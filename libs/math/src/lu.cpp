@@ -1,55 +1,31 @@
 #include <ws/math/lu.hpp>
 
-#include <cmath>
 #include <stdexcept>
 #include <utility>
 
 namespace ws::math {
 
+// Factorization is delegated to Eigen's PartialPivLU (PA = LU, unit-diagonal
+// L packed under U in the returned matrix, piv[k] = original row index that
+// ended up in row k). The solve below is plain forward/back substitution over
+// that packing, which matches the LuFactors contract exactly.
 LuFactors lu_decompose(const Matrix<double>& a) {
     if (a.rows() != a.cols()) {
         throw std::invalid_argument("lu_decompose: matrix must be square");
     }
-    const std::size_t n = a.rows();
+
+    Eigen::PartialPivLU<Eigen::MatrixXd> plu(a.eigen());
+    const Eigen::MatrixXd& packed = plu.matrixLU();
+    if (packed.diagonal().cwiseAbs().minCoeff() == 0.0) {
+        throw std::runtime_error("lu_decompose: matrix is singular");
+    }
 
     LuFactors f;
-    f.lu = a;
-    f.piv.resize(n);
-    for (std::size_t i = 0; i < n; ++i) {
-        f.piv[i] = i;
-    }
+    f.lu = Matrix<double>(a.rows(), a.cols());
+    f.lu.eigen() = packed;
 
-    for (std::size_t k = 0; k < n; ++k) {
-        // Partial pivoting: find the row i >= k with the largest |lu(i, k)|.
-        std::size_t best = k;
-        double best_abs = std::fabs(f.lu(k, k));
-        for (std::size_t i = k + 1; i < n; ++i) {
-            const double v = std::fabs(f.lu(i, k));
-            if (v > best_abs) {
-                best_abs = v;
-                best = i;
-            }
-        }
-
-        if (best_abs == 0.0) {
-            throw std::runtime_error("lu_decompose: matrix is singular");
-        }
-
-        if (best != k) {
-            std::swap(f.piv[k], f.piv[best]);
-            for (std::size_t c = 0; c < n; ++c) {
-                std::swap(f.lu(k, c), f.lu(best, c));
-            }
-        }
-
-        for (std::size_t i = k + 1; i < n; ++i) {
-            const double factor = f.lu(i, k) / f.lu(k, k);
-            f.lu(i, k) = factor;
-            for (std::size_t j = k + 1; j < n; ++j) {
-                f.lu(i, j) -= factor * f.lu(k, j);
-            }
-        }
-    }
+    const auto& perm = plu.permutationP().indices();
+    f.piv.assign(perm.data(), perm.data() + perm.size());
     return f;
 }
 

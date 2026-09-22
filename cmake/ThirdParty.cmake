@@ -58,8 +58,16 @@ FetchContent_Declare(implot
   GIT_REPOSITORY https://github.com/epezent/implot.git
   GIT_TAG v0.16
   GIT_SHALLOW TRUE)
+FetchContent_Declare(eigen
+  GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
+  GIT_TAG 3.4.0
+  GIT_SHALLOW TRUE)
+FetchContent_Declare(glm
+  GIT_REPOSITORY https://github.com/g-truc/glm.git
+  GIT_TAG 1.0.1
+  GIT_SHALLOW TRUE)
 
-foreach(dep vulkan_headers volk vma imgui implot)
+foreach(dep vulkan_headers volk vma imgui implot eigen glm)
   FetchContent_GetProperties(${dep})
   if(NOT ${dep}_POPULATED)
     FetchContent_Populate(${dep})
@@ -105,3 +113,14 @@ add_library(implot STATIC
   "${implot_SOURCE_DIR}/implot_items.cpp")
 target_include_directories(implot SYSTEM PUBLIC "${implot_SOURCE_DIR}")
 target_link_libraries(implot PUBLIC imgui)
+
+# --- Eigen (header-only; backing store for ws::math) -------------------------
+add_library(eigen3 INTERFACE)
+add_library(Eigen3::Eigen ALIAS eigen3)
+target_include_directories(eigen3 SYSTEM INTERFACE "${eigen_SOURCE_DIR}")
+
+# --- GLM (header-only; fixed-size vector/matrix math for ws::math) -----------
+add_library(glm INTERFACE)
+add_library(glm::glm ALIAS glm)
+target_include_directories(glm SYSTEM INTERFACE "${glm_SOURCE_DIR}")
+target_compile_definitions(glm INTERFACE GLM_FORCE_SILENT_WARNINGS)
