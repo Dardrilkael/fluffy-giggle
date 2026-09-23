@@ -5,34 +5,24 @@
 #include <stdexcept>
 #include <vector>
 
-// Eigen is a third-party header - suppress anything MSVC might warn about.
-#ifdef _MSC_VER
-#pragma warning(push, 0)
-#endif
-#include <Eigen/Dense>
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
-
 #include <ws/core/assert.hpp>
 
 namespace ws::math {
 
-// Dense row-major matrix, backed by Eigen (pinned 3.4.0, wrapped so the rest
-// of the workspace only ever sees this API). Storage layout is row-major:
-// data()[r * cols() + c].
+// Dense row-major matrix over a flat std::vector. Deliberately free of
+// third-party types (workspace rule: a lib never leaks its dependencies
+// into consumers) - anything numerics-heavy lives in src/ instead.
+// Storage layout: data()[r * cols() + c].
 template <typename T>
 class Matrix {
 public:
-    using EigenMatrix = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
-
     Matrix() = default;
 
-    Matrix(std::size_t rows, std::size_t cols, T init = T{}) : eigen_(rows, cols) {
+    Matrix(std::size_t rows, std::size_t cols, T init = T{}) : rows_(rows), cols_(cols) {
         if (rows == 0 || cols == 0) {
             throw std::invalid_argument("Matrix dimensions must be > 0");
         }
-        eigen_.setConstant(init);
+        data_.assign(rows * cols, init);
     }
 
     // Matrix m = {{1, 2, 3},
@@ -42,31 +32,30 @@ public:
             throw std::invalid_argument("Matrix dimensions must be > 0");
         }
         const std::size_t ncols = rows.begin()->size();
-        eigen_.resize(rows.size(), ncols);
-        std::size_t r = 0;
         for (const auto& row : rows) {
             if (row.size() != ncols) {
                 throw std::invalid_argument("All matrix rows must have the same length");
             }
-            std::size_t c = 0;
-            for (const T& v : row) {
-                eigen_(r, c++) = v;
-            }
-            ++r;
+        }
+        rows_ = rows.size();
+        cols_ = ncols;
+        data_.reserve(rows_ * cols_);
+        for (const auto& row : rows) {
+            data_.insert(data_.end(), row.begin(), row.end());
         }
     }
 
-    std::size_t rows() const { return static_cast<std::size_t>(eigen_.rows()); }
-    std::size_t cols() const { return static_cast<std::size_t>(eigen_.cols()); }
+    std::size_t rows() const { return rows_; }
+    std::size_t cols() const { return cols_; }
 
     // Fast element access. Bounds are checked in debug builds (WS_CORE_ASSERT).
     T& operator()(std::size_t r, std::size_t c) {
         WS_CORE_ASSERT(r < rows() && c < cols());
-        return eigen_(static_cast<Eigen::Index>(r), static_cast<Eigen::Index>(c));
+        return data_[r * cols_ + c];
     }
     const T& operator()(std::size_t r, std::size_t c) const {
         WS_CORE_ASSERT(r < rows() && c < cols());
-        return eigen_(static_cast<Eigen::Index>(r), static_cast<Eigen::Index>(c));
+        return data_[r * cols_ + c];
     }
 
     // Always-checked element access (throws std::out_of_range).
@@ -84,24 +73,28 @@ public:
     }
 
     // Contiguous row-major storage.
-    const T* data() const { return eigen_.data(); }
-
-    // Escape hatch to the Eigen matrix, for anything this wrapper does not
-    // expose (decompositions, reductions, expressions, ...).
-    const EigenMatrix& eigen() const { return eigen_; }
-    EigenMatrix& eigen() { return eigen_; }
+    const T* data() const { return data_.data(); }
 
     static Matrix zeros(std::size_t rows, std::size_t cols) { return Matrix(rows, cols, T{}); }
     static Matrix ones(std::size_t rows, std::size_t cols) { return Matrix(rows, cols, T{1}); }
     static Matrix identity(std::size_t n) {
         Matrix m(n, n);
-        m.eigen_.setIdentity();
+        for (std::size_t i = 0; i < n; ++i) {
+            m(i, i) = T{1};
+        }
         return m;
     }
 
     Matrix transpose() const {
-        Matrix t;
-        t.eigen_ = eigen_.transpose();
+        if (rows_ == 0) {
+            return Matrix{};
+        }
+        Matrix t(cols_, rows_);
+        for (std::size_t r = 0; r < rows_; ++r) {
+            for (std::size_t c = 0; c < cols_; ++c) {
+                t(c, r) = (*this)(r, c);
+            }
+        }
         return t;
     }
 
@@ -110,7 +103,19 @@ public:
             throw std::invalid_argument("Matrix multiply: inner dimensions must match");
         }
         Matrix out;
-        out.eigen_ = eigen_ * rhs.eigen_;
+        out.rows_ = rows_;
+        out.cols_ = rhs.cols_;
+        out.data_.assign(rows_ * rhs.cols_, T{});
+        // i/k/j loop order: both operands stream through row-major cache
+        // lines without transposing either one.
+        for (std::size_t i = 0; i < rows_; ++i) {
+            for (std::size_t k = 0; k < cols_; ++k) {
+                const T a = (*this)(i, k);
+                for (std::size_t j = 0; j < rhs.cols_; ++j) {
+                    out(i, j) += a * rhs(k, j);
+                }
+            }
+        }
         return out;
     }
 
@@ -119,29 +124,40 @@ public:
         if (v.size() != cols()) {
             throw std::invalid_argument("Matrix-vector product: dimension mismatch");
         }
-        const Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>> mapped(v.data(),
-                                                                           static_cast<Eigen::Index>(v.size()));
-        const Eigen::Matrix<T, Eigen::Dynamic, 1> out = eigen_ * mapped;
-        return std::vector<T>(out.data(), out.data() + out.size());
+        std::vector<T> out(rows_, T{});
+        for (std::size_t r = 0; r < rows_; ++r) {
+            T sum{};
+            for (std::size_t c = 0; c < cols_; ++c) {
+                sum += (*this)(r, c) * v[c];
+            }
+            out[r] = sum;
+        }
+        return out;
     }
 
     Matrix operator+(const Matrix& rhs) const {
         if (rows() != rhs.rows() || cols() != rhs.cols()) {
             throw std::invalid_argument("Matrix add: dimensions must match");
         }
-        Matrix out;
-        out.eigen_ = eigen_ + rhs.eigen_;
+        Matrix out = *this;
+        for (std::size_t i = 0; i < data_.size(); ++i) {
+            out.data_[i] += rhs.data_[i];
+        }
         return out;
     }
 
     Matrix operator*(T scalar) const {
-        Matrix out;
-        out.eigen_ = eigen_ * scalar;
+        Matrix out = *this;
+        for (T& v : out.data_) {
+            v *= scalar;
+        }
         return out;
     }
 
 private:
-    EigenMatrix eigen_;
+    std::size_t rows_ = 0;
+    std::size_t cols_ = 0;
+    std::vector<T> data_;
 };
 
 }  // namespace ws::math

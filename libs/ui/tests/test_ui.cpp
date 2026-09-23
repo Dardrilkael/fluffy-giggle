@@ -4,6 +4,7 @@
 #include <type_traits>
 
 #include <ws/ui/app.hpp>
+#include <ws/ui/widgets.hpp>  // must stay includable without any third-party header
 
 // The shell must be constructible and destructible without a window, GPU or
 // Vulkan loader - all of that only happens inside run(). The apps/playground

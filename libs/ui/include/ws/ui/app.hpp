@@ -16,8 +16,9 @@ struct AppConfig {
 // + ImPlot. Apps subclass and override on_frame() to draw their UI.
 //
 // All Vulkan/GLFW state is hidden behind a pimpl; no Vk* or GLFW types leak
-// into this header on purpose - engine libs and apps never see them either
-// (they only include <imgui.h> / <implot.h> for drawing).
+// into this header on purpose - engine libs and apps never see them either.
+// Drawing goes through <ws/ui/widgets.hpp>; apps never include third-party
+// headers.
 class App {
 public:
     explicit App(AppConfig config = {});

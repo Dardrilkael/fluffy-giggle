@@ -1,8 +1,8 @@
 // No DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN here - test_math.cpp owns doctest's
 // main() for the math test binary.
 
-// Deliberately includes BOTH the Eigen-backed and GLM-backed headers in one
-// translation unit: they must coexist cleanly.
+// Deliberately includes ALL ws::math headers in one translation unit: they
+// must coexist cleanly (and none of them may pull a third-party header).
 #include <ws/math/lu.hpp>
 #include <ws/math/matrix.hpp>
 #include <ws/math/vecmath.hpp>
@@ -42,8 +42,8 @@ TEST_CASE("double precision aliases exist") {
     CHECK(ws::math::length(v) == doctest::Approx(2.95803989154).epsilon(1e-10));
 }
 
-TEST_CASE("glm types and Eigen-backed Matrix coexist in one TU") {
-    // Compiles = passes. The two backends must never collide.
+TEST_CASE("vecmath and Matrix coexist in one TU") {
+    // Compiles = passes. The two headers must never collide.
     const ws::math::Matrix<double> m = {{1.0, 0.0},
                                         {0.0, 1.0}};
     const ws::math::Vec3 v = ws::math::normalize(ws::math::Vec3{1.0f, 1.0f, 0.0f});

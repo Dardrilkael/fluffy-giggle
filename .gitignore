@@ -19,3 +19,6 @@ Thumbs.db
 
 # Tools
 tools/downloads/
+
+# Runtime state (ImGui window layout, written by playground runs)
+imgui.ini
