@@ -23,7 +23,13 @@ struct WindowEventSink {
 // the matching ws::ui::Event and forwards it to sink->forward. The
 // callbacks themselves are file-local in window.cpp - deliberately never
 // declared in any header. Call before ImGui_ImplGlfw_InitForVulkan(window,
-// true): the backend then chains ours after updating its own state.
+// true): the backend then chains ours from the top of its own callbacks,
+// before its io updates.
 void install_window_callbacks(GLFWwindow* window, WindowEventSink* sink);
+
+// Installs the process-wide GLFW error callback (file-local in window.cpp,
+// logging through ws::core). Must run before glfwInit() so that init
+// failures are logged too.
+void install_glfw_error_callback();
 
 }  // namespace ws::ui

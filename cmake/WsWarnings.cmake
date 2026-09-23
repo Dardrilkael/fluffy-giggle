@@ -7,6 +7,8 @@ function(ws_set_warnings target)
     target_compile_options(${target} PRIVATE
       /W4 /WX /permissive- /utf-8 /Zc:__cplusplus /EHsc
       /wd4324  # structure padded due to alignment specifier (common in graphics code)
+      /w44062  # unhandled enumerator in a no-default switch (the MSVC counterpart
+               # of gcc/clang -Wswitch): enum switches stay exhaustive or grow a default
     )
   else()
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)

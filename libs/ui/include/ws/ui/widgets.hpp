@@ -7,7 +7,7 @@ namespace ws::ui {
 // Immediate-mode widgets: thin wrappers over Dear ImGui / ImPlot so apps can
 // build UIs without ever including a third-party header (workspace rule:
 // libs never leak their dependencies into consumers). Call these from
-// on_frame() only. Label/name/title parameters are null-terminated C strings
+// on_update() only. Label/name/title parameters are null-terminated C strings
 // (like ImGui's); text() is the exception and takes arbitrary string data.
 //
 // Missing a wrapper you need? Add a one-liner in src/widgets.cpp rather

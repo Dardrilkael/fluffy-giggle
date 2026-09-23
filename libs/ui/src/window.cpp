@@ -1,13 +1,16 @@
 // The only place GLFW's C callback surface exists. Each callback builds the
 // matching ws::ui::Event and hands it to the shell's single forwarder.
 //
-// ImGui's GLFW backend chains to every callback it also installs (cursor
-// pos / mouse button / scroll / key): it runs first and calls ours after
-// updating its own io state, so the shell can consult io.WantCapture* when
-// the event arrives. WindowSize and WindowClose are ours alone - the
-// backend installs neither.
+// ImGui's GLFW backend installs its own callbacks over ours and chains to
+// ours at the top of each of its own, BEFORE its io updates - so when our
+// callback runs, io does not yet reflect the current event. io.WantCapture*
+// still answers correctly because those flags were recomputed at the last
+// NewFrame (see imgui_wants() in src/app.cpp). WindowSize and WindowClose
+// are ours alone - the backend installs neither.
 
 #include "window.h"
+
+#include <ws/core/log.hpp>
 
 #include <GLFW/glfw3.h>
 
@@ -35,8 +38,13 @@ void on_window_close(GLFWwindow* window) {
 }
 
 // Size in screen coordinates; the shell recreates the swapchain off its own
-// framebuffer-size query when this arrives.
+// framebuffer-size query when this arrives. A zero size means minimized (at
+// least on Windows): an app can size nothing against it, and the restore
+// that follows reports the real size - so it is not delivered.
 void on_window_size(GLFWwindow* window, int width, int height) {
+    if (width <= 0 || height <= 0) {
+        return;
+    }
     emit(window, WindowResizeEvent{width, height});
 }
 
@@ -75,6 +83,12 @@ void on_scroll(GLFWwindow* window, double x, double y) {
     emit(window, MouseScrolledEvent{static_cast<float>(x), static_cast<float>(y)});
 }
 
+// Process-wide, not window-scoped: installed before glfwInit() (by the
+// shell, via install_glfw_error_callback()) so init failures get logged.
+void glfw_error(int code, const char* description) {
+    core::error("ui: GLFW error {}: {}", code, description);
+}
+
 }  // namespace
 
 void install_window_callbacks(GLFWwindow* window, WindowEventSink* sink) {
@@ -85,6 +99,10 @@ void install_window_callbacks(GLFWwindow* window, WindowEventSink* sink) {
     glfwSetMouseButtonCallback(window, on_mouse_button);
     glfwSetCursorPosCallback(window, on_cursor_pos);
     glfwSetScrollCallback(window, on_scroll);
+}
+
+void install_glfw_error_callback() {
+    glfwSetErrorCallback(&glfw_error);
 }
 
 }  // namespace ws::ui

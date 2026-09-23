@@ -59,10 +59,6 @@ constexpr std::array<VkFormat, 2> kPreferredFormats{
 // registered through ImGui_ImplVulkan_AddTexture().
 constexpr uint32_t kDescriptorSetCount = 16;
 
-void glfw_error(int code, const char* description) {
-    core::error("ui: GLFW error {}: {}", code, description);
-}
-
 // Mid-frame Vulkan failures leave the shell with no state to roll back to
 // (a command buffer may be half recorded, semaphores in flight), so log and
 // abort - the same policy as Dear ImGui's own examples.
@@ -156,12 +152,13 @@ struct App::Impl {
     // --- event system -------------------------------------------------------
     // GLFW callbacks (src/window.cpp) funnel every event through the sink;
     // forward_event() pre-marks ImGui-consumed input, queues the rest and
-    // coalesces mouse-move/scroll to the latest per frame. deliver_events()
-    // then drives App::on_event, once per queued event, before on_update().
+    // coalesces mouse-move/scroll per frame (move keeps the latest position,
+    // scroll sums its deltas). deliver_events() then drives App::on_event,
+    // once per queued event, before on_update().
     WindowEventSink event_sink_;
     std::vector<AnyEvent> event_queue_;
-    std::optional<MouseMovedEvent> pending_mouse_move_;   // coalesced: latest wins
-    std::optional<MouseScrolledEvent> pending_scroll_;
+    std::optional<MouseMovedEvent> pending_mouse_move_;  // coalesced: latest wins
+    std::optional<MouseScrolledEvent> pending_scroll_;   // coalesced: deltas summed
 
     // --- render command queue -----------------------------------------------
     // The app fills write_queue_ during on_update(); the render step swaps
@@ -184,8 +181,9 @@ struct App::Impl {
             return false;
         }
         // Our callbacks go in before the ImGui backend initializes: with
-        // install_callbacks=true it chains to ours after updating its own
-        // io state, so io.WantCapture* is meaningful when events arrive.
+        // install_callbacks=true it chains to ours at the top of its own
+        // callbacks, before its io updates - io.WantCapture* at event time
+        // reflects the last NewFrame (see imgui_wants()).
         event_sink_.forward = [this](Event& event) { forward_event(event); };
         install_window_callbacks(window, &event_sink_);
         return true;
@@ -224,6 +222,11 @@ struct App::Impl {
         if (imgui_wants(event)) {
             event.handled = true;
         }
+        // No default: /w44062 (cmake/WsWarnings.cmake; the -Wswitch
+        // counterpart on gcc/clang) fails the build if a new EventType is
+        // added without a case here, so no event can be silently dropped.
+        // A new event also needs an AnyEvent alternative above - the
+        // variant rejects types it cannot hold.
         switch (event.type()) {
             case EventType::WindowResize:
                 rebuild_swapchain = true;
@@ -232,9 +235,19 @@ struct App::Impl {
             case EventType::MouseMoved:
                 pending_mouse_move_ = static_cast<MouseMovedEvent&>(event);
                 break;
-            case EventType::MouseScrolled:
-                pending_scroll_ = static_cast<MouseScrolledEvent&>(event);
+            case EventType::MouseScrolled: {
+                // Offsets are per-event deltas, not positions: sum them, or
+                // ticks arriving between frames would be lost.
+                const MouseScrolledEvent& scrolled =
+                    static_cast<MouseScrolledEvent&>(event);
+                if (pending_scroll_) {
+                    pending_scroll_->x_offset += scrolled.x_offset;
+                    pending_scroll_->y_offset += scrolled.y_offset;
+                } else {
+                    pending_scroll_ = scrolled;
+                }
                 break;
+            }
             case EventType::WindowClose:
                 event_queue_.push_back(static_cast<WindowCloseEvent&>(event));
                 break;
@@ -830,6 +843,10 @@ struct App::Impl {
                                                    sync.acquired, VK_NULL_HANDLE,
                                                    &image_index);
         if (err == VK_ERROR_OUT_OF_DATE_KHR || err == VK_SUBOPTIMAL_KHR) {
+            // This frame cannot run: drop the commands submitted for it
+            // instead of letting them leak into a later frame (queue
+            // contract: same-frame execution, render_command_queue.hpp).
+            write_queue_.clear();
             rebuild_swapchain = true;  // present_frame() skips; next loop recreates
             return;
         }
@@ -866,9 +883,9 @@ struct App::Impl {
         // App-submitted commands run here, inside the render pass, after the
         // UI draw data - the seam for non-ImGui GPU work (overlays, offscreen
         // passes). The swap turns the queue the app filled during on_update()
-        // into the read queue; if this frame bails early above (out-of-date
-        // acquire returns before this point), the commands simply wait for
-        // the next successful frame.
+        // into the read queue; frames that cannot run (the bail path above,
+        // a hidden window in main_loop) clear the write queue instead - a
+        // command never outlives the frame it was submitted in.
         std::swap(write_queue_, read_queue_);
         try {
             read_queue_.execute();
@@ -963,14 +980,27 @@ struct App::Impl {
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
 
+            bool frame_abandoned = false;
             try {
                 app.on_update();
             } catch (const std::exception& e) {
                 core::error("ui: exception in on_update(): {}", e.what());
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
+                frame_abandoned = true;
             } catch (...) {
                 core::error("ui: unknown exception in on_update()");
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
+                frame_abandoned = true;
+            }
+            if (frame_abandoned) {
+                // The app may have thrown between Begin and End, leaving
+                // ImGui's window stack unbalanced. Calling ImGui::Render()
+                // would trip its "Missing End()" recovery assert and abort
+                // instead of closing cleanly, so abandon the frame: skip
+                // Render and the queues (the context teardown tolerates a
+                // half-open frame) and exit through the should-close flag.
+                write_queue_.clear();
+                break;
             }
 
             ImGui::Render();
@@ -979,6 +1009,10 @@ struct App::Impl {
                 draw_data->DisplaySize.x <= 0.0f || draw_data->DisplaySize.y <= 0.0f;
             if (!hidden) {
                 render_frame(draw_data);
+            } else {
+                // Zero-size (minimized) frame: same rule as the bail path in
+                // render_frame() - drop, never defer.
+                write_queue_.clear();
             }
 
             if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
@@ -1075,7 +1109,7 @@ struct App::Impl {
     }
 
     int run(App& app) {
-        glfwSetErrorCallback(&glfw_error);
+        install_glfw_error_callback();
         if (!glfwInit()) {
             core::error("ui: glfwInit failed");
             return 1;

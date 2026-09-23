@@ -17,8 +17,10 @@ namespace ws::ui {
 // This is the seam between app logic and GPU work. The shell keeps two
 // queues and swaps them per frame: the app fills the write queue during
 // on_update(), the shell swaps and executes the read queue while the
-// command buffer is being recorded. Single-threaded today, but the split
-// means moving app logic to its own thread later needs no API change.
+// command buffer is being recorded. Frames that cannot render clear the
+// write queue instead of deferring, so a command never outlives the frame
+// it was submitted in. Single-threaded today, but the split means moving
+// app logic to its own thread later needs no API change.
 class RenderCommandQueue {
 public:
     RenderCommandQueue() = default;

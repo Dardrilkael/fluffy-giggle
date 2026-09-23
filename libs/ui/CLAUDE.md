@@ -86,7 +86,9 @@ void on_event(ws::ui::Event& e) override {
   `glfwSetCursorPosCallback`, `glfwSetScrollCallback`,
   `glfwSetWindowCloseCallback`) once, in `src/window.cpp`. Every callback
   builds the matching `Event` and forwards it to a single
-  `std::function<void(Event&)>` stored on the window.
+  `std::function<void(Event&)>` stored on the window. Zero-size resize
+  events (minimize on Windows) are suppressed — nothing can be sized
+  against them, and the restore reports the real size.
 - ImGui gets first refusal: the shell always calls the ImGui GLFW backend's
   own callbacks first (or lets `ImGui_ImplGlfw_InstallCallbacks` chain them)
   so widgets consume input before the app sees it. If
@@ -96,8 +98,8 @@ void on_event(ws::ui::Event& e) override {
   unconditionally.
 - `App::on_event` runs synchronously on the main thread, before
   `on_update()`, once per queued event per frame — no event is ever
-  dropped or coalesced except mouse-move/scroll, which are coalesced to the
-  latest value per frame.
+  dropped or coalesced except mouse-move/scroll, which are coalesced per
+  frame (move keeps the latest position; scroll sums its deltas).
 
 ## Render command queue
 
@@ -109,8 +111,11 @@ void on_event(ws::ui::Event& e) override {
 - Two queues, swapped per frame (classic double-buffer): the app thread
   (or `on_update`) submits into the write queue; the shell's render step
   swaps and executes the read queue against the current command buffer.
-  Single-threaded today, but the split means moving `on_update()` to its
-  own thread later doesn't change the app-facing API.
+  A frame that cannot render (out-of-date acquire, hidden window) clears
+  the write queue instead of deferring — a command never outlives the
+  frame it was submitted in. Single-threaded today, but the split means
+  moving `on_update()` to its own thread later doesn't change the
+  app-facing API.
 - `widgets.hpp` calls still record directly against ImGui's immediate-mode
   context — ImGui already batches its own draw lists — but any future
   non-ImGui GPU work (custom overlays, offscreen passes) goes through the
@@ -152,7 +157,8 @@ void on_event(ws::ui::Event& e) override {
   per-frame buffer ring at Init; if the swapchain image count or format
   changes, the shell re-initializes the backend.
 - `on_event()` and `on_update()` exceptions are caught, logged, and close
-  the window cleanly.
+  the window cleanly (an `on_update()` exception abandons the frame — no
+  `Render()`, since the app may have thrown between `Begin`/`End`).
 - Don't use the `ImGui_ImplVulkanH_*` example helpers — the backend header
   marks them example-only; the shell manages its own swapchain objects.
 
