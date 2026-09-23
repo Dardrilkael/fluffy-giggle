@@ -1,9 +1,13 @@
 // Minimal playground: proves out the ws::ui shell end to end (window, Vulkan
-// swapchain, ImGui + ImPlot contexts) and gives the workspace a scratch pad.
-// Includes only ws headers - third parties stay behind the ui lib.
+// swapchain, ImGui + ImPlot contexts, event system) and gives the workspace
+// a scratch pad. Includes only ws headers - third parties stay behind the
+// ui lib.
 
 #include <ws/ui/app.hpp>
+#include <ws/ui/event.hpp>
 #include <ws/ui/widgets.hpp>
+
+#include <ws/core/log.hpp>
 
 #include <array>
 #include <cmath>
@@ -15,9 +19,28 @@ public:
     using ws::ui::App::App;
 
 protected:
-    void on_frame() override {
+    void on_event(ws::ui::Event& event) override {
+        ws::ui::EventDispatcher dispatcher{event};
+        // GLFW key codes 0-255 match ASCII, so 'D' needs no GLFW header.
+        dispatcher.dispatch<ws::ui::KeyPressedEvent>(
+            [this](const ws::ui::KeyPressedEvent& e) {
+                if (!e.repeat && e.keycode == 'D') {
+                    show_imgui_ = !show_imgui_;
+                    return true;
+                }
+                return false;
+            });
+        dispatcher.dispatch<ws::ui::WindowResizeEvent>(
+            [](const ws::ui::WindowResizeEvent& e) {
+                ws::core::info("playground: resized to {}x{}", e.width, e.height);
+                return true;
+            });
+    }
+
+    void on_update() override {
         if (ws::ui::begin_window("ws playground")) {
             ws::ui::text("shell is alive - every widget here goes through ws::ui");
+            ws::ui::text("press D to toggle the demo window (events, not polling)");
             if (ws::ui::button("imgui demo")) {
                 show_imgui_ = !show_imgui_;
             }

@@ -12,8 +12,12 @@ struct AppConfig {
     bool vsync = true;  // false: prefer mailbox/immediate present mode
 };
 
+class Event;
+class RenderCommandQueue;
+
 // Generic application shell: window + Vulkan context + Dear ImGui (docking)
-// + ImPlot. Apps subclass and override on_frame() to draw their UI.
+// + ImPlot, with a Hazel-style event system and a render command queue.
+// Apps subclass and override on_setup()/on_event()/on_update().
 //
 // All Vulkan/GLFW state is hidden behind a pimpl; no Vk* or GLFW types leak
 // into this header on purpose - engine libs and apps never see them either.
@@ -34,15 +38,29 @@ public:
     // (no Vulkan loader/device, etc. - details are logged).
     int run();
 
+    // The queue this app submits non-widget GPU work into (overlays,
+    // offscreen passes - anything beyond ImGui's own draw lists). The shell
+    // swaps and executes it while recording the frame's command buffer, in
+    // submission order. Include <ws/ui/render_command_queue.hpp> to use it.
+    RenderCommandQueue& command_queue();
+
 protected:
     // Called once after the context and ImGui are ready, before the first
     // frame. Safe to create ImGui/ImPlot objects here.
     virtual void on_setup() {}
 
-    // Called once per frame. Draw ImGui widgets / ImPlot plots here.
-    // Do NOT call ImGui::Render() or the backend NewFrame functions - the
-    // shell handles the frame lifecycle.
-    virtual void on_frame() {}
+    // Called once per queued input/window event, synchronously on the main
+    // thread, before on_update() for that frame. Events ImGui already
+    // consumed (mouse over a widget, text input) arrive with handled == true;
+    // EventDispatcher skips those, so handlers rarely check the flag.
+    // Include <ws/ui/event.hpp> for the event types. Default is empty.
+    virtual void on_event(Event&) {}
+
+    // Called once per frame, between NewFrame and Render. Draw widgets /
+    // plots here and submit command-queue work. Do NOT call ImGui::Render()
+    // or the backend NewFrame functions - the shell handles the frame
+    // lifecycle.
+    virtual void on_update() {}
 
 private:
     struct Impl;

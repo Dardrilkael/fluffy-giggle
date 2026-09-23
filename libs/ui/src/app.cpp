@@ -1,8 +1,9 @@
 // ws::ui::App - the application shell (GLFW window + Vulkan + Dear ImGui).
 //
-// All GLFW/Vulkan state lives in this file, behind App::Impl. The public
-// header exposes no third-party types on purpose: apps subclass App and draw
-// via ImGui/ImPlot inside on_setup()/on_frame().
+// All GLFW/Vulkan state lives behind App::Impl, split across this file and
+// src/window.cpp (the sole owner of GLFW's C callback surface). The public
+// header exposes no third-party types on purpose: apps subclass App and
+// react to events / draw via on_setup()/on_event()/on_update().
 //
 // The frame flow mirrors Dear ImGui's example_glfw_vulkan (rotating acquire/
 // present semaphore sets, recreate-on-out-of-date), but the swapchain code is
@@ -10,8 +11,12 @@
 // own docs, so this file owns its own swapchain objects instead.
 
 #include <ws/ui/app.hpp>
+#include <ws/ui/event.hpp>
+#include <ws/ui/render_command_queue.hpp>
 
 #include <ws/core/log.hpp>
+
+#include "window.h"
 
 #include <volk.h>  // meta-loader: every vk* symbol below is a volk global
 
@@ -30,10 +35,12 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <optional>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace ws::ui {
@@ -84,6 +91,13 @@ std::string_view present_mode_name(VkPresentModeKHR mode) {
         default: return "other";
     }
 }
+
+// Every concrete event type. The per-frame queue holds events by value -
+// no heap per event, and no vtable anywhere in the event system.
+using AnyEvent = std::variant<WindowCloseEvent, WindowResizeEvent, KeyPressedEvent,
+                             KeyReleasedEvent, MouseButtonPressedEvent,
+                             MouseButtonReleasedEvent, MouseMovedEvent,
+                             MouseScrolledEvent>;
 
 }  // namespace
 
@@ -139,6 +153,24 @@ struct App::Impl {
     VkFormat imgui_format = VK_FORMAT_UNDEFINED;  // drift means it must be re-inited
     bool viewport_style_set = false;
 
+    // --- event system -------------------------------------------------------
+    // GLFW callbacks (src/window.cpp) funnel every event through the sink;
+    // forward_event() pre-marks ImGui-consumed input, queues the rest and
+    // coalesces mouse-move/scroll to the latest per frame. deliver_events()
+    // then drives App::on_event, once per queued event, before on_update().
+    WindowEventSink event_sink_;
+    std::vector<AnyEvent> event_queue_;
+    std::optional<MouseMovedEvent> pending_mouse_move_;   // coalesced: latest wins
+    std::optional<MouseScrolledEvent> pending_scroll_;
+
+    // --- render command queue -----------------------------------------------
+    // The app fills write_queue_ during on_update(); the render step swaps
+    // and executes read_queue_ against the frame's command buffer. Kept as
+    // two so moving app logic off the render thread later needs no API
+    // change. Arena capacity survives the swap (the high-water mark).
+    RenderCommandQueue write_queue_;
+    RenderCommandQueue read_queue_;
+
     ~Impl() { shutdown(); }
 
     // --- startup ------------------------------------------------------------
@@ -151,7 +183,109 @@ struct App::Impl {
             core::error("ui: failed to create window \"{}\"", config.title);
             return false;
         }
+        // Our callbacks go in before the ImGui backend initializes: with
+        // install_callbacks=true it chains to ours after updating its own
+        // io state, so io.WantCapture* is meaningful when events arrive.
+        event_sink_.forward = [this](Event& event) { forward_event(event); };
+        install_window_callbacks(window, &event_sink_);
         return true;
+    }
+
+    // --- event system --------------------------------------------------------
+
+    // True when ImGui owns this input (pointer over a widget, text field
+    // focused, ...). Deliberately evaluated at event time - the flags were
+    // recomputed at the last NewFrame, which is the standard Hazel-style
+    // approximation. Window close/resize never count as captured.
+    bool imgui_wants(const Event& event) const {
+        if (ImGui::GetCurrentContext() == nullptr) {
+            return false;  // events before init_imgui(): nothing owns input yet
+        }
+        const ImGuiIO& io = ImGui::GetIO();
+        switch (event.type()) {
+            case EventType::KeyPressed:
+            case EventType::KeyReleased:
+                return io.WantCaptureKeyboard;
+            case EventType::MouseButtonPressed:
+            case EventType::MouseButtonReleased:
+            case EventType::MouseMoved:
+            case EventType::MouseScrolled:
+                return io.WantCaptureMouse;
+            default:
+                return false;
+        }
+    }
+
+    // Single funnel for every window/input event. ImGui-captured input is
+    // pre-marked handled (the app's dispatcher skips it, but still observes
+    // the event); resize also flags the swapchain rebuild here, before the
+    // app gets a chance to consume the event.
+    void forward_event(Event& event) {
+        if (imgui_wants(event)) {
+            event.handled = true;
+        }
+        switch (event.type()) {
+            case EventType::WindowResize:
+                rebuild_swapchain = true;
+                event_queue_.push_back(static_cast<WindowResizeEvent&>(event));
+                break;
+            case EventType::MouseMoved:
+                pending_mouse_move_ = static_cast<MouseMovedEvent&>(event);
+                break;
+            case EventType::MouseScrolled:
+                pending_scroll_ = static_cast<MouseScrolledEvent&>(event);
+                break;
+            case EventType::WindowClose:
+                event_queue_.push_back(static_cast<WindowCloseEvent&>(event));
+                break;
+            case EventType::KeyPressed:
+                event_queue_.push_back(static_cast<KeyPressedEvent&>(event));
+                break;
+            case EventType::KeyReleased:
+                event_queue_.push_back(static_cast<KeyReleasedEvent&>(event));
+                break;
+            case EventType::MouseButtonPressed:
+                event_queue_.push_back(static_cast<MouseButtonPressedEvent&>(event));
+                break;
+            case EventType::MouseButtonReleased:
+                event_queue_.push_back(static_cast<MouseButtonReleasedEvent&>(event));
+                break;
+        }
+    }
+
+    // Coalesced events flush right before delivery, so the app sees exactly
+    // one MouseMovedEvent / one MouseScrolledEvent per frame even when the
+    // OS delivered dozens. Their order relative to that frame's discrete
+    // events is not preserved.
+    void flush_coalesced() {
+        if (pending_mouse_move_) {
+            event_queue_.push_back(std::move(*pending_mouse_move_));
+            pending_mouse_move_.reset();
+        }
+        if (pending_scroll_) {
+            event_queue_.push_back(std::move(*pending_scroll_));
+            pending_scroll_.reset();
+        }
+    }
+
+    // App::on_event runs synchronously on the main thread, before this
+    // frame's on_update(), once per queued event. Exceptions are caught,
+    // logged, and close the window cleanly.
+    void deliver_events(App& app) {
+        flush_coalesced();
+        for (AnyEvent& event : event_queue_) {
+            try {
+                std::visit([&app](auto& concrete) { app.on_event(concrete); },
+                           event);
+            } catch (const std::exception& e) {
+                core::error("ui: exception in on_event(): {}", e.what());
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            } catch (...) {
+                core::error("ui: unknown exception in on_event()");
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            }
+        }
+        event_queue_.clear();
     }
 
     bool create_instance() {
@@ -729,6 +863,23 @@ struct App::Impl {
 
         ImGui_ImplVulkan_RenderDrawData(draw_data, frame.buffer);
 
+        // App-submitted commands run here, inside the render pass, after the
+        // UI draw data - the seam for non-ImGui GPU work (overlays, offscreen
+        // passes). The swap turns the queue the app filled during on_update()
+        // into the read queue; if this frame bails early above (out-of-date
+        // acquire returns before this point), the commands simply wait for
+        // the next successful frame.
+        std::swap(write_queue_, read_queue_);
+        try {
+            read_queue_.execute();
+        } catch (const std::exception& e) {
+            core::error("ui: exception in render command queue: {}", e.what());
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+        } catch (...) {
+            core::error("ui: unknown exception in render command queue");
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+        }
+
         vkCmdEndRenderPass(frame.buffer);
 
         const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -767,22 +918,33 @@ struct App::Impl {
     }
 
     int main_loop(App& app) {
-        while (glfwWindowShouldClose(window) == GLFW_FALSE) {
+        for (;;) {
             glfwPollEvents();
 
-            // Recreate when the framebuffer size changed or Vulkan flagged the
-            // swapchain out of date. Skip while the size is zero (iconified).
-            int fb_width = 0;
-            int fb_height = 0;
-            glfwGetFramebufferSize(window, &fb_width, &fb_height);
-            const bool size_changed = fb_width != static_cast<int>(extent.width) ||
-                                      fb_height != static_cast<int>(extent.height);
-            if (fb_width > 0 && fb_height > 0 && (rebuild_swapchain || size_changed)) {
-                if (!recreate_swapchain()) {
+            // Every queued event reaches on_event before this frame's
+            // on_update() - including the WindowCloseEvent of the closing
+            // click, so apps can react before the loop exits.
+            deliver_events(app);
+            if (glfwWindowShouldClose(window) == GLFW_TRUE) {
+                break;
+            }
+
+            // Swapchain recreation is event-driven: a WindowResizeEvent (or
+            // Vulkan itself, via out-of-date/suboptimal) raised the flag -
+            // there is no per-frame size poll. Skip while the surface is
+            // unusable (iconified); the flag survives until a good size
+            // arrives.
+            const bool iconified =
+                glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE;
+            if (rebuild_swapchain && !iconified) {
+                int fb_width = 0;
+                int fb_height = 0;
+                glfwGetFramebufferSize(window, &fb_width, &fb_height);
+                if (fb_width > 0 && fb_height > 0 && !recreate_swapchain()) {
                     return 1;
                 }
             }
-            if (glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE) {
+            if (iconified) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
@@ -802,12 +964,12 @@ struct App::Impl {
             ImGui::NewFrame();
 
             try {
-                app.on_frame();
+                app.on_update();
             } catch (const std::exception& e) {
-                core::error("ui: exception in on_frame(): {}", e.what());
+                core::error("ui: exception in on_update(): {}", e.what());
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             } catch (...) {
-                core::error("ui: unknown exception in on_frame()");
+                core::error("ui: unknown exception in on_update()");
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             }
 
@@ -937,6 +1099,10 @@ App::~App() = default;
 
 int App::run() {
     return impl_->run(*this);
+}
+
+RenderCommandQueue& App::command_queue() {
+    return impl_->write_queue_;
 }
 
 }  // namespace ws::ui
