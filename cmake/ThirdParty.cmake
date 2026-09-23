@@ -110,7 +110,8 @@ target_compile_definitions(imgui PUBLIC IMGUI_IMPL_VULKAN_USE_VOLK)
 # --- ImPlot -----------------------------------------------------------------
 add_library(implot STATIC
   "${implot_SOURCE_DIR}/implot.cpp"
-  "${implot_SOURCE_DIR}/implot_items.cpp")
+  "${implot_SOURCE_DIR}/implot_items.cpp"
+  "${implot_SOURCE_DIR}/implot_demo.cpp")
 target_include_directories(implot SYSTEM PUBLIC "${implot_SOURCE_DIR}")
 target_link_libraries(implot PUBLIC imgui)
 
