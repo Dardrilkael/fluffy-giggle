@@ -8,3 +8,6 @@ target_link_libraries(ws_ui
   PRIVATE imgui implot glfw volk vma)
 
 ws_add_test(ui SOURCES tests/test_ui.cpp)
+# tests exercise the internal pure-CPU batch core directly (src/ never
+# reaches apps).
+target_include_directories(test_ui PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
