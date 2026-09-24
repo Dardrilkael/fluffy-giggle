@@ -6,6 +6,8 @@
 #include <ws/ui/app.hpp>
 #include <ws/ui/event.hpp>
 #include <ws/ui/gui/gui_context.hpp>
+#include <ws/ui/gui/layout_cursor.hpp>
+#include <ws/ui/gui/widgets.hpp>
 #include <ws/ui/renderer2d.hpp>
 #include <ws/ui/widgets.hpp>
 
@@ -58,11 +60,28 @@ protected:
     void on_update() override {
         namespace r2d = ws::ui::r2d;
 
-        // --- gui module: input snapshot (Phase 1) ---
+        // --- gui module: input snapshot + the first real widget (Phases 1+5) ---
         // The shell accumulates raw input into one InputFrame per frame
-        // and publishes it here; the context adopts the copy. The live
-        // values show in the window below - widgets arrive in Phase 5.
+        // and publishes it here; the context adopts the copy, widgets
+        // consume it between new_frame and end_frame.
         gui_.new_frame(ws::ui::gui::frame_input());
+
+        // A gui panel in screen space (framebuffer px, top-left origin),
+        // drawn through r2d above the world quads. The button lays out,
+        // hit-tests and draws through the library - the click result is
+        // ours to keep.
+        r2d::set_layer(10);
+        r2d::begin();
+        const r2d::FrameSize gui_frame = r2d::frame_size();
+        (void)layout_.begin_panel({gui_frame.width - 244.0f, 24.0f, 220.0f, 160.0f},
+                                  12.0f);
+        if (ws::ui::gui::button(gui_, layout_, "clicks")) {
+            ++gui_clicks_;
+        }
+        layout_.end_panel();
+        r2d::end();
+        r2d::set_layer(0);
+
         gui_.end_frame();
 
         // --- 2D world, through the camera ---
@@ -146,6 +165,10 @@ protected:
                           "key 'D' down %d   text chars this frame: %zu",
                           in.key_down['D'], in.text_input.size());
             ws::ui::text(line);
+            std::snprintf(line, sizeof(line),
+                          "gui button clicks: %d (the panel, top right)",
+                          gui_clicks_);
+            ws::ui::text(line);
 
             if (ws::ui::button("imgui demo")) {
                 show_imgui_ = !show_imgui_;
@@ -202,6 +225,8 @@ private:
     bool show_imgui_ = false;
     bool show_implot_ = false;
     ws::ui::gui::GuiContext gui_;  // gui module consumer; fed the live snapshot
+    ws::ui::gui::LayoutCursor layout_;  // one per screen; the pass repeats each frame
+    int gui_clicks_ = 0;
 };
 
 }  // namespace
