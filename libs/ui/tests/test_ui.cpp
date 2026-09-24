@@ -885,9 +885,9 @@ TEST_CASE("sprite_size reports native pixels and {0,0} for unknown sprites") {
     CHECK(sentinel.height == 0.0f);
 }
 
-// --- gui module (Phase 0 skeleton + Phase 1 input snapshot) ------------------------
+// --- gui module (Phase 0 skeleton, Phase 1 input, Phase 2 ids) ----------------------
 
-TEST_CASE("gui skeleton: the Phase 0 surface constructs, links and no-ops safely") {
+TEST_CASE("gui module: the public surface constructs, links and behaves safely") {
     using namespace ws::ui::gui;
 
     // Fresh objects honor the declared defaults.
@@ -912,13 +912,12 @@ TEST_CASE("gui skeleton: the Phase 0 surface constructs, links and no-ops safely
     CHECK(gui.input().key_pressed['D'] == true);
     CHECK(gui.input().text_input.size() == 1);
 
-    // Every stub is callable and inert: ids read as invalid until the
-    // Phase 2 hash, hit tests report nothing until Phase 3, layout hands
-    // back empty rects until Phase 4. Underflow pops/closes are the
-    // documented no-ops - none of this may crash.
+    // Ids hash for real since Phase 2; hit tests report nothing until
+    // Phase 3, layout hands back empty rects until Phase 4. Underflow
+    // pops/closes are the documented no-ops - none of this may crash.
     gui.ids().push("panel");
     gui.ids().push(7);
-    CHECK(gui.ids().current("button") == kInvalidWidgetId);
+    CHECK(gui.ids().current("button") != kInvalidWidgetId);
     gui.ids().pop();
     gui.ids().pop();
     gui.ids().pop();
@@ -979,4 +978,117 @@ TEST_CASE("frame_input is drop-safe without a running app") {
     CHECK(frame.key_pressed['D'] == false);
     CHECK(frame.scroll_dy == 0.0f);
     CHECK(frame.text_input.empty());
+}
+
+// --- gui ids (Phase 2) --------------------------------------------------------------
+
+TEST_CASE("IdStack: same label under different scopes ids differently") {
+    using namespace ws::ui::gui;
+    IdStack ids;
+    ids.push("file-dialog");
+    const WidgetId file_ok = ids.current("ok");
+    ids.pop();
+    ids.push("error-dialog");
+    const WidgetId error_ok = ids.current("ok");
+
+    CHECK(file_ok != error_ok);
+    CHECK(file_ok != kInvalidWidgetId);
+    CHECK(error_ok != kInvalidWidgetId);
+
+    // pop() restored the first scope: the same derivation reads the same.
+    ids.pop();
+    ids.push("file-dialog");
+    CHECK(ids.current("ok") == file_ok);
+}
+
+TEST_CASE("IdStack: ids are stable across frames and fresh stacks") {
+    using namespace ws::ui::gui;
+    // Immediate mode re-describes the UI every frame: two independent
+    // walks of the same code path must derive identical ids - that is
+    // what lets per-widget state key on them.
+    IdStack frame_one;
+    frame_one.push("panel");
+    const WidgetId one = frame_one.current("slider");
+
+    IdStack frame_two;
+    frame_two.push("panel");
+    CHECK(frame_two.current("slider") == one);
+
+    // ...through int scopes too (indexed list rows).
+    frame_one.push(3);
+    frame_two.push(3);
+    const WidgetId cell_one = frame_one.current("cell");
+    CHECK(cell_one == frame_two.current("cell"));
+    CHECK(cell_one != one);
+
+    frame_one.pop();
+    frame_two.pop();
+    CHECK(frame_one.current("slider") == one);
+}
+
+TEST_CASE("IdStack: int scopes separate siblings without stringifying") {
+    using namespace ws::ui::gui;
+    IdStack ids;
+    ids.push("list");
+    ids.push(0);
+    const WidgetId row_zero = ids.current("row");
+    ids.pop();
+    ids.push(1);
+    const WidgetId row_one = ids.current("row");
+    ids.pop();
+
+    CHECK(row_zero != row_one);
+
+    // The VALUE 65 is not the LABEL "A" and not the LABEL "65": int
+    // scopes hash the integer's bytes, never a stringified form.
+    ids.push(65);
+    const WidgetId via_value = ids.current("row");
+    ids.pop();
+    ids.push("A");
+    CHECK(ids.current("row") != via_value);
+    ids.pop();
+    ids.push("65");
+    CHECK(ids.current("row") != via_value);
+}
+
+TEST_CASE("IdStack: scope paths are delimited, not plain concatenations") {
+    using namespace ws::ui::gui;
+    IdStack ab;
+    ab.push("ab");
+    const WidgetId ab_then_c = ab.current("c");
+
+    IdStack a;
+    a.push("a");
+    const WidgetId a_then_bc = a.current("bc");
+
+    // Without a delimiter "ab"/"c" and "a"/"bc" would hash the same
+    // byte stream; the delimiter makes them different paths.
+    CHECK(ab_then_c != a_then_bc);
+}
+
+TEST_CASE("IdStack: pop restores scope and overflow clamps at max depth") {
+    using namespace ws::ui::gui;
+    IdStack ids;
+    ids.pop();  // empty pop: documented no-op
+    CHECK(ids.depth() == 0);
+
+    ids.push("outer");
+    CHECK(ids.depth() == 1);
+    const WidgetId outer_widget = ids.current("widget");
+
+    ids.push("inner");
+    CHECK(ids.depth() == 2);
+    CHECK(ids.current("widget") != outer_widget);
+
+    ids.pop();
+    CHECK(ids.depth() == 1);
+    CHECK(ids.current("widget") == outer_widget);
+
+    // Pushing past kMaxDepth clamps (with one warn) instead of writing
+    // out of bounds; the stack keeps answering from the deepest scope.
+    for (int i = 0; i < IdStack::kMaxDepth + 4; ++i) {
+        ids.push(i);
+    }
+    CHECK(ids.depth() == IdStack::kMaxDepth);
+    CHECK(ids.current("deep") != kInvalidWidgetId);
 }
