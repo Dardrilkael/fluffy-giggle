@@ -829,6 +829,16 @@ void Renderer2D::warn_unknown_texture(uint32_t id) {
                    id);
 }
 
+void Renderer2D::warn_sprite(const Sprite& sprite) {
+    if (warned_) {
+        return;
+    }
+    warned_ = true;
+    ws::core::warn("ui: r2d sprite (page {}, index {}) is unknown - rendered "
+                   "white",
+                   sprite.page, sprite.index);
+}
+
 // --- Renderer2D: app-facing entry points -----------------------------------
 
 void Renderer2D::stash_camera(const Camera2D& camera) {
@@ -959,6 +969,118 @@ Texture Renderer2D::load_texture(const char* path) {
     return texture;
 }
 
+void Renderer2D::register_atlas_page(Texture page,
+                                     std::vector<atlas::Rect> rects) {
+    atlas_pages_.push_back(AtlasPage{page, std::move(rects)});
+}
+
+const atlas::Rect* Renderer2D::find_sprite_rect(const Sprite& sprite) const {
+    for (const AtlasPage& page : atlas_pages_) {
+        if (page.texture.id == sprite.page) {
+            if (sprite.index < page.rects.size()) {
+                return &page.rects[sprite.index];
+            }
+            return nullptr;  // the right page, but no such sprite
+        }
+    }
+    return nullptr;  // not a registered atlas page
+}
+
+void Renderer2D::draw_sprite(float x, float y, float w, float h,
+                             std::uint32_t color, Sprite sprite,
+                             float rotation) {
+    if (!accept("draw_sprite")) {
+        return;
+    }
+    float pos[4][2];
+    batch::quad_corners(x, y, w, h, rotation, pos);
+    // Page 0 is the white sentinel (failed loads degrade to it) - it draws
+    // silently. Any other unresolvable sprite is an app bug worth one warn.
+    const atlas::Rect* rect =
+        sprite.page == 0 ? nullptr : find_sprite_rect(sprite);
+    if (rect != nullptr) {
+        const float uv[4][2] = {
+            {rect->u0, rect->v0},  // TL
+            {rect->u1, rect->v0},  // TR
+            {rect->u1, rect->v1},  // BR
+            {rect->u0, rect->v1},  // BL
+        };
+        record("draw_sprite", pos, uv, color, Texture{sprite.page});
+    } else {
+        if (sprite.page != 0) {
+            warn_sprite(sprite);
+        }
+        record("draw_sprite", pos, kQuadUV, color, Texture{});
+    }
+}
+
+FrameSize Renderer2D::sprite_size(Sprite sprite) const {
+    const atlas::Rect* rect =
+        sprite.page == 0 ? nullptr : find_sprite_rect(sprite);
+    if (rect == nullptr) {
+        return FrameSize{};
+    }
+    return FrameSize{static_cast<float>(rect->w), static_cast<float>(rect->h)};
+}
+
+std::vector<Sprite> Renderer2D::load_atlas(
+    std::initializer_list<const char*> paths) {
+    const std::size_t count = paths.size();
+    std::vector<Sprite> sprites(count);  // failures keep Sprite{} (white)
+    if (device_ == VK_NULL_HANDLE) {
+        // Headless or pre-init: the load_texture contract - white, no crash.
+        ws::core::warn("ui: r2d::load_atlas() fell back to white sprites - "
+                       "no GPU context is alive");
+        return sprites;
+    }
+
+    // Load everything first (pure CPU), pack (which copies), then the stb
+    // buffers can go. Each page uploads once, afterwards.
+    std::vector<atlas::SourceImage> sources(count);
+    std::vector<stbi_uc*> stbi_pixels(count, nullptr);
+    std::size_t i = 0;
+    for (const char* path : paths) {
+        int width = 0;
+        int height = 0;
+        stbi_pixels[i] =
+            stbi_load(path, &width, &height, nullptr, STBI_rgb_alpha);
+        if (stbi_pixels[i] != nullptr) {
+            sources[i] = {stbi_pixels[i], static_cast<std::uint32_t>(width),
+                          static_cast<std::uint32_t>(height)};
+        } else {
+            ws::core::warn("ui: r2d::load_atlas('{}') failed - {} (white "
+                           "sprite)",
+                           path, stbi_failure_reason());
+        }
+        ++i;
+    }
+    atlas::Packing packed = atlas::pack(sources.data(), count);
+    for (stbi_uc* pixels : stbi_pixels) {
+        if (pixels != nullptr) {
+            stbi_image_free(pixels);
+        }
+    }
+
+    // A failed page upload degrades only its sprites, not the whole atlas.
+    std::vector<std::uint32_t> page_ids(packed.pages.size(), 0);
+    for (std::size_t p = 0; p < packed.pages.size(); ++p) {
+        atlas::Page& page = packed.pages[p];
+        Texture texture{};
+        if (upload_texture(page.pixels.data(), page.size, page.size,
+                           &texture)) {
+            register_atlas_page(texture, std::move(page.rects));
+            page_ids[p] = texture.id;
+        }
+    }
+    for (std::size_t s = 0; s < count; ++s) {
+        const atlas::Placement& place = packed.assigned[s];
+        if (place.page < page_ids.size() && page_ids[place.page] != 0) {
+            sprites[s] = Sprite{page_ids[place.page], place.index};
+        }
+    }
+    return sprites;
+}
+
 // --- public free functions ----------------------------------------------------
 
 namespace {
@@ -1046,6 +1168,30 @@ Texture load_texture(const char* path) {
     }
     warn_no_app("load_texture");
     return Texture{};
+}
+
+std::vector<Sprite> load_atlas(std::initializer_list<const char*> paths) {
+    if (g_active != nullptr) {
+        return g_active->load_atlas(paths);
+    }
+    warn_no_app("load_atlas");
+    return {};
+}
+
+void draw_sprite(float x, float y, float w, float h, std::uint32_t color,
+                 Sprite sprite, float rotation) {
+    if (g_active != nullptr) {
+        g_active->draw_sprite(x, y, w, h, color, sprite, rotation);
+    } else {
+        warn_no_app("draw_sprite");
+    }
+}
+
+FrameSize sprite_size(Sprite sprite) {
+    if (g_active != nullptr) {
+        return g_active->sprite_size(sprite);
+    }
+    return FrameSize{};
 }
 
 }  // namespace ws::ui::r2d

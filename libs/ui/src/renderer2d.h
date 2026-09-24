@@ -8,9 +8,11 @@
 // and replays them into the batch. The Vulkan half extends this class in
 // src/renderer2d.cpp and flushes that batch inside the render pass.
 
+#include "atlas_packer.h"
 #include "batch_core.h"
 
 #include <cstdint>
+#include <initializer_list>
 #include <vector>
 
 #include <volk.h>  // internal header: Vk*/Vma types live in signatures and
@@ -99,6 +101,14 @@ public:
                    std::uint32_t color);
     FrameSize frame_size() const;
     Texture load_texture(const char* path);
+    std::vector<Sprite> load_atlas(std::initializer_list<const char*> paths);
+    void draw_sprite(float x, float y, float w, float h, std::uint32_t color,
+                     Sprite sprite, float rotation = 0.0f);
+    FrameSize sprite_size(Sprite sprite) const;
+    // Installs a page's sub-rect table; Sprite::page is its key. Production
+    // (load_atlas) calls this per uploaded page; tests inject synthetic
+    // pages headlessly - the sprite contract is pure CPU state.
+    void register_atlas_page(Texture page, std::vector<atlas::Rect> rects);
 
     // Test/observability seam (internal header only): the built batch as
     // frame_end() left it.
@@ -122,6 +132,12 @@ private:
     // --- GPU half helpers ---
     // Unknown texture id, while a registry exists: once per frame.
     void warn_unknown_texture(uint32_t id);
+    // Unresolvable sprite (bad page or index): once per frame.
+    void warn_sprite(const Sprite& sprite);
+    // Resolves a sprite to its sub-rect; null when the page is not a
+    // registered atlas page or the index is out of range. Page 0 is never
+    // looked up - it is the white sentinel.
+    const atlas::Rect* find_sprite_rect(const Sprite& sprite) const;
     // Graphics pipeline against the given render pass; the shader modules
     // are created and destroyed inside (they are baked into the pipeline).
     bool create_pipeline(VkRenderPass render_pass);
@@ -177,6 +193,15 @@ private:
         VmaAllocation allocation = VK_NULL_HANDLE;
     };
     std::vector<TextureEntry> textures_;
+
+    // Atlas pages (load_atlas, or test injection): a page's texture id is
+    // its key in Sprite::page. Only grows, so sprites stay valid for the
+    // process lifetime - the same contract as textures_.
+    struct AtlasPage {
+        Texture texture;
+        std::vector<atlas::Rect> rects;
+    };
+    std::vector<AtlasPage> atlas_pages_;
 
     // One vertex region per swapchain image, sized by the static frame cap
     // (a resize never reallocates them), persistently mapped.

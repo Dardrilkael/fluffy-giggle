@@ -556,8 +556,12 @@ TEST_CASE("public r2d API is drop-safe without a running app") {
     set_layer(3);
     draw_quad(0.0f, 0.0f, 10.0f, 10.0f, rgba(255, 255, 255));
     draw_line(0.0f, 0.0f, 10.0f, 10.0f, 2.0f, rgba(255, 255, 255));
+    draw_sprite(0.0f, 0.0f, 10.0f, 10.0f, rgba(255, 255, 255), Sprite{});
     end();
-    load_texture("nope.png");  // warns, returns white, no crash
+    load_texture("nope.png");            // warns, returns white, no crash
+    const auto sprites = load_atlas({"nope.png"});  // warns, empty, no crash
+    CHECK(sprites.empty());
+    CHECK(sprite_size(Sprite{}).width == 0.0f);
 
     const FrameSize size = frame_size();
     CHECK(size.width == 0.0f);
@@ -740,4 +744,138 @@ TEST_CASE("load_texture without a GPU context returns the white texture") {
     using namespace ws::ui::r2d;
     Renderer2D r;
     CHECK(r.load_texture("no-such-file.png").id == 0);
+}
+
+// --- atlas sprites -------------------------------------------------------------
+
+TEST_CASE("draw_sprite records the page texture and sub-rect UVs") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    std::vector<atlas::Rect> rects(1);
+    rects[0].u0 = 0.25f;
+    rects[0].v0 = 0.5f;
+    rects[0].u1 = 0.75f;
+    rects[0].v1 = 1.0f;
+    rects[0].w = 8;
+    rects[0].h = 4;
+    r.register_atlas_page(Texture{7}, std::move(rects));
+
+    r.frame_begin(100.0f, 100.0f);
+    r.begin_screen();
+    r.draw_sprite(10.0f, 20.0f, 30.0f, 40.0f, rgba(255, 255, 255),
+                  Sprite{7, 0});
+    r.frame_end();
+
+    REQUIRE(r.batch().vertices().size() == 4);
+    const auto& v = r.batch().vertices();
+    CHECK(v[0].uv[0] == 0.25f);  // TL
+    CHECK(v[0].uv[1] == 0.5f);
+    CHECK(v[1].uv[0] == 0.75f);  // TR
+    CHECK(v[1].uv[1] == 0.5f);
+    CHECK(v[2].uv[0] == 0.75f);  // BR
+    CHECK(v[2].uv[1] == 1.0f);
+    CHECK(v[3].uv[0] == 0.25f);  // BL
+    CHECK(v[3].uv[1] == 1.0f);
+    CHECK(r.batch().chunk(0).texture_count == 1);
+    CHECK(r.batch().chunk(0).texture_ids[0] == 7u);
+}
+
+TEST_CASE("a page's sprites share one material key, whatever the draw order") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    std::vector<atlas::Rect> rects(2);
+    rects[0].u0 = 0.0f;
+    rects[0].v0 = 0.0f;
+    rects[0].u1 = 0.5f;
+    rects[0].v1 = 0.5f;
+    rects[1].u0 = 0.5f;
+    rects[1].v0 = 0.5f;
+    rects[1].u1 = 1.0f;
+    rects[1].v1 = 1.0f;
+    r.register_atlas_page(Texture{7}, std::move(rects));
+
+    r.frame_begin(100.0f, 100.0f);
+    r.begin_screen();
+    r.draw_sprite(0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFF, Sprite{7, 0});
+    r.draw_quad(20.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFF, Texture{9});
+    r.draw_sprite(0.0f, 20.0f, 1.0f, 1.0f, 0xFFFFFFFF, Sprite{7, 1});
+    r.frame_end();
+
+    // The material sort pulls both sprites (one page texture) ahead of the
+    // raw-texture quad, all inside one chunk - the whole point of atlases.
+    REQUIRE(r.batch().chunk_count() == 1);
+    const auto& v = r.batch().vertices();
+    REQUIRE(v.size() == 12);
+    CHECK(v[0].pos[0] == 0.0f);   // sprite 0
+    CHECK(v[4].pos[1] == 20.0f);  // sprite 1, reordered before the quad
+    CHECK(v[8].pos[0] == 20.0f);  // the raw-texture quad last
+    CHECK(v[0].tex_index == 0.0f);
+    CHECK(v[4].tex_index == 0.0f);
+    CHECK(v[8].tex_index == 1.0f);
+    CHECK(r.batch().chunk(0).texture_count == 2);
+    CHECK(r.batch().chunk(0).texture_ids[0] == 7u);
+    CHECK(r.batch().chunk(0).texture_ids[1] == 9u);
+    // Sub-rect UVs stayed per-sprite through the reorder.
+    CHECK(v[0].uv[0] == 0.0f);
+    CHECK(v[4].uv[0] == 0.5f);
+}
+
+TEST_CASE("unknown or sentinel sprites draw white, geometry intact") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    std::vector<atlas::Rect> rects(1);
+    r.register_atlas_page(Texture{7}, std::move(rects));
+
+    r.frame_begin(100.0f, 100.0f);
+    r.begin_screen();
+    r.draw_sprite(0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFF, Sprite{});  // sentinel
+    r.draw_sprite(10.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFF, Sprite{7, 9});
+    r.draw_sprite(20.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFF, Sprite{42, 0});
+    r.frame_end();
+
+    // All three degrade to the white texture with full-quad UVs; the
+    // quads themselves still draw where they were placed.
+    const auto& v = r.batch().vertices();
+    REQUIRE(v.size() == 12);
+    CHECK(r.batch().chunk(0).texture_count == 1);
+    CHECK(r.batch().chunk(0).texture_ids[0] == 0u);
+    CHECK(v[4].pos[0] == 10.0f);
+    CHECK(v[8].pos[0] == 20.0f);
+    for (std::size_t i = 0; i < 3; ++i) {
+        CHECK(v[i * 4].uv[0] == 0.0f);      // TL
+        CHECK(v[i * 4].uv[1] == 0.0f);
+        CHECK(v[i * 4 + 2].uv[0] == 1.0f);  // BR
+        CHECK(v[i * 4 + 2].uv[1] == 1.0f);
+    }
+}
+
+TEST_CASE("load_atlas without a GPU context returns white sprites") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    const std::vector<Sprite> sprites = r.load_atlas({"a.png", "b.png"});
+    REQUIRE(sprites.size() == 2);
+    CHECK(sprites[0].page == 0u);
+    CHECK(sprites[0].index == 0u);
+    CHECK(sprites[1].page == 0u);
+    CHECK(sprites[1].index == 0u);
+}
+
+TEST_CASE("sprite_size reports native pixels and {0,0} for unknown sprites") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    std::vector<atlas::Rect> rects(1);
+    rects[0].w = 8;
+    rects[0].h = 4;
+    r.register_atlas_page(Texture{7}, std::move(rects));
+
+    const FrameSize native = r.sprite_size(Sprite{7, 0});
+    CHECK(native.width == 8.0f);
+    CHECK(native.height == 4.0f);
+
+    const FrameSize unknown = r.sprite_size(Sprite{9, 0});
+    CHECK(unknown.width == 0.0f);
+    CHECK(unknown.height == 0.0f);
+    const FrameSize sentinel = r.sprite_size(Sprite{});
+    CHECK(sentinel.width == 0.0f);
+    CHECK(sentinel.height == 0.0f);
 }
