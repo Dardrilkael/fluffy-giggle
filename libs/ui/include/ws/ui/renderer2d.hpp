@@ -53,14 +53,26 @@ FrameSize frame_size();
 
 // --- frame recording ----------------------------------------------------------------
 // Screen mode: world (0,0) = window top-left, 1 world unit = 1 framebuffer
-// pixel. Both begin() overloads close any open camera segment first, so
-// calling them repeatedly per frame layers cameras back to front.
+// pixel. Every begin() opens a new camera block, so calling them repeatedly
+// per frame layers blocks back to front.
+//
+// At the frame's end the shell sorts the recorded draws - explicit layer
+// first, then camera block, then texture - and only then batches them. The
+// sort is stable: overlapping draws that share layer, camera and texture
+// always keep their submission order. Draws differing only in texture may
+// be grouped (reordered); when the overlap order of two different-texture
+// draws matters, give them an explicit set_layer().
 void begin();
 void begin(const Camera2D& camera);
 
-// Closes the open segment. Optional - an unclosed segment flushes as-is -
-// but draws between end() and the next begin() are dropped.
+// Ends the current camera block. Optional - an unclosed block flushes
+// as-is - but draws between end() and the next begin() are dropped.
 void end();
+
+// Sorts all subsequent draws into `layer` (default 0). Higher layers draw
+// later - on top - regardless of submission order or camera block. Sticky:
+// stays until the next set_layer(), across frames.
+void set_layer(std::uint32_t layer);
 
 // Top-left anchored quad; rotation pivots the center (positive = clockwise,
 // radians). Flat colors pass texture = {}.

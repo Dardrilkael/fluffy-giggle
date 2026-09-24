@@ -7,7 +7,8 @@
 #include <utility>
 #include <vector>
 
-#include "batch_core.h"  // internal: pure-CPU batch builder (src/ on the test include path)
+#include "batch_core.h"   // internal: pure-CPU batch builder (src/ on the test include path)
+#include "renderer2d.h"   // internal: command recording + sort/replay (same path)
 #include <ws/ui/app.hpp>
 #include <ws/ui/event.hpp>
 #include <ws/ui/render_command_queue.hpp>
@@ -379,6 +380,7 @@ TEST_CASE("public r2d API is drop-safe without a running app") {
     using namespace ws::ui::r2d;
     begin();               // screen mode
     begin(Camera2D{});     // world mode
+    set_layer(3);
     draw_quad(0.0f, 0.0f, 10.0f, 10.0f, rgba(255, 255, 255));
     draw_line(0.0f, 0.0f, 10.0f, 10.0f, 2.0f, rgba(255, 255, 255));
     end();
@@ -398,4 +400,144 @@ TEST_CASE("Camera2D and Texture defaults") {
 
     const ws::ui::r2d::Texture texture;
     CHECK(texture.id == 0);  // the white texture
+}
+
+// --- 2D renderer: recorded commands, sort, replay -----------------------------
+
+TEST_CASE("frame_end sorts explicit layers over submission order") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera2D{});
+    r.set_layer(1);
+    r.draw_quad(10.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255));  // layer 1, first
+    r.set_layer(0);
+    r.draw_quad(0.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255));  // layer 0, second
+    r.frame_end();
+
+    // Same camera and texture: one chunk, but the layer-0 quad draws first.
+    REQUIRE(r.batch().chunk_count() == 1);
+    REQUIRE(r.batch().vertices().size() == 8);
+    CHECK(r.batch().vertices()[0].pos[0] == 0.0f);   // layer-0 quad's TL
+    CHECK(r.batch().vertices()[4].pos[0] == 10.0f);  // layer-1 quad's TL
+}
+
+TEST_CASE("same-material draws keep submission order (stable sort)") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera2D{});
+    r.draw_quad(0.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255));
+    r.draw_quad(10.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255));
+    r.frame_end();
+    REQUIRE(r.batch().vertices().size() == 8);
+    CHECK(r.batch().vertices()[0].pos[0] == 0.0f);
+    CHECK(r.batch().vertices()[4].pos[0] == 10.0f);
+}
+
+TEST_CASE("the material sort groups a texture's quads within a block") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera2D{});
+    r.draw_quad(0.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255), Texture{1});
+    r.draw_quad(0.0f, 20.0f, 1.0f, 1.0f, rgba(255, 255, 255), Texture{2});
+    r.draw_quad(20.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255), Texture{1});
+    r.draw_quad(20.0f, 20.0f, 1.0f, 1.0f, rgba(255, 255, 255), Texture{2});
+    r.frame_end();
+
+    // Grouped by texture (submission order kept within each group): both
+    // texture-1 quads, then both texture-2 quads.
+    REQUIRE(r.batch().chunk_count() == 1);
+    const auto& v = r.batch().vertices();
+    REQUIRE(v.size() == 16);
+    CHECK(v[0].pos[0] == 0.0f);
+    CHECK(v[0].tex_index == 0.0f);
+    CHECK(v[4].pos[0] == 20.0f);
+    CHECK(v[4].tex_index == 0.0f);
+    CHECK(v[8].pos[0] == 0.0f);
+    CHECK(v[8].tex_index == 1.0f);
+    CHECK(v[12].pos[0] == 20.0f);
+    CHECK(v[12].tex_index == 1.0f);
+    CHECK(r.batch().chunk(0).texture_count == 2);
+}
+
+TEST_CASE("begin() blocks stay back to front; set_layer overrides that") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera2D{0.0f, 0.0f, 0.0f, 1.0f});
+    r.draw_quad(0.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255));
+    r.begin(Camera2D{0.0f, 0.0f, 0.0f, 2.0f});  // different zoom: different VP
+    r.draw_quad(10.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255));
+    r.frame_end();
+
+    REQUIRE(r.batch().chunk_count() == 2);
+    CHECK(r.batch().chunk(0).vertex_offset == 0);
+    CHECK(r.batch().chunk(1).vertex_offset == 4);
+    CHECK(r.batch().chunk(0).vp.m[0] != r.batch().chunk(1).vp.m[0]);  // zoom
+    CHECK(r.batch().vertices()[0].pos[0] == 0.0f);   // block 1 first...
+    CHECK(r.batch().vertices()[4].pos[0] == 10.0f);  // ...then block 2
+
+    // A high layer in block 1 draws after block 2 regardless.
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera2D{0.0f, 0.0f, 0.0f, 1.0f});
+    r.set_layer(5);
+    r.draw_quad(0.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255));
+    r.begin(Camera2D{0.0f, 0.0f, 0.0f, 2.0f});
+    r.set_layer(0);
+    r.draw_quad(10.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255));
+    r.frame_end();
+    REQUIRE(r.batch().chunk_count() == 2);
+    CHECK(r.batch().vertices()[0].pos[0] == 10.0f);  // layer 0 (block 2) first
+    CHECK(r.batch().vertices()[4].pos[0] == 0.0f);  // layer 5 (block 1) last
+}
+
+TEST_CASE("draws outside a begin()/end() block are dropped") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(100.0f, 100.0f);
+    r.draw_quad(0.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255));  // before begin()
+    r.begin(Camera2D{});
+    r.draw_quad(0.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255));
+    r.end();
+    r.draw_quad(50.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255));  // after end()
+    r.frame_end();
+
+    CHECK(r.batch().chunk_count() == 1);
+    REQUIRE(r.batch().vertices().size() == 4);  // only the in-block draw
+    CHECK(r.batch().vertices()[0].pos[0] == 0.0f);
+}
+
+TEST_CASE("frame_drop discards recorded commands, never defers them") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera2D{});
+    r.draw_quad(0.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255));
+    r.frame_drop();
+    CHECK(r.batch().empty());
+
+    r.frame_begin(100.0f, 100.0f);  // a fresh frame starts clean
+    r.frame_end();
+    CHECK(r.batch().empty());
+    CHECK(r.batch().chunk_count() == 0);
+}
+
+TEST_CASE("lines record through the same sorted path") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera2D{});
+    r.set_layer(1);
+    r.draw_line(0.0f, 0.0f, 10.0f, 0.0f, 2.0f, rgba(255, 255, 255));
+    r.set_layer(0);
+    r.draw_quad(0.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255));
+    r.frame_end();
+
+    // The layer-0 quad wins despite being submitted second; its first
+    // vertex sits at y = 0, the line's corners at y = +/- 1.
+    REQUIRE(r.batch().vertices().size() == 8);
+    CHECK(r.batch().vertices()[0].pos[1] == 0.0f);
+    CHECK(r.batch().vertices()[4].pos[1] == 1.0f);  // line corner A
 }
