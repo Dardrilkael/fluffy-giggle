@@ -16,6 +16,7 @@
 
 #include <ws/core/log.hpp>
 
+#include "renderer2d.h"
 #include "window.h"
 
 #include <volk.h>  // meta-loader: every vk* symbol below is a volk global
@@ -167,6 +168,13 @@ struct App::Impl {
     // change. Arena capacity survives the swap (the high-water mark).
     RenderCommandQueue write_queue_;
     RenderCommandQueue read_queue_;
+
+    // --- 2D renderer ---------------------------------------------------------
+    // The shell-owned batch renderer behind the r2d free functions. Apps
+    // record draws through ws::ui::r2d during on_update(); the shell runs
+    // frame_begin/frame_end around it and flushes the sorted batch inside
+    // the render pass, before ImGui's draw data (2D world under widgets).
+    r2d::Renderer2D renderer2d_;
 
     ~Impl() { shutdown(); }
 
@@ -780,6 +788,13 @@ struct App::Impl {
                 return false;
             }
         }
+        // Same drift rules for the 2D renderer: format drift rebuilds its
+        // pipeline, image-count drift its descriptor sets and vertex
+        // regions. A plain resize is render-pass compatible - its viewport
+        // and scissor are dynamic and arrive per flush.
+        if (!renderer2d_.on_swapchain_recreated(render_pass, format, image_count)) {
+            return false;
+        }
         return true;
     }
 
@@ -845,8 +860,10 @@ struct App::Impl {
         if (err == VK_ERROR_OUT_OF_DATE_KHR || err == VK_SUBOPTIMAL_KHR) {
             // This frame cannot run: drop the commands submitted for it
             // instead of letting them leak into a later frame (queue
-            // contract: same-frame execution, render_command_queue.hpp).
+            // contract: same-frame execution, render_command_queue.hpp; the
+            // 2D renderer keeps the same contract).
             write_queue_.clear();
+            renderer2d_.frame_drop();
             rebuild_swapchain = true;  // present_frame() skips; next loop recreates
             return;
         }
@@ -877,6 +894,13 @@ struct App::Impl {
         render_pass_info.clearValueCount = 1;
         render_pass_info.pClearValues = &clear;
         vkCmdBeginRenderPass(frame.buffer, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+
+        // 2D world first, widgets on top. This image's fence is already
+        // waited above, so the batch's vertex upload and the chunk descriptor
+        // writes cannot race the submit that last used them.
+        renderer2d_.flush(frame.buffer, image_index,
+                          static_cast<float>(extent.width),
+                          static_cast<float>(extent.height));
 
         ImGui_ImplVulkan_RenderDrawData(draw_data, frame.buffer);
 
@@ -980,9 +1004,14 @@ struct App::Impl {
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
 
+            // One r2d frame per ImGui frame: begin before on_update() records
+            // its draws, sort + replay once it returned.
+            renderer2d_.frame_begin(static_cast<float>(extent.width),
+                                    static_cast<float>(extent.height));
             bool frame_abandoned = false;
             try {
                 app.on_update();
+                renderer2d_.frame_end();
             } catch (const std::exception& e) {
                 core::error("ui: exception in on_update(): {}", e.what());
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
@@ -1000,6 +1029,7 @@ struct App::Impl {
                 // Render and the queues (the context teardown tolerates a
                 // half-open frame) and exit through the should-close flag.
                 write_queue_.clear();
+                renderer2d_.frame_drop();
                 break;
             }
 
@@ -1013,6 +1043,7 @@ struct App::Impl {
                 // Zero-size (minimized) frame: same rule as the bail path in
                 // render_frame() - drop, never defer.
                 write_queue_.clear();
+                renderer2d_.frame_drop();
             }
 
             if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
@@ -1045,6 +1076,14 @@ struct App::Impl {
         if (fb_width <= 0 || fb_height <= 0 || !create_swapchain(fb_width, fb_height)) {
             return false;
         }
+        // Before on_setup(): apps load textures there, and the r2d free
+        // functions need an active renderer. init() may fail mid-way;
+        // shutdown() doubles as the (idempotent) failure-path cleanup.
+        if (!renderer2d_.init(device, physical_device, allocator, queue,
+                              queue_family, render_pass, format, image_count)) {
+            return false;
+        }
+        r2d::set_active(&renderer2d_);
         if (!init_imgui(app)) {
             return false;
         }
@@ -1074,6 +1113,12 @@ struct App::Impl {
         }
 
         destroy_swapchain_objects();
+
+        // 2D renderer before the allocator and device it allocates from; the
+        // active pointer goes null so post-run r2d calls drop with a warn
+        // instead of touching a dead renderer.
+        r2d::set_active(nullptr);
+        renderer2d_.shutdown();
 
         if (allocator != VK_NULL_HANDLE) {
             vmaDestroyAllocator(allocator);

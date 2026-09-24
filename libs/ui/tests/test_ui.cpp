@@ -541,3 +541,30 @@ TEST_CASE("lines record through the same sorted path") {
     CHECK(r.batch().vertices()[0].pos[1] == 0.0f);
     CHECK(r.batch().vertices()[4].pos[1] == 1.0f);  // line corner A
 }
+
+TEST_CASE("texture ids pass through unchanged without a GPU registry") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(100.0f, 100.0f);
+    r.begin_screen();
+    r.draw_quad(0.0f, 0.0f, 10.0f, 10.0f, 0xFF0000FF);             // id 0
+    r.draw_quad(20.0f, 0.0f, 10.0f, 10.0f, 0xFF0000FF, Texture{7});
+    r.frame_end();
+
+    // The unknown-id clamp guards the flush-time descriptor write, which
+    // needs a GPU: without a registry there is nothing to validate against,
+    // so synthetic ids flow through untouched (the CPU-side tests and any
+    // non-GPU consumer rely on exactly that).
+    REQUIRE(r.batch().chunk_count() == 1);
+    const auto& chunk = r.batch().chunk(0);
+    CHECK(chunk.texture_count == 2);
+    CHECK(chunk.texture_ids[0] == 0u);  // id 0 (white) slots like any id
+    CHECK(chunk.texture_ids[1] == 7u);
+    CHECK(r.batch().vertices()[4].tex_index == 1.0f);  // id-7 quad: slot 1
+}
+
+TEST_CASE("load_texture without a GPU context returns the white texture") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    CHECK(r.load_texture("no-such-file.png").id == 0);
+}

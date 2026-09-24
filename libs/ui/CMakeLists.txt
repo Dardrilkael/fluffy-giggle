@@ -11,3 +11,6 @@ ws_add_test(ui SOURCES tests/test_ui.cpp)
 # tests exercise the internal pure-CPU batch core directly (src/ never
 # reaches apps).
 target_include_directories(test_ui PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+# renderer2d.h (internal) declares the Vulkan half: the test needs those
+# headers to compile it, though it never drives Vulkan itself.
+target_link_libraries(test_ui PRIVATE volk vma)

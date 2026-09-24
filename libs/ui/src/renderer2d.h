@@ -13,6 +13,10 @@
 #include <cstdint>
 #include <vector>
 
+#include <volk.h>  // internal header: Vk*/Vma types live in signatures and
+#include <vk_mem_alloc.h>  // storage. They never reach apps - that surface is
+                          // <ws/ui/renderer2d.hpp>.
+
 #include <ws/ui/renderer2d.hpp>
 
 namespace ws::ui::r2d {
@@ -43,6 +47,12 @@ inline std::uint64_t make_material_key(Texture texture) {
 
 class Renderer2D {
 public:
+    // Vulkan/VMA handles are single-owned: a copied renderer would destroy
+    // them twice at shutdown.
+    Renderer2D() = default;
+    Renderer2D(const Renderer2D&) = delete;
+    Renderer2D& operator=(const Renderer2D&) = delete;
+
     // --- shell plumbing (app.cpp) ---
     // Starts a frame: stores the extent, resets the batch and the command
     // list (capacity kept). Draws are accepted until frame_end/frame_drop.
@@ -53,6 +63,30 @@ public:
     // Abandons the frame: commands and batch are dropped, never deferred -
     // same contract as RenderCommandQueue::clear().
     void frame_drop();
+
+    // --- GPU lifecycle (app.cpp only; needs a live Vulkan context) ---
+    // One-time setup after the swapchain exists. Order inside: push-constant
+    // limit check, upload pool/fence, sampler, white texture (registry index
+    // 0 - every descriptor slot starts bound to it), set layout (32 immutable
+    // samplers), pipeline layout, per-image objects (descriptor pool, sets,
+    // vertex regions), shared index pattern, pipeline. On false the startup
+    // fails; shutdown() is the failure-path cleanup and cleans partial state.
+    bool init(VkDevice device, VkPhysicalDevice physical_device,
+              VmaAllocator allocator, VkQueue queue, uint32_t queue_family,
+              VkRenderPass render_pass, VkFormat format, uint32_t image_count);
+    // Swapchain drift. Format drift rebuilds the pipeline (a same-format
+    // resize needs nothing - that is the render-pass compatibility the ImGui
+    // backend relies on); image-count drift rebuilds the per-image sets and
+    // vertex regions. Extents are per-flush (dynamic viewport/scissor).
+    bool on_swapchain_recreated(VkRenderPass render_pass, VkFormat format,
+                                uint32_t image_count);
+    // Destroys everything init()/load_texture() created. Idempotent.
+    void shutdown();
+    // Draws the batch inside the render pass, before ImGui's draw data (2D
+    // world under widgets). The image's fence is waited before recording
+    // starts, so its vertex region and chunk sets are safely writable here.
+    void flush(VkCommandBuffer cmd, uint32_t image_index, float fb_width,
+               float fb_height);
 
     // --- app-facing entry points (forwarded from the free functions) ---
     void begin_screen();
@@ -85,6 +119,27 @@ private:
     void record(const char* what, const float (&pos)[4][2],
                 const float (&uv)[4][2], std::uint32_t color, Texture texture);
 
+    // --- GPU half helpers ---
+    // Unknown texture id, while a registry exists: once per frame.
+    void warn_unknown_texture(uint32_t id);
+    // Graphics pipeline against the given render pass; the shader modules
+    // are created and destroyed inside (they are baked into the pipeline).
+    bool create_pipeline(VkRenderPass render_pass);
+    // Descriptor pool + image_count*kMaxChunksPerFrame sets (initial
+    // full-white write) + one persistently-mapped vertex region per image.
+    bool create_per_image_objects(uint32_t image_count);
+    void destroy_per_image_objects();
+    // Shared absolute index pattern (quad q -> 4q + {0,1,2,2,3,0}), filled
+    // once and never rewritten.
+    bool create_index_buffer();
+    // Staging upload of a 4-byte-per-pixel R8G8B8A8 image (one-off submit +
+    // fence wait). Cleans its partial state and returns false on failure.
+    bool upload_texture(const void* pixels, uint32_t width, uint32_t height,
+                        Texture* out);
+    // Binds a chunk's used slots [0, texture_count); the rest keep the
+    // initial full-white write.
+    void write_chunk_set(VkDescriptorSet set, const batch::Chunk& chunk);
+
     std::vector<DrawCommand> commands_;  // capacity reused across frames
     batch::BatchCore batch_;
     Camera2D current_camera_{};
@@ -95,6 +150,50 @@ private:
     bool camera_stashed_ = false;  // set by begin(), cleared by end()
     bool frame_active_ = false;
     bool warned_ = false;
+
+    // --- Vulkan state (null/empty until init()) ---
+    VkDevice device_ = VK_NULL_HANDLE;
+    VkPhysicalDevice physical_device_ = VK_NULL_HANDLE;
+    VmaAllocator allocator_ = VK_NULL_HANDLE;
+    VkQueue queue_ = VK_NULL_HANDLE;
+    uint32_t queue_family_ = 0;
+
+    VkRenderPass render_pass_ = VK_NULL_HANDLE;  // last seen (rebuild input)
+    VkFormat format_ = VK_FORMAT_UNDEFINED;     // drift sentinel
+    uint32_t image_count_ = 0;
+
+    VkSampler sampler_ = VK_NULL_HANDLE;
+    VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;  // owns sets_
+    VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline pipeline_ = VK_NULL_HANDLE;
+
+    // A Texture's id is its index here; [0] is the white texture. The
+    // registry only grows (v1 never unloads), so stale descriptor-set
+    // bindings can never dangle mid-run.
+    struct TextureEntry {
+        VkImage image = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
+    };
+    std::vector<TextureEntry> textures_;
+
+    // One vertex region per swapchain image, sized by the static frame cap
+    // (a resize never reallocates them), persistently mapped.
+    struct ImageBuffers {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
+        batch::Vertex* mapped = nullptr;
+    };
+    std::vector<ImageBuffers> buffers_;
+
+    VkBuffer index_buffer_ = VK_NULL_HANDLE;
+    VmaAllocation index_allocation_ = VK_NULL_HANDLE;
+
+    VkCommandPool upload_pool_ = VK_NULL_HANDLE;  // texture uploads
+    VkFence upload_fence_ = VK_NULL_HANDLE;
+    // image_count_ * kMaxChunksPerFrame; slot = image_index * kMaxChunks + c.
+    std::vector<VkDescriptorSet> sets_;
 };
 
 // Points the public free functions at the live renderer. app.cpp installs it
