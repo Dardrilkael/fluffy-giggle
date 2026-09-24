@@ -75,7 +75,8 @@ protected:
         const r2d::FrameSize gui_frame = r2d::frame_size();
         (void)layout_.begin_panel({gui_frame.width - 244.0f, 24.0f, 220.0f, 160.0f},
                                   12.0f);
-        if (ws::ui::gui::button(gui_, layout_, "clicks")) {
+        if (ws::ui::gui::button(gui_, layout_, ws::ui::gui::kDefaultChrome,
+                                "clicks")) {
             ++gui_clicks_;
         }
         layout_.end_panel();

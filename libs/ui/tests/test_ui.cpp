@@ -17,6 +17,7 @@
 #include <ws/ui/gui/input_frame.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
 #include <ws/ui/gui/rect.hpp>
+#include <ws/ui/gui/theme.hpp>  // (same - the stock chrome parses headless)
 #include <ws/ui/gui/widgets.hpp>  // (same - proves the widget layer parses headless)
 #include <ws/ui/render_command_queue.hpp>
 #include <ws/ui/renderer2d.hpp>  // must stay includable without any third-party header
@@ -1379,7 +1380,7 @@ TEST_CASE("button: a full click over the laid-out rect fires exactly once") {
     // Frame 1: press inside the button's rect - pressed, not yet clicked.
     gui.new_frame(snap(60.0f, 12.0f, true, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
-    CHECK(!button(gui, layout, "fire"));
+    CHECK(!button(gui, layout, kDefaultChrome, "fire"));
     layout.end_panel();
     CHECK(gui.active_id() == id);
     gui.end_frame();
@@ -1388,7 +1389,7 @@ TEST_CASE("button: a full click over the laid-out rect fires exactly once") {
     // and completes the click.
     gui.new_frame(snap(60.0f, 12.0f, false, false, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
-    CHECK(button(gui, layout, "fire"));
+    CHECK(button(gui, layout, kDefaultChrome, "fire"));
     layout.end_panel();
     CHECK(gui.active_id() == kInvalidWidgetId);
     gui.end_frame();
@@ -1396,7 +1397,7 @@ TEST_CASE("button: a full click over the laid-out rect fires exactly once") {
     // Frame 3: no edges - the click is over and does not repeat.
     gui.new_frame(snap(60.0f, 12.0f));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
-    CHECK(!button(gui, layout, "fire"));
+    CHECK(!button(gui, layout, kDefaultChrome, "fire"));
     layout.end_panel();
     gui.end_frame();
 }
@@ -1411,8 +1412,8 @@ TEST_CASE("button: stacked buttons hit-test their own laid-out rects") {
     // above it). "first" must not fire.
     gui.new_frame(snap(60.0f, 36.0f, false, true, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
-    CHECK(!button(gui, layout, "first"));
-    CHECK(button(gui, layout, "second"));
+    CHECK(!button(gui, layout, kDefaultChrome, "first"));
+    CHECK(button(gui, layout, kDefaultChrome, "second"));
     layout.end_panel();
     gui.end_frame();
 }
@@ -1424,12 +1425,31 @@ TEST_CASE("button: hover alone claims hot but never clicks") {
 
     gui.new_frame(snap(60.0f, 12.0f));  // pointer over "first", no press
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
-    CHECK(!button(gui, layout, "first"));
-    CHECK(!button(gui, layout, "second"));
+    CHECK(!button(gui, layout, kDefaultChrome, "first"));
+    CHECK(!button(gui, layout, kDefaultChrome, "second"));
     layout.end_panel();
     // The hover claimed hot for "first" (the second's rect misses the
     // pointer, so it claimed nothing); nothing became active.
     CHECK(gui.hot_id() == IdStack{}.current("first"));
     CHECK(gui.active_id() == kInvalidWidgetId);
+    gui.end_frame();
+}
+
+TEST_CASE("button: the theme drives the widget's metrics") {
+    using namespace ws::ui::gui;
+    CHECK(kDefaultChrome.control_height == 24.0f);  // the layout-affecting default
+
+    // A tall variant: with 40 px controls the second button's rect sits
+    // at y = 40 - a click there must land on it, not on the first.
+    ChromeTheme tall = kDefaultChrome;
+    tall.control_height = 40.0f;
+
+    GuiContext gui;
+    LayoutCursor layout;
+    gui.new_frame(snap(60.0f, 60.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!button(gui, layout, tall, "first"));
+    CHECK(button(gui, layout, tall, "second"));
+    layout.end_panel();
     gui.end_frame();
 }

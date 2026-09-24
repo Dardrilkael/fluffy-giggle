@@ -3,6 +3,7 @@
 #include <ws/ui/gui/gui_context.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
 #include <ws/ui/gui/rect.hpp>
+#include <ws/ui/gui/theme.hpp>
 
 namespace ws::ui::gui {
 
@@ -20,13 +21,13 @@ namespace ws::ui::gui {
 // headless, so the widgets test without a window.
 
 // A push button: true on a full click inside it (press and release over
-// the same laid-out rect). `label` ids the widget - derived from the
-// current id scope, so the same label in two panels is two widgets -
+// the same laid-out rect). `theme` supplies the faces and metrics
+// (height = theme.control_height); `label` ids the widget - derived from
+// the current id scope, so the same label in two panels is two widgets -
 // and is drawn as a centered bar that tracks the label's length: real
 // text needs a font, which r2d does not have yet. `width` defaults to
-// 120 px; height is the standard control height (24 px until the theme
-// lands in Phase 6).
-bool button(GuiContext& gui, LayoutCursor& layout, const char* label,
-            float width = 120.0f);
+// 120 px.
+bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
+            const char* label, float width = 120.0f);
 
 }  // namespace ws::ui::gui
