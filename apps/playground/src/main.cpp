@@ -1,10 +1,11 @@
 // Minimal playground: proves out the ws::ui shell end to end (window, Vulkan
-// swapchain, ImGui + ImPlot contexts, event system) and gives the workspace
-// a scratch pad. Includes only ws headers - third parties stay behind the
-// ui lib.
+// swapchain, ImGui + ImPlot contexts, event system, 2D renderer) and gives
+// the workspace a scratch pad. Includes only ws headers - third parties stay
+// behind the ui lib.
 
 #include <ws/ui/app.hpp>
 #include <ws/ui/event.hpp>
+#include <ws/ui/renderer2d.hpp>
 #include <ws/ui/widgets.hpp>
 
 #include <ws/core/log.hpp>
@@ -19,6 +20,13 @@ public:
     using ws::ui::App::App;
 
 protected:
+    void on_setup() override {
+        // Relative to the exe's working directory - the build copies
+        // assets/ next to the binary. A miss just logs and every checker
+        // quad renders white (the documented fallback).
+        checker_ = ws::ui::r2d::load_texture("assets/checker.png");
+    }
+
     void on_event(ws::ui::Event& event) override {
         ws::ui::EventDispatcher dispatcher{event};
         // GLFW key codes 0-255 match ASCII, so 'D' needs no GLFW header.
@@ -38,6 +46,52 @@ protected:
     }
 
     void on_update() override {
+        namespace r2d = ws::ui::r2d;
+
+        // --- 2D world, through the camera ---
+        r2d::begin(camera_);
+        // 20x12 grid of 100px cells: a few hundred flat quads that batch
+        // into a single chunk (one material).
+        for (int gy = 0; gy < 12; ++gy) {
+            for (int gx = 0; gx < 20; ++gx) {
+                const std::uint32_t cell = (gx + gy) % 2 == 0
+                                               ? r2d::rgba(52, 52, 64)
+                                               : r2d::rgba(40, 40, 50);
+                r2d::draw_quad(gx * 100.0f, gy * 100.0f, 100.0f, 100.0f, cell);
+            }
+        }
+        // Textured quads (tint = vertex color * texel), one of them rotating
+        // around its center.
+        r2d::draw_quad(150.0f, 150.0f, 200.0f, 200.0f, r2d::rgba(255, 255, 255),
+                       checker_);
+        r2d::draw_quad(420.0f, 260.0f, 160.0f, 160.0f, r2d::rgba(120, 200, 255),
+                       checker_);
+        r2d::draw_quad(760.0f, 520.0f, 160.0f, 160.0f, r2d::rgba(255, 255, 255),
+                       checker_, spin_);
+        // Lines are CPU-expanded into quads - same batch, any thickness.
+        r2d::draw_line(0.0f, 0.0f, 2000.0f, 1200.0f, 2.0f,
+                       r2d::rgba(255, 200, 60));
+        r2d::draw_line(2000.0f, 0.0f, 0.0f, 1200.0f, 6.0f,
+                       r2d::rgba(90, 200, 255));
+        r2d::draw_line(1000.0f, 0.0f, 1000.0f, 1200.0f, 12.0f,
+                       r2d::rgba(255, 90, 120, 128));
+        r2d::end();
+
+        // --- screen layer: pixels from the top-left, no camera ---
+        r2d::begin();
+        const r2d::FrameSize frame = r2d::frame_size();
+        constexpr float inset = 8.0f;
+        const std::uint32_t border = r2d::rgba(255, 255, 255, 96);
+        r2d::draw_line(inset, inset, frame.width - inset, inset, 2.0f, border);
+        r2d::draw_line(frame.width - inset, inset, frame.width - inset,
+                       frame.height - inset, 2.0f, border);
+        r2d::draw_line(frame.width - inset, frame.height - inset, inset,
+                       frame.height - inset, 2.0f, border);
+        r2d::draw_line(inset, frame.height - inset, inset, inset, 2.0f, border);
+        r2d::end();
+
+        spin_ = std::fmod(spin_ + 0.01f, 6.2831853f);
+
         if (ws::ui::begin_window("ws playground")) {
             ws::ui::text("shell is alive - every widget here goes through ws::ui");
             ws::ui::text("press D to toggle the demo window (events, not polling)");
@@ -62,6 +116,14 @@ protected:
                 ws::ui::plot_line("sin", xs_.data(), ys_.data(), samples_);
                 ws::ui::end_plot();
             }
+
+            ws::ui::separator();
+            ws::ui::text("2D camera (drives the world layer)");
+            ws::ui::slider_float("cam x", &camera_.x, -2000.0f, 2000.0f);
+            ws::ui::slider_float("cam y", &camera_.y, -2000.0f, 2000.0f);
+            ws::ui::slider_float("cam zoom", &camera_.zoom, 0.1f, 4.0f);
+            ws::ui::slider_float("cam rotation", &camera_.rotation,
+                                 -3.14159265f, 3.14159265f);
         }
         ws::ui::end_window();
 
@@ -75,6 +137,9 @@ protected:
 
 private:
     static constexpr int kMaxSamples = 512;
+    ws::ui::r2d::Camera2D camera_{1000.0f, 600.0f, 0.0f, 1.0f};
+    ws::ui::r2d::Texture checker_{};
+    float spin_ = 0.0f;
     std::array<float, kMaxSamples> xs_{};
     std::array<float, kMaxSamples> ys_{};
     float amplitude_ = 0.75f;
