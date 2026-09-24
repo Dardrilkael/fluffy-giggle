@@ -1,5 +1,8 @@
 // The only place GLFW's C callback surface exists. Each callback builds the
-// matching ws::ui::Event and hands it to the shell's single forwarder.
+// matching ws::ui::Event and hands it to the shell's single forwarder; the
+// same callbacks also tap raw input into the gui library's InputFrame
+// (WindowEventSink::input) - a second, deliberately unfiltered consumer,
+// since the gui library hit-tests for itself (see <ws/ui/gui/input_frame.hpp>).
 //
 // ImGui's GLFW backend installs its own callbacks over ours and chains to
 // ours at the top of each of its own, BEFORE its io updates - so when our
@@ -19,6 +22,12 @@ namespace {
 
 WindowEventSink* sink_for(GLFWwindow* window) {
     return static_cast<WindowEventSink*>(glfwGetWindowUserPointer(window));
+}
+
+// The gui input tap for this window, when the shell installed one.
+gui::InputFrame* input_for(GLFWwindow* window) {
+    WindowEventSink* sink = sink_for(window);
+    return (sink != nullptr && sink->input != nullptr) ? sink->input : nullptr;
 }
 
 // Forwards `event` unless the window has no sink (or a broken one). Events
@@ -64,6 +73,16 @@ void on_key(GLFWwindow* window, int key, int scancode, int action, int mods) {
         default:
             break;
     }
+    // gui tap: held state on every transition, pressed edge on PRESS only -
+    // key repeat is a widget policy, not an input fact, so the edge stays
+    // pure. Out-of-range codes (GLFW_KEY_UNKNOWN) drop.
+    if (gui::InputFrame* input = input_for(window);
+        input != nullptr && key >= 0 && key < gui::InputFrame::kMaxKeys) {
+        input->key_down[key] = (action != GLFW_RELEASE);
+        if (action == GLFW_PRESS) {
+            input->key_pressed[key] = true;
+        }
+    }
 }
 
 void on_mouse_button(GLFWwindow* window, int button, int action, int mods) {
@@ -73,14 +92,61 @@ void on_mouse_button(GLFWwindow* window, int button, int action, int mods) {
     } else {
         emit(window, MouseButtonReleasedEvent{button});
     }
+    if (gui::InputFrame* input = input_for(window);
+        input != nullptr && button >= 0 &&
+        button < gui::InputFrame::kMaxMouseButtons) {
+        const bool down = (action == GLFW_PRESS);
+        input->mouse_down[button] = down;
+        if (down) {
+            input->mouse_pressed[button] = true;
+        } else {
+            input->mouse_released[button] = true;
+        }
+    }
 }
 
 void on_cursor_pos(GLFWwindow* window, double x, double y) {
     emit(window, MouseMovedEvent{static_cast<float>(x), static_cast<float>(y)});
+    if (gui::InputFrame* input = input_for(window)) {
+        // GLFW reports screen coordinates; gui space is framebuffer pixels
+        // (r2d screen mode). The ratio is 1:1 whenever the two match and
+        // drifts under DPI scaling. A degenerate window size keeps the
+        // last position rather than dividing by zero.
+        int fb_width = 0;
+        int fb_height = 0;
+        int win_width = 0;
+        int win_height = 0;
+        glfwGetFramebufferSize(window, &fb_width, &fb_height);
+        glfwGetWindowSize(window, &win_width, &win_height);
+        if (win_width > 0 && win_height > 0) {
+            input->mouse_x =
+                static_cast<float>(x) *
+                (static_cast<float>(fb_width) / static_cast<float>(win_width));
+            input->mouse_y =
+                static_cast<float>(y) *
+                (static_cast<float>(fb_height) / static_cast<float>(win_height));
+        }
+    }
 }
 
 void on_scroll(GLFWwindow* window, double x, double y) {
     emit(window, MouseScrolledEvent{static_cast<float>(x), static_cast<float>(y)});
+    if (gui::InputFrame* input = input_for(window)) {
+        // Deltas, not positions - sum, or ticks arriving between frames
+        // would be lost (same rule as the event path's coalescing).
+        input->scroll_dx += static_cast<float>(x);
+        input->scroll_dy += static_cast<float>(y);
+    }
+}
+
+// Text input has no Event counterpart (the event system models keys, not
+// glyphs), so codepoints go straight into the gui frame. The ImGui backend
+// installs its own char callback and chains to ours first, so its text
+// widgets keep working unchanged.
+void on_char(GLFWwindow* window, unsigned int codepoint) {
+    if (gui::InputFrame* input = input_for(window)) {
+        input->text_input.push_back(codepoint);
+    }
 }
 
 // Process-wide, not window-scoped: installed before glfwInit() (by the
@@ -99,6 +165,7 @@ void install_window_callbacks(GLFWwindow* window, WindowEventSink* sink) {
     glfwSetMouseButtonCallback(window, on_mouse_button);
     glfwSetCursorPosCallback(window, on_cursor_pos);
     glfwSetScrollCallback(window, on_scroll);
+    glfwSetCharCallback(window, on_char);
 }
 
 void install_glfw_error_callback() {

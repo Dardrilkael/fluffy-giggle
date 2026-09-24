@@ -24,9 +24,8 @@ struct InputFrame {
 
     // Advances to the next frame: clears the per-frame edges (pressed/
     // released, scroll, key presses, text input) and keeps held state and
-    // position. The platform layer calls this once per frame, after
-    // widgets have finished reading the snapshot. (Stub in the Phase 0
-    // skeleton; the input wiring lands in Phase 1.)
+    // position. The shell calls this once per frame at the top of the
+    // pump, before this frame's input starts accumulating.
     void next_frame();
 
     // --- held state ------------------------------------------------------------
@@ -44,5 +43,14 @@ struct InputFrame {
     // UTF-32 codepoints typed this frame, in arrival order.
     std::vector<std::uint32_t> text_input;
 };
+
+// The shell's snapshot for the frame being rendered, valid during
+// on_update() - hand it to GuiContext::new_frame(). Filled by the platform
+// layer from RAW GLFW input (src/window.cpp): deliberately not the
+// app-facing event stream, so the snapshot stays unfiltered even while
+// ImGui consumes the same physical input - the gui library hit-tests for
+// itself. Outside a running app: an empty frame (the drop-safe contract,
+// like r2d::frame_size()).
+const InputFrame& frame_input();
 
 }  // namespace ws::ui::gui

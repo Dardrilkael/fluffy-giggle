@@ -13,6 +13,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <vector>
 
 namespace {
@@ -57,11 +58,11 @@ protected:
     void on_update() override {
         namespace r2d = ws::ui::r2d;
 
-        // --- gui module skeleton ---
-        // Drives the empty frame lifecycle every frame so the ws::ui::gui
-        // module is compiled, linked and called - a no-op consumer until
-        // the input snapshot (Phase 1) and widgets (Phase 5) land.
-        gui_.new_frame(ws::ui::gui::InputFrame{});
+        // --- gui module: input snapshot (Phase 1) ---
+        // The shell accumulates raw input into one InputFrame per frame
+        // and publishes it here; the context adopts the copy. The live
+        // values show in the window below - widgets arrive in Phase 5.
+        gui_.new_frame(ws::ui::gui::frame_input());
         gui_.end_frame();
 
         // --- 2D world, through the camera ---
@@ -127,6 +128,25 @@ protected:
         if (ws::ui::begin_window("ws playground")) {
             ws::ui::text("shell is alive - every widget here goes through ws::ui");
             ws::ui::text("press D to toggle the demo window (events, not polling)");
+
+            // Live proof of the gui input snapshot (Phase 1): raw input
+            // straight from the shell, unaffected by these ImGui widgets.
+            const ws::ui::gui::InputFrame& in = gui_.input();
+            char line[96];
+            std::snprintf(line, sizeof(line),
+                          "gui mouse %.0f, %.0f px   down L%d M%d R%d",
+                          in.mouse_x, in.mouse_y, in.mouse_down[0],
+                          in.mouse_down[1], in.mouse_down[2]);
+            ws::ui::text(line);
+            std::snprintf(line, sizeof(line), "pressed L%d R%d   scroll %.1f, %.1f",
+                          in.mouse_pressed[0], in.mouse_pressed[2], in.scroll_dx,
+                          in.scroll_dy);
+            ws::ui::text(line);
+            std::snprintf(line, sizeof(line),
+                          "key 'D' down %d   text chars this frame: %zu",
+                          in.key_down['D'], in.text_input.size());
+            ws::ui::text(line);
+
             if (ws::ui::button("imgui demo")) {
                 show_imgui_ = !show_imgui_;
             }
@@ -181,7 +201,7 @@ private:
     bool show_signal_ = true;
     bool show_imgui_ = false;
     bool show_implot_ = false;
-    ws::ui::gui::GuiContext gui_;  // Phase 0 skeleton: linked, called, inert
+    ws::ui::gui::GuiContext gui_;  // gui module consumer; fed the live snapshot
 };
 
 }  // namespace

@@ -25,8 +25,9 @@ struct HitTest {
 // The layer is reached only through those widget functions by design:
 // identity, hit-testing and draw emission stay one seam, so a future
 // retained-mode tree could drive the same machinery without renderer
-// changes (buildplan: design for that, do not build it). (Bodies are
-// stubs in the Phase 0 skeleton; hot/active lands in Phase 3.)
+// changes (buildplan: design for that, do not build it). new_frame adopts
+// the input snapshot; hit-testing and the hot/active state it resolves are
+// stubs until Phase 3.
 class GuiContext {
 public:
     // Opens the frame: adopts `input` (the platform layer's filled

@@ -16,6 +16,7 @@
 
 #include <ws/core/log.hpp>
 
+#include "gui.h"
 #include "renderer2d.h"
 #include "window.h"
 
@@ -176,6 +177,14 @@ struct App::Impl {
     // the render pass, before ImGui's draw data (2D world under widgets).
     r2d::Renderer2D renderer2d_;
 
+    // --- gui library --------------------------------------------------------
+    // One input snapshot per frame, filled by the window callbacks' raw
+    // tap (src/window.cpp via WindowEventSink::input). main_loop clears
+    // the per-frame edges at the top of each iteration; on_update reads
+    // the snapshot through ws::ui::gui::frame_input() for the duration of
+    // the run.
+    gui::InputFrame gui_input_;
+
     ~Impl() { shutdown(); }
 
     // --- startup ------------------------------------------------------------
@@ -193,6 +202,7 @@ struct App::Impl {
         // callbacks, before its io updates - io.WantCapture* at event time
         // reflects the last NewFrame (see imgui_wants()).
         event_sink_.forward = [this](Event& event) { forward_event(event); };
+        event_sink_.input = &gui_input_;  // gui tap: raw input, no filtering
         install_window_callbacks(window, &event_sink_);
         return true;
     }
@@ -960,6 +970,11 @@ struct App::Impl {
 
     int main_loop(App& app) {
         for (;;) {
+            // Fresh gui input edges for this pump: the previous frame's
+            // pressed/released/scroll/text clear, held state and position
+            // stay. Iconified iterations never reach on_update, so their
+            // edges drop here - drop, never defer, like every queue.
+            gui_input_.next_frame();
             glfwPollEvents();
 
             // Every queued event reaches on_event before this frame's
@@ -1084,6 +1099,8 @@ struct App::Impl {
             return false;
         }
         r2d::set_active(&renderer2d_);
+        // The gui input snapshot publishes the same way (frame_input()).
+        gui::set_active_input(&gui_input_);
         if (!init_imgui(app)) {
             return false;
         }
@@ -1119,6 +1136,9 @@ struct App::Impl {
         // instead of touching a dead renderer.
         r2d::set_active(nullptr);
         renderer2d_.shutdown();
+        // Same for the gui input tap: post-run frame_input() reports an
+        // empty frame, same drop-safe contract.
+        gui::set_active_input(nullptr);
 
         if (allocator != VK_NULL_HANDLE) {
             vmaDestroyAllocator(allocator);

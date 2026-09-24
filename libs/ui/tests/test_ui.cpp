@@ -885,7 +885,7 @@ TEST_CASE("sprite_size reports native pixels and {0,0} for unknown sprites") {
     CHECK(sentinel.height == 0.0f);
 }
 
-// --- gui module skeleton (Phase 0) ------------------------------------------------
+// --- gui module (Phase 0 skeleton + Phase 1 input snapshot) ------------------------
 
 TEST_CASE("gui skeleton: the Phase 0 surface constructs, links and no-ops safely") {
     using namespace ws::ui::gui;
@@ -896,7 +896,8 @@ TEST_CASE("gui skeleton: the Phase 0 surface constructs, links and no-ops safely
     CHECK(GuiContext{}.hot_id() == kInvalidWidgetId);
     CHECK(GuiContext{}.active_id() == kInvalidWidgetId);
 
-    // A filled snapshot flows through the frame lifecycle unchanged.
+    // A filled snapshot flows through the frame lifecycle: new_frame adopts
+    // it (the frame's copy), end_frame (still a stub) stays inert.
     InputFrame input;
     input.mouse_x = 100.0f;
     input.mouse_down[0] = true;
@@ -906,6 +907,10 @@ TEST_CASE("gui skeleton: the Phase 0 surface constructs, links and no-ops safely
     GuiContext gui;
     gui.new_frame(input);
     gui.end_frame();
+    CHECK(gui.input().mouse_x == 100.0f);
+    CHECK(gui.input().mouse_down[0] == true);
+    CHECK(gui.input().key_pressed['D'] == true);
+    CHECK(gui.input().text_input.size() == 1);
 
     // Every stub is callable and inert: ids read as invalid until the
     // Phase 2 hash, hit tests report nothing until Phase 3, layout hands
@@ -931,4 +936,47 @@ TEST_CASE("gui skeleton: the Phase 0 surface constructs, links and no-ops safely
     CHECK(hit.pressed == false);
     CHECK(hit.clicked == false);
     CHECK(hit.released == false);
+}
+
+TEST_CASE("InputFrame::next_frame clears edges and keeps held state") {
+    using namespace ws::ui::gui;
+    InputFrame frame;
+    frame.mouse_x = 100.0f;
+    frame.mouse_y = 50.0f;
+    frame.mouse_down[0] = true;
+    frame.mouse_pressed[0] = true;
+    frame.mouse_released[1] = true;
+    frame.scroll_dx = 1.5f;
+    frame.scroll_dy = -2.5f;
+    frame.key_down['D'] = true;
+    frame.key_pressed['D'] = true;
+    frame.text_input.push_back(U'w');
+
+    frame.next_frame();
+
+    // Held state and position survive the frame boundary...
+    CHECK(frame.mouse_x == 100.0f);
+    CHECK(frame.mouse_y == 50.0f);
+    CHECK(frame.mouse_down[0] == true);
+    CHECK(frame.key_down['D'] == true);
+    // ...the per-frame edges do not.
+    CHECK(frame.mouse_pressed[0] == false);
+    CHECK(frame.mouse_released[1] == false);
+    CHECK(frame.scroll_dx == 0.0f);
+    CHECK(frame.scroll_dy == 0.0f);
+    CHECK(frame.key_pressed['D'] == false);
+    CHECK(frame.text_input.empty());
+}
+
+TEST_CASE("frame_input is drop-safe without a running app") {
+    // Headless: the shell never installed an accumulator, so the public
+    // getter answers an empty snapshot instead of dangling.
+    const ws::ui::gui::InputFrame& frame = ws::ui::gui::frame_input();
+    CHECK(frame.mouse_x == 0.0f);
+    CHECK(frame.mouse_y == 0.0f);
+    CHECK(frame.mouse_down[0] == false);
+    CHECK(frame.mouse_pressed[0] == false);
+    CHECK(frame.key_pressed['D'] == false);
+    CHECK(frame.scroll_dy == 0.0f);
+    CHECK(frame.text_input.empty());
 }
