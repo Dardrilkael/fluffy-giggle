@@ -1,10 +1,11 @@
 // ws::ui::gui - the gui library's out-of-line surface (see
-// libs/ui/gui-lib-buildplan.md). Input is real (Phase 1: the shell
-// accumulates one InputFrame per frame, published through frame_input())
-// and so are ids (Phase 2: the IdStack hash). Hit-testing (Phase 3) and
-// layout (Phase 4) are still declared stubs. The bodies stay out-of-line
-// on purpose: apps resolve these symbols through the ws_ui archive, so a
-// consumer compiling against the headers also proves the library links.
+// libs/ui/gui-lib-buildplan.md). Input (Phase 1: the shell accumulates one
+// InputFrame per frame, published through frame_input()), ids (Phase 2:
+// the IdStack hash) and hit-testing (Phase 3: hot/active + the
+// persistent_state side tables) are real; layout (Phase 4) is still a
+// declared stub. The bodies stay out-of-line on purpose: apps resolve
+// these symbols through the ws_ui archive, so a consumer compiling
+// against the headers also proves the library links.
 
 #include "gui.h"
 
@@ -167,14 +168,51 @@ void LayoutCursor::same_line() {}
 
 void LayoutCursor::end_panel() {}
 
-// --- GuiContext (hot/active + side tables land in Phase 3) -----------------------
+// --- GuiContext: hot/active hit-testing + persistent side tables ------------------
 
 void GuiContext::new_frame(const InputFrame& input) {
-    input_ = input;  // adopt the snapshot; hover resets join in Phase 3
+    input_ = input;
+    hot_id_ = kInvalidWidgetId;  // widgets re-claim hot as their hit tests run
 }
 
-void GuiContext::end_frame() {}
+void GuiContext::end_frame() {
+    // A release edge no hit_test consumed (the owner stopped running
+    // mid-drag - the UI changed) ends the press here; stale ownership
+    // would block the next frame's hot claims.
+    if (active_id_ != kInvalidWidgetId && input_.mouse_released[0]) {
+        active_id_ = kInvalidWidgetId;
+    }
+}
 
-HitTest GuiContext::hit_test(WidgetId, const Rect&) { return {}; }
+HitTest GuiContext::hit_test(WidgetId id, const Rect& rect) {
+    // The invalid id claims nothing - it is the "no widget" sentinel.
+    if (id == kInvalidWidgetId) {
+        return {};
+    }
+
+    HitTest hit;
+    const bool inside = contains(rect, input_.mouse_x, input_.mouse_y);
+    hit.hovered = inside;
+
+    // While a press is owned, the pointer is captured: only the owner
+    // can be hot. Otherwise the widget under the pointer claims hot;
+    // later widgets draw on top, so a later claim correctly wins.
+    if (inside && (active_id_ == kInvalidWidgetId || active_id_ == id)) {
+        hot_id_ = id;
+    }
+    // Mouse-down inside claims the press, if none is owned yet.
+    if (inside && input_.mouse_pressed[0] && active_id_ == kInvalidWidgetId) {
+        active_id_ = id;
+    }
+    if (active_id_ == id) {
+        hit.pressed = true;  // owns the live press, wherever the pointer is
+        if (input_.mouse_released[0]) {
+            hit.released = true;           // the drag ended, inside or out
+            hit.clicked = inside;          // a full click only if inside
+            active_id_ = kInvalidWidgetId;  // the press is over either way
+        }
+    }
+    return hit;
+}
 
 }  // namespace ws::ui::gui

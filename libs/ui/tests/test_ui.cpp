@@ -896,8 +896,8 @@ TEST_CASE("gui module: the public surface constructs, links and behaves safely")
     CHECK(GuiContext{}.hot_id() == kInvalidWidgetId);
     CHECK(GuiContext{}.active_id() == kInvalidWidgetId);
 
-    // A filled snapshot flows through the frame lifecycle: new_frame adopts
-    // it (the frame's copy), end_frame (still a stub) stays inert.
+    // A filled snapshot flows through the frame lifecycle: new_frame
+    // adopts it, end_frame clears any press a vanished widget left held.
     InputFrame input;
     input.mouse_x = 100.0f;
     input.mouse_down[0] = true;
@@ -912,9 +912,10 @@ TEST_CASE("gui module: the public surface constructs, links and behaves safely")
     CHECK(gui.input().key_pressed['D'] == true);
     CHECK(gui.input().text_input.size() == 1);
 
-    // Ids hash for real since Phase 2; hit tests report nothing until
-    // Phase 3, layout hands back empty rects until Phase 4. Underflow
-    // pops/closes are the documented no-ops - none of this may crash.
+    // Ids hash for real (Phase 2) and hit tests run for real (Phase 3),
+    // but the invalid id claims nothing; layout hands back empty rects
+    // until Phase 4. Underflow pops/closes are the documented no-ops -
+    // none of this may crash.
     gui.ids().push("panel");
     gui.ids().push(7);
     CHECK(gui.ids().current("button") != kInvalidWidgetId);
@@ -1091,4 +1092,172 @@ TEST_CASE("IdStack: pop restores scope and overflow clamps at max depth") {
     }
     CHECK(ids.depth() == IdStack::kMaxDepth);
     CHECK(ids.current("deep") != kInvalidWidgetId);
+}
+
+// --- gui hit-testing (Phase 3) ------------------------------------------------------
+
+namespace {
+
+// A pointer snapshot at (x, y) with the primary button's held state and
+// optional press/release edges set.
+ws::ui::gui::InputFrame snap(float x, float y, bool down = false,
+                             bool pressed = false, bool released = false) {
+    ws::ui::gui::InputFrame frame;
+    frame.mouse_x = x;
+    frame.mouse_y = y;
+    frame.mouse_down[0] = down;
+    frame.mouse_pressed[0] = pressed;
+    frame.mouse_released[0] = released;
+    return frame;
+}
+
+}  // namespace
+
+TEST_CASE("hit_test: hover claims hot; a full click is press-then-release inside") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId id = IdStack{}.current("button");
+    const Rect rect{100.0f, 100.0f, 80.0f, 24.0f};
+
+    // Frame 1: pointer inside, nothing held - hover only.
+    gui.new_frame(snap(120.0f, 110.0f));
+    HitTest hit = gui.hit_test(id, rect);
+    CHECK(hit.hovered);
+    CHECK(!hit.pressed);
+    CHECK(!hit.clicked);
+    CHECK(!hit.released);
+    CHECK(gui.hot_id() == id);
+    CHECK(gui.active_id() == kInvalidWidgetId);
+    gui.end_frame();
+
+    // Frame 2: press inside - the widget takes the press.
+    gui.new_frame(snap(120.0f, 110.0f, true, true));
+    hit = gui.hit_test(id, rect);
+    CHECK(hit.hovered);
+    CHECK(hit.pressed);
+    CHECK(!hit.clicked);
+    CHECK(gui.active_id() == id);
+
+    // Frame 3: still held, pointer dragged outside - the owner keeps the
+    // press, hover is gone.
+    gui.new_frame(snap(10.0f, 10.0f, true));
+    hit = gui.hit_test(id, rect);
+    CHECK(!hit.hovered);
+    CHECK(hit.pressed);
+    CHECK(gui.active_id() == id);
+
+    // Frame 4: release outside - the drag ends, no click.
+    gui.new_frame(snap(10.0f, 10.0f, false, false, true));
+    hit = gui.hit_test(id, rect);
+    CHECK(hit.released);
+    CHECK(!hit.clicked);
+    CHECK(gui.active_id() == kInvalidWidgetId);
+    gui.end_frame();
+}
+
+TEST_CASE("hit_test: release inside is a click; press+release in one frame still clicks") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId id = IdStack{}.current("button");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    gui.new_frame(snap(50.0f, 50.0f, true, true));
+    (void)gui.hit_test(id, rect);
+    gui.end_frame();
+
+    gui.new_frame(snap(50.0f, 50.0f, false, false, true));
+    const HitTest hit = gui.hit_test(id, rect);
+    CHECK(hit.hovered);
+    CHECK(hit.released);
+    CHECK(hit.clicked);
+    CHECK(gui.active_id() == kInvalidWidgetId);
+    CHECK(gui.hot_id() == id);
+    gui.end_frame();
+
+    // A click entirely between two frames: both edges arrive together.
+    GuiContext fast;
+    fast.new_frame(snap(50.0f, 50.0f, false, true, true));
+    const HitTest quick = fast.hit_test(id, rect);
+    CHECK(quick.clicked);
+    CHECK(quick.released);
+    fast.end_frame();
+}
+
+TEST_CASE("hit_test: a held press captures the pointer - other widgets cannot take it") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const IdStack ids;
+    // Two overlapping buttons; B draws later (on top) but A owns the press.
+    const WidgetId a = ids.current("a");
+    const WidgetId b = ids.current("b");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    gui.new_frame(snap(50.0f, 50.0f, true, true));
+    (void)gui.hit_test(a, rect);  // A runs first: takes the press
+    CHECK(gui.active_id() == a);
+
+    const HitTest under = gui.hit_test(b, rect);  // B overlaps: no press for B
+    CHECK(!under.pressed);
+    CHECK(!under.clicked);
+    CHECK(gui.hot_id() == a);  // while A owns the press, B cannot be hot
+    CHECK(gui.active_id() == a);
+
+    // Pressing again while A owns it changes nothing for B.
+    gui.new_frame(snap(50.0f, 50.0f, true, true));
+    const HitTest again = gui.hit_test(b, rect);
+    CHECK(!again.pressed);
+    CHECK(gui.active_id() == a);
+    gui.end_frame();
+}
+
+TEST_CASE("hit_test: a vanished press owner is dropped at end_frame") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId gone = IdStack{}.current("gone");
+    const WidgetId other = IdStack{}.current("other");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // Press on `gone`...
+    gui.new_frame(snap(50.0f, 50.0f, true, true));
+    (void)gui.hit_test(gone, rect);
+    CHECK(gui.active_id() == gone);
+    gui.end_frame();
+
+    // ...then the UI changes: `gone` no longer runs, but the release
+    // arrives. end_frame must drop the ownership, or no widget could be
+    // hot while the stale id owns the captured press.
+    gui.new_frame(snap(50.0f, 50.0f, false, false, true));
+    gui.end_frame();
+    CHECK(gui.active_id() == kInvalidWidgetId);
+
+    gui.new_frame(snap(50.0f, 50.0f));
+    const HitTest hit = gui.hit_test(other, rect);
+    CHECK(hit.hovered);
+    CHECK(gui.hot_id() == other);
+}
+
+TEST_CASE("persistent_state: keys values by (type, id) for the context's lifetime") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const IdStack ids;
+    const WidgetId a = ids.current("a");
+    const WidgetId b = ids.current("b");
+
+    // First touch default-constructs; entries survive frames.
+    gui.persistent_state<float>(a) = 1.5f;
+    gui.new_frame(snap(0.0f, 0.0f));
+    gui.end_frame();
+    CHECK(gui.persistent_state<float>(a) == 1.5f);
+
+    // Different id = different value; different type at the same id is a
+    // different table.
+    gui.persistent_state<float>(b) = 2.5f;
+    gui.persistent_state<int>(a) = 7;
+    CHECK(gui.persistent_state<float>(a) == 1.5f);
+    CHECK(gui.persistent_state<float>(b) == 2.5f);
+    CHECK(gui.persistent_state<int>(a) == 7);
+
+    // A second context owns independent state (no globals underneath).
+    GuiContext fresh;
+    CHECK(fresh.persistent_state<float>(a) == 0.0f);
 }

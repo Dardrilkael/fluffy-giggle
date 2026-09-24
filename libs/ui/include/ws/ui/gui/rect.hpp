@@ -14,4 +14,11 @@ struct Rect {
     float height = 0.0f;
 };
 
+// True when the point (px, py) lies inside `r`. Half-open - the right and
+// bottom edges are outside - so a pixel on a shared edge belongs to exactly
+// one of two adjacent rects, and empty rects contain nothing.
+inline bool contains(const Rect& r, float px, float py) {
+    return px >= r.x && px < r.x + r.width && py >= r.y && py < r.y + r.height;
+}
+
 }  // namespace ws::ui::gui
