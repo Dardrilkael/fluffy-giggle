@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cmath>
+#include <vector>
 
 namespace {
 
@@ -25,6 +26,13 @@ protected:
         // assets/ next to the binary. A miss just logs and every checker
         // quad renders white (the documented fallback).
         checker_ = ws::ui::r2d::load_texture("assets/checker.png");
+        // One atlas call packs all four icons into a single page texture;
+        // the sprite draws below then share one batch material. A missing
+        // file degrades that entry to Sprite{} (white), like load_texture.
+        icons_ = ws::ui::r2d::load_atlas({"assets/icon_blue.png",
+                                          "assets/icon_orange.png",
+                                          "assets/icon_green.png",
+                                          "assets/icon_purple.png"});
     }
 
     void on_event(ws::ui::Event& event) override {
@@ -75,6 +83,22 @@ protected:
                        r2d::rgba(90, 200, 255));
         r2d::draw_line(1000.0f, 0.0f, 1000.0f, 1200.0f, 12.0f,
                        r2d::rgba(255, 90, 120, 128));
+        // Atlas sprites: sub-rects of one packed page texture. However
+        // interleaved with the draws above, these four stay in one batch
+        // segment - the whole page is one material.
+        for (std::size_t i = 0; i < icons_.size(); ++i) {
+            const r2d::FrameSize native = r2d::sprite_size(icons_[i]);
+            // Missing/failed entries report {0, 0}: draw a visible white
+            // square instead of nothing (the fallback contract).
+            const float w = native.width > 0.0f ? native.width : 32.0f;
+            const float h = native.height > 0.0f ? native.height : 32.0f;
+            const float scale = (i == 3) ? 3.0f : 1.0f;  // magnified: gutters hold
+            r2d::draw_sprite(1100.0f + static_cast<float>(i) * 130.0f, 300.0f,
+                             w * scale, h * scale,
+                             i == 1 ? r2d::rgba(255, 230, 180)
+                                    : r2d::rgba(255, 255, 255),
+                             icons_[i], i == 1 ? spin_ : 0.0f);
+        }
         r2d::end();
 
         // --- screen layer: pixels from the top-left, no camera ---
@@ -124,6 +148,7 @@ protected:
             ws::ui::slider_float("cam zoom", &camera_.zoom, 0.1f, 4.0f);
             ws::ui::slider_float("cam rotation", &camera_.rotation,
                                  -3.14159265f, 3.14159265f);
+            ws::ui::text("atlas: the 4 icons right of the grid share one texture");
         }
         ws::ui::end_window();
 
@@ -139,6 +164,7 @@ private:
     static constexpr int kMaxSamples = 512;
     ws::ui::r2d::Camera2D camera_{1000.0f, 600.0f, 0.0f, 1.0f};
     ws::ui::r2d::Texture checker_{};
+    std::vector<ws::ui::r2d::Sprite> icons_;
     float spin_ = 0.0f;
     std::array<float, kMaxSamples> xs_{};
     std::array<float, kMaxSamples> ys_{};

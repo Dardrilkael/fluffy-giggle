@@ -15,7 +15,8 @@ gets a window, an event stream, and a place to submit draw commands —
 - **Render/widget API** — `widgets.hpp` (ImGui/ImPlot-backed draw calls),
   the engine's own vocabulary for drawing, not the graphics API's.
 - **2D renderer** — `renderer2d.hpp` (`ws::ui::r2d`): camera'd, textured
-  quads and lines, sorted then batched, flushed under the widgets.
+  quads and lines, atlas sprites, sorted then batched, flushed under
+  the widgets.
 - **`ws::ui::App`** — the shell itself: owns the window, Vulkan context,
   swapchain, frame loop, event pumping, and shutdown.
 
@@ -52,10 +53,11 @@ libs/ui/
     app.hpp                 # App, AppConfig — PUBLIC, zero third-party includes
     event.hpp                # Event, EventType, typed events, EventDispatcher
     render_command_queue.hpp # RenderCommandQueue
-    renderer2d.hpp           # r2d free functions: Camera2D, quads, lines, textures
+    renderer2d.hpp           # r2d free functions: Camera2D, quads, lines, sprites, textures
     widgets.hpp               # window/text/button/checkbox/slider/plot_line/...
   src/
     app.cpp                  # pimpl: Vulkan context, swapchain, frame loop
+    atlas_packer.h/.cpp      # pure-CPU shelf packer: atlas pages, sub-rects, gutters
     batch_core.h/.cpp        # pure-CPU batch: chunks, camera VP, geometry (no Vulkan)
     renderer2d.h/.cpp        # r2d engine: command sort/replay + Vulkan flush
     shaders/                  # batch.vert/.frag (GLSL) + spirv.h (committed build input)
@@ -132,12 +134,13 @@ void on_event(ws::ui::Event& e) override {
 
 `ws/ui/renderer2d.hpp` is the engine-style drawing API: free functions in
 `ws::ui::r2d` — `begin()` / `begin(camera)` / `end()`, `draw_quad`,
-`draw_line` (thickness in px), `set_layer`, `load_texture`, `frame_size`,
+`draw_line` (thickness in px), `draw_sprite`, `set_layer`, `load_texture`,
+`load_atlas`, `frame_size`, `sprite_size`,
 `rgba` (packs 0xRRGGBBAA — NOT IM_COL32 order). Apps record from
 `on_update()` only, exactly like widgets.hpp calls; every call is drop-safe
 outside a running app (logged once, then ignored). The public header
-includes only `<cstdint>` — no Vulkan/GLFW/stb types (stb_image is PRIVATE,
-like every third-party).
+includes only `<cstdint>`, `<initializer_list>` and `<vector>` — no
+Vulkan/GLFW/stb types (stb_image is PRIVATE, like every third-party).
 
 - **Recording is data.** A draw appends a `DrawCommand` (sort layer, camera
   block, material key, expanded corners). `frame_end()` — one point, after
@@ -155,6 +158,17 @@ like every third-party).
   only grows (v1 never unloads): ids are indexes, stable for the process
   lifetime, so stale descriptor bindings can never dangle. id 0 is the
   built-in 1x1 white texture; failed loads and unknown ids render white.
+- **Atlases.** `load_atlas({...})` (valid from `on_setup()`) packs an image
+  set into 2048x2048 pages — shelf packing, tallest first, 1px
+  duplicated-edge gutters so magnified sprites never sample a shelf
+  neighbour — and uploads one texture per page. `Sprite{page, index}`
+  keys into per-page rect tables (page is the page texture's id): a
+  page's sprites share one material key, so however interleaved the calls
+  were, the sort keeps them in one chunk; a full page spills to a new page
+  and batches apart, degrading gracefully. Missing/failed images become
+  `Sprite{}` (white — the load_texture contract); `sprite_size()` reports
+  native pixels (packing never scales). Page tables only grow, the same
+  contract as the texture registry.
 - **Layering.** One render pass, three layers: r2d flushes right after
   `vkCmdBeginRenderPass` (2D world), then ImGui's draw data (widgets), then
   the command queue (overlays).
@@ -190,8 +204,9 @@ like every third-party).
   `show_implot_demo`.
 - `renderer2d.hpp` (`ws::ui::r2d`): the 2D drawing API — `begin`/`end`
   camera blocks, `draw_quad` (top-left anchor, center-pivot rotation),
-  `draw_line`, `set_layer`, `load_texture`, `frame_size`. Draws are valid
-  only inside `on_update()`, within a `begin()` block.
+  `draw_line`, `draw_sprite` (atlas sub-rect quads), `set_layer`,
+  `load_texture`, `load_atlas`, `frame_size`, `sprite_size`. Draws are
+  valid only inside `on_update()`, within a `begin()` block.
 
 ## Backend invariants
 
