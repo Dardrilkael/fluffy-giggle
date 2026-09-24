@@ -5,6 +5,7 @@
 
 #include <ws/ui/app.hpp>
 #include <ws/ui/event.hpp>
+#include <ws/ui/gui/gui_context.hpp>
 #include <ws/ui/renderer2d.hpp>
 #include <ws/ui/widgets.hpp>
 
@@ -55,6 +56,13 @@ protected:
 
     void on_update() override {
         namespace r2d = ws::ui::r2d;
+
+        // --- gui module skeleton ---
+        // Drives the empty frame lifecycle every frame so the ws::ui::gui
+        // module is compiled, linked and called - a no-op consumer until
+        // the input snapshot (Phase 1) and widgets (Phase 5) land.
+        gui_.new_frame(ws::ui::gui::InputFrame{});
+        gui_.end_frame();
 
         // --- 2D world, through the camera ---
         r2d::begin(camera_);
@@ -173,6 +181,7 @@ private:
     bool show_signal_ = true;
     bool show_imgui_ = false;
     bool show_implot_ = false;
+    ws::ui::gui::GuiContext gui_;  // Phase 0 skeleton: linked, called, inert
 };
 
 }  // namespace

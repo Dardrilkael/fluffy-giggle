@@ -12,6 +12,11 @@
 #include "renderer2d.h"     // internal: command recording + sort/replay (same path)
 #include <ws/ui/app.hpp>
 #include <ws/ui/event.hpp>
+#include <ws/ui/gui/gui_context.hpp>  // must stay includable without any third-party header
+#include <ws/ui/gui/id_stack.hpp>      // (same - one include line per header proves each parses alone)
+#include <ws/ui/gui/input_frame.hpp>
+#include <ws/ui/gui/layout_cursor.hpp>
+#include <ws/ui/gui/rect.hpp>
 #include <ws/ui/render_command_queue.hpp>
 #include <ws/ui/renderer2d.hpp>  // must stay includable without any third-party header
 #include <ws/ui/widgets.hpp>  // must stay includable without any third-party header
@@ -878,4 +883,52 @@ TEST_CASE("sprite_size reports native pixels and {0,0} for unknown sprites") {
     const FrameSize sentinel = r.sprite_size(Sprite{});
     CHECK(sentinel.width == 0.0f);
     CHECK(sentinel.height == 0.0f);
+}
+
+// --- gui module skeleton (Phase 0) ------------------------------------------------
+
+TEST_CASE("gui skeleton: the Phase 0 surface constructs, links and no-ops safely") {
+    using namespace ws::ui::gui;
+
+    // Fresh objects honor the declared defaults.
+    CHECK(IdStack{}.depth() == 0);
+    CHECK(LayoutCursor{}.depth() == 0);
+    CHECK(GuiContext{}.hot_id() == kInvalidWidgetId);
+    CHECK(GuiContext{}.active_id() == kInvalidWidgetId);
+
+    // A filled snapshot flows through the frame lifecycle unchanged.
+    InputFrame input;
+    input.mouse_x = 100.0f;
+    input.mouse_down[0] = true;
+    input.key_pressed['D'] = true;
+    input.scroll_dy = -2.0f;
+    input.text_input.push_back(U'w');
+    GuiContext gui;
+    gui.new_frame(input);
+    gui.end_frame();
+
+    // Every stub is callable and inert: ids read as invalid until the
+    // Phase 2 hash, hit tests report nothing until Phase 3, layout hands
+    // back empty rects until Phase 4. Underflow pops/closes are the
+    // documented no-ops - none of this may crash.
+    gui.ids().push("panel");
+    gui.ids().push(7);
+    CHECK(gui.ids().current("button") == kInvalidWidgetId);
+    gui.ids().pop();
+    gui.ids().pop();
+    gui.ids().pop();
+
+    LayoutCursor layout;
+    const Rect content = layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 8.0f);
+    CHECK(content.width == 0.0f);
+    CHECK(layout.next(100.0f, 24.0f).height == 0.0f);
+    layout.same_line();
+    layout.end_panel();
+    layout.end_panel();
+
+    const HitTest hit = gui.hit_test(kInvalidWidgetId, {0.0f, 0.0f, 10.0f, 10.0f});
+    CHECK(hit.hovered == false);
+    CHECK(hit.pressed == false);
+    CHECK(hit.clicked == false);
+    CHECK(hit.released == false);
 }
