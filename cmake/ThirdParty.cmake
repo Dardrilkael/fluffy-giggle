@@ -62,7 +62,13 @@ FetchContent_Declare(eigen
   GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
   GIT_TAG 3.4.0
   GIT_SHALLOW TRUE)
-foreach(dep vulkan_headers volk vma imgui implot eigen)
+# stb has no release tags - pinned to a master commit. stb_image.h is
+# v2.30 (2024-05-31) at this hash.
+FetchContent_Declare(stb
+  GIT_REPOSITORY https://github.com/nothings/stb.git
+  GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20
+  GIT_SHALLOW TRUE)
+foreach(dep vulkan_headers volk vma imgui implot eigen stb)
   FetchContent_GetProperties(${dep})
   if(NOT ${dep}_POPULATED)
     FetchContent_Populate(${dep})
@@ -114,3 +120,10 @@ target_link_libraries(implot PUBLIC imgui)
 add_library(eigen3 INTERFACE)
 add_library(Eigen3::Eigen ALIAS eigen3)
 target_include_directories(eigen3 SYSTEM INTERFACE "${eigen_SOURCE_DIR}")
+
+# --- stb (header-only; stb_image decodes textures for libs/ui's 2D renderer) --
+# The STB_IMAGE_IMPLEMENTATION translation unit lives in libs/ui
+# (src/stb_impl.cpp) - the same one-TU rule as VMA's.
+add_library(stb INTERFACE)
+add_library(stb::stb ALIAS stb)
+target_include_directories(stb SYSTEM INTERFACE "${stb_SOURCE_DIR}")
