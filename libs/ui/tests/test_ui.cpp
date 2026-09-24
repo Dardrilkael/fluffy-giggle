@@ -885,7 +885,7 @@ TEST_CASE("sprite_size reports native pixels and {0,0} for unknown sprites") {
     CHECK(sentinel.height == 0.0f);
 }
 
-// --- gui module (Phase 0 skeleton, Phase 1 input, Phase 2 ids) ----------------------
+// --- gui module (Phases 0-4: the core is real) ---------------------------------------
 
 TEST_CASE("gui module: the public surface constructs, links and behaves safely") {
     using namespace ws::ui::gui;
@@ -912,10 +912,10 @@ TEST_CASE("gui module: the public surface constructs, links and behaves safely")
     CHECK(gui.input().key_pressed['D'] == true);
     CHECK(gui.input().text_input.size() == 1);
 
-    // Ids hash for real (Phase 2) and hit tests run for real (Phase 3),
-    // but the invalid id claims nothing; layout hands back empty rects
-    // until Phase 4. Underflow pops/closes are the documented no-ops -
-    // none of this may crash.
+    // Ids hash for real (Phase 2), hit tests run for real (Phase 3),
+    // layout flows for real (Phase 4); the invalid id claims nothing.
+    // Underflow pops/closes are the documented no-ops - none of this may
+    // crash.
     gui.ids().push("panel");
     gui.ids().push(7);
     CHECK(gui.ids().current("button") != kInvalidWidgetId);
@@ -925,11 +925,11 @@ TEST_CASE("gui module: the public surface constructs, links and behaves safely")
 
     LayoutCursor layout;
     const Rect content = layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 8.0f);
-    CHECK(content.width == 0.0f);
-    CHECK(layout.next(100.0f, 24.0f).height == 0.0f);
+    CHECK(content.width == 384.0f);
+    CHECK(layout.next(100.0f, 24.0f).height == 24.0f);
     layout.same_line();
     layout.end_panel();
-    layout.end_panel();
+    layout.end_panel();  // underflow close: documented no-op
 
     const HitTest hit = gui.hit_test(kInvalidWidgetId, {0.0f, 0.0f, 10.0f, 10.0f});
     CHECK(hit.hovered == false);
@@ -1260,4 +1260,105 @@ TEST_CASE("persistent_state: keys values by (type, id) for the context's lifetim
     // A second context owns independent state (no globals underneath).
     GuiContext fresh;
     CHECK(fresh.persistent_state<float>(a) == 0.0f);
+}
+
+// --- gui layout (Phase 4) ------------------------------------------------------------
+
+TEST_CASE("LayoutCursor: widgets stack downward, advancing below the line's tallest") {
+    using namespace ws::ui::gui;
+    LayoutCursor layout;
+
+    // Padding insets the content rect on every side.
+    const Rect content = layout.begin_panel({10.0f, 20.0f, 200.0f, 300.0f}, 8.0f);
+    CHECK(content.x == 18.0f);
+    CHECK(content.y == 28.0f);
+    CHECK(content.width == 184.0f);
+    CHECK(content.height == 284.0f);
+    CHECK(layout.depth() == 1);
+
+    // The first widget sits at the content's top-left...
+    const Rect first = layout.next(100.0f, 24.0f);
+    CHECK(first.x == 18.0f);
+    CHECK(first.y == 28.0f);
+    CHECK(first.width == 100.0f);
+    CHECK(first.height == 24.0f);
+
+    // ...the next opens a fresh line below it.
+    const Rect second = layout.next(60.0f, 30.0f);
+    CHECK(second.x == 18.0f);
+    CHECK(second.y == 52.0f);
+}
+
+TEST_CASE("LayoutCursor: same_line places beside; the line advances below its tallest") {
+    using namespace ws::ui::gui;
+    LayoutCursor layout;
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+
+    const Rect a = layout.next(100.0f, 24.0f);  // (0, 0)
+    layout.same_line();
+    const Rect b = layout.next(50.0f, 40.0f);  // (100, 0): beside a
+    CHECK(b.x == 100.0f);
+    CHECK(b.y == 0.0f);
+
+    // The next line starts below the taller b, not below the shorter a.
+    const Rect c = layout.next(30.0f, 20.0f);
+    CHECK(c.x == 0.0f);
+    CHECK(c.y == 40.0f);
+
+    // same_line with nothing placed yet: a no-op, placement still starts
+    // at the content's top-left.
+    LayoutCursor fresh;
+    (void)fresh.begin_panel({0.0f, 0.0f, 100.0f, 100.0f}, 0.0f);
+    fresh.same_line();
+    const Rect d = fresh.next(10.0f, 10.0f);
+    CHECK(d.x == 0.0f);
+    CHECK(d.y == 0.0f);
+}
+
+TEST_CASE("LayoutCursor: panels nest and the parent's cursor resumes untouched") {
+    using namespace ws::ui::gui;
+    LayoutCursor layout;
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    (void)layout.next(100.0f, 20.0f);  // the outer cursor now sits at y = 20
+
+    // A child panel lays out independently of the parent's cursor.
+    const Rect inner_content = layout.begin_panel({100.0f, 50.0f, 100.0f, 60.0f}, 10.0f);
+    CHECK(layout.depth() == 2);
+    CHECK(inner_content.x == 110.0f);
+    CHECK(inner_content.width == 80.0f);
+    const Rect inner = layout.next(40.0f, 10.0f);
+    CHECK(inner.x == 110.0f);
+    CHECK(inner.y == 60.0f);
+    layout.end_panel();
+    CHECK(layout.depth() == 1);
+
+    // The parent continues exactly where it was parked.
+    const Rect after = layout.next(10.0f, 10.0f);
+    CHECK(after.x == 0.0f);
+    CHECK(after.y == 20.0f);
+
+    layout.end_panel();
+    CHECK(layout.depth() == 0);
+    layout.end_panel();  // underflow close: documented no-op
+    CHECK(layout.depth() == 0);
+}
+
+TEST_CASE("LayoutCursor: without an open panel next() is drop-safe; overflow clamps") {
+    using namespace ws::ui::gui;
+
+    // No panel open: an empty rect, not a crash or a phantom placement.
+    LayoutCursor layout;
+    const Rect nowhere = layout.next(50.0f, 50.0f);
+    CHECK(nowhere.x == 0.0f);
+    CHECK(nowhere.y == 0.0f);
+    CHECK(nowhere.width == 0.0f);
+    CHECK(nowhere.height == 0.0f);
+    layout.same_line();  // no-op either; still must not crash
+
+    // Overflow: the stack clamps at kMaxPanels; the push is ignored
+    // (logged once - visible in this run's log).
+    for (int i = 0; i < LayoutCursor::kMaxPanels + 2; ++i) {
+        (void)layout.begin_panel({0.0f, 0.0f, 100.0f, 100.0f}, 0.0f);
+    }
+    CHECK(layout.depth() == LayoutCursor::kMaxPanels);
 }

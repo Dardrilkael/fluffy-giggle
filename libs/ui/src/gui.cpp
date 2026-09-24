@@ -1,11 +1,12 @@
 // ws::ui::gui - the gui library's out-of-line surface (see
-// libs/ui/gui-lib-buildplan.md). Input (Phase 1: the shell accumulates one
-// InputFrame per frame, published through frame_input()), ids (Phase 2:
-// the IdStack hash) and hit-testing (Phase 3: hot/active + the
-// persistent_state side tables) are real; layout (Phase 4) is still a
-// declared stub. The bodies stay out-of-line on purpose: apps resolve
-// these symbols through the ws_ui archive, so a consumer compiling
-// against the headers also proves the library links.
+// libs/ui/gui-lib-buildplan.md). The Phase 1-4 core is real: the shell
+// accumulates one InputFrame per frame (frame_input()), IdStack hashes
+// widget identity, GuiContext hit-tests hot/active with persistent side
+// tables, and LayoutCursor flows widgets through stacked panels. Widgets
+// themselves (Phase 5+) live in src/gui_widgets.cpp. The bodies stay
+// out-of-line on purpose: apps resolve these symbols through the ws_ui
+// archive, so a consumer compiling against the headers also proves the
+// library links.
 
 #include "gui.h"
 
@@ -16,6 +17,7 @@
 #include <ws/ui/gui/input_frame.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
 
+#include <algorithm>
 #include <array>
 
 namespace ws::ui::gui {
@@ -107,6 +109,25 @@ WidgetId scope_id(const std::array<WidgetId, IdStack::kMaxDepth>& stack,
                       : stack[static_cast<std::size_t>(depth) - 1];
 }
 
+// --- LayoutCursor panels ---------------------------------------------------------
+
+// Depth overflow is a programming error - surfaced in the log rather than
+// a crash; the panel stack clamps and this keeps it to one warn per process.
+bool panel_overflow_warned = false;
+
+// True when the panel stack is full; warns the first time only.
+bool panel_stack_full(int top) {
+    if (top + 1 < LayoutCursor::kMaxPanels) {
+        return false;
+    }
+    if (!panel_overflow_warned) {
+        panel_overflow_warned = true;
+        core::warn("ui: gui layout clamped at {} panels - deeper panels ignored",
+                   LayoutCursor::kMaxPanels);
+    }
+    return true;
+}
+
 }  // namespace
 
 // --- InputFrame: one frame's snapshot (the shell fills, next_frame advances) ----
@@ -158,15 +179,58 @@ WidgetId IdStack::current(const char* label) const {
     return hash_label(scope_id(stack_, depth_), label);
 }
 
-// --- LayoutCursor (Phase 4: stack layout) -----------------------------------------
+// --- LayoutCursor: stack-based layout --------------------------------------------
 
-Rect LayoutCursor::begin_panel(const Rect&, float) { return {}; }
+Rect LayoutCursor::begin_panel(const Rect& bounds, float padding) {
+    if (panel_stack_full(top_)) {
+        return {};  // stack overflow: the push is ignored (documented)
+    }
+    ++top_;
+    Panel& panel = panels_[static_cast<std::size_t>(top_)];
+    panel.content = {bounds.x + padding, bounds.y + padding,
+                     bounds.width - 2.0f * padding,
+                     bounds.height - 2.0f * padding};
+    panel.cursor_x = panel.content.x;
+    panel.cursor_y = panel.content.y;
+    panel.last = {};
+    panel.line_height = 0.0f;
+    return panel.content;
+}
 
-Rect LayoutCursor::next(float, float) { return {}; }
+Rect LayoutCursor::next(float w, float h) {
+    if (top_ < 0) {
+        return {};  // no panel open: nothing to place (drop-safe)
+    }
+    Panel& panel = panels_[static_cast<std::size_t>(top_)];
+    if (panel.cursor_x == panel.content.x) {
+        panel.line_height = 0.0f;  // the cursor is at a line start: a fresh line
+    }
+    const Rect placed{panel.cursor_x, panel.cursor_y, w, h};
+    panel.last = placed;
+    panel.line_height = std::max(panel.line_height, h);
+    // Default: the next widget opens a fresh line below this line's tallest.
+    panel.cursor_x = panel.content.x;
+    panel.cursor_y += panel.line_height;
+    return placed;
+}
 
-void LayoutCursor::same_line() {}
+void LayoutCursor::same_line() {
+    if (top_ < 0) {
+        return;
+    }
+    Panel& panel = panels_[static_cast<std::size_t>(top_)];
+    if (panel.last.width == 0.0f && panel.last.height == 0.0f) {
+        return;  // nothing placed yet: nowhere to resume after
+    }
+    panel.cursor_x = panel.last.x + panel.last.width;
+    panel.cursor_y = panel.last.y;
+}
 
-void LayoutCursor::end_panel() {}
+void LayoutCursor::end_panel() {
+    if (top_ >= 0) {
+        --top_;  // closing with none open is the documented no-op
+    }
+}
 
 // --- GuiContext: hot/active hit-testing + persistent side tables ------------------
 
