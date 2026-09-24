@@ -7,8 +7,9 @@
 #include <utility>
 #include <vector>
 
-#include "batch_core.h"   // internal: pure-CPU batch builder (src/ on the test include path)
-#include "renderer2d.h"   // internal: command recording + sort/replay (same path)
+#include "atlas_packer.h"  // internal: pure-CPU atlas packer (src/ on the test include path)
+#include "batch_core.h"     // internal: pure-CPU batch builder (same path)
+#include "renderer2d.h"     // internal: command recording + sort/replay (same path)
 #include <ws/ui/app.hpp>
 #include <ws/ui/event.hpp>
 #include <ws/ui/render_command_queue.hpp>
@@ -374,6 +375,178 @@ TEST_CASE("degenerate lines are dropped") {
                                         uv) == false);  // zero length
     CHECK(ws::ui::r2d::batch::line_quad(0.0f, 0.0f, 10.0f, 0.0f, 0.0f, pos,
                                         uv) == false);  // no thickness
+}
+
+// --- sprite atlas packer -------------------------------------------------------
+
+namespace {
+
+// A solid RGBA8 image for the packer to borrow.
+std::vector<std::uint8_t> solid_pixels(std::uint32_t w, std::uint32_t h,
+                                       std::uint8_t r, std::uint8_t g,
+                                       std::uint8_t b) {
+    std::vector<std::uint8_t> pixels(std::size_t(w) * h * 4);
+    for (std::size_t i = 0; i < pixels.size(); i += 4) {
+        pixels[i + 0] = r;
+        pixels[i + 1] = g;
+        pixels[i + 2] = b;
+        pixels[i + 3] = 255;
+    }
+    return pixels;
+}
+
+const std::uint8_t* page_px(const ws::ui::r2d::atlas::Page& page,
+                            std::size_t col, std::size_t row) {
+    return &page.pixels[(row * page.size + col) * 4];
+}
+
+bool is_color(const std::uint8_t* px, std::uint8_t r, std::uint8_t g,
+              std::uint8_t b, std::uint8_t a = 255) {
+    return px[0] == r && px[1] == g && px[2] == b && px[3] == a;
+}
+
+// Samples the canvas at a rect's center (exact: small ints over
+// power-of-two page sizes).
+const std::uint8_t* sample_center(const ws::ui::r2d::atlas::Page& page,
+                                  const ws::ui::r2d::atlas::Rect& rect) {
+    const auto to_px = [size = page.size](float t) {
+        return static_cast<std::size_t>(t * static_cast<float>(size));
+    };
+    return page_px(page, to_px((rect.u0 + rect.u1) * 0.5f),
+                   to_px((rect.v0 + rect.v1) * 0.5f));
+}
+
+}  // namespace
+
+TEST_CASE("atlas packer places images and maps handles in input order") {
+    using namespace ws::ui::r2d;
+    const auto red = solid_pixels(8, 4, 255, 0, 0);
+    const auto green = solid_pixels(4, 8, 0, 255, 0);
+    const auto blue = solid_pixels(8, 4, 0, 0, 255);
+    const atlas::SourceImage images[3] = {
+        {red.data(), 8, 4}, {green.data(), 4, 8}, {blue.data(), 8, 4}};
+
+    const atlas::Packing packed = atlas::pack(images, 3, 64);
+
+    REQUIRE(packed.pages.size() == 1);
+    REQUIRE(packed.assigned.size() == 3);
+    CHECK(packed.pages[0].rects.size() == 3);
+
+    // Rects carry the native size and each input's own pixels, whatever
+    // order packing visited them in.
+    const auto rect_of = [&](std::uint32_t input) -> const atlas::Rect& {
+        const atlas::Placement& pl = packed.assigned[input];
+        return packed.pages[pl.page].rects[pl.index];
+    };
+    const atlas::Rect& r0 = rect_of(0);
+    const atlas::Rect& r1 = rect_of(1);
+    const atlas::Rect& r2 = rect_of(2);
+    CHECK(r0.w == 8);
+    CHECK(r0.h == 4);
+    CHECK(r1.w == 4);
+    CHECK(r1.h == 8);
+    CHECK(r2.w == 8);
+    CHECK(r2.h == 4);
+    CHECK(is_color(sample_center(packed.pages[0], r0), 255, 0, 0));
+    CHECK(is_color(sample_center(packed.pages[0], r1), 0, 255, 0));
+    CHECK(is_color(sample_center(packed.pages[0], r2), 0, 0, 255));
+
+    // Tallest first: green (h=8) opens the shelf at the origin; the two
+    // 4px-high images follow in input order (red before blue).
+    CHECK(r1.u0 == doctest::Approx(1.0f / 64.0f));
+    CHECK(r1.v0 == doctest::Approx(1.0f / 64.0f));
+    CHECK(r0.u0 == doctest::Approx(7.0f / 64.0f));
+    CHECK(r2.u0 == doctest::Approx(17.0f / 64.0f));
+}
+
+TEST_CASE("atlas packer wraps shelves and spills pages") {
+    using namespace ws::ui::r2d;
+    const auto red = solid_pixels(10, 6, 255, 0, 0);
+    const auto green = solid_pixels(10, 6, 0, 255, 0);
+    const auto blue = solid_pixels(10, 6, 0, 0, 255);
+    const atlas::SourceImage images[3] = {
+        {red.data(), 10, 6}, {green.data(), 10, 6}, {blue.data(), 10, 6}};
+
+    // Cells are 12x8 on a 16px page: one per shelf, two shelves per page.
+    const atlas::Packing packed = atlas::pack(images, 3, 16);
+
+    REQUIRE(packed.pages.size() == 2);
+    CHECK(packed.pages[0].rects.size() == 2);
+    CHECK(packed.pages[1].rects.size() == 1);
+    CHECK(packed.pages[0].pixels.size() == 16u * 16u * 4u);
+
+    // Input order survives the spill: red and green share page 0 on
+    // separate shelves, blue starts page 1.
+    CHECK(packed.assigned[0].page == 0);
+    CHECK(packed.assigned[0].index == 0);
+    CHECK(packed.assigned[1].page == 0);
+    CHECK(packed.assigned[1].index == 1);
+    CHECK(packed.assigned[2].page == 1);
+    CHECK(packed.assigned[2].index == 0);
+
+    // Shelf geometry: wrapped x, next shelf one shelf-height down.
+    const atlas::Rect& r0 = packed.pages[0].rects[0];
+    const atlas::Rect& r1 = packed.pages[0].rects[1];
+    CHECK(r0.u0 == doctest::Approx(1.0f / 16.0f));
+    CHECK(r0.v0 == doctest::Approx(1.0f / 16.0f));
+    CHECK(r1.u0 == doctest::Approx(1.0f / 16.0f));
+    CHECK(r1.v0 == doctest::Approx(9.0f / 16.0f));
+}
+
+TEST_CASE("atlas packer degrades failed and oversized images to white cells") {
+    using namespace ws::ui::r2d;
+    const auto red = solid_pixels(4, 4, 255, 0, 0);
+    std::vector<std::uint8_t> dummy(4);
+    const atlas::SourceImage images[4] = {
+        {red.data(), 4, 4},        // fine
+        {nullptr, 0, 0},           // stb load failed
+        {dummy.data(), 100, 100},  // taller than the page - pixels never read
+        {dummy.data(), 0, 5},      // degenerate width
+    };
+
+    const atlas::Packing packed = atlas::pack(images, 4, 64);
+
+    REQUIRE(packed.pages.size() == 1);
+    REQUIRE(packed.assigned.size() == 4);
+    for (const atlas::Placement& pl : packed.assigned) {  // all still valid
+        CHECK(pl.page == 0);
+        CHECK(pl.index < packed.pages[0].rects.size());
+    }
+
+    // The good image keeps its pixels and size; the failures are white.
+    const atlas::Rect& good = packed.pages[0].rects[packed.assigned[0].index];
+    CHECK(good.w == 4);
+    CHECK(good.h == 4);
+    CHECK(is_color(sample_center(packed.pages[0], good), 255, 0, 0));
+    for (std::uint32_t i = 1; i < 4; ++i) {
+        const atlas::Rect& rect =
+            packed.pages[0].rects[packed.assigned[i].index];
+        CHECK(rect.w == atlas::kFallbackSize);
+        CHECK(rect.h == atlas::kFallbackSize);
+        CHECK(is_color(sample_center(packed.pages[0], rect), 255, 255, 255));
+    }
+}
+
+TEST_CASE("atlas packer extrudes sprite edges into the gutter") {
+    using namespace ws::ui::r2d;
+    const auto red = solid_pixels(4, 4, 255, 0, 0);
+    const atlas::SourceImage images[1] = {{red.data(), 4, 4}};
+
+    const atlas::Packing packed = atlas::pack(images, 1, 32);
+
+    REQUIRE(packed.pages.size() == 1);
+    const atlas::Rect& rect =
+        packed.pages[packed.assigned[0].page].rects[packed.assigned[0].index];
+
+    // Content occupies texels [1, 5) on both axes; the 1px ring around it
+    // duplicates the sprite's edge pixels.
+    CHECK(rect.u0 == doctest::Approx(1.0f / 32.0f));
+    CHECK(rect.u1 == doctest::Approx(5.0f / 32.0f));
+    CHECK(rect.v0 == doctest::Approx(1.0f / 32.0f));
+    CHECK(rect.v1 == doctest::Approx(5.0f / 32.0f));
+    CHECK(is_color(page_px(packed.pages[0], 0, 0), 255, 0, 0));  // near corner
+    CHECK(is_color(page_px(packed.pages[0], 5, 5), 255, 0, 0));  // far corner
+    CHECK(is_color(page_px(packed.pages[0], 6, 6), 0, 0, 0, 0));  // untouched
 }
 
 TEST_CASE("public r2d API is drop-safe without a running app") {
