@@ -2,6 +2,7 @@
 
 #include <ws/ui/gui/rect.hpp>
 
+#include <algorithm>
 #include <array>
 
 namespace ws::ui::gui {
@@ -27,8 +28,10 @@ public:
     // and parks the enclosing panel's cursor. Returns the content rect
     // (bounds shrunk by the padding) so callers can clip or place custom
     // content without redoing the math. Overflowing the stack (deeper
-    // than kMaxPanels) ignores the push (logged once) and returns an
-    // empty rect - children then flow into the enclosing panel.
+    // than kMaxPanels) clamps (logged once): the depth keeps counting so
+    // the matching end_panel() stays balanced - it can never pop a real
+    // ancestor - while the children flow into the deepest real panel and
+    // the returned content rect is empty.
     Rect begin_panel(const Rect& bounds, float padding);
     // The next widget's rect: size (w, h) at the cursor, then the cursor
     // advances below the line's tallest widget. No panel open: an empty
@@ -42,7 +45,9 @@ public:
     // Closing with none open is a no-op.
     void end_panel();
 
-    // Number of open panels (0 = none).
+    // Number of open panels (0 = none). Past the clamp this counts the
+    // overflowed degenerate panels too - honest bookkeeping for balanced
+    // end_panel() calls.
     int depth() const { return top_ + 1; }
 
 private:
@@ -52,9 +57,21 @@ private:
         float cursor_x = 0.0f;   // next widget's top-left (gui space)
         float cursor_y = 0.0f;
         float line_height = 0.0f;  // tallest widget on the line being placed
+        bool placed_any = false;  // next() ran here (same_line resumes only then)
+        bool at_line_start = true;  // the cursor opens a fresh line - explicit
+                                    // state, never a float position compare
     };
     std::array<Panel, kMaxPanels> panels_{};
-    int top_ = -1;  // index of the innermost open panel; -1 = none
+    int top_ = -1;  // innermost open panel; -1 = none. Past the clamp this
+                    // keeps counting (balanced pushes); slot() clamps it.
+
+    // The active panel's storage slot - the index clamps past kMaxPanels
+    // so overflowed (degenerate) pushes index the deepest real panel
+    // instead of out of bounds.
+    Panel& slot() {
+        return panels_[static_cast<std::size_t>(
+            std::min(top_, kMaxPanels - 1))];
+    }
 };
 
 }  // namespace ws::ui::gui

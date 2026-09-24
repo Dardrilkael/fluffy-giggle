@@ -15,6 +15,11 @@ namespace ws::ui::gui {
 // side tables - so a future retained-mode tree could drive the same
 // calls unchanged.
 //
+// Id discipline: a widget's id comes from its label under the current
+// scope, so same-label siblings in ONE scope share identity and fight
+// over hot/active - give loop-generated children ids().push(index)
+// between them. The context flags a duplicate id once per process.
+//
 // Calls are legal only between GuiContext::new_frame and end_frame, and
 // the draws land in the caller's r2d begin()/end() block (screen mode:
 // the same space layout and hit-testing use). Every draw is drop-safe

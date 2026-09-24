@@ -22,12 +22,16 @@ inline constexpr WidgetId kInvalidWidgetId = 0;
 // collide.
 class IdStack {
 public:
-    // Realistic immediate-mode nesting is a handful deep; overflow is
-    // clamped (and logged) rather than allocating.
+    // Realistic immediate-mode nesting is a handful deep. Pushes past
+    // this depth clamp (logged once): the remembered scope stops
+    // deepening, but the depth KEEPS COUNTING, so the matching pop()
+    // stays balanced and can never eat a real ancestor scope.
     static constexpr int kMaxDepth = 16;
 
     // Pushes a scope from a string label (widget class names, panel
-    // titles): pushed id = hash(current, label).
+    // titles): pushed id = hash(current, label). Past the clamp the id
+    // stops deepening (still valid - derived from the deepest remembered
+    // scope) while push/pop stays balanced.
     void push(const char* label);
     // Same, for indexed children (list rows, grid cells) - no
     // stringifying. pushed id = hash(current, index).
@@ -40,7 +44,8 @@ public:
     // id through this, so its state stays keyed while its scope moves.
     WidgetId current(const char* label) const;
 
-    // Current scope depth (0 = root).
+    // Current scope depth (0 = root). Past the clamp this still counts
+    // the overflowed pushes - honest bookkeeping for balanced pops.
     int depth() const { return depth_; }
 
 private:

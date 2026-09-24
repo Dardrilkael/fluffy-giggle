@@ -1087,13 +1087,21 @@ TEST_CASE("IdStack: pop restores scope and overflow clamps at max depth") {
     CHECK(ids.depth() == 1);
     CHECK(ids.current("widget") == outer_widget);
 
-    // Pushing past kMaxDepth clamps (with one warn) instead of writing
-    // out of bounds; the stack keeps answering from the deepest scope.
+    // Pushing past kMaxDepth clamps (with one warn): the remembered
+    // scope stops deepening, but the depth KEEPS COUNTING, so the
+    // matching pops stay balanced - they can never eat a real scope.
     for (int i = 0; i < IdStack::kMaxDepth + 4; ++i) {
         ids.push(i);
     }
-    CHECK(ids.depth() == IdStack::kMaxDepth);
-    CHECK(ids.current("deep") != kInvalidWidgetId);
+    CHECK(ids.depth() == 1 + IdStack::kMaxDepth + 4);  // the count stays honest
+    CHECK(ids.current("deep") != kInvalidWidgetId);  // still a valid id
+    for (int i = 0; i < IdStack::kMaxDepth + 4; ++i) {
+        ids.pop();
+    }
+
+    // The overflow round trip corrupted nothing above the clamp.
+    CHECK(ids.depth() == 1);
+    CHECK(ids.current("widget") == outer_widget);
 }
 
 // --- gui hit-testing (Phase 3) ------------------------------------------------------
@@ -1238,6 +1246,59 @@ TEST_CASE("hit_test: a vanished press owner is dropped at end_frame") {
     CHECK(gui.hot_id() == other);
 }
 
+TEST_CASE("hit_test: while another widget owns the drag, overlapped widgets do not hover") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const IdStack ids;
+    const WidgetId a = ids.current("a");
+    const WidgetId b = ids.current("b");
+    const Rect a_rect{0.0f, 0.0f, 100.0f, 100.0f};
+    const Rect b_rect{100.0f, 0.0f, 100.0f, 100.0f};
+
+    gui.new_frame(snap(50.0f, 50.0f, true, true));
+    (void)gui.hit_test(a, a_rect);  // A takes the press
+    gui.end_frame();
+
+    // The drag moves the pointer over B: B is inside, but A owns the
+    // captured pointer - B must not report hover (hot, not merely
+    // inside), and nobody is hot while the pointer is off the owner.
+    gui.new_frame(snap(150.0f, 50.0f, true));
+    const HitTest under = gui.hit_test(b, b_rect);
+    CHECK(!under.hovered);
+    CHECK(gui.hot_id() == kInvalidWidgetId);  // B could not claim
+    const HitTest owner = gui.hit_test(a, a_rect);
+    CHECK(owner.pressed);    // the drag lives on
+    CHECK(!owner.hovered);   // the pointer left A's rect
+    gui.end_frame();
+}
+
+TEST_CASE("hit_test: a duplicate id in one frame is flagged and tolerated") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId id = IdStack{}.current("dupe");
+
+    // Two widgets claiming the same id (same label, same scope, no
+    // push(index) between them) share hot/active - a caller bug the
+    // context flags (warns once per process, visible in this log) and
+    // tolerates: both queries answer, nothing corrupts.
+    gui.new_frame(snap(50.0f, 50.0f, true, true));
+    const HitTest first = gui.hit_test(id, {0.0f, 0.0f, 100.0f, 100.0f});
+    const HitTest second = gui.hit_test(id, {0.0f, 0.0f, 100.0f, 100.0f});
+    CHECK(first.pressed);
+    CHECK(second.pressed);
+    gui.end_frame();
+
+    // Distinct ids in one frame flag nothing (no false positives), and
+    // the same id may reappear in the NEXT frame - the census is per
+    // frame.
+    gui.new_frame(snap(50.0f, 50.0f));
+    const HitTest again = gui.hit_test(id, {0.0f, 0.0f, 100.0f, 100.0f});
+    CHECK(again.hovered);  // the same id reappears next frame, unflagged
+    const WidgetId other = IdStack{}.current("other");
+    (void)gui.hit_test(other, {0.0f, 0.0f, 100.0f, 100.0f});  // distinct: fine
+    gui.end_frame();
+}
+
 TEST_CASE("persistent_state: keys values by (type, id) for the context's lifetime") {
     using namespace ws::ui::gui;
     GuiContext gui;
@@ -1315,6 +1376,18 @@ TEST_CASE("LayoutCursor: same_line places beside; the line advances below its ta
     const Rect d = fresh.next(10.0f, 10.0f);
     CHECK(d.x == 0.0f);
     CHECK(d.y == 0.0f);
+
+    // A zero-size spacer still counts as placed: same_line resumes after
+    // it onto its line (an empty-rect heuristic would swallow this and
+    // open a new line instead).
+    LayoutCursor spacers;
+    (void)spacers.begin_panel({0.0f, 0.0f, 100.0f, 100.0f}, 0.0f);
+    (void)spacers.next(50.0f, 20.0f);  // line 1: a 50x20 widget at (0, 0)
+    (void)spacers.next(0.0f, 0.0f);    // a 0x0 spacer still ends line 1
+    spacers.same_line();
+    const Rect beside = spacers.next(10.0f, 10.0f);
+    CHECK(beside.x == 0.0f);   // after the 0-wide spacer
+    CHECK(beside.y == 20.0f);  // on the spacer's line, not a fresh one
 }
 
 TEST_CASE("LayoutCursor: panels nest and the parent's cursor resumes untouched") {
@@ -1357,12 +1430,39 @@ TEST_CASE("LayoutCursor: without an open panel next() is drop-safe; overflow cla
     CHECK(nowhere.height == 0.0f);
     layout.same_line();  // no-op either; still must not crash
 
-    // Overflow: the stack clamps at kMaxPanels; the push is ignored
-    // (logged once - visible in this run's log).
+    // Overflow: past kMaxPanels the push clamps (logged once - visible
+    // in this run's log) but still counts, so the matching end_panel()
+    // calls stay balanced.
     for (int i = 0; i < LayoutCursor::kMaxPanels + 2; ++i) {
         (void)layout.begin_panel({0.0f, 0.0f, 100.0f, 100.0f}, 0.0f);
     }
-    CHECK(layout.depth() == LayoutCursor::kMaxPanels);
+    CHECK(layout.depth() == LayoutCursor::kMaxPanels + 2);  // honest count
+    for (int i = 0; i < LayoutCursor::kMaxPanels + 2; ++i) {
+        layout.end_panel();
+    }
+    CHECK(layout.depth() == 0);
+}
+
+TEST_CASE("LayoutCursor: overflow round trips never eat a real panel") {
+    using namespace ws::ui::gui;
+    LayoutCursor layout;
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    (void)layout.next(100.0f, 20.0f);  // the real cursor parks at y = 20
+
+    // Deep nesting past the clamp: the overflowed panels are degenerate,
+    // but every end_panel() pairs with its own begin_panel() - the real
+    // panel must survive the round trip with its cursor untouched.
+    for (int i = 0; i < LayoutCursor::kMaxPanels + 2; ++i) {
+        (void)layout.begin_panel({0.0f, 0.0f, 100.0f, 100.0f}, 0.0f);
+    }
+    for (int i = 0; i < LayoutCursor::kMaxPanels + 2; ++i) {
+        layout.end_panel();
+    }
+    CHECK(layout.depth() == 1);
+
+    const Rect after = layout.next(10.0f, 10.0f);
+    CHECK(after.x == 0.0f);
+    CHECK(after.y == 20.0f);  // the parked cursor, uncorrupted
 }
 
 // --- gui widgets (Phase 5) ------------------------------------------------------------

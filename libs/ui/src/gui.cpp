@@ -23,6 +23,11 @@
 namespace ws::ui::gui {
 namespace {
 
+// Process-wide gui state (the shell's input tap, the warn-once flags).
+// Single-threaded BY DESIGN: the immediate-mode loop runs on the shell's
+// main thread only, so these are plain globals on purpose - not a data
+// race waiting to be "fixed" with atomics.
+
 // The shell's accumulator while App::run() is active; null before startup
 // and after shutdown.
 InputFrame* g_active_input = nullptr;
@@ -66,7 +71,8 @@ bool id_stack_full(int depth) {
     }
     if (!id_overflow_warned) {
         id_overflow_warned = true;
-        core::warn("ui: gui id stack clamped at depth {} - deeper scopes ignored",
+        core::warn("ui: gui id stack clamped at depth {} - deeper scopes stop "
+                   "deepening (push/pop stays balanced)",
                    IdStack::kMaxDepth);
     }
     return true;
@@ -102,11 +108,16 @@ WidgetId hash_index(WidgetId scope, int index) {
     return hash == 0 ? kZeroHash : hash;
 }
 
-// The scope id `depth` levels deep (0 = the fixed root seed).
+// The scope id `depth` levels deep (0 = the fixed root seed). Past the
+// clamp the slot index stops deepening with the counter, so overflowed
+// scopes derive from the deepest remembered scope.
 WidgetId scope_id(const std::array<WidgetId, IdStack::kMaxDepth>& stack,
                   int depth) {
-    return depth == 0 ? kRootScopeId
-                      : stack[static_cast<std::size_t>(depth) - 1];
+    if (depth == 0) {
+        return kRootScopeId;
+    }
+    const int slot = std::min(depth, IdStack::kMaxDepth) - 1;
+    return stack[static_cast<std::size_t>(slot)];
 }
 
 // --- LayoutCursor panels ---------------------------------------------------------
@@ -122,11 +133,17 @@ bool panel_stack_full(int top) {
     }
     if (!panel_overflow_warned) {
         panel_overflow_warned = true;
-        core::warn("ui: gui layout clamped at {} panels - deeper panels ignored",
+        core::warn("ui: gui layout clamped at {} panels - deeper panels flow "
+                   "into the deepest real one (begin/end stays balanced)",
                    LayoutCursor::kMaxPanels);
     }
     return true;
 }
+
+// A widget id hit-tested twice in one frame means two widgets share
+// identity (same-label siblings without a push(index) between them).
+// Flagged once per process; the duplicate is tolerated after.
+bool duplicate_id_warned = false;
 
 }  // namespace
 
@@ -153,6 +170,7 @@ const InputFrame& frame_input() {
 
 void IdStack::push(const char* label) {
     if (id_stack_full(depth_)) {
+        ++depth_;  // balanced with the matching pop; the scope stops deepening
         return;
     }
     stack_[static_cast<std::size_t>(depth_)] =
@@ -162,6 +180,7 @@ void IdStack::push(const char* label) {
 
 void IdStack::push(int index) {
     if (id_stack_full(depth_)) {
+        ++depth_;  // balanced with the matching pop; the scope stops deepening
         return;
     }
     stack_[static_cast<std::size_t>(depth_)] =
@@ -183,10 +202,14 @@ WidgetId IdStack::current(const char* label) const {
 
 Rect LayoutCursor::begin_panel(const Rect& bounds, float padding) {
     if (panel_stack_full(top_)) {
-        return {};  // stack overflow: the push is ignored (documented)
+        // Balanced with the matching end_panel(): the depth counts on,
+        // children flow into the deepest real panel, and this panel's
+        // content rect is degenerate.
+        ++top_;
+        return {};
     }
     ++top_;
-    Panel& panel = panels_[static_cast<std::size_t>(top_)];
+    Panel& panel = slot();
     panel.content = {bounds.x + padding, bounds.y + padding,
                      bounds.width - 2.0f * padding,
                      bounds.height - 2.0f * padding};
@@ -194,6 +217,8 @@ Rect LayoutCursor::begin_panel(const Rect& bounds, float padding) {
     panel.cursor_y = panel.content.y;
     panel.last = {};
     panel.line_height = 0.0f;
+    panel.placed_any = false;
+    panel.at_line_start = true;
     return panel.content;
 }
 
@@ -201,16 +226,18 @@ Rect LayoutCursor::next(float w, float h) {
     if (top_ < 0) {
         return {};  // no panel open: nothing to place (drop-safe)
     }
-    Panel& panel = panels_[static_cast<std::size_t>(top_)];
-    if (panel.cursor_x == panel.content.x) {
-        panel.line_height = 0.0f;  // the cursor is at a line start: a fresh line
+    Panel& panel = slot();
+    if (panel.at_line_start) {
+        panel.line_height = 0.0f;  // this placement opens a fresh line
     }
     const Rect placed{panel.cursor_x, panel.cursor_y, w, h};
     panel.last = placed;
+    panel.placed_any = true;
     panel.line_height = std::max(panel.line_height, h);
     // Default: the next widget opens a fresh line below this line's tallest.
     panel.cursor_x = panel.content.x;
     panel.cursor_y += panel.line_height;
+    panel.at_line_start = true;
     return placed;
 }
 
@@ -218,12 +245,13 @@ void LayoutCursor::same_line() {
     if (top_ < 0) {
         return;
     }
-    Panel& panel = panels_[static_cast<std::size_t>(top_)];
-    if (panel.last.width == 0.0f && panel.last.height == 0.0f) {
+    Panel& panel = slot();
+    if (!panel.placed_any) {
         return;  // nothing placed yet: nowhere to resume after
     }
     panel.cursor_x = panel.last.x + panel.last.width;
     panel.cursor_y = panel.last.y;
+    panel.at_line_start = false;  // resumed onto the current line
 }
 
 void LayoutCursor::end_panel() {
@@ -237,6 +265,7 @@ void LayoutCursor::end_panel() {
 void GuiContext::new_frame(const InputFrame& input) {
     input_ = input;
     hot_id_ = kInvalidWidgetId;  // widgets re-claim hot as their hit tests run
+    hit_ids_.clear();  // this frame's hit-test census starts empty
 }
 
 void GuiContext::end_frame() {
@@ -254,9 +283,18 @@ HitTest GuiContext::hit_test(WidgetId id, const Rect& rect) {
         return {};
     }
 
+    // One widget = one hit_test per frame. A repeat means two widgets
+    // share identity (same-label siblings without a push(index) between
+    // them) and will fight over hot and the side tables - flagged once
+    // per process, tolerated after.
+    if (!hit_ids_.insert(id).second && !duplicate_id_warned) {
+        duplicate_id_warned = true;
+        core::warn("ui: gui widget id hit-tested twice in one frame - "
+                   "same-label siblings need ids().push(index) between them");
+    }
+
     HitTest hit;
     const bool inside = contains(rect, input_.mouse_x, input_.mouse_y);
-    hit.hovered = inside;
 
     // While a press is owned, the pointer is captured: only the owner
     // can be hot. Otherwise the widget under the pointer claims hot;
@@ -264,6 +302,9 @@ HitTest GuiContext::hit_test(WidgetId id, const Rect& rect) {
     if (inside && (active_id_ == kInvalidWidgetId || active_id_ == id)) {
         hot_id_ = id;
     }
+    // Hot, not merely inside: the frame has ONE interactive winner, so a
+    // widget overlapped by somebody else's drag does not report hover.
+    hit.hovered = hot_id_ == id;
     // Mouse-down inside claims the press, if none is owned yet.
     if (inside && input_.mouse_pressed[0] && active_id_ == kInvalidWidgetId) {
         active_id_ = id;

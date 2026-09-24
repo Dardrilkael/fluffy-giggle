@@ -8,6 +8,7 @@
 #include <memory>
 #include <typeindex>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace ws::ui::gui {
 
@@ -15,7 +16,9 @@ namespace ws::ui::gui {
 // clicked implies released; released also fires when the drag ended
 // OUTSIDE the rect, so the widget that owned the drag learns it ended.
 struct HitTest {
-    bool hovered = false;   // pointer is inside the rect this frame
+    bool hovered = false;   // inside AND hot: the frame's interactive winner
+                             // (while another widget owns a press, no other
+                             // widget reports hover)
     bool pressed = false;   // active on this widget: the press started inside
     bool clicked = false;   // released inside while active = a full click
     bool released = false;  // button went up this frame while this widget was active
@@ -50,8 +53,12 @@ public:
     //   release outside clears active without a click - but the formerly
     //   active widget still sees released, to end drags cleanly.
     // While a press is owned, only its owner can be hot - the pointer is
-    // captured. `id` scopes the widget's persistent state
-    // (kInvalidWidgetId claims nothing); `rect` is in gui space.
+    // captured, and hovered means hot, not merely inside. One widget
+    // must not hit-test twice in a frame: a repeated id means two
+    // widgets share identity and will fight over hot and the side
+    // tables (flagged once per process). `id` scopes the widget's
+    // persistent state (kInvalidWidgetId claims nothing); `rect` is in
+    // gui space.
     HitTest hit_test(WidgetId id, const Rect& rect);
 
     // Persistent-but-implicit per-widget state (scroll offsets, drag
@@ -96,6 +103,8 @@ private:
     WidgetId hot_id_ = kInvalidWidgetId;     // widget under the pointer
     WidgetId active_id_ = kInvalidWidgetId;  // widget owning the press
     std::map<std::type_index, std::unique_ptr<StateTableBase>> state_tables_;
+    std::unordered_set<WidgetId> hit_ids_;  // ids hit-tested this frame; a
+                                            // repeat is an identity collision
 };
 
 }  // namespace ws::ui::gui
