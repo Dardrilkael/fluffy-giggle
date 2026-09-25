@@ -7,6 +7,7 @@
 #include <ws/ui/event.hpp>
 #include <ws/ui/gui/gui_context.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
+#include <ws/ui/gui/theme.hpp>
 #include <ws/ui/gui/widgets.hpp>
 #include <ws/ui/renderer2d.hpp>
 #include <ws/ui/widgets.hpp>
@@ -21,6 +22,12 @@
 #include <vector>
 
 namespace {
+
+// The system UI face - the APP picks it, not the ui lib (r2d takes
+// caller-resolved paths; Windows font-directory knowledge lives in this
+// TU, the platform boundary, and never inside the lib). One constant per
+// TU, per the house rule.
+constexpr const char* kDefaultFontPath = "C:/Windows/Fonts/segoeui.ttf";
 
 class PlaygroundApp final : public ws::ui::App {
 public:
@@ -39,6 +46,11 @@ protected:
                                           "assets/icon_orange.png",
                                           "assets/icon_green.png",
                                           "assets/icon_purple.png"});
+        // One font, one bake (the v1 rule): Segoe UI at 16 px, wired into
+        // the theme the gui panels below read. A failed load degrades to a
+        // fontless theme - the panels keep their v1 bars, never go dark.
+        font_ = ws::ui::r2d::load_font(kDefaultFontPath, 16.0f);
+        chrome_.font = font_.empty() ? nullptr : &font_;
     }
 
     void on_event(ws::ui::Event& event) override {
@@ -78,21 +90,21 @@ protected:
         r2d::begin();
         const r2d::FrameSize gui_frame = r2d::frame_size();
         const ws::ui::gui::Rect content = ws::ui::gui::begin_panel(
-            gui_, layout_, ws::ui::gui::kDefaultChrome, "demo",
+            gui_, layout_, chrome_, "demo",
             {gui_frame.width - 244.0f, 24.0f, 220.0f, 176.0f});
-        if (ws::ui::gui::button(gui_, layout_, ws::ui::gui::kDefaultChrome,
+        if (ws::ui::gui::button(gui_, layout_, chrome_,
                                 "clicks", 120.0f,
                                 icons_.empty() ? r2d::Sprite{}
                                                : icons_[0])) {
             ++gui_clicks_;
         }
-        ws::ui::gui::checkbox(gui_, layout_, ws::ui::gui::kDefaultChrome,
+        ws::ui::gui::checkbox(gui_, layout_, chrome_,
                               "signal", show_signal_);
-        ws::ui::gui::slider_float(gui_, layout_, ws::ui::gui::kDefaultChrome,
+        ws::ui::gui::slider_float(gui_, layout_, chrome_,
                                   "amplitude", amplitude_, 0.0f, 1.0f);
-        ws::ui::gui::slider_int(gui_, layout_, ws::ui::gui::kDefaultChrome,
+        ws::ui::gui::slider_int(gui_, layout_, chrome_,
                                 "samples", samples_, 4, kMaxSamples);
-        ws::ui::gui::slider_float(gui_, layout_, ws::ui::gui::kDefaultChrome,
+        ws::ui::gui::slider_float(gui_, layout_, chrome_,
                                   "spin", gui_spin_rate_, 0.0f, 0.2f);
         // Clip proof: this quad pokes past the panel's bottom-right corner
         // by 40 px each way - the scissor must cut it at the content edge.
@@ -107,31 +119,31 @@ protected:
         // flips - and "tune" edits the list itself, live: shrinking the
         // row count shrinks the scroll range one frame later.
         const ws::ui::gui::Rect page = ws::ui::gui::begin_panel(
-            gui_, layout_, ws::ui::gui::kDefaultChrome, "pages",
+            gui_, layout_, chrome_, "pages",
             {gui_frame.width - 244.0f, 208.0f, 220.0f, 220.0f});
         static const char* kPageTabs[] = {"list", "tune"};
-        (void)ws::ui::gui::tab_bar(gui_, layout_, ws::ui::gui::kDefaultChrome,
+        (void)ws::ui::gui::tab_bar(gui_, layout_, chrome_,
                                    "views", kPageTabs, 2, active_tab_,
                                    page.width * 0.5f);
         if (active_tab_ == 0) {
-            const float below = ws::ui::gui::kDefaultChrome.control_height +
-                                ws::ui::gui::kDefaultChrome.spacing;
+            const float below = chrome_.control_height +
+                                chrome_.spacing;
             (void)ws::ui::gui::begin_scroll_panel(
-                gui_, layout_, ws::ui::gui::kDefaultChrome, "list",
+                gui_, layout_, chrome_, "list",
                 {page.x, page.y + below, page.width, page.height - below});
             for (int i = 0; i < row_count_; ++i) {
                 gui_.ids().push(i);  // loop rows id by index (one label)
                 ws::ui::gui::checkbox(
-                    gui_, layout_, ws::ui::gui::kDefaultChrome, "row",
+                    gui_, layout_, chrome_, "row",
                     rows_[static_cast<std::size_t>(i)]);
                 gui_.ids().pop();
             }
             ws::ui::gui::end_scroll_panel(gui_, layout_,
-                                          ws::ui::gui::kDefaultChrome);
+                                          chrome_);
         } else {
-            ws::ui::gui::slider_int(gui_, layout_, ws::ui::gui::kDefaultChrome,
+            ws::ui::gui::slider_int(gui_, layout_, chrome_,
                                     "rows", row_count_, 1, 16, page.width);
-            if (ws::ui::gui::button(gui_, layout_, ws::ui::gui::kDefaultChrome,
+            if (ws::ui::gui::button(gui_, layout_, chrome_,
                                     "clear", page.width)) {
                 rows_.fill(false);
             }
@@ -140,7 +152,7 @@ protected:
         // The Phase 10 real screen's gui half, bottom-left: the tab strip
         // plus sliders/button (drive) and the scrollable node list
         // (inspect) that steer the world-space net below.
-        net_.draw_panel(gui_, layout_, gui_frame);
+        net_.draw_panel(gui_, layout_, chrome_, gui_frame);
         r2d::end();
         r2d::set_layer(0);
 
@@ -309,6 +321,8 @@ private:
     int row_count_ = 16;           // the "list" tab's rows (edited in "tune")
     std::array<bool, 16> rows_{};   // the "list" tab's checkbox states
     playground::NetScreen net_;    // Phase 10: the real screen (world + panel)
+    ws::ui::r2d::Font font_;      // one bake, one face - outlives the theme use
+    ws::ui::gui::ChromeTheme chrome_ = ws::ui::gui::kDefaultChrome;  // + font_
 };
 
 }  // namespace

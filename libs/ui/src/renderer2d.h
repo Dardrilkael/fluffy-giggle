@@ -126,6 +126,15 @@ public:
     // (load_atlas) calls this per uploaded page; tests inject synthetic
     // pages headlessly - the sprite contract is pure CPU state.
     void register_atlas_page(Texture page, std::vector<atlas::Rect> rects);
+    // Text: one sprite-quad per visible glyph through the same recording
+    // path as draw_sprite (a glyph IS a Sprite). Returns the pen advance
+    // - exactly Font::measure_text's answer, by construction.
+    float draw_text(float x, float y, const char* utf8_text,
+                    const Font& font, std::uint32_t color = 0xFFFFFFFFu);
+    // Bakes a font (src/font.*, pure CPU) and uploads its glyph pages -
+    // the font's OWN pages, never shared with load_atlas. The loaders'
+    // failure contract: warn once, return an empty Font.
+    Font load_font(const char* path, float pixel_height);
 
     // Test/observability seam (internal header only): the built batch as
     // frame_end() left it.

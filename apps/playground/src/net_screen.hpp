@@ -9,6 +9,7 @@
 
 #include <ws/ui/gui/gui_context.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
+#include <ws/ui/gui/theme.hpp>
 #include <ws/ui/renderer2d.hpp>
 
 #include <array>
@@ -28,9 +29,12 @@ public:
     // The gui side panel, bottom-left: tab "drive" holds the input sliders
     // and a reseed button, tab "inspect" a scrollable per-hidden-node
     // enable list (the scroll region has real room to scroll). Call inside
-    // the screen-space r2d block, between new_frame and end_frame.
+    // the screen-space r2d block, between new_frame and end_frame. The
+    // theme is the caller's (third param, the widget convention) - its
+    // font is what the labels draw with.
     void draw_panel(ws::ui::gui::GuiContext& ctx,
                     ws::ui::gui::LayoutCursor& layout,
+                    const ws::ui::gui::ChromeTheme& theme,
                     const ws::ui::r2d::FrameSize& frame);
 
 private:

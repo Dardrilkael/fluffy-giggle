@@ -27,6 +27,16 @@ struct ChromeTheme {
     float padding = 12.0f;       // panel content inset
     float spacing = 8.0f;        // the gap between widgets sharing a row
     float scroll_speed = 32.0f;  // px one wheel unit scrolls a scroll panel
+
+    // The font labels draw with - the one look asset that is a loaded
+    // object instead of a value. Null (the default) keeps the v1 label
+    // bars, so a fontless theme is the exact pre-font look. The theme
+    // does NOT own the font: load it once (r2d::load_font, valid from
+    // on_setup()) and keep it alive as long as any theme pointing at it
+    // is in use - one Font for the app's lifetime is the intended shape.
+    // A second face (a heading weight, say) grows a sibling field here,
+    // not a rework of this pointer.
+    const r2d::Font* font = nullptr;
 };
 
 // The stock look. constexpr, so a custom theme starts from it with

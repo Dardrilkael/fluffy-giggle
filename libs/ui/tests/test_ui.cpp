@@ -9,6 +9,7 @@
 
 #include "atlas_packer.h"  // internal: pure-CPU atlas packer (src/ on the test include path)
 #include "batch_core.h"     // internal: pure-CPU batch builder (same path)
+#include "font.h"           // internal: pure-CPU font bake + utf8 decoder (same path)
 #include "renderer2d.h"     // internal: command recording + sort/replay (same path)
 #include "rounded_texture.h"  // internal: the builtin rounded-rect mask bake (same path)
 #include <ws/ui/app.hpp>
@@ -688,6 +689,15 @@ TEST_CASE("public r2d API is drop-safe without a running app") {
     const auto sprites = load_atlas({"nope.png"});  // warns, empty, no crash
     CHECK(sprites.empty());
     CHECK(sprite_size(Sprite{}).width == 0.0f);
+    const Font font = load_font("nope.ttf", 16.0f);  // warns, empty, no crash
+    CHECK(font.empty());
+    // Headless draw_text drops the quads but keeps the honest width - the
+    // font's own measure - so layout math survives a missing renderer.
+    CHECK(draw_text(0.0f, 0.0f, "hi", font) == 0.0f);
+    Font::Glyph synth[95]{};
+    synth['h' - 32].advance = 4.0f;
+    const Font filled(16.0f, 20.0f, synth, 95);
+    CHECK(draw_text(0.0f, 0.0f, "hh", filled) == 8.0f);
 
     const FrameSize size = frame_size();
     CHECK(size.width == 0.0f);
@@ -2539,4 +2549,335 @@ TEST_CASE("scroll: a bounds-too-small viewport is empty and inert") {
     CHECK(gui.ids().depth() == 0);
     CHECK(layout.depth() == 0);
     gui.end_frame();
+}
+
+TEST_CASE("r2d free functions route through set_active") {
+    using namespace ws::ui::r2d;
+    // The seam the gui widgets draw through: the free functions are the
+    // public API, set_active is the app.cpp install point (and this
+    // test's). Everything else tests the members directly, so this is
+    // the one case that would catch a broken g_active hand-off.
+    Renderer2D r;
+    struct ActiveRenderer {
+        explicit ActiveRenderer(Renderer2D* renderer) { set_active(renderer); }
+        ~ActiveRenderer() { set_active(nullptr); }
+    };
+    const ActiveRenderer active{&r};  // RAII: null again on ANY exit
+    (void)active;
+
+    r.frame_begin(800.0f, 600.0f);
+    REQUIRE(frame_size().width == 800.0f);  // the free getter routes to r
+    begin();
+    draw_quad(0.0f, 0.0f, 10.0f, 10.0f, rgba(255, 255, 255));
+    end();
+    r.frame_end();
+    REQUIRE(r.batch().chunk_count() == 1);
+    REQUIRE(r.batch().vertices().size() == 4);
+}
+
+// --- fonts + text ----------------------------------------------------------------
+//
+// Two halves, like the rest of r2d: the CPU half (utf8 decode, bake,
+// Font measure) needs no renderer; the draw half runs headless against a
+// synthetic page - a glyph IS a Sprite, so draw_text is draw_sprite with
+// a pen loop. The one host dependency is the system face, resolved
+// through this section's ONE path constant (never inlined at a call
+// site): the bake test asserts STRUCTURE, not exact Segoe metrics, so
+// any real face keeps it green.
+
+namespace {
+
+constexpr const char* kDefaultTestFontPath = "C:/Windows/Fonts/segoeui.ttf";
+
+// A hand-built font for the draw tests: 'A' and 'B' advance 10 and 5 with
+// known offsets and sprites on a synthetic page; the space advances 3
+// without a bitmap. Every other codepoint is baked but BLANK (advance 0,
+// no sprite) - which is not the same as unbaked: blank still answers
+// glyph(), draws nothing and advances nothing, while unbaked (outside
+// ASCII 32..126) skips entirely.
+ws::ui::r2d::Font ab_font() {
+    using ws::ui::r2d::Font;
+    Font::Glyph glyphs[95]{};
+    glyphs[0].advance = 3.0f;  // ' '
+    Font::Glyph& a = glyphs['A' - 32];
+    a.advance = 10.0f;
+    a.offset_x = 1.0f;
+    a.offset_y = 2.0f;
+    a.width = 4.0f;
+    a.height = 5.0f;
+    a.sprite = ws::ui::r2d::Sprite{7, 0};
+    Font::Glyph& b = glyphs['B' - 32];
+    b.advance = 5.0f;
+    b.offset_x = 0.0f;
+    b.offset_y = 3.0f;
+    b.width = 2.0f;
+    b.height = 3.0f;
+    b.sprite = ws::ui::r2d::Sprite{7, 1};
+    return Font(24.0f, 30.0f, glyphs, 95);
+}
+
+}  // namespace
+
+TEST_CASE("utf8 decode covers multibyte codepoints and forgives damage") {
+    using ws::ui::r2d::font::utf8_next;
+    const char* s = "";
+    CHECK(utf8_next(s) == 0u);  // the terminator is the end sentinel
+    s = "a";
+    CHECK(utf8_next(s) == 'a');
+    CHECK(*s == '\0');  // one byte consumed
+    s = "\xC3\xA9";  // U+00E9
+    CHECK(utf8_next(s) == 0xE9u);
+    s = "\xE2\x82\xAC";  // U+20AC
+    CHECK(utf8_next(s) == 0x20ACu);
+    s = "\xF0\x9F\x99\x82";  // U+1F642
+    CHECK(utf8_next(s) == 0x1F642u);
+
+    // Damage never stalls the decode: each bad spot yields U+FFFD and
+    // eats exactly one byte.
+    s = "\xFF";  // not a lead byte
+    CHECK(utf8_next(s) == 0xFFFDu);
+    CHECK(*s == '\0');
+    s = "a\xC3";  // 'a', then a 2-byte lead cut short by the terminator
+    CHECK(utf8_next(s) == 'a');
+    CHECK(utf8_next(s) == 0xFFFDu);  // the lead alone is eaten...
+    CHECK(utf8_next(s) == 0u);       // ...the NUL still ends the string
+    s = "\xC0\x80";  // overlong NUL: rejected, never decoded as U+0000
+    CHECK(utf8_next(s) == 0xFFFDu);
+    CHECK(*s == '\0');
+}
+
+TEST_CASE("font bake is structural - never exact face metrics") {
+    const auto baked =
+        ws::ui::r2d::font::bake_file(kDefaultTestFontPath, 24.0f);
+    if (!baked.ok) {
+        MESSAGE("segoeui.ttf not present - bake checks skipped");
+        return;
+    }
+    REQUIRE(baked.glyphs.size() == 95u);  // the whole ASCII range, in order
+    CHECK(baked.glyphs.front().codepoint == ' ');
+    CHECK(baked.glyphs.back().codepoint == '~');
+    CHECK(baked.pixel_height == 24.0f);
+    CHECK(baked.line_height > 0.0f);
+
+    // The space: an advance to honor, no bitmap to draw.
+    const auto& space = baked.glyphs[' ' - 32];
+    CHECK(space.w == 0u);
+    CHECK(space.rgba.empty());
+    CHECK(space.advance > 0.0f);
+
+    // Shape invariants that hold for any sane face, not Segoe numbers.
+    CHECK(baked.glyphs['W' - 32].advance > baked.glyphs['i' - 32].advance);
+    const auto& a = baked.glyphs['A' - 32];
+    REQUIRE(a.w > 0u);
+    REQUIRE(a.h > 0u);
+    REQUIRE(a.rgba.size() == static_cast<std::size_t>(a.w) * a.h * 4u);
+
+    // The tint convention: RGB solid white, the coverage mask in alpha -
+    // the vertex tint supplies the text color, like the rounded mask.
+    bool ink = false;
+    for (std::size_t i = 0; i < a.rgba.size() / 4u; ++i) {
+        if (a.rgba[i * 4u + 3u] > 0) {
+            ink = true;
+            CHECK(a.rgba[i * 4u] == 255);
+            CHECK(a.rgba[i * 4u + 1u] == 255);
+            CHECK(a.rgba[i * 4u + 2u] == 255);
+            break;
+        }
+    }
+    CHECK(ink);
+}
+
+TEST_CASE("Font measures the baked advance sum and skips the unbaked") {
+    using namespace ws::ui::r2d;
+    const Font font = ab_font();
+    CHECK(font.pixel_height() == 24.0f);
+    CHECK(font.line_height() == 30.0f);
+    CHECK(!font.empty());
+
+    CHECK(font.measure_text("AB") == 15.0f);    // 10 + 5
+    CHECK(font.measure_text("A B") == 18.0f);  // ...plus the space's 3
+    // 'z' is baked but blank: present in the table, contributes nothing -
+    // NOT the same as the skipped codepoint below.
+    CHECK(font.measure_text("AzA") == 20.0f);
+    // U+00E9 is outside the bake range: skipped, no advance. (Adjacent
+    // literals: a hex escape absorbs following hex-digit characters.)
+    CHECK(font.measure_text("A" "\xC3\xA9" "A") == 20.0f);
+    CHECK(font.measure_text(nullptr) == 0.0f);
+    CHECK(font.measure_text("") == 0.0f);
+
+    // glyph(): in-range always answers - blank stays blank, by data;
+    // out-of-range is null.
+    const Font::Glyph* a = font.glyph('A');
+    REQUIRE(a != nullptr);
+    CHECK(a->advance == 10.0f);
+    REQUIRE(font.glyph('z') != nullptr);
+    CHECK(font.glyph('z')->advance == 0.0f);
+    CHECK(font.glyph(31) == nullptr);   // below the bake range
+    CHECK(font.glyph(127) == nullptr);  // above it
+
+    // The blank Font (a failed load, the headless fallback): inert, but
+    // still answers in-range glyph() with zeroed data.
+    const Font blank;
+    CHECK(blank.empty());
+    CHECK(blank.measure_text("A") == 0.0f);
+    REQUIRE(blank.glyph('A') != nullptr);
+    CHECK(blank.glyph('A')->advance == 0.0f);
+}
+
+TEST_CASE("draw_text records one contiguous glyph run on the font's own page") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.register_atlas_page(Texture{7}, {{0.0f, 0.0f, 0.5f, 0.5f, 4, 5},
+                                       {0.5f, 0.0f, 1.0f, 0.5f, 2, 3}});
+    const Font font = ab_font();
+
+    r.frame_begin(800.0f, 600.0f);
+    r.begin_screen();
+    const float drawn =
+        r.draw_text(100.0f, 40.0f, "A B", font, rgba(235, 238, 242));
+    r.end();
+    r.frame_end();
+
+    // draw == measure, by construction: draw_text's loop is measure_text's
+    // loop plus the quads. The pinned invariant - assert it first.
+    REQUIRE(drawn == 18.0f);
+    CHECK(font.measure_text("A B") == 18.0f);
+
+    // One contiguous run: both glyphs share the page texture, so both
+    // quads land in ONE chunk under ONE texture-table slot - the batching
+    // sanity check from the design. Fonts own their pages BY DESIGN: a
+    // font's glyphs never share a page with load_atlas sprites (packing
+    // is one-shot; a packed atlas never grows), so this test deliberately
+    // does NOT assert that text merges with icon sprites. Text batching
+    // apart from icons is the contract, not a regression.
+    REQUIRE(r.batch().chunk_count() == 1);
+    const auto& chunk = r.batch().chunk(0);
+    REQUIRE(chunk.texture_count == 1);
+    CHECK(chunk.texture_ids[0] == 7u);
+    REQUIRE(r.batch().vertices().size() == 8);
+    for (const auto& v : r.batch().vertices()) {
+        CHECK(v.tex_index == 0.0f);  // one page, one slot
+    }
+    // 'A': pen 100 + offset (1, 2) -> the quad's TL lands at (101, 42).
+    CHECK(r.batch().vertices()[0].pos[0] == 101.0f);
+    CHECK(r.batch().vertices()[0].pos[1] == 42.0f);
+    // 'B': the pen advanced past 'A' (10) and the space (3) -> 113.
+    CHECK(r.batch().vertices()[4].pos[0] == 113.0f);
+    CHECK(r.batch().vertices()[4].pos[1] == 43.0f);
+}
+
+TEST_CASE("draw_text skips the unbaked and stays inert on empty fonts") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.register_atlas_page(Texture{7}, {{0.0f, 0.0f, 1.0f, 1.0f, 4, 5}});
+    const Font font = ab_font();
+
+    r.frame_begin(800.0f, 600.0f);
+    r.begin_screen();
+    // 'z' is baked but blank (no bitmap, no advance); U+00E9 is outside
+    // the bake range. Neither draws - and only 'z' even exists in the
+    // table. The two 'A's carry the width.
+    const float drawn = r.draw_text(50.0f, 20.0f, "Az" "\xC3\xA9" "A", font);
+    r.end();
+    r.frame_end();
+    REQUIRE(drawn == font.measure_text("Az" "\xC3\xA9" "A"));
+    REQUIRE(drawn == 20.0f);
+    REQUIRE(r.batch().chunk_count() == 1);
+    REQUIRE(r.batch().vertices().size() == 8);
+    CHECK(r.batch().vertices()[4].pos[0] == 61.0f);  // 'z' advanced nothing
+
+    // A glyph whose page failed to upload (Sprite{} = page 0) keeps its
+    // advance but drops the quad: a white box is never useful text. The
+    // draw==measure identity survives even this font.
+    Font::Glyph degraded[95]{};
+    degraded['A' - 32].advance = 10.0f;
+    degraded['A' - 32].width = 4.0f;
+    degraded['A' - 32].height = 5.0f;  // sprite stays Sprite{} (page 0)
+    const Font degraded_font(24.0f, 30.0f, degraded, 95);
+    r.frame_begin(800.0f, 600.0f);
+    r.begin_screen();
+    CHECK(r.draw_text(0.0f, 0.0f, "AA", degraded_font) == 20.0f);
+    r.end();
+    r.frame_end();
+    CHECK(degraded_font.measure_text("AA") == 20.0f);
+    CHECK(r.batch().chunk_count() == 0);  // nothing recorded at all
+
+    // An empty font and a null string are inert; the default color
+    // argument needs no special-casing to exercise.
+    r.frame_begin(800.0f, 600.0f);
+    r.begin_screen();
+    CHECK(r.draw_text(0.0f, 0.0f, "text", Font{}) == 0.0f);
+    CHECK(r.draw_text(0.0f, 0.0f, nullptr, font) == 0.0f);
+    CHECK(r.draw_text(0.0f, 0.0f, "A", font) == 10.0f);  // default color
+    r.end();
+    r.frame_end();
+    REQUIRE(r.batch().vertices().size() == 4);  // just the one 'A'
+}
+
+TEST_CASE("gui labels draw through the theme font") {
+    using namespace ws::ui::gui;
+    // The stock chrome stays fontless: byte-for-byte the pre-font look.
+    CHECK(kDefaultChrome.font == nullptr);
+
+    ws::ui::r2d::Renderer2D r;
+    // Point the r2d free functions (the widgets draw through them) at
+    // this test's renderer for exactly this scope - and back to null on
+    // ANY exit: a failed REQUIRE throws, and a g_active left dangling at
+    // a destroyed stack renderer would poison every later test.
+    struct ActiveRenderer {
+        explicit ActiveRenderer(ws::ui::r2d::Renderer2D* renderer) {
+            ws::ui::r2d::set_active(renderer);
+        }
+        ~ActiveRenderer() { ws::ui::r2d::set_active(nullptr); }
+    };
+    const ActiveRenderer active{&r};
+    (void)active;  // a scope guard: its lifetime is the point
+
+    r.register_atlas_page(ws::ui::r2d::Texture{7},
+                          {{0.0f, 0.0f, 0.5f, 0.5f, 4, 5},
+                           {0.5f, 0.0f, 1.0f, 0.5f, 2, 3}});
+    const ws::ui::r2d::Font font = ab_font();
+    ChromeTheme theme = kDefaultChrome;
+    theme.font = &font;  // the theme points; it never owns
+
+    // Widgets flow inside a panel - that is the production shape. A bare
+    // LayoutCursor hands next() an empty rect (drop-safe, by design), and
+    // an empty-rect button has nothing to draw: no face, no label.
+    r.frame_begin(800.0f, 600.0f);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    gui.new_frame(snap(500.0f, 500.0f));
+    (void)begin_panel(gui, layout, theme, "root",
+                      {0.0f, 0.0f, 200.0f, 100.0f});
+    button(gui, layout, theme, "AB", 120.0f);  // advance 15, fits the face
+    end_panel(gui, layout);
+    gui.end_frame();
+    r.end();
+    r.frame_end();
+
+    // The panel's chrome recorded before its clip push (full clip), its
+    // button after it (under the panel's content clip) - and clip is a
+    // sort key, so the frame replays as two runs: chrome, then widgets.
+    REQUIRE(r.batch().chunk_count() == 2);
+    const auto& widgets = r.batch().chunk(1);
+    REQUIRE(widgets.texture_count == 2);  // the white face + the font's page
+    int glyph_slot = -1;
+    for (std::uint32_t s = 0; s < widgets.texture_count; ++s) {
+        if (widgets.texture_ids[s] == 7u) {
+            glyph_slot = static_cast<int>(s);
+        }
+    }
+    // Painter order inside the run: the face recorded first, so white
+    // owns slot 0 and the font's page slot 1. The two-slot table IS the
+    // "fonts own their pages" contract: same run (painter order), two
+    // textures - glyphs do NOT merge with icon sprites by design.
+    REQUIRE(glyph_slot == 1);
+    int glyph_verts = 0;
+    for (const auto& v : r.batch().vertices()) {
+        if (static_cast<int>(v.tex_index) == glyph_slot) {
+            ++glyph_verts;
+        }
+    }
+    CHECK(glyph_verts == 8);  // 'A' and 'B': two glyph quads, nothing else
 }

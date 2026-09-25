@@ -159,9 +159,9 @@ void NetScreen::draw_world() {
 
 void NetScreen::draw_panel(ws::ui::gui::GuiContext& ctx,
                            ws::ui::gui::LayoutCursor& layout,
+                           const ws::ui::gui::ChromeTheme& theme,
                            const ws::ui::r2d::FrameSize& frame) {
     namespace gui = ws::ui::gui;
-    const gui::ChromeTheme& theme = gui::kDefaultChrome;
 
     // Bottom-left, clear of the right-side demo panels.
     const Rect bounds{24.0f, frame.height - 232.0f, 240.0f, 208.0f};

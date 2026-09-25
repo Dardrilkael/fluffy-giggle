@@ -15,8 +15,8 @@ gets a window, an event stream, and a place to submit draw commands —
 - **Render/widget API** — `widgets.hpp` (ImGui/ImPlot-backed draw calls),
   the engine's own vocabulary for drawing, not the graphics API's.
 - **2D renderer** — `renderer2d.hpp` (`ws::ui::r2d`): camera'd, textured
-  quads and lines, atlas sprites, sorted then batched, flushed under the
-  widgets.
+  quads and lines, atlas sprites, baked glyph text, sorted then batched,
+  flushed under the widgets.
 - **Immediate-mode gui** — `gui/` headers (`ws::ui::gui`): dependency-free
   widgets (button/checkbox/slider/panel/tabs/scroll region) that draw
   through r2d; caller-owned state, identity + hit-testing + layout + draw
@@ -57,7 +57,7 @@ libs/ui/
     app.hpp                 # App, AppConfig — PUBLIC, zero third-party includes
     event.hpp                # Event, EventType, typed events, EventDispatcher
     render_command_queue.hpp # RenderCommandQueue
-    renderer2d.hpp           # r2d free functions: Camera2D, quads, lines, sprites, textures
+    renderer2d.hpp           # r2d free functions: Camera2D, quads, lines, sprites, fonts + text
     widgets.hpp               # window/text/button/checkbox/slider/plot_line/...
     gui/                      # the immediate-mode gui module (ws::ui::gui, no ImGui)
       gui_context.hpp        # GuiContext: input snapshot + hot/active + side tables
@@ -65,18 +65,20 @@ libs/ui/
       input_frame.hpp        # InputFrame: one frame's raw input; frame_input() getter
       layout_cursor.hpp      # LayoutCursor: flowing layout + panel stack
       rect.hpp                # Rect, WidgetId, HitTest — the shared vocabulary
-      theme.hpp               # ChromeTheme: every color/metric the widgets use
+      theme.hpp               # ChromeTheme: every color/metric the widgets use, + the borrowed font
       widgets.hpp            # button/checkbox/slider/panel/tabs/scroll region — the widget functions
   src/
     app.cpp                  # pimpl: Vulkan context, swapchain, frame loop
     atlas_packer.h/.cpp      # pure-CPU shelf packer: atlas pages, sub-rects, gutters
     batch_core.h/.cpp        # pure-CPU batch: chunks, camera VP, geometry (no Vulkan)
+    font.h/.cpp              # stb_truetype bake: ASCII 32..126 glyphs, white-RGBA
+                             #  coverage, forgiving utf8_next (pure CPU, no renderer state)
     gui.h/.cpp               # gui module internals: input accumulator, persistent state
     gui_widgets.cpp          # the widget functions' bodies (lay out, hit-test, draw)
     renderer2d.h/.cpp        # r2d engine: command sort/replay + Vulkan flush
     rounded_texture.h/.cpp   # pure-CPU bake of the builtin rounded-rect mask
     shaders/                  # batch.vert/.frag (GLSL) + spirv.h (committed build input)
-    stb_impl.cpp             # sole STB_IMAGE_IMPLEMENTATION translation unit
+    stb_impl.cpp             # sole STB implementation TU (STB_IMAGE + STB_TRUETYPE)
     window.h                 # internal: WindowEventSink (never reaches apps)
     window.cpp               # GLFW window + all glfwSet*Callback installs (only here)
     widgets.cpp              # ImGui/ImPlot-backed widget implementations
@@ -151,12 +153,13 @@ void on_event(ws::ui::Event& e) override {
 `ws::ui::r2d` — `begin()` / `begin(camera)` / `end()`, `draw_quad`,
 `draw_line` (thickness in px), `draw_sprite`, `draw_rounded_quad`,
 `set_layer`, `push_clip` / `pop_clip` (framebuffer-space clip stack),
-`load_texture`, `load_atlas`, `frame_size`, `sprite_size`,
-`rgba` (packs 0xRRGGBBAA — NOT IM_COL32 order). Apps record from
-`on_update()` only, exactly like widgets.hpp calls; every call is drop-safe
-outside a running app (logged once, then ignored). The public header
-includes only `<cstdint>`, `<initializer_list>` and `<vector>` — no
-Vulkan/GLFW/stb types (stb_image is PRIVATE, like every third-party).
+`load_texture`, `load_atlas`, `load_font`, `draw_text`, `frame_size`,
+`sprite_size`, `rgba` (packs 0xRRGGBBAA — NOT IM_COL32 order). Apps record
+from `on_update()` only, exactly like widgets.hpp calls; every call is
+drop-safe outside a running app (logged once, then ignored). The public
+header includes only `<cstdint>`, `<initializer_list>` and `<vector>` — no
+Vulkan/GLFW/stb types (stb_image and stb_truetype are PRIVATE, like every
+third-party).
 
 - **Recording is data.** A draw appends a `DrawCommand` (sort layer, camera
   block, clip, expanded corners; the material key rides along as metadata).
@@ -202,6 +205,29 @@ Vulkan/GLFW/stb types (stb_image is PRIVATE, like every third-party).
   `Sprite{}` (white — the load_texture contract); `sprite_size()` reports
   native pixels (packing never scales). Page tables only grow, the same
   contract as the texture registry.
+- **Fonts + text.** `load_font(path, pixel_height)` (valid from
+  `on_setup()`) bakes one face at one size through stb_truetype — ASCII
+  32..126, one `Font` per (face, size), never scaled or re-rasterized at
+  runtime. The glyphs pack into the font's OWN atlas pages, never shared
+  with `load_atlas` sprites: packing is one-shot and a packed atlas
+  never grows, so text merging with icon pages is a non-goal BY DESIGN
+  (the batching test pins per-font glyph runs and says so — its comment
+  exists so nobody reads that as a regression later). Glyph bitmaps
+  bake RGB-white with coverage in alpha, so the vertex tint supplies
+  the text color. `draw_text` emits one sprite-quad per visible glyph
+  and returns the pen's advance — exactly `Font::measure_text`, by
+  construction, for ANY font (empty, degraded); `(x, y)` is the line
+  BOX's top-left (baseline = y + ascent internally; `Glyph` offsets
+  measure from the line top). No kerning in v1; a codepoint outside the
+  bake is no draw and no advance; a page whose upload failed drops its
+  quads but keeps the advances honest — layout code never lies.
+  `utf8_next` decodes forgivingly: bad bytes and overlong encodings
+  become U+FFFD, never a crash or a runaway pointer. The path is the
+  CALLER's to resolve — the lib carries no platform knowledge, no
+  Windows font directory; the one system-face path constant lives in
+  each TU that uses it (playground app, tests). System-font-at-runtime
+  is a known future cost: right for a Windows-only tool today, and the
+  first thing to revisit if Android ever becomes real.
 - **Rounded quads.** `draw_rounded_quad` 9-slices a builtin 32×32 mask
   texture (`src/rounded_texture.*`, baked analytically: one-texel coverage
   antialiasing across the corner arcs, RGB white — shape rides in alpha, so
@@ -261,7 +287,10 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   feedback and drag tracking continue off-rect until release);
   release-inside = `clicked`, release-outside clears active with no
   click. `hovered` is hot-gated, so widgets under a foreign drag don't
-  light up.
+  light up. Hover is never a click precondition — clicks are pure
+  spatial containment — so a widget keeps working with hover simply
+  absent (no mouse yet, touch someday); never add logic that needs
+  hover first.
 - **Persistent state.** `persistent_state<T>(WidgetId)` returns a typed
   side-table entry keyed (type, id) — how a scroll offset survives frames
   and the panel vanishing for frames. Never a local static: if a widget
@@ -278,10 +307,15 @@ drive unchanged (that boundary is deliberate; don't paint it over).
 - **Theme.** `ChromeTheme` — the faces and the metrics (control height,
   corner radius, padding, spacing, scroll speed) in one plain struct,
   `kDefaultChrome` constexpr. Widgets take a `const ChromeTheme&` per
-  call, so a panel can carry its own variant inline.
+  call, so a panel can carry its own variant inline. `font` is a
+  borrowed `const r2d::Font*` (null = the v1 label bars, byte-for-byte
+  the pre-font look): the theme does NOT own the font — load it once
+  (`r2d::load_font`, valid from `on_setup()`) and keep it alive as
+  long as any theme pointing at it is in use. A second face (a heading
+  weight, say) grows a sibling field, not a rework of the pointer.
 - **Widgets** — all caller-state, all drawing through r2d, all drop-safe
-  headless: `button` (optional atlas icon + label bar), `checkbox`
-  (box + label bar, auto-sized row), `slider_float`/`slider_int`
+  headless: `button` (optional atlas icon + label), `checkbox`
+  (box + label, auto-sized row), `slider_float`/`slider_int`
   (click-to-set and drag are one rule: the owner maps the pointer while
   pressed), `begin_panel`/`end_panel` (chrome + clip + id scope + layout
   panel), `tab_bar` (the caller's int IS the selection; the strip
@@ -291,8 +325,10 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   scrolled positions — while the clip stays at the unscrolled viewport;
   the offset is persistent state, the content extent is measured at the
   previous end: one frame of lag, by design).
-- **v1 limits, deliberate:** labels are quad bars tracking the label
-  length (r2d has no font yet); the gui is screen-space only (the same
+- **v1 limits, deliberate:** labels draw through the theme font's
+  glyphs when one is set, the v1 quad bars otherwise — and text cannot
+  truncate, so a label wider than its face drops instead of spilling;
+  the gui is screen-space only (the same
   space layout and hit-testing use); scroll is vertical-only and every
   viewport under the pointer wheels; hit-testing ignores clips (a row
   scrolled out of sight still hit-tests — that needs a clip-aware hit
@@ -325,8 +361,11 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `draw_line`, `draw_sprite` (atlas sub-rect quads), `draw_rounded_quad`
   (9-sliced builtin mask, radius clamped to half the shorter side),
   `set_layer`, `push_clip`/`pop_clip` (nested framebuffer clip rects),
-  `load_texture`, `load_atlas`, `frame_size`, `sprite_size`. Draws are
-  valid only inside `on_update()`, within a `begin()` block.
+  `load_texture`, `load_atlas`, `load_font` (bakes one face at one pixel
+  size — ASCII 32..126, the font's own atlas pages), `draw_text` (glyph
+  quads; returns the advance, exactly `Font::measure_text`), `frame_size`,
+  `sprite_size`. Draws are valid only inside `on_update()`, within a
+  `begin()` block.
 - `gui/` (`ws::ui::gui`): the immediate-mode widget layer — `GuiContext` +
   `frame_input()`, `LayoutCursor`, `IdStack`, `ChromeTheme`/
   `kDefaultChrome`, and `button`/`checkbox`/`slider_float`/`slider_int`/

@@ -6,7 +6,7 @@
 
 namespace ws::ui::r2d {
 
-// 2D renderer: batched quads and lines, textured or flat. Apps record draws
+// 2D renderer: batched quads, lines and text, textured or flat. Apps record draws
 // from on_update() only, exactly like the widgets.hpp calls; the shell owns
 // every GPU detail (pipeline, buffers, flush point - 2D renders under the
 // widget layer, command-queue overlays render on top). Draws are recorded
@@ -145,5 +145,87 @@ std::vector<Sprite> load_atlas(std::initializer_list<const char*> paths);
 // The sprite's original pixel size - atlas packing never scales. {0, 0}
 // for unknown or sentinel sprites.
 FrameSize sprite_size(Sprite sprite);
+
+// --- fonts + text ---------------------------------------------------------------------
+// A baked font: one typeface rasterized once, at ONE pixel size - the v1
+// rule is a Font per (face, size) pair, so a new size means a new bake,
+// never scaling bitmaps (blurry) or re-rasterizing mid-frame (stutter).
+// load_font() does the baking (pure CPU, stb_truetype - PRIVATE like
+// every third-party) and gives the glyphs their OWN atlas pages: packing
+// is one-shot, so a font never shares a page with load_atlas sprites,
+// and two fonts are two page sets. A glyph is then an ordinary Sprite
+// and draw_text() is a per-glyph draw_sprite loop - text carries the
+// same layer, clip and camera-block contract as every other draw, and
+// one page means one batch texture slot. v1 bakes ASCII 32..126 only;
+// other codepoints are skipped (no draw, no advance), and there is no
+// kerning: a line measures as its plain advance sum.
+class Font {
+public:
+    // One baked glyph. `sprite` is where its bitmap landed on the font's
+    // pages; Sprite{} means nothing to draw (the space - it still
+    // advances). The offsets place the bitmap relative to the pen and
+    // the LINE TOP: (x + offset_x, y + offset_y) is the quad's top-left
+    // when drawing at pen x on the line whose box starts at y.
+    struct Glyph {
+        Sprite sprite{};
+        float advance = 0.0f;   // pen advance after this glyph, px
+        float offset_x = 0.0f;  // bitmap left, relative to the pen
+        float offset_y = 0.0f;  // bitmap top, relative to the line top
+        float width = 0.0f;     // bitmap size, px (0 = nothing to draw)
+        float height = 0.0f;
+    };
+
+    Font() = default;
+
+    // Fill constructor (load_font's assembly step, and tests building
+    // synthetic fonts): the glyphs for codepoints 32..126, in order.
+    // Fewer than 95 entries leave the tail unbaked; null bakes nothing.
+    Font(float pixel_height, float line_height, const Glyph* glyphs,
+         std::uint32_t count);
+
+    // False when nothing was baked (a failed load, the headless
+    // fallback): draw_text then draws nothing and measures 0.
+    bool empty() const { return line_height_ <= 0.0f; }
+    float pixel_height() const { return pixel_height_; }
+    // The typeface's line advance at the baked size (ascent - descent +
+    // line gap) - the height of the box draw_text's y names the top of.
+    float line_height() const { return line_height_; }
+
+    // The glyph for a codepoint: null outside 32..126; inside the range
+    // a blank glyph (advance 0, no sprite) is returned as-is and draws
+    // and advances nothing - the same skip, by data.
+    const Glyph* glyph(std::uint32_t codepoint) const;
+
+    // The width draw_text advances for utf8_text: the baked glyphs'
+    // advance sum, unbaked codepoints contributing nothing. draw_text
+    // returns exactly this value.
+    float measure_text(const char* utf8_text) const;
+
+private:
+    static constexpr std::uint32_t kFirstBaked = 32;
+    static constexpr std::uint32_t kBakedCount = 95;  // ASCII 32..126
+    Glyph glyphs_[kBakedCount]{};
+    float pixel_height_ = 0.0f;
+    float line_height_ = 0.0f;
+};
+
+// Rasterizes the ttf/otf at `path` at one pixel height and returns the
+// baked font. Valid from on_setup(), synchronous, like the texture
+// loads. The path is the CALLER's to resolve - the library knows nothing
+// about platforms or font directories; picking a face (the system one
+// included) is app code, by design. On failure - missing file, not a
+// font, no GPU context - logs once and returns an empty Font.
+Font load_font(const char* path, float pixel_height);
+
+// Draws one line of UTF-8 text, one sprite-quad per visible glyph.
+// (x, y) is the LINE BOX's top-left - not the baseline: widgets center
+// the box on their rows, and glyph offsets already reach down to the
+// baseline from y. Returns the pen's total advance - exactly
+// measure_text(utf8_text), by construction. The space and other blanks
+// advance without drawing; codepoints the font did not bake are skipped
+// entirely; an empty font draws nothing and returns 0. The bitmaps are
+// white with coverage in alpha, so `color` tints the glyphs directly.
+float draw_text(float x, float y, const char* utf8_text, const Font& font,
+                std::uint32_t color = 0xFFFFFFFFu);
 
 }  // namespace ws::ui::r2d

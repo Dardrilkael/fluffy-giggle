@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstring>
 
+#include "font.h"
 #include "rounded_texture.h"
 #include "shaders/spirv.h"
 
@@ -1210,6 +1211,39 @@ FrameSize Renderer2D::sprite_size(Sprite sprite) const {
     return FrameSize{static_cast<float>(rect->w), static_cast<float>(rect->h)};
 }
 
+float Renderer2D::draw_text(float x, float y, const char* utf8_text,
+                            const Font& font, std::uint32_t color) {
+    if (utf8_text == nullptr) {
+        return 0.0f;  // measure_text(nullptr) reports the same nothing
+    }
+    // Text is just more sprites: one quad per visible glyph through the
+    // draw_sprite path, so a string carries the caller's layer, clip and
+    // camera block, and its glyphs land in one batch run (one page texture
+    // = one texture-table slot). (x, y) is the LINE BOX's top-left - the
+    // box widgets center on their rows; glyph offsets already reach down
+    // to the baseline from there. No early-outs on the font's data: every
+    // baked glyph advances (visible or not), nothing else does - so the
+    // return is structurally measure_text's exact value, whatever the font.
+    const char* s = utf8_text;
+    float pen_x = x;
+    for (std::uint32_t cp = font::utf8_next(s); cp != 0u;
+         cp = font::utf8_next(s)) {
+        const Font::Glyph* g = font.glyph(cp);
+        if (g == nullptr) {
+            continue;  // not baked: no draw, no advance (v1 is ASCII-only)
+        }
+        // sprite.page 0 = a page that failed to upload: a white box would
+        // read as a glyph-shaped artifact, so the quad drops - the advance
+        // stays honest, measure_text never counted the bitmap anyway.
+        if (g->width > 0.0f && g->height > 0.0f && g->sprite.page != 0) {
+            draw_sprite(pen_x + g->offset_x, y + g->offset_y, g->width,
+                        g->height, color, g->sprite);
+        }
+        pen_x += g->advance;
+    }
+    return pen_x - x;
+}
+
 std::vector<Sprite> Renderer2D::load_atlas(
     std::initializer_list<const char*> paths) {
     const std::size_t count = paths.size();
@@ -1266,6 +1300,74 @@ std::vector<Sprite> Renderer2D::load_atlas(
         }
     }
     return sprites;
+}
+
+Font Renderer2D::load_font(const char* path, float pixel_height) {
+    if (device_ == VK_NULL_HANDLE) {
+        // Headless or pre-init: the loaders' contract - warn, degrade to
+        // empty (draw_text then draws nothing, measure_text reports 0).
+        ws::core::warn("ui: r2d::load_font('{}') fell back to an empty font "
+                       "- no GPU context is alive",
+                       path != nullptr ? path : "(null)");
+        return {};
+    }
+
+    // Bake first (pure CPU), then the same page pipeline as load_atlas.
+    // The font gets its OWN pages: atlas::pack is one-shot (a packed
+    // atlas never grows), so glyph sprites can never share a page with
+    // icon sprites - two Font instances bake two page sets, by design.
+    const font::BakedFont baked = font::bake_file(path, pixel_height);
+    if (!baked.ok) {
+        ws::core::warn("ui: r2d::load_font('{}') failed - empty font",
+                       path != nullptr ? path : "(null)");
+        return {};
+    }
+
+    // Every glyph's metrics first (advances and offsets need no atlas);
+    // sprites patch in after packing. Only glyphs WITH bitmaps feed the
+    // packer - the space and other blanks advance but never draw, and a
+    // white fallback cell would only waste page room.
+    std::vector<Font::Glyph> glyphs(baked.glyphs.size());
+    std::vector<atlas::SourceImage> sources;
+    std::vector<std::size_t> baked_index;  // sources[i] -> baked.glyphs slot
+    sources.reserve(baked.glyphs.size());
+    for (std::size_t i = 0; i < baked.glyphs.size(); ++i) {
+        const font::BakedGlyph& g = baked.glyphs[i];
+        Font::Glyph& out = glyphs[i];
+        out.advance = g.advance;
+        out.offset_x = g.offset_x;
+        out.offset_y = g.offset_y;
+        out.width = static_cast<float>(g.w);
+        out.height = static_cast<float>(g.h);
+        if (g.w > 0 && g.h > 0) {
+            sources.push_back(atlas::SourceImage{g.rgba.data(), g.w, g.h});
+            baked_index.push_back(i);
+        }
+    }
+
+    if (!sources.empty()) {
+        atlas::Packing packed = atlas::pack(sources.data(), sources.size());
+        // A failed page upload degrades only its glyphs, like load_atlas.
+        std::vector<std::uint32_t> page_ids(packed.pages.size(), 0);
+        for (std::size_t p = 0; p < packed.pages.size(); ++p) {
+            atlas::Page& page = packed.pages[p];
+            Texture texture{};
+            if (upload_texture(page.pixels.data(), page.size, page.size,
+                               &texture)) {
+                register_atlas_page(texture, std::move(page.rects));
+                page_ids[p] = texture.id;
+            }
+        }
+        for (std::size_t s = 0; s < baked_index.size(); ++s) {
+            const atlas::Placement& place = packed.assigned[s];
+            if (place.page < page_ids.size() && page_ids[place.page] != 0) {
+                glyphs[baked_index[s]].sprite =
+                    Sprite{page_ids[place.page], place.index};
+            }
+        }
+    }
+    return Font(baked.pixel_height, baked.line_height, glyphs.data(),
+                static_cast<std::uint32_t>(glyphs.size()));
 }
 
 // --- public free functions ----------------------------------------------------
@@ -1404,6 +1506,25 @@ FrameSize sprite_size(Sprite sprite) {
         return g_active->sprite_size(sprite);
     }
     return FrameSize{};
+}
+
+Font load_font(const char* path, float pixel_height) {
+    if (g_active != nullptr) {
+        return g_active->load_font(path, pixel_height);
+    }
+    warn_no_app("load_font");
+    return {};
+}
+
+float draw_text(float x, float y, const char* utf8_text, const Font& font,
+                std::uint32_t color) {
+    if (g_active != nullptr) {
+        return g_active->draw_text(x, y, utf8_text, font, color);
+    }
+    // No app: the draw drops (warned once, like every call here), but the
+    // width is still the honest measure - layout code keeps working.
+    warn_no_app("draw_text");
+    return font.measure_text(utf8_text);
 }
 
 }  // namespace ws::ui::r2d

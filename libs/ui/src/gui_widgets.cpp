@@ -16,14 +16,34 @@
 namespace ws::ui::gui {
 namespace {
 
-// The label placeholder until r2d has text: a centered bar whose width
-// tracks the label length, so sibling buttons stay visually distinct.
-// Clamped to the face (theme padding each side) and never negative, so
-// a narrow button cannot hand r2d a backwards bar.
+// The label placeholder while the theme carries no font: a centered bar
+// whose width tracks the label length, so sibling buttons stay visually
+// distinct. Clamped to the face (theme padding each side) and never
+// negative, so a narrow button cannot hand r2d a backwards bar.
 float label_bar_width(const char* label, float max_width) {
     const std::size_t chars = label != nullptr ? std::strlen(label) : 0;
     const float wanted = static_cast<float>(chars) * 6.0f;
     return std::max(0.0f, std::min(wanted, max_width));
+}
+
+// A label's advance width: the theme font's honest measure, or (fontless)
+// the bar placeholder's per-char estimate. UNclamped - each caller owns
+// its own fit budget (the checkbox row sizes to it, buttons clamp).
+float label_advance(const char* label, const ChromeTheme& theme) {
+    if (theme.font != nullptr) {
+        return theme.font->measure_text(label);
+    }
+    const std::size_t chars = label != nullptr ? std::strlen(label) : 0;
+    return static_cast<float>(chars) * 6.0f;
+}
+
+// Where a label's line box starts vertically: the font's line height
+// centered on the row (draw_text's y is the box top, not a baseline), or
+// (fontless) half the row - the bar centering the bar branch does inline.
+float label_top(float row_top, float row_height, const ChromeTheme& theme) {
+    const float h = theme.font != nullptr ? theme.font->line_height()
+                                          : row_height * 0.5f;
+    return row_top + (row_height - h) * 0.5f;
 }
 
 // A scroll region's persistent state (Phase 3 side-table entry): how far
@@ -88,16 +108,29 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
         label_room = std::max(0.0f, rect.width - used);
     }
 
-    // The label bar: half the control height, centered both ways in the
-    // room that remains. A zero-width bar (empty label or a degenerate
-    // button) draws nothing.
-    const float bar_height = rect.height * 0.5f;
-    const float bar_width =
-        label_bar_width(label, label_room - 2.0f * theme.padding);
-    if (bar_width > 0.0f) {
-        r2d::draw_quad(label_x + (label_room - bar_width) * 0.5f,
-                       rect.y + (rect.height - bar_height) * 0.5f, bar_width,
-                       bar_height, theme.text);
+    // The label: the theme font's glyphs centered in the room that
+    // remains, or (fontless) the v1 bar. Text cannot truncate, so a label
+    // wider than its room drops rather than overflowing the face.
+    if (theme.font != nullptr) {
+        const float advance = theme.font->measure_text(label);
+        const float room = std::max(0.0f, label_room - 2.0f * theme.padding);
+        if (advance > 0.0f && advance <= room) {
+            r2d::draw_text(label_x + (label_room - advance) * 0.5f,
+                           label_top(rect.y, rect.height, theme), label,
+                           *theme.font, theme.text);
+        }
+    } else {
+        // The bar: half the control height, centered both ways in the
+        // room that remains. A zero-width bar (empty label or a degenerate
+        // button) draws nothing.
+        const float bar_height = rect.height * 0.5f;
+        const float bar_width =
+            label_bar_width(label, label_room - 2.0f * theme.padding);
+        if (bar_width > 0.0f) {
+            r2d::draw_quad(label_x + (label_room - bar_width) * 0.5f,
+                           rect.y + (rect.height - bar_height) * 0.5f, bar_width,
+                           bar_height, theme.text);
+        }
     }
 
     return hit.clicked;
@@ -107,12 +140,13 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
               const char* label, bool& value) {
     const WidgetId id = gui.ids().current(label);
 
-    // The row auto-sizes: box, a gap, the label bar (FLT_MAX = the bar
-    // never clamps here; an explicit width policy is not worth a knob).
+    // The row auto-sizes: box, a gap, the label (its advance - the font's
+    // measure or the fontless per-char estimate; never clamped, so a
+    // label always sizes its own row).
     const float gap = theme.spacing;
-    const float bar_width = label_bar_width(label, FLT_MAX);
+    const float label_width = label_advance(label, theme);
     const Rect rect =
-        layout.next(theme.control_height + gap + bar_width, theme.control_height);
+        layout.next(theme.control_height + gap + label_width, theme.control_height);
     const HitTest hit = gui.hit_test(id, rect);
 
     if (hit.clicked) {
@@ -141,11 +175,19 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
                        theme.control_on);
     }
 
-    // The label bar beside the box, vertically centered.
-    if (bar_width > 0.0f) {
+    // The label beside the box, vertically centered: the theme font's
+    // line box, or (fontless) the v1 bar. The row already sized itself
+    // to the advance, so the label always fits - no truncation case.
+    if (theme.font != nullptr) {
+        if (label_width > 0.0f) {
+            r2d::draw_text(rect.x + box + gap,
+                           label_top(rect.y, rect.height, theme), label,
+                           *theme.font, theme.text);
+        }
+    } else if (label_width > 0.0f) {
         const float bar_height = rect.height * 0.5f;
         r2d::draw_quad(rect.x + box + gap,
-                       rect.y + (rect.height - bar_height) * 0.5f, bar_width,
+                       rect.y + (rect.height - bar_height) * 0.5f, label_width,
                        bar_height, theme.text);
     }
     return hit.clicked;
@@ -215,13 +257,25 @@ bool slider_float(GuiContext& gui, LayoutCursor& layout,
     // The handle itself: full control height, over rail and fill.
     r2d::draw_quad(handle_x, rect.y, handle_width, rect.height, theme.text);
 
-    // The label bar, right-aligned over the rail.
-    const float bar_width = label_bar_width(label, rect.width - 4.0f);
-    if (bar_width > 0.0f) {
-        const float bar_height = rect.height * 0.5f;
-        r2d::draw_quad(rect.x + rect.width - bar_width - 2.0f,
-                       rect.y + (rect.height - bar_height) * 0.5f, bar_width,
-                       bar_height, theme.text);
+    // The label, right-aligned over the rail: the theme font's glyphs, or
+    // (fontless) the v1 bar (clamped to the rail's budget). Text cannot
+    // truncate, so a label wider than the rail drops instead of spilling
+    // backwards past the slider.
+    if (theme.font != nullptr) {
+        const float advance = theme.font->measure_text(label);
+        if (advance > 0.0f && advance <= rect.width - 4.0f) {
+            r2d::draw_text(rect.x + rect.width - advance - 2.0f,
+                           label_top(rect.y, rect.height, theme), label,
+                           *theme.font, theme.text);
+        }
+    } else {
+        const float bar_width = label_bar_width(label, rect.width - 4.0f);
+        if (bar_width > 0.0f) {
+            const float bar_height = rect.height * 0.5f;
+            r2d::draw_quad(rect.x + rect.width - bar_width - 2.0f,
+                           rect.y + (rect.height - bar_height) * 0.5f, bar_width,
+                           bar_height, theme.text);
+        }
     }
     return changed;
 }
@@ -269,15 +323,29 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
         r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
                                theme.corner_radius, face);
 
-        // The tab's bar, centered like a button's label.
-        const float bar_width =
-            label_bar_width(tabs != nullptr ? tabs[i] : nullptr,
-                            rect.width - 2.0f * theme.padding);
-        if (bar_width > 0.0f) {
-            const float bar_height = rect.height * 0.5f;
-            r2d::draw_quad(rect.x + (rect.width - bar_width) * 0.5f,
-                           rect.y + (rect.height - bar_height) * 0.5f,
-                           bar_width, bar_height, theme.text);
+        // The tab's label, centered like a button's: the theme font's
+        // glyphs, or (fontless) the v1 bar. Same fit rule as a button -
+        // an over-long label drops instead of overflowing the tab.
+        const char* tab_label = tabs != nullptr ? tabs[i] : nullptr;
+        if (theme.font != nullptr) {
+            const float advance = theme.font->measure_text(tab_label);
+            const float room = std::max(0.0f,
+                                        rect.width - 2.0f * theme.padding);
+            if (advance > 0.0f && advance <= room) {
+                r2d::draw_text(rect.x + (rect.width - advance) * 0.5f,
+                               label_top(rect.y, rect.height, theme),
+                               tab_label, *theme.font, theme.text);
+            }
+        } else {
+            const float bar_width = label_bar_width(tab_label,
+                                                    rect.width -
+                                                        2.0f * theme.padding);
+            if (bar_width > 0.0f) {
+                const float bar_height = rect.height * 0.5f;
+                r2d::draw_quad(rect.x + (rect.width - bar_width) * 0.5f,
+                               rect.y + (rect.height - bar_height) * 0.5f,
+                               bar_width, bar_height, theme.text);
+            }
         }
 
         // A full click moves the selection; clicking the already-selected
