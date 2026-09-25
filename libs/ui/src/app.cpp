@@ -405,12 +405,22 @@ struct App::Impl {
                 if (can_present != VK_TRUE || !device_has_swapchain(physical)) {
                     continue;
                 }
+                // batch.frag's non-constant sampler-array index needs this;
+                // skip a device that lacks it rather than fail later in
+                // create_device() when another candidate might have it.
+                VkPhysicalDeviceFeatures features{};
+                vkGetPhysicalDeviceFeatures(physical, &features);
+                if (!features.shaderSampledImageArrayDynamicIndexing) {
+                    continue;
+                }
                 candidates.push_back({physical, i});
                 break;
             }
         }
         if (candidates.empty()) {
-            core::error("ui: no device can present to the window surface");
+            core::error(
+                "ui: no device can present to the window surface and "
+                "supports shaderSampledImageArrayDynamicIndexing");
             return false;
         }
 
@@ -442,6 +452,23 @@ struct App::Impl {
         queue_info.queueCount = 1;
         queue_info.pQueuePriorities = &queue_priority;
 
+        // batch.frag indexes u_textures[32] with a non-constant (runtime)
+        // index, which the spec gates behind this feature - without it,
+        // dynamic sampler-array indexing is undefined behavior even where
+        // a given driver happens to tolerate it. Required, not optional:
+        // fail loudly rather than ship a renderer that silently depends on
+        // driver leniency.
+        VkPhysicalDeviceFeatures available{};
+        vkGetPhysicalDeviceFeatures(physical_device, &available);
+        if (!available.shaderSampledImageArrayDynamicIndexing) {
+            core::error(
+                "ui: GPU lacks shaderSampledImageArrayDynamicIndexing, "
+                "required by the 2D batch shader's texture array");
+            return false;
+        }
+        VkPhysicalDeviceFeatures enabled{};
+        enabled.shaderSampledImageArrayDynamicIndexing = VK_TRUE;
+
         const char* extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
         VkDeviceCreateInfo create_info{};
         create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -449,6 +476,7 @@ struct App::Impl {
         create_info.pQueueCreateInfos = &queue_info;
         create_info.enabledExtensionCount = 1;
         create_info.ppEnabledExtensionNames = extensions;
+        create_info.pEnabledFeatures = &enabled;
         if (vkCreateDevice(physical_device, &create_info, nullptr, &device) != VK_SUCCESS) {
             core::error("ui: vkCreateDevice failed");
             return false;

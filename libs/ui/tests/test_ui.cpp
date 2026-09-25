@@ -738,7 +738,7 @@ TEST_CASE("same-material draws keep submission order (stable sort)") {
     CHECK(r.batch().vertices()[4].pos[0] == 10.0f);
 }
 
-TEST_CASE("the material sort groups a texture's quads within a block") {
+TEST_CASE("mixed textures keep painter order; one chunk absorbs them all") {
     using namespace ws::ui::r2d;
     Renderer2D r;
     r.frame_begin(100.0f, 100.0f);
@@ -749,19 +749,25 @@ TEST_CASE("the material sort groups a texture's quads within a block") {
     r.draw_quad(20.0f, 20.0f, 1.0f, 1.0f, rgba(255, 255, 255), Texture{2});
     r.frame_end();
 
-    // Grouped by texture (submission order kept within each group): both
-    // texture-1 quads, then both texture-2 quads.
+    // Texture is not a sort key: the replay is the exact submission order,
+    // and the per-chunk texture table holds both textures in ONE chunk.
+    // (Sorting by material would have pulled the texture-1 quads together,
+    // flipping overlapping draws that differ only in texture - the exact
+    // bug that put a rounded face over its label bar.)
     REQUIRE(r.batch().chunk_count() == 1);
     const auto& v = r.batch().vertices();
     REQUIRE(v.size() == 16);
     CHECK(v[0].pos[0] == 0.0f);
+    CHECK(v[0].pos[1] == 0.0f);
     CHECK(v[0].tex_index == 0.0f);
-    CHECK(v[4].pos[0] == 20.0f);
-    CHECK(v[4].tex_index == 0.0f);
-    CHECK(v[8].pos[0] == 0.0f);
-    CHECK(v[8].tex_index == 1.0f);
+    CHECK(v[4].pos[0] == 0.0f);
+    CHECK(v[4].pos[1] == 20.0f);
+    CHECK(v[4].tex_index == 1.0f);
+    CHECK(v[8].pos[0] == 20.0f);
+    CHECK(v[8].tex_index == 0.0f);   // texture 1 again: reuses its table slot
     CHECK(v[12].pos[0] == 20.0f);
-    CHECK(v[12].tex_index == 1.0f);
+    CHECK(v[12].pos[1] == 20.0f);
+    CHECK(v[12].tex_index == 1.0f);  // texture 2's slot again
     CHECK(r.batch().chunk(0).texture_count == 2);
 }
 
@@ -906,7 +912,7 @@ TEST_CASE("draw_sprite records the page texture and sub-rect UVs") {
     CHECK(r.batch().chunk(0).texture_ids[0] == 7u);
 }
 
-TEST_CASE("a page's sprites share one material key, whatever the draw order") {
+TEST_CASE("sprites and raw textures interleave; the page never splits the chunk") {
     using namespace ws::ui::r2d;
     Renderer2D r;
     std::vector<atlas::Rect> rects(2);
@@ -927,23 +933,26 @@ TEST_CASE("a page's sprites share one material key, whatever the draw order") {
     r.draw_sprite(0.0f, 20.0f, 1.0f, 1.0f, 0xFFFFFFFF, Sprite{7, 1});
     r.frame_end();
 
-    // The material sort pulls both sprites (one page texture) ahead of the
-    // raw-texture quad, all inside one chunk - the whole point of atlases.
+    // The whole point of atlases is the chunk structure, not the draw
+    // order: one page's sprites ride one texture-table slot, so however
+    // the calls interleave with other textures everything stays in one
+    // chunk - and, texture not being a sort key, the app's painter order
+    // survives the batch intact.
     REQUIRE(r.batch().chunk_count() == 1);
     const auto& v = r.batch().vertices();
     REQUIRE(v.size() == 12);
-    CHECK(v[0].pos[0] == 0.0f);   // sprite 0
-    CHECK(v[4].pos[1] == 20.0f);  // sprite 1, reordered before the quad
-    CHECK(v[8].pos[0] == 20.0f);  // the raw-texture quad last
-    CHECK(v[0].tex_index == 0.0f);
-    CHECK(v[4].tex_index == 0.0f);
-    CHECK(v[8].tex_index == 1.0f);
+    CHECK(v[0].pos[0] == 0.0f);   // sprite 0, first submitted
+    CHECK(v[4].pos[0] == 20.0f);  // the raw-texture quad, in its place
+    CHECK(v[8].pos[1] == 20.0f);  // sprite 1, last submitted
+    CHECK(v[0].tex_index == 0.0f);  // page 7's slot...
+    CHECK(v[4].tex_index == 1.0f);  // ...the quad's own slot...
+    CHECK(v[8].tex_index == 0.0f);  // ...page 7 again
     CHECK(r.batch().chunk(0).texture_count == 2);
     CHECK(r.batch().chunk(0).texture_ids[0] == 7u);
     CHECK(r.batch().chunk(0).texture_ids[1] == 9u);
-    // Sub-rect UVs stayed per-sprite through the reorder.
+    // Sub-rect UVs stayed per-sprite through the batch.
     CHECK(v[0].uv[0] == 0.0f);
-    CHECK(v[4].uv[0] == 0.5f);
+    CHECK(v[8].uv[0] == 0.5f);
 }
 
 TEST_CASE("unknown or sentinel sprites draw white, geometry intact") {
@@ -1019,7 +1028,7 @@ TEST_CASE("push_clip batches clip runs apart; pop restores the full frame") {
     r.end();
     r.frame_end();
 
-    // The sort is (layer, block, clip, material): the two full-clip quads
+    // The sort is (layer, block, clip): the two full-clip quads
     // group into chunk 0 keeping submission order (stable), the clipped
     // quad batches apart under its own clip.
     REQUIRE(r.batch().chunk_count() == 2);

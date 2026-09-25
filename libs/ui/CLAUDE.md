@@ -158,12 +158,15 @@ includes only `<cstdint>`, `<initializer_list>` and `<vector>` — no
 Vulkan/GLFW/stb types (stb_image is PRIVATE, like every third-party).
 
 - **Recording is data.** A draw appends a `DrawCommand` (sort layer, camera
-  block, clip, material key, expanded corners). `frame_end()` — one point,
-  after `on_update()` returns — stable-sorts the frame by (layer, camera
-  block, clip, material) and replays it into the batch, so GPU state
-  changes, not submission order, drive the chunk structure. The sort is
-  stable; `set_layer()` is the explicit z escape hatch that outranks all
-  three key components below it.
+  block, clip, expanded corners; the material key rides along as metadata).
+  `frame_end()` — one point, after `on_update()` returns — stable-sorts the
+  frame by (layer, camera block, clip) and replays it into the batch.
+  Material is NOT a sort key: the 32-slot table already lets one chunk hold
+  many textures, so sorting by it bought nothing and reordered overlapping
+  draws that differ in texture (a rounded face painted over its label bar).
+  Within one layer/block/clip the replay is the exact submission order —
+  real painter's order. `set_layer()` is the explicit z escape hatch that
+  outranks the key.
 - **Clip stack.** `push_clip(x, y, w, h)` pushes a framebuffer-space rect
   (top-left origin, screen space even inside camera blocks); draws snapshot
   the active clip, nesting intersects at push time, and the stack empties
@@ -191,8 +194,9 @@ Vulkan/GLFW/stb types (stb_image is PRIVATE, like every third-party).
   duplicated-edge gutters so magnified sprites never sample a shelf
   neighbour — and uploads one texture per page. `Sprite{page, index}`
   keys into per-page rect tables (page is the page texture's id): a
-  page's sprites share one material key, so however interleaved the calls
-  were, the sort keeps them in one chunk; a full page spills to a new page
+  page's sprites ride one texture-table slot, so however interleaved the
+  calls are they never split a chunk — and, texture not being a sort key,
+  they keep the app's draw order too; a full page spills to a new page
   and batches apart, degrading gracefully. Missing/failed images become
   `Sprite{}` (white — the load_texture contract); `sprite_size()` reports
   native pixels (packing never scales). Page tables only grow, the same
@@ -255,6 +259,12 @@ Vulkan/GLFW/stb types (stb_image is PRIVATE, like every third-party).
 
 - volk meta-loader everywhere: never link the Vulkan loader directly and
   never declare vk entry points outside volk (`VK_NO_PROTOTYPES`).
+- The batch shader indexes `u_textures[32]` with a runtime index, which the
+  spec gates behind `shaderSampledImageArrayDynamicIndexing`: device
+  selection skips GPUs lacking it and `vkCreateDevice` enables the feature
+  (previously `pEnabledFeatures` was null — all features off — and the
+  shader silently depended on driver leniency). Universally supported on
+  desktop GPUs, so the gate costs nothing.
 - VMA's implementation TU is `src/vma_impl.cpp` (dynamic function loading;
   the two loader entry points are handed over from `app.cpp` via
   `VmaAllocatorCreateInfo::pVulkanFunctions` since VMA 3.2 requires it) —

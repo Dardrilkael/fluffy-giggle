@@ -28,13 +28,16 @@ namespace ws::ui::r2d {
 // as data so the whole frame can be sorted before batching: state changes,
 // not submission order alone, decide the segment structure.
 struct DrawCommand {
-    // Sort key components, most significant first:
+    // Sort key components, most significant first (see frame_end()):
     std::uint32_t sort_layer = 0;    // set_layer(): the explicit z escape hatch
     std::uint32_t camera_epoch = 0;  // which begin() block recorded this
     float clip[4] = {0.0f, 0.0f, FLT_MAX, FLT_MAX};  // active clip at record
-                                    // time - one chunk = one scissor, so
-                                    // this sits between block and material
-                                    // in the key (clip runs batch apart)
+                                    // time - one chunk = one scissor, so a
+                                    // clip change is a hard chunk boundary
+    // NOT a sort key: the 32-slot per-chunk texture table already lets one
+    // chunk hold many materials, and sorting by this would reorder
+    // overlapping same-layer draws that use different textures (a button's
+    // face vs. its label bar). Kept as metadata only.
     std::uint64_t material_key = 0;  // texture (+ future blend/shader bits)
 
     Camera2D camera;           // camera state at record time

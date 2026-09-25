@@ -69,12 +69,13 @@ FrameSize frame_size();
 // per frame layers blocks back to front.
 //
 // At the frame's end the shell sorts the recorded draws - explicit layer
-// first, then camera block, then clip, then texture - and only then
-// batches them. The sort is stable: overlapping draws that share layer,
-// camera, clip and texture always keep their submission order. Draws
-// differing only in texture may be grouped (reordered); when the overlap
-// order of two different-texture draws matters, give them an explicit
-// set_layer().
+// first, then camera block, then clip - and only then batches them. The
+// sort is stable, and texture is NOT a key: draws that share layer, camera
+// block and clip replay in their exact submission order - real painter's
+// order - whatever textures they use (one chunk's texture table holds up
+// to 32 alongside, so mixed textures neither reorder nor split the chunk).
+// set_layer() stays the explicit z escape hatch when overlap order must
+// disagree with submission order.
 void begin();
 void begin(const Camera2D& camera);
 

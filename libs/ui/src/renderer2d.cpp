@@ -104,11 +104,15 @@ void Renderer2D::frame_end() {
         return;
     }
     // Layer first (the explicit z escape hatch), then begin() block, then
-    // clip, then material. The clip must precede material: one chunk = one
-    // scissor, so clip runs need contiguous batches (the 8-chunk frame cap
-    // makes interleaved clip runs unaffordable), while materials share a
-    // chunk through the 32-slot texture table. Stable, because reordering
-    // must never flip two overlapping same-state draws.
+    // clip. These three are the only hard chunk boundaries: one chunk is
+    // one VP and one scissor, so a layer/epoch/clip change must start a
+    // fresh chunk. Material (texture) is deliberately NOT a sort key - the
+    // 32-slot texture table already lets one chunk hold many textures, so
+    // sorting by material bought nothing but reordered draws that share a
+    // layer/epoch/clip and overlap on screen (e.g. a button's face and its
+    // label bar use different textures and would otherwise flip). Stable,
+    // so within an unchanged layer/epoch/clip, draws replay in the exact
+    // order the app recorded them - real painter's order.
     std::stable_sort(commands_.begin(), commands_.end(),
                      [](const DrawCommand& a, const DrawCommand& b) {
                          if (a.sort_layer != b.sort_layer) {
@@ -122,7 +126,7 @@ void Renderer2D::frame_end() {
                                  return a.clip[i] < b.clip[i];
                              }
                          }
-                         return a.material_key < b.material_key;
+                         return false;  // equal key: keep record order
                      });
 
     // Replay: a segment opens per begin() block AND per clip change - both

@@ -141,7 +141,8 @@ protected:
                                r2d::rgba(72, 132, 192));
         // Atlas sprites: sub-rects of one packed page texture. However
         // interleaved with the draws above, these four stay in one batch
-        // segment - the whole page is one material.
+        // segment - one page is one texture-table slot, and texture is
+        // not a sort key, so painter order rules.
         for (std::size_t i = 0; i < icons_.size(); ++i) {
             const r2d::FrameSize native = r2d::sprite_size(icons_[i]);
             // Missing/failed entries report {0, 0}: draw a visible white
