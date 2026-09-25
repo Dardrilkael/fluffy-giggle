@@ -18,8 +18,9 @@ gets a window, an event stream, and a place to submit draw commands —
   quads and lines, atlas sprites, sorted then batched, flushed under the
   widgets.
 - **Immediate-mode gui** — `gui/` headers (`ws::ui::gui`): dependency-free
-  widgets (button/checkbox/slider/panel) that draw through r2d; caller-owned
-  state, identity + hit-testing + layout + draw stay one seam.
+  widgets (button/checkbox/slider/panel/tabs/scroll region) that draw
+  through r2d; caller-owned state, identity + hit-testing + layout + draw
+  stay one seam.
 - **`ws::ui::App`** — the shell itself: owns the window, Vulkan context,
   swapchain, frame loop, event pumping, and shutdown.
 
@@ -65,7 +66,7 @@ libs/ui/
       layout_cursor.hpp      # LayoutCursor: flowing layout + panel stack
       rect.hpp                # Rect, WidgetId, HitTest — the shared vocabulary
       theme.hpp               # ChromeTheme: every color/metric the widgets use
-      widgets.hpp            # button/checkbox/slider/panel — the widget functions
+      widgets.hpp            # button/checkbox/slider/panel/tabs/scroll region — the widget functions
   src/
     app.cpp                  # pimpl: Vulkan context, swapchain, frame loop
     atlas_packer.h/.cpp      # pure-CPU shelf packer: atlas pages, sub-rects, gutters

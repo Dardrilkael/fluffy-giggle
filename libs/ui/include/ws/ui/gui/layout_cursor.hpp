@@ -50,6 +50,20 @@ public:
     // end_panel() calls.
     int depth() const { return top_ + 1; }
 
+    // The innermost open panel's content rect - the same rect its
+    // begin_panel returned, re-readable without threading it through to
+    // a later call (a scroll region's end needs it back). Empty with no
+    // panel open. Past the overflow clamp this reports the deepest real
+    // panel, where the degenerate children actually flowed.
+    Rect panel_content() const;
+
+    // How far the innermost panel's placements reach below its content
+    // origin: the bottom of the last placed line, or of the line a
+    // same_line() resumed onto - 0 with no panel open or nothing placed.
+    // A scroll region reads it after its children to size its content
+    // ("how tall was what I flowed?") without tracking placements itself.
+    float flow_extent() const;
+
 private:
     struct Panel {
         Rect content;  // the padded rect widgets flow within

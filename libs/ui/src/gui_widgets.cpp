@@ -26,6 +26,30 @@ float label_bar_width(const char* label, float max_width) {
     return std::max(0.0f, std::min(wanted, max_width));
 }
 
+// A scroll region's persistent state (Phase 3 side-table entry): how far
+// the content is scrolled up (offset), and the scroll range's top as
+// measured at the LAST end_scroll_panel (max_offset = content_height -
+// viewport_height). Begin clamps against the stale max, end refreshes
+// it - the immediate-mode one-frame lag, kept in one struct so the two
+// floats share one side-table entry per panel.
+struct ScrollState {
+    float offset = 0.0f;
+    float max_offset = 0.0f;
+};
+
+// The panel chrome begin_panel and begin_scroll_panel share: a 1px
+// border-colored quad behind the panel face inset by 1. Drawn BEFORE the
+// clip push, so the frame never clips against the content it contains.
+// Degenerate panels clamp their face to nothing instead of drawing
+// backwards.
+void panel_chrome(const Rect& bounds, const ChromeTheme& theme) {
+    r2d::draw_quad(bounds.x, bounds.y, bounds.width, bounds.height,
+                   theme.border);
+    r2d::draw_quad(bounds.x + 1.0f, bounds.y + 1.0f,
+                   std::max(0.0f, bounds.width - 2.0f),
+                   std::max(0.0f, bounds.height - 2.0f), theme.panel_bg);
+}
+
 }  // namespace
 
 bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
@@ -217,18 +241,66 @@ bool slider_int(GuiContext& gui, LayoutCursor& layout,
     return changed;
 }
 
+bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
+             const char* label, const char* const* tabs, int count,
+             int& active, float width) {
+    width = std::max(width, 0.0f);  // like button: no mirrored quads
+
+    bool changed = false;
+    // The strip's own scope: each tab ids by index under it, so duplicate
+    // tab labels in one strip stay distinct widgets (the loop-children
+    // discipline, without stringifying).
+    gui.ids().push(label);
+    for (int i = 0; i < count; ++i) {
+        gui.ids().push(i);
+        const Rect rect = layout.next(width, theme.control_height);
+        const HitTest hit = gui.hit_test(gui.ids().current("tab"), rect);
+
+        // Face priority: press feedback even on the selected tab, then
+        // the selection accent, then hover, then idle.
+        std::uint32_t face = theme.control_bg;
+        if (hit.pressed) {
+            face = theme.control_pressed;
+        } else if (i == active) {
+            face = theme.control_on;
+        } else if (hit.hovered) {
+            face = theme.control_hovered;
+        }
+        r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                               theme.corner_radius, face);
+
+        // The tab's bar, centered like a button's label.
+        const float bar_width =
+            label_bar_width(tabs != nullptr ? tabs[i] : nullptr,
+                            rect.width - 2.0f * theme.padding);
+        if (bar_width > 0.0f) {
+            const float bar_height = rect.height * 0.5f;
+            r2d::draw_quad(rect.x + (rect.width - bar_width) * 0.5f,
+                           rect.y + (rect.height - bar_height) * 0.5f,
+                           bar_width, bar_height, theme.text);
+        }
+
+        // A full click moves the selection; clicking the already-selected
+        // tab is a no-op that reports nothing.
+        if (hit.clicked && i != active) {
+            active = i;
+            changed = true;
+        }
+        gui.ids().pop();
+        if (i + 1 < count) {
+            layout.same_line();  // one line: the next tab beside this one
+        }
+    }
+    gui.ids().pop();
+    return changed;
+}
+
 Rect begin_panel(GuiContext& gui, LayoutCursor& layout,
                  const ChromeTheme& theme, const char* label,
                  const Rect& bounds) {
     // Chrome first, BEFORE the clip push, so the frame and face never clip
-    // against the content rect they contain: a 1px border-colored quad
-    // behind the panel face inset by 1. Degenerate panels clamp their
-    // face to nothing instead of drawing backwards.
-    r2d::draw_quad(bounds.x, bounds.y, bounds.width, bounds.height,
-                   theme.border);
-    r2d::draw_quad(bounds.x + 1.0f, bounds.y + 1.0f,
-                   std::max(0.0f, bounds.width - 2.0f),
-                   std::max(0.0f, bounds.height - 2.0f), theme.panel_bg);
+    // against the content rect they contain (see panel_chrome).
+    panel_chrome(bounds, theme);
 
     // Then the three pushes: the layout panel (it computes the content
     // rect), the clip at that rect (children cannot draw outside), and
@@ -248,6 +320,103 @@ void end_panel(GuiContext& gui, LayoutCursor& layout) {
     gui.ids().pop();
     r2d::pop_clip();
     layout.end_panel();
+}
+
+Rect begin_scroll_panel(GuiContext& gui, LayoutCursor& layout,
+                        const ChromeTheme& theme, const char* label,
+                        const Rect& bounds) {
+    // The same chrome as begin_panel, before any clip.
+    panel_chrome(bounds, theme);
+
+    // The viewport: bounds inset by the padding, clamped empty when the
+    // bounds cannot hold it (a backwards rect must not reach r2d). This
+    // is the UNSCROLLED window the content shows through - the clip and
+    // the returned rect both use it, unshifted.
+    const Rect viewport{bounds.x + theme.padding, bounds.y + theme.padding,
+                        std::max(0.0f, bounds.width - 2.0f * theme.padding),
+                        std::max(0.0f, bounds.height - 2.0f * theme.padding)};
+
+    // The scroll state keys INSIDE the panel's own scope, so the matching
+    // end_scroll_panel re-derives the same entry without the caller
+    // threading a handle through (begin pushes, end pops - both read
+    // while the scope is live).
+    gui.ids().push(label);
+    const WidgetId scroll_id = gui.ids().current("scroll");
+    ScrollState& scroll = gui.persistent_state<ScrollState>(scroll_id);
+
+    // The wheel moves the offset while the pointer is inside the viewport.
+    // Positive dy is wheel-up - toward EARLIER content - so the offset
+    // (content shifted up) decreases. Clamped against the range measured
+    // at the last end_scroll_panel: this frame's content does not exist
+    // yet, and a fresh panel has no range at all.
+    if (contains(viewport, gui.input().mouse_x, gui.input().mouse_y) &&
+        gui.input().scroll_dy != 0.0f) {
+        scroll.offset -= gui.input().scroll_dy * theme.scroll_speed;
+    }
+    scroll.offset =
+        std::min(std::max(scroll.offset, 0.0f), scroll.max_offset);
+
+    // Children flow inside a VIRTUAL panel, shifted up by the offset: the
+    // rects layout hands out are already at their scrolled positions, so
+    // widgets draw AND hit-test there with no per-widget knowledge - while
+    // the clip stays at the unscrolled viewport, cutting exactly what
+    // pokes past the edge. Push order (scope, layout, clip) is reversed
+    // by end_scroll_panel.
+    (void)layout.begin_panel({bounds.x, bounds.y - scroll.offset,
+                              bounds.width,
+                              bounds.height + scroll.offset},
+                             theme.padding);
+    r2d::push_clip(viewport.x, viewport.y, viewport.width, viewport.height);
+    return viewport;
+}
+
+void end_scroll_panel(GuiContext& gui, LayoutCursor& layout,
+                      const ChromeTheme& theme) {
+    // The same entry begin_scroll_panel keyed, re-derived inside the
+    // still-pushed scope.
+    const WidgetId scroll_id = gui.ids().current("scroll");
+    ScrollState& scroll = gui.persistent_state<ScrollState>(scroll_id);
+
+    // The real viewport: this frame's (virtual, shifted) content rect,
+    // shifted back down by the offset it was opened with. With no panel
+    // open (caller bug) panel_content() is empty and the math decays
+    // harmlessly, like every underflow pop.
+    Rect viewport = layout.panel_content();
+    viewport.y += scroll.offset;
+    viewport.width = std::max(0.0f, viewport.width);
+    viewport.height = std::max(0.0f, viewport.height - scroll.offset);
+
+    // This frame's placements size the scroll range the NEXT frame clamps
+    // against - a content that shrank pulls the offset in one frame later.
+    const float extent = layout.flow_extent();
+    scroll.max_offset = std::max(0.0f, extent - viewport.height);
+    scroll.offset =
+        std::min(std::max(scroll.offset, 0.0f), scroll.max_offset);
+
+    // The thumb, after all children (painter order puts it over the
+    // content) but still inside the clip. Drawn only while there is room
+    // to scroll: a fitted panel wears no dead chrome. Proportional to the
+    // visible share, with a floor so a huge content cannot shrink it to
+    // nothing.
+    if (scroll.max_offset > 0.0f && viewport.width > 0.0f &&
+        viewport.height > 0.0f) {
+        const float track = viewport.height;
+        const float thumb_width = 4.0f;
+        float thumb_height =
+            track * track / (track + scroll.max_offset);
+        thumb_height = std::min(std::max(thumb_height, 12.0f), track);
+        const float thumb_y =
+            viewport.y +
+            (scroll.offset / scroll.max_offset) * (track - thumb_height);
+        r2d::draw_rounded_quad(viewport.x + viewport.width - thumb_width,
+                               thumb_y, thumb_width, thumb_height,
+                               theme.corner_radius, theme.border);
+    }
+
+    // The reverse of begin_scroll_panel's pushes.
+    r2d::pop_clip();
+    layout.end_panel();
+    gui.ids().pop();
 }
 
 }  // namespace ws::ui::gui

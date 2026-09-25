@@ -77,4 +77,52 @@ Rect begin_panel(GuiContext& gui, LayoutCursor& layout,
                  const Rect& bounds);
 void end_panel(GuiContext& gui, LayoutCursor& layout);
 
+// A tab strip: `count` tabs side by side on one line, `width` px each
+// (the strip is count*width wide), theme.control_height tall. The
+// caller's `active` IS the selection state - a full click on a tab
+// writes the clicked index into it, and true returns only on the frame
+// the selection MOVED (clicking the already-active tab reports false).
+// An out-of-range `active` selects nothing until a click brings it back
+// in range; count <= 0 places and ids nothing. Tabs id by INDEX under
+// the strip's own scope (`label`), so duplicate tab labels inside one
+// strip stay distinct widgets; the labels shape the centered bars like
+// every other widget's. What shows per tab is the caller's branch -
+// the strip is the selection primitive, not a content container.
+bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
+             const char* label, const char* const* tabs, int count,
+             int& active, float width = 120.0f);
+
+// A scrollable panel: the same chrome, clip and id scope begin_panel
+// pushes, plus a wheel-driven vertical scroll. The scroll offset lives
+// in the context's persistent state (keyed by the panel's scope - the
+// Phase 3 mechanism), so it survives frames AND the panel vanishing for
+// frames (a tab that scrolls keeps its place), with no caller storage.
+// While the pointer is inside the viewport the wheel moves it
+// theme.scroll_speed px per unit (positive dy is wheel-up, toward the
+// top), clamped to [0, content_height - viewport_height] as measured
+// LAST frame - the immediate-mode answer to "this frame's content is
+// not laid out yet" (so the very first frame cannot scroll, and a
+// content that shrinks pulls the offset in one frame later). Children
+// flow from the content origin shifted up by the offset - they draw AND
+// hit-test at their scrolled positions - while the clip stays at the
+// UNSCROLLED viewport, so the scissor cuts exactly what pokes past it.
+// Returns the viewport (unshifted, clamped empty when the bounds cannot
+// hold the padding): the window the content shows through. The matching
+// end_scroll_panel() takes the theme too (it draws): it measures this
+// frame's content extent, re-clamps, draws the scrollbar thumb (only
+// while there is room to scroll), then pops the scope, clip and layout
+// panel in reverse.
+//
+// v1 limits, deliberate: vertical only (scroll_dx is ignored); the
+// wheel scrolls every scroll viewport under the pointer, so overlapping
+// regions are the caller's layout to avoid; and hit-testing does not
+// know about clips, so a row scrolled out of sight still hit-tests if
+// the pointer reaches its off-viewport rect (input clipping is a later
+// concern - it needs a clip-aware hit seam, not a widget patch).
+Rect begin_scroll_panel(GuiContext& gui, LayoutCursor& layout,
+                        const ChromeTheme& theme, const char* label,
+                        const Rect& bounds);
+void end_scroll_panel(GuiContext& gui, LayoutCursor& layout,
+                      const ChromeTheme& theme);
+
 }  // namespace ws::ui::gui

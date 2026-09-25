@@ -98,6 +98,43 @@ protected:
                        content.y + content.height - 8.0f, 48.0f, 48.0f,
                        r2d::rgba(255, 120, 60));
         ws::ui::gui::end_panel(gui_, layout_);
+
+        // Phase 9: a tabbed page under the demo panel. The strip selects
+        // (the caller's int is the state); "list" is a scrollable checkbox
+        // column whose offset lives in the gui context - it survives tab
+        // flips - and "tune" edits the list itself, live: shrinking the
+        // row count shrinks the scroll range one frame later.
+        const ws::ui::gui::Rect page = ws::ui::gui::begin_panel(
+            gui_, layout_, ws::ui::gui::kDefaultChrome, "pages",
+            {gui_frame.width - 244.0f, 208.0f, 220.0f, 220.0f});
+        static const char* kPageTabs[] = {"list", "tune"};
+        (void)ws::ui::gui::tab_bar(gui_, layout_, ws::ui::gui::kDefaultChrome,
+                                   "views", kPageTabs, 2, active_tab_,
+                                   page.width * 0.5f);
+        if (active_tab_ == 0) {
+            const float below = ws::ui::gui::kDefaultChrome.control_height +
+                                ws::ui::gui::kDefaultChrome.spacing;
+            (void)ws::ui::gui::begin_scroll_panel(
+                gui_, layout_, ws::ui::gui::kDefaultChrome, "list",
+                {page.x, page.y + below, page.width, page.height - below});
+            for (int i = 0; i < row_count_; ++i) {
+                gui_.ids().push(i);  // loop rows id by index (one label)
+                ws::ui::gui::checkbox(
+                    gui_, layout_, ws::ui::gui::kDefaultChrome, "row",
+                    rows_[static_cast<std::size_t>(i)]);
+                gui_.ids().pop();
+            }
+            ws::ui::gui::end_scroll_panel(gui_, layout_,
+                                          ws::ui::gui::kDefaultChrome);
+        } else {
+            ws::ui::gui::slider_int(gui_, layout_, ws::ui::gui::kDefaultChrome,
+                                    "rows", row_count_, 1, 16, page.width);
+            if (ws::ui::gui::button(gui_, layout_, ws::ui::gui::kDefaultChrome,
+                                    "clear", page.width)) {
+                rows_.fill(false);
+            }
+        }
+        ws::ui::gui::end_panel(gui_, layout_);
         r2d::end();
         r2d::set_layer(0);
 
@@ -257,6 +294,9 @@ private:
     ws::ui::gui::LayoutCursor layout_;  // one per screen; the pass repeats each frame
     int gui_clicks_ = 0;
     float gui_spin_rate_ = 0.01f;  // driven by the gui panel's "spin" slider
+    int active_tab_ = 0;           // Phase 9: the page panel's selected tab
+    int row_count_ = 16;           // the "list" tab's rows (edited in "tune")
+    std::array<bool, 16> rows_{};   // the "list" tab's checkbox states
 };
 
 }  // namespace

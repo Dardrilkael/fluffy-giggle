@@ -260,6 +260,30 @@ void LayoutCursor::end_panel() {
     }
 }
 
+Rect LayoutCursor::panel_content() const {
+    if (top_ < 0) {
+        return {};
+    }
+    return panels_[static_cast<std::size_t>(
+                       std::min(top_, kMaxPanels - 1))]
+        .content;
+}
+
+float LayoutCursor::flow_extent() const {
+    if (top_ < 0) {
+        return 0.0f;
+    }
+    const Panel& panel =
+        panels_[static_cast<std::size_t>(std::min(top_, kMaxPanels - 1))];
+    // At a line start the cursor sits below the last placed line; a
+    // same_line() rewind parks it on the line's top with the line's
+    // tallest still accumulated - the line's eventual bottom adds it.
+    const float bottom = panel.at_line_start
+                             ? panel.cursor_y
+                             : panel.cursor_y + panel.line_height;
+    return bottom - panel.content.y;
+}
+
 // --- GuiContext: hot/active hit-testing + persistent side tables ------------------
 
 void GuiContext::new_frame(const InputFrame& input) {

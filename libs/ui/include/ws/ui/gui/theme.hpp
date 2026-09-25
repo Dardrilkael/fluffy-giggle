@@ -25,7 +25,8 @@ struct ChromeTheme {
     float control_height = 24.0f;
     float corner_radius = 4.0f;  // drawn as real corners in Phase 8
     float padding = 12.0f;       // panel content inset
-    float spacing = 8.0f;        // reserved for widget gaps (Phase 7+)
+    float spacing = 8.0f;        // the gap between widgets sharing a row
+    float scroll_speed = 32.0f;  // px one wheel unit scrolls a scroll panel
 };
 
 // The stock look. constexpr, so a custom theme starts from it with

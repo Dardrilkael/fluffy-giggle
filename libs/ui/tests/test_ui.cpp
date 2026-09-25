@@ -2151,3 +2151,392 @@ TEST_CASE("button: an icon rides along; corner variants keep the click contract"
     gui.end_frame();
     CHECK(value == true);
 }
+
+// --- gui tabs + scroll regions (Phase 9) ---------------------------------------------
+
+TEST_CASE("tab_bar: a click moves the selection; the strip is one line") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    static const char* kTabs[] = {"alpha", "beta", "gamma"};
+    int active = 0;
+
+    // Tabs of 60 px on a 24-tall line: alpha (0,0,60,24), beta (60,0,..),
+    // gamma (120,0,..). A same-frame click on beta's rect selects it and
+    // reports exactly once.
+    gui.new_frame(snap(90.0f, 12.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(tab_bar(gui, layout, kDefaultChrome, "views", kTabs, 3, active,
+                  60.0f));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(active == 1);
+
+    // Clicking the already-selected tab: no move, no report.
+    gui.new_frame(snap(90.0f, 12.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!tab_bar(gui, layout, kDefaultChrome, "views", kTabs, 3, active,
+                   60.0f));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(active == 1);
+
+    // The strip occupied ONE line: the widget placed after it starts
+    // below the 24-tall tabs, not 72 down.
+    gui.new_frame(snap(400.0f, 400.0f));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    (void)tab_bar(gui, layout, kDefaultChrome, "views", kTabs, 3, active,
+                  60.0f);
+    const Rect after = layout.next(100.0f, 10.0f);
+    CHECK(after.y == 24.0f);
+    layout.end_panel();
+    gui.end_frame();
+
+    // A two-frame click back onto alpha: press frame selects nothing...
+    gui.new_frame(snap(30.0f, 12.0f, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!tab_bar(gui, layout, kDefaultChrome, "views", kTabs, 3, active,
+                   60.0f));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(active == 1);
+    // ...release frame completes it.
+    gui.new_frame(snap(30.0f, 12.0f, false, false, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(tab_bar(gui, layout, kDefaultChrome, "views", kTabs, 3, active,
+                  60.0f));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(active == 0);
+
+    // An out-of-range active selects nothing - until a click brings it
+    // back in range.
+    active = 7;
+    gui.new_frame(snap(150.0f, 12.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(tab_bar(gui, layout, kDefaultChrome, "views", kTabs, 3, active,
+                  60.0f));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(active == 2);
+
+    // count <= 0: nothing placed, nothing selected, the state untouched.
+    int none = 5;
+    gui.new_frame(snap(400.0f, 400.0f));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!tab_bar(gui, layout, kDefaultChrome, "empty", nullptr, 0, none));
+    const Rect empty_after = layout.next(10.0f, 10.0f);
+    CHECK(empty_after.y == 0.0f);  // the strip claimed no line
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(none == 5);
+}
+
+TEST_CASE("tab_bar: index scopes keep duplicate tab labels distinct") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    static const char* kSame[] = {"tab", "tab", "tab"};
+    int active = 0;
+
+    // Three tabs with ONE label: the index scopes are what separate them.
+    // During the press frame the pressed tab's id is active - the
+    // probe-derived id of views;2;tab, which collided ids (all three
+    // hashing to views;0;tab) could never produce.
+    IdStack probe;
+    probe.push("views");
+    probe.push(2);
+    const WidgetId tab_two = probe.current("tab");
+
+    gui.new_frame(snap(150.0f, 12.0f, true, true));  // press on gamma
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!tab_bar(gui, layout, kDefaultChrome, "views", kSame, 3, active,
+                   60.0f));
+    layout.end_panel();
+    CHECK(gui.active_id() == tab_two);
+    gui.end_frame();
+
+    // Release on the same tab: the click lands on gamma only.
+    gui.new_frame(snap(150.0f, 12.0f, false, false, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(tab_bar(gui, layout, kDefaultChrome, "views", kSame, 3, active,
+                  60.0f));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(active == 2);
+}
+
+TEST_CASE("scroll: the wheel moves the flow - clamps at both ends and persists") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    // One frame's pass over a 200x100 scroll panel (padding 12 → the
+    // viewport is (12, 12, 176, 76)) with `rows` 24-tall buttons, all
+    // sharing one label under per-index id scopes - the loop-children
+    // discipline. Returns the viewport and the row a full click landed
+    // on (-1 = none); headless, the draws drop and only layout,
+    // hit-testing and the persistent scroll state act.
+    const auto pass = [&](const InputFrame& frame, int rows) {
+        gui.new_frame(frame);
+        const Rect view = begin_scroll_panel(
+            gui, layout, kDefaultChrome, "list", {0.0f, 0.0f, 200.0f, 100.0f});
+        int clicked = -1;
+        for (int i = 0; i < rows; ++i) {
+            gui.ids().push(i);
+            if (button(gui, layout, kDefaultChrome, "row", 120.0f)) {
+                clicked = i;
+            }
+            gui.ids().pop();
+        }
+        end_scroll_panel(gui, layout, kDefaultChrome);
+        gui.end_frame();
+        return std::pair{view, clicked};
+    };
+
+    // Ten rows = 240 px of content; the scroll range is 240 - 76 = 164.
+    // Two click snapshots recur through the frames: a full click at the
+    // unscrolled row 0's center, and one at row 3's center at offset 32.
+    const InputFrame click_origin = snap(60.0f, 24.0f, false, true, true);
+    const InputFrame click_row3 = snap(60.0f, 64.0f, false, true, true);
+
+    // Frame 1: a wheel-down unit aims to scroll, but a fresh panel has no
+    // measured range yet - the immediate-mode first frame cannot scroll.
+    // The end of this frame measures the range for the next.
+    InputFrame f = snap(100.0f, 50.0f);  // pointer inside the viewport
+    f.scroll_dy = -1.0f;
+    {
+        const auto [view, clicked] = pass(f, 10);
+        CHECK(view.x == 12.0f);  // the viewport is unshifted, always
+        CHECK(view.y == 12.0f);
+        CHECK(view.width == 176.0f);
+        CHECK(view.height == 76.0f);
+        CHECK(clicked == -1);
+    }
+
+    // Frame 2: a click at the UNSCROLLED row 0 proves the frame-1 wheel
+    // moved nothing (had it, row 0 would sit at y -20..4 and this click
+    // would land on row 1).
+    {
+        const auto [view, clicked] = pass(click_origin, 10);
+        CHECK(view.y == 12.0f);
+        CHECK(clicked == 0);
+    }
+
+    // Frame 3: a wheel-down unit now moves the flow up 32 px
+    // (kDefaultChrome.scroll_speed) - and row 3, laid out at y 52..76,
+    // takes the same frame's click at its scrolled position.
+    f = click_row3;
+    f.scroll_dy = -1.0f;
+    {
+        const auto [view, clicked] = pass(f, 10);
+        CHECK(view.y == 12.0f);  // the viewport never shifts with the scroll
+        CHECK(clicked == 3);
+    }
+
+    // Frame 4: no wheel - the offset persisted across the frame boundary.
+    {
+        const auto [view, clicked] = pass(click_row3, 10);
+        CHECK(view.y == 12.0f);
+        CHECK(clicked == 3);
+    }
+
+    // Frame 5: a huge wheel-up clamps at the top (offset 0); row 0 is
+    // back at the unscrolled origin and takes the click.
+    f = click_origin;
+    f.scroll_dy = 100.0f;
+    {
+        const auto [view, clicked] = pass(f, 10);
+        CHECK(view.height == 76.0f);  // the viewport is still the window
+        CHECK(clicked == 0);
+    }
+
+    // Frame 6: a huge wheel-down clamps at the bottom (offset 164): row 9
+    // spans y 64..88, its bottom edge EXACTLY the viewport's bottom.
+    f = snap(60.0f, 87.0f, false, true, true);
+    f.scroll_dy = -100.0f;
+    {
+        const auto [view, clicked] = pass(f, 10);
+        CHECK(view.y == 12.0f);
+        CHECK(clicked == 9);
+    }
+
+    // Frame 7: idle - the offset held at the clamp; a click below row 9's
+    // bottom edge hits nothing at all.
+    {
+        const auto [view, clicked] =
+            pass(snap(60.0f, 90.0f, false, true, true), 10);
+        CHECK(view.y == 12.0f);
+        CHECK(clicked == -1);
+    }
+
+    // Frames 8-9: the content shrinks to two rows (48 px - shorter than
+    // the viewport). Frame 8 is the documented one-frame lag: the offset
+    // still holds 164 against last frame's range, so the two rows flow far
+    // above and the click at the unscrolled origin hits nothing...
+    {
+        const auto [view, clicked] = pass(click_origin, 2);
+        CHECK(view.height == 76.0f);
+        CHECK(clicked == -1);
+    }
+    // ...frame 9 clamps back to 0 and row 0 takes the click.
+    {
+        const auto [view, clicked] = pass(click_origin, 2);
+        CHECK(view.height == 76.0f);
+        CHECK(clicked == 0);
+    }
+}
+
+TEST_CASE("scroll: two regions keep independent offsets") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    // Two side-by-side panels, five 24-tall rows each (120 px of content,
+    // range 120 - 76 = 44). Returns which row a click landed on per panel.
+    const auto pass = [&](const InputFrame& frame, int& a_click, int& b_click) {
+        gui.new_frame(frame);
+        (void)begin_scroll_panel(gui, layout, kDefaultChrome, "left",
+                                 {0.0f, 0.0f, 120.0f, 100.0f});
+        a_click = -1;
+        for (int i = 0; i < 5; ++i) {
+            gui.ids().push(i);
+            if (button(gui, layout, kDefaultChrome, "row", 100.0f)) {
+                a_click = i;
+            }
+            gui.ids().pop();
+        }
+        end_scroll_panel(gui, layout, kDefaultChrome);
+        (void)begin_scroll_panel(gui, layout, kDefaultChrome, "right",
+                                 {140.0f, 0.0f, 120.0f, 100.0f});
+        b_click = -1;
+        for (int i = 0; i < 5; ++i) {
+            gui.ids().push(i);
+            if (button(gui, layout, kDefaultChrome, "row", 100.0f)) {
+                b_click = i;
+            }
+            gui.ids().pop();
+        }
+        end_scroll_panel(gui, layout, kDefaultChrome);
+        gui.end_frame();
+    };
+
+    // Frame 1: idle - both panels measure their range this frame.
+    int a = -2, b = -2;
+    pass(snap(400.0f, 400.0f), a, b);
+    CHECK(a == -1);
+    CHECK(b == -1);
+
+    // Frame 2: the pointer sits inside the LEFT viewport only; its wheel
+    // scrolls the left panel 32 px and must not touch the right one.
+    InputFrame f = snap(60.0f, 50.0f);
+    f.scroll_dy = -1.0f;
+    pass(f, a, b);
+    CHECK(a == -1);
+    CHECK(b == -1);
+
+    // Frame 3: the left panel's row 3 (y 52..76 at offset 32) takes the
+    // click - the right panel would put row 3 at y 84..108.
+    pass(snap(60.0f, 64.0f, false, true, true), a, b);
+    CHECK(a == 3);
+    CHECK(b == -1);
+
+    // Frame 4: the RIGHT panel's row 0 still sits at its unscrolled y
+    // (12..36) - had it scrolled 32, this click (row 0's spot) would land
+    // on row 1 (y 4..28) instead.
+    pass(snap(200.0f, 24.0f, false, true, true), a, b);
+    CHECK(a == -1);
+    CHECK(b == 0);
+}
+
+TEST_CASE("scroll: nests inside a panel and measures its own flow") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    const ChromeTheme& theme = kDefaultChrome;
+
+    // The outer panel flows a header, then a nested scroll region, then
+    // resumes - the scroll panel pushes on top of the outer panel's
+    // pushes, and its extent must measure ITS rows, not the outer's.
+    const auto pass = [&](const InputFrame& frame, int& clicked) {
+        gui.new_frame(frame);
+        (void)begin_panel(gui, layout, theme, "page",
+                          {0.0f, 0.0f, 200.0f, 200.0f});
+        (void)button(gui, layout, theme, "header", 120.0f);  // at (12, 12)
+        (void)begin_scroll_panel(gui, layout, theme, "list",
+                                 {12.0f, 12.0f, 100.0f, 100.0f});
+        clicked = -1;
+        for (int i = 0; i < 5; ++i) {
+            gui.ids().push(i);
+            if (button(gui, layout, theme, "row", 120.0f)) {
+                clicked = i;
+            }
+            gui.ids().pop();
+        }
+        end_scroll_panel(gui, layout, theme);
+        // The outer cursor resumes below the header, parked while the
+        // scroll region flowed its own rows.
+        const Rect after = layout.next(50.0f, 10.0f);
+        CHECK(after.y == 36.0f);
+        end_panel(gui, layout);
+        gui.end_frame();
+    };
+
+    // The depths stack: the scroll region's scope rides on the outer
+    // panel's, and each end pops exactly its own push.
+    gui.new_frame(snap(300.0f, 300.0f));
+    (void)begin_panel(gui, layout, theme, "page", {0.0f, 0.0f, 200.0f, 200.0f});
+    CHECK(gui.ids().depth() == 1);
+    (void)begin_scroll_panel(gui, layout, theme, "list",
+                             {12.0f, 12.0f, 100.0f, 100.0f});
+    CHECK(gui.ids().depth() == 2);  // page;list - children id under both
+    end_scroll_panel(gui, layout, theme);
+    CHECK(gui.ids().depth() == 1);
+    end_panel(gui, layout);
+    CHECK(gui.ids().depth() == 0);
+    gui.end_frame();
+
+    // An idle pass: five rows measure the inner range - 120 px of content
+    // against the viewport (24, 24, 76, 76) => 44.
+    int clicked = -2;
+    pass(snap(300.0f, 300.0f), clicked);
+    CHECK(clicked == -1);
+
+    // A wheel unit scrolls the inner region 32 - row 3, laid out at y
+    // 64..88, takes the click; the header, laid out by the OUTER panel,
+    // never moved.
+    InputFrame f = snap(60.0f, 76.0f, false, true, true);
+    f.scroll_dy = -1.0f;
+    pass(f, clicked);
+    CHECK(clicked == 3);
+}
+
+TEST_CASE("scroll: a bounds-too-small viewport is empty and inert") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    // Bounds smaller than the padding: the viewport clamps empty (never
+    // backwards), an empty rect contains no pointer, so the wheel has
+    // nothing to gate on - and the pushes still balance.
+    gui.new_frame(snap(50.0f, 50.0f));
+    const Rect view = begin_scroll_panel(gui, layout, kDefaultChrome, "tiny",
+                                         {0.0f, 0.0f, 4.0f, 4.0f});
+    CHECK(view.x == 12.0f);  // the inset origin stays honest
+    CHECK(view.y == 12.0f);
+    CHECK(view.width == 0.0f);
+    CHECK(view.height == 0.0f);
+    CHECK(gui.ids().depth() == 1);
+    end_scroll_panel(gui, layout, kDefaultChrome);
+    CHECK(gui.ids().depth() == 0);
+    CHECK(layout.depth() == 0);
+    gui.end_frame();
+
+    // An end without its begin decays to harmless no-ops, like every
+    // other underflow pop in the module.
+    gui.new_frame(snap(50.0f, 50.0f));
+    end_scroll_panel(gui, layout, kDefaultChrome);
+    CHECK(gui.ids().depth() == 0);
+    CHECK(layout.depth() == 0);
+    gui.end_frame();
+}
