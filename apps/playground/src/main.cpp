@@ -11,6 +11,8 @@
 #include <ws/ui/renderer2d.hpp>
 #include <ws/ui/widgets.hpp>
 
+#include "net_screen.hpp"
+
 #include <ws/core/log.hpp>
 
 #include <array>
@@ -135,6 +137,10 @@ protected:
             }
         }
         ws::ui::gui::end_panel(gui_, layout_);
+        // The Phase 10 real screen's gui half, bottom-left: the tab strip
+        // plus sliders/button (drive) and the scrollable node list
+        // (inspect) that steer the world-space net below.
+        net_.draw_panel(gui_, layout_, gui_frame);
         r2d::end();
         r2d::set_layer(0);
 
@@ -193,6 +199,11 @@ protected:
                                     : r2d::rgba(255, 255, 255),
                              icons_[i], i == 1 ? spin_ : 0.0f);
         }
+        // The Phase 10 real screen's world half: the net graph, drawn
+        // last so its nodes sit over the demo lines that cross the area.
+        // The gui block earlier in this frame already applied the panel's
+        // edits, so the forward pass here reflects them with no lag.
+        net_.draw_world();
         r2d::end();
 
         // --- screen layer: pixels from the top-left, no camera ---
@@ -297,6 +308,7 @@ private:
     int active_tab_ = 0;           // Phase 9: the page panel's selected tab
     int row_count_ = 16;           // the "list" tab's rows (edited in "tune")
     std::array<bool, 16> rows_{};   // the "list" tab's checkbox states
+    playground::NetScreen net_;    // Phase 10: the real screen (world + panel)
 };
 
 }  // namespace
