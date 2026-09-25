@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 
@@ -61,6 +62,25 @@ VkShaderModule make_shader_module(VkDevice device, const std::uint32_t* code,
     return module;
 }
 
+// The chunk's clip as a scissor rect: intersected with the frame extent
+// (kFullClip means "everything"), edges rounded outward by a sub-pixel so
+// a boundary pixel never falls outside the intended rect. A clip that
+// empties against the extent reports a zero dimension - flush skips the
+// chunk, nothing legitimate could have rendered anyway.
+VkRect2D chunk_scissor(const batch::Chunk& chunk, float fb_width,
+                       float fb_height) {
+    const float left = std::clamp(chunk.clip[0], 0.0f, fb_width);
+    const float top = std::clamp(chunk.clip[1], 0.0f, fb_height);
+    const float right = std::clamp(chunk.clip[0] + chunk.clip[2], 0.0f, fb_width);
+    const float bottom = std::clamp(chunk.clip[1] + chunk.clip[3], 0.0f, fb_height);
+    VkRect2D rect{};
+    rect.offset.x = static_cast<int32_t>(left);
+    rect.offset.y = static_cast<int32_t>(top);
+    rect.extent.width = static_cast<uint32_t>(std::ceil(right)) - rect.offset.x;
+    rect.extent.height = static_cast<uint32_t>(std::ceil(bottom)) - rect.offset.y;
+    return rect;
+}
+
 }  // namespace
 
 // --- Renderer2D: shell plumbing --------------------------------------------
@@ -72,6 +92,7 @@ void Renderer2D::frame_begin(float fb_width, float fb_height) {
     commands_.clear();  // capacity kept - the frame reuses the arena
     current_epoch_ = 0;
     camera_stashed_ = false;
+    clip_depth_ = 0;  // clips never leak across frames
     frame_active_ = true;
     warned_ = false;
 }
@@ -82,8 +103,11 @@ void Renderer2D::frame_end() {
         return;
     }
     // Layer first (the explicit z escape hatch), then begin() block, then
-    // material. Stable, because reordering must never flip two overlapping
-    // same-state draws.
+    // clip, then material. The clip must precede material: one chunk = one
+    // scissor, so clip runs need contiguous batches (the 8-chunk frame cap
+    // makes interleaved clip runs unaffordable), while materials share a
+    // chunk through the 32-slot texture table. Stable, because reordering
+    // must never flip two overlapping same-state draws.
     std::stable_sort(commands_.begin(), commands_.end(),
                      [](const DrawCommand& a, const DrawCommand& b) {
                          if (a.sort_layer != b.sort_layer) {
@@ -92,20 +116,36 @@ void Renderer2D::frame_end() {
                          if (a.camera_epoch != b.camera_epoch) {
                              return a.camera_epoch < b.camera_epoch;
                          }
+                         for (int i = 0; i < 4; ++i) {
+                             if (a.clip[i] != b.clip[i]) {
+                                 return a.clip[i] < b.clip[i];
+                             }
+                         }
                          return a.material_key < b.material_key;
                      });
 
-    // Replay: a segment opens per begin() block; the block's 32-slot texture
-    // table absorbs material variety, so material changes never split. Runs
-    // of the same block (same camera, different layers) share the segment -
-    // their sorted vertex order already paints correctly.
+    // Replay: a segment opens per begin() block AND per clip change - both
+    // are hard chunk boundaries (one VP and one scissor per chunk). Within
+    // a segment the block's 32-slot texture table absorbs material variety,
+    // so material changes never split. Runs of the same block (same camera,
+    // different layers) share the segment - their sorted vertex order
+    // already paints correctly.
     std::uint32_t open_epoch = 0;  // 0 never matches a recorded block
+    float open_clip[4] = {batch::kFullClip[0], batch::kFullClip[1],
+                          batch::kFullClip[2], batch::kFullClip[3]};
     for (const DrawCommand& cmd : commands_) {
-        if (cmd.camera_epoch != open_epoch) {
+        bool clip_changed = false;
+        for (int i = 0; i < 4; ++i) {
+            clip_changed = clip_changed || cmd.clip[i] != open_clip[i];
+        }
+        if (cmd.camera_epoch != open_epoch || clip_changed) {
             batch_.close_segment();
             batch_.open_segment(
-                batch::camera_vp(cmd.camera, fb_width_, fb_height_));
+                batch::camera_vp(cmd.camera, fb_width_, fb_height_), cmd.clip);
             open_epoch = cmd.camera_epoch;
+            for (int i = 0; i < 4; ++i) {
+                open_clip[i] = cmd.clip[i];
+            }
         }
         float color[4];
         batch::unpack_rgba(cmd.color, color);
@@ -120,6 +160,7 @@ void Renderer2D::frame_end() {
 void Renderer2D::frame_drop() {
     frame_active_ = false;
     camera_stashed_ = false;
+    clip_depth_ = 0;
     commands_.clear();
     batch_.new_frame();
 }
@@ -765,16 +806,20 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t image_index,
     viewport.height = fb_height;
     viewport.maxDepth = 1.0f;
     vkCmdSetViewport(cmd, 0, 1, &viewport);
-    VkRect2D scissor{};
-    scissor.extent.width = static_cast<uint32_t>(fb_width);
-    scissor.extent.height = static_cast<uint32_t>(fb_height);
-    vkCmdSetScissor(cmd, 0, 1, &scissor);
 
     for (uint32_t c = 0; c < batch_.chunk_count(); ++c) {
         const batch::Chunk& chunk = batch_.chunk(c);
         if (chunk.quad_count == 0) {
             continue;
         }
+        // One chunk = one scissor: each chunk's clip (intersected with the
+        // frame extent) applies before its draw. A clip that empties out
+        // skips the chunk - its draws had nowhere to land.
+        const VkRect2D scissor = chunk_scissor(chunk, fb_width, fb_height);
+        if (scissor.extent.width == 0 || scissor.extent.height == 0) {
+            continue;
+        }
+        vkCmdSetScissor(cmd, 0, 1, &scissor);
         VkDescriptorSet set =
             sets_[image_index * batch::kMaxChunksPerFrame + c];
         write_chunk_set(set, chunk);
@@ -873,7 +918,9 @@ void Renderer2D::record(const char* what, const float (&pos)[4][2],
     cmd.camera = current_camera_;
     cmd.texture = texture;
     cmd.color = color;
+    const float* clip = active_clip();
     for (int i = 0; i < 4; ++i) {
+        cmd.clip[i] = clip[i];
         cmd.pos[i][0] = pos[i][0];
         cmd.pos[i][1] = pos[i][1];
         cmd.uv[i][0] = uv[i][0];
@@ -910,6 +957,73 @@ void Renderer2D::set_layer(std::uint32_t layer) {
         return;
     }
     current_layer_ = layer;
+}
+
+bool Renderer2D::clip_stack_full(int depth) {
+    if (depth < kMaxClipDepth) {
+        return false;
+    }
+    if (!clip_overflow_warned_) {
+        clip_overflow_warned_ = true;
+        ws::core::warn("ui: r2d clip stack clamped at {} - deeper clips stop "
+                       "shrinking (push/pop stays balanced)",
+                       kMaxClipDepth);
+    }
+    return true;
+}
+
+const float* Renderer2D::active_clip() const {
+    if (clip_depth_ == 0) {
+        return batch::kFullClip;
+    }
+    // Past the overflow clamp the slot stops deepening - the same policy
+    // as the gui stacks, so overflowed scopes derive from the deepest
+    // real clip.
+    const int slot = std::min(clip_depth_, kMaxClipDepth) - 1;
+    return clip_stack_[slot];
+}
+
+void Renderer2D::push_clip(float x, float y, float width, float height) {
+    if (!accept("push_clip")) {
+        return;
+    }
+    if (clip_stack_full(clip_depth_)) {
+        ++clip_depth_;  // balanced with the matching pop_clip()
+        return;
+    }
+    const float* top = active_clip();
+    float* slot = clip_stack_[clip_depth_];
+    if (std::isfinite(x) && std::isfinite(y) && std::isfinite(width) &&
+        std::isfinite(height)) {
+        // Intersect with the active clip: nesting always shrinks. The
+        // !(> 0) form normalizes empty, inverted and negative extents to
+        // a degenerate rect - the sort key must never hold a NaN, and an
+        // empty clip means "render nothing", which is the only safe
+        // meaning for such input.
+        const float left = std::max(x, top[0]);
+        const float upper = std::max(y, top[1]);
+        const float right = std::min(x + width, top[0] + top[2]);
+        const float lower = std::min(y + height, top[1] + top[3]);
+        slot[0] = left;
+        slot[1] = upper;
+        slot[2] = right > left ? right - left : 0.0f;
+        slot[3] = lower > upper ? lower - upper : 0.0f;
+    } else {
+        slot[0] = 0.0f;
+        slot[1] = 0.0f;
+        slot[2] = 0.0f;  // non-finite input clips everything
+        slot[3] = 0.0f;
+    }
+    ++clip_depth_;
+}
+
+void Renderer2D::pop_clip() {
+    if (!accept("pop_clip")) {
+        return;
+    }
+    if (clip_depth_ > 0) {
+        --clip_depth_;  // popping an empty stack is the documented no-op
+    }
 }
 
 void Renderer2D::draw_quad(float x, float y, float w, float h,
@@ -1134,6 +1248,22 @@ void set_layer(std::uint32_t layer) {
         g_active->set_layer(layer);
     } else {
         warn_no_app("set_layer");
+    }
+}
+
+void push_clip(float x, float y, float width, float height) {
+    if (g_active != nullptr) {
+        g_active->push_clip(x, y, width, height);
+    } else {
+        warn_no_app("push_clip");
+    }
+}
+
+void pop_clip() {
+    if (g_active != nullptr) {
+        g_active->pop_clip();
+    } else {
+        warn_no_app("pop_clip");
     }
 }
 

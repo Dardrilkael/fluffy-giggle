@@ -355,6 +355,39 @@ TEST_CASE("chunk cap drops further segments and their draws") {
     CHECK(push_test_quad(core, 0u) == false);  // still closed after end()
 }
 
+TEST_CASE("open_segment carries the clip; texture splits inherit it") {
+    BatchCore core;
+    core.new_frame();
+    const float clip[4] = {5.0f, 5.0f, 50.0f, 50.0f};
+    REQUIRE(core.open_segment(default_vp(), clip));
+    REQUIRE(push_test_quad(core, 0u));
+    for (int i = 0; i < 4; ++i) {
+        CHECK(core.chunk(0).clip[i] == clip[i]);
+    }
+
+    // The default argument is the full-frame sentinel: an unclipped segment.
+    REQUIRE(core.open_segment(default_vp()));
+    REQUIRE(push_test_quad(core, 0u));
+    for (int i = 0; i < 4; ++i) {
+        CHECK(core.chunk(1).clip[i] == ws::ui::r2d::batch::kFullClip[i]);
+    }
+
+    // A texture-overflow split continues the SAME segment: the fresh chunk
+    // inherits both the VP and the clip.
+    core.new_frame();
+    REQUIRE(core.open_segment(default_vp(), clip));
+    for (std::uint32_t id = 0;
+         id <= ws::ui::r2d::batch::kMaxTexturesPerChunk; ++id) {
+        // 33 unique textures: one past the 32-slot table forces the split.
+        REQUIRE(push_test_quad(core, id));
+    }
+    REQUIRE(core.chunk_count() == 2);
+    CHECK(core.chunk(1).vp.m[0] == core.chunk(0).vp.m[0]);
+    for (int i = 0; i < 4; ++i) {
+        CHECK(core.chunk(1).clip[i] == clip[i]);
+    }
+}
+
 TEST_CASE("line expansion builds a thickness quad") {
     float pos[4][2];
     float uv[4][2];
@@ -564,6 +597,8 @@ TEST_CASE("public r2d API is drop-safe without a running app") {
     draw_quad(0.0f, 0.0f, 10.0f, 10.0f, rgba(255, 255, 255));
     draw_line(0.0f, 0.0f, 10.0f, 10.0f, 2.0f, rgba(255, 255, 255));
     draw_sprite(0.0f, 0.0f, 10.0f, 10.0f, rgba(255, 255, 255), Sprite{});
+    push_clip(0.0f, 0.0f, 10.0f, 10.0f);  // warns, then ignored: no app
+    pop_clip();
     end();
     load_texture("nope.png");            // warns, returns white, no crash
     const auto sprites = load_atlas({"nope.png"});  // warns, empty, no crash
@@ -885,6 +920,130 @@ TEST_CASE("sprite_size reports native pixels and {0,0} for unknown sprites") {
     const FrameSize sentinel = r.sprite_size(Sprite{});
     CHECK(sentinel.width == 0.0f);
     CHECK(sentinel.height == 0.0f);
+}
+
+TEST_CASE("push_clip batches clip runs apart; pop restores the full frame") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    r.begin(Camera2D{});
+    r.draw_quad(0.0f, 0.0f, 10.0f, 10.0f, rgba(255, 255, 255));
+    r.push_clip(10.0f, 10.0f, 100.0f, 100.0f);
+    r.draw_quad(20.0f, 20.0f, 10.0f, 10.0f, rgba(255, 255, 255));
+    r.pop_clip();
+    r.draw_quad(200.0f, 200.0f, 10.0f, 10.0f, rgba(255, 255, 255));
+    r.end();
+    r.frame_end();
+
+    // The sort is (layer, block, clip, material): the two full-clip quads
+    // group into chunk 0 keeping submission order (stable), the clipped
+    // quad batches apart under its own clip.
+    REQUIRE(r.batch().chunk_count() == 2);
+    const auto& full = r.batch().chunk(0);
+    CHECK(full.quad_count == 2);
+    for (int i = 0; i < 4; ++i) {
+        CHECK(full.clip[i] == ws::ui::r2d::batch::kFullClip[i]);
+    }
+    const auto& clipped = r.batch().chunk(1);
+    CHECK(clipped.quad_count == 1);
+    CHECK(clipped.clip[0] == 10.0f);
+    CHECK(clipped.clip[1] == 10.0f);
+    CHECK(clipped.clip[2] == 100.0f);
+    CHECK(clipped.clip[3] == 100.0f);
+    // Painter order survives inside the full chunk: first submitted first.
+    CHECK(r.batch().vertices()[0].pos[0] == 0.0f);
+    CHECK(r.batch().vertices()[4].pos[0] == 200.0f);
+}
+
+TEST_CASE("nested clips intersect at push time; disjoint ones go empty") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    r.begin(Camera2D{});
+    r.push_clip(0.0f, 0.0f, 200.0f, 200.0f);
+    r.push_clip(50.0f, 50.0f, 300.0f, 300.0f);  // intersects to (50,50,150,150)
+    r.draw_quad(60.0f, 60.0f, 10.0f, 10.0f, rgba(255, 255, 255));
+    r.pop_clip();
+    r.draw_quad(70.0f, 70.0f, 10.0f, 10.0f, rgba(255, 255, 255));
+    r.pop_clip();
+    r.end();
+    r.frame_end();
+
+    // One chunk per clip value; nesting intersected, never unioned.
+    REQUIRE(r.batch().chunk_count() == 2);
+    const auto& outer = r.batch().chunk(0);  // (0,0,200,200) sorts first
+    CHECK(outer.clip[0] == 0.0f);
+    CHECK(outer.clip[1] == 0.0f);
+    CHECK(outer.clip[2] == 200.0f);
+    CHECK(outer.clip[3] == 200.0f);
+    const auto& inner = r.batch().chunk(1);
+    CHECK(inner.clip[0] == 50.0f);
+    CHECK(inner.clip[1] == 50.0f);
+    CHECK(inner.clip[2] == 150.0f);
+    CHECK(inner.clip[3] == 150.0f);
+
+    // A disjoint push intersects to the empty rect - normalized, never
+    // negative, never NaN - and still batches under that value.
+    r.frame_begin(800.0f, 600.0f);
+    r.begin(Camera2D{});
+    r.push_clip(10.0f, 10.0f, 50.0f, 50.0f);
+    r.push_clip(200.0f, 200.0f, 50.0f, 50.0f);  // no overlap with the first
+    r.draw_quad(0.0f, 0.0f, 10.0f, 10.0f, rgba(255, 255, 255));
+    r.end();
+    r.frame_end();
+    REQUIRE(r.batch().chunk_count() == 1);
+    const auto& empty = r.batch().chunk(0);
+    CHECK(empty.clip[0] == 200.0f);  // the intersection's left/top survive
+    CHECK(empty.clip[1] == 200.0f);
+    CHECK(empty.clip[2] == 0.0f);    // but the extents clamp to nothing
+    CHECK(empty.clip[3] == 0.0f);
+}
+
+TEST_CASE("the clip stack balances overflow, resets per frame, pops empty safely") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    r.begin(Camera2D{});
+    // Overflow: depth counts past the cap so pops stay balanced - the
+    // warn fires once per renderer, deeper clips stop shrinking.
+    for (int i = 0; i < Renderer2D::kMaxClipDepth + 3; ++i) {
+        r.push_clip(5.0f, 5.0f, 10.0f, 10.0f);
+    }
+    r.draw_quad(0.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255));  // deepest real clip
+    for (int i = 0; i < Renderer2D::kMaxClipDepth + 3; ++i) {
+        r.pop_clip();
+    }
+    r.draw_quad(0.0f, 20.0f, 1.0f, 1.0f, rgba(255, 255, 255));  // back to full
+    r.end();
+    r.frame_end();
+    // Two clip values, so two chunks. The full clip's origin (0,0) sorts
+    // before (5,5): chunk 0 is the post-pop draw, chunk 1 the overflowed
+    // one - which kept the deepest REAL clip, not a stack-past-the-end one.
+    REQUIRE(r.batch().chunk_count() == 2);
+    CHECK(r.batch().chunk(0).quad_count == 1);
+    CHECK(r.batch().chunk(1).quad_count == 1);
+    CHECK(r.batch().chunk(1).clip[0] == 5.0f);
+    CHECK(r.batch().chunk(1).clip[1] == 5.0f);
+    CHECK(r.batch().chunk(1).clip[2] == 10.0f);
+    CHECK(r.batch().chunk(1).clip[3] == 10.0f);
+
+    // A clip left pushed never leaks: frame_begin empties the stack. (The
+    // frame below records nothing, so frame_end is a no-op - the stack
+    // reset is what frame_begin does, not what frame_end undoes.)
+    r.frame_begin(800.0f, 600.0f);
+    r.push_clip(5.0f, 5.0f, 5.0f, 5.0f);  // never popped
+    r.frame_end();
+
+    r.frame_begin(800.0f, 600.0f);
+    r.begin(Camera2D{});
+    r.pop_clip();  // nothing pushed this frame: documented no-op
+    r.draw_quad(0.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255));
+    r.end();
+    r.frame_end();
+    REQUIRE(r.batch().chunk_count() == 1);
+    for (int i = 0; i < 4; ++i) {
+        CHECK(r.batch().chunk(0).clip[i] == ws::ui::r2d::batch::kFullClip[i]);
+    }
 }
 
 // --- gui module (Phases 0-4: the core is real) ---------------------------------------
@@ -1551,5 +1710,194 @@ TEST_CASE("button: the theme drives the widget's metrics") {
     CHECK(!button(gui, layout, tall, "first"));
     CHECK(button(gui, layout, tall, "second"));
     layout.end_panel();
+    gui.end_frame();
+}
+
+TEST_CASE("checkbox: a full click toggles the bool exactly once") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    bool value = false;
+
+    // Idle: pointer away, no edges - nothing toggles.
+    gui.new_frame(snap(300.0f, 300.0f));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!checkbox(gui, layout, kDefaultChrome, "signal", value));
+    layout.end_panel();
+    CHECK(value == false);
+    gui.end_frame();
+
+    // Press inside (the (0,0) row is 68x24): owned, but no flip yet.
+    gui.new_frame(snap(4.0f, 4.0f, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!checkbox(gui, layout, kDefaultChrome, "signal", value));
+    layout.end_panel();
+    CHECK(value == false);
+    gui.end_frame();
+
+    // Release inside: the click lands - toggled true, reported once.
+    gui.new_frame(snap(4.0f, 4.0f, false, false, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(checkbox(gui, layout, kDefaultChrome, "signal", value));
+    layout.end_panel();
+    CHECK(value == true);
+    gui.end_frame();
+
+    // Next frame: the click is over; the value holds.
+    gui.new_frame(snap(4.0f, 4.0f));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!checkbox(gui, layout, kDefaultChrome, "signal", value));
+    layout.end_panel();
+    CHECK(value == true);
+    gui.end_frame();
+}
+
+TEST_CASE("slider: a press jumps to the pointer and the drag tracks it") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    float value = 0.0f;
+
+    // Press at the middle of the (0,0,120,24) track: click-to-set jumps
+    // the value there on the press frame itself.
+    gui.new_frame(snap(60.0f, 12.0f, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(slider_float(gui, layout, kDefaultChrome, "amp", value, 0.0f, 1.0f));
+    layout.end_panel();
+    CHECK(value == doctest::Approx(0.5f));
+    gui.end_frame();
+
+    // Hold and move to 3/4: the drag tracks the pointer.
+    gui.new_frame(snap(90.0f, 12.0f, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(slider_float(gui, layout, kDefaultChrome, "amp", value, 0.0f, 1.0f));
+    layout.end_panel();
+    CHECK(value == doctest::Approx(0.75f));
+    gui.end_frame();
+
+    // Release OUTSIDE the track: no click, the drag is over, and the
+    // value parks wherever it landed - nothing maps on the release frame.
+    gui.new_frame(snap(200.0f, 12.0f, false, false, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!slider_float(gui, layout, kDefaultChrome, "amp", value, 0.0f, 1.0f));
+    layout.end_panel();
+    CHECK(value == doctest::Approx(0.75f));
+    gui.end_frame();
+}
+
+TEST_CASE("slider: clamps and a degenerate range") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    // min == max: no division, no crash; a same-frame click (press+release
+    // before the frame saw the button held) still click-to-sets via the
+    // clicked path.
+    float flat = 5.0f;
+    gui.new_frame(snap(10.0f, 12.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(slider_float(gui, layout, kDefaultChrome, "flat", flat, 3.0f, 3.0f));
+    layout.end_panel();
+    CHECK(flat == doctest::Approx(3.0f));
+    gui.end_frame();
+
+    // An out-of-range value snaps in on the first interaction: pressing at
+    // x=10 on a 0..1 track maps to 1/12 - the 2.0 never renders or sticks.
+    float value = 2.0f;
+    gui.new_frame(snap(10.0f, 12.0f, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(slider_float(gui, layout, kDefaultChrome, "amp", value, 0.0f, 1.0f));
+    layout.end_panel();
+    CHECK(value == doctest::Approx(1.0f / 12.0f));
+    gui.end_frame();
+}
+
+TEST_CASE("slider_int: float math, integer write-back") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    int samples = 128;
+
+    // Mid-track press on 4..512: 4 + 0.5 * 508 = 258, exactly.
+    gui.new_frame(snap(60.0f, 12.0f, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(slider_int(gui, layout, kDefaultChrome, "samples", samples, 4, 512));
+    layout.end_panel();
+    CHECK(samples == 258);
+    gui.end_frame();
+
+    // Release inside: the clicked path re-maps the same pointer - same
+    // value, so no change is reported and the int is not rewritten.
+    gui.new_frame(snap(60.0f, 12.0f, false, false, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!slider_int(gui, layout, kDefaultChrome, "samples", samples, 4, 512));
+    layout.end_panel();
+    CHECK(samples == 258);
+    gui.end_frame();
+}
+
+TEST_CASE("panel: begin scopes ids and flows children; end restores") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    const ChromeTheme& theme = kDefaultChrome;
+
+    const WidgetId outside = IdStack{}.current("btn");
+
+    gui.new_frame(snap(400.0f, 400.0f));  // pointer away: no interactions
+    const Rect content =
+        begin_panel(gui, layout, theme, "demo", {10.0f, 10.0f, 200.0f, 100.0f});
+    // Content = bounds inset by the theme padding.
+    CHECK(content.x == doctest::Approx(10.0f + theme.padding));
+    CHECK(content.y == doctest::Approx(10.0f + theme.padding));
+    CHECK(content.width == doctest::Approx(200.0f - 2.0f * theme.padding));
+    CHECK(content.height == doctest::Approx(100.0f - 2.0f * theme.padding));
+    // Children id under the panel's scope.
+    REQUIRE(gui.ids().depth() == 1);
+    CHECK(gui.ids().current("btn") != outside);
+    // A child button lays out inside the content rect and behaves.
+    CHECK(!button(gui, layout, theme, "btn"));
+    end_panel(gui, layout);
+    // The id scope is back to the root: the same label means the same id.
+    CHECK(gui.ids().depth() == 0);
+    CHECK(gui.ids().current("btn") == outside);
+
+    // The layout stack unwound too: a fresh panel flows from its own
+    // bounds, not from where the last one left the cursor.
+    const Rect after =
+        begin_panel(gui, layout, theme, "demo2", {0.0f, 0.0f, 50.0f, 50.0f});
+    CHECK(after.x == doctest::Approx(theme.padding));
+    end_panel(gui, layout);
+    gui.end_frame();
+}
+
+TEST_CASE("panel: nesting stacks; each end pops exactly one level") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    gui.new_frame(snap(400.0f, 400.0f));
+    const Rect outer =
+        begin_panel(gui, layout, kDefaultChrome, "outer", {0.0f, 0.0f, 300.0f, 300.0f});
+    REQUIRE(gui.ids().depth() == 1);
+    const Rect inner = begin_panel(gui, layout, kDefaultChrome, "inner",
+                                   {outer.x + 20.0f, outer.y + 20.0f, 100.0f, 100.0f});
+    CHECK(inner.x == doctest::Approx(outer.x + 20.0f + kDefaultChrome.padding));
+    CHECK(inner.y == doctest::Approx(outer.y + 20.0f + kDefaultChrome.padding));
+    REQUIRE(gui.ids().depth() == 2);
+
+    // A widget in the innermost panel ids under outer;inner - distinct
+    // from the same label at the root, so the two can never fight over
+    // hot/active.
+    const WidgetId root_view = IdStack{}.current("signal");
+    CHECK(gui.ids().current("signal") != root_view);
+    bool value = false;
+    CHECK(!checkbox(gui, layout, kDefaultChrome, "signal", value));
+    CHECK(value == false);
+
+    end_panel(gui, layout);  // inner: back in the outer scope
+    CHECK(gui.ids().depth() == 1);
+    end_panel(gui, layout);  // outer: back at the root
+    CHECK(gui.ids().depth() == 0);
     gui.end_frame();
 }

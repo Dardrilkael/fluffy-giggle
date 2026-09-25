@@ -69,11 +69,12 @@ FrameSize frame_size();
 // per frame layers blocks back to front.
 //
 // At the frame's end the shell sorts the recorded draws - explicit layer
-// first, then camera block, then texture - and only then batches them. The
-// sort is stable: overlapping draws that share layer, camera and texture
-// always keep their submission order. Draws differing only in texture may
-// be grouped (reordered); when the overlap order of two different-texture
-// draws matters, give them an explicit set_layer().
+// first, then camera block, then clip, then texture - and only then
+// batches them. The sort is stable: overlapping draws that share layer,
+// camera, clip and texture always keep their submission order. Draws
+// differing only in texture may be grouped (reordered); when the overlap
+// order of two different-texture draws matters, give them an explicit
+// set_layer().
 void begin();
 void begin(const Camera2D& camera);
 
@@ -85,6 +86,19 @@ void end();
 // later - on top - regardless of submission order or camera block. Sticky:
 // stays until the next set_layer(), across frames.
 void set_layer(std::uint32_t layer);
+
+// Pushes a framebuffer-space clip rect (top-left origin, pixels): draws
+// recorded until the matching pop_clip() render only inside the rect
+// intersected with the clips already active - nesting always shrinks.
+// Clips are screen-space even inside camera blocks (the GPU scissors
+// framebuffer pixels), and they batch: draws under one clip group
+// together and apart from other clips, each group flushing under its own
+// scissor. The stack empties at each frame's start, so a clip cannot
+// leak across frames; pushes past the depth cap keep pop_clip() balanced
+// (deeper clips stop shrinking, warned once). pop_clip() with nothing
+// pushed is a no-op.
+void push_clip(float x, float y, float width, float height);
+void pop_clip();
 
 // Top-left anchored quad; rotation pivots the center (positive = clockwise,
 // radians). Flat colors pass texture = {}.

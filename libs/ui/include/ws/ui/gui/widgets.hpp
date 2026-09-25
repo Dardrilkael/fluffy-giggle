@@ -35,4 +35,41 @@ namespace ws::ui::gui {
 bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             const char* label, float width = 120.0f);
 
+// A checkbox: true on the frame a full click toggled `value` - the
+// caller's bool IS the state, the widget itself holds none. The box is a
+// control_height square (accent fill while on) followed by the label
+// bar; the hit area covers the whole row. The row auto-sizes to box +
+// spacing + label.
+bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
+              const char* label, bool& value);
+
+// A horizontal slider, click-to-set AND drag: a press inside the track
+// jumps the value to the pointer and tracks it while held; the value
+// clamps to [min, max]. True on the frame the value moved. The track is
+// control_height tall (rail, min-to-handle fill, handle); the label bar
+// draws right-aligned over it.
+bool slider_float(GuiContext& gui, LayoutCursor& layout,
+                  const ChromeTheme& theme, const char* label, float& value,
+                  float min, float max, float width = 120.0f);
+
+// slider_float over an int reference - the value rounds to the nearest
+// integer after the float math.
+bool slider_int(GuiContext& gui, LayoutCursor& layout,
+                const ChromeTheme& theme, const char* label, int& value,
+                int min, int max, float width = 120.0f);
+
+// A panel: chrome (1px border frame + panel face), a clip rect at its
+// content area (children cannot draw outside it, whatever they submit), an
+// id scope (children id under the panel, so same-label widgets inside and
+// outside stay distinct), and a layout panel (children flow from the
+// content's top-left, inset by theme.padding). Returns the content rect;
+// the matching end_panel() pops all three in reverse - every pop is
+// drop-safe against its begin having been dropped. The panel is chrome,
+// not a widget: it draws and clips but does not capture input (that
+// arrives when panels grow drag headers).
+Rect begin_panel(GuiContext& gui, LayoutCursor& layout,
+                 const ChromeTheme& theme, const char* label,
+                 const Rect& bounds);
+void end_panel(GuiContext& gui, LayoutCursor& layout);
+
 }  // namespace ws::ui::gui

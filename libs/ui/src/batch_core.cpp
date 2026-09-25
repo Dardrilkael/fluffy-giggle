@@ -76,12 +76,15 @@ bool line_quad(float x0, float y0, float x1, float y1, float thickness,
     return true;
 }
 
-bool BatchCore::start_chunk(const Mat4& vp) {
+bool BatchCore::start_chunk(const Mat4& vp, const float (&clip)[4]) {
     if (chunks_.size() >= kMaxChunksPerFrame) {
         return false;
     }
     Chunk chunk;
     chunk.vp = vp;
+    for (int i = 0; i < 4; ++i) {
+        chunk.clip[i] = clip[i];
+    }
     chunk.vertex_offset = static_cast<std::uint32_t>(vertices_.size());
     chunks_.push_back(chunk);
     return true;
@@ -93,8 +96,8 @@ void BatchCore::new_frame() {
     segment_open_ = false;
 }
 
-bool BatchCore::open_segment(const Mat4& vp) {
-    segment_open_ = start_chunk(vp);
+bool BatchCore::open_segment(const Mat4& vp, const float (&clip)[4]) {
+    segment_open_ = start_chunk(vp, clip);
     return segment_open_;
 }
 
@@ -115,9 +118,10 @@ std::uint32_t BatchCore::texture_slot(std::uint32_t texture_id) {
         return slot;
     }
     // Table full: split. The stale chunk keeps its vertices; the fresh one
-    // continues right where it left off, so flush order is unchanged.
+    // continues right where it left off, so flush order is unchanged. The
+    // split inherits the segment's VP and clip - it is the same segment.
     const Mat4 vp = chunk.vp;
-    if (!start_chunk(vp)) {
+    if (!start_chunk(vp, chunk.clip)) {
         return kMaxTexturesPerChunk;
     }
     chunks_.back().texture_ids[0] = texture_id;

@@ -5,6 +5,7 @@
 // this builds, in creation order, at one fixed point per frame. Never
 // include this from include/ws/ui/.
 
+#include <cfloat>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -16,6 +17,11 @@ namespace ws::ui::r2d::batch {
 inline constexpr std::uint32_t kMaxTexturesPerChunk = 32;   // = the sampler2D[32] array in shaders/batch.frag
 inline constexpr std::size_t kMaxVerticesPerFrame = 131072; // ~32k quads
 inline constexpr std::uint32_t kMaxChunksPerFrame = 8;     // per frame: segments + texture-overflow splits
+
+// The "no clip pushed" rect: the whole framebuffer. The flush intersects
+// every chunk clip with the frame extent, so infinite extents mean
+// "everything". Draws recorded with this clip render unscissored.
+inline constexpr float kFullClip[4] = {0.0f, 0.0f, FLT_MAX, FLT_MAX};
 
 struct Vertex {
     float pos[2];
@@ -36,6 +42,10 @@ struct Mat4 {
 // creation order.
 struct Chunk {
     Mat4 vp{};
+    // Framebuffer-space clip rect {x, y, w, h} this chunk renders within
+    // (kFullClip until a clip is pushed). One chunk = one vkCmdSetScissor,
+    // so a clip change always breaks the chunk.
+    float clip[4] = {0.0f, 0.0f, FLT_MAX, FLT_MAX};
     std::uint32_t vertex_offset = 0;  // first vertex, into the frame's buffer
     std::uint32_t quad_count = 0;
     std::uint32_t texture_ids[kMaxTexturesPerChunk] = {};
@@ -70,10 +80,10 @@ bool line_quad(float x0, float y0, float x1, float y1, float thickness,
 class BatchCore {
 public:
     void new_frame();
-    // Closes the current chunk (if any) and opens one with the given VP.
-    // Returns false at the chunk cap - the segment stays closed and its
-    // draws are dropped.
-    bool open_segment(const Mat4& vp);
+    // Closes the current chunk (if any) and opens one with the given VP and
+    // clip. Returns false at the chunk cap - the segment stays closed and
+    // its draws are dropped.
+    bool open_segment(const Mat4& vp, const float (&clip)[4] = kFullClip);
     void close_segment();
 
     // Appends one quad (4 vertices) to the open segment. Returns false when
@@ -89,7 +99,7 @@ public:
     const std::vector<Vertex>& vertices() const { return vertices_; }
 
 private:
-    bool start_chunk(const Mat4& vp);
+    bool start_chunk(const Mat4& vp, const float (&clip)[4]);
     // Slot for texture_id in the current chunk, splitting the chunk when
     // its table is full. Returns >= kMaxTexturesPerChunk when the draw must
     // be dropped (chunk cap).

@@ -11,6 +11,7 @@
 #include "atlas_packer.h"
 #include "batch_core.h"
 
+#include <cfloat>
 #include <cstdint>
 #include <initializer_list>
 #include <vector>
@@ -30,6 +31,10 @@ struct DrawCommand {
     // Sort key components, most significant first:
     std::uint32_t sort_layer = 0;    // set_layer(): the explicit z escape hatch
     std::uint32_t camera_epoch = 0;  // which begin() block recorded this
+    float clip[4] = {0.0f, 0.0f, FLT_MAX, FLT_MAX};  // active clip at record
+                                    // time - one chunk = one scissor, so
+                                    // this sits between block and material
+                                    // in the key (clip runs batch apart)
     std::uint64_t material_key = 0;  // texture (+ future blend/shader bits)
 
     Camera2D camera;           // camera state at record time
@@ -95,6 +100,13 @@ public:
     void begin(const Camera2D& camera);
     void end();
     void set_layer(std::uint32_t layer);
+    // Clip stack. Draws snapshot the active clip at record time; frame_end
+    // batches clip runs apart (one chunk = one scissor) and flush applies
+    // each chunk's clip. The stack empties at frame_begin - a clip never
+    // leaks across frames.
+    static constexpr int kMaxClipDepth = 8;
+    void push_clip(float x, float y, float width, float height);
+    void pop_clip();
     void draw_quad(float x, float y, float w, float h, std::uint32_t color,
                    Texture texture = {}, float rotation = 0.0f);
     void draw_line(float x0, float y0, float x1, float y1, float thickness,
@@ -161,6 +173,14 @@ private:
     Camera2D current_camera_{};
     std::uint32_t current_layer_ = 0;  // sticky across frames until set_layer()
     std::uint32_t current_epoch_ = 0;  // bumped by every begin()
+    // Clip stack state: one level = one {x, y, w, h} rect. Overflow keeps
+    // push/pop balanced (depth counts on, the slot stops deepening), the
+    // same policy as the gui stacks; the warn fires once per renderer.
+    bool clip_stack_full(int depth);
+    const float* active_clip() const;  // stack top; kFullClip when empty
+    float clip_stack_[kMaxClipDepth][4] = {};
+    int clip_depth_ = 0;
+    bool clip_overflow_warned_ = false;
     float fb_width_ = 0.0f;
     float fb_height_ = 0.0f;
     bool camera_stashed_ = false;  // set by begin(), cleared by end()

@@ -67,19 +67,35 @@ protected:
         gui_.new_frame(ws::ui::gui::frame_input());
 
         // A gui panel in screen space (framebuffer px, top-left origin),
-        // drawn through r2d above the world quads. The button lays out,
-        // hit-tests and draws through the library - the click result is
-        // ours to keep.
+        // drawn through r2d above the world quads. The panel widget draws
+        // the chrome, clips its children to the content rect, scopes their
+        // ids and flows them through the cursor. Every widget below drives
+        // a real piece of app state - the same state the ImGui window's
+        // controls below show - and the click counter is ours to keep.
         r2d::set_layer(10);
         r2d::begin();
         const r2d::FrameSize gui_frame = r2d::frame_size();
-        (void)layout_.begin_panel({gui_frame.width - 244.0f, 24.0f, 220.0f, 160.0f},
-                                  12.0f);
+        const ws::ui::gui::Rect content = ws::ui::gui::begin_panel(
+            gui_, layout_, ws::ui::gui::kDefaultChrome, "demo",
+            {gui_frame.width - 244.0f, 24.0f, 220.0f, 176.0f});
         if (ws::ui::gui::button(gui_, layout_, ws::ui::gui::kDefaultChrome,
                                 "clicks")) {
             ++gui_clicks_;
         }
-        layout_.end_panel();
+        ws::ui::gui::checkbox(gui_, layout_, ws::ui::gui::kDefaultChrome,
+                              "signal", show_signal_);
+        ws::ui::gui::slider_float(gui_, layout_, ws::ui::gui::kDefaultChrome,
+                                  "amplitude", amplitude_, 0.0f, 1.0f);
+        ws::ui::gui::slider_int(gui_, layout_, ws::ui::gui::kDefaultChrome,
+                                "samples", samples_, 4, kMaxSamples);
+        ws::ui::gui::slider_float(gui_, layout_, ws::ui::gui::kDefaultChrome,
+                                  "spin", gui_spin_rate_, 0.0f, 0.2f);
+        // Clip proof: this quad pokes past the panel's bottom-right corner
+        // by 40 px each way - the scissor must cut it at the content edge.
+        r2d::draw_quad(content.x + content.width - 8.0f,
+                       content.y + content.height - 8.0f, 48.0f, 48.0f,
+                       r2d::rgba(255, 120, 60));
+        ws::ui::gui::end_panel(gui_, layout_);
         r2d::end();
         r2d::set_layer(0);
 
@@ -143,7 +159,7 @@ protected:
         r2d::draw_line(inset, frame.height - inset, inset, inset, 2.0f, border);
         r2d::end();
 
-        spin_ = std::fmod(spin_ + 0.01f, 6.2831853f);
+        spin_ = std::fmod(spin_ + gui_spin_rate_, 6.2831853f);
 
         if (ws::ui::begin_window("ws playground")) {
             ws::ui::text("shell is alive - every widget here goes through ws::ui");
@@ -228,6 +244,7 @@ private:
     ws::ui::gui::GuiContext gui_;  // gui module consumer; fed the live snapshot
     ws::ui::gui::LayoutCursor layout_;  // one per screen; the pass repeats each frame
     int gui_clicks_ = 0;
+    float gui_spin_rate_ = 0.01f;  // driven by the gui panel's "spin" slider
 };
 
 }  // namespace

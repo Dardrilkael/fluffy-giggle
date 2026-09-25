@@ -69,7 +69,7 @@ libs/ui/
   tests/
 ```
 
-## Event system (Hazel-style)
+## Event system 
 
 - `ws/ui/event.hpp`: `Event` base + `EventType` enum (`WindowClose`,
   `WindowResize`, `KeyPressed`, `KeyReleased`, `MouseButtonPressed`,
@@ -134,7 +134,8 @@ void on_event(ws::ui::Event& e) override {
 
 `ws/ui/renderer2d.hpp` is the engine-style drawing API: free functions in
 `ws::ui::r2d` — `begin()` / `begin(camera)` / `end()`, `draw_quad`,
-`draw_line` (thickness in px), `draw_sprite`, `set_layer`, `load_texture`,
+`draw_line` (thickness in px), `draw_sprite`, `set_layer`, `push_clip` /
+`pop_clip` (framebuffer-space clip stack), `load_texture`,
 `load_atlas`, `frame_size`, `sprite_size`,
 `rgba` (packs 0xRRGGBBAA — NOT IM_COL32 order). Apps record from
 `on_update()` only, exactly like widgets.hpp calls; every call is drop-safe
@@ -143,15 +144,28 @@ includes only `<cstdint>`, `<initializer_list>` and `<vector>` — no
 Vulkan/GLFW/stb types (stb_image is PRIVATE, like every third-party).
 
 - **Recording is data.** A draw appends a `DrawCommand` (sort layer, camera
-  block, material key, expanded corners). `frame_end()` — one point, after
-  `on_update()` returns — stable-sorts the frame by (layer, camera block,
-  material) and replays it into the batch, so GPU state changes, not
-  submission order, drive the chunk structure. The sort is stable;
-  `set_layer()` is the explicit z escape hatch that outranks both.
+  block, clip, material key, expanded corners). `frame_end()` — one point,
+  after `on_update()` returns — stable-sorts the frame by (layer, camera
+  block, clip, material) and replays it into the batch, so GPU state
+  changes, not submission order, drive the chunk structure. The sort is
+  stable; `set_layer()` is the explicit z escape hatch that outranks all
+  three key components below it.
+- **Clip stack.** `push_clip(x, y, w, h)` pushes a framebuffer-space rect
+  (top-left origin, screen space even inside camera blocks); draws snapshot
+  the active clip, nesting intersects at push time, and the stack empties
+  at every `frame_begin` — a clip never leaks across frames. Clip sits
+  BEFORE material in the sort key so all draws under one clip batch into a
+  contiguous run (the 8-chunk cap makes interleaved runs unaffordable);
+  the flush sets one `vkCmdSetScissor` per chunk (chunk clip intersected
+  with the frame extent, outward-rounded) and skips empty-clip chunks
+  entirely. Depth cap 8, balanced overflow like the gui stacks: deeper
+  pushes count depth but stop shrinking (warned once per renderer), so
+  pops stay paired. `pop_clip()` with nothing pushed is a documented no-op.
 - **Chunks.** Up to 8 CPU chunks per frame: 32 textures / 131072 vertices
-  each. One chunk = one VP (64B push constants) + one 32-slot texture table
-  (one descriptor set) + one `vkCmdDrawIndexed`. Texture overflow closes the
-  chunk and opens a new one — no mid-frame GPU work ever. Caps exhausted:
+  each. One chunk = one VP (64B push constants) + one clip (one scissor)
+  + one 32-slot texture table (one descriptor set) + one `vkCmdDrawIndexed`.
+  Texture overflow closes the chunk and opens a new one that inherits the
+  segment's VP and clip — no mid-frame GPU work ever. Caps exhausted:
   further draws drop, one warn per frame.
 - **Textures.** `load_texture()` (valid from `on_setup()`) uploads
   synchronously — staging buffer, one-off submit, fence wait. The registry
@@ -205,6 +219,7 @@ Vulkan/GLFW/stb types (stb_image is PRIVATE, like every third-party).
 - `renderer2d.hpp` (`ws::ui::r2d`): the 2D drawing API — `begin`/`end`
   camera blocks, `draw_quad` (top-left anchor, center-pivot rotation),
   `draw_line`, `draw_sprite` (atlas sub-rect quads), `set_layer`,
+  `push_clip`/`pop_clip` (nested framebuffer clip rects),
   `load_texture`, `load_atlas`, `frame_size`, `sprite_size`. Draws are
   valid only inside `on_update()`, within a `begin()` block.
 
