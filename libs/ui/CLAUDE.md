@@ -15,8 +15,11 @@ gets a window, an event stream, and a place to submit draw commands —
 - **Render/widget API** — `widgets.hpp` (ImGui/ImPlot-backed draw calls),
   the engine's own vocabulary for drawing, not the graphics API's.
 - **2D renderer** — `renderer2d.hpp` (`ws::ui::r2d`): camera'd, textured
-  quads and lines, atlas sprites, sorted then batched, flushed under
-  the widgets.
+  quads and lines, atlas sprites, sorted then batched, flushed under the
+  widgets.
+- **Immediate-mode gui** — `gui/` headers (`ws::ui::gui`): dependency-free
+  widgets (button/checkbox/slider/panel) that draw through r2d; caller-owned
+  state, identity + hit-testing + layout + draw stay one seam.
 - **`ws::ui::App`** — the shell itself: owns the window, Vulkan context,
   swapchain, frame loop, event pumping, and shutdown.
 
@@ -55,11 +58,22 @@ libs/ui/
     render_command_queue.hpp # RenderCommandQueue
     renderer2d.hpp           # r2d free functions: Camera2D, quads, lines, sprites, textures
     widgets.hpp               # window/text/button/checkbox/slider/plot_line/...
+    gui/                      # the immediate-mode gui module (ws::ui::gui, no ImGui)
+      gui_context.hpp        # GuiContext: input snapshot + hot/active + side tables
+      id_stack.hpp           # WidgetId hashing + scoped id stack
+      input_frame.hpp        # InputFrame: one frame's raw input; frame_input() getter
+      layout_cursor.hpp      # LayoutCursor: flowing layout + panel stack
+      rect.hpp                # Rect, WidgetId, HitTest — the shared vocabulary
+      theme.hpp               # ChromeTheme: every color/metric the widgets use
+      widgets.hpp            # button/checkbox/slider/panel — the widget functions
   src/
     app.cpp                  # pimpl: Vulkan context, swapchain, frame loop
     atlas_packer.h/.cpp      # pure-CPU shelf packer: atlas pages, sub-rects, gutters
     batch_core.h/.cpp        # pure-CPU batch: chunks, camera VP, geometry (no Vulkan)
+    gui.h/.cpp               # gui module internals: input accumulator, persistent state
+    gui_widgets.cpp          # the widget functions' bodies (lay out, hit-test, draw)
     renderer2d.h/.cpp        # r2d engine: command sort/replay + Vulkan flush
+    rounded_texture.h/.cpp   # pure-CPU bake of the builtin rounded-rect mask
     shaders/                  # batch.vert/.frag (GLSL) + spirv.h (committed build input)
     stb_impl.cpp             # sole STB_IMAGE_IMPLEMENTATION translation unit
     window.h                 # internal: WindowEventSink (never reaches apps)
@@ -134,9 +148,9 @@ void on_event(ws::ui::Event& e) override {
 
 `ws/ui/renderer2d.hpp` is the engine-style drawing API: free functions in
 `ws::ui::r2d` — `begin()` / `begin(camera)` / `end()`, `draw_quad`,
-`draw_line` (thickness in px), `draw_sprite`, `set_layer`, `push_clip` /
-`pop_clip` (framebuffer-space clip stack), `load_texture`,
-`load_atlas`, `frame_size`, `sprite_size`,
+`draw_line` (thickness in px), `draw_sprite`, `draw_rounded_quad`,
+`set_layer`, `push_clip` / `pop_clip` (framebuffer-space clip stack),
+`load_texture`, `load_atlas`, `frame_size`, `sprite_size`,
 `rgba` (packs 0xRRGGBBAA — NOT IM_COL32 order). Apps record from
 `on_update()` only, exactly like widgets.hpp calls; every call is drop-safe
 outside a running app (logged once, then ignored). The public header
@@ -183,6 +197,19 @@ Vulkan/GLFW/stb types (stb_image is PRIVATE, like every third-party).
   `Sprite{}` (white — the load_texture contract); `sprite_size()` reports
   native pixels (packing never scales). Page tables only grow, the same
   contract as the texture registry.
+- **Rounded quads.** `draw_rounded_quad` 9-slices a builtin 32×32 mask
+  texture (`src/rounded_texture.*`, baked analytically: one-texel coverage
+  antialiasing across the corner arcs, RGB white — shape rides in alpha, so
+  the vertex tint supplies the color). Uploaded at GPU init, right after
+  white; the four corner slices scale the baked 8 px arcs to the requested
+  radius, the strips and center stretch the solid interior. The radius
+  clamps to half the shorter side; a sub-pixel radius degrades to the
+  plain square quad (minifying the arc would look worse). Rotation pivots
+  the whole rect's center (`batch::quad_corners_pivot`), so the nine
+  slices move as one rigid shape. Degenerate strips record zero-area
+  quads — a rounded quad is always exactly nine records. All nine share
+  one material: one batch segment, not nine. A failed mask upload warns
+  once and degrades every rounded quad to square corners (white texture).
 - **Layering.** One render pass, three layers: r2d flushes right after
   `vkCmdBeginRenderPass` (2D world), then ImGui's draw data (widgets), then
   the command queue (overlays).
@@ -218,8 +245,9 @@ Vulkan/GLFW/stb types (stb_image is PRIVATE, like every third-party).
   `show_implot_demo`.
 - `renderer2d.hpp` (`ws::ui::r2d`): the 2D drawing API — `begin`/`end`
   camera blocks, `draw_quad` (top-left anchor, center-pivot rotation),
-  `draw_line`, `draw_sprite` (atlas sub-rect quads), `set_layer`,
-  `push_clip`/`pop_clip` (nested framebuffer clip rects),
+  `draw_line`, `draw_sprite` (atlas sub-rect quads), `draw_rounded_quad`
+  (9-sliced builtin mask, radius clamped to half the shorter side),
+  `set_layer`, `push_clip`/`pop_clip` (nested framebuffer clip rects),
   `load_texture`, `load_atlas`, `frame_size`, `sprite_size`. Draws are
   valid only inside `on_update()`, within a `begin()` block.
 

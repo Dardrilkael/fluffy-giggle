@@ -10,6 +10,7 @@
 #include "atlas_packer.h"  // internal: pure-CPU atlas packer (src/ on the test include path)
 #include "batch_core.h"     // internal: pure-CPU batch builder (same path)
 #include "renderer2d.h"     // internal: command recording + sort/replay (same path)
+#include "rounded_texture.h"  // internal: the builtin rounded-rect mask bake (same path)
 #include <ws/ui/app.hpp>
 #include <ws/ui/event.hpp>
 #include <ws/ui/gui/gui_context.hpp>  // must stay includable without any third-party header
@@ -355,6 +356,44 @@ TEST_CASE("chunk cap drops further segments and their draws") {
     CHECK(push_test_quad(core, 0u) == false);  // still closed after end()
 }
 
+TEST_CASE("quad_corners_pivot rotates about the pivot; own-center is the default") {
+    using namespace ws::ui::r2d::batch;
+    const float half_pi = 1.5707963f;
+
+    // Rotation about a pivot OUTSIDE the rect: the whole rect orbits. At
+    // +90 degrees (clockwise, y-down) the map is (x, y) -> (-y, x): the
+    // rect centered at (12, 12) pivoting the origin swings to (-12, -12),
+    // so its corners land in the third quadrant around it.
+    float out[4][2];
+    quad_corners_pivot(10.0f, 10.0f, 4.0f, 4.0f, 0.0f, 0.0f, half_pi, out);
+    CHECK(out[0][0] == doctest::Approx(-10.0f));  // TL
+    CHECK(out[0][1] == doctest::Approx(10.0f));
+    CHECK(out[1][0] == doctest::Approx(-10.0f));  // TR
+    CHECK(out[1][1] == doctest::Approx(14.0f));
+    CHECK(out[2][0] == doctest::Approx(-14.0f));  // BR
+    CHECK(out[2][1] == doctest::Approx(14.0f));
+    CHECK(out[3][0] == doctest::Approx(-14.0f));  // BL
+    CHECK(out[3][1] == doctest::Approx(10.0f));
+
+    // Zero rotation lays the corners out plainly, pivot or not.
+    quad_corners_pivot(10.0f, 10.0f, 4.0f, 4.0f, -50.0f, 7.0f, 0.0f, out);
+    CHECK(out[0][0] == doctest::Approx(10.0f));
+    CHECK(out[0][1] == doctest::Approx(10.0f));
+    CHECK(out[2][0] == doctest::Approx(14.0f));
+    CHECK(out[2][1] == doctest::Approx(14.0f));
+
+    // quad_corners IS quad_corners_pivot at the rect's own center - the
+    // equivalence draw_rounded_quad's nine slices each break by pivoting
+    // the whole rect's center instead.
+    float own[4][2];
+    quad_corners(10.0f, 20.0f, 30.0f, 40.0f, 0.7f, own);
+    quad_corners_pivot(10.0f, 20.0f, 30.0f, 40.0f, 25.0f, 40.0f, 0.7f, out);
+    for (int i = 0; i < 4; ++i) {
+        CHECK(out[i][0] == doctest::Approx(own[i][0]));
+        CHECK(out[i][1] == doctest::Approx(own[i][1]));
+    }
+}
+
 TEST_CASE("open_segment carries the clip; texture splits inherit it") {
     BatchCore core;
     core.new_frame();
@@ -589,6 +628,49 @@ TEST_CASE("atlas packer extrudes sprite edges into the gutter") {
     CHECK(is_color(page_px(packed.pages[0], 6, 6), 0, 0, 0, 0));  // untouched
 }
 
+TEST_CASE("the rounded-rect mask bakes arcs with one-texel coverage") {
+    using namespace ws::ui::r2d;
+    const auto mask = rounded::bake();
+    using rounded::kTexSize;
+    using rounded::kTexRadius;
+
+    // RGBA8, row-major from the top-left.
+    REQUIRE(mask.size() ==
+            std::size_t(kTexSize) * std::size_t(kTexSize) * 4);
+    const auto px = [&](int x, int y, int c) {
+        return mask[(std::size_t(y) * kTexSize + x) * 4 + c];
+    };
+
+    // Shape rides in alpha only: RGB is white everywhere, even outside the
+    // rect (a tinted draw needs the color to come from the vertex, not the
+    // mask).
+    const int probes[][2] = {{0, 0}, {31, 0}, {16, 16}, {0, 31}};
+    for (const auto& p : probes) {
+        CHECK(px(p[0], p[1], 0) == 255);
+        CHECK(px(p[0], p[1], 1) == 255);
+        CHECK(px(p[0], p[1], 2) == 255);
+    }
+
+    // The flat interior is solid: this texel sits inside the [r, n-r] box,
+    // so no arc ever touches it.
+    CHECK(px(16, 16, 3) == 255);
+    // The corner is fully outside the quarter-circle at radius 8.
+    CHECK(px(0, 0, 3) == 0);
+    CHECK(px(31, 31, 3) == 0);
+    // And a texel on the arc is partial - the one-texel coverage ramp that
+    // antialiases the corners. Its exact byte depends on sqrt rounding,
+    // but a full 0 or 255 here would mean the ramp is missing.
+    const int arc = px(0, 5, 3);  // dist to the arc center (8, 8) ~ 7.91
+    CHECK(arc > 0);
+    CHECK(arc < 255);
+    CHECK(arc > 100);  // ~60% coverage, not a sliver or a near-solid
+    CHECK(arc < 200);
+    // The baked radius is a whole number of texels: at (r, r) the box
+    // clamp starts, so the arc's flat edges begin exactly there.
+    CHECK(px(kTexRadius, 0, 3) == 255);  // top edge, right of the corner: solid
+    CHECK(px(0, kTexRadius, 3) == 255);  // left edge, below the corner
+}
+
 TEST_CASE("public r2d API is drop-safe without a running app") {
     using namespace ws::ui::r2d;
     begin();               // screen mode
@@ -599,6 +681,8 @@ TEST_CASE("public r2d API is drop-safe without a running app") {
     draw_sprite(0.0f, 0.0f, 10.0f, 10.0f, rgba(255, 255, 255), Sprite{});
     push_clip(0.0f, 0.0f, 10.0f, 10.0f);  // warns, then ignored: no app
     pop_clip();
+    draw_rounded_quad(0.0f, 0.0f, 10.0f, 10.0f, 3.0f,
+                      rgba(255, 255, 255));  // same warn-once, same ignore
     end();
     load_texture("nope.png");            // warns, returns white, no crash
     const auto sprites = load_atlas({"nope.png"});  // warns, empty, no crash
@@ -1044,6 +1128,115 @@ TEST_CASE("the clip stack balances overflow, resets per frame, pops empty safely
     for (int i = 0; i < 4; ++i) {
         CHECK(r.batch().chunk(0).clip[i] == ws::ui::r2d::batch::kFullClip[i]);
     }
+}
+
+TEST_CASE("draw_rounded_quad 9-slices: one segment, corners sample the arcs") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera2D{});
+    r.draw_rounded_quad(0.0f, 0.0f, 100.0f, 40.0f, 8.0f, rgba(90, 168, 110));
+    r.end();
+    r.frame_end();
+
+    // Nine slices, one material (the builtin mask - white headless), so one
+    // batch segment: a rounded quad costs no more chunk budget than a flat
+    // one. Slice order is row-major: 0=TL corner, 1=top strip, 2=TR corner,
+    // 3=left strip, 4=center, ..., 8=BR corner.
+    const auto& v = r.batch().vertices();
+    REQUIRE(r.batch().chunk_count() == 1);
+    REQUIRE(r.batch().chunk(0).quad_count == 9);
+    REQUIRE(v.size() == 36);
+    const float lo = float(rounded::kTexRadius) / float(rounded::kTexSize);
+
+    // TL corner slice: sits at the rect's corner, samples the mask's arc.
+    CHECK(v[0].pos[0] == doctest::Approx(0.0f));
+    CHECK(v[0].pos[1] == doctest::Approx(0.0f));
+    CHECK(v[0].uv[0] == doctest::Approx(0.0f));
+    CHECK(v[0].uv[1] == doctest::Approx(0.0f));
+    // Top strip: starts at x = radius, stretches the mask's solid edge band.
+    CHECK(v[4].pos[0] == doctest::Approx(8.0f));
+    CHECK(v[4].pos[1] == doctest::Approx(0.0f));
+    CHECK(v[4].uv[0] == doctest::Approx(lo));
+    CHECK(v[4].uv[1] == doctest::Approx(0.0f));
+    // TR corner: mirrored slice, mirrored UVs.
+    CHECK(v[8].pos[0] == doctest::Approx(92.0f));
+    CHECK(v[8].uv[0] == doctest::Approx(1.0f - lo));
+    // Center: inset by the radius on both axes, samples the solid middle.
+    CHECK(v[16].pos[0] == doctest::Approx(8.0f));
+    CHECK(v[16].pos[1] == doctest::Approx(8.0f));
+    CHECK(v[16].uv[0] == doctest::Approx(lo));
+    CHECK(v[16].uv[1] == doctest::Approx(lo));
+    // BR corner: the deepest slice, full-depth UVs.
+    CHECK(v[32].pos[0] == doctest::Approx(92.0f));
+    CHECK(v[32].pos[1] == doctest::Approx(32.0f));
+    CHECK(v[32].uv[0] == doctest::Approx(1.0f - lo));
+    CHECK(v[32].uv[1] == doctest::Approx(1.0f - lo));
+}
+
+TEST_CASE("draw_rounded_quad clamps oversize radii, squares sub-pixel, drops empty") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera2D{});
+    // Radius 8 > half of the 4px side: clamps to 2. Still nine slices - the
+    // horizontal strips degenerate to zero height but record, keeping the
+    // slice count a constant (tests and batching stay simple).
+    r.draw_rounded_quad(0.0f, 0.0f, 10.0f, 4.0f, 8.0f, rgba(255, 255, 255));
+    // Sub-pixel and zero radii: honest square quads, one record each.
+    r.draw_rounded_quad(0.0f, 30.0f, 10.0f, 4.0f, 0.25f, rgba(255, 255, 255));
+    r.draw_rounded_quad(0.0f, 40.0f, 10.0f, 4.0f, 0.0f, rgba(255, 255, 255));
+    r.end();
+    r.frame_end();
+
+    const auto& v = r.batch().vertices();
+    REQUIRE(r.batch().chunk_count() == 1);  // all white-texture: one segment
+    REQUIRE(r.batch().chunk(0).quad_count == 11);  // 9 + 1 + 1
+    REQUIRE(v.size() == 44);
+    CHECK(v[4].pos[0] == doctest::Approx(2.0f));  // top strip starts at the
+    CHECK(v[4].pos[1] == doctest::Approx(0.0f)); // clamped radius
+    CHECK(v[12].pos[1] == doctest::Approx(2.0f));  // zero-height strip records
+    CHECK(v[36].uv[0] == doctest::Approx(0.0f));   // plain quad: kQuadUV
+    CHECK(v[36].uv[1] == doctest::Approx(0.0f));
+    CHECK(v[36].pos[1] == doctest::Approx(30.0f));  // and it is the y=30 quad
+
+    // Degenerate extents drop silently - live app data, not worth a warn.
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera2D{});
+    r.draw_rounded_quad(0.0f, 0.0f, 0.0f, 10.0f, 3.0f, rgba(255, 255, 255));
+    r.draw_rounded_quad(0.0f, 0.0f, 10.0f, -1.0f, 3.0f, rgba(255, 255, 255));
+    r.end();
+    r.frame_end();
+    CHECK(r.batch().chunk_count() == 0);
+    CHECK(r.batch().vertices().empty());
+}
+
+TEST_CASE("draw_rounded_quad rotation pivots the whole rect, slices rigid") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera2D{});
+    r.draw_rounded_quad(0.0f, 0.0f, 100.0f, 100.0f, 10.0f, rgba(255, 255, 255),
+                        1.5707963f);
+    r.end();
+    r.frame_end();
+
+    // +90 degrees, clockwise on screen: the whole square orbits its center
+    // as one rigid shape - the TL corner swings to the top-right, the
+    // center slice's TL lands 10px in along the new top edge, the BR
+    // corner slice to the bottom-left. Nine pivoted slices, one shape.
+    const auto& v = r.batch().vertices();
+    REQUIRE(r.batch().chunk(0).quad_count == 9);
+    CHECK(v[0].pos[0] == doctest::Approx(100.0f));
+    CHECK(v[0].pos[1] == doctest::Approx(0.0f));
+    CHECK(v[16].pos[0] == doctest::Approx(90.0f));
+    CHECK(v[16].pos[1] == doctest::Approx(10.0f));
+    CHECK(v[32].pos[0] == doctest::Approx(10.0f));
+    CHECK(v[32].pos[1] == doctest::Approx(90.0f));
+    // The UVs did not rotate with the shape - the BR slice still samples
+    // the mask's BR arc, wherever the rotation carries it.
+    CHECK(v[32].uv[0] == doctest::Approx(0.75f));
+    CHECK(v[32].uv[1] == doctest::Approx(0.75f));
 }
 
 // --- gui module (Phases 0-4: the core is real) ---------------------------------------
@@ -1900,4 +2093,52 @@ TEST_CASE("panel: nesting stacks; each end pops exactly one level") {
     end_panel(gui, layout);  // outer: back at the root
     CHECK(gui.ids().depth() == 0);
     gui.end_frame();
+}
+
+TEST_CASE("button: an icon rides along; corner variants keep the click contract") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    // An icon button (any sprite handle - headless, the draw drops like
+    // every other widget draw) still lays out, hit-tests and clicks exactly
+    // like a plain one: the icon is presentation, not a second widget.
+    const ws::ui::r2d::Sprite icon{7, 3};  // never dereferenced here
+    gui.new_frame(snap(60.0f, 12.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(button(gui, layout, kDefaultChrome, "fire", 120.0f, icon));
+    layout.end_panel();
+    gui.end_frame();
+
+    // The sentinel sprite (the default argument) is the no-icon button.
+    gui.new_frame(snap(60.0f, 12.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(button(gui, layout, kDefaultChrome, "plain"));
+    layout.end_panel();
+    gui.end_frame();
+
+    // Square corners (radius 0) stay a live widget: the theme shapes the
+    // drawing, never the interaction contract.
+    ChromeTheme square = kDefaultChrome;
+    square.corner_radius = 0.0f;
+    gui.new_frame(snap(60.0f, 12.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(button(gui, layout, square, "square"));
+    layout.end_panel();
+    gui.end_frame();
+
+    // An absurd radius exercises the guards: the button clamps it to half
+    // the control height, the checkbox's fill inset clamps at 5px so the
+    // square fill never pokes outside the arcs (here it draws nothing at
+    // all) - and both still toggle on a full click. The pointer aims at
+    // the checkbox's box, first row of this fresh frame.
+    ChromeTheme round = kDefaultChrome;
+    round.corner_radius = 100.0f;
+    bool value = false;
+    gui.new_frame(snap(4.0f, 4.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(checkbox(gui, layout, round, "marked", value));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(value == true);
 }

@@ -69,6 +69,12 @@ void unpack_rgba(std::uint32_t color, float out[4]);
 void quad_corners(float x, float y, float w, float h, float rotation,
                   float out[4][2]);
 
+// quad_corners with an explicit pivot: draw_rounded_quad rotates each of
+// its nine slices about the WHOLE rect's center, so the rounded rect moves
+// as one rigid shape. quad_corners is this with the slice's own center.
+void quad_corners_pivot(float x, float y, float w, float h, float pivot_x,
+                        float pivot_y, float rotation, float out[4][2]);
+
 // Expands a segment into a thickness quad (u runs along the line, v
 // across). Returns false for degenerate input - dropped silently, that is
 // plausibly live app data (e.g. a zero-length drag).

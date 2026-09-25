@@ -27,17 +27,21 @@ namespace ws::ui::gui {
 
 // A push button: true on a full click inside it (press and release over
 // the same laid-out rect). `theme` supplies the faces and metrics
-// (height = theme.control_height); `label` ids the widget - derived from
-// the current id scope, so the same label in two panels is two widgets -
-// and is drawn as a centered bar that tracks the label's length: real
-// text needs a font, which r2d does not have yet. `width` defaults to
-// 120 px.
+// (height = theme.control_height, corners = theme.corner_radius);
+// `label` ids the widget - derived from the current id scope, so the same
+// label in two panels is two widgets - and is drawn as a centered bar that
+// tracks the label's length: real text needs a font, which r2d does not
+// have yet. `icon` (a Sprite from load_atlas; the default {} draws none)
+// renders as a square at the left, inset clear of the rounded corners and
+// tinted white so the asset's own colors show; the label bar centers in
+// the room the icon leaves. `width` defaults to 120 px.
 bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
-            const char* label, float width = 120.0f);
+            const char* label, float width = 120.0f, r2d::Sprite icon = {});
 
 // A checkbox: true on the frame a full click toggled `value` - the
 // caller's bool IS the state, the widget itself holds none. The box is a
-// control_height square (accent fill while on) followed by the label
+// control_height square (accent fill while on, corners rounded by
+// theme.corner_radius) followed by the label
 // bar; the hit area covers the whole row. The row auto-sizes to box +
 // spacing + label.
 bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
@@ -46,8 +50,9 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 // A horizontal slider, click-to-set AND drag: a press inside the track
 // jumps the value to the pointer and tracks it while held; the value
 // clamps to [min, max]. True on the frame the value moved. The track is
-// control_height tall (rail, min-to-handle fill, handle); the label bar
-// draws right-aligned over it.
+// control_height tall (rail, min-to-handle fill, handle; rail and fill
+// rounded by theme.corner_radius); the label bar draws right-aligned over
+// it.
 bool slider_float(GuiContext& gui, LayoutCursor& layout,
                   const ChromeTheme& theme, const char* label, float& value,
                   float min, float max, float width = 120.0f);

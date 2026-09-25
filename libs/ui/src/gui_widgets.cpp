@@ -29,7 +29,7 @@ float label_bar_width(const char* label, float max_width) {
 }  // namespace
 
 bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
-            const char* label, float width) {
+            const char* label, float width, r2d::Sprite icon) {
     width = std::max(width, 0.0f);  // a negative width would draw a mirrored quad
 
     // One seam: the id keys the hit-test AND any persistent state; the
@@ -45,14 +45,33 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     } else if (hit.hovered) {
         face = theme.control_hovered;
     }
-    r2d::draw_quad(rect.x, rect.y, rect.width, rect.height, face);
+    r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                           theme.corner_radius, face);
 
-    // The label bar: half the control height, centered both ways. A
-    // zero-width bar (empty label or a degenerate button) draws nothing.
+    // The optional icon: a square the control is tall minus the corner
+    // insets, so it clears the rounded arcs; white tint keeps the asset's
+    // own colors. The sentinel (page 0) draws none. The label bar centers
+    // in whatever room the icon leaves.
+    float label_x = rect.x;
+    float label_room = rect.width;
+    if (icon.page != 0) {
+        const float inset = std::min(theme.corner_radius, rect.height * 0.5f);
+        const float side = rect.height - 2.0f * inset;
+        r2d::draw_sprite(rect.x + inset, rect.y + inset, side, side,
+                         r2d::rgba(255, 255, 255), icon);
+        const float used = rect.height + theme.spacing;
+        label_x = rect.x + used;
+        label_room = std::max(0.0f, rect.width - used);
+    }
+
+    // The label bar: half the control height, centered both ways in the
+    // room that remains. A zero-width bar (empty label or a degenerate
+    // button) draws nothing.
     const float bar_height = rect.height * 0.5f;
-    const float bar_width = label_bar_width(label, width - 2.0f * theme.padding);
+    const float bar_width =
+        label_bar_width(label, label_room - 2.0f * theme.padding);
     if (bar_width > 0.0f) {
-        r2d::draw_quad(rect.x + (rect.width - bar_width) * 0.5f,
+        r2d::draw_quad(label_x + (label_room - bar_width) * 0.5f,
                        rect.y + (rect.height - bar_height) * 0.5f, bar_width,
                        bar_height, theme.text);
     }
@@ -77,7 +96,7 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     }
 
     // The box: a control_height square with the same three-state face a
-    // button wears.
+    // button wears, corners rounded by the theme.
     std::uint32_t face = theme.control_bg;
     if (hit.pressed) {
         face = theme.control_pressed;
@@ -85,11 +104,13 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
         face = theme.control_hovered;
     }
     const float box = theme.control_height;
-    r2d::draw_quad(rect.x, rect.y, box, box, face);
+    r2d::draw_rounded_quad(rect.x, rect.y, box, box, theme.corner_radius, face);
 
-    // The check: the accent fill, inset by 5 px - drawn only while on, and
-    // only when the box leaves room (tiny control heights clamp to none).
-    const float inset = 5.0f;
+    // The check: the accent fill, inset past the box's corners so a
+    // heavily-rounded theme cannot let the square fill poke outside the
+    // arcs - drawn only while on, and only when the box leaves room (tiny
+    // control heights clamp to none).
+    const float inset = std::max(5.0f, theme.corner_radius);
     const float fill = box - 2.0f * inset;
     if (value && fill > 0.0f) {
         r2d::draw_quad(rect.x + inset, rect.y + inset, fill, fill,
@@ -138,7 +159,7 @@ bool slider_float(GuiContext& gui, LayoutCursor& layout,
     }
 
     // The rail: a half-height strip down the middle of the row, wearing
-    // the same three-state face.
+    // the same three-state face, ends rounded by the theme.
     std::uint32_t face = theme.control_bg;
     if (hit.pressed) {
         face = theme.control_pressed;
@@ -147,7 +168,8 @@ bool slider_float(GuiContext& gui, LayoutCursor& layout,
     }
     const float rail_height = rect.height * 0.5f;
     const float rail_y = rect.y + (rect.height - rail_height) * 0.5f;
-    r2d::draw_quad(rect.x, rail_y, rect.width, rail_height, face);
+    r2d::draw_rounded_quad(rect.x, rail_y, rect.width, rail_height,
+                           theme.corner_radius, face);
 
     // The handle position reflects the VALUE (the state), not the pointer:
     // an out-of-range caller value just parks the handle at its edge.
@@ -159,10 +181,12 @@ bool slider_float(GuiContext& gui, LayoutCursor& layout,
     const float handle_x =
         rect.x + std::min(std::max(t, 0.0f), 1.0f) * travel;
 
-    // The fill: rail left edge to the handle, in the on-accent.
+    // The fill: rail left edge to the handle, in the on-accent - rounded
+    // to match the rail's left end (its right end hides under the handle,
+    // which is full height and opaque).
     if (handle_x > rect.x) {
-        r2d::draw_quad(rect.x, rail_y, handle_x - rect.x, rail_height,
-                       theme.control_on);
+        r2d::draw_rounded_quad(rect.x, rail_y, handle_x - rect.x, rail_height,
+                               theme.corner_radius, theme.control_on);
     }
     // The handle itself: full control height, over rail and fill.
     r2d::draw_quad(handle_x, rect.y, handle_width, rect.height, theme.text);

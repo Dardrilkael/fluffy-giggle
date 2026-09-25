@@ -35,20 +35,26 @@ void unpack_rgba(std::uint32_t color, float out[4]) {
 
 void quad_corners(float x, float y, float w, float h, float rotation,
                   float out[4][2]) {
-    const float cx = x + w * 0.5f;
-    const float cy = y + h * 0.5f;
+    quad_corners_pivot(x, y, w, h, x + w * 0.5f, y + h * 0.5f, rotation, out);
+}
+
+void quad_corners_pivot(float x, float y, float w, float h, float pivot_x,
+                        float pivot_y, float rotation, float out[4][2]) {
     const float c = std::cos(rotation);
     const float s = std::sin(rotation);
 
+    // Slice center relative to the pivot; the corners hang off that.
+    const float mx = x + w * 0.5f - pivot_x;
+    const float my = y + h * 0.5f - pivot_y;
     const float local[4][2] = {
-        {-w * 0.5f, -h * 0.5f},  // TL
-        {+w * 0.5f, -h * 0.5f},  // TR
-        {+w * 0.5f, +h * 0.5f},  // BR
-        {-w * 0.5f, +h * 0.5f},  // BL
+        {mx - w * 0.5f, my - h * 0.5f},  // TL
+        {mx + w * 0.5f, my - h * 0.5f},  // TR
+        {mx + w * 0.5f, my + h * 0.5f},  // BR
+        {mx - w * 0.5f, my + h * 0.5f},  // BL
     };
     for (int i = 0; i < 4; ++i) {
-        out[i][0] = cx + c * local[i][0] - s * local[i][1];
-        out[i][1] = cy + s * local[i][0] + c * local[i][1];
+        out[i][0] = pivot_x + c * local[i][0] - s * local[i][1];
+        out[i][1] = pivot_y + s * local[i][0] + c * local[i][1];
     }
 }
 

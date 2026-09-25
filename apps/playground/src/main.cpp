@@ -79,7 +79,9 @@ protected:
             gui_, layout_, ws::ui::gui::kDefaultChrome, "demo",
             {gui_frame.width - 244.0f, 24.0f, 220.0f, 176.0f});
         if (ws::ui::gui::button(gui_, layout_, ws::ui::gui::kDefaultChrome,
-                                "clicks")) {
+                                "clicks", 120.0f,
+                                icons_.empty() ? r2d::Sprite{}
+                                               : icons_[0])) {
             ++gui_clicks_;
         }
         ws::ui::gui::checkbox(gui_, layout_, ws::ui::gui::kDefaultChrome,
@@ -128,6 +130,15 @@ protected:
                        r2d::rgba(90, 200, 255));
         r2d::draw_line(1000.0f, 0.0f, 1000.0f, 1200.0f, 12.0f,
                        r2d::rgba(255, 90, 120, 128));
+        // Rounded quads, 9-sliced from the builtin mask: this one magnifies
+        // the baked 8px arcs to a 24px radius; the tint multiplies the white
+        // mask, so any flat color comes out of the one texture.
+        r2d::draw_rounded_quad(250.0f, 700.0f, 160.0f, 90.0f, 24.0f,
+                               r2d::rgba(90, 168, 110));
+        // Radius past half the shorter side clamps: this renders as a
+        // fully-round-end pill, not overlapping corners.
+        r2d::draw_rounded_quad(450.0f, 700.0f, 40.0f, 40.0f, 30.0f,
+                               r2d::rgba(72, 132, 192));
         // Atlas sprites: sub-rects of one packed page texture. However
         // interleaved with the draws above, these four stay in one batch
         // segment - the whole page is one material.

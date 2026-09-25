@@ -118,6 +118,15 @@ void draw_sprite(float x, float y, float w, float h, std::uint32_t color,
 void draw_line(float x0, float y0, float x1, float y1, float thickness,
                std::uint32_t color);
 
+// Flat-color rounded rectangle, 9-sliced from a builtin mask texture: the
+// corner arcs scale to `radius`, the edges stretch. The radius clamps to
+// half the shorter side (past it the corners would overlap); a sub-pixel
+// radius renders as the plain square quad. Rotation pivots the rect's
+// center like draw_quad's. The nine slices share one material, so one
+// rounded quad costs one batch segment, not nine.
+void draw_rounded_quad(float x, float y, float w, float h, float radius,
+                       std::uint32_t color, float rotation = 0.0f);
+
 // Loads an image file (PNG/JPG/..., whatever stb_image reads) and returns
 // its handle. Valid from on_setup() onward. On failure logs and returns the
 // white texture. Loading is synchronous - fine at load granularity.

@@ -111,6 +111,8 @@ public:
                    Texture texture = {}, float rotation = 0.0f);
     void draw_line(float x0, float y0, float x1, float y1, float thickness,
                    std::uint32_t color);
+    void draw_rounded_quad(float x, float y, float w, float h, float radius,
+                           std::uint32_t color, float rotation = 0.0f);
     FrameSize frame_size() const;
     Texture load_texture(const char* path);
     std::vector<Sprite> load_atlas(std::initializer_list<const char*> paths);
@@ -213,6 +215,11 @@ private:
         VmaAllocation allocation = VK_NULL_HANDLE;
     };
     std::vector<TextureEntry> textures_;
+
+    // The builtin rounded-rect mask draw_rounded_quad 9-slices (uploaded
+    // at init, after white). White (square corners) until init runs or if
+    // the upload fails - headless tests record geometry against white.
+    Texture rounded_texture_{};
 
     // Atlas pages (load_atlas, or test injection): a page's texture id is
     // its key in Sprite::page. Only grows, so sprites stay valid for the

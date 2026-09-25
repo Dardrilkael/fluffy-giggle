@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstring>
 
+#include "rounded_texture.h"
 #include "shaders/spirv.h"
 
 #ifdef _MSC_VER
@@ -226,6 +227,20 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
     if (!upload_texture(kWhitePixel, 1, 1, &white)) {
         ws::core::error("ui: r2d init failed - white texture upload");
         return false;
+    }
+
+    // The rounded-rect mask draw_rounded_quad 9-slices. A failed upload
+    // degrades to white: the slices render solid, corners come out square -
+    // ugly, never fatal.
+    const auto mask = rounded::bake();
+    Texture rounded{};
+    if (upload_texture(mask.data(), static_cast<uint32_t>(rounded::kTexSize),
+                       static_cast<uint32_t>(rounded::kTexSize), &rounded)) {
+        rounded_texture_ = rounded;
+    } else {
+        ws::core::warn("ui: r2d rounded-rect mask upload failed - rounded "
+                       "quads render square");
+        rounded_texture_ = Texture{};
     }
 
     // One binding: a chunk's whole sampler table, immutable-sampled. The
@@ -1050,6 +1065,60 @@ void Renderer2D::draw_line(float x0, float y0, float x1, float y1,
     record("draw_line", pos, uv, color, Texture{});  // lines are solid color
 }
 
+void Renderer2D::draw_rounded_quad(float x, float y, float w, float h,
+                                   float radius, std::uint32_t color,
+                                   float rotation) {
+    if (!accept("draw_rounded_quad")) {
+        return;
+    }
+    if (w <= 0.0f || h <= 0.0f) {
+        return;  // degenerate: live app data, not worth a warning
+    }
+    // Corners cannot overlap: the radius caps at half the shorter side.
+    radius = std::min(radius, std::min(w, h) * 0.5f);
+    if (radius <= 0.5f) {
+        // A sub-pixel radius is an honest square quad - minifying the
+        // baked 8 px arc down to nothing would look worse.
+        float pos[4][2];
+        batch::quad_corners(x, y, w, h, rotation, pos);
+        record("draw_rounded_quad", pos, kQuadUV, color, Texture{});
+        return;
+    }
+    // 9-slice against the builtin mask: the four corner quads sample the
+    // baked arcs (scaled from kTexRadius to `radius`), the strips and the
+    // center stretch the solid interior. All nine pivot the WHOLE rect's
+    // center so rotation moves the rounded rect as one rigid shape. A
+    // degenerate strip (radius == half the short side) records a
+    // zero-area quad - harmless, and the slice count stays a constant
+    // nine. Headless (no upload) the mask id is white: the geometry
+    // records, the corners render square.
+    const float lo = static_cast<float>(rounded::kTexRadius) /
+                     static_cast<float>(rounded::kTexSize);
+    const float hi = 1.0f - lo;
+    const float xs[3] = {x, x + radius, x + w - radius};
+    const float ys[3] = {y, y + radius, y + h - radius};
+    const float sw[3] = {radius, w - 2.0f * radius, radius};
+    const float sh[3] = {radius, h - 2.0f * radius, radius};
+    const float u0[3] = {0.0f, lo, hi};
+    const float u1[3] = {lo, hi, 1.0f};
+    const float cx = x + w * 0.5f;
+    const float cy = y + h * 0.5f;
+    for (int gy = 0; gy < 3; ++gy) {
+        for (int gx = 0; gx < 3; ++gx) {
+            float pos[4][2];
+            batch::quad_corners_pivot(xs[gx], ys[gy], sw[gx], sh[gy], cx, cy,
+                                      rotation, pos);
+            const float uv[4][2] = {
+                {u0[gx], u0[gy]},  // TL
+                {u1[gx], u0[gy]},  // TR
+                {u1[gx], u1[gy]},  // BR
+                {u0[gx], u1[gy]},  // BL
+            };
+            record("draw_rounded_quad", pos, uv, color, rounded_texture_);
+        }
+    }
+}
+
 FrameSize Renderer2D::frame_size() const {
     return FrameSize{fb_width_, fb_height_};
 }
@@ -1282,6 +1351,15 @@ void draw_line(float x0, float y0, float x1, float y1, float thickness,
         g_active->draw_line(x0, y0, x1, y1, thickness, color);
     } else {
         warn_no_app("draw_line");
+    }
+}
+
+void draw_rounded_quad(float x, float y, float w, float h, float radius,
+                       std::uint32_t color, float rotation) {
+    if (g_active != nullptr) {
+        g_active->draw_rounded_quad(x, y, w, h, radius, color, rotation);
+    } else {
+        warn_no_app("draw_rounded_quad");
     }
 }
 
