@@ -130,9 +130,12 @@ public:
 
     void wait_for_window() override {
         // Surface-loss sleep: block on the looper (battery-friendly, not a
-        // spin) until the OS brings a window back or asks for destroy.
+        // spin) until the OS brings a window back or asks for destroy. One
+        // event per round: poll_all(-1) parks inside its drain loop right
+        // after INIT_WINDOW - waiting for a further event that never comes -
+        // and the window_ready_ that command set would never be observed.
         while (!should_close() && !window_ready_) {
-            poll_all(-1);
+            poll_once(-1);
         }
     }
 
@@ -185,6 +188,20 @@ private:
             if (app_->destroyRequested != 0) {
                 break;
             }
+        }
+    }
+
+    // At most one looper event: block, process it, return. The blocking wait
+    // (wait_for_window) must re-check window_ready_/should_close() between
+    // events - poll_all's drain only ever returns on a 0 timeout, where an
+    // idle looper answers "nothing pending" instead of parking.
+    void poll_once(int timeout) {
+        int events = 0;
+        android_poll_source* source = nullptr;
+        if (ALooper_pollOnce(timeout, nullptr, &events,
+                             reinterpret_cast<void**>(&source)) >= 0 &&
+            source != nullptr) {
+            source->process(app_, source);
         }
     }
 
