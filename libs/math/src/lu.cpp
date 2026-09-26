@@ -5,12 +5,17 @@
 // Eigen lives only in this TU - it is ws::math's private implementation
 // detail and must never escape into a header (workspace rule: a lib never
 // leaks its dependencies into consumers).
-#ifdef _MSC_VER
+#if defined(_MSC_VER)
 #pragma warning(push, 0)
+#elif defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Weverything"
 #endif
 #include <Eigen/Dense>
-#ifdef _MSC_VER
+#if defined(_MSC_VER)
 #pragma warning(pop)
+#elif defined(__clang__)
+#pragma clang diagnostic pop
 #endif
 
 namespace ws::math {

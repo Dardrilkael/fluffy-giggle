@@ -1,8 +1,10 @@
-// The only place GLFW's C callback surface exists. Each callback builds the
-// matching ws::ui::Event and hands it to the shell's single forwarder; the
-// same callbacks also tap raw input into the gui library's InputFrame
-// (WindowEventSink::input) - a second, deliberately unfiltered consumer,
-// since the gui library hit-tests for itself (see <ws/ui/gui/input_frame.hpp>).
+// The desktop half of the platform seam (see src/window.h): GLFW owns the
+// window, this TU owns GLFW. The only place GLFW's C callback surface
+// exists; each callback builds the matching ws::ui::Event and hands it to
+// the shell's single forwarder; the same callbacks also tap raw input into
+// the gui library's InputFrame (WindowEventSink::input) - a second,
+// deliberately unfiltered consumer, since the gui library hit-tests for
+// itself (see <ws/ui/gui/input_frame.hpp>).
 //
 // ImGui's GLFW backend installs its own callbacks over ours and chains to
 // ours at the top of each of its own, BEFORE its io updates - so when our
@@ -15,6 +17,9 @@
 
 #include <ws/core/log.hpp>
 
+#include <imgui_impl_glfw.h>
+
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
 namespace ws::ui {
@@ -150,13 +155,17 @@ void on_char(GLFWwindow* window, unsigned int codepoint) {
 }
 
 // Process-wide, not window-scoped: installed before glfwInit() (by the
-// shell, via install_glfw_error_callback()) so init failures get logged.
+// host, via install_glfw_error_callback()) so init failures get logged.
 void glfw_error(int code, const char* description) {
     core::error("ui: GLFW error {}: {}", code, description);
 }
 
-}  // namespace
-
+// Installs the window/input callbacks on `window`; every one of them builds
+// the matching ws::ui::Event and forwards it to sink->forward (and taps the
+// gui input snapshot through sink->input). The callbacks themselves are
+// file-local - deliberately never declared in any header. Called before
+// ImGui_ImplGlfw_InitForVulkan(window, true): the backend then chains ours
+// from the top of its own callbacks, before its io updates.
 void install_window_callbacks(GLFWwindow* window, WindowEventSink* sink) {
     glfwSetWindowUserPointer(window, sink);
     glfwSetWindowCloseCallback(window, on_window_close);
@@ -168,8 +177,112 @@ void install_window_callbacks(GLFWwindow* window, WindowEventSink* sink) {
     glfwSetCharCallback(window, on_char);
 }
 
+// Installs the process-wide GLFW error callback (file-local, logging
+// through ws::core). Must run before glfwInit() so that init failures are
+// logged too.
 void install_glfw_error_callback() {
     glfwSetErrorCallback(&glfw_error);
+}
+
+}  // namespace
+
+namespace {
+
+// WindowHost on GLFW: init opens the window, and "window ready" is a
+// startup fact that stays true for the whole run - the desktop teardown is
+// once, in order, in the destructor.
+class GlfwHost final : public WindowHost {
+public:
+    ~GlfwHost() override {
+        if (window_ != nullptr) {
+            glfwDestroyWindow(window_);
+            window_ = nullptr;
+        }
+        if (glfw_initialized_) {
+            glfwTerminate();
+            glfw_initialized_ = false;
+        }
+    }
+
+    bool init(WindowEventSink& sink, const AppConfig& config) override {
+        if (config.width < 1 || config.height < 1) {
+            core::error("ui: invalid initial window size {}x{}", config.width,
+                        config.height);
+            return false;
+        }
+        install_glfw_error_callback();  // before glfwInit: log init failures too
+        if (!glfwInit()) {
+            core::error("ui: glfwInit failed");
+            return false;
+        }
+        glfw_initialized_ = true;
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+        window_ = glfwCreateWindow(config.width, config.height, config.title.c_str(),
+                                  nullptr, nullptr);
+        if (window_ == nullptr) {
+            core::error("ui: failed to create window \"{}\"", config.title);
+            return false;
+        }
+        sink_ = &sink;
+        install_window_callbacks(window_, sink_);
+        return true;
+    }
+
+    std::vector<const char*> instance_extensions() const override {
+        uint32_t count = 0;
+        const char** extensions = glfwGetRequiredInstanceExtensions(&count);
+        if (extensions == nullptr) {
+            core::error("ui: GLFW reports no Vulkan WSI extensions");
+            return {};
+        }
+        return std::vector<const char*>(extensions, extensions + count);
+    }
+
+    bool create_surface(VkInstance instance, VkSurfaceKHR* out) const override {
+        return glfwCreateWindowSurface(instance, window_, nullptr, out) == VK_SUCCESS;
+    }
+
+    void pump() override { glfwPollEvents(); }
+
+    void wait_for_window() override {
+        // Unreachable: window_ready() never goes false on desktop (the
+        // shell never calls this without that check).
+    }
+
+    bool should_close() const override {
+        return glfwWindowShouldClose(window_) == GLFW_TRUE;
+    }
+
+    void request_stop() override { glfwSetWindowShouldClose(window_, GLFW_TRUE); }
+
+    bool window_ready() const override { return window_ != nullptr; }
+
+    bool is_hidden() const override {
+        return glfwGetWindowAttrib(window_, GLFW_ICONIFIED) == GLFW_TRUE;
+    }
+
+    void framebuffer_size(int* width, int* height) const override {
+        glfwGetFramebufferSize(window_, width, height);
+    }
+
+    bool imgui_platform_init() override {
+        return ImGui_ImplGlfw_InitForVulkan(window_, true);
+    }
+
+    void imgui_platform_new_frame() override { ImGui_ImplGlfw_NewFrame(); }
+
+    void imgui_platform_shutdown() override { ImGui_ImplGlfw_Shutdown(); }
+
+private:
+    GLFWwindow* window_ = nullptr;
+    WindowEventSink* sink_ = nullptr;
+    bool glfw_initialized_ = false;
+};
+
+}  // namespace
+
+std::unique_ptr<WindowHost> make_window_host() {
+    return std::make_unique<GlfwHost>();
 }
 
 }  // namespace ws::ui

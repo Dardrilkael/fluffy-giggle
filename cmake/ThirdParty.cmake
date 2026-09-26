@@ -11,32 +11,42 @@ set(FETCHCONTENT_QUIET OFF)
 # Some pinned third-party releases predate CMake 3.5; allow them to configure.
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
-FetchContent_Declare(doctest
-  GIT_REPOSITORY https://github.com/doctest/doctest.git
-  GIT_TAG v2.4.11
-  GIT_SHALLOW TRUE)
-
-set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(glfw
-  GIT_REPOSITORY https://github.com/glfw/glfw.git
-  GIT_TAG 3.4
-  GIT_SHALLOW TRUE)
-
-# glfw ships a real CMake build; use it.
-FetchContent_MakeAvailable(glfw)
-
 # doctest is a single header - its repo CMake predates CMake 3.5, so instead of
-# building it we just expose the header as an interface target.
-FetchContent_GetProperties(doctest)
-if(NOT doctest_POPULATED)
-  FetchContent_Populate(doctest)
+# building it we just expose the header as an interface target. Tests are never
+# cross-built (the android preset sets WS_BUILD_TESTS=OFF), so the fetch is
+# desktop-only too.
+if(NOT ANDROID)
+  FetchContent_Declare(doctest
+    GIT_REPOSITORY https://github.com/doctest/doctest.git
+    GIT_TAG v2.4.11
+    GIT_SHALLOW TRUE)
+  FetchContent_GetProperties(doctest)
+  if(NOT doctest_POPULATED)
+    FetchContent_Populate(doctest)
+  endif()
+  add_library(doctest INTERFACE)
+  add_library(doctest::doctest ALIAS doctest)
+  target_include_directories(doctest SYSTEM INTERFACE "${doctest_SOURCE_DIR}")
 endif()
-add_library(doctest INTERFACE)
-add_library(doctest::doctest ALIAS doctest)
-target_include_directories(doctest SYSTEM INTERFACE "${doctest_SOURCE_DIR}")
+
+# GLFW is the DESKTOP windowing platform. Android renders to the OS-owned
+# ANativeWindow (native_app_glue; see libs/ui/src/window_android.cpp), so
+# the fetch - and the target - simply do not exist there. Everything that
+# references glfw is desktop-only as well: the imgui platform backend below
+# and ws_ui's link list in libs/ui/CMakeLists.txt.
+if(NOT ANDROID)
+  set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+  set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(glfw
+    GIT_REPOSITORY https://github.com/glfw/glfw.git
+    GIT_TAG 3.4
+    GIT_SHALLOW TRUE)
+
+  # glfw ships a real CMake build; use it.
+  FetchContent_MakeAvailable(glfw)
+endif()
 
 FetchContent_Declare(vulkan_headers
   GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
@@ -86,6 +96,12 @@ target_include_directories(volk SYSTEM PUBLIC "${volk_SOURCE_DIR}")
 target_link_libraries(volk PUBLIC vulkan-headers)
 # Consumers must not link against a Vulkan loader or use prototypes directly.
 target_compile_definitions(volk PUBLIC VK_NO_PROTOTYPES)
+# Android presents its window through VK_KHR_android_surface; volk only
+# declares (and loads) that entry point when this is set, so it must cover
+# volk.c and every consumer TU alike - hence PUBLIC.
+if(ANDROID)
+  target_compile_definitions(volk PUBLIC VK_USE_PLATFORM_ANDROID_KHR)
+endif()
 
 # --- VulkanMemoryAllocator (header-only interface; implementation TU lives in libs/ui) ---
 add_library(vma INTERFACE)
@@ -93,19 +109,29 @@ add_library(vma::vma ALIAS vma)
 target_include_directories(vma SYSTEM INTERFACE "${vma_SOURCE_DIR}/include")
 target_link_libraries(vma INTERFACE volk)
 
-# --- Dear ImGui (+ GLFW and Vulkan backends, docking branch) ----------------
+# --- Dear ImGui (+ platform and Vulkan backends, docking branch) ----------------
+# The platform backend IS the windowing platform: GLFW's on desktop, the
+# ANativeWindow one on Android. Both come from the same fetch; the imgui
+# target just swaps the source and the platform link deps per build.
+if(ANDROID)
+  set(WS_IMGUI_PLATFORM_BACKEND "${imgui_SOURCE_DIR}/backends/imgui_impl_android.cpp")
+  set(WS_IMGUI_PLATFORM_DEPS volk android log)
+else()
+  set(WS_IMGUI_PLATFORM_BACKEND "${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp")
+  set(WS_IMGUI_PLATFORM_DEPS glfw volk)
+endif()
 add_library(imgui STATIC
   "${imgui_SOURCE_DIR}/imgui.cpp"
   "${imgui_SOURCE_DIR}/imgui_draw.cpp"
   "${imgui_SOURCE_DIR}/imgui_tables.cpp"
   "${imgui_SOURCE_DIR}/imgui_widgets.cpp"
   "${imgui_SOURCE_DIR}/imgui_demo.cpp"
-  "${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp"
+  "${WS_IMGUI_PLATFORM_BACKEND}"
   "${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp")
 target_include_directories(imgui SYSTEM PUBLIC
   "${imgui_SOURCE_DIR}"
   "${imgui_SOURCE_DIR}/backends")
-target_link_libraries(imgui PUBLIC glfw volk)
+target_link_libraries(imgui PUBLIC ${WS_IMGUI_PLATFORM_DEPS})
 target_compile_definitions(imgui PUBLIC IMGUI_IMPL_VULKAN_USE_VOLK)
 
 # --- ImPlot -----------------------------------------------------------------

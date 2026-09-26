@@ -1,14 +1,23 @@
-// ws::ui::App - the application shell (GLFW window + Vulkan + Dear ImGui).
+// ws::ui::App - the application shell (window + Vulkan + Dear ImGui).
 //
-// All GLFW/Vulkan state lives behind App::Impl, split across this file and
-// src/window.cpp (the sole owner of GLFW's C callback surface). The public
-// header exposes no third-party types on purpose: apps subclass App and
-// react to events / draw via on_setup()/on_event()/on_update().
+// All platform/Vulkan state lives behind App::Impl. This file is
+// windowing-agnostic: it talks to the OS only through the WindowHost seam
+// (src/window.h - window_glfw.cpp on desktop, window_android.cpp on
+// Android), and no GLFW/Android symbol appears here. The public header
+// exposes no third-party types on purpose: apps subclass App and react to
+// events / draw via on_setup()/on_event()/on_update().
 //
 // The frame flow mirrors Dear ImGui's example_glfw_vulkan (rotating acquire/
 // present semaphore sets, recreate-on-out-of-date), but the swapchain code is
 // ours - the ImGui_ImplVulkanH_* helpers are example-only per the backend's
 // own docs, so this file owns its own swapchain objects instead.
+//
+// Startup splits into two stages so the shell survives Android's surface
+// loss (APP_CMD_TERM_WINDOW takes the ANativeWindow away at any pause):
+// the context stage (platform host + VkInstance) runs once, while the
+// window stage (surface, device, swapchain, renderer, ImGui backends)
+// attaches and detaches with the window - on Android it re-runs whenever
+// the OS hands a window back.
 
 #include <ws/ui/app.hpp>
 #include <ws/ui/event.hpp>
@@ -22,15 +31,24 @@
 
 #include <volk.h>  // meta-loader: every vk* symbol below is a volk global
 
-#define GLFW_INCLUDE_NONE
-#include <GLFW/glfw3.h>
-
 #include <imgui.h>
-#include <imgui_impl_glfw.h>
 #include <imgui_impl_vulkan.h>
 #include <implot.h>
 
+// vk_mem_alloc.h is a third-party header - keep it clear of our /W4 /WX
+// settings on MSVC and of the stricter clang sets on Android.
+#if defined(_MSC_VER)
+#pragma warning(push, 0)
+#elif defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Weverything"
+#endif
 #include <vk_mem_alloc.h>
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#elif defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 #include <algorithm>
 #include <array>
@@ -117,8 +135,10 @@ struct App::Impl {
 
     AppConfig config;
 
-    GLFWwindow* window = nullptr;
-    bool glfw_initialized = false;
+    // The windowing platform behind the seam (src/window.h): GLFW on
+    // desktop, native_app_glue on Android. Window interactions below go
+    // through it; no GLFW/Android symbol appears in this file.
+    std::unique_ptr<WindowHost> host_;
 
     VkInstance instance = VK_NULL_HANDLE;
     VkPhysicalDevice physical_device = VK_NULL_HANDLE;
@@ -145,14 +165,22 @@ struct App::Impl {
     uint32_t sync_index = 0;   // rotating acquire/present semaphore set
     bool rebuild_swapchain = false;
 
-    bool imgui_glfw_up = false;
+    // Stage bookkeeping for the split startup (see the file comment): the
+    // context stage (host + instance) runs once; the device stage (device,
+    // allocator, ImGui pool) and the window stage (surface + swapchain +
+    // renderer + backends) attach to the current window - and re-attach on
+    // Android whenever the OS hands one back.
+    bool device_stage_up = false;
+    bool window_stage_up = false;
+    bool imgui_platform_up = false;  // GLFW / Android platform backend
     bool imgui_vk_up = false;
     uint32_t imgui_image_count = 0;  // values the backend was initialized with;
     VkFormat imgui_format = VK_FORMAT_UNDEFINED;  // drift means it must be re-inited
     bool viewport_style_set = false;
 
     // --- event system -------------------------------------------------------
-    // GLFW callbacks (src/window.cpp) funnel every event through the sink;
+    // Platform callbacks (src/window_glfw.cpp / src/window_android.cpp)
+    // funnel every event through the sink;
     // forward_event() pre-marks ImGui-consumed input, queues the rest and
     // coalesces mouse-move/scroll per frame (move keeps the latest position,
     // scroll sums its deltas). deliver_events() then drives App::on_event,
@@ -178,34 +206,15 @@ struct App::Impl {
     r2d::Renderer2D renderer2d_;
 
     // --- gui library --------------------------------------------------------
-    // One input snapshot per frame, filled by the window callbacks' raw
-    // tap (src/window.cpp via WindowEventSink::input). main_loop clears
+    // One input snapshot per frame, filled by the platform callbacks' raw
+    // tap (src/window_glfw.cpp / src/window_android.cpp, through
+    // WindowEventSink::input). main_loop clears
     // the per-frame edges at the top of each iteration; on_update reads
     // the snapshot through ws::ui::gui::frame_input() for the duration of
     // the run.
     gui::InputFrame gui_input_;
 
     ~Impl() { shutdown(); }
-
-    // --- startup ------------------------------------------------------------
-
-    bool create_window() {
-        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-        window = glfwCreateWindow(config.width, config.height, config.title.c_str(),
-                                  nullptr, nullptr);
-        if (window == nullptr) {
-            core::error("ui: failed to create window \"{}\"", config.title);
-            return false;
-        }
-        // Our callbacks go in before the ImGui backend initializes: with
-        // install_callbacks=true it chains to ours at the top of its own
-        // callbacks, before its io updates - io.WantCapture* at event time
-        // reflects the last NewFrame (see imgui_wants()).
-        event_sink_.forward = [this](Event& event) { forward_event(event); };
-        event_sink_.input = &gui_input_;  // gui tap: raw input, no filtering
-        install_window_callbacks(window, &event_sink_);
-        return true;
-    }
 
     // --- event system --------------------------------------------------------
 
@@ -310,10 +319,10 @@ struct App::Impl {
                            event);
             } catch (const std::exception& e) {
                 core::error("ui: exception in on_event(): {}", e.what());
-                glfwSetWindowShouldClose(window, GLFW_TRUE);
+                host_->request_stop();
             } catch (...) {
                 core::error("ui: unknown exception in on_event()");
-                glfwSetWindowShouldClose(window, GLFW_TRUE);
+                host_->request_stop();
             }
         }
         event_queue_.clear();
@@ -327,8 +336,10 @@ struct App::Impl {
             return false;
         }
 
-        uint32_t extension_count = 0;
-        const char** extensions = glfwGetRequiredInstanceExtensions(&extension_count);
+        // WSI extensions per platform: whatever the host needs to build its
+        // surface (GLFW's required set on desktop, surface + android_surface
+        // on Android).
+        const std::vector<const char*> extensions = host_->instance_extensions();
 
         // The shell needs nothing beyond WSI basics, so request the lowest API
         // version to run on the widest range of drivers.
@@ -340,8 +351,8 @@ struct App::Impl {
         VkInstanceCreateInfo create_info{};
         create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
         create_info.pApplicationInfo = &app_info;
-        create_info.enabledExtensionCount = extension_count;
-        create_info.ppEnabledExtensionNames = extensions;
+        create_info.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+        create_info.ppEnabledExtensionNames = extensions.data();
         if (vkCreateInstance(&create_info, nullptr, &instance) != VK_SUCCESS) {
             core::error("ui: vkCreateInstance failed");
             return false;
@@ -351,7 +362,7 @@ struct App::Impl {
     }
 
     bool create_surface() {
-        if (glfwCreateWindowSurface(instance, window, nullptr, &surface) != VK_SUCCESS) {
+        if (!host_->create_surface(instance, &surface)) {
             core::error("ui: failed to create the window surface");
             return false;
         }
@@ -808,7 +819,7 @@ struct App::Impl {
     bool recreate_swapchain() {
         int fb_width = 0;
         int fb_height = 0;
-        glfwGetFramebufferSize(window, &fb_width, &fb_height);
+        host_->framebuffer_size(&fb_width, &fb_height);
         destroy_swapchain_objects();
         if (!create_swapchain(fb_width, fb_height)) {
             return false;
@@ -875,11 +886,11 @@ struct App::Impl {
 
         ImGui::StyleColorsDark();
 
-        if (!ImGui_ImplGlfw_InitForVulkan(window, true)) {
-            core::error("ui: ImGui GLFW backend failed to initialize");
-            return false;
-        }
-        imgui_glfw_up = true;
+        // The Vulkan backend needs the swapchain (render pass + image
+        // count), so it inits in init_imgui_backend() once the window
+        // stage created one; the platform backend binds to the current
+        // window right after this - both called from attach_window(),
+        // which owns their lifecycle (Android re-runs them per attach).
         if (!init_imgui_backend()) {
             return false;
         }
@@ -953,10 +964,10 @@ struct App::Impl {
             read_queue_.execute();
         } catch (const std::exception& e) {
             core::error("ui: exception in render command queue: {}", e.what());
-            glfwSetWindowShouldClose(window, GLFW_TRUE);
+            host_->request_stop();
         } catch (...) {
             core::error("ui: unknown exception in render command queue");
-            glfwSetWindowShouldClose(window, GLFW_TRUE);
+            host_->request_stop();
         }
 
         vkCmdEndRenderPass(frame.buffer);
@@ -1000,35 +1011,54 @@ struct App::Impl {
         for (;;) {
             // Fresh gui input edges for this pump: the previous frame's
             // pressed/released/scroll/text clear, held state and position
-            // stay. Iconified iterations never reach on_update, so their
-            // edges drop here - drop, never defer, like every queue.
+            // stay. Iconified and surface-loss iterations never reach
+            // on_update, so their edges drop here - drop, never defer,
+            // like every queue.
             gui_input_.next_frame();
-            glfwPollEvents();
+            host_->pump();
 
             // Every queued event reaches on_event before this frame's
             // on_update() - including the WindowCloseEvent of the closing
             // click, so apps can react before the loop exits.
             deliver_events(app);
-            if (glfwWindowShouldClose(window) == GLFW_TRUE) {
+            if (host_->should_close()) {
                 break;
+            }
+
+            // The window stage follows the platform's window state: attach
+            // while a window exists, detach when the platform took it away
+            // (Android surface loss; desktop stays ready for the whole
+            // run), and block on the platform while there is nothing to
+            // render instead of spinning.
+            if (!host_->window_ready()) {
+                if (window_stage_up) {
+                    detach_window();
+                }
+                if (host_->should_close()) {
+                    break;
+                }
+                host_->wait_for_window();
+                continue;
+            }
+            if (!window_stage_up && !attach_window(app)) {
+                return 1;
             }
 
             // Swapchain recreation is event-driven: a WindowResizeEvent (or
             // Vulkan itself, via out-of-date/suboptimal) raised the flag -
             // there is no per-frame size poll. Skip while the surface is
-            // unusable (iconified); the flag survives until a good size
+            // unusable (minimized); the flag survives until a good size
             // arrives.
-            const bool iconified =
-                glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE;
-            if (rebuild_swapchain && !iconified) {
+            const bool window_hidden = host_->is_hidden();
+            if (rebuild_swapchain && !window_hidden) {
                 int fb_width = 0;
                 int fb_height = 0;
-                glfwGetFramebufferSize(window, &fb_width, &fb_height);
+                host_->framebuffer_size(&fb_width, &fb_height);
                 if (fb_width > 0 && fb_height > 0 && !recreate_swapchain()) {
                     return 1;
                 }
             }
-            if (iconified) {
+            if (window_hidden) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
@@ -1044,7 +1074,7 @@ struct App::Impl {
             }
 
             ImGui_ImplVulkan_NewFrame();
-            ImGui_ImplGlfw_NewFrame();
+            host_->imgui_platform_new_frame();
             ImGui::NewFrame();
 
             // One r2d frame per ImGui frame: begin before on_update() records
@@ -1057,11 +1087,11 @@ struct App::Impl {
                 renderer2d_.frame_end();
             } catch (const std::exception& e) {
                 core::error("ui: exception in on_update(): {}", e.what());
-                glfwSetWindowShouldClose(window, GLFW_TRUE);
+                host_->request_stop();
                 frame_abandoned = true;
             } catch (...) {
                 core::error("ui: unknown exception in on_update()");
-                glfwSetWindowShouldClose(window, GLFW_TRUE);
+                host_->request_stop();
                 frame_abandoned = true;
             }
             if (frame_abandoned) {
@@ -1102,53 +1132,123 @@ struct App::Impl {
 
     // --- lifecycle ----------------------------------------------------------
 
-    bool startup(App& app) {
-        if (config.width < 1 || config.height < 1) {
-            core::error("ui: invalid initial window size {}x{}", config.width,
-                        config.height);
+    // Context stage: the platform host and the Vulkan instance - everything
+    // that survives an Android surface loss. Runs once per process. The
+    // sink wiring happens here, before host_->init(): the platform installs
+    // its callbacks against that sink inside init().
+    bool startup_context() {
+        // The single funnel every platform callback reads (see the event
+        // system block) plus the gui library's raw input tap.
+        event_sink_.forward = [this](Event& event) { forward_event(event); };
+        event_sink_.input = &gui_input_;  // gui tap: raw input, no filtering
+        host_ = make_window_host();
+        if (!host_->init(event_sink_, config)) {
             return false;
         }
-        if (!create_window() || !create_instance() || !create_surface() ||
-            !select_device() || !create_device() || !create_allocator() ||
-            !create_imgui_pool()) {
+        return create_instance();
+    }
+
+    // Window stage: attaches the render stack to the platform's current
+    // window. Surface first, then (first attach only) the GPU objects and
+    // the renderer/ImGui contexts, then the swapchain. Re-attaches on
+    // Android after a surface loss: the drift rules re-initialize only
+    // what the OS round-trip actually invalidated, so app state (fonts,
+    // textures, ImGui contexts) survives untouched.
+    bool attach_window(App& app) {
+        if (!create_surface()) {
             return false;
+        }
+        if (!device_stage_up) {
+            if (!select_device() || !create_device() || !create_allocator() ||
+                !create_imgui_pool()) {
+                return false;
+            }
+            device_stage_up = true;
         }
         int fb_width = 0;
         int fb_height = 0;
-        glfwGetFramebufferSize(window, &fb_width, &fb_height);
+        host_->framebuffer_size(&fb_width, &fb_height);
         if (fb_width <= 0 || fb_height <= 0 || !create_swapchain(fb_width, fb_height)) {
             return false;
         }
-        // Before on_setup(): apps load textures there, and the r2d free
-        // functions need an active renderer. init() may fail mid-way;
-        // shutdown() doubles as the (idempotent) failure-path cleanup.
-        if (!renderer2d_.init(device, physical_device, allocator, queue,
-                              queue_family, render_pass, format, image_count)) {
+        if (!window_stage_up) {
+            // Before on_setup(): apps load textures there, and the r2d free
+            // functions need an active renderer. init() may fail mid-way;
+            // shutdown() doubles as the (idempotent) failure-path cleanup.
+            if (!renderer2d_.init(device, physical_device, allocator, queue,
+                                  queue_family, render_pass, format, image_count)) {
+                return false;
+            }
+            r2d::set_active(&renderer2d_);
+            // The gui input snapshot publishes the same way (frame_input()).
+            gui::set_active_input(&gui_input_);
+            if (!init_imgui(app)) {
+                return false;
+            }
+        } else {
+            // Re-attach: the same drift rules as recreate_swapchain(). The
+            // ImGui Vulkan backend re-inits only when the image count or
+            // format changed; the 2D renderer's pipeline and descriptor
+            // sets follow through on_swapchain_recreated().
+            if (image_count != imgui_image_count || format != imgui_format) {
+                ImGui_ImplVulkan_Shutdown();
+                imgui_vk_up = false;
+                if (!init_imgui_backend()) {
+                    return false;
+                }
+            }
+            if (!renderer2d_.on_swapchain_recreated(render_pass, format, image_count)) {
+                return false;
+            }
+        }
+        // The platform backend binds to the current window - Android hands
+        // over a NEW ANativeWindow with every INIT_WINDOW, so this runs on
+        // every attach, never only the first.
+        if (!host_->imgui_platform_init()) {
+            core::error("ui: ImGui platform backend failed to initialize");
             return false;
         }
-        r2d::set_active(&renderer2d_);
-        // The gui input snapshot publishes the same way (frame_input()).
-        gui::set_active_input(&gui_input_);
-        if (!init_imgui(app)) {
-            return false;
-        }
+        imgui_platform_up = true;
+        window_stage_up = true;
+        rebuild_swapchain = false;  // the swapchain above is the current one
         core::info("ui: \"{}\" ready: {}x{}, {} swapchain images, {} present",
                    config.title, extent.width, extent.height, image_count,
                    present_mode_name(present_mode));
         return true;
     }
 
-    // Idempotent: every destroy is guarded, so it doubles as the failure-path
-    // cleanup for partially completed startup.
-    void shutdown() {
+    // Tears the window stage down, in the same order final shutdown would:
+    // backends, swapchain objects, surface. Idempotent - it is BOTH the
+    // mid-run teardown for Android surface loss (APP_CMD_TERM_WINDOW) and
+    // the first step of shutdown(); every destroy is guarded, so it is the
+    // failure-path cleanup for a partially completed attach too.
+    void detach_window() {
         if (imgui_vk_up) {
             ImGui_ImplVulkan_Shutdown();
             imgui_vk_up = false;
         }
-        if (imgui_glfw_up) {
-            ImGui_ImplGlfw_Shutdown();
-            imgui_glfw_up = false;
+        if (imgui_platform_up) {
+            host_->imgui_platform_shutdown();
+            imgui_platform_up = false;
         }
+        destroy_swapchain_objects();
+        if (surface != VK_NULL_HANDLE) {
+            vkDestroySurfaceKHR(instance, surface, nullptr);
+            surface = VK_NULL_HANDLE;
+        }
+        window_stage_up = false;
+    }
+
+    // Idempotent: every destroy is guarded, so it doubles as the failure-path
+    // cleanup for a partially completed startup or attach.
+    void shutdown() {
+        // Window stage first, when it is up at all: backends, swapchain
+        // objects, surface - the same detach an Android surface loss takes,
+        // so final shutdown is simply "detach and never re-attach". A loop
+        // that broke mid-frame (exception, close button) lands here with the
+        // stage still up; a startup failure lands here with it already down.
+        detach_window();
+
         // Backend shutdown touches ImGui::GetIO(), so the contexts go last.
         if (ImPlot::GetCurrentContext() != nullptr) {
             ImPlot::DestroyContext();
@@ -1156,8 +1256,6 @@ struct App::Impl {
         if (ImGui::GetCurrentContext() != nullptr) {
             ImGui::DestroyContext();
         }
-
-        destroy_swapchain_objects();
 
         // 2D renderer before the allocator and device it allocates from; the
         // active pointer goes null so post-run r2d calls drop with a warn
@@ -1176,10 +1274,6 @@ struct App::Impl {
             vkDestroyDescriptorPool(device, imgui_pool, nullptr);
             imgui_pool = VK_NULL_HANDLE;
         }
-        if (surface != VK_NULL_HANDLE) {
-            vkDestroySurfaceKHR(instance, surface, nullptr);
-            surface = VK_NULL_HANDLE;
-        }
         if (device != VK_NULL_HANDLE) {
             vkDestroyDevice(device, nullptr);
             device = VK_NULL_HANDLE;
@@ -1191,28 +1285,19 @@ struct App::Impl {
             // so no vk* call may happen after it.
             volkFinalize();
         }
-        if (window != nullptr) {
-            glfwDestroyWindow(window);
-            window = nullptr;
-        }
-        if (glfw_initialized) {
-            glfwTerminate();
-            glfw_initialized = false;
-        }
+        // The host goes down after the Vulkan objects its surface fed: on
+        // desktop this is where the GLFW window and the library die (the
+        // host destructor), with the loop already out of the pump.
+        host_.reset();
+        device_stage_up = false;
     }
 
     int run(App& app) {
-        install_glfw_error_callback();
-        if (!glfwInit()) {
-            core::error("ui: glfwInit failed");
+        if (!startup_context()) {
+            shutdown();  // failure-path cleanup; every destroy is guarded
             return 1;
         }
-        glfw_initialized = true;
-
-        int result = 1;
-        if (startup(app)) {
-            result = main_loop(app);
-        }
+        const int result = main_loop(app);
         shutdown();
         return result;
     }

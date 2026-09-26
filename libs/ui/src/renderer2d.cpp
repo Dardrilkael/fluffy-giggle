@@ -10,12 +10,17 @@
 #include "rounded_texture.h"
 #include "shaders/spirv.h"
 
-#ifdef _MSC_VER
+#if defined(_MSC_VER)
 #pragma warning(push, 0)
+#elif defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Weverything"
 #endif
 #include <stb_image.h>  // declarations only; the implementation TU is stb_impl.cpp
-#ifdef _MSC_VER
+#if defined(_MSC_VER)
 #pragma warning(pop)
+#elif defined(__clang__)
+#pragma clang diagnostic pop
 #endif
 
 #include <ws/core/log.hpp>

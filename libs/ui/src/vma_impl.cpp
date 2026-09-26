@@ -10,11 +10,17 @@
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
 
-// VMA is a third-party header - keep it clear of our /W4 /WX settings.
-#ifdef _MSC_VER
+// VMA is a third-party header - keep it clear of our /W4 /WX (MSVC) and
+// -Werror (clang) settings.
+#if defined(_MSC_VER)
 #pragma warning(push, 0)
+#elif defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Weverything"
 #endif
 #include <vk_mem_alloc.h>
-#ifdef _MSC_VER
+#if defined(_MSC_VER)
 #pragma warning(pop)
+#elif defined(__clang__)
+#pragma clang diagnostic pop
 #endif

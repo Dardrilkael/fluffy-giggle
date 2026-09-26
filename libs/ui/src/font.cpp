@@ -5,12 +5,17 @@
 
 #include "font.h"
 
-#ifdef _MSC_VER
+#if defined(_MSC_VER)
 #pragma warning(push, 0)
+#elif defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Weverything"
 #endif
 #include <stb_truetype.h>  // declarations only; the implementation TU is stb_impl.cpp
-#ifdef _MSC_VER
+#if defined(_MSC_VER)
 #pragma warning(pop)
+#elif defined(__clang__)
+#pragma clang diagnostic pop
 #endif
 
 #include <ws/ui/renderer2d.hpp>  // the public Font whose out-of-line half lives here

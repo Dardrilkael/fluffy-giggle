@@ -3,13 +3,23 @@
 #include <memory>
 #include <string>
 
+#ifdef __ANDROID__
+struct android_app;  // opaque native_app_glue handle; never defined in a
+                     // public header (no NDK include needed to read this)
+#endif
+
 namespace ws::ui {
 
 struct AppConfig {
     std::string title = "ws app";
     int width = 1280;   // initial window size in screen coordinates
-    int height = 720;
+    int height = 720;   // (ignored on Android - the OS owns the window)
     bool vsync = true;  // false: prefer mailbox/immediate present mode
+#ifdef __ANDROID__
+    // The native_app_glue handle android_main() received; the shell renders
+    // to its ANativeWindow and pumps its looper. Null = run() fails fast.
+    android_app* app_handle = nullptr;
+#endif
 };
 
 class Event;
