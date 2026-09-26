@@ -393,13 +393,21 @@ drive unchanged (that boundary is deliberate; don't paint it over).
 - Swapchain: `minImageCount + 1` images, BGRA8 preferred, FIFO when vsync,
   mailbox/immediate when not; recreated on resize / out-of-date /
   suboptimal — resize is driven by the same `WindowResizeEvent` path, not a
-  separate poll.
+  separate poll. An acquire returning `VK_SUBOPTIMAL_KHR` is still a
+  success — the frame renders and presents (only the submit's wait retires
+  the semaphore the acquire signaled; destroying a still-signaled semaphore
+  would violate the spec), and the shell rebuilds once that frame has
+  retired; `VK_ERROR_OUT_OF_DATE_KHR` drops the frame instead.
 - The ImGui Vulkan backend bakes MinImageCount (= 2, never changes) and its
   per-frame buffer ring at Init; if the swapchain image count or format
   changes, the shell re-initializes the backend.
 - `on_event()` and `on_update()` exceptions are caught, logged, and close
   the window cleanly (an `on_update()` exception abandons the frame — no
   `Render()`, since the app may have thrown between `Begin`/`End`).
+- Mid-frame Vulkan failures are logged and `std::abort()` — after a failed
+  submit there is no state to roll back to (semaphores in flight, a command
+  buffer half recorded); the same policy as Dear ImGui's own examples.
+  Startup failures instead return 1 from `App::run()`.
 - Don't use the `ImGui_ImplVulkanH_*` example helpers — the backend header
   marks them example-only; the shell manages its own swapchain objects.
 

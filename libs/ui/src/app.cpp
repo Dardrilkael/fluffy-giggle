@@ -164,6 +164,10 @@ struct App::Impl {
     uint32_t image_index = 0;  // swapchain image being rendered this frame
     uint32_t sync_index = 0;   // rotating acquire/present semaphore set
     bool rebuild_swapchain = false;
+    // The acquire returned VK_SUBOPTIMAL_KHR: the frame still runs and
+    // presents (the image IS acquired, its semaphore IS signaled), and the
+    // swapchain is recreated only after that frame has retired.
+    bool swapchain_suboptimal = false;
 
     // Stage bookkeeping for the split startup (see the file comment): the
     // context stage (host + instance) runs once; the device stage (device,
@@ -825,6 +829,7 @@ struct App::Impl {
             return false;
         }
         rebuild_swapchain = false;
+        swapchain_suboptimal = false;
 
         // The backend bakes MinImageCount/RenderPass/its buffer ring at Init.
         // An identical format keeps the render passes (hence its pipeline)
@@ -906,17 +911,28 @@ struct App::Impl {
         const VkResult err = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
                                                    sync.acquired, VK_NULL_HANDLE,
                                                    &image_index);
-        if (err == VK_ERROR_OUT_OF_DATE_KHR || err == VK_SUBOPTIMAL_KHR) {
-            // This frame cannot run: drop the commands submitted for it
-            // instead of letting them leak into a later frame (queue
-            // contract: same-frame execution, render_command_queue.hpp; the
-            // 2D renderer keeps the same contract).
+        if (err == VK_ERROR_OUT_OF_DATE_KHR) {
+            // This frame cannot run: the acquire failed and signaled
+            // nothing. Drop the commands submitted for it instead of
+            // letting them leak into a later frame (queue contract:
+            // same-frame execution, render_command_queue.hpp; the 2D
+            // renderer keeps the same contract).
             write_queue_.clear();
             renderer2d_.frame_drop();
             rebuild_swapchain = true;  // present_frame() skips; next loop recreates
             return;
         }
-        vk_check(err, "vkAcquireNextImageKHR");
+        // VK_SUBOPTIMAL_KHR is a success code: the image IS acquired and
+        // sync.acquired IS signaled, so the frame must run and present -
+        // only a submit's semaphore wait consumes that signal, and the
+        // rebuild's destroy would otherwise take a live signaled semaphore
+        // down with the swapchain. Presenting a suboptimal swapchain is
+        // valid; present_frame() raises the rebuild flag once this frame
+        // has fully retired.
+        swapchain_suboptimal = (err == VK_SUBOPTIMAL_KHR);
+        if (!swapchain_suboptimal) {
+            vk_check(err, "vkAcquireNextImageKHR");
+        }
 
         Frame& frame = frames[image_index];
         vk_check(vkWaitForFences(device, 1, &frame.fence, VK_TRUE, UINT64_MAX),
@@ -1004,6 +1020,13 @@ struct App::Impl {
             return;
         }
         vk_check(err, "vkQueuePresentKHR");
+        if (swapchain_suboptimal) {
+            // The acquire said the swapchain no longer matches the
+            // surface; this frame presented fine, so recreate before the
+            // next acquire - the semaphore pair is fully retired now.
+            rebuild_swapchain = true;
+            swapchain_suboptimal = false;
+        }
         sync_index = (sync_index + 1) % static_cast<uint32_t>(syncs.size());
     }
 
@@ -1211,6 +1234,7 @@ struct App::Impl {
         imgui_platform_up = true;
         window_stage_up = true;
         rebuild_swapchain = false;  // the swapchain above is the current one
+        swapchain_suboptimal = false;
         core::info("ui: \"{}\" ready: {}x{}, {} swapchain images, {} present",
                    config.title, extent.width, extent.height, image_count,
                    present_mode_name(present_mode));
