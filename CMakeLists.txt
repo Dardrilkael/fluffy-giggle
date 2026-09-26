@@ -8,8 +8,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(WS_BUILD_APPS "Build applications under apps/" ON)
 option(WS_BUILD_TESTS "Build tests and register them with ctest" ON)
 
-# All executables land in build/<preset>/bin
+# All executables land in build/<preset>/bin - and so does the Android app
+# module (the app is a loadable .so there, not an exe).
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(WsHelpers)

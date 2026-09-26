@@ -48,7 +48,7 @@
         "ANDROID_PLATFORM": "android-26",
         "ANDROID_STL": "c++_static",
         "WS_BUILD_TESTS": "OFF",
-        "WS_BUILD_APPS": "OFF"
+        "WS_BUILD_APPS": "ON"
       }
     }
   ],

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Input to tools/package-android.ps1 (aapt2 link). NativeActivity +
+     hasCode=false: zero Java - the OS dlopens lib/arm64-v8a/libplayground.so
+     (android.app.lib_name below) and calls ANativeActivity_onCreate, which
+     native_app_glue owns. Portrait-locked: the swapchain builds with
+     preTransform = the surface's currentTransform, and a fixed orientation
+     keeps that IDENTITY in the common case. extractNativeLibs keeps lib
+     loading on the classic install-time extraction path (the packager
+     deflates the .so; stored page-aligned .so's would need zipalign -p). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.ws.playground"
+    android:versionCode="1"
+    android:versionName="0.1">
+
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+
+    <application
+        android:hasCode="false"
+        android:label="ws playground"
+        android:extractNativeLibs="true"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:label="ws playground"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density">
+            <!-- The module base name: libplayground.so, no prefix, no suffix. -->
+            <meta-data android:name="android.app.lib_name"
+                android:value="playground" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

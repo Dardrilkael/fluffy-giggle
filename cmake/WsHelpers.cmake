@@ -38,7 +38,29 @@ function(ws_add_app name)
   if(NOT ARG_SOURCES)
     message(FATAL_ERROR "ws_add_app(${name}): no sources.")
   endif()
-  add_executable(${name} ${ARG_SOURCES})
+  if(ANDROID)
+    # Android apps are loadable modules: the OS dlopens lib<name>.so and
+    # calls ANativeActivity_onCreate, which the glue .c defines - -u keeps
+    # the linker from dropping it (nothing else in the module references
+    # it). The glue is platform code, not ours: -w on its .c keeps Google's
+    # warnings out of our -Werror build.
+    add_library(${name} MODULE ${ARG_SOURCES})
+    set_target_properties(${name} PROPERTIES PREFIX "lib")
+    set_source_files_properties(
+      "${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c"
+      PROPERTIES COMPILE_OPTIONS "-w")
+    target_sources(${name} PRIVATE
+      "${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c")
+    target_include_directories(${name} PRIVATE
+      "${ANDROID_NDK}/sources/android/native_app_glue")
+    target_link_options(${name} PRIVATE "-uANativeActivity_onCreate")
+    # NDK platform libs (glue logging, backends): the platform surface, not
+    # a third-party leak - the workspace rule's target is GLFW/ImGui-style
+    # deps; android/log are link-only, no headers escape the app TU.
+    target_link_libraries(${name} PRIVATE android log)
+  else()
+    add_executable(${name} ${ARG_SOURCES})
+  endif()
   target_compile_features(${name} PRIVATE cxx_std_20)
   ws_set_warnings(${name})
   if(ARG_DEPENDS)

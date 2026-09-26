@@ -1,7 +1,8 @@
 // Minimal playground: proves out the ws::ui shell end to end (window, Vulkan
 // swapchain, ImGui + ImPlot contexts, event system, 2D renderer) and gives
 // the workspace a scratch pad. Includes only ws headers - third parties stay
-// behind the ui lib.
+// behind the ui lib. (The Android entry below talks to the NDK platform:
+// the app IS the platform boundary, the same reason it owns the font path.)
 
 #include <ws/ui/app.hpp>
 #include <ws/ui/event.hpp>
@@ -19,15 +20,37 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <string>
 #include <vector>
+
+#ifdef __ANDROID__
+// NDK headers are C - keep them clear of our -Wpedantic settings (the same
+// wrap src/window_android.cpp uses).
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Weverything"
+#endif
+#include <android/asset_manager.h>    // unpack the APK's assets at startup
+#include <android_native_app_glue.h>  // android_app + the android_main contract
+#include <sys/stat.h>                 // mkdir for the unpack target dir
+#include <unistd.h>                   // chdir
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+#endif
 
 namespace {
 
 // The system UI face - the APP picks it, not the ui lib (r2d takes
-// caller-resolved paths; Windows font-directory knowledge lives in this
-// TU, the platform boundary, and never inside the lib). One constant per
-// TU, per the house rule.
+// caller-resolved paths; font-directory knowledge lives in this TU, the
+// platform boundary, and never inside the lib). One constant per TU, per
+// the house rule. Roboto ships on every Android device; a missing face
+// degrades to the fontless v1 bars, same as a missing Windows face.
+#ifdef __ANDROID__
+constexpr const char* kDefaultFontPath = "/system/fonts/Roboto-Regular.ttf";
+#else
 constexpr const char* kDefaultFontPath = "C:/Windows/Fonts/segoeui.ttf";
+#endif
 
 class PlaygroundApp final : public ws::ui::App {
 public:
@@ -327,8 +350,78 @@ private:
 
 }  // namespace
 
+#ifdef __ANDROID__
+
+// Android entry. native_app_glue calls android_main() on the app's own
+// thread and hands over the handle the shell needs (AppConfig::app_handle).
+// The APK's assets/ unpack into the activity's files dir once per launch,
+// then chdir() makes every CWD-relative load in the app (assets/*.png,
+// imgui.ini) resolve there - so the app logic and the shell stay exactly
+// the desktop code, with zero knowledge of Android packaging.
+
+namespace {
+
+// stb_image and imgui.ini want real files, so copy every top-level APK
+// asset out of the asset manager into <filesDir>/assets/. A miss degrades
+// exactly like a missing file on desktop: white textures, one log line.
+void unpack_assets(android_app* app) {
+    AAssetManager* assets = app->activity->assetManager;
+    const char* base = app->activity->internalDataPath;
+    if (assets == nullptr || base == nullptr) {
+        return;
+    }
+    AAssetDir* dir = AAssetManager_openDir(assets, "");
+    if (dir == nullptr) {
+        return;
+    }
+    // EEXIST is fine - the dir survives launches; its files overwrite.
+    mkdir((std::string(base) + "/assets").c_str(), 0755);
+    while (const char* name = AAssetDir_getNextFileName(dir)) {
+        AAsset* asset = AAssetManager_open(assets, name, AASSET_MODE_STREAMING);
+        if (asset == nullptr) {
+            continue;
+        }
+        std::FILE* out =
+            std::fopen((std::string(base) + "/assets/" + name).c_str(), "wb");
+        if (out == nullptr) {
+            ws::core::error("playground: cannot unpack asset {}", name);
+            AAsset_close(asset);
+            continue;
+        }
+        char buffer[65536];
+        int read = 0;
+        while ((read = AAsset_read(asset, buffer, sizeof(buffer))) > 0) {
+            if (std::fwrite(buffer, 1, static_cast<std::size_t>(read), out) !=
+                static_cast<std::size_t>(read)) {
+                ws::core::error("playground: short write unpacking {}", name);
+                break;
+            }
+        }
+        std::fclose(out);
+        AAsset_close(asset);
+    }
+    AAssetDir_close(dir);
+}
+
+}  // namespace
+
+// The glue header declares android_main inside its extern "C" block; the
+// definition must match or the glue's C call site would not resolve.
+extern "C" void android_main(android_app* app) {
+    unpack_assets(app);
+    chdir(app->activity->internalDataPath);
+    ws::ui::AppConfig config;
+    config.title = "ws playground";
+    config.app_handle = app;
+    PlaygroundApp{config}.run();
+}
+
+#else
+
 int main() {
     ws::ui::AppConfig config;
     config.title = "ws playground";
     return PlaygroundApp{config}.run();
 }
+
+#endif
