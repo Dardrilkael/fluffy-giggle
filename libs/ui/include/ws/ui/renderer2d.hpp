@@ -27,6 +27,22 @@ struct Camera2D {
     float zoom = 1.0f;
 };
 
+// 3D perspective camera for the same y-down world the 2D camera draws in:
+// world -y renders UP on screen, exactly like every 2D draw. eye and target
+// are world points; up is the direction that must appear up on screen (the
+// default {0,-1,0} keeps the y-down convention); fov_y is the vertical field
+// of view in radians; near_z and far_z clip along the view axis. Plain
+// floats, like Camera2D - and usable out of the box the same way: the
+// default looks down +z at the origin from 400 units back.
+struct Camera3D {
+    float eye[3] = {0.0f, 0.0f, -400.0f};
+    float target[3] = {0.0f, 0.0f, 0.0f};
+    float up[3] = {0.0f, -1.0f, 0.0f};
+    float fov_y = 0.7853982f;  // 45 degrees
+    float near_z = 0.1f;
+    float far_z = 1000.0f;
+};
+
 // --- textures ---------------------------------------------------------------------
 // Opaque handle. 0 = the built-in 1x1 white texture (also the fallback for
 // failed loads). Ids are stable for the process lifetime; v1 frees textures

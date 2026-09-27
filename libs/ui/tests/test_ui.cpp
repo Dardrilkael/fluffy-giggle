@@ -1,8 +1,11 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <cstddef>
+#include <limits>
 #include <stdexcept>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -455,6 +458,275 @@ TEST_CASE("degenerate lines are dropped") {
                                         uv) == false);  // zero length
     CHECK(ws::ui::r2d::batch::line_quad(0.0f, 0.0f, 10.0f, 0.0f, 0.0f, pos,
                                         uv) == false);  // no thickness
+}
+
+// --- 3D camera math (basis, perspective VP, billboards, world lines) -----------
+
+TEST_CASE("camera_vp3d canonical camera maps axes to the Vulkan frustum") {
+    using ws::ui::r2d::Camera3D;
+    using ws::ui::r2d::batch::camera_vp3d;
+    // Eye on -z looking at the origin, default up, fov 90 (half-tan 1), a
+    // square frame, near 1 / far 99: the target sits at view depth 4.
+    Camera3D camera;
+    camera.eye[2] = -4.0f;
+    camera.fov_y = 1.5707963f;  // 90 degrees
+    camera.near_z = 1.0f;
+    camera.far_z = 99.0f;
+    const auto vp = camera_vp3d(camera, 100.0f, 100.0f);
+    const auto project = [&](float px, float py, float pz) {
+        const float x = vp.m[0] * px + vp.m[4] * py + vp.m[8] * pz + vp.m[12];
+        const float y = vp.m[1] * px + vp.m[5] * py + vp.m[9] * pz + vp.m[13];
+        const float z = vp.m[2] * px + vp.m[6] * py + vp.m[10] * pz + vp.m[14];
+        const float w = vp.m[3] * px + vp.m[7] * py + vp.m[11] * pz + vp.m[15];
+        return std::tuple{x / w, y / w, z / w};
+    };
+
+    auto [x, y, z] = project(0.0f, 0.0f, 0.0f);  // the target -> clip origin
+    CHECK(x == doctest::Approx(0.0f));
+    CHECK(y == doctest::Approx(0.0f));
+    CHECK(z == doctest::Approx(99.0f * 3.0f / (4.0f * 98.0f)));
+
+    std::tie(x, y, z) = project(4.0f, 0.0f, 0.0f);  // D*tan along +x: right edge
+    CHECK(x == doctest::Approx(1.0f));  // (a wrong cross order mirrors this)
+
+    std::tie(x, y, z) = project(0.0f, -4.0f, 0.0f);  // world -y (screen-up): top
+    CHECK(y == doctest::Approx(-1.0f));  // (a y-flip lands this at +1)
+
+    std::tie(x, y, z) = project(0.0f, 4.0f, 0.0f);  // world +y: bottom edge
+    CHECK(y == doctest::Approx(1.0f));
+
+    std::tie(x, y, z) = project(0.0f, 0.0f, -3.0f);  // eye + near: the near plane
+    CHECK(z == doctest::Approx(0.0f));
+
+    std::tie(x, y, z) = project(0.0f, 0.0f, 95.0f);  // eye + far: the far plane
+    CHECK(z == doctest::Approx(1.0f));
+}
+
+TEST_CASE("camera_vp3d fov and aspect scale the frustum edges") {
+    using ws::ui::r2d::Camera3D;
+    using ws::ui::r2d::batch::camera_vp3d;
+    // fov 53.13deg -> half-tan 0.5: at view depth 4 the frustum's half-height
+    // is 2 and, on a 2:1 frame, its half-width is 4.
+    Camera3D camera;
+    camera.eye[2] = -4.0f;
+    camera.fov_y = 0.9272952f;  // 2 * atan(0.5)
+    camera.near_z = 1.0f;
+    camera.far_z = 99.0f;
+    const auto vp = camera_vp3d(camera, 200.0f, 100.0f);
+    const auto project = [&](float px, float py, float pz) {
+        const float x = vp.m[0] * px + vp.m[4] * py + vp.m[8] * pz + vp.m[12];
+        const float y = vp.m[1] * px + vp.m[5] * py + vp.m[9] * pz + vp.m[13];
+        const float w = vp.m[3] * px + vp.m[7] * py + vp.m[11] * pz + vp.m[15];
+        return std::pair{x / w, y / w};
+    };
+
+    auto [x, y] = project(4.0f, 0.0f, 0.0f);  // half-width: aspect widens x
+    CHECK(x == doctest::Approx(1.0f));
+    std::tie(x, y) = project(2.0f, 0.0f, 0.0f);  // half-height's worth along x
+    CHECK(x == doctest::Approx(0.5f));
+    std::tie(x, y) = project(0.0f, -2.0f, 0.0f);  // half-height: vertical edge
+    CHECK(y == doctest::Approx(-1.0f));
+}
+
+TEST_CASE("camera_vp3d off-axis eye keeps the target at the frustum center") {
+    using ws::ui::r2d::Camera3D;
+    namespace batch = ws::ui::r2d::batch;
+    Camera3D camera;
+    camera.eye[0] = 10.0f; camera.eye[1] = -20.0f; camera.eye[2] = -7.0f;
+    camera.target[0] = 3.0f; camera.target[1] = 4.0f; camera.target[2] = 5.0f;
+    camera.up[0] = -0.3f; camera.up[1] = -0.8f; camera.up[2] = 0.52f;  // unnormalized
+    camera.fov_y = 1.5707963f;
+    camera.near_z = 1.0f;
+    camera.far_z = 99.0f;
+
+    const batch::CamBasis basis = batch::camera_basis(camera);
+    const auto vp = batch::camera_vp3d(camera, 100.0f, 100.0f);
+    const auto project = [&](const float p[3]) {
+        const float x = vp.m[0] * p[0] + vp.m[4] * p[1] + vp.m[8] * p[2] + vp.m[12];
+        const float y = vp.m[1] * p[0] + vp.m[5] * p[1] + vp.m[9] * p[2] + vp.m[13];
+        const float w = vp.m[3] * p[0] + vp.m[7] * p[1] + vp.m[11] * p[2] + vp.m[15];
+        return std::pair{x / w, y / w};
+    };
+    // The frustum edges sit half a fov-tan away from the TARGET, along the
+    // basis axes (the shared basis is exactly what production records with).
+    const float depth = (camera.target[0] - camera.eye[0]) * basis.forward[0] +
+                        (camera.target[1] - camera.eye[1]) * basis.forward[1] +
+                        (camera.target[2] - camera.eye[2]) * basis.forward[2];
+    const float s = depth * std::tan(camera.fov_y * 0.5f);
+
+    auto [x, y] = project(camera.target);  // the target pins the view center -
+    CHECK(x == doctest::Approx(0.0f));  // which only a wrong translation sign
+    CHECK(y == doctest::Approx(0.0f));  // (m[12]/m[13]) can break: the canonical
+                                        // camera's eye sits on both axes' zero
+    float p[3];
+    for (int a = 0; a < 3; ++a) p[a] = camera.target[a] + s * basis.right[a];
+    std::tie(x, y) = project(p);  // right edge of the frustum
+    CHECK(x == doctest::Approx(1.0f));
+    for (int a = 0; a < 3; ++a) p[a] = camera.target[a] + s * basis.up[a];
+    std::tie(x, y) = project(p);  // screen-up edge: TOP
+    CHECK(y == doctest::Approx(-1.0f));
+    for (int a = 0; a < 3; ++a) p[a] = camera.target[a] - s * basis.up[a];
+    std::tie(x, y) = project(p);  // screen-down edge: BOTTOM
+    CHECK(y == doctest::Approx(1.0f));
+}
+
+TEST_CASE("camera_vp3d degenerate inputs stay finite") {
+    using ws::ui::r2d::Camera3D;
+    using ws::ui::r2d::batch::Mat4;
+    using ws::ui::r2d::batch::camera_vp3d;
+    const auto all_finite = [](const Mat4& vp) {
+        for (float e : vp.m) {
+            if (!std::isfinite(e)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    const auto assert_finite = [&](const Camera3D& camera, float w, float h) {
+        CHECK(all_finite(camera_vp3d(camera, w, h)));
+    };
+
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    Camera3D camera;
+
+    camera.fov_y = 0.0f;         assert_finite(camera, 100.0f, 100.0f);
+    camera.fov_y = -0.5f;        assert_finite(camera, 100.0f, 100.0f);
+    camera.fov_y = nan;           assert_finite(camera, 100.0f, 100.0f);
+    camera.fov_y = 3.14159265f;  assert_finite(camera, 100.0f, 100.0f);  // >pi/2 half-tan
+    camera.fov_y = 0.7853982f;
+    camera.near_z = 0.0f;        assert_finite(camera, 100.0f, 100.0f);
+    camera.near_z = -1.0f;       assert_finite(camera, 100.0f, 100.0f);
+    camera.near_z = nan;          assert_finite(camera, 100.0f, 100.0f);
+    camera.near_z = 0.1f;
+    camera.far_z = 0.1f;         assert_finite(camera, 100.0f, 100.0f);  // == near
+    camera.far_z = -5.0f;        assert_finite(camera, 100.0f, 100.0f);  // < near
+    camera.far_z = 1000.0f;
+    camera.target[0] = camera.eye[0];  // target == eye: forward degenerates
+    camera.target[1] = camera.eye[1];
+    camera.target[2] = camera.eye[2];
+    assert_finite(camera, 100.0f, 100.0f);
+    camera.up[0] = 0.0f; camera.up[1] = 0.0f; camera.up[2] = 0.0f;  // zero hint
+    assert_finite(camera, 100.0f, 100.0f);
+    camera.up[0] = 0.0f; camera.up[1] = 0.0f; camera.up[2] = 1.0f;  // parallel to
+    assert_finite(camera, 100.0f, 100.0f);                         // the fallback forward
+    assert_finite(camera, 0.0f, 0.0f);  // zero extents
+}
+
+TEST_CASE("camera_basis is orthonormal and honors the up hint") {
+    using ws::ui::r2d::Camera3D;
+    using ws::ui::r2d::batch::CamBasis;
+    using ws::ui::r2d::batch::camera_basis;
+    using ws::math::dot;  // the workspace vecmath - what camera_basis itself uses
+
+    // The default camera looks down +z; the y-down hint makes world -y the
+    // screen-up and +x the screen-right - the same axes the 2D camera maps.
+    const CamBasis b = camera_basis(Camera3D{});
+    CHECK(b.right[0] == doctest::Approx(1.0f));
+    CHECK(b.right[1] == doctest::Approx(0.0f));
+    CHECK(b.right[2] == doctest::Approx(0.0f));
+    CHECK(b.up[0] == doctest::Approx(0.0f));
+    CHECK(b.up[1] == doctest::Approx(-1.0f));
+    CHECK(b.up[2] == doctest::Approx(0.0f));
+    CHECK(b.forward[0] == doctest::Approx(0.0f));
+    CHECK(b.forward[1] == doctest::Approx(0.0f));
+    CHECK(b.forward[2] == doctest::Approx(1.0f));
+
+    CHECK(dot(b.right, b.right) == doctest::Approx(1.0f));  // orthonormal:
+    CHECK(dot(b.up, b.up) == doctest::Approx(1.0f));       // unit axes,
+    CHECK(dot(b.forward, b.forward) == doctest::Approx(1.0f));
+    CHECK(dot(b.right, b.up) == doctest::Approx(0.0f));  // mutually perpendicular
+    CHECK(dot(b.right, b.forward) == doctest::Approx(0.0f));
+    CHECK(dot(b.up, b.forward) == doctest::Approx(0.0f));
+
+    // The hint defines the view handedness: flipping it mirrors the basis.
+    Camera3D flipped;
+    flipped.up[1] = 1.0f;  // y-up hint
+    const CamBasis f = camera_basis(flipped);
+    CHECK(f.right[0] == doctest::Approx(-1.0f));  // +x now renders LEFT
+    CHECK(f.up[1] == doctest::Approx(1.0f));      // +y renders up, as hinted
+    CHECK(f.forward[2] == doctest::Approx(1.0f));
+}
+
+TEST_CASE("billboard_corners centers on (x,y,z), faces the camera, spreads w/h") {
+    namespace batch = ws::ui::r2d::batch;
+    const batch::CamBasis basis = batch::camera_basis(ws::ui::r2d::Camera3D{});
+
+    float out[4][3];
+    batch::billboard_corners(100.0f, 200.0f, -50.0f, 4.0f, 6.0f, basis, out);
+
+    // Every corner sits on the plane through the center facing the camera,
+    // and the corners average to the center (a symmetric spread).
+    const float center[3] = {100.0f, 200.0f, -50.0f};
+    float mean[3] = {0.0f, 0.0f, 0.0f};
+    for (int i = 0; i < 4; ++i) {
+        const float off[3] = {out[i][0] - center[0], out[i][1] - center[1],
+                              out[i][2] - center[2]};
+        CHECK(off[0] * basis.forward[0] + off[1] * basis.forward[1] +
+              off[2] * basis.forward[2] == doctest::Approx(0.0f));
+        for (int a = 0; a < 3; ++a) {
+            mean[a] += out[i][a] * 0.25f;
+        }
+    }
+    CHECK(mean[0] == doctest::Approx(center[0]));
+    CHECK(mean[1] == doctest::Approx(center[1]));
+    CHECK(mean[2] == doctest::Approx(center[2]));
+
+    // TL, TR, BR, BL in the canonical basis: a center-anchored y-down quad.
+    CHECK(out[0][0] == doctest::Approx(98.0f));   // TL: x - w/2, y - h/2
+    CHECK(out[0][1] == doctest::Approx(197.0f));
+    CHECK(out[1][0] == doctest::Approx(102.0f));  // TR
+    CHECK(out[1][1] == doctest::Approx(197.0f));
+    CHECK(out[2][0] == doctest::Approx(102.0f));  // BR
+    CHECK(out[2][1] == doctest::Approx(203.0f));
+    CHECK(out[3][0] == doctest::Approx(98.0f));   // BL
+    CHECK(out[3][1] == doctest::Approx(203.0f));
+    CHECK(out[0][2] == doctest::Approx(-50.0f));  // all on the center's plane
+    CHECK(out[2][2] == doctest::Approx(-50.0f));
+}
+
+TEST_CASE("line_quad3d expands perpendicular to segment and view; degenerates drop") {
+    namespace batch = ws::ui::r2d::batch;
+    const batch::CamBasis basis = batch::camera_basis(ws::ui::r2d::Camera3D{});
+
+    float pos[4][3];
+    float uv[4][2];
+    REQUIRE(batch::line_quad3d(0.0f, 0.0f, 0.0f, 10.0f, 0.0f, 0.0f, 2.0f, basis,
+                               pos, uv));
+    // n = cross(dir, forward) = (0,-1,0): the ribbon spans world y, A,B at p0
+    // and C,D at p1 - line_quad's structure.
+    CHECK(pos[0][0] == doctest::Approx(0.0f));   // A: p0 + n*half
+    CHECK(pos[0][1] == doctest::Approx(-1.0f));
+    CHECK(pos[0][2] == doctest::Approx(0.0f));
+    CHECK(pos[1][0] == doctest::Approx(0.0f));   // B: p0 - n*half
+    CHECK(pos[1][1] == doctest::Approx(1.0f));
+    CHECK(pos[2][0] == doctest::Approx(10.0f));  // C: p1 - n*half
+    CHECK(pos[2][1] == doctest::Approx(1.0f));
+    CHECK(pos[3][0] == doctest::Approx(10.0f));  // D: p1 + n*half
+    CHECK(pos[3][1] == doctest::Approx(-1.0f));
+    CHECK(uv[0][0] == 0.0f);  // line_quad's UVs: u along, v across
+    CHECK(uv[1][1] == 1.0f);
+    CHECK(uv[2][0] == 1.0f);
+    CHECK(uv[3][1] == 0.0f);
+
+    // Degenerate input drops, the 2D contract.
+    CHECK(batch::line_quad3d(1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 2.0f, basis,
+                             pos, uv) == false);  // zero length
+    CHECK(batch::line_quad3d(0.0f, 0.0f, 0.0f, 10.0f, 0.0f, 0.0f, 0.0f, basis,
+                             pos, uv) == false);  // no thickness
+
+    // A segment along the view axis degenerates the cross - the screen-up
+    // fallback keeps the ribbon finite and spread across the screen.
+    REQUIRE(batch::line_quad3d(0.0f, 0.0f, -10.0f, 0.0f, 0.0f, 10.0f, 2.0f,
+                               basis, pos, uv));
+    for (int i = 0; i < 4; ++i) {
+        CHECK(std::isfinite(pos[i][0]));
+        CHECK(std::isfinite(pos[i][1]));
+        CHECK(std::isfinite(pos[i][2]));
+    }
+    CHECK(pos[0][1] == doctest::Approx(-1.0f));  // spread along screen-up
+    CHECK(pos[1][1] == doctest::Approx(1.0f));
+    CHECK(pos[0][2] == doctest::Approx(-10.0f));  // and ALONG the segment
+    CHECK(pos[3][2] == doctest::Approx(10.0f));
 }
 
 // --- sprite atlas packer -------------------------------------------------------

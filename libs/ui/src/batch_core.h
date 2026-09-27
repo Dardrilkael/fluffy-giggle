@@ -1,15 +1,20 @@
 #pragma once
 
-// Internal: pure-CPU 2D batch builder - no Vulkan, no third-party, fully
-// unit-testable headless. The GPU side (src/renderer2d.*) drains the chunks
-// this builds, in creation order, at one fixed point per frame. Never
-// include this from include/ws/ui/.
+// Internal: pure-CPU batch builder (2D + the 3D camera math) - no Vulkan,
+// no third-party, fully unit-testable headless. The GPU side
+// (src/renderer2d.*) drains the chunks this builds, in creation order, at
+// one fixed point per frame. Never include this from include/ws/ui/.
 
 #include <cfloat>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
 
+// The workspace's fixed-size vecmath (Vec3, dot/cross/normalize) for the 3D
+// camera path. ws::math is a ws lib, not a third-party - the no-leak rule
+// targets GLFW/Vulkan/ImGui-style deps - and this include stays internal,
+// like the whole file (the public header keeps plain floats).
+#include <ws/math/vecmath.hpp>
 #include <ws/ui/renderer2d.hpp>
 
 namespace ws::ui::r2d::batch {
@@ -80,6 +85,43 @@ void quad_corners_pivot(float x, float y, float w, float h, float pivot_x,
 // plausibly live app data (e.g. a zero-length drag).
 bool line_quad(float x0, float y0, float x1, float y1, float thickness,
                float out_pos[4][2], float out_uv[4][2]);
+
+// --- 3D camera (perspective) --------------------------------------------------
+
+// The 3D block's screen basis in world space: orthonormal, shared by the VP
+// and the record-time geometry so projection and billboards can never
+// disagree. forward points into the screen; up is the perpendicularized up
+// hint (world -y with the default {0,-1,0}: the y-down convention); right =
+// cross(forward, up) - the OPPOSITE order from the usual left-handed
+// look-at, because the y-down hint flips the handedness (the other order
+// mirrors the view). Axes are ws::math::Vec3 - the workspace's vecmath -
+// since the 3D helpers speak dot/cross/normalize (the push-constant Mat4
+// stays batch-local). Degenerate inputs (zero/NaN up, target == eye) always
+// yield a finite, orthonormal basis.
+struct CamBasis {
+    ws::math::Vec3 right;
+    ws::math::Vec3 up;
+    ws::math::Vec3 forward;
+};
+CamBasis camera_basis(const Camera3D& camera);
+
+// Perspective view-projection for Vulkan NDC (y down, z in [0,1] forward):
+// clip.w IS the view depth, so the homogeneous divide is the perspective
+// divide. Degenerate inputs stay finite, camera_vp's contract - a NaN
+// matrix would poison the whole batch.
+Mat4 camera_vp3d(const Camera3D& camera, float frame_width, float frame_height);
+
+// Billboard corners TL, TR, BR, BL - the 2D quads' order and UV assignment:
+// centered on (x, y, z), spread w/h along the basis, facing the camera.
+void billboard_corners(float x, float y, float z, float w, float h,
+                       const CamBasis& basis, float out[4][3]);
+
+// line_quad's 3D sibling: a thickness quad perpendicular to segment and
+// view, thickness in WORLD units (the 2D form's is framebuffer pixels).
+// False for degenerate input, line_quad's contract.
+bool line_quad3d(float x0, float y0, float z0, float x1, float y1, float z1,
+                 float thickness, const CamBasis& basis,
+                 float out_pos[4][3], float out_uv[4][2]);
 
 // --- frame builder ----------------------------------------------------------
 

@@ -82,6 +82,144 @@ bool line_quad(float x0, float y0, float x1, float y1, float thickness,
     return true;
 }
 
+// --- 3D camera (perspective) ----------------------------------------------------
+
+CamBasis camera_basis(const Camera3D& camera) {
+    using ws::math::Vec3;
+    // Degenerate checks in the "not greater than" form: false for NaN too, so
+    // no NaN input can produce a NaN basis (a NaN matrix would poison the
+    // whole batch, camera_vp's contract). ws::math::normalize is undefined
+    // for zero-length input - these guards are what make every normalize
+    // below safe.
+    Vec3 forward{camera.target[0] - camera.eye[0],
+                 camera.target[1] - camera.eye[1],
+                 camera.target[2] - camera.eye[2]};
+    if (!(ws::math::dot(forward, forward) > 1e-12f)) {
+        forward = Vec3{0.0f, 0.0f, 1.0f};
+    }
+    forward = ws::math::normalize(forward);
+
+    // A unit forward cannot be parallel to both fallback axes, so the chain
+    // always finds a usable right (the up hint may be zero, NaN, or parallel
+    // to the view).
+    const Vec3 hint{camera.up[0], camera.up[1], camera.up[2]};
+    Vec3 right = ws::math::cross(forward, hint);
+    if (!(ws::math::dot(right, right) > 1e-12f)) {
+        right = ws::math::cross(forward, Vec3{0.0f, 0.0f, 1.0f});
+    }
+    if (!(ws::math::dot(right, right) > 1e-12f)) {
+        right = ws::math::cross(forward, Vec3{0.0f, 1.0f, 0.0f});
+    }
+    right = ws::math::normalize(right);
+
+    // up is unit by construction (right and forward are unit and
+    // perpendicular) - the hint itself is never normalized; an unnormalized
+    // hint just bends the basis until it is orthonormal again.
+    return CamBasis{right, ws::math::cross(right, forward), forward};
+}
+
+Mat4 camera_vp3d(const Camera3D& camera, float frame_width, float frame_height) {
+    const CamBasis b = camera_basis(camera);
+    const float aspect = (frame_width > 0.0f && frame_height > 0.0f)
+                             ? frame_width / frame_height
+                             : 1.0f;
+    // NaN-safe guards, camera_vp's style: every fallback keeps all sixteen
+    // entries finite.
+    const float half_tan = std::tan(camera.fov_y * 0.5f);
+    const float t = (half_tan > 1e-4f && half_tan < 1e4f) ? half_tan : 1.0f;
+    const float f_s = 1.0f / t;
+    const float near_z = camera.near_z > 1e-4f ? camera.near_z : 1e-4f;
+    const float far_z = camera.far_z > near_z ? camera.far_z : near_z + 1.0f;
+    const float inv_range = 1.0f / (far_z - near_z);
+    const ws::math::Vec3 eye{camera.eye[0], camera.eye[1], camera.eye[2]};
+
+    // Row order clip.x / clip.y / clip.z / clip.w, column-major m[] exactly
+    // like camera_vp. With w = p - eye:
+    //   clip.x = f_s * dot(w, right) / aspect
+    //   clip.y = f_s * dot(w, -up)      (Vulkan NDC +y is down: -up maps up)
+    //   clip.z = far * (dot(w, forward) - near) / (far - near)
+    //   clip.w = dot(w, forward)        the view depth - the homogeneous
+    //                                   divide IS the perspective divide.
+    Mat4 vp{};
+    vp.m[0] = f_s * b.right.x / aspect;
+    vp.m[4] = f_s * b.right.y / aspect;
+    vp.m[8] = f_s * b.right.z / aspect;
+    vp.m[12] = -f_s * ws::math::dot(b.right, eye) / aspect;
+    vp.m[1] = -f_s * b.up.x;
+    vp.m[5] = -f_s * b.up.y;
+    vp.m[9] = -f_s * b.up.z;
+    vp.m[13] = f_s * ws::math::dot(b.up, eye);
+    vp.m[2] = far_z * b.forward.x * inv_range;
+    vp.m[6] = far_z * b.forward.y * inv_range;
+    vp.m[10] = far_z * b.forward.z * inv_range;
+    vp.m[14] = -far_z * (ws::math::dot(b.forward, eye) + near_z) * inv_range;
+    vp.m[3] = b.forward.x;
+    vp.m[7] = b.forward.y;
+    vp.m[11] = b.forward.z;
+    vp.m[15] = -ws::math::dot(b.forward, eye);
+    return vp;
+}
+
+void billboard_corners(float x, float y, float z, float w, float h,
+                       const CamBasis& basis, float out[4][3]) {
+    // TL, TR, BR, BL - the 2D quads' order and UV assignment: centered on
+    // (x, y, z), spread w/h along the basis, every corner on the plane
+    // through the center facing the camera (cull is NONE; the orientation,
+    // not the winding, is what matters here).
+    const ws::math::Vec3 c{x, y, z};
+    const float along[4][2] = {{-w * 0.5f, +h * 0.5f},  // TL
+                               {+w * 0.5f, +h * 0.5f},  // TR
+                               {+w * 0.5f, -h * 0.5f},  // BR
+                               {-w * 0.5f, -h * 0.5f}}; // BL
+    for (int i = 0; i < 4; ++i) {
+        const ws::math::Vec3 corner =
+            c + basis.right * along[i][0] + basis.up * along[i][1];
+        out[i][0] = corner.x;
+        out[i][1] = corner.y;
+        out[i][2] = corner.z;
+    }
+}
+
+bool line_quad3d(float x0, float y0, float z0, float x1, float y1, float z1,
+                 float thickness, const CamBasis& basis,
+                 float out_pos[4][3], float out_uv[4][2]) {
+    using ws::math::Vec3;
+    const Vec3 p0{x0, y0, z0};
+    const Vec3 p1{x1, y1, z1};
+    const Vec3 segment = p1 - p0;
+    if (!(ws::math::dot(segment, segment) > 1e-12f) ||
+        !(thickness > 0.0f)) {
+        return false;
+    }
+    const Vec3 dir = ws::math::normalize(segment);  // guarded above
+
+    // Ribbon normal: perpendicular to segment AND view. A segment along the
+    // view axis degenerates the cross - the screen-up fallback keeps the
+    // ribbon on screen (any perpendicular works there, and the width stays
+    // world-scaled either way).
+    Vec3 normal = ws::math::cross(dir, basis.forward);
+    float len2 = ws::math::dot(normal, normal);
+    if (!(len2 > 1e-12f)) {
+        normal = basis.up;
+        len2 = 1.0f;  // the basis is orthonormal - up is already unit
+    }
+    normal = normal * (thickness * 0.5f / std::sqrt(len2));
+
+    // A,B at p0 and C,D at p1 - line_quad's structure and UVs (the thickness
+    // is in WORLD units here, framebuffer pixels there).
+    const Vec3 pos[4] = {p0 + normal, p0 - normal, p1 - normal, p1 + normal};
+    for (int i = 0; i < 4; ++i) {
+        out_pos[i][0] = pos[i].x;
+        out_pos[i][1] = pos[i].y;
+        out_pos[i][2] = pos[i].z;
+    }
+    out_uv[0][0] = 0.0f; out_uv[0][1] = 0.0f;
+    out_uv[1][0] = 0.0f; out_uv[1][1] = 1.0f;
+    out_uv[2][0] = 1.0f; out_uv[2][1] = 1.0f;
+    out_uv[3][0] = 1.0f; out_uv[3][1] = 0.0f;
+    return true;
+}
+
 bool BatchCore::start_chunk(const Mat4& vp, const float (&clip)[4]) {
     if (chunks_.size() >= kMaxChunksPerFrame) {
         return false;
