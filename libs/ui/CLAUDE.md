@@ -15,8 +15,9 @@ gets a window, an event stream, and a place to submit draw commands —
 - **Render/widget API** — `widgets.hpp` (ImGui/ImPlot-backed draw calls),
   the engine's own vocabulary for drawing, not the graphics API's.
 - **2D renderer** — `renderer2d.hpp` (`ws::ui::r2d`): camera'd, textured
-  quads and lines, atlas sprites, baked glyph text, sorted then batched,
-  flushed under the widgets.
+  quads and lines, atlas sprites, baked glyph text, a perspective `Camera3D`
+  with depth-tested billboards, sorted then batched, flushed under the
+  widgets.
 - **Immediate-mode gui** — `gui/` headers (`ws::ui::gui`): dependency-free
   widgets (button/checkbox/slider/panel/tabs/scroll region) that draw
   through r2d; caller-owned state, identity + hit-testing + layout + draw
@@ -150,8 +151,8 @@ void on_event(ws::ui::Event& e) override {
 ## 2D renderer (r2d)
 
 `ws/ui/renderer2d.hpp` is the engine-style drawing API: free functions in
-`ws::ui::r2d` — `begin()` / `begin(camera)` / `end()`, `draw_quad`,
-`draw_line` (thickness in px), `draw_sprite`, `draw_rounded_quad`,
+`ws::ui::r2d` — `begin()` / `begin(camera)` / `begin(Camera3D)` / `end()`,
+`draw_quad`, `draw_line` (thickness in px), `draw_sprite`, `draw_rounded_quad`,
 `set_layer`, `push_clip` / `pop_clip` (framebuffer-space clip stack),
 `load_texture`, `load_atlas`, `load_font`, `draw_text`, `frame_size`,
 `sprite_size`, `rgba` (packs 0xRRGGBBAA — NOT IM_COL32 order). Apps record
@@ -184,10 +185,11 @@ third-party).
   pops stay paired. `pop_clip()` with nothing pushed is a documented no-op.
 - **Chunks.** Up to 8 CPU chunks per frame: 32 textures / 131072 vertices
   each. One chunk = one VP (64B push constants) + one clip (one scissor)
-  + one 32-slot texture table (one descriptor set) + one `vkCmdDrawIndexed`.
+  + one depth mode (which of the two pipelines flushes it) + one 32-slot
+  texture table (one descriptor set) + one `vkCmdDrawIndexed`.
   Texture overflow closes the chunk and opens a new one that inherits the
-  segment's VP and clip — no mid-frame GPU work ever. Caps exhausted:
-  further draws drop, one warn per frame.
+  segment's VP, clip and depth mode — no mid-frame GPU work ever. Caps
+  exhausted: further draws drop, one warn per frame.
 - **Textures.** `load_texture()` (valid from `on_setup()`) uploads
   synchronously — staging buffer, one-off submit, fence wait. The registry
   only grows (v1 never unloads): ids are indexes, stable for the process
@@ -241,9 +243,31 @@ third-party).
   quads — a rounded quad is always exactly nine records. All nine share
   one material: one batch segment, not nine. A failed mask upload warns
   once and degrades every rounded quad to square corners (white texture).
-- **Layering.** One render pass, three layers: r2d flushes right after
-  `vkCmdBeginRenderPass` (2D world), then ImGui's draw data (widgets), then
-  the command queue (overlays).
+- **Layering.** One render pass (color + depth attachments), three layers:
+  r2d flushes right after `vkCmdBeginRenderPass` (2D world and 3D blocks,
+  same flush), then ImGui's draw data (widgets), then the command queue
+  (overlays).
+- **3D camera + depth.** `begin(const Camera3D&)` opens a perspective
+  block; inside it the 3D overloads record — `draw_quad(x, y, z, ...)`
+  and `draw_sprite(x, y, z, ...)` are camera-facing billboards,
+  CENTER-anchored at (x, y, z) with w/h in world units (no rotation in v1;
+  the 2D forms stay top-left anchored), and
+  `draw_line(x0, y0, z0, x1, y1, z1, ...)` expands to a ribbon of
+  WORLD-unit thickness perpendicular to the segment and the view, constant
+  along its length. A 3D overload inside a 2D block warns once per frame
+  and records nothing; 2D draws inside a 3D block are legal but land on the
+  world's z=0 plane through the perspective VP, depth-tested against the
+  3D content (surprising — prefer separate blocks). One block is one kind:
+  `perspective` rides the begin() epoch (never a sort key), and the
+  block's chunks flag `depth_test`, flushing through the depth-tested
+  pipeline — LEQUAL + depth-write, so equal depths keep the stable sort's
+  submission order; depth clears to 1.0 each frame. 2D, gui and ImGui
+  never test or write depth (the 2D pipeline's depth state is
+  byte-identical to the pre-3D era), so painter's order is untouched and
+  2D chunks after 3D chunks paint over. near_z/far_z are the projection's
+  own clipping; `push_clip` stays framebuffer-space and applies to 3D
+  unchanged. No OIT in v1 — a semi-transparent depth-writing billboard
+  occludes what is behind it; no 3D `draw_text` / `draw_rounded_quad`.
 - **Drop-never-defer.** The batch resets everywhere the write queue clears
   (out-of-date acquire, hidden window, abandoned frame); iconified frames
   never reach `on_update()` at all.
@@ -252,8 +276,9 @@ third-party).
   all sets start fully white because the fragment shader indexes the
   sampler array dynamically — every slot of a bound set must be valid.
 - **Swapchain drift.** A same-format resize rebuilds nothing (viewport and
-  scissor are dynamic, extents arrive per flush); format drift rebuilds the
-  pipeline, image-count drift the sets and per-image vertex regions.
+  scissor are dynamic, extents arrive per flush); format drift rebuilds
+  both pipelines (the 2D and depth-tested 3D share one create info),
+  image-count drift the sets and per-image vertex regions.
 - `src/shaders/spirv.h` is generated by `tools/compile_shaders.ps1` and
   committed — the ImGui-backend pattern; the build needs no shader compiler.
 
@@ -357,8 +382,11 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `same_line`, `begin_plot`/`end_plot`/`plot_line`, `show_imgui_demo`/
   `show_implot_demo`.
 - `renderer2d.hpp` (`ws::ui::r2d`): the 2D drawing API — `begin`/`end`
-  camera blocks, `draw_quad` (top-left anchor, center-pivot rotation),
-  `draw_line`, `draw_sprite` (atlas sub-rect quads), `draw_rounded_quad`
+  camera blocks, `begin(const Camera3D&)` perspective blocks (inside them
+  the 3D overloads of `draw_quad`/`draw_sprite`/`draw_line` — the forms
+  with a z — record depth-tested billboards), `draw_quad` (top-left anchor,
+  center-pivot rotation), `draw_line`, `draw_sprite` (atlas sub-rect
+  quads), `draw_rounded_quad`
   (9-sliced builtin mask, radius clamped to half the shorter side),
   `set_layer`, `push_clip`/`pop_clip` (nested framebuffer clip rects),
   `load_texture`, `load_atlas`, `load_font` (bakes one face at one pixel
@@ -401,6 +429,19 @@ drive unchanged (that boundary is deliberate; don't paint it over).
 - The ImGui Vulkan backend bakes MinImageCount (= 2, never changes) and its
   per-frame buffer ring at Init; if the swapchain image count or format
   changes, the shell re-initializes the backend.
+- Depth attachment: unconditional from the first `create_swapchain` — the
+  render pass is always color + depth, so the ImGui backend's Init-baked
+  pipeline stays render-pass-compatible across every rebuild. The format
+  is chosen ONCE in `select_device` (D32_SFLOAT → D24_UNORM_S8_UINT →
+  D16_UNORM, first with DEPTH_STENCIL_ATTACHMENT support in optimal
+  tiling; startup fails loudly if the device has none), which runs
+  exactly once per process and strictly before any render pass exists —
+  that ordering IS the compatibility guarantee. Depth clears to 1.0 each
+  frame (the LEQUAL convention). r2d builds TWO pipelines against that
+  pass — depth-off (byte-identical to the pre-depth 2D era: test off,
+  write off, ALWAYS) and depth-on (LEQUAL + write, so ties keep the stable
+  sort's order) — sharing one layout and descriptor sets; `flush` binds
+  per chunk on kind change, after the skip checks.
 - `on_event()` and `on_update()` exceptions are caught, logged, and close
   the window cleanly (an `on_update()` exception abandons the frame — no
   `Render()`, since the app may have thrown between `Begin`/`End`).

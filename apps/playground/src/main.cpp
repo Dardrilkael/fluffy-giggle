@@ -241,6 +241,56 @@ protected:
         net_.draw_world();
         r2d::end();
 
+        // --- 3D world: the same grid, through the perspective camera ---
+        // One begin(Camera3D) block = one kind: its chunks flush through
+        // the depth-tested pipeline while everything above stays 2D
+        // painter's order. The block is an epoch, so it renders after the
+        // 2D world and under the screen border below.
+        if (show_3d_) {
+            r2d::begin(camera3d_);
+            // Ground grid on the world's z=0 plane - the same x/y extents
+            // the 2D camera above shows, now with visible convergence.
+            // Thickness is WORLD units here: ~2 px at the grid's depth.
+            for (int gx = 0; gx <= 10; ++gx) {
+                const float x = gx * 200.0f;
+                r2d::draw_line(x, 0.0f, 0.0f, x, 1200.0f, 0.0f, 4.0f,
+                               r2d::rgba(80, 80, 100));
+            }
+            for (int gy = 0; gy <= 6; ++gy) {
+                const float y = gy * 200.0f;
+                r2d::draw_line(0.0f, y, 0.0f, 2000.0f, y, 0.0f, 4.0f,
+                               r2d::rgba(80, 80, 100));
+            }
+            // Occlusion proof - the whole point of the depth buffer. Both
+            // billboards sit ON the eye->target axis (the red one at 2/3
+            // of the way to the target), so they project to the same
+            // screen point; red is nearer and must cover the overlap in
+            // EITHER submission order. The far_first toggle flips the
+            // order live: the picture must not change. Blue is wider so
+            // it peeks out around red and makes the overlap visible.
+            if (far_first_) {
+                r2d::draw_quad(1000.0f, 600.0f, 0.0f, 700.0f, 700.0f,
+                               r2d::rgba(80, 120, 255));
+                r2d::draw_quad(1000.0f, 433.0f, -500.0f, 300.0f, 300.0f,
+                               r2d::rgba(255, 60, 60));
+            } else {
+                r2d::draw_quad(1000.0f, 433.0f, -500.0f, 300.0f, 300.0f,
+                               r2d::rgba(255, 60, 60));
+                r2d::draw_quad(1000.0f, 600.0f, 0.0f, 700.0f, 700.0f,
+                               r2d::rgba(80, 120, 255));
+            }
+            // Parallax set: a sprite billboard floating nearer than the
+            // grid, and a world-space line running INTO the scene - its
+            // visible part starts mid-frame and recedes toward the
+            // vanishing point, all depth-test behavior.
+            r2d::draw_sprite(1450.0f, 350.0f, -400.0f, 240.0f, 240.0f,
+                             r2d::rgba(140, 200, 255),
+                             icons_.empty() ? r2d::Sprite{} : icons_[2]);
+            r2d::draw_line(1700.0f, 950.0f, -700.0f, 1700.0f, 950.0f, 500.0f,
+                           24.0f, r2d::rgba(255, 200, 60));
+            r2d::end();
+        }
+
         // --- screen layer: pixels from the top-left, no camera ---
         r2d::begin();
         const r2d::FrameSize frame = r2d::frame_size();
@@ -311,6 +361,17 @@ protected:
             ws::ui::slider_float("cam zoom", &camera_.zoom, 0.1f, 4.0f);
             ws::ui::slider_float("cam rotation", &camera_.rotation,
                                  -3.14159265f, 3.14159265f);
+            ws::ui::separator();
+            ws::ui::text("3D camera (drives the perspective layer)");
+            ws::ui::checkbox("show 3D", &show_3d_);
+            ws::ui::slider_float("eye x", &camera3d_.eye[0], -2000.0f,
+                                 2000.0f);
+            ws::ui::slider_float("eye y", &camera3d_.eye[1], -2000.0f,
+                                 2000.0f);
+            ws::ui::slider_float("eye z", &camera3d_.eye[2], -4000.0f, 0.0f);
+            ws::ui::slider_float("3D fov", &camera3d_.fov_y, 0.1f, 2.0f);
+            ws::ui::checkbox("far billboard first (occlusion proof)",
+                             &far_first_);
             ws::ui::text("atlas: the 4 icons right of the grid share one texture");
         }
         ws::ui::end_window();
@@ -326,6 +387,17 @@ protected:
 private:
     static constexpr int kMaxSamples = 512;
     ws::ui::r2d::Camera2D camera_{1000.0f, 600.0f, 0.0f, 1.0f};
+    // The perspective half: eye above the world's top edge, target the
+    // world center - the whole 2000x1200 grid lands in frame (45 deg fov)
+    // with visible convergence. near 1 / far 5000 covers the demo span.
+    ws::ui::r2d::Camera3D camera3d_{{1000.0f, 100.0f, -1500.0f},
+                                   {1000.0f, 600.0f, 0.0f},
+                                   {0.0f, -1.0f, 0.0f},
+                                   0.7853982f, 1.0f, 5000.0f};
+    bool show_3d_ = true;
+    // The occlusion proof's live control: flips the billboards' submission
+    // order so the depth test's invariance is watchable, not taken on faith.
+    bool far_first_ = true;
     ws::ui::r2d::Texture checker_{};
     std::vector<ws::ui::r2d::Sprite> icons_;
     float spin_ = 0.0f;
