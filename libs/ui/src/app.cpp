@@ -108,6 +108,26 @@ std::string_view present_mode_name(VkPresentModeKHR mode) {
     }
 }
 
+// The depth attachment's format: D32 -> D24S8 -> D16, first with
+// DEPTH_STENCIL_ATTACHMENT support in optimal tiling. Queried ONCE at
+// device selection and cached - every render pass the process ever creates
+// is built against this format, so swapchain rebuilds stay render-pass
+// compatible with the ImGui backend's baked pipeline.
+VkFormat choose_depth_format(VkPhysicalDevice physical) {
+    const VkFormat preferred[] = {VK_FORMAT_D32_SFLOAT,
+                                  VK_FORMAT_D24_UNORM_S8_UINT,
+                                  VK_FORMAT_D16_UNORM};
+    for (VkFormat candidate : preferred) {
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(physical, candidate, &properties);
+        if (properties.optimalTilingFeatures &
+            VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+            return candidate;
+        }
+    }
+    return VK_FORMAT_UNDEFINED;
+}
+
 // Every concrete event type. The per-frame queue holds events by value -
 // no heap per event, and no vtable anywhere in the event system.
 using AnyEvent = std::variant<WindowCloseEvent, WindowResizeEvent, KeyPressedEvent,
@@ -158,6 +178,14 @@ struct App::Impl {
     uint32_t image_count = 0;
     std::vector<VkImage> images;  // owned by the swapchain, not by us
     std::vector<VkImageView> views;
+    // The depth attachment, one per swapchain (extent == color): VMA owns
+    // the image (the color images are swapchain-owned), the view is ours.
+    // The format is chosen ONCE at device selection, so every render pass
+    // ever built uses the same depth format.
+    VkImage depth_image = VK_NULL_HANDLE;
+    VmaAllocation depth_allocation = VK_NULL_HANDLE;
+    VkImageView depth_view = VK_NULL_HANDLE;
+    VkFormat depth_format = VK_FORMAT_UNDEFINED;
     std::vector<VkFramebuffer> framebuffers;
     std::vector<Frame> frames;
     std::vector<Sync> syncs;
@@ -455,6 +483,18 @@ struct App::Impl {
 
         physical_device = chosen->device;
         queue_family = chosen->family;
+        // Depth format for every swapchain this process will build, chosen
+        // here because select_device runs exactly once and strictly before
+        // the first create_swapchain - that ordering IS the ImGui-backend
+        // compatibility guarantee (no pass ever exists with another
+        // format). A GPU with no depth-attachable format cannot run the
+        // renderer's depth-tested path - fail loudly, same rule as the
+        // dynamic-indexing feature above.
+        depth_format = choose_depth_format(physical_device);
+        if (depth_format == VK_FORMAT_UNDEFINED) {
+            core::error("ui: device supports no depth-attachable format");
+            return false;
+        }
         core::info("ui: using GPU \"{}\"", properties.deviceName);
         return true;
     }
@@ -692,6 +732,44 @@ struct App::Impl {
             }
         }
 
+        // Depth attachment, same extent as the color images. VMA owns the
+        // image; the view takes the DEPTH aspect only (a D24S8 stencil half
+        // stays unused, the standard depth-only view). No barrier needed -
+        // the render pass's UNDEFINED initialLayout transition covers first
+        // use, exactly like the color attachment.
+        VkImageCreateInfo depth_info{};
+        depth_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        depth_info.imageType = VK_IMAGE_TYPE_2D;
+        depth_info.format = depth_format;
+        depth_info.extent.width = extent.width;
+        depth_info.extent.height = extent.height;
+        depth_info.extent.depth = 1;
+        depth_info.mipLevels = 1;
+        depth_info.arrayLayers = 1;
+        depth_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        depth_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        depth_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        VmaAllocationCreateInfo depth_alloc{};
+        depth_alloc.usage = VMA_MEMORY_USAGE_AUTO;
+        if (vmaCreateImage(allocator, &depth_info, &depth_alloc, &depth_image,
+                           &depth_allocation, nullptr) != VK_SUCCESS) {
+            core::error("ui: vmaCreateImage (depth) failed");
+            return false;
+        }
+        VkImageViewCreateInfo depth_view_info{};
+        depth_view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        depth_view_info.image = depth_image;
+        depth_view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        depth_view_info.format = depth_format;
+        depth_view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        depth_view_info.subresourceRange.levelCount = 1;
+        depth_view_info.subresourceRange.layerCount = 1;
+        if (vkCreateImageView(device, &depth_view_info, nullptr, &depth_view) !=
+            VK_SUCCESS) {
+            core::error("ui: vkCreateImageView (depth) failed");
+            return false;
+        }
+
         VkAttachmentDescription color{};
         color.format = format;
         color.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -702,16 +780,33 @@ struct App::Impl {
         color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         color.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
+        // Cleared to 1.0 each frame, never read after the pass (only the
+        // subpass's own test/write touches it) - DONT_CARE keeps the store
+        // free, and the pass's UNDEFINED transition puts it into layout.
+        VkAttachmentDescription depth{};
+        depth.format = depth_format;
+        depth.samples = VK_SAMPLE_COUNT_1_BIT;
+        depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depth.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        depth.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depth.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        depth.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
         VkAttachmentReference color_ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+        VkAttachmentReference depth_ref{1,
+                                       VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
         VkSubpassDescription subpass{};
         subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
         subpass.colorAttachmentCount = 1;
         subpass.pColorAttachments = &color_ref;
+        subpass.pDepthStencilAttachment = &depth_ref;
 
+        VkAttachmentDescription attachments[2] = {color, depth};
         VkRenderPassCreateInfo render_pass_info{};
         render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        render_pass_info.attachmentCount = 1;
-        render_pass_info.pAttachments = &color;
+        render_pass_info.attachmentCount = 2;
+        render_pass_info.pAttachments = attachments;
         render_pass_info.subpassCount = 1;
         render_pass_info.pSubpasses = &subpass;
         if (vkCreateRenderPass(device, &render_pass_info, nullptr, &render_pass) !=
@@ -722,11 +817,14 @@ struct App::Impl {
 
         framebuffers.resize(image_count);
         for (uint32_t i = 0; i < image_count; ++i) {
+            // Every framebuffer pairs its color view with the one depth
+            // view - the pass has two attachments, so each must supply both.
+            VkImageView framebuffer_views[2] = {views[i], depth_view};
             VkFramebufferCreateInfo framebuffer_info{};
             framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
             framebuffer_info.renderPass = render_pass;
-            framebuffer_info.attachmentCount = 1;
-            framebuffer_info.pAttachments = &views[i];
+            framebuffer_info.attachmentCount = 2;
+            framebuffer_info.pAttachments = framebuffer_views;
             framebuffer_info.width = extent.width;
             framebuffer_info.height = extent.height;
             framebuffer_info.layers = 1;
@@ -804,6 +902,14 @@ struct App::Impl {
         for (VkImageView view : views) {
             vkDestroyImageView(device, view, nullptr);
         }
+        if (depth_view != VK_NULL_HANDLE) {
+            vkDestroyImageView(device, depth_view, nullptr);
+        }
+        if (depth_image != VK_NULL_HANDLE) {
+            // The allocator is a device-stage object - it outlives every
+            // window-stage teardown, including this one.
+            vmaDestroyImage(allocator, depth_image, depth_allocation);
+        }
         if (swapchain != VK_NULL_HANDLE) {
             vkDestroySwapchainKHR(device, swapchain, nullptr);
         }
@@ -813,6 +919,9 @@ struct App::Impl {
         syncs.clear();
         views.clear();
         images.clear();  // swapchain-owned; freed with the swapchain above
+        depth_view = VK_NULL_HANDLE;
+        depth_image = VK_NULL_HANDLE;
+        depth_allocation = VK_NULL_HANDLE;
         render_pass = VK_NULL_HANDLE;
         swapchain = VK_NULL_HANDLE;
         image_count = 0;
@@ -834,7 +943,8 @@ struct App::Impl {
         // The backend bakes MinImageCount/RenderPass/its buffer ring at Init.
         // An identical format keeps the render passes (hence its pipeline)
         // compatible; if the image count or format changed it must be
-        // re-initialized.
+        // re-initialized. The depth format never drifts - chosen once at
+        // device selection - so it never breaks compatibility either.
         if (image_count != imgui_image_count || format != imgui_format) {
             ImGui_ImplVulkan_Shutdown();
             imgui_vk_up = false;
@@ -945,19 +1055,24 @@ struct App::Impl {
         begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vk_check(vkBeginCommandBuffer(frame.buffer, &begin_info), "vkBeginCommandBuffer");
 
-        VkClearValue clear{};  // dark slate background; apps draw their UI on top
-        clear.color.float32[0] = 0.08f;
-        clear.color.float32[1] = 0.08f;
-        clear.color.float32[2] = 0.10f;
-        clear.color.float32[3] = 1.0f;
+        // Dark slate background; apps draw their UI on top. The depth clear
+        // is 1.0 - far plane, the LEQUAL convention: a 3D chunk's equal
+        // depths keep the submission order the stable sort built.
+        VkClearValue clears[2]{};
+        clears[0].color.float32[0] = 0.08f;
+        clears[0].color.float32[1] = 0.08f;
+        clears[0].color.float32[2] = 0.10f;
+        clears[0].color.float32[3] = 1.0f;
+        clears[1].depthStencil.depth = 1.0f;
+        clears[1].depthStencil.stencil = 0;
 
         VkRenderPassBeginInfo render_pass_info{};
         render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         render_pass_info.renderPass = render_pass;
         render_pass_info.framebuffer = framebuffers[image_index];
         render_pass_info.renderArea.extent = extent;
-        render_pass_info.clearValueCount = 1;
-        render_pass_info.pClearValues = &clear;
+        render_pass_info.clearValueCount = 2;
+        render_pass_info.pClearValues = clears;
         vkCmdBeginRenderPass(frame.buffer, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
 
         // 2D world first, widgets on top. This image's fence is already

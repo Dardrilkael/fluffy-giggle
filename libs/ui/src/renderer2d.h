@@ -241,6 +241,10 @@ private:
     VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
     VkPipeline pipeline_ = VK_NULL_HANDLE;
+    // The depth-tested sibling (LEQUAL + write, for Camera3D chunks): same
+    // shaders/layout/render pass, only the depth state differs. Created
+    // and destroyed in lockstep with pipeline_.
+    VkPipeline pipeline_3d_ = VK_NULL_HANDLE;
 
     // A Texture's id is its index here; [0] is the white texture. The
     // registry only grows (v1 never unloads), so stale descriptor-set

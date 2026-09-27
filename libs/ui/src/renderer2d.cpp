@@ -314,11 +314,14 @@ bool Renderer2D::on_swapchain_recreated(VkRenderPass render_pass,
                                         VkFormat format, uint32_t image_count) {
     render_pass_ = render_pass;
     if (pipeline_ != VK_NULL_HANDLE && format != format_) {
-        // Format drift invalidates the pipeline. A same-format resize needs
+        // Format drift invalidates the pipelines (both depth modes - they
+        // share every other byte of state). A same-format resize needs
         // nothing: render passes stay compatible, viewport/scissor are
         // dynamic, extents arrive per flush.
         vkDestroyPipeline(device_, pipeline_, nullptr);
+        vkDestroyPipeline(device_, pipeline_3d_, nullptr);
         pipeline_ = VK_NULL_HANDLE;
+        pipeline_3d_ = VK_NULL_HANDLE;
     }
     format_ = format;
     if (pipeline_ == VK_NULL_HANDLE && !create_pipeline(render_pass)) {
@@ -342,6 +345,10 @@ void Renderer2D::shutdown() {
     if (pipeline_ != VK_NULL_HANDLE) {
         vkDestroyPipeline(device_, pipeline_, nullptr);
         pipeline_ = VK_NULL_HANDLE;
+    }
+    if (pipeline_3d_ != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device_, pipeline_3d_, nullptr);
+        pipeline_3d_ = VK_NULL_HANDLE;
     }
     if (pipeline_layout_ != VK_NULL_HANDLE) {
         vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
@@ -579,11 +586,23 @@ bool Renderer2D::create_pipeline(VkRenderPass render_pass) {
     rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rasterization.lineWidth = 1.0f;
 
-    // No depth test - 2D is pure painter's order (the sort built it).
-    VkPipelineDepthStencilStateCreateInfo depth_stencil{};
-    depth_stencil.sType =
+    // Two depth modes, one pipeline each, everything else shared below:
+    // - depth_off is the 2D pipeline's state, byte-identical to the
+    //   single-pipeline era: test off, write off, compare ALWAYS. 2D is pure
+    //   painter's order (the sort built it) and MUST never touch depth.
+    // - depth_on is the 3D pipeline: LEQUAL so equal depths keep submission
+    //   order (the stable sort's), depth-write on so nearer geometry
+    //   occludes.
+    VkPipelineDepthStencilStateCreateInfo depth_off{};
+    depth_off.sType =
         VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    depth_stencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+    depth_off.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+    VkPipelineDepthStencilStateCreateInfo depth_on{};
+    depth_on.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depth_on.depthTestEnable = VK_TRUE;
+    depth_on.depthWriteEnable = VK_TRUE;
+    depth_on.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
 
     VkPipelineMultisampleStateCreateInfo multisample{};
     multisample.sType =
@@ -622,18 +641,32 @@ bool Renderer2D::create_pipeline(VkRenderPass render_pass) {
     pipeline_info.pViewportState = &viewport_state;
     pipeline_info.pRasterizationState = &rasterization;
     pipeline_info.pMultisampleState = &multisample;
-    pipeline_info.pDepthStencilState = &depth_stencil;
     pipeline_info.pColorBlendState = &blend;
     pipeline_info.pDynamicState = &dynamic;
     pipeline_info.layout = pipeline_layout_;
     pipeline_info.renderPass = render_pass;
     pipeline_info.subpass = 0;
-    const VkResult err = vkCreateGraphicsPipelines(
+    // One create info, two depth states: the pipelines share everything
+    // (shaders, layout, render pass) - only the depth mode differs, so the
+    // swap below is the whole difference between them.
+    pipeline_info.pDepthStencilState = &depth_off;
+    const VkResult err_2d = vkCreateGraphicsPipelines(
         device_, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline_);
-    vkDestroyShaderModule(device_, vert, nullptr);  // baked into the pipeline
+    pipeline_info.pDepthStencilState = &depth_on;
+    const VkResult err_3d = vkCreateGraphicsPipelines(
+        device_, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline_3d_);
+    vkDestroyShaderModule(device_, vert, nullptr);  // baked into the pipelines
     vkDestroyShaderModule(device_, frag, nullptr);
-    if (err != VK_SUCCESS) {
-        ws::core::error("ui: r2d - vkCreateGraphicsPipelines failed");
+    if (err_2d != VK_SUCCESS || err_3d != VK_SUCCESS) {
+        // Both in lockstep or neither: the callers (shutdown, the drift
+        // path) tolerate nulls, and flush checks one - they must agree.
+        vkDestroyPipeline(device_, pipeline_, nullptr);
+        vkDestroyPipeline(device_, pipeline_3d_, nullptr);
+        pipeline_ = VK_NULL_HANDLE;
+        pipeline_3d_ = VK_NULL_HANDLE;
+        ws::core::error(
+            "ui: r2d - vkCreateGraphicsPipelines failed ({}, {})",
+            static_cast<int>(err_2d), static_cast<int>(err_3d));
         return false;
     }
     return true;
@@ -832,7 +865,8 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t image_index,
                 vertices.size() * sizeof(batch::Vertex));
     vmaFlushAllocation(allocator_, region.allocation, 0, VK_WHOLE_SIZE);
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+    // Vertex/index binds and the viewport are pipeline-independent state -
+    // bound once; the pipeline itself binds per chunk below (bind on change).
     const VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &region.buffer, &offset);
     vkCmdBindIndexBuffer(cmd, index_buffer_, 0, VK_INDEX_TYPE_UINT32);
@@ -843,6 +877,7 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t image_index,
     viewport.maxDepth = 1.0f;
     vkCmdSetViewport(cmd, 0, 1, &viewport);
 
+    VkPipeline bound = VK_NULL_HANDLE;  // nothing bound when recording starts
     for (uint32_t c = 0; c < batch_.chunk_count(); ++c) {
         const batch::Chunk& chunk = batch_.chunk(c);
         if (chunk.quad_count == 0) {
@@ -854,6 +889,14 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t image_index,
         const VkRect2D scissor = chunk_scissor(chunk, fb_width, fb_height);
         if (scissor.extent.width == 0 || scissor.extent.height == 0) {
             continue;
+        }
+        // One chunk = one pipeline: the depth-tested 3D pipeline for a
+        // perspective block's chunks, the 2D painter's one otherwise. Bound
+        // on change only, after the skips - a skipped chunk never binds.
+        const VkPipeline want = chunk.depth_test ? pipeline_3d_ : pipeline_;
+        if (want != bound) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want);
+            bound = want;
         }
         vkCmdSetScissor(cmd, 0, 1, &scissor);
         VkDescriptorSet set =
