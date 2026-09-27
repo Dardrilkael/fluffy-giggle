@@ -99,6 +99,7 @@ void Renderer2D::frame_begin(float fb_width, float fb_height) {
     commands_.clear();  // capacity kept - the frame reuses the arena
     current_epoch_ = 0;
     camera_stashed_ = false;
+    current_perspective_ = false;
     clip_depth_ = 0;  // clips never leak across frames
     frame_active_ = true;
     warned_ = false;
@@ -151,8 +152,17 @@ void Renderer2D::frame_end() {
         }
         if (cmd.camera_epoch != open_epoch || clip_changed) {
             batch_.close_segment();
-            batch_.open_segment(
-                batch::camera_vp(cmd.camera, fb_width_, fb_height_), cmd.clip);
+            // The recorded kind picks the camera half: a perspective block
+            // replays through camera_vp3d and flags its chunks depth-tested
+            // (the flush's per-chunk pipeline bind), a 2D block through
+            // camera_vp with the flag off. The kind only ever changes at an
+            // epoch boundary - one begin() block is one kind - so it never
+            // splits a segment by itself.
+            const batch::Mat4 vp =
+                cmd.perspective
+                    ? batch::camera_vp3d(cmd.camera3d, fb_width_, fb_height_)
+                    : batch::camera_vp(cmd.camera, fb_width_, fb_height_);
+            batch_.open_segment(vp, cmd.clip, cmd.perspective);
             open_epoch = cmd.camera_epoch;
             for (int i = 0; i < 4; ++i) {
                 open_clip[i] = cmd.clip[i];
@@ -171,6 +181,7 @@ void Renderer2D::frame_end() {
 void Renderer2D::frame_drop() {
     frame_active_ = false;
     camera_stashed_ = false;
+    current_perspective_ = false;
     clip_depth_ = 0;
     commands_.clear();
     batch_.new_frame();
@@ -880,6 +891,16 @@ void Renderer2D::warn_drop(const char* what) {
                    what);
 }
 
+void Renderer2D::warn_kind(const char* what) {
+    if (warned_) {
+        return;
+    }
+    warned_ = true;
+    ws::core::warn("ui: r2d::{} dropped - 3D draws are only valid inside a "
+                   "begin(Camera3D) block",
+                   what);
+}
+
 void Renderer2D::warn_caps() {
     if (warned_) {
         return;
@@ -914,6 +935,14 @@ void Renderer2D::warn_sprite(const Sprite& sprite) {
 void Renderer2D::stash_camera(const Camera2D& camera) {
     ++current_epoch_;
     current_camera_ = camera;
+    current_perspective_ = false;  // this block records the 2D kind
+    camera_stashed_ = true;
+}
+
+void Renderer2D::stash_camera(const Camera3D& camera) {
+    ++current_epoch_;
+    current_camera3d_ = camera;
+    current_perspective_ = true;  // this block records the perspective kind
     camera_stashed_ = true;
 }
 
@@ -941,6 +970,10 @@ void Renderer2D::record(const char* what, const float (&pos)[4][3],
     cmd.camera_epoch = current_epoch_;
     cmd.material_key = make_material_key(texture);
     cmd.camera = current_camera_;
+    cmd.perspective = current_perspective_;
+    if (current_perspective_) {
+        cmd.camera3d = current_camera3d_;  // the half this draw replays with
+    }
     cmd.texture = texture;
     cmd.color = color;
     const float* clip = active_clip();
@@ -965,6 +998,13 @@ void Renderer2D::begin_screen() {
 }
 
 void Renderer2D::begin(const Camera2D& camera) {
+    if (!accept("begin")) {
+        return;
+    }
+    stash_camera(camera);
+}
+
+void Renderer2D::begin(const Camera3D& camera) {
     if (!accept("begin")) {
         return;
     }
@@ -1063,6 +1103,28 @@ void Renderer2D::draw_quad(float x, float y, float w, float h,
     record("draw_quad", pos, kQuadUV, color, texture);
 }
 
+void Renderer2D::draw_quad(float x, float y, float z, float w, float h,
+                           std::uint32_t color, Texture texture) {
+    if (!accept("draw_quad")) {
+        return;
+    }
+    if (!camera_stashed_) {
+        warn_drop("draw_quad");  // outside any begin()/end() block
+        return;
+    }
+    if (!current_perspective_) {
+        warn_kind("draw_quad");  // a 2D block is open: the wrong kind
+        return;
+    }
+    // Billboard: CENTER-anchored at (x, y, z), w/h world units along the
+    // camera's screen axes. The basis is recomputed per draw - it is a
+    // handful of cross products, nothing next to the record itself.
+    float pos[4][3];
+    batch::billboard_corners(x, y, z, w, h,
+                             batch::camera_basis(current_camera3d_), pos);
+    record("draw_quad", pos, kQuadUV, color, texture);
+}
+
 void Renderer2D::draw_line(float x0, float y0, float x1, float y1,
                            float thickness, std::uint32_t color) {
     if (!accept("draw_line")) {
@@ -1071,6 +1133,29 @@ void Renderer2D::draw_line(float x0, float y0, float x1, float y1,
     float pos[4][3];
     float uv[4][2];
     if (!batch::line_quad(x0, y0, x1, y1, thickness, pos, uv)) {
+        return;  // degenerate: live app data, not worth a warning
+    }
+    record("draw_line", pos, uv, color, Texture{});  // lines are solid color
+}
+
+void Renderer2D::draw_line(float x0, float y0, float z0, float x1, float y1,
+                           float z1, float thickness, std::uint32_t color) {
+    if (!accept("draw_line")) {
+        return;
+    }
+    if (!camera_stashed_) {
+        warn_drop("draw_line");  // outside any begin()/end() block
+        return;
+    }
+    if (!current_perspective_) {
+        warn_kind("draw_line");  // a 2D block is open: the wrong kind
+        return;
+    }
+    float pos[4][3];
+    float uv[4][2];
+    if (!batch::line_quad3d(x0, y0, z0, x1, y1, z1, thickness,
+                            batch::camera_basis(current_camera3d_), pos,
+                            uv)) {
         return;  // degenerate: live app data, not worth a warning
     }
     record("draw_line", pos, uv, color, Texture{});  // lines are solid color
@@ -1190,6 +1275,44 @@ void Renderer2D::draw_sprite(float x, float y, float w, float h,
     batch::quad_corners(x, y, w, h, rotation, pos);
     // Page 0 is the white sentinel (failed loads degrade to it) - it draws
     // silently. Any other unresolvable sprite is an app bug worth one warn.
+    const atlas::Rect* rect =
+        sprite.page == 0 ? nullptr : find_sprite_rect(sprite);
+    if (rect != nullptr) {
+        const float uv[4][2] = {
+            {rect->u0, rect->v0},  // TL
+            {rect->u1, rect->v0},  // TR
+            {rect->u1, rect->v1},  // BR
+            {rect->u0, rect->v1},  // BL
+        };
+        record("draw_sprite", pos, uv, color, Texture{sprite.page});
+    } else {
+        if (sprite.page != 0) {
+            warn_sprite(sprite);
+        }
+        record("draw_sprite", pos, kQuadUV, color, Texture{});
+    }
+}
+
+void Renderer2D::draw_sprite(float x, float y, float z, float w, float h,
+                             std::uint32_t color, Sprite sprite) {
+    if (!accept("draw_sprite")) {
+        return;
+    }
+    if (!camera_stashed_) {
+        warn_drop("draw_sprite");  // outside any begin()/end() block
+        return;
+    }
+    if (!current_perspective_) {
+        warn_kind("draw_sprite");  // a 2D block is open: the wrong kind
+        return;
+    }
+    float pos[4][3];
+    batch::billboard_corners(x, y, z, w, h,
+                             batch::camera_basis(current_camera3d_), pos);
+    // Rect resolution is the 2D body's, verbatim - only the corners differ
+    // (billboard, center-anchored). Page 0 is the white sentinel (failed
+    // loads degrade to it) - it draws silently. Any other unresolvable
+    // sprite is an app bug worth one warn.
     const atlas::Rect* rect =
         sprite.page == 0 ? nullptr : find_sprite_rect(sprite);
     if (rect != nullptr) {
@@ -1416,6 +1539,14 @@ void begin(const Camera2D& camera) {
     }
 }
 
+void begin(const Camera3D& camera) {
+    if (g_active != nullptr) {
+        g_active->begin(camera);
+    } else {
+        warn_no_app("begin");
+    }
+}
+
 void end() {
     if (g_active != nullptr) {
         g_active->end();
@@ -1457,10 +1588,28 @@ void draw_quad(float x, float y, float w, float h, std::uint32_t color,
     }
 }
 
+void draw_quad(float x, float y, float z, float w, float h,
+               std::uint32_t color, Texture texture) {
+    if (g_active != nullptr) {
+        g_active->draw_quad(x, y, z, w, h, color, texture);
+    } else {
+        warn_no_app("draw_quad");
+    }
+}
+
 void draw_line(float x0, float y0, float x1, float y1, float thickness,
                std::uint32_t color) {
     if (g_active != nullptr) {
         g_active->draw_line(x0, y0, x1, y1, thickness, color);
+    } else {
+        warn_no_app("draw_line");
+    }
+}
+
+void draw_line(float x0, float y0, float z0, float x1, float y1, float z1,
+               float thickness, std::uint32_t color) {
+    if (g_active != nullptr) {
+        g_active->draw_line(x0, y0, z0, x1, y1, z1, thickness, color);
     } else {
         warn_no_app("draw_line");
     }
@@ -1502,6 +1651,15 @@ void draw_sprite(float x, float y, float w, float h, std::uint32_t color,
                  Sprite sprite, float rotation) {
     if (g_active != nullptr) {
         g_active->draw_sprite(x, y, w, h, color, sprite, rotation);
+    } else {
+        warn_no_app("draw_sprite");
+    }
+}
+
+void draw_sprite(float x, float y, float z, float w, float h,
+                 std::uint32_t color, Sprite sprite) {
+    if (g_active != nullptr) {
+        g_active->draw_sprite(x, y, z, w, h, color, sprite);
     } else {
         warn_no_app("draw_sprite");
     }

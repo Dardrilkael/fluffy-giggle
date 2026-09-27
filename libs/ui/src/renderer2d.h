@@ -4,8 +4,8 @@
 // reaches apps - the public surface is <ws/ui/renderer2d.hpp>. App-facing
 // methods only RECORD commands (a draw is data until the frame ends);
 // frame_end() sorts the frame's commands - explicit layer first, then
-// begin() block, then material (stable, so same-state draws never flip) -
-// and replays them into the batch. The Vulkan half extends this class in
+// begin() block, then clip (stable, so same-state draws never flip) - and
+// replays them into the batch. The Vulkan half extends this class in
 // src/renderer2d.cpp and flushes that batch inside the render pass.
 
 #include "atlas_packer.h"
@@ -40,7 +40,11 @@ struct DrawCommand {
     // face vs. its label bar). Kept as metadata only.
     std::uint64_t material_key = 0;  // texture (+ future blend/shader bits)
 
-    Camera2D camera;           // camera state at record time
+    Camera2D camera;            // 2D camera state at record time
+    Camera3D camera3d;          // the perspective half, recorded when kind is 3D
+    bool perspective = false;   // the block kind: which camera half replays.
+                                // NOT a sort key either - one begin() block
+                                // is one kind, so it rides the epoch.
     Texture texture;            // {} = flat color (the white texture)
     std::uint32_t color = 0;  // packed 0xRRGGBBAA, unpacked at replay
 
@@ -101,6 +105,8 @@ public:
     // --- app-facing entry points (forwarded from the free functions) ---
     void begin_screen();
     void begin(const Camera2D& camera);
+    void begin(const Camera3D& camera);  // perspective block: the 3D overloads
+                                         // below are its recording surface
     void end();
     void set_layer(std::uint32_t layer);
     // Clip stack. Draws snapshot the active clip at record time; frame_end
@@ -114,6 +120,14 @@ public:
                    Texture texture = {}, float rotation = 0.0f);
     void draw_line(float x0, float y0, float x1, float y1, float thickness,
                    std::uint32_t color);
+    // 3D overloads: valid only inside a begin(Camera3D) block - in a 2D
+    // block they warn once per frame and record nothing. Quads and sprites
+    // are camera-facing billboards, CENTER-anchored at (x, y, z), with w/h
+    // in world units; the 3D line's thickness is world units too.
+    void draw_quad(float x, float y, float z, float w, float h,
+                   std::uint32_t color, Texture texture = {});
+    void draw_line(float x0, float y0, float z0, float x1, float y1, float z1,
+                   float thickness, std::uint32_t color);
     void draw_rounded_quad(float x, float y, float w, float h, float radius,
                            std::uint32_t color, float rotation = 0.0f);
     FrameSize frame_size() const;
@@ -121,6 +135,8 @@ public:
     std::vector<Sprite> load_atlas(std::initializer_list<const char*> paths);
     void draw_sprite(float x, float y, float w, float h, std::uint32_t color,
                      Sprite sprite, float rotation = 0.0f);
+    void draw_sprite(float x, float y, float z, float w, float h,
+                     std::uint32_t color, Sprite sprite);
     FrameSize sprite_size(Sprite sprite) const;
     // Installs a page's sub-rect table; Sprite::page is its key. Production
     // (load_atlas) calls this per uploaded page; tests inject synthetic
@@ -146,10 +162,13 @@ private:
     bool accept(const char* what);
     // Misuse warn (draw outside on_update() / begin() block): once per frame.
     void warn_drop(const char* what);
+    // Misuse warn (a 3D overload inside a 2D block): once per frame.
+    void warn_kind(const char* what);
     // Caps hit during replay: once per frame.
     void warn_caps();
     // Stashes camera state and opens a new begin() block (bumps the epoch).
     void stash_camera(const Camera2D& camera);
+    void stash_camera(const Camera3D& camera);
     // Appends one fully-expanded quad command; drops it (with the once-per-
     // frame warn) when no begin() block is open.
     void record(const char* what, const float (&pos)[4][3],
@@ -185,6 +204,11 @@ private:
     std::vector<DrawCommand> commands_;  // capacity reused across frames
     batch::BatchCore batch_;
     Camera2D current_camera_{};
+    Camera3D current_camera3d_{};
+    // The open block's kind - which camera half record() snapshots and which
+    // VP frame_end() builds. Set by every begin(), never read without an
+    // open block (camera_stashed_ gates that).
+    bool current_perspective_ = false;
     std::uint32_t current_layer_ = 0;  // sticky across frames until set_layer()
     std::uint32_t current_epoch_ = 0;  // bumped by every begin()
     // Clip stack state: one level = one {x, y, w, h} rect. Overflow keeps

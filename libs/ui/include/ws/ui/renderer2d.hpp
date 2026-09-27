@@ -95,6 +95,17 @@ FrameSize frame_size();
 void begin();
 void begin(const Camera2D& camera);
 
+// Opens a 3D perspective camera block (the struct above). Inside it the 3D
+// overloads below - the draw_quad/draw_sprite/draw_line forms that take a
+// z - record; 2D draws are legal too, but land on the world's z=0 plane
+// and render through this camera (surprising; prefer separate blocks). A
+// 3D overload called inside a 2D block warns once per frame and records
+// nothing. near_z/far_z clip along the view axis, the projection's own
+// clipping; push_clip stays framebuffer-space and applies unchanged. 3D
+// blocks sort by submission and layer exactly like 2D blocks - one block
+// is one kind, so blocks never interleave mid-batch.
+void begin(const Camera3D& camera);
+
 // Ends the current camera block. Optional - an unclosed block flushes
 // as-is - but draws between end() and the next begin() are dropped.
 void end();
@@ -122,6 +133,13 @@ void pop_clip();
 void draw_quad(float x, float y, float w, float h, std::uint32_t color,
                Texture texture = {}, float rotation = 0.0f);
 
+// 3D form (inside a begin(Camera3D) block only): a camera-facing billboard,
+// CENTER-anchored at (x, y, z) - w/h are world units spread along the
+// camera's screen axes, so the quad always faces the view and shrinks with
+// distance. No rotation in v1. In a 2D block: warns once, records nothing.
+void draw_quad(float x, float y, float z, float w, float h,
+               std::uint32_t color, Texture texture = {});
+
 // Draws an atlas sprite: same quad contract as draw_quad, but the texture
 // is the sprite's page and the UVs are its sub-rect - a page's sprites all
 // batch into one segment. Rotation pivots the center. Unknown or sentinel
@@ -129,11 +147,25 @@ void draw_quad(float x, float y, float w, float h, std::uint32_t color,
 void draw_sprite(float x, float y, float w, float h, std::uint32_t color,
                  Sprite sprite, float rotation = 0.0f);
 
+// 3D form: the same billboard contract as the 3D draw_quad - camera-facing,
+// center-anchored, w/h in world units - textured with the sprite's page
+// sub-rect. Unknown or sentinel sprites draw white, the 2D contract.
+void draw_sprite(float x, float y, float z, float w, float h,
+                 std::uint32_t color, Sprite sprite);
+
 // Quad of `thickness` pixels spanning the two endpoints (axis-crossed).
 // Degenerate input (zero length, non-positive thickness) is dropped
 // silently.
 void draw_line(float x0, float y0, float x1, float y1, float thickness,
                std::uint32_t color);
+
+// 3D form (inside a begin(Camera3D) block only): a ribbon of `thickness`
+// WORLD units (not pixels) spanning the two world endpoints, expanded
+// perpendicular to the segment and the view - constant world width along
+// its length. Degenerate input (zero length, non-positive thickness) is
+// dropped silently, the 2D contract.
+void draw_line(float x0, float y0, float z0, float x1, float y1, float z1,
+               float thickness, std::uint32_t color);
 
 // Flat-color rounded rectangle, 9-sliced from a builtin mask texture: the
 // corner arcs scale to `radius`, the edges stretch. The radius clamps to

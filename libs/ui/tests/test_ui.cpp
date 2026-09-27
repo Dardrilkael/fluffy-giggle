@@ -734,6 +734,40 @@ TEST_CASE("line_quad3d expands perpendicular to segment and view; degenerates dr
     CHECK(pos[3][2] == doctest::Approx(10.0f));
 }
 
+TEST_CASE("open_segment carries depth_test; texture splits inherit it") {
+    using ws::ui::r2d::batch::kFullClip;
+    BatchCore core;
+    core.new_frame();
+
+    // The default is the 2D kind: chunks render through the painter's
+    // pipeline, depth untouched.
+    REQUIRE(core.open_segment(default_vp()));
+    REQUIRE(push_test_quad(core, 0u));
+    CHECK(core.chunk(0).depth_test == false);
+
+    // A perspective segment flags its chunks - the flush's per-chunk
+    // pipeline bind keys on this bit. The clip can stay the full-frame
+    // sentinel while the flag is set: the defaulted parameter keeps the
+    // existing callers' calls unchanged.
+    REQUIRE(core.open_segment(default_vp(), kFullClip, true));
+    REQUIRE(push_test_quad(core, 0u));
+    CHECK(core.chunk(1).depth_test == true);
+
+    // A texture-overflow split continues the SAME segment: the fresh
+    // chunk inherits the depth mode alongside the VP and clip.
+    core.new_frame();
+    REQUIRE(core.open_segment(default_vp(), kFullClip, true));
+    for (std::uint32_t id = 0;
+         id <= ws::ui::r2d::batch::kMaxTexturesPerChunk; ++id) {
+        // 33 unique textures: one past the 32-slot table forces the split.
+        REQUIRE(push_test_quad(core, id));
+    }
+    REQUIRE(core.chunk_count() == 2);
+    CHECK(core.chunk(0).depth_test == true);
+    CHECK(core.chunk(1).depth_test == true);
+    CHECK(core.chunk(1).vp.m[0] == core.chunk(0).vp.m[0]);
+}
+
 // --- sprite atlas packer -------------------------------------------------------
 
 namespace {
@@ -1103,6 +1137,152 @@ TEST_CASE("draws outside a begin()/end() block are dropped") {
     CHECK(r.batch().chunk_count() == 1);
     REQUIRE(r.batch().vertices().size() == 4);  // only the in-block draw
     CHECK(r.batch().vertices()[0].pos[0] == 0.0f);
+}
+
+// --- 3D camera blocks: record/replay through the same sort ---------------------
+
+TEST_CASE("begin(Camera3D) records depth-tested perspective chunks") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera3D{});
+    r.draw_quad(0.0f, 0.0f, 100.0f, 10.0f, 10.0f, rgba(255, 255, 255));
+    r.frame_end();
+
+    REQUIRE(r.batch().chunk_count() == 1);
+    CHECK(r.batch().chunk(0).depth_test == true);
+    // The chunk VP is the recorded camera's perspective matrix, entry for
+    // entry (same inputs as the expected: deterministic math).
+    const auto want = batch::camera_vp3d(Camera3D{}, 100.0f, 100.0f);
+    for (int i = 0; i < 16; ++i) {
+        CHECK(r.batch().chunk(0).vp.m[i] == want.m[i]);
+    }
+    // The billboard's z is real world data now, not the 2D z=0 plane.
+    CHECK(r.batch().vertices()[0].pos[2] == 100.0f);
+
+    // A 2D block stays the 2D kind: orthographic VP, flag off.
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera2D{});
+    r.draw_quad(0.0f, 0.0f, 10.0f, 10.0f, rgba(255, 255, 255));
+    r.frame_end();
+    REQUIRE(r.batch().chunk_count() == 1);
+    CHECK(r.batch().chunk(0).depth_test == false);
+    const auto want2d = batch::camera_vp(Camera2D{}, 100.0f, 100.0f);
+    CHECK(r.batch().chunk(0).vp.m[0] == want2d.m[0]);
+}
+
+TEST_CASE("3D overloads in a 2D block drop; 2D draws in a 3D block land on z=0") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera2D{});
+    r.draw_quad(0.0f, 0.0f, 50.0f, 10.0f, 10.0f, rgba(255, 255, 255));
+    r.draw_line(0.0f, 0.0f, 0.0f, 10.0f, 10.0f, 10.0f, 2.0f,
+                rgba(255, 255, 255));
+    r.draw_sprite(0.0f, 0.0f, 50.0f, 10.0f, 10.0f, rgba(255, 255, 255),
+                 Sprite{});
+    r.frame_end();
+    // Warned once per frame, not asserted here (the log path is the same
+    // warn_drop plumbing the block tests above pin); the CONTRACT is that
+    // nothing records.
+    CHECK(r.batch().chunk_count() == 0);
+    CHECK(r.batch().vertices().empty());
+
+    // The reverse is legal: a 2D draw inside a 3D block records on the
+    // world's z=0 plane and replays through the perspective VP - a
+    // depth-tested chunk, the documented surprise.
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera3D{});
+    r.draw_quad(0.0f, 0.0f, 10.0f, 10.0f, rgba(255, 255, 255));  // 2D form
+    r.frame_end();
+    REQUIRE(r.batch().vertices().size() == 4);
+    for (const auto& v : r.batch().vertices()) {
+        CHECK(v.pos[2] == 0.0f);  // the world's z=0 plane, by construction
+    }
+    CHECK(r.batch().chunk(0).depth_test == true);
+}
+
+TEST_CASE("3D and 2D blocks sort by epoch beside each other") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera2D{});
+    r.draw_quad(0.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255));  // block 1: 2D
+    r.begin(Camera3D{});
+    r.draw_quad(10.0f, 0.0f, 50.0f, 1.0f, 1.0f, rgba(255, 255, 255));  // 3D
+    r.frame_end();
+
+    REQUIRE(r.batch().chunk_count() == 2);
+    CHECK(r.batch().chunk(0).depth_test == false);  // 2D block first
+    CHECK(r.batch().chunk(1).depth_test == true);   // then the 3D block
+    CHECK(r.batch().vertices()[0].pos[0] == 0.0f);
+    // The 3D quad is CENTER-anchored at x=10, w=1: its TL corner is 9.5
+    // (the 2D form's x=10 would be the corner itself - this pins the
+    // anchoring difference between the overloads).
+    CHECK(r.batch().vertices()[4].pos[0] == doctest::Approx(9.5f));
+
+    // set_layer outranks the block, across kinds: a high-layer 2D block
+    // draws after the 3D block regardless of submission order.
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera2D{});
+    r.set_layer(5);
+    r.draw_quad(0.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255));
+    r.begin(Camera3D{});
+    r.set_layer(0);
+    r.draw_quad(10.0f, 0.0f, 50.0f, 1.0f, 1.0f, rgba(255, 255, 255));
+    r.frame_end();
+    REQUIRE(r.batch().chunk_count() == 2);
+    CHECK(r.batch().chunk(0).depth_test == true);    // layer 0: the 3D block
+    CHECK(r.batch().chunk(1).depth_test == false);   // layer 5: the 2D block
+    CHECK(r.batch().vertices()[0].pos[0] == doctest::Approx(9.5f));  // 3D TL
+}
+
+TEST_CASE("3D draw_sprite resolves the page rect onto a billboard") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    std::vector<atlas::Rect> rects(1);
+    rects[0].u0 = 0.25f;
+    rects[0].v0 = 0.5f;
+    rects[0].u1 = 0.75f;
+    rects[0].v1 = 1.0f;
+    rects[0].w = 8;
+    rects[0].h = 4;
+    r.register_atlas_page(Texture{7}, std::move(rects));
+
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera3D{});
+    r.draw_sprite(0.0f, 0.0f, 100.0f, 8.0f, 4.0f, rgba(255, 255, 255),
+                  Sprite{7, 0});
+    r.frame_end();
+
+    REQUIRE(r.batch().vertices().size() == 4);
+    const auto& v = r.batch().vertices();
+    // The default camera's basis: right (1,0,0), up (0,-1,0) - world -y is
+    // screen up, the 2D convention. TL = center - right*w/2 + up*h/2.
+    CHECK(v[0].pos[0] == doctest::Approx(-4.0f));  // TL
+    CHECK(v[0].pos[1] == doctest::Approx(-2.0f));
+    CHECK(v[0].pos[2] == doctest::Approx(100.0f));
+    CHECK(v[1].pos[0] == doctest::Approx(4.0f));   // TR
+    CHECK(v[2].pos[1] == doctest::Approx(2.0f));   // BR
+    CHECK(v[3].pos[0] == doctest::Approx(-4.0f));  // BL
+    // Per-corner sub-rect UVs, the 2D draw_sprite contract.
+    CHECK(v[0].uv[0] == 0.25f);  // TL
+    CHECK(v[0].uv[1] == 0.5f);
+    CHECK(v[2].uv[0] == 0.75f);  // BR
+    CHECK(v[2].uv[1] == 1.0f);
+    CHECK(r.batch().chunk(0).texture_ids[0] == 7u);  // the page texture
+    CHECK(r.batch().chunk(0).depth_test == true);
+
+    // An unknown sprite degrades to white on the same billboard geometry.
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera3D{});
+    r.draw_sprite(0.0f, 0.0f, 100.0f, 8.0f, 4.0f, rgba(255, 255, 255),
+                  Sprite{9, 0});
+    r.frame_end();
+    REQUIRE(r.batch().vertices().size() == 4);
+    CHECK(r.batch().vertices()[0].uv[0] == 0.0f);  // full white UVs
+    CHECK(r.batch().vertices()[0].pos[2] == doctest::Approx(100.0f));
+    CHECK(r.batch().chunk(0).texture_ids[0] == 0u);
 }
 
 TEST_CASE("frame_drop discards recorded commands, never defers them") {

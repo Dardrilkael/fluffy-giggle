@@ -51,6 +51,11 @@ struct Chunk {
     // (kFullClip until a clip is pushed). One chunk = one vkCmdSetScissor,
     // so a clip change always breaks the chunk.
     float clip[4] = {0.0f, 0.0f, FLT_MAX, FLT_MAX};
+    // The chunk's depth mode: true = a perspective block's chunks (rendered
+    // by the depth-tested pipeline), false = the 2D painter's path. One
+    // begin() block is one kind, so the epoch order already keeps chunks of
+    // different kinds apart - the flag rides the segment, like the clip.
+    bool depth_test = false;
     std::uint32_t vertex_offset = 0;  // first vertex, into the frame's buffer
     std::uint32_t quad_count = 0;
     std::uint32_t texture_ids[kMaxTexturesPerChunk] = {};
@@ -129,10 +134,11 @@ bool line_quad3d(float x0, float y0, float z0, float x1, float y1, float z1,
 class BatchCore {
 public:
     void new_frame();
-    // Closes the current chunk (if any) and opens one with the given VP and
-    // clip. Returns false at the chunk cap - the segment stays closed and
-    // its draws are dropped.
-    bool open_segment(const Mat4& vp, const float (&clip)[4] = kFullClip);
+    // Closes the current chunk (if any) and opens one with the given VP,
+    // clip and depth mode. Returns false at the chunk cap - the segment
+    // stays closed and its draws are dropped.
+    bool open_segment(const Mat4& vp, const float (&clip)[4] = kFullClip,
+                      bool depth_test = false);
     void close_segment();
 
     // Appends one quad (4 vertices) to the open segment. Returns false when
@@ -148,7 +154,7 @@ public:
     const std::vector<Vertex>& vertices() const { return vertices_; }
 
 private:
-    bool start_chunk(const Mat4& vp, const float (&clip)[4]);
+    bool start_chunk(const Mat4& vp, const float (&clip)[4], bool depth_test);
     // Slot for texture_id in the current chunk, splitting the chunk when
     // its table is full. Returns >= kMaxTexturesPerChunk when the draw must
     // be dropped (chunk cap).
