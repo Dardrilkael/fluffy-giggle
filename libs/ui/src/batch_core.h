@@ -29,12 +29,12 @@ inline constexpr std::uint32_t kMaxChunksPerFrame = 8;     // per frame: segment
 inline constexpr float kFullClip[4] = {0.0f, 0.0f, FLT_MAX, FLT_MAX};
 
 struct Vertex {
-    float pos[2];
+    float pos[3];  // x, y, z - 2D draws land on z = 0 (the 3D camera owns z)
     float color[4];
     float uv[2];
     float tex_index;
 };
-static_assert(sizeof(Vertex) == 36, "vertex layout is load-bearing (shaders, pipeline)");
+static_assert(sizeof(Vertex) == 40, "vertex layout is load-bearing (shaders, pipeline)");
 
 // Column-major 4x4, GLSL upload order (m[0..3] = column 0).
 struct Mat4 {
@@ -70,21 +70,22 @@ void unpack_rgba(std::uint32_t color, float out[4]);
 
 // Quad corners around the center pivot, rotation positive = clockwise on
 // screen (y-down). Order TL, TR, BR, BL - matches the shared index pattern
-// (0,1,2 / 2,3,0) and the UV assignment in Renderer2D.
+// (0,1,2 / 2,3,0) and the UV assignment in Renderer2D. z is written 0: every
+// 2D draw sits on the world's z=0 plane.
 void quad_corners(float x, float y, float w, float h, float rotation,
-                  float out[4][2]);
+                  float out[4][3]);
 
 // quad_corners with an explicit pivot: draw_rounded_quad rotates each of
 // its nine slices about the WHOLE rect's center, so the rounded rect moves
 // as one rigid shape. quad_corners is this with the slice's own center.
 void quad_corners_pivot(float x, float y, float w, float h, float pivot_x,
-                        float pivot_y, float rotation, float out[4][2]);
+                        float pivot_y, float rotation, float out[4][3]);
 
 // Expands a segment into a thickness quad (u runs along the line, v
 // across). Returns false for degenerate input - dropped silently, that is
-// plausibly live app data (e.g. a zero-length drag).
+// plausibly live app data (e.g. a zero-length drag). z is written 0.
 bool line_quad(float x0, float y0, float x1, float y1, float thickness,
-               float out_pos[4][2], float out_uv[4][2]);
+               float out_pos[4][3], float out_uv[4][2]);
 
 // --- 3D camera (perspective) --------------------------------------------------
 
@@ -136,7 +137,7 @@ public:
 
     // Appends one quad (4 vertices) to the open segment. Returns false when
     // the draw must be dropped: no open segment, vertex cap, or chunk cap.
-    bool push_quad(const float (&pos)[4][2], const float (&uv)[4][2],
+    bool push_quad(const float (&pos)[4][3], const float (&uv)[4][2],
                    const float (&color)[4], std::uint32_t texture_id);
 
     bool empty() const { return vertices_.empty(); }

@@ -524,14 +524,14 @@ bool Renderer2D::create_pipeline(VkRenderPass render_pass) {
     stages[1].pName = "main";
 
     // The batch::Vertex layout, comment-tied to shaders/batch.vert and the
-    // 36-byte static_assert in batch_core.h.
+    // 40-byte static_assert in batch_core.h.
     VkVertexInputBindingDescription vertex_binding{};
     vertex_binding.stride = static_cast<uint32_t>(sizeof(batch::Vertex));
     VkVertexInputAttributeDescription attributes[4] = {
-        {0, 0, VK_FORMAT_R32G32_SFLOAT, 0},         // a_pos
-        {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 8},   // a_color
-        {2, 0, VK_FORMAT_R32G32_SFLOAT, 24},        // a_uv
-        {3, 0, VK_FORMAT_R32_SFLOAT, 32},           // a_tex_index
+        {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},      // a_pos
+        {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 12},  // a_color
+        {2, 0, VK_FORMAT_R32G32_SFLOAT, 28},        // a_uv
+        {3, 0, VK_FORMAT_R32_SFLOAT, 36},           // a_tex_index
     };
     VkPipelineVertexInputStateCreateInfo vertex_input{};
     vertex_input.sType =
@@ -917,7 +917,7 @@ void Renderer2D::stash_camera(const Camera2D& camera) {
     camera_stashed_ = true;
 }
 
-void Renderer2D::record(const char* what, const float (&pos)[4][2],
+void Renderer2D::record(const char* what, const float (&pos)[4][3],
                         const float (&uv)[4][2], std::uint32_t color,
                         Texture texture) {
     if (!camera_stashed_) {
@@ -948,6 +948,7 @@ void Renderer2D::record(const char* what, const float (&pos)[4][2],
         cmd.clip[i] = clip[i];
         cmd.pos[i][0] = pos[i][0];
         cmd.pos[i][1] = pos[i][1];
+        cmd.pos[i][2] = pos[i][2];
         cmd.uv[i][0] = uv[i][0];
         cmd.uv[i][1] = uv[i][1];
     }
@@ -1057,7 +1058,7 @@ void Renderer2D::draw_quad(float x, float y, float w, float h,
     if (!accept("draw_quad")) {
         return;
     }
-    float pos[4][2];
+    float pos[4][3];
     batch::quad_corners(x, y, w, h, rotation, pos);
     record("draw_quad", pos, kQuadUV, color, texture);
 }
@@ -1067,7 +1068,7 @@ void Renderer2D::draw_line(float x0, float y0, float x1, float y1,
     if (!accept("draw_line")) {
         return;
     }
-    float pos[4][2];
+    float pos[4][3];
     float uv[4][2];
     if (!batch::line_quad(x0, y0, x1, y1, thickness, pos, uv)) {
         return;  // degenerate: live app data, not worth a warning
@@ -1089,7 +1090,7 @@ void Renderer2D::draw_rounded_quad(float x, float y, float w, float h,
     if (radius <= 0.5f) {
         // A sub-pixel radius is an honest square quad - minifying the
         // baked 8 px arc down to nothing would look worse.
-        float pos[4][2];
+        float pos[4][3];
         batch::quad_corners(x, y, w, h, rotation, pos);
         record("draw_rounded_quad", pos, kQuadUV, color, Texture{});
         return;
@@ -1115,7 +1116,7 @@ void Renderer2D::draw_rounded_quad(float x, float y, float w, float h,
     const float cy = y + h * 0.5f;
     for (int gy = 0; gy < 3; ++gy) {
         for (int gx = 0; gx < 3; ++gx) {
-            float pos[4][2];
+            float pos[4][3];
             batch::quad_corners_pivot(xs[gx], ys[gy], sw[gx], sh[gy], cx, cy,
                                       rotation, pos);
             const float uv[4][2] = {
@@ -1185,7 +1186,7 @@ void Renderer2D::draw_sprite(float x, float y, float w, float h,
     if (!accept("draw_sprite")) {
         return;
     }
-    float pos[4][2];
+    float pos[4][3];
     batch::quad_corners(x, y, w, h, rotation, pos);
     // Page 0 is the white sentinel (failed loads degrade to it) - it draws
     // silently. Any other unresolvable sprite is an app bug worth one warn.

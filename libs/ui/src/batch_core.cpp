@@ -34,12 +34,12 @@ void unpack_rgba(std::uint32_t color, float out[4]) {
 }
 
 void quad_corners(float x, float y, float w, float h, float rotation,
-                  float out[4][2]) {
+                  float out[4][3]) {
     quad_corners_pivot(x, y, w, h, x + w * 0.5f, y + h * 0.5f, rotation, out);
 }
 
 void quad_corners_pivot(float x, float y, float w, float h, float pivot_x,
-                        float pivot_y, float rotation, float out[4][2]) {
+                        float pivot_y, float rotation, float out[4][3]) {
     const float c = std::cos(rotation);
     const float s = std::sin(rotation);
 
@@ -55,11 +55,12 @@ void quad_corners_pivot(float x, float y, float w, float h, float pivot_x,
     for (int i = 0; i < 4; ++i) {
         out[i][0] = pivot_x + c * local[i][0] - s * local[i][1];
         out[i][1] = pivot_y + s * local[i][0] + c * local[i][1];
+        out[i][2] = 0.0f;  // 2D draws sit on the world's z=0 plane
     }
 }
 
 bool line_quad(float x0, float y0, float x1, float y1, float thickness,
-               float out_pos[4][2], float out_uv[4][2]) {
+               float out_pos[4][3], float out_uv[4][2]) {
     const float dx = x1 - x0;
     const float dy = y1 - y0;
     const float len2 = dx * dx + dy * dy;
@@ -75,6 +76,9 @@ bool line_quad(float x0, float y0, float x1, float y1, float thickness,
     out_pos[1][0] = x0 - ox; out_pos[1][1] = y0 - oy;
     out_pos[2][0] = x1 - ox; out_pos[2][1] = y1 - oy;
     out_pos[3][0] = x1 + ox; out_pos[3][1] = y1 + oy;
+    for (int i = 0; i < 4; ++i) {
+        out_pos[i][2] = 0.0f;  // 2D draws sit on the world's z=0 plane
+    }
     out_uv[0][0] = 0.0f; out_uv[0][1] = 0.0f;
     out_uv[1][0] = 0.0f; out_uv[1][1] = 1.0f;
     out_uv[2][0] = 1.0f; out_uv[2][1] = 1.0f;
@@ -273,7 +277,7 @@ std::uint32_t BatchCore::texture_slot(std::uint32_t texture_id) {
     return 0;
 }
 
-bool BatchCore::push_quad(const float (&pos)[4][2], const float (&uv)[4][2],
+bool BatchCore::push_quad(const float (&pos)[4][3], const float (&uv)[4][2],
                           const float (&color)[4], std::uint32_t texture_id) {
     if (!segment_open_ || chunks_.empty()) {
         return false;
@@ -289,6 +293,7 @@ bool BatchCore::push_quad(const float (&pos)[4][2], const float (&uv)[4][2],
         Vertex v;
         v.pos[0] = pos[i][0];
         v.pos[1] = pos[i][1];
+        v.pos[2] = pos[i][2];
         v.color[0] = color[0];
         v.color[1] = color[1];
         v.color[2] = color[2];

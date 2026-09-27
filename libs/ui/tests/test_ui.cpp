@@ -169,7 +169,8 @@ Mat4 default_vp() {
 }
 
 bool push_test_quad(BatchCore& core, std::uint32_t texture_id) {
-    const float pos[4][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
+    const float pos[4][3] = {{0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f},
+                             {1.0f, 1.0f, 0.0f}, {0.0f, 1.0f, 0.0f}};
     const float uv[4][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
     const float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     return core.push_quad(pos, uv, color, texture_id);
@@ -246,7 +247,8 @@ TEST_CASE("push_quad emits 4 vertices with corner/uv/color/tex order") {
     core.new_frame();
     REQUIRE(core.open_segment(default_vp()));
 
-    const float pos[4][2] = {{1.0f, 2.0f}, {11.0f, 2.0f}, {11.0f, 12.0f}, {1.0f, 12.0f}};
+    const float pos[4][3] = {{1.0f, 2.0f, 0.0f}, {11.0f, 2.0f, 0.0f},
+                             {11.0f, 12.0f, 0.0f}, {1.0f, 12.0f, 0.0f}};
     const float uv[4][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
     const float color[4] = {0.25f, 0.5f, 0.75f, 1.0f};
     REQUIRE(core.push_quad(pos, uv, color, 7u));
@@ -256,6 +258,7 @@ TEST_CASE("push_quad emits 4 vertices with corner/uv/color/tex order") {
         const auto& v = core.vertices()[static_cast<std::size_t>(i)];
         CHECK(v.pos[0] == pos[i][0]);
         CHECK(v.pos[1] == pos[i][1]);
+        CHECK(v.pos[2] == pos[i][2]);  // z rides along - the z=0 plane for 2D
         CHECK(v.uv[0] == uv[i][0]);
         CHECK(v.uv[1] == uv[i][1]);
         CHECK(v.color[0] == color[0]);  // flat color rides on all corners
@@ -368,7 +371,7 @@ TEST_CASE("quad_corners_pivot rotates about the pivot; own-center is the default
     // +90 degrees (clockwise, y-down) the map is (x, y) -> (-y, x): the
     // rect centered at (12, 12) pivoting the origin swings to (-12, -12),
     // so its corners land in the third quadrant around it.
-    float out[4][2];
+    float out[4][3];
     quad_corners_pivot(10.0f, 10.0f, 4.0f, 4.0f, 0.0f, 0.0f, half_pi, out);
     CHECK(out[0][0] == doctest::Approx(-10.0f));  // TL
     CHECK(out[0][1] == doctest::Approx(10.0f));
@@ -378,6 +381,7 @@ TEST_CASE("quad_corners_pivot rotates about the pivot; own-center is the default
     CHECK(out[2][1] == doctest::Approx(14.0f));
     CHECK(out[3][0] == doctest::Approx(-14.0f));  // BL
     CHECK(out[3][1] == doctest::Approx(10.0f));
+    CHECK(out[0][2] == 0.0f);  // the z=0 plane every 2D draw lands on
 
     // Zero rotation lays the corners out plainly, pivot or not.
     quad_corners_pivot(10.0f, 10.0f, 4.0f, 4.0f, -50.0f, 7.0f, 0.0f, out);
@@ -389,7 +393,7 @@ TEST_CASE("quad_corners_pivot rotates about the pivot; own-center is the default
     // quad_corners IS quad_corners_pivot at the rect's own center - the
     // equivalence draw_rounded_quad's nine slices each break by pivoting
     // the whole rect's center instead.
-    float own[4][2];
+    float own[4][3];
     quad_corners(10.0f, 20.0f, 30.0f, 40.0f, 0.7f, own);
     quad_corners_pivot(10.0f, 20.0f, 30.0f, 40.0f, 25.0f, 40.0f, 0.7f, out);
     for (int i = 0; i < 4; ++i) {
@@ -432,7 +436,7 @@ TEST_CASE("open_segment carries the clip; texture splits inherit it") {
 }
 
 TEST_CASE("line expansion builds a thickness quad") {
-    float pos[4][2];
+    float pos[4][3];
     float uv[4][2];
     REQUIRE(ws::ui::r2d::batch::line_quad(0.0f, 0.0f, 10.0f, 0.0f, 2.0f, pos, uv));
 
@@ -444,6 +448,7 @@ TEST_CASE("line expansion builds a thickness quad") {
     CHECK(pos[2][1] == doctest::Approx(-1.0f));
     CHECK(pos[3][0] == doctest::Approx(10.0f));  // D: p1 + half normal
     CHECK(pos[3][1] == doctest::Approx(1.0f));
+    CHECK(pos[0][2] == 0.0f);  // the z=0 plane every 2D draw lands on
 
     CHECK(uv[0][0] == 0.0f);  // u runs along the line, v across it
     CHECK(uv[1][1] == 1.0f);
@@ -452,7 +457,7 @@ TEST_CASE("line expansion builds a thickness quad") {
 }
 
 TEST_CASE("degenerate lines are dropped") {
-    float pos[4][2];
+    float pos[4][3];
     float uv[4][2];
     CHECK(ws::ui::r2d::batch::line_quad(1.0f, 1.0f, 1.0f, 1.0f, 2.0f, pos,
                                         uv) == false);  // zero length

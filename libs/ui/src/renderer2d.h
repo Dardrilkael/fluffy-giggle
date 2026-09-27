@@ -44,7 +44,7 @@ struct DrawCommand {
     Texture texture;            // {} = flat color (the white texture)
     std::uint32_t color = 0;  // packed 0xRRGGBBAA, unpacked at replay
 
-    float pos[4][2] = {};  // TL, TR, BR, BL
+    float pos[4][3] = {};  // TL, TR, BR, BL; z = 0 (2D) or the 3D camera's world
     float uv[4][2] = {};
 };
 
@@ -152,7 +152,7 @@ private:
     void stash_camera(const Camera2D& camera);
     // Appends one fully-expanded quad command; drops it (with the once-per-
     // frame warn) when no begin() block is open.
-    void record(const char* what, const float (&pos)[4][2],
+    void record(const char* what, const float (&pos)[4][3],
                 const float (&uv)[4][2], std::uint32_t color, Texture texture);
 
     // --- GPU half helpers ---
