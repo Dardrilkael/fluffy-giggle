@@ -6,14 +6,22 @@
 // about the shell lives in this TU: the looper pump, the lifecycle
 // commands, and the input translation.
 //
-// Input contract: touch reports as mouse button 0 (the gui and the event
-// system see taps exactly like clicks), AKeyCodes translate to the GLFW
-// numbering the event system documents ("printable keys match ASCII"), and
-// ImGui gets first refusal per event - ImGui_ImplAndroid_HandleInputEvent
-// runs before the ws translation, the same ordering desktop gets from the
+// Input contract: every touch contact decodes into the gui frame's touch
+// table and the app Touch* events (stable per-contact ids), and the FIRST
+// contact of a gesture bridges to mouse button 0 - position, press, release
+// - so single-finger use, the gui's mouse path and ImGui keep working
+// unchanged. The bridge feeds ImGui's io directly: touch motion never
+// reaches ImGui_ImplAndroid_HandleInputEvent, whose decoder follows
+// pointer index 0 only and has no POINTER_UP/CANCEL case (a second finger
+// lifting used to strand the press in io). AKeyCodes translate to the GLFW
+// numbering the event system documents ("printable keys match ASCII") and
+// glyphs arrive as TextInputEvent; key and real-mouse events keep first
+// refusal through the backend, the same ordering desktop gets from the
 // GLFW backend's callback chaining.
 
 #include "window.h"
+
+#include <cstddef>  // std::size_t - the OS pointer indices
 
 #include <ws/core/log.hpp>
 
@@ -270,17 +278,27 @@ private:
     }
 
     void handle_input(const AInputEvent* event) {
+        const bool is_key = AInputEvent_getType(event) == AINPUT_EVENT_TYPE_KEY;
+        const bool mouse_source = (AInputEvent_getSource(event) &
+                                   AINPUT_SOURCE_MOUSE) == AINPUT_SOURCE_MOUSE;
         // ImGui first refusal - io absorbs the event before the ws
         // translation runs, so imgui_wants() (evaluated at the sink) sees
         // the WantCapture flags from the last NewFrame, exactly like the
-        // desktop callback chaining.
-        if (ImGui::GetCurrentContext() != nullptr) {
+        // desktop callback chaining. Keys and real-mouse motion keep the
+        // backend; touch-screen motion does not - the backend's decoder
+        // follows pointer index 0 only and has no POINTER_UP/CANCEL case,
+        // so a second finger lifting stranded the press in io. The
+        // primary-touch bridge feeds io instead, from inside the touch
+        // translation below.
+        if (ImGui::GetCurrentContext() != nullptr && (is_key || mouse_source)) {
             ImGui_ImplAndroid_HandleInputEvent(event);
         }
-        if (AInputEvent_getType(event) == AINPUT_EVENT_TYPE_KEY) {
+        if (is_key) {
             translate_key(event);
+        } else if (mouse_source) {
+            translate_mouse(event);
         } else {
-            translate_motion(event);
+            translate_touch(event);
         }
     }
 
@@ -317,10 +335,10 @@ private:
         // Text tap: hardware-keyboard glyphs only (native_app_glue has no
         // IME, so there is no soft-keyboard path). The key contract is GLFW
         // numbering - letters report uppercase, corrected to lowercase when
-        // shift is not held.
-        if (gui::InputFrame* input = sink_->input;
-            input != nullptr && action == AKEY_EVENT_ACTION_DOWN && key >= 32 &&
-            key <= 126) {
+        // shift is not held. One TextInputEvent per glyph (the event
+        // counterpart of the gui frame's text_input; desktop's on_char
+        // emits the same), then the frame's own copy.
+        if (action == AKEY_EVENT_ACTION_DOWN && key >= 32 && key <= 126) {
             uint32_t code = static_cast<uint32_t>(key);
             const bool shift_held = (AKeyEvent_getMetaState(event) &
                                      (AMETA_SHIFT_ON | AMETA_SHIFT_LEFT_ON |
@@ -328,65 +346,173 @@ private:
             if (key >= 'A' && key <= 'Z' && !shift_held) {
                 code += 32;
             }
-            input->text_input.push_back(code);
+            emit(TextInputEvent{code});
+            if (gui::InputFrame* input = sink_->input; input != nullptr) {
+                input->text_input.push_back(code);
+            }
         }
     }
 
-    void translate_motion(const AInputEvent* event) {
-        const int32_t source = AInputEvent_getSource(event);
-        if ((source & AINPUT_SOURCE_MOUSE) == AINPUT_SOURCE_MOUSE) {
-            translate_mouse(event);
+    // --- touch-screen motion (multi-touch) ----------------------------------
+    // Every contact the OS reports decodes into the gui frame's touch
+    // table, keyed by its stable per-contact id, and into the app Touch*
+    // events. The touch_* writers own the table AND the primary-touch ->
+    // mouse bridge (see gui/input_frame.hpp); this side only observes
+    // bridged_touch() to emit the bridge's Mouse* events and io feed -
+    // exactly the pair the old single-finger path produced, for whichever
+    // contact currently holds the bridge. Without a gui tap there is no
+    // bridge, so only the Touch* events flow.
+
+    // The 9th+ finger: the table is full and the contact drops (warned
+    // once per process, like every cap in the lib) - its events drop with
+    // it, since an app that never saw the press must never see its moves
+    // or release either.
+    void warn_touch_cap() {
+        if (!touch_cap_warned_) {
+            touch_cap_warned_ = true;
+            core::warn("ui: touch table full at {} contacts - further "
+                       "contacts dropped",
+                       gui::InputFrame::kMaxTouches);
+        }
+    }
+
+    // ImGui's io fed from the bridge - the same public event API the
+    // Android backend itself drives (touch source, position, button 0),
+    // so a finger keeps working on ImGui windows unchanged.
+    void imgui_bridge_pos(float x, float y) {
+        if (ImGui::GetCurrentContext() == nullptr) {
             return;
         }
-        // Touchscreen: button 0. Only the first pointer in v1 - a second
-        // finger arrives as ACTION_POINTER_DOWN/UP carrying that pointer's
-        // index in the action's high bits, and is dropped here.
-        const int32_t masked =
-            AMotionEvent_getAction(event) & AMOTION_EVENT_ACTION_MASK;
-        if (masked == AMOTION_EVENT_ACTION_POINTER_DOWN ||
-            masked == AMOTION_EVENT_ACTION_POINTER_UP) {
+        ImGuiIO& io = ImGui::GetIO();
+        io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+        io.AddMousePosEvent(x, y);
+    }
+    void imgui_bridge_button(bool down) {
+        if (ImGui::GetCurrentContext() == nullptr) {
             return;
         }
-        const float x = AMotionEvent_getX(event, 0);
-        const float y = AMotionEvent_getY(event, 0);
-        // AMotionEvent reports window pixels - the same space the
-        // framebuffer uses (the Vulkan ANativeWindow has no separate
-        // DPI-scaled screen space like desktop GLFW), so no scaling.
-        const auto set_pointer = [this, x, y] {
-            if (gui::InputFrame* input = sink_->input; input != nullptr) {
-                input->mouse_x = x;
-                input->mouse_y = y;
+        ImGui::GetIO().AddMouseButtonEvent(0, down);
+    }
+
+    // One contact began: DOWN (index 0 - the gesture's first finger) or
+    // POINTER_DOWN (index from the action bits). The bridge acquires it
+    // when no contact holds it yet - never a promotion mid-gesture.
+    void touch_begin(const AInputEvent* event, std::size_t index) {
+        const uint32_t id = AMotionEvent_getPointerId(event, index);
+        const float x = AMotionEvent_getX(event, index);
+        const float y = AMotionEvent_getY(event, index);
+        bool bridged = false;
+        if (gui::InputFrame* input = sink_->input; input != nullptr) {
+            const uint32_t bridge_before = input->bridged_touch();
+            if (input->touch_down(id, x, y) < 0) {
+                warn_touch_cap();
+                return;
             }
-        };
+            bridged = (bridge_before == gui::kNoPointer &&
+                       input->bridged_touch() == id);
+        }
+        emit(TouchPressedEvent{id, x, y});
+        if (bridged) {
+            imgui_bridge_pos(x, y);
+            imgui_bridge_button(true);
+            emit(MouseMovedEvent{x, y});  // a coherent position before the press
+            emit(MouseButtonPressedEvent{0});
+        }
+    }
+
+    // Every tracked contact moved: one MOVE event carries all current
+    // coords, and getX/getY read the latest sample (the historical ones
+    // need the getHistorical* API) - latest wins, the same rule the event
+    // stream's per-pointer coalescing applies to what we emit here.
+    void touch_move_all(const AInputEvent* event) {
+        gui::InputFrame* input = sink_->input;
+        const std::size_t count = AMotionEvent_getPointerCount(event);
+        for (std::size_t i = 0; i < count; ++i) {
+            const uint32_t id = AMotionEvent_getPointerId(event, i);
+            const float x = AMotionEvent_getX(event, i);
+            const float y = AMotionEvent_getY(event, i);
+            if (input == nullptr) {
+                emit(TouchMovedEvent{id, x, y});  // no table: nothing to gate on
+                continue;
+            }
+            if (!input->pointer_pos(id, nullptr, nullptr)) {
+                continue;  // a contact the cap dropped: no moves either
+            }
+            const bool bridged = input->bridged_touch() == id;
+            input->touch_move(id, x, y);
+            emit(TouchMovedEvent{id, x, y});
+            if (bridged) {
+                imgui_bridge_pos(x, y);
+                emit(MouseMovedEvent{x, y});
+            }
+        }
+    }
+
+    // One contact ended: UP (index 0 - the gesture's last finger),
+    // POINTER_UP (index from the action bits), or one contact of a
+    // CANCELled gesture. `cancelled` marks an OS-aborted gesture; the
+    // release edge still fires and the gui release rules treat it like
+    // any release - inside clicks, outside clears.
+    void touch_end(const AInputEvent* event, std::size_t index,
+                   bool cancelled) {
+        const uint32_t id = AMotionEvent_getPointerId(event, index);
+        const float x = AMotionEvent_getX(event, index);
+        const float y = AMotionEvent_getY(event, index);
+        bool bridged = false;
+        if (gui::InputFrame* input = sink_->input; input != nullptr) {
+            if (!input->pointer_pos(id, nullptr, nullptr)) {
+                return;  // a contact the cap dropped: no release either
+            }
+            bridged = input->bridged_touch() == id;
+            input->touch_up(id, x, y, cancelled);
+        }
+        emit(TouchReleasedEvent{id, x, y, cancelled});
+        if (bridged) {
+            imgui_bridge_pos(x, y);
+            imgui_bridge_button(false);
+            emit(MouseMovedEvent{x, y});
+            emit(MouseButtonReleasedEvent{0});
+        }
+    }
+
+    // Touchscreen (and stylus - pen differentiation is out of scope v1,
+    // one contact through the same path). AMotionEvent reports window
+    // pixels - the same space the framebuffer uses (the ANativeWindow has
+    // no separate DPI-scaled screen space like desktop GLFW), so no
+    // scaling. The action's high bits name the pointer a POINTER_DOWN/
+    // POINTER_UP is about; DOWN/UP carry the gesture's first/last contact;
+    // MOVE carries every pointer's coords; CANCEL aborts the whole
+    // gesture at once.
+    void translate_touch(const AInputEvent* event) {
+        const int32_t action = AMotionEvent_getAction(event);
+        const int32_t masked = action & AMOTION_EVENT_ACTION_MASK;
+        const std::size_t index = static_cast<std::size_t>(
+            (action & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >>
+            AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT);
         switch (masked) {
             case AMOTION_EVENT_ACTION_DOWN:
-                set_pointer();
-                emit(MouseMovedEvent{x, y});  // a coherent position before the press
-                emit(MouseButtonPressedEvent{0});
-                if (gui::InputFrame* input = sink_->input; input != nullptr) {
-                    input->mouse_down[0] = true;
-                    input->mouse_pressed[0] = true;
-                }
+                touch_begin(event, 0);
                 break;
-            case AMOTION_EVENT_ACTION_UP:
-            case AMOTION_EVENT_ACTION_CANCEL:
-                // CANCEL is a release without the click (palm rejection,
-                // drag left the window) - the gui release rules treat both
-                // alike: release-inside clicks, release-outside clears.
-                set_pointer();
-                emit(MouseMovedEvent{x, y});
-                emit(MouseButtonReleasedEvent{0});
-                if (gui::InputFrame* input = sink_->input; input != nullptr) {
-                    input->mouse_down[0] = false;
-                    input->mouse_released[0] = true;
-                }
+            case AMOTION_EVENT_ACTION_POINTER_DOWN:
+                touch_begin(event, index);
                 break;
             case AMOTION_EVENT_ACTION_MOVE:
-                set_pointer();
-                emit(MouseMovedEvent{x, y});
+                touch_move_all(event);
+                break;
+            case AMOTION_EVENT_ACTION_POINTER_UP:
+                touch_end(event, index, false);
+                break;
+            case AMOTION_EVENT_ACTION_UP:
+                touch_end(event, 0, false);  // the last contact lifting
+                break;
+            case AMOTION_EVENT_ACTION_CANCEL:
+                for (std::size_t i = 0;
+                     i < AMotionEvent_getPointerCount(event); ++i) {
+                    touch_end(event, i, true);
+                }
                 break;
             default:
-                break;
+                break;  // hover/outside never come from a touchscreen
         }
     }
 
@@ -459,6 +585,7 @@ private:
     bool window_ready_ = false;
     bool close_requested_ = false;
     int32_t mouse_buttons_ = 0;  // last seen AMOTION_EVENT_BUTTON_* mask
+    bool touch_cap_warned_ = false;  // the touch-table cap warn fired once
 };
 
 }  // namespace
