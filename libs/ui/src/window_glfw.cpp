@@ -144,11 +144,12 @@ void on_scroll(GLFWwindow* window, double x, double y) {
     }
 }
 
-// Text input has no Event counterpart (the event system models keys, not
-// glyphs), so codepoints go straight into the gui frame. The ImGui backend
-// installs its own char callback and chains to ours first, so its text
-// widgets keep working unchanged.
+// Glyphs are input too: one TextInputEvent per codepoint (UTF-32, arrival
+// order - the event counterpart of the gui frame's text_input), plus the
+// gui frame's own copy. The ImGui backend installs its own char callback
+// and chains to ours first, so its text widgets keep working unchanged.
 void on_char(GLFWwindow* window, unsigned int codepoint) {
+    emit(window, TextInputEvent{codepoint});
     if (gui::InputFrame* input = input_for(window)) {
         input->text_input.push_back(codepoint);
     }

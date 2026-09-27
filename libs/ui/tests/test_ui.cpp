@@ -68,6 +68,12 @@ TEST_CASE("every event carries its own type and starts unhandled") {
     CHECK(ws::ui::MouseButtonReleasedEvent{1}.type() == EventType::MouseButtonReleased);
     CHECK(ws::ui::MouseMovedEvent{1.0f, 2.0f}.type() == EventType::MouseMoved);
     CHECK(ws::ui::MouseScrolledEvent{0.0f, -1.0f}.type() == EventType::MouseScrolled);
+    CHECK(ws::ui::TouchPressedEvent{7, 1.0f, 2.0f}.type() ==
+          EventType::TouchPressed);
+    CHECK(ws::ui::TouchMovedEvent{7, 1.0f, 2.0f}.type() == EventType::TouchMoved);
+    CHECK(ws::ui::TouchReleasedEvent{7, 1.0f, 2.0f, true}.type() ==
+          EventType::TouchReleased);
+    CHECK(ws::ui::TextInputEvent{U'x'}.type() == EventType::TextInput);
 
     ws::ui::WindowResizeEvent resize{800, 600};
     CHECK(resize.handled == false);
@@ -76,6 +82,13 @@ TEST_CASE("every event carries its own type and starts unhandled") {
     ws::ui::KeyPressedEvent key{'D', true};
     CHECK(key.keycode == 'D');
     CHECK(key.repeat == true);
+    ws::ui::TouchReleasedEvent touch{7, 1.0f, 2.0f, true};
+    CHECK(touch.pointer_id == 7);
+    CHECK(touch.x == 1.0f);
+    CHECK(touch.y == 2.0f);
+    CHECK(touch.cancelled == true);
+    ws::ui::TextInputEvent glyph{U'w'};
+    CHECK(glyph.codepoint == U'w');
 }
 
 TEST_CASE("dispatcher fires only on the matching type and honors the return") {
@@ -1809,6 +1822,236 @@ TEST_CASE("frame_input is drop-safe without a running app") {
     CHECK(frame.key_pressed['D'] == false);
     CHECK(frame.scroll_dy == 0.0f);
     CHECK(frame.text_input.empty());
+    CHECK(frame.touch_count == 0);
+    CHECK(frame.bridged_touch() == ws::ui::gui::kNoPointer);
+    // An empty frame still lists the mouse: pointer slot 0, at rest.
+    std::array<ws::ui::gui::PointerView,
+               ws::ui::gui::InputFrame::kMaxPointers>
+        pointers{};
+    CHECK(frame.gather_pointers(pointers) == 1);
+    CHECK(pointers[0].id == ws::ui::gui::kMousePointerId);
+    CHECK(!pointers[0].down);
+}
+
+// --- InputFrame touch table (multi-touch groundwork) -------------------------
+
+TEST_CASE("touch table: down/move/up track a contact through its frames") {
+    using namespace ws::ui::gui;
+    InputFrame frame;
+
+    // Contact 17 lands: entry 0, held with a press edge.
+    CHECK(frame.touch_down(17, 30.0f, 40.0f) == 0);
+    CHECK(frame.touch_count == 1);
+    CHECK(frame.touches[0].id == 17);
+    CHECK(frame.touches[0].down);
+    CHECK(frame.touches[0].pressed);
+    CHECK(!frame.touches[0].released);
+    CHECK(frame.touches[0].x == 30.0f);
+    CHECK(frame.touches[0].y == 40.0f);
+
+    // ...moves: position only, no new edges (the press edge from the down
+    // above still belongs to this frame - edges clear at next_frame()).
+    frame.touch_move(17, 55.0f, 65.0f);
+    CHECK(frame.touches[0].x == 55.0f);
+    CHECK(frame.touches[0].y == 65.0f);
+    CHECK(frame.touches[0].down);
+    CHECK(!frame.touches[0].released);
+
+    // ...lifts: release edge, but the entry stays for this frame - a widget
+    // must still be able to see who lifted.
+    frame.touch_up(17, 60.0f, 70.0f, false);
+    CHECK(frame.touch_count == 1);
+    CHECK(!frame.touches[0].down);
+    CHECK(frame.touches[0].released);
+    CHECK(!frame.touches[0].cancelled);
+    CHECK(frame.touches[0].x == 60.0f);
+
+    // ...and leaves at the frame boundary.
+    frame.next_frame();
+    CHECK(frame.touch_count == 0);
+}
+
+TEST_CASE("touch table: insertion order survives releases and frame edges") {
+    using namespace ws::ui::gui;
+    InputFrame frame;
+    frame.touch_down(7, 0.0f, 0.0f);
+    frame.touch_down(3, 1.0f, 1.0f);
+    frame.touch_down(9, 2.0f, 2.0f);
+    CHECK(frame.touch_count == 3);
+    CHECK(frame.touches[1].id == 3);
+
+    // The middle contact lifts; the frame boundary compacts the table
+    // without reordering the survivors.
+    frame.touch_up(3, 1.0f, 1.0f, false);
+    frame.next_frame();
+    CHECK(frame.touch_count == 2);
+    CHECK(frame.touches[0].id == 7);
+    CHECK(frame.touches[1].id == 9);
+    CHECK(!frame.touches[0].pressed);  // edges cleared on the survivors
+    CHECK(!frame.touches[1].pressed);
+
+    // A new contact appends after them.
+    CHECK(frame.touch_down(5, 3.0f, 3.0f) == 2);
+    CHECK(frame.touches[2].id == 5);
+}
+
+TEST_CASE("touch table: a repeated down for the same id updates in place") {
+    using namespace ws::ui::gui;
+    InputFrame frame;
+    CHECK(frame.touch_down(7, 10.0f, 10.0f) == 0);
+    // One down per contact is the platform contract; a stray repeat must
+    // not duplicate the entry.
+    CHECK(frame.touch_down(7, 20.0f, 20.0f) == 0);
+    CHECK(frame.touch_count == 1);
+    CHECK(frame.touches[0].x == 20.0f);
+    CHECK(frame.touches[0].pressed);
+}
+
+TEST_CASE("primary-touch bridge: the first contact mirrors the mouse") {
+    using namespace ws::ui::gui;
+    InputFrame frame;
+
+    // The first contact of the gesture is the primary: it mirrors the mouse
+    // so single-finger use and ImGui keep working unchanged.
+    frame.touch_down(7, 10.0f, 20.0f);
+    CHECK(frame.bridged_touch() == 7);
+    CHECK(frame.mouse_x == 10.0f);
+    CHECK(frame.mouse_y == 20.0f);
+    CHECK(frame.mouse_down[0]);
+    CHECK(frame.mouse_pressed[0]);
+
+    // A second finger joins: tracked, never mirrored.
+    frame.touch_down(9, 80.0f, 90.0f);
+    CHECK(frame.bridged_touch() == 7);
+    CHECK(frame.mouse_x == 10.0f);
+
+    // Each finger's moves mirror only its own.
+    frame.touch_move(9, 85.0f, 95.0f);
+    CHECK(frame.mouse_x == 10.0f);
+    frame.touch_move(7, 15.0f, 25.0f);
+    CHECK(frame.mouse_x == 15.0f);
+    CHECK(frame.mouse_y == 25.0f);
+
+    // The secondary lifting changes nothing for the mouse.
+    frame.touch_up(9, 85.0f, 95.0f, false);
+    CHECK(frame.mouse_down[0]);
+    CHECK(!frame.mouse_released[0]);
+    CHECK(frame.bridged_touch() == 7);
+
+    // The primary lifting releases the mouse.
+    frame.touch_up(7, 15.0f, 25.0f, false);
+    CHECK(!frame.mouse_down[0]);
+    CHECK(frame.mouse_released[0]);
+    CHECK(frame.bridged_touch() == kNoPointer);
+}
+
+TEST_CASE("bridge: no promotion - a freed mouse stays free until a new gesture") {
+    using namespace ws::ui::gui;
+    InputFrame frame;
+    frame.touch_down(7, 10.0f, 20.0f);
+    frame.touch_down(9, 30.0f, 40.0f);
+
+    // The primary lifts while the secondary holds.
+    frame.touch_up(7, 10.0f, 20.0f, false);
+    CHECK(frame.bridged_touch() == kNoPointer);
+    CHECK(!frame.mouse_down[0]);
+
+    // The surviving finger neither owns nor moves the mouse.
+    frame.touch_move(9, 35.0f, 45.0f);
+    CHECK(frame.mouse_x == 10.0f);
+    CHECK(frame.mouse_released[0]);  // still released - no re-press
+
+    // The NEXT contact starts a fresh gesture and bridges.
+    frame.touch_down(4, 60.0f, 70.0f);
+    CHECK(frame.bridged_touch() == 4);
+    CHECK(frame.mouse_down[0]);
+    CHECK(frame.mouse_pressed[0]);
+    CHECK(frame.mouse_x == 60.0f);
+}
+
+TEST_CASE("cancelled contact: release edge with cancelled set, bridge lifts") {
+    using namespace ws::ui::gui;
+    InputFrame frame;
+    frame.touch_down(2, 5.0f, 6.0f);
+    frame.touch_up(2, 5.0f, 6.0f, true);
+
+    CHECK(frame.touches[0].cancelled);
+    CHECK(frame.touches[0].released);
+    CHECK(!frame.touches[0].down);
+    // A cancelled gesture is "never happened": the mouse reads as released,
+    // and the bridge frees.
+    CHECK(!frame.mouse_down[0]);
+    CHECK(frame.mouse_released[0]);
+    CHECK(frame.bridged_touch() == kNoPointer);
+}
+
+TEST_CASE("touch cap: the ninth contact drops, the table stays intact") {
+    using namespace ws::ui::gui;
+    InputFrame frame;
+    for (std::uint32_t id = 1; id <= static_cast<std::uint32_t>(
+                                     InputFrame::kMaxTouches);
+         ++id) {
+        CHECK(frame.touch_down(id, static_cast<float>(id), 0.0f) >= 0);
+    }
+    CHECK(frame.touch_count == InputFrame::kMaxTouches);
+    CHECK(frame.bridged_touch() == 1);  // the first contact bridges
+
+    // The 9th finger: rejected with no side effects anywhere.
+    CHECK(frame.touch_down(9, 99.0f, 99.0f) == -1);
+    CHECK(frame.touch_count == InputFrame::kMaxTouches);
+    CHECK(frame.bridged_touch() == 1);
+    CHECK(frame.mouse_x == 1.0f);       // the dropped contact moved nothing
+    CHECK(!frame.mouse_released[0]);   // ...and lifted nothing
+    CHECK(frame.touches[InputFrame::kMaxTouches - 1].id ==
+          InputFrame::kMaxTouches);
+}
+
+TEST_CASE("gather_pointers: mouse is slot 0, touches follow in table order") {
+    using namespace ws::ui::gui;
+    InputFrame frame;
+    frame.touch_down(7, 40.0f, 50.0f);
+    frame.touch_down(9, 60.0f, 70.0f);
+    frame.touch_up(9, 65.0f, 75.0f, false);  // 9 is in its release frame
+    // The platform's bridge would have overwritten the mirrored mouse with
+    // the touch; writing the mouse fields directly is the desktop shape.
+    // Either way slot 0 reports whatever the mouse state says.
+    frame.mouse_x = 12.0f;
+    frame.mouse_y = 34.0f;
+    frame.mouse_down[0] = true;
+    frame.mouse_pressed[0] = true;
+
+    std::array<PointerView, InputFrame::kMaxPointers> pointers{};
+    const int count = frame.gather_pointers(pointers);
+    CHECK(count == 3);
+    CHECK(pointers[0].id == kMousePointerId);
+    CHECK(pointers[0].x == 12.0f);
+    CHECK(pointers[0].y == 34.0f);
+    CHECK(pointers[0].down);
+    CHECK(pointers[0].pressed);
+    CHECK(pointers[1].id == 7);
+    CHECK(pointers[1].x == 40.0f);
+    CHECK(pointers[1].down);
+    CHECK(pointers[2].id == 9);
+    CHECK(!pointers[2].down);
+    CHECK(pointers[2].released);
+    CHECK(pointers[2].x == 65.0f);
+    CHECK(pointers[3].id == kNoPointer);  // past the count: the sentinel
+
+    // pointer_pos reaches the mouse and each touch - including one in its
+    // release frame - and misses ids the frame never held.
+    float x = 0.0f;
+    float y = 0.0f;
+    CHECK(frame.pointer_pos(kMousePointerId, &x, &y));
+    CHECK(x == 12.0f);
+    CHECK(y == 34.0f);
+    CHECK(frame.pointer_pos(7, &x, &y));
+    CHECK(x == 40.0f);
+    CHECK(y == 50.0f);
+    CHECK(frame.pointer_pos(9, &x, &y));
+    CHECK(x == 65.0f);
+    CHECK(y == 75.0f);
+    CHECK(frame.pointer_pos(7, nullptr, nullptr));  // pure existence check
+    CHECK(!frame.pointer_pos(1234, &x, &y));
 }
 
 // --- gui ids (Phase 2) --------------------------------------------------------------

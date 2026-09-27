@@ -17,6 +17,10 @@ enum class EventType : std::uint8_t {
     MouseButtonReleased,
     MouseMoved,
     MouseScrolled,
+    TouchPressed,
+    TouchMoved,
+    TouchReleased,
+    TextInput,
 };
 
 // Base of every event. Deliberately has no vtable: each event stores its
@@ -91,6 +95,53 @@ struct MouseScrolledEvent : Event {
         : Event(static_type()), x_offset(x_offset), y_offset(y_offset) {}
     float x_offset = 0.0f;
     float y_offset = 0.0f;
+};
+
+// Touch contacts. `pointer_id` is the platform's contact id - stable for the
+// lifetime of one finger-down (Android's pointer id; desktop synthesizes no
+// touch events, so these only arrive from touch platforms). Coordinates are
+// framebuffer pixels, top-left origin - the same space the mouse events and
+// the gui use.
+struct TouchPressedEvent : Event {
+    static constexpr EventType static_type() { return EventType::TouchPressed; }
+    constexpr TouchPressedEvent(std::uint32_t pointer_id, float x, float y)
+        : Event(static_type()), pointer_id(pointer_id), x(x), y(y) {}
+    std::uint32_t pointer_id = 0;
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
+struct TouchMovedEvent : Event {
+    static constexpr EventType static_type() { return EventType::TouchMoved; }
+    constexpr TouchMovedEvent(std::uint32_t pointer_id, float x, float y)
+        : Event(static_type()), pointer_id(pointer_id), x(x), y(y) {}
+    std::uint32_t pointer_id = 0;
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
+struct TouchReleasedEvent : Event {
+    static constexpr EventType static_type() { return EventType::TouchReleased; }
+    constexpr TouchReleasedEvent(std::uint32_t pointer_id, float x, float y,
+                                bool cancelled)
+        : Event(static_type()), pointer_id(pointer_id), x(x), y(y),
+          cancelled(cancelled) {}
+    std::uint32_t pointer_id = 0;
+    float x = 0.0f;
+    float y = 0.0f;
+    // The OS aborted the gesture (a palm, an incoming call) - semantically
+    // "never happened", never a click.
+    bool cancelled = false;
+};
+
+// One typed glyph, UTF-32, one event per codepoint in arrival order.
+// The event-system counterpart of the gui frame's text_input vector; keys
+// model presses, this models what was actually typed.
+struct TextInputEvent : Event {
+    static constexpr EventType static_type() { return EventType::TextInput; }
+    constexpr explicit TextInputEvent(std::uint32_t codepoint)
+        : Event(static_type()), codepoint(codepoint) {}
+    std::uint32_t codepoint = 0;
 };
 
 // Routes one event to typed handlers instead of a switch on type():

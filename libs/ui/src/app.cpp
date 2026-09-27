@@ -133,7 +133,8 @@ VkFormat choose_depth_format(VkPhysicalDevice physical) {
 using AnyEvent = std::variant<WindowCloseEvent, WindowResizeEvent, KeyPressedEvent,
                              KeyReleasedEvent, MouseButtonPressedEvent,
                              MouseButtonReleasedEvent, MouseMovedEvent,
-                             MouseScrolledEvent>;
+                             MouseScrolledEvent, TouchPressedEvent,
+                             TouchMovedEvent, TouchReleasedEvent, TextInputEvent>;
 
 }  // namespace
 
@@ -214,13 +215,20 @@ struct App::Impl {
     // Platform callbacks (src/window_glfw.cpp / src/window_android.cpp)
     // funnel every event through the sink;
     // forward_event() pre-marks ImGui-consumed input, queues the rest and
-    // coalesces mouse-move/scroll per frame (move keeps the latest position,
-    // scroll sums its deltas). deliver_events() then drives App::on_event,
+    // coalesces mouse-move/scroll/touch-move per frame (move keeps the
+    // latest position, scroll sums its deltas, each touch keeps its own
+    // latest move). deliver_events() then drives App::on_event,
     // once per queued event, before on_update().
     WindowEventSink event_sink_;
     std::vector<AnyEvent> event_queue_;
     std::optional<MouseMovedEvent> pending_mouse_move_;  // coalesced: latest wins
     std::optional<MouseScrolledEvent> pending_scroll_;   // coalesced: deltas summed
+    // One pending move per touch contact, latest wins - every moving finger
+    // keeps its own slot, so no finger's final position is lost at a busy
+    // frame boundary (pending_mouse_move_'s rule, per pointer id).
+    std::array<std::optional<TouchMovedEvent>, gui::InputFrame::kMaxTouches>
+        pending_touch_moves_{};
+    bool touch_move_overflow_warned_ = false;
 
     // --- render command queue -----------------------------------------------
     // The app fills write_queue_ during on_update(); the render step swaps
@@ -262,12 +270,20 @@ struct App::Impl {
         switch (event.type()) {
             case EventType::KeyPressed:
             case EventType::KeyReleased:
+            case EventType::TextInput:
                 return io.WantCaptureKeyboard;
             case EventType::MouseButtonPressed:
             case EventType::MouseButtonReleased:
             case EventType::MouseMoved:
             case EventType::MouseScrolled:
                 return io.WantCaptureMouse;
+            case EventType::TouchPressed:
+            case EventType::TouchMoved:
+            case EventType::TouchReleased:
+                // Never gated: ImGui is fed by the primary-touch bridge
+                // (the platform mirrors it into io), not by these - so a
+                // widget over the finger keeps its unfiltered stream.
+                return false;
             default:
                 return false;
         }
@@ -322,13 +338,52 @@ struct App::Impl {
             case EventType::MouseButtonReleased:
                 event_queue_.push_back(static_cast<MouseButtonReleasedEvent&>(event));
                 break;
+            case EventType::TouchPressed:
+                event_queue_.push_back(static_cast<TouchPressedEvent&>(event));
+                break;
+            case EventType::TouchMoved: {
+                // Latest position per pointer id - pending_mouse_move_'s
+                // rule, one slot per contact. A table with no id match and
+                // no free slot means more distinct movers than the touch
+                // cap ever admits (hand-rolled emitters only): drop + warn
+                // once.
+                const TouchMovedEvent& moved =
+                    static_cast<TouchMovedEvent&>(event);
+                std::optional<TouchMovedEvent>* slot = nullptr;
+                for (auto& pending : pending_touch_moves_) {
+                    if (pending && pending->pointer_id == moved.pointer_id) {
+                        slot = &pending;  // this contact's coalescing slot
+                        break;
+                    }
+                    if (!pending && slot == nullptr) {
+                        slot = &pending;  // first free slot, if no id matches
+                    }
+                }
+                if (slot != nullptr) {
+                    *slot = moved;
+                } else if (!touch_move_overflow_warned_) {
+                    touch_move_overflow_warned_ = true;
+                    core::warn("ui: touch-move coalescing overfull - a move "
+                               "was dropped");
+                }
+                break;
+            }
+            case EventType::TouchReleased:
+                event_queue_.push_back(static_cast<TouchReleasedEvent&>(event));
+                break;
+            case EventType::TextInput:
+                // One event per glyph, arrival order - typing is low-rate
+                // and order-preserving, so no coalescing.
+                event_queue_.push_back(static_cast<TextInputEvent&>(event));
+                break;
         }
     }
 
     // Coalesced events flush right before delivery, so the app sees exactly
     // one MouseMovedEvent / one MouseScrolledEvent per frame even when the
-    // OS delivered dozens. Their order relative to that frame's discrete
-    // events is not preserved.
+    // OS delivered dozens. Touch moves flush the same way - one per moving
+    // contact, in first-move slot order (deterministic). Their order
+    // relative to that frame's discrete events is not preserved.
     void flush_coalesced() {
         if (pending_mouse_move_) {
             event_queue_.push_back(std::move(*pending_mouse_move_));
@@ -337,6 +392,12 @@ struct App::Impl {
         if (pending_scroll_) {
             event_queue_.push_back(std::move(*pending_scroll_));
             pending_scroll_.reset();
+        }
+        for (auto& pending : pending_touch_moves_) {
+            if (pending) {
+                event_queue_.push_back(std::move(*pending));
+                pending.reset();
+            }
         }
     }
 
