@@ -17,10 +17,13 @@
 
 #include <ws/core/log.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifdef __ANDROID__
@@ -51,6 +54,27 @@ constexpr const char* kDefaultFontPath = "/system/fonts/Roboto-Regular.ttf";
 #else
 constexpr const char* kDefaultFontPath = "C:/Windows/Fonts/segoeui.ttf";
 #endif
+
+// The top-right gui column's two panel rects, stated once: the gui block
+// lays the panels there, and the pinch gate below treats those pixels as
+// the widgets' - a two-finger pinch over the gui must not move the world.
+// (The net panel's rect answers the same contract through
+// NetScreen::panel_bounds().)
+ws::ui::gui::Rect demo_panel_rect(float frame_width) {
+    return {frame_width - 244.0f, 24.0f, 220.0f, 176.0f};
+}
+ws::ui::gui::Rect pages_panel_rect(float frame_width) {
+    return {frame_width - 244.0f, 208.0f, 220.0f, 220.0f};
+}
+
+// Trail colors keyed by contact id mod 4: a finger keeps one color for
+// its whole gesture, two fingers never share one.
+constexpr std::uint8_t kTrailPalette[4][3] = {
+    {255, 150, 40},   // orange
+    {90, 200, 110},   // green
+    {80, 160, 255},   // blue
+    {200, 110, 255},  // purple
+};
 
 class PlaygroundApp final : public ws::ui::App {
 public:
@@ -87,6 +111,20 @@ protected:
                 }
                 return false;
             });
+        // The text-event echo: one UTF-32 codepoint per glyph, arrival
+        // order. The drawn echo (screen block below) keeps the bake's
+        // range - ASCII 32..126, the v1 font has no other glyphs; wider
+        // codepoints are observed here but not shown.
+        dispatcher.dispatch<ws::ui::TextInputEvent>(
+            [this](const ws::ui::TextInputEvent& e) {
+                if (e.codepoint >= 32u && e.codepoint <= 126u) {
+                    if (typed_.size() >= kTypedMax) {
+                        typed_.erase(typed_.begin());
+                    }
+                    typed_.push_back(static_cast<char>(e.codepoint));
+                }
+                return false;  // observed, never consumed
+            });
         dispatcher.dispatch<ws::ui::WindowResizeEvent>(
             [](const ws::ui::WindowResizeEvent& e) {
                 ws::core::info("playground: resized to {}x{}", e.width, e.height);
@@ -109,12 +147,14 @@ protected:
         // ids and flows them through the cursor. Every widget below drives
         // a real piece of app state - the same state the ImGui window's
         // controls below show - and the click counter is ours to keep.
+        // The three sliders are the multi-pointer demo: on a touch screen
+        // two fingers drag two of them at once - each slider follows its
+        // own pointer, never the mouse.
         r2d::set_layer(10);
         r2d::begin();
         const r2d::FrameSize gui_frame = r2d::frame_size();
         const ws::ui::gui::Rect content = ws::ui::gui::begin_panel(
-            gui_, layout_, chrome_, "demo",
-            {gui_frame.width - 244.0f, 24.0f, 220.0f, 176.0f});
+            gui_, layout_, chrome_, "demo", demo_panel_rect(gui_frame.width));
         if (ws::ui::gui::button(gui_, layout_, chrome_,
                                 "clicks", 120.0f,
                                 icons_.empty() ? r2d::Sprite{}
@@ -140,10 +180,11 @@ protected:
         // (the caller's int is the state); "list" is a scrollable checkbox
         // column whose offset lives in the gui context - it survives tab
         // flips - and "tune" edits the list itself, live: shrinking the
-        // row count shrinks the scroll range one frame later.
+        // row count shrinks the scroll range one frame later. On touch the
+        // list scrolls by finger: past drag_threshold the scroll owns the
+        // press (cancel_pointer), so sweeping rows never clicks them.
         const ws::ui::gui::Rect page = ws::ui::gui::begin_panel(
-            gui_, layout_, chrome_, "pages",
-            {gui_frame.width - 244.0f, 208.0f, 220.0f, 220.0f});
+            gui_, layout_, chrome_, "pages", pages_panel_rect(gui_frame.width));
         static const char* kPageTabs[] = {"list", "tune"};
         (void)ws::ui::gui::tab_bar(gui_, layout_, chrome_,
                                    "views", kPageTabs, 2, active_tab_,
@@ -180,6 +221,16 @@ protected:
         r2d::set_layer(0);
 
         gui_.end_frame();
+
+        // --- multi-touch demo: trails + pinch-zoom off the raw table ---
+        // The plan's gesture rule in miniature: the core ships the touch
+        // DATA (frame_input().touches, ids stable per contact), the app
+        // composes the gesture. This pass is a second consumer of the same
+        // snapshot the gui ran on - widgets and app-side gestures coexist
+        // without arbitration.
+        const ws::ui::gui::InputFrame& raw = ws::ui::gui::frame_input();
+        update_touch_trails(raw);
+        apply_pinch_zoom(raw);
 
         // --- 2D world, through the camera ---
         r2d::begin(camera_);
@@ -302,6 +353,41 @@ protected:
         r2d::draw_line(frame.width - inset, frame.height - inset, inset,
                        frame.height - inset, 2.0f, border);
         r2d::draw_line(inset, frame.height - inset, inset, inset, 2.0f, border);
+
+        // Multi-touch overlay, layer 5: over the world and this border,
+        // under the gui panels (10). One fading breadcrumb per finger,
+        // colored by contact id; the solid head marks the live contact,
+        // and a lifted trail retracts one point per frame until gone.
+        // Desktop has no touch table content (mouse-only by decision), so
+        // the overlay draws nothing there - the demo is for the Android
+        // run; the text echo below works everywhere keys exist.
+        r2d::set_layer(5);
+        for (const auto& entry : touch_trails_) {
+            const TouchTrail& trail = entry.second;
+            const std::uint8_t* pal = kTrailPalette[entry.first % 4u];
+            const std::size_t n = trail.points.size();
+            for (std::size_t i = 0; i < n; ++i) {
+                const float toward_head =
+                    static_cast<float>(i + 1) / static_cast<float>(n);
+                const auto alpha =
+                    static_cast<std::uint8_t>(48.0f + 207.0f * toward_head);
+                r2d::draw_quad(trail.points[i].first - 5.0f,
+                               trail.points[i].second - 5.0f, 10.0f, 10.0f,
+                               r2d::rgba(pal[0], pal[1], pal[2], alpha));
+            }
+            if (trail.down && !trail.points.empty()) {
+                r2d::draw_quad(trail.points.back().first - 9.0f,
+                               trail.points.back().second - 9.0f, 18.0f, 18.0f,
+                               r2d::rgba(pal[0], pal[1], pal[2], 230));
+            }
+        }
+        // The text-event echo, bottom-center (right of the net panel):
+        // the last few glyphs typed on either platform's key path.
+        if (!typed_.empty()) {
+            r2d::draw_text(280.0f, frame.height - 36.0f, typed_.c_str(),
+                           font_, r2d::rgba(235, 238, 242));
+        }
+        r2d::set_layer(0);
         r2d::end();
 
         spin_ = std::fmod(spin_ + gui_spin_rate_, 6.2831853f);
@@ -330,6 +416,10 @@ protected:
             std::snprintf(line, sizeof(line),
                           "gui button clicks: %d (the panel, top right)",
                           gui_clicks_);
+            ws::ui::text(line);
+            std::snprintf(line, sizeof(line),
+                          "touches %d (trails, pinch-zoom, finger-scroll)",
+                          in.touch_count);
             ws::ui::text(line);
 
             if (ws::ui::button("imgui demo")) {
@@ -415,9 +505,103 @@ private:
     int active_tab_ = 0;           // Phase 9: the page panel's selected tab
     int row_count_ = 16;           // the "list" tab's rows (edited in "tune")
     std::array<bool, 16> rows_{};   // the "list" tab's checkbox states
+    // Multi-touch demo state: per-contact breadcrumb trails, the pinch
+    // bookkeeping, the text echo buffer. All app-side, the gui contract -
+    // the core provides the data, the app composes the gesture.
+    struct TouchTrail {
+        static constexpr std::size_t kMaxPoints = 32;  // ~half a second at 60fps
+        std::vector<std::pair<float, float>> points;  // oldest first
+        bool down = false;  // the frame still sees the contact
+    };
+    static constexpr std::size_t kTypedMax = 40;
+    std::map<std::uint32_t, TouchTrail> touch_trails_;
+    float pinch_span_ = 0.0f;  // last pinch frame's finger span; 0 = none
+    std::string typed_;        // the last few typed glyphs (ASCII 32..126)
     playground::NetScreen net_;    // Phase 10: the real screen (world + panel)
     ws::ui::r2d::Font font_;      // one bake, one face - outlives the theme use
     ws::ui::gui::ChromeTheme chrome_ = ws::ui::gui::kDefaultChrome;  // + font_
+
+    // --- multi-touch demo helpers (state above) ---
+    // Appends each live contact's position to its trail (capped), and the
+    // release frame's lift point closes it; a contact absent this frame
+    // retracts one point per frame until its trail is gone.
+    void update_touch_trails(const ws::ui::gui::InputFrame& in) {
+        for (auto& entry : touch_trails_) {
+            entry.second.down = false;  // re-marked by the frame below
+        }
+        for (int i = 0; i < in.touch_count; ++i) {
+            const ws::ui::gui::TouchPoint& t =
+                in.touches[static_cast<std::size_t>(i)];
+            TouchTrail& trail = touch_trails_[t.id];
+            if (t.down || t.released) {
+                trail.points.emplace_back(t.x, t.y);
+                if (trail.points.size() > TouchTrail::kMaxPoints) {
+                    trail.points.erase(trail.points.begin());
+                }
+            }
+            trail.down = t.down;
+        }
+        for (auto it = touch_trails_.begin(); it != touch_trails_.end();) {
+            if (it->second.down) {
+                ++it;
+                continue;
+            }
+            if (!it->second.points.empty()) {
+                it->second.points.erase(it->second.points.begin());
+            }
+            if (it->second.points.empty()) {
+                it = touch_trails_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    // Two fingers off the gui panels = one pinch: the frame-to-frame span
+    // between the first two live contacts scales camera_.zoom (clamped to
+    // the window slider's range, so the two controls agree). A finger over
+    // the gui is the widgets'; a third finger aborts the gesture until it
+    // is two again.
+    void apply_pinch_zoom(const ws::ui::gui::InputFrame& in) {
+        const ws::ui::gui::TouchPoint* live[2] = {nullptr, nullptr};
+        int downs = 0;
+        for (int i = 0; i < in.touch_count; ++i) {
+            const ws::ui::gui::TouchPoint& t =
+                in.touches[static_cast<std::size_t>(i)];
+            if (!t.down) {
+                continue;
+            }
+            if (downs < 2) {
+                live[downs] = &t;
+            }
+            ++downs;
+        }
+        const ws::ui::r2d::FrameSize frame = ws::ui::r2d::frame_size();
+        bool pinching = downs == 2;
+        if (pinching) {
+            const ws::ui::gui::Rect panels[3] = {
+                demo_panel_rect(frame.width), pages_panel_rect(frame.width),
+                net_.panel_bounds()};
+            for (const ws::ui::gui::TouchPoint* t : live) {
+                for (const ws::ui::gui::Rect& panel : panels) {
+                    if (ws::ui::gui::contains(panel, t->x, t->y)) {
+                        pinching = false;
+                    }
+                }
+            }
+        }
+        if (!pinching) {
+            pinch_span_ = 0.0f;  // re-armed by the next clean two-finger frame
+            return;
+        }
+        const float span =
+            std::hypot(live[1]->x - live[0]->x, live[1]->y - live[0]->y);
+        if (pinch_span_ > 0.0f && span > 0.0f) {
+            camera_.zoom = std::min(
+                std::max(camera_.zoom * (span / pinch_span_), 0.1f), 4.0f);
+        }
+        pinch_span_ = span;
+    }
 };
 
 }  // namespace

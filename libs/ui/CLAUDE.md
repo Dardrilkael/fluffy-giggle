@@ -8,9 +8,11 @@ gets a window, an event stream, and a place to submit draw commands —
 
 ## What this is
 
-- **Windowing** — GLFW-backed window, owned entirely by the shell.
-- **Event system** — Hazel-style typed events + dispatcher, fed from GLFW
-  callbacks, delivered to `App::on_event`.
+- **Windowing** — the platform window (GLFW on desktop, NativeActivity on
+  Android), owned entirely by the shell.
+- **Event system** — Hazel-style typed events + dispatcher, fed from the
+  platform callbacks (GLFW on desktop, NativeActivity on Android), delivered
+  to `App::on_event`.
 - **Render command queue** — the seam between app logic and GPU work.
 - **Render/widget API** — `widgets.hpp` (ImGui/ImPlot-backed draw calls),
   the engine's own vocabulary for drawing, not the graphics API's.
@@ -39,10 +41,11 @@ This is the single most important architectural constraint of this library.
   `EventDispatcher`, and `RenderCommandQueue` are plain `ws::ui` types with
   no third-party types in their signatures.
 - All GLFW/Vulkan/ImGui state lives behind a pimpl (`src/app.cpp`,
-  `src/window.cpp`) — Vk*/GLFW types never appear in public headers, ever.
+  `src/window_glfw.cpp`/`src/window_android.cpp`) — Vk*/GLFW types never
+  appear in public headers, ever.
 - GLFW callback functions are `static`, file-local functions in
-  `src/window.cpp` — never declared or forward-declared in a header. This
-  is the *only* place GLFW's C callback surface exists.
+  `src/window_glfw.cpp` — never declared or forward-declared in a header.
+  This is the *only* place GLFW's C callback surface exists.
 - Before adding any public API, check: *could a consumer compile this
   header without Vulkan/GLFW/ImGui installed?* If not, it's a leak — fix it
   before merging.
@@ -61,11 +64,11 @@ libs/ui/
     renderer2d.hpp           # r2d free functions: Camera2D, quads, lines, sprites, fonts + text
     widgets.hpp               # window/text/button/checkbox/slider/plot_line/...
     gui/                      # the immediate-mode gui module (ws::ui::gui, no ImGui)
-      gui_context.hpp        # GuiContext: input snapshot + hot/active + side tables
+      gui_context.hpp        # GuiContext + HitTest: input snapshot, per-pointer hot/active + side tables
       id_stack.hpp           # WidgetId hashing + scoped id stack
-      input_frame.hpp        # InputFrame: one frame's raw input; frame_input() getter
+      input_frame.hpp        # InputFrame: one frame's raw input — mouse, keys, multi-touch table; frame_input() getter
       layout_cursor.hpp      # LayoutCursor: flowing layout + panel stack
-      rect.hpp                # Rect, WidgetId, HitTest — the shared vocabulary
+      rect.hpp                # Rect, WidgetId, contains() — the shared vocabulary
       theme.hpp               # ChromeTheme: every color/metric the widgets use, + the borrowed font
       widgets.hpp            # button/checkbox/slider/panel/tabs/scroll region — the widget functions
   src/
@@ -80,8 +83,9 @@ libs/ui/
     rounded_texture.h/.cpp   # pure-CPU bake of the builtin rounded-rect mask
     shaders/                  # batch.vert/.frag (GLSL) + spirv.h (committed build input)
     stb_impl.cpp             # sole STB implementation TU (STB_IMAGE + STB_TRUETYPE)
-    window.h                 # internal: WindowEventSink (never reaches apps)
-    window.cpp               # GLFW window + all glfwSet*Callback installs (only here)
+    window.h                 # internal: WindowHost, the platform seam (never reaches apps)
+    window_glfw.cpp          # desktop: GLFW window + all glfwSet*Callback installs (only here)
+    window_android.cpp       # Android: NativeActivity pump, multi-touch decode, the bridge feed
     widgets.cpp              # ImGui/ImPlot-backed widget implementations
     vma_impl.cpp             # sole VMA_IMPLEMENTATION translation unit
   tests/
@@ -91,10 +95,15 @@ libs/ui/
 
 - `ws/ui/event.hpp`: `Event` base + `EventType` enum (`WindowClose`,
   `WindowResize`, `KeyPressed`, `KeyReleased`, `MouseButtonPressed`,
-  `MouseButtonReleased`, `MouseMoved`, `MouseScrolled`). Each event is a
+  `MouseButtonReleased`, `MouseMoved`, `MouseScrolled`, `TouchPressed`,
+  `TouchMoved`, `TouchReleased`, `TextInput`). Each event is a
   small POD-ish struct (`WindowResizeEvent{width,height}`,
   `KeyPressedEvent{keycode, repeat}`, etc.) with a `type()` and a `handled`
-  flag.
+  flag. The touch trio carries `pointer_id` (the platform's stable
+  per-contact id) plus `x`/`y` in framebuffer pixels — the mouse's space;
+  `TouchReleasedEvent` adds `cancelled` (the OS aborted the gesture).
+  `TextInputEvent{codepoint}` is one UTF-32 codepoint per event, in
+  arrival order.
 - `EventDispatcher`: constructed with an `Event&`, exposes
   `dispatch<T>(fn)` — calls `fn(T&)` only if the event's runtime type
   matches `T`, and sets `handled = fn`'s return value. Apps write one
@@ -111,7 +120,9 @@ void on_event(ws::ui::Event& e) override {
 - The shell installs the GLFW callbacks (`glfwSetWindowSizeCallback`,
   `glfwSetKeyCallback`, `glfwSetMouseButtonCallback`,
   `glfwSetCursorPosCallback`, `glfwSetScrollCallback`,
-  `glfwSetWindowCloseCallback`) once, in `src/window.cpp`. Every callback
+  `glfwSetWindowCloseCallback`) once, in `src/window_glfw.cpp` (Android's
+  counterpart is the NativeActivity pump in `src/window_android.cpp`).
+  Every callback
   builds the matching `Event` and forwards it to a single
   `std::function<void(Event&)>` stored on the window. Zero-size resize
   events (minimize on Windows) are suppressed — nothing can be sized
@@ -122,11 +133,18 @@ void on_event(ws::ui::Event& e) override {
   `ImGuiIO::WantCaptureMouse`/`WantCaptureKeyboard` is set, the shell marks
   the corresponding `Event` `handled = true` before it reaches
   `App::on_event`, but still delivers `WindowResizeEvent`/`WindowClose`
-  unconditionally.
+  unconditionally. `Touch*` events are never ImGui-gated (the gate answers
+  false for them): on touch platforms ImGui is fed by the primary-touch →
+  mouse bridge instead, so apps keep unfiltered finger events.
+  `TextInputEvent` gates with `WantCaptureKeyboard`, exactly like
+  `KeyPressed`.
 - `App::on_event` runs synchronously on the main thread, before
   `on_update()`, once per queued event per frame — no event is ever
-  dropped or coalesced except mouse-move/scroll, which are coalesced per
-  frame (move keeps the latest position; scroll sums its deltas).
+  dropped or coalesced except mouse-move/scroll and `TouchMoved`, which
+  are coalesced per frame (move keeps the latest position; scroll sums its
+  deltas; `TouchMoved` keeps the latest position PER POINTER ID — one
+  event per moving contact per frame). `TextInput` never coalesces —
+  order is the payload.
 
 ## Render command queue
 
@@ -300,22 +318,48 @@ drive unchanged (that boundary is deliberate; don't paint it over).
 - **Input.** The shell accumulates raw input into one `InputFrame` per
   frame (`frame_input()`, drop-safe headless) — parallel to the
   ImGui-filtered `Event` stream, so gui widgets see the mouse even where
-  an ImGui window sits. `new_frame(frame_input())` adopts the snapshot;
-  widgets run; `end_frame()` resolves the frame (a release whose owner
-  vanished is dropped, not misattributed).
+  an ImGui window sits. The frame carries the mouse, the key state and
+  the multi-touch table (`touches`, up to `kMaxTouches` = 8 contacts,
+  keyed by the platform's stable pointer ids; an entry lives through
+  its release frame, so a widget can still see who lifted).
+  `gather_pointers()` flattens the two into one uniform list — slot 0 is
+  always the mouse (id `kMousePointerId`), the touches follow in arrival
+  order — and `pointer_pos(id)` looks one up. The `touch_*` writers
+  maintain the primary-touch → mouse bridge: the FIRST contact of a
+  gesture mirrors the mouse's position, button 0 and its edges (no
+  promotion on lift — single-finger use, the mouse path and ImGui keep
+  working, unchanged). `new_frame(frame_input())` adopts the snapshot;
+  widgets run; `end_frame()` resolves the frame per pointer (a release
+  whose owner vanished is dropped, not misattributed).
 - **Identity.** `WidgetId` is an FNV-1a hash of the id-stack scope plus a
   family tag and the label — same label, same scope, same id, stable
   across frames (that stability IS widget identity). Loop-generated
   children must `ids().push(index)` between calls or they collide; the
   context censuses ids per frame and warns once per duplicate.
-- **Hot/active.** Press-inside sets active (pointer capture: press
-  feedback and drag tracking continue off-rect until release);
-  release-inside = `clicked`, release-outside clears active with no
-  click. `hovered` is hot-gated, so widgets under a foreign drag don't
-  light up. Hover is never a click precondition — clicks are pure
-  spatial containment — so a widget keeps working with hover simply
-  absent (no mouse yet, touch someday); never add logic that needs
-  hover first.
+- **Hot/active, per pointer.** One `PointerTrack` per pointer, matched
+  across frames by pointer id (that carry IS the drag). The classic
+  rules run per pointer: press-inside sets that pointer's active
+  (pointer capture: press feedback and drag tracking continue off-rect
+  until release); release-inside = `clicked`, release-outside clears
+  with no click. `hit_test` OR-folds the per-pointer claims into one
+  `HitTest` for the widget — a two-finger press on one widget is one
+  press, and one click — and `HitTest::pointer` reports the owning
+  pointer as the lowest slot (the mouse outranks touches, so a bridged
+  finger resolves to the mouse it mirrors). Capture is per pointer: a
+  drag on one slider does not stop another finger from pressing the
+  next. `hovered` is hot-gated per pointer, so widgets under a foreign
+  drag don't light up. Hover is never a click precondition — clicks are
+  pure spatial containment — and a touch has no hover at all: contact
+  IS presence.
+- **Press cancel.** `cancel_pointer(id)` ends that pointer's press with
+  no click: the active claim clears, the track flags `cancelled`, and
+  it claims nothing until it lifts (`end_frame` lifts it with the
+  release, so the platform can reuse the id). The scroll-drag path is
+  today's caller (see Widgets). Cancelling a bridged touch cancels the
+  mouse it mirrors, and vice versa — the mirror rule. The bridge's
+  duplicate itself is benign by the fold rules above: the OR-fold
+  yields one press and one click, and the lowest-slot rule resolves
+  drags to the same finger.
 - **Persistent state.** `persistent_state<T>(WidgetId)` returns a typed
   side-table entry keyed (type, id) — how a scroll offset survives frames
   and the panel vanishing for frames. Never a local static: if a widget
@@ -330,7 +374,8 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   eats a real ancestor — and every pop is a documented no-op on an empty
   stack, so unbalanced calls degrade, never corrupt.
 - **Theme.** `ChromeTheme` — the faces and the metrics (control height,
-  corner radius, padding, spacing, scroll speed) in one plain struct,
+  corner radius, padding, spacing, scroll speed, drag threshold) in one
+  plain struct,
   `kDefaultChrome` constexpr. Widgets take a `const ChromeTheme&` per
   call, so a panel can carry its own variant inline. `font` is a
   borrowed `const r2d::Font*` (null = the v1 label bars, byte-for-byte
@@ -349,20 +394,34 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   virtual panel shifted by the offset — they draw and hit-test at
   scrolled positions — while the clip stays at the unscrolled viewport;
   the offset is persistent state, the content extent is measured at the
-  previous end: one frame of lag, by design).
+  previous end: one frame of lag, by design. Scrolling is two-handed:
+  the mouse wheels any viewport under it, a finger drags — each contact
+  pressed inside the viewport is watched, and past
+  `theme.drag_threshold` (8 px) the scroll owns the finger:
+  `cancel_pointer` fires before children run that frame, and the offset
+  follows the contact 1:1 with no crossing-frame jump. A lift inside
+  the threshold stays the child's tap. Known cosmetic limit: a
+  drag-tracking child (a slider) can move < threshold px before the
+  cancel fires).
 - **v1 limits, deliberate:** labels draw through the theme font's
   glyphs when one is set, the v1 quad bars otherwise — and text cannot
   truncate, so a label wider than its face drops instead of spilling;
   the gui is screen-space only (the same
-  space layout and hit-testing use); scroll is vertical-only and every
-  viewport under the pointer wheels; hit-testing ignores clips (a row
+  space layout and hit-testing use); scroll is vertical-only (the
+  mouse wheels any viewport under it, a finger drags any region past
+  the drag threshold); hit-testing ignores clips (a row
   scrolled out of sight still hit-tests — that needs a clip-aware hit
   seam, not a widget patch); panels are chrome, not input surfaces.
 - Everything tests headless (r2d draws drop without a window): the widget
   suite lives in `tests/test_ui.cpp` and runs with the rest via
   `ctest --preset debug -R ui`. `apps/playground` carries the full
   composition demo plus the Phase 10 "net inspector" screen — a
-  feedforward net drawn in the world layer, driven live by a gui panel.
+  feedforward net drawn in the world layer, driven live by a gui panel —
+  and the multi-touch demo: pointer-id-colored trails under every
+  finger, two sliders dragged at once, a two-finger pinch-zoom composed
+  app-side off the raw `frame_input()` table, finger-scrolling, and a
+  text echo of `TextInputEvent` codepoints. On desktop the touch
+  overlay simply draws nothing — there are no touches to show.
 
 ## Public API
 
@@ -395,12 +454,18 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `sprite_size`. Draws are valid only inside `on_update()`, within a
   `begin()` block.
 - `gui/` (`ws::ui::gui`): the immediate-mode widget layer — `GuiContext` +
-  `frame_input()`, `LayoutCursor`, `IdStack`, `ChromeTheme`/
-  `kDefaultChrome`, and `button`/`checkbox`/`slider_float`/`slider_int`/
-  `begin_panel`/`end_panel`/`tab_bar`/`begin_scroll_panel`/
-  `end_scroll_panel`. Valid only between `GuiContext::new_frame` and
-  `end_frame`, inside the caller's r2d screen-space block; the state is
-  the caller's, persistence lives in the context's side tables.
+  `frame_input()` (the frame's raw input: mouse, keys and the multi-touch
+  table — `touches`/`touch_count`, the platform-facing `touch_*` writers,
+  `gather_pointers`, `pointer_pos`, `bridged_touch`), `LayoutCursor`,
+  `IdStack`, `ChromeTheme`/`kDefaultChrome`, and `button`/`checkbox`/
+  `slider_float`/`slider_int`/`begin_panel`/`end_panel`/`tab_bar`/
+  `begin_scroll_panel`/`end_scroll_panel`. Hot/active are per pointer:
+  `hot_id()`/`active_id()` default to the mouse and take a pointer id;
+  `owning_pointer(widget_id)` and `pointer(id)` inspect the fold;
+  `cancel_pointer(id)` ends a press with no click. Valid only between
+  `GuiContext::new_frame` and `end_frame`, inside the caller's r2d
+  screen-space block; the state is the caller's, persistence lives in
+  the context's side tables.
 
 ## Backend invariants
 
@@ -451,6 +516,19 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   Startup failures instead return 1 from `App::run()`.
 - Don't use the `ImGui_ImplVulkanH_*` example helpers — the backend header
   marks them example-only; the shell manages its own swapchain objects.
+- Input platform invariants. Desktop is mouse-only BY DECISION — no Win32
+  WM_POINTER: touch screens keep the synthesized single-mouse behavior.
+  Android decodes EVERY contact (pointer index from the action bits,
+  MOVE updates all pointers, CANCEL lifts them all cancelled), emits
+  the `Touch*` events plus the bridge's `Mouse*` off `bridged_touch()`,
+  and drops the 9th+ finger with a once-per-frame warn. On Android,
+  ImGui is fed BY THE BRIDGE — `io.AddMousePosEvent`/
+  `AddMouseButtonEvent` direct; touch-source motion never reaches
+  `ImGui_ImplAndroid_HandleInputEvent`, whose index-0 following is what
+  produced the old stuck-press bug. Android soft-keyboard IME is out of
+  scope v1 (NativeActivity `hasCode=false` cannot receive IME commits —
+  revisit when the gui grows a text widget); `TextInputEvent` flows from
+  GLFW chars on desktop and hardware-key taps on Android.
 
 ## When implementing new features
 

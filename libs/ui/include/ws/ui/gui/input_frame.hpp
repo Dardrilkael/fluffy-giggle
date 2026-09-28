@@ -134,8 +134,9 @@ private:
 
 // The shell's snapshot for the frame being rendered, valid during
 // on_update() - hand it to GuiContext::new_frame(). Filled by the platform
-// layer from RAW GLFW input (src/window.cpp): deliberately not the
-// app-facing event stream, so the snapshot stays unfiltered even while
+// layer from RAW input (the GLFW callbacks on desktop, the NativeActivity
+// pump on Android): deliberately not the app-facing event stream, so the
+// snapshot stays unfiltered even while
 // ImGui consumes the same physical input - the gui library hit-tests for
 // itself. Outside a running app: an empty frame (the drop-safe contract,
 // like r2d::frame_size()).

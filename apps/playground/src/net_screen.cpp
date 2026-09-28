@@ -163,8 +163,11 @@ void NetScreen::draw_panel(ws::ui::gui::GuiContext& ctx,
                            const ws::ui::r2d::FrameSize& frame) {
     namespace gui = ws::ui::gui;
 
-    // Bottom-left, clear of the right-side demo panels.
+    // Bottom-left, clear of the right-side demo panels. The rect is
+    // published through panel_bounds() for the pinch gate in main.cpp -
+    // one source of truth for where the widgets live.
     const Rect bounds{24.0f, frame.height - 232.0f, 240.0f, 208.0f};
+    panel_bounds_ = bounds;
     const Rect page = gui::begin_panel(ctx, layout, theme, "net", bounds);
 
     // The strip selects; the branch below is the per-tab content - the

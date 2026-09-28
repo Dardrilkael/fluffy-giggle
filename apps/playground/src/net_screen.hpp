@@ -37,6 +37,12 @@ public:
                     const ws::ui::gui::ChromeTheme& theme,
                     const ws::ui::r2d::FrameSize& frame);
 
+    // The panel's outer rect as the last draw_panel placed it (bottom-left,
+    // clear of the demo column) - the playground's pinch gate treats these
+    // pixels as the widgets', not the world's. {0,0,0,0} before the first
+    // draw; contains() answers false for a zero rect.
+    const ws::ui::gui::Rect& panel_bounds() const { return panel_bounds_; }
+
 private:
     void reseed();
     float next_weight();  // deterministic LCG step, uniform in [-1, 1)
@@ -53,6 +59,7 @@ private:
     std::array<float, kHidden> hid_{};  // this frame's activations
     std::array<float, kOutputs> out_{};
     int tab_ = 0;  // the panel's tab strip selection (caller state)
+    ws::ui::gui::Rect panel_bounds_{};  // what draw_panel last laid out
 };
 
 }  // namespace playground
