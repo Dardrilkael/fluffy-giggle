@@ -36,6 +36,11 @@ ever see `ws::ui` types (`App`, `Event`, `EventDispatcher`,
 
 This is the single most important architectural constraint of this library.
 
+- Error handling: public APIs return `ws::core::Result`/`Status` (root
+  CLAUDE.md, "Error handling") — lib note: the existing surface predates the
+  rule (`App::run()` returns int, drop-safe calls log-and-ignore, mid-frame
+  Vulkan failures abort); new public APIs follow the rule.
+
 - No third-party header, and no GLFW/Vulkan/ImGui type, may appear under
   `include/` — apps and other libs include `ws/` headers only. `Event`,
   `EventDispatcher`, and `RenderCommandQueue` are plain `ws::ui` types with

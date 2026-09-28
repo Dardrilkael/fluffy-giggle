@@ -72,13 +72,20 @@ FetchContent_Declare(eigen
   GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
   GIT_TAG 3.4.0
   GIT_SHALLOW TRUE)
+# tl::expected is the std::expected backport backing ws::core's Result/Status
+# (result.hpp). Header-only, CC0, single include/tl/expected.hpp - the doctest/
+# dr_wav INTERFACE-target pattern. Unconditional: ws::core builds on Android.
+FetchContent_Declare(tl_expected
+  GIT_REPOSITORY https://github.com/TartanLlama/expected.git
+  GIT_TAG v1.1.0
+  GIT_SHALLOW TRUE)
 # stb has no release tags - pinned to a master commit. stb_image.h is
 # v2.30 (2024-05-31) at this hash.
 FetchContent_Declare(stb
   GIT_REPOSITORY https://github.com/nothings/stb.git
   GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20
   GIT_SHALLOW TRUE)
-foreach(dep vulkan_headers volk vma imgui implot eigen stb)
+foreach(dep vulkan_headers volk vma imgui implot eigen tl_expected stb)
   FetchContent_GetProperties(${dep})
   if(NOT ${dep}_POPULATED)
     FetchContent_Populate(${dep})
@@ -153,3 +160,11 @@ target_include_directories(eigen3 SYSTEM INTERFACE "${eigen_SOURCE_DIR}")
 add_library(stb INTERFACE)
 add_library(stb::stb ALIAS stb)
 target_include_directories(stb SYSTEM INTERFACE "${stb_SOURCE_DIR}")
+
+# --- tl::expected (header-only; ws::core's Result/Status backing store) ------
+# The ONE third-party linked PUBLIC: ws::core::Result is this type in the
+# public API (result.hpp aliases it behind a ws-owned name), so dependents
+# must see the header transitively.
+add_library(tl_expected INTERFACE)
+add_library(tl::expected ALIAS tl_expected)
+target_include_directories(tl_expected SYSTEM INTERFACE "${tl_expected_SOURCE_DIR}/include")

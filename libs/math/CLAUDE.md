@@ -36,6 +36,10 @@ sees no third-party headers at all: everything under include/ is ws-owned.
   applies a rotation.
 
 ## Invariants / rules
+- Error handling: public APIs return `ws::core::Result`/`Status` (root
+  CLAUDE.md, "Error handling") — lib note: `Matrix::at()` and
+  `lu_decompose`/`lu_solve` currently throw std exceptions; they predate the
+  rule and convert when next touched.
 - No third-party header may appear under include/ - if Eigen-level numerics
   are needed, add a ws::math function instead of exposing Eigen.
 - Matrix storage is row-major: `data()[r * cols() + c]`.

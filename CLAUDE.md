@@ -12,9 +12,23 @@ One commit per phase on `main`.
 - When a lib needs more of a third-party library than it wraps today, it
   grows a thin ws-layer wrapper (ws::ui does this in `widgets.hpp`,
   ws::math in its own headers) - it never re-exports third-party types.
+- The one exception: tl::expected, the std::expected backport backing
+  `ws::core::Result` - linked PUBLIC from ws::core because Result is the
+  public API, and named ONLY inside `ws/core/result.hpp` (see below).
+
+## Error handling
+- Public APIs return `ws::core::Result<T>` or `Status`; no exceptions across
+  lib boundaries.
+- Each lib defines its own error enum and converts to `ws::core::Error` at
+  its public boundary - core never knows lib-specific codes.
+- Audio callbacks and render loops must not allocate to report errors: use
+  empty/short messages there.
+- `assert.hpp` is for programmer errors only (debug builds, aborts); Result
+  is for runtime failures.
 
 ## Layout
-- `libs/core` - logging + asserts.
+- `libs/core` - logging + asserts + the shared error/result types
+  (`Error`, `Result<T>`, `Status`, `WS_TRY`/`WS_TRY_ASSIGN`).
 - `libs/math` - dense `Matrix<T>` + LU (Eigen stays private to lu.cpp) and
   ws-owned fixed-size vecmath.
 - `libs/ui` - app shell (GLFW/Vulkan/ImGui/ImPlot, all private) + the

@@ -45,6 +45,11 @@ void set_min_level(LogLevel level) {
   g_min_level = level;
 }
 
+void log_error(const Error& err) {
+  error("[{}] #{}: {} ({}:{})", err.category, err.code, err.message,
+        err.where.file_name(), err.where.line());
+}
+
 LogLevel min_level() {
   std::lock_guard lock(g_mutex);
   return g_min_level;
