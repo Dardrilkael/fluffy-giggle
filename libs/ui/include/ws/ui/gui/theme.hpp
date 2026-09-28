@@ -27,6 +27,11 @@ struct ChromeTheme {
     float padding = 12.0f;       // panel content inset
     float spacing = 8.0f;        // the gap between widgets sharing a row
     float scroll_speed = 32.0f;  // px one wheel unit scrolls a scroll panel
+    float drag_threshold = 8.0f;  // px a touch may wander from its press
+                                  // before a scroll panel calls it a drag -
+                                  // inside the window the press stays the
+                                  // child's (a tap), past it the scroll owns
+                                  // the finger
 
     // The font labels draw with - the one look asset that is a loaded
     // object instead of a value. Null (the default) keeps the v1 label

@@ -3484,6 +3484,272 @@ TEST_CASE("scroll: a bounds-too-small viewport is empty and inert") {
     gui.end_frame();
 }
 
+// --- scroll by touch-drag (the threshold cancels the press) ------------------------
+
+TEST_CASE("scroll: a touch drag scrolls 1:1 and cancels the press it started on") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    // The drag seam, end to end: 10 rows of 24 px in a 200x100 panel
+    // (padding 12 - the viewport is (12, 12, 176, 76), rows flow from
+    // y 12-offset). A probe contact (99) taps a fixed screen point each
+    // frame: the row IT clicks tells the offset, without reading the
+    // side table (ScrollState is the lib's private type; the clicks ARE
+    // the observable).
+    const auto pass = [&](const InputFrame& frame) {
+        gui.new_frame(frame);
+        (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
+                                 {0.0f, 0.0f, 200.0f, 100.0f});
+        int clicked = -1;
+        for (int i = 0; i < 10; ++i) {
+            gui.ids().push(i);
+            if (button(gui, layout, kDefaultChrome, "row", 120.0f)) {
+                clicked = i;
+            }
+            gui.ids().pop();
+        }
+        end_scroll_panel(gui, layout, kDefaultChrome);
+        gui.end_frame();
+        return clicked;
+    };
+    const auto row_id = [](int row) {
+        IdStack ids;
+        ids.push("list");
+        ids.push(row);
+        return ids.current("row");
+    };
+
+    // Frame 1: finger 7 presses row 2 (y 60..84). The child claims the
+    // press - the tap is the CHILD's so far, the panel only watches.
+    CHECK(pass(touch_frame({{7, 60.0f, 60.0f, /*pressed=*/true}})) == -1);
+    CHECK(gui.active_id(7) == row_id(2));
+
+    // Frame 2: 20 px up - past the 8 px threshold. The crossing frame
+    // cancels the child's press (finger 7 will never click now) and
+    // applies NO jump: the offset is still 0, so the probe tap at
+    // (60, 24) still lands on row 0.
+    CHECK(pass(touch_frame({{7, 60.0f, 40.0f},
+                            {99, 60.0f, 24.0f, true, true}})) == 0);
+    CHECK(gui.active_id(7) == kInvalidWidgetId);  // the scroll owns the finger
+
+    // Frame 3: 30 px more of drag - the offset follows 1:1. At offset 30
+    // row 1 spans y 6..30, so the same probe point now clicks row 1.
+    CHECK(pass(touch_frame({{7, 60.0f, 10.0f},
+                            {99, 60.0f, 24.0f, true, true}})) == 1);
+
+    // Frame 4: finger 7 lifts at (60, 10) - INSIDE row 1's scrolled rect
+    // (y 6..30). The cancelled press means its release clicks nothing.
+    CHECK(pass(touch_frame({{7, 60.0f, 10.0f, false, true}})) == -1);
+
+    // Frame 5: the offset held after the lift; the same probe still hits
+    // row 1 - the content stayed put.
+    CHECK(pass(touch_frame({{99, 60.0f, 24.0f, true, true}})) == 1);
+}
+
+TEST_CASE("scroll: a tap inside the threshold stays the child's click") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    const auto pass = [&](const InputFrame& frame) {
+        gui.new_frame(frame);
+        (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
+                                 {0.0f, 0.0f, 200.0f, 100.0f});
+        int clicked = -1;
+        for (int i = 0; i < 10; ++i) {
+            gui.ids().push(i);
+            if (button(gui, layout, kDefaultChrome, "row", 120.0f)) {
+                clicked = i;
+            }
+            gui.ids().pop();
+        }
+        end_scroll_panel(gui, layout, kDefaultChrome);
+        gui.end_frame();
+        return clicked;
+    };
+    const auto row_id = [](int row) {
+        IdStack ids;
+        ids.push("list");
+        ids.push(row);
+        return ids.current("row");
+    };
+
+    // Press row 0, wobble 4 px - under the threshold, the press stays
+    // the child's and the offset never moves.
+    CHECK(pass(touch_frame({{5, 60.0f, 24.0f, /*pressed=*/true}})) == -1);
+    CHECK(gui.active_id(5) == row_id(0));
+    CHECK(pass(touch_frame({{5, 60.0f, 20.0f}})) == -1);
+    CHECK(gui.active_id(5) == row_id(0));
+
+    // Lift back inside row 0 (y 12..36): a plain click - the tap was a
+    // tap, never a drag.
+    CHECK(pass(touch_frame({{5, 60.0f, 20.0f, false, true}})) == 0);
+}
+
+TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    // Hand-built frames, the mouse NOT parked: the first contact bridges
+    // and the mouse mirrors it - the real Android shape, where a dragging
+    // finger is two pointers at once. Without cancel_pointer's mirror
+    // rule, the mouse's copy of the press would survive the cancel and
+    // click the row on release.
+    const auto pass = [&](const InputFrame& frame) {
+        gui.new_frame(frame);
+        (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
+                                 {0.0f, 0.0f, 200.0f, 100.0f});
+        int clicked = -1;
+        for (int i = 0; i < 10; ++i) {
+            gui.ids().push(i);
+            if (button(gui, layout, kDefaultChrome, "row", 120.0f)) {
+                clicked = i;
+            }
+            gui.ids().pop();
+        }
+        end_scroll_panel(gui, layout, kDefaultChrome);
+        gui.end_frame();
+        return clicked;
+    };
+    const auto row_id = [](int row) {
+        IdStack ids;
+        ids.push("list");
+        ids.push(row);
+        return ids.current("row");
+    };
+
+    // Frame 1: contact 7 presses row 2 - the mouse mirrors the press, so
+    // BOTH tracks claim the row (the documented duplicate).
+    InputFrame press;
+    press.touch_down(7, 60.0f, 60.0f);
+    CHECK(pass(press) == -1);
+    CHECK(gui.active_id() == row_id(2));  // the mouse's track pressed...
+    CHECK(gui.active_id(7) == row_id(2));  // ...and so did the touch's
+
+    // Frame 2: 20 px up - the crossing. cancel_pointer(7) must take the
+    // mouse's claim down with the touch's.
+    InputFrame cross;
+    cross.touch_down(7, 60.0f, 60.0f);  // the entry; bridges again
+    cross.touch_move(7, 60.0f, 40.0f);  // the bridge mirrors the position
+    cross.touches[0].pressed = false;  // held, not pressed: clear the
+    cross.mouse_pressed[0] = false;    // edges both sides of the bridge
+    CHECK(pass(cross) == -1);
+    CHECK(gui.active_id() == kInvalidWidgetId);  // BOTH claims cancelled
+    CHECK(gui.active_id(7) == kInvalidWidgetId);
+
+    // Frame 3: drag back down to the press point - the offset would go
+    // negative and clamps at 0, so a probe at (60, 24) still clicks row 0.
+    // The probe is a same-frame tap: its press edge STAYS (a click is
+    // press-then-release; a bare release edge clicks nothing).
+    InputFrame back;
+    back.touch_down(7, 60.0f, 60.0f);
+    back.touch_down(99, 60.0f, 24.0f);  // the probe (not the bridge - 7 is)
+    back.touch_up(99, 60.0f, 24.0f, false);
+    back.touches[0].pressed = false;
+    back.mouse_pressed[0] = false;
+    CHECK(pass(back) == 0);
+
+    // Frame 4: release exactly where it pressed - row 2 still spans
+    // y 60..84, so the lift is INSIDE the row. The cancelled press clicks
+    // nothing; had the mouse's claim survived, this would click row 2.
+    InputFrame lift;
+    lift.touch_down(7, 60.0f, 60.0f);  // the entry, back for its lift
+    lift.touch_up(7, 60.0f, 60.0f, false);  // mirrors the mouse's release
+    lift.touches[0].pressed = false;  // down+up in one frame: the press
+    lift.mouse_pressed[0] = false;    // edge is not this frame's fact
+    CHECK(pass(lift) == -1);
+}
+
+TEST_CASE("scroll: two fingers drag one region, one lift confuses nothing") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    const auto pass = [&](const InputFrame& frame) {
+        gui.new_frame(frame);
+        (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
+                                 {0.0f, 0.0f, 200.0f, 100.0f});
+        int clicked = -1;
+        for (int i = 0; i < 10; ++i) {
+            gui.ids().push(i);
+            if (button(gui, layout, kDefaultChrome, "row", 120.0f)) {
+                clicked = i;
+            }
+            gui.ids().pop();
+        }
+        end_scroll_panel(gui, layout, kDefaultChrome);
+        gui.end_frame();
+        return clicked;
+    };
+
+    // Frame 1: two presses inside the viewport, rows 0 and 2.
+    CHECK(pass(touch_frame({{1, 60.0f, 30.0f, /*pressed=*/true},
+                            {2, 60.0f, 60.0f, /*pressed=*/true}})) == -1);
+
+    // Frame 2: both move 20 px up - both cross, both cancel; no jump.
+    CHECK(pass(touch_frame({{1, 60.0f, 10.0f},
+                            {2, 60.0f, 40.0f}})) == -1);
+
+    // Frame 3: both drag 10 px more - BOTH deltas apply (offset 20): at
+    // offset 20 row 1 spans y 16..40 and the probe at (60, 24) clicks
+    // row 1. A single-track drag would sit at offset 10 and click row 0.
+    CHECK(pass(touch_frame({{1, 60.0f, 0.0f},
+                            {2, 60.0f, 30.0f},
+                            {99, 60.0f, 24.0f, true, true}})) == 1);
+
+    // Frame 4: finger 1 lifts; finger 2 drags 10 more (offset 30) - the
+    // survivor's bookkeeping is its own. At offset 30 row 1 spans
+    // y 6..30 and the probe at (60, 14) clicks row 1 (at offset 20 it
+    // would still be row 0).
+    CHECK(pass(touch_frame({{1, 60.0f, 0.0f, false, true},
+                            {2, 60.0f, 20.0f},
+                            {99, 60.0f, 14.0f, true, true}})) == 1);
+}
+
+TEST_CASE("scroll: drag_threshold is the theme's metric") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    ChromeTheme sticky = kDefaultChrome;
+    sticky.drag_threshold = 100.0f;
+
+    const auto pass = [&](const InputFrame& frame) {
+        gui.new_frame(frame);
+        (void)begin_scroll_panel(gui, layout, sticky, "list",
+                                 {0.0f, 0.0f, 200.0f, 100.0f});
+        int clicked = -1;
+        for (int i = 0; i < 10; ++i) {
+            gui.ids().push(i);
+            if (button(gui, layout, sticky, "row", 120.0f)) {
+                clicked = i;
+            }
+            gui.ids().pop();
+        }
+        end_scroll_panel(gui, layout, sticky);
+        gui.end_frame();
+        return clicked;
+    };
+    const auto row_id = [](int row) {
+        IdStack ids;
+        ids.push("list");
+        ids.push(row);
+        return ids.current("row");
+    };
+
+    // A 20 px excursion - past kDefaultChrome.drag_threshold, well under
+    // this theme's: the press stays the child's, never cancelled.
+    CHECK(pass(touch_frame({{5, 60.0f, 24.0f, /*pressed=*/true}})) == -1);
+    CHECK(gui.active_id(5) == row_id(0));
+    CHECK(pass(touch_frame({{5, 60.0f, 4.0f}})) == -1);
+    CHECK(gui.active_id(5) == row_id(0));
+
+    // Lift inside row 0 (y 12..36 - the offset never moved, or this
+    // release would fall outside the shifted rect): a plain click.
+    CHECK(pass(touch_frame({{5, 60.0f, 30.0f, false, true}})) == 0);
+}
+
 TEST_CASE("r2d free functions route through set_active") {
     using namespace ws::ui::r2d;
     // The seam the gui widgets draw through: the free functions are the

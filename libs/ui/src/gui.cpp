@@ -470,14 +470,37 @@ void GuiContext::new_frame(const InputFrame& input) {
 void GuiContext::end_frame() {
     // A release edge no hit_test consumed (the owner stopped running
     // mid-drag - the UI changed) ends the press here, per pointer; stale
-    // ownership would block the next frame's hot claims.
+    // ownership would block the next frame's hot claims. A cancelled
+    // gesture lifts with its pointer - the id is free for the fresh
+    // contact the platform may reuse it for.
     const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
     for (int p = 0; p < count; ++p) {
-        if (pointers_[static_cast<std::size_t>(p)].active !=
-                kInvalidWidgetId &&
-            frame_pointers_[static_cast<std::size_t>(p)].released) {
-            pointers_[static_cast<std::size_t>(p)].active = kInvalidWidgetId;
+        PointerTrack& track = pointers_[static_cast<std::size_t>(p)];
+        if (frame_pointers_[static_cast<std::size_t>(p)].released) {
+            track.active = kInvalidWidgetId;
+            track.cancelled = false;
         }
+    }
+}
+
+void GuiContext::cancel_pointer(std::uint32_t pointer) {
+    // The bridge mirrors the first finger into the mouse: a gesture that
+    // consumes one consumes both, or the mirror would keep the child's
+    // press alive and click it on release.
+    std::uint32_t mirror = kNoPointer;
+    const std::uint32_t bridged = input_.bridged_touch();
+    if (bridged != kNoPointer &&
+        (pointer == bridged || pointer == kMousePointerId)) {
+        mirror = (pointer == bridged) ? kMousePointerId : bridged;
+    }
+    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+    for (int p = 0; p < count; ++p) {
+        PointerTrack& track = pointers_[static_cast<std::size_t>(p)];
+        if (track.id != pointer && track.id != mirror) {
+            continue;
+        }
+        track.active = kInvalidWidgetId;  // no click on release
+        track.cancelled = true;  // and no hot/press claims until lift
     }
 }
 
@@ -512,10 +535,11 @@ HitTest GuiContext::hit_test(WidgetId id, const Rect& rect) {
         const bool inside = contains(rect, view.x, view.y);
 
         // While this pointer's press is owned, the pointer is captured:
-        // only the owner can be hot. Otherwise the widget under this
-        // pointer claims hot; later widgets draw on top, so a later
-        // claim correctly wins.
-        if (inside &&
+        // only the owner can be hot. A cancelled pointer (its press was
+        // consumed by a gesture) claims nothing at all. Otherwise the
+        // widget under this pointer claims hot; later widgets draw on
+        // top, so a later claim correctly wins.
+        if (inside && !track.cancelled &&
             (track.active == kInvalidWidgetId || track.active == id)) {
             track.hot = id;
         }
@@ -524,7 +548,10 @@ HitTest GuiContext::hit_test(WidgetId id, const Rect& rect) {
         // not report hover.
         hit.hovered = hit.hovered || track.hot == id;
         // Pressed-inside claims this pointer's press, if none is owned.
-        if (inside && view.pressed && track.active == kInvalidWidgetId) {
+        // The cancelled guard is belt-and-braces: a consumed gesture
+        // never re-arms mid-flight.
+        if (inside && view.pressed && !track.cancelled &&
+            track.active == kInvalidWidgetId) {
             track.active = id;
         }
         if (track.active == id) {

@@ -57,7 +57,9 @@ public:
     void new_frame(const InputFrame& input);
     // Closes the frame: drops a press whose owner vanished before its
     // release frame (the UI changed mid-drag), per pointer, so stale
-    // ownership never blocks the next frame's hot claims.
+    // ownership never blocks the next frame's hot claims - and a
+    // cancelled gesture's flag lifts with its pointer, so the platform
+    // may reuse the id for a fresh contact.
     void end_frame();
 
     // Hot/active hit-test for one widget's rect, across the frame's
@@ -116,6 +118,13 @@ public:
     // no such pointer exists this frame. A widget that tracks its drag
     // follows its own pointer through this - never the raw mouse fields.
     const PointerView* pointer(std::uint32_t id) const;
+    // Ends `pointer`'s press with no click - a gesture (a scroll drag)
+    // consumed it. From this frame on the pointer claims neither hot nor
+    // press until it lifts, so widgets it sweeps while dragging see no
+    // hover and no press; on release nothing clicks. Cancelling a bridged
+    // touch cancels the mouse it mirrors (and vice versa): the bridge is
+    // one finger in two pointers, and a gesture that eats one eats both.
+    void cancel_pointer(std::uint32_t pointer);
 
 private:
     // One side table per state type, created on first use and owned by
@@ -137,10 +146,13 @@ private:
     // pointer's id - that carry IS the drag. Slot 0 is the mouse by
     // construction (new_frame aligns tracks to the frame's pointers);
     // hot re-claims every frame, active survives while the pointer does.
+    // `cancelled` marks a gesture-consumed press (cancel_pointer): the
+    // pointer claims nothing until it lifts, and the flag lifts with it.
     struct PointerTrack {
         std::uint32_t id = kNoPointer;
         WidgetId hot = kInvalidWidgetId;
         WidgetId active = kInvalidWidgetId;
+        bool cancelled = false;
     };
     std::array<PointerTrack, InputFrame::kMaxPointers> pointers_{};
     // The frame's pointers, aligned to pointers_ (slot i of both speaks

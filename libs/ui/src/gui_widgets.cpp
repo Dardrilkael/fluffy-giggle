@@ -9,6 +9,7 @@
 #include <ws/ui/renderer2d.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cfloat>
 #include <cmath>
 #include <cstring>
@@ -56,6 +57,43 @@ struct ScrollState {
     float offset = 0.0f;
     float max_offset = 0.0f;
 };
+
+// A scroll region's per-contact drag bookkeeping: a track exists from the
+// contact's press inside the viewport until it lifts. While it exists and
+// !dragging the press is still the CHILD's (a tap in progress, watched
+// against the threshold); dragging means the scroll owns the finger - the
+// child's press was cancelled and the offset follows the contact 1:1.
+struct ScrollDragTrack {
+    std::uint32_t id = kNoPointer;
+    float press_y = 0.0f;  // the threshold is measured from the press
+    float last_y = 0.0f;  // the previous frame's y, for the drag delta
+    bool dragging = false;
+};
+
+// One per scroll panel (the persistent side-table discipline): a track per
+// live contact, so two fingers can drag one region and one lifting never
+// confuses the survivor's bookkeeping.
+struct ScrollDragState {
+    std::array<ScrollDragTrack, InputFrame::kMaxTouches> tracks{};
+};
+
+// The contact's track: its own slot, or a free one for a fresh press.
+// Null only when the table is somehow full, which the sweep in
+// begin_scroll_panel makes unreachable (free slots always cover the
+// untracked contacts: live contacts are capped at the track count).
+ScrollDragTrack* drag_track_for(ScrollDragState& drag, std::uint32_t id) {
+    for (ScrollDragTrack& track : drag.tracks) {
+        if (track.id == id) {
+            return &track;
+        }
+    }
+    for (ScrollDragTrack& track : drag.tracks) {
+        if (track.id == kNoPointer) {
+            return &track;
+        }
+    }
+    return nullptr;
+}
 
 // The panel chrome begin_panel and begin_scroll_panel share: a 1px
 // border-colored quad behind the panel face inset by 1. Drawn BEFORE the
@@ -422,6 +460,74 @@ Rect begin_scroll_panel(GuiContext& gui, LayoutCursor& layout,
     if (contains(viewport, gui.input().mouse_x, gui.input().mouse_y) &&
         gui.input().scroll_dy != 0.0f) {
         scroll.offset -= gui.input().scroll_dy * theme.scroll_speed;
+    }
+
+    // Touch-drag: a contact that presses inside the viewport is watched -
+    // the child it landed on still owns that press (a tap in progress).
+    // Past the theme's drag_threshold the scroll takes the finger:
+    // cancel_pointer ends the child's press with no click, and from that
+    // frame the offset follows the contact 1:1 (finger up = later
+    // content) until it lifts. The cancel fires HERE, before any child
+    // runs, so the pressed widget sees no press at all from the crossing
+    // frame on (known cosmetic limit: a drag-tracking child, a slider,
+    // can move by < threshold px before the cancel). The mouse keeps the
+    // wheel - a desktop drag is a widget press, not a scroll gesture.
+    const WidgetId drag_id = gui.ids().current("drag");
+    ScrollDragState& drag = gui.persistent_state<ScrollDragState>(drag_id);
+    const InputFrame& input = gui.input();
+    const int touch_count =
+        std::min(input.touch_count, InputFrame::kMaxTouches);
+    // Sweep first: a track whose contact left the frame without a lift (a
+    // platform contract violation) frees its slot - the same id-liveness
+    // rule the context's own pointer tracks follow.
+    for (ScrollDragTrack& track : drag.tracks) {
+        if (track.id == kNoPointer) {
+            continue;
+        }
+        bool live = false;
+        for (int i = 0; i < touch_count; ++i) {
+            live = live || input.touches[static_cast<std::size_t>(i)].id ==
+                              track.id;
+        }
+        if (!live) {
+            track = ScrollDragTrack{};
+        }
+    }
+    for (int i = 0; i < touch_count; ++i) {
+        const TouchPoint& point = input.touches[static_cast<std::size_t>(i)];
+        ScrollDragTrack* track = drag_track_for(drag, point.id);
+        if (track == nullptr) {
+            continue;  // unreachable: the sweep keeps a slot free
+        }
+        if (track->id == kNoPointer) {
+            // Untracked: arm only on a fresh press inside the viewport.
+            if (point.pressed && contains(viewport, point.x, point.y)) {
+                track->id = point.id;
+                track->press_y = point.y;
+                track->last_y = point.y;
+                track->dragging = false;
+            }
+            continue;
+        }
+        if (!point.down) {
+            // The lift: a dragging contact's last delta lands with it; a
+            // watched one never crossed - the child clicks, the track goes.
+            if (track->dragging) {
+                scroll.offset -= point.y - track->last_y;
+            }
+            *track = ScrollDragTrack{};
+            continue;
+        }
+        if (track->dragging) {
+            scroll.offset -= point.y - track->last_y;
+            track->last_y = point.y;
+            continue;
+        }
+        if (std::abs(point.y - track->press_y) > theme.drag_threshold) {
+            track->dragging = true;
+            track->last_y = point.y;  // deltas start at the crossing
+            gui.cancel_pointer(point.id);  // the scroll owns the finger now
+        }
     }
     scroll.offset =
         std::min(std::max(scroll.offset, 0.0f), scroll.max_offset);
