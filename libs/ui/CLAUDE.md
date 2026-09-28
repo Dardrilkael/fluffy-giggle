@@ -200,14 +200,15 @@ third-party).
   the active clip, nesting intersects at push time, and the stack empties
   at every `frame_begin` — a clip never leaks across frames. Clip sits
   BEFORE material in the sort key so all draws under one clip batch into a
-  contiguous run (the 8-chunk cap makes interleaved runs unaffordable);
+  contiguous run (the 16-chunk cap makes interleaved runs unaffordable);
   the flush sets one `vkCmdSetScissor` per chunk (chunk clip intersected
   with the frame extent, outward-rounded) and skips empty-clip chunks
   entirely. Depth cap 8, balanced overflow like the gui stacks: deeper
   pushes count depth but stop shrinking (warned once per renderer), so
   pops stay paired. `pop_clip()` with nothing pushed is a documented no-op.
-- **Chunks.** Up to 8 CPU chunks per frame: 32 textures / 131072 vertices
-  each. One chunk = one VP (64B push constants) + one clip (one scissor)
+- **Chunks.** Up to 16 CPU chunks per frame: 32 textures per chunk /
+  131072 vertices per frame (shared across chunks — one draw-sized slice
+  each). One chunk = one VP (64B push constants) + one clip (one scissor)
   + one depth mode (which of the two pipelines flushes it) + one 32-slot
   texture table (one descriptor set) + one `vkCmdDrawIndexed`.
   Texture overflow closes the chunk and opens a new one that inherits the

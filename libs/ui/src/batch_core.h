@@ -21,7 +21,14 @@ namespace ws::ui::r2d::batch {
 
 inline constexpr std::uint32_t kMaxTexturesPerChunk = 32;   // = the sampler2D[32] array in shaders/batch.frag
 inline constexpr std::size_t kMaxVerticesPerFrame = 131072; // ~32k quads
-inline constexpr std::uint32_t kMaxChunksPerFrame = 8;     // per frame: segments + texture-overflow splits
+// One chunk per (camera block, clip) pair, and every gui panel pushes its
+// own clip - panels are the budget's main consumer. 8 saturated exactly
+// (the playground: panel chrome at ambient clip + three panels + a nested
+// scroll region + the 2D world + the 3D block + the screen overlay), and
+// the next panel's whole segment dropped with one warn per frame. 16
+// restores headroom; the cost scales with it (one descriptor set per
+// swapchain image per chunk).
+inline constexpr std::uint32_t kMaxChunksPerFrame = 16;
 
 // The "no clip pushed" rect: the whole framebuffer. The flush intersects
 // every chunk clip with the frame extent, so infinite extents mean
