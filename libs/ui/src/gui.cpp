@@ -439,20 +439,45 @@ float LayoutCursor::flow_extent() const {
     return bottom - panel.content.y;
 }
 
-// --- GuiContext: hot/active hit-testing + persistent side tables ------------------
+// --- GuiContext: per-pointer hot/active hit-testing + persistent side tables ------
 
 void GuiContext::new_frame(const InputFrame& input) {
     input_ = input;
-    hot_id_ = kInvalidWidgetId;  // widgets re-claim hot as their hit tests run
     hit_ids_.clear();  // this frame's hit-test census starts empty
+    // Adopt the frame's pointers: slot 0 is the mouse by construction,
+    // the touches follow in first-contact order. Each pointer matches
+    // last frame's track by id - active carries, and that carry IS the
+    // drag - or starts fresh; a track whose pointer left the frame
+    // entirely (lifted last frame) drops out here. Hot re-claims every
+    // frame, on every track, as the widgets' hit tests run.
+    pointer_count_ = input_.gather_pointers(frame_pointers_);
+    std::array<PointerTrack, InputFrame::kMaxPointers> matched{};
+    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+    for (int p = 0; p < count; ++p) {
+        const std::uint32_t id = frame_pointers_[static_cast<std::size_t>(p)].id;
+        for (int t = 0; t < InputFrame::kMaxPointers; ++t) {
+            if (pointers_[static_cast<std::size_t>(t)].id == id) {
+                matched[p] = pointers_[static_cast<std::size_t>(t)];
+                break;
+            }
+        }
+        matched[p].id = id;
+        matched[p].hot = kInvalidWidgetId;
+    }
+    pointers_ = matched;
 }
 
 void GuiContext::end_frame() {
     // A release edge no hit_test consumed (the owner stopped running
-    // mid-drag - the UI changed) ends the press here; stale ownership
-    // would block the next frame's hot claims.
-    if (active_id_ != kInvalidWidgetId && input_.mouse_released[0]) {
-        active_id_ = kInvalidWidgetId;
+    // mid-drag - the UI changed) ends the press here, per pointer; stale
+    // ownership would block the next frame's hot claims.
+    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+    for (int p = 0; p < count; ++p) {
+        if (pointers_[static_cast<std::size_t>(p)].active !=
+                kInvalidWidgetId &&
+            frame_pointers_[static_cast<std::size_t>(p)].released) {
+            pointers_[static_cast<std::size_t>(p)].active = kInvalidWidgetId;
+        }
     }
 }
 
@@ -472,31 +497,92 @@ HitTest GuiContext::hit_test(WidgetId id, const Rect& rect) {
                    "same-label siblings need ids().push(index) between them");
     }
 
+    // Today's single-pointer rules, run once per pointer, the results
+    // OR-folded into one HitTest: a two-pointer press on one widget is
+    // one press, and capture is per pointer - a drag owned by one finger
+    // does not stop another from hovering or pressing elsewhere. Slot
+    // order is mouse first, then touches in first-contact order; the
+    // first slot with a claim wins `hit.pointer` (deterministic - the
+    // bridged finger resolves to the mouse it mirrors).
     HitTest hit;
-    const bool inside = contains(rect, input_.mouse_x, input_.mouse_y);
+    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+    for (int p = 0; p < count; ++p) {
+        const PointerView& view = frame_pointers_[static_cast<std::size_t>(p)];
+        PointerTrack& track = pointers_[static_cast<std::size_t>(p)];
+        const bool inside = contains(rect, view.x, view.y);
 
-    // While a press is owned, the pointer is captured: only the owner
-    // can be hot. Otherwise the widget under the pointer claims hot;
-    // later widgets draw on top, so a later claim correctly wins.
-    if (inside && (active_id_ == kInvalidWidgetId || active_id_ == id)) {
-        hot_id_ = id;
-    }
-    // Hot, not merely inside: the frame has ONE interactive winner, so a
-    // widget overlapped by somebody else's drag does not report hover.
-    hit.hovered = hot_id_ == id;
-    // Mouse-down inside claims the press, if none is owned yet.
-    if (inside && input_.mouse_pressed[0] && active_id_ == kInvalidWidgetId) {
-        active_id_ = id;
-    }
-    if (active_id_ == id) {
-        hit.pressed = true;  // owns the live press, wherever the pointer is
-        if (input_.mouse_released[0]) {
-            hit.released = true;           // the drag ended, inside or out
-            hit.clicked = inside;          // a full click only if inside
-            active_id_ = kInvalidWidgetId;  // the press is over either way
+        // While this pointer's press is owned, the pointer is captured:
+        // only the owner can be hot. Otherwise the widget under this
+        // pointer claims hot; later widgets draw on top, so a later
+        // claim correctly wins.
+        if (inside &&
+            (track.active == kInvalidWidgetId || track.active == id)) {
+            track.hot = id;
+        }
+        // Hot, not merely inside: this pointer has ONE interactive
+        // winner, so a widget overlapped by this pointer's drag does
+        // not report hover.
+        hit.hovered = hit.hovered || track.hot == id;
+        // Pressed-inside claims this pointer's press, if none is owned.
+        if (inside && view.pressed && track.active == kInvalidWidgetId) {
+            track.active = id;
+        }
+        if (track.active == id) {
+            hit.pressed = true;  // owns a live press, wherever the pointer is
+            if (hit.pointer == kNoPointer) {
+                hit.pointer = view.id;  // first slot with a claim sticks
+            }
+            if (view.released) {
+                hit.released = true;   // the drag ended, inside or out
+                hit.clicked = hit.clicked || inside;  // full click only if inside
+                track.active = kInvalidWidgetId;  // the press is over either way
+            }
         }
     }
     return hit;
+}
+
+WidgetId GuiContext::hot_id(std::uint32_t pointer) const {
+    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+    for (int p = 0; p < count; ++p) {
+        if (pointers_[static_cast<std::size_t>(p)].id == pointer) {
+            return pointers_[static_cast<std::size_t>(p)].hot;
+        }
+    }
+    return kInvalidWidgetId;  // no such pointer this frame
+}
+
+WidgetId GuiContext::active_id(std::uint32_t pointer) const {
+    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+    for (int p = 0; p < count; ++p) {
+        if (pointers_[static_cast<std::size_t>(p)].id == pointer) {
+            return pointers_[static_cast<std::size_t>(p)].active;
+        }
+    }
+    return kInvalidWidgetId;  // no such pointer this frame
+}
+
+std::uint32_t GuiContext::owning_pointer(WidgetId id) const {
+    // Lowest live slot whose press is on `id` - with the bridge's mouse
+    // mirroring the first finger, that means the mouse slot wins ties
+    // (the documented duplicate), deterministically.
+    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+    for (int p = 0; p < count; ++p) {
+        if (pointers_[static_cast<std::size_t>(p)].active == id) {
+            return pointers_[static_cast<std::size_t>(p)].id;
+        }
+    }
+    return kNoPointer;
+}
+
+const PointerView* GuiContext::pointer(std::uint32_t id) const {
+    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+    for (int p = 0; p < count; ++p) {
+        if (frame_pointers_[static_cast<std::size_t>(p)].id == id) {
+            return &frame_pointers_[static_cast<std::size_t>(p)];
+        }
+    }
+    return nullptr;  // no such pointer this frame
 }
 
 }  // namespace ws::ui::gui

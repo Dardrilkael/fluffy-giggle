@@ -2192,6 +2192,42 @@ ws::ui::gui::InputFrame snap(float x, float y, bool down = false,
     return frame;
 }
 
+// One touch contact for touch_frame(): where it is and which edges fired
+// this frame. A contact with neither edge is held (mid-drag); pressed +
+// released together model a tap that began and ended within one frame.
+struct TouchSnap {
+    std::uint32_t id;
+    float x;
+    float y;
+    bool pressed = false;
+    bool released = false;
+};
+
+// snap()'s multi-touch counterpart: a frame of ONLY these contacts, built
+// through the public touch_* writers. The first touch_down bridges into
+// the mouse by design (the primary-touch -> mouse mirror), and writing the
+// mouse fields afterwards is the either-writer rule the Phase A gather
+// test set - so the mouse parks far away and the frame's pointer list is
+// exactly these contacts, in order.
+ws::ui::gui::InputFrame touch_frame(std::initializer_list<TouchSnap> contacts) {
+    ws::ui::gui::InputFrame frame;
+    for (const TouchSnap& contact : contacts) {
+        const int slot = frame.touch_down(contact.id, contact.x, contact.y);
+        if (slot >= 0 && !contact.pressed) {
+            frame.touches[static_cast<std::size_t>(slot)].pressed = false;
+        }
+        if (contact.released) {
+            frame.touch_up(contact.id, contact.x, contact.y, false);
+        }
+    }
+    frame.mouse_x = 900.0f;  // parked: nothing in the test rects is there
+    frame.mouse_y = 900.0f;
+    frame.mouse_down[0] = false;
+    frame.mouse_pressed[0] = false;
+    frame.mouse_released[0] = false;
+    return frame;
+}
+
 }  // namespace
 
 TEST_CASE("hit_test: hover claims hot; a full click is press-then-release inside") {
@@ -2367,6 +2403,169 @@ TEST_CASE("hit_test: a duplicate id in one frame is flagged and tolerated") {
     CHECK(again.hovered);  // the same id reappears next frame, unflagged
     const WidgetId other = IdStack{}.current("other");
     (void)gui.hit_test(other, {0.0f, 0.0f, 100.0f, 100.0f});  // distinct: fine
+    gui.end_frame();
+}
+
+// --- multi-pointer hit-testing (a finger each) -------------------------------------
+
+TEST_CASE("hit_test: two pointers can press two widgets in the same frame") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId a = IdStack{}.current("a");
+    const WidgetId b = IdStack{}.current("b");
+    const Rect a_rect{0.0f, 0.0f, 100.0f, 100.0f};
+    const Rect b_rect{100.0f, 0.0f, 100.0f, 100.0f};
+
+    // Two fingers, two widgets, one frame: each press is owned by the
+    // finger that made it - the single-pointer rules, run per pointer.
+    gui.new_frame(touch_frame({{1, 50.0f, 50.0f, /*pressed=*/true},
+                              {2, 150.0f, 50.0f, /*pressed=*/true}}));
+    const HitTest hit_a = gui.hit_test(a, a_rect);
+    const HitTest hit_b = gui.hit_test(b, b_rect);
+    CHECK(hit_a.pressed);
+    CHECK(hit_a.pointer == 1u);
+    CHECK(hit_b.pressed);
+    CHECK(hit_b.pointer == 2u);
+    CHECK(gui.active_id(1) == a);
+    CHECK(gui.active_id(2) == b);
+    CHECK(gui.owning_pointer(a) == 1u);
+    CHECK(gui.owning_pointer(b) == 2u);
+    CHECK(gui.hot_id(1) == a);
+    CHECK(gui.hot_id(2) == b);
+    // The parked mouse claims nothing, but it is still a pointer in the
+    // frame's list - and each pointer reports its own position.
+    CHECK(gui.hot_id() == kInvalidWidgetId);
+    CHECK(gui.pointer(1) != nullptr);
+    CHECK(gui.pointer(1)->x == 50.0f);
+    CHECK(gui.pointer(2)->x == 150.0f);
+    CHECK(gui.pointer(99) == nullptr);  // no such pointer this frame
+    CHECK(gui.pointer(kMousePointerId) != nullptr);
+    gui.end_frame();
+
+    // Both lift inside: both click, in one frame.
+    gui.new_frame(touch_frame({{1, 50.0f, 50.0f, false, true},
+                              {2, 150.0f, 50.0f, false, true}}));
+    CHECK(gui.hit_test(a, a_rect).clicked);
+    CHECK(gui.hit_test(b, b_rect).clicked);
+    gui.end_frame();
+}
+
+TEST_CASE("hit_test: two pointers on one widget - one press, one click") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId id = IdStack{}.current("both");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // Two fingers land on the same widget: ONE press (the fold), and the
+    // first-contact finger is the deterministic owner.
+    gui.new_frame(touch_frame({{5, 30.0f, 30.0f, /*pressed=*/true},
+                              {9, 70.0f, 70.0f, /*pressed=*/true}}));
+    const HitTest hit = gui.hit_test(id, rect);
+    CHECK(hit.pressed);
+    CHECK(!hit.clicked);
+    CHECK(hit.pointer == 5u);  // the lowest slot with a claim
+    CHECK(gui.owning_pointer(id) == 5u);
+    CHECK(gui.active_id(5) == id);  // both fingers hold it - same fold,
+    CHECK(gui.active_id(9) == id);  // one press, benign by design
+    gui.end_frame();
+
+    // Both lift inside: the fold makes it one click - `clicked` is one
+    // bool per frame no matter how many pointers resolved.
+    gui.new_frame(touch_frame({{5, 30.0f, 30.0f, false, true},
+                              {9, 70.0f, 70.0f, false, true}}));
+    CHECK(gui.hit_test(id, rect).clicked);
+    CHECK(gui.active_id(5) == kInvalidWidgetId);  // both presses resolved
+    CHECK(gui.active_id(9) == kInvalidWidgetId);
+    gui.end_frame();
+}
+
+TEST_CASE("hit_test: capture is per pointer - one drag blocks no other finger") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId a = IdStack{}.current("a");
+    const WidgetId b = IdStack{}.current("b");
+    const Rect a_rect{0.0f, 0.0f, 100.0f, 100.0f};
+    const Rect b_rect{100.0f, 0.0f, 100.0f, 100.0f};
+
+    // Finger 1 presses A; finger 2 presses B - same frame.
+    gui.new_frame(touch_frame({{1, 50.0f, 50.0f, /*pressed=*/true},
+                              {2, 150.0f, 50.0f, /*pressed=*/true}}));
+    CHECK(gui.hit_test(a, a_rect).pressed);
+    CHECK(gui.hit_test(b, b_rect).pressed);
+    gui.end_frame();
+
+    // Finger 1 drags off A (still holding); finger 2 rests on B. A keeps
+    // its captured press; B stays hovered - hot is per finger now, so a
+    // foreign drag no longer darkens the whole frame.
+    gui.new_frame(touch_frame({{1, 10.0f, 250.0f},  // held, dragged off A
+                              {2, 150.0f, 50.0f}}));  // held, on B
+    const HitTest dragged = gui.hit_test(a, a_rect);
+    const HitTest resting = gui.hit_test(b, b_rect);
+    CHECK(dragged.pressed);  // capture: still owns finger 1's press
+    CHECK(!dragged.hovered);  // off-rect: no hover
+    CHECK(resting.pressed);  // B keeps finger 2's press
+    CHECK(resting.hovered);  // ...and finger 2 still hovers it
+    gui.end_frame();
+}
+
+TEST_CASE("end_frame: a vanished owner's release is dropped per pointer") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId a = IdStack{}.current("a");
+    const WidgetId b = IdStack{}.current("b");
+    const Rect a_rect{0.0f, 0.0f, 100.0f, 100.0f};
+    const Rect b_rect{100.0f, 0.0f, 100.0f, 100.0f};
+
+    gui.new_frame(touch_frame({{1, 50.0f, 50.0f, /*pressed=*/true},
+                              {2, 150.0f, 50.0f, /*pressed=*/true}}));
+    CHECK(gui.hit_test(a, a_rect).pressed);
+    CHECK(gui.hit_test(b, b_rect).pressed);
+    gui.end_frame();
+
+    // The UI changed: A no longer runs, so finger 1's release arrives
+    // with no owner. end_frame drops it without touching finger 2, whose
+    // drag of B is still live and still consuming its own frames.
+    gui.new_frame(touch_frame({{1, 50.0f, 50.0f, false, true},
+                              {2, 180.0f, 60.0f}}));
+    CHECK(gui.hit_test(b, b_rect).pressed);  // B runs: finger 2 drags on
+    gui.end_frame();                         // drops finger 1's orphan release
+    CHECK(gui.active_id(1) == kInvalidWidgetId);
+    CHECK(gui.active_id(2) == b);
+    CHECK(gui.owning_pointer(b) == 2u);
+    gui.end_frame();
+}
+
+TEST_CASE("hit_test: the bridged finger is mouse and touch - one click") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId id = IdStack{}.current("one");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // Built through touch_down only - the bridge mirrors the mouse into
+    // the contact. No parking here: the duplicate IS the test.
+    InputFrame press;
+    press.touch_down(7, 50.0f, 50.0f);
+    gui.new_frame(press);
+    const HitTest hit = gui.hit_test(id, rect);
+    CHECK(hit.pressed);
+    CHECK(hit.pointer == kMousePointerId);  // the mouse slot outranks the touch
+    CHECK(gui.active_id() == id);           // the mouse's track claimed...
+    CHECK(gui.active_id(7) == id);           // ...and so did the touch's: the
+                                            // documented duplicate, benign
+    CHECK(gui.owning_pointer(id) == kMousePointerId);  // lowest slot resolves
+    gui.end_frame();
+
+    // The lift mirrors too: one click, not two.
+    InputFrame lift;
+    lift.touch_down(7, 50.0f, 50.0f);  // the entry, back for its release frame
+    lift.touch_up(7, 50.0f, 50.0f, false);  // mirrors the mouse's release
+    lift.touches[0].pressed = false;  // down and up in one frame: the press
+    lift.mouse_pressed[0] = false;    // edge is not this frame's fact
+    gui.new_frame(lift);
+    const HitTest released = gui.hit_test(id, rect);
+    CHECK(released.released);
+    CHECK(released.clicked);
+    CHECK(released.pointer == kMousePointerId);
     gui.end_frame();
 }
 
@@ -2694,6 +2893,40 @@ TEST_CASE("slider: a press jumps to the pointer and the drag tracks it") {
     CHECK(!slider_float(gui, layout, kDefaultChrome, "amp", value, 0.0f, 1.0f));
     layout.end_panel();
     CHECK(value == doctest::Approx(0.75f));
+    gui.end_frame();
+}
+
+TEST_CASE("slider: two sliders drag under two pointers at once") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    float amp = 0.0f;
+    float freq = 1.0f;
+
+    // Two fingers press two sliders in the same frame (rows are 24 tall:
+    // amp's track spans y 0..24, freq's y 24..48, both 120 wide). Each
+    // press jump-sets its OWN slider - before multi-pointer, both values
+    // mapped the mouse, and a second finger was invisible.
+    gui.new_frame(touch_frame({{1, 60.0f, 12.0f, /*pressed=*/true},
+                              {2, 30.0f, 36.0f, /*pressed=*/true}}));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(slider_float(gui, layout, kDefaultChrome, "amp", amp, 0.0f, 1.0f));
+    CHECK(slider_float(gui, layout, kDefaultChrome, "freq", freq, 0.0f, 1.0f));
+    layout.end_panel();
+    CHECK(amp == doctest::Approx(0.5f));    // finger 1 pressed at 60/120
+    CHECK(freq == doctest::Approx(0.25f));  // finger 2 pressed at 30/120
+    gui.end_frame();
+
+    // Both held, both moved - each value follows ITS finger: never the
+    // other pointer, never the parked mouse.
+    gui.new_frame(touch_frame({{1, 90.0f, 12.0f},
+                              {2, 96.0f, 36.0f}}));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(slider_float(gui, layout, kDefaultChrome, "amp", amp, 0.0f, 1.0f));
+    CHECK(slider_float(gui, layout, kDefaultChrome, "freq", freq, 0.0f, 1.0f));
+    layout.end_panel();
+    CHECK(amp == doctest::Approx(0.75f));  // finger 1 dragged to 90/120
+    CHECK(freq == doctest::Approx(0.8f));  // finger 2 dragged to 96/120
     gui.end_frame();
 }
 

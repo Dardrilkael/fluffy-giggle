@@ -202,20 +202,22 @@ bool slider_float(GuiContext& gui, LayoutCursor& layout,
     const HitTest hit = gui.hit_test(id, rect);
 
     // Click-to-set and drag are one rule: while this slider owns the
-    // press and the button is down, the value tracks the pointer. The
-    // press frame maps immediately - that jump IS click-to-set; hold
-    // frames keep mapping - that is the drag. A same-frame press+release
-    // never sees the button down, so hit.clicked carries the click-to-set
-    // for it (and re-mapping a normal release is a no-op: same pointer,
-    // same value).
+    // press and that pointer is down, the value tracks THE POINTER THAT
+    // GRABBED IT (hit.pointer - its own finger, never the mouse), so two
+    // sliders drag independently. The press frame maps immediately -
+    // that jump IS click-to-set; hold frames keep mapping - that is the
+    // drag. A same-frame press+release never sees the pointer down, so
+    // hit.clicked carries the click-to-set for it (the contact spends
+    // its release frame in the table, so the lookup still finds it), and
+    // re-mapping a normal release is a no-op: same pointer, same value.
     bool changed = false;
+    const PointerView* owner = gui.pointer(hit.pointer);
     const bool tracking =
-        (hit.pressed && gui.input().mouse_down[0]) || hit.clicked;
-    if (tracking && rect.width > 0.0f) {
+        (hit.pressed && owner != nullptr && owner->down) || hit.clicked;
+    if (tracking && owner != nullptr && rect.width > 0.0f) {
         const float span = max - min;
-        const float t = span > 0.0f
-                            ? (gui.input().mouse_x - rect.x) / rect.width
-                            : 0.0f;
+        const float t =
+            span > 0.0f ? (owner->x - rect.x) / rect.width : 0.0f;
         const float mapped =
             min + std::min(std::max(t, 0.0f), 1.0f) * span;
         if (mapped != value) {
