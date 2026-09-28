@@ -189,3 +189,24 @@ if(NOT ANDROID)
   add_library(dr_wav::dr_wav ALIAS dr_wav)
   target_include_directories(dr_wav SYSTEM INTERFACE "${dr_wav_SOURCE_DIR}")
 endif()
+
+# --- OpenAL Soft (device playback backend for ws::audio) -----------------------
+# A real CMake project - built via FetchContent_MakeAvailable, the glfw
+# pattern. LIBTYPE is OpenAL Soft's own variable: STATIC means no DLL to
+# deploy, and the target propagates AL_LIBTYPE_STATIC itself so AL/al.h
+# binds to the static runtime. Examples/utils/install are off, so nothing
+# beyond the library gets configured; note the project subfetches fmt at
+# configure time. Desktop-only, like the whole ws::audio lib (see
+# libs/audio/CLAUDE.md for the on-device story).
+if(NOT ANDROID)
+  set(LIBTYPE STATIC)
+  set(ALSOFT_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(ALSOFT_UTILS OFF CACHE BOOL "" FORCE)
+  set(ALSOFT_INSTALL OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(openal
+    GIT_REPOSITORY https://github.com/kcat/openal-soft.git
+    GIT_TAG 1.25.2
+    GIT_SHALLOW TRUE)
+  FetchContent_MakeAvailable(openal)
+  unset(LIBTYPE)
+endif()
