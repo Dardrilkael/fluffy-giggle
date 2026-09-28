@@ -26,6 +26,14 @@
 #include <utility>
 #include <vector>
 
+#ifndef __ANDROID__
+// The sound panel rides ws::audio, desktop-only in v1 (its OpenAL Soft
+// backend has no on-device story yet) - the whole feature lives behind this
+// gate, mirroring the entry split at the bottom of this file.
+#include <numbers>
+#include <ws/audio/engine.hpp>
+#endif
+
 #ifdef __ANDROID__
 // NDK headers are C - keep them clear of our -Wpedantic settings (the same
 // wrap src/window_android.cpp uses).
@@ -67,6 +75,41 @@ ws::ui::gui::Rect pages_panel_rect(float frame_width) {
     return {frame_width - 244.0f, 208.0f, 220.0f, 220.0f};
 }
 
+#ifndef __ANDROID__
+// The sound panel's rect, bottom-right and anchored to the frame the way
+// the net screen's is bottom-left (net_screen.cpp) - the mirror position
+// keeps it clear of the top-right demo column at any window size. The
+// pinch gate below treats these pixels as the widgets', same contract.
+ws::ui::gui::Rect sound_panel_rect(float frame_width, float frame_height) {
+    return {frame_width - 244.0f, frame_height - 152.0f, 220.0f, 128.0f};
+}
+
+// The panel's payload: the wavplayer arpeggio synthesized in place (the
+// SoundDesc path - the engine copies on load), so the demo ships zero
+// audio files. C-major up and back down, 0.23 s per note, linear decay.
+constexpr std::uint32_t kAudioRate = 44'100;  // Hz
+constexpr std::uint32_t kAudioNoteFrames = kAudioRate * 23 / 100;
+constexpr double kAudioMelody[] = {523.25, 659.25, 783.99, 1046.50,
+                                   783.99, 659.25, 523.25};
+constexpr auto kAudioNoteCount =
+    sizeof(kAudioMelody) / sizeof(kAudioMelody[0]);
+
+std::vector<std::int16_t> synth_arpeggio() {
+    std::vector<std::int16_t> out(kAudioNoteCount * kAudioNoteFrames);
+    for (std::size_t note = 0; note < kAudioNoteCount; ++note) {
+        const double hz = kAudioMelody[note];
+        for (std::uint32_t i = 0; i < kAudioNoteFrames; ++i) {
+            const double t = static_cast<double>(i) / kAudioRate;
+            const double decay =
+                1.0 - static_cast<double>(i) / kAudioNoteFrames;
+            out[note * kAudioNoteFrames + i] = static_cast<std::int16_t>(
+                std::sin(2.0 * std::numbers::pi * hz * t) * decay * 12'000.0);
+        }
+    }
+    return out;
+}
+#endif
+
 // Trail colors keyed by contact id mod 4: a finger keeps one color for
 // its whole gesture, two fingers never share one.
 constexpr std::uint8_t kTrailPalette[4][3] = {
@@ -98,6 +141,27 @@ protected:
         // fontless theme - the panels keep their v1 bars, never go dark.
         font_ = ws::ui::r2d::load_font(kDefaultFontPath, 16.0f);
         chrome_.font = font_.empty() ? nullptr : &font_;
+#ifndef __ANDROID__
+        // The sound panel's engine, one for the app's lifetime (the
+        // destructor tears it down). A failed device open is degradation,
+        // not a dead app: the panel still draws, the play button refuses
+        // with one warning, everything else runs untouched.
+        if (auto init = audio_engine_.init(); init) {
+            auto samples = synth_arpeggio();
+            const ws::audio::SoundDesc desc{
+                samples.data(), static_cast<std::uint32_t>(samples.size()),
+                1, kAudioRate};
+            if (auto sound = audio_engine_.load_sound(desc)) {
+                arpeggio_ = *sound;
+                audio_ok_ = true;
+                ws::core::info("playground: audio device open");
+            } else {
+                ws::core::log_error(sound.error());
+            }
+        } else {
+            ws::core::log_error(init.error());
+        }
+#endif
     }
 
     void on_event(ws::ui::Event& event) override {
@@ -217,6 +281,27 @@ protected:
         // plus sliders/button (drive) and the scrollable node list
         // (inspect) that steer the world-space net below.
         net_.draw_panel(gui_, layout_, chrome_, gui_frame);
+#ifndef __ANDROID__
+        // The ws::audio demo, the net panel's mirror at bottom right. Play
+        // is monophonic - it stops whatever is live so the sliders always
+        // steer what you actually hear - and starts from the current slider
+        // state. gain/pan write through every frame (update_audio below):
+        // pan is world-space x, the listener at the origin facing -z, so
+        // the source one unit ahead sweeps across the stereo field and its
+        // distance attenuation rides along.
+        const ws::ui::gui::Rect sound = ws::ui::gui::begin_panel(
+            gui_, layout_, chrome_, "sound",
+            sound_panel_rect(gui_frame.width, gui_frame.height));
+        if (ws::ui::gui::button(gui_, layout_, chrome_, "play",
+                                sound.width)) {
+            play_arpeggio();
+        }
+        ws::ui::gui::slider_float(gui_, layout_, chrome_, "gain",
+                                  audio_gain_, 0.0f, 1.0f);
+        ws::ui::gui::slider_float(gui_, layout_, chrome_, "pan",
+                                  audio_pan_, -4.0f, 4.0f);
+        ws::ui::gui::end_panel(gui_, layout_);
+#endif
         r2d::end();
         r2d::set_layer(0);
 
@@ -231,6 +316,12 @@ protected:
         const ws::ui::gui::InputFrame& raw = ws::ui::gui::frame_input();
         update_touch_trails(raw);
         apply_pinch_zoom(raw);
+#ifndef __ANDROID__
+        // The sound panel's per-frame pump: update() reaps the finished
+        // source (clearing the handle below), then the live slider state
+        // writes through to whatever is still playing.
+        update_audio();
+#endif
 
         // --- 2D world, through the camera ---
         r2d::begin(camera_);
@@ -421,6 +512,14 @@ protected:
                           "touches %d (trails, pinch-zoom, finger-scroll)",
                           in.touch_count);
             ws::ui::text(line);
+#ifndef __ANDROID__
+            std::snprintf(line, sizeof(line),
+                          "audio: %s (sound panel, bottom right)",
+                          audio_engine_.is_playing(audio_source_)
+                              ? "playing"
+                              : "idle");
+            ws::ui::text(line);
+#endif
 
             if (ws::ui::button("imgui demo")) {
                 show_imgui_ = !show_imgui_;
@@ -521,6 +620,74 @@ private:
     ws::ui::r2d::Font font_;      // one bake, one face - outlives the theme use
     ws::ui::gui::ChromeTheme chrome_ = ws::ui::gui::kDefaultChrome;  // + font_
 
+#ifndef __ANDROID__
+    // --- ws::audio demo state (the sound panel, bottom right) ---
+    ws::audio::AudioEngine audio_engine_;  // one per app: the ALC context is
+                                           // process-global anyway
+    ws::audio::SoundHandle arpeggio_{};    // the synthesized melody
+    ws::audio::SourceHandle audio_source_{};  // the live one-shot, {} = none
+    bool audio_ok_ = false;      // device open + sound loaded; play no-ops
+    bool audio_warned_ = false;  // the one refusal log when play no-ops
+    float audio_gain_ = 0.5f;    // live slider state, applied while playing
+    float audio_pan_ = 0.0f;     // live slider state, the source's world x
+
+    // The play button. Monophonic on purpose: stop whatever is live so the
+    // sliders always steer the one source you hear, then start a fresh one
+    // from the current slider state. A stop() failure here would mean the
+    // bookkeeping above slipped - logged, never fatal.
+    void play_arpeggio() {
+        if (!audio_ok_) {
+            if (!audio_warned_) {
+                audio_warned_ = true;
+                ws::core::warn("playground: play pressed, audio is disabled");
+            }
+            return;
+        }
+        if (audio_source_.valid()) {
+            if (auto stopped = audio_engine_.stop(audio_source_); !stopped) {
+                ws::core::log_error(stopped.error());
+            }
+            audio_source_ = {};
+        }
+        auto source = audio_engine_.play(arpeggio_, audio_gain_);
+        if (!source) {
+            ws::core::log_error(source.error());
+            return;
+        }
+        audio_source_ = *source;
+    }
+
+    // The wavplayer wait loop's interactive twin, once per frame: update()
+    // reaps the finished source, then the sliders write through to whatever
+    // is still playing. A setter failure clears the handle instead of
+    // logging the same error every frame.
+    void update_audio() {
+        if (!audio_ok_) {
+            return;
+        }
+        if (auto updated = audio_engine_.update(); !updated) {
+            ws::core::log_error(updated.error());
+            return;
+        }
+        if (!audio_engine_.is_playing(audio_source_)) {
+            audio_source_ = {};  // finished and reaped; {} until the next play
+            return;
+        }
+        if (auto gain = audio_engine_.set_gain(audio_source_, audio_gain_);
+            !gain) {
+            ws::core::log_error(gain.error());
+            audio_source_ = {};
+            return;
+        }
+        if (auto pos = audio_engine_.set_position(audio_source_, audio_pan_,
+                                                  0.0f, -1.0f);
+            !pos) {
+            ws::core::log_error(pos.error());
+            audio_source_ = {};
+        }
+    }
+#endif
+
     // --- multi-touch demo helpers (state above) ---
     // Appends each live contact's position to its trail (capped), and the
     // release frame's lift point closes it; a contact absent this frame
@@ -579,9 +746,16 @@ private:
         const ws::ui::r2d::FrameSize frame = ws::ui::r2d::frame_size();
         bool pinching = downs == 2;
         if (pinching) {
+#ifndef __ANDROID__
+            const ws::ui::gui::Rect panels[4] = {
+                demo_panel_rect(frame.width), pages_panel_rect(frame.width),
+                sound_panel_rect(frame.width, frame.height),
+                net_.panel_bounds()};
+#else
             const ws::ui::gui::Rect panels[3] = {
                 demo_panel_rect(frame.width), pages_panel_rect(frame.width),
                 net_.panel_bounds()};
+#endif
             for (const ws::ui::gui::TouchPoint* t : live) {
                 for (const ws::ui::gui::Rect& panel : panels) {
                     if (ws::ui::gui::contains(panel, t->x, t->y)) {

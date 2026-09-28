@@ -1,6 +1,11 @@
 ws_add_app(playground DEPENDS ws::ui)
 
 if(NOT ANDROID)
+  # The sound panel exercises ws::audio, desktop-only in v1 (no on-device
+  # backend decision yet) - the link and the panel (#ifndef __ANDROID__ in
+  # src/main.cpp) share this gate.
+  target_link_libraries(playground PRIVATE ws::audio)
+
   # The 2D demo loads assets/checker.png relative to the exe's working
   # directory, so ship the assets next to the binary. A missing file is a
   # documented fallback (white texture + one log line), not an error.
