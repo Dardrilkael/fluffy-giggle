@@ -36,5 +36,7 @@ One commit per phase on `main`.
 - `libs/audio` - WAV decoding (dr_wav, private) + OpenAL Soft device playback
   behind a Result-only API. Desktop-only in v1.
 - `apps/playground` - smoke-test app for the shell.
+- `apps/wavplayer` - headless ws::audio smoke app: plays a synthesized
+  arpeggio (or the wav passed as argv[1]) on the default device.
 
 Each `libs/<name>/CLAUDE.md` documents that lib's own rules and tests.
