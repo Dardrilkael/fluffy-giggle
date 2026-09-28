@@ -33,6 +33,8 @@ One commit per phase on `main`.
   ws-owned fixed-size vecmath.
 - `libs/ui` - app shell (GLFW/Vulkan/ImGui/ImPlot, all private) + the
   `widgets.hpp` drawing API.
+- `libs/audio` - WAV decoding (dr_wav, private) + OpenAL Soft device playback
+  behind a Result-only API. Desktop-only in v1.
 - `apps/playground` - smoke-test app for the shell.
 
 Each `libs/<name>/CLAUDE.md` documents that lib's own rules and tests.

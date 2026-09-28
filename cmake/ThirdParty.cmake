@@ -168,3 +168,24 @@ target_include_directories(stb SYSTEM INTERFACE "${stb_SOURCE_DIR}")
 add_library(tl_expected INTERFACE)
 add_library(tl::expected ALIAS tl_expected)
 target_include_directories(tl_expected SYSTEM INTERFACE "${tl_expected_SOURCE_DIR}/include")
+
+# --- dr_wav (header-only; decodes RIFF/WAVE for ws::audio) --------------------
+# dr_wav lives in the dr_libs monorepo, header at its root. The
+# DR_WAV_IMPLEMENTATION translation unit lives in libs/audio
+# (src/dr_wav_impl.cpp) - the same one-TU rule as stb's. Desktop-only, like
+# the whole ws::audio lib: its device backend (OpenAL Soft, a later phase)
+# is fetched desktop-only as well, so the fetch is unconditional only for
+# desktops (see libs/CMakeLists.txt).
+if(NOT ANDROID)
+  FetchContent_Declare(dr_wav
+    GIT_REPOSITORY https://github.com/mackron/dr_libs.git
+    GIT_TAG wav-0.14.5
+    GIT_SHALLOW TRUE)
+  FetchContent_GetProperties(dr_wav)
+  if(NOT dr_wav_POPULATED)
+    FetchContent_Populate(dr_wav)
+  endif()
+  add_library(dr_wav INTERFACE)
+  add_library(dr_wav::dr_wav ALIAS dr_wav)
+  target_include_directories(dr_wav SYSTEM INTERFACE "${dr_wav_SOURCE_DIR}")
+endif()
