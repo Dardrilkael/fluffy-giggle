@@ -296,10 +296,13 @@ protected:
                                 sound.width)) {
             play_arpeggio();
         }
+        // Full content width like the play button above (the pages/net
+        // panels do the same): the default-120 rail under a full-width
+        // button left the row's right side looking live but click-dead.
         ws::ui::gui::slider_float(gui_, layout_, chrome_, "gain",
-                                  audio_gain_, 0.0f, 1.0f);
+                                  audio_gain_, 0.0f, 1.0f, sound.width);
         ws::ui::gui::slider_float(gui_, layout_, chrome_, "pan",
-                                  audio_pan_, -4.0f, 4.0f);
+                                  audio_pan_, -4.0f, 4.0f, sound.width);
         ws::ui::gui::end_panel(gui_, layout_);
 #endif
         r2d::end();
