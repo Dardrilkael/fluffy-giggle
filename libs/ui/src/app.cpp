@@ -201,10 +201,15 @@ struct App::Impl {
     // Stage bookkeeping for the split startup (see the file comment): the
     // context stage (host + instance) runs once; the device stage (device,
     // allocator, ImGui pool) and the window stage (surface + swapchain +
-    // renderer + backends) attach to the current window - and re-attach on
-    // Android whenever the OS hands one back.
+    // backends) attach to the current window - and re-attach on Android
+    // whenever the OS hands one back. The r2d renderer, the ImGui/ImPlot
+    // contexts and the gui input publication (gpu_context_up) are created
+    // at the FIRST attach and survive a surface loss: only the backends
+    // and the swapchain ride the window, so a re-attach re-initializes
+    // those alone (the drift rules), never the full GPU init again.
     bool device_stage_up = false;
     bool window_stage_up = false;
+    bool gpu_context_up = false;  // renderer + ImGui contexts + gui publication
     bool imgui_platform_up = false;  // GLFW / Android platform backend
     bool imgui_vk_up = false;
     uint32_t imgui_image_count = 0;  // values the backend was initialized with;
@@ -1370,10 +1375,11 @@ struct App::Impl {
         if (fb_width <= 0 || fb_height <= 0 || !create_swapchain(fb_width, fb_height)) {
             return false;
         }
-        if (!window_stage_up) {
-            // Before on_setup(): apps load textures there, and the r2d free
-            // functions need an active renderer. init() may fail mid-way;
-            // shutdown() doubles as the (idempotent) failure-path cleanup.
+        if (!gpu_context_up) {
+            // First attach only. Before on_setup(): apps load textures
+            // there, and the r2d free functions need an active renderer.
+            // init() may fail mid-way; shutdown() doubles as the
+            // (idempotent) failure-path cleanup.
             if (!renderer2d_.init(device, physical_device, allocator, queue,
                                   queue_family, render_pass, format, image_count)) {
                 return false;
@@ -1384,14 +1390,21 @@ struct App::Impl {
             if (!init_imgui(app)) {
                 return false;
             }
+            gpu_context_up = true;
         } else {
-            // Re-attach: the same drift rules as recreate_swapchain(). The
-            // ImGui Vulkan backend re-inits only when the image count or
-            // format changed; the 2D renderer's pipeline and descriptor
-            // sets follow through on_swapchain_recreated().
-            if (image_count != imgui_image_count || format != imgui_format) {
-                ImGui_ImplVulkan_Shutdown();
-                imgui_vk_up = false;
+            // Re-attach: the renderer and the ImGui/ImPlot contexts are
+            // device-lifetime state and survived the detach (only the
+            // backends and the swapchain ride the window), so only the
+            // drift rules run - the same ones recreate_swapchain()
+            // applies. The backend was shut down at the detach and
+            // re-initializes here; identical format and image count keep
+            // its render pass compatible, and the renderer re-creates
+            // only what the OS round-trip actually invalidated.
+            if (!imgui_vk_up || image_count != imgui_image_count ||
+                format != imgui_format) {
+                if (imgui_vk_up) {
+                    ImGui_ImplVulkan_Shutdown();
+                }
                 if (!init_imgui_backend()) {
                     return false;
                 }
@@ -1490,6 +1503,7 @@ struct App::Impl {
         // host destructor), with the loop already out of the pump.
         host_.reset();
         device_stage_up = false;
+        gpu_context_up = false;
     }
 
     int run(App& app) {
