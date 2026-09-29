@@ -26,13 +26,11 @@
 #include <utility>
 #include <vector>
 
-#ifndef __ANDROID__
-// The sound panel rides ws::audio, desktop-only in v1 (its OpenAL Soft
-// backend has no on-device story yet) - the whole feature lives behind this
-// gate, mirroring the entry split at the bottom of this file.
+// The sound panel rides ws::audio on both platforms - the same OpenAL
+// Soft pimpl everywhere, Oboe->AAudio under it on Android. Nothing audio
+// is gated anymore; only the entry split at the bottom of this file is.
 #include <numbers>
 #include <ws/audio/engine.hpp>
-#endif
 
 #ifdef __ANDROID__
 // NDK headers are C - keep them clear of our -Wpedantic settings (the same
@@ -75,7 +73,6 @@ ws::ui::gui::Rect pages_panel_rect(float frame_width) {
     return {frame_width - 244.0f, 208.0f, 220.0f, 220.0f};
 }
 
-#ifndef __ANDROID__
 // The sound panel's rect, bottom-right and anchored to the frame the way
 // the net screen's is bottom-left (net_screen.cpp) - the mirror position
 // keeps it clear of the top-right demo column at any window size. The
@@ -108,7 +105,6 @@ std::vector<std::int16_t> synth_arpeggio() {
     }
     return out;
 }
-#endif
 
 // Trail colors keyed by contact id mod 4: a finger keeps one color for
 // its whole gesture, two fingers never share one.
@@ -141,7 +137,6 @@ protected:
         // fontless theme - the panels keep their v1 bars, never go dark.
         font_ = ws::ui::r2d::load_font(kDefaultFontPath, 16.0f);
         chrome_.font = font_.empty() ? nullptr : &font_;
-#ifndef __ANDROID__
         // The sound panel's engine, one for the app's lifetime (the
         // destructor tears it down). A failed device open is degradation,
         // not a dead app: the panel still draws, the play button refuses
@@ -161,7 +156,6 @@ protected:
         } else {
             ws::core::log_error(init.error());
         }
-#endif
     }
 
     void on_event(ws::ui::Event& event) override {
@@ -281,7 +275,6 @@ protected:
         // plus sliders/button (drive) and the scrollable node list
         // (inspect) that steer the world-space net below.
         net_.draw_panel(gui_, layout_, chrome_, gui_frame);
-#ifndef __ANDROID__
         // The ws::audio demo, the net panel's mirror at bottom right. Play
         // is monophonic - it stops whatever is live so the sliders always
         // steer what you actually hear - and starts from the current slider
@@ -304,7 +297,6 @@ protected:
         ws::ui::gui::slider_float(gui_, layout_, chrome_, "pan",
                                   audio_pan_, -4.0f, 4.0f, sound.width);
         ws::ui::gui::end_panel(gui_, layout_);
-#endif
         r2d::end();
         r2d::set_layer(0);
 
@@ -319,12 +311,10 @@ protected:
         const ws::ui::gui::InputFrame& raw = ws::ui::gui::frame_input();
         update_touch_trails(raw);
         apply_pinch_zoom(raw);
-#ifndef __ANDROID__
         // The sound panel's per-frame pump: update() reaps the finished
         // source (clearing the handle below), then the live slider state
         // writes through to whatever is still playing.
         update_audio();
-#endif
 
         // --- 2D world, through the camera ---
         r2d::begin(camera_);
@@ -515,14 +505,12 @@ protected:
                           "touches %d (trails, pinch-zoom, finger-scroll)",
                           in.touch_count);
             ws::ui::text(line);
-#ifndef __ANDROID__
             std::snprintf(line, sizeof(line),
                           "audio: %s (sound panel, bottom right)",
                           audio_engine_.is_playing(audio_source_)
                               ? "playing"
                               : "idle");
             ws::ui::text(line);
-#endif
 
             if (ws::ui::button("imgui demo")) {
                 show_imgui_ = !show_imgui_;
@@ -623,7 +611,6 @@ private:
     ws::ui::r2d::Font font_;      // one bake, one face - outlives the theme use
     ws::ui::gui::ChromeTheme chrome_ = ws::ui::gui::kDefaultChrome;  // + font_
 
-#ifndef __ANDROID__
     // --- ws::audio demo state (the sound panel, bottom right) ---
     ws::audio::AudioEngine audio_engine_;  // one per app: the ALC context is
                                            // process-global anyway
@@ -689,7 +676,6 @@ private:
             audio_source_ = {};
         }
     }
-#endif
 
     // --- multi-touch demo helpers (state above) ---
     // Appends each live contact's position to its trail (capped), and the
@@ -749,16 +735,10 @@ private:
         const ws::ui::r2d::FrameSize frame = ws::ui::r2d::frame_size();
         bool pinching = downs == 2;
         if (pinching) {
-#ifndef __ANDROID__
             const ws::ui::gui::Rect panels[4] = {
                 demo_panel_rect(frame.width), pages_panel_rect(frame.width),
                 sound_panel_rect(frame.width, frame.height),
                 net_.panel_bounds()};
-#else
-            const ws::ui::gui::Rect panels[3] = {
-                demo_panel_rect(frame.width), pages_panel_rect(frame.width),
-                net_.panel_bounds()};
-#endif
             for (const ws::ui::gui::TouchPoint* t : live) {
                 for (const ws::ui::gui::Rect& panel : panels) {
                     if (ws::ui::gui::contains(panel, t->x, t->y)) {
