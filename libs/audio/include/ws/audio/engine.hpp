@@ -34,9 +34,12 @@ struct SoundDesc {
 };
 
 // The audio device + every buffer and source it issued. OpenAL Soft stays
-// behind the pimpl: only src/ includes AL/*. One engine at a time in a
-// process - the ALC context is process-global, so a second live engine
-// would steal it from the first.
+// behind the pimpl on BOTH platforms: only src/ includes AL/*. Its device
+// layer is OpenAL Soft's own choice - WASAPI etc. on Windows, Oboe (which
+// drives AAudio on API 27+, an internal OpenSL fallback below that) on
+// Android - invisible here. One engine at a time in a process - the ALC
+// context is process-global, so a second live engine would steal it from
+// the first.
 class AudioEngine {
  public:
   AudioEngine();

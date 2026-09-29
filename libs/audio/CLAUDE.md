@@ -24,10 +24,19 @@ appears under include/ (OpenAL lives behind engine.hpp's pimpl).
 - `ws::core` (Result/Status, logging) - PUBLIC.
 - dr_wav (RIFF/WAVE decode) - PRIVATE: `DR_WAV_IMPLEMENTATION` compiles
   exactly once in `src/dr_wav_impl.cpp` (the stb rule) and no public header
-  includes it.
+  includes it. Pure C, built on every platform.
 - OpenAL Soft 1.25.2 (device playback) - PRIVATE: only `src/audio_engine.cpp`
   includes `AL/*`; `engine.hpp` is a pimpl. Built STATIC (LIBTYPE), so there
-  is no DLL to deploy.
+  is no DLL to deploy. Cross-platform: the SAME pimpl TU runs on Windows
+  and Android; OpenAL Soft picks its own device layer per platform
+  (WASAPI etc. on Windows).
+- Oboe 1.11.0 (Android only) - PRIVATE one level deeper: OpenAL Soft's
+  Android device backend IS Oboe (Google's official wrapper - AAudio on
+  API 27+, an OpenSL fallback inside Oboe below; upstream replaced its
+  old direct-AAudio backend). Fetched Android-only
+  (`cmake/ThirdParty.cmake`), consumed through OpenAL Soft's `OBOE_SOURCE`
+  hook, so its headers and target never leave the openal build. ws::audio
+  sees only `AL/*` on both platforms.
 
 ## Invariants / rules
 - Error handling: public APIs return `ws::core::Result`/`Status` (root
@@ -39,13 +48,17 @@ appears under include/ (OpenAL lives behind engine.hpp's pimpl).
   `backend_error` (the message carries the AL code, via `al_describe`).
   Teardown deletes sources and buffers while the context is still current,
   then releases context and device - in that order.
-- Desktop-only in v1: the lib is gated off the Android build
-  (libs/CMakeLists.txt) until an on-device backend decision is made - both
-  third-party fetches are desktop-only (cmake/ThirdParty.cmake) for the
-  same reason.
+- Cross-platform since the on-device decision landed: minSdk 26 (the
+  playground manifest's floor). Oboe uses AAudio from API 27, so a device
+  at exactly 26 still sounds through Oboe's internal OpenSL - a fallback
+  inside Oboe, not an OpenAL backend of ours. OpenAL Soft's own OpenSL
+  backend is forced OFF: Oboe is the one backend, deterministically
+  (`ALSOFT_REQUIRE_OBOE` turns a resolution miss into a configure error).
 - Tests build their fixtures in the temp dir at runtime - never commit
   binary fixtures, never write next to the repo. Engine tests play at gain
-  0: the suite must stay silent.
+  0: the suite must stay silent. The suite runs on the host (the android
+  preset sets WS_BUILD_TESTS=OFF); the engine cases need a working audio
+  endpoint on the machine.
 
 ## Tests
 ```

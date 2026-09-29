@@ -34,9 +34,11 @@ One commit per phase on `main`.
 - `libs/ui` - app shell (GLFW/Vulkan/ImGui/ImPlot, all private) + the
   `widgets.hpp` drawing API.
 - `libs/audio` - WAV decoding (dr_wav, private) + OpenAL Soft device playback
-  behind a Result-only API. Desktop-only in v1.
+  behind a Result-only API. Cross-platform: same OpenAL pimpl on Windows and
+  Android (OpenAL Soft rides Oboe -> AAudio there, both private).
 - `apps/playground` - smoke-test app for the shell.
-- `apps/wavplayer` - headless ws::audio smoke app: plays a synthesized
-  arpeggio (or the wav passed as argv[1]) on the default device.
+- `apps/wavplayer` - headless ws::audio smoke app (desktop console app):
+  plays a synthesized arpeggio (or the wav passed as argv[1]) on the
+  default device.
 
 Each `libs/<name>/CLAUDE.md` documents that lib's own rules and tests.

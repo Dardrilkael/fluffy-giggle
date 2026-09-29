@@ -1,10 +1,8 @@
 add_subdirectory(core)
 add_subdirectory(math)
 add_subdirectory(ui)
-# ws::audio is desktop-only in v1: its device backend (OpenAL Soft) is
-# fetched desktop-only (cmake/ThirdParty.cmake), so the lib stays off the
-# Android build until an on-device backend decision lands
-# (libs/audio/CLAUDE.md).
-if(NOT ANDROID)
-  add_subdirectory(audio)
-endif()
+# ws::audio builds everywhere: the engine pimpl is OpenAL Soft on both
+# platforms, and OpenAL Soft's own device layer goes AAudio-via-Oboe on
+# Android (cmake/ThirdParty.cmake fetches Oboe there, PRIVATE like every
+# third-party).
+add_subdirectory(audio)

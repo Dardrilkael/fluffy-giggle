@@ -172,41 +172,76 @@ target_include_directories(tl_expected SYSTEM INTERFACE "${tl_expected_SOURCE_DI
 # --- dr_wav (header-only; decodes RIFF/WAVE for ws::audio) --------------------
 # dr_wav lives in the dr_libs monorepo, header at its root. The
 # DR_WAV_IMPLEMENTATION translation unit lives in libs/audio
-# (src/dr_wav_impl.cpp) - the same one-TU rule as stb's. Desktop-only, like
-# the whole ws::audio lib: its device backend (OpenAL Soft, a later phase)
-# is fetched desktop-only as well, so the fetch is unconditional only for
-# desktops (see libs/CMakeLists.txt).
-if(NOT ANDROID)
-  FetchContent_Declare(dr_wav
-    GIT_REPOSITORY https://github.com/mackron/dr_libs.git
-    GIT_TAG wav-0.14.5
-    GIT_SHALLOW TRUE)
-  FetchContent_GetProperties(dr_wav)
-  if(NOT dr_wav_POPULATED)
-    FetchContent_Populate(dr_wav)
-  endif()
-  add_library(dr_wav INTERFACE)
-  add_library(dr_wav::dr_wav ALIAS dr_wav)
-  target_include_directories(dr_wav SYSTEM INTERFACE "${dr_wav_SOURCE_DIR}")
+# (src/dr_wav_impl.cpp) - the same one-TU rule as stb's. Pure C, so the
+# fetch is unconditional: ws::audio builds on Android too (OpenAL Soft is
+# fetched for both platforms below).
+FetchContent_Declare(dr_wav
+  GIT_REPOSITORY https://github.com/mackron/dr_libs.git
+  GIT_TAG wav-0.14.5
+  GIT_SHALLOW TRUE)
+FetchContent_GetProperties(dr_wav)
+if(NOT dr_wav_POPULATED)
+  FetchContent_Populate(dr_wav)
 endif()
+add_library(dr_wav INTERFACE)
+add_library(dr_wav::dr_wav ALIAS dr_wav)
+target_include_directories(dr_wav SYSTEM INTERFACE "${dr_wav_SOURCE_DIR}")
 
 # --- OpenAL Soft (device playback backend for ws::audio) -----------------------
 # A real CMake project - built via FetchContent_MakeAvailable, the glfw
 # pattern. LIBTYPE is OpenAL Soft's own variable: STATIC means no DLL to
 # deploy, and the target propagates AL_LIBTYPE_STATIC itself so AL/al.h
 # binds to the static runtime. Examples/utils/install are off, so nothing
-# beyond the library gets configured; note the project subfetches fmt at
-# configure time. Desktop-only, like the whole ws::audio lib (see
-# libs/audio/CLAUDE.md for the on-device story).
-if(NOT ANDROID)
-  set(LIBTYPE STATIC)
-  set(ALSOFT_EXAMPLES OFF CACHE BOOL "" FORCE)
-  set(ALSOFT_UTILS OFF CACHE BOOL "" FORCE)
-  set(ALSOFT_INSTALL OFF CACHE BOOL "" FORCE)
-  FetchContent_Declare(openal
-    GIT_REPOSITORY https://github.com/kcat/openal-soft.git
-    GIT_TAG 1.25.2
+# beyond the library gets configured; note the project bundles fmt
+# (fmt-11.2.0, an unconditional core dependency) and builds it too.
+#
+# Both platforms: ws::audio is the same OpenAL pimpl everywhere, and
+# OpenAL Soft picks its own device layer per platform - WASAPI etc. on
+# Windows, Oboe on Android. On Android (the ONLY direct AAudio user in
+# the workspace): Oboe is Google's official wrapper over the NDK audio
+# APIs - AAudio on API 27+, an OpenSL fallback INSIDE Oboe below that
+# (upstream replaced its older direct-AAudio backend with Oboe). OpenAL
+# Soft consumes it through its OBOE_SOURCE hook - an EXCLUDE_FROM_ALL
+# add_subdirectory inside the openal build, so no oboe target escapes to
+# us. It must be a CACHE variable: openal's own plain
+# set(OBOE_SOURCE "" CACHE STRING ...) would strip a normal variable of
+# that name, and its no-FORCE set respects an existing cache entry.
+# OpenSL stays OFF so Oboe is the ONE backend (deterministic "AAudio
+# only"), and REQUIRE turns a resolution miss into a configure error.
+# Oboe stays PRIVATE like every third-party: its headers never leave the
+# fetched tree, ws::audio sees only AL through the pimpl.
+set(LIBTYPE STATIC)
+set(ALSOFT_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(ALSOFT_UTILS OFF CACHE BOOL "" FORCE)
+set(ALSOFT_INSTALL OFF CACHE BOOL "" FORCE)
+if(ANDROID)
+  FetchContent_Declare(oboe
+    GIT_REPOSITORY https://github.com/google/oboe.git
+    GIT_TAG 1.11.0
     GIT_SHALLOW TRUE)
-  FetchContent_MakeAvailable(openal)
-  unset(LIBTYPE)
+  FetchContent_GetProperties(oboe)
+  if(NOT oboe_POPULATED)
+    FetchContent_Populate(oboe)
+  endif()
+  set(OBOE_SOURCE "${oboe_SOURCE_DIR}" CACHE STRING
+      "Source directory for Oboe (openal-soft's hook; ws sets it)" FORCE)
+  set(ALSOFT_BACKEND_OBOE ON CACHE BOOL "" FORCE)
+  set(ALSOFT_REQUIRE_OBOE ON CACHE BOOL "" FORCE)
+  set(ALSOFT_BACKEND_OPENSL OFF CACHE BOOL "" FORCE)
+  # openal defaults its build to C++20 named modules when the compiler
+  # claims support (its ALSOFT_ENABLE_MODULES, ON by default). NDK r27's
+  # clang 18 claims it but breaks on libc++'s ranges pipe operator through
+  # the module path ("deduced return type cannot be used before it is
+  # defined", al/auxeffectslot.cpp). Classic TUs on Android; desktop keeps
+  # upstream's default (MSVC builds the modules fine).
+  set(ALSOFT_ENABLE_MODULES OFF CACHE BOOL "" FORCE)
+endif()
+FetchContent_Declare(openal
+  GIT_REPOSITORY https://github.com/kcat/openal-soft.git
+  GIT_TAG 1.25.2
+  GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(openal)
+unset(LIBTYPE)
+if(ANDROID)
+  unset(OBOE_SOURCE CACHE)
 endif()
