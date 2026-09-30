@@ -83,11 +83,14 @@ class FrameParser {
   // Clears everything (too_large recovery / connection abort path).
   void reset();
 
- private:
   // Debug: poison the last delivered message's region, then forget it.
   // Every public entry point calls this first - "any parser call
-  // invalidates the span it handed you" is the whole rule.
+  // invalidates the span it handed you" is the whole rule. The
+  // connection logic also calls it right after an on_message callback
+  // returns, so the poison lands the moment the span goes stale.
   void invalidate_last_message();
+
+ private:
 
   std::vector<std::byte> buffer_;
   std::size_t consumed_ = 0;  // buffer_ offset of the first unconsumed byte

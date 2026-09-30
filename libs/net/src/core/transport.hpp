@@ -6,9 +6,14 @@
 // WSAPoll/epoll backend implements the same interface and nothing above
 // src/ changes - no public header, no user code.
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
+#include <vector>
+
+#include <ws/net/errors.hpp>
 
 namespace ws::net::detail {
 
@@ -49,5 +54,57 @@ class ILoopBackend {
 
 // Implemented in src/backend/uv (backend_factory.cpp).
 [[nodiscard]] std::unique_ptr<ILoopBackend> make_loop_backend();
+
+// ---- TCP stream seam ----
+
+// Upcalls from a stream peer into the connection logic driving it. All
+// fire on the loop thread. on_stream_dead is exactly once and always
+// the last call a live peer ever makes; after it the peer is inert
+// (writes dropped, no further upcalls).
+class IStreamSink {
+ public:
+  virtual ~IStreamSink() = default;
+
+  // Socket established (client connect completed; server sides fire it
+  // immediately after accept).
+  virtual void on_connected() = 0;
+
+  // Bytes arrived from the remote. The span is valid only for the call.
+  virtual void on_bytes(std::span<const std::byte> data) = 0;
+
+  // The stream is gone. `reason` is connection_closed when a graceful
+  // close completed, or the failure code (connection_reset,
+  // socket_error, ...) that killed it.
+  virtual void on_stream_dead(NetError reason) = 0;
+};
+
+// The stream side of the seam: what connection logic drives. The uv
+// implementation lives in src/backend/uv; tests fake it
+// (tests/fake_transport.hpp).
+class IStreamPeer {
+ public:
+  virtual ~IStreamPeer() = default;
+
+  // Give the sink someone to report to. Called once by the owner right
+  // after construction, before anything else.
+  virtual void attach_sink(IStreamSink* sink) = 0;
+
+  // Queue bytes (the copy is taken here). No-op once dead.
+  virtual void write(std::vector<std::byte> bytes) = 0;
+
+  // Graceful: drain queued writes, half-close the write side (FIN), then
+  // close the handle - reports on_stream_dead(connection_closed) when
+  // the dance completes. A remote EOF triggers the same dance from the
+  // peer's side, so pending writes still flush.
+  virtual void finish_and_close() = 0;
+
+  // Immediate teardown (RST): drops queued writes, closes now. Reports
+  // on_stream_dead(connection_reset) unless already dead. Wins over an
+  // in-flight finish_and_close.
+  virtual void abort() = 0;
+
+  // Bytes queued but not yet handed to the OS (backpressure metric).
+  [[nodiscard]] virtual std::size_t pending() const = 0;
+};
 
 }  // namespace ws::net::detail
