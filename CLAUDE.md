@@ -36,6 +36,11 @@ One commit per phase on `main`.
 - `libs/audio` - WAV decoding (dr_wav, private) + OpenAL Soft device playback
   behind a Result-only API. Cross-platform: same OpenAL pimpl on Windows and
   Android (OpenAL Soft rides Oboe -> AAudio there, both private).
+- `libs/net` - networking: single-threaded event loop (one thread-safe
+  `post`), length-prefixed message framing on TCP, UDP, LAN discovery.
+  libuv is private to `src/backend/uv` - the backend seam means a
+  WSAPoll/epoll swap later touches no public header (no uv.h under
+  `include/`).
 - `apps/playground` - smoke-test app for the shell.
 - `apps/wavplayer` - headless ws::audio smoke app (desktop console app):
   plays a synthesized arpeggio (or the wav passed as argv[1]) on the

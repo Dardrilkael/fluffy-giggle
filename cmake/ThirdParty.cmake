@@ -245,3 +245,23 @@ unset(LIBTYPE)
 if(ANDROID)
   unset(OBOE_SOURCE CACHE)
 endif()
+
+# --- libuv (async I/O backend for ws::net) -----------------------------------
+# A real CMake project - FetchContent_MakeAvailable, the glfw/openal
+# pattern. STATIC like every third-party here: LIBUV_BUILD_SHARED OFF means
+# only uv_a builds (no DLL to deploy; ws_net links it PRIVATE). Tests and
+# benchmarks are root-project-gated upstream but forced OFF anyway - cache
+# vars keep it deterministic across presets. ENABLE_CLANG_TIDY is upstream's
+# default-ON; not our build's business. Unconditional fetch: ws::net is
+# cross-platform (Windows/Android/Linux/macOS) and libuv's own CMake picks
+# the platform sources + system libs per build (ws2_32 etc. on MSVC, dl +
+# _GNU_SOURCE on Android, no pthread there).
+set(LIBUV_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(LIBUV_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(LIBUV_BUILD_BENCH OFF CACHE BOOL "" FORCE)
+set(ENABLE_CLANG_TIDY OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(libuv
+  GIT_REPOSITORY https://github.com/libuv/libuv.git
+  GIT_TAG v1.53.0
+  GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(libuv)

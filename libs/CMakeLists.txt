@@ -6,3 +6,8 @@ add_subdirectory(ui)
 # Android (cmake/ThirdParty.cmake fetches Oboe there, PRIVATE like every
 # third-party).
 add_subdirectory(audio)
+
+# ws::net is cross-platform on the same libuv backend everywhere: TCP/UDP +
+# LAN discovery, uv private to src/backend/uv (the glfw/openal fetch
+# pattern, unconditional).
+add_subdirectory(net)
