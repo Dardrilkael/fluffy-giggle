@@ -12,4 +12,21 @@ if(NOT MSVC)
   target_compile_options(ws_net PRIVATE -fvisibility=hidden)
 endif()
 
-ws_add_test(net SOURCES tests/test_api.cpp)
+ws_add_test(net SOURCES tests/test_api.cpp tests/test_frame.cpp)
+# tests drive the internal framing core directly (the ui pattern: src/
+# never reaches apps, but tests reach it through this PRIVATE path).
+if(TARGET test_net)
+  target_include_directories(test_net PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+
+# The frame-parser fuzz driver: desktop-only and deliberately NOT in
+# ctest - it runs long by design. Smoke it by hand:
+#   build/debug/bin/fuzz_net [seed] [iterations]
+if(NOT ANDROID)
+  add_executable(fuzz_net tests/fuzz_frame_main.cpp)
+  target_include_directories(fuzz_net PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+  target_link_libraries(fuzz_net PRIVATE ws::net)
+  ws_set_warnings(fuzz_net)
+endif()
