@@ -52,5 +52,8 @@ One commit per phase on `main`.
   other via LAN + loopback discovery beats (the smaller listen port
   dials, one framed TCP connection per pair); lines typed in one terminal
   print in all the others.
+- `apps/chatter` - netchat's protocol behind a gui (built for Android,
+  runs on desktop too): the same discovery beats and HELLO/SAY frames, so
+  phones and terminals share one chat; input is a tap-phrase palette.
 
 Each `libs/<name>/CLAUDE.md` documents that lib's own rules and tests.

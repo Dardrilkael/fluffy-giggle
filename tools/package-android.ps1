@@ -1,23 +1,29 @@
-# Package apps/playground into a signed, installable APK - no Java, no
-# Gradle. aapt2 links the manifest + assets/, the module .so is zipped in
-# as lib/arm64-v8a/, then zipalign + apksigner (the standard debug
-# keystore) finish it. NativeActivity + hasCode=false means the APK carries
-# zero code besides libplayground.so.
+# Package an app into a signed, installable APK - no Java, no Gradle.
+# aapt2 links the manifest (+ assets/ when the app has any), the module
+# .so is zipped in as lib/arm64-v8a/, then zipalign + apksigner (the
+# standard debug keystore) finish it. NativeActivity + hasCode=false
+# means the APK carries zero code besides lib<App>.so.
 #
 # Usage:
-#   tools/package-android.ps1             build + package only
-#   tools/package-android.ps1 -Install    ... then adb install -r
+#   tools/package-android.ps1                          playground (default)
+#   tools/package-android.ps1 -App chatter             ... apps/chatter
+#   tools/package-android.ps1 -App chatter -Install    ... then adb install -r
 #
 # Needs cmake + ninja on PATH and the android-local preset's NDK
 # (CMakeUserPresets.json - gitignored, pins this machine's NDK path); the
 # SDK lives under %LOCALAPPDATA%\Android\Sdk or $env:ANDROID_HOME.
 
-param([switch]$Install)
+param([string]$App = 'playground', [switch]$Install)
 
 $ErrorActionPreference = 'Stop'
 
 # Repo root = parent of tools\.
 $repo = Split-Path -Parent $PSScriptRoot
+$manifest = Join-Path $repo ("apps\$App\android\AndroidManifest.xml")
+if (-not (Test-Path $manifest)) {
+    throw "unknown app: apps\$App (no android\AndroidManifest.xml)"
+}
+$assets = Join-Path $repo ("apps\$App\assets")
 $sdk = if ($env:ANDROID_HOME) { $env:ANDROID_HOME }
        else { Join-Path $env:LOCALAPPDATA 'Android\Sdk' }
 if (-not (Test-Path $sdk)) {
@@ -46,27 +52,29 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'build failed (cmake --build --preset android-local)' }
 } finally { Pop-Location }
 
-$so = Join-Path $repo 'build\android\bin\libplayground.so'
+$so = Join-Path $repo ("build\android\bin\lib$App.so")
 if (-not (Test-Path $so)) { throw "module not found: $so" }
-$manifest = Join-Path $repo 'apps\playground\android\AndroidManifest.xml'
-$assets   = Join-Path $repo 'apps\playground\assets'
 
-# --- 2. aapt2 link: manifest + assets/ -> unsigned apk ---------------------
+# --- 2. aapt2 link: manifest (+ assets/ if the app has any) -> unsigned apk --
+# Not every app ships assets (chatter carries none) - -A goes in only
+# when the dir exists.
 $outDir = Join-Path $repo 'build\android\apk'
 New-Item -ItemType Directory -Force $outDir | Out-Null
 $unsigned = Join-Path $outDir 'unsigned.apk'
 Remove-Item $unsigned -ErrorAction SilentlyContinue
-& $aapt2 link --manifest $manifest -A $assets -I $androidJar -o $unsigned
+$linkArgs = @('link', '--manifest', $manifest, '-I', $androidJar, '-o', $unsigned)
+if (Test-Path $assets) { $linkArgs += @('-A', $assets) }
+& $aapt2 @linkArgs
 if ($LASTEXITCODE -ne 0) { throw 'aapt2 link failed' }
 
-# --- 3. lib/arm64-v8a/libplayground.so --------------------------------------
+# --- 3. lib/arm64-v8a/lib$App.so ---------------------------------------------
 # aapt2 has no native-lib flag (AGP does that in Gradle-land), so the entry
 # is zipped in directly. extractNativeLibs="true" in the manifest has the
 # installer unpack it, so any compression is fine.
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [System.IO.Compression.ZipFile]::Open($unsigned, 'Update')
 try {
-    $entry = $zip.CreateEntry('lib/arm64-v8a/libplayground.so')
+    $entry = $zip.CreateEntry(("lib/arm64-v8a/lib$App.so"))
     $dst = $entry.Open()
     $src = [System.IO.File]::OpenRead($so)
     try { $src.CopyTo($dst) } finally { $src.Dispose(); $dst.Dispose() }
@@ -92,7 +100,7 @@ if (-not (Test-Path $keystore)) {
 $jbr = 'C:\Program Files\Android\Android Studio\jbr'
 if (-not $env:JAVA_HOME -and (Test-Path $jbr)) { $env:JAVA_HOME = $jbr }
 
-$apk = Join-Path $repo 'build\android\playground.apk'
+$apk = Join-Path $repo ("build\android\$App.apk")
 & $apksigner sign --ks $keystore --ks-pass pass:android --key-pass pass:android --ks-key-alias androiddebugkey --out $apk $aligned
 if ($LASTEXITCODE -ne 0) { throw 'apksigner failed' }
 
@@ -103,5 +111,5 @@ if ($Install) {
     Write-Host "installed: $apk"
 } else {
     Write-Host "apk: $apk"
-    Write-Host 'install later with: tools\package-android.ps1 -Install'
+    Write-Host ("install later with: tools\package-android.ps1 -App {0} -Install" -f $App)
 }

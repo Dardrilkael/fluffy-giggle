@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Input to tools/package-android.ps1 (aapt2 link). NativeActivity +
+     hasCode=false: zero Java - the OS dlopens lib/arm64-v8a/libchatter.so
+     (android.app.lib_name below) and calls ANativeActivity_onCreate, which
+     native_app_glue owns. INTERNET is the one thing this manifest adds
+     over playground's: ws::net's sockets need it for the discovery beats
+     and the TCP chat pairs. Portrait-locked: the swapchain builds with
+     preTransform = the surface's currentTransform, and a fixed
+     orientation keeps that IDENTITY in the common case. extractNativeLibs
+     keeps lib loading on the classic install-time extraction path (the
+     packager deflates the .so; stored page-aligned .so's would need
+     zipalign -p). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.ws.chatter"
+    android:versionCode="1"
+    android:versionName="0.1">
+
+    <!-- Chat needs the network: UDP discovery beats + TCP connections. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- minSdk tracks ANDROID_PLATFORM (CMakePresets.json): libuv 1.53's
+         unix spawn path calls posix_spawn, which bionic declares only
+         from API 28. -->
+    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="35" />
+
+    <application
+        android:hasCode="false"
+        android:label="ws chatter"
+        android:extractNativeLibs="true"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:label="ws chatter"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density">
+            <!-- The module base name: libchatter.so, no prefix, no suffix. -->
+            <meta-data android:name="android.app.lib_name"
+                android:value="chatter" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
