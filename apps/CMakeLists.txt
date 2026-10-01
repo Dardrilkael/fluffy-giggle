@@ -8,4 +8,7 @@ if(NOT ANDROID)
   # netdemo is the same kind of console app - ws::net traffic narrated
   # through ws::core logs.
   add_subdirectory(netdemo)
+  # netchat too: several terminals (or machines) find each other over
+  # discovery and exchange framed text over TCP.
+  add_subdirectory(netchat)
 endif()

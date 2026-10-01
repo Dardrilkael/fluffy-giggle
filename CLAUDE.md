@@ -48,5 +48,9 @@ One commit per phase on `main`.
 - `apps/netdemo` - headless ws::net example: one EventLoop running framed
   TCP over loopback, a UDP round trip and LAN discovery, then an explicit
   teardown with loop work still in flight.
+- `apps/netchat` - terminal chat over ws::net: running copies find each
+  other via LAN + loopback discovery beats (the smaller listen port
+  dials, one framed TCP connection per pair); lines typed in one terminal
+  print in all the others.
 
 Each `libs/<name>/CLAUDE.md` documents that lib's own rules and tests.
