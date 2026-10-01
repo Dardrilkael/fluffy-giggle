@@ -19,6 +19,9 @@ class FakeStreamPeer final : public IStreamPeer {
  public:
   void attach_sink(IStreamSink* sink) override { sink_ = sink; }
 
+  void start() override {}  // tests drive the fake by hand
+  void set_keepalive(std::shared_ptr<void>) override {}
+
   void write(std::vector<std::byte> bytes) override {
     if (dead_) {
       return;  // inert after death

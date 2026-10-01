@@ -47,6 +47,19 @@ class ConnectionLogic final : public IStreamSink {
   void on_stream_dead(NetError reason) override;
 
   // --- user side (the public TcpConnection pimpl forwards these) ---
+  // Kicks the peer's I/O off (IStreamPeer::start). The public layer
+  // calls this once callbacks are wired and the keepalive is armed.
+  void start();
+
+  // The raw peer, for backend plumbing (keepalive arming) - not for I/O.
+  [[nodiscard]] IStreamPeer* peer() const noexcept { return peer_.get(); }
+
+  // Receive cap for incoming frames (public set_max_message_size).
+  // Call before traffic; too_large is sticky once tripped.
+  void set_max_message(std::uint32_t max_message) {
+    parser_.set_max_payload(max_message);
+  }
+
   [[nodiscard]] ws::core::Status send(std::span<const std::byte> payload);
   [[nodiscard]] ws::core::Status close();
   void abort();

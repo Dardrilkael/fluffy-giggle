@@ -42,6 +42,35 @@ TEST_CASE("posted work runs FIFO on the loop, then run() drains") {
   CHECK(loop.run().has_value());  // idle loop: a clean no-op run
 }
 
+TEST_CASE("a post made from inside a post runs on the same run()") {
+  // The wake async never holds the loop open: without run() flushing the
+  // chain again, the inner post would strand on an otherwise-idle loop
+  // until some LATER run() happened to pick it up.
+  EventLoop loop;
+  std::atomic<int> order{0};
+  std::atomic<int> inner_code{0};  // 0 = the inner post was accepted
+  REQUIRE(loop.post([&] {
+    order += 1;
+    if (const auto s = loop.post([&] { order += 10; }); !s.has_value()) {
+      inner_code = s.error().code;  // no asserts inside loop callbacks
+    }
+  }).has_value());
+  REQUIRE(loop.run().has_value());
+  CHECK(inner_code == 0);
+  CHECK(order == 11);
+}
+
+TEST_CASE("run_once also flushes a post chain that posts again") {
+  EventLoop loop;
+  std::atomic<int> order{0};
+  REQUIRE(loop.post([&] {
+    order += 1;
+    (void)loop.post([&] { order += 10; });  // outcome checked by `order`
+  }).has_value());
+  REQUIRE(loop.run_once().has_value());
+  CHECK(order == 11);
+}
+
 TEST_CASE("post from another thread while run() is in flight") {
   EventLoop loop;
   std::atomic<int> from_other{0};

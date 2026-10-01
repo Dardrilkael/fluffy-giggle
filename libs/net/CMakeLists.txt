@@ -13,7 +13,7 @@ if(NOT MSVC)
 endif()
 
 ws_add_test(net SOURCES tests/test_api.cpp tests/test_frame.cpp tests/test_loop.cpp
-                              tests/test_connection_core.cpp)
+                              tests/test_connection_core.cpp tests/test_tcp.cpp)
 # tests drive the internal framing core directly (the ui pattern: src/
 # never reaches apps, but tests reach it through this PRIVATE path).
 if(TARGET test_net)

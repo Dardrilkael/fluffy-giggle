@@ -26,6 +26,7 @@ enum class NetError : std::int32_t {
   connection_closed = 10, // clean close (local close() completed, or a peer FIN)
   connection_reset = 11,  // abrupt peer disconnect (RST or a read error)
   already_closed = 12,    // API used after close completed
+  connection_refused = 13, // an async connect found nothing listening
 };
 
 // One-line description per code, from a static table. This is the ONLY
@@ -46,6 +47,7 @@ enum class NetError : std::int32_t {
     case NetError::connection_closed: return "connection closed";
     case NetError::connection_reset: return "connection reset";
     case NetError::already_closed: return "already closed";
+    case NetError::connection_refused: return "connection refused";
   }
   return "unknown net error";
 }

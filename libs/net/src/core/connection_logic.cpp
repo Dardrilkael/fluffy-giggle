@@ -72,6 +72,10 @@ void ConnectionLogic::on_stream_dead(NetError reason) {
   }
 }
 
+void ConnectionLogic::start() {
+  peer_->start();
+}
+
 ws::core::Status ConnectionLogic::send(std::span<const std::byte> payload) {
   if (state_ != State::open && state_ != State::connecting) {
     return fail(NetError::already_closed, "send: connection is not open");

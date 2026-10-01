@@ -18,6 +18,10 @@ EventLoop::EventLoop() : impl_(std::make_unique<Impl>()) {}
 
 EventLoop::~EventLoop() = default;  // Impl dtor drains the backend
 
+detail::ILoopBackend* EventLoop::backend() const {
+  return impl_->backend.get();
+}
+
 ws::core::Status EventLoop::run() {
   if (impl_->backend->on_loop_thread()) {
     return fail(NetError::loop_stopped, "run() is not re-entrant");

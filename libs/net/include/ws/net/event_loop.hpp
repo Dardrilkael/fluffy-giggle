@@ -19,6 +19,13 @@
 
 namespace ws::net {
 
+class TcpConnection;
+class TcpListener;
+
+namespace detail {
+class ILoopBackend;  // the seam's own name (core/transport.hpp) - no
+}                    // backend type ever appears in a public header
+
 struct TimerHandle {
   std::uint32_t value = 0;  // 0 is never issued
   [[nodiscard]] bool valid() const noexcept { return value != 0; }
@@ -65,6 +72,14 @@ class WS_NET_API EventLoop {
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
+
+  // The backend behind the pimpl, for the socket classes (the only
+  // friends) to build their peers/listeners through the seam. A
+  // ws::net-internal name - no backend type appears in this header.
+  [[nodiscard]] detail::ILoopBackend* backend() const;
+
+  friend class TcpConnection;
+  friend class TcpListener;
 };
 
 }  // namespace ws::net

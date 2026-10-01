@@ -13,6 +13,7 @@
 #include <span>
 #include <vector>
 
+#include <ws/net/address.hpp>
 #include <ws/net/errors.hpp>
 
 namespace ws::net::detail {
@@ -89,6 +90,17 @@ class IStreamPeer {
   // after construction, before anything else.
   virtual void attach_sink(IStreamSink* sink) = 0;
 
+  // Kick the peer's I/O off: a client begins connecting, an accepted
+  // socket announces itself (on_connected) and starts reading. Called
+  // once, after attach_sink; late or repeated calls are no-ops.
+  virtual void start() = 0;
+
+  // The peer keeps `owner` alive until its handle's close callback has
+  // run - dropping every outside reference mid-flight must never free a
+  // live backend handle (the CLAUDE.md lifetime rule). The type is
+  // erased on purpose so the seam stays backend-agnostic.
+  virtual void set_keepalive(std::shared_ptr<void> owner) = 0;
+
   // Queue bytes (the copy is taken here). No-op once dead.
   virtual void write(std::vector<std::byte> bytes) = 0;
 
@@ -106,5 +118,42 @@ class IStreamPeer {
   // Bytes queued but not yet handed to the OS (backpressure metric).
   [[nodiscard]] virtual std::size_t pending() const = 0;
 };
+
+// The listener side of the seam. close() is idempotent; accepted
+// connections outlive the acceptor they came from.
+class IStreamAcceptor {
+ public:
+  virtual ~IStreamAcceptor() = default;
+
+  // Stop accepting and release the listening handle. The accept callback
+  // never fires again; existing connections are unaffected.
+  virtual void close() = 0;
+
+  // The address actually bound (the real port when the bind used 0).
+  [[nodiscard]] virtual Address local() const = 0;
+
+  // Same lifetime rule as IStreamPeer::set_keepalive.
+  virtual void set_keepalive(std::shared_ptr<void> owner) = 0;
+};
+
+// Accepted peers are handed to the owner together with the remote's
+// address (the sink wiring, keepalive and start are the owner's job).
+using StreamAcceptFn =
+    std::function<void(std::unique_ptr<IStreamPeer> peer, Address from)>;
+
+// ---- backend factories (implemented in src/backend/uv) ----
+
+// Starts a client connect. nullptr: the backend could not even begin
+// (an address it cannot put on the wire). The asynchronous part of
+// connecting - refused, unreachable, reset - reports through
+// on_stream_dead like any other death.
+[[nodiscard]] std::unique_ptr<IStreamPeer> make_stream_peer_connect(
+    ILoopBackend& loop, const Address& peer);
+
+// Binds and listens. nullptr: bind or listen failed (address in use,
+// invalid for the backend, ...).
+[[nodiscard]] std::unique_ptr<IStreamAcceptor> make_stream_acceptor(
+    ILoopBackend& loop, const Address& local, int backlog,
+    StreamAcceptFn on_accept);
 
 }  // namespace ws::net::detail

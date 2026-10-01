@@ -25,6 +25,20 @@ UvLoopBackend::~UvLoopBackend() {
   if (!alive_) {
     return;
   }
+  // Sockets the user never closed: force-close them with their own close
+  // callbacks so their cleanup (and their keepalive release) still runs
+  // in the drain below - the loop never outlives a live handle it made.
+  // The registry is swapped out first: on Windows a uv_close on a handle
+  // with no pending reqs runs the close callback synchronously, inside
+  // the uv_close call itself - and those callbacks untrack() from this
+  // vector, which must not mutate under the loop below.
+  std::vector<std::pair<uv_handle_t*, uv_close_cb>> doomed;
+  doomed.swap(tracked_);
+  for (const auto& [handle, on_closed] : doomed) {
+    if (!uv_is_closing(handle)) {
+      uv_close(handle, on_closed);
+    }
+  }
   uv_close(reinterpret_cast<uv_handle_t*>(&wake_), nullptr);
   for (const auto& [id, entry] : timers_) {
     if (!entry->closing) {  // closing entries already have their close in
@@ -45,6 +59,19 @@ UvLoopBackend::~UvLoopBackend() {
   }
   ws::core::error("net: event loop failed to drain at teardown - leaking "
                   "the backend rather than freeing live handles");
+}
+
+void UvLoopBackend::track(uv_handle_t* handle, uv_close_cb on_closed) {
+  tracked_.emplace_back(handle, on_closed);
+}
+
+void UvLoopBackend::untrack(uv_handle_t* handle) {
+  for (auto it = tracked_.begin(); it != tracked_.end(); ++it) {
+    if (it->first == handle) {
+      tracked_.erase(it);
+      return;
+    }
+  }
 }
 
 void UvLoopBackend::post(std::function<void()> fn) {
@@ -103,6 +130,16 @@ void UvLoopBackend::run() {
   loop_thread_.store(std::this_thread::get_id(), std::memory_order_relaxed);
   drain_posts();  // posts queued before run() execute at entry
   uv_run(&loop_, UV_RUN_DEFAULT);
+  // The wake async never holds the loop open, so a post made from inside
+  // a post would strand once the loop runs out of other work. Keep
+  // flushing post chains - each pass goes through uv_run first, so
+  // timers, sockets and stop() still get their turn between drains (a
+  // post that re-posts forever is simply unbounded work, same as an
+  // endless timer chain).
+  while (has_pending_posts()) {
+    drain_posts();
+    uv_run(&loop_, UV_RUN_DEFAULT);
+  }
   loop_thread_.store(std::thread::id{}, std::memory_order_relaxed);
 }
 
@@ -113,6 +150,12 @@ void UvLoopBackend::run_once() {
   loop_thread_.store(std::this_thread::get_id(), std::memory_order_relaxed);
   drain_posts();
   uv_run(&loop_, UV_RUN_ONCE);
+  // Same strand hazard as run(): an otherwise-idle loop would never
+  // deliver the wake event, so flush the post chain - one turn each.
+  while (has_pending_posts()) {
+    drain_posts();
+    uv_run(&loop_, UV_RUN_ONCE);
+  }
   loop_thread_.store(std::thread::id{}, std::memory_order_relaxed);
 }
 
@@ -145,6 +188,11 @@ void UvLoopBackend::drain_posts() {
   for (auto& fn : ready) {
     fn();  // callbacks must not throw: a throw crosses the libuv C boundary
   }
+}
+
+bool UvLoopBackend::has_pending_posts() const {
+  const std::lock_guard<std::mutex> lock(posts_mutex_);
+  return !posts_.empty();
 }
 
 void UvLoopBackend::on_timer(uv_timer_t* timer) {
