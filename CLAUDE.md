@@ -45,5 +45,8 @@ One commit per phase on `main`.
 - `apps/wavplayer` - headless ws::audio smoke app (desktop console app):
   plays a synthesized arpeggio (or the wav passed as argv[1]) on the
   default device.
+- `apps/netdemo` - headless ws::net example: one EventLoop running framed
+  TCP over loopback, a UDP round trip and LAN discovery, then an explicit
+  teardown with loop work still in flight.
 
 Each `libs/<name>/CLAUDE.md` documents that lib's own rules and tests.

@@ -5,4 +5,7 @@ add_subdirectory(playground)
 # update()/is_playing() with stdout logging - so the app stays gated.
 if(NOT ANDROID)
   add_subdirectory(wavplayer)
+  # netdemo is the same kind of console app - ws::net traffic narrated
+  # through ws::core logs.
+  add_subdirectory(netdemo)
 endif()
