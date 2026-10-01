@@ -21,6 +21,9 @@ namespace ws::net {
 
 class TcpConnection;
 class TcpListener;
+class UdpSocket;
+class DiscoveryAnnouncer;
+class DiscoveryBrowser;
 
 namespace detail {
 class ILoopBackend;  // the seam's own name (core/transport.hpp) - no
@@ -80,6 +83,9 @@ class WS_NET_API EventLoop {
 
   friend class TcpConnection;
   friend class TcpListener;
+  friend class UdpSocket;
+  friend class DiscoveryAnnouncer;
+  friend class DiscoveryBrowser;
 };
 
 }  // namespace ws::net

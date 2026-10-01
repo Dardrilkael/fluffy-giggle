@@ -56,6 +56,14 @@ under include/ (it lives behind pimpls, included only by src/backend/uv).
   returning (the caller's buffer is free to die with the call). A
   zero-copy send is a possible future addition if profiling ever shows the
   copy matters; not implemented now.
+- UDP is best-effort END TO END and the API owns that: `UdpSocket::
+  send_to` fails synchronously only (closed socket, bad address,
+  over-cap payload); asynchronous outcomes - an ICMP "port unreachable"
+  answering an earlier send, a datagram lost on the wire - are
+  deliberately unreported (the backend swallows the recv-side
+  UV_ECONNRESET Windows raises for it, and the send callback ignores
+  its status). Discovery inherits the same silence: a beat that never
+  lands simply means "not seen lately". Confirmed delivery is TCP's job.
 - TLS/WAN/reliable-UDP are out of scope v1. The seam above is where they
   would land (TLS wraps `IStreamPeer`), so none of them will change the
   public headers either.

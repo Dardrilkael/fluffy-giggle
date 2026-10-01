@@ -13,6 +13,7 @@
 #include <span>
 #include <vector>
 
+#include <ws/core/result.hpp>
 #include <ws/net/address.hpp>
 #include <ws/net/errors.hpp>
 
@@ -155,5 +156,60 @@ using StreamAcceptFn =
 [[nodiscard]] std::unique_ptr<IStreamAcceptor> make_stream_acceptor(
     ILoopBackend& loop, const Address& local, int backlog,
     StreamAcceptFn on_accept);
+
+// ---- UDP datagram seam ----
+
+// Upcalls from a datagram socket into its owner. All fire on the loop
+// thread; `data` is valid only for the call (debug builds poison the
+// bytes right after, same as the framing core's delivered spans).
+class IDatagramSink {
+ public:
+  virtual ~IDatagramSink() = default;
+
+  // One datagram arrived. Empty datagrams never arrive (the backend
+  // skips them; the public send refuses to make one).
+  virtual void on_packet(std::span<const std::byte> data, Address from) = 0;
+};
+
+// The datagram side of the seam: what a bound UDP socket offers. Same
+// lifetime discipline as the stream half - the ctx outlives the object
+// and frees itself in the uv close callback.
+class IDatagram {
+ public:
+  virtual ~IDatagram() = default;
+
+  // Give the sink someone to report to. Called once by the owner right
+  // after construction; datagrams arriving before it are dropped.
+  virtual void attach_sink(IDatagramSink* sink) = 0;
+
+  // Same lifetime rule as IStreamPeer::set_keepalive.
+  virtual void set_keepalive(std::shared_ptr<void> owner) = 0;
+
+  // Sends one datagram (the copy is taken here). Synchronous failures -
+  // a dead socket, an address the backend cannot use, a payload over
+  // the wire cap - fail the Status; asynchronous ones (an ICMP
+  // "port unreachable" answering an earlier send) are deliberately
+  // not reported anywhere: UDP is best-effort by design.
+  [[nodiscard]] virtual ws::core::Status send_to(
+      const Address& to, std::span<const std::byte> data) = 0;
+
+  // Closes the socket: on_packet never fires again, the port is
+  // released. Idempotent at the seam (the public layer reports
+  // already_closed on the paths that matter).
+  virtual void close() = 0;
+
+  // The address actually bound (the real port when the bind used 0).
+  [[nodiscard]] virtual Address local() const = 0;
+};
+
+// ---- datagram backend factory (implemented in src/backend/uv) ----
+
+// Binds a UDP socket and starts receiving (port 0 = ephemeral).
+// `reuse` lets a second socket bind the same port - the discovery
+// pattern, where several local browsers share one machine. nullptr:
+// bind or the receive start failed.
+[[nodiscard]] std::unique_ptr<IDatagram> make_datagram(ILoopBackend& loop,
+                                                       const Address& local,
+                                                       bool reuse);
 
 }  // namespace ws::net::detail
