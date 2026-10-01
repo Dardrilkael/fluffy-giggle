@@ -45,7 +45,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "ANDROID_ABI": "arm64-v8a",
-        "ANDROID_PLATFORM": "android-26",
+        "ANDROID_PLATFORM": "android-28",
         "ANDROID_STL": "c++_static",
         "WS_BUILD_TESTS": "OFF",
         "WS_BUILD_APPS": "ON"

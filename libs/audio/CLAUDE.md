@@ -48,10 +48,11 @@ appears under include/ (OpenAL lives behind engine.hpp's pimpl).
   `backend_error` (the message carries the AL code, via `al_describe`).
   Teardown deletes sources and buffers while the context is still current,
   then releases context and device - in that order.
-- Cross-platform since the on-device decision landed: minSdk 26 (the
-  playground manifest's floor). Oboe uses AAudio from API 27, so a device
-  at exactly 26 still sounds through Oboe's internal OpenSL - a fallback
-  inside Oboe, not an OpenAL backend of ours. OpenAL Soft's own OpenSL
+- Cross-platform since the on-device decision landed: minSdk 28 (the
+  playground manifest's floor; the workspace level rose from 26 with
+  libuv 1.53, whose unix spawn path needs bionic's API-28 posix_spawn -
+  see libs/net/CLAUDE.md). Oboe uses AAudio from API 27, so every
+  supported device sounds through AAudio. OpenAL Soft's own OpenSL
   backend is forced OFF: Oboe is the one backend, deterministically
   (`ALSOFT_REQUIRE_OBOE` turns a resolution miss into a configure error).
 - Tests build their fixtures in the temp dir at runtime - never commit

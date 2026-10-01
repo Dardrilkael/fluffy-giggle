@@ -23,6 +23,10 @@ under include/ (it lives behind pimpls, included only by src/backend/uv).
 - `ws::core` (Result/Status, logging) - PUBLIC.
 - libuv v1.53.0 (async I/O) - PRIVATE: only `src/backend/uv` includes
   `uv.h`; `cmake/ThirdParty.cmake` fetches it STATIC for every platform.
+  One platform cost of this exact version: 1.53's unix spawn path calls
+  posix_spawn directly, and bionic declares that family only from
+  API 28 - that (not any ws code) is why ANDROID_PLATFORM is
+  android-28 in CMakePresets.json.
   The backend is swappable BY DESIGN: core logic talks only to the
   `ILoopBackend`/`IStreamPeer`/`IDatagram` seam (`src/core/transport.hpp`),
   so a future WSAPoll/epoll backend (`src/backend/poll`, say) changes no
@@ -44,6 +48,12 @@ under include/ (it lives behind pimpls, included only by src/backend/uv).
   never frees a live backend handle. Every uv handle is closed via
   `uv_close` and freed only in its close callback (RAII discipline lives in
   `src/backend/uv`); `EventLoop`'s destructor drains before freeing.
+- Discovery cadence: an announcer's beats are loop work in their own
+  right - the one-shot timer chain re-arms inside every beat, so the
+  cadence keeps `run()` alive until `stop()` or loop teardown. Dropping
+  the announcer's Ptr does NOT stop it (the socket's keepalive owns the
+  Impl; tests/test_discovery.cpp pins the beat-after-drop case). `stop()`
+  is the off switch.
 - Message spans: `on_message` delivers a `std::span<const std::byte>` into
   the connection's read buffer, valid ONLY during the callback. Debug
   builds poison the delivered bytes (0xCD) right after the callback
@@ -70,5 +80,12 @@ under include/ (it lives behind pimpls, included only by src/backend/uv).
 
 ## Tests
 ctest --preset debug -R net
-Loopback tests need nothing beyond the machine itself (127.0.0.1,
-ephemeral ports); the socket-free core tests run everywhere.
+57 cases: api/errors/address, framing (with the deliberate span-lifetime
+"do not do this" case), loop, socket-free connection core over the fake
+transport, TCP over loopback, UDP over loopback, and discovery over a
+private loopback channel (real broadcast is not CI-testable; the wire
+format is spelled out in the foreign-packet test so a format change
+fails there). Loopback tests need nothing beyond the machine itself
+(127.0.0.1, ephemeral ports); the socket-free core tests run everywhere.
+`fuzz_net` is the frame-parser fuzz driver - desktop-only, deliberately
+not in ctest; smoke it by hand with a small iteration count.
