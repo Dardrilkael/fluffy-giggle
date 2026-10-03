@@ -1,8 +1,11 @@
-# Package an app into a signed, installable APK - no Java, no Gradle.
+# Package an app into a signed, installable APK - no Gradle.
 # aapt2 links the manifest (+ assets/ when the app has any), the module
 # .so is zipped in as lib/arm64-v8a/, then zipalign + apksigner (the
-# standard debug keystore) finish it. NativeActivity + hasCode=false
-# means the APK carries zero code besides lib<App>.so.
+# standard debug keystore) finish it. An app may also keep Java shims in
+# apps/<App>/android/*.java: they are javac'd + d8'd into classes.dex and
+# that app's manifest must set hasCode="true" and point its activity at
+# the class (chatter's MulticastLock lives there). Apps with no .java
+# stay pure NativeActivity + hasCode=false - zero code besides lib<App>.so.
 #
 # Usage:
 #   tools/package-android.ps1                          playground (default)
@@ -43,6 +46,11 @@ $apksigner  = Join-Path $buildTools.FullName 'apksigner.bat'
 $androidJar = Join-Path $platform.FullName 'android.jar'
 $adb        = Join-Path $sdk 'platform-tools\adb.exe'
 
+# javac/d8/apksigner all need a JVM: fall back to the Android Studio JBR
+# when JAVA_HOME is unset (decided once, used by steps 2.5 and 5).
+$jbr = 'C:\Program Files\Android\Android Studio\jbr'
+if (-not $env:JAVA_HOME -and (Test-Path $jbr)) { $env:JAVA_HOME = $jbr }
+
 # --- 1. build the module (the preset pins the NDK; no MSVC env needed) ------
 Push-Location $repo
 try {
@@ -67,13 +75,42 @@ if (Test-Path $assets) { $linkArgs += @('-A', $assets) }
 & $aapt2 @linkArgs
 if ($LASTEXITCODE -ne 0) { throw 'aapt2 link failed' }
 
-# --- 3. lib/arm64-v8a/lib$App.so ---------------------------------------------
+# --- 2.5. optional Java shim: apps/<App>/android/*.java -> classes.dex -------
+# Only apps that ship shims pay for this; the app's manifest must set
+# hasCode="true" and name the class as its activity. javac comes from the
+# same JVM apksigner uses (the JBR), d8 from build-tools. -target 8 keeps
+# the class file inside d8's comfort zone; --min-api tracks the app's
+# minSdkVersion (28).
+$javaFiles = @(Get-ChildItem (Join-Path $repo ("apps\$App\android")) -Filter *.java -ErrorAction SilentlyContinue)
+$dexPath = $null
+if ($javaFiles.Count -gt 0) {
+    $javac = Join-Path $jbr 'bin\javac.exe'
+    if (-not (Test-Path $javac)) { throw "javac not found in $jbr (need the Android Studio JBR, or set JAVA_HOME)" }
+    $d8 = Join-Path $buildTools.FullName 'd8.bat'
+    $classDir = Join-Path $repo 'build\android\java'
+    New-Item -ItemType Directory -Force $classDir | Out-Null
+    Remove-Item (Join-Path $classDir '*') -Recurse -Force -ErrorAction SilentlyContinue
+    & $javac -source 8 -target 8 -Xlint:-options -bootclasspath $androidJar -d $classDir @($javaFiles.FullName)
+    if ($LASTEXITCODE -ne 0) { throw 'javac failed' }
+    & $d8 --min-api 28 --lib $androidJar --output $classDir @((Get-ChildItem $classDir -Recurse -Filter *.class).FullName)
+    if ($LASTEXITCODE -ne 0) { throw 'd8 failed' }
+    $dexPath = Join-Path $classDir 'classes.dex'
+    if (-not (Test-Path $dexPath)) { throw 'd8 produced no classes.dex' }
+}
+
+# --- 3. lib/arm64-v8a/lib$App.so (+ classes.dex when step 2.5 ran) ------------
 # aapt2 has no native-lib flag (AGP does that in Gradle-land), so the entry
 # is zipped in directly. extractNativeLibs="true" in the manifest has the
 # installer unpack it, so any compression is fine.
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [System.IO.Compression.ZipFile]::Open($unsigned, 'Update')
 try {
+    if ($dexPath) {
+        $dexEntry = $zip.CreateEntry('classes.dex')
+        $dst = $dexEntry.Open()
+        $src = [System.IO.File]::OpenRead($dexPath)
+        try { $src.CopyTo($dst) } finally { $src.Dispose(); $dst.Dispose() }
+    }
     $entry = $zip.CreateEntry(("lib/arm64-v8a/lib$App.so"))
     $dst = $entry.Open()
     $src = [System.IO.File]::OpenRead($so)
@@ -95,11 +132,6 @@ if (-not (Test-Path $keystore)) {
     & $keytool -genkeypair -keystore $keystore -storepass android -keypass android -alias androiddebugkey -dname 'CN=Android Debug,O=Android,C=US' -keyalg RSA -keysize 2048 -validity 10000
     if ($LASTEXITCODE -ne 0) { throw 'keytool failed' }
 }
-# apksigner is a .bat needing a JVM: fall back to the Android Studio JBR
-# when JAVA_HOME is unset.
-$jbr = 'C:\Program Files\Android\Android Studio\jbr'
-if (-not $env:JAVA_HOME -and (Test-Path $jbr)) { $env:JAVA_HOME = $jbr }
-
 $apk = Join-Path $repo ("build\android\$App.apk")
 & $apksigner sign --ks $keystore --ks-pass pass:android --key-pass pass:android --ks-key-alias androiddebugkey --out $apk $aligned
 if ($LASTEXITCODE -ne 0) { throw 'apksigner failed' }

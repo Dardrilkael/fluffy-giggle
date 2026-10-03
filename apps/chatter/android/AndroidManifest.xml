@@ -1,10 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Input to tools/package-android.ps1 (aapt2 link). NativeActivity +
-     hasCode=false: zero Java - the OS dlopens lib/arm64-v8a/libchatter.so
-     (android.app.lib_name below) and calls ANativeActivity_onCreate, which
-     native_app_glue owns. INTERNET is the one thing this manifest adds
-     over playground's: ws::net's sockets need it for the discovery beats
-     and the TCP chat pairs. Portrait-locked: the swapchain builds with
+<!-- Input to tools/package-android.ps1 (aapt2 link). The APK carries one
+     Java class: ChatterActivity.java next to this file, a NativeActivity
+     subclass that only holds a WifiManager.MulticastLock (Wi-Fi chips
+     filter broadcast frames in hardware until an app holds the lock -
+     without it the discovery beats never reach ws::net). Past the shim
+     the OS dlopens lib/arm64-v8a/libchatter.so (android.app.lib_name
+     below) and calls ANativeActivity_onCreate, which native_app_glue
+     owns. INTERNET covers the sockets; the wifi/network permissions ride
+     with the MulticastLock. Portrait-locked: the swapchain builds with
      preTransform = the surface's currentTransform, and a fixed
      orientation keeps that IDENTITY in the common case. extractNativeLibs
      keeps lib loading on the classic install-time extraction path (the
@@ -17,19 +20,27 @@
 
     <!-- Chat needs the network: UDP discovery beats + TCP connections. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- MulticastLock: without it the chip-level filter drops the
+         broadcast/multicast discovery beats before the kernel ever sees
+         them. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <!-- minSdk tracks ANDROID_PLATFORM (CMakePresets.json): libuv 1.53's
          unix spawn path calls posix_spawn, which bionic declares only
          from API 28. -->
     <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="35" />
 
+    <!-- hasCode="true": the APK carries classes.dex with the
+         MulticastLock shim (apps without Java stay hasCode="false"). -->
     <application
-        android:hasCode="false"
+        android:hasCode="true"
         android:label="ws chatter"
         android:extractNativeLibs="true"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
         <activity
-            android:name="android.app.NativeActivity"
+            android:name="com.ws.chatter.ChatterActivity"
             android:exported="true"
             android:label="ws chatter"
             android:screenOrientation="portrait"
