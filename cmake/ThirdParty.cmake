@@ -265,3 +265,68 @@ FetchContent_Declare(libuv
   GIT_TAG v1.53.0
   GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(libuv)
+
+# --- Box2D (2D physics backend for ws::physics) --------------------------------
+# A real CMake project - FetchContent_MakeAvailable, the glfw/openal/libuv
+# pattern. v3's target is `box2d` (alias box2d::box2d), STATIC via the
+# BUILD_SHARED_LIBS-unset default like every third-party here, linked PRIVATE
+# by ws_physics. SAMPLES/UNIT_TESTS/VALIDATE are declared upstream only when
+# the project stands alone, so embedding already skips them - but the cache
+# FORCE keeps that deterministic across presets (and VALIDATE would compile
+# debug-only runtime checks into the lib; off in everything we ship).
+# Unconditional fetch: ws::physics builds the same 2D surface on Android.
+set(BOX2D_SAMPLES OFF CACHE BOOL "" FORCE)
+set(BOX2D_UNIT_TESTS OFF CACHE BOOL "" FORCE)
+set(BOX2D_VALIDATE OFF CACHE BOOL "" FORCE)
+set(BOX2D_BENCHMARKS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(box2d
+  GIT_REPOSITORY https://github.com/erincatto/box2d.git
+  GIT_TAG v3.1.1
+  GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(box2d)
+
+# --- Jolt Physics (3D physics backend for ws::physics) -------------------------
+# A real CMake project living in the repo's Build/ directory (hence
+# SOURCE_SUBDIR), the same MakeAvailable pattern. Embedded - not the root
+# CMakeLists - it configures ONLY the core library: upstream gates unit
+# tests/samples/viewer on being the top-level project. Target `Jolt`, STATIC:
+# JPH_BUILD_SHARED_LIBS pinned OFF. The forced options matter:
+#   USE_STATIC_MSVC_RUNTIME_LIBRARY defaults ON under MSVC and would mix /MT
+#     objects into our /MD binaries - it must follow OUR project default.
+#   FLOATING_POINT_EXCEPTIONS_ENABLED defaults ON: trapped FPEs would abort
+#     Debug test runs at the first NaN a deliberately-invalid test produced.
+#   CROSS_PLATFORM_DETERMINISTIC stays OFF deliberately - ws::physics
+#     promises determinism per binary (same build, same thread count), not
+#     bit-identical results across compilers and ISAs.
+#   ENABLE_ALL_WARNINGS / INTERPROCEDURAL_OPTIMIZATION / ENABLE_INSTALL are
+#     upstream standalone-build concerns, not ours (warnings-as-errors and
+#     LTO on a dependency slow every preset for nothing), and the debug
+#     renderer / profiler are dead weight a headless wrapper never touches.
+#   JPH_USE_DX12/JPH_USE_VK/JPH_USE_MTL gate Jolt's GPU compute (the hair
+#     demo pipeline) and its BUILD-TIME HLSL->SPIRV shader compilation. All
+#     three default ON on every platform - on the NDK there is no
+#     glslc/dxc, so those steps fail outright (Vulkan_GLSLC_EXECUTABLE-
+#     NOTFOUND). ws::physics runs plain CPU rigid-body simulation and never
+#     touches GPU compute, so all three go OFF everywhere; CPU compute keeps
+#     its upstream default.
+# The desktop SIMD profile (SSE4.1/AVX2/...) keeps upstream's defaults; those
+# options don't apply to Android arm64. Unconditional fetch: ws::physics
+# builds the same 3D surface on Android too.
+set(CROSS_PLATFORM_DETERMINISTIC OFF CACHE BOOL "" FORCE)
+set(FLOATING_POINT_EXCEPTIONS_ENABLED OFF CACHE BOOL "" FORCE)
+set(JPH_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
+set(ENABLE_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
+set(INTERPROCEDURAL_OPTIMIZATION OFF CACHE BOOL "" FORCE)
+set(ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+set(DEBUG_RENDERER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+set(PROFILER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+set(JPH_USE_DX12 OFF CACHE BOOL "" FORCE)
+set(JPH_USE_VK OFF CACHE BOOL "" FORCE)
+set(JPH_USE_MTL OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(jolt
+  GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
+  GIT_TAG v5.6.0
+  GIT_SHALLOW TRUE
+  SOURCE_SUBDIR Build)
+FetchContent_MakeAvailable(jolt)

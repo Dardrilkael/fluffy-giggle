@@ -11,3 +11,8 @@ add_subdirectory(audio)
 # LAN discovery, uv private to src/backend/uv (the glfw/openal fetch
 # pattern, unconditional).
 add_subdirectory(net)
+
+# ws::physics is cross-platform on the same two backends everywhere:
+# Box2D (2D) + Jolt (3D), both private to src/backend and both fetched
+# unconditionally - the 2D and 3D surfaces build identically on Android.
+add_subdirectory(physics)

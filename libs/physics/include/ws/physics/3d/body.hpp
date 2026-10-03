@@ -1,0 +1,58 @@
+#pragma once
+
+#include <cstdint>
+
+#include <ws/math/vecmath.hpp>
+#include <ws/physics/3d/shape.hpp>
+#include <ws/physics/common.hpp>
+
+namespace ws::physics3d {
+
+// Generational handle: O(1) lookup into the world's dense body arrays (no
+// maps). A retired slot's generation advances, so stale handles error
+// instead of aliasing. BodyId{} is never issued.
+struct BodyId {
+  std::uint32_t index = 0;
+  std::uint32_t generation = 0;
+};
+[[nodiscard]] constexpr bool operator==(BodyId l, BodyId r) {
+  return l.index == r.index && l.generation == r.generation;
+}
+[[nodiscard]] constexpr bool operator!=(BodyId l, BodyId r) {
+  return !(l == r);
+}
+
+struct Transform {
+  Vec3 position{};
+  ws::math::Quat rotation{};  // identity by default (w = 1)
+};
+
+// One entry of the bulk set_transforms path.
+struct BodyMove {
+  BodyId id{};
+  Vec3 position{};
+  ws::math::Quat rotation{};
+};
+
+// Full per-body readback (pose + velocities) from body_state().
+struct BodyState {
+  Vec3 position{};
+  ws::math::Quat rotation{};
+  Vec3 linear_velocity{};
+  Vec3 angular_velocity{};  // rad/s
+};
+
+struct BodyDesc {
+  ws::physics::BodyKind kind = ws::physics::BodyKind::dynamic;
+  Shape shape{Box{}};  // value type; equal shapes share one backend shape
+  Transform transform{};
+  Vec3 linear_velocity{};
+  Vec3 angular_velocity{};  // rad/s
+  float density = 1.0f;    // kg/m^3; > 0 for dynamic bodies
+  float friction = 0.2f;
+  float restitution = 0.0f;
+  float gravity_scale = 1.0f;
+  bool is_sensor = false;  // contact events fire, no collision response
+};
+
+}  // namespace ws::physics3d
