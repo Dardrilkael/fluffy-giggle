@@ -6,7 +6,13 @@
 // announcer's listener when its own listen port is the smaller of the
 // two, so every pair of terminals ends up with exactly one framed TCP
 // connection (equal ports - vanishingly rare with ephemeral picks -
-// simply never pair). The first frame on any connection is HELLO with a
+// simply never pair). A beat this copy cannot dial (its port is the
+// bigger one) still earns an answer: one unicast copy of our own beat,
+// straight back at the beat's source - a LAN hop can carry broadcasts
+// one way only (the wired PC here has never received the phone's Wi-Fi
+// beats), and the unicast answer crosses that hop, so both sides end
+// up holding both candidates and the port rule still gives the pair
+// exactly one connection. The first frame on any connection is HELLO with a
 // name to print; every frame after is a chat line. Whatever is typed in
 // one terminal prints in all the others; /quit (or end of input) closes
 // that copy down with connections still live.
@@ -15,6 +21,7 @@
 // run it on several machines.
 
 #include <charconv>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -135,6 +142,62 @@ int main(int argc, char* argv[]) {
 
   // --- discovery: a browser to hear beats, two announcers to send them --
 
+  const std::string beat = "netchat " + std::to_string(my_port) + " " + my_name;
+
+  ws::net::DiscoveryAnnouncer::Ptr lan_announcer;
+  auto lan_r = ws::net::DiscoveryAnnouncer::announce(
+      loop, to_bytes(beat),
+      ws::net::Address::broadcast(ws::net::kDefaultDiscoveryPort), 500);
+  if (lan_r) {
+    lan_announcer = *lan_r;
+  } else {
+    ws::core::log_error(lan_r.error());
+    ws::core::warn("netchat: no LAN beats - only this machine can see this copy");
+  }
+
+  // The same-machine rendezvous: Windows does not loop 255.255.255.255
+  // sends back to the sender's own listeners (the netdemo run showed 0
+  // local beats), but 127.255.255.255 is loopback's own directed
+  // broadcast - it stays on this machine and reaches every browser
+  // bound here. The library already sets SO_BROADCAST on every UDP
+  // socket, so this announce needs no special arrangement.
+  ws::net::DiscoveryAnnouncer::Ptr loopback_announcer;
+  auto loopback_r = ws::net::DiscoveryAnnouncer::announce(
+      loop, to_bytes(beat),
+      ws::net::Address{"127.255.255.255", ws::net::kDefaultDiscoveryPort},
+      500);
+  if (loopback_r) {
+    loopback_announcer = *loopback_r;
+  } else {
+    ws::core::log_error(loopback_r.error());
+  }
+
+  // The answer a heard beat earns when this copy is not the dialer: one
+  // unicast copy of our own beat, straight back at the beat's source -
+  // the announcer's own socket, off-cadence. A LAN hop can carry
+  // broadcasts one way only (the wired PC here has never once received
+  // the phone's Wi-Fi beats), so the peer on the far side may never
+  // learn this copy exists; the unicast answer crosses that hop, and
+  // the port rule on its side ends up holding both candidates.
+  // Throttled per host - beats keep arriving every 500ms and each would
+  // earn a fresh answer otherwise; a peer already connected to us
+  // ignores the answer (its dialed map holds our port), so nothing
+  // extra tracks "paired".
+  std::map<std::string, std::chrono::steady_clock::time_point> answered;
+  const auto answer_beat = [&](const ws::net::Address& from) {
+    if (!lan_announcer) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    auto [it, fresh] = answered.try_emplace(from.host, now);
+    if (!fresh && now - it->second < std::chrono::seconds{2}) {
+      return;
+    }
+    it->second = now;
+    (void)lan_announcer->send_once(
+        ws::net::Address{from.host, ws::net::kDefaultDiscoveryPort});
+  };
+
   ws::net::DiscoveryBrowser::Ptr browser;
   auto browser_r = ws::net::DiscoveryBrowser::browse(loop);
   if (browser_r) {
@@ -171,6 +234,7 @@ int main(int argc, char* argv[]) {
             return;  // already dialing, or talking, to this announced port
           }
           if (my_port >= port) {
+            answer_beat(from);  // teach a one-way-deaf peer this copy exists
             return;  // the smaller listen port dials: one connection per pair
           }
           auto conn_r = ws::net::TcpConnection::connect(
@@ -184,36 +248,6 @@ int main(int argc, char* argv[]) {
           dialed[std::string{port_s}] = conn.get();
           adopt(conn);
         });
-  }
-
-  const std::string beat = "netchat " + std::to_string(my_port) + " " + my_name;
-
-  ws::net::DiscoveryAnnouncer::Ptr lan_announcer;
-  auto lan_r = ws::net::DiscoveryAnnouncer::announce(
-      loop, to_bytes(beat),
-      ws::net::Address::broadcast(ws::net::kDefaultDiscoveryPort), 500);
-  if (lan_r) {
-    lan_announcer = *lan_r;
-  } else {
-    ws::core::log_error(lan_r.error());
-    ws::core::warn("netchat: no LAN beats - only this machine can see this copy");
-  }
-
-  // The same-machine rendezvous: Windows does not loop 255.255.255.255
-  // sends back to the sender's own listeners (the netdemo run showed 0
-  // local beats), but 127.255.255.255 is loopback's own directed
-  // broadcast - it stays on this machine and reaches every browser
-  // bound here. The library already sets SO_BROADCAST on every UDP
-  // socket, so this announce needs no special arrangement.
-  ws::net::DiscoveryAnnouncer::Ptr loopback_announcer;
-  auto loopback_r = ws::net::DiscoveryAnnouncer::announce(
-      loop, to_bytes(beat),
-      ws::net::Address{"127.255.255.255", ws::net::kDefaultDiscoveryPort},
-      500);
-  if (loopback_r) {
-    loopback_announcer = *loopback_r;
-  } else {
-    ws::core::log_error(loopback_r.error());
   }
 
   ws::core::info("netchat: {} here (port {}) - type to talk, /quit to leave",

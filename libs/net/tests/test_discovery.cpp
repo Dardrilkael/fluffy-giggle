@@ -100,6 +100,57 @@ TEST_CASE("an announcer's beats reach a browser, magic stripped") {
   CHECK(froms[0].host == "127.0.0.1");
 }
 
+TEST_CASE("send_once answers off-cadence from the announcer's own socket") {
+  EventLoop loop;
+  Watchdog watchdog{loop};
+
+  auto browser_result = DiscoveryBrowser::browse(loop, 0, true);
+  REQUIRE(browser_result.has_value());
+  DiscoveryBrowser::Ptr browser = *browser_result;
+  const Address browser_at = browser->local();
+
+  const std::vector<std::byte> body = payload(16, 0x5C);
+  std::vector<std::vector<std::byte>> heard;
+  std::vector<Address> froms;
+  int beats = 0;
+  browser->set_on_peer([&](std::span<const std::byte> p, Address from) {
+    ++beats;
+    heard.emplace_back(p.begin(), p.end());
+    froms.push_back(from);
+    if (beats == 1) {
+      loop.stop();  // park the loop at the cadence's first beat
+    }
+  });
+
+  // A cadence far beyond the case: the only scheduled beat is the
+  // immediate posted one, so anything after it must be a send_once.
+  auto announcer_result = DiscoveryAnnouncer::announce(
+      loop, body, Address::loopback(browser_at.port), 60000);
+  REQUIRE(announcer_result.has_value());
+  DiscoveryAnnouncer::Ptr announcer = *announcer_result;
+
+  (void)loop.run();
+  REQUIRE(beats == 1);
+
+  // The loop is parked, so the send is synchronous - exactly the state
+  // a browser callback answers from (same thread, same socket).
+  REQUIRE(
+      announcer->send_once(Address::loopback(browser_at.port)).has_value());
+  // No host, no beat.
+  CHECK(announcer->send_once(Address{}).error().code ==
+        static_cast<std::int32_t>(NetError::invalid_argument));
+
+  // Plenty of loop time for the answer to land - and nothing else may.
+  (void)loop.start_timer(300, [&loop] { loop.stop(); });
+  (void)loop.run();
+
+  CHECK(watchdog.bitten == false);
+  REQUIRE(beats == 2);
+  CHECK(heard[1] == body);       // the same payload...
+  CHECK(froms[0] == froms[1]);   // ...from the same announcer socket
+  CHECK(froms[1].host == "127.0.0.1");
+}
+
 TEST_CASE("a browser drops foreign packets and keeps the magic ones") {
   EventLoop loop;
   Watchdog watchdog{loop};

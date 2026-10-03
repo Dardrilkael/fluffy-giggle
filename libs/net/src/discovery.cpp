@@ -105,6 +105,17 @@ ws::core::Result<DiscoveryAnnouncer::Ptr> DiscoveryAnnouncer::announce(
   return Ptr{new DiscoveryAnnouncer(std::move(impl))};
 }
 
+ws::core::Status DiscoveryAnnouncer::send_once(const Address& to) {
+  if (!to.valid()) {
+    return fail(NetError::invalid_argument,
+                "send_once: the target address has no host");
+  }
+  // The announcer's own socket and already-built wire, one send, no
+  // cadence touched. A stopped announcer fails naturally - its socket
+  // is closed, and send_to reports already_closed.
+  return impl_->datagram->send_to(to, impl_->wire);
+}
+
 void DiscoveryAnnouncer::stop() {
   impl_->stopped = true;  // first: a beat mid-flight must not re-arm
   if (impl_->timer.has_value() && impl_->timer.value().valid()) {

@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstring>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -29,7 +30,12 @@ ws::core::Status send_refused(int rc) {
     return fail(NetError::message_too_large,
                 "send_to: datagram too large for the backend");
   }
-  return fail(NetError::socket_error, "send_to: backend refused the datagram");
+  // The catch-all names the backend's own error: a bare "refused" once
+  // hid a UV_EACCES (SO_BROADCAST never set) behind a generic message.
+  return fail(NetError::socket_error,
+              "send_to: backend refused the datagram (" +
+                  std::string{uv_strerror(rc)} + ", uv error " +
+                  std::to_string(rc) + ")");
 }
 
 }  // namespace
@@ -66,9 +72,6 @@ UvDatagramSocket::UvDatagramSocket(UvLoopBackend& backend,
     ctx_ = nullptr;
     return;
   }
-  // Every socket may broadcast (SO_BROADCAST): discovery needs it, and
-  // for unicast traffic the option changes nothing.
-  (void)uv_udp_set_broadcast(&ctx_->udp, 1);
   if (uv_udp_bind(&ctx_->udp, reinterpret_cast<const sockaddr*>(&sa),
                   reuse ? UV_UDP_REUSEADDR : 0) != 0) {
     ws::core::error("net: uv_udp_bind failed");
@@ -78,6 +81,18 @@ UvDatagramSocket::UvDatagramSocket(UvLoopBackend& backend,
     ctx_->owner = nullptr;  // the orphaned ctx closes alone
     ctx_ = nullptr;
     return;
+  }
+  // Every socket may broadcast (SO_BROADCAST): discovery needs it, and
+  // for unicast traffic the option changes nothing. It can only be set
+  // AFTER the bind - libuv creates the socket lazily at bind time, so a
+  // call before it returns UV_EBADF and the option silently never lands
+  // (every limited-broadcast send then dies with EACCES/WSAEACCES).
+  const int bcast_rc = uv_udp_set_broadcast(&ctx_->udp, 1);
+  if (bcast_rc != 0) {
+    // Degrade, not die: unicast keeps working, and each refused broadcast
+    // send reports the backend's own error through send_to.
+    ws::core::error("net: uv_udp_set_broadcast failed: {}",
+                    uv_strerror(bcast_rc));
   }
   if (uv_udp_recv_start(&ctx_->udp, &UvDatagramSocket::on_alloc,
                         &UvDatagramSocket::on_recv) != 0) {

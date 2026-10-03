@@ -49,6 +49,17 @@ class WS_NET_API DiscoveryAnnouncer {
       const Address& to = Address::broadcast(kDefaultDiscoveryPort),
       std::uint64_t period_ms = 1000);
 
+  // One extra beat to `to`, off-cadence, on this announcer's own socket
+  // and wire: the answer a browser owes the beat it just heard. A LAN
+  // hop can carry broadcasts one way only (a wired PC that never
+  // receives a phone's Wi-Fi beats would otherwise never learn the
+  // phone exists), and a unicast datagram straight back at the beat's
+  // source crosses that hop - so the peer learns this announcer and
+  // the pairing rule sees both candidates. Loop thread (or before
+  // run()); best-effort like every beat: an answer that never lands
+  // simply never happened.
+  [[nodiscard]] ws::core::Status send_once(const Address& to);
+
   DiscoveryAnnouncer(const DiscoveryAnnouncer&) = delete;
   DiscoveryAnnouncer& operator=(const DiscoveryAnnouncer&) = delete;
   DiscoveryAnnouncer(DiscoveryAnnouncer&&) = delete;

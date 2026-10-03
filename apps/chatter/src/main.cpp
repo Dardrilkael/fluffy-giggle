@@ -3,7 +3,13 @@
 // every 500 ms on two channels (the LAN broadcast for peers on other
 // machines, the 127.255.255.255 directed broadcast for peers on this
 // one), the smaller-listen-port-dials pairing rule that gives every pair
-// exactly one framed TCP connection, and the HELLO/SAY frames. Sharing
+// exactly one framed TCP connection, and the HELLO/SAY frames. A beat
+// this copy cannot dial (its port is the bigger one) still earns an
+// answer - one unicast copy of our own beat straight back at the source:
+// a LAN hop can carry broadcasts one way only (the wired PC here has
+// never received the phone's Wi-Fi beats), and the unicast answer crosses
+// it, so both sides hold both candidates and the port rule still gives
+// the pair exactly one connection. Sharing
 // the beat's prefix is deliberate: a chatter and a terminal netchat
 // discover each other and share one chat.
 //
@@ -37,10 +43,12 @@
 
 #include <atomic>
 #include <charconv>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <set>
 #include <mutex>
 #include <span>
 #include <string>
@@ -317,10 +325,19 @@ class ChatCore {
     if (port == port_) {
       return;  // my own beat, looped back to me
     }
+    // First sight of a peer's port - the one log a quiet run ever prints
+    // (joins and errors say the rest): that discovery itself is alive,
+    // and where the beat came from. Beats repeat every 500 ms; this
+    // fires once per port per process.
+    if (noticed_.insert(std::string{port_s}).second) {
+      ws::core::info("chatter: beat - {} (port {}) via {}",
+                     text.substr(space + 1), port_s, from.host);
+    }
     if (dialed_.count(std::string{port_s}) != 0) {
       return;  // already dialing, or talking, to this announced port
     }
     if (port_ >= port) {
+      answer_beat(from);  // teach a one-way-deaf peer this copy exists
       return;  // the smaller listen port dials: one connection per pair
     }
     auto conn_r = ws::net::TcpConnection::connect(
@@ -332,6 +349,42 @@ class ChatCore {
     ws::net::TcpConnection::Ptr conn = *conn_r;
     dialed_[std::string{port_s}] = conn.get();
     adopt(conn);
+  }
+
+  // The answer a heard beat earns when this copy is not the dialer: one
+  // unicast copy of our own beat, straight back at the beat's source -
+  // the announcer's own socket, off-cadence. A LAN hop can carry
+  // broadcasts one way only (the wired PC here has never once received
+  // the phone's Wi-Fi beats), so the peer on the far side may never
+  // learn this copy exists; the unicast answer crosses that hop, and
+  // the port rule on its side ends up holding both candidates.
+  // Throttled per host - beats keep arriving every 500ms and each would
+  // earn a fresh answer otherwise; a peer already connected to us
+  // ignores the answer (its dialed map holds our port), so nothing
+  // extra tracks "paired".
+  void answer_beat(const ws::net::Address& from) {
+    if (!lan_announcer_) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    auto [it, fresh] = answered_.try_emplace(from.host, now);
+    if (!fresh && now - it->second < std::chrono::seconds{2}) {
+      return;
+    }
+    it->second = now;
+    if (fresh) {
+      // Once per host: the one line that says the one-way-deaf hop is
+      // being bridged. Steady-state re-answers stay quiet.
+      ws::core::info("chatter: answered {} with a unicast beat", from.host);
+    }
+    const ws::core::Status sent = lan_announcer_->send_once(
+        ws::net::Address{from.host, ws::net::kDefaultDiscoveryPort});
+    if (!sent) {
+      // The cadence beats stay best-effort-silent by the lib's design,
+      // but the answer is the one datagram pairing can hinge on - a
+      // send that never even left deserves a line.
+      ws::core::log_error(sent.error());
+    }
   }
 
   // Queue one line for the gui (called on the net thread).
@@ -362,6 +415,12 @@ class ChatCore {
   // listen port in this protocol. on_closed clears the entry, so a beat
   // that keeps arriving can re-dial a peer that came back.
   std::map<std::string, ws::net::TcpConnection*> dialed_;
+  // Last unicast answer time per source host (loop thread only) -
+  // answer_beat's throttle.
+  std::map<std::string, std::chrono::steady_clock::time_point> answered_;
+  // Peer ports this copy has already logged a beat line for (loop
+  // thread only) - on_beat's once-per-port discovery log.
+  std::set<std::string> noticed_;
 
   // Written once in start(), before the net thread exists - read-only to
   // both threads after, no lock needed.
