@@ -298,6 +298,12 @@ inline Quat operator*(const Quat& a, const Quat& b) {
                 a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
 }
 
+// Zero-length input is undefined (yields inf/NaN, like GLM and normalize()).
+inline Quat normalize(const Quat& q) {
+    const float inv = 1.0f / std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    return Quat{q.x * inv, q.y * inv, q.z * inv, q.w * inv};
+}
+
 // Rotates v by q (q must be normalized).
 inline Vec3 rotate(const Quat& q, const Vec3& v) {
     const Vec3 axis{q.x, q.y, q.z};

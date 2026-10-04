@@ -1,11 +1,12 @@
 // World2D's pimpl: dimension glue over the shared machinery (world_core.hpp)
 // - Desc/shape validation, JointDesc translation (public variant with
 // BodyIds -> flat BackendJoint2D with slots), query result mapping and the
-// moved-from guards. The backend is the null one until Box2D lands
-// (src/backend/box2d) - the only line that changes then is the factory.
+// moved-from guards. Box2D v3 lives behind the seam (src/backend/box2d);
+// swapping engines touches only the factory line below.
 
 #include <cmath>
 #include <memory>
+#include <numbers>
 #include <variant>
 
 #include <ws/core/result.hpp>
@@ -22,6 +23,7 @@ namespace ws::physics::detail {
 struct Dim2D {
   using Vec = ws::math::Vec2;
   using Angular = float;
+  using Rotation = float;  // a 2D rotation is a bare angle
   using BodyId = physics2d::BodyId;
   using JointId = physics2d::JointId;
   using BodyDesc = physics2d::BodyDesc;
@@ -32,8 +34,21 @@ struct Dim2D {
   using Backend = IWorld2DBackend;
   using BackendJoint = BackendJoint2D;
   using BackendEvent = BackendEvent2D;
+  using BackendMove = BackendMove2D;
   using BackendVelocity = BackendVelocity2D;
   using CollectorBase = IEventCollector2D;
+
+  // Finiteness predicates for the runtime setters (world_core.hpp): a NaN
+  // must fail the call, never reach the engine.
+  [[nodiscard]] static bool is_finite(Vec v) {
+    return std::isfinite(v.x) && std::isfinite(v.y);
+  }
+  [[nodiscard]] static bool is_finite(float v) { return std::isfinite(v); }
+  // Any finite angle is already canonical - nothing to sanitize.
+  [[nodiscard]] static bool is_valid_rotation(float angle) {
+    return std::isfinite(angle);
+  }
+  static void sanitize_rotation(float&) {}
 };
 
 }  // namespace ws::physics::detail
@@ -48,6 +63,12 @@ using ::ws::physics::fail;
 [[nodiscard]] bool is_finite(ws::math::Vec2 v) {
   return std::isfinite(v.x) && std::isfinite(v.y);
 }
+
+// Revolute/hinge limits are measured against the UNWOUND relative angle:
+// Box2D asserts values inside +-0.99*pi and Jolt's hinge normalizes the
+// same way, so a limit beyond one turn has no meaning either engine can
+// honor. The lib rejects it instead of letting the engines disagree.
+constexpr float kMaxJointLimitAngle = 0.99f * std::numbers::pi_v<float>;
 
 [[nodiscard]] ws::core::Status validate_shape(const Shape& shape) {
   if (std::holds_alternative<Circle>(shape)) {
@@ -90,6 +111,12 @@ using ::ws::physics::fail;
     return fail(PhysicsError::invalid_argument,
                 "body material values must be finite");
   }
+  if (d.friction < 0.0f || d.restitution < 0.0f) {
+    // Engines mix materials via square roots (sqrt(f1 * f2)); a negative
+    // value would poison every contact it touches with NaN.
+    return fail(PhysicsError::invalid_argument,
+                "friction and restitution must be >= 0");
+  }
   return {};
 }
 
@@ -124,9 +151,12 @@ World2D& World2D::operator=(World2D&&) noexcept = default;
   if (auto st = detail::validate_core_desc(core); !st) {
     return ws::core::unexpected<ws::core::Error>(std::move(st.error()));
   }
-  auto backend = detail::make_null_world_2d(detail::BackendDesc2D{
+  auto backend = detail::make_box2d_world_2d(detail::BackendDesc2D{
       desc.gravity, desc.thread_count, desc.hit_speed_threshold,
       desc.max_bodies, desc.max_joints});
+  if (!backend) {
+    return fail(PhysicsError::backend_error, "Box2D backend failed to start");
+  }
   World2D world;
   world.impl_ = std::make_unique<Impl>(core, std::move(backend));
   return world;
@@ -142,7 +172,7 @@ World2D& World2D::operator=(World2D&&) noexcept = default;
 // --- bodies -------------------------------------------------------------------
 
 [[nodiscard]] ws::core::Result<BodyId> World2D::create_body(const BodyDesc& desc) {
-  if (!impl_) return fail(PhysicsError::backend_error, "world is moved-from");
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   if (auto st = validate_body_desc(desc); !st) {
     return ws::core::unexpected<ws::core::Error>(std::move(st.error()));
   }
@@ -150,49 +180,49 @@ World2D& World2D::operator=(World2D&&) noexcept = default;
 }
 
 ws::core::Status World2D::destroy_body(BodyId id) {
-  if (!impl_) return fail(PhysicsError::backend_error, "world is moved-from");
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   return impl_->core_.destroy_body(id);
 }
 
 [[nodiscard]] ws::core::Result<BodyState> World2D::body_state(BodyId id) const {
-  if (!impl_) return fail(PhysicsError::backend_error, "world is moved-from");
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   return impl_->core_.body_state(id);
 }
 
 ws::core::Status World2D::set_transform(BodyId id, Vec2 position, float rotation) {
-  if (!impl_) return fail(PhysicsError::backend_error, "world is moved-from");
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   return impl_->core_.set_transform(id, Transform{position, rotation});
 }
 
 ws::core::Status World2D::set_velocity(BodyId id, Vec2 linear, float angular) {
-  if (!impl_) return fail(PhysicsError::backend_error, "world is moved-from");
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   return impl_->core_.set_velocity(id, linear, angular);
 }
 
 ws::core::Status World2D::apply_linear_impulse(BodyId id, Vec2 impulse) {
-  if (!impl_) return fail(PhysicsError::backend_error, "world is moved-from");
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   return impl_->core_.apply_linear_impulse(id, impulse);
 }
 
 ws::core::Status World2D::apply_angular_impulse(BodyId id, float impulse) {
-  if (!impl_) return fail(PhysicsError::backend_error, "world is moved-from");
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   return impl_->core_.apply_angular_impulse(id, impulse);
 }
 
 ws::core::Status World2D::apply_force(BodyId id, Vec2 force) {
-  if (!impl_) return fail(PhysicsError::backend_error, "world is moved-from");
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   return impl_->core_.apply_force(id, force);
 }
 
 ws::core::Status World2D::apply_torque(BodyId id, float torque) {
-  if (!impl_) return fail(PhysicsError::backend_error, "world is moved-from");
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   return impl_->core_.apply_torque(id, torque);
 }
 
 // --- joints ---------------------------------------------------------------------
 
 [[nodiscard]] ws::core::Result<JointId> World2D::create_joint(const JointDesc& desc) {
-  if (!impl_) return fail(PhysicsError::backend_error, "world is moved-from");
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   using detail::BackendJoint2D;
   return std::visit(
       [this](const auto& j) -> ws::core::Result<JointId> {
@@ -226,6 +256,12 @@ ws::core::Status World2D::apply_torque(BodyId id, float torque) {
               return fail(PhysicsError::invalid_argument,
                           "RevoluteJoint: limits need lower <= upper, both finite");
             }
+            if (j.lower_angle < -kMaxJointLimitAngle ||
+                j.upper_angle > kMaxJointLimitAngle) {
+              return fail(PhysicsError::invalid_argument,
+                          "RevoluteJoint: limits must stay within one turn "
+                          "(+-0.99*pi)");
+            }
           }
           if (j.enable_motor) {
             if (!std::isfinite(j.motor_speed) || !std::isfinite(j.max_motor_torque) ||
@@ -237,9 +273,12 @@ ws::core::Status World2D::apply_torque(BodyId id, float torque) {
           }
         } else {  // DistanceJoint
           bj.type = BackendJoint2D::Type::distance;
-          if (!std::isfinite(j.length) || !(j.length >= 0.0f)) {
+          // > 0, not >= 0: Box2D hard-asserts length > 0 (joint.c), and a
+          // zero-length rod is degenerate anyway - that is what a weld is
+          // for. The check must happen here, before the engine ever sees it.
+          if (!std::isfinite(j.length) || !(j.length > 0.0f)) {
             return fail(PhysicsError::invalid_argument,
-                        "DistanceJoint: length must be finite and >= 0");
+                        "DistanceJoint: length must be finite and > 0");
           }
           bj.length = j.length;
         }
@@ -249,19 +288,19 @@ ws::core::Status World2D::apply_torque(BodyId id, float torque) {
 }
 
 ws::core::Status World2D::destroy_joint(JointId id) {
-  if (!impl_) return fail(PhysicsError::backend_error, "world is moved-from");
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   return impl_->core_.destroy_joint(id);
 }
 
 // --- stepping ---------------------------------------------------------------------
 
 ws::core::Status World2D::step() {
-  if (!impl_) return fail(PhysicsError::backend_error, "world is moved-from");
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   return impl_->core_.step();
 }
 
 ws::core::Status World2D::advance(float frame_dt) {
-  if (!impl_) return fail(PhysicsError::backend_error, "world is moved-from");
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   return impl_->core_.advance(frame_dt);
 }
 
@@ -283,8 +322,17 @@ ws::core::Status World2D::advance(float frame_dt) {
   return impl_ ? impl_->core_.transforms() : std::span<const Transform>{};
 }
 
+[[nodiscard]] std::span<const Transform> World2D::prev_transforms() const {
+  return impl_ ? impl_->core_.prev_transforms()
+               : std::span<const Transform>{};
+}
+
+[[nodiscard]] std::span<const BodyMove> World2D::moved_bodies() const {
+  return impl_ ? impl_->core_.moved_bodies() : std::span<const BodyMove>{};
+}
+
 ws::core::Status World2D::set_transforms(std::span<const BodyMove> moves) {
-  if (!impl_) return fail(PhysicsError::backend_error, "world is moved-from");
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   return impl_->core_.set_transforms(moves);
 }
 
@@ -292,7 +340,7 @@ ws::core::Status World2D::set_transforms(std::span<const BodyMove> moves) {
 
 [[nodiscard]] ws::core::Result<std::optional<RayHit>> World2D::raycast(
     Vec2 origin, Vec2 direction, float max_distance) const {
-  if (!impl_) return fail(PhysicsError::backend_error, "world is moved-from");
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   if (!is_finite(origin) || !is_finite(direction)) {
     return fail(PhysicsError::invalid_argument, "raycast: origin/direction must be finite");
   }
@@ -316,7 +364,7 @@ ws::core::Status World2D::set_transforms(std::span<const BodyMove> moves) {
 
 [[nodiscard]] ws::core::Result<std::vector<BodyId>> World2D::overlap_circle(
     Vec2 center, float radius) const {
-  if (!impl_) return fail(PhysicsError::backend_error, "world is moved-from");
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   if (!is_finite(center) || !std::isfinite(radius) || radius < 0.0f) {
     return fail(PhysicsError::invalid_argument,
                 "overlap_circle: needs finite center and radius >= 0");
@@ -328,7 +376,7 @@ ws::core::Status World2D::set_transforms(std::span<const BodyMove> moves) {
 
 [[nodiscard]] ws::core::Result<std::vector<BodyId>> World2D::overlap_aabb(
     Aabb box) const {
-  if (!impl_) return fail(PhysicsError::backend_error, "world is moved-from");
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   if (!is_finite(box.min) || !is_finite(box.max) || box.min.x > box.max.x ||
       box.min.y > box.max.y) {
     return fail(PhysicsError::invalid_argument,

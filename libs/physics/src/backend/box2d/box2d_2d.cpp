@@ -1,0 +1,737 @@
+// The Box2D v3.1.1 backend behind the 2D seam (core/backend2d.hpp). This is
+// the only 2D file that sees box2d.h - the workspace no-leak rule; apps see
+// ws::physics2d and nothing else.
+//
+// Slot mapping: the lib owns the generational handles and addresses this
+// backend by dense slot. slot -> b2BodyId/b2JointId live in pre-sized
+// vectors (one allocation at create, none after), and the reverse direction
+// rides Box2D body userData as slot + 1 (0 = never set).
+//
+// Task pool (Desc::thread_count = N > 0): N worker threads with FIXED
+// indices 0..N-1; the stepping thread is worker N. Box2D gets
+// workerCount = N + 1, clamped so it never exceeds Box2D's own
+// B2_MAX_WORKERS (64) - worker indices select per-worker scratch inside
+// Box2D, so every concurrently running task must hold a distinct index,
+// and every index must be < workerCount.
+//
+//   Box2D enqueues its constraint solver as workerCount UNIT tasks
+//   (itemCount = minRange = 1) whose instances synchronize with each other
+//   across internal stage barriers: they must all run CONCURRENTLY or the
+//   barriers deadlock. Unit tasks are therefore always queued, never run
+//   inline, and finish() helps - the stepping thread runs queued work
+//   instead of idling, which is what runs the last solver task.
+//   Parallel-for tasks (itemCount > minRange) are split into chunks by a
+//   pure function of (itemCount, minRange, workerCount), so same
+//   thread_count -> same chunks; the ranges are disjoint and the per-worker
+//   scratch is union-merged, so which thread runs which chunk cannot change
+//   results. Same binary + same thread_count produces an identical
+//   simulation (pinned by the determinism test).
+//
+//   thread_count = 0 registers no callbacks at all: Box2D then runs every
+//   phase serially on the stepping thread, its own default mode.
+//
+// Forces: Box2D clears accumulated force/torque on every simulated body at
+// the end of each step (v3.1.1 solver.c, per-body finalization) - the
+// public "forces are cleared at the end of every tick" holds with no
+// backend-side work.
+//
+// Moved bodies: Box2D reports every simulated (awake) body per step via
+// b2World_GetBodyEvents - asleep bodies cost nothing - and each event
+// carries the body's userData, so the slot mapping is free.
+
+#include <box2d/box2d.h>
+
+#include <algorithm>
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <exception>
+#include <memory>
+#include <mutex>
+#include <new>
+#include <stdexcept>
+#include <thread>
+#include <type_traits>
+#include <variant>
+#include <vector>
+
+#include <ws/core/log.hpp>
+#include <ws/physics/errors.hpp>
+
+#include "core/backend2d.hpp"
+
+namespace ws::physics::detail {
+namespace {
+
+using physics2d::Aabb;
+using physics2d::BodyDesc;
+using physics2d::Transform;
+using ws::math::Vec2;
+
+[[nodiscard]] b2Vec2 to_b2(Vec2 v) { return b2Vec2{v.x, v.y}; }
+[[nodiscard]] Vec2 from_b2(b2Vec2 v) { return Vec2{v.x, v.y}; }
+
+// Box2D's own recommendation ("usually 4"); a fixed constant so a tick
+// stays exactly desc.fixed_dt and results stay reproducible.
+constexpr int kSubStepCount = 4;
+
+// Fixed task-pool sizing: nothing is allocated after construction. Box2D
+// runs at most B2_MAX_WORKERS (64) workers; the arrays must hold a full
+// solver phase (workerCount unit tasks) plus whatever parallel-for chunks
+// coexist with it, with room to spare.
+constexpr std::uint32_t kMaxPoolThreads = 63;  // + the stepping thread = 64
+constexpr std::size_t kMaxTaskGroups = 128;
+constexpr std::size_t kMaxChunkJobs = 128;
+
+// b2OverlapResultFcn: gather the lib slot behind every overlapping shape.
+bool collect_overlap(b2ShapeId shape, void* context) {
+  auto* out = static_cast<std::vector<std::uint32_t>*>(context);
+  const b2BodyId body = b2Shape_GetBody(shape);
+  const auto raw = reinterpret_cast<std::uintptr_t>(b2Body_GetUserData(body));
+  if (raw != 0) {
+    out->push_back(static_cast<std::uint32_t>(raw - 1u));
+  }
+  return true;  // keep walking the tree
+}
+
+class Box2DWorld final : public IWorld2DBackend {
+ public:
+  explicit Box2DWorld(const BackendDesc2D& desc)
+      : hit_threshold_(desc.hit_speed_threshold) {
+    bodies_.resize(desc.max_bodies);
+    body_live_.resize(desc.max_bodies);
+    joints_.resize(desc.max_joints);
+    joint_live_.resize(desc.max_joints);
+
+    b2WorldDef def = b2DefaultWorldDef();
+    def.gravity = to_b2(desc.gravity);
+    def.hitEventThreshold = desc.hit_speed_threshold;
+    const std::uint32_t threads = std::min(desc.thread_count, kMaxPoolThreads);
+    if (threads > 0) {
+      // The pool starts before the world exists: a failed start must
+      // leave nothing behind (the factory turns the throw into nullptr).
+      if (!start_pool(threads)) {
+        throw std::runtime_error{"worker-pool startup failed"};
+      }
+      worker_count_ = static_cast<int>(threads) + 1;
+      def.workerCount = worker_count_;
+      def.enqueueTask = &Box2DWorld::enqueue_task;
+      def.finishTask = &Box2DWorld::finish_task;
+      def.userTaskContext = this;
+    }
+    world_ = b2CreateWorld(&def);
+  }
+
+  ~Box2DWorld() override {
+    stop_pool();  // workers run Box2D code: joined before the world dies
+    if (b2World_IsValid(world_)) {
+      b2DestroyWorld(world_);
+    }
+  }
+
+  Box2DWorld(const Box2DWorld&) = delete;
+  Box2DWorld& operator=(const Box2DWorld&) = delete;
+
+  // --- bodies ---------------------------------------------------------------
+
+  [[nodiscard]] ws::core::Status create_body(std::uint32_t slot,
+                                             const BodyDesc& desc) override {
+    if (slot >= bodies_.size()) {
+      return fail(PhysicsError::backend_error, "body slot out of range");
+    }
+
+    b2BodyDef bd = b2DefaultBodyDef();
+    bd.type = desc.kind == ws::physics::BodyKind::dynamic
+                  ? b2_dynamicBody
+                  : (desc.kind == ws::physics::BodyKind::kinematic
+                         ? b2_kinematicBody
+                         : b2_staticBody);
+    bd.position = to_b2(desc.transform.position);
+    bd.rotation = b2MakeRot(desc.transform.rotation);
+    bd.linearVelocity = to_b2(desc.linear_velocity);
+    bd.angularVelocity = desc.angular_velocity;
+    bd.gravityScale = desc.gravity_scale;
+    bd.userData =
+        reinterpret_cast<void*>(static_cast<std::uintptr_t>(slot) + 1u);
+
+    b2ShapeDef sd = b2DefaultShapeDef();
+    // Only dynamic bodies consume density; never hand the engine a negative
+    // one (the lib allows any finite value for non-dynamic bodies).
+    sd.density = desc.kind == ws::physics::BodyKind::dynamic
+                     ? desc.density
+                     : std::max(desc.density, 0.0f);
+    sd.material.friction = desc.friction;
+    sd.material.restitution = desc.restitution;
+    if (desc.is_sensor) {
+      sd.isSensor = true;
+      sd.enableSensorEvents = true;
+    } else {
+      // Contact lifecycle for solid shapes; hit events only when asked for.
+      sd.enableContactEvents = true;
+      sd.enableHitEvents = hit_threshold_ > 0.0f;
+    }
+
+    const b2BodyId body = b2CreateBody(world_, &bd);
+    if (!b2Body_IsValid(body)) {
+      return fail(PhysicsError::backend_error, "Box2D refused a body");
+    }
+    const b2ShapeId shape = std::visit(
+        [&](const auto& s) -> b2ShapeId {
+          using S = std::decay_t<decltype(s)>;
+          if constexpr (std::is_same_v<S, physics2d::Circle>) {
+            const b2Circle circle{b2Vec2{0.0f, 0.0f}, s.radius};
+            return b2CreateCircleShape(body, &sd, &circle);
+          } else if constexpr (std::is_same_v<S, physics2d::Box>) {
+            const b2Polygon box = b2MakeBox(s.half_extents.x, s.half_extents.y);
+            return b2CreatePolygonShape(body, &sd, &box);
+          } else {
+            const b2Capsule capsule{to_b2(s.a), to_b2(s.b), s.radius};
+            return b2CreateCapsuleShape(body, &sd, &capsule);
+          }
+        },
+        desc.shape);
+    if (!b2Shape_IsValid(shape)) {
+      b2DestroyBody(body);
+      return fail(PhysicsError::backend_error, "Box2D refused a shape");
+    }
+    bodies_[slot] = body;
+    body_live_[slot] = 1;
+    return {};
+  }
+
+  void destroy_body(std::uint32_t slot) override {
+    if (slot >= bodies_.size() || !body_live_[slot]) {
+      return;
+    }
+    // Box2D cascades attached shapes; the lib already destroyed its
+    // joints before the body, so none remain here.
+    b2DestroyBody(bodies_[slot]);
+    bodies_[slot] = b2_nullBodyId;
+    body_live_[slot] = 0;
+  }
+
+  void set_transform(std::uint32_t slot, const Transform& t) override {
+    if (slot >= bodies_.size() || !body_live_[slot]) {
+      return;
+    }
+    b2Body_SetTransform(bodies_[slot], to_b2(t.position), b2MakeRot(t.rotation));
+    // A teleport invalidates cached contacts; the body must re-evaluate.
+    b2Body_SetAwake(bodies_[slot], true);
+  }
+
+  void set_velocity(std::uint32_t slot, Vec2 linear, float angular) override {
+    if (slot >= bodies_.size() || !body_live_[slot]) {
+      return;
+    }
+    b2Body_SetLinearVelocity(bodies_[slot], to_b2(linear));
+    b2Body_SetAngularVelocity(bodies_[slot], angular);
+    b2Body_SetAwake(bodies_[slot], true);
+  }
+
+  void apply_linear_impulse(std::uint32_t slot, Vec2 impulse) override {
+    if (slot >= bodies_.size() || !body_live_[slot]) {
+      return;
+    }
+    b2Body_ApplyLinearImpulseToCenter(bodies_[slot], to_b2(impulse), true);
+  }
+
+  void apply_angular_impulse(std::uint32_t slot, float impulse) override {
+    if (slot >= bodies_.size() || !body_live_[slot]) {
+      return;
+    }
+    b2Body_ApplyAngularImpulse(bodies_[slot], impulse, true);
+  }
+
+  void apply_force(std::uint32_t slot, Vec2 force) override {
+    if (slot >= bodies_.size() || !body_live_[slot]) {
+      return;
+    }
+    b2Body_ApplyForceToCenter(bodies_[slot], to_b2(force), true);
+  }
+
+  void apply_torque(std::uint32_t slot, float torque) override {
+    if (slot >= bodies_.size() || !body_live_[slot]) {
+      return;
+    }
+    b2Body_ApplyTorque(bodies_[slot], torque, true);
+  }
+
+  [[nodiscard]] BackendVelocity2D get_velocity(
+      std::uint32_t slot) const override {
+    if (slot >= bodies_.size() || !body_live_[slot]) {
+      return {};
+    }
+    BackendVelocity2D v;
+    v.linear = from_b2(b2Body_GetLinearVelocity(bodies_[slot]));
+    v.angular = b2Body_GetAngularVelocity(bodies_[slot]);
+    return v;
+  }
+
+  // --- joints -----------------------------------------------------------------
+
+  [[nodiscard]] ws::core::Status create_joint(
+      std::uint32_t slot, const BackendJoint2D& joint) override {
+    if (slot >= joints_.size() || joint.slot_a >= bodies_.size() ||
+        joint.slot_b >= bodies_.size() || !body_live_[joint.slot_a] ||
+        !body_live_[joint.slot_b]) {
+      return fail(PhysicsError::backend_error, "joint slots out of range");
+    }
+    const b2BodyId a = bodies_[joint.slot_a];
+    const b2BodyId b = bodies_[joint.slot_b];
+    const float angle_a = b2Rot_GetAngle(b2Body_GetRotation(a));
+    const float angle_b = b2Rot_GetAngle(b2Body_GetRotation(b));
+    b2JointId id = b2_nullJointId;
+    switch (joint.type) {
+      case BackendJoint2D::Type::fixed: {
+        // Weld at the CURRENT relative pose: no snap on creation.
+        b2WeldJointDef def = b2DefaultWeldJointDef();
+        def.bodyIdA = a;
+        def.bodyIdB = b;
+        def.localAnchorA = b2Vec2{0.0f, 0.0f};
+        def.localAnchorB = b2Body_GetLocalPoint(b, b2Body_GetPosition(a));
+        def.referenceAngle = angle_b - angle_a;
+        id = b2CreateWeldJoint(world_, &def);
+        break;
+      }
+      case BackendJoint2D::Type::revolute: {
+        b2RevoluteJointDef def = b2DefaultRevoluteJointDef();
+        def.bodyIdA = a;
+        def.bodyIdB = b;
+        const b2Vec2 anchor = to_b2(joint.world_anchor);
+        def.localAnchorA = b2Body_GetLocalPoint(a, anchor);
+        def.localAnchorB = b2Body_GetLocalPoint(b, anchor);
+        def.referenceAngle = angle_b - angle_a;
+        def.enableLimit = joint.enable_limits;
+        def.lowerAngle = joint.lower_angle;
+        def.upperAngle = joint.upper_angle;
+        def.enableMotor = joint.enable_motor;
+        def.motorSpeed = joint.motor_speed;
+        def.maxMotorTorque = joint.max_motor_torque;
+        id = b2CreateRevoluteJoint(world_, &def);
+        break;
+      }
+      case BackendJoint2D::Type::distance: {
+        // Anchored at both body origins; the rest length is the caller's.
+        b2DistanceJointDef def = b2DefaultDistanceJointDef();
+        def.bodyIdA = a;
+        def.bodyIdB = b;
+        def.localAnchorA = b2Vec2{0.0f, 0.0f};
+        def.localAnchorB = b2Vec2{0.0f, 0.0f};
+        def.length = joint.length;
+        id = b2CreateDistanceJoint(world_, &def);
+        break;
+      }
+    }
+    if (!b2Joint_IsValid(id)) {
+      return fail(PhysicsError::backend_error, "Box2D refused a joint");
+    }
+    joints_[slot] = id;
+    joint_live_[slot] = 1;
+    return {};
+  }
+
+  void destroy_joint(std::uint32_t slot) override {
+    if (slot >= joints_.size() || !joint_live_[slot]) {
+      return;
+    }
+    b2DestroyJoint(joints_[slot]);
+    joints_[slot] = b2_nullJointId;
+    joint_live_[slot] = 0;
+  }
+
+  // --- stepping -----------------------------------------------------------------
+
+  std::size_t step(float dt, IEventCollector2D& collector,
+                   std::span<BackendMove2D> moves_out) override {
+    b2World_Step(world_, dt, kSubStepCount);
+
+    // Move events: one per simulated (awake) body this step, each carrying
+    // the body's userData - our slot + 1 - so no reverse lookup is needed.
+    // Sleep transitions ride the same event (fellAsleep); the pose it holds
+    // is the body's final one either way.
+    const b2BodyEvents body_events = b2World_GetBodyEvents(world_);
+    std::size_t count = 0;
+    for (int i = 0; i < body_events.moveCount; ++i) {
+      const b2BodyMoveEvent& e = body_events.moveEvents[i];
+      const auto raw = reinterpret_cast<std::uintptr_t>(e.userData);
+      if (raw == 0 || count >= moves_out.size()) {
+        continue;  // defensive: userData never set / span bounds
+      }
+      moves_out[count++] =
+          BackendMove2D{static_cast<std::uint32_t>(raw - 1u),
+                        Transform{from_b2(e.transform.p),
+                                  b2Rot_GetAngle(e.transform.q)}};
+    }
+
+    const b2ContactEvents contacts = b2World_GetContactEvents(world_);
+    for (int i = 0; i < contacts.beginCount; ++i) {
+      const b2ContactBeginTouchEvent& e = contacts.beginEvents[i];
+      std::uint32_t a = 0;
+      std::uint32_t b = 0;
+      if (!slot_of_shape(e.shapeIdA, a) || !slot_of_shape(e.shapeIdB, b)) {
+        continue;
+      }
+      BackendEvent2D ev{};
+      ev.slot_a = a;
+      ev.slot_b = b;
+      ev.phase = physics2d::ContactPhase::began;
+      if (e.manifold.pointCount > 0) {
+        ev.point = from_b2(e.manifold.points[0].point);
+      }
+      ev.normal = from_b2(e.manifold.normal);  // engine A->B; the lib re-faces
+      collector.add(ev);
+    }
+    for (int i = 0; i < contacts.endCount; ++i) {
+      const b2ContactEndTouchEvent& e = contacts.endEvents[i];
+      std::uint32_t a = 0;
+      std::uint32_t b = 0;
+      if (!slot_of_shape(e.shapeIdA, a) || !slot_of_shape(e.shapeIdB, b)) {
+        continue;
+      }
+      BackendEvent2D ev{};
+      ev.slot_a = a;
+      ev.slot_b = b;
+      ev.phase = physics2d::ContactPhase::ended;
+      collector.add(ev);  // Box2D end events carry no manifold
+    }
+    for (int i = 0; i < contacts.hitCount; ++i) {
+      const b2ContactHitEvent& e = contacts.hitEvents[i];
+      std::uint32_t a = 0;
+      std::uint32_t b = 0;
+      if (!slot_of_shape(e.shapeIdA, a) || !slot_of_shape(e.shapeIdB, b)) {
+        continue;
+      }
+      BackendEvent2D ev{};
+      ev.slot_a = a;
+      ev.slot_b = b;
+      ev.phase = physics2d::ContactPhase::hit;
+      ev.point = from_b2(e.point);
+      ev.normal = from_b2(e.normal);
+      ev.speed = e.approachSpeed;
+      collector.add(ev);
+    }
+
+    // Sensors report their overlap lifecycle separately (no collision
+    // response, no manifold, no hit events).
+    const b2SensorEvents sensors = b2World_GetSensorEvents(world_);
+    for (int i = 0; i < sensors.beginCount; ++i) {
+      const b2SensorBeginTouchEvent& e = sensors.beginEvents[i];
+      std::uint32_t sensor = 0;
+      std::uint32_t visitor = 0;
+      if (!slot_of_shape(e.sensorShapeId, sensor) ||
+          !slot_of_shape(e.visitorShapeId, visitor)) {
+        continue;
+      }
+      BackendEvent2D ev{};
+      ev.slot_a = sensor;
+      ev.slot_b = visitor;
+      ev.phase = physics2d::ContactPhase::began;
+      collector.add(ev);
+    }
+    for (int i = 0; i < sensors.endCount; ++i) {
+      const b2SensorEndTouchEvent& e = sensors.endEvents[i];
+      std::uint32_t sensor = 0;
+      std::uint32_t visitor = 0;
+      if (!slot_of_shape(e.sensorShapeId, sensor) ||
+          !slot_of_shape(e.visitorShapeId, visitor)) {
+        continue;
+      }
+      BackendEvent2D ev{};
+      ev.slot_a = sensor;
+      ev.slot_b = visitor;
+      ev.phase = physics2d::ContactPhase::ended;
+      collector.add(ev);
+    }
+    return count;
+  }
+
+  // --- queries -------------------------------------------------------------------
+
+  [[nodiscard]] std::optional<BackendRayHit2D> raycast(
+      Vec2 origin, Vec2 direction, float max_distance) const override {
+    const b2Vec2 translation{direction.x * max_distance,
+                             direction.y * max_distance};
+    const b2RayResult hit = b2World_CastRayClosest(
+        world_, to_b2(origin), translation, b2DefaultQueryFilter());
+    if (!hit.hit) {
+      return std::nullopt;
+    }
+    std::uint32_t slot = 0;
+    if (!slot_of_shape(hit.shapeId, slot)) {
+      return std::nullopt;  // defensive: the shape has no lib body
+    }
+    return BackendRayHit2D{slot, hit.fraction * max_distance, from_b2(hit.point),
+                           from_b2(hit.normal)};
+  }
+
+  void overlap_circle(Vec2 center, float radius,
+                      std::vector<std::uint32_t>& out) const override {
+    b2ShapeProxy proxy{};
+    proxy.points[0] = to_b2(center);
+    proxy.count = 1;
+    proxy.radius = radius;
+    b2World_OverlapShape(world_, &proxy, b2DefaultQueryFilter(),
+                         &collect_overlap, &out);
+  }
+
+  void overlap_aabb(const Aabb& box,
+                    std::vector<std::uint32_t>& out) const override {
+    const b2AABB aabb{to_b2(box.min), to_b2(box.max)};
+    b2World_OverlapAABB(world_, aabb, b2DefaultQueryFilter(), &collect_overlap,
+                        &out);
+  }
+
+ private:
+  // --- task pool ------------------------------------------------------------
+  // See the file header for the concurrency contract. enqueue/finish run
+  // on the stepping thread only; workers only pop and run chunks. All
+  // bookkeeping happens under mutex_; the only lock-free state is the
+  // atomic per-group remaining counter.
+
+  struct TaskGroup {
+    std::atomic<int> remaining{0};  // chunks not yet completed
+    bool in_use = false;             // slot owns an unfinished enqueue
+  };
+
+  struct ChunkJob {
+    b2TaskCallback* fn = nullptr;
+    int start = 0;
+    int end = 0;
+    void* task_ctx = nullptr;
+    TaskGroup* group = nullptr;
+    bool live = false;  // queued and not yet popped
+  };
+
+  static void* enqueue_task(b2TaskCallback* fn, int itemCount, int minRange,
+                            void* taskCtx, void* userCtx) {
+    return static_cast<Box2DWorld*>(userCtx)
+        ->enqueue(fn, itemCount, minRange, taskCtx);
+  }
+
+  static void finish_task(void* userTask, void* userCtx) {
+    static_cast<Box2DWorld*>(userCtx)->finish(static_cast<TaskGroup*>(userTask));
+  }
+
+  [[nodiscard]] bool start_pool(std::uint32_t count) {
+    try {
+      workers_.reserve(count);
+      for (std::uint32_t i = 0; i < count; ++i) {
+        workers_.emplace_back(&Box2DWorld::work_loop, this, i);
+      }
+    } catch (...) {
+      stop_pool();  // join what started; leave nothing behind
+      return false;
+    }
+    return true;
+  }
+
+  void stop_pool() {
+    {
+      std::lock_guard lock(mutex_);
+      stopping_ = true;
+    }
+    cv_.notify_all();
+    for (std::thread& worker : workers_) {
+      worker.join();
+    }
+    workers_.clear();
+  }
+
+  // Queue [start, end) as one chunk of `group`. If the pool is momentarily
+  // full, run it inline on the stepping thread (correct - distinct range,
+  // distinct worker index - just serial). Only parallel-for chunks can
+  // reach that path: a solver phase never exceeds the array bounds.
+  void dispatch(b2TaskCallback* fn, int start, int end, void* taskCtx,
+                TaskGroup* group) {
+    {
+      std::lock_guard lock(mutex_);
+      if (queue_size_ < kMaxChunkJobs) {
+        for (std::size_t i = 0; i < kMaxChunkJobs; ++i) {
+          if (!chunks_[i].live) {
+            chunks_[i] = ChunkJob{fn, start, end, taskCtx, group, true};
+            queue_[queue_tail_] = i;
+            queue_tail_ = (queue_tail_ + 1) % kMaxChunkJobs;
+            ++queue_size_;
+            cv_.notify_all();
+            return;
+          }
+        }
+      }
+    }
+    fn(start, end, worker_count_ - 1, taskCtx);
+    complete_chunk(group);
+  }
+
+  // Count one finished chunk; wake finish() when its group completes.
+  void complete_chunk(TaskGroup* group) {
+    std::lock_guard lock(mutex_);
+    if (group->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+      cv_.notify_all();
+    }
+  }
+
+  [[nodiscard]] TaskGroup* acquire_group() {
+    std::lock_guard lock(mutex_);
+    for (TaskGroup& group : groups_) {
+      if (!group.in_use) {
+        group.in_use = true;
+        return &group;
+      }
+    }
+    return nullptr;
+  }
+
+  void* enqueue(b2TaskCallback* fn, int itemCount, int minRange,
+                void* taskCtx) {
+    if (itemCount <= 0) {
+      return nullptr;
+    }
+    if (itemCount == 1 && minRange == 1) {
+      // Unit task (solver stage / tree refit / island split): possibly
+      // barrier-synchronized with its siblings - must go to the pool so
+      // they can run concurrently.
+      TaskGroup* group = acquire_group();
+      if (group == nullptr) {
+        // Unreachable with the arrays sized past B2_MAX_WORKERS; the
+        // serial fallback is still correct for non-synchronizing units.
+        fn(0, 1, worker_count_ - 1, taskCtx);
+        return nullptr;
+      }
+      group->remaining.store(1, std::memory_order_release);
+      dispatch(fn, 0, 1, taskCtx, group);
+      return group;
+    }
+    if (itemCount <= minRange) {
+      // Too small to be worth splitting: serial, like Box2D's own
+      // default task system.
+      fn(0, itemCount, worker_count_ - 1, taskCtx);
+      return nullptr;
+    }
+    const int chunks =
+        std::min(worker_count_, itemCount / std::max(minRange, 1));
+    if (chunks < 2) {
+      fn(0, itemCount, worker_count_ - 1, taskCtx);
+      return nullptr;
+    }
+    TaskGroup* group = acquire_group();
+    if (group == nullptr) {
+      fn(0, itemCount, worker_count_ - 1, taskCtx);
+      return nullptr;
+    }
+    group->remaining.store(chunks, std::memory_order_release);
+    const int chunk_size = (itemCount + chunks - 1) / chunks;
+    for (int i = 0; i < chunks; ++i) {
+      const int start = i * chunk_size;
+      const int end = std::min(start + chunk_size, itemCount);
+      if (start < end) {
+        dispatch(fn, start, end, taskCtx, group);
+      } else {
+        complete_chunk(group);  // degenerate tail chunk: nothing to run
+      }
+    }
+    return group;
+  }
+
+  void finish(TaskGroup* group) {
+    std::unique_lock lock(mutex_);
+    while (group->remaining.load(std::memory_order_acquire) != 0) {
+      if (queue_size_ > 0) {
+        // Help: run queued work on the stepping thread instead of idling.
+        // This is REQUIRED, not an optimization - Box2D's solver unit
+        // tasks spin at internal barriers until every sibling arrives,
+        // and this thread is the sibling that runs the last one.
+        const std::size_t ci = queue_[queue_head_];
+        queue_head_ = (queue_head_ + 1) % kMaxChunkJobs;
+        --queue_size_;
+        const ChunkJob job = chunks_[ci];
+        chunks_[ci].live = false;
+        lock.unlock();
+        job.fn(job.start, job.end, worker_count_ - 1, job.task_ctx);
+        lock.lock();
+        if (job.group->remaining.fetch_sub(1, std::memory_order_acq_rel) ==
+            1) {
+          cv_.notify_all();
+        }
+        continue;
+      }
+      cv_.wait(lock);
+    }
+    group->in_use = false;
+  }
+
+  void work_loop(std::uint32_t index) {
+    for (;;) {
+      ChunkJob job{};
+      {
+        std::unique_lock lock(mutex_);
+        cv_.wait(lock, [&] { return stopping_ || queue_size_ > 0; });
+        if (stopping_ && queue_size_ == 0) {
+          return;  // drain what is queued, then leave
+        }
+        const std::size_t ci = queue_[queue_head_];
+        queue_head_ = (queue_head_ + 1) % kMaxChunkJobs;
+        --queue_size_;
+        job = chunks_[ci];
+        chunks_[ci].live = false;
+      }
+      job.fn(job.start, job.end, index, job.task_ctx);
+      complete_chunk(job.group);
+    }
+  }
+
+  [[nodiscard]] bool slot_of_shape(b2ShapeId shape, std::uint32_t& out) const {
+    // End events can outlive their shapes: b2DestroyBody queues end events
+    // for the dying body's contacts, and they drain one step later holding
+    // STALE shape ids (generation bumped at destroy, slot maybe reused).
+    // b2Shape_GetBody hard-asserts on a stale id, so validity goes first
+    // (b2Shape_IsValid is the non-asserting twin) and the stale event is
+    // dropped - the lib's destroy path already owns that cleanup.
+    if (!b2Shape_IsValid(shape)) {
+      return false;
+    }
+    const b2BodyId body = b2Shape_GetBody(shape);
+    const auto raw = reinterpret_cast<std::uintptr_t>(b2Body_GetUserData(body));
+    if (raw == 0) {
+      return false;
+    }
+    out = static_cast<std::uint32_t>(raw - 1u);
+    return true;
+  }
+
+  b2WorldId world_{};
+  std::vector<b2BodyId> bodies_;    // slot -> engine body
+  std::vector<char> body_live_;     // 1 = the slot holds a live body
+  std::vector<b2JointId> joints_;   // slot -> engine joint
+  std::vector<char> joint_live_;
+  float hit_threshold_ = 0.0f;
+
+  // Task pool (idle when thread_count == 0).
+  int worker_count_ = 1;  // pool threads + the stepping thread
+  std::vector<std::thread> workers_;
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  TaskGroup groups_[kMaxTaskGroups];
+  ChunkJob chunks_[kMaxChunkJobs];
+  std::size_t queue_[kMaxChunkJobs];
+  std::size_t queue_head_ = 0;
+  std::size_t queue_tail_ = 0;
+  std::size_t queue_size_ = 0;
+  bool stopping_ = false;  // guarded by mutex_
+};
+
+}  // namespace
+
+std::unique_ptr<IWorld2DBackend> make_box2d_world_2d(
+    const BackendDesc2D& desc) {
+  try {
+    return std::make_unique<Box2DWorld>(desc);
+  } catch (const std::bad_alloc&) {
+    ws::core::warn("physics: Box2D backend out of memory");
+    return nullptr;
+  } catch (const std::exception& e) {
+    ws::core::warn("physics: Box2D backend failed to start: {}", e.what());
+    return nullptr;
+  }
+}
+
+}  // namespace ws::physics::detail

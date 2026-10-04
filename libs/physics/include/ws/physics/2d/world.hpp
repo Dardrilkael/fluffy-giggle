@@ -76,33 +76,53 @@ class WS_PHYSICS_API World2D {
   ws::core::Status destroy_joint(JointId id);
 
   // --- stepping ---------------------------------------------------------------
-  // Advances EXACTLY one fixed_dt tick. The contact-event buffer is cleared
-  // at the start of the tick, then filled by it.
+  // Advances EXACTLY one fixed_dt tick. The contact-event span below is
+  // per CALL: cleared at the start of the call, then filled by it.
   ws::core::Status step();
 
   // Accumulator form: consumes frame_dt, running at most Desc::max_substeps
-  // ticks; leftover time is dropped (spiral-of-death protection). After
-  // return, interpolation_alpha() is the fixed_dt fraction for render
-  // lerping (lerp between your copy of last frame's transforms() and the
-  // current one).
+  // ticks. Contact events are per CALL as well - the span unions every
+  // substep this call ran, so nothing is silently lost between ticks.
+  // Leftover time is dropped (spiral-of-death protection).
   ws::core::Status advance(float frame_dt);
+
+  // Render interpolation: for each moved body, lerp(prev_transforms()[i],
+  // transforms()[i], alpha). See prev_transforms() below.
   [[nodiscard]] float interpolation_alpha() const;  // [0, 1]
   [[nodiscard]] float fixed_dt() const;
 
   // --- events ---------------------------------------------------------------
-  // The last tick's contact events. The span is valid until the next
-  // step()/advance(). Events are sorted by (a.index, b.index, phase) -
-  // deterministic regardless of which worker thread reported them. Overflow
-  // beyond max_contact_events drops the newest events and warns once.
+  // The last step()/advance() CALL's contact events. The span is valid
+  // until the next step()/advance(). Sorted by (a.index, b.index, phase,
+  // point, normal, speed) - the full tiebreak chain makes the order a pure
+  // function of event content, and the backend feeds events in
+  // deterministic order, so overflow beyond max_contact_events drops the
+  // same events every run (warns once per overflowing episode). Index
+  // means SLOT index - dense and reused, NOT creation order.
   [[nodiscard]] std::span<const ContactEvent> contact_events() const;
 
   // --- bulk renderer path ------------------------------------------------------
   // Slot-indexed by BodyId::index (one contiguous array, no per-body call in
   // the renderer's hot loop): transforms()[i] is the transform of the body
-  // whose id.index == i. Entries for retired slots are stale - the renderer
-  // indexes with the ids it holds. Copied out by the backend in bulk after
-  // each tick.
+  // whose id.index == i. The mirror is maintained by the lib - creation and
+  // set_transform()/set_transforms() write it directly, and each tick the
+  // backend reports the bodies it simulated (moved_bodies()) and those
+  // poses are folded in. Entries for retired slots are stale - the renderer
+  // indexes with the ids it holds. Index means SLOT index - dense and
+  // reused, NOT creation order.
   [[nodiscard]] std::span<const Transform> transforms() const;
+
+  // The poses transforms() held at the START of the last step()/advance()
+  // call - the "previous frame" half of the interpolation_alpha() lerp. A
+  // body created during the call already holds its creation pose here
+  // (bodies spawn un-lerped). Same indexing as transforms().
+  [[nodiscard]] std::span<const Transform> prev_transforms() const;
+
+  // Bodies the backend simulated during the last step()/advance() call,
+  // sorted by index, one entry per body, ids always live. For Box2D this is
+  // exactly the awake set - a settled world reports nothing and costs
+  // nothing. Valid until the next step()/advance().
+  [[nodiscard]] std::span<const BodyMove> moved_bodies() const;
 
   // Bulk teleport (kinematic targets etc.). ATOMIC: every entry is validated
   // before anything is applied; one invalid id fails the whole call and
@@ -115,8 +135,10 @@ class WS_PHYSICS_API World2D {
   [[nodiscard]] ws::core::Result<std::optional<RayHit>>
   raycast(Vec2 origin, Vec2 direction, float max_distance) const;
 
-  // Bodies whose shapes overlap the query region; sorted by creation index
-  // (deterministic). One allocation per call - queries are not the hot path.
+  // Bodies whose shapes overlap the query region; sorted by id index -
+  // slot index, NOT creation order - independent of the backend's
+  // broad-phase traversal (deterministic). One allocation per call -
+  // queries are not the hot path.
   [[nodiscard]] ws::core::Result<std::vector<BodyId>>
   overlap_circle(Vec2 center, float radius) const;
   [[nodiscard]] ws::core::Result<std::vector<BodyId>>

@@ -1,6 +1,7 @@
-// The 3D null backend (internal): the exact mirror of null_2d.cpp - accepts
-// everything, simulates nothing, exists until the Jolt backend arrives
-// (src/backend/jolt3d). See null_2d.cpp for the rationale.
+// The 3D null backend (internal): accepts everything, simulates nothing,
+// exists until the Jolt backend arrives (src/backend/jolt3d) - it lets the
+// lib machinery build and be tested standalone, before any engine is
+// wired in. (The 2D counterpart was removed once Box2D landed.)
 
 #include <memory>
 
@@ -37,9 +38,10 @@ class NullWorld3D final : public IWorld3DBackend {
   }
   void destroy_joint(std::uint32_t /*slot*/) override {}
 
-  void step(float /*dt*/, IEventCollector3D& /*collector*/) override {}
-  void copy_transforms(
-      std::span<physics3d::Transform> /*out*/) const override {}
+  std::size_t step(float /*dt*/, IEventCollector3D& /*collector*/,
+                   std::span<BackendMove3D> /*moves_out*/) override {
+    return 0;  // nothing moves: the lib's mirrors already hold the truth
+  }
 
   [[nodiscard]] std::optional<BackendRayHit3D> raycast(
       ws::math::Vec3 /*origin*/, ws::math::Vec3 /*direction*/,

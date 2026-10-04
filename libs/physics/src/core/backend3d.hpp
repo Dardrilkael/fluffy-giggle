@@ -9,8 +9,9 @@
 // see backend2d.hpp; only the types differ (Vec3 + Quat). One extra wrinkle
 // specific to Jolt: contact events fire on solver worker threads during
 // step(), so the backend buffers them per thread (pre-reserved) and feeds
-// the collector in deterministic order after the tick completes. The lib's
-// sort makes the public order deterministic either way.
+// the collector in deterministic order after the tick completes. That is a
+// REQUIREMENT, not a nicety: which events the lib's overflow cap drops must
+// be deterministic. The lib's sort then fixes the public order.
 
 #include <cstdint>
 #include <memory>
@@ -81,6 +82,13 @@ struct BackendVelocity3D {
   ws::math::Vec3 angular{};
 };
 
+// One body the backend simulated during a tick: the slot the lib assigned,
+// plus the pose it ended the tick at (see BackendMove2D for the contract).
+struct BackendMove3D {
+  std::uint32_t slot = 0;
+  physics3d::Transform transform{};
+};
+
 class IWorld3DBackend {
  public:
   virtual ~IWorld3DBackend() = default;
@@ -105,8 +113,9 @@ class IWorld3DBackend {
       std::uint32_t slot, const BackendJoint3D& joint) = 0;
   virtual void destroy_joint(std::uint32_t slot) = 0;
 
-  virtual void step(float dt, IEventCollector3D& collector) = 0;
-  virtual void copy_transforms(std::span<physics3d::Transform> out) const = 0;
+  // Deterministic event order + moved-bodies contract: see the 2D seam.
+  virtual std::size_t step(float dt, IEventCollector3D& collector,
+                           std::span<BackendMove3D> moves_out) = 0;
 
   [[nodiscard]] virtual std::optional<BackendRayHit3D> raycast(
       ws::math::Vec3 origin, ws::math::Vec3 direction,

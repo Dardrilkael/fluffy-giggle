@@ -50,3 +50,23 @@ TEST_CASE("vecmath and Matrix coexist in one TU") {
     CHECK(m(0, 0) == 1.0);
     CHECK(ws::math::length(v) == doctest::Approx(1.0f).epsilon(1e-6f));
 }
+
+TEST_CASE("quat: normalize keeps the rotation, unit length") {
+    // A 90-degree turn about Z (fields are x, y, z, w), scaled by 7:
+    // normalize must recover the same rotation at unit length (normalize's
+    // zero input is undefined, like GLM's - callers guard, see ws::physics).
+    const ws::math::Quat seven_times{
+        0.0f, 0.0f, 7.0f * 0.70710678118f, 7.0f * 0.70710678118f};
+    const ws::math::Quat q = ws::math::normalize(seven_times);
+
+    CHECK(q.x == doctest::Approx(0.0f).epsilon(1e-6f));
+    CHECK(q.y == doctest::Approx(0.0f).epsilon(1e-6f));
+    CHECK(q.z == doctest::Approx(0.70710678118f).epsilon(1e-6f));
+    CHECK(q.w == doctest::Approx(0.70710678118f).epsilon(1e-6f));
+
+    // The rotation itself is unchanged: quarter turn about Z maps +X to +Y.
+    const ws::math::Vec3 turned = ws::math::rotate(q, ws::math::Vec3{1.0f, 0.0f, 0.0f});
+    CHECK(turned.x == doctest::Approx(0.0f).epsilon(1e-5f));
+    CHECK(turned.y == doctest::Approx(1.0f).epsilon(1e-5f));
+    CHECK(turned.z == doctest::Approx(0.0f).epsilon(1e-5f));
+}

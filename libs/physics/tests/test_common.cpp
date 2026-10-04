@@ -21,7 +21,7 @@ TEST_CASE("describe covers every PhysicsError, distinctly, from static storage")
   const PhysicsError codes[] = {
       PhysicsError::invalid_argument, PhysicsError::invalid_handle,
       PhysicsError::world_full,       PhysicsError::backend_error,
-      PhysicsError::not_supported,
+      PhysicsError::not_supported,    PhysicsError::invalid_state,
   };
   std::set<std::string_view> distinct;
   for (const auto code : codes) {

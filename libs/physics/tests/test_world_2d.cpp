@@ -1,11 +1,11 @@
 // No DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN here - test_common.cpp owns doctest's
 // main (the net test-suite pattern: one binary, several TUs).
 //
-// These cases pin the BACKEND-INDEPENDENT machinery against the null
+// These cases pin the BACKEND-INDEPENDENT machinery through the real Box2D
 // backend: generational handle lifetime, capacity, validation, the
 // accumulator's exact alpha semantics, bulk-set atomicity and the
-// event-buffer discipline. Physics behavior (gravity, collision) is the
-// real backend's job and lands with it.
+// event-buffer discipline. Engine BEHAVIOR (gravity, collision response,
+// contact events, queries) is test_world_2d_box2d.cpp's job.
 
 #include <doctest/doctest.h>
 
@@ -179,6 +179,47 @@ TEST_CASE("create_body validates shapes and material values") {
     d.density = 0.0f;
     CHECK(world.create_body(d).has_value());
   }
+  SUBCASE("friction and restitution must be >= 0") {
+    BodyDesc d{};
+    d.friction = -0.1f;
+    CHECK(has_code(world.create_body(d), PhysicsError::invalid_argument));
+    d.friction = 0.2f;
+    d.restitution = -1.0f;
+    CHECK(has_code(world.create_body(d), PhysicsError::invalid_argument));
+  }
+}
+
+TEST_CASE("runtime setters reject non-finite values before the engine sees them") {
+  auto world = make_world();
+  auto id = world.create_body(BodyDesc{});
+  REQUIRE(id.has_value());
+  const auto nan = std::nanf("");
+
+  CHECK(has_code(world.set_transform(*id, {nan, 0.0f}, 0.0f),
+                 PhysicsError::invalid_argument));
+  CHECK(has_code(world.set_transform(*id, {0.0f, nan}, 0.0f),
+                 PhysicsError::invalid_argument));
+  CHECK(has_code(world.set_transform(*id, {0.0f, 0.0f}, nan),
+                 PhysicsError::invalid_argument));
+  CHECK(has_code(world.set_velocity(*id, {nan, 0.0f}, 0.0f),
+                 PhysicsError::invalid_argument));
+  CHECK(has_code(world.set_velocity(*id, {0.0f, 0.0f}, nan),
+                 PhysicsError::invalid_argument));
+  CHECK(has_code(world.apply_linear_impulse(*id, {0.0f, nan}),
+                 PhysicsError::invalid_argument));
+  CHECK(has_code(world.apply_angular_impulse(*id, nan),
+                 PhysicsError::invalid_argument));
+  CHECK(has_code(world.apply_force(*id, {nan, 0.0f}),
+                 PhysicsError::invalid_argument));
+  CHECK(has_code(world.apply_torque(*id, nan),
+                 PhysicsError::invalid_argument));
+
+  // The body survived all of that un-corrupted.
+  auto state = world.body_state(*id);
+  REQUIRE(state.has_value());
+  CHECK(std::isfinite(state->position.x));
+  CHECK(std::isfinite(state->position.y));
+  CHECK(std::isfinite(state->rotation));
 }
 
 TEST_CASE("body_state echoes the pose; the mirror serves transforms()") {
@@ -237,6 +278,24 @@ TEST_CASE("set_transforms is atomic: one stale id moves nothing") {
   REQUIRE(applied.has_value());
   CHECK(applied->position.x == doctest::Approx(5.0f));
   CHECK(applied->rotation == doctest::Approx(0.25f));
+
+  SUBCASE("one non-finite VALUE fails the whole batch too - ids and values are both atomic") {
+    BodyMove bad_value{};
+    bad_value.id = *a;
+    bad_value.position = {std::nanf(""), 0.0f};
+    const BodyMove good_value{*a, {7.0f, 8.0f}, 0.0f};
+    const std::vector<BodyMove> batch_with_nan{good_value, bad_value};
+    CHECK(has_code(world.set_transforms(batch_with_nan),
+                   PhysicsError::invalid_argument));
+    // doctest re-runs the whole case per subcase, so the earlier all_good
+    // batch already applied: atomicity means the (5, 6) pose SURVIVES the
+    // failed batch - its good entry did not sneak in.
+    auto after = world.body_state(*a);
+    REQUIRE(after.has_value());
+    CHECK(after->position.x == doctest::Approx(5.0f));
+    CHECK(after->position.y == doctest::Approx(6.0f));
+    CHECK(after->rotation == doctest::Approx(0.25f));
+  }
 }
 
 TEST_CASE("the accumulator drives alpha; the backlog is dropped at the clamp") {
@@ -303,10 +362,14 @@ TEST_CASE("joints validate, live and cascade with their bodies") {
     CHECK(has_code(world.create_joint(DistanceJoint{stale, *a, 1.0f}),
                    PhysicsError::invalid_handle));
   }
-  SUBCASE("distance joints take length >= 0") {
+  SUBCASE("distance joints take length > 0") {
     CHECK(has_code(world.create_joint(DistanceJoint{*a, *b, -1.0f}),
                    PhysicsError::invalid_argument));
-    CHECK(world.create_joint(DistanceJoint{*a, *b, 0.0f}).has_value());
+    // Zero is degenerate (that is a weld's job) and Box2D hard-asserts
+    // length > 0 - the lib must reject it before the engine sees it.
+    CHECK(has_code(world.create_joint(DistanceJoint{*a, *b, 0.0f}),
+                   PhysicsError::invalid_argument));
+    CHECK(world.create_joint(DistanceJoint{*a, *b, 0.5f}).has_value());
   }
   SUBCASE("revolute limits need lower <= upper when enabled") {
     RevoluteJoint bad{};
@@ -324,6 +387,31 @@ TEST_CASE("joints validate, live and cascade with their bodies") {
     ok_limits.lower_angle = -0.5f;
     ok_limits.upper_angle = 0.5f;
     CHECK(world.create_joint(ok_limits).has_value());
+  }
+  SUBCASE("revolute limits must stay within one turn (+-0.99*pi)") {
+    RevoluteJoint beyond{};
+    beyond.a = *a;
+    beyond.b = *b;
+    beyond.enable_limits = true;
+    beyond.lower_angle = -0.5f;
+    beyond.upper_angle = 4.0f;  // beyond 0.99*pi
+    CHECK(has_code(world.create_joint(beyond), PhysicsError::invalid_argument));
+
+    beyond.lower_angle = -4.0f;  // below -0.99*pi
+    beyond.upper_angle = 0.5f;
+    CHECK(has_code(world.create_joint(beyond), PhysicsError::invalid_argument));
+  }
+  SUBCASE("a joint needs at least one dynamic body") {
+    BodyDesc static_desc{};
+    static_desc.kind = ws::physics::BodyKind::static_;
+    auto s1 = world.create_body(static_desc);
+    auto s2 = world.create_body(static_desc);
+    REQUIRE(s1.has_value());
+    REQUIRE(s2.has_value());
+    CHECK(has_code(world.create_joint(FixedJoint{*s1, *s2}),
+                   PhysicsError::invalid_argument));
+    // Dynamic-to-static is the normal anchor case.
+    CHECK(world.create_joint(FixedJoint{*a, *s1}).has_value());
   }
   SUBCASE("an enabled motor needs max_motor_torque > 0") {
     RevoluteJoint bad{};
@@ -368,15 +456,17 @@ TEST_CASE("a moved-from world fails cleanly on every path") {
   REQUIRE(id.has_value());
 
   World2D moved_to = std::move(world);
-  CHECK(has_code(world.step(), PhysicsError::backend_error));
-  CHECK(has_code(world.advance(0.0f), PhysicsError::backend_error));
-  CHECK(has_code(world.create_body(BodyDesc{}), PhysicsError::backend_error));
-  CHECK(has_code(world.body_state(*id), PhysicsError::backend_error));
-  CHECK(has_code(world.destroy_body(*id), PhysicsError::backend_error));
-  CHECK(has_code(world.set_transform(*id, {}, 0.0f), PhysicsError::backend_error));
-  CHECK(has_code(world.create_joint(FixedJoint{*id, *id}), PhysicsError::backend_error));
+  CHECK(has_code(world.step(), PhysicsError::invalid_state));
+  CHECK(has_code(world.advance(0.0f), PhysicsError::invalid_state));
+  CHECK(has_code(world.create_body(BodyDesc{}), PhysicsError::invalid_state));
+  CHECK(has_code(world.body_state(*id), PhysicsError::invalid_state));
+  CHECK(has_code(world.destroy_body(*id), PhysicsError::invalid_state));
+  CHECK(has_code(world.set_transform(*id, {}, 0.0f), PhysicsError::invalid_state));
+  CHECK(has_code(world.create_joint(FixedJoint{*id, *id}), PhysicsError::invalid_state));
   CHECK(world.contact_events().empty());
   CHECK(world.transforms().empty());
+  CHECK(world.prev_transforms().empty());
+  CHECK(world.moved_bodies().empty());
   CHECK(world.interpolation_alpha() == doctest::Approx(0.0f));
 
   // The move target owns everything the source created.

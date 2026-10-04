@@ -12,8 +12,10 @@
 // world is created).
 //
 // Poses: the lib owns the slot-indexed transform mirror that
-// World2D::transforms() serves. The lib writes it on create/set and the
-// backend refreshes it in bulk after every tick (copy_transforms); the
+// World2D::transforms() serves. The lib writes it on create/set; the
+// backend reports every body it simulated each tick (step()'s moves_out),
+// and the lib folds those into the mirror - a body that did not move
+// already holds its current pose there, so nothing else is needed. The
 // backend owns simulation truth, the lib owns the renderer-facing copy.
 // Velocities are backend-owned and read per body (get_velocity).
 //
@@ -100,6 +102,14 @@ struct BackendVelocity2D {
   float angular = 0.0f;
 };
 
+// One body the backend simulated during a tick: the slot the lib assigned,
+// plus the pose it ended the tick at. Asleep bodies never appear (they did
+// not move); the lib folds these into its pose mirror.
+struct BackendMove2D {
+  std::uint32_t slot = 0;
+  physics2d::Transform transform{};
+};
+
 class IWorld2DBackend {
  public:
   virtual ~IWorld2DBackend() = default;
@@ -127,12 +137,18 @@ class IWorld2DBackend {
 
   // One fixed tick. The backend calls collector.add() for every began/ended/
   // hit event it produced during the tick, then returns; it must have cleared
-  // its accumulated forces/torques by return.
-  virtual void step(float dt, IEventCollector2D& collector) = 0;
-
-  // Refresh the lib's slot-indexed pose mirror for every slot holding a
-  // live backend body (slots it does not hold are left untouched).
-  virtual void copy_transforms(std::span<physics2d::Transform> out) const = 0;
+  // its accumulated forces/torques by return. Events must be fed in
+  // DETERMINISTIC order (engine array order per tick): which events the
+  // lib's overflow cap drops must itself be deterministic, so a
+  // multithreaded engine buffers per thread and merges in a fixed order.
+  //
+  // Moves: the backend writes one entry per body it simulated this tick
+  // (awake bodies - asleep ones did not move and cost nothing) into
+  // moves_out and returns the count. The span is pre-sized to max_bodies,
+  // which bounds the per-tick awake count; writing past it is a backend
+  // bug. Slots must be ones the lib assigned. Returns the entry count.
+  virtual std::size_t step(float dt, IEventCollector2D& collector,
+                           std::span<BackendMove2D> moves_out) = 0;
 
   // Queries (allocating by design - not the hot path). Ray direction is
   // non-zero; normalize it first. Miss = nullopt.
@@ -145,9 +161,10 @@ class IWorld2DBackend {
                             std::vector<std::uint32_t>& out) const = 0;
 };
 
-// Backends (defined in src/backend/<name>): the null backend exists so the
-// lib machinery builds and tests standalone; Box2D v3 is the real 2D engine.
-[[nodiscard]] std::unique_ptr<IWorld2DBackend> make_null_world_2d(
+// The 2D backend: Box2D v3 (src/backend/box2d/box2d_2d.cpp). Returns
+// nullptr only when engine/pool initialization failed; World2D::create
+// turns that into a backend_error Result.
+[[nodiscard]] std::unique_ptr<IWorld2DBackend> make_box2d_world_2d(
     const BackendDesc2D& desc);
 
 }  // namespace ws::physics::detail

@@ -19,7 +19,7 @@ enum class ContactPhase : std::uint8_t {
 // other body - they just produce no collision response.
 struct ContactEvent {
   ContactPhase phase{};
-  BodyId a{};     // the body with the lower creation index
+  BodyId a{};     // the body with the lower slot index (a.index < b.index)
   BodyId b{};
   Vec3 point{};   // one witness point, world space
   Vec3 normal{};  // unit length, points a -> b

@@ -20,6 +20,7 @@ enum class PhysicsError : std::int32_t {
   world_full = 3,        // the world's body/joint capacity is exhausted
   backend_error = 4,     // a backend call failed; Result messages carry detail
   not_supported = 5,     // feature this backend lacks (reserved for future backends)
+  invalid_state = 6,     // object not in a state that allows the call (moved-from world, ...)
 };
 
 // One-line description per code, from a static table. This is the ONLY
@@ -32,6 +33,7 @@ enum class PhysicsError : std::int32_t {
     case PhysicsError::world_full: return "world is full";
     case PhysicsError::backend_error: return "backend error";
     case PhysicsError::not_supported: return "not supported";
+    case PhysicsError::invalid_state: return "invalid state";
   }
   return "unknown physics error";
 }

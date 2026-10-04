@@ -3,20 +3,31 @@
 // The backend-independent world machinery, shared by World2D and World3D
 // (internal - never included by a public header). Everything that does not
 // depend on the dimension's types lives HERE, once: generational handle
-// tables, the pose mirror behind transforms(), the contact-event buffer
-// with its drain/normalize/sort/cap discipline, the fixed-timestep
+// tables, the pose mirror behind transforms() and its previous-call copy,
+// the moved-bodies list fed by the backend each tick, the contact-event
+// buffer with its normalize/sort/cap discipline, the fixed-timestep
 // accumulator with the spiral-of-death clamp, bulk set_transforms
 // atomicity, and the destroy_body -> joint cascade.
 //
 // The dimension is a Traits type supplied by the per-dimension .cpp:
 //   struct Dim2D;  // in world2d.cpp - aliases Vec2/float types + the 2D seam
 //   struct Dim3D;  // in world3d.cpp
+// Beyond the type aliases the traits provide the dimension-specific
+// predicates the machinery needs:
+//   is_finite(Vec) / is_finite(Angular)  - finiteness for runtime setters
+//   is_valid_rotation(Rotation)          - finite AND non-degenerate
+//   sanitize_rotation(Rotation&)         - canonicalize (3D: normalize the Quat)
 // The public World classes stay separate BY DESIGN (the user-visible API
 // is two distinct mirrored types); only the tricky machinery is shared,
 // so a fix lands in one place. The per-dim .cpp keeps what genuinely
 // differs: Desc validation, shape validation, JointDesc translation
 // (public variant with BodyIds -> flat BackendJoint with slots) and the
 // query result mapping.
+//
+// Event + move semantics: contact_events(), moved_bodies() and
+// prev_transforms() are all PER step()/advance() CALL - an advance() that
+// runs several fixed ticks unions the ticks' events and moved bodies and
+// reports them once, which is how a game consumes them (once per frame).
 //
 // Allocation discipline: EVERY vector is sized at construction. Steady
 // state (create/destroy bodies + joints, step, advance, set_transforms,
@@ -29,6 +40,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -81,6 +93,7 @@ class WorldCore {
  public:
   using Vec = typename D::Vec;              // Vec2 / Vec3
   using Angular = typename D::Angular;      // float / Vec3
+  using Rotation = typename D::Rotation;    // float / Quat
   using BodyIdT = typename D::BodyId;
   using JointIdT = typename D::JointId;
   using BodyDescT = typename D::BodyDesc;
@@ -91,6 +104,7 @@ class WorldCore {
   using Backend = typename D::Backend;
   using BackendJoint = typename D::BackendJoint;
   using BackendEvent = typename D::BackendEvent;
+  using BackendMove = typename D::BackendMove;
   using BackendVelocity = typename D::BackendVelocity;
 
   WorldCore(const CoreDesc& desc, std::unique_ptr<Backend> backend)
@@ -98,9 +112,15 @@ class WorldCore {
         bodies_(desc.max_bodies),
         joints_(desc.max_joints),
         backend_(std::move(backend)) {
-    transforms_.resize(desc.max_bodies);      // one allocation, final size
+    transforms_.resize(desc.max_bodies);       // one allocation, final size
+    prev_transforms_.resize(desc.max_bodies);
     events_.reserve(desc.max_contact_events);  // capacity only
     records_.resize(desc.max_joints);
+    backend_moves_.resize(desc.max_bodies);   // step() scratch
+    seen_.assign(desc.max_bodies, 0);          // moved dedupe, 0 = unseen
+    moved_raw_.reserve(desc.max_bodies);
+    moved_.reserve(desc.max_bodies);
+    kinds_.assign(desc.max_bodies, ws::physics::BodyKind::static_);
   }
 
   WorldCore(const WorldCore&) = delete;
@@ -108,18 +128,30 @@ class WorldCore {
 
   // --- bodies -------------------------------------------------------------
 
-  // Pre-validated desc; the dimension layer validates shapes/kinds first.
+  // Pre-validated desc (the dimension layer checks shapes/kinds/material);
+  // the rotation is re-checked and canonicalized here because every path
+  // that writes a pose goes through the same rule.
   [[nodiscard]] ws::core::Result<BodyIdT> create_body(const BodyDescT& desc) {
+    if (!D::is_valid_rotation(desc.transform.rotation)) {
+      return fail(PhysicsError::invalid_argument,
+                  "body rotation must be finite and non-degenerate");
+    }
+    BodyDescT local = desc;  // creation is cold: one copy is fine
+    D::sanitize_rotation(local.transform.rotation);
     const auto slot = bodies_.allocate();
     if (!slot) {
       return fail(PhysicsError::world_full, "body capacity exhausted");
     }
-    if (auto st = backend_->create_body(*slot, desc); !st) {
+    if (auto st = backend_->create_body(*slot, local); !st) {
       bodies_.free(*slot);
       return fail(PhysicsError::backend_error,
                   std::string{"backend create_body: "} + st.error().message);
     }
-    transforms_[*slot] = desc.transform;
+    transforms_[*slot] = local.transform;
+    // New bodies spawn at their pose in BOTH mirrors: interpolating a body
+    // from a stale pre-birth pose would teleport it across the screen.
+    prev_transforms_[*slot] = local.transform;
+    kinds_[*slot] = local.kind;
     return BodyIdT{*slot, bodies_.generation(*slot)};
   }
 
@@ -130,7 +162,9 @@ class WorldCore {
     }
     // Joints die with their bodies (both engines do this too - the lib
     // mirrors it so its own tables stay true). Joints first: the engines
-    // refuse joint destruction once the body is gone.
+    // refuse joint destruction once the body is gone. The scan is
+    // O(max_joints) per destroy - fine for v1 scales; a per-body joint
+    // list is the upgrade path if mass despawns ever profile hot.
     for (std::uint32_t j = 0; j < records_.size(); ++j) {
       if (records_[j].live &&
           (records_[j].slot_a == *slot || records_[j].slot_b == *slot)) {
@@ -141,6 +175,7 @@ class WorldCore {
     }
     backend_->destroy_body(*slot);
     bodies_.free(*slot);
+    kinds_[*slot] = ws::physics::BodyKind::static_;
     return {};
   }
 
@@ -158,11 +193,17 @@ class WorldCore {
     return state;
   }
 
-  ws::core::Status set_transform(BodyIdT id, const TransformT& t) {
+  ws::core::Status set_transform(BodyIdT id, TransformT t) {
     const auto slot = resolve_body(id);
     if (!slot) {
       return fail(PhysicsError::invalid_handle, "stale or unknown body");
     }
+    if (!D::is_finite(t.position) || !D::is_valid_rotation(t.rotation)) {
+      return fail(PhysicsError::invalid_argument,
+                  "set_transform: position/rotation must be finite "
+                  "(and the rotation non-degenerate)");
+    }
+    D::sanitize_rotation(t.rotation);
     transforms_[*slot] = t;
     backend_->set_transform(*slot, t);
     return {};
@@ -173,6 +214,10 @@ class WorldCore {
     if (!slot) {
       return fail(PhysicsError::invalid_handle, "stale or unknown body");
     }
+    if (!D::is_finite(linear) || !D::is_finite(angular)) {
+      return fail(PhysicsError::invalid_argument,
+                  "set_velocity: values must be finite");
+    }
     backend_->set_velocity(*slot, linear, angular);
     return {};
   }
@@ -181,6 +226,9 @@ class WorldCore {
     const auto slot = resolve_body(id);
     if (!slot) {
       return fail(PhysicsError::invalid_handle, "stale or unknown body");
+    }
+    if (!D::is_finite(impulse)) {
+      return fail(PhysicsError::invalid_argument, "impulse must be finite");
     }
     backend_->apply_linear_impulse(*slot, impulse);
     return {};
@@ -191,6 +239,9 @@ class WorldCore {
     if (!slot) {
       return fail(PhysicsError::invalid_handle, "stale or unknown body");
     }
+    if (!D::is_finite(impulse)) {
+      return fail(PhysicsError::invalid_argument, "impulse must be finite");
+    }
     backend_->apply_angular_impulse(*slot, impulse);
     return {};
   }
@@ -200,6 +251,9 @@ class WorldCore {
     if (!slot) {
       return fail(PhysicsError::invalid_handle, "stale or unknown body");
     }
+    if (!D::is_finite(force)) {
+      return fail(PhysicsError::invalid_argument, "force must be finite");
+    }
     backend_->apply_force(*slot, force);
     return {};
   }
@@ -208,6 +262,9 @@ class WorldCore {
     const auto slot = resolve_body(id);
     if (!slot) {
       return fail(PhysicsError::invalid_handle, "stale or unknown body");
+    }
+    if (!D::is_finite(torque)) {
+      return fail(PhysicsError::invalid_argument, "torque must be finite");
     }
     backend_->apply_torque(*slot, torque);
     return {};
@@ -220,6 +277,13 @@ class WorldCore {
   [[nodiscard]] ws::core::Result<JointIdT> add_joint(std::uint32_t slot_a,
                                                      std::uint32_t slot_b,
                                                      const BackendJoint& joint) {
+    if (kinds_[slot_a] != ws::physics::BodyKind::dynamic &&
+        kinds_[slot_b] != ws::physics::BodyKind::dynamic) {
+      // Solver islands grow from dynamic bodies: a joint with none on
+      // either side never simulates and silently does nothing.
+      return fail(PhysicsError::invalid_argument,
+                  "create_joint: at least one body must be dynamic");
+    }
     const auto slot = joints_.allocate();
     if (!slot) {
       return fail(PhysicsError::world_full, "joint capacity exhausted");
@@ -245,8 +309,14 @@ class WorldCore {
 
   // --- stepping ---------------------------------------------------------------
 
+  // Events, moved bodies and the prev mirror are all PER CALL (see the
+  // file header): step() and advance() both open and close one "call".
+  // v1 backends cannot fail mid-step; the Status is reserved for engines
+  // that can report step failure.
   ws::core::Status step() {
+    begin_call();
     tick();
+    end_call();
     return {};
   }
 
@@ -254,6 +324,7 @@ class WorldCore {
     if (!(frame_dt >= 0.0f) || !std::isfinite(frame_dt)) {
       return fail(PhysicsError::invalid_argument, "frame_dt must be finite and >= 0");
     }
+    begin_call();
     accumulator_ += frame_dt;
     std::uint32_t steps = 0;
     while (accumulator_ >= desc_.fixed_dt && steps < desc_.max_substeps) {
@@ -264,9 +335,10 @@ class WorldCore {
     if (accumulator_ >= desc_.fixed_dt) {
       // Spiral-of-death protection: drop the whole backlog, keep only the
       // current tick's fraction for interpolation.
-      accumulator_ = std::fmod(accumulator_, desc_.fixed_dt);
+      accumulator_ = std::fmod(accumulator_, static_cast<double>(desc_.fixed_dt));
     }
-    alpha_ = accumulator_ / desc_.fixed_dt;
+    alpha_ = static_cast<float>(accumulator_ / desc_.fixed_dt);
+    end_call();
     return {};
   }
 
@@ -275,6 +347,7 @@ class WorldCore {
 
   // --- events + bulk paths ------------------------------------------------------
 
+  // This CALL's contact events (a multi-tick advance() unions its ticks).
   [[nodiscard]] std::span<const ContactEventT> contact_events() const {
     return std::span<const ContactEventT>{events_};
   }
@@ -283,15 +356,37 @@ class WorldCore {
     return std::span<const TransformT>{transforms_};
   }
 
+  // The pose mirror as it was before this CALL's step()/advance() - the
+  // "previous" endpoint for interpolation_alpha() lerping. Index-aligned
+  // with transforms(); retired slots hold stale data in both.
+  [[nodiscard]] std::span<const TransformT> prev_transforms() const {
+    return std::span<const TransformT>{prev_transforms_};
+  }
+
+  // Bodies the backend reported as simulated/moved during this CALL, sorted
+  // by BodyId index. Engines report awake bodies (Box2D reports every awake
+  // body each step, displacement or not); sleeping bodies never appear, so
+  // large sleeping worlds cost nothing to sync.
+  [[nodiscard]] std::span<const BodyMoveT> moved_bodies() const {
+    return std::span<const BodyMoveT>{moved_};
+  }
+
   ws::core::Status set_transforms(std::span<const BodyMoveT> moves) {
-    // ATOMIC: validate every id first; the apply loop cannot fail.
+    // ATOMIC: every id AND every value is validated first; the apply loop
+    // cannot fail. A NaN in entry 50 leaves the world untouched.
     for (const BodyMoveT& m : moves) {
       if (!bodies_.alive(m.id.index, m.id.generation)) {
         return fail(PhysicsError::invalid_handle, "set_transforms: stale or unknown body");
       }
+      if (!D::is_finite(m.position) || !D::is_valid_rotation(m.rotation)) {
+        return fail(PhysicsError::invalid_argument,
+                    "set_transforms: position/rotation must be finite "
+                    "(and the rotation non-degenerate)");
+      }
     }
     for (const BodyMoveT& m : moves) {
-      const TransformT t{m.position, m.rotation};
+      TransformT t{m.position, m.rotation};
+      D::sanitize_rotation(t.rotation);
       transforms_[m.id.index] = t;
       backend_->set_transform(m.id.index, t);
     }
@@ -299,8 +394,10 @@ class WorldCore {
   }
 
   // Query helper: backend returns slots; the dimension layer maps them to
-  // public handles through this. Sorted by creation index = slot order is
-  // NOT guaranteed from the engine, so sort here (deterministic).
+  // public handles through this. Engines return arbitrary order, so sorting
+  // by BodyId index makes the result deterministic. Note slot reuse means
+  // slot order is NOT creation order - the public contract promises a
+  // deterministic order, not a creation order.
   [[nodiscard]] ws::core::Result<std::vector<BodyIdT>> ids_for_slots(
       std::vector<std::uint32_t>& slots) const {
     std::sort(slots.begin(), slots.end());
@@ -339,26 +436,95 @@ class WorldCore {
     bool live = false;
   };
 
-  // The per-tick engine drive, shared by step() and advance().
-  void tick() {
-    events_.clear();  // capacity kept: no reallocation ever
-    EventCollector collector{*this};
-    backend_->step(desc_.fixed_dt, collector);
-    // Worker-thread arrival order is not deterministic (Jolt); the public
-    // order is (a.index, b.index, phase) - sorted once, in place.
+  // A moved entry before its public handle is resolved.
+  struct RawMove {
+    std::uint32_t slot;
+    TransformT transform;
+  };
+
+  // Opens one public step()/advance() call: snapshot the previous pose,
+  // reset the per-call buffers. The seen_ reset touches only the slots the
+  // previous call marked (O(previous moved), not O(max_bodies)).
+  void begin_call() {
+    prev_transforms_ = transforms_;  // same size since construction: no realloc
+    events_.clear();                 // capacity kept: no reallocation ever
+    for (const RawMove& m : moved_raw_) {
+      seen_[m.slot] = 0;
+    }
+    moved_raw_.clear();
+    moved_.clear();
+    overflow_drops_ = 0;
+  }
+
+  // Closes the call: fix the public event order (determinism contract) and
+  // publish the moved list with live public handles, sorted by index.
+  void end_call() {
+    // Same-pair events with the same phase (multi-point contacts, repeated
+    // hits) would come out in arbitrary order - std::sort is not stable, so
+    // the comparison continues through point, normal and speed.
     std::sort(events_.begin(), events_.end(),
               [](const ContactEventT& l, const ContactEventT& r) {
                 if (l.a.index != r.a.index) return l.a.index < r.a.index;
                 if (l.b.index != r.b.index) return l.b.index < r.b.index;
-                return static_cast<std::uint8_t>(l.phase) <
-                       static_cast<std::uint8_t>(r.phase);
+                const auto lp = static_cast<std::uint8_t>(l.phase);
+                const auto rp = static_cast<std::uint8_t>(r.phase);
+                if (lp != rp) return lp < rp;
+                if (l.point.x != r.point.x) return l.point.x < r.point.x;
+                if (l.point.y != r.point.y) return l.point.y < r.point.y;
+                if constexpr (requires { l.point.z; }) {
+                  if (l.point.z != r.point.z) return l.point.z < r.point.z;
+                }
+                if (l.normal.x != r.normal.x) return l.normal.x < r.normal.x;
+                if (l.normal.y != r.normal.y) return l.normal.y < r.normal.y;
+                if constexpr (requires { l.normal.z; }) {
+                  if (l.normal.z != r.normal.z) return l.normal.z < r.normal.z;
+                }
+                if (l.speed != r.speed) return l.speed < r.speed;
+                return false;
               });
-    backend_->copy_transforms(transforms_);
+    for (const RawMove& m : moved_raw_) {
+      if (const auto id = id_for_slot(m.slot)) {
+        moved_.push_back(
+            BodyMoveT{*id, m.transform.position, m.transform.rotation});
+      }
+    }
+    std::sort(moved_.begin(), moved_.end(),
+              [](const BodyMoveT& l, const BodyMoveT& r) {
+                return l.id.index < r.id.index;
+              });
+    // Re-arm the overflow warning once a call completes without dropping
+    // anything: one warning per overflow episode, not per world lifetime.
+    if (overflow_drops_ == 0) {
+      overflow_warned_ = false;
+    }
+  }
+
+  // One fixed tick of the engine. Appends to the CALL's buffers; the sort,
+  // cap reporting and handle resolution happen once, in end_call().
+  void tick() {
+    EventCollector collector{*this};
+    const std::size_t count =
+        backend_->step(desc_.fixed_dt, collector, backend_moves_);
+    for (std::size_t i = 0; i < count; ++i) {
+      const auto& mv = backend_moves_[i];
+      if (mv.slot >= transforms_.size()) {
+        continue;  // defensive: lib/backend slot maps are built in lockstep
+      }
+      transforms_[mv.slot] = mv.transform;
+      if (seen_[mv.slot] == 0) {
+        seen_[mv.slot] = static_cast<std::uint32_t>(moved_raw_.size()) + 1;
+        moved_raw_.push_back(RawMove{mv.slot, mv.transform});
+      } else {
+        moved_raw_[seen_[mv.slot] - 1].transform = mv.transform;
+      }
+    }
   }
 
   // IEventCollector2D/3D implementation: resolves engine slots to public
-  // handles, orders the pair by creation index (flipping the normal so it
-  // keeps pointing a -> b), caps the buffer, warns once on overflow.
+  // handles, orders the pair by BodyId index (flipping the normal so it
+  // keeps pointing a -> b), caps the buffer, warns once per overflow
+  // episode. The backend must feed events in a deterministic order so that
+  // WHICH events overflow-drop is itself deterministic.
   class EventCollector final : public D::CollectorBase {
    public:
     explicit EventCollector(WorldCore& core) : core_(core) {}
@@ -369,13 +535,14 @@ class WorldCore {
           core_.overflow_warned_ = true;
           ws::core::warn(
               "physics: contact-event buffer full ({}); dropping newest events",
-              core_.events_.capacity());
+              core_.desc_.max_contact_events);
         }
+        ++core_.overflow_drops_;
         return;
       }
       if (!core_.bodies_.live(event.slot_a) ||
           !core_.bodies_.live(event.slot_b)) {
-        return;  // defensive: bodies retire between ticks, never mid-tick
+        return;  // defensive: bodies retire between calls, never mid-call
       }
       BodyIdT a{event.slot_a, core_.bodies_.generation(event.slot_a)};
       BodyIdT b{event.slot_b, core_.bodies_.generation(event.slot_b)};
@@ -398,10 +565,17 @@ class WorldCore {
   std::unique_ptr<Backend> backend_;
 
   std::vector<TransformT> transforms_;   // slot-indexed pose mirror
-  std::vector<ContactEventT> events_;     // drained each tick, capacity fixed
-  std::vector<JointRecord> records_;     // joint slot -> body slots
-  float accumulator_ = 0.0f;
+  std::vector<TransformT> prev_transforms_;  // mirror before this CALL
+  std::vector<ContactEventT> events_;   // drained per call, capacity fixed
+  std::vector<JointRecord> records_;    // joint slot -> body slots
+  std::vector<BackendMove> backend_moves_;  // step() scratch, slot-indexed
+  std::vector<RawMove> moved_raw_;      // deduped moved slots this call
+  std::vector<BodyMoveT> moved_;        // public moved list this call
+  std::vector<std::uint32_t> seen_;     // slot -> moved_raw_ index+1 (0 = no)
+  std::vector<ws::physics::BodyKind> kinds_;  // slot -> body kind
+  double accumulator_ = 0.0;  // double: a float one drifts over long sessions
   float alpha_ = 0.0f;
+  std::uint32_t overflow_drops_ = 0;
   bool overflow_warned_ = false;
 };
 
