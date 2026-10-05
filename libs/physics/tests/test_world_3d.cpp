@@ -3,8 +3,10 @@
 // The 3D mirror of test_world_2d.cpp, deliberately leaner: the machinery
 // (tables, accumulator, event buffer, atomicity) is ONE shared template -
 // world_core.hpp - already pinned by the 2D suite. This file pins the 3D
-// surface: Quat poses, the Y-aligned capsule rules, hinge-axis validation
-// and overlap_sphere/overlap_aabb plumbing.
+// surface: Quat poses, the Y-aligned capsule rules, hinge-axis validation,
+// overlap_sphere/overlap_aabb plumbing, the Vec3/Quat setters' non-finite
+// rejection, and moved-from semantics (the 3D API has query paths the 2D
+// file never had to sweep).
 
 #include <doctest/doctest.h>
 
@@ -72,6 +74,11 @@ TEST_CASE("3D body lifetime mirrors the generational contract") {
 
   CHECK(world.create_body(BodyDesc{}).has_value());
   CHECK(has_code(world.create_body(BodyDesc{}), PhysicsError::world_full));
+
+  SUBCASE("a zero-capacity world refuses the very first body") {
+    auto empty = make_world(World3D::Desc{.max_bodies = 0, .max_joints = 0});
+    CHECK(has_code(empty.create_body(BodyDesc{}), PhysicsError::world_full));
+  }
 
   SUBCASE("stale handles error on every path") {
     const BodyId stale = *a;
@@ -212,6 +219,73 @@ TEST_CASE("hinge joints validate axis, limits and motor") {
     CHECK(world.destroy_body(*a).has_value());
     CHECK(has_code(world.destroy_joint(*joint), PhysicsError::invalid_handle));
   }
+}
+
+TEST_CASE("3D runtime setters reject non-finite values before Jolt sees them") {
+  auto world = make_world();
+  auto id = world.create_body(BodyDesc{});
+  REQUIRE(id.has_value());
+  const float nan = std::nanf("");
+  const Quat nan_quat{nan, 0.0f, 0.0f, 1.0f};
+
+  CHECK(has_code(world.set_transform(*id, Vec3{nan, 0.0f, 0.0f}, Quat{}),
+                 PhysicsError::invalid_argument));
+  CHECK(has_code(world.set_transform(*id, Vec3{}, nan_quat),
+                 PhysicsError::invalid_argument));
+  CHECK(has_code(world.set_velocity(*id, Vec3{0.0f, nan, 0.0f}, Vec3{}),
+                 PhysicsError::invalid_argument));
+  CHECK(has_code(world.set_velocity(*id, Vec3{}, Vec3{nan, 0.0f, 0.0f}),
+                 PhysicsError::invalid_argument));
+  CHECK(has_code(world.apply_linear_impulse(*id, Vec3{0.0f, 0.0f, nan}),
+                 PhysicsError::invalid_argument));
+  CHECK(has_code(world.apply_angular_impulse(*id, Vec3{nan, 0.0f, 0.0f}),
+                 PhysicsError::invalid_argument));
+  CHECK(has_code(world.apply_force(*id, Vec3{nan, 0.0f, 0.0f}),
+                 PhysicsError::invalid_argument));
+  CHECK(has_code(world.apply_torque(*id, Vec3{0.0f, nan, 0.0f}),
+                 PhysicsError::invalid_argument));
+
+  // The body survived all of that un-corrupted.
+  auto state = world.body_state(*id);
+  REQUIRE(state.has_value());
+  CHECK(std::isfinite(state->position.x));
+  CHECK(std::isfinite(state->position.y));
+  CHECK(std::isfinite(state->position.z));
+  CHECK(std::isfinite(state->rotation.w));
+}
+
+TEST_CASE("a moved-from 3D world fails cleanly on every path") {
+  auto world = make_world(World3D::Desc{.max_bodies = 4});
+  auto id = world.create_body(BodyDesc{});
+  REQUIRE(id.has_value());
+
+  World3D moved_to = std::move(world);
+  CHECK(has_code(world.step(), PhysicsError::invalid_state));
+  CHECK(has_code(world.advance(0.0f), PhysicsError::invalid_state));
+  CHECK(has_code(world.create_body(BodyDesc{}), PhysicsError::invalid_state));
+  CHECK(has_code(world.body_state(*id), PhysicsError::invalid_state));
+  CHECK(has_code(world.destroy_body(*id), PhysicsError::invalid_state));
+  CHECK(has_code(world.set_transform(*id, Vec3{}, Quat{}),
+                 PhysicsError::invalid_state));
+  CHECK(has_code(world.set_velocity(*id, Vec3{}, Vec3{}),
+                 PhysicsError::invalid_state));
+  CHECK(has_code(world.apply_linear_impulse(*id, Vec3{}),
+                 PhysicsError::invalid_state));
+  CHECK(has_code(world.create_joint(FixedJoint{*id, *id}),
+                 PhysicsError::invalid_state));
+  CHECK(world.contact_events().empty());
+  CHECK(world.transforms().empty());
+  CHECK(world.prev_transforms().empty());
+  CHECK(world.moved_bodies().empty());
+  CHECK(world.interpolation_alpha() == doctest::Approx(0.0f));
+  CHECK(has_code(world.raycast(Vec3{}, Vec3{0.0f, 0.0f, 1.0f}, 1.0f),
+                 PhysicsError::invalid_state));
+  CHECK(has_code(world.overlap_sphere(Vec3{}, 1.0f),
+                 PhysicsError::invalid_state));
+
+  // The move target owns everything the source created.
+  auto state = moved_to.body_state(*id);
+  CHECK(state.has_value());
 }
 
 TEST_CASE("3D queries validate arguments") {

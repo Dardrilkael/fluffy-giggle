@@ -15,4 +15,7 @@ if(NOT ANDROID)
   # netchat too: several terminals (or machines) find each other over
   # discovery and exchange framed text over TCP.
   add_subdirectory(netchat)
+  # bench_physics is the fourth console app: steps a falling-boxes scene in
+  # ws::physics and prints per-tick wall-clock cost per dimension/backend.
+  add_subdirectory(bench_physics)
 endif()

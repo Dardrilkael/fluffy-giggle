@@ -386,7 +386,15 @@ class JoltWorld3D final : public IWorld3DBackend,
     // (Jolt's samples run 10240 bodies on 10240 pairs/constraints).
     const std::uint32_t budget =
         std::clamp<std::uint32_t>(desc.max_bodies * 8u, 1024u, 65536u);
-    system_.Init(desc.max_bodies, 0 /* auto body mutexes */, budget, budget,
+    // Jolt's Array-backed containers reserve(max_bodies) through the global
+    // JPH::Allocate, which asserts inSize > 0 (Memory.cpp:24) - feeding the
+    // engine a literal zero aborts the first debug build that creates a
+    // zero-capacity world. That world is legal by contract: the lib's slot
+    // table refuses every body before the backend is ever asked. So floor
+    // only the ENGINE's view of capacity at 1; the tables above keep the
+    // true zero and stay the sole authority on who may create bodies.
+    const std::uint32_t jolt_capacity = std::max(desc.max_bodies, 1u);
+    system_.Init(jolt_capacity, 0 /* auto body mutexes */, budget, budget,
                 layers_, obj_vs_bp_, pair_filter_);
     system_.SetGravity(to_jph(desc.gravity));
     system_.SetContactListener(this);

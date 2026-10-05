@@ -55,5 +55,8 @@ One commit per phase on `main`.
 - `apps/chatter` - netchat's protocol behind a gui (built for Android,
   runs on desktop too): the same discovery beats and HELLO/SAY frames, so
   phones and terminals share one chat; input is a tap-phrase palette.
+- `apps/bench_physics` - headless ws::physics throughput bench (desktop
+  console app): steps a falling-boxes scene and prints per-tick wall-clock
+  cost while awake and after sleep, per dimension and thread config.
 
 Each `libs/<name>/CLAUDE.md` documents that lib's own rules and tests.
