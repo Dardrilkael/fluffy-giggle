@@ -41,6 +41,12 @@ One commit per phase on `main`.
   libuv is private to `src/backend/uv` - the backend seam means a
   WSAPoll/epoll swap later touches no public header (no uv.h under
   `include/`).
+- `libs/physics` - 2D + 3D physics behind one API (`ws::physics2d` /
+  `ws::physics3d`): generational bodies/joints, drained contact events,
+  queries, fixed-timestep stepping with zero steady-state allocation.
+  Box2D (2D) and Jolt (3D) are both private behind the `src/backend`
+  seam - an engine swap touches no public header (no engine header
+  under `include/`).
 - `apps/playground` - smoke-test app for the shell.
 - `apps/wavplayer` - headless ws::audio smoke app (desktop console app):
   plays a synthesized arpeggio (or the wav passed as argv[1]) on the

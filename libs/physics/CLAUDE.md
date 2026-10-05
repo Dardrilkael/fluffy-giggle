@@ -19,7 +19,10 @@ swap touches no public header and no user code.
 - `src/backend/jolt3d/` - the real 3D engine (Jolt Physics v5.6,
   FetchContent). Contact callbacks fire on worker threads during the
   step, so this backend buffers raw events per tick and feeds them
-  value-sorted after it completes.
+  value-sorted after it completes. The backend floors Jolt's VIEW of
+  body capacity at 1 (its allocator asserts on a zero-sized reserve in
+  debug builds); the lib's slot table keeps the true capacity - even 0 -
+  and stays the sole authority on who may create bodies.
 
 ## Contracts (tested, not just documented)
 - Zero heap allocation in steady-state step()/advance(): every per-step
@@ -74,3 +77,7 @@ multi-shape bodies, per-shape materials, CCD/bullet flags, sleep control.
 Android NDK (arm64-v8a, android-28) both build ws_physics from day one:
 run the suites on the desktop presets, compile-check via
 `cmake --build --preset android-local --target ws_physics`.
+apps/bench_physics (desktop console app) is the throughput consumer: a
+falling-box rain per dimension, timed while awake and after sleep. Run it
+manually - absolute numbers are machine-dependent, so nothing asserts on
+them.
