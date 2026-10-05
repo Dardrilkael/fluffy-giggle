@@ -35,6 +35,11 @@ struct BackendDesc3D {
   float hit_speed_threshold = 0.0f;
   std::uint32_t max_bodies = 0;
   std::uint32_t max_joints = 0;
+  // The 2D seam needs no event cap (Box2D owns the event arrays and the
+  // adapter drains them post-step); Jolt fires contact callbacks on
+  // worker threads DURING the step, so the 3D backend pre-reserves its
+  // raw buffer as a multiple of the lib's cap.
+  std::uint32_t max_contact_events = 0;
 };
 
 struct BackendJoint3D {
@@ -126,9 +131,10 @@ class IWorld3DBackend {
                             std::vector<std::uint32_t>& out) const = 0;
 };
 
-// Backends (defined in src/backend/<name>): the null backend builds and
-// tests the lib machinery standalone; Jolt Physics is the real 3D engine.
-[[nodiscard]] std::unique_ptr<IWorld3DBackend> make_null_world_3d(
+// The 3D backend: Jolt Physics v5.6 (src/backend/jolt3d/jolt3d_3d.cpp).
+// Returns nullptr only when engine/pool initialization failed;
+// World3D::create turns that into a backend_error Result.
+[[nodiscard]] std::unique_ptr<IWorld3DBackend> make_jolt_world_3d(
     const BackendDesc3D& desc);
 
 }  // namespace ws::physics::detail

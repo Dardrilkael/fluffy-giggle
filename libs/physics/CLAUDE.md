@@ -16,7 +16,10 @@ swap touches no public header and no user code.
   fixed-timestep accumulator, bulk set_transforms atomicity, and the
   destroy-body -> joint cascade.
 - `src/backend/box2d/` - the real 2D engine (Box2D v3, FetchContent).
-- `src/backend/null/` - the 3D placeholder until Jolt lands.
+- `src/backend/jolt3d/` - the real 3D engine (Jolt Physics v5.6,
+  FetchContent). Contact callbacks fire on worker threads during the
+  step, so this backend buffers raw events per tick and feeds them
+  value-sorted after it completes.
 
 ## Contracts (tested, not just documented)
 - Zero heap allocation in steady-state step()/advance(): every per-step
@@ -30,6 +33,11 @@ swap touches no public header and no user code.
 - Backends feed events in DETERMINISTIC order: WHICH events the
   max_contact_events cap drops must be the same every run.
 - Forces/torques clear at the end of every tick, whichever engine runs.
+- One documented backend divergence: Jolt removes contacts when a body
+  falls asleep and re-adds them on wake, so a resting 3D pair reports
+  `ended` at sleep and `began` again on wake; Box2D keeps sleeping
+  contacts silent. Passed through the seam verbatim - the 3D engine
+  suite pins the Jolt shape.
 - Determinism: same binary, same thread_count, same call sequence produces
   identical results (replay test). Cross-platform and cross-thread-count
   determinism are NOT promised.

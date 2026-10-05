@@ -214,7 +214,7 @@ TEST_CASE("hinge joints validate axis, limits and motor") {
   }
 }
 
-TEST_CASE("3D queries validate arguments even without a backend") {
+TEST_CASE("3D queries validate arguments") {
   auto world = make_world();
   CHECK(world.create_body(BodyDesc{}).has_value());
 
@@ -227,15 +227,18 @@ TEST_CASE("3D queries validate arguments even without a backend") {
   SUBCASE("overlap_sphere rejects negative radius; empty is fine") {
     CHECK(has_code(world.overlap_sphere(Vec3{}, -1.0f),
                    PhysicsError::invalid_argument));
-    auto hits = world.overlap_sphere(Vec3{}, 4.0f);
+    // A real engine answers now: a query that touches nothing still
+    // returns a valid empty list (engine hits are the Jolt suite's job).
+    auto hits = world.overlap_sphere(Vec3{100.0f, 100.0f, 100.0f}, 4.0f);
     REQUIRE(hits.has_value());
-    CHECK(hits->empty());  // null backend: no hits, valid result
+    CHECK(hits->empty());
   }
   SUBCASE("overlap_aabb rejects inverted boxes") {
     using ws::physics3d::Aabb;
     CHECK(has_code(world.overlap_aabb(Aabb{Vec3{1.0f, 1.0f, 1.0f}, Vec3{0.0f, 1.0f, 1.0f}}),
                    PhysicsError::invalid_argument));
-    auto hits = world.overlap_aabb(Aabb{Vec3{-8.0f, -8.0f, -8.0f}, Vec3{8.0f, 8.0f, 8.0f}});
+    auto hits = world.overlap_aabb(Aabb{Vec3{90.0f, 90.0f, 90.0f},
+                                        Vec3{108.0f, 108.0f, 108.0f}});
     REQUIRE(hits.has_value());
     CHECK(hits->empty());
   }

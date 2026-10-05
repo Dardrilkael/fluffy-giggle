@@ -3,7 +3,8 @@
 // world_core.hpp be shared). Differences from 2D: Vec3/Quat types, the
 // Y-aligned capsule, hinge joints carry a world axis (normalized here -
 // the backend receives a unit vector), and queries are overlap_sphere.
-// The backend is the null one until Jolt lands (src/backend/jolt3d).
+// The backend is Jolt (src/backend/jolt3d); the null placeholder was
+// removed when it landed, same as the 2D path.
 
 #include <cmath>
 #include <memory>
@@ -161,9 +162,12 @@ World3D& World3D::operator=(World3D&&) noexcept = default;
   if (auto st = detail::validate_core_desc(core); !st) {
     return ws::core::unexpected<ws::core::Error>(std::move(st.error()));
   }
-  auto backend = detail::make_null_world_3d(detail::BackendDesc3D{
+  auto backend = detail::make_jolt_world_3d(detail::BackendDesc3D{
       desc.gravity, desc.thread_count, desc.hit_speed_threshold,
-      desc.max_bodies, desc.max_joints});
+      desc.max_bodies, desc.max_joints, desc.max_contact_events});
+  if (!backend) {
+    return fail(PhysicsError::backend_error, "Jolt backend failed to start");
+  }
   World3D world;
   world.impl_ = std::make_unique<Impl>(core, std::move(backend));
   return world;
