@@ -63,6 +63,12 @@ class WS_PHYSICS_API World3D {
   ws::core::Status destroy_body(BodyId id);
   [[nodiscard]] ws::core::Result<BodyState> body_state(BodyId id) const;
 
+  // The opaque per-body payload (BodyDesc::user_data) - stored by this lib,
+  // never interpreted or forwarded to any engine. The id -> payload lookup
+  // for the contact-events loop, where events carry BodyIds only.
+  [[nodiscard]] ws::core::Result<std::uintptr_t> body_user_data(BodyId id) const;
+  ws::core::Status set_body_user_data(BodyId id, std::uintptr_t value);
+
   ws::core::Status set_transform(BodyId id, Vec3 position,
                                  ws::math::Quat rotation);
   ws::core::Status set_velocity(BodyId id, Vec3 linear, Vec3 angular);

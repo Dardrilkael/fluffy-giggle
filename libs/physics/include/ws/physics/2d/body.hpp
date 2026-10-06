@@ -52,6 +52,10 @@ struct BodyDesc {
   float restitution = 0.0f;
   float gravity_scale = 1.0f;
   bool is_sensor = false;  // contact events fire, no collision response
+  // Opaque per-body payload the lib stores but never interprets - a game
+  // object index, or a pointer as uintptr_t. Contact events carry BodyIds
+  // only; body_user_data() is the id -> payload lookup for that loop.
+  std::uintptr_t user_data = 0;
 };
 
 }  // namespace ws::physics2d

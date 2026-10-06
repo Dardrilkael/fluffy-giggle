@@ -3,7 +3,8 @@
 // The backend-independent world machinery, shared by World2D and World3D
 // (internal - never included by a public header). Everything that does not
 // depend on the dimension's types lives HERE, once: generational handle
-// tables, the pose mirror behind transforms() and its previous-call copy,
+// tables, the per-body user-data table, the pose mirror behind transforms()
+// and its previous-call copy,
 // the moved-bodies list fed by the backend each tick, the contact-event
 // buffer with its normalize/sort/cap discipline, the fixed-timestep
 // accumulator with the spiral-of-death clamp, bulk set_transforms
@@ -121,6 +122,7 @@ class WorldCore {
     moved_raw_.reserve(desc.max_bodies);
     moved_.reserve(desc.max_bodies);
     kinds_.assign(desc.max_bodies, ws::physics::BodyKind::static_);
+    user_data_.assign(desc.max_bodies, 0);
   }
 
   WorldCore(const WorldCore&) = delete;
@@ -152,6 +154,7 @@ class WorldCore {
     // from a stale pre-birth pose would teleport it across the screen.
     prev_transforms_[*slot] = local.transform;
     kinds_[*slot] = local.kind;
+    user_data_[*slot] = local.user_data;
     return BodyIdT{*slot, bodies_.generation(*slot)};
   }
 
@@ -176,6 +179,7 @@ class WorldCore {
     backend_->destroy_body(*slot);
     bodies_.free(*slot);
     kinds_[*slot] = ws::physics::BodyKind::static_;
+    user_data_[*slot] = 0;  // retired slots never leak a stale payload
     return {};
   }
 
@@ -191,6 +195,26 @@ class WorldCore {
     state.linear_velocity = v.linear;
     state.angular_velocity = v.angular;
     return state;
+  }
+
+  // The lib-owned payload table: user data never crosses the backend seam
+  // (no engine needs it - every public surface speaks BodyIds), so both are
+  // pure slot lookups with the same generational guard as every body path.
+  [[nodiscard]] ws::core::Result<std::uintptr_t> body_user_data(BodyIdT id) const {
+    const auto slot = resolve_body(id);
+    if (!slot) {
+      return fail(PhysicsError::invalid_handle, "stale or unknown body");
+    }
+    return user_data_[*slot];
+  }
+
+  ws::core::Status set_body_user_data(BodyIdT id, std::uintptr_t value) {
+    const auto slot = resolve_body(id);
+    if (!slot) {
+      return fail(PhysicsError::invalid_handle, "stale or unknown body");
+    }
+    user_data_[*slot] = value;
+    return {};
   }
 
   ws::core::Status set_transform(BodyIdT id, TransformT t) {
@@ -573,6 +597,7 @@ class WorldCore {
   std::vector<BodyMoveT> moved_;        // public moved list this call
   std::vector<std::uint32_t> seen_;     // slot -> moved_raw_ index+1 (0 = no)
   std::vector<ws::physics::BodyKind> kinds_;  // slot -> body kind
+  std::vector<std::uintptr_t> user_data_;  // slot -> opaque payload (lib-owned)
   double accumulator_ = 0.0;  // double: a float one drifts over long sessions
   float alpha_ = 0.0f;
   std::uint32_t overflow_drops_ = 0;

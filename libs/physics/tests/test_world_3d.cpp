@@ -84,6 +84,8 @@ TEST_CASE("3D body lifetime mirrors the generational contract") {
     const BodyId stale = *a;
     CHECK(world.destroy_body(stale).has_value());
     CHECK(has_code(world.body_state(stale), PhysicsError::invalid_handle));
+    CHECK(has_code(world.body_user_data(stale), PhysicsError::invalid_handle));
+    CHECK(has_code(world.set_body_user_data(stale, 1), PhysicsError::invalid_handle));
     CHECK(has_code(world.destroy_body(stale), PhysicsError::invalid_handle));
     CHECK(has_code(world.apply_linear_impulse(stale, Vec3{}), PhysicsError::invalid_handle));
     CHECK(has_code(world.set_velocity(stale, Vec3{}, Vec3{}), PhysicsError::invalid_handle));
@@ -96,6 +98,43 @@ TEST_CASE("3D body lifetime mirrors the generational contract") {
     CHECK(revived->index == stale.index);
     CHECK(revived->generation == stale.generation + 1);
   }
+}
+
+TEST_CASE("3D user data is a lib-owned payload: set, read, retire, reuse") {
+  auto world = make_world(World3D::Desc{.max_bodies = 2});
+
+  BodyDesc desc{};
+  desc.user_data = 0xBEEF;
+  const auto body = world.create_body(desc);
+  REQUIRE(body.has_value());
+  auto data = world.body_user_data(*body);
+  REQUIRE(data.has_value());
+  CHECK(*data == 0xBEEF);
+
+  SUBCASE("set_body_user_data overwrites") {
+    CHECK(world.set_body_user_data(*body, 42).has_value());
+    data = world.body_user_data(*body);
+    REQUIRE(data.has_value());
+    CHECK(*data == 42);
+  }
+
+  SUBCASE("slot reuse never leaks the retired body's payload") {
+    const BodyId stale = *body;
+    CHECK(world.destroy_body(stale).has_value());
+    BodyDesc revived_desc{};
+    revived_desc.user_data = 7;
+    const auto revived = world.create_body(revived_desc);
+    REQUIRE(revived.has_value());
+    CHECK(revived->index == stale.index);  // same slot, fresh payload
+    data = world.body_user_data(*revived);
+    REQUIRE(data.has_value());
+    CHECK(*data == 7);
+    CHECK(has_code(world.body_user_data(stale), PhysicsError::invalid_handle));
+  }
+
+  CHECK(has_code(world.body_user_data(BodyId{}), PhysicsError::invalid_handle));
+  CHECK(has_code(world.set_body_user_data(BodyId{}, 1),
+                 PhysicsError::invalid_handle));
 }
 
 TEST_CASE("3D shapes validate: sphere strict, capsule allows degenerate") {
@@ -264,6 +303,8 @@ TEST_CASE("a moved-from 3D world fails cleanly on every path") {
   CHECK(has_code(world.advance(0.0f), PhysicsError::invalid_state));
   CHECK(has_code(world.create_body(BodyDesc{}), PhysicsError::invalid_state));
   CHECK(has_code(world.body_state(*id), PhysicsError::invalid_state));
+  CHECK(has_code(world.body_user_data(*id), PhysicsError::invalid_state));
+  CHECK(has_code(world.set_body_user_data(*id, 7), PhysicsError::invalid_state));
   CHECK(has_code(world.destroy_body(*id), PhysicsError::invalid_state));
   CHECK(has_code(world.set_transform(*id, Vec3{}, Quat{}),
                  PhysicsError::invalid_state));

@@ -48,9 +48,15 @@ swap touches no public header and no user code.
 ## v1 scope (decided - review point 7)
 In scope: sensors (BodyDesc::is_sensor), the three v1 joint kinds, hit
 events above a speed threshold, the bulk set_transforms path.
-Deferred to v2 (the seam is internal, so every one of these grows
-additively with no public break): collision layers/masks, body user data,
-multi-shape bodies, per-shape materials, CCD/bullet flags, sleep control.
+
+## v2 progress
+- DONE: body user data - `BodyDesc::user_data` (uintptr_t, opaque) +
+  `body_user_data()`/`set_body_user_data()` on both worlds. Stored in
+  the lib's own slot table and never forwarded to any engine (no backend
+  needed to know), so retire/reuse hygiene is pure lib logic.
+- Remaining (all additive behind the seam, no public break): collision
+  layers/masks, multi-shape bodies, per-shape materials, CCD/bullet
+  flags, sleep control.
 
 ## Review decisions, settled
 - Virtual backend seam kept (not a compile-time template backend): a mock

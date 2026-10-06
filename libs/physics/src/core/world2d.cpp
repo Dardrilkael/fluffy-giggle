@@ -189,6 +189,18 @@ ws::core::Status World2D::destroy_body(BodyId id) {
   return impl_->core_.body_state(id);
 }
 
+[[nodiscard]] ws::core::Result<std::uintptr_t> World2D::body_user_data(
+    BodyId id) const {
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
+  return impl_->core_.body_user_data(id);
+}
+
+ws::core::Status World2D::set_body_user_data(BodyId id,
+                                              std::uintptr_t value) {
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
+  return impl_->core_.set_body_user_data(id, value);
+}
+
 ws::core::Status World2D::set_transform(BodyId id, Vec2 position, float rotation) {
   if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   return impl_->core_.set_transform(id, Transform{position, rotation});
