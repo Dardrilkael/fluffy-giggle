@@ -64,5 +64,9 @@ One commit per phase on `main`.
 - `apps/bench_physics` - headless ws::physics throughput bench (desktop
   console app): steps a falling-boxes scene and prints per-tick wall-clock
   cost while awake and after sleep, per dimension and thread config.
+- `apps/bounce` - the three-lib composition example (desktop windowed app):
+  a ws::physics2d pit of clickable boxes/circles drawn through ws::ui with
+  render interpolation, a ws-gui panel, and ws::audio thuds whose pitch and
+  gain follow each impact's speed.
 
 Each `libs/<name>/CLAUDE.md` documents that lib's own rules and tests.
