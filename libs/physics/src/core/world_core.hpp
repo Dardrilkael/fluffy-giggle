@@ -258,6 +258,11 @@ class WorldCore {
     return {};
   }
 
+  // No handle, no validation: every vector is a legal gravity (zero-g
+  // included). The backend owns the engine truth AND the wake-up the
+  // engines themselves skip.
+  void set_gravity(Vec gravity) { backend_->set_gravity(gravity); }
+
   ws::core::Status apply_linear_impulse(BodyIdT id, Vec impulse) {
     const auto slot = resolve_body(id);
     if (!slot) {

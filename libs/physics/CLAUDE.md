@@ -71,6 +71,14 @@ events above a speed threshold, the bulk set_transforms path.
   world-owned GroupFilter answering the rule; the ObjectLayer split is
   untouched (it sorts, the group decides). Sensors obey the same rule
   in both engines. Queries ignore filters in v2.
+- DONE: runtime gravity - `set_gravity()` on both worlds. Both engines
+  merely store the vector (`b2World_SetGravity` /
+  `PhysicsSystem::SetGravity`), so the adapters also wake every live
+  body: statics no-op the wake in both engines (Box2D's sleeping-set
+  threshold, Jolt's `ActivateBodies` IsStatic check), and a caller that
+  re-sets the same value every frame defeats sleep - the public comment
+  says so. Behavior tests pin the redirected fall and the wake of a
+  slept-in pile (moved_bodies proves the sleep was real).
 - Remaining (all additive behind the seam, no public break): multi-shape
   bodies, per-shape materials, CCD/bullet flags, sleep control.
 

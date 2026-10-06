@@ -218,6 +218,12 @@ ws::core::Status World2D::set_collision_filter(BodyId id,
   return impl_->core_.set_collision_filter(id, layer, mask);
 }
 
+ws::core::Status World2D::set_gravity(Vec2 gravity) {
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
+  impl_->core_.set_gravity(gravity);
+  return {};
+}
+
 ws::core::Status World2D::apply_linear_impulse(BodyId id, Vec2 impulse) {
   if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   return impl_->core_.apply_linear_impulse(id, impulse);

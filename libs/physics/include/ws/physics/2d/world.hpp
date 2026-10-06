@@ -75,6 +75,13 @@ class WS_PHYSICS_API World2D {
   ws::core::Status set_collision_filter(BodyId id, std::uint32_t layer,
                                         std::uint32_t mask);
 
+  // Runtime gravity change (Desc::gravity is the create-time value).
+  // Both engines merely store the new vector, so this also wakes every
+  // dynamic body - a world you tilt must move the piles already
+  // resting in it. Any vector is legal, zero-g included. Re-setting
+  // the same value every frame keeps the world from ever sleeping.
+  ws::core::Status set_gravity(Vec2 gravity);
+
   // World-space impulse at the center of mass; wakes the body.
   ws::core::Status apply_linear_impulse(BodyId id, Vec2 impulse);
   ws::core::Status apply_angular_impulse(BodyId id, float impulse);

@@ -230,6 +230,12 @@ ws::core::Status World3D::set_collision_filter(BodyId id,
   return impl_->core_.set_collision_filter(id, layer, mask);
 }
 
+ws::core::Status World3D::set_gravity(Vec3 gravity) {
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
+  impl_->core_.set_gravity(gravity);
+  return {};
+}
+
 ws::core::Status World3D::apply_linear_impulse(BodyId id, Vec3 impulse) {
   if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   return impl_->core_.apply_linear_impulse(id, impulse);

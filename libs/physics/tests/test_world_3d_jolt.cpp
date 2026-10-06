@@ -475,6 +475,59 @@ TEST_CASE("3D collision filters gate contacts, sensors and events") {
   }
 }
 
+TEST_CASE("3D runtime set_gravity redirects the fall and wakes the sleepers") {
+  SUBCASE("flipping the sign turns the fall into a climb") {
+    auto world = make_world(World3D::Desc{.thread_count = 0});
+    auto id = world.create_body(dynamic_box(Vec3{0.0f, 10.0f, 0.0f}));
+    REQUIRE(id.has_value());
+
+    step_n(world, 30);  // 0.5 s of free fall: y ~8.7, v ~-4.9
+    auto state = world.body_state(*id);
+    REQUIRE(state.has_value());
+
+    REQUIRE(world.set_gravity(Vec3{0.0f, 9.81f, 0.0f}).has_value());
+    step_n(world, 60);  // one more second: the climb retraces the fall
+
+    state = world.body_state(*id);
+    REQUIRE(state.has_value());
+    // Unflipped the box would sit at ~-0.9 and still be diving; flipped
+    // the climb retraces the fall, landing back just above the flip
+    // height (~8.8) with an upward velocity.
+    CHECK(state->position.y > 8.4f);
+    CHECK(state->linear_velocity.y > 4.0f);
+  }
+
+  SUBCASE("a resting pile sleeps, then wakes and leaves the floor") {
+    auto world = make_world(World3D::Desc{.thread_count = 0});
+    auto floor = world.create_body(
+        static_box(Vec3{0.0f, -1.0f, 0.0f}, Vec3{50.0f, 1.0f, 50.0f}));
+    REQUIRE(floor.has_value());
+    auto ball = world.create_body(ball_at(Vec3{0.0f, 5.0f, 0.0f}, 0.3f));
+    REQUIRE(ball.has_value());
+
+    step_n(world, 240);  // 4 s: settle, then outlast the sleep timer
+    auto state = world.body_state(*ball);
+    REQUIRE(state.has_value());
+    CHECK(std::abs(state->position.y - 0.5f) < 0.05f);  // resting on the floor
+    REQUIRE(world.step().has_value());
+    bool moved_while_sleeping = false;
+    for (const auto& m : world.moved_bodies()) {
+      if (m.id == *ball) {
+        moved_while_sleeping = true;
+      }
+    }
+    CHECK_FALSE(moved_while_sleeping);  // it really slept
+
+    REQUIRE(world.set_gravity(Vec3{0.0f, 9.81f, 0.0f}).has_value());
+    step_n(world, 60);
+
+    state = world.body_state(*ball);
+    REQUIRE(state.has_value());
+    // Unwoken it would sit at 0.5 forever; the wake-all lifts it out.
+    CHECK(state->position.y > 1.5f);
+  }
+}
+
 TEST_CASE("3D weld holds the pair rigid; destroying a body cascades the "
           "joint away") {
   auto world = make_world(World3D::Desc{.gravity = Vec3{0.0f, 0.0f, 0.0f},

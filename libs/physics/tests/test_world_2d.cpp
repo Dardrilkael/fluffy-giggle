@@ -515,6 +515,8 @@ TEST_CASE("a moved-from world fails cleanly on every path") {
   CHECK(has_code(world.set_transform(*id, {}, 0.0f), PhysicsError::invalid_state));
   CHECK(has_code(world.set_collision_filter(*id, 1u, 0xffffffffu),
                  PhysicsError::invalid_state));
+  CHECK(has_code(world.set_gravity(ws::math::Vec2{0.0f, -9.81f}),
+                 PhysicsError::invalid_state));
   CHECK(has_code(world.create_joint(FixedJoint{*id, *id}), PhysicsError::invalid_state));
   CHECK(world.contact_events().empty());
   CHECK(world.transforms().empty());

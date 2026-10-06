@@ -535,6 +535,20 @@ class JoltWorld3D final : public IWorld3DBackend,
         JPH::CollisionGroup(mask_filter_.GetPtr(), layer, mask));
   }
 
+  void set_gravity(ws::math::Vec3 gravity) override {
+    // SetGravity only stores the vector (PhysicsSystem.h): a sleeping
+    // body would stay glued to its contacts through the whole tilt, so
+    // wake every live body - ActivateBody skips statics
+    // (BodyManager::ActivateBodies checks IsStatic) and merely resets
+    // the sleep timer on bodies that are already awake.
+    system_.SetGravity(to_jph(gravity));
+    for (std::uint32_t slot = 0; slot < bodies_.size(); ++slot) {
+      if (body_live_[slot]) {
+        interface().ActivateBody(bodies_[slot]);
+      }
+    }
+  }
+
   void apply_linear_impulse(std::uint32_t slot, Vec3 impulse) override {
     if (!dynamic_live_at(slot)) {
       return;

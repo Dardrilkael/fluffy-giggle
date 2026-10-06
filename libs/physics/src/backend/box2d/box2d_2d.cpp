@@ -253,6 +253,20 @@ class Box2DWorld final : public IWorld2DBackend {
     b2Shape_SetFilter(shapes_[slot], filter);
   }
 
+  void set_gravity(ws::math::Vec2 gravity) override {
+    // SetGravity only stores the vector (world.c): a sleeping body
+    // would stay glued to its contacts through the whole tilt, so wake
+    // every live body - SetAwake(true) is a no-op for statics (their
+    // set index never reaches the sleeping threshold) and just repeats
+    // the awake bit for the rest.
+    b2World_SetGravity(world_, to_b2(gravity));
+    for (std::uint32_t slot = 0; slot < bodies_.size(); ++slot) {
+      if (body_live_[slot]) {
+        b2Body_SetAwake(bodies_[slot], true);
+      }
+    }
+  }
+
   void apply_linear_impulse(std::uint32_t slot, Vec2 impulse) override {
     if (slot >= bodies_.size() || !body_live_[slot]) {
       return;

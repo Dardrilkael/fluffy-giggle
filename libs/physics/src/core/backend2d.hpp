@@ -126,6 +126,11 @@ class IWorld2DBackend {
   // backend owns the truth - the lib keeps no copy.
   virtual void set_filter(std::uint32_t slot, std::uint32_t layer,
                           std::uint32_t mask) = 0;
+  // Runtime gravity (Desc::gravity at create). Neither engine wakes
+  // sleepers on its own (b2World_SetGravity / PhysicsSystem::SetGravity
+  // just store the vector), so the override must wake every live body
+  // itself - both engines no-op that wake on statics.
+  virtual void set_gravity(ws::math::Vec2 gravity) = 0;
   virtual void apply_linear_impulse(std::uint32_t slot,
                                     ws::math::Vec2 impulse) = 0;
   virtual void apply_angular_impulse(std::uint32_t slot, float impulse) = 0;

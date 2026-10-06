@@ -314,6 +314,8 @@ TEST_CASE("a moved-from 3D world fails cleanly on every path") {
                  PhysicsError::invalid_state));
   CHECK(has_code(world.set_collision_filter(*id, 1u, 0xffffffffu),
                  PhysicsError::invalid_state));
+  CHECK(has_code(world.set_gravity(Vec3{0.0f, -9.81f, 0.0f}),
+                 PhysicsError::invalid_state));
   CHECK(has_code(world.apply_linear_impulse(*id, Vec3{}),
                  PhysicsError::invalid_state));
   CHECK(has_code(world.create_joint(FixedJoint{*id, *id}),
