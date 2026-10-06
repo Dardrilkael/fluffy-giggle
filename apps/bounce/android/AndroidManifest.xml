@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Input to tools/package-android.ps1 (aapt2 link). NativeActivity +
+     hasCode=false: zero Java - the OS dlopens lib/arm64-v8a/libbounce.so
+     (android.app.lib_name below) and calls ANativeActivity_onCreate,
+     which native_app_glue owns. No permissions: the app touches no
+     sockets (unlike chatter) and OpenSL/AAudio playback (via ws::audio's
+     OpenAL Soft backend) needs none. Portrait-locked: the swapchain
+     builds with preTransform = the surface's currentTransform, and a
+     fixed orientation keeps that IDENTITY in the common case.
+     extractNativeLibs keeps lib loading on the classic install-time
+     extraction path (the packager deflates the .so; stored page-aligned
+     .so's would need zipalign -p). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.ws.bounce"
+    android:versionCode="1"
+    android:versionName="0.1">
+
+    <!-- minSdk tracks ANDROID_PLATFORM (CMakePresets.json), the same
+         floor the other APKs pin. -->
+    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="35" />
+
+    <application
+        android:hasCode="false"
+        android:label="ws bounce"
+        android:extractNativeLibs="true"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:label="ws bounce"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density">
+            <!-- The module base name: libbounce.so, no prefix, no suffix. -->
+            <meta-data android:name="android.app.lib_name"
+                android:value="bounce" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

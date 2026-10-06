@@ -7,8 +7,10 @@
 // and every contact hit event above the speed threshold becomes a
 // one-shot synthesized thud - pitch and gain follow the impact speed.
 //
-// Desktop-only (gated in apps/CMakeLists.txt): the font path and the
-// console-free simplicity keep it out of the Android build for now.
+// Desktop and phone alike (chatter's entry pattern): on Android the glue
+// hands android_main the shell handle, the system Roboto face stands in
+// for segoeui, and primary touch already bridges to mouse button 0 in the
+// ui backend - so tap-to-drop works with zero lib edits.
 
 #include <algorithm>
 #include <chrono>
@@ -20,6 +22,18 @@
 #include <optional>
 #include <random>
 #include <vector>
+
+#ifdef __ANDROID__
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Weverything"
+#endif
+#include <android_native_app_glue.h>  // android_app + the android_main contract
+#include <unistd.h>                   // chdir
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+#endif
 
 #include <ws/audio/engine.hpp>
 #include <ws/core/log.hpp>
@@ -101,16 +115,23 @@ struct Drop {
 
 class BounceApp final : public ws::ui::App {
  public:
-  BounceApp()
-      : App(ws::ui::AppConfig{.title = "ws bounce",
-                              .width = 1280,
-                              .height = 720}) {}
+  // The config comes from the platform entry (android_main supplies the
+  // glue handle; the desktop supplies the window size) - chatter's shape.
+  explicit BounceApp(const ws::ui::AppConfig& config)
+      : App(config) {}
 
  protected:
   void on_setup() override {
     ui_scale_ = ui_scale();
     chrome_ = gui::kDefaultChrome.scaled(ui_scale_);
+#ifdef __ANDROID__
+    // System face this side of the fence - no font ships in the APK
+    // (chatter's choice; an empty font just drops text, the pit lives on).
+    font_ = r2d::load_font("/system/fonts/Roboto-Regular.ttf",
+                           15.0f * ui_scale_);
+#else
     font_ = r2d::load_font("C:/Windows/Fonts/segoeui.ttf", 15.0f * ui_scale_);
+#endif
     chrome_.font = font_.empty() ? nullptr : &font_;
 
     // --- physics: the pit world ---------------------------------------------
@@ -390,7 +411,27 @@ class BounceApp final : public ws::ui::App {
   bool dead_ = false;
 };
 
+#ifdef __ANDROID__
+// Android entry: the glue calls android_main on the app's own thread and
+// hands over the handle the shell needs (AppConfig::app_handle). No
+// assets ship in the APK (the font is a system face); the CWD only
+// matters if imgui wants to write its .ini on shutdown, so point it at
+// the writable data dir - the same move chatter makes.
+extern "C" void android_main(android_app* app) {
+  chdir(app->activity->internalDataPath);
+  ws::ui::AppConfig config;
+  config.title = "ws bounce";
+  config.app_handle = app;
+  BounceApp bounce{config};
+  (void)bounce.run();
+}
+#else
 int main() {
-  BounceApp app;
+  ws::ui::AppConfig config;
+  config.title = "ws bounce";
+  config.width = 1280;
+  config.height = 720;
+  BounceApp app{config};
   return app.run();
 }
+#endif
