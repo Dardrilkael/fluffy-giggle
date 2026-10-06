@@ -352,15 +352,19 @@ class BounceApp final : public ws::ui::App {
 #ifdef __ANDROID__
     // --- phone tilt steers the pit -----------------------------------------
     // Device frame (portrait): x right, y toward the phone's top, z out
-    // of the glass; the gravity sensor marks the UP axis +9.81, so a
-    // right tilt gives gx > 0 (slide right = world +x) and a raised
-    // top gives gy > 0 (slide down-screen = world +y, hence the minus).
+    // of the glass. The gravity sensor reports which way is UP (+9.81
+    // marks the raised axis) while the boxes feel the opposite pull, so
+    // the in-plane direction NEGATES the sensor vector: dip the right
+    // edge (gx < 0) and they slide right (world +x); raise the top
+    // (gy > 0) and they slide down-screen (world +y). The first build
+    // took the vector straight and every tilt ran backwards - field
+    // report, inverted here.
     if (tilt_on_ && world_.has_value()) {
       const ws::math::Vec3 g = tilt_.gravity();
       const float mag = std::sqrt(g.x * g.x + g.y * g.y + g.z * g.z);
       Vec2 target{0.0f, 1.0f};  // flat or no data: the classic fall
       if (mag > 1.0f) {
-        const Vec2 in_plane{g.x / mag, -g.y / mag};
+        const Vec2 in_plane{-g.x / mag, g.y / mag};
         const float strength = std::sqrt(in_plane.x * in_plane.x +
                                          in_plane.y * in_plane.y);
         if (strength > 0.25f) {  // ~14.5 degrees; inside, the pit wins
