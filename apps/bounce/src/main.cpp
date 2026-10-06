@@ -13,6 +13,7 @@
 // ui backend - so tap-to-drop works with zero lib edits.
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -21,6 +22,7 @@
 #include <numbers>
 #include <optional>
 #include <random>
+#include <thread>
 #include <vector>
 
 #ifdef __ANDROID__
@@ -29,6 +31,8 @@
 #pragma clang diagnostic ignored "-Weverything"
 #endif
 #include <android_native_app_glue.h>  // android_app + the android_main contract
+#include <android/looper.h>           // the sensor queue's wakeup source
+#include <android/sensor.h>           // ASensorManager: the gravity vector
 #include <unistd.h>                   // chdir
 #if defined(__clang__)
 #pragma clang diagnostic pop
@@ -76,6 +80,13 @@ constexpr std::size_t kMaxDrops = 220;   // destroy-oldest past this
 constexpr float kHitThreshold = 130.0f;  // px/s; slower impacts stay silent
 constexpr int kPlaysPerFrame = 4;        // a collapsing pile must not spam
 
+// The controls panel: one widget taller on the phone (the tilt toggle).
+#ifdef __ANDROID__
+constexpr float kPanelHeight = 246.0f;
+#else
+constexpr float kPanelHeight = 210.0f;
+#endif
+
 // --- sound: three synthesized thuds (the wavplayer in-memory pattern) ---------
 constexpr std::uint32_t kRate = 44'100;
 constexpr std::uint32_t kThudFrames = kRate * 90 / 1000;  // 90 ms
@@ -110,6 +121,90 @@ struct Drop {
   float half_w = 0.0f;
   float half_h = 0.0f;
 };
+
+#ifdef __ANDROID__
+// Phone tilt -> pit gravity, straight from the NDK sensor API: the
+// gravity sensor (fused - it subtracts shakes; the accelerometer is the
+// cheap-device fallback) reports gravity in device frame, where +9.81
+// marks the axis pointing up. A dedicated looper thread owns the event
+// queue: the app's own looper belongs to the ui shell's input pump, and
+// a sensor ident waking THAT loop would be none of its business.
+class TiltSource {
+ public:
+  ~TiltSource() { stop(); }
+
+  void start() {
+    if (!thread_.joinable()) {
+      running_.store(true, std::memory_order_relaxed);
+      thread_ = std::thread([this] { run(); });
+    }
+  }
+
+  void stop() {
+    if (thread_.joinable()) {
+      running_.store(false, std::memory_order_relaxed);
+      thread_.join();
+    }
+  }
+
+  // Latest device-frame gravity, m/s^2; (0,0,0) until the first event.
+  // Relaxed atomics: a torn frame at worst wobbles one 60 Hz sample.
+  [[nodiscard]] ws::math::Vec3 gravity() const {
+    return {gx_.load(std::memory_order_relaxed),
+            gy_.load(std::memory_order_relaxed),
+            gz_.load(std::memory_order_relaxed)};
+  }
+
+ private:
+  void run() {
+    ASensorManager* manager =
+        ASensorManager_getInstanceForPackage("com.ws.bounce");
+    const ASensor* sensor = ASensorManager_getDefaultSensor(
+        manager, ASENSOR_TYPE_GRAVITY);
+    if (sensor == nullptr) {
+      sensor = ASensorManager_getDefaultSensor(manager,
+                                                ASENSOR_TYPE_ACCELEROMETER);
+    }
+    if (sensor == nullptr) {
+      return;  // no sensor at all: the pit keeps classic gravity
+    }
+    // The looper must be prepared on the thread that polls it.
+    ALooper* looper = ALooper_prepare(0);
+    ASensorEventQueue* queue = ASensorManager_createEventQueue(
+        manager, looper, /*ident=*/3, /*callback=*/nullptr, /*data=*/nullptr);
+    if (queue == nullptr) {
+      return;
+    }
+    ASensorEventQueue_enableSensor(queue, sensor);
+    ASensorEventQueue_setEventRate(queue, sensor, 20'000);  // 50 Hz
+
+    while (running_.load(std::memory_order_relaxed)) {
+      // A timeout keeps shutdown bounded: the queue may never wake
+      // again once the app pauses.
+      ALooper_pollOnce(100, nullptr, nullptr, nullptr);
+      for (ASensorEvent events[4];;) {
+        const auto count = ASensorEventQueue_getEvents(queue, events, 4);
+        if (count <= 0) {
+          break;
+        }
+        for (int i = 0; i < count; ++i) {
+          gx_.store(events[i].data[0], std::memory_order_relaxed);
+          gy_.store(events[i].data[1], std::memory_order_relaxed);
+          gz_.store(events[i].data[2], std::memory_order_relaxed);
+        }
+      }
+    }
+    ASensorEventQueue_disableSensor(queue, sensor);
+    ASensorManager_destroyEventQueue(manager, queue);
+  }
+
+  std::atomic<bool> running_{false};
+  std::thread thread_;
+  std::atomic<float> gx_{0.0f};
+  std::atomic<float> gy_{0.0f};
+  std::atomic<float> gz_{0.0f};
+};
+#endif  // __ANDROID__
 
 }  // namespace
 
@@ -183,6 +278,10 @@ class BounceApp final : public ws::ui::App {
       audio_dead_ = true;
       ws::core::warn("bounce: audio device unavailable - running silent");
     }
+
+#ifdef __ANDROID__
+    tilt_.start();  // no-op with zeros until the first event lands
+#endif
   }
 
   void on_update() override {
@@ -212,7 +311,7 @@ class BounceApp final : public ws::ui::App {
     const float scale = ui_scale_;
     const float panel_w = 200.0f * scale;
     const gui::Rect panel_bounds{frame.width - panel_w - 16.0f, 16.0f,
-                                 panel_w, 210.0f * scale};
+                                 panel_w, kPanelHeight * scale};
     const gui::Rect content =
         gui::begin_panel(gui_, layout_, chrome_, "controls", panel_bounds);
     const float widget_w = content.width;
@@ -225,6 +324,10 @@ class BounceApp final : public ws::ui::App {
       reset_drops();
     }
     (void)gui::checkbox(gui_, layout_, chrome_, "sound", sound_on_);
+#ifdef __ANDROID__
+    // Phone-only: toggle the sensor steering off to pin the classic pit.
+    (void)gui::checkbox(gui_, layout_, chrome_, "tilt gravity", tilt_on_);
+#endif
     (void)gui::slider_float(gui_, layout_, chrome_, "new drop bounce",
                             new_restitution_, 0.0f, 0.95f, widget_w);
     gui::end_panel(gui_, layout_);
@@ -245,6 +348,44 @@ class BounceApp final : public ws::ui::App {
       spawn_drop(input.mouse_x, input.mouse_y);
     }
     gui_.end_frame();
+
+#ifdef __ANDROID__
+    // --- phone tilt steers the pit -----------------------------------------
+    // Device frame (portrait): x right, y toward the phone's top, z out
+    // of the glass; the gravity sensor marks the UP axis +9.81, so a
+    // right tilt gives gx > 0 (slide right = world +x) and a raised
+    // top gives gy > 0 (slide down-screen = world +y, hence the minus).
+    if (tilt_on_ && world_.has_value()) {
+      const ws::math::Vec3 g = tilt_.gravity();
+      const float mag = std::sqrt(g.x * g.x + g.y * g.y + g.z * g.z);
+      Vec2 target{0.0f, 1.0f};  // flat or no data: the classic fall
+      if (mag > 1.0f) {
+        const Vec2 in_plane{g.x / mag, -g.y / mag};
+        const float strength = std::sqrt(in_plane.x * in_plane.x +
+                                         in_plane.y * in_plane.y);
+        if (strength > 0.25f) {  // ~14.5 degrees; inside, the pit wins
+          target = in_plane * (1.0f / strength);
+        }
+      }
+      // Exponential smoothing toward the target, dt-scaled; then push
+      // to the world ONLY when it moved - set_gravity wakes every
+      // body, and a same-value call per frame would defeat sleep.
+      const float k = 1.0f - std::exp(-frame_dt * 8.0f);
+      tilt_dir_ = tilt_dir_ + (target - tilt_dir_) * k;
+      const float len = std::sqrt(tilt_dir_.x * tilt_dir_.x +
+                                  tilt_dir_.y * tilt_dir_.y);
+      if (len > 0.001f) {
+        tilt_dir_ = tilt_dir_ * (1.0f / len);
+        const Vec2 gravity = tilt_dir_ * kGravityY;
+        const Vec2 delta = gravity - applied_gravity_;
+        if (std::abs(delta.x) + std::abs(delta.y) > kGravityY * 0.01f) {
+          if (world_->set_gravity(gravity).has_value()) {
+            applied_gravity_ = gravity;
+          }
+        }
+      }
+    }
+#endif
 
     // --- step the world, turn hits into thuds -------------------------------
     world_->advance(frame_dt);
@@ -409,6 +550,13 @@ class BounceApp final : public ws::ui::App {
   float ui_scale_ = 1.0f;
   std::optional<std::chrono::steady_clock::time_point> last_time_;
   bool dead_ = false;
+
+#ifdef __ANDROID__
+  TiltSource tilt_;
+  bool tilt_on_ = true;
+  Vec2 tilt_dir_{0.0f, 1.0f};  // smoothed world-space unit direction
+  Vec2 applied_gravity_{0.0f, kGravityY};  // last vector sent to the world
+#endif
 };
 
 #ifdef __ANDROID__

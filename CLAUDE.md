@@ -68,6 +68,8 @@ One commit per phase on `main`.
   and Android; its APK is `tools/package-android.ps1 -App bounce`):
   a ws::physics2d pit of clickable boxes/circles drawn through ws::ui with
   render interpolation, a ws-gui panel, and ws::audio thuds whose pitch and
-  gain follow each impact's speed.
+  gain follow each impact's speed. On the phone the gravity sensor steers
+  the pit (tilt to tumble; a dedicated NDK sensor thread feeds
+  `set_gravity`, which wakes the sleepers for you).
 
 Each `libs/<name>/CLAUDE.md` documents that lib's own rules and tests.
