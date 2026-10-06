@@ -57,6 +57,13 @@ struct BodyDesc {
   // object index, or a pointer as uintptr_t. Contact events carry BodyIds
   // only; body_user_data() is the id -> payload lookup for that loop.
   std::uintptr_t user_data = 0;
+  // Collision filtering: a and b collide iff (a.collision_layer &
+  // b.collision_mask) != 0 AND (b.collision_layer & a.collision_mask) != 0
+  // - both sides must accept the other. Defaults keep v1 behavior (collide
+  // with everything). Sensors follow the same rule; queries ignore it.
+  // Change at runtime via World3D::set_collision_filter.
+  std::uint32_t collision_layer = 1u;
+  std::uint32_t collision_mask = 0xffffffffu;
 };
 
 }  // namespace ws::physics3d

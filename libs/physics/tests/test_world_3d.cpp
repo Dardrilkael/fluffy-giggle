@@ -89,6 +89,8 @@ TEST_CASE("3D body lifetime mirrors the generational contract") {
     CHECK(has_code(world.destroy_body(stale), PhysicsError::invalid_handle));
     CHECK(has_code(world.apply_linear_impulse(stale, Vec3{}), PhysicsError::invalid_handle));
     CHECK(has_code(world.set_velocity(stale, Vec3{}, Vec3{}), PhysicsError::invalid_handle));
+    CHECK(has_code(world.set_collision_filter(stale, 1u, 0xffffffffu),
+                   PhysicsError::invalid_handle));
   }
   SUBCASE("the slot is reused with a bumped generation") {
     const BodyId stale = *a;
@@ -309,6 +311,8 @@ TEST_CASE("a moved-from 3D world fails cleanly on every path") {
   CHECK(has_code(world.set_transform(*id, Vec3{}, Quat{}),
                  PhysicsError::invalid_state));
   CHECK(has_code(world.set_velocity(*id, Vec3{}, Vec3{}),
+                 PhysicsError::invalid_state));
+  CHECK(has_code(world.set_collision_filter(*id, 1u, 0xffffffffu),
                  PhysicsError::invalid_state));
   CHECK(has_code(world.apply_linear_impulse(*id, Vec3{}),
                  PhysicsError::invalid_state));

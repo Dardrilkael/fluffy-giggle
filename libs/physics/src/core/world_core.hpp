@@ -246,6 +246,18 @@ class WorldCore {
     return {};
   }
 
+  ws::core::Status set_collision_filter(BodyIdT id, std::uint32_t layer,
+                                        std::uint32_t mask) {
+    const auto slot = resolve_body(id);
+    if (!slot) {
+      return fail(PhysicsError::invalid_handle, "stale or unknown body");
+    }
+    // Any bit pattern is legal (the engines take the bits verbatim) and
+    // the backend owns the truth, so there is no lib-side mirror to keep.
+    backend_->set_filter(*slot, layer, mask);
+    return {};
+  }
+
   ws::core::Status apply_linear_impulse(BodyIdT id, Vec impulse) {
     const auto slot = resolve_body(id);
     if (!slot) {

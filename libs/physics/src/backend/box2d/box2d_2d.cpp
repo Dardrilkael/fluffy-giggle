@@ -100,6 +100,7 @@ class Box2DWorld final : public IWorld2DBackend {
       : hit_threshold_(desc.hit_speed_threshold) {
     bodies_.resize(desc.max_bodies);
     body_live_.resize(desc.max_bodies);
+    shapes_.resize(desc.max_bodies);  // one shape per body (the lib's v2 plan)
     joints_.resize(desc.max_joints);
     joint_live_.resize(desc.max_joints);
 
@@ -162,9 +163,18 @@ class Box2DWorld final : public IWorld2DBackend {
                      : std::max(desc.density, 0.0f);
     sd.material.friction = desc.friction;
     sd.material.restitution = desc.restitution;
+    // The lib's rule IS b2ShouldShapesCollide's groupIndex==0 branch:
+    // (catA & maskB) && (catB & maskA). groupIndex stays 0.
+    sd.filter.categoryBits = desc.collision_layer;
+    sd.filter.maskBits = desc.collision_mask;
+    // Sensor events need the flag on BOTH shapes in Box2D v3 (sensor.c
+    // skips a pair whose OTHER shape lacks it), so every shape opts in:
+    // the lib's contract is "sensor overlaps fire began/ended events"
+    // and there is no per-shape subscription knob to expose. Solid
+    // pairs never appear in the sensor arrays, so nothing extra fires.
+    sd.enableSensorEvents = true;
     if (desc.is_sensor) {
       sd.isSensor = true;
-      sd.enableSensorEvents = true;
     } else {
       // Contact lifecycle for solid shapes; hit events only when asked for.
       sd.enableContactEvents = true;
@@ -195,6 +205,7 @@ class Box2DWorld final : public IWorld2DBackend {
       return fail(PhysicsError::backend_error, "Box2D refused a shape");
     }
     bodies_[slot] = body;
+    shapes_[slot] = shape;  // kept for set_filter's runtime b2Shape_SetFilter
     body_live_[slot] = 1;
     return {};
   }
@@ -207,6 +218,7 @@ class Box2DWorld final : public IWorld2DBackend {
     // joints before the body, so none remain here.
     b2DestroyBody(bodies_[slot]);
     bodies_[slot] = b2_nullBodyId;
+    shapes_[slot] = b2_nullShapeId;
     body_live_[slot] = 0;
   }
 
@@ -226,6 +238,19 @@ class Box2DWorld final : public IWorld2DBackend {
     b2Body_SetLinearVelocity(bodies_[slot], to_b2(linear));
     b2Body_SetAngularVelocity(bodies_[slot], angular);
     b2Body_SetAwake(bodies_[slot], true);
+  }
+
+  void set_filter(std::uint32_t slot, std::uint32_t layer,
+                  std::uint32_t mask) override {
+    if (slot >= bodies_.size() || !body_live_[slot]) {
+      return;
+    }
+    b2Filter filter{};
+    filter.categoryBits = layer;  // uint32 -> uint64 widens clean
+    filter.maskBits = mask;
+    // SetFilter resets the broadphase proxy and wakes the island (a
+    // filter change may kill contacts), so the change lands next tick.
+    b2Shape_SetFilter(shapes_[slot], filter);
   }
 
   void apply_linear_impulse(std::uint32_t slot, Vec2 impulse) override {
@@ -700,6 +725,7 @@ class Box2DWorld final : public IWorld2DBackend {
 
   b2WorldId world_{};
   std::vector<b2BodyId> bodies_;    // slot -> engine body
+  std::vector<b2ShapeId> shapes_;   // slot -> engine shape (one per body)
   std::vector<char> body_live_;     // 1 = the slot holds a live body
   std::vector<b2JointId> joints_;   // slot -> engine joint
   std::vector<char> joint_live_;

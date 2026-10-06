@@ -67,7 +67,9 @@
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseQuery.h>
 #include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/CollisionGroup.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
+#include <Jolt/Physics/Collision/GroupFilter.h>
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
@@ -177,6 +179,22 @@ class BpLayerInterface final : public JPH::BroadPhaseLayerInterface {
   // GetBroadPhaseLayerName exists only under JPH_PROFILE_ENABLED /
   // JPH_EXTERNAL_PROFILE - this build defines neither, so there is
   // nothing to override (and layer names are a profiler nicety anyway).
+};
+
+// The ws layer/mask rule, Jolt-shaped: every body packs the lib's
+// (collision_layer, collision_mask) into CollisionGroup's
+// (GroupID, SubGroupID) and this world-owned filter answers the
+// both-directions check the pair gate asks (Body::sFindCollidingPairsCanCollide,
+// which feeds contacts AND sensors). The ObjectLayer static/moving split
+// above is only broadphase bucketing and stays untouched: an object layer
+// says WHERE a body sorts, the group says WHAT it may touch.
+class LayerMaskFilter final : public JPH::GroupFilter {
+ public:
+  [[nodiscard]] bool CanCollide(const JPH::CollisionGroup& g1,
+                                const JPH::CollisionGroup& g2) const override {
+    return (g1.GetGroupID() & g2.GetSubGroupID()) != 0 &&
+           (g2.GetGroupID() & g1.GetSubGroupID()) != 0;
+  }
 };
 
 // Cache key for the shape cache. Density rides the key because Jolt bakes
@@ -349,6 +367,9 @@ class JoltWorld3D final : public IWorld3DBackend,
       // the registry must outlive every world - one process-lifetime
       // registration is exactly what Jolt's own samples do in main().
     });
+    // After the bootstrap (see the member's comment): the world-owned
+    // pair rule every body's CollisionGroup will point at.
+    mask_filter_ = new LayerMaskFilter();
 
     bodies_.resize(desc.max_bodies);   // slot -> engine id (invalid = free)
     body_live_.assign(desc.max_bodies, 0);
@@ -435,6 +456,11 @@ class JoltWorld3D final : public IWorld3DBackend,
     bcs.mRestitution = desc.restitution;
     bcs.mGravityFactor = desc.gravity_scale;
     bcs.mIsSensor = desc.is_sensor;
+    // (layer, mask) ride CollisionGroup's ids; the world-owned
+    // LayerMaskFilter turns them back into the both-directions rule.
+    bcs.mCollisionGroup = JPH::CollisionGroup(mask_filter_.GetPtr(),
+                                               desc.collision_layer,
+                                               desc.collision_mask);
     // Box2D parity: no damping unless the lib exposes it (v1 does not).
     bcs.mLinearDamping = 0.0f;
     bcs.mAngularDamping = 0.0f;
@@ -493,6 +519,20 @@ class JoltWorld3D final : public IWorld3DBackend,
     interface().SetLinearVelocity(bodies_[slot], to_jph(linear));
     interface().SetAngularVelocity(bodies_[slot], to_jph(angular));
     interface().ActivateBody(bodies_[slot]);
+  }
+
+  void set_filter(std::uint32_t slot, std::uint32_t layer,
+                  std::uint32_t mask) override {
+    if (slot >= bodies_.size() || !body_live_[slot]) {
+      return;
+    }
+    // SetCollisionGroup does NOT activate: a sleeping body keeps its
+    // contacts until something wakes it - the documented public contract.
+    // The broadphase re-gates every pair each tick, so awake pairs flip
+    // on the very next one.
+    interface().SetCollisionGroup(
+        bodies_[slot],
+        JPH::CollisionGroup(mask_filter_.GetPtr(), layer, mask));
   }
 
   void apply_linear_impulse(std::uint32_t slot, Vec3 impulse) override {
@@ -912,6 +952,11 @@ class JoltWorld3D final : public IWorld3DBackend,
   BpLayerInterface layers_;  // Init stores this pointer
   JPH::ObjectVsBroadPhaseLayerFilter obj_vs_bp_;  // stock: accept all
   JPH::ObjectLayerPairFilter pair_filter_;        // stock: accept all
+  // The ws (layer, mask) rule every body carries; ref-held so bodies'
+  // CollisionGroups can point at it for the world's lifetime. Allocated
+  // in the ctor body AFTER the allocator bootstrap - GroupFilter-derived
+  // news ride JPH::Allocate, which is null until RegisterDefaultAllocator.
+  JPH::Ref<LayerMaskFilter> mask_filter_;
   std::unique_ptr<JPH::JobSystem> jobs_;
   std::vector<JPH::BodyID> bodies_;               // slot -> engine id
   std::vector<std::uint8_t> body_live_;

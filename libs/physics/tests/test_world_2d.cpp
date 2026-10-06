@@ -104,6 +104,8 @@ TEST_CASE("body lifetime is generational: stale handles error, never alias") {
     CHECK(has_code(world.destroy_body(*first), PhysicsError::invalid_handle));
     CHECK(has_code(world.set_transform(*first, {}, 0.0f), PhysicsError::invalid_handle));
     CHECK(has_code(world.set_velocity(*first, {}, 0.0f), PhysicsError::invalid_handle));
+    CHECK(has_code(world.set_collision_filter(*first, 1u, 0xffffffffu),
+                   PhysicsError::invalid_handle));
     CHECK(has_code(world.apply_linear_impulse(*first, {}), PhysicsError::invalid_handle));
     CHECK(has_code(world.apply_angular_impulse(*first, 0.0f), PhysicsError::invalid_handle));
     CHECK(has_code(world.apply_force(*first, {}), PhysicsError::invalid_handle));
@@ -511,6 +513,8 @@ TEST_CASE("a moved-from world fails cleanly on every path") {
   CHECK(has_code(world.set_body_user_data(*id, 7), PhysicsError::invalid_state));
   CHECK(has_code(world.destroy_body(*id), PhysicsError::invalid_state));
   CHECK(has_code(world.set_transform(*id, {}, 0.0f), PhysicsError::invalid_state));
+  CHECK(has_code(world.set_collision_filter(*id, 1u, 0xffffffffu),
+                 PhysicsError::invalid_state));
   CHECK(has_code(world.create_joint(FixedJoint{*id, *id}), PhysicsError::invalid_state));
   CHECK(world.contact_events().empty());
   CHECK(world.transforms().empty());

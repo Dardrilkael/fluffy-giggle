@@ -378,6 +378,103 @@ TEST_CASE("3D advance() unions contact events across its substeps") {
   }
 }
 
+TEST_CASE("3D collision filters gate contacts, sensors and events") {
+  // The rule is BOTH-directional: (a.collision_layer & b.collision_mask)
+  // && (b.collision_layer & a.collision_mask). Every subcase is the same
+  // 5 m drop onto a floor whose interface sits at y = 0 (ball center
+  // rests at 0.5), so the y position after the steps IS the verdict.
+
+  SUBCASE("a one-directional reject is a reject: the ball falls through") {
+    auto world = make_world(World3D::Desc{.thread_count = 0});
+    BodyDesc floor_desc =
+        static_box(Vec3{0.0f, -0.5f, 0.0f}, Vec3{50.0f, 0.5f, 50.0f});
+    floor_desc.collision_mask = 2u;  // accepts layer 2 only: rejects the layer-1 ball
+    auto floor = world.create_body(floor_desc);
+    REQUIRE(floor.has_value());
+    auto ball = world.create_body(ball_at(Vec3{0.0f, 5.0f, 0.0f}, 0.0f));
+    REQUIRE(ball.has_value());
+
+    bool any_event = false;
+    for (int i = 0; i < 90; ++i) {
+      REQUIRE(world.step().has_value());
+      any_event = any_event || !world.contact_events().empty();
+    }
+    CHECK_FALSE(any_event);  // the pair never existed
+    auto state = world.body_state(*ball);
+    REQUIRE(state.has_value());
+    CHECK(state->position.y < -1.0f);  // through the interface, still falling
+  }
+
+  SUBCASE("runtime set_collision_filter flips a resting pair off") {
+    auto world = make_world(World3D::Desc{.thread_count = 0});
+    auto floor = world.create_body(static_box(Vec3{0.0f, -0.5f, 0.0f},
+                                              Vec3{50.0f, 0.5f, 50.0f}));
+    REQUIRE(floor.has_value());
+    auto ball = world.create_body(ball_at(Vec3{0.0f, 5.0f, 0.0f}, 0.0f));
+    REQUIRE(ball.has_value());
+
+    step_n(world, 120);  // drop, settle, most likely sleep
+    auto state = world.body_state(*ball);
+    REQUIRE(state.has_value());
+    CHECK(std::abs(state->position.y - 0.5f) < 0.05f);  // resting on it
+
+    // Mask 0 accepts nothing. Jolt's SetCollisionGroup does NOT activate
+    // a sleeping body, so the wake is explicit (set_velocity activates) -
+    // the documented public contract.
+    REQUIRE(world.set_collision_filter(*ball, 1u, 0u).has_value());
+    REQUIRE(world.set_velocity(*ball, Vec3{0.0f, -0.5f, 0.0f}, Vec3{})
+                .has_value());
+    step_n(world, 90);
+    state = world.body_state(*ball);
+    REQUIRE(state.has_value());
+    CHECK(state->position.y < -1.0f);
+  }
+
+  SUBCASE("a sensor fires began, does not respond, and sails the ball through") {
+    auto world = make_world(World3D::Desc{.thread_count = 0});
+    BodyDesc zone_desc =
+        static_box(Vec3{0.0f, -0.5f, 0.0f}, Vec3{50.0f, 0.5f, 50.0f});
+    zone_desc.is_sensor = true;
+    auto zone = world.create_body(zone_desc);
+    REQUIRE(zone.has_value());
+    auto ball = world.create_body(ball_at(Vec3{0.0f, 5.0f, 0.0f}, 0.0f));
+    REQUIRE(ball.has_value());
+
+    bool sensor_began = false;
+    for (int i = 0; i < 90; ++i) {
+      REQUIRE(world.step().has_value());
+      for (const auto& e : world.contact_events()) {
+        if (e.phase == ContactPhase::began) {
+          sensor_began = true;  // the only pair in the world
+        }
+      }
+    }
+    CHECK(sensor_began);
+    auto state = world.body_state(*ball);
+    REQUIRE(state.has_value());
+    CHECK(state->position.y < -1.0f);  // no impulse: it fell straight through
+  }
+
+  SUBCASE("a filtered sensor stays silent") {
+    auto world = make_world(World3D::Desc{.thread_count = 0});
+    BodyDesc zone_desc =
+        static_box(Vec3{0.0f, -0.5f, 0.0f}, Vec3{50.0f, 0.5f, 50.0f});
+    zone_desc.is_sensor = true;
+    zone_desc.collision_mask = 0u;  // the zone accepts nothing
+    auto zone = world.create_body(zone_desc);
+    REQUIRE(zone.has_value());
+    auto ball = world.create_body(ball_at(Vec3{0.0f, 5.0f, 0.0f}, 0.0f));
+    REQUIRE(ball.has_value());
+
+    bool any_event = false;
+    for (int i = 0; i < 90; ++i) {
+      REQUIRE(world.step().has_value());
+      any_event = any_event || !world.contact_events().empty();
+    }
+    CHECK_FALSE(any_event);
+  }
+}
+
 TEST_CASE("3D weld holds the pair rigid; destroying a body cascades the "
           "joint away") {
   auto world = make_world(World3D::Desc{.gravity = Vec3{0.0f, 0.0f, 0.0f},

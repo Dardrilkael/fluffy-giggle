@@ -41,6 +41,15 @@ swap touches no public header and no user code.
   `ended` at sleep and `began` again on wake; Box2D keeps sleeping
   contacts silent. Passed through the seam verbatim - the 3D engine
   suite pins the Jolt shape.
+- Second divergence, same shape: a runtime `set_collision_filter` wakes
+  the island in Box2D (`b2Shape_SetFilter`) but NOT in Jolt
+  (`SetCollisionGroup` does not activate), so a sleeping 3D body keeps
+  its contacts until woken by set_velocity/impulse - the public setter
+  documents the conservative contract. Behavior tests pin both engines.
+- Box2D v3 needs `enableSensorEvents` on BOTH shapes of a sensor pair
+  (sensor.c skips pairs whose other side lacks it), so the adapter opts
+  every shape in: the lib's contract is "sensor overlaps fire events",
+  with no per-shape subscription knob to expose.
 - Determinism: same binary, same thread_count, same call sequence produces
   identical results (replay test). Cross-platform and cross-thread-count
   determinism are NOT promised.
@@ -54,9 +63,16 @@ events above a speed threshold, the bulk set_transforms path.
   `body_user_data()`/`set_body_user_data()` on both worlds. Stored in
   the lib's own slot table and never forwarded to any engine (no backend
   needed to know), so retire/reuse hygiene is pure lib logic.
-- Remaining (all additive behind the seam, no public break): collision
-  layers/masks, multi-shape bodies, per-shape materials, CCD/bullet
-  flags, sleep control.
+- DONE: collision layers/masks - `BodyDesc::collision_layer/mask`
+  (both-directions bitmask rule, defaults keep v1 behavior) +
+  `set_collision_filter()` on both worlds. Box2D: b2Filter at create +
+  `b2Shape_SetFilter` at runtime (the adapter now keeps the per-slot
+  shape id). Jolt: (layer, mask) ride CollisionGroup's ids + a
+  world-owned GroupFilter answering the rule; the ObjectLayer split is
+  untouched (it sorts, the group decides). Sensors obey the same rule
+  in both engines. Queries ignore filters in v2.
+- Remaining (all additive behind the seam, no public break): multi-shape
+  bodies, per-shape materials, CCD/bullet flags, sleep control.
 
 ## Review decisions, settled
 - Virtual backend seam kept (not a compile-time template backend): a mock

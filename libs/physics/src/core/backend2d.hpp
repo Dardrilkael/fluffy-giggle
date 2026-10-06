@@ -122,6 +122,10 @@ class IWorld2DBackend {
                              const physics2d::Transform& t) = 0;
   virtual void set_velocity(std::uint32_t slot, ws::math::Vec2 linear,
                             float angular) = 0;
+  // Collision filter (BodyDesc::collision_layer/mask at create). The
+  // backend owns the truth - the lib keeps no copy.
+  virtual void set_filter(std::uint32_t slot, std::uint32_t layer,
+                          std::uint32_t mask) = 0;
   virtual void apply_linear_impulse(std::uint32_t slot,
                                     ws::math::Vec2 impulse) = 0;
   virtual void apply_angular_impulse(std::uint32_t slot, float impulse) = 0;
