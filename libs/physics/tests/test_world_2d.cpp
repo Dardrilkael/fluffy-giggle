@@ -426,6 +426,45 @@ TEST_CASE("the accumulator drives alpha; the backlog is dropped at the clamp") {
   }
 }
 
+TEST_CASE("zero-tick advances keep the interpolation endpoints standing") {
+  // 0.25 is exactly representable, and zero gravity keeps the pose linear:
+  // every tick moves x by exactly velocity * fixed_dt, so poses are exact.
+  auto world = make_world(World2D::Desc{.gravity = {0.0f, 0.0f},
+                                         .fixed_dt = 0.25f});
+  auto id = world.create_body(BodyDesc{});
+  REQUIRE(id.has_value());
+  REQUIRE(world.set_velocity(*id, {4.0f, 0.0f}, 0.0f).has_value());
+
+  // One tick: prev holds the spawn pose, cur the moved pose, and the body
+  // is in motion.
+  REQUIRE(world.step().has_value());
+  CHECK(world.prev_transforms()[id->index].position.x ==
+        doctest::Approx(0.0f));
+  CHECK(world.transforms()[id->index].position.x == doctest::Approx(1.0f));
+  REQUIRE(world.moved_bodies().size() == 1);
+  CHECK(world.moved_bodies().front().id == *id);
+
+  // Zero ticks (0.125 < 0.25): nothing may move, prev must NOT re-snap to
+  // cur (that would freeze the lerp at the newest pose), and the in-motion
+  // set stays visible while alpha grows.
+  REQUIRE(world.advance(0.125f).has_value());
+  CHECK(world.interpolation_alpha() == doctest::Approx(0.5f));
+  CHECK(world.prev_transforms()[id->index].position.x ==
+        doctest::Approx(0.0f));
+  CHECK(world.transforms()[id->index].position.x == doctest::Approx(1.0f));
+  REQUIRE(world.moved_bodies().size() == 1);
+  CHECK(world.moved_bodies().front().id == *id);
+
+  // The next advance completes the tick: prev becomes the pose before THAT
+  // tick (the old cur), and the moved list is rebuilt from it.
+  REQUIRE(world.advance(0.125f).has_value());
+  CHECK(world.interpolation_alpha() == doctest::Approx(0.0f));
+  CHECK(world.prev_transforms()[id->index].position.x ==
+        doctest::Approx(1.0f));
+  CHECK(world.transforms()[id->index].position.x == doctest::Approx(2.0f));
+  REQUIRE(world.moved_bodies().size() == 1);
+}
+
 TEST_CASE("step and the event-buffer discipline hold without a backend") {
   auto world = make_world();
   CHECK(world.contact_events().empty());  // before any tick

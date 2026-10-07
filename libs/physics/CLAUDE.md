@@ -29,10 +29,13 @@ swap touches no public header and no user code.
   buffer is pre-reserved at create(); the test suite proves it with global
   new/delete counters (the wrapper only - the engine's own C heap is its
   business).
-- Contact events, moved_bodies() and prev_transforms() are PER
-  step()/advance() CALL - a multi-tick advance() unions its ticks. Events
-  are sorted by the full tiebreak chain (a.index, b.index, phase, point,
-  normal, speed).
+- Contact events are PER step()/advance() CALL - a multi-tick advance()
+  unions its ticks. prev_transforms() and moved_bodies() are PER TICK: the
+  prev mirror snaps on a call's first tick and the moved list is rebuilt
+  then, so a zero-tick advance() (fast frame, big fixed_dt) keeps both
+  standing - interpolation endpoints stay stable and the in-motion set
+  stays visible while alpha grows. Events are sorted by the full
+  tiebreak chain (a.index, b.index, phase, point, normal, speed).
 - Backends feed events in DETERMINISTIC order: WHICH events the
   max_contact_events cap drops must be the same every run.
 - Forces/torques clear at the end of every tick, whichever engine runs.

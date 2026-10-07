@@ -486,22 +486,26 @@ class WorldCore {
     TransformT transform;
   };
 
-  // Opens one public step()/advance() call: snapshot the previous pose,
-  // reset the per-call buffers. The seen_ reset touches only the slots the
-  // previous call marked (O(previous moved), not O(max_bodies)).
+  // Opens one public step()/advance() call: reset the per-call buffers. The
+  // prev mirror and the published moved list are NOT reset here - they are
+  // per TICK, so zero-tick advance() calls leave both standing (see tick()
+  // and end_call()). The seen_ reset touches only the slots the previous
+  // call marked (O(previous moved), not O(max_bodies)).
   void begin_call() {
-    prev_transforms_ = transforms_;  // same size since construction: no realloc
-    events_.clear();                 // capacity kept: no reallocation ever
+    events_.clear();  // capacity kept: no reallocation ever
     for (const RawMove& m : moved_raw_) {
       seen_[m.slot] = 0;
     }
     moved_raw_.clear();
-    moved_.clear();
+    ticked_this_call_ = false;
     overflow_drops_ = 0;
   }
 
   // Closes the call: fix the public event order (determinism contract) and
-  // publish the moved list with live public handles, sorted by index.
+  // publish the moved list with live public handles, sorted by index. The
+  // moved list is rebuilt ONLY when a tick ran - a zero-tick advance()
+  // keeps the last tick's list standing, so renderers driven off it keep
+  // interpolating through frames that had no physics time.
   void end_call() {
     // Same-pair events with the same phase (multi-point contacts, repeated
     // hits) would come out in arbitrary order - std::sort is not stable, so
@@ -526,16 +530,19 @@ class WorldCore {
                 if (l.speed != r.speed) return l.speed < r.speed;
                 return false;
               });
-    for (const RawMove& m : moved_raw_) {
-      if (const auto id = id_for_slot(m.slot)) {
-        moved_.push_back(
-            BodyMoveT{*id, m.transform.position, m.transform.rotation});
+    if (ticked_this_call_) {
+      moved_.clear();
+      for (const RawMove& m : moved_raw_) {
+        if (const auto id = id_for_slot(m.slot)) {
+          moved_.push_back(
+              BodyMoveT{*id, m.transform.position, m.transform.rotation});
+        }
       }
+      std::sort(moved_.begin(), moved_.end(),
+                [](const BodyMoveT& l, const BodyMoveT& r) {
+                  return l.id.index < r.id.index;
+                });
     }
-    std::sort(moved_.begin(), moved_.end(),
-              [](const BodyMoveT& l, const BodyMoveT& r) {
-                return l.id.index < r.id.index;
-              });
     // Re-arm the overflow warning once a call completes without dropping
     // anything: one warning per overflow episode, not per world lifetime.
     if (overflow_drops_ == 0) {
@@ -546,6 +553,14 @@ class WorldCore {
   // One fixed tick of the engine. Appends to the CALL's buffers; the sort,
   // cap reporting and handle resolution happen once, in end_call().
   void tick() {
+    // The prev mirror is per TICK, snapped only on the FIRST tick of the
+    // call (a multi-tick advance() lerps across the whole arc). A zero-tick
+    // advance() never touches it, so interpolation endpoints stay stable
+    // while alpha grows across frames with no physics time.
+    if (!ticked_this_call_) {
+      prev_transforms_ = transforms_;  // same size since construction
+      ticked_this_call_ = true;
+    }
     EventCollector collector{*this};
     const std::size_t count =
         backend_->step(desc_.fixed_dt, collector, backend_moves_);
@@ -609,18 +624,21 @@ class WorldCore {
   std::unique_ptr<Backend> backend_;
 
   std::vector<TransformT> transforms_;   // slot-indexed pose mirror
-  std::vector<TransformT> prev_transforms_;  // mirror before this CALL
+  // Mirror before the last TICK that ran (snapped on a call's first tick,
+  // never on zero-tick calls - the interpolation contract).
+  std::vector<TransformT> prev_transforms_;
   std::vector<ContactEventT> events_;   // drained per call, capacity fixed
   std::vector<JointRecord> records_;    // joint slot -> body slots
   std::vector<BackendMove> backend_moves_;  // step() scratch, slot-indexed
   std::vector<RawMove> moved_raw_;      // deduped moved slots this call
-  std::vector<BodyMoveT> moved_;        // public moved list this call
+  std::vector<BodyMoveT> moved_;        // public moved list: the last tick's
   std::vector<std::uint32_t> seen_;     // slot -> moved_raw_ index+1 (0 = no)
   std::vector<ws::physics::BodyKind> kinds_;  // slot -> body kind
   std::vector<std::uintptr_t> user_data_;  // slot -> opaque payload (lib-owned)
   double accumulator_ = 0.0;  // double: a float one drifts over long sessions
   float alpha_ = 0.0f;
   std::uint32_t overflow_drops_ = 0;
+  bool ticked_this_call_ = false;  // first-tick snapshot gate (see tick())
   bool overflow_warned_ = false;
 };
 

@@ -137,16 +137,20 @@ class WS_PHYSICS_API World3D {
   // reused, NOT creation order.
   [[nodiscard]] std::span<const Transform> transforms() const;
 
-  // The poses transforms() held at the START of the last step()/advance()
-  // call - the "previous frame" half of the interpolation_alpha() lerp. A
-  // body created during the call already holds its creation pose here
-  // (bodies spawn un-lerped). Same indexing as transforms().
+  // The poses transforms() held just before the LAST TICK that ran - the
+  // "previous frame" half of the interpolation_alpha() lerp. An advance()
+  // that runs zero ticks leaves this untouched, so the lerp endpoints stay
+  // stable while alpha grows across frames with no physics time. A body
+  // created during a call already holds its creation pose here (bodies
+  // spawn un-lerped). Same indexing as transforms().
   [[nodiscard]] std::span<const Transform> prev_transforms() const;
 
-  // Bodies the backend simulated during the last step()/advance() call,
-  // sorted by index, one entry per body, ids always live. For the real
-  // engines this is exactly the awake set - a settled world reports
-  // nothing and costs nothing. Valid until the next step()/advance().
+  // Bodies the backend simulated during the last tick that ran, sorted by
+  // index, one entry per body. An advance() that runs zero ticks keeps the
+  // previous tick's list standing - the set in motion is still in motion -
+  // so a body destroyed since stays listed until the next tick. For the
+  // real engines this is exactly the awake set - a settled world reports
+  // nothing and costs nothing.
   [[nodiscard]] std::span<const BodyMove> moved_bodies() const;
 
   // Bulk teleport (kinematic targets etc.). ATOMIC: every entry is validated
