@@ -16,6 +16,12 @@ enum class BodyKind : std::uint8_t {
 inline constexpr std::uint32_t kMaxBodiesPerWorld = 65535;
 inline constexpr std::uint32_t kMaxJointsPerWorld = 16383;
 
+// Hard cap on BodyDesc::parts (multi-shape bodies). The backends keep flat
+// per-slot part tables sized to it and the create-time desc copy reuses a
+// pre-reserved buffer, so a mid-tick compound spawn stays allocation-free;
+// more parts than this fail create().
+inline constexpr std::uint32_t kMaxPartsPerBody = 8;
+
 // Default worker-thread count for world stepping:
 // - the default is hardware_concurrency - 1, clamped to [1, 4] on Android
 //   (big.LITTLE: oversubscribing the little cluster costs more than it

@@ -117,6 +117,31 @@ constexpr float kMaxJointLimitAngle = 0.99f * std::numbers::pi_v<float>;
     return fail(PhysicsError::invalid_argument,
                 "friction and restitution must be >= 0");
   }
+  if (d.part_count != 0 && d.is_sensor) {
+    // Sensors are body-wide in the 3D backend and per-shape in Box2D; the
+    // lib keeps one contract: a sensor body is a single shape.
+    return fail(PhysicsError::invalid_argument,
+                "parts are solid-only: is_sensor + parts is not supported");
+  }
+  if (d.part_count > ws::physics::kMaxPartsPerBody) {
+    return fail(PhysicsError::invalid_argument,
+                "part_count exceeds ws::physics::kMaxPartsPerBody");
+  }
+  for (std::uint32_t p = 0; p < d.part_count; ++p) {
+    const Part& part = d.parts[p];
+    if (auto st = validate_shape(part.shape); !st) {
+      return st;
+    }
+    if (!is_finite(part.offset) || !std::isfinite(part.friction) ||
+        !std::isfinite(part.restitution)) {
+      return fail(PhysicsError::invalid_argument,
+                  "part offset and material values must be finite");
+    }
+    if (part.friction < 0.0f || part.restitution < 0.0f) {
+      return fail(PhysicsError::invalid_argument,
+                  "part friction and restitution must be >= 0");
+    }
+  }
   return {};
 }
 

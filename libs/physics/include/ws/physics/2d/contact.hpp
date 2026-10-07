@@ -16,7 +16,9 @@ enum class ContactPhase : std::uint8_t {
 // are drained via World2D::contact_events(). begin/end fire exactly once per
 // overlap (no per-tick repeats while a pair rests); hit fires for impacts
 // above the world's threshold. Sensors report began/ended/hit like any
-// other body - they just produce no collision response.
+// other body - they just produce no collision response. Multi-shape bodies
+// report per SHAPE pair: a body pair touching through two shape pairs can
+// yield two began/ended cycles per step, each with its own transitions.
 struct ContactEvent {
   ContactPhase phase{};
   BodyId a{};     // the body with the lower slot index (a.index < b.index)

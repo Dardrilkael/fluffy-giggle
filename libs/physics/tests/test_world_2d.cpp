@@ -30,6 +30,7 @@ using ws::physics2d::Circle;
 using ws::physics2d::DistanceJoint;
 using ws::physics2d::FixedJoint;
 using ws::physics2d::JointId;
+using ws::physics2d::Part;
 using ws::physics2d::RevoluteJoint;
 using ws::physics2d::Transform;
 using ws::physics2d::World2D;
@@ -234,6 +235,54 @@ TEST_CASE("create_body validates shapes and material values") {
     CHECK(has_code(world.create_body(d), PhysicsError::invalid_argument));
     d.friction = 0.2f;
     d.restitution = -1.0f;
+    CHECK(has_code(world.create_body(d), PhysicsError::invalid_argument));
+  }
+}
+
+TEST_CASE("multi-shape parts validate before the engine sees them") {
+  auto world = make_world();
+
+  SUBCASE("a legal compound creates") {
+    BodyDesc d = body_at({0.0f, 0.0f});
+    d.parts[0] = Part{Box{ws::math::Vec2{1.0f, 1.0f}}, {}, 0.5f, 0.0f};
+    d.parts[1] = Part{Circle{0.5f}, {2.0f, 0.0f}, 0.1f, 0.5f};
+    d.part_count = 2;
+    CHECK(world.create_body(d).has_value());
+  }
+  SUBCASE("part_count above the cap fails") {
+    BodyDesc d{};
+    d.part_count = ws::physics::kMaxPartsPerBody + 1;
+    CHECK(has_code(world.create_body(d), PhysicsError::invalid_argument));
+  }
+  SUBCASE("parts are solid-only: a sensor compound fails") {
+    BodyDesc d{};
+    d.is_sensor = true;
+    d.parts[0] = Part{Circle{0.5f}, {}, 0.2f, 0.0f};
+    d.part_count = 1;
+    CHECK(has_code(world.create_body(d), PhysicsError::invalid_argument));
+  }
+  SUBCASE("each part's shape validates like a lone shape") {
+    BodyDesc d{};
+    d.parts[0] = Part{Circle{0.0f}, {}, 0.2f, 0.0f};  // radius must be > 0
+    d.part_count = 1;
+    CHECK(has_code(world.create_body(d), PhysicsError::invalid_argument));
+  }
+  SUBCASE("part materials must be finite and >= 0") {
+    BodyDesc d{};
+    d.parts[0] = Part{Circle{0.5f}, {}, -0.1f, 0.0f};
+    d.part_count = 1;
+    CHECK(has_code(world.create_body(d), PhysicsError::invalid_argument));
+    d.parts[0].friction = 0.2f;
+    d.parts[0].restitution = -1.0f;
+    CHECK(has_code(world.create_body(d), PhysicsError::invalid_argument));
+    d.parts[0].restitution = 0.0f;
+    d.parts[0].friction = std::nanf("");
+    CHECK(has_code(world.create_body(d), PhysicsError::invalid_argument));
+  }
+  SUBCASE("part offsets must be finite") {
+    BodyDesc d = body_at({0.0f, 0.0f});
+    d.parts[0] = Part{Circle{0.5f}, {std::nanf(""), 0.0f}, 0.2f, 0.0f};
+    d.part_count = 1;
     CHECK(has_code(world.create_body(d), PhysicsError::invalid_argument));
   }
 }

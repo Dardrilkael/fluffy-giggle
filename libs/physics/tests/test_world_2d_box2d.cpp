@@ -49,6 +49,7 @@ using ws::physics2d::Circle;
 using ws::physics2d::ContactPhase;
 using ws::physics2d::DistanceJoint;
 using ws::physics2d::FixedJoint;
+using ws::physics2d::Part;
 using ws::physics2d::RayHit;
 using ws::physics2d::RevoluteJoint;
 using ws::physics2d::Transform;
@@ -155,6 +156,115 @@ TEST_CASE("restitution 1 bounces: the impact flips the velocity sign") {
   }
   CHECK(began);
   CHECK(bounced);
+}
+
+TEST_CASE("multi-shape parts: per-part materials ride the shapes natively") {
+  // The compound floor helper: a static body whose two parts sit side by
+  // side along x with DIFFERENT surface materials. The body-level material
+  // is deliberately wrong for both (defaults) - part_count != 0 must IGNORE
+  // it entirely (Box2D mixes per shape pair from the per-part b2ShapeDef
+  // materials; there are no adapter tables to keep honest here).
+  const auto compound_floor = [](ws::math::Vec2 half, float left_friction,
+                                 float left_rest, float right_friction,
+                                 float right_rest) {
+    BodyDesc f{};
+    f.kind = ws::physics::BodyKind::static_;
+    f.transform = Transform{{0.0f, -1.0f}, 0.0f};
+    f.parts[0] = Part{Box{half}, ws::math::Vec2{-half.x, 0.0f}, left_friction,
+                      left_rest};
+    f.parts[1] = Part{Box{half}, ws::math::Vec2{half.x, 0.0f}, right_friction,
+                      right_rest};
+    f.part_count = 2;
+    return f;
+  };
+
+  SUBCASE("per-part restitution beats the ignored body-level value") {
+    auto world = make_world(World2D::Desc{.thread_count = 0});
+    auto floor = world.create_body(compound_floor(
+        ws::math::Vec2{1.5f, 1.0f}, 0.2f, 0.0f, 0.2f, 1.0f));
+    REQUIRE(floor.has_value());
+    // Box2D mixes restitution with max(): a rest-0 ball on the rest-1 part
+    // bounces while the same ball on the rest-0 part just stops.
+    auto dead = world.create_body(ball_at({-1.5f, 5.0f}, 0.0f));
+    auto live = world.create_body(ball_at({1.5f, 5.0f}, 0.0f));
+    REQUIRE(dead.has_value());
+    REQUIRE(live.has_value());
+
+    float dead_apex = 0.0f;
+    float live_apex = 0.0f;
+    for (int i = 0; i < 90; ++i) {  // 1.5 s: fall, hit, bounce back up
+      REQUIRE(world.step().has_value());
+      // The drop from y=5 takes ~0.96 s (58 steps) - apex sampling starts
+      // after landing, so the checks measure the BOUNCE, not the fall.
+      if (i < 60) {
+        continue;
+      }
+      auto d = world.body_state(*dead);
+      auto l = world.body_state(*live);
+      REQUIRE(d.has_value());
+      REQUIRE(l.has_value());
+      dead_apex = std::max(dead_apex, d->position.y);
+      live_apex = std::max(live_apex, l->position.y);
+    }
+    CHECK(dead_apex < 1.5f);  // never meaningfully bounced (rests at ~0.5)
+    CHECK(live_apex > 3.0f);  // back near the 5.0 drop height
+  }
+
+  SUBCASE("per-part friction beats the ignored body-level value") {
+    auto world = make_world(World2D::Desc{.thread_count = 0});
+    // Wide parts so each box slides over its own side for the whole second.
+    auto floor = world.create_body(compound_floor(
+        ws::math::Vec2{10.0f, 1.0f}, 1.0f, 0.0f, 0.0f, 0.0f));
+    REQUIRE(floor.has_value());
+    // Boxes start AT REST on the part surface (floor top is y=0, box half
+    // 0.5), so the whole second is pure sliding - no fall eating into it.
+    auto rough = world.create_body(dynamic_box({-15.0f, 0.5f}));
+    auto ice = world.create_body(dynamic_box({5.0f, 0.5f}));
+    REQUIRE(rough.has_value());
+    REQUIRE(ice.has_value());
+    REQUIRE(world.set_velocity(*rough, {3.0f, 0.0f}, 0.0f).has_value());
+    REQUIRE(world.set_velocity(*ice, {3.0f, 0.0f}, 0.0f).has_value());
+
+    step_n(world, 60);  // 1 s of sliding
+    auto r = world.body_state(*rough);
+    auto i = world.body_state(*ice);
+    REQUIRE(r.has_value());
+    REQUIRE(i.has_value());
+    // Box2D mixes friction with sqrt(f1*f2): box 0.2 * part 1.0 -> 0.45
+    // decelerates hard; box 0.2 * part 0.0 -> 0 keeps gliding.
+    CHECK(i->linear_velocity.x > 2.9f);   // ice: barely slowed
+    CHECK(r->linear_velocity.x < 0.5f);  // rough: friction ate most of it
+  }
+}
+
+TEST_CASE("multi-shape parts: geometry rides the body-local offset") {
+  auto world = make_world(World2D::Desc{.thread_count = 0});
+  // A static body at the origin carrying ONE part translated to (3, 0):
+  // the shape exists only there - the body origin itself is empty space.
+  BodyDesc offset_body{};
+  offset_body.kind = ws::physics::BodyKind::static_;
+  offset_body.parts[0] = Part{Box{ws::math::Vec2{1.0f, 1.0f}},
+                               ws::math::Vec2{3.0f, 0.0f}, 0.2f, 0.0f};
+  offset_body.part_count = 1;
+  auto shelf = world.create_body(offset_body);
+  REQUIRE(shelf.has_value());
+
+  auto on_shelf = world.create_body(ball_at({3.0f, 5.0f}, 0.0f));
+  auto through = world.create_body(ball_at({0.0f, 5.0f}, 0.0f));
+  REQUIRE(on_shelf.has_value());
+  REQUIRE(through.has_value());
+
+  step_n(world, 90);  // 1.5 s: plenty to land (and to fall far past)
+
+  auto landed = world.body_state(*on_shelf);
+  auto fell = world.body_state(*through);
+  REQUIRE(landed.has_value());
+  REQUIRE(fell.has_value());
+  // Shelf top is y=1 (origin + half 1), ball radius 0.5 -> rests at 1.5.
+  CHECK(landed->position.y == doctest::Approx(1.5f).epsilon(0.05));
+  CHECK(landed->position.x == doctest::Approx(3.0f).epsilon(0.05));
+  // No shape at the origin: free fall from y=5 over 1.5 s reaches ~-6.
+  CHECK(fell->position.y < -5.0f);
 }
 
 TEST_CASE("a stack settles, sleeps and leaves moved_bodies() empty") {
@@ -728,7 +838,9 @@ TEST_CASE("steady-state stepping allocates zero C++ heap") {
   for (int i = 0; i < 60; ++i) {
     REQUIRE(world.step().has_value());
     REQUIRE(world.contact_events().size() <= 512);
-    REQUIRE(world.moved_bodies().size() <= ids.size());
+    // +2: the two bodies spawned mid-window (below) are awake and moving
+    // too, and neither is in ids.
+    REQUIRE(world.moved_bodies().size() <= ids.size() + 2);
     (void)world.prev_transforms();
     (void)world.interpolation_alpha();
     if (i == 30) {
@@ -745,6 +857,16 @@ TEST_CASE("steady-state stepping allocates zero C++ heap") {
       REQUIRE(world.destroy_body(ids[7]).has_value());
       auto fresh = world.create_body(dynamic_box({2.0f, 25.0f}));
       REQUIRE(fresh.has_value());
+      // A compound spawn mid-window: the one desc copy stays free because
+      // parts ride a fixed array, not a vector (the array IS the fix this
+      // test pins - a vector's MSVC debug proxy would allocate here).
+      BodyDesc compound = dynamic_box({-2.0f, 25.0f});
+      compound.parts[0] = Part{Circle{0.5f}, {}, 0.2f, 0.0f};
+      compound.parts[1] = Part{Box{ws::math::Vec2{0.5f, 0.5f}},
+                               ws::math::Vec2{2.0f, 0.0f}, 0.2f, 0.0f};
+      compound.part_count = 2;
+      auto compound_id = world.create_body(compound);
+      REQUIRE(compound_id.has_value());
     }
   }
   CHECK(allocation_count() - before == 0);

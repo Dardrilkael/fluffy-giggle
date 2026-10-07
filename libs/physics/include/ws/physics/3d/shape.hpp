@@ -32,6 +32,17 @@ struct Capsule {
 
 using Shape = std::variant<Sphere, Box, Capsule>;
 
+// One shape of a multi-shape body: geometry at a local offset plus its own
+// surface material. A BodyDesc with non-empty parts carries one Part per
+// shape; friction/restitution here override the body-level fields for that
+// shape's contacts. No per-part rotation in v2.
+struct Part {
+  Shape shape{Box{}};
+  Vec3 offset{};             // body-local translation
+  float friction = 0.2f;     // >= 0, mixed per engine convention
+  float restitution = 0.0f;  // >= 0
+};
+
 // Axis-aligned query box for overlap_aabb (min <= max component-wise).
 struct Aabb {
   Vec3 min{};

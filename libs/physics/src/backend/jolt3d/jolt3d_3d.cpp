@@ -74,7 +74,11 @@
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#include <Jolt/Physics/Collision/Shape/CompoundShape.h>
+#include <Jolt/Physics/Collision/Shape/DecoratedShape.h>
+#include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Constraints/DistanceConstraint.h>
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
 #include <Jolt/Physics/Constraints/HingeConstraint.h>
@@ -107,6 +111,7 @@ namespace {
 
 using physics3d::Aabb;
 using physics3d::BodyDesc;
+using physics3d::Part;
 using physics3d::Transform;
 using ws::math::Quat;
 using ws::math::Vec3;
@@ -380,6 +385,15 @@ class JoltWorld3D final : public IWorld3DBackend,
     joints_.resize(desc.max_joints);   // slot -> engine constraint
     joint_live_.assign(desc.max_joints, 0);
     slot_by_index_.resize(desc.max_bodies);  // flat: no insert allocs, ever
+    // Per-part surface materials, one flat table per property (slot-major,
+    // kMaxPartsPerBody stride). Pre-sized here so a mid-tick compound spawn
+    // writes in place: the zero-alloc window test covers those too.
+    part_friction_.assign(std::size_t{desc.max_bodies} *
+                              ws::physics::kMaxPartsPerBody,
+                          0.0f);
+    part_restitution_.assign(std::size_t{desc.max_bodies} *
+                                 ws::physics::kMaxPartsPerBody,
+                             0.0f);
     const std::size_t raw_capacity =
         std::max<std::size_t>(kRawEventHeadroom * desc.max_contact_events,
                               16u);
@@ -439,9 +453,73 @@ class JoltWorld3D final : public IWorld3DBackend,
     const float density = desc.kind == ws::physics::BodyKind::dynamic
                               ? desc.density
                               : std::max(desc.density, 0.0f);
-    JPH::Ref<JPH::Shape> shape = shape_for(desc.shape, density);
-    if (shape == nullptr) {
-      return fail(PhysicsError::backend_error, "Jolt refused a shape");
+
+    // Shape + surface-material source: part_count != 0 defines ALL shapes
+    // and the body-level friction/restitution are ignored for physics.
+    JPH::Ref<JPH::Shape> shape;
+    float friction = desc.friction;
+    float restitution = desc.restitution;
+    bool multi_part = false;
+    if (desc.part_count == 0) {
+      shape = shape_for(desc.shape, density);
+      if (shape == nullptr) {
+        return fail(PhysicsError::backend_error, "Jolt refused a shape");
+      }
+    } else if (desc.part_count == 1) {
+      // One part: the part's material IS the body's (baked body-level
+      // below - a compound would collapse anyway: Create returns the bare
+      // child for a single sub-shape, dropping any per-sub-shape data). A
+      // non-zero offset rides a RotatedTranslated decorator over the
+      // cached leaf.
+      const Part& part = desc.parts[0];
+      JPH::Ref<JPH::Shape> leaf = shape_for(part.shape, density);
+      if (leaf == nullptr) {
+        return fail(PhysicsError::backend_error, "Jolt refused a part shape");
+      }
+      if (part.offset == Vec3{}) {
+        shape = leaf;
+      } else {
+        JPH::RotatedTranslatedShapeSettings rotated(
+            to_jph(part.offset), JPH::Quat::sIdentity(), leaf.GetPtr());
+        JPH::ShapeSettings::ShapeResult result = rotated.Create();
+        if (result.HasError()) {
+          return fail(PhysicsError::backend_error,
+                      "Jolt refused an offset part shape");
+        }
+        shape = result.Get();
+      }
+      friction = part.friction;
+      restitution = part.restitution;
+    } else {
+      // Two or more parts: a StaticCompoundShape. AddShape order IS parts
+      // order (the BVH build only permutes its own node array), so the
+      // sub-shape index names the part at contact time. Jolt's material
+      // mixing does not see sub-shapes, so the per-part materials ride the
+      // flat tables and the contact listener re-combines; friction here
+      // is only the unreachable-with-parts fallback.
+      JPH::StaticCompoundShapeSettings compound;
+      for (std::uint32_t p = 0; p < desc.part_count; ++p) {
+        const Part& part = desc.parts[p];
+        JPH::Ref<JPH::Shape> leaf = shape_for(part.shape, density);
+        if (leaf == nullptr) {
+          return fail(PhysicsError::backend_error, "Jolt refused a part shape");
+        }
+        compound.AddShape(to_jph(part.offset), JPH::Quat::sIdentity(),
+                          leaf.GetPtr());
+      }
+      JPH::ShapeSettings::ShapeResult result = compound.Create();
+      if (result.HasError()) {
+        return fail(PhysicsError::backend_error,
+                    "Jolt refused the compound shape");
+      }
+      shape = result.Get();
+      const std::size_t base =
+          std::size_t{slot} * ws::physics::kMaxPartsPerBody;
+      for (std::uint32_t i = 0; i < desc.part_count; ++i) {
+        part_friction_[base + i] = desc.parts[i].friction;
+        part_restitution_[base + i] = desc.parts[i].restitution;
+      }
+      multi_part = true;
     }
 
     JPH::BodyCreationSettings bcs(
@@ -452,9 +530,16 @@ class JoltWorld3D final : public IWorld3DBackend,
     bcs.mUserData = static_cast<std::uint64_t>(slot) + 1u;
     bcs.mLinearVelocity = to_jph(desc.linear_velocity);
     bcs.mAngularVelocity = to_jph(desc.angular_velocity);
-    bcs.mFriction = desc.friction;
-    bcs.mRestitution = desc.restitution;
+    bcs.mFriction = friction;        // body-level, or the lone part's
+    bcs.mRestitution = restitution;  // (multi-part pairs override per part)
     bcs.mGravityFactor = desc.gravity_scale;
+    if (multi_part) {
+      // Coplanar parts would merge their manifolds and keep ONE sub-shape's
+      // material for the whole merged contact (the manifold carries a single
+      // sub-shape pair); turning reduction off keeps per-part materials
+      // honest at the cost of a few extra contact constraints.
+      bcs.mUseManifoldReduction = false;
+    }
     bcs.mIsSensor = desc.is_sensor;
     // (layer, mask) ride CollisionGroup's ids; the world-owned
     // LayerMaskFilter turns them back into the both-directions rule.
@@ -822,7 +907,12 @@ class JoltWorld3D final : public IWorld3DBackend,
 
   void OnContactAdded(const JPH::Body& inBody1, const JPH::Body& inBody2,
                       const JPH::ContactManifold& inManifold,
-                      JPH::ContactSettings&) override {
+                      JPH::ContactSettings& ioSettings) override {
+    // Per-part materials land on the first step of a fresh pair; the
+    // listener owns the flat tables (no world registry a plain function
+    // pointer would need), so this is where the override lives.
+    apply_part_materials(inBody1, inManifold.mSubShapeID1, inBody2,
+                         inManifold.mSubShapeID2, ioSettings);
     const std::uint32_t a = user_slot(inBody1);
     const std::uint32_t b = user_slot(inBody2);
     if (a == kNoSlot || b == kNoSlot) {
@@ -860,11 +950,17 @@ class JoltWorld3D final : public IWorld3DBackend,
     }
   }
 
-  void OnContactPersisted(const JPH::Body&, const JPH::Body&,
-                          const JPH::ContactManifold&,
-                          JPH::ContactSettings&) override {
-    // Deliberately empty: began/ended fire once per overlap, no per-tick
-    // repeats while a pair rests - the public contact.hpp contract.
+  void OnContactPersisted(const JPH::Body& inBody1, const JPH::Body& inBody2,
+                          const JPH::ContactManifold& inManifold,
+                          JPH::ContactSettings& ioSettings) override {
+    // Still no EVENTS per tick while a pair rests (began/ended fire once
+    // per overlap - the public contact.hpp contract). But the combined
+    // material is NOT cached by the engine: every step rebuilds each
+    // contact constraint from fresh defaults, so the per-part override
+    // must land here too or it would silently revert to body-level
+    // mixing from the second step of a resting pair onward.
+    apply_part_materials(inBody1, inManifold.mSubShapeID1, inBody2,
+                         inManifold.mSubShapeID2, ioSettings);
   }
 
   void OnContactRemoved(const JPH::SubShapeIDPair& inSubShapePair) override {
@@ -874,6 +970,69 @@ class JoltWorld3D final : public IWorld3DBackend,
     // contract.
     push_removed(RawRemoved{inSubShapePair.GetBody1ID(),
                             inSubShapePair.GetBody2ID()});
+  }
+
+  // Which part of a multi-part body a sub-shape ID touches, or -1 when the
+  // touching shape is not a compound (single shape, or a lone part under a
+  // RotatedTranslated decorator - both take the body-level material, which
+  // the one-part path bakes to the part's values). Multi-part bodies carry
+  // the StaticCompoundShape bare (no decorators), and AddShape order IS
+  // parts order (the BVH build permutes only its own node array), so the
+  // compound's sub-shape index is the part index. GetSubShapeUserData is
+  // useless here: it returns the LEAF's own user data, and our cached
+  // leaves are shared across bodies.
+  [[nodiscard]] static int part_index(const JPH::Body& body,
+                                      const JPH::SubShapeID& id) {
+    const JPH::Shape* shape = body.GetShape();
+    if (shape == nullptr ||
+        shape->GetSubType() != JPH::EShapeSubType::StaticCompound) {
+      return -1;
+    }
+    const auto* compound = static_cast<const JPH::CompoundShape*>(shape);
+    JPH::SubShapeID remainder;
+    const std::uint32_t index =
+        compound->GetSubShapeIndexFromID(id, remainder);
+    return index < compound->GetNumSubShapes() ? int(index) : -1;
+  }
+
+  // Per-part materials at contact time. A pair where at least one side
+  // touches a compound part overrides the combined values; plain pairs
+  // keep the engine's own combine untouched (bit-identical v1 behavior).
+  // The override repeats the engine's default mixes - friction geometric
+  // mean, restitution max, the same formulas Box2D applies natively - so
+  // both dimensions and both pair kinds agree. Worker-thread safety: the
+  // tables are written only by create_body on the control thread, never
+  // during Update (single-threaded API contract).
+  void apply_part_materials(const JPH::Body& inBody1,
+                            const JPH::SubShapeID& inId1,
+                            const JPH::Body& inBody2,
+                            const JPH::SubShapeID& inId2,
+                            JPH::ContactSettings& ioSettings) {
+    const int p1 = part_index(inBody1, inId1);
+    const int p2 = part_index(inBody2, inId2);
+    if (p1 < 0 && p2 < 0) {
+      return;
+    }
+    float f1 = inBody1.GetFriction();
+    float e1 = inBody1.GetRestitution();
+    float f2 = inBody2.GetFriction();
+    float e2 = inBody2.GetRestitution();
+    const std::uint32_t a = user_slot(inBody1);
+    const std::uint32_t b = user_slot(inBody2);
+    if (p1 >= 0 && a != kNoSlot) {
+      const std::size_t i = std::size_t{a} * ws::physics::kMaxPartsPerBody +
+                            std::size_t(p1);
+      f1 = part_friction_[i];
+      e1 = part_restitution_[i];
+    }
+    if (p2 >= 0 && b != kNoSlot) {
+      const std::size_t i = std::size_t{b} * ws::physics::kMaxPartsPerBody +
+                            std::size_t(p2);
+      f2 = part_friction_[i];
+      e2 = part_restitution_[i];
+    }
+    ioSettings.mCombinedFriction = JPH::Sqrt(f1 * f2);
+    ioSettings.mCombinedRestitution = std::max(e1, e2);
   }
 
   // Callback-side appends: a worker thread, so the lock is required; a
@@ -973,6 +1132,10 @@ class JoltWorld3D final : public IWorld3DBackend,
   JPH::Ref<LayerMaskFilter> mask_filter_;
   std::unique_ptr<JPH::JobSystem> jobs_;
   std::vector<JPH::BodyID> bodies_;               // slot -> engine id
+  // Per-part surface materials, slot-major with kMaxPartsPerBody stride;
+  // read by the contact callbacks (see apply_part_materials).
+  std::vector<float> part_friction_;
+  std::vector<float> part_restitution_;
   std::vector<std::uint8_t> body_live_;
   std::vector<ws::physics::BodyKind> kinds_;  // adapter self-gates on it
   std::vector<JPH::TwoBodyConstraint*> joints_;  // slot -> engine constraint

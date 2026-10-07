@@ -46,6 +46,7 @@ using ws::physics3d::ContactPhase;
 using ws::physics3d::DistanceJoint;
 using ws::physics3d::FixedJoint;
 using ws::physics3d::HingeJoint;
+using ws::physics3d::Part;
 using ws::physics3d::RayHit;
 using ws::physics3d::Sphere;
 using ws::physics3d::Transform;
@@ -160,6 +161,123 @@ TEST_CASE("3D restitution 1 bounces: the impact flips the velocity sign") {
   }
   CHECK(began);
   CHECK(bounced);
+}
+
+TEST_CASE("3D multi-shape parts: the listener recombines materials every step") {
+  auto world = make_world(World3D::Desc{.thread_count = 0});
+
+  // Compound floor: rough part left, ice part right. The floor's BODY-level
+  // friction is the default 0.2 on purpose - it is exactly what the ice side
+  // would revert to if the listener stopped overriding persisted contacts
+  // (Jolt rebuilds contact constraints from body-level defaults every step;
+  // only OnContactAdded + OnContactPersisted together keep part materials).
+  BodyDesc floor{};
+  floor.kind = ws::physics::BodyKind::static_;
+  floor.transform = Transform{Vec3{0.0f, -1.0f, 0.0f}, Quat{}};
+  floor.parts[0] = Part{Box{Vec3{10.0f, 1.0f, 10.0f}},
+                        Vec3{-10.0f, 0.0f, 0.0f}, 1.0f, 0.0f};
+  floor.parts[1] = Part{Box{Vec3{10.0f, 1.0f, 10.0f}},
+                        Vec3{10.0f, 0.0f, 0.0f}, 0.0f, 0.0f};
+  floor.part_count = 2;
+  REQUIRE(world.create_body(floor).has_value());
+
+  // Sliding boxes (friction 1 so the sqrt mix is the part's alone): the
+  // rough side's combined friction is sqrt(1*1)=1, the ice side's
+  // sqrt(0*1)=0. Both start AT REST on the surface (floor top y=0) so the
+  // whole second is pure sliding.
+  BodyDesc rough_desc = dynamic_box(Vec3{-15.0f, 0.5f, 0.0f});
+  BodyDesc ice_desc = dynamic_box(Vec3{5.0f, 0.5f, 0.0f});
+  rough_desc.friction = 1.0f;
+  ice_desc.friction = 1.0f;
+  auto rough = world.create_body(rough_desc);
+  auto ice = world.create_body(ice_desc);
+  REQUIRE(rough.has_value());
+  REQUIRE(ice.has_value());
+  REQUIRE(world.set_velocity(*rough, Vec3{3.0f, 0.0f, 0.0f},
+                             Vec3{}).has_value());
+  REQUIRE(world.set_velocity(*ice, Vec3{3.0f, 0.0f, 0.0f},
+                             Vec3{}).has_value());
+
+  step_n(world, 60);  // 1 s of sliding, all of it PERSISTED contacts
+  auto r = world.body_state(*rough);
+  auto i = world.body_state(*ice);
+  REQUIRE(r.has_value());
+  REQUIRE(i.has_value());
+  // Ice keeps gliding - if the override were Added-only, the ~0.45 combined
+  // friction from the body-level floor value would have stopped it too.
+  CHECK(i->linear_velocity.x > 2.5f);
+  // Rough: combined 1.0 eats 3 m/s in ~0.3 s (then it sleeps).
+  CHECK(r->linear_velocity.x < 0.5f);
+}
+
+TEST_CASE("3D multi-shape parts: per-part restitution beats body-level") {
+  auto world = make_world(World3D::Desc{.thread_count = 0});
+
+  // Dead part left, trampoline right; body-level restitution stays 0 (the
+  // ignored-for-parts default) - the listener must combine from the parts.
+  BodyDesc floor{};
+  floor.kind = ws::physics::BodyKind::static_;
+  floor.transform = Transform{Vec3{0.0f, -1.0f, 0.0f}, Quat{}};
+  floor.parts[0] = Part{Box{Vec3{1.5f, 1.0f, 1.5f}},
+                        Vec3{-1.5f, 0.0f, 0.0f}, 0.2f, 0.0f};
+  floor.parts[1] = Part{Box{Vec3{1.5f, 1.0f, 1.5f}},
+                        Vec3{1.5f, 0.0f, 0.0f}, 0.2f, 1.0f};
+  floor.part_count = 2;
+  REQUIRE(world.create_body(floor).has_value());
+
+  auto dead = world.create_body(ball_at(Vec3{-1.5f, 5.0f, 0.0f}, 0.0f));
+  auto live = world.create_body(ball_at(Vec3{1.5f, 5.0f, 0.0f}, 0.0f));
+  REQUIRE(dead.has_value());
+  REQUIRE(live.has_value());
+
+  float dead_apex = 0.0f;
+  float live_apex = 0.0f;
+  for (int i = 0; i < 90; ++i) {  // 1.5 s: fall, hit, bounce back up
+    REQUIRE(world.step().has_value());
+    // The drop from y=5 takes ~0.96 s (58 steps) - apex sampling starts
+    // after landing, so the checks measure the BOUNCE, not the fall.
+    if (i < 60) {
+      continue;
+    }
+    auto d = world.body_state(*dead);
+    auto l = world.body_state(*live);
+    REQUIRE(d.has_value());
+    REQUIRE(l.has_value());
+    dead_apex = std::max(dead_apex, d->position.y);
+    live_apex = std::max(live_apex, l->position.y);
+  }
+  CHECK(dead_apex < 1.5f);  // never meaningfully bounced (rests at ~0.5)
+  CHECK(live_apex > 3.0f);  // back near the 5.0 drop height
+}
+
+TEST_CASE("3D multi-shape parts: geometry rides the body-local offset") {
+  auto world = make_world(World3D::Desc{.thread_count = 0});
+  // A static body at the origin carrying ONE part translated to (3, 0, 0):
+  // the shape exists only there - the body origin itself is empty space.
+  BodyDesc offset_body{};
+  offset_body.kind = ws::physics::BodyKind::static_;
+  offset_body.parts[0] = Part{Box{Vec3{1.0f, 1.0f, 1.0f}},
+                               Vec3{3.0f, 0.0f, 0.0f}, 0.2f, 0.0f};
+  offset_body.part_count = 1;
+  auto shelf = world.create_body(offset_body);
+  REQUIRE(shelf.has_value());
+
+  auto on_shelf = world.create_body(ball_at(Vec3{3.0f, 5.0f, 0.0f}, 0.0f));
+  auto through = world.create_body(ball_at(Vec3{0.0f, 5.0f, 0.0f}, 0.0f));
+  REQUIRE(on_shelf.has_value());
+  REQUIRE(through.has_value());
+
+  step_n(world, 90);  // 1.5 s: plenty to land (and to fall far past)
+
+  auto landed = world.body_state(*on_shelf);
+  auto fell = world.body_state(*through);
+  REQUIRE(landed.has_value());
+  REQUIRE(fell.has_value());
+  // Shelf top is y=1 (origin + half 1), ball radius 0.5 -> rests at 1.5.
+  CHECK(landed->position.y == doctest::Approx(1.5f).epsilon(0.05));
+  CHECK(landed->position.x == doctest::Approx(3.0f).epsilon(0.05));
+  // No shape at the origin: free fall from y=5 over 1.5 s reaches ~-6.
+  CHECK(fell->position.y < -5.0f);
 }
 
 TEST_CASE("3D stack settles, sleeps and leaves moved_bodies() empty; "
@@ -830,6 +948,18 @@ TEST_CASE("3D steady state steps without one heap allocation") {
       REQUIRE(world.destroy_body(ids[7]).has_value());
       auto fresh = world.create_body(dynamic_box(Vec3{2.0f, 25.0f, 0.0f}));
       REQUIRE(fresh.has_value());
+      // A compound spawn mid-window: parts ride a fixed array (the desc
+      // copy stays free), the shape cache stays hit-only because BOTH part
+      // shapes are already warm from the rain bodies, and the flat part
+      // tables were sized at construction.
+      BodyDesc compound = dynamic_box(Vec3{-2.0f, 25.0f, 0.0f});
+      compound.parts[0] = Part{Box{Vec3{0.5f, 0.5f, 0.5f}}, Vec3{}, 0.2f,
+                                0.0f};
+      compound.parts[1] = Part{Capsule{0.5f, 0.25f},
+                               Vec3{1.5f, 0.0f, 0.0f}, 0.2f, 0.0f};
+      compound.part_count = 2;
+      auto compound_id = world.create_body(compound);
+      REQUIRE(compound_id.has_value());
     }
   }
   CHECK(allocation_count() - before == 0);

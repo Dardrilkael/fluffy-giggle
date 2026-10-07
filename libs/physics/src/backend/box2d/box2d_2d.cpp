@@ -65,6 +65,7 @@ namespace {
 
 using physics2d::Aabb;
 using physics2d::BodyDesc;
+using physics2d::Part;
 using physics2d::Transform;
 using ws::math::Vec2;
 
@@ -100,7 +101,6 @@ class Box2DWorld final : public IWorld2DBackend {
       : hit_threshold_(desc.hit_speed_threshold) {
     bodies_.resize(desc.max_bodies);
     body_live_.resize(desc.max_bodies);
-    shapes_.resize(desc.max_bodies);  // one shape per body (the lib's v2 plan)
     joints_.resize(desc.max_joints);
     joint_live_.resize(desc.max_joints);
 
@@ -185,27 +185,55 @@ class Box2DWorld final : public IWorld2DBackend {
     if (!b2Body_IsValid(body)) {
       return fail(PhysicsError::backend_error, "Box2D refused a body");
     }
-    const b2ShapeId shape = std::visit(
-        [&](const auto& s) -> b2ShapeId {
-          using S = std::decay_t<decltype(s)>;
-          if constexpr (std::is_same_v<S, physics2d::Circle>) {
-            const b2Circle circle{b2Vec2{0.0f, 0.0f}, s.radius};
-            return b2CreateCircleShape(body, &sd, &circle);
-          } else if constexpr (std::is_same_v<S, physics2d::Box>) {
-            const b2Polygon box = b2MakeBox(s.half_extents.x, s.half_extents.y);
-            return b2CreatePolygonShape(body, &sd, &box);
-          } else {
-            const b2Capsule capsule{to_b2(s.a), to_b2(s.b), s.radius};
-            return b2CreateCapsuleShape(body, &sd, &capsule);
-          }
-        },
-        desc.shape);
-    if (!b2Shape_IsValid(shape)) {
-      b2DestroyBody(body);
-      return fail(PhysicsError::backend_error, "Box2D refused a shape");
+    // One shape at a body-local offset; the single-shape path passes a zero
+    // offset, which is bit-identical to the old centered constructors
+    // (b2MakeOffsetBox with identity rotation and a zero center).
+    const auto make_shape = [&](const physics2d::Shape& s, Vec2 off,
+                                const b2ShapeDef& shape_sd) -> b2ShapeId {
+      return std::visit(
+          [&](const auto& sh) -> b2ShapeId {
+            using S = std::decay_t<decltype(sh)>;
+            if constexpr (std::is_same_v<S, physics2d::Circle>) {
+              const b2Circle circle{to_b2(off), sh.radius};
+              return b2CreateCircleShape(body, &shape_sd, &circle);
+            } else if constexpr (std::is_same_v<S, physics2d::Box>) {
+              const b2Polygon box = b2MakeOffsetBox(
+                  sh.half_extents.x, sh.half_extents.y, to_b2(off),
+                  b2MakeRot(0.0f));
+              return b2CreatePolygonShape(body, &shape_sd, &box);
+            } else {
+              const b2Capsule capsule{to_b2(sh.a + off), to_b2(sh.b + off),
+                                     sh.radius};
+              return b2CreateCapsuleShape(body, &shape_sd, &capsule);
+            }
+          },
+          s);
+    };
+
+    if (desc.part_count != 0) {
+      // part_count != 0 defines ALL shapes, each with its own material (the
+      // body-level friction/restitution are ignored for physics). Box2D
+      // mixes per shape pair natively, so nothing else is needed at contact
+      // time.
+      for (std::uint32_t p = 0; p < desc.part_count; ++p) {
+        const Part& part = desc.parts[p];
+        b2ShapeDef part_sd = sd;  // same density/filter/flags; material below
+        part_sd.material.friction = part.friction;
+        part_sd.material.restitution = part.restitution;
+        const b2ShapeId shape = make_shape(part.shape, part.offset, part_sd);
+        if (!b2Shape_IsValid(shape)) {
+          b2DestroyBody(body);  // cascades the shapes made so far
+          return fail(PhysicsError::backend_error, "Box2D refused a part shape");
+        }
+      }
+    } else {
+      const b2ShapeId shape = make_shape(desc.shape, Vec2{}, sd);
+      if (!b2Shape_IsValid(shape)) {
+        b2DestroyBody(body);
+        return fail(PhysicsError::backend_error, "Box2D refused a shape");
+      }
     }
     bodies_[slot] = body;
-    shapes_[slot] = shape;  // kept for set_filter's runtime b2Shape_SetFilter
     body_live_[slot] = 1;
     return {};
   }
@@ -218,7 +246,6 @@ class Box2DWorld final : public IWorld2DBackend {
     // joints before the body, so none remain here.
     b2DestroyBody(bodies_[slot]);
     bodies_[slot] = b2_nullBodyId;
-    shapes_[slot] = b2_nullShapeId;
     body_live_[slot] = 0;
   }
 
@@ -248,9 +275,17 @@ class Box2DWorld final : public IWorld2DBackend {
     b2Filter filter{};
     filter.categoryBits = layer;  // uint32 -> uint64 widens clean
     filter.maskBits = mask;
-    // SetFilter resets the broadphase proxy and wakes the island (a
-    // filter change may kill contacts), so the change lands next tick.
-    b2Shape_SetFilter(shapes_[slot], filter);
+    // A body may own up to kMaxPartsPerBody shapes now, so ask the engine
+    // for the list (a stack buffer beats a per-slot shape table, and it
+    // works whatever the body's shape count is). SetFilter resets the
+    // broadphase proxy and wakes the island (a filter change may kill
+    // contacts), so the change lands next tick.
+    b2ShapeId shapes[ws::physics::kMaxPartsPerBody];
+    const int count = b2Body_GetShapes(
+        bodies_[slot], shapes, static_cast<int>(ws::physics::kMaxPartsPerBody));
+    for (int i = 0; i < count; ++i) {
+      b2Shape_SetFilter(shapes[i], filter);
+    }
   }
 
   void set_gravity(ws::math::Vec2 gravity) override {
@@ -739,7 +774,6 @@ class Box2DWorld final : public IWorld2DBackend {
 
   b2WorldId world_{};
   std::vector<b2BodyId> bodies_;    // slot -> engine body
-  std::vector<b2ShapeId> shapes_;   // slot -> engine shape (one per body)
   std::vector<char> body_live_;     // 1 = the slot holds a live body
   std::vector<b2JointId> joints_;   // slot -> engine joint
   std::vector<char> joint_live_;

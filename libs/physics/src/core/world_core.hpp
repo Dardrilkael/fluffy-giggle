@@ -138,7 +138,10 @@ class WorldCore {
       return fail(PhysicsError::invalid_argument,
                   "body rotation must be finite and non-degenerate");
     }
-    BodyDescT local = desc;  // creation is cold: one copy is fine
+    // The one per-create copy, kept on the stack: BodyDesc carries its parts
+    // in a fixed array (not a vector), so this copy allocates nothing - even
+    // a mid-tick compound spawn inside the zero-alloc window test is free.
+    BodyDescT local = desc;
     D::sanitize_rotation(local.transform.rotation);
     const auto slot = bodies_.allocate();
     if (!slot) {

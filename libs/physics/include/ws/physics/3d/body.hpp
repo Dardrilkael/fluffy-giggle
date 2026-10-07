@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 
 #include <ws/math/vecmath.hpp>
@@ -64,6 +65,20 @@ struct BodyDesc {
   // Change at runtime via World3D::set_collision_filter.
   std::uint32_t collision_layer = 1u;
   std::uint32_t collision_mask = 0xffffffffu;
+  // Multi-shape body: parts[0 .. part_count-1] define ALL shapes of the
+  // body. part_count != 0 means the desc's shape/friction/restitution are
+  // IGNORED for physics (still validated), density stays body-level, and
+  // parts are SOLID-ONLY (is_sensor + parts fails create; sensors are
+  // body-wide). A body pair may now report more than one contact event per
+  // step - one per touching shape pair, each with its own phase transitions.
+  //
+  // Fixed array, not a std::vector: a desc copy (create_body sanitizes the
+  // rotation through one) must stay allocation-free - a vector's first
+  // iterator use heap-allocates MSVC's debug proxy and an empty vector
+  // copy-assign RELEASES capacity, both of which break the zero-alloc
+  // contract at every create.
+  std::array<Part, ws::physics::kMaxPartsPerBody> parts{};
+  std::uint32_t part_count = 0;
 };
 
 }  // namespace ws::physics3d

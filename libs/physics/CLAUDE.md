@@ -79,8 +79,41 @@ events above a speed threshold, the bulk set_transforms path.
   re-sets the same value every frame defeats sleep - the public comment
   says so. Behavior tests pin the redirected fall and the wake of a
   slept-in pile (moved_bodies proves the sleep was real).
-- Remaining (all additive behind the seam, no public break): multi-shape
-  bodies, per-shape materials, CCD/bullet flags, sleep control.
+- DONE: multi-shape bodies + per-shape materials - `BodyDesc::parts[]` +
+  `part_count` (both dims), up to `kMaxPartsPerBody` (common.hpp).
+  part_count != 0 means parts define ALL shapes: body-level
+  shape/friction/restitution are IGNORED for physics (still validated),
+  density stays body-level, parts are solid-only (is_sensor + parts fails).
+  A touching body pair can now report one contact event per SHAPE pair per
+  step (public ContactEvent doc says so). No per-part rotation in v2.
+  - The parts ride a fixed std::array + count, NOT a std::vector: the
+    create-time desc copy (rotation sanitization) must stay allocation
+    free, and MSVC's debug STL allocates a ~16-byte container proxy on a
+    vector's first iterator touch while an empty-vector copy-assign
+    RELEASES capacity - a vector broke the zero-alloc window at every
+    create. The array copies trivially; no scratch buffer needed.
+  - Box2D: native per-part materials (per-part b2ShapeDef with its own
+    friction/restitution, offsets via b2Circle.center /
+    b2MakeOffsetBox). Nothing at contact time.
+  - Jolt: sub-shapes do not carry materials through the engine's mixing,
+    so the adapter keeps flat per-slot part tables (friction/restitution,
+    max_bodies x kMaxPartsPerBody, sized at construction) and the contact
+    listener recombines: combined friction sqrt(f1*f2), restitution
+    max(e1,e2) - Jolt's own defaults, matching Box2D's native mix. The
+    override fires in OnContactAdded AND OnContactPersisted (Jolt
+    rebuilds contact constraints from body defaults every step - an
+    Added-only override silently reverts on the second step of a resting
+    pair). The part index comes from GetSubShapeIndexFromID on the
+    StaticCompoundShape (AddShape order IS parts order);
+    GetSubShapeUserData is useless here (it reads the LEAF's user data,
+    and cached leaves are shared across bodies). Multi-part bodies set
+    mUseManifoldReduction(false) - a merged manifold carries one
+    sub-shape's material. A one-part body is NOT a compound (Create
+    returns the bare child): its material bakes body-level, and a
+    non-zero offset rides a RotatedTranslated decorator (part_index
+    returns -1 there, which is correct by construction).
+- Remaining (all additive behind the seam, no public break): CCD/bullet
+  flags, sleep control.
 
 ## Review decisions, settled
 - Virtual backend seam kept (not a compile-time template backend): a mock

@@ -31,6 +31,7 @@ using ws::physics3d::Capsule;
 using ws::physics3d::DistanceJoint;
 using ws::physics3d::FixedJoint;
 using ws::physics3d::HingeJoint;
+using ws::physics3d::Part;
 using ws::physics3d::Sphere;
 using ws::physics3d::Transform;
 using ws::physics3d::World3D;
@@ -158,6 +159,39 @@ TEST_CASE("3D shapes validate: sphere strict, capsule allows degenerate") {
   BodyDesc neg_capsule{};
   neg_capsule.shape = Capsule{-1.0f, 0.5f};
   CHECK(has_code(world.create_body(neg_capsule), PhysicsError::invalid_argument));
+}
+
+TEST_CASE("3D multi-shape parts validate before Jolt sees them") {
+  auto world = make_world();
+
+  BodyDesc legal = body_at({0.0f, 0.0f, 0.0f});
+  legal.parts[0] = Part{Box{Vec3{1.0f, 1.0f, 1.0f}}, {}, 0.5f, 0.0f};
+  legal.parts[1] = Part{Sphere{0.5f}, Vec3{2.0f, 0.0f, 0.0f}, 0.1f, 0.5f};
+  legal.part_count = 2;
+  CHECK(world.create_body(legal).has_value());
+
+  BodyDesc over_cap = legal;
+  over_cap.part_count = ws::physics::kMaxPartsPerBody + 1;
+  CHECK(has_code(world.create_body(over_cap), PhysicsError::invalid_argument));
+
+  BodyDesc sensor = legal;
+  sensor.is_sensor = true;
+  CHECK(has_code(world.create_body(sensor), PhysicsError::invalid_argument));
+
+  BodyDesc bad_shape = legal;
+  bad_shape.parts[0].shape = Sphere{0.0f};
+  CHECK(has_code(world.create_body(bad_shape), PhysicsError::invalid_argument));
+
+  BodyDesc bad_material = legal;
+  bad_material.parts[1].friction = -0.1f;
+  CHECK(has_code(world.create_body(bad_material), PhysicsError::invalid_argument));
+  bad_material.parts[1].friction = 0.2f;
+  bad_material.parts[1].restitution = -1.0f;
+  CHECK(has_code(world.create_body(bad_material), PhysicsError::invalid_argument));
+
+  BodyDesc bad_offset = legal;
+  bad_offset.parts[1].offset = Vec3{std::nanf(""), 0.0f, 0.0f};
+  CHECK(has_code(world.create_body(bad_offset), PhysicsError::invalid_argument));
 }
 
 TEST_CASE("3D body_state echoes the Quat pose; transforms() mirrors slots") {
