@@ -8,11 +8,13 @@
 // Keying, pose ownership and force-clearing follow the 2D seam contract -
 // see backend2d.hpp; only the types differ (Vec3 + Quat). One extra wrinkle
 // specific to Jolt: contact events fire on solver worker threads during
-// step(), so the backend buffers them per thread (pre-reserved) and feeds
-// the collector in deterministic order after the tick completes. That is a
-// REQUIREMENT, not a nicety: which hit events the lib's overflow budget
-// drops must be deterministic (began/ended bypass the budget). The lib's
-// sort then fixes the public order.
+// step(), so the backend buffers them into ONE mutex-protected
+// pre-reserved vector (workers append under the lock; the post-tick sort
+// makes callback arrival order irrelevant) and feeds the collector in
+// deterministic order after the tick completes. That is a REQUIREMENT,
+// not a nicety: which hit events the lib's overflow budget drops must be
+// deterministic (began/ended bypass the budget). The lib's sort then
+// fixes the public order.
 
 #include <cstdint>
 #include <memory>

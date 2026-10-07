@@ -149,8 +149,9 @@ class IWorld2DBackend {
   // its accumulated forces/torques by return. Events must be fed in
   // DETERMINISTIC order (engine array order per tick): which HIT events the
   // lib's overflow budget drops must itself be deterministic (began/ended
-  // bypass the budget), so a multithreaded engine buffers per thread and
-  // merges in a fixed order.
+  // bypass the budget), so a multithreaded engine must buffer its events -
+  // per-thread arrays merged in a fixed order, or one lock-guarded buffer
+  // sorted post-tick (the 3D backend does the latter) - before feeding.
   //
   // Moves: the backend writes one entry per body it simulated this tick
   // (awake bodies - asleep ones did not move and cost nothing) into
