@@ -1840,9 +1840,9 @@ TEST_CASE("touch table: down/move/up track a contact through its frames") {
     InputFrame frame;
 
     // Contact 17 lands: entry 0, held with a press edge.
-    CHECK(frame.touch_down(17, 30.0f, 40.0f) == 0);
+    CHECK(frame.touch_down(PointerId{17}, 30.0f, 40.0f) == 0);
     CHECK(frame.touch_count == 1);
-    CHECK(frame.touches[0].id == 17);
+    CHECK(frame.touches[0].id == PointerId{17});
     CHECK(frame.touches[0].down);
     CHECK(frame.touches[0].pressed);
     CHECK(!frame.touches[0].released);
@@ -1851,7 +1851,7 @@ TEST_CASE("touch table: down/move/up track a contact through its frames") {
 
     // ...moves: position only, no new edges (the press edge from the down
     // above still belongs to this frame - edges clear at next_frame()).
-    frame.touch_move(17, 55.0f, 65.0f);
+    frame.touch_move(PointerId{17}, 55.0f, 65.0f);
     CHECK(frame.touches[0].x == 55.0f);
     CHECK(frame.touches[0].y == 65.0f);
     CHECK(frame.touches[0].down);
@@ -1859,7 +1859,7 @@ TEST_CASE("touch table: down/move/up track a contact through its frames") {
 
     // ...lifts: release edge, but the entry stays for this frame - a widget
     // must still be able to see who lifted.
-    frame.touch_up(17, 60.0f, 70.0f, false);
+    frame.touch_up(PointerId{17}, 60.0f, 70.0f, false);
     CHECK(frame.touch_count == 1);
     CHECK(!frame.touches[0].down);
     CHECK(frame.touches[0].released);
@@ -1874,34 +1874,34 @@ TEST_CASE("touch table: down/move/up track a contact through its frames") {
 TEST_CASE("touch table: insertion order survives releases and frame edges") {
     using namespace ws::ui::gui;
     InputFrame frame;
-    frame.touch_down(7, 0.0f, 0.0f);
-    frame.touch_down(3, 1.0f, 1.0f);
-    frame.touch_down(9, 2.0f, 2.0f);
+    frame.touch_down(PointerId{7}, 0.0f, 0.0f);
+    frame.touch_down(PointerId{3}, 1.0f, 1.0f);
+    frame.touch_down(PointerId{9}, 2.0f, 2.0f);
     CHECK(frame.touch_count == 3);
-    CHECK(frame.touches[1].id == 3);
+    CHECK(frame.touches[1].id == PointerId{3});
 
     // The middle contact lifts; the frame boundary compacts the table
     // without reordering the survivors.
-    frame.touch_up(3, 1.0f, 1.0f, false);
+    frame.touch_up(PointerId{3}, 1.0f, 1.0f, false);
     frame.next_frame();
     CHECK(frame.touch_count == 2);
-    CHECK(frame.touches[0].id == 7);
-    CHECK(frame.touches[1].id == 9);
+    CHECK(frame.touches[0].id == PointerId{7});
+    CHECK(frame.touches[1].id == PointerId{9});
     CHECK(!frame.touches[0].pressed);  // edges cleared on the survivors
     CHECK(!frame.touches[1].pressed);
 
     // A new contact appends after them.
-    CHECK(frame.touch_down(5, 3.0f, 3.0f) == 2);
-    CHECK(frame.touches[2].id == 5);
+    CHECK(frame.touch_down(PointerId{5}, 3.0f, 3.0f) == 2);
+    CHECK(frame.touches[2].id == PointerId{5});
 }
 
 TEST_CASE("touch table: a repeated down for the same id updates in place") {
     using namespace ws::ui::gui;
     InputFrame frame;
-    CHECK(frame.touch_down(7, 10.0f, 10.0f) == 0);
+    CHECK(frame.touch_down(PointerId{7}, 10.0f, 10.0f) == 0);
     // One down per contact is the platform contract; a stray repeat must
     // not duplicate the entry.
-    CHECK(frame.touch_down(7, 20.0f, 20.0f) == 0);
+    CHECK(frame.touch_down(PointerId{7}, 20.0f, 20.0f) == 0);
     CHECK(frame.touch_count == 1);
     CHECK(frame.touches[0].x == 20.0f);
     CHECK(frame.touches[0].pressed);
@@ -1913,33 +1913,33 @@ TEST_CASE("primary-touch bridge: the first contact mirrors the mouse") {
 
     // The first contact of the gesture is the primary: it mirrors the mouse
     // so single-finger use and ImGui keep working unchanged.
-    frame.touch_down(7, 10.0f, 20.0f);
-    CHECK(frame.bridged_touch() == 7);
+    frame.touch_down(PointerId{7}, 10.0f, 20.0f);
+    CHECK(frame.bridged_touch() == PointerId{7});
     CHECK(frame.mouse_x == 10.0f);
     CHECK(frame.mouse_y == 20.0f);
     CHECK(frame.mouse_down[0]);
     CHECK(frame.mouse_pressed[0]);
 
     // A second finger joins: tracked, never mirrored.
-    frame.touch_down(9, 80.0f, 90.0f);
-    CHECK(frame.bridged_touch() == 7);
+    frame.touch_down(PointerId{9}, 80.0f, 90.0f);
+    CHECK(frame.bridged_touch() == PointerId{7});
     CHECK(frame.mouse_x == 10.0f);
 
     // Each finger's moves mirror only its own.
-    frame.touch_move(9, 85.0f, 95.0f);
+    frame.touch_move(PointerId{9}, 85.0f, 95.0f);
     CHECK(frame.mouse_x == 10.0f);
-    frame.touch_move(7, 15.0f, 25.0f);
+    frame.touch_move(PointerId{7}, 15.0f, 25.0f);
     CHECK(frame.mouse_x == 15.0f);
     CHECK(frame.mouse_y == 25.0f);
 
     // The secondary lifting changes nothing for the mouse.
-    frame.touch_up(9, 85.0f, 95.0f, false);
+    frame.touch_up(PointerId{9}, 85.0f, 95.0f, false);
     CHECK(frame.mouse_down[0]);
     CHECK(!frame.mouse_released[0]);
-    CHECK(frame.bridged_touch() == 7);
+    CHECK(frame.bridged_touch() == PointerId{7});
 
     // The primary lifting releases the mouse.
-    frame.touch_up(7, 15.0f, 25.0f, false);
+    frame.touch_up(PointerId{7}, 15.0f, 25.0f, false);
     CHECK(!frame.mouse_down[0]);
     CHECK(frame.mouse_released[0]);
     CHECK(frame.bridged_touch() == kNoPointer);
@@ -1948,22 +1948,22 @@ TEST_CASE("primary-touch bridge: the first contact mirrors the mouse") {
 TEST_CASE("bridge: no promotion - a freed mouse stays free until a new gesture") {
     using namespace ws::ui::gui;
     InputFrame frame;
-    frame.touch_down(7, 10.0f, 20.0f);
-    frame.touch_down(9, 30.0f, 40.0f);
+    frame.touch_down(PointerId{7}, 10.0f, 20.0f);
+    frame.touch_down(PointerId{9}, 30.0f, 40.0f);
 
     // The primary lifts while the secondary holds.
-    frame.touch_up(7, 10.0f, 20.0f, false);
+    frame.touch_up(PointerId{7}, 10.0f, 20.0f, false);
     CHECK(frame.bridged_touch() == kNoPointer);
     CHECK(!frame.mouse_down[0]);
 
     // The surviving finger neither owns nor moves the mouse.
-    frame.touch_move(9, 35.0f, 45.0f);
+    frame.touch_move(PointerId{9}, 35.0f, 45.0f);
     CHECK(frame.mouse_x == 10.0f);
     CHECK(frame.mouse_released[0]);  // still released - no re-press
 
     // The NEXT contact starts a fresh gesture and bridges.
-    frame.touch_down(4, 60.0f, 70.0f);
-    CHECK(frame.bridged_touch() == 4);
+    frame.touch_down(PointerId{4}, 60.0f, 70.0f);
+    CHECK(frame.bridged_touch() == PointerId{4});
     CHECK(frame.mouse_down[0]);
     CHECK(frame.mouse_pressed[0]);
     CHECK(frame.mouse_x == 60.0f);
@@ -1972,8 +1972,8 @@ TEST_CASE("bridge: no promotion - a freed mouse stays free until a new gesture")
 TEST_CASE("cancelled contact: release edge with cancelled set, bridge lifts") {
     using namespace ws::ui::gui;
     InputFrame frame;
-    frame.touch_down(2, 5.0f, 6.0f);
-    frame.touch_up(2, 5.0f, 6.0f, true);
+    frame.touch_down(PointerId{2}, 5.0f, 6.0f);
+    frame.touch_up(PointerId{2}, 5.0f, 6.0f, true);
 
     CHECK(frame.touches[0].cancelled);
     CHECK(frame.touches[0].released);
@@ -1991,27 +1991,28 @@ TEST_CASE("touch cap: the ninth contact drops, the table stays intact") {
     for (std::uint32_t id = 1; id <= static_cast<std::uint32_t>(
                                      InputFrame::kMaxTouches);
          ++id) {
-        CHECK(frame.touch_down(id, static_cast<float>(id), 0.0f) >= 0);
+        CHECK(frame.touch_down(PointerId{id}, static_cast<float>(id), 0.0f) >=
+              0);
     }
     CHECK(frame.touch_count == InputFrame::kMaxTouches);
-    CHECK(frame.bridged_touch() == 1);  // the first contact bridges
+    CHECK(frame.bridged_touch() == PointerId{1});  // the first contact bridges
 
     // The 9th finger: rejected with no side effects anywhere.
-    CHECK(frame.touch_down(9, 99.0f, 99.0f) == -1);
+    CHECK(frame.touch_down(PointerId{9}, 99.0f, 99.0f) == -1);
     CHECK(frame.touch_count == InputFrame::kMaxTouches);
-    CHECK(frame.bridged_touch() == 1);
+    CHECK(frame.bridged_touch() == PointerId{1});
     CHECK(frame.mouse_x == 1.0f);       // the dropped contact moved nothing
     CHECK(!frame.mouse_released[0]);   // ...and lifted nothing
     CHECK(frame.touches[InputFrame::kMaxTouches - 1].id ==
-          InputFrame::kMaxTouches);
+          PointerId{InputFrame::kMaxTouches});
 }
 
 TEST_CASE("gather_pointers: mouse is slot 0, touches follow in table order") {
     using namespace ws::ui::gui;
     InputFrame frame;
-    frame.touch_down(7, 40.0f, 50.0f);
-    frame.touch_down(9, 60.0f, 70.0f);
-    frame.touch_up(9, 65.0f, 75.0f, false);  // 9 is in its release frame
+    frame.touch_down(PointerId{7}, 40.0f, 50.0f);
+    frame.touch_down(PointerId{9}, 60.0f, 70.0f);
+    frame.touch_up(PointerId{9}, 65.0f, 75.0f, false);  // 9 is in its release frame
     // The platform's bridge would have overwritten the mirrored mouse with
     // the touch; writing the mouse fields directly is the desktop shape.
     // Either way slot 0 reports whatever the mouse state says.
@@ -2028,10 +2029,10 @@ TEST_CASE("gather_pointers: mouse is slot 0, touches follow in table order") {
     CHECK(pointers[0].y == 34.0f);
     CHECK(pointers[0].down);
     CHECK(pointers[0].pressed);
-    CHECK(pointers[1].id == 7);
+    CHECK(pointers[1].id == PointerId{7});
     CHECK(pointers[1].x == 40.0f);
     CHECK(pointers[1].down);
-    CHECK(pointers[2].id == 9);
+    CHECK(pointers[2].id == PointerId{9});
     CHECK(!pointers[2].down);
     CHECK(pointers[2].released);
     CHECK(pointers[2].x == 65.0f);
@@ -2044,14 +2045,14 @@ TEST_CASE("gather_pointers: mouse is slot 0, touches follow in table order") {
     CHECK(frame.pointer_pos(kMousePointerId, &x, &y));
     CHECK(x == 12.0f);
     CHECK(y == 34.0f);
-    CHECK(frame.pointer_pos(7, &x, &y));
+    CHECK(frame.pointer_pos(PointerId{7}, &x, &y));
     CHECK(x == 40.0f);
     CHECK(y == 50.0f);
-    CHECK(frame.pointer_pos(9, &x, &y));
+    CHECK(frame.pointer_pos(PointerId{9}, &x, &y));
     CHECK(x == 65.0f);
     CHECK(y == 75.0f);
-    CHECK(frame.pointer_pos(7, nullptr, nullptr));  // pure existence check
-    CHECK(!frame.pointer_pos(1234, &x, &y));
+    CHECK(frame.pointer_pos(PointerId{7}, nullptr, nullptr));  // pure existence check
+    CHECK(!frame.pointer_pos(PointerId{1234}, &x, &y));
 }
 
 TEST_CASE("Rect helpers: edges, centers and symmetric insets") {
@@ -2274,12 +2275,13 @@ struct TouchSnap {
 ws::ui::gui::InputFrame touch_frame(std::initializer_list<TouchSnap> contacts) {
     ws::ui::gui::InputFrame frame;
     for (const TouchSnap& contact : contacts) {
-        const int slot = frame.touch_down(contact.id, contact.x, contact.y);
+        const ws::ui::gui::PointerId id{contact.id};
+        const int slot = frame.touch_down(id, contact.x, contact.y);
         if (slot >= 0 && !contact.pressed) {
             frame.touches[static_cast<std::size_t>(slot)].pressed = false;
         }
         if (contact.released) {
-            frame.touch_up(contact.id, contact.x, contact.y, false);
+            frame.touch_up(id, contact.x, contact.y, false);
         }
     }
     frame.mouse_x = 900.0f;  // parked: nothing in the test rects is there
@@ -2305,7 +2307,7 @@ TEST_CASE("is_hot/is_active: the am-I spelling, invalid pinned false") {
     CHECK(!gui.is_active(w));
     CHECK(!gui.is_hot(kInvalidWidgetId));  // "no widget" never matches
     CHECK(!gui.is_active(kInvalidWidgetId));
-    CHECK(!gui.is_hot(w, 12345u));  // an unknown pointer answers false
+    CHECK(!gui.is_hot(w, PointerId{12345u}));  // an unknown pointer answers false
     gui.end_frame();
 
     // Press: the press frame claims active on the spot.
@@ -2313,7 +2315,7 @@ TEST_CASE("is_hot/is_active: the am-I spelling, invalid pinned false") {
     (void)gui.hit_test(w, rect);
     CHECK(gui.is_hot(w));
     CHECK(gui.is_active(w));
-    CHECK(!gui.is_active(w, 12345u));
+    CHECK(!gui.is_active(w, PointerId{12345u}));
     gui.end_frame();
 
     // Idle: hot_id() itself answers the invalid sentinel - is_hot() must
@@ -2518,22 +2520,22 @@ TEST_CASE("hit_test: two pointers can press two widgets in the same frame") {
     const HitTest hit_a = gui.hit_test(a, a_rect);
     const HitTest hit_b = gui.hit_test(b, b_rect);
     CHECK(hit_a.pressed);
-    CHECK(hit_a.pointer == 1u);
+    CHECK(hit_a.pointer == PointerId{1});
     CHECK(hit_b.pressed);
-    CHECK(hit_b.pointer == 2u);
-    CHECK(gui.active_id(1) == a);
-    CHECK(gui.active_id(2) == b);
-    CHECK(gui.owning_pointer(a) == 1u);
-    CHECK(gui.owning_pointer(b) == 2u);
-    CHECK(gui.hot_id(1) == a);
-    CHECK(gui.hot_id(2) == b);
+    CHECK(hit_b.pointer == PointerId{2});
+    CHECK(gui.active_id(PointerId{1}) == a);
+    CHECK(gui.active_id(PointerId{2}) == b);
+    CHECK(gui.owning_pointer(a) == PointerId{1});
+    CHECK(gui.owning_pointer(b) == PointerId{2});
+    CHECK(gui.hot_id(PointerId{1}) == a);
+    CHECK(gui.hot_id(PointerId{2}) == b);
     // The parked mouse claims nothing, but it is still a pointer in the
     // frame's list - and each pointer reports its own position.
     CHECK(gui.hot_id() == kInvalidWidgetId);
-    CHECK(gui.pointer(1) != nullptr);
-    CHECK(gui.pointer(1)->x == 50.0f);
-    CHECK(gui.pointer(2)->x == 150.0f);
-    CHECK(gui.pointer(99) == nullptr);  // no such pointer this frame
+    CHECK(gui.pointer(PointerId{1}) != nullptr);
+    CHECK(gui.pointer(PointerId{1})->x == 50.0f);
+    CHECK(gui.pointer(PointerId{2})->x == 150.0f);
+    CHECK(gui.pointer(PointerId{99}) == nullptr);  // no such pointer this frame
     CHECK(gui.pointer(kMousePointerId) != nullptr);
     gui.end_frame();
 
@@ -2558,10 +2560,10 @@ TEST_CASE("hit_test: two pointers on one widget - one press, one click") {
     const HitTest hit = gui.hit_test(id, rect);
     CHECK(hit.pressed);
     CHECK(!hit.clicked);
-    CHECK(hit.pointer == 5u);  // the lowest slot with a claim
-    CHECK(gui.owning_pointer(id) == 5u);
-    CHECK(gui.active_id(5) == id);  // both fingers hold it - same fold,
-    CHECK(gui.active_id(9) == id);  // one press, benign by design
+    CHECK(hit.pointer == PointerId{5});  // the lowest slot with a claim
+    CHECK(gui.owning_pointer(id) == PointerId{5});
+    CHECK(gui.active_id(PointerId{5}) == id);  // both fingers hold it - same fold,
+    CHECK(gui.active_id(PointerId{9}) == id);  // one press, benign by design
     gui.end_frame();
 
     // Both lift inside: the fold makes it one click - `clicked` is one
@@ -2569,8 +2571,8 @@ TEST_CASE("hit_test: two pointers on one widget - one press, one click") {
     gui.begin_frame(touch_frame({{5, 30.0f, 30.0f, false, true},
                               {9, 70.0f, 70.0f, false, true}}));
     CHECK(gui.hit_test(id, rect).clicked);
-    CHECK(gui.active_id(5) == kInvalidWidgetId);  // both presses resolved
-    CHECK(gui.active_id(9) == kInvalidWidgetId);
+    CHECK(gui.active_id(PointerId{5}) == kInvalidWidgetId);  // both presses resolved
+    CHECK(gui.active_id(PointerId{9}) == kInvalidWidgetId);
     gui.end_frame();
 }
 
@@ -2624,9 +2626,9 @@ TEST_CASE("end_frame: a vanished owner's release is dropped per pointer") {
                               {2, 180.0f, 60.0f}}));
     CHECK(gui.hit_test(b, b_rect).pressed);  // B runs: finger 2 drags on
     gui.end_frame();                         // drops finger 1's orphan release
-    CHECK(gui.active_id(1) == kInvalidWidgetId);
-    CHECK(gui.active_id(2) == b);
-    CHECK(gui.owning_pointer(b) == 2u);
+    CHECK(gui.active_id(PointerId{1}) == kInvalidWidgetId);
+    CHECK(gui.active_id(PointerId{2}) == b);
+    CHECK(gui.owning_pointer(b) == PointerId{2});
     gui.end_frame();
 }
 
@@ -2639,21 +2641,21 @@ TEST_CASE("hit_test: the bridged finger is mouse and touch - one click") {
     // Built through touch_down only - the bridge mirrors the mouse into
     // the contact. No parking here: the duplicate IS the test.
     InputFrame press;
-    press.touch_down(7, 50.0f, 50.0f);
+    press.touch_down(PointerId{7}, 50.0f, 50.0f);
     gui.begin_frame(press);
     const HitTest hit = gui.hit_test(id, rect);
     CHECK(hit.pressed);
     CHECK(hit.pointer == kMousePointerId);  // the mouse slot outranks the touch
     CHECK(gui.active_id() == id);           // the mouse's track claimed...
-    CHECK(gui.active_id(7) == id);           // ...and so did the touch's: the
-                                            // documented duplicate, benign
+    CHECK(gui.active_id(PointerId{7}) == id);  // ...and so did the touch's: the
+                                              // documented duplicate, benign
     CHECK(gui.owning_pointer(id) == kMousePointerId);  // lowest slot resolves
     gui.end_frame();
 
     // The lift mirrors too: one click, not two.
     InputFrame lift;
-    lift.touch_down(7, 50.0f, 50.0f);  // the entry, back for its release frame
-    lift.touch_up(7, 50.0f, 50.0f, false);  // mirrors the mouse's release
+    lift.touch_down(PointerId{7}, 50.0f, 50.0f);  // the entry, back for its release frame
+    lift.touch_up(PointerId{7}, 50.0f, 50.0f, false);  // mirrors the mouse's release
     lift.touches[0].pressed = false;  // down and up in one frame: the press
     lift.mouse_pressed[0] = false;    // edge is not this frame's fact
     gui.begin_frame(lift);
@@ -3645,7 +3647,7 @@ TEST_CASE("scroll: a touch drag scrolls 1:1 and cancels the press it started on"
     // Frame 1: finger 7 presses row 2 (y 60..84). The child claims the
     // press - the tap is the CHILD's so far, the panel only watches.
     CHECK(pass(touch_frame({{7, 60.0f, 60.0f, /*pressed=*/true}})) == -1);
-    CHECK(gui.active_id(7) == row_id(2));
+    CHECK(gui.active_id(PointerId{7}) == row_id(2));
 
     // Frame 2: 20 px up - past the 8 px threshold. The crossing frame
     // cancels the child's press (finger 7 will never click now) and
@@ -3653,7 +3655,7 @@ TEST_CASE("scroll: a touch drag scrolls 1:1 and cancels the press it started on"
     // (60, 24) still lands on row 0.
     CHECK(pass(touch_frame({{7, 60.0f, 40.0f},
                             {99, 60.0f, 24.0f, true, true}})) == 0);
-    CHECK(gui.active_id(7) == kInvalidWidgetId);  // the scroll owns the finger
+    CHECK(gui.active_id(PointerId{7}) == kInvalidWidgetId);  // the scroll owns the finger
 
     // Frame 3: 30 px more of drag - the offset follows 1:1. At offset 30
     // row 1 spans y 6..30, so the same probe point now clicks row 1.
@@ -3700,9 +3702,9 @@ TEST_CASE("scroll: a tap inside the threshold stays the child's click") {
     // Press row 0, wobble 4 px - under the threshold, the press stays
     // the child's and the offset never moves.
     CHECK(pass(touch_frame({{5, 60.0f, 24.0f, /*pressed=*/true}})) == -1);
-    CHECK(gui.active_id(5) == row_id(0));
+    CHECK(gui.active_id(PointerId{5}) == row_id(0));
     CHECK(pass(touch_frame({{5, 60.0f, 20.0f}})) == -1);
-    CHECK(gui.active_id(5) == row_id(0));
+    CHECK(gui.active_id(PointerId{5}) == row_id(0));
 
     // Lift back inside row 0 (y 12..36): a plain click - the tap was a
     // tap, never a drag.
@@ -3745,30 +3747,30 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
     // Frame 1: contact 7 presses row 2 - the mouse mirrors the press, so
     // BOTH tracks claim the row (the documented duplicate).
     InputFrame press;
-    press.touch_down(7, 60.0f, 60.0f);
+    press.touch_down(PointerId{7}, 60.0f, 60.0f);
     CHECK(pass(press) == -1);
     CHECK(gui.active_id() == row_id(2));  // the mouse's track pressed...
-    CHECK(gui.active_id(7) == row_id(2));  // ...and so did the touch's
+    CHECK(gui.active_id(PointerId{7}) == row_id(2));  // ...and so did the touch's
 
     // Frame 2: 20 px up - the crossing. cancel_pointer(7) must take the
     // mouse's claim down with the touch's.
     InputFrame cross;
-    cross.touch_down(7, 60.0f, 60.0f);  // the entry; bridges again
-    cross.touch_move(7, 60.0f, 40.0f);  // the bridge mirrors the position
+    cross.touch_down(PointerId{7}, 60.0f, 60.0f);  // the entry; bridges again
+    cross.touch_move(PointerId{7}, 60.0f, 40.0f);  // the bridge mirrors the position
     cross.touches[0].pressed = false;  // held, not pressed: clear the
     cross.mouse_pressed[0] = false;    // edges both sides of the bridge
     CHECK(pass(cross) == -1);
     CHECK(gui.active_id() == kInvalidWidgetId);  // BOTH claims cancelled
-    CHECK(gui.active_id(7) == kInvalidWidgetId);
+    CHECK(gui.active_id(PointerId{7}) == kInvalidWidgetId);
 
     // Frame 3: drag back down to the press point - the offset would go
     // negative and clamps at 0, so a probe at (60, 24) still clicks row 0.
     // The probe is a same-frame tap: its press edge STAYS (a click is
     // press-then-release; a bare release edge clicks nothing).
     InputFrame back;
-    back.touch_down(7, 60.0f, 60.0f);
-    back.touch_down(99, 60.0f, 24.0f);  // the probe (not the bridge - 7 is)
-    back.touch_up(99, 60.0f, 24.0f, false);
+    back.touch_down(PointerId{7}, 60.0f, 60.0f);
+    back.touch_down(PointerId{99}, 60.0f, 24.0f);  // the probe (not the bridge - 7 is)
+    back.touch_up(PointerId{99}, 60.0f, 24.0f, false);
     back.touches[0].pressed = false;
     back.mouse_pressed[0] = false;
     CHECK(pass(back) == 0);
@@ -3777,8 +3779,8 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
     // y 60..84, so the lift is INSIDE the row. The cancelled press clicks
     // nothing; had the mouse's claim survived, this would click row 2.
     InputFrame lift;
-    lift.touch_down(7, 60.0f, 60.0f);  // the entry, back for its lift
-    lift.touch_up(7, 60.0f, 60.0f, false);  // mirrors the mouse's release
+    lift.touch_down(PointerId{7}, 60.0f, 60.0f);  // the entry, back for its lift
+    lift.touch_up(PointerId{7}, 60.0f, 60.0f, false);  // mirrors the mouse's release
     lift.touches[0].pressed = false;  // down+up in one frame: the press
     lift.mouse_pressed[0] = false;    // edge is not this frame's fact
     CHECK(pass(lift) == -1);
@@ -3863,9 +3865,9 @@ TEST_CASE("scroll: drag_threshold is the theme's metric") {
     // A 20 px excursion - past kDefaultChrome.drag_threshold, well under
     // this theme's: the press stays the child's, never cancelled.
     CHECK(pass(touch_frame({{5, 60.0f, 24.0f, /*pressed=*/true}})) == -1);
-    CHECK(gui.active_id(5) == row_id(0));
+    CHECK(gui.active_id(PointerId{5}) == row_id(0));
     CHECK(pass(touch_frame({{5, 60.0f, 4.0f}})) == -1);
-    CHECK(gui.active_id(5) == row_id(0));
+    CHECK(gui.active_id(PointerId{5}) == row_id(0));
 
     // Lift inside row 0 (y 12..36 - the offset never moved, or this
     // release would fall outside the shifted rect): a plain click.

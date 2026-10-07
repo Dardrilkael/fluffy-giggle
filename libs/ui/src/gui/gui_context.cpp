@@ -34,7 +34,7 @@ void GuiContext::begin_frame(const InputFrame& input) {
     std::array<PointerTrack, InputFrame::kMaxPointers> matched{};
     const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
     for (int p = 0; p < count; ++p) {
-        const std::uint32_t id = frame_pointers_[static_cast<std::size_t>(p)].id;
+        const PointerId id = frame_pointers_[static_cast<std::size_t>(p)].id;
         for (int t = 0; t < InputFrame::kMaxPointers; ++t) {
             if (pointers_[static_cast<std::size_t>(t)].id == id) {
                 matched[p] = pointers_[static_cast<std::size_t>(t)];
@@ -63,12 +63,12 @@ void GuiContext::end_frame() {
     }
 }
 
-void GuiContext::cancel_pointer(std::uint32_t pointer) {
+void GuiContext::cancel_pointer(PointerId pointer) {
     // The bridge mirrors the first finger into the mouse: a gesture that
     // consumes one consumes both, or the mirror would keep the child's
     // press alive and click it on release.
-    std::uint32_t mirror = kNoPointer;
-    const std::uint32_t bridged = input_.bridged_touch();
+    PointerId mirror = kNoPointer;
+    const PointerId bridged = input_.bridged_touch();
     if (bridged != kNoPointer &&
         (pointer == bridged || pointer == kMousePointerId)) {
         mirror = (pointer == bridged) ? kMousePointerId : bridged;
@@ -168,7 +168,7 @@ HitTest GuiContext::hit_test_pointer(WidgetId id, const Rect& rect,
     return part;
 }
 
-WidgetId GuiContext::hot_id(std::uint32_t pointer) const {
+WidgetId GuiContext::hot_id(PointerId pointer) const {
     const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
     for (int p = 0; p < count; ++p) {
         if (pointers_[static_cast<std::size_t>(p)].id == pointer) {
@@ -178,7 +178,7 @@ WidgetId GuiContext::hot_id(std::uint32_t pointer) const {
     return kInvalidWidgetId;  // no such pointer this frame
 }
 
-WidgetId GuiContext::active_id(std::uint32_t pointer) const {
+WidgetId GuiContext::active_id(PointerId pointer) const {
     const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
     for (int p = 0; p < count; ++p) {
         if (pointers_[static_cast<std::size_t>(p)].id == pointer) {
@@ -188,17 +188,17 @@ WidgetId GuiContext::active_id(std::uint32_t pointer) const {
     return kInvalidWidgetId;  // no such pointer this frame
 }
 
-bool GuiContext::is_hot(WidgetId id, std::uint32_t pointer) const {
+bool GuiContext::is_hot(WidgetId id, PointerId pointer) const {
     // kInvalidWidgetId is "no widget" - it must never match, even though
     // hot_id() returns it for an idle or unknown pointer.
     return id != kInvalidWidgetId && hot_id(pointer) == id;
 }
 
-bool GuiContext::is_active(WidgetId id, std::uint32_t pointer) const {
+bool GuiContext::is_active(WidgetId id, PointerId pointer) const {
     return id != kInvalidWidgetId && active_id(pointer) == id;
 }
 
-std::uint32_t GuiContext::owning_pointer(WidgetId id) const {
+PointerId GuiContext::owning_pointer(WidgetId id) const {
     // Lowest live slot whose press is on `id` - with the bridge's mouse
     // mirroring the first finger, that means the mouse slot wins ties
     // (the documented duplicate), deterministically.
@@ -211,7 +211,7 @@ std::uint32_t GuiContext::owning_pointer(WidgetId id) const {
     return kNoPointer;
 }
 
-const PointerView* GuiContext::pointer(std::uint32_t id) const {
+const PointerView* GuiContext::pointer(PointerId id) const {
     const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
     for (int p = 0; p < count; ++p) {
         if (frame_pointers_[static_cast<std::size_t>(p)].id == id) {

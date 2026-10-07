@@ -1,7 +1,10 @@
 #pragma once
 
 #include <array>
+#include <compare>
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 
 namespace ws::ui::gui {
 
@@ -12,8 +15,32 @@ namespace ws::ui::gui {
 // persists" discipline. 0 is the invalid sentinel (hot/active "none");
 // the hash maps would-be zeros to a nonzero constant so no real widget
 // ever ids as invalid.
-using WidgetId = std::uint64_t;
-inline constexpr WidgetId kInvalidWidgetId = 0;
+//
+// A strong struct on purpose: no integer converts into a widget id, so
+// a texture id or a body slot can never be passed where a widget goes.
+// Compare with ==, order with < (both defaulted); the side tables hash
+// through the std::hash specialization below.
+struct WidgetId {
+    std::uint64_t value;
+
+    bool operator==(const WidgetId&) const = default;
+    std::strong_ordering operator<=>(const WidgetId&) const = default;
+};
+inline constexpr WidgetId kInvalidWidgetId{0};
+
+}  // namespace ws::ui::gui
+
+// The side tables key on ids; hash the underlying bits. (A std template
+// specialization: declared in namespace std proper - MSVC rejects the
+// qualified `struct std::hash<...>` spelling inside the gui namespace.)
+template <>
+struct std::hash<ws::ui::gui::WidgetId> {
+    std::size_t operator()(const ws::ui::gui::WidgetId& id) const noexcept {
+        return std::hash<std::uint64_t>{}(id.value);
+    }
+};
+
+namespace ws::ui::gui {
 
 // The id scope stack. Widgets with children (panels, tabs, list rows)
 // push a scope so same-named widgets in different scopes get different

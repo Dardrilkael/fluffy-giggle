@@ -415,12 +415,13 @@ private:
     // POINTER_DOWN (index from the action bits). The bridge acquires it
     // when no contact holds it yet - never a promotion mid-gesture.
     void touch_begin(const AInputEvent* event, std::size_t index) {
-        const uint32_t id = AMotionEvent_getPointerId(event, index);
+        const uint32_t raw_id = AMotionEvent_getPointerId(event, index);
+        const gui::PointerId id{raw_id};  // the gui's strong id (events below stay raw)
         const float x = AMotionEvent_getX(event, index);
         const float y = AMotionEvent_getY(event, index);
         bool bridged = false;
         if (gui::InputFrame* input = sink_->input; input != nullptr) {
-            const uint32_t bridge_before = input->bridged_touch();
+            const gui::PointerId bridge_before = input->bridged_touch();
             if (input->touch_down(id, x, y) < 0) {
                 warn_touch_cap();
                 return;
@@ -428,7 +429,7 @@ private:
             bridged = (bridge_before == gui::kNoPointer &&
                        input->bridged_touch() == id);
         }
-        emit(TouchPressedEvent{id, x, y});
+        emit(TouchPressedEvent{raw_id, x, y});
         if (bridged) {
             imgui_bridge_pos(x, y);
             imgui_bridge_button(true);
@@ -445,11 +446,12 @@ private:
         gui::InputFrame* input = sink_->input;
         const std::size_t count = AMotionEvent_getPointerCount(event);
         for (std::size_t i = 0; i < count; ++i) {
-            const uint32_t id = AMotionEvent_getPointerId(event, i);
+            const uint32_t raw_id = AMotionEvent_getPointerId(event, i);
+            const gui::PointerId id{raw_id};
             const float x = AMotionEvent_getX(event, i);
             const float y = AMotionEvent_getY(event, i);
             if (input == nullptr) {
-                emit(TouchMovedEvent{id, x, y});  // no table: nothing to gate on
+                emit(TouchMovedEvent{raw_id, x, y});  // no table: nothing to gate on
                 continue;
             }
             if (!input->pointer_pos(id, nullptr, nullptr)) {
@@ -457,7 +459,7 @@ private:
             }
             const bool bridged = input->bridged_touch() == id;
             input->touch_move(id, x, y);
-            emit(TouchMovedEvent{id, x, y});
+            emit(TouchMovedEvent{raw_id, x, y});
             if (bridged) {
                 imgui_bridge_pos(x, y);
                 emit(MouseMovedEvent{x, y});
@@ -472,7 +474,8 @@ private:
     // any release - inside clicks, outside clears.
     void touch_end(const AInputEvent* event, std::size_t index,
                    bool cancelled) {
-        const uint32_t id = AMotionEvent_getPointerId(event, index);
+        const uint32_t raw_id = AMotionEvent_getPointerId(event, index);
+        const gui::PointerId id{raw_id};
         const float x = AMotionEvent_getX(event, index);
         const float y = AMotionEvent_getY(event, index);
         bool bridged = false;
@@ -483,7 +486,7 @@ private:
             bridged = input->bridged_touch() == id;
             input->touch_up(id, x, y, cancelled);
         }
-        emit(TouchReleasedEvent{id, x, y, cancelled});
+        emit(TouchReleasedEvent{raw_id, x, y, cancelled});
         if (bridged) {
             imgui_bridge_pos(x, y);
             imgui_bridge_button(false);

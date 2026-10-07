@@ -30,7 +30,7 @@ struct HitTest {
     bool pressed = false;   // active on this widget: the press started inside
     bool clicked = false;   // released inside while active = a full click
     bool released = false;  // a pointer went up this frame while this widget was active
-    std::uint32_t pointer = kNoPointer;  // the pointer behind the fold
+    PointerId pointer = kNoPointer;  // the pointer behind the fold
 };
 
 // The immediate-mode gui core. Owns, per frame: the id scope stack, the
@@ -108,30 +108,30 @@ public:
     // The no-arg forms answer for the mouse - the pre-touch API, unchanged
     // in meaning. `pointer` is a mouse/touch pointer id as the frame sees
     // it (kMousePointerId for the mouse); an unknown id answers invalid.
-    WidgetId hot_id(std::uint32_t pointer = kMousePointerId) const;
-    WidgetId active_id(std::uint32_t pointer = kMousePointerId) const;
+    WidgetId hot_id(PointerId pointer = kMousePointerId) const;
+    WidgetId active_id(PointerId pointer = kMousePointerId) const;
     // The am-I spelling of the two above: true when `id` is this
     // pointer's hot/active widget right now. kInvalidWidgetId is pinned
     // to false - "no widget" must never match, even though hot_id()
     // returns that very sentinel when nothing is hot; an unknown pointer
     // answers false the same way.
-    bool is_hot(WidgetId id, std::uint32_t pointer = kMousePointerId) const;
-    bool is_active(WidgetId id, std::uint32_t pointer = kMousePointerId) const;
+    bool is_hot(WidgetId id, PointerId pointer = kMousePointerId) const;
+    bool is_active(WidgetId id, PointerId pointer = kMousePointerId) const;
     // The pointer owning a press on `id` right now, kNoPointer when none.
     // Lowest slot wins - deterministic, and the mouse outranks touches, so
     // the bridged finger resolves to the mouse it mirrors.
-    std::uint32_t owning_pointer(WidgetId id) const;
+    PointerId owning_pointer(WidgetId id) const;
     // The frame's view of pointer `id` (the mouse or any touch), null when
     // no such pointer exists this frame. A widget that tracks its drag
     // follows its own pointer through this - never the raw mouse fields.
-    const PointerView* pointer(std::uint32_t id) const;
+    const PointerView* pointer(PointerId id) const;
     // Ends `pointer`'s press with no click - a gesture (a scroll drag)
     // consumed it. From this frame on the pointer claims neither hot nor
     // press until it lifts, so widgets it sweeps while dragging see no
     // hover and no press; on release nothing clicks. Cancelling a bridged
     // touch cancels the mouse it mirrors (and vice versa): the bridge is
     // one finger in two pointers, and a gesture that eats one eats both.
-    void cancel_pointer(std::uint32_t pointer);
+    void cancel_pointer(PointerId pointer);
 
 private:
     // One side table per state type, created on first use and owned by
@@ -162,7 +162,7 @@ private:
     // `cancelled` marks a gesture-consumed press (cancel_pointer): the
     // pointer claims nothing until it lifts, and the flag lifts with it.
     struct PointerTrack {
-        std::uint32_t id = kNoPointer;
+        PointerId id = kNoPointer;
         WidgetId hot = kInvalidWidgetId;
         WidgetId active = kInvalidWidgetId;
         bool cancelled = false;

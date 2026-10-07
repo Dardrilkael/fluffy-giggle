@@ -19,17 +19,27 @@ namespace ws::ui::gui {
 // touch_* methods, keyed by the platform's per-contact id (Android's
 // multi-touch path; desktop GLFW synthesizes none).
 
+// Pointer identity, a strong struct on purpose: a texture id, a body
+// slot or a widget index can never be passed where a pointer goes (nor
+// a pointer into those APIs). It wraps the platform's per-contact id
+// (Android's small ints) plus the two sentinels below.
+struct PointerId {
+    std::uint32_t value;
+
+    bool operator==(const PointerId&) const = default;
+};
+
 // Pointer-id sentinels. Platform touch ids are small per-contact ints and
 // can never collide with these two; wherever pointers are listed, the
 // mouse always ids as kMousePointerId and "no pointer" is kNoPointer.
-inline constexpr std::uint32_t kMousePointerId = 0xFFFFFFFEu;
-inline constexpr std::uint32_t kNoPointer = 0xFFFFFFFFu;
+inline constexpr PointerId kMousePointerId{0xFFFFFFFEu};
+inline constexpr PointerId kNoPointer{0xFFFFFFFFu};
 
 // One touch contact in the frame's table. Entries stay through their
 // release frame (down=false, released=true) so a widget can still see who
 // lifted; next_frame() drops them after.
 struct TouchPoint {
-    std::uint32_t id = kNoPointer;  // platform contact id, stable while held
+    PointerId id = kNoPointer;  // platform contact id, stable while held
     float x = 0.0f;  // framebuffer px, top-left origin (mouse space)
     float y = 0.0f;
     bool down = false;
@@ -42,7 +52,7 @@ struct TouchPoint {
 // flattened into one uniform list - widgets never special-case where a
 // pointer came from.
 struct PointerView {
-    std::uint32_t id = kNoPointer;
+    PointerId id = kNoPointer;
     float x = 0.0f;
     float y = 0.0f;
     bool down = false;
@@ -79,16 +89,16 @@ struct InputFrame {
     // Returns the entry's slot, or -1 when the table is full (the caller
     // drops the contact and warns once). One down per contact is the
     // platform contract; a repeat updates in place instead of duplicating.
-    int touch_down(std::uint32_t id, float x, float y);
+    int touch_down(PointerId id, float x, float y);
     // Unknown ids are a no-op (the platform never moves an unreported
     // contact).
-    void touch_move(std::uint32_t id, float x, float y);
+    void touch_move(PointerId id, float x, float y);
     // `cancelled` marks an OS-aborted gesture (palm, system takeover) -
     // the release edge still fires.
-    void touch_up(std::uint32_t id, float x, float y, bool cancelled);
+    void touch_up(PointerId id, float x, float y, bool cancelled);
     // The contact currently mirrored as the mouse, kNoPointer when none.
     // Platform layers emit the bridge's Mouse* events off this.
-    std::uint32_t bridged_touch() const { return bridged_touch_id_; }
+    PointerId bridged_touch() const { return bridged_touch_id_; }
 
     // --- held state ------------------------------------------------------------
     float mouse_x = 0.0f;  // framebuffer pixels, top-left origin
@@ -120,7 +130,7 @@ struct InputFrame {
     int gather_pointers(std::array<PointerView, kMaxPointers>& out) const;
     // Pointer `id`'s position (the mouse or any touch); false when no such
     // pointer is in this frame. The out params are optional (pure lookup).
-    bool pointer_pos(std::uint32_t id, float* x, float* y) const;
+    bool pointer_pos(PointerId id, float* x, float* y) const;
 
 private:
     // The primary-touch -> mouse bridge: the FIRST contact of a gesture
@@ -129,7 +139,7 @@ private:
     // promotion - when it lifts, the mouse stays released until a new
     // gesture's first contact bridges. touch_up clears it; next_frame()
     // self-heals if its contact is already gone.
-    std::uint32_t bridged_touch_id_ = kNoPointer;
+    PointerId bridged_touch_id_ = kNoPointer;
 };
 
 // The shell's snapshot for the frame being rendered, valid during

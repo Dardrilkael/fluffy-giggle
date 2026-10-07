@@ -18,7 +18,7 @@ namespace {
 // by id, never by slot (ids are stable per contact; slots shuffle as
 // earlier fingers lift). -1 when the id is not in the table. Clamped to
 // kMaxTouches so a stray touch_count cannot walk out of the array.
-int find_touch(const InputFrame& frame, std::uint32_t id) {
+int find_touch(const InputFrame& frame, PointerId id) {
     const int count = std::min(frame.touch_count, InputFrame::kMaxTouches);
     for (int i = 0; i < count; ++i) {
         if (frame.touches[static_cast<std::size_t>(i)].id == id) {
@@ -64,7 +64,7 @@ void InputFrame::next_frame() {
     }
 }
 
-int InputFrame::touch_down(std::uint32_t id, float x, float y) {
+int InputFrame::touch_down(PointerId id, float x, float y) {
     int slot = find_touch(*this, id);
     if (slot < 0) {
         if (touch_count >= kMaxTouches) {
@@ -95,7 +95,7 @@ int InputFrame::touch_down(std::uint32_t id, float x, float y) {
     return slot;
 }
 
-void InputFrame::touch_move(std::uint32_t id, float x, float y) {
+void InputFrame::touch_move(PointerId id, float x, float y) {
     const int slot = find_touch(*this, id);
     if (slot < 0) {
         return;  // unknown id: no-op (never a reported contact)
@@ -109,7 +109,7 @@ void InputFrame::touch_move(std::uint32_t id, float x, float y) {
     }
 }
 
-void InputFrame::touch_up(std::uint32_t id, float x, float y, bool cancelled) {
+void InputFrame::touch_up(PointerId id, float x, float y, bool cancelled) {
     const int slot = find_touch(*this, id);
     if (slot < 0) {
         return;
@@ -155,7 +155,7 @@ int InputFrame::gather_pointers(
     return 1 + count;
 }
 
-bool InputFrame::pointer_pos(std::uint32_t id, float* x, float* y) const {
+bool InputFrame::pointer_pos(PointerId id, float* x, float* y) const {
     if (id == kMousePointerId) {
         if (x != nullptr) {
             *x = mouse_x;

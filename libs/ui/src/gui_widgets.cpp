@@ -64,7 +64,7 @@ struct ScrollState {
 // against the threshold); dragging means the scroll owns the finger - the
 // child's press was cancelled and the offset follows the contact 1:1.
 struct ScrollDragTrack {
-    std::uint32_t id = kNoPointer;
+    PointerId id = kNoPointer;
     float press_y = 0.0f;  // the threshold is measured from the press
     float last_y = 0.0f;  // the previous frame's y, for the drag delta
     bool dragging = false;
@@ -81,7 +81,7 @@ struct ScrollDragState {
 // Null only when the table is somehow full, which the sweep in
 // begin_scroll_panel makes unreachable (free slots always cover the
 // untracked contacts: live contacts are capped at the track count).
-ScrollDragTrack* drag_track_for(ScrollDragState& drag, std::uint32_t id) {
+ScrollDragTrack* drag_track_for(ScrollDragState& drag, PointerId id) {
     for (ScrollDragTrack& track : drag.tracks) {
         if (track.id == id) {
             return &track;

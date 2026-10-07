@@ -713,7 +713,7 @@ private:
         for (int i = 0; i < in.touch_count; ++i) {
             const ws::ui::gui::TouchPoint& t =
                 in.touches[static_cast<std::size_t>(i)];
-            TouchTrail& trail = touch_trails_[t.id];
+            TouchTrail& trail = touch_trails_[t.id.value];
             if (t.down || t.released) {
                 trail.points.emplace_back(t.x, t.y);
                 if (trail.points.size() > TouchTrail::kMaxPoints) {
