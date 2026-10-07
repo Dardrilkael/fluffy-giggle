@@ -65,20 +65,27 @@ constexpr const char* kDefaultFontPath = "C:/Windows/Fonts/segoeui.ttf";
 // lays the panels there, and the pinch gate below treats those pixels as
 // the widgets' - a two-finger pinch over the gui must not move the world.
 // (The net panel's rect answers the same contract through
-// NetScreen::panel_bounds().)
-ws::ui::gui::Rect demo_panel_rect(float frame_width) {
-    return {frame_width - 244.0f, 24.0f, 220.0f, 176.0f};
+// NetScreen::panel_bounds().) Margins and sizes multiply by the ui scale
+// (App::ui_scale(), captured at setup): the touch-density rule - the
+// theme metrics grow by the same factor, so the scaled rects keep
+// fitting the scaled widgets.
+ws::ui::gui::Rect demo_panel_rect(float frame_width, float scale) {
+    return {frame_width - 244.0f * scale, 24.0f * scale,
+            220.0f * scale, 176.0f * scale};
 }
-ws::ui::gui::Rect pages_panel_rect(float frame_width) {
-    return {frame_width - 244.0f, 208.0f, 220.0f, 220.0f};
+ws::ui::gui::Rect pages_panel_rect(float frame_width, float scale) {
+    return {frame_width - 244.0f * scale, 208.0f * scale,
+            220.0f * scale, 220.0f * scale};
 }
 
 // The sound panel's rect, bottom-right and anchored to the frame the way
 // the net screen's is bottom-left (net_screen.cpp) - the mirror position
 // keeps it clear of the top-right demo column at any window size. The
 // pinch gate below treats these pixels as the widgets', same contract.
-ws::ui::gui::Rect sound_panel_rect(float frame_width, float frame_height) {
-    return {frame_width - 244.0f, frame_height - 152.0f, 220.0f, 128.0f};
+ws::ui::gui::Rect sound_panel_rect(float frame_width, float frame_height,
+                                   float scale) {
+    return {frame_width - 244.0f * scale, frame_height - 152.0f * scale,
+            220.0f * scale, 128.0f * scale};
 }
 
 // The panel's payload: the wavplayer arpeggio synthesized in place (the
@@ -132,10 +139,17 @@ protected:
                                           "assets/icon_orange.png",
                                           "assets/icon_green.png",
                                           "assets/icon_purple.png"});
-        // One font, one bake (the v1 rule): Segoe UI at 16 px, wired into
-        // the theme the gui panels below read. A failed load degrades to a
-        // fontless theme - the panels keep their v1 bars, never go dark.
-        font_ = ws::ui::r2d::load_font(kDefaultFontPath, 16.0f);
+        // One font, one bake (the v1 rule), at the display's density: the
+        // bake height, the theme metrics and the panel rects below all
+        // multiply by App::ui_scale() (display density / 160 on Android,
+        // content scale on desktop) - a finger-sized gui on a phone, the
+        // same pixels on a 100%-scaling desktop. A failed load degrades
+        // to a fontless theme - the panels keep their v1 bars, never go
+        // dark.
+        ui_scale_ = ui_scale();
+        net_.set_ui_scale(ui_scale_);
+        font_ = ws::ui::r2d::load_font(kDefaultFontPath, 16.0f * ui_scale_);
+        chrome_ = ws::ui::gui::kDefaultChrome.scaled(ui_scale_);
         chrome_.font = font_.empty() ? nullptr : &font_;
         // The sound panel's engine, one for the app's lifetime (the
         // destructor tears it down). A failed device open is degradation,
@@ -212,9 +226,10 @@ protected:
         r2d::begin();
         const r2d::FrameSize gui_frame = r2d::frame_size();
         const ws::ui::gui::Rect content = ws::ui::gui::begin_panel(
-            gui_, layout_, chrome_, "demo", demo_panel_rect(gui_frame.width));
+            gui_, layout_, chrome_, "demo",
+            demo_panel_rect(gui_frame.width, ui_scale_));
         if (ws::ui::gui::button(gui_, layout_, chrome_,
-                                "clicks", 120.0f,
+                                "clicks", 120.0f * ui_scale_,
                                 icons_.empty() ? r2d::Sprite{}
                                                : icons_[0])) {
             ++gui_clicks_;
@@ -222,11 +237,14 @@ protected:
         ws::ui::gui::checkbox(gui_, layout_, chrome_,
                               "signal", show_signal_);
         ws::ui::gui::slider_float(gui_, layout_, chrome_,
-                                  "amplitude", amplitude_, 0.0f, 1.0f);
+                                  "amplitude", amplitude_, 0.0f, 1.0f,
+                                  120.0f * ui_scale_);
         ws::ui::gui::slider_int(gui_, layout_, chrome_,
-                                "samples", samples_, 4, kMaxSamples);
+                                "samples", samples_, 4, kMaxSamples,
+                                120.0f * ui_scale_);
         ws::ui::gui::slider_float(gui_, layout_, chrome_,
-                                  "spin", gui_spin_rate_, 0.0f, 0.2f);
+                                  "spin", gui_spin_rate_, 0.0f, 0.2f,
+                                  120.0f * ui_scale_);
         // Clip proof: this quad pokes past the panel's bottom-right corner
         // by 40 px each way - the scissor must cut it at the content edge.
         r2d::draw_quad(content.x + content.width - 8.0f,
@@ -242,7 +260,8 @@ protected:
         // list scrolls by finger: past drag_threshold the scroll owns the
         // press (cancel_pointer), so sweeping rows never clicks them.
         const ws::ui::gui::Rect page = ws::ui::gui::begin_panel(
-            gui_, layout_, chrome_, "pages", pages_panel_rect(gui_frame.width));
+            gui_, layout_, chrome_, "pages",
+            pages_panel_rect(gui_frame.width, ui_scale_));
         static const char* kPageTabs[] = {"list", "tune"};
         (void)ws::ui::gui::tab_bar(gui_, layout_, chrome_,
                                    "views", kPageTabs, 2, active_tab_,
@@ -284,7 +303,7 @@ protected:
         // distance attenuation rides along.
         const ws::ui::gui::Rect sound = ws::ui::gui::begin_panel(
             gui_, layout_, chrome_, "sound",
-            sound_panel_rect(gui_frame.width, gui_frame.height));
+            sound_panel_rect(gui_frame.width, gui_frame.height, ui_scale_));
         if (ws::ui::gui::button(gui_, layout_, chrome_, "play",
                                 sound.width)) {
             play_arpeggio();
@@ -466,9 +485,12 @@ protected:
             }
         }
         // The text-event echo, bottom-center (right of the net panel):
-        // the last few glyphs typed on either platform's key path.
+        // the last few glyphs typed on either platform's key path. The
+        // anchor scales by the same ui factor, keeping it clear of the
+        // wider net panel on a dense screen.
         if (!typed_.empty()) {
-            r2d::draw_text(280.0f, frame.height - 36.0f, typed_.c_str(),
+            r2d::draw_text(280.0f * ui_scale_,
+                           frame.height - 36.0f * ui_scale_, typed_.c_str(),
                            font_, r2d::rgba(235, 238, 242));
         }
         r2d::set_layer(0);
@@ -608,6 +630,9 @@ private:
     float pinch_span_ = 0.0f;  // last pinch frame's finger span; 0 = none
     std::string typed_;        // the last few typed glyphs (ASCII 32..126)
     playground::NetScreen net_;    // Phase 10: the real screen (world + panel)
+    // The platform's density factor, captured at setup: the font bake,
+    // the theme metrics and every panel rect above multiply by it.
+    float ui_scale_ = 1.0f;
     ws::ui::r2d::Font font_;      // one bake, one face - outlives the theme use
     ws::ui::gui::ChromeTheme chrome_ = ws::ui::gui::kDefaultChrome;  // + font_
 
@@ -736,8 +761,9 @@ private:
         bool pinching = downs == 2;
         if (pinching) {
             const ws::ui::gui::Rect panels[4] = {
-                demo_panel_rect(frame.width), pages_panel_rect(frame.width),
-                sound_panel_rect(frame.width, frame.height),
+                demo_panel_rect(frame.width, ui_scale_),
+                pages_panel_rect(frame.width, ui_scale_),
+                sound_panel_rect(frame.width, frame.height, ui_scale_),
                 net_.panel_bounds()};
             for (const ws::ui::gui::TouchPoint* t : live) {
                 for (const ws::ui::gui::Rect& panel : panels) {

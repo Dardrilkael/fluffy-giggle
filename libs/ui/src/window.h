@@ -93,6 +93,12 @@ public:
     // Framebuffer size in pixels; the swapchain sizes itself against this.
     virtual void framebuffer_size(int* width, int* height) const = 0;
 
+    // The platform's ui scale: how many gui-space pixels one
+    // density-independent "point" is. Android: display density / 160 (a
+    // 280 dpi phone reports 1.75); desktop: the GLFW content scale (1.0
+    // at a 100%-scaling display). Apps reach it through App::ui_scale().
+    virtual float ui_scale() const = 0;
+
     // --- ImGui platform backend (GLFW / Android) ----------------------------
     // init installs the backend against the current window. Android calls
     // it once per attach (each INIT_WINDOW can hand over a NEW

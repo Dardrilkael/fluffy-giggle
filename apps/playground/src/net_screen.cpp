@@ -165,8 +165,11 @@ void NetScreen::draw_panel(ws::ui::gui::GuiContext& ctx,
 
     // Bottom-left, clear of the right-side demo panels. The rect is
     // published through panel_bounds() for the pinch gate in main.cpp -
-    // one source of truth for where the widgets live.
-    const Rect bounds{24.0f, frame.height - 232.0f, 240.0f, 208.0f};
+    // one source of truth for where the widgets live. Margins and sizes
+    // multiply by the setup-time ui scale (set_ui_scale): the same
+    // touch-density rule the demo panels in main.cpp follow.
+    const Rect bounds{24.0f * ui_scale_, frame.height - 232.0f * ui_scale_,
+                      240.0f * ui_scale_, 208.0f * ui_scale_};
     panel_bounds_ = bounds;
     const Rect page = gui::begin_panel(ctx, layout, theme, "net", bounds);
 

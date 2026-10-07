@@ -43,6 +43,12 @@ public:
     // draw; contains() answers false for a zero rect.
     const ws::ui::gui::Rect& panel_bounds() const { return panel_bounds_; }
 
+    // The density factor App::ui_scale() reported: the panel's rect below
+    // anchors and sizes by it, the same touch-density rule the demo
+    // panels in main.cpp follow. Call once, from on_setup(); 1.0 (the
+    // default) is the unscaled look.
+    void set_ui_scale(float scale) { ui_scale_ = scale; }
+
 private:
     void reseed();
     float next_weight();  // deterministic LCG step, uniform in [-1, 1)
@@ -60,6 +66,7 @@ private:
     std::array<float, kOutputs> out_{};
     int tab_ = 0;  // the panel's tab strip selection (caller state)
     ws::ui::gui::Rect panel_bounds_{};  // what draw_panel last laid out
+    float ui_scale_ = 1.0f;  // set once at setup; scales the panel's rect
 };
 
 }  // namespace playground

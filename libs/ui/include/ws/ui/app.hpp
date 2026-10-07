@@ -72,6 +72,14 @@ protected:
     // lifecycle.
     virtual void on_update() {}
 
+    // The platform's ui scale, for touch-density: Android reports the
+    // display density (160 dpi = 1.0), desktop the window content scale.
+    // Multiply gui theme metrics (ChromeTheme::scaled), font pixel sizes
+    // and panel rects by it, so the gui is finger-sized on a phone; 1.0
+    // on a 100%-scaling desktop changes nothing. Valid from on_setup()
+    // on; 1.0 before run().
+    float ui_scale() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

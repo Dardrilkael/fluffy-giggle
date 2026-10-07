@@ -266,6 +266,18 @@ public:
         glfwGetFramebufferSize(window_, width, height);
     }
 
+    float ui_scale() const override {
+        // The content scale GLFW recommends for this window - it can
+        // change when the window moves between monitors, so this is a
+        // per-call query, not an init-time fact. 1.0 at 100% scaling.
+        float xs = 1.0f;
+        float ys = 1.0f;
+        if (window_ != nullptr) {
+            glfwGetWindowContentScale(window_, &xs, &ys);
+        }
+        return xs > 0.0f ? xs : 1.0f;
+    }
+
     bool imgui_platform_init() override {
         return ImGui_ImplGlfw_InitForVulkan(window_, true);
     }

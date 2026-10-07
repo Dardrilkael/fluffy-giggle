@@ -2824,6 +2824,33 @@ TEST_CASE("button: the theme drives the widget's metrics") {
     gui.end_frame();
 }
 
+TEST_CASE("theme scaled: metrics multiply, faces and font carry") {
+    using namespace ws::ui::gui;
+    const ws::ui::r2d::Font font{};
+    ChromeTheme base = kDefaultChrome;
+    base.font = &font;
+
+    const ChromeTheme big = base.scaled(2.0f);
+    CHECK(big.control_height == base.control_height * 2.0f);
+    CHECK(big.corner_radius == base.corner_radius * 2.0f);
+    CHECK(big.padding == base.padding * 2.0f);
+    CHECK(big.spacing == base.spacing * 2.0f);
+    CHECK(big.scroll_speed == base.scroll_speed * 2.0f);
+    CHECK(big.drag_threshold == base.drag_threshold * 2.0f);
+    // The look does not change with the density: every face and the
+    // borrowed font pointer carry as-is.
+    CHECK(big.panel_bg == base.panel_bg);
+    CHECK(big.control_on == base.control_on);
+    CHECK(big.border == base.border);
+    CHECK(big.font == &font);
+
+    // Scale 1 is the identity - the 100%-scaling desktop.
+    const ChromeTheme same = base.scaled(1.0f);
+    CHECK(same.control_height == base.control_height);
+    CHECK(same.drag_threshold == base.drag_threshold);
+    CHECK(same.font == &font);
+}
+
 TEST_CASE("checkbox: a full click toggles the bool exactly once") {
     using namespace ws::ui::gui;
     GuiContext gui;

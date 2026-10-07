@@ -1531,4 +1531,11 @@ RenderCommandQueue& App::command_queue() {
     return impl_->write_queue_;
 }
 
+float App::ui_scale() const {
+    // The density factor through the platform seam; before run() (and
+    // after a failed startup) there is no window platform, so the
+    // unscaled 1.0 stands.
+    return impl_->host_ ? impl_->host_->ui_scale() : 1.0f;
+}
+
 }  // namespace ws::ui

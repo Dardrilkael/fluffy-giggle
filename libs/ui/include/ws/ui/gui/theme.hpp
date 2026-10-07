@@ -42,6 +42,24 @@ struct ChromeTheme {
     // A second face (a heading weight, say) grows a sibling field here,
     // not a rework of this pointer.
     const r2d::Font* font = nullptr;
+
+    // A copy with every METRIC multiplied - the touch-density move. The
+    // shell reports the platform's ui scale (App::ui_scale(): display
+    // density / 160 on Android, content scale on desktop); an app that
+    // scales its theme, its font bake and its panel rects by the same
+    // factor gets a gui that is finger-sized on a phone and unchanged on
+    // a 100%-scaling desktop (1.0 is the identity). Faces and the font
+    // pointer carry as-is - the caller loads the bigger font.
+    constexpr ChromeTheme scaled(float scale) const {
+        ChromeTheme t = *this;
+        t.control_height = control_height * scale;
+        t.corner_radius = corner_radius * scale;
+        t.padding = padding * scale;
+        t.spacing = spacing * scale;
+        t.scroll_speed = scroll_speed * scale;
+        t.drag_threshold = drag_threshold * scale;
+        return t;
+    }
 };
 
 // The stock look. constexpr, so a custom theme starts from it with

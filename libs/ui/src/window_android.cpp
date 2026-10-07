@@ -34,6 +34,7 @@
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Weverything"
 #endif
+#include <android/configuration.h>
 #include <android/input.h>
 #include <android/keycodes.h>
 #include <android_native_app_glue.h>
@@ -113,6 +114,20 @@ public:
         app_->userData = this;
         app_->onAppCmd = &AndroidHost::app_cmd;
         app_->onInputEvent = &AndroidHost::app_input;
+        // The display density, read once: the screen does not change
+        // under a live process. density / 160 is the dp convention (a
+        // 280 dpi phone reports 1.75); an OS that refuses to name one
+        // (NONE, or the ANY wildcard) keeps the unscaled look.
+        AConfiguration* aconfig = AConfiguration_new();
+        if (aconfig != nullptr) {
+            AConfiguration_fromAssetManager(aconfig,
+                                            app_->activity->assetManager);
+            const int32_t density = AConfiguration_getDensity(aconfig);
+            AConfiguration_delete(aconfig);
+            ui_scale_ = density > 0 && density != ACONFIGURATION_DENSITY_ANY
+                            ? static_cast<float>(density) / 160.0f
+                            : 1.0f;
+        }
         return true;
     }
 
@@ -168,6 +183,8 @@ public:
         *width = (app_->window != nullptr) ? ANativeWindow_getWidth(app_->window) : 0;
         *height = (app_->window != nullptr) ? ANativeWindow_getHeight(app_->window) : 0;
     }
+
+    float ui_scale() const override { return ui_scale_; }
 
     bool imgui_platform_init() override {
         // Once per attach: each APP_CMD_INIT_WINDOW can hand over a NEW
@@ -584,6 +601,7 @@ private:
     WindowEventSink* sink_ = nullptr;
     bool window_ready_ = false;
     bool close_requested_ = false;
+    float ui_scale_ = 1.0f;  // density / 160, cached at init (see init)
     int32_t mouse_buttons_ = 0;  // last seen AMOTION_EVENT_BUTTON_* mask
     bool touch_cap_warned_ = false;  // the touch-table cap warn fired once
 };

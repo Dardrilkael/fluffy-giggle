@@ -383,7 +383,11 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   corner radius, padding, spacing, scroll speed, drag threshold) in one
   plain struct,
   `kDefaultChrome` constexpr. Widgets take a `const ChromeTheme&` per
-  call, so a panel can carry its own variant inline. `font` is a
+  call, so a panel can carry its own variant inline. `scaled(scale)`
+  returns a copy with every metric multiplied — the touch-density move,
+  fed by `App::ui_scale()` (Android display density / 160, desktop
+  content scale); faces and the font pointer carry unchanged (the caller
+  scales the font bake and panel rects by the same factor). `font` is a
   borrowed `const r2d::Font*` (null = the v1 label bars, byte-for-byte
   the pre-font look): the theme does NOT own the font — load it once
   (`r2d::load_font`, valid from `on_setup()`) and keep it alive as
@@ -442,6 +446,11 @@ drive unchanged (that boundary is deliberate; don't paint it over).
 - `on_update()`: called once per frame, between NewFrame and Render. Submit
   widget calls and command-queue work here. Do NOT call `ImGui::Render()`
   or the backend NewFrame functions — the shell owns the frame lifecycle.
+- `ui_scale()`: the platform's ui scale — Android display density / 160,
+  desktop the window content scale (1.0 at 100%). Multiply theme metrics
+  (`ChromeTheme::scaled`), font pixel sizes and panel rects by it for a
+  finger-sized gui on a phone; valid from `on_setup()` on, 1.0 before
+  `run()`.
 - `widgets.hpp`: the drawing API for apps — `begin_window`/`end_window`,
   `text`, `button`, `checkbox`, `slider_float`/`slider_int`, `separator`,
   `same_line`, `begin_plot`/`end_plot`/`plot_line`, `show_imgui_demo`/
