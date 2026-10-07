@@ -123,7 +123,7 @@ void IdStack::pop() {
     }
 }
 
-WidgetId IdStack::current(const char* label) const {
+WidgetId IdStack::id(const char* label) const {
     return hash_label(scope_id(stack_, depth_), label);
 }
 

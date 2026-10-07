@@ -20,7 +20,7 @@ namespace ws::ui::gui {
 // over hot/active - give loop-generated children ids().push(index)
 // between them. The context flags a duplicate id once per process.
 //
-// Calls are legal only between GuiContext::new_frame and end_frame, and
+// Calls are legal only between GuiContext::begin_frame and end_frame, and
 // the draws land in the caller's r2d begin()/end() block (screen mode:
 // the same space layout and hit-testing use). Every draw is drop-safe
 // headless, so the widgets test without a window.

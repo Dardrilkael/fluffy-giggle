@@ -133,7 +133,7 @@ private:
 };
 
 // The shell's snapshot for the frame being rendered, valid during
-// on_update() - hand it to GuiContext::new_frame(). Filled by the platform
+// on_update() - hand it to GuiContext::begin_frame(). Filled by the platform
 // layer from RAW input (the GLFW callbacks on desktop, the NativeActivity
 // pump on Android): deliberately not the app-facing event stream, so the
 // snapshot stays unfiltered even while

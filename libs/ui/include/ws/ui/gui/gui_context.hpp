@@ -53,8 +53,8 @@ public:
     // carries - that carry IS the drag) or starts fresh; a track whose
     // pointer left the frame drops out. Hot re-claims every frame, on
     // every track, as widgets' hit tests run. Widget calls are legal
-    // only between new_frame and end_frame.
-    void new_frame(const InputFrame& input);
+    // only between begin_frame and end_frame.
+    void begin_frame(const InputFrame& input);
     // Closes the frame: drops a press whose owner vanished before its
     // release frame (the UI changed mid-drag), per pointer, so stale
     // ownership never blocks the next frame's hot claims - and a
@@ -110,6 +110,13 @@ public:
     // it (kMousePointerId for the mouse); an unknown id answers invalid.
     WidgetId hot_id(std::uint32_t pointer = kMousePointerId) const;
     WidgetId active_id(std::uint32_t pointer = kMousePointerId) const;
+    // The am-I spelling of the two above: true when `id` is this
+    // pointer's hot/active widget right now. kInvalidWidgetId is pinned
+    // to false - "no widget" must never match, even though hot_id()
+    // returns that very sentinel when nothing is hot; an unknown pointer
+    // answers false the same way.
+    bool is_hot(WidgetId id, std::uint32_t pointer = kMousePointerId) const;
+    bool is_active(WidgetId id, std::uint32_t pointer = kMousePointerId) const;
     // The pointer owning a press on `id` right now, kNoPointer when none.
     // Lowest slot wins - deterministic, and the mouse outranks touches, so
     // the bridged finger resolves to the mouse it mirrors.
@@ -139,12 +146,18 @@ private:
         std::unordered_map<WidgetId, T> values;
     };
 
+    // One pointer slot's half of hit_test; the public function folds the
+    // slots into the widget-facing answer. Private on purpose: it
+    // mutates the slot's track, so only hit_test may call it, in its
+    // slot order (mouse first).
+    HitTest hit_test_pointer(WidgetId id, const Rect& rect, int slot);
+
     IdStack ids_;
-    InputFrame input_;  // copied in by new_frame - the frame's snapshot
+    InputFrame input_;  // copied in by begin_frame - the frame's snapshot
 
     // One pointer's hot/active pair, carried across frames keyed by the
     // pointer's id - that carry IS the drag. Slot 0 is the mouse by
-    // construction (new_frame aligns tracks to the frame's pointers);
+    // construction (begin_frame aligns tracks to the frame's pointers);
     // hot re-claims every frame, active survives while the pointer does.
     // `cancelled` marks a gesture-consumed press (cancel_pointer): the
     // pointer claims nothing until it lifts, and the flag lifts with it.

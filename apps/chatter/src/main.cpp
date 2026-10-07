@@ -565,7 +565,7 @@ class ChatterApp final : public ws::ui::App {
     // shape. A tap posts one SAY through the core.
     ws::ui::r2d::set_layer(10);
     ws::ui::r2d::begin();
-    gui_.new_frame(ws::ui::gui::frame_input());
+    gui_.begin_frame(ws::ui::gui::frame_input());
     const ws::ui::gui::Rect content =
         ws::ui::gui::begin_panel(gui_, layout_, chrome_, "palette", palette);
     const float btn_w = (content.width - chrome_.spacing * 3.0f) / 4.0f;

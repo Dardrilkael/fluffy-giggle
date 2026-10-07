@@ -240,7 +240,7 @@ bool BatchCore::start_chunk(const Mat4& vp, const float (&clip)[4],
     return true;
 }
 
-void BatchCore::new_frame() {
+void BatchCore::begin_frame() {
     vertices_.clear();
     chunks_.clear();
     segment_open_ = false;

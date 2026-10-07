@@ -29,7 +29,7 @@ public:
     // The gui side panel, bottom-left: tab "drive" holds the input sliders
     // and a reseed button, tab "inspect" a scrollable per-hidden-node
     // enable list (the scroll region has real room to scroll). Call inside
-    // the screen-space r2d block, between new_frame and end_frame. The
+    // the screen-space r2d block, between begin_frame and end_frame. The
     // theme is the caller's (third param, the widget convention) - its
     // font is what the labels draw with.
     void draw_panel(ws::ui::gui::GuiContext& ctx,

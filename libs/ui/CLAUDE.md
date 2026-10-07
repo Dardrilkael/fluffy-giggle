@@ -70,10 +70,10 @@ libs/ui/
     widgets.hpp               # window/text/button/checkbox/slider/plot_line/...
     gui/                      # the immediate-mode gui module (ws::ui::gui, no ImGui)
       gui_context.hpp        # GuiContext + HitTest: input snapshot, per-pointer hot/active + side tables
-      id_stack.hpp           # WidgetId hashing + scoped id stack
+      id_stack.hpp           # WidgetId hashing, the scoped id stack, ScopedId RAII
       input_frame.hpp        # InputFrame: one frame's raw input — mouse, keys, multi-touch table; frame_input() getter
       layout_cursor.hpp      # LayoutCursor: flowing layout + panel stack
-      rect.hpp                # Rect, WidgetId, contains() — the shared vocabulary
+      rect.hpp                # Rect + its geometry helpers (contains, edges, centers, expand/shrink) — the shared vocabulary
       theme.hpp               # ChromeTheme: every color/metric the widgets use, + the borrowed font
       widgets.hpp            # button/checkbox/slider/panel/tabs/scroll region — the widget functions
   src/
@@ -322,7 +322,7 @@ GuiContext side tables — the exact shape a future retained-mode tree could
 drive unchanged (that boundary is deliberate; don't paint it over).
 
 - **One seam.** A widget call does all four concerns under one id at once:
-  identity (`ids().current(label)` — the id stack's scope hashed in),
+  identity (`ids().id(label)` — the id stack's scope hashed in),
   hit-testing (`GuiContext::hit_test(id, rect)`), layout
   (`LayoutCursor::next(w, h)`) and draw emission (r2d at the caller's
   layer). What a widget draws, where it hit-tests and what it returns
@@ -340,7 +340,7 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   maintain the primary-touch → mouse bridge: the FIRST contact of a
   gesture mirrors the mouse's position, button 0 and its edges (no
   promotion on lift — single-finger use, the mouse path and ImGui keep
-  working, unchanged). `new_frame(frame_input())` adopts the snapshot;
+  working, unchanged). `begin_frame(frame_input())` adopts the snapshot;
   widgets run; `end_frame()` resolves the frame per pointer (a release
   whose owner vanished is dropped, not misattributed).
 - **Identity.** `WidgetId` is an FNV-1a hash of the id-stack scope plus a
@@ -478,13 +478,16 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `frame_input()` (the frame's raw input: mouse, keys and the multi-touch
   table — `touches`/`touch_count`, the platform-facing `touch_*` writers,
   `gather_pointers`, `pointer_pos`, `bridged_touch`), `LayoutCursor`,
-  `IdStack`, `ChromeTheme`/`kDefaultChrome`, and `button`/`checkbox`/
+  `IdStack` (and `ScopedId`, its RAII scope guard), `ChromeTheme`/
+  `kDefaultChrome`, and `button`/`checkbox`/
   `slider_float`/`slider_int`/`begin_panel`/`end_panel`/`tab_bar`/
   `begin_scroll_panel`/`end_scroll_panel`. Hot/active are per pointer:
   `hot_id()`/`active_id()` default to the mouse and take a pointer id;
-  `owning_pointer(widget_id)` and `pointer(id)` inspect the fold;
-  `cancel_pointer(id)` ends a press with no click. Valid only between
-  `GuiContext::new_frame` and `end_frame`, inside the caller's r2d
+  `is_hot(id, pointer)`/`is_active(id, pointer)` are the am-I spelling
+  (the invalid id pinned to false); `owning_pointer(widget_id)` and
+  `pointer(id)` inspect the fold; `cancel_pointer(id)` ends a press
+  with no click. Valid only between `GuiContext::begin_frame` and
+  `end_frame`, inside the caller's r2d
   screen-space block; the state is the caller's, persistence lives in
   the context's side tables.
 

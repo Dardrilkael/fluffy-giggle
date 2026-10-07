@@ -40,9 +40,9 @@ public:
     void pop();
 
     // The id a widget labeled `label` has under the current scope,
-    // WITHOUT pushing: hash(current, label). Each widget derives its own
+    // WITHOUT pushing: hash(scope, label). Each widget derives its own
     // id through this, so its state stays keyed while its scope moves.
-    WidgetId current(const char* label) const;
+    WidgetId id(const char* label) const;
 
     // Current scope depth (0 = root). Past the clamp this still counts
     // the overflowed pushes - honest bookkeeping for balanced pops.
@@ -51,6 +51,25 @@ public:
 private:
     std::array<WidgetId, kMaxDepth> stack_{};
     int depth_ = 0;
+};
+
+// An RAII id scope: pushes on construction, pops on destruction, so an
+// early return cannot leak a scope the way a manual push/pop pair can.
+// Non-copyable and non-movable on purpose: a second owner would pop the
+// same scope twice - the guard's lifetime IS its correctness.
+class ScopedId {
+public:
+    ScopedId(IdStack& ids, const char* label) : ids_(ids) { ids_.push(label); }
+    ScopedId(IdStack& ids, int index) : ids_(ids) { ids_.push(index); }
+    ~ScopedId() { ids_.pop(); }
+
+    ScopedId(const ScopedId&) = delete;
+    ScopedId& operator=(const ScopedId&) = delete;
+    ScopedId(ScopedId&&) = delete;
+    ScopedId& operator=(ScopedId&&) = delete;
+
+private:
+    IdStack& ids_;
 };
 
 }  // namespace ws::ui::gui

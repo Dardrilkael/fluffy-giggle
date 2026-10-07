@@ -257,7 +257,7 @@ TEST_CASE("camera_vp rotation convention is locked") {
 
 TEST_CASE("push_quad emits 4 vertices with corner/uv/color/tex order") {
     BatchCore core;
-    core.new_frame();
+    core.begin_frame();
     REQUIRE(core.open_segment(default_vp()));
 
     const float pos[4][3] = {{1.0f, 2.0f, 0.0f}, {11.0f, 2.0f, 0.0f},
@@ -288,7 +288,7 @@ TEST_CASE("push_quad emits 4 vertices with corner/uv/color/tex order") {
 
 TEST_CASE("texture slots assign per unique id and reuse repeats") {
     BatchCore core;
-    core.new_frame();
+    core.begin_frame();
     REQUIRE(core.open_segment(default_vp()));
 
     REQUIRE(push_test_quad(core, 1u));
@@ -307,7 +307,7 @@ TEST_CASE("texture slots assign per unique id and reuse repeats") {
 
 TEST_CASE("texture overflow splits chunks and preserves order") {
     BatchCore core;
-    core.new_frame();
+    core.begin_frame();
     REQUIRE(core.open_segment(default_vp()));
 
     const std::uint32_t unique_textures = 33;  // one past the chunk table
@@ -329,7 +329,7 @@ TEST_CASE("texture overflow splits chunks and preserves order") {
 
 TEST_CASE("open_segment closes the current chunk and carries the new VP") {
     BatchCore core;
-    core.new_frame();
+    core.begin_frame();
     REQUIRE(core.open_segment(default_vp()));
     REQUIRE(push_test_quad(core, 5u));
 
@@ -347,7 +347,7 @@ TEST_CASE("open_segment closes the current chunk and carries the new VP") {
 
 TEST_CASE("vertex cap drops draws without appending") {
     BatchCore core;
-    core.new_frame();
+    core.begin_frame();
     REQUIRE(core.open_segment(default_vp()));
 
     const auto quads = ws::ui::r2d::batch::kMaxVerticesPerFrame / 4;
@@ -364,7 +364,7 @@ TEST_CASE("vertex cap drops draws without appending") {
 
 TEST_CASE("chunk cap drops further segments and their draws") {
     BatchCore core;
-    core.new_frame();
+    core.begin_frame();
     for (std::uint32_t i = 0; i < ws::ui::r2d::batch::kMaxChunksPerFrame; ++i) {
         REQUIRE(core.open_segment(default_vp()));
     }
@@ -417,7 +417,7 @@ TEST_CASE("quad_corners_pivot rotates about the pivot; own-center is the default
 
 TEST_CASE("open_segment carries the clip; texture splits inherit it") {
     BatchCore core;
-    core.new_frame();
+    core.begin_frame();
     const float clip[4] = {5.0f, 5.0f, 50.0f, 50.0f};
     REQUIRE(core.open_segment(default_vp(), clip));
     REQUIRE(push_test_quad(core, 0u));
@@ -434,7 +434,7 @@ TEST_CASE("open_segment carries the clip; texture splits inherit it") {
 
     // A texture-overflow split continues the SAME segment: the fresh chunk
     // inherits both the VP and the clip.
-    core.new_frame();
+    core.begin_frame();
     REQUIRE(core.open_segment(default_vp(), clip));
     for (std::uint32_t id = 0;
          id <= ws::ui::r2d::batch::kMaxTexturesPerChunk; ++id) {
@@ -750,7 +750,7 @@ TEST_CASE("line_quad3d expands perpendicular to segment and view; degenerates dr
 TEST_CASE("open_segment carries depth_test; texture splits inherit it") {
     using ws::ui::r2d::batch::kFullClip;
     BatchCore core;
-    core.new_frame();
+    core.begin_frame();
 
     // The default is the 2D kind: chunks render through the painter's
     // pipeline, depth untouched.
@@ -768,7 +768,7 @@ TEST_CASE("open_segment carries depth_test; texture splits inherit it") {
 
     // A texture-overflow split continues the SAME segment: the fresh
     // chunk inherits the depth mode alongside the VP and clip.
-    core.new_frame();
+    core.begin_frame();
     REQUIRE(core.open_segment(default_vp(), kFullClip, true));
     for (std::uint32_t id = 0;
          id <= ws::ui::r2d::batch::kMaxTexturesPerChunk; ++id) {
@@ -1739,7 +1739,7 @@ TEST_CASE("gui module: the public surface constructs, links and behaves safely")
     CHECK(GuiContext{}.hot_id() == kInvalidWidgetId);
     CHECK(GuiContext{}.active_id() == kInvalidWidgetId);
 
-    // A filled snapshot flows through the frame lifecycle: new_frame
+    // A filled snapshot flows through the frame lifecycle: begin_frame
     // adopts it, end_frame clears any press a vanished widget left held.
     InputFrame input;
     input.mouse_x = 100.0f;
@@ -1748,7 +1748,7 @@ TEST_CASE("gui module: the public surface constructs, links and behaves safely")
     input.scroll_dy = -2.0f;
     input.text_input.push_back(U'w');
     GuiContext gui;
-    gui.new_frame(input);
+    gui.begin_frame(input);
     gui.end_frame();
     CHECK(gui.input().mouse_x == 100.0f);
     CHECK(gui.input().mouse_down[0] == true);
@@ -1761,7 +1761,7 @@ TEST_CASE("gui module: the public surface constructs, links and behaves safely")
     // crash.
     gui.ids().push("panel");
     gui.ids().push(7);
-    CHECK(gui.ids().current("button") != kInvalidWidgetId);
+    CHECK(gui.ids().id("button") != kInvalidWidgetId);
     gui.ids().pop();
     gui.ids().pop();
     gui.ids().pop();
@@ -2054,16 +2054,51 @@ TEST_CASE("gather_pointers: mouse is slot 0, touches follow in table order") {
     CHECK(!frame.pointer_pos(1234, &x, &y));
 }
 
+TEST_CASE("Rect helpers: edges, centers and symmetric insets") {
+    using namespace ws::ui::gui;
+    const Rect r{10.0f, 20.0f, 100.0f, 40.0f};
+
+    CHECK(r.right() == 110.0f);
+    CHECK(r.bottom() == 60.0f);
+    CHECK(r.center_x() == 60.0f);
+    CHECK(r.center_y() == 40.0f);
+
+    const Rect big = r.expanded(2.0f);
+    CHECK(big.x == 8.0f);
+    CHECK(big.y == 18.0f);
+    CHECK(big.width == 104.0f);
+    CHECK(big.height == 44.0f);
+    const Rect small = r.shrunk(2.0f);
+    CHECK(small.x == 12.0f);
+    CHECK(small.y == 22.0f);
+    CHECK(small.width == 96.0f);
+    CHECK(small.height == 36.0f);
+
+    // The half-open test: the inside and the top-left corner in, the
+    // far edges out.
+    CHECK(r.contains(10.0f, 20.0f));
+    CHECK(r.contains(55.0f, 40.0f));
+    CHECK(!r.contains(110.0f, 40.0f));
+    CHECK(!r.contains(10.0f, 60.0f));
+    CHECK(!Rect{}.contains(0.0f, 0.0f));  // empty rects contain nothing
+
+    // Shrunk past empty keeps the raw arithmetic; the half-open test
+    // then answers false everywhere - an over-inset rect hits nothing.
+    const Rect gone = r.shrunk(60.0f);
+    CHECK(gone.width < 0.0f);
+    CHECK(!gone.contains(60.0f, 40.0f));
+}
+
 // --- gui ids (Phase 2) --------------------------------------------------------------
 
 TEST_CASE("IdStack: same label under different scopes ids differently") {
     using namespace ws::ui::gui;
     IdStack ids;
     ids.push("file-dialog");
-    const WidgetId file_ok = ids.current("ok");
+    const WidgetId file_ok = ids.id("ok");
     ids.pop();
     ids.push("error-dialog");
-    const WidgetId error_ok = ids.current("ok");
+    const WidgetId error_ok = ids.id("ok");
 
     CHECK(file_ok != error_ok);
     CHECK(file_ok != kInvalidWidgetId);
@@ -2072,7 +2107,7 @@ TEST_CASE("IdStack: same label under different scopes ids differently") {
     // pop() restored the first scope: the same derivation reads the same.
     ids.pop();
     ids.push("file-dialog");
-    CHECK(ids.current("ok") == file_ok);
+    CHECK(ids.id("ok") == file_ok);
 }
 
 TEST_CASE("IdStack: ids are stable across frames and fresh stacks") {
@@ -2082,22 +2117,22 @@ TEST_CASE("IdStack: ids are stable across frames and fresh stacks") {
     // what lets per-widget state key on them.
     IdStack frame_one;
     frame_one.push("panel");
-    const WidgetId one = frame_one.current("slider");
+    const WidgetId one = frame_one.id("slider");
 
     IdStack frame_two;
     frame_two.push("panel");
-    CHECK(frame_two.current("slider") == one);
+    CHECK(frame_two.id("slider") == one);
 
     // ...through int scopes too (indexed list rows).
     frame_one.push(3);
     frame_two.push(3);
-    const WidgetId cell_one = frame_one.current("cell");
-    CHECK(cell_one == frame_two.current("cell"));
+    const WidgetId cell_one = frame_one.id("cell");
+    CHECK(cell_one == frame_two.id("cell"));
     CHECK(cell_one != one);
 
     frame_one.pop();
     frame_two.pop();
-    CHECK(frame_one.current("slider") == one);
+    CHECK(frame_one.id("slider") == one);
 }
 
 TEST_CASE("IdStack: int scopes separate siblings without stringifying") {
@@ -2105,10 +2140,10 @@ TEST_CASE("IdStack: int scopes separate siblings without stringifying") {
     IdStack ids;
     ids.push("list");
     ids.push(0);
-    const WidgetId row_zero = ids.current("row");
+    const WidgetId row_zero = ids.id("row");
     ids.pop();
     ids.push(1);
-    const WidgetId row_one = ids.current("row");
+    const WidgetId row_one = ids.id("row");
     ids.pop();
 
     CHECK(row_zero != row_one);
@@ -2116,24 +2151,24 @@ TEST_CASE("IdStack: int scopes separate siblings without stringifying") {
     // The VALUE 65 is not the LABEL "A" and not the LABEL "65": int
     // scopes hash the integer's bytes, never a stringified form.
     ids.push(65);
-    const WidgetId via_value = ids.current("row");
+    const WidgetId via_value = ids.id("row");
     ids.pop();
     ids.push("A");
-    CHECK(ids.current("row") != via_value);
+    CHECK(ids.id("row") != via_value);
     ids.pop();
     ids.push("65");
-    CHECK(ids.current("row") != via_value);
+    CHECK(ids.id("row") != via_value);
 }
 
 TEST_CASE("IdStack: scope paths are delimited, not plain concatenations") {
     using namespace ws::ui::gui;
     IdStack ab;
     ab.push("ab");
-    const WidgetId ab_then_c = ab.current("c");
+    const WidgetId ab_then_c = ab.id("c");
 
     IdStack a;
     a.push("a");
-    const WidgetId a_then_bc = a.current("bc");
+    const WidgetId a_then_bc = a.id("bc");
 
     // Without a delimiter "ab"/"c" and "a"/"bc" would hash the same
     // byte stream; the delimiter makes them different paths.
@@ -2148,15 +2183,15 @@ TEST_CASE("IdStack: pop restores scope and overflow clamps at max depth") {
 
     ids.push("outer");
     CHECK(ids.depth() == 1);
-    const WidgetId outer_widget = ids.current("widget");
+    const WidgetId outer_widget = ids.id("widget");
 
     ids.push("inner");
     CHECK(ids.depth() == 2);
-    CHECK(ids.current("widget") != outer_widget);
+    CHECK(ids.id("widget") != outer_widget);
 
     ids.pop();
     CHECK(ids.depth() == 1);
-    CHECK(ids.current("widget") == outer_widget);
+    CHECK(ids.id("widget") == outer_widget);
 
     // Pushing past kMaxDepth clamps (with one warn): the remembered
     // scope stops deepening, but the depth KEEPS COUNTING, so the
@@ -2165,14 +2200,41 @@ TEST_CASE("IdStack: pop restores scope and overflow clamps at max depth") {
         ids.push(i);
     }
     CHECK(ids.depth() == 1 + IdStack::kMaxDepth + 4);  // the count stays honest
-    CHECK(ids.current("deep") != kInvalidWidgetId);  // still a valid id
+    CHECK(ids.id("deep") != kInvalidWidgetId);  // still a valid id
     for (int i = 0; i < IdStack::kMaxDepth + 4; ++i) {
         ids.pop();
     }
 
     // The overflow round trip corrupted nothing above the clamp.
     CHECK(ids.depth() == 1);
-    CHECK(ids.current("widget") == outer_widget);
+    CHECK(ids.id("widget") == outer_widget);
+}
+
+TEST_CASE("ScopedId: the destructor pops, even through an early return") {
+    using namespace ws::ui::gui;
+    IdStack ids;
+    const WidgetId outside = ids.id("w");
+
+    const auto early = [&ids]() {
+        ScopedId scope(ids, "panel");
+        return ids.id("w");  // returns mid-scope: the guard pops anyway
+    };
+    CHECK(early() != outside);       // same label, different scope
+    CHECK(ids.depth() == 0);         // popped by the guard, not by hand
+    CHECK(ids.id("w") == outside);  // the parent scope answers again
+
+    {
+        ScopedId index_scope(ids, 3);
+        CHECK(ids.depth() == 1);
+    }
+    CHECK(ids.depth() == 0);
+
+    // A copy or a move would pop the same scope twice: the guard's
+    // lifetime IS its correctness, so neither may exist.
+    static_assert(!std::is_copy_constructible_v<ScopedId>);
+    static_assert(!std::is_copy_assignable_v<ScopedId>);
+    static_assert(!std::is_move_constructible_v<ScopedId>);
+    static_assert(!std::is_move_assignable_v<ScopedId>);
 }
 
 // --- gui hit-testing (Phase 3) ------------------------------------------------------
@@ -2230,14 +2292,47 @@ ws::ui::gui::InputFrame touch_frame(std::initializer_list<TouchSnap> contacts) {
 
 }  // namespace
 
+TEST_CASE("is_hot/is_active: the am-I spelling, invalid pinned false") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId w = IdStack{}.id("w");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // Hover: hot, not active.
+    gui.begin_frame(snap(50.0f, 50.0f));
+    (void)gui.hit_test(w, rect);
+    CHECK(gui.is_hot(w));
+    CHECK(!gui.is_active(w));
+    CHECK(!gui.is_hot(kInvalidWidgetId));  // "no widget" never matches
+    CHECK(!gui.is_active(kInvalidWidgetId));
+    CHECK(!gui.is_hot(w, 12345u));  // an unknown pointer answers false
+    gui.end_frame();
+
+    // Press: the press frame claims active on the spot.
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
+    (void)gui.hit_test(w, rect);
+    CHECK(gui.is_hot(w));
+    CHECK(gui.is_active(w));
+    CHECK(!gui.is_active(w, 12345u));
+    gui.end_frame();
+
+    // Idle: hot_id() itself answers the invalid sentinel - is_hot() must
+    // not fall into matching it.
+    GuiContext idle;
+    idle.begin_frame(snap(50.0f, 50.0f));
+    CHECK(idle.hot_id() == kInvalidWidgetId);
+    CHECK(!idle.is_hot(kInvalidWidgetId));
+    idle.end_frame();
+}
+
 TEST_CASE("hit_test: hover claims hot; a full click is press-then-release inside") {
     using namespace ws::ui::gui;
     GuiContext gui;
-    const WidgetId id = IdStack{}.current("button");
+    const WidgetId id = IdStack{}.id("button");
     const Rect rect{100.0f, 100.0f, 80.0f, 24.0f};
 
     // Frame 1: pointer inside, nothing held - hover only.
-    gui.new_frame(snap(120.0f, 110.0f));
+    gui.begin_frame(snap(120.0f, 110.0f));
     HitTest hit = gui.hit_test(id, rect);
     CHECK(hit.hovered);
     CHECK(!hit.pressed);
@@ -2248,7 +2343,7 @@ TEST_CASE("hit_test: hover claims hot; a full click is press-then-release inside
     gui.end_frame();
 
     // Frame 2: press inside - the widget takes the press.
-    gui.new_frame(snap(120.0f, 110.0f, true, true));
+    gui.begin_frame(snap(120.0f, 110.0f, true, true));
     hit = gui.hit_test(id, rect);
     CHECK(hit.hovered);
     CHECK(hit.pressed);
@@ -2257,14 +2352,14 @@ TEST_CASE("hit_test: hover claims hot; a full click is press-then-release inside
 
     // Frame 3: still held, pointer dragged outside - the owner keeps the
     // press, hover is gone.
-    gui.new_frame(snap(10.0f, 10.0f, true));
+    gui.begin_frame(snap(10.0f, 10.0f, true));
     hit = gui.hit_test(id, rect);
     CHECK(!hit.hovered);
     CHECK(hit.pressed);
     CHECK(gui.active_id() == id);
 
     // Frame 4: release outside - the drag ends, no click.
-    gui.new_frame(snap(10.0f, 10.0f, false, false, true));
+    gui.begin_frame(snap(10.0f, 10.0f, false, false, true));
     hit = gui.hit_test(id, rect);
     CHECK(hit.released);
     CHECK(!hit.clicked);
@@ -2275,14 +2370,14 @@ TEST_CASE("hit_test: hover claims hot; a full click is press-then-release inside
 TEST_CASE("hit_test: release inside is a click; press+release in one frame still clicks") {
     using namespace ws::ui::gui;
     GuiContext gui;
-    const WidgetId id = IdStack{}.current("button");
+    const WidgetId id = IdStack{}.id("button");
     const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
 
-    gui.new_frame(snap(50.0f, 50.0f, true, true));
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
     (void)gui.hit_test(id, rect);
     gui.end_frame();
 
-    gui.new_frame(snap(50.0f, 50.0f, false, false, true));
+    gui.begin_frame(snap(50.0f, 50.0f, false, false, true));
     const HitTest hit = gui.hit_test(id, rect);
     CHECK(hit.hovered);
     CHECK(hit.released);
@@ -2293,7 +2388,7 @@ TEST_CASE("hit_test: release inside is a click; press+release in one frame still
 
     // A click entirely between two frames: both edges arrive together.
     GuiContext fast;
-    fast.new_frame(snap(50.0f, 50.0f, false, true, true));
+    fast.begin_frame(snap(50.0f, 50.0f, false, true, true));
     const HitTest quick = fast.hit_test(id, rect);
     CHECK(quick.clicked);
     CHECK(quick.released);
@@ -2305,11 +2400,11 @@ TEST_CASE("hit_test: a held press captures the pointer - other widgets cannot ta
     GuiContext gui;
     const IdStack ids;
     // Two overlapping buttons; B draws later (on top) but A owns the press.
-    const WidgetId a = ids.current("a");
-    const WidgetId b = ids.current("b");
+    const WidgetId a = ids.id("a");
+    const WidgetId b = ids.id("b");
     const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
 
-    gui.new_frame(snap(50.0f, 50.0f, true, true));
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
     (void)gui.hit_test(a, rect);  // A runs first: takes the press
     CHECK(gui.active_id() == a);
 
@@ -2320,7 +2415,7 @@ TEST_CASE("hit_test: a held press captures the pointer - other widgets cannot ta
     CHECK(gui.active_id() == a);
 
     // Pressing again while A owns it changes nothing for B.
-    gui.new_frame(snap(50.0f, 50.0f, true, true));
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
     const HitTest again = gui.hit_test(b, rect);
     CHECK(!again.pressed);
     CHECK(gui.active_id() == a);
@@ -2330,12 +2425,12 @@ TEST_CASE("hit_test: a held press captures the pointer - other widgets cannot ta
 TEST_CASE("hit_test: a vanished press owner is dropped at end_frame") {
     using namespace ws::ui::gui;
     GuiContext gui;
-    const WidgetId gone = IdStack{}.current("gone");
-    const WidgetId other = IdStack{}.current("other");
+    const WidgetId gone = IdStack{}.id("gone");
+    const WidgetId other = IdStack{}.id("other");
     const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
 
     // Press on `gone`...
-    gui.new_frame(snap(50.0f, 50.0f, true, true));
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
     (void)gui.hit_test(gone, rect);
     CHECK(gui.active_id() == gone);
     gui.end_frame();
@@ -2343,11 +2438,11 @@ TEST_CASE("hit_test: a vanished press owner is dropped at end_frame") {
     // ...then the UI changes: `gone` no longer runs, but the release
     // arrives. end_frame must drop the ownership, or no widget could be
     // hot while the stale id owns the captured press.
-    gui.new_frame(snap(50.0f, 50.0f, false, false, true));
+    gui.begin_frame(snap(50.0f, 50.0f, false, false, true));
     gui.end_frame();
     CHECK(gui.active_id() == kInvalidWidgetId);
 
-    gui.new_frame(snap(50.0f, 50.0f));
+    gui.begin_frame(snap(50.0f, 50.0f));
     const HitTest hit = gui.hit_test(other, rect);
     CHECK(hit.hovered);
     CHECK(gui.hot_id() == other);
@@ -2357,19 +2452,19 @@ TEST_CASE("hit_test: while another widget owns the drag, overlapped widgets do n
     using namespace ws::ui::gui;
     GuiContext gui;
     const IdStack ids;
-    const WidgetId a = ids.current("a");
-    const WidgetId b = ids.current("b");
+    const WidgetId a = ids.id("a");
+    const WidgetId b = ids.id("b");
     const Rect a_rect{0.0f, 0.0f, 100.0f, 100.0f};
     const Rect b_rect{100.0f, 0.0f, 100.0f, 100.0f};
 
-    gui.new_frame(snap(50.0f, 50.0f, true, true));
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
     (void)gui.hit_test(a, a_rect);  // A takes the press
     gui.end_frame();
 
     // The drag moves the pointer over B: B is inside, but A owns the
     // captured pointer - B must not report hover (hot, not merely
     // inside), and nobody is hot while the pointer is off the owner.
-    gui.new_frame(snap(150.0f, 50.0f, true));
+    gui.begin_frame(snap(150.0f, 50.0f, true));
     const HitTest under = gui.hit_test(b, b_rect);
     CHECK(!under.hovered);
     CHECK(gui.hot_id() == kInvalidWidgetId);  // B could not claim
@@ -2382,13 +2477,13 @@ TEST_CASE("hit_test: while another widget owns the drag, overlapped widgets do n
 TEST_CASE("hit_test: a duplicate id in one frame is flagged and tolerated") {
     using namespace ws::ui::gui;
     GuiContext gui;
-    const WidgetId id = IdStack{}.current("dupe");
+    const WidgetId id = IdStack{}.id("dupe");
 
     // Two widgets claiming the same id (same label, same scope, no
     // push(index) between them) share hot/active - a caller bug the
     // context flags (warns once per process, visible in this log) and
     // tolerates: both queries answer, nothing corrupts.
-    gui.new_frame(snap(50.0f, 50.0f, true, true));
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
     const HitTest first = gui.hit_test(id, {0.0f, 0.0f, 100.0f, 100.0f});
     const HitTest second = gui.hit_test(id, {0.0f, 0.0f, 100.0f, 100.0f});
     CHECK(first.pressed);
@@ -2398,10 +2493,10 @@ TEST_CASE("hit_test: a duplicate id in one frame is flagged and tolerated") {
     // Distinct ids in one frame flag nothing (no false positives), and
     // the same id may reappear in the NEXT frame - the census is per
     // frame.
-    gui.new_frame(snap(50.0f, 50.0f));
+    gui.begin_frame(snap(50.0f, 50.0f));
     const HitTest again = gui.hit_test(id, {0.0f, 0.0f, 100.0f, 100.0f});
     CHECK(again.hovered);  // the same id reappears next frame, unflagged
-    const WidgetId other = IdStack{}.current("other");
+    const WidgetId other = IdStack{}.id("other");
     (void)gui.hit_test(other, {0.0f, 0.0f, 100.0f, 100.0f});  // distinct: fine
     gui.end_frame();
 }
@@ -2411,14 +2506,14 @@ TEST_CASE("hit_test: a duplicate id in one frame is flagged and tolerated") {
 TEST_CASE("hit_test: two pointers can press two widgets in the same frame") {
     using namespace ws::ui::gui;
     GuiContext gui;
-    const WidgetId a = IdStack{}.current("a");
-    const WidgetId b = IdStack{}.current("b");
+    const WidgetId a = IdStack{}.id("a");
+    const WidgetId b = IdStack{}.id("b");
     const Rect a_rect{0.0f, 0.0f, 100.0f, 100.0f};
     const Rect b_rect{100.0f, 0.0f, 100.0f, 100.0f};
 
     // Two fingers, two widgets, one frame: each press is owned by the
     // finger that made it - the single-pointer rules, run per pointer.
-    gui.new_frame(touch_frame({{1, 50.0f, 50.0f, /*pressed=*/true},
+    gui.begin_frame(touch_frame({{1, 50.0f, 50.0f, /*pressed=*/true},
                               {2, 150.0f, 50.0f, /*pressed=*/true}}));
     const HitTest hit_a = gui.hit_test(a, a_rect);
     const HitTest hit_b = gui.hit_test(b, b_rect);
@@ -2443,7 +2538,7 @@ TEST_CASE("hit_test: two pointers can press two widgets in the same frame") {
     gui.end_frame();
 
     // Both lift inside: both click, in one frame.
-    gui.new_frame(touch_frame({{1, 50.0f, 50.0f, false, true},
+    gui.begin_frame(touch_frame({{1, 50.0f, 50.0f, false, true},
                               {2, 150.0f, 50.0f, false, true}}));
     CHECK(gui.hit_test(a, a_rect).clicked);
     CHECK(gui.hit_test(b, b_rect).clicked);
@@ -2453,12 +2548,12 @@ TEST_CASE("hit_test: two pointers can press two widgets in the same frame") {
 TEST_CASE("hit_test: two pointers on one widget - one press, one click") {
     using namespace ws::ui::gui;
     GuiContext gui;
-    const WidgetId id = IdStack{}.current("both");
+    const WidgetId id = IdStack{}.id("both");
     const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
 
     // Two fingers land on the same widget: ONE press (the fold), and the
     // first-contact finger is the deterministic owner.
-    gui.new_frame(touch_frame({{5, 30.0f, 30.0f, /*pressed=*/true},
+    gui.begin_frame(touch_frame({{5, 30.0f, 30.0f, /*pressed=*/true},
                               {9, 70.0f, 70.0f, /*pressed=*/true}}));
     const HitTest hit = gui.hit_test(id, rect);
     CHECK(hit.pressed);
@@ -2471,7 +2566,7 @@ TEST_CASE("hit_test: two pointers on one widget - one press, one click") {
 
     // Both lift inside: the fold makes it one click - `clicked` is one
     // bool per frame no matter how many pointers resolved.
-    gui.new_frame(touch_frame({{5, 30.0f, 30.0f, false, true},
+    gui.begin_frame(touch_frame({{5, 30.0f, 30.0f, false, true},
                               {9, 70.0f, 70.0f, false, true}}));
     CHECK(gui.hit_test(id, rect).clicked);
     CHECK(gui.active_id(5) == kInvalidWidgetId);  // both presses resolved
@@ -2482,13 +2577,13 @@ TEST_CASE("hit_test: two pointers on one widget - one press, one click") {
 TEST_CASE("hit_test: capture is per pointer - one drag blocks no other finger") {
     using namespace ws::ui::gui;
     GuiContext gui;
-    const WidgetId a = IdStack{}.current("a");
-    const WidgetId b = IdStack{}.current("b");
+    const WidgetId a = IdStack{}.id("a");
+    const WidgetId b = IdStack{}.id("b");
     const Rect a_rect{0.0f, 0.0f, 100.0f, 100.0f};
     const Rect b_rect{100.0f, 0.0f, 100.0f, 100.0f};
 
     // Finger 1 presses A; finger 2 presses B - same frame.
-    gui.new_frame(touch_frame({{1, 50.0f, 50.0f, /*pressed=*/true},
+    gui.begin_frame(touch_frame({{1, 50.0f, 50.0f, /*pressed=*/true},
                               {2, 150.0f, 50.0f, /*pressed=*/true}}));
     CHECK(gui.hit_test(a, a_rect).pressed);
     CHECK(gui.hit_test(b, b_rect).pressed);
@@ -2497,7 +2592,7 @@ TEST_CASE("hit_test: capture is per pointer - one drag blocks no other finger") 
     // Finger 1 drags off A (still holding); finger 2 rests on B. A keeps
     // its captured press; B stays hovered - hot is per finger now, so a
     // foreign drag no longer darkens the whole frame.
-    gui.new_frame(touch_frame({{1, 10.0f, 250.0f},  // held, dragged off A
+    gui.begin_frame(touch_frame({{1, 10.0f, 250.0f},  // held, dragged off A
                               {2, 150.0f, 50.0f}}));  // held, on B
     const HitTest dragged = gui.hit_test(a, a_rect);
     const HitTest resting = gui.hit_test(b, b_rect);
@@ -2511,12 +2606,12 @@ TEST_CASE("hit_test: capture is per pointer - one drag blocks no other finger") 
 TEST_CASE("end_frame: a vanished owner's release is dropped per pointer") {
     using namespace ws::ui::gui;
     GuiContext gui;
-    const WidgetId a = IdStack{}.current("a");
-    const WidgetId b = IdStack{}.current("b");
+    const WidgetId a = IdStack{}.id("a");
+    const WidgetId b = IdStack{}.id("b");
     const Rect a_rect{0.0f, 0.0f, 100.0f, 100.0f};
     const Rect b_rect{100.0f, 0.0f, 100.0f, 100.0f};
 
-    gui.new_frame(touch_frame({{1, 50.0f, 50.0f, /*pressed=*/true},
+    gui.begin_frame(touch_frame({{1, 50.0f, 50.0f, /*pressed=*/true},
                               {2, 150.0f, 50.0f, /*pressed=*/true}}));
     CHECK(gui.hit_test(a, a_rect).pressed);
     CHECK(gui.hit_test(b, b_rect).pressed);
@@ -2525,7 +2620,7 @@ TEST_CASE("end_frame: a vanished owner's release is dropped per pointer") {
     // The UI changed: A no longer runs, so finger 1's release arrives
     // with no owner. end_frame drops it without touching finger 2, whose
     // drag of B is still live and still consuming its own frames.
-    gui.new_frame(touch_frame({{1, 50.0f, 50.0f, false, true},
+    gui.begin_frame(touch_frame({{1, 50.0f, 50.0f, false, true},
                               {2, 180.0f, 60.0f}}));
     CHECK(gui.hit_test(b, b_rect).pressed);  // B runs: finger 2 drags on
     gui.end_frame();                         // drops finger 1's orphan release
@@ -2538,14 +2633,14 @@ TEST_CASE("end_frame: a vanished owner's release is dropped per pointer") {
 TEST_CASE("hit_test: the bridged finger is mouse and touch - one click") {
     using namespace ws::ui::gui;
     GuiContext gui;
-    const WidgetId id = IdStack{}.current("one");
+    const WidgetId id = IdStack{}.id("one");
     const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
 
     // Built through touch_down only - the bridge mirrors the mouse into
     // the contact. No parking here: the duplicate IS the test.
     InputFrame press;
     press.touch_down(7, 50.0f, 50.0f);
-    gui.new_frame(press);
+    gui.begin_frame(press);
     const HitTest hit = gui.hit_test(id, rect);
     CHECK(hit.pressed);
     CHECK(hit.pointer == kMousePointerId);  // the mouse slot outranks the touch
@@ -2561,7 +2656,7 @@ TEST_CASE("hit_test: the bridged finger is mouse and touch - one click") {
     lift.touch_up(7, 50.0f, 50.0f, false);  // mirrors the mouse's release
     lift.touches[0].pressed = false;  // down and up in one frame: the press
     lift.mouse_pressed[0] = false;    // edge is not this frame's fact
-    gui.new_frame(lift);
+    gui.begin_frame(lift);
     const HitTest released = gui.hit_test(id, rect);
     CHECK(released.released);
     CHECK(released.clicked);
@@ -2573,12 +2668,12 @@ TEST_CASE("persistent_state: keys values by (type, id) for the context's lifetim
     using namespace ws::ui::gui;
     GuiContext gui;
     const IdStack ids;
-    const WidgetId a = ids.current("a");
-    const WidgetId b = ids.current("b");
+    const WidgetId a = ids.id("a");
+    const WidgetId b = ids.id("b");
 
     // First touch default-constructs; entries survive frames.
     gui.persistent_state<float>(a) = 1.5f;
-    gui.new_frame(snap(0.0f, 0.0f));
+    gui.begin_frame(snap(0.0f, 0.0f));
     gui.end_frame();
     CHECK(gui.persistent_state<float>(a) == 1.5f);
 
@@ -2745,10 +2840,10 @@ TEST_CASE("button: a full click over the laid-out rect fires exactly once") {
     using namespace ws::ui::gui;
     GuiContext gui;
     LayoutCursor layout;
-    const WidgetId id = IdStack{}.current("fire");
+    const WidgetId id = IdStack{}.id("fire");
 
     // Frame 1: press inside the button's rect - pressed, not yet clicked.
-    gui.new_frame(snap(60.0f, 12.0f, true, true));
+    gui.begin_frame(snap(60.0f, 12.0f, true, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(!button(gui, layout, kDefaultChrome, "fire"));
     layout.end_panel();
@@ -2757,7 +2852,7 @@ TEST_CASE("button: a full click over the laid-out rect fires exactly once") {
 
     // Frame 2: the same pass again - the release lands on the same rect
     // and completes the click.
-    gui.new_frame(snap(60.0f, 12.0f, false, false, true));
+    gui.begin_frame(snap(60.0f, 12.0f, false, false, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(button(gui, layout, kDefaultChrome, "fire"));
     layout.end_panel();
@@ -2765,7 +2860,7 @@ TEST_CASE("button: a full click over the laid-out rect fires exactly once") {
     gui.end_frame();
 
     // Frame 3: no edges - the click is over and does not repeat.
-    gui.new_frame(snap(60.0f, 12.0f));
+    gui.begin_frame(snap(60.0f, 12.0f));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(!button(gui, layout, kDefaultChrome, "fire"));
     layout.end_panel();
@@ -2780,7 +2875,7 @@ TEST_CASE("button: stacked buttons hit-test their own laid-out rects") {
     // A click that starts and ends between two frames, aimed at the
     // SECOND button (its rect is (0, 24, 120, 24) - the first stacked
     // above it). "first" must not fire.
-    gui.new_frame(snap(60.0f, 36.0f, false, true, true));
+    gui.begin_frame(snap(60.0f, 36.0f, false, true, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(!button(gui, layout, kDefaultChrome, "first"));
     CHECK(button(gui, layout, kDefaultChrome, "second"));
@@ -2793,14 +2888,14 @@ TEST_CASE("button: hover alone claims hot but never clicks") {
     GuiContext gui;
     LayoutCursor layout;
 
-    gui.new_frame(snap(60.0f, 12.0f));  // pointer over "first", no press
+    gui.begin_frame(snap(60.0f, 12.0f));  // pointer over "first", no press
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(!button(gui, layout, kDefaultChrome, "first"));
     CHECK(!button(gui, layout, kDefaultChrome, "second"));
     layout.end_panel();
     // The hover claimed hot for "first" (the second's rect misses the
     // pointer, so it claimed nothing); nothing became active.
-    CHECK(gui.hot_id() == IdStack{}.current("first"));
+    CHECK(gui.hot_id() == IdStack{}.id("first"));
     CHECK(gui.active_id() == kInvalidWidgetId);
     gui.end_frame();
 }
@@ -2816,7 +2911,7 @@ TEST_CASE("button: the theme drives the widget's metrics") {
 
     GuiContext gui;
     LayoutCursor layout;
-    gui.new_frame(snap(60.0f, 60.0f, false, true, true));
+    gui.begin_frame(snap(60.0f, 60.0f, false, true, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(!button(gui, layout, tall, "first"));
     CHECK(button(gui, layout, tall, "second"));
@@ -2858,7 +2953,7 @@ TEST_CASE("checkbox: a full click toggles the bool exactly once") {
     bool value = false;
 
     // Idle: pointer away, no edges - nothing toggles.
-    gui.new_frame(snap(300.0f, 300.0f));
+    gui.begin_frame(snap(300.0f, 300.0f));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(!checkbox(gui, layout, kDefaultChrome, "signal", value));
     layout.end_panel();
@@ -2866,7 +2961,7 @@ TEST_CASE("checkbox: a full click toggles the bool exactly once") {
     gui.end_frame();
 
     // Press inside (the (0,0) row is 68x24): owned, but no flip yet.
-    gui.new_frame(snap(4.0f, 4.0f, true, true));
+    gui.begin_frame(snap(4.0f, 4.0f, true, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(!checkbox(gui, layout, kDefaultChrome, "signal", value));
     layout.end_panel();
@@ -2874,7 +2969,7 @@ TEST_CASE("checkbox: a full click toggles the bool exactly once") {
     gui.end_frame();
 
     // Release inside: the click lands - toggled true, reported once.
-    gui.new_frame(snap(4.0f, 4.0f, false, false, true));
+    gui.begin_frame(snap(4.0f, 4.0f, false, false, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(checkbox(gui, layout, kDefaultChrome, "signal", value));
     layout.end_panel();
@@ -2882,7 +2977,7 @@ TEST_CASE("checkbox: a full click toggles the bool exactly once") {
     gui.end_frame();
 
     // Next frame: the click is over; the value holds.
-    gui.new_frame(snap(4.0f, 4.0f));
+    gui.begin_frame(snap(4.0f, 4.0f));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(!checkbox(gui, layout, kDefaultChrome, "signal", value));
     layout.end_panel();
@@ -2898,7 +2993,7 @@ TEST_CASE("slider: a press jumps to the pointer and the drag tracks it") {
 
     // Press at the middle of the (0,0,120,24) track: click-to-set jumps
     // the value there on the press frame itself.
-    gui.new_frame(snap(60.0f, 12.0f, true, true));
+    gui.begin_frame(snap(60.0f, 12.0f, true, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(slider_float(gui, layout, kDefaultChrome, "amp", value, 0.0f, 1.0f));
     layout.end_panel();
@@ -2906,7 +3001,7 @@ TEST_CASE("slider: a press jumps to the pointer and the drag tracks it") {
     gui.end_frame();
 
     // Hold and move to 3/4: the drag tracks the pointer.
-    gui.new_frame(snap(90.0f, 12.0f, true));
+    gui.begin_frame(snap(90.0f, 12.0f, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(slider_float(gui, layout, kDefaultChrome, "amp", value, 0.0f, 1.0f));
     layout.end_panel();
@@ -2915,7 +3010,7 @@ TEST_CASE("slider: a press jumps to the pointer and the drag tracks it") {
 
     // Release OUTSIDE the track: no click, the drag is over, and the
     // value parks wherever it landed - nothing maps on the release frame.
-    gui.new_frame(snap(200.0f, 12.0f, false, false, true));
+    gui.begin_frame(snap(200.0f, 12.0f, false, false, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(!slider_float(gui, layout, kDefaultChrome, "amp", value, 0.0f, 1.0f));
     layout.end_panel();
@@ -2934,7 +3029,7 @@ TEST_CASE("slider: two sliders drag under two pointers at once") {
     // amp's track spans y 0..24, freq's y 24..48, both 120 wide). Each
     // press jump-sets its OWN slider - before multi-pointer, both values
     // mapped the mouse, and a second finger was invisible.
-    gui.new_frame(touch_frame({{1, 60.0f, 12.0f, /*pressed=*/true},
+    gui.begin_frame(touch_frame({{1, 60.0f, 12.0f, /*pressed=*/true},
                               {2, 30.0f, 36.0f, /*pressed=*/true}}));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(slider_float(gui, layout, kDefaultChrome, "amp", amp, 0.0f, 1.0f));
@@ -2946,7 +3041,7 @@ TEST_CASE("slider: two sliders drag under two pointers at once") {
 
     // Both held, both moved - each value follows ITS finger: never the
     // other pointer, never the parked mouse.
-    gui.new_frame(touch_frame({{1, 90.0f, 12.0f},
+    gui.begin_frame(touch_frame({{1, 90.0f, 12.0f},
                               {2, 96.0f, 36.0f}}));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(slider_float(gui, layout, kDefaultChrome, "amp", amp, 0.0f, 1.0f));
@@ -2966,7 +3061,7 @@ TEST_CASE("slider: clamps and a degenerate range") {
     // before the frame saw the button held) still click-to-sets via the
     // clicked path.
     float flat = 5.0f;
-    gui.new_frame(snap(10.0f, 12.0f, false, true, true));
+    gui.begin_frame(snap(10.0f, 12.0f, false, true, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(slider_float(gui, layout, kDefaultChrome, "flat", flat, 3.0f, 3.0f));
     layout.end_panel();
@@ -2976,7 +3071,7 @@ TEST_CASE("slider: clamps and a degenerate range") {
     // An out-of-range value snaps in on the first interaction: pressing at
     // x=10 on a 0..1 track maps to 1/12 - the 2.0 never renders or sticks.
     float value = 2.0f;
-    gui.new_frame(snap(10.0f, 12.0f, true, true));
+    gui.begin_frame(snap(10.0f, 12.0f, true, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(slider_float(gui, layout, kDefaultChrome, "amp", value, 0.0f, 1.0f));
     layout.end_panel();
@@ -2991,7 +3086,7 @@ TEST_CASE("slider_int: float math, integer write-back") {
     int samples = 128;
 
     // Mid-track press on 4..512: 4 + 0.5 * 508 = 258, exactly.
-    gui.new_frame(snap(60.0f, 12.0f, true, true));
+    gui.begin_frame(snap(60.0f, 12.0f, true, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(slider_int(gui, layout, kDefaultChrome, "samples", samples, 4, 512));
     layout.end_panel();
@@ -3000,7 +3095,7 @@ TEST_CASE("slider_int: float math, integer write-back") {
 
     // Release inside: the clicked path re-maps the same pointer - same
     // value, so no change is reported and the int is not rewritten.
-    gui.new_frame(snap(60.0f, 12.0f, false, false, true));
+    gui.begin_frame(snap(60.0f, 12.0f, false, false, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(!slider_int(gui, layout, kDefaultChrome, "samples", samples, 4, 512));
     layout.end_panel();
@@ -3014,9 +3109,9 @@ TEST_CASE("panel: begin scopes ids and flows children; end restores") {
     LayoutCursor layout;
     const ChromeTheme& theme = kDefaultChrome;
 
-    const WidgetId outside = IdStack{}.current("btn");
+    const WidgetId outside = IdStack{}.id("btn");
 
-    gui.new_frame(snap(400.0f, 400.0f));  // pointer away: no interactions
+    gui.begin_frame(snap(400.0f, 400.0f));  // pointer away: no interactions
     const Rect content =
         begin_panel(gui, layout, theme, "demo", {10.0f, 10.0f, 200.0f, 100.0f});
     // Content = bounds inset by the theme padding.
@@ -3026,13 +3121,13 @@ TEST_CASE("panel: begin scopes ids and flows children; end restores") {
     CHECK(content.height == doctest::Approx(100.0f - 2.0f * theme.padding));
     // Children id under the panel's scope.
     REQUIRE(gui.ids().depth() == 1);
-    CHECK(gui.ids().current("btn") != outside);
+    CHECK(gui.ids().id("btn") != outside);
     // A child button lays out inside the content rect and behaves.
     CHECK(!button(gui, layout, theme, "btn"));
     end_panel(gui, layout);
     // The id scope is back to the root: the same label means the same id.
     CHECK(gui.ids().depth() == 0);
-    CHECK(gui.ids().current("btn") == outside);
+    CHECK(gui.ids().id("btn") == outside);
 
     // The layout stack unwound too: a fresh panel flows from its own
     // bounds, not from where the last one left the cursor.
@@ -3048,7 +3143,7 @@ TEST_CASE("panel: nesting stacks; each end pops exactly one level") {
     GuiContext gui;
     LayoutCursor layout;
 
-    gui.new_frame(snap(400.0f, 400.0f));
+    gui.begin_frame(snap(400.0f, 400.0f));
     const Rect outer =
         begin_panel(gui, layout, kDefaultChrome, "outer", {0.0f, 0.0f, 300.0f, 300.0f});
     REQUIRE(gui.ids().depth() == 1);
@@ -3061,8 +3156,8 @@ TEST_CASE("panel: nesting stacks; each end pops exactly one level") {
     // A widget in the innermost panel ids under outer;inner - distinct
     // from the same label at the root, so the two can never fight over
     // hot/active.
-    const WidgetId root_view = IdStack{}.current("signal");
-    CHECK(gui.ids().current("signal") != root_view);
+    const WidgetId root_view = IdStack{}.id("signal");
+    CHECK(gui.ids().id("signal") != root_view);
     bool value = false;
     CHECK(!checkbox(gui, layout, kDefaultChrome, "signal", value));
     CHECK(value == false);
@@ -3083,14 +3178,14 @@ TEST_CASE("button: an icon rides along; corner variants keep the click contract"
     // every other widget draw) still lays out, hit-tests and clicks exactly
     // like a plain one: the icon is presentation, not a second widget.
     const ws::ui::r2d::Sprite icon{7, 3};  // never dereferenced here
-    gui.new_frame(snap(60.0f, 12.0f, false, true, true));
+    gui.begin_frame(snap(60.0f, 12.0f, false, true, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(button(gui, layout, kDefaultChrome, "fire", 120.0f, icon));
     layout.end_panel();
     gui.end_frame();
 
     // The sentinel sprite (the default argument) is the no-icon button.
-    gui.new_frame(snap(60.0f, 12.0f, false, true, true));
+    gui.begin_frame(snap(60.0f, 12.0f, false, true, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(button(gui, layout, kDefaultChrome, "plain"));
     layout.end_panel();
@@ -3100,7 +3195,7 @@ TEST_CASE("button: an icon rides along; corner variants keep the click contract"
     // drawing, never the interaction contract.
     ChromeTheme square = kDefaultChrome;
     square.corner_radius = 0.0f;
-    gui.new_frame(snap(60.0f, 12.0f, false, true, true));
+    gui.begin_frame(snap(60.0f, 12.0f, false, true, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(button(gui, layout, square, "square"));
     layout.end_panel();
@@ -3114,7 +3209,7 @@ TEST_CASE("button: an icon rides along; corner variants keep the click contract"
     ChromeTheme round = kDefaultChrome;
     round.corner_radius = 100.0f;
     bool value = false;
-    gui.new_frame(snap(4.0f, 4.0f, false, true, true));
+    gui.begin_frame(snap(4.0f, 4.0f, false, true, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(checkbox(gui, layout, round, "marked", value));
     layout.end_panel();
@@ -3134,7 +3229,7 @@ TEST_CASE("tab_bar: a click moves the selection; the strip is one line") {
     // Tabs of 60 px on a 24-tall line: alpha (0,0,60,24), beta (60,0,..),
     // gamma (120,0,..). A same-frame click on beta's rect selects it and
     // reports exactly once.
-    gui.new_frame(snap(90.0f, 12.0f, false, true, true));
+    gui.begin_frame(snap(90.0f, 12.0f, false, true, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(tab_bar(gui, layout, kDefaultChrome, "views", kTabs, 3, active,
                   60.0f));
@@ -3143,7 +3238,7 @@ TEST_CASE("tab_bar: a click moves the selection; the strip is one line") {
     CHECK(active == 1);
 
     // Clicking the already-selected tab: no move, no report.
-    gui.new_frame(snap(90.0f, 12.0f, false, true, true));
+    gui.begin_frame(snap(90.0f, 12.0f, false, true, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(!tab_bar(gui, layout, kDefaultChrome, "views", kTabs, 3, active,
                    60.0f));
@@ -3153,7 +3248,7 @@ TEST_CASE("tab_bar: a click moves the selection; the strip is one line") {
 
     // The strip occupied ONE line: the widget placed after it starts
     // below the 24-tall tabs, not 72 down.
-    gui.new_frame(snap(400.0f, 400.0f));
+    gui.begin_frame(snap(400.0f, 400.0f));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     (void)tab_bar(gui, layout, kDefaultChrome, "views", kTabs, 3, active,
                   60.0f);
@@ -3163,7 +3258,7 @@ TEST_CASE("tab_bar: a click moves the selection; the strip is one line") {
     gui.end_frame();
 
     // A two-frame click back onto alpha: press frame selects nothing...
-    gui.new_frame(snap(30.0f, 12.0f, true, true));
+    gui.begin_frame(snap(30.0f, 12.0f, true, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(!tab_bar(gui, layout, kDefaultChrome, "views", kTabs, 3, active,
                    60.0f));
@@ -3171,7 +3266,7 @@ TEST_CASE("tab_bar: a click moves the selection; the strip is one line") {
     gui.end_frame();
     CHECK(active == 1);
     // ...release frame completes it.
-    gui.new_frame(snap(30.0f, 12.0f, false, false, true));
+    gui.begin_frame(snap(30.0f, 12.0f, false, false, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(tab_bar(gui, layout, kDefaultChrome, "views", kTabs, 3, active,
                   60.0f));
@@ -3182,7 +3277,7 @@ TEST_CASE("tab_bar: a click moves the selection; the strip is one line") {
     // An out-of-range active selects nothing - until a click brings it
     // back in range.
     active = 7;
-    gui.new_frame(snap(150.0f, 12.0f, false, true, true));
+    gui.begin_frame(snap(150.0f, 12.0f, false, true, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(tab_bar(gui, layout, kDefaultChrome, "views", kTabs, 3, active,
                   60.0f));
@@ -3192,7 +3287,7 @@ TEST_CASE("tab_bar: a click moves the selection; the strip is one line") {
 
     // count <= 0: nothing placed, nothing selected, the state untouched.
     int none = 5;
-    gui.new_frame(snap(400.0f, 400.0f));
+    gui.begin_frame(snap(400.0f, 400.0f));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(!tab_bar(gui, layout, kDefaultChrome, "empty", nullptr, 0, none));
     const Rect empty_after = layout.next(10.0f, 10.0f);
@@ -3216,9 +3311,9 @@ TEST_CASE("tab_bar: index scopes keep duplicate tab labels distinct") {
     IdStack probe;
     probe.push("views");
     probe.push(2);
-    const WidgetId tab_two = probe.current("tab");
+    const WidgetId tab_two = probe.id("tab");
 
-    gui.new_frame(snap(150.0f, 12.0f, true, true));  // press on gamma
+    gui.begin_frame(snap(150.0f, 12.0f, true, true));  // press on gamma
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(!tab_bar(gui, layout, kDefaultChrome, "views", kSame, 3, active,
                    60.0f));
@@ -3227,7 +3322,7 @@ TEST_CASE("tab_bar: index scopes keep duplicate tab labels distinct") {
     gui.end_frame();
 
     // Release on the same tab: the click lands on gamma only.
-    gui.new_frame(snap(150.0f, 12.0f, false, false, true));
+    gui.begin_frame(snap(150.0f, 12.0f, false, false, true));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(tab_bar(gui, layout, kDefaultChrome, "views", kSame, 3, active,
                   60.0f));
@@ -3248,7 +3343,7 @@ TEST_CASE("scroll: the wheel moves the flow - clamps at both ends and persists")
     // on (-1 = none); headless, the draws drop and only layout,
     // hit-testing and the persistent scroll state act.
     const auto pass = [&](const InputFrame& frame, int rows) {
-        gui.new_frame(frame);
+        gui.begin_frame(frame);
         const Rect view = begin_scroll_panel(
             gui, layout, kDefaultChrome, "list", {0.0f, 0.0f, 200.0f, 100.0f});
         int clicked = -1;
@@ -3365,7 +3460,7 @@ TEST_CASE("scroll: two regions keep independent offsets") {
     // Two side-by-side panels, five 24-tall rows each (120 px of content,
     // range 120 - 76 = 44). Returns which row a click landed on per panel.
     const auto pass = [&](const InputFrame& frame, int& a_click, int& b_click) {
-        gui.new_frame(frame);
+        gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "left",
                                  {0.0f, 0.0f, 120.0f, 100.0f});
         a_click = -1;
@@ -3429,7 +3524,7 @@ TEST_CASE("scroll: nests inside a panel and measures its own flow") {
     // resumes - the scroll panel pushes on top of the outer panel's
     // pushes, and its extent must measure ITS rows, not the outer's.
     const auto pass = [&](const InputFrame& frame, int& clicked) {
-        gui.new_frame(frame);
+        gui.begin_frame(frame);
         (void)begin_panel(gui, layout, theme, "page",
                           {0.0f, 0.0f, 200.0f, 200.0f});
         (void)button(gui, layout, theme, "header", 120.0f);  // at (12, 12)
@@ -3454,7 +3549,7 @@ TEST_CASE("scroll: nests inside a panel and measures its own flow") {
 
     // The depths stack: the scroll region's scope rides on the outer
     // panel's, and each end pops exactly its own push.
-    gui.new_frame(snap(300.0f, 300.0f));
+    gui.begin_frame(snap(300.0f, 300.0f));
     (void)begin_panel(gui, layout, theme, "page", {0.0f, 0.0f, 200.0f, 200.0f});
     CHECK(gui.ids().depth() == 1);
     (void)begin_scroll_panel(gui, layout, theme, "list",
@@ -3489,7 +3584,7 @@ TEST_CASE("scroll: a bounds-too-small viewport is empty and inert") {
     // Bounds smaller than the padding: the viewport clamps empty (never
     // backwards), an empty rect contains no pointer, so the wheel has
     // nothing to gate on - and the pushes still balance.
-    gui.new_frame(snap(50.0f, 50.0f));
+    gui.begin_frame(snap(50.0f, 50.0f));
     const Rect view = begin_scroll_panel(gui, layout, kDefaultChrome, "tiny",
                                          {0.0f, 0.0f, 4.0f, 4.0f});
     CHECK(view.x == 12.0f);  // the inset origin stays honest
@@ -3504,7 +3599,7 @@ TEST_CASE("scroll: a bounds-too-small viewport is empty and inert") {
 
     // An end without its begin decays to harmless no-ops, like every
     // other underflow pop in the module.
-    gui.new_frame(snap(50.0f, 50.0f));
+    gui.begin_frame(snap(50.0f, 50.0f));
     end_scroll_panel(gui, layout, kDefaultChrome);
     CHECK(gui.ids().depth() == 0);
     CHECK(layout.depth() == 0);
@@ -3525,7 +3620,7 @@ TEST_CASE("scroll: a touch drag scrolls 1:1 and cancels the press it started on"
     // side table (ScrollState is the lib's private type; the clicks ARE
     // the observable).
     const auto pass = [&](const InputFrame& frame) {
-        gui.new_frame(frame);
+        gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
                                  {0.0f, 0.0f, 200.0f, 100.0f});
         int clicked = -1;
@@ -3544,7 +3639,7 @@ TEST_CASE("scroll: a touch drag scrolls 1:1 and cancels the press it started on"
         IdStack ids;
         ids.push("list");
         ids.push(row);
-        return ids.current("row");
+        return ids.id("row");
     };
 
     // Frame 1: finger 7 presses row 2 (y 60..84). The child claims the
@@ -3580,7 +3675,7 @@ TEST_CASE("scroll: a tap inside the threshold stays the child's click") {
     LayoutCursor layout;
 
     const auto pass = [&](const InputFrame& frame) {
-        gui.new_frame(frame);
+        gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
                                  {0.0f, 0.0f, 200.0f, 100.0f});
         int clicked = -1;
@@ -3599,7 +3694,7 @@ TEST_CASE("scroll: a tap inside the threshold stays the child's click") {
         IdStack ids;
         ids.push("list");
         ids.push(row);
-        return ids.current("row");
+        return ids.id("row");
     };
 
     // Press row 0, wobble 4 px - under the threshold, the press stays
@@ -3625,7 +3720,7 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
     // rule, the mouse's copy of the press would survive the cancel and
     // click the row on release.
     const auto pass = [&](const InputFrame& frame) {
-        gui.new_frame(frame);
+        gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
                                  {0.0f, 0.0f, 200.0f, 100.0f});
         int clicked = -1;
@@ -3644,7 +3739,7 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
         IdStack ids;
         ids.push("list");
         ids.push(row);
-        return ids.current("row");
+        return ids.id("row");
     };
 
     // Frame 1: contact 7 presses row 2 - the mouse mirrors the press, so
@@ -3695,7 +3790,7 @@ TEST_CASE("scroll: two fingers drag one region, one lift confuses nothing") {
     LayoutCursor layout;
 
     const auto pass = [&](const InputFrame& frame) {
-        gui.new_frame(frame);
+        gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
                                  {0.0f, 0.0f, 200.0f, 100.0f});
         int clicked = -1;
@@ -3743,7 +3838,7 @@ TEST_CASE("scroll: drag_threshold is the theme's metric") {
     sticky.drag_threshold = 100.0f;
 
     const auto pass = [&](const InputFrame& frame) {
-        gui.new_frame(frame);
+        gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, sticky, "list",
                                  {0.0f, 0.0f, 200.0f, 100.0f});
         int clicked = -1;
@@ -3762,7 +3857,7 @@ TEST_CASE("scroll: drag_threshold is the theme's metric") {
         IdStack ids;
         ids.push("list");
         ids.push(row);
-        return ids.current("row");
+        return ids.id("row");
     };
 
     // A 20 px excursion - past kDefaultChrome.drag_threshold, well under
@@ -4073,7 +4168,7 @@ TEST_CASE("gui labels draw through the theme font") {
     r.begin_screen();
     GuiContext gui;
     LayoutCursor layout;
-    gui.new_frame(snap(500.0f, 500.0f));
+    gui.begin_frame(snap(500.0f, 500.0f));
     (void)begin_panel(gui, layout, theme, "root",
                       {0.0f, 0.0f, 200.0f, 100.0f});
     button(gui, layout, theme, "AB", 120.0f);  // advance 15, fits the face

@@ -140,7 +140,7 @@ bool line_quad3d(float x0, float y0, float z0, float x1, float y1, float z1,
 
 class BatchCore {
 public:
-    void new_frame();
+    void begin_frame();
     // Closes the current chunk (if any) and opens one with the given VP,
     // clip and depth mode. Returns false at the chunk cap - the segment
     // stays closed and its draws are dropped.

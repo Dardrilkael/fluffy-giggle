@@ -117,7 +117,7 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     // One seam: the id keys the hit-test AND any persistent state; the
     // rect is layout's answer for this frame; the draws land exactly
     // where hit-testing says the widget is.
-    const WidgetId id = gui.ids().current(label);
+    const WidgetId id = gui.ids().id(label);
     const Rect rect = layout.next(width, theme.control_height);
     const HitTest hit = gui.hit_test(id, rect);
 
@@ -176,7 +176,7 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 
 bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
               const char* label, bool& value) {
-    const WidgetId id = gui.ids().current(label);
+    const WidgetId id = gui.ids().id(label);
 
     // The row auto-sizes: box, a gap, the label (its advance - the font's
     // measure or the fontless per-char estimate; never clamped, so a
@@ -235,7 +235,7 @@ bool slider_float(GuiContext& gui, LayoutCursor& layout,
                   const ChromeTheme& theme, const char* label, float& value,
                   float min, float max, float width) {
     width = std::max(width, 0.0f);  // a negative width would draw a mirrored quad
-    const WidgetId id = gui.ids().current(label);
+    const WidgetId id = gui.ids().id(label);
     const Rect rect = layout.next(width, theme.control_height);
     const HitTest hit = gui.hit_test(id, rect);
 
@@ -348,7 +348,7 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     for (int i = 0; i < count; ++i) {
         gui.ids().push(i);
         const Rect rect = layout.next(width, theme.control_height);
-        const HitTest hit = gui.hit_test(gui.ids().current("tab"), rect);
+        const HitTest hit = gui.hit_test(gui.ids().id("tab"), rect);
 
         // Face priority: press feedback even on the selected tab, then
         // the selection accent, then hover, then idle.
@@ -449,7 +449,7 @@ Rect begin_scroll_panel(GuiContext& gui, LayoutCursor& layout,
     // threading a handle through (begin pushes, end pops - both read
     // while the scope is live).
     gui.ids().push(label);
-    const WidgetId scroll_id = gui.ids().current("scroll");
+    const WidgetId scroll_id = gui.ids().id("scroll");
     ScrollState& scroll = gui.persistent_state<ScrollState>(scroll_id);
 
     // The wheel moves the offset while the pointer is inside the viewport.
@@ -457,7 +457,7 @@ Rect begin_scroll_panel(GuiContext& gui, LayoutCursor& layout,
     // (content shifted up) decreases. Clamped against the range measured
     // at the last end_scroll_panel: this frame's content does not exist
     // yet, and a fresh panel has no range at all.
-    if (contains(viewport, gui.input().mouse_x, gui.input().mouse_y) &&
+    if (viewport.contains(gui.input().mouse_x, gui.input().mouse_y) &&
         gui.input().scroll_dy != 0.0f) {
         scroll.offset -= gui.input().scroll_dy * theme.scroll_speed;
     }
@@ -472,7 +472,7 @@ Rect begin_scroll_panel(GuiContext& gui, LayoutCursor& layout,
     // frame on (known cosmetic limit: a drag-tracking child, a slider,
     // can move by < threshold px before the cancel). The mouse keeps the
     // wheel - a desktop drag is a widget press, not a scroll gesture.
-    const WidgetId drag_id = gui.ids().current("drag");
+    const WidgetId drag_id = gui.ids().id("drag");
     ScrollDragState& drag = gui.persistent_state<ScrollDragState>(drag_id);
     const InputFrame& input = gui.input();
     const int touch_count =
@@ -501,7 +501,7 @@ Rect begin_scroll_panel(GuiContext& gui, LayoutCursor& layout,
         }
         if (track->id == kNoPointer) {
             // Untracked: arm only on a fresh press inside the viewport.
-            if (point.pressed && contains(viewport, point.x, point.y)) {
+            if (point.pressed && viewport.contains(point.x, point.y)) {
                 track->id = point.id;
                 track->press_y = point.y;
                 track->last_y = point.y;
@@ -550,7 +550,7 @@ void end_scroll_panel(GuiContext& gui, LayoutCursor& layout,
                       const ChromeTheme& theme) {
     // The same entry begin_scroll_panel keyed, re-derived inside the
     // still-pushed scope.
-    const WidgetId scroll_id = gui.ids().current("scroll");
+    const WidgetId scroll_id = gui.ids().id("scroll");
     ScrollState& scroll = gui.persistent_state<ScrollState>(scroll_id);
 
     // The real viewport: this frame's (virtual, shifted) content rect,

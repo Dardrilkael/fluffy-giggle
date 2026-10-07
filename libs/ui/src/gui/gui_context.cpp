@@ -21,7 +21,7 @@ bool duplicate_id_warned = false;
 
 // --- GuiContext: per-pointer hot/active hit-testing + persistent side tables ------
 
-void GuiContext::new_frame(const InputFrame& input) {
+void GuiContext::begin_frame(const InputFrame& input) {
     input_ = input;
     hit_ids_.clear();  // this frame's hit-test census starts empty
     // Adopt the frame's pointers: slot 0 is the mouse by construction,
@@ -100,53 +100,72 @@ HitTest GuiContext::hit_test(WidgetId id, const Rect& rect) {
                    "same-label siblings need ids().push(index) between them");
     }
 
-    // Today's single-pointer rules, run once per pointer, the results
-    // OR-folded into one HitTest: a two-pointer press on one widget is
-    // one press, and capture is per pointer - a drag owned by one finger
-    // does not stop another from hovering or pressing elsewhere. Slot
-    // order is mouse first, then touches in first-contact order; the
-    // first slot with a claim wins `hit.pointer` (deterministic - the
-    // bridged finger resolves to the mouse it mirrors).
+    // The per-pointer rules live in hit_test_pointer; this fold is where
+    // they become one widget-facing answer: ORs across pointers, so a
+    // two-pointer press on one widget is one press while capture stays
+    // per pointer (a drag owned by one finger does not stop another from
+    // hovering or pressing elsewhere). Slot order is mouse first, then
+    // touches in first-contact order; the first slot with a claim wins
+    // `hit.pointer` (deterministic - the bridged finger resolves to the
+    // mouse it mirrors).
     HitTest hit;
     const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
     for (int p = 0; p < count; ++p) {
-        const PointerView& view = frame_pointers_[static_cast<std::size_t>(p)];
-        PointerTrack& track = pointers_[static_cast<std::size_t>(p)];
-        const bool inside = contains(rect, view.x, view.y);
-
-        // While this pointer's press is owned, the pointer is captured:
-        // only the owner can be hot. A cancelled pointer (its press was
-        // consumed by a gesture) claims nothing at all. Otherwise the
-        // widget under this pointer claims hot; later widgets draw on
-        // top, so a later claim correctly wins.
-        if (inside && !track.cancelled &&
-            (track.active == kInvalidWidgetId || track.active == id)) {
-            track.hot = id;
-        }
-        // Hot, not merely inside: this pointer has ONE interactive
-        // winner, so a widget overlapped by this pointer's drag does
-        // not report hover.
-        hit.hovered = hit.hovered || track.hot == id;
-        // Pressed-inside claims this pointer's press, if none is owned.
-        // The cancelled guard is belt-and-braces: a consumed gesture
-        // never re-arms mid-flight.
-        if (inside && view.pressed && !track.cancelled &&
-            track.active == kInvalidWidgetId) {
-            track.active = id;
-        }
-        if (track.active == id) {
-            hit.pressed = true;  // owns a live press, wherever the pointer is
-            if (hit.pointer == kNoPointer) {
-                hit.pointer = view.id;  // first slot with a claim sticks
-            }
-            if (view.released) {
-                hit.released = true;   // the drag ended, inside or out
-                hit.clicked = hit.clicked || inside;  // full click only if inside
-                track.active = kInvalidWidgetId;  // the press is over either way
-            }
+        const HitTest part = hit_test_pointer(id, rect, p);
+        hit.hovered = hit.hovered || part.hovered;
+        hit.pressed = hit.pressed || part.pressed;
+        hit.clicked = hit.clicked || part.clicked;
+        hit.released = hit.released || part.released;
+        if (hit.pointer == kNoPointer) {
+            hit.pointer = part.pointer;  // first slot with a claim sticks
         }
     }
     return hit;
+}
+
+// One pointer's whole say in hit_test: claims hot/active on its slot's
+// track and reports what this slot saw. Only hit_test calls it, slot by
+// slot in its order - the track is shared per pointer, so any other
+// caller would be a call-order hazard.
+HitTest GuiContext::hit_test_pointer(WidgetId id, const Rect& rect,
+                                     int slot) {
+    const PointerView& view = frame_pointers_[static_cast<std::size_t>(slot)];
+    PointerTrack& track = pointers_[static_cast<std::size_t>(slot)];
+    const bool inside = rect.contains(view.x, view.y);
+
+    // While this pointer's press is owned, the pointer is captured:
+    // only the owner can be hot. A cancelled pointer (its press was
+    // consumed by a gesture) claims nothing at all. Otherwise the
+    // widget under this pointer claims hot; later widgets draw on
+    // top, so a later claim correctly wins.
+    if (inside && !track.cancelled &&
+        (track.active == kInvalidWidgetId || track.active == id)) {
+        track.hot = id;
+    }
+
+    HitTest part;
+    // Hot, not merely inside: this pointer has ONE interactive
+    // winner, so a widget overlapped by this pointer's drag does
+    // not report hover.
+    part.hovered = track.hot == id;
+    // Pressed-inside claims this pointer's press, if none is owned.
+    // The cancelled guard is belt-and-braces: a consumed gesture
+    // never re-arms mid-flight.
+    if (inside && view.pressed && !track.cancelled &&
+        track.active == kInvalidWidgetId) {
+        track.active = id;
+    }
+    if (track.active == id) {
+        part.pressed = true;  // owns a live press, wherever the pointer is
+        part.pointer = view.id;  // this slot's claim; the fold keeps the
+                                // first slot that has one
+        if (view.released) {
+            part.released = true;   // the drag ended, inside or out
+            part.clicked = inside;  // full click only if inside
+            track.active = kInvalidWidgetId;  // the press is over either way
+        }
+    }
+    return part;
 }
 
 WidgetId GuiContext::hot_id(std::uint32_t pointer) const {
@@ -167,6 +186,16 @@ WidgetId GuiContext::active_id(std::uint32_t pointer) const {
         }
     }
     return kInvalidWidgetId;  // no such pointer this frame
+}
+
+bool GuiContext::is_hot(WidgetId id, std::uint32_t pointer) const {
+    // kInvalidWidgetId is "no widget" - it must never match, even though
+    // hot_id() returns it for an idle or unknown pointer.
+    return id != kInvalidWidgetId && hot_id(pointer) == id;
+}
+
+bool GuiContext::is_active(WidgetId id, std::uint32_t pointer) const {
+    return id != kInvalidWidgetId && active_id(pointer) == id;
 }
 
 std::uint32_t GuiContext::owning_pointer(WidgetId id) const {

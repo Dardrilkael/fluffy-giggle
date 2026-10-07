@@ -95,7 +95,7 @@ VkRect2D chunk_scissor(const batch::Chunk& chunk, float fb_width,
 void Renderer2D::frame_begin(float fb_width, float fb_height) {
     fb_width_ = fb_width;
     fb_height_ = fb_height;
-    batch_.new_frame();
+    batch_.begin_frame();
     commands_.clear();  // capacity kept - the frame reuses the arena
     current_epoch_ = 0;
     camera_stashed_ = false;
@@ -184,7 +184,7 @@ void Renderer2D::frame_drop() {
     current_perspective_ = false;
     clip_depth_ = 0;
     commands_.clear();
-    batch_.new_frame();
+    batch_.begin_frame();
 }
 
 // --- Renderer2D: GPU lifecycle ----------------------------------------------

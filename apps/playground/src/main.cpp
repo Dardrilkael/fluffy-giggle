@@ -210,8 +210,8 @@ protected:
         // --- gui module: input snapshot + the first real widget (Phases 1+5) ---
         // The shell accumulates raw input into one InputFrame per frame
         // and publishes it here; the context adopts the copy, widgets
-        // consume it between new_frame and end_frame.
-        gui_.new_frame(ws::ui::gui::frame_input());
+        // consume it between begin_frame and end_frame.
+        gui_.begin_frame(ws::ui::gui::frame_input());
 
         // A gui panel in screen space (framebuffer px, top-left origin),
         // drawn through r2d above the world quads. The panel widget draws
@@ -767,7 +767,7 @@ private:
                 net_.panel_bounds()};
             for (const ws::ui::gui::TouchPoint* t : live) {
                 for (const ws::ui::gui::Rect& panel : panels) {
-                    if (ws::ui::gui::contains(panel, t->x, t->y)) {
+                    if (panel.contains(t->x, t->y)) {
                         pinching = false;
                     }
                 }
