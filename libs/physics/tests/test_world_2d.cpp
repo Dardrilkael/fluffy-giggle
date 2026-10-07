@@ -109,6 +109,10 @@ TEST_CASE("body lifetime is generational: stale handles error, never alias") {
                    PhysicsError::invalid_handle));
     CHECK(has_code(world.set_bullet(*first, true),
                    PhysicsError::invalid_handle));
+    CHECK(has_code(world.set_sleepable(*first, false),
+                   PhysicsError::invalid_handle));
+    CHECK(has_code(world.wake(*first), PhysicsError::invalid_handle));
+    CHECK(has_code(world.is_sleeping(*first), PhysicsError::invalid_handle));
     CHECK(has_code(world.apply_linear_impulse(*first, {}), PhysicsError::invalid_handle));
     CHECK(has_code(world.apply_angular_impulse(*first, 0.0f), PhysicsError::invalid_handle));
     CHECK(has_code(world.apply_force(*first, {}), PhysicsError::invalid_handle));
@@ -605,6 +609,11 @@ TEST_CASE("a moved-from world fails cleanly on every path") {
   CHECK(has_code(world.set_transform(*id, {}, 0.0f), PhysicsError::invalid_state));
   CHECK(has_code(world.set_collision_filter(*id, 1u, 0xffffffffu),
                  PhysicsError::invalid_state));
+  CHECK(has_code(world.set_velocity(*id, {}, 0.0f), PhysicsError::invalid_state));
+  CHECK(has_code(world.set_bullet(*id, true), PhysicsError::invalid_state));
+  CHECK(has_code(world.set_sleepable(*id, false), PhysicsError::invalid_state));
+  CHECK(has_code(world.wake(*id), PhysicsError::invalid_state));
+  CHECK(has_code(world.is_sleeping(*id), PhysicsError::invalid_state));
   CHECK(has_code(world.set_gravity(ws::math::Vec2{0.0f, -9.81f}),
                  PhysicsError::invalid_state));
   CHECK(has_code(world.create_joint(FixedJoint{*id, *id}), PhysicsError::invalid_state));

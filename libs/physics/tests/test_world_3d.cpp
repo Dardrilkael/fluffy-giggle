@@ -93,6 +93,9 @@ TEST_CASE("3D body lifetime mirrors the generational contract") {
     CHECK(has_code(world.set_collision_filter(stale, 1u, 0xffffffffu),
                    PhysicsError::invalid_handle));
     CHECK(has_code(world.set_bullet(stale, true), PhysicsError::invalid_handle));
+    CHECK(has_code(world.set_sleepable(stale, false), PhysicsError::invalid_handle));
+    CHECK(has_code(world.wake(stale), PhysicsError::invalid_handle));
+    CHECK(has_code(world.is_sleeping(stale), PhysicsError::invalid_handle));
   }
   SUBCASE("the slot is reused with a bumped generation") {
     const BodyId stale = *a;
@@ -349,6 +352,10 @@ TEST_CASE("a moved-from 3D world fails cleanly on every path") {
                  PhysicsError::invalid_state));
   CHECK(has_code(world.set_collision_filter(*id, 1u, 0xffffffffu),
                  PhysicsError::invalid_state));
+  CHECK(has_code(world.set_bullet(*id, true), PhysicsError::invalid_state));
+  CHECK(has_code(world.set_sleepable(*id, false), PhysicsError::invalid_state));
+  CHECK(has_code(world.wake(*id), PhysicsError::invalid_state));
+  CHECK(has_code(world.is_sleeping(*id), PhysicsError::invalid_state));
   CHECK(has_code(world.set_gravity(Vec3{0.0f, -9.81f, 0.0f}),
                  PhysicsError::invalid_state));
   CHECK(has_code(world.apply_linear_impulse(*id, Vec3{}),

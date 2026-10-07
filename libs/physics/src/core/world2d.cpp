@@ -248,6 +248,21 @@ ws::core::Status World2D::set_bullet(BodyId id, bool enabled) {
   return impl_->core_.set_bullet(id, enabled);
 }
 
+ws::core::Status World2D::set_sleepable(BodyId id, bool allowed) {
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
+  return impl_->core_.set_sleepable(id, allowed);
+}
+
+ws::core::Status World2D::wake(BodyId id) {
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
+  return impl_->core_.wake(id);
+}
+
+[[nodiscard]] ws::core::Result<bool> World2D::is_sleeping(BodyId id) const {
+  if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
+  return impl_->core_.is_sleeping(id);
+}
+
 ws::core::Status World2D::set_gravity(Vec2 gravity) {
   if (!impl_) return fail(PhysicsError::invalid_state, "world is moved-from");
   impl_->core_.set_gravity(gravity);

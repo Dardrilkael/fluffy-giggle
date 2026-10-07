@@ -101,6 +101,7 @@ class Box2DWorld final : public IWorld2DBackend {
       : hit_threshold_(desc.hit_speed_threshold) {
     bodies_.resize(desc.max_bodies);
     body_live_.resize(desc.max_bodies);
+    kinds_.resize(desc.max_bodies);
     joints_.resize(desc.max_joints);
     joint_live_.resize(desc.max_joints);
 
@@ -153,6 +154,7 @@ class Box2DWorld final : public IWorld2DBackend {
     bd.angularVelocity = desc.angular_velocity;
     bd.gravityScale = desc.gravity_scale;
     bd.isBullet = desc.is_bullet;  // CCD: pairs with this body use sweeps
+    bd.enableSleep = desc.allow_sleep;  // false pins the body awake
     bd.userData =
         reinterpret_cast<void*>(static_cast<std::uintptr_t>(slot) + 1u);
 
@@ -236,6 +238,7 @@ class Box2DWorld final : public IWorld2DBackend {
     }
     bodies_[slot] = body;
     body_live_[slot] = 1;
+    kinds_[slot] = desc.kind;
     return {};
   }
 
@@ -263,9 +266,12 @@ class Box2DWorld final : public IWorld2DBackend {
     if (slot >= bodies_.size() || !body_live_[slot]) {
       return;
     }
+    // Wake rule (CONTRACT.md 6): set_velocity wakes iff the new velocity
+    // is nonzero - exactly Box2D's native shape (body.c wakes only when
+    // the stored value is nonzero), so no explicit wake. A zero set on a
+    // sleeping body leaves it asleep.
     b2Body_SetLinearVelocity(bodies_[slot], to_b2(linear));
     b2Body_SetAngularVelocity(bodies_[slot], angular);
-    b2Body_SetAwake(bodies_[slot], true);
   }
 
   void set_filter(std::uint32_t slot, std::uint32_t layer,
@@ -297,6 +303,35 @@ class Box2DWorld final : public IWorld2DBackend {
     // is needed (only a moving body can tunnel, and moving bodies are
     // awake). The next step's collision pairing reads the new flag.
     b2Body_SetBullet(bodies_[slot], enabled);
+  }
+
+  void set_sleepable(std::uint32_t slot, bool allowed) override {
+    if (slot >= bodies_.size() || !body_live_[slot]) {
+      return;
+    }
+    // b2Body_EnableSleep(false) wakes the body itself (body.c:1549) - the
+    // lib's rule (CONTRACT.md 6) for free. Allowing sleep never wakes.
+    b2Body_EnableSleep(bodies_[slot], allowed);
+  }
+
+  void wake(std::uint32_t slot) override {
+    if (slot >= bodies_.size() || !body_live_[slot]) {
+      return;
+    }
+    b2Body_SetAwake(bodies_[slot], true);
+  }
+
+  [[nodiscard]] bool is_sleeping(std::uint32_t slot) const override {
+    if (slot >= bodies_.size() || !body_live_[slot]) {
+      return false;
+    }
+    // Statics never sleep, but Box2D reports them as not-awake
+    // (IsAwake == setIndex == b2_awakeSet, and statics live elsewhere),
+    // so the kind table decides before the engine is asked.
+    if (kinds_[slot] == ws::physics::BodyKind::static_) {
+      return false;
+    }
+    return !b2Body_IsAwake(bodies_[slot]);
   }
 
   void set_gravity(ws::math::Vec2 gravity) override {
@@ -786,6 +821,7 @@ class Box2DWorld final : public IWorld2DBackend {
   b2WorldId world_{};
   std::vector<b2BodyId> bodies_;    // slot -> engine body
   std::vector<char> body_live_;     // 1 = the slot holds a live body
+  std::vector<ws::physics::BodyKind> kinds_;  // statics never sleep (CONTRACT)
   std::vector<b2JointId> joints_;   // slot -> engine joint
   std::vector<char> joint_live_;
   float hit_threshold_ = 0.0f;

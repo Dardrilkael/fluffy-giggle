@@ -143,7 +143,46 @@ events above a speed threshold, the bulk set_transforms path.
     overlap window is skipped between consecutive ticks (x0=0.767 ->
     ticks land at 19.10 then 20.77, clearing [19.8, 20.2] by ~0.6 m,
     far past Box2D's 0.02 m speculative distance).
-- Remaining (all additive behind the seam, no public break): sleep control.
+- DONE: sleep control - `BodyDesc::allow_sleep` (both dims) +
+  `set_sleepable()`/`wake()`/`is_sleeping()` on both worlds. CONTRACT.md 6
+  is the normative wake-rule list; the adapters implement it:
+  - Box2D: `b2Body_EnableSleep(id, false)` wakes natively, so
+    set_sleepable(false) is one call; is_sleeping needs the lib's kind
+    table because a Box2D static reports NOT awake (its sleep-set index
+    is the static set) - statics would read as sleeping without the
+    guard. The adapter keeps a per-slot `kinds_` vector for that.
+  - Jolt: `Body::SetAllowSleeping` wakes NOTHING (it flips the flag and
+    resets the timer), so the adapter activates on forbid itself. Statics
+    have null MotionProperties - guarded before any MotionProperties
+    touch. TRAP (found the hard way): the adapter's BodyLockWrite must
+    be out of scope before `ActivateBody` - BodyInterface::ActivateBody
+    takes its own BodyLockWrite on the same body, and a SharedMutex
+    exclusively locked twice by one thread is UB (MSVC debug raises
+    SEH; release would deadlock).
+  - Wake-rule normalization this phase: set_velocity used to wake
+    unconditionally in both adapters; the contract says wake iff the
+    new velocity is nonzero, and both engines natively agree with that
+    shape (Box2D's SetLinearVelocity/SetAngularVelocity wake on nonzero;
+    Jolt's setters never wake, so the adapter gates ActivateBody on the
+    component-wise nonzero test). A zero set on a sleeping body leaves
+    it asleep in both dims now.
+  - Behavior tests: twins on a floor (one pinned at create, one free)
+    pin that the free twin sleeps while the pinned one cannot, statics
+    read awake, wake() works with no step, zero velocity-set keeps a
+    sleeper asleep, nonzero wakes, set_sleepable(true) never wakes and
+    (false) wakes from sleep. Machinery suites pin stale-handle and
+    moved-from failure codes for the trio.
+
+The engine-semantic rework arc ("the lib owns semantics, backends only
+compute"), one commit per phase: CONTRACT.md (C1, done) -> sleep control
+(C2, done) -> lib-owned touching table (C3) -> lib-computed mass
+properties (C4) -> one material-mixing rule (C5) -> backend factory +
+reference backend (C6) -> conformance suite encoding CONTRACT.md (C7).
+Also queued behind those: the machinery sweeps' "every path" names are
+still aspirational - the stale sweeps miss set_transform + the apply_*
+family in 3D, and the moved-from tests miss the apply_* family and
+destroy_joint/queries in 2D. A sweep-completeness micro-phase should
+make the names true.
 
 ## Review decisions, settled
 - Virtual backend seam kept (not a compile-time template backend): a mock

@@ -117,6 +117,16 @@ class IWorld3DBackend {
   // wakes nothing - none is needed: only a moving body can tunnel, and
   // a moving body is awake by definition. The backend owns the truth.
   virtual void set_bullet(std::uint32_t slot, bool enabled) = 0;
+  // Sleep control (BodyDesc::allow_sleep at create). The wake RULES are
+  // the lib's (CONTRACT.md 6): set_sleepable(slot, false) must leave the
+  // body awake (Box2D's b2Body_EnableSleep does that natively; Jolt's
+  // SetAllowSleeping resets a timer and wakes nothing, so this backend
+  // activates itself); set_sleepable(slot, true) never wakes. is_sleeping
+  // is the engine's sleep truth EXCEPT statics, which never sleep (both
+  // engines would otherwise report a static as not-awake).
+  virtual void set_sleepable(std::uint32_t slot, bool allowed) = 0;
+  virtual void wake(std::uint32_t slot) = 0;
+  [[nodiscard]] virtual bool is_sleeping(std::uint32_t slot) const = 0;
   // Runtime gravity (Desc::gravity at create). Neither engine wakes
   // sleepers on its own (b2World_SetGravity / PhysicsSystem::SetGravity
   // just store the vector), so the override must wake every live body

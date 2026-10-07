@@ -893,6 +893,73 @@ TEST_CASE("moved_bodies: kinematics report, statics never do; new bodies "
   CHECK(world.transforms()[fresh->index].position.y < 5.0f);
 }
 
+TEST_CASE("sleep control: the wake rules are the lib's, not the engine's") {
+  auto world = make_world();
+  auto floor = world.create_body(static_box({0.0f, -1.0f}, {20.0f, 1.0f}));
+  REQUIRE(floor.has_value());
+
+  // Every is_sleeping read below flows through this: a failed read must
+  // never look like a pass.
+  const auto sleeping = [&world](BodyId id) {
+    const auto result = world.is_sleeping(id);
+    REQUIRE(result.has_value());
+    return *result;
+  };
+
+  // Twins from the same height: one pinned awake for life at create, one
+  // left free to doze off.
+  BodyDesc pinned_desc = dynamic_box({-2.0f, 0.6f});
+  pinned_desc.allow_sleep = false;
+  auto pinned = world.create_body(pinned_desc);
+  REQUIRE(pinned.has_value());
+  auto twin = world.create_body(dynamic_box({2.0f, 0.6f}));
+  REQUIRE(twin.has_value());
+
+  // Both settle onto the floor; only the free twin falls asleep (bounded
+  // wait - a sleeper must appear or the test says so, no hang).
+  bool slept = false;
+  for (int i = 0; i < 300 && !slept; ++i) {
+    REQUIRE(world.step().has_value());
+    slept = sleeping(*twin);
+  }
+  REQUIRE(slept);
+  CHECK(sleeping(*pinned) == false);
+  CHECK(sleeping(*floor) == false);  // statics never sleep (CONTRACT.md 6)
+
+  // wake() is unconditional; no step is needed to observe it.
+  REQUIRE(world.wake(*twin).has_value());
+  CHECK(sleeping(*twin) == false);
+
+  // Resettle, then set_velocity: the wake rule is "iff the new velocity is
+  // nonzero" (CONTRACT.md 6) - a zero set must leave a sleeper asleep.
+  slept = false;
+  for (int i = 0; i < 300 && !slept; ++i) {
+    REQUIRE(world.step().has_value());
+    slept = sleeping(*twin);
+  }
+  REQUIRE(slept);
+  REQUIRE(world.set_velocity(*twin, {0.0f, 0.0f}, 0.0f).has_value());
+  CHECK(sleeping(*twin));
+  REQUIRE(world.set_velocity(*twin, {0.1f, 0.0f}, 0.0f).has_value());
+  CHECK(sleeping(*twin) == false);
+
+  // Resettle, then set_sleepable: permitting sleep never wakes; forbidding
+  // it wakes immediately, even from sleep.
+  slept = false;
+  for (int i = 0; i < 300 && !slept; ++i) {
+    REQUIRE(world.step().has_value());
+    slept = sleeping(*twin);
+  }
+  REQUIRE(slept);
+  REQUIRE(world.set_sleepable(*twin, true).has_value());
+  CHECK(sleeping(*twin));
+  REQUIRE(world.set_sleepable(*twin, false).has_value());
+  CHECK(sleeping(*twin) == false);
+
+  // The pinned twin stayed awake through all of it.
+  CHECK(sleeping(*pinned) == false);
+}
+
 namespace {
 
 // The global operator new/delete overrides at the bottom of this file bump

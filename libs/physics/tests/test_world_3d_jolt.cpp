@@ -931,6 +931,76 @@ TEST_CASE("3D moved_bodies: the kinematic platform reports every tick; "
         doctest::Approx(5.0f));  // the pre-tick pose, kept for lerping
 }
 
+TEST_CASE("3D sleep control: the wake rules are the lib's, not the engine's") {
+  auto world = make_world();
+  auto floor = world.create_body(static_box(Vec3{0.0f, -1.0f, 0.0f},
+                                            Vec3{20.0f, 1.0f, 20.0f}));
+  REQUIRE(floor.has_value());
+
+  // Every is_sleeping read below flows through this: a failed read must
+  // never look like a pass.
+  const auto sleeping = [&world](BodyId id) {
+    const auto result = world.is_sleeping(id);
+    REQUIRE(result.has_value());
+    return *result;
+  };
+
+  // Twins from the same height: one pinned awake for life at create, one
+  // left free to doze off.
+  BodyDesc pinned_desc = dynamic_box(Vec3{-2.0f, 0.6f, 0.0f});
+  pinned_desc.allow_sleep = false;
+  auto pinned = world.create_body(pinned_desc);
+  REQUIRE(pinned.has_value());
+  auto twin = world.create_body(dynamic_box(Vec3{2.0f, 0.6f, 0.0f}));
+  REQUIRE(twin.has_value());
+
+  // Both settle onto the floor; only the free twin falls asleep (bounded
+  // wait - a sleeper must appear or the test says so, no hang).
+  bool slept = false;
+  for (int i = 0; i < 300 && !slept; ++i) {
+    REQUIRE(world.step().has_value());
+    slept = sleeping(*twin);
+  }
+  REQUIRE(slept);
+  CHECK(sleeping(*pinned) == false);
+  CHECK(sleeping(*floor) == false);  // statics never sleep (CONTRACT.md 6)
+
+  // wake() is unconditional; no step is needed to observe it.
+  REQUIRE(world.wake(*twin).has_value());
+  CHECK(sleeping(*twin) == false);
+
+  // Resettle, then set_velocity: the wake rule is "iff the new velocity is
+  // nonzero" (CONTRACT.md 6) - a zero set must leave a sleeper asleep.
+  slept = false;
+  for (int i = 0; i < 300 && !slept; ++i) {
+    REQUIRE(world.step().has_value());
+    slept = sleeping(*twin);
+  }
+  REQUIRE(slept);
+  REQUIRE(world.set_velocity(*twin, Vec3{0.0f, 0.0f, 0.0f},
+                             Vec3{0.0f, 0.0f, 0.0f}).has_value());
+  CHECK(sleeping(*twin));
+  REQUIRE(world.set_velocity(*twin, Vec3{0.1f, 0.0f, 0.0f},
+                             Vec3{0.0f, 0.0f, 0.0f}).has_value());
+  CHECK(sleeping(*twin) == false);
+
+  // Resettle, then set_sleepable: permitting sleep never wakes; forbidding
+  // it wakes immediately, even from sleep.
+  slept = false;
+  for (int i = 0; i < 300 && !slept; ++i) {
+    REQUIRE(world.step().has_value());
+    slept = sleeping(*twin);
+  }
+  REQUIRE(slept);
+  REQUIRE(world.set_sleepable(*twin, true).has_value());
+  CHECK(sleeping(*twin));
+  REQUIRE(world.set_sleepable(*twin, false).has_value());
+  CHECK(sleeping(*twin) == false);
+
+  // The pinned twin stayed awake through all of it.
+  CHECK(sleeping(*pinned) == false);
+}
+
 TEST_CASE("3D steady state steps without one heap allocation") {
   World3D::Desc desc{};
   desc.max_bodies = 64;

@@ -61,6 +61,12 @@ struct BodyDesc {
   // time, give it to the few bodies that earn it (projectile speeds).
   // Change at runtime via World2D::set_bullet.
   bool is_bullet = false;
+  // Sleep: engines suspend bodies that stop moving to save cost. true (the
+  // default) lets this body fall asleep; false pins it awake forever.
+  // WHEN an engine sleeps a body is backend compute - the observable
+  // policy (wake rules, what sleeping means for events and moves) is
+  // CONTRACT.md 6. Change at runtime via World2D::set_sleepable.
+  bool allow_sleep = true;
   // Opaque per-body payload the lib stores but never interprets - a game
   // object index, or a pointer as uintptr_t. Contact events carry BodyIds
   // only; body_user_data() is the id -> payload lookup for that loop.

@@ -543,6 +543,9 @@ class JoltWorld3D final : public IWorld3DBackend,
     bcs.mMotionQuality = desc.is_bullet
                              ? JPH::EMotionQuality::LinearCast
                              : JPH::EMotionQuality::Discrete;
+    // Sleep: false pins the body awake (CONTRACT.md 6). WHEN a body
+    // sleeps is Jolt's idle heuristic - backend compute.
+    bcs.mAllowSleeping = desc.allow_sleep;
     if (multi_part) {
       // Coplanar parts would merge their manifolds and keep ONE sub-shape's
       // material for the whole merged contact (the manifold carries a single
@@ -613,7 +616,13 @@ class JoltWorld3D final : public IWorld3DBackend,
     }
     interface().SetLinearVelocity(bodies_[slot], to_jph(linear));
     interface().SetAngularVelocity(bodies_[slot], to_jph(angular));
-    interface().ActivateBody(bodies_[slot]);
+    // Wake rule (CONTRACT.md 6): set_velocity wakes iff the new velocity
+    // is nonzero - matching Box2D's native shape. Jolt's setters never
+    // activate, so the explicit wake carries the rule itself.
+    if (linear.x != 0.0f || linear.y != 0.0f || linear.z != 0.0f ||
+        angular.x != 0.0f || angular.y != 0.0f || angular.z != 0.0f) {
+      interface().ActivateBody(bodies_[slot]);
+    }
   }
 
   void set_filter(std::uint32_t slot, std::uint32_t layer,
@@ -644,6 +653,56 @@ class JoltWorld3D final : public IWorld3DBackend,
     interface().SetMotionQuality(
         bodies_[slot], enabled ? JPH::EMotionQuality::LinearCast
                                : JPH::EMotionQuality::Discrete);
+  }
+
+  void set_sleepable(std::uint32_t slot, bool allowed) override {
+    if (slot >= bodies_.size() || !body_live_[slot]) {
+      return;
+    }
+    // Statics carry no MotionProperties - SetAllowSleeping would deref
+    // null (Body.cpp:76). They never sleep anyway, so the flag is a
+    // no-op for them.
+    if (kinds_[slot] == ws::physics::BodyKind::static_) {
+      return;
+    }
+    // Body::SetAllowSleeping flips the flag and resets the sleep timer -
+    // it wakes NOTHING, so the lib's wake-on-forbid rule (CONTRACT.md 6)
+    // needs the explicit activate. Allowing sleep never wakes.
+    {
+      const JPH::BodyLockWrite lock(system_.GetBodyLockInterface(),
+                                    bodies_[slot]);
+      if (lock.Succeeded()) {
+        lock.GetBody().SetAllowSleeping(allowed);
+      }
+    }
+    // ActivateBody takes its own BodyLockWrite on this very body, so the
+    // scope above must end first: a SharedMutex exclusively locked twice
+    // by one thread is UB (MSVC debug raises SEH on the second lock).
+    if (!allowed) {
+      interface().ActivateBody(bodies_[slot]);
+    }
+  }
+
+  void wake(std::uint32_t slot) override {
+    if (slot >= bodies_.size() || !body_live_[slot]) {
+      return;
+    }
+    // ActivateBody is the unconditional wake; it no-ops statics
+    // (BodyManager::ActivateBodies checks IsStatic).
+    interface().ActivateBody(bodies_[slot]);
+  }
+
+  [[nodiscard]] bool is_sleeping(std::uint32_t slot) const override {
+    if (slot >= bodies_.size() || !body_live_[slot]) {
+      return false;
+    }
+    // Statics never sleep (CONTRACT.md 6), but Jolt reports them
+    // inactive (IsActive == has MotionProperties && not cInactiveIndex),
+    // so the kind table decides before the engine is asked.
+    if (kinds_[slot] == ws::physics::BodyKind::static_) {
+      return false;
+    }
+    return !interface().IsActive(bodies_[slot]);
   }
 
   void set_gravity(ws::math::Vec3 gravity) override {

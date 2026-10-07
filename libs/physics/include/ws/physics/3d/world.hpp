@@ -86,6 +86,16 @@ class WS_PHYSICS_API World3D {
   // value is the truth until this changes it.
   ws::core::Status set_bullet(BodyId id, bool enabled);
 
+  // Sleep control (BodyDesc::allow_sleep at create). set_sleepable(id,
+  // false) wakes the body immediately - even one that is asleep;
+  // set_sleepable(id, true) never wakes, it only permits future sleep.
+  // wake(id) activates the body unconditionally. is_sleeping is true only
+  // for a sleeping dynamic/kinematic body; statics never sleep. The wake
+  // rules are the lib's, not the engine's (CONTRACT.md 6).
+  ws::core::Status set_sleepable(BodyId id, bool allowed);
+  ws::core::Status wake(BodyId id);
+  [[nodiscard]] ws::core::Result<bool> is_sleeping(BodyId id) const;
+
   // Runtime gravity change (Desc::gravity is the create-time value).
   // Both engines merely store the new vector, so this also wakes every
   // dynamic body - a world you tilt must move the piles already

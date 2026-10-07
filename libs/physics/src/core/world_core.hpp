@@ -272,6 +272,35 @@ class WorldCore {
     return {};
   }
 
+  // Sleep control: bools and a bool readback, so nothing to validate
+  // beyond the handle. The wake RULES live here in the doc, the backend
+  // makes its engine obey them (CONTRACT.md 6).
+  ws::core::Status set_sleepable(BodyIdT id, bool allowed) {
+    const auto slot = resolve_body(id);
+    if (!slot) {
+      return fail(PhysicsError::invalid_handle, "stale or unknown body");
+    }
+    backend_->set_sleepable(*slot, allowed);
+    return {};
+  }
+
+  ws::core::Status wake(BodyIdT id) {
+    const auto slot = resolve_body(id);
+    if (!slot) {
+      return fail(PhysicsError::invalid_handle, "stale or unknown body");
+    }
+    backend_->wake(*slot);
+    return {};
+  }
+
+  ws::core::Result<bool> is_sleeping(BodyIdT id) const {
+    const auto slot = resolve_body(id);
+    if (!slot) {
+      return fail(PhysicsError::invalid_handle, "stale or unknown body");
+    }
+    return backend_->is_sleeping(*slot);
+  }
+
   // No handle, no validation: every vector is a legal gravity (zero-g
   // included). The backend owns the engine truth AND the wake-up the
   // engines themselves skip.
