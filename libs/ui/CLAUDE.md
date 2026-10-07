@@ -82,7 +82,13 @@ libs/ui/
     batch_core.h/.cpp        # pure-CPU batch: chunks, camera VP, geometry (no Vulkan)
     font.h/.cpp              # stb_truetype bake: ASCII 32..126 glyphs, white-RGBA
                              #  coverage, forgiving utf8_next (pure CPU, no renderer state)
-    gui.h/.cpp               # gui module internals: input accumulator, persistent state
+    gui.h                    # internal: set_active_input - the shell points frame_input() at its InputFrame
+    gui/                     # the gui module's out-of-line bodies, one concern per file:
+      gui.cpp                # shell glue: frame_input()'s live accumulator tap
+      gui_context.cpp        # GuiContext: per-pointer hot/active hit-testing + side tables
+      gui_id.cpp             # IdStack: FNV-1a scope-path hashing
+      gui_input.cpp          # InputFrame: touch table + the primary-touch -> mouse bridge
+      gui_layout.cpp         # LayoutCursor: stacked flow panels
     gui_widgets.cpp          # the widget functions' bodies (lay out, hit-test, draw)
     renderer2d.h/.cpp        # r2d engine: command sort/replay + Vulkan flush
     rounded_texture.h/.cpp   # pure-CPU bake of the builtin rounded-rect mask
