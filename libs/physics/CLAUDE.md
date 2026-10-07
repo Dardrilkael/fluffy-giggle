@@ -36,8 +36,13 @@ swap touches no public header and no user code.
   standing - interpolation endpoints stay stable and the in-motion set
   stays visible while alpha grows. Events are sorted by the full
   tiebreak chain (a.index, b.index, phase, point, normal, speed).
-- Backends feed events in DETERMINISTIC order: WHICH events the
-  max_contact_events cap drops must be the same every run.
+- Backends feed events in DETERMINISTIC order: WHICH hit events the
+  max_contact_events budget drops must be the same every run. began/ended
+  are lossless - they bypass the budget entirely (a dropped `ended` would
+  leave a consumer's touching state stuck forever), so a pathological tick
+  grows the event buffer past its pre-reserved bound; that growth is
+  amortized and never happens in steady state, keeping the zero-alloc
+  contract intact.
 - Forces/torques clear at the end of every tick, whichever engine runs.
 - One documented backend divergence: Jolt removes contacts when a body
   falls asleep and re-adds them on wake, so a resting 3D pair reports
@@ -127,7 +132,10 @@ events above a speed threshold, the bulk set_transforms path.
 - Sort-then-cap REJECTED for event overflow: it would break the
   pre-reserved buffer bound (events beyond max_contact_events are never
   stored). Deterministic backend feed order + cap achieves the same
-  determinism within the bound.
+  determinism within the bound - with one deliberate exception: edges
+  (began/ended) bypass the cap and may grow the buffer past it, because
+  correctness of consumer touching-state beats the bound (bug #2 of the
+  review triage; hits alone stay capped and deterministic).
 - Moved-bodies pipeline instead of a bulk copy-out: the backend reports the
   bodies it simulated and the lib folds them into its own mirror - sleeping
   worlds cost nothing to sync, and prev_transforms() falls out for free.

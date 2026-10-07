@@ -24,14 +24,17 @@
 // events into one mutex-protected pre-reserved vector and, AFTER the
 // tick, folds in the resolved removed events, sorts everything by the
 // same tiebreak chain the lib re-sorts by, and feeds the collector in
-// that order. The lib caps at max_contact_events and drops the newest:
-// with a value-sorted feed the kept prefix is a pure function of event
-// content, so WHICH events survive the cap is the same every run even
-// though callback arrival order is not. (Box2D drains engine arrays in
-// engine order - deterministic for a different reason.) The raw buffer
-// holds 4x the cap; a tick with more contact-lifecycle changes than
-// that drops nondeterministically - Box2D's engine-side event arrays
-// have the same overflow corner.
+// that order. The lib's cap guards only the hit stream and drops the
+// newest: began/ended bypass it (a dropped `ended` would stick a
+// consumer's touching state forever), so with a value-sorted feed
+// WHICH hits survive a spent cap is the same every run even though
+// callback arrival order is not. (Box2D drains engine arrays in engine
+// order - deterministic for a different reason.) The raw buffer holds
+// 4x the cap and cannot be edge-lossless: growing it inside the tick
+// would allocate mid-step and break the zero-alloc contract, so a tick
+// with more contact-lifecycle changes than 4x drops nondeterministically,
+// edges included - Box2D's engine-side event arrays have the same
+// overflow corner.
 //
 // One Jolt semantic is passed through verbatim (documented + tested):
 // when a body falls asleep Jolt removes its contacts, so a resting pair
@@ -817,8 +820,9 @@ class JoltWorld3D final : public IWorld3DBackend,
     // callback path by design. Resolve the buffered removals - a dead
     // BodyID misses the index table and drops, exactly the 2D stale-shape
     // contract - then sort the whole batch on the tiebreak chain and
-    // feed it in that order. With the feed value-sorted, the lib's
-    // drop-newest cap keeps a pure function of event content.
+    // feed it in that order. With the feed value-sorted, which hits a
+    // spent lib cap drops is a pure function of event content (edges
+    // bypass the cap entirely).
     {
       const std::scoped_lock lock{events_mutex_};
       for (const RawRemoved& removed : removed_) {

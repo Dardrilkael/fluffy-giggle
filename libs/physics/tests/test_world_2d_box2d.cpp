@@ -396,6 +396,54 @@ TEST_CASE("contact events: pair order fixes the normal to point a -> b") {
   run(false);  // ball created first: a = ball, normal re-faced
 }
 
+TEST_CASE("a spent event budget drops hits but never began/ended edges") {
+  // Budget 2, three identical falls that land the SAME tick, spaced far
+  // enough apart that no ball-ball pair exists: the tick wants 3 began +
+  // 3 hit events through a budget of 2. began/ended are the edges a
+  // consumer builds touching-state from - a dropped `ended` leaves a
+  // stuck pair forever - so ALL edges must survive a spent budget;
+  // only the high-volume hit stream may be capped.
+  World2D::Desc desc{};
+  desc.thread_count = 0;
+  desc.max_contact_events = 2;      // tiny budget: overflow is guaranteed
+  desc.hit_speed_threshold = 0.5f;  // m/s: hits fire alongside the edges
+  auto world = make_world(desc);
+  REQUIRE(world.create_body(static_box({0.0f, -0.5f}, {50.0f, 0.5f})).has_value());
+  for (const float x : {-10.0f, 0.0f, 10.0f}) {
+    REQUIRE(world.create_body(ball_at({x, 5.0f}, 0.0f)).has_value());
+  }
+
+  for (int i = 0; i < 90; ++i) {
+    REQUIRE(world.step().has_value());
+    if (!world.contact_events().empty()) {
+      break;
+    }
+  }
+  REQUIRE_FALSE(world.contact_events().empty());
+
+  // Which of the 3 hits survive is the backend's feed order - assert
+  // only feed-order-robust facts.
+  int began = 0;
+  int hits = 0;
+  std::vector<BodyId> began_pairs;
+  for (const auto& e : world.contact_events()) {
+    if (e.phase == ContactPhase::began) {
+      ++began;
+      began_pairs.push_back(e.b);  // normalization: a.index < b.index = floor
+    } else if (e.phase == ContactPhase::hit) {
+      ++hits;
+    }
+  }
+  CHECK(began == 3);  // every edge survived the spent budget
+  CHECK(hits <= 2);   // the budget still caps the hit stream
+  REQUIRE(began_pairs.size() == 3);
+  for (std::size_t i = 0; i < began_pairs.size(); ++i) {
+    for (std::size_t j = i + 1; j < began_pairs.size(); ++j) {
+      CHECK_FALSE(began_pairs[i] == began_pairs[j]);  // distinct balls
+    }
+  }
+}
+
 TEST_CASE("advance() unions contact events across its substeps") {
   World2D::Desc desc{};
   desc.thread_count = 0;

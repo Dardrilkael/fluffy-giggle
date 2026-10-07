@@ -147,9 +147,10 @@ class IWorld2DBackend {
   // One fixed tick. The backend calls collector.add() for every began/ended/
   // hit event it produced during the tick, then returns; it must have cleared
   // its accumulated forces/torques by return. Events must be fed in
-  // DETERMINISTIC order (engine array order per tick): which events the
-  // lib's overflow cap drops must itself be deterministic, so a
-  // multithreaded engine buffers per thread and merges in a fixed order.
+  // DETERMINISTIC order (engine array order per tick): which HIT events the
+  // lib's overflow budget drops must itself be deterministic (began/ended
+  // bypass the budget), so a multithreaded engine buffers per thread and
+  // merges in a fixed order.
   //
   // Moves: the backend writes one entry per body it simulated this tick
   // (awake bodies - asleep ones did not move and cost nothing) into

@@ -37,7 +37,7 @@ class WS_PHYSICS_API World2D {
     float fixed_dt = 1.0f / 60.0f;  // simulation tick, > 0
     std::uint32_t max_bodies = 4096;  // <= ws::physics::kMaxBodiesPerWorld
     std::uint32_t max_joints = 1024;  // <= ws::physics::kMaxJointsPerWorld
-    std::uint32_t max_contact_events = 1024;  // buffer pre-reserved to this
+    std::uint32_t max_contact_events = 1024;  // hit-event budget; edges never dropped
     std::uint32_t thread_count =
         ws::physics::default_thread_count();  // 0 = single-threaded
     float hit_speed_threshold = 0.0f;  // m/s; 0 disables hit events
@@ -116,9 +116,13 @@ class WS_PHYSICS_API World2D {
   // until the next step()/advance(). Sorted by (a.index, b.index, phase,
   // point, normal, speed) - the full tiebreak chain makes the order a pure
   // function of event content, and the backend feeds events in
-  // deterministic order, so overflow beyond max_contact_events drops the
-  // same events every run (warns once per overflowing episode). Index
-  // means SLOT index - dense and reused, NOT creation order.
+  // deterministic order, so which hit events the max_contact_events budget
+  // drops is the same every run (warns once per overflowing episode).
+  // began/ended are NEVER dropped - consumers build touching-state from
+  // those edges, and a lost `ended` would leave a stuck pair forever - so
+  // a pathological tick grows the buffer past the budget (amortized)
+  // instead of losing an edge. Index means SLOT index - dense and reused,
+  // NOT creation order.
   [[nodiscard]] std::span<const ContactEvent> contact_events() const;
 
   // --- bulk renderer path ------------------------------------------------------

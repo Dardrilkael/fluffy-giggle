@@ -492,7 +492,7 @@ class WorldCore {
   // and end_call()). The seen_ reset touches only the slots the previous
   // call marked (O(previous moved), not O(max_bodies)).
   void begin_call() {
-    events_.clear();  // capacity kept: no reallocation ever
+    events_.clear();  // capacity kept; only an edge-flood tick grows past it
     for (const RawMove& m : moved_raw_) {
       seen_[m.slot] = 0;
     }
@@ -581,19 +581,29 @@ class WorldCore {
 
   // IEventCollector2D/3D implementation: resolves engine slots to public
   // handles, orders the pair by BodyId index (flipping the normal so it
-  // keeps pointing a -> b), caps the buffer, warns once per overflow
+  // keeps pointing a -> b), caps the hit stream at max_contact_events
+  // (began/ended bypass the cap - see add()), warns once per overflow
   // episode. The backend must feed events in a deterministic order so that
-  // WHICH events overflow-drop is itself deterministic.
+  // WHICH hits overflow-drop is itself deterministic.
   class EventCollector final : public D::CollectorBase {
    public:
     explicit EventCollector(WorldCore& core) : core_(core) {}
 
     void add(const BackendEvent& event) override {
-      if (core_.events_.size() >= core_.desc_.max_contact_events) {
+      // The budget guards the high-volume stream: hit events (impacts) are
+      // dropped once max_contact_events is spent. began/ended are EDGE
+      // events that consumers build touching-state from - dropping an
+      // `ended` leaves a stuck "touching" pair forever - so they are NEVER
+      // dropped: the buffer grows past the budget instead. That growth is
+      // a pathological tick, not steady state (the zero-alloc contract
+      // covers steady state), and it is amortized like any vector.
+      const bool is_hit = event.phase == decltype(event.phase)::hit;
+      if (is_hit && core_.events_.size() >= core_.desc_.max_contact_events) {
         if (!core_.overflow_warned_) {
           core_.overflow_warned_ = true;
           ws::core::warn(
-              "physics: contact-event buffer full ({}); dropping newest events",
+              "physics: contact-event budget spent ({}); dropping hit "
+              "events (began/ended are never dropped)",
               core_.desc_.max_contact_events);
         }
         ++core_.overflow_drops_;
@@ -627,7 +637,8 @@ class WorldCore {
   // Mirror before the last TICK that ran (snapped on a call's first tick,
   // never on zero-tick calls - the interpolation contract).
   std::vector<TransformT> prev_transforms_;
-  std::vector<ContactEventT> events_;   // drained per call, capacity fixed
+  std::vector<ContactEventT> events_;   // drained per call; pre-reserved to
+                                       // the budget, edge floods may grow it
   std::vector<JointRecord> records_;    // joint slot -> body slots
   std::vector<BackendMove> backend_moves_;  // step() scratch, slot-indexed
   std::vector<RawMove> moved_raw_;      // deduped moved slots this call

@@ -10,8 +10,9 @@
 // specific to Jolt: contact events fire on solver worker threads during
 // step(), so the backend buffers them per thread (pre-reserved) and feeds
 // the collector in deterministic order after the tick completes. That is a
-// REQUIREMENT, not a nicety: which events the lib's overflow cap drops must
-// be deterministic. The lib's sort then fixes the public order.
+// REQUIREMENT, not a nicety: which hit events the lib's overflow budget
+// drops must be deterministic (began/ended bypass the budget). The lib's
+// sort then fixes the public order.
 
 #include <cstdint>
 #include <memory>
@@ -38,7 +39,7 @@ struct BackendDesc3D {
   // The 2D seam needs no event cap (Box2D owns the event arrays and the
   // adapter drains them post-step); Jolt fires contact callbacks on
   // worker threads DURING the step, so the 3D backend pre-reserves its
-  // raw buffer as a multiple of the lib's cap.
+  // raw buffer as a multiple of the lib's hit budget.
   std::uint32_t max_contact_events = 0;
 };
 
