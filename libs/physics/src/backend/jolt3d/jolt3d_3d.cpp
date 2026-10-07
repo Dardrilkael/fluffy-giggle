@@ -536,6 +536,13 @@ class JoltWorld3D final : public IWorld3DBackend,
     bcs.mFriction = friction;        // body-level, or the lone part's
     bcs.mRestitution = restitution;  // (multi-part pairs override per part)
     bcs.mGravityFactor = desc.gravity_scale;
+    // CCD: LinearCast sweeps the body from start to end pose, so a fast
+    // body stops at a thin static wall instead of tunneling. Discrete is
+    // the cheap default; statics never move so the quality never matters
+    // for them (the setting is per MotionProperties).
+    bcs.mMotionQuality = desc.is_bullet
+                             ? JPH::EMotionQuality::LinearCast
+                             : JPH::EMotionQuality::Discrete;
     if (multi_part) {
       // Coplanar parts would merge their manifolds and keep ONE sub-shape's
       // material for the whole merged contact (the manifold carries a single
@@ -621,6 +628,22 @@ class JoltWorld3D final : public IWorld3DBackend,
     interface().SetCollisionGroup(
         bodies_[slot],
         JPH::CollisionGroup(mask_filter_.GetPtr(), layer, mask));
+  }
+
+  void set_bullet(std::uint32_t slot, bool enabled) override {
+    if (slot >= bodies_.size() || !body_live_[slot]) {
+      return;
+    }
+    // BodyManager::SetMotionQuality swaps the quality under the
+    // active-bodies lock and adjusts the CCD-body counter - no
+    // activation, and none is needed (only a moving body can tunnel,
+    // and moving bodies are awake). A static/kinematic slot is a no-op
+    // in practice: no MotionProperties means the quality never gates
+    // anything the engine does for it. MotionPropertiesUnchecked null
+    // guards it inside Jolt itself.
+    interface().SetMotionQuality(
+        bodies_[slot], enabled ? JPH::EMotionQuality::LinearCast
+                               : JPH::EMotionQuality::Discrete);
   }
 
   void set_gravity(ws::math::Vec3 gravity) override {

@@ -646,6 +646,42 @@ TEST_CASE("3D runtime set_gravity redirects the fall and wakes the sleepers") {
   }
 }
 
+TEST_CASE("3D is_bullet/set_bullet: LinearCast stops a fast body at a thin wall") {
+  // The start offset phases the ticks so no end pose lands in the
+  // overlap window (per-tick travel 1.67 m vs a 0.3 m window, clearance
+  // 0.6+ m): Discrete sees no contact at all and walks through;
+  // LinearCast sweeps the travel and stops the body at the wall face
+  // (~19.85). Jolt's Discrete has NO auto-CCD - unlike Box2D, which
+  // sweeps fast bodies vs statics for free - so the flag is the only
+  // tunneling protection in 3D.
+  const auto run = [](bool bullet, bool via_runtime) {
+    auto world = make_world(World3D::Desc{.gravity = {0.0f, 0.0f, 0.0f},
+                                          .thread_count = 0});
+    REQUIRE(world.create_body(static_box(Vec3{20.0f, 0.0f, 0.0f},
+                                         Vec3{0.05f, 5.0f, 5.0f}))
+                .has_value());
+    BodyDesc d = dynamic_box(Vec3{0.767f, 0.0f, 0.0f});
+    d.shape = Sphere{0.1f};
+    d.linear_velocity = Vec3{100.0f, 0.0f, 0.0f};
+    if (!via_runtime) {
+      d.is_bullet = bullet;
+    }
+    auto id = world.create_body(d);
+    REQUIRE(id.has_value());
+    if (via_runtime) {
+      REQUIRE(world.set_bullet(*id, bullet).has_value());
+    }
+    step_n(world, 30);  // half a second: 50 m of clear-track travel
+    auto state = world.body_state(*id);
+    REQUIRE(state.has_value());
+    return state->position.x;
+  };
+  CHECK(run(false, false) > 30.0f);  // discrete tunneled: far past the wall
+  CHECK(run(true, false) < 20.0f);   // created a bullet: stopped at the face
+  CHECK(run(false, true) > 30.0f);  // runtime flip OFF: same discrete body
+  CHECK(run(true, true) < 20.0f);   // runtime flip ON: stops too
+}
+
 TEST_CASE("3D weld holds the pair rigid; destroying a body cascades the "
           "joint away") {
   auto world = make_world(World3D::Desc{.gravity = Vec3{0.0f, 0.0f, 0.0f},

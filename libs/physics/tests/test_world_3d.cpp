@@ -92,6 +92,7 @@ TEST_CASE("3D body lifetime mirrors the generational contract") {
     CHECK(has_code(world.set_velocity(stale, Vec3{}, Vec3{}), PhysicsError::invalid_handle));
     CHECK(has_code(world.set_collision_filter(stale, 1u, 0xffffffffu),
                    PhysicsError::invalid_handle));
+    CHECK(has_code(world.set_bullet(stale, true), PhysicsError::invalid_handle));
   }
   SUBCASE("the slot is reused with a bumped generation") {
     const BodyId stale = *a;

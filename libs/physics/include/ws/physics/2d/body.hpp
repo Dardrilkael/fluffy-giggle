@@ -53,6 +53,14 @@ struct BodyDesc {
   float restitution = 0.0f;
   float gravity_scale = 1.0f;
   bool is_sensor = false;  // contact events fire, no collision response
+  // Continuous collision for a fast body. Box2D already sweeps every
+  // fast-moving body against STATIC geometry on its own (free CCD vs
+  // walls); this flag extends the sweep to the kinematic and DYNAMIC
+  // trees, so the body also cannot tunnel through moving or resting
+  // non-static targets. Off by default - the extra sweep costs solver
+  // time, give it to the few bodies that earn it (projectile speeds).
+  // Change at runtime via World2D::set_bullet.
+  bool is_bullet = false;
   // Opaque per-body payload the lib stores but never interprets - a game
   // object index, or a pointer as uintptr_t. Contact events carry BodyIds
   // only; body_user_data() is the id -> payload lookup for that loop.

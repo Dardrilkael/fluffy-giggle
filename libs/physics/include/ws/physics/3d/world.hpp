@@ -80,6 +80,12 @@ class WS_PHYSICS_API World3D {
   ws::core::Status set_collision_filter(BodyId id, std::uint32_t layer,
                                         std::uint32_t mask);
 
+  // Runtime CCD change (BodyDesc::is_bullet at create). Neither engine
+  // wakes the body: a body at rest cannot tunnel, and the flag rides the
+  // next tick the body actually moves. No readback exists - the desc
+  // value is the truth until this changes it.
+  ws::core::Status set_bullet(BodyId id, bool enabled);
+
   // Runtime gravity change (Desc::gravity is the create-time value).
   // Both engines merely store the new vector, so this also wakes every
   // dynamic body - a world you tilt must move the piles already

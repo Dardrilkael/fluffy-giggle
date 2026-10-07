@@ -444,6 +444,50 @@ TEST_CASE("a spent event budget drops hits but never began/ended edges") {
   }
 }
 
+TEST_CASE("is_bullet/set_bullet: the sweep reaches dynamic targets too") {
+  // Box2D sweeps EVERY fast body against static geometry on its own, so
+  // the discriminator is a fast body vs a resting DYNAMIC target. The
+  // start offset phases the ticks so no end pose lands in the overlap
+  // window (per-tick travel 1.67 m vs a 0.4 m window, clearance 0.57 m
+  // on both sides - far past the 0.02 m speculative distance): the
+  // discrete path never even pairs them and walks through; the bullet's
+  // mid-tick sweep finds the crossing.
+  const auto run = [](bool bullet, bool via_runtime) {
+    auto world = make_world(World2D::Desc{.gravity = {0.0f, 0.0f},
+                                         .thread_count = 0});
+    // Resting dynamic target: a thin tall box at x=20 (spans 19.9..20.1).
+    BodyDesc target = dynamic_box({20.0f, 0.0f});
+    target.shape = Box{ws::math::Vec2{0.1f, 2.0f}};
+    auto tid = world.create_body(target);
+    REQUIRE(tid.has_value());
+    BodyDesc d = dynamic_box({0.767f, 0.0f});
+    d.shape = Circle{0.1f};
+    d.linear_velocity = {100.0f, 0.0f};
+    if (!via_runtime) {
+      d.is_bullet = bullet;
+    }
+    auto id = world.create_body(d);
+    REQUIRE(id.has_value());
+    if (via_runtime) {
+      REQUIRE(world.set_bullet(*id, bullet).has_value());
+    }
+    step_n(world, 30);  // half a second: 50 m of clear-track travel
+    auto state = world.body_state(*id);
+    REQUIRE(state.has_value());
+    auto tstate = world.body_state(*tid);
+    REQUIRE(tstate.has_value());
+    // Relative position: robust to the caught pair coasting together.
+    return state->position.x - tstate->position.x;
+  };
+  // Discrete tunneled: the ball ends 30 m AHEAD of the untouched target.
+  CHECK(run(false, false) > 5.0f);
+  CHECK(run(false, true) > 5.0f);
+  // Bullet caught it mid-flight: the ball never passed what it hit, and
+  // the pair coasts together after the e = 0 impact, difference ~-0.2.
+  CHECK(run(true, false) < 0.0f);
+  CHECK(run(true, true) < 0.0f);
+}
+
 TEST_CASE("advance() unions contact events across its substeps") {
   World2D::Desc desc{};
   desc.thread_count = 0;

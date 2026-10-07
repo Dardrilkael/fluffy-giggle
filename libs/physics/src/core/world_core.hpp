@@ -261,6 +261,17 @@ class WorldCore {
     return {};
   }
 
+  // CCD flag: a bool, so nothing to validate beyond the handle; the
+  // backend owns the truth.
+  ws::core::Status set_bullet(BodyIdT id, bool enabled) {
+    const auto slot = resolve_body(id);
+    if (!slot) {
+      return fail(PhysicsError::invalid_handle, "stale or unknown body");
+    }
+    backend_->set_bullet(*slot, enabled);
+    return {};
+  }
+
   // No handle, no validation: every vector is a legal gravity (zero-g
   // included). The backend owns the engine truth AND the wake-up the
   // engines themselves skip.

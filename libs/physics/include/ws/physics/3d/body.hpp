@@ -54,6 +54,15 @@ struct BodyDesc {
   float restitution = 0.0f;
   float gravity_scale = 1.0f;
   bool is_sensor = false;  // contact events fire, no collision response
+  // Continuous collision for a fast body: Jolt's LinearCast motion quality
+  // sweeps the body's path across a tick instead of testing only the end
+  // pose, so a fast body stops at a thin wall instead of tunneling.
+  // Unlike Box2D (which auto-sweeps fast bodies against statics even
+  // without the flag), Jolt's Discrete default has NO CCD of any kind -
+  // this flag is the only tunneling protection. Off by default - the
+  // cast costs solver time, give it to the few bodies that earn it
+  // (projectile speeds). Change at runtime via World3D::set_bullet.
+  bool is_bullet = false;
   // Opaque per-body payload the lib stores but never interprets - a game
   // object index, or a pointer as uintptr_t. Contact events carry BodyIds
   // only; body_user_data() is the id -> payload lookup for that loop.

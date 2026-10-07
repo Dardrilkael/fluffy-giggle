@@ -152,6 +152,7 @@ class Box2DWorld final : public IWorld2DBackend {
     bd.linearVelocity = to_b2(desc.linear_velocity);
     bd.angularVelocity = desc.angular_velocity;
     bd.gravityScale = desc.gravity_scale;
+    bd.isBullet = desc.is_bullet;  // CCD: pairs with this body use sweeps
     bd.userData =
         reinterpret_cast<void*>(static_cast<std::uintptr_t>(slot) + 1u);
 
@@ -286,6 +287,16 @@ class Box2DWorld final : public IWorld2DBackend {
     for (int i = 0; i < count; ++i) {
       b2Shape_SetFilter(shapes[i], filter);
     }
+  }
+
+  void set_bullet(std::uint32_t slot, bool enabled) override {
+    if (slot >= bodies_.size() || !body_live_[slot]) {
+      return;
+    }
+    // body.c SetBullet only flips bodySim->isBullet - no wake, and none
+    // is needed (only a moving body can tunnel, and moving bodies are
+    // awake). The next step's collision pairing reads the new flag.
+    b2Body_SetBullet(bodies_[slot], enabled);
   }
 
   void set_gravity(ws::math::Vec2 gravity) override {

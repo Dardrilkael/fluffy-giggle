@@ -107,6 +107,8 @@ TEST_CASE("body lifetime is generational: stale handles error, never alias") {
     CHECK(has_code(world.set_velocity(*first, {}, 0.0f), PhysicsError::invalid_handle));
     CHECK(has_code(world.set_collision_filter(*first, 1u, 0xffffffffu),
                    PhysicsError::invalid_handle));
+    CHECK(has_code(world.set_bullet(*first, true),
+                   PhysicsError::invalid_handle));
     CHECK(has_code(world.apply_linear_impulse(*first, {}), PhysicsError::invalid_handle));
     CHECK(has_code(world.apply_angular_impulse(*first, 0.0f), PhysicsError::invalid_handle));
     CHECK(has_code(world.apply_force(*first, {}), PhysicsError::invalid_handle));

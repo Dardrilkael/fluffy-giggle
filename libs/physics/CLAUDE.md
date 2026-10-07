@@ -120,8 +120,30 @@ events above a speed threshold, the bulk set_transforms path.
     returns the bare child): its material bakes body-level, and a
     non-zero offset rides a RotatedTranslated decorator (part_index
     returns -1 there, which is correct by construction).
-- Remaining (all additive behind the seam, no public break): CCD/bullet
-  flags, sleep control.
+- DONE: CCD/bullet flags - `BodyDesc::is_bullet` (both dims) +
+  `set_bullet()` on both worlds. The engines' CCD stories DIVERGE, and
+  both flag comments tell the truth:
+  - Box2D v3 already sweeps every fast body against STATIC geometry on
+    its own (isFast = maxVelocity*dt > 0.5*minExtent -> b2SolveContinuous,
+    free CCD vs walls, no flag needed); isBullet only extends the sweep to
+    the kinematic + DYNAMIC trees (the bullet body array). So a static
+    wall can never discriminate is_bullet in 2D - the behavior test uses a
+    resting DYNAMIC target.
+  - Jolt's Discrete default has NO CCD of any kind; the flag is
+    LinearCast motion quality, the only tunneling protection.
+  - Neither engine's runtime setter wakes the body, and none is needed:
+    only a moving body can tunnel, and a moving body is awake.
+    b2Body_SetBullet just flips bodySim->isBullet;
+    BodyManager::SetMotionQuality swaps the quality in place under the
+    active-bodies lock (adjusts mNumActiveCCDBodies, no activation).
+  - Test-design lesson: at v=100 m/s and dt=1/60 the body travels 5/3 m
+    per tick, so a start pose of x0=0 lands EXACTLY on a wall at x=20 at
+    tick 12 - the discrete end-pose test catches the body anyway and the
+    test proves nothing. Tunneling must be engineered: pick x0 so the
+    overlap window is skipped between consecutive ticks (x0=0.767 ->
+    ticks land at 19.10 then 20.77, clearing [19.8, 20.2] by ~0.6 m,
+    far past Box2D's 0.02 m speculative distance).
+- Remaining (all additive behind the seam, no public break): sleep control.
 
 ## Review decisions, settled
 - Virtual backend seam kept (not a compile-time template backend): a mock
