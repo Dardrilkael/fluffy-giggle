@@ -17,6 +17,7 @@ struct ChromeTheme {
     std::uint32_t control_bg = r2d::rgba(70, 73, 78);
     std::uint32_t control_hovered = r2d::rgba(92, 96, 102);
     std::uint32_t control_pressed = r2d::rgba(72, 132, 192);
+    std::uint32_t control_disabled = r2d::rgba(50, 52, 56);
     std::uint32_t control_on = r2d::rgba(90, 168, 110);  // toggled/checked accent
     std::uint32_t text = r2d::rgba(235, 238, 242);
     std::uint32_t border = r2d::rgba(255, 255, 255, 36);
@@ -32,6 +33,13 @@ struct ChromeTheme {
                                   // inside the window the press stays the
                                   // child's (a tap), past it the scroll owns
                                   // the finger
+    float disabled_alpha = 0.45f;  // the multiplier a disabled widget dims
+                                  // its non-face colors by (label text and
+                                  // bars, the checkbox fill, the slider
+                                  // fill and handle, the selected tab's
+                                  // accent) through dim(); 1.0 is the
+                                  // identity. A ratio, not a px metric -
+                                  // scaled() carries it as-is
 
     // The font labels draw with - the one look asset that is a loaded
     // object instead of a value. Null (the default) keeps the v1 label
@@ -65,5 +73,22 @@ struct ChromeTheme {
 // The stock look. constexpr, so a custom theme starts from it with
 // designated member overrides and stays a compile-time value.
 inline constexpr ChromeTheme kDefaultChrome{};
+
+// Multiplies a packed 0xRRGGBBAA color's alpha channel - the disabled
+// look's one helper. control_disabled covers a disabled widget's FACE
+// (its idle, hover and pressed faces all collapse to it); every other
+// color the widget draws passes through here with the theme's
+// disabled_alpha, so the whole widget dims as one and full-strength
+// text never rides a dead face. The factor clamps to [0, 1] worth of
+// alpha - negative and oversaturated inputs cannot wrap the byte.
+constexpr std::uint32_t dim(std::uint32_t color, float factor) {
+    float a = static_cast<float>((color >> 24) & 0xFFu) * factor;
+    if (a < 0.0f) {
+        a = 0.0f;
+    } else if (a > 255.0f) {
+        a = 255.0f;
+    }
+    return (color & 0x00FFFFFFu) | (static_cast<std::uint32_t>(a) << 24);
+}
 
 }  // namespace ws::ui::gui

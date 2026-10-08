@@ -40,7 +40,9 @@ namespace ws::ui::gui {
 // takes the focus at the press edge, Tab reaches them), Enter and Space
 // activate the focused button exactly like a click, and the focused
 // button wears a 1px accent ring - the focus rules live on GuiContext
-// (state/register_focusable/is_focused).
+// (state/register_focusable/is_focused). Inside a begin_disabled scope
+// the button goes dead as a whole: the control_disabled face, the icon
+// tint and the label dimmed by theme.disabled_alpha through dim().
 bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             const char* label, float width = 120.0f, r2d::Sprite icon = {});
 
@@ -49,7 +51,12 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 // control_height square (accent fill while on, corners rounded by
 // theme.corner_radius) followed by the label
 // bar; the hit area covers the whole row. The row auto-sizes to box +
-// spacing + label.
+// spacing + label. Checkboxes take the keyboard like buttons: the row
+// registers focusable, Enter and Space toggle the focused checkbox
+// exactly like a click, and the focused row wears the accent ring.
+// Inside a begin_disabled scope the row dims as a whole (dead face on
+// the box, fill and label faded) and no click or key can flip the
+// value.
 bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
               const char* label, bool& value);
 
@@ -58,13 +65,18 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 // clamps to [min, max]. True on the frame the value moved. The track is
 // control_height tall (rail, min-to-handle fill, handle; rail and fill
 // rounded by theme.corner_radius); the label bar draws right-aligned over
-// it.
+// it. Sliders take the keyboard too: the row registers focusable, the
+// focused row wears the ring, and the arrows step the focused slider -
+// 1% of the range per press (slider_int: 1), clamped to [min, max],
+// reported as changed only on a real move. Inside a begin_disabled
+// scope the whole row dims (dead face on the rail, fill, handle and
+// label faded) and no pointer or key can move the value.
 bool slider_float(GuiContext& gui, LayoutCursor& layout,
                   const ChromeTheme& theme, const char* label, float& value,
                   float min, float max, float width = 120.0f);
 
 // slider_float over an int reference - the value rounds to the nearest
-// integer after the float math.
+// integer after the float math, and the arrows step it by 1.
 bool slider_int(GuiContext& gui, LayoutCursor& layout,
                 const ChromeTheme& theme, const char* label, int& value,
                 int min, int max, float width = 120.0f);
@@ -92,7 +104,13 @@ void end_panel(GuiContext& gui, LayoutCursor& layout);
 // in range; count <= 0 places and ids nothing. Tabs id by INDEX under
 // the strip's own scope (`label`), so duplicate tab labels inside one
 // strip stay distinct widgets; the labels shape the centered bars like
-// every other widget's. What shows per tab is the caller's branch -
+// every other widget's. Tabs take the keyboard like buttons: each tab
+// registers focusable in strip order (Tab walks the strip left to
+// right), Enter or Space selects the focused tab exactly like a click,
+// and the focused tab wears the ring. Inside a begin_disabled scope
+// the strip dims as a whole - idle tabs take the dead face, the
+// selected tab's accent and every label fade - and no click or key
+// can move the selection. What shows per tab is the caller's branch -
 // the strip is the selection primitive, not a content container.
 bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
              const char* label, const char* const* tabs, int count,
@@ -119,12 +137,9 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 // while there is room to scroll), then pops the scope, clip and layout
 // panel in reverse.
 //
-// v1 limits, deliberate: vertical only (scroll_dx is ignored); the
+// v1 limits, deliberate: vertical only (scroll_dx is ignored); and the
 // wheel scrolls every scroll viewport under the pointer, so overlapping
-// regions are the caller's layout to avoid; and hit-testing does not
-// know about clips, so a row scrolled out of sight still hit-tests if
-// the pointer reaches its off-viewport rect (input clipping is a later
-// concern - it needs a clip-aware hit seam, not a widget patch).
+// regions are the caller's layout to avoid.
 Rect begin_scroll_panel(GuiContext& gui, LayoutCursor& layout,
                         const ChromeTheme& theme, const char* label,
                         const Rect& bounds);

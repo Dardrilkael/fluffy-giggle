@@ -111,6 +111,10 @@ public:
     // cancelled gesture's flag lifts with its pointer, so the platform
     // may reuse the id for a fresh contact. Each pointer's resolved hot
     // becomes hot_prev: the settled hover next frame's hit tests report.
+    // Tab moves queued this frame resolve here, against the frame's full
+    // registration list; and a veil that lifts this frame hands the focus
+    // back to what it displaced - but only on a quiet frame: a press or
+    // a Tab move keeps the focus it earned.
     void end_frame();
 
     // --- layer scopes: one layer concept for hit tests AND drawing ---
@@ -121,10 +125,13 @@ public:
     // who is on top. Call it inside the r2d begin()/end() block, like
     // the widget draws. A strictly higher layer wins hot whatever the
     // record order, and steals a press claimed THIS frame by a lower one
-    // (a click under a popup belongs to the popup); within one layer
-    // nothing changes - later widgets win hot, the first hit-test wins
-    // the press - and a drag carried from an earlier frame is capture:
-    // never stolen, not even by a modal veil opening mid-drag.
+    // (a click under a popup belongs to the popup). Within one layer
+    // the LATER widget wins BOTH hot and a fresh press - painter order
+    // is the topmost pixel, the one the user sees, so the widget that
+    // shows hover is the one that clicks; hover and click must never
+    // disagree on an overlap. A drag carried from an earlier frame is
+    // capture: never stolen, not even by a modal veil opening
+    // mid-drag.
     //
     // Layer::modal raises a VEIL, and the veil is frame-wide: it starts
     // at the first begin_layer(Layer::modal) of the frame, outlives the
@@ -132,7 +139,13 @@ public:
     // it is up, every strictly lower stratum is blocked - no hover, no
     // hot claim, no new press (no click-through); the block reads
     // stratum VALUES, so the modal's own chrome (hit-testing inside the
-    // modal scope, at the modal stratum) stays live. The veil being
+    // modal scope, at the modal stratum) stays live. The veil owns the
+    // keyboard too: register_focusable refuses widgets under it, which
+    // IS the focus trap - Tab wraps within the modal's own
+    // registrations and never escapes underneath - and a focused widget
+    // under it drops the focus (state()'s rule). The veil's rise stashes
+    // the focus it displaces, and the frame the veil lifts - a quiet
+    // frame, no press and no nav - hands the focus back. The veil being
     // frame-wide is what lets an app draw its chrome FIRST - the
     // stratum sorts it above base content wherever it records - while
     // the widgets it blocks still hit-test later in the frame; open the
@@ -208,7 +221,9 @@ public:
     // hit_test: a disabled widget claims nothing - no hover, no hot, no
     // press, so another widget under the same pointer may claim it - and
     // a focused widget that goes disabled drops the focus (it cannot
-    // hold what it cannot use).
+    // hold what it cannot use). The ambient begin_disabled scope joins
+    // the parameter - either locks the widget - and either way the id
+    // skips the frame's duplicate census (it never reaches hit_test).
     //
     // Focus is the keyboard's hot - a third concept beside hot (under
     // the pointer) and active (being pressed): focused means RECEIVES
@@ -228,9 +243,15 @@ public:
     // --- keyboard focus ---
     // Registers `id` as focusable THIS frame, in call order - the frame's
     // Tab order. Widgets call it during the frame, BEFORE their state()
-    // (a press's focus claim reads the registration). Ids past the
-    // registration cap drop with one warn per process; kInvalidWidgetId
-    // is refused (the sentinel is never focusable).
+    // (a press's focus claim reads the registration). Three refusals:
+    // kInvalidWidgetId (the sentinel is never focusable) and ids past
+    // the registration cap drop with one warn per process; the other two
+    // are silent because they are routine - a widget inside a
+    // begin_disabled scope registers nothing while locked, and a widget
+    // under a raised modal veil registers nothing at all. That veil
+    // refusal IS the focus trap: Tab resolves against what did register,
+    // so it wraps within the modal's own widgets and never escapes
+    // underneath.
     void register_focusable(WidgetId id);
     // True when `id` holds the keyboard focus. kInvalidWidgetId is pinned
     // false, like is_hot/is_active.
@@ -245,6 +266,33 @@ public:
     // same moves. Calls accumulate within a frame.
     void nav_next();
     void nav_previous();
+
+    // --- disabled scopes: one pair around a locked group ---
+    // begin_disabled opens a scope in which every widget that runs
+    // state() is locked: it claims nothing (hover, hot and press fall
+    // through to whatever sits underneath - pass-through is the point),
+    // it registers nothing focusable (Tab skips the scope), and it wears
+    // the Disabled face. The condition rides the begin -
+    // begin_disabled(!can_save) reads better than an if around the
+    // pair - so the scope pushes EVEN when the condition is false; it
+    // just does not lock anything. disabled() is the scope's answer:
+    // true when ANY open scope's condition held.
+    // The stack is shaped like the other gui stacks: fixed depth 32 with
+    // the balanced clamp (a push past 32 keeps counting but stops
+    // storing, warned once per process, so the matching end_disabled
+    // never eats a real scope's bit), a pop with nothing open is a
+    // no-op, and begin_frame resets a scope an early return never
+    // closed. Layer scopes carve out chrome: begin_layer saves the
+    // enclosing lock and RESETS it (a dialog opened from a locked form
+    // is new chrome, not part of the lock), end_layer restores what the
+    // enclosing scope had.
+    void begin_disabled(bool condition = true);
+    // Closes the innermost begin_disabled. Drop-safe like every gui pop:
+    // a call with no open scope is a no-op.
+    void end_disabled();
+    // True while any open begin_disabled condition held. The
+    // observability spelling, for apps and tests.
+    bool disabled() const;
 
     // Persistent-but-implicit per-widget state (scroll offsets, drag
     // accumulators, toggles), keyed by (type, widget id) and owned by the
@@ -367,6 +415,15 @@ private:
     static constexpr int kMaxFocusables = 128;
     std::array<WidgetId, kMaxFocusables> focusables_{};
     int focusable_count_ = 0;
+    // The focus the modal veil displaced, stashed at the veil's GENUINE
+    // rise - the frame it first appears; a continuing modal re-opens
+    // its scope every frame and must not re-stash what the dialog's own
+    // widgets focused - and handed back the quiet frame the veil lifts.
+    WidgetId pre_modal_focus_ = kInvalidWidgetId;
+    // Whether the veil was already up at begin_frame entry. The lift is
+    // only confirmable at end_frame (up at entry, and nothing re-raised
+    // it this frame); this is the "up at entry" half of that test.
+    bool veil_upon_entry_ = false;
 
     std::map<std::type_index, std::unique_ptr<StateTableBase>> state_tables_;
 
@@ -388,6 +445,26 @@ private:
     // The innermost open scope's numeric stratum (base without a scope):
     // the value the hit rules and r2d::set_layer both speak.
     std::uint32_t current_layer_value() const;
+
+    // --- disabled scopes (begin_disabled/end_disabled) ---
+    // The open scopes' conditions as a bitmask: bit i is the i-th open
+    // scope's condition (innermost in the low bit), disabled() is
+    // mask != 0, and the OR falls out of the shifts - a false condition
+    // pushes a 0 bit and locks nothing. Fixed depth with the balanced
+    // clamp: past 32 open scopes the depth keeps counting but the mask
+    // stops shifting (warned once per process), so the matching pops
+    // skip their shift and never eat a real scope's bit. begin_frame
+    // clears both, like every gui stack.
+    static constexpr int kMaxDisabledDepth = 32;
+    std::uint32_t disabled_mask_ = 0;
+    int disabled_depth_ = 0;
+    // Each layer scope's saved (mask, depth) pair: begin_layer stores
+    // the enclosing lock and resets it (chrome is not part of the form
+    // that locked), end_layer restores it. Indexed like the layer stack
+    // - a scope overflowed past kMaxLayerDepth stored nothing and
+    // restores nothing, matching the layer stack's own clamp.
+    std::array<std::uint32_t, kMaxLayerDepth> layer_disabled_mask_{};
+    std::array<int, kMaxLayerDepth> layer_disabled_depth_{};
 
     // --- hit clips (push_hit_clip/pop_hit_clip) ---
     // The hit-testing twin of r2d's clip stack, fixed depth with the

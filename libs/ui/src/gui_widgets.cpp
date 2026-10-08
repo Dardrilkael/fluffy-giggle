@@ -143,8 +143,16 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
                                theme.corner_radius + 1.0f, theme.control_on);
     }
 
+    // The disabled look: the dead face for the control, everything else
+    // (the icon tint, the label) dimmed through the theme's one helper -
+    // 1.0 is the identity for the live states.
+    const float dim_by =
+        result.state == WidgetState::Disabled ? theme.disabled_alpha : 1.0f;
+
     std::uint32_t face = theme.control_bg;
-    if (result.state == WidgetState::Pressed) {
+    if (result.state == WidgetState::Disabled) {
+        face = theme.control_disabled;  // the dead face covers idle/hover/press
+    } else if (result.state == WidgetState::Pressed) {
         face = theme.control_pressed;  // owned by the press, even if dragged away
     } else if (result.state == WidgetState::Hovered) {
         face = theme.control_hovered;
@@ -162,7 +170,7 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
         const float inset = std::min(theme.corner_radius, rect.height * 0.5f);
         const float side = rect.height - 2.0f * inset;
         r2d::draw_sprite(rect.x + inset, rect.y + inset, side, side,
-                         r2d::rgba(255, 255, 255), icon);
+                         dim(r2d::rgba(255, 255, 255), dim_by), icon);
         const float used = rect.height + theme.spacing;
         label_x = rect.x + used;
         label_room = std::max(0.0f, rect.width - used);
@@ -177,7 +185,7 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
         if (advance > 0.0f && advance <= room) {
             r2d::draw_text(label_x + (label_room - advance) * 0.5f,
                            label_top(rect.y, rect.height, theme), label,
-                           *theme.font, theme.text);
+                           *theme.font, dim(theme.text, dim_by));
         }
     } else {
         // The bar: half the control height, centered both ways in the
@@ -189,7 +197,7 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
         if (bar_width > 0.0f) {
             r2d::draw_quad(label_x + (label_room - bar_width) * 0.5f,
                            rect.y + (rect.height - bar_height) * 0.5f, bar_width,
-                           bar_height, theme.text);
+                           bar_height, dim(theme.text, dim_by));
         }
     }
 
@@ -207,18 +215,45 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     const float label_width = label_advance(label, theme);
     const Rect rect =
         layout.next(theme.control_height + gap + label_width, theme.control_height);
-    const HitTest hit = gui.hit_test(id, rect);
+    // Full citizenship, like a button: focusable, state() for the one
+    // hit-test plus the face, and the keyboard gets its say below.
+    gui.register_focusable(id);
+    const WidgetResult result = gui.state(id, rect);
+    const HitTest& hit = result.hit;
 
-    if (hit.clicked) {
+    // Keyboard toggle: Enter or Space flips the focused checkbox,
+    // edge-only - a click with no pointer involved.
+    const bool key_toggled =
+        gui.is_focused(id) &&
+        (gui.input().key_pressed[keys::kEnter] ||
+         gui.input().key_pressed[keys::kSpace]);
+
+    if (hit.clicked || key_toggled) {
         value = !value;  // the caller's bool is the state; a click flips it
     }
 
-    // The box: a control_height square with the same three-state face a
-    // button wears, corners rounded by the theme.
+    // The focus ring: the on-accent as a 1px outline behind the row, so
+    // Tab navigation is legible. Skipped for degenerate rows.
+    if (gui.is_focused(id) && rect.width > 0.0f && rect.height > 0.0f) {
+        r2d::draw_rounded_quad(rect.x - 1.0f, rect.y - 1.0f,
+                               rect.width + 2.0f, rect.height + 2.0f,
+                               theme.corner_radius + 1.0f, theme.control_on);
+    }
+
+    // The disabled look: the dead face for the box, the fill and the
+    // label dimmed through the one helper - 1.0 is the identity for the
+    // live states.
+    const float dim_by =
+        result.state == WidgetState::Disabled ? theme.disabled_alpha : 1.0f;
+
+    // The box: a control_height square with the same faces a button
+    // wears, corners rounded by the theme.
     std::uint32_t face = theme.control_bg;
-    if (hit.pressed) {
+    if (result.state == WidgetState::Disabled) {
+        face = theme.control_disabled;
+    } else if (result.state == WidgetState::Pressed) {
         face = theme.control_pressed;
-    } else if (hit.hovered) {
+    } else if (result.state == WidgetState::Hovered) {
         face = theme.control_hovered;
     }
     const float box = theme.control_height;
@@ -232,7 +267,7 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     const float fill = box - 2.0f * inset;
     if (value && fill > 0.0f) {
         r2d::draw_quad(rect.x + inset, rect.y + inset, fill, fill,
-                       theme.control_on);
+                       dim(theme.control_on, dim_by));
     }
 
     // The label beside the box, vertically centered: the theme font's
@@ -242,24 +277,34 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
         if (label_width > 0.0f) {
             r2d::draw_text(rect.x + box + gap,
                            label_top(rect.y, rect.height, theme), label,
-                           *theme.font, theme.text);
+                           *theme.font, dim(theme.text, dim_by));
         }
     } else if (label_width > 0.0f) {
         const float bar_height = rect.height * 0.5f;
         r2d::draw_quad(rect.x + box + gap,
                        rect.y + (rect.height - bar_height) * 0.5f, label_width,
-                       bar_height, theme.text);
+                       bar_height, dim(theme.text, dim_by));
     }
-    return hit.clicked;
+    return hit.clicked || key_toggled;
 }
 
-bool slider_float(GuiContext& gui, LayoutCursor& layout,
-                  const ChromeTheme& theme, const char* label, float& value,
-                  float min, float max, float width) {
+namespace {
+
+// The body both sliders share: they differ only in the keyboard step
+// (1% of the range for a float, 1 for an int), which rides through here
+// so the public pair keeps its signatures. Citizenship lives here once:
+// focusable, state() for the one hit-test plus the face, the arrows step
+// the focused slider, and the disabled look dims the fill, the handle
+// and the label as one.
+bool slider_impl(GuiContext& gui, LayoutCursor& layout,
+                 const ChromeTheme& theme, const char* label, float& value,
+                 float min, float max, float width, float key_step) {
     width = std::max(width, 0.0f);  // a negative width would draw a mirrored quad
     const WidgetId id = gui.ids().id(label);
     const Rect rect = layout.next(width, theme.control_height);
-    const HitTest hit = gui.hit_test(id, rect);
+    gui.register_focusable(id);
+    const WidgetResult result = gui.state(id, rect);
+    const HitTest& hit = result.hit;
 
     // Click-to-set and drag are one rule: while this slider owns the
     // press and that pointer is down, the value tracks THE POINTER THAT
@@ -286,12 +331,41 @@ bool slider_float(GuiContext& gui, LayoutCursor& layout,
         }
     }
 
+    // Keyboard: the arrows step the focused slider - one key_step per
+    // press, clamped to the range; only a real move reports changed.
+    if (gui.is_focused(id) && (gui.input().key_pressed[keys::kLeft] ||
+                               gui.input().key_pressed[keys::kRight])) {
+        const float step =
+            gui.input().key_pressed[keys::kRight] ? key_step : -key_step;
+        const float next = std::min(std::max(value + step, min), max);
+        if (next != value) {
+            value = next;
+            changed = true;
+        }
+    }
+
+    // The focus ring: the on-accent as a 1px outline behind the row, so
+    // Tab navigation is legible. Skipped for degenerate rows.
+    if (gui.is_focused(id) && rect.width > 0.0f && rect.height > 0.0f) {
+        r2d::draw_rounded_quad(rect.x - 1.0f, rect.y - 1.0f,
+                               rect.width + 2.0f, rect.height + 2.0f,
+                               theme.corner_radius + 1.0f, theme.control_on);
+    }
+
+    // The disabled look: the dead face for the rail, the fill, the
+    // handle and the label dimmed through the one helper - 1.0 is the
+    // identity for the live states.
+    const float dim_by =
+        result.state == WidgetState::Disabled ? theme.disabled_alpha : 1.0f;
+
     // The rail: a half-height strip down the middle of the row, wearing
-    // the same three-state face, ends rounded by the theme.
+    // the same faces a button wears, ends rounded by the theme.
     std::uint32_t face = theme.control_bg;
-    if (hit.pressed) {
+    if (result.state == WidgetState::Disabled) {
+        face = theme.control_disabled;
+    } else if (result.state == WidgetState::Pressed) {
         face = theme.control_pressed;
-    } else if (hit.hovered) {
+    } else if (result.state == WidgetState::Hovered) {
         face = theme.control_hovered;
     }
     const float rail_height = rect.height * 0.5f;
@@ -314,10 +388,12 @@ bool slider_float(GuiContext& gui, LayoutCursor& layout,
     // which is full height and opaque).
     if (handle_x > rect.x) {
         r2d::draw_rounded_quad(rect.x, rail_y, handle_x - rect.x, rail_height,
-                               theme.corner_radius, theme.control_on);
+                               theme.corner_radius,
+                               dim(theme.control_on, dim_by));
     }
     // The handle itself: full control height, over rail and fill.
-    r2d::draw_quad(handle_x, rect.y, handle_width, rect.height, theme.text);
+    r2d::draw_quad(handle_x, rect.y, handle_width, rect.height,
+                   dim(theme.text, dim_by));
 
     // The label, right-aligned over the rail: the theme font's glyphs, or
     // (fontless) the v1 bar (clamped to the rail's budget). Text cannot
@@ -328,7 +404,7 @@ bool slider_float(GuiContext& gui, LayoutCursor& layout,
         if (advance > 0.0f && advance <= rect.width - 4.0f) {
             r2d::draw_text(rect.x + rect.width - advance - 2.0f,
                            label_top(rect.y, rect.height, theme), label,
-                           *theme.font, theme.text);
+                           *theme.font, dim(theme.text, dim_by));
         }
     } else {
         const float bar_width = label_bar_width(label, rect.width - 4.0f);
@@ -336,19 +412,30 @@ bool slider_float(GuiContext& gui, LayoutCursor& layout,
             const float bar_height = rect.height * 0.5f;
             r2d::draw_quad(rect.x + rect.width - bar_width - 2.0f,
                            rect.y + (rect.height - bar_height) * 0.5f, bar_width,
-                           bar_height, theme.text);
+                           bar_height, dim(theme.text, dim_by));
         }
     }
     return changed;
+}
+
+}  // namespace
+
+bool slider_float(GuiContext& gui, LayoutCursor& layout,
+                  const ChromeTheme& theme, const char* label, float& value,
+                  float min, float max, float width) {
+    // The float keyboard step: 1% of the range per arrow press.
+    return slider_impl(gui, layout, theme, label, value, min, max, width,
+                       (max - min) / 100.0f);
 }
 
 bool slider_int(GuiContext& gui, LayoutCursor& layout,
                 const ChromeTheme& theme, const char* label, int& value,
                 int min, int max, float width) {
     float v = static_cast<float>(value);
-    const bool changed = slider_float(gui, layout, theme, label, v,
-                                      static_cast<float>(min),
-                                      static_cast<float>(max), width);
+    // The int keyboard step: 1 per arrow press.
+    const bool changed = slider_impl(gui, layout, theme, label, v,
+                                     static_cast<float>(min),
+                                     static_cast<float>(max), width, 1.0f);
     // Written only on a real change: a huge int that rounds through float
     // must not silently rewrite itself on idle frames.
     if (changed) {
@@ -370,17 +457,50 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     for (int i = 0; i < count; ++i) {
         gui.ids().push(i);
         const Rect rect = layout.next(width, theme.control_height);
-        const HitTest hit = gui.hit_test(gui.ids().id("tab"), rect);
+        // Full citizenship, like a button, per tab: each tab registers
+        // in strip order (Tab walks the strip left to right), state()
+        // runs the one hit-test and derives the face, and Enter or
+        // Space selects the focused tab.
+        const WidgetId tab_id = gui.ids().id("tab");
+        gui.register_focusable(tab_id);
+        const WidgetResult result = gui.state(tab_id, rect);
+        const HitTest& hit = result.hit;
+        const bool key_selected =
+            gui.is_focused(tab_id) &&
+            (gui.input().key_pressed[keys::kEnter] ||
+             gui.input().key_pressed[keys::kSpace]);
+
+        // The focus ring: the on-accent as a 1px outline behind the tab,
+        // so Tab navigation is legible. Skipped for degenerate rects.
+        if (gui.is_focused(tab_id) && rect.width > 0.0f &&
+            rect.height > 0.0f) {
+            r2d::draw_rounded_quad(rect.x - 1.0f, rect.y - 1.0f,
+                                   rect.width + 2.0f, rect.height + 2.0f,
+                                   theme.corner_radius + 1.0f,
+                                   theme.control_on);
+        }
+
+        // The disabled look: the dead face for an idle tab, the selected
+        // tab's accent and the label dimmed through the one helper - the
+        // selection stays legible in a dead strip, just faded. 1.0 is
+        // the identity for the live states.
+        const float dim_by =
+            result.state == WidgetState::Disabled ? theme.disabled_alpha
+                                                   : 1.0f;
 
         // Face priority: press feedback even on the selected tab, then
-        // the selection accent, then hover, then idle.
+        // the selection accent, then hover, then the dead face, then
+        // idle. A dead tab claims nothing, so its pressed/hover branches
+        // never fire - the Disabled slot is for the idle one.
         std::uint32_t face = theme.control_bg;
-        if (hit.pressed) {
+        if (result.state == WidgetState::Pressed) {
             face = theme.control_pressed;
         } else if (i == active) {
-            face = theme.control_on;
-        } else if (hit.hovered) {
+            face = dim(theme.control_on, dim_by);
+        } else if (result.state == WidgetState::Hovered) {
             face = theme.control_hovered;
+        } else if (result.state == WidgetState::Disabled) {
+            face = theme.control_disabled;
         }
         r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
                                theme.corner_radius, face);
@@ -396,7 +516,8 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             if (advance > 0.0f && advance <= room) {
                 r2d::draw_text(rect.x + (rect.width - advance) * 0.5f,
                                label_top(rect.y, rect.height, theme),
-                               tab_label, *theme.font, theme.text);
+                               tab_label, *theme.font,
+                               dim(theme.text, dim_by));
             }
         } else {
             const float bar_width = label_bar_width(tab_label,
@@ -406,13 +527,14 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
                 const float bar_height = rect.height * 0.5f;
                 r2d::draw_quad(rect.x + (rect.width - bar_width) * 0.5f,
                                rect.y + (rect.height - bar_height) * 0.5f,
-                               bar_width, bar_height, theme.text);
+                               bar_width, bar_height, dim(theme.text, dim_by));
             }
         }
 
-        // A full click moves the selection; clicking the already-selected
-        // tab is a no-op that reports nothing.
-        if (hit.clicked && i != active) {
+        // A full click or the focused tab's Enter/Space moves the
+        // selection; selecting the already-selected tab is a no-op that
+        // reports nothing.
+        if ((hit.clicked || key_selected) && i != active) {
             active = i;
             changed = true;
         }

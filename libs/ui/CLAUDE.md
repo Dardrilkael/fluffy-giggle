@@ -457,8 +457,12 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   on top. A strictly higher layer wins hot whatever the record order
   (draw order must not decide the pointer) and steals a press claimed
   THIS frame by a lower one — a click under a popup belongs to the
-  popup; within one layer nothing changes (later widgets win hot,
-  first hit-test wins the press), and a drag carried from an earlier
+  popup. Within one layer the LATER widget wins BOTH hot and a fresh
+  press: painter order is the topmost pixel, the one the user sees, so
+  the widget that shows hover is the one that clicks — the two must
+  never disagree on an overlap (M10; the steal leaves the earlier
+  widget with a stale pressed for the steal frame only, and its release
+  reports nothing). A drag carried from an earlier
   frame is capture: never stolen, not even by a modal veil opening
   mid-drag (the gesture finishes on its owner). `Layer::modal` raises a
   VEIL that is frame-wide: it starts at the frame's first modal scope,
@@ -466,6 +470,9 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `begin_frame` — while it is up, every strictly lower stratum is
   blocked (no hover, no hot, no new press; no click-through), and the
   modal's own chrome hit-tests at the modal stratum, unblocked. The
+  veil owns the keyboard as well (see Widget state + focus):
+  registrations under it are refused, and the frame it lifts hands the
+  displaced focus back. The
   frame-wide veil is what lets an app draw its chrome FIRST — the
   stratum sorts it above base content wherever it records — while the
   widgets it blocks still hit-test later in the frame; open the modal
@@ -504,7 +511,9 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   Hovered and draws its ring off `is_focused()` instead. `disabled`
   short-circuits BEFORE the hit-test: a disabled widget claims nothing
   (not even a census entry — the widget under the same pointer may
-  claim) and drops held focus. Focus follows the PRESS EDGE: a fresh
+  claim) and drops held focus; the ambient `begin_disabled` scope joins
+  the parameter — either locks the widget. Focus follows the PRESS
+  EDGE: a fresh
   press on a widget registered focusable this frame
   (`register_focusable(id)`, call order = Tab order, before state())
   takes the focus right there — a press that slips off and never clicks
@@ -514,18 +523,48 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `nav_next()`/`nav_previous()` queue moves resolved at end_frame as
   one net step against the frame's registrations, wrapping; focus
   outside the list restarts forward at the first, backward at the last.
-  A raised modal veil clears focus (`state()` drops it while the widget
-  hit-tests under the veil) — a modal blocks the keyboard like the
-  pointer. Otherwise focus persists while the widget keeps running:
+  A raised modal veil owns the keyboard like the pointer: widgets under
+  it never register — the refusal IS the focus trap, Tab wraps within
+  the modal's own registrations and cannot escape underneath — and
+  `state()` drops the focus of a widget that hit-tests under it. The
+  veil's GENUINE rise stashes the focus it displaces (`veil_upon_entry_`
+  tells lift from continuation; a continuing modal never re-stashes),
+  and the frame the veil lifts hands the focus back — but only on a
+  quiet frame (no press, no nav): a press or a Tab move on the closing
+  frame keeps the focus it earned. Two adjacent modals are one
+  continuous veil stretch — one stash, one restore. Otherwise focus
+  persists while the widget keeps running:
   an id, not a claim — an absent widget keeps focus until a press
   elsewhere or a Tab move takes it (the app decides whether that is
-  what it wants). Registration caps at `kMaxFocusables` = 128 with the
+  what it wants). `register_focusable` refuses three ways: the sentinel
+  and past-cap ids warn once and drop; inside a `begin_disabled` scope
+  and under a raised veil it refuses SILENTLY, both routine. The
+  registration caps at `kMaxFocusables` = 128 with the
   census's warn-once degrade; the registration-order list is the seam a
   directional/gamepad nav would extend (register bounds alongside the
   id) — deliberately deferred, not blocked. `keys::` (input_frame.hpp)
   is the spelling of the keys with built-in behavior — Tab, Enter,
-  Space, the shifts — GLFW numbering, so core and widgets can never
+  Space, the shifts, the arrows (kLeft/kRight step the focused slider)
+  — GLFW numbering, so core and widgets can never
   disagree.
+- **Disabled scopes (M10).** `begin_disabled(condition = true)`/
+  `end_disabled()`/`disabled()` — an ambient lock around whatever runs
+  between them: widgets become dead with no per-widget plumbing. The
+  condition form is a plain `if` written as a scope (a false condition
+  pushes a bit that locks nothing, so the matching `end` never eats an
+  enclosing true scope — the mask is the OR of every open condition,
+  `uint32_t` bit per level with a depth counter). Pass-through is the
+  point: a locked widget claims nothing, so the click lands on
+  whatever sits underneath — the scope withdraws hover, hot, presses
+  AND registration, and `state()` reads the lock (the parameter and
+  the scope are two doors into the same Disabled state). Frame-scoped
+  like every gui stack (begin_frame clears a stranded scope), balanced
+  clamp at 32 like the layer/id stacks (deeper scopes keep counting
+  and warn once per process), every `end_disabled()` a no-op on an
+  empty stack. Layer scopes RESET the lock at `begin_layer` and
+  restore it at `end_layer`: a dialog opened from a locked form is
+  live chrome, not more dead form — and the restore means the lock
+  never leaks into a stratum it did not come from.
 - **Press cancel.** `cancel_pointer(id)` ends that pointer's press with
   no click: the active claim clears, the track flags `cancelled`, and
   it claims nothing until it lifts (`end_frame` lifts it with the
@@ -552,27 +591,41 @@ drive unchanged (that boundary is deliberate; don't paint it over).
 - **Theme.** `ChromeTheme` — the faces and the metrics (control height,
   corner radius, padding, spacing, scroll speed, drag threshold) in one
   plain struct,
-  `kDefaultChrome` constexpr. Widgets take a `const ChromeTheme&` per
+  `kDefaultChrome` constexpr. `control_disabled` is the one dead face
+  every widget's Disabled state wears (it covers idle, hover and press
+  — a locked control has no live reactions), and `disabled_alpha`
+  (0.45) fades everything drawn on top of it: labels, checkbox fill,
+  slider fill and handle, the selected tab's accent. Widgets take a
+  `const ChromeTheme&` per
   call, so a panel can carry its own variant inline. `scaled(scale)`
   returns a copy with every metric multiplied — the touch-density move,
   fed by `App::ui_scale()` (Android display density / 160, desktop
   content scale); faces and the font pointer carry unchanged (the caller
-  scales the font bake and panel rects by the same factor). `font` is a
+  scales the font bake and panel rects by the same factor). `dim(color,
+  factor)` (beside the struct, not scaled — a ratio, not a metric) is
+  the helper that does the fading: it multiplies a color's ALPHA only,
+  so a dimmed label keeps its hue. `font` is a
   borrowed `const r2d::Font*` (null = the v1 label bars, byte-for-byte
   the pre-font look): the theme does NOT own the font — load it once
   (`r2d::load_font`, valid from `on_setup()`) and keep it alive as
   long as any theme pointing at it is in use. A second face (a heading
   weight, say) grows a sibling field, not a rework of the pointer.
 - **Widgets** — all caller-state, all drawing through r2d, all drop-safe
-  headless: `button` (optional atlas icon + label; keyboard-takes-focus:
-  a press on one focuses it, Tab reaches it, Enter/Space activate the
-  focused one exactly like a click, and the focused one wears a 1px
-  accent ring), `checkbox`
-  (box + label, auto-sized row), `slider_float`/`slider_int`
+  headless, and (M10) all citizens: every interactive widget registers
+  focusable and drives through `state()` — focus, the 1px accent ring,
+  keyboard control and the Disabled look are one story everywhere, not
+  a button privilege: `button` (optional atlas icon + label; Enter/
+  Space activate the focused one exactly like a click),
+  `checkbox`
+  (box + label, auto-sized row; Enter/Space toggle the focused one),
+  `slider_float`/`slider_int`
   (click-to-set and drag are one rule: the owner maps the pointer while
-  pressed), `begin_panel`/`end_panel` (chrome + clip + id scope + layout
+  pressed; kLeft/kRight step the focused one — 1% of the range per
+  press, int by 1, clamped to [min, max], changed reported only on a
+  real move), `begin_panel`/`end_panel` (chrome + clip + id scope + layout
   panel), `tab_bar` (the caller's int IS the selection; the strip
-  selects, the per-tab content is the caller's branch),
+  selects, the per-tab content is the caller's branch; the tabs
+  register in strip order and Enter/Space select the focused one),
   `begin_scroll_panel`/`end_scroll_panel` (children flow inside a
   virtual panel shifted by the offset — they draw and hit-test at
   scrolled positions — while the renderer clip and its hit-testing twin
@@ -657,10 +710,15 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   same rect (a scrolled-out row cannot claim); capture is never
   clipped. Widget state + keyboard focus: `state(id, bounds,
   disabled)` (one hit-test, `WidgetResult` = hit + `WidgetState`),
-  `register_focusable(id)` (call order = Tab order), `is_focused(id)`,
+  `register_focusable(id)` (call order = Tab order; refused inside a
+  disabled scope and under a raised modal veil), `is_focused(id)`,
   `set_focus(id)` (kInvalidWidgetId clears), `nav_next()`/
   `nav_previous()` (queued, resolved at end_frame), the `keys::`
-  constants for the built-in key spellings. Hot/active are per pointer:
+  constants for the built-in key spellings (Tab, Enter, Space, the
+  shifts, the arrows). Disabled scopes: `begin_disabled(condition)`/
+  `end_disabled()`/`disabled()` — the ambient lock (claims, focus and
+  registration withdrawn inside; layer scopes reset it at `begin_layer`
+  and restore it at `end_layer`). Hot/active are per pointer:
   `hot_id()`/`active_id()` default to the mouse and take a pointer id;
   `is_hot(id, pointer)`/`is_active(id, pointer)` are the am-I spelling
   (the invalid id pinned to false); `owning_pointer(widget_id)` and

@@ -2516,7 +2516,10 @@ TEST_CASE("hit_test: a held press captures the pointer - other widgets cannot ta
     using namespace ws::ui::gui;
     GuiContext gui;
     const IdStack ids;
-    // Two overlapping buttons; B draws later (on top) but A owns the press.
+    // Two overlapping buttons; B draws later (on top). A takes the press
+    // first and the CARRIED gesture is capture - B cannot take it. (A FRESH
+    // press on an overlap is the later widget's to steal - the M10
+    // hot/press agreement rule, tested in the overlap suite below.)
     const WidgetId a = ids.id("a");
     const WidgetId b = ids.id("b");
     const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
@@ -2524,15 +2527,22 @@ TEST_CASE("hit_test: a held press captures the pointer - other widgets cannot ta
     gui.begin_frame(snap(50.0f, 50.0f, true, true));
     (void)gui.hit_test(a, rect);  // A runs first: takes the press
     CHECK(gui.active_id() == a);
+    gui.end_frame();
 
+    // B appears on the overlap while the press is HELD (no new edge):
+    // capture - B gets nothing, not even hot.
+    gui.begin_frame(snap(50.0f, 50.0f, true));
+    (void)gui.hit_test(a, rect);  // the owner keeps its own hot
     const HitTest under = gui.hit_test(b, rect);  // B overlaps: no press for B
     CHECK(!under.pressed);
     CHECK(!under.clicked);
     CHECK(gui.hot_id() == a);  // while A owns the press, B cannot be hot
     CHECK(gui.active_id() == a);
 
-    // Pressing again while A owns it changes nothing for B.
+    // Even a fresh edge while A owns it changes nothing for B: the
+    // gesture belongs to its owner until it ends.
     gui.begin_frame(snap(50.0f, 50.0f, true, true));
+    (void)gui.hit_test(a, rect);
     const HitTest again = gui.hit_test(b, rect);
     CHECK(!again.pressed);
     CHECK(gui.active_id() == a);
@@ -5267,4 +5277,555 @@ TEST_CASE("gui labels draw through the theme font") {
         }
     }
     CHECK(glyph_verts == 8);  // 'A' and 'B': two glyph quads, nothing else
+}
+
+// --- hot/press agreement, the focus trap, disabled scopes (M10) ----------------------
+
+TEST_CASE("overlaps: the later widget wins hot AND the fresh press - hover and click agree") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId under = IdStack{}.id("under");
+    const WidgetId over = IdStack{}.id("over");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // Hover first: the later widget settles hot (the painter's rule) and
+    // reports hovered next frame.
+    gui.begin_frame(snap(50.0f, 50.0f));
+    (void)gui.state(under, rect);
+    (void)gui.state(over, rect);
+    CHECK(gui.hot_id() == over);
+    gui.end_frame();
+
+    // The press frame: `under` hit-tests first and claims, then `over` -
+    // the later widget, same stratum - STEALS the fresh press. Painter
+    // order is the topmost pixel, the one the user sees: the widget that
+    // shows hover is the one that clicks. (The steal leaves `under`
+    // holding a stale pressed for THIS frame only - its part was
+    // computed before the steal; the release frame gives it nothing.)
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
+    const WidgetResult under_hit = gui.state(under, rect);
+    const WidgetResult over_hit = gui.state(over, rect);
+    CHECK(gui.active_id() == over);
+    CHECK(gui.hot_id() == over);
+    CHECK(over_hit.hit.pressed);
+    CHECK(over_hit.hit.hovered);   // hot_prev settled on the later widget
+    CHECK(under_hit.hit.pressed);  // the one-frame steal artifact
+    gui.end_frame();
+
+    // The release clicks the widget the user sees; the stolen-from one
+    // learns nothing - not even a released.
+    gui.begin_frame(snap(50.0f, 50.0f, false, false, true));
+    const WidgetResult under_end = gui.state(under, rect);
+    const WidgetResult over_end = gui.state(over, rect);
+    CHECK(over_end.hit.clicked);
+    CHECK(!under_end.hit.clicked);
+    CHECK(!under_end.hit.released);
+    gui.end_frame();
+}
+
+TEST_CASE("overlaps: a carried press is capture - the later widget cannot steal it") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId under = IdStack{}.id("under");
+    const WidgetId over = IdStack{}.id("over");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // The press lands on `under` alone - `over` does not exist this frame.
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
+    (void)gui.state(under, rect);
+    CHECK(gui.active_id() == under);
+    gui.end_frame();
+
+    // `over` appears on the overlap while the press is HELD (no edge):
+    // carried is capture, the steal is fresh-only - not even a
+    // same-stratum later widget takes it, and `under` keeps hot too
+    // (ownership gates the claim).
+    gui.begin_frame(snap(50.0f, 50.0f, true));
+    (void)gui.state(under, rect);
+    (void)gui.state(over, rect);
+    CHECK(gui.active_id() == under);
+    CHECK(gui.hot_id() == under);
+    gui.end_frame();
+
+    // The release clicks the widget that owned the whole drag.
+    gui.begin_frame(snap(50.0f, 50.0f, false, false, true));
+    CHECK(gui.state(under, rect).hit.clicked);
+    CHECK(!gui.state(over, rect).hit.clicked);
+    gui.end_frame();
+}
+
+TEST_CASE("modals: Tab lands only inside the veil - the focus trap") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId modal_a = IdStack{}.id("modal-a");
+    const WidgetId modal_b = IdStack{}.id("modal-b");
+    const WidgetId base_w = IdStack{}.id("base-w");
+
+    // Chrome-first, like production: the modal scope opens at the top,
+    // its widgets register inside it, and the base widget's attempt
+    // under the veil is silently refused - the refusal IS the trap.
+    const auto veiled_frame = [&gui, modal_a, modal_b, base_w](InputFrame frame) {
+        gui.begin_frame(frame);
+        gui.begin_layer(Layer::modal);
+        gui.register_focusable(modal_a);
+        gui.register_focusable(modal_b);
+        gui.end_layer();
+        gui.register_focusable(base_w);  // refused: under the veil
+        gui.end_frame();
+    };
+
+    // Tab walks the modal's own registrations and wraps inside them -
+    // never escaping to the base widget the veil hides.
+    InputFrame tab = snap(200.0f, 200.0f);
+    tab.key_pressed[keys::kTab] = true;
+    veiled_frame(tab);
+    CHECK(gui.is_focused(modal_a));
+    veiled_frame(tab);
+    CHECK(gui.is_focused(modal_b));
+    veiled_frame(tab);
+    CHECK(gui.is_focused(modal_a));  // wrapped, not escaped
+    CHECK(!gui.is_focused(base_w));
+
+    // The veil lifts on a quiet frame (the rise stashed an empty focus,
+    // so the restore clears it), and now Tab reaches the base widget:
+    // registration under an open sky is ordinary again.
+    gui.begin_frame(snap(200.0f, 200.0f));
+    gui.register_focusable(base_w);
+    gui.end_frame();
+    CHECK(!gui.is_focused(modal_a));
+
+    InputFrame tab_plain = snap(200.0f, 200.0f);
+    tab_plain.key_pressed[keys::kTab] = true;
+    gui.begin_frame(tab_plain);
+    gui.register_focusable(base_w);
+    gui.end_frame();
+    CHECK(gui.is_focused(base_w));
+}
+
+TEST_CASE("modals: the veil lifts and hands the focus back") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId opener = IdStack{}.id("opener");
+    const WidgetId dialog = IdStack{}.id("dialog");
+    const WidgetId elsewhere = IdStack{}.id("elsewhere");
+    const Rect rect{0.0f, 0.0f, 400.0f, 300.0f};
+
+    // The opener takes the focus the ordinary way: a press on it.
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
+    gui.register_focusable(opener);
+    (void)gui.state(opener, rect);
+    CHECK(gui.is_focused(opener));
+    gui.end_frame();
+    gui.begin_frame(snap(50.0f, 50.0f, false, false, true));
+    gui.register_focusable(opener);
+    (void)gui.state(opener, rect);
+    gui.end_frame();
+
+    // The veil rises (chrome-first): the opener's focus drops this
+    // frame - the rise stashes it - and the veil is up from here.
+    gui.begin_frame(snap(200.0f, 200.0f));
+    gui.begin_layer(Layer::modal);
+    gui.register_focusable(dialog);
+    gui.end_layer();
+    const WidgetResult veiled = gui.state(opener, rect);
+    CHECK(veiled.state == WidgetState::Normal);  // no hover under the veil
+    CHECK(!gui.is_focused(opener));  // dropped: the veil blocks the keyboard
+    gui.end_frame();
+
+    // Still up the next frame: no restore while the veil holds.
+    gui.begin_frame(snap(200.0f, 200.0f));
+    gui.begin_layer(Layer::modal);
+    gui.end_layer();
+    (void)gui.state(opener, rect);
+    CHECK(!gui.is_focused(opener));
+    gui.end_frame();
+
+    // The closing frame is quiet (no press, no nav): mid-frame the
+    // focus is still gone - the lift is only confirmable at end_frame -
+    // and end_frame hands the stash back.
+    gui.begin_frame(snap(200.0f, 200.0f));
+    (void)gui.state(opener, rect);
+    CHECK(!gui.is_focused(opener));
+    gui.end_frame();
+    CHECK(gui.is_focused(opener));
+
+    // And it settles: with the pointer away, the restored opener wears
+    // the resting Focused state.
+    gui.begin_frame(snap(500.0f, 500.0f));
+    gui.register_focusable(opener);
+    CHECK(gui.state(opener, rect).state == WidgetState::Focused);
+    gui.end_frame();
+
+    // A LOUD closing frame declines: a press that lands a focus keeps
+    // it. Re-raise the veil (the opener's focus drops again), then
+    // close it on a press on a different focusable.
+    gui.begin_frame(snap(200.0f, 200.0f));
+    gui.begin_layer(Layer::modal);
+    gui.end_layer();
+    (void)gui.state(opener, rect);
+    CHECK(!gui.is_focused(opener));
+    gui.end_frame();
+    gui.begin_frame(snap(250.0f, 250.0f, true, true));
+    gui.register_focusable(elsewhere);
+    (void)gui.state(elsewhere, rect);
+    CHECK(gui.is_focused(elsewhere));
+    gui.end_frame();
+    CHECK(gui.is_focused(elsewhere));  // the restore yielded to the press
+    gui.begin_frame(snap(250.0f, 250.0f, false, false, true));
+    gui.register_focusable(elsewhere);
+    (void)gui.state(elsewhere, rect);
+    gui.end_frame();
+}
+
+TEST_CASE("citizenship: the checkbox takes focus and Enter toggles like a click") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    bool value = true;
+    bool other = true;
+
+    // Click the row: the press takes the focus (checkboxes register
+    // now), the release completes the click and flips the bool.
+    gui.begin_frame(snap(4.0f, 4.0f, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!checkbox(gui, layout, kDefaultChrome, "mute", value));
+    (void)checkbox(gui, layout, kDefaultChrome, "solo", other);
+    layout.end_panel();
+    gui.end_frame();
+    gui.begin_frame(snap(4.0f, 4.0f, false, false, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(checkbox(gui, layout, kDefaultChrome, "mute", value));
+    (void)checkbox(gui, layout, kDefaultChrome, "solo", other);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(value == false);
+    CHECK(other == true);
+    CHECK(gui.is_focused(IdStack{}.id("mute")));
+
+    // Enter toggles the focused checkbox - and only it.
+    InputFrame key_enter = snap(200.0f, 200.0f);
+    key_enter.key_pressed[keys::kEnter] = true;
+    gui.begin_frame(key_enter);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(checkbox(gui, layout, kDefaultChrome, "mute", value));
+    (void)checkbox(gui, layout, kDefaultChrome, "solo", other);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(value == true);
+    CHECK(other == true);
+
+    // Space does the same.
+    InputFrame key_space = snap(200.0f, 200.0f);
+    key_space.key_pressed[keys::kSpace] = true;
+    gui.begin_frame(key_space);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(checkbox(gui, layout, kDefaultChrome, "mute", value));
+    (void)checkbox(gui, layout, kDefaultChrome, "solo", other);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(value == false);
+
+    // Clearing the focus kills the key path: the same Space does nothing.
+    InputFrame key_dead = snap(200.0f, 200.0f);
+    key_dead.key_pressed[keys::kSpace] = true;
+    gui.begin_frame(key_dead);
+    gui.set_focus(kInvalidWidgetId);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!checkbox(gui, layout, kDefaultChrome, "mute", value));
+    (void)checkbox(gui, layout, kDefaultChrome, "solo", other);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(value == false);
+}
+
+TEST_CASE("citizenship: the arrows step the focused slider") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    float v = 0.25f;
+
+    // Press the exact middle: click-to-set parks 0.5, and the press
+    // takes the focus (sliders register now).
+    gui.begin_frame(snap(60.0f, 12.0f, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(slider_float(gui, layout, kDefaultChrome, "vol", v, 0.0f, 1.0f));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(v == doctest::Approx(0.5f));
+    CHECK(gui.is_focused(IdStack{}.id("vol")));
+
+    // The release inside maps the same value: no change, no report.
+    gui.begin_frame(snap(60.0f, 12.0f, false, false, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!slider_float(gui, layout, kDefaultChrome, "vol", v, 0.0f, 1.0f));
+    layout.end_panel();
+    gui.end_frame();
+
+    // Right steps 1% of the range; only a real move reports changed.
+    InputFrame key_right = snap(200.0f, 200.0f);
+    key_right.key_pressed[keys::kRight] = true;
+    gui.begin_frame(key_right);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(slider_float(gui, layout, kDefaultChrome, "vol", v, 0.0f, 1.0f));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(v == doctest::Approx(0.51f));
+
+    // Left steps back.
+    InputFrame key_left = snap(200.0f, 200.0f);
+    key_left.key_pressed[keys::kLeft] = true;
+    gui.begin_frame(key_left);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(slider_float(gui, layout, kDefaultChrome, "vol", v, 0.0f, 1.0f));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(v == doctest::Approx(0.5f));
+
+    // Without the focus the arrows do nothing and report nothing.
+    InputFrame key_dead = snap(200.0f, 200.0f);
+    key_dead.key_pressed[keys::kRight] = true;
+    gui.begin_frame(key_dead);
+    gui.set_focus(kInvalidWidgetId);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!slider_float(gui, layout, kDefaultChrome, "vol", v, 0.0f, 1.0f));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(v == doctest::Approx(0.5f));
+}
+
+TEST_CASE("citizenship: slider_int steps by one and clamps at the end") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    int n = 3;
+
+    // Press at the left edge: click-to-set parks 0 and the press takes
+    // the focus.
+    gui.begin_frame(snap(0.0f, 12.0f, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(slider_int(gui, layout, kDefaultChrome, "n", n, 0, 3));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(n == 0);
+    CHECK(gui.is_focused(IdStack{}.id("n")));
+
+    gui.begin_frame(snap(0.0f, 12.0f, false, false, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!slider_int(gui, layout, kDefaultChrome, "n", n, 0, 3));
+    layout.end_panel();
+    gui.end_frame();
+
+    // Right steps 1 per press, reporting changed on each real move.
+    InputFrame key_right = snap(200.0f, 200.0f);
+    key_right.key_pressed[keys::kRight] = true;
+    for (int expect = 1; expect <= 3; ++expect) {
+        gui.begin_frame(key_right);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        CHECK(slider_int(gui, layout, kDefaultChrome, "n", n, 0, 3));
+        layout.end_panel();
+        gui.end_frame();
+        CHECK(n == expect);
+    }
+
+    // At the max the same arrow reports nothing and the value holds.
+    gui.begin_frame(key_right);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!slider_int(gui, layout, kDefaultChrome, "n", n, 0, 3));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(n == 3);
+}
+
+TEST_CASE("citizenship: tabs take focus in strip order; Enter selects") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    const char* labels[] = {"one", "two", "three"};
+    int active = -1;
+
+    // Click the first tab: the press takes the focus (each tab registers
+    // now, in strip order) and selects nothing yet; the RELEASE completes
+    // the click and moves the selection.
+    gui.begin_frame(snap(30.0f, 12.0f, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!tab_bar(gui, layout, kDefaultChrome, "pages", labels, 3, active));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(active == -1);  // the press frame selects nothing
+    gui.begin_frame(snap(30.0f, 12.0f, false, false, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(tab_bar(gui, layout, kDefaultChrome, "pages", labels, 3, active));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(active == 0);
+
+    // Tab walks the strip's registrations: the focus moves to the
+    // second tab WITHOUT moving the selection.
+    InputFrame tab = snap(200.0f, 200.0f);
+    tab.key_pressed[keys::kTab] = true;
+    gui.begin_frame(tab);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!tab_bar(gui, layout, kDefaultChrome, "pages", labels, 3, active));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(active == 0);  // the focus moved, the selection did not
+
+    // Enter selects the focused tab - exactly like a click.
+    InputFrame key_enter = snap(200.0f, 200.0f);
+    key_enter.key_pressed[keys::kEnter] = true;
+    gui.begin_frame(key_enter);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(tab_bar(gui, layout, kDefaultChrome, "pages", labels, 3, active));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(active == 1);
+}
+
+TEST_CASE("disabled: the scope withdraws claims, focus and Tab") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId locked = IdStack{}.id("locked");
+    const WidgetId below = IdStack{}.id("below");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // Inside the scope the widget is dead: the Disabled face, zero
+    // claims - and the press falls through to the widget underneath.
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
+    gui.begin_disabled();
+    CHECK(gui.disabled());
+    gui.register_focusable(locked);  // refused while locked
+    const WidgetResult dead = gui.state(locked, rect);
+    CHECK(dead.state == WidgetState::Disabled);
+    CHECK(dead.hit.pressed == false);
+    CHECK(gui.hot_id() == kInvalidWidgetId);  // nothing claimed yet
+    gui.end_disabled();
+    gui.register_focusable(below);
+    const WidgetResult through = gui.state(below, rect);
+    CHECK(through.hit.pressed);  // pass-through: the click is below's
+    CHECK(gui.active_id() == below);
+    gui.end_frame();
+
+    // The release clicks the widget underneath, not the locked one.
+    gui.begin_frame(snap(50.0f, 50.0f, false, false, true));
+    const WidgetResult under_end = gui.state(below, rect);
+    CHECK(under_end.hit.clicked);
+    gui.end_frame();
+
+    // A conditional scope that does not hold locks nothing: the widget
+    // claims like always.
+    gui.begin_frame(snap(50.0f, 50.0f));
+    gui.begin_disabled(false);
+    CHECK(!gui.disabled());
+    const WidgetResult live = gui.state(locked, rect);
+    CHECK(live.state == WidgetState::Normal);
+    CHECK(gui.hot_id() == locked);
+    gui.end_disabled();
+    gui.end_frame();
+
+    // The balanced clamp: a false begin still pushes (its end must not
+    // eat an enclosing true scope), and a true inside locks regardless
+    // of the false around it - the mask is the OR of the conditions.
+    gui.begin_frame(snap(200.0f, 200.0f));
+    gui.begin_disabled();
+    gui.begin_disabled(false);
+    CHECK(gui.disabled());
+    gui.end_disabled();  // pops the FALSE scope only
+    CHECK(gui.disabled());  // the enclosing true still holds
+    gui.end_disabled();
+    CHECK(!gui.disabled());
+    gui.end_disabled();  // nothing open - drop-safe like every gui pop
+    CHECK(!gui.disabled());
+    gui.end_frame();
+
+    // Tab has nowhere to land while the only focusable is locked: the
+    // registration is refused, the nav resolves against nothing, and
+    // the focus holds still.
+    InputFrame tab = snap(200.0f, 200.0f);
+    tab.key_pressed[keys::kTab] = true;
+    gui.begin_frame(tab);
+    gui.begin_disabled();
+    gui.register_focusable(locked);  // refused
+    (void)gui.state(locked, rect);    // Disabled, no claims
+    gui.end_disabled();
+    gui.end_frame();
+    CHECK(gui.is_focused(below));  // unchanged: nowhere to land
+}
+
+TEST_CASE("disabled: a layer scope resets the lock and end_layer restores it") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId locked = IdStack{}.id("locked");
+    const WidgetId chrome = IdStack{}.id("chrome");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // A locked form opens a popup: the chrome inside the scope draws
+    // LIVE - registration works, the press lands, focus and all. Chrome
+    // is not part of the form that locked.
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
+    gui.begin_disabled();
+    gui.begin_layer(Layer::popup);
+    gui.register_focusable(chrome);
+    const WidgetResult live = gui.state(chrome, rect);
+    CHECK(live.hit.pressed);
+    CHECK(live.state == WidgetState::Pressed);
+    CHECK(gui.is_focused(chrome));
+    gui.end_layer();
+    // Back under the lock: the base widget is dead again - and the
+    // chrome keeps its press (the lock never touched it).
+    const WidgetResult dead = gui.state(locked, rect);
+    CHECK(dead.state == WidgetState::Disabled);
+    CHECK(gui.active_id() == chrome);
+    gui.end_disabled();
+    gui.end_frame();
+
+    // Lift the chrome's press (its owner does not run; end_frame drops
+    // the vanished release), then a fresh press is the base widget's
+    // own again: the scope ended.
+    gui.begin_frame(snap(50.0f, 50.0f, false, false, true));
+    (void)gui.state(locked, rect);  // blocked by the live press
+    gui.end_frame();
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
+    const WidgetResult revived = gui.state(locked, rect);
+    CHECK(revived.hit.pressed);
+    CHECK(revived.state == WidgetState::Pressed);
+    gui.end_frame();
+}
+
+TEST_CASE("disabled: begin_frame clears a scope an early return never closed") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId w = IdStack{}.id("w");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // An early return strands the scope: the frame ends still disabled.
+    gui.begin_frame(snap(50.0f, 50.0f));
+    gui.begin_disabled();
+    const WidgetResult dead = gui.state(w, rect);
+    CHECK(dead.state == WidgetState::Disabled);
+    gui.end_frame();  // no end_disabled - stranded open
+
+    // The next frame starts clean: the widget claims again.
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
+    CHECK(!gui.disabled());
+    const WidgetResult live = gui.state(w, rect);
+    CHECK(live.hit.pressed);
+    CHECK(gui.active_id() == w);
+    gui.end_frame();
+}
+
+TEST_CASE("theme: dim() multiplies the alpha channel only") {
+    using namespace ws::ui::gui;
+    // Colors are AARRGGBB - the alpha is the top byte.
+    // 1.0 is the identity.
+    CHECK(dim(0xFF203040u, 1.0f) == 0xFF203040u);
+    CHECK(dim(0x80203040u, 1.0f) == 0x80203040u);
+    // 255 * 0.5 truncates to 127 - the low bits drop, they do not round.
+    CHECK(dim(0xFF203040u, 0.5f) == 0x7F203040u);
+    // Zero and a negative factor drain the alpha, never the color.
+    CHECK(dim(0x40203040u, 0.0f) == 0x00203040u);
+    CHECK(dim(0xFF203040u, -1.0f) == 0x00203040u);
+    // An oversaturated factor clamps at full alpha.
+    CHECK(dim(0x80203040u, 2.0f) == 0xFF203040u);
+    // An already-transparent color stays transparent.
+    CHECK(dim(0x00203040u, 0.5f) == 0x00203040u);
 }

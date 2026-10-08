@@ -37,6 +37,10 @@ bool focus_overflow_warned = false;
 // overflowed scope keeps the deepest real clip's intersection.
 bool hit_clip_overflow_warned = false;
 
+// A begin_disabled pushed past the clamp. Flagged once per process; the
+// overflowed scopes keep the innermost 32 conditions.
+bool disabled_overflow_warned = false;
+
 // The intersection of two axis-aligned rects, raw arithmetic: a
 // negative extent is an empty overlap, and Rect's half-open contains
 // already answers nothing for a backwards rect, so an empty
@@ -80,10 +84,18 @@ void GuiContext::begin_frame(const InputFrame& input) {
     // an early return never closed cannot stick its scope onto the next
     // frame - and the modal veil one raised lifts with it. The hit-clip
     // stack resets with them: a clip an early return never popped
-    // cannot blank the next frame's claims.
+    // cannot blank the next frame's claims. The veil's lift is only
+    // confirmable at end_frame, so its up-ness at ENTRY is recorded
+    // here, before the reset - up at entry plus nothing re-raised is
+    // the lift end_frame restores the displaced focus on.
+    veil_upon_entry_ = modal_layer_ != 0;
     layer_depth_ = 0;
     modal_layer_ = 0;
     hit_clip_depth_ = 0;
+    // The disabled scope resets with the rest: an end_disabled an early
+    // return never reached cannot lock the next frame's widgets.
+    disabled_mask_ = 0;
+    disabled_depth_ = 0;
     // The frame's focus bookkeeping resets; the focus ITSELF carries -
     // focus is state, not a claim. Registration starts empty (widgets
     // re-register as they run), no press has landed on a focusable yet,
@@ -178,6 +190,16 @@ void GuiContext::end_frame() {
         idx = ((idx + pending_nav_) % n + n) % n;
         focused_ = focusables_[static_cast<std::size_t>(idx)];
     }
+    // The veil-lift restore: the veil was up at entry and nothing raised
+    // one this frame, so this is the frame it lifted - hand the focus
+    // back to what the rise displaced. A loud frame declines: a press
+    // or a nav move earned the focus it found, and the restore must
+    // not take it back (pending_nav_ is frame-reset, so != 0 here means
+    // a move ran THIS frame).
+    if (veil_upon_entry_ && modal_layer_ == 0 && !any_press &&
+        pending_nav_ == 0) {
+        focused_ = pre_modal_focus_;
+    }
 }
 
 void GuiContext::begin_layer(Layer layer) {
@@ -187,6 +209,13 @@ void GuiContext::begin_layer(Layer layer) {
     // value and raises no veil of its own.
     if (layer_depth_ < kMaxLayerDepth) {
         layer_stack_[static_cast<std::size_t>(layer_depth_)] = layer;
+        // The scope's saved lock: end_layer hands this (mask, depth)
+        // pair back, so the chrome a scope draws is never part of the
+        // form that locked outside it.
+        layer_disabled_mask_[static_cast<std::size_t>(layer_depth_)] =
+            disabled_mask_;
+        layer_disabled_depth_[static_cast<std::size_t>(layer_depth_)] =
+            disabled_depth_;
     } else if (!layer_overflow_warned) {
         layer_overflow_warned = true;
         core::warn("ui: gui layer stack clamped at 8 - deeper begin_layer "
@@ -194,12 +223,24 @@ void GuiContext::begin_layer(Layer layer) {
     }
     ++layer_depth_;
     if (layer == Layer::modal) {
+        // The veil's GENUINE rise - modal_layer_ still 0 and the veil
+        // was not up at entry - stashes the focus it is about to
+        // displace. A continuing modal re-opens its scope every frame
+        // and must not re-stash: the dialog's own focused widget would
+        // clobber what sat under the veil.
+        if (modal_layer_ == 0 && !veil_upon_entry_) {
+            pre_modal_focus_ = focused_;
+        }
         // The veil: frame-wide from this call, NOT the scope's lifetime -
         // it outlives the matching end_layer and lifts at the next
         // begin_frame. That is what lets chrome-first drawing block the
         // base widgets that hit-test later in the same frame.
         modal_layer_ = std::max(modal_layer_, static_cast<std::uint32_t>(layer));
     }
+    // The lock belongs to the enclosing FORM, not the chrome a scope
+    // draws: reset for the scope's widgets, end_layer restores.
+    disabled_mask_ = 0;
+    disabled_depth_ = 0;
     // The draw half of the concept: the same number that rules this
     // scope's hit tests sorts r2d's batch. Legal wherever set_layer is -
     // in practice inside the r2d begin()/end() block, like widget draws
@@ -215,6 +256,16 @@ void GuiContext::end_layer() {
         return;
     }
     --layer_depth_;
+    // Restore the enclosing scope's lock alongside its stratum: the
+    // (mask, depth) pair begin_layer saved. A scope that overflowed the
+    // clamp saved nothing and restores nothing - the layer stack's own
+    // reading of the overflow.
+    if (layer_depth_ < kMaxLayerDepth) {
+        disabled_mask_ =
+            layer_disabled_mask_[static_cast<std::size_t>(layer_depth_)];
+        disabled_depth_ =
+            layer_disabled_depth_[static_cast<std::size_t>(layer_depth_)];
+    }
     // Restore the enclosing stratum's draw layer (the hit rules read the
     // stack directly; this is purely the r2d half).
     r2d::set_layer(current_layer_value());
@@ -378,12 +429,13 @@ HitTest GuiContext::hit_test(WidgetId id, const Rect& rect) {
 WidgetResult GuiContext::state(WidgetId id, const Rect& bounds,
                                bool disabled) {
     WidgetResult result;
-    if (disabled) {
+    if (disabled || disabled_mask_ != 0) {
         // The short-circuit sits BEFORE hit_test on purpose: claims are
         // exactly what a disabled widget must not make - no hover, no
         // hot, no press - so the widget under the same pointer is free
         // to claim it. It cannot hold the focus either: a widget that
-        // cannot act cannot keep the keyboard.
+        // cannot act cannot keep the keyboard. The ambient
+        // begin_disabled scope joins the parameter here - either locks.
         if (focused_ == id) {
             focused_ = kInvalidWidgetId;
         }
@@ -464,22 +516,25 @@ HitTest GuiContext::hit_test_pointer(WidgetId id, const Rect& rect,
         track.hot_layer = layer;
     }
 
-    // The press claim: the first hit-test wins within a stratum, but a
-    // strictly higher layer steals a press claimed THIS frame - a click
-    // under a popup belongs to the popup. `active_fresh` marks the
-    // this-frame claim: a drag carried from an earlier frame is capture
-    // and is never stolen, not even by a modal opening mid-drag. The
-    // steal takes hot with it when the stratum's precedence allows -
-    // the press and its hover belong to the same widget from the moment
-    // the claim moves (the hot-claim block above already ran, blocked
-    // by the victim's then-ownership).
+    // The press claim: within one stratum the LATER widget steals a
+    // press claimed THIS frame - painter order is the topmost pixel, the
+    // one the user sees, so the widget that shows hover is the one that
+    // clicks (the hot claim above gives the same stratum the same
+    // rule); a strictly higher layer steals from a lower one whatever
+    // the record order - a click under a popup belongs to the popup.
+    // `active_fresh` marks the this-frame claim: a drag carried from an
+    // earlier frame is capture and is never stolen, not even by a modal
+    // opening mid-drag. The steal takes hot with it when the stratum's
+    // precedence allows - the press and its hover belong to the same
+    // widget from the moment the claim moves (the hot-claim block above
+    // already ran, blocked by the victim's then-ownership).
     if (inside && view.pressed && !track.cancelled && !blocked) {
         if (track.active == kInvalidWidgetId) {
             track.active = id;
             track.active_layer = layer;
             track.active_fresh = true;
         } else if (track.active != id && track.active_fresh &&
-                   layer > track.active_layer) {
+                   layer >= track.active_layer) {
             track.active = id;
             track.active_layer = layer;
             if (layer >= track.hot_layer) {
@@ -559,6 +614,19 @@ void GuiContext::register_focusable(WidgetId id) {
     if (id == kInvalidWidgetId) {
         return;  // the "no widget" sentinel is never focusable
     }
+    // Silent refusals, both routine: a widget inside a begin_disabled
+    // scope registers nothing while locked (Tab skips the scope), and
+    // a widget under the veil registers nothing at all - that refusal
+    // IS the focus trap: Tab resolves against what did register, so it
+    // wraps within the modal's own widgets and never escapes
+    // underneath. A veiled base widget legitimately attempts every
+    // frame, so neither path warns.
+    if (disabled_mask_ != 0) {
+        return;
+    }
+    if (modal_layer_ > 0 && current_layer_value() < modal_layer_) {
+        return;
+    }
     if (focusable_count_ >= kMaxFocusables) {
         if (!focus_overflow_warned) {
             focus_overflow_warned = true;
@@ -595,6 +663,39 @@ void GuiContext::nav_next() {
 
 void GuiContext::nav_previous() {
     --pending_nav_;
+}
+
+void GuiContext::begin_disabled(bool condition) {
+    // The balanced clamp like the other gui stacks: a push past
+    // kMaxDisabledDepth keeps counting but stops shifting, so the
+    // matching end_disabled skips its shift and never eats a real
+    // scope's bit. A false condition pushes a 0 bit - the scope exists
+    // (its end stays balanced) but locks nothing.
+    if (disabled_depth_ < kMaxDisabledDepth) {
+        disabled_mask_ = (disabled_mask_ << 1) | (condition ? 1u : 0u);
+    } else if (!disabled_overflow_warned) {
+        disabled_overflow_warned = true;
+        core::warn("ui: gui disabled stack clamped at 32 - deeper "
+                   "begin_disabled scopes keep the innermost 32 conditions");
+    }
+    ++disabled_depth_;
+}
+
+void GuiContext::end_disabled() {
+    // Drop-safe like every gui pop: a call with no open scope is a no-op.
+    if (disabled_depth_ == 0) {
+        return;
+    }
+    if (disabled_depth_ > kMaxDisabledDepth) {
+        --disabled_depth_;  // overflowed: this scope's bit was never stored
+    } else {
+        disabled_mask_ >>= 1;
+        --disabled_depth_;
+    }
+}
+
+bool GuiContext::disabled() const {
+    return disabled_mask_ != 0;  // the OR of the open scopes' conditions
 }
 
 }  // namespace ws::ui::gui
