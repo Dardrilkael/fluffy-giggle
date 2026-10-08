@@ -9,11 +9,11 @@ namespace ws::ui::gui {
 
 // The immediate-mode widget set. Each call is one frame's worth of one
 // widget: it lays out through the cursor, hit-tests through the context
-// under its id, emits its draws through r2d at the caller's current
-// layer, and returns the interaction result. The functions hold no
-// state of their own - everything persistent lives in the GuiContext
-// side tables - so a future retained-mode tree could drive the same
-// calls unchanged.
+// under its id, emits its draws through r2d at the context's current
+// layer scope (base without a begin_layer), and returns the interaction
+// result. The functions hold no state of their own - everything
+// persistent lives in the GuiContext side tables - so a future
+// retained-mode tree could drive the same calls unchanged.
 //
 // Id discipline: a widget's id comes from its label under the current
 // scope, so same-label siblings in ONE scope share identity and fight

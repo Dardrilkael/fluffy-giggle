@@ -69,7 +69,7 @@ libs/ui/
     renderer2d.hpp           # r2d free functions: Camera2D, quads, lines, sprites, fonts + text
     widgets.hpp               # window/text/button/checkbox/slider/plot_line/...
     gui/                      # the immediate-mode gui module (ws::ui::gui, no ImGui)
-      gui_context.hpp        # GuiContext + HitTest: input snapshot, per-pointer hot/active + side tables
+      gui_context.hpp        # GuiContext + HitTest + Layer: input snapshot, per-pointer hot/active, layer scopes + side tables
       id_stack.hpp           # WidgetId hashing, the scoped id stack, ScopedId RAII
       input_frame.hpp        # InputFrame: one frame's raw input — mouse, keys, multi-touch table; frame_input() getter
       layout_cursor.hpp      # LayoutCursor: flowing layout + panel stack
@@ -85,7 +85,7 @@ libs/ui/
     gui.h                    # internal: set_active_input - the shell points frame_input() at its InputFrame
     gui/                     # the gui module's out-of-line bodies, one concern per file:
       gui.cpp                # shell glue: frame_input()'s live accumulator tap
-      gui_context.cpp        # GuiContext: per-pointer hot/active hit-testing + side tables
+      gui_context.cpp        # GuiContext: per-pointer hot/active hit-testing, layer scopes + side tables
       gui_id.cpp             # IdStack: FNV-1a scope-path hashing
       gui_input.cpp          # InputFrame: touch table + the primary-touch -> mouse bridge
       gui_layout.cpp         # LayoutCursor: stacked flow panels
@@ -399,7 +399,11 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   family tag and the label — same label, same scope, same id, stable
   across frames (that stability IS widget identity). Loop-generated
   children must `ids().push(index)` between calls or they collide; the
-  context censuses ids per frame and warns once per duplicate.
+  context censuses ids per frame (M7: a fixed 512-slot open-addressing
+  table stamped by frame generation — cleared by bumping the stamp, so
+  nothing allocates and capacity never frees; a frame past 512 unique
+  ids warns once and stops censusing the rest) and warns once per
+  duplicate.
 - **Hot/active, per pointer.** One `PointerTrack` per pointer, matched
   across frames by pointer id (that carry IS the drag). The classic
   rules run per pointer: press-inside sets that pointer's active
@@ -411,10 +415,38 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   pointer as the lowest slot (the mouse outranks touches, so a bridged
   finger resolves to the mouse it mirrors). Capture is per pointer: a
   drag on one slider does not stop another finger from pressing the
-  next. `hovered` is hot-gated per pointer, so widgets under a foreign
-  drag don't light up. Hover is never a click precondition — clicks are
-  pure spatial containment — and a touch has no hover at all: contact
-  IS presence.
+  next. `hovered` is the SETTLED visual (M7): it reports the pointer's
+  last frame's final hot, gated on this frame's inside-ness — so an
+  overlapped widget never lights up, not even on the covering frame
+  (one frame of settling at worst; the live this-frame claim stays
+  visible through `hot_id()`). Hover is never a click precondition —
+  clicks are pure spatial containment — and a touch has no hover at
+  all: contact IS presence.
+- **Layers (M7).** One layer concept across hit-testing and drawing:
+  `begin_layer(Layer)`/`end_layer()` scope a stratum — `Layer::base` 10
+  (the default), `popup` 20, `tooltip` 30, `modal` 40 — and
+  `begin_layer` drives `r2d::set_layer` with the same number, so the
+  batch's sort order and the hit rules can never disagree about who is
+  on top. A strictly higher layer wins hot whatever the record order
+  (draw order must not decide the pointer) and steals a press claimed
+  THIS frame by a lower one — a click under a popup belongs to the
+  popup; within one layer nothing changes (later widgets win hot,
+  first hit-test wins the press), and a drag carried from an earlier
+  frame is capture: never stolen, not even by a modal veil opening
+  mid-drag (the gesture finishes on its owner). `Layer::modal` raises a
+  VEIL that is frame-wide: it starts at the frame's first modal scope,
+  outlives that scope's `end_layer`, and lifts at the next
+  `begin_frame` — while it is up, every strictly lower stratum is
+  blocked (no hover, no hot, no new press; no click-through), and the
+  modal's own chrome hit-tests at the modal stratum, unblocked. The
+  frame-wide veil is what lets an app draw its chrome FIRST — the
+  stratum sorts it above base content wherever it records — while the
+  widgets it blocks still hit-test later in the frame; open the modal
+  scope before the widgets it blocks and the block lands on the very
+  frame the modal appears. Scopes are frame-scoped like every gui
+  stack (a leaked `begin_layer` is reset by the next `begin_frame`),
+  capped at depth 8 with the balanced-clamp overflow, and every pop is
+  a no-op on an empty stack.
 - **Press cancel.** `cancel_pointer(id)` ends that pointer's press with
   no click: the active claim clears, the track flags `cancelled`, and
   it claims nothing until it lifts (`end_frame` lifts it with the
@@ -533,7 +565,10 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `IdStack` (and `ScopedId`, its RAII scope guard), `ChromeTheme`/
   `kDefaultChrome`, and `button`/`checkbox`/
   `slider_float`/`slider_int`/`begin_panel`/`end_panel`/`tab_bar`/
-  `begin_scroll_panel`/`end_scroll_panel`. Hot/active are per pointer:
+  `begin_scroll_panel`/`end_scroll_panel`, plus layer scopes — the
+  `Layer` strata (base/popup/tooltip/modal) with `begin_layer`/
+  `end_layer`/`current_layer`, one numbering for both hit-testing and
+  r2d draw order. Hot/active are per pointer:
   `hot_id()`/`active_id()` default to the mouse and take a pointer id;
   `is_hot(id, pointer)`/`is_active(id, pointer)` are the am-I spelling
   (the invalid id pinned to false); `owning_pointer(widget_id)` and

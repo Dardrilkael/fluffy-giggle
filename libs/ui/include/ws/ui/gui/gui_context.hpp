@@ -5,11 +5,12 @@
 #include <ws/ui/gui/rect.hpp>
 
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <typeindex>
 #include <unordered_map>
-#include <unordered_set>
 
 namespace ws::ui::gui {
 
@@ -24,13 +25,35 @@ namespace ws::ui::gui {
 // resolves to the mouse it mirrors) - so a widget that tracks its drag
 // follows its OWN finger, never the mouse. kNoPointer when nothing did.
 struct HitTest {
-    bool hovered = false;   // inside AND hot: the frame's interactive winner
-                             // (while another widget owns a press, no other
-                             // widget reports hover)
+    bool hovered = false;   // the SETTLED visual: this widget was last
+                             // frame's final hot for one of the pointers and
+                             // is still inside it now. Resolving hover from
+                             // the previous frame's claims is what keeps an
+                             // overlapped widget dark - a later, covering
+                             // widget wins the claim and the covered one
+                             // never lights up, not even on the covering
+                             // frame; a fresh hover settles one frame later
+                             // (one frame of settling at worst). The live
+                             // this-frame claim stays visible through
+                             // hot_id()/is_hot(). A cancelled or
+                             // modal-blocked pointer shows no hover.
     bool pressed = false;   // active on this widget: the press started inside
     bool clicked = false;   // released inside while active = a full click
     bool released = false;  // a pointer went up this frame while this widget was active
     PointerId pointer = kNoPointer;  // the pointer behind the fold
+};
+
+// The gui's layer strata - the same numbers r2d::set_layer sorts by, so
+// "a layer" means one thing to the hit rules and to draw order. World
+// content stays below 10 (the convention the apps already follow), and
+// the values are ordered, not dense: anything a future stratum needs
+// above modal keeps working. begin_layer() opens a scope at one of
+// these; hit_test() inside the scope claims at that precedence.
+enum class Layer : std::uint32_t {
+    base = 10,    // widgets without a begin_layer scope - the default
+    popup = 20,   // floating chrome above base content
+    tooltip = 30,  // hints above popups
+    modal = 40,   // a blocking veil: strictly lower strata go inert
 };
 
 // The immediate-mode gui core. Owns, per frame: the id scope stack, the
@@ -50,17 +73,58 @@ public:
     // snapshot) and rebuilds the per-pointer tracks off the frame's
     // pointer list - slot 0 the mouse, then the touches in first-contact
     // order. Each pointer matches last frame's track by id (active
-    // carries - that carry IS the drag) or starts fresh; a track whose
-    // pointer left the frame drops out. Hot re-claims every frame, on
-    // every track, as widgets' hit tests run. Widget calls are legal
-    // only between begin_frame and end_frame.
+    // carries - that carry IS the drag - and hot_prev carries with it:
+    // that carry IS next frame's settled hover) or starts fresh; a track
+    // whose pointer left the frame drops out. Hot re-claims every
+    // frame, on every track, as widgets' hit tests run. The layer scopes
+    // reset to base here, like every gui stack: a begin_layer an early
+    // return never closed cannot stick its modal veil onto the next
+    // frame. Widget calls are legal only between begin_frame and
+    // end_frame.
     void begin_frame(const InputFrame& input);
     // Closes the frame: drops a press whose owner vanished before its
     // release frame (the UI changed mid-drag), per pointer, so stale
     // ownership never blocks the next frame's hot claims - and a
     // cancelled gesture's flag lifts with its pointer, so the platform
-    // may reuse the id for a fresh contact.
+    // may reuse the id for a fresh contact. Each pointer's resolved hot
+    // becomes hot_prev: the settled hover next frame's hit tests report.
     void end_frame();
+
+    // --- layer scopes: one layer concept for hit tests AND drawing ---
+    // begin_layer opens a stratum: until the matching end_layer, the
+    // context hit-tests widgets at `layer`'s precedence and r2d draws
+    // them at the same number - begin_layer drives r2d::set_layer, so
+    // the batch's sort key and the hit rules can never disagree about
+    // who is on top. Call it inside the r2d begin()/end() block, like
+    // the widget draws. A strictly higher layer wins hot whatever the
+    // record order, and steals a press claimed THIS frame by a lower one
+    // (a click under a popup belongs to the popup); within one layer
+    // nothing changes - later widgets win hot, the first hit-test wins
+    // the press - and a drag carried from an earlier frame is capture:
+    // never stolen, not even by a modal veil opening mid-drag.
+    //
+    // Layer::modal raises a VEIL, and the veil is frame-wide: it starts
+    // at the first begin_layer(Layer::modal) of the frame, outlives the
+    // scope's own end_layer, and lifts at the next begin_frame. While
+    // it is up, every strictly lower stratum is blocked - no hover, no
+    // hot claim, no new press (no click-through); the block reads
+    // stratum VALUES, so the modal's own chrome (hit-testing inside the
+    // modal scope, at the modal stratum) stays live. The veil being
+    // frame-wide is what lets an app draw its chrome FIRST - the
+    // stratum sorts it above base content wherever it records - while
+    // the widgets it blocks still hit-test later in the frame; open the
+    // modal scope before the widgets it blocks, and the block is
+    // immediate, on the very frame the modal appears. end_layer closes
+    // the stratum scope only (and restores the enclosing r2d layer);
+    // the next begin_frame resets any scope left open AND lifts the
+    // veil the frame's modal scopes raised.
+    void begin_layer(Layer layer);
+    // Closes the innermost open begin_layer. Drop-safe: a call with no
+    // open scope is a no-op.
+    void end_layer();
+    // The innermost open scope (Layer::base when none is). The
+    // observability spelling, for apps and tests.
+    Layer current_layer() const;
 
     // Hot/active hit-test for one widget's rect, across the frame's
     // pointers (mouse and touches; the primary-touch bridge makes the
@@ -73,15 +137,19 @@ public:
     //   active widget still sees released, to end drags cleanly.
     // Capture is per pointer: a drag owned by one finger does not stop
     // another from hovering or pressing elsewhere. While a press is
-    // owned, only its owner can be hot for that pointer - hovered means
-    // hot, not merely inside. The folds are ORs across pointers, so
-    // `clicked` fires once no matter how many fingers were on the
-    // widget; `hit.pointer` names the lowest pointer slot behind the
-    // fold. One widget must not hit-test twice in a frame: a repeated
-    // id means two widgets share identity and will fight over hot and
-    // the side tables (flagged once per process). `id` scopes the
-    // widget's persistent state (kInvalidWidgetId claims nothing);
-    // `rect` is in gui space.
+    // owned, only its owner can be hot for that pointer - and hovered
+    // is that hot, settled: it reports the pointer's LAST frame's final
+    // hot, gated on this frame's inside-ness, so an overlapped widget
+    // never lights up (one frame of settling at worst). The folds are
+    // ORs across pointers, so `clicked` fires once no matter how many
+    // fingers were on the widget; `hit.pointer` names the lowest pointer
+    // slot behind the fold. The claims are layer-aware (begin_layer):
+    // the widget hit-tests at the innermost open scope's stratum, and
+    // the precedence rules of that scope apply (see begin_layer). One
+    // widget must not hit-test twice in a frame: a repeated id means two
+    // widgets share identity and will fight over hot and the side tables
+    // (flagged once per process). `id` scopes the widget's persistent
+    // state (kInvalidWidgetId claims nothing); `rect` is in gui space.
     HitTest hit_test(WidgetId id, const Rect& rect);
 
     // Persistent-but-implicit per-widget state (scroll offsets, drag
@@ -163,8 +231,16 @@ private:
     // pointer claims nothing until it lifts, and the flag lifts with it.
     struct PointerTrack {
         PointerId id = kNoPointer;
-        WidgetId hot = kInvalidWidgetId;
-        WidgetId active = kInvalidWidgetId;
+        WidgetId hot = kInvalidWidgetId;      // this frame's claim so far
+        std::uint32_t hot_layer = 0;          // the claiming widget's stratum
+        WidgetId hot_prev = kInvalidWidgetId;  // last frame's FINAL hot: the
+                                                // settled hover this frame
+                                                // reports
+        WidgetId active = kInvalidWidgetId;   // the press owner (carries)
+        std::uint32_t active_layer = 0;       // the stratum that claimed it
+        bool active_fresh = false;  // claimed THIS frame: a strictly higher
+                                    // layer may steal it; a carried drag is
+                                    // capture and never stolen
         bool cancelled = false;
     };
     std::array<PointerTrack, InputFrame::kMaxPointers> pointers_{};
@@ -174,8 +250,49 @@ private:
     int pointer_count_ = 0;
 
     std::map<std::type_index, std::unique_ptr<StateTableBase>> state_tables_;
-    std::unordered_set<WidgetId> hit_ids_;  // ids hit-tested this frame; a
-                                            // repeat is an identity collision
+
+    // --- layer scopes (begin_layer/end_layer) ---
+    // Fixed depth with the IdStack's balanced clamp: a push past
+    // kMaxLayerDepth keeps counting but stops storing (warned once per
+    // process), so the matching end_layer never eats a real scope - the
+    // overflowed scope keeps the deepest real stratum's value and adds
+    // no modal effect of its own.
+    static constexpr int kMaxLayerDepth = 8;
+    std::array<Layer, kMaxLayerDepth> layer_stack_{};
+    int layer_depth_ = 0;
+    // The frame's modal veil: the stratum a begin_layer(Layer::modal)
+    // raised this frame, 0 while none did. Deliberately NOT tied to the
+    // scope's lifetime - the veil outlives end_layer and lifts at the
+    // next begin_frame, so chrome-first drawing blocks the base widgets
+    // that hit-test later in the same frame.
+    std::uint32_t modal_layer_ = 0;
+    // The innermost open scope's numeric stratum (base without a scope):
+    // the value the hit rules and r2d::set_layer both speak.
+    std::uint32_t current_layer_value() const;
+
+    // The per-frame hit-test census: which widget ids already hit-tested
+    // this frame, as a fixed open-addressing table stamped by frame
+    // generation. begin_frame clears it by bumping the stamp - no slot
+    // is touched, so nothing allocates and the capacity never frees (the
+    // unordered_set this replaces spent a node allocation per widget per
+    // frame). A frame that fills every slot (512+ unique ids) warns once
+    // per process and stops censusing ids past the table: duplicate
+    // detection degrades, the frame runs on - growing would reintroduce
+    // the allocation the table exists to avoid.
+    struct HitCensus {
+        static constexpr std::size_t kSlots = 512;  // power of two
+
+        enum class Result { inserted, duplicate, full };
+        // Records `id` as seen this frame. Valid only after begin_frame
+        // bumped the stamp.
+        Result note(WidgetId id);
+
+        std::array<WidgetId, kSlots> ids{};
+        std::array<std::uint32_t, kSlots> stamps{};  // != stamp: empty this frame
+        std::uint32_t stamp = 0;  // this frame's generation; 0 is the "never"
+                                  // sentinel, the first frame bumps to 1
+    };
+    HitCensus census_;
 };
 
 }  // namespace ws::ui::gui

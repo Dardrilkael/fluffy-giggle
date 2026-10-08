@@ -221,10 +221,40 @@ protected:
         // controls below show - and the click counter is ours to keep.
         // The three sliders are the multi-pointer demo: on a touch screen
         // two fingers drag two of them at once - each slider follows its
-        // own pointer, never the mouse.
-        r2d::set_layer(10);
+        // own pointer, never the mouse. The gui block opens with a
+        // begin_layer scope: the context drives r2d's sort layer AND the
+        // hit-test precedence with the same number (M7's one-concept
+        // layers), so the panels below draw and claim at Layer::base.
         r2d::begin();
+        gui_.begin_layer(ws::ui::gui::Layer::base);
         const r2d::FrameSize gui_frame = r2d::frame_size();
+
+        // M7's modal demo, chrome-first: the veil a begin_layer(modal)
+        // raises is FRAME-wide - it starts here, outlives the scope's
+        // end_layer, and lifts at the next begin_frame - so opening it
+        // before the panels below run is what makes them click-dead
+        // under it, on the very frame the modal appears. The dimming
+        // quad is paint, not a widget; the blocking is the LAYER. The
+        // modal stratum (40) sorts this chrome above the base panels
+        // wherever it records, so drawing it first is painter-free.
+        // The panels' "veil" button opens it; "close" reopens the world
+        // (the next frame's begin_frame lifts the veil).
+        if (show_modal_) {
+            gui_.begin_layer(ws::ui::gui::Layer::modal);
+            r2d::draw_quad(0.0f, 0.0f, gui_frame.width, gui_frame.height,
+                           r2d::rgba(0, 0, 0, 140));
+            const ws::ui::gui::Rect veil = ws::ui::gui::begin_panel(
+                gui_, layout_, chrome_, "veil",
+                {gui_frame.width * 0.5f - 140.0f * ui_scale_,
+                 gui_frame.height * 0.5f - 60.0f * ui_scale_,
+                 280.0f * ui_scale_, 120.0f * ui_scale_});
+            if (ws::ui::gui::button(gui_, layout_, chrome_, "close",
+                                    veil.width)) {
+                show_modal_ = false;
+            }
+            ws::ui::gui::end_panel(gui_, layout_);
+            gui_.end_layer();  // the scope closes; the veil stays up
+        }
         const ws::ui::gui::Rect content = ws::ui::gui::begin_panel(
             gui_, layout_, chrome_, "demo",
             demo_panel_rect(gui_frame.width, ui_scale_));
@@ -233,6 +263,12 @@ protected:
                                 icons_.empty() ? r2d::Sprite{}
                                                : icons_[0])) {
             ++gui_clicks_;
+        }
+        // M7's modal demo: opens the blocking veil (drawn before the
+        // panels run, so it latches in time to starve them).
+        if (ws::ui::gui::button(gui_, layout_, chrome_, "veil",
+                                120.0f * ui_scale_)) {
+            show_modal_ = true;
         }
         ws::ui::gui::checkbox(gui_, layout_, chrome_,
                               "signal", show_signal_);
@@ -316,6 +352,12 @@ protected:
         ws::ui::gui::slider_float(gui_, layout_, chrome_, "pan",
                                   audio_pan_, -4.0f, 4.0f, sound.width);
         ws::ui::gui::end_panel(gui_, layout_);
+
+        ws::ui::gui::slider_float(gui_, layout_, chrome_, "pan",
+                                  audio_pan_, -4.0f, 4.0f, sound.width);
+        ws::ui::gui::end_panel(gui_, layout_);
+
+        gui_.end_layer();  // back to base: the world below re-owns layer 0
         r2d::end();
         r2d::set_layer(0);
 
@@ -616,6 +658,7 @@ private:
     float gui_spin_rate_ = 0.01f;  // driven by the gui panel's "spin" slider
     int active_tab_ = 0;           // Phase 9: the page panel's selected tab
     int row_count_ = 16;           // the "list" tab's rows (edited in "tune")
+    bool show_modal_ = false;      // M7: the Layer::modal veil demo's open flag
     std::array<bool, 16> rows_{};   // the "list" tab's checkbox states
     // Multi-touch demo state: per-contact breadcrumb trails, the pinch
     // bookkeeping, the text echo buffer. All app-side, the gui contract -

@@ -2417,6 +2417,15 @@ TEST_CASE("hit_test: hover claims hot; a full click is press-then-release inside
     const WidgetId id = IdStack{}.id("button");
     const Rect rect{100.0f, 100.0f, 80.0f, 24.0f};
 
+    // Frame 0: the pointer arrives - the claim is live this frame, the
+    // settled visual lands next frame (hovered reports last frame's
+    // resolved hot, so the first frame on a widget shows nothing yet).
+    gui.begin_frame(snap(120.0f, 110.0f));
+    (void)gui.hit_test(id, rect);
+    CHECK(gui.hot_id() == id);
+    CHECK(gui.active_id() == kInvalidWidgetId);
+    gui.end_frame();
+
     // Frame 1: pointer inside, nothing held - hover only.
     gui.begin_frame(snap(120.0f, 110.0f));
     HitTest hit = gui.hit_test(id, rect);
@@ -2530,8 +2539,15 @@ TEST_CASE("hit_test: a vanished press owner is dropped at end_frame") {
 
     gui.begin_frame(snap(50.0f, 50.0f));
     const HitTest hit = gui.hit_test(other, rect);
-    CHECK(hit.hovered);
+    CHECK(!hit.hovered);  // the claim is live this frame...
     CHECK(gui.hot_id() == other);
+    gui.end_frame();
+
+    // ...and the settled visual lands one frame later, once the frame's
+    // resolved hot has become hot_prev.
+    gui.begin_frame(snap(50.0f, 50.0f));
+    CHECK(gui.hit_test(other, rect).hovered);
+    gui.end_frame();
 }
 
 TEST_CASE("hit_test: while another widget owns the drag, overlapped widgets do not hover") {
@@ -2584,6 +2600,282 @@ TEST_CASE("hit_test: a duplicate id in one frame is flagged and tolerated") {
     CHECK(again.hovered);  // the same id reappears next frame, unflagged
     const WidgetId other = IdStack{}.id("other");
     (void)gui.hit_test(other, {0.0f, 0.0f, 100.0f, 100.0f});  // distinct: fine
+    gui.end_frame();
+}
+
+TEST_CASE("hit_test: overlapping widgets - only the topmost reports hovered") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const IdStack ids;
+    const WidgetId bottom = ids.id("bottom");
+    const WidgetId top = ids.id("top");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // Frame 1: the pointer sits in the overlap. The covered widget runs
+    // first and claims hot at its call (the live claim is call-ordered,
+    // as ever) - the covering widget steals the claim when it runs. The
+    // REPORTED hover must not light the covered one up, not even for
+    // this covering frame: hovered reads last frame's resolution, so
+    // neither shows hover yet and the claim is already decided.
+    gui.begin_frame(snap(50.0f, 50.0f));
+    const HitTest first_bottom = gui.hit_test(bottom, rect);
+    const HitTest first_top = gui.hit_test(top, rect);
+    CHECK(!first_bottom.hovered);  // covered: dark even on the covering frame
+    CHECK(!first_top.hovered);     // settling: nobody shows hover yet
+    CHECK(gui.hot_id() == top);    // ...but the live claim already resolved
+    gui.end_frame();
+
+    // Frame 2: settled - only the topmost reports hovered.
+    gui.begin_frame(snap(50.0f, 50.0f));
+    CHECK(!gui.hit_test(bottom, rect).hovered);
+    CHECK(gui.hit_test(top, rect).hovered);
+    CHECK(gui.hot_id() == top);
+    gui.end_frame();
+
+    // The covering widget vanishes: the covered one's hover is not
+    // stranded - with the pointer alone on it, it claims unopposed and
+    // settles the frame after.
+    gui.begin_frame(snap(50.0f, 50.0f));
+    CHECK(!gui.hit_test(bottom, rect).hovered);  // top held last frame's hot
+    CHECK(gui.hot_id() == bottom);               // bottom claims unopposed
+    gui.end_frame();
+    gui.begin_frame(snap(50.0f, 50.0f));
+    CHECK(gui.hit_test(bottom, rect).hovered);   // settled on bottom
+    gui.end_frame();
+}
+
+TEST_CASE("hit_test: a frame past the census's slots still runs") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // 600 unique ids hit-tested in one frame: past the 512-slot census.
+    // Nothing may crash or corrupt - the ids past the table simply stop
+    // being duplicate-checked (warned once per process, visible in the
+    // log). This is the degraded-but-alive contract the fixed table
+    // promises: no allocation, no silent breakage.
+    gui.begin_frame(snap(50.0f, 50.0f));
+    for (int i = 0; i < 600; ++i) {
+        gui.ids().push(i);
+        (void)gui.hit_test(gui.ids().id("w"), rect);
+        gui.ids().pop();
+    }
+    CHECK(gui.hot_id() != kInvalidWidgetId);  // the last claim stands
+    gui.end_frame();
+
+    // The next frame is a fresh census - the very same ids hit-test
+    // cleanly again, and a widget can claim hot after the crush.
+    gui.begin_frame(snap(50.0f, 50.0f));
+    gui.ids().push(0);
+    const WidgetId again_id = gui.ids().id("w");
+    const HitTest again = gui.hit_test(again_id, rect);
+    gui.ids().pop();
+    CHECK(gui.hot_id() == again_id);
+    CHECK(!again.hovered);  // the claim is live; the visual settles next frame
+    gui.end_frame();
+}
+
+// --- layer scopes (begin_layer/end_layer) -------------------------------------------
+
+TEST_CASE("layers: a popup wins the pointer over base, whatever the record order") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const IdStack ids;
+    const WidgetId popup_w = ids.id("popup");
+    const WidgetId base_w = ids.id("base");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // Base content hit-tests AFTER the popup this frame - the same-layer
+    // rule would let the later widget win. The layer rule overrides
+    // record order: a strictly lower stratum never unseats a higher one.
+    gui.begin_frame(snap(50.0f, 50.0f));
+    gui.begin_layer(Layer::popup);
+    (void)gui.hit_test(popup_w, rect);
+    gui.end_layer();
+    (void)gui.hit_test(base_w, rect);  // later, on top by record order - and losing
+    CHECK(gui.hot_id() == popup_w);
+    gui.end_frame();
+
+    // Settled: the popup hovers, the covered base widget does not.
+    gui.begin_frame(snap(50.0f, 50.0f));
+    gui.begin_layer(Layer::popup);
+    const HitTest popup_hit = gui.hit_test(popup_w, rect);
+    gui.end_layer();
+    const HitTest base_hit = gui.hit_test(base_w, rect);
+    CHECK(popup_hit.hovered);
+    CHECK(!base_hit.hovered);
+    gui.end_frame();
+}
+
+TEST_CASE("layers: a higher layer steals a fresh press; a carried drag is capture") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const IdStack ids;
+    const WidgetId base_w = ids.id("base");
+    const WidgetId popup_w = ids.id("popup");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // The press edge arrives with base content hit-testing first: base
+    // claims at its call, and the popup scope - hit-testing later, at a
+    // higher stratum - steals the THIS-FRAME claim. A click under a
+    // popup belongs to the popup.
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
+    (void)gui.hit_test(base_w, rect);
+    gui.begin_layer(Layer::popup);
+    (void)gui.hit_test(popup_w, rect);
+    gui.end_layer();
+    CHECK(gui.active_id() == popup_w);  // stolen, fresh claim and all
+    CHECK(gui.hot_id() == popup_w);    // hot moved with the press
+    gui.end_frame();
+
+    // Release inside: the popup clicks; base never did.
+    gui.begin_frame(snap(50.0f, 50.0f, false, false, true));
+    gui.begin_layer(Layer::popup);
+    const HitTest popup_hit = gui.hit_test(popup_w, rect);
+    gui.end_layer();
+    const HitTest base_hit = gui.hit_test(base_w, rect);
+    CHECK(popup_hit.released);
+    CHECK(popup_hit.clicked);
+    CHECK(!base_hit.released);  // the release folded into the popup's press
+    CHECK(!base_hit.clicked);
+    CHECK(gui.active_id() == kInvalidWidgetId);
+    gui.end_frame();
+
+    // The same steal refused the other way: base hit-tests after the
+    // popup claimed, and a strictly lower layer never steals.
+    GuiContext reverse;
+    reverse.begin_frame(snap(50.0f, 50.0f, true, true));
+    reverse.begin_layer(Layer::popup);
+    (void)reverse.hit_test(popup_w, rect);
+    reverse.end_layer();
+    (void)reverse.hit_test(base_w, rect);  // later, lower: no steal
+    CHECK(reverse.active_id() == popup_w);
+    reverse.end_frame();
+}
+
+TEST_CASE("layers: a modal opening mid-drag does not steal the carried press") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const IdStack ids;
+    const WidgetId base_w = ids.id("base");
+    const WidgetId chrome_w = ids.id("chrome");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // A drag starts on base content in an ordinary frame.
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
+    (void)gui.hit_test(base_w, rect);
+    CHECK(gui.active_id() == base_w);
+    gui.end_frame();
+
+    // The next frame a modal veil opens OVER the in-flight drag. The
+    // carried press is capture: not fresh, so no layer may steal it -
+    // the base widget still owns its drag, finishes it, and the modal
+    // blocks only its hover, not the gesture it interrupted.
+    gui.begin_frame(snap(50.0f, 50.0f, true));
+    gui.begin_layer(Layer::modal);
+    (void)gui.hit_test(chrome_w, rect);  // the modal's chrome, over the drag
+    gui.end_layer();
+    const HitTest drag = gui.hit_test(base_w, rect);
+    CHECK(drag.pressed);   // capture: the carried press is still base's
+    CHECK(!drag.hovered);  // ...but the modal veil darkens its hover
+    CHECK(gui.active_id() == base_w);  // the modal chrome could not steal
+    gui.end_frame();
+
+    // The drag releases under the veil: the gesture that started on base
+    // finishes on base. Capture outlives the scope change.
+    gui.begin_frame(snap(50.0f, 50.0f, false, false, true));
+    gui.begin_layer(Layer::modal);
+    (void)gui.hit_test(chrome_w, rect);
+    gui.end_layer();
+    const HitTest done = gui.hit_test(base_w, rect);
+    CHECK(done.released);
+    CHECK(done.clicked);
+    gui.end_frame();
+}
+
+TEST_CASE("layers: a modal scope blocks lower strata - no click-through") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const IdStack ids;
+    const WidgetId modal_w = ids.id("modal");
+    const WidgetId base_w = ids.id("base");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // The modal veil is open and the press lands where a base button
+    // lives. The modal's own chrome claims it; the base widget is
+    // starved of everything - no press, no hover, no hot claim.
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
+    gui.begin_layer(Layer::modal);
+    const HitTest modal_hit = gui.hit_test(modal_w, rect);
+    gui.end_layer();
+    const HitTest base_hit = gui.hit_test(base_w, rect);
+    CHECK(modal_hit.pressed);   // the modal stratum takes the press
+    CHECK(!base_hit.pressed);   // ...and nothing clicks through the veil
+    CHECK(!base_hit.hovered);   // no hover under the veil either
+    CHECK(gui.active_id() == modal_w);
+    CHECK(gui.hot_id() == modal_w);  // base could not unseat, nor claim
+    gui.end_frame();
+
+    // Release under the veil: the modal's chrome clicks; base stays dark.
+    gui.begin_frame(snap(50.0f, 50.0f, false, false, true));
+    gui.begin_layer(Layer::modal);
+    const HitTest modal_up = gui.hit_test(modal_w, rect);
+    gui.end_layer();
+    const HitTest base_up = gui.hit_test(base_w, rect);
+    CHECK(modal_up.clicked);
+    CHECK(!base_up.released);
+    CHECK(!base_up.clicked);
+    gui.end_frame();
+
+    // The veil lifts (the scope closed; a new frame): base is alive
+    // again - the block was the scope, not a stuck flag.
+    gui.begin_frame(snap(50.0f, 50.0f));
+    const HitTest base_alive = gui.hit_test(base_w, rect);
+    CHECK(gui.hot_id() == base_w);
+    CHECK(!base_alive.hovered);  // live claim this frame...
+    gui.end_frame();
+    gui.begin_frame(snap(50.0f, 50.0f));
+    CHECK(gui.hit_test(base_w, rect).hovered);  // ...settled after
+    gui.end_frame();
+}
+
+TEST_CASE("layers: scopes nest, restore, and reset with the frame") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId w = IdStack{}.id("w");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    CHECK(gui.current_layer() == Layer::base);  // no scope yet
+
+    // Nest and unwind: each end_layer restores the enclosing stratum.
+    gui.begin_frame(snap(50.0f, 50.0f));
+    gui.begin_layer(Layer::popup);
+    CHECK(gui.current_layer() == Layer::popup);
+    gui.begin_layer(Layer::tooltip);
+    CHECK(gui.current_layer() == Layer::tooltip);
+    gui.end_layer();
+    CHECK(gui.current_layer() == Layer::popup);
+    gui.end_layer();
+    CHECK(gui.current_layer() == Layer::base);
+
+    // An end_layer with no open scope is a drop-safe no-op.
+    gui.end_layer();
+    CHECK(gui.current_layer() == Layer::base);
+    gui.end_frame();
+
+    // A scope left open by an early return cannot stick: the next
+    // begin_frame resets the stack - and with it the modal veil.
+    gui.begin_frame(snap(50.0f, 50.0f));
+    gui.begin_layer(Layer::modal);
+    gui.end_frame();
+    gui.begin_frame(snap(50.0f, 50.0f));
+    CHECK(gui.current_layer() == Layer::base);
+    const HitTest alive = gui.hit_test(w, rect);
+    CHECK(gui.hot_id() == w);  // no veil: base claims freely again
+    CHECK(!alive.hovered);     // first frame on the widget: settling
+    gui.end_frame();
+    gui.begin_frame(snap(50.0f, 50.0f));
+    CHECK(gui.hit_test(w, rect).hovered);
     gui.end_frame();
 }
 

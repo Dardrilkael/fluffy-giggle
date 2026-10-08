@@ -116,7 +116,9 @@ void end();
 
 // Sorts all subsequent draws into `layer` (default 0). Higher layers draw
 // later - on top - regardless of submission order or camera block. Sticky:
-// stays until the next set_layer(), across frames.
+// stays until the next set_layer(), across frames. The gui's layer strata
+// (ws/ui/gui: Layer, 10..40) are values in this same space, driven by
+// GuiContext::begin_layer - one numbering, both sides.
 void set_layer(std::uint32_t layer);
 
 // Pushes a framebuffer-space clip rect (top-left origin, pixels): draws
