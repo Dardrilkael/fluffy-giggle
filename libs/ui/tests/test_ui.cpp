@@ -362,18 +362,31 @@ TEST_CASE("vertex cap drops draws without appending") {
     CHECK(core.vertices().size() == ws::ui::r2d::batch::kMaxVerticesPerFrame);
 }
 
-TEST_CASE("chunk cap drops further segments and their draws") {
+TEST_CASE("chunk cap drops further segments and their draws, never silently") {
     BatchCore core;
     core.begin_frame();
     for (std::uint32_t i = 0; i < ws::ui::r2d::batch::kMaxChunksPerFrame; ++i) {
         REQUIRE(core.open_segment(default_vp()));
     }
-    CHECK(core.open_segment(default_vp()) == false);  // 9th segment: no chunk
+    CHECK(core.open_segment(default_vp()) == false);  // one past: no chunk
     CHECK(core.chunk_count() == ws::ui::r2d::batch::kMaxChunksPerFrame);
     CHECK(push_test_quad(core, 0u) == false);  // segment stayed closed
 
     core.close_segment();
     CHECK(push_test_quad(core, 0u) == false);  // still closed after end()
+
+    // The array cannot grow (descriptor sets are pre-allocated per chunk
+    // slot at init), so over-cap is COUNTED, not silent (M5): the failed
+    // open is one dropped segment, the two unopenable-segment quads are
+    // two dropped quads. The renderer turns these into its once-per-frame
+    // warn; the stats surface carries the numbers.
+    CHECK(core.dropped_chunks() == 1);
+    CHECK(core.dropped_quads() == 2);
+
+    // begin_frame resets the accounting along with everything else.
+    core.begin_frame();
+    CHECK(core.dropped_chunks() == 0);
+    CHECK(core.dropped_quads() == 0);
 }
 
 TEST_CASE("quad_corners_pivot rotates about the pivot; own-center is the default") {
@@ -1508,14 +1521,16 @@ TEST_CASE("push_clip batches clip runs apart; pop restores the full frame") {
     r.end();
     r.frame_end();
 
-    // The sort is (layer, block, clip): the two full-clip quads
-    // group into chunk 0 keeping submission order (stable), the clipped
-    // quad batches apart under its own clip.
-    REQUIRE(r.batch().chunk_count() == 2);
-    const auto& full = r.batch().chunk(0);
-    CHECK(full.quad_count == 2);
+    // Clip changes split chunks in RECORD order: full-clip quad, clipped
+    // quad, full-clip quad again - three chunks. (The old clip sort key
+    // would have merged the two full-clip draws into one chunk ahead of
+    // the clipped one - the grouping was never the contract, painter
+    // order is.)
+    REQUIRE(r.batch().chunk_count() == 3);
+    const auto& first = r.batch().chunk(0);
+    CHECK(first.quad_count == 1);
     for (int i = 0; i < 4; ++i) {
-        CHECK(full.clip[i] == ws::ui::r2d::batch::kFullClip[i]);
+        CHECK(first.clip[i] == ws::ui::r2d::batch::kFullClip[i]);
     }
     const auto& clipped = r.batch().chunk(1);
     CHECK(clipped.quad_count == 1);
@@ -1523,9 +1538,71 @@ TEST_CASE("push_clip batches clip runs apart; pop restores the full frame") {
     CHECK(clipped.clip[1] == 10.0f);
     CHECK(clipped.clip[2] == 100.0f);
     CHECK(clipped.clip[3] == 100.0f);
-    // Painter order survives inside the full chunk: first submitted first.
+    const auto& last = r.batch().chunk(2);
+    CHECK(last.quad_count == 1);
+    for (int i = 0; i < 4; ++i) {
+        CHECK(last.clip[i] == ws::ui::r2d::batch::kFullClip[i]);
+    }
+    // Painter order survives: first submitted first, everywhere.
     CHECK(r.batch().vertices()[0].pos[0] == 0.0f);
-    CHECK(r.batch().vertices()[4].pos[0] == 200.0f);
+    CHECK(r.batch().vertices()[4].pos[0] == 20.0f);
+    CHECK(r.batch().vertices()[8].pos[0] == 200.0f);
+}
+
+TEST_CASE("overlapping clipped panels keep record order (clip is not a sort key)") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    r.begin(Camera2D{});
+    // Panel A first, its clip origin sorts LATER (100,100)...
+    r.push_clip(100.0f, 100.0f, 200.0f, 200.0f);
+    r.draw_quad(80.0f, 80.0f, 200.0f, 200.0f, rgba(255, 0, 0));
+    r.pop_clip();
+    // ...panel B second, clip origin sorts EARLIER (0,0). The old sort
+    // key moved B's chunk before A's, so A painted over B in the
+    // overlap - the z swap this test pins down.
+    r.push_clip(0.0f, 0.0f, 150.0f, 150.0f);
+    r.draw_quad(80.0f, 80.0f, 200.0f, 200.0f, rgba(0, 255, 0));
+    r.pop_clip();
+    r.end();
+    r.frame_end();
+
+    // Record order: chunk 0 is panel A (red), chunk 1 panel B (green) -
+    // B paints OVER A where the panels overlap, exactly as recorded.
+    REQUIRE(r.batch().chunk_count() == 2);
+    CHECK(r.batch().chunk(0).clip[0] == 100.0f);
+    CHECK(r.batch().chunk(1).clip[0] == 0.0f);
+    CHECK(r.batch().vertices()[0].color[1] == 0.0f);  // red quad first
+    CHECK(r.batch().vertices()[4].color[1] == 1.0f);  // green quad second
+}
+
+TEST_CASE("more than 16 clip runs overflow loudly, not silently") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    r.begin(Camera2D{});
+    // One more distinct clip than the cap: 17 single-draw runs, each its
+    // own chunk (a clip change always splits).
+    for (std::uint32_t i = 0; i < batch::kMaxChunksPerFrame + 1; ++i) {
+        r.push_clip(1.0f + static_cast<float>(i), 2.0f, 10.0f, 10.0f);
+        r.draw_quad(0.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255));
+        r.pop_clip();
+    }
+    r.end();
+    r.frame_end();
+
+    // The array does NOT grow: every chunk slot owns a pre-allocated
+    // descriptor set per swapchain image, so growth would mean mid-frame
+    // GPU allocation - forbidden. The overflow is counted instead (the
+    // renderer logs it once per frame; the stats surface carries it).
+    REQUIRE(r.batch().chunk_count() == batch::kMaxChunksPerFrame);
+    CHECK(r.batch().dropped_chunks() == 1);   // the 17th run never opened
+    CHECK(r.batch().dropped_quads() == 1);   // ...and its draw dropped
+    // The 16 surviving chunks replay in exact record order.
+    REQUIRE(r.batch().vertices().size() == 16 * 4);
+    for (std::uint32_t i = 0; i < batch::kMaxChunksPerFrame; ++i) {
+        CHECK(r.batch().chunk(i).clip[0] == 1.0f + static_cast<float>(i));
+    }
 }
 
 TEST_CASE("nested clips intersect at push time; disjoint ones go empty") {
@@ -1542,18 +1619,22 @@ TEST_CASE("nested clips intersect at push time; disjoint ones go empty") {
     r.end();
     r.frame_end();
 
-    // One chunk per clip value; nesting intersected, never unioned.
+    // One chunk per clip value; nesting intersected, never unioned. The
+    // inner-clipped draw was RECORDED first, so it is chunk 0 in record
+    // order - the opposite of the clip-value sort, and the point of M5:
+    // record order is the contract. (Chunk order and z-order both follow
+    // record here; the nested draw simply paints first.)
     REQUIRE(r.batch().chunk_count() == 2);
-    const auto& outer = r.batch().chunk(0);  // (0,0,200,200) sorts first
-    CHECK(outer.clip[0] == 0.0f);
-    CHECK(outer.clip[1] == 0.0f);
-    CHECK(outer.clip[2] == 200.0f);
-    CHECK(outer.clip[3] == 200.0f);
-    const auto& inner = r.batch().chunk(1);
+    const auto& inner = r.batch().chunk(0);
     CHECK(inner.clip[0] == 50.0f);
     CHECK(inner.clip[1] == 50.0f);
     CHECK(inner.clip[2] == 150.0f);
     CHECK(inner.clip[3] == 150.0f);
+    const auto& outer = r.batch().chunk(1);
+    CHECK(outer.clip[0] == 0.0f);
+    CHECK(outer.clip[1] == 0.0f);
+    CHECK(outer.clip[2] == 200.0f);
+    CHECK(outer.clip[3] == 200.0f);
 
     // A disjoint push intersects to the empty rect - normalized, never
     // negative, never NaN - and still batches under that value.
@@ -1589,16 +1670,19 @@ TEST_CASE("the clip stack balances overflow, resets per frame, pops empty safely
     r.draw_quad(0.0f, 20.0f, 1.0f, 1.0f, rgba(255, 255, 255));  // back to full
     r.end();
     r.frame_end();
-    // Two clip values, so two chunks. The full clip's origin (0,0) sorts
-    // before (5,5): chunk 0 is the post-pop draw, chunk 1 the overflowed
-    // one - which kept the deepest REAL clip, not a stack-past-the-end one.
+    // Two clip values, so two chunks in record order: the overflowed draw
+    // first, the post-pop draw second. Chunk 0 kept the deepest REAL clip,
+    // not a stack-past-the-end one.
     REQUIRE(r.batch().chunk_count() == 2);
     CHECK(r.batch().chunk(0).quad_count == 1);
     CHECK(r.batch().chunk(1).quad_count == 1);
-    CHECK(r.batch().chunk(1).clip[0] == 5.0f);
-    CHECK(r.batch().chunk(1).clip[1] == 5.0f);
-    CHECK(r.batch().chunk(1).clip[2] == 10.0f);
-    CHECK(r.batch().chunk(1).clip[3] == 10.0f);
+    CHECK(r.batch().chunk(0).clip[0] == 5.0f);
+    CHECK(r.batch().chunk(0).clip[1] == 5.0f);
+    CHECK(r.batch().chunk(0).clip[2] == 10.0f);
+    CHECK(r.batch().chunk(0).clip[3] == 10.0f);
+    for (int i = 0; i < 4; ++i) {
+        CHECK(r.batch().chunk(1).clip[i] == ws::ui::r2d::batch::kFullClip[i]);
+    }
 
     // A clip left pushed never leaks: frame_begin empties the stack. (The
     // frame below records nothing, so frame_end is a no-op - the stack
@@ -4180,8 +4264,9 @@ TEST_CASE("gui labels draw through the theme font") {
     r.frame_end();
 
     // The panel's chrome recorded before its clip push (full clip), its
-    // button after it (under the panel's content clip) - and clip is a
-    // sort key, so the frame replays as two runs: chrome, then widgets.
+    // button after it (under the panel's content clip) - the clip change
+    // splits a chunk in record order, so the frame replays as two runs:
+    // chrome, then widgets.
     REQUIRE(r.batch().chunk_count() == 2);
     const auto& widgets = r.batch().chunk(1);
     REQUIRE(widgets.texture_count == 2);  // the white face + the font's page

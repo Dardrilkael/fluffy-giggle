@@ -196,24 +196,32 @@ third-party).
 - **Recording is data.** A draw appends a `DrawCommand` (sort layer, camera
   block, clip, expanded corners; the material key rides along as metadata).
   `frame_end()` — one point, after `on_update()` returns — stable-sorts the
-  frame by (layer, camera block, clip) and replays it into the batch.
+  frame by (layer, camera block) and replays it into the batch.
   Material is NOT a sort key: the 32-slot table already lets one chunk hold
   many textures, so sorting by it bought nothing and reordered overlapping
   draws that differ in texture (a rounded face painted over its label bar).
-  Within one layer/block/clip the replay is the exact submission order —
+  Clip is NOT a sort key either: sorting by clip values swapped the z-order
+  of overlapping panels whenever the clip rects compared backwards — the
+  replay splits chunks wherever the clip changes in record order instead,
+  so the scissor still gets its own chunk with zero reordering (M5).
+  Within one layer/block the replay is the exact submission order —
   real painter's order. `set_layer()` is the explicit z escape hatch that
   outranks the key.
 - **Clip stack.** `push_clip(x, y, w, h)` pushes a framebuffer-space rect
   (top-left origin, screen space even inside camera blocks); draws snapshot
   the active clip, nesting intersects at push time, and the stack empties
-  at every `frame_begin` — a clip never leaks across frames. Clip sits
-  BEFORE material in the sort key so all draws under one clip batch into a
-  contiguous run (the 16-chunk cap makes interleaved runs unaffordable);
-  the flush sets one `vkCmdSetScissor` per chunk (chunk clip intersected
-  with the frame extent, outward-rounded) and skips empty-clip chunks
-  entirely. Depth cap 8, balanced overflow like the gui stacks: deeper
-  pushes count depth but stop shrinking (warned once per renderer), so
-  pops stay paired. `pop_clip()` with nothing pushed is a documented no-op.
+  at every `frame_begin` — a clip never leaks across frames. Clip is not a
+  sort key (M5): the replay splits a chunk wherever the active clip changes
+  in record order, so interleaved clip runs batch as-is instead of being
+  reordered by rect values; the flush sets one `vkCmdSetScissor` per chunk
+  (chunk clip intersected with the frame extent, outward-rounded) and skips
+  empty-clip chunks entirely. Depth cap 8, balanced overflow like the gui
+  stacks: deeper pushes count depth but stop shrinking (warned once per
+  renderer), so pops stay paired. `pop_clip()` with nothing pushed is a
+  documented no-op. **Record order is the contract**: with clip out of the
+  sort, a clip change always splits a chunk — so draw each clipped panel's
+  content CONTIGUOUSLY (all of panel A's draws, then all of panel B's);
+  A,B,A interleaving costs three chunks instead of two.
 - **Chunks.** Up to 16 CPU chunks per frame: 32 textures per chunk /
   131072 vertices per frame (shared across chunks — one draw-sized slice
   each). One chunk = one VP (64B push constants) + one clip (one scissor)
@@ -221,7 +229,13 @@ third-party).
   texture table (one descriptor set) + one `vkCmdDrawIndexed`.
   Texture overflow closes the chunk and opens a new one that inherits the
   segment's VP, clip and depth mode — no mid-frame GPU work ever. Caps
-  exhausted: further draws drop, one warn per frame.
+  exhausted: draws drop, but never silently (M5) — the drops are counted
+  (`BatchCore::dropped_chunks()`/`dropped_quads()`, reset per frame) and
+  the renderer warns once per frame with the frame's final totals. The
+  chunk array cannot grow past 16: every slot pre-owns a descriptor set
+  per swapchain image (allocated at init, strided at flush), so growth
+  would mean mid-frame GPU allocation — the batch's one hard no. M9 will
+  remove the cap properly.
 - **Textures.** `load_texture()` (valid from `on_setup()`) uploads
   synchronously — staging buffer, one-off submit, fence wait. The registry
   only grows (v1 never unloads): ids are indexes, stable for the process

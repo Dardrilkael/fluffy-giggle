@@ -27,7 +27,12 @@ inline constexpr std::size_t kMaxVerticesPerFrame = 131072; // ~32k quads
 // scroll region + the 2D world + the 3D block + the screen overlay), and
 // the next panel's whole segment dropped with one warn per frame. 16
 // restores headroom; the cost scales with it (one descriptor set per
-// swapchain image per chunk).
+// swapchain image per chunk). The array CANNOT grow mid-frame: the GPU
+// half pre-allocates image_count descriptor sets per chunk slot at init
+// and strides that pool at flush, so growth would mean mid-frame GPU
+// allocation - the batch design forbids it. Until M9 removes the cap,
+// over-cap drops are counted (dropped_chunks()/dropped_quads()) and the
+// renderer warns once per frame with the counts - never silent.
 inline constexpr std::uint32_t kMaxChunksPerFrame = 16;
 
 // The "no clip pushed" rect: the whole framebuffer. The flush intersects
@@ -159,6 +164,11 @@ public:
     }
     const Chunk& chunk(std::uint32_t i) const { return chunks_[i]; }
     const std::vector<Vertex>& vertices() const { return vertices_; }
+    // Overflow accounting (M5): the drops the caps produced this frame -
+    // surfaced so overflow is never silent (see kMaxChunksPerFrame). Both
+    // reset at begin_frame().
+    std::uint32_t dropped_chunks() const { return dropped_chunks_; }
+    std::uint32_t dropped_quads() const { return dropped_quads_; }
 
 private:
     bool start_chunk(const Mat4& vp, const float (&clip)[4], bool depth_test);
@@ -170,6 +180,8 @@ private:
     std::vector<Vertex> vertices_;
     std::vector<Chunk> chunks_;
     bool segment_open_ = false;
+    std::uint32_t dropped_chunks_ = 0;  // open_segment at the cap (M5)
+    std::uint32_t dropped_quads_ = 0;   // every quad dropped for any cap (M5)
 };
 
 }  // namespace ws::ui::r2d::batch

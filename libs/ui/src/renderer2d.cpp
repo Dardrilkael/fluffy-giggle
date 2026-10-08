@@ -110,30 +110,23 @@ void Renderer2D::frame_end() {
     if (commands_.empty()) {
         return;
     }
-    // Layer first (the explicit z escape hatch), then begin() block, then
-    // clip. These three are the only hard chunk boundaries: one chunk is
-    // one VP and one scissor, so a layer/epoch/clip change must start a
-    // fresh chunk. Material (texture) is deliberately NOT a sort key - the
-    // 32-slot texture table already lets one chunk hold many textures, so
-    // sorting by material bought nothing but reordered draws that share a
-    // layer/epoch/clip and overlap on screen (e.g. a button's face and its
-    // label bar use different textures and would otherwise flip). Stable,
-    // so within an unchanged layer/epoch/clip, draws replay in the exact
-    // order the app recorded them - real painter's order.
+    // Layer first (the explicit z escape hatch), then begin() block. Stable,
+    // so within one layer+epoch draws replay in the exact order the app
+    // recorded them - real painter's order. Clip is deliberately NOT a
+    // sort key: sorting by clip VALUES made overlapping panels with
+    // different clips swap z-order whenever the rects compared backwards.
+    // Instead the replay below splits chunks wherever the clip changes in
+    // record order - the scissor still gets its own chunk, without the
+    // reordering. Material (texture) is not a sort key either - the
+    // 32-slot table already lets one chunk hold many textures, so sorting
+    // by it bought nothing but reordered overlapping draws that share a
+    // layer/epoch and differ in texture (a button's face vs. its label).
     std::stable_sort(commands_.begin(), commands_.end(),
                      [](const DrawCommand& a, const DrawCommand& b) {
                          if (a.sort_layer != b.sort_layer) {
                              return a.sort_layer < b.sort_layer;
                          }
-                         if (a.camera_epoch != b.camera_epoch) {
-                             return a.camera_epoch < b.camera_epoch;
-                         }
-                         for (int i = 0; i < 4; ++i) {
-                             if (a.clip[i] != b.clip[i]) {
-                                 return a.clip[i] < b.clip[i];
-                             }
-                         }
-                         return false;  // equal key: keep record order
+                         return a.camera_epoch < b.camera_epoch;
                      });
 
     // Replay: a segment opens per begin() block AND per clip change - both
@@ -170,12 +163,16 @@ void Renderer2D::frame_end() {
         }
         float color[4];
         batch::unpack_rgba(cmd.color, color);
-        if (!batch_.push_quad(cmd.pos, cmd.uv, color, cmd.texture.id)) {
-            warn_caps();
-        }
+        (void)batch_.push_quad(cmd.pos, cmd.uv, color, cmd.texture.id);
     }
     batch_.close_segment();
     commands_.clear();
+    // Warn once per frame with the frame's FINAL drop totals - the counts
+    // are only complete after the whole replay, so the warn lives here,
+    // not inside the loop.
+    if (batch_.dropped_quads() > 0 || batch_.dropped_chunks() > 0) {
+        warn_caps();
+    }
 }
 
 void Renderer2D::frame_drop() {
@@ -964,8 +961,10 @@ void Renderer2D::warn_caps() {
         return;
     }
     warned_ = true;
-    ws::core::warn("ui: r2d draws dropped - frame batch caps exhausted "
-                   "({} segments, {} vertices)",
+    ws::core::warn("ui: r2d draws dropped - frame batch caps exhausted: "
+                   "{} quad(s) ({} chunk(s) over the {}-chunk cap, "
+                   "{}-vertex frame limit)",
+                   batch_.dropped_quads(), batch_.dropped_chunks(),
                    batch::kMaxChunksPerFrame, batch::kMaxVerticesPerFrame);
 }
 
@@ -1121,9 +1120,9 @@ void Renderer2D::push_clip(float x, float y, float width, float height) {
         std::isfinite(height)) {
         // Intersect with the active clip: nesting always shrinks. The
         // !(> 0) form normalizes empty, inverted and negative extents to
-        // a degenerate rect - the sort key must never hold a NaN, and an
-        // empty clip means "render nothing", which is the only safe
-        // meaning for such input.
+        // a degenerate rect - the clip-change comparison must never see a
+        // NaN, and an empty clip means "render nothing", which is the
+        // only safe meaning for such input.
         const float left = std::max(x, top[0]);
         const float upper = std::max(y, top[1]);
         const float right = std::min(x + width, top[0] + top[2]);

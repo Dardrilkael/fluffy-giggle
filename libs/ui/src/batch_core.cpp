@@ -227,6 +227,7 @@ bool line_quad3d(float x0, float y0, float z0, float x1, float y1, float z1,
 bool BatchCore::start_chunk(const Mat4& vp, const float (&clip)[4],
                             bool depth_test) {
     if (chunks_.size() >= kMaxChunksPerFrame) {
+        ++dropped_chunks_;
         return false;
     }
     Chunk chunk;
@@ -244,6 +245,8 @@ void BatchCore::begin_frame() {
     vertices_.clear();
     chunks_.clear();
     segment_open_ = false;
+    dropped_chunks_ = 0;
+    dropped_quads_ = 0;
 }
 
 bool BatchCore::open_segment(const Mat4& vp, const float (&clip)[4],
@@ -284,13 +287,16 @@ std::uint32_t BatchCore::texture_slot(std::uint32_t texture_id) {
 bool BatchCore::push_quad(const float (&pos)[4][3], const float (&uv)[4][2],
                           const float (&color)[4], std::uint32_t texture_id) {
     if (!segment_open_ || chunks_.empty()) {
+        ++dropped_quads_;
         return false;
     }
     if (vertices_.size() + 4 > kMaxVerticesPerFrame) {
+        ++dropped_quads_;
         return false;
     }
     const std::uint32_t slot = texture_slot(texture_id);
     if (slot >= kMaxTexturesPerChunk) {
+        ++dropped_quads_;
         return false;
     }
     for (int i = 0; i < 4; ++i) {

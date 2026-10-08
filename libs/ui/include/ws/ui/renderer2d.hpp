@@ -85,11 +85,15 @@ FrameSize frame_size();
 // per frame layers blocks back to front.
 //
 // At the frame's end the shell sorts the recorded draws - explicit layer
-// first, then camera block, then clip - and only then batches them. The
-// sort is stable, and texture is NOT a key: draws that share layer, camera
-// block and clip replay in their exact submission order - real painter's
-// order - whatever textures they use (one chunk's texture table holds up
-// to 32 alongside, so mixed textures neither reorder nor split the chunk).
+// first, then camera block - and only then batches them. The sort is
+// stable, and neither texture nor clip is a key: draws that share layer
+// and camera block replay in their exact submission order - real
+// painter's order - whatever textures they use (one chunk's texture
+// table holds up to 32 alongside, so mixed textures neither reorder nor
+// split the chunk). A clip change splits a fresh chunk in record order
+// (one chunk = one scissor), so clipped regions keep painter order too:
+// two overlapping panels render in the order the app drew them, never
+// reordered by their clip rects.
 // set_layer() stays the explicit z escape hatch when overlap order must
 // disagree with submission order.
 void begin();

@@ -4,8 +4,9 @@
 // reaches apps - the public surface is <ws/ui/renderer2d.hpp>. App-facing
 // methods only RECORD commands (a draw is data until the frame ends);
 // frame_end() sorts the frame's commands - explicit layer first, then
-// begin() block, then clip (stable, so same-state draws never flip) - and
-// replays them into the batch. The Vulkan half extends this class in
+// begin() block (stable, so same-layer draws never flip) - and replays
+// them into the batch, splitting a fresh chunk wherever the clip changes
+// in record order. The Vulkan half extends this class in
 // src/renderer2d.cpp and flushes that batch inside the render pass.
 
 #include "atlas_packer.h"
@@ -32,8 +33,9 @@ struct DrawCommand {
     std::uint32_t sort_layer = 0;    // set_layer(): the explicit z escape hatch
     std::uint32_t camera_epoch = 0;  // which begin() block recorded this
     float clip[4] = {0.0f, 0.0f, FLT_MAX, FLT_MAX};  // active clip at record
-                                    // time - one chunk = one scissor, so a
-                                    // clip change is a hard chunk boundary
+                                    // time - NOT a sort key: the replay
+                                    // splits chunks wherever it changes in
+                                    // record order (one chunk = one scissor)
     // NOT a sort key: the 32-slot per-chunk texture table already lets one
     // chunk hold many materials, and sorting by this would reorder
     // overlapping same-layer draws that use different textures (a button's
