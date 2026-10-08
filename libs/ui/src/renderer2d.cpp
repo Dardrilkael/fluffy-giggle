@@ -8,7 +8,7 @@
 
 #include "font.h"
 #include "rounded_texture.h"
-#include "shaders/spirv.h"
+#include "shader_provider.h"
 
 #if defined(_MSC_VER)
 #pragma warning(push, 0)
@@ -337,6 +337,19 @@ bool Renderer2D::on_swapchain_recreated(VkRenderPass render_pass,
     return true;
 }
 
+bool Renderer2D::reload_pipelines() {
+    // Dev-only rebake (WS_UI_DEV_SHADER_RELOAD caller in app.cpp). The
+    // caller MUST vkDeviceWaitIdle first: flush() bound draws through the
+    // pipelines being destroyed, and per-frame deletion queues (M6/M12)
+    // do not exist yet. Render-pass compatibility means the same
+    // render_pass_ is still the right rebake input.
+    vkDestroyPipeline(device_, pipeline_, nullptr);
+    vkDestroyPipeline(device_, pipeline_3d_, nullptr);
+    pipeline_ = VK_NULL_HANDLE;
+    pipeline_3d_ = VK_NULL_HANDLE;
+    return create_pipeline(render_pass_);
+}
+
 void Renderer2D::shutdown() {
     if (device_ == VK_NULL_HANDLE) {
         return;  // never initialized, or already shut down
@@ -518,12 +531,14 @@ bool Renderer2D::create_index_buffer() {
 }
 
 bool Renderer2D::create_pipeline(VkRenderPass render_pass) {
+    // The stages come from the provider: the committed spirv.h words by
+    // default, the hot-reloaded pair in a WS_UI_DEV_SHADER_RELOAD build.
+    const spirv::ShaderWords vert_words = spirv::vert_words();
+    const spirv::ShaderWords frag_words = spirv::frag_words();
     VkShaderModule vert = make_shader_module(
-        device_, spirv::kBatchVertSpv,
-        sizeof(spirv::kBatchVertSpv) / sizeof(spirv::kBatchVertSpv[0]));
+        device_, vert_words.words, vert_words.count);
     VkShaderModule frag = make_shader_module(
-        device_, spirv::kBatchFragSpv,
-        sizeof(spirv::kBatchFragSpv) / sizeof(spirv::kBatchFragSpv[0]));
+        device_, frag_words.words, frag_words.count);
     if (vert == VK_NULL_HANDLE || frag == VK_NULL_HANDLE) {
         vkDestroyShaderModule(device_, vert, nullptr);  // null-tolerated
         vkDestroyShaderModule(device_, frag, nullptr);

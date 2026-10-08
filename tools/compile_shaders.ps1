@@ -4,36 +4,74 @@
 # a shader changes.
 #
 # A compiler is located in this order:
-#   1. -Compiler <path>            (glslc or glslang, passed explicitly)
-#   2. glslc from the Vulkan SDK   ($env:VULKAN_SDK, else newest C:\VulkanSDK)
-#   3. glslangValidator / glslang on PATH (the Khronos release zips work;
-#      the binary was renamed glslangValidator -> glslang around v14)
+#   1. -Compiler <path>            (glslc, glslang or glslangValidator)
+#   2. $env:WS_GLSLANG
+#   3. glslang.exe / glslangValidator.exe / glslc.exe on PATH
+#   4. $env:VULKAN_SDK\Bin, else the newest C:\VulkanSDK
+#   5. the known %TEMP%\glslang-16.6.0 drop (re-create it by unzipping
+#      "glslang-16.6.0-windows-x86_64-release.zip" from the KhronosGroup
+#      glslang GitHub release 16.6.0 into %TEMP%\glslang-16.6.0)
+#
+# THE FLAGS AND THE HEADER FORMAT LIVE HERE ONLY - the CMake check/regen
+# targets and the dev hot-reload provider call this script (or resolve the
+# compiler the same way) and must never duplicate them.
 #
 # Usage:
-#   .\tools\compile_shaders.ps1
-#   .\tools\compile_shaders.ps1 -Compiler C:\path\to\glslangValidator.exe
+#   .\tools\compile_shaders.ps1                          # regenerate in place
+#   .\tools\compile_shaders.ps1 -OutFile C:\tmp\spirv.h  # write elsewhere
+#   .\tools\compile_shaders.ps1 -Check                   # compare, don't write
+#   .\tools\compile_shaders.ps1 -Compiler C:\path\to\glslang.exe
+#
+# -Check exits 0 when the tree's spirv.h matches what the flags would
+# regenerate, 1 when it differs (with the first differing line), 2 when
+# compilation itself failed.
 #
 # NOTE: keep this file pure ASCII. PowerShell 5.1 reads BOM-less files as
 # ANSI, so UTF-8 punctuation (em-dashes, smart quotes) breaks parsing.
 
-param([string]$Compiler = "")
+param(
+    [string]$Compiler = "",
+    [string]$OutFile = "",
+    [switch]$Check,
+    [switch]$AllowMissingCompiler
+)
 
 $ErrorActionPreference = "Stop"
 
+# The glslang version this script's output is pinned to. Byte-identical
+# output depends on it (the SPIR-V carries the generator version), so the
+# staleness checks warn - never fail - when a different version is found.
+$pinnedGlslang = "16.6.0"
+
 $repo = Split-Path -Parent $PSScriptRoot
 $shaderDir = Join-Path $repo "libs\ui\src\shaders"
-$outHeader = Join-Path $shaderDir "spirv.h"
+$repoHeader = Join-Path $shaderDir "spirv.h"
+if ($OutFile -eq "") { $OutFile = $repoHeader }
 $tmp = New-Item -ItemType Directory -Path (Join-Path $env:TEMP "ws-shaders") -Force
 
 function Find-Compiler([string]$Explicit) {
     if ($Explicit -ne "") {
         if (-not (Test-Path $Explicit)) {
+            if ($AllowMissingCompiler) {
+                Write-Host "SKIPPED: compiler not found at the explicit path: $Explicit"
+                exit 0
+            }
             throw "Compiler not found: $Explicit"
         }
         return $Explicit
     }
+    if ($env:WS_GLSLANG) {
+        if (Test-Path $env:WS_GLSLANG) { return $env:WS_GLSLANG }
+        Write-Warning "WS_GLSLANG is set but does not exist: $env:WS_GLSLANG"
+    }
+    foreach ($name in @("glslang.exe", "glslangValidator.exe", "glslc.exe")) {
+        $onPath = Get-Command $name -ErrorAction SilentlyContinue
+        if ($onPath) { return $onPath.Source }
+    }
     if ($env:VULKAN_SDK) {
         $candidate = Join-Path $env:VULKAN_SDK "Bin\glslc.exe"
+        if (Test-Path $candidate) { return $candidate }
+        $candidate = Join-Path $env:VULKAN_SDK "Bin\glslang.exe"
         if (Test-Path $candidate) { return $candidate }
     }
     if (Test-Path "C:\VulkanSDK") {
@@ -44,14 +82,21 @@ function Find-Compiler([string]$Explicit) {
             Select-Object -First 1
         if ($candidate) { return $candidate }
     }
-    $onPath = Get-Command glslangValidator -ErrorAction SilentlyContinue
-    if (-not $onPath) {
-        $onPath = Get-Command glslang -ErrorAction SilentlyContinue
+    $temp = Join-Path $env:TEMP "glslang-16.6.0\bin\glslang.exe"
+    if (Test-Path $temp) { return $temp }
+    $looked = @(
+        "-Compiler argument",
+        "WS_GLSLANG env var ($env:WS_GLSLANG)",
+        "glslang.exe / glslangValidator.exe / glslc.exe on PATH",
+        "VULKAN_SDK\Bin ($env:VULKAN_SDK)",
+        "C:\VulkanSDK",
+        "$env:TEMP\glslang-16.6.0\bin\glslang.exe"
+    ) -join "; "
+    if ($AllowMissingCompiler) {
+        Write-Host "SKIPPED: no shader compiler found. Looked for: $looked"
+        exit 0
     }
-    if ($onPath) { return $onPath.Source }
-    $onPath = Get-Command glslc -ErrorAction SilentlyContinue
-    if ($onPath) { return $onPath.Source }
-    throw "No shader compiler found. Install the Vulkan SDK (glslc), or put glslangValidator on PATH, or pass -Compiler <path>."
+    throw "No shader compiler found. Looked for: $looked. Install the Vulkan SDK, put glslang on PATH, or pass -Compiler <path>."
 }
 
 function Compile-Spv([string]$Compiler, [string]$Source, [string]$Out) {
@@ -87,8 +132,29 @@ function Emit-SpvArray([string]$SpvPath) {
     return $lines
 }
 
+function Get-CompilerVersion([string]$Compiler) {
+    try {
+        $out = (& $Compiler --version 2>$null) -join " "
+        if ($out -match "Version:\s*(\d+:\s*)?([\d.]+)") {
+            return $Matches[2]
+        }
+    } catch { }
+    return ""
+}
+
 $compiler = Find-Compiler $Compiler
+
+# Byte-identical output depends on the pinned glslang version (the SPIR-V
+# generator version is embedded in the binary), so a mismatch warns - the
+# check target must not fail a build over it.
+$version = Get-CompilerVersion $compiler
+if ($version -ne "" -and $version -ne $pinnedGlslang) {
+    Write-Warning ("glslang $version found, but the committed spirv.h is " +
+        "pinned to glslang $pinnedGlslang - a diff may be the version, not " +
+        "the shaders.")
+}
 Write-Host "Compiler: $compiler"
+if ($version -ne "") { Write-Host "Version: $version (pinned: $pinnedGlslang)" }
 
 $vertSpv = Join-Path $tmp "batch.vert.spv"
 $fragSpv = Join-Path $tmp "batch.frag.spv"
@@ -122,5 +188,46 @@ $header.Add("};")
 $header.Add("")
 $header.Add("}  // namespace ws::ui::r2d::spirv")
 
-[System.IO.File]::WriteAllText($outHeader, ($header -join "`n") + "`n")
-Write-Host "Wrote $outHeader"
+if ($Check) {
+    $fresh = ($header -join "`n") + "`n"
+    if (-not (Test-Path $repoHeader)) {
+        Write-Host "STALE: $repoHeader does not exist."
+        exit 1
+    }
+    # Git hands out CRLF or LF depending on autocrlf, so compare the
+    # content, not the raw bytes - the generator always emits LF.
+    $committed = [System.IO.File]::ReadAllText($repoHeader)
+    $committedLf = $committed.Replace("`r`n", "`n")
+    if ($committedLf -ceq $fresh) {
+        Write-Host "IN SYNC: $repoHeader matches the current shaders."
+        exit 0
+    }
+    Write-Host "STALE: $repoHeader differs from what the current shaders compile to."
+    $c = ($committedLf -split "`n") | ForEach-Object { $_.TrimEnd("`r") }
+    $f = $fresh -split "`n"
+    $shown = 0
+    for ($i = 0; $i -lt [Math]::Min($c.Count, $f.Count); $i++) {
+        if ($c[$i] -cne $f[$i]) {
+            Write-Host "  line $($i+1):"
+            Write-Host "    committed: $($c[$i])"
+            Write-Host "    expected:  $($f[$i])"
+            $shown++
+            if ($shown -ge 3) { break }
+        }
+    }
+    if ($c.Count -ne $f.Count) {
+        Write-Host "  (line counts differ: committed $($c.Count), expected $($f.Count))"
+    }
+    exit 1
+}
+
+# Write-then-move: a compile failure above throws before anything lands, but
+# the move also protects against a partial write and keeps $OutFile atomic
+# for the -OutFile callers (the CMake check target reads it after exit).
+$tmpHeader = Join-Path $tmp "spirv.h.new"
+[System.IO.File]::WriteAllText($tmpHeader, ($header -join "`n") + "`n")
+if ($OutFile -ne $repoHeader) {
+    New-Item -ItemType Directory -Path (Split-Path -Parent $OutFile) -Force | Out-Null
+}
+Move-Item -Force $tmpHeader $OutFile
+Write-Host "Wrote $OutFile"

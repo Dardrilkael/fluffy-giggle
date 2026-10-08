@@ -27,6 +27,7 @@
 
 #include "gui.h"
 #include "renderer2d.h"
+#include "shader_provider.h"
 #include "window.h"
 
 #include <volk.h>  // meta-loader: every vk* symbol below is a volk global
@@ -995,6 +996,14 @@ struct App::Impl {
         sync_index = 0;
     }
 
+    // The GLSL sources' directory, for the dev-only shader hot reload
+    // (WS_UI_DEV_SHADER_RELOAD): the committed spirv.h serves every default
+    // build; a dev build polls these files' mtimes each frame. Repo-root
+    // relative: apps already rely on CWD-relative asset paths, and the
+    // reload option is desktop-debug-only (configure-time gated), so the
+    // dev runs from the workspace root as always.
+    static const char* shader_dir() { return "libs/ui/src/shaders"; }
+
     bool recreate_swapchain() {
         int fb_width = 0;
         int fb_height = 0;
@@ -1266,6 +1275,26 @@ struct App::Impl {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
+
+#ifdef WS_UI_DEV_SHADER_RELOAD
+            // Dev-only hot reload: poll the GLSL mtimes at the frame
+            // boundary (nothing recorded, nothing in flight) and rebake
+            // the pipelines when they changed. A failed compile keeps the
+            // last good words inside the provider, so the app keeps
+            // rendering no matter what the editor did.
+            if (r2d::spirv::poll_reload(shader_dir())) {
+                // Until per-frame deletion queues exist (M6/M12), a hard
+                // wait is the only correct drain: the GPU may still be
+                // executing draws through the old pipelines. Dev-only
+                // iteration cost, never in a default build.
+                vkDeviceWaitIdle(device);
+                if (renderer2d_.reload_pipelines()) {
+                    core::info("ui: shader hot reload - pipelines rebaked");
+                } else {
+                    core::error("ui: shader hot reload - pipeline rebake failed");
+                }
+            }
+#endif
 
             // If the app enabled viewports in on_setup(), align platform-window
             // styling once (rounding/transparency artifacts otherwise).

@@ -94,6 +94,12 @@ public:
     // vertex regions. Extents are per-flush (dynamic viewport/scissor).
     bool on_swapchain_recreated(VkRenderPass render_pass, VkFormat format,
                                 uint32_t image_count);
+    // Dev-only (WS_UI_DEV_SHADER_RELOAD): destroys both pipelines and
+    // rebakes them from the provider's current words. Call only after
+    // vkDeviceWaitIdle - the GPU may still execute draws through the old
+    // pipelines. Only the dev build ever calls it, but it is harmless and
+    // cheap to compile everywhere.
+    bool reload_pipelines();
     // Destroys everything init()/load_texture() created. Idempotent.
     void shutdown();
     // Draws the batch inside the render pass, before ImGui's draw data (2D
