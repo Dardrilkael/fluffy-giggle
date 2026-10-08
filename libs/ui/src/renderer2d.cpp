@@ -189,7 +189,7 @@ void Renderer2D::frame_drop() {
 bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
                       VmaAllocator allocator, VkQueue queue,
                       uint32_t queue_family, VkRenderPass render_pass,
-                      VkFormat format, uint32_t image_count) {
+                      VkFormat format) {
     device_ = device;
     physical_device_ = physical_device;
     allocator_ = allocator;
@@ -297,10 +297,9 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
         return false;
     }
 
-    if (!create_per_image_objects(image_count)) {
+    if (!create_frame_resources()) {
         return false;
     }
-    image_count_ = image_count;
     if (!create_index_buffer() || !create_pipeline(render_pass)) {
         return false;
     }
@@ -308,13 +307,15 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
 }
 
 bool Renderer2D::on_swapchain_recreated(VkRenderPass render_pass,
-                                        VkFormat format, uint32_t image_count) {
+                                        VkFormat format) {
     render_pass_ = render_pass;
     if (pipeline_ != VK_NULL_HANDLE && format != format_) {
         // Format drift invalidates the pipelines (both depth modes - they
         // share every other byte of state). A same-format resize needs
         // nothing: render passes stay compatible, viewport/scissor are
-        // dynamic, extents arrive per flush.
+        // dynamic, extents arrive per flush. The per-frame-slot resources
+        // (arenas, descriptor sets) are swapchain-independent and ride
+        // through every rebuild untouched.
         vkDestroyPipeline(device_, pipeline_, nullptr);
         vkDestroyPipeline(device_, pipeline_3d_, nullptr);
         pipeline_ = VK_NULL_HANDLE;
@@ -324,22 +325,15 @@ bool Renderer2D::on_swapchain_recreated(VkRenderPass render_pass,
     if (pipeline_ == VK_NULL_HANDLE && !create_pipeline(render_pass)) {
         return false;
     }
-    if (image_count != image_count_) {
-        destroy_per_image_objects();
-        if (!create_per_image_objects(image_count)) {
-            return false;
-        }
-        image_count_ = image_count;
-    }
     return true;
 }
 
 bool Renderer2D::reload_pipelines() {
     // Dev-only rebake (WS_UI_DEV_SHADER_RELOAD caller in app.cpp). The
-    // caller MUST vkDeviceWaitIdle first: flush() bound draws through the
-    // pipelines being destroyed, and per-frame deletion queues (M6/M12)
-    // do not exist yet. Render-pass compatibility means the same
-    // render_pass_ is still the right rebake input.
+    // caller must first retire every in-flight frame (it waits the
+    // frame-slot fences): flush() bound draws through the pipelines being
+    // destroyed. Render-pass compatibility means the same render_pass_ is
+    // still the right rebake input.
     vkDestroyPipeline(device_, pipeline_, nullptr);
     vkDestroyPipeline(device_, pipeline_3d_, nullptr);
     pipeline_ = VK_NULL_HANDLE;
@@ -364,7 +358,7 @@ void Renderer2D::shutdown() {
         vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
         pipeline_layout_ = VK_NULL_HANDLE;
     }
-    destroy_per_image_objects();
+    destroy_frame_resources();
     if (index_buffer_ != VK_NULL_HANDLE) {
         vmaDestroyBuffer(allocator_, index_buffer_, index_allocation_);
         index_buffer_ = VK_NULL_HANDLE;
@@ -396,18 +390,18 @@ void Renderer2D::shutdown() {
     allocator_ = VK_NULL_HANDLE;
     queue_ = VK_NULL_HANDLE;
     render_pass_ = VK_NULL_HANDLE;
-    image_count_ = 0;
 }
 
 // --- Renderer2D: GPU helpers -------------------------------------------------
 
-bool Renderer2D::create_per_image_objects(uint32_t image_count) {
-    // One set per (swapchain image, chunk slot). A set belongs to exactly
-    // one image, whose fence is waited before any recording starts, so the
-    // flush-time rewrite never races an in-flight command buffer - and each
-    // chunk owns its set, so no set is rewritten between two binds inside
-    // one command buffer.
-    const uint32_t set_count = image_count * batch::kMaxChunksPerFrame;
+bool Renderer2D::create_frame_resources() {
+    // One set per (frame slot, chunk slot), fixed at init() - nothing here
+    // depends on the swapchain, so a resize rebuilds none of it. A set
+    // belongs to exactly one frame slot, whose fence is waited before any
+    // recording starts, so the flush-time rewrite never races an in-flight
+    // command buffer - and each chunk owns its set, so no set is rewritten
+    // between two binds inside one command buffer.
+    const uint32_t set_count = kMaxFramesInFlight * batch::kMaxChunksPerFrame;
 
     VkDescriptorPoolSize pool_size{};
     pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -461,10 +455,10 @@ bool Renderer2D::create_per_image_objects(uint32_t image_count) {
     }
     vkUpdateDescriptorSets(device_, set_count, writes.data(), 0, nullptr);
 
-    // One persistently-mapped vertex region per image, sized by the static
-    // frame cap so a swapchain resize never reallocates them.
-    buffers_.resize(image_count);
-    for (ImageBuffers& region : buffers_) {
+    // One persistently-mapped vertex arena per frame slot, sized by the
+    // static frame cap. Created once - a resize never reallocates them.
+    arenas_.resize(kMaxFramesInFlight);
+    for (FrameArena& arena : arenas_) {
         VkBufferCreateInfo buffer_info{};
         buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         buffer_info.size = batch::kMaxVerticesPerFrame * sizeof(batch::Vertex);
@@ -472,21 +466,21 @@ bool Renderer2D::create_per_image_objects(uint32_t image_count) {
         VmaAllocationCreateInfo alloc_info = host_write_alloc();
         VmaAllocationInfo mapped{};
         if (vmaCreateBuffer(allocator_, &buffer_info, &alloc_info,
-                            &region.buffer, &region.allocation, &mapped) !=
+                            &arena.buffer, &arena.allocation, &mapped) !=
             VK_SUCCESS) {
-            ws::core::error("ui: r2d - vertex region allocation failed");
+            ws::core::error("ui: r2d - vertex arena allocation failed");
             return false;
         }
-        region.mapped = static_cast<batch::Vertex*>(mapped.pMappedData);
+        arena.mapped = static_cast<batch::Vertex*>(mapped.pMappedData);
     }
     return true;
 }
 
-void Renderer2D::destroy_per_image_objects() {
-    for (const ImageBuffers& region : buffers_) {
-        vmaDestroyBuffer(allocator_, region.buffer, region.allocation);
+void Renderer2D::destroy_frame_resources() {
+    for (const FrameArena& arena : arenas_) {
+        vmaDestroyBuffer(allocator_, arena.buffer, arena.allocation);
     }
-    buffers_.clear();
+    arenas_.clear();
     sets_.clear();
     if (descriptor_pool_ != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
@@ -860,7 +854,7 @@ void Renderer2D::write_chunk_set(VkDescriptorSet set,
     vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
 }
 
-void Renderer2D::flush(VkCommandBuffer cmd, uint32_t image_index,
+void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
                        float fb_width, float fb_height) {
     if (pipeline_ == VK_NULL_HANDLE || batch_.empty()) {
         return;
@@ -869,18 +863,19 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t image_index,
         return;  // nothing sane to draw into
     }
 
-    // This image's fence is waited before recording started (render_frame),
-    // so its vertex region and chunk sets are safely writable now.
-    ImageBuffers& region = buffers_[image_index];
+    // This frame slot's fence is waited before recording started
+    // (render_frame), so its vertex arena and chunk sets are safely
+    // writable now.
+    FrameArena& arena = arenas_[frame_slot];
     const std::vector<batch::Vertex>& vertices = batch_.vertices();
-    std::memcpy(region.mapped, vertices.data(),
+    std::memcpy(arena.mapped, vertices.data(),
                 vertices.size() * sizeof(batch::Vertex));
-    vmaFlushAllocation(allocator_, region.allocation, 0, VK_WHOLE_SIZE);
+    vmaFlushAllocation(allocator_, arena.allocation, 0, VK_WHOLE_SIZE);
 
     // Vertex/index binds and the viewport are pipeline-independent state -
     // bound once; the pipeline itself binds per chunk below (bind on change).
     const VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &region.buffer, &offset);
+    vkCmdBindVertexBuffers(cmd, 0, 1, &arena.buffer, &offset);
     vkCmdBindIndexBuffer(cmd, index_buffer_, 0, VK_INDEX_TYPE_UINT32);
 
     VkViewport viewport{};
@@ -912,7 +907,7 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t image_index,
         }
         vkCmdSetScissor(cmd, 0, 1, &scissor);
         VkDescriptorSet set =
-            sets_[image_index * batch::kMaxChunksPerFrame + c];
+            sets_[frame_slot * batch::kMaxChunksPerFrame + c];
         write_chunk_set(set, chunk);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 pipeline_layout_, 0, 1, &set, 0, nullptr);

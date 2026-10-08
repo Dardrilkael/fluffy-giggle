@@ -61,6 +61,15 @@ inline std::uint64_t make_material_key(Texture texture) {
     return static_cast<std::uint64_t>(texture.id);
 }
 
+// How many frames may be recorded while an earlier one still executes -
+// the frames-in-flight model, deliberately decoupled from the swapchain
+// image count. The shell's frame slots (fence, command pool, buffer,
+// acquire semaphore), this renderer's vertex arenas and the chunk
+// descriptor storage are all keyed by it; 2 buys one frame of CPU/GPU
+// overlap under vsync without doubling per-frame memory. Both sides must
+// agree, so the constant lives here rather than in two files.
+inline constexpr std::uint32_t kMaxFramesInFlight = 2;
+
 class Renderer2D {
 public:
     // Vulkan/VMA handles are single-owned: a copied renderer would destroy
@@ -84,30 +93,34 @@ public:
     // One-time setup after the swapchain exists. Order inside: push-constant
     // limit check, upload pool/fence, sampler, white texture (registry index
     // 0 - every descriptor slot starts bound to it), set layout (32 immutable
-    // samplers), pipeline layout, per-image objects (descriptor pool, sets,
-    // vertex regions), shared index pattern, pipeline. On false the startup
-    // fails; shutdown() is the failure-path cleanup and cleans partial state.
+    // samplers), pipeline layout, per-frame-slot resources (descriptor pool,
+    // sets, vertex arenas - keyed by kMaxFramesInFlight, never by the
+    // swapchain image count), shared index pattern, pipeline. On false the
+    // startup fails; shutdown() is the failure-path cleanup and cleans
+    // partial state.
     bool init(VkDevice device, VkPhysicalDevice physical_device,
               VmaAllocator allocator, VkQueue queue, uint32_t queue_family,
-              VkRenderPass render_pass, VkFormat format, uint32_t image_count);
-    // Swapchain drift. Format drift rebuilds the pipeline (a same-format
-    // resize needs nothing - that is the render-pass compatibility the ImGui
-    // backend relies on); image-count drift rebuilds the per-image sets and
-    // vertex regions. Extents are per-flush (dynamic viewport/scissor).
-    bool on_swapchain_recreated(VkRenderPass render_pass, VkFormat format,
-                                uint32_t image_count);
+              VkRenderPass render_pass, VkFormat format);
+    // Swapchain drift. The per-frame-slot resources are swapchain-
+    // independent, so only format drift matters: it rebuilds the pipeline (a
+    // same-format resize needs nothing - that is the render-pass
+    // compatibility the ImGui backend relies on). Extents are per-flush
+    // (dynamic viewport/scissor).
+    bool on_swapchain_recreated(VkRenderPass render_pass, VkFormat format);
     // Dev-only (WS_UI_DEV_SHADER_RELOAD): destroys both pipelines and
-    // rebakes them from the provider's current words. Call only after
-    // vkDeviceWaitIdle - the GPU may still execute draws through the old
-    // pipelines. Only the dev build ever calls it, but it is harmless and
-    // cheap to compile everywhere.
+    // rebakes them from the provider's current words. Call only after every
+    // in-flight frame retired - the shell waits its frame-slot fences, which
+    // cover every submitted draw (the GPU may still execute draws through
+    // the old pipelines). Only the dev build ever calls it, but it is
+    // harmless and cheap to compile everywhere.
     bool reload_pipelines();
     // Destroys everything init()/load_texture() created. Idempotent.
     void shutdown();
     // Draws the batch inside the render pass, before ImGui's draw data (2D
-    // world under widgets). The image's fence is waited before recording
-    // starts, so its vertex region and chunk sets are safely writable here.
-    void flush(VkCommandBuffer cmd, uint32_t image_index, float fb_width,
+    // world under widgets). frame_slot selects this slot's vertex arena and
+    // chunk sets; that slot's fence is waited before recording starts, so
+    // they are safely writable here.
+    void flush(VkCommandBuffer cmd, uint32_t frame_slot, float fb_width,
                float fb_height);
 
     // --- app-facing entry points (forwarded from the free functions) ---
@@ -194,10 +207,11 @@ private:
     // Graphics pipeline against the given render pass; the shader modules
     // are created and destroyed inside (they are baked into the pipeline).
     bool create_pipeline(VkRenderPass render_pass);
-    // Descriptor pool + image_count*kMaxChunksPerFrame sets (initial
-    // full-white write) + one persistently-mapped vertex region per image.
-    bool create_per_image_objects(uint32_t image_count);
-    void destroy_per_image_objects();
+    // Descriptor pool + kMaxFramesInFlight*kMaxChunksPerFrame sets (initial
+    // full-white write) + one persistently-mapped vertex arena per frame
+    // slot. Created once at init(); nothing here depends on the swapchain.
+    bool create_frame_resources();
+    void destroy_frame_resources();
     // Shared absolute index pattern (quad q -> 4q + {0,1,2,2,3,0}), filled
     // once and never rewritten.
     bool create_index_buffer();
@@ -242,7 +256,6 @@ private:
 
     VkRenderPass render_pass_ = VK_NULL_HANDLE;  // last seen (rebuild input)
     VkFormat format_ = VK_FORMAT_UNDEFINED;     // drift sentinel
-    uint32_t image_count_ = 0;
 
     VkSampler sampler_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;  // owns sets_
@@ -278,21 +291,25 @@ private:
     };
     std::vector<AtlasPage> atlas_pages_;
 
-    // One vertex region per swapchain image, sized by the static frame cap
-    // (a resize never reallocates them), persistently mapped.
-    struct ImageBuffers {
+    // One vertex arena per frame slot (kMaxFramesInFlight of them), sized
+    // by the static frame cap, persistently mapped. A slot's fence gates its
+    // reuse, so the memcpy in flush() never races an in-flight submission.
+    struct FrameArena {
         VkBuffer buffer = VK_NULL_HANDLE;
         VmaAllocation allocation = VK_NULL_HANDLE;
         batch::Vertex* mapped = nullptr;
     };
-    std::vector<ImageBuffers> buffers_;
+    std::vector<FrameArena> arenas_;
 
     VkBuffer index_buffer_ = VK_NULL_HANDLE;
     VmaAllocation index_allocation_ = VK_NULL_HANDLE;
 
     VkCommandPool upload_pool_ = VK_NULL_HANDLE;  // texture uploads
     VkFence upload_fence_ = VK_NULL_HANDLE;
-    // image_count_ * kMaxChunksPerFrame; slot = image_index * kMaxChunks + c.
+    // kMaxFramesInFlight * kMaxChunksPerFrame, allocated once at init();
+    // the flush-time index is frame_slot * kMaxChunksPerFrame + c. A set
+    // belongs to exactly one (frame slot, chunk) pair, whose slot fence is
+    // waited before any recording starts.
     std::vector<VkDescriptorSet> sets_;
 };
 
