@@ -4629,6 +4629,314 @@ TEST_CASE("scroll: drag_threshold is the theme's metric") {
     CHECK(pass(touch_frame({{5, 60.0f, 30.0f, false, true}})) == 0);
 }
 
+// --- gui hit clips (the clip-aware hit seam) ---------------------------------------
+
+TEST_CASE("hit clips: a scrolled-out row cannot claim what sits under the panel") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    // The reported bug, end to end: 11 rows of 24 px = 264 px of content
+    // inside a 200x100 panel (viewport (12, 12, 176, 76), scroll range
+    // 188). Even unscrolled, the rows past y 88 sit below the viewport,
+    // and scrolled to offset 100 they straddle both ends - rows 0..3
+    // above, row 4 poking past the top, row 7 past the bottom, rows 8..10
+    // fully below. A widget UNDER the panel must win any press landing
+    // below the viewport; the pass probes one such rect after the panel
+    // closes (root scope - the panel popped its id and hit-clip scopes).
+    const auto pass = [&](const InputFrame& frame, HitTest& under) {
+        gui.begin_frame(frame);
+        (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
+                                 {0.0f, 0.0f, 200.0f, 100.0f});
+        int clicked = -1;
+        for (int i = 0; i < 11; ++i) {
+            gui.ids().push(i);
+            if (button(gui, layout, kDefaultChrome, "row", 120.0f)) {
+                clicked = i;
+            }
+            gui.ids().pop();
+        }
+        end_scroll_panel(gui, layout, kDefaultChrome);
+        const WidgetId under_id = gui.ids().id("under");
+        under = gui.hit_test(under_id, {60.0f, 88.0f, 120.0f, 40.0f});
+        gui.end_frame();
+        return clicked;
+    };
+
+    // Frame 1: idle, pointer inside the viewport - measures the range.
+    HitTest under;
+    CHECK(pass(snap(60.0f, 50.0f), under) == -1);
+    CHECK(!under.pressed);
+
+    // A click at (60, 116), below the viewport at offset 0: row 4 spans
+    // y 108..132 there - fully hidden by the clip, so without the fix
+    // it wins the first-hit-test press and the under-panel widget sees
+    // nothing. With it the row claims nothing and the widget below the
+    // panel takes the click.
+    CHECK(pass(snap(60.0f, 116.0f, false, true, true), under) == -1);
+    CHECK(under.pressed);
+    CHECK(under.clicked);
+
+    // -3.125 wheel units = exactly 100 px of offset (the pointer sits
+    // inside the viewport, where the wheel gates). Rows now flow from
+    // y -88: row 6 spans 56..80, row 7 straddles the bottom edge
+    // (80..88 visible), row 8 spans 104..128 - fully below again.
+    InputFrame wheel = snap(60.0f, 50.0f);
+    wheel.scroll_dy = -100.0f / kDefaultChrome.scroll_speed;
+    CHECK(pass(wheel, under) == -1);
+
+    // The same spot at the scrolled offset - hidden row 8's center -
+    // still belongs to the widget below the panel, not to the row.
+    CHECK(pass(snap(60.0f, 116.0f, false, true, true), under) == -1);
+    CHECK(under.pressed);
+    CHECK(under.clicked);
+
+    // The visible rows still claim at their scrolled positions.
+    CHECK(pass(snap(60.0f, 68.0f, false, true, true), under) == 6);
+
+    // Row 7 straddles the bottom edge: its visible part claims, its
+    // clipped part (y 92, past the edge at 88) does not - the
+    // under-panel widget owns that spot instead.
+    CHECK(pass(snap(60.0f, 84.0f, false, true, true), under) == 7);
+    CHECK(pass(snap(60.0f, 92.0f, false, true, true), under) == -1);
+    CHECK(under.pressed);
+    CHECK(under.clicked);
+}
+
+TEST_CASE("hit clips: a plain panel's children claim only inside the content rect") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    // begin_panel pushes the hit clip at the same rect it hands
+    // r2d::push_clip - the content rect. A child poking past the panel
+    // claims inside the content and goes dead outside it, exactly what
+    // the renderer's clip does to its pixels. Panel {0,0,100,60},
+    // padding 12: content (12, 12, 76, 36) - right edge 88, bottom 48.
+    // The child rect spans x 50..150, y 40..80: claimable only at its
+    // overlap with the content (x 50..88, y 40..48).
+    const Rect poking{50.0f, 40.0f, 100.0f, 40.0f};
+
+    // Inside the overlap: a plain click.
+    gui.begin_frame(snap(60.0f, 44.0f, false, true, true));
+    (void)begin_panel(gui, layout, kDefaultChrome, "page",
+                      {0.0f, 0.0f, 100.0f, 60.0f});
+    const Rect* clip = gui.current_hit_clip();
+    REQUIRE(clip != nullptr);
+    CHECK(clip->x == 12.0f);
+    CHECK(clip->y == 12.0f);
+    CHECK(clip->width == 76.0f);
+    CHECK(clip->height == 36.0f);
+    const HitTest inside = gui.hit_test(gui.ids().id("child"), poking);
+    CHECK(inside.pressed);
+    CHECK(inside.clicked);
+    end_panel(gui, layout);
+    CHECK(gui.current_hit_clip() == nullptr);  // the pop undid the push
+    gui.end_frame();
+
+    // Outside the content ((100, 60) is inside the child's full rect,
+    // past both content edges): dead - what the clip hides from the
+    // pixels cannot claim the pointer.
+    gui.begin_frame(snap(100.0f, 60.0f, false, true, true));
+    (void)begin_panel(gui, layout, kDefaultChrome, "page",
+                      {0.0f, 0.0f, 100.0f, 60.0f});
+    const HitTest dead = gui.hit_test(gui.ids().id("child"), poking);
+    CHECK(!dead.pressed);
+    CHECK(!dead.clicked);
+    end_panel(gui, layout);
+    gui.end_frame();
+
+    // The panel closed, the clip gone: the same rect claims everywhere
+    // again - the pop handed the whole screen back to the pointer.
+    gui.begin_frame(snap(100.0f, 60.0f, false, true, true));
+    const HitTest unclipped = gui.hit_test(gui.ids().id("child"), poking);
+    CHECK(unclipped.pressed);
+    CHECK(unclipped.clicked);
+    gui.end_frame();
+}
+
+TEST_CASE("hit clips: the seam - nesting, overflow, balance, frame reset") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+
+    // The public seam, driven directly. The probe rect covers everything
+    // - only the clips can veto a claim.
+    const Rect big{0.0f, 0.0f, 400.0f, 300.0f};
+    const auto click = [](float x, float y) {
+        return snap(x, y, false, true, true);
+    };
+
+    // Nesting intersects at push time: {50,50,100,100} inside
+    // {0,0,100,100} stores {50,50,50,50} - the effective clip, not the
+    // pushed rect.
+    gui.begin_frame(snap(300.0f, 300.0f));
+    gui.push_hit_clip({0.0f, 0.0f, 100.0f, 100.0f});
+    gui.push_hit_clip({50.0f, 50.0f, 100.0f, 100.0f});
+    const Rect* top = gui.current_hit_clip();
+    REQUIRE(top != nullptr);
+    CHECK(top->x == 50.0f);
+    CHECK(top->y == 50.0f);
+    CHECK(top->width == 50.0f);
+    CHECK(top->height == 50.0f);
+    gui.end_frame();
+
+    // Inside both clips: claims. Inside only the outer: dead - the
+    // intersection already cut it, though the probe rect covers both.
+    gui.begin_frame(click(60.0f, 60.0f));
+    gui.push_hit_clip({0.0f, 0.0f, 100.0f, 100.0f});
+    gui.push_hit_clip({50.0f, 50.0f, 100.0f, 100.0f});
+    CHECK(gui.hit_test(gui.ids().id("probe"), big).clicked);
+    gui.end_frame();
+
+    gui.begin_frame(click(25.0f, 25.0f));
+    gui.push_hit_clip({0.0f, 0.0f, 100.0f, 100.0f});
+    gui.push_hit_clip({50.0f, 50.0f, 100.0f, 100.0f});
+    const HitTest cut = gui.hit_test(gui.ids().id("probe"), big);
+    CHECK(!cut.pressed);
+    CHECK(!cut.clicked);
+    gui.end_frame();
+
+    // A pop restores the enclosing clip's coverage: (25, 25) claims with
+    // the inner clip popped.
+    gui.begin_frame(click(25.0f, 25.0f));
+    gui.push_hit_clip({0.0f, 0.0f, 100.0f, 100.0f});
+    gui.push_hit_clip({50.0f, 50.0f, 100.0f, 100.0f});
+    gui.pop_hit_clip();
+    CHECK(gui.hit_test(gui.ids().id("probe"), big).clicked);
+    gui.end_frame();
+
+    // Pops past empty are no-ops, drop-safe like every gui pop.
+    gui.begin_frame(click(25.0f, 25.0f));
+    gui.pop_hit_clip();
+    gui.pop_hit_clip();
+    CHECK(gui.current_hit_clip() == nullptr);
+    CHECK(gui.hit_test(gui.ids().id("probe"), big).clicked);
+    gui.end_frame();
+
+    // Overflow stays balanced: 8 pushes store, the 9th and 10th only
+    // count depth (warned once per process) - the far clip pushed past
+    // the clamp never takes effect, so (5, 5) still claims inside the
+    // 8th stored entry...
+    gui.begin_frame(click(5.0f, 5.0f));
+    for (int i = 0; i < 8; ++i) {
+        gui.push_hit_clip({0.0f, 0.0f, 10.0f, 10.0f});
+    }
+    gui.push_hit_clip({200.0f, 200.0f, 10.0f, 10.0f});
+    gui.push_hit_clip({200.0f, 200.0f, 10.0f, 10.0f});
+    CHECK(gui.hit_test(gui.ids().id("probe"), big).clicked);
+    gui.end_frame();
+
+    // ...and (205, 205), inside the pushed-but-unstored rects, does not.
+    gui.begin_frame(click(205.0f, 205.0f));
+    for (int i = 0; i < 8; ++i) {
+        gui.push_hit_clip({0.0f, 0.0f, 10.0f, 10.0f});
+    }
+    gui.push_hit_clip({200.0f, 200.0f, 10.0f, 10.0f});
+    gui.push_hit_clip({200.0f, 200.0f, 10.0f, 10.0f});
+    const Rect* clamped = gui.current_hit_clip();
+    REQUIRE(clamped != nullptr);
+    CHECK(clamped->x == 0.0f);  // the 8th stored entry, not the far pushes
+    CHECK(clamped->y == 0.0f);
+    CHECK(!gui.hit_test(gui.ids().id("probe"), big).pressed);
+    gui.end_frame();
+
+    // Ten pops unwind to exactly nothing: the overflowed pops never eat
+    // a real scope.
+    gui.begin_frame(click(205.0f, 205.0f));
+    for (int i = 0; i < 10; ++i) {
+        if (i < 8) {
+            gui.push_hit_clip({0.0f, 0.0f, 10.0f, 10.0f});
+        } else {
+            gui.push_hit_clip({200.0f, 200.0f, 10.0f, 10.0f});
+        }
+    }
+    for (int i = 0; i < 10; ++i) {
+        gui.pop_hit_clip();
+    }
+    CHECK(gui.current_hit_clip() == nullptr);  // balanced to nothing
+    CHECK(gui.hit_test(gui.ids().id("probe"), big).clicked);
+    gui.end_frame();
+
+    // Frame-scoped: a push an end_frame never popped cannot blank the
+    // next frame's claims.
+    gui.begin_frame(snap(300.0f, 300.0f));
+    gui.push_hit_clip({0.0f, 0.0f, 10.0f, 10.0f});
+    gui.end_frame();
+    gui.begin_frame(click(25.0f, 25.0f));
+    CHECK(gui.current_hit_clip() == nullptr);
+    CHECK(gui.hit_test(gui.ids().id("probe"), big).clicked);
+    gui.end_frame();
+
+    // A degenerate clip - empty, like the too-small viewport's - claims
+    // nothing anywhere: honestly nothing, rather than half measures.
+    gui.begin_frame(click(60.0f, 60.0f));
+    gui.push_hit_clip({12.0f, 12.0f, 0.0f, 0.0f});
+    const HitTest nothing = gui.hit_test(gui.ids().id("probe"), big);
+    CHECK(!nothing.pressed);
+    CHECK(!nothing.clicked);
+    gui.end_frame();
+}
+
+TEST_CASE("hit clips: capture is not clipped - an owned press outlives the scroll") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    // The clip gates NEW claims, never an in-flight gesture: a press
+    // claimed on a visible row stays owned while a wheel scrolls the row
+    // out from under the held button, and the release lands wherever the
+    // pointer is - clicked only if it ends inside the claimable part.
+    // Here the release happens while the row is fully scrolled away, so
+    // the drag ends released with no click: the release-outside rule,
+    // unchanged.
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
+                                 {0.0f, 0.0f, 200.0f, 100.0f});
+        int clicked = -1;
+        for (int i = 0; i < 11; ++i) {
+            gui.ids().push(i);
+            if (button(gui, layout, kDefaultChrome, "row", 120.0f)) {
+                clicked = i;
+            }
+            gui.ids().pop();
+        }
+        end_scroll_panel(gui, layout, kDefaultChrome);
+        gui.end_frame();
+        return clicked;
+    };
+    const auto row_id = [](int row) {
+        IdStack ids;
+        ids.push("list");
+        ids.push(row);
+        return ids.id("row");
+    };
+
+    // Frame 1: idle - measures the 11-row range (264 px, range 188).
+    CHECK(pass(snap(60.0f, 50.0f)) == -1);
+
+    // Frame 2: press row 0 (y 12..36 at offset 0) and hold.
+    CHECK(pass(snap(60.0f, 24.0f, true, true)) == -1);
+    CHECK(gui.active_id() == row_id(0));  // the press carried the frame
+
+    // Frame 3: still held, wheel 100 px - row 0 flows to y -88..-64,
+    // fully above the viewport, clipped away. Capture: row 0 keeps the
+    // press, and row 4, whose visible part now holds the pointer, can
+    // claim neither the press nor even hot (the mouse owns a live
+    // press).
+    InputFrame f = snap(60.0f, 24.0f, true);
+    f.scroll_dy = -100.0f / kDefaultChrome.scroll_speed;
+    CHECK(pass(f) == -1);
+    CHECK(gui.active_id() == row_id(0));  // the clip did not end the drag
+    CHECK(!gui.is_hot(row_id(4)));
+
+    // Frame 4: release at the same spot - outside row 0's clipped-away
+    // rect. The drag ends with no click and nothing else claims the
+    // release; the press is over.
+    CHECK(pass(snap(60.0f, 24.0f, false, false, true)) == -1);
+    CHECK(gui.active_id() == kInvalidWidgetId);
+}
+
 TEST_CASE("r2d free functions route through set_active") {
     using namespace ws::ui::r2d;
     // The seam the gui widgets draw through: the free functions are the

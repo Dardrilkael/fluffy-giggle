@@ -33,6 +33,24 @@ bool layer_overflow_warned = false;
 // the ids past the cap are simply not focusable that frame.
 bool focus_overflow_warned = false;
 
+// A push_hit_clip pushed past the clamp. Flagged once per process; the
+// overflowed scope keeps the deepest real clip's intersection.
+bool hit_clip_overflow_warned = false;
+
+// The intersection of two axis-aligned rects, raw arithmetic: a
+// negative extent is an empty overlap, and Rect's half-open contains
+// already answers nothing for a backwards rect, so an empty
+// intersection is inert with no normalization pass. Local to this TU
+// on purpose - the stack stores the intersection at push time and the
+// callers hand hit_test whole rects, so the public surface needs no
+// intersect of its own.
+Rect intersect_rects(const Rect& a, const Rect& b) {
+    const float x = std::max(a.x, b.x);
+    const float y = std::max(a.y, b.y);
+    return {x, y, std::min(a.right(), b.right()) - x,
+            std::min(a.bottom(), b.bottom()) - y};
+}
+
 // MurmurHash3's fmix64 finalizer: one round of mixing turns the FNV id's
 // bits into a well-spread probe start for the census table.
 std::uint64_t mix_id(std::uint64_t x) {
@@ -60,9 +78,12 @@ void GuiContext::begin_frame(const InputFrame& input) {
     }
     // Layer scopes are frame-scoped like every gui stack: a begin_layer
     // an early return never closed cannot stick its scope onto the next
-    // frame - and the modal veil one raised lifts with it.
+    // frame - and the modal veil one raised lifts with it. The hit-clip
+    // stack resets with them: a clip an early return never popped
+    // cannot blank the next frame's claims.
     layer_depth_ = 0;
     modal_layer_ = 0;
+    hit_clip_depth_ = 0;
     // The frame's focus bookkeeping resets; the focus ITSELF carries -
     // focus is state, not a claim. Registration starts empty (widgets
     // re-register as they run), no press has landed on a focusable yet,
@@ -211,6 +232,49 @@ std::uint32_t GuiContext::current_layer_value() const {
     return static_cast<std::uint32_t>(current_layer());
 }
 
+void GuiContext::push_hit_clip(const Rect& clip) {
+    // The balanced clamp, layer-stack-style: a push past kMaxHitClipDepth
+    // keeps counting but stops storing, so the matching pop_hit_clip
+    // stays balanced and never eats a real scope - the overflowed
+    // scopes keep the deepest real clip's intersection.
+    if (hit_clip_depth_ < kMaxHitClipDepth) {
+        // Nesting intersects at push time, exactly like r2d's clip
+        // stack: the stored entry is already the effective clip, so
+        // hit_test reads the top without walking the stack.
+        const Rect effective =
+            hit_clip_depth_ == 0
+                ? clip
+                : intersect_rects(clip, hit_clips_[static_cast<std::size_t>(
+                                           hit_clip_depth_ - 1)]);
+        hit_clips_[static_cast<std::size_t>(hit_clip_depth_)] = effective;
+    } else if (!hit_clip_overflow_warned) {
+        hit_clip_overflow_warned = true;
+        core::warn("ui: gui hit-clip stack clamped at 8 - deeper "
+                   "push_hit_clip scopes keep the deepest real clip");
+    }
+    ++hit_clip_depth_;
+}
+
+void GuiContext::pop_hit_clip() {
+    // Drop-safe like every gui pop: a pop with nothing pushed is a
+    // no-op.
+    if (hit_clip_depth_ == 0) {
+        return;
+    }
+    --hit_clip_depth_;
+}
+
+const Rect* GuiContext::current_hit_clip() const {
+    if (hit_clip_depth_ == 0) {
+        return nullptr;
+    }
+    // The clamp stores only kMaxHitClipDepth entries however deep the
+    // pushes went, so the top is the last STORED scope - current_layer's
+    // reading of the stacks that overflow.
+    const int top = std::min(hit_clip_depth_, kMaxHitClipDepth) - 1;
+    return &hit_clips_[static_cast<std::size_t>(top)];
+}
+
 GuiContext::HitCensus::Result GuiContext::HitCensus::note(WidgetId id) {
     // Linear probing over the power-of-two table: the first slot whose
     // stamp is not this frame's is empty (open addressing with the
@@ -277,6 +341,17 @@ HitTest GuiContext::hit_test(WidgetId id, const Rect& rect) {
                    "checked for duplicates");
     }
 
+    // The hit-clip twin of the renderer's clip: what the clip hides, the
+    // pointer cannot reach - a row scrolled past a viewport is not
+    // clickable from wherever it landed on screen. The intersection IS
+    // the rect the claims run against (a half-visible widget claims its
+    // visible part, a fully clipped one claims nothing), while the
+    // active-owning branch in hit_test_pointer is untouched: a press
+    // already claimed is capture, and the clip gates new claims only.
+    const Rect* const hit_clip = current_hit_clip();
+    const Rect claimable =
+        hit_clip != nullptr ? intersect_rects(rect, *hit_clip) : rect;
+
     // The per-pointer rules live in hit_test_pointer; this fold is where
     // they become one widget-facing answer: ORs across pointers, so a
     // two-pointer press on one widget is one press while capture stays
@@ -288,7 +363,7 @@ HitTest GuiContext::hit_test(WidgetId id, const Rect& rect) {
     HitTest hit;
     const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
     for (int p = 0; p < count; ++p) {
-        const HitTest part = hit_test_pointer(id, rect, p);
+        const HitTest part = hit_test_pointer(id, claimable, p);
         hit.hovered = hit.hovered || part.hovered;
         hit.pressed = hit.pressed || part.pressed;
         hit.clicked = hit.clicked || part.clicked;

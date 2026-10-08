@@ -149,6 +149,33 @@ public:
     // observability spelling, for apps and tests.
     Layer current_layer() const;
 
+    // --- hit clips: what the renderer's clip hides, the pointer cannot ---
+    // reach. push_hit_clip narrows the region hit_test claims inside
+    // until the matching pop_hit_clip - the hit-testing twin of
+    // r2d::push_clip, so a widget hidden by a clip (a row scrolled
+    // past a viewport) cannot claim hover, hot or a press from whatever
+    // sits over or under the panel. Nesting intersects at push time,
+    // exactly like r2d's stack; the panels push it at the same rect
+    // they hand r2d::push_clip (begin_panel at the content rect,
+    // begin_scroll_panel at the viewport), so the pixels and the
+    // pointer see the same hole. A press already claimed is capture
+    // and stays owned - the clip gates NEW claims, not in-flight
+    // gestures: a press can start on a visible row and finish
+    // scrolled out of sight, clicked only if it released inside the
+    // claimable part. Frame-scoped and depth-capped like the other
+    // gui stacks: a push past 8 keeps counting but stops shrinking
+    // (warned once per process, so the matching pop never eats a real
+    // scope), a pop with nothing pushed is a no-op, and begin_frame
+    // resets any scope an early return never closed.
+    void push_hit_clip(const Rect& clip);
+    // Closes the innermost push_hit_clip. Drop-safe like every gui pop:
+    // a call with nothing pushed is a no-op.
+    void pop_hit_clip();
+    // The innermost effective hit clip - ALREADY intersected with its
+    // enclosing clips at push time - null while none is pushed
+    // (everything is claimable). The observability spelling, for tests.
+    const Rect* current_hit_clip() const;
+
     // Hot/active hit-test for one widget's rect, across the frame's
     // pointers (mouse and touches; the primary-touch bridge makes the
     // first finger BOTH, a benign duplicate - one of them folds into
@@ -361,6 +388,17 @@ private:
     // The innermost open scope's numeric stratum (base without a scope):
     // the value the hit rules and r2d::set_layer both speak.
     std::uint32_t current_layer_value() const;
+
+    // --- hit clips (push_hit_clip/pop_hit_clip) ---
+    // The hit-testing twin of r2d's clip stack, fixed depth with the
+    // same balanced clamp as the layers: each entry is stored ALREADY
+    // intersected with the clip below it (nesting intersects at push
+    // time, like r2d), so the top entry IS the effective clip and
+    // hit_test reads it without walking the stack. begin_frame resets
+    // the depth, like every gui stack.
+    static constexpr int kMaxHitClipDepth = 8;
+    std::array<Rect, kMaxHitClipDepth> hit_clips_{};
+    int hit_clip_depth_ = 0;
 
     // The per-frame hit-test census: which widget ids already hit-tested
     // this frame, as a fixed open-addressing table stamped by frame

@@ -474,6 +474,24 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   stack (a leaked `begin_layer` is reset by the next `begin_frame`),
   capped at depth 8 with the balanced-clamp overflow, and every pop is
   a no-op on an empty stack.
+- **Hit clips (the clip-aware hit seam).** `push_hit_clip(rect)`/
+  `pop_hit_clip()`/`current_hit_clip()` on GuiContext — the
+  hit-testing twin of r2d's clip stack: `hit_test` intersects its rect
+  with the innermost clip, so a widget the renderer's clip hides (a row
+  scrolled past a viewport) cannot claim hover, hot or a press from
+  whatever sits over or under the panel, and a half-visible widget
+  claims its visible part. The panels push it at the SAME rect they
+  hand `r2d::push_clip` (`begin_panel`: the content rect;
+  `begin_scroll_panel`: the viewport) and pop beside `r2d::pop_clip`;
+  a raw `r2d::push_clip` does NOT hit-clip — the gui mirrors at the
+  panel seams. Nesting intersects at push time (the stored entry IS
+  the effective clip), frame-scoped like every gui stack, depth 8 with
+  the balanced clamp, pop-on-empty a no-op. Capture is never clipped:
+  a press claimed while visible stays owned when its widget scrolls
+  out of sight (the clip gates new claims, not in-flight gestures),
+  and it clicks only if the release ends inside the claimable part.
+  Fully-clipped widgets still census their id (duplicate detection
+  among scrolled-out rows is intact).
 - **Widget state + focus (M8).** Three distinct concepts: hot = under the
   pointer, active = being pressed, focused = receives keyboard input
   (`focused_` on GuiContext, beside hot/active). `state(id, bounds,
@@ -525,9 +543,10 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `next(w, h)` places at the cursor and advances below the line's
   tallest, `same_line()` rewinds onto the current line, `begin_panel`
   pushes a content rect (bounds inset by the theme padding),
-  `end_panel` pops it; nesting parks the parent's cursor. All three gui
-  stacks (ids, panels, renderer clips) cap at depth 8 with BALANCED
-  overflow — depth keeps counting past the clamp, so a matching pop never
+  `end_panel` pops it; nesting parks the parent's cursor. All four gui
+  stacks (ids, panels, renderer clips, hit clips) cap at depth 8 with
+  BALANCED overflow — depth keeps counting past the clamp, so a matching
+  pop never
   eats a real ancestor — and every pop is a documented no-op on an empty
   stack, so unbalanced calls degrade, never corrupt.
 - **Theme.** `ChromeTheme` — the faces and the metrics (control height,
@@ -556,7 +575,9 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   selects, the per-tab content is the caller's branch),
   `begin_scroll_panel`/`end_scroll_panel` (children flow inside a
   virtual panel shifted by the offset — they draw and hit-test at
-  scrolled positions — while the clip stays at the unscrolled viewport;
+  scrolled positions — while the renderer clip and its hit-testing twin
+  stay at the unscrolled viewport, so a row poked past the edge neither
+  draws nor claims;
   the offset is persistent state, the content extent is measured at the
   previous end: one frame of lag, by design. Scrolling is two-handed:
   the mouse wheels any viewport under it, a finger drags — each contact
@@ -573,9 +594,7 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   the gui is screen-space only (the same
   space layout and hit-testing use); scroll is vertical-only (the
   mouse wheels any viewport under it, a finger drags any region past
-  the drag threshold); hit-testing ignores clips (a row
-  scrolled out of sight still hit-tests — that needs a clip-aware hit
-  seam, not a widget patch); panels are chrome, not input surfaces.
+  the drag threshold); panels are chrome, not input surfaces.
 - Everything tests headless (r2d draws drop without a window): the widget
   suite lives in `tests/test_ui.cpp` and runs with the rest via
   `ctest --preset debug -R ui`. `apps/playground` carries the full
@@ -632,7 +651,11 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `begin_scroll_panel`/`end_scroll_panel`, plus layer scopes — the
   `Layer` strata (base/popup/tooltip/modal) with `begin_layer`/
   `end_layer`/`current_layer`, one numbering for both hit-testing and
-  r2d draw order. Widget state + keyboard focus: `state(id, bounds,
+  r2d draw order. Hit clips: `push_hit_clip(rect)`/`pop_hit_clip()`/
+  `current_hit_clip()` narrow what `hit_test` claims — the
+  hit-testing twin of `r2d::push_clip`, pushed by the panels at the
+  same rect (a scrolled-out row cannot claim); capture is never
+  clipped. Widget state + keyboard focus: `state(id, bounds,
   disabled)` (one hit-test, `WidgetResult` = hit + `WidgetState`),
   `register_focusable(id)` (call order = Tab order), `is_focused(id)`,
   `set_focus(id)` (kInvalidWidgetId clears), `nav_next()`/

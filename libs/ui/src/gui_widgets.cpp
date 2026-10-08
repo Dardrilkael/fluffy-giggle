@@ -432,14 +432,16 @@ Rect begin_panel(GuiContext& gui, LayoutCursor& layout,
     // against the content rect they contain (see panel_chrome).
     panel_chrome(bounds, theme);
 
-    // Then the three pushes: the layout panel (it computes the content
-    // rect), the clip at that rect (children cannot draw outside), and
-    // the id scope (children id under the panel). A degenerate content
-    // rect - an overflowed panel or bounds smaller than the padding -
-    // pushes an empty clip: honestly nothing, rather than children
-    // leaking outside.
+    // Then the four pushes: the layout panel (it computes the content
+    // rect), the clip at that rect and its hit-testing twin (children
+    // cannot draw OR claim outside - what the clip hides cannot win the
+    // pointer either), and the id scope (children id under the panel). A
+    // degenerate content rect - an overflowed panel or bounds smaller
+    // than the padding - pushes an empty clip: honestly nothing, rather
+    // than children leaking outside.
     const Rect content = layout.begin_panel(bounds, theme.padding);
     r2d::push_clip(content.x, content.y, content.width, content.height);
+    gui.push_hit_clip(content);
     gui.ids().push(label);
     return content;
 }
@@ -449,6 +451,7 @@ void end_panel(GuiContext& gui, LayoutCursor& layout) {
     // push that dropped (headless) or overflowed (the balanced clamps).
     gui.ids().pop();
     r2d::pop_clip();
+    gui.pop_hit_clip();
     layout.end_panel();
 }
 
@@ -557,14 +560,17 @@ Rect begin_scroll_panel(GuiContext& gui, LayoutCursor& layout,
     // Children flow inside a VIRTUAL panel, shifted up by the offset: the
     // rects layout hands out are already at their scrolled positions, so
     // widgets draw AND hit-test there with no per-widget knowledge - while
-    // the clip stays at the unscrolled viewport, cutting exactly what
-    // pokes past the edge. Push order (scope, layout, clip) is reversed
-    // by end_scroll_panel.
+    // the renderer clip and its hit-testing twin stay at the unscrolled
+    // viewport, cutting exactly what pokes past the edge from both the
+    // pixels and the pointer: a row scrolled out of sight cannot claim a
+    // click from whatever sits above or below the panel. Push order
+    // (scope, layout, clip) is reversed by end_scroll_panel.
     (void)layout.begin_panel({bounds.x, bounds.y - scroll.offset,
                               bounds.width,
                               bounds.height + scroll.offset},
                              theme.padding);
     r2d::push_clip(viewport.x, viewport.y, viewport.width, viewport.height);
+    gui.push_hit_clip(viewport);
     return viewport;
 }
 
@@ -613,6 +619,7 @@ void end_scroll_panel(GuiContext& gui, LayoutCursor& layout,
 
     // The reverse of begin_scroll_panel's pushes.
     r2d::pop_clip();
+    gui.pop_hit_clip();
     layout.end_panel();
     gui.ids().pop();
 }
