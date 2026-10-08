@@ -170,7 +170,7 @@ void Renderer2D::frame_end() {
     // Warn once per frame with the frame's FINAL drop totals - the counts
     // are only complete after the whole replay, so the warn lives here,
     // not inside the loop.
-    if (batch_.dropped_quads() > 0 || batch_.dropped_chunks() > 0) {
+    if (batch_.dropped_quads() > 0) {
         warn_caps();
     }
 }
@@ -189,7 +189,7 @@ void Renderer2D::frame_drop() {
 bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
                       VmaAllocator allocator, VkQueue queue,
                       uint32_t queue_family, VkRenderPass render_pass,
-                      VkFormat format) {
+                      VkFormat format, const TextureTier& tier) {
     device_ = device;
     physical_device_ = physical_device;
     allocator_ = allocator;
@@ -197,6 +197,11 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
     queue_family_ = queue_family;
     render_pass_ = render_pass;
     format_ = format;
+    tier_ = tier;
+    // The tier decides which id a vertex's tex_index carries (chunk-local
+    // slot vs global registry id), so the batch must know before the first
+    // frame records.
+    batch_.use_global_texture_ids(tier_.bindless);
 
     // The chunk VP rides push constants. The spec guarantees at least 128
     // bytes, so this only fires on a broken driver - fail loudly, not with
@@ -261,21 +266,49 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
         rounded_texture_ = Texture{};
     }
 
-    // One binding: a chunk's whole sampler table, immutable-sampled. The
-    // array size is comment-tied to kMaxTexturesPerChunk and batch.frag.
+    // One binding, whose shape is the tier's:
+    // - bindless: the GLOBAL texture table, kMaxBindlessTextures slots
+    //   (comment-tied to batch.frag's WS_BINDLESS branch and
+    //   batch::kMaxBindlessTextures), partially bound (the init-time
+    //   full-white write covers every roundable index; the flag keeps
+    //   unbound slots legal anyway), update-after-bind when the device
+    //   has it (new ids land at load time instead of each slot's idle
+    //   flush). Non-immutable samplers: 1024 immutable handles would buy
+    //   nothing over that init-time write, and the sampler rides every
+    //   per-id write the table gets.
+    // - chunked: a chunk's whole sampler table, immutable-sampled. The
+    //   array size is comment-tied to kMaxTexturesPerChunk and batch.frag.
     std::array<VkSampler, batch::kMaxTexturesPerChunk> immutable{};
-    immutable.fill(sampler_);
     VkDescriptorSetLayoutBinding binding{};
     binding.binding = 0;
     binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    binding.descriptorCount = batch::kMaxTexturesPerChunk;
     binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    binding.pImmutableSamplers = immutable.data();
     VkDescriptorSetLayoutCreateInfo set_layout_info{};
     set_layout_info.sType =
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     set_layout_info.bindingCount = 1;
     set_layout_info.pBindings = &binding;
+    VkDescriptorSetLayoutBindingFlagsCreateInfo binding_flags_info{};
+    VkDescriptorBindingFlags binding_flags =
+        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+    if (tier_.bindless) {
+        binding.descriptorCount = batch::kMaxBindlessTextures;
+        if (tier_.update_after_bind) {
+            binding_flags |= VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
+            // Sets from this layout must come from update-after-bind pools.
+            set_layout_info.flags =
+                VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+        }
+        binding_flags_info.sType =
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+        binding_flags_info.bindingCount = 1;
+        binding_flags_info.pBindingFlags = &binding_flags;
+        set_layout_info.pNext = &binding_flags_info;
+    } else {
+        immutable.fill(sampler_);
+        binding.descriptorCount = batch::kMaxTexturesPerChunk;
+        binding.pImmutableSamplers = immutable.data();
+    }
     if (vkCreateDescriptorSetLayout(device_, &set_layout_info, nullptr,
                                     &set_layout_) != VK_SUCCESS) {
         ws::core::error("ui: r2d init failed - vkCreateDescriptorSetLayout");
@@ -297,10 +330,9 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
         return false;
     }
 
-    if (!create_frame_resources()) {
-        return false;
-    }
-    if (!create_index_buffer() || !create_pipeline(render_pass)) {
+    // create_frame_resources builds the vertex AND index arenas, the tier's
+    // descriptor tables and the per-slot chunk pools in one pass.
+    if (!create_frame_resources() || !create_pipeline(render_pass)) {
         return false;
     }
     return true;
@@ -359,11 +391,6 @@ void Renderer2D::shutdown() {
         pipeline_layout_ = VK_NULL_HANDLE;
     }
     destroy_frame_resources();
-    if (index_buffer_ != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(allocator_, index_buffer_, index_allocation_);
-        index_buffer_ = VK_NULL_HANDLE;
-        index_allocation_ = VK_NULL_HANDLE;
-    }
     for (const TextureEntry& entry : textures_) {
         vkDestroyImageView(device_, entry.view, nullptr);
         vmaDestroyImage(allocator_, entry.image, entry.allocation);
@@ -394,84 +421,131 @@ void Renderer2D::shutdown() {
 
 // --- Renderer2D: GPU helpers -------------------------------------------------
 
+namespace {
+
+// Absolute pattern: quad q's six indices are 4q + {0,1,2,2,3,0}. A chunk
+// draw with firstIndex 0 and vertexOffset = chunk.vertex_offset lands each
+// chunk-local quad q on its own vertices: 4*(q0 + q) + k == 4q +
+// vertex_offset + k. Refilled on every index-arena growth.
+void fill_quad_index_pattern(uint32_t* indices, std::size_t quad_capacity) {
+    for (std::size_t q = 0; q < quad_capacity; ++q) {
+        const uint32_t base = static_cast<uint32_t>(q * 4);
+        indices[q * 6 + 0] = base + 0;  // TL
+        indices[q * 6 + 1] = base + 1;  // TR
+        indices[q * 6 + 2] = base + 2;  // BR
+        indices[q * 6 + 3] = base + 2;  // BR
+        indices[q * 6 + 4] = base + 3;  // BL
+        indices[q * 6 + 5] = base + 0;  // TL
+    }
+}
+
+}  // namespace
+
 bool Renderer2D::create_frame_resources() {
-    // One set per (frame slot, chunk slot), fixed at init() - nothing here
-    // depends on the swapchain, so a resize rebuilds none of it. A set
-    // belongs to exactly one frame slot, whose fence is waited before any
-    // recording starts, so the flush-time rewrite never races an in-flight
-    // command buffer - and each chunk owns its set, so no set is rewritten
-    // between two binds inside one command buffer.
-    const uint32_t set_count = kMaxFramesInFlight * batch::kMaxChunksPerFrame;
+    // Nothing here depends on the swapchain, so a resize rebuilds none of
+    // it. Everything a frame slot owns is keyed by that slot, whose fence
+    // is waited before any recording starts - growth and table rewrites
+    // below never race an in-flight command buffer.
 
-    VkDescriptorPoolSize pool_size{};
-    pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    pool_size.descriptorCount = set_count * batch::kMaxTexturesPerChunk;
-    VkDescriptorPoolCreateInfo pool_info{};
-    pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool_info.maxSets = set_count;
-    pool_info.poolSizeCount = 1;
-    pool_info.pPoolSizes = &pool_size;
-    if (vkCreateDescriptorPool(device_, &pool_info, nullptr,
-                               &descriptor_pool_) != VK_SUCCESS) {
-        ws::core::error("ui: r2d - vkCreateDescriptorPool failed");
-        return false;
-    }
-
-    const std::vector<VkDescriptorSetLayout> layouts(set_count, set_layout_);
-    VkDescriptorSetAllocateInfo set_info{};
-    set_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    set_info.descriptorPool = descriptor_pool_;
-    set_info.descriptorSetCount = set_count;
-    set_info.pSetLayouts = layouts.data();
-    sets_.resize(set_count);
-    if (vkAllocateDescriptorSets(device_, &set_info, sets_.data()) !=
-        VK_SUCCESS) {
-        ws::core::error("ui: r2d - vkAllocateDescriptorSets failed");
-        sets_.clear();
-        return false;
-    }
-
-    // Full-white start: flush only rewrites a chunk's used slots, but the
-    // fragment shader indexes the sampler array dynamically, so every slot
-    // of a bound set must hold a valid view at all times.
-    std::vector<VkDescriptorImageInfo> infos(
-        static_cast<std::size_t>(set_count) * batch::kMaxTexturesPerChunk);
-    for (VkDescriptorImageInfo& info : infos) {
-        info.sampler = sampler_;
-        info.imageView = textures_[kWhiteIndex].view;
-        info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    }
-    std::vector<VkWriteDescriptorSet> writes(set_count);
-    for (uint32_t i = 0; i < set_count; ++i) {
-        VkWriteDescriptorSet& write = writes[i];
-        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = sets_[i];
-        write.dstBinding = 0;
-        write.dstArrayElement = 0;
-        write.descriptorCount = batch::kMaxTexturesPerChunk;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        write.pImageInfo =
-            &infos[static_cast<std::size_t>(i) * batch::kMaxTexturesPerChunk];
-    }
-    vkUpdateDescriptorSets(device_, set_count, writes.data(), 0, nullptr);
-
-    // One persistently-mapped vertex arena per frame slot, sized by the
-    // static frame cap. Created once - a resize never reallocates them.
-    arenas_.resize(kMaxFramesInFlight);
-    for (FrameArena& arena : arenas_) {
-        VkBufferCreateInfo buffer_info{};
-        buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        buffer_info.size = batch::kMaxVerticesPerFrame * sizeof(batch::Vertex);
-        buffer_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-        VmaAllocationCreateInfo alloc_info = host_write_alloc();
-        VmaAllocationInfo mapped{};
-        if (vmaCreateBuffer(allocator_, &buffer_info, &alloc_info,
-                            &arena.buffer, &arena.allocation, &mapped) !=
-            VK_SUCCESS) {
-            ws::core::error("ui: r2d - vertex arena allocation failed");
+    // Descriptor side, per tier.
+    if (tier_.bindless) {
+        // One global texture table set per frame slot, from one pool. With
+        // update-after-bind the table stays writable while its slot's
+        // submission is still executing (that IS the feature); the pool
+        // flag pairs with the layout's UPDATE_AFTER_BIND_POOL flag.
+        VkDescriptorPoolSize pool_size{};
+        pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        pool_size.descriptorCount =
+            kMaxFramesInFlight * batch::kMaxBindlessTextures;
+        VkDescriptorPoolCreateInfo pool_info{};
+        pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        pool_info.maxSets = kMaxFramesInFlight;
+        if (tier_.update_after_bind) {
+            pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+        }
+        pool_info.poolSizeCount = 1;
+        pool_info.pPoolSizes = &pool_size;
+        if (vkCreateDescriptorPool(device_, &pool_info, nullptr,
+                                   &table_pool_) != VK_SUCCESS) {
+            ws::core::error("ui: r2d - vkCreateDescriptorPool failed");
             return false;
         }
-        arena.mapped = static_cast<batch::Vertex*>(mapped.pMappedData);
+        const std::vector<VkDescriptorSetLayout> layouts(kMaxFramesInFlight,
+                                                         set_layout_);
+        VkDescriptorSetAllocateInfo set_info{};
+        set_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        set_info.descriptorPool = table_pool_;
+        set_info.descriptorSetCount = kMaxFramesInFlight;
+        set_info.pSetLayouts = layouts.data();
+        table_sets_.resize(kMaxFramesInFlight);
+        if (vkAllocateDescriptorSets(device_, &set_info,
+                                     table_sets_.data()) != VK_SUCCESS) {
+            ws::core::error("ui: r2d - vkAllocateDescriptorSets failed");
+            table_sets_.clear();
+            return false;
+        }
+
+        // Full-white start (the whole table, one write per slot): the
+        // fragment shader indexes it dynamically, so every roundable index
+        // must hold a valid view at all times - id 0 (white) covers that
+        // from frame 1. Writes for ids loaded after this land through
+        // pending_table_ids_ below.
+        const std::size_t infos_count =
+            std::size_t(kMaxFramesInFlight) * batch::kMaxBindlessTextures;
+        std::vector<VkDescriptorImageInfo> infos(infos_count);
+        for (VkDescriptorImageInfo& info : infos) {
+            info.sampler = sampler_;
+            info.imageView = textures_[kWhiteIndex].view;
+            info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+        std::vector<VkWriteDescriptorSet> writes(kMaxFramesInFlight);
+        for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
+            VkWriteDescriptorSet& write = writes[i];
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = table_sets_[i];
+            write.dstBinding = 0;
+            write.dstArrayElement = 0;
+            write.descriptorCount = batch::kMaxBindlessTextures;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.pImageInfo =
+                &infos[std::size_t(i) * batch::kMaxBindlessTextures];
+        }
+        vkUpdateDescriptorSets(device_, kMaxFramesInFlight, writes.data(), 0,
+                              nullptr);
+
+        // Id 0 is in place everywhere; the rounded mask (and anything
+        // loaded before this) is still pending. Nothing has been submitted
+        // yet, so every slot is idle and takes its writes right now - the
+        // no-UAB path never gets a safer moment than this.
+        table_written_.fill(1);
+        for (uint32_t slot = 0; slot < kMaxFramesInFlight; ++slot) {
+            apply_pending_table_writes(slot);
+        }
+    } else {
+        // Chunked tier: one pool + set per (frame slot, chunk slot), grown
+        // by rebuild at flush when the frame needs more chunks.
+        // grow_chunk_sets builds each slot's initial pool (capacity 0 ->
+        // kInitialChunkCapacity) and white-inits its sets.
+        chunk_sets_.resize(kMaxFramesInFlight);
+        for (uint32_t slot = 0; slot < kMaxFramesInFlight; ++slot) {
+            if (!grow_chunk_sets(slot, batch::kInitialChunkCapacity)) {
+                return false;
+            }
+        }
+    }
+
+    // One persistently-mapped vertex and index arena per frame slot, both
+    // sized by the INITIAL capacities - the grow helpers double them at
+    // flush, the one point the slot is idle. (The index buffer used to be
+    // one shared allocation; growth needs the slot-idle flush, and a shared
+    // buffer would be bound by the other slot's in-flight submission.)
+    arenas_.resize(kMaxFramesInFlight);
+    index_arenas_.resize(kMaxFramesInFlight);
+    for (uint32_t slot = 0; slot < kMaxFramesInFlight; ++slot) {
+        if (!grow_vertex_arena(slot, batch::kInitialVertexCapacity) ||
+            !grow_index_arena(slot, batch::kInitialVertexCapacity / 4)) {
+            return false;
+        }
     }
     return true;
 }
@@ -481,51 +555,249 @@ void Renderer2D::destroy_frame_resources() {
         vmaDestroyBuffer(allocator_, arena.buffer, arena.allocation);
     }
     arenas_.clear();
-    sets_.clear();
-    if (descriptor_pool_ != VK_NULL_HANDLE) {
-        vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
-        descriptor_pool_ = VK_NULL_HANDLE;
+    for (const IndexArena& arena : index_arenas_) {
+        vmaDestroyBuffer(allocator_, arena.buffer, arena.allocation);
     }
+    index_arenas_.clear();
+    pending_table_ids_.clear();
+    table_written_.fill(0);
+    table_sets_.clear();
+    if (table_pool_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(device_, table_pool_, nullptr);
+        table_pool_ = VK_NULL_HANDLE;
+    }
+    for (ChunkSets& slot : chunk_sets_) {
+        if (slot.pool != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device_, slot.pool, nullptr);
+            slot.pool = VK_NULL_HANDLE;
+        }
+        slot.sets.clear();
+        slot.capacity = 0;
+    }
+    chunk_sets_.clear();
 }
 
-bool Renderer2D::create_index_buffer() {
-    // Absolute pattern: quad q's six indices are 4q + {0,1,2,2,3,0}. A chunk
-    // draw with firstIndex 0 and vertexOffset = chunk.vertex_offset lands
-    // each chunk-local quad q on its own vertices:
-    // 4*(q0 + q) + k == 4q + vertex_offset + k.
-    const uint32_t quad_capacity =
-        static_cast<uint32_t>(batch::kMaxVerticesPerFrame / 4);
+bool Renderer2D::grow_vertex_arena(uint32_t frame_slot,
+                                   std::size_t min_vertices) {
+    FrameArena& arena = arenas_[frame_slot];
+    std::size_t capacity = arena.capacity == 0
+                                ? batch::kInitialVertexCapacity
+                                : arena.capacity * 2;
+    while (capacity < min_vertices) {
+        capacity *= 2;
+    }
+    // The new buffer replaces the old one wholesale: flush grows BEFORE
+    // copying this frame's vertices in, and old frames' bytes are never
+    // read again - no content carry-over.
     VkBufferCreateInfo buffer_info{};
     buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     buffer_info.size =
-        static_cast<VkDeviceSize>(quad_capacity) * 6 * sizeof(uint32_t);
-    buffer_info.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+        static_cast<VkDeviceSize>(capacity) * sizeof(batch::Vertex);
+    buffer_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
     VmaAllocationCreateInfo alloc_info = host_write_alloc();
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VmaAllocation allocation = VK_NULL_HANDLE;
     VmaAllocationInfo mapped{};
-    if (vmaCreateBuffer(allocator_, &buffer_info, &alloc_info, &index_buffer_,
-                        &index_allocation_, &mapped) != VK_SUCCESS) {
-        ws::core::error("ui: r2d - index buffer allocation failed");
+    if (vmaCreateBuffer(allocator_, &buffer_info, &alloc_info, &buffer,
+                        &allocation, &mapped) != VK_SUCCESS) {
+        ws::core::error("ui: r2d - vertex arena growth failed ({} -> {} "
+                        "vertices, frame slot {})",
+                        arena.capacity, capacity, frame_slot);
         return false;
     }
-    auto* const indices = static_cast<uint32_t*>(mapped.pMappedData);
-    for (uint32_t q = 0; q < quad_capacity; ++q) {
-        const uint32_t base = q * 4;
-        indices[q * 6 + 0] = base + 0;  // TL
-        indices[q * 6 + 1] = base + 1;  // TR
-        indices[q * 6 + 2] = base + 2;  // BR
-        indices[q * 6 + 3] = base + 2;  // BR
-        indices[q * 6 + 4] = base + 3;  // BL
-        indices[q * 6 + 5] = base + 0;  // TL
+    if (arena.buffer != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(allocator_, arena.buffer, arena.allocation);
+        ws::core::info("ui: r2d grew frame slot {}'s vertex arena {} -> {} "
+                       "vertices",
+                       frame_slot, arena.capacity, capacity);
     }
-    vmaFlushAllocation(allocator_, index_allocation_, 0, VK_WHOLE_SIZE);
+    arena.buffer = buffer;
+    arena.allocation = allocation;
+    arena.mapped = static_cast<batch::Vertex*>(mapped.pMappedData);
+    arena.capacity = capacity;
+    return true;
+}
+
+bool Renderer2D::grow_index_arena(uint32_t frame_slot, std::size_t min_quads) {
+    IndexArena& arena = index_arenas_[frame_slot];
+    std::size_t capacity = arena.capacity == 0
+                                ? batch::kInitialVertexCapacity / 4
+                                : arena.capacity * 2;
+    while (capacity < min_quads) {
+        capacity *= 2;
+    }
+    VkBufferCreateInfo buffer_info{};
+    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size =
+        static_cast<VkDeviceSize>(capacity) * 6 * sizeof(uint32_t);
+    buffer_info.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    VmaAllocationCreateInfo alloc_info = host_write_alloc();
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VmaAllocation allocation = VK_NULL_HANDLE;
+    VmaAllocationInfo mapped{};
+    if (vmaCreateBuffer(allocator_, &buffer_info, &alloc_info, &buffer,
+                        &allocation, &mapped) != VK_SUCCESS) {
+        ws::core::error("ui: r2d - index arena growth failed ({} -> {} "
+                        "quads, frame slot {})",
+                        arena.capacity, capacity, frame_slot);
+        return false;
+    }
+    // The pattern is absolute (quad q -> 4q + offsets), so a growth refills
+    // the whole arena - the first quads' indices are unchanged, the new
+    // tail extends them.
+    auto* const indices = static_cast<uint32_t*>(mapped.pMappedData);
+    fill_quad_index_pattern(indices, capacity);
+    vmaFlushAllocation(allocator_, allocation, 0, VK_WHOLE_SIZE);
+    if (arena.buffer != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(allocator_, arena.buffer, arena.allocation);
+        ws::core::info("ui: r2d grew frame slot {}'s index arena {} -> {} "
+                       "quads",
+                       frame_slot, arena.capacity, capacity);
+    }
+    arena.buffer = buffer;
+    arena.allocation = allocation;
+    arena.mapped = indices;
+    arena.capacity = capacity;
+    return true;
+}
+
+void Renderer2D::apply_pending_table_writes(uint32_t frame_slot) {
+    // Bindless tier only. Ids are dense registry indexes, so a per-slot
+    // high-water mark (table_written_) is the whole state: a pending id
+    // below it is already in this slot's set. Texture loads are
+    // setup-granularity, so the small vectors here are fine - this never
+    // runs inside a render loop.
+    std::uint32_t& written = table_written_[frame_slot];
+    std::vector<std::uint32_t> todo;
+    for (std::uint32_t id : pending_table_ids_) {
+        if (id >= written) {
+            todo.push_back(id);
+        }
+    }
+    if (todo.empty()) {
+        return;
+    }
+    std::vector<VkDescriptorImageInfo> infos(todo.size());
+    std::vector<VkWriteDescriptorSet> writes(todo.size());
+    for (std::size_t i = 0; i < todo.size(); ++i) {
+        infos[i].sampler = sampler_;
+        infos[i].imageView = textures_[todo[i]].view;
+        infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkWriteDescriptorSet& write = writes[i];
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = table_sets_[frame_slot];
+        write.dstBinding = 0;
+        write.dstArrayElement = todo[i];
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &infos[i];
+    }
+    vkUpdateDescriptorSets(device_, uint32_t(writes.size()), writes.data(), 0,
+                          nullptr);
+    written = std::max(written, todo.back() + 1);
+    // Drain the ids every slot has now written (below the minimum mark):
+    // pending_table_ids_ only ever holds the short tail between slots.
+    std::uint32_t min_written = table_written_[0];
+    for (std::uint32_t mark : table_written_) {
+        min_written = std::min(min_written, mark);
+    }
+    pending_table_ids_.erase(
+        std::remove_if(pending_table_ids_.begin(), pending_table_ids_.end(),
+                       [min_written](std::uint32_t id) {
+                           return id < min_written;
+                       }),
+        pending_table_ids_.end());
+}
+
+bool Renderer2D::grow_chunk_sets(uint32_t frame_slot, uint32_t min_chunks) {
+    // Chunked tier only. Grows the slot's chunk-set pool to min_chunks by
+    // rebuilding it bigger: the slot's fence is waited (flush) or nothing
+    // was submitted yet (init), so the old pool and its sets are
+    // unreferenced. New sets start fully white - the shader indexes the
+    // table dynamically, so every slot of a bound set must hold a valid
+    // view at all times.
+    ChunkSets& slot_sets = chunk_sets_[frame_slot];
+    uint32_t capacity = slot_sets.capacity == 0
+                             ? batch::kInitialChunkCapacity
+                             : slot_sets.capacity * 2;
+    while (capacity < min_chunks) {
+        capacity *= 2;
+    }
+    VkDescriptorPoolSize pool_size{};
+    pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    pool_size.descriptorCount =
+        capacity * static_cast<uint32_t>(batch::kMaxTexturesPerChunk);
+    VkDescriptorPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool_info.maxSets = capacity;
+    pool_info.poolSizeCount = 1;
+    pool_info.pPoolSizes = &pool_size;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    if (vkCreateDescriptorPool(device_, &pool_info, nullptr, &pool) !=
+        VK_SUCCESS) {
+        ws::core::error("ui: r2d - chunk-set pool growth failed ({} -> {} "
+                        "sets, frame slot {})",
+                        slot_sets.capacity, capacity, frame_slot);
+        return false;
+    }
+    const std::vector<VkDescriptorSetLayout> layouts(capacity, set_layout_);
+    VkDescriptorSetAllocateInfo set_info{};
+    set_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    set_info.descriptorPool = pool;
+    set_info.descriptorSetCount = capacity;
+    set_info.pSetLayouts = layouts.data();
+    std::vector<VkDescriptorSet> sets(capacity);
+    if (vkAllocateDescriptorSets(device_, &set_info, sets.data()) !=
+        VK_SUCCESS) {
+        ws::core::error("ui: r2d - chunk-set allocation failed ({} sets, "
+                        "frame slot {})",
+                        capacity, frame_slot);
+        vkDestroyDescriptorPool(device_, pool, nullptr);
+        return false;
+    }
+    // Full-white start for every new set, then swap only once everything
+    // succeeded - a failed growth leaves the old pool bound and valid.
+    const std::size_t infos_count =
+        std::size_t(capacity) * batch::kMaxTexturesPerChunk;
+    std::vector<VkDescriptorImageInfo> infos(infos_count);
+    for (VkDescriptorImageInfo& info : infos) {
+        info.sampler = sampler_;
+        info.imageView = textures_[kWhiteIndex].view;
+        info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+    std::vector<VkWriteDescriptorSet> writes(capacity);
+    for (uint32_t i = 0; i < capacity; ++i) {
+        VkWriteDescriptorSet& write = writes[i];
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = sets[i];
+        write.dstBinding = 0;
+        write.dstArrayElement = 0;
+        write.descriptorCount = batch::kMaxTexturesPerChunk;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo =
+            &infos[std::size_t(i) * batch::kMaxTexturesPerChunk];
+    }
+    vkUpdateDescriptorSets(device_, capacity, writes.data(), 0, nullptr);
+    if (slot_sets.pool != VK_NULL_HANDLE) {
+        // Destroys the old pool AND its sets in one call - sets are freed
+        // with their pool, never individually.
+        vkDestroyDescriptorPool(device_, slot_sets.pool, nullptr);
+        ws::core::info("ui: r2d grew frame slot {}'s chunk sets {} -> {}",
+                       frame_slot, slot_sets.capacity, capacity);
+    }
+    slot_sets.pool = pool;
+    slot_sets.sets = std::move(sets);
+    slot_sets.capacity = capacity;
     return true;
 }
 
 bool Renderer2D::create_pipeline(VkRenderPass render_pass) {
     // The stages come from the provider: the committed spirv.h words by
-    // default, the hot-reloaded pair in a WS_UI_DEV_SHADER_RELOAD build.
+    // default, the hot-reloaded set in a WS_UI_DEV_SHADER_RELOAD build.
+    // The frag stage is the tier's variant - the global-table
+    // (nonuniformEXT) shader or the chunked 32-slot one, fixed at init.
     const spirv::ShaderWords vert_words = spirv::vert_words();
-    const spirv::ShaderWords frag_words = spirv::frag_words();
+    const spirv::ShaderWords frag_words = spirv::frag_words(tier_.bindless);
     VkShaderModule vert = make_shader_module(
         device_, vert_words.words, vert_words.count);
     VkShaderModule frag = make_shader_module(
@@ -680,6 +952,22 @@ bool Renderer2D::create_pipeline(VkRenderPass render_pass) {
 
 bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
                                 uint32_t height, Texture* out) {
+    // Bindless tier: ids index the shader's fixed 1024-slot table, so the
+    // registry cannot outgrow it. Refuse the load rather than hand out an
+    // id the table cannot hold - the caller's failed-load contract is
+    // white (id 0), so new textures degrade, never break. The chunked
+    // tier has no such limit: its tables are per-chunk and grow with the
+    // chunks.
+    if (tier_.bindless && textures_.size() >= batch::kMaxBindlessTextures) {
+        if (!table_full_warned_) {
+            table_full_warned_ = true;
+            ws::core::warn("ui: r2d texture table full ({} textures) - "
+                           "further loads render white",
+                           batch::kMaxBindlessTextures);
+        }
+        return false;
+    }
+
     const VkDeviceSize size =
         static_cast<VkDeviceSize>(width) * height * 4;  // R8G8B8A8, 4 B/px
 
@@ -826,8 +1114,24 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
     // id == registry index: [0] is white (init uploads it first), so ids
     // handed out from here start at 1.
     textures_.push_back(entry);
+    const uint32_t id = static_cast<uint32_t>(textures_.size() - 1);
     if (out != nullptr) {
-        *out = Texture{static_cast<uint32_t>(textures_.size() - 1)};
+        *out = Texture{id};
+    }
+    // Bindless tier: queue the table write. With update-after-bind it can
+    // land in every slot right now, even mid-frame (that IS the feature);
+    // without it each slot takes its writes at its idle flush, so a load
+    // mid-run renders white for at most a couple of frames per slot.
+    // Before the tables exist (init's own white/rounded uploads), the
+    // pending queue is the only option - create_frame_resources drains
+    // it once they are up.
+    if (tier_.bindless) {
+        pending_table_ids_.push_back(id);
+        if (tier_.update_after_bind && !table_sets_.empty()) {
+            for (uint32_t slot = 0; slot < kMaxFramesInFlight; ++slot) {
+                apply_pending_table_writes(slot);
+            }
+        }
     }
     return true;
 }
@@ -864,25 +1168,58 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
     }
 
     // This frame slot's fence is waited before recording started
-    // (render_frame), so its vertex arena and chunk sets are safely
-    // writable now.
+    // (render_frame), so its arenas, tables and chunk sets are safely
+    // writable here - and grown here, when the frame outgrew them. Growth
+    // failure keeps the old (smaller) buffer and drops the frame's draws:
+    // never a silent partial memcpy, the error log already fired.
     FrameArena& arena = arenas_[frame_slot];
     const std::vector<batch::Vertex>& vertices = batch_.vertices();
+    if (vertices.size() > arena.capacity) {
+        if (!grow_vertex_arena(frame_slot, vertices.size())) {
+            return;
+        }
+    }
     std::memcpy(arena.mapped, vertices.data(),
                 vertices.size() * sizeof(batch::Vertex));
     vmaFlushAllocation(allocator_, arena.allocation, 0, VK_WHOLE_SIZE);
+
+    // A full vertex arena is exactly capacity/4 quads; the index arena
+    // grows in step so the absolute pattern always covers the frame.
+    IndexArena& indices = index_arenas_[frame_slot];
+    const std::size_t quads = vertices.size() / 4;
+    if (quads > indices.capacity) {
+        if (!grow_index_arena(frame_slot, quads)) {
+            return;
+        }
+    }
 
     // Vertex/index binds and the viewport are pipeline-independent state -
     // bound once; the pipeline itself binds per chunk below (bind on change).
     const VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &arena.buffer, &offset);
-    vkCmdBindIndexBuffer(cmd, index_buffer_, 0, VK_INDEX_TYPE_UINT32);
+    vkCmdBindIndexBuffer(cmd, indices.buffer, 0, VK_INDEX_TYPE_UINT32);
 
     VkViewport viewport{};
     viewport.width = fb_width;
     viewport.height = fb_height;
     viewport.maxDepth = 1.0f;
     vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+    // Descriptor side, per tier - both are idle right now. Bindless: this
+    // slot takes any pending table writes, then the ONE global table set
+    // binds for the whole frame (tex_index already carries global ids).
+    // Chunked: grow the slot's chunk sets first so every chunk below has
+    // its own set - a mid-loop growth would leave a partial frame.
+    if (tier_.bindless) {
+        apply_pending_table_writes(frame_slot);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipeline_layout_, 0, 1,
+                                &table_sets_[frame_slot], 0, nullptr);
+    } else if (batch_.chunk_count() > chunk_sets_[frame_slot].capacity) {
+        if (!grow_chunk_sets(frame_slot, batch_.chunk_count())) {
+            return;
+        }
+    }
 
     VkPipeline bound = VK_NULL_HANDLE;  // nothing bound when recording starts
     for (uint32_t c = 0; c < batch_.chunk_count(); ++c) {
@@ -906,11 +1243,15 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
             bound = want;
         }
         vkCmdSetScissor(cmd, 0, 1, &scissor);
-        VkDescriptorSet set =
-            sets_[frame_slot * batch::kMaxChunksPerFrame + c];
-        write_chunk_set(set, chunk);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                pipeline_layout_, 0, 1, &set, 0, nullptr);
+        if (!tier_.bindless) {
+            // Chunked tier: the chunk's own 32-slot table, rewritten only
+            // after this slot's fence was waited and strictly before its
+            // own bind.
+            VkDescriptorSet set = chunk_sets_[frame_slot].sets[c];
+            write_chunk_set(set, chunk);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    pipeline_layout_, 0, 1, &set, 0, nullptr);
+        }
         vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT,
                            0, static_cast<uint32_t>(sizeof(batch::Mat4)),
                            chunk.vp.m);
@@ -956,11 +1297,13 @@ void Renderer2D::warn_caps() {
         return;
     }
     warned_ = true;
-    ws::core::warn("ui: r2d draws dropped - frame batch caps exhausted: "
-                   "{} quad(s) ({} chunk(s) over the {}-chunk cap, "
-                   "{}-vertex frame limit)",
-                   batch_.dropped_quads(), batch_.dropped_chunks(),
-                   batch::kMaxChunksPerFrame, batch::kMaxVerticesPerFrame);
+    // M9: chunks and vertices grow on demand, so the only drop left is a
+    // quad pushed with no open segment - push_quad with a segment always
+    // appends.
+    ws::core::warn("ui: r2d dropped {} quad(s) - a draw with no open "
+                   "segment (outside any begin()/end() block); capacity "
+                   "itself grows on demand",
+                   batch_.dropped_quads());
 }
 
 void Renderer2D::warn_unknown_texture(uint32_t id) {

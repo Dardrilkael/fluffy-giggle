@@ -43,9 +43,12 @@ struct ShaderWords {
 bool poll_reload(const std::string& shader_dir);
 
 // The stages the renderer should build pipelines from RIGHT NOW (call
-// after poll_reload told you to recreate).
+// after poll_reload told you to recreate). frag_words(bindless) picks the
+// tier's variant: the chunked 32-slot-table shader or the bindless
+// global-table one (nonuniformEXT) - the renderer passes the tier its
+// device probe picked at init, fixed for the process.
 ShaderWords vert_words();
-ShaderWords frag_words();
+ShaderWords frag_words(bool bindless);
 
 #else  // !WS_UI_DEV_SHADER_RELOAD
 
@@ -54,7 +57,11 @@ inline bool poll_reload(const std::string&) { return false; }
 inline ShaderWords vert_words() {
     return {kBatchVertSpv, sizeof(kBatchVertSpv) / sizeof(kBatchVertSpv[0])};
 }
-inline ShaderWords frag_words() {
+inline ShaderWords frag_words(bool bindless) {
+    if (bindless) {
+        return {kBatchFragBindlessSpv,
+                sizeof(kBatchFragBindlessSpv) / sizeof(kBatchFragBindlessSpv[0])};
+    }
     return {kBatchFragSpv, sizeof(kBatchFragSpv) / sizeof(kBatchFragSpv[0])};
 }
 

@@ -88,9 +88,9 @@ FrameSize frame_size();
 // first, then camera block - and only then batches them. The sort is
 // stable, and neither texture nor clip is a key: draws that share layer
 // and camera block replay in their exact submission order - real
-// painter's order - whatever textures they use (one chunk's texture
-// table holds up to 32 alongside, so mixed textures neither reorder nor
-// split the chunk). A clip change splits a fresh chunk in record order
+// painter's order - whatever textures they use (one chunk holds many
+// textures alongside, so mixed textures neither reorder nor split the
+// chunk). A clip change splits a fresh chunk in record order
 // (one chunk = one scissor), so clipped regions keep painter order too:
 // two overlapping panels render in the order the app drew them, never
 // reordered by their clip rects.
@@ -184,7 +184,10 @@ void draw_rounded_quad(float x, float y, float w, float h, float radius,
 
 // Loads an image file (PNG/JPG/..., whatever stb_image reads) and returns
 // its handle. Valid from on_setup() onward. On failure logs and returns the
-// white texture. Loading is synchronous - fine at load granularity.
+// white texture. Loading is synchronous - fine at load granularity. One
+// cap remains (M9's bindless tier): 1024 live textures per process - past
+// it the load warns once and hands back white. The registry only grows;
+// ids are stable for the process lifetime.
 Texture load_texture(const char* path);
 
 // Packs the given image files into atlas page textures (2048x2048, shelf

@@ -258,7 +258,7 @@ TEST_CASE("camera_vp rotation convention is locked") {
 TEST_CASE("push_quad emits 4 vertices with corner/uv/color/tex order") {
     BatchCore core;
     core.begin_frame();
-    REQUIRE(core.open_segment(default_vp()));
+    core.open_segment(default_vp());
 
     const float pos[4][3] = {{1.0f, 2.0f, 0.0f}, {11.0f, 2.0f, 0.0f},
                              {11.0f, 12.0f, 0.0f}, {1.0f, 12.0f, 0.0f}};
@@ -289,7 +289,7 @@ TEST_CASE("push_quad emits 4 vertices with corner/uv/color/tex order") {
 TEST_CASE("texture slots assign per unique id and reuse repeats") {
     BatchCore core;
     core.begin_frame();
-    REQUIRE(core.open_segment(default_vp()));
+    core.open_segment(default_vp());
 
     REQUIRE(push_test_quad(core, 1u));
     REQUIRE(push_test_quad(core, 1u));  // repeat: reuses slot 0
@@ -308,7 +308,7 @@ TEST_CASE("texture slots assign per unique id and reuse repeats") {
 TEST_CASE("texture overflow splits chunks and preserves order") {
     BatchCore core;
     core.begin_frame();
-    REQUIRE(core.open_segment(default_vp()));
+    core.open_segment(default_vp());
 
     const std::uint32_t unique_textures = 33;  // one past the chunk table
     for (std::uint32_t id = 0; id < unique_textures; ++id) {
@@ -327,15 +327,40 @@ TEST_CASE("texture overflow splits chunks and preserves order") {
     CHECK(core.vertices().back().tex_index == 0.0f);  // fresh table, slot 0
 }
 
+TEST_CASE("global texture ids skip the chunk table (bindless mode)") {
+    BatchCore core;
+    core.begin_frame();
+    // The bindless tier's shader table IS the texture registry: tex_index
+    // carries the global id verbatim, so texture variety never splits a
+    // chunk and the chunk's own table stays empty.
+    core.use_global_texture_ids(true);
+    core.open_segment(default_vp());
+
+    const std::uint32_t unique_textures = 33;  // one past the CHUNK table
+    for (std::uint32_t id = 0; id < unique_textures; ++id) {
+        REQUIRE(push_test_quad(core, id));
+    }
+
+    REQUIRE(core.chunk_count() == 1);  // no splits on texture variety
+    const auto& chunk = core.chunk(0);
+    CHECK(chunk.texture_count == 0);  // the chunk's own table stays empty
+    CHECK(chunk.quad_count == unique_textures);
+    // tex_index is the GLOBAL registry id, verbatim - no slot remap.
+    CHECK(core.vertices()[3].tex_index == 0.0f);
+    CHECK(core.vertices()[7].tex_index == 1.0f);
+    CHECK(core.vertices().back().tex_index ==
+          static_cast<float>(unique_textures - 1));
+}
+
 TEST_CASE("open_segment closes the current chunk and carries the new VP") {
     BatchCore core;
     core.begin_frame();
-    REQUIRE(core.open_segment(default_vp()));
+    core.open_segment(default_vp());
     REQUIRE(push_test_quad(core, 5u));
 
     const auto zoomed = ws::ui::r2d::batch::camera_vp(
         ws::ui::r2d::Camera2D{0.0f, 0.0f, 0.0f, 2.0f}, 100.0f, 100.0f);
-    REQUIRE(core.open_segment(zoomed));
+    core.open_segment(zoomed);
     REQUIRE(push_test_quad(core, 5u));
 
     REQUIRE(core.chunk_count() == 2);
@@ -345,47 +370,46 @@ TEST_CASE("open_segment closes the current chunk and carries the new VP") {
     CHECK(core.chunk(1).vp.m[0] == doctest::Approx(zoomed.m[0]));
 }
 
-TEST_CASE("vertex cap drops draws without appending") {
+TEST_CASE("vertex capacity grows instead of dropping (M9)") {
     BatchCore core;
     core.begin_frame();
-    REQUIRE(core.open_segment(default_vp()));
+    core.open_segment(default_vp());
 
-    const auto quads = ws::ui::r2d::batch::kMaxVerticesPerFrame / 4;
+    // One quad past the old hard cap (kInitialVertexCapacity WAS the cap,
+    // M5-M8): nothing drops, the vertex array simply grew.
+    const auto quads = ws::ui::r2d::batch::kInitialVertexCapacity / 4 + 1;
     for (std::size_t i = 0; i < quads; ++i) {
         if (!push_test_quad(core, 0u)) {
-            FAIL("quad ", i, " dropped below the cap");
+            FAIL("quad ", i, " dropped - capacity must grow, never drop");
         }
     }
-    CHECK(core.vertices().size() == ws::ui::r2d::batch::kMaxVerticesPerFrame);
-
-    CHECK(push_test_quad(core, 0u) == false);  // one past the cap drops
-    CHECK(core.vertices().size() == ws::ui::r2d::batch::kMaxVerticesPerFrame);
+    CHECK(core.vertices().size() == quads * 4);
+    CHECK(core.chunk_count() == 1);
+    CHECK(core.chunk(0).quad_count == quads);
+    CHECK(core.dropped_quads() == 0);
 }
 
-TEST_CASE("chunk cap drops further segments and their draws, never silently") {
+TEST_CASE("chunk capacity grows instead of dropping (M9)") {
     BatchCore core;
     core.begin_frame();
-    for (std::uint32_t i = 0; i < ws::ui::r2d::batch::kMaxChunksPerFrame; ++i) {
-        REQUIRE(core.open_segment(default_vp()));
+    // One segment past the old hard cap (kInitialChunkCapacity WAS the
+    // cap, M5-M8): every segment opens, every draw lands.
+    for (std::uint32_t i = 0;
+         i < ws::ui::r2d::batch::kInitialChunkCapacity + 1; ++i) {
+        core.open_segment(default_vp());
+        REQUIRE(push_test_quad(core, 0u));
     }
-    CHECK(core.open_segment(default_vp()) == false);  // one past: no chunk
-    CHECK(core.chunk_count() == ws::ui::r2d::batch::kMaxChunksPerFrame);
-    CHECK(push_test_quad(core, 0u) == false);  // segment stayed closed
+    CHECK(core.chunk_count() == ws::ui::r2d::batch::kInitialChunkCapacity + 1);
+    CHECK(core.dropped_quads() == 0);
 
+    // The ONE drop that remains (M9): a quad pushed with no open segment
+    // - counted, never silent. The renderer warns once per frame.
     core.close_segment();
-    CHECK(push_test_quad(core, 0u) == false);  // still closed after end()
-
-    // The array cannot grow (descriptor sets are pre-allocated per chunk
-    // slot at init), so over-cap is COUNTED, not silent (M5): the failed
-    // open is one dropped segment, the two unopenable-segment quads are
-    // two dropped quads. The renderer turns these into its once-per-frame
-    // warn; the stats surface carries the numbers.
-    CHECK(core.dropped_chunks() == 1);
-    CHECK(core.dropped_quads() == 2);
+    CHECK(push_test_quad(core, 0u) == false);
+    CHECK(core.dropped_quads() == 1);
 
     // begin_frame resets the accounting along with everything else.
     core.begin_frame();
-    CHECK(core.dropped_chunks() == 0);
     CHECK(core.dropped_quads() == 0);
 }
 
@@ -432,14 +456,14 @@ TEST_CASE("open_segment carries the clip; texture splits inherit it") {
     BatchCore core;
     core.begin_frame();
     const float clip[4] = {5.0f, 5.0f, 50.0f, 50.0f};
-    REQUIRE(core.open_segment(default_vp(), clip));
+    core.open_segment(default_vp(), clip);
     REQUIRE(push_test_quad(core, 0u));
     for (int i = 0; i < 4; ++i) {
         CHECK(core.chunk(0).clip[i] == clip[i]);
     }
 
     // The default argument is the full-frame sentinel: an unclipped segment.
-    REQUIRE(core.open_segment(default_vp()));
+    core.open_segment(default_vp());
     REQUIRE(push_test_quad(core, 0u));
     for (int i = 0; i < 4; ++i) {
         CHECK(core.chunk(1).clip[i] == ws::ui::r2d::batch::kFullClip[i]);
@@ -448,7 +472,7 @@ TEST_CASE("open_segment carries the clip; texture splits inherit it") {
     // A texture-overflow split continues the SAME segment: the fresh chunk
     // inherits both the VP and the clip.
     core.begin_frame();
-    REQUIRE(core.open_segment(default_vp(), clip));
+    core.open_segment(default_vp(), clip);
     for (std::uint32_t id = 0;
          id <= ws::ui::r2d::batch::kMaxTexturesPerChunk; ++id) {
         // 33 unique textures: one past the 32-slot table forces the split.
@@ -767,7 +791,7 @@ TEST_CASE("open_segment carries depth_test; texture splits inherit it") {
 
     // The default is the 2D kind: chunks render through the painter's
     // pipeline, depth untouched.
-    REQUIRE(core.open_segment(default_vp()));
+    core.open_segment(default_vp());
     REQUIRE(push_test_quad(core, 0u));
     CHECK(core.chunk(0).depth_test == false);
 
@@ -775,14 +799,14 @@ TEST_CASE("open_segment carries depth_test; texture splits inherit it") {
     // pipeline bind keys on this bit. The clip can stay the full-frame
     // sentinel while the flag is set: the defaulted parameter keeps the
     // existing callers' calls unchanged.
-    REQUIRE(core.open_segment(default_vp(), kFullClip, true));
+    core.open_segment(default_vp(), kFullClip, true);
     REQUIRE(push_test_quad(core, 0u));
     CHECK(core.chunk(1).depth_test == true);
 
     // A texture-overflow split continues the SAME segment: the fresh
     // chunk inherits the depth mode alongside the VP and clip.
     core.begin_frame();
-    REQUIRE(core.open_segment(default_vp(), kFullClip, true));
+    core.open_segment(default_vp(), kFullClip, true);
     for (std::uint32_t id = 0;
          id <= ws::ui::r2d::batch::kMaxTexturesPerChunk; ++id) {
         // 33 unique textures: one past the 32-slot table forces the split.
@@ -1576,14 +1600,16 @@ TEST_CASE("overlapping clipped panels keep record order (clip is not a sort key)
     CHECK(r.batch().vertices()[4].color[1] == 1.0f);  // green quad second
 }
 
-TEST_CASE("more than 16 clip runs overflow loudly, not silently") {
+TEST_CASE("more clip runs than the initial chunk capacity all land (M9)") {
     using namespace ws::ui::r2d;
     Renderer2D r;
     r.frame_begin(800.0f, 600.0f);
     r.begin(Camera2D{});
-    // One more distinct clip than the cap: 17 single-draw runs, each its
-    // own chunk (a clip change always splits).
-    for (std::uint32_t i = 0; i < batch::kMaxChunksPerFrame + 1; ++i) {
+    // One more distinct clip than the initial reservation: 17 single-draw
+    // runs, each its own chunk (a clip change always splits). The chunk
+    // array grows on demand now - nothing drops.
+    for (std::uint32_t i = 0;
+         i < batch::kInitialChunkCapacity + 1; ++i) {
         r.push_clip(1.0f + static_cast<float>(i), 2.0f, 10.0f, 10.0f);
         r.draw_quad(0.0f, 0.0f, 1.0f, 1.0f, rgba(255, 255, 255));
         r.pop_clip();
@@ -1591,16 +1617,12 @@ TEST_CASE("more than 16 clip runs overflow loudly, not silently") {
     r.end();
     r.frame_end();
 
-    // The array does NOT grow: every chunk slot owns a pre-allocated
-    // descriptor set per swapchain image, so growth would mean mid-frame
-    // GPU allocation - forbidden. The overflow is counted instead (the
-    // renderer logs it once per frame; the stats surface carries it).
-    REQUIRE(r.batch().chunk_count() == batch::kMaxChunksPerFrame);
-    CHECK(r.batch().dropped_chunks() == 1);   // the 17th run never opened
-    CHECK(r.batch().dropped_quads() == 1);   // ...and its draw dropped
-    // The 16 surviving chunks replay in exact record order.
-    REQUIRE(r.batch().vertices().size() == 16 * 4);
-    for (std::uint32_t i = 0; i < batch::kMaxChunksPerFrame; ++i) {
+    // All 17 runs recorded, replayed in exact record order, zero drops.
+    REQUIRE(r.batch().chunk_count() == batch::kInitialChunkCapacity + 1);
+    CHECK(r.batch().dropped_quads() == 0);
+    REQUIRE(r.batch().vertices().size() ==
+            std::size_t(batch::kInitialChunkCapacity + 1) * 4);
+    for (std::uint32_t i = 0; i < batch::kInitialChunkCapacity + 1; ++i) {
         CHECK(r.batch().chunk(i).clip[0] == 1.0f + static_cast<float>(i));
     }
 }

@@ -222,25 +222,40 @@ third-party).
   sort, a clip change always splits a chunk — so draw each clipped panel's
   content CONTIGUOUSLY (all of panel A's draws, then all of panel B's);
   A,B,A interleaving costs three chunks instead of two.
-- **Chunks.** Up to 16 CPU chunks per frame: 32 textures per chunk /
-  131072 vertices per frame (shared across chunks — one draw-sized slice
-  each). One chunk = one VP (64B push constants) + one clip (one scissor)
-  + one depth mode (which of the two pipelines flushes it) + one 32-slot
-  texture table (one descriptor set) + one `vkCmdDrawIndexed`.
-  Texture overflow closes the chunk and opens a new one that inherits the
-  segment's VP, clip and depth mode — no mid-frame GPU work ever. Caps
-  exhausted: draws drop, but never silently (M5) — the drops are counted
-  (`BatchCore::dropped_chunks()`/`dropped_quads()`, reset per frame) and
-  the renderer warns once per frame with the frame's final totals. The
-  chunk array cannot grow past 16: every slot pre-owns a descriptor set
-  per swapchain image (allocated at init, strided at flush), so growth
-  would mean mid-frame GPU allocation — the batch's one hard no. M9 will
-  remove the cap properly.
+- **Chunks (M9: growth, not caps).** One chunk = one VP (64B push
+  constants) + one clip (one scissor) + one depth mode (which of the two
+  pipelines flushes it) + one texture table + one `vkCmdDrawIndexed`.
+  CPU-side, chunks and vertices have NO hard cap anymore: the vectors
+  start at `kInitialChunkCapacity`/`kInitialVertexCapacity` and grow
+  geometrically at flush — the one point the frame slot is idle (its
+  fence was waited in render_frame before flush runs). GPU-side, the
+  vertex AND index arenas are per frame slot and grow at the same point
+  (the index buffer went per-slot for exactly that reason: a shared
+  buffer would be bound by the other slot's in-flight submission), as
+  does the chunked tier's per-slot descriptor pool (rebuilt bigger, new
+  sets white-inited). The one drop that remains: a quad pushed with NO
+  open segment, counted in `BatchCore::dropped_quads()` (reset per
+  frame) and warned once per frame by the renderer. A growth failure
+  (OOM) logs and skips that frame's draws — loudly, never a silent
+  partial memcpy. Texture handling splits by TIER (the device probe in
+  app.cpp picks once at init): **bindless** — one global 1024-slot table
+  bound once per frame; `tex_index` carries the GLOBAL registry id, so
+  texture variety never splits a chunk at all; **chunked** (fallback) —
+  a 32-slot table per chunk (`kMaxTexturesPerChunk`); overflow closes
+  the chunk and opens one inheriting the segment's VP, clip and depth
+  mode.
 - **Textures.** `load_texture()` (valid from `on_setup()`) uploads
   synchronously — staging buffer, one-off submit, fence wait. The registry
   only grows (v1 never unloads): ids are indexes, stable for the process
   lifetime, so stale descriptor bindings can never dangle. id 0 is the
   built-in 1x1 white texture; failed loads and unknown ids render white.
+  The bindless tier's table is fixed at 1024 slots
+  (`batch::kMaxBindlessTextures`): past it a load warns once and hands
+  back white — ids must stay dense indexes into the shader's table; the
+  chunked tier has no count limit. Table writes: with update-after-bind
+  (probed) a new id lands in every frame slot's table immediately, even
+  mid-frame; without it each slot takes its writes at its idle flush
+  (setup-time loads are in place before the first frame either way).
 - **Atlases.** `load_atlas({...})` (valid from `on_setup()`) packs an image
   set into 2048x2048 pages — shelf packing, tallest first, 1px
   duplicated-edge gutters so magnified sprites never sample a shelf
@@ -317,24 +332,36 @@ third-party).
 - **Drop-never-defer.** The batch resets everywhere the write queue clears
   (out-of-date acquire, hidden window, abandoned frame); iconified frames
   never reach `on_update()` at all.
-- **Descriptor sets.** One set per (frame slot, chunk slot) —
-  `kMaxFramesInFlight * kMaxChunksPerFrame` of them, allocated once at
-  init and never touched by a swapchain rebuild. A set is rewritten only
-  after its frame slot's fence is waited (render_frame waits it before
-  recording starts) and strictly before its own bind; all sets start fully
-  white because the fragment shader indexes the sampler array dynamically —
-  every slot of a bound set must be valid.
+- **Descriptor sets (M9: two tiers).** Bindless tier: ONE set per frame
+  slot (the 1024-slot global table) from one pool, bound once per flush;
+  every slot starts white (written at creation), and new ids land through
+  `pending_table_ids_` — immediately with update-after-bind, else at each
+  slot's idle flush, made safe by the per-slot `table_written_` high-water
+  marks. Chunked tier: one pool + sets per frame slot, grown by rebuild
+  at the slot's idle flush (`grow_chunk_sets`); a set is rewritten only
+  after its slot's fence was waited and strictly before its own bind.
+  Both tiers: sets are keyed by frame slot, allocated at init or at that
+  slot's flush, and never touched by a swapchain rebuild; every slot of a
+  bound set must hold a valid view, because the shader indexes the
+  sampler array dynamically.
 - **Swapchain drift.** A same-format resize rebuilds nothing (viewport and
   scissor are dynamic, extents arrive per flush); format drift rebuilds
   both pipelines (the 2D and depth-tested 3D share one create info).
-  Image-count drift rebuilds nothing either — the renderer's vertex arenas
-  and descriptor sets are keyed by frame slot, created once at init, and
-  swapchain-independent by construction.
+  Image-count drift rebuilds nothing either — the renderer's vertex and
+  index arenas and descriptor sets are keyed by frame slot (grown only at
+  that slot's idle flush), and swapchain-independent by construction.
 - **Shader workflow** (M4). `src/shaders/spirv.h` is generated by
   `tools/compile_shaders.ps1` and committed — the ImGui-backend pattern;
   the default build needs no shader compiler, and that stays true for
   every option below. The flags and the header format live in the script
-  ONLY (never duplicate them elsewhere). When a shader changes:
+  ONLY (never duplicate them elsewhere). M9: the header carries THREE
+  arrays — vert, chunked frag, bindless frag; `batch.frag` is one source
+  with `#ifdef WS_BINDLESS` branches (a 1024-slot table +
+  `nonuniformEXT` vs the 32-slot plain form), the script compiles the
+  bindless variant with `-DWS_BINDLESS --target-env vulkan1.1`
+  (nonuniformEXT emits SPIR-V 1.3) while the chunked variant keeps the
+  original flags byte-pinned, and the dev hot reload compiles both frag
+  variants all-or-nothing. When a shader changes:
   - Regenerate: `cmake --build --preset debug --target ws_ui_regen_shaders`
     (or `tools\compile_shaders.ps1` directly), then commit the header.
   - Check staleness: `--target ws_ui_check_shaders` regenerates to a
@@ -624,12 +651,27 @@ drive unchanged (that boundary is deliberate; don't paint it over).
 
 - volk meta-loader everywhere: never link the Vulkan loader directly and
   never declare vk entry points outside volk (`VK_NO_PROTOTYPES`).
-- The batch shader indexes `u_textures[32]` with a runtime index, which the
-  spec gates behind `shaderSampledImageArrayDynamicIndexing`: device
-  selection skips GPUs lacking it and `vkCreateDevice` enables the feature
-  (previously `pEnabledFeatures` was null — all features off — and the
-  shader silently depended on driver leniency). Universally supported on
-  desktop GPUs, so the gate costs nothing.
+- The batch shader indexes its texture array with a runtime index (both
+  tiers' variants), which the spec gates behind
+  `shaderSampledImageArrayDynamicIndexing`: device selection skips GPUs
+  lacking it and `vkCreateDevice` enables the feature. Universally
+  supported on desktop GPUs, so the gate costs nothing.
+- **Texture tiers (M9).** `create_device` probes descriptor indexing and
+  picks once: bindless when the device has
+  `shaderSampledImageArrayNonUniformIndexing` +
+  `descriptorBindingPartiallyBound` (+
+  `descriptorBindingSampledImageUpdateAfterBind` when present) AND the
+  limits cover one 1024-slot sampled-image binding (UAB limits when UAB
+  is wanted, core limits otherwise). The probe runs over the 1.1+ core
+  `vkGetPhysicalDeviceFeatures2`/`Properties2` pNext chains — the 1.2
+  dialect or `VK_EXT_descriptor_indexing` on 1.1, checked BEFORE any
+  pNext query so a pre-1.2 device never meets an unknown struct — and
+  enables through the `VkDeviceCreateInfo` pNext. Every miss (1.0 loader
+  or device, missing feature, missing limit) falls back to the chunked
+  tier, never a failure; the instance requests the loader's own version
+  (`vkEnumerateInstanceVersion`) so a 1.1+ device is reachable at all.
+  The tier logs one `core::info` line at startup (the smoke marker) and
+  is fixed for the process.
 - VMA's implementation TU is `src/vma_impl.cpp` (dynamic function loading;
   the two loader entry points are handed over from `app.cpp` via
   `VmaAllocatorCreateInfo::pVulkanFunctions` since VMA 3.2 requires it) —

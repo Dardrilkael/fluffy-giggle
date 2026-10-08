@@ -205,6 +205,13 @@ struct App::Impl {
     std::unique_ptr<WindowHost> host_;
 
     VkInstance instance = VK_NULL_HANDLE;
+    // The instance version the loader supports (M9): the bindless tier's
+    // shader is SPIR-V 1.3 (nonuniformEXT), so its device needs Vulkan
+    // 1.1+, which needs a 1.1+ instance. create_instance requests exactly
+    // this; the tier probe (create_device) only runs when it reached 1.1,
+    // and a 1.0-only loader means the chunked fallback tier - never a
+    // failure.
+    uint32_t instance_api_version = VK_API_VERSION_1_0;
     // WS_UI_VALIDATION opt-in (create_instance): the validation layer's
     // message funnel into ws::core via validation_log. Destroyed before the
     // instance itself.
@@ -300,6 +307,12 @@ struct App::Impl {
     // frame_begin/frame_end around it and flushes the sorted batch inside
     // the render pass, before ImGui's draw data (2D world under widgets).
     r2d::Renderer2D renderer2d_;
+    // The texture tier the device probe picked (M9): bindless (one global
+    // descriptor-indexed table, nonuniformEXT in the shader) when the
+    // device has descriptor indexing with the needed limits, the chunked
+    // 32-slot-table fallback otherwise. Fixed once at the device stage;
+    // the renderer init consumes it and it never changes after.
+    r2d::TextureTier texture_tier_{};
 
     // --- gui library --------------------------------------------------------
     // One input snapshot per frame, filled by the platform callbacks' raw
@@ -543,12 +556,34 @@ struct App::Impl {
             }
         }
 
-        // The shell needs nothing beyond WSI basics, so request the lowest API
-        // version to run on the widest range of drivers.
+        // Instance version probe (M9): ask the LOADER (not any device) for
+        // the newest Vulkan version it can instantiate, and request exactly
+        // that. The shell's own needs are WSI basics (1.0 everywhere), but
+        // the bindless texture tier's device probe runs over 1.1+ core
+        // entry points (vkGetPhysicalDeviceFeatures2) and its shader is
+        // SPIR-V 1.3 - a 1.0-only loader keeps the lowest version, which
+        // pins the renderer to the chunked fallback tier. Requesting the
+        // loader's own version never fails on an older driver: the
+        // apiVersion is a maximum, not a requirement.
+        instance_api_version = VK_API_VERSION_1_0;
+        const auto enumerate_instance_version =
+            reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
+                vkGetInstanceProcAddr(nullptr, "vkEnumerateInstanceVersion"));
+        if (enumerate_instance_version != nullptr) {
+            if (enumerate_instance_version(&instance_api_version) ==
+                VK_SUCCESS) {
+                // Unusable loader (should not happen, but a zeroed or bogus
+                // version must not reach VkApplicationInfo).
+                if (instance_api_version == 0) {
+                    instance_api_version = VK_API_VERSION_1_0;
+                }
+            }
+        }
+
         VkApplicationInfo app_info{};
         app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
         app_info.pApplicationName = config.title.c_str();
-        app_info.apiVersion = VK_API_VERSION_1_0;
+        app_info.apiVersion = instance_api_version;
 
         VkInstanceCreateInfo create_info{};
         create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -708,12 +743,12 @@ struct App::Impl {
         queue_info.queueCount = 1;
         queue_info.pQueuePriorities = &queue_priority;
 
-        // batch.frag indexes u_textures[32] with a non-constant (runtime)
-        // index, which the spec gates behind this feature - without it,
-        // dynamic sampler-array indexing is undefined behavior even where
-        // a given driver happens to tolerate it. Required, not optional:
-        // fail loudly rather than ship a renderer that silently depends on
-        // driver leniency.
+        // batch.frag indexes its texture array with a non-constant (runtime)
+        // index - BOTH tiers' variants do - which the spec gates behind this
+        // feature; without it, dynamic sampler-array indexing is undefined
+        // behavior even where a given driver happens to tolerate it.
+        // Required, not optional: fail loudly rather than ship a renderer
+        // that silently depends on driver leniency.
         VkPhysicalDeviceFeatures available{};
         vkGetPhysicalDeviceFeatures(physical_device, &available);
         if (!available.shaderSampledImageArrayDynamicIndexing) {
@@ -725,13 +760,155 @@ struct App::Impl {
         VkPhysicalDeviceFeatures enabled{};
         enabled.shaderSampledImageArrayDynamicIndexing = VK_TRUE;
 
-        const char* extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+        // M9: the texture-tier probe. The bindless tier needs descriptor
+        // indexing - partially-bound tables, nonuniform indexing in the
+        // shader, and (ideally) update-after-bind table writes. Order
+        // matters for old drivers: the plain 1.0 property query and the
+        // extension list run FIRST, and the 1.1+ pNext-chained probes only
+        // touch devices that already claimed the dialect (core 1.2 or
+        // VK_EXT_descriptor_indexing) - a pre-1.2 device never meets an
+        // unknown pNext struct. Any miss (1.0 loader or device, missing
+        // feature or limit) falls back to the chunked tier: never a
+        // failure, this is the spec's safe-fallback path.
+        texture_tier_ = r2d::TextureTier{};  // chunked is the default
+        std::vector<const char*> extensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+        VkPhysicalDeviceVulkan12Features enable_12{};
+        VkPhysicalDeviceDescriptorIndexingFeaturesEXT enable_ext{};
+        void* enable_chain = nullptr;  // VkDeviceCreateInfo pNext
+        std::string tier_miss = "the Vulkan loader or device is pre-1.1";
+        if (instance_api_version >= VK_API_VERSION_1_1) {
+            VkPhysicalDeviceProperties props{};
+            vkGetPhysicalDeviceProperties(physical_device, &props);
+            const bool core_12 = props.apiVersion >= VK_API_VERSION_1_2;
+            bool has_di_ext = false;
+            if (!core_12) {
+                // 1.1 device: descriptor indexing only via the extension.
+                uint32_t ext_count = 0;
+                vkEnumerateDeviceExtensionProperties(physical_device, nullptr,
+                                                     &ext_count, nullptr);
+                std::vector<VkExtensionProperties> device_extensions(ext_count);
+                vkEnumerateDeviceExtensionProperties(physical_device, nullptr,
+                                                     &ext_count,
+                                                     device_extensions.data());
+                for (const VkExtensionProperties& ext : device_extensions) {
+                    if (std::string_view(ext.extensionName) ==
+                        VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME) {
+                        has_di_ext = true;
+                        break;
+                    }
+                }
+            }
+            tier_miss = "descriptor indexing is not advertised";
+            if (core_12 || has_di_ext) {
+                // Features: the dialect's struct - same field names either
+                // way; the 1.2 one adds the descriptorIndexing aggregate
+                // switch and unrelated 1.2 features. The update-after-bind
+                // limits ride the properties pNext chain.
+                VkPhysicalDeviceDescriptorIndexingPropertiesEXT di_props{};
+                di_props.sType =
+                    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES_EXT;
+                VkPhysicalDeviceProperties2 props2{};
+                props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+                props2.pNext = &di_props;
+                vkGetPhysicalDeviceProperties2(physical_device, &props2);
+
+                bool has_nonuniform = false;
+                bool has_partial = false;
+                bool has_uab = false;
+                if (core_12) {
+                    VkPhysicalDeviceVulkan12Features probe12{};
+                    probe12.sType =
+                        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+                    VkPhysicalDeviceFeatures2 features2{};
+                    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+                    features2.pNext = &probe12;
+                    vkGetPhysicalDeviceFeatures2(physical_device, &features2);
+                    has_nonuniform =
+                        probe12.shaderSampledImageArrayNonUniformIndexing ==
+                        VK_TRUE;
+                    has_partial =
+                        probe12.descriptorBindingPartiallyBound == VK_TRUE;
+                    has_uab =
+                        probe12.descriptorBindingSampledImageUpdateAfterBind ==
+                        VK_TRUE;
+                } else {
+                    VkPhysicalDeviceDescriptorIndexingFeaturesEXT probe_ext{};
+                    probe_ext.sType =
+                        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT;
+                    VkPhysicalDeviceFeatures2 features2{};
+                    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+                    features2.pNext = &probe_ext;
+                    vkGetPhysicalDeviceFeatures2(physical_device, &features2);
+                    has_nonuniform =
+                        probe_ext.shaderSampledImageArrayNonUniformIndexing ==
+                        VK_TRUE;
+                    has_partial =
+                        probe_ext.descriptorBindingPartiallyBound == VK_TRUE;
+                    has_uab =
+                        probe_ext.descriptorBindingSampledImageUpdateAfterBind ==
+                        VK_TRUE;
+                }
+
+                // The table is one 1024-slot sampled-image binding in the
+                // fragment stage: the update-after-bind limits must cover
+                // it when UAB is wanted, the core limits otherwise.
+                const uint32_t table = r2d::batch::kMaxBindlessTextures;
+                const bool limits_ok =
+                    table <= props.limits.maxPerStageDescriptorSampledImages &&
+                    table <= props.limits.maxDescriptorSetSampledImages &&
+                    (!has_uab ||
+                     (table <=
+                          di_props.maxPerStageDescriptorUpdateAfterBindSampledImages &&
+                      table <=
+                          di_props.maxDescriptorSetUpdateAfterBindSampledImages));
+                tier_miss = "a needed feature or limit is missing";
+                if (has_nonuniform && has_partial && limits_ok) {
+                    texture_tier_.bindless = true;
+                    texture_tier_.update_after_bind = has_uab;
+                    if (core_12) {
+                        enable_12.sType =
+                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+                        // descriptorIndexing is the aggregate switch: it
+                        // must be on for any of the specific features to
+                        // work on a 1.2 device.
+                        enable_12.descriptorIndexing = VK_TRUE;
+                        enable_12.shaderSampledImageArrayNonUniformIndexing =
+                            VK_TRUE;
+                        enable_12.descriptorBindingPartiallyBound = VK_TRUE;
+                        enable_12.descriptorBindingSampledImageUpdateAfterBind =
+                            has_uab ? VK_TRUE : VK_FALSE;
+                        enable_chain = &enable_12;
+                    } else {
+                        extensions.push_back(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
+                        enable_ext.sType =
+                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT;
+                        enable_ext.shaderSampledImageArrayNonUniformIndexing =
+                            VK_TRUE;
+                        enable_ext.descriptorBindingPartiallyBound = VK_TRUE;
+                        enable_ext.descriptorBindingSampledImageUpdateAfterBind =
+                            has_uab ? VK_TRUE : VK_FALSE;
+                        enable_chain = &enable_ext;
+                    }
+                }
+            }
+        }
+        if (texture_tier_.bindless) {
+            core::info("ui: r2d texture tier: bindless global table ({})",
+                       texture_tier_.update_after_bind
+                           ? "update-after-bind writes"
+                           : "idle-flush writes");
+        } else {
+            core::info("ui: r2d texture tier: chunked tables ({})", tier_miss);
+        }
+
         VkDeviceCreateInfo create_info{};
         create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+        create_info.pNext = enable_chain;
         create_info.queueCreateInfoCount = 1;
         create_info.pQueueCreateInfos = &queue_info;
-        create_info.enabledExtensionCount = 1;
-        create_info.ppEnabledExtensionNames = extensions;
+        create_info.enabledExtensionCount =
+            static_cast<uint32_t>(extensions.size());
+        create_info.ppEnabledExtensionNames = extensions.data();
         create_info.pEnabledFeatures = &enabled;
         if (vkCreateDevice(physical_device, &create_info, nullptr, &device) != VK_SUCCESS) {
             core::error("ui: vkCreateDevice failed");
@@ -1632,7 +1809,8 @@ struct App::Impl {
             // init() may fail mid-way; shutdown() doubles as the
             // (idempotent) failure-path cleanup.
             if (!renderer2d_.init(device, physical_device, allocator, queue,
-                                  queue_family, render_pass, format)) {
+                                  queue_family, render_pass, format,
+                                  texture_tier_)) {
                 return false;
             }
             r2d::set_active(&renderer2d_);

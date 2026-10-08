@@ -20,20 +20,22 @@
 namespace ws::ui::r2d::batch {
 
 inline constexpr std::uint32_t kMaxTexturesPerChunk = 32;   // = the sampler2D[32] array in shaders/batch.frag
-inline constexpr std::size_t kMaxVerticesPerFrame = 131072; // ~32k quads
-// One chunk per (camera block, clip) pair, and every gui panel pushes its
-// own clip - panels are the budget's main consumer. 8 saturated exactly
-// (the playground: panel chrome at ambient clip + three panels + a nested
-// scroll region + the 2D world + the 3D block + the screen overlay), and
-// the next panel's whole segment dropped with one warn per frame. 16
-// restores headroom; the cost scales with it (one descriptor set per
-// swapchain image per chunk). The array CANNOT grow mid-frame: the GPU
-// half pre-allocates image_count descriptor sets per chunk slot at init
-// and strides that pool at flush, so growth would mean mid-frame GPU
-// allocation - the batch design forbids it. Until M9 removes the cap,
-// over-cap drops are counted (dropped_chunks()/dropped_quads()) and the
-// renderer warns once per frame with the counts - never silent.
-inline constexpr std::uint32_t kMaxChunksPerFrame = 16;
+// Initial reservations, NOT caps (M9): both the vertex and the chunk array
+// grow on demand, geometrically, so a busy app pays O(log) allocations and
+// then runs steady-state allocation-free. The GPU half grows in lockstep
+// at the one safe point - the flush, after the frame slot's fence was
+// waited (the slot is fully retired; nothing it owns is in flight). The
+// one drop left is recording with no open segment; it stays counted
+// (dropped_quads()) and the renderer warns - never silent.
+inline constexpr std::size_t kInitialVertexCapacity = 131072; // ~32k quads
+inline constexpr std::uint32_t kInitialChunkCapacity = 16;    // one clip run each, e.g.
+// The bindless tier's global texture table (M9): one descriptor array per
+// frame slot, bound once per frame and indexed by the texture's REGISTRY
+// id - stable for the process lifetime, so the index needs no per-chunk
+// remap and texture variety never splits a chunk. Comment-tied to the
+// [1024] branch of shaders/batch.frag and the descriptor set layout.
+// Loads past it degrade to white with one warn - the failed-load contract.
+inline constexpr std::uint32_t kMaxBindlessTextures = 1024;
 
 // The "no clip pushed" rect: the whole framebuffer. The flush intersects
 // every chunk clip with the frame extent, so infinite extents mean
@@ -53,10 +55,11 @@ struct Mat4 {
     float m[16];
 };
 
-// One draw-call-sized slice of the frame: shared VP, own texture table. A
-// full table splits into a fresh chunk with the same VP - painter order
-// survives because vertex ranges stay contiguous and chunks flush in
-// creation order.
+// One draw-call-sized slice of the frame: shared VP, own clip, own texture
+// table (chunked tier only - the bindless tier leaves it empty and indexes
+// the global table by the vertex's id). A full table splits into a fresh
+// chunk with the same VP - painter order survives because vertex ranges
+// stay contiguous and chunks flush in creation order.
 struct Chunk {
     Mat4 vp{};
     // Framebuffer-space clip rect {x, y, w, h} this chunk renders within
@@ -145,16 +148,29 @@ bool line_quad3d(float x0, float y0, float z0, float x1, float y1, float z1,
 
 class BatchCore {
 public:
+    // Reserves the initial capacities (see the constants above).
+    BatchCore();
+
+    // Which id a vertex's tex_index carries. False (the default, the
+    // fallback tier): the chunk-local table slot, chunks splitting at
+    // kMaxTexturesPerChunk - today's behavior exactly. True (the bindless
+    // tier): the GLOBAL registry id; the shader indexes one process-wide
+    // table, per-chunk tables stay empty, and texture variety never splits
+    // a chunk. Set once before the first frame (the renderer does it at
+    // init, off the device's descriptor-indexing support).
+    void use_global_texture_ids(bool enabled) { global_tex_ids_ = enabled; }
+
     void begin_frame();
     // Closes the current chunk (if any) and opens one with the given VP,
-    // clip and depth mode. Returns false at the chunk cap - the segment
-    // stays closed and its draws are dropped.
-    bool open_segment(const Mat4& vp, const float (&clip)[4] = kFullClip,
+    // clip and depth mode. Always succeeds - the chunk array grows on
+    // demand (M9 removed the cap; see kInitialChunkCapacity).
+    void open_segment(const Mat4& vp, const float (&clip)[4] = kFullClip,
                       bool depth_test = false);
     void close_segment();
 
-    // Appends one quad (4 vertices) to the open segment. Returns false when
-    // the draw must be dropped: no open segment, vertex cap, or chunk cap.
+    // Appends one quad (4 vertices) to the open segment. Returns false
+    // only when no segment is open - the one drop left: capacity grows
+    // instead of dropping (M9).
     bool push_quad(const float (&pos)[4][3], const float (&uv)[4][2],
                    const float (&color)[4], std::uint32_t texture_id);
 
@@ -164,24 +180,24 @@ public:
     }
     const Chunk& chunk(std::uint32_t i) const { return chunks_[i]; }
     const std::vector<Vertex>& vertices() const { return vertices_; }
-    // Overflow accounting (M5): the drops the caps produced this frame -
-    // surfaced so overflow is never silent (see kMaxChunksPerFrame). Both
-    // reset at begin_frame().
-    std::uint32_t dropped_chunks() const { return dropped_chunks_; }
+    // The frame's drops (reset at begin_frame()): quads recorded with no
+    // open segment. Chunks can no longer drop - they grow - so the
+    // overflow accounting M5 added is down to this one counter.
     std::uint32_t dropped_quads() const { return dropped_quads_; }
 
 private:
-    bool start_chunk(const Mat4& vp, const float (&clip)[4], bool depth_test);
+    // Appends a fresh chunk; the array grows (never drops).
+    void start_chunk(const Mat4& vp, const float (&clip)[4], bool depth_test);
     // Slot for texture_id in the current chunk, splitting the chunk when
-    // its table is full. Returns >= kMaxTexturesPerChunk when the draw must
-    // be dropped (chunk cap).
+    // its table is full. Chunked mode only (bindless writes the global id
+    // straight into the vertex and never calls this).
     std::uint32_t texture_slot(std::uint32_t texture_id);
 
     std::vector<Vertex> vertices_;
     std::vector<Chunk> chunks_;
     bool segment_open_ = false;
-    std::uint32_t dropped_chunks_ = 0;  // open_segment at the cap (M5)
-    std::uint32_t dropped_quads_ = 0;   // every quad dropped for any cap (M5)
+    bool global_tex_ids_ = false;         // tex_index semantics (see above)
+    std::uint32_t dropped_quads_ = 0;     // no-open-segment drops (M9)
 };
 
 }  // namespace ws::ui::r2d::batch

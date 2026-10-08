@@ -24,9 +24,13 @@ namespace {
 // Same flags as tools/compile_shaders.ps1 Compile-Spv for a glslang-family
 // binary: -V for Vulkan semantics, vulkan1.0 target, optimized. The script
 // is the single source of truth for the flags - these are comment-tied to
-// it (both files say so).
+// it (both files say so). The bindless variant adds -DWS_BINDLESS and
+// targets vulkan1.1: nonuniformEXT emits SPIR-V 1.3 decorations the
+// vulkan1.0 environment does not accept.
 constexpr char kCompileCommandLine[] =
     "\"{}\" -V --target-env vulkan1.0 -O \"{}\" -o \"{}\"";
+constexpr char kCompileBindlessCommandLine[] =
+    "\"{}\" -V --target-env vulkan1.1 -DWS_BINDLESS -O \"{}\" -o \"{}\"";
 
 // The SPIR-V magic word: every valid module starts with it.
 constexpr std::uint32_t kSpirvMagic = 0x07230203u;
@@ -37,6 +41,7 @@ constexpr std::uint32_t kSpirvMagic = 0x07230203u;
 // pipeline rebake is safe - no dangling code pointer exists.
 std::vector<std::uint32_t> g_vert;
 std::vector<std::uint32_t> g_frag;
+std::vector<std::uint32_t> g_frag_bindless;
 
 // File mtimes at the last compile attempt. Tracked even on failure: a
 // broken shader must not re-trigger every frame (and the dev loop wants
@@ -206,8 +211,10 @@ bool load_spv(const std::string& out_path, std::vector<std::uint32_t>* out) {
 
 // Full stage compile: subprocess to a temp .spv, validate, load. On any
 // failure logs the compiler's stderr (glslang prints errors there) and
-// returns false - the caller keeps the last good words.
+// returns false - the caller keeps the last good words. `suffix` tells the
+// bindless variant's command line (and keeps its .spv file apart).
 bool compile_stage(const std::string& compiler, const std::string& source,
+                   const char* command_line, const char* spv_suffix,
                    std::vector<std::uint32_t>* out) {
     const std::string temp = env_value("TEMP");
     if (temp.empty()) {
@@ -220,10 +227,10 @@ bool compile_stage(const std::string& compiler, const std::string& source,
     }();
     const std::string base =
         source.substr(source.find_last_of("\\/") + 1);
-    const std::string out_path = tmp_dir + "\\" + base + ".spv";
+    const std::string out_path = tmp_dir + "\\" + base + spv_suffix + ".spv";
 
-    const std::string cmdline = std::format(kCompileCommandLine, compiler,
-                                            source, out_path);
+    const std::string cmdline =
+        std::format(command_line, compiler, source, out_path);
     std::string compiler_output;
     if (!run_compiler_capture(cmdline, &compiler_output)) {
         ws::core::error("ui: shader hot reload - {} failed on {}:\n{}",
@@ -267,12 +274,19 @@ bool poll_reload(const std::string& shader_dir) {
 
     std::vector<std::uint32_t> new_vert = g_vert;
     std::vector<std::uint32_t> new_frag = g_frag;
-    if (!compile_stage(compiler, vert, &new_vert) ||
-        !compile_stage(compiler, frag, &new_frag)) {
+    std::vector<std::uint32_t> new_frag_bindless = g_frag_bindless;
+    // Both frag variants: the tier is fixed at init, but a frag edit must
+    // hot-reload whichever one the live pipelines use - compile both or
+    // keep the last good words (all-or-nothing, like the pipeline rebake).
+    if (!compile_stage(compiler, vert, kCompileCommandLine, "", &new_vert) ||
+        !compile_stage(compiler, frag, kCompileCommandLine, "", &new_frag) ||
+        !compile_stage(compiler, frag, kCompileBindlessCommandLine,
+                       "-bindless", &new_frag_bindless)) {
         return false;  // compile_stage already logged the failure
     }
     g_vert = std::move(new_vert);
     g_frag = std::move(new_frag);
+    g_frag_bindless = std::move(new_frag_bindless);
     ws::core::info("ui: shader hot reload - swapped in recompiled stages");
     return true;
 }
@@ -284,9 +298,15 @@ ShaderWords vert_words() {
     return {kBatchVertSpv, sizeof(kBatchVertSpv) / sizeof(kBatchVertSpv[0])};
 }
 
-ShaderWords frag_words() {
-    if (!g_frag.empty()) {
-        return {g_frag.data(), g_frag.size()};
+ShaderWords frag_words(bool bindless) {
+    const std::vector<std::uint32_t>& hot =
+        bindless ? g_frag_bindless : g_frag;
+    if (!hot.empty()) {
+        return {hot.data(), hot.size()};
+    }
+    if (bindless) {
+        return {kBatchFragBindlessSpv,
+                sizeof(kBatchFragBindlessSpv) / sizeof(kBatchFragBindlessSpv[0])};
     }
     return {kBatchFragSpv, sizeof(kBatchFragSpv) / sizeof(kBatchFragSpv[0])};
 }

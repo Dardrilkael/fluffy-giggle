@@ -12,7 +12,9 @@
 #include "atlas_packer.h"
 #include "batch_core.h"
 
+#include <array>
 #include <cfloat>
+#include <cstddef>
 #include <cstdint>
 #include <initializer_list>
 #include <vector>
@@ -70,6 +72,21 @@ inline std::uint64_t make_material_key(Texture texture) {
 // agree, so the constant lives here rather than in two files.
 inline constexpr std::uint32_t kMaxFramesInFlight = 2;
 
+// The texture path app.cpp's device probe picked (M9). bindless: one
+// global kMaxBindlessTextures-slot descriptor table per frame slot, bound
+// once per frame and indexed by the texture's registry id
+// (descriptor indexing + nonuniformEXT; texture variety never splits a
+// chunk). update_after_bind: the UAB feature - table writes land
+// immediately at load time; without it they defer to each slot's next
+// idle flush (its fence was waited), so a mid-run load shows white for at
+// most one frame per slot. Both false: the fallback tier - today's
+// per-chunk 32-slot tables, unchanged semantics, everything grown
+// instead of capped.
+struct TextureTier {
+    bool bindless = false;
+    bool update_after_bind = false;
+};
+
 class Renderer2D {
 public:
     // Vulkan/VMA handles are single-owned: a copied renderer would destroy
@@ -90,17 +107,21 @@ public:
     void frame_drop();
 
     // --- GPU lifecycle (app.cpp only; needs a live Vulkan context) ---
-    // One-time setup after the swapchain exists. Order inside: push-constant
-    // limit check, upload pool/fence, sampler, white texture (registry index
-    // 0 - every descriptor slot starts bound to it), set layout (32 immutable
-    // samplers), pipeline layout, per-frame-slot resources (descriptor pool,
-    // sets, vertex arenas - keyed by kMaxFramesInFlight, never by the
-    // swapchain image count), shared index pattern, pipeline. On false the
-    // startup fails; shutdown() is the failure-path cleanup and cleans
-    // partial state.
+    // One-time setup after the swapchain exists. `tier` is the device
+    // probe's pick (app.cpp enables the features before calling); it fixes
+    // the descriptor set layout, the frag shader variant and the flush path
+    // for the process. Order inside: push-constant limit check, upload
+    // pool/fence, sampler, white texture (registry index 0 - every
+    // descriptor slot starts bound to it), set layout (the tier's), pipeline
+    // layout, per-frame-slot resources (descriptor sets + vertex and index
+    // arenas - keyed by kMaxFramesInFlight, never by the swapchain image
+    // count), pipeline (the tier's frag variant). On false the startup
+    // fails; shutdown() is the failure-path cleanup and cleans partial
+    // state.
     bool init(VkDevice device, VkPhysicalDevice physical_device,
               VmaAllocator allocator, VkQueue queue, uint32_t queue_family,
-              VkRenderPass render_pass, VkFormat format);
+              VkRenderPass render_pass, VkFormat format,
+              const TextureTier& tier);
     // Swapchain drift. The per-frame-slot resources are swapchain-
     // independent, so only format drift matters: it rebuilds the pipeline (a
     // same-format resize needs nothing - that is the render-pass
@@ -117,9 +138,10 @@ public:
     // Destroys everything init()/load_texture() created. Idempotent.
     void shutdown();
     // Draws the batch inside the render pass, before ImGui's draw data (2D
-    // world under widgets). frame_slot selects this slot's vertex arena and
-    // chunk sets; that slot's fence is waited before recording starts, so
-    // they are safely writable here.
+    // world under widgets). frame_slot selects this slot's arenas and
+    // descriptor sets; that slot's fence is waited before recording starts,
+    // so they are safely writable here - and grown here, when the frame
+    // outgrew them (the one point the slot is idle; see the grow helpers).
     void flush(VkCommandBuffer cmd, uint32_t frame_slot, float fb_width,
                float fb_height);
 
@@ -206,22 +228,45 @@ private:
     const atlas::Rect* find_sprite_rect(const Sprite& sprite) const;
     // Graphics pipeline against the given render pass; the shader modules
     // are created and destroyed inside (they are baked into the pipeline).
+    // The fragment module is the tier's variant (see TextureTier).
     bool create_pipeline(VkRenderPass render_pass);
-    // Descriptor pool + kMaxFramesInFlight*kMaxChunksPerFrame sets (initial
-    // full-white write) + one persistently-mapped vertex arena per frame
-    // slot. Created once at init(); nothing here depends on the swapchain.
+    // Per-frame-slot resources: the tier's descriptor sets (bindless: one
+    // global-table set per slot; chunked: one pool + kInitialChunkCapacity
+    // sets per slot, grown at flush) plus one persistently-mapped vertex
+    // arena and one index arena per slot, sized by the initial capacities.
+    // Created once at init(); nothing here depends on the swapchain.
     bool create_frame_resources();
     void destroy_frame_resources();
-    // Shared absolute index pattern (quad q -> 4q + {0,1,2,2,3,0}), filled
-    // once and never rewritten.
-    bool create_index_buffer();
+    // Both arena halves grow at flush, the one point the frame slot is
+    // idle (its fence was waited): destroy + recreate the vertex arena at
+    // `min_vertices` (geometric - double, then double again if needed) and
+    // the index arena at the matching quad capacity, refilling the
+    // absolute pattern. False only when the (re)allocation fails - the
+    // caller keeps the old buffer and skips the frame's draws (logged).
+    bool grow_vertex_arena(uint32_t frame_slot, std::size_t min_vertices);
+    bool grow_index_arena(uint32_t frame_slot, std::size_t min_quads);
     // Staging upload of a 4-byte-per-pixel R8G8B8A8 image (one-off submit +
     // fence wait). Cleans its partial state and returns false on failure.
+    // In the bindless tier this also queues the id's descriptor table
+    // write (immediate with update-after-bind, else at the slot-idle
+    // flushes); ids past kMaxBindlessTextures are refused so a garbage
+    // index can never reach the shader's table.
     bool upload_texture(const void* pixels, uint32_t width, uint32_t height,
                         Texture* out);
     // Binds a chunk's used slots [0, texture_count); the rest keep the
-    // initial full-white write.
+    // initial full-white write. Chunked tier only.
     void write_chunk_set(VkDescriptorSet set, const batch::Chunk& chunk);
+    // Bindless tier: writes every pending id (>= table_written_[slot])
+    // into the slot's table set and advances the high-water mark. Called
+    // at the slot's idle flush, and once per slot at init when nothing is
+    // in flight yet.
+    void apply_pending_table_writes(uint32_t frame_slot);
+    // Chunked tier: grows the slot's chunk-set pool to `min_chunks` sets -
+    // rebuild it bigger (allocate + full-white-init the fresh sets,
+    // destroy the old pool; the slot is idle, so nothing references it).
+    // False = allocation failed; the old pool stays and the caller skips
+    // the frame's draws (logged).
+    bool grow_chunk_sets(uint32_t frame_slot, uint32_t min_chunks);
 
     std::vector<DrawCommand> commands_;  // capacity reused across frames
     batch::BatchCore batch_;
@@ -258,8 +303,7 @@ private:
     VkFormat format_ = VK_FORMAT_UNDEFINED;     // drift sentinel
 
     VkSampler sampler_ = VK_NULL_HANDLE;
-    VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;  // owns sets_
-    VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;  // the tier's layout
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
     VkPipeline pipeline_ = VK_NULL_HANDLE;
     // The depth-tested sibling (LEQUAL + write, for Camera3D chunks): same
@@ -291,26 +335,63 @@ private:
     };
     std::vector<AtlasPage> atlas_pages_;
 
-    // One vertex arena per frame slot (kMaxFramesInFlight of them), sized
-    // by the static frame cap, persistently mapped. A slot's fence gates its
-    // reuse, so the memcpy in flush() never races an in-flight submission.
+    // One vertex arena per frame slot (kMaxFramesInFlight of them),
+    // persistently mapped, starting at kInitialVertexCapacity vertices and
+    // grown at the slot's idle flush. A slot's fence gates its reuse, so
+    // the memcpy in flush() - and the growth around it - never races an
+    // in-flight submission.
     struct FrameArena {
         VkBuffer buffer = VK_NULL_HANDLE;
         VmaAllocation allocation = VK_NULL_HANDLE;
         batch::Vertex* mapped = nullptr;
+        std::size_t capacity = 0;  // vertices
     };
     std::vector<FrameArena> arenas_;
 
-    VkBuffer index_buffer_ = VK_NULL_HANDLE;
-    VmaAllocation index_allocation_ = VK_NULL_HANDLE;
+    // One index arena per frame slot, same growth contract as the vertex
+    // arena. Per-slot (not shared) precisely so it CAN grow at the slot's
+    // idle flush: a shared buffer would be bound by the other slot's
+    // in-flight submission. The pattern is absolute (quad q -> 4q +
+    // {0,1,2,2,3,0}), refilled on every growth.
+    struct IndexArena {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
+        std::uint32_t* mapped = nullptr;
+        std::size_t capacity = 0;  // quads
+    };
+    std::vector<IndexArena> index_arenas_;
 
     VkCommandPool upload_pool_ = VK_NULL_HANDLE;  // texture uploads
     VkFence upload_fence_ = VK_NULL_HANDLE;
-    // kMaxFramesInFlight * kMaxChunksPerFrame, allocated once at init();
-    // the flush-time index is frame_slot * kMaxChunksPerFrame + c. A set
-    // belongs to exactly one (frame slot, chunk) pair, whose slot fence is
-    // waited before any recording starts.
-    std::vector<VkDescriptorSet> sets_;
+
+    // --- texture tier state (M9; see TextureTier) ---
+    TextureTier tier_{};
+    // Bindless: one global-table set per frame slot, all slots white at
+    // creation (every index a malformed draw could round to stays valid).
+    VkDescriptorPool table_pool_ = VK_NULL_HANDLE;  // owns table_sets_
+    std::vector<VkDescriptorSet> table_sets_;       // [frame slot]
+    // How far each slot's table has caught up: ids [0, table_written_[s])
+    // are bound in slot s's set. Ids only grow, so a high-water mark
+    // suffices. Without update-after-bind a fresh texture waits for the
+    // slot's next idle flush; with it, upload_texture() writes every slot
+    // immediately and this only trails between init and the first frames.
+    std::array<std::uint32_t, kMaxFramesInFlight> table_written_{};
+    // Texture ids queued for table writes (drained per slot at its idle
+    // flush, or immediately when the last slot catches up).
+    std::vector<std::uint32_t> pending_table_ids_;
+    // One warn for the whole process: the bindless table refusing loads
+    // past kMaxBindlessTextures.
+    bool table_full_warned_ = false;
+    // Chunked: one pool + its chunk sets per frame slot. A set belongs to
+    // exactly one (frame slot, chunk) pair, whose slot fence is waited
+    // before any recording starts - that is what makes the flush-time
+    // rewrite (and growth) safe.
+    struct ChunkSets {
+        VkDescriptorPool pool = VK_NULL_HANDLE;
+        std::vector<VkDescriptorSet> sets;  // [chunk index]
+        std::uint32_t capacity = 0;
+    };
+    std::vector<ChunkSets> chunk_sets_;  // [frame slot]
 };
 
 // Points the public free functions at the live renderer. app.cpp installs it

@@ -224,12 +224,8 @@ bool line_quad3d(float x0, float y0, float z0, float x1, float y1, float z1,
     return true;
 }
 
-bool BatchCore::start_chunk(const Mat4& vp, const float (&clip)[4],
+void BatchCore::start_chunk(const Mat4& vp, const float (&clip)[4],
                             bool depth_test) {
-    if (chunks_.size() >= kMaxChunksPerFrame) {
-        ++dropped_chunks_;
-        return false;
-    }
     Chunk chunk;
     chunk.vp = vp;
     chunk.depth_test = depth_test;
@@ -238,21 +234,26 @@ bool BatchCore::start_chunk(const Mat4& vp, const float (&clip)[4],
     }
     chunk.vertex_offset = static_cast<std::uint32_t>(vertices_.size());
     chunks_.push_back(chunk);
-    return true;
+}
+
+BatchCore::BatchCore() {
+    // The old caps, as reservations: steady-state frames allocate nothing,
+    // and a frame past them grows geometrically (never drops - M9).
+    vertices_.reserve(kInitialVertexCapacity);
+    chunks_.reserve(kInitialChunkCapacity);
 }
 
 void BatchCore::begin_frame() {
     vertices_.clear();
     chunks_.clear();
     segment_open_ = false;
-    dropped_chunks_ = 0;
     dropped_quads_ = 0;
 }
 
-bool BatchCore::open_segment(const Mat4& vp, const float (&clip)[4],
+void BatchCore::open_segment(const Mat4& vp, const float (&clip)[4],
                              bool depth_test) {
-    segment_open_ = start_chunk(vp, clip, depth_test);
-    return segment_open_;
+    start_chunk(vp, clip, depth_test);
+    segment_open_ = true;
 }
 
 void BatchCore::close_segment() {
@@ -276,9 +277,7 @@ std::uint32_t BatchCore::texture_slot(std::uint32_t texture_id) {
     // split inherits the segment's VP, clip and depth mode - it is the same
     // segment.
     const Mat4 vp = chunk.vp;
-    if (!start_chunk(vp, chunk.clip, chunk.depth_test)) {
-        return kMaxTexturesPerChunk;
-    }
+    start_chunk(vp, chunk.clip, chunk.depth_test);
     chunks_.back().texture_ids[0] = texture_id;
     chunks_.back().texture_count = 1;
     return 0;
@@ -290,15 +289,11 @@ bool BatchCore::push_quad(const float (&pos)[4][3], const float (&uv)[4][2],
         ++dropped_quads_;
         return false;
     }
-    if (vertices_.size() + 4 > kMaxVerticesPerFrame) {
-        ++dropped_quads_;
-        return false;
-    }
-    const std::uint32_t slot = texture_slot(texture_id);
-    if (slot >= kMaxTexturesPerChunk) {
-        ++dropped_quads_;
-        return false;
-    }
+    // Chunked tier: the chunk-local table slot (with splits). Bindless
+    // tier: the global registry id - the shader's table is the registry,
+    // so no remap, no split, and the chunk's own table stays empty.
+    const std::uint32_t tex_index =
+        global_tex_ids_ ? texture_id : texture_slot(texture_id);
     for (int i = 0; i < 4; ++i) {
         Vertex v;
         v.pos[0] = pos[i][0];
@@ -310,7 +305,7 @@ bool BatchCore::push_quad(const float (&pos)[4][3], const float (&uv)[4][2],
         v.color[3] = color[3];
         v.uv[0] = uv[i][0];
         v.uv[1] = uv[i][1];
-        v.tex_index = static_cast<float>(slot);
+        v.tex_index = static_cast<float>(tex_index);
         vertices_.push_back(v);
     }
     ++chunks_.back().quad_count;
