@@ -447,6 +447,40 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   stack (a leaked `begin_layer` is reset by the next `begin_frame`),
   capped at depth 8 with the balanced-clamp overflow, and every pop is
   a no-op on an empty stack.
+- **Widget state + focus (M8).** Three distinct concepts: hot = under the
+  pointer, active = being pressed, focused = receives keyboard input
+  (`focused_` on GuiContext, beside hot/active). `state(id, bounds,
+  disabled=false)` is the one call widgets use instead of raw hit_test:
+  it runs exactly ONE hit_test (never a second path) and returns
+  `WidgetResult{hit, state}` — the hit plus the `WidgetState` derived off
+  it, so the two can never disagree. Priority is transient-first:
+  Disabled beats everything, then Pressed, Hovered; Focused is the
+  RESTING keyboard state — a focused widget under the pointer reports
+  Hovered and draws its ring off `is_focused()` instead. `disabled`
+  short-circuits BEFORE the hit-test: a disabled widget claims nothing
+  (not even a census entry — the widget under the same pointer may
+  claim) and drops held focus. Focus follows the PRESS EDGE: a fresh
+  press on a widget registered focusable this frame
+  (`register_focusable(id)`, call order = Tab order, before state())
+  takes the focus right there — a press that slips off and never clicks
+  keeps the focus it took; a press edge that lands on no focusable
+  (empty space, a plain widget) clears the focus at end_frame. Tab /
+  Shift+Tab (detected at end_frame off `keys::kTab` + shift held) and
+  `nav_next()`/`nav_previous()` queue moves resolved at end_frame as
+  one net step against the frame's registrations, wrapping; focus
+  outside the list restarts forward at the first, backward at the last.
+  A raised modal veil clears focus (`state()` drops it while the widget
+  hit-tests under the veil) — a modal blocks the keyboard like the
+  pointer. Otherwise focus persists while the widget keeps running:
+  an id, not a claim — an absent widget keeps focus until a press
+  elsewhere or a Tab move takes it (the app decides whether that is
+  what it wants). Registration caps at `kMaxFocusables` = 128 with the
+  census's warn-once degrade; the registration-order list is the seam a
+  directional/gamepad nav would extend (register bounds alongside the
+  id) — deliberately deferred, not blocked. `keys::` (input_frame.hpp)
+  is the spelling of the keys with built-in behavior — Tab, Enter,
+  Space, the shifts — GLFW numbering, so core and widgets can never
+  disagree.
 - **Press cancel.** `cancel_pointer(id)` ends that pointer's press with
   no click: the active claim clears, the track flags `cancelled`, and
   it claims nothing until it lifts (`end_frame` lifts it with the
@@ -484,7 +518,10 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   long as any theme pointing at it is in use. A second face (a heading
   weight, say) grows a sibling field, not a rework of the pointer.
 - **Widgets** — all caller-state, all drawing through r2d, all drop-safe
-  headless: `button` (optional atlas icon + label), `checkbox`
+  headless: `button` (optional atlas icon + label; keyboard-takes-focus:
+  a press on one focuses it, Tab reaches it, Enter/Space activate the
+  focused one exactly like a click, and the focused one wears a 1px
+  accent ring), `checkbox`
   (box + label, auto-sized row), `slider_float`/`slider_int`
   (click-to-set and drag are one rule: the owner maps the pointer while
   pressed), `begin_panel`/`end_panel` (chrome + clip + id scope + layout
@@ -568,7 +605,12 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `begin_scroll_panel`/`end_scroll_panel`, plus layer scopes — the
   `Layer` strata (base/popup/tooltip/modal) with `begin_layer`/
   `end_layer`/`current_layer`, one numbering for both hit-testing and
-  r2d draw order. Hot/active are per pointer:
+  r2d draw order. Widget state + keyboard focus: `state(id, bounds,
+  disabled)` (one hit-test, `WidgetResult` = hit + `WidgetState`),
+  `register_focusable(id)` (call order = Tab order), `is_focused(id)`,
+  `set_focus(id)` (kInvalidWidgetId clears), `nav_next()`/
+  `nav_previous()` (queued, resolved at end_frame), the `keys::`
+  constants for the built-in key spellings. Hot/active are per pointer:
   `hot_id()`/`active_id()` default to the mouse and take a pointer id;
   `is_hot(id, pointer)`/`is_active(id, pointer)` are the am-I spelling
   (the invalid id pinned to false); `owning_pointer(widget_id)` and

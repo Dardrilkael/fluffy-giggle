@@ -60,6 +60,20 @@ struct PointerView {
     bool released = false;
 };
 
+// The GLFW key codes the gui itself gives meaning to: Tab cycles focus,
+// Shift+Tab cycles back, Enter and Space activate the focused widget. Apps
+// keep using raw GLFW numbers for everything else (the arrays in
+// InputFrame are indexed by them); these exist so the gui core and its
+// widgets can never disagree about the spelling of the few keys with
+// built-in behavior.
+namespace keys {
+inline constexpr int kTab = 258;          // GLFW_KEY_TAB
+inline constexpr int kEnter = 257;         // GLFW_KEY_ENTER
+inline constexpr int kSpace = 32;          // GLFW_KEY_SPACE
+inline constexpr int kLeftShift = 340;      // GLFW_KEY_LEFT_SHIFT
+inline constexpr int kRightShift = 341;     // GLFW_KEY_RIGHT_SHIFT
+}  // namespace keys
+
 struct InputFrame {
     // GLFW mouse buttons run 0..7.
     static constexpr int kMaxMouseButtons = 8;

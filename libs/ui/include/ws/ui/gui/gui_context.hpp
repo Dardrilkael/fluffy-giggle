@@ -56,6 +56,29 @@ enum class Layer : std::uint32_t {
     modal = 40,   // a blocking veil: strictly lower strata go inert
 };
 
+// The visual state state() derives for a widget off its HitTest - one
+// enum for the faces a widget wears. Priority is transient-first:
+// Disabled beats everything (a disabled widget claims nothing, so no
+// other state can even arise), then Pressed, then Hovered; Focused is
+// the RESTING keyboard state - a focused widget under the pointer
+// reports Hovered and draws its focus ring off is_focused() instead.
+// Normal is nothing doing anything.
+enum class WidgetState : std::uint8_t {
+    Normal,
+    Hovered,
+    Pressed,
+    Focused,
+    Disabled,
+};
+
+// state()'s answer: the hit-test it performed plus the state derived off
+// it, both from ONE hit_test - the two can never disagree. A widget must
+// not hit-test again after this; the id is spent for the frame.
+struct WidgetResult {
+    HitTest hit;
+    WidgetState state = WidgetState::Normal;
+};
+
 // The immediate-mode gui core. Owns, per frame: the id scope stack, the
 // input snapshot, per-pointer hot/active tracking (the mouse and every
 // touch, each finger an independent pointer), and per-widget persistent
@@ -152,6 +175,50 @@ public:
     // state (kInvalidWidgetId claims nothing); `rect` is in gui space.
     HitTest hit_test(WidgetId id, const Rect& rect);
 
+    // state() is the focus-and-face half over hit_test: it runs exactly
+    // ONE hit_test (never a second path) and hands back its answer plus
+    // the WidgetState derived off it. `disabled` short-circuits BEFORE
+    // hit_test: a disabled widget claims nothing - no hover, no hot, no
+    // press, so another widget under the same pointer may claim it - and
+    // a focused widget that goes disabled drops the focus (it cannot
+    // hold what it cannot use).
+    //
+    // Focus is the keyboard's hot - a third concept beside hot (under
+    // the pointer) and active (being pressed): focused means RECEIVES
+    // KEYBOARD INPUT. A FRESH press on a widget registered focusable
+    // this frame takes the focus right there, at the press edge - the
+    // standard focus-follows-the-press, so a press that slips off its
+    // widget and never clicks still keeps the focus it took. A press
+    // edge that lands on no focusable (empty space, a plain widget)
+    // clears the focus at end_frame: clicking elsewhere means elsewhere.
+    // A focused widget hit-testing under a raised modal veil drops the
+    // focus the frame the veil rises - a modal blocks the keyboard like
+    // it blocks the pointer. Otherwise focus persists while the widget
+    // keeps running: it is an id, not a claim, and dies only by
+    // press-elsewhere, veil, or set_focus.
+    WidgetResult state(WidgetId id, const Rect& bounds, bool disabled = false);
+
+    // --- keyboard focus ---
+    // Registers `id` as focusable THIS frame, in call order - the frame's
+    // Tab order. Widgets call it during the frame, BEFORE their state()
+    // (a press's focus claim reads the registration). Ids past the
+    // registration cap drop with one warn per process; kInvalidWidgetId
+    // is refused (the sentinel is never focusable).
+    void register_focusable(WidgetId id);
+    // True when `id` holds the keyboard focus. kInvalidWidgetId is pinned
+    // false, like is_hot/is_active.
+    bool is_focused(WidgetId id) const;
+    // Moves the keyboard focus to `id` - kInvalidWidgetId clears it. No
+    // registration check: focus is just the id; the next press-elsewhere
+    // or Tab move applies the rules.
+    void set_focus(WidgetId id);
+    // Queue a focus move to the next / previous focusable in this
+    // frame's registration order (wrapping). Resolved at end_frame
+    // against the full registration list - Tab and Shift+Tab queue the
+    // same moves. Calls accumulate within a frame.
+    void nav_next();
+    void nav_previous();
+
     // Persistent-but-implicit per-widget state (scroll offsets, drag
     // accumulators, toggles), keyed by (type, widget id) and owned by the
     // context - never function-local statics, so a future retained layer
@@ -219,6 +286,10 @@ private:
     // mutates the slot's track, so only hit_test may call it, in its
     // slot order (mouse first).
     HitTest hit_test_pointer(WidgetId id, const Rect& rect, int slot);
+    // Whether `id` registered focusable this frame (the scan state()'s
+    // press-to-focus reads). Registration is a handful of ids, so the
+    // linear walk is the whole story.
+    bool is_registered_focusable(WidgetId id) const;
 
     IdStack ids_;
     InputFrame input_;  // copied in by begin_frame - the frame's snapshot
@@ -248,6 +319,27 @@ private:
     // about the same pointer), and how many slots are live this frame.
     std::array<PointerView, InputFrame::kMaxPointers> frame_pointers_{};
     int pointer_count_ = 0;
+
+    // --- keyboard focus (state()/register_focusable) ---
+    // The focused widget id - the keyboard's hot, beside the pointer's
+    // hot/active above. Persists across frames (focus is state, not a
+    // claim); moved by a press on a focusable, cleared by a press
+    // elsewhere or a modal veil, cycled by Tab.
+    WidgetId focused_ = kInvalidWidgetId;
+    // This frame's press landed on a focusable (state() latches it at
+    // the press edge) - end_frame's press-elsewhere clear holds its fire.
+    bool press_focused_ = false;
+    // Focus moves queued this frame (nav_next/nav_previous calls, plus
+    // the Tab edges end_frame reads itself), resolved as one net move
+    // against the frame's registrations at end_frame.
+    int pending_nav_ = 0;
+    // The frame's focusables in registration order - the Tab order.
+    // Fixed like the hit-test census: registration is a handful of
+    // pushes per frame, and the cap degrades loudly (a warn per process)
+    // rather than allocating mid-frame.
+    static constexpr int kMaxFocusables = 128;
+    std::array<WidgetId, kMaxFocusables> focusables_{};
+    int focusable_count_ = 0;
 
     std::map<std::type_index, std::unique_ptr<StateTableBase>> state_tables_;
 

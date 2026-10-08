@@ -2879,6 +2879,363 @@ TEST_CASE("layers: scopes nest, restore, and reset with the frame") {
     gui.end_frame();
 }
 
+// --- widget state + keyboard focus (M8) ---------------------------------------------
+
+TEST_CASE("state: derives Normal, Hovered, Pressed off one hit_test") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId w = IdStack{}.id("w");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // Idle: nothing doing anything.
+    gui.begin_frame(snap(200.0f, 200.0f));
+    const WidgetResult idle = gui.state(w, rect);
+    CHECK(idle.hit.hovered == false);
+    CHECK(idle.state == WidgetState::Normal);
+    gui.end_frame();
+
+    // Hover needs its settle frame (M7): the claim frame stays calm...
+    gui.begin_frame(snap(50.0f, 50.0f));
+    CHECK(gui.state(w, rect).state == WidgetState::Normal);
+    gui.end_frame();
+    // ...and the next frame reports the settled visual.
+    gui.begin_frame(snap(50.0f, 50.0f));
+    const WidgetResult hover = gui.state(w, rect);
+    CHECK(hover.hit.hovered);
+    CHECK(hover.state == WidgetState::Hovered);
+    gui.end_frame();
+
+    // Press outranks hover, wherever the pointer is.
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
+    const WidgetResult press = gui.state(w, rect);
+    CHECK(press.hit.pressed);
+    CHECK(press.state == WidgetState::Pressed);
+    gui.end_frame();
+}
+
+TEST_CASE("state: Focused is the resting keyboard state, under the pointer's") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId w = IdStack{}.id("w");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // Focus with the pointer far away: the widget wears Focused.
+    gui.begin_frame(snap(200.0f, 200.0f));
+    gui.set_focus(w);
+    CHECK(gui.is_focused(w));
+    CHECK(gui.state(w, rect).state == WidgetState::Focused);
+    gui.end_frame();
+
+    // Focus persists across frames - state, not a claim.
+    gui.begin_frame(snap(200.0f, 200.0f));
+    CHECK(gui.state(w, rect).state == WidgetState::Focused);
+    gui.end_frame();
+
+    // But the pointer's transient states outrank it...
+    gui.begin_frame(snap(50.0f, 50.0f));
+    (void)gui.state(w, rect);  // the claim frame
+    gui.end_frame();
+    gui.begin_frame(snap(50.0f, 50.0f));
+    const WidgetResult hovered = gui.state(w, rect);
+    CHECK(hovered.state == WidgetState::Hovered);
+    CHECK(gui.is_focused(w));  // ...without stealing the focus itself
+    gui.end_frame();
+
+    // And clearing the focus returns the widget to Normal.
+    gui.begin_frame(snap(200.0f, 200.0f));
+    gui.set_focus(kInvalidWidgetId);
+    CHECK(!gui.is_focused(w));
+    CHECK(gui.state(w, rect).state == WidgetState::Normal);
+    gui.end_frame();
+}
+
+TEST_CASE("state: disabled widgets claim nothing and hold no focus") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId w = IdStack{}.id("w");
+    const WidgetId above = IdStack{}.id("above");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // A fresh press inside BOTH rects: the disabled one runs first but
+    // must not claim - the enabled one above takes the press, hot and
+    // all. (The disabled id is not even censused: it never hit-tests.)
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
+    const WidgetResult off = gui.state(w, rect, true);
+    CHECK(off.state == WidgetState::Disabled);
+    CHECK(off.hit.pressed == false);
+    CHECK(off.hit.hovered == false);
+    const WidgetResult on = gui.state(above, rect);
+    CHECK(on.hit.pressed);
+    CHECK(on.state == WidgetState::Pressed);
+    CHECK(gui.active_id() == above);
+    CHECK(gui.hot_id() == above);
+    gui.end_frame();
+
+    // A focused widget that goes disabled drops the focus: it cannot
+    // hold what it cannot use.
+    gui.begin_frame(snap(200.0f, 200.0f));
+    gui.set_focus(w);
+    gui.end_frame();
+    gui.begin_frame(snap(200.0f, 200.0f));
+    const WidgetResult dropped = gui.state(w, rect, true);
+    CHECK(dropped.state == WidgetState::Disabled);
+    CHECK(!gui.is_focused(w));
+    gui.end_frame();
+}
+
+TEST_CASE("focus: a press on a focusable takes focus; a press elsewhere clears it") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId a = IdStack{}.id("a");
+    const WidgetId plain = IdStack{}.id("plain");
+    const Rect a_rect{0.0f, 0.0f, 100.0f, 100.0f};
+    const Rect plain_rect{200.0f, 0.0f, 100.0f, 100.0f};
+
+    // Press the focusable: focus lands at the press edge, the same frame.
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
+    gui.register_focusable(a);
+    CHECK(gui.state(a, a_rect).state == WidgetState::Pressed);
+    CHECK(gui.is_focused(a));
+    gui.end_frame();
+
+    // The release completes the click; focus stays (no new press edge).
+    gui.begin_frame(snap(50.0f, 50.0f, false, false, true));
+    (void)gui.state(a, a_rect);
+    CHECK(gui.is_focused(a));
+    gui.end_frame();
+
+    // An idle frame changes nothing.
+    gui.begin_frame(snap(50.0f, 50.0f));
+    (void)gui.state(a, a_rect);
+    CHECK(gui.is_focused(a));
+    gui.end_frame();
+
+    // A press on a plain (unregistered) widget is "elsewhere": the clear
+    // lands at that frame's end_frame. (Each press gets its lift frame:
+    // a held button cannot press again, and capture would rightly own
+    // the pointer through any fabricated second edge.)
+    gui.begin_frame(snap(250.0f, 50.0f, true, true));
+    (void)gui.hit_test(plain, plain_rect);
+    CHECK(gui.is_focused(a));  // until end_frame rules on it
+    gui.end_frame();
+    CHECK(!gui.is_focused(a));
+    gui.begin_frame(snap(250.0f, 50.0f, false, false, true));  // lift
+    gui.end_frame();
+
+    // Refocus, then a press on empty space (inside no widget at all)
+    // clears it the same way.
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
+    gui.register_focusable(a);
+    (void)gui.state(a, a_rect);
+    gui.end_frame();
+    gui.begin_frame(snap(50.0f, 50.0f, false, false, true));  // the click lands
+    (void)gui.state(a, a_rect);
+    gui.end_frame();
+    gui.begin_frame(snap(500.0f, 500.0f, true, true));
+    gui.end_frame();
+    CHECK(!gui.is_focused(a));
+    gui.begin_frame(snap(500.0f, 500.0f, false, false, true));  // lift
+    gui.end_frame();
+
+    // But a press on the focusable that slips off and never clicks KEEPS
+    // the focus it took at the edge: the press edge decides, not the
+    // completed click.
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
+    gui.register_focusable(a);
+    (void)gui.state(a, a_rect);
+    gui.end_frame();
+    gui.begin_frame(snap(400.0f, 400.0f, true));  // dragged away, held
+    (void)gui.state(a, a_rect);  // capture: still the press owner
+    CHECK(gui.is_focused(a));
+    gui.end_frame();
+    gui.begin_frame(snap(400.0f, 400.0f, false, false, true));  // release out
+    (void)gui.state(a, a_rect);  // no click - and the focus held anyway
+    CHECK(gui.is_focused(a));
+    gui.end_frame();
+}
+
+TEST_CASE("focus: Tab and Shift+Tab cycle registration order, wrapping") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId a = IdStack{}.id("a");
+    const WidgetId b = IdStack{}.id("b");
+    const WidgetId c = IdStack{}.id("c");
+
+    const auto frame = [&](bool tab, bool shift) {
+        InputFrame input = snap(200.0f, 200.0f);
+        input.key_pressed[keys::kTab] = tab;
+        input.key_down[keys::kLeftShift] = shift;
+        gui.begin_frame(input);
+        gui.register_focusable(a);  // registration order IS the Tab order
+        gui.register_focusable(b);
+        gui.register_focusable(c);
+        gui.end_frame();
+    };
+
+    // From nothing, Tab starts at the first registration.
+    frame(true, false);
+    CHECK(gui.is_focused(a));
+    frame(true, false);
+    CHECK(gui.is_focused(b));
+    frame(true, false);
+    CHECK(gui.is_focused(c));
+    frame(true, false);  // wraps forward
+    CHECK(gui.is_focused(a));
+
+    frame(true, true);  // wraps backward: a's predecessor is the last
+    CHECK(gui.is_focused(c));
+    frame(true, true);  // and walks back from there
+    CHECK(gui.is_focused(b));
+
+    frame(false, false);  // no Tab: nothing moves
+    CHECK(gui.is_focused(b));
+
+    // Focus outside this frame's registrations: forward restarts at the
+    // first, backward at the last.
+    gui.begin_frame(snap(200.0f, 200.0f));
+    gui.set_focus(kInvalidWidgetId);
+    gui.end_frame();
+    frame(true, false);
+    CHECK(gui.is_focused(a));
+    gui.begin_frame(snap(200.0f, 200.0f));
+    gui.set_focus(IdStack{}.id("gone"));  // never registered
+    gui.end_frame();
+    frame(true, true);
+    CHECK(gui.is_focused(c));
+}
+
+TEST_CASE("focus: nav_next/nav_previous queue moves resolved at end_frame") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId a = IdStack{}.id("a");
+    const WidgetId b = IdStack{}.id("b");
+    const WidgetId c = IdStack{}.id("c");
+
+    const auto frame = [&](int steps) {
+        gui.begin_frame(snap(200.0f, 200.0f));
+        gui.register_focusable(a);
+        gui.register_focusable(b);
+        gui.register_focusable(c);
+        for (int i = 0; i < steps; ++i) {
+            gui.nav_next();
+        }
+        for (int i = 0; i > steps; --i) {
+            gui.nav_previous();
+        }
+        CHECK(!gui.is_focused(b));  // mid-frame: nothing resolved yet
+        gui.end_frame();
+    };
+
+    frame(1);  // from nothing: the first registration
+    CHECK(gui.is_focused(a));
+    frame(2);  // two queued steps in one frame
+    CHECK(gui.is_focused(c));
+    frame(-1);
+    CHECK(gui.is_focused(b));
+
+    // No focusables registered: the move drops, focus survives.
+    gui.begin_frame(snap(200.0f, 200.0f));
+    gui.nav_next();
+    gui.end_frame();
+    CHECK(gui.is_focused(b));
+}
+
+TEST_CASE("focus: registration past the cap degrades loudly, never crashes") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    IdStack ids;
+
+    // The first registration survives; 200 more push the frame's list
+    // well past its cap - the overflow drops with one warn, and the
+    // move still lands on the first.
+    gui.begin_frame(snap(200.0f, 200.0f));
+    ids.push("cap");
+    const WidgetId first = ids.id("w");
+    gui.register_focusable(first);
+    for (int i = 0; i < 200; ++i) {
+        ids.push(i);
+        gui.register_focusable(ids.id("w"));
+        ids.pop();
+    }
+    gui.nav_next();
+    gui.end_frame();
+    CHECK(gui.is_focused(first));
+}
+
+TEST_CASE("layers: a modal veil clears focus under it") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId base_w = IdStack{}.id("base");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    gui.begin_frame(snap(200.0f, 200.0f));
+    gui.set_focus(base_w);
+    gui.register_focusable(base_w);
+    CHECK(gui.is_focused(base_w));
+    gui.end_frame();
+
+    // Chrome-first: the modal scope opens and closes at the top of the
+    // frame, and the veil stays up (M7). The base widget state()s later
+    // in the frame, under the veil - and drops the focus: a modal blocks
+    // the keyboard like it blocks the pointer.
+    gui.begin_frame(snap(200.0f, 200.0f));
+    gui.begin_layer(Layer::modal);
+    gui.end_layer();
+    const WidgetResult veiled = gui.state(base_w, rect);
+    CHECK(veiled.hit.hovered == false);  // M7's pointer block
+    CHECK(!gui.is_focused(base_w));      // M8's keyboard block
+    CHECK(veiled.state == WidgetState::Normal);
+    gui.end_frame();
+}
+
+TEST_CASE("button: Enter and Space activate the focused button") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    // Click the button first: the press takes the focus (buttons register
+    // focusable), the release completes the click.
+    gui.begin_frame(snap(60.0f, 12.0f, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!button(gui, layout, kDefaultChrome, "fire"));
+    layout.end_panel();
+    gui.end_frame();
+    gui.begin_frame(snap(60.0f, 12.0f, false, false, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(button(gui, layout, kDefaultChrome, "fire"));
+    layout.end_panel();
+    gui.end_frame();
+
+    // Pointer idle, focus held: Enter fires the button - and only it.
+    InputFrame key_enter = snap(200.0f, 200.0f);
+    key_enter.key_pressed[keys::kEnter] = true;
+    gui.begin_frame(key_enter);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(button(gui, layout, kDefaultChrome, "fire"));
+    CHECK(!button(gui, layout, kDefaultChrome, "other"));  // unfocused sibling
+    layout.end_panel();
+    gui.end_frame();
+
+    // Space does the same.
+    InputFrame key_space = snap(200.0f, 200.0f);
+    key_space.key_pressed[keys::kSpace] = true;
+    gui.begin_frame(key_space);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(button(gui, layout, kDefaultChrome, "fire"));
+    layout.end_panel();
+    gui.end_frame();
+
+    // Clearing the focus kills the key path: the same Space does nothing.
+    InputFrame key_none = snap(200.0f, 200.0f);
+    key_none.key_pressed[keys::kSpace] = true;
+    gui.begin_frame(key_none);
+    gui.set_focus(kInvalidWidgetId);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!button(gui, layout, kDefaultChrome, "fire"));
+    layout.end_panel();
+    gui.end_frame();
+}
+
 // --- multi-pointer hit-testing (a finger each) -------------------------------------
 
 TEST_CASE("hit_test: two pointers can press two widgets in the same frame") {

@@ -119,12 +119,34 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     // where hit-testing says the widget is.
     const WidgetId id = gui.ids().id(label);
     const Rect rect = layout.next(width, theme.control_height);
-    const HitTest hit = gui.hit_test(id, rect);
+    // Buttons are focusable: the registration precedes state() (a press's
+    // focus claim reads it), state() runs the one hit-test, and the
+    // keyboard gets its say below.
+    gui.register_focusable(id);
+    const WidgetResult result = gui.state(id, rect);
+    const HitTest& hit = result.hit;
+
+    // Keyboard activation: Enter or Space fires the focused button, like
+    // a click with no pointer involved. Edge-only (the frame the key went
+    // down) and only while THIS button holds the focus.
+    const bool key_clicked =
+        gui.is_focused(id) &&
+        (gui.input().key_pressed[keys::kEnter] ||
+         gui.input().key_pressed[keys::kSpace]);
+
+    // The focus ring: the on-accent as a 1px outline behind the face, so
+    // Tab navigation is legible. Skipped for degenerate rects - a
+    // zero-width face would show the ring with nothing in it.
+    if (gui.is_focused(id) && rect.width > 0.0f && rect.height > 0.0f) {
+        r2d::draw_rounded_quad(rect.x - 1.0f, rect.y - 1.0f,
+                               rect.width + 2.0f, rect.height + 2.0f,
+                               theme.corner_radius + 1.0f, theme.control_on);
+    }
 
     std::uint32_t face = theme.control_bg;
-    if (hit.pressed) {
+    if (result.state == WidgetState::Pressed) {
         face = theme.control_pressed;  // owned by the press, even if dragged away
-    } else if (hit.hovered) {
+    } else if (result.state == WidgetState::Hovered) {
         face = theme.control_hovered;
     }
     r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
@@ -171,7 +193,7 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
         }
     }
 
-    return hit.clicked;
+    return hit.clicked || key_clicked;
 }
 
 bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,

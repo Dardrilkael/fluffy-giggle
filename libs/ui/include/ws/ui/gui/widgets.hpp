@@ -35,6 +35,12 @@ namespace ws::ui::gui {
 // renders as a square at the left, inset clear of the rounded corners and
 // tinted white so the asset's own colors show; the label bar centers in
 // the room the icon leaves. `width` defaults to 120 px.
+//
+// Buttons take the keyboard: they register focusable (a press on one
+// takes the focus at the press edge, Tab reaches them), Enter and Space
+// activate the focused button exactly like a click, and the focused
+// button wears a 1px accent ring - the focus rules live on GuiContext
+// (state/register_focusable/is_focused).
 bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             const char* label, float width = 120.0f, r2d::Sprite icon = {});
 

@@ -29,6 +29,10 @@ bool census_full_warned = false;
 // overflowed scope keeps the deepest real stratum's value.
 bool layer_overflow_warned = false;
 
+// register_focusable ran past kMaxFocusables. Flagged once per process:
+// the ids past the cap are simply not focusable that frame.
+bool focus_overflow_warned = false;
+
 // MurmurHash3's fmix64 finalizer: one round of mixing turns the FNV id's
 // bits into a well-spread probe start for the census table.
 std::uint64_t mix_id(std::uint64_t x) {
@@ -59,6 +63,13 @@ void GuiContext::begin_frame(const InputFrame& input) {
     // frame - and the modal veil one raised lifts with it.
     layer_depth_ = 0;
     modal_layer_ = 0;
+    // The frame's focus bookkeeping resets; the focus ITSELF carries -
+    // focus is state, not a claim. Registration starts empty (widgets
+    // re-register as they run), no press has landed on a focusable yet,
+    // and no nav move is queued.
+    focusable_count_ = 0;
+    press_focused_ = false;
+    pending_nav_ = 0;
     // Adopt the frame's pointers: slot 0 is the mouse by construction,
     // the touches follow in first-contact order. Each pointer matches
     // last frame's track by id - active carries, and that carry IS the
@@ -101,6 +112,50 @@ void GuiContext::end_frame() {
             track.active = kInvalidWidgetId;
             track.cancelled = false;
         }
+    }
+
+    // Keyboard focus, pointer rule first so a stray press never overrides
+    // a Tab in the same frame. A press edge this frame that did not land
+    // on a focusable (state() latches the landing) is "clicking
+    // elsewhere": the focus clears. The press EDGE decides, not the
+    // completed click - a press on a focusable that slips off without
+    // clicking keeps the focus it took at the edge.
+    bool any_press = false;
+    for (int p = 0; p < count; ++p) {
+        any_press = any_press ||
+                    frame_pointers_[static_cast<std::size_t>(p)].pressed;
+    }
+    if (any_press && !press_focused_) {
+        focused_ = kInvalidWidgetId;
+    }
+    // Tab / Shift+Tab cycle this frame's registrations in order, wrapping.
+    // nav_next()/nav_previous() queued the same moves during the frame;
+    // resolving here, after every widget registered, is what makes the
+    // order the whole frame's. The net move lands mod the list - stepping
+    // one at a time and one net hop are the same landing.
+    if (input_.key_pressed[static_cast<std::size_t>(keys::kTab)]) {
+        const bool shift =
+            input_.key_down[static_cast<std::size_t>(keys::kLeftShift)] ||
+            input_.key_down[static_cast<std::size_t>(keys::kRightShift)];
+        pending_nav_ += shift ? -1 : 1;
+    }
+    if (pending_nav_ != 0 && focusable_count_ > 0) {
+        const int n = focusable_count_;
+        int idx = -1;
+        for (int i = 0; i < n; ++i) {
+            if (focusables_[static_cast<std::size_t>(i)] == focused_) {
+                idx = i;
+                break;
+            }
+        }
+        if (idx < 0) {
+            // Focus not among this frame's registrations (nothing set,
+            // cleared, or the widget did not register): forward restarts
+            // at the first, backward at the last.
+            idx = pending_nav_ > 0 ? n - 1 : 0;
+        }
+        idx = ((idx + pending_nav_) % n + n) % n;
+        focused_ = focusables_[static_cast<std::size_t>(idx)];
     }
 }
 
@@ -245,6 +300,54 @@ HitTest GuiContext::hit_test(WidgetId id, const Rect& rect) {
     return hit;
 }
 
+WidgetResult GuiContext::state(WidgetId id, const Rect& bounds,
+                               bool disabled) {
+    WidgetResult result;
+    if (disabled) {
+        // The short-circuit sits BEFORE hit_test on purpose: claims are
+        // exactly what a disabled widget must not make - no hover, no
+        // hot, no press - so the widget under the same pointer is free
+        // to claim it. It cannot hold the focus either: a widget that
+        // cannot act cannot keep the keyboard.
+        if (focused_ == id) {
+            focused_ = kInvalidWidgetId;
+        }
+        result.state = WidgetState::Disabled;
+        return result;
+    }
+    result.hit = hit_test(id, bounds);
+    // A raised veil blocks the keyboard like it blocks the pointer: the
+    // focused widget under it drops the focus rather than keeping an
+    // Enter that would click through the modal.
+    if (is_focused(id) && modal_layer_ > 0 &&
+        current_layer_value() < modal_layer_) {
+        focused_ = kInvalidWidgetId;
+    }
+    // Press-to-focus: the press edge on a focusable that registered this
+    // frame. hit.pressed holds for the whole drag, so the EDGE is the
+    // claiming pointer's own `pressed` flag - reading the edge, not the
+    // click, is what lets a press that slips off its widget keep the
+    // focus it took.
+    if (result.hit.pressed && result.hit.pointer != kNoPointer) {
+        const PointerView* view = pointer(result.hit.pointer);
+        if (view != nullptr && view->pressed &&
+            is_registered_focusable(id)) {
+            focused_ = id;
+            press_focused_ = true;
+        }
+    }
+    // The derived state, transient first: a pressed or hovered widget
+    // wears that; focus is the resting look between pointer visits.
+    if (result.hit.pressed) {
+        result.state = WidgetState::Pressed;
+    } else if (result.hit.hovered) {
+        result.state = WidgetState::Hovered;
+    } else if (is_focused(id)) {
+        result.state = WidgetState::Focused;
+    }
+    return result;
+}
+
 // One pointer's whole say in hit_test: claims hot/active on its slot's
 // track and reports what this slot saw. Only hit_test calls it, slot by
 // slot in its order - the track is shared per pointer, so any other
@@ -375,6 +478,48 @@ const PointerView* GuiContext::pointer(PointerId id) const {
         }
     }
     return nullptr;  // no such pointer this frame
+}
+
+void GuiContext::register_focusable(WidgetId id) {
+    if (id == kInvalidWidgetId) {
+        return;  // the "no widget" sentinel is never focusable
+    }
+    if (focusable_count_ >= kMaxFocusables) {
+        if (!focus_overflow_warned) {
+            focus_overflow_warned = true;
+            core::warn("ui: gui focusable registration clamped at 128 - "
+                       "widgets past the cap are not focusable this frame");
+        }
+        return;
+    }
+    focusables_[static_cast<std::size_t>(focusable_count_++)] = id;
+}
+
+bool GuiContext::is_registered_focusable(WidgetId id) const {
+    for (int i = 0; i < focusable_count_; ++i) {
+        if (focusables_[static_cast<std::size_t>(i)] == id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool GuiContext::is_focused(WidgetId id) const {
+    // Pinned like is_hot/is_active: "no widget" never matches, even
+    // though focused_ holds that very sentinel while nothing is focused.
+    return id != kInvalidWidgetId && focused_ == id;
+}
+
+void GuiContext::set_focus(WidgetId id) {
+    focused_ = id;  // kInvalidWidgetId is the clear
+}
+
+void GuiContext::nav_next() {
+    ++pending_nav_;  // resolved at end_frame, with the Tab moves
+}
+
+void GuiContext::nav_previous() {
+    --pending_nav_;
 }
 
 }  // namespace ws::ui::gui
