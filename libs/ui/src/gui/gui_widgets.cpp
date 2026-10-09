@@ -12,7 +12,9 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <string_view>
 
 namespace ws::ui::gui {
 namespace {
@@ -59,6 +61,18 @@ struct ScrollDragTrack {
 // confuses the survivor's bookkeeping.
 struct ScrollDragState {
     std::array<ScrollDragTrack, InputFrame::kMaxTouches> tracks{};
+};
+
+// drag_float's persistent half (the same side-table discipline): the grab
+// in flight - which pointer holds the press, where it started, and the
+// value it started from. The anchor is what makes the drag RELATIVE:
+// every frame maps the pointer's travel from the press, so no per-frame
+// delta bookkeeping exists and a frame skipped mid-drag resumes exactly
+// where the finger is.
+struct DragState {
+    PointerId pointer = kNoPointer;  // the grabbing pointer, while held
+    float anchor_x = 0.0f;      // the grab's pointer x
+    float anchor_value = 0.0f;  // the value at the grab
 };
 
 // The contact's track: its own slot, or a free one for a fresh press.
@@ -546,6 +560,175 @@ bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
     return hit.clicked || key_toggled;
 }
 
+bool collapsing_header(GuiContext& gui, LayoutCursor& layout,
+                       const ChromeTheme& theme, const char* label,
+                       bool& open, float width) {
+    // Fill-width, like button: a header wants its container's line.
+    if (width < 0.0f) {
+        width = layout.remaining_width();
+    }
+    width = std::max(width, 0.0f);  // a negative width would draw a mirrored quad
+
+    const WidgetId id = gui.ids().id(label);
+    const Rect rect = layout.next(width, theme.control_height);
+    // Full citizenship, like a checkbox: focusable, state() for the one
+    // hit-test plus the face, and the keyboard below.
+    gui.register_focusable(id);
+    const WidgetResult result = gui.state(id, rect);
+    const HitTest& hit = result.hit;
+
+    // Keyboard toggle: Enter or Space flips the focused header,
+    // edge-only - a click with no pointer involved.
+    const bool key_toggled =
+        gui.is_focused(id) &&
+        (gui.input().key_pressed[keys::kEnter] ||
+         gui.input().key_pressed[keys::kSpace]);
+
+    if (hit.clicked || key_toggled) {
+        open = !open;  // the caller's bool is the state; a click flips it
+    }
+
+    // The focus ring: the on-accent as a 1px outline behind the row, so
+    // Tab navigation is legible. Skipped for degenerate rows.
+    if (gui.is_focused(id) && rect.width > 0.0f && rect.height > 0.0f) {
+        r2d::draw_rounded_quad(rect.x - 1.0f, rect.y - 1.0f,
+                               rect.width + 2.0f, rect.height + 2.0f,
+                               theme.corner_radius + 1.0f, theme.control_on);
+    }
+
+    // The disabled look: the dead face for the row, the marker and the
+    // label dimmed through the one helper.
+    const float dim_by =
+        result.state == WidgetState::Disabled ? theme.disabled_alpha : 1.0f;
+
+    // The row: the faces a button wears, rounded by the theme.
+    std::uint32_t face = theme.control_bg;
+    if (result.state == WidgetState::Disabled) {
+        face = theme.control_disabled;
+    } else if (result.state == WidgetState::Pressed) {
+        face = theme.control_pressed;
+    } else if (result.state == WidgetState::Hovered) {
+        face = theme.control_hovered;
+    }
+    r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                           theme.corner_radius, face);
+
+    // The marker: a square inset like a checkbox's fill - the faint
+    // border color closed, the accent open. The state at a glance. The
+    // inset clears the row's rounded corners the same way the checkbox
+    // fill clears its box's (a heavily-rounded theme cannot let the
+    // square poke past the arcs).
+    const float box = theme.control_height;
+    const float inset = std::max(theme.check_inset, theme.corner_radius);
+    const float marker = box - 2.0f * inset;
+    if (marker > 0.0f) {
+        r2d::draw_quad(rect.x + inset, rect.y + inset, marker, marker,
+                       open ? dim(theme.control_on, dim_by) : theme.border);
+    }
+
+    // The label beside the marker, like a checkbox's - LEFT-aligned: a
+    // header reads from the left. Fitted to the room the marker leaves
+    // (minus a face inset each side).
+    const float gap = theme.spacing;
+    char scratch[128];
+    const LabelFit fit =
+        fit_text(label, std::max(0.0f, rect.width - box - gap -
+                                          2.0f * theme.label_inset),
+                 theme, scratch, sizeof(scratch));
+    if (fit.advance > 0.0f) {
+        if (theme.font != nullptr) {
+            r2d::draw_text(rect.x + box + gap,
+                           label_top(rect.y, rect.height, theme), fit.text,
+                           *theme.font, dim(theme.text, dim_by));
+        } else {
+            const float bar_height = rect.height * 0.5f;
+            r2d::draw_quad(rect.x + box + gap,
+                           rect.y + (rect.height - bar_height) * 0.5f,
+                           fit.advance, bar_height, dim(theme.text, dim_by));
+        }
+    }
+    // The answer is the state AFTER the flip: the caller's `if` places
+    // this frame's children when the click just opened it.
+    return open;
+}
+
+bool selectable(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
+               const char* label, bool selected, float width) {
+    // Fill-width, like button: list rows want their container's line.
+    if (width < 0.0f) {
+        width = layout.remaining_width();
+    }
+    width = std::max(width, 0.0f);  // a negative width would draw a mirrored quad
+
+    const WidgetId id = gui.ids().id(label);
+    const Rect rect = layout.next(width, theme.control_height);
+    gui.register_focusable(id);
+    const WidgetResult result = gui.state(id, rect);
+    const HitTest& hit = result.hit;
+
+    // Keyboard select: Enter or Space reports the focused row, edge-only
+    // - a click with no pointer involved. The selection itself stays
+    // the caller's to write.
+    const bool key_clicked =
+        gui.is_focused(id) &&
+        (gui.input().key_pressed[keys::kEnter] ||
+         gui.input().key_pressed[keys::kSpace]);
+
+    // The focus ring: the on-accent as a 1px outline behind the row.
+    // Skipped for degenerate rows.
+    if (gui.is_focused(id) && rect.width > 0.0f && rect.height > 0.0f) {
+        r2d::draw_rounded_quad(rect.x - 1.0f, rect.y - 1.0f,
+                               rect.width + 2.0f, rect.height + 2.0f,
+                               theme.corner_radius + 1.0f, theme.control_on);
+    }
+
+    const float dim_by =
+        result.state == WidgetState::Disabled ? theme.disabled_alpha : 1.0f;
+
+    // The face ladder EXCEPT the plain idle face: an unselected,
+    // unhovered row draws nothing at all - the bare list look. Hover,
+    // press and the disabled scope take the usual faces.
+    if (result.state == WidgetState::Disabled) {
+        r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                               theme.corner_radius, theme.control_disabled);
+    } else if (result.state == WidgetState::Pressed) {
+        r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                               theme.corner_radius, theme.control_pressed);
+    } else if (result.state == WidgetState::Hovered) {
+        r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                               theme.corner_radius, theme.control_hovered);
+    }
+
+    // The selection marker: a 3-px accent bar down the row's left edge -
+    // the v1 look, a hardcoded pixel like the separator's 2. It rides
+    // every face (or the bare row), dimmed under the disabled scope.
+    if (selected && rect.width > 0.0f && rect.height > 0.0f) {
+        r2d::draw_quad(rect.x, rect.y, 3.0f, rect.height,
+                       dim(theme.control_on, dim_by));
+    }
+
+    // The label, left-aligned past the bar's room (selected and
+    // unselected rows align), vertically centered: the theme font, or
+    // the fontless bar at the fitted advance.
+    char scratch[128];
+    const LabelFit fit =
+        fit_text(label, std::max(0.0f, rect.width - theme.check_inset -
+                                          theme.label_inset),
+                 theme, scratch, sizeof(scratch));
+    if (fit.advance > 0.0f) {
+        const float x = rect.x + theme.check_inset;
+        if (theme.font != nullptr) {
+            r2d::draw_text(x, label_top(rect.y, rect.height, theme), fit.text,
+                           *theme.font, dim(theme.text, dim_by));
+        } else {
+            const float bar_height = rect.height * 0.5f;
+            r2d::draw_quad(x, rect.y + (rect.height - bar_height) * 0.5f,
+                           fit.advance, bar_height, dim(theme.text, dim_by));
+        }
+    }
+    return hit.clicked || key_clicked;
+}
+
 void text(LayoutCursor& layout, const ChromeTheme& theme,
           const char* label, float width) {
     // Chrome: no id, no hit-test, no state - it lays out and draws, and
@@ -777,6 +960,137 @@ bool slider_int(GuiContext& gui, LayoutCursor& layout,
     // must not silently rewrite itself on idle frames.
     if (changed) {
         value = static_cast<int>(std::lround(v));
+    }
+    return changed;
+}
+
+bool drag_float(GuiContext& gui, LayoutCursor& layout,
+               const ChromeTheme& theme, const char* label, float& value,
+               float min, float max, float speed, float width) {
+    // Fill-width, like button: a negative width fills the rest of the
+    // line before the clamp keeps the draw sane.
+    if (width < 0.0f) {
+        width = layout.remaining_width();
+    }
+    width = std::max(width, 0.0f);  // a negative width would draw a mirrored quad
+    const WidgetId id = gui.ids().id(label);
+    const Rect rect = layout.next(width, theme.control_height);
+    gui.register_focusable(id);
+    const WidgetResult result = gui.state(id, rect);
+    const HitTest& hit = result.hit;
+
+    // The anchor: persistent state under the widget id, so the grab
+    // survives frames (and clear_persistent_state evicts it - the
+    // same side-table discipline as the scroll state).
+    DragState& drag = gui.persistent_state<DragState>(id);
+
+    bool changed = false;
+
+    // Grab-and-drag, not click-to-set: a press inside GRABS (the value
+    // does not jump - unlike a slider there is nothing to click-to-set),
+    // and while that pointer holds the press the value maps its travel
+    // from the ANCHOR, so no per-frame delta bookkeeping exists and a
+    // frame skipped mid-drag resumes exactly where the finger is. The
+    // sweep outlives the rect (hit.pressed stays true through the hold,
+    // press started inside), and a same-frame press+release never sees
+    // the pointer down - a plain click grabs and lifts, moving nothing.
+    const PointerView* owner = gui.pointer(hit.pointer);
+    if (hit.pressed && owner != nullptr && owner->down) {
+        if (drag.pointer == kNoPointer) {
+            drag.pointer = hit.pointer;
+            drag.anchor_x = owner->x;
+            drag.anchor_value = value;
+        }
+        if (drag.pointer == hit.pointer) {
+            const float mapped =
+                std::min(std::max(drag.anchor_value +
+                                      (owner->x - drag.anchor_x) * speed,
+                                  min),
+                         max);
+            // The NaN guard: a poisoned anchor (or caller value) maps to
+            // NaN, which never equals itself - the drag refuses rather
+            // than writing garbage.
+            if (mapped == mapped && mapped != value) {
+                value = mapped;
+                changed = true;
+            }
+        }
+    } else {
+        // Lift, cancel, or a pointer that never really pressed us: the
+        // grab ends, so the next press anchors fresh.
+        drag.pointer = kNoPointer;
+    }
+
+    // Keyboard: the arrows step the focused row - 1% of the range per
+    // press, like a slider; only a real move reports changed, and the
+    // same NaN guard holds.
+    if (gui.is_focused(id) && (gui.input().key_pressed[keys::kLeft] ||
+                               gui.input().key_pressed[keys::kRight])) {
+        const float step = (max - min) / 100.0f;
+        const float delta =
+            gui.input().key_pressed[keys::kRight] ? step : -step;
+        const float next = std::min(std::max(value + delta, min), max);
+        if (next == next && next != value) {
+            value = next;
+            changed = true;
+        }
+    }
+
+    // The focus ring: the on-accent as a 1px outline behind the row, so
+    // Tab navigation is legible. Skipped for degenerate rows.
+    if (gui.is_focused(id) && rect.width > 0.0f && rect.height > 0.0f) {
+        r2d::draw_rounded_quad(rect.x - 1.0f, rect.y - 1.0f,
+                               rect.width + 2.0f, rect.height + 2.0f,
+                               theme.corner_radius + 1.0f, theme.control_on);
+    }
+
+    // The disabled look: the dead face for the row, the value label
+    // dimmed through the one helper.
+    const float dim_by =
+        result.state == WidgetState::Disabled ? theme.disabled_alpha : 1.0f;
+
+    // The row: the faces a button wears, rounded by the theme - a drag
+    // value reads as a control, not a text line.
+    std::uint32_t face = theme.control_bg;
+    if (result.state == WidgetState::Disabled) {
+        face = theme.control_disabled;
+    } else if (result.state == WidgetState::Pressed) {
+        face = theme.control_pressed;
+    } else if (result.state == WidgetState::Hovered) {
+        face = theme.control_hovered;
+    }
+    r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                           theme.corner_radius, face);
+
+    // The combined "label: value" line (three decimals, the v1 spelling):
+    // the display cut first - a "##" suffix ids without drawing - then one
+    // snprintf into a local buffer; a label-less row shows the value
+    // alone. Fit_text truncates to the row's room (one padding each
+    // side), and the fit draws left-aligned like every widget label: the
+    // theme font, or the fontless bar at the fitted advance.
+    char value_buf[64];
+    const std::string_view display = label_display(label);
+    if (display.empty()) {
+        std::snprintf(value_buf, sizeof(value_buf), "%.3f", value);
+    } else {
+        std::snprintf(value_buf, sizeof(value_buf), "%.*s: %.3f",
+                      static_cast<int>(display.size()), display.data(),
+                      value);
+    }
+    char scratch[128];
+    const LabelFit fit =
+        fit_text(value_buf, std::max(0.0f, rect.width - 2.0f * theme.padding),
+                 theme, scratch, sizeof(scratch));
+    if (fit.advance > 0.0f) {
+        const float x = rect.x + theme.padding;
+        if (theme.font != nullptr) {
+            r2d::draw_text(x, label_top(rect.y, rect.height, theme), fit.text,
+                           *theme.font, dim(theme.text, dim_by));
+        } else {
+            const float bar_height = rect.height * 0.5f;
+            r2d::draw_quad(x, rect.y + (rect.height - bar_height) * 0.5f,
+                           fit.advance, bar_height, dim(theme.text, dim_by));
+        }
     }
     return changed;
 }

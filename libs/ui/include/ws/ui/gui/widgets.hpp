@@ -126,6 +126,33 @@ bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
                    const ChromeTheme& theme, const char* label, bool& value);
 
+// A collapsing header: a row that flips `open` on a click or Enter/
+// Space (the caller's bool IS the state) and returns it AFTER the flip,
+// so the content is the caller's `if` branch, exactly a tab strip's -
+// the header lays out only its own row. The marker square at the left
+// is the faint border color closed and the accent open; the label sits
+// beside it like a checkbox's, left-aligned. A negative `width` fills
+// the rest of the line (the default - headers want their container's
+// width). The same citizenship as a checkbox: focusable, the ring, and
+// a begin_disabled scope dims and deadens it as one.
+bool collapsing_header(GuiContext& gui, LayoutCursor& layout,
+                       const ChromeTheme& theme, const char* label,
+                       bool& open, float width = -1.0f);
+
+// A selectable row: true on a full click or Enter/Space - the selection
+// is the CALLER'S to keep (`selected` is display state the row reads
+// and never writes, so a click on the already-selected row still
+// reports true, unlike a radio - multi-select lists build on exactly
+// that). The selected row wears a 3-px accent bar down its left edge
+// (the v1 look, a hardcoded pixel like the separator's 2); an idle
+// unselected row draws NO face at all - the bare list look - while
+// hover, press and the disabled scope take the usual faces. The label
+// draws left-aligned past the bar's room, so selected and unselected
+// rows align. A negative `width` fills the rest of the line (the
+// default - list rows want their container's width).
+bool selectable(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
+               const char* label, bool selected, float width = -1.0f);
+
 // A horizontal slider, click-to-set AND drag: a press inside the track
 // jumps the value to the pointer and tracks it while held; the value
 // clamps to [min, max]. True on the frame the value moved. The track is
@@ -149,6 +176,25 @@ bool slider_float(GuiContext& gui, LayoutCursor& layout,
 bool slider_int(GuiContext& gui, LayoutCursor& layout,
                 const ChromeTheme& theme, const char* label, int& value,
                 int min, int max, float width = 120.0f);
+
+// A drag float: press inside to GRAB (the value does not jump - unlike
+// a slider there is nothing to click-to-set), then while the pointer
+// holds the press the value follows its horizontal travel at `speed`
+// per pixel, anchored where the grab landed, clamped to [min, max].
+// True on the frame the value moved. The grab outlives sweeps outside
+// the row (the press still owns it) and ends at the lift - and a plain
+// click (press and release with no travel) never moves the value. The
+// anchor lives in the context's persistent state under the widget's
+// id, so it survives frames and clear_persistent_state evicts it. The
+// row draws "label: value" (three decimals, the v1 spelling) fitted
+// and left-aligned. The keyboard steps the focused row 1% of the range
+// per arrow press, like a slider. Inside a begin_disabled scope the row
+// dims as one and no pointer or key can move the value. `width`
+// defaults to 120 px; a negative width fills the rest of the line.
+bool drag_float(GuiContext& gui, LayoutCursor& layout,
+                const ChromeTheme& theme, const char* label, float& value,
+                float min, float max, float speed = 1.0f,
+                float width = 120.0f);
 
 // A static label: lays out and draws, and that is all - no id, no
 // hit-test, nothing focusable, no GuiContext in the signature (chrome,

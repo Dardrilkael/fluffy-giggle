@@ -75,7 +75,7 @@ libs/ui/
       layout_cursor.hpp      # LayoutCursor: flowing layout + panel stack
       rect.hpp                # Rect + its geometry helpers (contains, edges, centers, expand/shrink) — the shared vocabulary
       theme.hpp               # ChromeTheme: every color/metric the widgets use, + the borrowed font
-      widgets.hpp            # button/checkbox/radio/toggle switch/slider/panel/tabs/scroll region + the statics (text/separator/progress) — the widget functions + fit_text
+      widgets.hpp            # button/checkbox/radio/toggle switch/slider/drag float/collapsing header/selectable/panel/tabs/scroll region + the statics (text/separator/progress) — the widget functions + fit_text
   src/
     app.cpp                  # pimpl: Vulkan context, swapchain, frame loop
     atlas_packer.h/.cpp      # pure-CPU shelf packer: atlas pages, sub-rects, gutters
@@ -694,11 +694,32 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   (checkbox semantics under a pill: the accent IS the track while on —
   dimmed, not deadened, under a disabled scope — and the knob snaps
   end-to-end, no travel animation in v1),
+  `collapsing_header`
+  (the caller's bool IS the open state: a click or Enter/Space flips it
+  and the return is the state AFTER the flip, so the content is the
+  caller's `if` branch exactly a tab strip's; the marker square at the
+  left is the faint border closed and the accent open, the label beside
+  it like a checkbox's; a negative width fills the line, the default),
+  `selectable`
+  (the selection is the CALLER's to keep: `selected` is display state
+  the row reads and never writes, so a click on the already-selected
+  row still reports true — the answer a multi-select list builds on;
+  the selected row wears a 3-px accent bar down its left edge, a
+  hardcoded pixel like the separator's 2, and an idle unselected row
+  draws NO face at all — the bare list look),
   `slider_float`/`slider_int`
   (click-to-set and drag are one rule: the owner maps the pointer while
   pressed; kLeft/kRight step the focused one — 1% of the range per
   press, int by 1, clamped to [min, max], changed reported only on a
   real move; a negative width fills the rest of the line),
+  `drag_float`
+  (a press inside GRABS — no click-to-set, and a plain click moves
+  nothing — then the held pointer maps its horizontal travel at `speed`
+  per px from the anchor in persistent state (a frame skipped mid-drag
+  resumes at the finger), clamped to [min, max], the sweep outliving
+  the row; kLeft/kRight step the focused row 1% of the range like a
+  slider; the row draws "label: value" (three decimals) fitted
+  left-aligned; width defaults 120, negative fills),
   `begin_panel`/`end_panel` (chrome + clip + id scope + layout panel
   flowing theme.spacing apart), `tab_bar` (the caller's int IS the
   selection; the strip
@@ -820,7 +841,8 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `clear_persistent_state` (the explicit eviction, by id or wholesale),
   `ChromeTheme`/
   `kDefaultChrome`, and `button`/`checkbox`/`radio`/`toggle_switch`/
-  `slider_float`/`slider_int`/`begin_panel`/`end_panel`/`tab_bar`/
+  `collapsing_header`/`selectable`/`slider_float`/`slider_int`/
+  `drag_float`/`begin_panel`/`end_panel`/`tab_bar`/
   `begin_scroll_panel`/`end_scroll_panel`, plus the M16 statics —
   `text`/`separator`/`progress` (no GuiContext in the signature), plus layer scopes — the
   `Layer` strata (base/popup/tooltip/modal) with `begin_layer`/

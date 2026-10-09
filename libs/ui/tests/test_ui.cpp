@@ -6961,6 +6961,452 @@ TEST_CASE("toggle_switch: checkbox semantics under the pill") {
     CHECK(music == true);
 }
 
+// --- the M17 widgets: the collapsing header, selectable, drag float (M17) ---
+
+TEST_CASE("collapsing_header: the flip, the child under it, the keyboard") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    bool open = false;
+    bool hdr = false;
+    int child_pokes = 0;
+
+    // The fill probe: a default-width header takes the whole line (the
+    // same remaining_width proof as a fill-width separator) and stands
+    // control_height tall.
+    gui.begin_frame(snap(200.0f, 200.0f));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    hdr = collapsing_header(gui, layout, kDefaultChrome, "opts", open);
+    CHECK(!hdr);  // closed: the return is the state, not the change
+    CHECK(layout.flow_extent() == 24.0f);
+    layout.same_line();
+    CHECK(layout.remaining_width() == 0.0f);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(open == false);
+
+    // A click opens: the press frame flips nothing, the release flips
+    // and returns the state AFTER it - so the child lays out on the very
+    // frame that opened it. The header row is (0,0,400,24).
+    gui.begin_frame(snap(4.0f, 12.0f, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    hdr = collapsing_header(gui, layout, kDefaultChrome, "opts", open);
+    CHECK(!hdr);
+    if (hdr) {
+        if (button(gui, layout, kDefaultChrome, "child", 60.0f)) ++child_pokes;
+    }
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(open == false);
+
+    gui.begin_frame(snap(4.0f, 12.0f, false, false, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    hdr = collapsing_header(gui, layout, kDefaultChrome, "opts", open);
+    CHECK(hdr);  // open AFTER the flip: the caller's if-branch runs now
+    if (hdr) {
+        if (button(gui, layout, kDefaultChrome, "child", 60.0f)) ++child_pokes;
+    }
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(open == true);
+
+    // The child is a full citizen inside the branch: it lays out at
+    // (0,24,60,24), it takes the focus at the press edge, it clicks.
+    gui.begin_frame(snap(30.0f, 36.0f, true, true));  // press on the child
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    hdr = collapsing_header(gui, layout, kDefaultChrome, "opts", open);
+    CHECK(hdr);  // an idle open frame still returns open
+    if (hdr) {
+        if (button(gui, layout, kDefaultChrome, "child", 60.0f)) ++child_pokes;
+    }
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(open == true);
+    CHECK(child_pokes == 0);  // the press frame clicks nothing
+
+    gui.begin_frame(snap(30.0f, 36.0f, false, false, true));  // the release
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    hdr = collapsing_header(gui, layout, kDefaultChrome, "opts", open);
+    CHECK(hdr);
+    if (hdr) {
+        if (button(gui, layout, kDefaultChrome, "child", 60.0f)) ++child_pokes;
+    }
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(open == true);
+    CHECK(child_pokes == 1);
+    CHECK(gui.is_focused(IdStack{}.id("child")));
+
+    // A click on the header closes it: the release frame flips and
+    // returns closed, so the child vanishes on that same frame (the
+    // click landed on the header, whose row never moved).
+    gui.begin_frame(snap(4.0f, 12.0f, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    hdr = collapsing_header(gui, layout, kDefaultChrome, "opts", open);
+    CHECK(hdr);
+    if (hdr) {
+        if (button(gui, layout, kDefaultChrome, "child", 60.0f)) ++child_pokes;
+    }
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(open == true);
+
+    gui.begin_frame(snap(4.0f, 12.0f, false, false, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    hdr = collapsing_header(gui, layout, kDefaultChrome, "opts", open);
+    CHECK(!hdr);  // closed AFTER the flip: no child this frame
+    if (hdr) {
+        if (button(gui, layout, kDefaultChrome, "child", 60.0f)) ++child_pokes;
+    }
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(open == false);
+    CHECK(child_pokes == 1);  // the closing click never touched the child
+    CHECK(gui.is_focused(IdStack{}.id("opts")));  // the click owns the focus
+
+    // The keyboard toggles both ways off the click focus.
+    InputFrame key_enter = snap(200.0f, 200.0f);
+    key_enter.key_pressed[keys::kEnter] = true;
+    gui.begin_frame(key_enter);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    hdr = collapsing_header(gui, layout, kDefaultChrome, "opts", open);
+    CHECK(hdr);  // Enter opened it
+    if (hdr) {
+        if (button(gui, layout, kDefaultChrome, "child", 60.0f)) ++child_pokes;
+    }
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(open == true);
+
+    InputFrame key_space = snap(200.0f, 200.0f);
+    key_space.key_pressed[keys::kSpace] = true;
+    gui.begin_frame(key_space);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    hdr = collapsing_header(gui, layout, kDefaultChrome, "opts", open);
+    CHECK(!hdr);  // Space closed it
+    if (hdr) {
+        if (button(gui, layout, kDefaultChrome, "child", 60.0f)) ++child_pokes;
+    }
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(open == false);
+
+    // A disabled scope deadens the flip: the click cannot open it.
+    gui.begin_frame(snap(4.0f, 12.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    gui.begin_disabled();
+    hdr = collapsing_header(gui, layout, kDefaultChrome, "opts", open);
+    CHECK(!hdr);
+    gui.end_disabled();
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(open == false);  // the lock held
+}
+
+TEST_CASE("selectable: the caller keeps the selection, the row reports clicks") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    int chosen = 0;
+    bool ra = false, rb = false, rg = false;
+
+    // The single-select caller pattern: three fixed 60-px rows (alpha at
+    // y=0, beta y=24, gamma y=48 - the zero-spacing panel), the caller
+    // writing `chosen` from whichever row reported; the row itself
+    // reads `selected` and never writes a thing.
+    gui.begin_frame(snap(30.0f, 36.0f, false, true, true));  // click on beta
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    ra = selectable(gui, layout, kDefaultChrome, "alpha", chosen == 0, 60.0f);
+    rb = selectable(gui, layout, kDefaultChrome, "beta", chosen == 1, 60.0f);
+    rg = selectable(gui, layout, kDefaultChrome, "gamma", chosen == 2, 60.0f);
+    CHECK(layout.flow_extent() == 72.0f);  // three 24-px rows, no spacing
+    if (ra) chosen = 0;
+    if (rb) chosen = 1;
+    if (rg) chosen = 2;
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(ra == false);
+    CHECK(rb == true);
+    CHECK(rg == false);
+    CHECK(chosen == 1);
+
+    // The radio contrast: a click on the ALREADY-selected row still
+    // reports true - multi-select lists build on exactly that.
+    gui.begin_frame(snap(30.0f, 36.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    ra = selectable(gui, layout, kDefaultChrome, "alpha", chosen == 0, 60.0f);
+    rb = selectable(gui, layout, kDefaultChrome, "beta", chosen == 1, 60.0f);
+    rg = selectable(gui, layout, kDefaultChrome, "gamma", chosen == 2, 60.0f);
+    if (ra) chosen = 0;
+    if (rb) chosen = 1;
+    if (rg) chosen = 2;
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(rb == true);
+    CHECK(chosen == 1);  // and the caller's write is the same no-op
+
+    // A real move: gamma.
+    gui.begin_frame(snap(30.0f, 60.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    ra = selectable(gui, layout, kDefaultChrome, "alpha", chosen == 0, 60.0f);
+    rb = selectable(gui, layout, kDefaultChrome, "beta", chosen == 1, 60.0f);
+    rg = selectable(gui, layout, kDefaultChrome, "gamma", chosen == 2, 60.0f);
+    if (ra) chosen = 0;
+    if (rb) chosen = 1;
+    if (rg) chosen = 2;
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(rg == true);
+    CHECK(chosen == 2);
+    CHECK(gui.is_focused(IdStack{}.id("gamma")));
+
+    // Enter reports the focused row - and the already-selected focused
+    // row still reports true, like the click above.
+    InputFrame key_enter = snap(200.0f, 200.0f);
+    key_enter.key_pressed[keys::kEnter] = true;
+    gui.begin_frame(key_enter);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    ra = selectable(gui, layout, kDefaultChrome, "alpha", chosen == 0, 60.0f);
+    rb = selectable(gui, layout, kDefaultChrome, "beta", chosen == 1, 60.0f);
+    rg = selectable(gui, layout, kDefaultChrome, "gamma", chosen == 2, 60.0f);
+    if (ra) chosen = 0;
+    if (rb) chosen = 1;
+    if (rg) chosen = 2;
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(rg == true);
+    CHECK(chosen == 2);
+
+    // A click past the 60-px width hits nothing - and a press edge on
+    // empty space clears the keyboard focus (state()'s rule: clicking
+    // elsewhere means elsewhere).
+    gui.begin_frame(snap(80.0f, 12.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    ra = selectable(gui, layout, kDefaultChrome, "alpha", chosen == 0, 60.0f);
+    rb = selectable(gui, layout, kDefaultChrome, "beta", chosen == 1, 60.0f);
+    rg = selectable(gui, layout, kDefaultChrome, "gamma", chosen == 2, 60.0f);
+    if (ra) chosen = 0;
+    if (rb) chosen = 1;
+    if (rg) chosen = 2;
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(ra == false);
+    CHECK(rb == false);
+    CHECK(rg == false);
+    CHECK(chosen == 2);
+    CHECK(!gui.is_focused(IdStack{}.id("gamma")));  // the focus cleared
+
+    // A disabled scope deadens the rows: the click reports nothing and
+    // the selection stays the caller's untouched value.
+    gui.begin_frame(snap(30.0f, 12.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    gui.begin_disabled();
+    ra = selectable(gui, layout, kDefaultChrome, "alpha", chosen == 0, 60.0f);
+    rb = selectable(gui, layout, kDefaultChrome, "beta", chosen == 1, 60.0f);
+    rg = selectable(gui, layout, kDefaultChrome, "gamma", chosen == 2, 60.0f);
+    gui.end_disabled();
+    if (ra) chosen = 0;
+    if (rb) chosen = 1;
+    if (rg) chosen = 2;
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(ra == false);
+    CHECK(rb == false);
+    CHECK(rg == false);
+    CHECK(chosen == 2);  // the lock held
+}
+
+TEST_CASE("drag_float: grab, travel, clamp - and a plain click moves nothing") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    float value = 0.0f;
+    bool moved = false;
+
+    // The row: 120 px wide (the default), 24 tall at (0,0). Speed 0.01
+    // over [0, 1]: 10 px of travel is 0.1 of value.
+    gui.begin_frame(snap(10.0f, 12.0f, true, true));  // the press GRABS
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
+                       0.0f, 1.0f, 0.01f);
+    CHECK(moved == false);  // the grab never jumps the value
+    CHECK(layout.flow_extent() == 24.0f);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(value == doctest::Approx(0.0f));
+
+    // The drag: each hold frame maps the pointer's travel from the
+    // anchor - 30 px is 0.3, 80 px is 0.8, and a sweep past the row's
+    // 120-px edge still tracks (the press owns the grab).
+    gui.begin_frame(snap(40.0f, 12.0f, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
+                       0.0f, 1.0f, 0.01f);
+    CHECK(moved == true);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(value == doctest::Approx(0.3f));
+
+    gui.begin_frame(snap(90.0f, 12.0f, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
+                       0.0f, 1.0f, 0.01f);
+    CHECK(moved == true);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(value == doctest::Approx(0.8f));
+
+    gui.begin_frame(snap(200.0f, 12.0f, true));  // 190 px: past 1.0
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
+                       0.0f, 1.0f, 0.01f);
+    CHECK(moved == true);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(value == doctest::Approx(1.0f));  // clamped at the max
+
+    gui.begin_frame(snap(200.0f, 12.0f, true));  // no further move
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
+                       0.0f, 1.0f, 0.01f);
+    CHECK(moved == false);  // mapped == value: not a change
+    layout.end_panel();
+    gui.end_frame();
+
+    gui.begin_frame(snap(200.0f, 12.0f, false, false, true));  // the lift
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
+                       0.0f, 1.0f, 0.01f);
+    CHECK(moved == false);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(value == doctest::Approx(1.0f));
+
+    // A fresh grab anchors where it landed: the next drag maps from the
+    // CURRENT value, backwards too.
+    gui.begin_frame(snap(10.0f, 12.0f, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
+                       0.0f, 1.0f, 0.01f);
+    CHECK(moved == false);  // anchored at 1.0
+    layout.end_panel();
+    gui.end_frame();
+
+    gui.begin_frame(snap(0.0f, 12.0f, true));  // 10 px back = -0.1
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
+                       0.0f, 1.0f, 0.01f);
+    CHECK(moved == true);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(value == doctest::Approx(0.9f));
+
+    gui.begin_frame(snap(0.0f, 12.0f, false, false, true));  // the lift
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
+                       0.0f, 1.0f, 0.01f);
+    CHECK(moved == false);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(value == doctest::Approx(0.9f));
+
+    // A plain click (press and release in one frame, no travel) never
+    // moves the value - the one difference from a slider's click-to-set.
+    gui.begin_frame(snap(60.0f, 12.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
+                       0.0f, 1.0f, 0.01f);
+    CHECK(moved == false);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(value == doctest::Approx(0.9f));
+
+    // Focus the row by clicking it, then the arrows step it - 1% of the
+    // range per press, like a slider.
+    gui.begin_frame(snap(4.0f, 12.0f, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
+                       0.0f, 1.0f, 0.01f);
+    CHECK(moved == false);  // a zero-travel grab-and-lift moves nothing
+    layout.end_panel();
+    gui.end_frame();
+    gui.begin_frame(snap(4.0f, 12.0f, false, false, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
+                       0.0f, 1.0f, 0.01f);
+    CHECK(moved == false);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(gui.is_focused(IdStack{}.id("gain")));
+
+    InputFrame key_right = snap(200.0f, 200.0f);
+    key_right.key_pressed[keys::kRight] = true;
+    gui.begin_frame(key_right);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
+                       0.0f, 1.0f, 0.01f);
+    CHECK(moved == true);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(value == doctest::Approx(0.91f));
+
+    InputFrame key_left = snap(200.0f, 200.0f);
+    key_left.key_pressed[keys::kLeft] = true;
+    gui.begin_frame(key_left);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
+                       0.0f, 1.0f, 0.01f);
+    CHECK(moved == true);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(value == doctest::Approx(0.9f));
+
+    // The min clamp mirrors the max: a long sweep left parks at 0.
+    gui.begin_frame(snap(10.0f, 12.0f, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
+                       0.0f, 1.0f, 0.01f);
+    CHECK(moved == false);  // anchored at 0.9
+    layout.end_panel();
+    gui.end_frame();
+    gui.begin_frame(snap(-500.0f, 12.0f, true));  // far past the min
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
+                       0.0f, 1.0f, 0.01f);
+    CHECK(moved == true);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(value == doctest::Approx(0.0f));
+    gui.begin_frame(snap(-500.0f, 12.0f, false, false, true));  // the lift
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
+                       0.0f, 1.0f, 0.01f);
+    CHECK(moved == false);
+    layout.end_panel();
+    gui.end_frame();
+
+    // A disabled scope deadens the row: the grab cannot even start.
+    gui.begin_frame(snap(10.0f, 12.0f, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    gui.begin_disabled();
+    moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
+                       0.0f, 1.0f, 0.01f);
+    CHECK(moved == false);
+    gui.end_disabled();
+    layout.end_panel();
+    gui.end_frame();
+    gui.begin_frame(snap(40.0f, 12.0f, true));  // the hold, still dead
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    gui.begin_disabled();
+    moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
+                       0.0f, 1.0f, 0.01f);
+    CHECK(moved == false);
+    gui.end_disabled();
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(value == doctest::Approx(0.0f));  // the lock held
+}
+
 TEST_CASE("utf8 decode covers multibyte codepoints and forgives damage") {
     using ws::ui::r2d::font::utf8_next;
     const char* s = "";
