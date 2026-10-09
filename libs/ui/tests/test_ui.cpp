@@ -2019,6 +2019,65 @@ TEST_CASE("touch table: a repeated down for the same id updates in place") {
     CHECK(frame.touches[0].pressed);
 }
 
+TEST_CASE("touch table: a same-frame id reuse keeps the lift's release edge") {
+    using namespace ws::ui::gui;
+    InputFrame frame;
+    CHECK(frame.touch_down(PointerId{4}, 10.0f, 10.0f) == 0);
+    frame.touch_up(PointerId{4}, 12.0f, 12.0f, false);
+    // The platform hands id 4 to a new contact before next_frame() -
+    // Android recycles low ids fast. The lift's edge must survive the
+    // arrival: the slot reads pressed+released with down, up-then-down,
+    // the flags the gui needs to report the lift while the new contact
+    // claims fresh. (The defect: the arrival erased the release.)
+    CHECK(frame.touch_down(PointerId{4}, 30.0f, 30.0f) == 0);
+    CHECK(frame.touch_count == 1);
+    CHECK(frame.touches[0].id == PointerId{4});
+    CHECK(frame.touches[0].down);
+    CHECK(frame.touches[0].pressed);
+    CHECK(frame.touches[0].released);
+    CHECK(frame.touches[0].x == 30.0f);  // position is the new contact's:
+    CHECK(frame.touches[0].y == 30.0f);  // last-write, like the mouse's
+
+    // The bridge mirrors the reuse order-exactly: the lift mirrored its
+    // release, the new contact re-bridges and mirrors a fresh press - and
+    // never cleared the mirrored release (the mouse's own rule, which the
+    // touch side now matches).
+    CHECK(frame.bridged_touch() == PointerId{4});
+    CHECK(frame.mouse_down[0]);
+    CHECK(frame.mouse_pressed[0]);
+    CHECK(frame.mouse_released[0]);
+
+    // The frame boundary clears every edge; the survivor stays.
+    frame.next_frame();
+    CHECK(frame.touch_count == 1);
+    CHECK(frame.touches[0].down);
+    CHECK(!frame.touches[0].pressed);
+    CHECK(!frame.touches[0].released);
+}
+
+TEST_CASE("touch table: a recycled slot carries no stale release into a new contact") {
+    using namespace ws::ui::gui;
+    InputFrame frame;
+    frame.touch_down(PointerId{1}, 0.0f, 0.0f);
+    frame.touch_down(PointerId{2}, 1.0f, 1.0f);
+    frame.touch_down(PointerId{3}, 2.0f, 2.0f);
+    // 1 and 2 lift (2 cancelled); 3 survives. The boundary compacts 3
+    // into slot 0 and leaves 2's released+cancelled bytes sitting in
+    // slot 1, above the count - the next arrival is created straight on
+    // top of them, and must not inherit either edge.
+    frame.touch_up(PointerId{1}, 0.0f, 0.0f, false);
+    frame.touch_up(PointerId{2}, 1.0f, 1.0f, true);
+    frame.next_frame();
+    CHECK(frame.touch_count == 1);
+
+    CHECK(frame.touch_down(PointerId{9}, 5.0f, 5.0f) == 1);
+    CHECK(frame.touches[1].id == PointerId{9});
+    CHECK(frame.touches[1].down);
+    CHECK(frame.touches[1].pressed);
+    CHECK(!frame.touches[1].released);   // slot 1 held 2's released bytes
+    CHECK(!frame.touches[1].cancelled);  // ...and its cancelled bytes
+}
+
 TEST_CASE("primary-touch bridge: the first contact mirrors the mouse") {
     using namespace ws::ui::gui;
     InputFrame frame;
@@ -3484,6 +3543,181 @@ TEST_CASE("hit_test: the bridged finger is mouse and touch - one click") {
     CHECK(released.released);
     CHECK(released.clicked);
     CHECK(released.pointer == kMousePointerId);
+    gui.end_frame();
+}
+
+// --- same-frame touch id reuse (the ordered-input defect) --------------------------
+
+TEST_CASE("id reuse: lift and landing on one widget - the click fires, the press re-claims") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId id = IdStack{}.id("w");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // The finger presses in its own frame; the claim carries.
+    gui.begin_frame(touch_frame({{4, 50.0f, 50.0f, /*pressed=*/true}}));
+    CHECK(gui.hit_test(id, rect).pressed);
+    CHECK(gui.active_id(PointerId{4}) == id);
+    gui.end_frame();
+
+    // One pump, one id: the finger lifts at (50,50) and the platform
+    // hands its id to a new contact at (60,60) before next_frame(). The
+    // slot reads pressed+released with down - the widget must report the
+    // old lifetime's click AND hold the new contact's press: the release
+    // not lost to the arrival, the claim not lost to the release.
+    InputFrame reuse;
+    reuse.touch_down(PointerId{4}, 50.0f, 50.0f);  // the carried press,
+    reuse.touches[0].pressed = false;               // no edge of its own
+    reuse.touch_up(PointerId{4}, 50.0f, 50.0f, false);  // the lift, inside
+    reuse.touch_down(PointerId{4}, 60.0f, 60.0f);      // the landing, inside
+    gui.begin_frame(reuse);  // the bridge's raw mouse writes stay inert:
+                             // mouse_present false, touch is the pointer
+    const HitTest both = gui.hit_test(id, rect);
+    CHECK(both.released);  // the old lifetime's lift reported
+    CHECK(both.clicked);   // the lift was inside: the click fires
+    CHECK(both.pressed);   // the new contact's press is live on the widget
+    CHECK(gui.active_id(PointerId{4}) == id);  // re-claimed fresh
+    gui.end_frame();
+    CHECK(gui.active_id(PointerId{4}) == id);  // survived its own release
+                                               // edge (end_frame's gate)
+
+    // The re-claim carried - and the new contact's own lift clicks: two
+    // lifetimes, two clicks, neither stolen by the other.
+    gui.begin_frame(touch_frame({{4, 60.0f, 60.0f}}));
+    CHECK(gui.hit_test(id, rect).pressed);
+    CHECK(gui.active_id(PointerId{4}) == id);
+    gui.end_frame();
+    gui.begin_frame(touch_frame({{4, 60.0f, 60.0f, false, /*released=*/true}}));
+    const HitTest lift = gui.hit_test(id, rect);
+    CHECK(lift.released);
+    CHECK(lift.clicked);
+    CHECK(gui.active_id(PointerId{4}) == kInvalidWidgetId);
+    gui.end_frame();
+}
+
+TEST_CASE("id reuse: a landing on a different widget claims it fresh, no phantom click") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId held = IdStack{}.id("held");
+    const WidgetId tapped = IdStack{}.id("tapped");
+    const Rect held_rect{0.0f, 0.0f, 100.0f, 100.0f};
+    const Rect tapped_rect{200.0f, 0.0f, 100.0f, 100.0f};
+
+    gui.begin_frame(touch_frame({{4, 50.0f, 50.0f, /*pressed=*/true}}));
+    CHECK(gui.hit_test(held, held_rect).pressed);
+    gui.end_frame();
+
+    // The drag slid off `held`, the finger lifted there, and the new
+    // contact lands inside `tapped` - one pump, one id. The old owner
+    // reports the lift (no click: the pointer is off it at the lift and
+    // at the landing both); `tapped` takes the new press through its own
+    // press-claim block - and the lift's release edge must NOT read as
+    // tapped's click, the contact is still down.
+    InputFrame reuse;
+    reuse.touch_down(PointerId{4}, 150.0f, 50.0f);  // carried, slid off held
+    reuse.touches[0].pressed = false;
+    reuse.touch_up(PointerId{4}, 150.0f, 50.0f, false);  // the lift, off held
+    reuse.touch_down(PointerId{4}, 250.0f, 50.0f);      // lands inside tapped
+    gui.begin_frame(reuse);
+    const HitTest owner = gui.hit_test(held, held_rect);  // records first
+    CHECK(owner.released);   // the drag it owned ended
+    CHECK(!owner.clicked);  // off it: no click either way
+    CHECK(gui.active_id(PointerId{4}) == kInvalidWidgetId);  // freed
+    const HitTest newcomer = gui.hit_test(tapped, tapped_rect);
+    CHECK(newcomer.pressed);    // the new press claimed, fresh
+    CHECK(!newcomer.released);  // the lift was not THIS press's end
+    CHECK(!newcomer.clicked);   // ...so no phantom click on a held contact
+    CHECK(gui.active_id(PointerId{4}) == tapped);
+    gui.end_frame();
+    CHECK(gui.active_id(PointerId{4}) == tapped);  // survived end_frame
+
+    // The fresh claim carries; its lift is the click that counts.
+    gui.begin_frame(touch_frame({{4, 250.0f, 50.0f}}));
+    CHECK(gui.hit_test(tapped, tapped_rect).pressed);
+    CHECK(gui.active_id(PointerId{4}) == tapped);
+    gui.end_frame();
+    gui.begin_frame(touch_frame({{4, 250.0f, 50.0f, false, /*released=*/true}}));
+    const HitTest lift = gui.hit_test(tapped, tapped_rect);
+    CHECK(lift.released);
+    CHECK(lift.clicked);
+    CHECK(gui.active_id(PointerId{4}) == kInvalidWidgetId);
+    gui.end_frame();
+}
+
+TEST_CASE("id reuse: a same-frame tap is still a tap - no re-claim, no carried press") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId id = IdStack{}.id("tap");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // pressed+released with down false - the down-then-up order. The
+    // reuse machinery must leave the tap alone: claim, click, and clear
+    // in one frame, nothing carried into the next.
+    gui.begin_frame(touch_frame({{4, 50.0f, 50.0f, /*pressed=*/true,
+                                  /*released=*/true}}));
+    const HitTest tap = gui.hit_test(id, rect);
+    CHECK(tap.pressed);
+    CHECK(tap.released);
+    CHECK(tap.clicked);
+    CHECK(gui.active_id(PointerId{4}) == kInvalidWidgetId);  // ended in-frame
+    gui.end_frame();
+    CHECK(gui.active_id(PointerId{4}) == kInvalidWidgetId);  // stays ended
+
+    // A new contact with the same id presses next frame and claims
+    // cleanly - the tap's claim did not leak through the release gate.
+    gui.begin_frame(touch_frame({{4, 50.0f, 50.0f, /*pressed=*/true}}));
+    CHECK(gui.hit_test(id, rect).pressed);
+    gui.end_frame();
+}
+
+TEST_CASE("id reuse: the owner vanished - the stale claim still lifts with the release") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId gone = IdStack{}.id("gone");
+    const WidgetId next = IdStack{}.id("next");
+    const Rect gone_rect{0.0f, 0.0f, 100.0f, 100.0f};
+    const Rect next_rect{0.0f, 0.0f, 100.0f, 100.0f};  // the same pixels:
+                                                       // a rebuilt widget
+
+    // The press claims; the UI then swaps the widget out from under it.
+    gui.begin_frame(touch_frame({{4, 50.0f, 50.0f, /*pressed=*/true}}));
+    CHECK(gui.hit_test(gone, gone_rect).pressed);
+    gui.end_frame();
+
+    // The reuse frame with the owner GONE (a tab flip, a rebuild): no
+    // hit_test consumes the edge, so end_frame's unconsumed-release clear
+    // must see it. Before the fix the arrival erased the edge and the
+    // dead owner's claim lived on, blocking this pointer's hot and press
+    // claims for the new contact's whole lifetime.
+    InputFrame reuse;
+    reuse.touch_down(PointerId{4}, 50.0f, 50.0f);
+    reuse.touches[0].pressed = false;
+    reuse.touch_up(PointerId{4}, 50.0f, 50.0f, false);
+    reuse.touch_down(PointerId{4}, 50.0f, 50.0f);
+    gui.begin_frame(reuse);
+    const HitTest rebuilt = gui.hit_test(next, next_rect);  // the replacement
+    CHECK(!rebuilt.pressed);   // the carried claim is capture: not fresh,
+                               // not stealable - the new contact cannot
+                               // take what the vanished owner still holds
+    CHECK(!rebuilt.hovered);   // (and the settled hover was the old
+                               // owner's: hot_prev is not this widget)
+    CHECK(gui.active_id(PointerId{4}) == gone);  // ...and still holds
+    gui.end_frame();
+    CHECK(gui.active_id(PointerId{4}) == kInvalidWidgetId);  // the release
+                                                             // lifted it
+
+    // The new contact is claimable again: hover settles on it. Its press
+    // edge was spent in the reuse frame, though - it holds, but presses
+    // nothing (the one win a full ordered event queue would buy).
+    gui.begin_frame(touch_frame({{4, 50.0f, 50.0f}}));
+    const HitTest settled = gui.hit_test(next, next_rect);
+    CHECK(!settled.pressed);
+    CHECK(gui.is_hot(next, PointerId{4}));  // the claim the stale owner
+                                            // used to block (the mouse is
+                                            // absent: touch is the pointer)
+    gui.end_frame();
+    gui.begin_frame(touch_frame({{4, 50.0f, 50.0f}}));
+    CHECK(gui.state(next, next_rect).state == WidgetState::Hovered);
     gui.end_frame();
 }
 

@@ -115,6 +115,13 @@ struct InputFrame {
     // Returns the entry's slot, or -1 when the table is full (the caller
     // drops the contact and warns once). One down per contact is the
     // platform contract; a repeat updates in place instead of duplicating.
+    // A same-frame id reuse - touch_up then touch_down on one id before
+    // next_frame(), which Android's low pointer ids make common - keeps
+    // the lift's edges: the slot reads pressed+released with down, the
+    // flags the gui needs to report the lift while the new contact claims
+    // fresh. The position is the new contact's: one frame snapshots
+    // last-write position, order-exact edges (the mouse fields have the
+    // same rule).
     int touch_down(PointerId id, float x, float y);
     // Unknown ids are a no-op (the platform never moves an unreported
     // contact).

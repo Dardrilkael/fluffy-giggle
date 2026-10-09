@@ -109,7 +109,11 @@ public:
     // release frame (the UI changed mid-drag), per pointer, so stale
     // ownership never blocks the next frame's hot claims - and a
     // cancelled gesture's flag lifts with its pointer, so the platform
-    // may reuse the id for a fresh contact. Each pointer's resolved hot
+    // may reuse the id for a fresh contact. One release does not drop:
+    // a same-frame id reuse whose new contact re-claimed the press
+    // (hit_test's fingerprint is pressed+released with down) - the edge
+    // belonged to the lift that reported it, and the new contact keeps
+    // the claim it just took. Each pointer's resolved hot
     // becomes hot_prev: the settled hover next frame's hit tests report.
     // Tab moves queued this frame resolve here, against the frame's full
     // registration list; and a veil that lifts this frame hands the focus

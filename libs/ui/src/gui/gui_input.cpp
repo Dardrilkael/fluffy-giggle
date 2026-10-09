@@ -71,15 +71,32 @@ int InputFrame::touch_down(PointerId id, float x, float y) {
             return -1;  // the cap contract: the caller drops + warns once
         }
         slot = touch_count++;
-        touches[static_cast<std::size_t>(slot)].id = id;
+        TouchPoint& fresh = touches[static_cast<std::size_t>(slot)];
+        fresh.id = id;
+        fresh.released = false;   // a slot above the compacted count still
+        fresh.cancelled = false;  // holds a dropped contact's bytes - a new
+                                  // contact must not inherit its edges
     }
     TouchPoint& point = touches[static_cast<std::size_t>(slot)];
     point.x = x;
     point.y = y;
     point.down = true;
     point.pressed = true;
-    point.released = false;
-    point.cancelled = false;
+    // released/cancelled are deliberately NOT written on a found slot: a
+    // same-frame id reuse (a finger lifts and the platform hands its id to
+    // a new contact before next_frame() - Android recycles low ids fast)
+    // must not destroy the lift's edges. The slot then reads
+    // pressed+released with down - up-then-down, the flags the gui needs
+    // to report the old lifetime's release while the new contact claims
+    // fresh. A same-frame tap is down-then-up (pressed+released, down
+    // false) and stays exactly that; next_frame() clears every edge with
+    // the rest. The position, though, is the new contact's - one frame
+    // snapshots last-write position but order-exact edges, the same rule
+    // the mouse fields below live by (the bridge never cleared
+    // mouse_released here either).
+    // The primary-touch -> mouse bridge: the first contact of a gesture
+    // mirrors the mouse so single-finger use and ImGui keep working
+    // unchanged; later contacts only track.
     // The primary-touch -> mouse bridge: the first contact of a gesture
     // mirrors the mouse so single-finger use and ImGui keep working
     // unchanged; later contacts only track.

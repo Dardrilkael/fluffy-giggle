@@ -136,14 +136,22 @@ void GuiContext::end_frame() {
     // mid-drag - the UI changed) ends the press here, per pointer; stale
     // ownership would block the next frame's hot claims. A cancelled
     // gesture lifts with its pointer - the id is free for the fresh
-    // contact the platform may reuse it for. Each pointer's resolved hot
-    // becomes hot_prev on the way out: the settled hover next frame
-    // reports, straight from the last thing the claims resolved to.
+    // contact the platform may reuse it for. One exception: a same-frame
+    // id reuse whose new contact already re-claimed - a fresh claim with
+    // the pointer still down. The release edge belongs to the lift that
+    // reported it; clearing the re-claim would leave the new contact
+    // pressing nothing, so the gate reads released with !(fresh && down):
+    // a tap lifts (down false) and still clears, a carried press is never
+    // fresh and still clears, only the reuse's re-claim survives its own
+    // release edge. Each pointer's resolved hot becomes hot_prev on the
+    // way out: the settled hover next frame reports, straight from the
+    // last thing the claims resolved to.
     const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
     for (int p = 0; p < count; ++p) {
         PointerTrack& track = pointers_[static_cast<std::size_t>(p)];
         track.hot_prev = track.hot;
-        if (frame_pointers_[static_cast<std::size_t>(p)].released) {
+        if (frame_pointers_[static_cast<std::size_t>(p)].released &&
+            !(track.active_fresh && frame_pointers_[static_cast<std::size_t>(p)].down)) {
             track.active = kInvalidWidgetId;
             track.cancelled = false;
         }
@@ -550,11 +558,46 @@ HitTest GuiContext::hit_test_pointer(WidgetId id, const Rect& rect,
         part.pressed = true;  // owns a live press, wherever the pointer is
         part.pointer = view.id;  // this slot's claim; the fold keeps the
                                 // first slot that has one
-        if (view.released) {
+        // The release edge is the end of THIS press only when the press
+        // began before it: a carried press (not fresh) always ends here,
+        // and a fresh claim that lifts (down false) is a tap - claimed and
+        // clicked within one frame, reported as always. But a fresh claim
+        // still holding (fresh AND down) is a same-frame id reuse claimed
+        // through the press-claim block above - the release edge belongs
+        // to the OLD lifetime the platform recycled this id from, and
+        // must not read as this claim's click. Its owner reports it (a
+        // carried active, below the claim) or nobody does (end_frame's
+        // unconsumed-release clear).
+        if (view.released && !(track.active_fresh && view.down)) {
             part.released = true;   // the drag ended, inside or out
             part.clicked = inside;  // full click only if inside
             track.active = kInvalidWidgetId;  // the press is over either way
         }
+    }
+    // A same-frame id reuse on the widget that OWNED the lifted contact:
+    // the platform lifted a finger and handed its id to a new contact
+    // before next_frame() (Android recycles low ids fast), so the pointer
+    // reads pressed+released with down - the lift's edge still on the
+    // slot, the new contact's press edge with it. That triple is the
+    // reuse fingerprint: a tap lifts (down false), a carried press has
+    // no edges, nothing else reads all three. The release above reported
+    // the old lifetime on the carried active it just cleared - and the
+    // press-claim block cannot take the new contact's press, it ran
+    // before the release freed the claim, inside this same call. (A
+    // reuse landing elsewhere needs no help: the old owner's call freed
+    // the claim first, so the landing widget's own press-claim block
+    // takes it, and the guard above keeps the lift's edge off it.)
+    // Re-made here, fresh like any this-frame press: a later widget at a
+    // sufficient layer steals it (the topmost pixel clicks), while the
+    // old drag's capture protection died with its release. The click
+    // verdict above used this frame's final position - the new contact's
+    // - so a lift and a landing on opposite sides of this rect fold to
+    // one verdict; that is the frame snapshot's rule, the mouse's own.
+    if (view.pressed && view.released && view.down && inside &&
+        !track.cancelled && !blocked && track.active == kInvalidWidgetId) {
+        track.active = id;
+        track.active_layer = layer;
+        track.active_fresh = true;
     }
     return part;
 }

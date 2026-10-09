@@ -413,7 +413,14 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   an ImGui window sits. The frame carries the mouse, the key state and
   the multi-touch table (`touches`, up to `kMaxTouches` = 8 contacts,
   keyed by the platform's stable pointer ids; an entry lives through
-  its release frame, so a widget can still see who lifted).
+  its release frame, so a widget can still see who lifted). Same-frame
+  id reuse — a finger lifts and the platform hands its id to a new
+  contact before `next_frame()` (Android recycles low ids fast) — is
+  order-exact in the flags: the slot reads pressed+released with down,
+  so the gui reports the lift while the new contact claims fresh.
+  `touch_down` clears the edges only when it CREATES an entry (a
+  recycled slot's stale release never leaks into a new contact);
+  position is last-write, the mouse's own snapshot rule.
   `gather_pointers()` flattens the two into one uniform list — slot 0 is
   the mouse (id `kMousePointerId`) while `mouse_present`, the touches
   follow in arrival order — and `pointer_pos(id)` looks one up (an
@@ -437,7 +444,9 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   finger is not a mouse, and a lifting one must not unplug a real one.
   `begin_frame(frame_input())` adopts the snapshot;
   widgets run; `end_frame()` resolves the frame per pointer (a release
-  whose owner vanished is dropped, not misattributed).
+  whose owner vanished is dropped, not misattributed — but a
+  re-claimed same-frame id reuse keeps its claim: the release edge
+  belonged to the lift that reported it).
 - **Identity.** `WidgetId` is an FNV-1a hash of the id-stack scope plus a
   family tag and the label — same label, same scope, same id, stable
   across frames (that stability IS widget identity). Loop-generated
