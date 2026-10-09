@@ -365,6 +365,260 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     return hit.clicked || key_toggled;
 }
 
+bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
+           const char* label, int& value, int this_option) {
+    const WidgetId id = gui.ids().id(label);
+
+    // The row auto-sizes like a checkbox's: dot, a gap, the label's
+    // DISPLAY advance ("##" suffixes id the row, never size it).
+    const float gap = theme.spacing;
+    char scratch[128];
+    const LabelFit fit =
+        fit_text(label, -1.0f, theme, scratch, sizeof(scratch));
+    const float label_width = fit.advance;
+    const Rect rect =
+        layout.next(theme.control_height + gap + label_width,
+                    theme.control_height);
+    // Full citizenship, like a checkbox: focusable, state() for the one
+    // hit-test plus the face, and the keyboard below.
+    gui.register_focusable(id);
+    const WidgetResult result = gui.state(id, rect);
+    const HitTest& hit = result.hit;
+
+    // Keyboard select: Enter or Space picks the focused radio,
+    // edge-only - a click with no pointer involved.
+    const bool key_selected =
+        gui.is_focused(id) &&
+        (gui.input().key_pressed[keys::kEnter] ||
+         gui.input().key_pressed[keys::kSpace]);
+
+    // Selecting the selected option is an idempotent write that reports
+    // false: true means the selection MOVED to this option this frame.
+    const bool was_other = value != this_option;
+    if (hit.clicked || key_selected) {
+        value = this_option;
+    }
+
+    // The focus ring: the on-accent as a 1px outline behind the row, so
+    // Tab navigation is legible. Skipped for degenerate rows.
+    if (gui.is_focused(id) && rect.width > 0.0f && rect.height > 0.0f) {
+        r2d::draw_rounded_quad(rect.x - 1.0f, rect.y - 1.0f,
+                               rect.width + 2.0f, rect.height + 2.0f,
+                               theme.corner_radius + 1.0f, theme.control_on);
+    }
+
+    // The disabled look: the dead face for the dot, the fill and the
+    // label dimmed through the one helper.
+    const float dim_by =
+        result.state == WidgetState::Disabled ? theme.disabled_alpha : 1.0f;
+
+    // The dot: a control_height circle - the radius asks for half the
+    // box, exactly what the draw clamps to - with the faces a button
+    // wears.
+    std::uint32_t face = theme.control_bg;
+    if (result.state == WidgetState::Disabled) {
+        face = theme.control_disabled;
+    } else if (result.state == WidgetState::Pressed) {
+        face = theme.control_pressed;
+    } else if (result.state == WidgetState::Hovered) {
+        face = theme.control_hovered;
+    }
+    const float box = theme.control_height;
+    r2d::draw_rounded_quad(rect.x, rect.y, box, box, box * 0.5f, face);
+
+    // The selection: an accent circle inset by check_inset alone - the
+    // dot is all corner, no straight edge for a fill to poke past, so
+    // the checkbox's corner-radius clearance has nothing to clear.
+    // Drawn only while this option holds the value, and only when the
+    // dot leaves room.
+    const float fill = box - 2.0f * theme.check_inset;
+    if (value == this_option && fill > 0.0f) {
+        r2d::draw_rounded_quad(rect.x + theme.check_inset,
+                               rect.y + theme.check_inset, fill, fill,
+                               fill * 0.5f, dim(theme.control_on, dim_by));
+    }
+
+    // The label beside the dot, vertically centered - the same draw a
+    // checkbox's label gets.
+    if (fit.advance > 0.0f) {
+        if (theme.font != nullptr) {
+            r2d::draw_text(rect.x + box + gap,
+                           label_top(rect.y, rect.height, theme), fit.text,
+                           *theme.font, dim(theme.text, dim_by));
+        } else {
+            const float bar_height = rect.height * 0.5f;
+            r2d::draw_quad(rect.x + box + gap,
+                           rect.y + (rect.height - bar_height) * 0.5f,
+                           fit.advance, bar_height, dim(theme.text, dim_by));
+        }
+    }
+    return (hit.clicked || key_selected) && was_other;
+}
+
+bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
+                   const ChromeTheme& theme, const char* label, bool& value) {
+    const WidgetId id = gui.ids().id(label);
+
+    // The row auto-sizes like a checkbox's: the pill (twice the height
+    // wide, the height tall), a gap, the label's DISPLAY advance.
+    const float gap = theme.spacing;
+    const float box = theme.control_height;
+    const float track_w = 2.0f * box;
+    char scratch[128];
+    const LabelFit fit =
+        fit_text(label, -1.0f, theme, scratch, sizeof(scratch));
+    const float label_width = fit.advance;
+    const Rect rect = layout.next(track_w + gap + label_width, box);
+    gui.register_focusable(id);
+    const WidgetResult result = gui.state(id, rect);
+    const HitTest& hit = result.hit;
+
+    // Keyboard toggle: Enter or Space flips the focused switch,
+    // edge-only - a click with no pointer involved.
+    const bool key_toggled =
+        gui.is_focused(id) &&
+        (gui.input().key_pressed[keys::kEnter] ||
+         gui.input().key_pressed[keys::kSpace]);
+
+    if (hit.clicked || key_toggled) {
+        value = !value;  // the caller's bool is the state; a click flips it
+    }
+
+    // The focus ring: the on-accent as a 1px outline behind the row.
+    // Skipped for degenerate rows.
+    if (gui.is_focused(id) && rect.width > 0.0f && rect.height > 0.0f) {
+        r2d::draw_rounded_quad(rect.x - 1.0f, rect.y - 1.0f,
+                               rect.width + 2.0f, rect.height + 2.0f,
+                               theme.corner_radius + 1.0f, theme.control_on);
+    }
+
+    // The disabled look: the knob and the label dimmed through the one
+    // helper; the track's own dead face is the off state's, while the
+    // on state dims its accent (below) like the checkbox's fill.
+    const float dim_by =
+        result.state == WidgetState::Disabled ? theme.disabled_alpha : 1.0f;
+
+    // The pill: the control faces while off; the accent IS the track
+    // while on - dimmed under the disabled scope rather than deadened,
+    // so the state stays readable. The radius asks for half the height
+    // and clamps to exactly that: the full pill.
+    std::uint32_t face = theme.control_bg;
+    if (result.state == WidgetState::Disabled) {
+        face = theme.control_disabled;
+    } else if (result.state == WidgetState::Pressed) {
+        face = theme.control_pressed;
+    } else if (result.state == WidgetState::Hovered) {
+        face = theme.control_hovered;
+    }
+    if (value) {
+        face = dim(theme.control_on, dim_by);
+    }
+    r2d::draw_rounded_quad(rect.x, rect.y, track_w, box, box * 0.5f, face);
+
+    // The knob: a near-white circle (the text color - the bright head
+    // reads on both faces) filling the pill's height minus the check
+    // inset, SNAPPED to its end - off left, on right. No travel
+    // animation in v1: the frame clock's first consumer is the text
+    // caret, a later phase.
+    const float knob = box - 2.0f * theme.check_inset;
+    if (knob > 0.0f) {
+        const float x =
+            value ? rect.x + track_w - theme.check_inset - knob
+                  : rect.x + theme.check_inset;
+        r2d::draw_rounded_quad(x, rect.y + theme.check_inset, knob, knob,
+                               knob * 0.5f, dim(theme.text, dim_by));
+    }
+
+    // The label beside the pill, vertically centered - the same draw a
+    // checkbox's label gets.
+    if (fit.advance > 0.0f) {
+        if (theme.font != nullptr) {
+            r2d::draw_text(rect.x + track_w + gap,
+                           label_top(rect.y, rect.height, theme), fit.text,
+                           *theme.font, dim(theme.text, dim_by));
+        } else {
+            const float bar_height = rect.height * 0.5f;
+            r2d::draw_quad(rect.x + track_w + gap,
+                           rect.y + (rect.height - bar_height) * 0.5f,
+                           fit.advance, bar_height, dim(theme.text, dim_by));
+        }
+    }
+    return hit.clicked || key_toggled;
+}
+
+void text(LayoutCursor& layout, const ChromeTheme& theme,
+          const char* label, float width) {
+    // Chrome: no id, no hit-test, no state - it lays out and draws, and
+    // that is all. A caller wanting a faded label dims its own theme
+    // copy; the gui does not invent a Disabled state for something that
+    // cannot be disabled.
+    char scratch[128];
+    const LabelFit fit = fit_text(label, width < 0.0f ? -1.0f : width, theme,
+                                  scratch, sizeof(scratch));
+    // A negative width sizes the row to the label's DISPLAY advance -
+    // marker-cut, never truncated, like a checkbox's sizing fit (and a
+    // "##" suffix neither ids nor sizes anything here: it just never
+    // draws). A fixed width pins the row and truncates the label into
+    // it instead. fit_text's own tests own the truncation ladder.
+    const Rect rect =
+        layout.next(width < 0.0f ? fit.advance : width, theme.control_height);
+    if (fit.advance > 0.0f) {
+        if (theme.font != nullptr) {
+            r2d::draw_text(rect.x, label_top(rect.y, rect.height, theme),
+                           fit.text, *theme.font, theme.text);
+        } else {
+            const float bar_height = rect.height * 0.5f;
+            r2d::draw_quad(rect.x, rect.y + (rect.height - bar_height) * 0.5f,
+                           fit.advance, bar_height, theme.text);
+        }
+    }
+}
+
+void separator(LayoutCursor& layout, const ChromeTheme& theme, float width) {
+    // Fill-width, like button: a negative width means "the rest of the
+    // line", resolved against the cursor before the clamp.
+    if (width < 0.0f) {
+        width = layout.remaining_width();
+    }
+    width = std::max(width, 0.0f);  // a negative width would draw a mirrored quad
+    // A 2-px rule - a hardcoded pixel like the focus ring's 1, not a
+    // theme metric. theme.border is the faint line that never competes
+    // with content, and the flow's own spacing gives it air on both
+    // sides.
+    const Rect rect = layout.next(width, 2.0f);
+    r2d::draw_quad(rect.x, rect.y, rect.width, rect.height, theme.border);
+}
+
+void progress(LayoutCursor& layout, const ChromeTheme& theme,
+              float fraction, float width) {
+    // Fill-width, like button: a negative width means "the rest of the
+    // line", resolved against the cursor before the clamp.
+    if (width < 0.0f) {
+        width = layout.remaining_width();
+    }
+    width = std::max(width, 0.0f);  // a negative width would draw a mirrored quad
+    // Clamp to [0, 1], NaN-safe: the inverted comparisons catch a NaN
+    // (it fails >= 0) and read it as empty rather than letting it
+    // through to the draw.
+    if (!(fraction >= 0.0f)) {
+        fraction = 0.0f;
+    }
+    if (!(fraction <= 1.0f)) {
+        fraction = 1.0f;
+    }
+    const Rect rect = layout.next(width, theme.control_height);
+    r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                           theme.corner_radius, theme.control_bg);
+    // The fill: the accent over the track, rounded with the theme; the
+    // draw clamps the radius to the fill's own half-height, so a thin
+    // sliver reads as a dot rather than an over-rounded bar.
+    const float fill = fraction * rect.width;
+    if (fill > 0.0f) {
+        r2d::draw_rounded_quad(rect.x, rect.y, fill, rect.height,
+                               theme.corner_radius, theme.control_on);
+    }
+}
+
 namespace {
 
 // The body both sliders share: they differ only in the keyboard step

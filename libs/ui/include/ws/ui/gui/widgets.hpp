@@ -13,7 +13,11 @@ namespace ws::ui::gui {
 // widget: it lays out through the cursor, hit-tests through the context
 // under its id, emits its draws through r2d at the context's current
 // layer scope (base without a begin_layer), and returns the interaction
-// result. The functions hold no state of their own - everything
+// result. The static chrome - text, separator, progress - is the
+// exception on the last two seams: no id to hit-test under, nothing to
+// return, and no GuiContext in the signature at all, which is how the
+// set spells "this one cannot interact with you".
+// The functions hold no state of their own - everything
 // persistent lives in the GuiContext side tables - so a future
 // retained-mode tree could drive the same calls unchanged.
 //
@@ -91,6 +95,37 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
               const char* label, bool& value);
 
+// A radio button: true on the frame a click or Enter/Space MOVED the
+// group's selection to this option. `value` is the caller's group state
+// (one int shared by every radio of the group), `this_option` the value
+// a selection writes; an interaction on the already-selected option is
+// an idempotent write that reports false - true means "the selection is
+// this option now, and it was not a frame ago", the answer a caller
+// branching on the change wants. The dot is a control_height circle
+// with the faces a button wears; the selection is an accent circle
+// inset like the checkbox's fill. The row auto-sizes to dot + spacing +
+// the label's display advance and the hit area covers it whole. Radios
+// take the keyboard like checkboxes: focusable, Enter and Space select,
+// the focused row wears the ring. Inside a begin_disabled scope the row
+// dims as one and no click or key can move the selection.
+bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
+           const char* label, int& value, int this_option);
+
+// A toggle switch: checkbox semantics under a switch look - true on the
+// frame a full click or Enter/Space flipped `value` (the caller's bool
+// is the state; the widget holds none). The track is a pill twice the
+// control height wide and the height tall: the accent face while on
+// (dimmed under a disabled scope, not deadened - the state stays
+// readable, like the checkbox's fill) and the control faces while off.
+// The knob is a near-white circle snapped to its end - off left, on
+// right; no travel animation in v1 (the frame clock's first consumer
+// is the text caret, a later phase). The row auto-sizes to track +
+// spacing + the label's display advance, the hit area covers it whole,
+// the focused row wears the ring, and a begin_disabled scope dims and
+// deadens it as one.
+bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
+                   const ChromeTheme& theme, const char* label, bool& value);
+
 // A horizontal slider, click-to-set AND drag: a press inside the track
 // jumps the value to the pointer and tracks it while held; the value
 // clamps to [min, max]. True on the frame the value moved. The track is
@@ -114,6 +149,35 @@ bool slider_float(GuiContext& gui, LayoutCursor& layout,
 bool slider_int(GuiContext& gui, LayoutCursor& layout,
                 const ChromeTheme& theme, const char* label, int& value,
                 int min, int max, float width = 120.0f);
+
+// A static label: lays out and draws, and that is all - no id, no
+// hit-test, nothing focusable, no GuiContext in the signature (chrome,
+// like a panel's frame; a caller wanting a faded label dims its own
+// theme copy through dim()). The row is control_height tall. A negative
+// `width` sizes the row to the label's DISPLAY advance - "##" suffixes
+// never draw and never size anything here, and nothing truncates, like
+// a checkbox's sizing fit; any other width fixes the row and truncates
+// the label to it ("..." on the cut). Draws like every widget label:
+// the theme font, or the fontless bar at the fitted advance.
+void text(LayoutCursor& layout, const ChromeTheme& theme,
+          const char* label, float width = -1.0f);
+
+// A horizontal rule: a theme.border-colored 2-px line (a hardcoded
+// pixel like the focus ring's 1, not a theme metric) with the flow's
+// own spacing for air on both sides. A negative `width` fills the rest
+// of the current line, like button's.
+void separator(LayoutCursor& layout, const ChromeTheme& theme,
+               float width = -1.0f);
+
+// A progress bar: a control_height track in the control face with
+// `fraction` of it filled by the accent - clamped to [0, 1], and a NaN
+// reads as empty (the inverted comparisons catch it). Chrome like text:
+// no id, no hit-test. A negative `width` fills the rest of the current
+// line, like button's; the fill rounds with the theme's corners and
+// clamps to its own half-height when the fraction runs thin, so a
+// sliver reads as a dot rather than an over-rounded bar.
+void progress(LayoutCursor& layout, const ChromeTheme& theme,
+              float fraction, float width = -1.0f);
 
 // A panel: chrome (1px border frame + panel face), a clip rect at its
 // content area (children cannot draw outside it, whatever they submit), an

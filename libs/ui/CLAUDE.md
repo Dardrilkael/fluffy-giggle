@@ -75,7 +75,7 @@ libs/ui/
       layout_cursor.hpp      # LayoutCursor: flowing layout + panel stack
       rect.hpp                # Rect + its geometry helpers (contains, edges, centers, expand/shrink) — the shared vocabulary
       theme.hpp               # ChromeTheme: every color/metric the widgets use, + the borrowed font
-      widgets.hpp            # button/checkbox/slider/panel/tabs/scroll region — the widget functions + fit_text
+      widgets.hpp            # button/checkbox/radio/toggle switch/slider/panel/tabs/scroll region + the statics (text/separator/progress) — the widget functions + fit_text
   src/
     app.cpp                  # pimpl: Vulkan context, swapchain, frame loop
     atlas_packer.h/.cpp      # pure-CPU shelf packer: atlas pages, sub-rects, gutters
@@ -685,6 +685,15 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   width fills the rest of the line),
   `checkbox`
   (box + label, auto-sized row; Enter/Space toggle the focused one),
+  `radio`
+  (the caller's int IS the group: a click or Enter/Space writes
+  `this_option` and reports true only when the selection MOVED — an
+  interaction on the already-selected option is an idempotent no-op;
+  the dot is a circle, the selection an inset accent circle),
+  `toggle_switch`
+  (checkbox semantics under a pill: the accent IS the track while on —
+  dimmed, not deadened, under a disabled scope — and the knob snaps
+  end-to-end, no travel animation in v1),
   `slider_float`/`slider_int`
   (click-to-set and drag are one rule: the owner maps the pointer while
   pressed; kLeft/kRight step the focused one — 1% of the range per
@@ -731,6 +740,15 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   cosmetic limits: a drag-tracking child (a slider) can move <
   threshold px before the cancel fires, and the thumb grab's cancel
   lands one frame after the child claimed — the same class of lag).
+  The static chrome (M16) is the exception on the citizen seams: `text`
+  (a label row — a negative width sizes to the display advance like a
+  checkbox's sizing fit, a fixed width truncates into the row),
+  `separator` (a 2-px border rule, a hardcoded pixel like the focus
+  ring's 1) and `progress` (the fraction clamps to [0, 1], a NaN draws
+  empty; the fill rounds and clamps to its own half-height when thin)
+  take NO GuiContext at all — no id, no hit-test, nothing focusable;
+  the signature is how the set spells "cannot interact with you", and a
+  caller wanting a faded static dims its own theme copy.
 - **v1 limits, deliberate:** labels draw through the theme font's
   glyphs when one is set, the v1 quad bars otherwise — and both go
   through `fit_text`, so a label wider than its budget truncates on a
@@ -801,9 +819,10 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   truncating width pass; never allocates — the caller's scratch),
   `clear_persistent_state` (the explicit eviction, by id or wholesale),
   `ChromeTheme`/
-  `kDefaultChrome`, and `button`/`checkbox`/
+  `kDefaultChrome`, and `button`/`checkbox`/`radio`/`toggle_switch`/
   `slider_float`/`slider_int`/`begin_panel`/`end_panel`/`tab_bar`/
-  `begin_scroll_panel`/`end_scroll_panel`, plus layer scopes — the
+  `begin_scroll_panel`/`end_scroll_panel`, plus the M16 statics —
+  `text`/`separator`/`progress` (no GuiContext in the signature), plus layer scopes — the
   `Layer` strata (base/popup/tooltip/modal) with `begin_layer`/
   `end_layer`/`current_layer`, one numbering for both hit-testing and
   r2d draw order. Hit clips: `push_hit_clip(rect)`/`pop_hit_clip()`/

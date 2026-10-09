@@ -6642,6 +6642,325 @@ TEST_CASE("reset_warn_once: the once-per-process flags re-arm, any time") {
     gui.end_frame();
 }
 
+// --- the M16 widgets: static chrome + the click variants (M16) -------------------
+
+TEST_CASE("text: a static label sizes its row and never touches the focus") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    // Auto-width: the row is the label's DISPLAY advance wide. A raw
+    // zero-spacing panel pins it - same_line() parks the cursor after
+    // the row, so remaining_width() reads exactly what the text left.
+    gui.begin_frame(snap(400.0f, 400.0f));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    text(layout, kDefaultChrome, "Save");  // 4 chars x label_char_width 6
+    layout.same_line();
+    CHECK(layout.remaining_width() == 376.0f);  // 400 - 24: the row was 24
+    text(layout, kDefaultChrome, "Save##hidden");  // "##" never draws - and
+    layout.same_line();  // never sizes: the row is another 24, not 54
+    CHECK(layout.remaining_width() == 352.0f);
+    text(layout, kDefaultChrome, "Saving", 50.0f);  // a fixed width pins the
+    layout.same_line();                              // row whatever the label
+    CHECK(layout.remaining_width() == 302.0f);  // 352 - 50
+    CHECK(layout.flow_extent() == 24.0f);  // one line, control_height tall
+    layout.end_panel();
+    gui.end_frame();
+
+    // Chrome takes nothing from the pointer: focus the button, then
+    // click right over the text's rect - no press, no focus move - so
+    // the button keeps the focus.
+    gui.begin_frame(snap(50.0f, 12.0f, true, true));  // press inside the button
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    text(layout, kDefaultChrome, "Save");  // (0, 0, 24, 24)
+    layout.same_line();
+    (void)button(gui, layout, kDefaultChrome, "go", 100.0f);  // (24, 0, ...)
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(gui.is_focused(IdStack{}.id("go")));
+
+    gui.begin_frame(snap(10.0f, 12.0f, false, false, true));  // a full click
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);  // over the
+    text(layout, kDefaultChrome, "Save");                        // text's rect
+    layout.same_line();
+    (void)button(gui, layout, kDefaultChrome, "go", 100.0f);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(gui.is_focused(IdStack{}.id("go")));  // untouched: chrome took nothing
+}
+
+TEST_CASE("separator: a fill-width rule, 2 px of flow") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    gui.begin_frame(snap(400.0f, 400.0f));
+    (void)layout.begin_panel({0.0f, 0.0f, 100.0f, 100.0f}, 0.0f);
+    text(layout, kDefaultChrome, "above");
+    text(layout, kDefaultChrome, "below");
+    separator(layout, kDefaultChrome);    // a negative width fills the line
+    CHECK(layout.flow_extent() == 50.0f);  // 24 + 24 + the 2-px rule, flush
+    layout.same_line();
+    CHECK(layout.remaining_width() == 0.0f);  // it consumed the rest
+    layout.end_panel();
+
+    // A fixed width + the flow's own spacing for air: 8, rule, 8.
+    LayoutCursor spaced;
+    (void)spaced.begin_panel({0.0f, 0.0f, 100.0f, 100.0f}, 0.0f, 8.0f);
+    text(spaced, kDefaultChrome, "one");
+    separator(spaced, kDefaultChrome, 30.0f);
+    spaced.same_line();
+    CHECK(spaced.remaining_width() == 62.0f);  // 100 - 30 - the 8-px gap
+    text(spaced, kDefaultChrome, "two");  // rides the rule's line, taller
+    CHECK(spaced.flow_extent() == 56.0f);  // 24 + 8 + the line's tallest, 24
+    spaced.end_panel();
+    gui.end_frame();
+}
+
+TEST_CASE("progress: fractions clamp and the widths land like button's") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    gui.begin_frame(snap(400.0f, 400.0f));
+    (void)layout.begin_panel({0.0f, 0.0f, 100.0f, 100.0f}, 0.0f);
+    // Fractions outside [0, 1] and a NaN all draw drop-safe (headless,
+    // the draws vanish); the ROW stays a sane control_height either way.
+    progress(layout, kDefaultChrome, 0.5f);
+    progress(layout, kDefaultChrome, -3.0f);
+    progress(layout, kDefaultChrome, 2.0f);
+    progress(layout, kDefaultChrome,
+             std::numeric_limits<float>::quiet_NaN());
+    CHECK(layout.flow_extent() == 96.0f);  // 4 x control_height, flush panel
+    progress(layout, kDefaultChrome, 0.25f, 40.0f);  // a fixed width leaves
+    layout.same_line();                              // the rest of the line
+    CHECK(layout.remaining_width() == 60.0f);
+    progress(layout, kDefaultChrome, 1.0f);  // a negative width fills it,
+    layout.same_line();                       // like button's
+    CHECK(layout.remaining_width() == 0.0f);
+    layout.end_panel();
+    gui.end_frame();
+}
+
+TEST_CASE("radio: the group moves on a click or Enter, and only on a move") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    int difficulty = 0;  // "easy" holds it before anything runs
+
+    // The rows auto-size to dot + the label's display advance: "easy" is
+    // 24 + 4x6 = 48 wide, row 2 starts at y = 24, row 3 at y = 48
+    // (zero-spacing panel) - so a click past x = 48 misses row 1, and a
+    // click at y = 60 is "hard"'s.
+    gui.begin_frame(snap(4.0f, 12.0f, true, true));  // press over "easy"
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!radio(gui, layout, kDefaultChrome, "easy", difficulty, 0));
+    (void)radio(gui, layout, kDefaultChrome, "normal", difficulty, 1);
+    (void)radio(gui, layout, kDefaultChrome, "hard", difficulty, 2);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(difficulty == 0);  // the press frame selects nothing
+
+    // Releasing over the ALREADY-SELECTED option: an idempotent write
+    // that reports false - the selection never moved.
+    gui.begin_frame(snap(4.0f, 12.0f, false, false, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!radio(gui, layout, kDefaultChrome, "easy", difficulty, 0));
+    (void)radio(gui, layout, kDefaultChrome, "normal", difficulty, 1);
+    (void)radio(gui, layout, kDefaultChrome, "hard", difficulty, 2);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(difficulty == 0);
+    CHECK(gui.is_focused(IdStack{}.id("easy")));  // the press focused it
+
+    // A click past the row hits nothing.
+    gui.begin_frame(snap(100.0f, 12.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!radio(gui, layout, kDefaultChrome, "easy", difficulty, 0));
+    CHECK(!radio(gui, layout, kDefaultChrome, "normal", difficulty, 1));
+    CHECK(!radio(gui, layout, kDefaultChrome, "hard", difficulty, 2));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(difficulty == 0);
+
+    // A real move: click "hard" (row 3, y in [48, 72)). Every frame
+    // lays out all three rows - the release must find the row where
+    // the press landed, or the click vanishes.
+    gui.begin_frame(snap(4.0f, 60.0f, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    (void)radio(gui, layout, kDefaultChrome, "easy", difficulty, 0);
+    (void)radio(gui, layout, kDefaultChrome, "normal", difficulty, 1);
+    CHECK(!radio(gui, layout, kDefaultChrome, "hard", difficulty, 2));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(difficulty == 0);
+    gui.begin_frame(snap(4.0f, 60.0f, false, false, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    (void)radio(gui, layout, kDefaultChrome, "easy", difficulty, 0);
+    (void)radio(gui, layout, kDefaultChrome, "normal", difficulty, 1);
+    CHECK(radio(gui, layout, kDefaultChrome, "hard", difficulty, 2));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(difficulty == 2);
+    CHECK(gui.is_focused(IdStack{}.id("hard")));
+
+    // Enter on the focused, already-selected radio: a no-op that
+    // reports false.
+    InputFrame key_enter = snap(200.0f, 200.0f);
+    key_enter.key_pressed[keys::kEnter] = true;
+    gui.begin_frame(key_enter);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!radio(gui, layout, kDefaultChrome, "easy", difficulty, 0));
+    CHECK(!radio(gui, layout, kDefaultChrome, "normal", difficulty, 1));
+    CHECK(!radio(gui, layout, kDefaultChrome, "hard", difficulty, 2));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(difficulty == 2);
+
+    // The one-frame click carries a real move too - and back to "easy".
+    gui.begin_frame(snap(4.0f, 12.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(radio(gui, layout, kDefaultChrome, "easy", difficulty, 0));
+    CHECK(!radio(gui, layout, kDefaultChrome, "normal", difficulty, 1));
+    CHECK(!radio(gui, layout, kDefaultChrome, "hard", difficulty, 2));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(difficulty == 0);
+
+    // Tab walks the registrations without moving the selection, and
+    // Enter on the newly focused radio selects it exactly like a click.
+    InputFrame tab = snap(200.0f, 200.0f);
+    tab.key_pressed[keys::kTab] = true;
+    gui.begin_frame(tab);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!radio(gui, layout, kDefaultChrome, "easy", difficulty, 0));
+    CHECK(!radio(gui, layout, kDefaultChrome, "normal", difficulty, 1));
+    CHECK(!radio(gui, layout, kDefaultChrome, "hard", difficulty, 2));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(difficulty == 0);  // the focus moved, the selection did not
+    CHECK(gui.is_focused(IdStack{}.id("normal")));
+    gui.begin_frame(key_enter);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!radio(gui, layout, kDefaultChrome, "easy", difficulty, 0));
+    CHECK(radio(gui, layout, kDefaultChrome, "normal", difficulty, 1));
+    CHECK(!radio(gui, layout, kDefaultChrome, "hard", difficulty, 2));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(difficulty == 1);
+
+    // Space is the same key, one stop further down.
+    gui.begin_frame(tab);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    (void)radio(gui, layout, kDefaultChrome, "easy", difficulty, 0);
+    (void)radio(gui, layout, kDefaultChrome, "normal", difficulty, 1);
+    (void)radio(gui, layout, kDefaultChrome, "hard", difficulty, 2);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(gui.is_focused(IdStack{}.id("hard")));
+    InputFrame key_space = snap(200.0f, 200.0f);
+    key_space.key_pressed[keys::kSpace] = true;
+    gui.begin_frame(key_space);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!radio(gui, layout, kDefaultChrome, "easy", difficulty, 0));
+    CHECK(!radio(gui, layout, kDefaultChrome, "normal", difficulty, 1));
+    CHECK(radio(gui, layout, kDefaultChrome, "hard", difficulty, 2));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(difficulty == 2);
+
+    // A disabled scope deadens the whole group: no click can move it.
+    gui.begin_frame(snap(4.0f, 60.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    gui.begin_disabled();
+    CHECK(!radio(gui, layout, kDefaultChrome, "easy", difficulty, 0));
+    CHECK(!radio(gui, layout, kDefaultChrome, "normal", difficulty, 1));
+    CHECK(!radio(gui, layout, kDefaultChrome, "hard", difficulty, 2));
+    gui.end_disabled();
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(difficulty == 2);  // the lock held
+}
+
+TEST_CASE("toggle_switch: checkbox semantics under the pill") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    bool sound = false;
+    bool music = false;
+
+    // The rows auto-size to pill + the label's advance: "sound" is
+    // 48 + 5x6 = 78 wide, row 2 at y = 24 (zero-spacing panel).
+    gui.begin_frame(snap(4.0f, 12.0f, true, true));  // press over "sound"
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!toggle_switch(gui, layout, kDefaultChrome, "sound", sound));
+    (void)toggle_switch(gui, layout, kDefaultChrome, "music", music);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(sound == false);  // the press frame flips nothing
+
+    gui.begin_frame(snap(4.0f, 12.0f, false, false, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(toggle_switch(gui, layout, kDefaultChrome, "sound", sound));
+    (void)toggle_switch(gui, layout, kDefaultChrome, "music", music);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(sound == true);
+    CHECK(music == false);
+    CHECK(gui.is_focused(IdStack{}.id("sound")));
+
+    // Enter and Space flip the focused switch, like the checkbox.
+    InputFrame key_enter = snap(200.0f, 200.0f);
+    key_enter.key_pressed[keys::kEnter] = true;
+    gui.begin_frame(key_enter);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(toggle_switch(gui, layout, kDefaultChrome, "sound", sound));
+    (void)toggle_switch(gui, layout, kDefaultChrome, "music", music);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(sound == false);
+    InputFrame key_space = snap(200.0f, 200.0f);
+    key_space.key_pressed[keys::kSpace] = true;
+    gui.begin_frame(key_space);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(toggle_switch(gui, layout, kDefaultChrome, "sound", sound));
+    (void)toggle_switch(gui, layout, kDefaultChrome, "music", music);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(sound == true);
+
+    // A click on the second row flips only it; a click past the row's
+    // 78-px width hits nothing.
+    gui.begin_frame(snap(4.0f, 36.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!toggle_switch(gui, layout, kDefaultChrome, "sound", sound));
+    CHECK(toggle_switch(gui, layout, kDefaultChrome, "music", music));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(sound == true);
+    CHECK(music == true);
+    gui.begin_frame(snap(100.0f, 12.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!toggle_switch(gui, layout, kDefaultChrome, "sound", sound));
+    CHECK(!toggle_switch(gui, layout, kDefaultChrome, "music", music));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(sound == true);
+    CHECK(music == true);
+
+    // A disabled scope deadens the switch: the click cannot flip it.
+    gui.begin_frame(snap(4.0f, 12.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    gui.begin_disabled();
+    CHECK(!toggle_switch(gui, layout, kDefaultChrome, "sound", sound));
+    CHECK(!toggle_switch(gui, layout, kDefaultChrome, "music", music));
+    gui.end_disabled();
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(sound == true);  // the lock held
+    CHECK(music == true);
+}
+
 TEST_CASE("utf8 decode covers multibyte codepoints and forgives damage") {
     using ws::ui::r2d::font::utf8_next;
     const char* s = "";
