@@ -70,12 +70,12 @@ libs/ui/
     widgets.hpp               # window/text/button/checkbox/slider/plot_line/...
     gui/                      # the immediate-mode gui module (ws::ui::gui, no ImGui)
       gui_context.hpp        # GuiContext + HitTest + Layer: input snapshot, per-pointer hot/active, layer scopes + side tables
-      id_stack.hpp           # WidgetId hashing, the scoped id stack, ScopedId RAII
-      input_frame.hpp        # InputFrame: one frame's raw input — mouse, keys, multi-touch table; frame_input() getter
+      id_stack.hpp           # WidgetId hashing, the scoped id stack, ScopedId RAII, label_display
+      input_frame.hpp        # InputFrame: one frame's raw input — mouse, keys, dt_seconds clock, multi-touch table; frame_input() getter
       layout_cursor.hpp      # LayoutCursor: flowing layout + panel stack
       rect.hpp                # Rect + its geometry helpers (contains, edges, centers, expand/shrink) — the shared vocabulary
       theme.hpp               # ChromeTheme: every color/metric the widgets use, + the borrowed font
-      widgets.hpp            # button/checkbox/slider/panel/tabs/scroll region — the widget functions
+      widgets.hpp            # button/checkbox/slider/panel/tabs/scroll region — the widget functions + fit_text
   src/
     app.cpp                  # pimpl: Vulkan context, swapchain, frame loop
     atlas_packer.h/.cpp      # pure-CPU shelf packer: atlas pages, sub-rects, gutters
@@ -86,7 +86,7 @@ libs/ui/
     gui/                     # the gui module's out-of-line bodies, one concern per file:
       gui.cpp                # shell glue: frame_input()'s live accumulator tap
       gui_context.cpp        # GuiContext: per-pointer hot/active hit-testing, layer scopes + side tables
-      gui_id.cpp             # IdStack: FNV-1a scope-path hashing
+      gui_id.cpp             # IdStack: FNV-1a scope-path hashing - the label/index/reserved families
       gui_input.cpp          # InputFrame: touch table + the primary-touch -> mouse bridge
       gui_layout.cpp         # LayoutCursor: stacked flow panels
     gui_widgets.cpp          # the widget functions' bodies (lay out, hit-test, draw)
@@ -410,7 +410,11 @@ drive unchanged (that boundary is deliberate; don't paint it over).
 - **Input.** The shell accumulates raw input into one `InputFrame` per
   frame (`frame_input()`, drop-safe headless) — parallel to the
   ImGui-filtered `Event` stream, so gui widgets see the mouse even where
-  an ImGui window sits. The frame carries the mouse, the key state and
+  an ImGui window sits. `dt_seconds` is the frame clock: the SHELL writes
+  it once per pump (`App`'s main loop, a `steady_clock` delta) and
+  `next_frame()` clears edges but never it — the shell's next write is
+  the refresh — so hand-built frames and the headless `frame_input()`
+  read 0. The frame carries the mouse, the key state and
   the multi-touch table (`touches`, up to `kMaxTouches` = 8 contacts,
   keyed by the platform's stable pointer ids; an entry lives through
   its release frame, so a widget can still see who lifted). Same-frame
@@ -449,7 +453,16 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   belonged to the lift that reported it).
 - **Identity.** `WidgetId` is an FNV-1a hash of the id-stack scope plus a
   family tag and the label — same label, same scope, same id, stable
-  across frames (that stability IS widget identity). Loop-generated
+  across frames (that stability IS widget identity). `id(label)` speaks
+  the two marker spellings: a `##` suffix ids the FULL string but never
+  draws — `label_display()` cuts the display at the first marker —
+  while `###` REDIRECTS the id to the marker onward, one identity
+  behind two displays (`Play###pause` == `Pause###pause`, so a widget
+  can relabel without orphaning its state); plain labels hash exactly
+  as before. `internal_id(key)` is the reserved third family ('R' —
+  the gui's own state keys, "scroll"/"drag") that no user label can
+  spell; changing a reserved key orphans the old-keyed state,
+  deliberately. Loop-generated
   children must `ids().push(index)` between calls or they collide; the
   context censuses ids per frame (M7: a fixed 512-slot open-addressing
   table stamped by frame generation — cleared by bumping the stamp, so
@@ -604,7 +617,12 @@ drive unchanged (that boundary is deliberate; don't paint it over).
 - **Persistent state.** `persistent_state<T>(WidgetId)` returns a typed
   side-table entry keyed (type, id) — how a scroll offset survives frames
   and the panel vanishing for frames. Never a local static: if a widget
-  needs to remember, it keys here.
+  needs to remember, it keys here. Eviction is EXPLICIT (M14):
+  `clear_persistent_state()` empties every table,
+  `clear_persistent_state(WidgetId)` one widget's entries in every
+  table — there is deliberately no automatic one. Call between frames
+  (mid-frame, a scroll panel holds a live reference into its entry);
+  a cleared widget's state re-creates fresh on its next call.
 - **Layout.** `LayoutCursor` is a flowing cursor with a panel stack:
   `next(w, h, align = top)` places at the cursor — `Align::center`/
   `bottom` place within the line height SO FAR (the widget counts when
@@ -630,7 +648,11 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   eats a real ancestor — and every pop is a documented no-op on an empty
   stack, so unbalanced calls degrade, never corrupt.
 - **Theme.** `ChromeTheme` — the faces and the metrics (control height,
-  corner radius, padding, spacing, scroll speed, drag threshold) in one
+  corner radius, padding, spacing, scroll speed, drag threshold, and
+  the M14 label/scrollbar metrics: `label_char_width` — the fontless
+  6-px-per-byte estimate, `label_inset`, `check_inset`,
+  `slider_handle_width`, `scrollbar_thumb_width`,
+  `scrollbar_band_width`, `scrollbar_min_thumb`) in one
   plain struct,
   `kDefaultChrome` constexpr. `control_disabled` is the one dead face
   every widget's Disabled state wears (it covers idle, hover and press
@@ -652,7 +674,10 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   long as any theme pointing at it is in use. A second face (a heading
   weight, say) grows a sibling field, not a rework of the pointer.
 - **Widgets** — all caller-state, all drawing through r2d, all drop-safe
-  headless, and (M10) all citizens: every interactive widget registers
+  headless, all fitted (M14): every label runs through `fit_text` — the
+  `##` display cut, then the truncating width pass, the ONE fitter for
+  both sizing and drawing, so a row's width and what it draws cannot
+  disagree — and (M10) all citizens: every interactive widget registers
   focusable and drives through `state()` — focus, the 1px accent ring,
   keyboard control and the Disabled look are one story everywhere, not
   a button privilege: `button` (optional atlas icon + label; Enter/
@@ -707,8 +732,10 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   threshold px before the cancel fires, and the thumb grab's cancel
   lands one frame after the child claimed — the same class of lag).
 - **v1 limits, deliberate:** labels draw through the theme font's
-  glyphs when one is set, the v1 quad bars otherwise — and text cannot
-  truncate, so a label wider than its face drops instead of spilling;
+  glyphs when one is set, the v1 quad bars otherwise — and both go
+  through `fit_text`, so a label wider than its budget truncates on a
+  character boundary (never splitting a UTF-8 codepoint) to the
+  longest fitting prefix + `...` instead of dropping or spilling;
   the gui is screen-space only (the same
   space layout and hit-testing use); scroll is vertical-only (the wheel
   and the touch drag are both arbitrated — see Widgets); panels are
@@ -762,11 +789,18 @@ drive unchanged (that boundary is deliberate; don't paint it over).
 - `gui/` (`ws::ui::gui`): the immediate-mode widget layer — `GuiContext` +
   `frame_input()` (the frame's raw input: mouse — fields plus
   `mouse_present`, the platform's own yes/no on the device's existence,
-  without which the mouse is not a pointer at all —, keys and the
+  without which the mouse is not a pointer at all —, the frame clock
+  `dt_seconds` (the shell's one write per pump), keys and the
   multi-touch
   table — `touches`/`touch_count`, the platform-facing `touch_*` writers,
   `gather_pointers`, `pointer_pos`, `bridged_touch`), `LayoutCursor`,
-  `IdStack` (and `ScopedId`, its RAII scope guard), `ChromeTheme`/
+  `IdStack` (and `ScopedId`, its RAII scope guard) — `id(label)`'s
+  `##`/`###` marker semantics, `internal_id(key)` (the reserved
+  state-key family) and `label_display(label)` (the display cut) —
+  `LabelFit`/`fit_text` (the shared label fitter: display cut,
+  truncating width pass; never allocates — the caller's scratch),
+  `clear_persistent_state` (the explicit eviction, by id or wholesale),
+  `ChromeTheme`/
   `kDefaultChrome`, and `button`/`checkbox`/
   `slider_float`/`slider_int`/`begin_panel`/`end_panel`/`tab_bar`/
   `begin_scroll_panel`/`end_scroll_panel`, plus layer scopes — the
@@ -801,7 +835,8 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `GuiContext::begin_frame` and
   `end_frame`, inside the caller's r2d
   screen-space block; the state is the caller's, persistence lives in
-  the context's side tables.
+  the context's side tables (`persistent_state<T>`, evicted only by the
+  explicit `clear_persistent_state`).
 
 ## Backend invariants
 

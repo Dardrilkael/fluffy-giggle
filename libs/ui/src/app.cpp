@@ -1613,7 +1613,20 @@ struct App::Impl {
     }
 
     int main_loop(App& app) {
+        // The frame clock's "previous": the pump's own start, so the
+        // first frame's dt measures real time and not a default
+        // epoch's.
+        std::chrono::steady_clock::time_point previous =
+            std::chrono::steady_clock::now();
         for (;;) {
+            // The frame clock: seconds from the previous pump top -
+            // steady_clock, immune to wall-clock moves. One write per
+            // iteration, before next_frame (which keeps the field: this
+            // write IS its refresh).
+            const auto now = std::chrono::steady_clock::now();
+            gui_input_.dt_seconds =
+                std::chrono::duration<float>(now - previous).count();
+            previous = now;
             // Fresh gui input edges for this pump: the previous frame's
             // pressed/released/scroll/text clear, held state and position
             // stay. Iconified and surface-loss iterations never reach

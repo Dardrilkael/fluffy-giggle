@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <string_view>
 
 namespace ws::ui::gui {
 
@@ -69,7 +70,21 @@ public:
     // The id a widget labeled `label` has under the current scope,
     // WITHOUT pushing: hash(scope, label). Each widget derives its own
     // id through this, so its state stays keyed while its scope moves.
+    // "##" suffixes ride the id but never the display: "Save##one" ids
+    // as the whole string (see label_display for the drawing half). A
+    // "###" marker instead REDIRECTS the id to the marker onward, so
+    // "Play###pause" and "Pause###pause" are one widget - an id that
+    // survives its display text changing.
     WidgetId id(const char* label) const;
+
+    // A RESERVED id for the gui's own state keys ("scroll", "drag"),
+    // derived under the current scope like id() but family-tagged
+    // apart from every label and index, so a user widget labeled
+    // "scroll" can never collide with a scroll panel's internals - the
+    // two derivations share no hash stream. This is the one id
+    // spelling whose derivation is the lib's to change; a change
+    // orphans old-keyed state (scroll offsets reset).
+    WidgetId internal_id(const char* key) const;
 
     // Current scope depth (0 = root). Past the clamp this still counts
     // the overflowed pushes - honest bookkeeping for balanced pops.
@@ -98,5 +113,11 @@ public:
 private:
     IdStack& ids_;
 };
+
+// The drawing half of a label: the part before the first "##"/"###" -
+// "Save##one" displays as "Save", the suffix ids the widget and never
+// draws (see IdStack::id for the id semantics of each marker). A label
+// with no marker is its own display; a null label displays as empty.
+std::string_view label_display(const char* label);
 
 }  // namespace ws::ui::gui

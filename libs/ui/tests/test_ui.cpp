@@ -1921,6 +1921,27 @@ TEST_CASE("InputFrame::next_frame clears edges and keeps held state") {
     CHECK(frame.text_input.empty());
 }
 
+TEST_CASE("InputFrame: the frame clock survives next_frame - the shell's write is the refresh") {
+    using namespace ws::ui::gui;
+    InputFrame frame;
+    CHECK(frame.dt_seconds == 0.0f);  // a hand-built frame starts at 0
+
+    frame.dt_seconds = 1.0f / 120.0f;
+    frame.next_frame();
+    // next_frame clears EDGES; the clock is the SHELL's to refresh (its
+    // next write, once per pump) - a frame boundary between writes must
+    // not zero it.
+    CHECK(frame.dt_seconds == doctest::Approx(1.0f / 120.0f));
+
+    // And the context hands the shell's clock to widgets whole:
+    // begin_frame copies the snapshot, dt included.
+    GuiContext gui;
+    frame.dt_seconds = 0.25f;
+    gui.begin_frame(frame);
+    CHECK(gui.input().dt_seconds == doctest::Approx(0.25f));
+    gui.end_frame();
+}
+
 TEST_CASE("frame_input is drop-safe without a running app") {
     // Headless: the shell never installed an accumulator, so the public
     // getter answers an empty snapshot instead of dangling.
@@ -1931,6 +1952,7 @@ TEST_CASE("frame_input is drop-safe without a running app") {
     CHECK(frame.mouse_pressed[0] == false);
     CHECK(frame.key_pressed['D'] == false);
     CHECK(frame.scroll_dy == 0.0f);
+    CHECK(frame.dt_seconds == 0.0f);  // no shell ran: the clock reads 0
     CHECK(frame.text_input.empty());
     CHECK(frame.touch_count == 0);
     CHECK(frame.bridged_touch() == ws::ui::gui::kNoPointer);
@@ -2419,6 +2441,63 @@ TEST_CASE("IdStack: pop restores scope and overflow clamps at max depth") {
     // The overflow round trip corrupted nothing above the clamp.
     CHECK(ids.depth() == 1);
     CHECK(ids.id("widget") == outer_widget);
+}
+
+TEST_CASE("IdStack: label markers split id from display (## ids whole, ### redirects)") {
+    using namespace ws::ui::gui;
+    IdStack ids;
+
+    // "##": the FULL string ids - the suffix keys the widget's state
+    // without ever drawing - so each suffixed spelling is its own
+    // widget, distinct from the plain label and from other suffixes.
+    CHECK(ids.id("Save##one") != ids.id("Save"));
+    CHECK(ids.id("Save##one") != ids.id("Save##two"));
+    CHECK(ids.id("Save##one") == ids.id("Save##one"));
+
+    // The display half: the bytes before the first marker (which is
+    // also how "###" displays), the label itself when no marker rode
+    // it, empty for a null or a marker-only label.
+    CHECK(label_display("Save##one") == "Save");
+    CHECK(label_display("Pause###pause") == "Pause");
+    CHECK(label_display("plain") == "plain");
+    CHECK(label_display("###only") == "");
+    CHECK(label_display("##only") == "");
+    CHECK(label_display(nullptr) == "");
+
+    // "###": the id REDIRECTS to the marker onward - one identity
+    // behind two displays, so a widget can change its label without
+    // orphaning its state.
+    CHECK(ids.id("Play###pause") == ids.id("Pause###pause"));
+    CHECK(ids.id("Play###pause") != ids.id("Play###resume"));
+    CHECK(ids.id("Play###pause") != ids.id("Play"));
+    // ...and it stays a scoped id like any other.
+    const WidgetId at_root = ids.id("Play###pause");
+    ids.push("panel");
+    CHECK(ids.id("Play###pause") != at_root);
+    ids.pop();
+    CHECK(ids.id("Play###pause") == at_root);
+}
+
+TEST_CASE("IdStack: internal_id is the reserved family no label can spell") {
+    using namespace ws::ui::gui;
+    IdStack ids;
+
+    // The gui's own state keys never collide with the user widgets that
+    // happen to share their spelling - the families mix no hash stream.
+    CHECK(ids.internal_id("scroll") != ids.id("scroll"));
+    CHECK(ids.internal_id("scroll") != ids.id("##scroll"));
+    CHECK(ids.internal_id("scroll") != ids.id("###scroll"));
+    CHECK(ids.internal_id("scroll") != ids.internal_id("drag"));
+    CHECK(ids.internal_id(nullptr) != ids.id(""));
+
+    // Scoped like id(): re-derivation is stable, the scope moves it.
+    const WidgetId root_key = ids.internal_id("scroll");
+    ids.push("panel");
+    const WidgetId scoped_key = ids.internal_id("scroll");
+    CHECK(scoped_key != root_key);
+    CHECK(ids.internal_id("scroll") == scoped_key);
+    ids.pop();
+    CHECK(ids.internal_id("scroll") == root_key);
 }
 
 TEST_CASE("ScopedId: the destructor pops, even through an early return") {
@@ -3912,6 +3991,32 @@ TEST_CASE("persistent_state: keys values by (type, id) for the context's lifetim
     CHECK(fresh.persistent_state<float>(a) == 0.0f);
 }
 
+TEST_CASE("clear_persistent_state: the explicit eviction - by id, then wholesale") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const IdStack ids;
+    const WidgetId a = ids.id("a");
+    const WidgetId b = ids.id("b");
+
+    gui.persistent_state<float>(a) = 1.5f;
+    gui.persistent_state<float>(b) = 2.5f;
+    gui.persistent_state<int>(b) = 7;
+
+    // One widget's entries leave EVERY table; the neighbor keeps its
+    // place, type by type.
+    gui.clear_persistent_state(a);
+    CHECK(gui.persistent_state<float>(a) == 0.0f);  // re-created fresh
+    CHECK(gui.persistent_state<float>(b) == 2.5f);
+    CHECK(gui.persistent_state<int>(b) == 7);
+
+    // Wholesale: every table empties - the app's "this screen is never
+    // coming back". There is deliberately no automatic eviction; this
+    // call is the whole eviction story.
+    gui.clear_persistent_state();
+    CHECK(gui.persistent_state<float>(b) == 0.0f);
+    CHECK(gui.persistent_state<int>(b) == 0);
+}
+
 // --- gui layout (Phase 4) ------------------------------------------------------------
 
 TEST_CASE("LayoutCursor: widgets stack downward, advancing below the line's tallest") {
@@ -4278,6 +4383,14 @@ TEST_CASE("theme scaled: metrics multiply, faces and font carry") {
     CHECK(big.spacing == base.spacing * 2.0f);
     CHECK(big.scroll_speed == base.scroll_speed * 2.0f);
     CHECK(big.drag_threshold == base.drag_threshold * 2.0f);
+    // The M14 label and scrollbar metrics ride the same train.
+    CHECK(big.label_char_width == base.label_char_width * 2.0f);
+    CHECK(big.label_inset == base.label_inset * 2.0f);
+    CHECK(big.check_inset == base.check_inset * 2.0f);
+    CHECK(big.slider_handle_width == base.slider_handle_width * 2.0f);
+    CHECK(big.scrollbar_thumb_width == base.scrollbar_thumb_width * 2.0f);
+    CHECK(big.scrollbar_band_width == base.scrollbar_band_width * 2.0f);
+    CHECK(big.scrollbar_min_thumb == base.scrollbar_min_thumb * 2.0f);
     // The look does not change with the density: every face and the
     // borrowed font pointer carry as-is.
     CHECK(big.panel_bg == base.panel_bg);
@@ -4290,6 +4403,21 @@ TEST_CASE("theme scaled: metrics multiply, faces and font carry") {
     CHECK(same.control_height == base.control_height);
     CHECK(same.drag_threshold == base.drag_threshold);
     CHECK(same.font == &font);
+}
+
+TEST_CASE("theme: the label and scrollbar metrics pin the v1 look") {
+    using namespace ws::ui::gui;
+    const ChromeTheme& t = kDefaultChrome;
+    // The fontless estimate (6 px a character) and the insets the
+    // widgets fit labels against.
+    CHECK(t.label_char_width == 6.0f);
+    CHECK(t.label_inset == 2.0f);
+    CHECK(t.check_inset == 5.0f);
+    // The slider handle and the scrollbar's thumb, band and floor.
+    CHECK(t.slider_handle_width == 10.0f);
+    CHECK(t.scrollbar_thumb_width == 4.0f);
+    CHECK(t.scrollbar_band_width == 12.0f);
+    CHECK(t.scrollbar_min_thumb == 12.0f);
 }
 
 TEST_CASE("checkbox: a full click toggles the bool exactly once") {
@@ -4666,6 +4794,191 @@ TEST_CASE("button and slider: a negative width fills the rest of the line") {
     CHECK(gain == doctest::Approx(0.5f));
 }
 
+// --- label fitting (M14): fit_text - the marker cut, the truncating width pass ------
+
+TEST_CASE("fit_text: the display cut - a ## suffix ids but never draws") {
+    using namespace ws::ui::gui;
+    char scratch[128];
+    const ChromeTheme& theme = kDefaultChrome;  // fontless: the estimate
+
+    // No marker: the label's own bytes and the per-char estimate
+    // (label_char_width = 6) - scratch never written.
+    const LabelFit whole =
+        fit_text("Save", 100.0f, theme, scratch, sizeof(scratch));
+    CHECK(std::string_view(whole.text) == "Save");
+    CHECK(whole.text != scratch);  // nothing needed changing: no copy
+    CHECK(whole.advance == doctest::Approx(24.0f));
+
+    // The marker cut moves the display into scratch (the view over the
+    // label is not null-terminated at the cut) - the display advances,
+    // the suffix never does.
+    const LabelFit cut =
+        fit_text("Save##one", 100.0f, theme, scratch, sizeof(scratch));
+    CHECK(cut.text == scratch);
+    CHECK(std::string_view(cut.text) == "Save");
+    CHECK(cut.advance == doctest::Approx(24.0f));
+
+    // A negative width skips the pass - the checkbox's sizing spelling.
+    const LabelFit nosize =
+        fit_text("Save##one", -1.0f, theme, scratch, sizeof(scratch));
+    CHECK(nosize.text == scratch);
+    CHECK(nosize.advance == doctest::Approx(24.0f));
+
+    // Empty answers: no label, an empty one, a marker-only one.
+    CHECK(fit_text(nullptr, 100.0f, theme, scratch,
+                   sizeof(scratch)).advance == 0.0f);
+    CHECK(std::string_view(fit_text("", 100.0f, theme, scratch,
+                                    sizeof(scratch)).text).empty());
+    CHECK(fit_text("###only", 100.0f, theme, scratch,
+                   sizeof(scratch)).advance == 0.0f);
+}
+
+TEST_CASE("fit_text: a width miss truncates to the longest fitting prefix + '...'") {
+    using namespace ws::ui::gui;
+    char scratch[128];
+    const ChromeTheme& theme = kDefaultChrome;  // 6 px per byte
+
+    // "Saving" estimates 36 px whole. It fits exactly: the label's own
+    // bytes, no copy.
+    const LabelFit whole =
+        fit_text("Saving", 36.0f, theme, scratch, sizeof(scratch));
+    CHECK(whole.text != scratch);
+    CHECK(std::string_view(whole.text) == "Saving");
+    CHECK(whole.advance == doctest::Approx(36.0f));
+
+    // One pixel short: the longest prefix + dots ("Sa..." = 30) - the
+    // truncation lands on a character boundary and never overflows the
+    // budget.
+    const LabelFit prefix =
+        fit_text("Saving", 35.0f, theme, scratch, sizeof(scratch));
+    CHECK(prefix.text == scratch);
+    CHECK(std::string_view(prefix.text) == "Sa...");
+    CHECK(prefix.advance == doctest::Approx(30.0f));
+
+    // The boundary fits exactly: 30 at 30, then one shorter step each
+    // time the budget drops past a candidate.
+    CHECK(std::string_view(fit_text("Saving", 30.0f, theme, scratch,
+                                    sizeof(scratch)).text) == "Sa...");
+    CHECK(std::string_view(fit_text("Saving", 29.0f, theme, scratch,
+                                    sizeof(scratch)).text) == "S...");
+    CHECK(std::string_view(fit_text("Saving", 23.0f, theme, scratch,
+                                    sizeof(scratch)).text) == "...");
+
+    // Past the bare dots: nothing drawable - empty text, a zero
+    // advance; a zero budget draws nothing either.
+    const LabelFit none =
+        fit_text("Saving", 17.0f, theme, scratch, sizeof(scratch));
+    CHECK(none.advance == 0.0f);
+    CHECK(std::string_view(none.text).empty());
+    CHECK(fit_text("Saving", 0.0f, theme, scratch,
+                   sizeof(scratch)).advance == 0.0f);
+
+    // The scratch bounds the copy: a 130-byte label truncating into a
+    // 128-byte scratch caps its prefix at 124 bytes, and the longest
+    // FITTING prefix under the cap wins (97 bytes + the dots = 100
+    // bytes = 600 px at a 600 budget).
+    char long_label[131];
+    for (int i = 0; i < 130; ++i) {
+        long_label[i] = 'x';
+    }
+    long_label[130] = '\0';
+    const LabelFit capped =
+        fit_text(long_label, 600.0f, theme, scratch, sizeof(scratch));
+    CHECK(capped.text == scratch);
+    CHECK(capped.advance == doctest::Approx(600.0f));
+    CHECK(std::string_view(capped.text).size() == 100);  // 97 + the dots
+}
+
+TEST_CASE("fit_text: the truncation never splits a UTF-8 codepoint") {
+    using namespace ws::ui::gui;
+    char scratch[128];
+    const ChromeTheme& theme = kDefaultChrome;  // 6 px per byte
+
+    // "\xC3\xA9" "AAA" ("e-acute" + AAA) is five bytes: whole = 30. At
+    // a 24 budget the 2-byte prefix ("é" + dots = 5 bytes = 30) misses,
+    // and the 1-byte cut would split the codepoint - the backup skips
+    // it, and the answer is the bare "..." (18), never a lone lead
+    // byte + dots (24).
+    const LabelFit split =
+        fit_text("\xC3\xA9" "AAA", 24.0f, theme, scratch, sizeof(scratch));
+    CHECK(split.text == scratch);
+    CHECK(std::string_view(split.text) == "...");
+    CHECK(split.advance == doctest::Approx(18.0f));
+
+    // "\xC3\xA9" "AAAA" (six bytes, whole 36) at 30: the whole
+    // codepoint's prefix fits - é + dots (5 bytes = 30).
+    const LabelFit kept =
+        fit_text("\xC3\xA9" "AAAA", 30.0f, theme, scratch, sizeof(scratch));
+    CHECK(std::string_view(kept.text) == "\xC3\xA9" "...");
+    CHECK(kept.advance == doctest::Approx(30.0f));
+}
+
+TEST_CASE("widgets: a ## suffix ids the widget but never draws or sizes it") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    bool suffixed = false;
+    bool plain = false;
+
+    // Two checkboxes in one panel scope, one label apart: "signal" and
+    // "signal##extra" - DIFFERENT widgets (the full string ids), one
+    // display (both rows size to "signal": box 24 + gap 8 + 36 = 68
+    // wide, not the 110 the full string would estimate).
+    // Content (12, 12, 376, 276): row 0 at (12, 12, 68, 24), row 1 at
+    // (12, 44, 68, 24).
+    gui.begin_frame(snap(300.0f, 300.0f));
+    (void)begin_panel(gui, layout, kDefaultChrome, "page",
+                      {0.0f, 0.0f, 400.0f, 300.0f});
+    CHECK(checkbox(gui, layout, kDefaultChrome, "signal##extra", suffixed)
+          == false);
+    CHECK(checkbox(gui, layout, kDefaultChrome, "signal", plain) == false);
+    end_panel(gui, layout);
+    gui.end_frame();
+
+    // A click on row 0 (the suffixed one) toggles it and leaves the
+    // plain one alone: the press owns, the release lands.
+    gui.begin_frame(snap(16.0f, 16.0f, true, true));
+    (void)begin_panel(gui, layout, kDefaultChrome, "page",
+                      {0.0f, 0.0f, 400.0f, 300.0f});
+    CHECK(!checkbox(gui, layout, kDefaultChrome, "signal##extra", suffixed));
+    CHECK(!checkbox(gui, layout, kDefaultChrome, "signal", plain));
+    end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(suffixed == false);  // owned, no flip yet
+    CHECK(plain == false);
+
+    gui.begin_frame(snap(16.0f, 16.0f, false, false, true));
+    (void)begin_panel(gui, layout, kDefaultChrome, "page",
+                      {0.0f, 0.0f, 400.0f, 300.0f});
+    CHECK(checkbox(gui, layout, kDefaultChrome, "signal##extra", suffixed));
+    CHECK(!checkbox(gui, layout, kDefaultChrome, "signal", plain));
+    end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(suffixed == true);
+    CHECK(plain == false);
+
+    // A click at x 117 sits past the display-sized row (right edge 80)
+    // but inside the full string's estimate (122): the suffix sized
+    // nothing, so there is nothing to claim out there.
+    gui.begin_frame(snap(117.0f, 16.0f, true, true));
+    (void)begin_panel(gui, layout, kDefaultChrome, "page",
+                      {0.0f, 0.0f, 400.0f, 300.0f});
+    CHECK(!checkbox(gui, layout, kDefaultChrome, "signal##extra", suffixed));
+    CHECK(!checkbox(gui, layout, kDefaultChrome, "signal", plain));
+    end_panel(gui, layout);
+    gui.end_frame();
+
+    gui.begin_frame(snap(117.0f, 16.0f, false, false, true));
+    (void)begin_panel(gui, layout, kDefaultChrome, "page",
+                      {0.0f, 0.0f, 400.0f, 300.0f});
+    CHECK(!checkbox(gui, layout, kDefaultChrome, "signal##extra", suffixed));
+    CHECK(!checkbox(gui, layout, kDefaultChrome, "signal", plain));
+    end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(suffixed == true);  // unchanged: the click landed on nothing
+    CHECK(plain == false);
+}
+
 // --- gui tabs + scroll regions (Phase 9) ---------------------------------------------
 
 TEST_CASE("tab_bar: a click moves the selection; the strip is one line") {
@@ -4904,6 +5217,47 @@ TEST_CASE("scroll: the wheel moves the flow - clamps at both ends and persists")
         CHECK(view.height == 76.0f);
         CHECK(clicked == 0);
     }
+}
+
+TEST_CASE("scroll: clear_persistent_state resets a region's place") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    const auto pass = [&](const InputFrame& frame, int rows) {
+        gui.begin_frame(frame);
+        const Rect view = begin_scroll_panel(
+            gui, layout, kDefaultChrome, "list", {0.0f, 0.0f, 200.0f, 100.0f});
+        int clicked = -1;
+        for (int i = 0; i < rows; ++i) {
+            gui.ids().push(i);
+            if (button(gui, layout, kDefaultChrome, "row", 120.0f)) {
+                clicked = i;
+            }
+            gui.ids().pop();
+        }
+        end_scroll_panel(gui, layout, kDefaultChrome);
+        gui.end_frame();
+        return std::pair{view, clicked};
+    };
+
+    // Prime (frame 1 measures the range and settles the wheel claim),
+    // scroll one notch (frame 2), hold (frame 3): offset 32.
+    (void)pass(snap(100.0f, 50.0f), 10);
+    InputFrame f = snap(100.0f, 50.0f);
+    f.scroll_dy = -1.0f;
+    (void)pass(f, 10);
+    (void)pass(snap(100.0f, 50.0f), 10);
+
+    // At offset 32 row 1 spans screen y 12..36: the click that was
+    // row 0's (at its unscrolled spot) is row 1's now.
+    CHECK(pass(snap(60.0f, 24.0f, false, true, true), 10).second == 1);
+
+    // The wholesale clear - between frames, the documented moment. The
+    // offset entry is gone, so the region starts over at the top: the
+    // same click is row 0's again.
+    gui.clear_persistent_state();
+    CHECK(pass(snap(60.0f, 24.0f, false, true, true), 10).second == 0);
 }
 
 TEST_CASE("scroll: the wheel is dead while no mouse is present") {
@@ -6216,6 +6570,50 @@ ws::ui::r2d::Font ab_font() {
 }
 
 }  // namespace
+
+TEST_CASE("fit_text: a theme font measures the fit glyph-honestly") {
+    using namespace ws::ui::gui;
+    const ws::ui::r2d::Font font = ab_font();  // A=10, B=5, blank dots
+    ChromeTheme theme = kDefaultChrome;
+    theme.font = &font;
+    char scratch[128];
+
+    // The whole fits: real glyph advances ("AB" = 15), the label's own
+    // bytes.
+    const LabelFit whole =
+        fit_text("AB", 100.0f, theme, scratch, sizeof(scratch));
+    CHECK(whole.text != scratch);
+    CHECK(std::string_view(whole.text) == "AB");
+    CHECK(whole.advance == doctest::Approx(15.0f));
+
+    // A miss truncates prefix by prefix: "AA" (20) at 12 fits only
+    // "A..." (10 - the dots bake blank and advance nothing), where the
+    // fontless estimate would have said 24.
+    const LabelFit cut =
+        fit_text("AA", 12.0f, theme, scratch, sizeof(scratch));
+    CHECK(cut.text == scratch);
+    CHECK(std::string_view(cut.text) == "A...");
+    CHECK(cut.advance == doctest::Approx(10.0f));
+
+    // The marker cut composes before any measuring: "AA##two" fits its
+    // display (20) at exactly 20.
+    const LabelFit marked =
+        fit_text("AA##two", 20.0f, theme, scratch, sizeof(scratch));
+    CHECK(marked.text == scratch);
+    CHECK(std::string_view(marked.text) == "AA");
+    CHECK(marked.advance == doctest::Approx(20.0f));
+
+    // A blank-only fit draws nothing: "zz" bakes blank (advance 0), so
+    // the whole "fits" at 0 - and a truncation whose only content
+    // would be blank dots ("AAzz" at 5) answers empty, the shared
+    // advance guard's doing.
+    CHECK(fit_text("zz", 100.0f, theme, scratch,
+                   sizeof(scratch)).advance == 0.0f);
+    const LabelFit blanks =
+        fit_text("AAzz", 5.0f, theme, scratch, sizeof(scratch));
+    CHECK(blanks.advance == 0.0f);
+    CHECK(std::string_view(blanks.text).empty());
+}
 
 TEST_CASE("utf8 decode covers multibyte codepoints and forgives damage") {
     using ws::ui::r2d::font::utf8_next;

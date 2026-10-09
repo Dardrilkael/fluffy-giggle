@@ -376,6 +376,18 @@ public:
         return static_cast<StateTable<T>&>(*found->second).values[id];
     }
 
+    // The EXPLICIT eviction of persistent state (there is deliberately
+    // no automatic one: entries outlive frames and vanished widgets, so
+    // a panel keeps its scroll place while it is gone - when the app
+    // KNOWS a screen will never come back, it says so here). With no
+    // argument every table empties - the "tear the screen down"
+    // spelling; with an id, that widget's entries leave every table
+    // and everything else stays. Call it BETWEEN frames: a reference a
+    // widget holds into its entry (a scroll panel across its begin/end
+    // pair) dangles once the entry is gone.
+    void clear_persistent_state();
+    void clear_persistent_state(WidgetId id);
+
     // --- the pieces widget functions receive ---
     IdStack& ids() { return ids_; }
     const InputFrame& input() const { return input_; }
@@ -418,10 +430,16 @@ private:
     // destroy its own values).
     struct StateTableBase {
         virtual ~StateTableBase() = default;
+        // The type-erased halves of clear_persistent_state: each table
+        // empties itself / erases its id's entry.
+        virtual void clear() = 0;
+        virtual std::size_t erase(WidgetId id) = 0;
     };
     template <typename T>
     struct StateTable : StateTableBase {
         std::unordered_map<WidgetId, T> values;
+        void clear() override { values.clear(); }
+        std::size_t erase(WidgetId id) override { return values.erase(id); }
     };
 
     // One pointer slot's half of hit_test; the public function folds the

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstring>
 
 namespace ws::ui::gui {
 namespace {
@@ -86,6 +87,23 @@ std::uint64_t hash_index(std::uint64_t scope, int index) {
     return hash == 0 ? kZeroHash : hash;
 }
 
+// hash(scope, reserved key): 'R' tags the family - the gui's OWN state
+// keys ("scroll", "drag"), which can never collide with a user label
+// ('L') or an index ('I') however they are spelled. Same stream shape
+// otherwise, so one scope path mixes the three families without
+// ambiguity.
+std::uint64_t hash_reserved(std::uint64_t scope, const char* key) {
+    std::uint64_t hash = fnv_step(scope, 'R');
+    if (key == nullptr) {
+        key = "";  // a null key ids like an empty one; no UB
+    }
+    for (const char* p = key; *p != '\0'; ++p) {
+        hash = fnv_step(hash, static_cast<unsigned char>(*p));
+    }
+    hash = fnv_step(hash, static_cast<unsigned char>(kScopeDelimiter));
+    return hash == 0 ? kZeroHash : hash;
+}
+
 // The scope id `depth` levels deep (0 = the fixed root seed). Past the
 // clamp the slot index stops deepening with the counter, so overflowed
 // scopes derive from the deepest remembered scope.
@@ -129,7 +147,36 @@ void IdStack::pop() {
 }
 
 WidgetId IdStack::id(const char* label) const {
+    // "###" REDIRECTS the id to the marker onward: "Play###pause" and
+    // "Pause###pause" are one widget whose display can change while its
+    // identity holds. The marker's own bytes hash in the stream (with
+    // their '#'), so a redirected id cannot collide with a plain
+    // label's short of sharing the marker spelling. A "##"-only suffix
+    // is NOT special here: the whole label ids, display or not.
+    if (label != nullptr) {
+        const char* marker = std::strstr(label, "###");
+        if (marker != nullptr) {
+            return WidgetId{hash_label(scope_id(stack_, depth_), marker)};
+        }
+    }
     return WidgetId{hash_label(scope_id(stack_, depth_), label)};
+}
+
+WidgetId IdStack::internal_id(const char* key) const {
+    return WidgetId{hash_reserved(scope_id(stack_, depth_), key)};
+}
+
+std::string_view label_display(const char* label) {
+    if (label == nullptr) {
+        return {};  // a null label displays as empty
+    }
+    // The first "##" ends the display - which also covers "###", whose
+    // first two bytes ARE a "##".
+    const char* cut = std::strstr(label, "##");
+    if (cut == nullptr) {
+        return label;
+    }
+    return std::string_view(label, static_cast<std::size_t>(cut - label));
 }
 
 }  // namespace ws::ui::gui

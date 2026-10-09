@@ -883,4 +883,24 @@ bool GuiContext::disabled() const {
     return disabled_mask_ != 0;  // the OR of the open scopes' conditions
 }
 
+void GuiContext::clear_persistent_state() {
+    // Every table, every entry: the "tear the screen down" spelling.
+    // The (void) names the unused key half so the structured binding
+    // stays honest.
+    for (auto& [type, table] : state_tables_) {
+        (void)type;
+        table->clear();
+    }
+}
+
+void GuiContext::clear_persistent_state(WidgetId id) {
+    // One widget's entries out of every table; everything else keeps
+    // its place. Between frames only - the header documents the
+    // dangling-reference hazard a mid-panel call would create.
+    for (auto& [type, table] : state_tables_) {
+        (void)type;
+        table->erase(id);
+    }
+}
+
 }  // namespace ws::ui::gui

@@ -5,6 +5,8 @@
 #include <ws/ui/gui/rect.hpp>
 #include <ws/ui/gui/theme.hpp>
 
+#include <cstddef>
+
 namespace ws::ui::gui {
 
 // The immediate-mode widget set. Each call is one frame's worth of one
@@ -19,11 +21,38 @@ namespace ws::ui::gui {
 // scope, so same-label siblings in ONE scope share identity and fight
 // over hot/active - give loop-generated children ids().push(index)
 // between them. The context flags a duplicate id once per process.
+// A label's "##" suffix ids without drawing ("Save##one" shows "Save"),
+// and "###" redirects the id to the marker onward so the display can
+// change while the identity holds - see label_display and IdStack::id.
 //
 // Calls are legal only between GuiContext::begin_frame and end_frame, and
 // the draws land in the caller's r2d begin()/end() block (screen mode:
 // the same space layout and hit-testing use). Every draw is drop-safe
 // headless, so the widgets test without a window.
+
+// fit_text's answer: the text to draw and its advance. `text` points at
+// the caller's own label bytes when nothing needed changing, or at the
+// caller's scratch buffer when something did - never anywhere else - so
+// it goes straight to r2d::draw_text with no copy and no allocation
+// (the gui never allocates mid-frame).
+struct LabelFit {
+    const char* text = nullptr;
+    float advance = 0.0f;
+};
+
+// Fits a label for drawing: the display text (label_display's cut -
+// "##" id suffixes never draw) truncated to `max_width` on a character
+// boundary, ending in ASCII "..." when anything was cut. A negative
+// max_width skips the width pass (marker-cut only - the spelling for a
+// caller sizing a row to its label). Measures through the theme font
+// when one is set - prefix by prefix, the honest glyph advances - or by
+// theme.label_char_width per character when it is not. `scratch` (with
+// its byte count) bounds the copy; it is written only when the display
+// was cut or truncated. Nothing fitting - not even "..." alone - draws
+// nothing: empty text, a 0 advance. Never returns null text.
+LabelFit fit_text(const char* label, float max_width,
+                  const ChromeTheme& theme, char* scratch,
+                  std::size_t scratch_bytes);
 
 // A push button: true on a full click inside it (press and release over
 // the same laid-out rect). `theme` supplies the faces and metrics

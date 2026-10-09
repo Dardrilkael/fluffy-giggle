@@ -150,6 +150,19 @@ struct InputFrame {
     std::array<bool, kMaxMouseButtons> mouse_down{};
     std::array<bool, kMaxKeys> key_down{};
 
+    // --- the frame clock (the shell writes it; next_frame keeps it) ------------
+    // Seconds of wall time from the previous pump top to this one - the
+    // frame's own clock, for anything that must move with real time (a
+    // caret's blink). The shell writes it once per iteration, right
+    // before this frame's input starts accumulating; a blocked
+    // iteration (hidden window, surface loss) reports the whole block -
+    // an honest clock, and an app that wants it smooth filters its own
+    // way. next_frame() deliberately does NOT clear it (unlike every
+    // edge below): the shell's next write is the refresh. A hand-built
+    // frame defaults to 0; without a running app frame_input()'s empty
+    // snapshot answers 0 too.
+    float dt_seconds = 0.0f;
+
     // --- edges this frame (cleared by next_frame) ------------------------------
     std::array<bool, kMaxMouseButtons> mouse_pressed{};
     std::array<bool, kMaxMouseButtons> mouse_released{};

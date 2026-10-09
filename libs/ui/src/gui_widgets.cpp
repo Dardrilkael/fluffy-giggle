@@ -17,27 +17,6 @@
 namespace ws::ui::gui {
 namespace {
 
-// The label placeholder while the theme carries no font: a centered bar
-// whose width tracks the label length, so sibling buttons stay visually
-// distinct. Clamped to the face (theme padding each side) and never
-// negative, so a narrow button cannot hand r2d a backwards bar.
-float label_bar_width(const char* label, float max_width) {
-    const std::size_t chars = label != nullptr ? std::strlen(label) : 0;
-    const float wanted = static_cast<float>(chars) * 6.0f;
-    return std::max(0.0f, std::min(wanted, max_width));
-}
-
-// A label's advance width: the theme font's honest measure, or (fontless)
-// the bar placeholder's per-char estimate. UNclamped - each caller owns
-// its own fit budget (the checkbox row sizes to it, buttons clamp).
-float label_advance(const char* label, const ChromeTheme& theme) {
-    if (theme.font != nullptr) {
-        return theme.font->measure_text(label);
-    }
-    const std::size_t chars = label != nullptr ? std::strlen(label) : 0;
-    return static_cast<float>(chars) * 6.0f;
-}
-
 // Where a label's line box starts vertically: the font's line height
 // centered on the row (draw_text's y is the box top, not a baseline), or
 // (fontless) half the row - the bar centering the bar branch does inline.
@@ -115,6 +94,88 @@ void panel_chrome(const Rect& bounds, const ChromeTheme& theme) {
 
 }  // namespace
 
+// fit_text's body. The display cut first (label_display - "##" id
+// suffixes never draw), then the width pass: the whole display when it
+// fits, and only a miss truncates - longest fitting prefix + ASCII
+// "..." - the cut backed up over UTF-8 continuation bytes so no
+// codepoint splits (the fontless theme never draws the text, but the
+// answer is a C string any caller could). Both measures ride one
+// lambda: the theme font's honest glyph advance, or the per-byte
+// estimate the v1 bars size from. The copy lands in the CALLER'S
+// scratch - the only buffer fit_text ever writes - and only when
+// something changed, so the mid-frame no-allocation rule holds on
+// every path.
+LabelFit fit_text(const char* label, float max_width,
+                  const ChromeTheme& theme, char* scratch,
+                  std::size_t scratch_bytes) {
+    const std::string_view display = label_display(label);
+    if (display.empty()) {
+        return {"", 0.0f};  // nothing to say: nothing to draw
+    }
+
+    // A marker cut the display when the label continues past it: the
+    // view over the label is not null-terminated at the cut, so the
+    // display moves into scratch as draw-ready bytes. No scratch, no
+    // cut - and nothing drawable.
+    const char* text = label;
+    if (label[display.size()] != '\0') {
+        if (scratch == nullptr || scratch_bytes < display.size() + 1) {
+            return {"", 0.0f};
+        }
+        std::memcpy(scratch, display.data(), display.size());
+        scratch[display.size()] = '\0';
+        text = scratch;
+    }
+
+    // The advance of the display as it stands: the font's measure, or
+    // (fontless) the estimate - per byte, the v1 bar's arithmetic.
+    const auto measure = [&](const char* s, std::size_t bytes) {
+        if (theme.font != nullptr) {
+            return theme.font->measure_text(s);
+        }
+        return static_cast<float>(bytes) * theme.label_char_width;
+    };
+    const float whole = measure(text, display.size());
+    if (max_width < 0.0f || whole <= max_width) {
+        return {text, whole};  // fits (or nobody asked for a width)
+    }
+
+    // Truncation: prefixes longest-first, each composed in scratch as
+    // prefix + "..." and measured whole. The whole display already
+    // missed, so the longest candidate cuts at least one byte; k = 0
+    // is the bare "..." - the last resort, and past it nothing draws.
+    if (scratch == nullptr || scratch_bytes < 4) {
+        return {"", 0.0f};  // not even the bare "..." could be built
+    }
+    const std::size_t cap = scratch_bytes - 1;  // room for the terminator
+    std::size_t k_max = display.size() - 1;  // cut at least one byte
+    if (k_max > cap - 3) {
+        k_max = cap - 3;  // the longest prefix that + "..." still fits
+    }
+    for (std::size_t k = k_max + 1; k-- > 0;) {
+        // UTF-8: back up while the byte at the cut continues the
+        // codepoint before it - the prefix keeps whole codepoints
+        // (corrupt bytes stay corrupt; utf8_next forgives them).
+        while (k > 0 && k < display.size() &&
+               (static_cast<unsigned char>(display[k]) & 0xC0u) == 0x80u) {
+            --k;
+        }
+        std::memcpy(scratch, display.data(), k);
+        scratch[k] = '.';
+        scratch[k + 1] = '.';
+        scratch[k + 2] = '.';
+        scratch[k + 3] = '\0';
+        const float advance = measure(scratch, k + 3);
+        if (advance > 0.0f && advance <= max_width) {
+            return {scratch, advance};
+        }
+        if (k == 0) {
+            break;  // the bare "..." was the last candidate
+        }
+    }
+    return {"", 0.0f};  // not even "..." fits: nothing drawable
+}
+
 bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             const char* label, float width, r2d::Sprite icon) {
     // Fill-width: a negative width means "the rest of the line" - the one
@@ -187,28 +248,26 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
         label_room = std::max(0.0f, rect.width - used);
     }
 
-    // The label: the theme font's glyphs centered in the room that
-    // remains, or (fontless) the v1 bar. Text cannot truncate, so a label
-    // wider than its room drops rather than overflowing the face.
-    if (theme.font != nullptr) {
-        const float advance = theme.font->measure_text(label);
-        const float room = std::max(0.0f, label_room - 2.0f * theme.padding);
-        if (advance > 0.0f && advance <= room) {
-            r2d::draw_text(label_x + (label_room - advance) * 0.5f,
-                           label_top(rect.y, rect.height, theme), label,
+    // The label: fitted to the room the icon leaves (minus the face's
+    // padding each side), centered. One fit serves both themes - the
+    // font draws the returned text, the fontless bar draws the returned
+    // advance as its width. A "##" suffix ids the button but never
+    // draws; a too-wide label truncates to "..." inside the face
+    // instead of dropping (the shared advance guard covers the blank
+    // measure - nothing drawable draws nothing).
+    char scratch[128];
+    const LabelFit fit =
+        fit_text(label, std::max(0.0f, label_room - 2.0f * theme.padding),
+                 theme, scratch, sizeof(scratch));
+    if (fit.advance > 0.0f) {
+        const float x = label_x + (label_room - fit.advance) * 0.5f;
+        if (theme.font != nullptr) {
+            r2d::draw_text(x, label_top(rect.y, rect.height, theme), fit.text,
                            *theme.font, dim(theme.text, dim_by));
-        }
-    } else {
-        // The bar: half the control height, centered both ways in the
-        // room that remains. A zero-width bar (empty label or a degenerate
-        // button) draws nothing.
-        const float bar_height = rect.height * 0.5f;
-        const float bar_width =
-            label_bar_width(label, label_room - 2.0f * theme.padding);
-        if (bar_width > 0.0f) {
-            r2d::draw_quad(label_x + (label_room - bar_width) * 0.5f,
-                           rect.y + (rect.height - bar_height) * 0.5f, bar_width,
-                           bar_height, dim(theme.text, dim_by));
+        } else {
+            const float bar_height = rect.height * 0.5f;
+            r2d::draw_quad(x, rect.y + (rect.height - bar_height) * 0.5f,
+                           fit.advance, bar_height, dim(theme.text, dim_by));
         }
     }
 
@@ -219,11 +278,17 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
               const char* label, bool& value) {
     const WidgetId id = gui.ids().id(label);
 
-    // The row auto-sizes: box, a gap, the label (its advance - the font's
-    // measure or the fontless per-char estimate; never clamped, so a
-    // label always sizes its own row).
+    // The row auto-sizes: box, a gap, the label's DISPLAY advance - the
+    // font's measure or the fontless per-char estimate, "##" suffixes
+    // cut (they id the row, never size it); never clamped, so a label
+    // always sizes its own row. One fit serves the sizing AND the draw:
+    // the row is exactly the advance wide, so the fitted text always
+    // fits.
     const float gap = theme.spacing;
-    const float label_width = label_advance(label, theme);
+    char scratch[128];
+    const LabelFit fit =
+        fit_text(label, -1.0f, theme, scratch, sizeof(scratch));
+    const float label_width = fit.advance;
     const Rect rect =
         layout.next(theme.control_height + gap + label_width, theme.control_height);
     // Full citizenship, like a button: focusable, state() for the one
@@ -274,7 +339,7 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     // heavily-rounded theme cannot let the square fill poke outside the
     // arcs - drawn only while on, and only when the box leaves room (tiny
     // control heights clamp to none).
-    const float inset = std::max(5.0f, theme.corner_radius);
+    const float inset = std::max(theme.check_inset, theme.corner_radius);
     const float fill = box - 2.0f * inset;
     if (value && fill > 0.0f) {
         r2d::draw_quad(rect.x + inset, rect.y + inset, fill, fill,
@@ -282,19 +347,20 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     }
 
     // The label beside the box, vertically centered: the theme font's
-    // line box, or (fontless) the v1 bar. The row already sized itself
-    // to the advance, so the label always fits - no truncation case.
-    if (theme.font != nullptr) {
-        if (label_width > 0.0f) {
+    // line box, or (fontless) the v1 bar at the fitted advance. The row
+    // already sized itself to that advance, so no truncation case can
+    // fire here - the -1 fit above WAS the draw's answer.
+    if (fit.advance > 0.0f) {
+        if (theme.font != nullptr) {
             r2d::draw_text(rect.x + box + gap,
-                           label_top(rect.y, rect.height, theme), label,
+                           label_top(rect.y, rect.height, theme), fit.text,
                            *theme.font, dim(theme.text, dim_by));
+        } else {
+            const float bar_height = rect.height * 0.5f;
+            r2d::draw_quad(rect.x + box + gap,
+                           rect.y + (rect.height - bar_height) * 0.5f,
+                           fit.advance, bar_height, dim(theme.text, dim_by));
         }
-    } else if (label_width > 0.0f) {
-        const float bar_height = rect.height * 0.5f;
-        r2d::draw_quad(rect.x + box + gap,
-                       rect.y + (rect.height - bar_height) * 0.5f, label_width,
-                       bar_height, dim(theme.text, dim_by));
     }
     return hit.clicked || key_toggled;
 }
@@ -394,7 +460,7 @@ bool slider_impl(GuiContext& gui, LayoutCursor& layout,
     // span <= 0 parks it at the left rather than dividing by zero.
     const float span = max - min;
     const float t = span > 0.0f ? (value - min) / span : 0.0f;
-    const float handle_width = 10.0f;
+    const float handle_width = theme.slider_handle_width;
     const float travel = std::max(0.0f, rect.width - handle_width);
     const float handle_x =
         rect.x + std::min(std::max(t, 0.0f), 1.0f) * travel;
@@ -411,24 +477,25 @@ bool slider_impl(GuiContext& gui, LayoutCursor& layout,
     r2d::draw_quad(handle_x, rect.y, handle_width, rect.height,
                    dim(theme.text, dim_by));
 
-    // The label, right-aligned over the rail: the theme font's glyphs, or
-    // (fontless) the v1 bar (clamped to the rail's budget). Text cannot
-    // truncate, so a label wider than the rail drops instead of spilling
-    // backwards past the slider.
-    if (theme.font != nullptr) {
-        const float advance = theme.font->measure_text(label);
-        if (advance > 0.0f && advance <= rect.width - 4.0f) {
-            r2d::draw_text(rect.x + rect.width - advance - 2.0f,
-                           label_top(rect.y, rect.height, theme), label,
+    // The label, right-aligned over the rail: fitted to the width minus
+    // two insets (one each side of the label), one fit for both themes -
+    // the font draws the returned text, the bar draws the advance. A
+    // "##" suffix never draws; a too-wide label truncates to "..."
+    // instead of spilling backwards past the slider.
+    char scratch[128];
+    const LabelFit fit =
+        fit_text(label,
+                 std::max(0.0f, rect.width - 2.0f * theme.label_inset), theme,
+                 scratch, sizeof(scratch));
+    if (fit.advance > 0.0f) {
+        const float x = rect.x + rect.width - fit.advance - theme.label_inset;
+        if (theme.font != nullptr) {
+            r2d::draw_text(x, label_top(rect.y, rect.height, theme), fit.text,
                            *theme.font, dim(theme.text, dim_by));
-        }
-    } else {
-        const float bar_width = label_bar_width(label, rect.width - 4.0f);
-        if (bar_width > 0.0f) {
+        } else {
             const float bar_height = rect.height * 0.5f;
-            r2d::draw_quad(rect.x + rect.width - bar_width - 2.0f,
-                           rect.y + (rect.height - bar_height) * 0.5f, bar_width,
-                           bar_height, dim(theme.text, dim_by));
+            r2d::draw_quad(x, rect.y + (rect.height - bar_height) * 0.5f,
+                           fit.advance, bar_height, dim(theme.text, dim_by));
         }
     }
     return changed;
@@ -521,29 +588,27 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
         r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
                                theme.corner_radius, face);
 
-        // The tab's label, centered like a button's: the theme font's
-        // glyphs, or (fontless) the v1 bar. Same fit rule as a button -
-        // an over-long label drops instead of overflowing the tab.
+        // The tab's label, centered like a button's: fitted to the tab
+        // minus its padding, one fit for both themes - the font draws
+        // the returned text, the bar draws the advance. Tab labels
+        // never id (the strip ids by INDEX), so a "##" in a tab label
+        // is pure display sugar: it cuts and keys nothing.
         const char* tab_label = tabs != nullptr ? tabs[i] : nullptr;
-        if (theme.font != nullptr) {
-            const float advance = theme.font->measure_text(tab_label);
-            const float room = std::max(0.0f,
-                                        rect.width - 2.0f * theme.padding);
-            if (advance > 0.0f && advance <= room) {
-                r2d::draw_text(rect.x + (rect.width - advance) * 0.5f,
-                               label_top(rect.y, rect.height, theme),
-                               tab_label, *theme.font,
+        char scratch[128];
+        const LabelFit fit =
+            fit_text(tab_label,
+                     std::max(0.0f, rect.width - 2.0f * theme.padding), theme,
+                     scratch, sizeof(scratch));
+        if (fit.advance > 0.0f) {
+            const float x = rect.x + (rect.width - fit.advance) * 0.5f;
+            if (theme.font != nullptr) {
+                r2d::draw_text(x, label_top(rect.y, rect.height, theme),
+                               fit.text, *theme.font,
                                dim(theme.text, dim_by));
-            }
-        } else {
-            const float bar_width = label_bar_width(tab_label,
-                                                    rect.width -
-                                                        2.0f * theme.padding);
-            if (bar_width > 0.0f) {
+            } else {
                 const float bar_height = rect.height * 0.5f;
-                r2d::draw_quad(rect.x + (rect.width - bar_width) * 0.5f,
-                               rect.y + (rect.height - bar_height) * 0.5f,
-                               bar_width, bar_height, dim(theme.text, dim_by));
+                r2d::draw_quad(x, rect.y + (rect.height - bar_height) * 0.5f,
+                               fit.advance, bar_height, dim(theme.text, dim_by));
             }
         }
 
@@ -620,9 +685,11 @@ Rect begin_scroll_panel(GuiContext& gui, LayoutCursor& layout,
     // The scroll state keys INSIDE the panel's own scope, so the matching
     // end_scroll_panel re-derives the same entry without the caller
     // threading a handle through (begin pushes, end pops - both read
-    // while the scope is live).
+    // while the scope is live). The key itself is RESERVED - the 'R'
+    // family a user label can never spell - so "scroll" the widget
+    // label and "scroll" the state key are two ids.
     gui.ids().push(label);
-    const WidgetId scroll_id = gui.ids().id("scroll");
+    const WidgetId scroll_id = gui.ids().internal_id("scroll");
     ScrollState& scroll = gui.persistent_state<ScrollState>(scroll_id);
 
     // The wheel claim, with THIS panel's own key (its ScrollState's
@@ -659,7 +726,7 @@ Rect begin_scroll_panel(GuiContext& gui, LayoutCursor& layout,
     // frame on (known cosmetic limit: a drag-tracking child, a slider,
     // can move by < threshold px before the cancel). The mouse keeps the
     // wheel - a desktop drag is a widget press, not a scroll gesture.
-    const WidgetId drag_id = gui.ids().id("drag");
+    const WidgetId drag_id = gui.ids().internal_id("drag");
     ScrollDragState& drag = gui.persistent_state<ScrollDragState>(drag_id);
     const InputFrame& input = gui.input();
     const int touch_count =
@@ -763,10 +830,11 @@ void end_scroll_panel(GuiContext& gui, LayoutCursor& layout,
                       const ChromeTheme& theme) {
     // The same entries begin_scroll_panel keyed, re-derived inside the
     // still-pushed scope: the scroll state the thumb grab rides in, and
-    // the flow-drag table the grab must quiet for its pointer.
-    const WidgetId scroll_id = gui.ids().id("scroll");
+    // the flow-drag table the grab must quiet for its pointer. Same
+    // reserved keys, same scope - the derivation cannot drift.
+    const WidgetId scroll_id = gui.ids().internal_id("scroll");
     ScrollState& scroll = gui.persistent_state<ScrollState>(scroll_id);
-    const WidgetId drag_id = gui.ids().id("drag");
+    const WidgetId drag_id = gui.ids().internal_id("drag");
     ScrollDragState& drag = gui.persistent_state<ScrollDragState>(drag_id);
 
     // The real viewport: this frame's (virtual, shifted) content rect,
@@ -817,7 +885,7 @@ void end_scroll_panel(GuiContext& gui, LayoutCursor& layout,
     // to nothing.
     //
     // The thumb is also GRABBABLE, and the grabbable band is the whole
-    // right gutter (a finger needs more room than the 4 px the bar
+    // right gutter (a finger needs more room than the thumb the bar
     // paints): a fresh press there ends any press a child took beneath
     // it - cancel_pointer, fired HERE at end, one frame after the child
     // claimed it, the same cosmetic limit the flow drag's cancel
@@ -835,11 +903,14 @@ void end_scroll_panel(GuiContext& gui, LayoutCursor& layout,
     if (scroll.max_offset > 0.0f && viewport.width > 0.0f &&
         viewport.height > 0.0f) {
         const float track = viewport.height;
-        const float thumb_width = 4.0f;
-        const float band_width = 12.0f;  // the grabbable gutter
+        const float thumb_width = theme.scrollbar_thumb_width;
+        const float band_width = theme.scrollbar_band_width;  // the grabbable
+                                                             // gutter
         float thumb_height =
             track * track / (track + scroll.max_offset);
-        thumb_height = std::min(std::max(thumb_height, 12.0f), track);
+        thumb_height = std::min(std::max(thumb_height,
+                                         theme.scrollbar_min_thumb),
+                                track);
         const auto thumb_top_for = [&](float offset) {
             return viewport.y + (offset / scroll.max_offset) *
                                       (track - thumb_height);

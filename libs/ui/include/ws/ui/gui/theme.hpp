@@ -33,6 +33,23 @@ struct ChromeTheme {
                                   // inside the window the press stays the
                                   // child's (a tap), past it the scroll owns
                                   // the finger
+    float label_char_width = 6.0f;  // the fontless label estimate: px per
+                                    // character (the v1 bar placeholder
+                                    // and fit_text's no-font measure)
+    float label_inset = 2.0f;  // px a fitted label keeps clear of its
+                               // control's edge (the slider's right
+                               // margin; its fit budget is the width
+                               // minus two of these)
+    float check_inset = 5.0f;  // the checkbox fill's inset past the box's
+                               // corners, max'd with corner_radius so a
+                               // round theme cannot let the fill poke
+                               // outside the arcs
+    float slider_handle_width = 10.0f;  // the slider handle's px
+    float scrollbar_thumb_width = 4.0f;  // the scrollbar thumb's px
+    float scrollbar_band_width = 12.0f;  // the thumb's grabbable gutter
+    float scrollbar_min_thumb = 12.0f;   // the thumb's minimum px height -
+                                        // a huge content cannot shrink it
+                                        // to nothing
     float disabled_alpha = 0.45f;  // the multiplier a disabled widget dims
                                   // its non-face colors by (label text and
                                   // bars, the checkbox fill, the slider
@@ -66,6 +83,13 @@ struct ChromeTheme {
         t.spacing = spacing * scale;
         t.scroll_speed = scroll_speed * scale;
         t.drag_threshold = drag_threshold * scale;
+        t.label_char_width = label_char_width * scale;
+        t.label_inset = label_inset * scale;
+        t.check_inset = check_inset * scale;
+        t.slider_handle_width = slider_handle_width * scale;
+        t.scrollbar_thumb_width = scrollbar_thumb_width * scale;
+        t.scrollbar_band_width = scrollbar_band_width * scale;
+        t.scrollbar_min_thumb = scrollbar_min_thumb * scale;
         return t;
     }
 };
