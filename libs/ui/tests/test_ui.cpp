@@ -6615,6 +6615,33 @@ TEST_CASE("fit_text: a theme font measures the fit glyph-honestly") {
     CHECK(std::string_view(blanks.text).empty());
 }
 
+TEST_CASE("reset_warn_once: the once-per-process flags re-arm, any time") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    // The seam is a plain flag reset - legal outside a frame, inside
+    // one, twice in a row: no frame state is involved. The absolute
+    // panel pins the button at (0,0) both frames (the cursor would
+    // otherwise flow on between them).
+    reset_warn_once();
+    gui.begin_frame(snap(300.0f, 300.0f));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    reset_warn_once();
+    reset_warn_once();
+    (void)button(gui, layout, kDefaultChrome, "probe", 100.0f);
+    layout.end_panel();
+    gui.end_frame();
+
+    // And the reset disturbs nothing: the next frame's widgets answer
+    // as ever - a full click still clicks.
+    gui.begin_frame(snap(10.0f, 10.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(button(gui, layout, kDefaultChrome, "probe", 100.0f));
+    layout.end_panel();
+    gui.end_frame();
+}
+
 TEST_CASE("utf8 decode covers multibyte codepoints and forgives damage") {
     using ws::ui::r2d::font::utf8_next;
     const char* s = "";

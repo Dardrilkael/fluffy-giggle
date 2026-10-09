@@ -82,14 +82,14 @@ libs/ui/
     batch_core.h/.cpp        # pure-CPU batch: chunks, camera VP, geometry (no Vulkan)
     font.h/.cpp              # stb_truetype bake: ASCII 32..126 glyphs, white-RGBA
                              #  coverage, forgiving utf8_next (pure CPU, no renderer state)
-    gui.h                    # internal: set_active_input - the shell points frame_input() at its InputFrame
+    gui.h                    # internal: set_active_input - the shell points frame_input() at its InputFrame; the warn-once reset seam
     gui/                     # the gui module's out-of-line bodies, one concern per file:
       gui.cpp                # shell glue: frame_input()'s live accumulator tap
       gui_context.cpp        # GuiContext: per-pointer hot/active hit-testing, layer scopes + side tables
       gui_id.cpp             # IdStack: FNV-1a scope-path hashing - the label/index/reserved families
       gui_input.cpp          # InputFrame: touch table + the primary-touch -> mouse bridge
       gui_layout.cpp         # LayoutCursor: stacked flow panels
-    gui_widgets.cpp          # the widget functions' bodies (lay out, hit-test, draw)
+      gui_widgets.cpp        # the widget functions' bodies (lay out, hit-test, draw) + fit_text
     renderer2d.h/.cpp        # r2d engine: command sort/replay + Vulkan flush
     rounded_texture.h/.cpp   # pure-CPU bake of the builtin rounded-rect mask
     shader_provider.h/.cpp   # pipeline shader words: committed spirv.h, or hot
@@ -836,7 +836,8 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `end_frame`, inside the caller's r2d
   screen-space block; the state is the caller's, persistence lives in
   the context's side tables (`persistent_state<T>`, evicted only by the
-  explicit `clear_persistent_state`).
+  explicit `clear_persistent_state`), and `reset_warn_once()` re-arms
+  the once-per-process warns - the test seam.
 
 ## Backend invariants
 

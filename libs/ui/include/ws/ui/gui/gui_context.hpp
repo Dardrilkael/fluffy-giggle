@@ -624,4 +624,12 @@ private:
     HitCensus census_;
 };
 
+// The gui's once-per-process warns (id/panel stack overflow, census
+// duplicate/full, layer/clip/disabled overflow, focusable cap, wheel
+// claim cap) fire the first time only. reset_warn_once() re-arms the
+// lot - the test seam, so one test's overflow does not silence the
+// next's warn path. App code has no reason to call it; it touches no
+// frame state, so any moment is legal (between frames reads cleanest).
+void reset_warn_once();
+
 }  // namespace ws::ui::gui

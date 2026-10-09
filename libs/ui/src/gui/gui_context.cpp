@@ -1,12 +1,14 @@
 // GuiContext's out-of-line half: per-pointer hot/active hit-testing,
-// layer scopes and the persistent side tables. The warn-once flags are
-// local to this TU.
+// layer scopes and the persistent side tables. This TU's warn-once
+// flags are local; reset_warn_once() re-arms them and the id/layout
+// pair the other gui TUs own (gui.h's detail seam).
 
 #include <ws/ui/gui/gui_context.hpp>
 
 #include <ws/core/log.hpp>
 #include <ws/ui/renderer2d.hpp>  // begin_layer drives r2d::set_layer - the
                                  // "one layer concept" is a real coupling
+#include "gui.h"  // detail::id/panel_overflow_warned - the reset seam
 
 #include <algorithm>
 #include <array>
@@ -292,8 +294,9 @@ void GuiContext::begin_layer(Layer layer) {
             disabled_depth_;
     } else if (!layer_overflow_warned) {
         layer_overflow_warned = true;
-        core::warn("ui: gui layer stack clamped at 8 - deeper begin_layer "
-                   "scopes keep the deepest real layer");
+        core::warn("ui: gui layer stack clamped at {} - deeper begin_layer "
+                   "scopes keep the deepest real layer",
+                   kMaxLayerDepth);
     }
     ++layer_depth_;
     if (layer == Layer::modal) {
@@ -374,8 +377,9 @@ void GuiContext::push_hit_clip(const Rect& clip) {
         hit_clips_[static_cast<std::size_t>(hit_clip_depth_)] = effective;
     } else if (!hit_clip_overflow_warned) {
         hit_clip_overflow_warned = true;
-        core::warn("ui: gui hit-clip stack clamped at 8 - deeper "
-                   "push_hit_clip scopes keep the deepest real clip");
+        core::warn("ui: gui hit-clip stack clamped at {} - deeper "
+                   "push_hit_clip scopes keep the deepest real clip",
+                   kMaxHitClipDepth);
     }
     ++hit_clip_depth_;
 }
@@ -530,9 +534,10 @@ HitTest GuiContext::hit_test(WidgetId id, const Rect& rect) {
                    "same-label siblings need ids().push(index) between them");
     } else if (seen == HitCensus::Result::full && !census_full_warned) {
         census_full_warned = true;
-        core::warn("ui: gui hit-test census full - more than 512 widget ids "
+        core::warn("ui: gui hit-test census full - more than {} widget ids "
                    "hit-tested this frame; ids past the census are no longer "
-                   "checked for duplicates");
+                   "checked for duplicates",
+                   HitCensus::kSlots);
     }
 
     // The hit-clip twin of the renderer's clip: what the clip hides, the
@@ -815,8 +820,9 @@ void GuiContext::register_focusable(WidgetId id) {
     if (focusable_count_ >= kMaxFocusables) {
         if (!focus_overflow_warned) {
             focus_overflow_warned = true;
-            core::warn("ui: gui focusable registration clamped at 128 - "
-                       "widgets past the cap are not focusable this frame");
+            core::warn("ui: gui focusable registration clamped at {} - "
+                       "widgets past the cap are not focusable this frame",
+                       kMaxFocusables);
         }
         return;
     }
@@ -860,8 +866,9 @@ void GuiContext::begin_disabled(bool condition) {
         disabled_mask_ = (disabled_mask_ << 1) | (condition ? 1u : 0u);
     } else if (!disabled_overflow_warned) {
         disabled_overflow_warned = true;
-        core::warn("ui: gui disabled stack clamped at 32 - deeper "
-                   "begin_disabled scopes keep the innermost 32 conditions");
+        core::warn("ui: gui disabled stack clamped at {} - deeper "
+                   "begin_disabled scopes keep the innermost {} conditions",
+                   kMaxDisabledDepth, kMaxDisabledDepth);
     }
     ++disabled_depth_;
 }
@@ -901,6 +908,21 @@ void GuiContext::clear_persistent_state(WidgetId id) {
         (void)type;
         table->erase(id);
     }
+}
+
+void reset_warn_once() {
+    // The test seam: the once-per-process warns re-arm. This TU's
+    // seven plus the two the other gui TUs own (gui.h's detail seam);
+    // no frame state is involved, so any moment is legal.
+    duplicate_id_warned = false;
+    census_full_warned = false;
+    layer_overflow_warned = false;
+    focus_overflow_warned = false;
+    hit_clip_overflow_warned = false;
+    disabled_overflow_warned = false;
+    wheel_overflow_warned = false;
+    detail::id_overflow_warned = false;
+    detail::panel_overflow_warned = false;
 }
 
 }  // namespace ws::ui::gui

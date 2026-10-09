@@ -1,28 +1,36 @@
 // LayoutCursor's out-of-line half: stacked flow panels. The panel-stack
-// overflow warn-once flag is local to this TU.
+// overflow warn-once flag is detail-linkage (gui.h) so reset_warn_once()
+// can re-arm it.
 
 #include <ws/ui/gui/layout_cursor.hpp>
 
 #include <ws/core/log.hpp>
+#include "gui.h"  // detail::panel_overflow_warned - reset_warn_once()'s seam
 
 #include <algorithm>
 
 namespace ws::ui::gui {
+namespace detail {
+
+// Depth overflow is a programming error - surfaced in the log rather
+// than a crash; the panel stack clamps and this keeps it to one warn
+// per process. External linkage (gui.h) so reset_warn_once() can
+// re-arm the test seam; single-threaded like every gui global (see
+// gui.cpp).
+bool panel_overflow_warned = false;
+
+}  // namespace detail
 namespace {
 
 // --- LayoutCursor panels ---------------------------------------------------------
-
-// Depth overflow is a programming error - surfaced in the log rather than
-// a crash; the panel stack clamps and this keeps it to one warn per process.
-bool panel_overflow_warned = false;
 
 // True when the panel stack is full; warns the first time only.
 bool panel_stack_full(int top) {
     if (top + 1 < LayoutCursor::kMaxPanels) {
         return false;
     }
-    if (!panel_overflow_warned) {
-        panel_overflow_warned = true;
+    if (!detail::panel_overflow_warned) {
+        detail::panel_overflow_warned = true;
         core::warn("ui: gui layout clamped at {} panels - deeper panels flow "
                    "into the deepest real one (begin/end stays balanced)",
                    LayoutCursor::kMaxPanels);

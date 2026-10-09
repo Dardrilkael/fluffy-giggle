@@ -1,10 +1,12 @@
 // IdStack's out-of-line half: widget identity as FNV-1a scope-path
-// hashes. The hashing constants and the overflow warn-once flag are
-// local to this TU - nothing else in the lib mixes ids.
+// hashes. The hashing constants are local to this TU - nothing else in
+// the lib mixes ids; the overflow warn-once flag is detail-linkage
+// (gui.h) so reset_warn_once() can re-arm it.
 
 #include <ws/ui/gui/id_stack.hpp>
 
 #include <ws/core/log.hpp>
+#include "gui.h"  // detail::id_overflow_warned - reset_warn_once()'s seam
 
 #include <algorithm>
 #include <array>
@@ -12,6 +14,15 @@
 #include <cstring>
 
 namespace ws::ui::gui {
+namespace detail {
+
+// Depth overflow is a programming error - surfaced in the log rather
+// than a crash; the stack clamps and this keeps it to one warn per
+// process. External linkage (gui.h) so reset_warn_once() can re-arm
+// the test seam; single-threaded like every gui global (see gui.cpp).
+bool id_overflow_warned = false;
+
+}  // namespace detail
 namespace {
 
 // --- IdStack hashing ------------------------------------------------------------
@@ -39,17 +50,13 @@ constexpr char kScopeDelimiter = ';';
 // kInvalidWidgetId. The substitution adds no collision of its own.
 constexpr std::uint64_t kZeroHash = 0x9E3779B97F4A7C15ULL;
 
-// Depth overflow is a programming error - surfaced in the log rather than
-// a crash; the stack clamps and this keeps it to one warn per process.
-bool id_overflow_warned = false;
-
 // True when the stack is full; warns the first time only.
 bool id_stack_full(int depth) {
     if (depth < IdStack::kMaxDepth) {
         return false;
     }
-    if (!id_overflow_warned) {
-        id_overflow_warned = true;
+    if (!detail::id_overflow_warned) {
+        detail::id_overflow_warned = true;
         core::warn("ui: gui id stack clamped at depth {} - deeper scopes stop "
                    "deepening (push/pop stays balanced)",
                    IdStack::kMaxDepth);

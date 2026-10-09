@@ -10,8 +10,8 @@
 
 #include <algorithm>
 #include <array>
-#include <cfloat>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 
 namespace ws::ui::gui {
