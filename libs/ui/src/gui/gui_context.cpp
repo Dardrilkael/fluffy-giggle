@@ -103,13 +103,15 @@ void GuiContext::begin_frame(const InputFrame& input) {
     focusable_count_ = 0;
     press_focused_ = false;
     pending_nav_ = 0;
-    // Adopt the frame's pointers: slot 0 is the mouse by construction,
-    // the touches follow in first-contact order. Each pointer matches
-    // last frame's track by id - active carries, and that carry IS the
-    // drag, and hot_prev carries with it: that carry IS next frame's
-    // settled hover - or starts fresh; a track whose pointer left the
-    // frame entirely (lifted last frame) drops out here. Hot re-claims
-    // every frame, on every track, as the widgets' hit tests run.
+    // Adopt the frame's pointers: the mouse leads while present, the
+    // touches follow in first-contact order - an absent mouse (touch-only
+    // device, cursor left the window) simply is not in the list. Each
+    // pointer matches last frame's track by id - active carries, and that
+    // carry IS the drag, and hot_prev carries with it: that carry IS next
+    // frame's settled hover - or starts fresh; a track whose pointer left
+    // the frame entirely (lifted last frame, mouse went absent) drops out
+    // here. Hot re-claims every frame, on every track, as the widgets'
+    // hit tests run.
     pointer_count_ = input_.gather_pointers(frame_pointers_);
     std::array<PointerTrack, InputFrame::kMaxPointers> matched{};
     const int count = std::min(pointer_count_, InputFrame::kMaxPointers);

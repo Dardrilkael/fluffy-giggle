@@ -12,6 +12,12 @@
 // still answers correctly because those flags were recomputed at the last
 // NewFrame (see imgui_wants() in src/app.cpp). WindowSize and WindowClose
 // are ours alone - the backend installs neither.
+//
+// The cursor callbacks also own InputFrame::mouse_present - the gui's
+// "is there a mouse at all": a move, a button or the cursor entering sets
+// it (and samples the position, so a first click lands where the user
+// sees it, not at (0,0)); the cursor leaving clears it, and the gui's
+// pointer list drops the mouse that frame.
 
 #include "window.h"
 
@@ -90,6 +96,29 @@ void on_key(GLFWwindow* window, int key, int scancode, int action, int mods) {
     }
 }
 
+// The shared tail of every "the mouse was seen" tap: scales a screen-space
+// position (GLFW's coordinates) into the gui's framebuffer pixels (r2d
+// screen mode) - the ratio is 1:1 whenever the two match and drifts under
+// DPI scaling; a degenerate window size keeps the last position rather
+// than dividing by zero - and marks the mouse present.
+void tap_cursor(GLFWwindow* window, gui::InputFrame* input, double x, double y) {
+    int fb_width = 0;
+    int fb_height = 0;
+    int win_width = 0;
+    int win_height = 0;
+    glfwGetFramebufferSize(window, &fb_width, &fb_height);
+    glfwGetWindowSize(window, &win_width, &win_height);
+    if (win_width > 0 && win_height > 0) {
+        input->mouse_x =
+            static_cast<float>(x) *
+            (static_cast<float>(fb_width) / static_cast<float>(win_width));
+        input->mouse_y =
+            static_cast<float>(y) *
+            (static_cast<float>(fb_height) / static_cast<float>(win_height));
+    }
+    input->mouse_present = true;
+}
+
 void on_mouse_button(GLFWwindow* window, int button, int action, int mods) {
     (void)mods;
     if (action == GLFW_PRESS) {
@@ -97,15 +126,22 @@ void on_mouse_button(GLFWwindow* window, int button, int action, int mods) {
     } else {
         emit(window, MouseButtonReleasedEvent{button});
     }
-    if (gui::InputFrame* input = input_for(window);
-        input != nullptr && button >= 0 &&
-        button < gui::InputFrame::kMaxMouseButtons) {
-        const bool down = (action == GLFW_PRESS);
-        input->mouse_down[button] = down;
-        if (down) {
-            input->mouse_pressed[button] = true;
-        } else {
-            input->mouse_released[button] = true;
+    if (gui::InputFrame* input = input_for(window)) {
+        // The click can be the device's first appearance (no move since the
+        // window opened): sample, so the press lands at the real cursor
+        // and not at the (0,0) default.
+        double x = 0.0;
+        double y = 0.0;
+        glfwGetCursorPos(window, &x, &y);
+        tap_cursor(window, input, x, y);
+        if (button >= 0 && button < gui::InputFrame::kMaxMouseButtons) {
+            const bool down = (action == GLFW_PRESS);
+            input->mouse_down[button] = down;
+            if (down) {
+                input->mouse_pressed[button] = true;
+            } else {
+                input->mouse_released[button] = true;
+            }
         }
     }
 }
@@ -113,23 +149,24 @@ void on_mouse_button(GLFWwindow* window, int button, int action, int mods) {
 void on_cursor_pos(GLFWwindow* window, double x, double y) {
     emit(window, MouseMovedEvent{static_cast<float>(x), static_cast<float>(y)});
     if (gui::InputFrame* input = input_for(window)) {
-        // GLFW reports screen coordinates; gui space is framebuffer pixels
-        // (r2d screen mode). The ratio is 1:1 whenever the two match and
-        // drifts under DPI scaling. A degenerate window size keeps the
-        // last position rather than dividing by zero.
-        int fb_width = 0;
-        int fb_height = 0;
-        int win_width = 0;
-        int win_height = 0;
-        glfwGetFramebufferSize(window, &fb_width, &fb_height);
-        glfwGetWindowSize(window, &win_width, &win_height);
-        if (win_width > 0 && win_height > 0) {
-            input->mouse_x =
-                static_cast<float>(x) *
-                (static_cast<float>(fb_width) / static_cast<float>(win_width));
-            input->mouse_y =
-                static_cast<float>(y) *
-                (static_cast<float>(fb_height) / static_cast<float>(win_height));
+        tap_cursor(window, input, x, y);
+    }
+}
+
+// The cursor crossing the window edge. Entering is the device being seen -
+// sample and mark present, exactly like a move (a press can beat the first
+// move callback). Leaving unplugs the mouse: the gui's pointer list drops
+// it that frame, hover dies with it, and a press still held evaporates -
+// the release, whenever it lands, reports nowhere.
+void on_cursor_enter(GLFWwindow* window, int entered) {
+    if (gui::InputFrame* input = input_for(window)) {
+        if (entered != GLFW_FALSE) {
+            double x = 0.0;
+            double y = 0.0;
+            glfwGetCursorPos(window, &x, &y);
+            tap_cursor(window, input, x, y);
+        } else {
+            input->mouse_present = false;
         }
     }
 }
@@ -174,6 +211,7 @@ void install_window_callbacks(GLFWwindow* window, WindowEventSink* sink) {
     glfwSetKeyCallback(window, on_key);
     glfwSetMouseButtonCallback(window, on_mouse_button);
     glfwSetCursorPosCallback(window, on_cursor_pos);
+    glfwSetCursorEnterCallback(window, on_cursor_enter);
     glfwSetScrollCallback(window, on_scroll);
     glfwSetCharCallback(window, on_char);
 }

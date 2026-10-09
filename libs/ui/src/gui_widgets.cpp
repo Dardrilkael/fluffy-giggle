@@ -599,12 +599,16 @@ Rect begin_scroll_panel(GuiContext& gui, LayoutCursor& layout,
     const WidgetId scroll_id = gui.ids().id("scroll");
     ScrollState& scroll = gui.persistent_state<ScrollState>(scroll_id);
 
-    // The wheel moves the offset while the pointer is inside the viewport.
-    // Positive dy is wheel-up - toward EARLIER content - so the offset
+    // The wheel moves the offset while the pointer is inside the viewport -
+    // and only while a mouse is present: the flag gates the whole device,
+    // so a touch-only frame (or a cursor that just left the window) never
+    // scrolls, whatever mouse_x/y hold. Positive dy is wheel-up - toward
+    // EARLIER content - so the offset
     // (content shifted up) decreases. Clamped against the range measured
     // at the last end_scroll_panel: this frame's content does not exist
     // yet, and a fresh panel has no range at all.
-    if (viewport.contains(gui.input().mouse_x, gui.input().mouse_y) &&
+    if (gui.input().mouse_present &&
+        viewport.contains(gui.input().mouse_x, gui.input().mouse_y) &&
         gui.input().scroll_dy != 0.0f) {
         scroll.offset -= gui.input().scroll_dy * theme.scroll_speed;
     }

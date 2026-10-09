@@ -1892,6 +1892,7 @@ TEST_CASE("InputFrame::next_frame clears edges and keeps held state") {
     InputFrame frame;
     frame.mouse_x = 100.0f;
     frame.mouse_y = 50.0f;
+    frame.mouse_present = true;
     frame.mouse_down[0] = true;
     frame.mouse_pressed[0] = true;
     frame.mouse_released[1] = true;
@@ -1903,9 +1904,12 @@ TEST_CASE("InputFrame::next_frame clears edges and keeps held state") {
 
     frame.next_frame();
 
-    // Held state and position survive the frame boundary...
+    // Held state and position survive the frame boundary... presence is
+    // held state too - the platform re-establishes it per event, and a
+    // frame boundary must not flicker the mouse out of the pointer list.
     CHECK(frame.mouse_x == 100.0f);
     CHECK(frame.mouse_y == 50.0f);
+    CHECK(frame.mouse_present == true);
     CHECK(frame.mouse_down[0] == true);
     CHECK(frame.key_down['D'] == true);
     // ...the per-frame edges do not.
@@ -1930,13 +1934,15 @@ TEST_CASE("frame_input is drop-safe without a running app") {
     CHECK(frame.text_input.empty());
     CHECK(frame.touch_count == 0);
     CHECK(frame.bridged_touch() == ws::ui::gui::kNoPointer);
-    // An empty frame still lists the mouse: pointer slot 0, at rest.
+    // An empty frame never saw a mouse: presence defaults false, so the
+    // pointer list is EMPTY - the touch-only shape. The mouse joins only
+    // when the platform says one exists.
     std::array<ws::ui::gui::PointerView,
                ws::ui::gui::InputFrame::kMaxPointers>
         pointers{};
-    CHECK(frame.gather_pointers(pointers) == 1);
-    CHECK(pointers[0].id == ws::ui::gui::kMousePointerId);
-    CHECK(!pointers[0].down);
+    CHECK(frame.gather_pointers(pointers) == 0);
+    CHECK(pointers[0].id == ws::ui::gui::kNoPointer);
+    CHECK(!frame.pointer_pos(ws::ui::gui::kMousePointerId, nullptr, nullptr));
 }
 
 // --- InputFrame touch table (multi-touch groundwork) -------------------------
@@ -2121,9 +2127,11 @@ TEST_CASE("gather_pointers: mouse is slot 0, touches follow in table order") {
     frame.touch_up(PointerId{9}, 65.0f, 75.0f, false);  // 9 is in its release frame
     // The platform's bridge would have overwritten the mirrored mouse with
     // the touch; writing the mouse fields directly is the desktop shape.
-    // Either way slot 0 reports whatever the mouse state says.
+    // Either way slot 0 reports whatever the mouse state says - and the
+    // desktop shape means a present mouse.
     frame.mouse_x = 12.0f;
     frame.mouse_y = 34.0f;
+    frame.mouse_present = true;
     frame.mouse_down[0] = true;
     frame.mouse_pressed[0] = true;
 
@@ -2159,6 +2167,43 @@ TEST_CASE("gather_pointers: mouse is slot 0, touches follow in table order") {
     CHECK(y == 75.0f);
     CHECK(frame.pointer_pos(PointerId{7}, nullptr, nullptr));  // pure existence check
     CHECK(!frame.pointer_pos(PointerId{1234}, &x, &y));
+}
+
+TEST_CASE("gather_pointers: an absent mouse is not a pointer - touches only") {
+    using namespace ws::ui::gui;
+    // The touch-only shape: the bridge mirrors the finger into the raw
+    // mouse fields, but presence is false, so the mouse claims nothing.
+    // Whatever mouse_x/y hold - a finger's position, or the (0,0) default
+    // - the pointer list is exactly the touches.
+    InputFrame frame;
+    frame.touch_down(PointerId{7}, 40.0f, 50.0f);
+    CHECK(frame.mouse_x == 40.0f);  // the bridge mirrored the finger...
+    CHECK(!frame.mouse_present);    // ...but the platform never saw a mouse
+
+    std::array<PointerView, InputFrame::kMaxPointers> pointers{};
+    CHECK(frame.gather_pointers(pointers) == 1);
+    CHECK(pointers[0].id == PointerId{7});  // slot 0 is the TOUCH
+    CHECK(pointers[0].x == 40.0f);
+    CHECK(pointers[0].pressed);
+    CHECK(pointers[1].id == kNoPointer);
+    float x = 0.0f;
+    float y = 0.0f;
+    CHECK(!frame.pointer_pos(kMousePointerId, &x, &y));
+    CHECK(!frame.pointer_pos(kMousePointerId, nullptr, nullptr));
+    CHECK(frame.pointer_pos(PointerId{7}, &x, &y));
+    CHECK(x == 40.0f);
+    CHECK(y == 50.0f);
+
+    // The mouse joins the list the moment the platform reports it - the
+    // Bluetooth-mouse-plugged-in-while-touching shape: the raw fields
+    // still mirror the finger (either-writer), and now they count.
+    frame.mouse_present = true;
+    CHECK(frame.gather_pointers(pointers) == 2);
+    CHECK(pointers[0].id == kMousePointerId);
+    CHECK(pointers[0].x == 40.0f);  // the finger's mirror, as written
+    CHECK(pointers[1].id == PointerId{7});
+    CHECK(frame.pointer_pos(kMousePointerId, &x, &y));
+    CHECK(x == 40.0f);
 }
 
 TEST_CASE("Rect helpers: edges, centers and symmetric insets") {
@@ -2349,12 +2394,15 @@ TEST_CASE("ScopedId: the destructor pops, even through an early return") {
 namespace {
 
 // A pointer snapshot at (x, y) with the primary button's held state and
-// optional press/release edges set.
+// optional press/release edges set. The mouse is PRESENT: snap() models a
+// device the platform has seen, so every pre-presence test keeps today's
+// meaning (the flag defaults false - see the mouse_present block below).
 ws::ui::gui::InputFrame snap(float x, float y, bool down = false,
                              bool pressed = false, bool released = false) {
     ws::ui::gui::InputFrame frame;
     frame.mouse_x = x;
     frame.mouse_y = y;
+    frame.mouse_present = true;
     frame.mouse_down[0] = down;
     frame.mouse_pressed[0] = pressed;
     frame.mouse_released[0] = released;
@@ -2374,10 +2422,12 @@ struct TouchSnap {
 
 // snap()'s multi-touch counterpart: a frame of ONLY these contacts, built
 // through the public touch_* writers. The first touch_down bridges into
-// the mouse by design (the primary-touch -> mouse mirror), and writing the
-// mouse fields afterwards is the either-writer rule the Phase A gather
-// test set - so the mouse parks far away and the frame's pointer list is
-// exactly these contacts, in order.
+// the mouse by design (the primary-touch -> mouse mirror), but the bridge
+// writes raw fields only - mouse_present stays false, so the gui's
+// pointer list is exactly these contacts, in order: the touch-only shape.
+// The parked mouse fields below are the either-writer rule the Phase A
+// gather test set, made inert by the absent flag: they feed raw-field
+// readers (ImGui, apps) and can never claim anything.
 ws::ui::gui::InputFrame touch_frame(std::initializer_list<TouchSnap> contacts) {
     ws::ui::gui::InputFrame frame;
     for (const TouchSnap& contact : contacts) {
@@ -3294,14 +3344,15 @@ TEST_CASE("hit_test: two pointers can press two widgets in the same frame") {
     CHECK(gui.owning_pointer(b) == PointerId{2});
     CHECK(gui.hot_id(PointerId{1}) == a);
     CHECK(gui.hot_id(PointerId{2}) == b);
-    // The parked mouse claims nothing, but it is still a pointer in the
-    // frame's list - and each pointer reports its own position.
+    // The parked mouse claims nothing - and being absent (present=false,
+    // the touch-only shape) it is not a pointer in the frame's list at
+    // all; each real pointer still reports its own position.
     CHECK(gui.hot_id() == kInvalidWidgetId);
     CHECK(gui.pointer(PointerId{1}) != nullptr);
     CHECK(gui.pointer(PointerId{1})->x == 50.0f);
     CHECK(gui.pointer(PointerId{2})->x == 150.0f);
     CHECK(gui.pointer(PointerId{99}) == nullptr);  // no such pointer this frame
-    CHECK(gui.pointer(kMousePointerId) != nullptr);
+    CHECK(gui.pointer(kMousePointerId) == nullptr);  // no mouse this frame
     gui.end_frame();
 
     // Both lift inside: both click, in one frame.
@@ -3404,9 +3455,13 @@ TEST_CASE("hit_test: the bridged finger is mouse and touch - one click") {
     const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
 
     // Built through touch_down only - the bridge mirrors the mouse into
-    // the contact. No parking here: the duplicate IS the test.
+    // the contact. No parking here: the duplicate IS the test. The mouse
+    // must also be PRESENT: the duplicate shape is a real mouse plus a
+    // finger (Android + Bluetooth). A touch-only device lists the finger
+    // alone - the pointer_pos/gather tests above pin that shape.
     InputFrame press;
     press.touch_down(PointerId{7}, 50.0f, 50.0f);
+    press.mouse_present = true;
     gui.begin_frame(press);
     const HitTest hit = gui.hit_test(id, rect);
     CHECK(hit.pressed);
@@ -3423,12 +3478,178 @@ TEST_CASE("hit_test: the bridged finger is mouse and touch - one click") {
     lift.touch_up(PointerId{7}, 50.0f, 50.0f, false);  // mirrors the mouse's release
     lift.touches[0].pressed = false;  // down and up in one frame: the press
     lift.mouse_pressed[0] = false;    // edge is not this frame's fact
+    lift.mouse_present = true;
     gui.begin_frame(lift);
     const HitTest released = gui.hit_test(id, rect);
     CHECK(released.released);
     CHECK(released.clicked);
     CHECK(released.pointer == kMousePointerId);
     gui.end_frame();
+}
+
+// --- mouse presence (the touch-only/cursor-leave defect) ---------------------------
+
+TEST_CASE("mouse_present: an absent mouse claims nothing - no hover at (0,0)") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId id = IdStack{}.id("corner");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // The defect's shape: a touch-only device where mouse_x/y sit at the
+    // (0,0) default - dead on the top-left widget. No platform ever said
+    // a mouse exists, so the mouse is not a pointer at all and no hover
+    // may ever settle there - not on any frame, settled or not.
+    InputFrame absent;
+    absent.mouse_x = 0.0f;  // explicit: the top-left default IS the trap
+    absent.mouse_y = 0.0f;
+    for (int settle = 0; settle < 3; ++settle) {
+        gui.begin_frame(absent);
+        const WidgetResult result = gui.state(id, rect);
+        CHECK(result.state == WidgetState::Normal);
+        CHECK(!result.hit.hovered);
+        CHECK(!result.hit.pressed);
+        CHECK(result.hit.pointer == kNoPointer);
+        CHECK(gui.hot_id() == kInvalidWidgetId);
+        CHECK(gui.active_id() == kInvalidWidgetId);
+        gui.end_frame();
+    }
+
+    // A ghost press edge (mouse_down written, device still absent) is
+    // nobody's press - and a ghost release later clicks nothing.
+    InputFrame ghost_press = absent;
+    ghost_press.mouse_down[0] = true;
+    ghost_press.mouse_pressed[0] = true;
+    gui.begin_frame(ghost_press);
+    CHECK(!gui.hit_test(id, rect).pressed);
+    CHECK(gui.active_id() == kInvalidWidgetId);
+    gui.end_frame();
+    InputFrame ghost_lift = absent;
+    ghost_lift.mouse_released[0] = true;
+    gui.begin_frame(ghost_lift);
+    CHECK(!gui.hit_test(id, rect).clicked);
+    gui.end_frame();
+
+    // Presence flips the whole device on: the same (0,0) position now
+    // settles hover (one frame, as always) and a press claims. The widget
+    // must RUN to claim - the settle frame hit-tests like any widget
+    // frame does.
+    InputFrame present = absent;
+    present.mouse_present = true;
+    gui.begin_frame(present);
+    (void)gui.state(id, rect);  // hot claims this frame
+    gui.end_frame();
+    gui.begin_frame(present);
+    CHECK(gui.state(id, rect).state == WidgetState::Hovered);
+    CHECK(gui.is_hot(id));
+    gui.end_frame();
+    gui.begin_frame(snap(0.0f, 0.0f, true, true));
+    CHECK(gui.hit_test(id, rect).pressed);
+    gui.end_frame();
+}
+
+TEST_CASE("mouse_present: a cursor leave kills hover and evaporates a held press") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId id = IdStack{}.id("leave");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // Hover settles while the mouse is there (the widget runs both
+    // frames - hot is frame-scoped, so the settle needs the claim)...
+    gui.begin_frame(snap(50.0f, 50.0f));
+    (void)gui.state(id, rect);
+    gui.end_frame();
+    gui.begin_frame(snap(50.0f, 50.0f));
+    CHECK(gui.state(id, rect).state == WidgetState::Hovered);
+    gui.end_frame();
+
+    // ...the cursor leaves the window: the platform clears ONLY the flag
+    // (position and button state stay as they were). The pointer drops
+    // out of the frame and its track with it - hover dies the SAME frame,
+    // not one frame later, because no track survives to carry hot_prev.
+    InputFrame left = snap(50.0f, 50.0f);
+    left.mouse_present = false;
+    gui.begin_frame(left);
+    const WidgetResult gone = gui.state(id, rect);
+    CHECK(gone.state == WidgetState::Normal);
+    CHECK(!gone.hit.hovered);
+    CHECK(gui.hot_id() == kInvalidWidgetId);
+    gui.end_frame();
+    gui.begin_frame(left);
+    CHECK(gui.state(id, rect).state == WidgetState::Normal);  // nothing settles back
+    gui.end_frame();
+
+    // A press in flight when the cursor leaves evaporates: the raw fields
+    // still read button-down, but the pointer is gone, so the drag is
+    // nobody's - and the release, whenever it lands, reports nowhere.
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
+    CHECK(gui.hit_test(id, rect).pressed);
+    CHECK(gui.active_id() == id);
+    gui.end_frame();
+    InputFrame carried = snap(50.0f, 50.0f, true);  // raw fields say held...
+    carried.mouse_present = false;                  // ...the device is gone
+    gui.begin_frame(carried);
+    CHECK(gui.active_id() == kInvalidWidgetId);  // the press evaporated
+    CHECK(gui.state(id, rect).state == WidgetState::Normal);
+    gui.end_frame();
+    InputFrame lift = snap(50.0f, 50.0f, false, false, true);
+    lift.mouse_present = false;
+    gui.begin_frame(lift);
+    CHECK(!gui.hit_test(id, rect).clicked);  // the release lands nowhere
+    gui.end_frame();
+
+    // The cursor returns: presence re-establishes the device, and the
+    // hover settles again like clockwork (the widget runs both frames).
+    gui.begin_frame(snap(50.0f, 50.0f));
+    (void)gui.state(id, rect);
+    gui.end_frame();
+    gui.begin_frame(snap(50.0f, 50.0f));
+    CHECK(gui.state(id, rect).state == WidgetState::Hovered);
+    gui.end_frame();
+}
+
+TEST_CASE("mouse_present: a lifted finger leaves no hover at the tap point") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const WidgetId id = IdStack{}.id("tap");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // The touch-only shape, built exactly as the platform would: a tap
+    // through the touch_* writers, the flag never set (the bridge mirrors
+    // raw fields only - it never speaks for presence). The finger's own
+    // touch slot drives the press.
+    InputFrame press;
+    press.touch_down(PointerId{7}, 50.0f, 50.0f);
+    gui.begin_frame(press);
+    const HitTest hit = gui.hit_test(id, rect);
+    CHECK(hit.pressed);
+    CHECK(hit.pointer == PointerId{7});  // the finger, not a mouse
+    CHECK(gui.active_id(PointerId{7}) == id);
+    CHECK(gui.active_id() == kInvalidWidgetId);  // no mouse to mirror onto
+    gui.end_frame();
+
+    InputFrame lift;
+    lift.touch_down(PointerId{7}, 50.0f, 50.0f);  // the entry, back for its lift
+    lift.touch_up(PointerId{7}, 50.0f, 50.0f, false);
+    lift.touches[0].pressed = false;  // down+up in one frame: the press edge
+    lift.mouse_pressed[0] = false;    // is not this frame's fact
+    gui.begin_frame(lift);
+    CHECK(gui.hit_test(id, rect).clicked);  // the one click, off the touch
+    gui.end_frame();
+
+    // The finger is gone, but mouse_x/y still read the tap point - the
+    // bridge's mirror, frozen at the lift. Under the old always-mouse
+    // semantics that position hovered the widget forever; absent, it must
+    // never settle.
+    CHECK(lift.mouse_x == 50.0f);
+    for (int settle = 0; settle < 3; ++settle) {
+        gui.begin_frame(InputFrame{});  // no touches, no mouse: the raw
+                                        // mirror is all that remains
+        const WidgetResult calm = gui.state(id, rect);
+        CHECK(calm.state == WidgetState::Normal);
+        CHECK(!calm.hit.hovered);
+        CHECK(gui.hot_id() == kInvalidWidgetId);
+        gui.end_frame();
+    }
 }
 
 TEST_CASE("persistent_state: keys values by (type, id) for the context's lifetime") {
@@ -4219,6 +4440,57 @@ TEST_CASE("scroll: the wheel moves the flow - clamps at both ends and persists")
     }
 }
 
+TEST_CASE("scroll: the wheel is dead while no mouse is present") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+
+    // The same flow-measuring pass as the wheel test above; the frames
+    // below differ only in mouse_present.
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)begin_scroll_panel(
+            gui, layout, kDefaultChrome, "list", {0.0f, 0.0f, 200.0f, 100.0f});
+        int clicked = -1;
+        for (int i = 0; i < 10; ++i) {
+            gui.ids().push(i);
+            if (button(gui, layout, kDefaultChrome, "row", 120.0f)) {
+                clicked = i;
+            }
+            gui.ids().pop();
+        }
+        end_scroll_panel(gui, layout, kDefaultChrome);
+        gui.end_frame();
+        return clicked;
+    };
+
+    // Frame 1: present and idle - measures the scroll range (ten 24-px
+    // rows against the 76-px viewport: 164) for what follows.
+    CHECK(pass(snap(100.0f, 50.0f)) == -1);
+
+    // Frame 2: an absent mouse wheels over the panel. A touch-only
+    // device's scroll_dy is never nonzero in practice, but a cursor that
+    // just left the window (or any hand-built frame) must not scroll -
+    // the presence flag gates the whole device, not the position.
+    InputFrame ghost = snap(100.0f, 50.0f);
+    ghost.scroll_dy = -1.0f;
+    ghost.mouse_present = false;
+    CHECK(pass(ghost) == -1);
+
+    // Frame 3: the click at the unscrolled origin still lands on row 0 -
+    // frame 2 moved nothing.
+    CHECK(pass(snap(60.0f, 24.0f, false, true, true)) == 0);
+
+    // Frame 4: the present mouse wheels - 32 px, as always.
+    InputFrame wheel = snap(100.0f, 50.0f);
+    wheel.scroll_dy = -1.0f;
+    CHECK(pass(wheel) == -1);
+
+    // Frame 5: the same origin click now lands on row 1 - row 0 scrolled
+    // out from under it (it sits at y -20..4).
+    CHECK(pass(snap(60.0f, 24.0f, false, true, true)) == 1);
+}
+
 TEST_CASE("scroll: two regions keep independent offsets") {
     using namespace ws::ui::gui;
     GuiContext gui;
@@ -4481,11 +4753,13 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
     GuiContext gui;
     LayoutCursor layout;
 
-    // Hand-built frames, the mouse NOT parked: the first contact bridges
-    // and the mouse mirrors it - the real Android shape, where a dragging
-    // finger is two pointers at once. Without cancel_pointer's mirror
-    // rule, the mouse's copy of the press would survive the cancel and
-    // click the row on release.
+    // Hand-built frames, the mouse NOT parked but PRESENT: the first
+    // contact bridges and the mouse mirrors it - the duplicate shape, a
+    // real mouse plus a dragging finger (Android + Bluetooth), where the
+    // finger is two pointers at once. A touch-only device lists the finger
+    // alone, and the cancel's mirror has nothing to pair. Without
+    // cancel_pointer's mirror rule the mouse's copy of the press would
+    // survive the cancel and click the row on release.
     const auto pass = [&](const InputFrame& frame) {
         gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
@@ -4513,6 +4787,7 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
     // BOTH tracks claim the row (the documented duplicate).
     InputFrame press;
     press.touch_down(PointerId{7}, 60.0f, 60.0f);
+    press.mouse_present = true;
     CHECK(pass(press) == -1);
     CHECK(gui.active_id() == row_id(2));  // the mouse's track pressed...
     CHECK(gui.active_id(PointerId{7}) == row_id(2));  // ...and so did the touch's
@@ -4524,6 +4799,7 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
     cross.touch_move(PointerId{7}, 60.0f, 40.0f);  // the bridge mirrors the position
     cross.touches[0].pressed = false;  // held, not pressed: clear the
     cross.mouse_pressed[0] = false;    // edges both sides of the bridge
+    cross.mouse_present = true;
     CHECK(pass(cross) == -1);
     CHECK(gui.active_id() == kInvalidWidgetId);  // BOTH claims cancelled
     CHECK(gui.active_id(PointerId{7}) == kInvalidWidgetId);
@@ -4538,6 +4814,7 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
     back.touch_up(PointerId{99}, 60.0f, 24.0f, false);
     back.touches[0].pressed = false;
     back.mouse_pressed[0] = false;
+    back.mouse_present = true;
     CHECK(pass(back) == 0);
 
     // Frame 4: release exactly where it pressed - row 2 still spans
@@ -4548,6 +4825,7 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
     lift.touch_up(PointerId{7}, 60.0f, 60.0f, false);  // mirrors the mouse's release
     lift.touches[0].pressed = false;  // down+up in one frame: the press
     lift.mouse_pressed[0] = false;    // edge is not this frame's fact
+    lift.mouse_present = true;
     CHECK(pass(lift) == -1);
 }
 

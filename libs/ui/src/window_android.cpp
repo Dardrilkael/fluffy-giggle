@@ -539,7 +539,11 @@ private:
     // Real mouse (Bluetooth): buttons diffed from the event's button mask -
     // one motion event can change several at once - plus hover and wheel.
     // GLFW button order is left(0), right(1), middle(2); Android's mask bits
-    // are primary<<0, secondary<<1, tertiary<<2.
+    // are primary<<0, secondary<<1, tertiary<<2. This path alone owns
+    // mouse_present on Android (the gui's "is there a mouse"): button
+    // transitions, motion and hover-enter set it, HOVER_EXIT clears it.
+    // The touch path never touches the flag - a finger is not a mouse, and
+    // a lifting one must not unplug a real one.
     void translate_mouse(const AInputEvent* event) {
         const int32_t buttons = AMotionEvent_getButtonState(event);
         struct ButtonBit {
@@ -561,6 +565,9 @@ private:
             if (now_down) {
                 emit(MouseButtonPressedEvent{bit.button});
                 if (input != nullptr) {
+                    // A press is the strongest presence signal - and the
+                    // device may never have hovered first.
+                    input->mouse_present = true;
                     input->mouse_down[bit.button] = true;
                     input->mouse_pressed[bit.button] = true;
                 }
@@ -584,7 +591,23 @@ private:
             if (input != nullptr) {
                 input->mouse_x = x;
                 input->mouse_y = y;
+                input->mouse_present = true;  // motion is presence
             }
+        }
+        // The cursor appearing over the window: the same tap as a move
+        // (position + presence) but no MouseMovedEvent - the event stream
+        // has no enter/leave, matching desktop's silent enter handling.
+        if (masked == AMOTION_EVENT_ACTION_HOVER_ENTER && input != nullptr) {
+            input->mouse_x = AMotionEvent_getX(event, 0);
+            input->mouse_y = AMotionEvent_getY(event, 0);
+            input->mouse_present = true;
+        }
+        // ...and leaving: the mouse is gone. Hover dies with the flag and
+        // a press still held evaporates - the same semantics as desktop's
+        // cursor-leave. Runs after the button diff above, so a leave that
+        // also releases buttons ends absent, not present.
+        if (masked == AMOTION_EVENT_ACTION_HOVER_EXIT && input != nullptr) {
+            input->mouse_present = false;
         }
         if (masked == AMOTION_EVENT_ACTION_SCROLL) {
             const float x = AMotionEvent_getAxisValue(

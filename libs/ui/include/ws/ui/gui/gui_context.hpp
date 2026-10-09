@@ -316,8 +316,10 @@ public:
 
     // --- hot/active inspection (drag math etc.), per pointer ---
     // The no-arg forms answer for the mouse - the pre-touch API, unchanged
-    // in meaning. `pointer` is a mouse/touch pointer id as the frame sees
-    // it (kMousePointerId for the mouse); an unknown id answers invalid.
+    // in meaning, so an absent mouse (InputFrame::mouse_present false)
+    // answers invalid: no mouse, no mouse's claims. `pointer` is a
+    // mouse/touch pointer id as the frame sees it (kMousePointerId for the
+    // mouse); an unknown id answers invalid.
     WidgetId hot_id(PointerId pointer = kMousePointerId) const;
     WidgetId active_id(PointerId pointer = kMousePointerId) const;
     // The am-I spelling of the two above: true when `id` is this

@@ -18,6 +18,12 @@ namespace ws::ui::gui {
 // codes ws::ui events already carry. Touch contacts arrive through the
 // touch_* methods, keyed by the platform's per-contact id (Android's
 // multi-touch path; desktop GLFW synthesizes none).
+//
+// The mouse exists for the gui only while mouse_present (below): the
+// platform sets the flag when it sees the device - cursor move, button,
+// cursor enter - and clears it when the cursor leaves the window. A
+// touch-only device therefore lists touches only, so mouse_x/y sitting
+// at (0,0) (or mirroring a lifted finger) can never hover anything.
 
 // Pointer identity, a strong struct on purpose: a texture id, a body
 // slot or a widget index can never be passed where a pointer goes (nor
@@ -31,7 +37,8 @@ struct PointerId {
 
 // Pointer-id sentinels. Platform touch ids are small per-contact ints and
 // can never collide with these two; wherever pointers are listed, the
-// mouse always ids as kMousePointerId and "no pointer" is kNoPointer.
+// mouse ids as kMousePointerId - when it is listed at all, which is
+// InputFrame::mouse_present's call - and "no pointer" is kNoPointer.
 inline constexpr PointerId kMousePointerId{0xFFFFFFFEu};
 inline constexpr PointerId kNoPointer{0xFFFFFFFFu};
 
@@ -101,7 +108,9 @@ struct InputFrame {
     // The platform layer's ONLY writers (besides tests): touch_down appends
     // an entry, touch_move updates one, touch_up marks the release edge -
     // the entry leaves at next_frame(), so the release frame still sees it.
-    // All three also maintain the primary-touch -> mouse bridge (below).
+    // All three also maintain the primary-touch -> mouse bridge (below);
+    // none of them touches mouse_present - that flag is the platform's own
+    // statement about a real mouse, and a finger is not one.
     //
     // Returns the entry's slot, or -1 when the table is full (the caller
     // drops the contact and warns once). One down per contact is the
@@ -120,6 +129,17 @@ struct InputFrame {
     // --- held state ------------------------------------------------------------
     float mouse_x = 0.0f;  // framebuffer pixels, top-left origin
     float mouse_y = 0.0f;
+    // A mouse exists, as far as the gui is concerned. The platform owns
+    // this flag: it sets it whenever the device is seen - a cursor move, a
+    // button, the cursor entering, each also sampling the position - and
+    // clears it when the cursor leaves the window. While false the mouse
+    // is not a pointer at all: gather_pointers lists the touches only,
+    // pointer_pos(kMousePointerId) answers false and the wheel is dead, so
+    // a touch-only device (where these fields mirror the last finger, or
+    // sit at (0,0) before any) can never show hover at the top-left.
+    // Held state, not an edge - next_frame() keeps it; the touch bridge
+    // never writes it.
+    bool mouse_present = false;
     std::array<bool, kMaxMouseButtons> mouse_down{};
     std::array<bool, kMaxKeys> key_down{};
 
@@ -140,13 +160,16 @@ struct InputFrame {
     int touch_count = 0;
 
     // --- unified pointer view --------------------------------------------------
-    // The frame's pointers as one flat list: [0] is always the mouse (id
-    // kMousePointerId), the touches follow in table order. A touch exists
-    // while down or in its release frame - no hover without contact. The
-    // return value is the entry count; slots past it read as kNoPointer.
+    // The frame's pointers as one flat list: [0] is the mouse (id
+    // kMousePointerId) while mouse_present, the touches follow in table
+    // order - a touch-only device lists the touches and nothing else. A
+    // touch exists while down or in its release frame - no hover without
+    // contact. The return value is the entry count; slots past it read as
+    // kNoPointer.
     int gather_pointers(std::array<PointerView, kMaxPointers>& out) const;
     // Pointer `id`'s position (the mouse or any touch); false when no such
-    // pointer is in this frame. The out params are optional (pure lookup).
+    // pointer is in this frame - the absent mouse included. The out params
+    // are optional (pure lookup).
     bool pointer_pos(PointerId id, float* x, float* y) const;
 
 private:
@@ -155,7 +178,9 @@ private:
     // use, the gui's mouse path and ImGui keep working unchanged. No
     // promotion - when it lifts, the mouse stays released until a new
     // gesture's first contact bridges. touch_up clears it; next_frame()
-    // self-heals if its contact is already gone.
+    // self-heals if its contact is already gone. The mirror is raw fields
+    // only: mouse_present stays the platform's call, so a lifting finger
+    // can never unplug a real mouse.
     PointerId bridged_touch_id_ = kNoPointer;
 };
 

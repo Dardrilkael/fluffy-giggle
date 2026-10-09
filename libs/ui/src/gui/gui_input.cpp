@@ -134,29 +134,40 @@ void InputFrame::touch_up(PointerId id, float x, float y, bool cancelled) {
 int InputFrame::gather_pointers(
     std::array<PointerView, kMaxPointers>& out) const {
     out.fill(PointerView{});
-    PointerView& mouse = out[0];
-    mouse.id = kMousePointerId;
-    mouse.x = mouse_x;
-    mouse.y = mouse_y;
-    mouse.down = mouse_down[0];
-    mouse.pressed = mouse_pressed[0];
-    mouse.released = mouse_released[0];
-    const int count = std::min(touch_count, kMaxTouches);
-    for (int i = 0; i < count; ++i) {
+    // The mouse is a pointer only while the platform says one is there;
+    // absent, the list is exactly the touches (a touch-only device) and
+    // nothing reports hover from mouse_x/y.
+    int count = 0;
+    if (mouse_present) {
+        PointerView& mouse = out[0];
+        mouse.id = kMousePointerId;
+        mouse.x = mouse_x;
+        mouse.y = mouse_y;
+        mouse.down = mouse_down[0];
+        mouse.pressed = mouse_pressed[0];
+        mouse.released = mouse_released[0];
+        count = 1;
+    }
+    const int touch_total = std::min(touch_count, kMaxTouches);
+    for (int i = 0; i < touch_total; ++i) {
         const TouchPoint& point = touches[static_cast<std::size_t>(i)];
-        PointerView& view = out[static_cast<std::size_t>(i) + 1];
+        PointerView& view = out[static_cast<std::size_t>(count)];
         view.id = point.id;
         view.x = point.x;
         view.y = point.y;
         view.down = point.down;
         view.pressed = point.pressed;
         view.released = point.released;
+        ++count;
     }
-    return 1 + count;
+    return count;
 }
 
 bool InputFrame::pointer_pos(PointerId id, float* x, float* y) const {
     if (id == kMousePointerId) {
+        if (!mouse_present) {
+            return false;  // not a pointer this frame
+        }
         if (x != nullptr) {
             *x = mouse_x;
         }

@@ -132,9 +132,10 @@ void on_event(ws::ui::Event& e) override {
 
 - The shell installs the GLFW callbacks (`glfwSetWindowSizeCallback`,
   `glfwSetKeyCallback`, `glfwSetMouseButtonCallback`,
-  `glfwSetCursorPosCallback`, `glfwSetScrollCallback`,
-  `glfwSetWindowCloseCallback`) once, in `src/window_glfw.cpp` (Android's
-  counterpart is the NativeActivity pump in `src/window_android.cpp`).
+  `glfwSetCursorPosCallback`, `glfwSetCursorEnterCallback`,
+  `glfwSetScrollCallback`, `glfwSetWindowCloseCallback`) once, in
+  `src/window_glfw.cpp` (Android's counterpart is the NativeActivity pump
+  in `src/window_android.cpp`).
   Every callback
   builds the matching `Event` and forwards it to a single
   `std::function<void(Event&)>` stored on the window. Zero-size resize
@@ -414,12 +415,27 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   keyed by the platform's stable pointer ids; an entry lives through
   its release frame, so a widget can still see who lifted).
   `gather_pointers()` flattens the two into one uniform list — slot 0 is
-  always the mouse (id `kMousePointerId`), the touches follow in arrival
-  order — and `pointer_pos(id)` looks one up. The `touch_*` writers
+  the mouse (id `kMousePointerId`) while `mouse_present`, the touches
+  follow in arrival order — and `pointer_pos(id)` looks one up (an
+  absent mouse answers false). `mouse_present` is the platform's own
+  statement that a mouse exists at all, held state the frame boundary
+  keeps: the desktop cursor callbacks set it on move, button or cursor
+  enter (each sampling the position, so a first click lands where the
+  user sees it, not at the (0,0) default) and clear it when the cursor
+  leaves the window; on Android only the real-mouse (Bluetooth) path
+  touches it — hover-enter/move/buttons set it, HOVER_EXIT clears it.
+  While false the mouse is not a pointer: no hover, no hot, no press,
+  no click, no wheel — a touch-only device (where `mouse_x/y` mirror
+  the last finger or sit at (0,0)) can never show hover at the
+  top-left, and a cursor that left the window takes its in-flight
+  press with it (the track drops with the pointer; hover dies the same
+  frame, not one later). The `touch_*` writers
   maintain the primary-touch → mouse bridge: the FIRST contact of a
   gesture mirrors the mouse's position, button 0 and its edges (no
   promotion on lift — single-finger use, the mouse path and ImGui keep
-  working, unchanged). `begin_frame(frame_input())` adopts the snapshot;
+  working, unchanged) — raw fields only, NEVER `mouse_present`: a
+  finger is not a mouse, and a lifting one must not unplug a real one.
+  `begin_frame(frame_input())` adopts the snapshot;
   widgets run; `end_frame()` resolves the frame per pointer (a release
   whose owner vanished is dropped, not misattributed).
 - **Identity.** `WidgetId` is an FNV-1a hash of the id-stack scope plus a
@@ -440,7 +456,9 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `HitTest` for the widget — a two-finger press on one widget is one
   press, and one click — and `HitTest::pointer` reports the owning
   pointer as the lowest slot (the mouse outranks touches, so a bridged
-  finger resolves to the mouse it mirrors). Capture is per pointer: a
+  finger resolves to the mouse it mirrors — when a mouse is present at
+  all: absent, the finger is the fold's only entry and owns the press
+  by itself). Capture is per pointer: a
   drag on one slider does not stop another finger from pressing the
   next. `hovered` is the SETTLED visual (M7): it reports the pointer's
   last frame's final hot, gated on this frame's inside-ness — so an
@@ -633,7 +651,8 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   draws nor claims;
   the offset is persistent state, the content extent is measured at the
   previous end: one frame of lag, by design. Scrolling is two-handed:
-  the mouse wheels any viewport under it, a finger drags — each contact
+  a PRESENT mouse wheels any viewport under it (the presence flag gates
+  the whole device), a finger drags — each contact
   pressed inside the viewport is watched, and past
   `theme.drag_threshold` (8 px) the scroll owns the finger:
   `cancel_pointer` fires before children run that frame, and the offset
@@ -645,7 +664,7 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   glyphs when one is set, the v1 quad bars otherwise — and text cannot
   truncate, so a label wider than its face drops instead of spilling;
   the gui is screen-space only (the same
-  space layout and hit-testing use); scroll is vertical-only (the
+  space layout and hit-testing use); scroll is vertical-only (a present
   mouse wheels any viewport under it, a finger drags any region past
   the drag threshold); panels are chrome, not input surfaces.
 - Everything tests headless (r2d draws drop without a window): the widget
@@ -695,7 +714,10 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `sprite_size`. Draws are valid only inside `on_update()`, within a
   `begin()` block.
 - `gui/` (`ws::ui::gui`): the immediate-mode widget layer — `GuiContext` +
-  `frame_input()` (the frame's raw input: mouse, keys and the multi-touch
+  `frame_input()` (the frame's raw input: mouse — fields plus
+  `mouse_present`, the platform's own yes/no on the device's existence,
+  without which the mouse is not a pointer at all —, keys and the
+  multi-touch
   table — `touches`/`touch_count`, the platform-facing `touch_*` writers,
   `gather_pointers`, `pointer_pos`, `bridged_touch`), `LayoutCursor`,
   `IdStack` (and `ScopedId`, its RAII scope guard), `ChromeTheme`/
@@ -819,10 +841,20 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   marks them example-only; the shell manages its own swapchain objects.
 - Input platform invariants. Desktop is mouse-only BY DECISION — no Win32
   WM_POINTER: touch screens keep the synthesized single-mouse behavior.
-  Android decodes EVERY contact (pointer index from the action bits,
+  Desktop owns `mouse_present` through the cursor callbacks: a move, a
+  button or a cursor-enter sets it and samples the position (the first
+  click after the window opens lands at the real cursor, not (0,0)); the
+  cursor leaving the window clears it — from that frame the gui's
+  pointer list has no mouse (hover dies the same frame, a held press
+  evaporates, the wheel is dead). Android decodes EVERY contact (pointer
+  index from the action bits,
   MOVE updates all pointers, CANCEL lifts them all cancelled), emits
   the `Touch*` events plus the bridge's `Mouse*` off `bridged_touch()`,
-  and drops the 9th+ finger with a once-per-frame warn. On Android,
+  and drops the 9th+ finger with a once-per-frame warn; the touch path
+  never touches `mouse_present` — only the real-mouse (Bluetooth) path
+  does (hover-enter/move/buttons set it with the position, HOVER_EXIT
+  clears it), so a touch-only device lists touches only and a finger
+  can never unplug a real mouse. On Android,
   ImGui is fed BY THE BRIDGE — `io.AddMousePosEvent`/
   `AddMouseButtonEvent` direct; touch-source motion never reaches
   `ImGui_ImplAndroid_HandleInputEvent`, whose index-0 following is what
