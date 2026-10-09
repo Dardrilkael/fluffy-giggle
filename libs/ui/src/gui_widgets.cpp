@@ -117,6 +117,12 @@ void panel_chrome(const Rect& bounds, const ChromeTheme& theme) {
 
 bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             const char* label, float width, r2d::Sprite icon) {
+    // Fill-width: a negative width means "the rest of the line" - the one
+    // size the caller cannot know before placing, resolved against the
+    // cursor before the clamp.
+    if (width < 0.0f) {
+        width = layout.remaining_width();
+    }
     width = std::max(width, 0.0f);  // a negative width would draw a mirrored quad
 
     // One seam: the id keys the hit-test AND any persistent state; the
@@ -304,6 +310,11 @@ namespace {
 bool slider_impl(GuiContext& gui, LayoutCursor& layout,
                  const ChromeTheme& theme, const char* label, float& value,
                  float min, float max, float width, float key_step) {
+    // Fill-width, like button: a negative width fills the rest of the
+    // line before the clamp keeps the draw sane.
+    if (width < 0.0f) {
+        width = layout.remaining_width();
+    }
     width = std::max(width, 0.0f);  // a negative width would draw a mirrored quad
     const WidgetId id = gui.ids().id(label);
     const Rect rect = layout.next(width, theme.control_height);
@@ -545,7 +556,12 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
         }
         gui.ids().pop();
         if (i + 1 < count) {
-            layout.same_line();  // one line: the next tab beside this one
+            // One line, but FLUSH: the strip is one widget's row, not
+            // flow items, so the tabs sit at fixed pitch (the strip is
+            // count*width wide, the documented geometry) - the explicit
+            // 0 gap overrides the panel's item spacing, which would
+            // otherwise gap them.
+            layout.same_line(0.0f);
         }
     }
     gui.ids().pop();
@@ -566,7 +582,8 @@ Rect begin_panel(GuiContext& gui, LayoutCursor& layout,
     // degenerate content rect - an overflowed panel or bounds smaller
     // than the padding - pushes an empty clip: honestly nothing, rather
     // than children leaking outside.
-    const Rect content = layout.begin_panel(bounds, theme.padding);
+    const Rect content = layout.begin_panel(bounds, theme.padding,
+                                            theme.spacing);
     // A panel is a wheel claimant too - ALL panels are, scrollable or
     // not: the popup that covers a scroll panel eats the wheel even
     // though it scrolls nothing. Keyless: it claims, never consumes.
@@ -736,7 +753,7 @@ Rect begin_scroll_panel(GuiContext& gui, LayoutCursor& layout,
     (void)layout.begin_panel({bounds.x, bounds.y - scroll.offset,
                               bounds.width,
                               bounds.height + scroll.offset},
-                             theme.padding);
+                             theme.padding, theme.spacing);
     r2d::push_clip(viewport.x, viewport.y, viewport.width, viewport.height);
     gui.push_hit_clip(viewport);
     return viewport;

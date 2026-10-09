@@ -606,10 +606,24 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   and the panel vanishing for frames. Never a local static: if a widget
   needs to remember, it keys here.
 - **Layout.** `LayoutCursor` is a flowing cursor with a panel stack:
-  `next(w, h)` places at the cursor and advances below the line's
-  tallest, `same_line()` rewinds onto the current line, `begin_panel`
-  pushes a content rect (bounds inset by the theme padding),
-  `end_panel` pops it; nesting parks the parent's cursor. All four gui
+  `next(w, h, align = top)` places at the cursor — `Align::center`/
+  `bottom` place within the line height SO FAR (the widget counts when
+  it is the tallest, so a tall latecomer tops out at the line's top
+  and earlier widgets never re-center — place the tallest first) —
+  and advances below the line's tallest plus the panel's spacing;
+  `same_line(gap = -1)` rewinds onto the current line, resuming one
+  panel-spacing right of the last widget (an explicit gap — tab_bar's
+  flush 0 — overrides for that one seam); `begin_panel(bounds, padding,
+  spacing = 0)` pushes a content rect (bounds inset by the padding,
+  width/height clamped at 0 — a bounds too small for its padding is an
+  empty panel, never a backwards one), `end_panel` pops it; nesting
+  parks the parent's cursor. `remaining_width()` is the room left on
+  the current line — the fill-width answer: a button/slider handed a
+  NEGATIVE width fills to the content's right edge. The gui's own
+  panels pass `theme.spacing`, so their children flow spaced between
+  lines and between same_line() items (`theme.spacing = 0` restores
+  the unspaced pitch); `flow_extent()` counts the between-line gaps
+  but never a trailing one. All four gui
   stacks (ids, panels, renderer clips, hit clips) cap at depth 8 with
   BALANCED overflow — depth keeps counting past the clamp, so a matching
   pop never
@@ -642,15 +656,18 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   focusable and drives through `state()` — focus, the 1px accent ring,
   keyboard control and the Disabled look are one story everywhere, not
   a button privilege: `button` (optional atlas icon + label; Enter/
-  Space activate the focused one exactly like a click),
+  Space activate the focused one exactly like a click; a negative
+  width fills the rest of the line),
   `checkbox`
   (box + label, auto-sized row; Enter/Space toggle the focused one),
   `slider_float`/`slider_int`
   (click-to-set and drag are one rule: the owner maps the pointer while
   pressed; kLeft/kRight step the focused one — 1% of the range per
   press, int by 1, clamped to [min, max], changed reported only on a
-  real move), `begin_panel`/`end_panel` (chrome + clip + id scope + layout
-  panel), `tab_bar` (the caller's int IS the selection; the strip
+  real move; a negative width fills the rest of the line),
+  `begin_panel`/`end_panel` (chrome + clip + id scope + layout panel
+  flowing theme.spacing apart), `tab_bar` (the caller's int IS the
+  selection; the strip
   selects, the per-tab content is the caller's branch; the tabs
   register in strip order and Enter/Space select the focused one),
   `begin_scroll_panel`/`end_scroll_panel` (children flow inside a

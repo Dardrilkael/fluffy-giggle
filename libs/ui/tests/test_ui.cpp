@@ -4052,6 +4052,130 @@ TEST_CASE("LayoutCursor: overflow round trips never eat a real panel") {
     CHECK(after.y == 20.0f);  // the parked cursor, uncorrupted
 }
 
+TEST_CASE("LayoutCursor: spacing gaps lines and same_line items; no trailing gap") {
+    using namespace ws::ui::gui;
+    LayoutCursor layout;
+    (void)layout.begin_panel({0.0f, 0.0f, 200.0f, 200.0f}, 0.0f, 8.0f);
+
+    // One spacing below a line's bottom is the next line's top.
+    (void)layout.next(30.0f, 24.0f);  // line 1: (0, 0) .. (30, 24)
+    const Rect b = layout.next(30.0f, 24.0f);
+    CHECK(b.y == 32.0f);  // 24 + the 8-px gap
+
+    // same_line resumes onto b's line, one spacing to its right. The
+    // extent mid-line counts the line's tallest SO FAR - b's 24.
+    layout.same_line();
+    CHECK(layout.flow_extent() == 56.0f);  // 32 + 24
+    const Rect c = layout.next(30.0f, 40.0f);
+    CHECK(c.x == 38.0f);  // b.x + b.width + the gap
+    CHECK(c.y == b.y);    // flush with b; c's height never lifts the line's top
+    CHECK(layout.flow_extent() == 72.0f);  // the line's tallest now: 32 + 40
+
+    // The next line starts below the line's TALLEST plus one gap...
+    const Rect d = layout.next(30.0f, 10.0f);
+    CHECK(d.y == 80.0f);  // 72 + 8
+
+    // ...and the extent stops at the last placed line's bottom: the gap
+    // before a line that never came is not content.
+    CHECK(layout.flow_extent() == 90.0f);
+
+    // An explicit same_line gap overrides the panel's spacing (tab_bar's
+    // flush strip seam); the default negative gap is the panel's own.
+    layout.same_line(0.0f);
+    CHECK(layout.next(30.0f, 10.0f).x == d.x + d.width);
+    layout.end_panel();
+
+    // The default spacing is 0 - the unspaced look, today's exact pitch.
+    LayoutCursor raw;
+    (void)raw.begin_panel({0.0f, 0.0f, 100.0f, 100.0f}, 0.0f);
+    (void)raw.next(30.0f, 24.0f);
+    CHECK(raw.next(30.0f, 24.0f).y == 24.0f);  // flush: no gap
+
+    // A spacing panel that placed nothing flows nothing.
+    LayoutCursor empty;
+    (void)empty.begin_panel({0.0f, 0.0f, 100.0f, 100.0f}, 0.0f, 8.0f);
+    CHECK(empty.flow_extent() == 0.0f);
+}
+
+TEST_CASE("LayoutCursor: remaining_width is the room left on the line") {
+    using namespace ws::ui::gui;
+    LayoutCursor layout;
+
+    // No panel open: no line to fill.
+    CHECK(layout.remaining_width() == 0.0f);
+
+    // content (22, 22, 176, 76): at a line start the whole content width
+    // remains - before AND after a placement rewound the cursor.
+    (void)layout.begin_panel({10.0f, 10.0f, 200.0f, 100.0f}, 12.0f);
+    CHECK(layout.remaining_width() == 176.0f);
+    (void)layout.next(60.0f, 24.0f);
+    CHECK(layout.remaining_width() == 176.0f);
+
+    // After same_line the cursor sits 60 in: 176 - 60 remain, and handing
+    // the remainder to next() spans exactly to the content's right edge.
+    layout.same_line();
+    CHECK(layout.remaining_width() == 116.0f);
+    const Rect fill = layout.next(layout.remaining_width(), 24.0f);
+    CHECK(fill.x == 82.0f);
+    CHECK(fill.width == 116.0f);
+    CHECK(fill.x + fill.width == 198.0f);  // the content's right edge
+
+    // The next line starts over at full width again.
+    CHECK(layout.remaining_width() == 176.0f);
+    layout.end_panel();
+}
+
+TEST_CASE("LayoutCursor: a bounds too small for its padding is an empty panel") {
+    using namespace ws::ui::gui;
+    LayoutCursor layout;
+
+    // Padding 12 on a 10x10 bounds: the content clamps at 0 - never
+    // backwards - and degenerates to its top-left point. Children still
+    // place there (the scroll viewport has clamped this way all along).
+    const Rect content = layout.begin_panel({10.0f, 10.0f, 10.0f, 10.0f}, 12.0f);
+    CHECK(content.x == 22.0f);
+    CHECK(content.y == 22.0f);
+    CHECK(content.width == 0.0f);
+    CHECK(content.height == 0.0f);
+    const Rect child = layout.next(20.0f, 20.0f);
+    CHECK(child.x == 22.0f);
+    CHECK(child.y == 22.0f);  // at the degenerate content origin
+    CHECK(layout.remaining_width() == 0.0f);  // nothing beyond the edge
+    layout.end_panel();
+}
+
+TEST_CASE("LayoutCursor: alignment places within the line height so far") {
+    using namespace ws::ui::gui;
+    LayoutCursor layout;
+    (void)layout.begin_panel({0.0f, 0.0f, 200.0f, 200.0f}, 0.0f);
+
+    // The tallest first: later widgets on the line center and bottom
+    // against it. The line's height is what stands to their LEFT.
+    (void)layout.next(30.0f, 48.0f);  // the line runs 0..48
+    layout.same_line();
+    CHECK(layout.next(30.0f, 24.0f, Align::center).y == 12.0f);  // (48-24)/2
+    layout.same_line();
+    CHECK(layout.next(30.0f, 24.0f, Align::bottom).y == 24.0f);  // 48 - 24
+
+    // The line advances below its TALLEST (48), not below the aligned
+    // placements' bottoms.
+    CHECK(layout.next(30.0f, 24.0f).y == 48.0f);
+    layout.end_panel();
+
+    // A tall LATECOMER tops out at the line's top: against the line so
+    // far it IS the height, so it never pokes above into the previous
+    // line (earlier widgets never re-center - place the tallest first).
+    LayoutCursor late;
+    (void)late.begin_panel({0.0f, 0.0f, 200.0f, 200.0f}, 0.0f);
+    (void)late.next(30.0f, 24.0f);  // a short line so far
+    late.same_line();
+    const Rect big = late.next(30.0f, 96.0f, Align::center);
+    CHECK(big.y == 0.0f);  // centered against max(24, 96) = itself: the top
+    CHECK(late.flow_extent() == 96.0f);  // the line grew to its tallest
+    CHECK(late.next(30.0f, 24.0f).y == 96.0f);  // the next line follows it
+    late.end_panel();
+}
+
 // --- gui widgets (Phase 5) ------------------------------------------------------------
 
 // One frame's widget pass, the way an app runs it: the layout re-opens
@@ -4439,6 +4563,109 @@ TEST_CASE("button: an icon rides along; corner variants keep the click contract"
     CHECK(value == true);
 }
 
+// --- layout semantics (M13): the gui look carries spacing and fill-width ------------
+
+TEST_CASE("panel: children flow spaced theme.spacing; 0 restores the old pitch") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    const ChromeTheme& theme = kDefaultChrome;
+
+    // The gui wrapper threads theme.spacing into its layout panel: rows
+    // pitch control_height + spacing. A probe placement after two buttons
+    // reads the pitch back without hit-testing.
+    gui.begin_frame(snap(400.0f, 400.0f));
+    (void)begin_panel(gui, layout, theme, "page", {0.0f, 0.0f, 200.0f, 200.0f});
+    (void)button(gui, layout, theme, "one");
+    (void)button(gui, layout, theme, "two");
+    const Rect probe = layout.next(10.0f, 10.0f);
+    CHECK(probe.y ==
+          doctest::Approx(12.0f + 2.0f * (theme.control_height + theme.spacing)));
+    end_panel(gui, layout);
+    gui.end_frame();
+
+    // A click in the 8-px seam between the rows (y 40 sits in 36..44)
+    // hits nothing at all.
+    bool hit = false;
+    gui.begin_frame(snap(60.0f, 40.0f, false, true, true));
+    (void)begin_panel(gui, layout, theme, "page", {0.0f, 0.0f, 200.0f, 200.0f});
+    if (button(gui, layout, theme, "one")) { hit = true; }
+    if (button(gui, layout, theme, "two")) { hit = true; }
+    end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(!hit);
+
+    // theme.spacing = 0 is the unspaced look: flush rows - and the same
+    // click now lands on the second row.
+    ChromeTheme flush = kDefaultChrome;
+    flush.spacing = 0.0f;
+    gui.begin_frame(snap(400.0f, 400.0f));
+    (void)begin_panel(gui, layout, flush, "page", {0.0f, 0.0f, 200.0f, 200.0f});
+    (void)button(gui, layout, flush, "one");
+    (void)button(gui, layout, flush, "two");
+    const Rect tight = layout.next(10.0f, 10.0f);
+    CHECK(tight.y == doctest::Approx(12.0f + 2.0f * flush.control_height));
+    end_panel(gui, layout);
+    gui.end_frame();
+
+    hit = false;
+    gui.begin_frame(snap(60.0f, 40.0f, false, true, true));  // now ON row two
+    (void)begin_panel(gui, layout, flush, "page", {0.0f, 0.0f, 200.0f, 200.0f});
+    if (button(gui, layout, flush, "one")) { hit = true; }
+    if (button(gui, layout, flush, "two")) { hit = true; }
+    end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(hit);
+}
+
+TEST_CASE("button and slider: a negative width fills the rest of the line") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    const ChromeTheme& theme = kDefaultChrome;
+    float gain = 0.0f;
+
+    // Panel {0,0,200,100} -> content (12, 12, 176, 76). A fill button
+    // spans the full content width (x 12..188); the fill slider takes
+    // the next row (y 44) and fills it too.
+    gui.begin_frame(snap(400.0f, 400.0f));
+    (void)begin_panel(gui, layout, theme, "page", {0.0f, 0.0f, 200.0f, 100.0f});
+    (void)button(gui, layout, theme, "fill", -1.0f);
+    (void)slider_float(gui, layout, theme, "gain", gain, 0.0f, 1.0f, -1.0f);
+    const Rect probe = layout.next(10.0f, 10.0f);
+    CHECK(probe.y ==
+          doctest::Approx(44.0f + theme.control_height + theme.spacing));
+    end_panel(gui, layout);
+    gui.end_frame();
+
+    // A click near the fill button's right end (x 180, inside 12..188)
+    // lands on it - a default-width button would have stopped at x 132.
+    gui.begin_frame(snap(180.0f, 24.0f, false, true, true));
+    (void)begin_panel(gui, layout, theme, "page", {0.0f, 0.0f, 200.0f, 100.0f});
+    CHECK(button(gui, layout, theme, "fill", -1.0f));
+    (void)slider_float(gui, layout, theme, "gain", gain, 0.0f, 1.0f, -1.0f);
+    end_panel(gui, layout);
+    gui.end_frame();
+
+    // Past the content's right edge there is nothing to claim.
+    gui.begin_frame(snap(190.0f, 24.0f, false, true, true));
+    (void)begin_panel(gui, layout, theme, "page", {0.0f, 0.0f, 200.0f, 100.0f});
+    CHECK(!button(gui, layout, theme, "fill", -1.0f));
+    (void)slider_float(gui, layout, theme, "gain", gain, 0.0f, 1.0f, -1.0f);
+    end_panel(gui, layout);
+    gui.end_frame();
+
+    // The fill slider maps its value over the FULL filled width: a press
+    // at the content's horizontal center (x 100 = 12 + 88) reads 0.5.
+    gui.begin_frame(snap(100.0f, 56.0f, true, true));
+    (void)begin_panel(gui, layout, theme, "page", {0.0f, 0.0f, 200.0f, 100.0f});
+    (void)button(gui, layout, theme, "fill", -1.0f);
+    CHECK(slider_float(gui, layout, theme, "gain", gain, 0.0f, 1.0f, -1.0f));
+    end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(gain == doctest::Approx(0.5f));
+}
+
 // --- gui tabs + scroll regions (Phase 9) ---------------------------------------------
 
 TEST_CASE("tab_bar: a click moves the selection; the strip is one line") {
@@ -4581,11 +4808,14 @@ TEST_CASE("scroll: the wheel moves the flow - clamps at both ends and persists")
         return std::pair{view, clicked};
     };
 
-    // Ten rows = 240 px of content; the scroll range is 240 - 76 = 164.
+    // Ten rows at a 32-px pitch (24-tall buttons plus the theme's 8-px
+    // gaps) = 312 px of content; the scroll range is 312 - 76 = 236.
     // Two click snapshots recur through the frames: a full click at the
-    // unscrolled row 0's center, and one at row 3's center at offset 32.
+    // unscrolled row 0's center, and one at row 3's visible center at
+    // offset 32 (the row pokes past the viewport; the click lands
+    // mid-visible, clear of the clip's edges).
     const InputFrame click_origin = snap(60.0f, 24.0f, false, true, true);
-    const InputFrame click_row3 = snap(60.0f, 64.0f, false, true, true);
+    const InputFrame click_row3 = snap(60.0f, 82.0f, false, true, true);
 
     // Frame 1: a wheel-down unit aims to scroll, but a fresh panel has no
     // measured range yet - the immediate-mode first frame cannot scroll.
@@ -4611,8 +4841,9 @@ TEST_CASE("scroll: the wheel moves the flow - clamps at both ends and persists")
     }
 
     // Frame 3: a wheel-down unit now moves the flow up 32 px
-    // (kDefaultChrome.scroll_speed) - and row 3, laid out at y 52..76,
-    // takes the same frame's click at its scrolled position.
+    // (kDefaultChrome.scroll_speed) - and row 3, laid out at y 76..100
+    // (content 108..132 minus the scroll, visible 76..88), takes the same
+    // frame's click at its visible center.
     f = click_row3;
     f.scroll_dy = -1.0f;
     {
@@ -4638,8 +4869,9 @@ TEST_CASE("scroll: the wheel moves the flow - clamps at both ends and persists")
         CHECK(clicked == 0);
     }
 
-    // Frame 6: a huge wheel-down clamps at the bottom (offset 164): row 9
-    // spans y 64..88, its bottom edge EXACTLY the viewport's bottom.
+    // Frame 6: a huge wheel-down clamps at the bottom (offset 236): row 9
+    // spans y 64..88, its bottom edge EXACTLY the viewport's bottom (the
+    // clamp always parks the content's bottom on the viewport's).
     f = snap(60.0f, 87.0f, false, true, true);
     f.scroll_dy = -100.0f;
     {
@@ -4657,9 +4889,9 @@ TEST_CASE("scroll: the wheel moves the flow - clamps at both ends and persists")
         CHECK(clicked == -1);
     }
 
-    // Frames 8-9: the content shrinks to two rows (48 px - shorter than
+    // Frames 8-9: the content shrinks to two rows (56 px - shorter than
     // the viewport). Frame 8 is the documented one-frame lag: the offset
-    // still holds 164 against last frame's range, so the two rows flow far
+    // still holds 236 against last frame's range, so the two rows flow far
     // above and the click at the unscrolled origin hits nothing...
     {
         const auto [view, clicked] = pass(click_origin, 2);
@@ -4730,8 +4962,9 @@ TEST_CASE("scroll: two regions keep independent offsets") {
     GuiContext gui;
     LayoutCursor layout;
 
-    // Two side-by-side panels, five 24-tall rows each (120 px of content,
-    // range 120 - 76 = 44). Returns which row a click landed on per panel.
+    // Two side-by-side panels, five 24-tall rows each (152 px of content
+    // at the 32-px pitch, range 152 - 76 = 76). Returns which row a click
+    // landed on per panel.
     const auto pass = [&](const InputFrame& frame, int& a_click, int& b_click) {
         gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "left",
@@ -4776,15 +5009,16 @@ TEST_CASE("scroll: two regions keep independent offsets") {
     CHECK(a == -1);
     CHECK(b == -1);
 
-    // Frame 3: the left panel's row 3 (y 52..76 at offset 32) takes the
-    // click - the right panel would put row 3 at y 84..108.
-    pass(snap(60.0f, 64.0f, false, true, true), a, b);
+    // Frame 3: the left panel's row 3 (y 76..100 at offset 32, visible
+    // 76..88) takes the click at its visible center - the right panel
+    // would put row 3 at y 108..132.
+    pass(snap(60.0f, 82.0f, false, true, true), a, b);
     CHECK(a == 3);
     CHECK(b == -1);
 
     // Frame 4: the RIGHT panel's row 0 still sits at its unscrolled y
-    // (12..36) - had it scrolled 32, this click (row 0's spot) would land
-    // on row 1 (y 4..28) instead.
+    // (12..36) - had it scrolled 32, row 1 would sit at y 12..36 and take
+    // this click (row 0's spot) instead.
     pass(snap(200.0f, 24.0f, false, true, true), a, b);
     CHECK(a == -1);
     CHECK(b == 0);
@@ -4815,10 +5049,10 @@ TEST_CASE("scroll: nests inside a panel and measures its own flow") {
             gui.ids().pop();
         }
         end_scroll_panel(gui, layout, theme);
-        // The outer cursor resumes below the header, parked while the
-        // scroll region flowed its own rows.
+        // The outer cursor resumes below the header plus one spacing,
+        // parked while the scroll region flowed its own rows.
         const Rect after = layout.next(50.0f, 10.0f);
-        CHECK(after.y == 36.0f);
+        CHECK(after.y == 44.0f);  // the header's bottom (36) + spacing (8)
         end_panel(gui, layout);
         gui.end_frame();
     };
@@ -4837,18 +5071,19 @@ TEST_CASE("scroll: nests inside a panel and measures its own flow") {
     CHECK(gui.ids().depth() == 0);
     gui.end_frame();
 
-    // An idle pass: five rows measure the inner range - 120 px of content
-    // against the viewport (24, 24, 76, 76) => 44. The pointer parks
-    // inside the inner viewport so the NEXT frame's wheel settles on the
-    // innermost claimant (both panels claim; the smaller bounds win).
+    // An idle pass: five rows measure the inner range - 152 px of content
+    // (32-px pitch) against the viewport (24, 24, 76, 76) => 76. The
+    // pointer parks inside the inner viewport so the NEXT frame's wheel
+    // settles on the innermost claimant (both panels claim; the smaller
+    // bounds win).
     int clicked = -2;
     pass(snap(60.0f, 76.0f), clicked);
     CHECK(clicked == -1);
 
     // A wheel unit scrolls the inner region 32 - row 3, laid out at y
-    // 64..88, takes the click; the header, laid out by the OUTER panel,
-    // never moved.
-    InputFrame f = snap(60.0f, 76.0f, false, true, true);
+    // 88..112 (visible 88..100), takes the click at its visible center;
+    // the header, laid out by the OUTER panel, never moved.
+    InputFrame f = snap(60.0f, 94.0f, false, true, true);
     f.scroll_dy = -1.0f;
     pass(f, clicked);
     CHECK(clicked == 3);
@@ -4861,10 +5096,11 @@ TEST_CASE("scroll: the wheel settles one frame, then the innermost panel "
     LayoutCursor layout;
 
     // Nested scroll panels: an outer 200x300 (viewport 12,12,176,276,
-    // range 84 over fifteen 24-px rows) with an inner 88x100 (viewport
-    // 112,24,64,76, range 44 over five rows) sitting to the right of the
-    // outer's own narrow rows, so a click at either side answers its
-    // panel alone. The pass returns which row each side landed on.
+    // range 196 over fifteen 24-px rows at the 32-px pitch) with an inner
+    // 88x100 (viewport 112,24,64,76, range 76 over five rows) sitting to
+    // the right of the outer's own narrow rows, so a click at either side
+    // answers its panel alone. The pass returns which row each side
+    // landed on.
     const auto pass = [&](const InputFrame& frame, int& outer, int& inner) {
         gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "outer",
@@ -4918,12 +5154,13 @@ TEST_CASE("scroll: the wheel settles one frame, then the innermost panel "
     // The second notch over the inner viewport scrolls - the INNERMOST
     // panel won the settle (both claim the pointer; the smaller bounds
     // take it), so the inner moves 32 and the outer moves nothing:
-    // the nested double-scroll defect. Inner row 3 (content y 96..120)
-    // lands at 64..88; the outer's row 0 never left y 12..36.
+    // the nested double-scroll defect. Inner row 3 (content y 120..144)
+    // lands at 88..112 (visible 88..100); the outer's row 0 never left
+    // y 12..36.
     f = snap(130.0f, 60.0f);
     f.scroll_dy = -1.0f;
     pass(f, outer, inner);
-    f = snap(142.0f, 76.0f, false, true, true);
+    f = snap(142.0f, 94.0f, false, true, true);
     pass(f, outer, inner);
     CHECK(inner == 3);
     f = snap(52.0f, 24.0f, false, true, true);
@@ -5096,7 +5333,8 @@ TEST_CASE("scroll: a nested touch drag takes only the innermost panel") {
         gui.end_frame();
     };
 
-    // Press on the inner's row 2 (content y 72..96, center 84) - the
+    // Press on the inner's row 2 (content y 88..112; its visible center
+    // is 94 - the clip cuts the row at the viewport's bottom edge) - the
     // row claims the tap in progress; both panels' begins watch it,
     // and the arm claim hands the drag to the inner (its begin runs
     // after the outer's, later wins).
@@ -5108,7 +5346,7 @@ TEST_CASE("scroll: a nested touch drag takes only the innermost panel") {
         return ids.id("row");
     };
     int outer = -2, inner = -2;
-    pass(touch_frame({{4, 130.0f, 84.0f, true, false}}), outer, inner);
+    pass(touch_frame({{4, 130.0f, 94.0f, true, false}}), outer, inner);
     CHECK(inner == -1);
     CHECK(gui.active_id(PointerId{4}) == inner_row_id(2));  // the tap in
                                                            // progress
@@ -5116,7 +5354,7 @@ TEST_CASE("scroll: a nested touch drag takes only the innermost panel") {
     // Up 14 px: past the 8-px threshold. The inner crossed and owns the
     // finger - its row's press is cancelled, no click on the lift -
     // and the drag starts at the crossing.
-    pass(touch_frame({{4, 130.0f, 70.0f}}), outer, inner);
+    pass(touch_frame({{4, 130.0f, 80.0f}}), outer, inner);
     CHECK(inner == -1);
     CHECK(gui.active_id(PointerId{4}) ==
           kInvalidWidgetId);  // the crossing cancelled the row's press
@@ -5125,7 +5363,7 @@ TEST_CASE("scroll: a nested touch drag takes only the innermost panel") {
     // content); the cancelled row clicks nothing on the lift, and the
     // outer's watched track dropped silently - the outer's rows never
     // moved.
-    pass(touch_frame({{4, 130.0f, 60.0f, false, true}}), outer, inner);
+    pass(touch_frame({{4, 130.0f, 70.0f, false, true}}), outer, inner);
     CHECK(inner == -1);  // cancelled at the crossing: the lift clicks nothing
 
     // The outer's row 0 is exactly where it started, and the inner's
@@ -5357,27 +5595,28 @@ TEST_CASE("scroll: a touch drag scrolls 1:1 and cancels the press it started on"
         return ids.id("row");
     };
 
-    // Frame 1: finger 7 presses row 2 (y 60..84). The child claims the
-    // press - the tap is the CHILD's so far, the panel only watches.
-    CHECK(pass(touch_frame({{7, 60.0f, 60.0f, /*pressed=*/true}})) == -1);
+    // Frame 1: finger 7 presses row 2 (y 76..100, at its visible center
+    // 82). The child claims the press - the tap is the CHILD's so far,
+    // the panel only watches.
+    CHECK(pass(touch_frame({{7, 60.0f, 82.0f, /*pressed=*/true}})) == -1);
     CHECK(gui.active_id(PointerId{7}) == row_id(2));
 
     // Frame 2: 20 px up - past the 8 px threshold. The crossing frame
     // cancels the child's press (finger 7 will never click now) and
     // applies NO jump: the offset is still 0, so the probe tap at
     // (60, 24) still lands on row 0.
-    CHECK(pass(touch_frame({{7, 60.0f, 40.0f},
+    CHECK(pass(touch_frame({{7, 60.0f, 62.0f},
                             {99, 60.0f, 24.0f, true, true}})) == 0);
     CHECK(gui.active_id(PointerId{7}) == kInvalidWidgetId);  // the scroll owns the finger
 
     // Frame 3: 30 px more of drag - the offset follows 1:1. At offset 30
-    // row 1 spans y 6..30, so the same probe point now clicks row 1.
-    CHECK(pass(touch_frame({{7, 60.0f, 10.0f},
+    // row 1 spans y 14..38, so the same probe point now clicks row 1.
+    CHECK(pass(touch_frame({{7, 60.0f, 32.0f},
                             {99, 60.0f, 24.0f, true, true}})) == 1);
 
-    // Frame 4: finger 7 lifts at (60, 10) - INSIDE row 1's scrolled rect
-    // (y 6..30). The cancelled press means its release clicks nothing.
-    CHECK(pass(touch_frame({{7, 60.0f, 10.0f, false, true}})) == -1);
+    // Frame 4: finger 7 lifts at (60, 32) - INSIDE row 1's scrolled rect
+    // (y 14..38). The cancelled press means its release clicks nothing.
+    CHECK(pass(touch_frame({{7, 60.0f, 32.0f, false, true}})) == -1);
 
     // Frame 5: the offset held after the lift; the same probe still hits
     // row 1 - the content stayed put.
@@ -5459,10 +5698,11 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
         return ids.id("row");
     };
 
-    // Frame 1: contact 7 presses row 2 - the mouse mirrors the press, so
-    // BOTH tracks claim the row (the documented duplicate).
+    // Frame 1: contact 7 presses row 2 (at its visible center, y 82) -
+    // the mouse mirrors the press, so BOTH tracks claim the row (the
+    // documented duplicate).
     InputFrame press;
-    press.touch_down(PointerId{7}, 60.0f, 60.0f);
+    press.touch_down(PointerId{7}, 60.0f, 82.0f);
     press.mouse_present = true;
     CHECK(pass(press) == -1);
     CHECK(gui.active_id() == row_id(2));  // the mouse's track pressed...
@@ -5471,8 +5711,8 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
     // Frame 2: 20 px up - the crossing. cancel_pointer(7) must take the
     // mouse's claim down with the touch's.
     InputFrame cross;
-    cross.touch_down(PointerId{7}, 60.0f, 60.0f);  // the entry; bridges again
-    cross.touch_move(PointerId{7}, 60.0f, 40.0f);  // the bridge mirrors the position
+    cross.touch_down(PointerId{7}, 60.0f, 82.0f);  // the entry; bridges again
+    cross.touch_move(PointerId{7}, 60.0f, 62.0f);  // the bridge mirrors the position
     cross.touches[0].pressed = false;  // held, not pressed: clear the
     cross.mouse_pressed[0] = false;    // edges both sides of the bridge
     cross.mouse_present = true;
@@ -5485,7 +5725,7 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
     // The probe is a same-frame tap: its press edge STAYS (a click is
     // press-then-release; a bare release edge clicks nothing).
     InputFrame back;
-    back.touch_down(PointerId{7}, 60.0f, 60.0f);
+    back.touch_down(PointerId{7}, 60.0f, 82.0f);
     back.touch_down(PointerId{99}, 60.0f, 24.0f);  // the probe (not the bridge - 7 is)
     back.touch_up(PointerId{99}, 60.0f, 24.0f, false);
     back.touches[0].pressed = false;
@@ -5494,11 +5734,11 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
     CHECK(pass(back) == 0);
 
     // Frame 4: release exactly where it pressed - row 2 still spans
-    // y 60..84, so the lift is INSIDE the row. The cancelled press clicks
+    // y 76..100, so the lift is INSIDE the row. The cancelled press clicks
     // nothing; had the mouse's claim survived, this would click row 2.
     InputFrame lift;
-    lift.touch_down(PointerId{7}, 60.0f, 60.0f);  // the entry, back for its lift
-    lift.touch_up(PointerId{7}, 60.0f, 60.0f, false);  // mirrors the mouse's release
+    lift.touch_down(PointerId{7}, 60.0f, 82.0f);  // the entry, back for its lift
+    lift.touch_up(PointerId{7}, 60.0f, 82.0f, false);  // mirrors the mouse's release
     lift.touches[0].pressed = false;  // down+up in one frame: the press
     lift.mouse_pressed[0] = false;    // edge is not this frame's fact
     lift.mouse_present = true;
@@ -5527,7 +5767,7 @@ TEST_CASE("scroll: two fingers drag one region, one lift confuses nothing") {
         return clicked;
     };
 
-    // Frame 1: two presses inside the viewport, rows 0 and 2.
+    // Frame 1: two presses inside the viewport, rows 0 and 1.
     CHECK(pass(touch_frame({{1, 60.0f, 30.0f, /*pressed=*/true},
                             {2, 60.0f, 60.0f, /*pressed=*/true}})) == -1);
 
@@ -5536,15 +5776,16 @@ TEST_CASE("scroll: two fingers drag one region, one lift confuses nothing") {
                             {2, 60.0f, 40.0f}})) == -1);
 
     // Frame 3: both drag 10 px more - BOTH deltas apply (offset 20): at
-    // offset 20 row 1 spans y 16..40 and the probe at (60, 24) clicks
-    // row 1. A single-track drag would sit at offset 10 and click row 0.
+    // offset 20 row 1 spans y 24..48 and the probe at (60, 24) clicks
+    // row 1 (its scrolled top edge). A single-track drag would sit at
+    // offset 10 and click row 0.
     CHECK(pass(touch_frame({{1, 60.0f, 0.0f},
                             {2, 60.0f, 30.0f},
                             {99, 60.0f, 24.0f, true, true}})) == 1);
 
     // Frame 4: finger 1 lifts; finger 2 drags 10 more (offset 30) - the
     // survivor's bookkeeping is its own. At offset 30 row 1 spans
-    // y 6..30 and the probe at (60, 14) clicks row 1 (at offset 20 it
+    // y 14..38 and the probe at (60, 14) clicks row 1 (at offset 20 it
     // would still be row 0).
     CHECK(pass(touch_frame({{1, 60.0f, 0.0f, false, true},
                             {2, 60.0f, 20.0f},
@@ -5600,14 +5841,15 @@ TEST_CASE("hit clips: a scrolled-out row cannot claim what sits under the panel"
     GuiContext gui;
     LayoutCursor layout;
 
-    // The reported bug, end to end: 11 rows of 24 px = 264 px of content
-    // inside a 200x100 panel (viewport (12, 12, 176, 76), scroll range
-    // 188). Even unscrolled, the rows past y 88 sit below the viewport,
-    // and scrolled to offset 100 they straddle both ends - rows 0..3
-    // above, row 4 poking past the top, row 7 past the bottom, rows 8..10
-    // fully below. A widget UNDER the panel must win any press landing
-    // below the viewport; the pass probes one such rect after the panel
-    // closes (root scope - the panel popped its id and hit-clip scopes).
+    // The reported bug, end to end: 11 rows of 24 px at the 32-px pitch
+    // = 344 px of content inside a 200x100 panel (viewport (12, 12, 176,
+    // 76), scroll range 268). Even unscrolled, the rows past y 88 sit
+    // below the viewport, and scrolled to offset 100 they straddle both
+    // ends - rows 0..2 above, row 3 poking past the top, row 5 past the
+    // bottom, rows 6..10 fully below. A widget UNDER the panel must win
+    // any press landing below the viewport; the pass probes one such
+    // rect after the panel closes (root scope - the panel popped its id
+    // and hit-clip scopes).
     const auto pass = [&](const InputFrame& frame, HitTest& under) {
         gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
@@ -5632,7 +5874,7 @@ TEST_CASE("hit clips: a scrolled-out row cannot claim what sits under the panel"
     CHECK(pass(snap(60.0f, 50.0f), under) == -1);
     CHECK(!under.pressed);
 
-    // A click at (60, 116), below the viewport at offset 0: row 4 spans
+    // A click at (60, 116), below the viewport at offset 0: row 3 spans
     // y 108..132 there - fully hidden by the clip, so without the fix
     // it wins the first-hit-test press and the under-panel widget sees
     // nothing. With it the row claims nothing and the widget below the
@@ -5649,25 +5891,26 @@ TEST_CASE("hit clips: a scrolled-out row cannot claim what sits under the panel"
     CHECK(!under.pressed);
 
     // -3.125 wheel units = exactly 100 px of offset. Rows now flow
-    // from y -88: row 6 spans 56..80, row 7 straddles the bottom edge
-    // (80..88 visible), row 8 spans 104..128 - fully below again.
+    // from y -88: row 4 spans 40..64, row 5 straddles the bottom edge
+    // (72..88 visible), row 6 spans 104..128 - fully below again.
     InputFrame wheel = snap(60.0f, 50.0f);
     wheel.scroll_dy = -100.0f / kDefaultChrome.scroll_speed;
     CHECK(pass(wheel, under) == -1);
 
-    // The same spot at the scrolled offset - hidden row 8's center -
+    // The same spot at the scrolled offset - hidden row 6's center -
     // still belongs to the widget below the panel, not to the row.
     CHECK(pass(snap(60.0f, 116.0f, false, true, true), under) == -1);
     CHECK(under.pressed);
     CHECK(under.clicked);
 
-    // The visible rows still claim at their scrolled positions.
-    CHECK(pass(snap(60.0f, 68.0f, false, true, true), under) == 6);
+    // The visible rows still claim at their scrolled positions: row 4
+    // (40..64) takes a click at its center.
+    CHECK(pass(snap(60.0f, 52.0f, false, true, true), under) == 4);
 
-    // Row 7 straddles the bottom edge: its visible part claims, its
-    // clipped part (y 92, past the edge at 88) does not - the
+    // Row 5 straddles the bottom edge: its visible part claims (y 80),
+    // its clipped part (y 92, past the edge at 88) does not - the
     // under-panel widget owns that spot instead.
-    CHECK(pass(snap(60.0f, 84.0f, false, true, true), under) == 7);
+    CHECK(pass(snap(60.0f, 80.0f, false, true, true), under) == 5);
     CHECK(pass(snap(60.0f, 92.0f, false, true, true), under) == -1);
     CHECK(under.pressed);
     CHECK(under.clicked);

@@ -34,7 +34,9 @@ namespace ws::ui::gui {
 // have yet. `icon` (a Sprite from load_atlas; the default {} draws none)
 // renders as a square at the left, inset clear of the rounded corners and
 // tinted white so the asset's own colors show; the label bar centers in
-// the room the icon leaves. `width` defaults to 120 px.
+// the room the icon leaves. `width` defaults to 120 px; a negative width
+// instead FILLS the rest of the current line (the panel content's
+// remaining run, from the cursor to the content's right edge).
 //
 // Buttons take the keyboard: they register focusable (a press on one
 // takes the focus at the press edge, Tab reaches them), Enter and Space
@@ -70,13 +72,16 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 // 1% of the range per press (slider_int: 1), clamped to [min, max],
 // reported as changed only on a real move. Inside a begin_disabled
 // scope the whole row dims (dead face on the rail, fill, handle and
-// label faded) and no pointer or key can move the value.
+// label faded) and no pointer or key can move the value. `width`
+// defaults to 120 px; a negative width instead FILLS the rest of the
+// current line, like button's.
 bool slider_float(GuiContext& gui, LayoutCursor& layout,
                   const ChromeTheme& theme, const char* label, float& value,
                   float min, float max, float width = 120.0f);
 
 // slider_float over an int reference - the value rounds to the nearest
-// integer after the float math, and the arrows step it by 1.
+// integer after the float math, and the arrows step it by 1. A negative
+// width fills the rest of the current line, like slider_float's.
 bool slider_int(GuiContext& gui, LayoutCursor& layout,
                 const ChromeTheme& theme, const char* label, int& value,
                 int min, int max, float width = 120.0f);
@@ -85,11 +90,13 @@ bool slider_int(GuiContext& gui, LayoutCursor& layout,
 // content area (children cannot draw outside it, whatever they submit), an
 // id scope (children id under the panel, so same-label widgets inside and
 // outside stay distinct), and a layout panel (children flow from the
-// content's top-left, inset by theme.padding). Returns the content rect;
-// the matching end_panel() pops all three in reverse - every pop is
-// drop-safe against its begin having been dropped. The panel is chrome,
-// not a widget: it draws and clips but does not capture input (that
-// arrives when panels grow drag headers).
+// content's top-left, inset by theme.padding, spaced theme.spacing apart
+// - between lines and between same_line() items; theme.spacing = 0 is
+// the unspaced look). Returns the content rect; the matching end_panel()
+// pops all three in reverse - every pop is drop-safe against its begin
+// having been dropped. The panel is chrome, not a widget: it draws and
+// clips but does not capture input (that arrives when panels grow drag
+// headers).
 Rect begin_panel(GuiContext& gui, LayoutCursor& layout,
                  const ChromeTheme& theme, const char* label,
                  const Rect& bounds);
@@ -117,11 +124,12 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
              int& active, float width = 120.0f);
 
 // A scrollable panel: the same chrome, clip and id scope begin_panel
-// pushes, plus wheel-driven and touch-dragged vertical scroll. The
-// scroll offset lives in the context's persistent state (keyed by the
-// panel's scope - the Phase 3 mechanism), so it survives frames AND
-// the panel vanishing for frames (a tab that scrolls keeps its place),
-// with no caller storage.
+// pushes (and its theme.spacing item gaps - the virtual panel the
+// content flows in carries them), plus wheel-driven and touch-dragged
+// vertical scroll. The scroll offset lives in the context's persistent
+// state (keyed by the panel's scope - the Phase 3 mechanism), so it
+// survives frames AND the panel vanishing for frames (a tab that
+// scrolls keeps its place), with no caller storage.
 //
 // The wheel is ARBITRATED: every panel (plain or scrollable) registers
 // as a wheel claimant each frame, and the scroll panel consumes only
