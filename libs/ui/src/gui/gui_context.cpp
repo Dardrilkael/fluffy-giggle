@@ -41,6 +41,11 @@ bool hit_clip_overflow_warned = false;
 // overflowed scopes keep the innermost 32 conditions.
 bool disabled_overflow_warned = false;
 
+// register_wheel_claim ran past kMaxWheelClaims. Flagged once per
+// process: the panels past the cap claim nothing that frame, so the
+// wheel may resolve to a claimant under them.
+bool wheel_overflow_warned = false;
+
 // The intersection of two axis-aligned rects, raw arithmetic: a
 // negative extent is an empty overlap, and Rect's half-open contains
 // already answers nothing for a backwards rect, so an empty
@@ -103,6 +108,15 @@ void GuiContext::begin_frame(const InputFrame& input) {
     focusable_count_ = 0;
     press_focused_ = false;
     pending_nav_ = 0;
+    // The wheel's claim table starts empty; last frame's winner stands
+    // until this frame's end_frame re-resolves it. The focus-into-view
+    // request shifts its one-frame queue (a request queued last
+    // end_frame is readable now, and only now), and the focus-rect
+    // latch is stale until the focused widget runs state().
+    wheel_claim_count_ = 0;
+    focus_into_view_ = focus_into_view_next_;
+    focus_into_view_next_ = false;
+    focused_rect_known_ = false;
     // Adopt the frame's pointers: the mouse leads while present, the
     // touches follow in first-contact order - an absent mouse (touch-only
     // device, cursor left the window) simply is not in the list. Each
@@ -154,6 +168,11 @@ void GuiContext::end_frame() {
             !(track.active_fresh && frame_pointers_[static_cast<std::size_t>(p)].down)) {
             track.active = kInvalidWidgetId;
             track.cancelled = false;
+            // The scroll arm dies with the press it was claimed for - a
+            // same-frame id reuse's new contact re-claims at its own
+            // panel's arm, exactly as it re-claims the press.
+            track.scroll_arm = nullptr;
+            track.scroll_arm_layer = 0;
         }
     }
 
@@ -184,6 +203,7 @@ void GuiContext::end_frame() {
     }
     if (pending_nav_ != 0 && focusable_count_ > 0) {
         const int n = focusable_count_;
+        const WidgetId before = focused_;
         int idx = -1;
         for (int i = 0; i < n; ++i) {
             if (focusables_[static_cast<std::size_t>(i)] == focused_) {
@@ -199,17 +219,61 @@ void GuiContext::end_frame() {
         }
         idx = ((idx + pending_nav_) % n + n) % n;
         focused_ = focusables_[static_cast<std::size_t>(idx)];
+        if (focused_ != before) {
+            // The keyboard arrived somewhere new without the pointer -
+            // queue the into-view request for the frame the widget runs
+            // and latches its bounds in, where its scroll panel reads
+            // it (end_scroll_panel's shift).
+            focus_into_view_next_ = true;
+        }
     }
     // The veil-lift restore: the veil was up at entry and nothing raised
     // one this frame, so this is the frame it lifted - hand the focus
     // back to what the rise displaced. A loud frame declines: a press
     // or a nav move earned the focus it found, and the restore must
     // not take it back (pending_nav_ is frame-reset, so != 0 here means
-    // a move ran THIS frame).
+    // a move ran THIS frame). The restored focus may sit scrolled out
+    // of view - it gets the same into-view request a Tab landing does.
     if (veil_upon_entry_ && modal_layer_ == 0 && !any_press &&
         pending_nav_ == 0) {
         focused_ = pre_modal_focus_;
+        focus_into_view_next_ = true;
     }
+
+    // The wheel's resolution, over the frame's whole claim table: the
+    // mouse's claims compete layer-first (a popup eats the wheel even
+    // when it scrolls nothing), then by innermost bounds (the smallest
+    // area - nested panels), then by registration order (the later
+    // panel is the one painted on top). Claims from a stratum under
+    // the veil drop out first - a modal leaves the wheel dead below it
+    // unless its own chrome registered a panel. The winner publishes
+    // for the NEXT frame: a frame's claims are only complete here, so
+    // the wheel consumes one frame behind the hover, the same settling
+    // hot_prev already answers for.
+    const void* wheel_winner = nullptr;
+    if (input_.mouse_present) {
+        bool have_winner = false;
+        std::uint32_t winner_layer = 0;
+        float winner_area = 0.0f;
+        for (int i = 0; i < wheel_claim_count_; ++i) {
+            const WheelClaim& claim = wheel_claims_[static_cast<std::size_t>(i)];
+            if (claim.layer < modal_layer_) {
+                continue;  // under the veil: no wheel below a modal
+            }
+            if (!claim.bounds.contains(input_.mouse_x, input_.mouse_y)) {
+                continue;
+            }
+            const float area = claim.bounds.width * claim.bounds.height;
+            if (!have_winner || claim.layer > winner_layer ||
+                (claim.layer == winner_layer && area <= winner_area)) {
+                have_winner = true;
+                wheel_winner = claim.key;
+                winner_layer = claim.layer;
+                winner_area = area;
+            }
+        }
+    }
+    wheel_winner_ = wheel_winner;
 }
 
 void GuiContext::begin_layer(Layer layer) {
@@ -336,6 +400,75 @@ const Rect* GuiContext::current_hit_clip() const {
     return &hit_clips_[static_cast<std::size_t>(top)];
 }
 
+// --- gesture arbitration: wheel claims, the scroll arm, into-view ---
+
+void GuiContext::register_wheel_claim(const Rect& bounds, const void* key) {
+    if (wheel_claim_count_ >= kMaxWheelClaims) {
+        if (!wheel_overflow_warned) {
+            wheel_overflow_warned = true;
+            core::warn("ui: gui wheel claim table clamped at {} - deeper "
+                       "panels this frame claim nothing",
+                       kMaxWheelClaims);
+        }
+        return;
+    }
+    WheelClaim& claim =
+        wheel_claims_[static_cast<std::size_t>(wheel_claim_count_++)];
+    claim.bounds = bounds;
+    claim.layer = current_layer_value();
+    claim.key = key;
+}
+
+bool GuiContext::wheel_won(const void* key) const {
+    return key != nullptr && key == wheel_winner_;
+}
+
+void GuiContext::claim_scroll_arm(PointerId pointer, const void* key) {
+    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+    for (int p = 0; p < count; ++p) {
+        PointerTrack& track = pointers_[static_cast<std::size_t>(p)];
+        if (track.id != pointer) {
+            continue;
+        }
+        // Later-or-higher wins: the innermost panel's begin runs after the
+        // outer's and a popup's layer above both, so the >= rule hands the
+        // arm to the panel the finger is actually on. A claim nobody
+        // contests simply lands.
+        if (track.scroll_arm == nullptr ||
+            current_layer_value() >= track.scroll_arm_layer) {
+            track.scroll_arm = key;
+            track.scroll_arm_layer = current_layer_value();
+        }
+        return;
+    }
+}
+
+const void* GuiContext::scroll_arm_owner(PointerId pointer) const {
+    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+    for (int p = 0; p < count; ++p) {
+        const PointerTrack& track = pointers_[static_cast<std::size_t>(p)];
+        if (track.id == pointer) {
+            return track.scroll_arm;
+        }
+    }
+    return nullptr;
+}
+
+bool GuiContext::claims_open() const {
+    return current_layer_value() >= modal_layer_;
+}
+
+bool GuiContext::focus_into_view_pending() const {
+    return focus_into_view_;
+}
+
+const Rect* GuiContext::focused_bounds() const {
+    if (!focused_rect_known_ || focused_ == kInvalidWidgetId) {
+        return nullptr;
+    }
+    return &focused_rect_;
+}
+
 GuiContext::HitCensus::Result GuiContext::HitCensus::note(WidgetId id) {
     // Linear probing over the power-of-two table: the first slot whose
     // stamp is not this frame's is empty (open addressing with the
@@ -459,6 +592,13 @@ WidgetResult GuiContext::state(WidgetId id, const Rect& bounds,
     if (is_focused(id) && modal_layer_ > 0 &&
         current_layer_value() < modal_layer_) {
         focused_ = kInvalidWidgetId;
+    }
+    // The focused widget's bounds, latched as the widget runs: the
+    // scroll panel containing it reads them the same frame for the
+    // Tab-focus into-view shift (focused_bounds).
+    if (focused_ == id) {
+        focused_rect_ = bounds;
+        focused_rect_known_ = true;
     }
     // Press-to-focus: the press edge on a focusable that registered this
     // frame. hit.pressed holds for the whole drag, so the EDGE is the

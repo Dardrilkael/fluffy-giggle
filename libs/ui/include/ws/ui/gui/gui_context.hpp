@@ -193,6 +193,68 @@ public:
     // (everything is claimable). The observability spelling, for tests.
     const Rect* current_hit_clip() const;
 
+    // --- gesture arbitration: the panel claims the scroll widgets gate on ---
+    //
+    // The WHEEL: every panel - plain or scrollable - registers its
+    // bounds as a wheel claimant each frame; a scroll panel passes its
+    // own key (the address of its ScrollState, stable for the entry's
+    // lifetime), a plain panel passes null and merely eats. Claims
+    // resolve at end_frame against the frame's whole table: a strictly
+    // higher layer wins (a popup over a scroll panel eats the wheel
+    // even though it scrolls nothing), ties go to the innermost rect
+    // (the smallest bounds - nested panels), the last registrant wins
+    // a dead tie. Claims from a stratum under a raised modal veil drop
+    // out entirely: the veil kills the wheel for everything below it.
+    // The winner publishes for the NEXT frame - the same one-frame
+    // settling hot_prev uses, because a frame's claim table is only
+    // complete at its end - so the first notch after the cursor
+    // arrives over a panel settles rather than scrolls.
+    void register_wheel_claim(const Rect& bounds, const void* key);
+    // True when `key`'s panel won LAST frame's wheel resolution - the
+    // settled owner whose scroll this frame consumes. A null key
+    // answers false: keyless panels claim to eat, never to consume.
+    bool wheel_won(const void* key) const;
+
+    // The scroll ARM: a scroll panel watching a fresh touch press (its
+    // drag-to-scroll about to cross the threshold) claims the pointer
+    // here. Nested panels both see the press, and the claim keeps the
+    // drag singular: a claim takes the pointer when nobody holds it or
+    // when the challenger's layer is >= the holder's - record order
+    // puts the innermost panel's begin after the outer's and a popup's
+    // layer above both, so later-or-higher IS the innermost/topmost
+    // panel under the finger. The claim lasts from the press until the
+    // release; panels consult scroll_arm_owner() before a watched
+    // track drags or sweeps - only the owner's track survives, the
+    // losers drop theirs silently (their child keeps the tap in
+    // progress, and the cancel they would have fired never does).
+    void claim_scroll_arm(PointerId pointer, const void* key);
+    // The pointer's current arm holder - null when no panel claimed
+    // it, and from the release frame on (the claim dies with the
+    // press it was claimed for).
+    const void* scroll_arm_owner(PointerId pointer) const;
+
+    // True when the innermost open layer scope may take new pointer
+    // claims right now: false only under a raised modal veil from a
+    // strictly lower stratum. Widgets that gate a gesture off the RAW
+    // frame - the scroll panels' touch arm and thumb grab, which see
+    // presses before hit_test could speak - consult this so the veil
+    // blocks them exactly as it blocks hit_test's claims.
+    bool claims_open() const;
+
+    // Tab's scroll-into-view: end_frame's Tab resolution (and the
+    // veil-lift focus restore, and set_focus) raise this for exactly
+    // the frame the newly focused widget runs in, and the scroll panel
+    // whose column contains the widget shifts its offset to pull it
+    // into the viewport (end_scroll_panel's rule). The observability
+    // spelling, for apps and tests.
+    bool focus_into_view_pending() const;
+    // The focused widget's drawn bounds, latched by its own state() as
+    // it ran THIS frame - null when nothing holds the focus or the
+    // focused widget has not run yet this frame. end_scroll_panel
+    // reads this with focus_into_view_pending() for the into-view
+    // shift.
+    const Rect* focused_bounds() const;
+
     // Hot/active hit-test for one widget's rect, across the frame's
     // pointers (mouse and touches; the primary-touch bridge makes the
     // first finger BOTH, a benign duplicate - one of them folds into
@@ -394,6 +456,12 @@ private:
                                     // layer may steal it; a carried drag is
                                     // capture and never stolen
         bool cancelled = false;
+        // The scroll-arm claim (claim_scroll_arm): the panel whose
+        // touch-drag this pointer is, from the press until the
+        // release. Rides inside the track so the claim carries with
+        // the pointer - no separate lifecycle to keep honest.
+        const void* scroll_arm = nullptr;
+        std::uint32_t scroll_arm_layer = 0;  // the claiming panel's stratum
     };
     std::array<PointerTrack, InputFrame::kMaxPointers> pointers_{};
     // The frame's pointers, aligned to pointers_ (slot i of both speaks
@@ -482,6 +550,36 @@ private:
     static constexpr int kMaxHitClipDepth = 8;
     std::array<Rect, kMaxHitClipDepth> hit_clips_{};
     int hit_clip_depth_ = 0;
+
+    // --- wheel claims (register_wheel_claim / the end_frame resolution) ---
+    // The frame's claimant table, fixed like every gui table: a frame
+    // with more live panels than kMaxWheelClaims warns once per
+    // process and the extras register nothing. begin_frame empties
+    // the table; end_frame resolves it against the mouse (see the
+    // public doc) and publishes the winner for the next frame to
+    // consume through wheel_won().
+    static constexpr int kMaxWheelClaims = 32;
+    struct WheelClaim {
+        Rect bounds{};
+        std::uint32_t layer = 0;    // the claiming panel's stratum
+        const void* key = nullptr;  // null: eats the wheel, consumes nothing
+    };
+    std::array<WheelClaim, kMaxWheelClaims> wheel_claims_{};
+    int wheel_claim_count_ = 0;
+    const void* wheel_winner_ = nullptr;  // last frame's resolved key
+
+    // --- Tab-focus scroll-into-view (focused_bounds/focus_into_view) ---
+    // The focused widget's bounds, latched by state() as the widget
+    // ran; and the request flag's one-frame queue. end_frame's nav
+    // landing (and the veil-restore hand-back) raise the NEXT flag -
+    // the frame the newly focused widget runs and latches in - while
+    // set_focus raises the live one directly (its call already sits
+    // inside the frame). begin_frame shifts the queue, so a request is
+    // readable for exactly one frame.
+    Rect focused_rect_{};
+    bool focused_rect_known_ = false;
+    bool focus_into_view_ = false;
+    bool focus_into_view_next_ = false;
 
     // The per-frame hit-test census: which widget ids already hit-tested
     // this frame, as a fixed open-addressing table stamped by frame

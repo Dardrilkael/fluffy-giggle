@@ -659,23 +659,43 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   stay at the unscrolled viewport, so a row poked past the edge neither
   draws nor claims;
   the offset is persistent state, the content extent is measured at the
-  previous end: one frame of lag, by design. Scrolling is two-handed:
-  a PRESENT mouse wheels any viewport under it (the presence flag gates
-  the whole device), a finger drags — each contact
-  pressed inside the viewport is watched, and past
-  `theme.drag_threshold` (8 px) the scroll owns the finger:
-  `cancel_pointer` fires before children run that frame, and the offset
-  follows the contact 1:1 with no crossing-frame jump. A lift inside
-  the threshold stays the child's tap. Known cosmetic limit: a
-  drag-tracking child (a slider) can move < threshold px before the
-  cancel fires).
+  previous end: one frame of lag, by design. Scrolling is ARBITRATED
+  (M12): every panel — plain or scrollable — registers its whole bounds
+  as a wheel claimant each frame (`register_wheel_claim`; plain panels
+  claim with a null key, scroll panels with their ScrollState's
+  address), and end_frame resolves layer-first (a popup eats the wheel
+  over the panel below), then innermost bounds (nested panels stop
+  double-scrolling), then registration order, dropping every claim
+  under a raised modal veil — the winner publishes for the NEXT frame,
+  the same one-frame settle `hot_prev` answers for hover, so the first
+  notch after the cursor arrives over a panel settles rather than
+  scrolls. A PRESENT mouse gates the whole wheel device. The touch
+  drag is singular the same way: a fresh press inside the viewport
+  claims a per-pointer scroll ARM (`claim_scroll_arm`, later-or-higher
+  wins, held press-to-release) and past `theme.drag_threshold` the
+  scroll owns the finger — `cancel_pointer` fires before children run
+  that frame, and the offset follows the contact 1:1 with no
+  crossing-frame jump; a panel whose watched track lost the arm drops
+  it silently, so the innermost panel the press landed on is the only
+  one that drags. The veil gates the raw-input gestures through
+  `claims_open()` exactly as it gates hit_test. Tab lands in view: the
+  frame after the keyboard focus moves onto a widget inside the panel,
+  the panel shifts the offset the minimum that pulls the widget into
+  the viewport (`focus_into_view_pending`/`focused_bounds`). The
+  scrollbar thumb is GRABBABLE — the whole right gutter is the hit
+  band, a press there ends any child press beneath it, a press on the
+  thumb keeps the grab offset, a press off it jumps the thumb centered
+  under the pointer, and the drag maps 1:1 through the track. Known
+  cosmetic limits: a drag-tracking child (a slider) can move <
+  threshold px before the cancel fires, and the thumb grab's cancel
+  lands one frame after the child claimed — the same class of lag).
 - **v1 limits, deliberate:** labels draw through the theme font's
   glyphs when one is set, the v1 quad bars otherwise — and text cannot
   truncate, so a label wider than its face drops instead of spilling;
   the gui is screen-space only (the same
-  space layout and hit-testing use); scroll is vertical-only (a present
-  mouse wheels any viewport under it, a finger drags any region past
-  the drag threshold); panels are chrome, not input surfaces.
+  space layout and hit-testing use); scroll is vertical-only (the wheel
+  and the touch drag are both arbitrated — see Widgets); panels are
+  chrome, not input surfaces.
 - Everything tests headless (r2d draws drop without a window): the widget
   suite lives in `tests/test_ui.cpp` and runs with the rest via
   `ctest --preset debug -R ui`. `apps/playground` carries the full
@@ -754,7 +774,14 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `is_hot(id, pointer)`/`is_active(id, pointer)` are the am-I spelling
   (the invalid id pinned to false); `owning_pointer(widget_id)` and
   `pointer(id)` inspect the fold; `cancel_pointer(id)` ends a press
-  with no click. Valid only between `GuiContext::begin_frame` and
+  with no click. Gesture arbitration (M12): `register_wheel_claim`/
+  `wheel_won(key)` (panels claim the wheel; the one-frame settle),
+  `claim_scroll_arm`/`scroll_arm_owner(pointer)` (the per-pointer
+  touch-drag arm, press-to-release), `claims_open()` (the modal veil's
+  gate, the same answer hit_test and the raw-input gestures read),
+  `focus_into_view_pending()`/`focused_bounds()` (Tab's
+  scroll-into-view handoff). Valid only between
+  `GuiContext::begin_frame` and
   `end_frame`, inside the caller's r2d
   screen-space block; the state is the caller's, persistence lives in
   the context's side tables.

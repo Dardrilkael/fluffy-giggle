@@ -117,29 +117,48 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
              int& active, float width = 120.0f);
 
 // A scrollable panel: the same chrome, clip and id scope begin_panel
-// pushes, plus a wheel-driven vertical scroll. The scroll offset lives
-// in the context's persistent state (keyed by the panel's scope - the
-// Phase 3 mechanism), so it survives frames AND the panel vanishing for
-// frames (a tab that scrolls keeps its place), with no caller storage.
-// While the pointer is inside the viewport the wheel moves it
-// theme.scroll_speed px per unit (positive dy is wheel-up, toward the
-// top), clamped to [0, content_height - viewport_height] as measured
-// LAST frame - the immediate-mode answer to "this frame's content is
-// not laid out yet" (so the very first frame cannot scroll, and a
-// content that shrinks pulls the offset in one frame later). Children
-// flow from the content origin shifted up by the offset - they draw AND
-// hit-test at their scrolled positions - while the clip stays at the
-// UNSCROLLED viewport, so the scissor cuts exactly what pokes past it.
-// Returns the viewport (unshifted, clamped empty when the bounds cannot
-// hold the padding): the window the content shows through. The matching
-// end_scroll_panel() takes the theme too (it draws): it measures this
-// frame's content extent, re-clamps, draws the scrollbar thumb (only
-// while there is room to scroll), then pops the scope, clip and layout
-// panel in reverse.
+// pushes, plus wheel-driven and touch-dragged vertical scroll. The
+// scroll offset lives in the context's persistent state (keyed by the
+// panel's scope - the Phase 3 mechanism), so it survives frames AND
+// the panel vanishing for frames (a tab that scrolls keeps its place),
+// with no caller storage.
 //
-// v1 limits, deliberate: vertical only (scroll_dx is ignored); and the
-// wheel scrolls every scroll viewport under the pointer, so overlapping
-// regions are the caller's layout to avoid.
+// The wheel is ARBITRATED: every panel (plain or scrollable) registers
+// as a wheel claimant each frame, and the scroll panel consumes only
+// when it won last frame's resolution - so nested scroll panels stop
+// double-scrolling (the innermost bounds under the pointer wins), a
+// popup panel over the panel eats the wheel, and a modal veil kills it
+// for everything below. The settle costs one frame: the first notch
+// after the cursor arrives over a panel settles the ownership instead
+// of scrolling (GuiContext::register_wheel_claim documents the rules).
+// The touch drag is singular the same way: a fresh press inside the
+// viewport is watched, and past theme.drag_threshold the scroll takes
+// the finger (cancel_pointer ends the child's press with no click) -
+// but only the panel that won the pointer's arm claim drags, so
+// nested panels never both scroll. The offset moves
+// theme.scroll_speed px per wheel unit (positive dy is wheel-up, toward
+// the top), clamped to [0, content_height - viewport_height] as
+// measured LAST frame - the immediate-mode answer to "this frame's
+// content is not laid out yet" (so the very first frame cannot scroll,
+// and a content that shrinks pulls the offset in one frame later).
+// Children flow from the content origin shifted up by the offset -
+// they draw AND hit-test at their scrolled positions - while the clip
+// stays at the UNSCROLLED viewport, so the scissor cuts exactly what
+// pokes past it. Tab-focus lands in view too: the frame after the
+// keyboard focus moves onto a widget inside the panel, the panel
+// shifts the offset the minimum that pulls the widget into the
+// viewport (see GuiContext::focus_into_view_pending).
+// Returns the viewport (unshifted, clamped empty when the bounds
+// cannot hold the padding): the window the content shows through. The
+// matching end_scroll_panel() takes the theme too (it draws): it
+// measures this frame's content extent, re-clamps, runs the Tab-focus
+// into-view shift, and draws the scrollbar thumb (only while there is
+// room to scroll). The thumb is GRABBABLE - the right gutter band is
+// its hit area, a press there ends any child press beneath it, and the
+// drag maps the pointer 1:1 through the track - then pops the scope,
+// clip and layout panel in reverse.
+//
+// v1 limits, deliberate: vertical only (scroll_dx is ignored).
 Rect begin_scroll_panel(GuiContext& gui, LayoutCursor& layout,
                         const ChromeTheme& theme, const char* label,
                         const Rect& bounds);
