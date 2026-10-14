@@ -7876,6 +7876,235 @@ TEST_CASE("modal: the veil blocks base input, the dialog's widgets work, "
     CHECK(gui.is_focused(base_w));  // the stashed focus, restored
 }
 
+// --- M19: the combo (the popup's row-widget shape) --------------------------------
+
+// The combo places its own dropdown off the frame size, so these tests
+// drive a live (windowless) r2d frame - the batch-test idiom - through
+// the shell's set_active tap: frame_size() answers a real 800x600, and
+// the gui's draws record into the batch instead of dropping headless.
+// The tap comes OFF before the renderer dies: a later test reading a
+// dangling g_active would crash the suite.
+TEST_CASE("combo: the row opens the dropdown it places and a choice "
+          "writes the int") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    static const char* kItems[] = {"alpha", "beta", "gamma"};
+    int selected = 1;
+    bool open = false;
+    bool changed = false;
+
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        changed = combo(gui, layout, kDefaultChrome, "shape", kItems, 3,
+                        selected, open, 120.0f);
+        layout.end_panel();
+        gui.end_frame();
+    };
+
+    // The row lays at (0,0,120,24). A one-frame click on it opens the
+    // dropdown the widget placed below - room in the frame, so flush at
+    // the row's bottom: bounds (0,24,120,112), items at y 36/68/100.
+    pass(snap(60.0f, 12.0f, false, true, true));
+    CHECK(open == true);       // the row's click toggled it
+    CHECK(changed == false);   // nothing chosen yet
+    CHECK(selected == 1);
+
+    // A click on item 0 (content row 12,36..60) writes the caller's int,
+    // answers true (the selection MOVED) and closes.
+    pass(snap(60.0f, 48.0f, false, true, true));
+    CHECK(selected == 0);
+    CHECK(changed == true);
+    CHECK(open == false);
+
+    // Reopen and re-click the already-selected item: the click still
+    // closes (picked), but a re-selection is not a move - the combo
+    // answers false, the radio's idempotence.
+    pass(snap(60.0f, 12.0f, false, true, true));
+    CHECK(open == true);
+    pass(snap(60.0f, 48.0f, false, true, true));
+    CHECK(selected == 0);
+    CHECK(changed == false);
+    CHECK(open == false);
+
+    // The empty combo (count 0): a bare row that never pretends - the
+    // click does not latch its caller's bool open at all.
+    bool empty_open = true;
+    int empty_sel = 0;
+    gui.begin_frame(snap(400.0f, 400.0f));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(combo(gui, layout, kDefaultChrome, "bare", nullptr, 0, empty_sel,
+                empty_open, 120.0f) == false);
+    CHECK(empty_open == false);  // refused, not toggled
+    layout.end_panel();
+    gui.end_frame();
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("combo: the dropdown flips above when the frame lacks room below") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 200.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    static const char* kItems[] = {"alpha", "beta", "gamma"};
+    int selected = 1;
+    bool open = false;
+    bool changed = false;
+
+    // The row sits near a short frame's bottom: raw panel at y 150, the
+    // row (0,150,120,24), its bottom 174. The 112-tall dropdown does not
+    // fit below (174+112 > 200), so it flips above: bounds (0,38,120,112),
+    // item 0 at (12,50,96,24). A click there proves the placement.
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 150.0f, 400.0f, 50.0f}, 0.0f);
+        changed = combo(gui, layout, kDefaultChrome, "shape", kItems, 3,
+                        selected, open, 120.0f);
+        layout.end_panel();
+        gui.end_frame();
+    };
+    pass(snap(60.0f, 162.0f, false, true, true));  // the row: open
+    CHECK(open == true);
+    pass(snap(60.0f, 62.0f, false, true, true));  // item 0, above the row
+    CHECK(selected == 0);
+    CHECK(changed == true);
+    CHECK(open == false);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("combo: a frame too short for the list clamps at its top edge") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 80.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    static const char* kItems[] = {"alpha", "beta", "gamma"};
+    int selected = 2;
+    bool open = false;
+    bool changed = false;
+
+    // Frame 800x80, row (0,10,120,24). The dropdown wants 112 but clamps
+    // to the frame's 80; below needs 114 > 80, above starts at -70, so
+    // the bounds clamp to (0,0,120,80) - OVERLAYING the row. The content
+    // (12,12,96,56) fits items 0 and 1; item 2 lays past the end.
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 10.0f, 400.0f, 30.0f}, 0.0f);
+        changed = combo(gui, layout, kDefaultChrome, "shape", kItems, 3,
+                        selected, open, 120.0f);
+        layout.end_panel();
+        gui.end_frame();
+    };
+
+    // The real click is two frames - the press claims the row, the
+    // release clicks it - and the release frame carries no press edge,
+    // so the dropdown it just laid over the row cannot steal the click
+    // that opened it: the overlay stays open. (A one-frame tap is a
+    // different animal: its press edge is still live when the overlaid
+    // items lay, and the higher stratum steals the fresh same-point
+    // claim - the tap opens the dropdown AND picks the item under the
+    // finger in one act. The recorded arbitration at work, not a combo
+    // bug; a real pointer never produces a same-frame tap.)
+    pass(snap(60.0f, 22.0f, true, true, false));    // the press: claimed, not a click
+    CHECK(open == false);
+    pass(snap(60.0f, 22.0f, false, false, true));  // the release: the row's click
+    CHECK(open == true);                          // the overlay survived its opening
+
+    // The pick, on item 1 (12,44..68) - clear of the row's band (10..34),
+    // which owns the taps that fall on it: the selection moves 2 -> 1
+    // and the choice closes.
+    pass(snap(60.0f, 56.0f, false, true, true));
+    CHECK(selected == 1);
+    CHECK(changed == true);
+    CHECK(open == false);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("combo: the keyboard walk - Enter opens Tab reaches the items "
+          "Enter picks") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    static const char* kItems[] = {"alpha", "beta", "gamma"};
+    int selected = 1;
+    bool open = false;
+    bool changed = false;
+    const WidgetId row_w = IdStack{}.id("shape");
+    IdStack alpha_ids;
+    alpha_ids.push("shape");
+    alpha_ids.push(0);
+    const WidgetId alpha_w = alpha_ids.id("alpha");
+
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        changed = combo(gui, layout, kDefaultChrome, "shape", kItems, 3,
+                        selected, open, 120.0f);
+        layout.end_panel();
+        gui.end_frame();
+    };
+
+    // A click on the row takes the focus and opens the dropdown.
+    pass(snap(60.0f, 12.0f, false, true, true));
+    CHECK(gui.is_focused(row_w));
+    CHECK(open == true);
+
+    // Tab lands on the FIRST item - the registration order is the row,
+    // then the items in list order (they are citizens while open).
+    InputFrame tab = snap(400.0f, 400.0f);
+    tab.key_pressed[keys::kTab] = true;
+    pass(tab);
+    CHECK(gui.is_focused(alpha_w));
+
+    // Enter picks the focused item: the int writes, the dropdown closes,
+    // and the focus hands back to the row (the item's id is about to
+    // vanish - without the handback the next Tab would restart the
+    // screen's walk from its first widget).
+    InputFrame enter = snap(400.0f, 400.0f);
+    enter.key_pressed[keys::kEnter] = true;
+    pass(enter);
+    CHECK(selected == 0);
+    CHECK(changed == true);
+    CHECK(open == false);
+    CHECK(gui.is_focused(row_w));  // handed back, not stranded
+
+    // And Enter on the focused row reopens - the walk is a loop.
+    pass(enter);
+    CHECK(open == true);
+    CHECK(gui.is_focused(row_w));  // the row kept it through the reopen
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
 TEST_CASE("utf8 decode covers multibyte codepoints and forgives damage") {
     using ws::ui::r2d::font::utf8_next;
     const char* s = "";

@@ -76,7 +76,7 @@ libs/ui/
       layout_cursor.hpp      # LayoutCursor: flowing layout + panel stack
       rect.hpp                # Rect + its geometry helpers (contains, edges, centers, expand/shrink) — the shared vocabulary
       theme.hpp               # ChromeTheme: every color/metric the widgets use (+ the modal veil face), + the borrowed font
-      widgets.hpp            # button/checkbox/radio/toggle switch/slider/drag float/collapsing header/selectable/panel/tabs/scroll region + the overlay scopes (popup/tooltip/modal) + the statics (text/separator/progress) — the widget functions + fit_text
+      widgets.hpp            # button/checkbox/radio/toggle switch/slider/drag float/collapsing header/selectable/combo/panel/tabs/scroll region + the overlay scopes (popup/tooltip/modal) + the statics (text/separator/progress) — the widget functions + fit_text
   src/
     app.cpp                  # pimpl: Vulkan context, swapchain, frame loop
     atlas_packer.h/.cpp      # pure-CPU shelf packer: atlas pages, sub-rects, gutters
@@ -732,6 +732,20 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   the selected row wears a 3-px accent bar down its left edge, a
   hardcoded pixel like the separator's 2, and an idle unselected row
   draws NO face at all — the bare list look),
+  `combo`
+  (the popup's row-widget shape: the caller's int IS the selection, the
+  caller's bool the dropdown's open state; the row wears button faces
+  with the collapsing_header's marker mirrored to the RIGHT edge —
+  border closed, accent open — and draws "label: item" like a
+  drag_float's line; a row click or Enter/Space toggles the dropdown,
+  which the WIDGET places: flush below the row while the frame has
+  room, flipped above when it does not, clamped at the frame's top
+  edge, never taller than the frame; an item click writes the int,
+  answers only on a real move like a radio, closes, and hands focus
+  back to the row — the vanished item id would otherwise strand the
+  Tab walk; the items are citizens, so Tab reaches them while the
+  dropdown is open and Enter picks; an empty combo lays a bare row and
+  never latches its caller's bool open),
   `slider_float`/`slider_int`
   (click-to-set and drag are one rule: the owner maps the pointer while
   pressed; kLeft/kRight step the focused one — 1% of the range per
@@ -812,7 +826,8 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   begin that answered false pushed nothing; a stray end is a no-op under
   its layer guard). v1 limits, deliberate: no Escape or focus-loss close
   for the popup, no auto-flip above the anchor when the frame lacks room
-  (the caller places `bounds` — the arithmetic M19's combo will own),
+  (the caller places `bounds` — the arithmetic M19's combo owns: its
+  dropdown flips above and clamps at the frame's edges itself),
   and the popup's padding rim falls through to what sits beneath —
   chrome is not an input surface, so fill-width children leave almost no
   rim to press. The static chrome (M16) is the exception on the citizen seams: `text`
@@ -897,7 +912,7 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `clear_persistent_state` (the explicit eviction, by id or wholesale),
   `ChromeTheme`/
   `kDefaultChrome`, and `button`/`checkbox`/`radio`/`toggle_switch`/
-  `collapsing_header`/`selectable`/`slider_float`/`slider_int`/
+  `collapsing_header`/`selectable`/`combo`/`slider_float`/`slider_int`/
   `drag_float`/`begin_panel`/`end_panel`/`tab_bar`/
   `begin_scroll_panel`/`end_scroll_panel`, plus the M18 overlay scopes —
   `begin_popup`/`end_popup` (bool& open + anchor/bounds; the

@@ -410,4 +410,38 @@ bool begin_modal(GuiContext& gui, LayoutCursor& layout,
 // and lifts at the next begin_frame (see begin_layer).
 void end_modal(GuiContext& gui, LayoutCursor& layout);
 
+// A combo box: the popup's row-widget shape - ONE widget under one
+// label, the row and the dropdown together. The row wears the button
+// faces (a marker square at its right edge says "opens": the faint
+// border closed, the accent open, the collapsing_header's marker
+// mirrored) and draws "label: item" like a drag_float composes
+// "label: value" (the display cut first; no item in range or count 0
+// shows the label alone). A click on the row toggles `open` (the
+// caller's bool, by reference); Enter/Space on the focused row toggles
+// it too, like a header. The dropdown is a begin_popup the widget
+// places ITSELF: below the row while the frame has room (flush at the
+// row's bottom, one control_height per item plus the panel padding and
+// spacing, the row's width), else flipped above the row, clamped at
+// the frame's edges - a frame too short for every item shows what fits
+// (the popup's clip cuts the rest; the caller places nothing). A click
+// on an item writes `selected` (the caller's int, by reference) and
+// answers true ONLY when the selection MOVED - a re-click on the
+// current item is a no-op close, the radio's answer - and closes the
+// dropdown; the row click that opened it and the outside-press close
+// are begin_popup's rules unmodified (the row IS the anchor). `items`
+// is a `const char* const*` array, like tab_bar's; `count` 0 or a
+// `selected` out of range lay a bare row that opens nothing (a combo
+// with nothing to choose does not pretend otherwise); the items id
+// under the row's label scope with a pushed index, so one label list
+// works anywhere. `width` lays the row like a button's (negative =
+// fill the line). Keyboard: the items are citizens like every row -
+// while the dropdown is open Tab reaches them in list order, Enter/
+// Space picks the focused one, and a choice hands the focus back to
+// the combo row so the next Tab continues the screen's walk (an
+// outside-press close leaves it wherever the pass-through press
+// landed - the focus-follows-press rule, no help wanted).
+bool combo(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
+          const char* label, const char* const* items, int count,
+          int& selected, bool& open, float width = -1.0f);
+
 }  // namespace ws::ui::gui

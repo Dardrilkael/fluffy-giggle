@@ -71,10 +71,10 @@ constexpr const char* kDefaultFontPath = "C:/Windows/Fonts/segoeui.ttf";
 // fitting the scaled widgets.
 ws::ui::gui::Rect demo_panel_rect(float frame_width, float scale) {
     return {frame_width - 244.0f * scale, 24.0f * scale,
-            220.0f * scale, 248.0f * scale};
+            220.0f * scale, 280.0f * scale};
 }
 ws::ui::gui::Rect pages_panel_rect(float frame_width, float scale) {
-    return {frame_width - 244.0f * scale, 280.0f * scale,
+    return {frame_width - 244.0f * scale, 312.0f * scale,
             220.0f * scale, 220.0f * scale};
 }
 
@@ -266,8 +266,9 @@ protected:
         // the anchor exemption keeps the popup, the caller's own toggle
         // closes it), the dropdown hangs below it over the rows there,
         // and the caller places both rects by hand - library-dumb
-        // placement, the arithmetic M19's combo will own. A choice closes
-        // the menu and retints the clip-proof quad at the panel's corner.
+        // placement, the arithmetic the combo row at the panel's bottom
+        // now owns. A choice closes the menu and retints the clip-proof
+        // quad at the panel's corner.
         if (ws::ui::gui::button(gui_, layout_, chrome_, "menu",
                                 120.0f * ui_scale_)) {
             menu_open_ = !menu_open_;
@@ -292,6 +293,7 @@ protected:
                         menu_choice_ == i, -1.0f)) {
                     menu_choice_ = i;
                     menu_open_ = false;  // a choice closes: caller's rule
+                    combo_open_ = false;  // one choice, one open dropdown
                 }
                 gui_.ids().pop();
             }
@@ -336,6 +338,19 @@ protected:
         ws::ui::gui::slider_float(gui_, layout_, chrome_,
                                   "spin", gui_spin_rate_, 0.0f, 0.2f,
                                   120.0f * ui_scale_);
+        // M19's combo, the same choice as one widget: the row owns the
+        // placement the raw popup above leaves to the caller - the
+        // dropdown it opens hangs past the panel's bottom edge, the clip
+        // escape in daily wear, flipping above or clamping when the
+        // frame lacks room - and the shared choice retints the quad from
+        // either control. The two dropdowns close each other: a pick is
+        // one answer, and a click outside one's bounds is the popup's
+        // own outside-press close.
+        if (ws::ui::gui::combo(gui_, layout_, chrome_, "tint", kMenuItems, 3,
+                               menu_choice_, combo_open_,
+                               120.0f * ui_scale_)) {
+            menu_open_ = false;  // the choice moved: the menu follows suit
+        }
         // Clip proof: this quad pokes past the panel's bottom-right corner
         // by 40 px each way - the scissor must cut it at the content edge.
         // Its tint is the popup demo's choice (red/green/blue above).
@@ -713,6 +728,7 @@ private:
     bool show_modal_ = false;      // M7: the Layer::modal veil demo's open flag
     bool menu_open_ = false;       // M18: the demo panel's popup menu
     int menu_choice_ = 0;          // its chosen tint (indexes kMenuTints)
+    bool combo_open_ = false;      // M19: the combo row's dropdown (same tint)
     std::array<bool, 16> rows_{};   // the "list" tab's checkbox states
     // Multi-touch demo state: per-contact breadcrumb trails, the pinch
     // bookkeeping, the text echo buffer. All app-side, the gui contract -
