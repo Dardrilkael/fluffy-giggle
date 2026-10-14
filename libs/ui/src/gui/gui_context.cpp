@@ -384,6 +384,23 @@ void GuiContext::push_hit_clip(const Rect& clip) {
     ++hit_clip_depth_;
 }
 
+void GuiContext::push_hit_clip_escape(const Rect& clip) {
+    // The same balanced clamp as push_hit_clip - the two share one
+    // stack, one depth counter and one overflow warn; only the
+    // intersection at push time is skipped: the stored entry is the
+    // escape rect itself, exactly what r2d::push_clip_escape records on
+    // its side, so the pixels and the pointer see the same hole.
+    if (hit_clip_depth_ < kMaxHitClipDepth) {
+        hit_clips_[static_cast<std::size_t>(hit_clip_depth_)] = clip;
+    } else if (!hit_clip_overflow_warned) {
+        hit_clip_overflow_warned = true;
+        core::warn("ui: gui hit-clip stack clamped at {} - deeper "
+                   "push_hit_clip scopes keep the deepest real clip",
+                   kMaxHitClipDepth);
+    }
+    ++hit_clip_depth_;
+}
+
 void GuiContext::pop_hit_clip() {
     // Drop-safe like every gui pop: a pop with nothing pushed is a
     // no-op.

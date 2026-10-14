@@ -158,6 +158,9 @@ public:
     // leaks across frames.
     static constexpr int kMaxClipDepth = 8;
     void push_clip(float x, float y, float width, float height);
+    // The overlay spelling: pushes WITHOUT intersecting the enclosing
+    // clips (see the public header's push_clip_escape).
+    void push_clip_escape(float x, float y, float width, float height);
     void pop_clip();
     void draw_quad(float x, float y, float w, float h, std::uint32_t color,
                    Texture texture = {}, float rotation = 0.0f);

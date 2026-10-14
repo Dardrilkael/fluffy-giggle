@@ -185,6 +185,15 @@ public:
     // scope), a pop with nothing pushed is a no-op, and begin_frame
     // resets any scope an early return never closed.
     void push_hit_clip(const Rect& clip);
+    // The overlay spelling, the twin of r2d::push_clip_escape: pushes
+    // `clip` WITHOUT intersecting the enclosing hit clips, so an
+    // overlay's children claim over a panel they float past instead of
+    // being cut by its hole. Further pushes from inside intersect with
+    // it as usual; pop_hit_clip closes it like any other. The popup and
+    // modal scopes are the callers (the tooltip pushes no hit clip at
+    // all - nothing in it is meant to claim) and a panel's own children
+    // never want this.
+    void push_hit_clip_escape(const Rect& clip);
     // Closes the innermost push_hit_clip. Drop-safe like every gui pop:
     // a call with nothing pushed is a no-op.
     void pop_hit_clip();

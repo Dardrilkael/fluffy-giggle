@@ -134,6 +134,19 @@ void set_layer(std::uint32_t layer);
 void push_clip(float x, float y, float width, float height);
 void pop_clip();
 
+// The overlay spelling of push_clip: pushes `rect` as the new innermost
+// clip WITHOUT intersecting the clips already active. A panel nesting
+// inside another panel shrinks (push_clip always intersects) - but an
+// overlay that floats OVER a panel must draw past its host's clip, or a
+// dropdown near the panel's edge would shear off at it. The escape is
+// exactly that: from here to the matching pop_clip() the active clip is
+// this rect alone, and further nesting from inside intersects with it
+// as usual. The gui's popup/tooltip/modal scopes are the intended
+// callers (and the gui's hit-testing mirror, push_hit_clip_escape, is
+// spelled to match). Same normalization, depth cap and no-op pop
+// contract as push_clip.
+void push_clip_escape(float x, float y, float width, float height);
+
 // Top-left anchored quad; rotation pivots the center (positive = clockwise,
 // radians). Flat colors pass texture = {}.
 void draw_quad(float x, float y, float w, float h, std::uint32_t color,

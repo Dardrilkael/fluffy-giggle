@@ -1487,6 +1487,36 @@ void Renderer2D::pop_clip() {
     }
 }
 
+void Renderer2D::push_clip_escape(float x, float y, float width,
+                                  float height) {
+    if (!accept("push_clip_escape")) {
+        return;
+    }
+    if (clip_stack_full(clip_depth_)) {
+        ++clip_depth_;  // balanced with the matching pop_clip()
+        return;
+    }
+    float* slot = clip_stack_[clip_depth_];
+    if (std::isfinite(x) && std::isfinite(y) && std::isfinite(width) &&
+        std::isfinite(height)) {
+        // NO intersect with the active clip: the escape REPLACES the top
+        // for everything recorded until the matching pop, so an overlay
+        // draws past the panel it floats over. The same !(> 0)
+        // normalization as push_clip - the clip-change comparison must
+        // never see a NaN, and an empty clip means "render nothing".
+        slot[0] = x;
+        slot[1] = y;
+        slot[2] = width > 0.0f ? width : 0.0f;
+        slot[3] = height > 0.0f ? height : 0.0f;
+    } else {
+        slot[0] = 0.0f;
+        slot[1] = 0.0f;
+        slot[2] = 0.0f;  // non-finite input clips everything
+        slot[3] = 0.0f;
+    }
+    ++clip_depth_;
+}
+
 void Renderer2D::draw_quad(float x, float y, float w, float h,
                            std::uint32_t color, Texture texture,
                            float rotation) {
@@ -1971,6 +2001,14 @@ void pop_clip() {
         g_active->pop_clip();
     } else {
         warn_no_app("pop_clip");
+    }
+}
+
+void push_clip_escape(float x, float y, float width, float height) {
+    if (g_active != nullptr) {
+        g_active->push_clip_escape(x, y, width, height);
+    } else {
+        warn_no_app("push_clip_escape");
     }
 }
 

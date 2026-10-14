@@ -21,6 +21,11 @@ struct ChromeTheme {
     std::uint32_t control_on = r2d::rgba(90, 168, 110);  // toggled/checked accent
     std::uint32_t text = r2d::rgba(235, 238, 242);
     std::uint32_t border = r2d::rgba(255, 255, 255, 36);
+    // The modal backdrop: a translucent wash drawn over the whole frame
+    // at the modal stratum while a modal scope is open - the veil the
+    // input rules already enforce, made visible. Not dim() territory:
+    // it is its own face, never scaled or dimmed.
+    std::uint32_t veil = r2d::rgba(0, 0, 0, 96);
 
     // Metrics, gui-space pixels.
     float control_height = 24.0f;

@@ -1042,6 +1042,7 @@ TEST_CASE("public r2d API is drop-safe without a running app") {
     draw_line(0.0f, 0.0f, 10.0f, 10.0f, 2.0f, rgba(255, 255, 255));
     draw_sprite(0.0f, 0.0f, 10.0f, 10.0f, rgba(255, 255, 255), Sprite{});
     push_clip(0.0f, 0.0f, 10.0f, 10.0f);  // warns, then ignored: no app
+    push_clip_escape(0.0f, 0.0f, 10.0f, 10.0f);  // the overlay spelling, same contract
     pop_clip();
     draw_rounded_quad(0.0f, 0.0f, 10.0f, 10.0f, 3.0f,
                       rgba(255, 255, 255));  // same warn-once, same ignore
@@ -1673,6 +1674,65 @@ TEST_CASE("nested clips intersect at push time; disjoint ones go empty") {
     CHECK(empty.clip[1] == 200.0f);
     CHECK(empty.clip[2] == 0.0f);    // but the extents clamp to nothing
     CHECK(empty.clip[3] == 0.0f);
+}
+
+TEST_CASE("push_clip_escape replaces the top; nesting from inside "
+          "intersects with the escape") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    r.begin(Camera2D{});
+    r.push_clip(0.0f, 0.0f, 200.0f, 200.0f);
+    r.draw_quad(100.0f, 100.0f, 10.0f, 10.0f, rgba(255, 255, 255));
+    // The escape REPLACES the top instead of intersecting: the overlay's
+    // clip is its rect alone, so a draw past the enclosing clip's right
+    // edge (x >= 200) still records under a real clip - the
+    // dropdown-near-the-panel-edge case the escape exists for. An
+    // intersecting push here would store (50,50,150,150).
+    r.push_clip_escape(50.0f, 50.0f, 300.0f, 300.0f);
+    r.draw_quad(250.0f, 60.0f, 10.0f, 10.0f, rgba(255, 255, 255));
+    // Nesting from inside intersects with the ESCAPED top as usual.
+    r.push_clip(280.0f, 280.0f, 50.0f, 50.0f);
+    r.draw_quad(290.0f, 290.0f, 5.0f, 5.0f, rgba(255, 255, 255));
+    r.pop_clip();
+    r.pop_clip();
+    // Both pops matched their pushes: the enclosing clip is back.
+    r.draw_quad(120.0f, 120.0f, 10.0f, 10.0f, rgba(255, 255, 255));
+    r.end();
+    r.frame_end();
+
+    // Four clip values, four chunks in record order - painter's order per
+    // clip run (M5) - and the escape run holding its RAW rect.
+    REQUIRE(r.batch().chunk_count() == 4);
+    const auto& enclosing = r.batch().chunk(0);
+    CHECK(enclosing.clip[0] == 0.0f);
+    CHECK(enclosing.clip[2] == 200.0f);
+    const auto& escape = r.batch().chunk(1);
+    CHECK(escape.clip[0] == 50.0f);
+    CHECK(escape.clip[1] == 50.0f);
+    CHECK(escape.clip[2] == 300.0f);  // the raw rect - NOT (50,50,150,150)
+    CHECK(escape.clip[3] == 300.0f);
+    const auto& nested = r.batch().chunk(2);
+    CHECK(nested.clip[0] == 280.0f);
+    CHECK(nested.clip[2] == 50.0f);   // intersected with the escape, not the enclosing
+    const auto& back = r.batch().chunk(3);
+    CHECK(back.clip[2] == 200.0f);    // the enclosing survived the round trip
+
+    // The disjoint case is where the two spellings part ways outright: an
+    // intersecting push against a disjoint enclosing clamps to EMPTY, the
+    // escape records its rect and keeps drawing.
+    r.frame_begin(800.0f, 600.0f);
+    r.begin(Camera2D{});
+    r.push_clip(10.0f, 10.0f, 50.0f, 50.0f);
+    r.push_clip_escape(200.0f, 200.0f, 50.0f, 50.0f);
+    r.draw_quad(210.0f, 210.0f, 10.0f, 10.0f, rgba(255, 255, 255));
+    r.pop_clip();
+    r.pop_clip();
+    r.end();
+    r.frame_end();
+    REQUIRE(r.batch().chunk_count() == 1);
+    CHECK(r.batch().chunk(0).clip[2] == 50.0f);  // extents survive - not the empty intersection
+    CHECK(r.batch().chunk(0).clip[3] == 50.0f);
 }
 
 TEST_CASE("the clip stack balances overflow, resets per frame, pops empty safely") {
@@ -7405,6 +7465,415 @@ TEST_CASE("drag_float: grab, travel, clamp - and a plain click moves nothing") {
     layout.end_panel();
     gui.end_frame();
     CHECK(value == doctest::Approx(0.0f));  // the lock held
+}
+
+// --- the M18 overlay scopes: clip escape + popup/tooltip/modal (M18) ------------
+
+TEST_CASE("push_hit_clip_escape: an overlay claims past the enclosing hole") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const IdStack ids;
+    const WidgetId over_w = ids.id("over");
+    const Rect over_row{150.0f, 150.0f, 50.0f, 20.0f};
+
+    // The enclosing hole a host panel pushes: everything past
+    // (0,0,100,100) is unclaimable inside it - what the clip hides
+    // cannot claim (the M6 rule).
+    gui.begin_frame(snap(170.0f, 160.0f));
+    gui.push_hit_clip({0.0f, 0.0f, 100.0f, 100.0f});
+    (void)gui.hit_test(over_w, over_row);
+    CHECK(gui.hot_id() == kInvalidWidgetId);  // the hole cut the claim
+    gui.pop_hit_clip();
+    gui.end_frame();
+
+    // The overlay spelling: the escape pushes its rect RAW - not the
+    // empty intersection an ordinary push would store - so the row
+    // floating past the host's edge claims again. The readback is the
+    // same proof from the other side: the stored entry IS the effective
+    // clip.
+    gui.begin_frame(snap(170.0f, 160.0f));
+    gui.push_hit_clip({0.0f, 0.0f, 100.0f, 100.0f});
+    gui.push_hit_clip_escape({100.0f, 100.0f, 200.0f, 200.0f});
+    const Rect* escaped = gui.current_hit_clip();
+    REQUIRE(escaped != nullptr);
+    CHECK(escaped->x == 100.0f);
+    CHECK(escaped->y == 100.0f);
+    CHECK(escaped->width == 200.0f);  // RAW - the intersecting push would be empty
+    CHECK(escaped->height == 200.0f);
+    (void)gui.hit_test(over_w, over_row);
+    CHECK(gui.hot_id() == over_w);  // the overlay claimed past the hole
+    // Nesting from inside intersects with the ESCAPED top, as usual.
+    gui.push_hit_clip({250.0f, 250.0f, 100.0f, 100.0f});
+    const Rect* nested = gui.current_hit_clip();
+    CHECK(nested->x == 250.0f);
+    CHECK(nested->width == 50.0f);  // 100..300 against 250..350 -> 250..300
+    gui.pop_hit_clip();
+    gui.pop_hit_clip();
+    gui.pop_hit_clip();
+    CHECK(gui.current_hit_clip() == nullptr);  // balanced to nothing
+    gui.end_frame();
+}
+
+TEST_CASE("popup: open lays children above base; an outside press closes it, "
+          "the click passing through") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    const Rect anchor{0.0f, 0.0f, 100.0f, 24.0f};  // the toggle button's rect
+    const Rect bounds{0.0f, 24.0f, 120.0f, 60.0f};
+    bool open = true;
+    bool toggle_clicked = false;
+    bool under_clicked = false;
+    bool far_clicked = false;
+    bool item_clicked = false;
+
+    // The frame's widget list, laid the same every frame: the toggle (the
+    // popup's anchor), an "under" button the popup floats over, a "far"
+    // button beside it poking clear of the popup's right edge, and the
+    // popup scope with one fill-width item.
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        if (button(gui, layout, kDefaultChrome, "toggle", 100.0f)) {
+            toggle_clicked = true;
+        }
+        if (button(gui, layout, kDefaultChrome, "under", 100.0f)) {
+            under_clicked = true;
+        }
+        layout.same_line();
+        if (button(gui, layout, kDefaultChrome, "far", 150.0f)) {
+            far_clicked = true;
+        }
+        if (begin_popup(gui, layout, kDefaultChrome, "menu", anchor, bounds,
+                        open)) {
+            if (button(gui, layout, kDefaultChrome, "item", -1.0f)) {
+                item_clicked = true;
+            }
+            end_popup(gui, layout);
+        }
+        layout.end_panel();
+        gui.end_frame();
+    };
+
+    // A closed popup lays nothing: begin answers false, pushes no scope -
+    // and the stray end after it is a no-op, not an outer-scope eater.
+    open = false;
+    gui.begin_frame(snap(200.0f, 200.0f));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(begin_popup(gui, layout, kDefaultChrome, "menu", anchor, bounds,
+                      open) == false);
+    CHECK(gui.current_layer() == Layer::base);
+    end_popup(gui, layout);  // stray: nothing was pushed
+    CHECK(gui.current_layer() == Layer::base);
+    layout.end_panel();
+    gui.end_frame();
+
+    // Open, hovering the item that floats over "under": the popup's
+    // child wins the pointer (the layer rule), and the scope reads
+    // through current_layer inside it.
+    open = true;
+    gui.begin_frame(snap(50.0f, 40.0f));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    (void)button(gui, layout, kDefaultChrome, "toggle", 100.0f);
+    (void)button(gui, layout, kDefaultChrome, "under", 100.0f);
+    layout.same_line();
+    (void)button(gui, layout, kDefaultChrome, "far", 150.0f);
+    CHECK(begin_popup(gui, layout, kDefaultChrome, "menu", anchor, bounds,
+                      open) == true);
+    CHECK(gui.current_layer() == Layer::popup);
+    const WidgetId item_w = gui.ids().id("item");  // under the live "menu" scope
+    (void)button(gui, layout, kDefaultChrome, "item", -1.0f);
+    CHECK(gui.hot_id() == item_w);  // stolen off "under" by the stratum
+    end_popup(gui, layout);
+    CHECK(gui.current_layer() == Layer::base);
+    layout.end_panel();
+    gui.end_frame();
+
+    // A full click on the item: the press is stolen to the popup stratum
+    // ("under" claimed first, lost the fresh claim), the release clicks
+    // the item, and "under" never does.
+    pass(snap(50.0f, 40.0f, true, true));
+    CHECK(open == true);
+    pass(snap(50.0f, 40.0f, false, false, true));
+    CHECK(item_clicked == true);
+    CHECK(under_clicked == false);
+    CHECK(far_clicked == false);
+
+    // A press outside the bounds AND outside the anchor closes the popup
+    // on the press frame itself - and the press passes through: "far"
+    // sits outside the popup's rect and claims it fresh.
+    item_clicked = false;
+    pass(snap(200.0f, 36.0f, true, true));
+    CHECK(open == false);            // closed, this very frame
+    CHECK(item_clicked == false);    // the content vanished with it
+    pass(snap(200.0f, 36.0f, false, false, true));
+    CHECK(far_clicked == true);      // the click landed on "far" beneath
+
+    // A press inside the ANCHOR is not a close: that click belongs to the
+    // toggle - the caller reads it and flips the popup closed itself.
+    open = true;
+    pass(snap(50.0f, 12.0f, true, true));
+    CHECK(open == true);  // the anchor press never closed it
+    pass(snap(50.0f, 12.0f, false, false, true));
+    CHECK(toggle_clicked == true);
+    open = false;  // the toggle handler's job, done by hand here
+
+    // The documented v1 limit, pinned: a press on the popup's own padding
+    // - inside bounds, outside every child - falls through to the widget
+    // beneath (chrome is not an input surface).
+    far_clicked = false;
+    open = true;
+    pass(snap(110.0f, 30.0f, true, true));
+    CHECK(open == true);  // inside bounds: not a close
+    pass(snap(110.0f, 30.0f, false, false, true));
+    CHECK(far_clicked == true);  // "far" claimed through the rim
+}
+
+TEST_CASE("popup: a dropdown hanging past its host panel's edge claims there") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    bool open = true;
+    bool item_clicked = false;
+
+    // The natural idiom: the combo row AND its popup run inside the host
+    // panel's scope, whose clip pair is active at the begin_popup call -
+    // and the dropdown hangs past the host's bottom edge. The escaping
+    // clip pair lets the children draw there; its hit twin is what lets
+    // them CLICK there. An intersecting hit clip would store the
+    // intersection with the host's content rect - a 4-px sliver here -
+    // and the rows would paint fine but never claim: draw/hit drift, the
+    // thing the one seam forbids.
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)begin_panel(gui, layout, kDefaultChrome, "host",
+                          {0.0f, 0.0f, 400.0f, 64.0f});
+        (void)button(gui, layout, kDefaultChrome, "combo", 100.0f);
+        if (begin_popup(gui, layout, kDefaultChrome, "menu",
+                        {12.0f, 12.0f, 100.0f, 24.0f},
+                        {0.0f, 36.0f, 120.0f, 80.0f}, open)) {
+            // The readback pin: the effective hit clip inside the popup
+            // is its CONTENT rect, not the intersection with the host's
+            // content (12,12,376,40) - which would be (12,48,96,4).
+            const Rect* clip = gui.current_hit_clip();
+            REQUIRE(clip != nullptr);
+            CHECK(clip->y == doctest::Approx(48.0f));
+            CHECK(clip->height == doctest::Approx(56.0f));
+            if (button(gui, layout, kDefaultChrome, "item", -1.0f)) {
+                item_clicked = true;
+            }
+            end_popup(gui, layout);
+        }
+        end_panel(gui, layout);
+        gui.end_frame();
+    };
+
+    // The press lands past the host's content bottom edge (y=60 > 52):
+    // only the escaped hit clip lets the hanging item claim there.
+    pass(snap(50.0f, 60.0f, true, true));
+    CHECK(open == true);  // inside the bounds: the press is no close
+    pass(snap(50.0f, 60.0f, false, false, true));
+    CHECK(item_clicked == true);
+}
+
+TEST_CASE("popup: the open scope eats the wheel over the panel beneath") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    bool open = true;
+    int clicked_row = -1;
+
+    // The M12 arbitration at widget granularity: the popup's keyless
+    // claim registers at the popup stratum, so a scroll panel it floats
+    // over loses the wheel while it is open - the rows beneath hold
+    // still - and wins it back the frame it closes.
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
+                                 {0.0f, 0.0f, 200.0f, 100.0f});
+        clicked_row = -1;
+        for (int i = 0; i < 10; ++i) {
+            gui.ids().push(i);
+            if (button(gui, layout, kDefaultChrome, "row", 120.0f)) {
+                clicked_row = i;
+            }
+            gui.ids().pop();
+        }
+        end_scroll_panel(gui, layout, kDefaultChrome);
+        if (begin_popup(gui, layout, kDefaultChrome, "menu",
+                        {60.0f, 80.0f, 40.0f, 20.0f},
+                        {50.0f, 20.0f, 100.0f, 50.0f}, open)) {
+            (void)button(gui, layout, kDefaultChrome, "item", -1.0f);
+            end_popup(gui, layout);
+        }
+        gui.end_frame();
+    };
+
+    // Settle with the popup open: its claim (layer 20 over the list's 10)
+    // wins the resolution.
+    pass(snap(100.0f, 50.0f));
+    CHECK(clicked_row == -1);
+
+    // The wheel notch under the popup: eaten. Row 0 keeps its unscrolled
+    // spot - the click left of the popup's rect proves it.
+    InputFrame wheel = snap(100.0f, 50.0f);
+    wheel.scroll_dy = -1.0f;
+    pass(wheel);
+    pass(snap(20.0f, 24.0f, false, true, true));
+    CHECK(clicked_row == 0);
+
+    // The popup closed: the settle hands the wheel back to the list, and
+    // the same notch scrolls 32 - row 1 takes the origin click.
+    open = false;
+    pass(snap(100.0f, 50.0f));
+    wheel.scroll_dy = -1.0f;
+    pass(wheel);
+    pass(snap(20.0f, 24.0f, false, true, true));
+    CHECK(clicked_row == 1);
+}
+
+TEST_CASE("tooltip: chrome above everything, no claim - the widget beneath "
+          "keeps its hot") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    bool clicked = false;
+
+    // Hover a base button with a tooltip floating OVER it: the hint is
+    // chrome at the tooltip stratum - it draws above, claims nothing,
+    // never closes anything. The button beneath keeps its hot.
+    gui.begin_frame(snap(60.0f, 12.0f));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    const WidgetId base_w = gui.ids().id("hovered");
+    (void)button(gui, layout, kDefaultChrome, "hovered", 120.0f);
+    CHECK(gui.is_hot(base_w));
+    if (begin_tooltip(gui, layout, kDefaultChrome, "hint",
+                      {40.0f, 0.0f, 80.0f, 30.0f}, gui.is_hot(base_w))) {
+        CHECK(gui.current_layer() == Layer::tooltip);
+        text(layout, kDefaultChrome, "the hovered button", -1.0f);
+        CHECK(gui.hot_id() == base_w);  // the hint claimed nothing
+        end_tooltip(gui, layout);
+    } else {
+        CHECK(false);  // is_hot was true: the hint must lay
+    }
+    CHECK(gui.current_layer() == Layer::base);
+    layout.end_panel();
+    gui.end_frame();
+
+    // The click survives the floating hint too: press and release under
+    // it click the button.
+    gui.begin_frame(snap(60.0f, 12.0f, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    if (button(gui, layout, kDefaultChrome, "hovered", 120.0f)) {
+        clicked = true;
+    }
+    if (begin_tooltip(gui, layout, kDefaultChrome, "hint",
+                      {40.0f, 0.0f, 80.0f, 30.0f}, true)) {
+        text(layout, kDefaultChrome, "the hovered button", -1.0f);
+        end_tooltip(gui, layout);
+    }
+    layout.end_panel();
+    gui.end_frame();
+    gui.begin_frame(snap(60.0f, 12.0f, false, false, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    if (button(gui, layout, kDefaultChrome, "hovered", 120.0f)) {
+        clicked = true;
+    }
+    if (begin_tooltip(gui, layout, kDefaultChrome, "hint",
+                      {40.0f, 0.0f, 80.0f, 30.0f}, true)) {
+        text(layout, kDefaultChrome, "the hovered button", -1.0f);
+        end_tooltip(gui, layout);
+    }
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(clicked == true);
+
+    // show false: begin lays nothing and the stray end is a no-op.
+    gui.begin_frame(snap(200.0f, 200.0f));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    (void)button(gui, layout, kDefaultChrome, "hovered", 120.0f);
+    CHECK(begin_tooltip(gui, layout, kDefaultChrome, "hint",
+                        {40.0f, 0.0f, 80.0f, 30.0f}, false) == false);
+    CHECK(gui.current_layer() == Layer::base);
+    end_tooltip(gui, layout);  // stray: nothing was pushed
+    CHECK(gui.current_layer() == Layer::base);
+    layout.end_panel();
+    gui.end_frame();
+}
+
+TEST_CASE("modal: the veil blocks base input, the dialog's widgets work, "
+          "the focus comes back") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    bool modal_open = false;
+    bool ok_clicked = false;
+    bool base_clicked = false;
+    const WidgetId base_w = IdStack{}.id("base");
+    IdStack ok_ids;
+    ok_ids.push("confirm");
+    const WidgetId ok_w = ok_ids.id("ok");
+
+    // Chrome-first, the documented pattern: the modal scope opens BEFORE
+    // the widgets it blocks, so the veil is up the very frame it appears.
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        if (begin_modal(gui, layout, kDefaultChrome, "confirm",
+                        {100.0f, 100.0f, 200.0f, 100.0f}, modal_open)) {
+            if (button(gui, layout, kDefaultChrome, "ok", 120.0f)) {
+                ok_clicked = true;
+            }
+            end_modal(gui, layout);
+        }
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        if (button(gui, layout, kDefaultChrome, "base", 100.0f)) {
+            base_clicked = true;
+        }
+        layout.end_panel();
+        gui.end_frame();
+    };
+
+    // A closed modal lays nothing and raises no veil - the stray end is a
+    // no-op.
+    gui.begin_frame(snap(200.0f, 200.0f));
+    CHECK(begin_modal(gui, layout, kDefaultChrome, "confirm",
+                      {100.0f, 100.0f, 200.0f, 100.0f}, false) == false);
+    CHECK(gui.current_layer() == Layer::base);
+    end_modal(gui, layout);  // stray: nothing was pushed
+    CHECK(gui.current_layer() == Layer::base);
+    CHECK(gui.claims_open());  // base still live: no veil rose
+    gui.end_frame();
+
+    // The base button takes the keyboard focus with its click.
+    pass(snap(60.0f, 12.0f, true, true));
+    pass(snap(60.0f, 12.0f, false, false, true));
+    CHECK(base_clicked == true);
+    CHECK(gui.is_focused(base_w));
+
+    // The veil rises: the SAME press on the base button now lands on
+    // nothing - no hover, no press, no click - and the focus it held is
+    // dropped (stashed at the rise for the lift to hand back).
+    base_clicked = false;
+    modal_open = true;
+    pass(snap(60.0f, 12.0f, true, true));
+    pass(snap(60.0f, 12.0f, false, false, true));
+    CHECK(base_clicked == false);       // the veil ate the click
+    CHECK(!gui.is_focused(base_w));     // and the keyboard with it
+    CHECK(!gui.claims_open());          // between frames: the veil still up
+
+    // The dialog's own button is above the veil: it clicks, and it takes
+    // the focus (the veil traps the keyboard inside the dialog).
+    pass(snap(160.0f, 124.0f, true, true));
+    pass(snap(160.0f, 124.0f, false, false, true));
+    CHECK(ok_clicked == true);
+    CHECK(gui.is_focused(ok_w));
+    CHECK(!gui.is_focused(base_w));
+
+    // The quiet frame after the close: the veil lifts and hands the focus
+    // back to what its rise displaced.
+    modal_open = false;  // the OK handler's job, done by hand
+    pass(snap(200.0f, 200.0f));
+    CHECK(gui.is_focused(base_w));  // the stashed focus, restored
 }
 
 TEST_CASE("utf8 decode covers multibyte codepoints and forgives damage") {

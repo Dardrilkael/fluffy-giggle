@@ -21,7 +21,8 @@ gets a window, an event stream, and a place to submit draw commands —
   with depth-tested billboards, sorted then batched, flushed under the
   widgets.
 - **Immediate-mode gui** — `gui/` headers (`ws::ui::gui`): dependency-free
-  widgets (button/checkbox/slider/panel/tabs/scroll region) that draw
+  widgets (button/checkbox/slider/panel/tabs/scroll region + the
+  popup/tooltip/modal overlay scopes) that draw
   through r2d; caller-owned state, identity + hit-testing + layout + draw
   stay one seam.
 - **`ws::ui::App`** — the shell itself: owns the window, Vulkan context,
@@ -74,8 +75,8 @@ libs/ui/
       input_frame.hpp        # InputFrame: one frame's raw input — mouse, keys, dt_seconds clock, multi-touch table; frame_input() getter
       layout_cursor.hpp      # LayoutCursor: flowing layout + panel stack
       rect.hpp                # Rect + its geometry helpers (contains, edges, centers, expand/shrink) — the shared vocabulary
-      theme.hpp               # ChromeTheme: every color/metric the widgets use, + the borrowed font
-      widgets.hpp            # button/checkbox/radio/toggle switch/slider/drag float/collapsing header/selectable/panel/tabs/scroll region + the statics (text/separator/progress) — the widget functions + fit_text
+      theme.hpp               # ChromeTheme: every color/metric the widgets use (+ the modal veil face), + the borrowed font
+      widgets.hpp            # button/checkbox/radio/toggle switch/slider/drag float/collapsing header/selectable/panel/tabs/scroll region + the overlay scopes (popup/tooltip/modal) + the statics (text/separator/progress) — the widget functions + fit_text
   src/
     app.cpp                  # pimpl: Vulkan context, swapchain, frame loop
     atlas_packer.h/.cpp      # pure-CPU shelf packer: atlas pages, sub-rects, gutters
@@ -186,6 +187,7 @@ void on_event(ws::ui::Event& e) override {
 `ws::ui::r2d` — `begin()` / `begin(camera)` / `begin(Camera3D)` / `end()`,
 `draw_quad`, `draw_line` (thickness in px), `draw_sprite`, `draw_rounded_quad`,
 `set_layer`, `push_clip` / `pop_clip` (framebuffer-space clip stack),
+`push_clip_escape` (the overlay spelling: pushes WITHOUT the intersect),
 `load_texture`, `load_atlas`, `load_font`, `draw_text`, `frame_size`,
 `sprite_size`, `rgba` (packs 0xRRGGBBAA — NOT IM_COL32 order). Apps record
 from `on_update()` only, exactly like widgets.hpp calls; every call is
@@ -223,6 +225,15 @@ third-party).
   sort, a clip change always splits a chunk — so draw each clipped panel's
   content CONTIGUOUSLY (all of panel A's draws, then all of panel B's);
   A,B,A interleaving costs three chunks instead of two.
+- **The overlay spelling (M18).** `push_clip_escape(x, y, w, h)` pushes
+  WITHOUT the intersect: the pushed rect IS the new innermost clip, so a
+  scope can punch a hole through the clips it sits inside — a dropdown
+  hanging past its host panel's content still paints there. Same
+  normalization (degenerate/backwards/near-empty rects drop to empty and
+  warn-and-clamp like push_clip), same depth cap, same no-op pop contract;
+  the gui's popup/tooltip/modal scopes are the intended callers, and the
+  gui's hit-testing mirror (`push_hit_clip_escape`) is spelled to match so
+  pixels and pointer never disagree (see Hit clips).
 - **Chunks (M9: growth, not caps).** One chunk = one VP (64B push
   constants) + one clip (one scissor) + one depth mode (which of the two
   pipelines flushes it) + one texture table + one `vkCmdDrawIndexed`.
@@ -520,7 +531,10 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   frame the modal appears. Scopes are frame-scoped like every gui
   stack (a leaked `begin_layer` is reset by the next `begin_frame`),
   capped at depth 8 with the balanced-clamp overflow, and every pop is
-  a no-op on an empty stack.
+  a no-op on an empty stack. M18's overlay scopes are the standard
+  users: `begin_popup`/`begin_tooltip`/`begin_modal` raise
+  `Layer::popup`/`tooltip`/`modal` themselves — a caller building an
+  overlay through the widget set never spells the begin_layer pair.
 - **Hit clips (the clip-aware hit seam).** `push_hit_clip(rect)`/
   `pop_hit_clip()`/`current_hit_clip()` on GuiContext — the
   hit-testing twin of r2d's clip stack: `hit_test` intersects its rect
@@ -538,7 +552,16 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   out of sight (the clip gates new claims, not in-flight gestures),
   and it clicks only if the release ends inside the claimable part.
   Fully-clipped widgets still census their id (duplicate detection
-  among scrolled-out rows is intact).
+  among scrolled-out rows is intact). The overlay twin (M18):
+  `push_hit_clip_escape(rect)` pushes WITHOUT the intersect, and the
+  popup/modal scopes push it push-for-push at the SAME rect they hand
+  `r2d::push_clip_escape` — then the intersecting content pair inside —
+  so the pixels and the pointer see the same hole even when a dropdown
+  hangs past its host panel's edge (a single intersecting escape would
+  clip the hit side to the empty sliver under the host's content edge:
+  draw escapes, hit doesn't — exactly the drift the one-seam rule
+  forbids). The tooltip deliberately pushes NO hit clip at all — chrome
+  that claims nothing, so the widget beneath keeps its hot.
 - **Widget state + focus (M8).** Three distinct concepts: hot = under the
   pointer, active = being pressed, focused = receives keyboard input
   (`focused_` on GuiContext, beside hot/active). `state(id, bounds,
@@ -648,7 +671,9 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   eats a real ancestor — and every pop is a documented no-op on an empty
   stack, so unbalanced calls degrade, never corrupt.
 - **Theme.** `ChromeTheme` — the faces and the metrics (control height,
-  corner radius, padding, spacing, scroll speed, drag threshold, and
+  corner radius, padding, spacing, scroll speed, drag threshold, the M18
+  `veil` — the modal scrim's own face, drawn frame-wide at full alpha,
+  never scaled or dimmed — and
   the M14 label/scrollbar metrics: `label_char_width` — the fontless
   6-px-per-byte estimate, `label_inset`, `check_inset`,
   `slider_handle_width`, `scrollbar_thumb_width`,
@@ -761,7 +786,36 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   cosmetic limits: a drag-tracking child (a slider) can move <
   threshold px before the cancel fires, and the thumb grab's cancel
   lands one frame after the child claimed — the same class of lag).
-  The static chrome (M16) is the exception on the citizen seams: `text`
+  The overlay scopes (M18) — `begin_popup`/`end_popup`,
+  `begin_tooltip`/`end_tooltip`, `begin_modal`/`end_modal` — raise their
+  strata themselves (see Layers), so the caller never spells a
+  begin_layer pair for an overlay: the POPUP takes `bool& open` (`!open`
+  answers false and lays nothing) and closes itself on a fresh press —
+  mouse button-0 or any touch, gated on `claims_open()` (under a raised
+  modal veil it is inert like every lower stratum and eats no press the
+  veil owns) — that lands outside `bounds` AND outside `anchor`: the
+  anchor is the trigger row, so its own click is the caller's toggle,
+  not a close, and the press passes through to whatever sits beneath,
+  which claims it fresh. Inside, it is a panel scope pushed with the
+  clip ESCAPES at the bounds (r2d and the hit mirror push-for-push, then
+  the intersecting content pair — see Hit clips) plus a keyless wheel
+  claim, so an open popup eats the wheel over the panel beneath. The
+  TOOLTIP takes `show` by value and is chrome only: no hit clip, no
+  wheel claim, no open state — nothing in it is meant to claim, so the
+  widget beneath keeps its hover and its clicks. The MODAL takes `open`
+  BY VALUE (it never auto-closes — the dialog's own buttons flip the
+  caller's bool) and paints `theme.veil` over the whole frame under its
+  own fullscreen clip escape, so it opens correctly from inside any
+  panel scope; the veil is the input-blocking one from the layer rules —
+  frame-wide, outliving `end_modal`, lifting at the next `begin_frame`,
+  the focus stash/restore included. All three ends are drop-safe (a
+  begin that answered false pushed nothing; a stray end is a no-op under
+  its layer guard). v1 limits, deliberate: no Escape or focus-loss close
+  for the popup, no auto-flip above the anchor when the frame lacks room
+  (the caller places `bounds` — the arithmetic M19's combo will own),
+  and the popup's padding rim falls through to what sits beneath —
+  chrome is not an input surface, so fill-width children leave almost no
+  rim to press. The static chrome (M16) is the exception on the citizen seams: `text`
   (a label row — a negative width sizes to the display advance like a
   checkbox's sizing fit, a fixed width truncates into the row),
   `separator` (a 2-px border rule, a hardcoded pixel like the focus
@@ -820,6 +874,8 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   quads), `draw_rounded_quad`
   (9-sliced builtin mask, radius clamped to half the shorter side),
   `set_layer`, `push_clip`/`pop_clip` (nested framebuffer clip rects),
+  `push_clip_escape` (the overlay spelling — pushes without the
+  intersect),
   `load_texture`, `load_atlas`, `load_font` (bakes one face at one pixel
   size — ASCII 32..126, the font's own atlas pages), `draw_text` (glyph
   quads; returns the advance, exactly `Font::measure_text`), `frame_size`,
@@ -843,12 +899,18 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `kDefaultChrome`, and `button`/`checkbox`/`radio`/`toggle_switch`/
   `collapsing_header`/`selectable`/`slider_float`/`slider_int`/
   `drag_float`/`begin_panel`/`end_panel`/`tab_bar`/
-  `begin_scroll_panel`/`end_scroll_panel`, plus the M16 statics —
+  `begin_scroll_panel`/`end_scroll_panel`, plus the M18 overlay scopes —
+  `begin_popup`/`end_popup` (bool& open + anchor/bounds; the
+  outside-press close, the press passing through), `begin_tooltip`/
+  `end_tooltip` (chrome-only, show by value) and `begin_modal`/
+  `end_modal` (open by value, the theme's veil) — plus the M16 statics —
   `text`/`separator`/`progress` (no GuiContext in the signature), plus layer scopes — the
   `Layer` strata (base/popup/tooltip/modal) with `begin_layer`/
   `end_layer`/`current_layer`, one numbering for both hit-testing and
   r2d draw order. Hit clips: `push_hit_clip(rect)`/`pop_hit_clip()`/
-  `current_hit_clip()` narrow what `hit_test` claims — the
+  `current_hit_clip()` (and the M18 `push_hit_clip_escape(rect)` —
+  the popup/modal twin of r2d's overlay spelling) narrow what
+  `hit_test` claims — the
   hit-testing twin of `r2d::push_clip`, pushed by the panels at the
   same rect (a scrolled-out row cannot claim); capture is never
   clipped. Widget state + keyboard focus: `state(id, bounds,

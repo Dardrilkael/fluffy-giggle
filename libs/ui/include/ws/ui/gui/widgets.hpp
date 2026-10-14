@@ -312,4 +312,102 @@ Rect begin_scroll_panel(GuiContext& gui, LayoutCursor& layout,
 void end_scroll_panel(GuiContext& gui, LayoutCursor& layout,
                       const ChromeTheme& theme);
 
+// --- the overlay scopes ---------------------------------------------------------
+// The three floating panels: popup, tooltip, modal. All take the same shape
+// as begin_panel - chrome, clip, id scope, layout panel - and add the two
+// things a panel floating OVER other content needs: a LAYER stratum
+// (children draw and claim above base content through the layer rules) and
+// an ESCAPING clip pair (r2d::push_clip_escape and its hit-testing twin,
+// pushed at the same rect like every panel clip: the overlay draws AND
+// hit-tests past the clip of the panel it floats over - a dropdown near its
+// host's edge would shear off and go unclickable there otherwise). All
+// three answer the caller's condition in the bool they return, so the
+// content lives in the caller's `if` branch - and the matching end lives
+// INSIDE that branch, right after the last child: a begin that answered
+// false pushed nothing, and though the layer guard makes a stray end a
+// no-op anyway, the discipline keeps the scopes reading balanced.
+
+// A popup: the floating panel combo dropdowns, context menus and their
+// kin open above base content. `open` is the caller's bool (the caller
+// owns the state, like every widget here); begin_popup returns it back and
+// the content is the caller's `if` branch:
+//
+//     if (button(gui, layout, theme, "menu", 60.0f)) menu_open = !menu_open;
+//     if (begin_popup(gui, layout, theme, "menu", anchor_rect, menu_rect,
+//                     menu_open)) {
+//         if (selectable(gui, layout, theme, "cut", false)) { ... }
+//         end_popup(gui, layout);
+//     }
+//
+// While open the scope pushes: the popup stratum (a full click on a
+// popup child beats whatever sits underneath), the chrome at `bounds`,
+// the escaping clip pair at the bounds, the content clip pair inside it
+// (children nest against the escaped bounds as usual), an id scope under
+// `label`, and a keyless wheel claim at the bounds (begin_panel's eat-
+// not-consume claim: a popup over a scroll panel takes the wheel).
+// `anchor` is the control the popup hangs from: a fresh press that lands
+// outside `bounds` AND outside the anchor closes the popup - `open`
+// flips false and begin_popup returns false on that same frame, so the
+// content vanishes while the press carries on to whatever sits beneath
+// it (the click passes through). A press inside the anchor is NOT a
+// close: that click belongs to the anchor's own widget (a combo row
+// toggles itself). A degenerate `anchor` (a zero rect) hangs from
+// nothing - every press outside the bounds then closes. Touches close
+// it too, per pressed contact. Under a raised modal veil the popup is
+// inert like every lower stratum - its close rule eats no press the
+// veil owns. v1 limits, deliberate: no Escape or focus-loss close (no
+// such events exist), no auto-flip above the anchor when the frame
+// lacks room (the caller places `bounds`), and a press on the popup's
+// own padding - not on a child - falls through to whatever sits beneath
+// (fill-width children leave almost no padding to press).
+bool begin_popup(GuiContext& gui, LayoutCursor& layout,
+                 const ChromeTheme& theme, const char* label,
+                 const Rect& anchor, const Rect& bounds, bool& open);
+// Closes the popup scope begin_popup opened - the caller calls it inside
+// the `if` branch, right after the last child (see the idiom above).
+// Drop-safe through the layer: an end_popup with no popup stratum open (a
+// begin that answered false, a stray call) is a no-op.
+void end_popup(GuiContext& gui, LayoutCursor& layout);
+
+// A tooltip: chrome floating at the tooltip stratum - the panel scope for
+// a hint that hovers above everything else. `show` is the caller's
+// condition (typically an is_hot() check on the widget being explained);
+// the content is the caller's `if` branch, the same idiom as
+// begin_popup's. The scope pushes the tooltip stratum, the chrome at
+// `bounds`, an escaping r2d clip at the bounds (the hint draws past any
+// panel) and an id scope - but NO hit clip, no wheel claim and no open
+// state: a tooltip never claims, never closes on anything, and the widget
+// it hovers over keeps its hot. Nothing inside is meant to be
+// interactive; a caller who puts a live widget in one gets exactly what
+// they asked for (it claims at the tooltip stratum, above everything,
+// unclipped by any hit clip).
+bool begin_tooltip(GuiContext& gui, LayoutCursor& layout,
+                   const ChromeTheme& theme, const char* label,
+                   const Rect& bounds, bool show);
+// Closes the tooltip scope. Drop-safe through the layer, like end_popup.
+void end_tooltip(GuiContext& gui, LayoutCursor& layout);
+
+// A modal dialog: the blocking overlay. `open` is the caller's bool BY
+// VALUE - the modal never closes itself (no outside-press rule: blocking
+// IS the point; the dialog's own buttons flip the caller's bool). While
+// open the scope paints theme.veil over the whole frame - the veil the
+// input rules already enforce, made visible, drawn under its own
+// fullscreen clip escape so it covers the frame even when the modal
+// opens inside a panel scope - and pushes the modal stratum, under
+// which strictly lower strata go inert: no hover, no hot, no fresh
+// press, the wheel dies, the keyboard is trapped (Tab wraps within the
+// modal's own widgets) and the focus stashed at the veil's rise comes
+// back when it lifts (the begin_layer rules - see GuiContext::
+// begin_layer). On top of the veil the scope is a panel like
+// begin_popup's: chrome at `bounds`, the escaping clip pairs, a keyless
+// wheel claim, an id scope. The content and end_modal live in the
+// caller's `if` branch, the same idiom as begin_popup's.
+bool begin_modal(GuiContext& gui, LayoutCursor& layout,
+                 const ChromeTheme& theme, const char* label,
+                 const Rect& bounds, bool open);
+// Closes the modal scope. Drop-safe through the layer, like end_popup -
+// but note the VEIL the scope raised outlives this end: it is frame-wide
+// and lifts at the next begin_frame (see begin_layer).
+void end_modal(GuiContext& gui, LayoutCursor& layout);
+
 }  // namespace ws::ui::gui

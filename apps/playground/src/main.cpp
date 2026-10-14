@@ -71,10 +71,10 @@ constexpr const char* kDefaultFontPath = "C:/Windows/Fonts/segoeui.ttf";
 // fitting the scaled widgets.
 ws::ui::gui::Rect demo_panel_rect(float frame_width, float scale) {
     return {frame_width - 244.0f * scale, 24.0f * scale,
-            220.0f * scale, 176.0f * scale};
+            220.0f * scale, 248.0f * scale};
 }
 ws::ui::gui::Rect pages_panel_rect(float frame_width, float scale) {
-    return {frame_width - 244.0f * scale, 208.0f * scale,
+    return {frame_width - 244.0f * scale, 280.0f * scale,
             220.0f * scale, 220.0f * scale};
 }
 
@@ -87,6 +87,14 @@ ws::ui::gui::Rect sound_panel_rect(float frame_width, float frame_height,
     return {frame_width - 244.0f * scale, frame_height - 152.0f * scale,
             220.0f * scale, 128.0f * scale};
 }
+
+// The demo panel's popup payload: three choices, one tint each - the
+// clip-proof quad at the panel's corner wears the choice, so the menu's
+// effect is visible outside the menu.
+constexpr const char* kMenuItems[] = {"red", "green", "blue"};
+constexpr std::uint32_t kMenuTints[] = {
+    ws::ui::r2d::rgba(232, 80, 60), ws::ui::r2d::rgba(90, 200, 90),
+    ws::ui::r2d::rgba(90, 150, 255)};
 
 // The panel's payload: the wavplayer arpeggio synthesized in place (the
 // SoundDesc path - the engine copies on load), so the demo ships zero
@@ -229,43 +237,90 @@ protected:
         gui_.begin_layer(ws::ui::gui::Layer::base);
         const r2d::FrameSize gui_frame = r2d::frame_size();
 
-        // M7's modal demo, chrome-first: the veil a begin_layer(modal)
-        // raises is FRAME-wide - it starts here, outlives the scope's
-        // end_layer, and lifts at the next begin_frame - so opening it
-        // before the panels below run is what makes them click-dead
-        // under it, on the very frame the modal appears. The dimming
-        // quad is paint, not a widget; the blocking is the LAYER. The
-        // modal stratum (40) sorts this chrome above the base panels
-        // wherever it records, so drawing it first is painter-free.
-        // The panels' "veil" button opens it; "close" reopens the world
-        // (the next frame's begin_frame lifts the veil).
-        if (show_modal_) {
-            gui_.begin_layer(ws::ui::gui::Layer::modal);
-            r2d::draw_quad(0.0f, 0.0f, gui_frame.width, gui_frame.height,
-                           r2d::rgba(0, 0, 0, 140));
-            const ws::ui::gui::Rect veil = ws::ui::gui::begin_panel(
-                gui_, layout_, chrome_, "veil",
+        // M18's modal scope, chrome-first: begin_modal paints the theme's
+        // veil over the whole frame and raises the blocking stratum -
+        // the veil is frame-wide, it starts here, outlives end_modal, and
+        // lifts at the next begin_frame - so opening it before the panels
+        // below run is what makes them click-dead under it, on the very
+        // frame the modal appears. `open` comes BY VALUE: the modal never
+        // closes itself, the dialog's own button flips the caller's bool.
+        // The panels' "veil" button opens it; "close" reopens the world.
+        if (ws::ui::gui::begin_modal(
+                gui_, layout_, chrome_, "confirm",
                 {gui_frame.width * 0.5f - 140.0f * ui_scale_,
                  gui_frame.height * 0.5f - 60.0f * ui_scale_,
-                 280.0f * ui_scale_, 120.0f * ui_scale_});
+                 280.0f * ui_scale_, 120.0f * ui_scale_},
+                show_modal_)) {
+            ws::ui::gui::text(layout_, chrome_, "the modal veil", -1.0f);
             if (ws::ui::gui::button(gui_, layout_, chrome_, "close",
-                                    veil.width)) {
+                                    -1.0f)) {
                 show_modal_ = false;
             }
-            ws::ui::gui::end_panel(gui_, layout_);
-            gui_.end_layer();  // the scope closes; the veil stays up
+            ws::ui::gui::end_modal(gui_, layout_);  // the veil stays up
         }
         const ws::ui::gui::Rect content = ws::ui::gui::begin_panel(
             gui_, layout_, chrome_, "demo",
             demo_panel_rect(gui_frame.width, ui_scale_));
+        // M18's popup demo, the combo idiom in miniature: the menu button
+        // IS the anchor (a press on it while open reaches the button -
+        // the anchor exemption keeps the popup, the caller's own toggle
+        // closes it), the dropdown hangs below it over the rows there,
+        // and the caller places both rects by hand - library-dumb
+        // placement, the arithmetic M19's combo will own. A choice closes
+        // the menu and retints the clip-proof quad at the panel's corner.
+        if (ws::ui::gui::button(gui_, layout_, chrome_, "menu",
+                                120.0f * ui_scale_)) {
+            menu_open_ = !menu_open_;
+        }
+        const ws::ui::gui::Rect menu_anchor{content.x, content.y,
+                                           120.0f * ui_scale_,
+                                           chrome_.control_height};
+        const float menu_h = chrome_.padding * 2.0f +
+                             chrome_.control_height * 3.0f +
+                             chrome_.spacing * 2.0f;
+        const ws::ui::gui::Rect menu_bounds{
+            content.x, content.y + chrome_.control_height,
+            140.0f * ui_scale_, menu_h};
+        if (ws::ui::gui::begin_popup(gui_, layout_, chrome_, "menu",
+                                     menu_anchor, menu_bounds,
+                                     menu_open_)) {
+            for (int i = 0; i < 3; ++i) {
+                gui_.ids().push(i);  // one label, three ids
+                if (ws::ui::gui::selectable(
+                        gui_, layout_, chrome_,
+                        kMenuItems[static_cast<std::size_t>(i)],
+                        menu_choice_ == i, -1.0f)) {
+                    menu_choice_ = i;
+                    menu_open_ = false;  // a choice closes: caller's rule
+                }
+                gui_.ids().pop();
+            }
+            ws::ui::gui::end_popup(gui_, layout_);
+        }
+        const ws::ui::gui::WidgetId clicks_w = gui_.ids().id("clicks");
         if (ws::ui::gui::button(gui_, layout_, chrome_,
                                 "clicks", 120.0f * ui_scale_,
                                 icons_.empty() ? r2d::Sprite{}
                                                : icons_[0])) {
             ++gui_clicks_;
         }
-        // M7's modal demo: opens the blocking veil (drawn before the
-        // panels run, so it latches in time to starve them).
+        // M18's tooltip demo: the hint follows the cursor while the
+        // clicks button is hot - chrome at the tooltip stratum that
+        // claims nothing, so the button beneath keeps its hover and
+        // its clicks.
+        if (ws::ui::gui::begin_tooltip(
+                gui_, layout_, chrome_, "hint",
+                {gui_.input().mouse_x + 14.0f * ui_scale_,
+                 gui_.input().mouse_y + 18.0f * ui_scale_,
+                 150.0f * ui_scale_, chrome_.control_height},
+                gui_.is_hot(clicks_w))) {
+            ws::ui::gui::text(layout_, chrome_, "the click counter",
+                              -1.0f);
+            ws::ui::gui::end_tooltip(gui_, layout_);
+        }
+        // The modal demo's opener: flips the bool begin_modal above reads
+        // next frame (the veil latches then, starving every panel below
+        // it - including this one).
         if (ws::ui::gui::button(gui_, layout_, chrome_, "veil",
                                 120.0f * ui_scale_)) {
             show_modal_ = true;
@@ -283,9 +338,10 @@ protected:
                                   120.0f * ui_scale_);
         // Clip proof: this quad pokes past the panel's bottom-right corner
         // by 40 px each way - the scissor must cut it at the content edge.
+        // Its tint is the popup demo's choice (red/green/blue above).
         r2d::draw_quad(content.x + content.width - 8.0f,
                        content.y + content.height - 8.0f, 48.0f, 48.0f,
-                       r2d::rgba(255, 120, 60));
+                       kMenuTints[static_cast<std::size_t>(menu_choice_)]);
         ws::ui::gui::end_panel(gui_, layout_);
 
         // Phase 9: a tabbed page under the demo panel. The strip selects
@@ -349,10 +405,6 @@ protected:
         // button left the row's right side looking live but click-dead.
         ws::ui::gui::slider_float(gui_, layout_, chrome_, "gain",
                                   audio_gain_, 0.0f, 1.0f, sound.width);
-        ws::ui::gui::slider_float(gui_, layout_, chrome_, "pan",
-                                  audio_pan_, -4.0f, 4.0f, sound.width);
-        ws::ui::gui::end_panel(gui_, layout_);
-
         ws::ui::gui::slider_float(gui_, layout_, chrome_, "pan",
                                   audio_pan_, -4.0f, 4.0f, sound.width);
         ws::ui::gui::end_panel(gui_, layout_);
@@ -659,6 +711,8 @@ private:
     int active_tab_ = 0;           // Phase 9: the page panel's selected tab
     int row_count_ = 16;           // the "list" tab's rows (edited in "tune")
     bool show_modal_ = false;      // M7: the Layer::modal veil demo's open flag
+    bool menu_open_ = false;       // M18: the demo panel's popup menu
+    int menu_choice_ = 0;          // its chosen tint (indexes kMenuTints)
     std::array<bool, 16> rows_{};   // the "list" tab's checkbox states
     // Multi-touch demo state: per-contact breadcrumb trails, the pinch
     // bookkeeping, the text echo buffer. All app-side, the gui contract -
