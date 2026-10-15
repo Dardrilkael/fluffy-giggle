@@ -118,8 +118,9 @@ bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 // (dimmed under a disabled scope, not deadened - the state stays
 // readable, like the checkbox's fill) and the control faces while off.
 // The knob is a near-white circle snapped to its end - off left, on
-// right; no travel animation in v1 (the frame clock's first consumer
-// is the text caret, a later phase). The row auto-sizes to track +
+// right; no travel animation in v1 (the frame clock's first consumer,
+// the text input's caret blink, spends the tick on typing instead).
+// The row auto-sizes to track +
 // spacing + the label's display advance, the hit area covers it whole,
 // the focused row wears the ring, and a begin_disabled scope dims and
 // deadens it as one.
@@ -443,5 +444,41 @@ void end_modal(GuiContext& gui, LayoutCursor& layout);
 bool combo(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
           const char* label, const char* const* items, int count,
           int& selected, bool& open, float width = -1.0f);
+
+// A text input: one editable line in a caller-owned buffer. `buf` is
+// NUL-terminated UTF-8 the caller owns (the house rule - the widget
+// holds no copy), `capacity` counts the NUL, and the answer is true on
+// the frame the text CHANGED (typing, Backspace/Delete, a cut, a
+// paste) - caret and selection moves edit nothing and answer false.
+// v1 edits ASCII 32..126, the font's bake range: typed codepoints
+// outside it drop, a paste filters byte-wise, and bytes already in the
+// buffer outside it sit inert (no advance, no draw - the font skips
+// them). The row wears the button faces with the content left-aligned
+// inside the padding; the label draws as a dimmed placeholder only
+// while the buffer is empty. The caret: a click places it (x to glyph
+// index at the mid-advance), Left/Right/Home/End move it, and it
+// blinks on the frame clock (dt_seconds' first consumer) - solid
+// through every edit and move, half on/half off at rest, hidden while
+// unfocused or under a disabled scope. Selection: Shift extends the
+// arrows/Home/End from the anchor, a press-and-sweep drags it, Ctrl+A
+// takes all, and typing or Backspace/Delete replaces it; Escape
+// clears it. The range draws as the accent band under the text, the
+// selected tab's face. Ctrl+C/X copy/cut the selection and Ctrl+V
+// pastes at the caret through the gui's clipboard seam
+// (GuiContext::set_clipboard; App::install_clipboard wires the
+// platform - an unwired seam, Android today, makes the trio no-ops).
+// Enter is not the widget's to take - a single line has no commit
+// edge, so the caller reads its own: is_focused(ids().id(label)) and
+// key_pressed[keys::kEnter] on the frame after the edit. Tab cycles
+// the focus away like any row's (the field registers focusable);
+// Space types, it does not activate. A line longer than the row
+// truncates with "..." at the right edge (v1 has no horizontal
+// scroll; the caret rides the edge while the keys still edit the
+// hidden tail). A null `buf` or `capacity` under 2 lays the same row
+// inert - nothing to edit, nothing to place. `width` lays the row
+// like a button's (negative = fill the line).
+bool text_input(GuiContext& gui, LayoutCursor& layout,
+                const ChromeTheme& theme, const char* label, char* buf,
+                int capacity, float width = -1.0f);
 
 }  // namespace ws::ui::gui

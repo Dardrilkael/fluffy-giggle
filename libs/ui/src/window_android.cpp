@@ -81,6 +81,7 @@ int glfw_key(int32_t keycode) {
         case AKEYCODE_SHIFT_LEFT: return 340;   // GLFW_KEY_LEFT_SHIFT
         case AKEYCODE_CTRL_LEFT: return 341;    // GLFW_KEY_LEFT_CONTROL
         case AKEYCODE_ALT_LEFT: return 342;     // GLFW_KEY_LEFT_ALT
+        case AKEYCODE_SHIFT_RIGHT: return 344;  // GLFW_KEY_RIGHT_SHIFT
         case AKEYCODE_COMMA: return ',';
         case AKEYCODE_PERIOD: return '.';
         case AKEYCODE_MINUS: return '-';

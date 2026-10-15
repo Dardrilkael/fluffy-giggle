@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <utility>  // std::move - the clipboard pair's install
 
 namespace ws::ui::gui {
 namespace {
@@ -529,6 +530,26 @@ void GuiContext::cancel_pointer(PointerId pointer) {
         }
         track.active = kInvalidWidgetId;  // no click on release
         track.cancelled = true;  // and no hot/press claims until lift
+    }
+}
+
+void GuiContext::set_clipboard(ClipboardGet get, ClipboardSet set) {
+    clipboard_get_ = std::move(get);
+    clipboard_set_ = std::move(set);
+}
+
+const char* GuiContext::get_clipboard_text() const {
+    // An unset seam IS an empty clipboard: the headless answer, and the
+    // one a host with no clipboard wiring keeps.
+    return clipboard_get_ ? clipboard_get_() : nullptr;
+}
+
+void GuiContext::set_clipboard_text(const char* text) {
+    // A null text has nothing to copy; an unset seam has nowhere to put
+    // it. Both drop quietly - the widget's shortcut is a no-op, exactly
+    // what an uninstalled seam promises.
+    if (clipboard_set_ && text != nullptr) {
+        clipboard_set_(text);
     }
 }
 

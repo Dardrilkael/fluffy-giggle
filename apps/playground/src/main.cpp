@@ -71,10 +71,10 @@ constexpr const char* kDefaultFontPath = "C:/Windows/Fonts/segoeui.ttf";
 // fitting the scaled widgets.
 ws::ui::gui::Rect demo_panel_rect(float frame_width, float scale) {
     return {frame_width - 244.0f * scale, 24.0f * scale,
-            220.0f * scale, 280.0f * scale};
+            220.0f * scale, 312.0f * scale};
 }
 ws::ui::gui::Rect pages_panel_rect(float frame_width, float scale) {
-    return {frame_width - 244.0f * scale, 312.0f * scale,
+    return {frame_width - 244.0f * scale, 344.0f * scale,
             220.0f * scale, 220.0f * scale};
 }
 
@@ -159,6 +159,12 @@ protected:
         font_ = ws::ui::r2d::load_font(kDefaultFontPath, 16.0f * ui_scale_);
         chrome_ = ws::ui::gui::kDefaultChrome.scaled(ui_scale_);
         chrome_.font = font_.empty() ? nullptr : &font_;
+        // M20's clipboard seam: the gui's text editing (Ctrl+C/X/V) rides a
+        // host-installed pair - GLFW's on desktop, deliberately unset on
+        // Android (the trio no-ops there, the seam's documented answer).
+        // on_setup is the natural point: the window exists, the gui
+        // context is ours for the app's whole lifetime.
+        install_clipboard(gui_);
         // The sound panel's engine, one for the app's lifetime (the
         // destructor tears it down). A failed device open is degradation,
         // not a dead app: the panel still draws, the play button refuses
@@ -350,6 +356,20 @@ protected:
                                menu_choice_, combo_open_,
                                120.0f * ui_scale_)) {
             menu_open_ = false;  // the choice moved: the menu follows suit
+        }
+        // M20's text input, the widget arc's editing rung: the buffer is the
+        // caller's, the caret/selection state lives in the gui context keyed
+        // by the row's id, and the frame clock spends its tick on the caret
+        // blink. Ctrl+C/X/V ride the clipboard seam install_clipboard wired
+        // at setup. Enter is deliberately not the widget's - the app reads
+        // the focused id plus the key edge itself, so the row below stays
+        // free for a caller rule; here that rule is an echo to the log.
+        (void)ws::ui::gui::text_input(gui_, layout_, chrome_, "name", name_buf_,
+                                      static_cast<int>(sizeof(name_buf_)),
+                                      120.0f * ui_scale_);
+        if (gui_.is_focused(gui_.ids().id("name")) &&
+            gui_.input().key_pressed[ws::ui::gui::keys::kEnter]) {
+            ws::core::info("playground: name \"{}\"", name_buf_);
         }
         // Clip proof: this quad pokes past the panel's bottom-right corner
         // by 40 px each way - the scissor must cut it at the content edge.
@@ -729,6 +749,7 @@ private:
     bool menu_open_ = false;       // M18: the demo panel's popup menu
     int menu_choice_ = 0;          // its chosen tint (indexes kMenuTints)
     bool combo_open_ = false;      // M19: the combo row's dropdown (same tint)
+    char name_buf_[32] = "playground";  // M20: the text input row's buffer
     std::array<bool, 16> rows_{};   // the "list" tab's checkbox states
     // Multi-touch demo state: per-contact breadcrumb trails, the pinch
     // bookkeeping, the text echo buffer. All app-side, the gui contract -

@@ -12,6 +12,7 @@
 
 #include <ws/ui/app.hpp>
 #include <ws/ui/event.hpp>
+#include <ws/ui/gui/gui_context.hpp>
 #include <ws/ui/gui/input_frame.hpp>
 
 #include <volk.h>  // internal header: Vk types appear in the seam signature
@@ -108,6 +109,15 @@ public:
     virtual bool imgui_platform_init() = 0;
     virtual void imgui_platform_new_frame() = 0;
     virtual void imgui_platform_shutdown() = 0;
+
+    // The gui clipboard seam's platform half: pushes this host's
+    // get/set pair onto the app's GuiContext (text_input's Ctrl+C/X/V
+    // ride it; App::install_clipboard is the app-side spelling). The
+    // base default installs nothing - the unset seam, "no clipboard",
+    // which is the honest answer on a host without wiring (Android
+    // today: a JNI hop is a later item) - so a platform opts in by
+    // overriding, like every other capability here.
+    virtual void install_clipboard(gui::GuiContext& gui) { (void)gui; }
 };
 
 // The platform host for this build: window_glfw.cpp on desktop,

@@ -69,9 +69,11 @@ struct PointerView {
 
 // The GLFW key codes the gui itself gives meaning to: Tab cycles focus,
 // Shift+Tab cycles back, Enter and Space activate the focused widget
-// (button, checkbox, tab), and the arrows step the focused slider. Apps
-// keep using raw GLFW numbers for everything else (the arrays in
-// InputFrame are indexed by them); these exist so the gui core and its
+// (button, checkbox, tab), the arrows step the focused slider - and the
+// text input owns the editing cluster: the caret keys, Backspace/Delete,
+// Home/End, Shift held for selection, Ctrl+A/C/V/X over the clipboard
+// seam. Apps keep using raw GLFW numbers for everything else (the arrays
+// in InputFrame are indexed by them); these exist so the gui core and its
 // widgets can never disagree about the spelling of the few keys with
 // built-in behavior.
 namespace keys {
@@ -79,9 +81,27 @@ inline constexpr int kTab = 258;          // GLFW_KEY_TAB
 inline constexpr int kEnter = 257;        // GLFW_KEY_ENTER
 inline constexpr int kSpace = 32;         // GLFW_KEY_SPACE
 inline constexpr int kLeftShift = 340;     // GLFW_KEY_LEFT_SHIFT
-inline constexpr int kRightShift = 341;    // GLFW_KEY_RIGHT_SHIFT
+// 341 is LEFT CONTROL, not the right shift - its own slot is 344 (this
+// was 341 until text input needed the control keys and the collision
+// surfaced; the android key mapper's comments are the numbering's
+// in-tree authority).
+inline constexpr int kRightShift = 344;    // GLFW_KEY_RIGHT_SHIFT
 inline constexpr int kRight = 262;         // GLFW_KEY_RIGHT
 inline constexpr int kLeft = 263;          // GLFW_KEY_LEFT
+// The text input's editing cluster.
+inline constexpr int kBackspace = 259;     // GLFW_KEY_BACKSPACE
+inline constexpr int kDelete = 261;        // GLFW_KEY_DELETE
+inline constexpr int kHome = 268;          // GLFW_KEY_HOME
+inline constexpr int kEnd = 269;           // GLFW_KEY_END
+inline constexpr int kEscape = 256;        // GLFW_KEY_ESCAPE (clears the
+                                           // text input's selection)
+// Ctrl+A selects all; Ctrl+C/X/V ride the clipboard seam.
+inline constexpr int kA = 65;             // GLFW_KEY_A
+inline constexpr int kC = 67;             // GLFW_KEY_C
+inline constexpr int kV = 86;             // GLFW_KEY_V
+inline constexpr int kX = 88;             // GLFW_KEY_X
+inline constexpr int kLeftControl = 341;  // GLFW_KEY_LEFT_CONTROL
+inline constexpr int kRightControl = 345;  // GLFW_KEY_RIGHT_CONTROL
 }  // namespace keys
 
 struct InputFrame {

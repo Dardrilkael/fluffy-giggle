@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <tuple>
@@ -8103,6 +8104,470 @@ TEST_CASE("combo: the keyboard walk - Enter opens Tab reaches the items "
     r.end();
     r.frame_end();
     set_active(nullptr);
+}
+
+// --- M20: the text input --------------------------------------------------------
+
+// The typing/caret tests drive the widget headless like the button
+// suite (its draws land nowhere without a renderer); only the blink
+// test needs the live batch, where the caret's one quad is the
+// observable. The field's id is spelled the way combo's tests spell
+// the row's: a fresh IdStack at the root scope, where the widget ids.
+
+TEST_CASE("text input: typing appends at the caret and answers changed "
+          "only on edit frames") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    char buf[16] = "";
+    bool changed = false;
+    const WidgetId field_w = IdStack{}.id("name");
+    gui.set_focus(field_w);  // the keyboard's own focus, no press needed
+
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        changed = text_input(gui, layout, kDefaultChrome, "name", buf,
+                             static_cast<int>(sizeof(buf)));
+        layout.end_panel();
+        gui.end_frame();
+    };
+
+    // Two codepoints in one frame land in arrival order.
+    InputFrame type = snap(400.0f, 400.0f);
+    type.text_input.push_back('h');
+    type.text_input.push_back('i');
+    pass(type);
+    CHECK(std::strcmp(buf, "hi") == 0);
+    CHECK(changed == true);
+
+    // The quiet frame: no codepoints, no answer - the buffer is not the
+    // change report.
+    pass(snap(400.0f, 400.0f));
+    CHECK(std::strcmp(buf, "hi") == 0);
+    CHECK(changed == false);
+
+    // The caret sat at the end through it all - the next edit appends.
+    InputFrame more = snap(400.0f, 400.0f);
+    more.text_input.push_back('!');
+    pass(more);
+    CHECK(std::strcmp(buf, "hi!") == 0);
+    CHECK(changed == true);
+}
+
+TEST_CASE("text input: backspace and delete edit around the caret") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    char buf[16] = "";
+    bool changed = false;
+    const WidgetId field_w = IdStack{}.id("name");
+    gui.set_focus(field_w);
+
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        changed = text_input(gui, layout, kDefaultChrome, "name", buf,
+                             static_cast<int>(sizeof(buf)));
+        layout.end_panel();
+        gui.end_frame();
+    };
+    const auto key = [&](int code) {
+        InputFrame frame = snap(400.0f, 400.0f);
+        frame.key_pressed[static_cast<std::size_t>(code)] = true;
+        pass(frame);
+    };
+    const auto type = [&](const char* text) {
+        InputFrame frame = snap(400.0f, 400.0f);
+        for (const char* p = text; *p != '\0'; ++p) {
+            frame.text_input.push_back(static_cast<std::uint32_t>(*p));
+        }
+        pass(frame);
+    };
+
+    type("abc");
+    CHECK(std::strcmp(buf, "abc") == 0);
+
+    // Backspace at the end eats the last byte.
+    key(keys::kBackspace);
+    CHECK(std::strcmp(buf, "ab") == 0);
+    CHECK(changed == true);
+
+    // Left once (a caret move edits nothing), then Delete eats the
+    // byte ahead of the caret.
+    key(keys::kLeft);
+    CHECK(changed == false);
+    key(keys::kDelete);
+    CHECK(std::strcmp(buf, "a") == 0);
+    CHECK(changed == true);
+
+    // The two dead ends: Backspace at 0, Delete at the end.
+    key(keys::kHome);
+    key(keys::kBackspace);
+    CHECK(std::strcmp(buf, "a") == 0);
+    CHECK(changed == false);
+    key(keys::kEnd);
+    key(keys::kDelete);
+    CHECK(std::strcmp(buf, "a") == 0);
+    CHECK(changed == false);
+}
+
+TEST_CASE("text input: shift selects typing replaces escape drops it") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    char buf[16] = "";
+    bool changed = false;
+    const WidgetId field_w = IdStack{}.id("name");
+    gui.set_focus(field_w);
+
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        changed = text_input(gui, layout, kDefaultChrome, "name", buf,
+                             static_cast<int>(sizeof(buf)));
+        layout.end_panel();
+        gui.end_frame();
+    };
+    const auto press_key = [&](int code, bool shift, bool ctrl) {
+        InputFrame frame = snap(400.0f, 400.0f);
+        frame.key_pressed[static_cast<std::size_t>(code)] = true;
+        if (shift) {
+            frame.key_down[static_cast<std::size_t>(keys::kLeftShift)] = true;
+        }
+        if (ctrl) {
+            frame.key_down[static_cast<std::size_t>(keys::kLeftControl)] =
+                true;
+        }
+        pass(frame);
+    };
+
+    // "abcd", then Home collapses to byte 0, then Shift+Right twice
+    // sweeps the selection over bytes 0..2 - proven by the replace.
+    InputFrame type = snap(400.0f, 400.0f);
+    for (const char* p = "abcd"; *p != '\0'; ++p) {
+        type.text_input.push_back(static_cast<std::uint32_t>(*p));
+    }
+    pass(type);
+    press_key(keys::kHome, false, false);
+    press_key(keys::kRight, true, false);
+    press_key(keys::kRight, true, false);
+    CHECK(std::strcmp(buf, "abcd") == 0);  // selection edits nothing
+
+    InputFrame replace = snap(400.0f, 400.0f);
+    replace.text_input.push_back('X');
+    pass(replace);
+    CHECK(std::strcmp(buf, "Xcd") == 0);  // the selection died under X
+    CHECK(changed == true);
+
+    // Ctrl+A selects all; typing replaces the whole line.
+    press_key(keys::kA, false, true);
+    InputFrame all = snap(400.0f, 400.0f);
+    all.text_input.push_back('Q');
+    pass(all);
+    CHECK(std::strcmp(buf, "Q") == 0);
+
+    // Ctrl+A again, then Escape drops the selection instead: the next
+    // byte lands at the caret, it does not replace.
+    press_key(keys::kA, false, true);
+    press_key(keys::kEscape, false, false);
+    InputFrame tail = snap(400.0f, 400.0f);
+    tail.text_input.push_back('Z');
+    pass(tail);
+    CHECK(std::strcmp(buf, "QZ") == 0);
+}
+
+TEST_CASE("text input: a click places the caret and a sweep selects") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    char buf[16] = "";
+    bool changed = false;
+    const WidgetId field_w = IdStack{}.id("name");
+    gui.set_focus(field_w);  // typing needs the keyboard first
+
+    // The row lays at (0,0,120,24) - panel padding 0 - so the content
+    // starts at x 12 (the theme's padding) and the fontless estimate
+    // walks 6 px per byte: "abcd" spans 12..36.
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        changed = text_input(gui, layout, kDefaultChrome, "name", buf,
+                             static_cast<int>(sizeof(buf)), 120.0f);
+        layout.end_panel();
+        gui.end_frame();
+    };
+    const auto type = [&](const char* text) {
+        InputFrame frame = snap(400.0f, 400.0f);
+        for (const char* p = text; *p != '\0'; ++p) {
+            frame.text_input.push_back(static_cast<std::uint32_t>(*p));
+        }
+        pass(frame);
+    };
+
+    type("abcd");
+
+    // The click at x 18 is 6 px into the content - past 'a' (12..18) at
+    // its mid-advance (15), into 'b' - so the caret lands at byte 1.
+    // state()'s press edge claims the focus the same frame, so the
+    // press frame places the caret on its own.
+    pass(snap(18.0f, 12.0f, true, true, false));
+    CHECK(gui.is_focused(field_w));
+    type("X");
+    CHECK(std::strcmp(buf, "aXbcd") == 0);
+
+    // The sweep: press at the content's left edge (caret 0), then hold
+    // and travel to x 30 (18 px in - caret 3) without lifting: the
+    // anchor stays at the press, the caret follows the finger, and the
+    // next byte replaces the dragged range. The buffer reads "aXbcd"
+    // now, so bytes 0..3 ("aXb") die under the X.
+    pass(snap(12.0f, 12.0f, true, true, false));  // press: caret 0
+    pass(snap(30.0f, 12.0f, true, false, false));  // held + traveled
+    pass(snap(30.0f, 12.0f, false, false, true));  // lift
+    type("X");
+    CHECK(std::strcmp(buf, "Xcd") == 0);
+}
+
+TEST_CASE("text input: the clipboard trio rides the seam") {
+    using namespace ws::ui::gui;
+    GuiContext gui;  // dies before the strings the seam captures
+    LayoutCursor layout;
+    char buf[16] = "";
+    bool changed = false;
+    std::string clip_src;   // what get answers
+    std::string clip_sink;  // what set received
+    gui.set_clipboard([&]() -> const char* { return clip_src.c_str(); },
+                      [&](const char* t) { clip_sink = t; });
+    const WidgetId field_w = IdStack{}.id("name");
+    gui.set_focus(field_w);
+
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        changed = text_input(gui, layout, kDefaultChrome, "name", buf,
+                             static_cast<int>(sizeof(buf)));
+        layout.end_panel();
+        gui.end_frame();
+    };
+    const auto press_key = [&](int code, bool ctrl) {
+        InputFrame frame = snap(400.0f, 400.0f);
+        frame.key_pressed[static_cast<std::size_t>(code)] = true;
+        if (ctrl) {
+            frame.key_down[static_cast<std::size_t>(keys::kLeftControl)] =
+                true;
+        }
+        pass(frame);
+    };
+    const auto type = [&](const char* text) {
+        InputFrame frame = snap(400.0f, 400.0f);
+        for (const char* p = text; *p != '\0'; ++p) {
+            frame.text_input.push_back(static_cast<std::uint32_t>(*p));
+        }
+        pass(frame);
+    };
+
+    type("hello");
+    press_key(keys::kA, true);      // select all
+    press_key(keys::kC, true);      // copy
+    CHECK(clip_sink == "hello");
+    CHECK(changed == false);        // a copy edits nothing
+    CHECK(std::strcmp(buf, "hello") == 0);
+
+    press_key(keys::kHome, false);  // collapse to 0
+    clip_src = "world";
+    press_key(keys::kV, true);      // paste at the caret
+    CHECK(std::strcmp(buf, "worldhello") == 0);
+    CHECK(changed == true);
+
+    press_key(keys::kA, true);      // select all again
+    press_key(keys::kX, true);      // cut: the copy AND the delete
+    CHECK(clip_sink == "worldhello");
+    CHECK(std::strcmp(buf, "") == 0);
+    CHECK(changed == true);
+
+    // The unwired seam: a fresh context answers null (its own contract)
+    // and the trio no-ops - paste reads nothing, nothing changes.
+    GuiContext bare;
+    CHECK(bare.get_clipboard_text() == nullptr);
+    bare.set_clipboard_text("dropped");  // nowhere to drop it INTO
+    char bare_buf[8] = "";
+    const WidgetId bare_w = IdStack{}.id("name");
+    bare.set_focus(bare_w);
+    InputFrame paste = snap(400.0f, 400.0f);
+    paste.key_pressed[static_cast<std::size_t>(keys::kV)] = true;
+    paste.key_down[static_cast<std::size_t>(keys::kLeftControl)] = true;
+    bare.begin_frame(paste);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!text_input(bare, layout, kDefaultChrome, "name", bare_buf,
+                      static_cast<int>(sizeof(bare_buf))));
+    layout.end_panel();
+    bare.end_frame();
+    CHECK(std::strcmp(bare_buf, "") == 0);
+}
+
+TEST_CASE("text input: capacity bounds the line and inert fields edit "
+          "nothing") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    char buf[4] = "";  // room for 3 bytes + the NUL
+    bool changed = false;
+    const WidgetId field_w = IdStack{}.id("name");
+    gui.set_focus(field_w);
+
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        changed = text_input(gui, layout, kDefaultChrome, "name", buf,
+                             static_cast<int>(sizeof(buf)));
+        layout.end_panel();
+        gui.end_frame();
+    };
+
+    // Four bytes in one frame: the first three land, the fourth finds
+    // the buffer full and the frame's remainder drops.
+    InputFrame flood = snap(400.0f, 400.0f);
+    for (const char* p = "abcd"; *p != '\0'; ++p) {
+        flood.text_input.push_back(static_cast<std::uint32_t>(*p));
+    }
+    pass(flood);
+    CHECK(std::strcmp(buf, "abc") == 0);
+    CHECK(changed == true);
+
+    InputFrame fifth = snap(400.0f, 400.0f);
+    fifth.text_input.push_back('d');
+    pass(fifth);
+    CHECK(std::strcmp(buf, "abc") == 0);  // full is full
+    CHECK(changed == false);
+
+    // A null buffer or a capacity under 2 lays the same row inert -
+    // nothing to crash on, nothing to edit.
+    InputFrame dead = snap(400.0f, 400.0f);
+    dead.text_input.push_back('x');
+    gui.begin_frame(dead);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(!text_input(gui, layout, kDefaultChrome, "null", nullptr, 16));
+    char one[1] = "";
+    CHECK(!text_input(gui, layout, kDefaultChrome, "one", one, 1));
+    layout.end_panel();
+    gui.end_frame();
+}
+
+TEST_CASE("text input: the caret blinks on the frame clock") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    set_active(&r);
+    GuiContext gui;
+    LayoutCursor layout;
+    char buf[8] = "";
+    const WidgetId field_w = IdStack{}.id("name");
+    gui.set_focus(field_w);
+
+    // One full renderer frame per pass, the batch tests' own order: draws
+    // record as commands and only frame_end's replay lays them into the
+    // batch, and frame_begin clears it - so each count below is that
+    // pass's alone. The panel's clip change splits chunks (the replay's
+    // rule), so the observable is the SUM over chunks: the focused empty
+    // field draws ring + face + placeholder + caret while the blink
+    // shows, one quad less while it hides.
+    const auto quads = [&] {
+        std::size_t total = 0;
+        for (std::uint32_t i = 0; i < r.batch().chunk_count(); ++i) {
+            total += r.batch().chunk(i).quad_count;
+        }
+        return total;
+    };
+    const auto pass = [&](float dt) {
+        r.frame_begin(800.0f, 600.0f);
+        r.begin_screen();
+        InputFrame frame = snap(400.0f, 400.0f);
+        frame.dt_seconds = dt;
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        (void)text_input(gui, layout, kDefaultChrome, "name", buf,
+                         static_cast<int>(sizeof(buf)), 120.0f);
+        layout.end_panel();
+        gui.end_frame();
+        r.end();
+        r.frame_end();
+    };
+
+    pass(0.0f);  // arrival: solid, and dt 0 keeps it there
+    const std::size_t solid = quads();
+    pass(0.6f);  // past the half: hidden
+    const std::size_t hidden = quads();
+    pass(0.6f);  // wrapped to 0.2: solid again
+    const std::size_t wrapped = quads();
+
+    // The two solid passes drew the same set; the hidden one drew one
+    // quad less - the caret is the blink's whole visible difference.
+    REQUIRE(solid > 0);
+    CHECK(hidden + 1 == solid);
+    CHECK(wrapped == solid);
+    set_active(nullptr);
+}
+
+TEST_CASE("text input: a begin_disabled scope deadens the field") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    char buf[8] = "";
+    const WidgetId field_w = IdStack{}.id("name");
+    gui.set_focus(field_w);
+
+    // Typing under a disabled scope edits nothing, and the field
+    // cannot even keep the keyboard: state() drops the focus the
+    // frame it sees the lock.
+    InputFrame type = snap(400.0f, 400.0f);
+    type.text_input.push_back('h');
+    gui.begin_frame(type);
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    gui.begin_disabled();
+    CHECK(!text_input(gui, layout, kDefaultChrome, "name", buf,
+                      static_cast<int>(sizeof(buf))));
+    gui.end_disabled();
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(std::strcmp(buf, "") == 0);
+    CHECK(!gui.is_focused(field_w));  // the lock took the keyboard back
+}
+
+TEST_CASE("text input: the v1 filter drops what the font never baked") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    char buf[8] = "";
+    bool changed = false;
+    const WidgetId field_w = IdStack{}.id("name");
+    gui.set_focus(field_w);
+
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        changed = text_input(gui, layout, kDefaultChrome, "name", buf,
+                             static_cast<int>(sizeof(buf)));
+        layout.end_panel();
+        gui.end_frame();
+    };
+
+    // A frame of nothing the bake range answers - U+00E9, a control
+    // code, DEL - plus one honest 'a': only the 'a' lands.
+    InputFrame mixed = snap(400.0f, 400.0f);
+    mixed.text_input.push_back(0x00E9u);  // e-acute: not baked
+    mixed.text_input.push_back(31u);      // a control code
+    mixed.text_input.push_back(127u);     // DEL: one past the range
+    mixed.text_input.push_back('a');
+    pass(mixed);
+    CHECK(std::strcmp(buf, "a") == 0);
+    CHECK(changed == true);
+
+    // A frame of ONLY the unbaked: nothing lands, nothing answers.
+    InputFrame accents = snap(400.0f, 400.0f);
+    accents.text_input.push_back(0x20ACu);  // the euro sign
+    pass(accents);
+    CHECK(std::strcmp(buf, "a") == 0);
+    CHECK(changed == false);
 }
 
 TEST_CASE("utf8 decode covers multibyte codepoints and forgives damage") {

@@ -25,6 +25,10 @@ struct AppConfig {
 class Event;
 class RenderCommandQueue;
 
+namespace gui {
+class GuiContext;  // the clipboard seam's target (installed, never owned)
+}  // namespace gui
+
 // Generic application shell: window + Vulkan context + Dear ImGui (docking)
 // + ImPlot, with a Hazel-style event system and a render command queue.
 // Apps subclass and override on_setup()/on_event()/on_update().
@@ -53,6 +57,13 @@ public:
     // swaps and executes it while recording the frame's command buffer, in
     // submission order. Include <ws/ui/render_command_queue.hpp> to use it.
     RenderCommandQueue& command_queue();
+
+    // Wires the gui's clipboard seam to this app's platform window - the
+    // pair the gui text_input's Ctrl+C/X/V ride. Call once after the
+    // window exists (on_setup() is the natural point); a host with no
+    // clipboard wiring (Android today) leaves the seam unset and the
+    // shortcuts no-op. Include <ws/ui/gui/gui_context.hpp> for the type.
+    void install_clipboard(gui::GuiContext& gui);
 
 protected:
     // Called once after the context and ImGui are ready, before the first

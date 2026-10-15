@@ -7,6 +7,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <typeindex>
@@ -397,6 +398,26 @@ public:
     void clear_persistent_state();
     void clear_persistent_state(WidgetId id);
 
+    // --- the clipboard seam: the gui edits, the host moves the bytes ---
+    // text_input's Ctrl+C/X/V ride this pair; the shell installs the
+    // platform's implementation (App::install_clipboard does the wiring
+    // on desktop - GLFW under the ws types, never named here). An
+    // uninstalled seam is the headless answer: reads return null and
+    // the copy/cut/paste shortcuts do nothing. Both halves speak
+    // NUL-terminated UTF-8; `get`'s answer is platform-owned and valid
+    // until the next clipboard call (null when the clipboard is empty -
+    // glfwGetClipboardString's own contract). Deliberately raw pointers,
+    // not strings: the editing path stays allocation-free while the
+    // widgets read it - the one copy an explicit Ctrl+C makes is the
+    // widget-side buffer it builds that frame.
+    using ClipboardGet = std::function<const char*()>;
+    using ClipboardSet = std::function<void(const char*)>;
+    void set_clipboard(ClipboardGet get, ClipboardSet set);
+    // The widget-side calls. A null seam answers null; a set with no
+    // seam installed drops the text (nothing to drop it INTO).
+    const char* get_clipboard_text() const;
+    void set_clipboard_text(const char* text);
+
     // --- the pieces widget functions receive ---
     IdStack& ids() { return ids_; }
     const InputFrame& input() const { return input_; }
@@ -463,6 +484,10 @@ private:
 
     IdStack ids_;
     InputFrame input_;  // copied in by begin_frame - the frame's snapshot
+
+    // The installed clipboard pair (unset until the shell wires one).
+    ClipboardGet clipboard_get_;
+    ClipboardSet clipboard_set_;
 
     // One pointer's hot/active pair, carried across frames keyed by the
     // pointer's id - that carry IS the drag. Slot 0 is the mouse by

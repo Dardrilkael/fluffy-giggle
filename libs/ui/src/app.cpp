@@ -1989,4 +1989,13 @@ float App::ui_scale() const {
     return impl_->host_ ? impl_->host_->ui_scale() : 1.0f;
 }
 
+void App::install_clipboard(gui::GuiContext& gui) {
+    // Nothing to wire before run() (or after a failed startup) - the
+    // unset seam is the no-clipboard answer, the same one a host
+    // without a clipboard gives.
+    if (impl_->host_) {
+        impl_->host_->install_clipboard(gui);
+    }
+}
+
 }  // namespace ws::ui

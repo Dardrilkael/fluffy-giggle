@@ -324,6 +324,18 @@ public:
 
     void imgui_platform_shutdown() override { ImGui_ImplGlfw_Shutdown(); }
 
+    // The gui clipboard seam, wired to this window: glfwGetClipboardString
+    // returns platform-owned memory valid until the next clipboard call
+    // (the seam's exact contract), and the pair captures the host, so it
+    // dies with the window - before the app's GuiContext can be gone
+    // while the pair still points here, the teardown order guarantees it
+    // (the subclass's members, the context among them, die first).
+    void install_clipboard(gui::GuiContext& gui) override {
+        gui.set_clipboard(
+            [this] { return glfwGetClipboardString(window_); },
+            [this](const char* text) { glfwSetClipboardString(window_, text); });
+    }
+
 private:
     GLFWwindow* window_ = nullptr;
     WindowEventSink* sink_ = nullptr;

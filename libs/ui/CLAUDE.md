@@ -21,7 +21,7 @@ gets a window, an event stream, and a place to submit draw commands —
   with depth-tested billboards, sorted then batched, flushed under the
   widgets.
 - **Immediate-mode gui** — `gui/` headers (`ws::ui::gui`): dependency-free
-  widgets (button/checkbox/slider/panel/tabs/scroll region + the
+  widgets (button/checkbox/slider/panel/tabs/scroll region/text input + the
   popup/tooltip/modal overlay scopes) that draw
   through r2d; caller-owned state, identity + hit-testing + layout + draw
   stay one seam.
@@ -70,13 +70,13 @@ libs/ui/
     renderer2d.hpp           # r2d free functions: Camera2D, quads, lines, sprites, fonts + text
     widgets.hpp               # window/text/button/checkbox/slider/plot_line/...
     gui/                      # the immediate-mode gui module (ws::ui::gui, no ImGui)
-      gui_context.hpp        # GuiContext + HitTest + Layer: input snapshot, per-pointer hot/active, layer scopes + side tables
+      gui_context.hpp        # GuiContext + HitTest + Layer: input snapshot, per-pointer hot/active, layer scopes + side tables + the clipboard seam (host-installed, nullable)
       id_stack.hpp           # WidgetId hashing, the scoped id stack, ScopedId RAII, label_display
-      input_frame.hpp        # InputFrame: one frame's raw input — mouse, keys, dt_seconds clock, multi-touch table; frame_input() getter
+      input_frame.hpp        # InputFrame: one frame's raw input — mouse, keys (the keys:: spellings), dt_seconds clock, multi-touch table; frame_input() getter
       layout_cursor.hpp      # LayoutCursor: flowing layout + panel stack
       rect.hpp                # Rect + its geometry helpers (contains, edges, centers, expand/shrink) — the shared vocabulary
       theme.hpp               # ChromeTheme: every color/metric the widgets use (+ the modal veil face), + the borrowed font
-      widgets.hpp            # button/checkbox/radio/toggle switch/slider/drag float/collapsing header/selectable/combo/panel/tabs/scroll region + the overlay scopes (popup/tooltip/modal) + the statics (text/separator/progress) — the widget functions + fit_text
+      widgets.hpp            # button/checkbox/radio/toggle switch/slider/drag float/collapsing header/selectable/combo/text input/panel/tabs/scroll region + the overlay scopes (popup/tooltip/modal) + the statics (text/separator/progress) — the widget functions + fit_text
   src/
     app.cpp                  # pimpl: Vulkan context, swapchain, frame loop
     atlas_packer.h/.cpp      # pure-CPU shelf packer: atlas pages, sub-rects, gutters
@@ -98,7 +98,7 @@ libs/ui/
     shaders/                  # batch.vert/.frag (GLSL) + spirv.h (committed build input)
     stb_impl.cpp             # sole STB implementation TU (STB_IMAGE + STB_TRUETYPE)
     window.h                 # internal: WindowHost, the platform seam (never reaches apps)
-    window_glfw.cpp          # desktop: GLFW window + all glfwSet*Callback installs (only here)
+    window_glfw.cpp          # desktop: GLFW window + all glfwSet*Callback installs + the clipboard pair (only here)
     window_android.cpp       # Android: NativeActivity pump, multi-touch decode, the bridge feed
     widgets.cpp              # ImGui/ImPlot-backed widget implementations
     vma_impl.cpp             # sole VMA_IMPLEMENTATION translation unit
@@ -607,8 +607,10 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   directional/gamepad nav would extend (register bounds alongside the
   id) — deliberately deferred, not blocked. `keys::` (input_frame.hpp)
   is the spelling of the keys with built-in behavior — Tab, Enter,
-  Space, the shifts, the arrows (kLeft/kRight step the focused slider)
-  — GLFW numbering, so core and widgets can never
+  Space, the shifts, the arrows (kLeft/kRight step the focused slider),
+  the text input's editing cluster (Backspace/Delete, Home/End,
+  Ctrl+A/C/V/X over the clipboard seam) — GLFW numbering, so core and
+  widgets can never
   disagree.
 - **Disabled scopes (M10).** `begin_disabled(condition = true)`/
   `end_disabled()`/`disabled()` — an ambient lock around whatever runs
@@ -746,6 +748,30 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   Tab walk; the items are citizens, so Tab reaches them while the
   dropdown is open and Enter picks; an empty combo lays a bare row and
   never latches its caller's bool open),
+  `text_input`
+  (the widget arc's editing rung: the caller owns the NUL-terminated
+  buffer, `capacity` counts the NUL, and the answer is true on the frame
+  the TEXT changed — caret and selection moves answer false. v1 edits
+  ASCII 32..126, the font bake's range: typed codepoints outside drop,
+  paste filters byte-wise, other bytes sit inert. A click places the
+  caret via the mid-advance walk, a shift-press extends the anchor, a
+  hold sweeps (drag-select); Left/Right/Home/End walk (Shift extends),
+  Ctrl+A selects all, Escape drops the selection, Backspace/Delete
+  erase (before typing when a frame carries both — no arrival order
+  exists), typing REPLACES the selection, a full buffer drops the
+  frame's remainder. Ctrl+C/X copy or cut the selection (the one
+  allocation: a mid-buffer range), Ctrl+V pastes through a two-pass
+  filter — all three over the clipboard seam (`set_clipboard` on
+  GuiContext, wired by `App::install_clipboard`; a null seam no-ops the
+  trio, the headless answer). Enter is NOT the widget's: the caller
+  reads `is_focused(id)` plus the Enter edge. Tab cycles away (the row
+  registers focusable). Long lines truncate with `...` at the right
+  edge, the caret clamped there while keys edit the hidden tail (no
+  horizontal scroll in v1); the caret blink is dt_seconds' first
+  consumer — persistent state keyed by the row id, reset on every
+  edit/move/press/focus-arrival, visible while the phase is under half;
+  a null buffer or capacity < 2 lays the row inert, the empty-combo
+  idiom, and a negative width fills the line),
   `slider_float`/`slider_int`
   (click-to-set and drag are one rule: the owner maps the pointer while
   pressed; kLeft/kRight step the focused one — 1% of the range per
@@ -877,6 +903,11 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   (`ChromeTheme::scaled`), font pixel sizes and panel rects by it for a
   finger-sized gui on a phone; valid from `on_setup()` on, 1.0 before
   `run()`.
+- `install_clipboard(gui::GuiContext&)`: wires the platform clipboard into
+  the gui's editing seam (Ctrl+C/X/V in `text_input`). Call once after the
+  window exists — `on_setup()` is the natural point; desktop (GLFW)
+  installs the real pair, Android today leaves the seam unset and the
+  trio no-ops (the documented headless answer, not an error).
 - `widgets.hpp`: the drawing API for apps — `begin_window`/`end_window`,
   `text`, `button`, `checkbox`, `slider_float`/`slider_int`, `separator`,
   `same_line`, `begin_plot`/`end_plot`/`plot_line`, `show_imgui_demo`/
@@ -903,7 +934,11 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `dt_seconds` (the shell's one write per pump), keys and the
   multi-touch
   table — `touches`/`touch_count`, the platform-facing `touch_*` writers,
-  `gather_pointers`, `pointer_pos`, `bridged_touch`), `LayoutCursor`,
+  `gather_pointers`, `pointer_pos`, `bridged_touch`; the clipboard seam —
+  `set_clipboard(get, set)`/`get_clipboard_text()`/`set_clipboard_text(text)`,
+  a host-installed nullable pair riding raw pointers so the editing path
+  never allocates (null = no clipboard; `App::install_clipboard` wires the
+  desktop host)), `LayoutCursor`,
   `IdStack` (and `ScopedId`, its RAII scope guard) — `id(label)`'s
   `##`/`###` marker semantics, `internal_id(key)` (the reserved
   state-key family) and `label_display(label)` (the display cut) —
@@ -912,7 +947,8 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `clear_persistent_state` (the explicit eviction, by id or wholesale),
   `ChromeTheme`/
   `kDefaultChrome`, and `button`/`checkbox`/`radio`/`toggle_switch`/
-  `collapsing_header`/`selectable`/`combo`/`slider_float`/`slider_int`/
+  `collapsing_header`/`selectable`/`combo`/`text_input`/`slider_float`/
+  `slider_int`/
   `drag_float`/`begin_panel`/`end_panel`/`tab_bar`/
   `begin_scroll_panel`/`end_scroll_panel`, plus the M18 overlay scopes —
   `begin_popup`/`end_popup` (bool& open + anchor/bounds; the
@@ -935,7 +971,9 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `set_focus(id)` (kInvalidWidgetId clears), `nav_next()`/
   `nav_previous()` (queued, resolved at end_frame), the `keys::`
   constants for the built-in key spellings (Tab, Enter, Space, the
-  shifts, the arrows). Disabled scopes: `begin_disabled(condition)`/
+  shifts, the arrows, the text input's editing cluster —
+  Backspace/Delete, Home/End, Ctrl+A/C/V/X). Disabled scopes:
+  `begin_disabled(condition)`/
   `end_disabled()`/`disabled()` — the ambient lock (claims, focus and
   registration withdrawn inside; layer scopes reset it at `begin_layer`
   and restore it at `end_layer`). Hot/active are per pointer:
@@ -1067,7 +1105,9 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `ImGui_ImplAndroid_HandleInputEvent`, whose index-0 following is what
   produced the old stuck-press bug. Android soft-keyboard IME is out of
   scope v1 (NativeActivity `hasCode=false` cannot receive IME commits —
-  revisit when the gui grows a text widget); `TextInputEvent` flows from
+  the M20 text input takes hardware-key taps there and sees no inline
+  composition surface on any platform; soft-IME delivery is the first
+  thing to revisit for it); `TextInputEvent` flows from
   GLFW chars on desktop and hardware-key taps on Android.
 
 ## When implementing new features
