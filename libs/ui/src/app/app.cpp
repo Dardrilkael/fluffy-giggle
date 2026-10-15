@@ -1070,7 +1070,14 @@ struct App::Impl {
         create_info.imageArrayLayers = 1;
         create_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         create_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        create_info.preTransform = caps.currentTransform;
+        // Identity on purpose, on every platform: the app renders upright in
+        // window space and the compositor applies any window rotation at
+        // present time. Android's currentTransform goes non-identity once
+        // the app follows device rotation; mirroring it here would promise
+        // pre-rotated buffers the shell never produces (a sideways image).
+        // The zero-compositor fast path - currentTransform + pre-rotated
+        // content - stays a deliberate future opt-in.
+        create_info.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
         create_info.compositeAlpha = choose_composite_alpha(caps);
         create_info.presentMode = present_mode;
         create_info.clipped = VK_TRUE;
