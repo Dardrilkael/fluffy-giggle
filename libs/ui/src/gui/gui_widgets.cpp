@@ -225,6 +225,32 @@ void draw_label(float x, float row_top, float row_height,
     }
 }
 
+// One row's whole citizenship ladder, in the order the frame contract
+// requires: the fill-width resolve against the cursor, the id from the
+// label (one seam - it keys the hit-test AND any persistent state), the
+// placed rect, the focusable registration BEFORE state() (a press's
+// focus claim reads the registration), then state()'s one hit-test.
+// Every interactive row widget walks these steps in this order; one
+// that begins here cannot get it wrong.
+struct Row {
+    WidgetId id;
+    Rect rect;
+    WidgetResult result;
+};
+
+// The ladder as one call. `width` keeps LayoutCursor's own contract:
+// negative fills the rest of the line; the auto-sized rows (checkbox,
+// radio, toggle) pass their computed width, which the resolve leaves
+// untouched.
+Row begin_row(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
+              const char* label, float width) {
+    resolve_width(width, layout);
+    const WidgetId id = gui.ids().id(label);
+    const Rect rect = layout.next(width, theme.control_height);
+    gui.register_focusable(id);
+    return {id, rect, gui.state(id, rect)};
+}
+
 }  // namespace
 
 // fit_text's body. The display cut first (label_display - "##" id
@@ -311,21 +337,10 @@ LabelFit fit_text(const char* label, float max_width,
 
 bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             const char* label, float width, r2d::Sprite icon) {
-    // Fill-width: a negative width means "the rest of the line" - the one
-    // size the caller cannot know before placing, resolved against the
-    // cursor before the clamp.
-    resolve_width(width, layout);
-
-    // One seam: the id keys the hit-test AND any persistent state; the
-    // rect is layout's answer for this frame; the draws land exactly
-    // where hit-testing says the widget is.
-    const WidgetId id = gui.ids().id(label);
-    const Rect rect = layout.next(width, theme.control_height);
-    // Buttons are focusable: the registration precedes state() (a press's
-    // focus claim reads it), state() runs the one hit-test, and the
-    // keyboard gets its say below.
-    gui.register_focusable(id);
-    const WidgetResult result = gui.state(id, rect);
+    const Row row = begin_row(gui, layout, theme, label, width);
+    const WidgetId id = row.id;
+    const Rect& rect = row.rect;
+    const WidgetResult& result = row.result;
     const HitTest& hit = result.hit;
 
     // Keyboard activation: Enter or Space fires the focused button, like
@@ -379,8 +394,6 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 
 bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
               const char* label, bool& value) {
-    const WidgetId id = gui.ids().id(label);
-
     // The row auto-sizes: box, a gap, the label's DISPLAY advance - the
     // font's measure or the fontless per-char estimate, "##" suffixes
     // cut (they id the row, never size it); never clamped, so a label
@@ -391,13 +404,11 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     char scratch[128];
     const LabelFit fit =
         fit_text(label, -1.0f, theme, scratch, sizeof(scratch));
-    const float label_width = fit.advance;
-    const Rect rect =
-        layout.next(theme.control_height + gap + label_width, theme.control_height);
-    // Full citizenship, like a button: focusable, state() for the one
-    // hit-test plus the face, and the keyboard gets its say below.
-    gui.register_focusable(id);
-    const WidgetResult result = gui.state(id, rect);
+    const Row row = begin_row(gui, layout, theme, label,
+                              theme.control_height + gap + fit.advance);
+    const WidgetId id = row.id;
+    const Rect& rect = row.rect;
+    const WidgetResult& result = row.result;
     const HitTest& hit = result.hit;
 
     // Keyboard toggle: Enter or Space flips the focused checkbox,
@@ -445,22 +456,17 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 
 bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
            const char* label, int& value, int this_option) {
-    const WidgetId id = gui.ids().id(label);
-
     // The row auto-sizes like a checkbox's: dot, a gap, the label's
     // DISPLAY advance ("##" suffixes id the row, never size it).
     const float gap = theme.spacing;
     char scratch[128];
     const LabelFit fit =
         fit_text(label, -1.0f, theme, scratch, sizeof(scratch));
-    const float label_width = fit.advance;
-    const Rect rect =
-        layout.next(theme.control_height + gap + label_width,
-                    theme.control_height);
-    // Full citizenship, like a checkbox: focusable, state() for the one
-    // hit-test plus the face, and the keyboard below.
-    gui.register_focusable(id);
-    const WidgetResult result = gui.state(id, rect);
+    const Row row = begin_row(gui, layout, theme, label,
+                              theme.control_height + gap + fit.advance);
+    const WidgetId id = row.id;
+    const Rect& rect = row.rect;
+    const WidgetResult& result = row.result;
     const HitTest& hit = result.hit;
 
     // Keyboard select: Enter or Space picks the focused radio,
@@ -510,8 +516,6 @@ bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 
 bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
                    const ChromeTheme& theme, const char* label, bool& value) {
-    const WidgetId id = gui.ids().id(label);
-
     // The row auto-sizes like a checkbox's: the pill (twice the height
     // wide, the height tall), a gap, the label's DISPLAY advance.
     const float gap = theme.spacing;
@@ -520,10 +524,11 @@ bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
     char scratch[128];
     const LabelFit fit =
         fit_text(label, -1.0f, theme, scratch, sizeof(scratch));
-    const float label_width = fit.advance;
-    const Rect rect = layout.next(track_w + gap + label_width, box);
-    gui.register_focusable(id);
-    const WidgetResult result = gui.state(id, rect);
+    const Row row = begin_row(gui, layout, theme, label,
+                              track_w + gap + fit.advance);
+    const WidgetId id = row.id;
+    const Rect& rect = row.rect;
+    const WidgetResult& result = row.result;
     const HitTest& hit = result.hit;
 
     // Keyboard toggle: Enter or Space flips the focused switch,
@@ -576,15 +581,11 @@ bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
 bool collapsing_header(GuiContext& gui, LayoutCursor& layout,
                        const ChromeTheme& theme, const char* label,
                        bool& open, float width) {
-    // Fill-width, like button: a header wants its container's line.
-    resolve_width(width, layout);
-
-    const WidgetId id = gui.ids().id(label);
-    const Rect rect = layout.next(width, theme.control_height);
-    // Full citizenship, like a checkbox: focusable, state() for the one
-    // hit-test plus the face, and the keyboard below.
-    gui.register_focusable(id);
-    const WidgetResult result = gui.state(id, rect);
+    // Fill-width: a header wants its container's line.
+    const Row row = begin_row(gui, layout, theme, label, width);
+    const WidgetId id = row.id;
+    const Rect& rect = row.rect;
+    const WidgetResult& result = row.result;
     const HitTest& hit = result.hit;
 
     // Keyboard toggle: Enter or Space flips the focused header,
@@ -639,13 +640,11 @@ bool collapsing_header(GuiContext& gui, LayoutCursor& layout,
 
 bool selectable(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
                const char* label, bool selected, float width) {
-    // Fill-width, like button: list rows want their container's line.
-    resolve_width(width, layout);
-
-    const WidgetId id = gui.ids().id(label);
-    const Rect rect = layout.next(width, theme.control_height);
-    gui.register_focusable(id);
-    const WidgetResult result = gui.state(id, rect);
+    // Fill-width: list rows want their container's line.
+    const Row row = begin_row(gui, layout, theme, label, width);
+    const WidgetId id = row.id;
+    const Rect& rect = row.rect;
+    const WidgetResult& result = row.result;
     const HitTest& hit = result.hit;
 
     // Keyboard select: Enter or Space reports the focused row, edge-only
@@ -748,20 +747,16 @@ namespace {
 
 // The body both sliders share: they differ only in the keyboard step
 // (1% of the range for a float, 1 for an int), which rides through here
-// so the public pair keeps its signatures. Citizenship lives here once:
-// focusable, state() for the one hit-test plus the face, the arrows step
-// the focused slider, and the disabled look dims the fill, the handle
-// and the label as one.
+// so the public pair keeps its signatures. The citizenship ladder rides
+// begin_row like every row widget; the arrows step the focused slider,
+// and the disabled look dims the fill, the handle and the label as one.
 bool slider_impl(GuiContext& gui, LayoutCursor& layout,
                  const ChromeTheme& theme, const char* label, float& value,
                  float min, float max, float width, float key_step) {
-    // Fill-width, like button: a negative width fills the rest of the
-    // line before the clamp keeps the draw sane.
-    resolve_width(width, layout);
-    const WidgetId id = gui.ids().id(label);
-    const Rect rect = layout.next(width, theme.control_height);
-    gui.register_focusable(id);
-    const WidgetResult result = gui.state(id, rect);
+    const Row row = begin_row(gui, layout, theme, label, width);
+    const WidgetId id = row.id;
+    const Rect& rect = row.rect;
+    const WidgetResult& result = row.result;
     const HitTest& hit = result.hit;
 
     // Click-to-set and drag are one rule: while this slider owns the
@@ -884,13 +879,10 @@ bool slider_int(GuiContext& gui, LayoutCursor& layout,
 bool drag_float(GuiContext& gui, LayoutCursor& layout,
                const ChromeTheme& theme, const char* label, float& value,
                float min, float max, float speed, float width) {
-    // Fill-width, like button: a negative width fills the rest of the
-    // line before the clamp keeps the draw sane.
-    resolve_width(width, layout);
-    const WidgetId id = gui.ids().id(label);
-    const Rect rect = layout.next(width, theme.control_height);
-    gui.register_focusable(id);
-    const WidgetResult result = gui.state(id, rect);
+    const Row row = begin_row(gui, layout, theme, label, width);
+    const WidgetId id = row.id;
+    const Rect& rect = row.rect;
+    const WidgetResult& result = row.result;
     const HitTest& hit = result.hit;
 
     // The anchor: persistent state under the widget id, so the grab
@@ -1591,15 +1583,10 @@ void end_modal(GuiContext& gui, LayoutCursor& layout) {
 bool combo(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
            const char* label, const char* const* items, int count,
            int& selected, bool& open, float width) {
-    // Fill-width, like button: a combo row wants its container's line.
-    resolve_width(width, layout);
-
-    const WidgetId id = gui.ids().id(label);
-    const Rect rect = layout.next(width, theme.control_height);
-    // Full citizenship, like every row widget: focusable, state() for the
-    // one hit-test plus the faces.
-    gui.register_focusable(id);
-    const WidgetResult result = gui.state(id, rect);
+    const Row row = begin_row(gui, layout, theme, label, width);
+    const WidgetId id = row.id;
+    const Rect& rect = row.rect;
+    const WidgetResult& result = row.result;
     const HitTest& hit = result.hit;
 
     // The empty combo: nothing to choose, nothing to open - a bare row
@@ -1730,13 +1717,10 @@ bool combo(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 bool text_input(GuiContext& gui, LayoutCursor& layout,
                 const ChromeTheme& theme, const char* label, char* buf,
                 int capacity, float width) {
-    // Fill-width, like button: a negative width fills the rest of the
-    // line before the clamp keeps the draw sane.
-    resolve_width(width, layout);
-    const WidgetId id = gui.ids().id(label);
-    const Rect rect = layout.next(width, theme.control_height);
-    gui.register_focusable(id);
-    const WidgetResult result = gui.state(id, rect);
+    const Row row = begin_row(gui, layout, theme, label, width);
+    const WidgetId id = row.id;
+    const Rect& rect = row.rect;
+    const WidgetResult& result = row.result;
     const HitTest& hit = result.hit;
     TextInputState& edit = gui.persistent_state<TextInputState>(id);
 
