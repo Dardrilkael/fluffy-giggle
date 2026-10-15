@@ -215,7 +215,9 @@ third-party).
   so the scissor still gets its own chunk with zero reordering (M5).
   Within one layer/block the replay is the exact submission order —
   real painter's order. `set_layer()` is the explicit z escape hatch that
-  outranks the key.
+  outranks the key; the layer is frame-scoped like the clip stack
+  (`frame_begin`/`frame_drop` reset it to 0, so re-establish it each
+  frame — the gui's `begin_layer` scopes already do).
 - **Clip stack.** `push_clip(x, y, w, h)` pushes a framebuffer-space rect
   (top-left origin, screen space even inside camera blocks); draws snapshot
   the active clip, nesting intersects at push time, and the stack empties

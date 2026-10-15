@@ -115,8 +115,10 @@ void begin(const Camera3D& camera);
 void end();
 
 // Sorts all subsequent draws into `layer` (default 0). Higher layers draw
-// later - on top - regardless of submission order or camera block. Sticky:
-// stays until the next set_layer(), across frames. The gui's layer strata
+// later - on top - regardless of submission order or camera block.
+// Frame-scoped like the clip stack: frame boundaries reset it to 0, so a
+// scope that wants a layer re-establishes it each frame (the gui's
+// begin_layer/end_layer pairs already do). The gui's layer strata
 // (ws/ui/gui: Layer, 10..40) are values in this same space, driven by
 // GuiContext::begin_layer - one numbering, both sides.
 void set_layer(std::uint32_t layer);

@@ -279,7 +279,7 @@ private:
     // VP frame_end() builds. Set by every begin(), never read without an
     // open block (camera_stashed_ gates that).
     bool current_perspective_ = false;
-    std::uint32_t current_layer_ = 0;  // sticky across frames until set_layer()
+    std::uint32_t current_layer_ = 0;  // frame-scoped: reset with the clips
     std::uint32_t current_epoch_ = 0;  // bumped by every begin()
     // Clip stack state: one level = one {x, y, w, h} rect. Overflow keeps
     // push/pop balanced (depth counts on, the slot stops deepening), the

@@ -80,6 +80,12 @@ VkRect2D chunk_scissor(const batch::Chunk& chunk, float fb_width,
     const float top = std::clamp(chunk.clip[1], 0.0f, fb_height);
     const float right = std::clamp(chunk.clip[0] + chunk.clip[2], 0.0f, fb_width);
     const float bottom = std::clamp(chunk.clip[1] + chunk.clip[3], 0.0f, fb_height);
+    // Empty after clamping: report a zero extent BEFORE the outward rounding
+    // below, which would otherwise widen e.g. [10.5, 10.5) into a 1 px
+    // sliver and leak draws through a "clip everything" scope.
+    if (right <= left || bottom <= top) {
+        return VkRect2D{};
+    }
     VkRect2D rect{};
     rect.offset.x = static_cast<int32_t>(left);
     rect.offset.y = static_cast<int32_t>(top);
@@ -98,6 +104,7 @@ void Renderer2D::frame_begin(float fb_width, float fb_height) {
     batch_.begin_frame();
     commands_.clear();  // capacity kept - the frame reuses the arena
     current_epoch_ = 0;
+    current_layer_ = 0;  // layers never leak across frames either
     camera_stashed_ = false;
     current_perspective_ = false;
     clip_depth_ = 0;  // clips never leak across frames
@@ -179,6 +186,7 @@ void Renderer2D::frame_drop() {
     frame_active_ = false;
     camera_stashed_ = false;
     current_perspective_ = false;
+    current_layer_ = 0;
     clip_depth_ = 0;
     commands_.clear();
     batch_.begin_frame();
@@ -366,11 +374,24 @@ bool Renderer2D::reload_pipelines() {
     // frame-slot fences): flush() bound draws through the pipelines being
     // destroyed. Render-pass compatibility means the same render_pass_ is
     // still the right rebake input.
-    vkDestroyPipeline(device_, pipeline_, nullptr);
-    vkDestroyPipeline(device_, pipeline_3d_, nullptr);
+    // Build the replacements BEFORE touching the live pipelines: a shader
+    // typo during hot reload must keep the last good pipelines rendering.
+    // create_pipeline writes the members and nulls them on failure, so park
+    // the old handles and restore them if the rebuild fails.
+    const VkPipeline old_2d = pipeline_;
+    const VkPipeline old_3d = pipeline_3d_;
     pipeline_ = VK_NULL_HANDLE;
     pipeline_3d_ = VK_NULL_HANDLE;
-    return create_pipeline(render_pass_);
+    if (!create_pipeline(render_pass_)) {
+        pipeline_ = old_2d;
+        pipeline_3d_ = old_3d;
+        ws::core::warn("ui: r2d pipeline reload failed - keeping the "
+                       "previous pipelines");
+        return false;
+    }
+    vkDestroyPipeline(device_, old_2d, nullptr);  // null-tolerated
+    vkDestroyPipeline(device_, old_3d, nullptr);
+    return true;
 }
 
 void Renderer2D::shutdown() {
@@ -396,6 +417,12 @@ void Renderer2D::shutdown() {
         vmaDestroyImage(allocator_, entry.image, entry.allocation);
     }
     textures_.clear();
+    // Registry-derived state dies with the registry: after a re-init the old
+    // page ids would resolve to rects of unrelated textures.
+    atlas_pages_.clear();
+    rounded_texture_ = Texture{};
+    table_full_warned_ = false;
+    clip_overflow_warned_ = false;
     if (set_layout_ != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(device_, set_layout_, nullptr);
         set_layout_ = VK_NULL_HANDLE;
