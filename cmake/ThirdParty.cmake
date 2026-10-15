@@ -30,8 +30,9 @@ if(NOT ANDROID)
 endif()
 
 # GLFW is the DESKTOP windowing platform. Android renders to the OS-owned
-# ANativeWindow (native_app_glue; see libs/ui/src/window_android.cpp), so
-# the fetch - and the target - simply do not exist there. Everything that
+# ANativeWindow (native_app_glue; see
+# libs/ui/src/platform/window_android.cpp), so the fetch - and the target -
+# simply do not exist there. Everything that
 # references glfw is desktop-only as well: the imgui platform backend below
 # and ws_ui's link list in libs/ui/CMakeLists.txt.
 if(NOT ANDROID)

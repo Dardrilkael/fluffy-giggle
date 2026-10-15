@@ -8,7 +8,7 @@
 // purpose: apps resolve these symbols through the ws_ui archive, so a
 // consumer compiling against the headers also proves the library links.
 
-#include "gui.h"
+#include "gui/gui.h"
 
 namespace ws::ui::gui {
 namespace {

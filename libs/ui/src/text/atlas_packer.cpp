@@ -1,4 +1,4 @@
-#include "atlas_packer.h"
+#include "text/atlas_packer.h"
 
 #include <algorithm>
 #include <numeric>

@@ -5,7 +5,7 @@
 #include <ws/ui/gui/layout_cursor.hpp>
 
 #include <ws/core/log.hpp>
-#include "gui.h"  // detail::panel_overflow_warned - reset_warn_once()'s seam
+#include "gui/gui.h"  // detail::panel_overflow_warned - reset_warn_once()'s seam
 
 #include <algorithm>
 

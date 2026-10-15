@@ -16,7 +16,7 @@
 // message and keeps the last good words - a dev iteration tool must never
 // crash the app or hand Vulkan a null module.
 
-#include "shaders/spirv.h"
+#include "render/shaders/spirv.h"
 
 #include <cstdint>
 #include <string>

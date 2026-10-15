@@ -3,7 +3,7 @@
 // no Vulkan, no renderer state, no platform headers - bake_file takes a
 // caller-resolved path, so this TU builds and runs anywhere.
 
-#include "font.h"
+#include "text/font.h"
 
 #if defined(_MSC_VER)
 #pragma warning(push, 0)

@@ -1,4 +1,4 @@
-# Regenerates libs/ui/src/shaders/spirv.h from the .vert/.frag files next to
+# Regenerates libs/ui/src/render/shaders/spirv.h from the .vert/.frag files next to
 # it. MANUAL by design: the committed SPIR-V arrays are the build input - the
 # build itself needs no Vulkan SDK and no shader compiler. Run this only when
 # a shader changes.
@@ -44,7 +44,7 @@ $ErrorActionPreference = "Stop"
 $pinnedGlslang = "16.6.0"
 
 $repo = Split-Path -Parent $PSScriptRoot
-$shaderDir = Join-Path $repo "libs\ui\src\shaders"
+$shaderDir = Join-Path $repo "libs\ui\src\render\shaders"
 $repoHeader = Join-Path $shaderDir "spirv.h"
 if ($OutFile -eq "") { $OutFile = $repoHeader }
 $tmp = New-Item -ItemType Directory -Path (Join-Path $env:TEMP "ws-shaders") -Force

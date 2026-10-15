@@ -5,17 +5,18 @@
 ws_add_library(ui DEPENDS ws::core ws::math)
 
 # Platform sources: exactly one windowing TU builds (the WindowHost seam,
-# src/window.h). The glob picks up both; drop the one this platform does not
+# src/platform/window.h). The glob picks up both; drop the one this platform
+# does not
 # use - a mis-filter fails loudly (the wrong TU's platform includes are
 # absent), so it can never silently double-compile.
 get_target_property(ui_sources ws_ui SOURCES)
 if(ui_sources)
   if(ANDROID)
     list(REMOVE_ITEM ui_sources
-      "${CMAKE_CURRENT_SOURCE_DIR}/src/window_glfw.cpp")
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/window_glfw.cpp")
   else()
     list(REMOVE_ITEM ui_sources
-      "${CMAKE_CURRENT_SOURCE_DIR}/src/window_android.cpp")
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/window_android.cpp")
   endif()
   set_target_properties(ws_ui PROPERTIES SOURCES "${ui_sources}")
 endif()
@@ -26,7 +27,8 @@ endif()
 # forward these targets to the final link, so symbols resolve.
 if(ANDROID)
   target_link_libraries(ws_ui PRIVATE imgui implot volk vma stb android log)
-  # native_app_glue headers for src/window_android.cpp (its .c lands in the
+  # native_app_glue headers for src/platform/window_android.cpp (its .c
+  # lands in the
   # app module in A2; the header-only usage here is enough for the seam).
   target_include_directories(ws_ui PRIVATE
     "${ANDROID_NDK}/sources/android/native_app_glue")

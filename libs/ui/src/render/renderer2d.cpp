@@ -1,4 +1,4 @@
-#include "renderer2d.h"
+#include "render/renderer2d.h"
 
 #include <algorithm>
 #include <array>
@@ -6,9 +6,9 @@
 #include <cstddef>
 #include <cstring>
 
-#include "font.h"
-#include "rounded_texture.h"
-#include "shader_provider.h"
+#include "text/font.h"
+#include "render/rounded_texture.h"
+#include "render/shader_provider.h"
 
 #if defined(_MSC_VER)
 #pragma warning(push, 0)

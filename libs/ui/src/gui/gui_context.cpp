@@ -8,7 +8,7 @@
 #include <ws/core/log.hpp>
 #include <ws/ui/renderer2d.hpp>  // begin_layer drives r2d::set_layer - the
                                  // "one layer concept" is a real coupling
-#include "gui.h"  // detail::id/panel_overflow_warned - the reset seam
+#include "gui/gui.h"  // detail::id/panel_overflow_warned - the reset seam
 
 #include <algorithm>
 #include <array>

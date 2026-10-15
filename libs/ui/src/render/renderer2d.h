@@ -9,8 +9,8 @@
 // in record order. The Vulkan half extends this class in
 // src/renderer2d.cpp and flushes that batch inside the render pass.
 
-#include "atlas_packer.h"
-#include "batch_core.h"
+#include "text/atlas_packer.h"
+#include "render/batch_core.h"
 
 #include <array>
 #include <cfloat>

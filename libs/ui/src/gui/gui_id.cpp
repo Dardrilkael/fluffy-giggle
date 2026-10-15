@@ -6,7 +6,7 @@
 #include <ws/ui/gui/id_stack.hpp>
 
 #include <ws/core/log.hpp>
-#include "gui.h"  // detail::id_overflow_warned - reset_warn_once()'s seam
+#include "gui/gui.h"  // detail::id_overflow_warned - reset_warn_once()'s seam
 
 #include <algorithm>
 #include <array>

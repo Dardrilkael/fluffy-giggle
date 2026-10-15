@@ -28,10 +28,10 @@
 
 #include <ws/core/log.hpp>
 
-#include "gui.h"
-#include "renderer2d.h"
-#include "shader_provider.h"
-#include "window.h"
+#include "gui/gui.h"
+#include "render/renderer2d.h"
+#include "render/shader_provider.h"
+#include "platform/window.h"
 
 #include <volk.h>  // meta-loader: every vk* symbol below is a volk global
 
@@ -1375,7 +1375,7 @@ struct App::Impl {
     // relative: apps already rely on CWD-relative asset paths, and the
     // reload option is desktop-debug-only (configure-time gated), so the
     // dev runs from the workspace root as always.
-    static const char* shader_dir() { return "libs/ui/src/shaders"; }
+    static const char* shader_dir() { return "libs/ui/src/render/shaders"; }
 
     bool recreate_swapchain() {
         int fb_width = 0;

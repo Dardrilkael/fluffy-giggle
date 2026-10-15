@@ -19,7 +19,7 @@
 // sees it, not at (0,0)); the cursor leaving clears it, and the gui's
 // pointer list drops the mouse that frame.
 
-#include "window.h"
+#include "platform/window.h"
 
 #include <ws/core/log.hpp>
 

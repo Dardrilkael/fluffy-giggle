@@ -1,4 +1,4 @@
-#include "shader_provider.h"
+#include "render/shader_provider.h"
 
 #ifdef WS_UI_DEV_SHADER_RELOAD
 

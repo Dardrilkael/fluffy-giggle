@@ -11,11 +11,11 @@
 #include <utility>
 #include <vector>
 
-#include "atlas_packer.h"  // internal: pure-CPU atlas packer (src/ on the test include path)
-#include "batch_core.h"     // internal: pure-CPU batch builder (same path)
-#include "font.h"           // internal: pure-CPU font bake + utf8 decoder (same path)
-#include "renderer2d.h"     // internal: command recording + sort/replay (same path)
-#include "rounded_texture.h"  // internal: the builtin rounded-rect mask bake (same path)
+#include "text/atlas_packer.h"  // internal: pure-CPU atlas packer (src/ on the test include path)
+#include "render/batch_core.h"     // internal: pure-CPU batch builder (same path)
+#include "text/font.h"           // internal: pure-CPU font bake + utf8 decoder (same path)
+#include "render/renderer2d.h"     // internal: command recording + sort/replay (same path)
+#include "render/rounded_texture.h"  // internal: the builtin rounded-rect mask bake (same path)
 #include <ws/ui/app.hpp>
 #include <ws/ui/event.hpp>
 #include <ws/ui/gui/gui_context.hpp>  // must stay includable without any third-party header

@@ -19,7 +19,7 @@
 // refusal through the backend, the same ordering desktop gets from the
 // GLFW backend's callback chaining.
 
-#include "window.h"
+#include "platform/window.h"
 
 #include <cstddef>  // std::size_t - the OS pointer indices
 
