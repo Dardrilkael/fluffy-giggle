@@ -85,9 +85,10 @@ libs/ui/
       window_glfw.cpp        # desktop: GLFW window + all glfwSet*Callback installs + the clipboard pair (only here)
       window_android.cpp     # Android: NativeActivity pump, multi-touch decode, the bridge feed
     gfx/                     # the Vulkan device-side implementation TUs
+      renderer2d_device.cpp  # r2d's Vulkan half: init/shutdown, pipelines, frame-slot arenas + descriptor tables, texture upload, flush
       vma_impl.cpp           # sole VMA_IMPLEMENTATION translation unit
     render/                  # the r2d renderer + its pure-CPU core + the shaders
-      renderer2d.h/.cpp      # r2d engine: command sort/replay + Vulkan flush
+      renderer2d.h/.cpp      # r2d engine: command recording + sort/replay - the CPU half (the Vulkan half is gfx/renderer2d_device.cpp)
       batch_core.h/.cpp      # pure-CPU batch: chunks, camera VP, geometry (no Vulkan)
       shader_provider.h/.cpp # pipeline shader words: committed spirv.h, or hot
                              # reload when WS_UI_DEV_SHADER_RELOAD (dev only)

@@ -7,7 +7,8 @@
 // begin() block (stable, so same-layer draws never flip) - and replays
 // them into the batch, splitting a fresh chunk wherever the clip changes
 // in record order. The Vulkan half extends this class in
-// src/render/renderer2d.cpp and flushes that batch inside the render pass.
+// src/gfx/renderer2d_device.cpp (the stage-2 split) and flushes that
+// batch inside the render pass.
 
 #include "text/atlas_packer.h"
 #include "render/batch_core.h"
