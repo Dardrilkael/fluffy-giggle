@@ -1667,8 +1667,7 @@ bool begin_tooltip(GuiContext& gui, LayoutCursor& layout,
     gui.begin_layer(Layer::tooltip);
     r2d::push_clip_escape(bounds.x, bounds.y, bounds.width, bounds.height);
     panel_chrome(bounds, theme);
-    const Rect content =
-        layout.begin_panel(bounds, theme.padding, theme.spacing);
+    layout.begin_panel(bounds, theme.padding, theme.spacing);
     gui.ids().push(label);
     return show;
 }
