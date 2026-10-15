@@ -1,7 +1,7 @@
 // Internal to ws::ui - never visible to apps or other libs. This header is
-// the windowing-platform seam: the shell (src/app.cpp) talks to the window
+// the windowing-platform seam: the shell (src/app/app.cpp) talks to the window
 // system ONLY through WindowHost, and exactly one implementation compiles
-// per platform - src/window_glfw.cpp on desktop, src/window_android.cpp on
+// per platform - src/platform/window_glfw.cpp on desktop, src/platform/window_android.cpp on
 // Android (native_app_glue). GLFW's C callback surface and Android's
 // AInputEvent/lifecycle translation both live behind it.
 #pragma once

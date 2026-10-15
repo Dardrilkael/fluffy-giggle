@@ -7,7 +7,7 @@
 // begin() block (stable, so same-layer draws never flip) - and replays
 // them into the batch, splitting a fresh chunk wherever the clip changes
 // in record order. The Vulkan half extends this class in
-// src/renderer2d.cpp and flushes that batch inside the render pass.
+// src/render/renderer2d.cpp and flushes that batch inside the render pass.
 
 #include "text/atlas_packer.h"
 #include "render/batch_core.h"
@@ -193,7 +193,7 @@ public:
     // - exactly Font::measure_text's answer, by construction.
     float draw_text(float x, float y, const char* utf8_text,
                     const Font& font, std::uint32_t color = 0xFFFFFFFFu);
-    // Bakes a font (src/font.*, pure CPU) and uploads its glyph pages -
+    // Bakes a font (src/text/font.*, pure CPU) and uploads its glyph pages -
     // the font's OWN pages, never shared with load_atlas. The loaders'
     // failure contract: warn once, return an empty Font.
     Font load_font(const char* path, float pixel_height);

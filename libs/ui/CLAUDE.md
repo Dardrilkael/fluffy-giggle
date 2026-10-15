@@ -46,16 +46,16 @@ This is the single most important architectural constraint of this library.
   `include/` — apps and other libs include `ws/` headers only. `Event`,
   `EventDispatcher`, and `RenderCommandQueue` are plain `ws::ui` types with
   no third-party types in their signatures.
-- All GLFW/Vulkan/ImGui state lives behind a pimpl (`src/app.cpp`,
-  `src/window_glfw.cpp`/`src/window_android.cpp`) — Vk*/GLFW types never
+- All GLFW/Vulkan/ImGui state lives behind a pimpl (`src/app/app.cpp`,
+  `src/platform/window_glfw.cpp`/`src/platform/window_android.cpp`) — Vk*/GLFW types never
   appear in public headers, ever.
 - GLFW callback functions are `static`, file-local functions in
-  `src/window_glfw.cpp` — never declared or forward-declared in a header.
+  `src/platform/window_glfw.cpp` — never declared or forward-declared in a header.
   This is the *only* place GLFW's C callback surface exists.
 - Before adding any public API, check: *could a consumer compile this
   header without Vulkan/GLFW/ImGui installed?* If not, it's a leak — fix it
   before merging.
-- `widgets.hpp` wraps ImGui/ImPlot calls in `src/widgets.cpp`; when an app
+- `widgets.hpp` wraps ImGui/ImPlot calls in `src/widgets/widgets.cpp`; when an app
   needs one more widget, add it there instead of exposing a third-party
   header.
 
@@ -77,31 +77,37 @@ libs/ui/
       rect.hpp                # Rect + its geometry helpers (contains, edges, centers, expand/shrink) — the shared vocabulary
       theme.hpp               # ChromeTheme: every color/metric the widgets use (+ the modal veil face), + the borrowed font
       widgets.hpp            # button/checkbox/radio/toggle switch/slider/drag float/collapsing header/selectable/combo/text input/panel/tabs/scroll region + the overlay scopes (popup/tooltip/modal) + the statics (text/separator/progress) — the widget functions + fit_text
-  src/
-    app.cpp                  # pimpl: Vulkan context, swapchain, frame loop
-    atlas_packer.h/.cpp      # pure-CPU shelf packer: atlas pages, sub-rects, gutters
-    batch_core.h/.cpp        # pure-CPU batch: chunks, camera VP, geometry (no Vulkan)
-    font.h/.cpp              # stb_truetype bake: ASCII 32..126 glyphs, white-RGBA
+  src/                       # layer folders - the cut lines for a future split into shared libs
+    app/                     # the shell itself
+      app.cpp                # pimpl: Vulkan context, swapchain, frame loop
+    platform/                # the windowing seam - exactly one window TU builds per platform
+      window.h               # internal: WindowHost, the platform seam (never reaches apps)
+      window_glfw.cpp        # desktop: GLFW window + all glfwSet*Callback installs + the clipboard pair (only here)
+      window_android.cpp     # Android: NativeActivity pump, multi-touch decode, the bridge feed
+    gfx/                     # the Vulkan device-side implementation TUs
+      vma_impl.cpp           # sole VMA_IMPLEMENTATION translation unit
+    render/                  # the r2d renderer + its pure-CPU core + the shaders
+      renderer2d.h/.cpp      # r2d engine: command sort/replay + Vulkan flush
+      batch_core.h/.cpp      # pure-CPU batch: chunks, camera VP, geometry (no Vulkan)
+      shader_provider.h/.cpp # pipeline shader words: committed spirv.h, or hot
+                             # reload when WS_UI_DEV_SHADER_RELOAD (dev only)
+      rounded_texture.h/.cpp # pure-CPU bake of the builtin rounded-rect mask
+      shaders/               # batch.vert/.frag (GLSL) + spirv.h (committed build input)
+    text/                    # the glyph bake + the atlas packer
+      font.h/.cpp            # stb_truetype bake: ASCII 32..126 glyphs, white-RGBA
                              #  coverage, forgiving utf8_next (pure CPU, no renderer state)
-    gui.h                    # internal: set_active_input - the shell points frame_input() at its InputFrame; the warn-once reset seam
-    gui/                     # the gui module's out-of-line bodies, one concern per file:
+      atlas_packer.h/.cpp    # pure-CPU shelf packer: atlas pages, sub-rects, gutters
+      stb_impl.cpp           # sole STB implementation TU (STB_IMAGE + STB_TRUETYPE)
+    gui/                     # the immediate-mode gui - internal seam + out-of-line bodies, one concern per file:
+      gui.h                  # internal: set_active_input - the shell points frame_input() at its InputFrame; the warn-once reset seam
       gui.cpp                # shell glue: frame_input()'s live accumulator tap
       gui_context.cpp        # GuiContext: per-pointer hot/active hit-testing, layer scopes + side tables
       gui_id.cpp             # IdStack: FNV-1a scope-path hashing - the label/index/reserved families
       gui_input.cpp          # InputFrame: touch table + the primary-touch -> mouse bridge
       gui_layout.cpp         # LayoutCursor: stacked flow panels
       gui_widgets.cpp        # the widget functions' bodies (lay out, hit-test, draw) + fit_text
-    renderer2d.h/.cpp        # r2d engine: command sort/replay + Vulkan flush
-    rounded_texture.h/.cpp   # pure-CPU bake of the builtin rounded-rect mask
-    shader_provider.h/.cpp   # pipeline shader words: committed spirv.h, or hot
-                             # reload when WS_UI_DEV_SHADER_RELOAD (dev only)
-    shaders/                  # batch.vert/.frag (GLSL) + spirv.h (committed build input)
-    stb_impl.cpp             # sole STB implementation TU (STB_IMAGE + STB_TRUETYPE)
-    window.h                 # internal: WindowHost, the platform seam (never reaches apps)
-    window_glfw.cpp          # desktop: GLFW window + all glfwSet*Callback installs + the clipboard pair (only here)
-    window_android.cpp       # Android: NativeActivity pump, multi-touch decode, the bridge feed
-    widgets.cpp              # ImGui/ImPlot-backed widget implementations
-    vma_impl.cpp             # sole VMA_IMPLEMENTATION translation unit
+    widgets/                 # the ImGui/ImPlot wrapper layer behind widgets.hpp
+      widgets.cpp            # ImGui/ImPlot-backed widget implementations
   tests/
 ```
 
@@ -135,8 +141,8 @@ void on_event(ws::ui::Event& e) override {
   `glfwSetKeyCallback`, `glfwSetMouseButtonCallback`,
   `glfwSetCursorPosCallback`, `glfwSetCursorEnterCallback`,
   `glfwSetScrollCallback`, `glfwSetWindowCloseCallback`) once, in
-  `src/window_glfw.cpp` (Android's counterpart is the NativeActivity pump
-  in `src/window_android.cpp`).
+  `src/platform/window_glfw.cpp` (Android's counterpart is the NativeActivity pump
+  in `src/platform/window_android.cpp`).
   Every callback
   builds the matching `Event` and forwards it to a single
   `std::function<void(Event&)>` stored on the window. Zero-size resize
@@ -304,7 +310,7 @@ third-party).
   is a known future cost: right for a Windows-only tool today, and the
   first thing to revisit if Android ever becomes real.
 - **Rounded quads.** `draw_rounded_quad` 9-slices a builtin 32×32 mask
-  texture (`src/rounded_texture.*`, baked analytically: one-texel coverage
+  texture (`src/render/rounded_texture.*`, baked analytically: one-texel coverage
   antialiasing across the corner arcs, RGB white — shape rides in alpha, so
   the vertex tint supplies the color). Uploaded at GPU init, right after
   white; the four corner slices scale the baked 8 px arcs to the requested
@@ -362,7 +368,7 @@ third-party).
   Image-count drift rebuilds nothing either — the renderer's vertex and
   index arenas and descriptor sets are keyed by frame slot (grown only at
   that slot's idle flush), and swapchain-independent by construction.
-- **Shader workflow** (M4). `src/shaders/spirv.h` is generated by
+- **Shader workflow** (M4). `src/render/shaders/spirv.h` is generated by
   `tools/compile_shaders.ps1` and committed — the ImGui-backend pattern;
   the default build needs no shader compiler, and that stays true for
   every option below. The flags and the header format live in the script
@@ -393,7 +399,7 @@ third-party).
     `glslang-16.6.0-windows-x86_64-release.zip` from the KhronosGroup
     glslang GitHub release 16.6.0, unzipped into `%TEMP%\glslang-16.6.0`.
   - Dev hot reload (`WS_UI_DEV_SHADER_RELOAD=ON`, default OFF, Debug +
-    desktop only — configure fails otherwise): `src/shader_provider.*`
+    desktop only — configure fails otherwise): `src/render/shader_provider.*`
     polls the GLSL mtimes each frame and, on change, recompiles with
     glslang (same flags/resolution), validates the SPIR-V magic word,
     and rebakes the pipelines once every frame slot's fence is waited (the
@@ -1020,7 +1026,7 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   (`vkEnumerateInstanceVersion`) so a 1.1+ device is reachable at all.
   The tier logs one `core::info` line at startup (the smoke marker) and
   is fixed for the process.
-- VMA's implementation TU is `src/vma_impl.cpp` (dynamic function loading;
+- VMA's implementation TU is `src/gfx/vma_impl.cpp` (dynamic function loading;
   the two loader entry points are handed over from `app.cpp` via
   `VmaAllocatorCreateInfo::pVulkanFunctions` since VMA 3.2 requires it) —
   exactly one `VMA_IMPLEMENTATION` TU in the workspace. The allocator is

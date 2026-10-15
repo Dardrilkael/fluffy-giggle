@@ -1,4 +1,4 @@
-// The desktop half of the platform seam (see src/window.h): GLFW owns the
+// The desktop half of the platform seam (see src/platform/window.h): GLFW owns the
 // window, this TU owns GLFW. The only place GLFW's C callback surface
 // exists; each callback builds the matching ws::ui::Event and hands it to
 // the shell's single forwarder; the same callbacks also tap raw input into
@@ -10,7 +10,7 @@
 // ours at the top of each of its own, BEFORE its io updates - so when our
 // callback runs, io does not yet reflect the current event. io.WantCapture*
 // still answers correctly because those flags were recomputed at the last
-// NewFrame (see imgui_wants() in src/app.cpp). WindowSize and WindowClose
+// NewFrame (see imgui_wants() in src/app/app.cpp). WindowSize and WindowClose
 // are ours alone - the backend installs neither.
 //
 // The cursor callbacks also own InputFrame::mouse_present - the gui's

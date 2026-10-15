@@ -1,4 +1,4 @@
-// The Android half of the platform seam (see src/window.h). The ws shell
+// The Android half of the platform seam (see src/platform/window.h). The ws shell
 // runs on the thread native_app_glue entered android_main() on; the OS owns
 // the window - it hands the ANativeWindow over at APP_CMD_INIT_WINDOW and
 // takes it back at APP_CMD_TERM_WINDOW - so "window ready" is a runtime

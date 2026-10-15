@@ -92,7 +92,7 @@ if(NOT ANDROID AND WIN32)
 endif()
 
 # Dev-only shader hot reload: an internal provider recompiles the GLSL at
-# frame boundaries (see src/shader_provider.*). Declared unconditionally
+# frame boundaries (see src/render/shader_provider.*). Declared unconditionally
 # so an ON value is CHECKED on every platform (Android and Release both
 # refuse it at configure time); the define is desktop-debug-only. Default
 # OFF - the default build keeps rendering from the committed spirv.h and

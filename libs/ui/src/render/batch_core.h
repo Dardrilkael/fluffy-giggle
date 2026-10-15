@@ -2,7 +2,7 @@
 
 // Internal: pure-CPU batch builder (2D + the 3D camera math) - no Vulkan,
 // no third-party, fully unit-testable headless. The GPU side
-// (src/renderer2d.*) drains the chunks this builds, in creation order, at
+// (src/render/renderer2d.*) drains the chunks this builds, in creation order, at
 // one fixed point per frame. Never include this from include/ws/ui/.
 
 #include <cfloat>

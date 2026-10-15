@@ -10,7 +10,7 @@ namespace ws::ui {
 // on_update() only. Label/name/title parameters are null-terminated C strings
 // (like ImGui's); text() is the exception and takes arbitrary string data.
 //
-// Missing a wrapper you need? Add a one-liner in src/widgets.cpp rather
+// Missing a wrapper you need? Add a one-liner in src/widgets/widgets.cpp rather
 // than including <imgui.h> from app code.
 
 // --- windows ------------------------------------------------------------------

@@ -2,7 +2,7 @@
 //
 // All platform/Vulkan state lives behind App::Impl. This file is
 // windowing-agnostic: it talks to the OS only through the WindowHost seam
-// (src/window.h - window_glfw.cpp on desktop, window_android.cpp on
+// (src/platform/window.h - window_glfw.cpp on desktop, window_android.cpp on
 // Android), and no GLFW/Android symbol appears here. The public header
 // exposes no third-party types on purpose: apps subclass App and react to
 // events / draw via on_setup()/on_event()/on_update().
@@ -199,7 +199,7 @@ struct App::Impl {
 
     AppConfig config;
 
-    // The windowing platform behind the seam (src/window.h): GLFW on
+    // The windowing platform behind the seam (src/platform/window.h): GLFW on
     // desktop, native_app_glue on Android. Window interactions below go
     // through it; no GLFW/Android symbol appears in this file.
     std::unique_ptr<WindowHost> host_;
@@ -275,7 +275,7 @@ struct App::Impl {
     bool viewport_style_set = false;
 
     // --- event system -------------------------------------------------------
-    // Platform callbacks (src/window_glfw.cpp / src/window_android.cpp)
+    // Platform callbacks (src/platform/window_glfw.cpp / src/platform/window_android.cpp)
     // funnel every event through the sink;
     // forward_event() pre-marks ImGui-consumed input, queues the rest and
     // coalesces mouse-move/scroll/touch-move per frame (move keeps the
@@ -316,7 +316,7 @@ struct App::Impl {
 
     // --- gui library --------------------------------------------------------
     // One input snapshot per frame, filled by the platform callbacks' raw
-    // tap (src/window_glfw.cpp / src/window_android.cpp, through
+    // tap (src/platform/window_glfw.cpp / src/platform/window_android.cpp, through
     // WindowEventSink::input). main_loop clears
     // the per-frame edges at the top of each iteration; on_update reads
     // the snapshot through ws::ui::gui::frame_input() for the duration of
@@ -921,7 +921,7 @@ struct App::Impl {
 
     bool create_allocator() {
         // VMA fetches every other function at runtime through these two
-        // (VMA_DYNAMIC_VULKAN_FUNCTIONS, see src/vma_impl.cpp) - since 3.2 they
+        // (VMA_DYNAMIC_VULKAN_FUNCTIONS, see src/gfx/vma_impl.cpp) - since 3.2 they
         // must be handed over explicitly; VMA no longer picks up the globals
         // by itself. Create the allocator only after volkLoadInstance and
         // volkLoadDevice have filled the pointers.

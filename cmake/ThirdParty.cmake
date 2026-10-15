@@ -157,7 +157,7 @@ target_include_directories(eigen3 SYSTEM INTERFACE "${eigen_SOURCE_DIR}")
 
 # --- stb (header-only; stb_image decodes textures for libs/ui's 2D renderer) --
 # The STB_IMAGE_IMPLEMENTATION translation unit lives in libs/ui
-# (src/stb_impl.cpp) - the same one-TU rule as VMA's.
+# (src/text/stb_impl.cpp) - the same one-TU rule as VMA's.
 add_library(stb INTERFACE)
 add_library(stb::stb ALIAS stb)
 target_include_directories(stb SYSTEM INTERFACE "${stb_SOURCE_DIR}")

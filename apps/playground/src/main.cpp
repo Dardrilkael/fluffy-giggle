@@ -34,7 +34,7 @@
 
 #ifdef __ANDROID__
 // NDK headers are C - keep them clear of our -Wpedantic settings (the same
-// wrap src/window_android.cpp uses).
+// wrap src/platform/window_android.cpp uses).
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Weverything"
