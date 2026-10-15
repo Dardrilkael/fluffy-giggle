@@ -4,7 +4,7 @@
 // mouse bridge the writers maintain. Pure CPU, no platform headers - the
 // tests drive it headless.
 
-#include <ws/ui/gui/input_frame.hpp>
+#include <ws/ui/input.hpp>
 
 #include <algorithm>
 #include <array>

@@ -1,8 +1,8 @@
 #pragma once
 
 #include <ws/ui/gui/id_stack.hpp>
-#include <ws/ui/gui/input_frame.hpp>
 #include <ws/ui/gui/rect.hpp>
+#include <ws/ui/input.hpp>
 
 #include <array>
 #include <cstddef>

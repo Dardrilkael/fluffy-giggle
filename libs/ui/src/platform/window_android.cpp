@@ -375,7 +375,7 @@ private:
     // Every contact the OS reports decodes into the gui frame's touch
     // table, keyed by its stable per-contact id, and into the app Touch*
     // events. The touch_* writers own the table AND the primary-touch ->
-    // mouse bridge (see gui/input_frame.hpp); this side only observes
+    // mouse bridge (see <ws/ui/input.hpp>); this side only observes
     // bridged_touch() to emit the bridge's Mouse* events and io feed -
     // exactly the pair the old single-finger path produced, for whichever
     // contact currently holds the bridge. Without a gui tap there is no

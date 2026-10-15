@@ -66,13 +66,13 @@ libs/ui/
   include/ws/ui/
     app.hpp                 # App, AppConfig — PUBLIC, zero third-party includes
     event.hpp                # Event, EventType, typed events, EventDispatcher
+    input.hpp                # InputFrame: one frame's raw input — mouse, keys (the keys:: spellings), dt_seconds clock, multi-touch table; frame_input(). Events + the snapshot under one GLFW-free header (the future ws::input surface)
     render_command_queue.hpp # RenderCommandQueue
     renderer2d.hpp           # r2d free functions: Camera2D, quads, lines, sprites, fonts + text
     widgets.hpp               # window/text/button/checkbox/slider/plot_line/...
     gui/                      # the immediate-mode gui module (ws::ui::gui, no ImGui)
       gui_context.hpp        # GuiContext + HitTest + Layer: input snapshot, per-pointer hot/active, layer scopes + side tables + the clipboard seam (host-installed, nullable)
       id_stack.hpp           # WidgetId hashing, the scoped id stack, ScopedId RAII, label_display
-      input_frame.hpp        # InputFrame: one frame's raw input — mouse, keys (the keys:: spellings), dt_seconds clock, multi-touch table; frame_input() getter
       layout_cursor.hpp      # LayoutCursor: flowing layout + panel stack
       rect.hpp                # Rect + its geometry helpers (contains, edges, centers, expand/shrink) — the shared vocabulary
       theme.hpp               # ChromeTheme: every color/metric the widgets use (+ the modal veil face), + the borrowed font
@@ -613,7 +613,7 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   registration caps at `kMaxFocusables` = 128 with the
   census's warn-once degrade; the registration-order list is the seam a
   directional/gamepad nav would extend (register bounds alongside the
-  id) — deliberately deferred, not blocked. `keys::` (input_frame.hpp)
+  id) — deliberately deferred, not blocked. `keys::` (input.hpp)
   is the spelling of the keys with built-in behavior — Tab, Enter,
   Space, the shifts, the arrows (kLeft/kRight step the focused slider),
   the text input's editing cluster (Backspace/Delete, Home/End,

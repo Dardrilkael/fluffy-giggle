@@ -20,11 +20,11 @@
 #include <ws/ui/event.hpp>
 #include <ws/ui/gui/gui_context.hpp>  // must stay includable without any third-party header
 #include <ws/ui/gui/id_stack.hpp>      // (same - one include line per header proves each parses alone)
-#include <ws/ui/gui/input_frame.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
 #include <ws/ui/gui/rect.hpp>
 #include <ws/ui/gui/theme.hpp>  // (same - the stock chrome parses headless)
 #include <ws/ui/gui/widgets.hpp>  // (same - proves the widget layer parses headless)
+#include <ws/ui/input.hpp>
 #include <ws/ui/render_command_queue.hpp>
 #include <ws/ui/renderer2d.hpp>  // must stay includable without any third-party header
 #include <ws/ui/widgets.hpp>  // must stay includable without any third-party header

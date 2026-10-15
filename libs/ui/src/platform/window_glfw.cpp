@@ -4,7 +4,7 @@
 // the shell's single forwarder; the same callbacks also tap raw input into
 // the gui library's InputFrame (WindowEventSink::input) - a second,
 // deliberately unfiltered consumer, since the gui library hit-tests for
-// itself (see <ws/ui/gui/input_frame.hpp>).
+// itself (see <ws/ui/input.hpp>).
 //
 // ImGui's GLFW backend installs its own callbacks over ours and chains to
 // ours at the top of each of its own, BEFORE its io updates - so when our

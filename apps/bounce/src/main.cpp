@@ -48,11 +48,11 @@
 #include <ws/physics/2d/world.hpp>
 #include <ws/ui/app.hpp>
 #include <ws/ui/gui/gui_context.hpp>
-#include <ws/ui/gui/input_frame.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
 #include <ws/ui/gui/rect.hpp>
 #include <ws/ui/gui/theme.hpp>
 #include <ws/ui/gui/widgets.hpp>
+#include <ws/ui/input.hpp>
 #include <ws/ui/renderer2d.hpp>
 
 namespace {

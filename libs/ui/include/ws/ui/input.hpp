@@ -1,5 +1,16 @@
 #pragma once
 
+// The input surface, gathered under one GLFW-free header: the event types
+// (event.hpp, included so this one header is the whole story) plus the
+// raw-input snapshot the platform layer fills from physical input. Nothing
+// here needs GLFW or Android to compile or link - the shell's platform TUs
+// are the only writers of an InputFrame, key/mouse codes are GLFW's
+// numbering carried as plain ints (the events' rule), and the gui only
+// READS the result. The namespace stays ws::ui::gui for now: renaming rides
+// this family's promotion to ws::input, not this header move.
+
+#include <ws/ui/event.hpp>
+
 #include <array>
 #include <cstdint>
 #include <vector>
@@ -106,7 +117,7 @@ inline constexpr int kC = 67;             // GLFW_KEY_C
 inline constexpr int kV = 86;             // GLFW_KEY_V
 inline constexpr int kX = 88;             // GLFW_KEY_X
 inline constexpr int kLeftControl = 341;  // GLFW_KEY_LEFT_CONTROL
-inline constexpr int kRightControl = 345;  // GLFW_KEY_RIGHT_CONTROL
+inline constexpr int kRightControl = 345; // GLFW_KEY_RIGHT_CONTROL
 }  // namespace keys
 
 struct InputFrame {
