@@ -885,7 +885,15 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   chrome, not input surfaces.
 - Everything tests headless (r2d draws drop without a window): the widget
   suite lives in `tests/test_ui.cpp` and runs with the rest via
-  `ctest --preset debug -R ui`. `apps/playground` carries the full
+  `ctest --preset debug -R ui` — which since stage 2 matches two tests,
+  because the gui TUs build into their own `ws_ui_gui` archive (it links
+  ONLY `ws::core`; `ws_ui` links it in PRIVATE, so apps see no change)
+  and `tests/test_ui_gui.cpp` is the acceptance target: it links that
+  archive with a recording stub for the r2d free-function seam
+  (`tests/ui_gui_r2d_stub.cpp`) plus the real pure-CPU font bake — no
+  Vulkan, GLFW, volk or vma anywhere on its link line. A gui that grows
+  a renderer- or platform-side dependency breaks that link by name.
+  `apps/playground` carries the full
   composition demo plus the Phase 10 "net inspector" screen — a
   feedforward net drawn in the world layer, driven live by a gui panel —
   and the multi-touch demo: pointer-id-colored trails under every
