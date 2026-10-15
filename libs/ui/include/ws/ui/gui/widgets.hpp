@@ -481,4 +481,61 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
                 const ChromeTheme& theme, const char* label, char* buf,
                 int capacity, float width = -1.0f);
 
+// One column of a table: the header text and the width policy. A width
+// above zero is fixed pixels; zero or negative STRETCHES - the column
+// shares equally with the other stretch columns whatever width the fixed
+// columns leave, clamped at zero (fixed columns win first; a squeezed
+// table never lays a backwards cell). `label` is the header cell's text;
+// null lays an empty header cell.
+struct TableColumn {
+    const char* label = nullptr;
+    float width = 0.0f;
+};
+
+// A table: the widget arc's grid rung - ONE call lays a header strip, a
+// 2-px rule under it (the separator's own look) and `row_count`
+// contiguous rows of text cells, all as one slot in the parent's flow.
+// `cells` is row-major - `cells[row * column_count + column]`, the
+// combo's items discipline: the caller owns the strings and
+// re-describes them every frame; a null cell is an empty one. Column
+// widths clamp the CELLS to the table's own right edge - a fixed set
+// that sums past the width never paints outside the rect.
+//
+// `label` ids the table and never draws - the header row is the visible
+// labeling, and the rows id under it (push(label), push(index)), so the
+// same grid works anywhere and two tables differ by label like any
+// widget. The table keeps NO context state of its own: the selection is
+// the caller's int, and the scroll is the caller's scroll panel - a
+// table taller than its panel simply flows (the scroll panel's clips
+// hide and unclaim whatever scrolls out; v1 culls nothing, every row
+// records).
+//
+// `selected` is what makes the table interactive: full citizenship per
+// row, selectable's exact look - the bare list (no idle face), the
+// hover and press faces, the 3-px accent bar on the selected row, the
+// 1px focus ring on the focused one. Each row registers focusable in
+// row order (Tab walks the grid top-down), Enter/Space pick the focused
+// row, Up/Down step the focused row clamped at the grid's ends (the
+// slider's arrow rule - Tab's wrap belongs to the screen, not the
+// grid), and a pick that MOVED the selection writes `*selected` and
+// answers true - the radio's idempotence: a re-pick on the current row
+// answers false and writes nothing. A NULL `selected` lays the same
+// grid display-only: no ids, no claims, no registrations - the
+// statics' "cannot interact with you" spelled by the pointer, like the
+// clipboard seam's null answer.
+//
+// `width` lays the whole table like a button's (negative = fill the
+// line). A table with no columns lays a bare slot and pretends nothing
+// (the empty combo's rule); one with no rows draws its header alone -
+// the empty dataset's honest look. v1 limits, deliberate: cells are
+// TEXT (the compositional table - a scope whose cells hold live
+// widgets - is a future shape, not this one), every cell
+// left-aligned, no sorting, resizing, reordering or zebra striping
+// (the bare-list look reads on its hover faces), and the header is
+// chrome - a header click claims nothing (sorting's future seam).
+bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
+           const char* label, const TableColumn* columns, int column_count,
+           const char* const* cells, int row_count,
+           int* selected = nullptr, float width = -1.0f);
+
 }  // namespace ws::ui::gui

@@ -69,7 +69,8 @@ struct PointerView {
 
 // The GLFW key codes the gui itself gives meaning to: Tab cycles focus,
 // Shift+Tab cycles back, Enter and Space activate the focused widget
-// (button, checkbox, tab), the arrows step the focused slider - and the
+// (button, checkbox, tab), the horizontal arrows step the focused
+// slider, the vertical arrows step the focused table row - and the
 // text input owns the editing cluster: the caret keys, Backspace/Delete,
 // Home/End, Shift held for selection, Ctrl+A/C/V/X over the clipboard
 // seam. Apps keep using raw GLFW numbers for everything else (the arrays
@@ -88,6 +89,10 @@ inline constexpr int kLeftShift = 340;     // GLFW_KEY_LEFT_SHIFT
 inline constexpr int kRightShift = 344;    // GLFW_KEY_RIGHT_SHIFT
 inline constexpr int kRight = 262;         // GLFW_KEY_RIGHT
 inline constexpr int kLeft = 263;          // GLFW_KEY_LEFT
+inline constexpr int kDown = 264;          // GLFW_KEY_DOWN (steps the
+                                           // focused table row one down)
+inline constexpr int kUp = 265;            // GLFW_KEY_UP (steps the focused
+                                           // table row one up)
 // The text input's editing cluster.
 inline constexpr int kBackspace = 259;     // GLFW_KEY_BACKSPACE
 inline constexpr int kDelete = 261;        // GLFW_KEY_DELETE

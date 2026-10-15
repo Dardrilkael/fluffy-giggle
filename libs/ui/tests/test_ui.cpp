@@ -8570,6 +8570,395 @@ TEST_CASE("text input: the v1 filter drops what the font never baked") {
     CHECK(changed == false);
 }
 
+// --- M21: the table ---------------------------------------------------------
+
+// The grid tests drive the widget headless like the combo suite; only
+// the draw test needs the live batch, where the quad sums are the
+// observable (the blink test's own order: one full renderer frame per
+// pass, the sum over chunks - the clip change splits them). The row
+// ids spell the way combo's tests spell its items': the table's label
+// pushed as a scope, then the row index.
+
+TEST_CASE("table: a click picks the row and only a move answers true") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    static const TableColumn kCols[3] = {
+        {"name", 100.0f}, {"value", 0.0f}, {"note", 60.0f}};
+    static const char* kCells[9] = {
+        "alpha", "1", "a", "beta", "2", "b", "gamma", "3", "c"};
+    int selected = 1;
+    bool changed = false;
+
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        changed = table(gui, layout, kDefaultChrome, "grid", kCols, 3,
+                        kCells, 3, &selected, 300.0f);
+        layout.end_panel();
+        gui.end_frame();
+    };
+
+    // The table lays at (0,0,300,98): header 24, a 2-px rule, then rows
+    // at y 26/50/74 - centers 38/62/86. A click on row 1's center is a
+    // re-pick on the already-selected row: picked, but no move.
+    pass(snap(150.0f, 62.0f, false, true, true));
+    CHECK(selected == 1);
+    CHECK(changed == false);
+
+    // A click on row 0 moves the selection and answers true.
+    pass(snap(150.0f, 38.0f, false, true, true));
+    CHECK(selected == 0);
+    CHECK(changed == true);
+
+    // And again: the radio's idempotence.
+    pass(snap(150.0f, 38.0f, false, true, true));
+    CHECK(selected == 0);
+    CHECK(changed == false);
+
+    // A click past the grid's bottom (y > 98, still inside the panel)
+    // claims nothing - the rows end where the table does.
+    pass(snap(150.0f, 130.0f, false, true, true));
+    CHECK(selected == 0);
+    CHECK(changed == false);
+    CHECK(gui.hot_id() == kInvalidWidgetId);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("table: the keyboard walk - tab reaches rows up down step "
+          "enter picks") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    static const TableColumn kCols[3] = {
+        {"name", 100.0f}, {"value", 0.0f}, {"note", 60.0f}};
+    static const char* kCells[9] = {
+        "alpha", "1", "a", "beta", "2", "b", "gamma", "3", "c"};
+    int selected = 1;
+    bool changed = false;
+    // The rows id under the table's label, then by index - the combo's
+    // item discipline, spelled the way its tests spell the items'.
+    IdStack row_ids;
+    row_ids.push("grid");
+    const auto row_w = [&](int i) {
+        row_ids.push(i);
+        const WidgetId w = row_ids.id("row");
+        row_ids.pop();
+        return w;
+    };
+
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        changed = table(gui, layout, kDefaultChrome, "grid", kCols, 3,
+                        kCells, 3, &selected, 300.0f);
+        layout.end_panel();
+        gui.end_frame();
+    };
+
+    // A press on row 2 takes the focus at the press edge and picks it.
+    pass(snap(150.0f, 86.0f, false, true, true));
+    CHECK(selected == 2);
+    CHECK(gui.is_focused(row_w(2)));
+
+    // Up steps the focused row one - the focus moves, the selection does
+    // not (two concepts, the focus rules' own distinction).
+    InputFrame up = snap(400.0f, 400.0f);
+    up.key_pressed[keys::kUp] = true;
+    pass(up);
+    CHECK(gui.is_focused(row_w(1)));
+    CHECK(selected == 2);
+
+    // Enter picks the focused row: the move answers true.
+    InputFrame enter = snap(400.0f, 400.0f);
+    enter.key_pressed[keys::kEnter] = true;
+    pass(enter);
+    CHECK(selected == 1);
+    CHECK(changed == true);
+
+    // Down from row 1 lands on row 2, then clamps at the grid's end -
+    // the slider's arrow rule, no wrap (Tab's wrap is the screen's).
+    InputFrame down = snap(400.0f, 400.0f);
+    down.key_pressed[keys::kDown] = true;
+    pass(down);
+    CHECK(gui.is_focused(row_w(2)));
+    pass(down);
+    CHECK(gui.is_focused(row_w(2)));
+
+    // Up walks back to the top and clamps there the same way.
+    pass(up);
+    CHECK(gui.is_focused(row_w(1)));
+    pass(up);
+    CHECK(gui.is_focused(row_w(0)));
+    pass(up);
+    CHECK(gui.is_focused(row_w(0)));
+
+    // The rows register in row order, so Tab walks the grid top-down.
+    InputFrame tab = snap(400.0f, 400.0f);
+    tab.key_pressed[keys::kTab] = true;
+    pass(tab);
+    CHECK(gui.is_focused(row_w(1)));
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("table: a null selected lays the grid display-only and claims "
+          "nothing") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    static const TableColumn kCols[3] = {
+        {"name", 100.0f}, {"value", 0.0f}, {"note", 60.0f}};
+    static const char* kCells[9] = {
+        "alpha", "1", "a", "beta", "2", "b", "gamma", "3", "c"};
+    bool changed = false;
+
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        changed = table(gui, layout, kDefaultChrome, "grid", kCols, 3,
+                        kCells, 3, nullptr, 300.0f);
+        layout.end_panel();
+        gui.end_frame();
+    };
+
+    // A full press-and-release inside a row: no id was even derived, so
+    // nothing claims - the statics' "cannot interact" spelled by the
+    // pointer, and the answer is false by construction.
+    pass(snap(150.0f, 62.0f, false, true, true));
+    CHECK(changed == false);
+    CHECK(gui.hot_id() == kInvalidWidgetId);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("table: the fill width lays the rows a fixed width does not") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    static const TableColumn kCols[3] = {
+        {"name", 100.0f}, {"value", 0.0f}, {"note", 60.0f}};
+    static const char* kCells[9] = {
+        "alpha", "1", "a", "beta", "2", "b", "gamma", "3", "c"};
+    int selected = 0;
+    bool changed = false;
+    float table_w = -1.0f;  // the pass reads it: fill, then fixed
+
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        changed = table(gui, layout, kDefaultChrome, "grid", kCols, 3,
+                        kCells, 3, &selected, table_w);
+        layout.end_panel();
+        gui.end_frame();
+    };
+
+    // Fill-width: in a 400-wide panel the grid is (0,0,400,98), so a
+    // click at the content's far right edge lands on row 1.
+    pass(snap(390.0f, 62.0f, false, true, true));
+    CHECK(selected == 1);
+    CHECK(changed == true);
+
+    // Fixed 120: the rows end at x 120 - the same click finds nothing.
+    table_w = 120.0f;
+    pass(snap(390.0f, 62.0f, false, true, true));
+    CHECK(changed == false);
+    CHECK(gui.hot_id() == kInvalidWidgetId);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("table: the degenerate shapes - no columns no rows null cells") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    static const TableColumn kCols[3] = {
+        {"name", 100.0f}, {"value", 0.0f}, {"note", 60.0f}};
+    static const char* kCells[9] = {
+        "alpha", "1", "a", "beta", "2", "b", "gamma", "3", "c"};
+    int selected = 0;
+    bool changed = false;
+    bool clicked = false;
+    int shape = 0;  // which degenerate shape this pass lays
+
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        clicked = false;
+        if (shape == 0) {
+            // No columns: a bare slot one control_height tall - the
+            // button after it proves the flow survived the shape.
+            changed = table(gui, layout, kDefaultChrome, "bare", nullptr,
+                            0, kCells, 3, &selected, 300.0f);
+            clicked = button(gui, layout, kDefaultChrome, "after", 120.0f);
+        } else if (shape == 1) {
+            changed = table(gui, layout, kDefaultChrome, "grid", kCols, 3,
+                            kCells, 0, &selected, 300.0f);
+        } else {
+            changed = table(gui, layout, kDefaultChrome, "grid", kCols, 3,
+                            nullptr, 5, &selected, 300.0f);
+        }
+        layout.end_panel();
+        gui.end_frame();
+    };
+
+    // The bare slot lays at (0,0,300,24) and takes it: the button after
+    // it sits at y 24, and its click proves the answer is a plain false.
+    shape = 0;
+    pass(snap(60.0f, 36.0f, false, true, true));
+    CHECK(changed == false);
+    CHECK(clicked == true);
+
+    // Zero rows: the header and its rule alone (26 px) - a press where
+    // row 0 would have laid finds no row, claims nothing.
+    shape = 1;
+    pass(snap(150.0f, 40.0f, false, true, true));
+    CHECK(changed == false);
+    CHECK(gui.hot_id() == kInvalidWidgetId);
+
+    // Null cells read as the same empty body, whatever count claimed.
+    shape = 2;
+    pass(snap(150.0f, 40.0f, false, true, true));
+    CHECK(changed == false);
+    CHECK(gui.hot_id() == kInvalidWidgetId);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("table: a begin_disabled scope deadens the grid") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    static const TableColumn kCols[3] = {
+        {"name", 100.0f}, {"value", 0.0f}, {"note", 60.0f}};
+    static const char* kCells[9] = {
+        "alpha", "1", "a", "beta", "2", "b", "gamma", "3", "c"};
+    int selected = 1;
+    bool changed = false;
+
+    const auto pass = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        gui.begin_disabled();
+        changed = table(gui, layout, kDefaultChrome, "grid", kCols, 3,
+                        kCells, 3, &selected, 300.0f);
+        gui.end_disabled();
+        layout.end_panel();
+        gui.end_frame();
+    };
+
+    // A full click inside a row: the scope withdraws claims and
+    // registrations together - no hover, no pick, the caller's int
+    // untouched, the answer false.
+    pass(snap(150.0f, 62.0f, false, true, true));
+    CHECK(changed == false);
+    CHECK(selected == 1);
+    CHECK(gui.hot_id() == kInvalidWidgetId);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("table: the grid draws - header rule and cells in the batch") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    set_active(&r);
+    GuiContext gui;
+    LayoutCursor layout;
+    static const TableColumn kCols[3] = {
+        {"name", 100.0f}, {"value", 0.0f}, {"note", 60.0f}};
+    static const char* kCells[9] = {
+        "alpha", "1", "a", "beta", "2", "b", "gamma", "3", "c"};
+    int selected = -1;  // out of range: no bar, no face, no ring
+    int* selected_ptr = &selected;
+
+    // One full renderer frame per pass, the blink test's own order: the
+    // batch fills only at frame_end's replay and the panel's clip change
+    // splits chunks, so the observable is the SUM over chunks. The pointer
+    // rides nowhere near the grid, so no hover face muddies the count.
+    const auto quads = [&] {
+        std::size_t total = 0;
+        for (std::uint32_t i = 0; i < r.batch().chunk_count(); ++i) {
+            total += r.batch().chunk(i).quad_count;
+        }
+        return total;
+    };
+    const auto pass = [&](int rows) {
+        r.frame_begin(800.0f, 600.0f);
+        r.begin_screen();
+        InputFrame frame = snap(400.0f, 400.0f);
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        (void)table(gui, layout, kDefaultChrome, "grid", kCols, 3, kCells,
+                    rows, selected_ptr, 300.0f);
+        layout.end_panel();
+        gui.end_frame();
+        r.end();
+        r.frame_end();
+    };
+
+    // Three rows of three fitted cells each, fontless bars: the body is
+    // 9 quads over the header-only shape (header face + 3 header cells
+    // + the 2-px rule - the same count at every row_count).
+    pass(3);
+    const std::size_t full = quads();
+    pass(0);
+    const std::size_t header_only = quads();
+    REQUIRE(full > header_only);
+    CHECK(full - header_only == 9);
+
+    // Display-only draws the same pixels: a null selected changes the
+    // claims, never the chrome.
+    selected_ptr = nullptr;
+    pass(3);
+    CHECK(quads() == full);
+
+    set_active(nullptr);
+}
+
 TEST_CASE("utf8 decode covers multibyte codepoints and forgives damage") {
     using ws::ui::r2d::font::utf8_next;
     const char* s = "";
