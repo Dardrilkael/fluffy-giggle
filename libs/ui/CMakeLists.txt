@@ -4,13 +4,32 @@
 # header keeps plain floats.
 ws_add_library(ui DEPENDS ws::core ws::math)
 
-# Platform sources: exactly one windowing TU builds (the WindowHost seam,
-# src/platform/window.h). The glob picks up both; drop the one this platform
-# does not
-# use - a mis-filter fails loudly (the wrong TU's platform includes are
-# absent), so it can never silently double-compile.
+# The gui subset as its own archive - the stage-2 acceptance cut. It links
+# ONLY ws::core: no Vulkan, GLFW, volk or vma target ever appears on its
+# link line, because the gui draws through the r2d free-function seam that
+# ws_ui's renderer TUs satisfy at the final link. Sources compile once
+# (ws_ui links this archive in, so apps see no difference) and
+# test_ui_gui below links it WITHOUT the renderer - the acceptance the
+# stage set out to prove.
+file(GLOB ui_gui_srcs CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/gui/*.cpp")
+add_library(ws_ui_gui STATIC ${ui_gui_srcs})
+add_library(ws::ui_gui ALIAS ws_ui_gui)
+target_include_directories(ws_ui_gui
+  PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_compile_features(ws_ui_gui PUBLIC cxx_std_20)
+ws_set_warnings(ws_ui_gui)
+target_link_libraries(ws_ui_gui PUBLIC ws::core)
+target_link_libraries(ws_ui PRIVATE ws_ui_gui)
+
+# Platform + gui sources: exactly one windowing TU builds (the WindowHost
+# seam, src/platform/window.h) and the gui TUs live in ws_ui_gui, not here.
+# The glob picks up both windowing TUs and every gui TU; drop what this
+# target does not use - a mis-filter fails loudly (the wrong TU's platform
+# includes are absent), so it can never silently double-compile.
 get_target_property(ui_sources ws_ui SOURCES)
 if(ui_sources)
+  list(REMOVE_ITEM ui_sources ${ui_gui_srcs})
   if(ANDROID)
     list(REMOVE_ITEM ui_sources
       "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/window_glfw.cpp")
@@ -38,7 +57,7 @@ endif()
 
 ws_add_test(ui SOURCES tests/test_ui.cpp)
 # ws_add_test no-ops when WS_BUILD_TESTS=OFF (the android preset), so the
-# test's tail settings apply only when the target exists.
+# tests' tail settings apply only when the targets exist.
 if(TARGET test_ui)
   # tests exercise the internal pure-CPU batch core directly (src/ never
   # reaches apps).
@@ -46,6 +65,25 @@ if(TARGET test_ui)
   # renderer2d.h (internal) declares the Vulkan half: the test needs those
   # headers to compile it, though it never drives Vulkan itself.
   target_link_libraries(test_ui PRIVATE volk vma)
+endif()
+
+# The stage-2 acceptance test: gui + its tests with NO Vulkan or GLFW on
+# the link line. Links the gui archive (ws::ui_gui), the REAL pure-CPU
+# font bake (src/text/font.cpp + its stb implementation TU - neither
+# touches a GPU) and a stub standing in for the r2d free functions the
+# gui draws through (tests/ui_gui_r2d_stub.cpp records every call, so the
+# cases assert the gui really drew). If the gui ever grows a renderer- or
+# platform-side link dependency, this executable stops linking - the
+# acceptance fails loudly, not silently.
+ws_add_test(ui_gui
+  SOURCES tests/test_ui_gui.cpp
+          tests/ui_gui_r2d_stub.cpp
+          src/text/font.cpp
+          src/text/stb_impl.cpp
+  DEPENDS stb)
+if(TARGET test_ui_gui)
+  # "text/font.h" from font.cpp + "ui_gui_stub.hpp" from the test pair.
+  target_include_directories(test_ui_gui PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
 
 # --- Shader workflow targets (opt-in; the default build is unchanged) ------
