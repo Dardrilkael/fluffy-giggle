@@ -1,9 +1,22 @@
 # ws - CLAUDE.md
 
 C++20 monorepo: each `libs/<name>` builds a `ws::<name>` static library,
-`apps/*` are the executables. Build via the CMake presets (Ninja + MSVC; the
-MSVC environment is required - `tools/dev-shell.ps1` for interactive use).
-One commit per phase on `main`.
+`apps/*` are the executables. One commit per phase on `main`.
+
+## Commands
+The debug/release presets are Ninja + MSVC and need the MSVC environment -
+`tools/dev-shell.ps1` opens a shell with it loaded.
+
+```
+cmake --preset debug                   # configure (also: release, vs-debug,
+                                        # vs-release, android)
+cmake --build --preset debug           # build (--target <name> for one)
+ctest --preset debug                   # all tests; -R <lib> for one lib
+tools/package-android.ps1 -App <name>  # APK (default playground)
+```
+
+`check_deps` runs with the suites (it is `tools/check_deps.ps1`): the one
+workspace rule below, enforced as a test.
 
 ## The one workspace rule: dependencies never leak into apps
 - Apps include only `ws/...` headers and link only `ws::` targets.
@@ -14,7 +27,8 @@ One commit per phase on `main`.
   ws::math in its own headers) - it never re-exports third-party types.
 - The one exception: tl::expected, the std::expected backport backing
   `ws::core::Result` - linked PUBLIC from ws::core because Result is the
-  public API, and named ONLY inside `ws/core/result.hpp` (see below).
+  public API, and named ONLY inside `ws/core/result.hpp`
+  (`libs/core/CLAUDE.md` spells out the carve-out).
 
 ## Error handling
 - Public APIs return `ws::core::Result<T>` or `Status`; no exceptions across
@@ -27,49 +41,23 @@ One commit per phase on `main`.
   is for runtime failures.
 
 ## Layout
-- `libs/core` - logging + asserts + the shared error/result types
-  (`Error`, `Result<T>`, `Status`, `WS_TRY`/`WS_TRY_ASSIGN`).
-- `libs/math` - dense `Matrix<T>` + LU (Eigen stays private to lu.cpp) and
-  ws-owned fixed-size vecmath.
-- `libs/ui` - app shell (GLFW/Vulkan/ImGui/ImPlot, all private) + the
-  `widgets.hpp` drawing API.
-- `libs/audio` - WAV decoding (dr_wav, private) + OpenAL Soft device playback
-  behind a Result-only API. Cross-platform: same OpenAL pimpl on Windows and
-  Android (OpenAL Soft rides Oboe -> AAudio there, both private).
-- `libs/net` - networking: single-threaded event loop (one thread-safe
-  `post`), length-prefixed message framing on TCP, UDP, LAN discovery.
-  libuv is private to `src/backend/uv` - the backend seam means a
-  WSAPoll/epoll swap later touches no public header (no uv.h under
-  `include/`).
-- `libs/physics` - 2D + 3D physics behind one API (`ws::physics2d` /
-  `ws::physics3d`): generational bodies/joints, drained contact events,
-  queries, fixed-timestep stepping with zero steady-state allocation.
-  Box2D (2D) and Jolt (3D) are both private behind the `src/backend`
-  seam - an engine swap touches no public header (no engine header
-  under `include/`).
-- `apps/playground` - smoke-test app for the shell.
-- `apps/wavplayer` - headless ws::audio smoke app (desktop console app):
-  plays a synthesized arpeggio (or the wav passed as argv[1]) on the
-  default device.
-- `apps/netdemo` - headless ws::net example: one EventLoop running framed
-  TCP over loopback, a UDP round trip and LAN discovery, then an explicit
-  teardown with loop work still in flight.
-- `apps/netchat` - terminal chat over ws::net: running copies find each
-  other via LAN + loopback discovery beats (the smaller listen port
-  dials, one framed TCP connection per pair); lines typed in one terminal
-  print in all the others.
-- `apps/chatter` - netchat's protocol behind a gui (built for Android,
-  runs on desktop too): the same discovery beats and HELLO/SAY frames, so
-  phones and terminals share one chat; input is a tap-phrase palette.
-- `apps/bench_physics` - headless ws::physics throughput bench (desktop
-  console app): steps a falling-boxes scene and prints per-tick wall-clock
-  cost while awake and after sleep, per dimension and thread config.
-- `apps/bounce` - the three-lib composition example (windowed app, desktop
-  and Android; its APK is `tools/package-android.ps1 -App bounce`):
-  a ws::physics2d pit of clickable boxes/circles drawn through ws::ui with
-  render interpolation, a ws-gui panel, and ws::audio thuds whose pitch and
-  gain follow each impact's speed. On the phone the gravity sensor steers
-  the pit (tilt to tumble; a dedicated NDK sensor thread feeds
-  `set_gravity`, which wakes the sleepers for you).
+One line each - the per-tree CLAUDE.md files carry the detail:
 
-Each `libs/<name>/CLAUDE.md` documents that lib's own rules and tests.
+- `libs/core` - logging + asserts + the shared error/result types.
+- `libs/math` - dense `Matrix<T>` + LU and ws-owned fixed-size vecmath.
+- `libs/ui` - app shell (GLFW/Vulkan/ImGui/ImPlot, all private) + the
+  widget/renderer/gui drawing APIs.
+- `libs/audio` - WAV decode + OpenAL Soft playback behind a Result-only API.
+- `libs/net` - event loop, framed TCP, UDP, LAN discovery.
+- `libs/physics` - 2D + 3D physics behind one API (Box2D/Jolt, private).
+- `apps/*` - the executables.
+
+## Read when
+- Touching `libs/<name>/` - read `libs/<name>/CLAUDE.md` (that lib's rules,
+  API surface and tests). Gui internals: `libs/ui/src/gui/CLAUDE.md`.
+- Touching `apps/` - read `apps/CLAUDE.md` (what each app is, what it
+  demonstrates, APK packaging).
+- Adding a third-party dependency anywhere - re-read the workspace rule
+  above; `tools/check_deps.ps1` lists the signatures the test catches.
+- Wanting the fuller pre-restructure layout text -
+  `docs/claude-md-archive.md` (a snapshot, not the living docs).
