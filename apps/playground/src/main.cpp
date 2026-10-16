@@ -5,7 +5,7 @@
 // the app IS the platform boundary, the same reason it owns the font path.)
 
 #include <ws/ui/app.hpp>
-#include <ws/ui/event.hpp>
+#include <ws/input/event.hpp>
 #include <ws/ui/gui/gui_context.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
 #include <ws/ui/gui/theme.hpp>

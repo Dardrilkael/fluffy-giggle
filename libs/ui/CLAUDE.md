@@ -63,10 +63,11 @@ This is the single most important architectural constraint of this library.
 
 ```
 libs/ui/
+  # (the input family — the event types + InputFrame/frame_input — lives
+  #  in libs/input since stage 3a; ui links it, and this tree's platform
+  #  TUs are the only writers of an InputFrame)
   include/ws/ui/
     app.hpp                 # App, AppConfig — PUBLIC, zero third-party includes
-    event.hpp                # Event, EventType, typed events, EventDispatcher
-    input.hpp                # InputFrame: one frame's raw input — mouse, keys (the keys:: spellings), dt_seconds clock, multi-touch table; frame_input(). Events + the snapshot under one GLFW-free header (the future ws::input surface)
     render_command_queue.hpp # RenderCommandQueue
     renderer2d.hpp           # r2d free functions: Camera2D, quads, lines, sprites, fonts + text
     widgets.hpp               # window/text/button/checkbox/slider/plot_line/...
@@ -100,11 +101,9 @@ libs/ui/
       atlas_packer.h/.cpp    # pure-CPU shelf packer: atlas pages, sub-rects, gutters
       stb_impl.cpp           # sole STB implementation TU (STB_IMAGE + STB_TRUETYPE)
     gui/                     # the immediate-mode gui - internal seam + out-of-line bodies, one concern per file:
-      gui.h                  # internal: set_active_input - the shell points frame_input() at its InputFrame; the warn-once reset seam
-      gui.cpp                # shell glue: frame_input()'s live accumulator tap
+      gui.h                  # internal: the warn-once flags' externs (the reset seam); the input plumbing moved to ws::input (stage 3a)
       gui_context.cpp        # GuiContext: per-pointer hot/active hit-testing, layer scopes + side tables
       gui_id.cpp             # IdStack: FNV-1a scope-path hashing - the label/index/reserved families
-      gui_input.cpp          # InputFrame: touch table + the primary-touch -> mouse bridge
       gui_layout.cpp         # LayoutCursor: stacked flow panels
       widgets_detail.hpp     # shared widget helpers + per-widget state structs (private to src/gui)
       widgets_buttons.cpp    # button, checkbox, radio, toggle_switch
@@ -123,7 +122,8 @@ libs/ui/
 
 ## Event system 
 
-- `ws/ui/event.hpp`: `Event` base + `EventType` enum (`WindowClose`,
+- `ws/input/event.hpp` (the input family, `libs/input` since stage 3a):
+  `Event` base + `EventType` enum (`WindowClose`,
   `WindowResize`, `KeyPressed`, `KeyReleased`, `MouseButtonPressed`,
   `MouseButtonReleased`, `MouseMoved`, `MouseScrolled`, `TouchPressed`,
   `TouchMoved`, `TouchReleased`, `TextInput`). Each event is a
@@ -436,8 +436,11 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   (`LayoutCursor::next(w, h)`) and draw emission (r2d at the caller's
   layer). What a widget draws, where it hit-tests and what it returns
   cannot drift apart — they come from the same rect and the same id.
-- **Input.** The shell accumulates raw input into one `InputFrame` per
-  frame (`frame_input()`, drop-safe headless) — parallel to the
+- **Input.** The input family lives in `libs/input` since stage 3a (the
+  event types + `InputFrame`/`frame_input()`, GLFW-free; this lib's
+  platform TUs are the only writers). The shell accumulates raw input
+  into one `InputFrame` per frame (`frame_input()`, drop-safe headless)
+  — parallel to the
   ImGui-filtered `Event` stream, so gui widgets see the mouse even where
   an ImGui window sits. `dt_seconds` is the frame clock: the SHELL writes
   it once per pump (`App`'s main loop, a `steady_clock` delta) and
@@ -623,7 +626,8 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   registration caps at `kMaxFocusables` = 128 with the
   census's warn-once degrade; the registration-order list is the seam a
   directional/gamepad nav would extend (register bounds alongside the
-  id) — deliberately deferred, not blocked. `keys::` (input.hpp)
+  id) — deliberately deferred, not blocked. `keys::`
+  (`<ws/input/input.hpp>`)
   is the spelling of the keys with built-in behavior — Tab, Enter,
   Space, the shifts, the arrows (kLeft/kRight step the focused slider),
   the text input's editing cluster (Backspace/Delete, Home/End,
@@ -896,12 +900,18 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   suite lives in `tests/test_ui.cpp` and runs with the rest via
   `ctest --preset debug -R ui` — which since stage 2 matches two tests,
   because the gui TUs build into their own `ws_ui_gui` archive (it links
-  ONLY `ws::core`; `ws_ui` links it in PRIVATE, so apps see no change)
-  and `tests/test_ui_gui.cpp` is the acceptance target: it links that
+  `ws::core` + `ws::input` — the frame snapshot it reads, itself
+  core-only and pure CPU; `ws_ui` links it in PRIVATE, so apps see no
+  change) and `tests/test_ui_gui.cpp` is the acceptance target: it links that
   archive with a recording stub for the r2d free-function seam
   (`tests/ui_gui_r2d_stub.cpp`) plus the real pure-CPU font bake — no
   Vulkan, GLFW, volk or vma anywhere on its link line. A gui that grows
   a renderer- or platform-side dependency breaks that link by name.
+  The input family's own cases moved with it to
+  `libs/input/tests/test_input.cpp` (`ctest --preset debug -R input`) —
+  event dispatch, the touch table, the bridge, pointer unification; the
+  gui-side adoption cases (begin_frame copying the snapshot) stayed
+  here.
   `apps/playground` carries the full
   composition demo plus the Phase 10 "net inspector" screen — a
   feedforward net drawn in the world layer, driven live by a gui panel —

@@ -52,7 +52,7 @@
 #include <ws/ui/gui/rect.hpp>
 #include <ws/ui/gui/theme.hpp>
 #include <ws/ui/gui/widgets.hpp>
-#include <ws/ui/input.hpp>
+#include <ws/input/input.hpp>
 #include <ws/ui/renderer2d.hpp>
 
 namespace {

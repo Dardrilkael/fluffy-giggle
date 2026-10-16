@@ -22,13 +22,13 @@
 // attaches and detaches with the window - on Android it re-runs whenever
 // the OS hands a window back.
 
+#include <ws/input/event.hpp>
+#include <ws/input/input.hpp>
 #include <ws/ui/app.hpp>
-#include <ws/ui/event.hpp>
 #include <ws/ui/render_command_queue.hpp>
 
 #include <ws/core/log.hpp>
 
-#include "gui/gui.h"
 #include "render/renderer2d.h"
 #include "render/shader_provider.h"
 #include "platform/window.h"

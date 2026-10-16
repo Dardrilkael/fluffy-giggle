@@ -1,5 +1,10 @@
 add_subdirectory(core)
 add_subdirectory(math)
+# ws::input is the input family promoted out of ui (stage 3a): the event
+# types + the InputFrame snapshot, pure CPU and GLFW-free (codes ride as
+# plain ints). ws::ui's platform TUs are the only writers of an InputFrame,
+# so ui links this lib - never the other way around.
+add_subdirectory(input)
 add_subdirectory(ui)
 # ws::audio builds everywhere: the engine pimpl is OpenAL Soft on both
 # platforms, and OpenAL Soft's own device layer goes AAudio-via-Oboe on

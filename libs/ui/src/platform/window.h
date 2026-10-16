@@ -10,10 +10,10 @@
 #include <memory>
 #include <vector>
 
+#include <ws/input/event.hpp>
+#include <ws/input/input.hpp>
 #include <ws/ui/app.hpp>
-#include <ws/ui/event.hpp>
 #include <ws/ui/gui/gui_context.hpp>
-#include <ws/ui/input.hpp>
 
 #include <volk.h>  // internal header: Vk types appear in the seam signature
                    // and never reach apps - that surface is <ws/ui/app.hpp>.

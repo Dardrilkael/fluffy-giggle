@@ -74,7 +74,7 @@ protected:
     // thread, before on_update() for that frame. Events ImGui already
     // consumed (mouse over a widget, text input) arrive with handled == true;
     // EventDispatcher skips those, so handlers rarely check the flag.
-    // Include <ws/ui/event.hpp> for the event types. Default is empty.
+    // Include <ws/input/event.hpp> for the event types. Default is empty.
     virtual void on_event(Event&) {}
 
     // Called once per frame, between NewFrame and Render. Draw widgets /

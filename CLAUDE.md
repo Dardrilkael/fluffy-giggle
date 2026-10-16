@@ -45,6 +45,10 @@ One line each - the per-tree CLAUDE.md files carry the detail:
 
 - `libs/core` - logging + asserts + the shared error/result types.
 - `libs/math` - dense `Matrix<T>` + LU and ws-owned fixed-size vecmath.
+- `libs/input` - the input family promoted out of ui (stage 3): the
+  GLFW-free event types + the `InputFrame` snapshot (touch/mouse -> one
+  pointer list). Pure CPU, core-only; ws::ui's platform TUs are the only
+  writers of an InputFrame.
 - `libs/ui` - app shell (GLFW/Vulkan/ImGui/ImPlot, all private) + the
   widget/renderer/gui drawing APIs.
 - `libs/audio` - WAV decode + OpenAL Soft playback behind a Result-only API.
