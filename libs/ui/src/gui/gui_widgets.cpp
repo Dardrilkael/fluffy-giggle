@@ -92,6 +92,110 @@ struct TextInputState {
     bool was_focused = false;
 };
 
+// The typing filter: v1 edits ASCII - one byte, one glyph, the bake's
+// whole range. The test takes the CODEPOINT, never a char: cp 300 cast
+// to the byte first would alias into ','. The paste path's
+// char->unsigned-char widening is exact, so it shares this one filter.
+bool is_insertable(std::uint32_t cp) {
+    return cp >= 32u && cp <= 126u;
+}
+
+// text_input's per-frame lens: the persistent caret pair from
+// TextInputState plus the caller's buffer geometry as one object, so
+// every edit below speaks a verb instead of spelling memmove. Built
+// once per frame with the length measured fresh; the frame-end clamp
+// writes the pair back into the persistent state. A dead field carries
+// room 0, and the verbs' own clamps turn that into a no-op.
+struct EditBuffer {
+    char* buf = nullptr;  // the caller's buffer (the widget never owns it)
+    int room = 0;   // bytes the buffer may hold: capacity minus the NUL
+    int len = 0;    // bytes before the terminator, measured this frame
+    int caret = 0;   // the editing position; the selection's live end
+    int anchor = 0;  // the selection origin; caret == anchor: none
+
+    // The selection as a range, low end first (equal ends: none).
+    int sel_lo() const { return std::min(caret, anchor); }
+    int sel_hi() const { return std::max(caret, anchor); }
+    bool has_selection() const { return caret != anchor; }
+
+    // Both ends onto `at`: the selection dies, the caret stays.
+    void collapse(int at) {
+        caret = anchor = at;
+    }
+
+    // The one eraser every deleter funnels through: [lo, hi) leaves,
+    // the tail slides, the terminator follows the new end.
+    void erase(int lo, int hi) {
+        lo = std::max(0, lo);
+        hi = std::min(len, hi);
+        if (lo >= hi) {
+            return;
+        }
+        std::memmove(buf + lo, buf + hi, static_cast<std::size_t>(len - hi));
+        len -= hi - lo;
+        buf[len] = '\0';
+    }
+
+    // A selection dies under what replaces it - typing and pasting both
+    // spell it; the caret lands where the selection was.
+    void erase_selection() {
+        if (has_selection()) {
+            const int lo = sel_lo();
+            erase(lo, sel_hi());
+            collapse(lo);
+        }
+    }
+
+    // n bytes at `at` (clamped into [0, len], never past the room): the
+    // tail slides once, the bytes land, the terminator follows. The
+    // return is the pen just past the insertion, or -1 when the room
+    // refused everything.
+    int insert(int at, const char* bytes, int n) {
+        at = std::max(0, std::min(len, at));
+        n = std::min(n, room - len);
+        if (n <= 0) {
+            return -1;
+        }
+        std::memmove(buf + at + n, buf + at,
+                     static_cast<std::size_t>(len - at));
+        std::memcpy(buf + at, bytes, static_cast<std::size_t>(n));
+        len += n;
+        buf[len] = '\0';
+        return at + n;
+    }
+
+    // A paste through the filter: only insertable bytes count, and only
+    // as many as the room takes - counted in one pass over the text,
+    // then landed in one move, so the buffer never walks per byte and
+    // the capacity never splits mid-paste. The return is insert's pen.
+    int insert_filtered(int at, const char* text) {
+        int take = 0;
+        for (const char* p = text; *p != '\0' && len + take < room; ++p) {
+            if (is_insertable(static_cast<unsigned char>(*p))) {
+                ++take;
+            }
+        }
+        at = std::max(0, std::min(len, at));
+        if (take <= 0) {
+            return -1;
+        }
+        std::memmove(buf + at + take, buf + at,
+                     static_cast<std::size_t>(len - at));
+        int pen = at;
+        for (const char* p = text; *p != '\0'; ++p) {
+            if (pen - at >= take) {
+                break;  // the room's count is landed; the tail never walks
+            }
+            if (is_insertable(static_cast<unsigned char>(*p))) {
+                buf[pen++] = *p;
+            }
+        }
+        len += take;
+        buf[len] = '\0';
+        return pen;
+    }
+};
+
 // The contact's track: its own slot, or a free one for a fresh press.
 // Null only when the table is somehow full, which the sweep in
 // begin_scroll_panel makes unreachable (free slots always cover the
@@ -124,11 +228,11 @@ void panel_chrome(const Rect& bounds, const ChromeTheme& theme) {
 }
 
 // --- the row idioms every citizen widget shares ---------------------------
-// The same seven moves, spelled once: the fill-width resolve, the
-// Enter/Space edge, the focus ring, the disabled dim, the face ladder
-// (and its bare-list exception), and the one label draw. The widgets
-// below read as the moves; the spelling - and its reasoning - lives
-// here, TU-local like label_top above.
+// The same moves, spelled once: the citizenship ladder (begin_row), the
+// fill-width resolve, the Enter/Space edge, the focus ring, the disabled
+// dim, the face ladder (and its bare-list exception), and the one label
+// draw. The widgets below read as the moves; the spelling - and its
+// reasoning - lives here, TU-local like label_top above.
 
 // Fill-width: a negative width means "the rest of the line" - the one
 // size the caller cannot know before placing - resolved against the
@@ -1742,6 +1846,11 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
         }
     }
 
+    // The frame's working lens: the edits below speak its verbs, and the
+    // write-back at the frame's end re-clamps the pair into the
+    // persistent state.
+    EditBuffer eb{buf, room, len, edit.caret, edit.anchor};
+
     const InputFrame& in = gui.input();
     // state()'s press edge claims the focus the SAME frame, so a quick
     // tap's own press frame already reads focused here.
@@ -1766,7 +1875,7 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
     // The pen x at byte `index`, clamped to the buffer's end.
     const auto x_at = [&](int index) -> float {
         float acc = 0.0f;
-        for (int i = 0; i < index && i < len; ++i) {
+        for (int i = 0; i < index && i < eb.len; ++i) {
             acc += char_advance(i);
         }
         return acc;
@@ -1776,14 +1885,14 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
     // placement, clamped to the buffer.
     const auto caret_from_x = [&](float dx) -> int {
         float acc = 0.0f;
-        for (int i = 0; i < len; ++i) {
+        for (int i = 0; i < eb.len; ++i) {
             const float adv = char_advance(i);
             if (dx < acc + adv * 0.5f) {
                 return i;
             }
             acc += adv;
         }
-        return len;
+        return eb.len;
     };
 
     const float content_x = rect.x + theme.padding;
@@ -1812,15 +1921,15 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
                        in.key_down[static_cast<std::size_t>(keys::kRightShift)];
     if (can_edit && hold) {
         const int placed = caret_from_x(owner->x - content_x);
-        if (owner->pressed || placed != edit.caret) {
+        if (owner->pressed || placed != eb.caret) {
             // Shift at the press extends the standing selection; a plain
             // press collapses the anchor onto the caret, and the sweep
             // that follows re-opens a selection the moment the pointer
             // travels.
             if (owner->pressed && !shift) {
-                edit.anchor = placed;
+                eb.anchor = placed;
             }
-            edit.caret = placed;
+            eb.caret = placed;
             edit.blink = 0.0f;
         }
     }
@@ -1834,50 +1943,33 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
         // The caret keys: Shift extends from the anchor, plain collapses
         // it onto the caret - the rule every editor spells.
         const auto move_caret = [&](int to) {
-            edit.caret = to;
+            eb.caret = to;
             if (!shift) {
-                edit.anchor = to;
+                eb.anchor = to;
             }
             edit.blink = 0.0f;
         };
         if (in.key_pressed[static_cast<std::size_t>(keys::kLeft)]) {
-            move_caret(std::max(0, edit.caret - 1));
+            move_caret(std::max(0, eb.caret - 1));
         }
         if (in.key_pressed[static_cast<std::size_t>(keys::kRight)]) {
-            move_caret(std::min(len, edit.caret + 1));
+            move_caret(std::min(eb.len, eb.caret + 1));
         }
         if (in.key_pressed[static_cast<std::size_t>(keys::kHome)]) {
             move_caret(0);
         }
         if (in.key_pressed[static_cast<std::size_t>(keys::kEnd)]) {
-            move_caret(len);
+            move_caret(eb.len);
         }
         if (ctrl && in.key_pressed[static_cast<std::size_t>(keys::kA)]) {
-            edit.anchor = 0;  // select all: the anchor says it
-            edit.caret = len;
+            eb.anchor = 0;  // select all: the anchor says it
+            eb.caret = eb.len;
             edit.blink = 0.0f;
         }
         if (in.key_pressed[static_cast<std::size_t>(keys::kEscape)]) {
-            edit.anchor = edit.caret;  // Escape's one job: drop the selection
+            eb.collapse(eb.caret);  // Escape's one job: drop the selection
             edit.blink = 0.0f;
         }
-
-        // The one eraser every deleter funnels through: [lo, hi) leaves,
-        // the tail slides, the terminator follows the new end.
-        const auto erase_range = [&](int lo, int hi) {
-            lo = std::max(0, lo);
-            hi = std::min(len, hi);
-            if (lo >= hi) {
-                return;
-            }
-            std::memmove(buf + lo, buf + hi,
-                         static_cast<std::size_t>(len - hi));
-            len -= hi - lo;
-            buf[len] = '\0';
-        };
-        // The selection as a range, low end first (equal ends: none).
-        const auto sel_lo = [&] { return std::min(edit.caret, edit.anchor); };
-        const auto sel_hi = [&] { return std::max(edit.caret, edit.anchor); };
 
         // Deleters before typing, when one frame carries both (no arrival
         // order exists between key edges and the codepoint list): the
@@ -1886,46 +1978,35 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
             in.key_pressed[static_cast<std::size_t>(keys::kDelete)]) {
             const bool forward =
                 in.key_pressed[static_cast<std::size_t>(keys::kDelete)];
-            if (sel_lo() != sel_hi()) {
-                const int lo = sel_lo();
-                erase_range(lo, sel_hi());
-                edit.caret = edit.anchor = lo;
+            if (eb.has_selection()) {
+                eb.erase_selection();
                 changed = true;
-            } else if (!forward && edit.caret > 0) {
-                erase_range(edit.caret - 1, edit.caret);
-                --edit.caret;
-                edit.anchor = edit.caret;
+            } else if (!forward && eb.caret > 0) {
+                eb.erase(eb.caret - 1, eb.caret);
+                eb.collapse(eb.caret - 1);
                 changed = true;
-            } else if (forward && edit.caret < len) {
-                erase_range(edit.caret, edit.caret + 1);
-                edit.anchor = edit.caret;
+            } else if (forward && eb.caret < eb.len) {
+                eb.erase(eb.caret, eb.caret + 1);
+                eb.collapse(eb.caret);
                 changed = true;
             }
             edit.blink = 0.0f;
         }
 
-        // Typing: the frame's codepoints filtered to the bake range (v1
+        // Typing: the frame's codepoints through the one filter (v1
         // edits ASCII). A selection dies under what replaces it, and a
         // full buffer drops the rest of the frame's text.
         for (std::uint32_t cp : in.text_input) {
-            if (cp < 32u || cp > 126u) {
+            if (!is_insertable(cp)) {
                 continue;
             }
-            if (edit.caret != edit.anchor) {
-                const int lo = sel_lo();
-                erase_range(lo, sel_hi());
-                edit.caret = edit.anchor = lo;
+            eb.erase_selection();
+            const char c = static_cast<char>(cp);
+            const int pen = eb.insert(eb.caret, &c, 1);
+            if (pen < 0) {
+                break;  // the room refused: the rest of the frame's text drops
             }
-            if (len >= room) {
-                break;
-            }
-            std::memmove(buf + edit.caret + 1, buf + edit.caret,
-                         static_cast<std::size_t>(len - edit.caret));
-            buf[edit.caret] = static_cast<char>(cp);
-            ++len;
-            buf[len] = '\0';
-            ++edit.caret;
-            edit.anchor = edit.caret;
+            eb.collapse(pen);
             edit.blink = 0.0f;
             changed = true;
         }
@@ -1937,15 +2018,13 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
         if (ctrl &&
             (in.key_pressed[static_cast<std::size_t>(keys::kC)] ||
              in.key_pressed[static_cast<std::size_t>(keys::kX)]) &&
-            sel_lo() != sel_hi()) {
+            eb.has_selection()) {
             // The one allocation an explicit copy may make: a mid-buffer
             // range is not NUL-terminated, and the seam speaks C strings.
             gui.set_clipboard_text(
-                std::string(buf + sel_lo(), buf + sel_hi()).c_str());
+                std::string(eb.buf + eb.sel_lo(), eb.buf + eb.sel_hi()).c_str());
             if (in.key_pressed[static_cast<std::size_t>(keys::kX)]) {
-                const int lo = sel_lo();
-                erase_range(lo, sel_hi());
-                edit.caret = edit.anchor = lo;
+                eb.erase_selection();
                 edit.blink = 0.0f;
                 changed = true;
             }
@@ -1953,40 +2032,10 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
         if (ctrl && in.key_pressed[static_cast<std::size_t>(keys::kV)]) {
             const char* pasted = gui.get_clipboard_text();
             if (pasted != nullptr) {
-                if (edit.caret != edit.anchor) {
-                    const int lo = sel_lo();
-                    erase_range(lo, sel_hi());
-                    edit.caret = edit.anchor = lo;
-                }
-                // Two passes: count the bytes that pass the filter AND
-                // the room, then insert them in one move - a paste never
-                // walks the buffer per byte and never splits capacity.
-                int take = 0;
-                for (const char* p = pasted;
-                     *p != '\0' && len + take < room; ++p) {
-                    const unsigned char c = static_cast<unsigned char>(*p);
-                    if (c >= 32u && c <= 126u) {
-                        ++take;
-                    }
-                }
-                if (take > 0) {
-                    std::memmove(buf + edit.caret + take, buf + edit.caret,
-                                 static_cast<std::size_t>(len - edit.caret));
-                    int at = edit.caret;
-                    for (const char* p = pasted; *p != '\0'; ++p) {
-                        if (at - edit.caret >= take) {
-                            break;
-                        }
-                        const unsigned char c =
-                            static_cast<unsigned char>(*p);
-                        if (c < 32u || c > 126u) {
-                            continue;
-                        }
-                        buf[at++] = *p;
-                    }
-                    len += take;
-                    buf[len] = '\0';
-                    edit.caret = edit.anchor = at;
+                eb.erase_selection();
+                const int pen = eb.insert_filtered(eb.caret, pasted);
+                if (pen >= 0) {
+                    eb.collapse(pen);
                     edit.blink = 0.0f;
                     changed = true;
                 }
@@ -1995,9 +2044,10 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
     }
 
     // The buffer may have shrunk under the edits (or under the caller's
-    // own hand between frames): both ends stay in range.
-    edit.caret = std::clamp(edit.caret, 0, len);
-    edit.anchor = std::clamp(edit.anchor, 0, len);
+    // own hand between frames): the write-back clamps both ends of the
+    // working pair into range on their way into the persistent state.
+    edit.caret = std::clamp(eb.caret, 0, eb.len);
+    edit.anchor = std::clamp(eb.anchor, 0, eb.len);
     edit.was_focused = focused;
 
     // --- the draw: ring, face, band, text, caret --------------------------
@@ -2033,21 +2083,21 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
         }
     }
 
-    if (len > 0) {
+    if (eb.len > 0) {
         // The content, left-aligned inside the padding. Content is DATA,
         // so fit_text's "##" cut does not apply - the truncation here is
         // the walk itself: the longest prefix + "..." when the whole
         // line misses the row's room (the v1 filter already guarantees
         // one byte per glyph).
-        const float whole = x_at(len);
-        int visible = len;
+        const float whole = x_at(eb.len);
+        int visible = eb.len;
         bool ellipsis = false;
         if (whole > content_room) {
             const float dots = cp_advance('.') * 3.0f;
             const float budget = std::max(0.0f, content_room - dots);
             float acc = 0.0f;
             visible = 0;
-            for (int i = 0; i < len; ++i) {
+            for (int i = 0; i < eb.len; ++i) {
                 const float adv = char_advance(i);
                 if (acc + adv > budget) {
                     break;

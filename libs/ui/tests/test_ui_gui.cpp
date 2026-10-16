@@ -98,6 +98,81 @@ TEST_CASE("a full click fires exactly once through the seam") {
     gui.end_frame();
 }
 
+TEST_CASE("text_input edits through its verbs: type, delete, replace") {
+    namespace keys = ws::ui::gui::keys;
+
+    ws::ui::gui_test::stub.reset();
+    GuiContext gui;
+    LayoutCursor layout;
+
+    // Capacity 4 means room for 3 bytes plus the NUL - the overfill
+    // tail below drops at that wall. The same panel'd field runs every
+    // frame, so the id (and the persistent caret under it) stays one
+    // widget's across the whole case.
+    char buf[4] = "";
+    const auto run_field = [&](const InputFrame& frame) -> bool {
+        gui.begin_frame(frame);
+        (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                       {0.0f, 0.0f, 400.0f, 300.0f});
+        const bool edited = ws::ui::gui::text_input(
+            gui, layout, kDefaultChrome, "field", buf, sizeof buf);
+        ws::ui::gui::end_panel(gui, layout);
+        gui.end_frame();
+        return edited;
+    };
+
+    // A press inside the field claims the focus the same frame; the
+    // release that follows settles it. Neither is an edit.
+    CHECK(!run_field(snap(60.0f, 20.0f, true, true)));
+    CHECK(!run_field(snap(60.0f, 20.0f, false, false, true)));
+
+    // Typing through the filter: insertable codepoints land in order,
+    // and cp 300 - not a byte - drops instead of aliasing into ','.
+    InputFrame typing = snap(-100.0f, -100.0f);
+    typing.text_input = {'a', 300u, 'b'};
+    CHECK(run_field(typing));
+    CHECK(std::strcmp(buf, "ab") == 0);
+
+    // Backspace eats the byte before the caret.
+    InputFrame del = snap(-100.0f, -100.0f);
+    del.key_pressed[static_cast<std::size_t>(keys::kBackspace)] = true;
+    CHECK(run_field(del));
+    CHECK(std::strcmp(buf, "a") == 0);
+
+    // End then typing appends: the caret key runs before the frame's
+    // codepoints land.
+    InputFrame append = snap(-100.0f, -100.0f);
+    append.key_pressed[static_cast<std::size_t>(keys::kEnd)] = true;
+    append.text_input = {'c'};
+    CHECK(run_field(append));
+    CHECK(std::strcmp(buf, "ac") == 0);
+
+    // Select all: a selection alone is not an edit - the frame reports
+    // false while the anchor and caret spread.
+    InputFrame select = snap(-100.0f, -100.0f);
+    select.key_down[static_cast<std::size_t>(keys::kLeftControl)] = true;
+    select.key_pressed[static_cast<std::size_t>(keys::kA)] = true;
+    CHECK(!run_field(select));
+
+    // Typing over the selection replaces it: one byte where two were.
+    InputFrame replace = snap(-100.0f, -100.0f);
+    replace.text_input = {'z'};
+    CHECK(run_field(replace));
+    CHECK(std::strcmp(buf, "z") == 0);
+
+    // The full-buffer drop: room for two more, four typed - the rest of
+    // the frame's text never lands and never splits the capacity.
+    InputFrame overfill = snap(-100.0f, -100.0f);
+    overfill.text_input = {'a', 'b', 'c', 'd'};
+    CHECK(run_field(overfill));
+    CHECK(std::strcmp(buf, "zab") == 0);
+
+    // An idle frame over the same field: nothing to report, nothing
+    // moved.
+    CHECK(!run_field(snap(-100.0f, -100.0f)));
+    CHECK(std::strcmp(buf, "zab") == 0);
+}
+
 TEST_CASE("fit_text truncates through the real font bake") {
     using ws::ui::r2d::Font;
     // 95 glyphs (ASCII 32..126, in order), every one advancing 10 px - a
