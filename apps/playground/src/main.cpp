@@ -186,11 +186,11 @@ protected:
         }
     }
 
-    void on_event(ws::ui::Event& event) override {
-        ws::ui::EventDispatcher dispatcher{event};
+    void on_event(ws::input::Event& event) override {
+        ws::input::EventDispatcher dispatcher{event};
         // GLFW key codes 0-255 match ASCII, so 'D' needs no GLFW header.
-        dispatcher.dispatch<ws::ui::KeyPressedEvent>(
-            [this](const ws::ui::KeyPressedEvent& e) {
+        dispatcher.dispatch<ws::input::KeyPressedEvent>(
+            [this](const ws::input::KeyPressedEvent& e) {
                 if (!e.repeat && e.keycode == 'D') {
                     show_imgui_ = !show_imgui_;
                     return true;
@@ -201,8 +201,8 @@ protected:
         // order. The drawn echo (screen block below) keeps the bake's
         // range - ASCII 32..126, the v1 font has no other glyphs; wider
         // codepoints are observed here but not shown.
-        dispatcher.dispatch<ws::ui::TextInputEvent>(
-            [this](const ws::ui::TextInputEvent& e) {
+        dispatcher.dispatch<ws::input::TextInputEvent>(
+            [this](const ws::input::TextInputEvent& e) {
                 if (e.codepoint >= 32u && e.codepoint <= 126u) {
                     if (typed_.size() >= kTypedMax) {
                         typed_.erase(typed_.begin());
@@ -211,8 +211,8 @@ protected:
                 }
                 return false;  // observed, never consumed
             });
-        dispatcher.dispatch<ws::ui::WindowResizeEvent>(
-            [](const ws::ui::WindowResizeEvent& e) {
+        dispatcher.dispatch<ws::input::WindowResizeEvent>(
+            [](const ws::input::WindowResizeEvent& e) {
                 ws::core::info("playground: resized to {}x{}", e.width, e.height);
                 return true;
             });
@@ -222,10 +222,10 @@ protected:
         namespace r2d = ws::ui::r2d;
 
         // --- gui module: input snapshot + the first real widget (Phases 1+5) ---
-        // The shell accumulates raw input into one InputFrame per frame
+        // The shell accumulates raw input into one ws::input::InputFrame per frame
         // and publishes it here; the context adopts the copy, widgets
         // consume it between begin_frame and end_frame.
-        gui_.begin_frame(ws::ui::gui::frame_input());
+        gui_.begin_frame(ws::input::frame_input());
 
         // A gui panel in screen space (framebuffer px, top-left origin),
         // drawn through r2d above the world quads. The panel widget draws
@@ -368,7 +368,7 @@ protected:
                                       static_cast<int>(sizeof(name_buf_)),
                                       120.0f * ui_scale_);
         if (gui_.is_focused(gui_.ids().id("name")) &&
-            gui_.input().key_pressed[ws::ui::gui::keys::kEnter]) {
+            gui_.input().key_pressed[ws::input::keys::kEnter]) {
             ws::core::info("playground: name \"{}\"", name_buf_);
         }
         // Clip proof: this quad pokes past the panel's bottom-right corner
@@ -452,11 +452,11 @@ protected:
 
         // --- multi-touch demo: trails + pinch-zoom off the raw table ---
         // The plan's gesture rule in miniature: the core ships the touch
-        // DATA (frame_input().touches, ids stable per contact), the app
+        // DATA (ws::input::frame_input().touches, ids stable per contact), the app
         // composes the gesture. This pass is a second consumer of the same
         // snapshot the gui ran on - widgets and app-side gestures coexist
         // without arbitration.
-        const ws::ui::gui::InputFrame& raw = ws::ui::gui::frame_input();
+        const ws::input::InputFrame& raw = ws::input::frame_input();
         update_touch_trails(raw);
         apply_pinch_zoom(raw);
         // The sound panel's per-frame pump: update() reaps the finished
@@ -633,7 +633,7 @@ protected:
 
             // Live proof of the gui input snapshot (Phase 1): raw input
             // straight from the shell, unaffected by these ImGui widgets.
-            const ws::ui::gui::InputFrame& in = gui_.input();
+            const ws::input::InputFrame& in = gui_.input();
             char line[96];
             std::snprintf(line, sizeof(line),
                           "gui mouse %.0f, %.0f px   down L%d M%d R%d",
@@ -840,12 +840,12 @@ private:
     // Appends each live contact's position to its trail (capped), and the
     // release frame's lift point closes it; a contact absent this frame
     // retracts one point per frame until its trail is gone.
-    void update_touch_trails(const ws::ui::gui::InputFrame& in) {
+    void update_touch_trails(const ws::input::InputFrame& in) {
         for (auto& entry : touch_trails_) {
             entry.second.down = false;  // re-marked by the frame below
         }
         for (int i = 0; i < in.touch_count; ++i) {
-            const ws::ui::gui::TouchPoint& t =
+            const ws::input::TouchPoint& t =
                 in.touches[static_cast<std::size_t>(i)];
             TouchTrail& trail = touch_trails_[t.id.value];
             if (t.down || t.released) {
@@ -877,11 +877,11 @@ private:
     // the window slider's range, so the two controls agree). A finger over
     // the gui is the widgets'; a third finger aborts the gesture until it
     // is two again.
-    void apply_pinch_zoom(const ws::ui::gui::InputFrame& in) {
-        const ws::ui::gui::TouchPoint* live[2] = {nullptr, nullptr};
+    void apply_pinch_zoom(const ws::input::InputFrame& in) {
+        const ws::input::TouchPoint* live[2] = {nullptr, nullptr};
         int downs = 0;
         for (int i = 0; i < in.touch_count; ++i) {
-            const ws::ui::gui::TouchPoint& t =
+            const ws::input::TouchPoint& t =
                 in.touches[static_cast<std::size_t>(i)];
             if (!t.down) {
                 continue;
@@ -899,7 +899,7 @@ private:
                 pages_panel_rect(frame.width, ui_scale_),
                 sound_panel_rect(frame.width, frame.height, ui_scale_),
                 net_.panel_bounds()};
-            for (const ws::ui::gui::TouchPoint* t : live) {
+            for (const ws::input::TouchPoint* t : live) {
                 for (const ws::ui::gui::Rect& panel : panels) {
                     if (panel.contains(t->x, t->y)) {
                         pinching = false;

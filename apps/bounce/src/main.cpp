@@ -296,7 +296,7 @@ class BounceApp final : public ws::ui::App {
     last_time_ = now;
     const float frame_dt = std::clamp(dt, 0.0f, 0.05f);
 
-    gui_.begin_frame(gui::frame_input());
+    gui_.begin_frame(ws::input::frame_input());
     r2d::begin();
 
     // Resize refit: FrameSize is the space the world lives in (DPI-correct,
@@ -341,8 +341,8 @@ class BounceApp final : public ws::ui::App {
                    status, font_, r2d::rgba(225, 225, 230));
 
     // Click-to-drop: anywhere the panel does not own. Read before
-    // end_frame() - the InputFrame belongs to this gui frame.
-    const auto& input = gui::frame_input();
+    // end_frame() - the ws::input::InputFrame belongs to this gui frame.
+    const auto& input = ws::input::frame_input();
     if (input.mouse_pressed[0] &&
         !panel_bounds.contains(input.mouse_x, input.mouse_y)) {
       spawn_drop(input.mouse_x, input.mouse_y);

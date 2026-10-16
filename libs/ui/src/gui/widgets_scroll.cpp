@@ -71,14 +71,14 @@ Rect begin_scroll_panel(GuiContext& gui, LayoutCursor& layout,
     // wheel - a desktop drag is a widget press, not a scroll gesture.
     const WidgetId drag_id = gui.ids().internal_id("drag");
     ScrollDragState& drag = gui.persistent_state<ScrollDragState>(drag_id);
-    const InputFrame& input = gui.input();
+    const ws::input::InputFrame& input = gui.input();
     const int touch_count =
-        std::min(input.touch_count, InputFrame::kMaxTouches);
+        std::min(input.touch_count, ws::input::InputFrame::kMaxTouches);
     // Sweep first: a track whose contact left the frame without a lift (a
     // platform contract violation) frees its slot - the same id-liveness
     // rule the context's own pointer tracks follow.
     for (ScrollDragTrack& track : drag.tracks) {
-        if (track.id == kNoPointer) {
+        if (track.id == ws::input::kNoPointer) {
             continue;
         }
         bool live = false;
@@ -91,12 +91,12 @@ Rect begin_scroll_panel(GuiContext& gui, LayoutCursor& layout,
         }
     }
     for (int i = 0; i < touch_count; ++i) {
-        const TouchPoint& point = input.touches[static_cast<std::size_t>(i)];
+        const ws::input::TouchPoint& point = input.touches[static_cast<std::size_t>(i)];
         ScrollDragTrack* track = drag_track_for(drag, point.id);
         if (track == nullptr) {
             continue;  // unreachable: the sweep keeps a slot free
         }
-        if (track->id == kNoPointer) {
+        if (track->id == ws::input::kNoPointer) {
             // Untracked: arm only on a fresh press inside the viewport,
             // and only while this stratum may take claims at all - the
             // modal veil blocks the raw-input arm exactly as it blocks
@@ -263,8 +263,8 @@ void end_scroll_panel(GuiContext& gui, LayoutCursor& layout,
         // stratum the veil has not closed.
         const Rect band{viewport.x + viewport.width - band_width, viewport.y,
                         band_width, viewport.height};
-        const InputFrame& input = gui.input();
-        const auto grab = [&](PointerId pointer, float py) {
+        const ws::input::InputFrame& input = gui.input();
+        const auto grab = [&](ws::input::PointerId pointer, float py) {
             const float thumb_y = thumb_top_for(scroll.offset);
             if (py < thumb_y || py > thumb_y + thumb_height) {
                 // Off the thumb: jump it centered under the pointer,
@@ -291,12 +291,12 @@ void end_scroll_panel(GuiContext& gui, LayoutCursor& layout,
         if (gui.claims_open()) {
             if (input.mouse_present && input.mouse_pressed[0] &&
                 band.contains(input.mouse_x, input.mouse_y)) {
-                grab(kMousePointerId, input.mouse_y);
+                grab(ws::input::kMousePointerId, input.mouse_y);
             }
             const int touch_count =
-                std::min(input.touch_count, InputFrame::kMaxTouches);
+                std::min(input.touch_count, ws::input::InputFrame::kMaxTouches);
             for (int i = 0; i < touch_count; ++i) {
-                const TouchPoint& point =
+                const ws::input::TouchPoint& point =
                     input.touches[static_cast<std::size_t>(i)];
                 if (point.pressed && band.contains(point.x, point.y)) {
                     grab(point.id, point.y);
@@ -308,10 +308,10 @@ void end_scroll_panel(GuiContext& gui, LayoutCursor& layout,
         // the mouse, a touch and a bridged finger all drag their grab.
         // A lifted or vanished pointer ends the drag - nothing lands on
         // the release frame.
-        if (scroll.thumb != kNoPointer) {
-            const PointerView* view = gui.pointer(scroll.thumb);
+        if (scroll.thumb != ws::input::kNoPointer) {
+            const ws::input::PointerView* view = gui.pointer(scroll.thumb);
             if (view == nullptr || !view->down) {
-                scroll.thumb = kNoPointer;
+                scroll.thumb = ws::input::kNoPointer;
             } else {
                 scroll.offset = std::min(
                     std::max((view->y - scroll.thumb_grab - viewport.y) /

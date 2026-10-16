@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace ws::ui {
+namespace ws::input {
 
 // Hazel-style event types. Key and mouse codes are plain ints (GLFW's
 // numbering: mouse buttons are 0/1/2, printable keys match ASCII), so no
@@ -146,9 +146,9 @@ struct TextInputEvent : Event {
 
 // Routes one event to typed handlers instead of a switch on type():
 //
-//     void on_event(ws::ui::Event& e) override {
-//         ws::ui::EventDispatcher d{e};
-//         d.dispatch<ws::ui::WindowResizeEvent>(
+//     void on_event(ws::input::Event& e) override {
+//         ws::input::EventDispatcher d{e};
+//         d.dispatch<ws::input::WindowResizeEvent>(
 //             [this](auto& ev) { return on_resize(ev); });
 //     }
 //
@@ -173,4 +173,4 @@ private:
     Event& event_;
 };
 
-}  // namespace ws::ui
+}  // namespace ws::input

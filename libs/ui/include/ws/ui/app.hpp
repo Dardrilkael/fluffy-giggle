@@ -8,6 +8,11 @@ struct android_app;  // opaque native_app_glue handle; never defined in a
                      // public header (no NDK include needed to read this)
 #endif
 
+namespace ws::input {
+class Event;  // the event family lives in ws::input (stage 3a): the shell
+              // queues these between frames and delivers each to on_event()
+}  // namespace ws::input
+
 namespace ws::ui {
 
 struct AppConfig {
@@ -22,7 +27,6 @@ struct AppConfig {
 #endif
 };
 
-class Event;
 class RenderCommandQueue;
 
 namespace gui {
@@ -75,7 +79,7 @@ protected:
     // consumed (mouse over a widget, text input) arrive with handled == true;
     // EventDispatcher skips those, so handlers rarely check the flag.
     // Include <ws/input/event.hpp> for the event types. Default is empty.
-    virtual void on_event(Event&) {}
+    virtual void on_event(ws::input::Event&) {}
 
     // Called once per frame, between NewFrame and Render. Draw widgets /
     // plots here and submit command-queue work. Do NOT call ImGui::Render()

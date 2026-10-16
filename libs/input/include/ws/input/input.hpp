@@ -3,19 +3,19 @@
 // The input surface, gathered under one GLFW-free header: the event types
 // (event.hpp, included so this one header is the whole story) plus the
 // raw-input snapshot the platform layer fills from physical input. Nothing
-// here needs GLFW or Android to compile or link - the shell's platform TUs
-// are the only writers of an InputFrame, key/mouse codes are GLFW's
-// numbering carried as plain ints (the events' rule), and the gui only
-// READS the result. The namespace stays ws::ui::gui for now: renaming rides
-// this family's promotion to ws::input, not this header move.
+// here needs GLFW or Android to compile or link - ws::ui's platform TUs
+// (src/platform there) are the only writers of an InputFrame, key/mouse
+// codes are GLFW's numbering carried as plain ints (the events' rule), and
+// the gui only READS the result. The whole family lives in ws::input -
+// phase B of the promotion landed the namespace with the lib move.
 
-#include <ws/ui/event.hpp>
+#include <ws/input/event.hpp>
 
 #include <array>
 #include <cstdint>
 #include <vector>
 
-namespace ws::ui::gui {
+namespace ws::input {
 
 // One frame's input as a snapshot. The platform layer (the shell's GLFW
 // callbacks) accumulates raw events between frames and publishes exactly
@@ -26,7 +26,7 @@ namespace ws::ui::gui {
 // Mouse coordinates are framebuffer pixels with the origin top-left (the
 // space of r2d screen mode and Rect), not GLFW screen coordinates - the
 // platform layer scales while filling. Button and key codes are the GLFW
-// codes ws::ui events already carry. Touch contacts arrive through the
+// codes the event types already carry. Touch contacts arrive through the
 // touch_* methods, keyed by the platform's per-contact id (Android's
 // multi-touch path; desktop GLFW synthesizes none).
 //
@@ -250,4 +250,11 @@ private:
 // like r2d::frame_size()).
 const InputFrame& frame_input();
 
-}  // namespace ws::ui::gui
+// The install seam behind frame_input(), not for apps: ws::ui's App::run()
+// points the getter at its live accumulator for the duration of the run and
+// clears it at shutdown - after which frame_input() reports the empty
+// frame above. Declared here (public) because the shell is another lib
+// now: app.cpp reaches it through this header, not gui internals.
+void set_active_input(InputFrame* input);
+
+}  // namespace ws::input

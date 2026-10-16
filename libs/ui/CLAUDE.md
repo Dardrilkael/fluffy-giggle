@@ -140,10 +140,10 @@ libs/ui/
   `on_event` and dispatch to typed handlers instead of a switch:
 
 ```cpp
-void on_event(ws::ui::Event& e) override {
-    ws::ui::EventDispatcher d(e);
-    d.dispatch<ws::ui::WindowResizeEvent>([this](auto& ev){ return on_resize(ev); });
-    d.dispatch<ws::ui::KeyPressedEvent>([this](auto& ev){ return on_key(ev); });
+void on_event(ws::input::Event& e) override {
+    ws::input::EventDispatcher d(e);
+    d.dispatch<ws::input::WindowResizeEvent>([this](auto& ev){ return on_resize(ev); });
+    d.dispatch<ws::input::KeyPressedEvent>([this](auto& ev){ return on_key(ev); });
 }
 ```
 

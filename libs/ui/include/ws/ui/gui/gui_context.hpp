@@ -24,7 +24,7 @@ namespace ws::ui::gui {
 // `pointer` names the pointer the fold came from - the lowest pointer
 // slot with a claim (the mouse outranks touches, so the bridged finger
 // resolves to the mouse it mirrors) - so a widget that tracks its drag
-// follows its OWN finger, never the mouse. kNoPointer when nothing did.
+// follows its OWN finger, never the mouse. ws::input::kNoPointer when nothing did.
 struct HitTest {
     bool hovered = false;   // the SETTLED visual: this widget was last
                              // frame's final hot for one of the pointers and
@@ -41,7 +41,7 @@ struct HitTest {
     bool pressed = false;   // active on this widget: the press started inside
     bool clicked = false;   // released inside while active = a full click
     bool released = false;  // a pointer went up this frame while this widget was active
-    PointerId pointer = kNoPointer;  // the pointer behind the fold
+    ws::input::PointerId pointer = ws::input::kNoPointer;  // the pointer behind the fold
 };
 
 // The gui's layer strata - the same numbers r2d::set_layer sorts by, so
@@ -105,7 +105,7 @@ public:
     // return never closed cannot stick its modal veil onto the next
     // frame. Widget calls are legal only between begin_frame and
     // end_frame.
-    void begin_frame(const InputFrame& input);
+    void begin_frame(const ws::input::InputFrame& input);
     // Closes the frame: drops a press whose owner vanished before its
     // release frame (the UI changed mid-drag), per pointer, so stale
     // ownership never blocks the next frame's hot claims - and a
@@ -237,11 +237,11 @@ public:
     // track drags or sweeps - only the owner's track survives, the
     // losers drop theirs silently (their child keeps the tap in
     // progress, and the cancel they would have fired never does).
-    void claim_scroll_arm(PointerId pointer, const void* key);
+    void claim_scroll_arm(ws::input::PointerId pointer, const void* key);
     // The pointer's current arm holder - null when no panel claimed
     // it, and from the release frame on (the claim dies with the
     // press it was claimed for).
-    const void* scroll_arm_owner(PointerId pointer) const;
+    const void* scroll_arm_owner(ws::input::PointerId pointer) const;
 
     // True when the innermost open layer scope may take new pointer
     // claims right now: false only under a raised modal veil from a
@@ -420,38 +420,38 @@ public:
 
     // --- the pieces widget functions receive ---
     IdStack& ids() { return ids_; }
-    const InputFrame& input() const { return input_; }
+    const ws::input::InputFrame& input() const { return input_; }
 
     // --- hot/active inspection (drag math etc.), per pointer ---
     // The no-arg forms answer for the mouse - the pre-touch API, unchanged
-    // in meaning, so an absent mouse (InputFrame::mouse_present false)
+    // in meaning, so an absent mouse (ws::input::InputFrame::mouse_present false)
     // answers invalid: no mouse, no mouse's claims. `pointer` is a
-    // mouse/touch pointer id as the frame sees it (kMousePointerId for the
+    // mouse/touch pointer id as the frame sees it (ws::input::kMousePointerId for the
     // mouse); an unknown id answers invalid.
-    WidgetId hot_id(PointerId pointer = kMousePointerId) const;
-    WidgetId active_id(PointerId pointer = kMousePointerId) const;
+    WidgetId hot_id(ws::input::PointerId pointer = ws::input::kMousePointerId) const;
+    WidgetId active_id(ws::input::PointerId pointer = ws::input::kMousePointerId) const;
     // The am-I spelling of the two above: true when `id` is this
     // pointer's hot/active widget right now. kInvalidWidgetId is pinned
     // to false - "no widget" must never match, even though hot_id()
     // returns that very sentinel when nothing is hot; an unknown pointer
     // answers false the same way.
-    bool is_hot(WidgetId id, PointerId pointer = kMousePointerId) const;
-    bool is_active(WidgetId id, PointerId pointer = kMousePointerId) const;
-    // The pointer owning a press on `id` right now, kNoPointer when none.
+    bool is_hot(WidgetId id, ws::input::PointerId pointer = ws::input::kMousePointerId) const;
+    bool is_active(WidgetId id, ws::input::PointerId pointer = ws::input::kMousePointerId) const;
+    // The pointer owning a press on `id` right now, ws::input::kNoPointer when none.
     // Lowest slot wins - deterministic, and the mouse outranks touches, so
     // the bridged finger resolves to the mouse it mirrors.
-    PointerId owning_pointer(WidgetId id) const;
+    ws::input::PointerId owning_pointer(WidgetId id) const;
     // The frame's view of pointer `id` (the mouse or any touch), null when
     // no such pointer exists this frame. A widget that tracks its drag
     // follows its own pointer through this - never the raw mouse fields.
-    const PointerView* pointer(PointerId id) const;
+    const ws::input::PointerView* pointer(ws::input::PointerId id) const;
     // Ends `pointer`'s press with no click - a gesture (a scroll drag)
     // consumed it. From this frame on the pointer claims neither hot nor
     // press until it lifts, so widgets it sweeps while dragging see no
     // hover and no press; on release nothing clicks. Cancelling a bridged
     // touch cancels the mouse it mirrors (and vice versa): the bridge is
     // one finger in two pointers, and a gesture that eats one eats both.
-    void cancel_pointer(PointerId pointer);
+    void cancel_pointer(ws::input::PointerId pointer);
 
 private:
     // One side table per state type, created on first use and owned by
@@ -483,7 +483,7 @@ private:
     bool is_registered_focusable(WidgetId id) const;
 
     IdStack ids_;
-    InputFrame input_;  // copied in by begin_frame - the frame's snapshot
+    ws::input::InputFrame input_;  // copied in by begin_frame - the frame's snapshot
 
     // The installed clipboard pair (unset until the shell wires one).
     ClipboardGet clipboard_get_;
@@ -496,7 +496,7 @@ private:
     // `cancelled` marks a gesture-consumed press (cancel_pointer): the
     // pointer claims nothing until it lifts, and the flag lifts with it.
     struct PointerTrack {
-        PointerId id = kNoPointer;
+        ws::input::PointerId id = ws::input::kNoPointer;
         WidgetId hot = kInvalidWidgetId;      // this frame's claim so far
         std::uint32_t hot_layer = 0;          // the claiming widget's stratum
         WidgetId hot_prev = kInvalidWidgetId;  // last frame's FINAL hot: the
@@ -515,10 +515,10 @@ private:
         const void* scroll_arm = nullptr;
         std::uint32_t scroll_arm_layer = 0;  // the claiming panel's stratum
     };
-    std::array<PointerTrack, InputFrame::kMaxPointers> pointers_{};
+    std::array<PointerTrack, ws::input::InputFrame::kMaxPointers> pointers_{};
     // The frame's pointers, aligned to pointers_ (slot i of both speaks
     // about the same pointer), and how many slots are live this frame.
-    std::array<PointerView, InputFrame::kMaxPointers> frame_pointers_{};
+    std::array<ws::input::PointerView, ws::input::InputFrame::kMaxPointers> frame_pointers_{};
     int pointer_count_ = 0;
 
     // --- keyboard focus (state()/register_focusable) ---

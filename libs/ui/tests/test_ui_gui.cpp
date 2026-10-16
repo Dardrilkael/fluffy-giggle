@@ -28,7 +28,7 @@
 namespace {
 
 using ws::ui::gui::GuiContext;
-using ws::ui::gui::InputFrame;
+using ws::input::InputFrame;
 using ws::ui::gui::LayoutCursor;
 using ws::ui::gui::kDefaultChrome;
 
@@ -99,7 +99,7 @@ TEST_CASE("a full click fires exactly once through the seam") {
 }
 
 TEST_CASE("text_input edits through its verbs: type, delete, replace") {
-    namespace keys = ws::ui::gui::keys;
+    namespace keys = ws::input::keys;
 
     ws::ui::gui_test::stub.reset();
     GuiContext gui;
@@ -227,8 +227,8 @@ TEST_CASE("layer scopes drive r2d::set_layer through the seam") {
 }
 
 TEST_CASE("the InputFrame touch bridge runs without the platform layer") {
-    using ws::ui::gui::PointerId;
-    using ws::ui::gui::PointerView;
+    using ws::input::PointerId;
+    using ws::input::PointerView;
 
     InputFrame frame;
     const PointerId finger{7u};

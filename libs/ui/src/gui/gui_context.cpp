@@ -78,7 +78,7 @@ std::uint64_t mix_id(std::uint64_t x) {
 
 // --- GuiContext: per-pointer hot/active hit-testing + persistent side tables ------
 
-void GuiContext::begin_frame(const InputFrame& input) {
+void GuiContext::begin_frame(const ws::input::InputFrame& input) {
     input_ = input;
     // This frame's hit-test census starts empty: bumping the generation
     // makes every slot read "unused" without touching one. The wrap
@@ -130,11 +130,11 @@ void GuiContext::begin_frame(const InputFrame& input) {
     // here. Hot re-claims every frame, on every track, as the widgets'
     // hit tests run.
     pointer_count_ = input_.gather_pointers(frame_pointers_);
-    std::array<PointerTrack, InputFrame::kMaxPointers> matched{};
-    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+    std::array<PointerTrack, ws::input::InputFrame::kMaxPointers> matched{};
+    const int count = std::min(pointer_count_, ws::input::InputFrame::kMaxPointers);
     for (int p = 0; p < count; ++p) {
-        const PointerId id = frame_pointers_[static_cast<std::size_t>(p)].id;
-        for (int t = 0; t < InputFrame::kMaxPointers; ++t) {
+        const ws::input::PointerId id = frame_pointers_[static_cast<std::size_t>(p)].id;
+        for (int t = 0; t < ws::input::InputFrame::kMaxPointers; ++t) {
             if (pointers_[static_cast<std::size_t>(t)].id == id) {
                 matched[p] = pointers_[static_cast<std::size_t>(t)];
                 break;
@@ -163,7 +163,7 @@ void GuiContext::end_frame() {
     // release edge. Each pointer's resolved hot becomes hot_prev on the
     // way out: the settled hover next frame reports, straight from the
     // last thing the claims resolved to.
-    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+    const int count = std::min(pointer_count_, ws::input::InputFrame::kMaxPointers);
     for (int p = 0; p < count; ++p) {
         PointerTrack& track = pointers_[static_cast<std::size_t>(p)];
         track.hot_prev = track.hot;
@@ -198,10 +198,10 @@ void GuiContext::end_frame() {
     // resolving here, after every widget registered, is what makes the
     // order the whole frame's. The net move lands mod the list - stepping
     // one at a time and one net hop are the same landing.
-    if (input_.key_pressed[static_cast<std::size_t>(keys::kTab)]) {
+    if (input_.key_pressed[static_cast<std::size_t>(ws::input::keys::kTab)]) {
         const bool shift =
-            input_.key_down[static_cast<std::size_t>(keys::kLeftShift)] ||
-            input_.key_down[static_cast<std::size_t>(keys::kRightShift)];
+            input_.key_down[static_cast<std::size_t>(ws::input::keys::kLeftShift)] ||
+            input_.key_down[static_cast<std::size_t>(ws::input::keys::kRightShift)];
         pending_nav_ += shift ? -1 : 1;
     }
     if (pending_nav_ != 0 && focusable_count_ > 0) {
@@ -445,8 +445,8 @@ bool GuiContext::wheel_won(const void* key) const {
     return key != nullptr && key == wheel_winner_;
 }
 
-void GuiContext::claim_scroll_arm(PointerId pointer, const void* key) {
-    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+void GuiContext::claim_scroll_arm(ws::input::PointerId pointer, const void* key) {
+    const int count = std::min(pointer_count_, ws::input::InputFrame::kMaxPointers);
     for (int p = 0; p < count; ++p) {
         PointerTrack& track = pointers_[static_cast<std::size_t>(p)];
         if (track.id != pointer) {
@@ -465,8 +465,8 @@ void GuiContext::claim_scroll_arm(PointerId pointer, const void* key) {
     }
 }
 
-const void* GuiContext::scroll_arm_owner(PointerId pointer) const {
-    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+const void* GuiContext::scroll_arm_owner(ws::input::PointerId pointer) const {
+    const int count = std::min(pointer_count_, ws::input::InputFrame::kMaxPointers);
     for (int p = 0; p < count; ++p) {
         const PointerTrack& track = pointers_[static_cast<std::size_t>(p)];
         if (track.id == pointer) {
@@ -512,17 +512,17 @@ GuiContext::HitCensus::Result GuiContext::HitCensus::note(WidgetId id) {
     return Result::full;  // every slot holds some other id of this frame
 }
 
-void GuiContext::cancel_pointer(PointerId pointer) {
+void GuiContext::cancel_pointer(ws::input::PointerId pointer) {
     // The bridge mirrors the first finger into the mouse: a gesture that
     // consumes one consumes both, or the mirror would keep the child's
     // press alive and click it on release.
-    PointerId mirror = kNoPointer;
-    const PointerId bridged = input_.bridged_touch();
-    if (bridged != kNoPointer &&
-        (pointer == bridged || pointer == kMousePointerId)) {
-        mirror = (pointer == bridged) ? kMousePointerId : bridged;
+    ws::input::PointerId mirror = ws::input::kNoPointer;
+    const ws::input::PointerId bridged = input_.bridged_touch();
+    if (bridged != ws::input::kNoPointer &&
+        (pointer == bridged || pointer == ws::input::kMousePointerId)) {
+        mirror = (pointer == bridged) ? ws::input::kMousePointerId : bridged;
     }
-    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+    const int count = std::min(pointer_count_, ws::input::InputFrame::kMaxPointers);
     for (int p = 0; p < count; ++p) {
         PointerTrack& track = pointers_[static_cast<std::size_t>(p)];
         if (track.id != pointer && track.id != mirror) {
@@ -598,14 +598,14 @@ HitTest GuiContext::hit_test(WidgetId id, const Rect& rect) {
     // `hit.pointer` (deterministic - the bridged finger resolves to the
     // mouse it mirrors).
     HitTest hit;
-    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+    const int count = std::min(pointer_count_, ws::input::InputFrame::kMaxPointers);
     for (int p = 0; p < count; ++p) {
         const HitTest part = hit_test_pointer(id, claimable, p);
         hit.hovered = hit.hovered || part.hovered;
         hit.pressed = hit.pressed || part.pressed;
         hit.clicked = hit.clicked || part.clicked;
         hit.released = hit.released || part.released;
-        if (hit.pointer == kNoPointer) {
+        if (hit.pointer == ws::input::kNoPointer) {
             hit.pointer = part.pointer;  // first slot with a claim sticks
         }
     }
@@ -648,8 +648,8 @@ WidgetResult GuiContext::state(WidgetId id, const Rect& bounds,
     // claiming pointer's own `pressed` flag - reading the edge, not the
     // click, is what lets a press that slips off its widget keep the
     // focus it took.
-    if (result.hit.pressed && result.hit.pointer != kNoPointer) {
-        const PointerView* view = pointer(result.hit.pointer);
+    if (result.hit.pressed && result.hit.pointer != ws::input::kNoPointer) {
+        const ws::input::PointerView* view = pointer(result.hit.pointer);
         if (view != nullptr && view->pressed &&
             is_registered_focusable(id)) {
             focused_ = id;
@@ -675,7 +675,7 @@ WidgetResult GuiContext::state(WidgetId id, const Rect& bounds,
 // widget's stratum is the innermost open begin_layer scope.
 HitTest GuiContext::hit_test_pointer(WidgetId id, const Rect& rect,
                                      int slot) {
-    const PointerView& view = frame_pointers_[static_cast<std::size_t>(slot)];
+    const ws::input::PointerView& view = frame_pointers_[static_cast<std::size_t>(slot)];
     PointerTrack& track = pointers_[static_cast<std::size_t>(slot)];
     const bool inside = rect.contains(view.x, view.y);
     const std::uint32_t layer = current_layer_value();
@@ -785,8 +785,8 @@ HitTest GuiContext::hit_test_pointer(WidgetId id, const Rect& rect,
     return part;
 }
 
-WidgetId GuiContext::hot_id(PointerId pointer) const {
-    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+WidgetId GuiContext::hot_id(ws::input::PointerId pointer) const {
+    const int count = std::min(pointer_count_, ws::input::InputFrame::kMaxPointers);
     for (int p = 0; p < count; ++p) {
         if (pointers_[static_cast<std::size_t>(p)].id == pointer) {
             return pointers_[static_cast<std::size_t>(p)].hot;
@@ -795,8 +795,8 @@ WidgetId GuiContext::hot_id(PointerId pointer) const {
     return kInvalidWidgetId;  // no such pointer this frame
 }
 
-WidgetId GuiContext::active_id(PointerId pointer) const {
-    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+WidgetId GuiContext::active_id(ws::input::PointerId pointer) const {
+    const int count = std::min(pointer_count_, ws::input::InputFrame::kMaxPointers);
     for (int p = 0; p < count; ++p) {
         if (pointers_[static_cast<std::size_t>(p)].id == pointer) {
             return pointers_[static_cast<std::size_t>(p)].active;
@@ -805,31 +805,31 @@ WidgetId GuiContext::active_id(PointerId pointer) const {
     return kInvalidWidgetId;  // no such pointer this frame
 }
 
-bool GuiContext::is_hot(WidgetId id, PointerId pointer) const {
+bool GuiContext::is_hot(WidgetId id, ws::input::PointerId pointer) const {
     // kInvalidWidgetId is "no widget" - it must never match, even though
     // hot_id() returns it for an idle or unknown pointer.
     return id != kInvalidWidgetId && hot_id(pointer) == id;
 }
 
-bool GuiContext::is_active(WidgetId id, PointerId pointer) const {
+bool GuiContext::is_active(WidgetId id, ws::input::PointerId pointer) const {
     return id != kInvalidWidgetId && active_id(pointer) == id;
 }
 
-PointerId GuiContext::owning_pointer(WidgetId id) const {
+ws::input::PointerId GuiContext::owning_pointer(WidgetId id) const {
     // Lowest live slot whose press is on `id` - with the bridge's mouse
     // mirroring the first finger, that means the mouse slot wins ties
     // (the documented duplicate), deterministically.
-    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+    const int count = std::min(pointer_count_, ws::input::InputFrame::kMaxPointers);
     for (int p = 0; p < count; ++p) {
         if (pointers_[static_cast<std::size_t>(p)].active == id) {
             return pointers_[static_cast<std::size_t>(p)].id;
         }
     }
-    return kNoPointer;
+    return ws::input::kNoPointer;
 }
 
-const PointerView* GuiContext::pointer(PointerId id) const {
-    const int count = std::min(pointer_count_, InputFrame::kMaxPointers);
+const ws::input::PointerView* GuiContext::pointer(ws::input::PointerId id) const {
+    const int count = std::min(pointer_count_, ws::input::InputFrame::kMaxPointers);
     for (int p = 0; p < count; ++p) {
         if (frame_pointers_[static_cast<std::size_t>(p)].id == id) {
             return &frame_pointers_[static_cast<std::size_t>(p)];

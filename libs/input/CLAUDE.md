@@ -23,8 +23,6 @@ platform header anywhere under `include/`.
 - ws::ui's platform TUs (src/platform there: window_glfw/window_android)
   are the ONLY writers of an InputFrame; this lib never reaches back up -
   ws::ui links ws::input, never the reverse.
-- The namespace is still ws::ui::gui in phase A of the promotion; phase B
-  sweeps the whole family (events included) to ws::input.
 
 ## Tests
 - `tests/test_input.cpp`: headless - no window, no GPU, no platform TU.

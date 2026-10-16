@@ -20,17 +20,17 @@
 
 namespace ws::ui {
 
-// Every platform event funnels its Event through this single sink; the
+// Every platform event funnels its ws::input::Event through this single sink; the
 // callbacks that feed it are file-local in the platform TU.
 //
 // `input` is the parallel gui-library tap: the same raw events accumulate
-// one ws::ui::gui::InputFrame per frame, independent of the event stream -
+// one ws::input::InputFrame per frame, independent of the event stream -
 // so the gui snapshot stays unfiltered even while ImGui (or the app's
 // on_event) consumes the same physical input. The gui library hit-tests for
 // itself. Null until the shell wires it; every source null-checks.
 struct WindowEventSink {
-    std::function<void(Event&)> forward;
-    gui::InputFrame* input = nullptr;
+    std::function<void(ws::input::Event&)> forward;
+    ws::input::InputFrame* input = nullptr;
 };
 
 // Everything the shell needs from the windowing platform, and nothing more.

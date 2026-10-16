@@ -151,11 +151,11 @@ VkFormat choose_depth_format(VkPhysicalDevice physical) {
 
 // Every concrete event type. The per-frame queue holds events by value -
 // no heap per event, and no vtable anywhere in the event system.
-using AnyEvent = std::variant<WindowCloseEvent, WindowResizeEvent, KeyPressedEvent,
-                             KeyReleasedEvent, MouseButtonPressedEvent,
-                             MouseButtonReleasedEvent, MouseMovedEvent,
-                             MouseScrolledEvent, TouchPressedEvent,
-                             TouchMovedEvent, TouchReleasedEvent, TextInputEvent>;
+using AnyEvent = std::variant<ws::input::WindowCloseEvent, ws::input::WindowResizeEvent, ws::input::KeyPressedEvent,
+                             ws::input::KeyReleasedEvent, ws::input::MouseButtonPressedEvent,
+                             ws::input::MouseButtonReleasedEvent, ws::input::MouseMovedEvent,
+                             ws::input::MouseScrolledEvent, ws::input::TouchPressedEvent,
+                             ws::input::TouchMovedEvent, ws::input::TouchReleasedEvent, ws::input::TextInputEvent>;
 
 // WS_UI_VALIDATION opt-in: the debug-utils callback funnelling the
 // validation layer's messages into ws::core's log (the layer itself is
@@ -284,12 +284,12 @@ struct App::Impl {
     // once per queued event, before on_update().
     WindowEventSink event_sink_;
     std::vector<AnyEvent> event_queue_;
-    std::optional<MouseMovedEvent> pending_mouse_move_;  // coalesced: latest wins
-    std::optional<MouseScrolledEvent> pending_scroll_;   // coalesced: deltas summed
+    std::optional<ws::input::MouseMovedEvent> pending_mouse_move_;  // coalesced: latest wins
+    std::optional<ws::input::MouseScrolledEvent> pending_scroll_;   // coalesced: deltas summed
     // One pending move per touch contact, latest wins - every moving finger
     // keeps its own slot, so no finger's final position is lost at a busy
     // frame boundary (pending_mouse_move_'s rule, per pointer id).
-    std::array<std::optional<TouchMovedEvent>, gui::InputFrame::kMaxTouches>
+    std::array<std::optional<ws::input::TouchMovedEvent>, ws::input::InputFrame::kMaxTouches>
         pending_touch_moves_{};
     bool touch_move_overflow_warned_ = false;
 
@@ -319,9 +319,9 @@ struct App::Impl {
     // tap (src/platform/window_glfw.cpp / src/platform/window_android.cpp, through
     // WindowEventSink::input). main_loop clears
     // the per-frame edges at the top of each iteration; on_update reads
-    // the snapshot through ws::ui::gui::frame_input() for the duration of
+    // the snapshot through ws::input::frame_input() for the duration of
     // the run.
-    gui::InputFrame gui_input_;
+    ws::input::InputFrame gui_input_;
 
     ~Impl() { shutdown(); }
 
@@ -331,24 +331,24 @@ struct App::Impl {
     // focused, ...). Deliberately evaluated at event time - the flags were
     // recomputed at the last NewFrame, which is the standard Hazel-style
     // approximation. Window close/resize never count as captured.
-    bool imgui_wants(const Event& event) const {
+    bool imgui_wants(const ws::input::Event& event) const {
         if (ImGui::GetCurrentContext() == nullptr) {
             return false;  // events before init_imgui(): nothing owns input yet
         }
         const ImGuiIO& io = ImGui::GetIO();
         switch (event.type()) {
-            case EventType::KeyPressed:
-            case EventType::KeyReleased:
-            case EventType::TextInput:
+            case ws::input::EventType::KeyPressed:
+            case ws::input::EventType::KeyReleased:
+            case ws::input::EventType::TextInput:
                 return io.WantCaptureKeyboard;
-            case EventType::MouseButtonPressed:
-            case EventType::MouseButtonReleased:
-            case EventType::MouseMoved:
-            case EventType::MouseScrolled:
+            case ws::input::EventType::MouseButtonPressed:
+            case ws::input::EventType::MouseButtonReleased:
+            case ws::input::EventType::MouseMoved:
+            case ws::input::EventType::MouseScrolled:
                 return io.WantCaptureMouse;
-            case EventType::TouchPressed:
-            case EventType::TouchMoved:
-            case EventType::TouchReleased:
+            case ws::input::EventType::TouchPressed:
+            case ws::input::EventType::TouchMoved:
+            case ws::input::EventType::TouchReleased:
                 // Never gated: ImGui is fed by the primary-touch bridge
                 // (the platform mirrors it into io), not by these - so a
                 // widget over the finger keeps its unfiltered stream.
@@ -362,28 +362,28 @@ struct App::Impl {
     // pre-marked handled (the app's dispatcher skips it, but still observes
     // the event); resize also flags the swapchain rebuild here, before the
     // app gets a chance to consume the event.
-    void forward_event(Event& event) {
+    void forward_event(ws::input::Event& event) {
         if (imgui_wants(event)) {
             event.handled = true;
         }
         // No default: /w44062 (cmake/WsWarnings.cmake; the -Wswitch
-        // counterpart on gcc/clang) fails the build if a new EventType is
+        // counterpart on gcc/clang) fails the build if a new ws::input::EventType is
         // added without a case here, so no event can be silently dropped.
         // A new event also needs an AnyEvent alternative above - the
         // variant rejects types it cannot hold.
         switch (event.type()) {
-            case EventType::WindowResize:
+            case ws::input::EventType::WindowResize:
                 rebuild_swapchain = true;
-                event_queue_.push_back(static_cast<WindowResizeEvent&>(event));
+                event_queue_.push_back(static_cast<ws::input::WindowResizeEvent&>(event));
                 break;
-            case EventType::MouseMoved:
-                pending_mouse_move_ = static_cast<MouseMovedEvent&>(event);
+            case ws::input::EventType::MouseMoved:
+                pending_mouse_move_ = static_cast<ws::input::MouseMovedEvent&>(event);
                 break;
-            case EventType::MouseScrolled: {
+            case ws::input::EventType::MouseScrolled: {
                 // Offsets are per-event deltas, not positions: sum them, or
                 // ticks arriving between frames would be lost.
-                const MouseScrolledEvent& scrolled =
-                    static_cast<MouseScrolledEvent&>(event);
+                const ws::input::MouseScrolledEvent& scrolled =
+                    static_cast<ws::input::MouseScrolledEvent&>(event);
                 if (pending_scroll_) {
                     pending_scroll_->x_offset += scrolled.x_offset;
                     pending_scroll_->y_offset += scrolled.y_offset;
@@ -392,33 +392,33 @@ struct App::Impl {
                 }
                 break;
             }
-            case EventType::WindowClose:
-                event_queue_.push_back(static_cast<WindowCloseEvent&>(event));
+            case ws::input::EventType::WindowClose:
+                event_queue_.push_back(static_cast<ws::input::WindowCloseEvent&>(event));
                 break;
-            case EventType::KeyPressed:
-                event_queue_.push_back(static_cast<KeyPressedEvent&>(event));
+            case ws::input::EventType::KeyPressed:
+                event_queue_.push_back(static_cast<ws::input::KeyPressedEvent&>(event));
                 break;
-            case EventType::KeyReleased:
-                event_queue_.push_back(static_cast<KeyReleasedEvent&>(event));
+            case ws::input::EventType::KeyReleased:
+                event_queue_.push_back(static_cast<ws::input::KeyReleasedEvent&>(event));
                 break;
-            case EventType::MouseButtonPressed:
-                event_queue_.push_back(static_cast<MouseButtonPressedEvent&>(event));
+            case ws::input::EventType::MouseButtonPressed:
+                event_queue_.push_back(static_cast<ws::input::MouseButtonPressedEvent&>(event));
                 break;
-            case EventType::MouseButtonReleased:
-                event_queue_.push_back(static_cast<MouseButtonReleasedEvent&>(event));
+            case ws::input::EventType::MouseButtonReleased:
+                event_queue_.push_back(static_cast<ws::input::MouseButtonReleasedEvent&>(event));
                 break;
-            case EventType::TouchPressed:
-                event_queue_.push_back(static_cast<TouchPressedEvent&>(event));
+            case ws::input::EventType::TouchPressed:
+                event_queue_.push_back(static_cast<ws::input::TouchPressedEvent&>(event));
                 break;
-            case EventType::TouchMoved: {
+            case ws::input::EventType::TouchMoved: {
                 // Latest position per pointer id - pending_mouse_move_'s
                 // rule, one slot per contact. A table with no id match and
                 // no free slot means more distinct movers than the touch
                 // cap ever admits (hand-rolled emitters only): drop + warn
                 // once.
-                const TouchMovedEvent& moved =
-                    static_cast<TouchMovedEvent&>(event);
-                std::optional<TouchMovedEvent>* slot = nullptr;
+                const ws::input::TouchMovedEvent& moved =
+                    static_cast<ws::input::TouchMovedEvent&>(event);
+                std::optional<ws::input::TouchMovedEvent>* slot = nullptr;
                 for (auto& pending : pending_touch_moves_) {
                     if (pending && pending->pointer_id == moved.pointer_id) {
                         slot = &pending;  // this contact's coalescing slot
@@ -437,19 +437,19 @@ struct App::Impl {
                 }
                 break;
             }
-            case EventType::TouchReleased:
-                event_queue_.push_back(static_cast<TouchReleasedEvent&>(event));
+            case ws::input::EventType::TouchReleased:
+                event_queue_.push_back(static_cast<ws::input::TouchReleasedEvent&>(event));
                 break;
-            case EventType::TextInput:
+            case ws::input::EventType::TextInput:
                 // One event per glyph, arrival order - typing is low-rate
                 // and order-preserving, so no coalescing.
-                event_queue_.push_back(static_cast<TextInputEvent&>(event));
+                event_queue_.push_back(static_cast<ws::input::TextInputEvent&>(event));
                 break;
         }
     }
 
     // Coalesced events flush right before delivery, so the app sees exactly
-    // one MouseMovedEvent / one MouseScrolledEvent per frame even when the
+    // one ws::input::MouseMovedEvent / one ws::input::MouseScrolledEvent per frame even when the
     // OS delivered dozens. Touch moves flush the same way - one per moving
     // contact, in first-move slot order (deterministic). Their order
     // relative to that frame's discrete events is not preserved.
@@ -1643,7 +1643,7 @@ struct App::Impl {
             host_->pump();
 
             // Every queued event reaches on_event before this frame's
-            // on_update() - including the WindowCloseEvent of the closing
+            // on_update() - including the ws::input::WindowCloseEvent of the closing
             // click, so apps can react before the loop exits.
             deliver_events(app);
             if (host_->should_close()) {
@@ -1669,7 +1669,7 @@ struct App::Impl {
                 return 1;
             }
 
-            // Swapchain recreation is event-driven: a WindowResizeEvent (or
+            // Swapchain recreation is event-driven: a ws::input::WindowResizeEvent (or
             // Vulkan itself, via out-of-date/suboptimal) raised the flag -
             // there is no per-frame size poll. Skip while the surface is
             // unusable (minimized); the flag survives until a good size
@@ -1791,7 +1791,7 @@ struct App::Impl {
     bool startup_context() {
         // The single funnel every platform callback reads (see the event
         // system block) plus the gui library's raw input tap.
-        event_sink_.forward = [this](Event& event) { forward_event(event); };
+        event_sink_.forward = [this](ws::input::Event& event) { forward_event(event); };
         event_sink_.input = &gui_input_;  // gui tap: raw input, no filtering
         host_ = make_window_host();
         if (!host_->init(event_sink_, config)) {
@@ -1834,8 +1834,8 @@ struct App::Impl {
                 return false;
             }
             r2d::set_active(&renderer2d_);
-            // The gui input snapshot publishes the same way (frame_input()).
-            gui::set_active_input(&gui_input_);
+            // The gui input snapshot publishes the same way (ws::input::frame_input()).
+            ws::input::set_active_input(&gui_input_);
             if (!init_imgui(app)) {
                 return false;
             }
@@ -1926,9 +1926,9 @@ struct App::Impl {
         // instead of touching a dead renderer.
         r2d::set_active(nullptr);
         renderer2d_.shutdown();
-        // Same for the gui input tap: post-run frame_input() reports an
+        // Same for the gui input tap: post-run ws::input::frame_input() reports an
         // empty frame, same drop-safe contract.
-        gui::set_active_input(nullptr);
+        ws::input::set_active_input(nullptr);
 
         if (allocator != VK_NULL_HANDLE) {
             vmaDestroyAllocator(allocator);

@@ -15,7 +15,7 @@
 // pointer index 0 only and has no POINTER_UP/CANCEL case (a second finger
 // lifting used to strand the press in io). AKeyCodes translate to the GLFW
 // numbering the event system documents ("printable keys match ASCII") and
-// glyphs arrive as TextInputEvent; key and real-mouse events keep first
+// glyphs arrive as ws::input::TextInputEvent; key and real-mouse events keep first
 // refusal through the backend, the same ordering desktop gets from the
 // GLFW backend's callback chaining.
 
@@ -45,12 +45,12 @@
 namespace ws::ui {
 namespace {
 
-constexpr int kKeyUnknown = -1;  // GLFW_KEY_UNKNOWN; out of InputFrame range
+constexpr int kKeyUnknown = -1;  // GLFW_KEY_UNKNOWN; out of ws::input::InputFrame range
 
 // AKeyEvent code -> the GLFW key numbering the event system documents
 // ("printable keys match ASCII" - GLFW_KEY_A == 'A' == 65, etc.). Covers
 // the printable set plus the standard editing/navigation keys; unmapped
-// keys drop (kKeyUnknown fails the InputFrame range check too).
+// keys drop (kKeyUnknown fails the ws::input::InputFrame range check too).
 int glfw_key(int32_t keycode) {
     if (keycode >= AKEYCODE_A && keycode <= AKEYCODE_Z) {
         return 'A' + (keycode - AKEYCODE_A);
@@ -272,7 +272,7 @@ private:
                                            ? ANativeWindow_getHeight(app->window)
                                            : 0;
                 if (width > 0 && height > 0) {
-                    host->emit(WindowResizeEvent{width, height});
+                    host->emit(ws::input::WindowResizeEvent{width, height});
                 }
                 break;
             }
@@ -337,14 +337,14 @@ private:
         }
         const bool repeat = (action == AKEY_EVENT_ACTION_MULTIPLE);
         if (action == AKEY_EVENT_ACTION_DOWN || repeat) {
-            emit(KeyPressedEvent{key, repeat});
+            emit(ws::input::KeyPressedEvent{key, repeat});
         } else if (action == AKEY_EVENT_ACTION_UP) {
-            emit(KeyReleasedEvent{key});
+            emit(ws::input::KeyReleasedEvent{key});
         }
         // gui tap, the same rules as the desktop key callback: held state
         // on every transition, pressed edge on the first DOWN only.
-        if (gui::InputFrame* input = sink_->input;
-            input != nullptr && key >= 0 && key < gui::InputFrame::kMaxKeys) {
+        if (ws::input::InputFrame* input = sink_->input;
+            input != nullptr && key >= 0 && key < ws::input::InputFrame::kMaxKeys) {
             input->key_down[key] = (action != AKEY_EVENT_ACTION_UP);
             if (action == AKEY_EVENT_ACTION_DOWN) {
                 input->key_pressed[key] = true;
@@ -353,7 +353,7 @@ private:
         // Text tap: hardware-keyboard glyphs only (native_app_glue has no
         // IME, so there is no soft-keyboard path). The key contract is GLFW
         // numbering - letters report uppercase, corrected to lowercase when
-        // shift is not held. One TextInputEvent per glyph (the event
+        // shift is not held. One ws::input::TextInputEvent per glyph (the event
         // counterpart of the gui frame's text_input; desktop's on_char
         // emits the same), then the frame's own copy.
         if (action == AKEY_EVENT_ACTION_DOWN && key >= 32 && key <= 126) {
@@ -364,8 +364,8 @@ private:
             if (key >= 'A' && key <= 'Z' && !shift_held) {
                 code += 32;
             }
-            emit(TextInputEvent{code});
-            if (gui::InputFrame* input = sink_->input; input != nullptr) {
+            emit(ws::input::TextInputEvent{code});
+            if (ws::input::InputFrame* input = sink_->input; input != nullptr) {
                 input->text_input.push_back(code);
             }
         }
@@ -390,7 +390,7 @@ private:
             touch_cap_warned_ = true;
             core::warn("ui: touch table full at {} contacts - further "
                        "contacts dropped",
-                       gui::InputFrame::kMaxTouches);
+                       ws::input::InputFrame::kMaxTouches);
         }
     }
 
@@ -417,25 +417,25 @@ private:
     // when no contact holds it yet - never a promotion mid-gesture.
     void touch_begin(const AInputEvent* event, std::size_t index) {
         const uint32_t raw_id = AMotionEvent_getPointerId(event, index);
-        const gui::PointerId id{raw_id};  // the gui's strong id (events below stay raw)
+        const ws::input::PointerId id{raw_id};  // the gui's strong id (events below stay raw)
         const float x = AMotionEvent_getX(event, index);
         const float y = AMotionEvent_getY(event, index);
         bool bridged = false;
-        if (gui::InputFrame* input = sink_->input; input != nullptr) {
-            const gui::PointerId bridge_before = input->bridged_touch();
+        if (ws::input::InputFrame* input = sink_->input; input != nullptr) {
+            const ws::input::PointerId bridge_before = input->bridged_touch();
             if (input->touch_down(id, x, y) < 0) {
                 warn_touch_cap();
                 return;
             }
-            bridged = (bridge_before == gui::kNoPointer &&
+            bridged = (bridge_before == ws::input::kNoPointer &&
                        input->bridged_touch() == id);
         }
-        emit(TouchPressedEvent{raw_id, x, y});
+        emit(ws::input::TouchPressedEvent{raw_id, x, y});
         if (bridged) {
             imgui_bridge_pos(x, y);
             imgui_bridge_button(true);
-            emit(MouseMovedEvent{x, y});  // a coherent position before the press
-            emit(MouseButtonPressedEvent{0});
+            emit(ws::input::MouseMovedEvent{x, y});  // a coherent position before the press
+            emit(ws::input::MouseButtonPressedEvent{0});
         }
     }
 
@@ -444,15 +444,15 @@ private:
     // need the getHistorical* API) - latest wins, the same rule the event
     // stream's per-pointer coalescing applies to what we emit here.
     void touch_move_all(const AInputEvent* event) {
-        gui::InputFrame* input = sink_->input;
+        ws::input::InputFrame* input = sink_->input;
         const std::size_t count = AMotionEvent_getPointerCount(event);
         for (std::size_t i = 0; i < count; ++i) {
             const uint32_t raw_id = AMotionEvent_getPointerId(event, i);
-            const gui::PointerId id{raw_id};
+            const ws::input::PointerId id{raw_id};
             const float x = AMotionEvent_getX(event, i);
             const float y = AMotionEvent_getY(event, i);
             if (input == nullptr) {
-                emit(TouchMovedEvent{raw_id, x, y});  // no table: nothing to gate on
+                emit(ws::input::TouchMovedEvent{raw_id, x, y});  // no table: nothing to gate on
                 continue;
             }
             if (!input->pointer_pos(id, nullptr, nullptr)) {
@@ -460,10 +460,10 @@ private:
             }
             const bool bridged = input->bridged_touch() == id;
             input->touch_move(id, x, y);
-            emit(TouchMovedEvent{raw_id, x, y});
+            emit(ws::input::TouchMovedEvent{raw_id, x, y});
             if (bridged) {
                 imgui_bridge_pos(x, y);
-                emit(MouseMovedEvent{x, y});
+                emit(ws::input::MouseMovedEvent{x, y});
             }
         }
     }
@@ -476,23 +476,23 @@ private:
     void touch_end(const AInputEvent* event, std::size_t index,
                    bool cancelled) {
         const uint32_t raw_id = AMotionEvent_getPointerId(event, index);
-        const gui::PointerId id{raw_id};
+        const ws::input::PointerId id{raw_id};
         const float x = AMotionEvent_getX(event, index);
         const float y = AMotionEvent_getY(event, index);
         bool bridged = false;
-        if (gui::InputFrame* input = sink_->input; input != nullptr) {
+        if (ws::input::InputFrame* input = sink_->input; input != nullptr) {
             if (!input->pointer_pos(id, nullptr, nullptr)) {
                 return;  // a contact the cap dropped: no release either
             }
             bridged = input->bridged_touch() == id;
             input->touch_up(id, x, y, cancelled);
         }
-        emit(TouchReleasedEvent{raw_id, x, y, cancelled});
+        emit(ws::input::TouchReleasedEvent{raw_id, x, y, cancelled});
         if (bridged) {
             imgui_bridge_pos(x, y);
             imgui_bridge_button(false);
-            emit(MouseMovedEvent{x, y});
-            emit(MouseButtonReleasedEvent{0});
+            emit(ws::input::MouseMovedEvent{x, y});
+            emit(ws::input::MouseButtonReleasedEvent{0});
         }
     }
 
@@ -556,7 +556,7 @@ private:
             {AMOTION_EVENT_BUTTON_SECONDARY, 1},
             {AMOTION_EVENT_BUTTON_TERTIARY, 2},
         };
-        gui::InputFrame* input = sink_->input;
+        ws::input::InputFrame* input = sink_->input;
         for (const ButtonBit& bit : kBits) {
             const bool was_down = (mouse_buttons_ & bit.bit) != 0;
             const bool now_down = (buttons & bit.bit) != 0;
@@ -564,7 +564,7 @@ private:
                 continue;
             }
             if (now_down) {
-                emit(MouseButtonPressedEvent{bit.button});
+                emit(ws::input::MouseButtonPressedEvent{bit.button});
                 if (input != nullptr) {
                     // A press is the strongest presence signal - and the
                     // device may never have hovered first.
@@ -573,7 +573,7 @@ private:
                     input->mouse_pressed[bit.button] = true;
                 }
             } else {
-                emit(MouseButtonReleasedEvent{bit.button});
+                emit(ws::input::MouseButtonReleasedEvent{bit.button});
                 if (input != nullptr) {
                     input->mouse_down[bit.button] = false;
                     input->mouse_released[bit.button] = true;
@@ -588,7 +588,7 @@ private:
             masked == AMOTION_EVENT_ACTION_MOVE) {
             const float x = AMotionEvent_getX(event, 0);
             const float y = AMotionEvent_getY(event, 0);
-            emit(MouseMovedEvent{x, y});
+            emit(ws::input::MouseMovedEvent{x, y});
             if (input != nullptr) {
                 input->mouse_x = x;
                 input->mouse_y = y;
@@ -596,7 +596,7 @@ private:
             }
         }
         // The cursor appearing over the window: the same tap as a move
-        // (position + presence) but no MouseMovedEvent - the event stream
+        // (position + presence) but no ws::input::MouseMovedEvent - the event stream
         // has no enter/leave, matching desktop's silent enter handling.
         if (masked == AMOTION_EVENT_ACTION_HOVER_ENTER && input != nullptr) {
             input->mouse_x = AMotionEvent_getX(event, 0);
@@ -615,7 +615,7 @@ private:
                 event, AMOTION_EVENT_AXIS_HSCROLL, 0);
             const float y = AMotionEvent_getAxisValue(
                 event, AMOTION_EVENT_AXIS_VSCROLL, 0);
-            emit(MouseScrolledEvent{x, y});
+            emit(ws::input::MouseScrolledEvent{x, y});
             if (input != nullptr) {
                 // Deltas, not positions - sum, like every other scroll tap.
                 input->scroll_dx += x;

@@ -41,7 +41,7 @@ inline float label_top(float row_top, float row_height,
 struct ScrollState {
     float offset = 0.0f;
     float max_offset = 0.0f;
-    PointerId thumb = kNoPointer;  // the grabbing pointer, while held
+    ws::input::PointerId thumb = ws::input::kNoPointer;  // the grabbing pointer, while held
     float thumb_grab = 0.0f;  // the grab's offset within the thumb
 };
 
@@ -51,7 +51,7 @@ struct ScrollState {
 // against the threshold); dragging means the scroll owns the finger - the
 // child's press was cancelled and the offset follows the contact 1:1.
 struct ScrollDragTrack {
-    PointerId id = kNoPointer;
+    ws::input::PointerId id = ws::input::kNoPointer;
     float press_y = 0.0f;  // the threshold is measured from the press
     float last_y = 0.0f;  // the previous frame's y, for the drag delta
     bool dragging = false;
@@ -61,7 +61,7 @@ struct ScrollDragTrack {
 // live contact, so two fingers can drag one region and one lifting never
 // confuses the survivor's bookkeeping.
 struct ScrollDragState {
-    std::array<ScrollDragTrack, InputFrame::kMaxTouches> tracks{};
+    std::array<ScrollDragTrack, ws::input::InputFrame::kMaxTouches> tracks{};
 };
 
 // drag_float's persistent half (the same side-table discipline): the grab
@@ -71,7 +71,7 @@ struct ScrollDragState {
 // delta bookkeeping exists and a frame skipped mid-drag resumes exactly
 // where the finger is.
 struct DragState {
-    PointerId pointer = kNoPointer;  // the grabbing pointer, while held
+    ws::input::PointerId pointer = ws::input::kNoPointer;  // the grabbing pointer, while held
     float anchor_x = 0.0f;      // the grab's pointer x
     float anchor_value = 0.0f;  // the value at the grab
 };
@@ -199,14 +199,14 @@ struct EditBuffer {
 // Null only when the table is somehow full, which the sweep in
 // begin_scroll_panel makes unreachable (free slots always cover the
 // untracked contacts: live contacts are capped at the track count).
-inline ScrollDragTrack* drag_track_for(ScrollDragState& drag, PointerId id) {
+inline ScrollDragTrack* drag_track_for(ScrollDragState& drag, ws::input::PointerId id) {
     for (ScrollDragTrack& track : drag.tracks) {
         if (track.id == id) {
             return &track;
         }
     }
     for (ScrollDragTrack& track : drag.tracks) {
-        if (track.id == kNoPointer) {
+        if (track.id == ws::input::kNoPointer) {
             return &track;
         }
     }
@@ -248,8 +248,8 @@ inline void resolve_width(float& width, const LayoutCursor& layout) {
 // widget holds the focus.
 inline bool key_activated(const GuiContext& gui, WidgetId id) {
     return gui.is_focused(id) &&
-           (gui.input().key_pressed[keys::kEnter] ||
-            gui.input().key_pressed[keys::kSpace]);
+           (gui.input().key_pressed[ws::input::keys::kEnter] ||
+            gui.input().key_pressed[ws::input::keys::kSpace]);
 }
 
 // The focus ring: the on-accent as a 1px outline behind the row, so Tab

@@ -48,7 +48,7 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
     // persistent state.
     EditBuffer eb{buf, room, len, edit.caret, edit.anchor};
 
-    const InputFrame& in = gui.input();
+    const ws::input::InputFrame& in = gui.input();
     // state()'s press edge claims the focus the SAME frame, so a quick
     // tap's own press frame already reads focused here.
     const bool focused = gui.is_focused(id);
@@ -112,10 +112,10 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
     }
 
     // --- the pointer: a press places the caret, a sweep selects ---------
-    const PointerView* owner = gui.pointer(hit.pointer);
+    const ws::input::PointerView* owner = gui.pointer(hit.pointer);
     const bool hold = hit.pressed && owner != nullptr && owner->down;
-    const bool shift = in.key_down[static_cast<std::size_t>(keys::kLeftShift)] ||
-                       in.key_down[static_cast<std::size_t>(keys::kRightShift)];
+    const bool shift = in.key_down[static_cast<std::size_t>(ws::input::keys::kLeftShift)] ||
+                       in.key_down[static_cast<std::size_t>(ws::input::keys::kRightShift)];
     if (can_edit && hold) {
         const int placed = caret_from_x(owner->x - content_x);
         if (owner->pressed || placed != eb.caret) {
@@ -134,8 +134,8 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
     // --- the keyboard: caret keys, deleters, typing, the clipboard ------
     if (can_edit) {
         const bool ctrl =
-            in.key_down[static_cast<std::size_t>(keys::kLeftControl)] ||
-            in.key_down[static_cast<std::size_t>(keys::kRightControl)];
+            in.key_down[static_cast<std::size_t>(ws::input::keys::kLeftControl)] ||
+            in.key_down[static_cast<std::size_t>(ws::input::keys::kRightControl)];
 
         // The caret keys: Shift extends from the anchor, plain collapses
         // it onto the caret - the rule every editor spells.
@@ -146,24 +146,24 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
             }
             edit.blink = 0.0f;
         };
-        if (in.key_pressed[static_cast<std::size_t>(keys::kLeft)]) {
+        if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kLeft)]) {
             move_caret(std::max(0, eb.caret - 1));
         }
-        if (in.key_pressed[static_cast<std::size_t>(keys::kRight)]) {
+        if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kRight)]) {
             move_caret(std::min(eb.len, eb.caret + 1));
         }
-        if (in.key_pressed[static_cast<std::size_t>(keys::kHome)]) {
+        if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kHome)]) {
             move_caret(0);
         }
-        if (in.key_pressed[static_cast<std::size_t>(keys::kEnd)]) {
+        if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kEnd)]) {
             move_caret(eb.len);
         }
-        if (ctrl && in.key_pressed[static_cast<std::size_t>(keys::kA)]) {
+        if (ctrl && in.key_pressed[static_cast<std::size_t>(ws::input::keys::kA)]) {
             eb.anchor = 0;  // select all: the anchor says it
             eb.caret = eb.len;
             edit.blink = 0.0f;
         }
-        if (in.key_pressed[static_cast<std::size_t>(keys::kEscape)]) {
+        if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kEscape)]) {
             eb.collapse(eb.caret);  // Escape's one job: drop the selection
             edit.blink = 0.0f;
         }
@@ -171,10 +171,10 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
         // Deleters before typing, when one frame carries both (no arrival
         // order exists between key edges and the codepoint list): the
         // old text leaves, then the new lands at the settled caret.
-        if (in.key_pressed[static_cast<std::size_t>(keys::kBackspace)] ||
-            in.key_pressed[static_cast<std::size_t>(keys::kDelete)]) {
+        if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kBackspace)] ||
+            in.key_pressed[static_cast<std::size_t>(ws::input::keys::kDelete)]) {
             const bool forward =
-                in.key_pressed[static_cast<std::size_t>(keys::kDelete)];
+                in.key_pressed[static_cast<std::size_t>(ws::input::keys::kDelete)];
             if (eb.has_selection()) {
                 eb.erase_selection();
                 changed = true;
@@ -213,20 +213,20 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
         // typing. An unwired seam makes all three no-ops (the context's
         // own contract; Android keeps one today).
         if (ctrl &&
-            (in.key_pressed[static_cast<std::size_t>(keys::kC)] ||
-             in.key_pressed[static_cast<std::size_t>(keys::kX)]) &&
+            (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kC)] ||
+             in.key_pressed[static_cast<std::size_t>(ws::input::keys::kX)]) &&
             eb.has_selection()) {
             // The one allocation an explicit copy may make: a mid-buffer
             // range is not NUL-terminated, and the seam speaks C strings.
             gui.set_clipboard_text(
                 std::string(eb.buf + eb.sel_lo(), eb.buf + eb.sel_hi()).c_str());
-            if (in.key_pressed[static_cast<std::size_t>(keys::kX)]) {
+            if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kX)]) {
                 eb.erase_selection();
                 edit.blink = 0.0f;
                 changed = true;
             }
         }
-        if (ctrl && in.key_pressed[static_cast<std::size_t>(keys::kV)]) {
+        if (ctrl && in.key_pressed[static_cast<std::size_t>(ws::input::keys::kV)]) {
             const char* pasted = gui.get_clipboard_text();
             if (pasted != nullptr) {
                 eb.erase_selection();

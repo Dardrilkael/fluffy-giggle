@@ -1831,7 +1831,7 @@ TEST_CASE("gui module: the public surface constructs, links and behaves safely")
 
     // A filled snapshot flows through the frame lifecycle: begin_frame
     // adopts it, end_frame clears any press a vanished widget left held.
-    InputFrame input;
+    ws::input::InputFrame input;
     input.mouse_x = 100.0f;
     input.mouse_down[0] = true;
     input.key_pressed['D'] = true;
@@ -2121,9 +2121,9 @@ namespace {
 // optional press/release edges set. The mouse is PRESENT: snap() models a
 // device the platform has seen, so every pre-presence test keeps today's
 // meaning (the flag defaults false - see the mouse_present block below).
-ws::ui::gui::InputFrame snap(float x, float y, bool down = false,
+ws::input::InputFrame snap(float x, float y, bool down = false,
                              bool pressed = false, bool released = false) {
-    ws::ui::gui::InputFrame frame;
+    ws::input::InputFrame frame;
     frame.mouse_x = x;
     frame.mouse_y = y;
     frame.mouse_present = true;
@@ -2152,10 +2152,10 @@ struct TouchSnap {
 // The parked mouse fields below are the either-writer rule the Phase A
 // gather test set, made inert by the absent flag: they feed raw-field
 // readers (ImGui, apps) and can never claim anything.
-ws::ui::gui::InputFrame touch_frame(std::initializer_list<TouchSnap> contacts) {
-    ws::ui::gui::InputFrame frame;
+ws::input::InputFrame touch_frame(std::initializer_list<TouchSnap> contacts) {
+    ws::input::InputFrame frame;
     for (const TouchSnap& contact : contacts) {
-        const ws::ui::gui::PointerId id{contact.id};
+        const ws::input::PointerId id{contact.id};
         const int slot = frame.touch_down(id, contact.x, contact.y);
         if (slot >= 0 && !contact.pressed) {
             frame.touches[static_cast<std::size_t>(slot)].pressed = false;
@@ -2187,7 +2187,7 @@ TEST_CASE("is_hot/is_active: the am-I spelling, invalid pinned false") {
     CHECK(!gui.is_active(w));
     CHECK(!gui.is_hot(kInvalidWidgetId));  // "no widget" never matches
     CHECK(!gui.is_active(kInvalidWidgetId));
-    CHECK(!gui.is_hot(w, PointerId{12345u}));  // an unknown pointer answers false
+    CHECK(!gui.is_hot(w, ws::input::PointerId{12345u}));  // an unknown pointer answers false
     gui.end_frame();
 
     // Press: the press frame claims active on the spot.
@@ -2195,7 +2195,7 @@ TEST_CASE("is_hot/is_active: the am-I spelling, invalid pinned false") {
     (void)gui.hit_test(w, rect);
     CHECK(gui.is_hot(w));
     CHECK(gui.is_active(w));
-    CHECK(!gui.is_active(w, PointerId{12345u}));
+    CHECK(!gui.is_active(w, ws::input::PointerId{12345u}));
     gui.end_frame();
 
     // Idle: hot_id() itself answers the invalid sentinel - is_hot() must
@@ -2868,9 +2868,9 @@ TEST_CASE("focus: Tab and Shift+Tab cycle registration order, wrapping") {
     const WidgetId c = IdStack{}.id("c");
 
     const auto frame = [&](bool tab, bool shift) {
-        InputFrame input = snap(200.0f, 200.0f);
-        input.key_pressed[keys::kTab] = tab;
-        input.key_down[keys::kLeftShift] = shift;
+        ws::input::InputFrame input = snap(200.0f, 200.0f);
+        input.key_pressed[ws::input::keys::kTab] = tab;
+        input.key_down[ws::input::keys::kLeftShift] = shift;
         gui.begin_frame(input);
         gui.register_focusable(a);  // registration order IS the Tab order
         gui.register_focusable(b);
@@ -3013,8 +3013,8 @@ TEST_CASE("button: Enter and Space activate the focused button") {
     gui.end_frame();
 
     // Pointer idle, focus held: Enter fires the button - and only it.
-    InputFrame key_enter = snap(200.0f, 200.0f);
-    key_enter.key_pressed[keys::kEnter] = true;
+    ws::input::InputFrame key_enter = snap(200.0f, 200.0f);
+    key_enter.key_pressed[ws::input::keys::kEnter] = true;
     gui.begin_frame(key_enter);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(button(gui, layout, kDefaultChrome, "fire"));
@@ -3023,8 +3023,8 @@ TEST_CASE("button: Enter and Space activate the focused button") {
     gui.end_frame();
 
     // Space does the same.
-    InputFrame key_space = snap(200.0f, 200.0f);
-    key_space.key_pressed[keys::kSpace] = true;
+    ws::input::InputFrame key_space = snap(200.0f, 200.0f);
+    key_space.key_pressed[ws::input::keys::kSpace] = true;
     gui.begin_frame(key_space);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(button(gui, layout, kDefaultChrome, "fire"));
@@ -3032,8 +3032,8 @@ TEST_CASE("button: Enter and Space activate the focused button") {
     gui.end_frame();
 
     // Clearing the focus kills the key path: the same Space does nothing.
-    InputFrame key_none = snap(200.0f, 200.0f);
-    key_none.key_pressed[keys::kSpace] = true;
+    ws::input::InputFrame key_none = snap(200.0f, 200.0f);
+    key_none.key_pressed[ws::input::keys::kSpace] = true;
     gui.begin_frame(key_none);
     gui.set_focus(kInvalidWidgetId);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
@@ -3059,24 +3059,24 @@ TEST_CASE("hit_test: two pointers can press two widgets in the same frame") {
     const HitTest hit_a = gui.hit_test(a, a_rect);
     const HitTest hit_b = gui.hit_test(b, b_rect);
     CHECK(hit_a.pressed);
-    CHECK(hit_a.pointer == PointerId{1});
+    CHECK(hit_a.pointer == ws::input::PointerId{1});
     CHECK(hit_b.pressed);
-    CHECK(hit_b.pointer == PointerId{2});
-    CHECK(gui.active_id(PointerId{1}) == a);
-    CHECK(gui.active_id(PointerId{2}) == b);
-    CHECK(gui.owning_pointer(a) == PointerId{1});
-    CHECK(gui.owning_pointer(b) == PointerId{2});
-    CHECK(gui.hot_id(PointerId{1}) == a);
-    CHECK(gui.hot_id(PointerId{2}) == b);
+    CHECK(hit_b.pointer == ws::input::PointerId{2});
+    CHECK(gui.active_id(ws::input::PointerId{1}) == a);
+    CHECK(gui.active_id(ws::input::PointerId{2}) == b);
+    CHECK(gui.owning_pointer(a) == ws::input::PointerId{1});
+    CHECK(gui.owning_pointer(b) == ws::input::PointerId{2});
+    CHECK(gui.hot_id(ws::input::PointerId{1}) == a);
+    CHECK(gui.hot_id(ws::input::PointerId{2}) == b);
     // The parked mouse claims nothing - and being absent (present=false,
     // the touch-only shape) it is not a pointer in the frame's list at
     // all; each real pointer still reports its own position.
     CHECK(gui.hot_id() == kInvalidWidgetId);
-    CHECK(gui.pointer(PointerId{1}) != nullptr);
-    CHECK(gui.pointer(PointerId{1})->x == 50.0f);
-    CHECK(gui.pointer(PointerId{2})->x == 150.0f);
-    CHECK(gui.pointer(PointerId{99}) == nullptr);  // no such pointer this frame
-    CHECK(gui.pointer(kMousePointerId) == nullptr);  // no mouse this frame
+    CHECK(gui.pointer(ws::input::PointerId{1}) != nullptr);
+    CHECK(gui.pointer(ws::input::PointerId{1})->x == 50.0f);
+    CHECK(gui.pointer(ws::input::PointerId{2})->x == 150.0f);
+    CHECK(gui.pointer(ws::input::PointerId{99}) == nullptr);  // no such pointer this frame
+    CHECK(gui.pointer(ws::input::kMousePointerId) == nullptr);  // no mouse this frame
     gui.end_frame();
 
     // Both lift inside: both click, in one frame.
@@ -3100,10 +3100,10 @@ TEST_CASE("hit_test: two pointers on one widget - one press, one click") {
     const HitTest hit = gui.hit_test(id, rect);
     CHECK(hit.pressed);
     CHECK(!hit.clicked);
-    CHECK(hit.pointer == PointerId{5});  // the lowest slot with a claim
-    CHECK(gui.owning_pointer(id) == PointerId{5});
-    CHECK(gui.active_id(PointerId{5}) == id);  // both fingers hold it - same fold,
-    CHECK(gui.active_id(PointerId{9}) == id);  // one press, benign by design
+    CHECK(hit.pointer == ws::input::PointerId{5});  // the lowest slot with a claim
+    CHECK(gui.owning_pointer(id) == ws::input::PointerId{5});
+    CHECK(gui.active_id(ws::input::PointerId{5}) == id);  // both fingers hold it - same fold,
+    CHECK(gui.active_id(ws::input::PointerId{9}) == id);  // one press, benign by design
     gui.end_frame();
 
     // Both lift inside: the fold makes it one click - `clicked` is one
@@ -3111,8 +3111,8 @@ TEST_CASE("hit_test: two pointers on one widget - one press, one click") {
     gui.begin_frame(touch_frame({{5, 30.0f, 30.0f, false, true},
                               {9, 70.0f, 70.0f, false, true}}));
     CHECK(gui.hit_test(id, rect).clicked);
-    CHECK(gui.active_id(PointerId{5}) == kInvalidWidgetId);  // both presses resolved
-    CHECK(gui.active_id(PointerId{9}) == kInvalidWidgetId);
+    CHECK(gui.active_id(ws::input::PointerId{5}) == kInvalidWidgetId);  // both presses resolved
+    CHECK(gui.active_id(ws::input::PointerId{9}) == kInvalidWidgetId);
     gui.end_frame();
 }
 
@@ -3166,9 +3166,9 @@ TEST_CASE("end_frame: a vanished owner's release is dropped per pointer") {
                               {2, 180.0f, 60.0f}}));
     CHECK(gui.hit_test(b, b_rect).pressed);  // B runs: finger 2 drags on
     gui.end_frame();                         // drops finger 1's orphan release
-    CHECK(gui.active_id(PointerId{1}) == kInvalidWidgetId);
-    CHECK(gui.active_id(PointerId{2}) == b);
-    CHECK(gui.owning_pointer(b) == PointerId{2});
+    CHECK(gui.active_id(ws::input::PointerId{1}) == kInvalidWidgetId);
+    CHECK(gui.active_id(ws::input::PointerId{2}) == b);
+    CHECK(gui.owning_pointer(b) == ws::input::PointerId{2});
     gui.end_frame();
 }
 
@@ -3183,23 +3183,23 @@ TEST_CASE("hit_test: the bridged finger is mouse and touch - one click") {
     // must also be PRESENT: the duplicate shape is a real mouse plus a
     // finger (Android + Bluetooth). A touch-only device lists the finger
     // alone - the pointer_pos/gather tests above pin that shape.
-    InputFrame press;
-    press.touch_down(PointerId{7}, 50.0f, 50.0f);
+    ws::input::InputFrame press;
+    press.touch_down(ws::input::PointerId{7}, 50.0f, 50.0f);
     press.mouse_present = true;
     gui.begin_frame(press);
     const HitTest hit = gui.hit_test(id, rect);
     CHECK(hit.pressed);
-    CHECK(hit.pointer == kMousePointerId);  // the mouse slot outranks the touch
+    CHECK(hit.pointer == ws::input::kMousePointerId);  // the mouse slot outranks the touch
     CHECK(gui.active_id() == id);           // the mouse's track claimed...
-    CHECK(gui.active_id(PointerId{7}) == id);  // ...and so did the touch's: the
+    CHECK(gui.active_id(ws::input::PointerId{7}) == id);  // ...and so did the touch's: the
                                               // documented duplicate, benign
-    CHECK(gui.owning_pointer(id) == kMousePointerId);  // lowest slot resolves
+    CHECK(gui.owning_pointer(id) == ws::input::kMousePointerId);  // lowest slot resolves
     gui.end_frame();
 
     // The lift mirrors too: one click, not two.
-    InputFrame lift;
-    lift.touch_down(PointerId{7}, 50.0f, 50.0f);  // the entry, back for its release frame
-    lift.touch_up(PointerId{7}, 50.0f, 50.0f, false);  // mirrors the mouse's release
+    ws::input::InputFrame lift;
+    lift.touch_down(ws::input::PointerId{7}, 50.0f, 50.0f);  // the entry, back for its release frame
+    lift.touch_up(ws::input::PointerId{7}, 50.0f, 50.0f, false);  // mirrors the mouse's release
     lift.touches[0].pressed = false;  // down and up in one frame: the press
     lift.mouse_pressed[0] = false;    // edge is not this frame's fact
     lift.mouse_present = true;
@@ -3207,7 +3207,7 @@ TEST_CASE("hit_test: the bridged finger is mouse and touch - one click") {
     const HitTest released = gui.hit_test(id, rect);
     CHECK(released.released);
     CHECK(released.clicked);
-    CHECK(released.pointer == kMousePointerId);
+    CHECK(released.pointer == ws::input::kMousePointerId);
     gui.end_frame();
 }
 
@@ -3222,7 +3222,7 @@ TEST_CASE("id reuse: lift and landing on one widget - the click fires, the press
     // The finger presses in its own frame; the claim carries.
     gui.begin_frame(touch_frame({{4, 50.0f, 50.0f, /*pressed=*/true}}));
     CHECK(gui.hit_test(id, rect).pressed);
-    CHECK(gui.active_id(PointerId{4}) == id);
+    CHECK(gui.active_id(ws::input::PointerId{4}) == id);
     gui.end_frame();
 
     // One pump, one id: the finger lifts at (50,50) and the platform
@@ -3230,33 +3230,33 @@ TEST_CASE("id reuse: lift and landing on one widget - the click fires, the press
     // slot reads pressed+released with down - the widget must report the
     // old lifetime's click AND hold the new contact's press: the release
     // not lost to the arrival, the claim not lost to the release.
-    InputFrame reuse;
-    reuse.touch_down(PointerId{4}, 50.0f, 50.0f);  // the carried press,
+    ws::input::InputFrame reuse;
+    reuse.touch_down(ws::input::PointerId{4}, 50.0f, 50.0f);  // the carried press,
     reuse.touches[0].pressed = false;               // no edge of its own
-    reuse.touch_up(PointerId{4}, 50.0f, 50.0f, false);  // the lift, inside
-    reuse.touch_down(PointerId{4}, 60.0f, 60.0f);      // the landing, inside
+    reuse.touch_up(ws::input::PointerId{4}, 50.0f, 50.0f, false);  // the lift, inside
+    reuse.touch_down(ws::input::PointerId{4}, 60.0f, 60.0f);      // the landing, inside
     gui.begin_frame(reuse);  // the bridge's raw mouse writes stay inert:
                              // mouse_present false, touch is the pointer
     const HitTest both = gui.hit_test(id, rect);
     CHECK(both.released);  // the old lifetime's lift reported
     CHECK(both.clicked);   // the lift was inside: the click fires
     CHECK(both.pressed);   // the new contact's press is live on the widget
-    CHECK(gui.active_id(PointerId{4}) == id);  // re-claimed fresh
+    CHECK(gui.active_id(ws::input::PointerId{4}) == id);  // re-claimed fresh
     gui.end_frame();
-    CHECK(gui.active_id(PointerId{4}) == id);  // survived its own release
+    CHECK(gui.active_id(ws::input::PointerId{4}) == id);  // survived its own release
                                                // edge (end_frame's gate)
 
     // The re-claim carried - and the new contact's own lift clicks: two
     // lifetimes, two clicks, neither stolen by the other.
     gui.begin_frame(touch_frame({{4, 60.0f, 60.0f}}));
     CHECK(gui.hit_test(id, rect).pressed);
-    CHECK(gui.active_id(PointerId{4}) == id);
+    CHECK(gui.active_id(ws::input::PointerId{4}) == id);
     gui.end_frame();
     gui.begin_frame(touch_frame({{4, 60.0f, 60.0f, false, /*released=*/true}}));
     const HitTest lift = gui.hit_test(id, rect);
     CHECK(lift.released);
     CHECK(lift.clicked);
-    CHECK(gui.active_id(PointerId{4}) == kInvalidWidgetId);
+    CHECK(gui.active_id(ws::input::PointerId{4}) == kInvalidWidgetId);
     gui.end_frame();
 }
 
@@ -3278,34 +3278,34 @@ TEST_CASE("id reuse: a landing on a different widget claims it fresh, no phantom
     // at the landing both); `tapped` takes the new press through its own
     // press-claim block - and the lift's release edge must NOT read as
     // tapped's click, the contact is still down.
-    InputFrame reuse;
-    reuse.touch_down(PointerId{4}, 150.0f, 50.0f);  // carried, slid off held
+    ws::input::InputFrame reuse;
+    reuse.touch_down(ws::input::PointerId{4}, 150.0f, 50.0f);  // carried, slid off held
     reuse.touches[0].pressed = false;
-    reuse.touch_up(PointerId{4}, 150.0f, 50.0f, false);  // the lift, off held
-    reuse.touch_down(PointerId{4}, 250.0f, 50.0f);      // lands inside tapped
+    reuse.touch_up(ws::input::PointerId{4}, 150.0f, 50.0f, false);  // the lift, off held
+    reuse.touch_down(ws::input::PointerId{4}, 250.0f, 50.0f);      // lands inside tapped
     gui.begin_frame(reuse);
     const HitTest owner = gui.hit_test(held, held_rect);  // records first
     CHECK(owner.released);   // the drag it owned ended
     CHECK(!owner.clicked);  // off it: no click either way
-    CHECK(gui.active_id(PointerId{4}) == kInvalidWidgetId);  // freed
+    CHECK(gui.active_id(ws::input::PointerId{4}) == kInvalidWidgetId);  // freed
     const HitTest newcomer = gui.hit_test(tapped, tapped_rect);
     CHECK(newcomer.pressed);    // the new press claimed, fresh
     CHECK(!newcomer.released);  // the lift was not THIS press's end
     CHECK(!newcomer.clicked);   // ...so no phantom click on a held contact
-    CHECK(gui.active_id(PointerId{4}) == tapped);
+    CHECK(gui.active_id(ws::input::PointerId{4}) == tapped);
     gui.end_frame();
-    CHECK(gui.active_id(PointerId{4}) == tapped);  // survived end_frame
+    CHECK(gui.active_id(ws::input::PointerId{4}) == tapped);  // survived end_frame
 
     // The fresh claim carries; its lift is the click that counts.
     gui.begin_frame(touch_frame({{4, 250.0f, 50.0f}}));
     CHECK(gui.hit_test(tapped, tapped_rect).pressed);
-    CHECK(gui.active_id(PointerId{4}) == tapped);
+    CHECK(gui.active_id(ws::input::PointerId{4}) == tapped);
     gui.end_frame();
     gui.begin_frame(touch_frame({{4, 250.0f, 50.0f, false, /*released=*/true}}));
     const HitTest lift = gui.hit_test(tapped, tapped_rect);
     CHECK(lift.released);
     CHECK(lift.clicked);
-    CHECK(gui.active_id(PointerId{4}) == kInvalidWidgetId);
+    CHECK(gui.active_id(ws::input::PointerId{4}) == kInvalidWidgetId);
     gui.end_frame();
 }
 
@@ -3324,9 +3324,9 @@ TEST_CASE("id reuse: a same-frame tap is still a tap - no re-claim, no carried p
     CHECK(tap.pressed);
     CHECK(tap.released);
     CHECK(tap.clicked);
-    CHECK(gui.active_id(PointerId{4}) == kInvalidWidgetId);  // ended in-frame
+    CHECK(gui.active_id(ws::input::PointerId{4}) == kInvalidWidgetId);  // ended in-frame
     gui.end_frame();
-    CHECK(gui.active_id(PointerId{4}) == kInvalidWidgetId);  // stays ended
+    CHECK(gui.active_id(ws::input::PointerId{4}) == kInvalidWidgetId);  // stays ended
 
     // A new contact with the same id presses next frame and claims
     // cleanly - the tap's claim did not leak through the release gate.
@@ -3354,11 +3354,11 @@ TEST_CASE("id reuse: the owner vanished - the stale claim still lifts with the r
     // must see it. Before the fix the arrival erased the edge and the
     // dead owner's claim lived on, blocking this pointer's hot and press
     // claims for the new contact's whole lifetime.
-    InputFrame reuse;
-    reuse.touch_down(PointerId{4}, 50.0f, 50.0f);
+    ws::input::InputFrame reuse;
+    reuse.touch_down(ws::input::PointerId{4}, 50.0f, 50.0f);
     reuse.touches[0].pressed = false;
-    reuse.touch_up(PointerId{4}, 50.0f, 50.0f, false);
-    reuse.touch_down(PointerId{4}, 50.0f, 50.0f);
+    reuse.touch_up(ws::input::PointerId{4}, 50.0f, 50.0f, false);
+    reuse.touch_down(ws::input::PointerId{4}, 50.0f, 50.0f);
     gui.begin_frame(reuse);
     const HitTest rebuilt = gui.hit_test(next, next_rect);  // the replacement
     CHECK(!rebuilt.pressed);   // the carried claim is capture: not fresh,
@@ -3366,9 +3366,9 @@ TEST_CASE("id reuse: the owner vanished - the stale claim still lifts with the r
                                // take what the vanished owner still holds
     CHECK(!rebuilt.hovered);   // (and the settled hover was the old
                                // owner's: hot_prev is not this widget)
-    CHECK(gui.active_id(PointerId{4}) == gone);  // ...and still holds
+    CHECK(gui.active_id(ws::input::PointerId{4}) == gone);  // ...and still holds
     gui.end_frame();
-    CHECK(gui.active_id(PointerId{4}) == kInvalidWidgetId);  // the release
+    CHECK(gui.active_id(ws::input::PointerId{4}) == kInvalidWidgetId);  // the release
                                                              // lifted it
 
     // The new contact is claimable again: hover settles on it. Its press
@@ -3377,7 +3377,7 @@ TEST_CASE("id reuse: the owner vanished - the stale claim still lifts with the r
     gui.begin_frame(touch_frame({{4, 50.0f, 50.0f}}));
     const HitTest settled = gui.hit_test(next, next_rect);
     CHECK(!settled.pressed);
-    CHECK(gui.is_hot(next, PointerId{4}));  // the claim the stale owner
+    CHECK(gui.is_hot(next, ws::input::PointerId{4}));  // the claim the stale owner
                                             // used to block (the mouse is
                                             // absent: touch is the pointer)
     gui.end_frame();
@@ -3398,7 +3398,7 @@ TEST_CASE("mouse_present: an absent mouse claims nothing - no hover at (0,0)") {
     // (0,0) default - dead on the top-left widget. No platform ever said
     // a mouse exists, so the mouse is not a pointer at all and no hover
     // may ever settle there - not on any frame, settled or not.
-    InputFrame absent;
+    ws::input::InputFrame absent;
     absent.mouse_x = 0.0f;  // explicit: the top-left default IS the trap
     absent.mouse_y = 0.0f;
     for (int settle = 0; settle < 3; ++settle) {
@@ -3407,7 +3407,7 @@ TEST_CASE("mouse_present: an absent mouse claims nothing - no hover at (0,0)") {
         CHECK(result.state == WidgetState::Normal);
         CHECK(!result.hit.hovered);
         CHECK(!result.hit.pressed);
-        CHECK(result.hit.pointer == kNoPointer);
+        CHECK(result.hit.pointer == ws::input::kNoPointer);
         CHECK(gui.hot_id() == kInvalidWidgetId);
         CHECK(gui.active_id() == kInvalidWidgetId);
         gui.end_frame();
@@ -3415,14 +3415,14 @@ TEST_CASE("mouse_present: an absent mouse claims nothing - no hover at (0,0)") {
 
     // A ghost press edge (mouse_down written, device still absent) is
     // nobody's press - and a ghost release later clicks nothing.
-    InputFrame ghost_press = absent;
+    ws::input::InputFrame ghost_press = absent;
     ghost_press.mouse_down[0] = true;
     ghost_press.mouse_pressed[0] = true;
     gui.begin_frame(ghost_press);
     CHECK(!gui.hit_test(id, rect).pressed);
     CHECK(gui.active_id() == kInvalidWidgetId);
     gui.end_frame();
-    InputFrame ghost_lift = absent;
+    ws::input::InputFrame ghost_lift = absent;
     ghost_lift.mouse_released[0] = true;
     gui.begin_frame(ghost_lift);
     CHECK(!gui.hit_test(id, rect).clicked);
@@ -3432,7 +3432,7 @@ TEST_CASE("mouse_present: an absent mouse claims nothing - no hover at (0,0)") {
     // settles hover (one frame, as always) and a press claims. The widget
     // must RUN to claim - the settle frame hit-tests like any widget
     // frame does.
-    InputFrame present = absent;
+    ws::input::InputFrame present = absent;
     present.mouse_present = true;
     gui.begin_frame(present);
     (void)gui.state(id, rect);  // hot claims this frame
@@ -3465,7 +3465,7 @@ TEST_CASE("mouse_present: a cursor leave kills hover and evaporates a held press
     // (position and button state stay as they were). The pointer drops
     // out of the frame and its track with it - hover dies the SAME frame,
     // not one frame later, because no track survives to carry hot_prev.
-    InputFrame left = snap(50.0f, 50.0f);
+    ws::input::InputFrame left = snap(50.0f, 50.0f);
     left.mouse_present = false;
     gui.begin_frame(left);
     const WidgetResult gone = gui.state(id, rect);
@@ -3484,13 +3484,13 @@ TEST_CASE("mouse_present: a cursor leave kills hover and evaporates a held press
     CHECK(gui.hit_test(id, rect).pressed);
     CHECK(gui.active_id() == id);
     gui.end_frame();
-    InputFrame carried = snap(50.0f, 50.0f, true);  // raw fields say held...
+    ws::input::InputFrame carried = snap(50.0f, 50.0f, true);  // raw fields say held...
     carried.mouse_present = false;                  // ...the device is gone
     gui.begin_frame(carried);
     CHECK(gui.active_id() == kInvalidWidgetId);  // the press evaporated
     CHECK(gui.state(id, rect).state == WidgetState::Normal);
     gui.end_frame();
-    InputFrame lift = snap(50.0f, 50.0f, false, false, true);
+    ws::input::InputFrame lift = snap(50.0f, 50.0f, false, false, true);
     lift.mouse_present = false;
     gui.begin_frame(lift);
     CHECK(!gui.hit_test(id, rect).clicked);  // the release lands nowhere
@@ -3516,19 +3516,19 @@ TEST_CASE("mouse_present: a lifted finger leaves no hover at the tap point") {
     // through the touch_* writers, the flag never set (the bridge mirrors
     // raw fields only - it never speaks for presence). The finger's own
     // touch slot drives the press.
-    InputFrame press;
-    press.touch_down(PointerId{7}, 50.0f, 50.0f);
+    ws::input::InputFrame press;
+    press.touch_down(ws::input::PointerId{7}, 50.0f, 50.0f);
     gui.begin_frame(press);
     const HitTest hit = gui.hit_test(id, rect);
     CHECK(hit.pressed);
-    CHECK(hit.pointer == PointerId{7});  // the finger, not a mouse
-    CHECK(gui.active_id(PointerId{7}) == id);
+    CHECK(hit.pointer == ws::input::PointerId{7});  // the finger, not a mouse
+    CHECK(gui.active_id(ws::input::PointerId{7}) == id);
     CHECK(gui.active_id() == kInvalidWidgetId);  // no mouse to mirror onto
     gui.end_frame();
 
-    InputFrame lift;
-    lift.touch_down(PointerId{7}, 50.0f, 50.0f);  // the entry, back for its lift
-    lift.touch_up(PointerId{7}, 50.0f, 50.0f, false);
+    ws::input::InputFrame lift;
+    lift.touch_down(ws::input::PointerId{7}, 50.0f, 50.0f);  // the entry, back for its lift
+    lift.touch_up(ws::input::PointerId{7}, 50.0f, 50.0f, false);
     lift.touches[0].pressed = false;  // down+up in one frame: the press edge
     lift.mouse_pressed[0] = false;    // is not this frame's fact
     gui.begin_frame(lift);
@@ -3541,7 +3541,7 @@ TEST_CASE("mouse_present: a lifted finger leaves no hover at the tap point") {
     // never settle.
     CHECK(lift.mouse_x == 50.0f);
     for (int settle = 0; settle < 3; ++settle) {
-        gui.begin_frame(InputFrame{});  // no touches, no mouse: the raw
+        gui.begin_frame(ws::input::InputFrame{});  // no touches, no mouse: the raw
                                         // mirror is all that remains
         const WidgetResult calm = gui.state(id, rect);
         CHECK(calm.state == WidgetState::Normal);
@@ -4690,7 +4690,7 @@ TEST_CASE("scroll: the wheel moves the flow - clamps at both ends and persists")
     // discipline. Returns the viewport and the row a full click landed
     // on (-1 = none); headless, the draws drop and only layout,
     // hit-testing and the persistent scroll state act.
-    const auto pass = [&](const InputFrame& frame, int rows) {
+    const auto pass = [&](const ws::input::InputFrame& frame, int rows) {
         gui.begin_frame(frame);
         const Rect view = begin_scroll_panel(
             gui, layout, kDefaultChrome, "list", {0.0f, 0.0f, 200.0f, 100.0f});
@@ -4713,13 +4713,13 @@ TEST_CASE("scroll: the wheel moves the flow - clamps at both ends and persists")
     // unscrolled row 0's center, and one at row 3's visible center at
     // offset 32 (the row pokes past the viewport; the click lands
     // mid-visible, clear of the clip's edges).
-    const InputFrame click_origin = snap(60.0f, 24.0f, false, true, true);
-    const InputFrame click_row3 = snap(60.0f, 82.0f, false, true, true);
+    const ws::input::InputFrame click_origin = snap(60.0f, 24.0f, false, true, true);
+    const ws::input::InputFrame click_row3 = snap(60.0f, 82.0f, false, true, true);
 
     // Frame 1: a wheel-down unit aims to scroll, but a fresh panel has no
     // measured range yet - the immediate-mode first frame cannot scroll.
     // The end of this frame measures the range for the next.
-    InputFrame f = snap(100.0f, 50.0f);  // pointer inside the viewport
+    ws::input::InputFrame f = snap(100.0f, 50.0f);  // pointer inside the viewport
     f.scroll_dy = -1.0f;
     {
         const auto [view, clicked] = pass(f, 10);
@@ -4810,7 +4810,7 @@ TEST_CASE("scroll: clear_persistent_state resets a region's place") {
     GuiContext gui;
     LayoutCursor layout;
 
-    const auto pass = [&](const InputFrame& frame, int rows) {
+    const auto pass = [&](const ws::input::InputFrame& frame, int rows) {
         gui.begin_frame(frame);
         const Rect view = begin_scroll_panel(
             gui, layout, kDefaultChrome, "list", {0.0f, 0.0f, 200.0f, 100.0f});
@@ -4830,7 +4830,7 @@ TEST_CASE("scroll: clear_persistent_state resets a region's place") {
     // Prime (frame 1 measures the range and settles the wheel claim),
     // scroll one notch (frame 2), hold (frame 3): offset 32.
     (void)pass(snap(100.0f, 50.0f), 10);
-    InputFrame f = snap(100.0f, 50.0f);
+    ws::input::InputFrame f = snap(100.0f, 50.0f);
     f.scroll_dy = -1.0f;
     (void)pass(f, 10);
     (void)pass(snap(100.0f, 50.0f), 10);
@@ -4853,7 +4853,7 @@ TEST_CASE("scroll: the wheel is dead while no mouse is present") {
 
     // The same flow-measuring pass as the wheel test above; the frames
     // below differ only in mouse_present.
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)begin_scroll_panel(
             gui, layout, kDefaultChrome, "list", {0.0f, 0.0f, 200.0f, 100.0f});
@@ -4878,7 +4878,7 @@ TEST_CASE("scroll: the wheel is dead while no mouse is present") {
     // device's scroll_dy is never nonzero in practice, but a cursor that
     // just left the window (or any hand-built frame) must not scroll -
     // the presence flag gates the whole device, not the position.
-    InputFrame ghost = snap(100.0f, 50.0f);
+    ws::input::InputFrame ghost = snap(100.0f, 50.0f);
     ghost.scroll_dy = -1.0f;
     ghost.mouse_present = false;
     CHECK(pass(ghost) == -1);
@@ -4888,7 +4888,7 @@ TEST_CASE("scroll: the wheel is dead while no mouse is present") {
     CHECK(pass(snap(60.0f, 24.0f, false, true, true)) == 0);
 
     // Frame 4: the present mouse wheels - 32 px, as always.
-    InputFrame wheel = snap(100.0f, 50.0f);
+    ws::input::InputFrame wheel = snap(100.0f, 50.0f);
     wheel.scroll_dy = -1.0f;
     CHECK(pass(wheel) == -1);
 
@@ -4905,7 +4905,7 @@ TEST_CASE("scroll: two regions keep independent offsets") {
     // Two side-by-side panels, five 24-tall rows each (152 px of content
     // at the 32-px pitch, range 152 - 76 = 76). Returns which row a click
     // landed on per panel.
-    const auto pass = [&](const InputFrame& frame, int& a_click, int& b_click) {
+    const auto pass = [&](const ws::input::InputFrame& frame, int& a_click, int& b_click) {
         gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "left",
                                  {0.0f, 0.0f, 120.0f, 100.0f});
@@ -4943,7 +4943,7 @@ TEST_CASE("scroll: two regions keep independent offsets") {
 
     // Frame 2: the pointer sits inside the LEFT viewport only; its wheel
     // scrolls the left panel 32 px and must not touch the right one.
-    InputFrame f = snap(60.0f, 50.0f);
+    ws::input::InputFrame f = snap(60.0f, 50.0f);
     f.scroll_dy = -1.0f;
     pass(f, a, b);
     CHECK(a == -1);
@@ -4973,7 +4973,7 @@ TEST_CASE("scroll: nests inside a panel and measures its own flow") {
     // The outer panel flows a header, then a nested scroll region, then
     // resumes - the scroll panel pushes on top of the outer panel's
     // pushes, and its extent must measure ITS rows, not the outer's.
-    const auto pass = [&](const InputFrame& frame, int& clicked) {
+    const auto pass = [&](const ws::input::InputFrame& frame, int& clicked) {
         gui.begin_frame(frame);
         (void)begin_panel(gui, layout, theme, "page",
                           {0.0f, 0.0f, 200.0f, 200.0f});
@@ -5023,7 +5023,7 @@ TEST_CASE("scroll: nests inside a panel and measures its own flow") {
     // A wheel unit scrolls the inner region 32 - row 3, laid out at y
     // 88..112 (visible 88..100), takes the click at its visible center;
     // the header, laid out by the OUTER panel, never moved.
-    InputFrame f = snap(60.0f, 94.0f, false, true, true);
+    ws::input::InputFrame f = snap(60.0f, 94.0f, false, true, true);
     f.scroll_dy = -1.0f;
     pass(f, clicked);
     CHECK(clicked == 3);
@@ -5041,7 +5041,7 @@ TEST_CASE("scroll: the wheel settles one frame, then the innermost panel "
     // the right of the outer's own narrow rows, so a click at either side
     // answers its panel alone. The pass returns which row each side
     // landed on.
-    const auto pass = [&](const InputFrame& frame, int& outer, int& inner) {
+    const auto pass = [&](const ws::input::InputFrame& frame, int& outer, int& inner) {
         gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "outer",
                                  {0.0f, 0.0f, 200.0f, 300.0f});
@@ -5082,7 +5082,7 @@ TEST_CASE("scroll: the wheel settles one frame, then the innermost panel "
     // behind the hover like hot_prev. Inner row 0 still sits at its
     // content spot y 24..48; the click at its center proves it (and
     // lands on no outer row - the inner's rows start at x 112).
-    InputFrame f = snap(130.0f, 60.0f);
+    ws::input::InputFrame f = snap(130.0f, 60.0f);
     f.scroll_dy = -1.0f;
     pass(f, outer, inner);
     CHECK(inner == -1);
@@ -5119,7 +5119,7 @@ TEST_CASE("scroll: a popup panel eats the wheel over the panel below") {
     // the popup-over-a-panel scroll defect. The popup panel is drawn
     // chrome-only (begin_panel, no widgets), so the rows below stay
     // clickable outside its rect.
-    const auto pass = [&](const InputFrame& frame, bool popup, int& clicked) {
+    const auto pass = [&](const ws::input::InputFrame& frame, bool popup, int& clicked) {
         gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
                                  {0.0f, 0.0f, 200.0f, 100.0f});
@@ -5150,7 +5150,7 @@ TEST_CASE("scroll: a popup panel eats the wheel over the panel below") {
 
     // The wheel under the popup: dead. Row 0 keeps its unscrolled
     // spot - the click left of the popup's rect proves it.
-    InputFrame f = snap(100.0f, 50.0f);
+    ws::input::InputFrame f = snap(100.0f, 50.0f);
     f.scroll_dy = -1.0f;
     pass(f, true, clicked);
     pass(snap(20.0f, 24.0f, false, true, true), true, clicked);
@@ -5179,7 +5179,7 @@ TEST_CASE("scroll: the modal veil kills the wheel - and the raw-input "
     // through a dialog. The modal scope opens BEFORE the panel it
     // blocks - the documented pattern, so the veil is already up when
     // the panel's begin runs its claims.
-    const auto pass = [&](const InputFrame& frame, bool veil, int& clicked) {
+    const auto pass = [&](const ws::input::InputFrame& frame, bool veil, int& clicked) {
         gui.begin_frame(frame);
         if (veil) {
             gui.begin_layer(Layer::modal);
@@ -5211,7 +5211,7 @@ TEST_CASE("scroll: the modal veil kills the wheel - and the raw-input "
     CHECK(!gui.claims_open());  // and after the scope, the base is shut
 
     // The wheel below the veil: dead, veil or not.
-    InputFrame f = snap(100.0f, 50.0f);
+    ws::input::InputFrame f = snap(100.0f, 50.0f);
     f.scroll_dy = -1.0f;
     pass(f, true, clicked);
     CHECK(clicked == -1);
@@ -5246,7 +5246,7 @@ TEST_CASE("scroll: a nested touch drag takes only the innermost panel") {
     // inner 88x100 (viewport 112,24,64,76) with five rows to the
     // right. A finger pressing inside the inner viewport sits inside
     // BOTH panels' viewports - the defect had both panels drag.
-    const auto pass = [&](const InputFrame& frame, int& outer, int& inner) {
+    const auto pass = [&](const ws::input::InputFrame& frame, int& outer, int& inner) {
         gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "outer",
                                  {0.0f, 0.0f, 200.0f, 300.0f});
@@ -5288,7 +5288,7 @@ TEST_CASE("scroll: a nested touch drag takes only the innermost panel") {
     int outer = -2, inner = -2;
     pass(touch_frame({{4, 130.0f, 94.0f, true, false}}), outer, inner);
     CHECK(inner == -1);
-    CHECK(gui.active_id(PointerId{4}) == inner_row_id(2));  // the tap in
+    CHECK(gui.active_id(ws::input::PointerId{4}) == inner_row_id(2));  // the tap in
                                                            // progress
 
     // Up 14 px: past the 8-px threshold. The inner crossed and owns the
@@ -5296,7 +5296,7 @@ TEST_CASE("scroll: a nested touch drag takes only the innermost panel") {
     // and the drag starts at the crossing.
     pass(touch_frame({{4, 130.0f, 80.0f}}), outer, inner);
     CHECK(inner == -1);
-    CHECK(gui.active_id(PointerId{4}) ==
+    CHECK(gui.active_id(ws::input::PointerId{4}) ==
           kInvalidWidgetId);  // the crossing cancelled the row's press
 
     // Up 10 more, and lift: the INNER scrolled 10 (finger up = later
@@ -5328,7 +5328,7 @@ TEST_CASE("scroll: the thumb is grabbable - the gutter jumps to the "
     // be taken away from the row). Content 240, viewport 76, range 164;
     // the thumb is 76*76/240 = 24.07 px tall, so the track travels
     // 51.93 px for the full 164.
-    const auto pass = [&](const InputFrame& frame, int& clicked) {
+    const auto pass = [&](const ws::input::InputFrame& frame, int& clicked) {
         gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
                                  {0.0f, 0.0f, 200.0f, 100.0f});
@@ -5399,7 +5399,7 @@ TEST_CASE("scroll: Tab lands the focus in view") {
     // register focusable, so Tab walks them; the panel shifts the
     // offset to pull the newly focused row into the viewport - the
     // frame after the landing, the row latches its bounds first.
-    const auto pass = [&](InputFrame frame, int& clicked) {
+    const auto pass = [&](ws::input::InputFrame frame, int& clicked) {
         gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
                                  {0.0f, 0.0f, 200.0f, 100.0f});
@@ -5429,8 +5429,8 @@ TEST_CASE("scroll: Tab lands the focus in view") {
     int clicked = -2;
     pass(snap(400.0f, 400.0f), clicked);
     for (int tab = 0; tab < 9; ++tab) {
-        InputFrame f = snap(400.0f, 400.0f);
-        f.key_pressed[keys::kTab] = true;
+        ws::input::InputFrame f = snap(400.0f, 400.0f);
+        f.key_pressed[ws::input::keys::kTab] = true;
         pass(f, clicked);
     }
     CHECK(gui.is_focused(row_id(8)));
@@ -5448,8 +5448,8 @@ TEST_CASE("scroll: Tab lands the focus in view") {
 
     // One more Tab walks to row 9 (content y 228..252, latch at
     // 88..112): the shift lands it at 64..88 the same way.
-    InputFrame tab = snap(400.0f, 400.0f);
-    tab.key_pressed[keys::kTab] = true;
+    ws::input::InputFrame tab = snap(400.0f, 400.0f);
+    tab.key_pressed[ws::input::keys::kTab] = true;
     pass(tab, clicked);
     CHECK(gui.is_focused(row_id(9)));
     pass(snap(400.0f, 400.0f), clicked);  // the into-view frame
@@ -5459,9 +5459,9 @@ TEST_CASE("scroll: Tab lands the focus in view") {
     // Shift+Tab walks BACK to row 8 - at offset 164 it sits at
     // 40..64, already fully in view, and the shift is a no-op: the
     // same click spot finds row 8 again, not a scrolled-away row.
-    InputFrame back = snap(400.0f, 400.0f);
-    back.key_pressed[keys::kTab] = true;
-    back.key_down[static_cast<std::size_t>(keys::kLeftShift)] = true;
+    ws::input::InputFrame back = snap(400.0f, 400.0f);
+    back.key_pressed[ws::input::keys::kTab] = true;
+    back.key_down[static_cast<std::size_t>(ws::input::keys::kLeftShift)] = true;
     pass(back, clicked);
     CHECK(gui.is_focused(row_id(8)));
     pass(snap(400.0f, 400.0f), clicked);
@@ -5512,7 +5512,7 @@ TEST_CASE("scroll: a touch drag scrolls 1:1 and cancels the press it started on"
     // frame: the row IT clicks tells the offset, without reading the
     // side table (ScrollState is the lib's private type; the clicks ARE
     // the observable).
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
                                  {0.0f, 0.0f, 200.0f, 100.0f});
@@ -5539,7 +5539,7 @@ TEST_CASE("scroll: a touch drag scrolls 1:1 and cancels the press it started on"
     // 82). The child claims the press - the tap is the CHILD's so far,
     // the panel only watches.
     CHECK(pass(touch_frame({{7, 60.0f, 82.0f, /*pressed=*/true}})) == -1);
-    CHECK(gui.active_id(PointerId{7}) == row_id(2));
+    CHECK(gui.active_id(ws::input::PointerId{7}) == row_id(2));
 
     // Frame 2: 20 px up - past the 8 px threshold. The crossing frame
     // cancels the child's press (finger 7 will never click now) and
@@ -5547,7 +5547,7 @@ TEST_CASE("scroll: a touch drag scrolls 1:1 and cancels the press it started on"
     // (60, 24) still lands on row 0.
     CHECK(pass(touch_frame({{7, 60.0f, 62.0f},
                             {99, 60.0f, 24.0f, true, true}})) == 0);
-    CHECK(gui.active_id(PointerId{7}) == kInvalidWidgetId);  // the scroll owns the finger
+    CHECK(gui.active_id(ws::input::PointerId{7}) == kInvalidWidgetId);  // the scroll owns the finger
 
     // Frame 3: 30 px more of drag - the offset follows 1:1. At offset 30
     // row 1 spans y 14..38, so the same probe point now clicks row 1.
@@ -5568,7 +5568,7 @@ TEST_CASE("scroll: a tap inside the threshold stays the child's click") {
     GuiContext gui;
     LayoutCursor layout;
 
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
                                  {0.0f, 0.0f, 200.0f, 100.0f});
@@ -5594,9 +5594,9 @@ TEST_CASE("scroll: a tap inside the threshold stays the child's click") {
     // Press row 0, wobble 4 px - under the threshold, the press stays
     // the child's and the offset never moves.
     CHECK(pass(touch_frame({{5, 60.0f, 24.0f, /*pressed=*/true}})) == -1);
-    CHECK(gui.active_id(PointerId{5}) == row_id(0));
+    CHECK(gui.active_id(ws::input::PointerId{5}) == row_id(0));
     CHECK(pass(touch_frame({{5, 60.0f, 20.0f}})) == -1);
-    CHECK(gui.active_id(PointerId{5}) == row_id(0));
+    CHECK(gui.active_id(ws::input::PointerId{5}) == row_id(0));
 
     // Lift back inside row 0 (y 12..36): a plain click - the tap was a
     // tap, never a drag.
@@ -5615,7 +5615,7 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
     // alone, and the cancel's mirror has nothing to pair. Without
     // cancel_pointer's mirror rule the mouse's copy of the press would
     // survive the cancel and click the row on release.
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
                                  {0.0f, 0.0f, 200.0f, 100.0f});
@@ -5641,33 +5641,33 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
     // Frame 1: contact 7 presses row 2 (at its visible center, y 82) -
     // the mouse mirrors the press, so BOTH tracks claim the row (the
     // documented duplicate).
-    InputFrame press;
-    press.touch_down(PointerId{7}, 60.0f, 82.0f);
+    ws::input::InputFrame press;
+    press.touch_down(ws::input::PointerId{7}, 60.0f, 82.0f);
     press.mouse_present = true;
     CHECK(pass(press) == -1);
     CHECK(gui.active_id() == row_id(2));  // the mouse's track pressed...
-    CHECK(gui.active_id(PointerId{7}) == row_id(2));  // ...and so did the touch's
+    CHECK(gui.active_id(ws::input::PointerId{7}) == row_id(2));  // ...and so did the touch's
 
     // Frame 2: 20 px up - the crossing. cancel_pointer(7) must take the
     // mouse's claim down with the touch's.
-    InputFrame cross;
-    cross.touch_down(PointerId{7}, 60.0f, 82.0f);  // the entry; bridges again
-    cross.touch_move(PointerId{7}, 60.0f, 62.0f);  // the bridge mirrors the position
+    ws::input::InputFrame cross;
+    cross.touch_down(ws::input::PointerId{7}, 60.0f, 82.0f);  // the entry; bridges again
+    cross.touch_move(ws::input::PointerId{7}, 60.0f, 62.0f);  // the bridge mirrors the position
     cross.touches[0].pressed = false;  // held, not pressed: clear the
     cross.mouse_pressed[0] = false;    // edges both sides of the bridge
     cross.mouse_present = true;
     CHECK(pass(cross) == -1);
     CHECK(gui.active_id() == kInvalidWidgetId);  // BOTH claims cancelled
-    CHECK(gui.active_id(PointerId{7}) == kInvalidWidgetId);
+    CHECK(gui.active_id(ws::input::PointerId{7}) == kInvalidWidgetId);
 
     // Frame 3: drag back down to the press point - the offset would go
     // negative and clamps at 0, so a probe at (60, 24) still clicks row 0.
     // The probe is a same-frame tap: its press edge STAYS (a click is
     // press-then-release; a bare release edge clicks nothing).
-    InputFrame back;
-    back.touch_down(PointerId{7}, 60.0f, 82.0f);
-    back.touch_down(PointerId{99}, 60.0f, 24.0f);  // the probe (not the bridge - 7 is)
-    back.touch_up(PointerId{99}, 60.0f, 24.0f, false);
+    ws::input::InputFrame back;
+    back.touch_down(ws::input::PointerId{7}, 60.0f, 82.0f);
+    back.touch_down(ws::input::PointerId{99}, 60.0f, 24.0f);  // the probe (not the bridge - 7 is)
+    back.touch_up(ws::input::PointerId{99}, 60.0f, 24.0f, false);
     back.touches[0].pressed = false;
     back.mouse_pressed[0] = false;
     back.mouse_present = true;
@@ -5676,9 +5676,9 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
     // Frame 4: release exactly where it pressed - row 2 still spans
     // y 76..100, so the lift is INSIDE the row. The cancelled press clicks
     // nothing; had the mouse's claim survived, this would click row 2.
-    InputFrame lift;
-    lift.touch_down(PointerId{7}, 60.0f, 82.0f);  // the entry, back for its lift
-    lift.touch_up(PointerId{7}, 60.0f, 82.0f, false);  // mirrors the mouse's release
+    ws::input::InputFrame lift;
+    lift.touch_down(ws::input::PointerId{7}, 60.0f, 82.0f);  // the entry, back for its lift
+    lift.touch_up(ws::input::PointerId{7}, 60.0f, 82.0f, false);  // mirrors the mouse's release
     lift.touches[0].pressed = false;  // down+up in one frame: the press
     lift.mouse_pressed[0] = false;    // edge is not this frame's fact
     lift.mouse_present = true;
@@ -5690,7 +5690,7 @@ TEST_CASE("scroll: two fingers drag one region, one lift confuses nothing") {
     GuiContext gui;
     LayoutCursor layout;
 
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
                                  {0.0f, 0.0f, 200.0f, 100.0f});
@@ -5739,7 +5739,7 @@ TEST_CASE("scroll: drag_threshold is the theme's metric") {
     ChromeTheme sticky = kDefaultChrome;
     sticky.drag_threshold = 100.0f;
 
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, sticky, "list",
                                  {0.0f, 0.0f, 200.0f, 100.0f});
@@ -5765,9 +5765,9 @@ TEST_CASE("scroll: drag_threshold is the theme's metric") {
     // A 20 px excursion - past kDefaultChrome.drag_threshold, well under
     // this theme's: the press stays the child's, never cancelled.
     CHECK(pass(touch_frame({{5, 60.0f, 24.0f, /*pressed=*/true}})) == -1);
-    CHECK(gui.active_id(PointerId{5}) == row_id(0));
+    CHECK(gui.active_id(ws::input::PointerId{5}) == row_id(0));
     CHECK(pass(touch_frame({{5, 60.0f, 4.0f}})) == -1);
-    CHECK(gui.active_id(PointerId{5}) == row_id(0));
+    CHECK(gui.active_id(ws::input::PointerId{5}) == row_id(0));
 
     // Lift inside row 0 (y 12..36 - the offset never moved, or this
     // release would fall outside the shifted rect): a plain click.
@@ -5790,7 +5790,7 @@ TEST_CASE("hit clips: a scrolled-out row cannot claim what sits under the panel"
     // any press landing below the viewport; the pass probes one such
     // rect after the panel closes (root scope - the panel popped its id
     // and hit-clip scopes).
-    const auto pass = [&](const InputFrame& frame, HitTest& under) {
+    const auto pass = [&](const ws::input::InputFrame& frame, HitTest& under) {
         gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
                                  {0.0f, 0.0f, 200.0f, 100.0f});
@@ -5833,7 +5833,7 @@ TEST_CASE("hit clips: a scrolled-out row cannot claim what sits under the panel"
     // -3.125 wheel units = exactly 100 px of offset. Rows now flow
     // from y -88: row 4 spans 40..64, row 5 straddles the bottom edge
     // (72..88 visible), row 6 spans 104..128 - fully below again.
-    InputFrame wheel = snap(60.0f, 50.0f);
+    ws::input::InputFrame wheel = snap(60.0f, 50.0f);
     wheel.scroll_dy = -100.0f / kDefaultChrome.scroll_speed;
     CHECK(pass(wheel, under) == -1);
 
@@ -6042,7 +6042,7 @@ TEST_CASE("hit clips: capture is not clipped - an owned press outlives the scrol
     // Here the release happens while the row is fully scrolled away, so
     // the drag ends released with no click: the release-outside rule,
     // unchanged.
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
                                  {0.0f, 0.0f, 200.0f, 100.0f});
@@ -6077,7 +6077,7 @@ TEST_CASE("hit clips: capture is not clipped - an owned press outlives the scrol
     // press, and row 4, whose visible part now holds the pointer, can
     // claim neither the press nor even hot (the mouse owns a live
     // press).
-    InputFrame f = snap(60.0f, 24.0f, true);
+    ws::input::InputFrame f = snap(60.0f, 24.0f, true);
     f.scroll_dy = -100.0f / kDefaultChrome.scroll_speed;
     CHECK(pass(f) == -1);
     CHECK(gui.active_id() == row_id(0));  // the clip did not end the drag
@@ -6392,8 +6392,8 @@ TEST_CASE("radio: the group moves on a click or Enter, and only on a move") {
 
     // Enter on the focused, already-selected radio: a no-op that
     // reports false.
-    InputFrame key_enter = snap(200.0f, 200.0f);
-    key_enter.key_pressed[keys::kEnter] = true;
+    ws::input::InputFrame key_enter = snap(200.0f, 200.0f);
+    key_enter.key_pressed[ws::input::keys::kEnter] = true;
     gui.begin_frame(key_enter);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(!radio(gui, layout, kDefaultChrome, "easy", difficulty, 0));
@@ -6415,8 +6415,8 @@ TEST_CASE("radio: the group moves on a click or Enter, and only on a move") {
 
     // Tab walks the registrations without moving the selection, and
     // Enter on the newly focused radio selects it exactly like a click.
-    InputFrame tab = snap(200.0f, 200.0f);
-    tab.key_pressed[keys::kTab] = true;
+    ws::input::InputFrame tab = snap(200.0f, 200.0f);
+    tab.key_pressed[ws::input::keys::kTab] = true;
     gui.begin_frame(tab);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(!radio(gui, layout, kDefaultChrome, "easy", difficulty, 0));
@@ -6444,8 +6444,8 @@ TEST_CASE("radio: the group moves on a click or Enter, and only on a move") {
     layout.end_panel();
     gui.end_frame();
     CHECK(gui.is_focused(IdStack{}.id("hard")));
-    InputFrame key_space = snap(200.0f, 200.0f);
-    key_space.key_pressed[keys::kSpace] = true;
+    ws::input::InputFrame key_space = snap(200.0f, 200.0f);
+    key_space.key_pressed[ws::input::keys::kSpace] = true;
     gui.begin_frame(key_space);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(!radio(gui, layout, kDefaultChrome, "easy", difficulty, 0));
@@ -6496,8 +6496,8 @@ TEST_CASE("toggle_switch: checkbox semantics under the pill") {
     CHECK(gui.is_focused(IdStack{}.id("sound")));
 
     // Enter and Space flip the focused switch, like the checkbox.
-    InputFrame key_enter = snap(200.0f, 200.0f);
-    key_enter.key_pressed[keys::kEnter] = true;
+    ws::input::InputFrame key_enter = snap(200.0f, 200.0f);
+    key_enter.key_pressed[ws::input::keys::kEnter] = true;
     gui.begin_frame(key_enter);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(toggle_switch(gui, layout, kDefaultChrome, "sound", sound));
@@ -6505,8 +6505,8 @@ TEST_CASE("toggle_switch: checkbox semantics under the pill") {
     layout.end_panel();
     gui.end_frame();
     CHECK(sound == false);
-    InputFrame key_space = snap(200.0f, 200.0f);
-    key_space.key_pressed[keys::kSpace] = true;
+    ws::input::InputFrame key_space = snap(200.0f, 200.0f);
+    key_space.key_pressed[ws::input::keys::kSpace] = true;
     gui.begin_frame(key_space);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(toggle_switch(gui, layout, kDefaultChrome, "sound", sound));
@@ -6651,8 +6651,8 @@ TEST_CASE("collapsing_header: the flip, the child under it, the keyboard") {
     CHECK(gui.is_focused(IdStack{}.id("opts")));  // the click owns the focus
 
     // The keyboard toggles both ways off the click focus.
-    InputFrame key_enter = snap(200.0f, 200.0f);
-    key_enter.key_pressed[keys::kEnter] = true;
+    ws::input::InputFrame key_enter = snap(200.0f, 200.0f);
+    key_enter.key_pressed[ws::input::keys::kEnter] = true;
     gui.begin_frame(key_enter);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     hdr = collapsing_header(gui, layout, kDefaultChrome, "opts", open);
@@ -6664,8 +6664,8 @@ TEST_CASE("collapsing_header: the flip, the child under it, the keyboard") {
     gui.end_frame();
     CHECK(open == true);
 
-    InputFrame key_space = snap(200.0f, 200.0f);
-    key_space.key_pressed[keys::kSpace] = true;
+    ws::input::InputFrame key_space = snap(200.0f, 200.0f);
+    key_space.key_pressed[ws::input::keys::kSpace] = true;
     gui.begin_frame(key_space);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     hdr = collapsing_header(gui, layout, kDefaultChrome, "opts", open);
@@ -6748,8 +6748,8 @@ TEST_CASE("selectable: the caller keeps the selection, the row reports clicks") 
 
     // Enter reports the focused row - and the already-selected focused
     // row still reports true, like the click above.
-    InputFrame key_enter = snap(200.0f, 200.0f);
-    key_enter.key_pressed[keys::kEnter] = true;
+    ws::input::InputFrame key_enter = snap(200.0f, 200.0f);
+    key_enter.key_pressed[ws::input::keys::kEnter] = true;
     gui.begin_frame(key_enter);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     ra = selectable(gui, layout, kDefaultChrome, "alpha", chosen == 0, 60.0f);
@@ -6925,8 +6925,8 @@ TEST_CASE("drag_float: grab, travel, clamp - and a plain click moves nothing") {
     gui.end_frame();
     CHECK(gui.is_focused(IdStack{}.id("gain")));
 
-    InputFrame key_right = snap(200.0f, 200.0f);
-    key_right.key_pressed[keys::kRight] = true;
+    ws::input::InputFrame key_right = snap(200.0f, 200.0f);
+    key_right.key_pressed[ws::input::keys::kRight] = true;
     gui.begin_frame(key_right);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
@@ -6936,8 +6936,8 @@ TEST_CASE("drag_float: grab, travel, clamp - and a plain click moves nothing") {
     gui.end_frame();
     CHECK(value == doctest::Approx(0.91f));
 
-    InputFrame key_left = snap(200.0f, 200.0f);
-    key_left.key_pressed[keys::kLeft] = true;
+    ws::input::InputFrame key_left = snap(200.0f, 200.0f);
+    key_left.key_pressed[ws::input::keys::kLeft] = true;
     gui.begin_frame(key_left);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
@@ -7057,7 +7057,7 @@ TEST_CASE("popup: open lays children above base; an outside press closes it, "
     // popup's anchor), an "under" button the popup floats over, a "far"
     // button beside it poking clear of the popup's right edge, and the
     // popup scope with one fill-width item.
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
         if (button(gui, layout, kDefaultChrome, "toggle", 100.0f)) {
@@ -7170,7 +7170,7 @@ TEST_CASE("popup: a dropdown hanging past its host panel's edge claims there") {
     // intersection with the host's content rect - a 4-px sliver here -
     // and the rows would paint fine but never claim: draw/hit drift, the
     // thing the one seam forbids.
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)begin_panel(gui, layout, kDefaultChrome, "host",
                           {0.0f, 0.0f, 400.0f, 64.0f});
@@ -7213,7 +7213,7 @@ TEST_CASE("popup: the open scope eats the wheel over the panel beneath") {
     // claim registers at the popup stratum, so a scroll panel it floats
     // over loses the wheel while it is open - the rows beneath hold
     // still - and wins it back the frame it closes.
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)begin_scroll_panel(gui, layout, kDefaultChrome, "list",
                                  {0.0f, 0.0f, 200.0f, 100.0f});
@@ -7242,7 +7242,7 @@ TEST_CASE("popup: the open scope eats the wheel over the panel beneath") {
 
     // The wheel notch under the popup: eaten. Row 0 keeps its unscrolled
     // spot - the click left of the popup's rect proves it.
-    InputFrame wheel = snap(100.0f, 50.0f);
+    ws::input::InputFrame wheel = snap(100.0f, 50.0f);
     wheel.scroll_dy = -1.0f;
     pass(wheel);
     pass(snap(20.0f, 24.0f, false, true, true));
@@ -7342,7 +7342,7 @@ TEST_CASE("modal: the veil blocks base input, the dialog's widgets work, "
 
     // Chrome-first, the documented pattern: the modal scope opens BEFORE
     // the widgets it blocks, so the veil is up the very frame it appears.
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         if (begin_modal(gui, layout, kDefaultChrome, "confirm",
                         {100.0f, 100.0f, 200.0f, 100.0f}, modal_open)) {
@@ -7425,7 +7425,7 @@ TEST_CASE("combo: the row opens the dropdown it places and a choice "
     bool open = false;
     bool changed = false;
 
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
         changed = combo(gui, layout, kDefaultChrome, "shape", kItems, 3,
@@ -7494,7 +7494,7 @@ TEST_CASE("combo: the dropdown flips above when the frame lacks room below") {
     // row (0,150,120,24), its bottom 174. The 112-tall dropdown does not
     // fit below (174+112 > 200), so it flips above: bounds (0,38,120,112),
     // item 0 at (12,50,96,24). A click there proves the placement.
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 150.0f, 400.0f, 50.0f}, 0.0f);
         changed = combo(gui, layout, kDefaultChrome, "shape", kItems, 3,
@@ -7532,7 +7532,7 @@ TEST_CASE("combo: a frame too short for the list clamps at its top edge") {
     // to the frame's 80; below needs 114 > 80, above starts at -70, so
     // the bounds clamp to (0,0,120,80) - OVERLAYING the row. The content
     // (12,12,96,56) fits items 0 and 1; item 2 lays past the end.
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 10.0f, 400.0f, 30.0f}, 0.0f);
         changed = combo(gui, layout, kDefaultChrome, "shape", kItems, 3,
@@ -7588,7 +7588,7 @@ TEST_CASE("combo: the keyboard walk - Enter opens Tab reaches the items "
     alpha_ids.push(0);
     const WidgetId alpha_w = alpha_ids.id("alpha");
 
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
         changed = combo(gui, layout, kDefaultChrome, "shape", kItems, 3,
@@ -7604,8 +7604,8 @@ TEST_CASE("combo: the keyboard walk - Enter opens Tab reaches the items "
 
     // Tab lands on the FIRST item - the registration order is the row,
     // then the items in list order (they are citizens while open).
-    InputFrame tab = snap(400.0f, 400.0f);
-    tab.key_pressed[keys::kTab] = true;
+    ws::input::InputFrame tab = snap(400.0f, 400.0f);
+    tab.key_pressed[ws::input::keys::kTab] = true;
     pass(tab);
     CHECK(gui.is_focused(alpha_w));
 
@@ -7613,8 +7613,8 @@ TEST_CASE("combo: the keyboard walk - Enter opens Tab reaches the items "
     // and the focus hands back to the row (the item's id is about to
     // vanish - without the handback the next Tab would restart the
     // screen's walk from its first widget).
-    InputFrame enter = snap(400.0f, 400.0f);
-    enter.key_pressed[keys::kEnter] = true;
+    ws::input::InputFrame enter = snap(400.0f, 400.0f);
+    enter.key_pressed[ws::input::keys::kEnter] = true;
     pass(enter);
     CHECK(selected == 0);
     CHECK(changed == true);
@@ -7649,7 +7649,7 @@ TEST_CASE("text input: typing appends at the caret and answers changed "
     const WidgetId field_w = IdStack{}.id("name");
     gui.set_focus(field_w);  // the keyboard's own focus, no press needed
 
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
         changed = text_input(gui, layout, kDefaultChrome, "name", buf,
@@ -7659,7 +7659,7 @@ TEST_CASE("text input: typing appends at the caret and answers changed "
     };
 
     // Two codepoints in one frame land in arrival order.
-    InputFrame type = snap(400.0f, 400.0f);
+    ws::input::InputFrame type = snap(400.0f, 400.0f);
     type.text_input.push_back('h');
     type.text_input.push_back('i');
     pass(type);
@@ -7673,7 +7673,7 @@ TEST_CASE("text input: typing appends at the caret and answers changed "
     CHECK(changed == false);
 
     // The caret sat at the end through it all - the next edit appends.
-    InputFrame more = snap(400.0f, 400.0f);
+    ws::input::InputFrame more = snap(400.0f, 400.0f);
     more.text_input.push_back('!');
     pass(more);
     CHECK(std::strcmp(buf, "hi!") == 0);
@@ -7689,7 +7689,7 @@ TEST_CASE("text input: backspace and delete edit around the caret") {
     const WidgetId field_w = IdStack{}.id("name");
     gui.set_focus(field_w);
 
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
         changed = text_input(gui, layout, kDefaultChrome, "name", buf,
@@ -7698,12 +7698,12 @@ TEST_CASE("text input: backspace and delete edit around the caret") {
         gui.end_frame();
     };
     const auto key = [&](int code) {
-        InputFrame frame = snap(400.0f, 400.0f);
+        ws::input::InputFrame frame = snap(400.0f, 400.0f);
         frame.key_pressed[static_cast<std::size_t>(code)] = true;
         pass(frame);
     };
     const auto type = [&](const char* text) {
-        InputFrame frame = snap(400.0f, 400.0f);
+        ws::input::InputFrame frame = snap(400.0f, 400.0f);
         for (const char* p = text; *p != '\0'; ++p) {
             frame.text_input.push_back(static_cast<std::uint32_t>(*p));
         }
@@ -7714,25 +7714,25 @@ TEST_CASE("text input: backspace and delete edit around the caret") {
     CHECK(std::strcmp(buf, "abc") == 0);
 
     // Backspace at the end eats the last byte.
-    key(keys::kBackspace);
+    key(ws::input::keys::kBackspace);
     CHECK(std::strcmp(buf, "ab") == 0);
     CHECK(changed == true);
 
     // Left once (a caret move edits nothing), then Delete eats the
     // byte ahead of the caret.
-    key(keys::kLeft);
+    key(ws::input::keys::kLeft);
     CHECK(changed == false);
-    key(keys::kDelete);
+    key(ws::input::keys::kDelete);
     CHECK(std::strcmp(buf, "a") == 0);
     CHECK(changed == true);
 
     // The two dead ends: Backspace at 0, Delete at the end.
-    key(keys::kHome);
-    key(keys::kBackspace);
+    key(ws::input::keys::kHome);
+    key(ws::input::keys::kBackspace);
     CHECK(std::strcmp(buf, "a") == 0);
     CHECK(changed == false);
-    key(keys::kEnd);
-    key(keys::kDelete);
+    key(ws::input::keys::kEnd);
+    key(ws::input::keys::kDelete);
     CHECK(std::strcmp(buf, "a") == 0);
     CHECK(changed == false);
 }
@@ -7746,7 +7746,7 @@ TEST_CASE("text input: shift selects typing replaces escape drops it") {
     const WidgetId field_w = IdStack{}.id("name");
     gui.set_focus(field_w);
 
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
         changed = text_input(gui, layout, kDefaultChrome, "name", buf,
@@ -7755,13 +7755,13 @@ TEST_CASE("text input: shift selects typing replaces escape drops it") {
         gui.end_frame();
     };
     const auto press_key = [&](int code, bool shift, bool ctrl) {
-        InputFrame frame = snap(400.0f, 400.0f);
+        ws::input::InputFrame frame = snap(400.0f, 400.0f);
         frame.key_pressed[static_cast<std::size_t>(code)] = true;
         if (shift) {
-            frame.key_down[static_cast<std::size_t>(keys::kLeftShift)] = true;
+            frame.key_down[static_cast<std::size_t>(ws::input::keys::kLeftShift)] = true;
         }
         if (ctrl) {
-            frame.key_down[static_cast<std::size_t>(keys::kLeftControl)] =
+            frame.key_down[static_cast<std::size_t>(ws::input::keys::kLeftControl)] =
                 true;
         }
         pass(frame);
@@ -7769,34 +7769,34 @@ TEST_CASE("text input: shift selects typing replaces escape drops it") {
 
     // "abcd", then Home collapses to byte 0, then Shift+Right twice
     // sweeps the selection over bytes 0..2 - proven by the replace.
-    InputFrame type = snap(400.0f, 400.0f);
+    ws::input::InputFrame type = snap(400.0f, 400.0f);
     for (const char* p = "abcd"; *p != '\0'; ++p) {
         type.text_input.push_back(static_cast<std::uint32_t>(*p));
     }
     pass(type);
-    press_key(keys::kHome, false, false);
-    press_key(keys::kRight, true, false);
-    press_key(keys::kRight, true, false);
+    press_key(ws::input::keys::kHome, false, false);
+    press_key(ws::input::keys::kRight, true, false);
+    press_key(ws::input::keys::kRight, true, false);
     CHECK(std::strcmp(buf, "abcd") == 0);  // selection edits nothing
 
-    InputFrame replace = snap(400.0f, 400.0f);
+    ws::input::InputFrame replace = snap(400.0f, 400.0f);
     replace.text_input.push_back('X');
     pass(replace);
     CHECK(std::strcmp(buf, "Xcd") == 0);  // the selection died under X
     CHECK(changed == true);
 
     // Ctrl+A selects all; typing replaces the whole line.
-    press_key(keys::kA, false, true);
-    InputFrame all = snap(400.0f, 400.0f);
+    press_key(ws::input::keys::kA, false, true);
+    ws::input::InputFrame all = snap(400.0f, 400.0f);
     all.text_input.push_back('Q');
     pass(all);
     CHECK(std::strcmp(buf, "Q") == 0);
 
     // Ctrl+A again, then Escape drops the selection instead: the next
     // byte lands at the caret, it does not replace.
-    press_key(keys::kA, false, true);
-    press_key(keys::kEscape, false, false);
-    InputFrame tail = snap(400.0f, 400.0f);
+    press_key(ws::input::keys::kA, false, true);
+    press_key(ws::input::keys::kEscape, false, false);
+    ws::input::InputFrame tail = snap(400.0f, 400.0f);
     tail.text_input.push_back('Z');
     pass(tail);
     CHECK(std::strcmp(buf, "QZ") == 0);
@@ -7814,7 +7814,7 @@ TEST_CASE("text input: a click places the caret and a sweep selects") {
     // The row lays at (0,0,120,24) - panel padding 0 - so the content
     // starts at x 12 (the theme's padding) and the fontless estimate
     // walks 6 px per byte: "abcd" spans 12..36.
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
         changed = text_input(gui, layout, kDefaultChrome, "name", buf,
@@ -7823,7 +7823,7 @@ TEST_CASE("text input: a click places the caret and a sweep selects") {
         gui.end_frame();
     };
     const auto type = [&](const char* text) {
-        InputFrame frame = snap(400.0f, 400.0f);
+        ws::input::InputFrame frame = snap(400.0f, 400.0f);
         for (const char* p = text; *p != '\0'; ++p) {
             frame.text_input.push_back(static_cast<std::uint32_t>(*p));
         }
@@ -7866,7 +7866,7 @@ TEST_CASE("text input: the clipboard trio rides the seam") {
     const WidgetId field_w = IdStack{}.id("name");
     gui.set_focus(field_w);
 
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
         changed = text_input(gui, layout, kDefaultChrome, "name", buf,
@@ -7875,16 +7875,16 @@ TEST_CASE("text input: the clipboard trio rides the seam") {
         gui.end_frame();
     };
     const auto press_key = [&](int code, bool ctrl) {
-        InputFrame frame = snap(400.0f, 400.0f);
+        ws::input::InputFrame frame = snap(400.0f, 400.0f);
         frame.key_pressed[static_cast<std::size_t>(code)] = true;
         if (ctrl) {
-            frame.key_down[static_cast<std::size_t>(keys::kLeftControl)] =
+            frame.key_down[static_cast<std::size_t>(ws::input::keys::kLeftControl)] =
                 true;
         }
         pass(frame);
     };
     const auto type = [&](const char* text) {
-        InputFrame frame = snap(400.0f, 400.0f);
+        ws::input::InputFrame frame = snap(400.0f, 400.0f);
         for (const char* p = text; *p != '\0'; ++p) {
             frame.text_input.push_back(static_cast<std::uint32_t>(*p));
         }
@@ -7892,20 +7892,20 @@ TEST_CASE("text input: the clipboard trio rides the seam") {
     };
 
     type("hello");
-    press_key(keys::kA, true);      // select all
-    press_key(keys::kC, true);      // copy
+    press_key(ws::input::keys::kA, true);      // select all
+    press_key(ws::input::keys::kC, true);      // copy
     CHECK(clip_sink == "hello");
     CHECK(changed == false);        // a copy edits nothing
     CHECK(std::strcmp(buf, "hello") == 0);
 
-    press_key(keys::kHome, false);  // collapse to 0
+    press_key(ws::input::keys::kHome, false);  // collapse to 0
     clip_src = "world";
-    press_key(keys::kV, true);      // paste at the caret
+    press_key(ws::input::keys::kV, true);      // paste at the caret
     CHECK(std::strcmp(buf, "worldhello") == 0);
     CHECK(changed == true);
 
-    press_key(keys::kA, true);      // select all again
-    press_key(keys::kX, true);      // cut: the copy AND the delete
+    press_key(ws::input::keys::kA, true);      // select all again
+    press_key(ws::input::keys::kX, true);      // cut: the copy AND the delete
     CHECK(clip_sink == "worldhello");
     CHECK(std::strcmp(buf, "") == 0);
     CHECK(changed == true);
@@ -7918,9 +7918,9 @@ TEST_CASE("text input: the clipboard trio rides the seam") {
     char bare_buf[8] = "";
     const WidgetId bare_w = IdStack{}.id("name");
     bare.set_focus(bare_w);
-    InputFrame paste = snap(400.0f, 400.0f);
-    paste.key_pressed[static_cast<std::size_t>(keys::kV)] = true;
-    paste.key_down[static_cast<std::size_t>(keys::kLeftControl)] = true;
+    ws::input::InputFrame paste = snap(400.0f, 400.0f);
+    paste.key_pressed[static_cast<std::size_t>(ws::input::keys::kV)] = true;
+    paste.key_down[static_cast<std::size_t>(ws::input::keys::kLeftControl)] = true;
     bare.begin_frame(paste);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(!text_input(bare, layout, kDefaultChrome, "name", bare_buf,
@@ -7940,7 +7940,7 @@ TEST_CASE("text input: capacity bounds the line and inert fields edit "
     const WidgetId field_w = IdStack{}.id("name");
     gui.set_focus(field_w);
 
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
         changed = text_input(gui, layout, kDefaultChrome, "name", buf,
@@ -7951,7 +7951,7 @@ TEST_CASE("text input: capacity bounds the line and inert fields edit "
 
     // Four bytes in one frame: the first three land, the fourth finds
     // the buffer full and the frame's remainder drops.
-    InputFrame flood = snap(400.0f, 400.0f);
+    ws::input::InputFrame flood = snap(400.0f, 400.0f);
     for (const char* p = "abcd"; *p != '\0'; ++p) {
         flood.text_input.push_back(static_cast<std::uint32_t>(*p));
     }
@@ -7959,7 +7959,7 @@ TEST_CASE("text input: capacity bounds the line and inert fields edit "
     CHECK(std::strcmp(buf, "abc") == 0);
     CHECK(changed == true);
 
-    InputFrame fifth = snap(400.0f, 400.0f);
+    ws::input::InputFrame fifth = snap(400.0f, 400.0f);
     fifth.text_input.push_back('d');
     pass(fifth);
     CHECK(std::strcmp(buf, "abc") == 0);  // full is full
@@ -7967,7 +7967,7 @@ TEST_CASE("text input: capacity bounds the line and inert fields edit "
 
     // A null buffer or a capacity under 2 lays the same row inert -
     // nothing to crash on, nothing to edit.
-    InputFrame dead = snap(400.0f, 400.0f);
+    ws::input::InputFrame dead = snap(400.0f, 400.0f);
     dead.text_input.push_back('x');
     gui.begin_frame(dead);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
@@ -8006,7 +8006,7 @@ TEST_CASE("text input: the caret blinks on the frame clock") {
     const auto pass = [&](float dt) {
         r.frame_begin(800.0f, 600.0f);
         r.begin_screen();
-        InputFrame frame = snap(400.0f, 400.0f);
+        ws::input::InputFrame frame = snap(400.0f, 400.0f);
         frame.dt_seconds = dt;
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
@@ -8044,7 +8044,7 @@ TEST_CASE("text input: a begin_disabled scope deadens the field") {
     // Typing under a disabled scope edits nothing, and the field
     // cannot even keep the keyboard: state() drops the focus the
     // frame it sees the lock.
-    InputFrame type = snap(400.0f, 400.0f);
+    ws::input::InputFrame type = snap(400.0f, 400.0f);
     type.text_input.push_back('h');
     gui.begin_frame(type);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
@@ -8067,7 +8067,7 @@ TEST_CASE("text input: the v1 filter drops what the font never baked") {
     const WidgetId field_w = IdStack{}.id("name");
     gui.set_focus(field_w);
 
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
         changed = text_input(gui, layout, kDefaultChrome, "name", buf,
@@ -8078,7 +8078,7 @@ TEST_CASE("text input: the v1 filter drops what the font never baked") {
 
     // A frame of nothing the bake range answers - U+00E9, a control
     // code, DEL - plus one honest 'a': only the 'a' lands.
-    InputFrame mixed = snap(400.0f, 400.0f);
+    ws::input::InputFrame mixed = snap(400.0f, 400.0f);
     mixed.text_input.push_back(0x00E9u);  // e-acute: not baked
     mixed.text_input.push_back(31u);      // a control code
     mixed.text_input.push_back(127u);     // DEL: one past the range
@@ -8088,7 +8088,7 @@ TEST_CASE("text input: the v1 filter drops what the font never baked") {
     CHECK(changed == true);
 
     // A frame of ONLY the unbaked: nothing lands, nothing answers.
-    InputFrame accents = snap(400.0f, 400.0f);
+    ws::input::InputFrame accents = snap(400.0f, 400.0f);
     accents.text_input.push_back(0x20ACu);  // the euro sign
     pass(accents);
     CHECK(std::strcmp(buf, "a") == 0);
@@ -8120,7 +8120,7 @@ TEST_CASE("table: a click picks the row and only a move answers true") {
     int selected = 1;
     bool changed = false;
 
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
         changed = table(gui, layout, kDefaultChrome, "grid", kCols, 3,
@@ -8185,7 +8185,7 @@ TEST_CASE("table: the keyboard walk - tab reaches rows up down step "
         return w;
     };
 
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
         changed = table(gui, layout, kDefaultChrome, "grid", kCols, 3,
@@ -8201,23 +8201,23 @@ TEST_CASE("table: the keyboard walk - tab reaches rows up down step "
 
     // Up steps the focused row one - the focus moves, the selection does
     // not (two concepts, the focus rules' own distinction).
-    InputFrame up = snap(400.0f, 400.0f);
-    up.key_pressed[keys::kUp] = true;
+    ws::input::InputFrame up = snap(400.0f, 400.0f);
+    up.key_pressed[ws::input::keys::kUp] = true;
     pass(up);
     CHECK(gui.is_focused(row_w(1)));
     CHECK(selected == 2);
 
     // Enter picks the focused row: the move answers true.
-    InputFrame enter = snap(400.0f, 400.0f);
-    enter.key_pressed[keys::kEnter] = true;
+    ws::input::InputFrame enter = snap(400.0f, 400.0f);
+    enter.key_pressed[ws::input::keys::kEnter] = true;
     pass(enter);
     CHECK(selected == 1);
     CHECK(changed == true);
 
     // Down from row 1 lands on row 2, then clamps at the grid's end -
     // the slider's arrow rule, no wrap (Tab's wrap is the screen's).
-    InputFrame down = snap(400.0f, 400.0f);
-    down.key_pressed[keys::kDown] = true;
+    ws::input::InputFrame down = snap(400.0f, 400.0f);
+    down.key_pressed[ws::input::keys::kDown] = true;
     pass(down);
     CHECK(gui.is_focused(row_w(2)));
     pass(down);
@@ -8232,8 +8232,8 @@ TEST_CASE("table: the keyboard walk - tab reaches rows up down step "
     CHECK(gui.is_focused(row_w(0)));
 
     // The rows register in row order, so Tab walks the grid top-down.
-    InputFrame tab = snap(400.0f, 400.0f);
-    tab.key_pressed[keys::kTab] = true;
+    ws::input::InputFrame tab = snap(400.0f, 400.0f);
+    tab.key_pressed[ws::input::keys::kTab] = true;
     pass(tab);
     CHECK(gui.is_focused(row_w(1)));
 
@@ -8258,7 +8258,7 @@ TEST_CASE("table: a null selected lays the grid display-only and claims "
         "alpha", "1", "a", "beta", "2", "b", "gamma", "3", "c"};
     bool changed = false;
 
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
         changed = table(gui, layout, kDefaultChrome, "grid", kCols, 3,
@@ -8296,7 +8296,7 @@ TEST_CASE("table: the fill width lays the rows a fixed width does not") {
     bool changed = false;
     float table_w = -1.0f;  // the pass reads it: fill, then fixed
 
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
         changed = table(gui, layout, kDefaultChrome, "grid", kCols, 3,
@@ -8340,7 +8340,7 @@ TEST_CASE("table: the degenerate shapes - no columns no rows null cells") {
     bool clicked = false;
     int shape = 0;  // which degenerate shape this pass lays
 
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
         clicked = false;
@@ -8402,7 +8402,7 @@ TEST_CASE("table: a begin_disabled scope deadens the grid") {
     int selected = 1;
     bool changed = false;
 
-    const auto pass = [&](const InputFrame& frame) {
+    const auto pass = [&](const ws::input::InputFrame& frame) {
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
         gui.begin_disabled();
@@ -8454,7 +8454,7 @@ TEST_CASE("table: the grid draws - header rule and cells in the batch") {
     const auto pass = [&](int rows) {
         r.frame_begin(800.0f, 600.0f);
         r.begin_screen();
-        InputFrame frame = snap(400.0f, 400.0f);
+        ws::input::InputFrame frame = snap(400.0f, 400.0f);
         gui.begin_frame(frame);
         (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
         (void)table(gui, layout, kDefaultChrome, "grid", kCols, 3, kCells,
@@ -8834,7 +8834,7 @@ TEST_CASE("modals: Tab lands only inside the veil - the focus trap") {
     // Chrome-first, like production: the modal scope opens at the top,
     // its widgets register inside it, and the base widget's attempt
     // under the veil is silently refused - the refusal IS the trap.
-    const auto veiled_frame = [&gui, modal_a, modal_b, base_w](InputFrame frame) {
+    const auto veiled_frame = [&gui, modal_a, modal_b, base_w](ws::input::InputFrame frame) {
         gui.begin_frame(frame);
         gui.begin_layer(Layer::modal);
         gui.register_focusable(modal_a);
@@ -8846,8 +8846,8 @@ TEST_CASE("modals: Tab lands only inside the veil - the focus trap") {
 
     // Tab walks the modal's own registrations and wraps inside them -
     // never escaping to the base widget the veil hides.
-    InputFrame tab = snap(200.0f, 200.0f);
-    tab.key_pressed[keys::kTab] = true;
+    ws::input::InputFrame tab = snap(200.0f, 200.0f);
+    tab.key_pressed[ws::input::keys::kTab] = true;
     veiled_frame(tab);
     CHECK(gui.is_focused(modal_a));
     veiled_frame(tab);
@@ -8864,8 +8864,8 @@ TEST_CASE("modals: Tab lands only inside the veil - the focus trap") {
     gui.end_frame();
     CHECK(!gui.is_focused(modal_a));
 
-    InputFrame tab_plain = snap(200.0f, 200.0f);
-    tab_plain.key_pressed[keys::kTab] = true;
+    ws::input::InputFrame tab_plain = snap(200.0f, 200.0f);
+    tab_plain.key_pressed[ws::input::keys::kTab] = true;
     gui.begin_frame(tab_plain);
     gui.register_focusable(base_w);
     gui.end_frame();
@@ -8973,8 +8973,8 @@ TEST_CASE("citizenship: the checkbox takes focus and Enter toggles like a click"
     CHECK(gui.is_focused(IdStack{}.id("mute")));
 
     // Enter toggles the focused checkbox - and only it.
-    InputFrame key_enter = snap(200.0f, 200.0f);
-    key_enter.key_pressed[keys::kEnter] = true;
+    ws::input::InputFrame key_enter = snap(200.0f, 200.0f);
+    key_enter.key_pressed[ws::input::keys::kEnter] = true;
     gui.begin_frame(key_enter);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(checkbox(gui, layout, kDefaultChrome, "mute", value));
@@ -8985,8 +8985,8 @@ TEST_CASE("citizenship: the checkbox takes focus and Enter toggles like a click"
     CHECK(other == true);
 
     // Space does the same.
-    InputFrame key_space = snap(200.0f, 200.0f);
-    key_space.key_pressed[keys::kSpace] = true;
+    ws::input::InputFrame key_space = snap(200.0f, 200.0f);
+    key_space.key_pressed[ws::input::keys::kSpace] = true;
     gui.begin_frame(key_space);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(checkbox(gui, layout, kDefaultChrome, "mute", value));
@@ -8996,8 +8996,8 @@ TEST_CASE("citizenship: the checkbox takes focus and Enter toggles like a click"
     CHECK(value == false);
 
     // Clearing the focus kills the key path: the same Space does nothing.
-    InputFrame key_dead = snap(200.0f, 200.0f);
-    key_dead.key_pressed[keys::kSpace] = true;
+    ws::input::InputFrame key_dead = snap(200.0f, 200.0f);
+    key_dead.key_pressed[ws::input::keys::kSpace] = true;
     gui.begin_frame(key_dead);
     gui.set_focus(kInvalidWidgetId);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
@@ -9032,8 +9032,8 @@ TEST_CASE("citizenship: the arrows step the focused slider") {
     gui.end_frame();
 
     // Right steps 1% of the range; only a real move reports changed.
-    InputFrame key_right = snap(200.0f, 200.0f);
-    key_right.key_pressed[keys::kRight] = true;
+    ws::input::InputFrame key_right = snap(200.0f, 200.0f);
+    key_right.key_pressed[ws::input::keys::kRight] = true;
     gui.begin_frame(key_right);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(slider_float(gui, layout, kDefaultChrome, "vol", v, 0.0f, 1.0f));
@@ -9042,8 +9042,8 @@ TEST_CASE("citizenship: the arrows step the focused slider") {
     CHECK(v == doctest::Approx(0.51f));
 
     // Left steps back.
-    InputFrame key_left = snap(200.0f, 200.0f);
-    key_left.key_pressed[keys::kLeft] = true;
+    ws::input::InputFrame key_left = snap(200.0f, 200.0f);
+    key_left.key_pressed[ws::input::keys::kLeft] = true;
     gui.begin_frame(key_left);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(slider_float(gui, layout, kDefaultChrome, "vol", v, 0.0f, 1.0f));
@@ -9052,8 +9052,8 @@ TEST_CASE("citizenship: the arrows step the focused slider") {
     CHECK(v == doctest::Approx(0.5f));
 
     // Without the focus the arrows do nothing and report nothing.
-    InputFrame key_dead = snap(200.0f, 200.0f);
-    key_dead.key_pressed[keys::kRight] = true;
+    ws::input::InputFrame key_dead = snap(200.0f, 200.0f);
+    key_dead.key_pressed[ws::input::keys::kRight] = true;
     gui.begin_frame(key_dead);
     gui.set_focus(kInvalidWidgetId);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
@@ -9086,8 +9086,8 @@ TEST_CASE("citizenship: slider_int steps by one and clamps at the end") {
     gui.end_frame();
 
     // Right steps 1 per press, reporting changed on each real move.
-    InputFrame key_right = snap(200.0f, 200.0f);
-    key_right.key_pressed[keys::kRight] = true;
+    ws::input::InputFrame key_right = snap(200.0f, 200.0f);
+    key_right.key_pressed[ws::input::keys::kRight] = true;
     for (int expect = 1; expect <= 3; ++expect) {
         gui.begin_frame(key_right);
         (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
@@ -9131,8 +9131,8 @@ TEST_CASE("citizenship: tabs take focus in strip order; Enter selects") {
 
     // Tab walks the strip's registrations: the focus moves to the
     // second tab WITHOUT moving the selection.
-    InputFrame tab = snap(200.0f, 200.0f);
-    tab.key_pressed[keys::kTab] = true;
+    ws::input::InputFrame tab = snap(200.0f, 200.0f);
+    tab.key_pressed[ws::input::keys::kTab] = true;
     gui.begin_frame(tab);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(!tab_bar(gui, layout, kDefaultChrome, "pages", labels, 3, active));
@@ -9141,8 +9141,8 @@ TEST_CASE("citizenship: tabs take focus in strip order; Enter selects") {
     CHECK(active == 0);  // the focus moved, the selection did not
 
     // Enter selects the focused tab - exactly like a click.
-    InputFrame key_enter = snap(200.0f, 200.0f);
-    key_enter.key_pressed[keys::kEnter] = true;
+    ws::input::InputFrame key_enter = snap(200.0f, 200.0f);
+    key_enter.key_pressed[ws::input::keys::kEnter] = true;
     gui.begin_frame(key_enter);
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     CHECK(tab_bar(gui, layout, kDefaultChrome, "pages", labels, 3, active));
@@ -9210,8 +9210,8 @@ TEST_CASE("disabled: the scope withdraws claims, focus and Tab") {
     // Tab has nowhere to land while the only focusable is locked: the
     // registration is refused, the nav resolves against nothing, and
     // the focus holds still.
-    InputFrame tab = snap(200.0f, 200.0f);
-    tab.key_pressed[keys::kTab] = true;
+    ws::input::InputFrame tab = snap(200.0f, 200.0f);
+    tab.key_pressed[ws::input::keys::kTab] = true;
     gui.begin_frame(tab);
     gui.begin_disabled();
     gui.register_focusable(locked);  // refused

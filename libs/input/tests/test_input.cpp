@@ -16,53 +16,53 @@
 // --- event system ---------------------------------------------------------
 
 TEST_CASE("every event carries its own type and starts unhandled") {
-    using ws::ui::EventType;
-    CHECK(ws::ui::WindowCloseEvent{}.type() == EventType::WindowClose);
-    CHECK(ws::ui::WindowCloseEvent{}.static_type() == EventType::WindowClose);
-    CHECK(ws::ui::WindowResizeEvent{640, 480}.type() == EventType::WindowResize);
-    CHECK(ws::ui::KeyPressedEvent{'D', false}.type() == EventType::KeyPressed);
-    CHECK(ws::ui::KeyReleasedEvent{'D'}.type() == EventType::KeyReleased);
-    CHECK(ws::ui::MouseButtonPressedEvent{0}.type() == EventType::MouseButtonPressed);
-    CHECK(ws::ui::MouseButtonReleasedEvent{1}.type() == EventType::MouseButtonReleased);
-    CHECK(ws::ui::MouseMovedEvent{1.0f, 2.0f}.type() == EventType::MouseMoved);
-    CHECK(ws::ui::MouseScrolledEvent{0.0f, -1.0f}.type() == EventType::MouseScrolled);
-    CHECK(ws::ui::TouchPressedEvent{7, 1.0f, 2.0f}.type() ==
+    using ws::input::EventType;
+    CHECK(ws::input::WindowCloseEvent{}.type() == EventType::WindowClose);
+    CHECK(ws::input::WindowCloseEvent{}.static_type() == EventType::WindowClose);
+    CHECK(ws::input::WindowResizeEvent{640, 480}.type() == EventType::WindowResize);
+    CHECK(ws::input::KeyPressedEvent{'D', false}.type() == EventType::KeyPressed);
+    CHECK(ws::input::KeyReleasedEvent{'D'}.type() == EventType::KeyReleased);
+    CHECK(ws::input::MouseButtonPressedEvent{0}.type() == EventType::MouseButtonPressed);
+    CHECK(ws::input::MouseButtonReleasedEvent{1}.type() == EventType::MouseButtonReleased);
+    CHECK(ws::input::MouseMovedEvent{1.0f, 2.0f}.type() == EventType::MouseMoved);
+    CHECK(ws::input::MouseScrolledEvent{0.0f, -1.0f}.type() == EventType::MouseScrolled);
+    CHECK(ws::input::TouchPressedEvent{7, 1.0f, 2.0f}.type() ==
           EventType::TouchPressed);
-    CHECK(ws::ui::TouchMovedEvent{7, 1.0f, 2.0f}.type() == EventType::TouchMoved);
-    CHECK(ws::ui::TouchReleasedEvent{7, 1.0f, 2.0f, true}.type() ==
+    CHECK(ws::input::TouchMovedEvent{7, 1.0f, 2.0f}.type() == EventType::TouchMoved);
+    CHECK(ws::input::TouchReleasedEvent{7, 1.0f, 2.0f, true}.type() ==
           EventType::TouchReleased);
-    CHECK(ws::ui::TextInputEvent{U'x'}.type() == EventType::TextInput);
+    CHECK(ws::input::TextInputEvent{U'x'}.type() == EventType::TextInput);
 
-    ws::ui::WindowResizeEvent resize{800, 600};
+    ws::input::WindowResizeEvent resize{800, 600};
     CHECK(resize.handled == false);
     CHECK(resize.width == 800);
     CHECK(resize.height == 600);
-    ws::ui::KeyPressedEvent key{'D', true};
+    ws::input::KeyPressedEvent key{'D', true};
     CHECK(key.keycode == 'D');
     CHECK(key.repeat == true);
-    ws::ui::TouchReleasedEvent touch{7, 1.0f, 2.0f, true};
+    ws::input::TouchReleasedEvent touch{7, 1.0f, 2.0f, true};
     CHECK(touch.pointer_id == 7);
     CHECK(touch.x == 1.0f);
     CHECK(touch.y == 2.0f);
     CHECK(touch.cancelled == true);
-    ws::ui::TextInputEvent glyph{U'w'};
+    ws::input::TextInputEvent glyph{U'w'};
     CHECK(glyph.codepoint == U'w');
 }
 
 TEST_CASE("dispatcher fires only on the matching type and honors the return") {
-    ws::ui::WindowResizeEvent event{800, 600};
-    ws::ui::EventDispatcher dispatcher{event};
+    ws::input::WindowResizeEvent event{800, 600};
+    ws::input::EventDispatcher dispatcher{event};
 
     bool called = false;
-    CHECK(dispatcher.dispatch<ws::ui::KeyPressedEvent>(
-              [&](const ws::ui::KeyPressedEvent&) {
+    CHECK(dispatcher.dispatch<ws::input::KeyPressedEvent>(
+              [&](const ws::input::KeyPressedEvent&) {
                   called = true;
                   return true;
               }) == false);
     CHECK(called == false);  // wrong type: handler must not fire
 
-    CHECK(dispatcher.dispatch<ws::ui::WindowResizeEvent>(
-              [&](const ws::ui::WindowResizeEvent& e) {
+    CHECK(dispatcher.dispatch<ws::input::WindowResizeEvent>(
+              [&](const ws::input::WindowResizeEvent& e) {
                   called = true;
                   CHECK(e.width == 800);
                   return false;  // declines: event stays unhandled
@@ -70,19 +70,19 @@ TEST_CASE("dispatcher fires only on the matching type and honors the return") {
     CHECK(called);
     CHECK(event.handled == false);
 
-    CHECK(dispatcher.dispatch<ws::ui::WindowResizeEvent>(
-              [](const ws::ui::WindowResizeEvent&) { return true; }) == true);
+    CHECK(dispatcher.dispatch<ws::input::WindowResizeEvent>(
+              [](const ws::input::WindowResizeEvent&) { return true; }) == true);
     CHECK(event.handled == true);
 }
 
 TEST_CASE("dispatcher skips events the shell pre-marked handled") {
-    ws::ui::MouseMovedEvent event{3.0f, 4.0f};
+    ws::input::MouseMovedEvent event{3.0f, 4.0f};
     event.handled = true;  // e.g. ImGui captured the mouse over a widget
-    ws::ui::EventDispatcher dispatcher{event};
+    ws::input::EventDispatcher dispatcher{event};
 
     bool called = false;
-    CHECK(dispatcher.dispatch<ws::ui::MouseMovedEvent>(
-              [&](const ws::ui::MouseMovedEvent&) {
+    CHECK(dispatcher.dispatch<ws::input::MouseMovedEvent>(
+              [&](const ws::input::MouseMovedEvent&) {
                   called = true;
                   return true;
               }) == false);
@@ -92,7 +92,7 @@ TEST_CASE("dispatcher skips events the shell pre-marked handled") {
 // --- InputFrame: one frame's snapshot ---------------------------------------
 
 TEST_CASE("InputFrame::next_frame clears edges and keeps held state") {
-    using namespace ws::ui::gui;
+    using namespace ws::input;
     InputFrame frame;
     frame.mouse_x = 100.0f;
     frame.mouse_y = 50.0f;
@@ -126,7 +126,7 @@ TEST_CASE("InputFrame::next_frame clears edges and keeps held state") {
 }
 
 TEST_CASE("InputFrame: the frame clock survives next_frame - the shell's write is the refresh") {
-    using namespace ws::ui::gui;
+    using namespace ws::input;
     InputFrame frame;
     CHECK(frame.dt_seconds == 0.0f);  // a hand-built frame starts at 0
 
@@ -143,7 +143,7 @@ TEST_CASE("InputFrame: the frame clock survives next_frame - the shell's write i
 TEST_CASE("frame_input is drop-safe without a running app") {
     // Headless: the shell never installed an accumulator, so the public
     // getter answers an empty snapshot instead of dangling.
-    const ws::ui::gui::InputFrame& frame = ws::ui::gui::frame_input();
+    const ws::input::InputFrame& frame = ws::input::frame_input();
     CHECK(frame.mouse_x == 0.0f);
     CHECK(frame.mouse_y == 0.0f);
     CHECK(frame.mouse_down[0] == false);
@@ -153,22 +153,22 @@ TEST_CASE("frame_input is drop-safe without a running app") {
     CHECK(frame.dt_seconds == 0.0f);  // no shell ran: the clock reads 0
     CHECK(frame.text_input.empty());
     CHECK(frame.touch_count == 0);
-    CHECK(frame.bridged_touch() == ws::ui::gui::kNoPointer);
+    CHECK(frame.bridged_touch() == ws::input::kNoPointer);
     // An empty frame never saw a mouse: presence defaults false, so the
     // pointer list is EMPTY - the touch-only shape. The mouse joins only
     // when the platform says one exists.
-    std::array<ws::ui::gui::PointerView,
-               ws::ui::gui::InputFrame::kMaxPointers>
+    std::array<ws::input::PointerView,
+               ws::input::InputFrame::kMaxPointers>
         pointers{};
     CHECK(frame.gather_pointers(pointers) == 0);
-    CHECK(pointers[0].id == ws::ui::gui::kNoPointer);
-    CHECK(!frame.pointer_pos(ws::ui::gui::kMousePointerId, nullptr, nullptr));
+    CHECK(pointers[0].id == ws::input::kNoPointer);
+    CHECK(!frame.pointer_pos(ws::input::kMousePointerId, nullptr, nullptr));
 }
 
 // --- InputFrame touch table (multi-touch groundwork) -------------------------
 
 TEST_CASE("touch table: down/move/up track a contact through its frames") {
-    using namespace ws::ui::gui;
+    using namespace ws::input;
     InputFrame frame;
 
     // Contact 17 lands: entry 0, held with a press edge.
@@ -204,7 +204,7 @@ TEST_CASE("touch table: down/move/up track a contact through its frames") {
 }
 
 TEST_CASE("touch table: insertion order survives releases and frame edges") {
-    using namespace ws::ui::gui;
+    using namespace ws::input;
     InputFrame frame;
     frame.touch_down(PointerId{7}, 0.0f, 0.0f);
     frame.touch_down(PointerId{3}, 1.0f, 1.0f);
@@ -228,7 +228,7 @@ TEST_CASE("touch table: insertion order survives releases and frame edges") {
 }
 
 TEST_CASE("touch table: a repeated down for the same id updates in place") {
-    using namespace ws::ui::gui;
+    using namespace ws::input;
     InputFrame frame;
     CHECK(frame.touch_down(PointerId{7}, 10.0f, 10.0f) == 0);
     // One down per contact is the platform contract; a stray repeat must
@@ -240,7 +240,7 @@ TEST_CASE("touch table: a repeated down for the same id updates in place") {
 }
 
 TEST_CASE("touch table: a same-frame id reuse keeps the lift's release edge") {
-    using namespace ws::ui::gui;
+    using namespace ws::input;
     InputFrame frame;
     CHECK(frame.touch_down(PointerId{4}, 10.0f, 10.0f) == 0);
     frame.touch_up(PointerId{4}, 12.0f, 12.0f, false);
@@ -276,7 +276,7 @@ TEST_CASE("touch table: a same-frame id reuse keeps the lift's release edge") {
 }
 
 TEST_CASE("touch table: a recycled slot carries no stale release into a new contact") {
-    using namespace ws::ui::gui;
+    using namespace ws::input;
     InputFrame frame;
     frame.touch_down(PointerId{1}, 0.0f, 0.0f);
     frame.touch_down(PointerId{2}, 1.0f, 1.0f);
@@ -299,7 +299,7 @@ TEST_CASE("touch table: a recycled slot carries no stale release into a new cont
 }
 
 TEST_CASE("primary-touch bridge: the first contact mirrors the mouse") {
-    using namespace ws::ui::gui;
+    using namespace ws::input;
     InputFrame frame;
 
     // The first contact of the gesture is the primary: it mirrors the mouse
@@ -337,7 +337,7 @@ TEST_CASE("primary-touch bridge: the first contact mirrors the mouse") {
 }
 
 TEST_CASE("bridge: no promotion - a freed mouse stays free until a new gesture") {
-    using namespace ws::ui::gui;
+    using namespace ws::input;
     InputFrame frame;
     frame.touch_down(PointerId{7}, 10.0f, 20.0f);
     frame.touch_down(PointerId{9}, 30.0f, 40.0f);
@@ -361,7 +361,7 @@ TEST_CASE("bridge: no promotion - a freed mouse stays free until a new gesture")
 }
 
 TEST_CASE("cancelled contact: release edge with cancelled set, bridge lifts") {
-    using namespace ws::ui::gui;
+    using namespace ws::input;
     InputFrame frame;
     frame.touch_down(PointerId{2}, 5.0f, 6.0f);
     frame.touch_up(PointerId{2}, 5.0f, 6.0f, true);
@@ -377,7 +377,7 @@ TEST_CASE("cancelled contact: release edge with cancelled set, bridge lifts") {
 }
 
 TEST_CASE("touch cap: the ninth contact drops, the table stays intact") {
-    using namespace ws::ui::gui;
+    using namespace ws::input;
     InputFrame frame;
     for (std::uint32_t id = 1; id <= static_cast<std::uint32_t>(
                                      InputFrame::kMaxTouches);
@@ -399,7 +399,7 @@ TEST_CASE("touch cap: the ninth contact drops, the table stays intact") {
 }
 
 TEST_CASE("gather_pointers: mouse is slot 0, touches follow in table order") {
-    using namespace ws::ui::gui;
+    using namespace ws::input;
     InputFrame frame;
     frame.touch_down(PointerId{7}, 40.0f, 50.0f);
     frame.touch_down(PointerId{9}, 60.0f, 70.0f);
@@ -449,7 +449,7 @@ TEST_CASE("gather_pointers: mouse is slot 0, touches follow in table order") {
 }
 
 TEST_CASE("gather_pointers: an absent mouse is not a pointer - touches only") {
-    using namespace ws::ui::gui;
+    using namespace ws::input;
     // The touch-only shape: the bridge mirrors the finger into the raw
     // mouse fields, but presence is false, so the mouse claims nothing.
     // Whatever mouse_x/y hold - a finger's position, or the (0,0) default

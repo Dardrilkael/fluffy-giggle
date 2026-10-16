@@ -469,7 +469,7 @@ bool combo(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 // platform - an unwired seam, Android today, makes the trio no-ops).
 // Enter is not the widget's to take - a single line has no commit
 // edge, so the caller reads its own: is_focused(ids().id(label)) and
-// key_pressed[keys::kEnter] on the frame after the edit. Tab cycles
+// key_pressed[ws::input::keys::kEnter] on the frame after the edit. Tab cycles
 // the focus away like any row's (the field registers focusable);
 // Space types, it does not activate. A line longer than the row
 // truncates with "..." at the right edge (v1 has no horizontal

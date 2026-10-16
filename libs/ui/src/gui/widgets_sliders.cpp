@@ -40,7 +40,7 @@ bool slider_impl(GuiContext& gui, LayoutCursor& layout,
     // its release frame in the table, so the lookup still finds it), and
     // re-mapping a normal release is a no-op: same pointer, same value.
     bool changed = false;
-    const PointerView* owner = gui.pointer(hit.pointer);
+    const ws::input::PointerView* owner = gui.pointer(hit.pointer);
     const bool tracking =
         (hit.pressed && owner != nullptr && owner->down) || hit.clicked;
     if (tracking && owner != nullptr && rect.width > 0.0f) {
@@ -57,10 +57,10 @@ bool slider_impl(GuiContext& gui, LayoutCursor& layout,
 
     // Keyboard: the arrows step the focused slider - one key_step per
     // press, clamped to the range; only a real move reports changed.
-    if (gui.is_focused(id) && (gui.input().key_pressed[keys::kLeft] ||
-                               gui.input().key_pressed[keys::kRight])) {
+    if (gui.is_focused(id) && (gui.input().key_pressed[ws::input::keys::kLeft] ||
+                               gui.input().key_pressed[ws::input::keys::kRight])) {
         const float step =
-            gui.input().key_pressed[keys::kRight] ? key_step : -key_step;
+            gui.input().key_pressed[ws::input::keys::kRight] ? key_step : -key_step;
         const float next = std::min(std::max(value + step, min), max);
         if (next != value) {
             value = next;
@@ -171,9 +171,9 @@ bool drag_float(GuiContext& gui, LayoutCursor& layout,
     // sweep outlives the rect (hit.pressed stays true through the hold,
     // press started inside), and a same-frame press+release never sees
     // the pointer down - a plain click grabs and lifts, moving nothing.
-    const PointerView* owner = gui.pointer(hit.pointer);
+    const ws::input::PointerView* owner = gui.pointer(hit.pointer);
     if (hit.pressed && owner != nullptr && owner->down) {
-        if (drag.pointer == kNoPointer) {
+        if (drag.pointer == ws::input::kNoPointer) {
             drag.pointer = hit.pointer;
             drag.anchor_x = owner->x;
             drag.anchor_value = value;
@@ -195,17 +195,17 @@ bool drag_float(GuiContext& gui, LayoutCursor& layout,
     } else {
         // Lift, cancel, or a pointer that never really pressed us: the
         // grab ends, so the next press anchors fresh.
-        drag.pointer = kNoPointer;
+        drag.pointer = ws::input::kNoPointer;
     }
 
     // Keyboard: the arrows step the focused row - 1% of the range per
     // press, like a slider; only a real move reports changed, and the
     // same NaN guard holds.
-    if (gui.is_focused(id) && (gui.input().key_pressed[keys::kLeft] ||
-                               gui.input().key_pressed[keys::kRight])) {
+    if (gui.is_focused(id) && (gui.input().key_pressed[ws::input::keys::kLeft] ||
+                               gui.input().key_pressed[ws::input::keys::kRight])) {
         const float step = (max - min) / 100.0f;
         const float delta =
-            gui.input().key_pressed[keys::kRight] ? step : -step;
+            gui.input().key_pressed[ws::input::keys::kRight] ? step : -step;
         const float next = std::min(std::max(value + delta, min), max);
         if (next == next && next != value) {
             value = next;

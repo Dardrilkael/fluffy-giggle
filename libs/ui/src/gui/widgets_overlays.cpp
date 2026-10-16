@@ -25,7 +25,7 @@ bool begin_popup(GuiContext& gui, LayoutCursor& layout,
     // rule. The veil gate applies: under a raised modal veil the popup is
     // inert like every lower stratum - its close rule eats no press the
     // veil owns.
-    const InputFrame& input = gui.input();
+    const ws::input::InputFrame& input = gui.input();
     if (gui.claims_open()) {
         if (input.mouse_present && input.mouse_pressed[0] &&
             !bounds.contains(input.mouse_x, input.mouse_y) &&
@@ -34,9 +34,9 @@ bool begin_popup(GuiContext& gui, LayoutCursor& layout,
             return false;
         }
         const int touch_count =
-            std::min(input.touch_count, InputFrame::kMaxTouches);
+            std::min(input.touch_count, ws::input::InputFrame::kMaxTouches);
         for (int i = 0; i < touch_count; ++i) {
-            const TouchPoint& point =
+            const ws::input::TouchPoint& point =
                 input.touches[static_cast<std::size_t>(i)];
             if (point.pressed && !bounds.contains(point.x, point.y) &&
                 !anchor.contains(point.x, point.y)) {

@@ -1,15 +1,17 @@
-// InputFrame's out-of-line half: the touch table the platform callbacks
-// fill (window_glfw/window_android call the touch_* writers with stable
-// per-contact ids), next_frame()'s advance, and the primary-touch ->
-// mouse bridge the writers maintain. Pure CPU, no platform headers - the
-// tests drive it headless.
+// The input family's out-of-line half: InputFrame's touch table (the
+// ws::ui platform callbacks fill it - window_glfw/window_android call the
+// touch_* writers with stable per-contact ids), next_frame()'s advance,
+// the primary-touch -> mouse bridge the writers maintain, and the
+// frame_input() glue (set_active_input points the getter at the shell's
+// live accumulator while ws::ui's App::run() is active). Pure CPU, no
+// platform headers - the tests drive it headless.
 
-#include <ws/ui/input.hpp>
+#include <ws/input/input.hpp>
 
 #include <algorithm>
 #include <array>
 
-namespace ws::ui::gui {
+namespace ws::input {
 namespace {
 
 // --- InputFrame touch table ---------------------------------------------------
@@ -207,4 +209,34 @@ bool InputFrame::pointer_pos(PointerId id, float* x, float* y) const {
     return true;
 }
 
-}  // namespace ws::ui::gui
+// --- frame_input: the shell's accumulator (set_active_input installs) --------
+
+namespace {
+
+// Process-wide input state (the shell's tap, the only global this lib
+// owns). Single-threaded BY DESIGN: the immediate-mode loop runs on the
+// shell's main thread only, so these are plain globals on purpose - not a
+// data race waiting to be "fixed" with atomics.
+
+// The shell's accumulator while ws::ui's App::run() is active; null before
+// startup and after shutdown.
+InputFrame* g_active_input = nullptr;
+
+// The answer frame_input() gives without a running app - a valid empty
+// frame, so callers never see a dangling or partially filled snapshot.
+const InputFrame& empty_input() {
+    static const InputFrame empty;
+    return empty;
+}
+
+}  // namespace
+
+void set_active_input(InputFrame* input) {
+    g_active_input = input;
+}
+
+const InputFrame& frame_input() {
+    return g_active_input != nullptr ? *g_active_input : empty_input();
+}
+
+}  // namespace ws::input

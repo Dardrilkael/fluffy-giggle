@@ -159,9 +159,9 @@ bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             // ring draws now, and the scroll panel's focus-into-view
             // follows the move for free.
             if (gui.is_focused(rid)) {
-                if (gui.input().key_pressed[keys::kUp] && i > 0) {
+                if (gui.input().key_pressed[ws::input::keys::kUp] && i > 0) {
                     gui.set_focus(row_id(i - 1));
-                } else if (gui.input().key_pressed[keys::kDown] &&
+                } else if (gui.input().key_pressed[ws::input::keys::kDown] &&
                            i + 1 < row_count) {
                     gui.set_focus(row_id(i + 1));
                 }

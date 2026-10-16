@@ -1,8 +1,8 @@
 // The desktop half of the platform seam (see src/platform/window.h): GLFW owns the
 // window, this TU owns GLFW. The only place GLFW's C callback surface
-// exists; each callback builds the matching ws::ui::Event and hands it to
+// exists; each callback builds the matching ws::input::Event and hands it to
 // the shell's single forwarder; the same callbacks also tap raw input into
-// the gui library's InputFrame (WindowEventSink::input) - a second,
+// the gui library's ws::input::InputFrame (WindowEventSink::input) - a second,
 // deliberately unfiltered consumer, since the gui library hit-tests for
 // itself (see <ws/input/input.hpp>).
 //
@@ -13,7 +13,7 @@
 // NewFrame (see imgui_wants() in src/app/app.cpp). WindowSize and WindowClose
 // are ours alone - the backend installs neither.
 //
-// The cursor callbacks also own InputFrame::mouse_present - the gui's
+// The cursor callbacks also own ws::input::InputFrame::mouse_present - the gui's
 // "is there a mouse at all": a move, a button or the cursor entering sets
 // it (and samples the position, so a first click lands where the user
 // sees it, not at (0,0)); the cursor leaving clears it, and the gui's
@@ -36,7 +36,7 @@ WindowEventSink* sink_for(GLFWwindow* window) {
 }
 
 // The gui input tap for this window, when the shell installed one.
-gui::InputFrame* input_for(GLFWwindow* window) {
+ws::input::InputFrame* input_for(GLFWwindow* window) {
     WindowEventSink* sink = sink_for(window);
     return (sink != nullptr && sink->input != nullptr) ? sink->input : nullptr;
 }
@@ -54,7 +54,7 @@ void on_window_close(GLFWwindow* window) {
     // GLFW already sets the close flag before invoking this callback; set it
     // again so the intent is explicit and the loop cannot miss it.
     glfwSetWindowShouldClose(window, GLFW_TRUE);
-    emit(window, WindowCloseEvent{});
+    emit(window, ws::input::WindowCloseEvent{});
 }
 
 // Size in screen coordinates; the shell recreates the swapchain off its own
@@ -65,7 +65,7 @@ void on_window_size(GLFWwindow* window, int width, int height) {
     if (width <= 0 || height <= 0) {
         return;
     }
-    emit(window, WindowResizeEvent{width, height});
+    emit(window, ws::input::WindowResizeEvent{width, height});
 }
 
 void on_key(GLFWwindow* window, int key, int scancode, int action, int mods) {
@@ -73,13 +73,13 @@ void on_key(GLFWwindow* window, int key, int scancode, int action, int mods) {
     (void)mods;
     switch (action) {
         case GLFW_PRESS:
-            emit(window, KeyPressedEvent{key, false});
+            emit(window, ws::input::KeyPressedEvent{key, false});
             break;
         case GLFW_RELEASE:
-            emit(window, KeyReleasedEvent{key});
+            emit(window, ws::input::KeyReleasedEvent{key});
             break;
         case GLFW_REPEAT:
-            emit(window, KeyPressedEvent{key, true});
+            emit(window, ws::input::KeyPressedEvent{key, true});
             break;
         default:
             break;
@@ -87,8 +87,8 @@ void on_key(GLFWwindow* window, int key, int scancode, int action, int mods) {
     // gui tap: held state on every transition, pressed edge on PRESS only -
     // key repeat is a widget policy, not an input fact, so the edge stays
     // pure. Out-of-range codes (GLFW_KEY_UNKNOWN) drop.
-    if (gui::InputFrame* input = input_for(window);
-        input != nullptr && key >= 0 && key < gui::InputFrame::kMaxKeys) {
+    if (ws::input::InputFrame* input = input_for(window);
+        input != nullptr && key >= 0 && key < ws::input::InputFrame::kMaxKeys) {
         input->key_down[key] = (action != GLFW_RELEASE);
         if (action == GLFW_PRESS) {
             input->key_pressed[key] = true;
@@ -101,7 +101,7 @@ void on_key(GLFWwindow* window, int key, int scancode, int action, int mods) {
 // screen mode) - the ratio is 1:1 whenever the two match and drifts under
 // DPI scaling; a degenerate window size keeps the last position rather
 // than dividing by zero - and marks the mouse present.
-void tap_cursor(GLFWwindow* window, gui::InputFrame* input, double x, double y) {
+void tap_cursor(GLFWwindow* window, ws::input::InputFrame* input, double x, double y) {
     int fb_width = 0;
     int fb_height = 0;
     int win_width = 0;
@@ -122,11 +122,11 @@ void tap_cursor(GLFWwindow* window, gui::InputFrame* input, double x, double y) 
 void on_mouse_button(GLFWwindow* window, int button, int action, int mods) {
     (void)mods;
     if (action == GLFW_PRESS) {
-        emit(window, MouseButtonPressedEvent{button});
+        emit(window, ws::input::MouseButtonPressedEvent{button});
     } else {
-        emit(window, MouseButtonReleasedEvent{button});
+        emit(window, ws::input::MouseButtonReleasedEvent{button});
     }
-    if (gui::InputFrame* input = input_for(window)) {
+    if (ws::input::InputFrame* input = input_for(window)) {
         // The click can be the device's first appearance (no move since the
         // window opened): sample, so the press lands at the real cursor
         // and not at the (0,0) default.
@@ -134,7 +134,7 @@ void on_mouse_button(GLFWwindow* window, int button, int action, int mods) {
         double y = 0.0;
         glfwGetCursorPos(window, &x, &y);
         tap_cursor(window, input, x, y);
-        if (button >= 0 && button < gui::InputFrame::kMaxMouseButtons) {
+        if (button >= 0 && button < ws::input::InputFrame::kMaxMouseButtons) {
             const bool down = (action == GLFW_PRESS);
             input->mouse_down[button] = down;
             if (down) {
@@ -147,8 +147,8 @@ void on_mouse_button(GLFWwindow* window, int button, int action, int mods) {
 }
 
 void on_cursor_pos(GLFWwindow* window, double x, double y) {
-    emit(window, MouseMovedEvent{static_cast<float>(x), static_cast<float>(y)});
-    if (gui::InputFrame* input = input_for(window)) {
+    emit(window, ws::input::MouseMovedEvent{static_cast<float>(x), static_cast<float>(y)});
+    if (ws::input::InputFrame* input = input_for(window)) {
         tap_cursor(window, input, x, y);
     }
 }
@@ -159,7 +159,7 @@ void on_cursor_pos(GLFWwindow* window, double x, double y) {
 // it that frame, hover dies with it, and a press still held evaporates -
 // the release, whenever it lands, reports nowhere.
 void on_cursor_enter(GLFWwindow* window, int entered) {
-    if (gui::InputFrame* input = input_for(window)) {
+    if (ws::input::InputFrame* input = input_for(window)) {
         if (entered != GLFW_FALSE) {
             double x = 0.0;
             double y = 0.0;
@@ -172,8 +172,8 @@ void on_cursor_enter(GLFWwindow* window, int entered) {
 }
 
 void on_scroll(GLFWwindow* window, double x, double y) {
-    emit(window, MouseScrolledEvent{static_cast<float>(x), static_cast<float>(y)});
-    if (gui::InputFrame* input = input_for(window)) {
+    emit(window, ws::input::MouseScrolledEvent{static_cast<float>(x), static_cast<float>(y)});
+    if (ws::input::InputFrame* input = input_for(window)) {
         // Deltas, not positions - sum, or ticks arriving between frames
         // would be lost (same rule as the event path's coalescing).
         input->scroll_dx += static_cast<float>(x);
@@ -181,13 +181,13 @@ void on_scroll(GLFWwindow* window, double x, double y) {
     }
 }
 
-// Glyphs are input too: one TextInputEvent per codepoint (UTF-32, arrival
+// Glyphs are input too: one ws::input::TextInputEvent per codepoint (UTF-32, arrival
 // order - the event counterpart of the gui frame's text_input), plus the
 // gui frame's own copy. The ImGui backend installs its own char callback
 // and chains to ours first, so its text widgets keep working unchanged.
 void on_char(GLFWwindow* window, unsigned int codepoint) {
-    emit(window, TextInputEvent{codepoint});
-    if (gui::InputFrame* input = input_for(window)) {
+    emit(window, ws::input::TextInputEvent{codepoint});
+    if (ws::input::InputFrame* input = input_for(window)) {
         input->text_input.push_back(codepoint);
     }
 }
@@ -199,7 +199,7 @@ void glfw_error(int code, const char* description) {
 }
 
 // Installs the window/input callbacks on `window`; every one of them builds
-// the matching ws::ui::Event and forwards it to sink->forward (and taps the
+// the matching ws::input::Event and forwards it to sink->forward (and taps the
 // gui input snapshot through sink->input). The callbacks themselves are
 // file-local - deliberately never declared in any header. Called before
 // ImGui_ImplGlfw_InitForVulkan(window, true): the backend then chains ours
