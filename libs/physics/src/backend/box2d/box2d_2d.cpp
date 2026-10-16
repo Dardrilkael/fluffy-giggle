@@ -139,8 +139,9 @@ class Box2DWorld final : public IWorld2DBackend {
 
   // --- bodies ---------------------------------------------------------------
 
-  [[nodiscard]] ws::core::Status create_body(std::uint32_t slot,
-                                             const BodyDesc& desc) override {
+  [[nodiscard]] ws::core::Status create_body(
+      std::uint32_t slot, const BodyDesc& desc,
+      const MassData2D& mass) override {
     if (slot >= bodies_.size()) {
       return fail(PhysicsError::backend_error, "body slot out of range");
     }
@@ -243,6 +244,28 @@ class Box2DWorld final : public IWorld2DBackend {
         b2DestroyBody(body);
         return fail(PhysicsError::backend_error, "Box2D refused a shape");
       }
+    }
+    // The lib owns mass (CONTRACT.md 4): apply its closed-form numbers,
+    // overriding whatever Box2D derived while adding the shapes. The
+    // override must carry inertia ABOUT THE COM plus the COM in body-local
+    // space - b2Body_SetMassData stores both verbatim (it does not
+    // re-center, unlike Box2D's own automatic path). Statics/kinematics
+    // arrive with zeros and skip this entirely: they carry no mass
+    // semantics, and b2Body_SetMassData on a non-dynamic body would assert.
+    if (desc.kind == ws::physics::BodyKind::dynamic) {
+      b2MassData md;
+      md.mass = mass.mass;
+      md.center = to_b2(mass.center);
+      md.rotationalInertia = mass.inertia;
+      b2Body_SetMassData(body, md);
+      // Re-pin the create velocity: each shape attach re-derived the
+      // localCenter and converted the stored velocity by
+      // omega x (center - oldCenter) (b2UpdateBodyMassData), so the
+      // def's velocity landed ORIGIN-frame. The lib's linear_velocity is
+      // the COM velocity - set_velocity()/body_state() already are, in
+      // both engines - so the desc must read back identically. This is
+      // a no-op for COM-at-origin bodies (the only kind v1 had).
+      b2Body_SetLinearVelocity(body, to_b2(desc.linear_velocity));
     }
     bodies_[slot] = body;
     body_live_[slot] = 1;

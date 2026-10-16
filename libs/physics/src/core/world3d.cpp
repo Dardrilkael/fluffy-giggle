@@ -37,6 +37,13 @@ struct Dim3D {
   using BackendMove = BackendMove3D;
   using BackendVelocity = BackendVelocity3D;
   using CollectorBase = IEventCollector3D;
+  // Lib-computed mass (CONTRACT.md 4): the trait routes WorldCore to the
+  // dimension's closed-form. Same mirror discipline as every alias above.
+  using MassData = MassData3D;
+
+  [[nodiscard]] static MassData mass_data(const BodyDesc& d) {
+    return mass_data_3d(d);
+  }
 
   // Finiteness predicates for the runtime setters (world_core.hpp): a NaN
   // must fail the call, never reach Jolt (it asserts on contact).

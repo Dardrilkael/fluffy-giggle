@@ -576,6 +576,124 @@ TEST_CASE("forces accumulate within a tick and clear at its end") {
   CHECK(std::abs(state->angular_velocity - 6.0f * kDt) < 1e-3f);
 }
 
+TEST_CASE("mass override: F = ma and tau = I alpha on the lib numbers") {
+  // C4 (CONTRACT.md 4): the lib computes mass/inertia closed-form and the
+  // adapter pushes them through b2Body_SetMassData. For a single box the
+  // numbers equal what Box2D would derive itself (same physics), so this
+  // case proves the override round-trips without corrupting the dynamics;
+  // the composite spin case below is the structural discriminator, and
+  // test_mass_properties.cpp pins the formulas themselves. Box2D
+  // integrates an applied force across a step's 4 substeps and clears it
+  // once per step: v = a*dt*N exactly, while x picks up the substep
+  // staircase x = a*dt^2*(N*(N-1)/2 + 5N/8).
+  auto world = make_world(World2D::Desc{.gravity = {0.0f, 0.0f},
+                                        .thread_count = 0});
+  BodyDesc d{};
+  d.shape = Box{ws::math::Vec2{1.0f, 1.0f}};  // rho=3: m = 12, I = 8
+  d.density = 3.0f;
+  d.allow_sleep = false;
+  auto id = world.create_body(d);
+  REQUIRE(id.has_value());
+
+  // F = 24 N on 12 kg: a = 2 m/s^2; 60 ticks land v exactly on 2.
+  for (int i = 0; i < 60; ++i) {
+    REQUIRE(world.apply_force(*id, {24.0f, 0.0f}).has_value());
+    REQUIRE(world.step().has_value());
+  }
+  auto state = world.body_state(*id);
+  REQUIRE(state.has_value());
+  CHECK(std::abs(state->linear_velocity.x - 2.0f) < 1e-3f);
+  const float x = 2.0f * kDt * kDt * (60.0f * 59.0f / 2.0f + 37.5f);
+  CHECK(std::abs(state->position.x - x) < 3e-3f);
+  CHECK(std::abs(state->position.y) < 1e-3f);
+
+  // Torque: tau = 16 on I = 8 -> alpha = 2 rad/s^2; omega lands exactly
+  // on 2 (angular velocity is substep-exact the same way v is).
+  for (int i = 0; i < 60; ++i) {
+    REQUIRE(world.apply_torque(*id, 16.0f).has_value());
+    REQUIRE(world.step().has_value());
+  }
+  state = world.body_state(*id);
+  REQUIRE(state.has_value());
+  CHECK(std::abs(state->angular_velocity - 2.0f) < 1e-3f);
+}
+
+TEST_CASE("mass override: composites sum masses and inertias") {
+  // Two parts, body-level density 1: box half=(1,1) at the origin
+  // (m = 4, I = 8/3) + box half=(0.5,0.5) at (2,0) (m = 1, I = 1/6).
+  // Hand-derived: m = 5, com = (0.4, 0), I about the com =
+  // 8/3 + 1/6 + 4*0.4^2 + 1*1.6^2. The engine applies OUR numbers
+  // (SetMassData), so the dynamics read the lib's parallel-axis sum back
+  // out; Box2D's own derivation would agree (same physics) - the spin
+  // case is what separates the two stories.
+  auto world = make_world(World2D::Desc{.gravity = {0.0f, 0.0f},
+                                        .thread_count = 0});
+  BodyDesc d{};
+  d.allow_sleep = false;
+  d.parts[0] = Part{Box{ws::math::Vec2{1.0f, 1.0f}},
+                    ws::math::Vec2{0.0f, 0.0f}, 0.2f, 0.0f};
+  d.parts[1] = Part{Box{ws::math::Vec2{0.5f, 0.5f}},
+                    ws::math::Vec2{2.0f, 0.0f}, 0.2f, 0.0f};
+  d.part_count = 2;
+  auto id = world.create_body(d);
+  REQUIRE(id.has_value());
+
+  // F = 10 N on m = 5: a = 2; 60 ticks land v exactly on 2.
+  for (int i = 0; i < 60; ++i) {
+    REQUIRE(world.apply_force(*id, {10.0f, 0.0f}).has_value());
+    REQUIRE(world.step().has_value());
+  }
+  auto state = world.body_state(*id);
+  REQUIRE(state.has_value());
+  CHECK(std::abs(state->linear_velocity.x - 2.0f) < 1e-3f);
+
+  // Torque through the hand-derived composite inertia: tau = 2*I ->
+  // alpha = 2, omega lands exactly on 2.
+  const float inertia =
+      8.0f / 3.0f + 1.0f / 6.0f + 4.0f * 0.4f * 0.4f + 1.0f * 1.6f * 1.6f;
+  for (int i = 0; i < 60; ++i) {
+    REQUIRE(world.apply_torque(*id, 2.0f * inertia).has_value());
+    REQUIRE(world.step().has_value());
+  }
+  state = world.body_state(*id);
+  REQUIRE(state.has_value());
+  CHECK(std::abs(state->angular_velocity - 2.0f) < 1e-3f);
+}
+
+TEST_CASE("mass override: a composite spins about its COM, not its origin") {
+  // THE structural discriminator. The composite's COM is (0.4, 0) in
+  // body-local space, so a free spin (zero gravity, no forces) must keep
+  // the WORLD COM fixed while the body ORIGIN orbits it:
+  //   origin = com_world - R(theta) * com, with com_world = (0.4, 0).
+  // Box2D rotates about bodySim->center and rebuilds the origin
+  // transform as center - R*localCenter (solver.c), and localCenter is
+  // OUR mass-data center. If the override were dropped, or its center
+  // ignored, the origin would sit still instead of orbiting.
+  auto world = make_world(World2D::Desc{.gravity = {0.0f, 0.0f},
+                                        .thread_count = 0});
+  BodyDesc d{};
+  d.angular_velocity = 1.0f;  // constant omega: 60 ticks -> theta = 1 rad
+  d.allow_sleep = false;
+  d.parts[0] = Part{Box{ws::math::Vec2{1.0f, 1.0f}},
+                    ws::math::Vec2{0.0f, 0.0f}, 0.2f, 0.0f};
+  d.parts[1] = Part{Box{ws::math::Vec2{0.5f, 0.5f}},
+                    ws::math::Vec2{2.0f, 0.0f}, 0.2f, 0.0f};
+  d.part_count = 2;
+  auto id = world.create_body(d);
+  REQUIRE(id.has_value());
+
+  step_n(world, 60);
+  auto state = world.body_state(*id);
+  REQUIRE(state.has_value());
+  CHECK(std::abs(state->rotation - 1.0f) < 1e-3f);
+
+  const float c = 0.4f;  // hand-derived mass-weighted COM (4*0 + 1*2)/5
+  const float cos_t = std::cos(state->rotation);
+  const float sin_t = std::sin(state->rotation);
+  CHECK(std::abs(state->position.x - c * (1.0f - cos_t)) < 1e-3f);
+  CHECK(std::abs(state->position.y + c * sin_t) < 1e-3f);
+}
+
 TEST_CASE("contact events: pair order fixes the normal to point a -> b") {
   const auto run = [](bool floor_first) {
     auto world = make_world(World2D::Desc{.thread_count = 0});

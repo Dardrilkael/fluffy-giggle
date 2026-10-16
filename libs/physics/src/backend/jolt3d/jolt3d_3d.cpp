@@ -460,7 +460,8 @@ class JoltWorld3D final : public IWorld3DBackend,
   // --- bodies ---------------------------------------------------------------
 
   [[nodiscard]] ws::core::Status create_body(
-      std::uint32_t slot, const BodyDesc& desc) override {
+      std::uint32_t slot, const BodyDesc& desc,
+      const MassData3D& mass) override {
     if (slot >= bodies_.size()) {
       return fail(PhysicsError::backend_error, "body slot out of range");
     }
@@ -577,6 +578,31 @@ class JoltWorld3D final : public IWorld3DBackend,
     // Box2D parity: no damping unless the lib exposes it (v1 does not).
     bcs.mLinearDamping = 0.0f;
     bcs.mAngularDamping = 0.0f;
+    // The lib owns mass (CONTRACT.md 4): MassAndInertiaProvided makes
+    // Jolt take mMassPropertiesOverride verbatim - no engine derivation.
+    // Jolt's MassProperties inertia is COM-frame (compounds store child
+    // positions COM-relative and never shift back), which is exactly the
+    // lib's convention; Jolt derives its rotation pivot from the shape
+    // itself, so the COM number crosses only implicitly: a compound's
+    // pivot is the volume-weighted child centroid, which equals the lib's
+    // mass-weighted COM because every part shares the body-level density.
+    // Statics/kinematics carry zeros and skip this - MassAndInertiaProvided
+    // with zero mass would assert in SetMassProperties (mInvMass = 1/0).
+    if (desc.kind == ws::physics::BodyKind::dynamic) {
+      bcs.mOverrideMassProperties =
+          JPH::EOverrideMassProperties::MassAndInertiaProvided;
+      bcs.mMassPropertiesOverride.mMass = mass.mass;
+      // Column-major (ws::math) into column-major (JPH::Mat44): column c of
+      // the tensor lands in column c. The tensor is symmetric, so even a
+      // transposed store would read back the same matrix.
+      for (int c = 0; c < 3; ++c) {
+        bcs.mMassPropertiesOverride.mInertia.SetColumn4(
+            c, JPH::Vec4(mass.inertia[c][0], mass.inertia[c][1],
+                         mass.inertia[c][2], 0.0f));
+      }
+      bcs.mMassPropertiesOverride.mInertia.SetColumn4(
+          3, JPH::Vec4(0.0f, 0.0f, 0.0f, 1.0f));
+    }
 
     JPH::Body* body = interface().CreateBody(bcs);
     if (body == nullptr) {

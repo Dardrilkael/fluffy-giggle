@@ -160,7 +160,14 @@ class WorldCore {
     if (!slot) {
       return fail(PhysicsError::world_full, "body capacity exhausted");
     }
-    if (auto st = backend_->create_body(*slot, local); !st) {
+    // The lib owns mass semantics (CONTRACT.md 4): closed-form from the
+    // desc, never the engine's derivation. Zeros for statics/kinematics -
+    // they carry no mass semantics - and the backend must not apply them.
+    typename D::MassData mass{};
+    if (local.kind == ws::physics::BodyKind::dynamic) {
+      mass = D::mass_data(local);
+    }
+    if (auto st = backend_->create_body(*slot, local, mass); !st) {
       bodies_.free(*slot);
       return fail(PhysicsError::backend_error,
                   std::string{"backend create_body: "} + st.error().message);

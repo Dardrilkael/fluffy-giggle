@@ -22,6 +22,8 @@
 #include <span>
 #include <vector>
 
+#include "mass_properties.hpp"
+
 #include <ws/core/result.hpp>
 #include <ws/math/vecmath.hpp>
 #include <ws/physics/3d/body.hpp>
@@ -109,8 +111,14 @@ class IWorld3DBackend {
  public:
   virtual ~IWorld3DBackend() = default;
 
+  // `mass` is the LIB-computed mass data (CONTRACT.md 4) - the backend
+  // never derives mass itself, it applies these numbers through its
+  // override mechanism (BodyCreationSettings::mOverrideMassProperties).
+  // Meaningful for dynamic bodies only: statics/kinematics carry zeros and
+  // MUST NOT have them applied.
   [[nodiscard]] virtual ws::core::Status create_body(
-      std::uint32_t slot, const physics3d::BodyDesc& desc) = 0;
+      std::uint32_t slot, const physics3d::BodyDesc& desc,
+      const MassData3D& mass) = 0;
   virtual void destroy_body(std::uint32_t slot) = 0;
   virtual void set_transform(std::uint32_t slot,
                              const physics3d::Transform& t) = 0;

@@ -30,6 +30,8 @@
 #include <span>
 #include <vector>
 
+#include "mass_properties.hpp"
+
 #include <ws/core/result.hpp>
 #include <ws/math/vecmath.hpp>
 #include <ws/physics/2d/body.hpp>
@@ -123,8 +125,14 @@ class IWorld2DBackend {
   virtual ~IWorld2DBackend() = default;
 
   // Bodies. `slot` was just allocated by the lib; `desc` is pre-validated.
+  // `mass` is the LIB-computed mass data (CONTRACT.md 4) - the backend
+  // never derives mass itself, it applies these numbers through its
+  // override mechanism (b2Body_SetMassData). Meaningful for dynamic
+  // bodies only: statics/kinematics carry zeros and MUST NOT have them
+  // applied.
   [[nodiscard]] virtual ws::core::Status create_body(
-      std::uint32_t slot, const physics2d::BodyDesc& desc) = 0;
+      std::uint32_t slot, const physics2d::BodyDesc& desc,
+      const MassData2D& mass) = 0;
   virtual void destroy_body(std::uint32_t slot) = 0;
   virtual void set_transform(std::uint32_t slot,
                              const physics2d::Transform& t) = 0;

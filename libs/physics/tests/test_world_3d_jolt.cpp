@@ -615,6 +615,133 @@ TEST_CASE("3D forces accumulate within a tick and clear at its end") {
   CHECK(std::abs(state->angular_velocity.y - 6.0f * kDt) < 1e-3f);
 }
 
+TEST_CASE("3D mass override: F = ma and tau = I alpha on the lib numbers") {
+  // C4 (CONTRACT.md 4): the lib computes mass/inertia closed-form and the
+  // adapter pushes them through BodyCreationSettings::mOverrideMassProperties
+  // (MassAndInertiaProvided). For a single box the numbers equal Jolt's own
+  // derivation (same physics), so this proves the override round-trips
+  // cleanly; the composite spin case below is the structural
+  // discriminator, and test_mass_properties.cpp pins the formulas.
+  // Jolt takes one semi-implicit step per tick: v = a*dt*N exactly,
+  // x = a*dt^2*N*(N+1)/2.
+  auto world = make_world(World3D::Desc{.gravity = Vec3{0.0f, 0.0f, 0.0f},
+                                        .thread_count = 0});
+  BodyDesc d{};
+  d.shape = Box{Vec3{1.0f, 1.0f, 1.0f}};  // rho=1: m = 8, I = 16/3
+  d.allow_sleep = false;
+  auto id = world.create_body(d);
+  REQUIRE(id.has_value());
+
+  // F = (16,0,0) on 8 kg: a = 2; 60 ticks land v exactly on 2.
+  for (int i = 0; i < 60; ++i) {
+    REQUIRE(world.apply_force(*id, Vec3{16.0f, 0.0f, 0.0f}).has_value());
+    REQUIRE(world.step().has_value());
+  }
+  auto state = world.body_state(*id);
+  REQUIRE(state.has_value());
+  CHECK(std::abs(state->linear_velocity.x - 2.0f) < 1e-3f);
+  const float x = 2.0f * kDt * kDt * (60.0f * 61.0f / 2.0f);
+  CHECK(std::abs(state->position.x - x) < 3e-3f);
+
+  // Torque about x: tau = 32/3 on I = 16/3 -> alpha = 2; omega lands
+  // exactly on 2.
+  for (int i = 0; i < 60; ++i) {
+    REQUIRE(world.apply_torque(*id, Vec3{32.0f / 3.0f, 0.0f, 0.0f})
+                .has_value());
+    REQUIRE(world.step().has_value());
+  }
+  state = world.body_state(*id);
+  REQUIRE(state.has_value());
+  CHECK(std::abs(state->angular_velocity.x - 2.0f) < 1e-3f);
+}
+
+TEST_CASE("3D mass override: composite mass and tensor") {
+  // Box half=(1,1,1) at the origin (m = 8) + sphere r = 0.5 at (3,0,0)
+  // (m = pi/6), body-level density 1. Hand-derived: m = 8 + pi/6, com =
+  // (3*m_s/(8+m_s), 0, 0), and - every part offset on the x axis - the
+  // tensor is diagonal with I_zz = I_yy = 16/3 + 8*cx^2 +
+  // (2/5)*m_s*0.25 + m_s*(3-cx)^2.
+  auto world = make_world(World3D::Desc{.gravity = Vec3{0.0f, 0.0f, 0.0f},
+                                        .thread_count = 0});
+  BodyDesc d{};
+  d.allow_sleep = false;
+  d.parts[0] = Part{Box{Vec3{1.0f, 1.0f, 1.0f}},
+                    Vec3{0.0f, 0.0f, 0.0f}, 0.2f, 0.0f};
+  d.parts[1] = Part{Sphere{0.5f}, Vec3{3.0f, 0.0f, 0.0f}, 0.2f, 0.0f};
+  d.part_count = 2;
+  auto id = world.create_body(d);
+  REQUIRE(id.has_value());
+
+  const float m_b = 8.0f;
+  const float m_s = 3.14159265f / 6.0f;
+  const float cx = 3.0f * m_s / (m_b + m_s);
+
+  // Force scaled to the composite mass: a = 2; v lands exactly on 2.
+  for (int i = 0; i < 60; ++i) {
+    REQUIRE(world.apply_force(*id, Vec3{2.0f * (m_b + m_s), 0.0f, 0.0f})
+                .has_value());
+    REQUIRE(world.step().has_value());
+  }
+  auto state = world.body_state(*id);
+  REQUIRE(state.has_value());
+  CHECK(std::abs(state->linear_velocity.x - 2.0f) < 1e-3f);
+
+  // Torque about z through the hand-derived I_zz: alpha = 2, omega
+  // lands on 2. z is a principal axis (all part offsets sit on x), so
+  // omega stays on it and the other components read zero.
+  const float i_zz = 16.0f / 3.0f + m_b * cx * cx + 0.4f * m_s * 0.25f +
+                     m_s * (3.0f - cx) * (3.0f - cx);
+  for (int i = 0; i < 60; ++i) {
+    REQUIRE(world.apply_torque(*id, Vec3{0.0f, 0.0f, 2.0f * i_zz})
+                .has_value());
+    REQUIRE(world.step().has_value());
+  }
+  state = world.body_state(*id);
+  REQUIRE(state.has_value());
+  CHECK(std::abs(state->angular_velocity.z - 2.0f) < 1e-3f);
+  CHECK(std::abs(state->angular_velocity.x) < 1e-3f);
+  CHECK(std::abs(state->angular_velocity.y) < 1e-3f);
+}
+
+TEST_CASE("3D mass override: a composite spins about its COM, not its origin") {
+  // THE structural discriminator. Jolt derives its rotation pivot from
+  // the shape - StaticCompoundShape's volume-weighted child centroid -
+  // and never sees the lib's COM as a number; under the body-level
+  // density that centroid IS the lib's mass-weighted COM, so they agree
+  // by construction. A free spin (zero gravity, no forces) keeps the
+  // world COM fixed while the ORIGIN orbits it:
+  //   origin = com_world - R(theta) * com.
+  // Jolt rotates about mPosition (the COM) and reports the origin
+  // through GetPosition() = mPosition - R*shapeCOM (Body.h), so the
+  // numbers below pin the agreement end to end: a mismatched pivot
+  // would leave the origin sitting still.
+  auto world = make_world(World3D::Desc{.gravity = Vec3{0.0f, 0.0f, 0.0f},
+                                        .thread_count = 0});
+  BodyDesc d{};
+  d.angular_velocity = Vec3{0.0f, 0.0f, 1.0f};  // 60 ticks -> 1 rad
+  d.allow_sleep = false;
+  d.parts[0] = Part{Box{Vec3{1.0f, 1.0f, 1.0f}},
+                    Vec3{0.0f, 0.0f, 0.0f}, 0.2f, 0.0f};
+  d.parts[1] = Part{Sphere{0.5f}, Vec3{3.0f, 0.0f, 0.0f}, 0.2f, 0.0f};
+  d.part_count = 2;
+  auto id = world.create_body(d);
+  REQUIRE(id.has_value());
+
+  step_n(world, 60);
+  auto state = world.body_state(*id);
+  REQUIRE(state.has_value());
+  // Pure z rotation: theta = 2*atan2(qz, qw).
+  const float theta =
+      2.0f * std::atan2(state->rotation.z, state->rotation.w);
+  CHECK(std::abs(theta - 1.0f) < 1e-3f);
+
+  const float m_s = 3.14159265f / 6.0f;
+  const float c = 3.0f * m_s / (8.0f + m_s);  // hand-derived mass COM
+  CHECK(std::abs(state->position.x - c * (1.0f - std::cos(theta))) < 1e-3f);
+  CHECK(std::abs(state->position.y + c * std::sin(theta)) < 1e-3f);
+  CHECK(std::abs(state->position.z) < 1e-3f);
+}
+
 TEST_CASE("3D contact events: pair order fixes the normal to point a -> b") {
   const auto run = [](bool floor_first) {
     auto world = make_world(World3D::Desc{.thread_count = 0});

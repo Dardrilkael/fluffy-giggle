@@ -37,6 +37,13 @@ struct Dim2D {
   using BackendMove = BackendMove2D;
   using BackendVelocity = BackendVelocity2D;
   using CollectorBase = IEventCollector2D;
+  // Lib-computed mass (CONTRACT.md 4): the trait routes WorldCore to the
+  // dimension's closed-form. Same mirror discipline as every alias above.
+  using MassData = MassData2D;
+
+  [[nodiscard]] static MassData mass_data(const BodyDesc& d) {
+    return mass_data_2d(d);
+  }
 
   // Finiteness predicates for the runtime setters (world_core.hpp): a NaN
   // must fail the call, never reach the engine.
