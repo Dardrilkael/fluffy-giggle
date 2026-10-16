@@ -106,24 +106,31 @@ events above a speed threshold, the bulk set_transforms path.
     create. The array copies trivially; no scratch buffer needed.
   - Box2D: native per-part materials (per-part b2ShapeDef with its own
     friction/restitution, offsets via b2Circle.center /
-    b2MakeOffsetBox). Nothing at contact time.
+    b2MakeOffsetBox). Mixing: the world callbacks
+    (b2WorldDef.frictionCallback/restitutionCallback) route every pair
+    through the lib's material.hpp rule (C5), so Box2D's own combine
+    never runs.
   - Jolt: sub-shapes do not carry materials through the engine's mixing,
     so the adapter keeps flat per-slot part tables (friction/restitution,
     max_bodies x kMaxPartsPerBody, sized at construction) and the contact
-    listener recombines: combined friction sqrt(f1*f2), restitution
-    max(e1,e2) - Jolt's own defaults, matching Box2D's native mix. The
-    override fires in OnContactAdded AND OnContactPersisted (Jolt
-    rebuilds contact constraints from body defaults every step - an
-    Added-only override silently reverts on the second step of a resting
-    pair). The part index comes from GetSubShapeIndexFromID on the
-    StaticCompoundShape (AddShape order IS parts order);
-    GetSubShapeUserData is useless here (it reads the LEAF's user data,
-    and cached leaves are shared across bodies). Multi-part bodies set
-    mUseManifoldReduction(false) - a merged manifold carries one
-    sub-shape's material. A one-part body is NOT a compound (Create
-    returns the bare child): its material bakes body-level, and a
-    non-zero offset rides a RotatedTranslated decorator (part_index
-    returns -1 there, which is correct by construction).
+    listener recombines through the lib's one rule (src/core/material.hpp,
+    C5): combined friction sqrt(f1*f2), restitution max(e1,e2) - the
+    same numbers as Jolt's own defaults, but the lib's formula, applied
+    to EVERY pair (plain pairs from body-level values, part pairs from
+    the tables), so the engine's combine never survives. The listener -
+    not Jolt's CombineFunction hook, a bare function pointer with no
+    user context that could never reach the per-part tables - fires in
+    OnContactAdded AND OnContactPersisted (Jolt rebuilds contact
+    constraints from body defaults every step - an Added-only override
+    silently reverts on the second step of a resting pair). The part
+    index comes from GetSubShapeIndexFromID on the StaticCompoundShape
+    (AddShape order IS parts order); GetSubShapeUserData is useless here
+    (it reads the LEAF's user data, and cached leaves are shared across
+    bodies). Multi-part bodies set mUseManifoldReduction(false) - a
+    merged manifold carries one sub-shape's material. A one-part body is
+    NOT a compound (Create returns the bare child): its material bakes
+    body-level, and a non-zero offset rides a RotatedTranslated decorator
+    (part_index returns -1 there, which is correct by construction).
 - DONE: CCD/bullet flags - `BodyDesc::is_bullet` (both dims) +
   `set_bullet()` on both worlds. The engines' CCD stories DIVERGE, and
   both flag comments tell the truth:
@@ -180,8 +187,9 @@ events above a speed threshold, the bulk set_transforms path.
 The engine-semantic rework arc ("the lib owns semantics, backends only
 compute"), one commit per phase: CONTRACT.md (C1, done) -> sleep control
 (C2, done) -> lib-owned touching table (C3, done) -> lib-computed mass
-properties (C4) -> one material-mixing rule (C5) -> backend factory +
-reference backend (C6) -> conformance suite encoding CONTRACT.md (C7).
+properties (C4, done) -> one material-mixing rule (C5, done) -> backend
+factory + reference backend (C6) -> conformance suite encoding
+CONTRACT.md (C7).
 Also queued behind those: the machinery sweeps' "every path" names are
 still aspirational - the stale sweeps miss set_transform + the apply_*
 family in 3D, and the moved-from tests miss the apply_* family and

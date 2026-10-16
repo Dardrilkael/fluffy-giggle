@@ -62,6 +62,7 @@
 #include <ws/physics/errors.hpp>
 
 #include "core/backend2d.hpp"
+#include "core/material.hpp"
 
 namespace ws::physics::detail {
 namespace {
@@ -98,6 +99,25 @@ bool collect_overlap(b2ShapeId shape, void* context) {
   return true;  // keep walking the tree
 }
 
+// The lib's material rule drives Box2D directly (CONTRACT.md 5): every
+// touching shape pair combines through core/material.hpp, never through
+// Box2D's own default combine (b2DefaultFrictionCallback /
+// b2DefaultRestitutionCallback in world.c - sqrt/max, which the installed
+// pointers replace, so they never run). Per-part materials already ride
+// each part's b2ShapeDef, so the floats arrive per SHAPE pair; the unused
+// material ids are Box2D's own per-shape tagging scheme, which the lib
+// does not use. Box2D calls these from worker threads during the step (the
+// typedef warns): pure float math, which is what that contract allows.
+float mix_friction_b2(float friction_a, int /*user_material_id_a*/,
+                      float friction_b, int /*user_material_id_b*/) {
+  return mix_friction(friction_a, friction_b);
+}
+
+float mix_restitution_b2(float restitution_a, int /*user_material_id_a*/,
+                         float restitution_b, int /*user_material_id_b*/) {
+  return mix_restitution(restitution_a, restitution_b);
+}
+
 class Box2DWorld final : public IWorld2DBackend {
  public:
   explicit Box2DWorld(const BackendDesc2D& desc)
@@ -111,6 +131,10 @@ class Box2DWorld final : public IWorld2DBackend {
     b2WorldDef def = b2DefaultWorldDef();
     def.gravity = to_b2(desc.gravity);
     def.hitEventThreshold = desc.hit_speed_threshold;
+    // Material mixing is lib-owned (CONTRACT.md 5): same numbers as
+    // Box2D's defaults, but the formula is ours (see the shims above).
+    def.frictionCallback = &mix_friction_b2;
+    def.restitutionCallback = &mix_restitution_b2;
     const std::uint32_t threads = std::min(desc.thread_count, kMaxPoolThreads);
     if (threads > 0) {
       // The pool starts before the world exists: a failed start must

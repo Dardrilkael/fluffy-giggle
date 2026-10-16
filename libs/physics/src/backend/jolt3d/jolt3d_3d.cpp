@@ -108,6 +108,7 @@
 #include <ws/physics/errors.hpp>
 
 #include "core/backend3d.hpp"
+#include "core/material.hpp"
 
 namespace ws::physics::detail {
 namespace {
@@ -1065,11 +1066,13 @@ class JoltWorld3D final : public IWorld3DBackend,
   void OnContactAdded(const JPH::Body& inBody1, const JPH::Body& inBody2,
                       const JPH::ContactManifold& inManifold,
                       JPH::ContactSettings& ioSettings) override {
-    // Per-part materials land on the first step of a fresh pair; the
-    // listener owns the flat tables (no world registry a plain function
-    // pointer would need), so this is where the override lives.
-    apply_part_materials(inBody1, inManifold.mSubShapeID1, inBody2,
-                         inManifold.mSubShapeID2, ioSettings);
+    // The lib's material rule lands on the first step of a fresh pair.
+    // The override lives in the listener, not Jolt's CombineFunction hook
+    // (ContactConstraintManager::SetCombineFriction): that hook is a bare
+    // function pointer with no user context, so it could never reach this
+    // adapter's per-part tables.
+    apply_materials(inBody1, inManifold.mSubShapeID1, inBody2,
+                    inManifold.mSubShapeID2, ioSettings);
     const std::uint32_t a = user_slot(inBody1);
     const std::uint32_t b = user_slot(inBody2);
     if (a == kNoSlot || b == kNoSlot) {
@@ -1115,11 +1118,11 @@ class JoltWorld3D final : public IWorld3DBackend,
     // Still no EVENTS per tick while a pair rests (began/ended fire once
     // per overlap - the public contact.hpp contract). But the combined
     // material is NOT cached by the engine: every step rebuilds each
-    // contact constraint from fresh defaults, so the per-part override
-    // must land here too or it would silently revert to body-level
-    // mixing from the second step of a resting pair onward.
-    apply_part_materials(inBody1, inManifold.mSubShapeID1, inBody2,
-                         inManifold.mSubShapeID2, ioSettings);
+    // contact constraint from fresh defaults, so the material override
+    // must land here too or every pair would silently revert to Jolt's
+    // own combine from the second step of a resting pair onward.
+    apply_materials(inBody1, inManifold.mSubShapeID1, inBody2,
+                    inManifold.mSubShapeID2, ioSettings);
   }
 
   void OnContactRemoved(const JPH::SubShapeIDPair& inSubShapePair) override {
@@ -1166,28 +1169,27 @@ class JoltWorld3D final : public IWorld3DBackend,
     return p < 0 ? std::uint8_t{0} : static_cast<std::uint8_t>(p);
   }
 
-  // Per-part materials at contact time. A pair where at least one side
-  // touches a compound part overrides the combined values; plain pairs
-  // keep the engine's own combine untouched (bit-identical v1 behavior).
-  // The override repeats the engine's default mixes - friction geometric
-  // mean, restitution max, the same formulas Box2D applies natively - so
-  // both dimensions and both pair kinds agree. Worker-thread safety: the
-  // tables are written only by create_body on the control thread, never
-  // during Update (single-threaded API contract).
-  void apply_part_materials(const JPH::Body& inBody1,
-                            const JPH::SubShapeID& inId1,
-                            const JPH::Body& inBody2,
-                            const JPH::SubShapeID& inId2,
-                            JPH::ContactSettings& ioSettings) {
-    const int p1 = part_index(inBody1, inId1);
-    const int p2 = part_index(inBody2, inId2);
-    if (p1 < 0 && p2 < 0) {
-      return;
-    }
+  // Material mixing at contact time (CONTRACT.md 5): EVERY pair combines
+  // through the lib's one rule (core/material.hpp) - plain pairs from
+  // body-level values, part pairs from the flat per-slot tables (Jolt's
+  // mixing does not see sub-shapes). Jolt's own combine (also sqrt/max -
+  // ContactConstraintManager's default lambdas) seeds the settings first;
+  // this overwrites both values unconditionally, so an engine formula
+  // never survives. Same numbers as before the takeover - what changes
+  // is who computes them. Worker-thread safety: the tables are written
+  // only by create_body on the control thread, never during Update
+  // (single-threaded API contract).
+  void apply_materials(const JPH::Body& inBody1,
+                       const JPH::SubShapeID& inId1,
+                       const JPH::Body& inBody2,
+                       const JPH::SubShapeID& inId2,
+                       JPH::ContactSettings& ioSettings) {
     float f1 = inBody1.GetFriction();
     float e1 = inBody1.GetRestitution();
     float f2 = inBody2.GetFriction();
     float e2 = inBody2.GetRestitution();
+    const int p1 = part_index(inBody1, inId1);
+    const int p2 = part_index(inBody2, inId2);
     const std::uint32_t a = user_slot(inBody1);
     const std::uint32_t b = user_slot(inBody2);
     if (p1 >= 0 && a != kNoSlot) {
@@ -1202,8 +1204,8 @@ class JoltWorld3D final : public IWorld3DBackend,
       f2 = part_friction_[i];
       e2 = part_restitution_[i];
     }
-    ioSettings.mCombinedFriction = JPH::Sqrt(f1 * f2);
-    ioSettings.mCombinedRestitution = std::max(e1, e2);
+    ioSettings.mCombinedFriction = mix_friction(f1, f2);
+    ioSettings.mCombinedRestitution = mix_restitution(e1, e2);
   }
 
   // Callback-side appends: a worker thread, so the lock is required; a
@@ -1304,7 +1306,7 @@ class JoltWorld3D final : public IWorld3DBackend,
   std::unique_ptr<JPH::JobSystem> jobs_;
   std::vector<JPH::BodyID> bodies_;               // slot -> engine id
   // Per-part surface materials, slot-major with kMaxPartsPerBody stride;
-  // read by the contact callbacks (see apply_part_materials).
+  // read by the contact callbacks (see apply_materials).
   std::vector<float> part_friction_;
   std::vector<float> part_restitution_;
   std::vector<std::uint8_t> body_live_;

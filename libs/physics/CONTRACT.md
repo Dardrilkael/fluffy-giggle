@@ -58,8 +58,10 @@ lib deliberately does not constrain (an engine's internals may differ).
 ## 5. Material mixing (one lib rule)
 - Friction combines as sqrt(f1*f2); restitution combines as max(e1,e2).
 - The rule is applied per touching shape pair (multi-part: per part pair),
-  through each backend's per-contact mechanism - natively in Box2D, via
-  the contact-override path in Jolt. No engine-specific mixing survives.
+  through each backend's per-pair hook: the world friction/restitution
+  callbacks in Box2D, the contact-settings override in Jolt's listener.
+  Both hooks call the lib's one formula (src/core/material.hpp) - no
+  engine's own mixing formula ever runs.
 
 ## 6. Sleep policy and wake rules
 - `allow_sleep` defaults to true (BodyDesc at create,
