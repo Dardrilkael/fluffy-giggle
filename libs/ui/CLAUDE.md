@@ -106,7 +106,16 @@ libs/ui/
       gui_id.cpp             # IdStack: FNV-1a scope-path hashing - the label/index/reserved families
       gui_input.cpp          # InputFrame: touch table + the primary-touch -> mouse bridge
       gui_layout.cpp         # LayoutCursor: stacked flow panels
-      gui_widgets.cpp        # the widget functions' bodies (lay out, hit-test, draw) + fit_text
+      widgets_detail.hpp     # shared widget helpers + per-widget state structs (private to src/gui)
+      widgets_buttons.cpp    # button, checkbox, radio, toggle_switch
+      widgets_basic.cpp      # collapsing_header, selectable, text, separator, progress + fit_text
+      widgets_sliders.cpp    # slider_float/int (one shared body), drag_float
+      widgets_panels.cpp     # tab_bar, begin/end_panel
+      widgets_scroll.cpp     # begin/end_scroll_panel: wheel claim, flow drag, thumb grab
+      widgets_overlays.cpp   # popup, tooltip, modal
+      widgets_combo.cpp      # combo row + its popup list
+      widgets_text_input.cpp # text_input: caret/selection edits through the EditBuffer verbs
+      widgets_table.cpp      # table: column grid, header, selectable rows
     widgets/                 # the ImGui/ImPlot wrapper layer behind widgets.hpp
       widgets.cpp            # ImGui/ImPlot-backed widget implementations
   tests/
@@ -1126,6 +1135,7 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   composition surface on any platform; soft-IME delivery is the first
   thing to revisit for it); `TextInputEvent` flows from
   GLFW chars on desktop and hardware-key taps on Android.
+
 
 ## When implementing new features
 

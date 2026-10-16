@@ -4,7 +4,8 @@
 // while App::run() is active. gui_input.cpp carries the InputFrame,
 // gui_id.cpp the IdStack hashing, gui_layout.cpp the LayoutCursor panels,
 // gui_context.cpp the GuiContext hit-testing; widgets themselves (Phase
-// 5+) live in src/gui/gui_widgets.cpp. The bodies stay out-of-line on
+// 5+) live in src/gui/'s per-family widget files (see src/gui/CLAUDE.md).
+// The bodies stay out-of-line on
 // purpose: apps resolve these symbols through the ws_ui archive, so a
 // consumer compiling against the headers also proves the library links.
 
