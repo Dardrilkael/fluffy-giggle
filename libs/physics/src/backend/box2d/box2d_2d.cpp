@@ -5,7 +5,10 @@
 // Slot mapping: the lib owns the generational handles and addresses this
 // backend by dense slot. slot -> b2BodyId/b2JointId live in pre-sized
 // vectors (one allocation at create, none after), and the reverse direction
-// rides Box2D body userData as slot + 1 (0 = never set).
+// rides Box2D body userData as slot + 1 (0 = never set). Contact/sensor
+// events name SHAPES, so each shape's userData packs its full owner -
+// (slot + 1) | (part + 1) << 32 - and the drain reads body AND part in one
+// call (owner_of_shape): the lib's touching table keys on the shape pair.
 //
 // Task pool (Desc::thread_count = N > 0): N worker threads with FIXED
 // indices 0..N-1; the stepping thread is worker N. Box2D gets
@@ -183,6 +186,9 @@ class Box2DWorld final : public IWorld2DBackend {
       sd.enableContactEvents = true;
       sd.enableHitEvents = hit_threshold_ > 0.0f;
     }
+    // Every shape names its owning (slot, part) - the event drain resolves
+    // both in one read (owner_of_shape). Part 0 is the body-level shape.
+    sd.userData = reinterpret_cast<void*>(pack_shape_owner(slot, 0));
 
     const b2BodyId body = b2CreateBody(world_, &bd);
     if (!b2Body_IsValid(body)) {
@@ -223,6 +229,8 @@ class Box2DWorld final : public IWorld2DBackend {
         b2ShapeDef part_sd = sd;  // same density/filter/flags; material below
         part_sd.material.friction = part.friction;
         part_sd.material.restitution = part.restitution;
+        part_sd.userData =
+            reinterpret_cast<void*>(pack_shape_owner(slot, p));
         const b2ShapeId shape = make_shape(part.shape, part.offset, part_sd);
         if (!b2Shape_IsValid(shape)) {
           b2DestroyBody(body);  // cascades the shapes made so far
@@ -488,12 +496,17 @@ class Box2DWorld final : public IWorld2DBackend {
       const b2ContactBeginTouchEvent& e = contacts.beginEvents[i];
       std::uint32_t a = 0;
       std::uint32_t b = 0;
-      if (!slot_of_shape(e.shapeIdA, a) || !slot_of_shape(e.shapeIdB, b)) {
+      std::uint8_t pa = 0;
+      std::uint8_t pb = 0;
+      if (!owner_of_shape(e.shapeIdA, a, pa) ||
+          !owner_of_shape(e.shapeIdB, b, pb)) {
         continue;
       }
       BackendEvent2D ev{};
       ev.slot_a = a;
       ev.slot_b = b;
+      ev.part_a = pa;
+      ev.part_b = pb;
       ev.phase = physics2d::ContactPhase::began;
       if (e.manifold.pointCount > 0) {
         ev.point = from_b2(e.manifold.points[0].point);
@@ -505,12 +518,17 @@ class Box2DWorld final : public IWorld2DBackend {
       const b2ContactEndTouchEvent& e = contacts.endEvents[i];
       std::uint32_t a = 0;
       std::uint32_t b = 0;
-      if (!slot_of_shape(e.shapeIdA, a) || !slot_of_shape(e.shapeIdB, b)) {
+      std::uint8_t pa = 0;
+      std::uint8_t pb = 0;
+      if (!owner_of_shape(e.shapeIdA, a, pa) ||
+          !owner_of_shape(e.shapeIdB, b, pb)) {
         continue;
       }
       BackendEvent2D ev{};
       ev.slot_a = a;
       ev.slot_b = b;
+      ev.part_a = pa;
+      ev.part_b = pb;
       ev.phase = physics2d::ContactPhase::ended;
       collector.add(ev);  // Box2D end events carry no manifold
     }
@@ -518,12 +536,17 @@ class Box2DWorld final : public IWorld2DBackend {
       const b2ContactHitEvent& e = contacts.hitEvents[i];
       std::uint32_t a = 0;
       std::uint32_t b = 0;
-      if (!slot_of_shape(e.shapeIdA, a) || !slot_of_shape(e.shapeIdB, b)) {
+      std::uint8_t pa = 0;
+      std::uint8_t pb = 0;
+      if (!owner_of_shape(e.shapeIdA, a, pa) ||
+          !owner_of_shape(e.shapeIdB, b, pb)) {
         continue;
       }
       BackendEvent2D ev{};
       ev.slot_a = a;
       ev.slot_b = b;
+      ev.part_a = pa;
+      ev.part_b = pb;
       ev.phase = physics2d::ContactPhase::hit;
       ev.point = from_b2(e.point);
       ev.normal = from_b2(e.normal);
@@ -538,13 +561,17 @@ class Box2DWorld final : public IWorld2DBackend {
       const b2SensorBeginTouchEvent& e = sensors.beginEvents[i];
       std::uint32_t sensor = 0;
       std::uint32_t visitor = 0;
-      if (!slot_of_shape(e.sensorShapeId, sensor) ||
-          !slot_of_shape(e.visitorShapeId, visitor)) {
+      std::uint8_t sensor_part = 0;
+      std::uint8_t visitor_part = 0;
+      if (!owner_of_shape(e.sensorShapeId, sensor, sensor_part) ||
+          !owner_of_shape(e.visitorShapeId, visitor, visitor_part)) {
         continue;
       }
       BackendEvent2D ev{};
       ev.slot_a = sensor;
       ev.slot_b = visitor;
+      ev.part_a = sensor_part;
+      ev.part_b = visitor_part;
       ev.phase = physics2d::ContactPhase::began;
       collector.add(ev);
     }
@@ -552,13 +579,17 @@ class Box2DWorld final : public IWorld2DBackend {
       const b2SensorEndTouchEvent& e = sensors.endEvents[i];
       std::uint32_t sensor = 0;
       std::uint32_t visitor = 0;
-      if (!slot_of_shape(e.sensorShapeId, sensor) ||
-          !slot_of_shape(e.visitorShapeId, visitor)) {
+      std::uint8_t sensor_part = 0;
+      std::uint8_t visitor_part = 0;
+      if (!owner_of_shape(e.sensorShapeId, sensor, sensor_part) ||
+          !owner_of_shape(e.visitorShapeId, visitor, visitor_part)) {
         continue;
       }
       BackendEvent2D ev{};
       ev.slot_a = sensor;
       ev.slot_b = visitor;
+      ev.part_a = sensor_part;
+      ev.part_b = visitor_part;
       ev.phase = physics2d::ContactPhase::ended;
       collector.add(ev);
     }
@@ -577,7 +608,8 @@ class Box2DWorld final : public IWorld2DBackend {
       return std::nullopt;
     }
     std::uint32_t slot = 0;
-    if (!slot_of_shape(hit.shapeId, slot)) {
+    std::uint8_t part = 0;  // a ray hits one shape; the lib speaks bodies
+    if (!owner_of_shape(hit.shapeId, slot, part)) {
       return std::nullopt;  // defensive: the shape has no lib body
     }
     return BackendRayHit2D{slot, hit.fraction * max_distance, from_b2(hit.point),
@@ -799,22 +831,33 @@ class Box2DWorld final : public IWorld2DBackend {
     }
   }
 
-  [[nodiscard]] bool slot_of_shape(b2ShapeId shape, std::uint32_t& out) const {
-    // End events can outlive their shapes: b2DestroyBody queues end events
-    // for the dying body's contacts, and they drain one step later holding
-    // STALE shape ids (generation bumped at destroy, slot maybe reused).
-    // b2Shape_GetBody hard-asserts on a stale id, so validity goes first
-    // (b2Shape_IsValid is the non-asserting twin) and the stale event is
-    // dropped - the lib's destroy path already owns that cleanup.
+  // (slot + 1) | (part + 1) << 32 - zero only when never set, mirroring the
+  // body userData sentinel.
+  [[nodiscard]] static std::uintptr_t pack_shape_owner(std::uint32_t slot,
+                                                       std::uint32_t part) {
+    return (static_cast<std::uintptr_t>(slot) + 1u) |
+           ((static_cast<std::uintptr_t>(part) + 1u) << 32);
+  }
+
+  // Shape id -> its owning (slot, part), packed at create. End events can
+  // outlive their shapes: b2DestroyBody queues end events for the dying
+  // body's contacts, and they drain one step later holding STALE shape ids
+  // (generation bumped at destroy, slot maybe reused). b2Shape_GetUserData
+  // hard-asserts on a stale id, so validity goes first (b2Shape_IsValid is
+  // the non-asserting twin) and the stale event is dropped - the lib's
+  // destroy path already owns that cleanup.
+  [[nodiscard]] bool owner_of_shape(b2ShapeId shape, std::uint32_t& out_slot,
+                                    std::uint8_t& out_part) const {
     if (!b2Shape_IsValid(shape)) {
       return false;
     }
-    const b2BodyId body = b2Shape_GetBody(shape);
-    const auto raw = reinterpret_cast<std::uintptr_t>(b2Body_GetUserData(body));
+    const auto raw =
+        reinterpret_cast<std::uintptr_t>(b2Shape_GetUserData(shape));
     if (raw == 0) {
       return false;
     }
-    out = static_cast<std::uint32_t>(raw - 1u);
+    out_slot = static_cast<std::uint32_t>(raw & 0xFFFFFFFFull) - 1u;
+    out_part = static_cast<std::uint8_t>(raw >> 32) - 1u;
     return true;
   }
 

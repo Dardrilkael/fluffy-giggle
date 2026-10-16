@@ -251,6 +251,9 @@ struct ShapeKey {
 // One buffered contact lifecycle change. Began/hit entries know their
 // slots at callback time (mUserData); ended entries start as raw BodyIDs
 // (OnContactRemoved cannot touch bodies) and are resolved after the tick.
+// part_a/part_b name the touching SHAPE of each body (0 = body-level
+// shape) - the lib's touching table keys on the full shape pair, and
+// contacts fire per shape pair, so they must ride every raw entry.
 struct RawEvent {
   std::uint32_t slot_a = 0;
   std::uint32_t slot_b = 0;
@@ -258,11 +261,19 @@ struct RawEvent {
   Vec3 point{};
   Vec3 normal{};
   float speed = 0.0f;
+  std::uint8_t part_a = 0;
+  std::uint8_t part_b = 0;
 };
 
+// Ended entries keep their SubShapeIDs too: the drain resolves them to part
+// indices post-tick (a live body's shape is immutable, so the ID resolves
+// the same after the tick; a destroyed one drops the event anyway - the
+// destroy-silence contract).
 struct RawRemoved {
   JPH::BodyID id_a{};
   JPH::BodyID id_b{};
+  JPH::SubShapeID sub_a{};
+  JPH::SubShapeID sub_b{};
 };
 
 // Jolt body index -> the lib slot it currently holds. FLAT on purpose:
@@ -292,18 +303,22 @@ struct JoltIndexEntry {
 
 // The full tiebreak chain, on the AS-REPORTED slots: a pure function of
 // event content, so the sorted feed (and therefore which events the
-// lib's cap drops) is identical every run.
+// lib's cap drops) is identical every run. Parts join the chain so two
+// same-content events from different shape pairs of one body pair still
+// have a fixed order.
 [[nodiscard]] bool raw_event_less(const RawEvent& l, const RawEvent& r) {
   // make_tuple, not tie: the phase cast makes a temporary, and tie needs
   // lvalues. By-value tuples compare lexicographically all the same.
   return std::make_tuple(l.slot_a, l.slot_b,
                          static_cast<std::uint8_t>(l.phase),
                          l.point.x, l.point.y, l.point.z,
-                         l.normal.x, l.normal.y, l.normal.z, l.speed) <
+                         l.normal.x, l.normal.y, l.normal.z, l.speed,
+                         l.part_a, l.part_b) <
          std::make_tuple(r.slot_a, r.slot_b,
                          static_cast<std::uint8_t>(r.phase),
                          r.point.x, r.point.y, r.point.z,
-                         r.normal.x, r.normal.y, r.normal.z, r.speed);
+                         r.normal.x, r.normal.y, r.normal.z, r.speed,
+                         r.part_a, r.part_b);
 }
 
 // Broadphase query collector that folds every overlapping body's lib slot
@@ -913,18 +928,48 @@ class JoltWorld3D final : public IWorld3DBackend,
         if (a == kNoSlot || b == kNoSlot) {
           continue;
         }
+        // The touching table keys on the shape pair, so the ended must
+        // name its parts. Post-tick the LOCKING interface is the correct
+        // read; a body destroyed mid-Update already dropped above, and a
+        // live body's shape is immutable, so the buffered SubShapeID
+        // resolves identically after the tick. The two reads live in
+        // SEPARATE scopes on purpose: debug builds auto-enable Jolt's
+        // assert layer (JPH_DEBUG -> JPH_ENABLE_ASSERTS even with the
+        // CMake USE_ASSERTS off), and PhysicsLock::sCheckLock forbids a
+        // thread from holding two PerBody locks at once - the engine's
+        // own pair-locks go through the batch API, which marks PerBody
+        // once. Overlapping lock_a and lock_b here trips JPH_ASSERT ->
+        // __debugbreak() -> SEH (the set_sleepable/ActivateBody trap's
+        // sibling; sequential scopes are correct in every config).
+        std::uint8_t pa = 0;
+        {
+          const JPH::BodyLockRead lock_a(system_.GetBodyLockInterface(),
+                                         removed.id_a);
+          if (lock_a.Succeeded()) {
+            pa = part_of(lock_a.GetBody(), removed.sub_a);
+          }
+        }
+        std::uint8_t pb = 0;
+        {
+          const JPH::BodyLockRead lock_b(system_.GetBodyLockInterface(),
+                                         removed.id_b);
+          if (lock_b.Succeeded()) {
+            pb = part_of(lock_b.GetBody(), removed.sub_b);
+          }
+        }
         if (raw_events_.size() < raw_events_.capacity()) {
           // Ended events carry no geometry (Box2D's end events do not
           // either); the tiebreak chain only reaches point/normal/speed
           // after slots and phase.
           raw_events_.push_back(RawEvent{a, b,
-                                         physics3d::ContactPhase::ended});
+                                         physics3d::ContactPhase::ended,
+                                         Vec3{}, Vec3{}, 0.0f, pa, pb});
         }
       }
       std::sort(raw_events_.begin(), raw_events_.end(), raw_event_less);
       for (const RawEvent& e : raw_events_) {
         collector.add(BackendEvent3D{e.slot_a, e.slot_b, e.phase, e.point,
-                                     e.normal, e.speed});
+                                     e.normal, e.speed, e.part_a, e.part_b});
       }
       raw_events_.clear();
       removed_.clear();
@@ -1025,14 +1070,16 @@ class JoltWorld3D final : public IWorld3DBackend,
         inBody2.GetAngularVelocity().Cross(
             point - inBody2.GetCenterOfMassPosition());
     const float speed = std::max(0.0f, -(v2 - v1).Dot(normal));
+    const std::uint8_t pa = part_of(inBody1, inManifold.mSubShapeID1);
+    const std::uint8_t pb = part_of(inBody2, inManifold.mSubShapeID2);
     push_raw(RawEvent{a, b, physics3d::ContactPhase::began,
-                      from_jph(point), from_jph(normal), speed});
+                      from_jph(point), from_jph(normal), speed, pa, pb});
     // Jolt has no separate hit callback: same rule as Box2D's hit events,
     // approach speed over the world's threshold (> 0 keeps resting
     // contacts quiet when the threshold is the default 0).
     if (speed > hit_threshold_) {
       push_raw(RawEvent{a, b, physics3d::ContactPhase::hit,
-                        from_jph(point), from_jph(normal), speed});
+                        from_jph(point), from_jph(normal), speed, pa, pb});
     }
   }
 
@@ -1053,9 +1100,12 @@ class JoltWorld3D final : public IWorld3DBackend,
     // The bodies may already be destroyed (a destroy cascade fires its
     // removals at the NEXT Update): buffer raw ids, resolve post-tick. A
     // dead pair misses the index table and drops - the destroy-silence
-    // contract.
+    // contract. The SubShapeIDs ride along so the drain can name the
+    // shape pair after the tick (the shape table key).
     push_removed(RawRemoved{inSubShapePair.GetBody1ID(),
-                            inSubShapePair.GetBody2ID()});
+                            inSubShapePair.GetBody2ID(),
+                            inSubShapePair.GetSubShapeID1(),
+                            inSubShapePair.GetSubShapeID2()});
   }
 
   // Which part of a multi-part body a sub-shape ID touches, or -1 when the
@@ -1079,6 +1129,15 @@ class JoltWorld3D final : public IWorld3DBackend,
     const std::uint32_t index =
         compound->GetSubShapeIndexFromID(id, remainder);
     return index < compound->GetNumSubShapes() ? int(index) : -1;
+  }
+
+  // The event seam's part encoding: a non-compound body has exactly one
+  // shape, which IS part 0 - single-shape bodies, one-part bodies (a bare
+  // child) and lone parts under a RotatedTranslated decorator all report 0.
+  [[nodiscard]] static std::uint8_t part_of(const JPH::Body& body,
+                                           const JPH::SubShapeID& id) {
+    const int p = part_index(body, id);
+    return p < 0 ? std::uint8_t{0} : static_cast<std::uint8_t>(p);
   }
 
   // Per-part materials at contact time. A pair where at least one side

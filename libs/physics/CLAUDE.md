@@ -44,13 +44,17 @@ swap touches no public header and no user code.
   amortized and never happens in steady state, keeping the zero-alloc
   contract intact.
 - Forces/torques clear at the end of every tick, whichever engine runs.
-- One documented backend divergence: Jolt removes contacts when a body
-  falls asleep and re-adds them on wake, so a resting 3D pair reports
-  `ended` at sleep and `began` again on wake; Box2D keeps sleeping
-  contacts silent. Passed through the seam verbatim - the 3D engine
-  suite pins the Jolt shape.
-- Second divergence, same shape: a runtime `set_collision_filter` wakes
-  the island in Box2D (`b2Shape_SetFilter`) but NOT in Jolt
+- Sleep is event-silent in BOTH engines since C3 (the lib-owned touching
+  table, world_core.hpp): the table keys pairs on the full SHAPE pair (a
+  second part's began is never read as a duplicate), suppresses Jolt's
+  sleep-purge `ended` and wake-re-add `began`, and reconciles the one
+  edge sleep can owe - a real separation while a side sleeps is
+  delivered by the table's two-tick deadline (zeroed geometry), never
+  dropped. Destroying a body silences its pairs and purges the slot's
+  keys, so reuse cannot collide a stale key. Both engine suites pin the
+  same observable shape.
+- The remaining documented divergence: a runtime `set_collision_filter`
+  wakes the island in Box2D (`b2Shape_SetFilter`) but NOT in Jolt
   (`SetCollisionGroup` does not activate), so a sleeping 3D body keeps
   its contacts until woken by set_velocity/impulse - the public setter
   documents the conservative contract. Behavior tests pin both engines.
@@ -175,7 +179,7 @@ events above a speed threshold, the bulk set_transforms path.
 
 The engine-semantic rework arc ("the lib owns semantics, backends only
 compute"), one commit per phase: CONTRACT.md (C1, done) -> sleep control
-(C2, done) -> lib-owned touching table (C3) -> lib-computed mass
+(C2, done) -> lib-owned touching table (C3, done) -> lib-computed mass
 properties (C4) -> one material-mixing rule (C5) -> backend factory +
 reference backend (C6) -> conformance suite encoding CONTRACT.md (C7).
 Also queued behind those: the machinery sweeps' "every path" names are

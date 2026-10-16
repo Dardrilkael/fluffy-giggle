@@ -63,6 +63,12 @@ struct BackendJoint3D {
   float length = 0.0f;
 };
 
+// part_a/part_b say WHICH shape of each body touched (0 for a body-level
+// shape, the parts[] index for a multi-part body): engines report contacts
+// per SHAPE pair, and the lib's touching table (world_core.hpp) keys on the
+// full shape pair so a second part's began is never mistaken for a
+// duplicate. The parts ride their slots: when the collector re-orders the
+// pair it swaps these too.
 struct BackendEvent3D {
   std::uint32_t slot_a = 0;
   std::uint32_t slot_b = 0;
@@ -70,6 +76,8 @@ struct BackendEvent3D {
   ws::math::Vec3 point{};
   ws::math::Vec3 normal{};
   float speed = 0.0f;
+  std::uint8_t part_a = 0;
+  std::uint8_t part_b = 0;
 };
 
 class IEventCollector3D {

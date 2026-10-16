@@ -73,6 +73,12 @@ struct BackendJoint2D {
 // One raw contact occurrence, in engine order. The lib's collector resolves
 // slots to BodyIds, orders the pair by creation index and flips the normal
 // accordingly - the backend reports in whatever order its engine produces.
+// part_a/part_b say WHICH shape of each body touched (0 for a body-level
+// shape, the parts[] index for a multi-part body): engines report contacts
+// per SHAPE pair, and the lib's touching table (world_core.hpp) keys on the
+// full shape pair so a second part's began is never mistaken for a
+// duplicate. The parts ride their slots: when the collector re-orders the
+// pair it swaps these too.
 struct BackendEvent2D {
   std::uint32_t slot_a = 0;
   std::uint32_t slot_b = 0;
@@ -80,6 +86,8 @@ struct BackendEvent2D {
   ws::math::Vec2 point{};
   ws::math::Vec2 normal{};  // engine convention; the lib normalizes to a->b
   float speed = 0.0f;
+  std::uint8_t part_a = 0;
+  std::uint8_t part_b = 0;
 };
 
 // Where the backend pushes events during step(). Written straight into the

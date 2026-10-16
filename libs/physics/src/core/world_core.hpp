@@ -123,6 +123,19 @@ class WorldCore {
     moved_.reserve(desc.max_bodies);
     kinds_.assign(desc.max_bodies, ws::physics::BodyKind::static_);
     user_data_.assign(desc.max_bodies, 0);
+    // The touching table: headroom for 4 distinct pairs per body (>= 16
+    // entries, capped at 65536 at construction). One allocation, final
+    // size; growth beyond it is amortized scene-complexity growth, never
+    // steady-state churn (the edge-flood precedent).
+    std::uint64_t pair_cap = std::uint64_t{4} * desc.max_bodies;
+    pair_cap = std::clamp(pair_cap, std::uint64_t{16}, std::uint64_t{65536});
+    std::size_t pairs_pow2 = std::size_t{16};
+    while (pairs_pow2 < pair_cap) {
+      pairs_pow2 <<= 1;
+    }
+    pairs_.assign(pairs_pow2, TouchPair{});
+    pairs_mask_ = pairs_pow2 - 1;
+    sleeping_pairs_.reserve(32);  // frozen pairs: the pile-sleeping subset
   }
 
   WorldCore(const WorldCore&) = delete;
@@ -180,6 +193,10 @@ class WorldCore {
       }
     }
     backend_->destroy_body(*slot);
+    // The touching table dies with the body, SILENTLY (destroy-silence):
+    // no ended events for a body the consumer already gave up, and no key
+    // a reused slot could ever collide with.
+    purge_pairs_for_slot(*slot);
     bodies_.free(*slot);
     kinds_[*slot] = ws::physics::BodyKind::static_;
     user_data_[*slot] = 0;  // retired slots never leak a stale payload
@@ -526,6 +543,247 @@ class WorldCore {
     TransformT transform;
   };
 
+  // --- lib-owned touching table (CONTRACT.md 7) -------------------------------
+  // The engine-independent "who is touching whom": backends report only raw
+  // begin/end edges, and THIS table decides the sleep/wake semantics for both
+  // engines - no began/ended is ever caused by a body falling asleep or
+  // waking up, whichever engine runs underneath. Keyed on the full SHAPE
+  // pair (slots + parts), because engines report contacts per shape pair and
+  // a second part's began must never read as a duplicate of the first.
+  //
+  // Open addressing, linear probing, tombstones on erase (probe paths stay
+  // intact). Sized at construction for 4x max_bodies pairs (capped), grown
+  // x2 at 3/4 load like the edge-flood precedent: steady state allocates
+  // nothing, and growth means genuine scene-complexity growth, never churn.
+  struct TouchPair {
+    std::uint32_t slot_a = 0;  // canonical: slot_a < slot_b (creation order)
+    std::uint32_t slot_b = 0;
+    std::uint8_t part_a = 0;   // rides slot_a
+    std::uint8_t part_b = 0;   // rides slot_b
+    static constexpr std::uint8_t kEmpty = 0;
+    static constexpr std::uint8_t kAlive = 1;     // touching, both sides live
+    static constexpr std::uint8_t kFrozen = 2;    // touching-asleep (see below)
+    static constexpr std::uint8_t kTombstone = 3;
+    std::uint8_t state = kEmpty;
+  };
+
+  // The frozen subset: pairs whose `ended` was suppressed because one side
+  // was asleep when it arrived (the lib cannot tell a sleep-purge from a
+  // genuine separation at event time). Reconciliation: once the sleeper
+  // MOVES again (the moves feed is the awake set in both dims), the pair
+  // gets a deadline; if the engine re-adds the touch before it lapses -
+  // Jolt does, on wake - the began confirms the pair and the deadline dies
+  // quietly; if not, the separation was real and the lib emits the ended
+  // itself, a couple of ticks late. frozen_at guards the same-tick case: a
+  // body settling to sleep appears in THAT tick's moves feed, and a pair
+  // frozen that same tick must not start its window yet - the window opens
+  // on the sleeper's next motion, i.e. its wake.
+  struct SleepingPair {
+    std::uint32_t slot_a = 0;
+    std::uint32_t slot_b = 0;
+    std::uint8_t part_a = 0;
+    std::uint8_t part_b = 0;
+    std::uint32_t frozen_at = 0;  // tick_count_ low bits at the freeze
+    std::uint32_t deadline = 0;   // 0 = unstamped; else absolute tick to emit
+  };
+
+  [[nodiscard]] static std::uint64_t pair_hash(std::uint32_t a, std::uint32_t b,
+                                               std::uint8_t pa,
+                                               std::uint8_t pb) {
+    std::uint64_t h = 0x9E3779B97F4A7C15ull ^ (std::uint64_t{a} << 32) ^
+                      std::uint64_t{b} ^ (std::uint64_t{pa} << 40) ^
+                      (std::uint64_t{pb} << 48);
+    h ^= h >> 30;
+    h *= 0xBF58476D1CE4E5B9ull;
+    h ^= h >> 27;
+    h *= 0x94D049BB133111EBull;
+    h ^= h >> 31;
+    return h;
+  }
+
+  [[nodiscard]] std::size_t pair_home(std::uint32_t a, std::uint32_t b,
+                                      std::uint8_t pa, std::uint8_t pb) const {
+    return static_cast<std::size_t>(pair_hash(a, b, pa, pb)) & pairs_mask_;
+  }
+
+  // Probe to the pair's entry, skipping tombstones; npos when absent.
+  [[nodiscard]] std::size_t find_pair(std::uint32_t a, std::uint32_t b,
+                                      std::uint8_t pa, std::uint8_t pb) const {
+    if (pairs_.empty()) {
+      return static_cast<std::size_t>(-1);
+    }
+    std::size_t i = pair_home(a, b, pa, pb);
+    for (std::size_t probe = 0; probe < pairs_.size(); ++probe) {
+      const TouchPair& p = pairs_[i];
+      if (p.state == TouchPair::kEmpty) {
+        return static_cast<std::size_t>(-1);
+      }
+      if (p.state == TouchPair::kAlive || p.state == TouchPair::kFrozen) {
+        if (p.slot_a == a && p.slot_b == b && p.part_a == pa &&
+            p.part_b == pb) {
+          return i;
+        }
+      }
+      i = (i + 1) & pairs_mask_;
+    }
+    return static_cast<std::size_t>(-1);  // table full of tombstones (grown)
+  }
+
+  // Place a fresh alive entry (or resurrect a tombstone seen while probing).
+  // The caller has already checked absence via find_pair.
+  void insert_pair(std::uint32_t a, std::uint32_t b, std::uint8_t pa,
+                   std::uint8_t pb) {
+    if ((pairs_used_ + 1) * 4 >= pairs_.size() * 3) {
+      grow_pairs();
+    }
+    std::size_t i = pair_home(a, b, pa, pb);
+    std::size_t first_tombstone = static_cast<std::size_t>(-1);
+    // Post-growth the load is under 3/4, so this loop always finds an
+    // empty slot; a tombstone seen on the way wins over it (probe chains
+    // through a reused tombstone must still find this pair later).
+    while (true) {
+      TouchPair& p = pairs_[i];
+      if (p.state == TouchPair::kEmpty) {
+        if (first_tombstone == static_cast<std::size_t>(-1)) {
+          ++pairs_used_;  // fresh slot; a tombstone reuse counts nothing
+        } else {
+          i = first_tombstone;
+        }
+        pairs_[i] = TouchPair{a, b, pa, pb, TouchPair::kAlive};
+        return;
+      }
+      if (p.state == TouchPair::kTombstone &&
+          first_tombstone == static_cast<std::size_t>(-1)) {
+        first_tombstone = i;
+      }
+      i = (i + 1) & pairs_mask_;
+    }
+  }
+
+  // Drop a live/frozen pair without a trace beyond the tombstone.
+  void erase_pair(std::size_t i) {
+    if (i < pairs_.size() && pairs_[i].state != TouchPair::kEmpty &&
+        pairs_[i].state != TouchPair::kTombstone) {
+      pairs_[i].state = TouchPair::kTombstone;
+      // pairs_used_ counts tombstones too: load stays honest, the next
+      // grow compacts them away.
+    }
+  }
+
+  // Amortized x2 growth; alive/frozen pairs rehash, tombstones vanish.
+  void grow_pairs() {
+    std::vector<TouchPair> old;
+    old.swap(pairs_);
+    const std::size_t cap = old.empty() ? std::size_t{16} : old.size() * 2;
+    pairs_.assign(cap, TouchPair{});
+    pairs_mask_ = cap - 1;
+    pairs_used_ = 0;
+    for (const TouchPair& p : old) {
+      if (p.state == TouchPair::kAlive || p.state == TouchPair::kFrozen) {
+        std::size_t i = pair_home(p.slot_a, p.slot_b, p.part_a, p.part_b);
+        while (pairs_[i].state != TouchPair::kEmpty) {
+          i = (i + 1) & pairs_mask_;
+        }
+        pairs_[i] = p;
+        ++pairs_used_;
+      }
+    }
+  }
+
+  // destroy_body's half of the destroy-silence contract: every pair that
+  // names the slot dies SILENTLY (no ended events - the body is gone, the
+  // consumer's per-body state dies with it), and slot reuse can never
+  // collide a stale key. The full scan is O(capacity) like the joint scan
+  // above it - fine at v1 scales.
+  void purge_pairs_for_slot(std::uint32_t slot) {
+    for (TouchPair& p : pairs_) {
+      if ((p.state == TouchPair::kAlive || p.state == TouchPair::kFrozen) &&
+          (p.slot_a == slot || p.slot_b == slot)) {
+        p.state = TouchPair::kTombstone;
+      }
+    }
+    for (std::size_t i = sleeping_pairs_.size(); i-- > 0;) {
+      const SleepingPair& sp = sleeping_pairs_[i];
+      if (sp.slot_a == slot || sp.slot_b == slot) {
+        sleeping_pairs_[i] = sleeping_pairs_.back();
+        sleeping_pairs_.pop_back();
+      }
+    }
+  }
+
+  // The began-confirmation path: a frozen pair's sleeper woke and the
+  // engine re-added the touch, so the pair never broke - drop the
+  // reconciliation deadline with it.
+  void unfreeze_sleeping(std::uint32_t a, std::uint32_t b, std::uint8_t pa,
+                         std::uint8_t pb) {
+    for (std::size_t i = sleeping_pairs_.size(); i-- > 0;) {
+      const SleepingPair& sp = sleeping_pairs_[i];
+      if (sp.slot_a == a && sp.slot_b == b && sp.part_a == pa &&
+          sp.part_b == pb) {
+        sleeping_pairs_[i] = sleeping_pairs_.back();
+        sleeping_pairs_.pop_back();
+        return;
+      }
+    }
+  }
+
+  // The reconciliation half of the sleep policy (CONTRACT.md 7): runs at
+  // the END of every tick, after the moves fold. A world with nothing
+  // frozen costs one empty check - sleeping worlds stay free. Two passes:
+  //
+  // Stamp: every entry in THIS tick's raw moves feed is a body the engine
+  // simulated - in both dims that is the awake set, so a moved slot in a
+  // frozen pair is the sleeper waking (the feed is per TICK on purpose:
+  // moved_raw_ is per CALL and would keep a long-woken slot looking fresh
+  // on later ticks of one advance()). A pair frozen this same tick is
+  // skipped - its sleeper settled into sleep INSIDE this feed, and the
+  // window must open on the next motion, the wake. The deadline is two
+  // ticks out: enough for the engine's began re-add of a surviving touch
+  // to land and confirm the pair before anything is reported.
+  //
+  // Expire: a lapsed deadline means no began came - the separation was
+  // real, so the lib emits the ended itself (zeroed geometry, exactly
+  // Box2D's end events) and drops the pair. Wrap-safe compare; backwards
+  // iteration with swap-pop (no order to preserve in this list).
+  void reconcile_sleeping_pairs(std::uint32_t moved_count) {
+    if (sleeping_pairs_.empty()) {
+      return;
+    }
+    const std::uint32_t now = static_cast<std::uint32_t>(tick_count_);
+    if (moved_count > 0) {
+      for (std::uint32_t i = 0; i < moved_count; ++i) {
+        const std::uint32_t slot = backend_moves_[i].slot;
+        for (SleepingPair& sp : sleeping_pairs_) {
+          if (sp.deadline == 0 && sp.frozen_at != now &&
+              (sp.slot_a == slot || sp.slot_b == slot)) {
+            sp.deadline = now + 2;
+          }
+        }
+      }
+    }
+    for (std::size_t i = sleeping_pairs_.size(); i-- > 0;) {
+      const SleepingPair sp = sleeping_pairs_[i];
+      if (sp.deadline == 0 || std::int32_t(now - sp.deadline) < 0) {
+        continue;  // unstamped, or the window is still open
+      }
+      const std::size_t idx =
+          find_pair(sp.slot_a, sp.slot_b, sp.part_a, sp.part_b);
+      if (idx != static_cast<std::size_t>(-1) &&
+          pairs_[idx].state == TouchPair::kFrozen) {
+        // Only a purge can retire a slot while its pair sits here, and
+        // the purge drops the entry too - both ids resolve.
+        erase_pair(idx);
+        const BodyIdT a{sp.slot_a, bodies_.generation(sp.slot_a)};
+        const BodyIdT b{sp.slot_b, bodies_.generation(sp.slot_b)};
+        events_.push_back(ContactEventT{
+            decltype(ContactEventT{}.phase)::ended, a, b, Vec{}, Vec{},
+            0.0f});
+      }
+      sleeping_pairs_[i] = sleeping_pairs_.back();
+      sleeping_pairs_.pop_back();
+    }
+  }
+
   // Opens one public step()/advance() call: reset the per-call buffers. The
   // prev mirror and the published moved list are NOT reset here - they are
   // per TICK, so zero-tick advance() calls leave both standing (see tick()
@@ -593,6 +851,9 @@ class WorldCore {
   // One fixed tick of the engine. Appends to the CALL's buffers; the sort,
   // cap reporting and handle resolution happen once, in end_call().
   void tick() {
+    // Low 32 bits feed the sleeping-pair deadlines (wrap-safe compares);
+    // the u64 never wraps in practice.
+    ++tick_count_;
     // The prev mirror is per TICK, snapped only on the FIRST tick of the
     // call (a multi-tick advance() lerps across the whole arc). A zero-tick
     // advance() never touches it, so interpolation endpoints stay stable
@@ -617,6 +878,11 @@ class WorldCore {
         moved_raw_[seen_[mv.slot] - 1].transform = mv.transform;
       }
     }
+    // The drain (collector.add) has finished, so any began that confirms a
+    // frozen pair already did its work; what is left is deadline stamping
+    // (this tick's awake set) and expiry - suppressed separations whose
+    // re-add window has lapsed.
+    reconcile_sleeping_pairs(static_cast<std::uint32_t>(count));
   }
 
   // IEventCollector2D/3D implementation: resolves engine slots to public
@@ -653,13 +919,60 @@ class WorldCore {
           !core_.bodies_.live(event.slot_b)) {
         return;  // defensive: bodies retire between calls, never mid-call
       }
-      BodyIdT a{event.slot_a, core_.bodies_.generation(event.slot_a)};
-      BodyIdT b{event.slot_b, core_.bodies_.generation(event.slot_b)};
+      // One canonical order for the table key and the public event: pair
+      // by BodyId index (== slot), parts riding their slots, normal
+      // flipped to keep pointing a -> b.
+      std::uint32_t sa = event.slot_a;
+      std::uint32_t sb = event.slot_b;
+      std::uint8_t pa = event.part_a;
+      std::uint8_t pb = event.part_b;
       typename D::Vec normal = event.normal;
-      if (a.index > b.index) {
-        std::swap(a, b);
+      if (sa > sb) {
+        std::swap(sa, sb);
+        std::swap(pa, pb);
         normal = -normal;
       }
+      // The lib's sleep/contact-event policy (CONTRACT.md 7): edges flow
+      // through the touching table so the SEMANTICS are engine-neutral.
+      // began for a pair the table already knows is an engine re-fire of
+      // an existing touch - Jolt re-adds purged contacts on wake - and is
+      // suppressed (a frozen pair unfreezes instead: the touch outlived
+      // the sleep). ended that arrives while one side sleeps is frozen
+      // (suppressed, reconciled later): the lib cannot tell a sleep-purge
+      // from a genuine separation at event time, and no ended caused by
+      // sleep may reach the consumer. Hits never touch the table.
+      if (event.phase == decltype(event.phase)::began) {
+        const std::size_t idx = core_.find_pair(sa, sb, pa, pb);
+        if (idx != static_cast<std::size_t>(-1)) {
+          if (core_.pairs_[idx].state == TouchPair::kFrozen) {
+            // The sleeper woke and the engine re-added the touch: the
+            // pair never broke from the consumer's point of view.
+            core_.pairs_[idx].state = TouchPair::kAlive;
+            core_.unfreeze_sleeping(sa, sb, pa, pb);
+          }
+          return;  // duplicate began: the touch was reported when it began
+        }
+        core_.insert_pair(sa, sb, pa, pb);
+      } else if (event.phase == decltype(event.phase)::ended) {
+        const std::size_t idx = core_.find_pair(sa, sb, pa, pb);
+        if (idx == static_cast<std::size_t>(-1)) {
+          // Not tracked (raced a purge, or an engine double-ended): pass
+          // through so a consumer that saw the began stays honest.
+        } else if (core_.pairs_[idx].state == TouchPair::kFrozen) {
+          return;  // already consumed at freeze time
+        } else if (core_.backend_->is_sleeping(sa) ||
+                   core_.backend_->is_sleeping(sb)) {
+          core_.pairs_[idx].state = TouchPair::kFrozen;
+          core_.sleeping_pairs_.push_back(
+              SleepingPair{sa, sb, pa, pb,
+                           static_cast<std::uint32_t>(core_.tick_count_), 0});
+          return;  // suppressed: no ended is ever caused by falling asleep
+        } else {
+          core_.erase_pair(idx);
+        }
+      }
+      BodyIdT a{sa, core_.bodies_.generation(sa)};
+      BodyIdT b{sb, core_.bodies_.generation(sb)};
       core_.events_.push_back(
           ContactEventT{event.phase, a, b, event.point, normal, event.speed});
     }
@@ -691,6 +1004,13 @@ class WorldCore {
   std::uint32_t overflow_drops_ = 0;
   bool ticked_this_call_ = false;  // first-tick snapshot gate (see tick())
   bool overflow_warned_ = false;
+  // The lib-owned touching state (CONTRACT.md 7) - see the TouchPair block
+  // above for the layout and the policy comments.
+  std::vector<TouchPair> pairs_;  // open-addressed, power-of-two capacity
+  std::size_t pairs_mask_ = 0;    // capacity - 1
+  std::size_t pairs_used_ = 0;    // non-empty entries, tombstones included
+  std::vector<SleepingPair> sleeping_pairs_;  // the frozen subset, flat
+  std::uint64_t tick_count_ = 0;  // deadlines use the low 32 bits
 };
 
 }  // namespace ws::physics::detail

@@ -11,11 +11,12 @@
 // steady state. The backend-independent machinery is pinned in
 // test_world_3d.cpp.
 //
-// One Jolt semantic is PINNED here rather than matched to 2D (documented in
-// the adapter's header and libs/physics/CLAUDE.md): Jolt removes contacts
-// when a body falls asleep and re-adds them on wake, so a resting pair
-// reports `ended` at sleep and `began` again on wake. Box2D keeps sleeping
-// contacts silent. The stack case below asserts the Jolt shape.
+// Jolt's raw feed removes a sleeper's contacts when it falls asleep and
+// re-adds them on wake. Since C3 the lib owns the touching table
+// (world_core.hpp) and eats both: sleep and wake never produce began or
+// ended (CONTRACT.md 7), so the observable shape now matches Box2D's. The
+// stack case below pins the silence; the reconcile case pins the one edge
+// sleep CAN owe - a real separation while a side sleeps.
 //
 // The zero-allocation case reuses the global operator new/delete counters
 // that test_world_2d_box2d.cpp installs for the whole test binary; Jolt's
@@ -97,6 +98,23 @@ void step_n(World3D& world, int n) {
   for (int i = 0; i < n; ++i) {
     REQUIRE(world.step().has_value());
   }
+}
+
+// The shared setup of the touching-table cases: two dynamic boxes stacked
+// on the floor (the same deliberate 0.75/1.75 gaps as the stack case - both
+// really fall, slam, settle), waited to full sleep.
+[[nodiscard]] bool both_asleep(World3D& world, BodyId lower, BodyId upper) {
+  for (int i = 0; i < 300; ++i) {
+    REQUIRE(world.step().has_value());
+    auto l = world.is_sleeping(lower);
+    auto u = world.is_sleeping(upper);
+    REQUIRE(l.has_value());
+    REQUIRE(u.has_value());
+    if (*l && *u) {
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace
@@ -280,8 +298,88 @@ TEST_CASE("3D multi-shape parts: geometry rides the body-local offset") {
   CHECK(fell->position.y < -5.0f);
 }
 
+TEST_CASE("3D two part-pairs of one body pair begin and end independently") {
+  // The touching table keys on the full SHAPE pair (world_core.hpp), so a
+  // second part's began must never read as a duplicate of the first, and
+  // each part-pair ends on its own. Zero gravity keeps the geometry
+  // deterministic: a static two-pillar base (different heights) and a
+  // dynamic two-footed body, with the feet staged to touch two ticks
+  // apart. Only began events carry a witness point, so the part pairs are
+  // told apart by where their began points sit (z ~ 0 vs z ~ 2); ended is
+  // pinned by COUNT: both part-pairs must end, each exactly once.
+  auto world = make_world(World3D::Desc{.gravity = Vec3{0.0f, 0.0f, 0.0f},
+                                        .thread_count = 0});
+  BodyDesc base{};
+  base.kind = ws::physics::BodyKind::static_;
+  base.transform = Transform{Vec3{0.0f, 0.0f, 0.0f}, Quat{}};
+  base.parts[0] = Part{Box{Vec3{0.5f, 0.5f, 0.5f}},
+                        Vec3{0.0f, 0.5f, 0.0f}, 0.2f, 0.0f};   // top y = 1.0
+  base.parts[1] = Part{Box{Vec3{0.5f, 0.25f, 0.5f}},
+                        Vec3{0.0f, 0.25f, 2.0f}, 0.2f, 0.0f};  // top y = 0.5
+  base.part_count = 2;
+  auto base_id = world.create_body(base);
+  REQUIRE(base_id.has_value());
+
+  BodyDesc bridge{};
+  bridge.transform = Transform{Vec3{0.0f, 1.05f, 0.0f}, Quat{}};
+  bridge.parts[0] = Part{Box{Vec3{0.25f, 0.25f, 0.25f}},
+                         Vec3{0.0f, 0.0f, 0.0f}, 0.2f, 0.0f};
+  bridge.parts[1] = Part{Box{Vec3{0.25f, 0.25f, 0.25f}},
+                         Vec3{0.0f, 0.0f, 2.0f}, 0.2f, 0.0f};
+  bridge.part_count = 2;
+  auto bridge_id = world.create_body(bridge);
+  REQUIRE(bridge_id.has_value());
+
+  int began_low = 0;   // began with a witness point over pillar 0
+  int began_high = 0;  // began with a witness point over pillar 1
+  int ended = 0;
+  const auto collect = [&](int ticks) {
+    for (int i = 0; i < ticks; ++i) {
+      REQUIRE(world.step().has_value());
+      for (const auto& e : world.contact_events()) {
+        if (e.phase == ContactPhase::began) {
+          // Pillar 0's contact points sit at z in [-0.25, 0.25]; pillar
+          // 1's at z in [1.75, 2.25].
+          (e.point.z < 1.0f ? began_low : began_high) += 1;
+        } else if (e.phase == ContactPhase::ended) {
+          ++ended;
+        }
+      }
+    }
+  };
+
+  // Phase 1: foot 0 spawns 0.2 into pillar 0 (bottom 0.8 vs top 1.0) while
+  // foot 1 clears pillar 1 by 0.3 - exactly one began, over pillar 0.
+  collect(2);
+  CHECK(began_low == 1);
+  CHECK(began_high == 0);
+
+  // Phase 2: the teleport sinks the whole body - foot 0 stays in contact
+  // the entire time (no gap ever opens: no ended, no re-began), while
+  // foot 1's 0.1 overlap with pillar 1 brings a SECOND began for the SAME
+  // body pair. A slot-keyed table would swallow it as a duplicate.
+  REQUIRE(world.set_transform(*bridge_id, Vec3{0.0f, 0.65f, 0.0f}, Quat{})
+              .has_value());
+  collect(2);
+  CHECK(began_low == 1);   // foot 0 never re-began (never separated)
+  CHECK(began_high == 1);  // the second part-pair's began survived
+
+  // Phase 3: lift the whole body clear - both part-pairs separate, and
+  // each ends exactly once. (Zero-g depenetration only rests the feet ON
+  // the pillars, it never separates them, so the separation is driven by
+  // the transform, not the solver.)
+  REQUIRE(world.set_transform(*bridge_id, Vec3{0.0f, 1.65f, 0.0f}, Quat{})
+              .has_value());
+  for (int i = 0; i < 10 && ended < 2; ++i) {
+    collect(1);
+  }
+  CHECK(ended == 2);      // one per part-pair, no more
+  CHECK(began_low == 1);  // and never a duplicate began
+  CHECK(began_high == 1);
+}
+
 TEST_CASE("3D stack settles, sleeps and leaves moved_bodies() empty; "
-          "sleep reports ended, wake reports began") {
+          "sleep and wake never report contact events") {
   auto world = make_world(World3D::Desc{.thread_count = 0});
   auto floor = world.create_body(static_box(Vec3{0.0f, -0.5f, 0.0f},
                                              Vec3{50.0f, 0.5f, 50.0f}));
@@ -308,20 +406,33 @@ TEST_CASE("3D stack settles, sleeps and leaves moved_bodies() empty; "
   }
   CHECK(world.prev_transforms().size() == world.transforms().size());
 
-  // The Jolt semantic this file exists to pin: contacts are REMOVED when
-  // a body falls asleep, so the settle ends with `ended` events for the
-  // resting pairs (Box2D keeps sleeping contacts silent - documented
-  // divergence, passed through the seam verbatim).
-  bool saw_sleep_ended = false;
+  // CONTRACT.md 7: sleep is silent. Jolt purges a sleeper's contacts the
+  // moment it falls asleep - the old backend divergence - and re-detects
+  // them on wake. The lib's touching table eats both, so a settling stack
+  // reports no `ended` at all, and once the world goes quiet (an empty
+  // moved list: nothing simulated, all three slept through it) it reports
+  // no began/ended either. The slam and wobble before that legitimately
+  // fire began/hit.
+  int quiet_from = -1;
+  int ended_total = 0;
+  int edges_after_quiet = 0;
   for (int i = 0; i < 300; ++i) {  // five seconds: slam, wobble, settle, sleep
     REQUIRE(world.step().has_value());
+    if (world.moved_bodies().empty() && quiet_from < 0) {
+      quiet_from = i;
+    }
     for (const auto& e : world.contact_events()) {
       if (e.phase == ContactPhase::ended) {
-        saw_sleep_ended = true;
+        ++ended_total;
+      }
+      if (quiet_from >= 0 && e.phase != ContactPhase::hit) {
+        ++edges_after_quiet;
       }
     }
   }
-  CHECK(saw_sleep_ended);
+  REQUIRE(quiet_from >= 0);       // they really slept
+  CHECK(ended_total == 0);        // and never reported `ended` on the way
+  CHECK(edges_after_quiet == 0);  // sleep itself is event-silent
 
   for (std::size_t i = 0; i < boxes.size(); ++i) {
     auto state = world.body_state(boxes[i]);
@@ -343,19 +454,125 @@ TEST_CASE("3D stack settles, sleeps and leaves moved_bodies() empty; "
     CHECK(cur.position.y == doctest::Approx(prev.position.y));
   }
 
-  // And the other half of the semantic: waking a sleeper re-detects its
-  // contacts, so the pair reports `began` again.
+  // The wake half: Jolt re-detects the sleeper's contacts the moment it
+  // wakes, and the table eats that too - a pair that never stopped
+  // touching stays `began` from its original contact. The wake is proven
+  // real by the moved list, so the zero is the suppression at work.
   REQUIRE(world.set_velocity(boxes[0], Vec3{0.01f, 0.0f, 0.0f},
                              Vec3{0.0f, 0.01f, 0.0f})
               .has_value());
-  REQUIRE(world.step().has_value());
-  bool saw_wake_began = false;
-  for (const auto& e : world.contact_events()) {
-    if (e.phase == ContactPhase::began) {
-      saw_wake_began = true;
+  bool wake_moved = false;
+  int wake_edges = 0;
+  for (int i = 0; i < 3; ++i) {
+    REQUIRE(world.step().has_value());
+    wake_moved = wake_moved || !world.moved_bodies().empty();
+    for (const auto& e : world.contact_events()) {
+      if (e.phase != ContactPhase::hit) {
+        ++wake_edges;
+      }
     }
   }
-  CHECK(saw_wake_began);
+  CHECK(wake_moved);        // the boxes really woke and simulated
+  CHECK(wake_edges == 0);  // yet not one began/ended surfaced
+}
+
+TEST_CASE("3D a sleeping pair's real separation still reports ended") {
+  // The freeze path of the touching table: Jolt already dropped the pair
+  // when the stack fell asleep, so the engine will never say `ended` - the
+  // table froze it, the wake movement stamps its deadline, and reconcile
+  // owes the consumer the edge (CONTRACT.md 7: ended fires exactly once
+  // per touching -> not-touching transition, however the backend loses
+  // track).
+  auto world = make_world(World3D::Desc{.thread_count = 0});
+  auto floor = world.create_body(static_box(Vec3{0.0f, -0.5f, 0.0f},
+                                             Vec3{50.0f, 0.5f, 50.0f}));
+  REQUIRE(floor.has_value());
+  auto lower = world.create_body(dynamic_box(Vec3{0.0f, 0.75f, 0.0f}));
+  auto upper = world.create_body(dynamic_box(Vec3{0.0f, 1.75f, 0.0f}));
+  REQUIRE(lower.has_value());
+  REQUIRE(upper.has_value());
+  REQUIRE(both_asleep(world, *lower, *upper));
+
+  // The upper box teleports away - into the air, far from the stack - so
+  // the pair really separates while the lower box stays asleep.
+  REQUIRE(world.set_transform(*upper, Vec3{5.0f, 5.0f, 0.0f}, Quat{})
+              .has_value());
+
+  const auto names_pair = [&](const auto& e) {
+    return (e.a == *lower && e.b == *upper) || (e.a == *upper && e.b == *lower);
+  };
+  bool saw_ended = false;
+  bool saw_other = false;
+  for (int i = 0; i < 10 && !saw_ended; ++i) {
+    REQUIRE(world.step().has_value());
+    for (const auto& e : world.contact_events()) {
+      if (!names_pair(e)) {
+        continue;
+      }
+      if (e.phase == ContactPhase::ended) {
+        saw_ended = true;
+      } else {
+        saw_other = true;  // nothing re-touched: no began/hit for this pair
+      }
+    }
+  }
+  CHECK(saw_ended);        // the lib delivered the engine's missing edge
+  CHECK_FALSE(saw_other);
+
+  // The lower box slept through its own pair's end: no wake, no motion.
+  auto still = world.is_sleeping(*lower);
+  REQUIRE(still.has_value());
+  CHECK(*still);
+}
+
+TEST_CASE("3D destroying a touching body is silent; the reused slot "
+          "re-begins cleanly") {
+  auto world = make_world(World3D::Desc{.thread_count = 0});
+  auto floor = world.create_body(static_box(Vec3{0.0f, -0.5f, 0.0f},
+                                             Vec3{50.0f, 0.5f, 50.0f}));
+  REQUIRE(floor.has_value());
+  // The two-box stack of the reconcile case, settled to sleep: the
+  // upper->lower pair is in the table when its owner dies.
+  auto lower = world.create_body(dynamic_box(Vec3{0.0f, 0.75f, 0.0f}));
+  auto upper = world.create_body(dynamic_box(Vec3{0.0f, 1.75f, 0.0f}));
+  REQUIRE(lower.has_value());
+  REQUIRE(upper.has_value());
+  REQUIRE(both_asleep(world, *lower, *upper));
+
+  REQUIRE(world.destroy_body(*upper).has_value());
+
+  // Silence (CONTRACT.md 7: destroying a body never reports its pairs):
+  // the engine's late removal resolves to a dead body and drops, and the
+  // table purged the pair - no edge names the dead slot in the quiet
+  // ticks that follow.
+  for (int i = 0; i < 5; ++i) {
+    REQUIRE(world.step().has_value());
+    for (const auto& e : world.contact_events()) {
+      CHECK_FALSE(e.a == *upper);
+      CHECK_FALSE(e.b == *upper);
+    }
+  }
+
+  // Slot reuse: the freed slot is the only one, so the next body lands in
+  // it - same index, bumped generation. Dropped onto the survivor, it must
+  // begin EXACTLY once: the dead pair's stale key may neither suppress the
+  // new contact nor duplicate it.
+  auto reuser = world.create_body(dynamic_box(Vec3{0.0f, 1.75f, 0.0f}));
+  REQUIRE(reuser.has_value());
+  CHECK(reuser->index == upper->index);
+  CHECK_FALSE(*reuser == *upper);  // generation moved on: the stale id is dead
+
+  int began = 0;
+  for (int i = 0; i < 120; ++i) {  // 2 s: fall (13 ticks), land, settle, sleep
+    REQUIRE(world.step().has_value());
+    for (const auto& e : world.contact_events()) {
+      if (e.phase == ContactPhase::began &&
+          (e.a == *reuser || e.b == *reuser)) {
+        ++began;
+      }
+    }
+  }
+  CHECK(began == 1);
 }
 
 TEST_CASE("3D forces accumulate within a tick and clear at its end") {

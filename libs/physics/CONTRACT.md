@@ -92,7 +92,13 @@ lib deliberately does not constrain (an engine's internals may differ).
   by the lib in every backend - a sleeping pair that is still
   geometrically touching stays touching, and its wake adds no `began`).
   began fires exactly once per not-touching -> touching transition; ended
-  exactly once per touching -> not-touching transition.
+  exactly once per touching -> not-touching transition. An engine `ended`
+  that arrives while a side sleeps cannot be trusted (it may be sleep
+  bookkeeping, not motion), so the lib holds it: a re-confirmed touch
+  cancels it, otherwise the lib delivers the `ended` itself a couple of
+  ticks late - never dropped. Destroying a body silences its pairs
+  entirely (the consumer's per-body state dies with the body) and purges
+  them from the table, so slot reuse can never collide a stale key.
 - Events are PER step()/advance() CALL (a multi-tick advance unions its
   ticks); moved_bodies() and prev_transforms() are PER TICK (a zero-tick
   advance keeps both standing).
