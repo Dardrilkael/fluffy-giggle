@@ -18,9 +18,11 @@
 
 namespace ws::physics2d {
 
-// The 2D simulation. Box2D v3 lives behind the pimpl - no Box2D type appears
-// here, and a backend swap touches no public header. Movable, not copyable;
-// created via create(). All fallible calls return ws::core::Result/Status.
+// The 2D simulation. The backend lives behind the pimpl - the factory in
+// src/core/backend_factory.cpp picks it (Box2D v3 by default) - so no engine
+// type appears here, and a backend swap touches no public header. Movable,
+// not copyable; created via create(). All fallible calls return
+// ws::core::Result/Status.
 //
 // Units: SI (m, kg, s). Bodies and joints are addressed by generational
 // handles - stale handles return invalid_handle, never UB.

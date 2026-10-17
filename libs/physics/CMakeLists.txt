@@ -16,10 +16,26 @@ if(NOT MSVC)
   target_compile_options(ws_physics PRIVATE -fvisibility=hidden)
 endif()
 
+# Dev probe (default OFF): default the 2D world onto the reference backend
+# (src/backend/reference2d) instead of Box2D - flips make_world_backend_2d
+# in src/core/backend_factory.cpp. The reference computes detection, events,
+# ballistics and queries with NO solver response, CCD, joints or sleep
+# onset, so machinery cases that need resting contact or joints fail
+# against it honestly; the point is running the lib's machinery under a
+# second implementation, not a "better" engine.
+option(WS_PHYSICS_DEFAULT_BACKEND_REFERENCE
+       "ws::physics: default the 2D world to the reference backend (dev probe)"
+       OFF)
+if(WS_PHYSICS_DEFAULT_BACKEND_REFERENCE)
+  target_compile_definitions(ws_physics PRIVATE
+                              WS_PHYSICS_DEFAULT_BACKEND_REFERENCE=1)
+endif()
+
 ws_add_test(physics
   SOURCES tests/test_common.cpp tests/test_world_2d.cpp tests/test_world_3d.cpp
           tests/test_world_2d_box2d.cpp tests/test_world_3d_jolt.cpp
-          tests/test_mass_properties.cpp tests/test_material.cpp)
+          tests/test_mass_properties.cpp tests/test_material.cpp
+          tests/test_reference_2d.cpp)
 # tests drive the internal machinery directly (the net pattern: src/ never
 # reaches apps, but tests reach it through this PRIVATE path).
 if(TARGET test_physics)

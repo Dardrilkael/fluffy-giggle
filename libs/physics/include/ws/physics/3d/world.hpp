@@ -18,9 +18,10 @@
 
 namespace ws::physics3d {
 
-// The 3D simulation. Jolt Physics lives behind the pimpl - no Jolt type
-// appears here, and a backend swap touches no public header. Movable, not
-// copyable; created via create(). All fallible calls return
+// The 3D simulation. The backend lives behind the pimpl - the factory in
+// src/core/backend_factory.cpp picks it (Jolt Physics by default) - so no
+// engine type appears here, and a backend swap touches no public header.
+// Movable, not copyable; created via create(). All fallible calls return
 // ws::core::Result/Status.
 //
 // Units: SI (m, kg, s). Bodies and joints are addressed by generational

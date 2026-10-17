@@ -209,4 +209,25 @@ class IWorld2DBackend {
 [[nodiscard]] std::unique_ptr<IWorld2DBackend> make_box2d_world_2d(
     const BackendDesc2D& desc);
 
+// The reference 2D backend (src/backend/reference2d/reference_2d.cpp):
+// CONTRACT.md computed by brute force - O(n^2) detection, semi-implicit
+// Euler on the lib's mass data. An honest SUBSET, not a solver: no contact
+// response (pairs pass through), no CCD (is_bullet stored, never read), no
+// joints (create_joint -> backend_error), circles and boxes only (a capsule
+// fails create_body), and it never sleeps - idle heuristics are backend
+// compute and this one computes "never", so the wake rules hold vacuously
+// and thread_count is ignored. Exists so the conformance suite (C7) can run
+// the lib's machinery over a second implementation and so tests can pin
+// semantics with hand-checkable numbers. Returns nullptr only on
+// out-of-memory.
+[[nodiscard]] std::unique_ptr<IWorld2DBackend> make_reference_world_2d(
+    const BackendDesc2D& desc);
+
+// The default-backend choice (src/core/backend_factory.cpp) - the ONE
+// place an engine is named from World2D's side. The CMake dev probe
+// WS_PHYSICS_DEFAULT_BACKEND_REFERENCE flips 2D onto the reference
+// implementation; otherwise Box2D.
+[[nodiscard]] std::unique_ptr<IWorld2DBackend> make_world_backend_2d(
+    const BackendDesc2D& desc);
+
 }  // namespace ws::physics::detail

@@ -183,11 +183,11 @@ World2D& World2D::operator=(World2D&&) noexcept = default;
   if (auto st = detail::validate_core_desc(core); !st) {
     return ws::core::unexpected<ws::core::Error>(std::move(st.error()));
   }
-  auto backend = detail::make_box2d_world_2d(detail::BackendDesc2D{
+  auto backend = detail::make_world_backend_2d(detail::BackendDesc2D{
       desc.gravity, desc.thread_count, desc.hit_speed_threshold,
       desc.max_bodies, desc.max_joints});
   if (!backend) {
-    return fail(PhysicsError::backend_error, "Box2D backend failed to start");
+    return fail(PhysicsError::backend_error, "2D backend failed to start");
   }
   World2D world;
   world.impl_ = std::make_unique<Impl>(core, std::move(backend));

@@ -194,11 +194,11 @@ World3D& World3D::operator=(World3D&&) noexcept = default;
   if (auto st = detail::validate_core_desc(core); !st) {
     return ws::core::unexpected<ws::core::Error>(std::move(st.error()));
   }
-  auto backend = detail::make_jolt_world_3d(detail::BackendDesc3D{
+  auto backend = detail::make_world_backend_3d(detail::BackendDesc3D{
       desc.gravity, desc.thread_count, desc.hit_speed_threshold,
       desc.max_bodies, desc.max_joints, desc.max_contact_events});
   if (!backend) {
-    return fail(PhysicsError::backend_error, "Jolt backend failed to start");
+    return fail(PhysicsError::backend_error, "3D backend failed to start");
   }
   World3D world;
   world.impl_ = std::make_unique<Impl>(core, std::move(backend));

@@ -15,6 +15,15 @@ swap touches no public header and no user code.
   copy, the moved-bodies list, contact-event normalize/sort/cap, the
   fixed-timestep accumulator, bulk set_transforms atomicity, and the
   destroy-body -> joint cascade.
+- `src/core/backend_factory.cpp` - the ONE place a backend is chosen:
+  make_world_backend_2d/3d, called by both worlds' create(). A compile-time
+  dev probe (CMake option WS_PHYSICS_DEFAULT_BACKEND_REFERENCE, default
+  OFF) flips the 2D pick from Box2D to the reference backend.
+- `src/backend/reference2d/` - the reference 2D backend: CONTRACT.md's
+  detection, events, ballistics and queries computed from scratch, no
+  engine. An HONEST subset, not a toy solver: no contact response (pairs
+  pass through), no CCD, no joints, circles/boxes only, never sleeps -
+  the raw-seam suite pins its exact numbers.
 - `src/backend/box2d/` - the real 2D engine (Box2D v3, FetchContent).
 - `src/backend/jolt3d/` - the real 3D engine (Jolt Physics v5.6,
   FetchContent). Contact callbacks fire on worker threads during the
@@ -65,6 +74,16 @@ swap touches no public header and no user code.
 - Determinism: same binary, same thread_count, same call sequence produces
   identical results (replay test). Cross-platform and cross-thread-count
   determinism are NOT promised.
+- The reference backend is the machinery's second opinion: it computes the
+  lib's rules with zero engine help (O(n^2) detection nested so touch keys
+  are lex-sorted by construction, entering-rays-only raycasts, the
+  began/ended touching diff, COM-frame semi-implicit Euler on the lib's
+  mass properties), and every rule it cannot honor fails honestly instead
+  of faking it: capsules and joints return backend_error, solid pairs
+  pass through (no solver), is_sleeping is always false. Flipping the dev
+  probe (WS_PHYSICS_DEFAULT_BACKEND_REFERENCE=ON) runs the WHOLE existing
+  machinery suite against it - the cases that need resting contact or
+  joints fail there, which is the point of a second implementation.
 
 ## v1 scope (decided - review point 7)
 In scope: sensors (BodyDesc::is_sensor), the three v1 joint kinds, hit
@@ -188,7 +207,7 @@ The engine-semantic rework arc ("the lib owns semantics, backends only
 compute"), one commit per phase: CONTRACT.md (C1, done) -> sleep control
 (C2, done) -> lib-owned touching table (C3, done) -> lib-computed mass
 properties (C4, done) -> one material-mixing rule (C5, done) -> backend
-factory + reference backend (C6) -> conformance suite encoding
+factory + reference 2D backend (C6, done) -> conformance suite encoding
 CONTRACT.md (C7).
 Also queued behind those: the machinery sweeps' "every path" names are
 still aspirational - the stale sweeps miss set_transform + the apply_*
