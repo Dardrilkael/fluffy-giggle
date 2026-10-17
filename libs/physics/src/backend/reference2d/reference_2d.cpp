@@ -701,7 +701,12 @@ class ReferenceWorld2D final : public IWorld2DBackend {
         }
         // Closest hit wins; ties keep the LOWEST slot, then part index
         // (strict <, ascending iteration). t <= max_distance, per the
-        // public [0, max_distance] promise.
+        // public [0, max_distance] promise - the cap gate runs before the
+        // best-so-far test, so even a lone first candidate beyond it is
+        // rejected.
+        if (t > max_distance) {
+          continue;
+        }
         if (!found || t < best_t) {
           found = true;
           best_t = t;

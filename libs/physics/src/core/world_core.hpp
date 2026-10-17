@@ -10,9 +10,9 @@
 // accumulator with the spiral-of-death clamp, bulk set_transforms
 // atomicity, and the destroy_body -> joint cascade.
 //
-// The dimension is a Traits type supplied by the per-dimension .cpp:
-//   struct Dim2D;  // in world2d.cpp - aliases Vec2/float types + the 2D seam
-//   struct Dim3D;  // in world3d.cpp
+// The dimension is a Traits type supplied by the per-dimension header:
+//   struct Dim2D;  // in src/core/dim_2d.hpp - aliases + the 2D seam types
+//   struct Dim3D;  // in src/core/dim_3d.hpp
 // Beyond the type aliases the traits provide the dimension-specific
 // predicates the machinery needs:
 //   is_finite(Vec) / is_finite(Angular)  - finiteness for runtime setters

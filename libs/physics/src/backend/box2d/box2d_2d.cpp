@@ -125,6 +125,9 @@ class Box2DWorld final : public IWorld2DBackend {
     bodies_.resize(desc.max_bodies);
     body_live_.resize(desc.max_bodies);
     kinds_.resize(desc.max_bodies);
+    layers_.resize(desc.max_bodies);
+    masks_.resize(desc.max_bodies);
+    shape_categories_.resize(desc.max_bodies);
     joints_.resize(desc.max_joints);
     joint_live_.resize(desc.max_joints);
 
@@ -149,6 +152,16 @@ class Box2DWorld final : public IWorld2DBackend {
       def.userTaskContext = this;
     }
     world_ = b2CreateWorld(&def);
+    // The lib's both-directions filter rule answers from this object's
+    // per-slot tables (should_collide below), the same architecture as
+    // the Jolt adapter's world-owned GroupFilter. Captureless lambda ->
+    // plain fcn pointer.
+    b2World_SetCustomFilterCallback(
+        world_,
+        [](b2ShapeId a, b2ShapeId b, void* context) {
+          return static_cast<Box2DWorld*>(context)->should_collide(a, b);
+        },
+        this);
   }
 
   ~Box2DWorld() override {
@@ -169,6 +182,12 @@ class Box2DWorld final : public IWorld2DBackend {
     if (slot >= bodies_.size()) {
       return fail(PhysicsError::backend_error, "body slot out of range");
     }
+    // The rule's inputs live here, not in the engine's shape bits (see
+    // the shape-def comment below). The category token starts at its
+    // create-time value; set_filter toggles it.
+    layers_[slot] = desc.collision_layer;
+    masks_[slot] = desc.collision_mask;
+    shape_categories_[slot] = 1;
 
     b2BodyDef bd = b2DefaultBodyDef();
     bd.type = desc.kind == ws::physics::BodyKind::dynamic
@@ -194,10 +213,20 @@ class Box2DWorld final : public IWorld2DBackend {
                      : std::max(desc.density, 0.0f);
     sd.material.friction = desc.friction;
     sd.material.restitution = desc.restitution;
-    // The lib's rule IS b2ShouldShapesCollide's groupIndex==0 branch:
-    // (catA & maskB) && (catB & maskA). groupIndex stays 0.
-    sd.filter.categoryBits = desc.collision_layer;
-    sd.filter.maskBits = desc.collision_mask;
+    // CONTRACT.md 9: queries see ALL bodies and ignore filters, but
+    // Box2D's stock queries consult BOTH directions of the shape's own
+    // filter (b2ShouldQueryCollide), so a lib-legal mask of 0 would hide
+    // a body from every query. Shapes therefore carry a NEUTRAL engine
+    // filter; the lib's both-directions rule (catA & maskB) &&
+    // (catB & maskA) answers from the adapter's per-slot tables via the
+    // world's custom filter callback - the same architecture as the Jolt
+    // adapter's world-owned GroupFilter. This Box2D (3.1.1) consults the
+    // callback for every pair it considers (the docs' per-shape opt-in
+    // flag does not exist in this source). The category doubles as the
+    // revalidation token set_filter toggles; any non-zero value keeps
+    // the shape query-visible.
+    sd.filter.categoryBits = 1;
+    sd.filter.maskBits = ~std::uint64_t{0};
     // Sensor events need the flag on BOTH shapes in Box2D v3 (sensor.c
     // skips a pair whose OTHER shape lacks it), so every shape opts in:
     // the lib's contract is "sensor overlaps fire began/ended events"
@@ -334,14 +363,24 @@ class Box2DWorld final : public IWorld2DBackend {
     if (slot >= bodies_.size() || !body_live_[slot]) {
       return;
     }
+    layers_[slot] = layer;
+    masks_[slot] = mask;
+    // The rule itself answers from the tables above, but Box2D consults
+    // the custom filter only when it (re)considers a pair: at create, or
+    // after a proxy reset. b2Shape_SetFilter early-outs on an unchanged
+    // filter, so the category alternates 1 <-> 2 as an opaque
+    // revalidation token: every call resets the broadphase proxy and
+    // wakes the island (a filter change may kill contacts - the
+    // documented 2D wake), and the next tick's pair pass re-runs the
+    // rule with the fresh tables. Both token values are non-zero, so
+    // queries keep seeing the shape (CONTRACT.md 9). A body may own up
+    // to kMaxPartsPerBody shapes, so ask the engine for the list (a
+    // stack buffer beats a per-slot shape table, and it works whatever
+    // the body's shape count is).
+    shape_categories_[slot] = 3u - shape_categories_[slot];
     b2Filter filter{};
-    filter.categoryBits = layer;  // uint32 -> uint64 widens clean
-    filter.maskBits = mask;
-    // A body may own up to kMaxPartsPerBody shapes now, so ask the engine
-    // for the list (a stack buffer beats a per-slot shape table, and it
-    // works whatever the body's shape count is). SetFilter resets the
-    // broadphase proxy and wakes the island (a filter change may kill
-    // contacts), so the change lands next tick.
+    filter.categoryBits = shape_categories_[slot];
+    filter.maskBits = ~std::uint64_t{0};
     b2ShapeId shapes[ws::physics::kMaxPartsPerBody];
     const int count = b2Body_GetShapes(
         bodies_[slot], shapes, static_cast<int>(ws::physics::kMaxPartsPerBody));
@@ -614,6 +653,12 @@ class Box2DWorld final : public IWorld2DBackend {
           !owner_of_shape(e.visitorShapeId, visitor, visitor_part)) {
         continue;
       }
+      // The sensor pass ignored the lib rule (see pair_collides); a
+      // rule-failing pair must stay completely silent - both edges - or
+      // an orphan ended would reach consumers that never saw its began.
+      if (!pair_collides(sensor, visitor)) {
+        continue;
+      }
       BackendEvent2D ev{};
       ev.slot_a = sensor;
       ev.slot_b = visitor;
@@ -630,6 +675,10 @@ class Box2DWorld final : public IWorld2DBackend {
       std::uint8_t visitor_part = 0;
       if (!owner_of_shape(e.sensorShapeId, sensor, sensor_part) ||
           !owner_of_shape(e.visitorShapeId, visitor, visitor_part)) {
+        continue;
+      }
+      // Same gate as the began edge above (pair_collides explains why).
+      if (!pair_collides(sensor, visitor)) {
         continue;
       }
       BackendEvent2D ev{};
@@ -908,10 +957,49 @@ class Box2DWorld final : public IWorld2DBackend {
     return true;
   }
 
+  // The custom filter callback's answer: the lib's both-directions rule
+  // (CONTRACT.md 9) from the adapter's own tables. Parts resolve to their
+  // owning body's layer/mask - the filter is body-level in the lib, and
+  // every part shape carries its owner in userData. Box2D calls this from
+  // worker threads during the step (the typedef warns); the tables are
+  // written only between steps on the API thread, so the reads are
+  // race-free - the same discipline as the Jolt adapter's part tables. A
+  // shape the adapter cannot resolve (impossible: every shape it creates
+  // carries an owner) keeps the engine's own verdict instead of silently
+  // vanishing.
+  [[nodiscard]] bool should_collide(b2ShapeId a, b2ShapeId b) const {
+    std::uint32_t slot_a = 0, slot_b = 0;
+    std::uint8_t part_a = 0, part_b = 0;
+    if (!owner_of_shape(a, slot_a, part_a) ||
+        !owner_of_shape(b, slot_b, part_b)) {
+      return true;
+    }
+    return pair_collides(slot_a, slot_b);
+  }
+
+  // The rule on resolved owners. The custom filter callback answers it for
+  // CONTACT pairs, but Box2D's sensor overlap pass (sensor.c) never
+  // consults the callback - it gates on the shapes' own bits, which are
+  // neutral here so queries can see every body (CONTRACT.md 9). Sensor
+  // events are therefore rule-gated at the drain below. One edge that
+  // follows: a sensor pair whose filter flips mid-overlap keeps its
+  // pre-flip event lifetime until the shapes separate (the change lands
+  // with the next overlap, not retroactively).
+  [[nodiscard]] bool pair_collides(std::uint32_t slot_a,
+                                   std::uint32_t slot_b) const {
+    return (layers_[slot_a] & masks_[slot_b]) != 0 &&
+           (layers_[slot_b] & masks_[slot_a]) != 0;
+  }
+
   b2WorldId world_{};
   std::vector<b2BodyId> bodies_;    // slot -> engine body
   std::vector<char> body_live_;     // 1 = the slot holds a live body
   std::vector<ws::physics::BodyKind> kinds_;  // statics never sleep (CONTRACT)
+  std::vector<std::uint32_t> layers_;  // slot -> the lib's collision_layer
+  std::vector<std::uint32_t> masks_;   // slot -> the lib's collision_mask
+  // slot -> the engine category token set_filter toggles (see set_filter);
+  // the rule lives in should_collide, the bits only force revalidation.
+  std::vector<std::uint32_t> shape_categories_;
   std::vector<b2JointId> joints_;   // slot -> engine joint
   std::vector<char> joint_live_;
   float hit_threshold_ = 0.0f;

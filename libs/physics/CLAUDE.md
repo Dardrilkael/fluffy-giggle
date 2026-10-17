@@ -10,8 +10,9 @@ swap touches no public header and no user code.
 - `include/ws/physics/2d|3d/` - the public API (world, body, joint, contact,
   raycast). Only ws::core and ws::math types cross the boundary.
 - `src/core/world_core.hpp` - the dimension-independent machinery shared by
-  both worlds via a traits type (Dim2D / Dim3D defined in the respective
-  world .cpp): generational handle tables, the pose mirror + its prev-call
+  both worlds via a traits type (Dim2D / Dim3D, extracted to
+  src/core/dim_2d.hpp / dim_3d.hpp): generational handle tables, the pose
+  mirror + its prev-call
   copy, the moved-bodies list, contact-event normalize/sort/cap, the
   fixed-timestep accumulator, bulk set_transforms atomicity, and the
   destroy-body -> joint cascade.
@@ -96,9 +97,19 @@ events above a speed threshold, the bulk set_transforms path.
   needed to know), so retire/reuse hygiene is pure lib logic.
 - DONE: collision layers/masks - `BodyDesc::collision_layer/mask`
   (both-directions bitmask rule, defaults keep v1 behavior) +
-  `set_collision_filter()` on both worlds. Box2D: b2Filter at create +
-  `b2Shape_SetFilter` at runtime (the adapter now keeps the per-slot
-  shape id). Jolt: (layer, mask) ride CollisionGroup's ids + a
+  `set_collision_filter()` on both worlds. Box2D (reworked in C7a):
+  shapes carry a NEUTRAL engine filter - a lib-legal mask of 0 must not
+  hide a body from queries (CONTRACT.md 9 vs b2ShouldQueryCollide's
+  both-direction check) - and the world's custom filter callback answers
+  the rule from the adapter's per-slot layer/mask tables, the same
+  architecture as the Jolt GroupFilter below. Runtime changes still ride
+  `b2Shape_SetFilter`: the category alternates 1/2 as an opaque
+  revalidation token so the call never early-outs (reset proxy, wake
+  island, next tick's pair pass re-runs the rule). Sensors: the 3.1.1
+  overlap pass never consults the callback, so sensor events are
+  rule-gated at the adapter's drain; a sensor pair whose filter flips
+  mid-overlap keeps its pre-flip event lifetime until separation. Jolt:
+  (layer, mask) ride CollisionGroup's ids + a
   world-owned GroupFilter answering the rule; the ObjectLayer split is
   untouched (it sorts, the group decides). Sensors obey the same rule
   in both engines. Queries ignore filters in v2.
@@ -208,7 +219,8 @@ compute"), one commit per phase: CONTRACT.md (C1, done) -> sleep control
 (C2, done) -> lib-owned touching table (C3, done) -> lib-computed mass
 properties (C4, done) -> one material-mixing rule (C5, done) -> backend
 factory + reference 2D backend (C6, done) -> conformance suite encoding
-CONTRACT.md (C7).
+CONTRACT.md (C7; the 2D half landed as C7a - Dim traits headers + the
+both-backend 2D suite; the 3D twin, over Jolt + a 3D reference, is C7b).
 Also queued behind those: the machinery sweeps' "every path" names are
 still aspirational - the stale sweeps miss set_transform + the apply_*
 family in 3D, and the moved-from tests miss the apply_* family and
@@ -243,6 +255,19 @@ make the names true.
 Android NDK (arm64-v8a, android-28) both build ws_physics from day one:
 run the suites on the desktop presets, compile-check via
 `cmake --build --preset android-local --target ws_physics`.
+The conformance suite (tests/test_conformance.cpp, C7a) drives
+WorldCore<Dim2D> directly over BOTH backends in one binary - the same
+machinery World2D runs - and encodes the cross-backend CONTRACT
+clauses: ballistics (velocity tight, position banded by the staircase
+formulas in its header), F = ma on the lib's mass numbers, impulse
+immediacy, began/ended/hit edges with their zero-geometry promises,
+filters at create + runtime, destroy/silence/reuse, queries (closest
+hit, sensors seen, filters ignored), per-call events vs per-tick
+moved/prev, generational retire. Engine-only semantics (sleep onset,
+solver response, materials, joints) stay in the engine suites, and
+first-touch TICK numbers are never asserted across engines: touching
+scenes step until the edge appears (the reference detects after
+integrating the tick, Box2D's pair pass a tick later).
 apps/bench_physics (desktop console app) is the throughput consumer: a
 falling-box rain per dimension, timed while awake and after sleep. Run it
 manually - absolute numbers are machine-dependent, so nothing asserts on
