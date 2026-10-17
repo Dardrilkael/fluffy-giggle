@@ -45,10 +45,14 @@ One line each - the per-tree CLAUDE.md files carry the detail:
 
 - `libs/core` - logging + asserts + the shared error/result types.
 - `libs/math` - dense `Matrix<T>` + LU and ws-owned fixed-size vecmath.
-- `libs/input` - the input family promoted out of ui (stage 3): the
+- `libs/input` - the input family promoted out of ui (stage 3a): the
   GLFW-free event types + the `InputFrame` snapshot (touch/mouse -> one
   pointer list). Pure CPU, core-only; ws::ui's platform TUs are the only
   writers of an InputFrame.
+- `libs/gfx` - the Vulkan device layer promoted out of ui (stage 3b):
+  loader/instance, surface-via-callback, device/queue selection, the VMA
+  allocator. Public API is opaque void* handles; volk/vma stay PRIVATE and
+  ui (the only consumer) is the unwrap point.
 - `libs/ui` - app shell (GLFW/Vulkan/ImGui/ImPlot, all private) + the
   widget/renderer/gui drawing APIs.
 - `libs/audio` - WAV decode + OpenAL Soft playback behind a Result-only API.

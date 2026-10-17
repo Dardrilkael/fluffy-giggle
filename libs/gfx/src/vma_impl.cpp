@@ -2,7 +2,7 @@
 // volk must come first: with VMA_DYNAMIC_VULKAN_FUNCTIONS the allocator
 // resolves every other Vulkan entry point at runtime through the two loaders
 // (vkGetInstanceProcAddr / vkGetDeviceProcAddr, both volk globals) that
-// app.cpp hands over via VmaAllocatorCreateInfo::pVulkanFunctions - since
+// gpu.cpp hands over via VmaAllocatorCreateInfo::pVulkanFunctions - since
 // VMA 3.2 it no longer picks them up implicitly.
 #include <volk.h>
 

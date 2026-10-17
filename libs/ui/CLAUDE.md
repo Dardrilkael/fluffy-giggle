@@ -25,7 +25,8 @@ gets a window, an event stream, and a place to submit draw commands —
   popup/tooltip/modal overlay scopes) that draw
   through r2d; caller-owned state, identity + hit-testing + layout + draw
   stay one seam.
-- **`ws::ui::App`** — the shell itself: owns the window, Vulkan context,
+- **`ws::ui::App`** — the shell itself: owns the window, the Vulkan
+  device layer (through the `ws::gfx::Gpu` it holds, since stage 3b),
   swapchain, frame loop, event pumping, and shutdown.
 
 The shell is the product. Consumers link against this library and only
@@ -66,6 +67,9 @@ libs/ui/
   # (the input family — the event types + InputFrame/frame_input — lives
   #  in libs/input since stage 3a; ui links it, and this tree's platform
   #  TUs are the only writers of an InputFrame)
+  # (the Vulkan device layer — loader/instance/surface/device/allocator —
+  #  lives in libs/gfx since stage 3b; ui holds a gfx::Gpu and unwraps its
+  #  opaque handles in app.cpp, the one cast point)
   include/ws/ui/
     app.hpp                 # App, AppConfig — PUBLIC, zero third-party includes
     render_command_queue.hpp # RenderCommandQueue
@@ -80,16 +84,14 @@ libs/ui/
       widgets.hpp            # button/checkbox/radio/toggle switch/slider/drag float/collapsing header/selectable/combo/text input/panel/tabs/scroll region + the overlay scopes (popup/tooltip/modal) + the statics (text/separator/progress) — the widget functions + fit_text
   src/                       # layer folders - the cut lines for a future split into shared libs
     app/                     # the shell itself
-      app.cpp                # pimpl: Vulkan context, swapchain, frame loop
+      app.cpp                # pimpl: swapchain, frame loop, backends; the device bootstrap lives in ws::gfx (stage 3b), unwrapped through gfx::Gpu's opaque handles
     platform/                # the windowing seam - exactly one window TU builds per platform
       window.h               # internal: WindowHost, the platform seam (never reaches apps)
       window_glfw.cpp        # desktop: GLFW window + all glfwSet*Callback installs + the clipboard pair (only here)
       window_android.cpp     # Android: NativeActivity pump, multi-touch decode, the bridge feed
-    gfx/                     # the Vulkan device-side implementation TUs
-      renderer2d_device.cpp  # r2d's Vulkan half: init/shutdown, pipelines, frame-slot arenas + descriptor tables, texture upload, flush
-      vma_impl.cpp           # sole VMA_IMPLEMENTATION translation unit
     render/                  # the r2d renderer + its pure-CPU core + the shaders
-      renderer2d.h/.cpp      # r2d engine: command recording + sort/replay - the CPU half (the Vulkan half is gfx/renderer2d_device.cpp)
+      renderer2d.h/.cpp      # r2d engine: command recording + sort/replay - the CPU half
+      renderer2d_device.cpp  # r2d's Vulkan half (beside the CPU half since 3b): init/shutdown, pipelines, frame-slot arenas + descriptor tables, texture upload, flush
       batch_core.h/.cpp      # pure-CPU batch: chunks, camera VP, geometry (no Vulkan)
       shader_provider.h/.cpp # pipeline shader words: committed spirv.h, or hot
                              # reload when WS_UI_DEV_SHADER_RELOAD (dev only)
@@ -268,7 +270,8 @@ third-party).
   frame) and warned once per frame by the renderer. A growth failure
   (OOM) logs and skips that frame's draws — loudly, never a silent
   partial memcpy. Texture handling splits by TIER (the device probe in
-  app.cpp picks once at init): **bindless** — one global 1024-slot table
+  ws::gfx picks once, from the options app.cpp passes at init_gpu()):
+  **bindless** — one global 1024-slot table
   bound once per frame; `tex_index` carries the GLOBAL registry id, so
   texture variety never splits a chunk at all; **chunked** (fallback) —
   a 32-slot table per chunk (`kMaxTexturesPerChunk`); overflow closes
@@ -1040,8 +1043,11 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `shaderSampledImageArrayDynamicIndexing`: device selection skips GPUs
   lacking it and `vkCreateDevice` enables the feature. Universally
   supported on desktop GPUs, so the gate costs nothing.
-- **Texture tiers (M9).** `create_device` probes descriptor indexing and
-  picks once: bindless when the device has
+- **Texture tiers (M9).** `ws::gfx::Gpu`'s device stage probes descriptor
+  indexing and picks once (since stage 3b: ui passes the request —
+  want_bindless plus the batch's own table size — through
+  `gfx::DeviceOptions`, and maps the answer onto `r2d::TextureTier` at
+  the first attach): bindless when the device has
   `shaderSampledImageArrayNonUniformIndexing` +
   `descriptorBindingPartiallyBound` (+
   `descriptorBindingSampledImageUpdateAfterBind` when present) AND the
@@ -1054,13 +1060,14 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   or device, missing feature, missing limit) falls back to the chunked
   tier, never a failure; the instance requests the loader's own version
   (`vkEnumerateInstanceVersion`) so a 1.1+ device is reachable at all.
-  The tier logs one `core::info` line at startup (the smoke marker) and
-  is fixed for the process.
-- VMA's implementation TU is `src/gfx/vma_impl.cpp` (dynamic function loading;
-  the two loader entry points are handed over from `app.cpp` via
-  `VmaAllocatorCreateInfo::pVulkanFunctions` since VMA 3.2 requires it) —
-  exactly one `VMA_IMPLEMENTATION` TU in the workspace. The allocator is
-  created by the shell for future GPU-side data work; it is not yet
+  The tier logs one `core::info` line at startup (tagged `gfx:` since the
+  move — the smoke marker) and is fixed for the process.
+- VMA's implementation TU is `libs/gfx/src/vma_impl.cpp` since stage 3b
+  (dynamic function loading; the two loader entry points are handed over
+  from gfx's `gpu.cpp` via `VmaAllocatorCreateInfo::pVulkanFunctions`
+  since VMA 3.2 requires it) — exactly one `VMA_IMPLEMENTATION` TU in
+  the workspace. The allocator is created by `ws::gfx::Gpu` (the first
+  attach's device stage) for future GPU-side data work; it is not yet
   exposed in the public API.
 - Swapchain: `minImageCount + 1` images, BGRA8 preferred, FIFO when vsync,
   mailbox/immediate when not; recreated on resize / out-of-date /
@@ -1090,7 +1097,10 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   chain IS the proof the shared image is safe; per-frame depth images
   would only buy back a small serialization bubble.
 - Validation is opt-in via `WS_UI_VALIDATION` (env var — deliberately not
-  public API): the Khronos validation layer + `VK_EXT_debug_utils` are
+  public API; ui reads it once and hands `enable_validation` to
+  `ws::gfx::Gpu` — the layer request, the messenger and the message
+  funnel live in gfx since stage 3b): the Khronos validation layer +
+  `VK_EXT_debug_utils` are
   enabled when both enumerate, messages route through the ws logger
   (error/warn/info by severity), and a machine without the Vulkan SDK
   warns once and runs without. Synchronization validation only ever runs
@@ -1101,7 +1111,7 @@ drive unchanged (that boundary is deliberate; don't paint it over).
 - Depth attachment: unconditional from the first `create_swapchain` — the
   render pass is always color + depth, so the ImGui backend's Init-baked
   pipeline stays render-pass-compatible across every rebuild. The format
-  is chosen ONCE in `select_device` (D32_SFLOAT → D24_UNORM_S8_UINT →
+  is chosen ONCE at gfx's device selection (D32_SFLOAT → D24_UNORM_S8_UINT →
   D16_UNORM, first with DEPTH_STENCIL_ATTACHMENT support in optimal
   tiling; startup fails loudly if the device has none), which runs
   exactly once per process and strictly before any render pass exists —

@@ -111,7 +111,7 @@ if(ANDROID)
   target_compile_definitions(volk PUBLIC VK_USE_PLATFORM_ANDROID_KHR)
 endif()
 
-# --- VulkanMemoryAllocator (header-only interface; implementation TU lives in libs/ui) ---
+# --- VulkanMemoryAllocator (header-only interface; implementation TU lives in libs/gfx) ---
 add_library(vma INTERFACE)
 add_library(vma::vma ALIAS vma)
 target_include_directories(vma SYSTEM INTERFACE "${vma_SOURCE_DIR}/include")

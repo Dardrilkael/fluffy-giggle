@@ -7,6 +7,13 @@
 // exposes no third-party types on purpose: apps subclass App and react to
 // events / draw via on_setup()/on_event()/on_update().
 //
+// The Vulkan device layer (loader, instance, surface, device selection,
+// queue, VMA allocator) lives in ws::gfx since stage 3b - Impl holds a
+// gfx::Gpu and unwraps its opaque void* handles through the accessors
+// just below the member block (this file includes volk.h, so it is the
+// one legit cast point). The swapchain, the frame loop and the backends
+// stay here.
+//
 // The frame flow is the classic frames-in-flight model: r2d::kMaxFramesInFlight
 // frame slots each own a fence, command pool/buffer and acquire semaphore,
 // while each swapchain image owns its render-finished semaphore - the slot
@@ -17,17 +24,19 @@
 //
 // Startup splits into two stages so the shell survives Android's surface
 // loss (APP_CMD_TERM_WINDOW takes the ANativeWindow away at any pause):
-// the context stage (platform host + VkInstance) runs once, while the
+// the context stage (platform host + the gfx instance) runs once, while the
 // window stage (surface, device, swapchain, renderer, ImGui backends)
 // attaches and detaches with the window - on Android it re-runs whenever
 // the OS hands a window back.
 
+#include <ws/gfx/gpu.hpp>
 #include <ws/input/event.hpp>
 #include <ws/input/input.hpp>
 #include <ws/ui/app.hpp>
 #include <ws/ui/render_command_queue.hpp>
 
 #include <ws/core/log.hpp>
+#include <ws/core/result.hpp>
 
 #include "render/renderer2d.h"
 #include "render/shader_provider.h"
@@ -129,26 +138,6 @@ const char* env_probe(const char* name) {
 #endif
 }
 
-// The depth attachment's format: D32 -> D24S8 -> D16, first with
-// DEPTH_STENCIL_ATTACHMENT support in optimal tiling. Queried ONCE at
-// device selection and cached - every render pass the process ever creates
-// is built against this format, so swapchain rebuilds stay render-pass
-// compatible with the ImGui backend's baked pipeline.
-VkFormat choose_depth_format(VkPhysicalDevice physical) {
-    const VkFormat preferred[] = {VK_FORMAT_D32_SFLOAT,
-                                  VK_FORMAT_D24_UNORM_S8_UINT,
-                                  VK_FORMAT_D16_UNORM};
-    for (VkFormat candidate : preferred) {
-        VkFormatProperties properties{};
-        vkGetPhysicalDeviceFormatProperties(physical, candidate, &properties);
-        if (properties.optimalTilingFeatures &
-            VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
-            return candidate;
-        }
-    }
-    return VK_FORMAT_UNDEFINED;
-}
-
 // Every concrete event type. The per-frame queue holds events by value -
 // no heap per event, and no vtable anywhere in the event system.
 using AnyEvent = std::variant<ws::input::WindowCloseEvent, ws::input::WindowResizeEvent, ws::input::KeyPressedEvent,
@@ -157,27 +146,19 @@ using AnyEvent = std::variant<ws::input::WindowCloseEvent, ws::input::WindowResi
                              ws::input::MouseScrolledEvent, ws::input::TouchPressedEvent,
                              ws::input::TouchMovedEvent, ws::input::TouchReleasedEvent, ws::input::TextInputEvent>;
 
-// WS_UI_VALIDATION opt-in: the debug-utils callback funnelling the
-// validation layer's messages into ws::core's log (the layer itself is
-// requested in create_instance). Errors and warnings keep their own level
-// so a synchronization violation is impossible to miss; the layer's own
-// INFO banner reports which checks (sync validation included) are active.
-VKAPI_ATTR VkBool32 VKAPI_CALL validation_log(
-        VkDebugUtilsMessageSeverityFlagBitsEXT severity,
-        VkDebugUtilsMessageTypeFlagsEXT types,
-        const VkDebugUtilsMessengerCallbackDataEXT* data, void* user_data) {
-    (void)types;
-    (void)user_data;
-    const char* message = data->pMessage ? data->pMessage : "<no message>";
-    if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0) {
-        core::error("ui: validation: {}", message);
-    } else if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) !=
-               0) {
-        core::warn("ui: validation: {}", message);
-    } else {
-        core::info("ui: validation: {}", message);
+// The gfx::SurfaceSource adapter: WindowHost speaks Vulkan handles (it
+// includes volk.h internally), gfx speaks opaque void* - this fn-ptr is
+// one of this file's two cast points for that boundary (the other is the
+// Impl accessors below). Wired once at init_gpu(); called by gfx at
+// every attach_surface().
+bool ui_gfx_create_surface(void* instance, void** surface_out, void* user) {
+    auto* host = static_cast<WindowHost*>(user);
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    if (!host->create_surface(static_cast<VkInstance>(instance), &surface)) {
+        return false;
     }
-    return VK_FALSE;
+    *surface_out = surface;
+    return true;
 }
 
 }  // namespace
@@ -204,25 +185,13 @@ struct App::Impl {
     // through it; no GLFW/Android symbol appears in this file.
     std::unique_ptr<WindowHost> host_;
 
-    VkInstance instance = VK_NULL_HANDLE;
-    // The instance version the loader supports (M9): the bindless tier's
-    // shader is SPIR-V 1.3 (nonuniformEXT), so its device needs Vulkan
-    // 1.1+, which needs a 1.1+ instance. create_instance requests exactly
-    // this; the tier probe (create_device) only runs when it reached 1.1,
-    // and a 1.0-only loader means the chunked fallback tier - never a
-    // failure.
-    uint32_t instance_api_version = VK_API_VERSION_1_0;
-    // WS_UI_VALIDATION opt-in (create_instance): the validation layer's
-    // message funnel into ws::core via validation_log. Destroyed before the
-    // instance itself.
-    VkDebugUtilsMessengerEXT validation_messenger = VK_NULL_HANDLE;
-    VkPhysicalDevice physical_device = VK_NULL_HANDLE;
-    VkDevice device = VK_NULL_HANDLE;
-    VkQueue queue = VK_NULL_HANDLE;
-    uint32_t queue_family = 0;
-    VkSurfaceKHR surface = VK_NULL_HANDLE;
-
-    VmaAllocator allocator = VK_NULL_HANDLE;  // ready for future GPU-side data work
+    // The Vulkan device layer (stage 3b): loader, instance, surface,
+    // physical device, device, queue, VMA allocator - everything up to and
+    // including the allocator, behind gfx::Gpu's staged lifecycle
+    // (init once / attach+detach per window / shutdown guarded). Handles
+    // cross the gfx boundary as opaque void*; the accessors below are
+    // this file's one unwrap point.
+    gfx::Gpu gpu_;
     VkDescriptorPool imgui_pool = VK_NULL_HANDLE;
 
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
@@ -235,12 +204,11 @@ struct App::Impl {
     std::vector<VkImageView> views;
     // The depth attachment, one per swapchain (extent == color): VMA owns
     // the image (the color images are swapchain-owned), the view is ours.
-    // The format is chosen ONCE at device selection, so every render pass
-    // ever built uses the same depth format.
+    // The format is chosen ONCE at gfx's device selection (depth_format()
+    // below), so every render pass ever built uses the same depth format.
     VkImage depth_image = VK_NULL_HANDLE;
     VmaAllocation depth_allocation = VK_NULL_HANDLE;
     VkImageView depth_view = VK_NULL_HANDLE;
-    VkFormat depth_format = VK_FORMAT_UNDEFINED;
     std::vector<VkFramebuffer> framebuffers;
     std::array<FrameSlot, r2d::kMaxFramesInFlight> frame_slots{};
     // Render-finished semaphores are per IMAGE, not per slot: the present of
@@ -257,15 +225,18 @@ struct App::Impl {
     bool swapchain_suboptimal = false;
 
     // Stage bookkeeping for the split startup (see the file comment): the
-    // context stage (host + instance) runs once; the device stage (device,
-    // allocator, ImGui pool) and the window stage (surface + swapchain +
-    // backends) attach to the current window - and re-attach on Android
-    // whenever the OS hands one back. The r2d renderer, the ImGui/ImPlot
-    // contexts and the gui input publication (gpu_context_up) are created
-    // at the FIRST attach and survive a surface loss: only the backends
-    // and the swapchain ride the window, so a re-attach re-initializes
-    // those alone (the drift rules), never the full GPU init again.
-    bool device_stage_up = false;
+    // context stage (host + gfx instance) runs once; the device stage
+    // (device, queue, allocator - tracked inside gfx::Gpu) and the window
+    // stage (surface + swapchain + backends) attach to the current window
+    // - and re-attach on Android whenever the OS hands one back. The
+    // ImGui pool (imgui_pool above) rides the device stage with them: it
+    // is created at the first attach and outlives every surface loss,
+    // which is exactly what imgui_pool == VK_NULL_HANDLE tracks here.
+    // The r2d renderer, the ImGui/ImPlot contexts and the gui input
+    // publication (gpu_context_up) are created at the FIRST attach and
+    // survive a surface loss: only the backends and the swapchain ride
+    // the window, so a re-attach re-initializes those alone (the drift
+    // rules), never the full GPU init again.
     bool window_stage_up = false;
     bool gpu_context_up = false;  // renderer + ImGui contexts + gui publication
     bool imgui_platform_up = false;  // GLFW / Android platform backend
@@ -307,7 +278,7 @@ struct App::Impl {
     // frame_begin/frame_end around it and flushes the sorted batch inside
     // the render pass, before ImGui's draw data (2D world under widgets).
     r2d::Renderer2D renderer2d_;
-    // The texture tier the device probe picked (M9): bindless (one global
+    // The texture tier gfx's device probe picked (M9): bindless (one global
     // descriptor-indexed table, nonuniformEXT in the shader) when the
     // device has descriptor indexing with the needed limits, the chunked
     // 32-slot-table fallback otherwise. Fixed once at the device stage;
@@ -324,6 +295,22 @@ struct App::Impl {
     ws::input::InputFrame gui_input_;
 
     ~Impl() { shutdown(); }
+
+    // Raw-handle views over gpu_ - the shell's swapchain/frame/backend
+    // code speaks volk types, so each use site casts once, here, instead
+    // of sprinkling reinterpret_casts (the gfx public API is opaque void*
+    // on purpose: no Vulkan vocabulary may cross a lib boundary). Every
+    // one is null until its stage is up - gfx's null-state contract.
+    VkInstance instance() const { return static_cast<VkInstance>(gpu_.instance()); }
+    VkPhysicalDevice physical_device() const {
+        return static_cast<VkPhysicalDevice>(gpu_.physical_device());
+    }
+    VkDevice device() const { return static_cast<VkDevice>(gpu_.device()); }
+    VkQueue queue() const { return static_cast<VkQueue>(gpu_.queue()); }
+    VkSurfaceKHR surface() const { return static_cast<VkSurfaceKHR>(gpu_.surface()); }
+    VmaAllocator allocator() const { return static_cast<VmaAllocator>(gpu_.allocator()); }
+    uint32_t queue_family() const { return gpu_.queue_family(); }
+    VkFormat depth_format() const { return static_cast<VkFormat>(gpu_.depth_format()); }
 
     // --- event system --------------------------------------------------------
 
@@ -490,453 +477,37 @@ struct App::Impl {
         event_queue_.clear();
     }
 
-    bool create_instance() {
-        const VkResult err = volkInitialize();
-        if (err != VK_SUCCESS) {
-            core::error("ui: Vulkan loader not found (volkInitialize = VkResult {})",
-                        static_cast<int>(err));
-            return false;
-        }
+    // The context stage's gfx half: init() builds the instance from the
+    // host's WSI extension list - SurfaceSource adapts WindowHost to the
+    // gfx seam (the extension pointers now, the surface callback at every
+    // attach). The options carry the shell's requests:
+    // - enable_validation: the WS_UI_VALIDATION opt-in (M6's sync-model
+    //   test vehicle), read once right here - deliberately not gfx's
+    //   business. Validation costs frames and needs the SDK; a machine
+    //   without the layer warns once (inside gfx) and runs without it.
+    // - want_bindless + the batch's own table size: the renderer's M9
+    //   texture tier, probed once at the first attach.
+    // The device stage itself (physical device, device, queue,
+    // allocator) comes up at the first attach_surface().
+    bool init_gpu() {
+        const std::vector<const char*> extensions = host_->instance_extensions();
+        gfx::SurfaceSource source{};
+        source.instance_extensions = extensions.data();
+        source.instance_extension_count = static_cast<uint32_t>(extensions.size());
+        source.create_surface = &ui_gfx_create_surface;
+        source.user = host_.get();
 
-        // WSI extensions per platform: whatever the host needs to build its
-        // surface (GLFW's required set on desktop, surface + android_surface
-        // on Android). Copied into a mutable vector: the opt-in validation
-        // path below may append one more.
-        std::vector<const char*> extensions = host_->instance_extensions();
-        std::vector<const char*> layers;
-
-        // Opt-in validation (M6's sync-model test vehicle): WS_UI_VALIDATION
-        // loads VK_LAYER_KHRONOS_VALIDATION plus a debug-utils messenger that
-        // logs through ws::core. Off by default - validation costs frames and
-        // an SDK must be installed (the registry probe found none on this
-        // machine's default path). Synchronization validation is enabled by
-        // default in every SDK layer >= 1.3.239, and the layer's own startup
-        // banner (an INFO message) reports whether it is active - so the log
-        // itself shows what ran. A machine without the layer warns once and
-        // runs without it; the shell never requires it.
+        gfx::DeviceOptions options{};
+        options.application_name = config.title.c_str();
         const char* validation_env = env_probe("WS_UI_VALIDATION");
-        const bool want_validation =
+        options.enable_validation =
             validation_env != nullptr && std::string_view(validation_env) != "0";
-        bool validation_on = false;
-        if (want_validation) {
-            uint32_t layer_count = 0;
-            vkEnumerateInstanceLayerProperties(&layer_count, nullptr);
-            std::vector<VkLayerProperties> available_layers(layer_count);
-            vkEnumerateInstanceLayerProperties(&layer_count, available_layers.data());
-            bool has_khronos = false;
-            for (const VkLayerProperties& layer : available_layers) {
-                if (std::string_view(layer.layerName) ==
-                    "VK_LAYER_KHRONOS_VALIDATION") {
-                    has_khronos = true;
-                    break;
-                }
-            }
-            uint32_t extension_count = 0;
-            vkEnumerateInstanceExtensionProperties(nullptr, &extension_count,
-                                                   nullptr);
-            std::vector<VkExtensionProperties> available_extensions(extension_count);
-            vkEnumerateInstanceExtensionProperties(nullptr, &extension_count,
-                                                   available_extensions.data());
-            bool has_debug_utils = false;
-            for (const VkExtensionProperties& extension : available_extensions) {
-                if (std::string_view(extension.extensionName) ==
-                    VK_EXT_DEBUG_UTILS_EXTENSION_NAME) {
-                    has_debug_utils = true;
-                    break;
-                }
-            }
-            if (has_khronos && has_debug_utils) {
-                layers.push_back("VK_LAYER_KHRONOS_VALIDATION");
-                extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-                validation_on = true;
-            } else {
-                core::warn("ui: WS_UI_VALIDATION is set but the Khronos "
-                           "validation layer or debug utils is not installed "
-                           "(needs the Vulkan SDK) - running without validation");
-            }
-        }
+        options.want_bindless = true;
+        options.bindless_descriptor_limit = r2d::batch::kMaxBindlessTextures;
 
-        // Instance version probe (M9): ask the LOADER (not any device) for
-        // the newest Vulkan version it can instantiate, and request exactly
-        // that. The shell's own needs are WSI basics (1.0 everywhere), but
-        // the bindless texture tier's device probe runs over 1.1+ core
-        // entry points (vkGetPhysicalDeviceFeatures2) and its shader is
-        // SPIR-V 1.3 - a 1.0-only loader keeps the lowest version, which
-        // pins the renderer to the chunked fallback tier. Requesting the
-        // loader's own version never fails on an older driver: the
-        // apiVersion is a maximum, not a requirement.
-        instance_api_version = VK_API_VERSION_1_0;
-        const auto enumerate_instance_version =
-            reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
-                vkGetInstanceProcAddr(nullptr, "vkEnumerateInstanceVersion"));
-        if (enumerate_instance_version != nullptr) {
-            if (enumerate_instance_version(&instance_api_version) ==
-                VK_SUCCESS) {
-                // Unusable loader (should not happen, but a zeroed or bogus
-                // version must not reach VkApplicationInfo).
-                if (instance_api_version == 0) {
-                    instance_api_version = VK_API_VERSION_1_0;
-                }
-            }
-        }
-
-        VkApplicationInfo app_info{};
-        app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-        app_info.pApplicationName = config.title.c_str();
-        app_info.apiVersion = instance_api_version;
-
-        VkInstanceCreateInfo create_info{};
-        create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-        create_info.pApplicationInfo = &app_info;
-        create_info.enabledLayerCount = static_cast<uint32_t>(layers.size());
-        create_info.ppEnabledLayerNames = layers.data();
-        create_info.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
-        create_info.ppEnabledExtensionNames = extensions.data();
-        if (vkCreateInstance(&create_info, nullptr, &instance) != VK_SUCCESS) {
-            core::error("ui: vkCreateInstance failed");
-            return false;
-        }
-        volkLoadInstance(instance);
-
-        if (validation_on) {
-            // Messenger, not just the layer: without it the layer's findings
-            // go to the OS debug output, not our log. INFO severity included
-            // so the layer's startup banner (its active checks, sync
-            // validation among them) lands in the log too.
-            VkDebugUtilsMessengerCreateInfoEXT messenger_info{};
-            messenger_info.sType =
-                VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-            messenger_info.messageSeverity =
-                VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT |
-                VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-                VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-            messenger_info.messageType =
-                VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-                VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-                VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
-            messenger_info.pfnUserCallback = &validation_log;
-            if (vkCreateDebugUtilsMessengerEXT(instance, &messenger_info, nullptr,
-                                               &validation_messenger) ==
-                VK_SUCCESS) {
-                core::info("ui: validation layers enabled (WS_UI_VALIDATION)");
-            } else {
-                validation_messenger = VK_NULL_HANDLE;
-                core::warn("ui: vkCreateDebugUtilsMessengerEXT failed - the "
-                           "layer is on but its messages go to the OS debug "
-                           "output, not this log");
-            }
-        }
-        return true;
-    }
-
-    bool create_surface() {
-        if (!host_->create_surface(instance, &surface)) {
-            core::error("ui: failed to create the window surface");
-            return false;
-        }
-        return true;
-    }
-
-    static bool device_has_swapchain(VkPhysicalDevice candidate) {
-        uint32_t count = 0;
-        vkEnumerateDeviceExtensionProperties(candidate, nullptr, &count, nullptr);
-        std::vector<VkExtensionProperties> available(count);
-        vkEnumerateDeviceExtensionProperties(candidate, nullptr, &count, available.data());
-        for (const VkExtensionProperties& extension : available) {
-            if (std::string_view(extension.extensionName) ==
-                VK_KHR_SWAPCHAIN_EXTENSION_NAME) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    bool select_device() {
-        uint32_t device_count = 0;
-        if (vkEnumeratePhysicalDevices(instance, &device_count, nullptr) != VK_SUCCESS ||
-            device_count == 0) {
-            core::error("ui: no Vulkan-capable devices found");
-            return false;
-        }
-        std::vector<VkPhysicalDevice> devices(device_count);
-        vkEnumeratePhysicalDevices(instance, &device_count, devices.data());
-
-        // A device qualifies when it has a queue family that can both draw and
-        // present on our surface, plus the swapchain extension. One family
-        // doing both is true for essentially every setup.
-        struct Candidate {
-            VkPhysicalDevice device;
-            uint32_t family;
-        };
-        std::vector<Candidate> candidates;
-        for (VkPhysicalDevice physical : devices) {
-            uint32_t family_count = 0;
-            vkGetPhysicalDeviceQueueFamilyProperties(physical, &family_count, nullptr);
-            std::vector<VkQueueFamilyProperties> families(family_count);
-            vkGetPhysicalDeviceQueueFamilyProperties(physical, &family_count,
-                                                     families.data());
-            for (uint32_t i = 0; i < family_count; ++i) {
-                if ((families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0) {
-                    continue;
-                }
-                VkBool32 can_present = VK_FALSE;
-                vkGetPhysicalDeviceSurfaceSupportKHR(physical, i, surface, &can_present);
-                if (can_present != VK_TRUE || !device_has_swapchain(physical)) {
-                    continue;
-                }
-                // batch.frag's non-constant sampler-array index needs this;
-                // skip a device that lacks it rather than fail later in
-                // create_device() when another candidate might have it.
-                VkPhysicalDeviceFeatures features{};
-                vkGetPhysicalDeviceFeatures(physical, &features);
-                if (!features.shaderSampledImageArrayDynamicIndexing) {
-                    continue;
-                }
-                candidates.push_back({physical, i});
-                break;
-            }
-        }
-        if (candidates.empty()) {
-            core::error(
-                "ui: no device can present to the window surface and "
-                "supports shaderSampledImageArrayDynamicIndexing");
-            return false;
-        }
-
-        // Prefer a discrete GPU, fall back to the first qualifier.
-        const Candidate* chosen = &candidates[0];
-        VkPhysicalDeviceProperties properties{};
-        vkGetPhysicalDeviceProperties(chosen->device, &properties);
-        for (const Candidate& candidate : candidates) {
-            VkPhysicalDeviceProperties candidate_properties{};
-            vkGetPhysicalDeviceProperties(candidate.device, &candidate_properties);
-            if (candidate_properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
-                chosen = &candidate;
-                properties = candidate_properties;
-                break;
-            }
-        }
-
-        physical_device = chosen->device;
-        queue_family = chosen->family;
-        // Depth format for every swapchain this process will build, chosen
-        // here because select_device runs exactly once and strictly before
-        // the first create_swapchain - that ordering IS the ImGui-backend
-        // compatibility guarantee (no pass ever exists with another
-        // format). A GPU with no depth-attachable format cannot run the
-        // renderer's depth-tested path - fail loudly, same rule as the
-        // dynamic-indexing feature above.
-        depth_format = choose_depth_format(physical_device);
-        if (depth_format == VK_FORMAT_UNDEFINED) {
-            core::error("ui: device supports no depth-attachable format");
-            return false;
-        }
-        core::info("ui: using GPU \"{}\"", properties.deviceName);
-        return true;
-    }
-
-    bool create_device() {
-        const float queue_priority = 1.0f;
-        VkDeviceQueueCreateInfo queue_info{};
-        queue_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-        queue_info.queueFamilyIndex = queue_family;
-        queue_info.queueCount = 1;
-        queue_info.pQueuePriorities = &queue_priority;
-
-        // batch.frag indexes its texture array with a non-constant (runtime)
-        // index - BOTH tiers' variants do - which the spec gates behind this
-        // feature; without it, dynamic sampler-array indexing is undefined
-        // behavior even where a given driver happens to tolerate it.
-        // Required, not optional: fail loudly rather than ship a renderer
-        // that silently depends on driver leniency.
-        VkPhysicalDeviceFeatures available{};
-        vkGetPhysicalDeviceFeatures(physical_device, &available);
-        if (!available.shaderSampledImageArrayDynamicIndexing) {
-            core::error(
-                "ui: GPU lacks shaderSampledImageArrayDynamicIndexing, "
-                "required by the 2D batch shader's texture array");
-            return false;
-        }
-        VkPhysicalDeviceFeatures enabled{};
-        enabled.shaderSampledImageArrayDynamicIndexing = VK_TRUE;
-
-        // M9: the texture-tier probe. The bindless tier needs descriptor
-        // indexing - partially-bound tables, nonuniform indexing in the
-        // shader, and (ideally) update-after-bind table writes. Order
-        // matters for old drivers: the plain 1.0 property query and the
-        // extension list run FIRST, and the 1.1+ pNext-chained probes only
-        // touch devices that already claimed the dialect (core 1.2 or
-        // VK_EXT_descriptor_indexing) - a pre-1.2 device never meets an
-        // unknown pNext struct. Any miss (1.0 loader or device, missing
-        // feature or limit) falls back to the chunked tier: never a
-        // failure, this is the spec's safe-fallback path.
-        texture_tier_ = r2d::TextureTier{};  // chunked is the default
-        std::vector<const char*> extensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
-        VkPhysicalDeviceVulkan12Features enable_12{};
-        VkPhysicalDeviceDescriptorIndexingFeaturesEXT enable_ext{};
-        void* enable_chain = nullptr;  // VkDeviceCreateInfo pNext
-        std::string tier_miss = "the Vulkan loader or device is pre-1.1";
-        if (instance_api_version >= VK_API_VERSION_1_1) {
-            VkPhysicalDeviceProperties props{};
-            vkGetPhysicalDeviceProperties(physical_device, &props);
-            const bool core_12 = props.apiVersion >= VK_API_VERSION_1_2;
-            bool has_di_ext = false;
-            if (!core_12) {
-                // 1.1 device: descriptor indexing only via the extension.
-                uint32_t ext_count = 0;
-                vkEnumerateDeviceExtensionProperties(physical_device, nullptr,
-                                                     &ext_count, nullptr);
-                std::vector<VkExtensionProperties> device_extensions(ext_count);
-                vkEnumerateDeviceExtensionProperties(physical_device, nullptr,
-                                                     &ext_count,
-                                                     device_extensions.data());
-                for (const VkExtensionProperties& ext : device_extensions) {
-                    if (std::string_view(ext.extensionName) ==
-                        VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME) {
-                        has_di_ext = true;
-                        break;
-                    }
-                }
-            }
-            tier_miss = "descriptor indexing is not advertised";
-            if (core_12 || has_di_ext) {
-                // Features: the dialect's struct - same field names either
-                // way; the 1.2 one adds the descriptorIndexing aggregate
-                // switch and unrelated 1.2 features. The update-after-bind
-                // limits ride the properties pNext chain.
-                VkPhysicalDeviceDescriptorIndexingPropertiesEXT di_props{};
-                di_props.sType =
-                    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES_EXT;
-                VkPhysicalDeviceProperties2 props2{};
-                props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-                props2.pNext = &di_props;
-                vkGetPhysicalDeviceProperties2(physical_device, &props2);
-
-                bool has_nonuniform = false;
-                bool has_partial = false;
-                bool has_uab = false;
-                if (core_12) {
-                    VkPhysicalDeviceVulkan12Features probe12{};
-                    probe12.sType =
-                        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-                    VkPhysicalDeviceFeatures2 features2{};
-                    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-                    features2.pNext = &probe12;
-                    vkGetPhysicalDeviceFeatures2(physical_device, &features2);
-                    has_nonuniform =
-                        probe12.shaderSampledImageArrayNonUniformIndexing ==
-                        VK_TRUE;
-                    has_partial =
-                        probe12.descriptorBindingPartiallyBound == VK_TRUE;
-                    has_uab =
-                        probe12.descriptorBindingSampledImageUpdateAfterBind ==
-                        VK_TRUE;
-                } else {
-                    VkPhysicalDeviceDescriptorIndexingFeaturesEXT probe_ext{};
-                    probe_ext.sType =
-                        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT;
-                    VkPhysicalDeviceFeatures2 features2{};
-                    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-                    features2.pNext = &probe_ext;
-                    vkGetPhysicalDeviceFeatures2(physical_device, &features2);
-                    has_nonuniform =
-                        probe_ext.shaderSampledImageArrayNonUniformIndexing ==
-                        VK_TRUE;
-                    has_partial =
-                        probe_ext.descriptorBindingPartiallyBound == VK_TRUE;
-                    has_uab =
-                        probe_ext.descriptorBindingSampledImageUpdateAfterBind ==
-                        VK_TRUE;
-                }
-
-                // The table is one 1024-slot sampled-image binding in the
-                // fragment stage: the update-after-bind limits must cover
-                // it when UAB is wanted, the core limits otherwise.
-                const uint32_t table = r2d::batch::kMaxBindlessTextures;
-                const bool limits_ok =
-                    table <= props.limits.maxPerStageDescriptorSampledImages &&
-                    table <= props.limits.maxDescriptorSetSampledImages &&
-                    (!has_uab ||
-                     (table <=
-                          di_props.maxPerStageDescriptorUpdateAfterBindSampledImages &&
-                      table <=
-                          di_props.maxDescriptorSetUpdateAfterBindSampledImages));
-                tier_miss = "a needed feature or limit is missing";
-                if (has_nonuniform && has_partial && limits_ok) {
-                    texture_tier_.bindless = true;
-                    texture_tier_.update_after_bind = has_uab;
-                    if (core_12) {
-                        enable_12.sType =
-                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-                        // descriptorIndexing is the aggregate switch: it
-                        // must be on for any of the specific features to
-                        // work on a 1.2 device.
-                        enable_12.descriptorIndexing = VK_TRUE;
-                        enable_12.shaderSampledImageArrayNonUniformIndexing =
-                            VK_TRUE;
-                        enable_12.descriptorBindingPartiallyBound = VK_TRUE;
-                        enable_12.descriptorBindingSampledImageUpdateAfterBind =
-                            has_uab ? VK_TRUE : VK_FALSE;
-                        enable_chain = &enable_12;
-                    } else {
-                        extensions.push_back(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
-                        enable_ext.sType =
-                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT;
-                        enable_ext.shaderSampledImageArrayNonUniformIndexing =
-                            VK_TRUE;
-                        enable_ext.descriptorBindingPartiallyBound = VK_TRUE;
-                        enable_ext.descriptorBindingSampledImageUpdateAfterBind =
-                            has_uab ? VK_TRUE : VK_FALSE;
-                        enable_chain = &enable_ext;
-                    }
-                }
-            }
-        }
-        if (texture_tier_.bindless) {
-            core::info("ui: r2d texture tier: bindless global table ({})",
-                       texture_tier_.update_after_bind
-                           ? "update-after-bind writes"
-                           : "idle-flush writes");
-        } else {
-            core::info("ui: r2d texture tier: chunked tables ({})", tier_miss);
-        }
-
-        VkDeviceCreateInfo create_info{};
-        create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-        create_info.pNext = enable_chain;
-        create_info.queueCreateInfoCount = 1;
-        create_info.pQueueCreateInfos = &queue_info;
-        create_info.enabledExtensionCount =
-            static_cast<uint32_t>(extensions.size());
-        create_info.ppEnabledExtensionNames = extensions.data();
-        create_info.pEnabledFeatures = &enabled;
-        if (vkCreateDevice(physical_device, &create_info, nullptr, &device) != VK_SUCCESS) {
-            core::error("ui: vkCreateDevice failed");
-            return false;
-        }
-        volkLoadDevice(device);
-        vkGetDeviceQueue(device, queue_family, 0, &queue);
-        return true;
-    }
-
-    bool create_allocator() {
-        // VMA fetches every other function at runtime through these two
-        // (VMA_DYNAMIC_VULKAN_FUNCTIONS, see src/gfx/vma_impl.cpp) - since 3.2 they
-        // must be handed over explicitly; VMA no longer picks up the globals
-        // by itself. Create the allocator only after volkLoadInstance and
-        // volkLoadDevice have filled the pointers.
-        VmaVulkanFunctions functions{};
-        functions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;  // volk globals
-        functions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
-
-        VmaAllocatorCreateInfo create_info{};
-        create_info.physicalDevice = physical_device;
-        create_info.device = device;
-        create_info.instance = instance;
-        create_info.vulkanApiVersion = VK_API_VERSION_1_0;
-        create_info.pVulkanFunctions = &functions;
-        if (vmaCreateAllocator(&create_info, &allocator) != VK_SUCCESS) {
-            core::error("ui: failed to create the memory allocator");
+        const core::Status started = gpu_.init(source, options);
+        if (!started) {
+            core::log_error(started.error());
             return false;
         }
         return true;
@@ -954,7 +525,7 @@ struct App::Impl {
         create_info.maxSets = kDescriptorSetCount;
         create_info.poolSizeCount = 1;
         create_info.pPoolSizes = &pool_size;
-        if (vkCreateDescriptorPool(device, &create_info, nullptr, &imgui_pool) !=
+        if (vkCreateDescriptorPool(device(), &create_info, nullptr, &imgui_pool) !=
             VK_SUCCESS) {
             core::error("ui: failed to create the ImGui descriptor pool");
             return false;
@@ -966,9 +537,9 @@ struct App::Impl {
 
     VkSurfaceFormatKHR choose_surface_format() const {
         uint32_t count = 0;
-        vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &count, nullptr);
+        vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device(), surface(), &count, nullptr);
         std::vector<VkSurfaceFormatKHR> formats(count);
-        vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &count,
+        vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device(), surface(), &count,
                                              formats.data());
         if (formats.empty()) {
             return {VK_FORMAT_B8G8R8A8_UNORM, VK_COLORSPACE_SRGB_NONLINEAR_KHR};
@@ -990,10 +561,10 @@ struct App::Impl {
 
     VkPresentModeKHR choose_present_mode() const {
         uint32_t count = 0;
-        vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &count,
+        vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device(), surface(), &count,
                                                   nullptr);
         std::vector<VkPresentModeKHR> modes(count);
-        vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &count,
+        vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device(), surface(), &count,
                                                  modes.data());
         const auto has = [modes](VkPresentModeKHR mode) {
             return std::find(modes.begin(), modes.end(), mode) != modes.end();
@@ -1029,7 +600,7 @@ struct App::Impl {
     // render pass, framebuffers and per-frame command/fence/semaphore objects.
     bool create_swapchain(int fb_width, int fb_height) {
         VkSurfaceCapabilitiesKHR caps{};
-        if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &caps) !=
+        if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device(), surface(), &caps) !=
             VK_SUCCESS) {
             core::error("ui: failed to query surface capabilities");
             return false;
@@ -1062,7 +633,7 @@ struct App::Impl {
 
         VkSwapchainCreateInfoKHR create_info{};
         create_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-        create_info.surface = surface;
+        create_info.surface = surface();
         create_info.minImageCount = image_request;
         create_info.imageFormat = surface_format.format;
         create_info.imageColorSpace = surface_format.colorSpace;
@@ -1081,21 +652,21 @@ struct App::Impl {
         create_info.compositeAlpha = choose_composite_alpha(caps);
         create_info.presentMode = present_mode;
         create_info.clipped = VK_TRUE;
-        if (vkCreateSwapchainKHR(device, &create_info, nullptr, &swapchain) !=
+        if (vkCreateSwapchainKHR(device(), &create_info, nullptr, &swapchain) !=
             VK_SUCCESS) {
             core::error("ui: vkCreateSwapchainKHR failed");
             return false;
         }
 
         uint32_t actual_count = 0;
-        if (vkGetSwapchainImagesKHR(device, swapchain, &actual_count, nullptr) !=
+        if (vkGetSwapchainImagesKHR(device(), swapchain, &actual_count, nullptr) !=
             VK_SUCCESS) {
             core::error("ui: vkGetSwapchainImagesKHR failed");
             return false;
         }
         image_count = actual_count;
         images.resize(image_count);
-        if (vkGetSwapchainImagesKHR(device, swapchain, &actual_count, images.data()) !=
+        if (vkGetSwapchainImagesKHR(device(), swapchain, &actual_count, images.data()) !=
             VK_SUCCESS) {
             core::error("ui: vkGetSwapchainImagesKHR failed");
             return false;
@@ -1111,7 +682,7 @@ struct App::Impl {
             view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             view_info.subresourceRange.levelCount = 1;
             view_info.subresourceRange.layerCount = 1;
-            if (vkCreateImageView(device, &view_info, nullptr, &views[i]) != VK_SUCCESS) {
+            if (vkCreateImageView(device(), &view_info, nullptr, &views[i]) != VK_SUCCESS) {
                 core::error("ui: vkCreateImageView failed");
                 return false;
             }
@@ -1125,7 +696,7 @@ struct App::Impl {
         VkImageCreateInfo depth_info{};
         depth_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         depth_info.imageType = VK_IMAGE_TYPE_2D;
-        depth_info.format = depth_format;
+        depth_info.format = depth_format();
         depth_info.extent.width = extent.width;
         depth_info.extent.height = extent.height;
         depth_info.extent.depth = 1;
@@ -1136,7 +707,7 @@ struct App::Impl {
         depth_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
         VmaAllocationCreateInfo depth_alloc{};
         depth_alloc.usage = VMA_MEMORY_USAGE_AUTO;
-        if (vmaCreateImage(allocator, &depth_info, &depth_alloc, &depth_image,
+        if (vmaCreateImage(allocator(), &depth_info, &depth_alloc, &depth_image,
                            &depth_allocation, nullptr) != VK_SUCCESS) {
             core::error("ui: vmaCreateImage (depth) failed");
             return false;
@@ -1145,11 +716,11 @@ struct App::Impl {
         depth_view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         depth_view_info.image = depth_image;
         depth_view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        depth_view_info.format = depth_format;
+        depth_view_info.format = depth_format();
         depth_view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
         depth_view_info.subresourceRange.levelCount = 1;
         depth_view_info.subresourceRange.layerCount = 1;
-        if (vkCreateImageView(device, &depth_view_info, nullptr, &depth_view) !=
+        if (vkCreateImageView(device(), &depth_view_info, nullptr, &depth_view) !=
             VK_SUCCESS) {
             core::error("ui: vkCreateImageView (depth) failed");
             return false;
@@ -1169,7 +740,7 @@ struct App::Impl {
         // subpass's own test/write touches it) - DONT_CARE keeps the store
         // free, and the pass's UNDEFINED transition puts it into layout.
         VkAttachmentDescription depth{};
-        depth.format = depth_format;
+        depth.format = depth_format();
         depth.samples = VK_SAMPLE_COUNT_1_BIT;
         depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -1235,7 +806,7 @@ struct App::Impl {
         render_pass_info.pSubpasses = &subpass;
         render_pass_info.dependencyCount = 2;
         render_pass_info.pDependencies = dependencies;
-        if (vkCreateRenderPass(device, &render_pass_info, nullptr, &render_pass) !=
+        if (vkCreateRenderPass(device(), &render_pass_info, nullptr, &render_pass) !=
             VK_SUCCESS) {
             core::error("ui: vkCreateRenderPass failed");
             return false;
@@ -1254,7 +825,7 @@ struct App::Impl {
             framebuffer_info.width = extent.width;
             framebuffer_info.height = extent.height;
             framebuffer_info.layers = 1;
-            if (vkCreateFramebuffer(device, &framebuffer_info, nullptr,
+            if (vkCreateFramebuffer(device(), &framebuffer_info, nullptr,
                                     &framebuffers[i]) != VK_SUCCESS) {
                 core::error("ui: vkCreateFramebuffer failed");
                 return false;
@@ -1269,8 +840,8 @@ struct App::Impl {
         for (FrameSlot& slot : frame_slots) {
             VkCommandPoolCreateInfo pool_info{};
             pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-            pool_info.queueFamilyIndex = queue_family;
-            if (vkCreateCommandPool(device, &pool_info, nullptr, &slot.pool) !=
+            pool_info.queueFamilyIndex = queue_family();
+            if (vkCreateCommandPool(device(), &pool_info, nullptr, &slot.pool) !=
                 VK_SUCCESS) {
                 core::error("ui: vkCreateCommandPool failed");
                 return false;
@@ -1280,7 +851,7 @@ struct App::Impl {
             buffer_info.commandPool = slot.pool;
             buffer_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
             buffer_info.commandBufferCount = 1;
-            if (vkAllocateCommandBuffers(device, &buffer_info, &slot.buffer) !=
+            if (vkAllocateCommandBuffers(device(), &buffer_info, &slot.buffer) !=
                 VK_SUCCESS) {
                 core::error("ui: vkAllocateCommandBuffers failed");
                 return false;
@@ -1288,14 +859,14 @@ struct App::Impl {
             VkFenceCreateInfo fence_info{};
             fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
             fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-            if (vkCreateFence(device, &fence_info, nullptr, &slot.fence) !=
+            if (vkCreateFence(device(), &fence_info, nullptr, &slot.fence) !=
                 VK_SUCCESS) {
                 core::error("ui: vkCreateFence failed");
                 return false;
             }
             VkSemaphoreCreateInfo semaphore_info{};
             semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-            if (vkCreateSemaphore(device, &semaphore_info, nullptr,
+            if (vkCreateSemaphore(device(), &semaphore_info, nullptr,
                                   &slot.acquired) != VK_SUCCESS) {
                 core::error("ui: vkCreateSemaphore failed");
                 return false;
@@ -1308,7 +879,7 @@ struct App::Impl {
         for (VkSemaphore& semaphore : image_rendered) {
             VkSemaphoreCreateInfo semaphore_info{};
             semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-            if (vkCreateSemaphore(device, &semaphore_info, nullptr, &semaphore) !=
+            if (vkCreateSemaphore(device(), &semaphore_info, nullptr, &semaphore) !=
                 VK_SUCCESS) {
                 core::error("ui: vkCreateSemaphore failed");
                 return false;
@@ -1319,43 +890,44 @@ struct App::Impl {
 
     // Destroys everything create_swapchain() made. Safe on partial state
     // and idempotent - but only the STATE RESETS below the guard are
-    // unconditional: every vk*/vma* call sits under `device`, because with
-    // VK_NO_PROTOTYPES those are volk/VMA function pointers that stay NULL
-    // until a device exists (run() never having been reached must be able
-    // to tear down a default-constructed Impl - ~Impl calls shutdown()).
+    // unconditional: every vk*/vma* call sits under `device()`, because
+    // with VK_NO_PROTOTYPES those are volk/VMA function pointers that stay
+    // NULL until a device exists (run() never having been reached must be
+    // able to tear down a default-constructed Impl - ~Impl calls
+    // shutdown()).
     // The null-handle-no-op contract never gets a chance to apply without
     // the entry points, and frame_slots is a FIXED array - its destroy
     // loop cannot lean on emptiness the way the vectors can.
     void destroy_swapchain_objects() {
-        if (device != VK_NULL_HANDLE) {
-            vkDeviceWaitIdle(device);
+        if (device() != VK_NULL_HANDLE) {
+            vkDeviceWaitIdle(device());
             if (render_pass != VK_NULL_HANDLE) {
-                vkDestroyRenderPass(device, render_pass, nullptr);
+                vkDestroyRenderPass(device(), render_pass, nullptr);
             }
             for (VkFramebuffer framebuffer : framebuffers) {
-                vkDestroyFramebuffer(device, framebuffer, nullptr);
+                vkDestroyFramebuffer(device(), framebuffer, nullptr);
             }
             for (const FrameSlot& slot : frame_slots) {
-                vkDestroySemaphore(device, slot.acquired, nullptr);
-                vkDestroyFence(device, slot.fence, nullptr);
-                vkDestroyCommandPool(device, slot.pool, nullptr);
+                vkDestroySemaphore(device(), slot.acquired, nullptr);
+                vkDestroyFence(device(), slot.fence, nullptr);
+                vkDestroyCommandPool(device(), slot.pool, nullptr);
             }
             for (VkSemaphore semaphore : image_rendered) {
-                vkDestroySemaphore(device, semaphore, nullptr);
+                vkDestroySemaphore(device(), semaphore, nullptr);
             }
             for (VkImageView view : views) {
-                vkDestroyImageView(device, view, nullptr);
+                vkDestroyImageView(device(), view, nullptr);
             }
             if (depth_view != VK_NULL_HANDLE) {
-                vkDestroyImageView(device, depth_view, nullptr);
+                vkDestroyImageView(device(), depth_view, nullptr);
             }
             if (depth_image != VK_NULL_HANDLE) {
                 // The allocator is a device-stage object - it outlives
                 // every window-stage teardown, including this one.
-                vmaDestroyImage(allocator, depth_image, depth_allocation);
+                vmaDestroyImage(allocator(), depth_image, depth_allocation);
             }
             if (swapchain != VK_NULL_HANDLE) {
-                vkDestroySwapchainKHR(device, swapchain, nullptr);
+                vkDestroySwapchainKHR(device(), swapchain, nullptr);
             }
         }
 
@@ -1422,11 +994,11 @@ struct App::Impl {
 
     bool init_imgui_backend() {
         ImGui_ImplVulkan_InitInfo info{};
-        info.Instance = instance;
-        info.PhysicalDevice = physical_device;
-        info.Device = device;
-        info.QueueFamily = queue_family;
-        info.Queue = queue;
+        info.Instance = instance();
+        info.PhysicalDevice = physical_device();
+        info.Device = device();
+        info.QueueFamily = queue_family();
+        info.Queue = queue();
         info.DescriptorPool = imgui_pool;
         info.RenderPass = render_pass;
         info.MinImageCount = kMinImageCount;  // never changes: the backend cannot
@@ -1479,13 +1051,13 @@ struct App::Impl {
         // retired. kMaxFramesInFlight slots is what bounds frames in flight
         // - the swapchain image count has no say in it.
         FrameSlot& slot = frame_slots[frame_index];
-        vk_check(vkWaitForFences(device, 1, &slot.fence, VK_TRUE, UINT64_MAX),
+        vk_check(vkWaitForFences(device(), 1, &slot.fence, VK_TRUE, UINT64_MAX),
                  "vkWaitForFences");
 
         // Acquire only after the slot retired: the semaphore this signals is
         // the one the slot's previous submission waited on, so signaling it
         // again before that wait executed would be a semaphore-in-use error.
-        const VkResult err = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
+        const VkResult err = vkAcquireNextImageKHR(device(), swapchain, UINT64_MAX,
                                                    slot.acquired, VK_NULL_HANDLE,
                                                    &image_index);
         if (err == VK_ERROR_OUT_OF_DATE_KHR) {
@@ -1515,8 +1087,8 @@ struct App::Impl {
         // The slot is committed to this frame from here: reset the fence
         // AFTER the acquire so a bail above never leaves a never-submitted
         // unsignaled fence behind.
-        vk_check(vkResetFences(device, 1, &slot.fence), "vkResetFences");
-        vk_check(vkResetCommandPool(device, slot.pool, 0), "vkResetCommandPool");
+        vk_check(vkResetFences(device(), 1, &slot.fence), "vkResetFences");
+        vk_check(vkResetCommandPool(device(), slot.pool, 0), "vkResetCommandPool");
 
         VkCommandBufferBeginInfo begin_info{};
         begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1585,7 +1157,7 @@ struct App::Impl {
         submit_info.signalSemaphoreCount = 1;
         submit_info.pSignalSemaphores = &image_rendered[image_index];
         vk_check(vkEndCommandBuffer(slot.buffer), "vkEndCommandBuffer");
-        vk_check(vkQueueSubmit(queue, 1, &submit_info, slot.fence), "vkQueueSubmit");
+        vk_check(vkQueueSubmit(queue(), 1, &submit_info, slot.fence), "vkQueueSubmit");
 
         // Next frame takes the other slot - at most this many submissions
         // are outstanding before someone waits a fence again.
@@ -1603,7 +1175,7 @@ struct App::Impl {
         present_info.swapchainCount = 1;
         present_info.pSwapchains = &swapchain;
         present_info.pImageIndices = &image_index;
-        const VkResult err = vkQueuePresentKHR(queue, &present_info);
+        const VkResult err = vkQueuePresentKHR(queue(), &present_info);
         if (err == VK_ERROR_OUT_OF_DATE_KHR || err == VK_SUBOPTIMAL_KHR) {
             rebuild_swapchain = true;
             return;
@@ -1703,7 +1275,7 @@ struct App::Impl {
                 // deletion queues (M12) can move this off the iteration
                 // loop later. Dev-only cost, never in a default build.
                 for (const FrameSlot& slot : frame_slots) {
-                    vk_check(vkWaitForFences(device, 1, &slot.fence, VK_TRUE,
+                    vk_check(vkWaitForFences(device(), 1, &slot.fence, VK_TRUE,
                                              UINT64_MAX),
                              "vkWaitForFences");
                 }
@@ -1784,8 +1356,9 @@ struct App::Impl {
 
     // --- lifecycle ----------------------------------------------------------
 
-    // Context stage: the platform host and the Vulkan instance - everything
-    // that survives an Android surface loss. Runs once per process. The
+    // Context stage: the platform host and the Vulkan instance (inside
+    // gfx::Gpu, since stage 3b) - everything that survives an Android
+    // surface loss. Runs once per process. The
     // sink wiring happens here, before host_->init(): the platform installs
     // its callbacks against that sink inside init().
     bool startup_context() {
@@ -1797,25 +1370,28 @@ struct App::Impl {
         if (!host_->init(event_sink_, config)) {
             return false;
         }
-        return create_instance();
+        return init_gpu();
     }
 
     // Window stage: attaches the render stack to the platform's current
-    // window. Surface first, then (first attach only) the GPU objects and
-    // the renderer/ImGui contexts, then the swapchain. Re-attaches on
-    // Android after a surface loss: the drift rules re-initialize only
-    // what the OS round-trip actually invalidated, so app state (fonts,
-    // textures, ImGui contexts) survives untouched.
+    // window. Surface first (through gfx::Gpu - the FIRST attach also
+    // brings the device stage up inside it), then the ImGui pool and the
+    // renderer/ImGui contexts (first attach only), then the swapchain.
+    // Re-attaches on Android after a surface loss: the drift rules
+    // re-initialize only what the OS round-trip actually invalidated, so
+    // app state (fonts, textures, ImGui contexts) survives untouched.
     bool attach_window(App& app) {
-        if (!create_surface()) {
+        const core::Status attached = gpu_.attach_surface();
+        if (!attached) {
+            core::log_error(attached.error());
             return false;
         }
-        if (!device_stage_up) {
-            if (!select_device() || !create_device() || !create_allocator() ||
-                !create_imgui_pool()) {
-                return false;
-            }
-            device_stage_up = true;
+        // The ImGui pool rides the device stage: created at the first
+        // attach, reused by every re-attach - a null pool IS the "not up
+        // yet" marker (the device/queue/allocator half is gfx's own
+        // tracking).
+        if (imgui_pool == VK_NULL_HANDLE && !create_imgui_pool()) {
+            return false;
         }
         int fb_width = 0;
         int fb_height = 0;
@@ -1828,8 +1404,15 @@ struct App::Impl {
             // there, and the r2d free functions need an active renderer.
             // init() may fail mid-way; shutdown() doubles as the
             // (idempotent) failure-path cleanup.
-            if (!renderer2d_.init(device, physical_device, allocator, queue,
-                                  queue_family, render_pass, format,
+            // The tier gfx's probe picked (parameterized by this very
+            // table size at init_gpu()) maps onto the renderer's own
+            // spelling.
+            const gfx::DescriptorIndexing indexing = gpu_.descriptor_indexing();
+            texture_tier_ = r2d::TextureTier{.bindless = indexing.bindless,
+                                            .update_after_bind =
+                                                indexing.update_after_bind};
+            if (!renderer2d_.init(device(), physical_device(), allocator(), queue(),
+                                  queue_family(), render_pass, format,
                                   texture_tier_)) {
                 return false;
             }
@@ -1882,7 +1465,8 @@ struct App::Impl {
     }
 
     // Tears the window stage down, in the same order final shutdown would:
-    // backends, swapchain objects, surface. Idempotent - it is BOTH the
+    // backends, swapchain objects, surface (the last through gfx::Gpu).
+    // Idempotent - it is BOTH the
     // mid-run teardown for Android surface loss (APP_CMD_TERM_WINDOW) and
     // the first step of shutdown(); every destroy is guarded, so it is the
     // failure-path cleanup for a partially completed attach too.
@@ -1896,10 +1480,7 @@ struct App::Impl {
             imgui_platform_up = false;
         }
         destroy_swapchain_objects();
-        if (surface != VK_NULL_HANDLE) {
-            vkDestroySurfaceKHR(instance, surface, nullptr);
-            surface = VK_NULL_HANDLE;
-        }
+        gpu_.detach_surface();
         window_stage_up = false;
     }
 
@@ -1930,37 +1511,24 @@ struct App::Impl {
         // empty frame, same drop-safe contract.
         ws::input::set_active_input(nullptr);
 
-        if (allocator != VK_NULL_HANDLE) {
-            vmaDestroyAllocator(allocator);
-            allocator = VK_NULL_HANDLE;
-        }
+        // The ImGui pool is a device object: destroy it while the device
+        // still exists, BEFORE gfx tears the device stage down (the old
+        // order destroyed the allocator first - legal, but pool-first is
+        // the cleaner dependency direction).
         if (imgui_pool != VK_NULL_HANDLE) {
-            vkDestroyDescriptorPool(device, imgui_pool, nullptr);
+            vkDestroyDescriptorPool(device(), imgui_pool, nullptr);
             imgui_pool = VK_NULL_HANDLE;
         }
-        if (device != VK_NULL_HANDLE) {
-            vkDestroyDevice(device, nullptr);
-            device = VK_NULL_HANDLE;
-        }
-        if (instance != VK_NULL_HANDLE) {
-            // The messenger rides the instance - destroyed first, while its
-            // vkDestroyDebugUtilsMessengerEXT entry point is still loaded.
-            if (validation_messenger != VK_NULL_HANDLE) {
-                vkDestroyDebugUtilsMessengerEXT(instance, validation_messenger,
-                                                nullptr);
-                validation_messenger = VK_NULL_HANDLE;
-            }
-            vkDestroyInstance(instance, nullptr);
-            instance = VK_NULL_HANDLE;
-            // Must be last: this zeroes every function pointer volk loaded,
-            // so no vk* call may happen after it.
-            volkFinalize();
-        }
+        // The whole Vulkan device layer: surface, allocator, device,
+        // validation messenger, instance, the volk globals - in that
+        // order, every step guarded and idempotent inside
+        // gfx::Gpu::shutdown() (volkFinalize is last there: no vk* call
+        // may happen after it).
+        gpu_.shutdown();
         // The host goes down after the Vulkan objects its surface fed: on
         // desktop this is where the GLFW window and the library die (the
         // host destructor), with the loop already out of the pump.
         host_.reset();
-        device_stage_up = false;
         gpu_context_up = false;
     }
 

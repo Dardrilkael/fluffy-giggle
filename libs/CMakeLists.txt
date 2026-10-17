@@ -5,6 +5,12 @@ add_subdirectory(math)
 # plain ints). ws::ui's platform TUs are the only writers of an InputFrame,
 # so ui links this lib - never the other way around.
 add_subdirectory(input)
+# ws::gfx is the Vulkan device layer promoted out of ui (stage 3b): the
+# loader/instance, the surface-via-callback, device/queue selection, the
+# VMA allocator. volk/vma stay PRIVATE here (handles cross to ui as
+# opaque void*), and ui is the only consumer - never the other way
+# around.
+add_subdirectory(gfx)
 add_subdirectory(ui)
 # ws::audio builds everywhere: the engine pimpl is OpenAL Soft on both
 # platforms, and OpenAL Soft's own device layer goes AAudio-via-Oboe on

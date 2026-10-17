@@ -2,7 +2,7 @@
 # path), not a third-party: PUBLIC like ws::core, which apps already receive
 # transitively the same way. The include stays internal to src/ - the public
 # header keeps plain floats.
-ws_add_library(ui DEPENDS ws::core ws::math ws::input)
+ws_add_library(ui DEPENDS ws::core ws::math ws::input ws::gfx)
 
 # The gui subset as its own archive - the stage-2 acceptance cut. It links
 # ws::core + ws::input (the frame snapshot it reads; itself core-only,
