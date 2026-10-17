@@ -12,8 +12,20 @@ target_link_libraries(ws_physics PRIVATE box2d Jolt)
 # Hidden by default on GCC/Clang; WS_PHYSICS_API (visibility.hpp) is the
 # only exported surface - the ws_net pattern. MSVC needs no flag - its
 # DLLs export nothing without __declspec anyway.
+#
+# RTTI off on non-MSVC, matching Jolt's own build (its CMake defaults
+# CPP_RTTI_ENABLED OFF -> -fno-rtti on clang/gcc). The adapter subclasses
+# Jolt types (jolt3d_3d.cpp's LayerMaskFilter : JPH::GroupFilter), and
+# under the Itanium ABI an RTTI-enabled TU that subclasses a -fno-rtti
+# base references a typeinfo that is never emitted (the key-function TU
+# skips it) - undefined at the final .so link. MSVC's typeinfo emission
+# links fine, so only the NDK leg needs the flag. The lib itself uses no
+# typeid/dynamic_cast. NOTE: a static-lib compile-check cannot catch
+# this - since backend_factory.cpp references every backend, even a
+# 2D-only app pulls jolt3d_3d.cpp.o at link time; only linking an actual
+# image (e.g. libbounce.so) resolves the archive.
 if(NOT MSVC)
-  target_compile_options(ws_physics PRIVATE -fvisibility=hidden)
+  target_compile_options(ws_physics PRIVATE -fvisibility=hidden -fno-rtti)
 endif()
 
 # Dev probe (default OFF): default BOTH dimensions onto their reference

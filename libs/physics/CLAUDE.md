@@ -274,8 +274,14 @@ make the names true.
 `ctest --preset debug -R "physics|check_deps" --output-on-failure`
 (cwd in the repo root; the preset handles the build dir). Windows+MSVC and
 Android NDK (arm64-v8a, android-28) both build ws_physics from day one:
-run the suites on the desktop presets, compile-check via
-`cmake --build --preset android-local --target ws_physics`.
+run the suites on the desktop presets, and on the NDK LINK an app, not
+just the lib - `cmake --build --preset android-local --target ws_physics
+bounce`. A static-lib compile-check resolves nothing, and since
+backend_factory.cpp references every backend, even a 2D-only app pulls
+jolt3d_3d.cpp.o into the final image; that is how the -fno-rtti rule in
+CMakeLists.txt stayed hidden until the first .so link after C6 - an
+RTTI-on subclass of a -fno-rtti Jolt base references a typeinfo the NDK
+build never emits, and only the app link sees it.
 The conformance suite (tests/test_conformance.cpp, C7a) drives
 WorldCore<Dim2D> directly over BOTH backends in one binary - the same
 machinery World2D runs - and encodes the cross-backend CONTRACT
