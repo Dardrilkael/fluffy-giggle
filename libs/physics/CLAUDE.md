@@ -19,12 +19,22 @@ swap touches no public header and no user code.
 - `src/core/backend_factory.cpp` - the ONE place a backend is chosen:
   make_world_backend_2d/3d, called by both worlds' create(). A compile-time
   dev probe (CMake option WS_PHYSICS_DEFAULT_BACKEND_REFERENCE, default
-  OFF) flips the 2D pick from Box2D to the reference backend.
+  OFF) flips BOTH picks to their reference twins (2D Box2D -> reference,
+  3D Jolt -> reference3d).
 - `src/backend/reference2d/` - the reference 2D backend: CONTRACT.md's
   detection, events, ballistics and queries computed from scratch, no
   engine. An HONEST subset, not a toy solver: no contact response (pairs
   pass through), no CCD, no joints, circles/boxes only, never sleeps -
   the raw-seam suite pins its exact numbers.
+- `src/backend/reference3d/` - the reference 3D twin (C7b), the same
+  honest-subset rules grown to the 3D seam: spheres/boxes with all three
+  narrowphase pairs (capsule descs fail backend_error), multi-part
+  bodies, sensors, filters, entering-only queries, COM-frame
+  semi-implicit Euler + the Euler quaternion step on the lib's mass
+  properties. No joints, no solver (pairs pass through), never sleeps.
+  Its per-tick caches and union-AABB broadphase never change results or
+  pair order - the raw-seam suite (test_reference_3d.cpp) pins exact
+  numbers, including the one-tick closed quaternion forms.
 - `src/backend/box2d/` - the real 2D engine (Box2D v3, FetchContent).
 - `src/backend/jolt3d/` - the real 3D engine (Jolt Physics v5.6,
   FetchContent). Contact callbacks fire on worker threads during the
@@ -32,7 +42,15 @@ swap touches no public header and no user code.
   value-sorted after it completes. The backend floors Jolt's VIEW of
   body capacity at 1 (its allocator asserts on a zero-sized reserve in
   debug builds); the lib's slot table keeps the true capacity - even 0 -
-  and stays the sole authority on who may create bodies.
+  and stays the sole authority on who may create bodies. C7b pinned its
+  event/ray conventions to the lib's (the 3D conformance suite forced
+  five adapter fixes): sensor pairs fire began/ended only, with zero
+  geometry and never a hit (Jolt would report a real sensor manifold);
+  solid began carries zero speed ("hit events only", the public header's
+  promise); hit threshold 0 DISABLES hits entirely - the same rule as
+  Box2D's enableHitEvents gate, not "every began"; raycasts opt out of
+  Jolt's treat-convex-as-solid so a ray starting inside a body misses it
+  (entering rays only, CONTRACT.md 9).
 
 ## Contracts (tested, not just documented)
 - Zero heap allocation in steady-state step()/advance(): every per-step
@@ -75,16 +93,18 @@ swap touches no public header and no user code.
 - Determinism: same binary, same thread_count, same call sequence produces
   identical results (replay test). Cross-platform and cross-thread-count
   determinism are NOT promised.
-- The reference backend is the machinery's second opinion: it computes the
-  lib's rules with zero engine help (O(n^2) detection nested so touch keys
-  are lex-sorted by construction, entering-rays-only raycasts, the
-  began/ended touching diff, COM-frame semi-implicit Euler on the lib's
-  mass properties), and every rule it cannot honor fails honestly instead
-  of faking it: capsules and joints return backend_error, solid pairs
-  pass through (no solver), is_sleeping is always false. Flipping the dev
-  probe (WS_PHYSICS_DEFAULT_BACKEND_REFERENCE=ON) runs the WHOLE existing
-  machinery suite against it - the cases that need resting contact or
-  joints fail there, which is the point of a second implementation.
+- The reference twins (2D since C6, 3D since C7b) are the machinery's
+  second opinion: they compute the lib's rules with zero engine help
+  (O(n^2) detection nested so touch keys are lex-sorted by construction,
+  entering-rays-only raycasts, the began/ended touching diff, COM-frame
+  semi-implicit Euler on the lib's mass properties), and every rule they
+  cannot honor fails honestly instead of faking it: unsupported shapes
+  and joints return backend_error, solid pairs pass through (no
+  solver), is_sleeping is always false. Flipping the dev probe
+  (WS_PHYSICS_DEFAULT_BACKEND_REFERENCE=ON) runs the WHOLE existing
+  machinery suite against BOTH twins - the cases that need resting
+  contact or joints fail there, which is the point of a second
+  implementation.
 
 ## v1 scope (decided - review point 7)
 In scope: sensors (BodyDesc::is_sensor), the three v1 joint kinds, hit
@@ -219,8 +239,9 @@ compute"), one commit per phase: CONTRACT.md (C1, done) -> sleep control
 (C2, done) -> lib-owned touching table (C3, done) -> lib-computed mass
 properties (C4, done) -> one material-mixing rule (C5, done) -> backend
 factory + reference 2D backend (C6, done) -> conformance suite encoding
-CONTRACT.md (C7; the 2D half landed as C7a - Dim traits headers + the
-both-backend 2D suite; the 3D twin, over Jolt + a 3D reference, is C7b).
+CONTRACT.md (C7, done: C7a - Dim traits headers + the both-backend 2D
+suite; C7b - the 3D reference twin, the both-backend 3D suite over Jolt +
+it, and the Jolt-adapter conformance fixes above).
 Also queued behind those: the machinery sweeps' "every path" names are
 still aspirational - the stale sweeps miss set_transform + the apply_*
 family in 3D, and the moved-from tests miss the apply_* family and
@@ -268,6 +289,16 @@ solver response, materials, joints) stay in the engine suites, and
 first-touch TICK numbers are never asserted across engines: touching
 scenes step until the edge appears (the reference detects after
 integrating the tick, Box2D's pair pass a tick later).
+The 3D sibling (tests/test_conformance_3d.cpp, C7b) drives
+WorldCore<Dim3D> over Jolt and the reference twin with the same clause
+set, TIGHTER where 3D genuinely agrees: the Jolt adapter steps one
+collision step with zeroed damping - the same semi-implicit Euler the
+reference integrates - so ballistics pin near-exact on both legs and a
+fast impact fires began AND hit on the same tick. The one real
+divergence is banded: Jolt composes the exact axis-angle exponential
+map while the reference steps the Euler quaternion derivative (an
+O(theta^3) gap), so spin pins run on the composed angle
+2 atan2(q.axis, q.w) at ~0.1%.
 apps/bench_physics (desktop console app) is the throughput consumer: a
 falling-box rain per dimension, timed while awake and after sleep. Run it
 manually - absolute numbers are machine-dependent, so nothing asserts on

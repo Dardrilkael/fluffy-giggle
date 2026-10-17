@@ -5,14 +5,15 @@
 // runtime enum later) touches exactly this TU.
 //
 // WS_PHYSICS_DEFAULT_BACKEND_REFERENCE (the CMake option of the same name,
-// default OFF) is a dev probe: it flips the 2D world onto the reference
+// default OFF) is a dev probe: it flips a dimension onto its reference
 // implementation - detection, events, ballistics and queries, but no solver
-// response, CCD, joints or sleep onset (src/backend/reference2d). Machinery
-// cases that need resting contact or joints fail against it honestly; the
-// point is running the lib's machinery under a second implementation, not
-// a "better" engine. 3D keeps Jolt under both settings for now - the 3D
-// reference twin lands with the conformance suite (C7), which needs
-// machinery-over-both-backends in one binary.
+// response, CCD, joints or sleep onset (src/backend/reference2d,
+// src/backend/reference3d). Machinery cases that need resting contact or
+// joints fail against it honestly; the point is running the lib's machinery
+// under a second implementation, not a "better" engine. Each dimension's
+// conformance suite (tests/test_conformance*.cpp) drives the machinery over
+// BOTH backends directly, whatever this default says - the probe only
+// redirects the public World2D/World3D.
 
 #include <memory>
 
@@ -32,7 +33,11 @@ std::unique_ptr<IWorld2DBackend> make_world_backend_2d(
 
 std::unique_ptr<IWorld3DBackend> make_world_backend_3d(
     const BackendDesc3D& desc) {
+#if WS_PHYSICS_DEFAULT_BACKEND_REFERENCE
+  return make_reference_world_3d(desc);
+#else
   return make_jolt_world_3d(desc);
+#endif
 }
 
 }  // namespace ws::physics::detail

@@ -15,10 +15,11 @@ enum class ContactPhase : std::uint8_t {
 // One buffered contact event. Events accumulate during step()/advance() and
 // are drained via World3D::contact_events(). begin/end fire exactly once per
 // overlap (no per-tick repeats while a pair rests); hit fires for impacts
-// above the world's threshold. Sensors report began/ended/hit like any
-// other body - they just produce no collision response. Multi-shape bodies
-// report per SHAPE pair: a body pair touching through two shape pairs can
-// yield two began/ended cycles per step, each with its own transitions.
+// above the world's threshold. Sensors report began/ended only (CONTRACT.md
+// 7: never hit) and carry no manifold geometry - zero point, zero normal,
+// zero speed. Multi-shape bodies report per SHAPE pair: a body pair
+// touching through two shape pairs can yield two began/ended cycles per
+// step, each with its own transitions.
 struct ContactEvent {
   ContactPhase phase{};
   BodyId a{};     // the body with the lower slot index (a.index < b.index)

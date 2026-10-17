@@ -70,6 +70,7 @@
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseQuery.h>
 #include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/CollisionGroup.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Collision/GroupFilter.h>
@@ -1011,10 +1012,19 @@ class JoltWorld3D final : public IWorld3DBackend,
     // direction arrives unit (world3d.cpp normalizes); the ray length IS
     // the search distance - the shape of the query the 2D seam makes too.
     const JPH::RRayCast ray{to_jph(origin), to_jph(direction) * max_distance};
-    JPH::RayCastResult result;
-    if (!system_.GetNarrowPhaseQuery().CastRay(ray, result)) {
+    // Entering rays only (the query convention the 2D seam pins,
+    // CONTRACT.md 9): Jolt's default RayCastSettings treats convex shapes
+    // as SOLID, so a ray cast from inside a body would hit at fraction 0
+    // and shadow everything down the line. Box2D and both reference twins
+    // miss an inside origin - opt out of solid treatment.
+    JPH::RayCastSettings settings;
+    settings.mTreatConvexAsSolid = false;
+    JPH::ClosestHitCollisionCollector<JPH::CastRayCollector> collector;
+    system_.GetNarrowPhaseQuery().CastRay(ray, settings, collector);
+    if (!collector.HadHit()) {
       return std::nullopt;
     }
+    const JPH::RayCastResult& result = collector.mHit;
     const std::uint32_t hit_slot =
         slot_for_index(slot_by_index_, result.mBodyID);
     if (hit_slot == kNoSlot) {
@@ -1101,12 +1111,25 @@ class JoltWorld3D final : public IWorld3DBackend,
     const float speed = std::max(0.0f, -(v2 - v1).Dot(normal));
     const std::uint8_t pa = part_of(inBody1, inManifold.mSubShapeID1);
     const std::uint8_t pb = part_of(inBody2, inManifold.mSubShapeID2);
+    // The lib's event conventions (CONTRACT.md 7, public 3d/contact.hpp),
+    // matched to Box2D and both reference twins: sensors fire began/ended
+    // ONLY - never hit - and a sensor began carries no manifold at all
+    // (zeros; Box2D's sensor events carry none either). And began never
+    // carries speed: "speed - relative approach speed (hit events only)".
+    if (inBody1.IsSensor() || inBody2.IsSensor()) {
+      push_raw(RawEvent{a, b, physics3d::ContactPhase::began, Vec3{},
+                        Vec3{}, 0.0f, pa, pb});
+      return;
+    }
     push_raw(RawEvent{a, b, physics3d::ContactPhase::began,
-                      from_jph(point), from_jph(normal), speed, pa, pb});
-    // Jolt has no separate hit callback: same rule as Box2D's hit events,
-    // approach speed over the world's threshold (> 0 keeps resting
-    // contacts quiet when the threshold is the default 0).
-    if (speed > hit_threshold_) {
+                      from_jph(point), from_jph(normal), 0.0f, pa, pb});
+    // Jolt has no separate hit callback: the same rule as Box2D's hit
+    // events (enableHitEvents = threshold > 0), approach speed over the
+    // world's threshold - and threshold 0 DISABLES hits entirely (the
+    // public Desc promise), it does not mean "every began". Sensors never
+    // reach here (CONTRACT.md 2: sensors collide for events only - no hit
+    // events).
+    if (hit_threshold_ > 0.0f && speed > hit_threshold_) {
       push_raw(RawEvent{a, b, physics3d::ContactPhase::hit,
                         from_jph(point), from_jph(normal), speed, pa, pb});
     }

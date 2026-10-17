@@ -180,9 +180,17 @@ class IWorld3DBackend {
 [[nodiscard]] std::unique_ptr<IWorld3DBackend> make_jolt_world_3d(
     const BackendDesc3D& desc);
 
+// The reference 3D twin (src/backend/reference3d/reference_3d.cpp):
+// CONTRACT.md computed without an engine - the second implementation the
+// conformance suite runs the machinery against (see reference_2d.cpp for
+// the subset it honestly refuses).
+[[nodiscard]] std::unique_ptr<IWorld3DBackend> make_reference_world_3d(
+    const BackendDesc3D& desc);
+
 // The default-backend choice (src/core/backend_factory.cpp) - the ONE
-// place an engine is named from World3D's side. 3D is Jolt under both
-// settings today; the 3D reference twin lands with the conformance suite.
+// place an engine is named from World3D's side. Jolt is the shipping
+// pick; the dev probe (WS_PHYSICS_DEFAULT_BACKEND_REFERENCE) flips both
+// dimensions to their reference twins.
 [[nodiscard]] std::unique_ptr<IWorld3DBackend> make_world_backend_3d(
     const BackendDesc3D& desc);
 
