@@ -96,9 +96,12 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
         value = !value;  // the caller's bool is the state; a click flips it
     }
 
-    // The focus ring: the on-accent as a 1px outline behind the row, so
-    // Tab navigation is legible. Skipped for degenerate rows.
-    focus_ring(gui, id, rect, theme);
+    // The focus ring: the on-accent as a 1px outline behind the BOX -
+    // the body the checkbox paints - not the row: the label's half of
+    // the row is exposed, and the solid ring draw would flood it with
+    // the accent the moment focus lands.
+    const float box = theme.control_height;
+    focus_ring(gui, id, {rect.x, rect.y, box, box}, theme);
 
     // The disabled look: the dead face for the box, the fill and the
     // label dimmed through the one helper - 1.0 is the identity for the
@@ -108,7 +111,6 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     // The box: a control_height square with the same faces a button
     // wears, corners rounded by the theme.
     const std::uint32_t face = control_face(result.state, theme);
-    const float box = theme.control_height;
     r2d::draw_rounded_quad(rect.x, rect.y, box, box, theme.corner_radius, face);
 
     // The check: the accent fill, inset past the box's corners so a
@@ -157,9 +159,13 @@ bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
         value = this_option;
     }
 
-    // The focus ring: the on-accent as a 1px outline behind the row, so
-    // Tab navigation is legible. Skipped for degenerate rows.
-    focus_ring(gui, id, rect, theme);
+    // The focus ring: the on-accent as a 1px outline behind the DOT -
+    // the body the radio paints - asked for at the dot's own
+    // half-height so the ring curves with it, not the row: the label's
+    // half of the row is exposed, and the solid ring draw would flood
+    // it with the accent the moment focus lands.
+    const float box = theme.control_height;
+    focus_ring(gui, id, {rect.x, rect.y, box, box}, theme, box * 0.5f);
 
     // The disabled look: the dead face for the dot, the fill and the
     // label dimmed through the one helper.
@@ -169,7 +175,6 @@ bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     // box, exactly what the draw clamps to - with the faces a button
     // wears.
     const std::uint32_t face = control_face(result.state, theme);
-    const float box = theme.control_height;
     r2d::draw_rounded_quad(rect.x, rect.y, box, box, box * 0.5f, face);
 
     // The selection: an accent circle inset by check_inset alone - the
@@ -216,9 +221,12 @@ bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
         value = !value;  // the caller's bool is the state; a click flips it
     }
 
-    // The focus ring: the on-accent as a 1px outline behind the row.
-    // Skipped for degenerate rows.
-    focus_ring(gui, id, rect, theme);
+    // The focus ring: the on-accent as a 1px outline behind the PILL -
+    // the body the switch paints - asked for at the pill's own
+    // half-height so the ring curves with its ends, not the row: the
+    // label's stretch of the row is exposed, and the solid ring draw
+    // would flood it with the accent the moment focus lands.
+    focus_ring(gui, id, {rect.x, rect.y, track_w, box}, theme, box * 0.5f);
 
     // The disabled look: the knob and the label dimmed through the one
     // helper; the track's own dead face is the off state's, while the

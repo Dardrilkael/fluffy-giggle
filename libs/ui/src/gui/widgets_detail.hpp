@@ -252,16 +252,29 @@ inline bool key_activated(const GuiContext& gui, WidgetId id) {
             gui.input().key_pressed[ws::input::keys::kSpace]);
 }
 
-// The focus ring: the on-accent as a 1px outline behind the row, so Tab
-// navigation is legible. Skipped for degenerate rects - a zero-width
-// face would show the ring with nothing in it.
-inline void focus_ring(const GuiContext& gui, WidgetId id, const Rect& rect,
-                       const ChromeTheme& theme) {
-    if (gui.is_focused(id) && rect.width > 0.0f && rect.height > 0.0f) {
-        r2d::draw_rounded_quad(rect.x - 1.0f, rect.y - 1.0f,
-                               rect.width + 2.0f, rect.height + 2.0f,
-                               theme.corner_radius + 1.0f, theme.control_on);
+// The focus ring: the on-accent as a 1px outline behind `body` - the
+// rect the widget itself paints - so Tab navigation is legible. The
+// draw is a SOLID quad that the body then masks to an outline, so body
+// must be exactly what covers the row: a full-face row (a button's)
+// passes the row rect; a partial one (the slider's rail, the
+// checkbox's box) passes the part - the row's exposed area would
+// otherwise flood with the accent the moment focus lands. `radius` is
+// the body's own rounding; the circle and pill bodies pass their
+// half-height. Skipped for degenerate rects - a zero-width body would
+// show the ring with nothing in it.
+inline void focus_ring(const GuiContext& gui, WidgetId id, const Rect& body,
+                       const ChromeTheme& theme, float radius) {
+    if (gui.is_focused(id) && body.width > 0.0f && body.height > 0.0f) {
+        r2d::draw_rounded_quad(body.x - 1.0f, body.y - 1.0f,
+                               body.width + 2.0f, body.height + 2.0f,
+                               radius + 1.0f, theme.control_on);
     }
+}
+
+// The common spelling: the body wears the theme's control rounding.
+inline void focus_ring(const GuiContext& gui, WidgetId id, const Rect& body,
+                       const ChromeTheme& theme) {
+    focus_ring(gui, id, body, theme, theme.corner_radius);
 }
 
 // The disabled dim: the theme's alpha under the lock, 1.0 the identity
