@@ -25,9 +25,10 @@ gets a window, an event stream, and a place to submit draw commands —
   popup/tooltip/modal overlay scopes) that draw
   through r2d; caller-owned state, identity + hit-testing + layout + draw
   stay one seam.
-- **`ws::ui::App`** — the shell itself: owns the window, the Vulkan
-  device layer (through the `ws::gfx::Gpu` it holds, since stage 3b),
-  swapchain, frame loop, event pumping, and shutdown.
+- **`ws::ui::App`** — the shell itself: owns the window, the device layer
+  and the presentation layer (through the `ws::gfx::Gpu` and
+  `ws::gfx::Swapchain` it holds, since stage 3b), the frame loop, event
+  pumping, and shutdown.
 
 The shell is the product. Consumers link against this library and only
 ever see `ws::ui` types (`App`, `Event`, `EventDispatcher`,
@@ -67,9 +68,11 @@ libs/ui/
   # (the input family — the event types + InputFrame/frame_input — lives
   #  in libs/input since stage 3a; ui links it, and this tree's platform
   #  TUs are the only writers of an InputFrame)
-  # (the Vulkan device layer — loader/instance/surface/device/allocator —
-  #  lives in libs/gfx since stage 3b; ui holds a gfx::Gpu and unwraps its
-  #  opaque handles in app.cpp, the one cast point)
+  # (the Vulkan device layer AND the swapchain/frame sync —
+  #  loader/instance/surface/device/allocator, swapchain, render pass,
+  #  frame sync — live in libs/gfx since stage 3b; ui holds a
+  #  gfx::Gpu + gfx::Swapchain and unwraps their opaque handles in
+  #  app.cpp, the one cast point)
   include/ws/ui/
     app.hpp                 # App, AppConfig — PUBLIC, zero third-party includes
     render_command_queue.hpp # RenderCommandQueue
@@ -84,7 +87,7 @@ libs/ui/
       widgets.hpp            # button/checkbox/radio/toggle switch/slider/drag float/collapsing header/selectable/combo/text input/panel/tabs/scroll region + the overlay scopes (popup/tooltip/modal) + the statics (text/separator/progress) — the widget functions + fit_text
   src/                       # layer folders - the cut lines for a future split into shared libs
     app/                     # the shell itself
-      app.cpp                # pimpl: swapchain, frame loop, backends; the device bootstrap lives in ws::gfx (stage 3b), unwrapped through gfx::Gpu's opaque handles
+      app.cpp                # pimpl: the frame loop + backends; the device bootstrap and the swapchain/frame sync live in ws::gfx (stage 3b), unwrapped through gfx::Gpu's and gfx::Swapchain's opaque handles
     platform/                # the windowing seam - exactly one window TU builds per platform
       window.h               # internal: WindowHost, the platform seam (never reaches apps)
       window_glfw.cpp        # desktop: GLFW window + all glfwSet*Callback installs + the clipboard pair (only here)
@@ -1067,35 +1070,48 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   from gfx's `gpu.cpp` via `VmaAllocatorCreateInfo::pVulkanFunctions`
   since VMA 3.2 requires it) — exactly one `VMA_IMPLEMENTATION` TU in
   the workspace. The allocator is created by `ws::gfx::Gpu` (the first
-  attach's device stage) for future GPU-side data work; it is not yet
-  exposed in the public API.
-- Swapchain: `minImageCount + 1` images, BGRA8 preferred, FIFO when vsync,
-  mailbox/immediate when not; recreated on resize / out-of-date /
-  suboptimal — resize is driven by the same `WindowResizeEvent` path, not a
-  separate poll. An acquire returning `VK_SUBOPTIMAL_KHR` is still a
-  success — the frame renders and presents (only the submit's wait retires
-  the semaphore the acquire signaled; destroying a still-signaled semaphore
-  would violate the spec), and the shell rebuilds once that frame has
-  retired; `VK_ERROR_OUT_OF_DATE_KHR` drops the frame instead.
-- Frames in flight (M6): `r2d::kMaxFramesInFlight` (= 2) frame slots — each
-  owns a fence, command pool/buffer and acquire semaphore — bound how many
-  frames may overlap, decoupled from the swapchain image count; each
-  swapchain image instead owns its render-finished semaphore. A frame
-  waits its slot's fence BEFORE acquiring (the CPU throttle), and the
-  fence is reset only after the acquire succeeded — an out-of-date bail
-  leaves the slot signaled and pristine, so no acquire can ever wait a
-  fence nobody submits against. Two in-flight frames always render
-  different images (acquire never hands out an image whose present is
-  still pending), so a per-image semaphore can never be signaled twice
-  while pending; present waits the image's rendered semaphore.
-- The render pass carries explicit external subpass dependencies: color
-  (`EXTERNAL` → `COLOR_ATTACHMENT_OUTPUT` — pairs with acquire's wait
-  stage) and depth (`EXTERNAL`/`COLOR_ATTACHMENT_OUTPUT` ↔
+  attach's device stage) and crosses to ui as one of Gpu's opaque
+  handles; app.cpp unwraps it and hands the `VmaAllocator` to r2d's
+  device half — the one vma consumer left in ui until phase C's
+  buffer/image helpers move those call sites into gfx.
+- Swapchain: `ws::gfx::Swapchain` owns it since stage 3b phase B — the
+  shell holds one beside its Gpu and recreates through `recreate()`;
+  the choice tables are gfx's pure helpers, tested in libs/gfx. The
+  contract the shell leans on: `minImageCount + 1` images, BGRA8
+  preferred, FIFO when vsync, mailbox/immediate when not; recreated on
+  resize / out-of-date / suboptimal — resize is driven by the same
+  `WindowResizeEvent` path, not a separate poll. An acquire answering
+  `out_of_date` drops the frame (the shell clears its queues and
+  renderer state with it); a suboptimal acquire still renders and
+  presents — only the submit's wait retires the semaphore the acquire
+  signaled, and destroying a still-signaled semaphore would violate the
+  spec — and the rebuild lands once that frame has retired.
+- Frames in flight (M6): the slots live in `gfx::Swapchain` since stage 3b
+  phase B — `gfx::kMaxFramesInFlight` (= 2, pinned equal to
+  `r2d::kMaxFramesInFlight` by a static_assert in app.cpp, because r2d's
+  per-slot arenas and descriptor tables key on the same count) frame
+  slots, each owning a fence, command pool/buffer and acquire semaphore,
+  bound how many frames may overlap, decoupled from the swapchain image
+  count; each swapchain image instead owns its render-finished
+  semaphore. A frame waits its slot's fence BEFORE acquiring (the CPU
+  throttle), and the fence is reset only after the acquire succeeded —
+  an out-of-date bail leaves the slot signaled and pristine, so no
+  acquire can ever wait a fence nobody submits against. Two in-flight
+  frames always render different images (acquire never hands out an
+  image whose present is still pending), so a per-image semaphore can
+  never be signaled twice while pending; present waits the image's
+  rendered semaphore.
+- The render pass is built by `gfx::Swapchain` (stage 3b phase B), always
+  color + depth, and carries explicit external subpass dependencies:
+  color (`EXTERNAL` → `COLOR_ATTACHMENT_OUTPUT` — pairs with acquire's
+  wait stage) and depth (`EXTERNAL`/`COLOR_ATTACHMENT_OUTPUT` ↔
   `EARLY/LATE_FRAGMENT_TESTS` with `DEPTH_STENCIL_ATTACHMENT_WRITE`,
   first-use and last-render chained) — without them the single shared
   depth image is a WAW hazard across frames in flight. That dependency
   chain IS the proof the shared image is safe; per-frame depth images
-  would only buy back a small serialization bubble.
+  would only buy back a small serialization bubble. (gfx's CLAUDE.md
+  carries the swapchain-side detail; r2d just builds its two pipelines
+  against the pass it is handed.)
 - Validation is opt-in via `WS_UI_VALIDATION` (env var — deliberately not
   public API; ui reads it once and hands `enable_validation` to
   `ws::gfx::Gpu` — the layer request, the messenger and the message
@@ -1108,8 +1124,8 @@ drive unchanged (that boundary is deliberate; don't paint it over).
 - The ImGui Vulkan backend bakes MinImageCount (= 2, never changes) and its
   per-frame buffer ring at Init; if the swapchain image count or format
   changes, the shell re-initializes the backend.
-- Depth attachment: unconditional from the first `create_swapchain` — the
-  render pass is always color + depth, so the ImGui backend's Init-baked
+- Depth attachment: unconditional from the first `gfx::Swapchain::create()` —
+  the render pass is always color + depth, so the ImGui backend's Init-baked
   pipeline stays render-pass-compatible across every rebuild. The format
   is chosen ONCE at gfx's device selection (D32_SFLOAT → D24_UNORM_S8_UINT →
   D16_UNORM, first with DEPTH_STENCIL_ATTACHMENT support in optimal
@@ -1126,10 +1142,13 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `Render()`, since the app may have thrown between `Begin`/`End`).
 - Mid-frame Vulkan failures are logged and `std::abort()` — after a failed
   submit there is no state to roll back to (semaphores in flight, a command
-  buffer half recorded); the same policy as Dear ImGui's own examples.
+  buffer half recorded); the same policy as Dear ImGui's own examples, and
+  the policy `gfx::Swapchain`'s frame flow inherited when the code moved
+  (gfx's one documented exception to its logs-NOTHING rule).
   Startup failures instead return 1 from `App::run()`.
 - Don't use the `ImGui_ImplVulkanH_*` example helpers — the backend header
-  marks them example-only; the shell manages its own swapchain objects.
+  marks them example-only; the shell drives `ws::gfx::Swapchain`
+  instead of the example objects.
 - Input platform invariants. Desktop is mouse-only BY DECISION — no Win32
   WM_POINTER: touch screens keep the synthesized single-mouse behavior.
   Desktop owns `mouse_present` through the cursor callbacks: a move, a

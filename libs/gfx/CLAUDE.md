@@ -3,8 +3,8 @@
 Guidance for Claude Code when working in this library. `libs/gfx` is the
 **Vulkan device layer** promoted out of `ws::ui` (stage 3b): the loader,
 the instance, the surface (via callback), physical-device/queue selection,
-the device, and the VMA allocator. `ws::ui` is the only consumer — apps
-never include this lib.
+the device, the VMA allocator, and — since phase B — the swapchain and
+frame sync. `ws::ui` is the only consumer — apps never include this lib.
 
 ## The one rule: no Vulkan vocabulary under include/
 
@@ -46,8 +46,16 @@ rides the `Status` and the consumer logs it (`core::log_error`). gfx
 speaks only two info lines directly (the GPU it picked, the texture tier)
 and two warns (validation layer missing on an opt-in, messenger create
 failed). Codes are the anon-namespace constants in `gpu.cpp` (order 1,
-loader/instance 100s, surface 200s, device 300s); the category is
+loader/instance 100s, surface 200s, device 300s) and `swapchain.cpp`
+(the shared order code, then swapchain-creation 400s); the category is
 always `"gfx"`.
+
+The one exception — `Swapchain`'s frame flow (acquire, the render-pass
+pair, submit, present): a Vulkan failure there leaves no state to roll
+back to (semaphores in flight, a command buffer half recorded), so it
+logs `core::error` and `std::abort()`s — the policy the shell documented
+when it owned this code. `Swapchain`'s creation/teardown calls
+(create/recreate/destroy) still answer `Status` like everything else.
 
 ## The descriptor-indexing probe (M9, parameterized)
 
@@ -62,23 +70,73 @@ headless. The depth-format walk (`pick_depth_format`) is the same shape:
 D32 → D24S8 → D16, chosen once at device selection, exposed as its
 numeric value.
 
+## The swapchain and frame sync (phase B)
+
+`ws::gfx::Swapchain` owns everything tied to the presentation extent:
+the swapchain, its image views, the depth attachment (one per swapchain
+— VMA owns the image, the view is ours), the color+depth render pass,
+the framebuffers, and the whole frame sync — `kMaxFramesInFlight`
+frame slots (a fence, a command pool+buffer and an acquire semaphore
+each) plus one render-finished semaphore per image. `ws::ui` holds one
+Swapchain beside its Gpu and is the only consumer; handles cross as
+opaque `void*` exactly like Gpu's.
+
+- **Lifecycle**: `create(Gpu&, fb_w, fb_h, options)` needs a Gpu with
+  its device stage up and a surface attached (a dead Gpu is a `Status`,
+  never a crash); a failed create cleans up after itself. `destroy()`
+  is idempotent and keeps the Gpu + options, so create can run again on
+  the re-attach path. `recreate(fb_w, fb_h)` is destroy+build with the
+  full dead-Gpu guard. The Gpu must outlive the Swapchain.
+- **Frame flow**: `acquire()` waits the slot fence BEFORE acquiring (the
+  CPU throttle) and resets it only after the acquire succeeded — an
+  out-of-date acquire bails having signaled nothing, the slot stays
+  signaled and pristine. `VK_SUBOPTIMAL_KHR` is a success (the image IS
+  acquired, its semaphore IS signaled): the frame must run and present,
+  and `present()` folds the rebuild in once the frame has retired —
+  never destroy a swapchain holding a live signaled semaphore.
+  `submit()` waits the acquire semaphore at `COLOR_ATTACHMENT_OUTPUT`
+  and signals the image's render-finished semaphore plus the slot
+  fence; `present()` waits the image's semaphore.
+  `begin_render_pass()` clears depth to 1.0 — the LEQUAL convention —
+  through the color+depth pass, whose two explicit external subpass
+  dependencies (color: `EXTERNAL`→`COLOR_ATTACHMENT_OUTPUT`, pairing
+  with acquire's wait stage; depth: chained through the fragment-test
+  stages) are what make the single shared depth image safe across
+  frames in flight. `wait_frames()` waits every slot fence — the
+  consumer's dev-only pipeline-rebake drain seam.
+- **Choices**: the decision tables live in `src/swapchain_choice.h` as
+  pure Vulkan-free helpers — surface format (the first preferred format
+  offered in the required color space, else the surface's first entry),
+  present mode (first preference supported, FIFO fallback; vsync-on
+  never walks — FIFO is assigned directly, the one mode the spec
+  guarantees), extent (the fixed current extent, else the framebuffer
+  size clamped into the surface bounds; degenerate answers false),
+  image count (min+1, clamped when the surface has a max), composite
+  alpha (opaque, else the lowest supported bit). `swapchain.cpp` fills
+  them from the surface queries and supplies the typed constants; the
+  helpers only decide, so tests cover the tables headless.
+
 ## Layout
 
 ```
 libs/gfx/
-  include/ws/gfx/gpu.hpp    # Gpu, SurfaceSource, DeviceOptions, DescriptorIndexing — PUBLIC, ws/core only
-  src/gpu.cpp               # the bootstrap: instance, selection, device, allocator, teardown
-  src/gpu_choice.h          # pure, Vulkan-free decision helpers (the testable half)
-  src/vma_impl.cpp          # the workspace's single VMA_IMPLEMENTATION TU (moved from ui)
-  tests/test_gfx.cpp        # headless: the pure helpers + the null-state/lifecycle contracts
+  include/ws/gfx/gpu.hpp        # Gpu, SurfaceSource, DeviceOptions, DescriptorIndexing — PUBLIC, ws/core only
+  include/ws/gfx/swapchain.hpp  # Swapchain + Frame + SwapchainOptions, AcquireStatus/PresentStatus, kMaxFramesInFlight
+  src/gpu.cpp                   # the bootstrap: instance, selection, device, allocator, teardown
+  src/gpu_choice.h              # pure, Vulkan-free decision helpers (the testable half)
+  src/swapchain.cpp             # the presentation layer: swapchain, depth, render pass, framebuffers, frame sync
+  src/swapchain_choice.h        # pure, Vulkan-free swapchain decisions (the testable half)
+  src/vma_impl.cpp              # the workspace's single VMA_IMPLEMENTATION TU (moved from ui)
+  tests/test_gfx.cpp            # headless: the pure helpers + the null-state/lifecycle contracts
 ```
 
 ## What is NOT here
 
-The swapchain and frame sync stay in `ws::ui` until phase B; the
-buffer/image/shader-module helpers (phase C) will grow here when the r2d
-device half rewires onto them. Do not add API surface speculatively —
-keep it only as large as ui actually uses.
+The buffer/image/shader-module helpers (phase C) will grow here when the
+r2d device half rewires onto them — until then `ws::ui` still links vma
+PRIVATE and its `app.cpp` unwraps the allocator handle for r2d's device
+half (the one vma consumer left in ui). Do not add API surface
+speculatively — keep it only as large as ui actually uses.
 
 ## Tests
 
@@ -86,6 +144,7 @@ keep it only as large as ui actually uses.
 ctest --preset debug -R gfx
 ```
 
-Headless by contract: the pure helpers, the source-shape guards and the
-null-state/lifecycle-misuse paths run without a GPU, and no test fakes a
-Vulkan device — a machine-dependent probe is a bug, not coverage.
+Headless by contract: the pure helpers (device choice + the swapchain
+choice tables), the source-shape guards and Gpu's/Swapchain's
+null-state/lifecycle-misuse paths run without a GPU, and no test fakes
+a Vulkan device — a machine-dependent probe is a bug, not coverage.

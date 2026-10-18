@@ -11,13 +11,14 @@ ws_add_library(gfx DEPENDS ws::core)
 # vulkan-headers rides volk (PUBLIC there); vma rides both.
 target_link_libraries(ws_gfx PRIVATE volk vma)
 
-# The pure device-choice helpers (the tier decision, the depth-format
-# walk) are tested headless through the internal header; no GPU is faked
-# and no volk entry point runs on any tested path.
+# The pure device-choice and swapchain-choice helpers (the tier decision,
+# the depth-format walk, the swapchain tables) are tested headless through
+# the internal headers; no GPU is faked and no volk entry point runs on
+# any tested path.
 ws_add_test(gfx SOURCES tests/test_gfx.cpp)
-# test_gfx instantiates Gpu (the null-state contract): the archive's
-# objects reference volk globals at link time even though the tested
-# paths never call them.
+# test_gfx instantiates Gpu and Swapchain (their null-state contracts):
+# the archive's objects reference volk globals at link time even though
+# the tested paths never call them.
 if(TARGET test_gfx)
   target_include_directories(test_gfx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(test_gfx PRIVATE volk)

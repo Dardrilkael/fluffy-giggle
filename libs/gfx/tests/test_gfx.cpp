@@ -4,16 +4,19 @@
 #include <cstdint>
 #include <string_view>
 
-#include "gpu_choice.h"  // internal: the pure decision helpers (src/)
+#include "gpu_choice.h"        // internal: the pure decision helpers (src/)
+#include "swapchain_choice.h"  // internal: the swapchain decision helpers (src/)
 
 #include <ws/gfx/gpu.hpp>
+#include <ws/gfx/swapchain.hpp>
 
 // gfx's own suite: what runs without a GPU - the pure decision helpers
-// (the descriptor-indexing tier table, the depth-format walk) and Gpu's
-// null-state contract (getters before init, lifecycle misuse, idempotent
-// teardown). No Vulkan device is ever faked: Gpu is never init()ed here,
-// so no volk entry point runs; the cases only pin the guarded, headless
-// paths.
+// (the descriptor-indexing tier table, the depth-format walk, the
+// swapchain choices) and the null-state contracts (Gpu's getters before
+// init, lifecycle misuse, idempotent teardown; Swapchain's lifecycle and
+// frame flow before create). No Vulkan device is ever faked: Gpu is
+// never init()ed and Swapchain never created here, so no volk entry
+// point runs; the cases only pin the guarded, headless paths.
 
 namespace {
 
@@ -110,6 +113,125 @@ TEST_CASE("pick_depth_format takes the first supported candidate") {
     }
 }
 
+// --- the swapchain choices (swapchain_choice.h) -------------------------------
+// The decision tables swapchain.cpp feeds from the surface queries. The
+// values below are plain numbers (the helpers take uint32 by design):
+// real spec numbering where a table names real modes and bits, arbitrary
+// stand-ins elsewhere - chosen to exercise the walk orders.
+
+TEST_CASE("choose_surface_format takes the first preferred format offered") {
+    using ws::gfx::SurfaceFormatChoice;
+    const SurfaceFormatChoice offered[] = {{50, 7}, {44, 7}, {43, 9}};
+    const uint32_t preferred[] = {43, 44};
+
+    SUBCASE("an empty list is no restrictions: the caller's answer") {
+        const SurfaceFormatChoice unrestricted{77, 7};
+        const SurfaceFormatChoice choice = ws::gfx::choose_surface_format(
+            nullptr, 0, preferred, 2, 7, unrestricted);
+        CHECK(choice.format == 77u);
+        CHECK(choice.color_space == 7u);
+    }
+    SUBCASE("the color space gates the walk: the next preference wins") {
+        // 43 is the top preference but only offered in the wrong color
+        // space, so 44 takes it.
+        const SurfaceFormatChoice choice = ws::gfx::choose_surface_format(
+            offered, 3, preferred, 2, 7, SurfaceFormatChoice{});
+        CHECK(choice.format == 44u);
+        CHECK(choice.color_space == 7u);
+    }
+    SUBCASE("preference order outranks the surface's list order") {
+        const SurfaceFormatChoice list_order[] = {{37, 7}, {44, 7}};
+        const uint32_t prefs[] = {44, 37};
+        const SurfaceFormatChoice choice = ws::gfx::choose_surface_format(
+            list_order, 2, prefs, 2, 7, SurfaceFormatChoice{});
+        CHECK(choice.format == 44u);
+        CHECK(choice.color_space == 7u);
+    }
+    SUBCASE("no preferred format offered: the surface's first entry") {
+        const SurfaceFormatChoice only[] = {{99, 7}};
+        const SurfaceFormatChoice choice = ws::gfx::choose_surface_format(
+            only, 1, preferred, 2, 7, SurfaceFormatChoice{});
+        CHECK(choice.format == 99u);
+        CHECK(choice.color_space == 7u);
+    }
+}
+
+TEST_CASE("choose_present_mode takes the first preference supported") {
+    // Real VkPresentModeKHR numbering: immediate 0, mailbox 1, fifo 2,
+    // fifo_relaxed 3. The vsync-on path never walks (FIFO is assigned
+    // directly, the one mode the spec guarantees); this is the vsync-off
+    // walk and its fallback.
+    const uint32_t prefs[] = {1, 0};  // mailbox, then immediate
+    const uint32_t fifo = 2;
+
+    SUBCASE("first preference supported wins") {
+        const uint32_t avail[] = {fifo, 1};
+        CHECK(ws::gfx::choose_present_mode(prefs, 2, avail, 2, fifo) == 1u);
+    }
+    SUBCASE("an unsupported first preference walks to the next") {
+        const uint32_t relaxed[] = {3, 0};  // fifo_relaxed, then immediate
+        const uint32_t avail[] = {fifo, 0};
+        CHECK(ws::gfx::choose_present_mode(relaxed, 2, avail, 2, fifo) == 0u);
+    }
+    SUBCASE("nothing preferred is supported: the FIFO fallback") {
+        const uint32_t avail[] = {fifo};
+        CHECK(ws::gfx::choose_present_mode(prefs, 2, avail, 1, fifo) == fifo);
+    }
+}
+
+TEST_CASE("choose_extent answers the fixed extent, else the clamped size") {
+    using ws::gfx::ExtentChoice;
+    const ExtentChoice lo{320, 200};    // the surface's min
+    const ExtentChoice hi{2560, 1440};  // the surface's max
+    // The spec's "match the window" sentinel: the surface has no fixed
+    // size, so the framebuffer size - clamped into the bounds above -
+    // is the extent.
+    const ExtentChoice match_window{0xFFFFFFFFu, 0xFFFFFFFFu};
+
+    SUBCASE("a fixed current extent ignores the framebuffer size") {
+        const ExtentChoice fixed{800, 600};
+        ExtentChoice out{};
+        CHECK(ws::gfx::choose_extent(fixed, lo, hi, 100, 50, &out));
+        CHECK(out.width == 800u);
+        CHECK(out.height == 600u);
+    }
+    SUBCASE("the sentinel clamps the framebuffer size into the bounds") {
+        ExtentChoice out{};
+        CHECK(ws::gfx::choose_extent(match_window, lo, hi, 1280, 720, &out));
+        CHECK(out.width == 1280u);
+        CHECK(out.height == 720u);
+    }
+    SUBCASE("clamped from below and from above") {
+        ExtentChoice out{};
+        CHECK(ws::gfx::choose_extent(match_window, lo, hi, 100, 100, &out));
+        CHECK(out.width == 320u);
+        CHECK(out.height == 200u);
+        CHECK(ws::gfx::choose_extent(match_window, lo, hi, 4000, 3000, &out));
+        CHECK(out.width == 2560u);
+        CHECK(out.height == 1440u);
+    }
+    SUBCASE("a zero-sized extent answers false - no visible area") {
+        const ExtentChoice fixed{0, 600};  // fixed, but no width
+        ExtentChoice out{};
+        CHECK_FALSE(ws::gfx::choose_extent(fixed, lo, hi, 1280, 720, &out));
+        CHECK(out.width == 0u);
+    }
+}
+
+TEST_CASE("choose_image_count asks for one above the minimum") {
+    CHECK(ws::gfx::choose_image_count(2, 0) == 3u);  // max 0: unlimited
+    CHECK(ws::gfx::choose_image_count(2, 8) == 3u);  // room to spare
+    CHECK(ws::gfx::choose_image_count(2, 2) == 2u);  // min == max pinned
+    CHECK(ws::gfx::choose_image_count(4, 0) == 5u);
+}
+
+TEST_CASE("choose_composite_alpha prefers opaque, else the lowest bit") {
+    const uint32_t opaque = 1;  // VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
+    CHECK(ws::gfx::choose_composite_alpha(0b111, opaque) == opaque);
+    CHECK(ws::gfx::choose_composite_alpha(0b110, opaque) == 2u);
+    CHECK(ws::gfx::choose_composite_alpha(0, opaque) == opaque);
+}
+
 // --- Gpu's null-state contract (no loader, no device) ------------------------
 
 TEST_CASE("a default-constructed Gpu reports the null state") {
@@ -167,4 +289,63 @@ TEST_CASE("init rejects an unusable SurfaceSource before any loader call") {
         REQUIRE_FALSE(status);
         CHECK(gpu.instance() == nullptr);
     }
+}
+
+// --- Swapchain's null-state contract (no device, never created) ---------------
+
+TEST_CASE("a default-constructed Swapchain reports the null state") {
+    ws::gfx::Swapchain swapchain;
+    CHECK(swapchain.render_pass() == nullptr);  // VkRenderPass
+    CHECK(swapchain.format() == 0);             // VK_FORMAT_UNDEFINED
+    CHECK(swapchain.present_mode() == 2);       // VK_PRESENT_MODE_FIFO_KHR
+    CHECK(swapchain.image_count() == 0);
+    CHECK(swapchain.width() == 0);
+    CHECK(swapchain.height() == 0);
+}
+
+TEST_CASE("Swapchain lifecycle misuse is a Status, never a crash") {
+    ws::gfx::Gpu gpu;  // never init()ed: no device stage, no surface
+    ws::gfx::Swapchain swapchain;
+
+    // create() against a dead Gpu: the guarded error path - build()
+    // never runs, so no volk entry point is touched.
+    const ws::core::Status created =
+        swapchain.create(gpu, 1280, 720, ws::gfx::SwapchainOptions{});
+    REQUIRE_FALSE(created);
+    CHECK(created.error().category == std::string_view("gfx"));
+    CHECK(created.error().code != 0);
+    CHECK_FALSE(created.error().message.empty());
+
+    // The failed create stored nothing: recreate() still answers the
+    // never-created Status instead of walking a null Gpu.
+    const ws::core::Status recreated = swapchain.recreate(1280, 720);
+    REQUIRE_FALSE(recreated);
+    CHECK(recreated.error().category == std::string_view("gfx"));
+    CHECK(recreated.error().code != 0);
+
+    // destroy() on nothing: safe, idempotent.
+    swapchain.destroy();
+    swapchain.destroy();
+
+    // The null state survives the whole cycle.
+    CHECK(swapchain.render_pass() == nullptr);
+    CHECK(swapchain.image_count() == 0);
+}
+
+TEST_CASE("Swapchain's frame flow is guarded when empty") {
+    ws::gfx::Swapchain swapchain;
+    ws::gfx::Swapchain::Frame frame{};
+
+    // The frame flow guards only the EMPTY state (the consumer frames
+    // with its window stage up): acquire answers the out-of-date bail so
+    // the caller's recreate path runs, present answers needs_rebuild,
+    // and the recording middle is a no-op.
+    CHECK(swapchain.acquire(&frame) == ws::gfx::AcquireStatus::out_of_date);
+    CHECK(swapchain.present(frame) == ws::gfx::PresentStatus::needs_rebuild);
+    const float clear[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    swapchain.begin_render_pass(frame, clear);
+    swapchain.end_render_pass(frame);
+    swapchain.submit(frame);
+    swapchain.wait_frames();  // no fences were ever submitted
+    CHECK(swapchain.render_pass() == nullptr);
 }

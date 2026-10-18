@@ -8,19 +8,23 @@
 // events / draw via on_setup()/on_event()/on_update().
 //
 // The Vulkan device layer (loader, instance, surface, device selection,
-// queue, VMA allocator) lives in ws::gfx since stage 3b - Impl holds a
-// gfx::Gpu and unwraps its opaque void* handles through the accessors
-// just below the member block (this file includes volk.h, so it is the
-// one legit cast point). The swapchain, the frame loop and the backends
-// stay here.
+// queue, VMA allocator) lives in ws::gfx since stage 3b, and the
+// presentation layer (swapchain, depth attachment, render pass,
+// framebuffers, frame sync) since its phase B - Impl holds a gfx::Gpu
+// plus a gfx::Swapchain and unwraps their opaque void* handles through
+// the accessors just below the member block (this file includes volk.h,
+// so it is the one legit cast point). The frame loop, its recording
+// middle (the r2d flush, ImGui draw data, the command queue) and the
+// backends stay here.
 //
-// The frame flow is the classic frames-in-flight model: r2d::kMaxFramesInFlight
-// frame slots each own a fence, command pool/buffer and acquire semaphore,
-// while each swapchain image owns its render-finished semaphore - the slot
-// count, not the image count, bounds how many frames may be in flight.
-// Recreate-on-out-of-date as in Dear ImGui's examples, but the swapchain code
-// is ours - the ImGui_ImplVulkanH_* helpers are example-only per the backend's
-// own docs, so this file owns its own swapchain objects instead.
+// The frame flow is the classic frames-in-flight model, owned by
+// gfx::Swapchain: gfx::kMaxFramesInFlight frame slots (pinned equal to
+// r2d's constant below) each own a fence, command pool/buffer and
+// acquire semaphore, while each swapchain image owns its render-finished
+// semaphore - the slot count, not the image count, bounds how many
+// frames may be in flight. Recreate-on-out-of-date as in Dear ImGui's
+// examples, but the swapchain code is ours - the ImGui_ImplVulkanH_*
+// helpers are example-only per the backend's own docs.
 //
 // Startup splits into two stages so the shell survives Android's surface
 // loss (APP_CMD_TERM_WINDOW takes the ANativeWindow away at any pause):
@@ -30,6 +34,7 @@
 // the OS hands a window back.
 
 #include <ws/gfx/gpu.hpp>
+#include <ws/gfx/swapchain.hpp>
 #include <ws/input/event.hpp>
 #include <ws/input/input.hpp>
 #include <ws/ui/app.hpp>
@@ -63,7 +68,6 @@
 #pragma clang diagnostic pop
 #endif
 
-#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -83,24 +87,9 @@ namespace {
 // and never change while the backend is alive (it cannot update the value).
 constexpr uint32_t kMinImageCount = 2;
 
-// Swapchain format preference, most preferred first. SRGB_NONLINEAR is the
-// only colorspace required by the spec, so we require it alongside.
-constexpr std::array<VkFormat, 2> kPreferredFormats{
-    VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM};
-
 // Descriptor sets for the font atlas plus a handful of app textures
 // registered through ImGui_ImplVulkan_AddTexture().
 constexpr uint32_t kDescriptorSetCount = 16;
-
-// Mid-frame Vulkan failures leave the shell with no state to roll back to
-// (a command buffer may be half recorded, semaphores in flight), so log and
-// abort - the same policy as Dear ImGui's own examples.
-void vk_check(VkResult err, const char* what) {
-    if (err != VK_SUCCESS) {
-        core::error("ui: {} failed (VkResult {})", what, static_cast<int>(err));
-        std::abort();
-    }
-}
 
 // Handed to ImGui so backend-internal Vulkan failures surface in our logs.
 void imgui_vk_check(VkResult err) {
@@ -163,20 +152,14 @@ bool ui_gfx_create_surface(void* instance, void** surface_out, void* user) {
 
 }  // namespace
 
+// The frame-slot count has two homes since stage 3b phase B:
+// gfx::Swapchain owns the slots, and r2d's arenas + chunk sets key on
+// it. One number - pinned equal so a change on either side fails the
+// build right here.
+static_assert(gfx::kMaxFramesInFlight == r2d::kMaxFramesInFlight,
+              "gfx::Swapchain and r2d must agree on the frame-slot count");
+
 struct App::Impl {
-    // One frame slot per frame in flight (r2d::kMaxFramesInFlight of them) -
-    // the unit the CPU throttles on. Everything the GPU may still be reading
-    // from a previous frame lives in a slot: its command pool/buffer, the
-    // renderer's vertex arena and chunk descriptor sets, and the acquire
-    // semaphore (re-signaled every acquire, so it must retire first - that
-    // is why the slot fence is waited BEFORE the acquire). The fence is
-    // created SIGNALED: the first wait must not block.
-    struct FrameSlot {
-        VkCommandPool pool = VK_NULL_HANDLE;
-        VkCommandBuffer buffer = VK_NULL_HANDLE;
-        VkFence fence = VK_NULL_HANDLE;
-        VkSemaphore acquired = VK_NULL_HANDLE;
-    };
 
     AppConfig config;
 
@@ -194,35 +177,17 @@ struct App::Impl {
     gfx::Gpu gpu_;
     VkDescriptorPool imgui_pool = VK_NULL_HANDLE;
 
-    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
-    VkRenderPass render_pass = VK_NULL_HANDLE;
-    VkFormat format = VK_FORMAT_UNDEFINED;
-    VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR;
-    VkExtent2D extent{};
-    uint32_t image_count = 0;
-    std::vector<VkImage> images;  // owned by the swapchain, not by us
-    std::vector<VkImageView> views;
-    // The depth attachment, one per swapchain (extent == color): VMA owns
-    // the image (the color images are swapchain-owned), the view is ours.
-    // The format is chosen ONCE at gfx's device selection (depth_format()
-    // below), so every render pass ever built uses the same depth format.
-    VkImage depth_image = VK_NULL_HANDLE;
-    VmaAllocation depth_allocation = VK_NULL_HANDLE;
-    VkImageView depth_view = VK_NULL_HANDLE;
-    std::vector<VkFramebuffer> framebuffers;
-    std::array<FrameSlot, r2d::kMaxFramesInFlight> frame_slots{};
-    // Render-finished semaphores are per IMAGE, not per slot: the present of
-    // image i must wait exactly the submission that rendered i, and while
-    // that submission is still queued the image cannot be re-acquired - so
-    // two frames in flight always render two different images.
-    std::vector<VkSemaphore> image_rendered;
-    uint32_t image_index = 0;  // swapchain image being rendered this frame
-    uint32_t frame_index = 0;  // frame slot recording the current frame
+    // The presentation layer (stage 3b phase B): swapchain, image views,
+    // depth attachment, render pass, framebuffers and the whole frame
+    // sync - the frame slots and the per-image render-finished
+    // semaphores - behind gfx::Swapchain's opaque handles; the accessors
+    // below are this file's unwrap point for its per-swapchain state.
+    gfx::Swapchain swapchain_;
+    // A resize (the WindowResizeEvent path) or Vulkan itself
+    // (out-of-date/suboptimal at acquire or present) raised this: the
+    // loop top recreates the swapchain before the next frame. There is
+    // no per-frame size poll.
     bool rebuild_swapchain = false;
-    // The acquire returned VK_SUBOPTIMAL_KHR: the frame still runs and
-    // presents (the image IS acquired, its semaphore IS signaled), and the
-    // swapchain is recreated only after that frame has retired.
-    bool swapchain_suboptimal = false;
 
     // Stage bookkeeping for the split startup (see the file comment): the
     // context stage (host + gfx instance) runs once; the device stage
@@ -296,21 +261,27 @@ struct App::Impl {
 
     ~Impl() { shutdown(); }
 
-    // Raw-handle views over gpu_ - the shell's swapchain/frame/backend
-    // code speaks volk types, so each use site casts once, here, instead
-    // of sprinkling reinterpret_casts (the gfx public API is opaque void*
-    // on purpose: no Vulkan vocabulary may cross a lib boundary). Every
-    // one is null until its stage is up - gfx's null-state contract.
+    // Raw-handle views over gpu_ and swapchain_ - the shell's backend and
+    // renderer code speaks volk types, so each use site casts once, here,
+    // instead of sprinkling reinterpret_casts (the gfx public API is
+    // opaque void* on purpose: no Vulkan vocabulary may cross a lib
+    // boundary). Every one is null/0 until its stage is up - gfx's
+    // null-state contract.
     VkInstance instance() const { return static_cast<VkInstance>(gpu_.instance()); }
     VkPhysicalDevice physical_device() const {
         return static_cast<VkPhysicalDevice>(gpu_.physical_device());
     }
     VkDevice device() const { return static_cast<VkDevice>(gpu_.device()); }
     VkQueue queue() const { return static_cast<VkQueue>(gpu_.queue()); }
-    VkSurfaceKHR surface() const { return static_cast<VkSurfaceKHR>(gpu_.surface()); }
     VmaAllocator allocator() const { return static_cast<VmaAllocator>(gpu_.allocator()); }
     uint32_t queue_family() const { return gpu_.queue_family(); }
-    VkFormat depth_format() const { return static_cast<VkFormat>(gpu_.depth_format()); }
+    // The current swapchain's render pass and format - what the backend
+    // init and the renderer's drift checks read; null / UNDEFINED before
+    // the window stage creates a swapchain.
+    VkRenderPass render_pass() const {
+        return static_cast<VkRenderPass>(swapchain_.render_pass());
+    }
+    VkFormat format() const { return static_cast<VkFormat>(swapchain_.format()); }
 
     // --- event system --------------------------------------------------------
 
@@ -533,421 +504,6 @@ struct App::Impl {
         return true;
     }
 
-    // --- swapchain ----------------------------------------------------------
-
-    VkSurfaceFormatKHR choose_surface_format() const {
-        uint32_t count = 0;
-        vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device(), surface(), &count, nullptr);
-        std::vector<VkSurfaceFormatKHR> formats(count);
-        vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device(), surface(), &count,
-                                             formats.data());
-        if (formats.empty()) {
-            return {VK_FORMAT_B8G8R8A8_UNORM, VK_COLORSPACE_SRGB_NONLINEAR_KHR};
-        }
-        // One entry with UNDEFINED format means "any format is acceptable".
-        if (formats.size() == 1 && formats[0].format == VK_FORMAT_UNDEFINED) {
-            return {VK_FORMAT_B8G8R8A8_UNORM, VK_COLORSPACE_SRGB_NONLINEAR_KHR};
-        }
-        for (VkFormat preferred : kPreferredFormats) {
-            for (const VkSurfaceFormatKHR& surface_format : formats) {
-                if (surface_format.format == preferred &&
-                    surface_format.colorSpace == VK_COLORSPACE_SRGB_NONLINEAR_KHR) {
-                    return surface_format;
-                }
-            }
-        }
-        return formats[0];  // driver knows best; virtually always BGRA8 anyway
-    }
-
-    VkPresentModeKHR choose_present_mode() const {
-        uint32_t count = 0;
-        vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device(), surface(), &count,
-                                                  nullptr);
-        std::vector<VkPresentModeKHR> modes(count);
-        vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device(), surface(), &count,
-                                                 modes.data());
-        const auto has = [modes](VkPresentModeKHR mode) {
-            return std::find(modes.begin(), modes.end(), mode) != modes.end();
-        };
-        if (!config.vsync) {
-            // Uncapped: mailbox first (still tear-free), then immediate.
-            if (has(VK_PRESENT_MODE_MAILBOX_KHR)) {
-                return VK_PRESENT_MODE_MAILBOX_KHR;
-            }
-            if (has(VK_PRESENT_MODE_IMMEDIATE_KHR)) {
-                return VK_PRESENT_MODE_IMMEDIATE_KHR;
-            }
-            core::info("ui: no mailbox/immediate support, falling back to FIFO");
-        }
-        return VK_PRESENT_MODE_FIFO_KHR;  // the only mode the spec guarantees
-    }
-
-    static VkCompositeAlphaFlagBitsKHR choose_composite_alpha(
-        const VkSurfaceCapabilitiesKHR& caps) {
-        if (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) {
-            return VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-        }
-        // Opaque is universal in practice; take whatever the surface allows.
-        for (uint32_t bit = 1; bit != 0; bit <<= 1) {
-            if (caps.supportedCompositeAlpha & bit) {
-                return static_cast<VkCompositeAlphaFlagBitsKHR>(bit);
-            }
-        }
-        return VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    }
-
-    // Creates the swapchain and everything tied to its extent: image views,
-    // render pass, framebuffers and per-frame command/fence/semaphore objects.
-    bool create_swapchain(int fb_width, int fb_height) {
-        VkSurfaceCapabilitiesKHR caps{};
-        if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device(), surface(), &caps) !=
-            VK_SUCCESS) {
-            core::error("ui: failed to query surface capabilities");
-            return false;
-        }
-
-        // 0xFFFFFFFF means "match the window's current framebuffer size".
-        if (caps.currentExtent.width != 0xFFFFFFFFu) {
-            extent = caps.currentExtent;
-        } else {
-            extent.width = std::clamp(static_cast<uint32_t>(fb_width),
-                                      caps.minImageExtent.width,
-                                      caps.maxImageExtent.width);
-            extent.height = std::clamp(static_cast<uint32_t>(fb_height),
-                                       caps.minImageExtent.height,
-                                       caps.maxImageExtent.height);
-        }
-        if (extent.width == 0 || extent.height == 0) {
-            core::error("ui: swapchain extent is zero (window has no visible area)");
-            return false;
-        }
-
-        const VkSurfaceFormatKHR surface_format = choose_surface_format();
-        format = surface_format.format;
-        present_mode = choose_present_mode();
-
-        uint32_t image_request = caps.minImageCount + 1;  // room to render while presenting
-        if (caps.maxImageCount != 0) {
-            image_request = std::min(image_request, caps.maxImageCount);
-        }
-
-        VkSwapchainCreateInfoKHR create_info{};
-        create_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-        create_info.surface = surface();
-        create_info.minImageCount = image_request;
-        create_info.imageFormat = surface_format.format;
-        create_info.imageColorSpace = surface_format.colorSpace;
-        create_info.imageExtent = extent;
-        create_info.imageArrayLayers = 1;
-        create_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-        create_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        // Identity on purpose, on every platform: the app renders upright in
-        // window space and the compositor applies any window rotation at
-        // present time. Android's currentTransform goes non-identity once
-        // the app follows device rotation; mirroring it here would promise
-        // pre-rotated buffers the shell never produces (a sideways image).
-        // The zero-compositor fast path - currentTransform + pre-rotated
-        // content - stays a deliberate future opt-in.
-        create_info.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-        create_info.compositeAlpha = choose_composite_alpha(caps);
-        create_info.presentMode = present_mode;
-        create_info.clipped = VK_TRUE;
-        if (vkCreateSwapchainKHR(device(), &create_info, nullptr, &swapchain) !=
-            VK_SUCCESS) {
-            core::error("ui: vkCreateSwapchainKHR failed");
-            return false;
-        }
-
-        uint32_t actual_count = 0;
-        if (vkGetSwapchainImagesKHR(device(), swapchain, &actual_count, nullptr) !=
-            VK_SUCCESS) {
-            core::error("ui: vkGetSwapchainImagesKHR failed");
-            return false;
-        }
-        image_count = actual_count;
-        images.resize(image_count);
-        if (vkGetSwapchainImagesKHR(device(), swapchain, &actual_count, images.data()) !=
-            VK_SUCCESS) {
-            core::error("ui: vkGetSwapchainImagesKHR failed");
-            return false;
-        }
-
-        views.resize(image_count);
-        for (uint32_t i = 0; i < image_count; ++i) {
-            VkImageViewCreateInfo view_info{};
-            view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-            view_info.image = images[i];
-            view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-            view_info.format = format;
-            view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            view_info.subresourceRange.levelCount = 1;
-            view_info.subresourceRange.layerCount = 1;
-            if (vkCreateImageView(device(), &view_info, nullptr, &views[i]) != VK_SUCCESS) {
-                core::error("ui: vkCreateImageView failed");
-                return false;
-            }
-        }
-
-        // Depth attachment, same extent as the color images. VMA owns the
-        // image; the view takes the DEPTH aspect only (a D24S8 stencil half
-        // stays unused, the standard depth-only view). No barrier needed -
-        // the render pass's UNDEFINED initialLayout transition covers first
-        // use, exactly like the color attachment.
-        VkImageCreateInfo depth_info{};
-        depth_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        depth_info.imageType = VK_IMAGE_TYPE_2D;
-        depth_info.format = depth_format();
-        depth_info.extent.width = extent.width;
-        depth_info.extent.height = extent.height;
-        depth_info.extent.depth = 1;
-        depth_info.mipLevels = 1;
-        depth_info.arrayLayers = 1;
-        depth_info.samples = VK_SAMPLE_COUNT_1_BIT;
-        depth_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-        depth_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-        VmaAllocationCreateInfo depth_alloc{};
-        depth_alloc.usage = VMA_MEMORY_USAGE_AUTO;
-        if (vmaCreateImage(allocator(), &depth_info, &depth_alloc, &depth_image,
-                           &depth_allocation, nullptr) != VK_SUCCESS) {
-            core::error("ui: vmaCreateImage (depth) failed");
-            return false;
-        }
-        VkImageViewCreateInfo depth_view_info{};
-        depth_view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        depth_view_info.image = depth_image;
-        depth_view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        depth_view_info.format = depth_format();
-        depth_view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-        depth_view_info.subresourceRange.levelCount = 1;
-        depth_view_info.subresourceRange.layerCount = 1;
-        if (vkCreateImageView(device(), &depth_view_info, nullptr, &depth_view) !=
-            VK_SUCCESS) {
-            core::error("ui: vkCreateImageView (depth) failed");
-            return false;
-        }
-
-        VkAttachmentDescription color{};
-        color.format = format;
-        color.samples = VK_SAMPLE_COUNT_1_BIT;
-        color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        color.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-        // Cleared to 1.0 each frame, never read after the pass (only the
-        // subpass's own test/write touches it) - DONT_CARE keeps the store
-        // free, and the pass's UNDEFINED transition puts it into layout.
-        VkAttachmentDescription depth{};
-        depth.format = depth_format();
-        depth.samples = VK_SAMPLE_COUNT_1_BIT;
-        depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depth.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        depth.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depth.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        depth.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-        VkAttachmentReference color_ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-        VkAttachmentReference depth_ref{1,
-                                       VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
-        VkSubpassDescription subpass{};
-        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount = 1;
-        subpass.pColorAttachments = &color_ref;
-        subpass.pDepthStencilAttachment = &depth_ref;
-
-        VkAttachmentDescription attachments[2] = {color, depth};
-
-        // External dependencies, the frames-in-flight contract spelled out
-        // for the driver. Without them the pass is a WAW hazard: consecutive
-        // frames on the queue would race on the attachments, the shared
-        // depth image above all.
-        // (1) color: the acquire's semaphore (waited at this stage by the
-        //     submit) orders the presentation engine's last read of THIS
-        //     image; the dependency chains the load-clear after it.
-        //     srcAccess 0: nothing of ours runs before that wait.
-        // (2) depth: ONE image backs every framebuffer, so back-to-back
-        //     frames are WAW (this frame's clear vs. the previous frame's
-        //     depth writes) and WAR (vs. its depth tests). The execution
-        //     chain from EARLY/LATE_FRAGMENT_TESTS to EARLY/LATE plus the
-        //     depth-write availability flush serializes consecutive passes
-        //     on the single graphics queue - that barrier IS what makes the
-        //     single shared image safe; per-frame depth images would only
-        //     buy back its small serialization bubble.
-        VkSubpassDependency dependencies[2]{};
-        dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
-        dependencies[0].dstSubpass = 0;
-        dependencies[0].srcStageMask =
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dependencies[0].srcAccessMask = 0;
-        dependencies[0].dstStageMask =
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        dependencies[1].srcSubpass = VK_SUBPASS_EXTERNAL;
-        dependencies[1].dstSubpass = 0;
-        dependencies[1].srcStageMask =
-            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
-            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-        dependencies[1].srcAccessMask =
-            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        dependencies[1].dstStageMask =
-            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
-            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-        dependencies[1].dstAccessMask =
-            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-
-        VkRenderPassCreateInfo render_pass_info{};
-        render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        render_pass_info.attachmentCount = 2;
-        render_pass_info.pAttachments = attachments;
-        render_pass_info.subpassCount = 1;
-        render_pass_info.pSubpasses = &subpass;
-        render_pass_info.dependencyCount = 2;
-        render_pass_info.pDependencies = dependencies;
-        if (vkCreateRenderPass(device(), &render_pass_info, nullptr, &render_pass) !=
-            VK_SUCCESS) {
-            core::error("ui: vkCreateRenderPass failed");
-            return false;
-        }
-
-        framebuffers.resize(image_count);
-        for (uint32_t i = 0; i < image_count; ++i) {
-            // Every framebuffer pairs its color view with the one depth
-            // view - the pass has two attachments, so each must supply both.
-            VkImageView framebuffer_views[2] = {views[i], depth_view};
-            VkFramebufferCreateInfo framebuffer_info{};
-            framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-            framebuffer_info.renderPass = render_pass;
-            framebuffer_info.attachmentCount = 2;
-            framebuffer_info.pAttachments = framebuffer_views;
-            framebuffer_info.width = extent.width;
-            framebuffer_info.height = extent.height;
-            framebuffer_info.layers = 1;
-            if (vkCreateFramebuffer(device(), &framebuffer_info, nullptr,
-                                    &framebuffers[i]) != VK_SUCCESS) {
-                core::error("ui: vkCreateFramebuffer failed");
-                return false;
-            }
-        }
-
-        // Frame slots: a FIXED count, independent of image_count - that
-        // separation is the frames-in-flight model. The fences start
-        // SIGNALED so the first wait of each slot passes immediately; the
-        // acquire semaphore is re-signaled every acquire and retired by the
-        // submit's wait, both gated by the slot fence.
-        for (FrameSlot& slot : frame_slots) {
-            VkCommandPoolCreateInfo pool_info{};
-            pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-            pool_info.queueFamilyIndex = queue_family();
-            if (vkCreateCommandPool(device(), &pool_info, nullptr, &slot.pool) !=
-                VK_SUCCESS) {
-                core::error("ui: vkCreateCommandPool failed");
-                return false;
-            }
-            VkCommandBufferAllocateInfo buffer_info{};
-            buffer_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-            buffer_info.commandPool = slot.pool;
-            buffer_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-            buffer_info.commandBufferCount = 1;
-            if (vkAllocateCommandBuffers(device(), &buffer_info, &slot.buffer) !=
-                VK_SUCCESS) {
-                core::error("ui: vkAllocateCommandBuffers failed");
-                return false;
-            }
-            VkFenceCreateInfo fence_info{};
-            fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-            fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-            if (vkCreateFence(device(), &fence_info, nullptr, &slot.fence) !=
-                VK_SUCCESS) {
-                core::error("ui: vkCreateFence failed");
-                return false;
-            }
-            VkSemaphoreCreateInfo semaphore_info{};
-            semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-            if (vkCreateSemaphore(device(), &semaphore_info, nullptr,
-                                  &slot.acquired) != VK_SUCCESS) {
-                core::error("ui: vkCreateSemaphore failed");
-                return false;
-            }
-        }
-
-        // Render-finished semaphores: one per swapchain image (see the member
-        // comment). Counted with the swapchain, recreated with it.
-        image_rendered.resize(image_count);
-        for (VkSemaphore& semaphore : image_rendered) {
-            VkSemaphoreCreateInfo semaphore_info{};
-            semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-            if (vkCreateSemaphore(device(), &semaphore_info, nullptr, &semaphore) !=
-                VK_SUCCESS) {
-                core::error("ui: vkCreateSemaphore failed");
-                return false;
-            }
-        }
-        return true;
-    }
-
-    // Destroys everything create_swapchain() made. Safe on partial state
-    // and idempotent - but only the STATE RESETS below the guard are
-    // unconditional: every vk*/vma* call sits under `device()`, because
-    // with VK_NO_PROTOTYPES those are volk/VMA function pointers that stay
-    // NULL until a device exists (run() never having been reached must be
-    // able to tear down a default-constructed Impl - ~Impl calls
-    // shutdown()).
-    // The null-handle-no-op contract never gets a chance to apply without
-    // the entry points, and frame_slots is a FIXED array - its destroy
-    // loop cannot lean on emptiness the way the vectors can.
-    void destroy_swapchain_objects() {
-        if (device() != VK_NULL_HANDLE) {
-            vkDeviceWaitIdle(device());
-            if (render_pass != VK_NULL_HANDLE) {
-                vkDestroyRenderPass(device(), render_pass, nullptr);
-            }
-            for (VkFramebuffer framebuffer : framebuffers) {
-                vkDestroyFramebuffer(device(), framebuffer, nullptr);
-            }
-            for (const FrameSlot& slot : frame_slots) {
-                vkDestroySemaphore(device(), slot.acquired, nullptr);
-                vkDestroyFence(device(), slot.fence, nullptr);
-                vkDestroyCommandPool(device(), slot.pool, nullptr);
-            }
-            for (VkSemaphore semaphore : image_rendered) {
-                vkDestroySemaphore(device(), semaphore, nullptr);
-            }
-            for (VkImageView view : views) {
-                vkDestroyImageView(device(), view, nullptr);
-            }
-            if (depth_view != VK_NULL_HANDLE) {
-                vkDestroyImageView(device(), depth_view, nullptr);
-            }
-            if (depth_image != VK_NULL_HANDLE) {
-                // The allocator is a device-stage object - it outlives
-                // every window-stage teardown, including this one.
-                vmaDestroyImage(allocator(), depth_image, depth_allocation);
-            }
-            if (swapchain != VK_NULL_HANDLE) {
-                vkDestroySwapchainKHR(device(), swapchain, nullptr);
-            }
-        }
-
-        framebuffers.clear();
-        image_rendered.clear();
-        views.clear();
-        images.clear();  // swapchain-owned; freed with the swapchain above
-        for (FrameSlot& slot : frame_slots) {
-            slot = FrameSlot{};  // handles back to null for the next create
-        }
-        depth_view = VK_NULL_HANDLE;
-        depth_image = VK_NULL_HANDLE;
-        depth_allocation = VK_NULL_HANDLE;
-        render_pass = VK_NULL_HANDLE;
-        swapchain = VK_NULL_HANDLE;
-        image_count = 0;
-        image_index = 0;
-        frame_index = 0;
-    }
-
     // The GLSL sources' directory, for the dev-only shader hot reload
     // (WS_UI_DEV_SHADER_RELOAD): the committed spirv.h serves every default
     // build; a dev build polls these files' mtimes each frame. Repo-root
@@ -960,19 +516,24 @@ struct App::Impl {
         int fb_width = 0;
         int fb_height = 0;
         host_->framebuffer_size(&fb_width, &fb_height);
-        destroy_swapchain_objects();
-        if (!create_swapchain(fb_width, fb_height)) {
+        // gfx::Swapchain owns the destroy+rebuild pair; its Status carries
+        // the diagnostic. A failed recreate leaves it torn down cleanly
+        // (create/recreate clean up after themselves) - shutdown() finishes
+        // through the same guarded path.
+        const core::Status recreated = swapchain_.recreate(fb_width, fb_height);
+        if (!recreated) {
+            core::log_error(recreated.error());
             return false;
         }
         rebuild_swapchain = false;
-        swapchain_suboptimal = false;
 
         // The backend bakes MinImageCount/RenderPass/its buffer ring at Init.
         // An identical format keeps the render passes (hence its pipeline)
         // compatible; if the image count or format changed it must be
         // re-initialized. The depth format never drifts - chosen once at
         // device selection - so it never breaks compatibility either.
-        if (image_count != imgui_image_count || format != imgui_format) {
+        if (swapchain_.image_count() != imgui_image_count ||
+            format() != imgui_format) {
             ImGui_ImplVulkan_Shutdown();
             imgui_vk_up = false;
             if (!init_imgui_backend()) {
@@ -984,7 +545,7 @@ struct App::Impl {
         // at init), so only format drift matters - it rebuilds the pipeline.
         // A plain resize is render-pass compatible - the viewport and
         // scissor are dynamic and arrive per flush.
-        if (!renderer2d_.on_swapchain_recreated(render_pass, format)) {
+        if (!renderer2d_.on_swapchain_recreated(render_pass(), format())) {
             return false;
         }
         return true;
@@ -1000,17 +561,17 @@ struct App::Impl {
         info.QueueFamily = queue_family();
         info.Queue = queue();
         info.DescriptorPool = imgui_pool;
-        info.RenderPass = render_pass;
+        info.RenderPass = render_pass();
         info.MinImageCount = kMinImageCount;  // never changes: the backend cannot
-        info.ImageCount = image_count;         // update it after init
+        info.ImageCount = swapchain_.image_count();  // update it after init
         info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
         info.CheckVkResultFn = &imgui_vk_check;
         if (!ImGui_ImplVulkan_Init(&info)) {
             core::error("ui: ImGui Vulkan backend failed to initialize");
             return false;
         }
-        imgui_image_count = image_count;
-        imgui_format = format;
+        imgui_image_count = swapchain_.image_count();
+        imgui_format = format();
         imgui_vk_up = true;
         return true;
     }
@@ -1043,153 +604,6 @@ struct App::Impl {
     }
 
     // --- frame loop ---------------------------------------------------------
-
-    void render_frame(ImDrawData* draw_data) {
-        // The slot fence is the CPU throttle: waiting it means the previous
-        // submission that used this slot (pool, command buffer, the
-        // renderer's arena and chunk sets, the acquire semaphore) has fully
-        // retired. kMaxFramesInFlight slots is what bounds frames in flight
-        // - the swapchain image count has no say in it.
-        FrameSlot& slot = frame_slots[frame_index];
-        vk_check(vkWaitForFences(device(), 1, &slot.fence, VK_TRUE, UINT64_MAX),
-                 "vkWaitForFences");
-
-        // Acquire only after the slot retired: the semaphore this signals is
-        // the one the slot's previous submission waited on, so signaling it
-        // again before that wait executed would be a semaphore-in-use error.
-        const VkResult err = vkAcquireNextImageKHR(device(), swapchain, UINT64_MAX,
-                                                   slot.acquired, VK_NULL_HANDLE,
-                                                   &image_index);
-        if (err == VK_ERROR_OUT_OF_DATE_KHR) {
-            // This frame cannot run: the acquire failed and signaled
-            // nothing. Drop the commands submitted for it instead of
-            // letting them leak into a later frame (queue contract:
-            // same-frame execution, render_command_queue.hpp; the 2D
-            // renderer keeps the same contract). The fence reset below
-            // never ran, so the slot stays signaled and pristine for the
-            // rebuilt swapchain's fresh slots.
-            write_queue_.clear();
-            renderer2d_.frame_drop();
-            rebuild_swapchain = true;  // present_frame() skips; next loop recreates
-            return;
-        }
-        // VK_SUBOPTIMAL_KHR is a success code: the image IS acquired and
-        // slot.acquired IS signaled, so the frame must run and present -
-        // only a submit's semaphore wait consumes that signal, and the
-        // rebuild's destroy would otherwise take a live signaled semaphore
-        // down with the swapchain. Presenting a suboptimal swapchain is
-        // valid; present_frame() raises the rebuild flag once this frame
-        // has fully retired.
-        swapchain_suboptimal = (err == VK_SUBOPTIMAL_KHR);
-        if (!swapchain_suboptimal) {
-            vk_check(err, "vkAcquireNextImageKHR");
-        }
-        // The slot is committed to this frame from here: reset the fence
-        // AFTER the acquire so a bail above never leaves a never-submitted
-        // unsignaled fence behind.
-        vk_check(vkResetFences(device(), 1, &slot.fence), "vkResetFences");
-        vk_check(vkResetCommandPool(device(), slot.pool, 0), "vkResetCommandPool");
-
-        VkCommandBufferBeginInfo begin_info{};
-        begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vk_check(vkBeginCommandBuffer(slot.buffer, &begin_info), "vkBeginCommandBuffer");
-
-        // Dark slate background; apps draw their UI on top. The depth clear
-        // is 1.0 - far plane, the LEQUAL convention: a 3D chunk's equal
-        // depths keep the submission order the stable sort built.
-        VkClearValue clears[2]{};
-        clears[0].color.float32[0] = 0.08f;
-        clears[0].color.float32[1] = 0.08f;
-        clears[0].color.float32[2] = 0.10f;
-        clears[0].color.float32[3] = 1.0f;
-        clears[1].depthStencil.depth = 1.0f;
-        clears[1].depthStencil.stencil = 0;
-
-        VkRenderPassBeginInfo render_pass_info{};
-        render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        render_pass_info.renderPass = render_pass;
-        render_pass_info.framebuffer = framebuffers[image_index];
-        render_pass_info.renderArea.extent = extent;
-        render_pass_info.clearValueCount = 2;
-        render_pass_info.pClearValues = clears;
-        vkCmdBeginRenderPass(slot.buffer, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
-
-        // 2D world first, widgets on top. This slot's fence is already
-        // waited above, so the batch's vertex upload and the chunk
-        // descriptor writes cannot race the submission that last used them.
-        renderer2d_.flush(slot.buffer, frame_index,
-                          static_cast<float>(extent.width),
-                          static_cast<float>(extent.height));
-
-        ImGui_ImplVulkan_RenderDrawData(draw_data, slot.buffer);
-
-        // App-submitted commands run here, inside the render pass, after the
-        // UI draw data - the seam for non-ImGui GPU work (overlays, offscreen
-        // passes). The swap turns the queue the app filled during on_update()
-        // into the read queue; frames that cannot run (the bail path above,
-        // a hidden window in main_loop) clear the write queue instead - a
-        // command never outlives the frame it was submitted in.
-        std::swap(write_queue_, read_queue_);
-        try {
-            read_queue_.execute();
-        } catch (const std::exception& e) {
-            core::error("ui: exception in render command queue: {}", e.what());
-            host_->request_stop();
-        } catch (...) {
-            core::error("ui: unknown exception in render command queue");
-            host_->request_stop();
-        }
-
-        vkCmdEndRenderPass(slot.buffer);
-
-        // Wait the acquire at the color-attachment stage (nothing earlier
-        // touches the image), signal THIS image's render-finished semaphore
-        // for its present, and the slot's fence for the next slot user.
-        const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        VkSubmitInfo submit_info{};
-        submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit_info.waitSemaphoreCount = 1;
-        submit_info.pWaitSemaphores = &slot.acquired;
-        submit_info.pWaitDstStageMask = &wait_stage;
-        submit_info.commandBufferCount = 1;
-        submit_info.pCommandBuffers = &slot.buffer;
-        submit_info.signalSemaphoreCount = 1;
-        submit_info.pSignalSemaphores = &image_rendered[image_index];
-        vk_check(vkEndCommandBuffer(slot.buffer), "vkEndCommandBuffer");
-        vk_check(vkQueueSubmit(queue(), 1, &submit_info, slot.fence), "vkQueueSubmit");
-
-        // Next frame takes the other slot - at most this many submissions
-        // are outstanding before someone waits a fence again.
-        frame_index = (frame_index + 1) % r2d::kMaxFramesInFlight;
-    }
-
-    void present_frame() {
-        if (rebuild_swapchain) {
-            return;
-        }
-        VkPresentInfoKHR present_info{};
-        present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-        present_info.waitSemaphoreCount = 1;
-        present_info.pWaitSemaphores = &image_rendered[image_index];
-        present_info.swapchainCount = 1;
-        present_info.pSwapchains = &swapchain;
-        present_info.pImageIndices = &image_index;
-        const VkResult err = vkQueuePresentKHR(queue(), &present_info);
-        if (err == VK_ERROR_OUT_OF_DATE_KHR || err == VK_SUBOPTIMAL_KHR) {
-            rebuild_swapchain = true;
-            return;
-        }
-        vk_check(err, "vkQueuePresentKHR");
-        if (swapchain_suboptimal) {
-            // The acquire said the swapchain no longer matches the
-            // surface; this frame presented fine, so recreate before the
-            // next acquire - the image's semaphore is fully retired now
-            // (this present consumed it).
-            rebuild_swapchain = true;
-            swapchain_suboptimal = false;
-        }
-    }
 
     int main_loop(App& app) {
         // The frame clock's "previous": the pump's own start, so the
@@ -1274,11 +688,7 @@ struct App::Impl {
                 // destroying the old pipelines needs. Deferred per-frame
                 // deletion queues (M12) can move this off the iteration
                 // loop later. Dev-only cost, never in a default build.
-                for (const FrameSlot& slot : frame_slots) {
-                    vk_check(vkWaitForFences(device(), 1, &slot.fence, VK_TRUE,
-                                             UINT64_MAX),
-                             "vkWaitForFences");
-                }
+                swapchain_.wait_frames();
                 if (renderer2d_.reload_pipelines()) {
                     core::info("ui: shader hot reload - pipelines rebaked");
                 } else {
@@ -1303,8 +713,8 @@ struct App::Impl {
 
             // One r2d frame per ImGui frame: begin before on_update() records
             // its draws, sort + replay once it returned.
-            renderer2d_.frame_begin(static_cast<float>(extent.width),
-                                    static_cast<float>(extent.height));
+            renderer2d_.frame_begin(static_cast<float>(swapchain_.width()),
+                                    static_cast<float>(swapchain_.height()));
             bool frame_abandoned = false;
             try {
                 app.on_update();
@@ -1334,11 +744,67 @@ struct App::Impl {
             ImDrawData* draw_data = ImGui::GetDrawData();
             const bool hidden =
                 draw_data->DisplaySize.x <= 0.0f || draw_data->DisplaySize.y <= 0.0f;
+            bool frame_rendered = false;
+            gfx::Swapchain::Frame frame{};
             if (!hidden) {
-                render_frame(draw_data);
+                // Dark slate background; apps draw their UI on top. The
+                // depth clear (1.0 - far plane, the LEQUAL convention) is
+                // gfx's half of begin_render_pass.
+                static constexpr float kClearColor[4] = {0.08f, 0.08f, 0.10f,
+                                                         1.0f};
+                if (swapchain_.acquire(&frame) == gfx::AcquireStatus::out_of_date) {
+                    // This frame cannot run: nothing was acquired or
+                    // signaled, and gfx kept the slot signaled and
+                    // pristine. Drop the commands submitted for it instead
+                    // of letting them leak into a later frame (queue
+                    // contract: same-frame execution,
+                    // render_command_queue.hpp; the 2D renderer keeps the
+                    // same contract).
+                    write_queue_.clear();
+                    renderer2d_.frame_drop();
+                    rebuild_swapchain = true;  // the loop top recreates
+                } else {
+                    swapchain_.begin_render_pass(frame, kClearColor);
+                    VkCommandBuffer cmd =
+                        static_cast<VkCommandBuffer>(frame.command_buffer);
+
+                    // 2D world first, widgets on top. This slot's fence was
+                    // waited inside acquire, so the batch's vertex upload
+                    // and the chunk descriptor writes cannot race the
+                    // submission that last used them.
+                    renderer2d_.flush(cmd, frame.frame_index,
+                                      static_cast<float>(swapchain_.width()),
+                                      static_cast<float>(swapchain_.height()));
+
+                    ImGui_ImplVulkan_RenderDrawData(draw_data, cmd);
+
+                    // App-submitted commands run here, inside the render
+                    // pass, after the UI draw data - the seam for
+                    // non-ImGui GPU work (overlays, offscreen passes).
+                    // The swap turns the queue the app filled during
+                    // on_update() into the read queue; frames that cannot
+                    // run (the bail path above, a hidden window) clear the
+                    // write queue instead - a command never outlives the
+                    // frame it was submitted in.
+                    std::swap(write_queue_, read_queue_);
+                    try {
+                        read_queue_.execute();
+                    } catch (const std::exception& e) {
+                        core::error("ui: exception in render command queue: {}",
+                                    e.what());
+                        host_->request_stop();
+                    } catch (...) {
+                        core::error("ui: unknown exception in render command queue");
+                        host_->request_stop();
+                    }
+
+                    swapchain_.end_render_pass(frame);
+                    swapchain_.submit(frame);
+                    frame_rendered = true;
+                }
             } else {
-                // Zero-size (minimized) frame: same rule as the bail path in
-                // render_frame() - drop, never defer.
+                // Zero-size (minimized) frame: same rule as the bail path
+                // above - drop, never defer.
                 write_queue_.clear();
                 renderer2d_.frame_drop();
             }
@@ -1347,8 +813,10 @@ struct App::Impl {
                 ImGui::UpdatePlatformWindows();
                 ImGui::RenderPlatformWindowsDefault();
             }
-            if (!hidden) {
-                present_frame();
+            if (frame_rendered) {
+                if (swapchain_.present(frame) == gfx::PresentStatus::needs_rebuild) {
+                    rebuild_swapchain = true;
+                }
             }
         }
         return 0;
@@ -1396,7 +864,17 @@ struct App::Impl {
         int fb_width = 0;
         int fb_height = 0;
         host_->framebuffer_size(&fb_width, &fb_height);
-        if (fb_width <= 0 || fb_height <= 0 || !create_swapchain(fb_width, fb_height)) {
+        if (fb_width <= 0 || fb_height <= 0) {
+            return false;
+        }
+        // The window stage's presentation half: the swapchain (with the
+        // render pass + framebuffers it carries) against the Gpu the
+        // surface attach above brought up. A failure cleans up after
+        // itself inside gfx - the Status carries the diagnostic.
+        const core::Status created =
+            swapchain_.create(gpu_, fb_width, fb_height, {config.vsync});
+        if (!created) {
+            core::log_error(created.error());
             return false;
         }
         if (!gpu_context_up) {
@@ -1412,7 +890,7 @@ struct App::Impl {
                                             .update_after_bind =
                                                 indexing.update_after_bind};
             if (!renderer2d_.init(device(), physical_device(), allocator(), queue(),
-                                  queue_family(), render_pass, format,
+                                  queue_family(), render_pass(), format(),
                                   texture_tier_)) {
                 return false;
             }
@@ -1432,8 +910,8 @@ struct App::Impl {
             // re-initializes here; identical format and image count keep
             // its render pass compatible, and the renderer re-creates
             // only what the OS round-trip actually invalidated.
-            if (!imgui_vk_up || image_count != imgui_image_count ||
-                format != imgui_format) {
+            if (!imgui_vk_up || swapchain_.image_count() != imgui_image_count ||
+                format() != imgui_format) {
                 if (imgui_vk_up) {
                     ImGui_ImplVulkan_Shutdown();
                 }
@@ -1441,7 +919,7 @@ struct App::Impl {
                     return false;
                 }
             }
-            if (!renderer2d_.on_swapchain_recreated(render_pass, format)) {
+            if (!renderer2d_.on_swapchain_recreated(render_pass(), format())) {
                 return false;
             }
         }
@@ -1455,17 +933,18 @@ struct App::Impl {
         imgui_platform_up = true;
         window_stage_up = true;
         rebuild_swapchain = false;  // the swapchain above is the current one
-        swapchain_suboptimal = false;
         core::info("ui: \"{}\" ready: {}x{}, {} swapchain images, "
                    "{} frames in flight, {} present",
-                   config.title, extent.width, extent.height, image_count,
-                   r2d::kMaxFramesInFlight,
-                   present_mode_name(present_mode));
+                   config.title, swapchain_.width(), swapchain_.height(),
+                   swapchain_.image_count(), gfx::kMaxFramesInFlight,
+                   present_mode_name(static_cast<VkPresentModeKHR>(
+                       swapchain_.present_mode())));
         return true;
     }
 
     // Tears the window stage down, in the same order final shutdown would:
-    // backends, swapchain objects, surface (the last through gfx::Gpu).
+    // backends, the swapchain (through gfx::Swapchain), surface (through
+    // gfx::Gpu).
     // Idempotent - it is BOTH the
     // mid-run teardown for Android surface loss (APP_CMD_TERM_WINDOW) and
     // the first step of shutdown(); every destroy is guarded, so it is the
@@ -1479,7 +958,7 @@ struct App::Impl {
             host_->imgui_platform_shutdown();
             imgui_platform_up = false;
         }
-        destroy_swapchain_objects();
+        swapchain_.destroy();
         gpu_.detach_surface();
         window_stage_up = false;
     }
