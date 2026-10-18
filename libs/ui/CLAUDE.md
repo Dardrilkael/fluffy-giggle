@@ -68,11 +68,13 @@ libs/ui/
   # (the input family — the event types + InputFrame/frame_input — lives
   #  in libs/input since stage 3a; ui links it, and this tree's platform
   #  TUs are the only writers of an InputFrame)
-  # (the Vulkan device layer AND the swapchain/frame sync —
-  #  loader/instance/surface/device/allocator, swapchain, render pass,
-  #  frame sync — live in libs/gfx since stage 3b; ui holds a
-  #  gfx::Gpu + gfx::Swapchain and unwraps their opaque handles in
-  #  app.cpp, the one cast point)
+  # (the Vulkan device layer, the swapchain/frame sync AND the
+  #  device-memory/object helpers — loader/instance/surface/device/
+  #  allocator, swapchain, render pass, frame sync, buffer/image/
+  #  shader-module ops — live in libs/gfx since stage 3b; ui holds a
+  #  gfx::Gpu + gfx::Swapchain, unwraps their opaque handles in app.cpp
+  #  (the bootstrap's cast point) and draws its memory ops through
+  #  Gpu's methods — ui links no vma since phase C)
   include/ws/ui/
     app.hpp                 # App, AppConfig — PUBLIC, zero third-party includes
     render_command_queue.hpp # RenderCommandQueue
@@ -87,7 +89,7 @@ libs/ui/
       widgets.hpp            # button/checkbox/radio/toggle switch/slider/drag float/collapsing header/selectable/combo/text input/panel/tabs/scroll region + the overlay scopes (popup/tooltip/modal) + the statics (text/separator/progress) — the widget functions + fit_text
   src/                       # layer folders - the cut lines for a future split into shared libs
     app/                     # the shell itself
-      app.cpp                # pimpl: the frame loop + backends; the device bootstrap and the swapchain/frame sync live in ws::gfx (stage 3b), unwrapped through gfx::Gpu's and gfx::Swapchain's opaque handles
+      app.cpp                # pimpl: the frame loop + backends; the device bootstrap, the swapchain/frame sync and the buffer/image/shader-module ops live in ws::gfx (stage 3b), unwrapped through gfx::Gpu's and gfx::Swapchain's opaque handles (the r2d device half casts the handles its Gpu methods hand back, once, at each create)
     platform/                # the windowing seam - exactly one window TU builds per platform
       window.h               # internal: WindowHost, the platform seam (never reaches apps)
       window_glfw.cpp        # desktop: GLFW window + all glfwSet*Callback installs + the clipboard pair (only here)
@@ -1065,15 +1067,18 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   (`vkEnumerateInstanceVersion`) so a 1.1+ device is reachable at all.
   The tier logs one `core::info` line at startup (tagged `gfx:` since the
   move — the smoke marker) and is fixed for the process.
-- VMA's implementation TU is `libs/gfx/src/vma_impl.cpp` since stage 3b
-  (dynamic function loading; the two loader entry points are handed over
-  from gfx's `gpu.cpp` via `VmaAllocatorCreateInfo::pVulkanFunctions`
-  since VMA 3.2 requires it) — exactly one `VMA_IMPLEMENTATION` TU in
-  the workspace. The allocator is created by `ws::gfx::Gpu` (the first
-  attach's device stage) and crosses to ui as one of Gpu's opaque
-  handles; app.cpp unwraps it and hands the `VmaAllocator` to r2d's
-  device half — the one vma consumer left in ui until phase C's
-  buffer/image helpers move those call sites into gfx.
+- VMA lives entirely in `libs/gfx` since stage 3b phase C: the
+  implementation TU is `libs/gfx/src/vma_impl.cpp` (dynamic function
+  loading; the two loader entry points are handed over from gfx's
+  `gpu.cpp` via `VmaAllocatorCreateInfo::pVulkanFunctions` since VMA 3.2
+  requires it) — exactly one `VMA_IMPLEMENTATION` TU in the workspace.
+  The allocator is created by `ws::gfx::Gpu` (the first attach's device
+  stage) and stays there: r2d's device half creates its arenas, staging
+  buffers, textures and shader modules through `Gpu::create_buffer` /
+  `create_image` / `create_shader_module` (+ `destroy_*`/`flush_buffer`),
+  so `ws_ui` links no vma target and no `vk_mem_alloc.h` include exists
+  under `libs/ui` — the `VmaAllocator` handle's only consumers are
+  gfx's own TUs (`memory.cpp`, the swapchain's depth image).
 - Swapchain: `ws::gfx::Swapchain` owns it since stage 3b phase B — the
   shell holds one beside its Gpu and recreates through `recreate()`;
   the choice tables are gfx's pure helpers, tested in libs/gfx. The

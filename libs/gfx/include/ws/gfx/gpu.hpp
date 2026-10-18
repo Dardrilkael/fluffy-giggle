@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 
@@ -39,6 +40,41 @@ struct DeviceOptions {
 struct DescriptorIndexing {
     bool bindless = false;           // one global descriptor-indexed table is possible
     bool update_after_bind = false;  // ... and its writes may land mid-flight
+};
+
+// Device-memory + object descriptors (phase C). The `usage`/`format`
+// fields carry the Vulkan enums as plain numbers - the consumer spells
+// them with its own Vulkan headers; no Vulkan type crosses the boundary.
+struct BufferDesc {
+    uint64_t size = 0;   // bytes
+    uint32_t usage = 0;  // VkBufferUsageFlags
+};
+
+// create_buffer's answer: the handles to keep and the write window.
+// `buffer` + `allocation` pair up for destroy_buffer; `mapped` is the
+// host-visible window to write through (the buffer stays mapped for its
+// lifetime).
+struct BufferOut {
+    void* buffer = nullptr;      // VkBuffer
+    void* allocation = nullptr;  // VmaAllocation
+    void* mapped = nullptr;      // host-visible write window
+};
+
+// The image shape ui uploads: 2D, one mip, one layer, optimal tiling,
+// starting undefined - the boilerplate lives in gfx.
+struct ImageDesc {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t format = 0;  // VkFormat
+    uint32_t usage = 0;   // VkImageUsageFlags
+};
+
+// create_image's answer: the device-local image plus its allocation pair
+// for destroy_image. The image view stays the consumer's (a plain vk
+// object, not memory).
+struct ImageOut {
+    void* image = nullptr;       // VkImage
+    void* allocation = nullptr;  // VmaAllocation
 };
 
 // The Vulkan device layer: loader, instance (+ optional validation),
@@ -83,6 +119,26 @@ public:
     uint32_t depth_format() const;
 
     DescriptorIndexing descriptor_indexing() const;
+
+    // --- device memory + object helpers (phase C; src/memory.cpp) ---
+    // The ops ui's renderer draws through, sized to exactly its use:
+    // buffers are host-write and persistently mapped (the arena + upload
+    // staging profile), images are device-local 2D sample targets. Each
+    // create clears its out record, validates the descriptor, then needs
+    // the device stage - every failure is the Status above, never a
+    // crash. The destroys and the flush are null-tolerant no-ops, so
+    // failure-path teardown calls them uniformly.
+    core::Status create_buffer(const BufferDesc& desc, BufferOut& out) const;
+    void destroy_buffer(void* buffer, void* allocation) const;
+    // Makes the whole buffer's host writes visible - vma may hand back
+    // non-coherent memory, so a writer flushes after filling `mapped`.
+    void flush_buffer(void* allocation) const;
+    core::Status create_image(const ImageDesc& desc, ImageOut& out) const;
+    void destroy_image(void* image, void* allocation) const;
+    core::Status create_shader_module(const uint32_t* code,
+                                      std::size_t word_count,
+                                      void** module) const;
+    void destroy_shader_module(void* module) const;
 
 private:
     struct Impl;

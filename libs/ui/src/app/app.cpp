@@ -53,21 +53,6 @@
 #include <imgui_impl_vulkan.h>
 #include <implot.h>
 
-// vk_mem_alloc.h is a third-party header - keep it clear of our /W4 /WX
-// settings on MSVC and of the stricter clang sets on Android.
-#if defined(_MSC_VER)
-#pragma warning(push, 0)
-#elif defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Weverything"
-#endif
-#include <vk_mem_alloc.h>
-#if defined(_MSC_VER)
-#pragma warning(pop)
-#elif defined(__clang__)
-#pragma clang diagnostic pop
-#endif
-
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -273,7 +258,6 @@ struct App::Impl {
     }
     VkDevice device() const { return static_cast<VkDevice>(gpu_.device()); }
     VkQueue queue() const { return static_cast<VkQueue>(gpu_.queue()); }
-    VmaAllocator allocator() const { return static_cast<VmaAllocator>(gpu_.allocator()); }
     uint32_t queue_family() const { return gpu_.queue_family(); }
     // The current swapchain's render pass and format - what the backend
     // init and the renderer's drift checks read; null / UNDEFINED before
@@ -889,7 +873,7 @@ struct App::Impl {
             texture_tier_ = r2d::TextureTier{.bindless = indexing.bindless,
                                             .update_after_bind =
                                                 indexing.update_after_bind};
-            if (!renderer2d_.init(device(), physical_device(), allocator(), queue(),
+            if (!renderer2d_.init(device(), physical_device(), gpu_, queue(),
                                   queue_family(), render_pass(), format(),
                                   texture_tier_)) {
                 return false;

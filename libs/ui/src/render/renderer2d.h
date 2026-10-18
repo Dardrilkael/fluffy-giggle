@@ -20,9 +20,13 @@
 #include <initializer_list>
 #include <vector>
 
-#include <volk.h>  // internal header: Vk*/Vma types live in signatures and
-#include <vk_mem_alloc.h>  // storage. They never reach apps - that surface is
-                          // <ws/ui/renderer2d.hpp>.
+#include <volk.h>  // internal header: the Vk* types in signatures and
+                  // storage below never reach apps - that surface is
+                  // <ws/ui/renderer2d.hpp>.
+#include <ws/gfx/gpu.hpp>  // Gpu: the device layer's memory + object ops
+                           // (buffer/image create-destroy, flush, shader
+                           // modules) this half draws its handles from - ui
+                           // links no VMA since stage 3b phase C
 
 #include <ws/ui/renderer2d.hpp>
 
@@ -90,8 +94,8 @@ struct TextureTier {
 
 class Renderer2D {
 public:
-    // Vulkan/VMA handles are single-owned: a copied renderer would destroy
-    // them twice at shutdown.
+    // The Vulkan handles (and the gfx memory handles paired with them) are
+    // single-owned: a copied renderer would destroy them twice at shutdown.
     Renderer2D() = default;
     Renderer2D(const Renderer2D&) = delete;
     Renderer2D& operator=(const Renderer2D&) = delete;
@@ -111,7 +115,10 @@ public:
     // One-time setup after the swapchain exists. `tier` is the device
     // probe's pick (app.cpp enables the features before calling); it fixes
     // the descriptor set layout, the frag shader variant and the flush path
-    // for the process. Order inside: push-constant limit check, upload
+    // for the process. `gpu` is the device layer: every buffer, image and
+    // shader module created below goes through its methods (and the VMA
+    // allocator behind them never reaches ui). Order inside: push-constant
+    // limit check, upload
     // pool/fence, sampler, white texture (registry index 0 - every
     // descriptor slot starts bound to it), set layout (the tier's), pipeline
     // layout, per-frame-slot resources (descriptor sets + vertex and index
@@ -120,7 +127,7 @@ public:
     // fails; shutdown() is the failure-path cleanup and cleans partial
     // state.
     bool init(VkDevice device, VkPhysicalDevice physical_device,
-              VmaAllocator allocator, VkQueue queue, uint32_t queue_family,
+              const gfx::Gpu& gpu, VkQueue queue, uint32_t queue_family,
               VkRenderPass render_pass, VkFormat format,
               const TextureTier& tier);
     // Swapchain drift. The per-frame-slot resources are swapchain-
@@ -299,7 +306,9 @@ private:
     // --- Vulkan state (null/empty until init()) ---
     VkDevice device_ = VK_NULL_HANDLE;
     VkPhysicalDevice physical_device_ = VK_NULL_HANDLE;
-    VmaAllocator allocator_ = VK_NULL_HANDLE;
+    // The device layer: buffers, images and shader modules come from its
+    // methods, and the VMA allocator behind them stays inside gfx.
+    const gfx::Gpu* gpu_ = nullptr;
     VkQueue queue_ = VK_NULL_HANDLE;
     uint32_t queue_family_ = 0;
 
@@ -321,7 +330,7 @@ private:
     struct TextureEntry {
         VkImage image = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
-        VmaAllocation allocation = VK_NULL_HANDLE;
+        void* allocation = nullptr;  // the gfx image allocation (destroy_image's pair)
     };
     std::vector<TextureEntry> textures_;
 
@@ -346,7 +355,7 @@ private:
     // in-flight submission.
     struct FrameArena {
         VkBuffer buffer = VK_NULL_HANDLE;
-        VmaAllocation allocation = VK_NULL_HANDLE;
+        void* allocation = nullptr;  // the gfx buffer allocation (flush/destroy's handle)
         batch::Vertex* mapped = nullptr;
         std::size_t capacity = 0;  // vertices
     };
@@ -359,7 +368,7 @@ private:
     // {0,1,2,2,3,0}), refilled on every growth.
     struct IndexArena {
         VkBuffer buffer = VK_NULL_HANDLE;
-        VmaAllocation allocation = VK_NULL_HANDLE;
+        void* allocation = nullptr;  // the gfx buffer allocation (flush/destroy's handle)
         std::uint32_t* mapped = nullptr;
         std::size_t capacity = 0;  // quads
     };

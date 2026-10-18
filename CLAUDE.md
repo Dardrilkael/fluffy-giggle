@@ -52,9 +52,11 @@ One line each - the per-tree CLAUDE.md files carry the detail:
   writers of an InputFrame.
 - `libs/gfx` - the Vulkan device layer promoted out of ui (stage 3b):
   loader/instance, surface-via-callback, device/queue selection, the VMA
-  allocator, the swapchain and frame sync. Public API is opaque void*
-  handles; volk/vma stay PRIVATE and ui (the only consumer) is the
-  unwrap point.
+  allocator, the swapchain and frame sync, and (phase C) the
+  buffer/image/shader-module helpers ui's renderer draws through - no
+  vma target or vk_mem_alloc.h include remains under libs/ui. Public API
+  is opaque void* handles; volk/vma stay PRIVATE and ui (the only
+  consumer) is the unwrap point.
 - `libs/ui` - app shell (GLFW/Vulkan/ImGui/ImPlot, all private) + the
   widget/renderer/gui drawing APIs.
 - `libs/audio` - WAV decode + OpenAL Soft playback behind a Result-only API.

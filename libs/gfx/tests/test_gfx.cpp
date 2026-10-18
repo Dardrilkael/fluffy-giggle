@@ -14,9 +14,11 @@
 // (the descriptor-indexing tier table, the depth-format walk, the
 // swapchain choices) and the null-state contracts (Gpu's getters before
 // init, lifecycle misuse, idempotent teardown; Swapchain's lifecycle and
-// frame flow before create). No Vulkan device is ever faked: Gpu is
-// never init()ed and Swapchain never created here, so no volk entry
-// point runs; the cases only pin the guarded, headless paths.
+// frame flow before create; the phase-C memory/object guards - descriptor
+// validation, the device-stage Status, null-tolerant destroys). No
+// Vulkan device is ever faked: Gpu is never init()ed and Swapchain never
+// created here, so no volk entry point runs; the cases only pin the
+// guarded, headless paths.
 
 namespace {
 
@@ -289,6 +291,85 @@ TEST_CASE("init rejects an unusable SurfaceSource before any loader call") {
         REQUIRE_FALSE(status);
         CHECK(gpu.instance() == nullptr);
     }
+}
+
+// --- the device-memory + object helpers (phase C; no device stage) ----------
+// The desc/word values below are opaque stand-ins: the guards fire before
+// any Vulkan call could read them, so their numeric meaning never matters.
+
+TEST_CASE("the creates reject bad descriptors first") {
+    ws::gfx::Gpu gpu;  // never init()ed: no device stage - the cheap
+                       // descriptor validation fires before any stage check
+
+    SUBCASE("a zero-size buffer desc") {
+        ws::gfx::BufferOut out;
+        out.buffer = reinterpret_cast<void*>(1);  // cleared on failure
+        const ws::core::Status st =
+            gpu.create_buffer(ws::gfx::BufferDesc{0, 1u}, out);
+        REQUIRE_FALSE(st);
+        CHECK(st.error().category == std::string_view("gfx"));
+        CHECK(st.error().code != 0);
+        CHECK(out.buffer == nullptr);
+        CHECK(out.allocation == nullptr);
+        CHECK(out.mapped == nullptr);
+    }
+    SUBCASE("a zero-extent image desc") {
+        ws::gfx::ImageOut out;
+        const ws::core::Status st =
+            gpu.create_image(ws::gfx::ImageDesc{0, 64, 37u, 4u}, out);
+        REQUIRE_FALSE(st);
+        CHECK(st.error().code != 0);
+        CHECK(out.image == nullptr);
+        CHECK(out.allocation == nullptr);
+    }
+    SUBCASE("empty shader words") {
+        void* module = reinterpret_cast<void*>(1);
+        const ws::core::Status st =
+            gpu.create_shader_module(nullptr, 4, &module);
+        REQUIRE_FALSE(st);
+        CHECK(st.error().code != 0);
+        CHECK(module == nullptr);
+    }
+}
+
+TEST_CASE("the creates need the device stage - a Status, never a crash") {
+    ws::gfx::Gpu gpu;
+    const std::uint32_t words[4] = {0, 1, 2, 3};
+
+    ws::gfx::BufferOut buffer;
+    const ws::core::Status buffer_st =
+        gpu.create_buffer(ws::gfx::BufferDesc{1024, 1u}, buffer);
+    REQUIRE_FALSE(buffer_st);
+    CHECK(buffer_st.error().category == std::string_view("gfx"));
+    CHECK(buffer_st.error().code != 0);
+    CHECK(buffer.buffer == nullptr);
+
+    ws::gfx::ImageOut image;
+    const ws::core::Status image_st =
+        gpu.create_image(ws::gfx::ImageDesc{64, 64, 37u, 4u}, image);
+    REQUIRE_FALSE(image_st);
+    CHECK(image_st.error().code != 0);
+
+    void* module = nullptr;
+    const ws::core::Status module_st =
+        gpu.create_shader_module(words, 4, &module);
+    REQUIRE_FALSE(module_st);
+    CHECK(module_st.error().code != 0);
+    CHECK(module == nullptr);
+}
+
+TEST_CASE("destroy and flush are null-tolerant no-ops on a dead Gpu") {
+    ws::gfx::Gpu gpu;  // no device stage: nothing to free through
+    gpu.destroy_buffer(nullptr, nullptr);
+    gpu.destroy_image(nullptr, nullptr);
+    gpu.flush_buffer(nullptr);
+    gpu.destroy_shader_module(nullptr);
+    // Even non-null handles: without the device stage there is no
+    // allocator to free through, so the destroys stay no-ops - failure
+    // teardowns never need their own stage checks.
+    gpu.destroy_buffer(reinterpret_cast<void*>(1), reinterpret_cast<void*>(2));
+    gpu.destroy_image(reinterpret_cast<void*>(1), reinterpret_cast<void*>(2));
+    gpu.destroy_shader_module(reinterpret_cast<void*>(1));
 }
 
 // --- Swapchain's null-state contract (no device, never created) ---------------

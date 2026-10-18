@@ -35,30 +35,6 @@ namespace {
 // load resolve to it.
 constexpr std::uint32_t kWhiteIndex = 0;
 
-// Host-visible allocation for write-then-submit buffers (the index pattern,
-// vertex regions, staging): sequential writes, mapped at creation. vma may
-// hand back non-coherent memory, so every writer still flushes explicitly.
-VmaAllocationCreateInfo host_write_alloc() {
-    VmaAllocationCreateInfo info{};
-    info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-                 VMA_ALLOCATION_CREATE_MAPPED_BIT;
-    info.usage = VMA_MEMORY_USAGE_AUTO;
-    return info;
-}
-
-VkShaderModule make_shader_module(VkDevice device, const std::uint32_t* code,
-                                  std::size_t word_count) {
-    VkShaderModuleCreateInfo info{};
-    info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    info.codeSize = word_count * sizeof(std::uint32_t);
-    info.pCode = code;
-    VkShaderModule module = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(device, &info, nullptr, &module) != VK_SUCCESS) {
-        return VK_NULL_HANDLE;
-    }
-    return module;
-}
-
 // The chunk's clip as a scissor rect: intersected with the frame extent
 // (kFullClip means "everything"), edges rounded outward by a sub-pixel so
 // a boundary pixel never falls outside the intended rect. A clip that
@@ -89,12 +65,12 @@ VkRect2D chunk_scissor(const batch::Chunk& chunk, float fb_width,
 // --- Renderer2D: GPU lifecycle ----------------------------------------------
 
 bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
-                      VmaAllocator allocator, VkQueue queue,
+                      const gfx::Gpu& gpu, VkQueue queue,
                       uint32_t queue_family, VkRenderPass render_pass,
                       VkFormat format, const TextureTier& tier) {
     device_ = device;
     physical_device_ = physical_device;
-    allocator_ = allocator;
+    gpu_ = &gpu;
     queue_ = queue;
     queue_family_ = queue_family;
     render_pass_ = render_pass;
@@ -308,7 +284,7 @@ void Renderer2D::shutdown() {
     destroy_frame_resources();
     for (const TextureEntry& entry : textures_) {
         vkDestroyImageView(device_, entry.view, nullptr);
-        vmaDestroyImage(allocator_, entry.image, entry.allocation);
+        gpu_->destroy_image(entry.image, entry.allocation);
     }
     textures_.clear();
     // Registry-derived state dies with the registry: after a re-init the old
@@ -335,7 +311,7 @@ void Renderer2D::shutdown() {
     }
     device_ = VK_NULL_HANDLE;
     physical_device_ = VK_NULL_HANDLE;
-    allocator_ = VK_NULL_HANDLE;
+    gpu_ = nullptr;
     queue_ = VK_NULL_HANDLE;
     render_pass_ = VK_NULL_HANDLE;
 }
@@ -473,11 +449,11 @@ bool Renderer2D::create_frame_resources() {
 
 void Renderer2D::destroy_frame_resources() {
     for (const FrameArena& arena : arenas_) {
-        vmaDestroyBuffer(allocator_, arena.buffer, arena.allocation);
+        gpu_->destroy_buffer(arena.buffer, arena.allocation);
     }
     arenas_.clear();
     for (const IndexArena& arena : index_arenas_) {
-        vmaDestroyBuffer(allocator_, arena.buffer, arena.allocation);
+        gpu_->destroy_buffer(arena.buffer, arena.allocation);
     }
     index_arenas_.clear();
     pending_table_ids_.clear();
@@ -510,31 +486,27 @@ bool Renderer2D::grow_vertex_arena(uint32_t frame_slot,
     // The new buffer replaces the old one wholesale: flush grows BEFORE
     // copying this frame's vertices in, and old frames' bytes are never
     // read again - no content carry-over.
-    VkBufferCreateInfo buffer_info{};
-    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    buffer_info.size =
-        static_cast<VkDeviceSize>(capacity) * sizeof(batch::Vertex);
-    buffer_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-    VmaAllocationCreateInfo alloc_info = host_write_alloc();
-    VkBuffer buffer = VK_NULL_HANDLE;
-    VmaAllocation allocation = VK_NULL_HANDLE;
-    VmaAllocationInfo mapped{};
-    if (vmaCreateBuffer(allocator_, &buffer_info, &alloc_info, &buffer,
-                        &allocation, &mapped) != VK_SUCCESS) {
+    gfx::BufferOut buffer{};
+    const ws::core::Status created = gpu_->create_buffer(
+        {static_cast<std::uint64_t>(capacity) * sizeof(batch::Vertex),
+         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT},
+        buffer);
+    if (!created) {
         ws::core::error("ui: r2d - vertex arena growth failed ({} -> {} "
-                        "vertices, frame slot {})",
-                        arena.capacity, capacity, frame_slot);
+                        "vertices, frame slot {}): {}",
+                        arena.capacity, capacity, frame_slot,
+                        created.error().message);
         return false;
     }
     if (arena.buffer != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(allocator_, arena.buffer, arena.allocation);
+        gpu_->destroy_buffer(arena.buffer, arena.allocation);
         ws::core::info("ui: r2d grew frame slot {}'s vertex arena {} -> {} "
                        "vertices",
                        frame_slot, arena.capacity, capacity);
     }
-    arena.buffer = buffer;
-    arena.allocation = allocation;
-    arena.mapped = static_cast<batch::Vertex*>(mapped.pMappedData);
+    arena.buffer = static_cast<VkBuffer>(buffer.buffer);
+    arena.allocation = buffer.allocation;
+    arena.mapped = static_cast<batch::Vertex*>(buffer.mapped);
     arena.capacity = capacity;
     return true;
 }
@@ -547,36 +519,32 @@ bool Renderer2D::grow_index_arena(uint32_t frame_slot, std::size_t min_quads) {
     while (capacity < min_quads) {
         capacity *= 2;
     }
-    VkBufferCreateInfo buffer_info{};
-    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    buffer_info.size =
-        static_cast<VkDeviceSize>(capacity) * 6 * sizeof(uint32_t);
-    buffer_info.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-    VmaAllocationCreateInfo alloc_info = host_write_alloc();
-    VkBuffer buffer = VK_NULL_HANDLE;
-    VmaAllocation allocation = VK_NULL_HANDLE;
-    VmaAllocationInfo mapped{};
-    if (vmaCreateBuffer(allocator_, &buffer_info, &alloc_info, &buffer,
-                        &allocation, &mapped) != VK_SUCCESS) {
+    gfx::BufferOut buffer{};
+    const ws::core::Status created = gpu_->create_buffer(
+        {static_cast<std::uint64_t>(capacity) * 6 * sizeof(uint32_t),
+         VK_BUFFER_USAGE_INDEX_BUFFER_BIT},
+        buffer);
+    if (!created) {
         ws::core::error("ui: r2d - index arena growth failed ({} -> {} "
-                        "quads, frame slot {})",
-                        arena.capacity, capacity, frame_slot);
+                        "quads, frame slot {}): {}",
+                        arena.capacity, capacity, frame_slot,
+                        created.error().message);
         return false;
     }
     // The pattern is absolute (quad q -> 4q + offsets), so a growth refills
     // the whole arena - the first quads' indices are unchanged, the new
     // tail extends them.
-    auto* const indices = static_cast<uint32_t*>(mapped.pMappedData);
+    auto* const indices = static_cast<uint32_t*>(buffer.mapped);
     fill_quad_index_pattern(indices, capacity);
-    vmaFlushAllocation(allocator_, allocation, 0, VK_WHOLE_SIZE);
+    gpu_->flush_buffer(buffer.allocation);
     if (arena.buffer != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(allocator_, arena.buffer, arena.allocation);
+        gpu_->destroy_buffer(arena.buffer, arena.allocation);
         ws::core::info("ui: r2d grew frame slot {}'s index arena {} -> {} "
                        "quads",
                        frame_slot, arena.capacity, capacity);
     }
-    arena.buffer = buffer;
-    arena.allocation = allocation;
+    arena.buffer = static_cast<VkBuffer>(buffer.buffer);
+    arena.allocation = buffer.allocation;
     arena.mapped = indices;
     arena.capacity = capacity;
     return true;
@@ -719,16 +687,25 @@ bool Renderer2D::create_pipeline(VkRenderPass render_pass) {
     // (nonuniformEXT) shader or the chunked 32-slot one, fixed at init.
     const spirv::ShaderWords vert_words = spirv::vert_words();
     const spirv::ShaderWords frag_words = spirv::frag_words(tier_.bindless);
-    VkShaderModule vert = make_shader_module(
-        device_, vert_words.words, vert_words.count);
-    VkShaderModule frag = make_shader_module(
-        device_, frag_words.words, frag_words.count);
-    if (vert == VK_NULL_HANDLE || frag == VK_NULL_HANDLE) {
-        vkDestroyShaderModule(device_, vert, nullptr);  // null-tolerated
-        vkDestroyShaderModule(device_, frag, nullptr);
-        ws::core::error("ui: r2d - shader module creation failed");
+    void* vert_raw = nullptr;
+    const ws::core::Status vert_module = gpu_->create_shader_module(
+        vert_words.words, vert_words.count, &vert_raw);
+    if (!vert_module) {
+        ws::core::error("ui: r2d - vertex shader module creation failed: {}",
+                        vert_module.error().message);
         return false;
     }
+    void* frag_raw = nullptr;
+    const ws::core::Status frag_module = gpu_->create_shader_module(
+        frag_words.words, frag_words.count, &frag_raw);
+    if (!frag_module) {
+        gpu_->destroy_shader_module(vert_raw);  // the pair is broken
+        ws::core::error("ui: r2d - fragment shader module creation failed: {}",
+                        frag_module.error().message);
+        return false;
+    }
+    const VkShaderModule vert = static_cast<VkShaderModule>(vert_raw);
+    const VkShaderModule frag = static_cast<VkShaderModule>(frag_raw);
 
     VkPipelineShaderStageCreateInfo stages[2]{};
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -854,8 +831,8 @@ bool Renderer2D::create_pipeline(VkRenderPass render_pass) {
     pipeline_info.pDepthStencilState = &depth_on;
     const VkResult err_3d = vkCreateGraphicsPipelines(
         device_, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline_3d_);
-    vkDestroyShaderModule(device_, vert, nullptr);  // baked into the pipelines
-    vkDestroyShaderModule(device_, frag, nullptr);
+    gpu_->destroy_shader_module(vert);  // baked into the pipelines
+    gpu_->destroy_shader_module(frag);
     if (err_2d != VK_SUCCESS || err_3d != VK_SUCCESS) {
         // Both in lockstep or neither: the callers (shutdown, the drift
         // path) tolerate nulls, and flush checks one - they must agree.
@@ -893,29 +870,18 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
         static_cast<VkDeviceSize>(width) * height * 4;  // R8G8B8A8, 4 B/px
 
     TextureEntry entry{};
-    VkImageCreateInfo image_info{};
-    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    image_info.imageType = VK_IMAGE_TYPE_2D;
-    image_info.format = VK_FORMAT_R8G8B8A8_UNORM;
-    image_info.extent.width = width;
-    image_info.extent.height = height;
-    image_info.extent.depth = 1;
-    image_info.mipLevels = 1;
-    image_info.arrayLayers = 1;
-    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
-    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    image_info.usage =
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    VmaAllocationCreateInfo image_alloc{};
-    image_alloc.usage = VMA_MEMORY_USAGE_AUTO;  // device-local in practice
-    if (vmaCreateImage(allocator_, &image_info, &image_alloc, &entry.image,
-                       &entry.allocation, nullptr) != VK_SUCCESS) {
-        ws::core::error("ui: r2d - vmaCreateImage failed ({}x{})", width,
-                        height);
+    gfx::ImageOut image{};
+    const ws::core::Status image_created = gpu_->create_image(
+        {width, height, VK_FORMAT_R8G8B8A8_UNORM,
+         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT},
+        image);
+    if (!image_created) {
+        ws::core::error("ui: r2d - texture image create failed ({}x{}): {}",
+                        width, height, image_created.error().message);
         return false;
     }
+    entry.image = static_cast<VkImage>(image.image);
+    entry.allocation = image.allocation;
     VkImageViewCreateInfo view_info{};
     view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     view_info.image = entry.image;
@@ -928,28 +894,25 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
         VK_SUCCESS) {
         ws::core::error("ui: r2d - vkCreateImageView failed ({}x{})", width,
                         height);
-        vmaDestroyImage(allocator_, entry.image, entry.allocation);
+        gpu_->destroy_image(entry.image, entry.allocation);
         return false;
     }
 
-    VkBufferCreateInfo staging_info{};
-    staging_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    staging_info.size = size;
-    staging_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    VmaAllocationCreateInfo staging_alloc = host_write_alloc();
-    VkBuffer staging = VK_NULL_HANDLE;
-    VmaAllocation staging_allocation = VK_NULL_HANDLE;
-    VmaAllocationInfo staging_mapped{};
-    if (vmaCreateBuffer(allocator_, &staging_info, &staging_alloc, &staging,
-                        &staging_allocation, &staging_mapped) != VK_SUCCESS) {
-        ws::core::error("ui: r2d - staging buffer allocation failed");
+    gfx::BufferOut staging_out{};
+    const ws::core::Status staging_created = gpu_->create_buffer(
+        {static_cast<std::uint64_t>(size), VK_BUFFER_USAGE_TRANSFER_SRC_BIT},
+        staging_out);
+    if (!staging_created) {
+        ws::core::error("ui: r2d - staging buffer allocation failed: {}",
+                        staging_created.error().message);
         vkDestroyImageView(device_, entry.view, nullptr);
-        vmaDestroyImage(allocator_, entry.image, entry.allocation);
+        gpu_->destroy_image(entry.image, entry.allocation);
         return false;
     }
-    std::memcpy(staging_mapped.pMappedData, pixels,
+    const VkBuffer staging = static_cast<VkBuffer>(staging_out.buffer);
+    std::memcpy(staging_out.mapped, pixels,
                 static_cast<std::size_t>(size));
-    vmaFlushAllocation(allocator_, staging_allocation, 0, VK_WHOLE_SIZE);
+    gpu_->flush_buffer(staging_out.allocation);
 
     // One-off submit on the graphics queue - textures load at load
     // granularity, so the synchronous fence wait is fine.
@@ -1023,12 +986,12 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
     if (cmd != VK_NULL_HANDLE) {
         vkFreeCommandBuffers(device_, upload_pool_, 1, &cmd);
     }
-    vmaDestroyBuffer(allocator_, staging, staging_allocation);
+    gpu_->destroy_buffer(staging_out.buffer, staging_out.allocation);
     if (err != VK_SUCCESS) {
         ws::core::error("ui: r2d - texture upload failed (VkResult {})",
                         static_cast<int>(err));
         vkDestroyImageView(device_, entry.view, nullptr);
-        vmaDestroyImage(allocator_, entry.image, entry.allocation);
+        gpu_->destroy_image(entry.image, entry.allocation);
         return false;
     }
 
@@ -1102,7 +1065,9 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
     }
     std::memcpy(arena.mapped, vertices.data(),
                 vertices.size() * sizeof(batch::Vertex));
-    vmaFlushAllocation(allocator_, arena.allocation, 0, VK_WHOLE_SIZE);
+    // vma may hand back non-coherent memory: make the arena's writes
+    // visible before the submit.
+    gpu_->flush_buffer(arena.allocation);
 
     // A full vertex arena is exactly capacity/4 quads; the index arena
     // grows in step so the absolute pattern always covers the frame.

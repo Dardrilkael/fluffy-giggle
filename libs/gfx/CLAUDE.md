@@ -3,12 +3,15 @@
 Guidance for Claude Code when working in this library. `libs/gfx` is the
 **Vulkan device layer** promoted out of `ws::ui` (stage 3b): the loader,
 the instance, the surface (via callback), physical-device/queue selection,
-the device, the VMA allocator, and — since phase B — the swapchain and
-frame sync. `ws::ui` is the only consumer — apps never include this lib.
+the device, the VMA allocator, — since phase B — the swapchain and
+frame sync, and — since phase C — the device-memory/object helpers
+(host-write buffers, images, shader modules) ui's renderer draws
+through. `ws::ui` is the only consumer — apps never include this lib.
 
 ## The one rule: no Vulkan vocabulary under include/
 
-The public header (`ws/gfx/gpu.hpp`) carries zero Vulkan types. Handles
+The public headers (`ws/gfx/gpu.hpp`, `ws/gfx/swapchain.hpp`) carry zero
+Vulkan types. Handles
 cross the lib boundary as `void*`, each getter commented with the type it
 actually is (`// VkDevice`); the consumer (`ui`'s `src/app/app.cpp`, which
 includes volk.h) is the single unwrap point. `volk`, `vma` and
@@ -46,8 +49,9 @@ rides the `Status` and the consumer logs it (`core::log_error`). gfx
 speaks only two info lines directly (the GPU it picked, the texture tier)
 and two warns (validation layer missing on an opt-in, messenger create
 failed). Codes are the anon-namespace constants in `gpu.cpp` (order 1,
-loader/instance 100s, surface 200s, device 300s) and `swapchain.cpp`
-(the shared order code, then swapchain-creation 400s); the category is
+loader/instance 100s, surface 200s, device 300s), `swapchain.cpp`
+(the shared order code, then swapchain-creation 400s) and `memory.cpp`
+(the shared order code, then the create calls' 500s); the category is
 always `"gfx"`.
 
 The one exception — `Swapchain`'s frame flow (acquire, the render-pass
@@ -116,6 +120,35 @@ opaque `void*` exactly like Gpu's.
   them from the surface queries and supplies the typed constants; the
   helpers only decide, so tests cover the tables headless.
 
+## Device memory + object helpers (phase C)
+
+`Gpu`'s memory/object methods (`src/memory.cpp`) are the ops ui's
+renderer needs — sized to exactly its use, nothing speculative:
+
+- **Buffers**: `create_buffer` is the one host-write profile ui has
+  (sequential writes, persistently mapped — the arena + upload-staging
+  shape); `flush_buffer` makes a whole buffer's writes visible (vma
+  may hand back non-coherent memory, so a writer flushes after filling
+  `mapped`); `destroy_buffer` takes the create's handle pair.
+- **Images**: `create_image` is the one shape ui uploads — device-local
+  2D sample targets (one mip, one layer, optimal tiling, starting
+  undefined); the image VIEW stays the consumer's (a plain vk object,
+  not memory).
+- **Shader modules**: `create_shader_module` from SPIR-V words; the
+  consumer casts the handle once and destroys after the pipelines are
+  baked.
+- **Guards**: each create clears its out record, validates the
+  descriptor first (zero size/extent, empty words — detectable with no
+  device), then requires the device stage; every failure is a `Status`.
+  The destroys and the flush are null-tolerant no-ops, so failure-path
+  teardown calls them uniformly — and a dead Gpu makes them no-ops too.
+
+Since this phase `ws::ui` links no vma target and no `vk_mem_alloc.h`
+include exists under `libs/ui`: r2d's arenas, staging buffers, textures
+and shader modules all come through these methods, and the public
+`allocator()` getter's only consumers are gfx's own TUs (this file's
+creates, the swapchain's depth image).
+
 ## Layout
 
 ```
@@ -126,17 +159,17 @@ libs/gfx/
   src/gpu_choice.h              # pure, Vulkan-free decision helpers (the testable half)
   src/swapchain.cpp             # the presentation layer: swapchain, depth, render pass, framebuffers, frame sync
   src/swapchain_choice.h        # pure, Vulkan-free swapchain decisions (the testable half)
+  src/memory.cpp                # device memory + object helpers: buffers, images, shader modules
   src/vma_impl.cpp              # the workspace's single VMA_IMPLEMENTATION TU (moved from ui)
   tests/test_gfx.cpp            # headless: the pure helpers + the null-state/lifecycle contracts
 ```
 
 ## What is NOT here
 
-The buffer/image/shader-module helpers (phase C) will grow here when the
-r2d device half rewires onto them — until then `ws::ui` still links vma
-PRIVATE and its `app.cpp` unwraps the allocator handle for r2d's device
-half (the one vma consumer left in ui). Do not add API surface
-speculatively — keep it only as large as ui actually uses.
+Pipeline helpers stay in ui: r2d builds its pipelines straight against
+the VkDevice (plain vk calls — no vma involved), and wrapping them here
+would be surface ui does not need. Do not add API surface speculatively —
+keep it only as large as ui actually uses.
 
 ## Tests
 
@@ -145,6 +178,8 @@ ctest --preset debug -R gfx
 ```
 
 Headless by contract: the pure helpers (device choice + the swapchain
-choice tables), the source-shape guards and Gpu's/Swapchain's
-null-state/lifecycle-misuse paths run without a GPU, and no test fakes
-a Vulkan device — a machine-dependent probe is a bug, not coverage.
+choice tables), the source-shape guards, Gpu's/Swapchain's
+null-state/lifecycle-misuse paths and the phase-C memory/object guards
+(descriptor validation, the device-stage Status, null-tolerant
+destroys) run without a GPU, and no test fakes a Vulkan device — a
+machine-dependent probe is a bug, not coverage.

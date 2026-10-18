@@ -46,14 +46,14 @@ endif()
 # library (apps draw through <ws/ui/widgets.hpp>). Static archives still
 # forward these targets to the final link, so symbols resolve.
 if(ANDROID)
-  target_link_libraries(ws_ui PRIVATE imgui implot volk vma stb android log)
+  target_link_libraries(ws_ui PRIVATE imgui implot volk stb android log)
   # native_app_glue headers for src/platform/window_android.cpp (its .c
   # lands in the
   # app module in A2; the header-only usage here is enough for the seam).
   target_include_directories(ws_ui PRIVATE
     "${ANDROID_NDK}/sources/android/native_app_glue")
 else()
-  target_link_libraries(ws_ui PRIVATE imgui implot glfw volk vma stb)
+  target_link_libraries(ws_ui PRIVATE imgui implot glfw volk stb)
 endif()
 
 ws_add_test(ui SOURCES tests/test_ui.cpp)
@@ -65,7 +65,7 @@ if(TARGET test_ui)
   target_include_directories(test_ui PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   # renderer2d.h (internal) declares the Vulkan half: the test needs those
   # headers to compile it, though it never drives Vulkan itself.
-  target_link_libraries(test_ui PRIVATE volk vma)
+  target_link_libraries(test_ui PRIVATE volk)
 endif()
 
 # The stage-2 acceptance test: gui + its tests with NO Vulkan or GLFW on
