@@ -21,6 +21,7 @@
 #include <ws/physics/2d/world.hpp>
 
 using ws::physics::PhysicsError;
+using ws::physics2d::Aabb;
 using ws::physics2d::BodyDesc;
 using ws::physics2d::BodyId;
 using ws::physics2d::BodyMove;
@@ -616,12 +617,24 @@ TEST_CASE("a moved-from world fails cleanly on every path") {
   CHECK(has_code(world.is_sleeping(*id), PhysicsError::invalid_state));
   CHECK(has_code(world.set_gravity(ws::math::Vec2{0.0f, -9.81f}),
                  PhysicsError::invalid_state));
+  CHECK(has_code(world.apply_linear_impulse(*id, {}), PhysicsError::invalid_state));
+  CHECK(has_code(world.apply_angular_impulse(*id, 0.0f), PhysicsError::invalid_state));
+  CHECK(has_code(world.apply_force(*id, {}), PhysicsError::invalid_state));
+  CHECK(has_code(world.apply_torque(*id, 0.0f), PhysicsError::invalid_state));
   CHECK(has_code(world.create_joint(FixedJoint{*id, *id}), PhysicsError::invalid_state));
+  CHECK(has_code(world.destroy_joint(JointId{}), PhysicsError::invalid_state));
   CHECK(world.contact_events().empty());
   CHECK(world.transforms().empty());
   CHECK(world.prev_transforms().empty());
   CHECK(world.moved_bodies().empty());
+  CHECK(has_code(world.set_transforms({}), PhysicsError::invalid_state));
   CHECK(world.interpolation_alpha() == doctest::Approx(0.0f));
+  CHECK(world.fixed_dt() == doctest::Approx(0.0f));
+  CHECK(has_code(world.raycast({}, {1.0f, 0.0f}, 1.0f),
+                 PhysicsError::invalid_state));
+  CHECK(has_code(world.overlap_circle({}, 1.0f), PhysicsError::invalid_state));
+  CHECK(has_code(world.overlap_aabb(Aabb{{-1.0f, -1.0f}, {1.0f, 1.0f}}),
+                 PhysicsError::invalid_state));
 
   // The move target owns everything the source created.
   auto state = moved_to.body_state(*id);

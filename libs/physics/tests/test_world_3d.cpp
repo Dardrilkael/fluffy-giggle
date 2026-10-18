@@ -5,8 +5,7 @@
 // world_core.hpp - already pinned by the 2D suite. This file pins the 3D
 // surface: Quat poses, the Y-aligned capsule rules, hinge-axis validation,
 // overlap_sphere/overlap_aabb plumbing, the Vec3/Quat setters' non-finite
-// rejection, and moved-from semantics (the 3D API has query paths the 2D
-// file never had to sweep).
+// rejection, and moved-from semantics.
 
 #include <doctest/doctest.h>
 
@@ -23,6 +22,7 @@
 using ws::math::Quat;
 using ws::math::Vec3;
 using ws::physics::PhysicsError;
+using ws::physics3d::Aabb;
 using ws::physics3d::BodyDesc;
 using ws::physics3d::BodyId;
 using ws::physics3d::BodyMove;
@@ -31,6 +31,7 @@ using ws::physics3d::Capsule;
 using ws::physics3d::DistanceJoint;
 using ws::physics3d::FixedJoint;
 using ws::physics3d::HingeJoint;
+using ws::physics3d::JointId;
 using ws::physics3d::Part;
 using ws::physics3d::Sphere;
 using ws::physics3d::Transform;
@@ -88,7 +89,8 @@ TEST_CASE("3D body lifetime mirrors the generational contract") {
     CHECK(has_code(world.body_user_data(stale), PhysicsError::invalid_handle));
     CHECK(has_code(world.set_body_user_data(stale, 1), PhysicsError::invalid_handle));
     CHECK(has_code(world.destroy_body(stale), PhysicsError::invalid_handle));
-    CHECK(has_code(world.apply_linear_impulse(stale, Vec3{}), PhysicsError::invalid_handle));
+    CHECK(has_code(world.set_transform(stale, Vec3{}, Quat{}),
+                   PhysicsError::invalid_handle));
     CHECK(has_code(world.set_velocity(stale, Vec3{}, Vec3{}), PhysicsError::invalid_handle));
     CHECK(has_code(world.set_collision_filter(stale, 1u, 0xffffffffu),
                    PhysicsError::invalid_handle));
@@ -96,6 +98,12 @@ TEST_CASE("3D body lifetime mirrors the generational contract") {
     CHECK(has_code(world.set_sleepable(stale, false), PhysicsError::invalid_handle));
     CHECK(has_code(world.wake(stale), PhysicsError::invalid_handle));
     CHECK(has_code(world.is_sleeping(stale), PhysicsError::invalid_handle));
+    CHECK(has_code(world.apply_linear_impulse(stale, Vec3{}), PhysicsError::invalid_handle));
+    CHECK(has_code(world.apply_angular_impulse(stale, Vec3{}), PhysicsError::invalid_handle));
+    CHECK(has_code(world.apply_force(stale, Vec3{}), PhysicsError::invalid_handle));
+    CHECK(has_code(world.apply_torque(stale, Vec3{}), PhysicsError::invalid_handle));
+    CHECK(has_code(world.body_state(BodyId{}), PhysicsError::invalid_handle));
+    CHECK(has_code(world.destroy_body(BodyId{}), PhysicsError::invalid_handle));
   }
   SUBCASE("the slot is reused with a bumped generation") {
     const BodyId stale = *a;
@@ -360,16 +368,26 @@ TEST_CASE("a moved-from 3D world fails cleanly on every path") {
                  PhysicsError::invalid_state));
   CHECK(has_code(world.apply_linear_impulse(*id, Vec3{}),
                  PhysicsError::invalid_state));
+  CHECK(has_code(world.apply_angular_impulse(*id, Vec3{}),
+                 PhysicsError::invalid_state));
+  CHECK(has_code(world.apply_force(*id, Vec3{}), PhysicsError::invalid_state));
+  CHECK(has_code(world.apply_torque(*id, Vec3{}), PhysicsError::invalid_state));
   CHECK(has_code(world.create_joint(FixedJoint{*id, *id}),
                  PhysicsError::invalid_state));
+  CHECK(has_code(world.destroy_joint(JointId{}), PhysicsError::invalid_state));
   CHECK(world.contact_events().empty());
   CHECK(world.transforms().empty());
   CHECK(world.prev_transforms().empty());
   CHECK(world.moved_bodies().empty());
+  CHECK(has_code(world.set_transforms({}), PhysicsError::invalid_state));
   CHECK(world.interpolation_alpha() == doctest::Approx(0.0f));
+  CHECK(world.fixed_dt() == doctest::Approx(0.0f));
   CHECK(has_code(world.raycast(Vec3{}, Vec3{0.0f, 0.0f, 1.0f}, 1.0f),
                  PhysicsError::invalid_state));
   CHECK(has_code(world.overlap_sphere(Vec3{}, 1.0f),
+                 PhysicsError::invalid_state));
+  CHECK(has_code(world.overlap_aabb(Aabb{Vec3{0.0f, 0.0f, 0.0f},
+                                         Vec3{1.0f, 1.0f, 1.0f}}),
                  PhysicsError::invalid_state));
 
   // The move target owns everything the source created.
@@ -397,7 +415,6 @@ TEST_CASE("3D queries validate arguments") {
     CHECK(hits->empty());
   }
   SUBCASE("overlap_aabb rejects inverted boxes") {
-    using ws::physics3d::Aabb;
     CHECK(has_code(world.overlap_aabb(Aabb{Vec3{1.0f, 1.0f, 1.0f}, Vec3{0.0f, 1.0f, 1.0f}}),
                    PhysicsError::invalid_argument));
     auto hits = world.overlap_aabb(Aabb{Vec3{90.0f, 90.0f, 90.0f},

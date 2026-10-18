@@ -242,11 +242,15 @@ factory + reference 2D backend (C6, done) -> conformance suite encoding
 CONTRACT.md (C7, done: C7a - Dim traits headers + the both-backend 2D
 suite; C7b - the 3D reference twin, the both-backend 3D suite over Jolt +
 it, and the Jolt-adapter conformance fixes above).
-Also queued behind those: the machinery sweeps' "every path" names are
-still aspirational - the stale sweeps miss set_transform + the apply_*
-family in 3D, and the moved-from tests miss the apply_* family and
-destroy_joint/queries in 2D. A sweep-completeness micro-phase should
-make the names true.
+The sweep-completeness micro-phase (done, post-C7b) made those names
+true: the 3D stale-handle sweep mirrors the 2D one path for path
+(set_transform + the full apply_* family + the zero-handle probes), and
+both moved-from tests sweep the entire API - the apply_* family,
+destroy_joint, set_transforms, fixed_dt() (a moved-from world reports
+0), and the query paths (2D grew raycast/overlap_circle/overlap_aabb,
+3D grew overlap_aabb). Stale-joint coverage already existed in both
+dims. No product code changed: every path was already guarded in
+world2d/world3d.cpp - the tests now pin it.
 
 ## Review decisions, settled
 - Virtual backend seam kept (not a compile-time template backend): a mock
