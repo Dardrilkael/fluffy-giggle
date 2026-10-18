@@ -665,22 +665,43 @@ float Renderer2D::draw_text(float x, float y, const char* utf8_text,
     // = one texture-table slot). (x, y) is the LINE BOX's top-left - the
     // box widgets center on their rows; glyph offsets already reach down
     // to the baseline from there. No early-outs on the font's data: every
-    // baked glyph advances (visible or not), nothing else does - so the
-    // return is structurally measure_text's exact value, whatever the font.
+    // glyph the font answers advances (visible or not), nothing else does
+    // - so the return is structurally measure_text's exact value, whatever
+    // the font.
+    //
+    // Whole-pixel snap: on an axis-aligned, zoom-1 2D camera - the gui's
+    // screen mode - each glyph's quad origin rounds onto the pixel grid,
+    // so the baked texels land texel-on-pixel and the text reads crisp.
+    // The PEN keeps its exact fractional advance; each glyph rounds its
+    // own box, so spacing stays the bake's, and one bake's shared
+    // fractional ascent (plus integer bitmap boxes) keeps the per-glyph
+    // Y rounds mutually aligned. A rotated or zoomed camera, or a 3D
+    // block, skips the snap: fractional positions are the truth there,
+    // and sub-pixel camera motion must stay smooth. Camera pan is not a
+    // gate - a fractional pan shifts every glyph by one common phase;
+    // the snap kills per-glyph jitter, not uniform motion.
+    bool snap = false;
+    if (camera_stashed_ && !current_perspective_) {
+        const Camera2D& cam = frame_cameras_[current_epoch_ - 1].camera;
+        snap = cam.rotation == 0.0f && cam.zoom == 1.0f;
+    }
     const char* s = utf8_text;
     float pen_x = x;
     for (std::uint32_t cp = font::utf8_next(s); cp != 0u;
          cp = font::utf8_next(s)) {
         const Font::Glyph* g = font.glyph(cp);
         if (g == nullptr) {
-            continue;  // not baked: no draw, no advance (v1 is ASCII-only)
+            continue;  // the controls (cp < 32): no draw, no advance
         }
         // sprite.page 0 = a page that failed to upload: a white box would
         // read as a glyph-shaped artifact, so the quad drops - the advance
         // stays honest, measure_text never counted the bitmap anyway.
         if (g->width > 0.0f && g->height > 0.0f && g->sprite.page != 0) {
-            draw_sprite(pen_x + g->offset_x, y + g->offset_y, g->width,
-                        g->height, color, g->sprite);
+            const float gx = pen_x + g->offset_x;
+            const float gy = y + g->offset_y;
+            draw_sprite(snap ? std::roundf(gx) : gx,
+                        snap ? std::roundf(gy) : gy, g->width, g->height,
+                        color, g->sprite);
         }
         pen_x += g->advance;
     }
@@ -769,7 +790,8 @@ Font Renderer2D::load_font(const char* path, float pixel_height) {
     // Every glyph's metrics first (advances and offsets need no atlas);
     // sprites patch in after packing. Only glyphs WITH bitmaps feed the
     // packer - the space and other blanks advance but never draw, and a
-    // white fallback cell would only waste page room.
+    // blank cell would only waste page room. The baked fallback box is
+    // a glyph like any other here: it rides the pages with the rest.
     std::vector<Font::Glyph> glyphs(baked.glyphs.size());
     std::vector<atlas::SourceImage> sources;
     std::vector<std::size_t> baked_index;  // sources[i] -> baked.glyphs slot

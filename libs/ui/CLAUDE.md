@@ -330,8 +330,14 @@ third-party).
   construction, for ANY font (empty, degraded); `(x, y)` is the line
   BOX's top-left (baseline = y + ascent internally; `Glyph` offsets
   measure from the line top). No kerning in v1; a codepoint outside the
-  bake is no draw and no advance; a page whose upload failed drops its
-  quads but keeps the advances honest — layout code never lies.
+  bake draws the synthesized fallback box (the "tofu") and advances it
+  — a font built with fewer glyphs keeps the fallback zeroed, the old
+  no-draw/no-advance skip; a page whose upload failed drops its
+  quads but keeps the advances honest — layout code never lies. On an
+  axis-aligned, zoom-1 2D camera (the gui's screen mode) each glyph
+  quad's origin rounds to whole pixels — the pen keeps its exact
+  fractional advance — while rotated or zoomed cameras stay fractional,
+  so camera motion remains smooth.
   `utf8_next` decodes forgivingly: bad bytes and overlong encodings
   become U+FFFD, never a crash or a runaway pointer. The path is the
   CALLER's to resolve — the lib carries no platform knowledge, no

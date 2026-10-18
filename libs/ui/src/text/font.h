@@ -13,7 +13,9 @@
 
 namespace ws::ui::r2d::font {
 
-// The bake range - must match the public Font's (ASCII 32..126).
+// The bake range - must match the public Font's (ASCII 32..126). The
+// synthesized fallback box (appended by bake_file) lands at slot
+// kBakedCount, mirroring the public Font's kFallbackGlyph.
 inline constexpr std::uint32_t kFirstCodepoint = 32;
 inline constexpr std::uint32_t kBakedCount = 95;
 
@@ -42,9 +44,12 @@ struct BakedGlyph {
     std::vector<std::uint8_t> rgba;  // w*h*4, empty when w == 0
 };
 
-// One whole bake: the glyphs for 32..126 in order, plus the line metrics.
-// ok == false covers every failure (missing file, not a font, bad size) -
-// callers degrade to an empty public Font, never crash.
+// One whole bake: the glyphs for 32..126 in order, then the fallback box
+// (slot kBakedCount - every codepoint past the range draws it), plus the
+// line metrics. ok == false covers every failure (missing file, not a
+// font, bad size) - callers degrade to an empty public Font, never
+// crash; a failed bake appends nothing, so that font's fallback slot
+// stays zeroed and nothing draws.
 struct BakedFont {
     bool ok = false;
     float pixel_height = 0.0f;
@@ -52,7 +57,8 @@ struct BakedFont {
     std::vector<BakedGlyph> glyphs;
 };
 
-// Reads the ttf/otf at `path` and rasterizes it at `pixel_height` px.
+// Reads the ttf/otf at `path`, rasterizes it at `pixel_height` px and
+// appends the synthesized fallback box - kBakedCount + 1 glyphs in all.
 // Pure CPU; the caller owns the upload (Renderer2D::load_font does).
 BakedFont bake_file(const char* path, float pixel_height);
 

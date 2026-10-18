@@ -228,9 +228,11 @@ FrameSize sprite_size(Sprite sprite);
 // and two fonts are two page sets. A glyph is then an ordinary Sprite
 // and draw_text() is a per-glyph draw_sprite loop - text carries the
 // same layer, clip and camera-block contract as every other draw, and
-// one page means one batch texture slot. v1 bakes ASCII 32..126 only;
-// other codepoints are skipped (no draw, no advance), and there is no
-// kerning: a line measures as its plain advance sum.
+// one page means one batch texture slot. v1 bakes ASCII 32..126 plus
+// one synthesized fallback box: a codepoint outside the bake draws the
+// box and advances it (a font built with fewer glyphs keeps the
+// fallback zeroed - the old skip), and there is no kerning: a line
+// measures as its plain advance sum.
 class Font {
 public:
     // One baked glyph. `sprite` is where its bitmap landed on the font's
@@ -250,8 +252,9 @@ public:
     Font() = default;
 
     // Fill constructor (load_font's assembly step, and tests building
-    // synthetic fonts): the glyphs for codepoints 32..126, in order.
-    // Fewer than 95 entries leave the tail unbaked; null bakes nothing.
+    // synthetic fonts): the glyphs for codepoints 32..126, in order,
+    // then the fallback. Fewer than 96 entries leave the tail unbaked -
+    // a missing fallback keeps the old skip; null bakes nothing.
     Font(float pixel_height, float line_height, const Glyph* glyphs,
          std::uint32_t count);
 
@@ -263,20 +266,25 @@ public:
     // line gap) - the height of the box draw_text's y names the top of.
     float line_height() const { return line_height_; }
 
-    // The glyph for a codepoint: null outside 32..126; inside the range
-    // a blank glyph (advance 0, no sprite) is returned as-is and draws
-    // and advances nothing - the same skip, by data.
+    // The glyph for a codepoint: null below 32 (the controls), the
+    // fallback slot for anything past 126, and the bake's own entry in
+    // between - where a blank glyph (advance 0, no sprite) is returned
+    // as-is and draws and advances nothing, the same skip by data (a
+    // zeroed fallback is that skip again).
     const Glyph* glyph(std::uint32_t codepoint) const;
 
-    // The width draw_text advances for utf8_text: the baked glyphs'
-    // advance sum, unbaked codepoints contributing nothing. draw_text
-    // returns exactly this value.
+    // The width draw_text advances for utf8_text: the glyphs' advance
+    // sum - the fallback's included when the font carries one.
+    // draw_text returns exactly this value.
     float measure_text(const char* utf8_text) const;
 
 private:
     static constexpr std::uint32_t kFirstBaked = 32;
     static constexpr std::uint32_t kBakedCount = 95;  // ASCII 32..126
-    Glyph glyphs_[kBakedCount]{};
+    // Slot kBakedCount, one past the bake: the fallback box every
+    // codepoint outside 32..126 resolves to.
+    static constexpr std::uint32_t kFallbackGlyph = kBakedCount;
+    Glyph glyphs_[kFallbackGlyph + 1]{};
     float pixel_height_ = 0.0f;
     float line_height_ = 0.0f;
 };
@@ -294,9 +302,14 @@ Font load_font(const char* path, float pixel_height);
 // the box on their rows, and glyph offsets already reach down to the
 // baseline from y. Returns the pen's total advance - exactly
 // measure_text(utf8_text), by construction. The space and other blanks
-// advance without drawing; codepoints the font did not bake are skipped
-// entirely; an empty font draws nothing and returns 0. The bitmaps are
-// white with coverage in alpha, so `color` tints the glyphs directly.
+// advance without drawing; codepoints past the bake draw the fallback
+// box and advance it (or, on a font whose fallback is zeroed, skip
+// entirely); an empty font draws nothing and returns 0. On an
+// axis-aligned, zoom-1 2D camera each glyph quad rounds to whole
+// pixels - the pen keeps its exact fractional advance - while rotated
+// or zoomed cameras keep fractional positions, so camera motion stays
+// smooth. The bitmaps are white with coverage in alpha, so `color`
+// tints the glyphs directly.
 float draw_text(float x, float y, const char* utf8_text, const Font& font,
                 std::uint32_t color = 0xFFFFFFFFu);
 

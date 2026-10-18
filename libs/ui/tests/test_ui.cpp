@@ -6159,9 +6159,10 @@ constexpr const char* kDefaultTestFontPath = "C:/Windows/Fonts/segoeui.ttf";
 // A hand-built font for the draw tests: 'A' and 'B' advance 10 and 5 with
 // known offsets and sprites on a synthetic page; the space advances 3
 // without a bitmap. Every other codepoint is baked but BLANK (advance 0,
-// no sprite) - which is not the same as unbaked: blank still answers
-// glyph(), draws nothing and advances nothing, while unbaked (outside
-// ASCII 32..126) skips entirely.
+// no sprite) - which is not the same as the fallback: blank still answers
+// glyph(), draws nothing and advances nothing. The 95 glyphs leave the
+// fallback slot zeroed, so codepoints outside ASCII 32..126 get the old
+// skip too - by data, exactly how a failed load behaves.
 ws::ui::r2d::Font ab_font() {
     using ws::ui::r2d::Font;
     Font::Glyph glyphs[95]{};
@@ -8547,9 +8548,9 @@ TEST_CASE("font bake is structural - never exact face metrics") {
         MESSAGE("segoeui.ttf not present - bake checks skipped");
         return;
     }
-    REQUIRE(baked.glyphs.size() == 95u);  // the whole ASCII range, in order
+    REQUIRE(baked.glyphs.size() == 96u);  // the ASCII range + the fallback
     CHECK(baked.glyphs.front().codepoint == ' ');
-    CHECK(baked.glyphs.back().codepoint == '~');
+    CHECK(baked.glyphs[94].codepoint == '~');  // the bake's last ASCII glyph
     CHECK(baked.pixel_height == 24.0f);
     CHECK(baked.line_height > 0.0f);
 
@@ -8580,6 +8581,23 @@ TEST_CASE("font bake is structural - never exact face metrics") {
         }
     }
     CHECK(ink);
+
+    // The fallback box - the 96th glyph, the tofu every codepoint past
+    // the bake draws: synthesized (no face metrics), hollow, gapped.
+    const auto& tofu = baked.glyphs.back();
+    CHECK(tofu.codepoint == 0xFFFDu);  // the replacement character's face
+    REQUIRE(tofu.w > 0u);
+    REQUIRE(tofu.h > 0u);
+    REQUIRE(tofu.rgba.size() ==
+            static_cast<std::size_t>(tofu.w) * tofu.h * 4u);
+    CHECK(tofu.advance > static_cast<float>(tofu.w));  // boxes gap, never merge
+    const auto alpha_at = [&](std::uint32_t tx, std::uint32_t ty) {
+        return tofu.rgba[(static_cast<std::size_t>(ty) * tofu.w + tx) * 4u +
+                         3u];
+    };
+    CHECK(alpha_at(0, 0) == 255u);  // the stroke corners...
+    CHECK(alpha_at(tofu.w - 1u, tofu.h - 1u) == 255u);
+    CHECK(alpha_at(tofu.w / 2u, tofu.h / 2u) == 0u);  // ...and the hollow
 }
 
 TEST_CASE("Font measures the baked advance sum and skips the unbaked") {
@@ -8594,7 +8612,8 @@ TEST_CASE("Font measures the baked advance sum and skips the unbaked") {
     // 'z' is baked but blank: present in the table, contributes nothing -
     // NOT the same as the skipped codepoint below.
     CHECK(font.measure_text("AzA") == 20.0f);
-    // U+00E9 is outside the bake range: skipped, no advance. (Adjacent
+    // U+00E9 lands on ab_font's ZEROED fallback (95 glyphs handed to
+    // the ctor): no draw, no advance - the old skip, by data. (Adjacent
     // literals: a hex escape absorbs following hex-digit characters.)
     CHECK(font.measure_text("A" "\xC3\xA9" "A") == 20.0f);
     CHECK(font.measure_text(nullptr) == 0.0f);
@@ -8607,8 +8626,12 @@ TEST_CASE("Font measures the baked advance sum and skips the unbaked") {
     CHECK(a->advance == 10.0f);
     REQUIRE(font.glyph('z') != nullptr);
     CHECK(font.glyph('z')->advance == 0.0f);
-    CHECK(font.glyph(31) == nullptr);   // below the bake range
-    CHECK(font.glyph(127) == nullptr);  // above it
+    CHECK(font.glyph(31) == nullptr);  // the controls: below the bake
+    // Past the bake: the fallback slot - ab_font's is zeroed, so the
+    // same skip, and every out-of-range codepoint shares the ONE slot.
+    REQUIRE(font.glyph(127) != nullptr);
+    CHECK(font.glyph(127)->advance == 0.0f);
+    CHECK(font.glyph(127) == font.glyph(0xFFFDu));
 
     // The blank Font (a failed load, the headless fallback): inert, but
     // still answers in-range glyph() with zeroed data.
@@ -8617,6 +8640,16 @@ TEST_CASE("Font measures the baked advance sum and skips the unbaked") {
     CHECK(blank.measure_text("A") == 0.0f);
     REQUIRE(blank.glyph('A') != nullptr);
     CHECK(blank.glyph('A')->advance == 0.0f);
+
+    // A font that CARRIES the fallback (a real bake hands 96): the
+    // unbaked codepoint measures the tofu's advance.
+    Font::Glyph with_tofu[96]{};
+    with_tofu['A' - 32].advance = 10.0f;
+    with_tofu[95].advance = 8.0f;
+    const Font tofu_font(24.0f, 30.0f, with_tofu, 96);
+    CHECK(tofu_font.measure_text("A" "\xC3\xA9" "A") == 28.0f);  // 10+8+10
+    REQUIRE(tofu_font.glyph(127) != nullptr);
+    CHECK(tofu_font.glyph(127)->advance == 8.0f);
 }
 
 TEST_CASE("draw_text records one contiguous glyph run on the font's own page") {
@@ -8661,7 +8694,56 @@ TEST_CASE("draw_text records one contiguous glyph run on the font's own page") {
     CHECK(r.batch().vertices()[4].pos[1] == 43.0f);
 }
 
-TEST_CASE("draw_text skips the unbaked and stays inert on empty fonts") {
+TEST_CASE("draw_text snaps to whole pixels on the axis-aligned screen camera") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.register_atlas_page(Texture{7}, {{0.0f, 0.0f, 1.0f, 1.0f, 4, 5}});
+    const Font font = ab_font();  // 'A': offset (1, 2), advance 10
+
+    // Screen mode - the identity camera: each glyph's quad origin rounds
+    // onto the pixel grid. The pen stays fractional: 'A' #2's pen is
+    // 20.25, its box 21.25 -> 21.
+    r.frame_begin(800.0f, 600.0f);
+    r.begin_screen();
+    r.draw_text(10.25f, 20.75f, "AA", font);
+    r.end();
+    r.frame_end();
+    REQUIRE(r.batch().vertices().size() == 8);
+    CHECK(r.batch().vertices()[0].pos[0] == 11.0f);  // 10.25+1 -> 11.25 -> 11
+    CHECK(r.batch().vertices()[0].pos[1] == 23.0f);  // 20.75+2 -> 22.75 -> 23
+    CHECK(r.batch().vertices()[4].pos[0] == 21.0f);  // 20.25+1 -> 21.25 -> 21
+    CHECK(r.batch().vertices()[4].pos[1] == 23.0f);
+
+    // A zoomed camera: NO snap - fractional quads are the truth under a
+    // camera, and sub-pixel motion must stay smooth.
+    r.frame_begin(800.0f, 600.0f);
+    r.begin(Camera2D{0.0f, 0.0f, 0.0f, 2.0f});
+    r.draw_text(10.25f, 20.75f, "A", font);
+    r.end();
+    r.frame_end();
+    REQUIRE(r.batch().vertices().size() == 4);
+    CHECK(r.batch().vertices()[0].pos[0] == 11.25f);
+    CHECK(r.batch().vertices()[0].pos[1] == 22.75f);
+
+    // Rotated: same - the snap is the axis-aligned camera's alone.
+    r.frame_begin(800.0f, 600.0f);
+    r.begin(Camera2D{0.0f, 0.0f, 0.5f, 1.0f});
+    r.draw_text(10.25f, 20.75f, "A", font);
+    r.end();
+    r.frame_end();
+    CHECK(r.batch().vertices()[0].pos[0] == 11.25f);
+
+    // Camera PAN is not a gate: a fractional pan shifts every glyph by
+    // one common phase, so the quads still snap.
+    r.frame_begin(800.0f, 600.0f);
+    r.begin(Camera2D{0.25f, 0.25f, 0.0f, 1.0f});
+    r.draw_text(10.25f, 20.75f, "A", font);
+    r.end();
+    r.frame_end();
+    CHECK(r.batch().vertices()[0].pos[0] == 11.0f);
+}
+
+TEST_CASE("draw_text falls to the fallback and stays inert on empty fonts") {
     using namespace ws::ui::r2d;
     Renderer2D r;
     r.register_atlas_page(Texture{7}, {{0.0f, 0.0f, 1.0f, 1.0f, 4, 5}});
@@ -8669,9 +8751,9 @@ TEST_CASE("draw_text skips the unbaked and stays inert on empty fonts") {
 
     r.frame_begin(800.0f, 600.0f);
     r.begin_screen();
-    // 'z' is baked but blank (no bitmap, no advance); U+00E9 is outside
-    // the bake range. Neither draws - and only 'z' even exists in the
-    // table. The two 'A's carry the width.
+    // 'z' is baked but blank (no bitmap, no advance); U+00E9 lands on
+    // ab_font's zeroed fallback. Neither draws - and only 'z' even
+    // exists in the table. The two 'A's carry the width.
     const float drawn = r.draw_text(50.0f, 20.0f, "Az" "\xC3\xA9" "A", font);
     r.end();
     r.frame_end();
@@ -8707,6 +8789,32 @@ TEST_CASE("draw_text skips the unbaked and stays inert on empty fonts") {
     r.end();
     r.frame_end();
     REQUIRE(r.batch().vertices().size() == 4);  // just the one 'A'
+
+    // A font that carries the fallback (the real bake's 96 glyphs): the
+    // unbaked codepoint DRAWS the box and advances - one more quad on
+    // the font's own page, measure and draw still one loop.
+    Font::Glyph with_tofu[96]{};
+    with_tofu['A' - 32].advance = 10.0f;
+    with_tofu['A' - 32].width = 4.0f;
+    with_tofu['A' - 32].height = 5.0f;
+    with_tofu['A' - 32].sprite = Sprite{7, 0};
+    with_tofu[95].advance = 6.0f;
+    with_tofu[95].width = 5.0f;
+    with_tofu[95].height = 12.0f;
+    with_tofu[95].offset_x = 1.0f;
+    with_tofu[95].offset_y = 2.0f;
+    with_tofu[95].sprite = Sprite{7, 0};
+    const Font tofu_font(24.0f, 30.0f, with_tofu, 96);
+    r.frame_begin(800.0f, 600.0f);
+    r.begin_screen();
+    const float tofu_drawn = r.draw_text(0.0f, 0.0f, "A" "\xC3\xA9", tofu_font);
+    r.end();
+    r.frame_end();
+    CHECK(tofu_drawn == 16.0f);  // 'A' 10 + the box's 6
+    CHECK(tofu_font.measure_text("A" "\xC3\xA9") == 16.0f);
+    REQUIRE(r.batch().vertices().size() == 8);  // 'A' + the box
+    CHECK(r.batch().vertices()[4].pos[0] == 11.0f);  // pen 10 + offset 1
+    CHECK(r.batch().vertices()[4].pos[1] == 2.0f);
 }
 
 TEST_CASE("gui labels draw through the theme font") {
