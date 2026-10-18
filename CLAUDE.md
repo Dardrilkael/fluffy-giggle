@@ -1,7 +1,8 @@
 # ws - CLAUDE.md
 
 C++20 monorepo: each `libs/<name>` builds a `ws::<name>` static library,
-`apps/*` are the executables. One commit per phase on `main`.
+`apps/*` are the executables. One commit per phase on `main`, pushed to
+origin as it lands.
 
 ## Commands
 The debug/release presets are Ninja + MSVC and need the MSVC environment -
