@@ -38,22 +38,14 @@ namespace ws::ui::r2d {
 struct DrawCommand {
     // Sort key components, most significant first (see frame_end()):
     std::uint32_t sort_layer = 0;    // set_layer(): the explicit z escape hatch
-    std::uint32_t camera_epoch = 0;  // which begin() block recorded this
+    std::uint32_t camera_epoch = 0;  // which begin() block recorded this:
+                                     // frame_cameras_[epoch - 1] holds its
+                                     // camera - one snapshot per block, not
+                                     // one camera pair per command
     float clip[4] = {0.0f, 0.0f, FLT_MAX, FLT_MAX};  // active clip at record
                                     // time - NOT a sort key: the replay
                                     // splits chunks wherever it changes in
                                     // record order (one chunk = one scissor)
-    // NOT a sort key: the 32-slot per-chunk texture table already lets one
-    // chunk hold many materials, and sorting by this would reorder
-    // overlapping same-layer draws that use different textures (a button's
-    // face vs. its label bar). Kept as metadata only.
-    std::uint64_t material_key = 0;  // texture (+ future blend/shader bits)
-
-    Camera2D camera;            // 2D camera state at record time
-    Camera3D camera3d;          // the perspective half, recorded when kind is 3D
-    bool perspective = false;   // the block kind: which camera half replays.
-                                // NOT a sort key either - one begin() block
-                                // is one kind, so it rides the epoch.
     Texture texture;            // {} = flat color (the white texture)
     std::uint32_t color = 0;  // packed 0xRRGGBBAA, unpacked at replay
 
@@ -61,12 +53,16 @@ struct DrawCommand {
     float uv[4][2] = {};
 };
 
-// v1 packs just the texture id; blend mode and shader id are the reserved
-// upper bits (shader << 40 | blend << 32) for the day they exist - the
-// sort comparator's shape never changes.
-inline std::uint64_t make_material_key(Texture texture) {
-    return static_cast<std::uint64_t>(texture.id);
-}
+// One begin() block's camera state, snapshotted at stash time. The block's
+// commands reference it through their camera_epoch - a frame's blocks are
+// few, its commands many, so the camera is stored once per block. The kind
+// (2D vs perspective) rides the snapshot; one block is one kind, so the
+// replay reads it only at an epoch boundary.
+struct CameraSnapshot {
+    Camera2D camera{};
+    Camera3D camera3d{};
+    bool perspective = false;
+};
 
 // How many frames may be recorded while an earlier one still executes -
 // the frames-in-flight model, deliberately decoupled from the swapchain
@@ -211,8 +207,21 @@ public:
     const batch::BatchCore& batch() const { return batch_; }
 
 private:
+    // Per-frame warn kinds, one bit each: frame_begin() clears the mask, a
+    // kind's first occurrence fires and sets its bit - so distinct problems
+    // each get their one warn instead of the first problem silencing the
+    // rest. The warns outside this mask keep their own one-shot bools and
+    // never reset: clip_overflow_warned_ (per renderer) and
+    // table_full_warned_ (per process - registry state).
+    enum WarnKind : std::uint32_t {
+        kWarnDrop = 1u << 0,            // draw outside on_update()/begin()
+        kWarnKindMismatch = 1u << 1,     // 3D overload inside a 2D block
+        kWarnCaps = 1u << 2,            // replay hit a cap, quads dropped
+        kWarnUnknownTexture = 1u << 3,   // draw with an unregistered id
+        kWarnSprite = 1u << 4,          // unresolvable sprite
+    };
     // Central guard: false when calls must drop (no active frame) - warns
-    // once per frame, for any reason.
+    // once per frame for its kind.
     bool accept(const char* what);
     // Misuse warn (draw outside on_update() / begin() block): once per frame.
     void warn_drop(const char* what);
@@ -234,8 +243,11 @@ private:
     // Unresolvable sprite (bad page or index): once per frame.
     void warn_sprite(const Sprite& sprite);
     // Resolves a sprite to its sub-rect; null when the page is not a
-    // registered atlas page or the index is out of range. Page 0 is never
-    // looked up - it is the white sentinel.
+    // registered atlas page or the index is out of range. O(1): the dense
+    // page_of_texture_ map carries texture id -> atlas_pages_ index (this
+    // runs once per sprite and once per glyph, so it must not scale with
+    // the page count). Page 0 is never looked up - it is the white
+    // sentinel.
     const atlas::Rect* find_sprite_rect(const Sprite& sprite) const;
     // Graphics pipeline against the given render pass; the shader modules
     // are created and destroyed inside (they are baked into the pipeline).
@@ -281,14 +293,22 @@ private:
 
     std::vector<DrawCommand> commands_;  // capacity reused across frames
     batch::BatchCore batch_;
-    Camera2D current_camera_{};
-    Camera3D current_camera3d_{};
-    // The open block's kind - which camera half record() snapshots and which
-    // VP frame_end() builds. Set by every begin(), never read without an
-    // open block (camera_stashed_ gates that).
+    Camera3D current_camera3d_{};  // the open 3D block's camera (billboards
+                                  // and 3D lines expand against it at
+                                  // record time; the replay reads the
+                                  // snapshot, not this)
+    // The open block's kind - what stash_camera() will snapshot, and what
+    // the 3D overloads check against (a 3D overload inside a 2D block
+    // warns and records nothing). Set by every begin(), never read
+    // without an open block (camera_stashed_ gates that).
     bool current_perspective_ = false;
     std::uint32_t current_layer_ = 0;  // frame-scoped: reset with the clips
     std::uint32_t current_epoch_ = 0;  // bumped by every begin()
+    // This frame's begin() blocks, in epoch order: a command recorded
+    // under epoch e replays through frame_cameras_[e - 1]. Cleared with
+    // the epochs at frame_begin; capacity reused across frames (a frame's
+    // blocks are few, its commands many - that asymmetry is the point).
+    std::vector<CameraSnapshot> frame_cameras_;
     // Clip stack state: one level = one {x, y, w, h} rect. Overflow keeps
     // push/pop balanced (depth counts on, the slot stops deepening), the
     // same policy as the gui stacks; the warn fires once per renderer.
@@ -301,7 +321,7 @@ private:
     float fb_height_ = 0.0f;
     bool camera_stashed_ = false;  // set by begin(), cleared by end()
     bool frame_active_ = false;
-    bool warned_ = false;
+    std::uint32_t warned_mask_ = 0;  // WarnKind bits; frame_begin clears it
 
     // --- Vulkan state (null/empty until init()) ---
     VkDevice device_ = VK_NULL_HANDLE;
@@ -347,6 +367,11 @@ private:
         std::vector<atlas::Rect> rects;
     };
     std::vector<AtlasPage> atlas_pages_;
+    // Dense texture id -> atlas_pages_ index, filled at
+    // register_atlas_page (grown with fill value kNoAtlasPage = not a
+    // page). find_sprite_rect's O(1) lookup; only grows, never rewritten.
+    std::vector<std::uint32_t> page_of_texture_;
+    static constexpr std::uint32_t kNoAtlasPage = 0xFFFFFFFFu;
 
     // One vertex arena per frame slot (kMaxFramesInFlight of them),
     // persistently mapped, starting at kInitialVertexCapacity vertices and

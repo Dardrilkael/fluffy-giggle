@@ -220,7 +220,9 @@ Vulkan/GLFW/stb types (stb_image and stb_truetype are PRIVATE, like every
 third-party).
 
 - **Recording is data.** A draw appends a `DrawCommand` (sort layer, camera
-  block, clip, expanded corners; the material key rides along as metadata).
+  epoch, clip, texture, color, expanded corners — the camera itself is
+  NOT in the command: each begin() block snapshots into a per-frame
+  camera table, and the command references it by its dense epoch).
   `frame_end()` — one point, after `on_update()` returns — stable-sorts the
   frame by (layer, camera block) and replays it into the batch.
   Material is NOT a sort key: the 32-slot table already lets one chunk hold

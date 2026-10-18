@@ -45,13 +45,16 @@ void Renderer2D::frame_begin(float fb_width, float fb_height) {
     fb_height_ = fb_height;
     batch_.begin_frame();
     commands_.clear();  // capacity kept - the frame reuses the arena
+    // The epochs restart at 1, so the snapshots go with them. Capacity
+    // kept, like every per-frame arena here.
+    frame_cameras_.clear();
     current_epoch_ = 0;
     current_layer_ = 0;  // layers never leak across frames either
     camera_stashed_ = false;
     current_perspective_ = false;
     clip_depth_ = 0;  // clips never leak across frames
     frame_active_ = true;
-    warned_ = false;
+    warned_mask_ = 0;
 }
 
 void Renderer2D::frame_end() {
@@ -94,17 +97,19 @@ void Renderer2D::frame_end() {
         }
         if (cmd.camera_epoch != open_epoch || clip_changed) {
             batch_.close_segment();
-            // The recorded kind picks the camera half: a perspective block
-            // replays through camera_vp3d and flags its chunks depth-tested
-            // (the flush's per-chunk pipeline bind), a 2D block through
-            // camera_vp with the flag off. The kind only ever changes at an
-            // epoch boundary - one begin() block is one kind - so it never
-            // splits a segment by itself.
+            // The block's snapshot picks the camera half: a perspective
+            // block replays through camera_vp3d and flags its chunks
+            // depth-tested (the flush's per-chunk pipeline bind), a 2D
+            // block through camera_vp with the flag off. The kind only
+            // ever changes at an epoch boundary - one begin() block is
+            // one kind - so it never splits a segment by itself.
+            const CameraSnapshot& snap =
+                frame_cameras_[cmd.camera_epoch - 1];
             const batch::Mat4 vp =
-                cmd.perspective
-                    ? batch::camera_vp3d(cmd.camera3d, fb_width_, fb_height_)
-                    : batch::camera_vp(cmd.camera, fb_width_, fb_height_);
-            batch_.open_segment(vp, cmd.clip, cmd.perspective);
+                snap.perspective
+                    ? batch::camera_vp3d(snap.camera3d, fb_width_, fb_height_)
+                    : batch::camera_vp(snap.camera, fb_width_, fb_height_);
+            batch_.open_segment(vp, cmd.clip, snap.perspective);
             open_epoch = cmd.camera_epoch;
             for (int i = 0; i < 4; ++i) {
                 open_clip[i] = cmd.clip[i];
@@ -131,6 +136,7 @@ void Renderer2D::frame_drop() {
     current_layer_ = 0;
     clip_depth_ = 0;
     commands_.clear();
+    frame_cameras_.clear();
     batch_.begin_frame();
 }
 
@@ -145,30 +151,30 @@ bool Renderer2D::accept(const char* what) {
 }
 
 void Renderer2D::warn_drop(const char* what) {
-    if (warned_) {
+    if (warned_mask_ & kWarnDrop) {
         return;
     }
-    warned_ = true;
+    warned_mask_ |= kWarnDrop;
     ws::core::warn("ui: r2d::{} dropped - draws are only valid inside "
                    "on_update(), within a begin()/end() block",
                    what);
 }
 
 void Renderer2D::warn_kind(const char* what) {
-    if (warned_) {
+    if (warned_mask_ & kWarnKindMismatch) {
         return;
     }
-    warned_ = true;
+    warned_mask_ |= kWarnKindMismatch;
     ws::core::warn("ui: r2d::{} dropped - 3D draws are only valid inside a "
                    "begin(Camera3D) block",
                    what);
 }
 
 void Renderer2D::warn_caps() {
-    if (warned_) {
+    if (warned_mask_ & kWarnCaps) {
         return;
     }
-    warned_ = true;
+    warned_mask_ |= kWarnCaps;
     // M9: chunks and vertices grow on demand, so the only drop left is a
     // quad pushed with no open segment - push_quad with a segment always
     // appends.
@@ -179,19 +185,19 @@ void Renderer2D::warn_caps() {
 }
 
 void Renderer2D::warn_unknown_texture(uint32_t id) {
-    if (warned_) {
+    if (warned_mask_ & kWarnUnknownTexture) {
         return;
     }
-    warned_ = true;
+    warned_mask_ |= kWarnUnknownTexture;
     ws::core::warn("ui: r2d draw with unknown texture id {} - rendered white",
                    id);
 }
 
 void Renderer2D::warn_sprite(const Sprite& sprite) {
-    if (warned_) {
+    if (warned_mask_ & kWarnSprite) {
         return;
     }
-    warned_ = true;
+    warned_mask_ |= kWarnSprite;
     ws::core::warn("ui: r2d sprite (page {}, index {}) is unknown - rendered "
                    "white",
                    sprite.page, sprite.index);
@@ -201,9 +207,12 @@ void Renderer2D::warn_sprite(const Sprite& sprite) {
 
 void Renderer2D::stash_camera(const Camera2D& camera) {
     ++current_epoch_;
-    current_camera_ = camera;
     current_perspective_ = false;  // this block records the 2D kind
     camera_stashed_ = true;
+    // The block's snapshot: its commands replay through
+    // frame_cameras_[epoch - 1]. current_epoch_ was just bumped, so the
+    // push lands exactly on this epoch's slot.
+    frame_cameras_.push_back(CameraSnapshot{camera, Camera3D{}, false});
 }
 
 void Renderer2D::stash_camera(const Camera3D& camera) {
@@ -211,6 +220,7 @@ void Renderer2D::stash_camera(const Camera3D& camera) {
     current_camera3d_ = camera;
     current_perspective_ = true;  // this block records the perspective kind
     camera_stashed_ = true;
+    frame_cameras_.push_back(CameraSnapshot{Camera2D{}, camera, true});
 }
 
 void Renderer2D::record(const char* what, const float (&pos)[4][3],
@@ -222,11 +232,11 @@ void Renderer2D::record(const char* what, const float (&pos)[4][3],
     }
     // Unknown ids render white: a garbage index must never reach the
     // descriptor write at flush time (it would index textures_ out of
-    // bounds). Clamped here, before the material key is even packed, so a
-    // garbage id cannot leak into the sort either. Only while a registry
-    // exists (init() puts white at index 0 before any frame): headless
-    // there is nothing to index and no flush, so synthetic ids pass
-    // through untouched - the CPU-side tests rely on exactly that.
+    // bounds) - clamped here, at record time, before the command exists.
+    // Only while a registry exists (init() puts white at index 0 before
+    // any frame): headless there is nothing to index and no flush, so
+    // synthetic ids pass through untouched - the CPU-side tests rely on
+    // exactly that.
     if (!textures_.empty() && texture.id != 0 &&
         texture.id >= textures_.size()) {
         warn_unknown_texture(texture.id);
@@ -234,13 +244,10 @@ void Renderer2D::record(const char* what, const float (&pos)[4][3],
     }
     DrawCommand cmd;
     cmd.sort_layer = current_layer_;
+    // The camera rides the epoch: frame_end replays this command through
+    // frame_cameras_[camera_epoch - 1], not through a copy of the camera
+    // embedded in the command.
     cmd.camera_epoch = current_epoch_;
-    cmd.material_key = make_material_key(texture);
-    cmd.camera = current_camera_;
-    cmd.perspective = current_perspective_;
-    if (current_perspective_) {
-        cmd.camera3d = current_camera3d_;  // the half this draw replays with
-    }
     cmd.texture = texture;
     cmd.color = color;
     const float* clip = active_clip();
@@ -547,19 +554,44 @@ Texture Renderer2D::load_texture(const char* path) {
 
 void Renderer2D::register_atlas_page(Texture page,
                                      std::vector<atlas::Rect> rects) {
+    if (page.id == kNoAtlasPage) {
+        // The sentinel itself can never be a map key (id + 1 would wrap).
+        // Unreachable from production - ids are registry indexes, and the
+        // bindless tier caps them far below the sentinel - so this is
+        // garbage armor, not a path any real caller can take.
+        ws::core::warn("ui: r2d::register_atlas_page refused texture id {} "
+                       "- its sprites render white",
+                       page.id);
+        return;
+    }
+    const std::uint32_t index =
+        static_cast<std::uint32_t>(atlas_pages_.size());
     atlas_pages_.push_back(AtlasPage{page, std::move(rects)});
+    // The dense map grows to cover the id; fresh entries are the sentinel
+    // (not a page). Synthetic test ids land here untouched, registry or
+    // not - the map is keyed by id, not by textures_.
+    if (page_of_texture_.size() <= page.id) {
+        page_of_texture_.resize(page.id + 1, kNoAtlasPage);
+    }
+    page_of_texture_[page.id] = index;
 }
 
 const atlas::Rect* Renderer2D::find_sprite_rect(const Sprite& sprite) const {
-    for (const AtlasPage& page : atlas_pages_) {
-        if (page.texture.id == sprite.page) {
-            if (sprite.index < page.rects.size()) {
-                return &page.rects[sprite.index];
-            }
-            return nullptr;  // the right page, but no such sprite
-        }
+    // O(1): the dense map carries id -> atlas_pages_ index. This runs once
+    // per sprite and once per glyph in draw_text, so it must not scale
+    // with the page count. Ids past the map = never registered as a page.
+    if (sprite.page >= page_of_texture_.size()) {
+        return nullptr;  // not a registered atlas page
     }
-    return nullptr;  // not a registered atlas page
+    const std::uint32_t index = page_of_texture_[sprite.page];
+    if (index == kNoAtlasPage) {
+        return nullptr;  // a texture that is not an atlas page
+    }
+    const AtlasPage& page = atlas_pages_[index];
+    if (sprite.index >= page.rects.size()) {
+        return nullptr;  // the right page, but no such sprite
+    }
+    return &page.rects[sprite.index];
 }
 
 void Renderer2D::draw_sprite(float x, float y, float w, float h,
