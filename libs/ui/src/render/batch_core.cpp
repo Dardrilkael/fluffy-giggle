@@ -289,6 +289,25 @@ bool BatchCore::push_quad(const float (&pos)[4][3], const float (&uv)[4][2],
         ++dropped_quads_;
         return false;
     }
+    // The u16 index space caps one chunk at kMaxQuadsPerChunk: split at
+    // the cap exactly like the texture-table split, but COPY the table -
+    // the fresh chunk's vertices still name the old slots, so its table
+    // must resolve them. Index-based access throughout: start_chunk's
+    // push_back may move the elements, so references into chunks_ do not
+    // survive it (the clip array is read inside start_chunk before its
+    // own push, so binding it as an argument is safe).
+    if (chunks_.back().quad_count >= kMaxQuadsPerChunk) {
+        const std::size_t old_index = chunks_.size() - 1;
+        const Mat4 vp = chunks_[old_index].vp;
+        start_chunk(vp, chunks_[old_index].clip,
+                    chunks_[old_index].depth_test);
+        Chunk& fresh = chunks_.back();
+        for (std::uint32_t i = 0; i < chunks_[old_index].texture_count;
+             ++i) {
+            fresh.texture_ids[i] = chunks_[old_index].texture_ids[i];
+        }
+        fresh.texture_count = chunks_[old_index].texture_count;
+    }
     // Chunked tier: the chunk-local table slot (with splits). Bindless
     // tier: the global registry id - the shader's table is the registry,
     // so no remap, no split, and the chunk's own table stays empty.

@@ -251,6 +251,45 @@ TEST_CASE("texture overflow splits chunks and preserves order") {
     CHECK(core.vertices().back().tex_index == 0.0f);  // fresh table, slot 0
 }
 
+TEST_CASE("quad cap splits chunks with the table carried over (u16)") {
+    BatchCore core;
+    core.begin_frame();
+    core.open_segment(default_vp());
+
+    // One chunk's worth of quads on a single texture, then past the cap:
+    // the split is the u16 index space's edge (4 * kMaxQuadsPerChunk =
+    // 65536 = the whole uint16 range).
+    for (std::uint32_t i = 0;
+         i < ws::ui::r2d::batch::kMaxQuadsPerChunk; ++i) {
+        REQUIRE(push_test_quad(core, 1u));
+    }
+    REQUIRE(push_test_quad(core, 1u));  // quad kMax: same texture, past cap
+    REQUIRE(push_test_quad(core, 2u));  // ...and a fresh texture after it
+
+    REQUIRE(core.chunk_count() == 2);
+    const auto& a = core.chunk(0);
+    const auto& b = core.chunk(1);
+    CHECK(a.quad_count == ws::ui::r2d::batch::kMaxQuadsPerChunk);
+    CHECK(a.vertex_offset == 0);
+    // Contiguous: painter order survives the split (the segment is one
+    // run; the fresh chunk continues exactly where the full one ended).
+    CHECK(b.vertex_offset == ws::ui::r2d::batch::kMaxQuadsPerChunk * 4);
+    CHECK(b.quad_count == 2);
+    // The split carries the table: texture 1 is slot 0 in the fresh chunk
+    // without re-registering, and the post-split newcomer takes slot 1.
+    CHECK(b.texture_count == 2);
+    CHECK(b.texture_ids[0] == 1u);
+    CHECK(b.texture_ids[1] == 2u);
+    CHECK(b.vp.m[0] == a.vp.m[0]);    // the split inherits the segment
+    CHECK(b.depth_test == a.depth_test);
+    // Slot resolution past the split: the same-texture quad rides the
+    // carried slot 0, the newcomer rides the fresh slot 1.
+    const std::size_t first_past =
+        std::size_t(ws::ui::r2d::batch::kMaxQuadsPerChunk) * 4;
+    CHECK(core.vertices()[first_past].tex_index == 0.0f);
+    CHECK(core.vertices()[first_past + 4].tex_index == 1.0f);
+}
+
 TEST_CASE("global texture ids skip the chunk table (bindless mode)") {
     BatchCore core;
     core.begin_frame();
@@ -308,8 +347,13 @@ TEST_CASE("vertex capacity grows instead of dropping (M9)") {
         }
     }
     CHECK(core.vertices().size() == quads * 4);
-    CHECK(core.chunk_count() == 1);
-    CHECK(core.chunk(0).quad_count == quads);
+    // The u16 index space splits the run: 32769 = 16384 + 16384 + 1
+    // (kMaxQuadsPerChunk per chunk, the remainder in the last one).
+    CHECK(core.chunk_count() == 3);
+    CHECK(core.chunk(0).quad_count == ws::ui::r2d::batch::kMaxQuadsPerChunk);
+    CHECK(core.chunk(1).quad_count == ws::ui::r2d::batch::kMaxQuadsPerChunk);
+    CHECK(core.chunk(2).quad_count ==
+          quads - 2 * ws::ui::r2d::batch::kMaxQuadsPerChunk);
     CHECK(core.dropped_quads() == 0);
 }
 

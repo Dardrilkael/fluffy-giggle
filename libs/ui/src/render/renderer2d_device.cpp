@@ -318,26 +318,6 @@ void Renderer2D::shutdown() {
 
 // --- Renderer2D: GPU helpers -------------------------------------------------
 
-namespace {
-
-// Absolute pattern: quad q's six indices are 4q + {0,1,2,2,3,0}. A chunk
-// draw with firstIndex 0 and vertexOffset = chunk.vertex_offset lands each
-// chunk-local quad q on its own vertices: 4*(q0 + q) + k == 4q +
-// vertex_offset + k. Refilled on every index-arena growth.
-void fill_quad_index_pattern(uint32_t* indices, std::size_t quad_capacity) {
-    for (std::size_t q = 0; q < quad_capacity; ++q) {
-        const uint32_t base = static_cast<uint32_t>(q * 4);
-        indices[q * 6 + 0] = base + 0;  // TL
-        indices[q * 6 + 1] = base + 1;  // TR
-        indices[q * 6 + 2] = base + 2;  // BR
-        indices[q * 6 + 3] = base + 2;  // BR
-        indices[q * 6 + 4] = base + 3;  // BL
-        indices[q * 6 + 5] = base + 0;  // TL
-    }
-}
-
-}  // namespace
-
 bool Renderer2D::create_frame_resources() {
     // Nothing here depends on the swapchain, so a resize rebuilds none of
     // it. Everything a frame slot owns is keyed by that slot, whose fence
@@ -521,7 +501,7 @@ bool Renderer2D::grow_index_arena(uint32_t frame_slot, std::size_t min_quads) {
     }
     gfx::BufferOut buffer{};
     const ws::core::Status created = gpu_->create_buffer(
-        {static_cast<std::uint64_t>(capacity) * 6 * sizeof(uint32_t),
+        {static_cast<std::uint64_t>(capacity) * 6 * sizeof(std::uint16_t),
          VK_BUFFER_USAGE_INDEX_BUFFER_BIT},
         buffer);
     if (!created) {
@@ -531,12 +511,10 @@ bool Renderer2D::grow_index_arena(uint32_t frame_slot, std::size_t min_quads) {
                         created.error().message);
         return false;
     }
-    // The pattern is absolute (quad q -> 4q + offsets), so a growth refills
-    // the whole arena - the first quads' indices are unchanged, the new
-    // tail extends them.
-    auto* const indices = static_cast<uint32_t*>(buffer.mapped);
-    fill_quad_index_pattern(indices, capacity);
-    gpu_->flush_buffer(buffer.allocation);
+    // No refill: the flush writes each chunk's pattern every frame (the
+    // indices are chunk-local u16), so a fresh buffer only needs its
+    // capacity - the flush fills exactly what it draws.
+    auto* const indices = static_cast<std::uint16_t*>(buffer.mapped);
     if (arena.buffer != VK_NULL_HANDLE) {
         gpu_->destroy_buffer(arena.buffer, arena.allocation);
         ws::core::info("ui: r2d grew frame slot {}'s index arena {} -> {} "
@@ -1070,7 +1048,7 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
     gpu_->flush_buffer(arena.allocation);
 
     // A full vertex arena is exactly capacity/4 quads; the index arena
-    // grows in step so the absolute pattern always covers the frame.
+    // grows in step so every chunk's pattern instance fits.
     IndexArena& indices = index_arenas_[frame_slot];
     const std::size_t quads = vertices.size() / 4;
     if (quads > indices.capacity) {
@@ -1079,11 +1057,36 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
         }
     }
 
+    // Chunk-local u16 pattern, written fresh every frame: quad q of chunk
+    // c -> 4q + {0,1,2,2,3,0} at the chunk's own base. Chunks are
+    // contiguous (start_chunk stamps the current vertex count), so
+    // (vertex_offset / 4) * 6 is the chunk's first index and the write
+    // regions never overlap. Per chunk, never one global fill: a
+    // texture-table split can start a chunk at any quad index, so the
+    // LOCAL quad number restarts per chunk - that is what keeps every
+    // index inside the u16 space (kMaxQuadsPerChunk bounds quad_count).
+    for (uint32_t c = 0; c < batch_.chunk_count(); ++c) {
+        const batch::Chunk& chunk = batch_.chunk(c);
+        std::uint16_t* dst = indices.mapped +
+            (static_cast<std::size_t>(chunk.vertex_offset) / 4) * 6;
+        for (uint32_t q = 0; q < chunk.quad_count; ++q) {
+            const std::uint16_t base = static_cast<std::uint16_t>(q * 4);
+            dst[q * 6 + 0] = base + 0;  // TL
+            dst[q * 6 + 1] = base + 1;  // TR
+            dst[q * 6 + 2] = base + 2;  // BR
+            dst[q * 6 + 3] = base + 2;  // BR
+            dst[q * 6 + 4] = base + 3;  // BL
+            dst[q * 6 + 5] = base + 0;  // TL
+        }
+    }
+    // Same non-coherent visibility contract as the vertex arena above.
+    gpu_->flush_buffer(indices.allocation);
+
     // Vertex/index binds and the viewport are pipeline-independent state -
     // bound once; the pipeline itself binds per chunk below (bind on change).
     const VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &arena.buffer, &offset);
-    vkCmdBindIndexBuffer(cmd, indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+    vkCmdBindIndexBuffer(cmd, indices.buffer, 0, VK_INDEX_TYPE_UINT16);
 
     VkViewport viewport{};
     viewport.width = fb_width;
@@ -1141,9 +1144,11 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
         vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT,
                            0, static_cast<uint32_t>(sizeof(batch::Mat4)),
                            chunk.vp.m);
-        // The shared absolute index pattern + vertexOffset picks out the
-        // chunk's contiguous vertices; firstIndex stays 0.
-        vkCmdDrawIndexed(cmd, chunk.quad_count * 6, 1, 0,
+        // Chunk-local indices: firstIndex lands on this chunk's pattern
+        // instance; vertexOffset rebases it onto the chunk's contiguous
+        // vertices (4*(local q) + vertex_offset + k == the global quad).
+        const uint32_t first_index = (chunk.vertex_offset / 4) * 6;
+        vkCmdDrawIndexed(cmd, chunk.quad_count * 6, 1, first_index,
                          static_cast<int32_t>(chunk.vertex_offset), 0);
     }
 }

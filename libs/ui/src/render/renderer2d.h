@@ -262,10 +262,11 @@ private:
     void destroy_frame_resources();
     // Both arena halves grow at flush, the one point the frame slot is
     // idle (its fence was waited): destroy + recreate the vertex arena at
-    // `min_vertices` (geometric - double, then double again if needed) and
-    // the index arena at the matching quad capacity, refilling the
-    // absolute pattern. False only when the (re)allocation fails - the
-    // caller keeps the old buffer and skips the frame's draws (logged).
+    // `min_vertices` (geometric - double, then double again if needed)
+    // and the index arena at the matching quad capacity (its contents are
+    // rewritten per frame at flush, so growth needs no refill). False
+    // only when the (re)allocation fails - the caller keeps the old
+    // buffer and skips the frame's draws (logged).
     bool grow_vertex_arena(uint32_t frame_slot, std::size_t min_vertices);
     bool grow_index_arena(uint32_t frame_slot, std::size_t min_quads);
     // Staging upload of a 4-byte-per-pixel R8G8B8A8 image (one-off submit +
@@ -389,12 +390,14 @@ private:
     // One index arena per frame slot, same growth contract as the vertex
     // arena. Per-slot (not shared) precisely so it CAN grow at the slot's
     // idle flush: a shared buffer would be bound by the other slot's
-    // in-flight submission. The pattern is absolute (quad q -> 4q +
-    // {0,1,2,2,3,0}), refilled on every growth.
+    // in-flight submission. u16, and the indices are CHUNK-LOCAL (quad q
+    // of the chunk -> 4q + {0,1,2,2,3,0}): the flush writes each chunk's
+    // pattern every frame, so growth needs no refill - and one chunk's
+    // indices never leave the u16 space (batch::kMaxQuadsPerChunk).
     struct IndexArena {
         VkBuffer buffer = VK_NULL_HANDLE;
         void* allocation = nullptr;  // the gfx buffer allocation (flush/destroy's handle)
-        std::uint32_t* mapped = nullptr;
+        std::uint16_t* mapped = nullptr;
         std::size_t capacity = 0;  // quads
     };
     std::vector<IndexArena> index_arenas_;

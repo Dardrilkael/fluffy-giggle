@@ -20,6 +20,12 @@
 namespace ws::ui::r2d::batch {
 
 inline constexpr std::uint32_t kMaxTexturesPerChunk = 32;   // = the sampler2D[32] array in shaders/batch.frag
+// One chunk never exceeds this many quads: 16384 quads = 65536 vertices,
+// exactly the u16 index space, so the flush's chunk-local index pattern
+// (4*q_local + k) always fits uint16. push_quad splits at the cap exactly
+// like the texture-table split - same VP/clip/depth, plus a copy of the
+// texture table so the fresh chunk keeps resolving the same ids.
+inline constexpr std::uint32_t kMaxQuadsPerChunk = 16384;
 // Initial reservations, NOT caps (M9): both the vertex and the chunk array
 // grow on demand, geometrically, so a busy app pays O(log) allocations and
 // then runs steady-state allocation-free. The GPU half grows in lockstep

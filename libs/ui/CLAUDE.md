@@ -264,15 +264,24 @@ third-party).
 - **Chunks (M9: growth, not caps).** One chunk = one VP (64B push
   constants) + one clip (one scissor) + one depth mode (which of the two
   pipelines flushes it) + one texture table + one `vkCmdDrawIndexed`.
-  CPU-side, chunks and vertices have NO hard cap anymore: the vectors
+  CPU-side, chunks and vertices have NO drop caps anymore: the vectors
   start at `kInitialChunkCapacity`/`kInitialVertexCapacity` and grow
   geometrically at flush — the one point the frame slot is idle (its
-  fence was waited in render_frame before flush runs). GPU-side, the
-  vertex AND index arenas are per frame slot and grow at the same point
-  (the index buffer went per-slot for exactly that reason: a shared
-  buffer would be bound by the other slot's in-flight submission), as
-  does the chunked tier's per-slot descriptor pool (rebuilt bigger, new
-  sets white-inited). The one drop that remains: a quad pushed with NO
+  fence was waited in render_frame before flush runs). One structural
+  split remains: a chunk holds at most `kMaxQuadsPerChunk` (16384) quads
+  — exactly the u16 index space — and `push_quad` splits past it like a
+  texture-table overflow (same VP/clip/depth, plus a copy of the
+  texture table so the fresh chunk keeps resolving the same ids).
+  GPU-side, the vertex AND index arenas are per frame slot and grow at
+  the same point (the index buffer went per-slot for exactly that
+  reason: a shared buffer would be bound by the other slot's in-flight
+  submission), as does the chunked tier's per-slot descriptor pool
+  (rebuilt bigger, new sets white-inited). The index arena is u16 with
+  CHUNK-LOCAL indices (quad q of the chunk -> 4q + {0,1,2,2,3,0}); the
+  flush writes each chunk's pattern every frame — `firstIndex`
+  `(vertex_offset/4)*6`, `vertexOffset` the chunk's `vertex_offset` —
+  so growth needs no refill and the index bytes per quad halve. The one
+  drop that remains: a quad pushed with NO
   open segment, counted in `BatchCore::dropped_quads()` (reset per
   frame) and warned once per frame by the renderer. A growth failure
   (OOM) logs and skips that frame's draws — loudly, never a silent
