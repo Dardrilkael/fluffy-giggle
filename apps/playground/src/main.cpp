@@ -315,12 +315,20 @@ protected:
         // M18's tooltip demo: the hint follows the cursor while the
         // clicks button is hot - chrome at the tooltip stratum that
         // claims nothing, so the button beneath keeps its hover and
-        // its clicks.
+        // its clicks. The bounds carry the hint's WHOLE box: the scope
+        // is a padded panel (the cursor starts inset by theme.padding)
+        // around one control_height text row, so anything shorter
+        // clips the line to its top sliver.
+        const float hint_w =
+            chrome_.font != nullptr
+                ? chrome_.font->measure_text("the click counter")
+                : 150.0f * ui_scale_;
         if (ws::ui::gui::begin_tooltip(
                 gui_, layout_, chrome_, "hint",
                 {gui_.input().mouse_x + 14.0f * ui_scale_,
                  gui_.input().mouse_y + 18.0f * ui_scale_,
-                 150.0f * ui_scale_, chrome_.control_height},
+                 hint_w + 2.0f * chrome_.padding,
+                 chrome_.control_height + 2.0f * chrome_.padding},
                 gui_.is_hot(clicks_w))) {
             ws::ui::gui::text(layout_, chrome_, "the click counter",
                               -1.0f);

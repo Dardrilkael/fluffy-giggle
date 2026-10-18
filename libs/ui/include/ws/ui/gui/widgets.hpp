@@ -374,7 +374,11 @@ void end_popup(GuiContext& gui, LayoutCursor& layout);
 // a hint that hovers above everything else. `show` is the caller's
 // condition (typically an is_hot() check on the widget being explained);
 // the content is the caller's `if` branch, the same idiom as
-// begin_popup's. The scope pushes the tooltip stratum, the chrome at
+// begin_popup's. `bounds` is caller-sized and must fit the whole hint:
+// the scope is a padded panel (the cursor starts inset by
+// theme.padding), so a box shorter than the padding plus its content
+// rows clips them at the bounds. The scope pushes the tooltip stratum,
+// the chrome at
 // `bounds`, an escaping r2d clip at the bounds (the hint draws past any
 // panel) and an id scope - but NO hit clip, no wheel claim and no open
 // state: a tooltip never claims, never closes on anything, and the widget
