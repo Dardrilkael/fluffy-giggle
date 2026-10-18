@@ -51,6 +51,12 @@ struct DrawCommand {
 
     float pos[4][3] = {};  // TL, TR, BR, BL; z = 0 (2D) or the 3D camera's world
     float uv[4][2] = {};
+    float radius = 0.0f;  // 0 = the sample path (every record but
+                          // draw_rounded_quad's SDF form); > 0 = that form's
+                          // corner radius, world units - the replay routes
+                          // the command to push_rounded_quad, which packs it
+                          // into a NEGATIVE tex_index (never a texture id:
+                          // that is the shader's discriminator)
 };
 
 // One begin() block's camera state, snapshotted at stash time. The block's
@@ -233,9 +239,11 @@ private:
     void stash_camera(const Camera2D& camera);
     void stash_camera(const Camera3D& camera);
     // Appends one fully-expanded quad command; drops it (with the once-per-
-    // frame warn) when no begin() block is open.
+    // frame warn) when no begin() block is open. `radius > 0` marks the
+    // command as draw_rounded_quad's SDF form (see DrawCommand::radius).
     void record(const char* what, const float (&pos)[4][3],
-                const float (&uv)[4][2], std::uint32_t color, Texture texture);
+                const float (&uv)[4][2], std::uint32_t color, Texture texture,
+                float radius = 0.0f);
 
     // --- GPU half helpers ---
     // Unknown texture id, while a registry exists: once per frame.
@@ -354,11 +362,6 @@ private:
         void* allocation = nullptr;  // the gfx image allocation (destroy_image's pair)
     };
     std::vector<TextureEntry> textures_;
-
-    // The builtin rounded-rect mask draw_rounded_quad 9-slices (uploaded
-    // at init, after white). White (square corners) until init runs or if
-    // the upload fails - headless tests record geometry against white.
-    Texture rounded_texture_{};
 
     // Atlas pages (load_atlas, or test injection): a page's texture id is
     // its key in Sprite::page. Only grows, so sprites stay valid for the

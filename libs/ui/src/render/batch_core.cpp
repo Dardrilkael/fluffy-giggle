@@ -283,12 +283,7 @@ std::uint32_t BatchCore::texture_slot(std::uint32_t texture_id) {
     return 0;
 }
 
-bool BatchCore::push_quad(const float (&pos)[4][3], const float (&uv)[4][2],
-                          const float (&color)[4], std::uint32_t texture_id) {
-    if (!segment_open_ || chunks_.empty()) {
-        ++dropped_quads_;
-        return false;
-    }
+void BatchCore::split_full_chunk() {
     // The u16 index space caps one chunk at kMaxQuadsPerChunk: split at
     // the cap exactly like the texture-table split, but COPY the table -
     // the fresh chunk's vertices still name the old slots, so its table
@@ -296,17 +291,25 @@ bool BatchCore::push_quad(const float (&pos)[4][3], const float (&uv)[4][2],
     // push_back may move the elements, so references into chunks_ do not
     // survive it (the clip array is read inside start_chunk before its
     // own push, so binding it as an argument is safe).
+    const std::size_t old_index = chunks_.size() - 1;
+    const Mat4 vp = chunks_[old_index].vp;
+    start_chunk(vp, chunks_[old_index].clip,
+                chunks_[old_index].depth_test);
+    Chunk& fresh = chunks_.back();
+    for (std::uint32_t i = 0; i < chunks_[old_index].texture_count; ++i) {
+        fresh.texture_ids[i] = chunks_[old_index].texture_ids[i];
+    }
+    fresh.texture_count = chunks_[old_index].texture_count;
+}
+
+bool BatchCore::push_quad(const float (&pos)[4][3], const float (&uv)[4][2],
+                          const float (&color)[4], std::uint32_t texture_id) {
+    if (!segment_open_ || chunks_.empty()) {
+        ++dropped_quads_;
+        return false;
+    }
     if (chunks_.back().quad_count >= kMaxQuadsPerChunk) {
-        const std::size_t old_index = chunks_.size() - 1;
-        const Mat4 vp = chunks_[old_index].vp;
-        start_chunk(vp, chunks_[old_index].clip,
-                    chunks_[old_index].depth_test);
-        Chunk& fresh = chunks_.back();
-        for (std::uint32_t i = 0; i < chunks_[old_index].texture_count;
-             ++i) {
-            fresh.texture_ids[i] = chunks_[old_index].texture_ids[i];
-        }
-        fresh.texture_count = chunks_[old_index].texture_count;
+        split_full_chunk();
     }
     // Chunked tier: the chunk-local table slot (with splits). Bindless
     // tier: the global registry id - the shader's table is the registry,
@@ -325,6 +328,43 @@ bool BatchCore::push_quad(const float (&pos)[4][3], const float (&uv)[4][2],
         v.uv[0] = uv[i][0];
         v.uv[1] = uv[i][1];
         v.tex_index = static_cast<float>(tex_index);
+        vertices_.push_back(v);
+    }
+    ++chunks_.back().quad_count;
+    return true;
+}
+
+bool BatchCore::push_rounded_quad(const float (&pos)[4][3],
+                                  const float (&uv)[4][2],
+                                  const float (&color)[4], float radius) {
+    if (!segment_open_ || chunks_.empty()) {
+        ++dropped_quads_;
+        return false;
+    }
+    if (chunks_.back().quad_count >= kMaxQuadsPerChunk) {
+        split_full_chunk();
+    }
+    // No texture slot, either tier: tex_index carries the SDF radius
+    // NEGATIVE, normalized to the rect's width (see the header). TL -> TR
+    // is the width even under rotation - the corners are rigid. A
+    // degenerate width (unreachable: draw_rounded_quad drops w <= 0)
+    // degrades to 0, the flat-color sample path.
+    const float dx = pos[1][0] - pos[0][0];
+    const float dy = pos[1][1] - pos[0][1];
+    const float w = std::sqrt(dx * dx + dy * dy);
+    const float tex_index = w > 1e-6f ? -(radius / w) : 0.0f;
+    for (int i = 0; i < 4; ++i) {
+        Vertex v;
+        v.pos[0] = pos[i][0];
+        v.pos[1] = pos[i][1];
+        v.pos[2] = pos[i][2];
+        v.color[0] = color[0];
+        v.color[1] = color[1];
+        v.color[2] = color[2];
+        v.color[3] = color[3];
+        v.uv[0] = uv[i][0];
+        v.uv[1] = uv[i][1];
+        v.tex_index = tex_index;
         vertices_.push_back(v);
     }
     ++chunks_.back().quad_count;

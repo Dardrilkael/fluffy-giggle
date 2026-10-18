@@ -7,7 +7,6 @@
 #include <cstring>
 
 #include "text/font.h"
-#include "render/rounded_texture.h"
 
 #if defined(_MSC_VER)
 #pragma warning(push, 0)
@@ -117,7 +116,14 @@ void Renderer2D::frame_end() {
         }
         float color[4];
         batch::unpack_rgba(cmd.color, color);
-        (void)batch_.push_quad(cmd.pos, cmd.uv, color, cmd.texture.id);
+        if (cmd.radius > 0.0f) {
+            // draw_rounded_quad's SDF form: one quad, no texture slot -
+            // the batch packs the radius into a negative tex_index.
+            (void)batch_.push_rounded_quad(cmd.pos, cmd.uv, color,
+                                            cmd.radius);
+        } else {
+            (void)batch_.push_quad(cmd.pos, cmd.uv, color, cmd.texture.id);
+        }
     }
     batch_.close_segment();
     commands_.clear();
@@ -225,7 +231,7 @@ void Renderer2D::stash_camera(const Camera3D& camera) {
 
 void Renderer2D::record(const char* what, const float (&pos)[4][3],
                         const float (&uv)[4][2], std::uint32_t color,
-                        Texture texture) {
+                        Texture texture, float radius) {
     if (!camera_stashed_) {
         warn_drop(what);  // outside any begin()/end() block
         return;
@@ -250,6 +256,7 @@ void Renderer2D::record(const char* what, const float (&pos)[4][3],
     cmd.camera_epoch = current_epoch_;
     cmd.texture = texture;
     cmd.color = color;
+    cmd.radius = radius;
     const float* clip = active_clip();
     for (int i = 0; i < 4; ++i) {
         cmd.clip[i] = clip[i];
@@ -477,46 +484,24 @@ void Renderer2D::draw_rounded_quad(float x, float y, float w, float h,
     // Corners cannot overlap: the radius caps at half the shorter side.
     radius = std::min(radius, std::min(w, h) * 0.5f);
     if (radius <= 0.5f) {
-        // A sub-pixel radius is an honest square quad - minifying the
-        // baked 8 px arc down to nothing would look worse.
+        // A sub-pixel radius is an honest square quad - an
+        // antialiasing ramp narrower than a pixel buys nothing.
         float pos[4][3];
         batch::quad_corners(x, y, w, h, rotation, pos);
         record("draw_rounded_quad", pos, kQuadUV, color, Texture{});
         return;
     }
-    // 9-slice against the builtin mask: the four corner quads sample the
-    // baked arcs (scaled from kTexRadius to `radius`), the strips and the
-    // center stretch the solid interior. All nine pivot the WHOLE rect's
-    // center so rotation moves the rounded rect as one rigid shape. A
-    // degenerate strip (radius == half the short side) records a
-    // zero-area quad - harmless, and the slice count stays a constant
-    // nine. Headless (no upload) the mask id is white: the geometry
-    // records, the corners render square.
-    const float lo = static_cast<float>(rounded::kTexRadius) /
-                     static_cast<float>(rounded::kTexSize);
-    const float hi = 1.0f - lo;
-    const float xs[3] = {x, x + radius, x + w - radius};
-    const float ys[3] = {y, y + radius, y + h - radius};
-    const float sw[3] = {radius, w - 2.0f * radius, radius};
-    const float sh[3] = {radius, h - 2.0f * radius, radius};
-    const float u0[3] = {0.0f, lo, hi};
-    const float u1[3] = {lo, hi, 1.0f};
-    const float cx = x + w * 0.5f;
-    const float cy = y + h * 0.5f;
-    for (int gy = 0; gy < 3; ++gy) {
-        for (int gx = 0; gx < 3; ++gx) {
-            float pos[4][3];
-            batch::quad_corners_pivot(xs[gx], ys[gy], sw[gx], sh[gy], cx, cy,
-                                      rotation, pos);
-            const float uv[4][2] = {
-                {u0[gx], u0[gy]},  // TL
-                {u1[gx], u0[gy]},  // TR
-                {u1[gx], u1[gy]},  // BR
-                {u0[gx], u1[gy]},  // BL
-            };
-            record("draw_rounded_quad", pos, uv, color, rounded_texture_);
-        }
-    }
+    // One quad, shaded by an SDF: uv are the rect's normalized local
+    // coordinates (they ride the TL/TR/BR/BL corners, so rotation keeps
+    // them rigid), and the radius rides the command for the replay's
+    // push_rounded_quad route - the batch packs it into a NEGATIVE
+    // tex_index, the never-a-texture discriminator shaders/batch.frag
+    // branches on to reconstruct the rounded-box coverage analytically.
+    // No mask texture, no nine slices, no upload-failure degradation:
+    // headless tests record the same geometry the GPU shades.
+    float pos[4][3];
+    batch::quad_corners(x, y, w, h, rotation, pos);
+    record("draw_rounded_quad", pos, kQuadUV, color, Texture{}, radius);
 }
 
 FrameSize Renderer2D::frame_size() const {

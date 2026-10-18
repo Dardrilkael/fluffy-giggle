@@ -100,7 +100,6 @@ libs/ui/
       batch_core.h/.cpp      # pure-CPU batch: chunks, camera VP, geometry (no Vulkan)
       shader_provider.h/.cpp # pipeline shader words: committed spirv.h, or hot
                              # reload when WS_UI_DEV_SHADER_RELOAD (dev only)
-      rounded_texture.h/.cpp # pure-CPU bake of the builtin rounded-rect mask
       shaders/               # batch.vert/.frag (GLSL) + spirv.h (committed build input)
     text/                    # the glyph bake + the atlas packer
       font.h/.cpp            # stb_truetype bake: ASCII 32..126 glyphs, white-RGBA
@@ -340,19 +339,23 @@ third-party).
   each TU that uses it (playground app, tests). System-font-at-runtime
   is a known future cost: right for a Windows-only tool today, and the
   first thing to revisit if Android ever becomes real.
-- **Rounded quads.** `draw_rounded_quad` 9-slices a builtin 32×32 mask
-  texture (`src/render/rounded_texture.*`, baked analytically: one-texel coverage
-  antialiasing across the corner arcs, RGB white — shape rides in alpha, so
-  the vertex tint supplies the color). Uploaded at GPU init, right after
-  white; the four corner slices scale the baked 8 px arcs to the requested
-  radius, the strips and center stretch the solid interior. The radius
+- **Rounded quads.** `draw_rounded_quad` records ONE quad — pivoted
+  corners, uv = the rect's normalized local coordinates — and the rounded
+  shape is an analytic SDF in `shaders/batch.frag`: the corner radius
+  rides the batch's per-vertex `tex_index` channel as a NEGATIVE value
+  normalized to the rect's width (`push_rounded_quad` packs `-radius/w`;
+  negative is never a texture index in either tier, so the sign is the
+  discriminator). The shader recovers the pixel scale from the uv's
+  screen-space derivatives (`|dFdx| = 1/width_px` — exact under rotation
+  because the 2D camera's scale is zoom-only; the flat qualifier keeps
+  the whole primitive on one branch), evaluates a rounded-box SDF, and
+  antialiases with fwidth — no mask texture, no upload to fail, exact at
+  any radius (the old form baked 8 px arcs into a 32×32 mask and
+  9-sliced). A rounded quad takes no texture-table slot; a rounded-only
+  chunk leaves `texture_count` 0 (`write_chunk_set` skips it). The radius
   clamps to half the shorter side; a sub-pixel radius degrades to the
-  plain square quad (minifying the arc would look worse). Rotation pivots
-  the whole rect's center (`batch::quad_corners_pivot`), so the nine
-  slices move as one rigid shape. Degenerate strips record zero-area
-  quads — a rounded quad is always exactly nine records. All nine share
-  one material: one batch segment, not nine. A failed mask upload warns
-  once and degrades every rounded quad to square corners (white texture).
+  plain square quad. Rotation pivots the rect's own center
+  (`batch::quad_corners`), one rigid quad.
 - **Layering.** One render pass (color + depth attachments), three layers:
   r2d flushes right after `vkCmdBeginRenderPass` (2D world and 3D blocks,
   same flush), then ImGui's draw data (widgets), then the command queue
@@ -973,7 +976,7 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   with a z — record depth-tested billboards), `draw_quad` (top-left anchor,
   center-pivot rotation), `draw_line`, `draw_sprite` (atlas sub-rect
   quads), `draw_rounded_quad`
-  (9-sliced builtin mask, radius clamped to half the shorter side),
+  (one SDF-shaded quad, radius clamped to half the shorter side),
   `set_layer`, `push_clip`/`pop_clip` (nested framebuffer clip rects),
   `push_clip_escape` (the overlay spelling — pushes without the
   intersect),

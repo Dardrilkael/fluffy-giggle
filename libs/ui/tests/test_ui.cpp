@@ -15,7 +15,6 @@
 #include "render/batch_core.h"     // internal: pure-CPU batch builder (same path)
 #include "text/font.h"           // internal: pure-CPU font bake + utf8 decoder (same path)
 #include "render/renderer2d.h"     // internal: command recording + sort/replay (same path)
-#include "render/rounded_texture.h"  // internal: the builtin rounded-rect mask bake (same path)
 #include <ws/input/input.hpp>
 #include <ws/ui/app.hpp>
 #include <ws/ui/gui/gui_context.hpp>  // must stay includable without any third-party header
@@ -409,8 +408,8 @@ TEST_CASE("quad_corners_pivot rotates about the pivot; own-center is the default
     CHECK(out[2][1] == doctest::Approx(14.0f));
 
     // quad_corners IS quad_corners_pivot at the rect's own center - the
-    // equivalence draw_rounded_quad's nine slices each break by pivoting
-    // the whole rect's center instead.
+    // equivalence draw_rounded_quad leans on to pivot its whole rect
+    // with the plain spelling.
     float own[4][3];
     quad_corners(10.0f, 20.0f, 30.0f, 40.0f, 0.7f, own);
     quad_corners_pivot(10.0f, 20.0f, 30.0f, 40.0f, 25.0f, 40.0f, 0.7f, out);
@@ -958,47 +957,37 @@ TEST_CASE("atlas packer extrudes sprite edges into the gutter") {
     CHECK(is_color(page_px(packed.pages[0], 6, 6), 0, 0, 0, 0));  // untouched
 }
 
-TEST_CASE("the rounded-rect mask bakes arcs with one-texel coverage") {
+TEST_CASE("the rounded-rect SDF channel: one record, radius normalized negative") {
     using namespace ws::ui::r2d;
-    const auto mask = rounded::bake();
-    using rounded::kTexSize;
-    using rounded::kTexRadius;
+    Renderer2D r;
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(Camera2D{});
+    r.draw_rounded_quad(10.0f, 20.0f, 50.0f, 30.0f, 10.0f, rgba(90, 168, 110));
+    r.end();
+    r.frame_end();
 
-    // RGBA8, row-major from the top-left.
-    REQUIRE(mask.size() ==
-            std::size_t(kTexSize) * std::size_t(kTexSize) * 4);
-    const auto px = [&](int x, int y, int c) {
-        return mask[(std::size_t(y) * kTexSize + x) * 4 + c];
-    };
-
-    // Shape rides in alpha only: RGB is white everywhere, even outside the
-    // rect (a tinted draw needs the color to come from the vertex, not the
-    // mask).
-    const int probes[][2] = {{0, 0}, {31, 0}, {16, 16}, {0, 31}};
-    for (const auto& p : probes) {
-        CHECK(px(p[0], p[1], 0) == 255);
-        CHECK(px(p[0], p[1], 1) == 255);
-        CHECK(px(p[0], p[1], 2) == 255);
+    // The baked 32x32 mask is gone: the rounded shape now shades from
+    // per-vertex data, so its CPU-side truth is exactly what the shader
+    // consumes. One record - not nine slices - and the four vertices
+    // carry the SDF channel: tex_index = -radius/w, NEGATIVE (never a
+    // texture index in either tier - the discriminator batch.frag
+    // branches on) and normalized to the rect's width, so the shader's
+    // uv-gradient recovery returns the radius in pixels for any camera.
+    const auto& v = r.batch().vertices();
+    REQUIRE(r.batch().chunk_count() == 1);
+    REQUIRE(r.batch().chunk(0).quad_count == 1);
+    REQUIRE(v.size() == 4);
+    for (const auto& vert : v) {
+        CHECK(vert.tex_index == doctest::Approx(-10.0f / 50.0f));
     }
-
-    // The flat interior is solid: this texel sits inside the [r, n-r] box,
-    // so no arc ever touches it.
-    CHECK(px(16, 16, 3) == 255);
-    // The corner is fully outside the quarter-circle at radius 8.
-    CHECK(px(0, 0, 3) == 0);
-    CHECK(px(31, 31, 3) == 0);
-    // And a texel on the arc is partial - the one-texel coverage ramp that
-    // antialiases the corners. Its exact byte depends on sqrt rounding,
-    // but a full 0 or 255 here would mean the ramp is missing.
-    const int arc = px(0, 5, 3);  // dist to the arc center (8, 8) ~ 7.91
-    CHECK(arc > 0);
-    CHECK(arc < 255);
-    CHECK(arc > 100);  // ~60% coverage, not a sliver or a near-solid
-    CHECK(arc < 200);
-    // The baked radius is a whole number of texels: at (r, r) the box
-    // clamp starts, so the arc's flat edges begin exactly there.
-    CHECK(px(kTexRadius, 0, 3) == 255);  // top edge, right of the corner: solid
-    CHECK(px(0, kTexRadius, 3) == 255);  // left edge, below the corner
+    // uv are the rect's normalized local coordinates - they ride the
+    // TL/TR/BR/BL corners, so they stay rigid under rotation.
+    CHECK(v[0].uv[0] == doctest::Approx(0.0f));  // TL
+    CHECK(v[0].uv[1] == doctest::Approx(0.0f));
+    CHECK(v[2].uv[0] == doctest::Approx(1.0f));  // BR
+    CHECK(v[2].uv[1] == doctest::Approx(1.0f));
+    // And the record takes no texture: flat color, no table slot.
+    CHECK(r.batch().chunk(0).texture_count == 0);
 }
 
 TEST_CASE("public r2d API is drop-safe without a running app") {
@@ -1753,7 +1742,7 @@ TEST_CASE("the clip stack balances overflow, resets per frame, pops empty safely
     }
 }
 
-TEST_CASE("draw_rounded_quad 9-slices: one segment, corners sample the arcs") {
+TEST_CASE("draw_rounded_quad records one SDF quad: one segment, whole-rect corners") {
     using namespace ws::ui::r2d;
     Renderer2D r;
     r.frame_begin(100.0f, 100.0f);
@@ -1762,39 +1751,31 @@ TEST_CASE("draw_rounded_quad 9-slices: one segment, corners sample the arcs") {
     r.end();
     r.frame_end();
 
-    // Nine slices, one material (the builtin mask - white headless), so one
-    // batch segment: a rounded quad costs no more chunk budget than a flat
-    // one. Slice order is row-major: 0=TL corner, 1=top strip, 2=TR corner,
-    // 3=left strip, 4=center, ..., 8=BR corner.
+    // One quad, one batch segment: a rounded quad costs no more chunk
+    // budget than a flat one, and there are no slice seams to check. The
+    // four corners ARE the rect's corners - one rigid quad the shader
+    // rounds analytically.
     const auto& v = r.batch().vertices();
     REQUIRE(r.batch().chunk_count() == 1);
-    REQUIRE(r.batch().chunk(0).quad_count == 9);
-    REQUIRE(v.size() == 36);
-    const float lo = float(rounded::kTexRadius) / float(rounded::kTexSize);
-
-    // TL corner slice: sits at the rect's corner, samples the mask's arc.
-    CHECK(v[0].pos[0] == doctest::Approx(0.0f));
+    REQUIRE(r.batch().chunk(0).quad_count == 1);
+    REQUIRE(v.size() == 4);
+    CHECK(v[0].pos[0] == doctest::Approx(0.0f));    // TL
     CHECK(v[0].pos[1] == doctest::Approx(0.0f));
-    CHECK(v[0].uv[0] == doctest::Approx(0.0f));
-    CHECK(v[0].uv[1] == doctest::Approx(0.0f));
-    // Top strip: starts at x = radius, stretches the mask's solid edge band.
-    CHECK(v[4].pos[0] == doctest::Approx(8.0f));
-    CHECK(v[4].pos[1] == doctest::Approx(0.0f));
-    CHECK(v[4].uv[0] == doctest::Approx(lo));
-    CHECK(v[4].uv[1] == doctest::Approx(0.0f));
-    // TR corner: mirrored slice, mirrored UVs.
-    CHECK(v[8].pos[0] == doctest::Approx(92.0f));
-    CHECK(v[8].uv[0] == doctest::Approx(1.0f - lo));
-    // Center: inset by the radius on both axes, samples the solid middle.
-    CHECK(v[16].pos[0] == doctest::Approx(8.0f));
-    CHECK(v[16].pos[1] == doctest::Approx(8.0f));
-    CHECK(v[16].uv[0] == doctest::Approx(lo));
-    CHECK(v[16].uv[1] == doctest::Approx(lo));
-    // BR corner: the deepest slice, full-depth UVs.
-    CHECK(v[32].pos[0] == doctest::Approx(92.0f));
-    CHECK(v[32].pos[1] == doctest::Approx(32.0f));
-    CHECK(v[32].uv[0] == doctest::Approx(1.0f - lo));
-    CHECK(v[32].uv[1] == doctest::Approx(1.0f - lo));
+    CHECK(v[1].pos[0] == doctest::Approx(100.0f));  // TR
+    CHECK(v[1].pos[1] == doctest::Approx(0.0f));
+    CHECK(v[2].pos[0] == doctest::Approx(100.0f));  // BR
+    CHECK(v[2].pos[1] == doctest::Approx(40.0f));
+    CHECK(v[3].pos[0] == doctest::Approx(0.0f));   // BL
+    CHECK(v[3].pos[1] == doctest::Approx(40.0f));
+    // The radius rides every vertex: -r/w = -0.08.
+    for (const auto& vert : v) {
+        CHECK(vert.tex_index == doctest::Approx(-0.08f));
+    }
+    // Flat color unpacks into the vertices like every other draw.
+    CHECK(v[0].color[0] == doctest::Approx(90.0f / 255.0f));
+    CHECK(v[0].color[1] == doctest::Approx(168.0f / 255.0f));
+    CHECK(v[0].color[2] == doctest::Approx(110.0f / 255.0f));
+    CHECK(v[0].color[3] == doctest::Approx(1.0f));
 }
 
 TEST_CASE("draw_rounded_quad clamps oversize radii, squares sub-pixel, drops empty") {
@@ -1802,26 +1783,28 @@ TEST_CASE("draw_rounded_quad clamps oversize radii, squares sub-pixel, drops emp
     Renderer2D r;
     r.frame_begin(100.0f, 100.0f);
     r.begin(Camera2D{});
-    // Radius 8 > half of the 4px side: clamps to 2. Still nine slices - the
-    // horizontal strips degenerate to zero height but record, keeping the
-    // slice count a constant (tests and batching stay simple).
+    // Radius 8 > half of the 4px side: clamps to 2. One SDF record, the
+    // radius normalized to the width: -2/10 = -0.2.
     r.draw_rounded_quad(0.0f, 0.0f, 10.0f, 4.0f, 8.0f, rgba(255, 255, 255));
-    // Sub-pixel and zero radii: honest square quads, one record each.
+    // Sub-pixel and zero radii: honest square quads, one record each -
+    // the sample path, tex_index 0 (flat white).
     r.draw_rounded_quad(0.0f, 30.0f, 10.0f, 4.0f, 0.25f, rgba(255, 255, 255));
     r.draw_rounded_quad(0.0f, 40.0f, 10.0f, 4.0f, 0.0f, rgba(255, 255, 255));
     r.end();
     r.frame_end();
 
     const auto& v = r.batch().vertices();
-    REQUIRE(r.batch().chunk_count() == 1);  // all white-texture: one segment
-    REQUIRE(r.batch().chunk(0).quad_count == 11);  // 9 + 1 + 1
-    REQUIRE(v.size() == 44);
-    CHECK(v[4].pos[0] == doctest::Approx(2.0f));  // top strip starts at the
-    CHECK(v[4].pos[1] == doctest::Approx(0.0f)); // clamped radius
-    CHECK(v[12].pos[1] == doctest::Approx(2.0f));  // zero-height strip records
-    CHECK(v[36].uv[0] == doctest::Approx(0.0f));   // plain quad: kQuadUV
-    CHECK(v[36].uv[1] == doctest::Approx(0.0f));
-    CHECK(v[36].pos[1] == doctest::Approx(30.0f));  // and it is the y=30 quad
+    REQUIRE(r.batch().chunk_count() == 1);  // all flat-color: one segment
+    REQUIRE(r.batch().chunk(0).quad_count == 3);
+    REQUIRE(v.size() == 12);
+    for (int i = 0; i < 4; ++i) {
+        CHECK(v[i].tex_index == doctest::Approx(-0.2f));  // clamped radius
+    }
+    for (int i = 4; i < 12; ++i) {
+        CHECK(v[i].tex_index == doctest::Approx(0.0f));  // square fallback
+    }
+    CHECK(v[4].pos[1] == doctest::Approx(30.0f));  // the y=30 square quad
+    CHECK(v[8].pos[1] == doctest::Approx(40.0f));  // the y=40 one
 
     // Degenerate extents drop silently - live app data, not worth a warn.
     r.frame_begin(100.0f, 100.0f);
@@ -1834,7 +1817,7 @@ TEST_CASE("draw_rounded_quad clamps oversize radii, squares sub-pixel, drops emp
     CHECK(r.batch().vertices().empty());
 }
 
-TEST_CASE("draw_rounded_quad rotation pivots the whole rect, slices rigid") {
+TEST_CASE("draw_rounded_quad rotation pivots the whole rect, SDF rigid") {
     using namespace ws::ui::r2d;
     Renderer2D r;
     r.frame_begin(100.0f, 100.0f);
@@ -1844,22 +1827,23 @@ TEST_CASE("draw_rounded_quad rotation pivots the whole rect, slices rigid") {
     r.end();
     r.frame_end();
 
-    // +90 degrees, clockwise on screen: the whole square orbits its center
-    // as one rigid shape - the TL corner swings to the top-right, the
-    // center slice's TL lands 10px in along the new top edge, the BR
-    // corner slice to the bottom-left. Nine pivoted slices, one shape.
+    // +90 degrees, clockwise on screen: the whole rect orbits its center
+    // as one rigid quad - the TL corner swings to the top-right, the BR
+    // corner to the bottom-left. The uv and the radius channel ride the
+    // corners unchanged, so the SDF rounds the same local corners
+    // wherever the rotation carries them.
     const auto& v = r.batch().vertices();
-    REQUIRE(r.batch().chunk(0).quad_count == 9);
-    CHECK(v[0].pos[0] == doctest::Approx(100.0f));
+    REQUIRE(r.batch().chunk_count() == 1);
+    REQUIRE(r.batch().chunk(0).quad_count == 1);
+    CHECK(v[0].pos[0] == doctest::Approx(100.0f));  // TL -> top-right
     CHECK(v[0].pos[1] == doctest::Approx(0.0f));
-    CHECK(v[16].pos[0] == doctest::Approx(90.0f));
-    CHECK(v[16].pos[1] == doctest::Approx(10.0f));
-    CHECK(v[32].pos[0] == doctest::Approx(10.0f));
-    CHECK(v[32].pos[1] == doctest::Approx(90.0f));
-    // The UVs did not rotate with the shape - the BR slice still samples
-    // the mask's BR arc, wherever the rotation carries it.
-    CHECK(v[32].uv[0] == doctest::Approx(0.75f));
-    CHECK(v[32].uv[1] == doctest::Approx(0.75f));
+    CHECK(v[2].pos[0] == doctest::Approx(0.0f));   // BR -> bottom-left
+    CHECK(v[2].pos[1] == doctest::Approx(100.0f));
+    // The corner's uv did not rotate with the shape - the BR vertex
+    // still carries the rect's local (1, 1), never the screen's.
+    CHECK(v[2].uv[0] == doctest::Approx(1.0f));
+    CHECK(v[2].uv[1] == doctest::Approx(1.0f));
+    CHECK(v[2].tex_index == doctest::Approx(-0.1f));  // -10/100, unchanged
 }
 
 // --- gui module (Phases 0-4: the core is real) ---------------------------------------
@@ -8583,7 +8567,8 @@ TEST_CASE("font bake is structural - never exact face metrics") {
     REQUIRE(a.rgba.size() == static_cast<std::size_t>(a.w) * a.h * 4u);
 
     // The tint convention: RGB solid white, the coverage mask in alpha -
-    // the vertex tint supplies the text color, like the rounded mask.
+    // the vertex tint supplies the text color, like the rounded-rect SDF
+    // scales its coverage into alpha.
     bool ink = false;
     for (std::size_t i = 0; i < a.rgba.size() / 4u; ++i) {
         if (a.rgba[i * 4u + 3u] > 0) {
@@ -8772,24 +8757,26 @@ TEST_CASE("gui labels draw through the theme font") {
     // chrome, then widgets.
     REQUIRE(r.batch().chunk_count() == 2);
     const auto& widgets = r.batch().chunk(1);
-    REQUIRE(widgets.texture_count == 2);  // the white face + the font's page
-    int glyph_slot = -1;
-    for (std::uint32_t s = 0; s < widgets.texture_count; ++s) {
-        if (widgets.texture_ids[s] == 7u) {
-            glyph_slot = static_cast<int>(s);
-        }
-    }
-    // Painter order inside the run: the face recorded first, so white
-    // owns slot 0 and the font's page slot 1. The two-slot table IS the
-    // "fonts own their pages" contract: same run (painter order), two
-    // textures - glyphs do NOT merge with icon sprites by design.
-    REQUIRE(glyph_slot == 1);
+    // The button's rounded face is the SDF path: it takes no texture
+    // slot, so the widgets run's table holds exactly the font's page -
+    // the "fonts own their pages" contract: same run (painter order),
+    // glyphs do NOT merge with icon sprites by design.
+    REQUIRE(widgets.quad_count == 3);  // the SDF face + 'A' + 'B'
+    REQUIRE(widgets.texture_count == 1);
+    REQUIRE(widgets.texture_ids[0] == 7u);  // the font's page, slot 0
+    int face_verts = 0;
     int glyph_verts = 0;
-    for (const auto& v : r.batch().vertices()) {
-        if (static_cast<int>(v.tex_index) == glyph_slot) {
-            ++glyph_verts;
+    const auto& verts = r.batch().vertices();
+    for (std::size_t i = widgets.vertex_offset;
+         i < widgets.vertex_offset + std::size_t(widgets.quad_count) * 4;
+         ++i) {
+        if (verts[i].tex_index < 0.0f) {
+            ++face_verts;  // the SDF channel: negative is never a texture
+        } else if (verts[i].tex_index == 0.0f) {
+            ++glyph_verts;  // the page's slot 0
         }
     }
+    CHECK(face_verts == 4);   // one rounded face quad, not nine slices
     CHECK(glyph_verts == 8);  // 'A' and 'B': two glyph quads, nothing else
 }
 

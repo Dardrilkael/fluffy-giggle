@@ -18,7 +18,6 @@
 #include <cstring>
 #include <vector>
 
-#include "render/rounded_texture.h"
 #include "render/shader_provider.h"
 
 #include <ws/core/log.hpp>
@@ -128,20 +127,6 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
     if (!upload_texture(kWhitePixel, 1, 1, &white)) {
         ws::core::error("ui: r2d init failed - white texture upload");
         return false;
-    }
-
-    // The rounded-rect mask draw_rounded_quad 9-slices. A failed upload
-    // degrades to white: the slices render solid, corners come out square -
-    // ugly, never fatal.
-    const auto mask = rounded::bake();
-    Texture rounded{};
-    if (upload_texture(mask.data(), static_cast<uint32_t>(rounded::kTexSize),
-                       static_cast<uint32_t>(rounded::kTexSize), &rounded)) {
-        rounded_texture_ = rounded;
-    } else {
-        ws::core::warn("ui: r2d rounded-rect mask upload failed - rounded "
-                       "quads render square");
-        rounded_texture_ = Texture{};
     }
 
     // One binding, whose shape is the tier's:
@@ -290,7 +275,6 @@ void Renderer2D::shutdown() {
     // Registry-derived state dies with the registry: after a re-init the old
     // page ids would resolve to rects of unrelated textures.
     atlas_pages_.clear();
-    rounded_texture_ = Texture{};
     table_full_warned_ = false;
     clip_overflow_warned_ = false;
     if (set_layout_ != VK_NULL_HANDLE) {
@@ -390,10 +374,10 @@ bool Renderer2D::create_frame_resources() {
         vkUpdateDescriptorSets(device_, kMaxFramesInFlight, writes.data(), 0,
                               nullptr);
 
-        // Id 0 is in place everywhere; the rounded mask (and anything
-        // loaded before this) is still pending. Nothing has been submitted
-        // yet, so every slot is idle and takes its writes right now - the
-        // no-UAB path never gets a safer moment than this.
+        // Id 0 is in place everywhere; anything loaded before this is
+        // still pending. Nothing has been submitted yet, so every slot is
+        // idle and takes its writes right now - the no-UAB path never
+        // gets a safer moment than this.
         table_written_.fill(1);
         for (uint32_t slot = 0; slot < kMaxFramesInFlight; ++slot) {
             apply_pending_table_writes(slot);
@@ -984,9 +968,9 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
     // land in every slot right now, even mid-frame (that IS the feature);
     // without it each slot takes its writes at its idle flush, so a load
     // mid-run renders white for at most a couple of frames per slot.
-    // Before the tables exist (init's own white/rounded uploads), the
-    // pending queue is the only option - create_frame_resources drains
-    // it once they are up.
+    // Before the tables exist (init's own white upload), the pending
+    // queue is the only option - create_frame_resources drains it once
+    // they are up.
     if (tier_.bindless) {
         pending_table_ids_.push_back(id);
         if (tier_.update_after_bind && !table_sets_.empty()) {
@@ -1001,7 +985,9 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
 void Renderer2D::write_chunk_set(VkDescriptorSet set,
                                  const batch::Chunk& chunk) {
     if (chunk.texture_count == 0) {
-        return;  // push_quad always assigns a slot, but never write 0 descriptors
+        // A rounded-only chunk never assigns a slot (push_rounded_quad
+        // takes none) - and never write 0 descriptors.
+        return;
     }
     VkDescriptorImageInfo infos[batch::kMaxTexturesPerChunk];
     for (uint32_t i = 0; i < chunk.texture_count; ++i) {

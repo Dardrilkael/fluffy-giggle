@@ -250,13 +250,18 @@ void progress(LayoutCursor& layout, const ChromeTheme& theme,
     const Rect rect = layout.next(width, theme.control_height);
     r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
                            theme.corner_radius, theme.control_bg);
-    // The fill: the accent over the track, rounded with the theme; the
-    // draw clamps the radius to the fill's own half-height, so a thin
-    // sliver reads as a dot rather than an over-rounded bar.
-    const float fill = fraction * rect.width;
+    // The fill: the accent over the track, rounded with the theme. It
+    // insets a hard 1 px (a literal like the focus ring's 1) on every
+    // side: the SDF shades a half-pixel antialiasing ramp past the ideal
+    // edge, and a fill flush with the track paints that ramp on the
+    // track's own outline - the accent reading as escaped. The draw also
+    // clamps the radius to the fill's own half-height, so a thin sliver
+    // reads as a dot rather than an over-rounded bar.
+    const float fill = fraction * rect.width - 2.0f;
     if (fill > 0.0f) {
-        r2d::draw_rounded_quad(rect.x, rect.y, fill, rect.height,
-                               theme.corner_radius, theme.control_on);
+        r2d::draw_rounded_quad(rect.x + 1.0f, rect.y + 1.0f, fill,
+                               rect.height - 2.0f, theme.corner_radius,
+                               theme.control_on);
     }
 }
 

@@ -188,12 +188,12 @@ void draw_line(float x0, float y0, float x1, float y1, float thickness,
 void draw_line(float x0, float y0, float z0, float x1, float y1, float z1,
                float thickness, std::uint32_t color);
 
-// Flat-color rounded rectangle, 9-sliced from a builtin mask texture: the
-// corner arcs scale to `radius`, the edges stretch. The radius clamps to
-// half the shorter side (past it the corners would overlap); a sub-pixel
-// radius renders as the plain square quad. Rotation pivots the rect's
-// center like draw_quad's. The nine slices share one material, so one
-// rounded quad costs one batch segment, not nine.
+// Flat-color rounded rectangle: ONE quad shaded by an analytic rounded-box
+// SDF in the fragment shader (the radius rides the batch's per-vertex
+// channel - no mask texture, so the radius is exact and antialiased at any
+// camera zoom or rotation). The radius clamps to half the shorter side
+// (past it the corners would overlap); a sub-pixel radius renders as the
+// plain square quad. Rotation pivots the rect's center like draw_quad's.
 void draw_rounded_quad(float x, float y, float w, float h, float radius,
                        std::uint32_t color, float rotation = 0.0f);
 

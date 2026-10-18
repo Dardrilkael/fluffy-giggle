@@ -22,9 +22,9 @@ namespace ws::ui::r2d::batch {
 inline constexpr std::uint32_t kMaxTexturesPerChunk = 32;   // = the sampler2D[32] array in shaders/batch.frag
 // One chunk never exceeds this many quads: 16384 quads = 65536 vertices,
 // exactly the u16 index space, so the flush's chunk-local index pattern
-// (4*q_local + k) always fits uint16. push_quad splits at the cap exactly
-// like the texture-table split - same VP/clip/depth, plus a copy of the
-// texture table so the fresh chunk keeps resolving the same ids.
+// (4*q_local + k) always fits uint16. Both push paths split at the cap
+// exactly like the texture-table split - same VP/clip/depth, plus a copy
+// of the texture table so the fresh chunk keeps resolving the same ids.
 inline constexpr std::uint32_t kMaxQuadsPerChunk = 16384;
 // Initial reservations, NOT caps (M9): both the vertex and the chunk array
 // grow on demand, geometrically, so a busy app pays O(log) allocations and
@@ -101,9 +101,8 @@ void unpack_rgba(std::uint32_t color, float out[4]);
 void quad_corners(float x, float y, float w, float h, float rotation,
                   float out[4][3]);
 
-// quad_corners with an explicit pivot: draw_rounded_quad rotates each of
-// its nine slices about the WHOLE rect's center, so the rounded rect moves
-// as one rigid shape. quad_corners is this with the slice's own center.
+// quad_corners with an explicit pivot: the caller controls the rotation's
+// anchor. quad_corners is this with the rect's own center.
 void quad_corners_pivot(float x, float y, float w, float h, float pivot_x,
                         float pivot_y, float rotation, float out[4][3]);
 
@@ -180,6 +179,19 @@ public:
     bool push_quad(const float (&pos)[4][3], const float (&uv)[4][2],
                    const float (&color)[4], std::uint32_t texture_id);
 
+    // The rounded-rect sibling: same guards and cap split, but the quad
+    // names no texture. `radius` is the corner radius in WORLD units;
+    // each vertex's tex_index carries it NEGATIVE and normalized to the
+    // rect's width (-radius/w, w = |TR - TL|) - negative is never a
+    // texture index in either tier, so shaders/batch.frag branches on it
+    // and reconstructs the rounded-box SDF analytically (no mask, no
+    // nine slices). The chunk's texture table stays untouched: a
+    // rounded-only chunk keeps texture_count 0 (write_chunk_set skips
+    // empty tables), and mixing rounded quads into a textured chunk
+    // needs no slot at all.
+    bool push_rounded_quad(const float (&pos)[4][3], const float (&uv)[4][2],
+                           const float (&color)[4], float radius);
+
     bool empty() const { return vertices_.empty(); }
     std::uint32_t chunk_count() const {
         return static_cast<std::uint32_t>(chunks_.size());
@@ -194,6 +206,14 @@ public:
 private:
     // Appends a fresh chunk; the array grows (never drops).
     void start_chunk(const Mat4& vp, const float (&clip)[4], bool depth_test);
+    // Splits the current chunk at kMaxQuadsPerChunk (both push paths call
+    // this at the cap): the fresh chunk inherits the segment's VP, clip,
+    // depth mode and the whole texture table - the fresh chunk's vertices
+    // still name the old slots. Index-based access throughout:
+    // start_chunk's push_back may move the elements, so references into
+    // chunks_ do not survive it (the clip array is read inside start_chunk
+    // before its own push, so binding it as an argument is safe).
+    void split_full_chunk();
     // Slot for texture_id in the current chunk, splitting the chunk when
     // its table is full. Chunked mode only (bindless writes the global id
     // straight into the vertex and never calls this).

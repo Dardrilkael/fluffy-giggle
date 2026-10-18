@@ -68,20 +68,24 @@ bool slider_impl(GuiContext& gui, LayoutCursor& layout,
         }
     }
 
-    // The focus ring: the on-accent as a 1px outline behind the row, so
-    // Tab navigation is legible. Skipped for degenerate rows.
-    focus_ring(gui, id, rect, theme);
+    // The rail: a half-height strip down the middle of the row, wearing
+    // the same faces a button wears, ends rounded by the theme.
+    const std::uint32_t face = control_face(result.state, theme);
+    const float rail_height = rect.height * 0.5f;
+    const float rail_y = rect.y + (rect.height - rail_height) * 0.5f;
+
+    // The focus ring: the on-accent as a 1px outline behind the RAIL -
+    // the body the slider paints - not the row, whose area above and
+    // below the rail is exposed: the ring draw is solid, masked to an
+    // outline by the body, and a row-sized ring would read as the whole
+    // slider going green the moment a click lands focus on it.
+    focus_ring(gui, id, {rect.x, rail_y, rect.width, rail_height}, theme);
 
     // The disabled look: the dead face for the rail, the fill, the
     // handle and the label dimmed through the one helper - 1.0 is the
     // identity for the live states.
     const float dim_by = dim_factor(result.state, theme);
 
-    // The rail: a half-height strip down the middle of the row, wearing
-    // the same faces a button wears, ends rounded by the theme.
-    const std::uint32_t face = control_face(result.state, theme);
-    const float rail_height = rect.height * 0.5f;
-    const float rail_y = rect.y + (rect.height - rail_height) * 0.5f;
     r2d::draw_rounded_quad(rect.x, rail_y, rect.width, rail_height,
                            theme.corner_radius, face);
 
@@ -96,11 +100,16 @@ bool slider_impl(GuiContext& gui, LayoutCursor& layout,
         rect.x + std::min(std::max(t, 0.0f), 1.0f) * travel;
 
     // The fill: rail left edge to the handle, in the on-accent - rounded
-    // to match the rail's left end (its right end hides under the handle,
-    // which is full height and opaque).
-    if (handle_x > rect.x) {
-        r2d::draw_rounded_quad(rect.x, rail_y, handle_x - rect.x, rail_height,
-                               theme.corner_radius,
+    // to match the rail's left end. Its exposed sides inset a hard 1 px
+    // (a literal like the focus ring's 1): the SDF shades a half-pixel
+    // antialiasing ramp past the ideal edge, and a fill flush with the
+    // rail paints that ramp on the rail's own outline - the accent
+    // reading as escaped from the track. The right end keeps the flush
+    // edge; it hides under the handle, which is full height and opaque.
+    const float fill_w = handle_x - rect.x - 1.0f;
+    if (fill_w > 0.0f) {
+        r2d::draw_rounded_quad(rect.x + 1.0f, rail_y + 1.0f, fill_w,
+                               rail_height - 2.0f, theme.corner_radius,
                                dim(theme.control_on, dim_by));
     }
     // The handle itself: full control height, over rail and fill.
