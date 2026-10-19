@@ -135,11 +135,11 @@ public:
     // limit check, upload
     // pool/fence, sampler, white texture (registry index 0 - every
     // descriptor slot starts bound to it), set layout (the tier's), pipeline
-    // layout, per-frame-slot resources (descriptor sets + vertex and index
-    // arenas - keyed by kMaxFramesInFlight, never by the swapchain image
-    // count), pipeline (the tier's frag variant). On false the startup
-    // fails; shutdown() is the failure-path cleanup and cleans partial
-    // state.
+    // layout, pipeline cache, per-frame-slot resources (descriptor sets +
+    // vertex and index arenas - keyed by kMaxFramesInFlight, never by the
+    // swapchain image count), pipeline (the tier's frag variant). On false
+    // the startup fails; shutdown() is the failure-path cleanup and cleans
+    // partial state.
     bool init(VkDevice device, VkPhysicalDevice physical_device,
               const gfx::Gpu& gpu, VkQueue queue, uint32_t queue_family,
               VkRenderPass render_pass, VkFormat format,
@@ -344,6 +344,12 @@ private:
     // False = allocation failed; the old pool stays and the caller skips
     // the frame's draws (logged).
     bool grow_chunk_sets(uint32_t frame_slot, uint32_t min_chunks);
+    // Debug-utils object name (validation captures name what they see).
+    // No-ops unless the instance carries VK_EXT_debug_utils - gfx enables
+    // it only when validation runs, and volk leaves the entry point null
+    // otherwise, so a plain build names nothing and pays nothing.
+    void name_object(VkObjectType object_type, std::uint64_t handle,
+                     const char* name);
 
     std::vector<DrawCommand> commands_;  // capacity reused across frames
     batch::BatchCore batch_;
@@ -408,6 +414,12 @@ private:
     // shaders/layout/render pass, only the depth state differs. Created
     // and destroyed in lockstep with pipeline_.
     VkPipeline pipeline_3d_ = VK_NULL_HANDLE;
+    // The in-memory pipeline cache every create_pipeline call funnels
+    // through - init's, a format-drift rebake's, a dev hot reload's - so a
+    // rebake reuses the driver's compiled stages instead of recompiling.
+    // Destroyed only at shutdown (nothing else invalidates it); never
+    // persisted - two tiny pipelines make a disk file pure liability.
+    VkPipelineCache pipeline_cache_ = VK_NULL_HANDLE;
 
     // A Texture's id packs (generation << kGenShift) | slot; the slot is
     // this table's index, [0] is the white texture (id 0, never

@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "render/shader_provider.h"
@@ -100,6 +101,9 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
         ws::core::error("ui: r2d init failed - vkCreateCommandPool");
         return false;
     }
+    name_object(VK_OBJECT_TYPE_COMMAND_POOL,
+                reinterpret_cast<std::uint64_t>(upload_pool_),
+                "r2d upload command pool");
     VkFenceCreateInfo upload_fence_info{};
     upload_fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     if (vkCreateFence(device_, &upload_fence_info, nullptr, &upload_fence_) !=
@@ -107,6 +111,9 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
         ws::core::error("ui: r2d init failed - vkCreateFence");
         return false;
     }
+    name_object(VK_OBJECT_TYPE_FENCE,
+                reinterpret_cast<std::uint64_t>(upload_fence_),
+                "r2d upload fence");
 
     VkSamplerCreateInfo sampler_info{};
     sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -128,6 +135,8 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
         ws::core::error("ui: r2d init failed - vkCreateSampler");
         return false;
     }
+    name_object(VK_OBJECT_TYPE_SAMPLER,
+                reinterpret_cast<std::uint64_t>(sampler_), "r2d sampler");
 
     // White first: every descriptor slot starts bound to it, and flat-color
     // draws and failed loads resolve to it.
@@ -137,6 +146,14 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
         ws::core::error("ui: r2d init failed - white texture upload");
         return false;
     }
+    // The registry's pivot point - every fallback resolves here - so it is
+    // the one texture worth picking out in a capture.
+    name_object(VK_OBJECT_TYPE_IMAGE,
+                reinterpret_cast<std::uint64_t>(textures_[kWhiteIndex].image),
+                "r2d white texture");
+    name_object(VK_OBJECT_TYPE_IMAGE_VIEW,
+                reinterpret_cast<std::uint64_t>(textures_[kWhiteIndex].view),
+                "r2d white texture view");
 
     // One binding, whose shape is the tier's:
     // - bindless: the GLOBAL texture table, kMaxBindlessTextures slots
@@ -186,6 +203,10 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
         ws::core::error("ui: r2d init failed - vkCreateDescriptorSetLayout");
         return false;
     }
+    name_object(VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
+                reinterpret_cast<std::uint64_t>(set_layout_),
+                tier_.bindless ? "r2d bindless texture table layout"
+                               : "r2d chunk texture table layout");
 
     VkPushConstantRange push_range{};
     push_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
@@ -199,6 +220,22 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
     if (vkCreatePipelineLayout(device_, &pipeline_layout_info, nullptr,
                                &pipeline_layout_) != VK_SUCCESS) {
         ws::core::error("ui: r2d init failed - vkCreatePipelineLayout");
+        return false;
+    }
+    name_object(VK_OBJECT_TYPE_PIPELINE_LAYOUT,
+                reinterpret_cast<std::uint64_t>(pipeline_layout_),
+                "r2d pipeline layout");
+
+    // The pipeline cache every create_pipeline call funnels through (init,
+    // a format-drift rebake, a dev hot reload): a rebake reuses the
+    // driver's compiled stages instead of recompiling from scratch.
+    // In-memory only - two tiny pipelines compile sub-ms, a cache file
+    // would only add IO and staleness questions.
+    VkPipelineCacheCreateInfo cache_info{};
+    cache_info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    if (vkCreatePipelineCache(device_, &cache_info, nullptr,
+                             &pipeline_cache_) != VK_SUCCESS) {
+        ws::core::error("ui: r2d init failed - vkCreatePipelineCache");
         return false;
     }
 
@@ -275,6 +312,10 @@ void Renderer2D::shutdown() {
         vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
         pipeline_layout_ = VK_NULL_HANDLE;
     }
+    if (pipeline_cache_ != VK_NULL_HANDLE) {
+        vkDestroyPipelineCache(device_, pipeline_cache_, nullptr);
+        pipeline_cache_ = VK_NULL_HANDLE;
+    }
     destroy_frame_resources();
     // The wait above already drained every submission, so the retire
     // queue's fences are all satisfied: free those rows directly here
@@ -332,6 +373,23 @@ void Renderer2D::shutdown() {
 
 // --- Renderer2D: GPU helpers -------------------------------------------------
 
+void Renderer2D::name_object(VkObjectType object_type,
+                             std::uint64_t handle, const char* name) {
+    // Debug-utils names ride the instance extension gfx enables only for
+    // validation runs - volk leaves the entry point null otherwise and
+    // this no-ops with it, so a plain build names nothing, pays nothing,
+    // and the naming call sites stay unconditional.
+    if (vkSetDebugUtilsObjectNameEXT == nullptr) {
+        return;
+    }
+    VkDebugUtilsObjectNameInfoEXT info{};
+    info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+    info.objectType = object_type;
+    info.objectHandle = handle;
+    info.pObjectName = name;
+    vkSetDebugUtilsObjectNameEXT(device_, &info);
+}
+
 bool Renderer2D::create_frame_resources() {
     // Nothing here depends on the swapchain, so a resize rebuilds none of
     // it. Everything a frame slot owns is keyed by that slot, whose fence
@@ -361,6 +419,9 @@ bool Renderer2D::create_frame_resources() {
             ws::core::error("ui: r2d - vkCreateDescriptorPool failed");
             return false;
         }
+        name_object(VK_OBJECT_TYPE_DESCRIPTOR_POOL,
+                    reinterpret_cast<std::uint64_t>(table_pool_),
+                    "r2d bindless texture table pool");
         const std::vector<VkDescriptorSetLayout> layouts(kMaxFramesInFlight,
                                                          set_layout_);
         VkDescriptorSetAllocateInfo set_info{};
@@ -507,6 +568,10 @@ bool Renderer2D::grow_vertex_arena(uint32_t frame_slot,
     arena.allocation = buffer.allocation;
     arena.mapped = static_cast<batch::Vertex*>(buffer.mapped);
     arena.capacity = capacity;
+    const std::string name =
+        "r2d vertex arena slot " + std::to_string(frame_slot);
+    name_object(VK_OBJECT_TYPE_BUFFER,
+               reinterpret_cast<std::uint64_t>(arena.buffer), name.c_str());
     return true;
 }
 
@@ -544,6 +609,10 @@ bool Renderer2D::grow_index_arena(uint32_t frame_slot, std::size_t min_quads) {
     arena.allocation = buffer.allocation;
     arena.mapped = indices;
     arena.capacity = capacity;
+    const std::string name =
+        "r2d index arena slot " + std::to_string(frame_slot);
+    name_object(VK_OBJECT_TYPE_BUFFER,
+               reinterpret_cast<std::uint64_t>(arena.buffer), name.c_str());
     return true;
 }
 
@@ -688,6 +757,10 @@ bool Renderer2D::grow_chunk_sets(uint32_t frame_slot, uint32_t min_chunks) {
                         slot_sets.capacity, capacity, frame_slot);
         return false;
     }
+    const std::string name =
+        "r2d chunk set pool slot " + std::to_string(frame_slot);
+    name_object(VK_OBJECT_TYPE_DESCRIPTOR_POOL,
+               reinterpret_cast<std::uint64_t>(pool), name.c_str());
     const std::vector<VkDescriptorSetLayout> layouts(capacity, set_layout_);
     VkDescriptorSetAllocateInfo set_info{};
     set_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -883,13 +956,16 @@ bool Renderer2D::create_pipeline(VkRenderPass render_pass) {
     pipeline_info.subpass = 0;
     // One create info, two depth states: the pipelines share everything
     // (shaders, layout, render pass) - only the depth mode differs, so the
-    // swap below is the whole difference between them.
+    // swap below is the whole difference between them. Both run through
+    // pipeline_cache_, so whichever path reached this function (init, a
+    // format-drift rebake, a dev hot reload) reuses the driver's compiled
+    // stages from the creates before it.
     pipeline_info.pDepthStencilState = &depth_off;
     const VkResult err_2d = vkCreateGraphicsPipelines(
-        device_, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline_);
+        device_, pipeline_cache_, 1, &pipeline_info, nullptr, &pipeline_);
     pipeline_info.pDepthStencilState = &depth_on;
     const VkResult err_3d = vkCreateGraphicsPipelines(
-        device_, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline_3d_);
+        device_, pipeline_cache_, 1, &pipeline_info, nullptr, &pipeline_3d_);
     gpu_->destroy_shader_module(vert);  // baked into the pipelines
     gpu_->destroy_shader_module(frag);
     if (err_2d != VK_SUCCESS || err_3d != VK_SUCCESS) {
@@ -904,6 +980,12 @@ bool Renderer2D::create_pipeline(VkRenderPass render_pass) {
             static_cast<int>(err_2d), static_cast<int>(err_3d));
         return false;
     }
+    name_object(VK_OBJECT_TYPE_PIPELINE,
+                reinterpret_cast<std::uint64_t>(pipeline_),
+                "r2d pipeline (2D painter)");
+    name_object(VK_OBJECT_TYPE_PIPELINE,
+                reinterpret_cast<std::uint64_t>(pipeline_3d_),
+                "r2d pipeline (3D depth-tested)");
     return true;
 }
 
