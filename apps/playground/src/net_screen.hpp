@@ -1,9 +1,15 @@
-// Phase 10 integration screen: a "net inspector" - the neuralnet-studio
-// flavor, one real screen's worth of gui driving a live forward pass.
-// The world half draws the net (nodes + weighted edges) through r2d; the
-// panel half is a full gui composition (tabs, sliders, button, a
-// scrollable checkbox list) editing the same state. All widget state is
-// caller-owned - the gui contract; the net itself is plain app state.
+// Phase 10 integration screen: a live "net lab". The net actually learns a
+// 2D classification task (circle / xor / wave) with SGD + backprop, every
+// frame, while the screen shows what is happening: the graph with signal
+// pulses along the edges, the decision-boundary heatmap with the data on
+// top, a loss sparkline and an accuracy bar. The panel steers it: learning
+// rate, speed, dataset, reseed, and a model tab that ablates input features
+// and hidden nodes so you can watch the net break (or not).
+//
+// The screen's seams are the old ones (draw_panel / draw_world /
+// panel_bounds / set_ui_scale); the one addition is tick(), which
+// main.cpp calls once per frame before draw_world(). All widget state is
+// caller-owned (the gui contract); the net is plain app state.
 
 #pragma once
 
@@ -13,6 +19,7 @@
 #include <ws/ui/renderer2d.hpp>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 
 namespace playground {
@@ -21,52 +28,78 @@ class NetScreen {
 public:
     NetScreen();
 
-    // The forward pass, then the world-space graph (edges first, nodes on
-    // top). Call inside the camera'd r2d block. The gui block runs earlier
-    // in the same frame, so this pass already reflects this frame's edits.
+    // Advance simulation by the frame's dt (internally clocked and clamped
+    // to 50 ms so a breakpoint doesn't become a training burst). Call once
+    // per frame, before draw_world().
+    void tick();
+
+    // Render the world half: card, graph + pulses, heatmap, data, sparkline,
+    // accuracy bar. Pure read of the state tick() left behind. Call inside
+    // the camera'd r2d block, after draw_panel in the same frame.
     void draw_world();
 
-    // The gui side panel, bottom-left: tab "drive" holds the input sliders
-    // and a reseed button, tab "inspect" a scrollable per-hidden-node
-    // enable list (the scroll region has real room to scroll). Call inside
-    // the screen-space r2d block, between begin_frame and end_frame. The
-    // theme is the caller's (third param, the widget convention) - its
-    // font is what the labels draw with.
+    // Bottom-left gui panel. Tab "train" / "model" as before.
     void draw_panel(ws::ui::gui::GuiContext& ctx,
                     ws::ui::gui::LayoutCursor& layout,
                     const ws::ui::gui::ChromeTheme& theme,
                     const ws::ui::r2d::FrameSize& frame);
 
-    // The panel's outer rect as the last draw_panel placed it (bottom-left,
-    // clear of the demo column) - the playground's pinch gate treats these
-    // pixels as the widgets', not the world's. {0,0,0,0} before the first
-    // draw; contains() answers false for a zero rect.
     const ws::ui::gui::Rect& panel_bounds() const { return panel_bounds_; }
-
-    // The density factor App::ui_scale() reported: the panel's rect below
-    // anchors and sizes by it, the same touch-density rule the demo
-    // panels in main.cpp follow. Call once, from on_setup(); 1.0 (the
-    // default) is the unscaled look.
     void set_ui_scale(float scale) { ui_scale_ = scale; }
 
 private:
-    void reseed();
-    float next_weight();  // deterministic LCG step, uniform in [-1, 1)
-
+    // ---- training internals ----
     static constexpr int kInputs = 4;
     static constexpr int kHidden = 8;
-    static constexpr int kOutputs = 2;
+    static constexpr int kSamples = 160;
+    static constexpr int kHist = 96;
+    static constexpr int kGrid = 20;
 
+    void reseed();
+    void make_dataset();
+    float next_rand();
+    void features(float x, float y, float f[kInputs]) const;
+    float forward(const float f[kInputs], float* hid) const;
+    void train_step(int sample);
+    void evaluate();
+    float learning_rate() const;
+
+    // ---- draw helpers (each reads current state, no mutation) ----
+    void draw_card();
+    void draw_graph();
+    void draw_heatmap();
+    void draw_telemetry();
+
+    // ---- state ----
     std::uint32_t rng_ = 0x1234u;
-    std::array<float, kInputs> in_{};        // slider-driven, 0..1
-    std::array<bool, kHidden> hidden_on_{};  // the inspector's checkboxes
     float w0_[kHidden][kInputs]{};
-    float w1_[kOutputs][kHidden]{};
-    std::array<float, kHidden> hid_{};  // this frame's activations
-    std::array<float, kOutputs> out_{};
-    int tab_ = 0;  // the panel's tab strip selection (caller state)
-    ws::ui::gui::Rect panel_bounds_{};  // what draw_panel last laid out
-    float ui_scale_ = 1.0f;  // set once at setup; scales the panel's rect
+    float b0_[kHidden]{};
+    float w1_[kHidden]{};
+    float b1_ = 0.0f;
+    std::array<bool, kInputs> input_on_{};
+    std::array<bool, kHidden> hidden_on_{};
+    float sx_[kSamples]{}, sy_[kSamples]{};
+    float label_[kSamples]{};
+    int dataset_ = 0;
+    float feat_[kInputs]{};
+    std::array<float, kHidden> hid_{};
+    float out_ = 0.0f;
+    int probe_ = 0;
+    float loss_ = 1.0f, acc_ = 0.5f;
+    float hist_[kHist]{};
+    int hist_head_ = 0;
+    int eval_countdown_ = 0;
+    int cursor_ = 0;
+    long steps_total_ = 0;
+    float lr_slider_ = 0.5f;
+    float speed_slider_ = 0.5f;
+    int tab_ = 0;
+    float time_ = 0.0f;
+    float step_accum_ = 0.0f;
+    std::chrono::steady_clock::time_point last_tp_{};
+    bool have_tp_ = false;
+    ws::ui::gui::Rect panel_bounds_{};
+    float ui_scale_ = 1.0f;
 };
 
 }  // namespace playground
