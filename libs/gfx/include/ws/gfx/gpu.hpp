@@ -60,13 +60,16 @@ struct BufferOut {
     void* mapped = nullptr;      // host-visible write window
 };
 
-// The image shape ui uploads: 2D, one mip, one layer, optimal tiling,
-// starting undefined - the boilerplate lives in gfx.
+// The image shape ui uploads: 2D, one layer, optimal tiling, starting
+// undefined - the boilerplate lives in gfx. The mip count is the
+// descriptor's one degree of freedom: 1 is the flat image (no chain),
+// and the full chain for a w*h image is floor(log2(max(w, h))) + 1.
 struct ImageDesc {
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t format = 0;  // VkFormat
     uint32_t usage = 0;   // VkImageUsageFlags
+    uint32_t mip_levels = 1;
 };
 
 // create_image's answer: the device-local image plus its allocation pair

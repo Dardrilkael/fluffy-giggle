@@ -322,6 +322,15 @@ TEST_CASE("the creates reject bad descriptors first") {
         CHECK(out.image == nullptr);
         CHECK(out.allocation == nullptr);
     }
+    SUBCASE("a zero-mip image desc") {
+        ws::gfx::ImageOut out;
+        const ws::core::Status st =
+            gpu.create_image(ws::gfx::ImageDesc{64, 64, 37u, 4u, 0u}, out);
+        REQUIRE_FALSE(st);
+        CHECK(st.error().code != 0);
+        CHECK(out.image == nullptr);
+        CHECK(out.allocation == nullptr);
+    }
     SUBCASE("empty shader words") {
         void* module = reinterpret_cast<void*>(1);
         const ws::core::Status st =

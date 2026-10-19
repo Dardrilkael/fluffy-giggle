@@ -115,6 +115,10 @@ core::Status Gpu::create_image(const ImageDesc& desc, ImageOut& out) const {
     if (desc.width == 0 || desc.height == 0) {
         return core::fail(kErrInvalid, "gfx", "image create with a zero extent");
     }
+    if (desc.mip_levels == 0) {
+        return core::fail(kErrInvalid, "gfx",
+                          "image create with zero mip levels");
+    }
     const VmaAllocator alloc = static_cast<VmaAllocator>(allocator());
     if (alloc == nullptr) {
         return core::fail(kErrOrder, "gfx",
@@ -122,8 +126,9 @@ core::Status Gpu::create_image(const ImageDesc& desc, ImageOut& out) const {
     }
     // The one image shape ui uploads: a device-local 2D sample target
     // (AUTO with no host flags lands device-local in practice). The
-    // boilerplate below is every texture's - one mip, one layer, one
-    // sample, optimal tiling, exclusive, starting undefined.
+    // boilerplate below is every texture's - one layer, one sample,
+    // optimal tiling, exclusive, starting undefined - except the mip
+    // count, which is the descriptor's.
     VkImageCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     info.imageType = VK_IMAGE_TYPE_2D;
@@ -131,7 +136,7 @@ core::Status Gpu::create_image(const ImageDesc& desc, ImageOut& out) const {
     info.extent.width = desc.width;
     info.extent.height = desc.height;
     info.extent.depth = 1;
-    info.mipLevels = 1;
+    info.mipLevels = desc.mip_levels;
     info.arrayLayers = 1;
     info.samples = VK_SAMPLE_COUNT_1_BIT;
     info.tiling = VK_IMAGE_TILING_OPTIMAL;

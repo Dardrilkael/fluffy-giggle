@@ -131,9 +131,10 @@ renderer needs — sized to exactly its use, nothing speculative:
   may hand back non-coherent memory, so a writer flushes after filling
   `mapped`); `destroy_buffer` takes the create's handle pair.
 - **Images**: `create_image` is the one shape ui uploads — device-local
-  2D sample targets (one mip, one layer, optimal tiling, starting
-  undefined); the image VIEW stays the consumer's (a plain vk object,
-  not memory).
+  2D sample targets (one layer, optimal tiling, starting undefined); the
+  mip count is the descriptor's — 1 flat, or the full
+  floor(log2(max(w, h))) + 1 chain r2d blits down. The image VIEW stays
+  the consumer's (a plain vk object, not memory).
 - **Shader modules**: `create_shader_module` from SPIR-V words; the
   consumer casts the handle once and destroys after the pipelines are
   baked.

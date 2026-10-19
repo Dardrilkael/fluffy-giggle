@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -111,6 +112,14 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
     sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     sampler_info.magFilter = VK_FILTER_LINEAR;
     sampler_info.minFilter = VK_FILTER_LINEAR;
+    // upload_texture blits a full mip chain into every texture; LINEAR
+    // here picks between pre-filtered levels by LOD, so a sprite drawn
+    // smaller than its bitmap samples the matching mip instead of
+    // shimmering base-level texels. maxLod must open past the chain: the
+    // zero-init default clamps it to 0, which would pin every sample to
+    // the base level and mute the whole chain.
+    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    sampler_info.maxLod = VK_LOD_CLAMP_NONE;
     sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -831,11 +840,21 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
     const VkDeviceSize size =
         static_cast<VkDeviceSize>(width) * height * 4;  // R8G8B8A8, 4 B/px
 
+    // The full mip chain: floor(log2(max(w, h))) + 1 levels - bit_width
+    // IS that, for integers (2048 -> 12, 3x5 -> 3, 1x1 -> 1). Level 0
+    // takes the upload copy; each later level is blitted down from the
+    // one before it, so a sprite drawn smaller than its bitmap samples
+    // a pre-filtered mip. The 1x1 white lands at exactly 1 level and
+    // skips the cascade.
+    const uint32_t mip_levels = std::bit_width(std::max(width, height));
+
     TextureEntry entry{};
     gfx::ImageOut image{};
     const ws::core::Status image_created = gpu_->create_image(
         {width, height, VK_FORMAT_R8G8B8A8_UNORM,
-         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT},
+         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+             VK_IMAGE_USAGE_SAMPLED_BIT,
+         mip_levels},
         image);
     if (!image_created) {
         ws::core::error("ui: r2d - texture image create failed ({}x{}): {}",
@@ -850,7 +869,7 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
     view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
     view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
     view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    view_info.subresourceRange.levelCount = 1;
+    view_info.subresourceRange.levelCount = mip_levels;
     view_info.subresourceRange.layerCount = 1;
     if (vkCreateImageView(device_, &view_info, nullptr, &entry.view) !=
         VK_SUCCESS) {
@@ -892,6 +911,9 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
         err = vkBeginCommandBuffer(cmd, &begin_info);
     }
     if (err == VK_SUCCESS) {
+        // The whole chain starts life undefined, so the head barrier
+        // covers every level; the copy writes level 0 and the cascade
+        // below fills the rest.
         VkImageMemoryBarrier to_dst{};
         to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -901,7 +923,7 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
         to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         to_dst.image = entry.image;
         to_dst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        to_dst.subresourceRange.levelCount = 1;
+        to_dst.subresourceRange.levelCount = mip_levels;
         to_dst.subresourceRange.layerCount = 1;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
@@ -917,6 +939,73 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                                &region);
 
+        // The cascade: level `level` blits down into level+1. A source
+        // level flips to transfer-src for the blit that reads it, then
+        // retires straight to sampled - it is done, nothing touches it
+        // again. The LAST level never sources a blit: it stays a
+        // transfer target and rides to_sampled below, which therefore
+        // covers exactly one level either way - at 1 level the plain
+        // single-mip path, unchanged.
+        for (uint32_t level = 0; level + 1 < mip_levels; ++level) {
+            VkImageMemoryBarrier to_src{};
+            to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            to_src.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            to_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            to_src.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            to_src.image = entry.image;
+            to_src.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            to_src.subresourceRange.baseMipLevel = level;
+            to_src.subresourceRange.levelCount = 1;
+            to_src.subresourceRange.layerCount = 1;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                                 nullptr, 0, nullptr, 1, &to_src);
+
+            // Halve each axis per level, floored at 1: a non-square
+            // image keeps producing real extents down to the 1x1 tail.
+            const uint32_t src_w = std::max(1u, width >> level);
+            const uint32_t src_h = std::max(1u, height >> level);
+            const uint32_t dst_w = std::max(1u, width >> (level + 1));
+            const uint32_t dst_h = std::max(1u, height >> (level + 1));
+            VkImageBlit blit{};
+            blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blit.srcSubresource.mipLevel = level;
+            blit.srcSubresource.layerCount = 1;
+            blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blit.dstSubresource.mipLevel = level + 1;
+            blit.dstSubresource.layerCount = 1;
+            blit.srcOffsets[1].x = static_cast<int32_t>(src_w);
+            blit.srcOffsets[1].y = static_cast<int32_t>(src_h);
+            blit.srcOffsets[1].z = 1;
+            blit.dstOffsets[1].x = static_cast<int32_t>(dst_w);
+            blit.dstOffsets[1].y = static_cast<int32_t>(dst_h);
+            blit.dstOffsets[1].z = 1;
+            vkCmdBlitImage(cmd, entry.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, entry.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                           VK_FILTER_LINEAR);
+
+            VkImageMemoryBarrier retired{};
+            retired.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            retired.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            retired.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            retired.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            retired.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            retired.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            retired.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            retired.image = entry.image;
+            retired.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            retired.subresourceRange.baseMipLevel = level;
+            retired.subresourceRange.levelCount = 1;
+            retired.subresourceRange.layerCount = 1;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0,
+                                 nullptr, 0, nullptr, 1, &retired);
+        }
+
         VkImageMemoryBarrier to_sampled{};
         to_sampled.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         to_sampled.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -927,6 +1016,7 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
         to_sampled.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         to_sampled.image = entry.image;
         to_sampled.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        to_sampled.subresourceRange.baseMipLevel = mip_levels - 1;
         to_sampled.subresourceRange.levelCount = 1;
         to_sampled.subresourceRange.layerCount = 1;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
