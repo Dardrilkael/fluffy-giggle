@@ -27,7 +27,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <fstream>
 #include <span>
 #include <string>
 #include <vector>
@@ -122,6 +124,7 @@ private:
     bool show_3d_ = true;
     bool far_first_ = true;
     ws::ui::r2d::Texture checker_{};
+    std::vector<std::uint8_t> checker_bytes_;  // the file's bytes, for the reload demo
     std::vector<ws::ui::r2d::Sprite> icons_;
     float spin_ = 0.0f;
 
@@ -166,6 +169,21 @@ private:
 
 void PlaygroundApp::on_setup() {
     checker_ = ws::ui::r2d::load_texture("assets/checker.png");
+    // The same file as raw bytes: the reload button below bakes them
+    // through load_texture_from_memory. A failed read leaves it empty
+    // and the button degrades to the white fallback - exactly the
+    // contract a missing file gets.
+    if (std::ifstream file("assets/checker.png",
+                           std::ios::binary | std::ios::ate);
+        file) {
+        const std::streamoff size = file.tellg();
+        if (size > 0) {
+            checker_bytes_.resize(static_cast<std::size_t>(size));
+            file.seekg(0);
+            file.read(reinterpret_cast<char*>(checker_bytes_.data()),
+                      static_cast<std::streamsize>(size));
+        }
+    }
     icons_ = ws::ui::r2d::load_atlas({"assets/icon_blue.png",
                                       "assets/icon_orange.png",
                                       "assets/icon_green.png",
@@ -639,6 +657,36 @@ void PlaygroundApp::draw_imgui_debug() {
         ws::ui::checkbox("far billboard first (occlusion proof)",
                          &far_first_);
         ws::ui::text("atlas: the 4 icons right of the grid share one texture");
+
+        // The r2d texture lifecycle, live: the stats block reads the
+        // LAST frame's accounting (this frame has not flushed yet), and
+        // the button walks the destroy/reload pair end to end - the
+        // destroy kills the old handle on the spot (its slot's GPU
+        // memory returns once the frames in flight have drained), the
+        // reload bakes the file bytes into a fresh slot. Watch the
+        // handle move on click and the live-texture count settle back
+        // a few frames later, when the retired slot reaches the
+        // freelist.
+        ws::ui::separator();
+        const ws::ui::r2d::Stats st = ws::ui::r2d::stats();
+        std::snprintf(line, sizeof(line),
+                      "r2d last frame: %u cmds, %u quads, %u chunks, %u verts, %u dropped",
+                      st.commands, st.quads, st.chunks, st.vertices,
+                      st.dropped_quads);
+        ws::ui::text(line);
+        std::snprintf(line, sizeof(line), "%u live textures, tier %s%s",
+                      st.textures,
+                      st.bindless ? "bindless" : "chunked",
+                      st.update_after_bind ? ", update-after-bind" : "");
+        ws::ui::text(line);
+        std::snprintf(line, sizeof(line), "checker handle 0x%08x",
+                      static_cast<unsigned>(checker_.id));
+        ws::ui::text(line);
+        if (ws::ui::button("destroy + reload checker")) {
+            ws::ui::r2d::destroy_texture(checker_);
+            checker_ = ws::ui::r2d::load_texture_from_memory(
+                checker_bytes_.data(), checker_bytes_.size());
+        }
     }
     ws::ui::end_window();
 
