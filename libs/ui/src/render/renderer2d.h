@@ -79,9 +79,21 @@ struct CameraSnapshot {
 // agree, so the constant lives here rather than in two files.
 inline constexpr std::uint32_t kMaxFramesInFlight = 2;
 
+// Texture id packing: id = (generation << kGenShift) | slot. The slot is
+// the registry index (bindless caps it at kMaxBindlessTextures; the
+// chunked tier's chunk tables hold it too); the generation counts the
+// slot's reuses - destroy_texture bumps it at once, so a stale handle the
+// app kept drawing with fails record()'s gen check and renders white
+// instead of aliasing the slot's next tenant. 12 bits wrap after 4096
+// reuses of one slot: a handle older than that can false-positive as
+// fresh (the documented limit).
+inline constexpr std::uint32_t kSlotMask = 0xFFFFFu;  // 20-bit slot, 1M
+inline constexpr std::uint32_t kGenShift = 20;
+inline constexpr std::uint32_t kGenMask = 0xFFFu;  // 12-bit generation
+
 // The texture path app.cpp's device probe picked (M9). bindless: one
 // global kMaxBindlessTextures-slot descriptor table per frame slot, bound
-// once per frame and indexed by the texture's registry id
+// once per frame and indexed by the texture's registry SLOT
 // (descriptor indexing + nonuniformEXT; texture variety never splits a
 // chunk). update_after_bind: the UAB feature - table writes land
 // immediately at load time; without it they defer to each slot's next
@@ -207,6 +219,18 @@ public:
     // the font's OWN pages, never shared with load_atlas. The loaders'
     // failure contract: warn once, return an empty Font.
     Font load_font(const char* path, float pixel_height);
+    // The texture-lifecycle pair (the public header's
+    // load_texture_from_memory / destroy_texture route here).
+    // from_memory is the in-memory spelling of load_texture; destroy
+    // retires the handle at once - record() rejects its generation from
+    // this call on, so only the frames already recorded can still see the
+    // image - and queues the GPU free for the flush kMaxFramesInFlight
+    // frames out. Headless both warn and answer white/no-op.
+    Texture load_texture_from_memory(const void* data, std::size_t size);
+    void destroy_texture(Texture texture);
+    // The last frame's counts (snapshotted at frame_end) plus the live
+    // count and tier, filled at call time. The member behind stats().
+    Stats stats() const;
 
     // Test/observability seam (internal header only): the built batch as
     // frame_end() left it.
@@ -252,10 +276,10 @@ private:
     void warn_sprite(const Sprite& sprite);
     // Resolves a sprite to its sub-rect; null when the page is not a
     // registered atlas page or the index is out of range. O(1): the dense
-    // page_of_texture_ map carries texture id -> atlas_pages_ index (this
+    // page_of_texture_ map carries texture slot -> atlas_pages_ index (this
     // runs once per sprite and once per glyph, so it must not scale with
-    // the page count). Page 0 is never looked up - it is the white
-    // sentinel.
+    // the page count); a stale page id fails the full-id equality check.
+    // Page 0 is never looked up - it is the white sentinel.
     const atlas::Rect* find_sprite_rect(const Sprite& sprite) const;
     // Graphics pipeline against the given render pass; the shader modules
     // are created and destroyed inside (they are baked into the pipeline).
@@ -279,20 +303,41 @@ private:
     bool grow_index_arena(uint32_t frame_slot, std::size_t min_quads);
     // Staging upload of a 4-byte-per-pixel R8G8B8A8 image (one-off submit +
     // fence wait). Cleans its partial state and returns false on failure.
-    // In the bindless tier this also queues the id's descriptor table
-    // write (immediate with update-after-bind, else at the slot-idle
-    // flushes); ids past kMaxBindlessTextures are refused so a garbage
-    // index can never reach the shader's table.
+    // Slots come off free_slots_ first (destroy_texture's retirees); the
+    // registry only grows when the freelist is empty. In the bindless
+    // tier this also queues the slot's descriptor table rebind (immediate
+    // with update-after-bind, else at the slot-idle flushes); fresh slots
+    // past kMaxBindlessTextures are refused so a garbage index can never
+    // reach the shader's table (a reused slot always fits - its table
+    // index never changed).
     bool upload_texture(const void* pixels, uint32_t width, uint32_t height,
                         Texture* out);
     // Binds a chunk's used slots [0, texture_count); the rest keep the
     // initial full-white write. Chunked tier only.
     void write_chunk_set(VkDescriptorSet set, const batch::Chunk& chunk);
-    // Bindless tier: writes every pending id (>= table_written_[slot])
-    // into the slot's table set and advances the high-water mark. Called
-    // at the slot's idle flush, and once per slot at init when nothing is
+    // Bindless tier: marks one texture slot's table binding stale in
+    // EVERY frame slot and queues the rewrite. Uploads (the slot's
+    // content changed) and frees (the view died; the row parks on
+    // white) both land here - the cleared bitmap bits are what make a
+    // REUSED slot rebind like a fresh one.
+    void queue_table_write(uint32_t slot);
+    // Bindless tier: rebinds every queued texture slot whose up-to-date
+    // bit is clear in this frame slot's table (see table_written_) and
+    // drains the queue entries every frame slot has caught up on. Called
+    // at the slot's idle flush, immediately per slot at upload time when
+    // update-after-bind is up, and once per slot at init when nothing is
     // in flight yet.
     void apply_pending_table_writes(uint32_t frame_slot);
+    // Frees the retire queue's due entries at flush entry (the device
+    // half's one lifecycle step): destroy view + image, park the row on
+    // white's view, return the slot to free_slots_, and queue the table
+    // rebind. Safe exactly there: this flush's acquire waited its slot
+    // fence - the one the submit kMaxFramesInFlight back signaled, and
+    // by the same acquire chain every older one - so the destroy's
+    // frame, the last that could reference the image, has fully
+    // retired; later frames never recorded it (destroy already bumped
+    // the generation).
+    void free_retired_textures();
     // Chunked tier: grows the slot's chunk-set pool to `min_chunks` sets -
     // rebuild it bigger (allocate + full-white-init the fresh sets,
     // destroy the old pool; the slot is idle, so nothing references it).
@@ -331,6 +376,17 @@ private:
     bool camera_stashed_ = false;  // set by begin(), cleared by end()
     bool frame_active_ = false;
     std::uint32_t warned_mask_ = 0;  // WarnKind bits; frame_begin clears it
+    // The SUBMISSION clock, bumped at the top of every flush - each flush
+    // call is one submit, and dropped frames (out-of-date, hidden) never
+    // bump it. The texture retire queue's timeline: destroy_texture stamps
+    // free_at = now + kMaxFramesInFlight + 1, because the recording
+    // frame - the last that can still reference a just-destroyed image -
+    // is the NEXT submit, and the flush that reaches free_at has, at
+    // entry, already waited the fence that submit signaled.
+    std::uint64_t frame_index_ = 0;
+    // frame_end's snapshot of the frame; stats() fills the registry/tier
+    // fields on top of it at call time. frame_drop zeroes it.
+    Stats last_stats_{};
 
     // --- Vulkan state (null/empty until init()) ---
     VkDevice device_ = VK_NULL_HANDLE;
@@ -353,15 +409,32 @@ private:
     // and destroyed in lockstep with pipeline_.
     VkPipeline pipeline_3d_ = VK_NULL_HANDLE;
 
-    // A Texture's id is its index here; [0] is the white texture. The
-    // registry only grows (v1 never unloads), so stale descriptor-set
-    // bindings can never dangle mid-run.
+    // A Texture's id packs (generation << kGenShift) | slot; the slot is
+    // this table's index, [0] is the white texture (id 0, never
+    // destroyed). destroy_texture bumps the generation at once - the
+    // handle is dead from that moment - and free_retired_textures
+    // reclaims the image at the flush kMaxFramesInFlight frames later,
+    // parks the entry on white's view (a table must never hold a dead
+    // view) and pushes the slot onto free_slots_ for the next upload to
+    // reuse (which hands out the bumped generation).
     struct TextureEntry {
         VkImage image = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
         void* allocation = nullptr;  // the gfx image allocation (destroy_image's pair)
+        std::uint32_t generation = 0;  // the slot's reuse counter (id's high bits)
     };
     std::vector<TextureEntry> textures_;
+    // Pending GPU frees, drained at flush entry (see
+    // free_retired_textures). The one lifecycle queue: app-side destroys
+    // enqueue, the device half frees.
+    struct RetireEntry {
+        std::uint32_t slot;
+        std::uint64_t free_at;  // frame_index_ the flush must have reached
+    };
+    std::vector<RetireEntry> retire_queue_;
+    // Slots whose images are reclaimed - upload_texture pops here before
+    // the registry grows. Shutdown clears it with the registry.
+    std::vector<std::uint32_t> free_slots_;
 
     // Atlas pages (load_atlas, or test injection): a page's texture id is
     // its key in Sprite::page. Only grows, so sprites stay valid for the
@@ -371,9 +444,10 @@ private:
         std::vector<atlas::Rect> rects;
     };
     std::vector<AtlasPage> atlas_pages_;
-    // Dense texture id -> atlas_pages_ index, filled at
+    // Dense texture SLOT -> atlas_pages_ index, filled at
     // register_atlas_page (grown with fill value kNoAtlasPage = not a
-    // page). find_sprite_rect's O(1) lookup; only grows, never rewritten.
+    // page). find_sprite_rect's O(1) lookup; a freed page's slot is
+    // re-sentineled at the free.
     std::vector<std::uint32_t> page_of_texture_;
     static constexpr std::uint32_t kNoAtlasPage = 0xFFFFFFFFu;
 
@@ -414,15 +488,21 @@ private:
     // creation (every index a malformed draw could round to stays valid).
     VkDescriptorPool table_pool_ = VK_NULL_HANDLE;  // owns table_sets_
     std::vector<VkDescriptorSet> table_sets_;       // [frame slot]
-    // How far each slot's table has caught up: ids [0, table_written_[s])
-    // are bound in slot s's set. Ids only grow, so a high-water mark
-    // suffices. Without update-after-bind a fresh texture waits for the
-    // slot's next idle flush; with it, upload_texture() writes every slot
-    // immediately and this only trails between init and the first frames.
-    std::array<std::uint32_t, kMaxFramesInFlight> table_written_{};
-    // Texture ids queued for table writes (drained per slot at its idle
-    // flush, or immediately when the last slot catches up).
-    std::vector<std::uint32_t> pending_table_ids_;
+    // Per frame slot, one up-to-date bit per texture slot: SET = this
+    // frame slot's table binding for that texture slot holds the slot's
+    // current content (its live view, or the parked white of a freed
+    // slot); CLEAR = a rebind is owed. Uploads and frees clear the slot's
+    // bits everywhere and queue it below; the init's full-white write
+    // makes every bit start SET. This replaced M9's high-water marks -
+    // reused slots would have slipped past a high-water check silently.
+    std::array<std::array<std::uint64_t, batch::kMaxBindlessTextures / 64>,
+               kMaxFramesInFlight>
+        table_written_{};
+    // Texture slots queued for table rebinds (drained per frame slot at
+    // its idle flush, or immediately under update-after-bind once every
+    // slot catches up). Duplicate entries are harmless - the writes are
+    // idempotent and the drain removes them together.
+    std::vector<std::uint32_t> pending_table_slots_;
     // One warn for the whole process: the bindless table refusing loads
     // past kMaxBindlessTextures.
     bool table_full_warned_ = false;

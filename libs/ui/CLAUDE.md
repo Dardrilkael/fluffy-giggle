@@ -210,11 +210,14 @@ void on_event(ws::input::Event& e) override {
 `draw_quad`, `draw_line` (thickness in px), `draw_sprite`, `draw_rounded_quad`,
 `set_layer`, `push_clip` / `pop_clip` (framebuffer-space clip stack),
 `push_clip_escape` (the overlay spelling: pushes WITHOUT the intersect),
-`load_texture`, `load_atlas`, `load_font`, `draw_text`, `frame_size`,
-`sprite_size`, `rgba` (packs 0xRRGGBBAA — NOT IM_COL32 order). Apps record
+`load_texture`, `load_texture_from_memory`, `destroy_texture`, `load_atlas`,
+`load_font`, `draw_text`, `frame_size`, `sprite_size`, `stats`, `rgba`
+(packs 0xRRGGBBAA — NOT IM_COL32 order). Apps record
 from `on_update()` only, exactly like widgets.hpp calls; every call is
-drop-safe outside a running app (logged once, then ignored). The public
-header includes only `<cstdint>`, `<initializer_list>` and `<vector>` — no
+drop-safe outside a running app (logged once, then ignored — the queries
+`frame_size`/`sprite_size`/`stats` answer zero instead). The public
+header includes only `<cstddef>`, `<cstdint>`, `<initializer_list>` and
+`<vector>` — no
 Vulkan/GLFW/stb types (stb_image and stb_truetype are PRIVATE, like every
 third-party).
 
@@ -287,23 +290,36 @@ third-party).
   partial memcpy. Texture handling splits by TIER (the device probe in
   ws::gfx picks once, from the options app.cpp passes at init_gpu()):
   **bindless** — one global 1024-slot table
-  bound once per frame; `tex_index` carries the GLOBAL registry id, so
+  bound once per frame; `tex_index` carries the GLOBAL registry slot (the
+  id's low bits — the generation never reaches the shader), so
   texture variety never splits a chunk at all; **chunked** (fallback) —
   a 32-slot table per chunk (`kMaxTexturesPerChunk`); overflow closes
   the chunk and opens one inheriting the segment's VP, clip and depth
   mode.
-- **Textures.** `load_texture()` (valid from `on_setup()`) uploads
-  synchronously — staging buffer, one-off submit, fence wait. The registry
-  only grows (v1 never unloads): ids are indexes, stable for the process
-  lifetime, so stale descriptor bindings can never dangle. id 0 is the
-  built-in 1x1 white texture; failed loads and unknown ids render white.
-  The bindless tier's table is fixed at 1024 slots
+- **Textures.** `load_texture()` and `load_texture_from_memory()` (both
+  valid from `on_setup()`) upload synchronously — staging buffer, one-off
+  submit, fence wait — and answer white on failure. id 0 is the built-in
+  1x1 white texture, never destroyed; every other handle is
+  GENERATION-COUNTERED (`(generation << 20) | slot`), so a handle dies
+  with its `destroy_texture()` call: further draws render white (warned
+  once per frame), the GPU memory is reclaimed at the flush
+  kMaxFramesInFlight frames later — the frames still in flight when
+  destroy ran are the last that can see the old image — and the freed
+  slot is what a later load reuses. A stale handle (destroyed already,
+  or its slot since reused) fails the generation check and renders
+  white; after 4096 reuses of one slot the 12-bit generation wraps (a
+  documented limit). The bindless tier's table is fixed at 1024 slots
   (`batch::kMaxBindlessTextures`): past it a load warns once and hands
-  back white — ids must stay dense indexes into the shader's table; the
-  chunked tier has no count limit. Table writes: with update-after-bind
-  (probed) a new id lands in every frame slot's table immediately, even
-  mid-frame; without it each slot takes its writes at its idle flush
-  (setup-time loads are in place before the first frame either way).
+  back white — but freed slots never count against the cap, so
+  destroy/load cycles keep working at it; the chunked tier has no count
+  limit. Table writes: a per-slot pending BITMAP (`table_written_`, one
+  bit per bindless index per frame slot, all-SET after the init write)
+  replaced the old high-water marks — a queued slot rebinds wherever its
+  bit is clear, and BOTH uploads and frees clear it, which is what makes
+  a reused slot rebind like a fresh one. With update-after-bind (probed)
+  the write lands in every frame slot immediately, even mid-frame;
+  without it each slot takes its writes at its idle flush (setup-time
+  loads are in place before the first frame either way).
 - **Atlases.** `load_atlas({...})` (valid from `on_setup()`) packs an image
   set into 2048x2048 pages — shelf packing, tallest first, 1px
   duplicated-edge gutters so magnified sprites never sample a shelf
@@ -314,8 +330,11 @@ third-party).
   they keep the app's draw order too; a full page spills to a new page
   and batches apart, degrading gracefully. Missing/failed images become
   `Sprite{}` (white — the load_texture contract); `sprite_size()` reports
-  native pixels (packing never scales). Page tables only grow, the same
-  contract as the texture registry.
+  native pixels (packing never scales). Page rect tables only grow — a
+  page is never rebaked — but a page texture can die:
+  `destroy_texture(Texture{sprite.page})` frees it like any texture, and
+  its sprites render white afterward (the stale id fails the page's
+  full-id check; the freed slot's map entry re-sentinels at the retire).
 - **Fonts + text.** `load_font(path, pixel_height)` (valid from
   `on_setup()`) bakes one face at one size through stb_truetype — ASCII
   32..126, one `Font` per (face, size), never scaled or re-rasterized at
@@ -392,16 +411,20 @@ third-party).
   never reach `on_update()` at all.
 - **Descriptor sets (M9: two tiers).** Bindless tier: ONE set per frame
   slot (the 1024-slot global table) from one pool, bound once per flush;
-  every slot starts white (written at creation), and new ids land through
-  `pending_table_ids_` — immediately with update-after-bind, else at each
-  slot's idle flush, made safe by the per-slot `table_written_` high-water
-  marks. Chunked tier: one pool + sets per frame slot, grown by rebuild
+  every slot starts white (written at creation — every bitmap bit SET),
+  and new slots land through `pending_table_slots_` — immediately with
+  update-after-bind, else at each slot's idle flush — tracked by the
+  per-slot `table_written_` BITMAP: one bit per bindless index per frame
+  slot, a queued slot rebinding wherever its bit is clear and draining
+  from the queue once every frame slot's bit is set. Chunked tier: one
+  pool + sets per frame slot, grown by rebuild
   at the slot's idle flush (`grow_chunk_sets`); a set is rewritten only
   after its slot's fence was waited and strictly before its own bind.
   Both tiers: sets are keyed by frame slot, allocated at init or at that
   slot's flush, and never touched by a swapchain rebuild; every slot of a
   bound set must hold a valid view, because the shader indexes the
-  sampler array dynamically.
+  sampler array dynamically — a freed texture's row parks on white's
+  view, so a table never holds (or reads) a dead one.
 - **Swapchain drift.** A same-format resize rebuilds nothing (viewport and
   scissor are dynamic, extents arrive per flush); format drift rebuilds
   both pipelines (the 2D and depth-tested 3D share one create info).
@@ -986,7 +1009,12 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `set_layer`, `push_clip`/`pop_clip` (nested framebuffer clip rects),
   `push_clip_escape` (the overlay spelling — pushes without the
   intersect),
-  `load_texture`, `load_atlas`, `load_font` (bakes one face at one pixel
+  `load_texture`, `load_texture_from_memory` (the in-memory spelling,
+  white on failure), `destroy_texture` (the handle dies at the call —
+  further draws render white; the GPU memory is reclaimed at the flush
+  kMaxFramesInFlight frames later, and the freed slot is what a later
+  load reuses), `stats` (the last frame's accounting + the live-registry
+  state), `load_atlas`, `load_font` (bakes one face at one pixel
   size — ASCII 32..126, the font's own atlas pages), `draw_text` (glyph
   quads; returns the advance, exactly `Font::measure_text`), `frame_size`,
   `sprite_size`. Draws are valid only inside `on_update()`, within a

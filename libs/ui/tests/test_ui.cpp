@@ -293,8 +293,8 @@ TEST_CASE("global texture ids skip the chunk table (bindless mode)") {
     BatchCore core;
     core.begin_frame();
     // The bindless tier's shader table IS the texture registry: tex_index
-    // carries the global id verbatim, so texture variety never splits a
-    // chunk and the chunk's own table stays empty.
+    // carries the global registry slot verbatim, so texture variety never
+    // splits a chunk and the chunk's own table stays empty.
     core.use_global_texture_ids(true);
     core.open_segment(default_vp());
 
@@ -307,7 +307,7 @@ TEST_CASE("global texture ids skip the chunk table (bindless mode)") {
     const auto& chunk = core.chunk(0);
     CHECK(chunk.texture_count == 0);  // the chunk's own table stays empty
     CHECK(chunk.quad_count == unique_textures);
-    // tex_index is the GLOBAL registry id, verbatim - no slot remap.
+    // tex_index is the GLOBAL registry slot, verbatim - no remap.
     CHECK(core.vertices()[3].tex_index == 0.0f);
     CHECK(core.vertices()[7].tex_index == 1.0f);
     CHECK(core.vertices().back().tex_index ==
@@ -1351,6 +1351,87 @@ TEST_CASE("load_texture without a GPU context returns the white texture") {
     using namespace ws::ui::r2d;
     Renderer2D r;
     CHECK(r.load_texture("no-such-file.png").id == 0);
+}
+
+TEST_CASE("load_texture_from_memory without a GPU context returns white") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    // Garbage bytes, an empty buffer and a null pointer all degrade the
+    // same way - load_texture's contract: white, not a crash. Headless
+    // there is not even a decoder path to reach, but the API surface
+    // must hold its shape with no GPU context alive.
+    const std::uint8_t garbage[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    CHECK(r.load_texture_from_memory(garbage, sizeof garbage).id == 0);
+    CHECK(r.load_texture_from_memory(garbage, 0).id == 0);
+    CHECK(r.load_texture_from_memory(nullptr, 8).id == 0);
+}
+
+TEST_CASE("destroy_texture without a GPU context is a warned no-op") {
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    // Nothing was ever uploaded through a headless handle, so every
+    // destroy is a drop: a synthetic id, white itself (never destroyed
+    // even with a GPU), a generation-carrying id, and a repeat of one id
+    // (the second destroy of a handle is a no-op too). The renderer must
+    // come out unharmed - the next frame still records.
+    r.destroy_texture(Texture{7});
+    r.destroy_texture(Texture{});
+    r.destroy_texture(Texture{0x12345678u});
+    r.destroy_texture(Texture{7});
+
+    r.frame_begin(100.0f, 100.0f);
+    r.begin_screen();
+    r.draw_quad(0.0f, 0.0f, 10.0f, 10.0f, 0xFF0000FF, Texture{7});
+    r.frame_end();
+    REQUIRE(r.batch().chunk_count() == 1);
+    CHECK(r.batch().vertices().size() == 4);
+}
+
+TEST_CASE("stats answers zeros with no app, the frame's counts with one") {
+    using namespace ws::ui::r2d;
+    // The no-app query contract - frame_size()/sprite_size()'s rule: a
+    // zero answer, never a warn.
+    const Stats idle = stats();
+    CHECK(idle.commands == 0);
+    CHECK(idle.quads == 0);
+    CHECK(idle.chunks == 0);
+    CHECK(idle.vertices == 0);
+    CHECK(idle.dropped_quads == 0);
+    CHECK(idle.textures == 0);
+    CHECK(!idle.bindless);
+    CHECK(!idle.update_after_bind);
+
+    Renderer2D r;
+    struct ActiveRenderer {
+        explicit ActiveRenderer(Renderer2D* renderer) { set_active(renderer); }
+        ~ActiveRenderer() { set_active(nullptr); }
+    };
+    const ActiveRenderer active{&r};
+    (void)active;
+
+    // An abandoned frame renders nothing, and the stats say so.
+    r.frame_begin(100.0f, 100.0f);
+    r.begin_screen();
+    r.draw_quad(0.0f, 0.0f, 10.0f, 10.0f, 0xFFFFFFFFu);
+    r.frame_drop();
+    CHECK(stats().commands == 0);
+
+    // A rendered frame reports its accounting. The registry/tier fields
+    // read zero/false headless - no GPU context exists to fill them, the
+    // same by-construction zeros the header documents.
+    r.frame_begin(100.0f, 100.0f);
+    r.begin_screen();
+    r.draw_quad(0.0f, 0.0f, 10.0f, 10.0f, 0xFFFFFFFFu);
+    r.frame_end();
+    const Stats s = stats();
+    CHECK(s.commands == 1);
+    CHECK(s.quads == 1);
+    CHECK(s.chunks == 1);
+    CHECK(s.vertices == 4);
+    CHECK(s.dropped_quads == 0);
+    CHECK(s.textures == 0);
+    CHECK(!s.bindless);
+    CHECK(!s.update_after_bind);
 }
 
 // --- atlas sprites -------------------------------------------------------------

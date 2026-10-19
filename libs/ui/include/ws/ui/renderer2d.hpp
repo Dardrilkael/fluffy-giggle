@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <initializer_list>
 #include <vector>
@@ -45,8 +46,14 @@ struct Camera3D {
 
 // --- textures ---------------------------------------------------------------------
 // Opaque handle. 0 = the built-in 1x1 white texture (also the fallback for
-// failed loads). Ids are stable for the process lifetime; v1 frees textures
-// only at shutdown, so handles never dangle.
+// failed loads) - it is never destroyed. Every other handle is
+// generation-counted: destroy_texture() kills it the moment it returns
+// (further draws render white, warned once per frame) and reclaims the GPU
+// memory once the frames in flight have drained; the freed slot is what a
+// later load reuses, and a stale handle kept past that fails the
+// generation check and renders white. The 12-bit generation wraps after
+// 4096 reuses of one slot - a handle older than that can false-positive
+// as fresh (documented limit).
 struct Texture {
     std::uint32_t id = 0;
 };
@@ -201,9 +208,25 @@ void draw_rounded_quad(float x, float y, float w, float h, float radius,
 // its handle. Valid from on_setup() onward. On failure logs and returns the
 // white texture. Loading is synchronous - fine at load granularity. One
 // cap remains (M9's bindless tier): 1024 live textures per process - past
-// it the load warns once and hands back white. The registry only grows;
-// ids are stable for the process lifetime.
+// it the load warns once and hands back white. Destroyed textures' slots
+// return to a freelist later loads reuse (see destroy_texture).
 Texture load_texture(const char* path);
+
+// The in-memory spelling of load_texture: same decoder, same contract
+// (white on failure, synchronous, valid from on_setup()). The buffer is
+// read only during the call.
+Texture load_texture_from_memory(const void* data, std::size_t size);
+
+// Frees a texture. The handle is dead from this call on: further draws
+// with it render white (warned once per frame), and the GPU memory is
+// reclaimed at the flush kMaxFramesInFlight frames later - the frames
+// still in flight when destroy_texture was called are the last that can
+// see the old image. The freed slot is reused by later loads; a stale
+// handle (destroyed already, or its slot since reused) is a warned no-op,
+// and so is a second destroy of the same handle. id 0 (white) is
+// refused. Atlas pages free the same way (Texture{sprite.page}); their
+// sprites render white afterward.
+void destroy_texture(Texture texture);
 
 // Packs the given image files into atlas page textures (2048x2048, shelf
 // packed tallest-first, duplicated-edge gutters) and returns one Sprite
@@ -312,5 +335,22 @@ Font load_font(const char* path, float pixel_height);
 // tints the glyphs directly.
 float draw_text(float x, float y, const char* utf8_text, const Font& font,
                 std::uint32_t color = 0xFFFFFFFFu);
+
+// --- diagnostics -----------------------------------------------------------------
+// The last frame's accounting plus the registry state at call time.
+// Zeros until the first frame ends (and every field reads zero with no
+// app running); the registry/tier fields are empty by construction on a
+// headless renderer.
+struct Stats {
+    std::uint32_t commands = 0;        // draws recorded into the last frame
+    std::uint32_t quads = 0;           // quads the replay pushed
+    std::uint32_t chunks = 0;          // batch chunks the replay built
+    std::uint32_t vertices = 0;        // batch vertices (4 per quad)
+    std::uint32_t dropped_quads = 0;   // recorded with no open segment
+    std::uint32_t textures = 0;        // live: registry minus freed slots
+    bool bindless = false;             // the device probe's texture tier
+    bool update_after_bind = false;    // ...and its update-after-bind feature
+};
+Stats stats();
 
 }  // namespace ws::ui::r2d

@@ -159,10 +159,12 @@ public:
     // Which id a vertex's tex_index carries. False (the default, the
     // fallback tier): the chunk-local table slot, chunks splitting at
     // kMaxTexturesPerChunk - today's behavior exactly. True (the bindless
-    // tier): the GLOBAL registry id; the shader indexes one process-wide
-    // table, per-chunk tables stay empty, and texture variety never splits
-    // a chunk. Set once before the first frame (the renderer does it at
-    // init, off the device's descriptor-indexing support).
+    // tier): the GLOBAL registry slot (a texture id's low bits - the
+    // generation count never reaches the shader); the shader indexes one
+    // process-wide table, per-chunk tables stay empty, and texture
+    // variety never splits a chunk. Set once before the first frame (the
+    // renderer does it at init, off the device's descriptor-indexing
+    // support).
     void use_global_texture_ids(bool enabled) { global_tex_ids_ = enabled; }
 
     void begin_frame();

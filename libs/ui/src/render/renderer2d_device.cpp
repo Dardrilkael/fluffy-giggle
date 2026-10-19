@@ -276,14 +276,35 @@ void Renderer2D::shutdown() {
         pipeline_layout_ = VK_NULL_HANDLE;
     }
     destroy_frame_resources();
+    // The wait above already drained every submission, so the retire
+    // queue's fences are all satisfied: free those rows directly here
+    // (no bookkeeping - the registry dies right below), and the loop
+    // after skips what they leave behind (image == VK_NULL_HANDLE
+    // marks a freed row: its view is white's, its image already gone).
+    for (const RetireEntry& retire : retire_queue_) {
+        TextureEntry& entry = textures_[retire.slot];
+        if (entry.image != VK_NULL_HANDLE) {
+            vkDestroyImageView(device_, entry.view, nullptr);
+            gpu_->destroy_image(entry.image, entry.allocation);
+            entry.image = VK_NULL_HANDLE;
+        }
+    }
+    retire_queue_.clear();
     for (const TextureEntry& entry : textures_) {
+        if (entry.image == VK_NULL_HANDLE) {
+            continue;  // freed above, or by the retire drain
+        }
         vkDestroyImageView(device_, entry.view, nullptr);
         gpu_->destroy_image(entry.image, entry.allocation);
     }
     textures_.clear();
-    // Registry-derived state dies with the registry: after a re-init the old
-    // page ids would resolve to rects of unrelated textures.
+    // Registry-derived state dies with the registry: after a re-init the
+    // old page ids would resolve to rects of unrelated textures - and a
+    // stale freelist would hand out rows past the fresh registry's end,
+    // so it dies with the pages.
     atlas_pages_.clear();
+    page_of_texture_.clear();
+    free_slots_.clear();
     table_full_warned_ = false;
     clip_overflow_warned_ = false;
     if (set_layout_ != VK_NULL_HANDLE) {
@@ -358,8 +379,8 @@ bool Renderer2D::create_frame_resources() {
         // Full-white start (the whole table, one write per slot): the
         // fragment shader indexes it dynamically, so every roundable index
         // must hold a valid view at all times - id 0 (white) covers that
-        // from frame 1. Writes for ids loaded after this land through
-        // pending_table_ids_ below.
+        // from frame 1. Writes for texture slots loaded after this land
+        // through pending_table_slots_ below.
         const std::size_t infos_count =
             std::size_t(kMaxFramesInFlight) * batch::kMaxBindlessTextures;
         std::vector<VkDescriptorImageInfo> infos(infos_count);
@@ -383,11 +404,16 @@ bool Renderer2D::create_frame_resources() {
         vkUpdateDescriptorSets(device_, kMaxFramesInFlight, writes.data(), 0,
                               nullptr);
 
-        // Id 0 is in place everywhere; anything loaded before this is
-        // still pending. Nothing has been submitted yet, so every slot is
-        // idle and takes its writes right now - the no-UAB path never
-        // gets a safer moment than this.
-        table_written_.fill(1);
+        // The write above made every binding hold current content, so
+        // every bitmap bit starts SET; slots loaded later clear their
+        // bits at upload time and land through pending_table_slots_.
+        // Nothing has been submitted yet, so every frame slot is idle
+        // and takes its writes right now - the no-UAB path never gets a
+        // safer moment than this.
+        for (std::array<std::uint64_t, batch::kMaxBindlessTextures / 64>&
+                 words : table_written_) {
+            words.fill(~std::uint64_t(0));
+        }
         for (uint32_t slot = 0; slot < kMaxFramesInFlight; ++slot) {
             apply_pending_table_writes(slot);
         }
@@ -429,8 +455,8 @@ void Renderer2D::destroy_frame_resources() {
         gpu_->destroy_buffer(arena.buffer, arena.allocation);
     }
     index_arenas_.clear();
-    pending_table_ids_.clear();
-    table_written_.fill(0);
+    pending_table_slots_.clear();
+    table_written_ = {};  // every bit clear: no tables exist to be stale
     table_sets_.clear();
     if (table_pool_ != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(device_, table_pool_, nullptr);
@@ -521,52 +547,114 @@ bool Renderer2D::grow_index_arena(uint32_t frame_slot, std::size_t min_quads) {
     return true;
 }
 
+void Renderer2D::queue_table_write(uint32_t slot) {
+    // The bookkeeping half of every table update: queue the slot and
+    // clear its bit in every frame slot, so each one's next
+    // apply_pending_table_writes rebinds it. Bit clear = the binding is
+    // stale (a fresh upload, or a free whose parked white replaced a
+    // dead view); without this a reused slot would ride its old SET bit
+    // and never rebind.
+    pending_table_slots_.push_back(slot);
+    const std::uint64_t bit = std::uint64_t(1) << (slot & 63u);
+    for (auto& words : table_written_) {
+        words[slot >> 6] &= ~bit;
+    }
+}
+
 void Renderer2D::apply_pending_table_writes(uint32_t frame_slot) {
-    // Bindless tier only. Ids are dense registry indexes, so a per-slot
-    // high-water mark (table_written_) is the whole state: a pending id
-    // below it is already in this slot's set. Texture loads are
-    // setup-granularity, so the small vectors here are fine - this never
-    // runs inside a render loop.
-    std::uint32_t& written = table_written_[frame_slot];
+    // Bindless tier only. table_written_ is the whole state: a SET bit
+    // means this frame slot's binding already holds that texture slot's
+    // current content, so the todo is exactly the queued slots whose bit
+    // is clear HERE. Texture loads are setup-granularity, so the small
+    // vectors are fine - this never runs inside a render loop.
     std::vector<std::uint32_t> todo;
-    for (std::uint32_t id : pending_table_ids_) {
-        if (id >= written) {
-            todo.push_back(id);
+    auto& written = table_written_[frame_slot];
+    for (std::uint32_t slot : pending_table_slots_) {
+        const std::uint64_t bit = std::uint64_t(1) << (slot & 63u);
+        if ((written[slot >> 6] & bit) == 0) {
+            todo.push_back(slot);
         }
     }
-    if (todo.empty()) {
-        return;
+    if (!todo.empty()) {
+        std::vector<VkDescriptorImageInfo> infos(todo.size());
+        std::vector<VkWriteDescriptorSet> writes(todo.size());
+        for (std::size_t i = 0; i < todo.size(); ++i) {
+            infos[i].sampler = sampler_;
+            infos[i].imageView = textures_[todo[i]].view;
+            infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            VkWriteDescriptorSet& write = writes[i];
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = table_sets_[frame_slot];
+            write.dstBinding = 0;
+            write.dstArrayElement = todo[i];
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.pImageInfo = &infos[i];
+        }
+        vkUpdateDescriptorSets(device_, uint32_t(writes.size()),
+                               writes.data(), 0, nullptr);
+        for (std::uint32_t slot : todo) {
+            written[slot >> 6] |= std::uint64_t(1) << (slot & 63u);
+        }
     }
-    std::vector<VkDescriptorImageInfo> infos(todo.size());
-    std::vector<VkWriteDescriptorSet> writes(todo.size());
-    for (std::size_t i = 0; i < todo.size(); ++i) {
-        infos[i].sampler = sampler_;
-        infos[i].imageView = textures_[todo[i]].view;
-        infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        VkWriteDescriptorSet& write = writes[i];
-        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = table_sets_[frame_slot];
-        write.dstBinding = 0;
-        write.dstArrayElement = todo[i];
-        write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        write.pImageInfo = &infos[i];
-    }
-    vkUpdateDescriptorSets(device_, uint32_t(writes.size()), writes.data(), 0,
-                          nullptr);
-    written = std::max(written, todo.back() + 1);
-    // Drain the ids every slot has now written (below the minimum mark):
-    // pending_table_ids_ only ever holds the short tail between slots.
-    std::uint32_t min_written = table_written_[0];
-    for (std::uint32_t mark : table_written_) {
-        min_written = std::min(min_written, mark);
-    }
-    pending_table_ids_.erase(
-        std::remove_if(pending_table_ids_.begin(), pending_table_ids_.end(),
-                       [min_written](std::uint32_t id) {
-                           return id < min_written;
+    // No early return on an empty todo: init's own calls arrive with
+    // every bit SET and must still drain. A slot leaves the queue only
+    // when EVERY frame slot's bit is set (the queue holds just the
+    // short tail between slots); duplicate entries are harmless - an
+    // already-set bit contributes no write, and the drain removes all
+    // copies together.
+    pending_table_slots_.erase(
+        std::remove_if(pending_table_slots_.begin(),
+                       pending_table_slots_.end(),
+                       [this](std::uint32_t slot) {
+                           const std::uint64_t bit =
+                               std::uint64_t(1) << (slot & 63u);
+                           for (const auto& words : table_written_) {
+                               if ((words[slot >> 6] & bit) == 0) {
+                                   return false;  // a frame slot owes it
+                               }
+                           }
+                           return true;
                        }),
-        pending_table_ids_.end());
+        pending_table_slots_.end());
+}
+
+void Renderer2D::free_retired_textures() {
+    // The drain at flush entry. An entry is due once the submission
+    // clock reaches its free_at: this flush's acquire waited the fence
+    // its slot's previous submit signaled - the submit
+    // kMaxFramesInFlight back - and by the same acquire chain every
+    // submit before that, which includes the destroy's frame (the last
+    // that could have recorded the old image; the generation bump
+    // already rejected everything later). Dropped frames never submit
+    // and never advance the clock, so a quiet stretch only delays the
+    // free - the stamp is a lower bound, later is always safe.
+    for (auto it = retire_queue_.begin(); it != retire_queue_.end();) {
+        if (frame_index_ < it->free_at) {
+            ++it;
+            continue;
+        }
+        TextureEntry& entry = textures_[it->slot];
+        vkDestroyImageView(device_, entry.view, nullptr);
+        gpu_->destroy_image(entry.image, entry.allocation);
+        // Park the row on white: the chunked tier rebuilds its chunk
+        // tables from textures_[slot].view every flush, and the
+        // bindless rebind queued below writes the same field - no table
+        // can ever hold (or read) a dead view. The row keeps its bumped
+        // generation, which is what rejects stale handles against the
+        // empty slot.
+        entry.view = textures_[kWhiteIndex].view;
+        entry.image = VK_NULL_HANDLE;
+        entry.allocation = nullptr;
+        if (it->slot < page_of_texture_.size()) {
+            page_of_texture_[it->slot] = kNoAtlasPage;
+        }
+        if (tier_.bindless) {
+            queue_table_write(it->slot);
+        }
+        free_slots_.push_back(it->slot);
+        it = retire_queue_.erase(it);
+    }
 }
 
 bool Renderer2D::grow_chunk_sets(uint32_t frame_slot, uint32_t min_chunks) {
@@ -824,10 +912,13 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
     // Bindless tier: ids index the shader's fixed 1024-slot table, so the
     // registry cannot outgrow it. Refuse the load rather than hand out an
     // id the table cannot hold - the caller's failed-load contract is
-    // white (id 0), so new textures degrade, never break. The chunked
-    // tier has no such limit: its tables are per-chunk and grow with the
-    // chunks.
-    if (tier_.bindless && textures_.size() >= batch::kMaxBindlessTextures) {
+    // white (id 0), so new textures degrade, never break. A FREED row
+    // never counts against the cap: reusing one leaves the registry's
+    // size - and the slot's table index - untouched, so destroy/load
+    // cycles keep working at the cap. The chunked tier has no such
+    // limit: its tables are per-chunk and grow with the chunks.
+    if (tier_.bindless && free_slots_.empty() &&
+        textures_.size() >= batch::kMaxBindlessTextures) {
         if (!table_full_warned_) {
             table_full_warned_ = true;
             ws::core::warn("ui: r2d texture table full ({} textures) - "
@@ -1047,25 +1138,38 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
         return false;
     }
 
-    // id == registry index: [0] is white (init uploads it first), so ids
-    // handed out from here start at 1.
-    textures_.push_back(entry);
-    const uint32_t id = static_cast<uint32_t>(textures_.size() - 1);
+    // Registry placement: a freed row is reused (destroy_texture bumped
+    // its generation at retire time, so the old handles are already dead
+    // and the new tenant's id packs the bumped count); the registry only
+    // grows when no row is free. [0] is white - init uploads it first,
+    // so a fresh row's id starts at slot 1, generation 0.
+    uint32_t slot = 0;
+    if (!free_slots_.empty()) {
+        slot = free_slots_.back();
+        free_slots_.pop_back();
+        entry.generation = textures_[slot].generation;
+        textures_[slot] = entry;
+    } else {
+        slot = static_cast<uint32_t>(textures_.size());
+        entry.generation = 0;
+        textures_.push_back(entry);
+    }
+    const uint32_t id = (entry.generation << kGenShift) | slot;
     if (out != nullptr) {
         *out = Texture{id};
     }
     // Bindless tier: queue the table write. With update-after-bind it can
-    // land in every slot right now, even mid-frame (that IS the feature);
-    // without it each slot takes its writes at its idle flush, so a load
-    // mid-run renders white for at most a couple of frames per slot.
-    // Before the tables exist (init's own white upload), the pending
-    // queue is the only option - create_frame_resources drains it once
-    // they are up.
+    // land in every frame slot right now, even mid-frame (that IS the
+    // feature); without it each slot takes its writes at its idle flush,
+    // so a load mid-run renders white for at most a couple of frames per
+    // slot. Before the tables exist (init's own white upload), the
+    // pending queue is the only option - create_frame_resources drains
+    // it once they are up.
     if (tier_.bindless) {
-        pending_table_ids_.push_back(id);
+        queue_table_write(slot);
         if (tier_.update_after_bind && !table_sets_.empty()) {
-            for (uint32_t slot = 0; slot < kMaxFramesInFlight; ++slot) {
-                apply_pending_table_writes(slot);
+            for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
+                apply_pending_table_writes(i);
             }
         }
     }
@@ -1098,6 +1202,13 @@ void Renderer2D::write_chunk_set(VkDescriptorSet set,
 
 void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
                        float fb_width, float fb_height) {
+    // The submission clock - and the retire drain - run before any early
+    // return: every flush call is one submit (the shell submits right
+    // after it, whatever the batch holds), and an empty frame must still
+    // free textures whose retirement has come due, or a quiet stretch of
+    // empty frames would hold their GPU memory past safety.
+    ++frame_index_;
+    free_retired_textures();
     if (pipeline_ == VK_NULL_HANDLE || batch_.empty()) {
         return;
     }
@@ -1227,6 +1338,21 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
         vkCmdDrawIndexed(cmd, chunk.quad_count * 6, 1, first_index,
                          static_cast<int32_t>(chunk.vertex_offset), 0);
     }
+}
+
+Stats Renderer2D::stats() const {
+    // frame_end's snapshot of the frame plus the registry state at call
+    // time. An empty registry is the headless renderer - every field
+    // reads zero by construction there.
+    Stats out = last_stats_;
+    out.textures =
+        textures_.empty()
+            ? 0u
+            : static_cast<std::uint32_t>(textures_.size() -
+                                         free_slots_.size());
+    out.bindless = tier_.bindless;
+    out.update_after_bind = tier_.update_after_bind;
+    return out;
 }
 
 }  // namespace ws::ui::r2d

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <climits>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -58,7 +59,12 @@ void Renderer2D::frame_begin(float fb_width, float fb_height) {
 
 void Renderer2D::frame_end() {
     frame_active_ = false;
+    // Captured before the empty check: the replay clears commands_, and
+    // stats() reports what the app recorded whatever the replay did.
+    const std::uint32_t command_count =
+        static_cast<std::uint32_t>(commands_.size());
     if (commands_.empty()) {
+        last_stats_ = Stats{};  // a frame that recorded nothing
         return;
     }
     // Layer first (the explicit z escape hatch), then begin() block. Stable,
@@ -122,11 +128,26 @@ void Renderer2D::frame_end() {
             (void)batch_.push_rounded_quad(cmd.pos, cmd.uv, color,
                                             cmd.radius);
         } else {
-            (void)batch_.push_quad(cmd.pos, cmd.uv, color, cmd.texture.id);
+            // The SLOT, not the full id: the batch's tables (chunk
+            // tables, the bindless tex_index) key on registry slots, and
+            // record() already proved the id's generation.
+            (void)batch_.push_quad(cmd.pos, cmd.uv, color,
+                                   cmd.texture.id & kSlotMask);
         }
     }
     batch_.close_segment();
     commands_.clear();
+    // The frame's accounting, for stats(): captured now that the whole
+    // replay has run (the counts are only complete here). The registry
+    // and tier fields fill in at call time, on the device half.
+    last_stats_ = Stats{};
+    last_stats_.commands = command_count;
+    last_stats_.quads =
+        static_cast<std::uint32_t>(batch_.vertices().size() / 4);
+    last_stats_.chunks = batch_.chunk_count();
+    last_stats_.vertices =
+        static_cast<std::uint32_t>(batch_.vertices().size());
+    last_stats_.dropped_quads = batch_.dropped_quads();
     // Warn once per frame with the frame's FINAL drop totals - the counts
     // are only complete after the whole replay, so the warn lives here,
     // not inside the loop.
@@ -144,6 +165,7 @@ void Renderer2D::frame_drop() {
     commands_.clear();
     frame_cameras_.clear();
     batch_.begin_frame();
+    last_stats_ = Stats{};  // an abandoned frame renders nothing
 }
 
 // --- Renderer2D: guards -----------------------------------------------------
@@ -195,7 +217,8 @@ void Renderer2D::warn_unknown_texture(uint32_t id) {
         return;
     }
     warned_mask_ |= kWarnUnknownTexture;
-    ws::core::warn("ui: r2d draw with unknown texture id {} - rendered white",
+    ws::core::warn("ui: r2d draw with unknown or destroyed texture id {} - "
+                   "rendered white",
                    id);
 }
 
@@ -236,17 +259,23 @@ void Renderer2D::record(const char* what, const float (&pos)[4][3],
         warn_drop(what);  // outside any begin()/end() block
         return;
     }
-    // Unknown ids render white: a garbage index must never reach the
-    // descriptor write at flush time (it would index textures_ out of
-    // bounds) - clamped here, at record time, before the command exists.
-    // Only while a registry exists (init() puts white at index 0 before
-    // any frame): headless there is nothing to index and no flush, so
-    // synthetic ids pass through untouched - the CPU-side tests rely on
-    // exactly that.
-    if (!textures_.empty() && texture.id != 0 &&
-        texture.id >= textures_.size()) {
-        warn_unknown_texture(texture.id);
-        texture = Texture{};
+    // Unknown or stale ids render white: the id is generation-counted
+    // (gen << kGenShift | slot), so a destroyed handle - or one whose
+    // slot a later load reused - fails the generation check exactly
+    // like a garbage index, and none of them may reach the descriptor
+    // write at flush time (out of bounds, or the wrong image). Clamped
+    // here, at record time, before the command exists. Only while a
+    // registry exists (init() puts white at index 0 before any frame):
+    // headless there is nothing to index and no flush, so synthetic ids
+    // pass through untouched - the CPU-side tests rely on exactly that.
+    if (!textures_.empty() && texture.id != 0) {
+        const std::uint32_t slot = texture.id & kSlotMask;
+        const std::uint32_t gen = (texture.id >> kGenShift) & kGenMask;
+        if (slot >= textures_.size() ||
+            textures_[slot].generation != gen) {
+            warn_unknown_texture(texture.id);
+            texture = Texture{};
+        }
     }
     DrawCommand cmd;
     cmd.sort_layer = current_layer_;
@@ -537,6 +566,91 @@ Texture Renderer2D::load_texture(const char* path) {
     return texture;
 }
 
+Texture Renderer2D::load_texture_from_memory(const void* data,
+                                             std::size_t size) {
+    Texture texture{};
+    if (device_ == VK_NULL_HANDLE) {
+        // No GPU context (headless tests, or a call before init()) -
+        // the load_texture contract: white, not a crash.
+        ws::core::warn("ui: r2d::load_texture_from_memory() fell back to "
+                       "white - no GPU context is alive");
+        return texture;
+    }
+    if (data == nullptr || size == 0 ||
+        size > static_cast<std::size_t>(INT_MAX)) {
+        // stb's length parameter is an int; anything past INT_MAX would
+        // wrap it, not size it.
+        ws::core::warn("ui: r2d::load_texture_from_memory() failed - {} "
+                       "bytes is not decodable image data (using white)",
+                       size);
+        return texture;
+    }
+    int width = 0;
+    int height = 0;
+    // Force 4 B/px: the registry is R8G8B8A8_UNORM (matches the UNORM
+    // swapchain and the ImGui font atlas, so colors render as authored).
+    stbi_uc* pixels = stbi_load_from_memory(
+        static_cast<const stbi_uc*>(data), static_cast<int>(size), &width,
+        &height, nullptr, STBI_rgb_alpha);
+    if (pixels == nullptr) {
+        ws::core::warn("ui: r2d::load_texture_from_memory() failed - {} "
+                       "(using white)",
+                       stbi_failure_reason());
+        return texture;
+    }
+    if (!upload_texture(pixels, static_cast<uint32_t>(width),
+                        static_cast<uint32_t>(height), &texture)) {
+        ws::core::warn("ui: r2d::load_texture_from_memory() upload failed "
+                       "- using white");
+        texture = Texture{};
+    }
+    stbi_image_free(pixels);
+    return texture;
+}
+
+void Renderer2D::destroy_texture(Texture texture) {
+    if (device_ == VK_NULL_HANDLE) {
+        // No GPU context: nothing was ever uploaded through this handle -
+        // the loaders' warn-and-degrade contract.
+        ws::core::warn("ui: r2d::destroy_texture({}) dropped - no GPU "
+                       "context is alive",
+                       texture.id);
+        return;
+    }
+    if (texture.id == 0) {
+        ws::core::warn("ui: r2d::destroy_texture(0) refused - the white "
+                       "fallback is never destroyed");
+        return;
+    }
+    const std::uint32_t slot = texture.id & kSlotMask;
+    const std::uint32_t gen = (texture.id >> kGenShift) & kGenMask;
+    if (slot >= textures_.size() || textures_[slot].generation != gen) {
+        // Unknown, already destroyed, or its slot reused by a later load:
+        // a warned no-op either way. Cold (load-granularity) path, so the
+        // warn needs no once-per-frame guard.
+        ws::core::warn("ui: r2d::destroy_texture({}) dropped - unknown or "
+                       "already destroyed texture id",
+                       texture.id);
+        return;
+    }
+    // The generation bump is what kills the handle: record() fails every
+    // later draw with it, so the frame this call runs in is the LAST
+    // that can hold the image. frame_index_ is the SUBMISSION clock
+    // (flush() bumps it; a frame that drops never submits and never
+    // counts), so at this moment the recording frame - if it renders -
+    // is submit number frame_index_ + 1: the stamp buys TWO more submits
+    // of slack, and the flush that reaches it has, at entry, already
+    // waited the fence the submit kMaxFramesInFlight back signaled (and
+    // by the acquire chain, every older one) - which covers this frame
+    // and everything before it. A dropped frame recorded nothing the
+    // batch replayed, so its absence only delays the free, never
+    // unsafens it.
+    textures_[slot].generation =
+        (textures_[slot].generation + 1) & kGenMask;
+    retire_queue_.push_back(
+        RetireEntry{slot, frame_index_ + kMaxFramesInFlight + 1});
+}
+
 void Renderer2D::register_atlas_page(Texture page,
                                      std::vector<atlas::Rect> rects) {
     if (page.id == kNoAtlasPage) {
@@ -552,27 +666,38 @@ void Renderer2D::register_atlas_page(Texture page,
     const std::uint32_t index =
         static_cast<std::uint32_t>(atlas_pages_.size());
     atlas_pages_.push_back(AtlasPage{page, std::move(rects)});
-    // The dense map grows to cover the id; fresh entries are the sentinel
-    // (not a page). Synthetic test ids land here untouched, registry or
-    // not - the map is keyed by id, not by textures_.
-    if (page_of_texture_.size() <= page.id) {
-        page_of_texture_.resize(page.id + 1, kNoAtlasPage);
+    // The dense map is keyed by the page's SLOT, so a freed slot a later
+    // page reuses rebinds to the new tenant; the stored page keeps the
+    // FULL id, and that is what find_sprite_rect compares, so a stale
+    // handle never resolves to the slot's new page. Fresh entries are
+    // the sentinel (not a page); synthetic test ids land here
+    // untouched, registry or not.
+    const std::uint32_t slot = page.id & kSlotMask;
+    if (page_of_texture_.size() <= slot) {
+        page_of_texture_.resize(slot + 1, kNoAtlasPage);
     }
-    page_of_texture_[page.id] = index;
+    page_of_texture_[slot] = index;
 }
 
 const atlas::Rect* Renderer2D::find_sprite_rect(const Sprite& sprite) const {
-    // O(1): the dense map carries id -> atlas_pages_ index. This runs once
-    // per sprite and once per glyph in draw_text, so it must not scale
-    // with the page count. Ids past the map = never registered as a page.
-    if (sprite.page >= page_of_texture_.size()) {
+    // O(1): the dense map carries SLOT -> atlas_pages_ index. This runs
+    // once per sprite and once per glyph in draw_text, so it must not
+    // scale with the page count. Slots past the map = never registered
+    // as a page.
+    const std::uint32_t slot = sprite.page & kSlotMask;
+    if (slot >= page_of_texture_.size()) {
         return nullptr;  // not a registered atlas page
     }
-    const std::uint32_t index = page_of_texture_[sprite.page];
+    const std::uint32_t index = page_of_texture_[slot];
     if (index == kNoAtlasPage) {
-        return nullptr;  // a texture that is not an atlas page
+        return nullptr;  // not a page - or a page whose slot was freed
     }
     const AtlasPage& page = atlas_pages_[index];
+    // Full-id equality: a destroyed page, or a stale handle whose slot a
+    // later page reused, must not resolve to whatever the slot holds now.
+    if (page.texture.id != sprite.page) {
+        return nullptr;  // the handle predates the page at this slot
+    }
     if (sprite.index >= page.rects.size()) {
         return nullptr;  // the right page, but no such sprite
     }
@@ -983,6 +1108,22 @@ Texture load_texture(const char* path) {
     return Texture{};
 }
 
+Texture load_texture_from_memory(const void* data, std::size_t size) {
+    if (g_active != nullptr) {
+        return g_active->load_texture_from_memory(data, size);
+    }
+    warn_no_app("load_texture_from_memory");
+    return Texture{};
+}
+
+void destroy_texture(Texture texture) {
+    if (g_active != nullptr) {
+        g_active->destroy_texture(texture);
+    } else {
+        warn_no_app("destroy_texture");
+    }
+}
+
 std::vector<Sprite> load_atlas(std::initializer_list<const char*> paths) {
     if (g_active != nullptr) {
         return g_active->load_atlas(paths);
@@ -1033,6 +1174,15 @@ float draw_text(float x, float y, const char* utf8_text, const Font& font,
     // width is still the honest measure - layout code keeps working.
     warn_no_app("draw_text");
     return font.measure_text(utf8_text);
+}
+
+Stats stats() {
+    if (g_active != nullptr) {
+        return g_active->stats();
+    }
+    // No warn - the frame_size()/sprite_size() contract: a query with no
+    // app running is a zero answer, not an app bug.
+    return Stats{};
 }
 
 }  // namespace ws::ui::r2d
