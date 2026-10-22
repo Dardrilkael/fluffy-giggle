@@ -21,6 +21,7 @@
 #include <ws/ui/gui/id_stack.hpp>      // (same - one include line per header proves each parses alone)
 #include <ws/ui/gui/layout_cursor.hpp>
 #include <ws/ui/gui/rect.hpp>
+#include <ws/ui/gui/scoped.hpp>  // (same - the RAII guard family parses headless)
 #include <ws/ui/gui/theme.hpp>  // (same - the stock chrome parses headless)
 #include <ws/ui/gui/widgets.hpp>  // (same - proves the widget layer parses headless)
 #include <ws/ui/render_command_queue.hpp>
@@ -7147,6 +7148,124 @@ TEST_CASE("push_hit_clip_escape: an overlay claims past the enclosing hole") {
     gui.pop_hit_clip();
     gui.pop_hit_clip();
     CHECK(gui.current_hit_clip() == nullptr);  // balanced to nothing
+    gui.end_frame();
+}
+
+TEST_CASE("scoped guards: each begin/end pair as one block local, and an "
+          "early return cannot leak the scope") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    const Rect anchor{0.0f, 0.0f, 100.0f, 24.0f};
+    const Rect bounds{0.0f, 24.0f, 120.0f, 60.0f};
+
+    // ScopedLayer + ScopedDisabled: the always-pushes pair, held for
+    // exactly the block below - the same begin/end calls, nothing more.
+    gui.begin_frame(snap(10.0f, 10.0f));
+    {
+        const ScopedLayer layer(gui, Layer::popup);
+        CHECK(gui.current_layer() == Layer::popup);
+        const ScopedDisabled lock(gui, true);
+        CHECK(gui.disabled() == true);
+    }
+    CHECK(gui.current_layer() == Layer::base);
+    CHECK(gui.disabled() == false);
+    gui.end_frame();
+
+    // The condition form is the pair's own contract: a false condition
+    // pushes a bit that locks nothing, and the end still balances.
+    gui.begin_frame(snap(10.0f, 10.0f));
+    {
+        const ScopedDisabled no_lock(gui, false);
+        CHECK(gui.disabled() == false);
+    }
+    CHECK(gui.disabled() == false);
+    gui.end_frame();
+
+    // ScopedPanel: content() is the begin's own answer, and the rows
+    // inside id under the scope like any panel's.
+    gui.begin_frame(snap(50.0f, 20.0f));
+    {
+        const ScopedPanel panel(gui, layout, kDefaultChrome, "p",
+                                {0.0f, 0.0f, 200.0f, 100.0f});
+        const Rect content = panel.content();
+        CHECK(content.x == kDefaultChrome.padding);
+        CHECK(content.width == 200.0f - 2.0f * kDefaultChrome.padding);
+        (void)button(gui, layout, kDefaultChrome, "in", -1.0f);
+        CHECK(gui.hot_id() == gui.ids().id("in"));
+    }
+    gui.end_frame();
+
+    // ScopedScrollPanel: the scrolling twin, one row iding inside.
+    gui.begin_frame(snap(50.0f, 20.0f));
+    {
+        const ScopedScrollPanel page(gui, layout, kDefaultChrome, "page",
+                                     {0.0f, 0.0f, 200.0f, 100.0f});
+        (void)button(gui, layout, kDefaultChrome, "srow", -1.0f);
+        CHECK(gui.hot_id() == gui.ids().id("srow"));
+    }
+    gui.end_frame();
+
+    // ScopedPopup with a closed caller: the begin answered false and
+    // pushed nothing, so the guard's end pops nothing.
+    bool open = false;
+    gui.begin_frame(snap(10.0f, 10.0f));
+    {
+        const ScopedPopup closed(gui, layout, kDefaultChrome, "closed",
+                                 anchor, bounds, open);
+        CHECK(gui.current_layer() == Layer::base);
+    }
+    CHECK(gui.current_layer() == Layer::base);
+    gui.end_frame();
+
+    // ScopedPopup open: the body gates on the guard, the layer holds
+    // inside it, and end_popup rides the destructor.
+    open = true;
+    gui.begin_frame(snap(10.0f, 10.0f));
+    {
+        const ScopedPopup pop(gui, layout, kDefaultChrome, "menu", anchor,
+                              bounds, open);
+        CHECK(gui.current_layer() == Layer::popup);
+        if (pop) {
+            (void)button(gui, layout, kDefaultChrome, "row", -1.0f);
+        }
+    }
+    CHECK(gui.current_layer() == Layer::base);
+    gui.end_frame();
+
+    // The guard's whole point: a return from inside the scope still
+    // pairs it - the manual pair's one failure mode cannot happen.
+    const auto early = [&]() {
+        const ScopedPopup pop(gui, layout, kDefaultChrome, "menu", anchor,
+                              bounds, open);
+        if (pop) {
+            return;  // mid-scope exit: the destructor ends the popup
+        }
+    };
+    gui.begin_frame(snap(10.0f, 10.0f));
+    early();
+    CHECK(gui.current_layer() == Layer::base);  // balanced despite the return
+    gui.end_frame();
+
+    // ScopedTooltip: show by value, the chrome-only stratum.
+    gui.begin_frame(snap(10.0f, 10.0f));
+    {
+        const ScopedTooltip tip(gui, layout, kDefaultChrome, "tip",
+                                {10.0f, 10.0f, 100.0f, 40.0f}, true);
+        CHECK(gui.current_layer() == Layer::tooltip);
+    }
+    CHECK(gui.current_layer() == Layer::base);
+    gui.end_frame();
+
+    // ScopedModal: the scope pairs like the popup (the veil is the
+    // frame-wide one either way - it lifts at the next begin_frame).
+    gui.begin_frame(snap(10.0f, 10.0f));
+    {
+        const ScopedModal modal(gui, layout, kDefaultChrome, "m",
+                                {50.0f, 50.0f, 200.0f, 100.0f}, true);
+        CHECK(gui.current_layer() == Layer::modal);
+    }
+    CHECK(gui.current_layer() == Layer::base);
     gui.end_frame();
 }
 
