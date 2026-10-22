@@ -22,12 +22,7 @@ JobSystem::~JobSystem() {
     }
     // Cancel-all: running jobs see the request at their next poll; queued
     // jobs additionally get their terminal state set below.
-    {
-        std::scoped_lock lock{live_mutex_};
-        for (const auto& rec : live_) {
-            rec->request_cancel();
-        }
-    }
+    request_cancel_all();
     // Workers skip remaining queued entries - each is marked cancelled
     // without running, and anyone blocked on its handle is woken. (Lock
     // order here is queue -> record; nothing anywhere takes them the
@@ -121,6 +116,95 @@ void JobSystem::prune_live(detail::RecordBase* base) noexcept {
         });
     if (it != live_.end()) {
         live_.erase(it);
+    }
+    // Unregister from the key/group rosters. The key slot is dropped only
+    // when it still points at THIS record - a newer same-key job has
+    // already taken it (and cancelled us), and the slot belongs to them.
+    if (base->key != 0) {
+        const auto slot = keys_.find(base->key);
+        if (slot != keys_.end()) {
+            const auto held = slot->second.lock();
+            if (held == nullptr || held.get() == base) {
+                keys_.erase(slot);
+            }
+        }
+    }
+    if (base->group != 0) {
+        const auto roster = groups_.find(base->group);
+        if (roster != groups_.end()) {
+            auto& members = roster->second;
+            members.erase(
+                std::remove_if(members.begin(), members.end(),
+                               [base](const std::weak_ptr<detail::RecordBase>& w) {
+                                   const auto held = w.lock();
+                                   return held == nullptr || held.get() == base;
+                               }),
+                members.end());
+            if (members.empty()) {
+                groups_.erase(roster);
+            }
+        }
+    }
+}
+
+void JobSystem::request_cancel_all() {
+    std::scoped_lock lock{live_mutex_};
+    for (const auto& rec : live_) {
+        rec->request_cancel();
+    }
+}
+
+void JobSystem::wait_all() {
+    std::vector<std::shared_ptr<detail::RecordBase>> snapshot;
+    {
+        std::scoped_lock lock{live_mutex_};
+        snapshot.reserve(live_.size());
+        for (const auto& rec : live_) {
+            snapshot.push_back(rec);
+        }
+    }
+    wait_records(snapshot);
+}
+
+void JobSystem::cancel_group(std::uint64_t group) {
+    std::scoped_lock lock{live_mutex_};
+    const auto roster = groups_.find(group);
+    if (roster == groups_.end()) {
+        return;
+    }
+    for (const auto& weak : roster->second) {
+        if (const auto rec = weak.lock()) {
+            if (!rec->terminal()) {
+                rec->request_cancel();
+            }
+        }
+    }
+}
+
+void JobSystem::wait_group(std::uint64_t group) {
+    std::vector<std::shared_ptr<detail::RecordBase>> snapshot;
+    {
+        std::scoped_lock lock{live_mutex_};
+        const auto roster = groups_.find(group);
+        if (roster == groups_.end()) {
+            return;
+        }
+        for (const auto& weak : roster->second) {
+            if (const auto rec = weak.lock()) {
+                snapshot.push_back(rec);
+            }
+        }
+    }
+    wait_records(snapshot);
+}
+
+void JobSystem::wait_records(
+    const std::vector<std::shared_ptr<detail::RecordBase>>& records) {
+    // Each cv is signalled at its own terminal transition, so one pass
+    // over the snapshot suffices: nothing leaves terminal afterwards.
+    for (const auto& rec : records) {
+        std::unique_lock lock{rec->mutex};
+        rec->cv.wait(lock, [&rec] { return rec->terminal(); });
     }
 }
 

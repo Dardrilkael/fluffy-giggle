@@ -11,6 +11,7 @@
 #include <mutex>
 #include <thread>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -42,13 +43,16 @@ enum class Priority : std::int32_t {
     high = 2,
 };
 
-// Optional submit-time registration. Phase 1 stores both fields on the
-// record; the latest-wins key registry and the group registry are the
-// next arc's work - zero means "not registered".
+// Optional submit-time registration. Zero means "not registered" for each
+// field; both registries are live (guarded with the job registries under
+// one mutex, pruned as jobs finish).
 struct JobOptions {
-    std::uint64_t key = 0;   // nonzero: a latest-wins key (same key resubmit
-                             // cancels the previous run)
-    std::uint64_t group = 0; // nonzero: a group tag for cancel/wait by group
+    std::uint64_t key = 0;   // nonzero: a latest-wins key - submitting the
+                             // same key again REQUESTS a cancel on the
+                             // previous run (cooperative: a running job
+                             // that ignores it still lands done)
+    std::uint64_t group = 0; // nonzero: a group tag for cancel_group/
+                             // wait_group
 };
 
 // Delivery callbacks, both invoked on the DRAIN thread (never a worker).
@@ -317,6 +321,24 @@ public:
                 return JobHandle<T>{record};
             }
             live_.push_back(base);
+            if (options.key != 0) {
+                // Latest-wins: request a cancel on the run this key
+                // replaces, then take the slot.
+                const auto slot = keys_.find(options.key);
+                if (slot != keys_.end()) {
+                    if (const auto previous = slot->second.lock()) {
+                        if (!previous->terminal()) {
+                            previous->request_cancel();
+                        }
+                    }
+                    slot->second = base;
+                } else {
+                    keys_.emplace(options.key, base);
+                }
+            }
+            if (options.group != 0) {
+                groups_[options.group].push_back(base);
+            }
             queues_[static_cast<std::size_t>(priority)].push_back(
                 Work{base, std::move(run)});
         }
@@ -335,6 +357,25 @@ public:
         return static_cast<unsigned>(workers_.size());
     }
 
+    // Request a cancel on every unfinished job (the shutdown cancel-all,
+    // usable any time). Cooperative as ever: running jobs see it at their
+    // next poll, queued jobs are skipped at pickup.
+    void request_cancel_all();
+
+    // Block until every job that is unfinished AT THE CALL is terminal.
+    // Owner thread only, like wait(); jobs submitted after the call are
+    // not waited for.
+    void wait_all();
+
+    // Request a cancel on every unfinished job in one group
+    // (JobOptions.group). Unknown groups are a quiet no-op.
+    void cancel_group(std::uint64_t group);
+
+    // Block until every job in one group that is unfinished AT THE CALL is
+    // terminal. Owner thread only; jobs joining the group during the wait
+    // are not waited for.
+    void wait_group(std::uint64_t group);
+
 private:
     struct Work {
         std::shared_ptr<detail::RecordBase> record;
@@ -346,6 +387,8 @@ private:
     [[nodiscard]] bool has_work_locked() const noexcept;
     [[nodiscard]] Work pop_locked();
     void prune_live(detail::RecordBase* base) noexcept;
+    static void wait_records(
+        const std::vector<std::shared_ptr<detail::RecordBase>>& records);
 
     // marshal_ is declared FIRST so it is destroyed LAST: its posts hold
     // `this`-owned pointers, and no member may die before the queue that
@@ -356,8 +399,16 @@ private:
     std::condition_variable queue_cv_;
     std::atomic<std::uint64_t> next_id_{0};
     std::atomic<bool> stopping_{false};
-    std::mutex live_mutex_;
+    std::mutex live_mutex_;  // guards live_, keys_ and groups_
     std::vector<std::shared_ptr<detail::RecordBase>> live_;  // unfinished
+    // Latest-wins keys and group rosters, both weak: a finished job keeps
+    // no record alive, and expired entries are dropped at the next touch.
+    std::unordered_map<std::uint64_t,
+                       std::weak_ptr<detail::RecordBase>>
+        keys_;
+    std::unordered_map<std::uint64_t,
+                       std::vector<std::weak_ptr<detail::RecordBase>>>
+        groups_;
     std::vector<std::thread> workers_;
 };
 

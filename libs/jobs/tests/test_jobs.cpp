@@ -12,8 +12,10 @@
 #include <vector>
 
 #include <ws/core/result.hpp>
+#include <ws/jobs/debouncer.hpp>
 #include <ws/jobs/job_system.hpp>
 #include <ws/jobs/marshal.hpp>
+#include <ws/jobs/published.hpp>
 
 // Stage 8's headless core: the pool, the marshal queue, the handle/token
 // contract and shutdown. The deterministic-order tests all run on a
@@ -537,4 +539,326 @@ TEST_CASE("shutdown: a submit racing teardown is refused, not enqueued") {
 
     CHECK(child_state.load() == JobState::cancelled);
     CHECK(!child_ran.load());
+}
+
+TEST_CASE("keys: resubmitting a key cancels the running previous") {
+    JobSystem js(1);
+
+    auto first = js.submit<int>(
+        [](JobContext& ctx) -> Result<int> {
+            // Parks until the same-key resubmit requests the cancel.
+            while (!ctx.cancelled()) {
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+            return ws::jobs::fail(JobError::cancelled);
+        },
+        Priority::normal, JobOptions{.key = 7});
+    while (first.state() != JobState::running) {
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+
+    auto second = js.submit<int>([](JobContext&) -> Result<int> { return 2; },
+                                 Priority::normal, JobOptions{.key = 7});
+
+    CHECK(first.wait() == JobState::cancelled);
+    CHECK(second.wait() == JobState::done);
+    const Result<int> taken = second.take();
+    REQUIRE(taken.has_value());
+    CHECK(taken.value() == 2);
+}
+
+TEST_CASE("keys: a queued previous with the same key never runs") {
+    JobSystem js(1);
+    Gate gate;
+    std::atomic<bool> ran{false};
+
+    auto blocker = js.submit<void>([&gate](JobContext&) -> Status {
+        gate.hold_on();
+        return {};
+    });
+    while (blocker.state() != JobState::running) {
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+
+    auto first = js.submit<int>(
+        [&ran](JobContext&) -> Result<int> {
+            ran.store(true);
+            return 1;
+        },
+        Priority::normal, JobOptions{.key = 9});
+    auto second = js.submit<int>([](JobContext&) -> Result<int> { return 2; },
+                                 Priority::normal, JobOptions{.key = 9});
+
+    gate.release();
+    CHECK(first.wait() == JobState::cancelled);
+    CHECK(!ran.load());  // skipped at pickup, never ran
+    CHECK(second.wait() == JobState::done);
+}
+
+TEST_CASE("groups: cancel_group requests only its members") {
+    JobSystem js(3);
+    Gate gate_c;
+
+    auto parked = [](JobContext& ctx) -> Result<int> {
+        while (!ctx.cancelled()) {
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+        return ws::jobs::fail(JobError::cancelled);
+    };
+    auto a = js.submit<int>(parked, Priority::normal, JobOptions{.group = 5});
+    auto b = js.submit<int>(parked, Priority::normal, JobOptions{.group = 5});
+    auto c = js.submit<int>(
+        [&gate_c](JobContext&) -> Result<int> {
+            gate_c.hold_on();
+            return 3;
+        },
+        Priority::normal, JobOptions{.group = 6});
+    for (auto* h : {&a, &b, &c}) {
+        while (h->state() != JobState::running) {
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+    }
+
+    js.cancel_group(5);
+    CHECK(a.wait() == JobState::cancelled);
+    CHECK(b.wait() == JobState::cancelled);
+
+    gate_c.release();
+    CHECK(c.wait() == JobState::done);
+    js.cancel_group(12345);  // unknown group: a quiet no-op
+}
+
+TEST_CASE("groups: wait_group blocks until the group is terminal") {
+    JobSystem js(3);  // three gated jobs must all be running at once
+    Gate gate;
+
+    auto one = js.submit<int>(
+        [&gate](JobContext&) -> Result<int> {
+            gate.hold_on();
+            return 1;
+        },
+        Priority::normal, JobOptions{.group = 1});
+    auto two = js.submit<int>(
+        [&gate](JobContext&) -> Result<int> {
+            gate.hold_on();
+            return 2;
+        },
+        Priority::normal, JobOptions{.group = 1});
+    auto outside = js.submit<int>(
+        [&gate](JobContext&) -> Result<int> {
+            gate.hold_on();
+            return 3;
+        });
+    for (auto* h : {&one, &two, &outside}) {
+        while (h->state() != JobState::running) {
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+    }
+
+    std::atomic<bool> waiter_done{false};
+    std::thread waiter([&] {
+        js.wait_group(1);
+        waiter_done.store(true);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    CHECK(!waiter_done.load());  // the group's work is gated: still blocked
+
+    gate.release();
+    one.wait();
+    two.wait();
+    waiter.join();
+    CHECK(waiter_done.load());  // returned without waiting for `outside`
+
+    outside.wait();
+    js.wait_group(1);  // empty now: immediate
+}
+
+TEST_CASE("wait_all: blocks until every live job is terminal") {
+    JobSystem js(2);
+    Gate gate;
+
+    auto one = js.submit<int>([&gate](JobContext&) -> Result<int> {
+        gate.hold_on();
+        return 1;
+    });
+    auto two = js.submit<int>([&gate](JobContext&) -> Result<int> {
+        gate.hold_on();
+        return 2;
+    });
+    for (auto* h : {&one, &two}) {
+        while (h->state() != JobState::running) {
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+    }
+
+    std::atomic<bool> waiter_done{false};
+    std::thread waiter([&] {
+        js.wait_all();
+        waiter_done.store(true);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    CHECK(!waiter_done.load());
+
+    gate.release();
+    one.wait();
+    two.wait();
+    waiter.join();
+    CHECK(waiter_done.load());
+    js.wait_all();  // nothing live: returns immediately
+}
+
+TEST_CASE("cancel_all: requests every live job, queued included") {
+    JobSystem js(2);
+    std::atomic<int> finished_cancels{0};
+
+    auto parked = [&finished_cancels](JobContext& ctx) -> Result<int> {
+        while (!ctx.cancelled()) {
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+        ++finished_cancels;
+        return ws::jobs::fail(JobError::cancelled);
+    };
+    auto a = js.submit<int>(parked);
+    auto b = js.submit<int>(parked);
+    for (auto* h : {&a, &b}) {
+        while (h->state() != JobState::running) {
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+    }
+    auto queued = js.submit<int>(parked);  // waits behind the parked pair
+
+    js.request_cancel_all();
+    CHECK(a.wait() == JobState::cancelled);
+    CHECK(b.wait() == JobState::cancelled);
+    CHECK(queued.wait() == JobState::cancelled);  // skipped at pickup
+    CHECK(finished_cancels.load() == 2);  // only the running pair ran
+}
+
+TEST_CASE("published: versioned snapshots, read_if_new, never torn") {
+    using Pair = std::pair<int, int>;
+
+    ws::jobs::Published<Pair> pub;
+    CHECK(pub.version() == 0);
+    std::uint64_t seen = 0;
+    Pair latest{0, 0};
+    CHECK(!pub.read_if_new(seen, latest));
+
+    pub.publish({1, 1});
+    CHECK(pub.version() == 1);
+    CHECK(pub.read_if_new(seen, latest));
+    CHECK(latest == Pair{1, 1});
+    CHECK(seen == 1);
+    CHECK(!pub.read_if_new(seen, latest));  // same version: no delivery
+
+    pub.publish({2, 2});
+    pub.publish({3, 3});
+    CHECK(pub.read_if_new(seen, latest));  // coalesced: the latest only
+    CHECK(latest == Pair{3, 3});
+    CHECK(seen == 3);
+    CHECK(pub.read() == Pair{3, 3});
+
+    const ws::jobs::Published<int> pre{42};  // pre-published: version 1
+    CHECK(pre.version() == 1);
+    std::uint64_t pre_seen = 0;
+    int pre_value = 0;
+    CHECK(pre.read_if_new(pre_seen, pre_value));
+    CHECK(pre_value == 42);
+
+    // Stress: a producer pairs (n, n) flat out; a consumer reads whatever
+    // is newest. Any torn pair (or a version going backwards) is a failure.
+    ws::jobs::Published<Pair> stressed;
+    constexpr int kPublishes = 20000;
+    std::atomic<bool> stop{false};
+    std::thread producer([&] {
+        for (int i = 0; i < kPublishes; ++i) {
+            stressed.publish({i, i});
+        }
+        stop.store(true);
+    });
+    std::atomic<int> torn{0};
+    std::atomic<int> version_went_backwards{0};
+    std::atomic<std::uint64_t> highest{0};
+    std::thread consumer([&] {
+        std::uint64_t c_seen = 0;
+        std::uint64_t c_last = 0;
+        Pair value;
+        while (!stop.load()) {
+            if (stressed.read_if_new(c_seen, value)) {
+                if (c_seen <= c_last) {
+                    ++version_went_backwards;
+                }
+                c_last = c_seen;
+                if (value.first != value.second) {
+                    ++torn;
+                }
+            }
+        }
+        highest.store(c_last);
+    });
+    producer.join();
+    consumer.join();
+
+    CHECK(stressed.version() == kPublishes);  // version 0 + kPublishes bumps
+    CHECK(torn.load() == 0);
+    CHECK(version_went_backwards.load() == 0);
+    CHECK(highest.load() > 0);
+}
+
+TEST_CASE("debouncer: quiet window, reschedule, cancel - on a fake clock") {
+    JobSystem js(1);
+    std::int64_t now = 0;  // the injected clock: no sleep ever runs this
+    ws::jobs::Debouncer deb(js, [&now] { return now; }, 100);
+
+    SUBCASE("fires through the system once the window is quiet") {
+        std::atomic<int> fired{0};
+        deb.run([&fired] { ++fired; });
+        CHECK(deb.pending());
+
+        now = 99;
+        deb.poll();
+        CHECK(fired.load() == 0);  // one ms short: window still open
+
+        now = 100;
+        deb.poll();
+        CHECK(!deb.pending());
+        for (int i = 0; i < 500 && fired.load() == 0; ++i) {
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+        CHECK(fired.load() == 1);  // ran on the worker, via the system
+    }
+
+    SUBCASE("a reschedule slides the window and replaces the task") {
+        std::atomic<int> first_fired{0};
+        std::atomic<int> second_fired{0};
+
+        now = 0;
+        deb.run([&first_fired] { ++first_fired; });
+        now = 60;
+        deb.run([&second_fired] { ++second_fired; });  // deadline now 160
+
+        now = 100;
+        deb.poll();  // past the FIRST deadline, not the second
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        CHECK(first_fired.load() == 0);
+
+        now = 160;
+        deb.poll();
+        for (int i = 0; i < 500 && second_fired.load() == 0; ++i) {
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+        CHECK(second_fired.load() == 1);
+        CHECK(first_fired.load() == 0);  // replaced, never fired
+    }
+
+    SUBCASE("cancel drops the pending task for good") {
+        std::atomic<int> fired{0};
+        deb.run([&fired] { ++fired; });
+        deb.cancel();
+        CHECK(!deb.pending());
+
+        now = 100000;
+        deb.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        CHECK(fired.load() == 0);
+    }
 }
