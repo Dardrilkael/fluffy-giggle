@@ -118,6 +118,10 @@ inline constexpr int kV = 86;             // GLFW_KEY_V
 inline constexpr int kX = 88;             // GLFW_KEY_X
 inline constexpr int kLeftControl = 341;  // GLFW_KEY_LEFT_CONTROL
 inline constexpr int kRightControl = 345; // GLFW_KEY_RIGHT_CONTROL
+// Alt: the menu bar's Alt+mnemonic opens match the shift spelling above
+// (key_down + a letter, read by the gui) - GLFW numbers the pair 342/346.
+inline constexpr int kLeftAlt = 342;      // GLFW_KEY_LEFT_ALT
+inline constexpr int kRightAlt = 346;    // GLFW_KEY_RIGHT_ALT
 }  // namespace keys
 
 struct InputFrame {

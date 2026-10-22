@@ -55,6 +55,8 @@ enum class Layer : std::uint32_t {
     popup = 20,   // floating chrome above base content
     tooltip = 30,  // hints above popups
     modal = 40,   // a blocking veil: strictly lower strata go inert
+    toast = 50,   // passive notifications above the modal: visible and
+                  // clickable while a veil is up, blocking nothing
 };
 
 // The visual state state() derives for a widget off its HitTest - one

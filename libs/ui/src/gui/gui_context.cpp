@@ -1109,6 +1109,8 @@ void reset_warn_once() {
     pin_overflow_warned = false;
     detail::id_overflow_warned = false;
     detail::panel_overflow_warned = false;
+    detail::toast_overflow_warned = false;
+    detail::menu_overflow_warned = false;
 }
 
 }  // namespace ws::ui::gui

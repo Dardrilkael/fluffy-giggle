@@ -9519,3 +9519,1014 @@ TEST_CASE("theme: dim() multiplies the alpha channel only") {
     // An already-transparent color stays transparent.
     CHECK(dim(0x00203040u, 0.5f) == 0x00203040u);
 }
+
+// --- M22: the menus, dialogs and toasts -------------------------------------------
+//
+// The menu geometry these cases click through, all derived from
+// kDefaultChrome (padding 12, spacing 8, control_height 24, the fontless
+// 6px label estimate) inside a {0,0,400,300} panel laid with padding 0:
+// a one-char title ("&a" strips to "a") is max(6+24, 24) = 30 wide, so
+// the strip's titles sit at (0,0,30,24), (30,0,30,24), (60,0,30,24);
+// the window below title 0 is (0, 24, 2*12 + widest, count*24 + 2*12)
+// with rows inset by the padding at (12, 36 + i*24); a child window
+// anchors RIGHT of its parent row. Every case builds its frames with
+// snap()/touch_frame() and, where a clock matters, sets dt_seconds by
+// hand - hand-built frames read 0.
+namespace {
+
+// The walk list: every row shape the keyboard and the pointer must
+// step around - a live row, a separator, another live row, a disabled
+// row with a reason, and the last live row. (File scope, so the
+// gui names spell their namespace here.)
+const ws::ui::gui::MenuItem kWalkItems[] = {
+    {"one"},
+    {.kind = ws::ui::gui::MenuItemKind::separator},
+    {"two"},
+    {.label = "three", .disabled = true, .disabled_reason = "not yet"},
+    {"four"},
+};
+const ws::ui::gui::MenuDesc kWalkBar[] = {{"&a", kWalkItems, 5}};
+
+// Two menus on one bar: the hover-switch case's target list.
+const ws::ui::gui::MenuItem kGlideItems[] = {
+    {"bravo"},
+    {"beta"},
+};
+const ws::ui::gui::MenuDesc kGlideBar[] = {
+    {"&a", kWalkItems, 5},
+    {"&b", kGlideItems, 2},
+};
+
+// A parent and a plain row: the submenu cases' chain.
+const ws::ui::gui::MenuItem kSubDeep[] = {{"deep"}};
+const ws::ui::gui::MenuItem kParentItems[] = {
+    {"parent", {}, nullptr, kSubDeep, 1},
+    {"plain"},
+};
+const ws::ui::gui::MenuDesc kParentBar[] = {{"&a", kParentItems, 2}};
+
+// The context menus' list: two rows, no art - the window is
+// 2*padding + "bravo" wide (54), count*24 + 2*padding tall (72).
+const ws::ui::gui::MenuItem kCtxItems[] = {
+    {"alpha"},
+    {"bravo"},
+};
+
+}  // namespace
+
+TEST_CASE("menu bar: a click opens below the title, a choice fires with "
+          ".menu") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    int open = -1;
+    MenuEvent ev;
+
+    const auto pass = [&](const ws::input::InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        ev = menu_bar(gui, layout, kDefaultChrome, "bar", kWalkBar, 1, open);
+        layout.end_panel();
+        gui.end_frame();
+    };
+
+    // The title lays at (0,0,30,24). A one-frame click opens menu 0 -
+    // and the press that opened it is the anchor's own, never a close.
+    pass(snap(15.0f, 12.0f, false, true, true));
+    CHECK(open == 0);
+    CHECK(ev.item == nullptr);
+
+    // The window below the title: rows inset by the padding, so "two"
+    // (row 2 - the separator is row 1) is centered at (27,96). Its
+    // click fires the caller's own MenuItem and closes the chain.
+    pass(snap(27.0f, 96.0f, false, true, true));
+    CHECK(open == -1);
+    REQUIRE(ev.item != nullptr);
+    CHECK(ev.item == &kWalkItems[2]);
+    CHECK(ev.menu == 0);
+
+    // The title is a toggle: a click on the open one closes it.
+    pass(snap(15.0f, 12.0f, false, true, true));
+    CHECK(open == 0);
+    pass(snap(15.0f, 12.0f, false, true, true));
+    CHECK(open == -1);
+    CHECK(ev.item == nullptr);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("menu bar: a hover on another title switches the open menu") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    int open = -1;
+    MenuEvent ev;
+
+    const auto pass = [&](const ws::input::InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        ev = menu_bar(gui, layout, kDefaultChrome, "glide", kGlideBar, 2,
+                      open);
+        layout.end_panel();
+        gui.end_frame();
+    };
+
+    // Open menu 0 (title 0 at (0,0,30,24)), then park on title 1
+    // ((30,0,30,24), center (45,12)). The switch reads the SETTLED
+    // hover, so the first parked frame only warms it - the second one
+    // switches.
+    pass(snap(15.0f, 12.0f, false, true, true));
+    CHECK(open == 0);
+    pass(snap(45.0f, 12.0f));
+    CHECK(open == 0);  // still settling
+    pass(snap(45.0f, 12.0f));
+    CHECK(open == 1);
+
+    // The switched menu's window lays below title 1: (30,24,54,72), its
+    // rows at (42,36,30,24) - "bravo" fires with the NEW menu index.
+    pass(snap(57.0f, 48.0f, false, true, true));
+    CHECK(open == -1);
+    REQUIRE(ev.item != nullptr);
+    CHECK(ev.item == &kGlideItems[0]);
+    CHECK(ev.menu == 1);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("menu bar: Alt opens, the arrows walk past the dead rows, Enter "
+          "fires") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    int open = -1;
+    MenuEvent ev;
+
+    const auto pass = [&](const ws::input::InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        ev = menu_bar(gui, layout, kDefaultChrome, "kb", kWalkBar, 1, open);
+        layout.end_panel();
+        gui.end_frame();
+    };
+    // A key edge with the pointer parked off the strip; the Alt spelling
+    // holds the modifier down like the platform would.
+    const auto key = [&](int code) {
+        ws::input::InputFrame frame = snap(400.0f, 300.0f);
+        frame.key_pressed[static_cast<std::size_t>(code)] = true;
+        pass(frame);
+    };
+    const auto alt_key = [&](int code) {
+        ws::input::InputFrame frame = snap(400.0f, 300.0f);
+        frame.key_down[static_cast<std::size_t>(
+            ws::input::keys::kLeftAlt)] = true;
+        frame.key_pressed[static_cast<std::size_t>(code)] = true;
+        pass(frame);
+    };
+
+    // Alt+A opens the "&a" title from anywhere on the bar.
+    alt_key(ws::input::keys::kA);
+    CHECK(open == 0);
+
+    // Down walks from nothing onto "one", then past the separator onto
+    // "two" - Enter fires it with .menu, and the chain closes.
+    key(ws::input::keys::kDown);
+    key(ws::input::keys::kDown);
+    key(ws::input::keys::kEnter);
+    CHECK(open == -1);
+    REQUIRE(ev.item != nullptr);
+    CHECK(ev.item == &kWalkItems[2]);
+    CHECK(ev.menu == 0);
+
+    // Reopen and walk the disabled row: one, two, FOUR - the dead row
+    // never takes the highlight, and Enter still fires past it.
+    alt_key(ws::input::keys::kA);
+    key(ws::input::keys::kDown);
+    key(ws::input::keys::kDown);
+    key(ws::input::keys::kDown);
+    key(ws::input::keys::kEnter);
+    CHECK(open == -1);
+    CHECK(ev.item == &kWalkItems[4]);
+
+    // Left at the root closes the whole chain - the same rule that
+    // climbs one level in a nested chain, applied where the root IS
+    // the deepest.
+    alt_key(ws::input::keys::kA);
+    CHECK(open == 0);
+    key(ws::input::keys::kLeft);
+    CHECK(open == -1);
+    CHECK(ev.item == nullptr);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("menu chain: the submenu rests open, the re-aim closes it") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    int open = -1;
+    MenuEvent ev;
+
+    const auto pass = [&](const ws::input::InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        ev = menu_bar(gui, layout, kDefaultChrome, "sub", kParentBar, 1,
+                      open);
+        layout.end_panel();
+        gui.end_frame();
+    };
+    // A parked pointer with the frame clock running: the rest clock
+    // reads dt_seconds, which hand-built frames leave at 0.
+    const auto hover = [&](float x, float y, float dt) {
+        ws::input::InputFrame frame = snap(x, y);
+        frame.dt_seconds = dt;
+        pass(frame);
+    };
+
+    // Open the menu: the parent row "parent" is row 0 at (12,36,60,24)
+    // (the window is 84 wide - the marker room for the diamond adds
+    // padding + 12 to the label columns).
+    pass(snap(15.0f, 12.0f, false, true, true));
+    CHECK(open == 0);
+
+    // 0.2s of rest is short of menu_open_delay (0.25): the child never
+    // opened, so a click at the child's row spot (right of the root
+    // window, x 96 > 84) is an OUTSIDE press - the chain closes and
+    // nothing fires. That click is the discriminator: had the delay
+    // misfired open, "deep" would fire.
+    hover(42.0f, 48.0f, 0.1f);
+    hover(42.0f, 48.0f, 0.1f);
+    ev = {};
+    pass(snap(96.0f, 60.0f, false, true, true));
+    CHECK(open == -1);
+    CHECK(ev.item == nullptr);
+
+    // Reopen; 0.3s of rest opens the child the SAME frame, anchored
+    // right of the parent row: (72,36,48,48), its row at (84,48,24,24).
+    // The click there fires through - the root level's outside-press
+    // exempts every deeper window of its own chain.
+    pass(snap(15.0f, 12.0f, false, true, true));
+    hover(42.0f, 48.0f, 0.3f);
+    ev = {};
+    pass(snap(96.0f, 60.0f, false, true, true));
+    CHECK(open == -1);
+    REQUIRE(ev.item != nullptr);
+    CHECK(ev.item == &kSubDeep[0]);
+    CHECK(ev.menu == 0);
+
+    // The re-aim: reopen and rest the child open, then slide the
+    // pointer onto "plain" (row 1, (12,60,60,24)). The highlight leaves
+    // the parent and the child closes the same frame - the click at
+    // the now-dead child spot closes the whole chain instead.
+    pass(snap(15.0f, 12.0f, false, true, true));
+    hover(42.0f, 48.0f, 0.3f);
+    hover(42.0f, 72.0f, 0.0f);
+    ev = {};
+    pass(snap(96.0f, 60.0f, false, true, true));
+    CHECK(open == -1);
+    CHECK(ev.item == nullptr);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("menu rows: a separator and a disabled row never fire; the "
+          "disabled reason is a tooltip") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    int open = -1;
+    MenuEvent ev;
+
+    const auto pass = [&](const ws::input::InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        ev = menu_bar(gui, layout, kDefaultChrome, "rows", kWalkBar, 1,
+                      open);
+        layout.end_panel();
+        gui.end_frame();
+    };
+    const auto hover = [&](float x, float y, float dt) {
+        ws::input::InputFrame frame = snap(x, y);
+        frame.dt_seconds = dt;
+        pass(frame);
+    };
+
+    pass(snap(15.0f, 12.0f, false, true, true));
+    CHECK(open == 0);
+
+    // The separator (row 1, centered (27,72)): a dead-center click
+    // claims nothing, fires nothing, closes nothing - the menu holds.
+    ev = {};
+    pass(snap(27.0f, 72.0f, false, true, true));
+    CHECK(open == 0);
+    CHECK(ev.item == nullptr);
+
+    // The disabled row (row 3, centered (27,120)): the click lands
+    // inside the window and dies there - nothing claims a dead row.
+    ev = {};
+    pass(snap(27.0f, 120.0f, false, true, true));
+    CHECK(open == 0);
+    CHECK(ev.item == nullptr);
+
+    // A rest on the disabled row past tooltip_delay hands the caller's
+    // reason to the tooltip scope - chrome: it claims nothing, so the
+    // menu holds through it.
+    hover(27.0f, 120.0f, 0.5f);
+    hover(27.0f, 120.0f, 0.5f);
+    CHECK(open == 0);
+
+    // And the menu is still live after all of it: "four" (row 4,
+    // centered (27,144)) fires.
+    ev = {};
+    pass(snap(27.0f, 144.0f, false, true, true));
+    CHECK(open == -1);
+    REQUIRE(ev.item != nullptr);
+    CHECK(ev.item == &kWalkItems[4]);
+    CHECK(ev.menu == 0);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("menu chain: Escape climbs one level a press; an outside press "
+          "closes and passes through") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    int open = -1;
+    MenuEvent ev;
+    int catches = 0;
+
+    // The bar on row 0, a fill-width "catch" button on row 1 - at
+    // (0,24,400,24), center (200,36): the press-through witness.
+    const auto pass = [&](const ws::input::InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        ev = menu_bar(gui, layout, kDefaultChrome, "esc", kParentBar, 1,
+                      open);
+        if (button(gui, layout, kDefaultChrome, "catch", -1.0f)) {
+            ++catches;
+        }
+        layout.end_panel();
+        gui.end_frame();
+    };
+    const auto hover = [&](float x, float y, float dt) {
+        ws::input::InputFrame frame = snap(x, y);
+        frame.dt_seconds = dt;
+        pass(frame);
+    };
+
+    // Open the root and rest the child open (two levels).
+    pass(snap(15.0f, 12.0f, false, true, true));
+    hover(42.0f, 48.0f, 0.3f);
+    CHECK(open == 0);
+
+    // Escape is the shared arbitration: the press frame claims, the
+    // next quiet frame reads the win - the DEEPEST level's claim, so
+    // one press closes the CHILD and the root holds.
+    ws::input::InputFrame esc = snap(400.0f, 300.0f);
+    esc.key_pressed[static_cast<std::size_t>(ws::input::keys::kEscape)] =
+        true;
+    pass(esc);
+    CHECK(open == 0);  // the press frame closed nothing
+    pass(snap(400.0f, 300.0f));
+    CHECK(open == 0);  // the child closed, the root holds
+
+    // Probe: the child's row spot is dead now - the click there is an
+    // outside press, the whole chain closes, and it is off the catch
+    // button's row, so nothing beneath fires either.
+    ev = {};
+    pass(snap(96.0f, 60.0f, false, true, true));
+    CHECK(open == -1);
+    CHECK(ev.item == nullptr);
+    CHECK(catches == 0);
+
+    // The root alone: one Escape cycle closes it whole.
+    pass(snap(15.0f, 12.0f, false, true, true));
+    CHECK(open == 0);
+    pass(esc);
+    CHECK(open == 0);
+    pass(snap(400.0f, 300.0f));
+    CHECK(open == -1);
+
+    // The outside press closes on the PRESS frame and passes through:
+    // the click at (200,36) is outside the menu window and on the
+    // catch button - the menu closes AND the button sees its click.
+    pass(snap(15.0f, 12.0f, false, true, true));
+    CHECK(open == 0);
+    ev = {};
+    pass(snap(200.0f, 36.0f, false, true, true));
+    CHECK(open == -1);
+    CHECK(ev.item == nullptr);
+    CHECK(catches == 1);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("context menu: the right-click opens at the point, a re-trigger "
+          "moves it") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    bool open = false;
+    MenuEvent ev;
+
+    const Rect region{0.0f, 0.0f, 400.0f, 300.0f};
+    const auto pass = [&](const ws::input::InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        ev = context_menu(gui, layout, kDefaultChrome, "ctx", region,
+                          kCtxItems, 2, open);
+        layout.end_panel();
+        gui.end_frame();
+    };
+    // snap() writes button 0 only: the right press is the second
+    // button's own edge.
+    const auto right = [&](float x, float y) {
+        ws::input::InputFrame frame = snap(x, y);
+        frame.mouse_pressed[1] = true;
+        pass(frame);
+    };
+
+    // Right at (150,150): the window anchors AT the point -
+    // (150,150,54,72), rows centered (177,174) and (177,198).
+    right(150.0f, 150.0f);
+    CHECK(open);
+    CHECK(ev.item == nullptr);
+
+    // A row click fires through the chain with .menu -1: the context
+    // root owns no bar index.
+    ev = {};
+    pass(snap(177.0f, 174.0f, false, true, true));
+    CHECK(!open);
+    REQUIRE(ev.item != nullptr);
+    CHECK(ev.item == &kCtxItems[0]);
+    CHECK(ev.menu == -1);
+
+    // Open at (100,120) - row 0 there is centered (127,144).
+    right(100.0f, 120.0f);
+    CHECK(open);
+
+    // A right press at ANOTHER point MOVES the menu (the re-trigger is
+    // exempt from its own close); the new window leaves the old spot
+    // dead - a click there closes the whole chain with no event.
+    right(200.0f, 100.0f);
+    CHECK(open);
+    ev = {};
+    pass(snap(127.0f, 144.0f, false, true, true));
+    CHECK(!open);
+    CHECK(ev.item == nullptr);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("context menu: a still long-press opens it, a wander cancels "
+          "the watch") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    bool open = false;
+    MenuEvent ev;
+
+    const Rect region{0.0f, 100.0f, 300.0f, 100.0f};
+    const auto pass = [&](const ws::input::InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        ev = context_menu(gui, layout, kDefaultChrome, "ctxb", region,
+                          kCtxItems, 2, open);
+        layout.end_panel();
+        gui.end_frame();
+    };
+    // The touch spellings: a fresh contact (the edge kept), a held
+    // move (the helper clears the edge) and the lift.
+    const auto touch = [&](float x, float y, float dt, bool fresh,
+                           bool lifted) {
+        ws::input::InputFrame frame =
+            touch_frame({TouchSnap{0u, x, y, fresh, lifted}});
+        frame.dt_seconds = dt;
+        pass(frame);
+    };
+
+    // The press arms the watch (the arm frame's own dt never counts -
+    // the age starts at zero); one 0.3 hold is short of
+    // long_press_time (0.5) and the second crosses it: the menu opens
+    // at the finger, the finger spent so the lift that follows
+    // clicks nothing beneath it.
+    touch(50.0f, 150.0f, 0.3f, true, false);
+    CHECK(!open);
+    touch(50.0f, 150.0f, 0.3f, false, false);
+    CHECK(!open);  // 0.3: short of the 0.5 press-and-hold
+    touch(50.0f, 150.0f, 0.3f, false, false);
+    CHECK(open);  // 0.6: past it
+    touch(50.0f, 150.0f, 0.0f, false, true);
+    CHECK(open);  // the spent finger's lift closes nothing
+
+    // Close it for the wander round: a click outside the window
+    // (50..104) but inside the panel.
+    ev = {};
+    pass(snap(250.0f, 150.0f, false, true, true));
+    CHECK(!open);
+
+    // The wander: 30px is past drag_threshold (8), the watch dies, and
+    // however long the finger then holds it never re-arms - only a
+    // fresh press edge does.
+    touch(50.0f, 150.0f, 0.3f, true, false);
+    touch(80.0f, 150.0f, 0.0f, false, false);
+    touch(80.0f, 150.0f, 0.5f, false, false);
+    CHECK(!open);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("toast store: slots, eviction by age, expiry on the clock") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    Toasts toasts;
+
+    // The aging frame: no renderer, no pointer - draw_toasts still
+    // ages every live slot on the frame clock (an empty frame puts
+    // every toast past its top, so nothing draws and nothing claims).
+    const auto age = [&](float dt) {
+        ws::input::InputFrame frame;
+        frame.dt_seconds = dt;
+        gui.begin_frame(frame);
+        (void)draw_toasts(gui, kDefaultChrome, toasts);
+        gui.end_frame();
+    };
+
+    // --- the slots -------------------------------------------------------
+    CHECK(toasts.push({"a", ToastSeverity::info, nullptr, 5.0f}) == 0);
+    CHECK(toasts.push({"b", ToastSeverity::info, nullptr, 5.0f}) == 1);
+    CHECK(toasts.push({"c", ToastSeverity::info, nullptr, 5.0f}) == 2);
+    CHECK(toasts.count() == 3);
+    toasts.dismiss(1);
+    CHECK(toasts.count() == 2);
+    toasts.dismiss(1);  // a stale id: a no-op
+    toasts.dismiss(-1);  // out of range: a no-op
+    toasts.dismiss(99);
+    CHECK(toasts.count() == 2);
+    CHECK(toasts.push({"d", ToastSeverity::info, nullptr, 5.0f}) == 1);
+    CHECK(toasts.count() == 3);
+    toasts.clear();
+    CHECK(toasts.count() == 0);
+
+    // --- the flood: the OLDEST drops ------------------------------------
+    // A(0) ages alone first, then B(1), then the fill: the ninth push
+    // evicts A (age 4.0 - the greatest), the tenth evicts B (1.0, the
+    // next greatest): the AGE rules, not the slot order. Sticky
+    // (duration 0) so nothing expires along the way.
+    const auto sticky = [](const char* text) {
+        return Toast{text, ToastSeverity::info, nullptr, 0.0f};
+    };
+    (void)toasts.push(sticky("A"));
+    age(3.0f);
+    (void)toasts.push(sticky("B"));
+    age(1.0f);
+    for (int i = 0; i < 6; ++i) {
+        (void)toasts.push(sticky("fill"));
+    }
+    CHECK(toasts.count() == 8);
+    CHECK(toasts.push(sticky("I")) == 0);
+    CHECK(toasts.count() == 8);  // the eviction replaced, never added
+    CHECK(toasts.push(sticky("J")) == 1);
+    CHECK(toasts.count() == 8);
+
+    // The tie: two aged TOGETHER (3.5 apiece), the flood drops the
+    // earlier push - the lowest slot among equals.
+    toasts.clear();
+    (void)toasts.push(sticky("A"));
+    (void)toasts.push(sticky("B"));
+    age(3.5f);
+    for (int i = 0; i < 6; ++i) {
+        (void)toasts.push(sticky("fill"));
+    }
+    CHECK(toasts.push(sticky("I")) == 0);
+    CHECK(toasts.push(sticky("J")) == 1);
+
+    // --- the clock ---------------------------------------------------------
+    toasts.clear();
+    (void)toasts.push({"gone", ToastSeverity::info, nullptr, 2.0f});
+    age(1.0f);
+    CHECK(toasts.count() == 1);
+    age(1.0f);  // exactly at the duration: gone
+    CHECK(toasts.count() == 0);
+    (void)toasts.push({"stay", ToastSeverity::info, nullptr, 0.0f});
+    age(10.0f);
+    CHECK(toasts.count() == 1);  // a sticky toast never expires
+}
+
+TEST_CASE("toast stack: the youngest at the corner, the action fires, "
+          "the body dismisses silently") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    Toasts toasts;
+    int fired = -1;
+
+    const auto pass = [&](const ws::input::InputFrame& frame) {
+        gui.begin_frame(frame);
+        fired = draw_toasts(gui, kDefaultChrome, toasts);
+        gui.end_frame();
+    };
+
+    // "first" (54 wide) pushed before "second" (60): the same-age tie
+    // puts the LATER push at the corner - second at (728,552,60,48),
+    // first riding up at (734,496,54,48).
+    (void)toasts.push({"first", ToastSeverity::info, nullptr, 4.0f});
+    (void)toasts.push({"second", ToastSeverity::info, nullptr, 4.0f});
+    pass(snap(400.0f, 300.0f));
+    CHECK(toasts.count() == 2);
+
+    // The discriminator: x 731 is inside second's corner rect but LEFT
+    // of where a cornered "first" would start (734) - the click
+    // dismisses second and only second.
+    pass(snap(731.0f, 576.0f, false, true, true));
+    CHECK(toasts.count() == 1);
+    // The survivor, now alone, took the corner (734,552,54,48).
+    pass(snap(760.0f, 576.0f, false, true, true));
+    CHECK(toasts.count() == 0);
+
+    // --- the action toast -------------------------------------------------
+    // "file deleted" + "undo": the toast is 152 wide, the undo button
+    // at (728,564,48,24) - a real button, click and all.
+    (void)toasts.push({"file deleted", ToastSeverity::info, "undo",
+                       4.0f});
+    pass(snap(400.0f, 300.0f));
+    CHECK(toasts.count() == 1);
+    pass(snap(752.0f, 576.0f, false, true, true));
+    CHECK(fired == 0);
+    CHECK(toasts.count() == 0);
+
+    // A body click (left of the button) is a DISMISSAL, never an
+    // action: the toast goes, the return stays quiet.
+    (void)toasts.push({"file deleted", ToastSeverity::info, "undo",
+                       4.0f});
+    pass(snap(400.0f, 300.0f));
+    pass(snap(640.0f, 555.0f, false, true, true));
+    CHECK(fired == -1);
+    CHECK(toasts.count() == 0);
+
+    // The touch's body press dismisses the same way (the snap's
+    // `pressed` carries the fresh edge - the helper clears it for
+    // held contacts).
+    (void)toasts.push({"file deleted", ToastSeverity::info, "undo",
+                       4.0f});
+    pass(snap(400.0f, 300.0f));
+    pass(touch_frame({TouchSnap{0u, 640.0f, 555.0f, true}}));
+    CHECK(fired == -1);
+    CHECK(toasts.count() == 0);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("toast stack: the action works above a modal veil, the veil "
+          "blocks what sits beneath") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    Toasts toasts;
+    bool open = true;
+    DialogEvent ev;
+    int beneath = 0;
+    int fired = -1;
+
+    (void)toasts.push({"file deleted", ToastSeverity::info, "undo",
+                       4.0f});
+
+    // The modal FIRST - the veil is frame-wide from the scope's open,
+    // so the widget beneath it is blocked on the very frame it rises.
+    const auto pass = [&](const ws::input::InputFrame& frame) {
+        gui.begin_frame(frame);
+        ev = modal_dialog(gui, kDefaultChrome, "veil", "Save",
+                          DialogButtons::ok_cancel, open, 280.0f);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        if (button(gui, layout, kDefaultChrome, "beneath", -1.0f)) {
+            ++beneath;
+        }
+        layout.end_panel();
+        fired = draw_toasts(gui, kDefaultChrome, toasts);
+        gui.end_frame();
+    };
+
+    pass(snap(400.0f, 300.0f));  // the settle: the veil is up
+
+    // The toast stratum (50) sits above the veil (40): the undo click
+    // lands while the world beneath is blocked - and the dialog holds.
+    pass(snap(752.0f, 576.0f, false, true, true));
+    CHECK(fired == 0);
+    CHECK(toasts.count() == 0);
+    CHECK(open);
+    CHECK(ev.button == -1);
+
+    // The veil's own block: the click at (10,12) is on the beneath
+    // button and it never fires - and a modal never closes on an
+    // outside press, blocking IS the point.
+    pass(snap(10.0f, 12.0f, false, true, true));
+    CHECK(beneath == 0);
+    CHECK(open);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("modal dialog: Enter confirms after the opening frame, Escape "
+          "answers the negative") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    ws::input::InputFrame enter = snap(400.0f, 300.0f);
+    enter.key_pressed[static_cast<std::size_t>(ws::input::keys::kEnter)] =
+        true;
+    ws::input::InputFrame esc = snap(400.0f, 300.0f);
+    esc.key_pressed[static_cast<std::size_t>(ws::input::keys::kEscape)] =
+        true;
+    const ws::input::InputFrame quiet = snap(400.0f, 300.0f);
+
+    // Three distinct open flags: the Escape arbitration matches the
+    // winner by ADDRESS, so each phase claims its own.
+    bool okc_open = true;
+    bool ok_open = true;
+    bool bare_open = true;
+    const auto run = [&](const char* name, DialogButtons buttons,
+                         bool& open_ref,
+                         const ws::input::InputFrame& frame) {
+        gui.begin_frame(frame);
+        const DialogEvent event =
+            modal_dialog(gui, kDefaultChrome, name, "Title", buttons,
+                         open_ref, 360.0f);
+        gui.end_frame();
+        return event;
+    };
+
+    // The frame that opened it never confirms it - the was_open carry
+    // guards the host's own activating edge.
+    DialogEvent ev = run("d", DialogButtons::ok_cancel, okc_open, enter);
+    CHECK(okc_open);
+    CHECK(ev.button == -1);
+    CHECK(!ev.accepted);
+
+    // The next Enter confirms: the positive button, accepted true.
+    ev = run("d", DialogButtons::ok_cancel, okc_open, enter);
+    CHECK(!okc_open);
+    CHECK(ev.button == 0);
+    CHECK(ev.accepted);
+
+    // Escape: the press frame claims, the next quiet frame reads the
+    // win - the two-frame idiom every claimant shares - and the
+    // negative answers: button 1, accepted false.
+    okc_open = true;
+    (void)run("d", DialogButtons::ok_cancel, okc_open, quiet);  // settle
+    ev = run("d", DialogButtons::ok_cancel, okc_open, esc);
+    CHECK(okc_open);  // the press frame closed nothing
+    ev = run("d", DialogButtons::ok_cancel, okc_open, quiet);
+    CHECK(!okc_open);
+    CHECK(ev.button == 1);
+    CHECK(!ev.accepted);
+
+    // ok-only: Escape is a plain dismissal - there is no negative to
+    // fire.
+    (void)run("okonly", DialogButtons::ok, ok_open, quiet);
+    (void)run("okonly", DialogButtons::ok, ok_open, esc);
+    ev = run("okonly", DialogButtons::ok, ok_open, quiet);
+    CHECK(!ok_open);
+    CHECK(ev.button == -1);
+    CHECK(!ev.accepted);
+
+    // No buttons at all: the set that takes no keys and answers
+    // nothing - neither Escape nor Enter moves it.
+    (void)run("bare", DialogButtons::none, bare_open, quiet);
+    (void)run("bare", DialogButtons::none, bare_open, esc);
+    (void)run("bare", DialogButtons::none, bare_open, quiet);
+    CHECK(bare_open);
+    ev = run("bare", DialogButtons::none, bare_open, enter);
+    CHECK(bare_open);
+    CHECK(ev.button == -1);
+    CHECK(!ev.accepted);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("modal dialog: the stock buttons answer by click") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    bool open = true;
+    const ws::input::InputFrame quiet = snap(400.0f, 300.0f);
+
+    const auto pass = [&](const ws::input::InputFrame& frame) {
+        gui.begin_frame(frame);
+        const DialogEvent event =
+            modal_dialog(gui, kDefaultChrome, "clicks", "Title",
+                         DialogButtons::ok_cancel, open, 360.0f);
+        gui.end_frame();
+        return event;
+    };
+
+    // 360 wide, no body: (220,260,360,80), and the UNIFORM button set
+    // (Cancel, the widest, sets 60 for both) centers - OK at
+    // (336,304,60,24), Cancel at (404,304,60,24).
+    (void)pass(quiet);  // the settle: the window measures its rows
+    DialogEvent ev = pass(snap(366.0f, 316.0f, false, true, true));
+    CHECK(!open);
+    CHECK(ev.button == 0);
+    CHECK(ev.accepted);
+
+    open = true;
+    (void)pass(quiet);
+    ev = pass(snap(434.0f, 316.0f, false, true, true));
+    CHECK(!open);
+    CHECK(ev.button == 1);
+    CHECK(!ev.accepted);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("statics: the spinner, the indeterminate bar and the status "
+          "strip") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+
+    const auto pass = [&](float dt) {
+        ws::input::InputFrame frame = snap(400.0f, 300.0f);
+        frame.dt_seconds = dt;
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        spinner(gui, layout, kDefaultChrome, "busy");
+        progress_indeterminate(gui, layout, kDefaultChrome, "scan",
+                               120.0f);
+        layout.end_panel();
+        gui.end_frame();
+    };
+    // Two frames of the busy pair: the phases advance on the frame
+    // clock and the draws land in the batch - a smoke, nothing more.
+    pass(1.0f / 60.0f);
+    pass(1.0f / 60.0f);
+
+    // The status strip: full width, one control height, pinned to the
+    // frame's bottom - and it takes no row in any flow.
+    const Rect bar = status_bar(kDefaultChrome, "ready");
+    CHECK(bar.x == 0.0f);
+    CHECK(bar.y == 576.0f);
+    CHECK(bar.width == 800.0f);
+    CHECK(bar.height == 24.0f);
+
+    r.end();
+    r.frame_end();
+    // Read while the renderer is still active - detached, the queries
+    // answer zero by the drop-safe rule.
+    const auto s = stats();
+    set_active(nullptr);
+    CHECK(s.commands > 0);
+    CHECK(s.dropped_quads == 0);
+}
+
+TEST_CASE("the trailing disabled lock: combo, text input and button all "
+          "take it") {
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    const char* items[] = {"aa", "bb"};
+    int selected = 0;
+    bool open = true;  // pre-latched: the lock must still close it
+    char buf[16] = "abc";
+    int combo_changes = 0;
+    int button_clicks = 0;
+    bool field_changed = false;
+
+    const auto pass = [&](const ws::input::InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        if (combo(gui, layout, kDefaultChrome, "c", items, 2, selected,
+                  open, 120.0f, true)) {
+            ++combo_changes;
+        }
+        field_changed = text_input(gui, layout, kDefaultChrome, "f", buf,
+                                   static_cast<int>(sizeof buf), 120.0f,
+                                   true);
+        if (button(gui, layout, kDefaultChrome, "dead", 120.0f, {}, true)) {
+            ++button_clicks;
+        }
+        layout.end_panel();
+        gui.end_frame();
+    };
+
+    // A disabled combo closes a pre-latched dropdown the frame it
+    // runs - the lock is not a mere look.
+    pass(snap(400.0f, 300.0f));
+    CHECK(!open);
+    CHECK(combo_changes == 0);
+    CHECK(selected == 0);
+
+    // The rows: combo (0,0,120,24), the field (0,24,120,24), the
+    // button (0,48,120,24). A held focus on the dead field drops and
+    // the typed key never lands in the buffer.
+    const WidgetId field = IdStack{}.id("f");
+    gui.set_focus(field);
+    ws::input::InputFrame typing = snap(60.0f, 36.0f, false, true, true);
+    typing.key_pressed[static_cast<std::size_t>(ws::input::keys::kX)] =
+        true;
+    pass(typing);
+    CHECK(!open);
+    CHECK(combo_changes == 0);
+    CHECK(selected == 0);
+    CHECK(field_changed == false);
+    CHECK(std::strcmp(buf, "abc") == 0);
+    CHECK(!gui.is_focused(field));
+
+    // The dead button: a click dead-center answers nothing.
+    pass(snap(60.0f, 60.0f, false, true, true));
+    CHECK(button_clicks == 0);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}

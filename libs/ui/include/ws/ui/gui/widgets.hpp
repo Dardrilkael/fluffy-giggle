@@ -647,6 +647,106 @@ bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
            const char* const* cells, int row_count,
            int* selected = nullptr, float width = -1.0f);
 
+// --- menus ------------------------------------------------------------------
+// Menus are data-driven: the caller owns a plain array of item structs
+// and re-describes it every frame, the same discipline as combo's item
+// list - a menu holds no state beyond what the context keeps (the open
+// chain, the highlight, the submenu timers), so the same array drives a
+// bar, a context menu and a submenu without the caller wiring anything.
+// What fires comes back as a MenuEvent pointing at the caller's own
+// MenuItem, read it the frame it arrives.
+
+// What a menu entry is.
+enum class MenuItemKind { action, check, radio, separator };
+
+// One menu entry, plain data with borrowed strings - the caller's
+// bytes, re-read each frame; keep them alive while the menu can draw
+// them. `label` carries the '&' mnemonic spelling: the character after
+// the first '&' is the mnemonic - underlined where menus draw it, and
+// Alt+letter opens the bar title carrying one; "&&" is a literal
+// ampersand. `icon` is the optional square an item draws inset, a
+// button's. `shortcut` is the right-aligned hint - plain text the host
+// supplies ("Ctrl+S"), never interpreted. A non-null `submenu` (with
+// its count) makes the item a parent: it opens a nested menu instead of
+// firing. `kind` picks the row's shape - action plain, check a box
+// like a checkbox's, radio the dot, separator a rule that ignores
+// every other field - and `checked` is the check/radio display state,
+// the caller's to own. `disabled` lays a dead row no click or key
+// reaches; `disabled_reason` is the tooltip a mouse rest shows on it.
+struct MenuItem {
+    const char* label = nullptr;
+    r2d::Sprite icon = {};
+    const char* shortcut = nullptr;
+    const MenuItem* submenu = nullptr;
+    int submenu_count = 0;
+    MenuItemKind kind = MenuItemKind::action;
+    bool checked = false;
+    bool disabled = false;
+    const char* disabled_reason = nullptr;
+};
+
+// One top-level menu of a bar: its title (an '&' mnemonic allowed,
+// like an item's label) and its item list.
+struct MenuDesc {
+    const char* title = nullptr;
+    const MenuItem* items = nullptr;
+    int count = 0;
+};
+
+// What a menu reports the frame an item activates: the item itself -
+// the caller's own MenuItem, by pointer - and the top-level menu that
+// held it (menu_bar's index into its MenuDesc array; context_menu
+// reports -1, its list having no parent). The event copies nothing.
+struct MenuEvent {
+    const MenuItem* item = nullptr;
+    int menu = -1;
+};
+
+// The menu bar: `menus` (count of them) laid as title rows flowing
+// left, `open` the caller's index of the open menu (-1 = none, where
+// the caller initializes it). The titles are focusable citizens - Tab
+// walks them, Enter/Space toggles the focused one - and Alt+mnemonic
+// opens the title carrying it from anywhere on the bar. A click opens
+// a menu below its title, placed by place_popup; hovering another
+// title while one is open switches to it. Items behave as MenuItem
+// documents, flush rows; a parent item opens its submenu to the right
+// after the mouse rests on it for theme.menu_open_delay (a touch opens
+// it at a tap, no delay), and the chain closes on a click outside, on
+// Escape - the topmost-overlay rule: the deepest open level first, each
+// level claiming its own - or on a choice. The keyboard walks the
+// deepest open menu: Up/Down move the highlight wrapping past
+// separators and disabled rows, Enter activates the highlighted item,
+// Right opens its submenu, Left closes the deepest one - and that menu
+// owns the whole cluster: nothing beneath the bar sees those keys, or
+// the typing, while a menu is open. A disabled item never highlights
+// and never fires; a mouse rest on one shows its `disabled_reason` as
+// a tooltip. Returns the activated item the frame it fires (.menu the
+// root menu's index) - check, radio and separator rows included in the
+// reporting contract: the caller owns the state they display, and a
+// separator never fires. v1 limits, deliberate: menu items are not
+// focusable citizens (the arrow walk is a menu's keyboard; Tab walks
+// only the titles), and a bar does not wrap - count menus to fit the
+// strip.
+MenuEvent menu_bar(GuiContext& gui, LayoutCursor& layout,
+                   const ChromeTheme& theme, const char* label,
+                   const MenuDesc* menus, int count, int& open);
+
+// The context menu: the popup that opens on right-click (mouse button
+// 1) or a touch long-press - held past theme.long_press_time without
+// wandering past theme.drag_threshold, the long-press-is-a-right-click
+// rule - inside `region`, at the press point. `open` is the caller's
+// bool; where the menu opened lives in the context's persistent state,
+// so it holds still while open. The item rows are menu_bar's own
+// renderer and rules - the keyboard walk, Escape through the
+// arbitration, the click-outside close, the submenu delays - and the
+// event reports the fired item with .menu at -1. A right-click while
+// one is open moves it; the press that opens a menu never also closes
+// it.
+MenuEvent context_menu(GuiContext& gui, LayoutCursor& layout,
+                       const ChromeTheme& theme, const char* label,
+                       const Rect& region, const MenuItem* items,
+                       int count, bool& open);
+
 // --- the modal dialog -------------------------------------------------------
 // The one-call overlay: a centered modal window the helper owns end to
 // end - veil, panel, title, body, buttons, the Enter/Esc semantics -
@@ -693,5 +793,75 @@ DialogEvent modal_dialog(GuiContext& gui, const ChromeTheme& theme,
                          const std::function<void(GuiContext&, LayoutCursor&,
                                                   const ChromeTheme&)>& body =
                              {});
+
+// --- toasts -----------------------------------------------------------------
+// The notification stratum: transient messages that stack above
+// EVERYTHING - the toast layer sits above the modal veil, so a toast
+// stays visible and its action stays clickable while a dialog blocks
+// the world beneath. The host owns the store and pushes from its own
+// code; draw_toasts draws it once a frame.
+
+// The severity accent a toast wears - the theme's toast_* faces.
+enum class ToastSeverity { info, warning, error };
+
+// One notification, plain data with borrowed strings: the caller's
+// bytes, re-read every frame the toast draws - keep them alive past
+// clear(). `action` (optional) is a real button the toast lays; its
+// click dismisses the toast and reports the slot through draw_toasts'
+// return - a click anywhere on the body dismisses SILENTLY, so an
+// app's action reply never fires on a mere dismissal. `duration` is
+// the seconds a toast lives once shown; zero or less is sticky, and
+// only a click or Toasts::dismiss removes it.
+struct Toast {
+    const char* text = nullptr;
+    ToastSeverity severity = ToastSeverity::info;
+    const char* action = nullptr;
+    float duration = 4.0f;
+};
+
+// The host-owned toast store. Fixed slots: push past the cap drops the
+// OLDEST toast and returns its slot - the flood policy, warned once
+// per process; a notification stack never grows without bound, and the
+// drop is the point, not a failure. Slot ids are stable from push to
+// dismiss. No GuiContext anywhere in the store: push from wherever the
+// app learns the news; only draw_toasts touches the context.
+struct Toasts {
+    // Enqueues `toast`; returns its slot id.
+    int push(const Toast& toast);
+    // Removes one toast by its slot id (a stale id is a no-op).
+    void dismiss(int slot);
+    // Removes every toast.
+    void clear();
+    // The live count.
+    int count() const;
+
+    // draw_toasts ages and lays the slots: the store's one consumer,
+    // granted the internals so the public surface stays
+    // push/dismiss/clear/count.
+    friend int draw_toasts(GuiContext&, const ChromeTheme&, Toasts&, float);
+
+private:
+    static constexpr int kMaxToasts = 8;
+    struct Slot {
+        Toast toast;
+        float age = 0.0f;  // seconds since push, drawn down against duration
+        bool live = false;
+    };
+    std::array<Slot, kMaxToasts> slots_{};
+    int live_count_ = 0;
+};
+
+// Draws the store's live toasts, bottom-right of the frame, stacking
+// upward newest-nearest-the-corner, `bottom_clearance` px clear of the
+// bottom edge (a status bar's height). Takes no row in any flow - call
+// it from wherever, once a frame. Each toast is a panel wearing its
+// severity accent as a left band, its text, and - when it carries one
+// - its action button: a real, focusable, clickable button at the
+// toast stratum, which sits above the modal veil, so it works while a
+// dialog is up. A click on the body dismisses silently; the age runs
+// down on the frame clock and the toast vanishes when it runs out.
+// Returns the slot whose action fired this frame, -1 when none did.
+int draw_toasts(GuiContext& gui, const ChromeTheme& theme, Toasts& toasts,
+                float bottom_clearance = 0.0f);
 
 }  // namespace ws::ui::gui

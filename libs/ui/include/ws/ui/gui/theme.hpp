@@ -26,6 +26,14 @@ struct ChromeTheme {
     // input rules already enforce, made visible. Not dim() territory:
     // it is its own face, never scaled or dimmed.
     std::uint32_t veil = r2d::rgba(0, 0, 0, 96);
+    // The toast severities: the accent a toast wears with its text -
+    // the action button's face and any severity mark it draws. The
+    // toast body itself reuses panel_bg + border, chrome like any
+    // panel; the severities are saturated enough to read on both stock
+    // themes.
+    std::uint32_t toast_info = r2d::rgba(72, 132, 192);
+    std::uint32_t toast_warning = r2d::rgba(200, 150, 60);
+    std::uint32_t toast_error = r2d::rgba(190, 80, 70);
 
     // Metrics, gui-space pixels.
     float control_height = 24.0f;
@@ -117,6 +125,24 @@ struct ChromeTheme {
 // The stock look. constexpr, so a custom theme starts from it with
 // designated member overrides and stays a compile-time value.
 inline constexpr ChromeTheme kDefaultChrome{};
+
+// The light stock theme - same metrics, a daylight face set: the dark
+// palette with every color flipped (pale chrome, dark text, a gray
+// veil instead of a black one). Aggregate-initialized through the nine
+// faces, so the toast severities keep their defaults and the metrics
+// and font stay exactly what kDefaultChrome{} leaves them - scale it
+// and install a font the same way.
+inline constexpr ChromeTheme kLightChrome{
+    r2d::rgba(240, 240, 244),    // panel_bg
+    r2d::rgba(210, 212, 216),    // control_bg
+    r2d::rgba(190, 193, 198),    // control_hovered
+    r2d::rgba(90, 130, 200),     // control_pressed
+    r2d::rgba(225, 226, 230),    // control_disabled
+    r2d::rgba(40, 140, 80),      // control_on
+    r2d::rgba(30, 32, 38),       // text
+    r2d::rgba(0, 0, 0, 40),      // border
+    r2d::rgba(96, 96, 96, 110),  // veil
+};
 
 // Multiplies a packed 0xRRGGBBAA color's alpha channel - the disabled
 // look's one helper. control_disabled covers a disabled widget's FACE

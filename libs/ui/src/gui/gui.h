@@ -12,11 +12,14 @@ namespace ws::ui::gui {
 namespace detail {
 
 // The id-stack and panel-stack overflow warn-once flags (gui_id.cpp /
-// gui_layout.cpp own the definitions). External linkage solely so
+// gui_layout.cpp own the definitions), and the toast-store cap's
+// (widgets_toasts.cpp). External linkage solely so
 // reset_warn_once() - defined in gui_context.cpp - can re-arm them;
 // single-threaded like every gui global.
 extern bool id_overflow_warned;
 extern bool panel_overflow_warned;
+extern bool toast_overflow_warned;
+extern bool menu_overflow_warned;
 
 }  // namespace ws::ui::gui::detail
 
