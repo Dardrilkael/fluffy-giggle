@@ -27,3 +27,9 @@ add_subdirectory(net)
 # Box2D (2D) + Jolt (3D), both private to src/backend and both fetched
 # unconditionally - the 2D and 3D surfaces build identically on Android.
 add_subdirectory(physics)
+
+# ws::jobs is the headless job system (nextplan stage 8): a Result-shaped
+# pool with priorities, cooperative cancellation and coalesced progress +
+# completions marshalled to the owner thread. Pure std + ws::core - no
+# third-party anywhere; consumers (ws::ui first) drain() once per frame.
+add_subdirectory(jobs)
