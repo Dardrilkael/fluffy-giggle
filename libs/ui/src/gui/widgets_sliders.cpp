@@ -19,12 +19,15 @@ namespace {
 // The body both sliders share: they differ only in the keyboard step
 // (1% of the range for a float, 1 for an int), which rides through here
 // so the public pair keeps its signatures. The citizenship ladder rides
-// begin_row like every row widget; the arrows step the focused slider,
-// and the disabled look dims the fill, the handle and the label as one.
+// begin_row like every row widget - the trailing `disabled` sugar
+// included, the lock begin_row hands state() - and the arrows step the
+// focused slider, with the disabled look dimming the fill, the handle
+// and the label as one.
 bool slider_impl(GuiContext& gui, LayoutCursor& layout,
                  const ChromeTheme& theme, const char* label, float& value,
-                 float min, float max, float width, float key_step) {
-    const Row row = begin_row(gui, layout, theme, label, width);
+                 float min, float max, float width, float key_step,
+                 bool disabled) {
+    const Row row = begin_row(gui, layout, theme, label, width, disabled);
     const WidgetId id = row.id;
     const Rect& rect = row.rect;
     const WidgetResult& result = row.result;
@@ -134,20 +137,21 @@ bool slider_impl(GuiContext& gui, LayoutCursor& layout,
 
 bool slider_float(GuiContext& gui, LayoutCursor& layout,
                   const ChromeTheme& theme, const char* label, float& value,
-                  float min, float max, float width) {
+                  float min, float max, float width, bool disabled) {
     // The float keyboard step: 1% of the range per arrow press.
     return slider_impl(gui, layout, theme, label, value, min, max, width,
-                       (max - min) / 100.0f);
+                       (max - min) / 100.0f, disabled);
 }
 
 bool slider_int(GuiContext& gui, LayoutCursor& layout,
                 const ChromeTheme& theme, const char* label, int& value,
-                int min, int max, float width) {
+                int min, int max, float width, bool disabled) {
     float v = static_cast<float>(value);
     // The int keyboard step: 1 per arrow press.
     const bool changed = slider_impl(gui, layout, theme, label, v,
                                      static_cast<float>(min),
-                                     static_cast<float>(max), width, 1.0f);
+                                     static_cast<float>(max), width, 1.0f,
+                                     disabled);
     // Written only on a real change: a huge int that rounds through float
     // must not silently rewrite itself on idle frames.
     if (changed) {
@@ -158,8 +162,9 @@ bool slider_int(GuiContext& gui, LayoutCursor& layout,
 
 bool drag_float(GuiContext& gui, LayoutCursor& layout,
                const ChromeTheme& theme, const char* label, float& value,
-               float min, float max, float speed, float width) {
-    const Row row = begin_row(gui, layout, theme, label, width);
+               float min, float max, float speed, float width,
+               bool disabled) {
+    const Row row = begin_row(gui, layout, theme, label, width, disabled);
     const WidgetId id = row.id;
     const Rect& rect = row.rect;
     const WidgetResult& result = row.result;

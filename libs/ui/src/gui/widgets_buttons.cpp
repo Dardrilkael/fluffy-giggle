@@ -13,8 +13,9 @@
 namespace ws::ui::gui {
 
 bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
-            const char* label, float width, r2d::Sprite icon) {
-    const Row row = begin_row(gui, layout, theme, label, width);
+            const char* label, float width, r2d::Sprite icon,
+            bool disabled) {
+    const Row row = begin_row(gui, layout, theme, label, width, disabled);
     const WidgetId id = row.id;
     const Rect& rect = row.rect;
     const WidgetResult& result = row.result;
@@ -70,7 +71,7 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 }
 
 bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
-              const char* label, bool& value) {
+              const char* label, bool& value, bool disabled) {
     // The row auto-sizes: box, a gap, the label's DISPLAY advance - the
     // font's measure or the fontless per-char estimate, "##" suffixes
     // cut (they id the row, never size it); never clamped, so a label
@@ -82,7 +83,8 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     const LabelFit fit =
         fit_text(label, -1.0f, theme, scratch, sizeof(scratch));
     const Row row = begin_row(gui, layout, theme, label,
-                              theme.control_height + gap + fit.advance);
+                              theme.control_height + gap + fit.advance,
+                              disabled);
     const WidgetId id = row.id;
     const Rect& rect = row.rect;
     const WidgetResult& result = row.result;
@@ -134,7 +136,7 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 }
 
 bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
-           const char* label, int& value, int this_option) {
+           const char* label, int& value, int this_option, bool disabled) {
     // The row auto-sizes like a checkbox's: dot, a gap, the label's
     // DISPLAY advance ("##" suffixes id the row, never size it).
     const float gap = theme.spacing;
@@ -142,7 +144,8 @@ bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     const LabelFit fit =
         fit_text(label, -1.0f, theme, scratch, sizeof(scratch));
     const Row row = begin_row(gui, layout, theme, label,
-                              theme.control_height + gap + fit.advance);
+                              theme.control_height + gap + fit.advance,
+                              disabled);
     const WidgetId id = row.id;
     const Rect& rect = row.rect;
     const WidgetResult& result = row.result;
@@ -197,7 +200,8 @@ bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 }
 
 bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
-                   const ChromeTheme& theme, const char* label, bool& value) {
+                   const ChromeTheme& theme, const char* label, bool& value,
+                   bool disabled) {
     // The row auto-sizes like a checkbox's: the pill (twice the height
     // wide, the height tall), a gap, the label's DISPLAY advance.
     const float gap = theme.spacing;
@@ -207,7 +211,7 @@ bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
     const LabelFit fit =
         fit_text(label, -1.0f, theme, scratch, sizeof(scratch));
     const Row row = begin_row(gui, layout, theme, label,
-                              track_w + gap + fit.advance);
+                              track_w + gap + fit.advance, disabled);
     const WidgetId id = row.id;
     const Rect& rect = row.rect;
     const WidgetResult& result = row.result;

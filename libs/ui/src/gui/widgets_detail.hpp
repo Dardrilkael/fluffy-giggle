@@ -226,6 +226,44 @@ inline void panel_chrome(const Rect& bounds, const ChromeTheme& theme) {
                    std::max(0.0f, bounds.height - 2.0f), theme.panel_bg);
 }
 
+// The overlay panel scope every stratum-raised window shares - the
+// popup scope, the modal's panel half, and the menu windows: AFTER the
+// caller pushes its layer (and the modal paints its veil), this pushes
+// the clip ESCAPE at the bounds - r2d and the hit mirror push-for-push,
+// so a window hanging past its host panel's edge draws AND hit-tests
+// there - then the chrome, the content panel (`spacing` is the one
+// caller difference: the gui's own overlays flow their theme's, menu
+// windows lay their rows flush), the keyless wheel claim (an open
+// overlay eats the wheel over the panel beneath) and the content clip
+// pair. pop_overlay_panel pops exactly this, in reverse; the layer
+// push and its end stay with the caller (each end guards its own
+// stratum before popping anything).
+inline void push_overlay_panel(GuiContext& gui, LayoutCursor& layout,
+                               const ChromeTheme& theme, const char* label,
+                               const Rect& bounds, float spacing) {
+    r2d::push_clip_escape(bounds.x, bounds.y, bounds.width, bounds.height);
+    gui.push_hit_clip_escape(bounds);
+    panel_chrome(bounds, theme);
+    const Rect content =
+        layout.begin_panel(bounds, theme.padding, spacing);
+    gui.register_wheel_claim(bounds, nullptr);
+    r2d::push_clip(content.x, content.y, content.width, content.height);
+    gui.push_hit_clip(content);
+    gui.ids().push(label);
+}
+
+// push_overlay_panel's matching pop. Unconditional by design: the
+// overlay ends all guard on their stratum first, so a stray pop cannot
+// eat an outer scope.
+inline void pop_overlay_panel(GuiContext& gui, LayoutCursor& layout) {
+    gui.ids().pop();
+    r2d::pop_clip();
+    gui.pop_hit_clip();
+    layout.end_panel();
+    r2d::pop_clip();
+    gui.pop_hit_clip();
+}
+
 // --- the row idioms every citizen widget shares ---------------------------
 // The same moves, spelled once: the citizenship ladder (begin_row), the
 // fill-width resolve, the Enter/Space edge, the focus ring, the disabled
@@ -358,15 +396,20 @@ struct Row {
 // The ladder as one call. `width` keeps LayoutCursor's own contract:
 // negative fills the rest of the line; the auto-sized rows (checkbox,
 // radio, toggle) pass their computed width, which the resolve leaves
-// untouched.
+// untouched. `disabled` is the per-widget sugar: the row skips the
+// focusable registration (Tab walks past a dead row) and hands state()
+// the lock directly - the same Disabled state the ambient scope drives,
+// one widget at a time.
 inline Row begin_row(GuiContext& gui, LayoutCursor& layout,
                      const ChromeTheme& theme, const char* label,
-                     float width) {
+                     float width, bool disabled = false) {
     resolve_width(width, layout);
     const WidgetId id = gui.ids().id(label);
     const Rect rect = layout.next(width, theme.control_height);
-    gui.register_focusable(id);
-    return {id, rect, gui.state(id, rect)};
+    if (!disabled) {
+        gui.register_focusable(id);
+    }
+    return {id, rect, gui.state(id, rect, disabled)};
 }
 
 }  // namespace ws::ui::gui

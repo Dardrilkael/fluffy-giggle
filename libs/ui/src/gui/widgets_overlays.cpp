@@ -1,7 +1,9 @@
 // ws::ui::gui widget functions, one family per file (src/gui/CLAUDE.md):
 // the overlay strata - popup, tooltip and modal, the scopes above the
 // panel flow: the layer push, the clip escape, and for the modal the
-// veil that owns every claim beneath it.
+// veil that owns every claim beneath it. This file also owns the
+// placement arithmetic every overlay shares (place_popup) and the
+// tooltip pair - the hover clock and the folded one-liner.
 
 #include "widgets_detail.hpp"
 
@@ -9,10 +11,50 @@
 
 namespace ws::ui::gui {
 
+Rect place_popup(const Rect& anchor, float width, float height,
+                 PopupAnchor side) {
+    const r2d::FrameSize frame = r2d::frame_size();
+    // The frame clamps the SIZE first: a window taller or wider than
+    // the frame lays filling what fits, never backwards.
+    width = std::max(0.0f, std::min(width, frame.width));
+    height = std::max(0.0f, std::min(height, frame.height));
+
+    float x = anchor.x;
+    float y = anchor.y;
+    if (side == PopupAnchor::below) {
+        y = anchor.y + anchor.height;  // under the bottom edge...
+        if (y + height > frame.height) {
+            y = anchor.y - height;  // ...unless the frame lacks the room
+        }
+    } else {
+        x = anchor.x + anchor.width;  // past the right edge, or
+        if (x + width > frame.width) {
+            x = anchor.x - width;  // flipped to the left when it cannot fit
+        }
+    }
+    // Both axes clamp into the frame last. The flip already chose the
+    // side; what remains is keeping the window on the frame - a
+    // degenerate anchor (a point) clamps from wherever it sits.
+    x = std::max(0.0f, std::min(x, frame.width - width));
+    y = std::max(0.0f, std::min(y, frame.height - height));
+    return {x, y, width, height};
+}
+
 bool begin_popup(GuiContext& gui, LayoutCursor& layout,
                  const ChromeTheme& theme, const char* label,
                  const Rect& anchor, const Rect& bounds, bool& open) {
     if (!open) {
+        return false;
+    }
+
+    // Escape from LAST frame's arbitration: end_frame resolved the
+    // claims and published the winner, and this entry is where the
+    // popup reads its win. The closing frame claims nothing - one
+    // Escape closes one level, and whatever holds it open (a bar's
+    // menu, a parent submenu) claims fresh the frame after, so the
+    // next press climbs the chain a link at a time.
+    if (gui.esc_won(&open)) {
+        open = false;
         return false;
     }
 
@@ -46,26 +88,16 @@ bool begin_popup(GuiContext& gui, LayoutCursor& layout,
         }
     }
 
-    // The stratum, then the panel scope. The clip pair ESCAPES at the
-    // bounds, r2d side and hit side at the same rect like every panel
-    // clip: the popup hangs off a widget inside a panel (whose clip pair
-    // is active at this call), and it must draw AND hit-test past its
-    // host's hole - a dropdown at the host's bottom edge would shear off
-    // and go unclickable there otherwise. The content pair then nests
-    // against the escaped bounds as usual.
+    // The stratum, then this frame's Escape claim - AFTER the layer
+    // push, so the arbitration records the popup's stratum, the same
+    // value the hit rules and the draw order both speak - then the
+    // shared overlay panel scope (the clip escapes, chrome, the wheel
+    // claim, the content clips and the id push: the popup hangs off a
+    // widget inside a panel whose clip pair is active here, and it
+    // must draw AND hit-test past its host's hole).
     gui.begin_layer(Layer::popup);
-    r2d::push_clip_escape(bounds.x, bounds.y, bounds.width, bounds.height);
-    gui.push_hit_clip_escape(bounds);
-    panel_chrome(bounds, theme);
-    const Rect content =
-        layout.begin_panel(bounds, theme.padding, theme.spacing);
-    // Keyless wheel claim, begin_panel's: claims to eat, never consume -
-    // a popup over a scroll panel takes the wheel even though it scrolls
-    // nothing.
-    gui.register_wheel_claim(bounds, nullptr);
-    r2d::push_clip(content.x, content.y, content.width, content.height);
-    gui.push_hit_clip(content);
-    gui.ids().push(label);
+    gui.claim_esc(&open);
+    push_overlay_panel(gui, layout, theme, label, bounds, theme.spacing);
     return open;
 }
 
@@ -76,14 +108,55 @@ void end_popup(GuiContext& gui, LayoutCursor& layout) {
     if (gui.current_layer() != Layer::popup) {
         return;
     }
-    // Exactly the reverse of begin_popup's pushes.
-    gui.ids().pop();
-    r2d::pop_clip();
-    gui.pop_hit_clip();
-    layout.end_panel();
-    r2d::pop_clip();
-    gui.pop_hit_clip();
+    pop_overlay_panel(gui, layout);
     gui.end_layer();
+}
+
+bool tooltip_delayed(GuiContext& gui, WidgetId id, const ChromeTheme& theme) {
+    // The hover clock: rest accumulates while the widget is hot, and
+    // the answer turns true the frame it passes the theme's delay.
+    // is_hot is the SETTLED hover, so the clock starts on the settled
+    // claim and a flickering hover - an overlapped row - never banks
+    // enough rest to fire.
+    struct RestState {
+        float rest = 0.0f;  // seconds of settled hover, zeroed off-hover
+    };
+    RestState& state = gui.persistent_state<RestState>(id);
+    if (!gui.is_hot(id)) {
+        state.rest = 0.0f;
+        return false;
+    }
+    state.rest += gui.input().dt_seconds;
+    return state.rest >= theme.tooltip_delay;
+}
+
+void tooltip_text(GuiContext& gui, LayoutCursor& layout,
+                  const ChromeTheme& theme, const char* label,
+                  const Rect& anchor, const char* hint) {
+    // The whole hover-to-hint pattern in one call: the delay (keyed by
+    // the shared label - the explained widget is laid in this same
+    // scope, so its id keys the clock), then a one-row tooltip placed
+    // below the anchor's row, flipped and clamped into the frame,
+    // sized to the hint plus the panel padding. The parameter spells
+    // itself `hint` because `text` here is the row widget the scope's
+    // one line lands in.
+    const WidgetId id = gui.ids().id(label);
+    if (!tooltip_delayed(gui, id, theme)) {
+        return;
+    }
+    char scratch[128];
+    const LabelFit fit =
+        fit_text(hint, -1.0f, theme, scratch, sizeof scratch);
+    if (fit.advance <= 0.0f) {
+        return;  // nothing to say - a zero-size box is noise
+    }
+    const Rect bounds =
+        place_popup(anchor, fit.advance + 2.0f * theme.padding,
+                    theme.control_height + 2.0f * theme.padding);
+    if (begin_tooltip(gui, layout, theme, label, bounds, true)) {
+        text(layout, theme, hint, -1.0f);
+        end_tooltip(gui, layout);
+    }
 }
 
 bool begin_tooltip(GuiContext& gui, LayoutCursor& layout,
@@ -138,19 +211,10 @@ bool begin_modal(GuiContext& gui, LayoutCursor& layout,
     r2d::draw_quad(0.0f, 0.0f, frame.width, frame.height, theme.veil);
     r2d::pop_clip();
 
-    // Then the panel scope, the same shape as a popup's - the clip pair
-    // escapes at the bounds, the content pair nests inside - minus the
-    // close rule: blocking IS the point. The dialog's own buttons flip
-    // the caller's bool.
-    r2d::push_clip_escape(bounds.x, bounds.y, bounds.width, bounds.height);
-    gui.push_hit_clip_escape(bounds);
-    panel_chrome(bounds, theme);
-    const Rect content =
-        layout.begin_panel(bounds, theme.padding, theme.spacing);
-    gui.register_wheel_claim(bounds, nullptr);
-    r2d::push_clip(content.x, content.y, content.width, content.height);
-    gui.push_hit_clip(content);
-    gui.ids().push(label);
+    // Then the shared overlay panel scope, the same shape as a popup's,
+    // minus the close rules: blocking IS the point. The dialog's own
+    // buttons flip the caller's bool.
+    push_overlay_panel(gui, layout, theme, label, bounds, theme.spacing);
     return open;
 }
 
@@ -161,12 +225,7 @@ void end_modal(GuiContext& gui, LayoutCursor& layout) {
     if (gui.current_layer() != Layer::modal) {
         return;
     }
-    gui.ids().pop();
-    r2d::pop_clip();
-    gui.pop_hit_clip();
-    layout.end_panel();
-    r2d::pop_clip();
-    gui.pop_hit_clip();
+    pop_overlay_panel(gui, layout);
     gui.end_layer();
 }
 

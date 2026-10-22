@@ -5,7 +5,9 @@
 #include <ws/ui/gui/rect.hpp>
 #include <ws/ui/gui/theme.hpp>
 
+#include <array>
 #include <cstddef>
+#include <functional>
 
 namespace ws::ui::gui {
 
@@ -77,9 +79,12 @@ LabelFit fit_text(const char* label, float max_width,
 // button wears a 1px accent ring - the focus rules live on GuiContext
 // (state/register_focusable/is_focused). Inside a begin_disabled scope
 // the button goes dead as a whole: the control_disabled face, the icon
-// tint and the label dimmed by theme.disabled_alpha through dim().
+// tint and the label dimmed by theme.disabled_alpha through dim(). The
+// trailing `disabled` parameter is the same lock on this one row, no
+// scope needed.
 bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
-            const char* label, float width = 120.0f, r2d::Sprite icon = {});
+            const char* label, float width = 120.0f, r2d::Sprite icon = {},
+            bool disabled = false);
 
 // A checkbox: true on the frame a full click toggled `value` - the
 // caller's bool IS the state, the widget itself holds none. The box is a
@@ -91,9 +96,10 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 // exactly like a click, and the focused row wears the accent ring.
 // Inside a begin_disabled scope the row dims as a whole (dead face on
 // the box, fill and label faded) and no click or key can flip the
-// value.
+// value. The trailing `disabled` parameter is the same lock on this
+// one row, no scope needed.
 bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
-              const char* label, bool& value);
+              const char* label, bool& value, bool disabled = false);
 
 // A radio button: true on the frame a click or Enter/Space MOVED the
 // group's selection to this option. `value` is the caller's group state
@@ -107,9 +113,11 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 // the label's display advance and the hit area covers it whole. Radios
 // take the keyboard like checkboxes: focusable, Enter and Space select,
 // the focused row wears the ring. Inside a begin_disabled scope the row
-// dims as one and no click or key can move the selection.
+// dims as one and no click or key can move the selection. The trailing
+// `disabled` parameter is the same lock on this one row, no scope needed.
 bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
-           const char* label, int& value, int this_option);
+           const char* label, int& value, int this_option,
+           bool disabled = false);
 
 // A toggle switch: checkbox semantics under a switch look - true on the
 // frame a full click or Enter/Space flipped `value` (the caller's bool
@@ -123,9 +131,11 @@ bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 // The row auto-sizes to track +
 // spacing + the label's display advance, the hit area covers it whole,
 // the focused row wears the ring, and a begin_disabled scope dims and
-// deadens it as one.
+// deadens it as one. The trailing `disabled` parameter is the same lock
+// on this one row, no scope needed.
 bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
-                   const ChromeTheme& theme, const char* label, bool& value);
+                   const ChromeTheme& theme, const char* label,
+                   bool& value, bool disabled = false);
 
 // A collapsing header: a row that flips `open` on a click or Enter/
 // Space (the caller's bool IS the state) and returns it AFTER the flip,
@@ -135,10 +145,13 @@ bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
 // beside it like a checkbox's, left-aligned. A negative `width` fills
 // the rest of the line (the default - headers want their container's
 // width). The same citizenship as a checkbox: focusable, the ring, and
-// a begin_disabled scope dims and deadens it as one.
+// a begin_disabled scope dims and deadens it as one. The trailing
+// `disabled` parameter is the same lock on this one row, no scope
+// needed.
 bool collapsing_header(GuiContext& gui, LayoutCursor& layout,
                        const ChromeTheme& theme, const char* label,
-                       bool& open, float width = -1.0f);
+                       bool& open, float width = -1.0f,
+                       bool disabled = false);
 
 // A selectable row: true on a full click or Enter/Space - the selection
 // is the CALLER'S to keep (`selected` is display state the row reads
@@ -150,9 +163,12 @@ bool collapsing_header(GuiContext& gui, LayoutCursor& layout,
 // hover, press and the disabled scope take the usual faces. The label
 // draws left-aligned past the bar's room, so selected and unselected
 // rows align. A negative `width` fills the rest of the line (the
-// default - list rows want their container's width).
+// default - list rows want their container's width). The trailing
+// `disabled` parameter is the begin_disabled lock on this one row: the
+// dead face, no claim, no focus - Tab walks past it.
 bool selectable(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
-               const char* label, bool selected, float width = -1.0f);
+               const char* label, bool selected, float width = -1.0f,
+               bool disabled = false);
 
 // A horizontal slider, click-to-set AND drag: a press inside the track
 // jumps the value to the pointer and tracks it while held; the value
@@ -164,19 +180,24 @@ bool selectable(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 // 1% of the range per press (slider_int: 1), clamped to [min, max],
 // reported as changed only on a real move. Inside a begin_disabled
 // scope the whole row dims (dead face on the rail, fill, handle and
-// label faded) and no pointer or key can move the value. `width`
-// defaults to 120 px; a negative width instead FILLS the rest of the
-// current line, like button's.
+// label faded) and no pointer or key can move the value. The trailing
+// `disabled` parameter is the same lock on this one row, no scope
+// needed. `width` defaults to 120 px; a negative width instead FILLS
+// the rest of the current line, like button's.
 bool slider_float(GuiContext& gui, LayoutCursor& layout,
                   const ChromeTheme& theme, const char* label, float& value,
-                  float min, float max, float width = 120.0f);
+                  float min, float max, float width = 120.0f,
+                  bool disabled = false);
 
 // slider_float over an int reference - the value rounds to the nearest
 // integer after the float math, and the arrows step it by 1. A negative
-// width fills the rest of the current line, like slider_float's.
+// width fills the rest of the current line, like slider_float's; the
+// trailing `disabled` parameter is its row's own lock, like the
+// others'.
 bool slider_int(GuiContext& gui, LayoutCursor& layout,
                 const ChromeTheme& theme, const char* label, int& value,
-                int min, int max, float width = 120.0f);
+                int min, int max, float width = 120.0f,
+                bool disabled = false);
 
 // A drag float: press inside to GRAB (the value does not jump - unlike
 // a slider there is nothing to click-to-set), then while the pointer
@@ -191,11 +212,13 @@ bool slider_int(GuiContext& gui, LayoutCursor& layout,
 // and left-aligned. The keyboard steps the focused row 1% of the range
 // per arrow press, like a slider. Inside a begin_disabled scope the row
 // dims as one and no pointer or key can move the value. `width`
-// defaults to 120 px; a negative width fills the rest of the line.
+// defaults to 120 px; a negative width fills the rest of the line; the
+// trailing `disabled` parameter is the same lock on this one row, no
+// scope needed.
 bool drag_float(GuiContext& gui, LayoutCursor& layout,
                 const ChromeTheme& theme, const char* label, float& value,
                 float min, float max, float speed = 1.0f,
-                float width = 120.0f);
+                float width = 120.0f, bool disabled = false);
 
 // A static label: lays out and draws, and that is all - no id, no
 // hit-test, nothing focusable, no GuiContext in the signature (chrome,
@@ -225,6 +248,34 @@ void separator(LayoutCursor& layout, const ChromeTheme& theme,
 // sliver reads as a dot rather than an over-rounded bar.
 void progress(LayoutCursor& layout, const ChromeTheme& theme,
               float fraction, float width = -1.0f);
+
+// A spinner: the busy indicator - `size` px square (a negative size,
+// the default, takes theme.control_height), eight dots chasing around
+// its circle, the bright one wearing the accent and the rest the
+// control faces, the phase advancing on the frame clock (dt_seconds)
+// in the context's persistent state under `label` - which ids the
+// spinner and never draws. Headless the frame clock reads 0: the dots
+// hold their phase, the one honest answer without time.
+void spinner(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
+             const char* label, float size = -1.0f);
+
+// The indeterminate progress bar: progress's track with nothing to
+// show - a band a third of the track's width sweeps it left to right,
+// wrapping, the phase on the frame clock in the persistent state under
+// `label` (which ids the bar and never draws, progress's own label
+// discipline - the caller composes a text row of its own beside it).
+// A negative `width` fills the rest of the current line.
+void progress_indeterminate(GuiContext& gui, LayoutCursor& layout,
+                             const ChromeTheme& theme, const char* label,
+                             float width = -1.0f);
+
+// The status bar: a frame-anchored strip along the bottom edge - full
+// width, one control height, `text` left-inset past the padding. It
+// takes NO row in the flow and no GuiContext (the statics' signature -
+// nothing to interact with): the caller draws it wherever it fits its
+// frame and keeps its content clear by the returned rect's top edge,
+// the layout arithmetic being the caller's (the bar reserves nothing).
+Rect status_bar(const ChromeTheme& theme, const char* text);
 
 // A panel: chrome (1px border frame + panel face), a clip rect at its
 // content area (children cannot draw outside it, whatever they submit), an
@@ -257,11 +308,13 @@ void end_panel(GuiContext& gui, LayoutCursor& layout);
 // and the focused tab wears the ring. Inside a begin_disabled scope
 // the strip dims as a whole - idle tabs take the dead face, the
 // selected tab's accent and every label fade - and no click or key
-// can move the selection. What shows per tab is the caller's branch -
-// the strip is the selection primitive, not a content container.
+// can move the selection. The trailing `disabled` parameter is the
+// same lock on the whole strip, no scope needed. What shows per tab is
+// the caller's branch - the strip is the selection primitive, not a
+// content container.
 bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
              const char* label, const char* const* tabs, int count,
-             int& active, float width = 120.0f);
+             int& active, float width = 120.0f, bool disabled = false);
 
 // A scrollable panel: the same chrome, clip and id scope begin_panel
 // pushes (and its theme.spacing item gaps - the virtual panel the
@@ -328,6 +381,23 @@ void end_scroll_panel(GuiContext& gui, LayoutCursor& layout,
 // false pushed nothing, and though the layer guard makes a stray end a
 // no-op anyway, the discipline keeps the scopes reading balanced.
 
+// Which side of its anchor a placed popup hangs from: below is the
+// dropdown shape (under the anchor's bottom edge), right the submenu
+// shape (past its right edge).
+enum class PopupAnchor { below, right };
+
+// Where a popup window hangs from its anchor, as pure arithmetic -
+// nothing drawn, nothing claimed. The size clamps to the frame first
+// (a window taller than the frame lays filling what fits), then it
+// prefers the chosen side and FLIPS to the opposite one when the frame
+// lacks the room, then clamps the position so the window never leaves
+// the frame either way. A degenerate anchor - a point, the press point
+// of a context menu - anchors at itself: the window hangs below/right
+// of the point. Headless the frame is empty and everything clamps to
+// the origin.
+Rect place_popup(const Rect& anchor, float width, float height,
+                 PopupAnchor side = PopupAnchor::below);
+
 // A popup: the floating panel combo dropdowns, context menus and their
 // kin open above base content. `open` is the caller's bool (the caller
 // owns the state, like every widget here); begin_popup returns it back and
@@ -354,13 +424,19 @@ void end_scroll_panel(GuiContext& gui, LayoutCursor& layout,
 // close: that click belongs to the anchor's own widget (a combo row
 // toggles itself). A degenerate `anchor` (a zero rect) hangs from
 // nothing - every press outside the bounds then closes. Touches close
-// it too, per pressed contact. Under a raised modal veil the popup is
-// inert like every lower stratum - its close rule eats no press the
-// veil owns. v1 limits, deliberate: no Escape or focus-loss close (no
-// such events exist), no auto-flip above the anchor when the frame
-// lacks room (the caller places `bounds`), and a press on the popup's
-// own padding - not on a child - falls through to whatever sits beneath
-// (fill-width children leave almost no padding to press).
+// it too, per pressed contact. ESCAPE closes the popup: it claims the
+// frame's Escape while open (GuiContext::claim_esc - the topmost open
+// overlay wins the key; a text_input that drops its selection first
+// spends the Escape so the popup keeps it, one key per intent), and
+// the win lands the frame after the press. Under a raised modal veil
+// the popup is inert like every lower stratum: its close rule eats no
+// press the veil owns and its claim never reaches the arbitration.
+// v1 limits, deliberate: no focus-loss close, no auto-flip above the
+// anchor when the frame lacks room (place_popup does that arithmetic
+// for a caller who wants it - here the caller still places `bounds`),
+// and a press on the popup's own padding - not on a child - falls
+// through to whatever sits beneath (fill-width children leave almost
+// no padding to press).
 bool begin_popup(GuiContext& gui, LayoutCursor& layout,
                  const ChromeTheme& theme, const char* label,
                  const Rect& anchor, const Rect& bounds, bool& open);
@@ -391,6 +467,30 @@ bool begin_tooltip(GuiContext& gui, LayoutCursor& layout,
                    const Rect& bounds, bool show);
 // Closes the tooltip scope. Drop-safe through the layer, like end_popup.
 void end_tooltip(GuiContext& gui, LayoutCursor& layout);
+
+// The tooltip delay: true once the pointer has rested on the widget
+// whose id this is - the hovered widget's own id, is_hot's spelling -
+// for theme.tooltip_delay seconds; false again the frame it leaves.
+// The accumulated rest lives in the persistent state under the id, so
+// a re-hover starts from zero and a flickering hover (an overlapped
+// row) never reaches the threshold. Gate a begin_tooltip scope with
+// it; under a raised modal veil the widget beneath cannot be hot at
+// all, so the delay needs no gate of its own.
+bool tooltip_delayed(GuiContext& gui, WidgetId id, const ChromeTheme& theme);
+
+// The one-line tooltip: the whole hover-to-hint pattern folded into
+// one call - tooltip_delayed's rest, then a tooltip scope holding one
+// text row, placed by place_popup below `anchor` (flipped above when
+// the frame lacks room, clamped at its edges) and sized to the hint
+// plus the theme's padding. `label` is the label of the widget being
+// explained, the same id scope it was laid under - the shared label
+// keys the delay; `hint` is the one line the tooltip draws (its name
+// keeps it clear of the text() row widget it lands in). Rich content
+// stays the caller's: gate a begin_tooltip scope with tooltip_delayed
+// and lay the rows by hand.
+void tooltip_text(GuiContext& gui, LayoutCursor& layout,
+                  const ChromeTheme& theme, const char* label,
+                  const Rect& anchor, const char* hint);
 
 // A modal dialog: the blocking overlay. `open` is the caller's bool BY
 // VALUE - the modal never closes itself (no outside-press rule: blocking
@@ -444,10 +544,13 @@ void end_modal(GuiContext& gui, LayoutCursor& layout);
 // Space picks the focused one, and a choice hands the focus back to
 // the combo row so the next Tab continues the screen's walk (an
 // outside-press close leaves it wherever the pass-through press
-// landed - the focus-follows-press rule, no help wanted).
+// landed - the focus-follows-press rule, no help wanted). The
+// trailing `disabled` parameter locks the row (and its dropdown with
+// it), the begin_disabled lock without the scope.
 bool combo(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
           const char* label, const char* const* items, int count,
-          int& selected, bool& open, float width = -1.0f);
+          int& selected, bool& open, float width = -1.0f,
+          bool disabled = false);
 
 // A text input: one editable line in a caller-owned buffer. `buf` is
 // NUL-terminated UTF-8 the caller owns (the house rule - the widget
@@ -480,10 +583,12 @@ bool combo(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 // scroll; the caret rides the edge while the keys still edit the
 // hidden tail). A null `buf` or `capacity` under 2 lays the same row
 // inert - nothing to edit, nothing to place. `width` lays the row
-// like a button's (negative = fill the line).
+// like a button's (negative = fill the line). The trailing `disabled`
+// parameter locks the field - the dead face, no caret, no focus, no
+// keys - the begin_disabled lock without the scope.
 bool text_input(GuiContext& gui, LayoutCursor& layout,
                 const ChromeTheme& theme, const char* label, char* buf,
-                int capacity, float width = -1.0f);
+                int capacity, float width = -1.0f, bool disabled = false);
 
 // One column of a table: the header text and the width policy. A width
 // above zero is fixed pixels; zero or negative STRETCHES - the column
@@ -541,5 +646,52 @@ bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
            const char* label, const TableColumn* columns, int column_count,
            const char* const* cells, int row_count,
            int* selected = nullptr, float width = -1.0f);
+
+// --- the modal dialog -------------------------------------------------------
+// The one-call overlay: a centered modal window the helper owns end to
+// end - veil, panel, title, body, buttons, the Enter/Esc semantics -
+// so a dialog is one call in the host's frame, not a scope it builds.
+
+// The standard button sets, reading order left to right. `none` lays
+// no buttons: the dialog then closes only by its `open` flipped from
+// outside, and it takes no Enter and no Escape (nothing to answer
+// with; those keys belong to whatever sits in the body).
+enum class DialogButtons { none, ok, ok_cancel, yes_no, retry_cancel };
+
+// What a dialog answers: the index of the standard button that fired
+// (0 the positive, reading order; -1 when nothing fired this frame)
+// and `accepted`, the semantic answer - true when the positive button
+// or Enter spoke, false when the negative button or Escape did. A
+// caller branching on yes-or-no reads `accepted` and never `button`.
+struct DialogEvent {
+    int button = -1;
+    bool accepted = false;
+};
+
+// A modal dialog with a standard button row. `title` draws as the
+// heading; `body` (optional) lays rows between it and the buttons - any
+// widget calls, run in the dialog's own cursor and id scope, the veil
+// trapping Tab inside. The window centers on the frame at `width`; its
+// height is the body's extent measured the LAST frame it ran (one
+// frame of settle the first time it opens - the immediate-mode answer,
+// like a scroll panel's content extent). The buttons are real button
+// rows: a click fires them, and Enter answers the positive one
+// wherever the focus sits - consumed at the dialog's entry, so nothing
+// in the body double-takes the key (Space stays a body widget's own).
+// Escape answers the negative one through the same arbitration every
+// overlay uses - the frame after the press, and a text field that drops
+// its selection first spends the key: one Escape abandons the edit,
+// the next closes the dialog. The dialog flips `open` false itself on
+// any answer, so the event and the flag agree on the frame it closes -
+// read `accepted` that same frame. Button labels are English stock in
+// v1 (OK, Cancel, Yes, No, Retry); a themed label set is the seam a
+// localization would grow.
+DialogEvent modal_dialog(GuiContext& gui, const ChromeTheme& theme,
+                         const char* label, const char* title,
+                         DialogButtons buttons, bool& open,
+                         float width = 360.0f,
+                         const std::function<void(GuiContext&, LayoutCursor&,
+                                                  const ChromeTheme&)>& body =
+                             {});
 
 }  // namespace ws::ui::gui

@@ -13,8 +13,8 @@ namespace ws::ui::gui {
 
 bool combo(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
            const char* label, const char* const* items, int count,
-           int& selected, bool& open, float width) {
-    const Row row = begin_row(gui, layout, theme, label, width);
+           int& selected, bool& open, float width, bool disabled) {
+    const Row row = begin_row(gui, layout, theme, label, width, disabled);
     const WidgetId id = row.id;
     const Rect& rect = row.rect;
     const WidgetResult& result = row.result;
@@ -22,15 +22,19 @@ bool combo(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 
     // The empty combo: nothing to choose, nothing to open - a bare row
     // that never pretends otherwise (and never touches the caller's
-    // bool, so a later refill starts closed).
+    // bool, so a later refill starts closed). A disabled combo locks
+    // its dropdown with it: the row claims nothing, so no click or key
+    // could reopen one, and a dropdown left open by a lock landing
+    // mid-flight closes - the documented whole-widget lock.
     const bool empty = count <= 0 || items == nullptr;
-    if (empty) {
+    if (empty || disabled) {
         open = false;
     }
 
     // The row's click and keyboard toggle: Enter/Space on the focused
-    // row flips it too, like a header - never on an empty combo.
-    const bool key_toggled = !empty && key_activated(gui, id);
+    // row flips it too, like a header - never on an empty or locked
+    // combo (the locked row holds no focus, so the keys never arrive).
+    const bool key_toggled = !empty && !disabled && key_activated(gui, id);
     if (!empty && (hit.clicked || key_toggled)) {
         open = !open;  // the caller's bool is the popup's state
     }

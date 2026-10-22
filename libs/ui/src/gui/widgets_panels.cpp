@@ -12,7 +12,7 @@ namespace ws::ui::gui {
 
 bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
              const char* label, const char* const* tabs, int count,
-             int& active, float width) {
+             int& active, float width, bool disabled) {
     width = std::max(width, 0.0f);  // like button: no mirrored quads
 
     bool changed = false;
@@ -26,10 +26,16 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
         // Full citizenship, like a button, per tab: each tab registers
         // in strip order (Tab walks the strip left to right), state()
         // runs the one hit-test and derives the face, and Enter or
-        // Space selects the focused tab.
+        // Space selects the focused tab. The trailing `disabled`
+        // parameter is the same lock on the whole strip: registration
+        // skipped (Tab walks past), state() handed the lock, and the
+        // selection below cannot move (a dead row reports no click,
+        // holds no focus for the keys).
         const WidgetId tab_id = gui.ids().id("tab");
-        gui.register_focusable(tab_id);
-        const WidgetResult result = gui.state(tab_id, rect);
+        if (!disabled) {
+            gui.register_focusable(tab_id);
+        }
+        const WidgetResult result = gui.state(tab_id, rect, disabled);
         const HitTest& hit = result.hit;
         const bool key_selected = key_activated(gui, tab_id);
 

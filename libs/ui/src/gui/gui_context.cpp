@@ -1,7 +1,7 @@
 // GuiContext's out-of-line half: per-pointer hot/active hit-testing,
 // layer scopes and the persistent side tables. This TU's warn-once
-// flags are local; reset_warn_once() re-arms them and the id/layout
-// pair the other gui TUs own (gui.h's detail seam).
+// flags are local; reset_warn_once() re-arms them and the ones the
+// other gui TUs own (gui.h's detail seam).
 
 #include <ws/ui/gui/gui_context.hpp>
 
@@ -48,6 +48,14 @@ bool disabled_overflow_warned = false;
 // process: the panels past the cap claim nothing that frame, so the
 // wheel may resolve to a claimant under them.
 bool wheel_overflow_warned = false;
+
+// claim_esc ran past kMaxEscClaims. Flagged once per process: the
+// overlays past the cap never close on Escape.
+bool esc_overflow_warned = false;
+
+// pin_persistent_state ran past kMaxPinnedIds. Flagged once per
+// process: the ids past the cap sweep like everyone else.
+bool pin_overflow_warned = false;
 
 // The intersection of two axis-aligned rects, raw arithmetic: a
 // negative extent is an empty overlap, and Rect's half-open contains
@@ -117,6 +125,15 @@ void GuiContext::begin_frame(const ws::input::InputFrame& input) {
     // end_frame is readable now, and only now), and the focus-rect
     // latch is stale until the focused widget runs state().
     wheel_claim_count_ = 0;
+    // The Escape claim table starts empty with it, and no widget has
+    // spent this frame's Escape yet; end_frame re-publishes the winner
+    // every frame, so a win nobody came back to read clears itself (a
+    // stale winner must never close a freshly reopened overlay). The
+    // state-sweep clock ticks once per frame - every persistent_state
+    // touch stamps it, the sweep reads it.
+    esc_claim_count_ = 0;
+    escape_consumed_ = false;
+    ++frame_stamp_;
     focus_into_view_ = focus_into_view_next_;
     focus_into_view_next_ = false;
     focused_rect_known_ = false;
@@ -277,6 +294,31 @@ void GuiContext::end_frame() {
         }
     }
     wheel_winner_ = wheel_winner;
+
+    // The Escape resolution, the wheel's shape one stratum over: this
+    // frame's Escape, when no widget consumed it, goes to exactly ONE
+    // claimant - strictly higher layer first (the modal over the
+    // popup), then the LAST registrant at the winning stratum (a
+    // nested submenu begins after its parent, so it out-ranks it).
+    // The winner publishes for the NEXT frame, whose winning overlay
+    // closes at its own begin through esc_won() - the same one-frame
+    // settle the wheel claims use. Every frame publishes, Escape or
+    // not: a null publish clears a win the winner never came back to
+    // read (its screen vanished mid-frame), so a stale winner can
+    // never close a freshly reopened overlay.
+    const bool* esc_winner = nullptr;
+    std::uint32_t esc_winner_layer = 0;
+    if (input_.key_pressed[static_cast<std::size_t>(ws::input::keys::kEscape)] &&
+        !escape_consumed_) {
+        for (int i = 0; i < esc_claim_count_; ++i) {
+            const EscClaim& claim = esc_claims_[static_cast<std::size_t>(i)];
+            if (esc_winner == nullptr || claim.layer >= esc_winner_layer) {
+                esc_winner = claim.open;
+                esc_winner_layer = claim.layer;
+            }
+        }
+    }
+    esc_winner_ = esc_winner;
 }
 
 void GuiContext::begin_layer(Layer layer) {
@@ -478,6 +520,59 @@ const void* GuiContext::scroll_arm_owner(ws::input::PointerId pointer) const {
 
 bool GuiContext::claims_open() const {
     return current_layer_value() >= modal_layer_;
+}
+
+void GuiContext::claim_esc(bool* open) {
+    // The veil gate is the point: an overlay under a raised modal never
+    // claims, so Esc always reaches the modal first - the same stratum
+    // rule hit_test reads, applied to the keyboard. A null flag is a
+    // host error, not an overlay; it claims nothing.
+    if (open == nullptr || !claims_open()) {
+        return;
+    }
+    if (esc_claim_count_ >= kMaxEscClaims) {
+        if (!esc_overflow_warned) {
+            esc_overflow_warned = true;
+            core::warn("ui: gui Escape claim table clamped at {} - overlays "
+                       "past the cap never close on Escape",
+                       kMaxEscClaims);
+        }
+        return;
+    }
+    EscClaim& claim = esc_claims_[static_cast<std::size_t>(esc_claim_count_++)];
+    claim.open = open;
+    claim.layer = current_layer_value();
+}
+
+bool GuiContext::esc_won(const bool* open) const {
+    // Address-only on purpose: a flag that moved between frames just
+    // loses the win, and the winner's read is inert once it has closed
+    // (a closed overlay's begin returns before this).
+    return open != nullptr && open == esc_winner_;
+}
+
+void GuiContext::consume_escape() {
+    // The frame's arbitration dies here; the key edge itself stays in
+    // the snapshot for any widget still reading raw input this frame -
+    // which is exactly why a widget that ACTED on the edge is the one
+    // that must call this.
+    escape_consumed_ = true;
+}
+
+void GuiContext::consume_key(int key) {
+    // The context's OWN copy: begin_frame copies the snapshot in, so
+    // clearing an edge here hides it from every later reader this
+    // frame - how an open menu owns its navigation cluster. The
+    // platform's frame is untouched.
+    if (key >= 0 && key < ws::input::InputFrame::kMaxKeys) {
+        input_.key_pressed[static_cast<std::size_t>(key)] = false;
+    }
+}
+
+void GuiContext::consume_typing() {
+    // The vector keeps its capacity - the clear is allocation-free, so
+    // the steady-state rule holds on this path too.
+    input_.text_input.clear();
 }
 
 bool GuiContext::focus_into_view_pending() const {
@@ -948,9 +1043,60 @@ void GuiContext::clear_persistent_state(WidgetId id) {
     }
 }
 
+std::size_t GuiContext::sweep_persistent_state(std::uint32_t max_unused_frames) {
+    // The underflow guard lives here, once, not per table: a window
+    // wider than the frames lived so far sweeps from 0, which only
+    // makes a young context's first sweeps keep everything - the
+    // conservative side of the edge.
+    const std::uint32_t cutoff = frame_stamp_ > max_unused_frames
+                                     ? frame_stamp_ - max_unused_frames
+                                     : 0;
+    std::size_t evicted = 0;
+    for (auto& [type, table] : state_tables_) {
+        (void)type;
+        evicted += table->sweep(cutoff, pinned_ids_.data(),
+                                static_cast<std::size_t>(pinned_count_));
+    }
+    return evicted;
+}
+
+void GuiContext::pin_persistent_state(WidgetId id) {
+    if (id == kInvalidWidgetId) {
+        return;  // the sentinel pins nothing, like it registers nothing
+    }
+    for (int i = 0; i < pinned_count_; ++i) {
+        if (pinned_ids_[static_cast<std::size_t>(i)] == id) {
+            return;  // already pinned: storing twice buys nothing
+        }
+    }
+    if (pinned_count_ >= kMaxPinnedIds) {
+        if (!pin_overflow_warned) {
+            pin_overflow_warned = true;
+            core::warn("ui: gui state pin table clamped at {} - ids past "
+                       "the cap sweep like everyone else",
+                       kMaxPinnedIds);
+        }
+        return;
+    }
+    pinned_ids_[static_cast<std::size_t>(pinned_count_++)] = id;
+}
+
+void GuiContext::unpin_persistent_state(WidgetId id) {
+    // Swap-with-last: pin order carries no meaning, and the removal
+    // must not shift the live prefix the sweep reads.
+    for (int i = 0; i < pinned_count_; ++i) {
+        if (pinned_ids_[static_cast<std::size_t>(i)] == id) {
+            pinned_ids_[static_cast<std::size_t>(i)] =
+                pinned_ids_[static_cast<std::size_t>(pinned_count_ - 1)];
+            --pinned_count_;
+            return;
+        }
+    }
+}
+
 void reset_warn_once() {
     // The test seam: the once-per-process warns re-arm. This TU's
-    // seven plus the two the other gui TUs own (gui.h's detail seam);
+    // nine plus the ones the other gui TUs own (gui.h's detail seam);
     // no frame state is involved, so any moment is legal.
     duplicate_id_warned = false;
     census_full_warned = false;
@@ -959,6 +1105,8 @@ void reset_warn_once() {
     hit_clip_overflow_warned = false;
     disabled_overflow_warned = false;
     wheel_overflow_warned = false;
+    esc_overflow_warned = false;
+    pin_overflow_warned = false;
     detail::id_overflow_warned = false;
     detail::panel_overflow_warned = false;
 }

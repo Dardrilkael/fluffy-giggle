@@ -225,6 +225,43 @@ public:
     // answers false: keyless panels claim to eat, never to consume.
     bool wheel_won(const void* key) const;
 
+    // --- Escape arbitration: one key, a stack of overlays ---
+    // An overlay that closes on Escape claims it at its begin, and the
+    // claim key is the ADDRESS of the caller's open flag, so end_frame
+    // can pick ONE winner without knowing the overlay type: strictly
+    // higher layer first (the modal over the popup), then the LAST
+    // registrant at the winning layer (a nested submenu begins after
+    // its parent, so it out-ranks it). The frame AFTER the Escape, the
+    // winning overlay's own begin reads esc_won() and closes - the same
+    // one-frame settle the wheel claim uses, because a frame's claim
+    // table is only complete at its end. A claim from under a raised
+    // modal veil never registers (the same gate hit_test reads), which
+    // is how Esc reaches the modal first. The flag must live somewhere
+    // frame-stable (a caller member, a persistent_state entry); a flag
+    // that moves between frames just loses the win - esc_won compares
+    // addresses and never dereferences.
+    void claim_esc(bool* open);
+    // True when THIS open flag won last frame's arbitration - the
+    // winner's own begin closes on it (and a closed overlay claims
+    // nothing, so the next Esc settles on what is left).
+    bool esc_won(const bool* open) const;
+    // Spends this frame's Escape before the arbitration resolves it: a
+    // widget that ACTED on the edge (text_input dropping a selection)
+    // closes nothing behind itself - one Escape abandons the edit, the
+    // next one closes the overlay. A frame with no Escape pressed is
+    // unaffected.
+    void consume_escape();
+    // Clears one key's pressed edge in the context's OWN input copy -
+    // how an open menu owns its navigation cluster (the arrows, Enter,
+    // the works) so the widget underneath never sees them. Widgets read
+    // gui.input(), never the platform's frame, so this is the whole
+    // story. Unknown keys are a no-op.
+    void consume_key(int key);
+    // The typing spelling of consume_key: clears the frame's text_input
+    // codepoints (the vector keeps its capacity - no allocation), so an
+    // open menu's mnemonic walk eats the frame's letters.
+    void consume_typing();
+
     // The scroll ARM: a scroll panel watching a fresh touch press (its
     // drag-to-scroll about to cross the threshold) claims the pointer
     // here. Nested panels both see the press, and the claim keeps the
@@ -374,7 +411,11 @@ public:
     // accumulators, toggles), keyed by (type, widget id) and owned by the
     // context - never function-local statics, so a future retained layer
     // could key the same way. First touch default-constructs the value;
-    // entries outlive frames for the context's lifetime.
+    // entries outlive frames for the context's lifetime. Eviction stays
+    // explicit by default (clear_persistent_state);
+    // sweep_persistent_state is the opt-in garbage pass and
+    // pin_persistent_state its exemption. Every touch stamps the entry
+    // with the frame counter - the only thing the sweep reads.
     template <typename T>
     T& persistent_state(WidgetId id) {
         const std::type_index type = typeid(T);
@@ -383,7 +424,9 @@ public:
             auto table = std::make_unique<StateTable<T>>();
             found = state_tables_.emplace(type, std::move(table)).first;
         }
-        return static_cast<StateTable<T>&>(*found->second).values[id];
+        auto& entry = static_cast<StateTable<T>&>(*found->second).values[id];
+        entry.last_frame = frame_stamp_;
+        return entry.value;
     }
 
     // The EXPLICIT eviction of persistent state (there is deliberately
@@ -397,6 +440,20 @@ public:
     // pair) dangles once the entry is gone.
     void clear_persistent_state();
     void clear_persistent_state(WidgetId id);
+    // The opt-in garbage pass: evicts every persistent-state entry no
+    // widget touched in the last `max_unused_frames` frames, across all
+    // tables, sparing pinned ids. Call it between frames (the same rule
+    // clear_persistent_state lives under); an app that never calls it
+    // keeps the explicit-eviction default, and one that calls it every
+    // frame buys "state dies with the widget" at max_unused frames of
+    // lag. Returns how many entries left.
+    std::size_t sweep_persistent_state(std::uint32_t max_unused_frames);
+    // Exempts `id` from the sweep - the rare entry that must outlive its
+    // widget's absence. Pinning twice stores once; the cap is 64 ids with
+    // the usual warn-once degrade.
+    void pin_persistent_state(WidgetId id);
+    // Lifts the exemption (a pin nobody set is a no-op).
+    void unpin_persistent_state(WidgetId id);
 
     // --- the clipboard seam: the gui edits, the host moves the bytes ---
     // text_input's Ctrl+C/X/V ride this pair; the shell installs the
@@ -464,12 +521,45 @@ private:
         // empties itself / erases its id's entry.
         virtual void clear() = 0;
         virtual std::size_t erase(WidgetId id) = 0;
+        // ...and of sweep_persistent_state: each table evicts its
+        // untouched entries (last_frame older than the cutoff),
+        // sparing the pinned ids handed in. The cutoff arithmetic is
+        // the caller's, once, so the underflow guard lives there too.
+        virtual std::size_t sweep(std::uint32_t cutoff, const WidgetId* pinned,
+                                  std::size_t pinned_count) = 0;
     };
     template <typename T>
     struct StateTable : StateTableBase {
-        std::unordered_map<WidgetId, T> values;
+        // The value plus the sweep's clock: `last_frame` is the frame
+        // stamp at the entry's last touch, stamped by every
+        // persistent_state call.
+        struct Entry {
+            T value{};
+            std::uint32_t last_frame = 0;
+        };
+        std::unordered_map<WidgetId, Entry> values;
         void clear() override { values.clear(); }
         std::size_t erase(WidgetId id) override { return values.erase(id); }
+        std::size_t sweep(std::uint32_t cutoff, const WidgetId* pinned,
+                          std::size_t pinned_count) override {
+            std::size_t evicted = 0;
+            for (auto it = values.begin(); it != values.end();) {
+                bool is_pinned = false;
+                for (std::size_t p = 0; p < pinned_count; ++p) {
+                    if (pinned[p] == it->first) {
+                        is_pinned = true;
+                        break;
+                    }
+                }
+                if (!is_pinned && it->second.last_frame < cutoff) {
+                    it = values.erase(it);
+                    ++evicted;
+                } else {
+                    ++it;
+                }
+            }
+            return evicted;
+        }
     };
 
     // One pointer slot's half of hit_test; the public function folds the
@@ -552,6 +642,15 @@ private:
     bool veil_upon_entry_ = false;
 
     std::map<std::type_index, std::unique_ptr<StateTableBase>> state_tables_;
+    // The sweep's clock, bumped once per begin_frame. uint32 wraps after
+    // ~2 years of 60 fps frames; a wrap reads as ancient stamps for one
+    // window, keeping a few entries one sweep longer - benign.
+    std::uint32_t frame_stamp_ = 0;
+    // The sweep's exemptions, fixed like every gui table: 64 pins with
+    // the warn-once degrade past the cap, deduplicated on insert.
+    static constexpr int kMaxPinnedIds = 64;
+    std::array<WidgetId, kMaxPinnedIds> pinned_ids_{};
+    int pinned_count_ = 0;
 
     // --- layer scopes (begin_layer/end_layer) ---
     // Fixed depth with the IdStack's balanced clamp: a push past
@@ -620,6 +719,22 @@ private:
     int wheel_claim_count_ = 0;
     const void* wheel_winner_ = nullptr;  // last frame's resolved key
 
+    // --- Escape claims (claim_esc / the end_frame resolution) ---
+    // The frame's claim table, fixed like the wheel's: a frame with
+    // more open overlays than kMaxEscClaims warns once per process and
+    // the extras register nothing. begin_frame empties the table and
+    // the winner; end_frame resolves it when the frame carried an
+    // Escape no widget consumed.
+    static constexpr int kMaxEscClaims = 8;
+    struct EscClaim {
+        bool* open = nullptr;     // the claim key: the caller's flag
+        std::uint32_t layer = 0;  // the claiming overlay's stratum
+    };
+    std::array<EscClaim, kMaxEscClaims> esc_claims_{};
+    int esc_claim_count_ = 0;
+    const bool* esc_winner_ = nullptr;  // last frame's resolved claim key
+    bool escape_consumed_ = false;  // a widget spent this frame's Escape
+
     // --- Tab-focus scroll-into-view (focused_bounds/focus_into_view) ---
     // The focused widget's bounds, latched by state() as the widget
     // ran; and the request flag's one-frame queue. end_frame's nav
@@ -660,7 +775,8 @@ private:
 
 // The gui's once-per-process warns (id/panel stack overflow, census
 // duplicate/full, layer/clip/disabled overflow, focusable cap, wheel
-// claim cap) fire the first time only. reset_warn_once() re-arms the
+// claim cap, Escape claim cap, state pin cap) fire the first time
+// only. reset_warn_once() re-arms the
 // lot - the test seam, so one test's overflow does not silence the
 // next's warn path. App code has no reason to call it; it touches no
 // frame state, so any moment is legal (between frames reads cleanest).

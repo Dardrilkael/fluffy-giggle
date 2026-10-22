@@ -7,11 +7,28 @@
 #include "widgets_detail.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string_view>
 
 namespace ws::ui::gui {
+namespace {
+
+// The busy indicators' persistent halves: the wrap-around phase each
+// one advances on the frame clock, keyed by the widget's label - the
+// one number a running indicator owns. Two structs, not one shared:
+// persistent_state keys by type as well as id, and a caller laying a
+// spinner and an indeterminate bar under one label would otherwise
+// share (and fight over) one phase.
+struct SpinnerPhase {
+    float phase = 0.0f;  // [0, 1): the turn, one eighth per bright dot
+};
+struct IndeterminatePhase {
+    float phase = 0.0f;  // [0, 1): the sweep, the band's trip across
+};
+
+}  // namespace
 
 // fit_text's body. The display cut first (label_display - "##" id
 // suffixes never draw), then the width pass: the whole display when it
@@ -97,9 +114,9 @@ LabelFit fit_text(const char* label, float max_width,
 
 bool collapsing_header(GuiContext& gui, LayoutCursor& layout,
                        const ChromeTheme& theme, const char* label,
-                       bool& open, float width) {
+                       bool& open, float width, bool disabled) {
     // Fill-width: a header wants its container's line.
-    const Row row = begin_row(gui, layout, theme, label, width);
+    const Row row = begin_row(gui, layout, theme, label, width, disabled);
     const WidgetId id = row.id;
     const Rect& rect = row.rect;
     const WidgetResult& result = row.result;
@@ -156,9 +173,9 @@ bool collapsing_header(GuiContext& gui, LayoutCursor& layout,
 }
 
 bool selectable(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
-               const char* label, bool selected, float width) {
+               const char* label, bool selected, float width, bool disabled) {
     // Fill-width: list rows want their container's line.
-    const Row row = begin_row(gui, layout, theme, label, width);
+    const Row row = begin_row(gui, layout, theme, label, width, disabled);
     const WidgetId id = row.id;
     const Rect& rect = row.rect;
     const WidgetResult& result = row.result;
@@ -263,6 +280,120 @@ void progress(LayoutCursor& layout, const ChromeTheme& theme,
                                rect.height - 2.0f, theme.corner_radius,
                                theme.control_on);
     }
+}
+
+void spinner(GuiContext& gui, LayoutCursor& layout,
+            const ChromeTheme& theme, const char* label, float size) {
+    // The busy indicator: a square of chasing dots that claims nothing
+    // and ids only for its phase - `label` never draws (progress's own
+    // label discipline: the caller composes the caption beside it).
+    // A negative size takes the control height, like every default.
+    if (size < 0.0f) {
+        size = theme.control_height;
+    }
+    size = std::max(size, 0.0f);
+    const Rect rect = layout.next(size, size);
+    SpinnerPhase& state = gui.persistent_state<SpinnerPhase>(
+        gui.ids().id(label));
+
+    // One turn per 0.8 s - the bright dot hands off every tenth of a
+    // second, the pace the chase reads at any control size. Headless
+    // the frame clock reads 0: the phase holds, the honest answer
+    // without time.
+    state.phase = std::fmod(
+        state.phase + gui.input().dt_seconds / 0.8f, 1.0f);
+    if (rect.width <= 0.0f || rect.height <= 0.0f) {
+        return;  // degenerate: nothing to orbit (the phase still banked)
+    }
+
+    // Eight dots on a circle, the bright one wearing the accent and
+    // the rest the resting control face. The dot radius keeps a
+    // floor (a 1-px dot still reads at tiny sizes), the ring clears
+    // it, and a dot draws as a rounded quad at its own half-size - the
+    // radius clamp makes each a circle.
+    const float center_x = rect.x + rect.width * 0.5f;
+    const float center_y = rect.y + rect.height * 0.5f;
+    const float dot = std::max(1.0f, rect.width / 16.0f);
+    const float ring = std::max(0.0f, rect.width * 0.5f - dot);
+    const int bright = static_cast<int>(state.phase * 8.0f) % 8;
+    for (int i = 0; i < 8; ++i) {
+        const float angle =
+            static_cast<float>(i) * (6.2831853f / 8.0f) - 1.5707963f;
+        const float x = center_x + ring * std::cos(angle);
+        const float y = center_y + ring * std::sin(angle);
+        r2d::draw_rounded_quad(x - dot, y - dot, 2.0f * dot, 2.0f * dot,
+                               dot, i == bright ? theme.control_on
+                                                : theme.control_bg);
+    }
+}
+
+void progress_indeterminate(GuiContext& gui, LayoutCursor& layout,
+                            const ChromeTheme& theme, const char* label,
+                            float width) {
+    // progress's track with nothing to show: a band a third of the
+    // track's width sweeps it left to right, wrapping - the busy
+    // answer when there is no fraction to draw. `label` ids the bar
+    // for its phase and never draws, progress's own label discipline.
+    resolve_width(width, layout);
+    const Rect rect = layout.next(width, theme.control_height);
+    IndeterminatePhase& state =
+        gui.persistent_state<IndeterminatePhase>(gui.ids().id(label));
+
+    // One sweep per 1.2 s: fast enough to read as alive, slow enough
+    // not to strobe. Headless the band holds.
+    state.phase =
+        std::fmod(state.phase + gui.input().dt_seconds / 1.2f, 1.0f);
+
+    r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                           theme.corner_radius, theme.control_bg);
+    if (rect.width <= 2.0f) {
+        return;  // no room for a band (headless degenerate included)
+    }
+
+    // The band enters off the left edge and exits past the right one,
+    // so the visible slice is the intersection with the track - inset
+    // the hard 1 px on every side like progress's fill, so the SDF's
+    // half-pixel ramp never paints on the track's own outline.
+    const float band = rect.width / 3.0f;
+    const float span = rect.width + band;  // off-left in to off-right out
+    const float pos = -band + state.phase * span;  // the band's left edge
+    const float lo = std::max(pos, 1.0f);
+    const float hi = std::min(pos + band, rect.width - 1.0f);
+    if (hi > lo) {
+        r2d::draw_rounded_quad(rect.x + lo, rect.y + 1.0f, hi - lo,
+                               rect.height - 2.0f, theme.corner_radius,
+                               theme.control_on);
+    }
+}
+
+Rect status_bar(const ChromeTheme& theme, const char* text) {
+    // The frame-anchored strip: full width along the bottom edge, one
+    // control height, `text` left-inset past the padding. No row in any
+    // flow - no cursor at all - and no id: the caller draws it
+    // wherever it fits and keeps its content clear by the returned
+    // rect's top edge. Empty frames (headless) answer an empty rect
+    // and draw nothing.
+    const r2d::FrameSize frame = r2d::frame_size();
+    if (frame.width <= 0.0f || frame.height < theme.control_height) {
+        return {};
+    }
+    const Rect rect{0.0f, frame.height - theme.control_height,
+                    frame.width, theme.control_height};
+
+    // The chrome: the panel face with a 1-px rule along its top edge -
+    // the separator's own look, on the one edge that faces content.
+    r2d::draw_quad(rect.x, rect.y, rect.width, rect.height, theme.panel_bg);
+    r2d::draw_quad(rect.x, rect.y, rect.width, 1.0f, theme.border);
+
+    // The text, fitted to the width less both insets - a long line
+    // truncates like any label.
+    char scratch[128];
+    const LabelFit fit =
+        fit_text(text, std::max(0.0f, rect.width - 2.0f * theme.padding),
+                 theme, scratch, sizeof scratch);
+    draw_label(rect.x + theme.padding, rect.y, rect.height, fit,
+               theme.text, theme);
+    return rect;
 }
 
 }  // namespace ws::ui::gui

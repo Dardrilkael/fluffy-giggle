@@ -17,8 +17,8 @@ namespace ws::ui::gui {
 
 bool text_input(GuiContext& gui, LayoutCursor& layout,
                 const ChromeTheme& theme, const char* label, char* buf,
-                int capacity, float width) {
-    const Row row = begin_row(gui, layout, theme, label, width);
+                int capacity, float width, bool disabled) {
+    const Row row = begin_row(gui, layout, theme, label, width, disabled);
     const WidgetId id = row.id;
     const Rect& rect = row.rect;
     const WidgetResult& result = row.result;
@@ -164,8 +164,18 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
             edit.blink = 0.0f;
         }
         if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kEscape)]) {
-            eb.collapse(eb.caret);  // Escape's one job: drop the selection
-            edit.blink = 0.0f;
+            // Escape's one job: drop the selection. The drop SPENDS the
+            // key - consume_escape, only when a selection actually
+            // stood - so the popup or dialog behind the field keeps
+            // its claim that frame: one Escape abandons the edit, the
+            // next one closes the overlay. A bare-caret Escape (or a
+            // field inside no overlay) leaves the key to the
+            // arbitration untouched.
+            if (eb.has_selection()) {
+                eb.collapse(eb.caret);
+                edit.blink = 0.0f;
+                gui.consume_escape();
+            }
         }
 
         // Deleters before typing, when one frame carries both (no arrival

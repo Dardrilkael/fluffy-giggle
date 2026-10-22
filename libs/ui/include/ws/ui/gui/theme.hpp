@@ -38,6 +38,20 @@ struct ChromeTheme {
                                   // inside the window the press stays the
                                   // child's (a tap), past it the scroll owns
                                   // the finger
+    // Timings, SECONDS - not px. scaled() carries them as-is, exactly
+    // like disabled_alpha: a denser screen does not make a user
+    // faster, and a hover delay is a hover delay at any dpi.
+    float tooltip_delay = 0.4f;  // s the pointer must rest on a widget
+                                // before tooltip_delayed opens its
+                                // tooltip
+    float long_press_time = 0.5f;  // s a touch must hold a region,
+                                  // without wandering past
+                                  // drag_threshold, before it counts as
+                                  // a right-click (the context menu)
+    float menu_open_delay = 0.25f;  // s the mouse must rest on a menu
+                                   // item before its submenu opens;
+                                   // touch skips the delay - a tap
+                                   // toggles
     float label_char_width = 6.0f;  // the fontless label estimate: px per
                                     // character (the v1 bar placeholder
                                     // and fit_text's no-font measure)
@@ -73,13 +87,14 @@ struct ChromeTheme {
     // not a rework of this pointer.
     const r2d::Font* font = nullptr;
 
-    // A copy with every METRIC multiplied - the touch-density move. The
-    // shell reports the platform's ui scale (App::ui_scale(): display
+    // A copy with every px METRIC multiplied - the touch-density move.
+    // The shell reports the platform's ui scale (App::ui_scale(): display
     // density / 160 on Android, content scale on desktop); an app that
     // scales its theme, its font bake and its panel rects by the same
     // factor gets a gui that is finger-sized on a phone and unchanged on
     // a 100%-scaling desktop (1.0 is the identity). Faces and the font
-    // pointer carry as-is - the caller loads the bigger font.
+    // pointer carry as-is - the caller loads the bigger font - and so do
+    // the timing metrics and disabled_alpha (their fields say why).
     constexpr ChromeTheme scaled(float scale) const {
         ChromeTheme t = *this;
         t.control_height = control_height * scale;
