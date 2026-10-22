@@ -25,3 +25,8 @@ endif()
 # it stays ungated like playground and chatter - tap-to-drop rides the ui
 # backend's primary-touch -> mouse bridge.
 add_subdirectory(bounce)
+# ui_gallery is the gui widget set's acceptance view: one screen with every
+# ws::ui::gui widget family on it, no assets (the system font face, resolved
+# at the platform boundary), so it builds for the phone and the desktop
+# unchanged - ungated for the same reason as the gui apps above.
+add_subdirectory(ui_gallery)

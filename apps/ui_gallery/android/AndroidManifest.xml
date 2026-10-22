@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Input to tools/package-android.ps1 (aapt2 link). NativeActivity +
+     hasCode=false: zero Java - the OS dlopens lib/arm64-v8a/libui_gallery.so
+     (android.app.lib_name below) and calls ANativeActivity_onCreate, which
+     native_app_glue owns. Follows device rotation like playground (no
+     screenOrientation lock): configChanges below keeps the activity alive
+     across the turn, and the gallery lays itself out from frame_size()
+     alone, so the page reflows for the turned aspect on the next frame.
+     extractNativeLibs keeps lib loading on the classic install-time
+     extraction path (the packager deflates the .so; stored page-aligned
+     .so's would need zipalign -p). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.ws.ui_gallery"
+    android:versionCode="1"
+    android:versionName="0.1">
+
+    <!-- minSdk tracks ANDROID_PLATFORM (CMakePresets.json), the NDK
+         platform every app in the workspace builds against. -->
+    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="35" />
+
+    <application
+        android:hasCode="false"
+        android:label="ws ui gallery"
+        android:extractNativeLibs="true"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:label="ws ui gallery"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density">
+            <!-- The module base name: libui_gallery.so, no prefix, no suffix. -->
+            <meta-data android:name="android.app.lib_name"
+                android:value="ui_gallery" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

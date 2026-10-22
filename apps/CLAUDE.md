@@ -28,3 +28,13 @@ CMakeLists only wire ws libraries together.
   gain follow each impact's speed. On the phone the gravity sensor steers
   the pit (tilt to tumble; a dedicated NDK sensor thread feeds
   `set_gravity`, which wakes the sleepers for you).
+- `apps/ui_gallery` - the ws::ui::gui widget set's acceptance view (windowed
+  app, desktop and Android; its APK is `tools/package-android.ps1 -App
+  ui_gallery`): one screen with every widget family on it - a menu bar and
+  a right-click/long-press context menu on the chrome strip, a scrolling
+  page of sections (buttons, choices, sliders, text, lists, a table, tabs,
+  the overlays, the disabled scope), all five modal-dialog button sets, the
+  toast store's whole story, and a status bar the page keeps clear of. No
+  assets: the font is the system face resolved at the platform boundary
+  (like playground's), so Windows and Android build it from one source
+  unchanged.

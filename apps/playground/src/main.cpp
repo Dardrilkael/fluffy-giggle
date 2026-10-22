@@ -5,7 +5,8 @@
 // the app IS the platform boundary, the same reason it owns the font path.)
 // The screen-sized demos live in their own files - audio_demo (the sound
 // panel + its engine), touch_demo (trails + pinch), net_screen (the net lab,
-// which owns its own tick) - this file keeps the frame phases: the gui
+// which owns its own tick), menu_demo (the gui menu bar, the context menu
+// and the toast stack) - this file keeps the frame phases: the gui
 // panels, the simulation tick, the 2D/3D worlds, the overlay and the ImGui
 // debug window.
 
@@ -19,6 +20,7 @@
 #include <ws/ui/widgets.hpp>
 
 #include "audio_demo.hpp"
+#include "menu_demo.hpp"
 #include "net_screen.hpp"
 #include "touch_demo.hpp"
 
@@ -65,8 +67,11 @@ constexpr const char* kDefaultFontPath = "C:/Windows/Fonts/segoeui.ttf";
 
 // One rule for panel geometry, stated once. The gui block draws at these
 // rects; the pinch gate reads them back so a two-finger pinch over a panel
-// goes to the widgets, not the camera.
+// goes to the widgets, not the camera. The menu demo sits top-LEFT (the
+// right column is full) and the toast stack clears the sound panel's
+// top edge at the bottom-right corner.
 struct PanelLayout {
+    ws::ui::gui::Rect menu;
     ws::ui::gui::Rect demo;
     ws::ui::gui::Rect pages;
     ws::ui::gui::Rect sound;
@@ -77,6 +82,7 @@ struct PanelLayout {
                                const ws::ui::gui::Rect& net_rect) {
         const float x = frame.width - 244.0f * scale;
         return {
+            {24.0f * scale, 24.0f * scale, 220.0f * scale, 320.0f * scale},
             {x, 24.0f * scale, 220.0f * scale, 312.0f * scale},
             {x, 344.0f * scale, 220.0f * scale, 220.0f * scale},
             {x, frame.height - 152.0f * scale, 220.0f * scale, 128.0f * scale},
@@ -84,8 +90,8 @@ struct PanelLayout {
         };
     }
 
-    std::array<ws::ui::gui::Rect, 4> all() const {
-        return {demo, pages, sound, net};
+    std::array<ws::ui::gui::Rect, 5> all() const {
+        return {menu, demo, pages, sound, net};
     }
 };
 
@@ -163,6 +169,7 @@ private:
 
     // ---- extracted concerns ----
     playground::AudioDemo audio_;
+    playground::MenuDemo menu_;
     playground::TouchDemo touch_;
     playground::NetScreen net_;
 };
@@ -241,6 +248,16 @@ void PlaygroundApp::on_update() {
     const r2d::FrameSize gui_frame = r2d::frame_size();
     draw_gui_panels(gui_frame);
     gui_.end_layer();
+    // The toast stratum, outside the panel flow: the one draw_toasts
+    // call ages the store and lays its slots above the modal veil,
+    // clear of the sound panel at the bottom-right corner (the
+    // clearance = the panel's top edge + its margin). The slot an
+    // action button fired goes back to the demo for its reply.
+    const int toast_fired = ws::ui::gui::draw_toasts(
+        gui_, chrome_, menu_.toasts(), 156.0f * ui_scale_);
+    if (toast_fired >= 0) {
+        menu_.toast_fired(toast_fired);
+    }
     r2d::end();
     r2d::set_layer(0);
     gui_.end_frame();
@@ -284,6 +301,7 @@ void PlaygroundApp::draw_gui_panels(const ws::ui::r2d::FrameSize& frame) {
     }
 
     const auto panels = PanelLayout::compute(frame, ui_scale_, net_.panel_bounds());
+    menu_.draw_panel(gui_, layout_, chrome_, panels.menu);
     draw_demo_panel(panels.demo);
 
     // Pages panel: tabbed list / tune.

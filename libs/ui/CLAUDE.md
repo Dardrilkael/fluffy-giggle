@@ -21,7 +21,8 @@ gets a window, an event stream, and a place to submit draw commands —
   with depth-tested billboards, sorted then batched, flushed under the
   widgets.
 - **Immediate-mode gui** — `gui/` headers (`ws::ui::gui`): dependency-free
-  widgets (button/checkbox/slider/panel/tabs/scroll region/text input + the
+  widgets (button/checkbox/slider/panel/tabs/scroll region/text input,
+  menus, dialogs, toasts + the
   popup/tooltip/modal overlay scopes) that draw
   through r2d; caller-owned state, identity + hit-testing + layout + draw
   stay one seam.
@@ -86,7 +87,8 @@ libs/ui/
       layout_cursor.hpp      # LayoutCursor: flowing layout + panel stack
       rect.hpp                # Rect + its geometry helpers (contains, edges, centers, expand/shrink) — the shared vocabulary
       theme.hpp               # ChromeTheme: every color/metric the widgets use (+ the modal veil face), + the borrowed font
-      widgets.hpp            # button/checkbox/radio/toggle switch/slider/drag float/collapsing header/selectable/combo/text input/panel/tabs/scroll region + the overlay scopes (popup/tooltip/modal) + the statics (text/separator/progress) — the widget functions + fit_text
+      widgets.hpp            # button/checkbox/radio/toggle switch/slider/drag float/collapsing header/selectable/combo/text input/panel/tabs/scroll region + menus (menu_bar/context_menu) + modal_dialog + toasts + the overlay scopes (popup/tooltip/modal) + the statics (text/separator/progress/spinner/progress_indeterminate/status_bar) — the widget functions + fit_text
+      scoped.hpp             # the RAII guard for every begin/end pair (panel/scroll panel/popup/tooltip/modal/layer/disabled) — header-only, one class per pair, calling the same begins/ends
   src/                       # layer folders - the cut lines for a future split into shared libs
     app/                     # the shell itself
       app.cpp                # pimpl: the frame loop + backends; the device bootstrap, the swapchain/frame sync and the buffer/image/shader-module ops live in ws::gfx (stage 3b), unwrapped through gfx::Gpu's and gfx::Swapchain's opaque handles (the r2d device half casts the handles its Gpu methods hand back, once, at each create)
@@ -113,11 +115,16 @@ libs/ui/
       gui_layout.cpp         # LayoutCursor: stacked flow panels
       widgets_detail.hpp     # shared widget helpers + per-widget state structs (private to src/gui)
       widgets_buttons.cpp    # button, checkbox, radio, toggle_switch
-      widgets_basic.cpp      # collapsing_header, selectable, text, separator, progress + fit_text
+      widgets_basic.cpp      # collapsing_header, selectable, text, separator,
+                             # progress, spinner, progress_indeterminate,
+                             # status_bar + fit_text
       widgets_sliders.cpp    # slider_float/int (one shared body), drag_float
       widgets_panels.cpp     # tab_bar, begin/end_panel
       widgets_scroll.cpp     # begin/end_scroll_panel: wheel claim, flow drag, thumb grab
       widgets_overlays.cpp   # popup, tooltip, modal
+      widgets_dialogs.cpp    # modal_dialog: the stock button sets over begin_modal
+      widgets_menus.cpp      # menu_bar, context_menu: the item renderer + the open chain
+      widgets_toasts.cpp     # the Toasts store + draw_toasts (the toast stratum)
       widgets_combo.cpp      # combo row + its popup list
       widgets_text_input.cpp # text_input: caret/selection edits through the EditBuffer verbs
       widgets_table.cpp      # table: column grid, header, selectable rows
@@ -574,7 +581,9 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   all: contact IS presence.
 - **Layers (M7).** One layer concept across hit-testing and drawing:
   `begin_layer(Layer)`/`end_layer()` scope a stratum — `Layer::base` 10
-  (the default), `popup` 20, `tooltip` 30, `modal` 40 — and
+  (the default), `popup` 20, `tooltip` 30, `modal` 40, `toast` 50
+  (passive notifications: draw_toasts' stratum — visible and clickable
+  above the veil, blocking nothing) — and
   `begin_layer` drives `r2d::set_layer` with the same number, so the
   batch's sort order and the hit rules can never disagree about who is
   on top. A strictly higher layer wins hot whatever the record order
@@ -933,11 +942,82 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   (a label row — a negative width sizes to the display advance like a
   checkbox's sizing fit, a fixed width truncates into the row),
   `separator` (a 2-px border rule, a hardcoded pixel like the focus
-  ring's 1) and `progress` (the fraction clamps to [0, 1], a NaN draws
+  ring's 1), `progress` (the fraction clamps to [0, 1], a NaN draws
   empty; the fill rounds and clamps to its own half-height when thin)
-  take NO GuiContext at all — no id, no hit-test, nothing focusable;
+  and `status_bar` (the one static that places itself: full width, one
+  control height along the frame's bottom edge, taking no row — that
+  height is the `bottom_clearance` draw_toasts wants) take NO
+  GuiContext at all — no id, no hit-test, nothing focusable;
   the signature is how the set spells "cannot interact with you", and a
-  caller wanting a faded static dims its own theme copy.
+  caller wanting a faded static dims its own theme copy. The busy pair
+  takes the context for the frame clock alone: `spinner` (eight dots
+  chasing, size defaulting to control_height) and
+  `progress_indeterminate` (progress's track with a sweep) id on a
+  label that never draws and phase on `dt_seconds` (headless it reads
+  0 and the dots hold, the one honest answer without time).
+- **Menus (the widget arc's tail).** `MenuItem` arrays are per-frame
+  stack data, re-described every frame; what fires comes back as a
+  `MenuEvent` whose `item` pointer is identity-compared against THIS
+  frame's own arrays — checks and radios flip caller state (the rows
+  show it next frame), separators never fire, disabled rows cannot
+  (and a `disabled_reason` hand-draws its tooltip after a rest).
+  `menu_bar(gui, layout, theme, label, const MenuDesc*, count, int&
+  open)` lays a focusable title strip — `&X` mnemonics (Alt opens,
+  never toggles; first match wins; `&&` a literal), hover switching
+  while one is open, the caller's int the open menu index (-1 none).
+  `context_menu(gui, layout, theme, label, region, items, count, bool&
+  open)` opens at the PRESS POINT: a right-click inside the region, or
+  a touch held past `theme.long_press_time` (the lift cancelled, so it
+  clicks nothing); a second right-click while open moves the menu.
+  Shared machinery: submenus open after `theme.menu_open_delay` of
+  rest on a parent (immediately on a click), cascading to a depth cap
+  with the warn-once degrade; the chain closes on an outside press,
+  Esc (the deepest level wins the claim) or a firing row;
+  Up/Down/Enter/Space/Right/Left plus type-ahead walk the rows, which
+  drive their own highlight — menu rows are not focusable, and Tab
+  walks the bar's titles only. Open state is persistent, keyed by the
+  caller's label; a degenerate array (null or empty) closes and
+  answers nothing.
+- **Dialogs.** `modal_dialog(gui, theme, label, title, DialogButtons,
+  bool& open, width = 360, body = {})` is the one-call overlay over
+  `begin_modal`: a centered window (a negative width fills the frame;
+  the height is the content extent the last run measured — one settle
+  frame), the title and body rows in the dialog's OWN cursor + id
+  scope (it takes no row in any host flow), and one of five stock
+  button sets — none/ok/ok_cancel/yes_no/retry_cancel, the positive
+  first, uniform widths (the widest label + padding); a click answers
+  `DialogEvent{button, accepted}` with accepted = the positive.
+  Escape answers the NEGATIVE (the negative button's reading-order
+  index, or a plain -1 dismissal when the set carries none) — claimed
+  at entry, before the body runs, so the body's text field spends the
+  key first (one Escape abandons the edit, the next closes); Enter
+  answers the POSITIVE, spent before the body opens, and NEVER on the
+  frame that opened the dialog (the activating key edge is still in
+  it — the Enter that opened a confirm must not confirm it); the
+  `none` set takes neither key and answers nothing — its only way out
+  is a button the body draws. The VEIL-FIRST rule: call it before the
+  widgets it blocks, so the frame-wide veil lands on the very frame
+  the dialog opens.
+- **Toasts.** `Toasts` is the caller-owned store: `push({text,
+  severity, action, duration})` answers the slot id; `dismiss(slot)`,
+  `clear()`, `count()`. The text is BORROWED — re-read every frame it
+  draws, so string literals or long-lived bytes only. Eight slots; a
+  push past the cap evicts the greatest age (ties to the lower slot,
+  warned once) and answers with the victim's slot; `duration <= 0` is
+  sticky — only a click removes it. `draw_toasts(gui, theme, store,
+  bottom_clearance = 0)` runs ONCE a frame at the toast stratum:
+  aging first (expired toasts dismiss, not draw), newest nearest the
+  corner, stacked upward from the clearance; an action-button click
+  or a body press dismisses and answers that slot (-1 = nothing
+  fired), and a body press passes through to whatever sits beneath.
+- **Scope guards.** `scoped.hpp` wraps every begin/end pair in the
+  ScopedId pattern: `ScopedLayer`, `ScopedDisabled`, `ScopedPanel`/
+  `ScopedScrollPanel` (the content rect on `content()`),
+  `ScopedPopup`/`ScopedTooltip`/`ScopedModal` (explicit operator bool —
+  the overlay guards gate their end on the begin's own answer, so a
+  false begin pops nothing). Header-only, calling the same begins/ends
+  the app would, copy and move deleted; an early return inside a
+  scope cannot strand it.
 - **v1 limits, deliberate:** labels draw through the theme font's
   glyphs when one is set, the v1 quad bars otherwise — and both go
   through `fit_text`, so a label wider than its budget truncates on a
@@ -969,8 +1049,13 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   and the multi-touch demo: pointer-id-colored trails under every
   finger, two sliders dragged at once, a two-finger pinch-zoom composed
   app-side off the raw `frame_input()` table, finger-scrolling, and a
-  text echo of `TextInputEvent` codepoints. On desktop the touch
+  text echo of `TextInputEvent` codepoints — plus the menu screen (the
+  widget arc's end-to-end demo: menu bar, context menu, the modal
+  dialog and the toast store; `src/menu_demo.cpp`). On desktop the touch
   overlay simply draws nothing — there are no touches to show.
+  `apps/ui_gallery` is the set's acceptance view: every widget family
+  on one screen, Windows and Android from one source (see
+  `apps/CLAUDE.md`).
 
 ## Public API
 
@@ -1046,11 +1131,19 @@ drive unchanged (that boundary is deliberate; don't paint it over).
   `begin_popup`/`end_popup` (bool& open + anchor/bounds; the
   outside-press close, the press passing through), `begin_tooltip`/
   `end_tooltip` (chrome-only, show by value) and `begin_modal`/
-  `end_modal` (open by value, the theme's veil) — plus the M16 statics —
-  `text`/`separator`/`progress` (no GuiContext in the signature), plus layer scopes — the
-  `Layer` strata (base/popup/tooltip/modal) with `begin_layer`/
+  `end_modal` (open by value, the theme's veil) — plus `modal_dialog`
+  (the stock button sets over begin_modal: `DialogButtons`/
+  `DialogEvent`), `menu_bar`/`context_menu` (per-frame `MenuItem`
+  arrays, `MenuDesc`, `MenuEvent` identity wiring), the `Toasts` store
+  + `draw_toasts` (the toast stratum), the M16 statics —
+  `text`/`separator`/`progress`/`status_bar` (no GuiContext in the
+  signature) — and the busy pair `spinner`/`progress_indeterminate`,
+  plus layer scopes — the
+  `Layer` strata (base/popup/tooltip/modal/toast) with `begin_layer`/
   `end_layer`/`current_layer`, one numbering for both hit-testing and
-  r2d draw order. Hit clips: `push_hit_clip(rect)`/`pop_hit_clip()`/
+  r2d draw order, plus the RAII guards `ScopedLayer`/`ScopedDisabled`/
+  `ScopedPanel`/`ScopedScrollPanel`/`ScopedPopup`/`ScopedTooltip`/
+  `ScopedModal` (`scoped.hpp`, one per begin/end pair). Hit clips: `push_hit_clip(rect)`/`pop_hit_clip()`/
   `current_hit_clip()` (and the M18 `push_hit_clip_escape(rect)` —
   the popup/modal twin of r2d's overlay spelling) narrow what
   `hit_test` claims — the
