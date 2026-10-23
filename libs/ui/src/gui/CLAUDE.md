@@ -10,5 +10,8 @@
 - widgets_dialogs.cpp: modal_dialog (the stock button sets over begin_modal)
 - widgets_menus.cpp: menu_bar, context_menu (+ the shared item renderer/chain)
 - widgets_toasts.cpp: the Toasts store + draw_toasts (the toast stratum)
+- widgets_jobs.cpp: the ws::jobs bridge's out-of-line half - the JobProgress
+  mirror's store and the job_view state-to-view mapping (the row and toast
+  templates stay in job_progress.hpp with their JobHandle<T> parameter)
 - widgets_combo.cpp / widgets_text_input.cpp / widgets_table.cpp
 Rule: one widget family per file; never add a widget to a file already over ~400 lines.

@@ -37,6 +37,7 @@
 #include <ws/gfx/swapchain.hpp>
 #include <ws/input/event.hpp>
 #include <ws/input/input.hpp>
+#include <ws/jobs/job_system.hpp>
 #include <ws/ui/app.hpp>
 #include <ws/ui/render_command_queue.hpp>
 
@@ -152,6 +153,13 @@ struct App::Impl {
     // desktop, native_app_glue on Android. Window interactions below go
     // through it; no GLFW/Android symbol appears in this file.
     std::unique_ptr<WindowHost> host_;
+
+    // The installed job system (stage 8), caller-owned: null until
+    // install_job_system() hands one in, and the loop drains this
+    // pointer's marshal queue once per frame - between the event
+    // delivery and on_update(), the between-frames seam the gui's job
+    // helpers (<ws/ui/gui/job_progress.hpp>) build on.
+    ws::jobs::JobSystem* jobs_ = nullptr;
 
     // The Vulkan device layer (stage 3b): loader, instance, surface,
     // physical device, device, queue, VMA allocator - everything up to and
@@ -616,6 +624,21 @@ struct App::Impl {
             // on_update() - including the ws::input::WindowCloseEvent of the closing
             // click, so apps can react before the loop exits.
             deliver_events(app);
+
+            // The installed job system's frame drain (stage 8):
+            // everything its workers marshalled since the last frame -
+            // progress deliveries, completions - runs HERE, on the
+            // main thread, before this frame's on_update() and outside
+            // any gui frame, so the callbacks may touch gui state
+            // directly (the Toasts store, an app-owned JobProgress
+            // mirror) with no locks. Draining before the close check
+            // also delivers everything posted before the window close
+            // before the loop exits; the hidden-window continue paths
+            // below ride the same drain, so backgrounded completions
+            // still land.
+            if (jobs_ != nullptr) {
+                jobs_->drain();
+            }
             if (host_->should_close()) {
                 break;
             }
@@ -1034,6 +1057,16 @@ void App::install_clipboard(gui::GuiContext& gui) {
     if (impl_->host_) {
         impl_->host_->install_clipboard(gui);
     }
+}
+
+void App::install_job_system(ws::jobs::JobSystem& jobs) {
+    // A pointer store, nothing more: the drain site in the loop reads
+    // the member every iteration, so installing any time - on_setup()
+    // is the natural point, mid-run works too - takes effect on the
+    // next pump. The system stays caller-owned; the shell never drains
+    // after the loop, which is what the run()-outlives-it contract in
+    // the header rests on.
+    impl_->jobs_ = &jobs;
 }
 
 }  // namespace ws::ui

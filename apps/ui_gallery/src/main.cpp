@@ -3,7 +3,9 @@
 // submenu, checks, radios, a disabled row with its reason tooltip) and
 // a right-click / long-press context menu on the chrome strip; a
 // scrolling page of sections - buttons, choices, sliders, text, lists,
-// a table, tabs, the overlays (a raw popup, a raw modal scope, the
+// a table, tabs, a live job row (the ws::jobs bridge: a worker counting
+// under a progress bar, a cancel button, a failure toast), the overlays
+// (a raw popup, a raw modal scope, the
 // five modal-dialog button sets, the toast store), the disabled scope;
 // and a status bar the page keeps clear of. The gallery loads no
 // assets (its font is the system face, resolved here at the platform
@@ -29,7 +31,10 @@
 
 #include <ws/ui/app.hpp>
 #include <ws/input/input.hpp>
+#include <ws/jobs/job_system.hpp>
+#include <ws/jobs/errors.hpp>
 #include <ws/ui/gui/gui_context.hpp>
+#include <ws/ui/gui/job_progress.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
 #include <ws/ui/gui/scoped.hpp>
 #include <ws/ui/gui/theme.hpp>
@@ -38,8 +43,11 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <string>
+#include <thread>
 #include <utility>
 
 namespace {
@@ -77,6 +85,7 @@ enum Section {
     kLists,
     kTable,
     kTabs,
+    kJobs,
     kOverlays,
     kDisabled,
     kSectionCount
@@ -87,6 +96,15 @@ public:
     explicit GalleryApp(ws::ui::AppConfig config)
         : ws::ui::App(std::move(config)) {}
 
+    // One last drain on the way out: the shell stopped pumping at
+    // run()'s return, so anything the final jobs posted would
+    // otherwise die in the queue with the teardown WARN. This is the
+    // jobs lib's "drain before tearing down if completions matter"
+    // rule, spelled out where a real app writes it - the body runs
+    // before any member destructs, so the completions still see live
+    // state.
+    ~GalleryApp() override { jobs_.drain(); }
+
 protected:
     void on_setup() override {
         scale_ = ui_scale();
@@ -94,6 +112,11 @@ protected:
         chrome_ = gui::kDefaultChrome.scaled(scale_);
         chrome_.font = font_.empty() ? nullptr : &font_;
         install_clipboard(gui_);  // Ctrl+C/X/V in the text inputs
+        // The drain seat: once per frame, between the events and
+        // on_update, the shell drains this system - every progress
+        // report and completion below lands on the main thread, where
+        // the mirrors and the toast store already live.
+        install_job_system(jobs_);
         section_.fill(true);
     }
 
@@ -214,6 +237,21 @@ private:
     // The last event's one-line echo (the status bar's tail); every
     // widget reaction above writes here, nothing clears it.
     char status_[96] = "nothing has happened yet";
+
+    // ---- the jobs demo (the ws::jobs bridge) ----
+    // Two workers: enough to show the pool without spinning a thread
+    // per core on a phone. Caller-owned, like everything here - the
+    // shell only drains it.
+    ws::jobs::JobSystem jobs_{2};
+    // The counting job's mirror + handle; the row reads both every
+    // frame, the drain fills the mirror between them.
+    gui::JobProgress work_mirror_;
+    ws::jobs::JobHandle<int> work_{};
+    // The failure toasts' long-lived text - the toast store borrows
+    // its bytes (the flood literals' rule), so they must outlive the
+    // toast: members, never stack strings.
+    std::string work_text_;
+    std::string fail_text_;
 };
 
 void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
@@ -591,6 +629,78 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
             }
             gui::end_panel(gui_, layout_);
         }
+    }
+
+    // --- jobs: a live row (the ws::jobs bridge) ------------------------------------
+    if (gui::collapsing_header(gui_, layout_, chrome_, "jobs: a live row",
+                               section_[kJobs])) {
+        // "run a job": the counting demo - 100 steps of 20 ms (about
+        // two seconds of worker time), one progress report per step.
+        // The mirror fills on the drain (install_job_system put that
+        // between frames, right before on_update), the row below reads
+        // it live, and on_complete lands back on this thread:
+        // toast_on_failure for the error case, a status echo for
+        // success, quiet for cancelled - the helper's own contract.
+        if (gui::button(gui_, layout_, chrome_, "run a job", half)) {
+            work_mirror_.reset();
+            ws::jobs::JobCallbacks<int> cbs = work_mirror_.callbacks<int>();
+            cbs.on_complete = [this](ws::jobs::JobHandle<int> handle) {
+                const ws::core::Result<int> result = gui::toast_on_failure(
+                    toasts_, work_text_, handle, "the counting job");
+                if (result.has_value()) {
+                    std::snprintf(status_, sizeof status_,
+                                  "the job finished: counted to %d",
+                                  result.value());
+                } else if (result.error().code ==
+                           static_cast<std::int32_t>(
+                               ws::jobs::JobError::cancelled)) {
+                    std::snprintf(status_, sizeof status_,
+                                  "the counting job was cancelled");
+                }
+            };
+            work_ = jobs_.submit<int>(
+                [](ws::jobs::JobContext& ctx) -> ws::core::Result<int> {
+                    for (int step = 1; step <= 100; ++step) {
+                        std::this_thread::sleep_for(
+                            std::chrono::milliseconds(20));
+                        WS_TRY(ctx.check_cancel());
+                        char message[32];
+                        std::snprintf(message, sizeof message,
+                                      "counted %d/100", step);
+                        ctx.report_progress(step / 100.0f, message);
+                    }
+                    return 100;
+                },
+                ws::jobs::Priority::normal, {}, cbs);
+        }
+        layout_.same_line();
+        // "fail a job": the other completion story - a fake failure
+        // 400 ms in, and the toast the instant it lands. No row, no
+        // mirror: the toast IS the demo.
+        if (gui::button(gui_, layout_, chrome_, "fail a job", half)) {
+            ws::jobs::JobCallbacks<void> cbs;
+            cbs.on_complete = [this](ws::jobs::JobHandle<void> handle) {
+                (void)gui::toast_on_failure(toasts_, fail_text_, handle,
+                                             "the failing job");
+            };
+            (void)jobs_.submit<void>(
+                [](ws::jobs::JobContext&) -> ws::core::Status {
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(400));
+                    return ws::jobs::fail(ws::jobs::JobError::invalid_argument,
+                                           "the demo's fake failure");
+                },
+                ws::jobs::Priority::normal, {}, cbs);
+        }
+        // The row itself: "label: state" line, the state-colored bar,
+        // the cancel button - drawn every frame, the "no job" idle
+        // look before the first run and after every terminal state.
+        (void)gui::job_progress(gui_, layout_, chrome_, "the counting job",
+                                work_, work_mirror_);
+        gui::text(layout_, chrome_,
+                  "two workers; progress and completions cross to the "
+                  "main thread between frames",
+                  -1.0f);
     }
 
     // --- overlays: popup, modal, dialogs, toasts ----------------------------------

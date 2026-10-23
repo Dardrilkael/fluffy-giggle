@@ -14,16 +14,23 @@
 #include <doctest/doctest.h>
 
 #include <ws/ui/gui/gui_context.hpp>
+#include <ws/ui/gui/job_progress.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
 #include <ws/ui/gui/theme.hpp>
 #include <ws/ui/gui/widgets.hpp>
 #include <ws/input/input.hpp>
+#include <ws/jobs/errors.hpp>
+#include <ws/jobs/job_system.hpp>
 #include <ws/ui/renderer2d.hpp>
 
 #include "ui_gui_stub.hpp"
 
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstring>
+#include <string>
+#include <thread>
 
 namespace {
 
@@ -250,4 +257,210 @@ TEST_CASE("the InputFrame touch bridge runs without the platform layer") {
     CHECK(pointers[0].id == finger);
     CHECK(pointers[0].x == 40.0f);
     CHECK(pointers[0].pressed);
+}
+
+TEST_CASE("the JobProgress mirror stores what the drain delivers") {
+    ws::ui::gui::JobProgress mirror;
+    CHECK(mirror.fraction() == 0.0f);
+    CHECK(mirror.message().empty());
+
+    // The wired callbacks ARE the drain's delivery shape - calling
+    // them directly is exactly what drain() does on the main thread.
+    ws::jobs::JobCallbacks<int> cbs = mirror.callbacks<int>();
+    cbs.on_progress(0.5f, "halfway");
+    CHECK(mirror.fraction() == 0.5f);
+    CHECK(mirror.message() == "halfway");
+
+    // The delivery's pointer dies with the call: the mirror copied it
+    // out, so the word survives the buffer it came from.
+    {
+        char stack_message[24];
+        std::snprintf(stack_message, sizeof stack_message, "step %d", 37);
+        cbs.on_progress(0.37f, stack_message);
+        CHECK(mirror.fraction() == 0.37f);
+    }
+    CHECK(mirror.message() == "step 37");
+
+    // Clamped like the record clamps; a null message clears, it does
+    // not keep the stale one.
+    cbs.on_progress(2.0f, nullptr);
+    CHECK(mirror.fraction() == 1.0f);
+    CHECK(mirror.message().empty());
+    cbs.on_progress(-1.0f, "never mind");
+    CHECK(mirror.fraction() == 0.0f);
+
+    // reset(): a new job on the same mirror starts clean.
+    mirror.reset();
+    CHECK(mirror.fraction() == 0.0f);
+    CHECK(mirror.message().empty());
+}
+
+TEST_CASE("job_view maps every job state to its face") {
+    using ws::jobs::JobState;
+    const ws::ui::gui::ChromeTheme& chrome = kDefaultChrome;
+    ws::ui::gui::JobProgress mirror;
+    mirror.report(0.5f, "halfway");
+
+    // The live states wear the accent, carry the mirror's fraction,
+    // and keep the cancel armed; the running word is the mirror's
+    // latest message, falling back to "running" before the first
+    // report.
+    ws::ui::gui::JobView view =
+        ws::ui::gui::job_view(JobState::running, mirror, chrome);
+    CHECK(view.fraction == 0.5f);
+    CHECK(view.fill == chrome.control_pressed);
+    CHECK(std::string(view.word) == "halfway");
+    CHECK(view.cancellable);
+
+    mirror.report(0.5f, "");
+    view = ws::ui::gui::job_view(JobState::running, mirror, chrome);
+    CHECK(std::string(view.word) == "running");
+
+    view = ws::ui::gui::job_view(JobState::queued, mirror, chrome);
+    CHECK(view.fraction == 0.5f);
+    CHECK(view.fill == chrome.control_pressed);
+    CHECK(std::string(view.word) == "queued");
+    CHECK(view.cancellable);
+
+    // The terminal states land a FULL bar - the row shows its outcome,
+    // not its last report. done wears control_on, failed the toast
+    // red (the row and the toast it posts read as one story), and the
+    // cancel is dead on every one of them.
+    view = ws::ui::gui::job_view(JobState::done, mirror, chrome);
+    CHECK(view.fraction == 1.0f);
+    CHECK(view.fill == chrome.control_on);
+    CHECK(std::string(view.word) == "done");
+    CHECK(!view.cancellable);
+
+    view = ws::ui::gui::job_view(JobState::failed, mirror, chrome);
+    CHECK(view.fraction == 1.0f);
+    CHECK(view.fill == chrome.toast_error);
+    CHECK(std::string(view.word) == "failed");
+    CHECK(!view.cancellable);
+
+    // Cancelled keeps the half-run fraction - a cancelled job stays
+    // visibly half-run - but the dead face.
+    view = ws::ui::gui::job_view(JobState::cancelled, mirror, chrome);
+    CHECK(view.fraction == 0.5f);
+    CHECK(view.fill == chrome.control_disabled);
+    CHECK(std::string(view.word) == "cancelled");
+    CHECK(!view.cancellable);
+
+    // The null handle: the idle row.
+    view = ws::ui::gui::job_view(JobState::invalid, mirror, chrome);
+    CHECK(view.fraction == 0.0f);
+    CHECK(view.fill == 0u);
+    CHECK(std::string(view.word) == "no job");
+    CHECK(!view.cancellable);
+}
+
+TEST_CASE("the job row draws through the seam and its cancel button cancels") {
+    ws::ui::gui_test::stub.reset();
+    // A gated worker: the row's cancel click has something live to
+    // cancel, deterministically - the gate holds the callable until
+    // the click has landed, then check_cancel honours the request.
+    ws::jobs::JobSystem jobs{1};
+    std::atomic<bool> gate{false};
+    ws::jobs::JobHandle<int> handle = jobs.submit<int>(
+        [&gate](ws::jobs::JobContext& ctx) -> ws::core::Result<int> {
+            while (!gate.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            WS_TRY(ctx.check_cancel());
+            return 42;
+        });
+
+    GuiContext gui;
+    LayoutCursor layout;
+    ws::ui::gui::JobProgress mirror;
+    const auto draw_row = [&](const InputFrame& frame) -> bool {
+        gui.begin_frame(frame);
+        (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                       {0.0f, 0.0f, 400.0f, 300.0f});
+        const bool cancelled = ws::ui::gui::job_progress(
+            gui, layout, kDefaultChrome, "job", handle, mirror);
+        ws::ui::gui::end_panel(gui, layout);
+        gui.end_frame();
+        return cancelled;
+    };
+
+    // The row really drew. The test theme is fontless, so both label
+    // lines draw their v1 bars (plain quads) rather than draw_texts;
+    // the row's rounded quads are the bar's track, the bar's fill and
+    // the cancel button's face. Frame 1 with an empty mirror draws
+    // exactly track + button - no fill - plus the panel chrome's two
+    // plain quads. The pointer parks on the cancel button's center:
+    // the row's second line, right end - content 12 px in, the bar
+    // taking everything but the button's 80 px and one spacing, so the
+    // button spans x 308..388, y 44..68.
+    CHECK(!draw_row(snap(348.0f, 56.0f)));
+    CHECK(ws::ui::gui_test::stub.quads == 4);  // panel chrome + 2 label bars
+    CHECK(ws::ui::gui_test::stub.rounded == 2);  // track + button, no fill
+
+    // Script the mirror with what the drain would have delivered and
+    // redraw: the fill appears - the frame's third rounded quad, the
+    // row's fraction flowing from the mirror to the bar. The counters
+    // are cumulative, so frame 2 adds its whole redraw: track + the
+    // new fill + the button face.
+    mirror.report(0.9f, "almost there");
+    CHECK(!draw_row(snap(348.0f, 56.0f)));
+    CHECK(ws::ui::gui_test::stub.rounded == 5);
+
+    // The full click fires exactly once and requests the cancel.
+    CHECK(!draw_row(snap(348.0f, 56.0f, true, true)));       // press
+    CHECK(draw_row(snap(348.0f, 56.0f, false, false, true)));  // release
+
+    // Release the worker: the honoured cancel lands the cancelled
+    // state - the click did the asking, the job did the answering.
+    gate.store(true);
+    handle.wait();
+    CHECK(handle.state() == ws::jobs::JobState::cancelled);
+
+    // The terminal row draws its dead look without flinching.
+    CHECK(!draw_row(snap(348.0f, 56.0f)));
+}
+
+TEST_CASE("toast_on_failure toasts only failures") {
+    ws::jobs::JobSystem jobs{1};
+    ws::ui::gui::Toasts toasts;
+    std::string text;
+
+    // A failed job: the helper formats the error into the long-lived
+    // buffer and posts exactly one error toast that borrows it.
+    ws::jobs::JobHandle<int> failed = jobs.submit<int>(
+        [](ws::jobs::JobContext&) -> ws::core::Result<int> {
+            return ws::jobs::fail(ws::jobs::JobError::invalid_argument,
+                                   "the fake failure");
+        });
+    failed.wait();
+    const ws::core::Result<int> failed_result = ws::ui::gui::toast_on_failure(
+        toasts, text, failed, "the demo job");
+    CHECK(!failed_result.has_value());
+    CHECK(toasts.count() == 1);
+    CHECK(text == "the demo job: the fake failure");
+
+    // A cancelled job is not a failure: no toast, and the borrowed
+    // buffer untouched - the Result crosses back for the caller's own
+    // quiet handling.
+    ws::jobs::JobHandle<int> cancelled = jobs.submit<int>(
+        [](ws::jobs::JobContext&) -> ws::core::Result<int> {
+            return ws::jobs::fail(ws::jobs::JobError::cancelled);
+        });
+    cancelled.wait();
+    const ws::core::Result<int> cancelled_result =
+        ws::ui::gui::toast_on_failure(toasts, text, cancelled,
+                                      "the cancelled job");
+    CHECK(!cancelled_result.has_value());
+    CHECK(toasts.count() == 1);  // still only the failure's
+    CHECK(text == "the demo job: the fake failure");
+
+    // A success crosses the value straight through, no toast.
+    ws::jobs::JobHandle<int> done = jobs.submit<int>(
+        [](ws::jobs::JobContext&) -> ws::core::Result<int> { return 42; });
+    done.wait();
+    const ws::core::Result<int> done_result =
+        ws::ui::gui::toast_on_failure(toasts, text, done);
+    CHECK(done_result.has_value());
+    CHECK(done_result.value() == 42);
+    CHECK(toasts.count() == 1);
 }

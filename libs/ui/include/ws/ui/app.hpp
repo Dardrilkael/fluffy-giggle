@@ -13,6 +13,11 @@ class Event;  // the event family lives in ws::input (stage 3a): the shell
               // queues these between frames and delivers each to on_event()
 }  // namespace ws::input
 
+namespace ws::jobs {
+class JobSystem;  // the frame drain's target (stage 8): installed, never
+                 // owned - no ws::jobs header needed to read this one
+}  // namespace ws::jobs
+
 namespace ws::ui {
 
 struct AppConfig {
@@ -68,6 +73,21 @@ public:
     // clipboard wiring (Android today) leaves the seam unset and the
     // shortcuts no-op. Include <ws/ui/gui/gui_context.hpp> for the type.
     void install_clipboard(gui::GuiContext& gui);
+
+    // Installs the job system whose marshal queue the shell drains once
+    // per frame, right after the platform events land and BEFORE
+    // on_update() runs. Every progress delivery and completion the
+    // system marshalled therefore runs on the main thread, between
+    // frames, where callbacks may touch gui state directly (the Toasts
+    // store, an app-owned JobProgress mirror) with no locks - the
+    // single-thread guarantee the gui helpers in
+    // <ws/ui/gui/job_progress.hpp> are built on. The system is
+    // caller-owned: install once from on_setup() and keep it alive
+    // past run() (or drain it by hand before destroying it - the shell
+    // never drains after the loop). Installing nothing leaves the
+    // shell draining nothing. Include <ws/jobs/job_system.hpp> for the
+    // type.
+    void install_job_system(ws::jobs::JobSystem& jobs);
 
 protected:
     // Called once after the context and ImGui are ready, before the first

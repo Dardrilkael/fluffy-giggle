@@ -33,6 +33,9 @@ CMakeLists only wire ws libraries together.
   ui_gallery`): one screen with every widget family on it - a menu bar and
   a right-click/long-press context menu on the chrome strip, a scrolling
   page of sections (buttons, choices, sliders, text, lists, a table, tabs,
+  a live job row - the ws::jobs bridge: a counting worker under a
+  progress bar with a cancel button, a failure that posts the error
+  toast, all completions landing on the main thread between frames -
   the overlays, the disabled scope), all five modal-dialog button sets, the
   toast store's whole story, and a status bar the page keeps clear of. No
   assets: the font is the system face resolved at the platform boundary

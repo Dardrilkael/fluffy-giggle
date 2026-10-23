@@ -1,13 +1,16 @@
 # ws::math is a workspace lib (the fixed-size vecmath behind the 3D camera
 # path), not a third-party: PUBLIC like ws::core, which apps already receive
 # transitively the same way. The include stays internal to src/ - the public
-# header keeps plain floats.
-ws_add_library(ui DEPENDS ws::core ws::math ws::input ws::gfx)
+# header keeps plain floats. ws::jobs is the same kind of workspace tier
+# (stage 8): App drains an installed system's marshal queue between frames.
+ws_add_library(ui DEPENDS ws::core ws::math ws::input ws::gfx ws::jobs)
 
 # The gui subset as its own archive - the stage-2 acceptance cut. It links
 # ws::core + ws::input (the frame snapshot it reads; itself core-only,
-# pure CPU): no Vulkan, GLFW, volk or vma target ever appears on its link
-# line, because the gui draws through the r2d free-function seam that
+# pure CPU) + ws::jobs (the job_progress bridge's backend; the same
+# purity class - pure std + core, no platform anywhere): no Vulkan,
+# GLFW, volk or vma target ever appears on its link line, because the
+# gui draws through the r2d free-function seam that
 # ws_ui's renderer TUs satisfy at the final link. Sources compile once
 # (ws_ui links this archive in, so apps see no difference) and
 # test_ui_gui below links it WITHOUT the renderer - the acceptance the
@@ -20,7 +23,7 @@ target_include_directories(ws_ui_gui
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_features(ws_ui_gui PUBLIC cxx_std_20)
 ws_set_warnings(ws_ui_gui)
-target_link_libraries(ws_ui_gui PUBLIC ws::core ws::input)
+target_link_libraries(ws_ui_gui PUBLIC ws::core ws::input ws::jobs)
 target_link_libraries(ws_ui PRIVATE ws_ui_gui)
 
 # Platform + gui sources: exactly one windowing TU builds (the WindowHost
@@ -69,8 +72,9 @@ if(TARGET test_ui)
 endif()
 
 # The stage-2 acceptance test: gui + its tests with NO Vulkan or GLFW on
-# the link line. Links the gui archive (ws::ui_gui; its ws::input side is
-# core-only and pure CPU, so the cut stays renderer-free), the REAL
+# the link line. Links the gui archive (ws::ui_gui; its ws::input and
+# ws::jobs sides are core-only and pure CPU, so the cut stays
+# renderer-free), the REAL
 # pure-CPU font bake (src/text/font.cpp + its stb implementation TU -
 # neither touches a GPU) and a stub standing in for the r2d free functions
 # the gui draws through (tests/ui_gui_r2d_stub.cpp records every call, so
