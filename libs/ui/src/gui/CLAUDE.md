@@ -14,4 +14,8 @@
   mirror's store and the job_view state-to-view mapping (the row and toast
   templates stay in job_progress.hpp with their JobHandle<T> parameter)
 - widgets_combo.cpp / widgets_text_input.cpp / widgets_table.cpp
+- theme_color.cpp / theme_data.cpp: the stage-10 theme data half - the
+  OKLCH/WCAG color math + accent derivation, and the ThemeData document
+  around ChromeTheme. Pure value types, not widgets; the widget-file rule
+  below does not apply.
 Rule: one widget family per file; never add a widget to a file already over ~400 lines.

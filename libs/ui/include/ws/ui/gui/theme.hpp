@@ -16,7 +16,7 @@ struct ChromeTheme {
     std::uint32_t panel_bg = r2d::rgba(38, 40, 46);
     std::uint32_t control_bg = r2d::rgba(70, 73, 78);
     std::uint32_t control_hovered = r2d::rgba(92, 96, 102);
-    std::uint32_t control_pressed = r2d::rgba(72, 132, 192);
+    std::uint32_t control_pressed = r2d::rgba(100, 160, 220);
     std::uint32_t control_disabled = r2d::rgba(50, 52, 56);
     std::uint32_t control_on = r2d::rgba(90, 168, 110);  // toggled/checked accent
     std::uint32_t text = r2d::rgba(235, 238, 242);
@@ -123,7 +123,10 @@ struct ChromeTheme {
 };
 
 // The stock look. constexpr, so a custom theme starts from it with
-// designated member overrides and stays a compile-time value.
+// designated member overrides and stays a compile-time value. Both
+// stock themes pass the gui/theme_color.hpp contrast checks
+// (contrast_failures() is empty on each); the faces are picked, not
+// derived, but they answer to the same rules.
 inline constexpr ChromeTheme kDefaultChrome{};
 
 // The light stock theme - same metrics, a daylight face set: the dark
@@ -135,30 +138,34 @@ inline constexpr ChromeTheme kDefaultChrome{};
 inline constexpr ChromeTheme kLightChrome{
     r2d::rgba(240, 240, 244),    // panel_bg
     r2d::rgba(210, 212, 216),    // control_bg
-    r2d::rgba(190, 193, 198),    // control_hovered
-    r2d::rgba(90, 130, 200),     // control_pressed
+    r2d::rgba(184, 187, 193),    // control_hovered
+    r2d::rgba(70, 110, 180),     // control_pressed
     r2d::rgba(225, 226, 230),    // control_disabled
-    r2d::rgba(40, 140, 80),      // control_on
+    r2d::rgba(30, 128, 68),      // control_on
     r2d::rgba(30, 32, 38),       // text
     r2d::rgba(0, 0, 0, 40),      // border
     r2d::rgba(96, 96, 96, 110),  // veil
 };
 
-// Multiplies a packed 0xRRGGBBAA color's alpha channel - the disabled
-// look's one helper. control_disabled covers a disabled widget's FACE
-// (its idle, hover and pressed faces all collapse to it); every other
-// color the widget draws passes through here with the theme's
-// disabled_alpha, so the whole widget dims as one and full-strength
-// text never rides a dead face. The factor clamps to [0, 1] worth of
-// alpha - negative and oversaturated inputs cannot wrap the byte.
+// Multiplies a packed 0xRRGGBBAA color's alpha channel - the alpha is
+// the LOW byte, where r2d::rgba puts it and the batch reader looks
+// for it. (The M10 original scaled the TOP byte - red - by mistake,
+// and its test pinned that; the stage-10 color tests caught it.) The
+// disabled look's one helper. control_disabled covers a disabled
+// widget's FACE (its idle, hover and pressed faces all collapse to
+// it); every other color the widget draws passes through here with
+// the theme's disabled_alpha, so the whole widget dims as one and
+// full-strength text never rides a dead face. The factor clamps to
+// [0, 1] worth of alpha - negative and oversaturated inputs cannot
+// wrap the byte.
 constexpr std::uint32_t dim(std::uint32_t color, float factor) {
-    float a = static_cast<float>((color >> 24) & 0xFFu) * factor;
+    float a = static_cast<float>(color & 0xFFu) * factor;
     if (a < 0.0f) {
         a = 0.0f;
     } else if (a > 255.0f) {
         a = 255.0f;
     }
-    return (color & 0x00FFFFFFu) | (static_cast<std::uint32_t>(a) << 24);
+    return (color & 0xFFFFFF00u) | static_cast<std::uint32_t>(a);
 }
 
 }  // namespace ws::ui::gui

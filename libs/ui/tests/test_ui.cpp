@@ -9624,19 +9624,21 @@ TEST_CASE("disabled: begin_frame clears a scope an early return never closed") {
 
 TEST_CASE("theme: dim() multiplies the alpha channel only") {
     using namespace ws::ui::gui;
-    // Colors are AARRGGBB - the alpha is the top byte.
+    // Colors are RRGGBBAA - the alpha is the LOW byte, r2d::rgba's
+    // order. (The M10 form of this case assumed AARRGGBB and so
+    // pinned the red-scaling bug; the stage-10 color math caught it.)
     // 1.0 is the identity.
-    CHECK(dim(0xFF203040u, 1.0f) == 0xFF203040u);
-    CHECK(dim(0x80203040u, 1.0f) == 0x80203040u);
+    CHECK(dim(0x203040FFu, 1.0f) == 0x203040FFu);
+    CHECK(dim(0x20304080u, 1.0f) == 0x20304080u);
     // 255 * 0.5 truncates to 127 - the low bits drop, they do not round.
-    CHECK(dim(0xFF203040u, 0.5f) == 0x7F203040u);
+    CHECK(dim(0x203040FFu, 0.5f) == 0x2030407Fu);
     // Zero and a negative factor drain the alpha, never the color.
-    CHECK(dim(0x40203040u, 0.0f) == 0x00203040u);
-    CHECK(dim(0xFF203040u, -1.0f) == 0x00203040u);
+    CHECK(dim(0x20304040u, 0.0f) == 0x20304000u);
+    CHECK(dim(0x203040FFu, -1.0f) == 0x20304000u);
     // An oversaturated factor clamps at full alpha.
-    CHECK(dim(0x80203040u, 2.0f) == 0xFF203040u);
+    CHECK(dim(0x20304080u, 2.0f) == 0x203040FFu);
     // An already-transparent color stays transparent.
-    CHECK(dim(0x00203040u, 0.5f) == 0x00203040u);
+    CHECK(dim(0x20304000u, 0.5f) == 0x20304000u);
 }
 
 // --- M22: the menus, dialogs and toasts -------------------------------------------

@@ -17,6 +17,8 @@
 #include <ws/ui/gui/job_progress.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
 #include <ws/ui/gui/theme.hpp>
+#include <ws/ui/gui/theme_color.hpp>
+#include <ws/ui/gui/theme_data.hpp>
 #include <ws/ui/gui/widgets.hpp>
 #include <ws/input/input.hpp>
 #include <ws/jobs/errors.hpp>
@@ -28,6 +30,8 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -38,6 +42,7 @@ using ws::ui::gui::GuiContext;
 using ws::input::InputFrame;
 using ws::ui::gui::LayoutCursor;
 using ws::ui::gui::kDefaultChrome;
+using ws::ui::gui::kLightChrome;
 
 // A pointer snapshot at (x, y) with the primary button's held state and
 // optional press/release edges set - the same shape test_ui's snap()
@@ -463,4 +468,179 @@ TEST_CASE("toast_on_failure toasts only failures") {
     CHECK(done_result.has_value());
     CHECK(done_result.value() == 42);
     CHECK(toasts.count() == 1);
+}
+
+TEST_CASE("oklch conversions round-trip the stock faces") {
+    using ws::ui::gui::oklch_from_rgb;
+    using ws::ui::gui::rgb_from_oklch;
+
+    const std::uint32_t faces[] = {
+        kDefaultChrome.panel_bg,       kDefaultChrome.control_bg,
+        kDefaultChrome.control_on,     kDefaultChrome.control_pressed,
+        kDefaultChrome.control_hovered,
+        kDefaultChrome.control_disabled, kDefaultChrome.text,
+        kLightChrome.panel_bg,         kLightChrome.control_bg,
+        kLightChrome.control_on,       kLightChrome.control_pressed,
+        kLightChrome.control_hovered,  kLightChrome.control_disabled,
+        kLightChrome.text,
+    };
+    const auto channel = [](std::uint32_t color, int shift) {
+        return (color >> shift) & 0xFFu;
+    };
+    for (const std::uint32_t face : faces) {
+        CAPTURE(face);
+        const std::uint32_t back = rgb_from_oklch(oklch_from_rgb(face));
+        // One step of 8-bit quantization slack per channel - an
+        // in-gamut color survives the double round trip almost
+        // exactly.
+        CHECK(std::abs(static_cast<int>(channel(back, 16)) -
+                       static_cast<int>(channel(face, 16))) <= 1);
+        CHECK(std::abs(static_cast<int>(channel(back, 8)) -
+                       static_cast<int>(channel(face, 8))) <= 1);
+        CHECK(std::abs(static_cast<int>(channel(back, 0)) -
+                       static_cast<int>(channel(face, 0))) <= 1);
+    }
+
+    // Anchors: black is no lightness, white is all of it, and the
+    // perceptual order tracks the obvious one on the light theme.
+    CHECK(oklch_from_rgb(0x000000FFu).L ==
+          doctest::Approx(0.0).epsilon(0.001));
+    CHECK(oklch_from_rgb(0xFFFFFFFFu).L ==
+          doctest::Approx(1.0).epsilon(0.001));
+    CHECK(oklch_from_rgb(kLightChrome.panel_bg).L >
+          oklch_from_rgb(kLightChrome.text).L);
+}
+
+TEST_CASE("contrast_ratio anchors") {
+    using ws::ui::gui::contrast_ratio;
+
+    // The ends of the scale: the textbook 21:1, and a color against
+    // itself.
+    CHECK(contrast_ratio(0xFFFFFFFFu, 0x000000FFu) ==
+          doctest::Approx(21.0).epsilon(0.001));
+    CHECK(contrast_ratio(0x808080FFu, 0x808080FFu) ==
+          doctest::Approx(1.0));
+    // Order-independent.
+    CHECK(contrast_ratio(0x000000FFu, 0xFFFFFFFFu) ==
+          contrast_ratio(0xFFFFFFFFu, 0x000000FFu));
+}
+
+TEST_CASE("the stock themes pass their contrast checks") {
+    using ws::ui::gui::contrast_failures;
+    using ws::ui::gui::oklch_from_rgb;
+
+    CHECK(contrast_failures(kDefaultChrome).empty());
+    CHECK(contrast_failures(kLightChrome).empty());
+
+    // Hover is a perceptual contract, not a WCAG pair: the shift off
+    // the control face clears 0.05 Oklab lightness on both themes -
+    // the pointer is the indicator, the shift just has to be visible.
+    for (const ws::ui::gui::ChromeTheme& theme :
+         {kDefaultChrome, kLightChrome}) {
+        const double gap = oklch_from_rgb(theme.control_hovered).L -
+                           oklch_from_rgb(theme.control_bg).L;
+        CHECK(std::abs(gap) >= 0.05);
+    }
+}
+
+TEST_CASE("apply_accent derives contrast-safe faces across accents") {
+    using ws::ui::gui::apply_accent;
+    using ws::ui::gui::contrast_failures;
+
+    // A spread: brandish hues, pastels, and the awkward ends - a
+    // near-black accent on the dark chrome and a near-white on the
+    // light have to TRAVEL to clear their ratios, which is the
+    // walk's whole job.
+    const std::uint32_t accents[] = {
+        0x4C84C0FFu,  // blue
+        0x54A054FFu,  // green
+        0xD08830FFu,  // orange
+        0xC04040FFu,  // red
+        0xE090B0FFu,  // pink
+        0x808080FFu,  // mid gray
+        0x202020FFu,  // near-black
+        0xF0F0F0FFu,  // near-white
+    };
+    for (const std::uint32_t accent : accents) {
+        CAPTURE(accent);
+        ws::ui::gui::ChromeTheme dark = kDefaultChrome;
+        apply_accent(dark, accent);
+        CHECK(contrast_failures(dark).empty());
+
+        ws::ui::gui::ChromeTheme light = kLightChrome;
+        apply_accent(light, accent);
+        CHECK(contrast_failures(light).empty());
+    }
+}
+
+TEST_CASE("apply_accent leaves the semantic faces alone") {
+    using ws::ui::gui::apply_accent;
+
+    const ws::ui::gui::ChromeTheme stock = kDefaultChrome;
+    ws::ui::gui::ChromeTheme dark = kDefaultChrome;
+    apply_accent(dark, 0xC04040FFu);
+
+    // The faces that carry meaning - the veil, the severities, text,
+    // the backgrounds - are never derived: they keep their shipped
+    // values verbatim.
+    CHECK(dark.veil == stock.veil);
+    CHECK(dark.toast_info == stock.toast_info);
+    CHECK(dark.toast_warning == stock.toast_warning);
+    CHECK(dark.toast_error == stock.toast_error);
+    CHECK(dark.text == stock.text);
+    CHECK(dark.panel_bg == stock.panel_bg);
+    CHECK(dark.control_bg == stock.control_bg);
+    CHECK(dark.border == stock.border);
+
+    // The four accent-driven faces all moved.
+    CHECK(dark.control_on != stock.control_on);
+    CHECK(dark.control_pressed != stock.control_pressed);
+    CHECK(dark.control_hovered != stock.control_hovered);
+    CHECK(dark.control_disabled != stock.control_disabled);
+}
+
+TEST_CASE("the derived hover follows the background polarity") {
+    using ws::ui::gui::apply_accent;
+    using ws::ui::gui::oklch_from_rgb;
+
+    // Dark chrome: hover lightens - further from the dark panel.
+    ws::ui::gui::ChromeTheme dark = kDefaultChrome;
+    apply_accent(dark, 0x4C84C0FFu);
+    const double dark_gap = oklch_from_rgb(dark.control_hovered).L -
+                            oklch_from_rgb(dark.control_bg).L;
+    CHECK(dark_gap >= 0.05);
+
+    // Light chrome: hover darkens - further from the light panel.
+    ws::ui::gui::ChromeTheme light = kLightChrome;
+    apply_accent(light, 0x4C84C0FFu);
+    const double light_gap = oklch_from_rgb(light.control_hovered).L -
+                             oklch_from_rgb(light.control_bg).L;
+    CHECK(light_gap <= -0.05);
+}
+
+TEST_CASE("ThemeData carries the stock documents and the accent") {
+    using ws::ui::gui::ThemeData;
+    using ws::ui::gui::apply_accent;
+    using ws::ui::gui::default_dark;
+    using ws::ui::gui::default_light;
+
+    const ThemeData dark = default_dark();
+    CHECK(dark.chrome.panel_bg == kDefaultChrome.panel_bg);
+    CHECK(dark.chrome.text == kDefaultChrome.text);
+    CHECK(dark.accent == 0u);  // the stock faces: never derived
+    CHECK(dark.regular.size > 0.0f);  // roles carry real sizes
+    CHECK(dark.panel_shadow.blur > 0.0f);
+
+    const ThemeData light = default_light();
+    CHECK(light.chrome.panel_bg == kLightChrome.panel_bg);
+    CHECK(light.chrome.control_on == kLightChrome.control_on);
+
+    // The document-level apply_accent derives into the chrome AND
+    // remembers the accent, forced opaque - even a grubby-alpha
+    // input lands clean.
+    ThemeData styled = default_dark();
+    apply_accent(styled, 0x54A05499u);
+    CHECK(styled.accent == 0x54A054FFu);
+    CHECK(styled.chrome.control_on != dark.chrome.control_on);
+    CHECK(styled.chrome.panel_bg == dark.chrome.panel_bg);
 }
