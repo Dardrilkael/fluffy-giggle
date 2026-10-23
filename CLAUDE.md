@@ -65,6 +65,9 @@ One line each - the per-tree CLAUDE.md files carry the detail:
 - `libs/jobs` - the headless job system: a Result-shaped pool with
   priorities, cooperative cancellation and completions marshalled to the
   owner thread; ws::ui's App drains it once per frame.
+- `libs/settings` - the headless settings store: a typed schema with
+  constraints, layered sources with provenance, change observers, and
+  JSON persistence through a minimal FileSystem seam.
 - `apps/*` - the executables.
 
 ## Read when
