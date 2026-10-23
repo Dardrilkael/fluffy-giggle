@@ -64,6 +64,9 @@ public:
     // Insert or assign: a new key appends; an existing key keeps its
     // position and takes the value.
     void set(std::string key, Value value);
+    // Drop a key if present; later entries shift up. True when there
+    // was one. (Migration steps need this to retire a renamed key.)
+    bool erase(std::string_view key);
 
     [[nodiscard]] std::vector<Entry>::const_iterator begin() const noexcept;
     [[nodiscard]] std::vector<Entry>::const_iterator end() const noexcept;

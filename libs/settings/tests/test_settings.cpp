@@ -27,6 +27,8 @@ namespace {
 using ws::settings::ConstraintAction;
 using ws::settings::EnumConstraint;
 using ws::settings::Layer;
+using ws::settings::MigrationStep;
+using ws::settings::Migrations;
 using ws::settings::RangeConstraint;
 using ws::settings::RegexConstraint;
 using ws::settings::Schema;
@@ -951,4 +953,390 @@ TEST_CASE("json: integer and real stay apart; typed pulls answer Result") {
     CHECK(parsed("[1]").as_array() != nullptr);
     CHECK(parsed("3").as_object() == nullptr);
     CHECK(parsed("{}").as_object() != nullptr);
+}
+
+// ---- the shape version + the migration chain ---------------------------
+
+TEST_CASE("schema: the shape version and the reserved key") {
+    Schema schema;
+    CHECK(schema.version() == 1);
+    REQUIRE(schema.set_version(3));
+    CHECK(schema.version() == 3);
+
+    const auto low = schema.set_version(0);
+    REQUIRE_FALSE(low);
+    CHECK(low.error().code == code_of(SettingsError::invalid_argument));
+    CHECK(schema.version() == 3);
+
+    const auto reserved = schema.declare(SettingDesc{
+        .key = "version",
+        .type = SettingType::integer,
+        .default_value = SettingValue::integer(1),
+    });
+    REQUIRE_FALSE(reserved);
+    CHECK(reserved.error().code == code_of(SettingsError::bad_schema));
+}
+
+TEST_CASE("migrations: the chain walks step by step") {
+    Migrations chain;
+    std::vector<std::string> walked;
+    REQUIRE(chain.add(1, [&](Value& doc) {
+        walked.push_back("1->2");
+        // v2 renamed editor.size to editor.font.size.
+        Object* root = doc.as_object();
+        if (const Value* old = root->find("editor.size")) {
+            const auto size = old->get_integer();
+            root->erase("editor.size");
+            root->set("editor.font.size",
+                      Value::integer(size.value_or(14)));
+        }
+        return ws::core::Status{};
+    }));
+    REQUIRE(chain.add(2, [&](Value& doc) {
+        walked.push_back("2->3");
+        Object* root = doc.as_object();
+        if (const Value* size = root->find("editor.font.size")) {
+            root->set("editor.font.size",
+                      Value::integer(size->get_integer().value_or(0) * 2));
+        }
+        return ws::core::Status{};
+    }));
+
+    // v1 -> v3: both steps, in order, then the version stamped.
+    Value doc = parsed(R"( {"version": 1, "editor.size": 11} )");
+    REQUIRE(chain.run(doc, 3));
+    CHECK(walked == std::vector<std::string>{"1->2", "2->3"});
+    CHECK(doc.as_object()->find("version")->get_integer().value_or(0) == 3);
+    CHECK(doc.as_object()->find("editor.size") == nullptr);
+    CHECK(doc.as_object()->find("editor.font.size")->get_integer()
+              .value_or(0) == 22);
+
+    // Already current: the fast path runs nothing.
+    walked.clear();
+    Value fresh = parsed(R"( {"version": 3, "editor.font.size": 8} )");
+    REQUIRE(chain.run(fresh, 3));
+    CHECK(walked.empty());
+    CHECK(fresh.as_object()->find("editor.font.size")->get_integer()
+              .value_or(0) == 8);
+
+    // A missing step names the gap.
+    Migrations short_chain;
+    REQUIRE(short_chain.add(1, [](Value&) { return ws::core::Status{}; }));
+    Value gap = parsed(R"( {"version": 1} )");
+    const auto missing = short_chain.run(gap, 3);
+    REQUIRE_FALSE(missing);
+    CHECK(missing.error().code == code_of(SettingsError::migrate_failed));
+    CHECK(missing.error().message.find("from version 2") !=
+          std::string::npos);
+
+    // A file from the future is refused, not downgraded.
+    Value future = parsed(R"( {"version": 9} )");
+    const auto newer = chain.run(future, 3);
+    REQUIRE_FALSE(newer);
+    CHECK(newer.error().code == code_of(SettingsError::migrate_failed));
+    CHECK(newer.error().message.find("newer") != std::string::npos);
+
+    // A pre-versioning file reads as shape 1 and walks the chain.
+    walked.clear();
+    Value pre = parsed(R"( {"editor.size": 5} )");
+    REQUIRE(chain.run(pre, 3));
+    CHECK(walked == std::vector<std::string>{"1->2", "2->3"});
+    CHECK(pre.as_object()->find("version")->get_integer().value_or(0) == 3);
+
+    // The chain refuses ambiguity and nonsense at add().
+    const auto duplicate =
+        chain.add(2, [](Value&) { return ws::core::Status{}; });
+    REQUIRE_FALSE(duplicate);
+    CHECK(duplicate.error().code == code_of(SettingsError::invalid_argument));
+    Migrations empty_chain;
+    CHECK_FALSE(empty_chain.add(0, [](Value&) { return ws::core::Status{}; }));
+    CHECK_FALSE(empty_chain.add(1, MigrationStep{}));
+
+    // A non-object root and a non-integer version answer corrupt_file.
+    Value list = parsed("[1]");
+    const auto not_object = chain.run(list, 3);
+    REQUIRE_FALSE(not_object);
+    CHECK(not_object.error().code == code_of(SettingsError::corrupt_file));
+
+    Value wordy = parsed(R"( {"version": "two"} )");
+    const auto bad_version = chain.run(wordy, 3);
+    REQUIRE_FALSE(bad_version);
+    CHECK(bad_version.error().code == code_of(SettingsError::corrupt_file));
+
+    // A step's own failure is the walk's failure, message intact.
+    Migrations failing;
+    REQUIRE(failing.add(1, [](Value&) {
+        return ws::core::Status{
+            fail(SettingsError::migrate_failed, "the step said no")};
+    }));
+    Value victim = parsed(R"( {"version": 1} )");
+    const auto step_failed = failing.run(victim, 2);
+    REQUIRE_FALSE(step_failed);
+    CHECK(step_failed.error().message.find("the step said no") !=
+          std::string::npos);
+
+    // A step that rebuilds the root as a non-object answers corrupt_file.
+    Migrations rebuilding;
+    REQUIRE(rebuilding.add(1, [](Value& doc) {
+        doc = Value::array();
+        return ws::core::Status{};
+    }));
+    Value wrecked = parsed(R"( {"version": 1} )");
+    const auto not_root = rebuilding.run(wrecked, 2);
+    REQUIRE_FALSE(not_root);
+    CHECK(not_root.error().code == code_of(SettingsError::corrupt_file));
+}
+
+// ---- the layer-file bridge ---------------------------------------------
+
+TEST_CASE("store: load_layer folds a file, remembering unknowns") {
+    SettingsStore store{demo_schema()};
+    Migrations chain;
+
+    Value file = parsed(R"(
+    {
+        "version": 1,
+        "editor.font.size": 200,  // clamps to 72 on the way in
+        "editor.theme": "light",
+        "app.telemetry": true,
+        "some.future.key": [1, {"nested": true}],
+        "hand.written": "kept"
+    })");
+    REQUIRE(store.load_layer(Layer::user, file, chain));
+
+    const auto size = store.get<std::int64_t>("editor.font.size");
+    REQUIRE(size);
+    CHECK(size->value == 72);
+    CHECK(size->layer == Layer::user);
+    CHECK(store.get<std::string>("editor.theme")->value == "light");
+    CHECK(store.get<bool>("app.telemetry")->value == true);
+
+    // Unknown keys never became settings.
+    const auto no = store.layer_of("hand.written");
+    REQUIRE_FALSE(no);
+    CHECK(no.error().code == code_of(SettingsError::unknown_key));
+
+    // The defaults layer takes no file.
+    const auto refused = store.load_layer(Layer::defaults, file, chain);
+    REQUIRE_FALSE(refused);
+    CHECK(refused.error().code == code_of(SettingsError::invalid_argument));
+}
+
+TEST_CASE("store: a failing load names its key and leaves the layer "
+          "untouched") {
+    SettingsStore store{demo_schema()};
+    Migrations chain;
+    REQUIRE(store.set(Layer::user, "editor.font.size", 20));
+
+    // A valid key before the bad one still never applies: the load is
+    // all-or-nothing.
+    const auto rejected = store.load_layer(
+        Layer::user, parsed(R"( {"app.max_recent": 5, "editor.tab_width": 99} )"),
+        chain);
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().code ==
+          code_of(SettingsError::constraint_rejected));
+    CHECK(rejected.error().message.find("editor.tab_width") !=
+          std::string::npos);
+    CHECK(store.get<std::int64_t>("app.max_recent")->layer ==
+          Layer::defaults);
+    CHECK(store.get<std::int64_t>("editor.font.size")->value == 20);
+
+    // A json kind with no scalar counterpart.
+    const auto not_scalar = store.load_layer(
+        Layer::user, parsed(R"( {"editor.theme": ["a", "b"]} )"), chain);
+    REQUIRE_FALSE(not_scalar);
+    CHECK(not_scalar.error().code == code_of(SettingsError::type_mismatch));
+    CHECK(not_scalar.error().message.find("editor.theme") !=
+          std::string::npos);
+
+    // Strict types: a json integer at a real key is a mismatch, the
+    // same as set().
+    const auto strict = store.load_layer(
+        Layer::user, parsed(R"( {"app.scale": 2} )"), chain);
+    REQUIRE_FALSE(strict);
+    CHECK(strict.error().code == code_of(SettingsError::type_mismatch));
+
+    // A non-object root is corrupt.
+    const auto no_root =
+        store.load_layer(Layer::user, parsed("[1, 2]"), chain);
+    REQUIRE_FALSE(no_root);
+    CHECK(no_root.error().code == code_of(SettingsError::corrupt_file));
+}
+
+TEST_CASE("store: the file is the layer - a reload drops what the file "
+          "dropped") {
+    SettingsStore store{demo_schema()};
+    Migrations chain;
+
+    Value file = parsed(R"( {"editor.font.size": 18} )");
+    REQUIRE(store.load_layer(Layer::user, file, chain));
+    REQUIRE(store.set(Layer::user, "app.telemetry", true));
+    CHECK(store.has_value(Layer::user, "app.telemetry"));
+
+    // Reload: the file carries only font.size, so telemetry reverts to
+    // the layer below - silently, the phase-1 clear() contract.
+    REQUIRE(store.load_layer(Layer::user, file, chain));
+    CHECK(store.get<bool>("app.telemetry")->layer == Layer::defaults);
+    CHECK(store.has_value(Layer::user, "editor.font.size"));
+    CHECK_FALSE(store.has_value(Layer::user, "app.telemetry"));
+}
+
+TEST_CASE("store: a load notifies observers per applied key, in file order") {
+    SettingsStore store{demo_schema()};
+    Migrations chain;
+    std::vector<SettingChange> seen;
+    (void)store.observe("editor.", [&](const SettingChange& c) {
+        seen.push_back(c);
+    });
+
+    REQUIRE(store.load_layer(
+        Layer::user,
+        parsed(R"( {"editor.theme": "light", "editor.font.size": 12, )"
+               R"( "app.max_recent": 3} )"),
+        chain));
+
+    REQUIRE(seen.size() == 2);
+    CHECK(seen[0].key == "editor.theme");
+    CHECK(seen[0].layer == Layer::user);
+    CHECK(seen[1].key == "editor.font.size");
+    CHECK(seen[1].value == SettingValue::integer(12));
+}
+
+TEST_CASE("store: save_layer writes the version, the layer, the unknowns") {
+    Schema bumped = demo_schema();
+    REQUIRE(bumped.set_version(7));
+    SettingsStore store{std::move(bumped)};
+    Migrations chain;
+
+    Value file = parsed(R"(
+    {
+        "version": 7,
+        "editor.font.size": 16,
+        "hand.written": {"kept": [1, 2]},
+        "zz.another": null
+    })");
+    REQUIRE(store.load_layer(Layer::user, file, chain));
+    REQUIRE(store.set(Layer::user, "editor.theme", "dark"));
+
+    const auto saved = store.save_layer(Layer::user);
+    REQUIRE(saved);
+    const Object& root = *saved->as_object();
+    CHECK(root.size() == 5);
+    CHECK(root.find("version")->get_integer().value_or(0) == 7);
+    CHECK(root.find("editor.font.size")->get_integer().value_or(0) == 16);
+    CHECK(root.find("editor.theme")->get_text().value_or("") == "dark");
+    CHECK(root.find("hand.written")->as_object() != nullptr);
+    CHECK(root.find("hand.written")->as_object()->find("kept")
+              ->as_array()
+              ->size() == 2);
+    CHECK(root.find("zz.another")->is_null());
+
+    // Order: version first, the layer's own keys alphabetical, the
+    // unknowns in the order the file carried them.
+    auto it = root.begin();
+    CHECK(it->first == "version");
+    CHECK(std::next(it)->first == "editor.font.size");
+    CHECK(std::next(it, 2)->first == "editor.theme");
+    CHECK(std::next(it, 3)->first == "hand.written");
+    CHECK(std::next(it, 4)->first == "zz.another");
+
+    // The unknown subtrees round-trip verbatim.
+    CHECK(*root.find("hand.written") == parsed(R"( {"kept": [1, 2]} )"));
+
+    // The defaults layer saves nothing.
+    const auto refused = store.save_layer(Layer::defaults);
+    REQUIRE_FALSE(refused);
+    CHECK(refused.error().code == code_of(SettingsError::invalid_argument));
+}
+
+TEST_CASE("store: load -> save -> load round-trips") {
+    SettingsStore store{demo_schema()};
+    Migrations chain;
+
+    REQUIRE(store.load_layer(Layer::user, parsed(R"(
+    {
+        "editor.font.size": 16,
+        "audio.volume": 0.25,
+        "editor.font.name": "Inconsolata",
+        "mystery": {"a": [1, 2.5, "x"]}
+    })"), chain));
+    const auto saved = store.save_layer(Layer::user);
+    REQUIRE(saved);
+    const std::string text = write(*saved);
+
+    SettingsStore reloaded{demo_schema()};
+    REQUIRE(reloaded.load_layer(Layer::user, parsed(text), chain));
+    CHECK(reloaded.get<std::int64_t>("editor.font.size")->value == 16);
+    CHECK(reloaded.get<double>("audio.volume")->value ==
+          doctest::Approx(0.25));
+    CHECK(reloaded.get<std::string>("editor.font.name")->value ==
+          "Inconsolata");
+
+    // The unknown subtree survived two saves, and the second save
+    // reproduces the first byte for byte.
+    const auto again = reloaded.save_layer(Layer::user);
+    REQUIRE(again);
+    CHECK(*again == *saved);
+    CHECK(write(*again) == text);
+}
+
+TEST_CASE("store: load_layer runs the migration chain first") {
+    Schema schema;
+    REQUIRE(schema.set_version(2));
+    REQUIRE(schema.declare(SettingDesc{
+        .key = "editor.font.size",
+        .type = SettingType::integer,
+        .default_value = SettingValue::integer(14),
+        .constraints = {RangeConstraint{
+            .min = 8.0, .max = 72.0, .action = ConstraintAction::clamp}},
+    }));
+    SettingsStore store{std::move(schema)};
+
+    Migrations chain;
+    REQUIRE(chain.add(1, [](Value& doc) {
+        // v2 renamed editor.size -> editor.font.size.
+        Object* root = doc.as_object();
+        if (const Value* old = root->find("editor.size")) {
+            const auto size = old->get_integer();
+            root->erase("editor.size");
+            root->set("editor.font.size",
+                      Value::integer(size.value_or(14)));
+        }
+        return ws::core::Status{};
+    }));
+
+    Value v1 = parsed(R"( {"version": 1, "editor.size": 22} )");
+    REQUIRE(store.load_layer(Layer::user, v1, chain));
+    const auto size = store.get<std::int64_t>("editor.font.size");
+    REQUIRE(size);
+    CHECK(size->value == 22);
+    CHECK(size->layer == Layer::user);
+
+    // The caller's document stayed intact - the walk ran on a copy.
+    CHECK(v1.as_object()->find("editor.size") != nullptr);
+
+    // The retired key did not survive as an unknown.
+    const auto saved = store.save_layer(Layer::user);
+    REQUIRE(saved);
+    CHECK(saved->as_object()->find("editor.size") == nullptr);
+    CHECK(saved->as_object()->find("version")->get_integer().value_or(0) ==
+          2);
+    CHECK(saved->as_object()->find("editor.font.size")
+              ->get_integer()
+              .value_or(0) == 22);
+
+    // Without the step, the v1 file cannot load.
+    Schema again_schema;
+    REQUIRE(again_schema.set_version(2));
+    REQUIRE(again_schema.declare(SettingDesc{
+        .key = "editor.font.size",
+        .type = SettingType::integer,
+        .default_value = SettingValue::integer(14),
+    }));
+    SettingsStore plain{std::move(again_schema)};
+
+    const auto no_step = plain.load_layer(Layer::user, v1, Migrations{});
+    REQUIRE_FALSE(no_step);
+    CHECK(no_step.error().code == code_of(SettingsError::migrate_failed));
 }

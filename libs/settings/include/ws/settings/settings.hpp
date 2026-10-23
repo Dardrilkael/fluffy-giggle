@@ -12,6 +12,8 @@
 #include <vector>
 
 #include <ws/core/result.hpp>
+#include <ws/settings/json.hpp>
+#include <ws/settings/migration.hpp>
 #include <ws/settings/schema.hpp>
 #include <ws/settings/value.hpp>
 
@@ -146,6 +148,28 @@ public:
     [[nodiscard]] ObserverId observe(std::string pattern, Observer observer);
     void remove_observer(ObserverId id);
 
+    // ---- the layer-file bridge ----
+
+    // Fold one parsed layer file into this layer. The document runs
+    // through the migration chain to the schema's version first, then:
+    // schema-known keys validate through the same one path as set()
+    // (a clamp lands; a reject, or a json kind with no scalar
+    // counterpart, fails the load naming the key); unknown keys are
+    // remembered verbatim and re-emitted by save_layer; the reserved
+    // "version" key is consumed, never stored. The file IS the layer:
+    // what the layer held is dropped and replaced, and observers fire
+    // per applied key, in the file's order (a key the file dropped
+    // reverts silently - the phase-1 clear() contract). All-or-
+    // nothing: a failure anywhere leaves the layer untouched.
+    ws::core::Status load_layer(Layer layer, const json::Value& document,
+                                const Migrations& migrations);
+
+    // The layer as one json object: "version" first, then the
+    // layer's own values (alphabetical - they live in a map), then
+    // the remembered unknown keys in the order the file carried
+    // them. An empty layer saves as just the version field.
+    [[nodiscard]] ws::core::Result<json::Value> save_layer(Layer layer) const;
+
     [[nodiscard]] const Schema& schema() const noexcept { return schema_; }
 
 private:
@@ -163,6 +187,11 @@ private:
     Schema schema_;
     std::map<std::string, SettingValue, std::less<>>
         layers_[detail::kLayerCount];
+    // Keys a loaded file carried that the schema does not know - kept
+    // as json verbatim so save_layer re-emits them. Only a load ever
+    // touches them (set() answers unknown_key), so a load REPLACES
+    // the layer's set.
+    json::Object unknowns_[detail::kLayerCount];
     std::vector<ObserverEntry> observers_;
     ObserverId next_observer_id_ = 1;
 };

@@ -121,4 +121,126 @@ void SettingsStore::notify(const SettingChange& change) {
     }
 }
 
+// ---- the layer-file bridge ---------------------------------------------
+
+namespace {
+
+// Prefix an inner validation failure with the load's key context,
+// preserving its code, category and location (the inner failures are
+// the store's own - only the message wants more context).
+[[nodiscard]] ws::core::unexpected<ws::core::Error> wrap_key(
+    std::string_view key, ws::core::Error inner) {
+    inner.message = "load '" + std::string{key} + "': " + inner.message;
+    return ws::core::unexpected<ws::core::Error>(std::move(inner));
+}
+
+// json -> the store's value model. Only the four scalar kinds map;
+// arrays, objects and null have no scalar counterpart.
+[[nodiscard]] ws::core::Result<SettingValue> json_to_setting(
+    const json::Value& value) {
+    switch (value.kind()) {
+        case json::Kind::boolean:
+            return SettingValue::boolean(value.get_bool().value_or(false));
+        case json::Kind::integer:
+            return SettingValue::integer(value.get_integer().value_or(0));
+        case json::Kind::real:
+            return SettingValue::real(value.get_real().value_or(0.0));
+        case json::Kind::text:
+            return SettingValue::text(*value.as_text());
+        default:
+            return fail(SettingsError::type_mismatch,
+                        "json value is " +
+                            std::string{json::kind_name(value.kind())} +
+                            ", but a setting is one of the four scalar "
+                            "types");
+    }
+}
+
+// The store's value model -> json, kind for kind. Total: a SettingValue
+// is always one of the four.
+[[nodiscard]] json::Value setting_to_json(const SettingValue& value) {
+    switch (value.type()) {
+        case SettingType::boolean:
+            return json::Value::boolean(value.as_bool().value_or(false));
+        case SettingType::integer:
+            return json::Value::integer(value.as_integer().value_or(0));
+        case SettingType::real:
+            return json::Value::real(value.as_real().value_or(0.0));
+        default:
+            return json::Value::text(value.as_text().value_or(""));
+    }
+}
+
+}  // namespace
+
+ws::core::Status SettingsStore::load_layer(Layer layer,
+                                            const json::Value& document,
+                                            const Migrations& migrations) {
+    const auto slot = static_cast<std::size_t>(layer);
+    if (slot == 0 || slot >= detail::kLayerCount) {
+        return fail(SettingsError::invalid_argument,
+                    "load: the schema owns the defaults layer; target "
+                    "another one");
+    }
+    json::Value migrated = document;  // the caller's document stays intact
+    WS_TRY(migrations.run(migrated, schema_.version()));
+    const json::Object& root = *migrated.as_object();
+
+    // Stage the whole file before touching the store, so a bad key
+    // anywhere fails the load with the layer untouched.
+    std::vector<std::pair<std::string, SettingValue>> staged;
+    json::Object unknowns;
+    for (const json::Object::Entry& entry : root) {
+        if (entry.first == "version") {
+            continue;  // the format's own field, never a setting
+        }
+        const SettingDesc* desc = schema_.find(entry.first);
+        if (desc == nullptr) {
+            unknowns.set(entry.first, entry.second);
+            continue;
+        }
+        auto value = json_to_setting(entry.second);
+        if (!value) {
+            return wrap_key(entry.first, std::move(value.error()));
+        }
+        auto checked = coerce(*desc, std::move(*value));
+        if (!checked) {
+            return wrap_key(entry.first, std::move(checked.error()));
+        }
+        staged.emplace_back(entry.first, std::move(*checked));
+    }
+
+    // The file IS the layer: drop what the layer held, then apply.
+    // Everything staged already passed validation, so these set_value
+    // calls cannot fail - they run it again for the one-path rule (and
+    // to land the clamped payload observers see).
+    layers_[slot].clear();
+    unknowns_[slot] = std::move(unknowns);
+    for (auto& [key, value] : staged) {
+        (void)set_value(layer, key, std::move(value));
+    }
+    return {};
+}
+
+ws::core::Result<json::Value> SettingsStore::save_layer(Layer layer) const {
+    const auto slot = static_cast<std::size_t>(layer);
+    if (slot == 0 || slot >= detail::kLayerCount) {
+        return fail(SettingsError::invalid_argument,
+                    "save: the schema owns the defaults layer; target "
+                    "another one");
+    }
+    json::Object root;
+    root.set("version", json::Value::integer(schema_.version()));
+    // Known keys in map order (alphabetical): stable, if not the file's
+    // original order.
+    for (const auto& [key, value] : layers_[slot]) {
+        root.set(key, setting_to_json(value));
+    }
+    // Unknown keys keep the order the file carried them in.
+    for (const json::Object::Entry& entry : unknowns_[slot]) {
+        root.set(entry.first, entry.second);
+    }
+    return json::Value::object(std::move(root));
+}
+
 }  // namespace ws::settings

@@ -70,6 +70,11 @@ ws::core::Status Schema::declare(SettingDesc desc) {
     if (desc.key.empty()) {
         return fail(SettingsError::bad_schema, "declare: empty key");
     }
+    if (desc.key == "version") {
+        return fail(SettingsError::bad_schema,
+                    "declare: 'version' is reserved for the layer-file "
+                    "format");
+    }
     if (find(desc.key) != nullptr) {
         return fail(SettingsError::bad_schema,
                     "declare: duplicate key '" + desc.key + "'");
@@ -166,6 +171,16 @@ std::vector<const SettingDesc*> Schema::in_category(
         }
     }
     return out;
+}
+
+ws::core::Status Schema::set_version(std::int64_t version) {
+    if (version < 1) {
+        return fail(SettingsError::invalid_argument,
+                    "the shape version starts at 1, got " +
+                        std::to_string(version));
+    }
+    version_ = version;
+    return {};
 }
 
 }  // namespace ws::settings

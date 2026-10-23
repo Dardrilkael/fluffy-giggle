@@ -72,6 +72,16 @@ void Object::set(std::string key, Value value) {
     entries_.emplace_back(std::move(key), std::move(value));
 }
 
+bool Object::erase(std::string_view key) {
+    for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+        if (it->first == key) {
+            entries_.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
 bool Object::operator==(const Object& other) const {
     return entries_ == other.entries_;
 }

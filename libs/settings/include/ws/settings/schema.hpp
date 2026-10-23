@@ -68,7 +68,8 @@ class Schema {
 public:
     Schema() = default;
 
-    // Declare one setting. bad_schema answers: an empty key, a
+    // Declare one setting. bad_schema answers: an empty key, a key
+    // named "version" (reserved for the layer-file format), a
     // duplicate key, a default whose type differs from the declared
     // type, a constraint that cannot apply to the type (a range on a
     // bool/text key, enum entries of another type, a regex on a
@@ -90,8 +91,15 @@ public:
     [[nodiscard]] std::vector<const SettingDesc*> in_category(
         std::string_view category) const;
 
+    // The file-shape version: what save_layer stamps into a layer
+    // file and what the migration chain walks toward. Defaults to 1;
+    // versions below 1 answer invalid_argument.
+    [[nodiscard]] std::int64_t version() const noexcept { return version_; }
+    ws::core::Status set_version(std::int64_t version);
+
 private:
     std::vector<SettingDesc> descs_;
+    std::int64_t version_ = 1;
 };
 
 }  // namespace ws::settings
