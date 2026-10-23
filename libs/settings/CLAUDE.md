@@ -3,9 +3,10 @@
 The headless settings store (nextplan stage 9): a typed schema
 (defaults + constraints), layered sources with provenance, change
 observers, an in-house JSON facility, layer files folded in through a
-versioned migration chain, and (phase 4) a minimal FileSystem seam on
-top. Pure std + ws::core - no third-party anywhere, no platform
-headers, no locks.
+versioned migration chain, and file persistence through a minimal
+FileSystem seam - atomic writes, corrupt recovery, a debounced save.
+Pure std + ws::core - no third-party anywhere, no platform headers,
+no locks.
 
 ## Purpose, per header
 
@@ -38,6 +39,19 @@ headers, no locks.
   stamps the schema's version when the walk lands. A file with no
   "version" field reads as shape 1; a file newer than the schema is
   refused, never downgraded.
+- `filesystem.hpp` - the minimal file seam the workspace standardizes
+  on: read, an ATOMIC write (the bytes land in a sibling ".tmp", then
+  one rename replaces the target - a failure anywhere leaves the
+  previous file intact), rename, remove, exists. Plus
+  `StdFileSystem`, the std::filesystem default, routing utf-8 paths
+  through char8_t so non-ascii paths survive Windows. Stage 10's
+  theme loading reuses the same seam.
+- `file.hpp` - `FileLoad` (the load's report: missing / recovered /
+  where the .bak went / why) + `LayerFile`, one layer's file: load
+  with corrupt recovery, atomic save, and the debounced write - the
+  jobs Debouncer's shape (injected Clock, owner-thread state,
+  poll() on the frame cadence), but the write runs on the owner
+  thread; a JobSystem is the wrong tool for one rename.
 - `json.hpp` - the in-house JSON facility (phase 2): `Value` (seven
   kinds, integer/real DISTINCT so a round trip never re-types a
   value), the insertion-order `Object`, `parse()` (strict grammar plus
@@ -103,6 +117,21 @@ headers, no locks.
   the order the file carried them. An empty layer saves as just the
   version field. Load failures keep the inner error's code/category/
   location and only re-prefix the message ("load 'key': ...").
+- The file layer's recovery policy: a read failure on an EXISTING
+  file is I/O trouble (locked, not corrupt) - the error propagates,
+  nothing is preserved. Any CONTENT failure - the parse, the
+  migration walk, the fold - is corrupt recovery: the file is
+  preserved to "<path>.bak" (an existing .bak is replaced - the
+  newest corrupt file wins the slot), the store keeps serving what
+  it already had, and the report carries the reason. A missing file
+  is the first run. A failed preserve still recovers: backup stays
+  empty, the corrupt file stays put, and the next successful save
+  overwrites it.
+- The debounced write: touch (re)arms - it fires quiet_ms after the
+  LAST touch (slides, never stacks); poll() fires at most one write
+  per call on the frame cadence; a FAILED write is reported and
+  dropped, not retried; cancel drops; flush writes now (shutdown).
+  All owner-thread, like the store.
 
 ## Known tradeoffs
 
@@ -136,6 +165,15 @@ headers, no locks.
 - A reload's reverted keys notify nobody (clear() is silent) - the
   phase-1 contract; revisit if a ui ever needs to react to "the file
   dropped this key".
+- `StdFileSystem::write` uses a fixed "<path>.tmp" sibling: atomic
+  against crashes, not against a second writer on the same path (the
+  store's owner-thread rule already forbids one).
+- The .bak slot holds ONE corrupt file: a second corruption replaces
+  the first.
+- `LayerFile` holds references (store, fs, migrations) and is
+  non-copyable: the caller owns them and outlives it.
+- A failed debounced write is dropped, not retried - re-touch to
+  retry; an auto-retry on the frame loop would spam a dead disk.
 
 ## Tests
 
@@ -159,9 +197,6 @@ parse -> write -> parse stability, insertion order + duplicate
 resolution + Object::set, and integer/real staying apart across a
 round trip.
 
-The later phases grow this suite: the FileSystem seam / atomic saves /
-corrupt recovery / debounced writes (phase 4).
-
 Phase 3 adds the layer-file suite: the shape version (default 1, the
 reserved "version" key), the migration chain (a two-step walk, the
 already-current fast path, a missing step naming its gap, a
@@ -176,3 +211,18 @@ alphabetical-knowns / file-order-unknowns shape (order walked by
 iterator), a load -> save -> load round-trip that is byte-equal the
 second time, and a rename migration end to end (the retired key gone
 from the save, the caller's document unmodified).
+
+Phase 4 adds the file suite: a real StdFileSystem smoke in the temp
+dir (write/read/exists round-trip, the rename-REPLACES semantics the
+atomic save and the .bak slot lean on, remove's gone-is-gone
+contract), loads (clean / the first-run missing file / corrupt
+preserved to .bak with the reason), the recovery matrix (a
+future-shape file, a fold that refuses, the second corrupt file
+winning the .bak slot, a failed preserve still recovering, an
+unreadable file propagating as I/O and touching nothing), save
+atomicity (a failing write leaves the previous file byte-identical),
+the debounce on a fake clock (fires after quiet, slides on re-touch,
+cancel drops, a failed write dropped not retried, flush immediate,
+the default steady clock), and an end-to-end pass: v1 file ->
+migration -> set -> debounced save -> a second store reads it clean,
+unknown subtree intact.

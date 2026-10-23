@@ -1,15 +1,17 @@
 // The settings store's suite: the schema, the layered store,
-// validation, observers, and the json facility - still headless,
-// no files yet (the migration and FileSystem layers grow their own
-// cases later).
+// validation, observers, the json facility, the migration chain, and
+// the file seam + the debounced write. Headless lib code throughout;
+// the only real disk is the StdFileSystem smoke, in the temp dir.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -17,6 +19,8 @@
 #include <vector>
 
 #include <ws/settings/errors.hpp>
+#include <ws/settings/file.hpp>
+#include <ws/settings/filesystem.hpp>
 #include <ws/settings/json.hpp>
 #include <ws/settings/schema.hpp>
 #include <ws/settings/settings.hpp>
@@ -26,7 +30,9 @@ namespace {
 
 using ws::settings::ConstraintAction;
 using ws::settings::EnumConstraint;
+using ws::settings::FileSystem;
 using ws::settings::Layer;
+using ws::settings::LayerFile;
 using ws::settings::MigrationStep;
 using ws::settings::Migrations;
 using ws::settings::RangeConstraint;
@@ -38,6 +44,7 @@ using ws::settings::SettingsError;
 using ws::settings::SettingsStore;
 using ws::settings::SettingType;
 using ws::settings::SettingValue;
+using ws::settings::StdFileSystem;
 
 using ws::settings::json::Array;
 using ws::settings::json::Kind;
@@ -1339,4 +1346,404 @@ TEST_CASE("store: load_layer runs the migration chain first") {
     const auto no_step = plain.load_layer(Layer::user, v1, Migrations{});
     REQUIRE_FALSE(no_step);
     CHECK(no_step.error().code == code_of(SettingsError::migrate_failed));
+}
+
+// ---- the file seam + the debounced write -------------------------------
+
+// The in-memory fake every file case runs against: a byte map plus
+// injectable per-verb failures (sticky until the test clears them).
+// The fake's write is atomic by construction - "the old file
+// survives a failed write" is the map keeping the old bytes.
+class FakeFileSystem final : public FileSystem {
+public:
+    bool fail_read = false;
+    bool fail_write = false;
+    bool fail_rename = false;
+    bool fail_remove = false;
+    int writes = 0;  // successful writes - the debounce counts them
+
+    std::map<std::string, std::string, std::less<>> files;
+
+    ws::core::Result<std::string> read(
+        std::string_view path) const override {
+        if (fail_read) {
+            return fail(SettingsError::io_failed, "read (fake)");
+        }
+        const auto it = files.find(path);
+        if (it == files.end()) {
+            return fail(SettingsError::io_failed, "no such file (fake)");
+        }
+        return it->second;
+    }
+
+    ws::core::Status write(std::string_view path,
+                           std::string_view bytes) override {
+        if (fail_write) {
+            return fail(SettingsError::io_failed, "write (fake)");
+        }
+        files.insert_or_assign(std::string{path}, std::string{bytes});
+        ++writes;
+        return {};
+    }
+
+    ws::core::Status rename(std::string_view from,
+                            std::string_view to) override {
+        if (fail_rename) {
+            return fail(SettingsError::io_failed, "rename (fake)");
+        }
+        const auto it = files.find(from);
+        if (it == files.end()) {
+            return fail(SettingsError::io_failed,
+                        "rename: no such file (fake)");
+        }
+        std::string bytes = std::move(it->second);
+        files.erase(it);
+        files.insert_or_assign(std::string{to}, std::move(bytes));
+        return {};
+    }
+
+    bool remove(std::string_view path) override {
+        if (fail_remove) {
+            return false;
+        }
+        (void)files.erase(std::string{path});
+        return true;
+    }
+
+    [[nodiscard]] bool exists(std::string_view path) const override {
+        return files.contains(path);
+    }
+};
+
+TEST_CASE("filesystem: StdFileSystem round-trips for real") {
+    StdFileSystem fs;
+    const std::filesystem::path dir = std::filesystem::temp_directory_path();
+    const std::u8string upath = (dir / u8"ws_settings_smoke.json").u8string();
+    const std::string path{upath.begin(), upath.end()};
+
+    // Clean slate (a previous run may have littered the temp dir).
+    (void)fs.remove(path);
+    (void)fs.remove(path + ".bak");
+    CHECK_FALSE(fs.exists(path));
+
+    REQUIRE(fs.write(path, "one"));
+    CHECK(fs.exists(path));
+    CHECK_FALSE(fs.exists(path + ".tmp"));  // the temp is renamed away
+    const auto first = fs.read(path);
+    REQUIRE(first);
+    CHECK(*first == "one");
+
+    // Writing again must REPLACE, not refuse - the atomic save and
+    // the .bak slot both lean on rename-over-existing.
+    REQUIRE(fs.write(path, "two"));
+    const auto second = fs.read(path);
+    REQUIRE(second);
+    CHECK(*second == "two");
+
+    CHECK(fs.remove(path));
+    CHECK_FALSE(fs.exists(path));
+    CHECK(fs.remove(path));  // already gone: still "gone"
+
+    REQUIRE(fs.write(path, "old"));
+    REQUIRE(fs.write(path + ".bak", "stale bak"));
+    REQUIRE(fs.rename(path, path + ".bak"));
+    const auto moved = fs.read(path + ".bak");
+    REQUIRE(moved);
+    CHECK(*moved == "old");
+    CHECK_FALSE(fs.exists(path));
+
+    (void)fs.remove(path + ".bak");
+}
+
+TEST_CASE("layer file: load clean, missing, corrupt") {
+    FakeFileSystem fs;
+    Migrations chain;
+    SettingsStore store{demo_schema()};
+
+    fs.files["settings.json"] = write(parsed(R"(
+    {
+        "version": 1,
+        "editor.font.size": 20,
+        "hand.written": [1, 2, 3]
+    })"));
+    LayerFile file{store, Layer::user, fs, "settings.json", chain};
+
+    const auto good = file.load();
+    REQUIRE(good);
+    CHECK_FALSE(good->missing);
+    CHECK_FALSE(good->recovered);
+    const auto size = store.get<std::int64_t>("editor.font.size");
+    REQUIRE(size);
+    CHECK(size->value == 20);
+    CHECK(size->layer == Layer::user);
+
+    // Missing: the first run, not an error.
+    SettingsStore fresh{demo_schema()};
+    LayerFile absent{fresh, Layer::user, fs, "nope.json", chain};
+    const auto first_run = absent.load();
+    REQUIRE(first_run);
+    CHECK(first_run->missing);
+    CHECK_FALSE(first_run->recovered);
+    CHECK(fresh.get<std::int64_t>("editor.font.size")->layer ==
+          Layer::defaults);
+
+    // Corrupt: preserved to .bak, defaults served, reason kept.
+    fs.files["broken.json"] = "{ not json";
+    SettingsStore recovery{demo_schema()};
+    LayerFile corrupt{recovery, Layer::user, fs, "broken.json", chain};
+    const auto saved_off = corrupt.load();
+    REQUIRE(saved_off);
+    CHECK(saved_off->recovered);
+    CHECK(saved_off->backup == "broken.json.bak");
+    CHECK(saved_off->reason.code == code_of(SettingsError::parse_failed));
+    CHECK(fs.read("broken.json.bak").value_or("") == "{ not json");
+    CHECK_FALSE(fs.exists("broken.json"));
+    CHECK(recovery.get<std::int64_t>("editor.font.size")->value == 14);
+
+    // The defaults layer takes no file.
+    SettingsStore owned_store{demo_schema()};
+    LayerFile owned{owned_store, Layer::defaults, fs, "settings.json",
+                    chain};
+    const auto refused = owned.load();
+    REQUIRE_FALSE(refused);
+    CHECK(refused.error().code == code_of(SettingsError::invalid_argument));
+}
+
+TEST_CASE("layer file: every content failure is recovery") {
+    FakeFileSystem fs;
+    Migrations chain;
+    SettingsStore store{demo_schema()};
+
+    // A file from a future shape: preserved, never guessed at.
+    fs.files["future.json"] =
+        R"( {"version": 99, "editor.font.size": 20} )";
+    LayerFile future{store, Layer::user, fs, "future.json", chain};
+    const auto too_new = future.load();
+    REQUIRE(too_new);
+    CHECK(too_new->recovered);
+    CHECK(too_new->reason.code == code_of(SettingsError::migrate_failed));
+    CHECK(fs.exists("future.json.bak"));
+
+    // A file that refuses to fold (all-or-nothing, phase 3).
+    fs.files["reject.json"] = R"( {"editor.tab_width": 99} )";
+    LayerFile reject{store, Layer::user, fs, "reject.json", chain};
+    const auto refused = reject.load();
+    REQUIRE(refused);
+    CHECK(refused->recovered);
+    CHECK(refused->reason.code ==
+          code_of(SettingsError::constraint_rejected));
+
+    // The second corrupt file wins the .bak slot.
+    fs.files["twice.json"] = "first";
+    LayerFile twice{store, Layer::user, fs, "twice.json", chain};
+    REQUIRE(twice.load()->recovered);
+    CHECK(fs.read("twice.json.bak").value_or("") == "first");
+    fs.files["twice.json"] = "second";
+    const auto again = twice.load();
+    REQUIRE(again);
+    CHECK(again->recovered);
+    CHECK(fs.read("twice.json.bak").value_or("") == "second");
+
+    // A failed preserve still serves defaults; the corrupt file
+    // stays put for the next successful save to overwrite.
+    fs.files["locked.json"] = "{ oops";
+    fs.fail_rename = true;
+    LayerFile locked{store, Layer::user, fs, "locked.json", chain};
+    const auto unpreserved = locked.load();
+    REQUIRE(unpreserved);
+    CHECK(unpreserved->recovered);
+    CHECK(unpreserved->backup.empty());
+    CHECK(fs.exists("locked.json"));
+    fs.fail_rename = false;
+
+    // An unreadable existing file is I/O trouble, not corruption:
+    // nothing is preserved, the error propagates.
+    fs.files["busy.json"] = "fine";
+    fs.fail_read = true;
+    LayerFile busy{store, Layer::user, fs, "busy.json", chain};
+    const auto unreadable = busy.load();
+    REQUIRE_FALSE(unreadable);
+    CHECK(unreadable.error().code == code_of(SettingsError::io_failed));
+    CHECK(fs.exists("busy.json"));
+    fs.fail_read = false;
+}
+
+TEST_CASE("layer file: save is atomic, the old file survives failures") {
+    FakeFileSystem fs;
+    Migrations chain;
+    SettingsStore store{demo_schema()};
+
+    fs.files["user.json"] =
+        write(parsed(R"( {"version": 1, "editor.font.size": 18} )"));
+    LayerFile file{store, Layer::user, fs, "user.json", chain};
+    REQUIRE(file.load());
+
+    REQUIRE(store.set(Layer::user, "editor.font.size", 20));
+    REQUIRE(file.save());
+    const auto saved = parse(fs.files["user.json"]);
+    REQUIRE(saved);
+    CHECK(saved->as_object()->find("version") != nullptr);
+    CHECK(saved->as_object()->find("editor.font.size")
+              ->get_integer()
+              .value_or(0) == 20);
+
+    // A failing write leaves the previous file intact.
+    const std::string before = fs.files["user.json"];
+    REQUIRE(store.set(Layer::user, "audio.volume", 0.25));
+    fs.fail_write = true;
+    CHECK_FALSE(file.save());
+    CHECK(fs.files["user.json"] == before);
+    fs.fail_write = false;
+
+    // The defaults layer saves nothing.
+    SettingsStore owned_store{demo_schema()};
+    LayerFile owned{owned_store, Layer::defaults, fs, "user.json", chain};
+    CHECK_FALSE(owned.save());
+}
+
+TEST_CASE("layer file: the debounce fires after quiet, slides, drops") {
+    FakeFileSystem fs;
+    Migrations chain;
+    SettingsStore store{demo_schema()};
+    fs.files["user.json"] = "{}";
+
+    std::int64_t now = 0;
+    LayerFile file{store, Layer::user, fs, "user.json", chain,
+                   [&now] { return now; }, 500};
+
+    // Nothing armed: poll is a no-op.
+    REQUIRE(file.poll());
+    CHECK_FALSE(file.pending());
+    CHECK(fs.writes == 0);
+
+    // Fires exactly once, at/after the deadline.
+    REQUIRE(store.set(Layer::user, "editor.font.size", 20));
+    file.touch();
+    CHECK(file.pending());
+    now = 499;
+    REQUIRE(file.poll());
+    CHECK(file.pending());
+    CHECK(fs.writes == 0);
+    now = 500;
+    REQUIRE(file.poll());
+    CHECK_FALSE(file.pending());
+    CHECK(fs.writes == 1);
+
+    // A re-touch slides the window: no stacked writes.
+    file.touch();
+    now = 400;
+    file.touch();  // the deadline slid to 900
+    now = 600;
+    REQUIRE(file.poll());
+    CHECK(file.pending());
+    CHECK(fs.writes == 1);
+    now = 900;
+    REQUIRE(file.poll());
+    CHECK(fs.writes == 2);
+
+    // cancel drops the pending write without firing it.
+    file.touch();
+    file.cancel();
+    CHECK_FALSE(file.pending());
+    now = 100000;
+    REQUIRE(file.poll());
+    CHECK(fs.writes == 2);
+
+    // A failed write is reported and dropped, not retried.
+    file.touch();
+    fs.fail_write = true;
+    now = 100500;
+    const auto failed = file.poll();
+    REQUIRE_FALSE(failed);
+    CHECK(failed.error().code == code_of(SettingsError::io_failed));
+    CHECK_FALSE(file.pending());
+    fs.fail_write = false;
+    now = 200000;
+    REQUIRE(file.poll());  // nothing pending: no retry
+    CHECK(fs.writes == 2);
+
+    // flush writes NOW when one is pending...
+    file.touch();
+    REQUIRE(file.flush());
+    CHECK(fs.writes == 3);
+    CHECK_FALSE(file.pending());
+    // ...and is a no-op when not.
+    REQUIRE(file.flush());
+    CHECK(fs.writes == 3);
+
+    // The default steady clock needs no injection.
+    LayerFile default_clock{store, Layer::user, fs, "user.json", chain};
+    default_clock.touch();
+    CHECK(default_clock.pending());
+    REQUIRE(default_clock.flush());
+    CHECK(fs.writes == 4);
+}
+
+TEST_CASE("layer file: end to end through the fake fs") {
+    FakeFileSystem fs;
+    Schema schema;
+    REQUIRE(schema.set_version(2));
+    REQUIRE(schema.declare(SettingDesc{
+        .key = "editor.font.size",
+        .type = SettingType::integer,
+        .default_value = SettingValue::integer(14),
+        .constraints = {RangeConstraint{
+            .min = 8.0, .max = 72.0, .action = ConstraintAction::clamp}},
+    }));
+    REQUIRE(schema.declare(SettingDesc{
+        .key = "editor.theme",
+        .type = SettingType::text,
+        .default_value = SettingValue::text("dark"),
+    }));
+
+    Migrations chain;
+    REQUIRE(chain.add(1, [](Value& doc) {
+        // v2 renamed editor.size -> editor.font.size.
+        Object* root = doc.as_object();
+        if (const Value* old = root->find("editor.size")) {
+            const auto size = old->get_integer();
+            root->erase("editor.size");
+            root->set("editor.font.size",
+                      Value::integer(size.value_or(14)));
+        }
+        return ws::core::Status{};
+    }));
+
+    fs.files["user.json"] = R"(
+    {
+        "version": 1,
+        "editor.size": 22,
+        "hand.written": {"kept": true}
+    })";
+    SettingsStore first{schema};
+    LayerFile file{first, Layer::user, fs, "user.json", chain};
+    const auto loaded = file.load();
+    REQUIRE(loaded);
+    CHECK_FALSE(loaded->recovered);
+    CHECK(first.get<std::int64_t>("editor.font.size")->value == 22);
+
+    REQUIRE(first.set(Layer::user, "editor.theme", "solarized"));
+    file.touch();
+    REQUIRE(file.flush());
+
+    // A second store reads what the first wrote - and the saved file
+    // sits at the current shape, so it needs no walk.
+    SettingsStore second{schema};
+    LayerFile reread{second, Layer::user, fs, "user.json", Migrations{}};
+    const auto back = reread.load();
+    REQUIRE(back);
+    CHECK_FALSE(back->recovered);
+    CHECK(second.get<std::int64_t>("editor.font.size")->value == 22);
+    CHECK(second.get<std::string>("editor.theme")->value == "solarized");
+    CHECK(second.get<std::string>("editor.theme")->layer == Layer::user);
+
+    // The unknown subtree survived the migration and two saves.
+    const auto saved_doc = parse(fs.files["user.json"]);
+    REQUIRE(saved_doc);
+    const Object* root = saved_doc->as_object();
+    REQUIRE(root->find("hand.written") != nullptr);
+    CHECK(*root->find("hand.written") == parsed(R"( {"kept": true} )"));
+    CHECK(root->find("version")->get_integer().value_or(0) == 2);
+    CHECK(root->find("editor.size") == nullptr);
+    CHECK(root->find("editor.theme") != nullptr);
 }
