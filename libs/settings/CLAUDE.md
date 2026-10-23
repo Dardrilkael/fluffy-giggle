@@ -2,9 +2,9 @@
 
 The headless settings store (nextplan stage 9): a typed schema
 (defaults + constraints), layered sources with provenance, change
-observers, and (later phases) JSON persistence through a minimal
-FileSystem seam. Pure std + ws::core - no third-party anywhere, no
-platform headers, no locks.
+observers, an in-house JSON facility, and (later phases) layer files +
+migrations through a minimal FileSystem seam. Pure std + ws::core -
+no third-party anywhere, no platform headers, no locks.
 
 ## Purpose, per header
 
@@ -25,6 +25,16 @@ platform headers, no locks.
   command_line; the rank IS the precedence) + `SettingsStore`: get<T>
   with layer provenance, set into one layer, layer_of/has_value/clear,
   observers keyed by exact key or dot-prefix.
+- `json.hpp` - the in-house JSON facility (phase 2): `Value` (seven
+  kinds, integer/real DISTINCT so a round trip never re-types a
+  value), the insertion-order `Object`, `parse()` (strict grammar plus
+  tolerances for comments and a leading UTF-8 BOM, every failure
+  naming itself and its line/column, nesting capped at kMaxDepth=128)
+  and `write()` (4-space indent, one entry per line, escaped strings,
+  shortest-round-trip reals that always carry '.' or an exponent).
+  Hand-rolled on purpose: a third-party parser (linked PRIVATE) was
+  the alternative, but the settings-shaped subset fits one .cpp, and
+  std-only keeps it building on every platform the store does.
 
 ## Allowed dependencies
 
@@ -75,6 +85,18 @@ platform headers, no locks.
   one owner's state).
 - `clear()` allocates one string for the erase (no heterogeneous erase
   until C++23).
+- `json::Object` lookups are a linear scan (settings files run to
+  hundreds of keys), and duplicate keys resolve to first position /
+  last value - hand-edited files override at the bottom.
+- The json writer prefers plain decimals and falls back to scientific
+  notation only where `%f` cannot spell the value in 64 chars; a
+  non-finite real has no json form and writes as null (schema
+  validation keeps those out of settings files).
+- `Object`'s members are all defined out of line in `src/json.cpp`:
+  the entries hold an incomplete `Value` in the header, so nothing may
+  odr-use them there - same for `Value::operator==`, kept out of line
+  so the defaulted form is never instantiated against the
+  self-referential `Array`.
 
 ## Tests
 
@@ -87,6 +109,17 @@ observer patterns/order/payload/equal-value sets, removal and
 registration mid-notification, re-entrant set, introspection, and the
 SettingValue unit behavior.
 
-The later phases grow this suite: json (phase 2), layer files +
-migrations (phase 3), the FileSystem seam / atomic saves / corrupt
-recovery / debounced writes (phase 4).
+Phase 2 adds the json suite: scalars (int64 edges), strings with the
+full escape set and surrogate pairs, arrays/objects/nesting, the depth
+cap (the document needs an innermost VALUE to reach it - an empty
+innermost array never asks for one), comments and a leading BOM, a
+30-entry malformed table (every failure checked for message and
+line/column), the exact written shape of a nested document,
+escape/control-char writing, non-finite reals writing as null,
+parse -> write -> parse stability, insertion order + duplicate
+resolution + Object::set, and integer/real staying apart across a
+round trip.
+
+The later phases grow this suite: layer files + migrations (phase 3),
+the FileSystem seam / atomic saves / corrupt recovery / debounced
+writes (phase 4).

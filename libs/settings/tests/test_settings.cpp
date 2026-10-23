@@ -1,17 +1,23 @@
-// The settings store's phase-1 suite: the schema, the layered store,
-// validation and observers - all headless, no files yet (the json,
-// migration and FileSystem layers grow their own cases later).
+// The settings store's suite: the schema, the layered store,
+// validation, observers, and the json facility - still headless,
+// no files yet (the migration and FileSystem layers grow their own
+// cases later).
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include <ws/settings/errors.hpp>
+#include <ws/settings/json.hpp>
 #include <ws/settings/schema.hpp>
 #include <ws/settings/settings.hpp>
 #include <ws/settings/value.hpp>
@@ -31,9 +37,30 @@ using ws::settings::SettingsStore;
 using ws::settings::SettingType;
 using ws::settings::SettingValue;
 
+using ws::settings::json::Array;
+using ws::settings::json::Kind;
+using ws::settings::json::Object;
+using ws::settings::json::Value;
+using ws::settings::json::parse;
+using ws::settings::json::write;
+
 // Every error code the suite checks, as the raw int the Error carries.
 [[nodiscard]] constexpr std::int32_t code_of(SettingsError error) {
     return static_cast<std::int32_t>(error);
+}
+
+// A document that must have parsed, for the happy paths.
+[[nodiscard]] Value parsed(std::string_view text) {
+    const auto v = parse(text);
+    REQUIRE(v);
+    return *v;
+}
+
+// The error a malformed document must have answered.
+[[nodiscard]] ws::core::Error parse_error(std::string_view text) {
+    const auto v = parse(text);
+    REQUIRE_FALSE(v);
+    return v.error();
 }
 
 // The ten-key schema every store case builds on: one key per constraint
@@ -631,4 +658,297 @@ TEST_CASE("value: SettingValue typed getters and to_text") {
     CHECK(SettingValue::text("same").type() == SettingType::text);
     CHECK(SettingValue::text(std::string{"owned"}).as_text().value_or("") ==
           "owned");
+}
+
+// ---- json -------------------------------------------------------------
+
+TEST_CASE("json: scalars parse") {
+    CHECK(parsed("null").is_null());
+    CHECK(parsed("true").get_bool().value_or(false));
+    CHECK_FALSE(parsed("false").get_bool().value_or(true));
+    CHECK(parsed("42").get_integer().value_or(0) == 42);
+    CHECK(parsed("-7").get_integer().value_or(0) == -7);
+    CHECK(parsed(std::to_string(std::numeric_limits<std::int64_t>::min()))
+              .get_integer()
+              .value_or(0) == std::numeric_limits<std::int64_t>::min());
+    CHECK(parsed(std::to_string(std::numeric_limits<std::int64_t>::max()))
+              .get_integer()
+              .value_or(0) == std::numeric_limits<std::int64_t>::max());
+    CHECK(parsed("1.5").get_real().value_or(0.0) == 1.5);
+    CHECK(parsed("-0.25").get_real().value_or(0.0) == -0.25);
+    CHECK(parsed("2.5e-3").get_real().value_or(0.0) == 2.5e-3);
+    CHECK(parsed("1E+2").get_real().value_or(0.0) == 100.0);
+    CHECK(parsed("-1e3").get_real().value_or(0.0) == -1000.0);
+    CHECK(parsed("-0").is_integer());
+
+    // Whitespace everywhere it is legal.
+    CHECK(parsed(" \t\r\n42 \n").get_integer().value_or(0) == 42);
+
+    CHECK(parsed("true").kind() == Kind::boolean);
+    CHECK(parsed("42").kind() == Kind::integer);
+    CHECK(parsed("4.5").kind() == Kind::real);
+    CHECK(parsed("\"x\"").kind() == Kind::text);
+}
+
+TEST_CASE("json: strings and escapes") {
+    CHECK(parsed("\"\"").get_text().value_or("") == "");
+    CHECK(parsed(R"( "\/\b\f\n\r\t\" " )").get_text().value_or("") ==
+          "/\b\f\n\r\t\" ");
+    CHECK(parsed(R"( "a\\b" )").get_text().value_or("") == "a\\b");
+    CHECK(parsed(R"( "A" )").get_text().value_or("") == "A");
+    CHECK(parsed(R"( "é" )").get_text().value_or("") == "\xc3\xa9");
+    CHECK(parsed(R"( "😀" )").get_text().value_or("") ==
+          "\xf0\x9f\x98\x80");
+    CHECK(parsed("\"caf\xc3\xa9\"").get_text().value_or("") == "caf\xc3\xa9");
+}
+
+TEST_CASE("json: arrays, objects, nesting") {
+    const Value v =
+        parsed(R"( {"a": [1, 2.5, "x", null, true], "b": {"c": {"d": [false]}}} )");
+    REQUIRE(v.is_object());
+    const Object& root = *v.as_object();
+    CHECK(root.size() == 2);
+
+    const Value* a = root.find("a");
+    REQUIRE(a != nullptr);
+    REQUIRE(a->is_array());
+    CHECK(a->as_array()->size() == 5);
+    CHECK((*a->as_array())[0].get_integer().value_or(0) == 1);
+    CHECK((*a->as_array())[1].get_real().value_or(0.0) == 2.5);
+    CHECK((*a->as_array())[2].get_text().value_or("") == "x");
+    CHECK((*a->as_array())[3].is_null());
+    CHECK((*a->as_array())[4].get_bool().value_or(false));
+
+    const Value* b = root.find("b");
+    REQUIRE(b != nullptr);
+    const Value* c = b->as_object()->find("c");
+    REQUIRE(c != nullptr);
+    const Value* d = c->as_object()->find("d");
+    REQUIRE(d != nullptr);
+    REQUIRE(d->is_array());
+    CHECK(d->as_array()->size() == 1);
+    CHECK_FALSE(d->as_array()->front().get_bool().value_or(true));
+
+    CHECK(parsed("[]").as_array() != nullptr);
+    CHECK(parsed("[]").as_array()->empty());
+    CHECK(parsed("{}").as_object() != nullptr);
+    CHECK(parsed("{}").as_object()->empty());
+}
+
+TEST_CASE("json: the depth cap") {
+    // A value inside 128 arrays is at the limit; inside 129 it is
+    // refused. (The innermost needs a value - an empty array never
+    // asks for one, so a bare "[[[" ... "]]]" never reaches the cap.)
+    const std::string at_limit =
+        std::string(128, '[') + "0" + std::string(128, ']');
+    CHECK(parse(at_limit));
+
+    const std::string past =
+        std::string(129, '[') + "0" + std::string(129, ']');
+    const auto r = parse(past);
+    REQUIRE_FALSE(r);
+    CHECK(r.error().code == code_of(SettingsError::parse_failed));
+    CHECK(r.error().message.find("nesting deeper than 128") !=
+          std::string::npos);
+}
+
+TEST_CASE("json: comments and a leading BOM") {
+    const Value v = parsed(
+        R"( // the one true config
+        {
+            /* the block form */ "a": 1, "b": /* inline */ 2
+        }
+        // trailing, after the document
+        )");
+    REQUIRE(v.is_object());
+    const Object& obj = *v.as_object();
+    CHECK(obj.size() == 2);
+    CHECK(obj.find("a")->get_integer().value_or(0) == 1);
+    CHECK(obj.find("b")->get_integer().value_or(0) == 2);
+
+    CHECK(parsed("\xEF\xBB\xBF 42").get_integer().value_or(0) == 42);
+
+    const auto unterminated = parse_error(R"( /* never closed )");
+    CHECK(unterminated.code == code_of(SettingsError::parse_failed));
+    CHECK(unterminated.message.find("unterminated block comment") !=
+          std::string::npos);
+}
+
+TEST_CASE("json: malformed inputs answer parse_failed") {
+    const std::pair<std::string_view, std::string_view> bad[] = {
+        {"", "unexpected end of input"},
+        {"   ", "unexpected end of input"},
+        {"{", "expected a key"},
+        {R"({"a")", "expected ':'"},
+        {R"({"a":)", "unexpected end of input"},
+        {R"({"a" 1})", "expected ':'"},
+        {R"({"a":1 "b":2})", "expected ',' or '}'"},
+        {R"({"a":1,})", "expected a key"},
+        {R"({"a":1])", "expected ',' or '}'"},
+        {"[1,]", "unexpected character"},
+        {"[1 2]", "expected ',' or ']'"},
+        {"tru", "invalid literal"},
+        {"nul", "invalid literal"},
+        {"falsx", "invalid literal"},
+        {"01", "invalid number"},
+        {"1.", "invalid number"},
+        {"-", "unexpected end of input"},
+        {"1e", "invalid number"},
+        {"1e+", "invalid number"},
+        {"1.2.3", "invalid number"},
+        {"9223372036854775808", "integer literal out of range"},
+        {"1e999", "invalid number"},
+        {R"("unterminated)", "unterminated string"},
+        {R"("bad \x escape")", "invalid escape"},
+        {R"("\u00")", "invalid \\u escape"},
+        {R"("\ud83d")", "unpaired high surrogate"},
+        {R"("\udc00")", "lone low surrogate"},
+        {R"("\ud83dX")", "unpaired high surrogate"},
+        {R"({} trailing)", "trailing characters"},
+        {R"(/* no value */)", "unexpected end of input"},
+    };
+    for (const auto& [document, want] : bad) {
+        CAPTURE(document);
+        const auto e = parse_error(document);
+        CHECK(e.code == code_of(SettingsError::parse_failed));
+        CHECK(e.message.find(want) != std::string::npos);
+    }
+
+    // A raw newline inside a string is reported on the line it sits on.
+    const auto nl = parse_error("{\n \"a\": \"b\nc\"\n}");
+    CAPTURE(nl.message);
+    CHECK(nl.message.find("line 2") != std::string::npos);
+
+    // Every parse failure carries its position.
+    CHECK(parse_error("x").message.find("at line 1, column 1") !=
+          std::string::npos);
+}
+
+TEST_CASE("json: write is readable and escapes") {
+    Object theme;
+    theme.set("editor.theme", Value::text("dark"));
+    theme.set("editor.font.size", Value::integer(14));
+
+    Array list;
+    list.push_back(Value::integer(1));
+    list.push_back(Value::text("two"));
+    list.push_back(Value::boolean(false));
+
+    Object root;
+    root.set("theme", Value::object(std::move(theme)));
+    root.set("list", Value::array(std::move(list)));
+    root.set("empty", Value::object(Object{}));
+    root.set("scale", Value::real(1.5));
+
+    const std::string expected =
+        "{\n"
+        "    \"theme\": {\n"
+        "        \"editor.theme\": \"dark\",\n"
+        "        \"editor.font.size\": 14\n"
+        "    },\n"
+        "    \"list\": [\n"
+        "        1,\n"
+        "        \"two\",\n"
+        "        false\n"
+        "    ],\n"
+        "    \"empty\": {},\n"
+        "    \"scale\": 1.5\n"
+        "}\n";
+    CHECK(write(Value::object(std::move(root))) == expected);
+
+    CHECK(write(Value::null()) == "null\n");
+    CHECK(write(Value::array()) == "[]\n");
+    CHECK(write(Value::boolean(true)) == "true\n");
+    CHECK(write(Value::integer(-3)) == "-3\n");
+    CHECK(write(Value::real(0.5)) == "0.5\n");
+    CHECK(write(Value::real(1200.0)) == "1200.0\n");
+    CHECK(write(Value::real(-0.0)) == "-0.0\n");
+    CHECK(write(Value::real(2.5e-3)) == "0.0025\n");
+    CHECK(write(Value::real(1e300)) == "1e+300\n");
+
+    CHECK(write(Value::text("a\"b\\c\nd\te")) == "\"a\\\"b\\\\c\\nd\\te\"\n");
+    const std::string control = std::string{'x', '\x01', 'y'};
+    CHECK(write(Value::text(control)) == "\"x\\u0001y\"\n");
+
+    // A non-finite real has no json form; the writer refuses to guess.
+    CHECK(write(Value::real(std::nan(""))) == "null\n");
+    CHECK(write(Value::real(HUGE_VAL)) == "null\n");
+}
+
+TEST_CASE("json: parse -> write -> parse stability") {
+    const char* source = R"( // hand-maintained
+{
+    "editor.theme": "dark",  /* the one that ships */
+    "editor.font.name": "Café Mono",
+    "scale": 1.25,
+    "limits": {
+        "low": -2.5e-3,
+        "high": 1e+2
+    },
+    "emoji": "😀",
+    "list": [1, 2.0, "three", null, true, []]
+}
+)";
+    const Value first = parsed(source);
+    const std::string written = write(first);
+    const Value second = parsed(written);
+    CHECK(second == first);
+
+    // The written form is the readable shape: comments are gone, one
+    // entry per line, 4-space steps.
+    CHECK(written.find("//") == std::string::npos);
+    CHECK(written.find("/*") == std::string::npos);
+}
+
+TEST_CASE("json: insertion order, duplicates, and Object::set") {
+    const Value v = parsed(R"( {"z": 1, "a": 2, "m": 3} )");
+    const Object& obj = *v.as_object();
+    REQUIRE(obj.size() == 3);
+    CHECK(obj.begin()->first == "z");
+    CHECK(std::next(obj.begin())->first == "a");
+    CHECK(std::next(obj.begin(), 2)->first == "m");
+
+    // A duplicate key keeps the FIRST position and takes the LAST
+    // value: hand-edited files override at the bottom.
+    const Value dup = parsed(R"( {"a": 1, "b": 9, "a": 2} )");
+    const Object& d = *dup.as_object();
+    REQUIRE(d.size() == 2);
+    CHECK(d.begin()->first == "a");
+    CHECK(d.begin()->second.get_integer().value_or(0) == 2);
+    CHECK(d.find("b")->get_integer().value_or(0) == 9);
+
+    // set() overwrites in place: position kept, value replaced.
+    Object hand;
+    hand.set("k", Value::integer(1));
+    hand.set("k", Value::integer(5));
+    REQUIRE(hand.size() == 1);
+    CHECK(hand.begin()->second.get_integer().value_or(0) == 5);
+
+    CHECK(obj == *v.as_object());
+    CHECK(obj.find("missing") == nullptr);
+}
+
+TEST_CASE("json: integer and real stay apart; typed pulls answer Result") {
+    CHECK(parsed("3").is_integer());
+    CHECK(parsed("3.0").is_real());
+    CHECK(parsed("3e0").is_real());
+
+    CHECK(write(parsed("3")) == "3\n");
+    CHECK(write(parsed("3.0")) == "3.0\n");
+
+    // A round trip never re-types a value.
+    CHECK(parse(write(parsed("3")))->is_integer());
+    CHECK(parse(write(parsed("-12e2")))->is_real());
+    const Value weird = parsed("-12e2");
+    CHECK(parse(write(weird))->get_real().value_or(0.0) ==
+          weird.get_real().value_or(0.0));
+
+    const auto wrong = parsed("3").get_text();
+    REQUIRE_FALSE(wrong);
+    CHECK(wrong.error().code == code_of(SettingsError::type_mismatch));
+
+    CHECK(parsed("3").as_array() == nullptr);
+    CHECK(parsed("[1]").as_array() != nullptr);
+    CHECK(parsed("3").as_object() == nullptr);
+    CHECK(parsed("{}").as_object() != nullptr);
 }
