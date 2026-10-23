@@ -62,6 +62,9 @@ One line each - the per-tree CLAUDE.md files carry the detail:
 - `libs/audio` - WAV decode + OpenAL Soft playback behind a Result-only API.
 - `libs/net` - event loop, framed TCP, UDP, LAN discovery.
 - `libs/physics` - 2D + 3D physics behind one API (Box2D/Jolt, private).
+- `libs/jobs` - the headless job system: a Result-shaped pool with
+  priorities, cooperative cancellation and completions marshalled to the
+  owner thread; ws::ui's App drains it once per frame.
 - `apps/*` - the executables.
 
 ## Read when
