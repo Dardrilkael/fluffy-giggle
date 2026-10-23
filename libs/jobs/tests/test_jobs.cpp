@@ -782,7 +782,14 @@ TEST_CASE("published: versioned snapshots, read_if_new, never torn") {
         std::uint64_t c_seen = 0;
         std::uint64_t c_last = 0;
         Pair value;
-        while (!stop.load()) {
+        // Keep reading until the producer stops AND at least one read
+        // has landed: the consumer must not exit on its very first stop
+        // check (the producer can finish all 20k publishes before this
+        // thread is ever scheduled), or highest==0 flakes the check
+        // below. The read is a structural guarantee once the version is
+        // final, never a scheduling bet.
+        bool stopped = false;
+        while (!stopped || c_last == 0) {
             if (stressed.read_if_new(c_seen, value)) {
                 if (c_seen <= c_last) {
                     ++version_went_backwards;
@@ -792,6 +799,7 @@ TEST_CASE("published: versioned snapshots, read_if_new, never torn") {
                     ++torn;
                 }
             }
+            stopped = stop.load();
         }
         highest.store(c_last);
     });
