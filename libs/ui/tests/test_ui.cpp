@@ -11257,3 +11257,206 @@ TEST_CASE("a custom look owns every pixel over the standard behavior") {
         CHECK(vertex.tex_index == 0.0f);  // a plain quad, not the SDF face
     }
 }
+
+TEST_CASE("the basic-row pairs record the widgets' output byte for byte") {
+    using namespace ws::ui::gui;
+    ws::ui::r2d::Renderer2D r;
+    struct ActiveRenderer {
+        explicit ActiveRenderer(ws::ui::r2d::Renderer2D* renderer) {
+            ws::ui::r2d::set_active(renderer);
+        }
+        ~ActiveRenderer() { ws::ui::r2d::set_active(nullptr); }
+    };
+    const ActiveRenderer active{&r};
+    (void)active;
+
+    const ws::ui::r2d::Font font = ab_font();
+    ChromeTheme theme = kDefaultChrome;
+    theme.font = &font;  // the theme points; it never owns
+
+    const ws::input::InputFrame quiet = snap(-100.0f, -100.0f);
+    const ws::input::InputFrame tap = snap(50.0f, 12.0f, false, true, true);
+    // Busy frames: the phase widgets need a frame clock that moved, so
+    // the recordings below prove the persistent phase advances the same
+    // for the stock widget and the pair (half a turn, half a sweep).
+    ws::input::InputFrame busy = snap(-100.0f, -100.0f);
+    busy.dt_seconds = 0.4f;
+    ws::input::InputFrame sweep = snap(-100.0f, -100.0f);
+    sweep.dt_seconds = 0.6f;
+
+    // One recording per pass: a fresh context in the same frame, the
+    // standard widget first, then the pair composing the same widget's
+    // halves at the same id and rect. The WHOLE frame's vertices - panel
+    // chrome included - must be identical: the split touched nothing.
+    const auto record = [&](auto&& run, const ws::input::InputFrame& frame) {
+        r.frame_begin(800.0f, 600.0f);
+        r.begin_screen();
+        GuiContext gui;
+        LayoutCursor layout;
+        gui.begin_frame(frame);
+        (void)begin_panel(gui, layout, theme, "root",
+                          {0.0f, 0.0f, 400.0f, 300.0f});
+        run(gui, layout);
+        end_panel(gui, layout);
+        gui.end_frame();
+        r.end();
+        r.frame_end();
+        return r.batch().vertices();  // by value: the next frame resets
+    };
+    const auto identical = [](const auto& stock, const auto& split) {
+        REQUIRE(stock.size() == split.size());
+        REQUIRE(!stock.empty());  // a frame that recorded nothing proves nothing
+        CHECK(std::memcmp(stock.data(), split.data(),
+                          stock.size() * sizeof(stock[0])) == 0);
+    };
+
+    // collapsing_header, the quiet frame: same id, same placed line.
+    {
+        bool stock_open = false;
+        bool split_open = false;
+        const auto stock = record([&](GuiContext& gui, LayoutCursor& layout) {
+            (void)collapsing_header(gui, layout, theme, "hdr", stock_open,
+                                    300.0f);
+        }, quiet);
+        const auto split = record([&](GuiContext& gui, LayoutCursor& layout) {
+            const WidgetId id = gui.ids().id("hdr");
+            const Rect rect = layout.next(300.0f, theme.control_height);
+            const CollapsingHeaderResult result =
+                collapsing_header_behavior(gui, id, rect, split_open);
+            collapsing_header_draw(rect, result, theme, "hdr", split_open);
+        }, quiet);
+        identical(stock, split);
+        CHECK(!stock_open);  // the quiet frame flips nothing
+        CHECK(!split_open);
+    }
+
+    // collapsing_header through a tap: both flip open, both draw the
+    // open marker - the answer and the pixels agree.
+    {
+        bool stock_open = false;
+        bool split_open = false;
+        const auto stock = record([&](GuiContext& gui, LayoutCursor& layout) {
+            (void)collapsing_header(gui, layout, theme, "hdr", stock_open,
+                                    300.0f);
+        }, tap);
+        const auto split = record([&](GuiContext& gui, LayoutCursor& layout) {
+            const WidgetId id = gui.ids().id("hdr");
+            const Rect rect = layout.next(300.0f, theme.control_height);
+            const CollapsingHeaderResult result =
+                collapsing_header_behavior(gui, id, rect, split_open);
+            collapsing_header_draw(rect, result, theme, "hdr", split_open);
+        }, tap);
+        identical(stock, split);
+        CHECK(stock_open);
+        CHECK(split_open);
+    }
+
+    // selectable, the quiet frame with the row SELECTED: the accent bar
+    // rides both draws. The click reports; the selection itself is the
+    // caller's either way.
+    {
+        bool stock_picked = false;
+        bool split_picked = false;
+        const auto stock = record([&](GuiContext& gui, LayoutCursor& layout) {
+            stock_picked = selectable(gui, layout, theme, "row", true, 300.0f);
+        }, quiet);
+        const auto split = record([&](GuiContext& gui, LayoutCursor& layout) {
+            const WidgetId id = gui.ids().id("row");
+            const Rect rect = layout.next(300.0f, theme.control_height);
+            const SelectableResult result = selectable_behavior(gui, id, rect);
+            selectable_draw(rect, result, theme, "row", true);
+            split_picked = result.clicked;
+        }, quiet);
+        identical(stock, split);
+        CHECK(!stock_picked);  // the quiet frame clicks nothing
+        CHECK(!split_picked);
+    }
+
+    // selectable through a tap.
+    {
+        bool stock_picked = false;
+        bool split_picked = false;
+        const auto stock = record([&](GuiContext& gui, LayoutCursor& layout) {
+            stock_picked = selectable(gui, layout, theme, "row", true, 300.0f);
+        }, tap);
+        const auto split = record([&](GuiContext& gui, LayoutCursor& layout) {
+            const WidgetId id = gui.ids().id("row");
+            const Rect rect = layout.next(300.0f, theme.control_height);
+            const SelectableResult result = selectable_behavior(gui, id, rect);
+            selectable_draw(rect, result, theme, "row", true);
+            split_picked = result.clicked;
+        }, tap);
+        identical(stock, split);
+        CHECK(stock_picked);
+        CHECK(split_picked);
+    }
+
+    // spinner on a busy frame: the clock is the behavior's, the dots
+    // the draw's - and the pair lands the same bright dot.
+    {
+        const auto stock = record([&](GuiContext& gui, LayoutCursor& layout) {
+            spinner(gui, layout, theme, "spin", 24.0f);
+        }, busy);
+        const auto split = record([&](GuiContext& gui, LayoutCursor& layout) {
+            const WidgetId id = gui.ids().id("spin");
+            const Rect rect = layout.next(24.0f, 24.0f);
+            const SpinnerResult result = spinner_behavior(gui, id);
+            spinner_draw(rect, result, theme);
+        }, busy);
+        identical(stock, split);
+    }
+
+    // progress_indeterminate on a busy frame: half the sweep drawn the
+    // same by both.
+    {
+        const auto stock = record([&](GuiContext& gui, LayoutCursor& layout) {
+            progress_indeterminate(gui, layout, theme, "bar", 300.0f);
+        }, sweep);
+        const auto split = record([&](GuiContext& gui, LayoutCursor& layout) {
+            const WidgetId id = gui.ids().id("bar");
+            const Rect rect = layout.next(300.0f, theme.control_height);
+            const IndeterminateResult result =
+                progress_indeterminate_behavior(gui, id);
+            progress_indeterminate_draw(rect, result, theme);
+        }, sweep);
+        identical(stock, split);
+    }
+}
+
+TEST_CASE("a custom look owns every pixel over a selectable row") {
+    using namespace ws::ui::gui;
+    ws::ui::r2d::Renderer2D r;
+    ws::ui::r2d::set_active(&r);
+
+    // The gallery's custom-draw case in miniature, a list row's turn:
+    // the behavior answers the click, then a flat face and an accent
+    // bar are the whole look - the stock rounded hover face and label
+    // never record a vertex.
+    r.frame_begin(800.0f, 600.0f);
+    r.begin_screen();
+    GuiContext gui;
+    gui.begin_frame(snap(50.0f, 12.0f, false, true, true));
+    const WidgetId id = gui.ids().id("flat");
+    const Rect rect{0.0f, 0.0f, 120.0f, 24.0f};
+    const SelectableResult result = selectable_behavior(gui, id, rect);
+    ws::ui::r2d::draw_quad(rect.x, rect.y, rect.width, rect.height,
+                           kDefaultChrome.control_pressed);
+    ws::ui::r2d::draw_quad(rect.x, rect.y, 3.0f, rect.height,
+                           kDefaultChrome.control_on);
+    gui.end_frame();
+    r.end();
+    r.frame_end();
+    ws::ui::r2d::set_active(nullptr);
+
+    CHECK(result.clicked);
+    CHECK(result.state == WidgetState::Pressed);
+    CHECK(result.focused);  // the tap latched it; the ring never drew
+
+    // Exactly the two custom quads: eight plain-textured vertices,
+    // nothing else - the behavior half contributed not one.
+    REQUIRE(r.batch().vertices().size() == 8);
+    CHECK(r.batch().chunk_count() == 1);
+    for (const auto& vertex : r.batch().vertices()) {
+        CHECK(vertex.tex_index == 0.0f);  // a plain quad, not the SDF face
+    }
+}

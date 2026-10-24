@@ -1265,3 +1265,147 @@ TEST_CASE("custom looks paint over the behaviors, pixel for pixel theirs") {
     CHECK(ws::ui::gui_test::stub.quads == 2);
     CHECK(ws::ui::gui_test::stub.texts == 0);
 }
+
+TEST_CASE("the basic-row behaviors drive the interaction and draw nothing") {
+    using ws::ui::gui::WidgetState;
+
+    ws::ui::gui_test::stub.reset();
+    GuiContext gui;
+    const ws::ui::gui::Rect rect{0.0f, 0.0f, 120.0f, 24.0f};
+
+    // collapsing_header: the tap flips the caller's bool.
+    gui.begin_frame(snap(60.0f, 10.0f, false, true, true));
+    bool open = false;
+    const ws::ui::gui::CollapsingHeaderResult header =
+        ws::ui::gui::collapsing_header_behavior(gui, gui.ids().id("hdr"),
+                                                rect, open);
+    gui.end_frame();
+    CHECK(header.toggled);
+    CHECK(header.state == WidgetState::Pressed);
+    CHECK(open);
+
+    // selectable: the click reports; the selection stays the caller's.
+    gui.begin_frame(snap(60.0f, 10.0f, false, true, true));
+    const ws::ui::gui::SelectableResult row =
+        ws::ui::gui::selectable_behavior(gui, gui.ids().id("row"), rect);
+    gui.end_frame();
+    CHECK(row.clicked);
+
+    // spinner: the behavior advances the persistent phase on the frame
+    // clock - 0.4 s is half the 0.8 s turn - and the next half wraps.
+    InputFrame busy = snap(-100.0f, -100.0f);
+    busy.dt_seconds = 0.4f;
+    gui.begin_frame(busy);
+    const ws::ui::gui::SpinnerResult spun =
+        ws::ui::gui::spinner_behavior(gui, gui.ids().id("spin"));
+    gui.end_frame();
+    CHECK(spun.phase == 0.5f);
+    gui.begin_frame(busy);
+    const ws::ui::gui::SpinnerResult wrapped =
+        ws::ui::gui::spinner_behavior(gui, gui.ids().id("spin"));
+    gui.end_frame();
+    CHECK(wrapped.phase == 0.0f);
+
+    // progress_indeterminate: 0.6 s is half the 1.2 s sweep.
+    InputFrame sweep = snap(-100.0f, -100.0f);
+    sweep.dt_seconds = 0.6f;
+    gui.begin_frame(sweep);
+    const ws::ui::gui::IndeterminateResult half =
+        ws::ui::gui::progress_indeterminate_behavior(gui,
+                                                     gui.ids().id("bar"));
+    gui.end_frame();
+    CHECK(half.phase == 0.5f);
+
+    CHECK(ws::ui::gui_test::stub.quads == 0);
+    CHECK(ws::ui::gui_test::stub.rounded == 0);
+    CHECK(ws::ui::gui_test::stub.sprites == 0);
+    CHECK(ws::ui::gui_test::stub.texts == 0);
+    CHECK(ws::ui::gui_test::stub.clip_pushes == 0);
+    CHECK(ws::ui::gui_test::stub.clip_pops == 0);
+    CHECK(ws::ui::gui_test::stub.layer_sets == 0);
+}
+
+TEST_CASE("custom looks paint over the basic-row behaviors") {
+    using ws::ui::r2d::draw_quad;
+    using ws::ui::r2d::draw_rounded_quad;
+
+    // The seam from the other side, the basic rows' turn: each sub-block
+    // resets the stub, runs one behavior, paints a hand-rolled look, and
+    // checks the counters carry exactly the custom draws - no stock look
+    // leaked.
+    GuiContext gui;
+    const ws::ui::gui::Rect rect{0.0f, 0.0f, 120.0f, 24.0f};
+    const auto tap = [&gui]() {
+        gui.begin_frame(snap(60.0f, 10.0f, false, true, true));
+    };
+    const auto busy = [&gui](float dt) {
+        InputFrame frame = snap(-100.0f, -100.0f);
+        frame.dt_seconds = dt;
+        gui.begin_frame(frame);
+    };
+
+    // collapsing_header: a flat face and the open marker square.
+    ws::ui::gui_test::stub.reset();
+    tap();
+    {
+        bool open = false;
+        const ws::ui::gui::CollapsingHeaderResult result =
+            ws::ui::gui::collapsing_header_behavior(gui, gui.ids().id("hdr"),
+                                                    rect, open);
+        draw_quad(rect.x, rect.y, rect.width, rect.height,
+                  kDefaultChrome.control_pressed);
+        draw_quad(rect.x + 4.0f, rect.y + 4.0f, 16.0f, 16.0f,
+                  kDefaultChrome.control_on);
+        gui.end_frame();
+        CHECK(result.toggled);
+        CHECK(open);
+    }
+    CHECK(ws::ui::gui_test::stub.quads == 2);
+    CHECK(ws::ui::gui_test::stub.rounded == 0);
+
+    // selectable: the selected row as a flat face and an accent bar.
+    ws::ui::gui_test::stub.reset();
+    tap();
+    {
+        const ws::ui::gui::SelectableResult result =
+            ws::ui::gui::selectable_behavior(gui, gui.ids().id("row"), rect);
+        draw_quad(rect.x, rect.y, rect.width, rect.height,
+                  kDefaultChrome.control_pressed);
+        draw_quad(rect.x, rect.y, 3.0f, rect.height, kDefaultChrome.control_on);
+        gui.end_frame();
+        CHECK(result.clicked);
+    }
+    CHECK(ws::ui::gui_test::stub.quads == 2);
+
+    // spinner: one dot stands for the whole chase (the phase is the
+    // look's to spend).
+    ws::ui::gui_test::stub.reset();
+    busy(0.4f);
+    {
+        const ws::ui::gui::SpinnerResult result =
+            ws::ui::gui::spinner_behavior(gui, gui.ids().id("spin"));
+        draw_rounded_quad(56.0f, 8.0f, 8.0f, 8.0f, 4.0f,
+                          kDefaultChrome.control_on);
+        gui.end_frame();
+        CHECK(result.phase == 0.5f);
+    }
+    CHECK(ws::ui::gui_test::stub.rounded == 1);
+    CHECK(ws::ui::gui_test::stub.quads == 0);
+
+    // progress_indeterminate: a sharp-cornered track and band.
+    ws::ui::gui_test::stub.reset();
+    busy(0.6f);
+    {
+        const ws::ui::gui::IndeterminateResult result =
+            ws::ui::gui::progress_indeterminate_behavior(gui,
+                                                          gui.ids().id("bar"));
+        draw_quad(rect.x, rect.y, rect.width, rect.height,
+                  kDefaultChrome.control_bg);
+        draw_quad(rect.x + 10.0f, rect.y + 1.0f, 40.0f, 22.0f,
+                  kDefaultChrome.control_on);
+        gui.end_frame();
+        CHECK(result.phase == 0.5f);
+    }
+    CHECK(ws::ui::gui_test::stub.quads == 2);
+    CHECK(ws::ui::gui_test::stub.texts == 0);
+}

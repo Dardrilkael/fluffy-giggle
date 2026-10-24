@@ -228,6 +228,20 @@ bool collapsing_header(GuiContext& gui, LayoutCursor& layout,
                        bool& open, float width = -1.0f,
                        bool disabled = false);
 
+// The split halves, collapsing_header's seam: the behavior owns the
+// flip of `open`; the draw takes the (already flipped) value.
+struct CollapsingHeaderResult : WidgetPaint {
+    bool toggled = false;  // `open` flipped this frame (click or key)
+};
+
+CollapsingHeaderResult collapsing_header_behavior(
+    GuiContext& gui, WidgetId id, const Rect& rect, bool& open,
+    bool disabled = false, const HitShape& hit_shape = {});
+void collapsing_header_draw(const Rect& rect,
+                            const CollapsingHeaderResult& result,
+                            const ChromeTheme& theme, const char* label,
+                            bool open);
+
 // A selectable row: true on a full click or Enter/Space - the selection
 // is the CALLER'S to keep (`selected` is display state the row reads
 // and never writes, so a click on the already-selected row still
@@ -244,6 +258,19 @@ bool collapsing_header(GuiContext& gui, LayoutCursor& layout,
 bool selectable(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
                const char* label, bool selected, float width = -1.0f,
                bool disabled = false);
+
+// The split halves, selectable's seam: the behavior reports the click -
+// the selection stays the caller's to write; the draw reads it.
+struct SelectableResult : WidgetPaint {
+    bool clicked = false;  // a full click or Enter/Space this frame
+};
+
+SelectableResult selectable_behavior(GuiContext& gui, WidgetId id,
+                                     const Rect& rect, bool disabled = false,
+                                     const HitShape& hit_shape = {});
+void selectable_draw(const Rect& rect, const SelectableResult& result,
+                     const ChromeTheme& theme, const char* label,
+                     bool selected);
 
 // A horizontal slider, click-to-set AND drag: a press inside the track
 // jumps the value to the pointer and tracks it while held; the value
@@ -334,6 +361,18 @@ void progress(LayoutCursor& layout, const ChromeTheme& theme,
 void spinner(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
              const char* label, float size = -1.0f);
 
+// The split halves, spinner's: the behavior advances the persistent
+// phase on the frame clock and answers it; the draw orbits the dots. A
+// custom look chases its own marks around the same phase. Not a
+// WidgetPaint: the spinner claims nothing, so there is nothing to paint.
+struct SpinnerResult {
+    float phase = 0.0f;  // [0, 1): the turn, the bright dot is int(phase*8)
+};
+
+SpinnerResult spinner_behavior(GuiContext& gui, WidgetId id);
+void spinner_draw(const Rect& rect, const SpinnerResult& result,
+                  const ChromeTheme& theme);
+
 // The indeterminate progress bar: progress's track with nothing to
 // show - a band a third of the track's width sweeps it left to right,
 // wrapping, the phase on the frame clock in the persistent state under
@@ -343,6 +382,18 @@ void spinner(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 void progress_indeterminate(GuiContext& gui, LayoutCursor& layout,
                              const ChromeTheme& theme, const char* label,
                              float width = -1.0f);
+
+// The split halves, progress_indeterminate's: the behavior advances the
+// persistent sweep on the frame clock; the draw runs the band across.
+struct IndeterminateResult {
+    float phase = 0.0f;  // [0, 1): the sweep, the band's trip across
+};
+
+IndeterminateResult progress_indeterminate_behavior(GuiContext& gui,
+                                                    WidgetId id);
+void progress_indeterminate_draw(const Rect& rect,
+                                  const IndeterminateResult& result,
+                                  const ChromeTheme& theme);
 
 // The status bar: a frame-anchored strip along the bottom edge - full
 // width, one control height, `text` left-inset past the padding. It

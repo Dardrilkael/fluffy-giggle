@@ -116,23 +116,34 @@ bool collapsing_header(GuiContext& gui, LayoutCursor& layout,
                        const ChromeTheme& theme, const char* label,
                        bool& open, float width, bool disabled) {
     // Fill-width: a header wants its container's line.
-    const Row row = begin_row(gui, layout, theme, label, width, disabled);
-    const WidgetId id = row.id;
-    const Rect& rect = row.rect;
-    const WidgetResult& result = row.result;
-    const HitTest& hit = result.hit;
+    const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
+    const CollapsingHeaderResult result =
+        collapsing_header_behavior(gui, row.id, row.rect, open, disabled);
+    collapsing_header_draw(row.rect, result, theme, label, open);
+    // The answer is the state AFTER the flip: the caller's `if` places
+    // this frame's children when the click just opened it.
+    return open;
+}
 
-    // Keyboard toggle: Enter or Space flips the focused header,
-    // edge-only - a click with no pointer involved.
-    const bool key_toggled = key_activated(gui, id);
-
-    if (hit.clicked || key_toggled) {
+CollapsingHeaderResult collapsing_header_behavior(
+    GuiContext& gui, WidgetId id, const Rect& rect, bool& open,
+    bool disabled, const HitShape& hit_shape) {
+    CollapsingHeaderResult result{
+        begin_widget_paint(gui, id, rect, disabled, hit_shape)};
+    result.toggled = result.hit.clicked || key_activated(gui, id);
+    if (result.toggled) {
         open = !open;  // the caller's bool is the state; a click flips it
     }
+    return result;
+}
 
+void collapsing_header_draw(const Rect& rect,
+                           const CollapsingHeaderResult& result,
+                           const ChromeTheme& theme, const char* label,
+                           bool open) {
     // The focus ring: the on-accent as a 1px outline behind the row, so
     // Tab navigation is legible. Skipped for degenerate rows.
-    focus_ring(gui, id, rect, theme);
+    ring_draw(result.focused, rect, theme);
 
     // The disabled look: the dead face for the row, the marker and the
     // label dimmed through the one helper.
@@ -167,28 +178,36 @@ bool collapsing_header(GuiContext& gui, LayoutCursor& layout,
                  theme, scratch, sizeof(scratch));
     draw_label(rect.x + box + gap, rect.y, rect.height, fit,
                dim(theme.text, dim_by), theme);
-    // The answer is the state AFTER the flip: the caller's `if` places
-    // this frame's children when the click just opened it.
-    return open;
 }
 
 bool selectable(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
                const char* label, bool selected, float width, bool disabled) {
     // Fill-width: list rows want their container's line.
-    const Row row = begin_row(gui, layout, theme, label, width, disabled);
-    const WidgetId id = row.id;
-    const Rect& rect = row.rect;
-    const WidgetResult& result = row.result;
-    const HitTest& hit = result.hit;
+    const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
+    const SelectableResult result =
+        selectable_behavior(gui, row.id, row.rect, disabled);
+    selectable_draw(row.rect, result, theme, label, selected);
+    return result.clicked;
+}
 
+SelectableResult selectable_behavior(GuiContext& gui, WidgetId id,
+                                     const Rect& rect, bool disabled,
+                                     const HitShape& hit_shape) {
+    SelectableResult result{
+        begin_widget_paint(gui, id, rect, disabled, hit_shape)};
     // Keyboard select: Enter or Space reports the focused row, edge-only
     // - a click with no pointer involved. The selection itself stays
     // the caller's to write.
-    const bool key_clicked = key_activated(gui, id);
+    result.clicked = result.hit.clicked || key_activated(gui, id);
+    return result;
+}
 
+void selectable_draw(const Rect& rect, const SelectableResult& result,
+                     const ChromeTheme& theme, const char* label,
+                     bool selected) {
     // The focus ring: the on-accent as a 1px outline behind the row.
     // Skipped for degenerate rows.
-    focus_ring(gui, id, rect, theme);
+    ring_draw(result.focused, rect, theme);
 
     const float dim_by = dim_factor(result.state, theme);
 
@@ -216,7 +235,6 @@ bool selectable(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
                  theme, scratch, sizeof(scratch));
     draw_label(rect.x + theme.check_inset, rect.y, rect.height, fit,
                dim(theme.text, dim_by), theme);
-    return hit.clicked || key_clicked;
 }
 
 void text(LayoutCursor& layout, const ChromeTheme& theme,
@@ -293,15 +311,23 @@ void spinner(GuiContext& gui, LayoutCursor& layout,
     }
     size = std::max(size, 0.0f);
     const Rect rect = layout.next(size, size);
-    SpinnerPhase& state = gui.persistent_state<SpinnerPhase>(
-        gui.ids().id(label));
+    const SpinnerResult result = spinner_behavior(gui, gui.ids().id(label));
+    spinner_draw(rect, result, theme);
+}
 
+SpinnerResult spinner_behavior(GuiContext& gui, WidgetId id) {
+    SpinnerPhase& state = gui.persistent_state<SpinnerPhase>(id);
     // One turn per 0.8 s - the bright dot hands off every tenth of a
     // second, the pace the chase reads at any control size. Headless
     // the frame clock reads 0: the phase holds, the honest answer
     // without time.
     state.phase = std::fmod(
         state.phase + gui.input().dt_seconds / 0.8f, 1.0f);
+    return {state.phase};
+}
+
+void spinner_draw(const Rect& rect, const SpinnerResult& result,
+                  const ChromeTheme& theme) {
     if (rect.width <= 0.0f || rect.height <= 0.0f) {
         return;  // degenerate: nothing to orbit (the phase still banked)
     }
@@ -315,7 +341,7 @@ void spinner(GuiContext& gui, LayoutCursor& layout,
     const float center_y = rect.y + rect.height * 0.5f;
     const float dot = std::max(1.0f, rect.width / 16.0f);
     const float ring = std::max(0.0f, rect.width * 0.5f - dot);
-    const int bright = static_cast<int>(state.phase * 8.0f) % 8;
+    const int bright = static_cast<int>(result.phase * 8.0f) % 8;
     for (int i = 0; i < 8; ++i) {
         const float angle =
             static_cast<float>(i) * (6.2831853f / 8.0f) - 1.5707963f;
@@ -336,14 +362,24 @@ void progress_indeterminate(GuiContext& gui, LayoutCursor& layout,
     // for its phase and never draws, progress's own label discipline.
     resolve_width(width, layout);
     const Rect rect = layout.next(width, theme.control_height);
-    IndeterminatePhase& state =
-        gui.persistent_state<IndeterminatePhase>(gui.ids().id(label));
+    const IndeterminateResult result =
+        progress_indeterminate_behavior(gui, gui.ids().id(label));
+    progress_indeterminate_draw(rect, result, theme);
+}
 
+IndeterminateResult progress_indeterminate_behavior(GuiContext& gui,
+                                                    WidgetId id) {
+    IndeterminatePhase& state = gui.persistent_state<IndeterminatePhase>(id);
     // One sweep per 1.2 s: fast enough to read as alive, slow enough
     // not to strobe. Headless the band holds.
     state.phase =
         std::fmod(state.phase + gui.input().dt_seconds / 1.2f, 1.0f);
+    return {state.phase};
+}
 
+void progress_indeterminate_draw(const Rect& rect,
+                                 const IndeterminateResult& result,
+                                 const ChromeTheme& theme) {
     r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
                            theme.corner_radius, theme.control_bg);
     if (rect.width <= 2.0f) {
@@ -356,7 +392,7 @@ void progress_indeterminate(GuiContext& gui, LayoutCursor& layout,
     // half-pixel ramp never paints on the track's own outline.
     const float band = rect.width / 3.0f;
     const float span = rect.width + band;  // off-left in to off-right out
-    const float pos = -band + state.phase * span;  // the band's left edge
+    const float pos = -band + result.phase * span;  // the band's left edge
     const float lo = std::max(pos, 1.0f);
     const float hi = std::min(pos + band, rect.width - 1.0f);
     if (hi > lo) {
