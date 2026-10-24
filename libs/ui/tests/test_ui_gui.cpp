@@ -1409,3 +1409,123 @@ TEST_CASE("custom looks paint over the basic-row behaviors") {
     CHECK(ws::ui::gui_test::stub.quads == 2);
     CHECK(ws::ui::gui_test::stub.texts == 0);
 }
+
+TEST_CASE("the slider behaviors drive the interaction and draw nothing") {
+    using ws::ui::gui::WidgetState;
+
+    ws::ui::gui_test::stub.reset();
+    GuiContext gui;
+    const ws::ui::gui::Rect rect{0.0f, 0.0f, 120.0f, 24.0f};
+
+    // slider_behavior: the one-frame tap IS click-to-set - the value
+    // jumps to the pointer's fraction of the track.
+    gui.begin_frame(snap(60.0f, 10.0f, false, true, true));
+    float value = 0.0f;
+    const ws::ui::gui::SliderResult jumped = ws::ui::gui::slider_behavior(
+        gui, gui.ids().id("slide"), rect, value, 0.0f, 100.0f, 1.0f);
+    gui.end_frame();
+    CHECK(jumped.changed);
+    CHECK(jumped.hit.pressed);
+    CHECK(jumped.state == WidgetState::Pressed);
+    CHECK(value == 50.0f);  // dead center of the track: exact in float
+
+    // slider_behavior: the arrows step the focused slider - key_step
+    // per press, clamped to the range.
+    gui.set_focus(gui.ids().id("step"));
+    InputFrame keys = snap(-100.0f, -100.0f);
+    keys.key_pressed[static_cast<std::size_t>(ws::input::keys::kRight)] =
+        true;
+    gui.begin_frame(keys);
+    float stepped = 10.0f;
+    const ws::ui::gui::SliderResult nudged = ws::ui::gui::slider_behavior(
+        gui, gui.ids().id("step"), rect, stepped, 0.0f, 100.0f, 2.5f);
+    gui.end_frame();
+    CHECK(nudged.changed);
+    CHECK(stepped == 12.5f);
+
+    // drag_float_behavior: a one-frame tap is a plain click - grab and
+    // lift, no move (the pointer is never seen down).
+    gui.begin_frame(snap(60.0f, 10.0f, false, true, true));
+    float dragged = 0.0f;
+    const ws::ui::gui::DragFloatResult clicked = ws::ui::gui::drag_float_behavior(
+        gui, gui.ids().id("drag"), rect, dragged, -100.0f, 100.0f, 1.0f);
+    gui.end_frame();
+    CHECK(!clicked.changed);
+    CHECK(dragged == 0.0f);
+
+    // drag_float_behavior: the held drag - the press frame anchors, the
+    // next frame maps the travel from the anchor.
+    gui.begin_frame(snap(60.0f, 10.0f, true, true));
+    const ws::ui::gui::DragFloatResult grabbed = ws::ui::gui::drag_float_behavior(
+        gui, gui.ids().id("drag"), rect, dragged, -100.0f, 100.0f, 1.0f);
+    gui.end_frame();
+    CHECK(!grabbed.changed);  // the anchor lands; the finger hasn't moved
+    gui.begin_frame(snap(100.0f, 10.0f, true));
+    const ws::ui::gui::DragFloatResult swept = ws::ui::gui::drag_float_behavior(
+        gui, gui.ids().id("drag"), rect, dragged, -100.0f, 100.0f, 1.0f);
+    gui.end_frame();
+    CHECK(swept.changed);
+    CHECK(dragged == 40.0f);  // 40 px of travel at speed 1
+
+    CHECK(ws::ui::gui_test::stub.quads == 0);
+    CHECK(ws::ui::gui_test::stub.rounded == 0);
+    CHECK(ws::ui::gui_test::stub.sprites == 0);
+    CHECK(ws::ui::gui_test::stub.texts == 0);
+    CHECK(ws::ui::gui_test::stub.clip_pushes == 0);
+    CHECK(ws::ui::gui_test::stub.clip_pops == 0);
+    CHECK(ws::ui::gui_test::stub.layer_sets == 0);
+}
+
+TEST_CASE("custom looks paint over the slider behaviors") {
+    using ws::ui::r2d::draw_quad;
+    using ws::ui::r2d::draw_rounded_quad;
+
+    // The seam from the other side, the analog rows' turn: each
+    // sub-block resets the stub, runs one behavior, paints a
+    // hand-rolled look, and checks the counters carry exactly the
+    // custom draws - no stock look leaked.
+    GuiContext gui;
+    const ws::ui::gui::Rect rect{0.0f, 0.0f, 120.0f, 24.0f};
+    const auto tap = [&gui]() {
+        gui.begin_frame(snap(60.0f, 10.0f, false, true, true));
+    };
+
+    // slider: a sharp rail, a flat fill and a rounded handle.
+    ws::ui::gui_test::stub.reset();
+    tap();
+    {
+        float value = 0.0f;
+        const ws::ui::gui::SliderResult result = ws::ui::gui::slider_behavior(
+            gui, gui.ids().id("slide"), rect, value, 0.0f, 100.0f, 1.0f);
+        draw_quad(rect.x, rect.y + 9.0f, rect.width, 6.0f,
+                  kDefaultChrome.control_bg);
+        draw_quad(rect.x + 1.0f, rect.y + 10.0f, 55.0f, 4.0f,
+                  kDefaultChrome.control_on);
+        draw_rounded_quad(rect.x + 56.0f, rect.y, 8.0f, rect.height, 4.0f,
+                          kDefaultChrome.text);
+        gui.end_frame();
+        CHECK(result.changed);
+        CHECK(value == 50.0f);  // dead center of the track
+    }
+    CHECK(ws::ui::gui_test::stub.quads == 2);
+    CHECK(ws::ui::gui_test::stub.rounded == 1);
+
+    // drag_float: the row face and a bar for the value line.
+    ws::ui::gui_test::stub.reset();
+    tap();
+    {
+        float value = 0.0f;
+        const ws::ui::gui::DragFloatResult result =
+            ws::ui::gui::drag_float_behavior(gui, gui.ids().id("drag"),
+                                             rect, value, -100.0f, 100.0f,
+                                             1.0f);
+        draw_quad(rect.x, rect.y, rect.width, rect.height,
+                  kDefaultChrome.control_pressed);
+        draw_quad(rect.x + 8.0f, rect.y + 8.0f, 40.0f, 8.0f,
+                  kDefaultChrome.text);
+        gui.end_frame();
+        CHECK(!result.changed);  // the one-frame tap moves nothing
+    }
+    CHECK(ws::ui::gui_test::stub.quads == 2);
+    CHECK(ws::ui::gui_test::stub.texts == 0);
+}

@@ -11460,3 +11460,227 @@ TEST_CASE("a custom look owns every pixel over a selectable row") {
         CHECK(vertex.tex_index == 0.0f);  // a plain quad, not the SDF face
     }
 }
+
+TEST_CASE("the slider pairs record the widgets' output byte for byte") {
+    using namespace ws::ui::gui;
+    ws::ui::r2d::Renderer2D r;
+    struct ActiveRenderer {
+        explicit ActiveRenderer(ws::ui::r2d::Renderer2D* renderer) {
+            ws::ui::r2d::set_active(renderer);
+        }
+        ~ActiveRenderer() { ws::ui::r2d::set_active(nullptr); }
+    };
+    const ActiveRenderer active{&r};
+    (void)active;
+
+    const ws::ui::r2d::Font font = ab_font();
+    ChromeTheme theme = kDefaultChrome;
+    theme.font = &font;  // the theme points; it never owns
+
+    const ws::input::InputFrame quiet = snap(-100.0f, -100.0f);
+    const ws::input::InputFrame tap = snap(50.0f, 12.0f, false, true, true);
+
+    const auto record = [&](auto&& run, const ws::input::InputFrame& frame) {
+        r.frame_begin(800.0f, 600.0f);
+        r.begin_screen();
+        GuiContext gui;
+        LayoutCursor layout;
+        gui.begin_frame(frame);
+        (void)begin_panel(gui, layout, theme, "root",
+                          {0.0f, 0.0f, 400.0f, 300.0f});
+        run(gui, layout);
+        end_panel(gui, layout);
+        gui.end_frame();
+        r.end();
+        r.frame_end();
+        return r.batch().vertices();  // by value: the next frame resets
+    };
+    const auto identical = [](const auto& stock, const auto& split) {
+        REQUIRE(stock.size() == split.size());
+        REQUIRE(!stock.empty());  // a frame that recorded nothing proves nothing
+        CHECK(std::memcmp(stock.data(), split.data(),
+                          stock.size() * sizeof(stock[0])) == 0);
+    };
+
+    // slider_float, the quiet frame: same rail, same handle at rest.
+    {
+        float stock_value = 30.0f;
+        float split_value = 30.0f;
+        const auto stock = record([&](GuiContext& gui, LayoutCursor& layout) {
+            (void)slider_float(gui, layout, theme, "slide", stock_value,
+                               0.0f, 100.0f, 120.0f);
+        }, quiet);
+        const auto split = record([&](GuiContext& gui, LayoutCursor& layout) {
+            const WidgetId id = gui.ids().id("slide");
+            const Rect rect = layout.next(120.0f, theme.control_height);
+            const SliderResult result = slider_behavior(
+                gui, id, rect, split_value, 0.0f, 100.0f, 1.0f);
+            slider_draw(rect, result, theme, "slide", split_value, 0.0f,
+                        100.0f);
+        }, quiet);
+        identical(stock, split);
+        CHECK(stock_value == 30.0f);  // the quiet frame moves nothing
+        CHECK(split_value == 30.0f);
+    }
+
+    // slider_float through a tap: click-to-set jumps the value, the
+    // pressed face rides the result into the draw, and both land the
+    // same fraction of the track.
+    {
+        float stock_value = 30.0f;
+        float split_value = 30.0f;
+        const auto stock = record([&](GuiContext& gui, LayoutCursor& layout) {
+            (void)slider_float(gui, layout, theme, "slide", stock_value,
+                               0.0f, 100.0f, 120.0f);
+        }, tap);
+        const auto split = record([&](GuiContext& gui, LayoutCursor& layout) {
+            const WidgetId id = gui.ids().id("slide");
+            const Rect rect = layout.next(120.0f, theme.control_height);
+            const SliderResult result = slider_behavior(
+                gui, id, rect, split_value, 0.0f, 100.0f, 1.0f);
+            slider_draw(rect, result, theme, "slide", split_value, 0.0f,
+                        100.0f);
+        }, tap);
+        identical(stock, split);
+        CHECK(stock_value == split_value);
+        CHECK(stock_value > 31.0f);  // the tap at x=50 of a row inset to x=12
+        CHECK(stock_value < 32.0f);
+    }
+
+    // slider_int, the quiet frame: the int ladder over the float pair,
+    // rounding nothing on a frame that moves nothing.
+    {
+        int stock_count = 3;
+        int split_count = 3;
+        const auto stock = record([&](GuiContext& gui, LayoutCursor& layout) {
+            (void)slider_int(gui, layout, theme, "count", stock_count, 0, 100,
+                             120.0f);
+        }, quiet);
+        const auto split = record([&](GuiContext& gui, LayoutCursor& layout) {
+            const WidgetId id = gui.ids().id("count");
+            const Rect rect = layout.next(120.0f, theme.control_height);
+            float v = static_cast<float>(split_count);
+            const SliderResult result =
+                slider_behavior(gui, id, rect, v, 0.0f, 100.0f, 1.0f);
+            slider_draw(rect, result, theme, "count", v, 0.0f, 100.0f);
+            if (result.changed) {
+                split_count = static_cast<int>(std::lround(v));
+            }
+        }, quiet);
+        identical(stock, split);
+        CHECK(stock_count == 3);
+        CHECK(split_count == 3);
+    }
+
+    // drag_float, the quiet frame.
+    {
+        float stock_value = 20.0f;
+        float split_value = 20.0f;
+        const auto stock = record([&](GuiContext& gui, LayoutCursor& layout) {
+            (void)drag_float(gui, layout, theme, "drag", stock_value,
+                             -100.0f, 100.0f, 1.0f, 120.0f);
+        }, quiet);
+        const auto split = record([&](GuiContext& gui, LayoutCursor& layout) {
+            const WidgetId id = gui.ids().id("drag");
+            const Rect rect = layout.next(120.0f, theme.control_height);
+            const DragFloatResult result = drag_float_behavior(
+                gui, id, rect, split_value, -100.0f, 100.0f, 1.0f);
+            drag_float_draw(rect, result, theme, "drag", split_value);
+        }, quiet);
+        identical(stock, split);
+        CHECK(stock_value == 20.0f);
+        CHECK(split_value == 20.0f);
+    }
+
+    // drag_float through a held drag: two frames over ONE context (the
+    // anchor lives in the persistent state there) - the grab frame
+    // anchors, the hold frame sweeps. Both gui frames' draws land in
+    // one batch, and the whole doubled stream must be identical.
+    {
+        const ws::input::InputFrame grab = snap(50.0f, 12.0f, true, true);
+        const ws::input::InputFrame hold = snap(90.0f, 12.0f, true);
+        const auto record_drag = [&](auto&& run) {
+            r.frame_begin(800.0f, 600.0f);
+            r.begin_screen();
+            GuiContext gui;
+            LayoutCursor layout;
+            gui.begin_frame(grab);
+            (void)begin_panel(gui, layout, theme, "root",
+                              {0.0f, 0.0f, 400.0f, 300.0f});
+            run(gui, layout);
+            end_panel(gui, layout);
+            gui.end_frame();
+            gui.begin_frame(hold);
+            (void)begin_panel(gui, layout, theme, "root",
+                              {0.0f, 0.0f, 400.0f, 300.0f});
+            run(gui, layout);
+            end_panel(gui, layout);
+            gui.end_frame();
+            r.end();
+            r.frame_end();
+            return r.batch().vertices();
+        };
+        float stock_value = 0.0f;
+        float split_value = 0.0f;
+        const auto stock = record_drag([&](GuiContext& gui,
+                                           LayoutCursor& layout) {
+            (void)drag_float(gui, layout, theme, "drag", stock_value,
+                             -100.0f, 100.0f, 1.0f, 120.0f);
+        });
+        const auto split = record_drag([&](GuiContext& gui,
+                                           LayoutCursor& layout) {
+            const WidgetId id = gui.ids().id("drag");
+            const Rect rect = layout.next(120.0f, theme.control_height);
+            const DragFloatResult result = drag_float_behavior(
+                gui, id, rect, split_value, -100.0f, 100.0f, 1.0f);
+            drag_float_draw(rect, result, theme, "drag", split_value);
+        });
+        identical(stock, split);
+        CHECK(stock_value == 40.0f);  // 40 px of travel at speed 1
+        CHECK(split_value == 40.0f);
+    }
+}
+
+TEST_CASE("a custom look owns every pixel over a slider") {
+    using namespace ws::ui::gui;
+    ws::ui::r2d::Renderer2D r;
+    ws::ui::r2d::set_active(&r);
+
+    // A bare-knuckles slider: the behavior answers the click-to-set,
+    // then a sharp rail, a flat fill and a plain handle are the whole
+    // track - the stock rounded rail, fill and right-aligned label
+    // never record a vertex.
+    r.frame_begin(800.0f, 600.0f);
+    r.begin_screen();
+    GuiContext gui;
+    gui.begin_frame(snap(50.0f, 12.0f, false, true, true));
+    const WidgetId id = gui.ids().id("flat");
+    const Rect rect{0.0f, 0.0f, 120.0f, 24.0f};
+    float value = 0.0f;
+    const SliderResult result =
+        slider_behavior(gui, id, rect, value, 0.0f, 100.0f, 1.0f);
+    ws::ui::r2d::draw_quad(rect.x, rect.y + 9.0f, rect.width, 6.0f,
+                           kDefaultChrome.control_bg);
+    ws::ui::r2d::draw_quad(rect.x + 1.0f, rect.y + 10.0f, 41.0f, 4.0f,
+                           kDefaultChrome.control_on);
+    ws::ui::r2d::draw_quad(rect.x + 40.0f, rect.y, 8.0f, rect.height,
+                           kDefaultChrome.text);
+    gui.end_frame();
+    r.end();
+    r.frame_end();
+    ws::ui::r2d::set_active(nullptr);
+
+    CHECK(result.changed);
+    CHECK(result.state == WidgetState::Pressed);
+    CHECK(result.focused);  // the tap latched it; the ring never drew
+    CHECK(value > 41.0f);  // the tap sits at x=50 of the 120-px track
+    CHECK(value < 42.0f);
+
+    // Exactly the three custom quads: twelve plain-textured vertices,
+    // nothing else - the behavior half contributed not one.
+    REQUIRE(r.batch().vertices().size() == 12);
+    CHECK(r.batch().chunk_count() == 1);
+    for (const auto& vertex : r.batch().vertices()) {
+        CHECK(vertex.tex_index == 0.0f);  // a plain quad, not the SDF face
+    }
+}

@@ -1,8 +1,11 @@
 // ws::ui::gui widget functions, one family per file (src/gui/CLAUDE.md):
-// the analog rows - slider_float and slider_int through one shared
-// TU-local body (slider_impl below), and drag_float, whose grab
-// state rides the DragState side table. The shared row idioms live
-// in widgets_detail.hpp.
+// the analog rows - slider_float and slider_int over one shared
+// behavior/draw pair (the keyboard step is the one difference, and it
+// rides the behavior's parameters), and drag_float, whose grab state
+// rides the DragState side table. Each widget composes its split halves
+// in order: the ladder places the row, the behavior owns the
+// interaction, the draw owns the pixels. The shared row idioms live in
+// widgets_detail.hpp.
 
 #include "widgets_detail.hpp"
 
@@ -14,23 +17,43 @@
 
 namespace ws::ui::gui {
 
-namespace {
+bool slider_float(GuiContext& gui, LayoutCursor& layout,
+                  const ChromeTheme& theme, const char* label, float& value,
+                  float min, float max, float width, bool disabled) {
+    // The float keyboard step: 1% of the range per arrow press.
+    const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
+    const SliderResult result =
+        slider_behavior(gui, row.id, row.rect, value, min, max,
+                        (max - min) / 100.0f, disabled);
+    slider_draw(row.rect, result, theme, label, value, min, max);
+    return result.changed;
+}
 
-// The body both sliders share: they differ only in the keyboard step
-// (1% of the range for a float, 1 for an int), which rides through here
-// so the public pair keeps its signatures. The citizenship ladder rides
-// begin_row like every row widget - the trailing `disabled` sugar
-// included, the lock begin_row hands state() - and the arrows step the
-// focused slider, with the disabled look dimming the fill, the handle
-// and the label as one.
-bool slider_impl(GuiContext& gui, LayoutCursor& layout,
-                 const ChromeTheme& theme, const char* label, float& value,
-                 float min, float max, float width, float key_step,
-                 bool disabled) {
-    const Row row = begin_row(gui, layout, theme, label, width, disabled);
-    const WidgetId id = row.id;
-    const Rect& rect = row.rect;
-    const WidgetResult& result = row.result;
+bool slider_int(GuiContext& gui, LayoutCursor& layout,
+                const ChromeTheme& theme, const char* label, int& value,
+                int min, int max, float width, bool disabled) {
+    float v = static_cast<float>(value);
+    // The int keyboard step: 1 per arrow press.
+    const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
+    const SliderResult result =
+        slider_behavior(gui, row.id, row.rect, v, static_cast<float>(min),
+                        static_cast<float>(max), 1.0f, disabled);
+    slider_draw(row.rect, result, theme, label, v, static_cast<float>(min),
+                static_cast<float>(max));
+    // Written only on a real change: a huge int that rounds through float
+    // must not silently rewrite itself on idle frames.
+    if (result.changed) {
+        value = static_cast<int>(std::lround(v));
+    }
+    return result.changed;
+}
+
+SliderResult slider_behavior(GuiContext& gui, WidgetId id, const Rect& rect,
+                             float& value, float min, float max,
+                             float key_step, bool disabled,
+                             const HitShape& hit_shape) {
+    SliderResult result{
+        begin_widget_paint(gui, id, rect, disabled, hit_shape)};
     const HitTest& hit = result.hit;
 
     // Click-to-set and drag are one rule: while this slider owns the
@@ -42,7 +65,6 @@ bool slider_impl(GuiContext& gui, LayoutCursor& layout,
     // hit.clicked carries the click-to-set for it (the contact spends
     // its release frame in the table, so the lookup still finds it), and
     // re-mapping a normal release is a no-op: same pointer, same value.
-    bool changed = false;
     const ws::input::PointerView* owner = gui.pointer(hit.pointer);
     const bool tracking =
         (hit.pressed && owner != nullptr && owner->down) || hit.clicked;
@@ -54,23 +76,32 @@ bool slider_impl(GuiContext& gui, LayoutCursor& layout,
             min + std::min(std::max(t, 0.0f), 1.0f) * span;
         if (mapped != value) {
             value = mapped;
-            changed = true;
+            result.changed = true;
         }
     }
 
     // Keyboard: the arrows step the focused slider - one key_step per
     // press, clamped to the range; only a real move reports changed.
-    if (gui.is_focused(id) && (gui.input().key_pressed[ws::input::keys::kLeft] ||
-                               gui.input().key_pressed[ws::input::keys::kRight])) {
+    // The focus read rides the fold begin_widget_paint captured after
+    // state(): nothing between there and here moves it.
+    if (result.focused &&
+        (gui.input().key_pressed[ws::input::keys::kLeft] ||
+         gui.input().key_pressed[ws::input::keys::kRight])) {
         const float step =
-            gui.input().key_pressed[ws::input::keys::kRight] ? key_step : -key_step;
+            gui.input().key_pressed[ws::input::keys::kRight] ? key_step
+                                                              : -key_step;
         const float next = std::min(std::max(value + step, min), max);
         if (next != value) {
             value = next;
-            changed = true;
+            result.changed = true;
         }
     }
+    return result;
+}
 
+void slider_draw(const Rect& rect, const SliderResult& result,
+                 const ChromeTheme& theme, const char* label, float value,
+                 float min, float max) {
     // The rail: a half-height strip down the middle of the row, wearing
     // the same faces a button wears, ends rounded by the theme.
     const std::uint32_t face = control_face(result.state, theme);
@@ -82,7 +113,8 @@ bool slider_impl(GuiContext& gui, LayoutCursor& layout,
     // below the rail is exposed: the ring draw is solid, masked to an
     // outline by the body, and a row-sized ring would read as the whole
     // slider going green the moment a click lands focus on it.
-    focus_ring(gui, id, {rect.x, rail_y, rect.width, rail_height}, theme);
+    ring_draw(result.focused, {rect.x, rail_y, rect.width, rail_height},
+              theme);
 
     // The disabled look: the dead face for the rail, the fill, the
     // handle and the label dimmed through the one helper - 1.0 is the
@@ -130,52 +162,32 @@ bool slider_impl(GuiContext& gui, LayoutCursor& layout,
                  scratch, sizeof(scratch));
     draw_label(rect.x + rect.width - fit.advance - theme.label_inset, rect.y,
                rect.height, fit, dim(theme.text, dim_by), theme);
-    return changed;
-}
-
-}  // namespace
-
-bool slider_float(GuiContext& gui, LayoutCursor& layout,
-                  const ChromeTheme& theme, const char* label, float& value,
-                  float min, float max, float width, bool disabled) {
-    // The float keyboard step: 1% of the range per arrow press.
-    return slider_impl(gui, layout, theme, label, value, min, max, width,
-                       (max - min) / 100.0f, disabled);
-}
-
-bool slider_int(GuiContext& gui, LayoutCursor& layout,
-                const ChromeTheme& theme, const char* label, int& value,
-                int min, int max, float width, bool disabled) {
-    float v = static_cast<float>(value);
-    // The int keyboard step: 1 per arrow press.
-    const bool changed = slider_impl(gui, layout, theme, label, v,
-                                     static_cast<float>(min),
-                                     static_cast<float>(max), width, 1.0f,
-                                     disabled);
-    // Written only on a real change: a huge int that rounds through float
-    // must not silently rewrite itself on idle frames.
-    if (changed) {
-        value = static_cast<int>(std::lround(v));
-    }
-    return changed;
 }
 
 bool drag_float(GuiContext& gui, LayoutCursor& layout,
                const ChromeTheme& theme, const char* label, float& value,
                float min, float max, float speed, float width,
                bool disabled) {
-    const Row row = begin_row(gui, layout, theme, label, width, disabled);
-    const WidgetId id = row.id;
-    const Rect& rect = row.rect;
-    const WidgetResult& result = row.result;
+    const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
+    const DragFloatResult result =
+        drag_float_behavior(gui, row.id, row.rect, value, min, max, speed,
+                            disabled);
+    drag_float_draw(row.rect, result, theme, label, value);
+    return result.changed;
+}
+
+DragFloatResult drag_float_behavior(GuiContext& gui, WidgetId id,
+                                    const Rect& rect, float& value,
+                                    float min, float max, float speed,
+                                    bool disabled, const HitShape& hit_shape) {
+    DragFloatResult result{
+        begin_widget_paint(gui, id, rect, disabled, hit_shape)};
     const HitTest& hit = result.hit;
 
     // The anchor: persistent state under the widget id, so the grab
     // survives frames (and clear_persistent_state evicts it - the
     // same side-table discipline as the scroll state).
     DragState& drag = gui.persistent_state<DragState>(id);
-
-    bool changed = false;
 
     // Grab-and-drag, not click-to-set: a press inside GRABS (the value
     // does not jump - unlike a slider there is nothing to click-to-set),
@@ -203,7 +215,7 @@ bool drag_float(GuiContext& gui, LayoutCursor& layout,
             // than writing garbage.
             if (mapped == mapped && mapped != value) {
                 value = mapped;
-                changed = true;
+                result.changed = true;
             }
         }
     } else {
@@ -214,22 +226,29 @@ bool drag_float(GuiContext& gui, LayoutCursor& layout,
 
     // Keyboard: the arrows step the focused row - 1% of the range per
     // press, like a slider; only a real move reports changed, and the
-    // same NaN guard holds.
-    if (gui.is_focused(id) && (gui.input().key_pressed[ws::input::keys::kLeft] ||
-                               gui.input().key_pressed[ws::input::keys::kRight])) {
+    // same NaN guard holds. The focus read rides the fold
+    // begin_widget_paint captured after state().
+    if (result.focused &&
+        (gui.input().key_pressed[ws::input::keys::kLeft] ||
+         gui.input().key_pressed[ws::input::keys::kRight])) {
         const float step = (max - min) / 100.0f;
         const float delta =
             gui.input().key_pressed[ws::input::keys::kRight] ? step : -step;
         const float next = std::min(std::max(value + delta, min), max);
         if (next == next && next != value) {
             value = next;
-            changed = true;
+            result.changed = true;
         }
     }
+    return result;
+}
 
+void drag_float_draw(const Rect& rect, const DragFloatResult& result,
+                     const ChromeTheme& theme, const char* label,
+                     float value) {
     // The focus ring: the on-accent as a 1px outline behind the row, so
     // Tab navigation is legible. Skipped for degenerate rows.
-    focus_ring(gui, id, rect, theme);
+    ring_draw(result.focused, rect, theme);
 
     // The disabled look: the dead face for the row, the value label
     // dimmed through the one helper.
@@ -262,7 +281,6 @@ bool drag_float(GuiContext& gui, LayoutCursor& layout,
                  theme, scratch, sizeof(scratch));
     draw_label(rect.x + theme.padding, rect.y, rect.height, fit,
                dim(theme.text, dim_by), theme);
-    return changed;
 }
 
 }  // namespace ws::ui::gui

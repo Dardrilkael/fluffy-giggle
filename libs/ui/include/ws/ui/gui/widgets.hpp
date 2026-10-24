@@ -322,6 +322,42 @@ bool drag_float(GuiContext& gui, LayoutCursor& layout,
                 float min, float max, float speed = 1.0f,
                 float width = 120.0f, bool disabled = false);
 
+// The split halves, the sliders' seam: the behavior owns the tracking
+// (click-to-set and the drag are one rule), the arrow steps and the
+// clamped write - theme-free, its whole geometry the range and the key
+// step. The draw owns the rail, the fill, the handle - positioned from
+// the VALUE the behavior left, never the pointer - and the label. Both
+// sliders share the pair: slider_int feeds the float ladder and rounds
+// on its way back.
+struct SliderResult : WidgetPaint {
+    bool changed = false;  // the value moved this frame (pointer or key)
+};
+
+SliderResult slider_behavior(GuiContext& gui, WidgetId id, const Rect& rect,
+                             float& value, float min, float max,
+                             float key_step, bool disabled = false,
+                             const HitShape& hit_shape = {});
+void slider_draw(const Rect& rect, const SliderResult& result,
+                 const ChromeTheme& theme, const char* label, float value,
+                 float min, float max);
+
+// The split halves, drag_float's seam: the behavior owns the anchor -
+// the grab that survives frames in the persistent state - and the
+// arrow steps; the draw owns the row face and the "label: value" line
+// (it formats the value itself).
+struct DragFloatResult : WidgetPaint {
+    bool changed = false;  // the value moved this frame (drag or key)
+};
+
+DragFloatResult drag_float_behavior(GuiContext& gui, WidgetId id,
+                                    const Rect& rect, float& value,
+                                    float min, float max, float speed,
+                                    bool disabled = false,
+                                    const HitShape& hit_shape = {});
+void drag_float_draw(const Rect& rect, const DragFloatResult& result,
+                     const ChromeTheme& theme, const char* label,
+                     float value);
+
 // A static label: lays out and draws, and that is all - no id, no
 // hit-test, nothing focusable, no GuiContext in the signature (chrome,
 // like a panel's frame; a caller wanting a faded label dims its own
