@@ -11,33 +11,37 @@
 
 namespace ws::ui::gui {
 
-Rect place_popup(const Rect& anchor, float width, float height,
-                 PopupAnchor side) {
-    const r2d::FrameSize frame = r2d::frame_size();
-    // The frame clamps the SIZE first: a window taller or wider than
+Rect popup_placement(const Rect& anchor, float width, float height,
+                     PopupAnchor side, const r2d::FrameSize& viewport) {
+    // The viewport clamps the SIZE first: a window taller or wider than
     // the frame lays filling what fits, never backwards.
-    width = std::max(0.0f, std::min(width, frame.width));
-    height = std::max(0.0f, std::min(height, frame.height));
+    width = std::max(0.0f, std::min(width, viewport.width));
+    height = std::max(0.0f, std::min(height, viewport.height));
 
     float x = anchor.x;
     float y = anchor.y;
     if (side == PopupAnchor::below) {
         y = anchor.y + anchor.height;  // under the bottom edge...
-        if (y + height > frame.height) {
+        if (y + height > viewport.height) {
             y = anchor.y - height;  // ...unless the frame lacks the room
         }
     } else {
         x = anchor.x + anchor.width;  // past the right edge, or
-        if (x + width > frame.width) {
+        if (x + width > viewport.width) {
             x = anchor.x - width;  // flipped to the left when it cannot fit
         }
     }
     // Both axes clamp into the frame last. The flip already chose the
     // side; what remains is keeping the window on the frame - a
     // degenerate anchor (a point) clamps from wherever it sits.
-    x = std::max(0.0f, std::min(x, frame.width - width));
-    y = std::max(0.0f, std::min(y, frame.height - height));
+    x = std::max(0.0f, std::min(x, viewport.width - width));
+    y = std::max(0.0f, std::min(y, viewport.height - height));
     return {x, y, width, height};
+}
+
+Rect place_popup(const Rect& anchor, float width, float height,
+                 PopupAnchor side) {
+    return popup_placement(anchor, width, height, side, r2d::frame_size());
 }
 
 bool begin_popup(GuiContext& gui, LayoutCursor& layout,

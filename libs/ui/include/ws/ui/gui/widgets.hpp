@@ -568,15 +568,21 @@ void end_scroll_panel(GuiContext& gui, LayoutCursor& layout,
 // shape (past its right edge).
 enum class PopupAnchor { below, right };
 
-// Where a popup window hangs from its anchor, as pure arithmetic -
-// nothing drawn, nothing claimed. The size clamps to the frame first
-// (a window taller than the frame lays filling what fits), then it
-// prefers the chosen side and FLIPS to the opposite one when the frame
-// lacks the room, then clamps the position so the window never leaves
-// the frame either way. A degenerate anchor - a point, the press point
-// of a context menu - anchors at itself: the window hangs below/right
-// of the point. Headless the frame is empty and everything clamps to
-// the origin.
+// The placement arithmetic on its own: the size clamps to the viewport
+// first (a window taller than the frame lays filling what fits), then
+// it prefers the chosen side and FLIPS to the opposite one when the
+// viewport lacks the room, then clamps the position so the window never
+// leaves the viewport either way. A degenerate anchor - a point, the
+// press point of a context menu - anchors at itself: the window hangs
+// below/right of the point. Pure: no frame read, nothing drawn,
+// nothing claimed, so it tests headless with any viewport, and a caller
+// placing into something other than the full frame can.
+Rect popup_placement(const Rect& anchor, float width, float height,
+                     PopupAnchor side, const r2d::FrameSize& viewport);
+
+// The live-frame spelling of popup_placement: reads the frame and
+// delegates. Headless the frame is empty and everything clamps to the
+// origin.
 Rect place_popup(const Rect& anchor, float width, float height,
                  PopupAnchor side = PopupAnchor::below);
 

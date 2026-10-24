@@ -1705,3 +1705,64 @@ TEST_CASE("the table keeps its late reads under the grid walk") {
     CHECK(gui.is_focused(row_w(0)));
     CHECK(ws::ui::gui_test::stub.rounded == 2);
 }
+
+TEST_CASE("popup_placement: flip and clamp as pure geometry") {
+    using ws::ui::gui::PopupAnchor;
+    const ws::ui::r2d::FrameSize view{800.0f, 600.0f};
+    const ws::ui::gui::Rect row{100.0f, 50.0f, 120.0f, 24.0f};
+
+    // below: the dropdown hangs under the anchor's bottom edge.
+    const ws::ui::gui::Rect under = ws::ui::gui::popup_placement(
+        row, 100.0f, 80.0f, PopupAnchor::below, view);
+    CHECK(under.x == 100.0f);
+    CHECK(under.y == 74.0f);
+    CHECK(under.width == 100.0f);
+    CHECK(under.height == 80.0f);
+
+    // below with no room under: flips above the anchor's top.
+    const ws::ui::gui::Rect above = ws::ui::gui::popup_placement(
+        ws::ui::gui::Rect{100.0f, 550.0f, 120.0f, 24.0f}, 100.0f, 80.0f,
+        PopupAnchor::below, view);
+    CHECK(above.y == 470.0f);  // 550 - 80: the flip fit, the clamp holds
+
+    // right: the submenu shape hangs past the right edge...
+    const ws::ui::gui::Rect right = ws::ui::gui::popup_placement(
+        row, 100.0f, 80.0f, PopupAnchor::right, view);
+    CHECK(right.x == 220.0f);
+    // ...or flips to the left when the viewport lacks the room.
+    const ws::ui::gui::Rect flipped = ws::ui::gui::popup_placement(
+        ws::ui::gui::Rect{700.0f, 50.0f, 120.0f, 24.0f}, 100.0f, 80.0f,
+        PopupAnchor::right, view);
+    CHECK(flipped.x == 600.0f);  // 700 - 100
+
+    // The size clamps to the viewport first: an oversized window fills
+    // what fits, and the position clamp parks it at the origin.
+    const ws::ui::gui::Rect fill = ws::ui::gui::popup_placement(
+        row, 2000.0f, 5000.0f, PopupAnchor::below, view);
+    CHECK(fill.width == 800.0f);
+    CHECK(fill.height == 600.0f);
+    CHECK(fill.x == 0.0f);
+    CHECK(fill.y == 0.0f);
+
+    // A degenerate anchor - a point, a context menu's press point -
+    // hangs below the point at its own x.
+    const ws::ui::gui::Rect point = ws::ui::gui::popup_placement(
+        ws::ui::gui::Rect{400.0f, 300.0f, 0.0f, 0.0f}, 100.0f, 80.0f,
+        PopupAnchor::below, view);
+    CHECK(point.x == 400.0f);
+    CHECK(point.y == 300.0f);
+
+    // The delegate: headless the frame is empty, so place_popup answers
+    // exactly the pure spelling against an empty viewport.
+    const ws::ui::gui::Rect live =
+        ws::ui::gui::place_popup(row, 100.0f, 80.0f);
+    const ws::ui::gui::Rect dead = ws::ui::gui::popup_placement(
+        row, 100.0f, 80.0f, PopupAnchor::below,
+        ws::ui::r2d::FrameSize{});
+    CHECK(live.x == dead.x);
+    CHECK(live.y == dead.y);
+    CHECK(live.width == dead.width);
+    CHECK(live.height == dead.height);
+    CHECK(dead.x == 0.0f);  // and that answer is the origin clamp
+    CHECK(dead.y == 0.0f);
+}
