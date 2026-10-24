@@ -1,6 +1,7 @@
 // ws::ui::gui widget functions, one family per file (src/gui/CLAUDE.md):
 // the table - the column grid, its header chrome and the selectable
-// rows under the loop-children id discipline.
+// rows under the loop-children id discipline. The rows fold through the
+// shared begin but keep their own late key edge under the grid walk.
 
 #include "widgets_detail.hpp"
 
@@ -148,17 +149,23 @@ bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             }
 
             const WidgetId rid = row_id(i);
-            gui.register_focusable(rid);
-            const WidgetResult result = gui.state(rid, row_rect);
-            const HitTest& hit = result.hit;
+            // The row's fold: registration, the one hit-test with its
+            // focus latch, the focused capture - the same begin every
+            // behavior takes. Not selectable_behavior itself: the walk
+            // below hands focus to a neighbor mid-row, and this row's
+            // Enter edge and ring must read after it, where the
+            // behavior's fold reads before.
+            const WidgetPaint row =
+                begin_widget_paint(gui, rid, row_rect, false, {});
 
             // Up/Down step the focused row, clamped at the grid's ends -
             // the slider's arrow rule (Tab's wrap is the screen's walk,
             // not the grid's). set_focus is immediate, combo's handback
             // idiom: the neighbor's state() still runs this frame, so its
             // ring draws now, and the scroll panel's focus-into-view
-            // follows the move for free.
-            if (gui.is_focused(rid)) {
+            // follows the move for free. The gate rides the fold's
+            // capture - nothing between the fold and here moves focus.
+            if (row.focused) {
                 if (gui.input().key_pressed[ws::input::keys::kUp] && i > 0) {
                     gui.set_focus(row_id(i - 1));
                 } else if (gui.input().key_pressed[ws::input::keys::kDown] &&
@@ -169,15 +176,19 @@ bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 
             // Keyboard pick: Enter/Space on the focused row, edge-only -
             // selectable's rule; the selection itself stays the caller's
-            // to move.
+            // to move. Read after the walk, not folded into the
+            // behavior's begin: the edge belongs to the row that holds
+            // focus once the walk has moved it.
             const bool key_clicked = key_activated(gui, rid);
 
-            // The focus ring, like every row's.
+            // The ring reads the context, not the fold's capture, for
+            // the same reason: the walk above may have moved focus since
+            // the fold took it.
             focus_ring(gui, rid, row_rect, theme);
 
             // The bare-list face - selectable's look, no idle rung: an
             // unhovered, unselected row is text on the parent's chrome.
-            if (const auto face = list_face(result.state, theme)) {
+            if (const auto face = list_face(row.state, theme)) {
                 r2d::draw_rounded_quad(row_rect.x, row_rect.y, row_rect.width,
                                        row_rect.height, theme.corner_radius,
                                        *face);
@@ -195,7 +206,7 @@ bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             // The pick: a click or the focused row's key writes the
             // caller's int and answers ONLY on a real move - the radio's
             // idempotence (a re-pick on the current row is a no-op).
-            if ((hit.clicked || key_clicked) && *selected != i) {
+            if ((row.hit.clicked || key_clicked) && *selected != i) {
                 *selected = i;
                 changed = true;
             }

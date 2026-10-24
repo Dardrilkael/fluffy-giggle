@@ -1630,3 +1630,78 @@ TEST_CASE("custom looks paint over the tab behavior, panel_draw the chrome") {
     CHECK(ws::ui::gui_test::stub.clip_pushes == 0);
     CHECK(ws::ui::gui_test::stub.layer_sets == 0);
 }
+
+TEST_CASE("the table keeps its late reads under the grid walk") {
+    GuiContext gui;
+    LayoutCursor layout;
+    static const ws::ui::gui::TableColumn cols[] = {{"name", 100.0f},
+                                                    {"value", 0.0f}};
+    static const char* const cells[] = {"alpha", "1", "beta", "2",
+                                       "gamma", "3"};
+    int selected = 0;
+    bool changed = false;
+
+    // The rows id under the table's label, then by index - spelled the
+    // way the focus checks need it.
+    const auto row_w = [&](int i) {
+        gui.ids().push("grid");
+        gui.ids().push(i);
+        const ws::ui::gui::WidgetId w = gui.ids().id("row");
+        gui.ids().pop();
+        gui.ids().pop();
+        return w;
+    };
+    // The counters reset per frame: each pass asserts ITS frame's draws.
+    const auto pass = [&](const InputFrame& frame) {
+        ws::ui::gui_test::stub.reset();
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 300.0f, 100.0f}, 0.0f);
+        changed = ws::ui::gui::table(gui, layout, kDefaultChrome, "grid",
+                                     cols, 2, cells, 3, &selected, 300.0f);
+        layout.end_panel();
+        gui.end_frame();
+    };
+
+    // A tap on the last row picks it and latches the focus: the pressed
+    // face and the ring both draw on the tapped row this frame (with the
+    // header bar, three rounded quads).
+    pass(snap(150.0f, 80.0f, false, true, true));
+    CHECK(selected == 2);
+    CHECK(changed);
+    CHECK(gui.is_focused(row_w(2)));
+    CHECK(ws::ui::gui_test::stub.rounded == 3);
+
+    // Up walks the focus to row 1 and nothing else: the selection
+    // holds. The ring reads AFTER the step, so it draws NOWHERE this
+    // frame - the handing row no longer holds focus and the landing
+    // row's iteration already ran. A fold-captured ring would draw one
+    // on the handing row; the header bar is the only rounded quad.
+    InputFrame up = snap(-100.0f, -100.0f);
+    up.key_pressed[static_cast<std::size_t>(ws::input::keys::kUp)] = true;
+    pass(up);
+    CHECK(selected == 2);
+    CHECK(!changed);
+    CHECK(gui.is_focused(row_w(1)));
+    CHECK(ws::ui::gui_test::stub.rounded == 1);
+
+    // Again: the focus walks to row 0 the same way.
+    pass(up);
+    CHECK(gui.is_focused(row_w(0)));
+    CHECK(ws::ui::gui_test::stub.rounded == 1);
+
+    // At the top the walk clamps: no step, the focus holds, and the
+    // ring draws on the row that keeps it.
+    pass(up);
+    CHECK(gui.is_focused(row_w(0)));
+    CHECK(ws::ui::gui_test::stub.rounded == 2);
+
+    // Enter picks the focused row - the selection follows the walk.
+    InputFrame enter = snap(-100.0f, -100.0f);
+    enter.key_pressed[static_cast<std::size_t>(ws::input::keys::kEnter)] =
+        true;
+    pass(enter);
+    CHECK(selected == 0);
+    CHECK(changed);
+    CHECK(gui.is_focused(row_w(0)));
+    CHECK(ws::ui::gui_test::stub.rounded == 2);
+}
