@@ -648,7 +648,70 @@ void GuiContext::set_clipboard_text(const char* text) {
     }
 }
 
+Rect hit_shape_bounds(const Rect& bounds, const HitShape& shape) {
+    const float pad = shape.pad > 0.0f ? shape.pad : 0.0f;
+    return {bounds.x - pad, bounds.y - pad, bounds.width + 2.0f * pad,
+            bounds.height + 2.0f * pad};
+}
+
+bool HitShape::contains(const Rect& bounds, float x, float y) const {
+    const Rect tested = hit_shape_bounds(bounds, *this);
+    if (!tested.contains(x, y)) {
+        return false;  // outside even the padded bounds: not this widget
+    }
+    switch (kind) {
+    case Kind::rect:
+        return true;
+    case Kind::circle: {
+        const float cx = tested.x + tested.width * 0.5f;
+        const float cy = tested.y + tested.height * 0.5f;
+        const float r = radius > 0.0f
+                            ? radius
+                            : std::min(tested.width, tested.height) * 0.5f;
+        const float dx = x - cx;
+        const float dy = y - cy;
+        return dx * dx + dy * dy <= r * r;
+    }
+    case Kind::rounded_rect: {
+        const float r =
+            std::min(radius, std::min(tested.width, tested.height) * 0.5f);
+        const float dx =
+            std::max(std::max(tested.x + r - x, x - (tested.x + tested.width - r)),
+                     0.0f);
+        const float dy =
+            std::max(std::max(tested.y + r - y, y - (tested.y + tested.height - r)),
+                     0.0f);
+        return dx * dx + dy * dy <= r * r;
+    }
+    case Kind::polygon: {
+        if (poly_count < 3 || poly_x == nullptr || poly_y == nullptr) {
+            return true;  // degenerate: the rect's own answer
+        }
+        bool inside = false;
+        for (int i = 0, j = poly_count - 1; i < poly_count; j = i++) {
+            const float xi = poly_x[static_cast<std::size_t>(i)];
+            const float yi = poly_y[static_cast<std::size_t>(i)];
+            const float xj = poly_x[static_cast<std::size_t>(j)];
+            const float yj = poly_y[static_cast<std::size_t>(j)];
+            if ((yi > y) != (yj > y) &&
+                x < (xj - xi) * (y - yi) / (yj - yi) + xi) {
+                inside = !inside;
+            }
+        }
+        return inside;
+    }
+    case Kind::predicate:
+        return predicate == nullptr || predicate(user, x, y);
+    }
+    return true;
+}
+
 HitTest GuiContext::hit_test(WidgetId id, const Rect& rect) {
+    return hit_test(id, rect, HitShape{});
+}
+
+HitTest GuiContext::hit_test(WidgetId id, const Rect& rect,
+                             const HitShape& shape) {
     // The invalid id claims nothing - it is the "no widget" sentinel.
     if (id == kInvalidWidgetId) {
         return {};
@@ -680,9 +743,13 @@ HitTest GuiContext::hit_test(WidgetId id, const Rect& rect) {
     // visible part, a fully clipped one claims nothing), while the
     // active-owning branch in hit_test_pointer is untouched: a press
     // already claimed is capture, and the clip gates new claims only.
+    // The rect intersected is the PADDED one - hit padding cannot reach
+    // past a clip, exactly like the widget's own bounds - and the shape
+    // then refines inside it.
+    const Rect tested = hit_shape_bounds(rect, shape);
     const Rect* const hit_clip = current_hit_clip();
     const Rect claimable =
-        hit_clip != nullptr ? intersect_rects(rect, *hit_clip) : rect;
+        hit_clip != nullptr ? intersect_rects(tested, *hit_clip) : tested;
 
     // The per-pointer rules live in hit_test_pointer; this fold is where
     // they become one widget-facing answer: ORs across pointers, so a
@@ -695,7 +762,7 @@ HitTest GuiContext::hit_test(WidgetId id, const Rect& rect) {
     HitTest hit;
     const int count = std::min(pointer_count_, ws::input::InputFrame::kMaxPointers);
     for (int p = 0; p < count; ++p) {
-        const HitTest part = hit_test_pointer(id, claimable, p);
+        const HitTest part = hit_test_pointer(id, claimable, tested, shape, p);
         hit.hovered = hit.hovered || part.hovered;
         hit.pressed = hit.pressed || part.pressed;
         hit.clicked = hit.clicked || part.clicked;
@@ -707,8 +774,12 @@ HitTest GuiContext::hit_test(WidgetId id, const Rect& rect) {
     return hit;
 }
 
-WidgetResult GuiContext::state(WidgetId id, const Rect& bounds,
-                               bool disabled) {
+WidgetResult GuiContext::state(WidgetId id, const Rect& bounds, bool disabled) {
+    return state(id, bounds, disabled, HitShape{});
+}
+
+WidgetResult GuiContext::state(WidgetId id, const Rect& bounds, bool disabled,
+                               const HitShape& shape) {
     WidgetResult result;
     if (disabled || disabled_mask_ != 0) {
         // The short-circuit sits BEFORE hit_test on purpose: claims are
@@ -723,7 +794,7 @@ WidgetResult GuiContext::state(WidgetId id, const Rect& bounds,
         result.state = WidgetState::Disabled;
         return result;
     }
-    result.hit = hit_test(id, bounds);
+    result.hit = hit_test(id, bounds, shape);
     // A raised veil blocks the keyboard like it blocks the pointer: the
     // focused widget under it drops the focus rather than keeping an
     // Enter that would click through the modal.
@@ -768,11 +839,13 @@ WidgetResult GuiContext::state(WidgetId id, const Rect& bounds,
 // slot in its order - the track is shared per pointer, so any other
 // caller would be a call-order hazard. The claims are layer-aware: the
 // widget's stratum is the innermost open begin_layer scope.
-HitTest GuiContext::hit_test_pointer(WidgetId id, const Rect& rect,
-                                     int slot) {
+HitTest GuiContext::hit_test_pointer(WidgetId id, const Rect& claimable,
+                                     const Rect& tested,
+                                     const HitShape& shape, int slot) {
     const ws::input::PointerView& view = frame_pointers_[static_cast<std::size_t>(slot)];
     PointerTrack& track = pointers_[static_cast<std::size_t>(slot)];
-    const bool inside = rect.contains(view.x, view.y);
+    const bool inside = claimable.contains(view.x, view.y) &&
+                        shape.contains(tested, view.x, view.y);
     const std::uint32_t layer = current_layer_value();
     // The frame's modal veil blocks every strictly lower stratum
     // outright: no hover, no hot claim, no new press (no click-through).

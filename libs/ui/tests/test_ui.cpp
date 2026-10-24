@@ -2601,6 +2601,159 @@ TEST_CASE("hit_test: a frame past the census's slots still runs") {
     gui.end_frame();
 }
 
+// --- hit shapes (HitShape on hit_test/state) ----------------------------------------
+
+TEST_CASE("hit shapes: a circle knob ignores its bounding corners; the widget beneath claims them") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const IdStack ids;
+    const WidgetId base_w = ids.id("base");
+    const WidgetId knob_w = ids.id("knob");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+    HitShape circle;
+    circle.kind = HitShape::Kind::circle;
+
+    // The knob hit-tests LATER (the topmost pixel, by record order) over
+    // the same bounds, but the tap sits in a corner the circle cuts: the
+    // knob never claims, and the base rect underneath takes the tap.
+    // A one-frame tap, so nothing carries into the next probe.
+    gui.begin_frame(snap(95.0f, 95.0f, false, true, true));
+    const HitTest base_hit = gui.hit_test(base_w, rect);
+    const HitTest knob_hit = gui.hit_test(knob_w, rect, circle);
+    CHECK(base_hit.clicked);
+    CHECK(!knob_hit.clicked);
+    gui.end_frame();
+
+    // The same press at the center: both shapes contain it, and the
+    // later widget steals the fresh claim - the layers test's own
+    // two-frame proof, now through a shape.
+    gui.begin_frame(snap(50.0f, 50.0f, true, true));
+    (void)gui.hit_test(base_w, rect);
+    (void)gui.hit_test(knob_w, rect, circle);
+    CHECK(gui.active_id() == knob_w);
+    gui.end_frame();
+    gui.begin_frame(snap(50.0f, 50.0f, false, false, true));
+    const HitTest base_mid = gui.hit_test(base_w, rect);
+    const HitTest knob_mid = gui.hit_test(knob_w, rect, circle);
+    CHECK(knob_mid.clicked);
+    CHECK(!base_mid.clicked);
+    gui.end_frame();
+}
+
+TEST_CASE("hit shapes: padding grows the touch target without moving the bounds") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const IdStack ids;
+    const WidgetId w = ids.id("wide");
+    const Rect rect{10.0f, 10.0f, 100.0f, 100.0f};
+    HitShape padded;
+    padded.pad = 10.0f;
+
+    // A tap 2px past the bounds' right edge, inside the pad: claimed
+    // and fully clicked - the pad is part of the press.
+    gui.begin_frame(snap(112.0f, 60.0f, false, true, true));
+    const HitTest edge = gui.hit_test(w, rect, padded);
+    CHECK(edge.pressed);
+    CHECK(edge.clicked);
+    gui.end_frame();
+
+    // A hit clip gates the padding like it gates the bounds: past the
+    // clip, the same padded tap claims nothing at all.
+    gui.begin_frame(snap(112.0f, 60.0f, false, true, true));
+    gui.push_hit_clip({0.0f, 0.0f, 110.0f, 200.0f});
+    const HitTest clipped = gui.hit_test(w, rect, padded);
+    gui.pop_hit_clip();
+    CHECK(!clipped.pressed);
+    CHECK(!clipped.clicked);
+    gui.end_frame();
+}
+
+TEST_CASE("hit shapes: rounded_rect, polygon and predicate refine inside the bounds") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const IdStack ids;
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    HitShape rounded;
+    rounded.kind = HitShape::Kind::rounded_rect;
+    rounded.radius = 30.0f;
+    const WidgetId rr = ids.id("rr");
+
+    // The cut corner falls through; the middle does not. One-frame taps,
+    // so each probe claims and releases within itself.
+    gui.begin_frame(snap(5.0f, 5.0f, false, true, true));
+    CHECK(!gui.hit_test(rr, rect, rounded).pressed);
+    gui.end_frame();
+    gui.begin_frame(snap(50.0f, 50.0f, false, true, true));
+    CHECK(gui.hit_test(rr, rect, rounded).pressed);
+    gui.end_frame();
+
+    // A triangle: any winding, even-odd containment, absolute points.
+    HitShape tri;
+    tri.kind = HitShape::Kind::polygon;
+    const float px[] = {0.0f, 100.0f, 50.0f};
+    const float py[] = {0.0f, 0.0f, 100.0f};
+    tri.poly_x = px;
+    tri.poly_y = py;
+    tri.poly_count = 3;
+    const WidgetId pg = ids.id("pg");
+
+    gui.begin_frame(snap(95.0f, 50.0f, false, true, true));  // in bounds, out of tri
+    CHECK(!gui.hit_test(pg, rect, tri).pressed);
+    gui.end_frame();
+    gui.begin_frame(snap(50.0f, 60.0f, false, true, true));  // deep in the tri
+    CHECK(gui.hit_test(pg, rect, tri).pressed);
+    gui.end_frame();
+
+    // The predicate escape hatch, allocation-free: an L-shaped hit.
+    static const auto l_shape = [](const void*, float x, float y) {
+        return (x < 30.0f) || (y < 30.0f);  // the top-left L
+    };
+    HitShape ell;
+    ell.kind = HitShape::Kind::predicate;
+    ell.predicate = l_shape;
+    const WidgetId pr = ids.id("pr");
+
+    gui.begin_frame(snap(80.0f, 80.0f, false, true, true));
+    CHECK(!gui.hit_test(pr, rect, ell).pressed);
+    gui.end_frame();
+    gui.begin_frame(snap(80.0f, 20.0f, false, true, true));
+    CHECK(gui.hit_test(pr, rect, ell).pressed);
+    gui.end_frame();
+}
+
+TEST_CASE("hit shapes: the default shape is the old rect test, answer for answer") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    const IdStack ids;
+    const WidgetId plain = ids.id("plain");
+    const WidgetId shaped = ids.id("shaped");
+    const Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    // Two widgets at two places, each settling its own hover: the
+    // three-arg call and the shape call must answer identically - the
+    // default shape is the old rect test, byte for byte.
+    gui.begin_frame(snap(50.0f, 50.0f));
+    (void)gui.state(plain, rect);
+    gui.end_frame();
+    gui.begin_frame(snap(50.0f, 50.0f));
+    const WidgetResult a = gui.state(plain, rect);
+    gui.end_frame();
+    CHECK(a.state == WidgetState::Hovered);
+
+    gui.begin_frame(snap(50.0f, 50.0f));
+    (void)gui.state(shaped, rect, false, HitShape{});
+    gui.end_frame();
+    gui.begin_frame(snap(50.0f, 50.0f));
+    const WidgetResult b = gui.state(shaped, rect, false, HitShape{});
+    gui.end_frame();
+
+    CHECK(b.state == WidgetState::Hovered);
+    CHECK(a.hit.hovered == b.hit.hovered);
+    CHECK(a.hit.pressed == b.hit.pressed);
+    CHECK(a.hit.clicked == b.hit.clicked);
+}
+
 // --- layer scopes (begin_layer/end_layer) -------------------------------------------
 
 TEST_CASE("layers: a popup wins the pointer over base, whatever the record order") {

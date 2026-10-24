@@ -82,6 +82,46 @@ struct WidgetResult {
     WidgetState state = WidgetState::Normal;
 };
 
+// The pointer test inside a widget's bounds rect, for looks the rect
+// cannot say: a circular knob, rounded corners that should not click, a
+// hexagon, anything. The bounds rect stays the outer limit of every
+// other rule - layout, clipping, layers and the focus ring all key on
+// it - and the shape only refines whether a pointer inside the PADDED
+// bounds counts. Shape tests allocate nothing; the predicate is a plain
+// function pointer because a capturing callable would allocate.
+struct HitShape {
+    enum class Kind : std::uint8_t {
+        rect,         // the whole padded bounds - the default, and the
+                      // exact test every widget ran before shapes existed
+        circle,       // centered on the bounds' center, `radius` big (the
+                      // inscribed circle when radius <= 0)
+        rounded_rect, // the bounds with `radius` corners - a click in a
+                      // cut corner falls through to what lays beneath
+        polygon,      // `poly_x`/`poly_y` points, absolute coords, any
+                      // winding, even-odd containment
+        predicate,    // `predicate(user, x, y)` - the escape hatch
+    };
+    Kind kind = Kind::rect;
+    float radius = 0.0f;  // circle / rounded_rect
+    const float* poly_x = nullptr;  // polygon points, absolute coords
+    const float* poly_y = nullptr;
+    int poly_count = 0;
+    bool (*predicate)(const void* user, float x, float y) = nullptr;
+    const void* user = nullptr;
+    float pad = 0.0f;  // hit padding: grows the TESTED rect outward for
+                       // touch targets; the layout rect, the clip gates
+                       // and the focus ring are untouched
+
+    // The shape's whole say for one pointer position: whether it lands
+    // on the widget. `bounds` is the widget's plain layout rect; the
+    // padding and the kind refine inside it.
+    bool contains(const Rect& bounds, float x, float y) const;
+};
+
+// The padded rect a shape tests against - `bounds` grown by `pad` on
+// every side (never shrunk: a negative pad reads as zero).
+Rect hit_shape_bounds(const Rect& bounds, const HitShape& shape);
+
 // The immediate-mode gui core. Owns, per frame: the id scope stack, the
 // input snapshot, per-pointer hot/active tracking (the mouse and every
 // touch, each finger an independent pointer), and per-widget persistent
@@ -329,6 +369,13 @@ public:
     // (flagged once per process). `id` scopes the widget's persistent
     // state (kInvalidWidgetId claims nothing); `rect` is in gui space.
     HitTest hit_test(WidgetId id, const Rect& rect);
+    // The same test refined by a HitShape: the claim the widget makes is
+    // the padded-bounds intersection with the hit clip, and a pointer
+    // there must also land inside the shape. Every other rule - layers,
+    // the topmost steal, capture, the settled hover - is unchanged, so
+    // two overlapping widgets resolve by stratum and record order over
+    // whichever shapes actually contain the pointer.
+    HitTest hit_test(WidgetId id, const Rect& rect, const HitShape& shape);
 
     // state() is the focus-and-face half over hit_test: it runs exactly
     // ONE hit_test (never a second path) and hands back its answer plus
@@ -354,6 +401,11 @@ public:
     // keeps running: it is an id, not a claim, and dies only by
     // press-elsewhere, veil, or set_focus.
     WidgetResult state(WidgetId id, const Rect& bounds, bool disabled = false);
+    // state() over a HitShape: the focus bounds still latch the PLAIN
+    // rect (the ring and the into-view shift speak the layout), only
+    // the pointer test takes the shape.
+    WidgetResult state(WidgetId id, const Rect& bounds, bool disabled,
+                       const HitShape& shape);
 
     // --- keyboard focus ---
     // Registers `id` as focusable THIS frame, in call order - the frame's
@@ -567,8 +619,13 @@ private:
     // One pointer slot's half of hit_test; the public function folds the
     // slots into the widget-facing answer. Private on purpose: it
     // mutates the slot's track, so only hit_test may call it, in its
-    // slot order (mouse first).
-    HitTest hit_test_pointer(WidgetId id, const Rect& rect, int slot);
+    // slot order (mouse first). `claimable` is the padded-bounds/clip
+    // intersection the claims run against; `tested` the unclipped
+    // padded bounds the shape refines inside; the two agree whenever no
+    // clip is active.
+    HitTest hit_test_pointer(WidgetId id, const Rect& claimable,
+                             const Rect& tested, const HitShape& shape,
+                             int slot);
     // Whether `id` registered focusable this frame (the scan state()'s
     // press-to-focus reads). Registration is a handful of ids, so the
     // linear walk is the whole story.
