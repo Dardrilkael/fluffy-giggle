@@ -100,6 +100,18 @@ public:
     // at a 100%-scaling display). Apps reach it through App::ui_scale().
     virtual float ui_scale() const = 0;
 
+    // The platform's dark-mode answer, live at call time: true when the
+    // OS theme (or its app-theme spelling) is dark. The base default is
+    // the light answer - the stub for hosts with no probe. GLFW has no
+    // theme API, so the desktop override reads the Windows Personalize
+    // registry key (other desktops answer light for now); Android reads
+    // the night mask of the glue's live AConfiguration. No platform
+    // surfaces a change event the shell could forward, and callers ask
+    // rarely (a theme picked once at startup), so this reads the OS per
+    // call - a hot poller caches at its own cadence. Apps reach it
+    // through App::prefers_dark().
+    virtual bool prefers_dark() const { return false; }
+
     // --- ImGui platform backend (GLFW / Android) ----------------------------
     // init installs the backend against the current window. Android calls
     // it once per attach (each INIT_WINDOW can hand over a NEW

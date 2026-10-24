@@ -34,7 +34,8 @@ libs/ui/
   include/ws/ui/
     app.hpp, render_command_queue.hpp, renderer2d.hpp, widgets.hpp
     gui/  gui_context.hpp, id_stack.hpp, job_progress.hpp, layout_cursor.hpp,
-          rect.hpp, theme.hpp, widgets.hpp, scoped.hpp
+          rect.hpp, theme.hpp, theme_color.hpp, theme_data.hpp,
+          theme_json.hpp, widgets.hpp, scoped.hpp
   src/
     app/        app.cpp (pimpl: frame loop + backends)
     platform/   window.h, window_glfw.cpp, window_android.cpp (one builds per platform)
@@ -168,6 +169,7 @@ Widget functions hold no state; persistence lives in `GuiContext` side tables.
 - `on_event(Event&)`: once per queued event, before `on_update()`.
 - `on_update()`: once per frame. **Do not call `ImGui::Render()` or the backend NewFrame functions**; the shell owns the frame lifecycle.
 - `ui_scale()`: Android density / 160, or the desktop content scale. It is 1.0 before `run()` and valid from `on_setup()`.
+- `prefers_dark()`: the OS dark-mode answer, live per call — Windows reads the Personalize registry value (advapi32, linked PRIVATE), Android the glue's `AConfiguration` night mask, and a probe-less platform answers false (light). Neither platform offers a theme-change event, so nothing is cached: callers ask rarely (a stock theme picked once at startup). It is false before `run()`, valid from `on_setup()`. The platform half lives in `WindowHost::prefers_dark()` (a defaulted virtual — the stub answer where no probe exists).
 - `install_clipboard(gui::GuiContext&)`: call once in `on_setup()`. Desktop installs the real pair. Android leaves it unset, so the clipboard trio no-ops.
 - `install_job_system(ws::jobs::JobSystem&)`: call once in `on_setup()`. The shell drains the system's marshal queue once per frame, between the event delivery and `on_update()` — progress deliveries and completions run on the main thread, outside any gui frame, so callbacks may touch gui state (the `Toasts` store, a `JobProgress` mirror) with no locks. The system is caller-owned and must outlive `run()` (or be drained by hand before it is destroyed).
 - `widgets.hpp`: `begin_window` / `end_window`, `text`, `button`, `checkbox`, `slider_float` / `slider_int`, `separator`, `same_line`, `begin_plot` / `end_plot` / `plot_line`, `show_imgui_demo` / `show_implot_demo`.

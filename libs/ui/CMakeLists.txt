@@ -59,6 +59,12 @@ if(ANDROID)
     "${ANDROID_NDK}/sources/android/native_app_glue")
 else()
   target_link_libraries(ws_ui PRIVATE imgui implot glfw volk stb)
+  if(WIN32)
+    # window_glfw.cpp's OS dark-mode probe (App::prefers_dark) reads the
+    # Personalize key through RegGetValueA, which advapi32 owns. A system
+    # lib, not a third-party target - PRIVATE, like every dep here.
+    target_link_libraries(ws_ui PRIVATE advapi32)
+  endif()
 endif()
 
 ws_add_test(ui SOURCES tests/test_ui.cpp)

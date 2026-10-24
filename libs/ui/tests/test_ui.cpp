@@ -55,6 +55,16 @@ TEST_CASE("App is neither copyable nor movable") {
     CHECK(true);
 }
 
+TEST_CASE("App::prefers_dark answers the headless default before run()") {
+    ws::ui::App app;
+    // No window platform exists yet (the host is born inside run()), so
+    // the answer is the documented headless default - light, the same
+    // answer a probe-less platform gives - never an OS probe. The live
+    // registry/night-mask reads are the gallery's smoke (stage 10's
+    // theme page), not a headless test's business.
+    CHECK_FALSE(app.prefers_dark());
+}
+
 // --- render command queue --------------------------------------------------
 
 TEST_CASE("command queue runs in submission order and clears on execute") {

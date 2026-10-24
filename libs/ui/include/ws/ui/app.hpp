@@ -89,6 +89,19 @@ public:
     // type.
     void install_job_system(ws::jobs::JobSystem& jobs);
 
+    // The OS's dark-mode answer for this app, live at call time: true
+    // when the user's system theme is dark - Windows answers from the
+    // Personalize registry value, Android from the configuration's
+    // night mode, and a platform without a probe answers false (light).
+    // Neither platform offers a change event the shell could forward,
+    // and callers ask rarely (a stock theme picked once at startup,
+    // re-checked on focus at most), so the answer is a live OS read per
+    // call, never cached here - poll it per frame and you pay a
+    // registry/config read per frame. Valid from on_setup() on; false
+    // before run(), the headless default (the same answer a probe-less
+    // platform gives).
+    bool prefers_dark() const;
+
 protected:
     // Called once after the context and ImGui are ready, before the first
     // frame. Safe to create ImGui/ImPlot objects here.

@@ -28,6 +28,16 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
+#ifdef _WIN32
+// The OS dark-mode probe (prefers_dark below) reads the Personalize
+// registry key, so this platform TU - never an app - carries the one
+// windows.h the seam needs. Lean guard + NOMINMAX: this TU is in every
+// default desktop build, and windows.h's macros would collide with std.
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 namespace ws::ui {
 namespace {
 
@@ -314,6 +324,36 @@ public:
             glfwGetWindowContentScale(window_, &xs, &ys);
         }
         return xs > 0.0f ? xs : 1.0f;
+    }
+
+    bool prefers_dark() const override {
+#ifdef _WIN32
+        // The Personalize key Windows 1809+ writes: AppsUseLightTheme 0
+        // = apps dark, 1 = apps light. GLFW exposes no theme API and no
+        // change event, so this is a live read per call - callers ask
+        // rarely (a theme picked once at startup, re-checked on focus at
+        // most), and a hot poller caches at its own cadence. A missing
+        // key (pre-1809 Windows, or the value deleted) and a failed
+        // read both keep the light default: absent preference is not a
+        // dark demand.
+        DWORD apps_light = 1;
+        DWORD size = sizeof(apps_light);
+        const LSTATUS status =
+            RegGetValueA(HKEY_CURRENT_USER,
+                         "Software\\Microsoft\\Windows\\CurrentVersion\\"
+                         "Themes\\Personalize",
+                         "AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr,
+                         &apps_light, &size);
+        if (status != ERROR_SUCCESS) {
+            return false;
+        }
+        return apps_light == 0;
+#else
+        // No desktop dark-mode probe on this platform yet - the seam's
+        // documented stub (the base default, spelled out where a reader
+        // of this TU looks for the platform's answer).
+        return false;
+#endif
     }
 
     bool imgui_platform_init() override {

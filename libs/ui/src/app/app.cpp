@@ -1050,6 +1050,13 @@ float App::ui_scale() const {
     return impl_->host_ ? impl_->host_->ui_scale() : 1.0f;
 }
 
+bool App::prefers_dark() const {
+    // The OS theme through the platform seam; before run() (and after a
+    // failed startup) there is no window platform, so the light default
+    // stands - the same answer a host without a probe gives.
+    return impl_->host_ != nullptr && impl_->host_->prefers_dark();
+}
+
 void App::install_clipboard(gui::GuiContext& gui) {
     // Nothing to wire before run() (or after a failed startup) - the
     // unset seam is the no-clipboard answer, the same one a host

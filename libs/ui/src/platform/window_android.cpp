@@ -187,6 +187,22 @@ public:
 
     float ui_scale() const override { return ui_scale_; }
 
+    bool prefers_dark() const override {
+        // The glue owns android_app::config and keeps it current - filled
+        // from the activity's asset manager at creation, refreshed on
+        // every APP_CMD_CONFIG_CHANGED (which pump() drains) - so this is
+        // a live read: a night-mode flip the OS delivers is answered on
+        // the next call. The getter answers the isolated night field
+        // (NO/YES; 0 = unspecified), so a direct compare - no mask. A null
+        // config (never in practice; defensive like the density read)
+        // keeps the light default - the seam's stub.
+        if (app_ == nullptr || app_->config == nullptr) {
+            return false;
+        }
+        return AConfiguration_getUiModeNight(app_->config) ==
+               ACONFIGURATION_UI_MODE_NIGHT_YES;
+    }
+
     bool imgui_platform_init() override {
         // Once per attach: each APP_CMD_INIT_WINDOW can hand over a NEW
         // ANativeWindow, and the backend keeps the pointer it was given.
