@@ -740,6 +740,28 @@ bool combo(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
           int& selected, bool& open, float width = -1.0f,
           bool disabled = false);
 
+// The split halves, the combo row's seam: the behavior owns the row's
+// interaction - the fold, the drop of `open` on an empty or locked combo
+// (the whole-widget lock: a dropdown left open by a lock landing
+// mid-flight closes), and the toggle, a click or the focused row's
+// Enter/Space refused while `empty`. The draw paints the closed row:
+// the face, the right-edge marker, the "label: item" line, with `open`
+// the post-toggle answer the marker keys on. The pair is the row
+// alone - the dropdown stays the composed widget's own half, so a
+// caller building a custom combo lays its list through place_popup and
+// begin_popup the way the widget does.
+struct ComboResult : WidgetPaint {
+    bool toggled = false;  // the row flipped `open` this frame
+};
+
+ComboResult combo_behavior(GuiContext& gui, WidgetId id, const Rect& rect,
+                           bool& open, bool empty, bool disabled = false,
+                           const HitShape& hit_shape = {});
+void combo_draw(const Rect& rect, const ComboResult& result,
+                const ChromeTheme& theme, const char* label,
+                const char* const* items, int count, int selected,
+                bool open);
+
 // A text input: one editable line in a caller-owned buffer. `buf` is
 // NUL-terminated UTF-8 the caller owns (the house rule - the widget
 // holds no copy), `capacity` counts the NUL, and the answer is true on

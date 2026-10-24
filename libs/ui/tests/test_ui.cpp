@@ -11880,3 +11880,165 @@ TEST_CASE("a custom look owns every pixel over a tab") {
         CHECK(vertex.tex_index == 0.0f);  // a plain quad, not the SDF face
     }
 }
+
+TEST_CASE("the combo pair records the widget's output byte for byte") {
+    using namespace ws::ui::gui;
+    ws::ui::r2d::Renderer2D r;
+    struct ActiveRenderer {
+        explicit ActiveRenderer(ws::ui::r2d::Renderer2D* renderer) {
+            ws::ui::r2d::set_active(renderer);
+        }
+        ~ActiveRenderer() { ws::ui::r2d::set_active(nullptr); }
+    };
+    const ActiveRenderer active{&r};
+    (void)active;
+
+    const ws::ui::r2d::Font font = ab_font();
+    ChromeTheme theme = kDefaultChrome;
+    theme.font = &font;  // the theme points; it never owns
+
+    const ws::input::InputFrame quiet = snap(-100.0f, -100.0f);
+    // The row lays at (12,12,120,24) inside the padded panel; the tap on
+    // it opens the dropdown this same frame (bounds (12,36,120,112),
+    // item 0 at (24,48,96,24)), and the item tap at (60,48) picks it.
+    const ws::input::InputFrame tap_row =
+        snap(60.0f, 12.0f, false, true, true);
+    const ws::input::InputFrame tap_item =
+        snap(60.0f, 48.0f, false, true, true);
+
+    const auto record = [&](auto&& run, const ws::input::InputFrame& frame) {
+        r.frame_begin(800.0f, 600.0f);
+        r.begin_screen();
+        GuiContext gui;
+        LayoutCursor layout;
+        gui.begin_frame(frame);
+        (void)begin_panel(gui, layout, theme, "root",
+                          {0.0f, 0.0f, 400.0f, 300.0f});
+        run(gui, layout);
+        end_panel(gui, layout);
+        gui.end_frame();
+        r.end();
+        r.frame_end();
+        return r.batch().vertices();  // by value: the next frame resets
+    };
+    const auto identical = [](const auto& stock, const auto& split) {
+        REQUIRE(stock.size() == split.size());
+        REQUIRE(!stock.empty());  // a frame that recorded nothing proves nothing
+        CHECK(std::memcmp(stock.data(), split.data(),
+                          stock.size() * sizeof(stock[0])) == 0);
+    };
+
+    static const char* const kItems[] = {"alpha", "beta", "gamma"};
+    const auto split_combo = [&](GuiContext& gui, LayoutCursor& layout,
+                                 int& selected, bool& open) {
+        // The ladder spelled by hand (begin_widget_row is the widget's
+        // private half): the id, the placed rect, then the pair - and the
+        // dropdown through the shared placement, exactly as the widget
+        // lays it.
+        const WidgetId id = gui.ids().id("shape");
+        const Rect rect = layout.next(120.0f, theme.control_height);
+        const ComboResult result = combo_behavior(gui, id, rect, open, false);
+        combo_draw(rect, result, theme, "shape", kItems, 3, selected, open);
+        const float items_h =
+            static_cast<float>(3) * theme.control_height +
+            static_cast<float>(2) * theme.spacing;
+        const Rect bounds =
+            place_popup(rect, rect.width, items_h + 2.0f * theme.padding);
+        bool changed = false;
+        if (begin_popup(gui, layout, theme, "shape", rect, bounds, open)) {
+            for (int i = 0; i < 3; ++i) {
+                gui.ids().push(i);
+                const bool picked = selectable(gui, layout, theme, kItems[i],
+                                               i == selected, -1.0f);
+                if (picked && i != selected) {
+                    selected = i;
+                    changed = true;
+                }
+                if (picked) {
+                    open = false;  // a choice closes: the combo's rule
+                    gui.set_focus(id);
+                }
+                gui.ids().pop();
+            }
+            end_popup(gui, layout);
+        }
+        return changed;
+    };
+
+    // The quiet frame: the closed row at rest, the second item showing.
+    {
+        int stock_sel = 1;
+        int split_sel = 1;
+        bool stock_open = false;
+        bool split_open = false;
+        const auto stock = record(
+            [&](GuiContext& gui, LayoutCursor& layout) {
+                (void)combo(gui, layout, theme, "shape", kItems, 3, stock_sel,
+                            stock_open, 120.0f);
+            },
+            quiet);
+        const auto split = record(
+            [&](GuiContext& gui, LayoutCursor& layout) {
+                (void)split_combo(gui, layout, split_sel, split_open);
+            },
+            quiet);
+        identical(stock, split);
+        CHECK(stock_sel == split_sel);
+        CHECK(stock_open == false);
+        CHECK(split_open == false);
+    }
+
+    // The opening tap: the pressed row face, the open marker, and the
+    // dropdown the widget placed - all laid in the tap's own frame.
+    {
+        int stock_sel = 1;
+        int split_sel = 1;
+        bool stock_open = false;
+        bool split_open = false;
+        const auto stock = record(
+            [&](GuiContext& gui, LayoutCursor& layout) {
+                (void)combo(gui, layout, theme, "shape", kItems, 3, stock_sel,
+                            stock_open, 120.0f);
+            },
+            tap_row);
+        const auto split = record(
+            [&](GuiContext& gui, LayoutCursor& layout) {
+                (void)split_combo(gui, layout, split_sel, split_open);
+            },
+            tap_row);
+        identical(stock, split);
+        CHECK(stock_open == true);
+        CHECK(split_open == true);
+    }
+
+    // The pick: the open dropdown lays, item 0's click writes the int,
+    // closes and hands the focus back - the same frame in both
+    // spellings, byte for byte.
+    {
+        int stock_sel = 1;
+        int split_sel = 1;
+        bool stock_open = true;
+        bool split_open = true;
+        bool stock_changed = false;
+        bool split_changed = false;
+        const auto stock = record(
+            [&](GuiContext& gui, LayoutCursor& layout) {
+                stock_changed = combo(gui, layout, theme, "shape", kItems, 3,
+                                      stock_sel, stock_open, 120.0f);
+            },
+            tap_item);
+        const auto split = record(
+            [&](GuiContext& gui, LayoutCursor& layout) {
+                split_changed =
+                    split_combo(gui, layout, split_sel, split_open);
+            },
+            tap_item);
+        identical(stock, split);
+        CHECK(stock_changed);
+        CHECK(split_changed);
+        CHECK(stock_sel == 0);
+        CHECK(split_sel == 0);
+        CHECK(stock_open == false);
+        CHECK(split_open == false);
+    }
+}

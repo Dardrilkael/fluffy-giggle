@@ -1766,3 +1766,117 @@ TEST_CASE("popup_placement: flip and clamp as pure geometry") {
     CHECK(dead.x == 0.0f);  // and that answer is the origin clamp
     CHECK(dead.y == 0.0f);
 }
+
+TEST_CASE("the combo behavior drives the interaction and draws nothing") {
+    using ws::ui::gui::WidgetState;
+
+    ws::ui::gui_test::stub.reset();
+    GuiContext gui;
+    const ws::ui::gui::Rect rect{0.0f, 0.0f, 120.0f, 24.0f};
+    const ws::ui::gui::WidgetId id = gui.ids().id("shape");
+    bool open = false;
+
+    // A one-frame tap on the row toggles `open` - the caller's bool is
+    // the popup's state, and the behavior is the row's whole interaction.
+    gui.begin_frame(snap(60.0f, 12.0f, false, true, true));
+    const ws::ui::gui::ComboResult tapped =
+        ws::ui::gui::combo_behavior(gui, id, rect, open, false);
+    gui.end_frame();
+    CHECK(tapped.toggled);
+    CHECK(tapped.hit.clicked);
+    CHECK(open == true);
+
+    // A second tap closes it - the same fold, the other direction.
+    gui.begin_frame(snap(60.0f, 12.0f, false, true, true));
+    const ws::ui::gui::ComboResult closed =
+        ws::ui::gui::combo_behavior(gui, id, rect, open, false);
+    gui.end_frame();
+    CHECK(closed.toggled);
+    CHECK(open == false);
+
+    // Enter on the focused row flips it too, like a header.
+    gui.set_focus(id);
+    InputFrame keys = snap(-100.0f, -100.0f);
+    keys.key_pressed[static_cast<std::size_t>(ws::input::keys::kEnter)] =
+        true;
+    gui.begin_frame(keys);
+    const ws::ui::gui::ComboResult keyed =
+        ws::ui::gui::combo_behavior(gui, id, rect, open, false);
+    gui.end_frame();
+    CHECK(keyed.toggled);
+    CHECK(keyed.focused);
+    CHECK(open == true);
+
+    // The empty combo refuses everything and drops a pre-latched `open`:
+    // the tap lands (the hit is real) but a bare row never pretends, so
+    // a later refill starts closed.
+    bool empty_open = true;
+    gui.begin_frame(snap(60.0f, 12.0f, false, true, true));
+    const ws::ui::gui::ComboResult bare =
+        ws::ui::gui::combo_behavior(gui, id, rect, empty_open, true);
+    gui.end_frame();
+    CHECK(bare.hit.clicked);  // the tap landed...
+    CHECK(!bare.toggled);     // ...and `empty` refused it anyway
+    CHECK(empty_open == false);
+
+    // The trailing lock: a dead row claims nothing, and a dropdown left
+    // open by a lock landing mid-flight closes - the whole-widget lock.
+    bool locked_open = true;
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    const ws::ui::gui::ComboResult locked =
+        ws::ui::gui::combo_behavior(gui, id, rect, locked_open, false, true);
+    gui.end_frame();
+    CHECK(!locked.toggled);
+    CHECK(locked.state == WidgetState::Disabled);
+    CHECK(locked_open == false);
+
+    // The behavior drew nothing across every pass above.
+    CHECK(ws::ui::gui_test::stub.quads == 0);
+    CHECK(ws::ui::gui_test::stub.rounded == 0);
+    CHECK(ws::ui::gui_test::stub.sprites == 0);
+    CHECK(ws::ui::gui_test::stub.texts == 0);
+    CHECK(ws::ui::gui_test::stub.clip_pushes == 0);
+    CHECK(ws::ui::gui_test::stub.clip_pops == 0);
+    CHECK(ws::ui::gui_test::stub.layer_sets == 0);
+}
+
+TEST_CASE("custom looks paint over the combo behavior") {
+    using ws::ui::r2d::draw_quad;
+
+    GuiContext gui;
+    const ws::ui::gui::Rect rect{0.0f, 0.0f, 120.0f, 24.0f};
+    static const char* const kItems[] = {"alpha", "beta"};
+    const ws::ui::gui::WidgetId id = gui.ids().id("shape");
+    bool open = false;
+
+    // The stock draw over a quiet behavior result: the face (rounded),
+    // then the right-edge marker and the "label: item" line - the stub
+    // theme is fontless, so the label is its bar quad.
+    ws::ui::gui_test::stub.reset();
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    const ws::ui::gui::ComboResult result =
+        ws::ui::gui::combo_behavior(gui, id, rect, open, false);
+    ws::ui::gui::combo_draw(rect, result, kDefaultChrome, "shape", kItems, 2,
+                            1, open);
+    gui.end_frame();
+    CHECK(ws::ui::gui_test::stub.rounded == 1);  // the face
+    CHECK(ws::ui::gui_test::stub.quads == 2);    // the marker + the label bar
+    CHECK(ws::ui::gui_test::stub.texts == 0);
+
+    // A custom look owns every pixel over the behavior: two hand quads
+    // replace the stock draw, and the interaction is untouched.
+    ws::ui::gui_test::stub.reset();
+    bool open2 = false;
+    gui.begin_frame(snap(60.0f, 12.0f, false, true, true));
+    const ws::ui::gui::ComboResult tapped =
+        ws::ui::gui::combo_behavior(gui, id, rect, open2, false);
+    draw_quad(rect.x, rect.y, rect.width, rect.height,
+              kDefaultChrome.control_bg);
+    draw_quad(rect.x + rect.width - 12.0f, rect.y + 8.0f, 8.0f, 8.0f,
+              kDefaultChrome.control_on);
+    gui.end_frame();
+    CHECK(tapped.toggled);
+    CHECK(open2 == true);
+    CHECK(ws::ui::gui_test::stub.quads == 2);
+    CHECK(ws::ui::gui_test::stub.rounded == 0);
+}
