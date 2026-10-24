@@ -32,12 +32,17 @@ CMakeLists only wire ws libraries together.
   app, desktop and Android; its APK is `tools/package-android.ps1 -App
   ui_gallery`): one screen with every widget family on it - a menu bar and
   a right-click/long-press context menu on the chrome strip, a scrolling
-  page of sections (buttons, choices, sliders, text, lists, a table, tabs,
-  a live job row - the ws::jobs bridge: a counting worker under a
-  progress bar with a cancel button, a failure that posts the error
-  toast, all completions landing on the main thread between frames -
-  the overlays, the disabled scope), all five modal-dialog button sets, the
-  toast store's whole story, and a status bar the page keeps clear of. No
-  assets: the font is the system face resolved at the platform boundary
-  (like playground's), so Windows and Android build it from one source
-  unchanged.
+  page of sections (theme - the stage 10 story: the dark/light switch
+  with the live OS answer and an adopt button, the accent picker whose
+  derived faces wear immediately, font-px and scale sliders that re-bake
+  the font (a size change is a new font), the growing font stacking faces
+  live with lazy glyphs landing per frame, a swatch grid of every chrome
+  token, and a live contrast readout; buttons, choices, sliders, text,
+  lists, a table, tabs, a live job row - the ws::jobs bridge: a counting
+  worker under a progress bar with a cancel button, a failure that posts
+  the error toast, all completions landing on the main thread between
+  frames - the overlays, the disabled scope), all five modal-dialog button
+  sets, the toast store's whole story, and a status bar the page keeps
+  clear of. No assets: the font is the system face resolved at the
+  platform boundary (like playground's), so Windows and Android build it
+  from one source unchanged.

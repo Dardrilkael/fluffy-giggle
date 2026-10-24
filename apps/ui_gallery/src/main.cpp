@@ -38,6 +38,8 @@
 #include <ws/ui/gui/layout_cursor.hpp>
 #include <ws/ui/gui/scoped.hpp>
 #include <ws/ui/gui/theme.hpp>
+#include <ws/ui/gui/theme_color.hpp>
+#include <ws/ui/gui/theme_data.hpp>
 #include <ws/ui/gui/widgets.hpp>
 #include <ws/ui/renderer2d.hpp>
 
@@ -49,6 +51,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -64,6 +67,16 @@ constexpr const char* kDefaultFontPath = "/system/fonts/Roboto-Regular.ttf";
 constexpr const char* kDefaultFontPath = "C:/Windows/Fonts/segoeui.ttf";
 #endif
 
+// The growing-font demo's second stacked face (the Han carrier; the
+// primary file stacks too, as its own past-ASCII fallback - Latin-1
+// supplements live past the inline bake). A missing file refuses
+// gracefully: the status bar says so, the line keeps its tofu.
+#ifdef __ANDROID__
+constexpr const char* kExtraFontPath = "/system/fonts/NotoSansCJK-Regular.ttc";
+#else
+constexpr const char* kExtraFontPath = "C:/Windows/Fonts/msyh.ttc";
+#endif
+
 constexpr std::uint32_t kBackdrop = ws::ui::r2d::rgba(22, 24, 30);
 constexpr std::uint32_t kGridLine = ws::ui::r2d::rgba(34, 38, 48);
 constexpr float kGridStep = 32.0f;
@@ -75,9 +88,33 @@ const char* const kWave[] = {
     "wave 5", "wave 6", "wave 7", "wave 8", "wave 9",
 };
 
+// The theme page's accent rows: 0 keeps the stock hand-picked faces,
+// anything else re-derives the control faces through apply_accent - and
+// every selected radio and checked box on the page wears the answer.
+struct AccentRow {
+    const char* name;
+    std::uint32_t color;
+};
+constexpr AccentRow kAccents[] = {
+    {"stock", 0u},
+    {"blue", ws::ui::r2d::rgba(80, 140, 230)},
+    {"orange", ws::ui::r2d::rgba(235, 145, 60)},
+    {"green", ws::ui::r2d::rgba(90, 180, 120)},
+    {"magenta", ws::ui::r2d::rgba(215, 80, 170)},
+};
+constexpr int kAccentCount = 5;
+
+// The growing-font demo line: e-acute, o-umlaut, a-ogonek (all past the
+// inline bake - the stacked primary carries them) and the Han codepoint
+// (the stacked YaHei/Noto carries it). Hex escapes split per byte, the
+// tests' idiom.
+constexpr const char* kLazyLine =
+    "growing: " "\xC3" "\xA9" "\xC3" "\xB6" "\xC4" "\x85" " " "\xE4" "\xB8" "\x96";
+
 // The page's sections, one collapsing header each; the bools are the
 // headers' own open state (caller-owned, like everything here).
 enum Section {
+    kTheme,
     kButtons,
     kChoices,
     kSliders,
@@ -108,9 +145,15 @@ public:
 protected:
     void on_setup() override {
         scale_ = ui_scale();
-        font_ = ws::ui::r2d::load_font(kDefaultFontPath, 16.0f * scale_);
-        chrome_ = gui::kDefaultChrome.scaled(scale_);
-        chrome_.font = font_.empty() ? nullptr : &font_;
+        // The stage-10 start: the OS answer picks the stock document -
+        // the theme page flips it (and re-derives an accent onto it)
+        // live from there.
+        theme_dark_ = prefers_dark();
+        theme_pick_ = theme_dark_ ? 0 : 1;
+        theme_ = theme_dark_ ? gui::default_dark() : gui::default_light();
+        font_px_ = theme_.regular.size;
+        rebuild_font();
+        sync_chrome();
         install_clipboard(gui_);  // Ctrl+C/X/V in the text inputs
         // The drain seat: once per frame, between the events and
         // on_update, the shell drains this system - every progress
@@ -190,6 +233,36 @@ private:
                       3.0f});
     }
 
+    // ---- the stage-10 theme flow ----
+    // The page's two knobs are theme_dark_ (which stock document) and
+    // accent_color_ (0 = the stock hand-picked palette); rebuild_theme()
+    // re-derives the whole look from them. rebuild_font() is the
+    // size-change story: a new bake IS a new font, so the stacked faces
+    // re-stack (the app owns that - the growing half belongs to the font
+    // that grew it) and the lazy glyphs re-request on first use.
+
+    void rebuild_theme() {
+        theme_ = theme_dark_ ? gui::default_dark() : gui::default_light();
+        if (accent_color_ != 0u) {
+            gui::apply_accent(theme_, accent_color_);
+        }
+        theme_.regular.size = font_px_;  // the size slider survives flips
+        sync_chrome();
+    }
+
+    void rebuild_font() {
+        font_ = ws::ui::r2d::load_font(kDefaultFontPath, font_px_ * scale_);
+        if (!font_.empty() && stack_faces_) {
+            (void)ws::ui::r2d::font_add_face(font_, kDefaultFontPath, 0);
+            (void)ws::ui::r2d::font_add_face(font_, kExtraFontPath, 1);
+        }
+    }
+
+    void sync_chrome() {
+        chrome_ = theme_.chrome.scaled(scale_);
+        chrome_.font = font_.empty() ? nullptr : &font_;
+    }
+
     void draw_gallery(const ws::ui::r2d::FrameSize& frame);
 
     // ---- the shell seats ----
@@ -198,6 +271,16 @@ private:
     gui::ChromeTheme chrome_ = gui::kDefaultChrome;
     ws::ui::r2d::Font font_;
     float scale_ = 1.0f;
+
+    // ---- the theme demo (stage 10) ----
+    gui::ThemeData theme_ = gui::default_dark();
+    bool theme_dark_ = true;            // which stock document is active
+    int theme_pick_ = 0;                // the dark/light radio row
+    std::uint32_t accent_color_ = 0u;   // 0 = the stock hand-picked palette
+    int accent_pick_ = 0;               // the accent radio row
+    float font_px_ = 16.0f;             // the live bake size (the doc mirrors it)
+    bool stack_faces_ = false;          // the growing-font demo's stack state
+    std::uint32_t lazy_baked_ = 0;      // glyphs landed through font_bake_pending
 
     // ---- caller-owned widget state (the gallery IS this list) ----
     std::array<bool, kSectionCount> section_{};
@@ -409,6 +492,182 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
     const gui::Rect page = gui::begin_scroll_panel(gui_, layout_, chrome_,
                                                    "gallery page", page_bounds);
     const float half = (page.width - chrome_.spacing) * 0.5f;
+
+    // --- theme (stage 10): the document, the accent, the growing font ----
+    if (gui::collapsing_header(gui_, layout_, chrome_,
+                               "theme: accent, sizes, the growing font",
+                               section_[kTheme])) {
+        // The live OS answer - read per call, never cached (no OS theme
+        // event exists on either platform), so flipping the system
+        // setting recolors this line without a restart. The radios pick
+        // the ACTIVE document; "adopt" snaps them to whatever the OS
+        // says right now.
+        char os_line[80];
+        std::snprintf(os_line, sizeof os_line,
+                      "the OS says %s mode right now - live, no restart",
+                      prefers_dark() ? "dark" : "light");
+        gui::text(layout_, chrome_, os_line, -1.0f);
+        if (gui::radio(gui_, layout_, chrome_, "dark", theme_pick_, 0)) {
+            theme_dark_ = true;
+            rebuild_theme();
+            std::snprintf(status_, sizeof status_, "theme: dark");
+        }
+        layout_.same_line();
+        if (gui::radio(gui_, layout_, chrome_, "light", theme_pick_, 1)) {
+            theme_dark_ = false;
+            rebuild_theme();
+            std::snprintf(status_, sizeof status_, "theme: light");
+        }
+        layout_.same_line();
+        if (gui::button(gui_, layout_, chrome_, "adopt the OS answer",
+                        -1.0f)) {
+            theme_dark_ = prefers_dark();
+            theme_pick_ = theme_dark_ ? 0 : 1;
+            rebuild_theme();
+            std::snprintf(status_, sizeof status_,
+                          "theme: adopted the OS answer");
+        }
+
+        // The accent rows. Each pick re-derives control_on / pressed /
+        // hovered / disabled from one color - and the selected radio
+        // itself already wears the answer, so the row below demos the
+        // pick with no extra code at all.
+        for (int i = 0; i < kAccentCount; ++i) {
+            if (gui::radio(gui_, layout_, chrome_, kAccents[i].name,
+                           accent_pick_, i)) {
+                accent_color_ = kAccents[i].color;
+                rebuild_theme();
+                std::snprintf(status_, sizeof status_, "accent: %s",
+                              kAccents[i].name);
+            }
+            if (i + 1 < kAccentCount) {
+                layout_.same_line();
+            }
+        }
+
+        // The size knobs. A size change IS a new font - the whole bake
+        // again, the stack re-added, the lazy glyphs re-requested on
+        // first use - and the scale slider multiplies every metric and
+        // the bake size with it. Both feed the same rebuild pair.
+        if (gui::slider_float(gui_, layout_, chrome_, "font px", font_px_,
+                              10.0f, 28.0f, half)) {
+            theme_.regular.size = font_px_;
+            rebuild_font();
+            sync_chrome();
+            std::snprintf(status_, sizeof status_, "font re-baked at %.0f px",
+                          font_px_);
+        }
+        layout_.same_line();
+        if (gui::slider_float(gui_, layout_, chrome_, "scale x", scale_,
+                              0.75f, 2.0f, half)) {
+            rebuild_font();
+            sync_chrome();
+            std::snprintf(status_, sizeof status_, "ui scale: %.2f", scale_);
+        }
+
+        // The growing font, live. The line below draws tofu for
+        // everything past ASCII until its codepoints are requested and
+        // baked; the request + bake pair runs every frame (the intended
+        // cadence - both no-op once the queue is dry), the button stacks
+        // the primary file as its own past-ASCII fallback plus a Han
+        // face, and the font-px slider above proves the re-bake story:
+        // every rebuild starts the lazy half empty and the same line
+        // heals itself within a frame or two.
+        if (!font_.empty()) {
+            (void)ws::ui::r2d::font_request_text(font_, kLazyLine);
+            lazy_baked_ += ws::ui::r2d::font_bake_pending(font_, 8u);
+        }
+        gui::text(layout_, chrome_, kLazyLine, -1.0f);
+        if (gui::button(gui_, layout_, chrome_, "stack the faces", half)) {
+            stack_faces_ = true;
+            const ws::core::Status primary =
+                ws::ui::r2d::font_add_face(font_, kDefaultFontPath, 0);
+            const ws::core::Status extra =
+                ws::ui::r2d::font_add_face(font_, kExtraFontPath, 1);
+            if (primary.has_value() && extra.has_value()) {
+                std::snprintf(status_, sizeof status_,
+                              "stacked: the primary + the Han face");
+            } else if (primary.has_value()) {
+                std::snprintf(status_, sizeof status_,
+                              "stacked the primary; the Han face was refused");
+            } else {
+                std::snprintf(status_, sizeof status_,
+                              "the stack was refused - is there a font?");
+            }
+        }
+        layout_.same_line();
+        char lazy_line[48];
+        std::snprintf(lazy_line, sizeof lazy_line, "lazily baked glyphs: %u",
+                      lazy_baked_);
+        gui::text(layout_, chrome_, lazy_line, half);
+
+        // The document's faces, one swatch row each: a panel_bg-backed
+        // quad (so the translucent veil and border read) then the name
+        // and the packed value. Raw r2d quads at layout-cursor rects -
+        // decorative, no id, nothing focusable, like the grid backdrop.
+        const struct {
+            const char* name;
+            std::uint32_t face;
+        } swatches[] = {
+            {"panel_bg", theme_.chrome.panel_bg},
+            {"control_bg", theme_.chrome.control_bg},
+            {"control_hovered", theme_.chrome.control_hovered},
+            {"control_pressed", theme_.chrome.control_pressed},
+            {"control_disabled", theme_.chrome.control_disabled},
+            {"control_on", theme_.chrome.control_on},
+            {"text", theme_.chrome.text},
+            {"border", theme_.chrome.border},
+            {"veil", theme_.chrome.veil},
+            {"toast_info", theme_.chrome.toast_info},
+            {"toast_warning", theme_.chrome.toast_warning},
+            {"toast_error", theme_.chrome.toast_error},
+        };
+        const float swatch_px = 16.0f * scale_;
+        for (const auto& sw : swatches) {
+            const gui::Rect swatch = layout_.next(swatch_px, swatch_px);
+            ws::ui::r2d::draw_quad(swatch.x, swatch.y, swatch.width,
+                                   swatch.height, theme_.chrome.panel_bg);
+            ws::ui::r2d::draw_quad(swatch.x, swatch.y, swatch.width,
+                                   swatch.height, sw.face);
+            layout_.same_line();
+            char face_line[48];
+            std::snprintf(face_line, sizeof face_line, "%s  0x%08X", sw.name,
+                          sw.face);
+            gui::text(layout_, chrome_, face_line, -1.0f);
+        }
+        if (accent_color_ != 0u) {
+            const gui::Rect swatch = layout_.next(swatch_px, swatch_px);
+            ws::ui::r2d::draw_quad(swatch.x, swatch.y, swatch.width,
+                                   swatch.height, theme_.chrome.panel_bg);
+            ws::ui::r2d::draw_quad(swatch.x, swatch.y, swatch.width,
+                                   swatch.height, accent_color_);
+            layout_.same_line();
+            char face_line[48];
+            std::snprintf(face_line, sizeof face_line, "accent  0x%08X",
+                          accent_color_);
+            gui::text(layout_, chrome_, face_line, -1.0f);
+        }
+
+        // The contrast answer, live: the checked pairs (AA text 4.5:1,
+        // the state-carrying faces 3:1) re-measured against the ACTIVE
+        // document every frame - an accent that could not win shows
+        // here by design, not as a surprise.
+        const std::vector<gui::ContrastFailure> failures =
+            gui::contrast_failures(theme_.chrome);
+        if (failures.empty()) {
+            gui::text(layout_, chrome_,
+                      "contrast: every checked pair passes (text 4.5:1, "
+                      "state faces 3:1)", -1.0f);
+        } else {
+            for (const gui::ContrastFailure& failure : failures) {
+                char ratio_line[96];
+                std::snprintf(ratio_line, sizeof ratio_line,
+                              "contrast: %s measures %.2f:1 - needs %.1f:1",
+                              failure.pair, failure.ratio, failure.required);
+                gui::text(layout_, chrome_, ratio_line, -1.0f);
+            }
+        }
+    }
 
     // --- buttons -----------------------------------------------------------
     if (gui::collapsing_header(gui_, layout_, chrome_, "buttons",
