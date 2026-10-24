@@ -11063,3 +11063,197 @@ TEST_CASE("the trailing disabled lock: combo, text input and button all "
     r.frame_end();
     set_active(nullptr);
 }
+
+// --- the split halves: behavior + draw IS the widget, byte for byte -------
+
+TEST_CASE("split pairs record the widgets' output byte for byte") {
+    using namespace ws::ui::gui;
+    ws::ui::r2d::Renderer2D r;
+    // Route the r2d free functions at this renderer for exactly this
+    // scope - a failed REQUIRE throws, and a g_active left dangling at a
+    // destroyed stack renderer would poison every later test.
+    struct ActiveRenderer {
+        explicit ActiveRenderer(ws::ui::r2d::Renderer2D* renderer) {
+            ws::ui::r2d::set_active(renderer);
+        }
+        ~ActiveRenderer() { ws::ui::r2d::set_active(nullptr); }
+    };
+    const ActiveRenderer active{&r};
+    (void)active;
+
+    const ws::ui::r2d::Font font = ab_font();
+    ChromeTheme theme = kDefaultChrome;
+    theme.font = &font;  // the theme points; it never owns
+
+    const ws::input::InputFrame quiet = snap(-100.0f, -100.0f);
+    const ws::input::InputFrame tap = snap(50.0f, 12.0f, false, true, true);
+
+    // One recording per pass: a fresh context in the same frame, the
+    // standard widget first, then the pair composing the same widget's
+    // halves at the same id and rect. The WHOLE frame's vertices - panel
+    // chrome included - must be identical: the split touched nothing.
+    const auto record = [&](auto&& run, const ws::input::InputFrame& frame) {
+        r.frame_begin(800.0f, 600.0f);
+        r.begin_screen();
+        GuiContext gui;
+        LayoutCursor layout;
+        gui.begin_frame(frame);
+        (void)begin_panel(gui, layout, theme, "root",
+                          {0.0f, 0.0f, 400.0f, 300.0f});
+        run(gui, layout);
+        end_panel(gui, layout);
+        gui.end_frame();
+        r.end();
+        r.frame_end();
+        return r.batch().vertices();  // by value: the next frame resets
+    };
+    const auto identical = [](const auto& stock, const auto& split) {
+        REQUIRE(stock.size() == split.size());
+        REQUIRE(!stock.empty());  // a frame that recorded nothing proves nothing
+        CHECK(std::memcmp(stock.data(), split.data(),
+                          stock.size() * sizeof(stock[0])) == 0);
+    };
+
+    // button, the quiet frame: same id, same placed rect, same Normal.
+    {
+        const auto stock = record([&](GuiContext& gui, LayoutCursor& layout) {
+            (void)button(gui, layout, theme, "go", 120.0f);
+        }, quiet);
+        const auto split = record([&](GuiContext& gui, LayoutCursor& layout) {
+            const WidgetId id = gui.ids().id("go");
+            const Rect rect = layout.next(120.0f, theme.control_height);
+            const ButtonResult result = button_behavior(gui, id, rect);
+            button_draw(rect, result, theme, "go");
+        }, quiet);
+        identical(stock, split);
+    }
+
+    // button through a tap: the press latches the focus, the pressed face
+    // rides the result into the draw - and the click answers both.
+    {
+        bool stock_fired = false;
+        bool split_fired = false;
+        const auto stock = record([&](GuiContext& gui, LayoutCursor& layout) {
+            stock_fired = button(gui, layout, theme, "go", 120.0f);
+        }, tap);
+        const auto split = record([&](GuiContext& gui, LayoutCursor& layout) {
+            const WidgetId id = gui.ids().id("go");
+            const Rect rect = layout.next(120.0f, theme.control_height);
+            const ButtonResult result = button_behavior(gui, id, rect);
+            button_draw(rect, result, theme, "go");
+            split_fired = result.activated();
+        }, tap);
+        identical(stock, split);
+        CHECK(stock_fired);
+        CHECK(split_fired);
+    }
+
+    // checkbox: the auto-sized row spelled by hand composes identically.
+    {
+        bool stock_check = false;
+        bool split_check = false;
+        const auto stock = record([&](GuiContext& gui, LayoutCursor& layout) {
+            (void)checkbox(gui, layout, theme, "box", stock_check);
+        }, quiet);
+        const auto split = record([&](GuiContext& gui, LayoutCursor& layout) {
+            char scratch[128];
+            const LabelFit fit =
+                fit_text("box", -1.0f, theme, scratch, sizeof(scratch));
+            const WidgetId id = gui.ids().id("box");
+            const Rect rect =
+                layout.next(theme.control_height + theme.spacing + fit.advance,
+                            theme.control_height);
+            const CheckboxResult result =
+                checkbox_behavior(gui, id, rect, split_check);
+            checkbox_draw(rect, result, theme, "box", split_check);
+        }, quiet);
+        identical(stock, split);
+        CHECK(!stock_check);
+        CHECK(!split_check);
+    }
+
+    // radio: the dot's row, the group state read AFTER the behavior -
+    // exactly how the widget feeds its own draw.
+    {
+        int stock_pick = 0;
+        int split_pick = 0;
+        const auto stock = record([&](GuiContext& gui, LayoutCursor& layout) {
+            (void)radio(gui, layout, theme, "one", stock_pick, 1);
+        }, quiet);
+        const auto split = record([&](GuiContext& gui, LayoutCursor& layout) {
+            char scratch[128];
+            const LabelFit fit =
+                fit_text("one", -1.0f, theme, scratch, sizeof(scratch));
+            const WidgetId id = gui.ids().id("one");
+            const Rect rect =
+                layout.next(theme.control_height + theme.spacing + fit.advance,
+                            theme.control_height);
+            const RadioResult result =
+                radio_behavior(gui, id, rect, split_pick, 1);
+            radio_draw(rect, result, theme, "one", split_pick == 1);
+        }, quiet);
+        identical(stock, split);
+        CHECK(stock_pick == 0);  // the quiet frame moves no selection
+        CHECK(split_pick == 0);
+    }
+
+    // toggle_switch: the pill's row, the caller's bool after the flip.
+    {
+        bool stock_on = false;
+        bool split_on = false;
+        const auto stock = record([&](GuiContext& gui, LayoutCursor& layout) {
+            (void)toggle_switch(gui, layout, theme, "lit", stock_on);
+        }, quiet);
+        const auto split = record([&](GuiContext& gui, LayoutCursor& layout) {
+            char scratch[128];
+            const LabelFit fit =
+                fit_text("lit", -1.0f, theme, scratch, sizeof(scratch));
+            const WidgetId id = gui.ids().id("lit");
+            const Rect rect = layout.next(2.0f * theme.control_height +
+                                               theme.spacing + fit.advance,
+                                           theme.control_height);
+            const ToggleSwitchResult result =
+                toggle_switch_behavior(gui, id, rect, split_on);
+            toggle_switch_draw(rect, result, theme, "lit", split_on);
+        }, quiet);
+        identical(stock, split);
+        CHECK(!stock_on);  // the quiet frame flips nothing
+        CHECK(!split_on);
+    }
+}
+
+TEST_CASE("a custom look owns every pixel over the standard behavior") {
+    using namespace ws::ui::gui;
+    ws::ui::r2d::Renderer2D r;
+    ws::ui::r2d::set_active(&r);
+
+    // The gallery's custom-draw case in miniature: the behavior answers
+    // the interaction, then whatever the caller paints IS the look. A
+    // flat one-quad face over the stock interaction - the stock look's
+    // rounded face and label bar never record a vertex.
+    r.frame_begin(800.0f, 600.0f);
+    r.begin_screen();
+    GuiContext gui;
+    gui.begin_frame(snap(50.0f, 12.0f, false, true, true));
+    const WidgetId id = gui.ids().id("flat");
+    const Rect rect{0.0f, 0.0f, 120.0f, 24.0f};
+    const ButtonResult result = button_behavior(gui, id, rect);
+    ws::ui::r2d::draw_quad(rect.x, rect.y, rect.width, rect.height,
+                           kDefaultChrome.control_pressed);
+    gui.end_frame();
+    r.end();
+    r.frame_end();
+    ws::ui::r2d::set_active(nullptr);
+
+    CHECK(result.clicked);
+    CHECK(result.state == WidgetState::Pressed);
+    CHECK(result.focused);  // the tap latched it; the ring never drew
+
+    // Exactly the custom quad: four plain-textured vertices, nothing
+    // else - the behavior half contributed not one.
+    REQUIRE(r.batch().vertices().size() == 4);
+    CHECK(r.batch().chunk_count() == 1);
+    for (const auto& vertex : r.batch().vertices()) {
+        CHECK(vertex.tex_index == 0.0f);  // a plain quad, not the SDF face
+    }
+}

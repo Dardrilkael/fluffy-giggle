@@ -300,13 +300,28 @@ inline bool key_activated(const GuiContext& gui, WidgetId id) {
 // the body's own rounding; the circle and pill bodies pass their
 // half-height. Skipped for degenerate rects - a zero-width body would
 // show the ring with nothing in it.
-inline void focus_ring(const GuiContext& gui, WidgetId id, const Rect& body,
-                       const ChromeTheme& theme, float radius) {
-    if (gui.is_focused(id) && body.width > 0.0f && body.height > 0.0f) {
+//
+// ring_draw is the draw half's spelling: focus arrives as a value the
+// behavior already captured, so a look never reads the context.
+// focus_ring (the unsplit widgets' convenience) delegates here.
+inline void ring_draw(bool focused, const Rect& body, const ChromeTheme& theme,
+                      float radius) {
+    if (focused && body.width > 0.0f && body.height > 0.0f) {
         r2d::draw_rounded_quad(body.x - 1.0f, body.y - 1.0f,
                                body.width + 2.0f, body.height + 2.0f,
                                radius + 1.0f, theme.control_on);
     }
+}
+
+inline void focus_ring(const GuiContext& gui, WidgetId id, const Rect& body,
+                       const ChromeTheme& theme, float radius) {
+    ring_draw(gui.is_focused(id), body, theme, radius);
+}
+
+// The common spelling: the body wears the theme's control rounding.
+inline void ring_draw(bool focused, const Rect& body,
+                      const ChromeTheme& theme) {
+    ring_draw(focused, body, theme, theme.corner_radius);
 }
 
 // The common spelling: the body wears the theme's control rounding.
@@ -410,6 +425,47 @@ inline Row begin_row(GuiContext& gui, LayoutCursor& layout,
         gui.register_focusable(id);
     }
     return {id, rect, gui.state(id, rect, disabled)};
+}
+
+// --- the split widgets' ladder and fold ------------------------------------
+// The behavior/draw seam's two shared spells. A split widget composes
+// three moves: begin_widget_row places and identifies, the behavior
+// runs the citizenship and the interaction, the draw paints the result.
+
+// The ladder's first half: the fill-width resolve, the id from the
+// label, the placed rect - everything before the citizenship. The
+// registration and state() belong to the behavior half next, which keeps
+// their order (registration BEFORE state(): a press's focus claim reads
+// it).
+struct RowLayout {
+    WidgetId id;
+    Rect rect;
+};
+
+inline RowLayout begin_widget_row(GuiContext& gui, LayoutCursor& layout,
+                                  const ChromeTheme& theme, const char* label,
+                                  float width) {
+    resolve_width(width, layout);
+    const WidgetId id = gui.ids().id(label);
+    return {id, layout.next(width, theme.control_height)};
+}
+
+// The behavior half's opening fold: the focusable registration (unless
+// dead - Tab walks past), state()'s one hit-test, and the focus read the
+// draw's ring keys on - taken after state(), because a press's focus
+// claim latches inside it.
+inline WidgetPaint begin_widget_paint(GuiContext& gui, WidgetId id,
+                                      const Rect& rect, bool disabled,
+                                      const HitShape& hit_shape) {
+    if (!disabled) {
+        gui.register_focusable(id);
+    }
+    WidgetPaint paint;
+    const WidgetResult fold = gui.state(id, rect, disabled, hit_shape);
+    paint.state = fold.state;
+    paint.hit = fold.hit;
+    paint.focused = gui.is_focused(id);
+    return paint;
 }
 
 }  // namespace ws::ui::gui

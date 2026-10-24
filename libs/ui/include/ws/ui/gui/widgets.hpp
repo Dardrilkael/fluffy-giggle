@@ -60,6 +60,18 @@ LabelFit fit_text(const char* label, float max_width,
                   const ChromeTheme& theme, char* scratch,
                   std::size_t scratch_bytes);
 
+// What a split widget's behavior half hands its draw half: the state the
+// row earned this frame (one state() fold), the focus flag the ring
+// reads, and the hit itself - everything a look needs, nothing it may
+// change. Every <widget>_behavior returns one of these (a widget's own
+// result derives from it); every <widget>_draw paints one. The default
+// is the inert row: a hand-built result paints dead, never hot.
+struct WidgetPaint {
+    WidgetState state = WidgetState::Disabled;
+    bool focused = false;
+    HitTest hit{};
+};
+
 // A push button: true on a full click inside it (press and release over
 // the same laid-out rect). `theme` supplies the faces and metrics
 // (height = theme.control_height, corners = theme.corner_radius);
@@ -86,6 +98,28 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             const char* label, float width = 120.0f, r2d::Sprite icon = {},
             bool disabled = false);
 
+// The split halves: button's interaction without a single draw, and its
+// stock look over the answer. Composing them in order IS the widget
+// above; swapping the draw half for your own is the custom-look seam -
+// the behavior owns identity, focus and the click, the draw owns pixels.
+struct ButtonResult : WidgetPaint {
+    bool clicked = false;      // a full click inside the rect this frame
+    bool key_clicked = false;  // Enter or Space on the focused row
+    bool activated() const { return clicked || key_clicked; }
+};
+
+// The interaction half at a placed rect: registers the focusable, runs
+// the one hit-test, reads the key edge. Draws nothing.
+ButtonResult button_behavior(GuiContext& gui, WidgetId id, const Rect& rect,
+                             bool disabled = false,
+                             const HitShape& hit_shape = {});
+
+// The look half: the stock face, ring, icon and centered label. Reads no
+// context - the whole look rides the result, the theme and the label.
+void button_draw(const Rect& rect, const ButtonResult& result,
+                 const ChromeTheme& theme, const char* label,
+                 r2d::Sprite icon = {});
+
 // A checkbox: true on the frame a full click toggled `value` - the
 // caller's bool IS the state, the widget itself holds none. The box is a
 // control_height square (accent fill while on, corners rounded by
@@ -100,6 +134,20 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 // one row, no scope needed.
 bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
               const char* label, bool& value, bool disabled = false);
+
+// The split halves, checkbox's seam: the behavior also owns the flip of
+// `value`; the draw takes the (already flipped) value as `checked`.
+struct CheckboxResult : WidgetPaint {
+    bool toggled = false;  // `value` flipped this frame (click or key)
+};
+
+CheckboxResult checkbox_behavior(GuiContext& gui, WidgetId id,
+                                 const Rect& rect, bool& value,
+                                 bool disabled = false,
+                                 const HitShape& hit_shape = {});
+void checkbox_draw(const Rect& rect, const CheckboxResult& result,
+                   const ChromeTheme& theme, const char* label,
+                   bool checked);
 
 // A radio button: true on the frame a click or Enter/Space MOVED the
 // group's selection to this option. `value` is the caller's group state
@@ -119,6 +167,19 @@ bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
            const char* label, int& value, int this_option,
            bool disabled = false);
 
+// The split halves, radio's seam: the behavior writes the selection;
+// the draw takes the group's answer as `selected`.
+struct RadioResult : WidgetPaint {
+    bool moved = false;  // the selection moved to this option this frame
+};
+
+RadioResult radio_behavior(GuiContext& gui, WidgetId id, const Rect& rect,
+                           int& value, int this_option, bool disabled = false,
+                           const HitShape& hit_shape = {});
+void radio_draw(const Rect& rect, const RadioResult& result,
+                const ChromeTheme& theme, const char* label,
+                bool selected);
+
 // A toggle switch: checkbox semantics under a switch look - true on the
 // frame a full click or Enter/Space flipped `value` (the caller's bool
 // is the state; the widget holds none). The track is a pill twice the
@@ -136,6 +197,20 @@ bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
                    const ChromeTheme& theme, const char* label,
                    bool& value, bool disabled = false);
+
+// The split halves, toggle_switch's seam: the behavior owns the flip of
+// `value`; the draw takes the (already flipped) value as `on`.
+struct ToggleSwitchResult : WidgetPaint {
+    bool toggled = false;  // `value` flipped this frame (click or key)
+};
+
+ToggleSwitchResult toggle_switch_behavior(GuiContext& gui, WidgetId id,
+                                          const Rect& rect, bool& value,
+                                          bool disabled = false,
+                                          const HitShape& hit_shape = {});
+void toggle_switch_draw(const Rect& rect, const ToggleSwitchResult& result,
+                        const ChromeTheme& theme, const char* label,
+                        bool on);
 
 // A collapsing header: a row that flips `open` on a click or Enter/
 // Space (the caller's bool IS the state) and returns it AFTER the flip,

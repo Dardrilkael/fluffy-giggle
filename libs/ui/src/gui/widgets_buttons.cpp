@@ -1,9 +1,10 @@
 // ws::ui::gui widget functions, one family per file (src/gui/CLAUDE.md):
 // the press-and-choose rows - button, checkbox, radio, toggle_switch.
-// Each widget lays out through LayoutCursor, hit-tests through
-// GuiContext and draws through r2d - identity, layout and drawing
-// stay one seam - and every color and metric rides the ChromeTheme;
-// the shared row idioms live in widgets_detail.hpp.
+// Each widget composes its split halves in order: the ladder places the
+// row (begin_widget_row), the behavior owns the interaction, the draw
+// owns the pixels - the public pair is the same seam a custom look uses.
+// Every color and metric rides the ChromeTheme; the shared row idioms
+// live in widgets_detail.hpp.
 
 #include "widgets_detail.hpp"
 
@@ -15,21 +16,32 @@ namespace ws::ui::gui {
 bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             const char* label, float width, r2d::Sprite icon,
             bool disabled) {
-    const Row row = begin_row(gui, layout, theme, label, width, disabled);
-    const WidgetId id = row.id;
-    const Rect& rect = row.rect;
-    const WidgetResult& result = row.result;
-    const HitTest& hit = result.hit;
+    const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
+    const ButtonResult result =
+        button_behavior(gui, row.id, row.rect, disabled);
+    button_draw(row.rect, result, theme, label, icon);
+    return result.activated();
+}
 
+ButtonResult button_behavior(GuiContext& gui, WidgetId id, const Rect& rect,
+                             bool disabled, const HitShape& hit_shape) {
+    ButtonResult result{
+        begin_widget_paint(gui, id, rect, disabled, hit_shape)};
     // Keyboard activation: Enter or Space fires the focused button, like
     // a click with no pointer involved. Edge-only (the frame the key went
     // down) and only while THIS button holds the focus.
-    const bool key_clicked = key_activated(gui, id);
+    result.clicked = result.hit.clicked;
+    result.key_clicked = key_activated(gui, id);
+    return result;
+}
 
+void button_draw(const Rect& rect, const ButtonResult& result,
+                 const ChromeTheme& theme, const char* label,
+                 r2d::Sprite icon) {
     // The focus ring: the on-accent as a 1px outline behind the face, so
     // Tab navigation is legible. Skipped for degenerate rects - a
     // zero-width face would show the ring with nothing in it.
-    focus_ring(gui, id, rect, theme);
+    ring_draw(result.focused, rect, theme);
 
     // The disabled look: the dead face for the control, everything else
     // (the icon tint, the label) dimmed through the theme's one helper -
@@ -66,8 +78,6 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
                  theme, scratch, sizeof(scratch));
     draw_label(label_x + (label_room - fit.advance) * 0.5f, rect.y,
                rect.height, fit, dim(theme.text, dim_by), theme);
-
-    return hit.clicked || key_clicked;
 }
 
 bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
@@ -75,35 +85,42 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     // The row auto-sizes: box, a gap, the label's DISPLAY advance - the
     // font's measure or the fontless per-char estimate, "##" suffixes
     // cut (they id the row, never size it); never clamped, so a label
-    // always sizes its own row. One fit serves the sizing AND the draw:
-    // the row is exactly the advance wide, so the fitted text always
-    // fits.
+    // always sizes its own row.
     const float gap = theme.spacing;
     char scratch[128];
     const LabelFit fit =
         fit_text(label, -1.0f, theme, scratch, sizeof(scratch));
-    const Row row = begin_row(gui, layout, theme, label,
-                              theme.control_height + gap + fit.advance,
-                              disabled);
-    const WidgetId id = row.id;
-    const Rect& rect = row.rect;
-    const WidgetResult& result = row.result;
-    const HitTest& hit = result.hit;
+    const RowLayout row = begin_widget_row(gui, layout, theme, label,
+                                           theme.control_height + gap +
+                                               fit.advance);
+    const CheckboxResult result =
+        checkbox_behavior(gui, row.id, row.rect, value, disabled);
+    checkbox_draw(row.rect, result, theme, label, value);
+    return result.toggled;
+}
 
-    // Keyboard toggle: Enter or Space flips the focused checkbox,
-    // edge-only - a click with no pointer involved.
-    const bool key_toggled = key_activated(gui, id);
-
-    if (hit.clicked || key_toggled) {
+CheckboxResult checkbox_behavior(GuiContext& gui, WidgetId id,
+                                 const Rect& rect, bool& value,
+                                 bool disabled, const HitShape& hit_shape) {
+    CheckboxResult result{
+        begin_widget_paint(gui, id, rect, disabled, hit_shape)};
+    result.toggled = result.hit.clicked || key_activated(gui, id);
+    if (result.toggled) {
         value = !value;  // the caller's bool is the state; a click flips it
     }
+    return result;
+}
 
-    // The focus ring: the on-accent as a 1px outline behind the BOX -
-    // the body the checkbox paints - not the row: the label's half of
-    // the row is exposed, and the solid ring draw would flood it with
-    // the accent the moment focus lands.
+void checkbox_draw(const Rect& rect, const CheckboxResult& result,
+                   const ChromeTheme& theme, const char* label,
+                   bool checked) {
+    const float gap = theme.spacing;
     const float box = theme.control_height;
-    focus_ring(gui, id, {rect.x, rect.y, box, box}, theme);
+
+    // The focus ring: behind the BOX - the body the checkbox paints -
+    // not the row: the label's half of the row is exposed, and the solid
+    // ring draw would flood it with the accent the moment focus lands.
+    ring_draw(result.focused, {rect.x, rect.y, box, box}, theme);
 
     // The disabled look: the dead face for the box, the fill and the
     // label dimmed through the one helper - 1.0 is the identity for the
@@ -117,22 +134,24 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 
     // The check: the accent fill, inset past the box's corners so a
     // heavily-rounded theme cannot let the square fill poke outside the
-    // arcs - drawn only while on, and only when the box leaves room (tiny
-    // control heights clamp to none).
+    // arcs - drawn only while on, and only when the box leaves room
+    // (tiny control heights clamp to none).
     const float inset = std::max(theme.check_inset, theme.corner_radius);
     const float fill = box - 2.0f * inset;
-    if (value && fill > 0.0f) {
+    if (checked && fill > 0.0f) {
         r2d::draw_quad(rect.x + inset, rect.y + inset, fill, fill,
                        dim(theme.control_on, dim_by));
     }
 
     // The label beside the box, vertically centered: the theme font's
     // line box, or (fontless) the v1 bar at the fitted advance. The row
-    // already sized itself to that advance, so no truncation case can
-    // fire here - the -1 fit above WAS the draw's answer.
+    // sized itself to that advance, so no truncation case can fire here
+    // - the -1 fit IS the draw's answer.
+    char scratch[128];
+    const LabelFit fit =
+        fit_text(label, -1.0f, theme, scratch, sizeof(scratch));
     draw_label(rect.x + box + gap, rect.y, rect.height, fit,
                dim(theme.text, dim_by), theme);
-    return hit.clicked || key_toggled;
 }
 
 bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
@@ -143,32 +162,40 @@ bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     char scratch[128];
     const LabelFit fit =
         fit_text(label, -1.0f, theme, scratch, sizeof(scratch));
-    const Row row = begin_row(gui, layout, theme, label,
-                              theme.control_height + gap + fit.advance,
-                              disabled);
-    const WidgetId id = row.id;
-    const Rect& rect = row.rect;
-    const WidgetResult& result = row.result;
-    const HitTest& hit = result.hit;
+    const RowLayout row = begin_widget_row(gui, layout, theme, label,
+                                           theme.control_height + gap +
+                                               fit.advance);
+    const RadioResult result =
+        radio_behavior(gui, row.id, row.rect, value, this_option, disabled);
+    radio_draw(row.rect, result, theme, label, value == this_option);
+    return result.moved;
+}
 
-    // Keyboard select: Enter or Space picks the focused radio,
-    // edge-only - a click with no pointer involved.
-    const bool key_selected = key_activated(gui, id);
-
+RadioResult radio_behavior(GuiContext& gui, WidgetId id, const Rect& rect,
+                           int& value, int this_option, bool disabled,
+                           const HitShape& hit_shape) {
+    RadioResult result{
+        begin_widget_paint(gui, id, rect, disabled, hit_shape)};
     // Selecting the selected option is an idempotent write that reports
     // false: true means the selection MOVED to this option this frame.
+    const bool select = result.hit.clicked || key_activated(gui, id);
     const bool was_other = value != this_option;
-    if (hit.clicked || key_selected) {
+    if (select) {
         value = this_option;
     }
+    result.moved = select && was_other;
+    return result;
+}
 
-    // The focus ring: the on-accent as a 1px outline behind the DOT -
-    // the body the radio paints - asked for at the dot's own
-    // half-height so the ring curves with it, not the row: the label's
-    // half of the row is exposed, and the solid ring draw would flood
-    // it with the accent the moment focus lands.
+void radio_draw(const Rect& rect, const RadioResult& result,
+                const ChromeTheme& theme, const char* label, bool selected) {
+    const float gap = theme.spacing;
     const float box = theme.control_height;
-    focus_ring(gui, id, {rect.x, rect.y, box, box}, theme, box * 0.5f);
+
+    // The focus ring: behind the DOT, asked for at the dot's own
+    // half-height so the ring curves with it - the same exposed-label
+    // rule the checkbox's box follows.
+    ring_draw(result.focused, {rect.x, rect.y, box, box}, theme, box * 0.5f);
 
     // The disabled look: the dead face for the dot, the fill and the
     // label dimmed through the one helper.
@@ -186,17 +213,18 @@ bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     // Drawn only while this option holds the value, and only when the
     // dot leaves room.
     const float fill = box - 2.0f * theme.check_inset;
-    if (value == this_option && fill > 0.0f) {
+    if (selected && fill > 0.0f) {
         r2d::draw_rounded_quad(rect.x + theme.check_inset,
                                rect.y + theme.check_inset, fill, fill,
                                fill * 0.5f, dim(theme.control_on, dim_by));
     }
 
-    // The label beside the dot, vertically centered - the same draw a
-    // checkbox's label gets.
+    // The label beside the dot - the same draw a checkbox's label gets.
+    char scratch[128];
+    const LabelFit fit =
+        fit_text(label, -1.0f, theme, scratch, sizeof(scratch));
     draw_label(rect.x + box + gap, rect.y, rect.height, fit,
                dim(theme.text, dim_by), theme);
-    return (hit.clicked || key_selected) && was_other;
 }
 
 bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
@@ -210,27 +238,39 @@ bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
     char scratch[128];
     const LabelFit fit =
         fit_text(label, -1.0f, theme, scratch, sizeof(scratch));
-    const Row row = begin_row(gui, layout, theme, label,
-                              track_w + gap + fit.advance, disabled);
-    const WidgetId id = row.id;
-    const Rect& rect = row.rect;
-    const WidgetResult& result = row.result;
-    const HitTest& hit = result.hit;
+    const RowLayout row =
+        begin_widget_row(gui, layout, theme, label, track_w + gap + fit.advance);
+    const ToggleSwitchResult result =
+        toggle_switch_behavior(gui, row.id, row.rect, value, disabled);
+    toggle_switch_draw(row.rect, result, theme, label, value);
+    return result.toggled;
+}
 
-    // Keyboard toggle: Enter or Space flips the focused switch,
-    // edge-only - a click with no pointer involved.
-    const bool key_toggled = key_activated(gui, id);
-
-    if (hit.clicked || key_toggled) {
+ToggleSwitchResult toggle_switch_behavior(GuiContext& gui, WidgetId id,
+                                          const Rect& rect, bool& value,
+                                          bool disabled,
+                                          const HitShape& hit_shape) {
+    ToggleSwitchResult result{
+        begin_widget_paint(gui, id, rect, disabled, hit_shape)};
+    result.toggled = result.hit.clicked || key_activated(gui, id);
+    if (result.toggled) {
         value = !value;  // the caller's bool is the state; a click flips it
     }
+    return result;
+}
 
-    // The focus ring: the on-accent as a 1px outline behind the PILL -
-    // the body the switch paints - asked for at the pill's own
-    // half-height so the ring curves with its ends, not the row: the
-    // label's stretch of the row is exposed, and the solid ring draw
-    // would flood it with the accent the moment focus lands.
-    focus_ring(gui, id, {rect.x, rect.y, track_w, box}, theme, box * 0.5f);
+void toggle_switch_draw(const Rect& rect, const ToggleSwitchResult& result,
+                        const ChromeTheme& theme, const char* label,
+                        bool on) {
+    const float gap = theme.spacing;
+    const float box = theme.control_height;
+    const float track_w = 2.0f * box;
+
+    // The focus ring: behind the PILL, asked for at the pill's own
+    // half-height so the ring curves with its ends - the same
+    // exposed-label rule the checkbox's box follows.
+    ring_draw(result.focused, {rect.x, rect.y, track_w, box}, theme,
+              box * 0.5f);
 
     // The disabled look: the knob and the label dimmed through the one
     // helper; the track's own dead face is the off state's, while the
@@ -242,7 +282,7 @@ bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
     // so the state stays readable. The radius asks for half the height
     // and clamps to exactly that: the full pill.
     std::uint32_t face = control_face(result.state, theme);
-    if (value) {
+    if (on) {
         face = dim(theme.control_on, dim_by);
     }
     r2d::draw_rounded_quad(rect.x, rect.y, track_w, box, box * 0.5f, face);
@@ -255,16 +295,18 @@ bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
     const float knob = box - 2.0f * theme.check_inset;
     if (knob > 0.0f) {
         const float x =
-            value ? rect.x + track_w - theme.check_inset - knob
-                  : rect.x + theme.check_inset;
+            on ? rect.x + track_w - theme.check_inset - knob
+               : rect.x + theme.check_inset;
         r2d::draw_rounded_quad(x, rect.y + theme.check_inset, knob, knob,
                                knob * 0.5f, dim(theme.text, dim_by));
     }
 
     // The label beside the pill - the same draw a checkbox's label gets.
+    char scratch[128];
+    const LabelFit fit =
+        fit_text(label, -1.0f, theme, scratch, sizeof(scratch));
     draw_label(rect.x + track_w + gap, rect.y, rect.height, fit,
                dim(theme.text, dim_by), theme);
-    return hit.clicked || key_toggled;
 }
 
 }  // namespace ws::ui::gui

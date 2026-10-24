@@ -1131,3 +1131,137 @@ TEST_CASE("ThemeFile round-trips through the real StdFileSystem") {
     }
     (void)fs.remove(path);
 }
+
+TEST_CASE("the split behaviors drive the interaction and draw nothing") {
+    using ws::ui::gui::WidgetState;
+
+    ws::ui::gui_test::stub.reset();
+    GuiContext gui;
+    const ws::ui::gui::Rect rect{0.0f, 0.0f, 120.0f, 24.0f};
+
+    // One frame per behavior, a one-frame tap inside the rect: each fold
+    // answers the interaction (click, flip, move) while not one draw
+    // call reaches the r2d seam the stub records.
+    gui.begin_frame(snap(60.0f, 10.0f, false, true, true));
+    const ws::ui::gui::ButtonResult pressed =
+        ws::ui::gui::button_behavior(gui, gui.ids().id("btn"), rect);
+    gui.end_frame();
+    CHECK(pressed.clicked);
+    CHECK(pressed.hit.pressed);
+    CHECK(pressed.state == WidgetState::Pressed);
+
+    gui.begin_frame(snap(60.0f, 10.0f, false, true, true));
+    bool check = false;
+    const ws::ui::gui::CheckboxResult flipped =
+        ws::ui::gui::checkbox_behavior(gui, gui.ids().id("cb"), rect, check);
+    gui.end_frame();
+    CHECK(flipped.toggled);
+    CHECK(check);
+
+    gui.begin_frame(snap(60.0f, 10.0f, false, true, true));
+    int choice = 1;
+    const ws::ui::gui::RadioResult moved = ws::ui::gui::radio_behavior(
+        gui, gui.ids().id("rd"), rect, choice, 2);
+    gui.end_frame();
+    CHECK(moved.moved);
+    CHECK(choice == 2);
+
+    gui.begin_frame(snap(60.0f, 10.0f, false, true, true));
+    bool on = false;
+    const ws::ui::gui::ToggleSwitchResult lit =
+        ws::ui::gui::toggle_switch_behavior(gui, gui.ids().id("sw"), rect, on);
+    gui.end_frame();
+    CHECK(lit.toggled);
+    CHECK(on);
+
+    CHECK(ws::ui::gui_test::stub.quads == 0);
+    CHECK(ws::ui::gui_test::stub.rounded == 0);
+    CHECK(ws::ui::gui_test::stub.sprites == 0);
+    CHECK(ws::ui::gui_test::stub.texts == 0);
+    CHECK(ws::ui::gui_test::stub.clip_pushes == 0);
+    CHECK(ws::ui::gui_test::stub.clip_pops == 0);
+    CHECK(ws::ui::gui_test::stub.layer_sets == 0);
+}
+
+TEST_CASE("custom looks paint over the behaviors, pixel for pixel theirs") {
+    using ws::ui::r2d::draw_quad;
+    using ws::ui::r2d::draw_rounded_quad;
+
+    // The seam from the other side: the behavior answers, then whatever
+    // the caller draws IS the look. Each sub-block resets the stub, runs
+    // one behavior with a tap, paints a hand-rolled face, and checks the
+    // counters carry exactly the custom draws - no stock look leaked.
+    GuiContext gui;
+    const ws::ui::gui::Rect rect{0.0f, 0.0f, 120.0f, 24.0f};
+    const auto tap = [&gui]() { gui.begin_frame(snap(60.0f, 10.0f, false, true, true)); };
+
+    // button: a flat face and a bar for the label.
+    ws::ui::gui_test::stub.reset();
+    tap();
+    {
+        const ws::ui::gui::ButtonResult result =
+            ws::ui::gui::button_behavior(gui, gui.ids().id("flat"), rect);
+        draw_quad(rect.x, rect.y, rect.width, rect.height,
+                  kDefaultChrome.control_pressed);
+        draw_quad(rect.x + 8.0f, rect.y + 8.0f, 40.0f, 8.0f,
+                  kDefaultChrome.text);
+        gui.end_frame();
+        CHECK(result.clicked);
+    }
+    CHECK(ws::ui::gui_test::stub.quads == 2);
+    CHECK(ws::ui::gui_test::stub.rounded == 0);
+
+    // checkbox: a square that lights the accent while on.
+    ws::ui::gui_test::stub.reset();
+    tap();
+    {
+        bool value = false;
+        const ws::ui::gui::CheckboxResult result =
+            ws::ui::gui::checkbox_behavior(gui, gui.ids().id("mine"), rect,
+                                           value);
+        draw_quad(0.0f, 0.0f, 24.0f, 24.0f,
+                  value ? kDefaultChrome.control_on
+                        : kDefaultChrome.control_bg);
+        gui.end_frame();
+        CHECK(result.toggled);
+        CHECK(value);
+    }
+    CHECK(ws::ui::gui_test::stub.quads == 1);
+    CHECK(ws::ui::gui_test::stub.rounded == 0);
+
+    // radio: a circle, filled while selected.
+    ws::ui::gui_test::stub.reset();
+    tap();
+    {
+        int choice = 1;
+        const ws::ui::gui::RadioResult result = ws::ui::gui::radio_behavior(
+            gui, gui.ids().id("dot"), rect, choice, 2);
+        draw_rounded_quad(0.0f, 0.0f, 24.0f, 24.0f, 12.0f,
+                          choice == 2 ? kDefaultChrome.control_on
+                                      : kDefaultChrome.control_bg);
+        gui.end_frame();
+        CHECK(result.moved);
+        CHECK(choice == 2);
+    }
+    CHECK(ws::ui::gui_test::stub.rounded == 1);
+    CHECK(ws::ui::gui_test::stub.quads == 0);
+
+    // toggle_switch: a track and the knob at its end.
+    ws::ui::gui_test::stub.reset();
+    tap();
+    {
+        bool value = false;
+        const ws::ui::gui::ToggleSwitchResult result =
+            ws::ui::gui::toggle_switch_behavior(gui, gui.ids().id("sw"),
+                                                rect, value);
+        draw_quad(0.0f, 0.0f, 48.0f, 24.0f,
+                  value ? kDefaultChrome.control_on
+                        : kDefaultChrome.control_bg);
+        draw_quad(40.0f, 2.0f, 20.0f, 20.0f, kDefaultChrome.text);
+        gui.end_frame();
+        CHECK(result.toggled);
+        CHECK(value);
+    }
+    CHECK(ws::ui::gui_test::stub.quads == 2);
+    CHECK(ws::ui::gui_test::stub.texts == 0);
+}
