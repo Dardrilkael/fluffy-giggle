@@ -210,6 +210,13 @@ public:
     // (load_atlas) calls this per uploaded page; tests inject synthetic
     // pages headlessly - the sprite contract is pure CPU state.
     void register_atlas_page(Texture page, std::vector<atlas::Rect> rects);
+    // The one page-upload step every packed surface funnels through
+    // (load_atlas, load_font, font_bake_pending): stages the pixels as a
+    // square RGBA8 page texture and registers its rects. Texture{} when
+    // headless or the upload fails - callers keep their degraded paths
+    // (white sprites; page-0 glyph quads that drop but still advance).
+    Texture upload_atlas_page(const void* pixels, std::uint32_t size,
+                              std::vector<atlas::Rect> rects);
     // Text: one sprite-quad per visible glyph through the same recording
     // path as draw_sprite (a glyph IS a Sprite). Returns the pen advance
     // - exactly Font::measure_text's answer, by construction.

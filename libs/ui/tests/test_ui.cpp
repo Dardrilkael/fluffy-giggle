@@ -8862,6 +8862,255 @@ TEST_CASE("Font measures the baked advance sum and skips the unbaked") {
     CHECK(tofu_font.glyph(127)->advance == 8.0f);
 }
 
+TEST_CASE("font faces stack by priority and resolve per codepoint") {
+    using namespace ws::ui::r2d;
+    // Two real faces with DIFFERENT metrics for the same codepoint, so
+    // which face answered is observable in the advance: Segoe UI Bold vs
+    // Consolas (its omega advance is the mono width).
+    constexpr const char* kBoldPath = "C:/Windows/Fonts/segoeuib.ttf";
+    constexpr const char* kMonoPath = "C:/Windows/Fonts/consola.ttf";
+    const font::FaceBake bold = font::load_face(kBoldPath, 24.0f);
+    const font::FaceBake mono = font::load_face(kMonoPath, 24.0f);
+    if (!bold.ok || !mono.ok) {
+        MESSAGE("segoeuib.ttf/consola.ttf not present - face checks skipped");
+        return;
+    }
+    // Both carry omega (U+03A9), and the pair must disagree on its
+    // advance - otherwise which one answered would not be observable.
+    REQUIRE(bold.carries(0x03A9));
+    REQUIRE(mono.carries(0x03A9));
+    const font::BakedGlyph bold_omega = font::bake_face_glyph(bold, 0x03A9, 0.0f);
+    const font::BakedGlyph mono_omega = font::bake_face_glyph(mono, 0x03A9, 0.0f);
+    REQUIRE(bold_omega.advance != mono_omega.advance);
+    // The literal is split: a hex escape absorbs following hex digits.
+    constexpr const char* kOmega = "\xCE" "\xA9";
+
+    // Lower priority value answers first - even when it was added second.
+    Font stack = ab_font();
+    REQUIRE(font_add_face(stack, kBoldPath, 1).has_value());
+    REQUIRE(font_add_face(stack, kMonoPath, 0).has_value());
+    // The hand-built font borrows the FIRST-arriving face's baseline.
+    CHECK(stack.extras_state()->baseline_y == bold.ascent_px);
+    // The insert kept the stack sorted: mono (0) sits before bold (1).
+    REQUIRE(stack.extras_state()->faces.size() == 2u);
+    CHECK(stack.extras_state()->faces[0].priority == 0);
+    CHECK(font_request_text(stack, kOmega) == 1u);
+    CHECK(font_bake_pending(stack, 8u) == 1u);
+    const Font::Glyph* omega = stack.glyph(0x03A9);
+    REQUIRE(omega != nullptr);
+    CHECK(omega->advance == mono_omega.advance);  // mono won
+    // The baseline fold: the answering face's box is baseline-relative
+    // (baked here against baseline 0); the font's glyph sits the shared
+    // baseline - bold's, the first face to arrive - below the line top.
+    CHECK(omega->offset_y == doctest::Approx(bold.ascent_px + mono_omega.offset_y));
+
+    // Flipped priorities flip the answer.
+    Font flipped = ab_font();
+    REQUIRE(font_add_face(flipped, kBoldPath, 0).has_value());
+    REQUIRE(font_add_face(flipped, kMonoPath, 1).has_value());
+    CHECK(font_request_text(flipped, kOmega) == 1u);
+    CHECK(font_bake_pending(flipped, 8u) == 1u);
+    const Font::Glyph* bold_answer = flipped.glyph(0x03A9);
+    REQUIRE(bold_answer != nullptr);
+    CHECK(bold_answer->advance == bold_omega.advance);  // bold won
+
+    // Equal priorities keep addition order: bold added first answers.
+    Font tied = ab_font();
+    REQUIRE(font_add_face(tied, kBoldPath, 0).has_value());
+    REQUIRE(font_add_face(tied, kMonoPath, 0).has_value());
+    CHECK(font_request_text(tied, kOmega) == 1u);
+    CHECK(font_bake_pending(tied, 8u) == 1u);
+    const Font::Glyph* tie_answer = tied.glyph(0x03A9);
+    REQUIRE(tie_answer != nullptr);
+    CHECK(tie_answer->advance == bold_omega.advance);
+}
+
+TEST_CASE("font_request_text marks only what a stacked face carries") {
+    using namespace ws::ui::r2d;
+    Font font = ab_font();
+    // No faces stacked: nothing can become pending, whatever the text.
+    CHECK(font_request_text(font, "h\xC3\xA9llo \xE4\xB8\x96") == 0u);
+
+    const font::FaceBake segoe = font::load_face(kDefaultTestFontPath, 24.0f);
+    if (!segoe.ok) {
+        MESSAGE("segoeui.ttf not present - face checks skipped");
+        return;
+    }
+    // The fixture's split: Segoe UI carries e-acute but not the Han
+    // codepoint; YaHei (face 0 of the collection) carries the Han one.
+    REQUIRE(segoe.carries(0x00E9));
+    REQUIRE_FALSE(segoe.carries(0x4E16));
+    REQUIRE(font_add_face(font, kDefaultTestFontPath, 0).has_value());
+    CHECK(font_request_text(font, "h\xC3\xA9llo \xE4\xB8\x96") == 1u);
+    // Idempotent: the queue holds e-acute once, the second request marks
+    // nothing, and nothing else in the string is past the inline bake.
+    CHECK(font_request_text(font, "h\xC3\xA9llo \xE4\xB8\x96") == 0u);
+
+    // Before any bake, both out-of-bake codepoints still share the ONE
+    // fallback slot (ab_font's zeroed one).
+    CHECK(font.glyph(0x00E9) == font.glyph(0x10FF00));
+
+    // A second face - added AFTER the request - answers what the first
+    // could not: the request must be made again.
+    REQUIRE(font_add_face(font, "C:/Windows/Fonts/msyh.ttc", 1).has_value());
+    CHECK(font_request_text(font, "\xE4\xB8\x96") == 1u);
+    CHECK(font_bake_pending(font, 8u) == 2u);  // e-acute + the Han codepoint
+
+    // Baked: each is its OWN glyph now, no longer the shared fallback.
+    const Font::Glyph* e_acute = font.glyph(0x00E9);
+    REQUIRE(e_acute != nullptr);
+    CHECK(e_acute != font.glyph(0x10FF00));
+    CHECK(e_acute->advance > 0.0f);
+    CHECK(font.measure_text("\xC3\xA9") == e_acute->advance);
+    // Nothing carries a Private Use codepoint: it stays the fallback box.
+    CHECK(font.glyph(0x0F0000) == font.glyph(0x10FF00));
+}
+
+TEST_CASE("font_bake_pending honors the cap and drains the queue") {
+    using namespace ws::ui::r2d;
+    Font font = ab_font();
+    REQUIRE(font_add_face(font, kDefaultTestFontPath, 0).has_value());
+    // Four distinct codepoints past the inline bake: e-acute, o-umlaut,
+    // u-umlaut, a-ogonek.
+    constexpr const char* kText =
+        "\xC3\xA9" "\xC3\xB6" "\xC3\xBC" "\xC4\x85";
+    CHECK(font_request_text(font, kText) == 4u);
+    // The zero cap bakes nothing but disturbs nothing either.
+    CHECK(font_bake_pending(font, 0u) == 0u);
+    // ab_font's fallback is zeroed: before the bake the extras measure 0.
+    CHECK(font.measure_text(kText) == 0.0f);
+
+    CHECK(font_bake_pending(font, 2u) == 2u);
+    CHECK(font_bake_pending(font, 2u) == 2u);
+    CHECK(font_bake_pending(font, 2u) == 0u);  // drained
+
+    // After the bake the same text measures its real advance sum, in
+    // decode order - the first two baked first, order never mattered to
+    // the sum, only to which batch landed when.
+    const float sum = font.glyph(0x00E9)->advance + font.glyph(0x00F6)->advance +
+                      font.glyph(0x00FC)->advance + font.glyph(0x0105)->advance;
+    CHECK(sum > 0.0f);
+    CHECK(font.measure_text(kText) == doctest::Approx(sum));
+    // Headless: sprites stay page 0 - the quad drops, the advance lives.
+    CHECK(font.glyph(0x00E9)->sprite.page == 0u);
+    // Re-requesting the baked text marks nothing more.
+    CHECK(font_request_text(font, kText) == 0u);
+}
+
+TEST_CASE("font_add_face refuses unbaked fonts and unreadable files") {
+    using namespace ws::ui::r2d;
+    // A font that was never baked (a failed load, the headless fallback)
+    // cannot grow: its stack would have no size or baseline to sit on.
+    Font unbaked;
+    const ws::core::Status refused =
+        font_add_face(unbaked, kDefaultTestFontPath, 0);
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().code ==
+          static_cast<std::int32_t>(FontError::font_empty));
+    CHECK(refused.error().category == std::string_view{"ui"});
+    CHECK_FALSE(refused.error().message.empty());
+    CHECK_FALSE(describe(FontError::font_empty).empty());
+
+    // A baked font, a file that is not there - and no path at all.
+    Font font = ab_font();
+    const ws::core::Status missing =
+        font_add_face(font, "no-such-font.ttf", 0);
+    REQUIRE_FALSE(missing.has_value());
+    CHECK(missing.error().code ==
+          static_cast<std::int32_t>(FontError::face_load_failed));
+    const ws::core::Status null_path = font_add_face(font, nullptr, 0);
+    REQUIRE_FALSE(null_path.has_value());
+    CHECK(null_path.error().code ==
+          static_cast<std::int32_t>(FontError::face_load_failed));
+
+    // The refusals left the stack untouched: nobody carries e-acute, so a
+    // request still marks nothing - and the queue stays empty.
+    CHECK(font.extras_state()->faces.empty());
+    CHECK(font_request_text(font, "\xC3\xA9") == 0u);
+}
+
+TEST_CASE("Font copies share the growing half - a copy is the same font") {
+    using namespace ws::ui::r2d;
+    const font::FaceBake segoe = font::load_face(kDefaultTestFontPath, 24.0f);
+    if (!segoe.ok) {
+        MESSAGE("segoeui.ttf not present - copy-share checks skipped");
+        return;
+    }
+    Font font = ab_font();
+    Font copy = font;  // a copy IS the same font
+    CHECK(copy.extras_state() == font.extras_state());
+
+    // A face added through the COPY is a face of the ORIGINAL...
+    REQUIRE(font_add_face(copy, kDefaultTestFontPath, 0).has_value());
+    // ...a request made through the ORIGINAL marks the codepoint...
+    CHECK(font_request_text(font, "\xC3\xA9") == 1u);
+    // ...and a bake driven by the COPY lands it for both.
+    CHECK(font_bake_pending(copy, 8u) == 1u);
+
+    const Font::Glyph* via_original = font.glyph(0x00E9);
+    REQUIRE(via_original != nullptr);
+    CHECK(via_original->advance > 0.0f);
+    // One shared entry: both handles hand out the same glyph pointer (the
+    // inline glyphs_ array is per-object data - only the growing half is
+    // shared, and past-126 codepoints live only there).
+    CHECK(copy.glyph(0x00E9) == via_original);
+    CHECK(font.glyph(0x00E9) == copy.glyph(0x00E9));
+}
+
+TEST_CASE("a lazy bake round-trips real segoeui metrics headless") {
+    using namespace ws::ui::r2d;
+    const font::BakedFont baked = font::bake_file(kDefaultTestFontPath, 24.0f);
+    if (!baked.ok) {
+        MESSAGE("segoeui.ttf not present - real-bake smoke skipped");
+        return;
+    }
+    // Assemble the public Font exactly as Renderer2D::load_font does,
+    // minus the pack: headless there are no pages, so no sprites either.
+    std::vector<Font::Glyph> glyphs(baked.glyphs.size());
+    for (std::size_t i = 0; i < baked.glyphs.size(); ++i) {
+        const font::BakedGlyph& g = baked.glyphs[i];
+        glyphs[i].advance = g.advance;
+        glyphs[i].offset_x = g.offset_x;
+        glyphs[i].offset_y = g.offset_y;
+        glyphs[i].width = static_cast<float>(g.w);
+        glyphs[i].height = static_cast<float>(g.h);
+    }
+    Font font(baked.pixel_height, baked.line_height, glyphs.data(),
+              static_cast<std::uint32_t>(glyphs.size()));
+    // The baseline handoff load_font performs for the growing half.
+    font.extras_state()->baseline_y = baked.ascent_px;
+    font.extras_state()->baseline_known = true;
+
+    const font::FaceBake face = font::load_face(kDefaultTestFontPath,
+                                                baked.pixel_height);
+    REQUIRE(face.ok);
+    REQUIRE(font_add_face(font, kDefaultTestFontPath, 0).has_value());
+    // Three Greek codepoints past the inline bake: omega, capital sigma,
+    // gamma. Each lazy bake must land exactly where the same face's own
+    // math says, folded onto the shared baseline.
+    constexpr const char* kGreek = "\xCE\xA9" "\xCE\xA3" "\xCE\xB3";
+    CHECK(font_request_text(font, kGreek) == 3u);
+    CHECK(font_bake_pending(font, 8u) == 3u);
+
+    const std::uint32_t cps[3] = {0x03A9, 0x03A3, 0x03B3};
+    for (const std::uint32_t cp : cps) {
+        const Font::Glyph* lazy = font.glyph(cp);
+        REQUIRE(lazy != nullptr);
+        // The same face baked directly, baseline 0: identical metrics
+        // except offset_y, which sits the shared baseline's distance lower.
+        const font::BakedGlyph direct = font::bake_face_glyph(face, cp, 0.0f);
+        CHECK(lazy->advance == doctest::Approx(direct.advance));
+        CHECK(lazy->offset_x == doctest::Approx(direct.offset_x));
+        CHECK(lazy->offset_y ==
+              doctest::Approx(baked.ascent_px + direct.offset_y));
+        CHECK(lazy->width == doctest::Approx(static_cast<float>(direct.w)));
+        CHECK(lazy->height == doctest::Approx(static_cast<float>(direct.h)));
+        // Headless: the sprite half waits - the quad drops, the metrics
+        // are already honest.
+        CHECK(lazy->sprite.page == 0u);
+    }
+}
+
 TEST_CASE("draw_text records one contiguous glyph run on the font's own page") {
     using namespace ws::ui::r2d;
     Renderer2D r;

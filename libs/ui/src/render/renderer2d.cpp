@@ -679,6 +679,22 @@ void Renderer2D::register_atlas_page(Texture page,
     page_of_texture_[slot] = index;
 }
 
+Texture Renderer2D::upload_atlas_page(const void* pixels, std::uint32_t size,
+                                      std::vector<atlas::Rect> rects) {
+    // Headless/pre-init or a failed staging: Texture{} (id 0), and the
+    // caller's degraded path takes over - load_atlas hands white sprites,
+    // the lazy bake keeps page-0 glyph quads that drop but still advance.
+    if (device_ == VK_NULL_HANDLE) {
+        return Texture{};
+    }
+    Texture texture{};
+    if (!upload_texture(pixels, size, size, &texture)) {
+        return Texture{};
+    }
+    register_atlas_page(texture, std::move(rects));
+    return texture;
+}
+
 const atlas::Rect* Renderer2D::find_sprite_rect(const Sprite& sprite) const {
     // O(1): the dense map carries SLOT -> atlas_pages_ index. This runs
     // once per sprite and once per glyph in draw_text, so it must not
@@ -875,12 +891,9 @@ std::vector<Sprite> Renderer2D::load_atlas(
     std::vector<std::uint32_t> page_ids(packed.pages.size(), 0);
     for (std::size_t p = 0; p < packed.pages.size(); ++p) {
         atlas::Page& page = packed.pages[p];
-        Texture texture{};
-        if (upload_texture(page.pixels.data(), page.size, page.size,
-                           &texture)) {
-            register_atlas_page(texture, std::move(page.rects));
-            page_ids[p] = texture.id;
-        }
+        const Texture texture = upload_atlas_page(
+            page.pixels.data(), page.size, std::move(page.rects));
+        page_ids[p] = texture.id;
     }
     for (std::size_t s = 0; s < count; ++s) {
         const atlas::Placement& place = packed.assigned[s];
@@ -941,12 +954,9 @@ Font Renderer2D::load_font(const char* path, float pixel_height) {
         std::vector<std::uint32_t> page_ids(packed.pages.size(), 0);
         for (std::size_t p = 0; p < packed.pages.size(); ++p) {
             atlas::Page& page = packed.pages[p];
-            Texture texture{};
-            if (upload_texture(page.pixels.data(), page.size, page.size,
-                               &texture)) {
-                register_atlas_page(texture, std::move(page.rects));
-                page_ids[p] = texture.id;
-            }
+            const Texture texture = upload_atlas_page(
+                page.pixels.data(), page.size, std::move(page.rects));
+            page_ids[p] = texture.id;
         }
         for (std::size_t s = 0; s < baked_index.size(); ++s) {
             const atlas::Placement& place = packed.assigned[s];
@@ -956,8 +966,14 @@ Font Renderer2D::load_font(const char* path, float pixel_height) {
             }
         }
     }
-    return Font(baked.pixel_height, baked.line_height, glyphs.data(),
-                static_cast<std::uint32_t>(glyphs.size()));
+    Font font(baked.pixel_height, baked.line_height, glyphs.data(),
+              static_cast<std::uint32_t>(glyphs.size()));
+    // The growing half's baseline comes from the primary bake's own
+    // ascent - the number a stacked face's glyphs fold against, so its
+    // lazy bakes sit on the same baseline the inline glyphs drew on.
+    font.extras_state()->baseline_y = baked.ascent_px;
+    font.extras_state()->baseline_known = true;
+    return font;
 }
 
 // --- public free functions ----------------------------------------------------
@@ -1163,6 +1179,99 @@ Font load_font(const char* path, float pixel_height) {
     }
     warn_no_app("load_font");
     return {};
+}
+
+std::uint32_t font_bake_pending(Font& font, std::uint32_t batch_cap) {
+    // Deliberately NOT the warn_no_app shape: baking fills the font, and
+    // the metrics half is real work without a renderer (tests, and any
+    // pre-first-frame call) - only the page upload waits for one, by
+    // leaving the sprites at page 0 (draw_text drops the quad, the
+    // advance stays honest). The public header spells this contract.
+    font::FontExtra* extra = font.extras_state();
+    if (extra->pending.empty() || batch_cap == 0u) {
+        return 0u;
+    }
+    const std::size_t take =
+        std::min<std::size_t>(batch_cap, extra->pending.size());
+
+    // Bake the batch (pure CPU), keeping only meaningful glyphs: one with
+    // a bitmap or a real advance. Anything else - a face that stopped
+    // carrying its pending codepoint, a degenerate raster - leaves the
+    // queue without an entry, and the fallback box keeps answering it.
+    std::vector<std::uint32_t> cps;
+    std::vector<font::BakedGlyph> baked;
+    cps.reserve(take);
+    baked.reserve(take);
+    for (std::size_t i = 0; i < take; ++i) {
+        const std::uint32_t cp = extra->pending[i];
+        const font::FaceBake* face = extra->resolve(cp);
+        if (face == nullptr) {
+            continue;
+        }
+        font::BakedGlyph g =
+            font::bake_face_glyph(*face, cp, extra->baseline_y);
+        if (g.w > 0u || g.advance > 0.0f) {
+            cps.push_back(cp);
+            baked.push_back(std::move(g));
+        }
+    }
+    // The whole consumed prefix leaves the queue, baked or dropped.
+    for (std::size_t i = 0; i < take; ++i) {
+        extra->pending_set.erase(extra->pending[i]);
+    }
+    extra->pending.erase(
+        extra->pending.begin(),
+        extra->pending.begin() + static_cast<std::ptrdiff_t>(take));
+    if (cps.empty()) {
+        return 0u;
+    }
+
+    // Metrics first, sprites patch in after packing - load_font's shape.
+    // Only glyphs WITH bitmaps feed the packer; blanks (the space-likes)
+    // advance without pages.
+    std::vector<Font::Glyph> glyphs(cps.size());
+    std::vector<atlas::SourceImage> sources;
+    std::vector<std::size_t> baked_index;  // sources[i] -> cps/baked slot
+    sources.reserve(cps.size());
+    for (std::size_t i = 0; i < baked.size(); ++i) {
+        const font::BakedGlyph& g = baked[i];
+        Font::Glyph& out = glyphs[i];
+        out.advance = g.advance;
+        out.offset_x = g.offset_x;
+        out.offset_y = g.offset_y;
+        out.width = static_cast<float>(g.w);
+        out.height = static_cast<float>(g.h);
+        if (g.w > 0u && g.h > 0u) {
+            sources.push_back(atlas::SourceImage{g.rgba.data(), g.w, g.h});
+            baked_index.push_back(i);
+        }
+    }
+
+    if (g_active != nullptr && !sources.empty()) {
+        // One pack for the whole batch, fresh pages per pack - atlas::pack
+        // is one-shot, so each batch grows the font by its own page set.
+        // Headless skips the pack entirely: sprites were only ever the
+        // upload's business, and the metrics are already in place.
+        atlas::Packing packed = atlas::pack(sources.data(), sources.size());
+        std::vector<std::uint32_t> page_ids(packed.pages.size(), 0u);
+        for (std::size_t p = 0; p < packed.pages.size(); ++p) {
+            atlas::Page& page = packed.pages[p];
+            const Texture texture = g_active->upload_atlas_page(
+                page.pixels.data(), page.size, std::move(page.rects));
+            page_ids[p] = texture.id;
+        }
+        for (std::size_t s = 0; s < baked_index.size(); ++s) {
+            const atlas::Placement& place = packed.assigned[s];
+            if (place.page < page_ids.size() && page_ids[place.page] != 0u) {
+                glyphs[baked_index[s]].sprite =
+                    Sprite{page_ids[place.page], place.index};
+            }
+        }
+    }
+    for (std::size_t i = 0; i < cps.size(); ++i) {
+        extra->glyphs.insert_or_assign(cps[i], glyphs[i]);
+    }
+    return static_cast<std::uint32_t>(cps.size());
 }
 
 float draw_text(float x, float y, const char* utf8_text, const Font& font,

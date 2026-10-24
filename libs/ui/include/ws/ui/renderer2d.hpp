@@ -3,7 +3,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
+
+#include <ws/core/result.hpp>  // ws::core::Status (font_add_face) - a
+                               // workspace header, not a third-party one
 
 namespace ws::ui::r2d {
 
@@ -256,6 +263,23 @@ FrameSize sprite_size(Sprite sprite);
 // box and advances it (a font built with fewer glyphs keeps the
 // fallback zeroed - the old skip), and there is no kerning: a line
 // measures as its plain advance sum.
+//
+// The growing font: a Font can STACK more typeface files under its
+// primary bake (font_add_face) and bake their glyphs LAZILY -
+// font_request_text marks a string's out-of-bake codepoints pending,
+// font_bake_pending rasterizes a batch per frame into FRESH pages (pack
+// is one-shot, so each batch is its own page set). The inline 95 stay
+// the fast path; a codepoint past 126 resolves through the lazily-baked
+// table before the fallback box, so draw_text, measure_text and every
+// widget survive unchanged. One font stays ONE size - a runtime size
+// change is a new font (its lazy glyphs re-request on first use). The
+// stack and the table are the font's shared out-of-line half: a copy of
+// a Font IS the same font - it draws what the original bakes, and a
+// face added to either shows in both. Independent fonts come from
+// load_font, never from a copy.
+namespace font {
+struct FontExtra;  // internal (src/text/font.h): the stack + the lazy table
+}
 class Font {
 public:
     // One baked glyph. `sprite` is where its bitmap landed on the font's
@@ -272,7 +296,10 @@ public:
         float height = 0.0f;
     };
 
-    Font() = default;
+    // Both constructors eagerly allocate the shared out-of-line half (the
+    // copy contract above). Copies and moves stay implicit - a copy
+    // shares, a move hands over, and neither ever deep-copies.
+    Font();
 
     // Fill constructor (load_font's assembly step, and tests building
     // synthetic fonts): the glyphs for codepoints 32..126, in order,
@@ -290,10 +317,11 @@ public:
     float line_height() const { return line_height_; }
 
     // The glyph for a codepoint: null below 32 (the controls), the
-    // fallback slot for anything past 126, and the bake's own entry in
-    // between - where a blank glyph (advance 0, no sprite) is returned
-    // as-is and draws and advances nothing, the same skip by data (a
-    // zeroed fallback is that skip again).
+    // bake's own entry for 32..126, and past 126 the lazily-baked table
+    // first (a baked entry wins, even headless-metric-only) then the
+    // fallback box - where a blank glyph (advance 0, no sprite) is
+    // returned as-is and draws and advances nothing, the same skip by
+    // data (a zeroed fallback is that skip again).
     const Glyph* glyph(std::uint32_t codepoint) const;
 
     // The width draw_text advances for utf8_text: the glyphs' advance
@@ -301,15 +329,24 @@ public:
     // draw_text returns exactly this value.
     float measure_text(const char* utf8_text) const;
 
+    // Internal (src/): the shared growing half behind glyph() and the
+    // font_* free functions. The type is internal, so app code can
+    // neither name it nor dereference this - it has no src/ include
+    // path.
+    font::FontExtra* extras_state() const noexcept { return extras_.get(); }
+
 private:
     static constexpr std::uint32_t kFirstBaked = 32;
     static constexpr std::uint32_t kBakedCount = 95;  // ASCII 32..126
     // Slot kBakedCount, one past the bake: the fallback box every
-    // codepoint outside 32..126 resolves to.
+    // codepoint outside 32..126 resolves to (the lazy table first).
     static constexpr std::uint32_t kFallbackGlyph = kBakedCount;
     Glyph glyphs_[kFallbackGlyph + 1]{};
     float pixel_height_ = 0.0f;
     float line_height_ = 0.0f;
+    // Never null (every constructor allocates it): the face stack, the
+    // lazily-baked table, the pending queue - see font.h's FontExtra.
+    std::shared_ptr<font::FontExtra> extras_;
 };
 
 // Rasterizes the ttf/otf at `path` at one pixel height and returns the
@@ -320,14 +357,84 @@ private:
 // font, no GPU context - logs once and returns an empty Font.
 Font load_font(const char* path, float pixel_height);
 
+// The face stack's failure codes (font_add_face): every failure is a
+// ws::core::Error with category "ui" and one of these as its code.
+// Append-only: never renumber, only add.
+enum class FontError : std::int32_t {
+    font_empty = 1,        // faces stack on a baked font - this one was not
+    face_load_failed = 2,  // the file is missing, unreadable or not a font
+};
+
+// One-line description per code (the theme-json shape).
+[[nodiscard]] constexpr std::string_view describe(FontError code) noexcept {
+    switch (code) {
+        case FontError::font_empty: return "the font was never baked";
+        case FontError::face_load_failed:
+            return "the face file could not be loaded";
+    }
+    return "unknown font error";
+}
+
+[[nodiscard]] inline ws::core::Error make_font_error(FontError code,
+                                                     std::string message) {
+    return ws::core::make_error(static_cast<std::int32_t>(code), "ui",
+                                std::move(message));
+}
+
+// unexpected<Error> that converts into any Result<T> (the jobs shape):
+//   return fail(FontError::font_empty, "font_add_face: no path");
+[[nodiscard]] inline ws::core::unexpected<ws::core::Error> fail(
+    FontError code, std::string message = {}) {
+    if (message.empty()) {
+        message = std::string{describe(code)};
+    }
+    return ws::core::unexpected<ws::core::Error>(
+        make_font_error(code, std::move(message)));
+}
+
+// Stacks one more typeface file onto the font, as a fallback for
+// codepoints past the inline bake. Resolution is per codepoint, inside
+// the one font: lower `priority` value answers first, ties keep addition
+// order; a face bakes at the font's own pixel height (fonts are one
+// size), and its glyphs sit on the font's shared baseline. The same file
+// may stack twice at different priorities. Fails - FontError - on a
+// font that was never baked, and on a missing/invalid file; a failure
+// leaves the stack untouched. Owner thread, like every Font call; the
+// path is the caller's to resolve, exactly like load_font's.
+ws::core::Status font_add_face(Font& font, const char* path, int priority);
+
+// Marks every codepoint of the text that nobody can draw YET - past the
+// inline bake, not in the lazy table, not already queued, and carried by
+// some stacked face - as pending for font_bake_pending. Returns how many
+// were newly marked; re-requesting the same text marks nothing more.
+// A request made BEFORE a face was added found nobody carrying, so
+// re-request after font_add_face - marking is cheap and idempotent, and
+// the natural cadence is once per content change.
+std::uint32_t font_request_text(Font& font, const char* utf8_text);
+
+// Bakes up to batch_cap pending glyphs (request order) into fresh atlas
+// pages - one upload per page - and returns how many landed. The rest
+// stay pending for the next call: the amortized no-hitch contract, so
+// the caller's cadence is once per frame with a cap that fits a frame.
+// Headless (no live renderer) it still bakes the metrics - sprites stay
+// Sprite{} and draw_text drops the quad but keeps the advance - so
+// layout is testable before the first frame, and a bake never warns:
+// filling the font IS the job, the page upload is the half that waits.
+// A pending codepoint whose face stopped carrying it (or that baked to
+// nothing at all) quietly leaves the queue without an entry - the
+// fallback box keeps answering it. Owner thread, like every Font call.
+std::uint32_t font_bake_pending(Font& font, std::uint32_t batch_cap = 64u);
+
 // Draws one line of UTF-8 text, one sprite-quad per visible glyph.
 // (x, y) is the LINE BOX's top-left - not the baseline: widgets center
 // the box on their rows, and glyph offsets already reach down to the
 // baseline from y. Returns the pen's total advance - exactly
 // measure_text(utf8_text), by construction. The space and other blanks
 // advance without drawing; codepoints past the bake draw the fallback
-// box and advance it (or, on a font whose fallback is zeroed, skip
-// entirely); an empty font draws nothing and returns 0. On an
+// box and advance it - until their lazy bake lands (font_bake_pending),
+// after which they draw like any baked glyph - or, on a font whose
+// fallback is zeroed, skip entirely; an empty font draws nothing and
+// returns 0. On an
 // axis-aligned, zoom-1 2D camera each glyph quad rounds to whole
 // pixels - the pen keeps its exact fractional advance - while rotated
 // or zoomed cameras keep fractional positions, so camera motion stays

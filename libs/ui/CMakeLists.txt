@@ -75,8 +75,10 @@ if(TARGET test_ui)
   # reaches apps).
   target_include_directories(test_ui PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   # renderer2d.h (internal) declares the Vulkan half: the test needs those
-  # headers to compile it, though it never drives Vulkan itself.
-  target_link_libraries(test_ui PRIVATE volk)
+  # headers to compile it, though it never drives Vulkan itself. stb is
+  # the same PRIVATE class: text/font.h (on the src/ include path since the
+  # growing font) declares stb_truetype, so the test needs its dir too.
+  target_link_libraries(test_ui PRIVATE volk stb)
 endif()
 
 # The stage-2 acceptance test: gui + its tests with NO Vulkan or GLFW on

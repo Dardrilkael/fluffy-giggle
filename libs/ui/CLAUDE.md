@@ -80,6 +80,12 @@ A bump-allocated double buffer. The app submits into the write queue, and the sh
     - **Chunked:** a 32-slot table per chunk.
 - **Atlases:** 2048² pages, shelf packing, 1px gutters. `Sprite{page, index}`. A failed image becomes `Sprite{}` (white).
 - **Fonts and text:** `load_font(path, pixel_height)` bakes ASCII 32..126 into the font's own atlas pages (never shared with sprites, by design). `draw_text` returns the advance (equals `Font::measure_text`). No kerning. Unknown codepoints draw a tofu box. Glyph origins round to whole pixels on an axis-aligned zoom-1 2D camera. `utf8_next` is forgiving (bad bytes become U+FFFD). Font path resolution is the caller's job.
+- **The growing font (stage 10):** a Font can stack more typeface files under its inline bake and rasterize their glyphs lazily — three owner-thread free functions in `r2d`:
+  - `font_add_face(font, path, priority)` appends a face to the font's internal stack. Resolution is per codepoint: lower `priority` answers first, ties keep addition order, the same file may stack twice. Fails `FontError::font_empty` on a never-baked font and `FontError::face_load_failed` on a missing/invalid file (category "ui", codes append-only); a failure leaves the stack untouched. A hand-built font (fill ctor) borrows its first added face's ascent as the shared baseline; `load_font` sets it from the primary bake's own ascent.
+  - `font_request_text(font, utf8)` marks the text's out-of-bake codepoints that some stacked face carries (not yet baked, not queued) as pending; returns how many were newly marked. Idempotent; **re-request after adding a face** — a request made before the face found nobody carrying.
+  - `font_bake_pending(font, batch_cap = 64)` bakes from the queue's front (request order) into **fresh atlas pages, one pack per batch** (`atlas::pack` is one-shot) and one texture upload per page. Headless it still fills the metrics — sprites stay `Sprite{}` and `draw_text` drops the quad but keeps the advance — and it never warns: filling the font is the job, only the upload half waits for a renderer. Blanks (no bitmap, no advance) leave the queue with no entry; the fallback box keeps answering them.
+  - **Copies share the growing half.** Every `Font` constructor eagerly allocates an internal `FontExtra` (`shared_ptr`); a copy IS the same font — a face added through either shows in both, and lazily-baked glyph pointers are identical. One font stays one size; a size change is a new font.
+  - `FaceBake` (internal, `src/text/font.h`) is move-only: its `stbtt_fontinfo` points into its own `bytes` vector, so a copy would strand those pointers at the donor's freed buffer — copy operations are deleted; `std::move` on a `const FaceBake` is a compile error, not silent corruption.
 - **Rounded quads:** an analytic SDF in `batch.frag`. The radius rides the `tex_index` channel as a negative value (`-radius/w`). It takes no texture slot, and the radius clamps to half the shorter side.
 - **3D:** `begin(Camera3D)` opens a perspective block. `draw_quad(x,y,z,...)` and `draw_sprite(x,y,z,...)` are center-anchored billboards. `draw_line` with z is a world-thickness ribbon. Depth is LEQUAL + write. There is no OIT, no 3D text and no 3D rounded quads. A 3D call inside a 2D block warns and records nothing.
 - **Layering in one render pass:** r2d first, then ImGui draw data, then the command queue.
@@ -221,7 +227,7 @@ ctest --preset debug -R ui
 - No popup Escape-close or auto-flip. The combo handles its own flip.
 - The popup padding rim passes input through.
 - No OIT, and no 3D text or rounded quads.
-- Fonts have no kerning and are never rescaled at runtime. Font loading uses system font paths supplied by the caller, which is Windows-only in practice today.
+- Fonts have no kerning and are never rescaled at runtime — a size change is a new font (its lazy glyphs re-request on first use). The face stack grows a font past ASCII without a re-bake, but the primary path stays `load_font`. Font paths are supplied by the caller, which is Windows-only in practice today.
 - The Android soft-keyboard IME is unsupported.
 - No directional or gamepad focus nav yet. The focusable list is the seam for it.
 - Handle generation wraps after 4096 reuses of one slot. The bindless table is capped at 1024 slots.
