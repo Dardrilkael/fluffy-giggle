@@ -1880,3 +1880,59 @@ TEST_CASE("custom looks paint over the combo behavior") {
     CHECK(ws::ui::gui_test::stub.quads == 2);
     CHECK(ws::ui::gui_test::stub.rounded == 0);
 }
+
+TEST_CASE("the menu hover engine clocks rest and ripens on its delays") {
+    using ws::ui::gui::MenuHoverAction;
+    using ws::ui::gui::MenuHoverState;
+    using ws::ui::gui::menu_hover_step;
+
+    // Binary-exact dt and delays, so the ripening frame is the third
+    // step, not a float hair off it.
+    MenuHoverState hover;
+    CHECK(menu_hover_step(hover, 0, 0.25f, 0.75f, 1.0f, true, false) ==
+          MenuHoverAction::none);
+    CHECK(menu_hover_step(hover, 0, 0.25f, 0.75f, 1.0f, true, false) ==
+          MenuHoverAction::none);
+    CHECK(hover.item == 0);
+    CHECK(hover.rest == 0.5f);
+
+    // The rest crosses the submenu delay: the child ripens - and it
+    // keeps ripening every frame the pointer stays, the caller's own
+    // state applying it once (the chain's open levels).
+    CHECK(menu_hover_step(hover, 0, 0.25f, 0.75f, 1.0f, true, false) ==
+          MenuHoverAction::open_child);
+    CHECK(hover.rest == 0.75f);
+    CHECK(menu_hover_step(hover, 0, 0.25f, 0.75f, 1.0f, true, false) ==
+          MenuHoverAction::open_child);
+
+    // A move restarts the clock: the ripe row's answer goes quiet, and
+    // a plain row never ripens anything however long it rests.
+    CHECK(menu_hover_step(hover, 1, 0.25f, 0.75f, 1.0f, true, false) ==
+          MenuHoverAction::none);
+    CHECK(hover.item == 1);
+    CHECK(hover.rest == 0.25f);
+    CHECK(menu_hover_step(hover, 1, 2.0f, 0.75f, 1.0f, false, false) ==
+          MenuHoverAction::none);
+    CHECK(hover.rest == 2.25f);
+
+    // The dead row's tooltip: its own delay, and a rest with no reason
+    // to show answers nothing at all.
+    MenuHoverState dead;
+    CHECK(menu_hover_step(dead, 2, 0.25f, 0.75f, 0.75f, false, true) ==
+          MenuHoverAction::none);
+    CHECK(menu_hover_step(dead, 2, 0.25f, 0.75f, 0.75f, false, true) ==
+          MenuHoverAction::none);
+    CHECK(menu_hover_step(dead, 2, 0.25f, 0.75f, 0.75f, false, true) ==
+          MenuHoverAction::show_tooltip);
+    CHECK(menu_hover_step(dead, 2, 10.0f, 0.75f, 0.75f, false, false) ==
+          MenuHoverAction::none);
+
+    // The clear: the pointer left every row - the caller's
+    // assignment, the state's own zero spelling. The next rest starts
+    // over: had the clock survived, 10.25s would ripen the tooltip.
+    dead = {};
+    CHECK(dead.item == -1);
+    CHECK(dead.rest == 0.0f);
+    CHECK(menu_hover_step(dead, 2, 0.25f, 0.75f, 0.75f, false, true) ==
+          MenuHoverAction::none);
+}

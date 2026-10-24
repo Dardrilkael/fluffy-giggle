@@ -4,7 +4,9 @@
 // state per root. Menus are data-driven (the caller re-describes its
 // arrays every frame); what persists - the open chain, the highlight,
 // the rest clocks, the context open point - lives in one MenuState
-// under the caller's root label.
+// under the caller's root label. The rest clock is the public hover
+// engine (menu_hover_step), run by the chain on the frame's injected
+// dt.
 
 #include "widgets_detail.hpp"
 
@@ -30,20 +32,19 @@ namespace {
 
 // One menu ROOT's persistent half: the open chain (level 0 mirrors the
 // caller's flag/index), which row of the level above opened each level,
-// the keyboard/hover highlight per level, the mouse-rest row and its
-// clock (the submenu delay and the disabled tooltip both run on it),
-// and each level's window as laid - the outside-press test exempts a
-// press inside any still-open level's stored bounds. The context root
-// adds its open point and the long-press watcher; the bar adds
-// root_index (which MenuDesc is open - the event's .menu).
+// the keyboard/hover highlight per level, the hover engine's per-level
+// state (the submenu delay and the disabled tooltip both run on its
+// rest clock), and each level's window as laid - the outside-press test
+// exempts a press inside any still-open level's stored bounds. The
+// context root adds its open point and the long-press watcher; the bar
+// adds root_index (which MenuDesc is open - the event's .menu).
 struct MenuState {
     static constexpr int kDepth = 4;  // the root plus 3 nested submenus
 
     bool  open[kDepth]{};       // THE esc claim keys, one address per level
     int   parent[kDepth];       // the row in the level above that opened level L
     int   highlight[kDepth];   // the keyboard/hover aim (-1 none)
-    int   rest_item[kDepth];    // the row the pointer rests on (-1 none)
-    float rest[kDepth]{};       // seconds of rest on rest_item
+    MenuHoverState hover[kDepth];  // the rest engine's row and clock
     Rect  bounds[kDepth]{};     // each level's window, stored as laid
 
     float ctx_x = 0.0f;         // the context menu's open point
@@ -58,7 +59,6 @@ struct MenuState {
         for (int l = 0; l < kDepth; ++l) {
             parent[l] = -1;
             highlight[l] = -1;
-            rest_item[l] = -1;
         }
     }
 };
@@ -79,8 +79,7 @@ void close_chain_from(MenuState& state, int level) {
         state.open[l] = false;
         state.parent[l] = -1;
         state.highlight[l] = -1;
-        state.rest_item[l] = -1;
-        state.rest[l] = 0.0f;
+        state.hover[l] = {};
         state.bounds[l] = {};
     }
 }
@@ -271,8 +270,7 @@ bool open_child_level(MenuState& state, int l, int i) {
     state.open[l + 1] = true;
     state.parent[l + 1] = i;
     state.highlight[l + 1] = -1;
-    state.rest_item[l + 1] = -1;
-    state.rest[l + 1] = 0.0f;
+    state.hover[l + 1] = {};
     return true;
 }
 
@@ -536,14 +534,18 @@ void lay_menu_chain(GuiContext& gui, LayoutCursor& layout,
             const bool is_parent =
                 item.submenu != nullptr && item.submenu_count > 0;
 
-            // The pointer's aim: the rest row follows the finger,
-            // its clock resetting on a move, and a live row under it
+            // The pointer's aim: the hover engine clocks the rest on
+            // this row (a move to a new row restarts it) and answers
+            // what the rest ripened; a live row under the pointer
             // takes the highlight (the keyboard's aim follows too).
+            MenuHoverAction ripe = MenuHoverAction::none;
             if (pointer_in) {
-                if (state.rest_item[l] != i) {
-                    state.rest_item[l] = i;
-                    state.rest[l] = 0.0f;
-                }
+                ripe = menu_hover_step(state.hover[l], i, in.dt_seconds,
+                                       theme.menu_open_delay,
+                                       theme.tooltip_delay,
+                                       is_parent && !item.disabled,
+                                       item.disabled &&
+                                           item.disabled_reason != nullptr);
                 if (!item.disabled) {
                     state.highlight[l] = i;
                 }
@@ -555,14 +557,11 @@ void lay_menu_chain(GuiContext& gui, LayoutCursor& layout,
                 state.open[l + 1] && state.parent[l + 1] != i) {
                 close_chain_from(state, l + 1);
             }
-            // The rest clock runs while the pointer stays on this row.
-            if (pointer_in) {
-                state.rest[l] += in.dt_seconds;
-            }
             // The submenu delay: a live parent, rested on, opens its
-            // child mid-loop - so it lays this same frame.
-            if (is_parent && !item.disabled && pointer_in &&
-                state.rest[l] >= theme.menu_open_delay &&
+            // child mid-loop - so it lays this same frame. The engine
+            // ripened it; the chain adds its own state to the apply -
+            // a child already open under THIS row stays untouched.
+            if (ripe == MenuHoverAction::open_child &&
                 !(l + 1 < MenuState::kDepth && state.open[l + 1] &&
                   state.parent[l + 1] == i)) {
                 open_child_level(state, l, i);
@@ -584,10 +583,10 @@ void lay_menu_chain(GuiContext& gui, LayoutCursor& layout,
                 }
             }
             // A disabled row never fires, but a rest on it still has
-            // something to say: the raw-clock tooltip (is_hot cannot
-            // fire on a dead row) carries the caller's reason.
-            if (item.disabled && item.disabled_reason != nullptr &&
-                pointer_in && state.rest[l] >= theme.tooltip_delay) {
+            // something to say: the raw-clock tooltip (the hover
+            // engine's ripe answer; is_hot cannot fire on a dead row)
+            // carries the caller's reason.
+            if (ripe == MenuHoverAction::show_tooltip) {
                 char reason_scratch[128];
                 const LabelFit reason_fit =
                     fit_text(item.disabled_reason, -1.0f, theme,
@@ -721,8 +720,7 @@ void lay_menu_chain(GuiContext& gui, LayoutCursor& layout,
         // row clears. The highlight PERSISTS - it is the keyboard's
         // aim too, and the next arrow press walks from it.
         if (!mouse_in_row) {
-            state.rest_item[l] = -1;
-            state.rest[l] = 0.0f;
+            state.hover[l] = {};
         }
         pop_overlay_panel(gui, layout);
         gui.ids().pop();  // the level's depth push
@@ -733,6 +731,30 @@ void lay_menu_chain(GuiContext& gui, LayoutCursor& layout,
 }
 
 }  // namespace
+
+// --- the hover engine -------------------------------------------------------
+//
+// The rest clock the chain runs per level: one step per frame on the
+// row the pointer rests on, dt injected from the frame. Pure state
+// math - the delay rules run headless, and a caller laying its own
+// menu-shaped popup runs the same rules (widgets.hpp holds the full
+// contract).
+MenuHoverAction menu_hover_step(MenuHoverState& hover, int item, float dt,
+                                float open_delay, float tooltip_delay,
+                                bool parent, bool tooltip) {
+    if (hover.item != item) {
+        hover.item = item;  // the pointer moved: the rest restarts
+        hover.rest = 0.0f;
+    }
+    hover.rest += dt;
+    if (parent && hover.rest >= open_delay) {
+        return MenuHoverAction::open_child;
+    }
+    if (tooltip && hover.rest >= tooltip_delay) {
+        return MenuHoverAction::show_tooltip;
+    }
+    return MenuHoverAction::none;
+}
 
 // --- the bar ------------------------------------------------------------
 //
@@ -870,8 +892,7 @@ MenuEvent menu_bar(GuiContext& gui, LayoutCursor& layout,
         if (state.root_index != open) {
             close_chain_from(state, 1);
             state.highlight[0] = -1;
-            state.rest_item[0] = -1;
-            state.rest[0] = 0.0f;
+            state.hover[0] = {};
             state.root_index = open;
         }
         // The strip opened or switched it this frame: the level-0
@@ -932,8 +953,7 @@ MenuEvent context_menu(GuiContext& gui, LayoutCursor& layout,
             open = true;
             close_chain_from(state, 1);  // the move drops the submenus
             state.highlight[0] = -1;     // and the old aim
-            state.rest_item[0] = -1;
-            state.rest[0] = 0.0f;
+            state.hover[0] = {};
             state.ctx_x = in.mouse_x;
             state.ctx_y = in.mouse_y;
             reopened = true;
@@ -979,8 +999,7 @@ MenuEvent context_menu(GuiContext& gui, LayoutCursor& layout,
                     open = true;
                     close_chain_from(state, 1);
                     state.highlight[0] = -1;
-                    state.rest_item[0] = -1;
-                    state.rest[0] = 0.0f;
+                    state.hover[0] = {};
                     state.ctx_x = watched->x;
                     state.ctx_y = watched->y;
                     // The finger is spent - canceled, so the lift that

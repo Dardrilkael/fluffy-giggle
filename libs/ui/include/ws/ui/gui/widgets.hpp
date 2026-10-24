@@ -912,6 +912,36 @@ struct MenuEvent {
     int menu = -1;
 };
 
+// One menu level's hover engine state: the row the pointer rests on
+// and the seconds it has continuously rested there. The menus keep
+// one per open-chain level; a caller laying its own menu-shaped
+// popup keeps its own.
+struct MenuHoverState {
+    int item = -1;      // the row the pointer rests on (-1: none)
+    float rest = 0.0f;  // seconds of continuous rest on that row
+};
+
+// What one step of the hover engine ripened.
+enum class MenuHoverAction {
+    none,           // resting, nothing ripe yet
+    open_child,     // a live parent rested past the submenu delay
+    show_tooltip,   // a disabled row rested past the tooltip delay
+};
+
+// The menus' hover engine, one step: name the row the pointer rests on
+// this frame and inject the frame's dt, and the clock follows - a move
+// to a new row restarts the rest. `parent` spells a live submenu row,
+// `tooltip` a disabled row carrying a reason (mutually exclusive, so at
+// most one answer fires); the delays arrive as parameters so the engine
+// runs headless - the menu chain passes the theme's menu_open_delay
+// and tooltip_delay. The answer repeats every ripe frame: apply it
+// through your own state, the way the chain's open levels do, and
+// clear the state by assignment ({}) when the pointer leaves every
+// row.
+MenuHoverAction menu_hover_step(MenuHoverState& hover, int item, float dt,
+                                float open_delay, float tooltip_delay,
+                                bool parent, bool tooltip);
+
 // The menu bar: `menus` (count of them) laid as title rows flowing
 // left, `open` the caller's index of the open menu (-1 = none, where
 // the caller initializes it). The titles are focusable citizens - Tab
