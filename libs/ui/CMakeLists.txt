@@ -7,8 +7,10 @@ ws_add_library(ui DEPENDS ws::core ws::math ws::input ws::gfx ws::jobs)
 
 # The gui subset as its own archive - the stage-2 acceptance cut. It links
 # ws::core + ws::input (the frame snapshot it reads; itself core-only,
-# pure CPU) + ws::jobs (the job_progress bridge's backend; the same
-# purity class - pure std + core, no platform anywhere): no Vulkan,
+# pure CPU) + ws::jobs (the job_progress bridge's backend) + ws::settings
+# (theme_json's persistence: json, migrations and the FileSystem seam -
+# the jobs precedent, the reference lives in a public header). The same
+# purity class - pure std + core, no platform anywhere: no Vulkan,
 # GLFW, volk or vma target ever appears on its link line, because the
 # gui draws through the r2d free-function seam that
 # ws_ui's renderer TUs satisfy at the final link. Sources compile once
@@ -23,7 +25,7 @@ target_include_directories(ws_ui_gui
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_features(ws_ui_gui PUBLIC cxx_std_20)
 ws_set_warnings(ws_ui_gui)
-target_link_libraries(ws_ui_gui PUBLIC ws::core ws::input ws::jobs)
+target_link_libraries(ws_ui_gui PUBLIC ws::core ws::input ws::jobs ws::settings)
 target_link_libraries(ws_ui PRIVATE ws_ui_gui)
 
 # Platform + gui sources: exactly one windowing TU builds (the WindowHost

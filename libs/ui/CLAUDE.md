@@ -10,7 +10,7 @@ Condensed from the 1,339-line `libs/ui/CLAUDE.md`. Every rule, invariant and ext
 - **`RenderCommandQueue`:** the seam between app logic and GPU work.
 - **`widgets.hpp`:** the ImGui/ImPlot-backed wrapper.
 - **`r2d`:** the 2D renderer.
-- **`gui/`:** an immediate-mode widget set that draws through r2d; the job-row helpers bridge `ws::jobs` (the only workspace dep besides core/input, same purity class).
+- **`gui/`:** an immediate-mode widget set that draws through r2d; the job-row helpers bridge `ws::jobs` and the theme-json layer bridges `ws::settings` (both workspace deps of the same purity class as core/input — pure std, no platform).
 
 Since stage 3, the input family lives in `libs/input`, and the Vulkan device, swapchain, frame sync and VMA live in `libs/gfx`. `ui` holds a `gfx::Gpu` and a `gfx::Swapchain`; `app.cpp` is the only place their opaque handles are cast.
 
@@ -206,7 +206,7 @@ ctest --preset debug -R ui
 ```
 
 - `tests/test_ui.cpp` and `tests/test_ui_gui.cpp` are the two ui tests.
-- `test_ui_gui` is the gui acceptance target. It links `ws_ui_gui` (which needs only `ws::core` + `ws::input` + `ws::jobs`) with the recording r2d stub `tests/ui_gui_r2d_stub.cpp` and the real font bake. **No Vulkan, GLFW, volk or VMA may appear on its link line**; a gui that grows a renderer or platform dependency breaks that link.
+- `test_ui_gui` is the gui acceptance target. It links `ws_ui_gui` (which needs only `ws::core` + `ws::input` + `ws::jobs` + `ws::settings`) with the recording r2d stub `tests/ui_gui_r2d_stub.cpp` and the real font bake. **No Vulkan, GLFW, volk or VMA may appear on its link line**; a gui that grows a renderer or platform dependency breaks that link.
 - Input tests live in `libs/input/tests/test_input.cpp` (`ctest --preset debug -R input`).
 - Demo apps:
   - `apps/playground`: full composition demo, net inspector, multi-touch demo, menu demo (`src/menu_demo.cpp`).

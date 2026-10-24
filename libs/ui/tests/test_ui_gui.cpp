@@ -19,10 +19,14 @@
 #include <ws/ui/gui/theme.hpp>
 #include <ws/ui/gui/theme_color.hpp>
 #include <ws/ui/gui/theme_data.hpp>
+#include <ws/ui/gui/theme_json.hpp>
 #include <ws/ui/gui/widgets.hpp>
 #include <ws/input/input.hpp>
 #include <ws/jobs/errors.hpp>
 #include <ws/jobs/job_system.hpp>
+#include <ws/settings/filesystem.hpp>
+#include <ws/settings/json.hpp>
+#include <ws/settings/migration.hpp>
 #include <ws/ui/renderer2d.hpp>
 
 #include "ui_gui_stub.hpp"
@@ -33,8 +37,11 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <map>
 #include <string>
 #include <thread>
+#include <utility>
 
 namespace {
 
@@ -643,4 +650,484 @@ TEST_CASE("ThemeData carries the stock documents and the accent") {
     CHECK(styled.accent == 0x54A054FFu);
     CHECK(styled.chrome.control_on != dark.chrome.control_on);
     CHECK(styled.chrome.panel_bg == dark.chrome.panel_bg);
+}
+
+// --- Stage 10 phase 2: theme json + ThemeFile -------------------------------
+
+namespace {
+
+// The settings suite's in-memory FileSystem, mirrored: one map, a read
+// counter (poller gating asserts it), and a write breaker. The errors
+// imitate StdFileSystem's - code and category do not matter to
+// ThemeFile, only the message rides its reports.
+class MemoryFs final : public ws::settings::FileSystem {
+public:
+    bool fail_read = false;
+    bool fail_write = false;
+    mutable int reads = 0;
+    int writes = 0;
+
+    ws::core::Result<std::string> read(
+        std::string_view path) const override {
+        ++reads;
+        if (fail_read) {
+            return ws::core::fail(1, "settings", "read (fake)");
+        }
+        const auto it = files.find(path);
+        if (it == files.end()) {
+            return ws::core::fail(1, "settings", "no such file (fake)");
+        }
+        return it->second;
+    }
+
+    ws::core::Status write(std::string_view path,
+                           std::string_view bytes) override {
+        if (fail_write) {
+            return ws::core::fail(1, "settings", "write (fake)");
+        }
+        files.insert_or_assign(std::string{path}, std::string{bytes});
+        ++writes;
+        return {};
+    }
+
+    ws::core::Status rename(std::string_view from,
+                            std::string_view to) override {
+        const auto it = files.find(from);
+        if (it == files.end()) {
+            return ws::core::fail(1, "settings", "rename (fake)");
+        }
+        std::string bytes = std::move(it->second);
+        files.erase(it);
+        files.insert_or_assign(std::string{to}, std::move(bytes));
+        return {};
+    }
+
+    bool remove(std::string_view path) override {
+        return files.erase(std::string{path}) > 0;
+    }
+
+    [[nodiscard]] bool exists(std::string_view path) const override {
+        return files.contains(path);
+    }
+
+    std::map<std::string, std::string, std::less<>> files;
+};
+
+// A fake steady clock: the test moves time by writing `now`, the file
+// holds the clock (a lambda over this) - the Debouncer test shape.
+// Must outlive every ThemeFile it feeds.
+struct FakeClock {
+    std::int64_t now = 0;
+    ws::ui::gui::ThemeFile::Clock clock() {
+        return [this] { return now; };
+    }
+};
+
+}  // namespace
+
+TEST_CASE("theme json round-trips a full document byte-stably") {
+    using ws::ui::gui::ThemeData;
+    using ws::ui::gui::default_dark;
+    using ws::ui::gui::default_light;
+    using ws::ui::gui::read_theme;
+    using ws::ui::gui::write_theme;
+
+    ThemeData styled = default_dark();
+    styled.accent = 0x54A054FFu;
+    styled.chrome.panel_bg = 0x20222AFFu;
+    styled.chrome.control_height = 30.0f;
+    styled.chrome.tooltip_delay = 0.25f;
+    styled.regular.family = "Segoe UI";
+    styled.regular.size = 18.0f;
+    styled.mono.family = "Cascadia Mono";
+    styled.icon_set = "ws-stock";
+    styled.panel_shadow.blur = 12.0f;
+    styled.control_shadow.color = 0x00000080u;
+
+    const std::string text = write_theme(styled);
+
+    // The canonical shape: version first, 8-digit uppercase hex,
+    // metrics as reals.
+    CHECK(text.find("\"version\": 1") != std::string::npos);
+    CHECK(text.find("\"accent\": \"#54A054FF\"") != std::string::npos);
+    CHECK(text.find("\"panel_bg\": \"#20222AFF\"") != std::string::npos);
+    CHECK(text.find("\"control_height\": 30.0") != std::string::npos);
+
+    // Reading over a DIFFERENT base recovers the whole document - the
+    // text is complete, the base only fills gaps.
+    const auto over_light = read_theme(text, default_light());
+    REQUIRE(over_light);
+    CHECK(over_light->accent == styled.accent);
+    CHECK(over_light->chrome.panel_bg == styled.chrome.panel_bg);
+    CHECK(over_light->chrome.control_height == styled.chrome.control_height);
+    CHECK(over_light->chrome.tooltip_delay == styled.chrome.tooltip_delay);
+    CHECK(over_light->regular.family == styled.regular.family);
+    CHECK(over_light->regular.size == styled.regular.size);
+    CHECK(over_light->mono.family == styled.mono.family);
+    CHECK(over_light->icon_set == styled.icon_set);
+    CHECK(over_light->panel_shadow.blur == styled.panel_shadow.blur);
+    CHECK(over_light->control_shadow.color == styled.control_shadow.color);
+
+    // write(read(text)) is byte-stable.
+    CHECK(write_theme(*over_light) == text);
+}
+
+TEST_CASE("read_theme fills gaps from the base and never derives") {
+    using ws::ui::gui::default_dark;
+    using ws::ui::gui::read_theme;
+
+    // A minimal hand edit: the accent only. No derivation on the way
+    // in - the stock faces stay, an app wanting them re-derived calls
+    // apply_accent(theme, theme.accent) itself.
+    const auto minimal = read_theme(
+        R"json({
+            "version": 1,
+            "accent": "#54A054"
+        })json",
+        default_dark());
+    REQUIRE(minimal);
+    CHECK(minimal->accent == 0x54A054FFu);  // #RRGGBB implies alpha FF
+    CHECK(minimal->chrome.panel_bg == kDefaultChrome.panel_bg);
+    CHECK(minimal->chrome.control_on == kDefaultChrome.control_on);
+    CHECK(minimal->icon_set.empty());
+
+    // A missing "version" reads as shape 1.
+    const auto unversioned =
+        read_theme(R"json({"accent": "#54A054FF"})json", default_dark());
+    REQUIRE(unversioned);
+    CHECK(unversioned->accent == 0x54A054FFu);
+
+    // Metrics fold as reals or integers; font sizes too; untouched
+    // members keep the base.
+    const auto sizes = read_theme(
+        R"json({
+            "version": 1,
+            "chrome": {"control_height": 28, "corner_radius": 6.5},
+            "fonts": {"regular": {"family": "Trebuchet", "size": 20}}
+        })json",
+        default_dark());
+    REQUIRE(sizes);
+    CHECK(sizes->chrome.control_height == 28.0f);
+    CHECK(sizes->chrome.corner_radius == 6.5f);
+    CHECK(sizes->regular.family == "Trebuchet");
+    CHECK(sizes->regular.size == 20.0f);
+    CHECK(sizes->chrome.padding == kDefaultChrome.padding);
+}
+
+TEST_CASE("read_theme refuses what it cannot honor") {
+    using ws::ui::gui::ThemeData;
+    using ws::ui::gui::ThemeError;
+    using ws::ui::gui::describe;
+    using ws::ui::gui::read_theme;
+
+    CHECK(describe(ThemeError::parse_failed) ==
+          std::string_view{"parse failed"});
+
+    const auto bad_json = read_theme("{ nope", ThemeData{});
+    REQUIRE_FALSE(bad_json);
+    CHECK(bad_json.error().code ==
+          static_cast<std::int32_t>(ThemeError::parse_failed));
+    CHECK(std::string_view{bad_json.error().category} == "ui");
+    CHECK(bad_json.error().message.find("parse: ") == 0);
+
+    const auto bad_root = read_theme("[1, 2]", ThemeData{});
+    REQUIRE_FALSE(bad_root);
+    CHECK(bad_root.error().code ==
+          static_cast<std::int32_t>(ThemeError::bad_value));
+
+    const auto bad_face =
+        read_theme(R"json({"chrome": {"text": 235}})json", ThemeData{});
+    REQUIRE_FALSE(bad_face);
+    CHECK(bad_face.error().message.find("chrome.text") != std::string::npos);
+
+    const auto bad_hex =
+        read_theme(R"json({"accent": "#54A05G"})json", ThemeData{});
+    REQUIRE_FALSE(bad_hex);
+    CHECK(bad_hex.error().message.find("accent") != std::string::npos);
+
+    const auto bad_metric =
+        read_theme(R"json({"chrome": {"padding": "wide"}})json",
+                   ThemeData{});
+    REQUIRE_FALSE(bad_metric);
+    CHECK(bad_metric.error().message.find("chrome.padding") !=
+          std::string::npos);
+
+    // A newer shape is refused, never guessed at.
+    const auto future = read_theme(R"json({"version": 2})json", ThemeData{});
+    REQUIRE_FALSE(future);
+    CHECK(future.error().code ==
+          static_cast<std::int32_t>(ThemeError::migrate_failed));
+}
+
+TEST_CASE("ThemeFile loads and keeps unknown top-level members") {
+    using ws::ui::gui::ThemeFile;
+    using ws::ui::gui::default_dark;
+
+    MemoryFs fs;
+    fs.files["theme.json"] = R"json({
+    "version": 1,
+    "accent": "#54A054FF",
+    "my_note": "a hand annotation",
+    "experiments": {"hue": 42},
+    "chrome": {"panel_bg": "#20222AFF", "control_height": 28.0}
+})json";
+    ws::settings::Migrations migrations;
+    ThemeFile file("theme.json", fs, migrations, default_dark());
+
+    const auto load = file.load();
+    REQUIRE(load.ok());
+    CHECK_FALSE(load.missing);
+    CHECK(load.theme.accent == 0x54A054FFu);
+    CHECK(load.theme.chrome.panel_bg == 0x20222AFFu);
+    CHECK(load.theme.chrome.control_height == 28.0f);
+    CHECK(file.theme().accent == 0x54A054FFu);
+
+    // Saving re-emits the knowns (the live theme) PLUS the remembered
+    // unknowns, in their file order.
+    REQUIRE(file.save());
+    const std::string saved = fs.files["theme.json"];
+    CHECK(saved.find("\"my_note\": \"a hand annotation\"") !=
+          std::string::npos);
+    CHECK(saved.find("\"hue\": 42") != std::string::npos);
+    CHECK(saved.find("\"control_height\": 28.0") != std::string::npos);
+
+    // load -> save -> load is byte-stable the second time.
+    REQUIRE(file.load().ok());
+    REQUIRE(file.save());
+    CHECK(fs.files["theme.json"] == saved);
+}
+
+TEST_CASE("ThemeFile answers the first run and stays quiet") {
+    using ws::ui::gui::ThemeFile;
+    using ws::ui::gui::default_dark;
+
+    MemoryFs fs;  // empty: no file anywhere
+    ws::settings::Migrations migrations;
+    FakeClock clock;
+    ThemeFile file("theme.json", fs, migrations, default_dark(), 250,
+                   clock.clock());
+
+    // Poll before load owes nothing - and does not consume the gate.
+    const auto pre = file.poll();
+    CHECK_FALSE(pre.reloaded);
+    CHECK_FALSE(pre.failed);
+
+    const auto load = file.load();
+    CHECK(load.missing);
+    CHECK(load.ok());
+    CHECK(load.theme.chrome.panel_bg == kDefaultChrome.panel_bg);
+    CHECK(file.theme().chrome.panel_bg == kDefaultChrome.panel_bg);
+
+    // Nothing to watch, and the cadence starts at load(): polls stay
+    // silent, no failure spam, and an under-cadence poll reads
+    // nothing at all.
+    CHECK(fs.reads == 1);  // load()'s read
+    clock.now = 100;
+    auto quiet = file.poll();
+    CHECK_FALSE(quiet.reloaded);
+    CHECK_FALSE(quiet.failed);
+    CHECK(fs.reads == 1);  // under the gate: no read happened
+    clock.now = 300;
+    quiet = file.poll();
+    CHECK_FALSE(quiet.reloaded);
+    CHECK_FALSE(quiet.failed);
+    CHECK(fs.reads == 2);  // past the gate, read, still nothing there
+}
+
+TEST_CASE("ThemeFile hot-reloads and keeps the last good theme") {
+    using ws::ui::gui::ThemeFile;
+    using ws::ui::gui::default_dark;
+
+    MemoryFs fs;
+    fs.files["theme.json"] =
+        R"json({"version": 1, "accent": "#54A054FF"})json";
+    ws::settings::Migrations migrations;
+    FakeClock clock;
+    ThemeFile file("theme.json", fs, migrations, default_dark(), 250,
+                   clock.clock());
+    REQUIRE(file.load().ok());
+    REQUIRE(file.theme().accent == 0x54A054FFu);
+    const int reads_after_load = fs.reads;
+
+    // Under the cadence: silent, and no read happens.
+    clock.now = 100;
+    auto poll = file.poll();
+    CHECK_FALSE(poll.reloaded);
+    CHECK_FALSE(poll.failed);
+    CHECK(fs.reads == reads_after_load);
+
+    // Past the cadence, bytes unchanged: a read, no transition.
+    clock.now = 300;
+    poll = file.poll();
+    CHECK_FALSE(poll.reloaded);
+    CHECK_FALSE(poll.failed);
+    CHECK(fs.reads == reads_after_load + 1);
+
+    // The dev edits the file: reloaded.
+    fs.files["theme.json"] =
+        R"json({"version": 1, "accent": "#C04040FF", "chrome": {"control_on": "#3070D0FF"}})json";
+    clock.now = 600;
+    poll = file.poll();
+    CHECK(poll.reloaded);
+    CHECK_FALSE(poll.failed);
+    CHECK(file.theme().accent == 0xC04040FFu);
+    CHECK(file.theme().chrome.control_on == 0x3070D0FFu);
+
+    // The dev saves garbage: reported once, the last good kept, and
+    // the poll stays quiet while the bytes do not change.
+    fs.files["theme.json"] = "{ not json";
+    clock.now = 900;
+    poll = file.poll();
+    CHECK_FALSE(poll.reloaded);
+    CHECK(poll.failed);
+    CHECK_FALSE(poll.error.empty());
+    CHECK(file.theme().accent == 0xC04040FFu);
+
+    clock.now = 1200;
+    poll = file.poll();
+    CHECK_FALSE(poll.reloaded);
+    CHECK_FALSE(poll.failed);  // same bytes: quiet
+
+    // A known key with the wrong type: the same contract.
+    fs.files["theme.json"] =
+        R"json({"version": 1, "chrome": {"text": 7}})json";
+    clock.now = 1500;
+    poll = file.poll();
+    CHECK_FALSE(poll.reloaded);
+    CHECK(poll.failed);
+    CHECK(file.theme().accent == 0xC04040FFu);
+    clock.now = 1800;
+    poll = file.poll();
+    CHECK_FALSE(poll.failed);  // bad bytes remembered: quiet
+
+    // The dev fixes it: reloaded again.
+    fs.files["theme.json"] =
+        R"json({"version": 1, "accent": "#54A054FF"})json";
+    clock.now = 2100;
+    poll = file.poll();
+    CHECK(poll.reloaded);
+    CHECK(file.theme().accent == 0x54A054FFu);
+
+    // Deleting the file after a good load: reported once, the theme
+    // kept, then quiet until a file reappears.
+    fs.files.erase("theme.json");
+    clock.now = 2400;
+    poll = file.poll();
+    CHECK_FALSE(poll.reloaded);
+    CHECK(poll.failed);
+    CHECK(file.theme().accent == 0x54A054FFu);
+    clock.now = 2700;
+    poll = file.poll();
+    CHECK_FALSE(poll.failed);
+    CHECK_FALSE(poll.reloaded);
+}
+
+TEST_CASE("a bad first load reports and the poll recovers") {
+    using ws::ui::gui::ThemeFile;
+    using ws::ui::gui::default_dark;
+
+    MemoryFs fs;
+    fs.files["theme.json"] = "{ broken at startup";
+    ws::settings::Migrations migrations;
+    FakeClock clock;
+    ThemeFile file("theme.json", fs, migrations, default_dark(), 250,
+                   clock.clock());
+
+    const auto load = file.load();
+    CHECK(load.failed);
+    CHECK_FALSE(load.missing);
+    CHECK_FALSE(load.error.empty());
+    CHECK(load.theme.chrome.panel_bg == kDefaultChrome.panel_bg);
+
+    // The failed load remembered its bad bytes: a poll before the dev
+    // touches anything stays quiet - the load already reported.
+    clock.now = 1000;
+    auto poll = file.poll();
+    CHECK_FALSE(poll.reloaded);
+    CHECK_FALSE(poll.failed);
+
+    // The dev fixes the file; the poll picks it up.
+    fs.files["theme.json"] =
+        R"json({"version": 1, "accent": "#D08830FF"})json";
+    clock.now = 2000;
+    poll = file.poll();
+    CHECK(poll.reloaded);
+    CHECK_FALSE(poll.failed);
+    CHECK(file.theme().accent == 0xD08830FFu);
+}
+
+TEST_CASE("set_theme + save writes the file and the poll stays quiet") {
+    using ws::ui::gui::ThemeData;
+    using ws::ui::gui::ThemeFile;
+    using ws::ui::gui::default_dark;
+
+    MemoryFs fs;
+    fs.files["theme.json"] = R"json({"version": 1, "unknown_key": 11})json";
+    ws::settings::Migrations migrations;
+    FakeClock clock;
+    ThemeFile file("theme.json", fs, migrations, default_dark(), 250,
+                   clock.clock());
+    REQUIRE(file.load().ok());
+    CHECK(fs.writes == 0);
+
+    ThemeData edited = file.theme();
+    edited.accent = 0x8060C0FFu;
+    edited.chrome.padding = 20.0f;
+    file.set_theme(std::move(edited));
+
+    REQUIRE(file.save());
+    CHECK(fs.writes == 1);
+    const std::string& saved = fs.files["theme.json"];
+    CHECK(saved.find("\"accent\": \"#8060C0FF\"") != std::string::npos);
+    CHECK(saved.find("\"padding\": 20.0") != std::string::npos);
+    CHECK(saved.find("\"unknown_key\": 11") != std::string::npos);
+
+    // The poll remembers the written bytes: our own save is not a
+    // reload.
+    clock.now = 1000;
+    const auto poll = file.poll();
+    CHECK_FALSE(poll.reloaded);
+    CHECK_FALSE(poll.failed);
+
+    // A failing save reports through the Status, io_failed.
+    fs.fail_write = true;
+    const ws::core::Status failed = file.save();
+    REQUIRE_FALSE(failed);
+    CHECK(failed.error().code ==
+          static_cast<std::int32_t>(ws::ui::gui::ThemeError::io_failed));
+    CHECK(std::string_view{failed.error().category} == "ui");
+    CHECK(fs.writes == 1);  // nothing landed
+}
+
+TEST_CASE("ThemeFile round-trips through the real StdFileSystem") {
+    using ws::ui::gui::ThemeData;
+    using ws::ui::gui::ThemeFile;
+    using ws::ui::gui::default_dark;
+    using ws::ui::gui::default_light;
+
+    ws::settings::StdFileSystem fs;
+    const std::filesystem::path dir = std::filesystem::temp_directory_path();
+    const std::u8string upath = (dir / u8"ws_theme_smoke.json").u8string();
+    const std::string path{upath.begin(), upath.end()};
+    (void)fs.remove(path);  // a previous run may have littered
+
+    ws::settings::Migrations migrations;
+    ThemeData edited = default_dark();
+    edited.icon_set = "smoke";
+    edited.chrome.spacing = 10.0f;
+    {
+        ThemeFile writer(path, fs, migrations, default_dark());
+        writer.set_theme(std::move(edited));
+        REQUIRE(writer.save());
+    }
+    {
+        ThemeFile reader(path, fs, migrations, default_light());
+        const auto load = reader.load();
+        REQUIRE(load.ok());
+        CHECK_FALSE(load.missing);
+        CHECK(load.theme.icon_set == "smoke");
+        CHECK(load.theme.chrome.spacing == 10.0f);
+        CHECK(load.theme.chrome.panel_bg == default_dark().chrome.panel_bg);
+    }
+    (void)fs.remove(path);
 }

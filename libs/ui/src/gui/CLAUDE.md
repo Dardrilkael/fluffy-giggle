@@ -18,4 +18,8 @@
   OKLCH/WCAG color math + accent derivation, and the ThemeData document
   around ChromeTheme. Pure value types, not widgets; the widget-file rule
   below does not apply.
+- theme_json.cpp: the stage-10 persistence half - read_theme/write_theme
+  (the settings json/migrations seam) and ThemeFile (load, atomic save,
+  the byte-compare hot-reload poller with its injected clock). Same
+  value-type purity, no widgets.
 Rule: one widget family per file; never add a widget to a file already over ~400 lines.
