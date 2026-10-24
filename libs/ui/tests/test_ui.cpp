@@ -11684,3 +11684,199 @@ TEST_CASE("a custom look owns every pixel over a slider") {
         CHECK(vertex.tex_index == 0.0f);  // a plain quad, not the SDF face
     }
 }
+
+TEST_CASE("the tab strip pair records the widget's output byte for byte") {
+    using namespace ws::ui::gui;
+    ws::ui::r2d::Renderer2D r;
+    struct ActiveRenderer {
+        explicit ActiveRenderer(ws::ui::r2d::Renderer2D* renderer) {
+            ws::ui::r2d::set_active(renderer);
+        }
+        ~ActiveRenderer() { ws::ui::r2d::set_active(nullptr); }
+    };
+    const ActiveRenderer active{&r};
+    (void)active;
+
+    const ws::ui::r2d::Font font = ab_font();
+    ChromeTheme theme = kDefaultChrome;
+    theme.font = &font;  // the theme points; it never owns
+
+    const ws::input::InputFrame quiet = snap(-100.0f, -100.0f);
+    // The strip is three flush 80-px tabs from x=12: the tap at x=200
+    // lands inside the third.
+    const ws::input::InputFrame tap_third =
+        snap(200.0f, 12.0f, false, true, true);
+
+    const auto record = [&](auto&& run, const ws::input::InputFrame& frame) {
+        r.frame_begin(800.0f, 600.0f);
+        r.begin_screen();
+        GuiContext gui;
+        LayoutCursor layout;
+        gui.begin_frame(frame);
+        (void)begin_panel(gui, layout, theme, "root",
+                          {0.0f, 0.0f, 400.0f, 300.0f});
+        run(gui, layout);
+        end_panel(gui, layout);
+        gui.end_frame();
+        r.end();
+        r.frame_end();
+        return r.batch().vertices();  // by value: the next frame resets
+    };
+    const auto identical = [](const auto& stock, const auto& split) {
+        REQUIRE(stock.size() == split.size());
+        REQUIRE(!stock.empty());  // a frame that recorded nothing proves nothing
+        CHECK(std::memcmp(stock.data(), split.data(),
+                          stock.size() * sizeof(stock[0])) == 0);
+    };
+
+    const char* const tabs[] = {"alpha", "beta", "gamma"};
+    const auto split_strip = [&](GuiContext& gui, LayoutCursor& layout,
+                                 int& active) {
+        // The strip's own spelling: the id scope ladder and the flush
+        // pitch are the caller's half, one behavior+draw per tab.
+        gui.ids().push("strip");
+        for (int i = 0; i < 3; ++i) {
+            gui.ids().push(i);
+            const Rect rect = layout.next(80.0f, theme.control_height);
+            const WidgetId tab_id = gui.ids().id("tab");
+            const TabResult result = tab_behavior(gui, tab_id, rect);
+            tab_draw(rect, result, theme, tabs[i], i == active);
+            if (result.clicked && i != active) {
+                active = i;
+            }
+            gui.ids().pop();
+            if (i + 1 < 3) {
+                layout.same_line(0.0f);
+            }
+        }
+        gui.ids().pop();
+    };
+
+    // The quiet frame: three tabs at rest, the second selected.
+    {
+        int stock_active = 1;
+        int split_active = 1;
+        const auto stock = record(
+            [&](GuiContext& gui, LayoutCursor& layout) {
+                (void)tab_bar(gui, layout, theme, "strip", tabs, 3,
+                              stock_active, 80.0f);
+            },
+            quiet);
+        const auto split = record(
+            [&](GuiContext& gui, LayoutCursor& layout) {
+                split_strip(gui, layout, split_active);
+            },
+            quiet);
+        identical(stock, split);
+        CHECK(stock_active == 1);
+        CHECK(split_active == 1);
+    }
+
+    // A tap on the third tab: the pressed face rides the result into the
+    // draw, and the selection moves identically in both spellings -
+    // after the draw, on the clicked tab, only on a real move.
+    {
+        int stock_active = 1;
+        int split_active = 1;
+        const auto stock = record(
+            [&](GuiContext& gui, LayoutCursor& layout) {
+                (void)tab_bar(gui, layout, theme, "strip", tabs, 3,
+                              stock_active, 80.0f);
+            },
+            tap_third);
+        const auto split = record(
+            [&](GuiContext& gui, LayoutCursor& layout) {
+                split_strip(gui, layout, split_active);
+            },
+            tap_third);
+        identical(stock, split);
+        CHECK(stock_active == 2);
+        CHECK(split_active == 2);
+    }
+}
+
+TEST_CASE("panel_draw records begin_panel's chrome byte for byte") {
+    using namespace ws::ui::gui;
+    ws::ui::r2d::Renderer2D r;
+    struct ActiveRenderer {
+        explicit ActiveRenderer(ws::ui::r2d::Renderer2D* renderer) {
+            ws::ui::r2d::set_active(renderer);
+        }
+        ~ActiveRenderer() { ws::ui::r2d::set_active(nullptr); }
+    };
+    const ActiveRenderer active{&r};
+    (void)active;
+
+    const ws::ui::r2d::Font font = ab_font();
+    ChromeTheme theme = kDefaultChrome;
+    theme.font = &font;  // the theme points; it never owns
+
+    const Rect bounds{10.0f, 20.0f, 200.0f, 100.0f};
+
+    // The stock scope: the chrome, then the clip, hit-clip and id pushes
+    // - none of which record a vertex - then the pops.
+    r.frame_begin(800.0f, 600.0f);
+    r.begin_screen();
+    {
+        GuiContext gui;
+        LayoutCursor layout;
+        gui.begin_frame(snap(-100.0f, -100.0f));
+        (void)begin_panel(gui, layout, theme, "root", bounds);
+        end_panel(gui, layout);
+        gui.end_frame();
+    }
+    r.end();
+    r.frame_end();
+    const auto stock = r.batch().vertices();  // by value, before the reset
+
+    // The chrome alone, no scope around it: what a custom container
+    // paints before it pushes its own clips.
+    r.frame_begin(800.0f, 600.0f);
+    r.begin_screen();
+    panel_draw(bounds, theme);
+    r.end();
+    r.frame_end();
+    const auto alone = r.batch().vertices();
+
+    REQUIRE(stock.size() == 8);  // the 1-px border quad and the inset face
+    REQUIRE(stock.size() == alone.size());
+    CHECK(std::memcmp(stock.data(), alone.data(),
+                      stock.size() * sizeof(stock[0])) == 0);
+}
+
+TEST_CASE("a custom look owns every pixel over a tab") {
+    using namespace ws::ui::gui;
+    ws::ui::r2d::Renderer2D r;
+    ws::ui::r2d::set_active(&r);
+
+    // A bare-knuckles tab: the behavior answers the click, then a flat
+    // face and an accent underline are the whole tab - the stock rounded
+    // face, focus ring and centered label never record a vertex.
+    r.frame_begin(800.0f, 600.0f);
+    r.begin_screen();
+    GuiContext gui;
+    gui.begin_frame(snap(50.0f, 12.0f, false, true, true));
+    const WidgetId id = gui.ids().id("flat");
+    const Rect rect{0.0f, 0.0f, 120.0f, 24.0f};
+    const TabResult result = tab_behavior(gui, id, rect);
+    ws::ui::r2d::draw_quad(rect.x, rect.y, rect.width, rect.height,
+                           kDefaultChrome.control_bg);
+    ws::ui::r2d::draw_quad(rect.x, rect.y + rect.height - 2.0f, rect.width,
+                           2.0f, kDefaultChrome.control_on);
+    gui.end_frame();
+    r.end();
+    r.frame_end();
+    ws::ui::r2d::set_active(nullptr);
+
+    CHECK(result.clicked);
+    CHECK(result.state == WidgetState::Pressed);
+    CHECK(result.focused);  // the tap latched it; the ring never drew
+
+    // Exactly the two custom quads: eight plain-textured vertices,
+    // nothing else - the behavior half contributed not one.
+    REQUIRE(r.batch().vertices().size() == 8);
+    CHECK(r.batch().chunk_count() == 1);
+    for (const auto& vertex : r.batch().vertices()) {
+        CHECK(vertex.tex_index == 0.0f);  // a plain quad, not the SDF face
+    }
+}

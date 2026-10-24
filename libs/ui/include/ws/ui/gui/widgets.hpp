@@ -455,6 +455,12 @@ Rect begin_panel(GuiContext& gui, LayoutCursor& layout,
                  const Rect& bounds);
 void end_panel(GuiContext& gui, LayoutCursor& layout);
 
+// A panel's chrome alone: the 1-px border frame behind the face inset
+// by 1 - the same two quads begin_panel paints before it pushes its
+// clips. For a custom container that wants the stock look without the
+// panel scope: draw this, then push your own clips.
+void panel_draw(const Rect& bounds, const ChromeTheme& theme);
+
 // A tab strip: `count` tabs side by side on one line, `width` px each
 // (the strip is count*width wide), theme.control_height tall. The
 // caller's `active` IS the selection state - a full click on a tab
@@ -477,6 +483,20 @@ void end_panel(GuiContext& gui, LayoutCursor& layout);
 bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
              const char* label, const char* const* tabs, int count,
              int& active, float width = 120.0f, bool disabled = false);
+
+// The split halves, the tab strip's seam: the behavior is ONE tab's
+// interaction (the strip loops it - the caller owns the id scope, so
+// the index-ids the strip builds stay the caller's to shape); the draw
+// is one tab's pixels. `selected` is display state the draw reads and
+// never writes, like selectable's.
+struct TabResult : WidgetPaint {
+    bool clicked = false;  // a full click or the focused tab's Enter/Space
+};
+
+TabResult tab_behavior(GuiContext& gui, WidgetId id, const Rect& rect,
+                       bool disabled = false, const HitShape& hit_shape = {});
+void tab_draw(const Rect& rect, const TabResult& result,
+              const ChromeTheme& theme, const char* label, bool selected);
 
 // A scrollable panel: the same chrome, clip and id scope begin_panel
 // pushes (and its theme.spacing item gaps - the virtual panel the

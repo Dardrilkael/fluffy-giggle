@@ -1529,3 +1529,104 @@ TEST_CASE("custom looks paint over the slider behaviors") {
     CHECK(ws::ui::gui_test::stub.quads == 2);
     CHECK(ws::ui::gui_test::stub.texts == 0);
 }
+
+TEST_CASE("the tab behavior drives the interaction and draws nothing") {
+    using ws::ui::gui::WidgetState;
+
+    ws::ui::gui_test::stub.reset();
+    GuiContext gui;
+    const ws::ui::gui::Rect rect{0.0f, 0.0f, 120.0f, 24.0f};
+
+    // The loop-widget seam: the strip owns the id scope (its label, the
+    // index, then "tab" under them), so the test spells the id the
+    // strip's way too - the behavior takes the finished id per tab.
+    gui.ids().push("strip");
+    gui.ids().push(0);
+    const ws::ui::gui::WidgetId tab_id = gui.ids().id("tab");
+    gui.ids().pop();
+    gui.ids().pop();
+
+    // A one-frame tap inside clicks - folded with the focused tab's
+    // Enter/Space into the one "pick me" signal.
+    gui.begin_frame(snap(60.0f, 10.0f, false, true, true));
+    const ws::ui::gui::TabResult result =
+        ws::ui::gui::tab_behavior(gui, tab_id, rect);
+    gui.end_frame();
+    CHECK(result.clicked);
+    CHECK(result.hit.pressed);
+    CHECK(result.state == WidgetState::Pressed);
+
+    // Enter on the focused tab: the keyboard half of the same fold.
+    gui.set_focus(tab_id);
+    InputFrame keys = snap(-100.0f, -100.0f);
+    keys.key_pressed[static_cast<std::size_t>(ws::input::keys::kEnter)] =
+        true;
+    gui.begin_frame(keys);
+    const ws::ui::gui::TabResult keyed =
+        ws::ui::gui::tab_behavior(gui, tab_id, rect);
+    gui.end_frame();
+    CHECK(keyed.clicked);
+    CHECK(keyed.focused);
+
+    // A quiet frame claims nothing: the focus is the resting state.
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    const ws::ui::gui::TabResult quiet =
+        ws::ui::gui::tab_behavior(gui, tab_id, rect);
+    gui.end_frame();
+    CHECK(!quiet.clicked);
+    CHECK(quiet.state == WidgetState::Focused);
+
+    CHECK(ws::ui::gui_test::stub.quads == 0);
+    CHECK(ws::ui::gui_test::stub.rounded == 0);
+    CHECK(ws::ui::gui_test::stub.sprites == 0);
+    CHECK(ws::ui::gui_test::stub.texts == 0);
+    CHECK(ws::ui::gui_test::stub.clip_pushes == 0);
+    CHECK(ws::ui::gui_test::stub.clip_pops == 0);
+    CHECK(ws::ui::gui_test::stub.layer_sets == 0);
+}
+
+TEST_CASE("custom looks paint over the tab behavior, panel_draw the chrome") {
+    using ws::ui::r2d::draw_quad;
+
+    // The seam from the other side, the strip's turn: a custom tab look
+    // owns every pixel over the behavior, and panel_draw answers the
+    // stock chrome alone - the border frame and the inset face, the
+    // same two quads begin_panel paints, with none of its pushes.
+    GuiContext gui;
+    const ws::ui::gui::Rect rect{0.0f, 0.0f, 120.0f, 24.0f};
+    const auto tap = [&gui]() {
+        gui.begin_frame(snap(60.0f, 10.0f, false, true, true));
+    };
+
+    // tab: a flat face with the accent as an underline, no label.
+    ws::ui::gui_test::stub.reset();
+    tap();
+    {
+        gui.ids().push("strip");
+        gui.ids().push(0);
+        const ws::ui::gui::TabResult result = ws::ui::gui::tab_behavior(
+            gui, gui.ids().id("tab"), rect);
+        gui.ids().pop();
+        gui.ids().pop();
+        draw_quad(rect.x, rect.y, rect.width, rect.height,
+                  kDefaultChrome.control_bg);
+        draw_quad(rect.x, rect.y + rect.height - 2.0f, rect.width, 2.0f,
+                  kDefaultChrome.control_on);
+        gui.end_frame();
+        CHECK(result.clicked);
+    }
+    CHECK(ws::ui::gui_test::stub.quads == 2);
+    CHECK(ws::ui::gui_test::stub.texts == 0);
+
+    // panel_draw: the chrome alone for a custom container - exactly the
+    // border and the inset face, and no clip, layer or id push rides
+    // along (those are begin_panel's).
+    ws::ui::gui_test::stub.reset();
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    ws::ui::gui::panel_draw(ws::ui::gui::Rect{10.0f, 20.0f, 200.0f, 100.0f},
+                            kDefaultChrome);
+    gui.end_frame();
+    CHECK(ws::ui::gui_test::stub.quads == 2);
+    CHECK(ws::ui::gui_test::stub.clip_pushes == 0);
+    CHECK(ws::ui::gui_test::stub.layer_sets == 0);
+}

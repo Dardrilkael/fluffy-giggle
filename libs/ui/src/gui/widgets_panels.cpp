@@ -1,7 +1,9 @@
 // ws::ui::gui widget functions, one family per file (src/gui/CLAUDE.md):
-// the container rows - the tab_bar strip and the begin/end_panel
-// scope every widget lives inside: chrome, the clip pair, the id
-// scope and the wheel claim.
+// the container rows - the tab strip as a pair (tab_behavior/tab_draw,
+// one tab's interaction and pixels; tab_bar owns the strip: the id scope
+// and the pitch), the begin/end_panel scope every widget lives inside
+// (chrome, the clip pair, the id scope and the wheel claim), and
+// panel_draw: that chrome alone for a custom container.
 
 #include "widgets_detail.hpp"
 
@@ -23,63 +25,21 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     for (int i = 0; i < count; ++i) {
         gui.ids().push(i);
         const Rect rect = layout.next(width, theme.control_height);
-        // Full citizenship, like a button, per tab: each tab registers
-        // in strip order (Tab walks the strip left to right), state()
-        // runs the one hit-test and derives the face, and Enter or
-        // Space selects the focused tab. The trailing `disabled`
-        // parameter is the same lock on the whole strip: registration
-        // skipped (Tab walks past), state() handed the lock, and the
-        // selection below cannot move (a dead row reports no click,
-        // holds no focus for the keys).
+        // Full citizenship, like a button, per tab - the behavior's fold
+        // (registration in strip order so Tab walks the strip left to
+        // right, state()'s one hit-test, the Enter/Space edge). The
+        // trailing `disabled` parameter is the same lock on the whole
+        // strip: registration skipped (Tab walks past), state() handed
+        // the lock, and the selection below cannot move (a dead row
+        // reports no click, holds no focus for the keys).
         const WidgetId tab_id = gui.ids().id("tab");
-        if (!disabled) {
-            gui.register_focusable(tab_id);
-        }
-        const WidgetResult result = gui.state(tab_id, rect, disabled);
-        const HitTest& hit = result.hit;
-        const bool key_selected = key_activated(gui, tab_id);
-
-        focus_ring(gui, tab_id, rect, theme);
-
-        // The disabled look: the dead face for an idle tab, the selected
-        // tab's accent and the label dimmed - the selection stays
-        // legible in a dead strip, just faded.
-        const float dim_by = dim_factor(result.state, theme);
-
-        // Face priority: press feedback even on the selected tab, then
-        // the selection accent, then hover, then the dead face, then
-        // idle. A dead tab claims nothing, so its pressed/hover branches
-        // never fire - the Disabled slot is for the idle one.
-        std::uint32_t face = theme.control_bg;
-        if (result.state == WidgetState::Pressed) {
-            face = theme.control_pressed;
-        } else if (i == active) {
-            face = dim(theme.control_on, dim_by);
-        } else if (result.state == WidgetState::Hovered) {
-            face = theme.control_hovered;
-        } else if (result.state == WidgetState::Disabled) {
-            face = theme.control_disabled;
-        }
-        r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
-                               theme.corner_radius, face);
-
-        // The tab's label, centered like a button's: fitted to the tab
-        // minus its padding. Tab labels never id (the strip ids by
-        // INDEX), so a "##" in a tab label is pure display sugar: it
-        // cuts and keys nothing.
-        const char* tab_label = tabs != nullptr ? tabs[i] : nullptr;
-        char scratch[128];
-        const LabelFit fit =
-            fit_text(tab_label,
-                     std::max(0.0f, rect.width - 2.0f * theme.padding), theme,
-                     scratch, sizeof(scratch));
-        draw_label(rect.x + (rect.width - fit.advance) * 0.5f, rect.y,
-                   rect.height, fit, dim(theme.text, dim_by), theme);
-
+        const TabResult result = tab_behavior(gui, tab_id, rect, disabled);
+        tab_draw(rect, result, theme, tabs != nullptr ? tabs[i] : nullptr,
+                 i == active);
         // A full click or the focused tab's Enter/Space moves the
         // selection; selecting the already-selected tab is a no-op that
         // reports nothing.
-        if ((hit.clicked || key_selected) && i != active) {
+        if (result.clicked && i != active) {
             active = i;
             changed = true;
         }
@@ -95,6 +55,56 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     }
     gui.ids().pop();
     return changed;
+}
+
+TabResult tab_behavior(GuiContext& gui, WidgetId id, const Rect& rect,
+                       bool disabled, const HitShape& hit_shape) {
+    TabResult result{begin_widget_paint(gui, id, rect, disabled, hit_shape)};
+    // Enter or Space on the focused tab selects it - folded with the
+    // click into the one "pick me" signal a tab has.
+    result.clicked = result.hit.clicked || key_activated(gui, id);
+    return result;
+}
+
+void tab_draw(const Rect& rect, const TabResult& result,
+              const ChromeTheme& theme, const char* label, bool selected) {
+    // The focus ring: the on-accent as a 1px outline behind the tab, so
+    // Tab navigation is legible. Skipped for degenerate rows.
+    ring_draw(result.focused, rect, theme);
+
+    // The disabled look: the dead face for an idle tab, the selected
+    // tab's accent and the label dimmed - the selection stays
+    // legible in a dead strip, just faded.
+    const float dim_by = dim_factor(result.state, theme);
+
+    // Face priority: press feedback even on the selected tab, then
+    // the selection accent, then hover, then the dead face, then
+    // idle. A dead tab claims nothing, so its pressed/hover branches
+    // never fire - the Disabled slot is for the idle one.
+    std::uint32_t face = theme.control_bg;
+    if (result.state == WidgetState::Pressed) {
+        face = theme.control_pressed;
+    } else if (selected) {
+        face = dim(theme.control_on, dim_by);
+    } else if (result.state == WidgetState::Hovered) {
+        face = theme.control_hovered;
+    } else if (result.state == WidgetState::Disabled) {
+        face = theme.control_disabled;
+    }
+    r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                           theme.corner_radius, face);
+
+    // The tab's label, centered like a button's: fitted to the tab
+    // minus its padding. Tab labels never id (the strip ids by
+    // INDEX), so a "##" in a tab label is pure display sugar: it
+    // cuts and keys nothing.
+    char scratch[128];
+    const LabelFit fit =
+        fit_text(label,
+                 std::max(0.0f, rect.width - 2.0f * theme.padding), theme,
+                 scratch, sizeof(scratch));
+    draw_label(rect.x + (rect.width - fit.advance) * 0.5f, rect.y,
+               rect.height, fit, dim(theme.text, dim_by), theme);
 }
 
 Rect begin_panel(GuiContext& gui, LayoutCursor& layout,
@@ -130,6 +140,12 @@ void end_panel(GuiContext& gui, LayoutCursor& layout) {
     r2d::pop_clip();
     gui.pop_hit_clip();
     layout.end_panel();
+}
+
+void panel_draw(const Rect& bounds, const ChromeTheme& theme) {
+    // The one-line public spelling of the private chrome begin_panel
+    // paints before it pushes anything - the same draw both call.
+    panel_chrome(bounds, theme);
 }
 
 }  // namespace ws::ui::gui
