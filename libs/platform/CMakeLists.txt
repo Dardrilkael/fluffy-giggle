@@ -1,8 +1,9 @@
 # ws::platform is the headless platform-services lib (nextplan stage
 # 12): standard locations, the debounced file watch, the recent
-# files MRU, the autosave crash-recovery pair, the file dialogs and
-# the clipboard + message boxes now; the rest of the window-coupled
-# services next. ws::settings is PUBLIC like
+# files MRU, the autosave crash-recovery pair, the file dialogs,
+# the clipboard, the message boxes, the window title and the
+# single-instance grab - the headless halves of stage 12, complete.
+# ws::settings is PUBLIC like
 # ws::core: its FileSystem + json seams are the workspace's standard and
 # the reference lives in a public header (recent.hpp) - the ws::ui
 # gui-target precedent. Pure std + those two; the OS halves stay in
@@ -23,13 +24,15 @@ if(platform_sources)
       "${CMAKE_CURRENT_SOURCE_DIR}/src/locations_win.cpp"
       "${CMAKE_CURRENT_SOURCE_DIR}/src/dialogs_win.cpp"
       "${CMAKE_CURRENT_SOURCE_DIR}/src/clipboard_win.cpp"
-      "${CMAKE_CURRENT_SOURCE_DIR}/src/messagebox_win.cpp")
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/messagebox_win.cpp"
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/single_instance_win.cpp")
   else()
     list(REMOVE_ITEM platform_sources
       "${CMAKE_CURRENT_SOURCE_DIR}/src/locations_android.cpp"
       "${CMAKE_CURRENT_SOURCE_DIR}/src/dialogs_android.cpp"
       "${CMAKE_CURRENT_SOURCE_DIR}/src/clipboard_android.cpp"
-      "${CMAKE_CURRENT_SOURCE_DIR}/src/messagebox_android.cpp")
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/messagebox_android.cpp"
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/single_instance_android.cpp")
   endif()
   set_target_properties(ws_platform PROPERTIES SOURCES "${platform_sources}")
 endif()

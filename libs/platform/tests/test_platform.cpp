@@ -6,7 +6,9 @@
 // scripted fake + the refusal, and the message boxes' fake + the
 // refusal (the clipboard has no case on purpose: a test that
 // clobbers the user's clipboard would be a bad citizen - the
-// gallery round-trips it interactively instead).
+// gallery round-trips it interactively instead), and the window
+// title + the single-instance pair (the composer pure, the argv
+// parse pure, the grab real - two same-key holds in one process).
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -23,6 +25,7 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #include <ws/platform/autosave.hpp>
 #include <ws/platform/dialogs.hpp>
@@ -31,6 +34,8 @@
 #include <ws/platform/messagebox.hpp>
 #include <ws/platform/paths.hpp>
 #include <ws/platform/recent.hpp>
+#include <ws/platform/single_instance.hpp>
+#include <ws/platform/title.hpp>
 #include <ws/platform/watch.hpp>
 #include <ws/settings/errors.hpp>
 #include <ws/settings/json.hpp>
@@ -1003,4 +1008,67 @@ TEST_CASE("make_message_boxes hands back the native set") {
     const std::unique_ptr<ws::platform::MessageBoxes> boxes =
         ws::platform::make_message_boxes();
     REQUIRE(boxes != nullptr);
+}
+
+// ---- window title + single instance: the composer, the argv
+// ---- parse, the real grab
+
+TEST_CASE("window_title composes the Notepad convention") {
+    // the document leads; the star prefixes the whole title when
+    // there is unsaved work
+    REQUIRE(ws::platform::window_title("Editor", "", false).value() ==
+            "Editor");
+    REQUIRE(ws::platform::window_title("Editor", "", true).value() ==
+            "*Editor");
+    REQUIRE(ws::platform::window_title("Editor", "report.txt", false)
+                .value() == "report.txt - Editor");
+    REQUIRE(ws::platform::window_title("Editor", "report.txt", true)
+                .value() == "*report.txt - Editor");
+    // an empty app name is a refusal, not a title
+    const auto refused = ws::platform::window_title("", "report.txt", false);
+    REQUIRE_FALSE(refused.has_value());
+    REQUIRE(code_of(refused.error()) == "platform/6");
+}
+
+TEST_CASE("open_documents skips the program and the switches") {
+    const char* argv[] = {"app.exe",
+                          "C:/docs/one.txt",
+                          nullptr,
+                          "-v",
+                          "/log",
+                          "",
+                          "C:/docs/two.txt"};
+    const std::vector<std::string> documents =
+        ws::platform::open_documents(7, argv);
+    const std::vector<std::string> expected{"C:/docs/one.txt",
+                                            "C:/docs/two.txt"};
+    REQUIRE(documents == expected);
+    // argv[0] alone: nothing to open
+    REQUIRE(ws::platform::open_documents(1, argv).empty());
+}
+
+TEST_CASE("the single-instance grab is exclusive per key") {
+    // two grabs in one process contend for the same OS mutex - the
+    // second sees the first's hold, exactly like a second launch
+    {
+        const ws::platform::SingleInstance first{"ws-test-singleton"};
+        REQUIRE(first.is_primary());
+        {
+            const ws::platform::SingleInstance second{"ws-test-singleton"};
+            REQUIRE_FALSE(second.is_primary());
+            // a different key does not contend
+            const ws::platform::SingleInstance other{"ws-test-other-key"};
+            REQUIRE(other.is_primary());
+        }
+        // the second instance dying does NOT free the lock - the
+        // primary's hold persists until the primary itself exits,
+        // so a fresh grab while it lives is still a second one
+        const ws::platform::SingleInstance still_second{
+            "ws-test-singleton"};
+        REQUIRE_FALSE(still_second.is_primary());
+    }
+    // every handle closed: the named mutex died with them, so a
+    // later launch is primary again
+    const ws::platform::SingleInstance third{"ws-test-singleton"};
+    REQUIRE(third.is_primary());
 }

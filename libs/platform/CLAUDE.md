@@ -3,12 +3,13 @@
 The headless platform-services lib (nextplan stage 12): the OS-facing
 services an app needs, behind Result-only APIs - standard locations,
 the debounced file watch, the recent-files MRU, the autosave
-crash-recovery pair, the file dialogs, the clipboard and the message
-boxes now, the window title and single-instance later, riding
-ws::core (Result/Status) and the ws::settings seams (FileSystem +
-json) wherever a file is involved. Pure std + ws::core +
-ws::settings; the OS halves live in per-platform TUs and no
-platform header ever crosses into include/.
+crash-recovery pair, the file dialogs, the clipboard, the message
+boxes, the window title and the single-instance grab; the headless
+halves of stage 12 are complete, the ui bridge + gallery follow in
+ws::ui. Riding ws::core (Result/Status) and the ws::settings seams
+(FileSystem + json) wherever a file is involved. Pure std +
+ws::core + ws::settings; the OS halves live in per-platform TUs and
+no platform header ever crosses into include/.
 
 ## Purpose, per header
 
@@ -125,6 +126,23 @@ platform header ever crosses into include/.
   and records every request, an empty queue answering the request's
   first choice (the click-through). `make_message_boxes()`:
   MessageBoxW on windows, the refusal on android.
+- `title.hpp` - the window-title composer, pure: app + document +
+  dirty bit into the Notepad convention (the document leads, a star
+  prefixes the whole title when there is unsaved work). ui owns
+  the window and hands the result to the OS; an empty app name
+  answers invalid_argument - a title with no app is a caller bug.
+- `single_instance.hpp` - the one-process grab. `SingleInstance`
+  holds an OS-wide lock per key for the process lifetime - a named
+  mutex under Local\ on windows (per-login, not machine-global),
+  the OS's launchMode on android (every process is primary) - and
+  answers is_primary(); the second instance shows its complaint and
+  exits. A failed create claims primary anyway: possibly two
+  instances beats certainly none. `open_documents(argc, argv)` is
+  the open-with hook - pure, inline, platform-free: argv[0] and
+  the Windows switch spellings skipped, the rest verbatim. The
+  mutex's lifetime is the lock's: the primary's hold outlives the
+  second instance's exit, and the named mutex dies only with the
+  last handle.
 
 ## Allowed dependencies
 
@@ -231,6 +249,17 @@ platform header ever crosses into include/.
 - The wide/narrow edge is shared src-local win_utf8.hpp (never
   under include/), one conversion per TU, hoisted once the win TUs
   hit three.
+- The single-instance lock lives under Local\: per-login, so a
+  second login starts its own instance; machine-global (Global\)
+  was the wrong default for a desktop app.
+- The second instance's documents are not forwarded: it parses them,
+  shows its complaint and exits. The forward channel (the first app
+  that needs it picks the IPC - a window message, a socket, a file)
+  is a documented cut, not a forgotten one.
+- open_documents uses the Windows switch spellings ("-" and "/"):
+  a "/"-rooted POSIX path would read as a switch. The desktop is
+  Windows-only, and android has no argv - the launch intent carries
+  the documents, the activity's JNI to read.
 
 ## Tests
 
@@ -287,4 +316,12 @@ ref - an empty queue answering the request's first choice, the
 queues popping in order, every ask's request recorded verbatim
 (with the request mutated between asks visible in the records) -
 the refusal's platform/2, and the native factory constructed and
-destroyed only; a real ask raises a modal box.
+destroyed only; a real ask raises a modal box. The second half of
+phase 6 adds the title + single-instance trio: the composer's four
+compositions and the empty-app refusal, the argv parse (argv[0],
+switches, empties and a null skipped, the documents verbatim), and
+the real grab - a same-key second hold in one process answered
+not-primary, a different key not contending, the primary's hold
+outliving the second's death (a third grab while it lives is still
+a second one), and a fresh grab primary again once every handle
+closed.

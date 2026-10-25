@@ -74,9 +74,10 @@ One line each - the per-tree CLAUDE.md files carry the detail:
   pruned, persisted), the autosave crash-recovery pair (marker file,
   recover/discard), the file dialogs (open/save/folder, scripted
   fake for tests and the gallery), the clipboard (text/typed
-  payload/image) and the message boxes (scripted fake) over the
-  settings FileSystem + json seams; the title + single-instance
-  services come later.
+  payload/image), the message boxes (scripted fake), the
+  window-title composer and the single-instance grab over the
+  settings FileSystem + json seams - stage 12's headless halves;
+  the ui bridge + gallery page follow in ws::ui.
 - `apps/*` - the executables.
 
 ## Read when
