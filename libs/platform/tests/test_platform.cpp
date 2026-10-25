@@ -17,6 +17,7 @@
 #include <system_error>
 #include <utility>
 
+#include <ws/platform/autosave.hpp>
 #include <ws/platform/errors.hpp>
 #include <ws/platform/locations.hpp>
 #include <ws/platform/paths.hpp>
@@ -392,7 +393,9 @@ class FakeFs final : public ws::settings::FileSystem {
         return {};
     }
     bool remove(std::string_view path) override {
-        return files.erase(std::string{path}) > 0;
+        files.erase(std::string{path});
+        return true;  // the seam's contract: gone afterwards - removed
+                      // or never there - and the fake never gets stuck
     }
     [[nodiscard]] bool exists(std::string_view path) const override {
         return !missing.contains(std::string{path});
@@ -616,5 +619,239 @@ TEST_CASE("RecentFiles round trips through the real seam") {
     // the pinned missing file stays
     std::filesystem::remove(one, ignored);
     REQUIRE(back.menu_items().size() == 1);
+    std::filesystem::remove_all(base, ignored);
+}
+
+// ---- autosave: the crash-recovery state machine ----
+
+// The autosave suite's fake: an honest disk - only what was written
+// exists - plus the write-failure countdown. (FakeFs models the MRU's
+// world, where touched paths exist without being written.)
+class DiskFs final : public ws::settings::FileSystem {
+  public:
+    std::map<std::string, std::string> files;
+    int fail_writes = 0;
+
+    [[nodiscard]] ws::core::Result<std::string> read(
+        std::string_view path) const override {
+        const auto it = files.find(std::string{path});
+        if (it == files.end()) {
+            return ws::settings::fail(ws::settings::SettingsError::io_failed,
+                                      "read: missing");
+        }
+        return it->second;
+    }
+    ws::core::Status write(std::string_view path,
+                           std::string_view bytes) override {
+        if (fail_writes > 0) {
+            --fail_writes;
+            return ws::settings::fail(ws::settings::SettingsError::io_failed,
+                                      "write refused");
+        }
+        files[std::string{path}] = std::string{bytes};
+        return {};
+    }
+    ws::core::Status rename(std::string_view from,
+                            std::string_view to) override {
+        const auto it = files.find(std::string{from});
+        if (it == files.end()) {
+            return ws::settings::fail(ws::settings::SettingsError::io_failed,
+                                      "rename: missing");
+        }
+        files[std::string{to}] = it->second;
+        files.erase(it);
+        return {};
+    }
+    bool remove(std::string_view path) override {
+        files.erase(std::string{path});
+        return true;  // gone afterwards - removed or never there
+    }
+    [[nodiscard]] bool exists(std::string_view path) const override {
+        return files.contains(std::string{path});
+    }
+};
+
+// The fake-disk cases never touch the real filesystem: snapshot's
+// store-dir mkdir -p is injectable (DirEnsurer, the WatchSource
+// precedent for the half the FileSystem seam leaves out). Only the
+// snapshot-calling constructions need it - probe/recover/discard
+// never make a directory.
+const ws::platform::Autosave::DirEnsurer no_ensure =
+    [](std::string_view) { return ws::core::Status{}; };
+
+TEST_CASE("the autosave clean cycle: snapshot, finish, nothing claimed") {
+    DiskFs fs;
+    ws::platform::Autosave autosave{fs, "C:/docs/report.txt", "C:/store",
+                                    [] { return std::int64_t{1000}; },
+                                    no_ensure};
+    const auto fresh = autosave.probe();
+    REQUIRE(fresh.has_value());
+    REQUIRE_FALSE(fresh->has_value());
+
+    REQUIRE(autosave.snapshot("draft v1"));
+
+    // the marker on disk IS the crash evidence: a fresh instance - the
+    // next session - sees a session that never finished
+    ws::platform::Autosave next{fs, "C:/docs/report.txt", "C:/store",
+                                 [] { return std::int64_t{9000}; }};
+    const auto found = next.probe();
+    REQUIRE(found.has_value());
+    REQUIRE(found->has_value());
+    const ws::platform::Recovery& recovery = **found;
+    REQUIRE(recovery.document == "C:/docs/report.txt");
+    REQUIRE(recovery.autosave == autosave.autosave_path());
+    REQUIRE(recovery.saved_ms == 1000);
+
+    // the clean exit clears both, and probe agrees
+    REQUIRE(autosave.finish());
+    REQUIRE(fs.files.empty());
+    const auto after = next.probe();
+    REQUIRE(after.has_value());
+    REQUIRE_FALSE(after->has_value());
+}
+
+TEST_CASE("the crash + recover cycle hands the content back") {
+    DiskFs fs;
+    {
+        ws::platform::Autosave crashed{fs, "C:/docs/report.txt", "C:/store",
+                                       [] { return std::int64_t{1000}; },
+                                       no_ensure};
+        REQUIRE(crashed.snapshot("the draft"));
+        // no finish() - the session dies with the files in place
+    }
+    ws::platform::Autosave next{fs, "C:/docs/report.txt", "C:/store",
+                                [] { return std::int64_t{9000}; }};
+    REQUIRE(next.probe()->has_value());
+
+    const auto bytes = next.recover();
+    REQUIRE(bytes.has_value());
+    REQUIRE(*bytes == "the draft");
+    REQUIRE(fs.files.empty());               // the pair cleared
+    REQUIRE_FALSE(next.probe()->has_value());  // and nothing claimed since
+
+    // recover again: nothing left
+    const auto again = next.recover();
+    REQUIRE_FALSE(again.has_value());
+    REQUIRE(code_of(again.error()) == "platform/6");
+}
+
+TEST_CASE("the crash + discard cycle drops the content") {
+    DiskFs fs;
+    ws::platform::Autosave autosave{fs, "doc.txt", "store",
+                                    [] { return std::int64_t{100}; },
+                                    no_ensure};
+    REQUIRE(autosave.snapshot("draft"));
+    ws::platform::Autosave next{fs, "doc.txt", "store", {}};
+    REQUIRE(next.probe()->has_value());
+    REQUIRE(next.discard());
+    REQUIRE(fs.files.empty());
+    REQUIRE_FALSE(next.probe()->has_value());
+}
+
+TEST_CASE("a failed snapshot never promises a recovery") {
+    DiskFs fs;
+    ws::platform::Autosave autosave{fs, "doc.txt", "store",
+                                    [] { return std::int64_t{100}; },
+                                    no_ensure};
+    REQUIRE(autosave.snapshot("v1"));
+
+    fs.fail_writes = 1;  // the content write is refused
+    REQUIRE_FALSE(autosave.snapshot("v2"));
+    // the pair on disk is exactly the v1 pair
+    REQUIRE(fs.files.at(autosave.autosave_path()) == "v1");
+    const auto found = autosave.probe();
+    REQUIRE(found.has_value());
+    REQUIRE(found->has_value());
+    REQUIRE((**found).saved_ms == 100);  // the marker still claims v1
+
+    fs.fail_writes = 0;
+    REQUIRE(autosave.snapshot("v2"));  // the next snapshot lands
+    REQUIRE(fs.files.at(autosave.autosave_path()) == "v2");
+    REQUIRE(autosave.finish());
+}
+
+TEST_CASE("recover requires content; an orphan is recoverable") {
+    DiskFs fs;
+    ws::platform::Autosave autosave{fs, "doc.txt", "store", {}};
+    const auto nothing = autosave.recover();
+    REQUIRE_FALSE(nothing.has_value());
+    REQUIRE(code_of(nothing.error()) == "platform/6");
+
+    // an orphan: content without a marker - the crash window between
+    // the two writes - is recoverable by construction
+    fs.files[autosave.autosave_path()] = "orphaned";
+    const auto bytes = autosave.recover();
+    REQUIRE(bytes.has_value());
+    REQUIRE(*bytes == "orphaned");
+    REQUIRE(fs.files.empty());
+}
+
+TEST_CASE("a corrupt marker answers corrupt_file; discard still cleans") {
+    DiskFs fs;
+    ws::platform::Autosave autosave{fs, "doc.txt", "store", {}, no_ensure};
+    REQUIRE(autosave.snapshot("v1"));
+
+    fs.files[autosave.marker_path()] = "{ not json ]";
+    const auto found = autosave.probe();
+    REQUIRE_FALSE(found.has_value());
+    REQUIRE(code_of(found.error()) == "platform/5");
+    REQUIRE(autosave.discard());  // cleanup never needs the marker parsed
+    REQUIRE(fs.files.empty());
+
+    // a future shape is refused, never downgraded
+    fs.files[autosave.marker_path()] = R"({"version": 2})";
+    REQUIRE(code_of(autosave.probe().error()) == "platform/5");
+    // a marker missing its fields is refused
+    fs.files[autosave.marker_path()] =
+        R"({"version": 1, "document": "x"})";
+    REQUIRE(code_of(autosave.probe().error()) == "platform/5");
+    REQUIRE(autosave.discard());
+}
+
+TEST_CASE("the derived paths collide never and read as the document") {
+    DiskFs fs;
+    ws::platform::Autosave a{fs, "C:/docs/report.txt", "C:/store", {}};
+    ws::platform::Autosave b{fs, "D:/other/report.txt", "C:/store", {}};
+    REQUIRE(a.document() == "C:/docs/report.txt");  // normalized
+    REQUIRE(a.autosave_path() != b.autosave_path());
+    REQUIRE(a.marker_path() != b.marker_path());
+    // the doc's name leads (extension included), the store dir
+    // prefixes, the hash separates
+    REQUIRE(a.autosave_path().starts_with("C:/store/report.txt-"));
+    REQUIRE(a.autosave_path().ends_with(".autosave"));
+    REQUIRE(a.marker_path().ends_with(".marker"));
+    // two spellings of one document derive one path family
+    ws::platform::Autosave c{fs, "C:\\docs\\report.txt", "C:/store", {}};
+    REQUIRE(c.autosave_path() == a.autosave_path());
+    REQUIRE(c.marker_path() == a.marker_path());
+}
+
+TEST_CASE("Autosave round trips through the real seam") {
+    const std::filesystem::path base = scratch("autosave");
+    const std::string doc = (base / "report.txt").generic_string();
+    // the store dir does not exist yet - snapshot's mkdir -p makes it
+    const std::string store = (base / "cfg" / "autosave").generic_string();
+    {
+        ws::settings::StdFileSystem fs;
+        ws::platform::Autosave session{fs, doc, store,
+                                       [] { return std::int64_t{1000}; }};
+        REQUIRE_FALSE(session.probe()->has_value());
+        REQUIRE(session.snapshot("real draft"));
+        REQUIRE(fs.exists(session.autosave_path()));
+        REQUIRE(fs.exists(session.marker_path()));
+    }
+    {
+        ws::settings::StdFileSystem fs;
+        ws::platform::Autosave next{fs, doc, store, {}};
+        const auto found = next.probe();
+        REQUIRE(found.has_value());
+        REQUIRE(found->has_value());
+        REQUIRE((**found).saved_ms == 1000);
+        const auto bytes = next.recover();
+        REQUIRE(bytes.has_value());
+        REQUIRE(*bytes == "real draft");
+        REQUIRE_FALSE(next.probe()->has_value());
+    }
+    std::error_code ignored;
     std::filesystem::remove_all(base, ignored);
 }

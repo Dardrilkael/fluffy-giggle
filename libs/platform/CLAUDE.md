@@ -2,11 +2,11 @@
 
 The headless platform-services lib (nextplan stage 12): the OS-facing
 services an app needs, behind Result-only APIs - standard locations,
-the debounced file watch and the recent-files MRU now, dialogs and
-autosave later, riding ws::core (Result/Status) and the ws::settings
-seams (FileSystem + json) wherever a file is involved. Pure std +
-ws::core + ws::settings; the OS halves live in per-platform TUs and no
-platform header ever crosses into include/.
+the debounced file watch, the recent-files MRU and the autosave
+crash-recovery pair now, dialogs later, riding ws::core (Result/Status)
+and the ws::settings seams (FileSystem + json) wherever a file is
+involved. Pure std + ws::core + ws::settings; the OS halves live in
+per-platform TUs and no platform header ever crosses into include/.
 
 ## Purpose, per header
 
@@ -64,6 +64,24 @@ platform header ever crosses into include/.
   the in-memory lists, all-or-nothing; shape 1 only, a newer shape is
   refused never downgraded) and `save` (atomic through the seam's
   temp+rename, so a failure leaves the previous file intact).
+- `autosave.hpp` - the crash-recovery helper. `Autosave` keeps a
+  content copy plus a marker file in a caller-chosen store dir, both
+  named after the document - its name plus a hash of the normalized
+  path, so same-named documents in different folders never collide
+  and two spellings of one document derive one family. The marker is
+  the commit point: `snapshot` writes content first, marker last (a
+  crash between the two leaves an orphan nothing claims; a failed
+  write never promises a recovery), `finish` removes the marker
+  first (the same window can only orphan). `probe` reads the marker
+  alone as the crash evidence - a clean exit always clears it; a
+  corrupt marker answers corrupt_file while `discard` still cleans
+  the pair. `recover` requires only the content file (an orphan is
+  recoverable by construction) and holds the bytes before removing
+  anything. Two injected seams: the saved_ms clock (default
+  wall-clock ms - display information, not a debounce) and the
+  store-dir maker (DirEnsurer, default ensure_directory - the
+  FileSystem has five content verbs and no mkdir, the WatchSource
+  precedent).
 
 ## Allowed dependencies
 
@@ -121,6 +139,17 @@ platform header ever crosses into include/.
 - One RecentFiles owns one store path (the seam's fixed ".tmp"
   sibling); two instances on one path would race through the same
   temp name - the owner-thread rule already forbids it.
+- The autosave marker is the whole crash evidence: a content file
+  with no marker (the crash window between the two writes) is an
+  orphan probe never claims - it waits for the next snapshot to
+  overwrite it; nothing sweeps the store dir.
+- The marker shape is version 1, append-only; a corrupt marker costs
+  the prompt, not the draft - recover() keys on the content file
+  alone, and only discard() drops it.
+- saved_ms is wall-clock because it is shown ("autosave from 14:02"),
+  never compared for elapsed time: a clock that jumps moves it.
+- One Autosave per document, owner thread (the seam's fixed ".tmp"
+  sibling already forbids a second writer on one path).
 
 ## Tests
 
@@ -150,4 +179,17 @@ refused with in-memory lists intact and a future shape refused, the
 missing store as the first run, a failed save leaving the previous
 file byte-identical (then recovering), and a real StdFileSystem smoke
 in the OS temp: real files survive the prune, the removed one prunes,
-the pinned missing file stays.
+the pinned missing file stays. Phase 4 adds the autosave suite over
+DiskFs - a fake whose exists is honest (only what was written exists),
+with a write-failure countdown and the contract-true remove: the
+clean cycle (a fresh instance sees nothing, snapshot, a second
+instance sees the crashed pair, finish clears both), the crash +
+recover cycle (the content handed back, the pair cleared, the second
+recover's invalid_argument), crash + discard, the failed snapshot
+leaving the v1 pair intact with the marker still claiming v1, recover
+requiring content while an orphan content file is recoverable by
+construction, the corrupt marker answering corrupt_file with discard
+still cleaning and future/missing-field shapes refused, the derived
+paths (same name in different folders never colliding, two spellings
+one family), and a real StdFileSystem smoke where snapshot makes the
+store dir that does not exist yet.
