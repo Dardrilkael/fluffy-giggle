@@ -29,40 +29,10 @@ inline float label_top(float row_top, float row_height,
     return row_top + (row_height - h) * 0.5f;
 }
 
-// A scroll region's persistent state (Phase 3 side-table entry): how far
-// the content is scrolled up (offset), and the scroll range's top as
-// measured at the LAST end_scroll_panel (max_offset = content_height -
-// viewport_height). Begin clamps against the stale max, end refreshes
-// it - the immediate-mode one-frame lag, kept in one struct so the
-// floats share one side-table entry per panel. `thumb` is the thumb
-// grab in flight (the pointer holding it and where in the thumb the
-// grab landed) - the panel's own drag, beside the flow drag's
-// ScrollDragState, keyed in the same entry.
-struct ScrollState {
-    float offset = 0.0f;
-    float max_offset = 0.0f;
-    ws::input::PointerId thumb = ws::input::kNoPointer;  // the grabbing pointer, while held
-    float thumb_grab = 0.0f;  // the grab's offset within the thumb
-};
-
-// A scroll region's per-contact drag bookkeeping: a track exists from the
-// contact's press inside the viewport until it lifts. While it exists and
-// !dragging the press is still the CHILD's (a tap in progress, watched
-// against the threshold); dragging means the scroll owns the finger - the
-// child's press was cancelled and the offset follows the contact 1:1.
-struct ScrollDragTrack {
-    ws::input::PointerId id = ws::input::kNoPointer;
-    float press_y = 0.0f;  // the threshold is measured from the press
-    float last_y = 0.0f;  // the previous frame's y, for the drag delta
-    bool dragging = false;
-};
-
-// One per scroll panel (the persistent side-table discipline): a track per
-// live contact, so two fingers can drag one region and one lifting never
-// confuses the survivor's bookkeeping.
-struct ScrollDragState {
-    std::array<ScrollDragTrack, ws::input::InputFrame::kMaxTouches> tracks{};
-};
+// A scroll region's persistent state and drag table (ScrollState,
+// ScrollDragTrack, ScrollDragState) live in the public widgets.hpp now -
+// the split scroll halves take them by reference, so a custom scrollable
+// region holds its own in the side table.
 
 // drag_float's persistent half (the same side-table discipline): the grab
 // in flight - which pointer holds the press, where it started, and the

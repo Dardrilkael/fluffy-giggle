@@ -548,6 +548,90 @@ Rect begin_scroll_panel(GuiContext& gui, LayoutCursor& layout,
 void end_scroll_panel(GuiContext& gui, LayoutCursor& layout,
                       const ChromeTheme& theme);
 
+// --- the scrollable region's split halves ----------------------------------
+// The scroll panel's behavior halves, public so a caller laying its
+// own scrollable region runs the same rules the panel does: the touch
+// flow-drag, and the thumb's grab-and-follow with the paint that
+// follows it. Their state travels with them - hold a ScrollState and a
+// ScrollDragState in the context's persistent side table under your
+// own ids, the way the panel keys its reserved internal ones.
+
+// A scroll region's persistent state: how far the content is scrolled
+// up (offset), the scroll range's top as measured at the last end
+// (max_offset = content_height - viewport_height - begin clamps
+// against the stale max, end refreshes it, the one-frame lag), and
+// the thumb grab in flight: the pointer holding it and where in the
+// thumb the grab landed.
+struct ScrollState {
+    float offset = 0.0f;
+    float max_offset = 0.0f;
+    ws::input::PointerId thumb = ws::input::kNoPointer;  // the grabbing pointer, while held
+    float thumb_grab = 0.0f;  // the grab's offset within the thumb
+};
+
+// A scroll region's per-contact drag bookkeeping: a track exists from
+// the contact's press inside the viewport until it lifts. While it
+// exists and !dragging the press is still the CHILD's (a tap in
+// progress, watched against the threshold); dragging means the scroll
+// owns the finger - the child's press was cancelled and the offset
+// follows the contact 1:1.
+struct ScrollDragTrack {
+    ws::input::PointerId id = ws::input::kNoPointer;
+    float press_y = 0.0f;  // the threshold is measured from the press
+    float last_y = 0.0f;  // the previous frame's y, for the drag delta
+    bool dragging = false;
+};
+
+// One per scroll region (the persistent side-table discipline): a
+// track per live contact, so two fingers can drag one region and one
+// lifting never confuses the survivor's bookkeeping.
+struct ScrollDragState {
+    std::array<ScrollDragTrack, ws::input::InputFrame::kMaxTouches> tracks{};
+};
+
+// The thumb's resting place this frame - what the grab-and-follow
+// behavior hands the paint (and any custom hit-testing a caller wants
+// over its own region).
+struct ScrollbarThumb {
+    bool shows = false;    // a fitted region wears no thumb at all
+    float top = 0.0f;      // the thumb's resting top, in frame px
+    float height = 0.0f;   // proportional to the visible share, floored
+};
+
+// The touch flow-drag half: watch every live contact that pressed
+// inside `viewport`, and past theme.drag_threshold take the finger -
+// cancel_pointer ends the child's press with no click, and from the
+// crossing frame the offset follows the contact 1:1 until it lifts
+// (finger up = later content). The offset arrives unclamped; the
+// caller clamps against max_offset the way the panel does. The arm
+// claim (claim_scroll_arm, keyed on `scroll`'s address) keeps a
+// nested drag singular - the innermost region that saw the press wins
+// - and a track whose arm another region owns drops silently, so the
+// child keeps its tap. Nothing draws here.
+void scroll_drag_behavior(GuiContext& gui, ScrollState& scroll,
+                          ScrollDragState& drag, const Rect& viewport,
+                          const ChromeTheme& theme);
+
+// The thumb's grab-and-follow half, run at the END of the frame (the
+// children have laid; the offset this frame's grabs land on is last
+// frame's content): the whole right gutter (theme.scrollbar_band_width
+// wide) is grabbable - a fresh press there ends any child press
+// beneath it and takes the pointer, ON the thumb keeping the exact
+// grab offset, off it jumping the thumb centered under the pointer -
+// and the held pointer maps 1:1 through the track until it lifts. A
+// fitted region (max_offset 0, or an empty viewport) answers
+// shows=false and takes no press at all. Nothing draws here.
+ScrollbarThumb scroll_thumb_behavior(GuiContext& gui, ScrollState& scroll,
+                                     ScrollDragState& drag,
+                                     const Rect& viewport,
+                                     const ChromeTheme& theme);
+
+// The paint half: the thumb at its resting place, the theme's width
+// and border face at the gutter's left edge - one rounded quad, only
+// while the behavior says the region scrolls.
+void scrollbar_draw(const Rect& viewport, const ScrollbarThumb& thumb,
+                    const ChromeTheme& theme);
+
 // --- the overlay scopes ---------------------------------------------------------
 // The three floating panels: popup, tooltip, modal. All take the same shape
 // as begin_panel - chrome, clip, id scope, layout panel - and add the two

@@ -1936,3 +1936,210 @@ TEST_CASE("the menu hover engine clocks rest and ripens on its delays") {
     CHECK(menu_hover_step(dead, 2, 0.25f, 0.75f, 0.75f, false, true) ==
           MenuHoverAction::none);
 }
+
+TEST_CASE("the scroll drag behavior drives the flow and draws nothing") {
+    using ws::ui::gui::ScrollDragState;
+    using ws::ui::gui::ScrollState;
+    ws::ui::gui_test::stub.reset();
+
+    GuiContext gui;
+    ScrollState scroll;
+    ScrollDragState drag;
+    const ws::ui::gui::Rect viewport{12.0f, 12.0f, 176.0f, 76.0f};
+    const ws::input::PointerId finger{7u};
+
+    // The frames run the platform's own shape: the edges land on the
+    // frame, the gui adopts them, and next_frame clears before the
+    // next frame accumulates.
+    ws::input::InputFrame frame;
+
+    // Frame 1: the finger presses inside the viewport - the press is
+    // watched, not taken.
+    (void)frame.touch_down(finger, 60.0f, 52.0f);
+    gui.begin_frame(frame);
+    ws::ui::gui::scroll_drag_behavior(gui, scroll, drag, viewport,
+                                      kDefaultChrome);
+    gui.end_frame();
+    CHECK(scroll.offset == 0.0f);
+    frame.next_frame();
+
+    // Frame 2: a 4px wander (threshold 8) - still the child's tap.
+    (void)frame.touch_move(finger, 60.0f, 48.0f);
+    gui.begin_frame(frame);
+    ws::ui::gui::scroll_drag_behavior(gui, scroll, drag, viewport,
+                                      kDefaultChrome);
+    gui.end_frame();
+    CHECK(scroll.offset == 0.0f);
+    frame.next_frame();
+
+    // Frame 3: past the threshold - the crossing frame applies no
+    // jump; the deltas start at the crossing point.
+    (void)frame.touch_move(finger, 60.0f, 20.0f);
+    gui.begin_frame(frame);
+    ws::ui::gui::scroll_drag_behavior(gui, scroll, drag, viewport,
+                                      kDefaultChrome);
+    gui.end_frame();
+    CHECK(scroll.offset == 0.0f);
+    frame.next_frame();
+
+    // Frame 4: the drag follows 1:1 - 28px up is 28px of offset, the
+    // finger's capture running past the viewport's edge.
+    (void)frame.touch_move(finger, 60.0f, -8.0f);
+    gui.begin_frame(frame);
+    ws::ui::gui::scroll_drag_behavior(gui, scroll, drag, viewport,
+                                      kDefaultChrome);
+    gui.end_frame();
+    CHECK(scroll.offset == 28.0f);
+    frame.next_frame();
+
+    // Frame 5: the lift lands the last delta with it, then the track
+    // is gone - a later quiet frame drags nothing.
+    frame.touch_up(finger, 60.0f, -20.0f, false);
+    gui.begin_frame(frame);
+    ws::ui::gui::scroll_drag_behavior(gui, scroll, drag, viewport,
+                                      kDefaultChrome);
+    gui.end_frame();
+    CHECK(scroll.offset == 40.0f);
+    frame.next_frame();
+    gui.begin_frame(frame);
+    ws::ui::gui::scroll_drag_behavior(gui, scroll, drag, viewport,
+                                      kDefaultChrome);
+    gui.end_frame();
+    CHECK(scroll.offset == 40.0f);
+
+    // The behavior is the interaction alone: every counter at zero.
+    CHECK(ws::ui::gui_test::stub.quads == 0);
+    CHECK(ws::ui::gui_test::stub.rounded == 0);
+    CHECK(ws::ui::gui_test::stub.sprites == 0);
+    CHECK(ws::ui::gui_test::stub.texts == 0);
+    CHECK(ws::ui::gui_test::stub.clip_pushes == 0);
+    CHECK(ws::ui::gui_test::stub.clip_pops == 0);
+    CHECK(ws::ui::gui_test::stub.layer_sets == 0);
+}
+
+TEST_CASE("the thumb behavior grabs, jumps and follows - the fitted region "
+          "shows nothing") {
+    using ws::ui::gui::ScrollbarThumb;
+    using ws::ui::gui::ScrollDragState;
+    using ws::ui::gui::ScrollState;
+    ws::ui::gui_test::stub.reset();
+
+    GuiContext gui;
+    ScrollState scroll;
+    ScrollDragState drag;
+    // A 176x75 viewport over 300px of content (max_offset 225): the
+    // thumb is 75*75/300 = 18.75px tall, traveling 56.25px - all
+    // binary-exact, so the checks pin the math, not a float hair.
+    const ws::ui::gui::Rect viewport{12.0f, 12.0f, 176.0f, 75.0f};
+    scroll.max_offset = 225.0f;
+    const ws::input::PointerId finger{7u};
+
+    // A quiet frame: the thumb sits at the top, nothing grabbed.
+    ws::input::InputFrame frame;
+    gui.begin_frame(frame);
+    const ScrollbarThumb top =
+        ws::ui::gui::scroll_thumb_behavior(gui, scroll, drag, viewport,
+                                           kDefaultChrome);
+    gui.end_frame();
+    CHECK(top.shows);
+    CHECK(top.top == 12.0f);
+    CHECK(top.height == 18.75f);
+    frame.next_frame();
+
+    // A press below the thumb jumps it centered under the finger: py
+    // 49.5 is half the travel down, so the offset lands at 112.5 and
+    // the thumb's top at 40.125 - the pixel under the finger stays
+    // under the finger (grab = half the thumb).
+    (void)frame.touch_down(finger, 180.0f, 49.5f);
+    gui.begin_frame(frame);
+    const ScrollbarThumb jumped =
+        ws::ui::gui::scroll_thumb_behavior(gui, scroll, drag, viewport,
+                                           kDefaultChrome);
+    gui.end_frame();
+    CHECK(jumped.shows);
+    CHECK(scroll.offset == 112.5f);
+    CHECK(jumped.top == 40.125f);
+    CHECK(scroll.thumb == finger);
+    CHECK(scroll.thumb_grab == 9.375f);
+    frame.next_frame();
+
+    // The follow maps the held pointer 1:1 through the track: the
+    // finger pulled above the viewport's top clamps the offset to 0
+    // and the thumb parks at the top.
+    (void)frame.touch_move(finger, 180.0f, 6.0f);
+    gui.begin_frame(frame);
+    const ScrollbarThumb followed =
+        ws::ui::gui::scroll_thumb_behavior(gui, scroll, drag, viewport,
+                                           kDefaultChrome);
+    gui.end_frame();
+    CHECK(followed.shows);
+    CHECK(scroll.offset == 0.0f);
+    CHECK(followed.top == 12.0f);
+    frame.next_frame();
+
+    // The lift ends the grab; a fitted region answers shows=false and
+    // takes no press at all - the same input, the content shrunk to
+    // fit.
+    frame.touch_up(finger, 180.0f, 6.0f, false);
+    scroll.max_offset = 0.0f;
+    gui.begin_frame(frame);
+    const ScrollbarThumb fitted =
+        ws::ui::gui::scroll_thumb_behavior(gui, scroll, drag, viewport,
+                                           kDefaultChrome);
+    gui.end_frame();
+    CHECK(!fitted.shows);
+
+    // The behavior draws nothing through the whole grab.
+    CHECK(ws::ui::gui_test::stub.quads == 0);
+    CHECK(ws::ui::gui_test::stub.rounded == 0);
+}
+
+TEST_CASE("custom looks paint the scrollbar over the thumb behavior") {
+    using ws::ui::r2d::draw_quad;
+    using ws::ui::gui::ScrollbarThumb;
+    using ws::ui::gui::ScrollDragState;
+    using ws::ui::gui::ScrollState;
+    ws::ui::gui_test::stub.reset();
+
+    GuiContext gui;
+    ScrollState scroll;
+    ScrollDragState drag;
+    const ws::ui::gui::Rect viewport{12.0f, 12.0f, 176.0f, 75.0f};
+    scroll.max_offset = 225.0f;
+
+    // The stock paint over a quiet answer: ONE rounded quad - the
+    // thumb, 4px wide at the gutter's left edge, in the border face.
+    ws::input::InputFrame frame;
+    gui.begin_frame(frame);
+    const ScrollbarThumb thumb =
+        ws::ui::gui::scroll_thumb_behavior(gui, scroll, drag, viewport,
+                                           kDefaultChrome);
+    ws::ui::gui::scrollbar_draw(viewport, thumb, kDefaultChrome);
+    gui.end_frame();
+    CHECK(ws::ui::gui_test::stub.rounded == 1);
+    CHECK(ws::ui::gui_test::stub.quads == 0);
+
+    // The fitted answer paints nothing, wherever the caller puts it.
+    ws::ui::gui_test::stub.reset();
+    const ScrollbarThumb none;
+    ws::ui::gui::scrollbar_draw(viewport, none, kDefaultChrome);
+    CHECK(ws::ui::gui_test::stub.rounded == 0);
+
+    // A custom look owns every pixel over the behavior: an 8px square
+    // accent thumb in place of the stock bar, the rest untouched.
+    ws::ui::gui_test::stub.reset();
+    scroll.offset = 112.5f;  // mid-content, the same half-travel spot
+    gui.begin_frame(frame);
+    const ScrollbarThumb mid =
+        ws::ui::gui::scroll_thumb_behavior(gui, scroll, drag, viewport,
+                                           kDefaultChrome);
+    draw_quad(viewport.x + viewport.width - 12.0f, mid.top + mid.height -
+                                                       8.0f,
+              8.0f, 8.0f, kDefaultChrome.control_on);
+    gui.end_frame();
+    CHECK(mid.shows);
+    CHECK(mid.top == 12.0f + 112.5f / 225.0f * (75.0f - 18.75f));
+    CHECK(mid.top == 40.125f);
+    CHECK(ws::ui::gui_test::stub.quads == 1);
+    CHECK(ws::ui::gui_test::stub.rounded == 0);
+}
