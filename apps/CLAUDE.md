@@ -41,8 +41,11 @@ CMakeLists only wire ws libraries together.
   lists, a table, tabs, a live job row - the ws::jobs bridge: a counting
   worker under a progress bar with a cancel button, a failure that posts
   the error toast, all completions landing on the main thread between
-  frames - the overlays, the disabled scope), all five modal-dialog button
-  sets, the toast store's whole story, and a status bar the page keeps
-  clear of. No assets: the font is the system face resolved at the
+  frames - the overlays, the disabled scope, custom look - the stage 11
+  story: one slider value and one text buffer, each drawn three ways: the
+  composed widgets, a custom paint over the stock behavior, and a widget
+  the app owns outright off the raw state() seam), all five modal-dialog
+  button sets, the toast store's whole story, and a status bar the page
+  keeps clear of. No assets: the font is the system face resolved at the
   platform boundary (like playground's), so Windows and Android build it
   from one source unchanged.

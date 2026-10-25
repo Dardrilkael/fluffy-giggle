@@ -6,8 +6,12 @@
 // a table, tabs, a live job row (the ws::jobs bridge: a worker counting
 // under a progress bar, a cancel button, a failure toast), the overlays
 // (a raw popup, a raw modal scope, the
-// five modal-dialog button sets, the toast store), the disabled scope;
-// and a status bar the page keeps clear of. The gallery loads no
+// five modal-dialog button sets, the toast store), the disabled scope,
+// and the custom-look page (the stage-11 story: one slider value and one
+// text buffer, each drawn three ways - the composed widgets, a custom
+// paint over the stock behavior, and a widget the app owns outright off
+// the raw state() seam); and a status bar the page keeps clear of. The
+// gallery loads no
 // assets (its font is the system face, resolved here at the platform
 // boundary the same way playground resolves its own), so it builds for
 // Windows and Android unchanged: the gui draws through r2d and reads
@@ -48,6 +52,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <utility>
@@ -125,6 +130,7 @@ enum Section {
     kJobs,
     kOverlays,
     kDisabled,
+    kCustomLook,
     kSectionCount
 };
 
@@ -229,6 +235,10 @@ private:
         tab_ = 0;
         lock_check_ = false;
         lock_slide_ = 0.25f;
+        custom_slide_ = 0.5f;
+        step_value_ = 3;
+        std::snprintf(custom_buf_, sizeof custom_buf_, "skin me");
+        std::snprintf(digit_buf_, sizeof digit_buf_, "42");
         toasts_.push({"counters reset", gui::ToastSeverity::info, nullptr,
                       3.0f});
     }
@@ -264,6 +274,15 @@ private:
     }
 
     void draw_gallery(const ws::ui::r2d::FrameSize& frame);
+
+    // The custom-look fields' shared paint over a text behavior answer:
+    // the selection band under the text, the text at the content x the
+    // behavior mapped the caret against (the font, or the fontless bar),
+    // and a caret block gated on the reported blink phase. No face, no
+    // ring - the chrome around it is the caller's half.
+    void paint_bare_field(const gui::Rect& row,
+                          const gui::TextInputResult& result,
+                          const char* buf);
 
     // ---- the shell seats ----
     gui::GuiContext gui_;
@@ -317,6 +336,19 @@ private:
     bool lock_check_ = false;
     float lock_slide_ = 0.25f;
     gui::Toasts toasts_;
+
+    // ---- the custom-look demo (stage 11: the behavior/draw seam) ----
+    // One slider value and one text buffer shared by the standard and
+    // the custom-paint views of them - the seam's whole point: the same
+    // behavior state, several looks. The digits-only field keeps its
+    // own buffer, because its rule strips what the others accept.
+    float custom_slide_ = 0.5f;             // one value, three slider looks
+    char custom_buf_[32] = "skin me";       // one buffer, two field looks
+    gui::TextInputState underline_edit_;    // the underline field's edit pair
+    char digit_buf_[16] = "42";             // the digits-only field's buffer
+    gui::TextInputState digit_edit_;        // its edit pair
+    int step_value_ = 3;                    // the app-own stepper's lit count
+
     // The last event's one-line echo (the status bar's tail); every
     // widget reaction above writes here, nothing clears it.
     char status_[96] = "nothing has happened yet";
@@ -336,6 +368,42 @@ private:
     std::string work_text_;
     std::string fail_text_;
 };
+
+void GalleryApp::paint_bare_field(const gui::Rect& row,
+                                  const gui::TextInputResult& result,
+                                  const char* buf) {
+    namespace r2d = ws::ui::r2d;
+    // The marks ride the font's line box centered on the row, or the
+    // half-height bar fontless - the app re-derives what the stock
+    // widgets spell through their private helpers.
+    const float mark_h = chrome_.font != nullptr
+                             ? chrome_.font->line_height()
+                             : row.height * 0.5f;
+    const float mark_y = row.y + (row.height - mark_h) * 0.5f;
+    const float content_x = row.x + chrome_.padding;
+
+    // The selection band first, so the text draws over it - the span
+    // arrives already clamped; the visibility gates are this look's.
+    if (result.focused && result.sel_x1 > result.sel_x0) {
+        r2d::draw_quad(result.sel_x0, mark_y, result.sel_x1 - result.sel_x0,
+                       mark_h, chrome_.control_on);
+    }
+    if (chrome_.font != nullptr) {
+        (void)r2d::draw_text(content_x, mark_y, buf, *chrome_.font,
+                            chrome_.text);
+    } else if (buf[0] != '\0') {
+        // The fontless v1 bar at the per-char estimate, like every
+        // label the chrome draws without a face.
+        r2d::draw_quad(content_x, mark_y,
+                       chrome_.label_char_width *
+                           static_cast<float>(std::strlen(buf)),
+                       mark_h, chrome_.text);
+    }
+    if (result.focused && result.blink < 0.5f) {
+        r2d::draw_quad(result.caret_x, mark_y, 2.0f * scale_, mark_h,
+                       chrome_.text);
+    }
+}
 
 void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
     // ---- the modal dialog first: the veil-first rule ------------------------
@@ -1129,6 +1197,165 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
                               lock_slide_, 0.0f, 1.0f, -1.0f)) {
         }
         gui_.end_disabled();
+    }
+
+    // --- custom look: the stage-11 behavior/draw seam ----------------------
+    // One slider value and one text buffer, each drawn three ways: the
+    // composed widgets; the same behavior under the app's own paint;
+    // and the stepper, a widget the app owns outright - its own value
+    // mapping over the raw citizenship seam, its own pixels. The ids
+    // come from the same label well every composed row draws from.
+    if (gui::collapsing_header(gui_, layout_, chrome_,
+                               "custom look: the behavior/draw seam",
+                               section_[kCustomLook])) {
+        gui::text(layout_, chrome_,
+                  "one slider value, three ways to draw it:", -1.0f);
+
+        // The composed row: the stock behavior and the stock look.
+        (void)gui::slider_float(gui_, layout_, chrome_, "standard",
+                               custom_slide_, 0.0f, 1.0f, -1.0f);
+
+        // Custom draw on the default behavior: the pixel bar. The same
+        // click-to-set, drag and arrow steps slider_behavior runs, the
+        // value written into the one shared member - painted as chunky
+        // blocks instead of the rail-and-handle look. The face ladder
+        // shows through the result: the off blocks warm on hover.
+        gui::text(layout_, chrome_, "pixel bar - custom draw", -1.0f);
+        const gui::Rect pixel_row =
+            layout_.next(page.width, chrome_.control_height);
+        const gui::SliderResult pixel = gui::slider_behavior(
+            gui_, gui_.ids().id("pixel bar"), pixel_row, custom_slide_,
+            0.0f, 1.0f, (1.0f - 0.0f) / 100.0f);
+        {
+            constexpr int kBlocks = 12;
+            const float gap = 2.0f * scale_;
+            const float block_w = std::max(
+                0.0f, (pixel_row.width - gap * (kBlocks - 1)) / kBlocks);
+            const std::uint32_t off =
+                pixel.state == gui::WidgetState::Hovered
+                    ? chrome_.control_hovered
+                    : chrome_.control_disabled;
+            for (int i = 0; i < kBlocks; ++i) {
+                const bool lit = custom_slide_ >= (i + 0.5f) / kBlocks;
+                ws::ui::r2d::draw_quad(
+                    pixel_row.x + i * (block_w + gap),
+                    pixel_row.y + 3.0f * scale_, block_w,
+                    pixel_row.height - 6.0f * scale_,
+                    lit ? chrome_.control_on : off);
+            }
+        }
+
+        // Fully custom: the app owns the stepper. state() is the whole
+        // citizenship seam - one hit-test, the press capture, the Tab
+        // walk through register_focusable - and the mapping (the
+        // pointer quantized to ten steps, the arrows stepping while
+        // focused) and the paint are the app's own.
+        gui::text(layout_, chrome_, "step leds - fully custom", -1.0f);
+        const gui::Rect step_row =
+            layout_.next(page.width, chrome_.control_height);
+        const gui::WidgetId step_id = gui_.ids().id("step leds");
+        gui_.register_focusable(step_id);
+        const gui::WidgetResult step = gui_.state(step_id, step_row, false);
+        constexpr int kSteps = 10;
+        if (step.hit.pressed) {
+            const ws::input::PointerView* finger =
+                gui_.pointer(step.hit.pointer);
+            if (finger != nullptr && finger->down) {
+                const float along = std::clamp(
+                    (finger->x - step_row.x) / step_row.width, 0.0f, 1.0f);
+                step_value_ = std::min(
+                    kSteps - 1, static_cast<int>(along * kSteps + 0.5f));
+            }
+        }
+        if (gui_.is_focused(step_id)) {
+            if (gui_.input().key_pressed[ws::input::keys::kLeft]) {
+                step_value_ = std::max(0, step_value_ - 1);
+            }
+            if (gui_.input().key_pressed[ws::input::keys::kRight]) {
+                step_value_ = std::min(kSteps - 1, step_value_ + 1);
+            }
+        }
+        {
+            const std::uint32_t off =
+                step.state == gui::WidgetState::Hovered
+                    ? chrome_.control_hovered
+                    : chrome_.control_disabled;
+            const float gap = 3.0f * scale_;
+            const float block_w = std::max(
+                0.0f, (step_row.width - gap * (kSteps - 1)) / kSteps);
+            for (int i = 0; i < kSteps; ++i) {
+                ws::ui::r2d::draw_quad(
+                    step_row.x + i * (block_w + gap),
+                    step_row.y + 4.0f * scale_, block_w,
+                    step_row.height - 8.0f * scale_,
+                    i < step_value_ ? chrome_.control_on : off);
+            }
+            if (gui_.is_focused(step_id)) {
+                // The app's own focus mark, since no stock ring runs.
+                ws::ui::r2d::draw_quad(
+                    step_row.x, step_row.y + step_row.height - 2.0f * scale_,
+                    step_row.width, 2.0f * scale_, chrome_.control_on);
+            }
+        }
+
+        gui::text(layout_, chrome_,
+                  "one text buffer, three fields over it:", -1.0f);
+
+        // The composed field, over the shared buffer.
+        if (gui::text_input(gui_, layout_, chrome_, "standard field",
+                            custom_buf_,
+                            static_cast<int>(sizeof custom_buf_), -1.0f)) {
+            std::snprintf(status_, sizeof status_, "typed: %s", custom_buf_);
+        }
+
+        // Custom draw on the default behavior: the underline field over
+        // the SAME buffer - a second view of one caller-owned string,
+        // under its own editing pair. The behavior answers the caret
+        // and the selection as pixels; this look draws them its own
+        // way, no rounded face, no ring.
+        gui::text(layout_, chrome_, "underline - custom draw", -1.0f);
+        const gui::Rect line_row =
+            layout_.next(page.width, chrome_.control_height);
+        const gui::TextInputResult line = gui::text_input_behavior(
+            gui_, gui_.ids().id("underline field"), line_row, custom_buf_,
+            static_cast<int>(sizeof custom_buf_), underline_edit_, chrome_);
+        if (line.edited) {
+            std::snprintf(status_, sizeof status_, "typed: %s", custom_buf_);
+        }
+        ws::ui::r2d::draw_quad(
+            line_row.x, line_row.y + line_row.height - 2.0f * scale_,
+            line_row.width, 2.0f * scale_,
+            line.focused ? chrome_.control_on : chrome_.border);
+        paint_bare_field(line_row, line, custom_buf_);
+
+        // Both custom: the digits-only field - the app's own rule on
+        // the same behavior (a non-digit the frame typed is stripped
+        // from the buffer the app owns; the behavior's own write-back
+        // clamp settles the caret into the shorter line next frame)
+        // and its own look, a boxed inset.
+        gui::text(layout_, chrome_, "digits only - custom rules", -1.0f);
+        const gui::Rect digit_row =
+            layout_.next(page.width, chrome_.control_height);
+        const gui::TextInputResult digits = gui::text_input_behavior(
+            gui_, gui_.ids().id("digits field"), digit_row, digit_buf_,
+            static_cast<int>(sizeof digit_buf_), digit_edit_, chrome_);
+        if (digits.edited) {
+            int keep = 0;
+            for (int i = 0; digit_buf_[i] != '\0'; ++i) {
+                if (digit_buf_[i] >= '0' && digit_buf_[i] <= '9') {
+                    digit_buf_[keep++] = digit_buf_[i];
+                }
+            }
+            digit_buf_[keep] = '\0';
+            std::snprintf(status_, sizeof status_, "digits: %s", digit_buf_);
+        }
+        ws::ui::r2d::draw_quad(digit_row.x, digit_row.y, digit_row.width,
+                               digit_row.height, chrome_.border);
+        ws::ui::r2d::draw_quad(digit_row.x + 1.0f, digit_row.y + 1.0f,
+                               std::max(0.0f, digit_row.width - 2.0f),
+                               std::max(0.0f, digit_row.height - 2.0f),
+                               chrome_.panel_bg);
+        paint_bare_field(digit_row, digits, digit_buf_);
     }
 
     gui::end_scroll_panel(gui_, layout_, chrome_);
