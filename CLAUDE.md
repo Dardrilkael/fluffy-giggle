@@ -71,9 +71,10 @@ One line each - the per-tree CLAUDE.md files carry the detail:
 - `libs/platform` - the headless platform-services lib: standard
   locations (supplied roots win over the OS truth), lexical path
   helpers, the debounced file watch, the recent-files MRU (pinned,
-  pruned, persisted) and the autosave crash-recovery pair (marker
-  file, recover/discard) over the settings FileSystem + json seams;
-  dialogs come later.
+  pruned, persisted), the autosave crash-recovery pair (marker file,
+  recover/discard) and the file dialogs (open/save/folder, scripted
+  fake for tests and the gallery) over the settings FileSystem +
+  json seams; the window-coupled services come later.
 - `apps/*` - the executables.
 
 ## Read when

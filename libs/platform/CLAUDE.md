@@ -2,11 +2,12 @@
 
 The headless platform-services lib (nextplan stage 12): the OS-facing
 services an app needs, behind Result-only APIs - standard locations,
-the debounced file watch, the recent-files MRU and the autosave
-crash-recovery pair now, dialogs later, riding ws::core (Result/Status)
-and the ws::settings seams (FileSystem + json) wherever a file is
-involved. Pure std + ws::core + ws::settings; the OS halves live in
-per-platform TUs and no platform header ever crosses into include/.
+the debounced file watch, the recent-files MRU, the autosave
+crash-recovery pair and the file dialogs now, the window-coupled
+services later, riding ws::core (Result/Status) and the ws::settings
+seams (FileSystem + json) wherever a file is involved. Pure std +
+ws::core + ws::settings; the OS halves live in per-platform TUs and
+no platform header ever crosses into include/.
 
 ## Purpose, per header
 
@@ -82,6 +83,26 @@ per-platform TUs and no platform header ever crosses into include/.
   store-dir maker (DirEnsurer, default ensure_directory - the
   FileSystem has five content verbs and no mkdir, the WatchSource
   precedent).
+- `dialogs.hpp` - the pickers behind one interface, so tests and the
+  gallery can script a fake: `FileFilter` (a name + the OS-shaped
+  pattern, passed through verbatim - the OS is the matcher),
+  `FileDialogOptions` (title, default_path - the folder to start in
+  for the open and folder dialogs, a file name for save - filters)
+  and `FileDialogs` (open_file/open_files/save_file/select_folder).
+  Every call blocks while the user decides: the caller's worker
+  thread, never the render loop. A dismissed dialog is nullopt - an
+  empty list from open_files - a normal answer, never an error.
+  `UnavailableFileDialogs` is the android answer (the Storage Access
+  Framework lives behind the activity, which only the app TU knows)
+  and a public class so the refusal is testable everywhere.
+  `FakeFileDialogs` scripts the answers - a queue per kind, an empty
+  queue or a nullopt entry answers a dismissal - and records every
+  call's options. `make_file_dialogs()` builds the platform's native
+  set: the COM IFileDialog family on windows (a per-call STA
+  apartment, an MTA thread answers unavailable), the refusal on
+  android. The linux story is documented-only
+  (xdg-desktop-portal): the workspace's desktop is Windows-only, the
+  ws::ui windowing precedent.
 
 ## Allowed dependencies
 
@@ -150,6 +171,20 @@ per-platform TUs and no platform header ever crosses into include/.
   never compared for elapsed time: a clock that jumps moves it.
 - One Autosave per document, owner thread (the seam's fixed ".tmp"
   sibling already forbids a second writer on one path).
+- The dialogs map a dismissal to nullopt, never to the canceled
+  code: the Result's failure channel stays for the platform failing,
+  and canceled remains for a caller that prefers to re-map (the
+  table is append-only).
+- The COM apartment is paid per call: a dialog is a human-speed
+  event, and the lib owns no threads to hold an apartment. A worker
+  already in the MTA apartment answers unavailable - a dialog cannot
+  host there.
+- The dialogs' title and default_path are hints, never failures: a
+  folder the shell cannot parse falls back to the OS's remembered
+  one, and a filter with an empty name or pattern is dropped.
+- The multi-select skips an item that cannot be named (FORCEFILESYSTEM
+  makes it a non-case in practice); the single kinds answer
+  io_failed when their one result has no file-system path.
 
 ## Tests
 
@@ -192,4 +227,11 @@ construction, the corrupt marker answering corrupt_file with discard
 still cleaning and future/missing-field shapes refused, the derived
 paths (same name in different folders never colliding, two spellings
 one family), and a real StdFileSystem smoke where snapshot makes the
-store dir that does not exist yet.
+store dir that does not exist yet. Phase 5 adds the dialogs suite:
+the fake playing the scripted answers through the interface ref (an
+empty queue answering dismissals, the queues popping in order, a
+nullopt entry scripted as a dismissal, the files vector, every
+call's options recorded verbatim), the unavailable set refusing
+every kind with category and code asserted, and the native factory
+constructed and destroyed only - a real call raises a modal dialog
+and would hang the suite; the gallery exercises it interactively.

@@ -1,7 +1,9 @@
 // ws::platform's suite: the lexical path helpers, the Locations seam
 // (supplied roots win, the OS-truth smoke), ensure_directory on real
-// scratch dirs under the OS temp, the debounced watch on a fake clock
-// and the recent-files MRU over a FileSystem fake.
+// scratch dirs under the OS temp, the debounced watch on a fake
+// clock, the recent-files MRU over a FileSystem fake, the autosave
+// crash-recovery state machine over a fake disk, and the file
+// dialogs' scripted fake + the refusal.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -11,6 +13,8 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -18,6 +22,7 @@
 #include <utility>
 
 #include <ws/platform/autosave.hpp>
+#include <ws/platform/dialogs.hpp>
 #include <ws/platform/errors.hpp>
 #include <ws/platform/locations.hpp>
 #include <ws/platform/paths.hpp>
@@ -854,4 +859,84 @@ TEST_CASE("Autosave round trips through the real seam") {
     }
     std::error_code ignored;
     std::filesystem::remove_all(base, ignored);
+}
+
+// ---- file dialogs: the scripted fake + the refusal ----
+
+TEST_CASE("the fake dialogs play the scripted answers") {
+    ws::platform::FakeFileDialogs scripted;
+    ws::platform::FileDialogs& dialogs = scripted;
+
+    ws::platform::FileDialogOptions options;
+    options.title = "pick";
+    options.default_path = "C:/docs";
+    options.filters.push_back({"Text", "*.txt"});
+    options.filters.push_back({"All", "*.*"});
+
+    // nothing staged: every kind answers a dismissed dialog
+    const auto no_open = dialogs.open_file(options);
+    REQUIRE(no_open.has_value());
+    REQUIRE_FALSE(no_open->has_value());
+    const auto no_files = dialogs.open_files(options);
+    REQUIRE(no_files.has_value());
+    REQUIRE(no_files->empty());
+    const auto no_save = dialogs.save_file(options);
+    REQUIRE(no_save.has_value());
+    REQUIRE_FALSE(no_save->has_value());
+    const auto no_folder = dialogs.select_folder(options);
+    REQUIRE(no_folder.has_value());
+    REQUIRE_FALSE(no_folder->has_value());
+
+    // scripted answers pop in order; a nullopt entry is a dismissal
+    scripted.open_queue = {"C:/docs/a.txt", std::nullopt};
+    REQUIRE(dialogs.open_file(options)->value_or("") == "C:/docs/a.txt");
+    const auto dismissed = dialogs.open_file(options);
+    REQUIRE(dismissed.has_value());
+    REQUIRE_FALSE(dismissed->has_value());
+    // and the queue stays empty: dismissed from here on
+    REQUIRE_FALSE(dialogs.open_file(options)->has_value());
+
+    scripted.files_queue = {{"C:/docs/a.txt", "C:/docs/b.txt"}};
+    const auto picked = dialogs.open_files(options);
+    REQUIRE(picked.has_value());
+    REQUIRE(picked->size() == 2);
+    REQUIRE((*picked)[1] == "C:/docs/b.txt");
+
+    scripted.save_queue = {"C:/docs/report.txt"};
+    REQUIRE(dialogs.save_file(options)->value_or("") ==
+            "C:/docs/report.txt");
+    scripted.folder_queue = {"C:/docs"};
+    REQUIRE(dialogs.select_folder(options)->value_or("") == "C:/docs");
+
+    // every call recorded its options verbatim
+    REQUIRE(scripted.open_calls.size() == 4);
+    REQUIRE(scripted.files_calls.size() == 2);
+    REQUIRE(scripted.save_calls.size() == 2);
+    REQUIRE(scripted.folder_calls.size() == 2);
+    const ws::platform::FileDialogOptions& recorded = scripted.open_calls[0];
+    REQUIRE(recorded.title == "pick");
+    REQUIRE(recorded.default_path == "C:/docs");
+    REQUIRE(recorded.filters.size() == 2);
+    REQUIRE(recorded.filters[0].pattern == "*.txt");
+    REQUIRE(recorded.filters[1].pattern == "*.*");
+}
+
+TEST_CASE("the unavailable dialog set refuses every kind") {
+    ws::platform::UnavailableFileDialogs dialogs;
+
+    const auto opened = dialogs.open_file({});
+    REQUIRE_FALSE(opened.has_value());
+    REQUIRE(code_of(opened.error()) == "platform/2");
+    REQUIRE(code_of(dialogs.open_files({}).error()) == "platform/2");
+    REQUIRE(code_of(dialogs.save_file({}).error()) == "platform/2");
+    REQUIRE(code_of(dialogs.select_folder({}).error()) == "platform/2");
+}
+
+TEST_CASE("make_file_dialogs hands back the native set") {
+    // Constructed and destroyed only: a real call raises a modal
+    // dialog and would hang the suite - the native set is exercised
+    // interactively by the gallery (phase 7).
+    const std::unique_ptr<ws::platform::FileDialogs> dialogs =
+        ws::platform::make_file_dialogs();
+    REQUIRE(dialogs != nullptr);
 }
