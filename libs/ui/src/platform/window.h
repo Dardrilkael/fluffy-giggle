@@ -130,6 +130,18 @@ public:
     // today: a JNI hop is a later item) - so a platform opts in by
     // overriding, like every other capability here.
     virtual void install_clipboard(gui::GuiContext& gui) { (void)gui; }
+
+    // The stage-12 halves the window itself owns. set_title hands the
+    // platform a composed title - the answer of ws::platform's
+    // window_title(), which stays headless: this seam is where the
+    // composed string meets the OS window. set_cursor picks one of the
+    // standard system pointers (CursorShape in <ws/ui/app.hpp>). Base
+    // defaults are no-ops: a host whose platform owns the surface keeps
+    // them - Android's activity owns the window label (manifest-bound)
+    // and the glue exposes no cursor API, so a USB mouse there keeps
+    // the system pointer.
+    virtual void set_title(std::string_view title) { (void)title; }
+    virtual void set_cursor(CursorShape shape) { (void)shape; }
 };
 
 // The platform host for this build: window_glfw.cpp on desktop,

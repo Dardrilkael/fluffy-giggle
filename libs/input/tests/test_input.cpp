@@ -33,6 +33,15 @@ TEST_CASE("every event carries its own type and starts unhandled") {
           EventType::TouchReleased);
     CHECK(ws::input::TextInputEvent{U'x'}.type() == EventType::TextInput);
 
+    ws::input::FileDroppedEvent drop{
+        std::vector<std::string>{"C:/docs/one.txt", "C:/docs/two.txt"}};
+    CHECK(drop.type() == EventType::FileDropped);
+    CHECK(drop.static_type() == EventType::FileDropped);
+    CHECK(drop.paths.size() == 2);
+    CHECK(drop.paths[0] == "C:/docs/one.txt");
+    CHECK(drop.paths[1] == "C:/docs/two.txt");
+    CHECK(drop.handled == false);
+
     ws::input::WindowResizeEvent resize{800, 600};
     CHECK(resize.handled == false);
     CHECK(resize.width == 800);
@@ -87,6 +96,27 @@ TEST_CASE("dispatcher skips events the shell pre-marked handled") {
                   return true;
               }) == false);
     CHECK(called == false);
+}
+
+TEST_CASE("a file drop dispatches and its paths cross intact") {
+    // The stage-12 arrival: the windowing layer emits one event per
+    // drop with the paths already copied out of the OS callback. The
+    // handler sees them by reference and marks the event consumed.
+    ws::input::FileDroppedEvent event{
+        std::vector<std::string>{"C:/one.txt", "C:/two.txt"}};
+    ws::input::EventDispatcher dispatcher{event};
+
+    bool called = false;
+    CHECK(dispatcher.dispatch<ws::input::FileDroppedEvent>(
+              [&](const ws::input::FileDroppedEvent& e) {
+                  called = true;
+                  CHECK(e.paths.size() == 2);
+                  CHECK(e.paths[0] == "C:/one.txt");
+                  CHECK(e.paths[1] == "C:/two.txt");
+                  return true;
+              }) == true);
+    CHECK(called);
+    CHECK(event.handled == true);
 }
 
 // --- InputFrame: one frame's snapshot ---------------------------------------

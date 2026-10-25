@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 
 #ifdef __ANDROID__
 struct android_app;  // opaque native_app_glue handle; never defined in a
@@ -37,6 +38,21 @@ class RenderCommandQueue;
 namespace gui {
 class GuiContext;  // the clipboard seam's target (installed, never owned)
 }  // namespace gui
+
+// The standard system pointers (stage 12's cursor shape). The arrow is
+// the OS default; the rest are the shapes every desktop shares. A host
+// without a cursor API keeps the default (Android's glue exposes none -
+// a USB mouse there carries the system pointer).
+enum class CursorShape {
+    arrow,         // the default pointer - clears any shape set earlier
+    text,          // the I-beam, over editable text
+    crosshair,     // pixel-precise picking
+    hand,          // a clickable thing
+    resize_ew,     // a horizontal resize edge
+    resize_ns,     // a vertical resize edge
+    resize_all,    // the four-way move
+    not_allowed,   // the operation will not work here
+};
 
 // Generic application shell: window + Vulkan context + Dear ImGui (docking)
 // + ImPlot, with a Hazel-style event system and a render command queue.
@@ -101,6 +117,20 @@ public:
     // before run(), the headless default (the same answer a probe-less
     // platform gives).
     bool prefers_dark() const;
+
+    // Hands `title` to the platform window. The intended caller is the
+    // composed answer of ws::platform's window_title(app, document,
+    // dirty) - the stage-12 split of labor: ws::platform composes the
+    // string (pure, headless) and this seam is where it meets the OS
+    // window ui owns. No-op before run() and on a host whose platform
+    // owns the label (Android: the activity's label is manifest-bound).
+    void set_title(std::string_view title);
+
+    // One of the standard system pointers over this window (see
+    // CursorShape). No-op before run() and on a host without a cursor
+    // API. The shape persists until the next call - set CursorShape::
+    // arrow to hand the default back.
+    void set_cursor(CursorShape shape);
 
 protected:
     // Called once after the context and ImGui are ready, before the first

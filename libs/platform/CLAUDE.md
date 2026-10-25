@@ -4,9 +4,11 @@ The headless platform-services lib (nextplan stage 12): the OS-facing
 services an app needs, behind Result-only APIs - standard locations,
 the debounced file watch, the recent-files MRU, the autosave
 crash-recovery pair, the file dialogs, the clipboard, the message
-boxes, the window title and the single-instance grab; the headless
-halves of stage 12 are complete, the ui bridge + gallery follow in
-ws::ui. Riding ws::core (Result/Status) and the ws::settings seams
+boxes, the window title and the single-instance grab. Stage 12 is
+complete: the headless halves live here, the ui bridge (the
+drag-drop event, the cursor/title window seams, the dialogs
+marshall) and the gallery's platform page live in ws::ui. Riding
+ws::core (Result/Status) and the ws::settings seams
 (FileSystem + json) wherever a file is involved. Pure std +
 ws::core + ws::settings; the OS halves live in per-platform TUs and
 no platform header ever crosses into include/.

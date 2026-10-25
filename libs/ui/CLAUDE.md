@@ -51,12 +51,13 @@ libs/ui/
 
 ## Event system
 
-- Event types: `WindowClose`, `WindowResize`, `KeyPressed`, `KeyReleased`, `MouseButtonPressed`, `MouseButtonReleased`, `MouseMoved`, `MouseScrolled`, `TouchPressed`, `TouchMoved`, `TouchReleased`, `TextInput`.
+- Event types: `WindowClose`, `WindowResize`, `KeyPressed`, `KeyReleased`, `MouseButtonPressed`, `MouseButtonReleased`, `MouseMoved`, `MouseScrolled`, `TouchPressed`, `TouchMoved`, `TouchReleased`, `TextInput`, `FileDropped`.
 - Touch events carry `pointer_id` and `x`/`y` in framebuffer pixels. `TouchReleasedEvent` adds `cancelled`. `TextInputEvent` is one UTF-32 codepoint per event.
+- `FileDroppedEvent` (stage 12) is one event per drop, its utf-8 paths copied at the platform edge before the OS callback returns - the **only heap-owning event**, so its constructor is the one that is not constexpr. Desktop arrival only (GLFW emits it; no Android TU does), so a handler simply never fires there.
 - `EventDispatcher(Event&)::dispatch<T>(fn)` calls `fn` only on a type match and sets `handled` from its return value.
 - `on_event` runs synchronously on the main thread before `on_update()`.
-- Coalescing: mouse move (latest position), scroll (summed), `TouchMoved` (latest per pointer id). `TextInput` never coalesces.
-- ImGui gets first refusal through `WantCaptureMouse` / `WantCaptureKeyboard`. `WindowResize` / `WindowClose` always deliver. **Touch events are never ImGui-gated** (ImGui is fed by a touch→mouse bridge). `TextInput` gates like `KeyPressed`.
+- Coalescing: mouse move (latest position), scroll (summed), `TouchMoved` (latest per pointer id). `TextInput` and `FileDropped` never coalesce (arrival order).
+- ImGui gets first refusal through `WantCaptureMouse` / `WantCaptureKeyboard`. `WindowResize` / `WindowClose` always deliver. **Touch events are never ImGui-gated** (ImGui is fed by a touch→mouse bridge). `TextInput` gates like `KeyPressed`; `FileDropped` falls to the never-gated default.
 - Zero-size resize events (Windows minimize) are suppressed.
 
 ## Render command queue
@@ -180,6 +181,8 @@ Widget functions hold no state; persistence lives in `GuiContext` side tables.
 - `on_update()`: once per frame. **Do not call `ImGui::Render()` or the backend NewFrame functions**; the shell owns the frame lifecycle.
 - `ui_scale()`: Android density / 160, or the desktop content scale. It is 1.0 before `run()` and valid from `on_setup()`.
 - `prefers_dark()`: the OS dark-mode answer, live per call — Windows reads the Personalize registry value (advapi32, linked PRIVATE), Android the glue's `AConfiguration` night mask, and a probe-less platform answers false (light). Neither platform offers a theme-change event, so nothing is cached: callers ask rarely (a stock theme picked once at startup). It is false before `run()`, valid from `on_setup()`. The platform half lives in `WindowHost::prefers_dark()` (a defaulted virtual — the stub answer where no probe exists).
+- `set_title(std::string_view)` (stage 12): hands a composed title to the OS window. The intended caller is the answer of `ws::platform::window_title(app, document, dirty)` — the split of labor: ws::platform composes (pure, headless), this seam is where the string meets the OS window. No-op before `run()` and on Android (the activity's label is manifest-bound).
+- `set_cursor(CursorShape)` (stage 12): one of the eight standard system pointers over the window; persists until the next call, `arrow` hands the default back. GLFW lazily creates and caches one cursor per shape (destroyed before `glfwTerminate`); no-op before `run()` and on Android (the glue exposes no cursor API).
 - `install_clipboard(gui::GuiContext&)`: call once in `on_setup()`. Desktop installs the real pair. Android leaves it unset, so the clipboard trio no-ops.
 - `install_job_system(ws::jobs::JobSystem&)`: call once in `on_setup()`. The shell drains the system's marshal queue once per frame, between the event delivery and `on_update()` — progress deliveries and completions run on the main thread, outside any gui frame, so callbacks may touch gui state (the `Toasts` store, a `JobProgress` mirror) with no locks. The system is caller-owned and must outlive `run()` (or be drained by hand before it is destroyed).
 - `widgets.hpp`: `begin_window` / `end_window`, `text`, `button`, `checkbox`, `slider_float` / `slider_int`, `separator`, `same_line`, `begin_plot` / `end_plot` / `plot_line`, `show_imgui_demo` / `show_implot_demo`.

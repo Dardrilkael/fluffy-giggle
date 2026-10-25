@@ -7,10 +7,17 @@
 // under a progress bar, a cancel button, a failure toast), the overlays
 // (a raw popup, a raw modal scope, the
 // five modal-dialog button sets, the toast store), the disabled scope,
-// and the custom-look page (the stage-11 story: one slider value and one
+// the custom-look page (the stage-11 story: one slider value and one
 // text buffer, each drawn three ways - the composed widgets, a custom
 // paint over the stock behavior, and a widget the app owns outright off
-// the raw state() seam); and a status bar the page keeps clear of. The
+// the raw state() seam), and the platform page (the stage-12 story: the
+// native file dialogs run on a ws::jobs worker - they block while the
+// user decides - with every answer marshalled back through the frame
+// drain, the recent-files MRU persisted through the settings seams,
+// the clipboard round trip, the file-drop log, and the autosave
+// crash-recovery pair whose startup probe asks its yes/no through a
+// native message box the same worker way); and a status bar the page
+// keeps clear of. The
 // gallery loads no
 // assets (its font is the system face, resolved here at the platform
 // boundary the same way playground resolves its own), so it builds for
@@ -34,9 +41,21 @@
 #endif
 
 #include <ws/ui/app.hpp>
+#include <ws/input/event.hpp>
 #include <ws/input/input.hpp>
 #include <ws/jobs/job_system.hpp>
 #include <ws/jobs/errors.hpp>
+#include <ws/platform/autosave.hpp>
+#include <ws/platform/clipboard.hpp>
+#include <ws/platform/dialogs.hpp>
+#include <ws/platform/errors.hpp>
+#include <ws/platform/locations.hpp>
+#include <ws/platform/messagebox.hpp>
+#include <ws/platform/paths.hpp>
+#include <ws/platform/recent.hpp>
+#include <ws/platform/single_instance.hpp>
+#include <ws/platform/title.hpp>
+#include <ws/settings/filesystem.hpp>
 #include <ws/ui/gui/gui_context.hpp>
 #include <ws/ui/gui/job_progress.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
@@ -53,6 +72,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -85,6 +106,25 @@ constexpr const char* kExtraFontPath = "C:/Windows/Fonts/msyh.ttc";
 constexpr std::uint32_t kBackdrop = ws::ui::r2d::rgba(22, 24, 30);
 constexpr std::uint32_t kGridLine = ws::ui::r2d::rgba(34, 38, 48);
 constexpr float kGridStep = 32.0f;
+
+// The platform page's drop log: the newest kDropLogCap drops stay on
+// it, one entry per drop (that entry is the drop's whole path list,
+// arrival order).
+constexpr std::size_t kDropLogCap = 6;
+
+// The cursor radio's rows, CursorShape's own order: the section walks
+// the names, the shapes column is what set_cursor takes.
+constexpr const char* const kCursorNames[] = {
+    "arrow", "text", "crosshair", "hand",
+    "resize ew", "resize ns", "resize all", "not allowed",
+};
+constexpr ws::ui::CursorShape kCursorShapes[] = {
+    ws::ui::CursorShape::arrow,     ws::ui::CursorShape::text,
+    ws::ui::CursorShape::crosshair, ws::ui::CursorShape::hand,
+    ws::ui::CursorShape::resize_ew, ws::ui::CursorShape::resize_ns,
+    ws::ui::CursorShape::resize_all, ws::ui::CursorShape::not_allowed,
+};
+constexpr int kCursorCount = 8;
 
 // The flood button's wave - fixed literals because the toast store
 // borrows its text (a stack buffer would die with the frame).
@@ -131,13 +171,42 @@ enum Section {
     kOverlays,
     kDisabled,
     kCustomLook,
+    kPlatform,
     kSectionCount
 };
 
+// The platform page's store dir, computed once at construction: the
+// OS data location for this app on desktop (made on the spot by the
+// Locations seam), the process CWD on android - android_main chdir'd
+// into the internal data dir before the app was built, os_location
+// refuses there (the activity owns the package dirs), and this app TU
+// is the one place that knows the CWD fact. A failed desktop ensure
+// falls back to the CWD too: the demo degrades to local files, it
+// never refuses to run.
+std::string platform_store_dir() {
+#ifndef __ANDROID__
+    const ws::platform::Locations where{"ws ui gallery"};
+    if (where.ensure(ws::platform::Location::data)) {
+        const ws::core::Result<std::string> dir =
+            where.get(ws::platform::Location::data);
+        if (dir.has_value()) {
+            return dir.value();
+        }
+    }
+#endif
+    return ".";
+}
+
 class GalleryApp final : public ws::ui::App {
 public:
-    explicit GalleryApp(ws::ui::AppConfig config)
-        : ws::ui::App(std::move(config)) {}
+    // launch_docs: the command line's documents (open_documents in
+    // main) - the open-with hook's half this app owns, fed into the
+    // MRU head in on_setup. Empty on android (no argv - the launch
+    // intent carries documents, the activity's JNI to read).
+    explicit GalleryApp(ws::ui::AppConfig config,
+                        std::vector<std::string> launch_docs = {})
+        : ws::ui::App(std::move(config)),
+          launch_docs_(std::move(launch_docs)) {}
 
     // One last drain on the way out: the shell stopped pumping at
     // run()'s return, so anything the final jobs posted would
@@ -166,7 +235,67 @@ protected:
         // report and completion below lands on the main thread, where
         // the mirrors and the toast store already live.
         install_job_system(jobs_);
+        // The stage-12 platform half, up before the first frame: the
+        // MRU loads (a missing file is the first run - only a failure
+        // speaks, one error toast whose bytes the member owns), the
+        // native factories answer this platform's set, and a leftover
+        // crash marker asks its yes/no through a native box on the
+        // worker - that completion lands on this same drain.
+        const ws::core::Status recent_loaded = recent_.load();
+        if (!recent_loaded.has_value()) {
+            recent_text_ = "the recent list: ";
+            recent_text_ += recent_loaded.error().message;
+            toasts_.push({recent_text_.c_str(), gui::ToastSeverity::error,
+                          nullptr, 5.0f});
+        }
+        // The open-with documents count as use: they feed the MRU
+        // head before the first frame - the primary showing them IS
+        // this app's answer to forwarding (the second-instance
+        // forward channel is the documented cut; this app never sees
+        // one, a second copy never runs).
+        if (!launch_docs_.empty()) {
+            for (const std::string& doc : launch_docs_) {
+                (void)recent_.touch(doc);
+            }
+            (void)recent_.save();
+            std::snprintf(status_, sizeof status_, "opened %d from the "
+                                                 "command line",
+                          static_cast<int>(launch_docs_.size()));
+        }
+        dialogs_ = ws::platform::make_file_dialogs();
+        boxes_ = ws::platform::make_message_boxes();
+        refresh_probe();
+        if (probe_.has_value() && probe_.value()) {
+            offer_recovery();
+        }
         section_.fill(true);
+    }
+
+    // Stage 12's drag-drop-as-events: one FileDroppedEvent per drop,
+    // the paths riding the event (copied at the platform edge before
+    // the OS callback returned, so appending is plain state work). A
+    // drop is an open gesture - every path feeds the MRU, one save
+    // after the loop - and the log keeps the newest drops first.
+    // Desktop arrival only: on android the handler never fires, the
+    // same app builds.
+    void on_event(ws::input::Event& event) override {
+        ws::input::EventDispatcher dispatcher(event);
+        dispatcher.dispatch<ws::input::FileDroppedEvent>(
+            [this](ws::input::FileDroppedEvent& drop) {
+                if (!drop.paths.empty()) {
+                    dropped_.insert(dropped_.begin(), drop.paths);
+                    if (dropped_.size() > kDropLogCap) {
+                        dropped_.resize(kDropLogCap);
+                    }
+                    for (const std::string& path : drop.paths) {
+                        (void)recent_.touch(path);
+                    }
+                    (void)recent_.save();
+                    std::snprintf(status_, sizeof status_, "%d files dropped",
+                                  static_cast<int>(drop.paths.size()));
+                }
+                return true;  // the gallery owns drops: consumed
+            });
     }
 
     void on_update() override {
@@ -273,6 +402,196 @@ private:
         chrome_.font = font_.empty() ? nullptr : &font_;
     }
 
+    // ---- the platform page (stage 12's bridge) ----
+    // Every blocking native call runs as a job: the dialogs and the
+    // recovery ask block while the user decides, so a worker holds
+    // them and the completions land on the main thread through the
+    // drain - the same bridge the counting job rides. The borrowed-
+    // bytes rule applies to every toast the completions post: the
+    // text formats into a member string first.
+
+    // Re-read the crash probe. ok + nullopt = nothing to recover; a
+    // value is the marker's record; an error is the corrupt marker
+    // the section shows while the manual pair keeps working.
+    void refresh_probe() { probe_ = autosave_.probe(); }
+
+    // The recover action, shared by the startup ask's yes and the
+    // manual button: the crashed content becomes the draft (the
+    // snprintf truncates to the field - a demo bound, noted here
+    // because truncation is a bug everywhere else), the pair clears,
+    // the probe re-reads.
+    void do_recover() {
+        const ws::core::Result<std::string> recovered = autosave_.recover();
+        if (!recovered.has_value()) {
+            ask_text_ = recovered.error().message;
+            toasts_.push({ask_text_.c_str(), gui::ToastSeverity::error,
+                          nullptr, 5.0f});
+            refresh_probe();
+            return;
+        }
+        std::snprintf(draft_buf_, sizeof draft_buf_, "%s",
+                      recovered.value().c_str());
+        refresh_probe();
+        std::snprintf(status_, sizeof status_, "recovered the crashed draft");
+        toasts_.push({"the crashed draft is back", gui::ToastSeverity::info,
+                      nullptr, 3.0f});
+    }
+
+    // The discard action: the ask's no and the manual button's twin.
+    void do_discard() {
+        const ws::core::Status dropped = autosave_.discard();
+        refresh_probe();
+        if (dropped.has_value()) {
+            std::snprintf(status_, sizeof status_,
+                          "the crashed autosave was dropped");
+        } else {
+            std::snprintf(status_, sizeof status_, "discard failed: %s",
+                          dropped.error().message.c_str());
+        }
+    }
+
+    // The startup offer: a found marker asks through the native box
+    // on the worker (an ask blocks until answered). Yes recovers, no
+    // drops; the section's manual pair stays as the fallback either
+    // way. A refused ask (android) crosses as the failure toast.
+    void offer_recovery() {
+        ws::platform::MessageBoxRequest request;
+        request.kind = ws::platform::MessageBoxKind::warning;
+        request.buttons = ws::platform::MessageBoxButtons::yes_no;
+        request.title = "ws ui gallery";
+        request.message = "the last session left an autosave - recover it?";
+        ws::jobs::JobCallbacks<ws::platform::MessageBoxChoice> cbs;
+        cbs.on_complete =
+            [this](ws::jobs::JobHandle<ws::platform::MessageBoxChoice>
+                       handle) {
+                const ws::core::Result<ws::platform::MessageBoxChoice>
+                    answer = gui::toast_on_failure(toasts_, ask_text_,
+                                                   handle, "the recovery ask");
+                if (!answer.has_value()) {
+                    return;  // the failure toast already spoke
+                }
+                if (answer.value() == ws::platform::MessageBoxChoice::yes) {
+                    do_recover();
+                } else {
+                    do_discard();
+                }
+            };
+        ask_out_ = jobs_.submit<ws::platform::MessageBoxChoice>(
+            [this, request](ws::jobs::JobContext&)
+                -> ws::core::Result<ws::platform::MessageBoxChoice> {
+                return boxes_->ask(request);
+            },
+            ws::jobs::Priority::normal, {}, cbs);
+    }
+
+    // One of the three single-path pickers (0 open, 1 save, 2
+    // folder). The worker holds the modal; the completion lands
+    // between frames and feeds the MRU - an open and a save are both
+    // use - while the status line echoes the answer or the
+    // dismissal (a dismissed dialog is a normal answer).
+    void pick_file(int kind) {
+        static constexpr const char* const kDialogNames[] = {
+            "the open dialog", "the save dialog", "the folder dialog"};
+        ws::platform::FileDialogOptions options;
+        options.title = kDialogNames[kind];
+        if (kind == 1 && title_doc_[0] != '\0') {
+            options.default_path = title_doc_;  // seeds the file-name box
+        }
+        ws::jobs::JobCallbacks<std::optional<std::string>> cbs;
+        cbs.on_complete =
+            [this, kind](ws::jobs::JobHandle<std::optional<std::string>>
+                             handle) {
+                const ws::core::Result<std::optional<std::string>> picked =
+                    gui::toast_on_failure(toasts_, pick_text_, handle,
+                                          kDialogNames[kind]);
+                if (!picked.has_value()) {
+                    return;  // the failure toast already spoke
+                }
+                if (!picked.value().has_value()) {
+                    std::snprintf(status_, sizeof status_,
+                                  "%s was dismissed", kDialogNames[kind]);
+                    return;
+                }
+                const std::string& path = picked.value().value();
+                (void)recent_.touch(path);
+                (void)recent_.save();
+                std::snprintf(status_, sizeof status_, "%s answered: %s",
+                              kDialogNames[kind], path.c_str());
+            };
+        dialog_out_ = jobs_.submit<std::optional<std::string>>(
+            [this, kind, options](ws::jobs::JobContext&)
+                -> ws::core::Result<std::optional<std::string>> {
+                switch (kind) {
+                    case 0:
+                        return dialogs_->open_file(options);
+                    case 1:
+                        return dialogs_->save_file(options);
+                    default:
+                        break;
+                }
+                return dialogs_->select_folder(options);
+            },
+            ws::jobs::Priority::normal, {}, cbs);
+    }
+
+    // The multi-select open: several files at once, each one used.
+    void pick_files() {
+        ws::platform::FileDialogOptions options;
+        options.title = "the multi-open dialog";
+        ws::jobs::JobCallbacks<std::vector<std::string>> cbs;
+        cbs.on_complete =
+            [this](ws::jobs::JobHandle<std::vector<std::string>> handle) {
+                const ws::core::Result<std::vector<std::string>> picked =
+                    gui::toast_on_failure(toasts_, pick_text_, handle,
+                                          "the multi-open dialog");
+                if (!picked.has_value()) {
+                    return;  // the failure toast already spoke
+                }
+                const std::vector<std::string>& files = picked.value();
+                if (files.empty()) {
+                    std::snprintf(status_, sizeof status_,
+                                  "the multi-open dialog was dismissed");
+                    return;
+                }
+                for (const std::string& file : files) {
+                    (void)recent_.touch(file);
+                }
+                (void)recent_.save();
+                std::snprintf(status_, sizeof status_,
+                              "opened %d files, first: %s",
+                              static_cast<int>(files.size()),
+                              files.front().c_str());
+            };
+        files_out_ = jobs_.submit<std::vector<std::string>>(
+            [this, options](ws::jobs::JobContext&)
+                -> ws::core::Result<std::vector<std::string>> {
+                return dialogs_->open_files(options);
+            },
+            ws::jobs::Priority::normal, {}, cbs);
+    }
+
+    // Compose the title through ws::platform (pure, headless) and
+    // hand the answer to the OS through the ui seam - stage 12's
+    // split of labor. The echo copy stays for the line below the
+    // field: android's host no-ops set_title (the activity's label
+    // is manifest-bound), so the echo is the platform-neutral half
+    // of the demo.
+    void compose_title() {
+        const ws::core::Result<std::string> composed =
+            ws::platform::window_title("ws ui gallery", title_doc_,
+                                        title_dirty_);
+        if (composed.has_value()) {
+            std::snprintf(title_last_, sizeof title_last_, "%s",
+                          composed.value().c_str());
+            set_title(composed.value());
+            std::snprintf(status_, sizeof status_, "title: %s",
+                          composed.value().c_str());
+        } else {
+            std::snprintf(title_last_, sizeof title_last_, "title failed: %s",
+                          composed.error().message.c_str());
+        }
+    }
+
     void draw_gallery(const ws::ui::r2d::FrameSize& frame);
 
     // The custom-look fields' shared paint over a text behavior answer:
@@ -367,6 +686,55 @@ private:
     // toast: members, never stack strings.
     std::string work_text_;
     std::string fail_text_;
+
+    // ---- the platform page's state (stage 12) ----
+    // fs_ first: recent_ and autosave_ borrow it, and the in-class
+    // initializers run in declaration order. The store dir was made
+    // by platform_store_dir() - the OS data location on desktop, the
+    // CWD on android - so both members persist real files.
+    ws::settings::StdFileSystem fs_;
+    std::string store_dir_ = platform_store_dir();
+    ws::platform::RecentFiles recent_{
+        fs_, ws::platform::join_path(store_dir_, "recent.json"), 8};
+    ws::platform::Autosave autosave_{
+        fs_, "gallery draft", ws::platform::join_path(store_dir_, "autosave")};
+    // The native pickers and asker, this platform's set (the COM
+    // family + MessageBoxW on windows, the refusals on android),
+    // built once in on_setup. The handles gate the buttons so one
+    // native thing is out at a time - the worker pool could hold
+    // two, but the demo reads clearer one at a time.
+    std::unique_ptr<ws::platform::FileDialogs> dialogs_;
+    std::unique_ptr<ws::platform::MessageBoxes> boxes_;
+    ws::jobs::JobHandle<std::optional<std::string>> dialog_out_{};
+    ws::jobs::JobHandle<std::vector<std::string>> files_out_{};
+    ws::jobs::JobHandle<ws::platform::MessageBoxChoice> ask_out_{};
+    // The crash probe's live answer, re-read by refresh_probe(): ok
+    // + nullopt = nothing to recover, a value = the marker's record,
+    // an error = the corrupt marker the section shows.
+    ws::core::Result<std::optional<ws::platform::Recovery>> probe_{};
+    // The drop log: one entry per drop (the drop's whole path list),
+    // newest first, capped at kDropLogCap by on_event.
+    std::vector<std::vector<std::string>> dropped_;
+    // The open-with documents main parsed out of argv (empty on
+    // android), consumed by on_setup.
+    std::vector<std::string> launch_docs_;
+    // The sections' own state: the autosave draft (the "document"
+    // the crash story edits), the title page's document name + dirty
+    // bit (window_title composes, set_title hands the answer to the
+    // OS), the last composed title echoed as a line so android sees
+    // it too (its host no-ops the seam), the cursor radio's pick,
+    // and the clipboard read-backs' echo buffer.
+    char draft_buf_[64] = "the gallery draft";
+    char title_doc_[32] = "untitled.txt";
+    bool title_dirty_ = false;
+    char title_last_[96] = "never composed";
+    int cursor_pick_ = 0;
+    char clip_buf_[96] = "(nothing read back yet)";
+    // The completions' toast texts - the store borrows bytes, so
+    // members, like work_text_/fail_text_ above.
+    std::string recent_text_;
+    std::string pick_text_;
+    std::string ask_text_;
 };
 
 void GalleryApp::paint_bare_field(const gui::Rect& row,
@@ -1358,6 +1726,318 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
         paint_bare_field(digit_row, digits, digit_buf_);
     }
 
+    // --- platform (stage 12): dialogs, recent files, clipboard, drops,
+    //     the autosave pair, the title, the cursor ------------------------
+    if (gui::collapsing_header(
+            gui_, layout_, chrome_,
+            "platform: dialogs, recent files, clipboard, drops, autosave",
+            section_[kPlatform])) {
+        // The pickers: each button submits its native modal to a
+        // worker (the dialog blocks while the user decides) and the
+        // answer crosses back through the frame drain - the counting
+        // job's bridge again. The buttons lock while one is out: one
+        // native thing at a time reads cleaner than two.
+        const bool dialog_out = dialog_out_.busy() || files_out_.busy();
+        if (gui::button(gui_, layout_, chrome_, "open a file", half, {},
+                        dialog_out)) {
+            pick_file(0);
+            std::snprintf(status_, sizeof status_, "the open dialog is out");
+        }
+        layout_.same_line();
+        if (gui::button(gui_, layout_, chrome_, "save as", half, {},
+                        dialog_out)) {
+            pick_file(1);
+            std::snprintf(status_, sizeof status_, "the save dialog is out");
+        }
+        if (gui::button(gui_, layout_, chrome_, "pick a folder", half, {},
+                        dialog_out)) {
+            pick_file(2);
+            std::snprintf(status_, sizeof status_, "the folder dialog is out");
+        }
+        layout_.same_line();
+        if (gui::button(gui_, layout_, chrome_, "open several", half, {},
+                        dialog_out)) {
+            pick_files();
+            std::snprintf(status_, sizeof status_,
+                          "the multi-open dialog is out");
+        }
+        if (dialog_out) {
+            gui::spinner(gui_, layout_, chrome_, "the dialog spinner");
+            layout_.same_line();
+            gui::text(layout_, chrome_,
+                      "a native dialog is out - the loop never blocked",
+                      layout_.remaining_width());
+        }
+
+        // The MRU: menu_items() answers the rows (newest first, the
+        // lazy prune already run, same-named siblings already
+        // disambiguated); a click opens - promotes to the head and
+        // saves. The pin button rides each row's right edge; a pinned
+        // row survives the cap and the missing-file prune.
+        const std::vector<ws::platform::RecentItem> rows = recent_.menu_items();
+        if (rows.empty()) {
+            gui::text(layout_, chrome_,
+                      "(nothing recent yet - open, save or drop a file)",
+                      page.width);
+        } else {
+            const float pin_w = 72.0f * scale_;
+            const float row_w =
+                std::max(0.0f, page.width - pin_w - chrome_.spacing);
+            for (const ws::platform::RecentItem& item : rows) {
+                char label[160];
+                std::snprintf(label, sizeof label, "%s%s", item.label.c_str(),
+                              item.pinned ? "   [pinned]" : "");
+                if (gui::selectable(gui_, layout_, chrome_, label, false,
+                                    row_w)) {
+                    (void)recent_.touch(item.path);
+                    (void)recent_.save();
+                    std::snprintf(status_, sizeof status_, "recent: opened %s",
+                                  item.path.c_str());
+                }
+                layout_.same_line();
+                if (gui::button(gui_, layout_, chrome_,
+                                item.pinned ? "unpin" : "pin", pin_w)) {
+                    // pin/unpin answer bool, not Status: a refusal
+                    // means the path was not in the list (a prune
+                    // raced the click) - rare, and the status says
+                    // so rather than inventing an error.
+                    const bool moved = item.pinned
+                                           ? recent_.unpin("", item.path)
+                                           : recent_.pin("", item.path);
+                    (void)recent_.save();
+                    if (moved) {
+                        std::snprintf(status_, sizeof status_, "%s %s",
+                                      item.pinned ? "unpinned" : "pinned",
+                                      item.path.c_str());
+                    } else {
+                        std::snprintf(status_, sizeof status_,
+                                      "the pin move was refused");
+                    }
+                }
+            }
+        }
+
+        // The clipboard round trip - the one platform call the loop
+        // CAN afford inline (no human decides anything), so these
+        // ride the frame directly. Text, a typed payload, an image:
+        // the demo's own content, this app's consent - the suite
+        // never touches a clipboard.
+        if (gui::button(gui_, layout_, chrome_, "copy the draft", half)) {
+            const ws::core::Status copied =
+                ws::platform::set_clipboard_text(draft_buf_);
+            std::snprintf(status_, sizeof status_, "%s",
+                          copied.has_value()
+                              ? "copied the draft as text"
+                              : copied.error().message.c_str());
+        }
+        layout_.same_line();
+        if (gui::button(gui_, layout_, chrome_, "read the text back", half)) {
+            const ws::core::Result<std::optional<std::string>> read =
+                ws::platform::clipboard_text();
+            if (!read.has_value()) {
+                std::snprintf(status_, sizeof status_, "read failed: %s",
+                              read.error().message.c_str());
+            } else if (!read.value().has_value()) {
+                std::snprintf(clip_buf_, sizeof clip_buf_,
+                              "(the clipboard holds no text)");
+                std::snprintf(status_, sizeof status_,
+                              "the clipboard holds no text");
+            } else {
+                std::snprintf(clip_buf_, sizeof clip_buf_, "%s",
+                              read.value().value().c_str());
+                std::snprintf(status_, sizeof status_, "read the text back");
+            }
+        }
+        if (gui::button(gui_, layout_, chrome_, "copy typed bytes", half)) {
+            const ws::core::Status copied = ws::platform::set_clipboard_payload(
+                "ws gallery demo", draft_buf_);
+            std::snprintf(status_, sizeof status_, "%s",
+                          copied.has_value()
+                              ? "copied the draft under the payload type"
+                              : copied.error().message.c_str());
+        }
+        layout_.same_line();
+        if (gui::button(gui_, layout_, chrome_, "read the bytes back", half)) {
+            const ws::core::Result<std::optional<std::string>> read =
+                ws::platform::clipboard_payload("ws gallery demo");
+            if (!read.has_value()) {
+                std::snprintf(status_, sizeof status_, "read failed: %s",
+                              read.error().message.c_str());
+            } else if (!read.value().has_value()) {
+                std::snprintf(clip_buf_, sizeof clip_buf_,
+                              "(the clipboard holds no such payload)");
+                std::snprintf(status_, sizeof status_,
+                              "the clipboard holds no such payload");
+            } else {
+                std::snprintf(clip_buf_, sizeof clip_buf_, "%s",
+                              read.value().value().c_str());
+                std::snprintf(status_, sizeof status_, "read the bytes back");
+            }
+        }
+        if (gui::button(gui_, layout_, chrome_, "copy a 2x2 image", half)) {
+            ws::platform::ClipboardImage image;  // a 2x2 RGBA checker
+            image.width = 2;
+            image.height = 2;
+            image.bytes.assign("\xff\x00\x00\xff" "\x00\xff\x00\xff"
+                               "\x00\xff\x00\xff" "\xff\x00\x00\xff",
+                              16);
+            const ws::core::Status copied =
+                ws::platform::set_clipboard_image(image);
+            std::snprintf(status_, sizeof status_, "%s",
+                          copied.has_value()
+                              ? "copied the 2x2 checker"
+                              : copied.error().message.c_str());
+        }
+        layout_.same_line();
+        if (gui::button(gui_, layout_, chrome_, "read the image back", half)) {
+            const ws::core::Result<std::optional<ws::platform::ClipboardImage>>
+                read = ws::platform::clipboard_image();
+            if (!read.has_value()) {
+                std::snprintf(status_, sizeof status_, "read failed: %s",
+                              read.error().message.c_str());
+            } else if (!read.value().has_value()) {
+                std::snprintf(clip_buf_, sizeof clip_buf_,
+                              "(the clipboard holds no image)");
+                std::snprintf(status_, sizeof status_,
+                              "the clipboard holds no image");
+            } else {
+                const ws::platform::ClipboardImage& image = read.value().value();
+                std::snprintf(clip_buf_, sizeof clip_buf_,
+                              "image %dx%d, %d bytes", image.width,
+                              image.height,
+                              static_cast<int>(image.bytes.size()));
+                std::snprintf(status_, sizeof status_, "read the image back");
+            }
+        }
+        gui::text(layout_, chrome_, clip_buf_, page.width);
+
+        // The drop zone: chrome only - the whole window takes the
+        // drop (the OS owns the target and reports no position), so
+        // the quad is an invitation, not a hit area. The log below
+        // is what on_event recorded, newest first.
+        const float zone_h = chrome_.control_height * 1.5f;
+        const gui::Rect zone = layout_.next(page.width, zone_h);
+        ws::ui::r2d::draw_rounded_quad(zone.x, zone.y, zone.width, zone.height,
+                                       chrome_.corner_radius,
+                                       chrome_.panel_bg);
+        const float edge = std::max(1.0f, 1.0f * scale_);
+        ws::ui::r2d::draw_quad(zone.x, zone.y, zone.width, edge,
+                               chrome_.border);
+        ws::ui::r2d::draw_quad(zone.x, zone.y + zone.height - edge, zone.width,
+                               edge, chrome_.border);
+        ws::ui::r2d::draw_quad(zone.x, zone.y, edge, zone.height,
+                               chrome_.border);
+        ws::ui::r2d::draw_quad(zone.x + zone.width - edge, zone.y, edge,
+                               zone.height, chrome_.border);
+        gui::text(layout_, chrome_,
+                  "drop files anywhere on the window - the log keeps the "
+                  "newest drops",
+                  page.width);
+        if (dropped_.empty()) {
+            gui::text(layout_, chrome_, "(no files dropped yet)", page.width);
+        } else {
+            for (const std::vector<std::string>& drop : dropped_) {
+                if (drop.empty()) {
+                    continue;
+                }
+                char drop_line[160];
+                std::snprintf(drop_line, sizeof drop_line, "drop: %s%s",
+                              drop.front().c_str(),
+                              drop.size() > 1 ? " (+more)" : "");
+                gui::text(layout_, chrome_, drop_line, page.width);
+            }
+        }
+
+        // The crash-recovery pair. The demo's crash is simply closing
+        // the window without "finish cleanly" - the next run's probe
+        // finds the marker, and the startup ask (or this manual
+        // pair) settles it. The snapshot buttons lock while the
+        // native ask is out.
+        gui::text_input(gui_, layout_, chrome_, "the draft", draft_buf_,
+                        static_cast<int>(sizeof draft_buf_), page.width);
+        if (gui::button(gui_, layout_, chrome_, "snapshot the draft", half, {},
+                        ask_out_.busy())) {
+            const ws::core::Status saved = autosave_.snapshot(draft_buf_);
+            refresh_probe();
+            std::snprintf(status_, sizeof status_, "%s",
+                          saved.has_value()
+                              ? "snapshotted - the marker is down"
+                              : saved.error().message.c_str());
+        }
+        layout_.same_line();
+        if (gui::button(gui_, layout_, chrome_, "finish cleanly", half, {},
+                        ask_out_.busy())) {
+            const ws::core::Status finished = autosave_.finish();
+            refresh_probe();
+            std::snprintf(status_, sizeof status_, "%s",
+                          finished.has_value()
+                              ? "finished - the pair is cleared"
+                              : finished.error().message.c_str());
+        }
+        // The probe's live answer as a line, whatever it holds: the
+        // waiting marker, the corrupt one, or nothing to do.
+        char probe_line[160];
+        if (!probe_.has_value()) {
+            std::snprintf(probe_line, sizeof probe_line,
+                          "the marker reads corrupt: %s",
+                          probe_.error().message.c_str());
+        } else if (probe_.value()) {
+            std::snprintf(probe_line, sizeof probe_line,
+                          "a crashed autosave waits - snapshot clock %lld",
+                          static_cast<long long>(probe_.value()->saved_ms));
+        } else {
+            std::snprintf(probe_line, sizeof probe_line,
+                          "no crashed autosave - snapshot, then just close "
+                          "the window");
+        }
+        gui::text(layout_, chrome_, probe_line, page.width);
+        if (ask_out_.busy()) {
+            gui::text(layout_, chrome_, "asking through the native box...",
+                      page.width);
+        } else {
+            // The manual pair: the fallback the startup ask drives
+            // too. recover() can fail (nothing to recover); the
+            // failure toast says so.
+            if (gui::button(gui_, layout_, chrome_, "recover", half)) {
+                do_recover();
+            }
+            layout_.same_line();
+            if (gui::button(gui_, layout_, chrome_, "discard", half)) {
+                do_discard();
+            }
+        }
+
+        // The title, composed live on every change (Notepad's
+        // behavior): the field and the dirty bit feed the composer,
+        // the seam hands the answer to the OS, the echo line shows
+        // it on every platform.
+        if (gui::text_input(gui_, layout_, chrome_, "document", title_doc_,
+                            static_cast<int>(sizeof title_doc_), half)) {
+            compose_title();
+        }
+        layout_.same_line();
+        if (gui::checkbox(gui_, layout_, chrome_, "unsaved work",
+                         title_dirty_)) {
+            compose_title();
+        }
+        gui::text(layout_, chrome_, title_last_, page.width);
+
+        // The cursor shapes: a radio walk over the eight standard
+        // pointers, four to a row, set_cursor applied the moment the
+        // pick moves (arrow hands the default back).
+        for (int i = 0; i < kCursorCount; ++i) {
+            if (i > 0 && i % 4 != 0) {
+                layout_.same_line();
+            }
+            if (gui::radio(gui_, layout_, chrome_, kCursorNames[i],
+                           cursor_pick_, i)) {
+                set_cursor(kCursorShapes[i]);
+                std::snprintf(status_, sizeof status_, "cursor: %s",
+                              kCursorNames[i]);
+            }
+        }
+    }
+
     gui::end_scroll_panel(gui_, layout_, chrome_);
 
     // The status bar: the one static that places itself - full width,
@@ -1385,12 +2065,31 @@ extern "C" void android_main(android_app* app) {
     (void)gallery.run();
 }
 #else
-int main() {
+int main(int argc, char* argv[]) {
+    // The single-instance grab: a second launch complains through the
+    // native box and exits - on this desktop TU, so the complaint is
+    // also stage 6b's message box seen from the outside. Android's
+    // android_main takes no grab: the manifest's launchMode owns
+    // single-instancing there.
+    const ws::platform::SingleInstance guard{"ws ui gallery"};
+    if (!guard.is_primary()) {
+        const std::unique_ptr<ws::platform::MessageBoxes> boxes =
+            ws::platform::make_message_boxes();
+        ws::platform::MessageBoxRequest request;
+        request.kind = ws::platform::MessageBoxKind::warning;
+        request.buttons = ws::platform::MessageBoxButtons::ok;
+        request.title = "ws ui gallery";
+        request.message =
+            "another ws ui gallery is already running - this copy exits";
+        (void)boxes->ask(request);
+        return 1;
+    }
     ws::ui::AppConfig config;
     config.title = "ws ui gallery";
     config.width = 1000;
     config.height = 700;
-    GalleryApp gallery(std::move(config));
+    GalleryApp gallery(std::move(config),
+                       ws::platform::open_documents(argc, argv));
     return gallery.run();
 }
 #endif

@@ -44,7 +44,21 @@ CMakeLists only wire ws libraries together.
   frames - the overlays, the disabled scope, custom look - the stage 11
   story: one slider value and one text buffer, each drawn three ways: the
   composed widgets, a custom paint over the stock behavior, and a widget
-  the app owns outright off the raw state() seam), all five modal-dialog
+  the app owns outright off the raw state() seam), and the platform
+  page (the stage-12 story: the native file dialogs and the recovery
+  ask each running on a ws::jobs worker - they block while the user
+  decides - with every answer marshalled back through the frame
+  drain; the recent-files MRU with pin/unpin, persisted through the
+  settings seams; the clipboard round trip over text, a typed payload
+  and a 2x2 image; the file-drop log fed by ws::input's
+  FileDroppedEvent; the autosave crash-recovery pair whose startup
+  probe asks its yes/no through the native message box, with the
+  manual recover/discard pair as the fallback; the window title
+  composed live through ws::platform::window_title and handed to the
+  OS by ws::ui's set_title, echoed as a line so Android - whose host
+  no-ops the seam - sees the composition too; the cursor-shape
+  radios over ws::ui's set_cursor; and the single-instance grab +
+  open-with argv parse in the desktop main), all five modal-dialog
   button sets, the toast store's whole story, and a status bar the page
   keeps clear of. No assets: the font is the system face resolved at the
   platform boundary (like playground's), so Windows and Android build it

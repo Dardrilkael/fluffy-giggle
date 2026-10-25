@@ -9,7 +9,11 @@ platform header anywhere under `include/`.
 - `include/ws/input/event.hpp`: the `Event` base, `EventType`, the typed
   event structs and `EventDispatcher`. Key/mouse codes are plain ints in
   GLFW's numbering (mouse buttons 0/1/2, printable keys match ASCII) - no
-  GLFW header is ever needed to handle these.
+  GLFW header is ever needed to handle these. `FileDroppedEvent` (stage
+  12's drag-drop-as-events) is the one heap-owning event: one event per
+  drop, utf-8 paths copied before the OS callback returns, desktop-only
+  arrival (no Android TU emits one, so a handler there simply never
+  fires).
 - `include/ws/input/input.hpp`: `InputFrame` (mouse/keys, the dt_seconds
   frame clock, the multi-touch table), `PointerId` + its sentinels,
   `PointerView`, the `keys::` constants the gui gives meaning to,
@@ -26,7 +30,8 @@ platform header anywhere under `include/`.
 
 ## Tests
 - `tests/test_input.cpp`: headless - no window, no GPU, no platform TU.
-  Event type/dispatcher round-trips, next_frame's edge clearing, the touch
+  Event type/dispatcher round-trips (the file-drop event's type, paths
+  and dispatch among them), next_frame's edge clearing, the touch
   table (release-frame retention, same-frame id reuse, the 8-contact
   cap), the primary-touch bridge, gather_pointers/pointer_pos unification.
   The gui-side adoption cases (GuiContext::begin_frame copying the

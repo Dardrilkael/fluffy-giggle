@@ -114,12 +114,15 @@ const char* env_probe(const char* name) {
 }
 
 // Every concrete event type. The per-frame queue holds events by value -
-// no heap per event, and no vtable anywhere in the event system.
+// no vtable anywhere in the event system, and no heap per event but the
+// one exception: FileDroppedEvent carries its paths vector (a drop is
+// human-rare, so a copy there is nothing the loop ever notices).
 using AnyEvent = std::variant<ws::input::WindowCloseEvent, ws::input::WindowResizeEvent, ws::input::KeyPressedEvent,
                              ws::input::KeyReleasedEvent, ws::input::MouseButtonPressedEvent,
                              ws::input::MouseButtonReleasedEvent, ws::input::MouseMovedEvent,
                              ws::input::MouseScrolledEvent, ws::input::TouchPressedEvent,
-                             ws::input::TouchMovedEvent, ws::input::TouchReleasedEvent, ws::input::TextInputEvent>;
+                             ws::input::TouchMovedEvent, ws::input::TouchReleasedEvent,
+                             ws::input::TextInputEvent, ws::input::FileDroppedEvent>;
 
 // The gfx::SurfaceSource adapter: WindowHost speaks Vulkan handles (it
 // includes volk.h internally), gfx speaks opaque void* - this fn-ptr is
@@ -394,6 +397,13 @@ struct App::Impl {
                 // One event per glyph, arrival order - typing is low-rate
                 // and order-preserving, so no coalescing.
                 event_queue_.push_back(static_cast<ws::input::TextInputEvent&>(event));
+                break;
+            case ws::input::EventType::FileDropped:
+                // One event per drop, arrival order - the TextInput rule
+                // again. The paths ride the event (copied at the platform
+                // edge before the OS callback returned), so the queue's
+                // by-value push moves them, nothing dangles.
+                event_queue_.push_back(static_cast<ws::input::FileDroppedEvent&>(event));
                 break;
         }
     }
@@ -1055,6 +1065,23 @@ bool App::prefers_dark() const {
     // failed startup) there is no window platform, so the light default
     // stands - the same answer a host without a probe gives.
     return impl_->host_ != nullptr && impl_->host_->prefers_dark();
+}
+
+void App::set_title(std::string_view title) {
+    // The composed string handed to the platform window; before run()
+    // (and after a failed startup) there is no window to retitle, and
+    // a host whose platform owns the label no-ops inside the seam.
+    if (impl_->host_) {
+        impl_->host_->set_title(title);
+    }
+}
+
+void App::set_cursor(CursorShape shape) {
+    // Same seam story as set_title: no window before run(), and a host
+    // without a cursor API (Android's glue) no-ops inside the seam.
+    if (impl_->host_) {
+        impl_->host_->set_cursor(shape);
+    }
 }
 
 void App::install_clipboard(gui::GuiContext& gui) {

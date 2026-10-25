@@ -28,6 +28,13 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
+#include <array>
+#include <cstddef>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 #ifdef _WIN32
 // The OS dark-mode probe (prefers_dark below) reads the Personalize
 // registry key, so this platform TU - never an app - carries the one
@@ -202,6 +209,25 @@ void on_char(GLFWwindow* window, unsigned int codepoint) {
     }
 }
 
+// Files dragged onto the window (stage 12's drag-drop-as-events): one
+// ws::input::FileDroppedEvent per drop, never coalesced. GLFW hands the
+// paths as utf-8 valid only inside this callback, so they are copied
+// into the event before it leaves - the one event type that owns heap,
+// human-rare by nature. The OS reports no drop position, so paths are
+// the whole payload. The ImGui backend installs no drop callback of
+// its own, so ours stands alone (had it one, the install order would
+// chain it like every other callback here).
+void on_drop(GLFWwindow* window, int count, const char** paths) {
+    std::vector<std::string> dropped;
+    dropped.reserve(count > 0 ? static_cast<std::size_t>(count) : 0u);
+    for (int i = 0; i < count; ++i) {
+        if (paths[i] != nullptr) {
+            dropped.emplace_back(paths[i]);
+        }
+    }
+    emit(window, ws::input::FileDroppedEvent{std::move(dropped)});
+}
+
 // Process-wide, not window-scoped: installed before glfwInit() (by the
 // host, via install_glfw_error_callback()) so init failures get logged.
 void glfw_error(int code, const char* description) {
@@ -224,6 +250,7 @@ void install_window_callbacks(GLFWwindow* window, WindowEventSink* sink) {
     glfwSetCursorEnterCallback(window, on_cursor_enter);
     glfwSetScrollCallback(window, on_scroll);
     glfwSetCharCallback(window, on_char);
+    glfwSetDropCallback(window, on_drop);
 }
 
 // Installs the process-wide GLFW error callback (file-local, logging
@@ -237,6 +264,22 @@ void install_glfw_error_callback() {
 
 namespace {
 
+// The GLFW spelling of one CursorShape (see <ws/ui/app.hpp>). Cursor
+// creation needs no window, so these are pure enum-to-enum.
+int glfw_cursor_shape(CursorShape shape) {
+    switch (shape) {
+        case CursorShape::text: return GLFW_IBEAM_CURSOR;
+        case CursorShape::crosshair: return GLFW_CROSSHAIR_CURSOR;
+        case CursorShape::hand: return GLFW_HAND_CURSOR;
+        case CursorShape::resize_ew: return GLFW_HRESIZE_CURSOR;
+        case CursorShape::resize_ns: return GLFW_VRESIZE_CURSOR;
+        case CursorShape::resize_all: return GLFW_RESIZE_ALL_CURSOR;
+        case CursorShape::not_allowed: return GLFW_NOT_ALLOWED_CURSOR;
+        case CursorShape::arrow: break;
+    }
+    return GLFW_ARROW_CURSOR;
+}
+
 // WindowHost on GLFW: init opens the window, and "window ready" is a
 // startup fact that stays true for the whole run - the desktop teardown is
 // once, in order, in the destructor.
@@ -244,8 +287,17 @@ class GlfwHost final : public WindowHost {
 public:
     ~GlfwHost() override {
         if (window_ != nullptr) {
+            glfwSetCursor(window_, nullptr);
             glfwDestroyWindow(window_);
             window_ = nullptr;
+        }
+        // The lazily-created standard cursors die before the library
+        // does (glfwTerminate invalidates them).
+        for (GLFWcursor*& cursor : cursors_) {
+            if (cursor != nullptr) {
+                glfwDestroyCursor(cursor);
+                cursor = nullptr;
+            }
         }
         if (glfw_initialized_) {
             glfwTerminate();
@@ -376,10 +428,48 @@ public:
             [this](const char* text) { glfwSetClipboardString(window_, text); });
     }
 
+    // The stage-12 seam halves (see window.h): the composed title meets
+    // the OS window here, and the standard pointers come from GLFW's
+    // own cursor factory. set_title takes utf-8, the exact spelling
+    // ws::platform's composer answers, so it crosses verbatim.
+    void set_title(std::string_view title) override {
+        if (window_ != nullptr) {
+            glfwSetWindowTitle(window_, std::string{title}.c_str());
+        }
+    }
+
+    void set_cursor(CursorShape shape) override {
+        // The arrow IS the window default: a null cursor hands the
+        // default back, so it needs no created object. Every other
+        // shape maps to one standard cursor, created on first use and
+        // shared for the process lifetime (the cache below).
+        if (window_ == nullptr) {
+            return;
+        }
+        if (shape == CursorShape::arrow) {
+            glfwSetCursor(window_, nullptr);
+            return;
+        }
+        const std::size_t slot = static_cast<std::size_t>(shape);
+        if (cursors_[slot] == nullptr) {
+            cursors_[slot] = glfwCreateStandardCursor(glfw_cursor_shape(shape));
+            if (cursors_[slot] == nullptr) {
+                core::warn("ui: the standard cursor could not be created");
+                return;
+            }
+        }
+        glfwSetCursor(window_, cursors_[slot]);
+    }
+
 private:
     GLFWwindow* window_ = nullptr;
     WindowEventSink* sink_ = nullptr;
     bool glfw_initialized_ = false;
+    // One standard cursor per non-arrow shape, created lazily and
+    // destroyed in the destructor before glfwTerminate. Indexed by
+    // CursorShape's value - arrow (0) never gets a slot used.
+    std::array<GLFWcursor*, static_cast<std::size_t>(CursorShape::not_allowed) + 1>
+        cursors_{};
 };
 
 }  // namespace

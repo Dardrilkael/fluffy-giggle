@@ -1,6 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace ws::input {
 
@@ -21,6 +24,7 @@ enum class EventType : std::uint8_t {
     TouchMoved,
     TouchReleased,
     TextInput,
+    FileDropped,
 };
 
 // Base of every event. Deliberately has no vtable: each event stores its
@@ -142,6 +146,23 @@ struct TextInputEvent : Event {
     constexpr explicit TextInputEvent(std::uint32_t codepoint)
         : Event(static_type()), codepoint(codepoint) {}
     std::uint32_t codepoint = 0;
+};
+
+// Files dragged onto the window (stage 12's drag-drop-as-events): one
+// event per drop, never coalesced, the paths in the OS's arrival order.
+// The windowing layer copies them out before its OS callback returns -
+// the platform's strings die with that callback - so the event owns
+// utf-8 narrow paths verbatim. The OS reports no drop position, so
+// paths are the whole payload. Desktop arrival only: no platform TU
+// on Android emits one (there is no drag-drop there), so a handler
+// simply never fires - the type exists so both platforms build the
+// same app. The only event that owns heap (a drop is human-rare), so
+// its constructor is the one that is not constexpr.
+struct FileDroppedEvent : Event {
+    static constexpr EventType static_type() { return EventType::FileDropped; }
+    explicit FileDroppedEvent(std::vector<std::string> paths)
+        : Event(static_type()), paths(std::move(paths)) {}
+    std::vector<std::string> paths;
 };
 
 // Routes one event to typed handlers instead of a switch on type():

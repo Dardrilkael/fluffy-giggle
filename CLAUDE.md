@@ -76,8 +76,9 @@ One line each - the per-tree CLAUDE.md files carry the detail:
   fake for tests and the gallery), the clipboard (text/typed
   payload/image), the message boxes (scripted fake), the
   window-title composer and the single-instance grab over the
-  settings FileSystem + json seams - stage 12's headless halves;
-  the ui bridge + gallery page follow in ws::ui.
+  settings FileSystem + json seams - stage 12's complete story: the
+  headless halves here, the drag-drop event, the cursor/title window
+  seams and the gallery's platform page over in ws::ui.
 - `apps/*` - the executables.
 
 ## Read when
