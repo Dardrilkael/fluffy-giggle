@@ -1,6 +1,7 @@
 // ws::platform's suite: the lexical path helpers, the Locations seam
-// (supplied roots win, the OS-truth smoke) and ensure_directory on
-// real scratch dirs under the OS temp.
+// (supplied roots win, the OS-truth smoke), ensure_directory on real
+// scratch dirs under the OS temp, the debounced watch on a fake clock
+// and the recent-files MRU over a FileSystem fake.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -9,6 +10,8 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <set>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -17,7 +20,10 @@
 #include <ws/platform/errors.hpp>
 #include <ws/platform/locations.hpp>
 #include <ws/platform/paths.hpp>
+#include <ws/platform/recent.hpp>
 #include <ws/platform/watch.hpp>
+#include <ws/settings/errors.hpp>
+#include <ws/settings/json.hpp>
 
 namespace {
 
@@ -342,5 +348,273 @@ TEST_CASE("StdWatchSource watches a real file's stamps") {
     std::error_code ignored;
     std::filesystem::remove(file, ignored);
     REQUIRE(watch.poll() == ws::platform::FileEvent::removed);
+    std::filesystem::remove_all(base, ignored);
+}
+
+// ---- recent files (the MRU, its pins and its persistence) ----
+
+// The FileSystem fake: a map of files, everything existing unless the
+// case denies a path (the prune cases), and a write-failure countdown.
+class FakeFs final : public ws::settings::FileSystem {
+  public:
+    std::map<std::string, std::string> files;
+    std::set<std::string> missing;
+    int fail_writes = 0;
+
+    [[nodiscard]] ws::core::Result<std::string> read(
+        std::string_view path) const override {
+        const auto it = files.find(std::string{path});
+        if (it == files.end()) {
+            return ws::settings::fail(ws::settings::SettingsError::io_failed,
+                                      "read: missing");
+        }
+        return it->second;
+    }
+    ws::core::Status write(std::string_view path,
+                           std::string_view bytes) override {
+        if (fail_writes > 0) {
+            --fail_writes;
+            return ws::settings::fail(ws::settings::SettingsError::io_failed,
+                                      "write refused");
+        }
+        files[std::string{path}] = std::string{bytes};
+        return {};
+    }
+    ws::core::Status rename(std::string_view from,
+                            std::string_view to) override {
+        const auto it = files.find(std::string{from});
+        if (it == files.end()) {
+            return ws::settings::fail(ws::settings::SettingsError::io_failed,
+                                      "rename: missing");
+        }
+        files[std::string{to}] = it->second;
+        files.erase(it);
+        return {};
+    }
+    bool remove(std::string_view path) override {
+        return files.erase(std::string{path}) > 0;
+    }
+    [[nodiscard]] bool exists(std::string_view path) const override {
+        return !missing.contains(std::string{path});
+    }
+};
+
+TEST_CASE("the MRU orders, dedupes and caps") {
+    FakeFs fs;
+    ws::platform::RecentFiles recent{fs, "recent.json", 3};
+    REQUIRE(recent.touch("C:/docs/a.txt"));
+    REQUIRE(recent.touch("C:/docs/b.txt"));
+    REQUIRE(recent.touch("C:/docs/c.txt"));
+    auto items = recent.menu_items();
+    REQUIRE(items.size() == 3);
+    REQUIRE(items[0].path == "C:/docs/c.txt");
+    REQUIRE(items[1].path == "C:/docs/b.txt");
+    REQUIRE(items[2].path == "C:/docs/a.txt");
+
+    // a re-touch promotes, never duplicates
+    REQUIRE(recent.touch("C:/docs/a.txt"));
+    items = recent.menu_items();
+    REQUIRE(items.size() == 3);
+    REQUIRE(items[0].path == "C:/docs/a.txt");
+
+    // two spellings of one file are one entry (the dedupe normalizes)
+    REQUIRE(recent.touch("C:\\docs\\b.txt"));
+    items = recent.menu_items();
+    REQUIRE(items.size() == 3);
+    REQUIRE(items[0].path == "C:/docs/b.txt");
+
+    // over the cap: the oldest unpinned tail entry falls off. The
+    // dedupe promotion left c at the tail, so c goes - not a.
+    REQUIRE(recent.touch("C:/docs/d.txt"));
+    items = recent.menu_items();
+    REQUIRE(items.size() == 3);
+    REQUIRE(items[0].path == "C:/docs/d.txt");
+    REQUIRE(items[1].path == "C:/docs/b.txt");
+    REQUIRE(items[2].path == "C:/docs/a.txt");
+}
+
+TEST_CASE("pins survive the cap, the prune and a re-touch") {
+    FakeFs fs;
+    ws::platform::RecentFiles recent{fs, "recent.json", 3};
+    REQUIRE(recent.touch("one.txt"));
+    REQUIRE(recent.touch("two.txt"));
+    REQUIRE(recent.touch("three.txt"));
+    REQUIRE(recent.pin("", "three.txt"));
+
+    // three is pinned: the eviction picks the oldest UNPINNED (one)
+    REQUIRE(recent.touch("four.txt"));
+    auto items = recent.menu_items();
+    REQUIRE(items.size() == 3);
+    REQUIRE(items[0].path == "four.txt");
+    REQUIRE(items[1].path == "three.txt");  // still here, still pinned
+    REQUIRE(items[1].pinned);
+
+    // a re-touch keeps the pin
+    REQUIRE(recent.touch("three.txt"));
+    REQUIRE(recent.menu_items()[0].pinned);
+
+    // the missing file prunes unpinned entries; a pinned one stays
+    fs.missing.insert("three.txt");
+    fs.missing.insert("four.txt");
+    fs.missing.insert("two.txt");
+    REQUIRE(recent.pin("", "two.txt"));  // pin it before it vanishes
+    items = recent.menu_items();
+    REQUIRE(items.size() == 2);           // four pruned: missing, unpinned
+    REQUIRE(items[0].path == "three.txt");  // pinned, missing, kept
+    REQUIRE(items[1].path == "two.txt");  // pinned before vanishing: kept
+    REQUIRE(items[1].pinned);
+
+    // an all-pinned full list refuses a new touch, untouched
+    REQUIRE(recent.unpin("", "three.txt"));
+    REQUIRE(recent.touch("five.txt"));
+    REQUIRE(recent.touch("six.txt"));
+    REQUIRE(recent.touch("seven.txt"));
+    // the cap evicted five and three on the way; pin what survived
+    REQUIRE(recent.pin("", "seven.txt"));
+    REQUIRE(recent.pin("", "six.txt"));
+    const std::size_t before = recent.menu_items().size();
+    REQUIRE_FALSE(recent.touch("eight.txt"));
+    REQUIRE(recent.menu_items().size() == before);
+}
+
+TEST_CASE("menu labels disambiguate same-named siblings") {
+    FakeFs fs;
+    ws::platform::RecentFiles recent{fs, "recent.json", 10};
+    REQUIRE(recent.touch("C:/a/report.txt"));
+    REQUIRE(recent.touch("C:/b/report.txt"));
+    REQUIRE(recent.touch("D:/c/other.txt"));
+    const auto items = recent.menu_items();
+    REQUIRE(items.size() == 3);
+    REQUIRE(items[0].label == "other.txt");
+    // the later-touched sibling keeps the bare name; the older one
+    // disambiguates with its parent
+    REQUIRE(items[1].label == "report.txt");
+    REQUIRE(items[1].path == "C:/b/report.txt");
+    REQUIRE(items[2].label == "report.txt (a)");
+    REQUIRE(items[2].path == "C:/a/report.txt");
+}
+
+TEST_CASE("the json round trip carries the types and the pins") {
+    FakeFs fs;
+    {
+        ws::platform::RecentFiles recent{fs, "recent.json", 10};
+        REQUIRE(recent.touch("C:/docs/one.txt"));
+        REQUIRE(recent.touch("scene", "C:/maps/valley.scene"));
+        REQUIRE(recent.touch("C:/docs/two.txt"));
+        REQUIRE(recent.pin("", "C:/docs/one.txt"));
+        REQUIRE(recent.save());
+    }
+    // the saved shape: version 1, the lists object, MRU order kept
+    const std::string saved = fs.files.at("recent.json");
+    const auto parsed = ws::settings::json::parse(saved);
+    REQUIRE(parsed.has_value());
+    const auto* version = parsed->as_object()->find("version");
+    REQUIRE(version != nullptr);
+    const auto shape = version->get_integer();
+    REQUIRE(shape.has_value());
+    REQUIRE(*shape == 1);
+    const auto* lists = parsed->as_object()->find("lists");
+    REQUIRE(lists != nullptr);
+    REQUIRE(lists->as_object()->find("") != nullptr);
+    REQUIRE(lists->as_object()->find("scene") != nullptr);
+
+    {
+        ws::platform::RecentFiles back{fs, "recent.json", 10};
+        REQUIRE(back.load());
+        const auto whole = back.menu_items();
+        REQUIRE(whole.size() == 2);
+        REQUIRE(whole[0].path == "C:/docs/two.txt");
+        REQUIRE_FALSE(whole[0].pinned);
+        REQUIRE(whole[1].path == "C:/docs/one.txt");
+        REQUIRE(whole[1].pinned);
+        const auto scenes = back.menu_items("scene");
+        REQUIRE(scenes.size() == 1);
+        REQUIRE(scenes[0].path == "C:/maps/valley.scene");
+    }
+}
+
+TEST_CASE("a corrupt file answers parse_failed and loads nothing") {
+    FakeFs fs;
+    fs.files["recent.json"] = "{ not json ]";
+    ws::platform::RecentFiles recent{fs, "recent.json", 10};
+    REQUIRE(recent.touch("keep.txt"));
+    const auto loaded = recent.load();
+    REQUIRE_FALSE(loaded.has_value());
+    REQUIRE(code_of(loaded.error()) == "platform/4");
+    // the load is all-or-nothing: memory kept what it had
+    REQUIRE(recent.menu_items().size() == 1);
+    REQUIRE(recent.menu_items()[0].path == "keep.txt");
+
+    // a newer shape is refused, never downgraded
+    fs.files["recent.json"] = R"({"version": 2, "lists": {}})";
+    REQUIRE_FALSE(recent.load());
+    REQUIRE(code_of(recent.load().error()) == "platform/4");
+}
+
+TEST_CASE("a missing store is the first run") {
+    FakeFs fs;
+    fs.missing.insert("recent.json");  // the fake's "not there"
+    ws::platform::RecentFiles recent{fs, "recent.json", 10};
+    REQUIRE(recent.load());
+    REQUIRE(recent.menu_items().empty());
+}
+
+TEST_CASE("a failed save leaves the previous file intact") {
+    FakeFs fs;
+    ws::platform::RecentFiles recent{fs, "recent.json", 10};
+    REQUIRE(recent.touch("a.txt"));
+    REQUIRE(recent.save());
+    const std::string before = fs.files.at("recent.json");
+
+    REQUIRE(recent.touch("b.txt"));
+    fs.fail_writes = 1;
+    REQUIRE_FALSE(recent.save());
+    REQUIRE(fs.files.at("recent.json") == before);  // byte-identical
+
+    fs.fail_writes = 0;
+    REQUIRE(recent.save());
+    ws::platform::RecentFiles back{fs, "recent.json", 10};
+    REQUIRE(back.load());
+    const auto items = back.menu_items();
+    REQUIRE(items.size() == 2);
+    REQUIRE(items[0].path == "b.txt");
+    REQUIRE(items[1].path == "a.txt");
+}
+
+TEST_CASE("RecentFiles round trips through the real seam") {
+    const std::filesystem::path base = scratch("recent");
+    std::filesystem::create_directories(base);
+    const std::string store = (base / "recent.json").generic_string();
+    const std::string one = (base / "one.txt").generic_string();
+    const std::string scene_file = (base / "valley.scene").generic_string();
+    {
+        std::ofstream out{one, std::ios::binary | std::ios::trunc};
+        out << "one";
+        std::ofstream scenes{scene_file, std::ios::binary | std::ios::trunc};
+        scenes << "valley";
+    }
+
+    ws::settings::StdFileSystem fs;
+    ws::platform::RecentFiles recent{fs, store, 5};
+    REQUIRE(recent.load());  // the first run
+    REQUIRE(recent.touch(one));
+    REQUIRE(recent.touch("scene", scene_file));
+    REQUIRE(recent.pin("", one));
+    REQUIRE(recent.save());
+
+    ws::platform::RecentFiles back{fs, store, 5};
+    REQUIRE(back.load());
+    const auto whole = back.menu_items();
+    REQUIRE(whole.size() == 1);
+    REQUIRE(whole[0].path == one);
+    REQUIRE(whole[0].pinned);
+
+    // the file gone from disk: the unpinned entry prunes lazily
+    std::error_code ignored;
+    std::filesystem::remove(scene_file, ignored);
+    REQUIRE(back.menu_items("scene").empty());
+    // the pinned missing file stays
+    std::filesystem::remove(one, ignored);
+    REQUIRE(back.menu_items().size() == 1);
     std::filesystem::remove_all(base, ignored);
 }

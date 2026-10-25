@@ -70,8 +70,9 @@ One line each - the per-tree CLAUDE.md files carry the detail:
   JSON persistence through a minimal FileSystem seam.
 - `libs/platform` - the headless platform-services lib: standard
   locations (supplied roots win over the OS truth), lexical path
-  helpers, and the debounced file watch; dialogs, recent files and
-  autosave come later over the settings FileSystem + json seams.
+  helpers, the debounced file watch and the recent-files MRU (pinned,
+  pruned, persisted) over the settings FileSystem + json seams;
+  dialogs and autosave come later.
 - `apps/*` - the executables.
 
 ## Read when

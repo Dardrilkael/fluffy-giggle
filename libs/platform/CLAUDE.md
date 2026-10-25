@@ -1,11 +1,12 @@
 # ws::platform - CLAUDE.md
 
 The headless platform-services lib (nextplan stage 12): the OS-facing
-services an app needs, behind Result-only APIs - standard locations now,
-dialogs, recent files, autosave and file watching later, riding
-ws::core (Result/Status) and the ws::settings seams (FileSystem + json)
-wherever a file is involved. Pure std + ws::core; the OS halves live in
-per-platform TUs and no platform header ever crosses into include/.
+services an app needs, behind Result-only APIs - standard locations,
+the debounced file watch and the recent-files MRU now, dialogs and
+autosave later, riding ws::core (Result/Status) and the ws::settings
+seams (FileSystem + json) wherever a file is involved. Pure std +
+ws::core + ws::settings; the OS halves live in per-platform TUs and no
+platform header ever crosses into include/.
 
 ## Purpose, per header
 
@@ -46,14 +47,33 @@ per-platform TUs and no platform header ever crosses into include/.
   pending event (a load followed by arm() misses the load's own
   write). An exists-but-unstatable sample reads as ms=0 and the next
   poll re-reads - no event is invented from a failed stat.
+- `recent.hpp` - the capped MRU of recently used files, one list per
+  document type ("" is the whole-app default). `touch` promotes and
+  dedupes by the normalized path keeping an existing pin; over the cap
+  the oldest unpinned TAIL entry falls off - the new head never evicts
+  itself, so an all-pinned full list refuses the touch, untouched.
+  `pin`/`unpin` mark entries that survive both the cap and the lazy
+  missing-file prune (`menu_items` drops unpinned entries whose file
+  is gone - the FileSystem's exists, so an undeterminable path reads
+  as gone; pinned entries stay even when missing). `menu_items` also
+  builds the labels: the first same-named file wears the bare name,
+  later siblings grow " (parent)". Persistence is explicit json
+  through the settings seams: `load` (a missing file is the first run;
+  a corrupt file answers parse_failed with NOTHING preserved - unlike
+  the settings .bak, recent files rebuild from use; a load replaces
+  the in-memory lists, all-or-nothing; shape 1 only, a newer shape is
+  refused never downgraded) and `save` (atomic through the seam's
+  temp+rename, so a failure leaves the previous file intact).
 
 ## Allowed dependencies
 
 - `ws::core` PUBLIC (Result/Status/errors - the public API returns
   them).
-- ws::settings arrives with the file-riding phases (recent files,
-  autosave) as PUBLIC - the FileSystem seam and the json facility are
-  the workspace's standard, never duplicated here.
+- `ws::settings` PUBLIC, arrived with recent files (the
+  file-riding phases): the FileSystem seam and the json facility are
+  the workspace's standard, never duplicated here. The reference
+  lives in a public header (recent.hpp) - the ws::ui gui-target
+  precedent.
 - System link libraries (shell32/ole32 for the KnownFolders) stay
   PRIVATE on ws_platform, advapi32's precedent in ws::ui.
 
@@ -71,7 +91,7 @@ per-platform TUs and no platform header ever crosses into include/.
 - Result/Status only, no exceptions across the boundary (root
   CLAUDE.md).
 
-## Known tradeoffs (phase 1)
+## Known tradeoffs
 
 - `Locations` with an empty member AND no app name answers
   `unavailable` rather than inventing a path.
@@ -87,6 +107,20 @@ per-platform TUs and no platform header ever crosses into include/.
   writes inside one stamp tick (100ns on NTFS, coarser elsewhere) land
   as one. `StdWatchSource::exists` answering false for an
   undeterminable path reads as "gone" - the seam's contract, inherited.
+- RecentFiles has no .bak: a corrupt store costs the recent list
+  (rebuilds from use), unlike the settings store's preserved corrupt
+  file. The list is convenience data, not user work.
+- The recent-files shape is version 1, append-only from here; a file
+  newer than shape 1 is refused, never downgraded.
+- The first same-named file wears the bare label; which sibling gets
+  the " (parent)" suffix follows MRU order, not the menu's stable
+  order - acceptable for a menu rebuilt per open.
+- menu_items' prune consults the FileSystem's exists per call: a
+  network share that answers undeterminable reads as gone, dropping
+  the entry. Pinned entries never prune, so pin what matters.
+- One RecentFiles owns one store path (the seam's fixed ".tmp"
+  sibling); two instances on one path would race through the same
+  temp name - the owner-thread rule already forbids it.
 
 ## Tests
 
@@ -105,4 +139,15 @@ sliding the deadline, the removal firing and the fast reappear merging
 into one modified, arm() swallowing a pending event, a missing file's
 first appearance, and a StdWatchSource case whose stamps are set
 explicitly through std::filesystem::last_write_time (quiet 0, no
-races against the clock).
+races against the clock). Phase 3 adds the recent-files suite over a
+FileSystem fake (a file map, a deny-set for "not there", a
+write-failure countdown): MRU order + dedupe by two spellings + cap
+eviction taking the tail, pins surviving the cap and the re-touch
+keeping a pin, the lazy prune (unpinned missing dropped, pinned
+missing kept), same-named label disambiguation, the json round trip
+across two doc types with the saved shape checked, the corrupt file
+refused with in-memory lists intact and a future shape refused, the
+missing store as the first run, a failed save leaving the previous
+file byte-identical (then recovering), and a real StdFileSystem smoke
+in the OS temp: real files survive the prune, the removed one prunes,
+the pinned missing file stays.
