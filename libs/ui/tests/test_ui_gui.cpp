@@ -2143,3 +2143,213 @@ TEST_CASE("custom looks paint the scrollbar over the thumb behavior") {
     CHECK(ws::ui::gui_test::stub.quads == 1);
     CHECK(ws::ui::gui_test::stub.rounded == 0);
 }
+
+TEST_CASE("the text input behavior edits and maps the caret, drawing "
+          "nothing") {
+    namespace keys = ws::input::keys;
+    using ws::ui::gui::TextInputResult;
+    using ws::ui::gui::TextInputState;
+
+    ws::ui::gui_test::stub.reset();
+    GuiContext gui;
+    char buf[16] = "";
+    TextInputState edit;
+    const ws::ui::gui::Rect rect{0.0f, 0.0f, 176.0f, 24.0f};
+    const ws::ui::gui::WidgetId id = gui.ids().id("field");
+
+    // A press inside the row claims the focus the same frame; an empty
+    // buffer clamps the placement to byte 0, the caret at the content
+    // edge.
+    gui.begin_frame(snap(20.0f, 12.0f, true, true));
+    const TextInputResult placed =
+        ws::ui::gui::text_input_behavior(gui, id, rect, buf,
+                                         static_cast<int>(sizeof buf),
+                                         edit, kDefaultChrome);
+    gui.end_frame();
+    CHECK(placed.focused);
+    CHECK(placed.hit.pressed);
+    CHECK(edit.caret == 0);
+    CHECK(edit.anchor == 0);
+    CHECK(placed.caret_x == 12.0f);  // content_x, nothing typed yet
+
+    // Typing lands at the caret; the mapped caret follows the pen and
+    // the span stays closed while no selection stands.
+    InputFrame typing = snap(-100.0f, -100.0f);
+    typing.text_input = {'a', 'b', 'c', 'd'};
+    gui.begin_frame(typing);
+    const TextInputResult typed =
+        ws::ui::gui::text_input_behavior(gui, id, rect, buf,
+                                         static_cast<int>(sizeof buf),
+                                         edit, kDefaultChrome);
+    gui.end_frame();
+    CHECK(typed.edited);
+    CHECK(std::strcmp(buf, "abcd") == 0);
+    CHECK(edit.caret == 4);
+    CHECK(typed.caret_x == 36.0f);  // content_x + four fontless chars
+    CHECK(typed.sel_x0 == typed.sel_x1);
+
+    // A press into the content places the caret by the mid-advance
+    // rule: x 26 is 14px in, past the mid of byte 2 - caret 2, the
+    // anchor collapsed onto it by the plain press.
+    gui.begin_frame(snap(26.0f, 12.0f, true, true));
+    const TextInputResult jumped =
+        ws::ui::gui::text_input_behavior(gui, id, rect, buf,
+                                         static_cast<int>(sizeof buf),
+                                         edit, kDefaultChrome);
+    gui.end_frame();
+    CHECK(edit.caret == 2);
+    CHECK(edit.anchor == 2);
+    CHECK(jumped.caret_x == 24.0f);
+
+    // Select all spreads the span over the whole line - and a
+    // selection is not an edit: the frame answers false.
+    InputFrame all = snap(-100.0f, -100.0f);
+    all.key_down[static_cast<std::size_t>(keys::kLeftControl)] = true;
+    all.key_pressed[static_cast<std::size_t>(keys::kA)] = true;
+    gui.begin_frame(all);
+    const TextInputResult selected =
+        ws::ui::gui::text_input_behavior(gui, id, rect, buf,
+                                         static_cast<int>(sizeof buf),
+                                         edit, kDefaultChrome);
+    gui.end_frame();
+    CHECK(!selected.edited);
+    CHECK(edit.anchor == 0);
+    CHECK(edit.caret == 4);
+    CHECK(selected.sel_x0 == 12.0f);
+    CHECK(selected.sel_x1 == 36.0f);
+
+    // The blink phase rides the frame clock through the result: the
+    // select-all rewound it solid, a quarter-second frame reads 0.25,
+    // the next 0.5 - binary-exact steps.
+    InputFrame tick = snap(-100.0f, -100.0f);
+    tick.dt_seconds = 0.25f;
+    gui.begin_frame(tick);
+    const TextInputResult phase1 =
+        ws::ui::gui::text_input_behavior(gui, id, rect, buf,
+                                         static_cast<int>(sizeof buf),
+                                         edit, kDefaultChrome);
+    gui.end_frame();
+    CHECK(phase1.blink == 0.25f);
+    gui.begin_frame(tick);
+    const TextInputResult phase2 =
+        ws::ui::gui::text_input_behavior(gui, id, rect, buf,
+                                         static_cast<int>(sizeof buf),
+                                         edit, kDefaultChrome);
+    gui.end_frame();
+    CHECK(phase2.blink == 0.5f);
+
+    // A null buffer lays the same row inert: no edit, no crash, the
+    // caret parked at the content edge.
+    const ws::ui::gui::WidgetId bare_id = gui.ids().id("bare");
+    TextInputState bare_edit;
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    const TextInputResult bare =
+        ws::ui::gui::text_input_behavior(gui, bare_id, rect, nullptr, 16,
+                                         bare_edit, kDefaultChrome);
+    gui.end_frame();
+    CHECK(!bare.edited);
+    CHECK(bare.caret_x == 12.0f);
+
+    // The behavior never drew through any of it.
+    CHECK(ws::ui::gui_test::stub.quads == 0);
+    CHECK(ws::ui::gui_test::stub.rounded == 0);
+    CHECK(ws::ui::gui_test::stub.sprites == 0);
+    CHECK(ws::ui::gui_test::stub.texts == 0);
+    CHECK(ws::ui::gui_test::stub.clip_pushes == 0);
+    CHECK(ws::ui::gui_test::stub.clip_pops == 0);
+    CHECK(ws::ui::gui_test::stub.layer_sets == 0);
+}
+
+TEST_CASE("custom looks paint over the text input behavior") {
+    using ws::ui::r2d::draw_quad;
+    namespace keys = ws::input::keys;
+    using ws::ui::gui::TextInputResult;
+    using ws::ui::gui::TextInputState;
+
+    GuiContext gui;
+    char buf[16] = "";
+    TextInputState edit;
+    const ws::ui::gui::Rect rect{0.0f, 0.0f, 176.0f, 24.0f};
+    const ws::ui::gui::WidgetId id = gui.ids().id("field");
+
+    // The stock draw over a quiet unfocused answer: the face, and the
+    // empty buffer's placeholder bar - the fontless stub theme's two
+    // pieces.
+    ws::ui::gui_test::stub.reset();
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    const TextInputResult quiet =
+        ws::ui::gui::text_input_behavior(gui, id, rect, buf,
+                                         static_cast<int>(sizeof buf),
+                                         edit, kDefaultChrome);
+    ws::ui::gui::text_input_draw(rect, quiet, kDefaultChrome, "label", buf,
+                                 static_cast<int>(sizeof buf));
+    gui.end_frame();
+    CHECK(ws::ui::gui_test::stub.rounded == 1);  // the face
+    CHECK(ws::ui::gui_test::stub.quads == 1);    // the placeholder bar
+
+    // The press claims the focus; typing fills the buffer; the stock
+    // draw over the answer paints the ring, the face, the text bar and
+    // the solid caret - the standard field's pixels.
+    gui.begin_frame(snap(20.0f, 12.0f, true, true));
+    (void)ws::ui::gui::text_input_behavior(gui, id, rect, buf,
+                                           static_cast<int>(sizeof buf),
+                                           edit, kDefaultChrome);
+    gui.end_frame();
+    ws::ui::gui_test::stub.reset();
+    InputFrame typing = snap(-100.0f, -100.0f);
+    typing.text_input = {'h', 'i'};
+    gui.begin_frame(typing);
+    const TextInputResult typed =
+        ws::ui::gui::text_input_behavior(gui, id, rect, buf,
+                                         static_cast<int>(sizeof buf),
+                                         edit, kDefaultChrome);
+    ws::ui::gui::text_input_draw(rect, typed, kDefaultChrome, "label", buf,
+                                 static_cast<int>(sizeof buf));
+    gui.end_frame();
+    CHECK(ws::ui::gui_test::stub.rounded == 2);  // the ring + the face
+    CHECK(ws::ui::gui_test::stub.quads == 2);    // the text bar + the caret
+    CHECK(typed.caret_x == 24.0f);
+
+    // Select-all bands the line: one accent quad under the text, the
+    // caret solid at the selection's live end.
+    ws::ui::gui_test::stub.reset();
+    InputFrame all = snap(-100.0f, -100.0f);
+    all.key_down[static_cast<std::size_t>(keys::kLeftControl)] = true;
+    all.key_pressed[static_cast<std::size_t>(keys::kA)] = true;
+    gui.begin_frame(all);
+    const TextInputResult selected =
+        ws::ui::gui::text_input_behavior(gui, id, rect, buf,
+                                         static_cast<int>(sizeof buf),
+                                         edit, kDefaultChrome);
+    ws::ui::gui::text_input_draw(rect, selected, kDefaultChrome, "label",
+                                 buf, static_cast<int>(sizeof buf));
+    gui.end_frame();
+    CHECK(ws::ui::gui_test::stub.rounded == 2);  // the ring + the face
+    CHECK(ws::ui::gui_test::stub.quads == 3);    // band + text + caret
+    CHECK(selected.sel_x0 == 12.0f);
+    CHECK(selected.sel_x1 == 24.0f);
+
+    // A custom look owns every pixel over the same behavior: an
+    // underline field - the accent baseline, the text bar and a caret
+    // block at the mapped x - with the standing selection replaced by
+    // the next keystroke through the behavior untouched.
+    ws::ui::gui_test::stub.reset();
+    InputFrame replace = snap(-100.0f, -100.0f);
+    replace.text_input = {'!'};
+    gui.begin_frame(replace);
+    const TextInputResult swapped =
+        ws::ui::gui::text_input_behavior(gui, id, rect, buf,
+                                         static_cast<int>(sizeof buf),
+                                         edit, kDefaultChrome);
+    draw_quad(rect.x, rect.y + rect.height - 2.0f, rect.width, 2.0f,
+              kDefaultChrome.control_on);
+    draw_quad(rect.x + kDefaultChrome.padding, 6.0f, 6.0f, 12.0f,
+              kDefaultChrome.text);
+    draw_quad(swapped.caret_x, 4.0f, 2.0f, 16.0f, kDefaultChrome.control_on);
+    gui.end_frame();
+    CHECK(swapped.edited);
+    CHECK(std::strcmp(buf, "!") == 0);
+    CHECK(swapped.caret_x == 18.0f);  // content_x + the one char typed
+    CHECK(ws::ui::gui_test::stub.quads == 3);
+    CHECK(ws::ui::gui_test::stub.rounded == 0);
+}

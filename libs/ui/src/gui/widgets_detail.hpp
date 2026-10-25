@@ -46,124 +46,11 @@ struct DragState {
     float anchor_value = 0.0f;  // the value at the grab
 };
 
-// text_input's persistent half: the caret and its selection anchor are
-// byte offsets into the CALLER's buffer (v1 edits ASCII, so bytes are
-// characters; equal means no selection). The blink phase is the frame
-// clock's first consumer - dt_seconds accumulates here, half on/half
-// off at rest, and every edit, caret move or press rewinds it so the
-// caret reads solid while the user works. `was_focused` lights it the
-// frame the field GAINS the focus, so a Tab-arrival caret shows
-// immediately instead of mid-blink.
-struct TextInputState {
-    int caret = 0;
-    int anchor = 0;      // the selection origin; caret == anchor: none
-    float blink = 0.0f;  // [0, 1): under 0.5 draws the caret
-    bool was_focused = false;
-};
-
-// The typing filter: v1 edits ASCII - one byte, one glyph, the bake's
-// whole range. The test takes the CODEPOINT, never a char: cp 300 cast
-// to the byte first would alias into ','. The paste path's
-// char->unsigned-char widening is exact, so it shares this one filter.
-inline bool is_insertable(std::uint32_t cp) {
-    return cp >= 32u && cp <= 126u;
-}
-
-// text_input's per-frame lens: the persistent caret pair from
-// TextInputState plus the caller's buffer geometry as one object, so
-// every edit below speaks a verb instead of spelling memmove. Built
-// once per frame with the length measured fresh; the frame-end clamp
-// writes the pair back into the persistent state. A dead field carries
-// room 0, and the verbs' own clamps turn that into a no-op.
-struct EditBuffer {
-    char* buf = nullptr;  // the caller's buffer (the widget never owns it)
-    int room = 0;   // bytes the buffer may hold: capacity minus the NUL
-    int len = 0;    // bytes before the terminator, measured this frame
-    int caret = 0;   // the editing position; the selection's live end
-    int anchor = 0;  // the selection origin; caret == anchor: none
-
-    // The selection as a range, low end first (equal ends: none).
-    int sel_lo() const { return std::min(caret, anchor); }
-    int sel_hi() const { return std::max(caret, anchor); }
-    bool has_selection() const { return caret != anchor; }
-
-    // Both ends onto `at`: the selection dies, the caret stays.
-    void collapse(int at) {
-        caret = anchor = at;
-    }
-
-    // The one eraser every deleter funnels through: [lo, hi) leaves,
-    // the tail slides, the terminator follows the new end.
-    void erase(int lo, int hi) {
-        lo = std::max(0, lo);
-        hi = std::min(len, hi);
-        if (lo >= hi) {
-            return;
-        }
-        std::memmove(buf + lo, buf + hi, static_cast<std::size_t>(len - hi));
-        len -= hi - lo;
-        buf[len] = '\0';
-    }
-
-    // A selection dies under what replaces it - typing and pasting both
-    // spell it; the caret lands where the selection was.
-    void erase_selection() {
-        if (has_selection()) {
-            const int lo = sel_lo();
-            erase(lo, sel_hi());
-            collapse(lo);
-        }
-    }
-
-    // n bytes at `at` (clamped into [0, len], never past the room): the
-    // tail slides once, the bytes land, the terminator follows. The
-    // return is the pen just past the insertion, or -1 when the room
-    // refused everything.
-    int insert(int at, const char* bytes, int n) {
-        at = std::max(0, std::min(len, at));
-        n = std::min(n, room - len);
-        if (n <= 0) {
-            return -1;
-        }
-        std::memmove(buf + at + n, buf + at,
-                     static_cast<std::size_t>(len - at));
-        std::memcpy(buf + at, bytes, static_cast<std::size_t>(n));
-        len += n;
-        buf[len] = '\0';
-        return at + n;
-    }
-
-    // A paste through the filter: only insertable bytes count, and only
-    // as many as the room takes - counted in one pass over the text,
-    // then landed in one move, so the buffer never walks per byte and
-    // the capacity never splits mid-paste. The return is insert's pen.
-    int insert_filtered(int at, const char* text) {
-        int take = 0;
-        for (const char* p = text; *p != '\0' && len + take < room; ++p) {
-            if (is_insertable(static_cast<unsigned char>(*p))) {
-                ++take;
-            }
-        }
-        at = std::max(0, std::min(len, at));
-        if (take <= 0) {
-            return -1;
-        }
-        std::memmove(buf + at + take, buf + at,
-                     static_cast<std::size_t>(len - at));
-        int pen = at;
-        for (const char* p = text; *p != '\0'; ++p) {
-            if (pen - at >= take) {
-                break;  // the room's count is landed; the tail never walks
-            }
-            if (is_insertable(static_cast<unsigned char>(*p))) {
-                buf[pen++] = *p;
-            }
-        }
-        len += take;
-        buf[len] = '\0';
-        return pen;
-    }
-};
+// The text field's persistent pair (TextInputState), the typing filter
+// (is_insertable) and the per-frame edit lens (EditBuffer) live in the
+// public widgets.hpp now - the field's split halves take the state by
+// reference and speak the lens's verbs, so a custom text field holds
+// its own and edits through the same moves.
 
 // The contact's track: its own slot, or a free one for a fresh press.
 // Null only when the table is somehow full, which the sweep in
@@ -363,38 +250,6 @@ inline void draw_label(float x, float row_top, float row_height,
         r2d::draw_quad(x, row_top + (row_height - bar_height) * 0.5f,
                        fit.advance, bar_height, color);
     }
-}
-
-// One row's whole citizenship ladder, in the order the frame contract
-// requires: the fill-width resolve against the cursor, the id from the
-// label (one seam - it keys the hit-test AND any persistent state), the
-// placed rect, the focusable registration BEFORE state() (a press's
-// focus claim reads the registration), then state()'s one hit-test.
-// Every interactive row widget walks these steps in this order; one
-// that begins here cannot get it wrong.
-struct Row {
-    WidgetId id;
-    Rect rect;
-    WidgetResult result;
-};
-
-// The ladder as one call. `width` keeps LayoutCursor's own contract:
-// negative fills the rest of the line; the auto-sized rows (checkbox,
-// radio, toggle) pass their computed width, which the resolve leaves
-// untouched. `disabled` is the per-widget sugar: the row skips the
-// focusable registration (Tab walks past a dead row) and hands state()
-// the lock directly - the same Disabled state the ambient scope drives,
-// one widget at a time.
-inline Row begin_row(GuiContext& gui, LayoutCursor& layout,
-                     const ChromeTheme& theme, const char* label,
-                     float width, bool disabled = false) {
-    resolve_width(width, layout);
-    const WidgetId id = gui.ids().id(label);
-    const Rect rect = layout.next(width, theme.control_height);
-    if (!disabled) {
-        gui.register_focusable(id);
-    }
-    return {id, rect, gui.state(id, rect, disabled)};
 }
 
 // --- the split widgets' ladder and fold ------------------------------------

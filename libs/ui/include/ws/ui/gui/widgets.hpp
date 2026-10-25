@@ -5,8 +5,11 @@
 #include <ws/ui/gui/rect.hpp>
 #include <ws/ui/gui/theme.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <functional>
 
 namespace ws::ui::gui {
@@ -883,6 +886,174 @@ void combo_draw(const Rect& rect, const ComboResult& result,
 bool text_input(GuiContext& gui, LayoutCursor& layout,
                 const ChromeTheme& theme, const char* label, char* buf,
                 int capacity, float width = -1.0f, bool disabled = false);
+
+// --- the text field's split halves -------------------------------------------
+// The field's behavior/draw seam, public for the custom text field:
+// the behavior owns the editing - the caret and the selection against
+// the caller's buffer, the whole keyboard, the clipboard trio - and
+// maps the caret into pixels; the draw owns the stock field's every
+// pixel over the answer. The state travels public with them: hold the
+// persistent pair in the context's side table under your own id, and
+// the EditBuffer lens is yours for whatever else a custom field edits.
+
+// text_input's persistent half: the caret and its selection anchor are
+// byte offsets into the CALLER's buffer (v1 edits ASCII, so bytes are
+// characters; equal means no selection). The blink phase is the frame
+// clock's first consumer - dt_seconds accumulates here, half on/half
+// off at rest, and every edit, caret move or press rewinds it so the
+// caret reads solid while the user works. `was_focused` lights it the
+// frame the field GAINS the focus, so a Tab-arrival caret shows
+// immediately instead of mid-blink.
+struct TextInputState {
+    int caret = 0;
+    int anchor = 0;      // the selection origin; caret == anchor: none
+    float blink = 0.0f;  // [0, 1): under 0.5 draws the caret
+    bool was_focused = false;
+};
+
+// The typing filter: v1 edits ASCII - one byte, one glyph, the bake's
+// whole range. The test takes the CODEPOINT, never a char: cp 300 cast
+// to the byte first would alias into ','. The paste path's
+// char->unsigned-char widening is exact, so it shares this one filter.
+inline bool is_insertable(std::uint32_t cp) {
+    return cp >= 32u && cp <= 126u;
+}
+
+// text_input's per-frame lens: the persistent caret pair from
+// TextInputState plus the caller's buffer geometry as one object, so
+// every edit speaks a verb instead of spelling memmove. Built once per
+// frame with the length measured fresh; the frame-end clamp writes the
+// pair back into the persistent state. A dead field carries room 0,
+// and the verbs' own clamps turn that into a no-op.
+struct EditBuffer {
+    char* buf = nullptr;  // the caller's buffer (the widget never owns it)
+    int room = 0;   // bytes the buffer may hold: capacity minus the NUL
+    int len = 0;    // bytes before the terminator, measured this frame
+    int caret = 0;   // the editing position; the selection's live end
+    int anchor = 0;  // the selection origin; caret == anchor: none
+
+    // The selection as a range, low end first (equal ends: none).
+    int sel_lo() const { return std::min(caret, anchor); }
+    int sel_hi() const { return std::max(caret, anchor); }
+    bool has_selection() const { return caret != anchor; }
+
+    // Both ends onto `at`: the selection dies, the caret stays.
+    void collapse(int at) {
+        caret = anchor = at;
+    }
+
+    // The one eraser every deleter funnels through: [lo, hi) leaves,
+    // the tail slides, the terminator follows the new end.
+    void erase(int lo, int hi) {
+        lo = std::max(0, lo);
+        hi = std::min(len, hi);
+        if (lo >= hi) {
+            return;
+        }
+        std::memmove(buf + lo, buf + hi, static_cast<std::size_t>(len - hi));
+        len -= hi - lo;
+        buf[len] = '\0';
+    }
+
+    // A selection dies under what replaces it - typing and pasting both
+    // spell it; the caret lands where the selection was.
+    void erase_selection() {
+        if (has_selection()) {
+            const int lo = sel_lo();
+            erase(lo, sel_hi());
+            collapse(lo);
+        }
+    }
+
+    // n bytes at `at` (clamped into [0, len], never past the room): the
+    // tail slides once, the bytes land, the terminator follows. The
+    // return is the pen just past the insertion, or -1 when the room
+    // refused everything.
+    int insert(int at, const char* bytes, int n) {
+        at = std::max(0, std::min(len, at));
+        n = std::min(n, room - len);
+        if (n <= 0) {
+            return -1;
+        }
+        std::memmove(buf + at + n, buf + at,
+                     static_cast<std::size_t>(len - at));
+        std::memcpy(buf + at, bytes, static_cast<std::size_t>(n));
+        len += n;
+        buf[len] = '\0';
+        return at + n;
+    }
+
+    // A paste through the filter: only insertable bytes count, and only
+    // as many as the room takes - counted in one pass over the text,
+    // then landed in one move, so the buffer never walks per byte and
+    // the capacity never splits mid-paste. The return is insert's pen.
+    int insert_filtered(int at, const char* text) {
+        int take = 0;
+        for (const char* p = text; *p != '\0' && len + take < room; ++p) {
+            if (is_insertable(static_cast<unsigned char>(*p))) {
+                ++take;
+            }
+        }
+        at = std::max(0, std::min(len, at));
+        if (take <= 0) {
+            return -1;
+        }
+        std::memmove(buf + at + take, buf + at,
+                     static_cast<std::size_t>(len - at));
+        int pen = at;
+        for (const char* p = text; *p != '\0'; ++p) {
+            if (pen - at >= take) {
+                break;  // the room's count is landed; the tail never walks
+            }
+            if (is_insertable(static_cast<unsigned char>(*p))) {
+                buf[pen++] = *p;
+            }
+        }
+        len += take;
+        buf[len] = '\0';
+        return pen;
+    }
+};
+
+// What the behavior hands a look: the row's paint plus the caret's
+// mapped geometry, paint-ready. caret_x is the caret's x in frame px,
+// clamped to the row's room; sel_x0/sel_x1 are the selection band's
+// edges in frame px, equally clamped (equal: no selection stands - an
+// unfocused field still reports its span, and the stock draw gates it
+// on the focus); blink is the caret's phase [0, 1). The visibility
+// gates - focus, the disabled lock, the blink phase - are the look's
+// to apply; edited is the frame's answer, the widget's own return.
+struct TextInputResult : WidgetPaint {
+    float caret_x = 0.0f;  // the caret's resting x, frame px
+    float sel_x0 = 0.0f;   // the selection band's left edge, frame px
+    float sel_x1 = 0.0f;   // ...right edge (x0 == x1: none stands)
+    float blink = 0.0f;    // the caret's phase [0, 1): under 0.5 solid
+    bool edited = false;   // the buffer changed this frame
+};
+
+// The interaction half at a placed rect: the citizenship fold, then the
+// field's whole editing - the press that places the caret, the sweep
+// that selects, the caret keys, the deleters, the frame's codepoints
+// through the v1 filter, Ctrl+A, Escape's selection drop and the
+// clipboard trio - all against the caller's buffer through the
+// EditBuffer verbs, the pair written back into `edit`. `theme` maps
+// the caret into pixels: the font's glyph advances, or
+// label_char_width fontless. Draws nothing.
+TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
+                                    const Rect& rect, char* buf, int capacity,
+                                    TextInputState& edit,
+                                    const ChromeTheme& theme,
+                                    bool disabled = false,
+                                    const HitShape& hit_shape = {});
+
+// The look half: the face, the focus ring, the selection band, the
+// content - or the placeholder while the buffer is empty - the "..."
+// when the line runs past the room, and the blinking caret at the
+// mapped x. Reads no context; `buf` is read-only here, the edits are
+// the behavior's.
+void text_input_draw(const Rect& rect, const TextInputResult& result,
+                     const ChromeTheme& theme, const char* label,
+                     const char* buf, int capacity);
 
 // One column of a table: the header text and the width policy. A width
 // above zero is fixed pixels; zero or negative STRETCHES - the column

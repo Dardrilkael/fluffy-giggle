@@ -1,7 +1,10 @@
 // ws::ui::gui widget functions, one family per file (src/gui/CLAUDE.md):
-// the text field - caret, selection and the typed edits through the
-// EditBuffer verbs (the lens and the TextInputState live in
-// widgets_detail.hpp).
+// the text field - the split pair public for the custom field:
+// text_input_behavior (the caret and selection edits against the
+// caller's buffer, plus the caret's pixel mapping) and text_input_draw
+// (the stock field's look over the answer), with the composed row over
+// them. The lens (EditBuffer) and the persistent pair (TextInputState)
+// live in the public widgets.hpp.
 
 #include "widgets_detail.hpp"
 
@@ -13,17 +16,28 @@
 
 namespace ws::ui::gui {
 
-// --- M20: the text input ----------------------------------------------------
+// --- the composed row --------------------------------------------------------
 
 bool text_input(GuiContext& gui, LayoutCursor& layout,
                 const ChromeTheme& theme, const char* label, char* buf,
                 int capacity, float width, bool disabled) {
-    const Row row = begin_row(gui, layout, theme, label, width, disabled);
-    const WidgetId id = row.id;
-    const Rect& rect = row.rect;
-    const WidgetResult& result = row.result;
-    const HitTest& hit = result.hit;
-    TextInputState& edit = gui.persistent_state<TextInputState>(id);
+    const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
+    TextInputState& edit = gui.persistent_state<TextInputState>(row.id);
+    const TextInputResult result = text_input_behavior(
+        gui, row.id, row.rect, buf, capacity, edit, theme, disabled);
+    text_input_draw(row.rect, result, theme, label, buf, capacity);
+    return result.edited;
+}
+
+// --- the behavior half, public for the custom field --------------------------
+
+TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
+                                    const Rect& rect, char* buf, int capacity,
+                                    TextInputState& edit,
+                                    const ChromeTheme& theme, bool disabled,
+                                    const HitShape& hit_shape) {
+    TextInputResult out{begin_widget_paint(gui, id, rect, disabled, hit_shape)};
+    const HitTest& hit = out.hit;
 
     // The caller owns the buffer; the widget owns the editing. `live` is
     // the honest capacity read - a null buf or no room for a byte plus
@@ -50,9 +64,9 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
 
     const ws::input::InputFrame& in = gui.input();
     // state()'s press edge claims the focus the SAME frame, so a quick
-    // tap's own press frame already reads focused here.
-    const bool focused = gui.is_focused(id);
-    const bool dead = result.state == WidgetState::Disabled;
+    // tap's own press frame already reads focused in the fold above.
+    const bool focused = out.focused;
+    const bool dead = out.state == WidgetState::Disabled;
     const bool can_edit = live && focused && !dead;
 
     // The advance arithmetic the whole field rides: one codepoint's
@@ -257,8 +271,27 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
     edit.anchor = std::clamp(eb.anchor, 0, eb.len);
     edit.was_focused = focused;
 
-    // --- the draw: ring, face, band, text, caret --------------------------
-    focus_ring(gui, id, rect, theme);
+    // The mapped answer, paint-ready: the clamped pair's places against
+    // the row's room (a line running past it parks the marks at the
+    // edge - v1 has no horizontal scroll, the keys still edit the
+    // hidden tail), the blink phase as it stands, the frame's edit
+    // word.
+    out.caret_x = content_x + std::min(x_at(edit.caret), content_room);
+    const int sel_lo = std::min(edit.caret, edit.anchor);
+    const int sel_hi = std::max(edit.caret, edit.anchor);
+    out.sel_x0 = content_x + std::min(x_at(sel_lo), content_room);
+    out.sel_x1 = content_x + std::min(x_at(sel_hi), content_room);
+    out.blink = edit.blink;
+    out.edited = changed;
+    return out;
+}
+
+// --- the draw half ------------------------------------------------------------
+
+void text_input_draw(const Rect& rect, const TextInputResult& result,
+                     const ChromeTheme& theme, const char* label,
+                     const char* buf, int capacity) {
+    ring_draw(result.focused, rect, theme);
     const float dim_by = dim_factor(result.state, theme);
     // The field reads held while a press owns it: the plain ladder.
     const std::uint32_t face = control_face(result.state, theme);
@@ -275,36 +308,62 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
         mark_h = theme.font->line_height();
     }
 
+    const float content_x = rect.x + theme.padding;
+    const float content_room = std::max(0.0f, rect.width - 2.0f * theme.padding);
+
     // The selection band: the accent under the text, the selected tab's
     // face - only while the field holds the focus (a stale selection
-    // never bands an unfocused row).
-    const int sel_lo_draw = std::min(edit.caret, edit.anchor);
-    const int sel_hi_draw = std::max(edit.caret, edit.anchor);
-    if (focused && !dead && sel_hi_draw > sel_lo_draw) {
-        const float x0 =
-            content_x + std::min(x_at(sel_lo_draw), content_room);
-        const float x1 =
-            content_x + std::min(x_at(sel_hi_draw), content_room);
-        if (x1 > x0) {
-            r2d::draw_quad(x0, mark_y, x1 - x0, mark_h, theme.control_on);
-        }
+    // never bands an unfocused row). The behavior already clamped the
+    // span to the room; equal edges mean nothing stands.
+    if (result.focused && result.state != WidgetState::Disabled &&
+        result.sel_x1 > result.sel_x0) {
+        r2d::draw_quad(result.sel_x0, mark_y, result.sel_x1 - result.sel_x0,
+                       mark_h, theme.control_on);
     }
 
-    if (eb.len > 0) {
+    // The content walk: the same advance arithmetic the behavior maps
+    // the caret by, recomputed here - the look owns its own fits.
+    const bool live = buf != nullptr && capacity >= 2;
+    const int room = live ? capacity - 1 : 0;
+    int len = 0;
+    if (live) {
+        while (len < room && buf[len] != '\0') {
+            ++len;
+        }
+    }
+    const auto cp_advance = [&](unsigned char c) -> float {
+        if (theme.font != nullptr) {
+            const r2d::Font::Glyph* g = theme.font->glyph(c);
+            return g != nullptr ? g->advance : 0.0f;
+        }
+        return theme.label_char_width;
+    };
+    const auto char_advance = [&](int i) -> float {
+        return cp_advance(static_cast<unsigned char>(buf[i]));
+    };
+    const auto x_at = [&](int index) -> float {
+        float acc = 0.0f;
+        for (int i = 0; i < index && i < len; ++i) {
+            acc += char_advance(i);
+        }
+        return acc;
+    };
+
+    if (len > 0) {
         // The content, left-aligned inside the padding. Content is DATA,
         // so fit_text's "##" cut does not apply - the truncation here is
         // the walk itself: the longest prefix + "..." when the whole
         // line misses the row's room (the v1 filter already guarantees
         // one byte per glyph).
-        const float whole = x_at(eb.len);
-        int visible = eb.len;
+        const float whole = x_at(len);
+        int visible = len;
         bool ellipsis = false;
         if (whole > content_room) {
             const float dots = cp_advance('.') * 3.0f;
             const float budget = std::max(0.0f, content_room - dots);
             float acc = 0.0f;
             visible = 0;
-            for (int i = 0; i < eb.len; ++i) {
+            for (int i = 0; i < len; ++i) {
                 const float adv = char_advance(i);
                 if (acc + adv > budget) {
                     break;
@@ -353,16 +412,14 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
         }
     }
 
-    // The caret: a 2px bar in the text color - solid on arrival and
-    // through work, half on/half off at rest, clamped to the row's room
-    // when the line runs past it (v1 has no horizontal scroll; the
-    // caret rides the edge while the keys still edit the hidden tail).
-    if (focused && !dead && live && edit.blink < 0.5f) {
-        const float cx =
-            content_x + std::min(x_at(edit.caret), content_room);
-        r2d::draw_quad(cx, mark_y, 2.0f, mark_h, theme.text);
+    // The caret: a 2px bar in the text color at the mapped x - solid
+    // on arrival and through work, half on/half off at rest (the phase
+    // the behavior reports; the stock look's own under-half rule),
+    // hidden while unfocused, locked or inert.
+    if (result.focused && result.state != WidgetState::Disabled && live &&
+        result.blink < 0.5f) {
+        r2d::draw_quad(result.caret_x, mark_y, 2.0f, mark_h, theme.text);
     }
-    return changed;
 }
 
 }  // namespace ws::ui::gui
