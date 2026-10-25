@@ -39,3 +39,10 @@ add_subdirectory(jobs)
 # observers and JSON persistence through a minimal FileSystem seam.
 # Pure std + ws::core - no third-party anywhere.
 add_subdirectory(settings)
+
+# ws::platform is the headless platform-services lib (nextplan stage 12):
+# standard locations and lexical paths now, then dialogs/recent
+# files/autosave/watch on the ws::settings FileSystem + json seams. The
+# os halves stay in per-platform TUs behind Result-only APIs; apps never
+# see a platform header.
+add_subdirectory(platform)
