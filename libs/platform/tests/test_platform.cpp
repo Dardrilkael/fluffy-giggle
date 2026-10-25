@@ -5,6 +5,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -16,6 +17,7 @@
 #include <ws/platform/errors.hpp>
 #include <ws/platform/locations.hpp>
 #include <ws/platform/paths.hpp>
+#include <ws/platform/watch.hpp>
 
 namespace {
 
@@ -39,6 +41,24 @@ namespace {
            error.code ==
                static_cast<std::int32_t>(ws::platform::PlatformError::unavailable);
 }
+
+// The watch's test seam: presence and stamp driven by hand, no disk.
+class FakeWatchSource final : public ws::platform::WatchSource {
+  public:
+    bool present = false;
+    std::int64_t mtime_ms = 0;
+
+    [[nodiscard]] ws::core::Result<std::int64_t> modified_ms(
+        std::string_view) const override {
+        if (!present) {
+            return ws::platform::fail(ws::platform::PlatformError::io_failed);
+        }
+        return mtime_ms;
+    }
+    [[nodiscard]] bool exists(std::string_view) const override {
+        return present;
+    }
+};
 
 }  // namespace
 
@@ -173,4 +193,154 @@ TEST_CASE("os_location answers the Windows truth for an app") {
     ws::platform::Locations locs{"ws-app"};
     REQUIRE(locs.get(ws::platform::Location::config).value() == cfg.value());
     REQUIRE(locs.get(ws::platform::Location::cache).value() == cache.value());
+}
+
+TEST_CASE("the watch fires a settled change once, after quiet") {
+    FakeWatchSource source;
+    source.present = true;
+    source.mtime_ms = 1000;
+    std::int64_t now = 0;
+    ws::platform::FileWatch watch{source, "tracked.json",
+                                  [&now] { return now; }, 400};
+    REQUIRE(watch.poll() == ws::platform::FileEvent::none);
+
+    now = 100;
+    source.mtime_ms = 2000;
+    REQUIRE(watch.poll() == ws::platform::FileEvent::none);  // just observed
+    now = 300;
+    REQUIRE(watch.poll() == ws::platform::FileEvent::none);  // 200ms, not 400
+    now = 501;
+    REQUIRE(watch.poll() == ws::platform::FileEvent::modified);  // 401ms quiet
+    now = 600;
+    REQUIRE(watch.poll() == ws::platform::FileEvent::none);  // once only
+}
+
+TEST_CASE("a still-moving writer slides the deadline, never stacks") {
+    FakeWatchSource source;
+    source.present = true;
+    source.mtime_ms = 1000;
+    std::int64_t now = 0;
+    ws::platform::FileWatch watch{source, "tracked.json",
+                                  [&now] { return now; }, 400};
+
+    now = 10;
+    source.mtime_ms = 2000;
+    REQUIRE(watch.poll() == ws::platform::FileEvent::none);
+    now = 110;
+    source.mtime_ms = 3000;  // still writing: the deadline slides to 110
+    REQUIRE(watch.poll() == ws::platform::FileEvent::none);
+    now = 310;
+    source.mtime_ms = 4000;  // and again, to 310
+    REQUIRE(watch.poll() == ws::platform::FileEvent::none);
+    now = 500;
+    REQUIRE(watch.poll() == ws::platform::FileEvent::none);  // 190ms since
+    now = 711;
+    REQUIRE(watch.poll() == ws::platform::FileEvent::modified);  // 401ms since
+    now = 800;
+    REQUIRE(watch.poll() == ws::platform::FileEvent::none);
+}
+
+TEST_CASE("a removal fires; a fast reappear merges into modified") {
+    FakeWatchSource source;
+    source.present = true;
+    source.mtime_ms = 1000;
+    std::int64_t now = 0;
+    ws::platform::FileWatch watch{source, "tracked.json",
+                                  [&now] { return now; }, 400};
+
+    now = 100;
+    source.present = false;  // gone at 100
+    REQUIRE(watch.poll() == ws::platform::FileEvent::none);
+    now = 300;
+    REQUIRE(watch.poll() == ws::platform::FileEvent::none);
+    now = 501;
+    REQUIRE(watch.poll() == ws::platform::FileEvent::removed);  // stayed gone
+
+    now = 600;
+    source.present = true;  // back with new content
+    source.mtime_ms = 5000;
+    REQUIRE(watch.poll() == ws::platform::FileEvent::none);  // observed at 600
+    now = 1001;
+    REQUIRE(watch.poll() == ws::platform::FileEvent::modified);
+
+    // The interim case: gone at 100, back at 200 - one modified, and
+    // the removal never fires.
+    FakeWatchSource quick;
+    quick.present = false;  // missing at construction
+    now = 0;
+    ws::platform::FileWatch merges{quick, "quick.json",
+                                   [&now] { return now; }, 400};
+    quick.present = true;
+    quick.mtime_ms = 900;
+    now = 100;
+    REQUIRE(merges.poll() == ws::platform::FileEvent::none);  // observed at 100
+    now = 501;
+    REQUIRE(merges.poll() == ws::platform::FileEvent::modified);
+}
+
+TEST_CASE("arm re-baselines and swallows the pending event") {
+    FakeWatchSource source;
+    source.present = true;
+    source.mtime_ms = 1000;
+    std::int64_t now = 0;
+    ws::platform::FileWatch watch{source, "tracked.json",
+                                  [&now] { return now; }, 400};
+    now = 100;
+    source.mtime_ms = 2000;
+    REQUIRE(watch.poll() == ws::platform::FileEvent::none);  // pending
+
+    watch.arm();  // the load's own write: baseline moves to 2000
+    now = 1000;
+    REQUIRE(watch.poll() == ws::platform::FileEvent::none);  // swallowed
+    source.mtime_ms = 3000;  // a real later change still lands
+    REQUIRE(watch.poll() == ws::platform::FileEvent::none);
+    now = 1401;
+    REQUIRE(watch.poll() == ws::platform::FileEvent::modified);
+}
+
+TEST_CASE("a missing file's first appearance fires modified") {
+    FakeWatchSource source;
+    source.present = false;  // not there at construction
+    std::int64_t now = 0;
+    ws::platform::FileWatch watch{source, "created.json",
+                                  [&now] { return now; }, 400};
+    REQUIRE(watch.poll() == ws::platform::FileEvent::none);
+
+    now = 10;
+    source.present = true;
+    source.mtime_ms = 700;
+    REQUIRE(watch.poll() == ws::platform::FileEvent::none);  // observed at 10
+    now = 411;
+    REQUIRE(watch.poll() == ws::platform::FileEvent::modified);
+}
+
+TEST_CASE("StdWatchSource watches a real file's stamps") {
+    const std::filesystem::path base = scratch("watch");
+    std::filesystem::create_directories(base);
+    const std::string file = (base / "tracked.txt").generic_string();
+    {
+        std::ofstream out{file, std::ios::binary | std::ios::trunc};
+        out << "v1";
+    }
+
+    ws::platform::StdWatchSource source;
+    // quiet 0: any settled change is due the same poll, so no sleeps -
+    // the stamps are set explicitly, not raced against the clock.
+    ws::platform::FileWatch watch{source, file,
+                                  ws::platform::FileWatch::Clock{}, 0};
+    REQUIRE(watch.poll() == ws::platform::FileEvent::none);
+
+    const auto old_time =
+        std::filesystem::file_time_type::clock::now() - std::chrono::hours(2);
+    const auto new_time = old_time + std::chrono::hours(1);
+    std::filesystem::last_write_time(std::filesystem::path{file}, old_time);
+    watch.arm();  // baseline: old_time
+    std::filesystem::last_write_time(std::filesystem::path{file}, new_time);
+    REQUIRE(watch.poll() == ws::platform::FileEvent::modified);
+    REQUIRE(watch.poll() == ws::platform::FileEvent::none);
+
+    std::error_code ignored;
+    std::filesystem::remove(file, ignored);
+    REQUIRE(watch.poll() == ws::platform::FileEvent::removed);
+    std::filesystem::remove_all(base, ignored);
 }

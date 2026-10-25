@@ -32,6 +32,20 @@ per-platform TUs and no platform header ever crosses into include/.
   dirs, the app TU installs a LocationRoots at startup).
   `ensure_directory` is mkdir -p over utf-8 narrow paths (the
   StdFileSystem char8_t routing), `io_failed` on any blocker.
+- `watch.hpp` - the "changed on disk" detector: `WatchSource` (the time
+  half the FileSystem seam leaves out - modified_ms + exists; a fake in
+  tests, `StdWatchSource` in production), `FileEvent`
+  (modified/removed) and `FileWatch`, the LayerFile debouncer's shape:
+  an injected `std::function<int64_t()>` ms clock (default
+  steady_clock), owner-thread state, `poll()` on the frame cadence
+  firing at most one event per call. The event fires `quiet_ms` after
+  the LAST observed change - a writer still writing slides the
+  deadline; a removal and a fast reappear merge into one modified; a
+  file missing at construction baselines as missing, so its first
+  appearance fires modified; `arm()` re-baselines and swallows the
+  pending event (a load followed by arm() misses the load's own
+  write). An exists-but-unstatable sample reads as ms=0 and the next
+  poll re-reads - no event is invented from a failed stat.
 
 ## Allowed dependencies
 
@@ -69,10 +83,14 @@ per-platform TUs and no platform header ever crosses into include/.
   Windows-only today, the ws::ui windowing precedent).
 - `normalize_path` is purely lexical: it never touches the disk, so
   symlinked segments resolve by name, not by target.
+- The watch sees the file's stamp move, not same-stamp rewrites: two
+  writes inside one stamp tick (100ns on NTFS, coarser elsewhere) land
+  as one. `StdWatchSource::exists` answering false for an
+  undeterminable path reads as "gone" - the seam's contract, inherited.
 
 ## Tests
 
-`test_platform.cpp` - phase 1: the path table (join's folding and the
+`test_platform.cpp` - the path table (join's folding and the
 absolute-right-wins rule, normalize's separators/dots/root-clamp and
 relative-".." cases, drive and unc roots, "C:" drive-only, is_absolute,
 name_of/parent_of edges), the Locations seam (supplied roots answered
@@ -81,4 +99,10 @@ unavailable with category and code asserted), ensure's mkdir -p chain
 and idempotence, ensure_directory's file-blocker io_failed, and the
 os_location smoke on the real KnownFolders (the app suffix,
 cache == data/cache, documents/temp absolute, the empty-name refusal,
-the app-name constructor matching os_location).
+the app-name constructor matching os_location). Phase 2 adds the watch
+suite: a settled change firing once after quiet, a still-moving writer
+sliding the deadline, the removal firing and the fast reappear merging
+into one modified, arm() swallowing a pending event, a missing file's
+first appearance, and a StdWatchSource case whose stamps are set
+explicitly through std::filesystem::last_write_time (quiet 0, no
+races against the clock).

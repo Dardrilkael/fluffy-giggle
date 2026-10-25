@@ -69,9 +69,9 @@ One line each - the per-tree CLAUDE.md files carry the detail:
   constraints, layered sources with provenance, change observers, and
   JSON persistence through a minimal FileSystem seam.
 - `libs/platform` - the headless platform-services lib: standard
-  locations (supplied roots win over the OS truth) and lexical path
-  helpers; dialogs, recent files, autosave and file watching come later
-  over the settings FileSystem + json seams.
+  locations (supplied roots win over the OS truth), lexical path
+  helpers, and the debounced file watch; dialogs, recent files and
+  autosave come later over the settings FileSystem + json seams.
 - `apps/*` - the executables.
 
 ## Read when

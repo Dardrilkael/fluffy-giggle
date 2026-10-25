@@ -1,8 +1,9 @@
 # ws::platform is the headless platform-services lib (nextplan stage
-# 12): standard locations now, then dialogs/recent files/autosave/watch
-# on the ws::settings FileSystem + json seams. Pure std + ws::core; the
-# OS halves stay in per-platform TUs behind Result-only APIs, and no
-# platform header ever crosses into include/.
+# 12): standard locations and the debounced file watch now, then
+# dialogs/recent files/autosave on the ws::settings FileSystem + json
+# seams. Pure std + ws::core; the OS halves stay in per-platform TUs
+# behind Result-only APIs, and no platform header ever crosses into
+# include/.
 ws_add_library(platform DEPENDS ws::core)
 
 # Exactly one locations TU builds (the ws::ui windowing precedent):
