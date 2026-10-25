@@ -79,6 +79,13 @@ One line each - the per-tree CLAUDE.md files carry the detail:
   settings FileSystem + json seams - stage 12's complete story: the
   headless halves here, the drag-drop event, the cursor/title window
   seams and the gallery's platform page over in ws::ui.
+- `libs/app` - the headless app-framework services (nextplan stage 13):
+  the command registry (id/label/category, enabled/checked predicates,
+  dispatch by id), then shortcut resolution (chords, two-step
+  sequences, contexts, conflict detection, user rebinding through the
+  settings seams) and the undo stack - the headless halves of stage
+  13; the menu/toolbar builders, the command palette and the keymap
+  editor that view them live in ws::ui.
 - `apps/*` - the executables.
 
 ## Read when

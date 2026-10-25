@@ -46,3 +46,11 @@ add_subdirectory(settings)
 # os halves stay in per-platform TUs behind Result-only APIs; apps never
 # see a platform header.
 add_subdirectory(platform)
+
+# ws::app is the headless app-framework services lib (nextplan stage
+# 13): the command registry, then shortcut resolution with user
+# rebinding and the undo stack - the headless halves of stage 13; the
+# ui views over them (menu/toolbar builders, the command palette, the
+# keymap editor) live in ws::ui. Pure std + ws::core; ws::settings
+# joins when keymap persistence lands.
+add_subdirectory(app)
