@@ -3,11 +3,12 @@
 The headless platform-services lib (nextplan stage 12): the OS-facing
 services an app needs, behind Result-only APIs - standard locations,
 the debounced file watch, the recent-files MRU, the autosave
-crash-recovery pair and the file dialogs now, the window-coupled
-services later, riding ws::core (Result/Status) and the ws::settings
-seams (FileSystem + json) wherever a file is involved. Pure std +
-ws::core + ws::settings; the OS halves live in per-platform TUs and
-no platform header ever crosses into include/.
+crash-recovery pair, the file dialogs, the clipboard and the message
+boxes now, the window title and single-instance later, riding
+ws::core (Result/Status) and the ws::settings seams (FileSystem +
+json) wherever a file is involved. Pure std + ws::core +
+ws::settings; the OS halves live in per-platform TUs and no
+platform header ever crosses into include/.
 
 ## Purpose, per header
 
@@ -103,6 +104,27 @@ no platform header ever crosses into include/.
   android. The linux story is documented-only
   (xdg-desktop-portal): the workspace's desktop is Windows-only, the
   ws::ui windowing precedent.
+- `clipboard.hpp` - the session clipboard as free functions, no
+  interface: there is no fake to script - a round trip IS the real
+  thing, and the gallery demos it interactively. Text is utf-8 at
+  the edge (the OS channel is NUL-terminated: embedded NULs stop
+  at the first), payloads carry arbitrary bytes under a
+  caller-chosen type that doubles as the OS format name, images are
+  plain RGBA top-down (the DIB shuffle - BGRA, row order, padding -
+  is this lib's, never the caller's). Every read answers nullopt
+  when the clipboard holds no such content - a normal answer, never
+  an error. The suite has no clipboard case on purpose: a test that
+  clobbers the user's clipboard would be a bad citizen.
+- `messagebox.hpp` - the native ask behind one interface, the
+  dialogs pattern: `MessageBoxes::ask(MessageBoxRequest)` answers a
+  `MessageBoxChoice` - always, because a box cannot be dismissed
+  without one (the X maps to cancel on ok_cancel, to the only
+  choice on ok), so there is no nullopt channel.
+  `UnavailableMessageBoxes` is the android answer, public so the
+  refusal is testable everywhere; `FakeMessageBoxes` scripts a queue
+  and records every request, an empty queue answering the request's
+  first choice (the click-through). `make_message_boxes()`:
+  MessageBoxW on windows, the refusal on android.
 
 ## Allowed dependencies
 
@@ -113,8 +135,9 @@ no platform header ever crosses into include/.
   the workspace's standard, never duplicated here. The reference
   lives in a public header (recent.hpp) - the ws::ui gui-target
   precedent.
-- System link libraries (shell32/ole32 for the KnownFolders) stay
-  PRIVATE on ws_platform, advapi32's precedent in ws::ui.
+- System link libraries (shell32/ole32 for the KnownFolders and the
+  COM dialogs, user32 for the clipboard + MessageBoxW) stay PRIVATE
+  on ws_platform, advapi32's precedent in ws::ui.
 
 ## Rules
 
@@ -185,6 +208,29 @@ no platform header ever crosses into include/.
 - The multi-select skips an item that cannot be named (FORCEFILESYSTEM
   makes it a non-case in practice); the single kinds answer
   io_failed when their one result has no file-system path.
+- The clipboard text channel is a NUL-terminated string end to
+  end: embedded NULs stop at the first. The payload channel is the
+  binary-safe one - its length rides the block's GlobalSize.
+- clipboard_image reads only plain 32-bit BI_RGB DIBs: a 24-bit or
+  compressed DIB answers io_failed (screenshots and PNG copies
+  arrive 32-bit; the first consumer that needs more grows the
+  conversion).
+- The clipboard is busy-shared with every other window: a refused
+  OpenClipboard answers io_failed, never retried in a spin - retry
+  is the caller's policy. And the suite never touches it: the
+  user's clipboard is not the suite's to clobber.
+- A message box always answers a choice: a box cannot be dismissed
+  without one, so ask() has no nullopt channel (unlike the
+  dialogs, where a dismissal is a normal answer).
+- The fake message box's empty queue answers the request's first
+  choice: an unscripted ask never invents a choice the buttons did
+  not offer (ok for the ok-shaped sets, yes for yes_no).
+- MessageBoxW runs parentless: ui's window is not platform's to
+  parent on, and the box locks its own modal loop - a worker
+  thread's ask, never the render loop's.
+- The wide/narrow edge is shared src-local win_utf8.hpp (never
+  under include/), one conversion per TU, hoisted once the win TUs
+  hit three.
 
 ## Tests
 
@@ -235,3 +281,10 @@ call's options recorded verbatim), the unavailable set refusing
 every kind with category and code asserted, and the native factory
 constructed and destroyed only - a real call raises a modal dialog
 and would hang the suite; the gallery exercises it interactively.
+Phase 6 adds the message boxes' suite (the clipboard has none on
+purpose): the fake playing scripted answers through the interface
+ref - an empty queue answering the request's first choice, the
+queues popping in order, every ask's request recorded verbatim
+(with the request mutated between asks visible in the records) -
+the refusal's platform/2, and the native factory constructed and
+destroyed only; a real ask raises a modal box.

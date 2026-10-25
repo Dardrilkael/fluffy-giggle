@@ -2,8 +2,11 @@
 // (supplied roots win, the OS-truth smoke), ensure_directory on real
 // scratch dirs under the OS temp, the debounced watch on a fake
 // clock, the recent-files MRU over a FileSystem fake, the autosave
-// crash-recovery state machine over a fake disk, and the file
-// dialogs' scripted fake + the refusal.
+// crash-recovery state machine over a fake disk, the file dialogs'
+// scripted fake + the refusal, and the message boxes' fake + the
+// refusal (the clipboard has no case on purpose: a test that
+// clobbers the user's clipboard would be a bad citizen - the
+// gallery round-trips it interactively instead).
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -25,6 +28,7 @@
 #include <ws/platform/dialogs.hpp>
 #include <ws/platform/errors.hpp>
 #include <ws/platform/locations.hpp>
+#include <ws/platform/messagebox.hpp>
 #include <ws/platform/paths.hpp>
 #include <ws/platform/recent.hpp>
 #include <ws/platform/watch.hpp>
@@ -939,4 +943,64 @@ TEST_CASE("make_file_dialogs hands back the native set") {
     const std::unique_ptr<ws::platform::FileDialogs> dialogs =
         ws::platform::make_file_dialogs();
     REQUIRE(dialogs != nullptr);
+}
+
+// ---- message boxes: the scripted fake + the refusal ----
+
+TEST_CASE("the fake message boxes play the scripted answers") {
+    ws::platform::FakeMessageBoxes scripted;
+    ws::platform::MessageBoxes& boxes = scripted;
+
+    ws::platform::MessageBoxRequest request;
+    request.kind = ws::platform::MessageBoxKind::warning;
+    request.buttons = ws::platform::MessageBoxButtons::ok_cancel;
+    request.title = "keep going?";
+    request.message = "the document is unsaved";
+
+    // an empty queue answers the request's first choice - the
+    // click-through - never a choice the buttons did not offer
+    const auto click_through = boxes.ask(request);
+    REQUIRE(click_through.has_value());
+    REQUIRE(*click_through == ws::platform::MessageBoxChoice::ok);
+    request.buttons = ws::platform::MessageBoxButtons::yes_no;
+    const auto yes_through = boxes.ask(request);
+    REQUIRE(yes_through.has_value());
+    REQUIRE(*yes_through == ws::platform::MessageBoxChoice::yes);
+
+    // scripted answers pop in order
+    scripted.queue = {ws::platform::MessageBoxChoice::no,
+                      ws::platform::MessageBoxChoice::cancel};
+    const auto refused = boxes.ask(request);
+    REQUIRE(refused.has_value());
+    REQUIRE(*refused == ws::platform::MessageBoxChoice::no);
+    const auto backed_out = boxes.ask(request);
+    REQUIRE(backed_out.has_value());
+    REQUIRE(*backed_out == ws::platform::MessageBoxChoice::cancel);
+
+    // every ask recorded its request verbatim
+    REQUIRE(scripted.calls.size() == 4);
+    const ws::platform::MessageBoxRequest& recorded = scripted.calls[0];
+    REQUIRE(recorded.kind == ws::platform::MessageBoxKind::warning);
+    REQUIRE(recorded.buttons ==
+            ws::platform::MessageBoxButtons::ok_cancel);
+    REQUIRE(recorded.title == "keep going?");
+    REQUIRE(recorded.message == "the document is unsaved");
+    REQUIRE(scripted.calls[2].buttons ==
+            ws::platform::MessageBoxButtons::yes_no);
+}
+
+TEST_CASE("the unavailable message boxes refuse") {
+    ws::platform::UnavailableMessageBoxes boxes;
+    const auto refused = boxes.ask({});
+    REQUIRE_FALSE(refused.has_value());
+    REQUIRE(code_of(refused.error()) == "platform/2");
+}
+
+TEST_CASE("make_message_boxes hands back the native set") {
+    // Constructed and destroyed only: a real ask raises a modal box
+    // and would hang the suite - the native set is exercised
+    // interactively by the gallery (phase 7).
+    const std::unique_ptr<ws::platform::MessageBoxes> boxes =
+        ws::platform::make_message_boxes();
+    REQUIRE(boxes != nullptr);
 }

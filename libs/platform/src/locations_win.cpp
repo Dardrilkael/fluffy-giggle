@@ -10,27 +10,14 @@
 #include <ws/platform/locations.hpp>
 #include <ws/platform/paths.hpp>
 
-// windows.h last: its min/max macros must not shadow the std headers.
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
+// windows.h last through the shared edge (win_utf8.hpp, the
+// src-local wide/narrow conversion every win TU crosses once);
+// shlobj wants the LEAN_AND_MEAN windows.h in place first.
+#include "win_utf8.hpp"
 #include <shlobj.h>
 
 namespace ws::platform {
 namespace {
-
-// wide -> utf-8 narrow: every OS string crosses this edge once.
-[[nodiscard]] std::string to_utf8(const wchar_t* wide) {
-    const int bytes = WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0,
-                                          nullptr, nullptr);
-    if (bytes <= 1) {
-        return {};
-    }
-    std::string out(static_cast<size_t>(bytes - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, wide, -1, out.data(), bytes, nullptr,
-                        nullptr);
-    return out;
-}
 
 [[nodiscard]] ws::core::Result<std::string> known_folder(
     REFKNOWNFOLDERID id, std::string_view what) {

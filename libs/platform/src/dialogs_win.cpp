@@ -1,7 +1,8 @@
 // The Windows half of the native pickers: the IFileDialog family
 // (the Vista+ COM shell dialogs) behind FileDialogs. One TU, one
-// edge - utf-8 narrow at the API, wide inside, converted once (the
-// locations_win idiom). Every call blocks while the user decides,
+// edge - utf-8 narrow at the API, wide inside, converted once
+// through the shared src-local win_utf8.hpp. Every call blocks
+// while the user decides,
 // on the caller's worker thread; the COM apartment is paid per
 // call, never forced on the thread that built the set.
 
@@ -15,49 +16,14 @@
 #include <ws/platform/errors.hpp>
 #include <ws/platform/paths.hpp>
 
-// windows.h last: its min/max macros must not shadow the std headers
-// (the locations_win idiom).
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
+// windows.h last through the shared edge (win_utf8.hpp); the COM
+// dialogs want objbase/shobjidl after it.
+#include "win_utf8.hpp"
 #include <objbase.h>
 #include <shobjidl.h>
 
 namespace ws::platform {
 namespace {
-
-// wide -> utf-8 narrow and back: every OS string crosses this edge
-// once. This TU's own copy - each platform TU keeps its edge local.
-[[nodiscard]] std::string to_utf8(const wchar_t* wide) {
-    if (wide == nullptr) {
-        return {};
-    }
-    const int bytes = WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0,
-                                          nullptr, nullptr);
-    if (bytes <= 1) {
-        return {};
-    }
-    std::string out(static_cast<size_t>(bytes - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, wide, -1, out.data(), bytes, nullptr,
-                        nullptr);
-    return out;
-}
-
-[[nodiscard]] std::wstring from_utf8(std::string_view narrow) {
-    if (narrow.empty()) {
-        return {};
-    }
-    const int wide = MultiByteToWideChar(
-        CP_UTF8, 0, narrow.data(), static_cast<int>(narrow.size()),
-        nullptr, 0);
-    if (wide <= 0) {
-        return {};
-    }
-    std::wstring out(static_cast<size_t>(wide), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, narrow.data(),
-                        static_cast<int>(narrow.size()), out.data(), wide);
-    return out;
-}
 
 [[nodiscard]] ws::core::unexpected<ws::core::Error> com_fail(
     std::string_view what) {
