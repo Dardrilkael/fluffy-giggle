@@ -62,6 +62,10 @@ state, no locks.
   `command_for` feed the menu hints and the keymap editor.
   `kPrimaryModifier` is the Ctrl-vs-Cmd convention: control
   on GLFW/Windows today, a mac bridge remaps chords to `super_key`.
+  `describe_chord` (a free function, the phase-4 promotion from a
+  private static) is the one display spelling of a chord - the
+  conflict messages AND the ui views' hints read the same text, so a
+  rebind renames everywhere at once.
   `Resolution` tells the caller what to dispatch AND whether the
   chord was consumed (a match, or an armed first step) so a focused
   field knows not to type it.
@@ -162,7 +166,8 @@ state, no locks.
   the timeout bounds a stale pending; there is no focus-change rule.
 - `describe_chord`'s key names are a FINITE GLFW table (printables
   plus the named keys); any other code prints "<key N>". They are
-  for conflict messages, never for persistence.
+  for conflict messages and the ui views' hint texts, never for
+  persistence.
 - One sequence per first chord per context: two sequences sharing a
   first chord would need second-chord disambiguation, which nobody
   asked for yet.

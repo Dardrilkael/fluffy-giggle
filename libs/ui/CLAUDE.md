@@ -10,7 +10,7 @@ Condensed from the 1,339-line `libs/ui/CLAUDE.md`. Every rule, invariant and ext
 - **`RenderCommandQueue`:** the seam between app logic and GPU work.
 - **`widgets.hpp`:** the ImGui/ImPlot-backed wrapper.
 - **`r2d`:** the 2D renderer.
-- **`gui/`:** an immediate-mode widget set that draws through r2d; the job-row helpers bridge `ws::jobs` and the theme-json layer bridges `ws::settings` (both workspace deps of the same purity class as core/input — pure std, no platform).
+- **`gui/`:** an immediate-mode widget set that draws through r2d; the job-row helpers bridge `ws::jobs`, the theme-json layer `ws::settings` and the command views `ws::app` (all workspace deps of the same purity class as core/input — pure std, no platform).
 
 Since stage 3, the input family lives in `libs/input`, and the Vulkan device, swapchain, frame sync and VMA live in `libs/gfx`. `ui` holds a `gfx::Gpu` and a `gfx::Swapchain`; `app.cpp` is the only place their opaque handles are cast.
 
@@ -33,9 +33,9 @@ Since stage 3, the input family lives in `libs/input`, and the Vulkan device, sw
 libs/ui/
   include/ws/ui/
     app.hpp, render_command_queue.hpp, renderer2d.hpp, widgets.hpp
-    gui/  gui_context.hpp, id_stack.hpp, job_progress.hpp, layout_cursor.hpp,
-          rect.hpp, theme.hpp, theme_color.hpp, theme_data.hpp,
-          theme_json.hpp, widgets.hpp, scoped.hpp
+    gui/  command_views.hpp, gui_context.hpp, id_stack.hpp, job_progress.hpp,
+          layout_cursor.hpp, rect.hpp, theme.hpp, theme_color.hpp,
+          theme_data.hpp, theme_json.hpp, widgets.hpp, scoped.hpp
   src/
     app/        app.cpp (pimpl: frame loop + backends)
     platform/   window.h, window_glfw.cpp, window_android.cpp (one builds per platform)
@@ -170,6 +170,7 @@ Widget functions hold no state; persistence lives in `GuiContext` side tables.
 - **Dialogs:** `modal_dialog(gui, theme, label, title, DialogButtons, bool& open, width = 360, body = {})`. Stock sets: none / ok / ok_cancel / yes_no / retry_cancel. Escape answers the negative, and Enter answers the positive but never on the opening frame.
 - **Toasts:** 8 slots, borrowed text, `duration <= 0` is sticky, and `draw_toasts` runs once per frame.
 - **The jobs bridge** (`job_progress.hpp`): `JobProgress` (one mirror per job, filled by the drain's `on_progress` deliveries), `job_view()` (the pure `JobState`-to-look mapping: fill face, word, cancellable — the scripted-states test seam), the `job_progress()` row widget ("label: state" line, state-colored bar, cancel button wired to `request_cancel()`), and `toast_on_failure()` (a failed job formats its error into a caller-owned long-lived string and posts one error toast; cancelled is not a failure; the Result crosses back). The bar's color rides `control_on` through a local theme copy, so no widget grew a color parameter. All of it assumes the App seam: the drain that fills the mirrors runs on the gui's own thread, so the mirrors are plain unlocked state.
+- **The command views** (`command_views.hpp`, stage 13): the ws::app bridge over the command registry, the shortcut resolver and — composed by the host, never named here — the undo stack. `command_hint()` is the one chord text every view shows: the LIVE binding when a resolver is given ("" when the command carries none — a removed binding must not fall back to hinting the declared chord it no longer answers), else the declared default; `ws::app::describe_chord`'s spelling, so a rebind renames every hint at once. `CommandMenuBuilder` maps the registry into per-frame `MenuItem` arrays (one top-level menu per category in spec order, registration order within, a checked predicate lays a check row, enabled gates disabled, an empty category drops its menu, `command_of()` decodes a `MenuEvent`; v1: no submenus, no separators, and `Command::icon` stays unread — no icon seam yet). `command_toolbar()` is a fitted button row for a caller-chosen id list (unknown ids skipped, no tooltips). `fuzzy_score()` / `palette_rank()` are the palette's pure halves (case-insensitive subsequence with word-start and run bonuses, then recency, then registration order — the scripted test seam). `command_palette()` is the centered modal: search + ranked rows (kRows=8 shown), the argument prompt a needs_argument command swaps in, recents surviving closes, Enter/Up/Down while the search field holds focus, Escape through the overlay arbitration, and the frame that opened it answering no keys. `keymap_editor()` is the bindings panel: context picker, search, the Command/Shortcut table, and the Record capture resolving its target at the Record press and applying through `rebind()` when the target carries a binding, `bind()` when not (rebind refuses the unbound); the resolver's own conflict warnings land verbatim in the status. Escape cancels a recording by reading the RAW edge and calling `consume_escape()` — `claim_esc` is modal-gated, so a panel-level claim records nothing. Both list views build their rows AFTER their search field, so the frame's typing narrows the frame's own list. The ws::app link is PUBLIC (the job_progress.hpp precedent: the registry, resolver and describe_chord all appear in this public header).
 - **Scope guards** (`scoped.hpp`): `ScopedLayer`, `ScopedDisabled`, `ScopedPanel`, `ScopedScrollPanel`, `ScopedPopup`, `ScopedTooltip`, `ScopedModal`. Header-only, copy and move deleted, and the overlay guards gate their end on the begin's answer.
 - **Everything is drop-safe headless**, so the whole gui tests without a window.
 
@@ -221,7 +222,7 @@ ctest --preset debug -R ui
 ```
 
 - `tests/test_ui.cpp` and `tests/test_ui_gui.cpp` are the two ui tests.
-- `test_ui_gui` is the gui acceptance target. It links `ws_ui_gui` (which needs only `ws::core` + `ws::input` + `ws::jobs` + `ws::settings`) with the recording r2d stub `tests/ui_gui_r2d_stub.cpp` and the real font bake. **No Vulkan, GLFW, volk or VMA may appear on its link line**; a gui that grows a renderer or platform dependency breaks that link.
+- `test_ui_gui` is the gui acceptance target. It links `ws_ui_gui` (which needs only `ws::core` + `ws::input` + `ws::jobs` + `ws::settings` + `ws::app`) with the recording r2d stub `tests/ui_gui_r2d_stub.cpp` and the real font bake. **No Vulkan, GLFW, volk or VMA may appear on its link line**; a gui that grows a renderer or platform dependency breaks that link.
 - Input tests live in `libs/input/tests/test_input.cpp` (`ctest --preset debug -R input`).
 - Demo apps:
   - `apps/playground`: full composition demo, net inspector, multi-touch demo, menu demo (`src/menu_demo.cpp`).

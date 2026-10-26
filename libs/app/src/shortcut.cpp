@@ -42,7 +42,7 @@ const char* named_key(int key) {
 
 }  // namespace
 
-std::string ShortcutResolver::describe_chord(Shortcut chord) {
+std::string describe_chord(Shortcut chord) {
     std::string text;
     if (has_mod(chord.mods, Mod::control)) {
         text += "Ctrl+";

@@ -13,6 +13,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <ws/ui/gui/command_views.hpp>
 #include <ws/ui/gui/gui_context.hpp>
 #include <ws/ui/gui/job_progress.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
@@ -21,6 +22,8 @@
 #include <ws/ui/gui/theme_data.hpp>
 #include <ws/ui/gui/theme_json.hpp>
 #include <ws/ui/gui/widgets.hpp>
+#include <ws/app/command.hpp>
+#include <ws/app/shortcut.hpp>
 #include <ws/input/input.hpp>
 #include <ws/jobs/errors.hpp>
 #include <ws/jobs/job_system.hpp>
@@ -42,6 +45,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -2352,4 +2356,675 @@ TEST_CASE("custom looks paint over the text input behavior") {
     CHECK(swapped.caret_x == 18.0f);  // content_x + the one char typed
     CHECK(ws::ui::gui_test::stub.quads == 3);
     CHECK(ws::ui::gui_test::stub.rounded == 0);
+}
+
+// --- the ws::app bridge (stage 13 phase 4) ----------------------------------
+namespace {
+
+// The bridge cases' toy registry: the three command shapes the views
+// read - a chorded action, an argument-asker and a plain one - in a
+// registration order the ranking cases depend on. The callers that
+// need dead or checked rows set those predicates on their own
+// commands; this shared shape stays the plain three.
+ws::app::CommandRegistry toy_registry() {
+    ws::app::CommandRegistry registry;
+    (void)registry.add(ws::app::Command{
+        .id = "app.save",
+        .label = "Save",
+        .category = "File",
+        .shortcut = ws::app::Shortcut{83, ws::app::Mod::control},  // Ctrl+S
+        .execute = [](std::string_view) {},
+    });
+    (void)registry.add(ws::app::Command{
+        .id = "edit.rename",
+        .label = "Rename",
+        .category = "File",
+        .needs_argument = true,
+        .execute = [](std::string_view) {},
+    });
+    (void)registry.add(ws::app::Command{
+        .id = "misc.other",
+        .label = "Other",
+        .category = "Misc",
+        .execute = [](std::string_view) {},
+    });
+    return registry;
+}
+
+}  // namespace
+
+TEST_CASE("the fuzzy scorer ranks word starts, runs and brevity") {
+    using ws::ui::gui::fuzzy_score;
+
+    CHECK(fuzzy_score("", "anything") == 0);  // the empty query is recency's
+    CHECK(fuzzy_score("zzz", "Save") == 0);   // a missing char is no match
+    CHECK(fuzzy_score("save", "Save") > 0);
+    // Case-insensitive on ASCII, both directions.
+    CHECK(fuzzy_score("save", "Save") == fuzzy_score("SAVE", "Save"));
+    // A word-start hit beats a mid-word one ("sa" in "Save All" vs
+    // "Quasar" - both carry it, only one starts a word).
+    CHECK(fuzzy_score("sa", "Save All") > fuzzy_score("sa", "Quasar"));
+    // A contiguous run beats the same letters scattered.
+    CHECK(fuzzy_score("ab", "ab") > fuzzy_score("ab", "aabb"));
+    // The length penalty: a tighter label wins the same hits.
+    CHECK(fuzzy_score("sa", "Save All") >
+          fuzzy_score("sa", "Save A Lot More"));
+    // Every match outranks none, whatever the length penalty did to it.
+    CHECK(fuzzy_score("z", "zzzzzzzzzzzzzzzzzzzz") >= 1);
+}
+
+TEST_CASE("palette_rank orders by score, then recency, then registration") {
+    using ws::ui::gui::palette_rank;
+    const ws::app::CommandRegistry registry = toy_registry();
+    // Registration order: app.save (0), edit.rename (1), misc.other (2).
+
+    const auto all = palette_rank("", registry, {});
+    REQUIRE(all.size() == 3);
+    CHECK(all[0].index == 0);
+    CHECK(all[1].index == 1);
+    CHECK(all[2].index == 2);
+
+    // "save" narrows to the labels carrying s,a,v,e as a
+    // subsequence: of the toy's three, only "Save" does ("Rename"
+    // has no 's', "Other" no 'v').
+    const auto sav = palette_rank("save", registry, {});
+    REQUIRE(sav.size() == 1);
+    CHECK(sav[0].index == 0);
+
+    // Recency leads only when the scores tie - the empty query's case.
+    const auto rec = palette_rank("", registry, {"edit.rename"});
+    REQUIRE(rec.size() == 3);
+    CHECK(rec[0].index == 1);  // the recent first
+    CHECK(rec[1].index == 0);  // then registration order
+    CHECK(rec[2].index == 2);
+
+    // A recent that does not match the query changes nothing.
+    const auto mixed = palette_rank("save", registry, {"edit.rename"});
+    REQUIRE(mixed.size() == 1);
+    CHECK(mixed[0].index == 0);
+}
+
+TEST_CASE("command_hint reads the live binding, never a stale default") {
+    using ws::ui::gui::command_hint;
+    const ws::app::CommandRegistry registry = toy_registry();
+    const ws::app::Command* save = registry.find("app.save");
+    const ws::app::Command* other = registry.find("misc.other");
+    REQUIRE(save != nullptr);
+    REQUIRE(other != nullptr);
+
+    // No resolver: the declared chord, or nothing for a chordless one.
+    CHECK(command_hint(*save, nullptr, ws::app::KeyContext::global) ==
+          "Ctrl+S");
+    CHECK(command_hint(*other, nullptr, ws::app::KeyContext::global) ==
+          "");
+
+    // A resolver that never seeded: no binding, so no hint - a removed
+    // binding must not fall back to hinting the chord it no longer
+    // answers, and an unseeded resolver answers the same way.
+    ws::app::ShortcutResolver resolver;
+    CHECK(command_hint(*save, &resolver, ws::app::KeyContext::global) ==
+          "");
+
+    // Seeded: the live binding, which is the declared one.
+    REQUIRE(resolver.install_defaults(registry).has_value());
+    CHECK(command_hint(*save, &resolver, ws::app::KeyContext::global) ==
+          "Ctrl+S");
+
+    // Rebound: the new chord everywhere at once (the one describe_chord
+    // spelling every view reads).
+    REQUIRE(resolver
+                .rebind("app.save", ws::app::KeyContext::global,
+                        ws::app::Shortcut{75, ws::app::Mod::control})
+                .has_value());
+    CHECK(command_hint(*save, &resolver, ws::app::KeyContext::global) ==
+          "Ctrl+K");
+
+    // Removed: empty again.
+    REQUIRE(resolver
+                .rebind("app.save", ws::app::KeyContext::global,
+                        ws::app::Shortcut{0, ws::app::Mod::none})
+                .has_value());
+    CHECK(command_hint(*save, &resolver, ws::app::KeyContext::global) ==
+          "");
+}
+
+TEST_CASE("the menu builder maps the registry into live menu arrays") {
+    bool save_checked = false;
+    bool can_quit = true;
+    ws::app::CommandRegistry registry;
+    (void)registry.add(ws::app::Command{
+        .id = "app.save",
+        .label = "Save",
+        .category = "File",
+        .shortcut = ws::app::Shortcut{83, ws::app::Mod::control},
+        .checked = [&save_checked] { return save_checked; },
+        .execute = [](std::string_view) {},
+    });
+    (void)registry.add(ws::app::Command{
+        .id = "app.quit",
+        .label = "Quit",
+        .category = "File",
+        .enabled = [&can_quit] { return can_quit; },
+        .execute = [](std::string_view) {},
+    });
+    (void)registry.add(ws::app::Command{
+        .id = "edit.copy",
+        .label = "Copy",
+        .category = "Edit",
+        .execute = [](std::string_view) {},
+    });
+
+    ws::ui::gui::CommandMenuBuilder builder;
+    builder.describe({{"&File", "File"},
+                     {"&Edit", "Edit"},
+                     {"&Nothing", "Empty"}});
+    builder.build(registry, nullptr, ws::app::KeyContext::global);
+
+    // The empty category drops its menu; the order follows the specs.
+    REQUIRE(builder.count() == 2);
+    const ws::ui::gui::MenuDesc* menus = builder.menus();
+    CHECK(std::strcmp(menus[0].title, "&File") == 0);
+    REQUIRE(menus[0].count == 2);
+    CHECK(std::strcmp(menus[0].items[0].label, "Save") == 0);
+    CHECK(menus[0].items[0].kind == ws::ui::gui::MenuItemKind::check);
+    CHECK(menus[0].items[0].checked == false);  // the predicate, live
+    CHECK(std::strcmp(menus[0].items[0].shortcut, "Ctrl+S") == 0);
+    CHECK(std::strcmp(menus[0].items[1].label, "Quit") == 0);
+    CHECK(menus[0].items[1].kind == ws::ui::gui::MenuItemKind::action);
+    CHECK(menus[0].items[1].disabled == false);
+    CHECK(menus[0].items[1].shortcut == nullptr);  // chordless: no hint
+    CHECK(std::strcmp(menus[1].title, "&Edit") == 0);
+    REQUIRE(menus[1].count == 1);
+    CHECK(std::strcmp(menus[1].items[0].label, "Copy") == 0);
+
+    // The predicates are re-read per frame: flip the bools, rebuild,
+    // the rows flip with them.
+    save_checked = true;
+    can_quit = false;
+    builder.build(registry, nullptr, ws::app::KeyContext::global);
+    CHECK(builder.menus()[0].items[0].checked == true);
+    CHECK(builder.menus()[0].items[1].disabled == true);
+
+    // command_of decodes this frame's items and nothing else.
+    CHECK(builder.command_of(&builder.menus()[0].items[0]) == "app.save");
+    CHECK(builder.command_of(&builder.menus()[1].items[0]) == "edit.copy");
+    CHECK(builder.command_of(nullptr).empty());
+    const ws::ui::gui::MenuItem foreign{"not one of these"};
+    CHECK(builder.command_of(&foreign).empty());
+
+    // The honesty rule through the builder: a resolver with the
+    // binding removed lays no hint, the declared chord included.
+    ws::app::ShortcutResolver resolver;
+    REQUIRE(resolver.install_defaults(registry).has_value());
+    REQUIRE(resolver
+                .rebind("app.save", ws::app::KeyContext::global,
+                        ws::app::Shortcut{0, ws::app::Mod::none})
+                .has_value());
+    builder.build(registry, &resolver, ws::app::KeyContext::global);
+    CHECK(builder.menus()[0].items[0].shortcut == nullptr);
+}
+
+TEST_CASE("the toolbar fires its buttons and lays the dead rows dead") {
+    namespace keys = ws::input::keys;
+    ws::ui::gui_test::stub.reset();
+    bool can_quit = false;
+    ws::app::CommandRegistry registry;
+    (void)registry.add(ws::app::Command{
+        .id = "app.save",
+        .label = "Save",
+        .category = "File",
+        .execute = [](std::string_view) {},
+    });
+    (void)registry.add(ws::app::Command{
+        .id = "app.quit",
+        .label = "Quit",
+        .category = "File",
+        .enabled = [&can_quit] { return can_quit; },
+        .execute = [](std::string_view) {},
+    });
+    const std::vector<std::string> ids{"app.save", "app.quit", "app.nope"};
+
+    GuiContext gui;
+    LayoutCursor layout;
+    std::string_view fired;
+
+    // The press inside the first button latches the focus but is not
+    // a click yet. The Save button sits at the panel content's head
+    // (fitted to its label: 4 chars * 6 + 2 * padding wide), the Quit
+    // beside it on the same line, and "app.nope" - unknown - lays
+    // nothing at all.
+    gui.begin_frame(snap(30.0f, 24.0f, true, true));
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    fired = ws::ui::gui::command_toolbar(gui, layout, kDefaultChrome,
+                                         "bar", registry, ids);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(fired.empty());
+
+    // The release completes the click: the fired id is the answer.
+    gui.begin_frame(snap(30.0f, 24.0f, false, false, true));
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    fired = ws::ui::gui::command_toolbar(gui, layout, kDefaultChrome,
+                                         "bar", registry, ids);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(fired == "app.save");
+
+    // Enter on the focused button fires it again - the click gave it
+    // the focus, and a citizen's keyboard path is the same fire.
+    InputFrame enter = snap(-100.0f, -100.0f);
+    enter.key_pressed[static_cast<std::size_t>(keys::kEnter)] = true;
+    gui.begin_frame(enter);
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    fired = ws::ui::gui::command_toolbar(gui, layout, kDefaultChrome,
+                                         "bar", registry, ids);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(fired == "app.save");
+
+    // A press-and-release on the dead Quit row claims nothing and
+    // fires nothing - the lock is the enabled predicate, read live.
+    gui.begin_frame(snap(90.0f, 24.0f, true, true));
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    fired = ws::ui::gui::command_toolbar(gui, layout, kDefaultChrome,
+                                         "bar", registry, ids);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    gui.begin_frame(snap(90.0f, 24.0f, false, false, true));
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    fired = ws::ui::gui::command_toolbar(gui, layout, kDefaultChrome,
+                                         "bar", registry, ids);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(fired.empty());
+
+    // The predicate flipped: the same row now takes the click.
+    can_quit = true;
+    gui.begin_frame(snap(90.0f, 24.0f, true, true));
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    fired = ws::ui::gui::command_toolbar(gui, layout, kDefaultChrome,
+                                         "bar", registry, ids);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    gui.begin_frame(snap(90.0f, 24.0f, false, false, true));
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    fired = ws::ui::gui::command_toolbar(gui, layout, kDefaultChrome,
+                                         "bar", registry, ids);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(fired == "app.quit");
+}
+
+TEST_CASE("the command palette searches, fires, prompts and closes") {
+    namespace keys = ws::input::keys;
+    ws::ui::gui_test::stub.reset();
+    const ws::app::CommandRegistry registry = toy_registry();
+    ws::app::ShortcutResolver resolver;
+    REQUIRE(resolver.install_defaults(registry).has_value());
+
+    GuiContext gui;
+    ws::ui::gui::CommandPalette state;
+    bool open = true;
+
+    // The opening frame answers no keys, Enter included - the chord
+    // that opened the palette is still in that frame's edges.
+    InputFrame open_press = snap(-100.0f, -100.0f);
+    open_press.key_pressed[static_cast<std::size_t>(keys::kEnter)] = true;
+    gui.begin_frame(open_press);
+    ws::ui::gui::PaletteEvent ev = ws::ui::gui::command_palette(
+        gui, kDefaultChrome, "palette", open, registry, &resolver,
+        ws::app::KeyContext::global, state);
+    gui.end_frame();
+    CHECK(!ev.dispatch);
+    CHECK(!ev.close);
+    CHECK(state.was_open);
+
+    // Typing lands in the search (the fresh open focused it) and the
+    // ranked list narrows with it; the footer names the row Enter
+    // would fire, chord included.
+    InputFrame typing = snap(-100.0f, -100.0f);
+    typing.text_input = {'s', 'a', 'v'};
+    gui.begin_frame(typing);
+    ev = ws::ui::gui::command_palette(gui, kDefaultChrome, "palette", open,
+                                      registry, &resolver,
+                                      ws::app::KeyContext::global, state);
+    gui.end_frame();
+    CHECK(std::string_view{state.search} == "sav");
+    REQUIRE(state.ranked.size() == 1);
+    CHECK(state.ranked[0] == 0);  // app.save, registration index 0
+    CHECK(state.footer == "Save  Ctrl+S");
+
+    // Enter fires the highlighted row: the dispatch + the close ask,
+    // and the command is noted in the recents.
+    InputFrame fire = snap(-100.0f, -100.0f);
+    fire.key_pressed[static_cast<std::size_t>(keys::kEnter)] = true;
+    gui.begin_frame(fire);
+    ev = ws::ui::gui::command_palette(gui, kDefaultChrome, "palette", open,
+                                      registry, &resolver,
+                                      ws::app::KeyContext::global, state);
+    gui.end_frame();
+    CHECK(ev.dispatch);
+    CHECK(ev.command == "app.save");
+    CHECK(ev.argument.empty());
+    CHECK(ev.close);
+    REQUIRE(state.recents.size() == 1);
+    CHECK(state.recents[0] == "app.save");
+    open = false;  // the caller honors the close
+
+    // A closed frame re-arms the open; the recents survive it.
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    ev = ws::ui::gui::command_palette(gui, kDefaultChrome, "palette", open,
+                                      registry, &resolver,
+                                      ws::app::KeyContext::global, state);
+    gui.end_frame();
+    CHECK(!ev.dispatch);
+    CHECK(!state.was_open);
+
+    // The reopen: the search is reset (fresh open), the empty query
+    // lists the recents first and then registration order.
+    open = true;
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    ev = ws::ui::gui::command_palette(gui, kDefaultChrome, "palette", open,
+                                      registry, &resolver,
+                                      ws::app::KeyContext::global, state);
+    gui.end_frame();
+    CHECK(state.search[0] == '\0');
+    REQUIRE(state.ranked.size() == 3);
+    CHECK(state.ranked[0] == 0);  // the recent
+    CHECK(state.ranked[1] == 1);
+    CHECK(state.ranked[2] == 2);
+
+    // Down steps the highlight to row 1; Enter there finds
+    // needs_argument and swaps to the prompt instead of dispatching.
+    InputFrame down = snap(-100.0f, -100.0f);
+    down.key_pressed[static_cast<std::size_t>(keys::kDown)] = true;
+    gui.begin_frame(down);
+    ev = ws::ui::gui::command_palette(gui, kDefaultChrome, "palette", open,
+                                      registry, &resolver,
+                                      ws::app::KeyContext::global, state);
+    gui.end_frame();
+    CHECK(state.selection == 1);
+    CHECK(!ev.dispatch);
+
+    InputFrame prompt = snap(-100.0f, -100.0f);
+    prompt.key_pressed[static_cast<std::size_t>(keys::kEnter)] = true;
+    gui.begin_frame(prompt);
+    ev = ws::ui::gui::command_palette(gui, kDefaultChrome, "palette", open,
+                                      registry, &resolver,
+                                      ws::app::KeyContext::global, state);
+    gui.end_frame();
+    CHECK(!ev.dispatch);  // the prompt, not the fire
+    CHECK(!ev.close);
+    CHECK(state.prompting);
+    CHECK(state.chosen == "edit.rename");
+
+    // The payload types into the argument field (the search is locked
+    // while prompting), and Enter there dispatches with it.
+    InputFrame payload = snap(-100.0f, -100.0f);
+    payload.text_input = {'x', 'y'};
+    gui.begin_frame(payload);
+    ev = ws::ui::gui::command_palette(gui, kDefaultChrome, "palette", open,
+                                      registry, &resolver,
+                                      ws::app::KeyContext::global, state);
+    gui.end_frame();
+    CHECK(std::string_view{state.argument} == "xy");
+
+    InputFrame arg_fire = snap(-100.0f, -100.0f);
+    arg_fire.key_pressed[static_cast<std::size_t>(keys::kEnter)] = true;
+    gui.begin_frame(arg_fire);
+    ev = ws::ui::gui::command_palette(gui, kDefaultChrome, "palette", open,
+                                      registry, &resolver,
+                                      ws::app::KeyContext::global, state);
+    gui.end_frame();
+    CHECK(ev.dispatch);
+    CHECK(ev.command == "edit.rename");
+    CHECK(ev.argument == "xy");
+    CHECK(ev.close);
+    open = false;
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    (void)ws::ui::gui::command_palette(gui, kDefaultChrome, "palette", open,
+                                       registry, &resolver,
+                                       ws::app::KeyContext::global, state);
+    gui.end_frame();
+
+    // Escape closes through the arbitration: the press frame lays
+    // quiet, the NEXT frame reads the win and asks to close.
+    open = true;
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    (void)ws::ui::gui::command_palette(gui, kDefaultChrome, "palette", open,
+                                       registry, &resolver,
+                                       ws::app::KeyContext::global, state);
+    gui.end_frame();
+    InputFrame esc = snap(-100.0f, -100.0f);
+    esc.key_pressed[static_cast<std::size_t>(keys::kEscape)] = true;
+    gui.begin_frame(esc);
+    ev = ws::ui::gui::command_palette(gui, kDefaultChrome, "palette", open,
+                                      registry, &resolver,
+                                      ws::app::KeyContext::global, state);
+    gui.end_frame();
+    CHECK(!ev.close);  // the claim settles at end_frame
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    ev = ws::ui::gui::command_palette(gui, kDefaultChrome, "palette", open,
+                                      registry, &resolver,
+                                      ws::app::KeyContext::global, state);
+    gui.end_frame();
+    CHECK(ev.close);   // and the next frame reads it
+    open = false;
+}
+
+TEST_CASE("the keymap editor records, warns and cancels") {
+    namespace keys = ws::input::keys;
+    ws::ui::gui_test::stub.reset();
+    ws::app::CommandRegistry registry = toy_registry();
+    // A chordless fourth command so the bind path (a command with no
+    // binding - rebind would refuse it) is a real row too.
+    (void)registry.add(ws::app::Command{
+        .id = "edit.copy",
+        .label = "Copy",
+        .category = "Edit",
+        .execute = [](std::string_view) {},
+    });
+    ws::app::ShortcutResolver resolver;
+    REQUIRE(resolver.install_defaults(registry).has_value());
+
+    GuiContext gui;
+    LayoutCursor layout;
+    ws::ui::gui::KeymapEditor state;
+    state.selected = 0;  // the caller's own pick (a row click's write)
+
+    // The Record button's id, replicated through the same scopes the
+    // editor derives it under (the panel's, then the editor's label).
+    ws::ui::gui::IdStack ids;
+    ids.push("panel");
+    ids.push("keymap");
+    const ws::ui::gui::WidgetId record_id = ids.id("Record...");
+
+    // Frame 1 lays the editor and takes the button's focus (the lay
+    // registers it; set_focus after the lay raises the live ring).
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    ws::ui::gui::keymap_editor(gui, layout, kDefaultChrome, "keymap",
+                               registry, resolver, state);
+    gui.set_focus(record_id);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(!state.recording);
+    // The detail line names the picked row and its live chord.
+    CHECK(state.detail == "Save  Ctrl+S");
+
+    // Enter starts the recording with the picked row captured.
+    InputFrame press_record = snap(-100.0f, -100.0f);
+    press_record.key_pressed[static_cast<std::size_t>(keys::kEnter)] = true;
+    gui.begin_frame(press_record);
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    ws::ui::gui::keymap_editor(gui, layout, kDefaultChrome, "keymap",
+                               registry, resolver, state);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(state.recording);
+    CHECK(state.recording_id == "app.save");
+
+    // The capture frame: Ctrl held, K pressed - the chord lands through
+    // rebind (Save carried the seeded binding), the status names it,
+    // and the recording ends in the same frame.
+    InputFrame capture = snap(-100.0f, -100.0f);
+    capture.key_down[static_cast<std::size_t>(keys::kLeftControl)] = true;
+    capture.key_pressed[75] = true;  // 'K', GLFW numbering
+    gui.begin_frame(capture);
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    ws::ui::gui::keymap_editor(gui, layout, kDefaultChrome, "keymap",
+                               registry, resolver, state);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(!state.recording);
+    CHECK(state.status == "bound 'Save' to Ctrl+K");
+    const ws::app::Shortcut* bound =
+        resolver.binding_for("app.save", ws::app::KeyContext::global);
+    REQUIRE(bound != nullptr);
+    CHECK(*bound == ws::app::Shortcut{75, ws::app::Mod::control});
+
+    // The conflict warning: record the chordless Copy onto the chord
+    // Save now owns - the resolver's own refusal lands verbatim in
+    // the status, and neither binding moved.
+    state.selected = 3;  // Copy, the registration walk's fourth row
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    ws::ui::gui::keymap_editor(gui, layout, kDefaultChrome, "keymap",
+                               registry, resolver, state);
+    gui.set_focus(record_id);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    InputFrame press_again = snap(-100.0f, -100.0f);
+    press_again.key_pressed[static_cast<std::size_t>(keys::kEnter)] = true;
+    gui.begin_frame(press_again);
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    ws::ui::gui::keymap_editor(gui, layout, kDefaultChrome, "keymap",
+                               registry, resolver, state);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(state.recording);
+    CHECK(state.recording_id == "edit.copy");
+
+    InputFrame conflict = snap(-100.0f, -100.0f);
+    conflict.key_down[static_cast<std::size_t>(keys::kLeftControl)] = true;
+    conflict.key_pressed[75] = true;  // Ctrl+K: Save's now
+    gui.begin_frame(conflict);
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    ws::ui::gui::keymap_editor(gui, layout, kDefaultChrome, "keymap",
+                               registry, resolver, state);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(!state.recording);
+    CHECK(state.status.find("Ctrl+K") != std::string::npos);
+    CHECK(state.status.find("app.save") != std::string::npos);  // the owner, by id
+    CHECK(resolver.binding_for("edit.copy", ws::app::KeyContext::global) ==
+          nullptr);  // refused: nothing moved
+
+    // Escape cancels a live recording: the edge frame cancels (the
+    // editor acts on it and consumes the arbitration), the widgets
+    // unlock, and the status says so.
+    state.selected = 0;
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    ws::ui::gui::keymap_editor(gui, layout, kDefaultChrome, "keymap",
+                               registry, resolver, state);
+    gui.set_focus(record_id);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    InputFrame press_third = snap(-100.0f, -100.0f);
+    press_third.key_pressed[static_cast<std::size_t>(keys::kEnter)] = true;
+    gui.begin_frame(press_third);
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    ws::ui::gui::keymap_editor(gui, layout, kDefaultChrome, "keymap",
+                               registry, resolver, state);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(state.recording);
+
+    InputFrame cancel = snap(-100.0f, -100.0f);
+    cancel.key_pressed[static_cast<std::size_t>(keys::kEscape)] = true;
+    gui.begin_frame(cancel);
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    ws::ui::gui::keymap_editor(gui, layout, kDefaultChrome, "keymap",
+                               registry, resolver, state);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(!state.recording);
+    CHECK(state.status == "recording cancelled");
+    CHECK(resolver.binding_for("app.save", ws::app::KeyContext::global) !=
+          nullptr);  // the binding Save carried is untouched
+
+    // The search narrows the rows: "Copy" leaves the one row (a pick
+    // pointing past it clamps onto it), and the chordless bind path
+    // (no binding - bind(), never rebind()) puts a real chord under it.
+    state.selected = 3;  // a stale pick: Copy was the fourth row
+    std::snprintf(state.search, sizeof state.search, "Copy");
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    ws::ui::gui::keymap_editor(gui, layout, kDefaultChrome, "keymap",
+                               registry, resolver, state);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    REQUIRE(state.row_commands.size() == 1);
+    CHECK(state.row_commands[0] == 3);
+    REQUIRE(state.cells.size() == 2);
+    CHECK(std::strcmp(state.cells[0], "Copy") == 0);
+    CHECK(std::strcmp(state.cells[1], "<none>") == 0);
+    CHECK(state.selected == 0);  // the narrowed list clamps the pick
+
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    ws::ui::gui::keymap_editor(gui, layout, kDefaultChrome, "keymap",
+                               registry, resolver, state);
+    gui.set_focus(record_id);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    InputFrame press_fourth = snap(-100.0f, -100.0f);
+    press_fourth.key_pressed[static_cast<std::size_t>(keys::kEnter)] = true;
+    gui.begin_frame(press_fourth);
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    ws::ui::gui::keymap_editor(gui, layout, kDefaultChrome, "keymap",
+                               registry, resolver, state);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(state.recording);
+    CHECK(state.recording_id == "edit.copy");
+
+    InputFrame chordless = snap(-100.0f, -100.0f);
+    chordless.key_down[static_cast<std::size_t>(keys::kLeftControl)] = true;
+    chordless.key_down[static_cast<std::size_t>(keys::kLeftShift)] = true;
+    chordless.key_pressed[67] = true;  // 'C', GLFW numbering
+    gui.begin_frame(chordless);
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    ws::ui::gui::keymap_editor(gui, layout, kDefaultChrome, "keymap",
+                               registry, resolver, state);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(!state.recording);
+    CHECK(state.status == "bound 'Copy' to Ctrl+Shift+C");
+    bound = resolver.binding_for("edit.copy", ws::app::KeyContext::global);
+    REQUIRE(bound != nullptr);
+    CHECK(bound->key == 67);
+    CHECK(ws::app::has_mod(bound->mods, ws::app::Mod::control));
+    CHECK(ws::app::has_mod(bound->mods, ws::app::Mod::shift));
 }

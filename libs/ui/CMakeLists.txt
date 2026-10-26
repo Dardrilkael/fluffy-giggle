@@ -9,7 +9,11 @@ ws_add_library(ui DEPENDS ws::core ws::math ws::input ws::gfx ws::jobs)
 # ws::core + ws::input (the frame snapshot it reads; itself core-only,
 # pure CPU) + ws::jobs (the job_progress bridge's backend) + ws::settings
 # (theme_json's persistence: json, migrations and the FileSystem seam -
-# the jobs precedent, the reference lives in a public header). The same
+# the jobs precedent, the reference lives in a public header) + ws::app
+# (stage 13: the command_views bridge - the registry, the shortcut
+# resolver and describe_chord all ride in a public gui header, so the
+# same PUBLIC precedent applies; itself pure std + core + settings).
+# The same
 # purity class - pure std + core, no platform anywhere: no Vulkan,
 # GLFW, volk or vma target ever appears on its link line, because the
 # gui draws through the r2d free-function seam that
@@ -25,7 +29,7 @@ target_include_directories(ws_ui_gui
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_features(ws_ui_gui PUBLIC cxx_std_20)
 ws_set_warnings(ws_ui_gui)
-target_link_libraries(ws_ui_gui PUBLIC ws::core ws::input ws::jobs ws::settings)
+target_link_libraries(ws_ui_gui PUBLIC ws::core ws::input ws::jobs ws::settings ws::app)
 target_link_libraries(ws_ui PRIVATE ws_ui_gui)
 
 # Platform + gui sources: exactly one windowing TU builds (the WindowHost

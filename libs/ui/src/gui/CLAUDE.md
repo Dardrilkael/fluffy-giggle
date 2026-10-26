@@ -14,6 +14,11 @@
   mirror's store and the job_view state-to-view mapping (the row and toast
   templates stay in job_progress.hpp with their JobHandle<T> parameter)
 - widgets_combo.cpp / widgets_text_input.cpp / widgets_table.cpp
+- command_views.cpp / command_palette.cpp / command_keymap.cpp: the
+  ws::app bridge (stage 13 phase 4) - the shared hint + menu builder +
+  toolbar; the palette's fuzzy scorer/ranker + the modal over them; and
+  the keymap editor with its Record capture. One widget family, one
+  file; the bridge's shared header is include/ws/ui/gui/command_views.hpp
 - theme_color.cpp / theme_data.cpp: the stage-10 theme data half - the
   OKLCH/WCAG color math + accent derivation, and the ThemeData document
   around ChromeTheme. Pure value types, not widgets; the widget-file rule

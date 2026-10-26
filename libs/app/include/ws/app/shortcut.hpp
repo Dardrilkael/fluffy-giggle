@@ -30,6 +30,15 @@ enum class KeyContext : std::uint8_t {
 // the bridge's, the table here is the documented convention.
 inline constexpr Mod kPrimaryModifier = Mod::control;
 
+// One chord as display text, "Ctrl+Shift+S" and friends: modifiers
+// in the Ctrl/Super/Alt/Shift order, printable keys by their uppercase
+// letter, the GLFW-named keys by name, anything else "<key N>". The
+// spelling the conflict messages build AND the one the ui views show
+// as a menu hint, a palette row or a keymap cell - one text, so a
+// rebind renames everywhere at once. Never a persistence format: the
+// keymap file carries the numbers.
+[[nodiscard]] std::string describe_chord(Shortcut chord);
+
 // What a pressed chord resolved to. command is the id to dispatch
 // ("" when nothing matched); consumed says the chord was the
 // resolver's - a match, or an armed sequence's first step - so the
@@ -201,7 +210,6 @@ private:
     [[nodiscard]] static const Table& tables_for(const std::vector<Table>& tables,
                                                  KeyContext context);
     [[nodiscard]] static bool chord_modified(Shortcut chord) noexcept;
-    [[nodiscard]] static std::string describe_chord(Shortcut chord);
     // The bind-time rules, shared by bind()/bind_sequence() and
     // install() (the load path): validate + append into one context's
     // table, nothing stored on refusal.
