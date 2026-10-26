@@ -52,6 +52,10 @@ struct Shortcut {
     Mod mods = Mod::none;
 };
 
+[[nodiscard]] constexpr bool operator==(Shortcut a, Shortcut b) noexcept {
+    return a.key == b.key && a.mods == b.mods;
+}
+
 // One registrable action. id is the stable key: menus and keymap
 // persistence name commands by it, so it must survive refactors -
 // renaming one orphans user bindings. label is the UI text, category
