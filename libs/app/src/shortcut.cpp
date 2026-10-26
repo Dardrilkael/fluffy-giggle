@@ -91,15 +91,14 @@ const ShortcutResolver::Table& ShortcutResolver::tables_for(
     return tables[static_cast<std::size_t>(context)];
 }
 
-ws::core::Status ShortcutResolver::bind(Shortcut chord, std::string command,
-                                        KeyContext context) {
+ws::core::Status ShortcutResolver::push_plain(Table& table, Shortcut chord,
+                                              std::string command) {
     if (command.empty()) {
         return fail(AppError::invalid_argument, "a binding needs a command id");
     }
     if (chord.key == 0) {
         return fail(AppError::invalid_argument, "a binding needs a key");
     }
-    Table& table = tables_for(tables_, context);
     for (const Plain& plain : table.plains) {
         if (plain.chord == chord) {
             return fail(AppError::conflict,
@@ -118,9 +117,9 @@ ws::core::Status ShortcutResolver::bind(Shortcut chord, std::string command,
     return {};
 }
 
-ws::core::Status ShortcutResolver::bind_sequence(Shortcut first, Shortcut second,
+ws::core::Status ShortcutResolver::push_sequence(Table& table, Shortcut first,
+                                                 Shortcut second,
                                                  std::string command,
-                                                 KeyContext context,
                                                  std::int64_t timeout_ms) {
     if (command.empty()) {
         return fail(AppError::invalid_argument, "a sequence needs a command id");
@@ -131,7 +130,6 @@ ws::core::Status ShortcutResolver::bind_sequence(Shortcut first, Shortcut second
     if (timeout_ms <= 0) {
         return fail(AppError::invalid_argument, "a sequence needs a positive timeout");
     }
-    Table& table = tables_for(tables_, context);
     for (const Plain& plain : table.plains) {
         if (plain.chord == first) {
             return fail(AppError::conflict,
@@ -149,6 +147,19 @@ ws::core::Status ShortcutResolver::bind_sequence(Shortcut first, Shortcut second
     table.sequences.push_back(
         Sequence{first, second, std::move(command), timeout_ms});
     return {};
+}
+
+ws::core::Status ShortcutResolver::bind(Shortcut chord, std::string command,
+                                        KeyContext context) {
+    return push_plain(tables_for(tables_, context), chord, std::move(command));
+}
+
+ws::core::Status ShortcutResolver::bind_sequence(Shortcut first, Shortcut second,
+                                                 std::string command,
+                                                 KeyContext context,
+                                                 std::int64_t timeout_ms) {
+    return push_sequence(tables_for(tables_, context), first, second,
+                         std::move(command), timeout_ms);
 }
 
 ws::core::Status ShortcutResolver::unbind(Shortcut chord, KeyContext context) {
@@ -239,6 +250,53 @@ ws::core::Status ShortcutResolver::install_defaults(const CommandRegistry& regis
 void ShortcutResolver::reset_to_defaults() {
     tables_ = defaults_;  // the last installed seed, every context
     pending_.armed = false;
+}
+
+ws::core::Status ShortcutResolver::install(const ShortcutTable& global,
+                                           const ShortcutTable& panel,
+                                           const ShortcutTable& text_editing) {
+    // Built whole or not at all: every context validates into a
+    // scratch set before anything commits (the keymap load's
+    // all-or-nothing edge).
+    std::vector<Table> built{Table{}, Table{}, Table{}};
+    const ShortcutTable* sources[3] = {&global, &panel, &text_editing};
+    for (int rung = 0; rung < 3; ++rung) {
+        Table& table = built[static_cast<std::size_t>(rung)];
+        for (const ShortcutBinding& binding : sources[rung]->bindings) {
+            const ws::core::Status pushed =
+                push_plain(table, binding.chord, binding.command);
+            if (!pushed.has_value()) {
+                return pushed;
+            }
+        }
+        for (const ShortcutSequence& sequence : sources[rung]->sequences) {
+            const ws::core::Status pushed =
+                push_sequence(table, sequence.first, sequence.second,
+                              sequence.command, sequence.timeout_ms);
+            if (!pushed.has_value()) {
+                return pushed;
+            }
+        }
+    }
+    tables_ = std::move(built);
+    pending_.armed = false;  // the tables it armed on are gone
+    return {};
+}
+
+ShortcutTable ShortcutResolver::table_of(KeyContext context) const {
+    const Table& table = tables_for(tables_, context);
+    ShortcutTable out;
+    out.bindings.reserve(table.plains.size());
+    for (const Plain& plain : table.plains) {
+        out.bindings.push_back(ShortcutBinding{plain.chord, plain.command});
+    }
+    out.sequences.reserve(table.sequences.size());
+    for (const Sequence& sequence : table.sequences) {
+        out.sequences.push_back(ShortcutSequence{sequence.first, sequence.second,
+                                                 sequence.command,
+                                                 sequence.timeout_ms});
+    }
+    return out;
 }
 
 Resolution ShortcutResolver::resolve(Shortcut pressed, KeyContext active) {

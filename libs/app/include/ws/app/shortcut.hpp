@@ -41,6 +41,25 @@ struct Resolution {
     bool sequence_pending = false;
 };
 
+// The serialized shapes: one binding, one two-step sequence, and one
+// context's whole table. install() takes these, table_of() answers
+// them - the keymap file layer (keymap.hpp) builds them from json,
+// the keymap editor's list view reads them back.
+struct ShortcutBinding {
+    Shortcut chord;
+    std::string command;
+};
+struct ShortcutSequence {
+    Shortcut first;
+    Shortcut second;
+    std::string command;
+    std::int64_t timeout_ms = 0;
+};
+struct ShortcutTable {
+    std::vector<ShortcutBinding> bindings;
+    std::vector<ShortcutSequence> sequences;
+};
+
 // The live binding table: command ids to chords, per context, plus
 // the two-step sequences and the user rebinds layered over the
 // defaults. Owner-thread state, no locks (the command registry's
@@ -105,6 +124,23 @@ public:
     // and drops any pending sequence step.
     void reset_to_defaults();
 
+    // Replaces every context's live table in one all-or-nothing step
+    // (the keymap load's edge): every entry runs the bind-time rules
+    // - an empty command, a keyless chord, a non-positive timeout, a
+    // duplicate chord, a chord that is both a plain binding and a
+    // prefix, a second sequence on one prefix - and the first
+    // refusal leaves the resolver exactly as it was. The defaults
+    // seed is untouched (reset_to_defaults() still restores the last
+    // install_defaults), and an armed sequence step is dropped with
+    // the tables it armed on.
+    [[nodiscard]] ws::core::Status install(const ShortcutTable& global,
+                                           const ShortcutTable& panel,
+                                           const ShortcutTable& text_editing);
+
+    // One context's live table as a copy - the keymap serializer's
+    // and the editor's list view's read.
+    [[nodiscard]] ShortcutTable table_of(KeyContext context) const;
+
     // Resolves one pressed chord (a key PRESS edge - the caller
     // tracks edges, the resolver never sees a held repeat). Walks
     // the ladder from the active rung down to global: the first rung
@@ -166,6 +202,15 @@ private:
                                                  KeyContext context);
     [[nodiscard]] static bool chord_modified(Shortcut chord) noexcept;
     [[nodiscard]] static std::string describe_chord(Shortcut chord);
+    // The bind-time rules, shared by bind()/bind_sequence() and
+    // install() (the load path): validate + append into one context's
+    // table, nothing stored on refusal.
+    [[nodiscard]] static ws::core::Status push_plain(Table& table, Shortcut chord,
+                                                     std::string command);
+    [[nodiscard]] static ws::core::Status push_sequence(Table& table, Shortcut first,
+                                                        Shortcut second,
+                                                        std::string command,
+                                                        std::int64_t timeout_ms);
 
     std::function<std::int64_t()> clock_;
     std::vector<Table> tables_{

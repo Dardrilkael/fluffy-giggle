@@ -1,14 +1,13 @@
 # ws::app - CLAUDE.md
 
 The headless app-framework lib (nextplan stage 13): the command
-registry, shortcut resolution with user rebinding (the resolution
-engine landed; keymap persistence through the settings seams is the
-arc's next phase), and the undo stack - the services an app shell
-composes. Riding ws::core (Result/Status); ws::settings joins when
-keymap persistence lands (its FileSystem + json seams are the
-workspace's standard, the platform precedent). The UI views over
-these - menu/toolbar builders, the command palette, the keymap editor
-- live in ws::ui, never here. Pure std; owner-thread state, no locks.
+registry, shortcut resolution with user rebinding and the persisted
+keymap file, and the undo stack - the services an app shell
+composes. Riding ws::core (Result/Status) and ws::settings (the
+keymap file's FileSystem + json seams - the platform precedent). The
+UI views over these - menu/toolbar builders, the command palette, the
+keymap editor - live in ws::ui, never here. Pure std; owner-thread
+state, no locks.
 
 ## Purpose, per header
 
@@ -55,20 +54,51 @@ these - menu/toolbar builders, the command palette, the keymap editor
   (key 0 removes it; a collision with another command or a prefix is
   refused), `install_defaults` seeds a registry's declared chords
   whole-or-not-at-all, `reset_to_defaults` restores the last seed,
-  `binding_for`/`command_for` feed the menu hints and the keymap
-  editor. `kPrimaryModifier` is the Ctrl-vs-Cmd convention: control
+  `install` replaces every context's live table in one
+  all-or-nothing batch (the keymap load's edge: the bind-time rules
+  are the batch's, the defaults seed is untouched, an armed step is
+  dropped), `table_of` copies one context's table out for the
+  serializer and the editor's list view, and `binding_for`/
+  `command_for` feed the menu hints and the keymap editor.
+  `kPrimaryModifier` is the Ctrl-vs-Cmd convention: control
   on GLFW/Windows today, a mac bridge remaps chords to `super_key`.
   `Resolution` tells the caller what to dispatch AND whether the
   chord was consumed (a match, or an armed first step) so a focused
   field knows not to type it.
+- `keymap.hpp` - the persisted keymap: the resolver's whole live
+  table (every context's bindings and sequences, no provenance - the
+  2a decision) saved and loaded through the ws::settings json +
+  FileSystem seams, the recent-files precedent. The document is
+  versioned shape 1 with all three contexts always present, so
+  save -> load -> save re-emits byte-identical text (table order
+  survives install and the json object keeps insertion order). A
+  MISSING file is the first run: `load` succeeds with the resolver
+  untouched - never wipe a seed because the file is not there yet
+  (the app's flow is install_defaults() then load()). The refusal
+  split: json grammar trouble answers parse_failed, a well-formed
+  document of the wrong shape corrupt_file (absent "version" reads
+  as shape 1; any other value is refused, never downgraded), an fs
+  read failure io_failed - and semantic duplicates surface as the
+  resolver's own conflict from install(), every refusal leaving the
+  resolver exactly as it was. Unknown keys - a top-level field, an
+  entry field, a context this version does not know - are forward
+  data from a newer file: ignored, never a refusal. `save` returns
+  the seam's write Status AS-IS (category "settings"), riding the
+  seam's atomic sibling-tmp + rename, so a failed save leaves the
+  previous file byte-identical. `export_text`/`import_text` move
+  the same document as text for the editor's copy field and the
+  file-dialog paths. No .bak: the keymap is re-editable convenience
+  data over a re-seedable defaults table (the recent-files policy).
 
 ## Allowed dependencies
 
 - `ws::core` PUBLIC (Result/Status/errors - the public API returns
   them).
-- `ws::settings` (planned, with keymap persistence): the FileSystem +
-  json seams for the keymap file - the recent-files/theme-file
-  precedent, never a duplicated writer.
+- `ws::settings` PUBLIC (the keymap file): the FileSystem + json
+  seams - the recent-files/theme-file precedent, never a duplicated
+  writer. PUBLIC like ws::core because the seam's reference lives in
+  a public header (`Keymap` takes a `FileSystem&`), the ws::platform
+  precedent.
 
 ## Rules
 
@@ -100,9 +130,9 @@ these - menu/toolbar builders, the command palette, the keymap editor
   nothing and avoids the flinch).
 - The resolver keeps NO binding provenance: `install_defaults`
   re-seeds a context's whole live table (rebinds made on the old one
-  are lost) and `reset_to_defaults` restores the last seed. Keymap
-  persistence (the arc's next phase) saves the whole live table, so
-  no override tracking is needed.
+  are lost) and `reset_to_defaults` restores the last seed. The
+  keymap file (keymap.hpp) saves the whole live table for exactly
+  this reason - no override tracking is needed.
 - A pending sequence step holds its rung across a focus change: it
   completes there until it times out or another chord cancels it -
   the timeout bounds a stale pending; there is no focus-change rule.
@@ -140,5 +170,18 @@ no-op onto its own chord, onto-prefix refused, key-0 removal, the
 not-found refusal), and install_defaults (declared chords seeded,
 chordless commands skipped, reset after a rebind, the re-seed
 replacing the live table, the clash seeding nothing with the message
-naming both commands). The undo stack grows its own section as the
-arc's later phases land.
+naming both commands). The keymap: install's whole-or-nothing batch
+(table_of mirroring every rung, the in-batch clash / keyless chord /
+plain-plus-prefix / zero-timeout refusals each leaving the live
+table standing, an installed sequence arming and completing), the
+file round-trip (a user rebind surviving the trip, a seeded reader
+replaced not merged, the byte-identical save -> load -> save), the
+missing-file first run, the refusal matrix (grammar app/4 vs shape
+app/5 - a non-object root, wrong-typed or unsupported version,
+contexts or a context of the wrong kind, an entryless binding, key
+0, mods 16, timeout 0 - each leaving the seed standing) plus the
+forward-data tolerance doc, the in-file clash answered as the
+resolver's own conflict, the failed save propagating the seam's
+settings/8 with the previous file byte-identical, import/export as
+text, and a real StdFileSystem smoke in the OS temp. The undo stack
+grows its own section as the arc's later phases land.

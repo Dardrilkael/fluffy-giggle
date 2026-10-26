@@ -5,13 +5,20 @@
 // contract, and the Mod helpers; the shortcut resolver - the bind and
 // collision rules, the context ladder with the text rule, the two-step
 // sequences driven on a fake clock, rebinding, and the defaults seed
-// with its whole-or-nothing clash refusal. The undo stack grows its
-// own section as the arc's later phases land.
+// with its whole-or-nothing clash refusal; the keymap file - the
+// install/table_of batch API, the save/load round-trips through the
+// settings FileSystem + json seams, the missing-file first run, the
+// parse/corrupt/conflict refusals with nothing installed, the
+// failed-save contract, import/export, and a real StdFileSystem
+// smoke. The undo stack grows its own section as the arc's later
+// phases land.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
 #include <cstdint>
+#include <filesystem>
+#include <map>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -19,7 +26,10 @@
 
 #include <ws/app/command.hpp>
 #include <ws/app/errors.hpp>
+#include <ws/app/keymap.hpp>
 #include <ws/app/shortcut.hpp>
+#include <ws/settings/errors.hpp>
+#include <ws/settings/filesystem.hpp>
 
 namespace {
 
@@ -54,6 +64,48 @@ constexpr ws::app::Shortcut ctrl(int key) {
 constexpr ws::app::Shortcut plain_key(int key) {
     return ws::app::Shortcut{key, ws::app::Mod::none};
 }
+
+// The settings seam's test double: an in-memory file map plus a
+// write-failure countdown (the settings suite's own fake's shape).
+class FakeFs final : public ws::settings::FileSystem {
+public:
+    std::map<std::string, std::string> files;
+    int write_failures = 0;  // writes fail while this counts down
+
+    [[nodiscard]] ws::core::Result<std::string> read(
+        std::string_view path) const override {
+        const auto found = files.find(std::string{path});
+        if (found == files.end()) {
+            return ws::settings::fail(ws::settings::SettingsError::io_failed,
+                                      "not there (test)");
+        }
+        return found->second;
+    }
+
+    ws::core::Status write(std::string_view path,
+                           std::string_view bytes) override {
+        if (write_failures > 0) {
+            --write_failures;
+            return ws::settings::fail(ws::settings::SettingsError::io_failed,
+                                      "no write (test)");
+        }
+        files[std::string{path}] = std::string{bytes};
+        return {};
+    }
+
+    ws::core::Status rename(std::string_view /*from*/,
+                            std::string_view /*to*/) override {
+        return {};
+    }
+
+    bool remove(std::string_view path) override {
+        return files.erase(std::string{path}) > 0;
+    }
+
+    [[nodiscard]] bool exists(std::string_view path) const override {
+        return files.find(std::string{path}) != files.end();
+    }
+};
 
 }  // namespace
 
@@ -628,4 +680,299 @@ TEST_CASE("install_defaults seeds the declared chords, whole or not at all") {
     CHECK(clash.error().message.find("a.second") != std::string::npos);
     CHECK(*resolver.binding_for("file.open", ws::app::KeyContext::global) ==
           ctrl(79));
+}
+
+TEST_CASE("install replaces every context's table whole or not at all") {
+    FakeClock clock;
+    ws::app::ShortcutResolver resolver{[&clock] { return clock.now; }};
+    REQUIRE(resolver.bind(ctrl(83), "old.save", ws::app::KeyContext::global)
+                .has_value());
+
+    ws::app::ShortcutTable global;
+    global.bindings.push_back(ws::app::ShortcutBinding{ctrl(79), "file.open"});
+    global.bindings.push_back(ws::app::ShortcutBinding{ctrl(81), "file.quit"});
+    global.sequences.push_back(
+        ws::app::ShortcutSequence{ctrl(75), ctrl(83), "file.save-all", 1000});
+    ws::app::ShortcutTable panel;
+    panel.bindings.push_back(ws::app::ShortcutBinding{ctrl(84), "panel.trees"});
+    ws::app::ShortcutTable text_editing;
+    text_editing.bindings.push_back(ws::app::ShortcutBinding{
+        ws::app::Shortcut{256, ws::app::Mod::none}, "edit.leave-field"});
+
+    REQUIRE(resolver.install(global, panel, text_editing).has_value());
+    const ws::app::ShortcutTable read =
+        resolver.table_of(ws::app::KeyContext::global);
+    REQUIRE(read.bindings.size() == 2);
+    CHECK(read.bindings[0].command == "file.open");
+    CHECK(read.bindings[0].chord == ctrl(79));
+    CHECK(read.bindings[1].command == "file.quit");
+    REQUIRE(read.sequences.size() == 1);
+    CHECK(read.sequences[0].command == "file.save-all");
+    CHECK(read.sequences[0].timeout_ms == 1000);
+    REQUIRE(resolver.table_of(ws::app::KeyContext::panel).bindings.size() == 1);
+    CHECK(resolver.table_of(ws::app::KeyContext::text_editing)
+              .bindings[0]
+              .command == "edit.leave-field");
+    // The old live table is gone.
+    CHECK(resolver.binding_for("old.save", ws::app::KeyContext::global) ==
+          nullptr);
+    // An installed sequence arms and completes like a bound one.
+    clock.now = 0;
+    CHECK(resolver.resolve(ctrl(75), ws::app::KeyContext::global).sequence_pending);
+    clock.now = 500;
+    CHECK(resolver.resolve(ctrl(83), ws::app::KeyContext::global).command ==
+          "file.save-all");
+
+    // A clash inside the batch: refused, the live table stands.
+    ws::app::ShortcutTable clashing;
+    clashing.bindings.push_back(ws::app::ShortcutBinding{ctrl(79), "file.open"});
+    clashing.bindings.push_back(ws::app::ShortcutBinding{ctrl(79), "file.dup"});
+    const auto clash = resolver.install(clashing, panel, text_editing);
+    REQUIRE_FALSE(clash.has_value());
+    CHECK(code_of(clash.error()) == "app/3");
+    CHECK(*resolver.binding_for("file.open", ws::app::KeyContext::global) ==
+          ctrl(79));
+
+    // A keyless binding: app/1, still nothing changed.
+    ws::app::ShortcutTable keyless;
+    keyless.bindings.push_back(
+        ws::app::ShortcutBinding{ws::app::Shortcut{}, "file.none"});
+    const auto no_key = resolver.install(keyless, panel, text_editing);
+    REQUIRE_FALSE(no_key.has_value());
+    CHECK(code_of(no_key.error()) == "app/1");
+
+    // A plain binding and a prefix on the same chord in one batch:
+    // app/3 (the rules bind() runs are the batch's rules too).
+    ws::app::ShortcutTable mixed;
+    mixed.bindings.push_back(ws::app::ShortcutBinding{ctrl(75), "edit.both"});
+    mixed.sequences.push_back(
+        ws::app::ShortcutSequence{ctrl(75), ctrl(79), "edit.seq", 500});
+    const auto both = resolver.install(mixed, panel, text_editing);
+    REQUIRE_FALSE(both.has_value());
+    CHECK(code_of(both.error()) == "app/3");
+
+    // A zero timeout deep in the panel batch: app/1, and the already
+    // fine global scratch commits nothing either.
+    ws::app::ShortcutTable no_timeout;
+    no_timeout.sequences.push_back(
+        ws::app::ShortcutSequence{ctrl(85), ctrl(85), "edit.tap", 0});
+    const auto zero = resolver.install(global, no_timeout, text_editing);
+    REQUIRE_FALSE(zero.has_value());
+    CHECK(code_of(zero.error()) == "app/1");
+    CHECK(resolver.table_of(ws::app::KeyContext::global).bindings.size() == 2);
+}
+
+TEST_CASE("the keymap round-trips through a file") {
+    FakeFs fs;
+    ws::app::ShortcutResolver resolver;
+    REQUIRE(resolver.bind(ctrl(83), "file.save", ws::app::KeyContext::global)
+                .has_value());
+    REQUIRE(resolver.bind(ctrl(79), "file.open", ws::app::KeyContext::global)
+                .has_value());
+    REQUIRE(resolver
+                .bind(plain_key(83), "edit.cut-field",
+                      ws::app::KeyContext::text_editing)
+                .has_value());
+    REQUIRE(resolver.bind_sequence(ctrl(75), ctrl(83), "file.save-all",
+                                   ws::app::KeyContext::global, 1000)
+                .has_value());
+    // A user rebind, to prove the whole live table is what travels.
+    REQUIRE(resolver.rebind("file.save", ws::app::KeyContext::global, ctrl(84))
+                .has_value());
+
+    ws::app::Keymap writer{fs, "/cfg/keymap.json"};
+    REQUIRE(writer.save(resolver).has_value());
+    const std::string written = fs.files["/cfg/keymap.json"];
+    CHECK(written.find("\"version\": 1") != std::string::npos);
+
+    // A second resolver seeded differently: the file REPLACES it.
+    ws::app::ShortcutResolver reader;
+    REQUIRE(reader.bind(ctrl(81), "file.quit", ws::app::KeyContext::global)
+                .has_value());
+    ws::app::Keymap loader{fs, "/cfg/keymap.json"};
+    REQUIRE(loader.load(reader).has_value());
+    CHECK(*reader.binding_for("file.save", ws::app::KeyContext::global) ==
+          ctrl(84));  // the rebind survived the trip
+    CHECK(*reader.binding_for("file.open", ws::app::KeyContext::global) ==
+          ctrl(79));
+    CHECK(*reader.binding_for("edit.cut-field",
+                             ws::app::KeyContext::text_editing) == plain_key(83));
+    CHECK(reader.binding_for("file.quit", ws::app::KeyContext::global) ==
+          nullptr);  // the seed the file replaced
+    CHECK(reader.table_of(ws::app::KeyContext::global).sequences.size() == 1);
+    CHECK(reader.table_of(ws::app::KeyContext::global)
+              .sequences[0]
+              .timeout_ms == 1000);
+
+    // Save -> load -> save is byte-identical: table order survives
+    // install, and the writer's shape is fixed.
+    ws::app::Keymap rewriter{fs, "/cfg/keymap.json"};
+    REQUIRE(rewriter.save(reader).has_value());
+    CHECK(fs.files["/cfg/keymap.json"] == written);
+}
+
+TEST_CASE("a missing keymap is the first run - the seed stands") {
+    FakeFs fs;
+    ws::app::ShortcutResolver resolver;
+    REQUIRE(resolver.bind(ctrl(83), "file.save", ws::app::KeyContext::global)
+                .has_value());
+
+    ws::app::Keymap keymap{fs, "/cfg/absent.json"};
+    CHECK(keymap.path() == "/cfg/absent.json");
+    const ws::core::Status loaded = keymap.load(resolver);
+    REQUIRE(loaded.has_value());
+    CHECK(*resolver.binding_for("file.save", ws::app::KeyContext::global) ==
+          ctrl(83));  // untouched - never wipe a seed on a missing file
+}
+
+TEST_CASE("a corrupt keymap is refused with nothing installed") {
+    FakeFs fs;
+    ws::app::ShortcutResolver resolver;
+    REQUIRE(resolver.bind(ctrl(83), "file.save", ws::app::KeyContext::global)
+                .has_value());
+    ws::app::Keymap keymap{fs, "/cfg/keymap.json"};
+
+    // Grammar trouble is app/4; well-formed json that is not a v1
+    // keymap is app/5. Every refusal leaves the seed standing.
+    const auto refused = [&](std::string_view bytes, const char* code) {
+        fs.files["/cfg/keymap.json"] = std::string{bytes};
+        const ws::core::Status loaded = keymap.load(resolver);
+        REQUIRE_FALSE(loaded.has_value());
+        CHECK(code_of(loaded.error()) == code);
+        CHECK(*resolver.binding_for("file.save", ws::app::KeyContext::global) ==
+              ctrl(83));
+    };
+
+    refused("{ not json", "app/4");
+    refused("[]", "app/5");
+    refused("{\"version\": 2}", "app/5");
+    refused("{\"version\": \"one\"}", "app/5");
+    refused("{\"version\": 1, \"contexts\": []}", "app/5");
+    refused("{\"version\": 1, \"contexts\": {\"global\": []}}", "app/5");
+    refused(
+        "{\"version\": 1, \"contexts\": {\"global\": {\"bindings\": [{}]}}}",
+        "app/5");
+    refused(
+        "{\"version\": 1, \"contexts\": {\"global\": {\"bindings\": "
+        "[{\"command\": \"x\", \"chord\": {\"key\": 0}}]}}}",
+        "app/5");
+    refused(
+        "{\"version\": 1, \"contexts\": {\"global\": {\"bindings\": "
+        "[{\"command\": \"x\", \"chord\": {\"key\": 83, \"mods\": 16}}]}}}",
+        "app/5");
+    refused(
+        "{\"version\": 1, \"contexts\": {\"global\": {\"sequences\": "
+        "[{\"command\": \"x\", \"first\": {\"key\": 75}, \"second\": "
+        "{\"key\": 83}, \"timeout_ms\": 0}]}}}",
+        "app/5");
+
+    // Tolerance: a newer file's unknown keys - a top-level field, an
+    // entry field, a context this version does not know - are
+    // forward data, never a refusal. The known entries still land,
+    // replacing (not merging into) what the resolver held.
+    fs.files["/cfg/keymap.json"] =
+        "{\"version\": 1, \"future\": 7, \"contexts\": {"
+        "\"global\": {\"bindings\": [{\"command\": \"file.open\", "
+        "\"chord\": {\"key\": 79, \"mods\": 2}, \"hint\": \"Ctrl+O\"}], "
+        "\"extra\": 3}, \"panel\": {}, \"future-rung\": {\"bindings\": []}}}";
+    const ws::core::Status loaded = keymap.load(resolver);
+    REQUIRE(loaded.has_value());
+    CHECK(*resolver.binding_for("file.open", ws::app::KeyContext::global) ==
+          ctrl(79));
+    CHECK(resolver.binding_for("file.save", ws::app::KeyContext::global) ==
+          nullptr);  // replaced, not merged
+}
+
+TEST_CASE("a clashing keymap answers the conflict and installs nothing") {
+    FakeFs fs;
+    fs.files["/cfg/keymap.json"] =
+        "{\"version\": 1, \"contexts\": {\"global\": {\"bindings\": ["
+        "{\"command\": \"file.open\", \"chord\": {\"key\": 79, \"mods\": 2}}, "
+        "{\"command\": \"file.dup\", \"chord\": {\"key\": 79, \"mods\": 2}}]}}}";
+
+    ws::app::ShortcutResolver resolver;
+    REQUIRE(resolver.bind(ctrl(83), "file.save", ws::app::KeyContext::global)
+                .has_value());
+    ws::app::Keymap keymap{fs, "/cfg/keymap.json"};
+    const ws::core::Status loaded = keymap.load(resolver);
+    REQUIRE_FALSE(loaded.has_value());
+    CHECK(code_of(loaded.error()) == "app/3");
+    CHECK(loaded.error().message.find("Ctrl+O") != std::string::npos);
+    CHECK(*resolver.binding_for("file.save", ws::app::KeyContext::global) ==
+          ctrl(83));  // the seed stands
+    CHECK(resolver.binding_for("file.open", ws::app::KeyContext::global) ==
+          nullptr);
+}
+
+TEST_CASE("a failed save leaves the previous file intact") {
+    FakeFs fs;
+    ws::app::ShortcutResolver resolver;
+    REQUIRE(resolver.bind(ctrl(83), "file.save", ws::app::KeyContext::global)
+                .has_value());
+    ws::app::Keymap keymap{fs, "/cfg/keymap.json"};
+    REQUIRE(keymap.save(resolver).has_value());
+    const std::string first_save = fs.files["/cfg/keymap.json"];
+
+    // The seam's write fails: its Status propagates AS-IS (category
+    // "settings" - the seam's own error, never re-wrapped), and the
+    // previous file is untouched.
+    fs.write_failures = 1;
+    REQUIRE(resolver.rebind("file.save", ws::app::KeyContext::global, ctrl(84))
+                .has_value());
+    const ws::core::Status failed = keymap.save(resolver);
+    REQUIRE_FALSE(failed.has_value());
+    CHECK(code_of(failed.error()) == "settings/8");
+    CHECK(fs.files["/cfg/keymap.json"] == first_save);
+
+    // The next load still sees the first save's table.
+    ws::app::ShortcutResolver reader;
+    REQUIRE(keymap.load(reader).has_value());
+    CHECK(*reader.binding_for("file.save", ws::app::KeyContext::global) ==
+          ctrl(83));  // the pre-rebind chord the first save carried
+}
+
+TEST_CASE("import and export move the keymap as text") {
+    FakeFs fs;
+    ws::app::Keymap keymap{fs, "/cfg/keymap.json"};
+
+    ws::app::ShortcutResolver resolver;
+    REQUIRE(resolver.bind(ctrl(79), "file.open", ws::app::KeyContext::global)
+                .has_value());
+    const std::string text = keymap.export_text(resolver);
+    CHECK(text.find("\"version\": 1") != std::string::npos);
+    CHECK(text.find("file.open") != std::string::npos);
+
+    // Into a fresh resolver: the same table, the same text back.
+    ws::app::ShortcutResolver imported;
+    REQUIRE(keymap.import_text(text, imported).has_value());
+    CHECK(*imported.binding_for("file.open", ws::app::KeyContext::global) ==
+          ctrl(79));
+    CHECK(keymap.export_text(imported) == text);
+
+    // Corrupt text refuses with the importer untouched.
+    const auto bad = keymap.import_text("{ nope", imported);
+    REQUIRE_FALSE(bad.has_value());
+    CHECK(code_of(bad.error()) == "app/4");
+    CHECK(*imported.binding_for("file.open", ws::app::KeyContext::global) ==
+          ctrl(79));
+}
+
+TEST_CASE("a StdFileSystem keymap smoke in the OS temp") {
+    const std::filesystem::path file =
+        std::filesystem::temp_directory_path() / "ws_app_keymap_test.json";
+    ws::settings::StdFileSystem fs;
+
+    ws::app::ShortcutResolver resolver;
+    REQUIRE(resolver.bind(ctrl(83), "file.save", ws::app::KeyContext::global)
+                .has_value());
+    ws::app::Keymap writer{fs, file.string()};
+    REQUIRE(writer.save(resolver).has_value());
+
+    ws::app::ShortcutResolver reader;
+    ws::app::Keymap loader{fs, file.string()};
+    REQUIRE(loader.load(reader).has_value());
+    CHECK(*reader.binding_for("file.save", ws::app::KeyContext::global) ==
+          ctrl(83));
+
+    CHECK(fs.remove(file.string()));
 }
