@@ -10,8 +10,11 @@
 // settings FileSystem + json seams, the missing-file first run, the
 // parse/corrupt/conflict refusals with nothing installed, the
 // failed-save contract, import/export, and a real StdFileSystem
-// smoke. The undo stack grows its own section as the arc's later
-// phases land.
+// smoke. The undo stack: apply-on-push, the coalescing hook and its
+// step boundary, the transaction group with its refusals, the
+// save-point dirty flag across undo/redo and its unreachable cases,
+// both history bounds with the keep-newest rule, and the
+// state-change listeners.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -19,6 +22,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -28,6 +32,7 @@
 #include <ws/app/errors.hpp>
 #include <ws/app/keymap.hpp>
 #include <ws/app/shortcut.hpp>
+#include <ws/app/undo.hpp>
 #include <ws/settings/errors.hpp>
 #include <ws/settings/filesystem.hpp>
 
@@ -105,6 +110,90 @@ public:
     [[nodiscard]] bool exists(std::string_view path) const override {
         return files.find(std::string{path}) != files.end();
     }
+};
+
+// The undo stack's host model: a document whose text the commands
+// move, plus the three command kinds the contracts exercise -
+// Append coalesces with its own kind (absorbing the payload into
+// one undo), SetField never coalesces and captures its prior, and
+// Heavy carries a chosen memory estimate for the bounds tests.
+struct Doc {
+    std::string text;
+    std::vector<std::string> log;  // "a:<chunk>" per apply, "u:<chunk>" per undo
+};
+
+class Append final : public ws::app::UndoCommand {
+public:
+    Append(Doc& doc, std::string chunk) : doc_{doc}, chunk_{std::move(chunk)} {}
+
+    void apply() override {
+        doc_.text += chunk_;
+        doc_.log.push_back("a:" + chunk_);
+    }
+    void undo() override {
+        doc_.text.resize(doc_.text.size() - chunk_.size());
+        doc_.log.push_back("u:" + chunk_);
+    }
+    [[nodiscard]] std::string name() const override { return "Typing"; }
+
+    // Only with another Append: the top command's chunk grows to
+    // cover both, so its one undo() reverts the whole run.
+    [[nodiscard]] bool merge_with(
+        const ws::app::UndoCommand& next) override {
+        const auto* typed = dynamic_cast<const Append*>(&next);
+        if (typed == nullptr) {
+            return false;
+        }
+        chunk_ += typed->chunk_;
+        return true;
+    }
+    [[nodiscard]] std::size_t memory_estimate() const override {
+        return sizeof(Append) + chunk_.size();
+    }
+
+private:
+    Doc& doc_;
+    std::string chunk_;
+};
+
+class SetField final : public ws::app::UndoCommand {
+public:
+    SetField(Doc& doc, std::string value)
+        : doc_{doc}, value_{std::move(value)} {}
+
+    void apply() override {
+        prior_ = doc_.text;
+        doc_.text = value_;
+        doc_.log.push_back("s:" + value_);
+    }
+    void undo() override {
+        doc_.text = prior_;
+        doc_.log.push_back("r:" + value_);
+    }
+    [[nodiscard]] std::string name() const override { return "Set Title"; }
+
+private:
+    Doc& doc_;
+    std::string value_;
+    std::string prior_;
+};
+
+class Heavy final : public ws::app::UndoCommand {
+public:
+    Heavy(Doc& doc, std::string chunk, std::size_t estimate)
+        : doc_{doc}, chunk_{std::move(chunk)}, estimate_{estimate} {}
+
+    void apply() override { doc_.text += chunk_; }
+    void undo() override { doc_.text.resize(doc_.text.size() - chunk_.size()); }
+    [[nodiscard]] std::string name() const override { return "Heavy"; }
+    [[nodiscard]] std::size_t memory_estimate() const override {
+        return estimate_;
+    }
+
+private:
+    Doc& doc_;
+    std::string chunk_;
+    std::size_t estimate_;
 };
 
 }  // namespace
@@ -975,4 +1064,477 @@ TEST_CASE("a StdFileSystem keymap smoke in the OS temp") {
           ctrl(83));
 
     CHECK(fs.remove(file.string()));
+}
+
+TEST_CASE("push applies, undo reverts, redo reapplies") {
+    Doc doc;
+    ws::app::UndoStack stack;
+
+    // Push IS the edit: apply() runs before the stack records, so
+    // the host never pre-applies.
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "one")).has_value());
+    CHECK(doc.text == "one");
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "two")).has_value());
+    CHECK(doc.text == "two");
+
+    CHECK(stack.can_undo());
+    CHECK_FALSE(stack.can_redo());
+    CHECK(stack.undo_count() == 2);
+    CHECK(stack.redo_count() == 0);
+    CHECK(stack.name_to_undo() == "Set Title");
+    CHECK(stack.name_to_redo().empty());
+    // The default estimate is the BASE-size floor: the stack
+    // cannot see the derived object, so a host with payload
+    // overrides memory_estimate (Append and Heavy below do).
+    CHECK(stack.memory_used() == 2 * sizeof(ws::app::UndoCommand));
+
+    REQUIRE(stack.undo().has_value());
+    CHECK(doc.text == "one");
+    CHECK(stack.name_to_redo() == "Set Title");
+    REQUIRE(stack.redo().has_value());
+    CHECK(doc.text == "two");
+
+    // The branches run out: not_found, not a crash. Both steps are
+    // redoable, so it takes both redos back before redo drains.
+    REQUIRE(stack.undo().has_value());
+    REQUIRE(stack.undo().has_value());
+    CHECK(doc.text == "");
+    const ws::core::Status drained = stack.undo();
+    REQUIRE_FALSE(drained.has_value());
+    CHECK(code_of(drained.error()) == "app/2");
+    CHECK(stack.name_to_undo().empty());  // the undo branch is drained
+    REQUIRE(stack.redo().has_value());
+    REQUIRE(stack.redo().has_value());
+    const ws::core::Status re_drained = stack.redo();
+    REQUIRE_FALSE(re_drained.has_value());
+    CHECK(code_of(re_drained.error()) == "app/2");
+
+    const ws::core::Status null_push =
+        stack.push(std::unique_ptr<SetField>{nullptr});
+    REQUIRE_FALSE(null_push.has_value());
+    CHECK(code_of(null_push.error()) == "app/1");
+}
+
+TEST_CASE("consecutive commands of the same kind coalesce into one step") {
+    Doc doc;
+    ws::app::UndoStack stack;
+
+    REQUIRE(stack.push(std::make_unique<Append>(doc, "ab")).has_value());
+    REQUIRE(stack.push(std::make_unique<Append>(doc, "cd")).has_value());
+    REQUIRE(stack.push(std::make_unique<Append>(doc, "ef")).has_value());
+    CHECK(doc.text == "abcdef");
+    CHECK(doc.log.size() == 3);  // every command applied; coalescing is
+                                 // only the history's shape
+
+    // One step: the top absorbed both payloads, and its estimate
+    // grew to cover them.
+    CHECK(stack.undo_count() == 1);
+    CHECK(stack.memory_used() == sizeof(Append) + 6);
+    CHECK(stack.name_to_undo() == "Typing");
+
+    // One undo reverts the whole run - the absorbed payload too.
+    REQUIRE(stack.undo().has_value());
+    CHECK(doc.text == "");
+    REQUIRE(stack.redo().has_value());
+    CHECK(doc.text == "abcdef");
+
+    // A different kind never coalesces: the offer goes to the top
+    // command, whose merge_with says no. Three pushes, three steps.
+    Doc mixed;
+    ws::app::UndoStack mixing;
+    REQUIRE(mixing.push(std::make_unique<Append>(mixed, "x")).has_value());
+    REQUIRE(mixing.push(std::make_unique<SetField>(mixed, "title")).has_value());
+    REQUIRE(mixing.push(std::make_unique<Append>(mixed, "y")).has_value());
+    CHECK(mixed.text == "titley");  // the Append rides on the set text
+    CHECK(mixing.undo_count() == 3);
+    REQUIRE(mixing.undo().has_value());
+    CHECK(mixed.text == "title");  // only the second Append reverted
+}
+
+TEST_CASE("a push past a fork drops the redo branch") {
+    Doc doc;
+    ws::app::UndoStack stack;
+
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "one")).has_value());
+    REQUIRE(stack.undo().has_value());
+    CHECK(stack.redo_count() == 1);
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "other")).has_value());
+
+    CHECK(stack.redo_count() == 0);
+    const ws::core::Status no_redo = stack.redo();
+    REQUIRE_FALSE(no_redo.has_value());
+    CHECK(code_of(no_redo.error()) == "app/2");
+    CHECK(stack.name_to_redo().empty());
+    // The branch rebuilt at the fork point: the pushed-past step is
+    // the only survivor, so exactly one undo stands.
+    CHECK(stack.undo_count() == 1);
+}
+
+TEST_CASE("transactions group many pushes into one named step") {
+    Doc doc;
+    ws::app::UndoStack stack;
+
+    // Everything under an open transaction is refused: undoing
+    // mid-group would corrupt it, and so would redo, mark_saved,
+    // clear and set_limits (whose immediate trim would bypass the
+    // assembling step). The gates read false while it is open.
+    REQUIRE(stack.begin_transaction("Batch Edit").has_value());
+    CHECK_FALSE(stack.can_undo());
+    CHECK_FALSE(stack.can_redo());
+    const ws::core::Status mid_undo = stack.undo();
+    REQUIRE_FALSE(mid_undo.has_value());
+    CHECK(code_of(mid_undo.error()) == "app/1");
+    const ws::core::Status mid_redo = stack.redo();
+    REQUIRE_FALSE(mid_redo.has_value());
+    CHECK(code_of(mid_redo.error()) == "app/1");
+    const ws::core::Status mid_saved = stack.mark_saved();
+    REQUIRE_FALSE(mid_saved.has_value());
+    CHECK(code_of(mid_saved.error()) == "app/1");
+    const ws::core::Status mid_clear = stack.clear();
+    REQUIRE_FALSE(mid_clear.has_value());
+    CHECK(code_of(mid_clear.error()) == "app/1");
+    const ws::core::Status mid_limits = stack.set_limits(1, 0);
+    REQUIRE_FALSE(mid_limits.has_value());
+    CHECK(code_of(mid_limits.error()) == "app/1");
+    const ws::core::Status already_open = stack.begin_transaction("Again");
+    REQUIRE_FALSE(already_open.has_value());
+    CHECK(code_of(already_open.error()) == "app/1");
+    const ws::core::Status mid_null = stack.push(nullptr);
+    REQUIRE_FALSE(mid_null.has_value());
+    CHECK(code_of(mid_null.error()) == "app/1");
+
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "X")).has_value());
+    REQUIRE(stack.push(std::make_unique<Append>(doc, "y")).has_value());
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "Z")).has_value());
+    CHECK(doc.text == "Z");
+    REQUIRE(stack.end_transaction().has_value());
+
+    // One step, the transaction's name, not the commands'.
+    CHECK(stack.undo_count() == 1);
+    CHECK(stack.name_to_undo() == "Batch Edit");
+
+    // ONE undo reverts the whole group - the point of a
+    // transaction - running its commands in REVERSE: the log shows
+    // the last edit's revert first (r:Z before u:y before r:X).
+    REQUIRE(stack.undo().has_value());
+    CHECK(doc.text == "");
+    CHECK(doc.log == std::vector<std::string>{"s:X", "a:y", "s:Z", "r:Z",
+                                              "u:y", "r:X"});
+    const ws::core::Status nothing = stack.undo();
+    REQUIRE_FALSE(nothing.has_value());
+    CHECK(code_of(nothing.error()) == "app/2");
+
+    // Redo replays the same group forward: X, then y, then Z.
+    REQUIRE(stack.redo().has_value());
+    CHECK(doc.text == "Z");
+    CHECK(doc.log.size() == 9);      // three applies, three reverts,
+    CHECK(doc.log.back() == "s:Z");  // three re-applies
+
+    const ws::core::Status not_open = stack.end_transaction();
+    REQUIRE_FALSE(not_open.has_value());
+    CHECK(code_of(not_open.error()) == "app/1");
+}
+
+TEST_CASE("an empty transaction records no step and never merges across") {
+    Doc doc;
+    ws::app::UndoStack stack;
+
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "one")).has_value());
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "two")).has_value());
+    REQUIRE(stack.undo().has_value());  // the redo branch holds "two"
+
+    // An empty transaction changes nothing: no step, the redo
+    // branch stands.
+    REQUIRE(stack.begin_transaction("No-op").has_value());
+    REQUIRE(stack.end_transaction().has_value());
+    CHECK(stack.undo_count() == 1);
+    CHECK(stack.redo_count() == 1);
+    REQUIRE(stack.redo().has_value());
+    CHECK(doc.text == "two");
+
+    // The coalescing hook never crosses a step boundary: an Append
+    // pushed before begin() stays its own step, the Append inside
+    // the transaction starts a fresh one.
+    Doc typed;
+    ws::app::UndoStack typing;
+    REQUIRE(typing.push(std::make_unique<Append>(typed, "a")).has_value());
+    REQUIRE(typing.begin_transaction("Second keystroke").has_value());
+    REQUIRE(typing.push(std::make_unique<Append>(typed, "b")).has_value());
+    REQUIRE(typing.end_transaction().has_value());
+    CHECK(typing.undo_count() == 2);  // NOT coalesced into one
+    REQUIRE(typing.undo().has_value());
+    CHECK(typed.text == "a");  // only "b" reverted
+    REQUIRE(typing.undo().has_value());
+    CHECK(typed.text == "");
+
+    // The empty name refuses.
+    const ws::core::Status nameless = stack.begin_transaction("");
+    REQUIRE_FALSE(nameless.has_value());
+    CHECK(code_of(nameless.error()) == "app/1");
+}
+
+TEST_CASE("the save point tracks dirty across undo and redo") {
+    Doc doc;
+    ws::app::UndoStack stack;
+
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "one")).has_value());
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "two")).has_value());
+    REQUIRE(stack.mark_saved().has_value());
+    CHECK_FALSE(stack.is_dirty());
+
+    // Forward past the save point reads dirty, back onto it clean:
+    // the comparison is positional, in both directions.
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "three")).has_value());
+    CHECK(stack.is_dirty());
+    REQUIRE(stack.undo().has_value());
+    CHECK_FALSE(stack.is_dirty());
+    REQUIRE(stack.undo().has_value());
+    CHECK(stack.is_dirty());
+    REQUIRE(stack.redo().has_value());
+    CHECK_FALSE(stack.is_dirty());
+    REQUIRE(stack.redo().has_value());
+    CHECK(stack.is_dirty());
+
+    // A push at a CLEAN position: the save point sits AT the redo
+    // boundary - it is the current state - and survives the drop;
+    // one undo reads clean again. (It is not "inside" the dropped
+    // branch: the branch's steps have not touched it.)
+    REQUIRE(stack.undo().has_value());
+    CHECK_FALSE(stack.is_dirty());
+    REQUIRE(stack.mark_saved().has_value());
+    CHECK(stack.redo_count() == 1);
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "four")).has_value());
+    CHECK(stack.is_dirty());
+    REQUIRE(stack.undo().has_value());
+    CHECK_FALSE(stack.is_dirty());
+    CHECK(doc.text == "two");
+
+    // Unreachable: a save point INSIDE the dropped redo branch was
+    // a state those steps built - dirty is permanent until the
+    // next mark_saved, through undo and redo both.
+    Doc lost;
+    ws::app::UndoStack forgetting;
+    REQUIRE(forgetting.push(std::make_unique<SetField>(lost, "one"))
+                .has_value());
+    REQUIRE(forgetting.mark_saved().has_value());
+    REQUIRE(forgetting.undo().has_value());
+    CHECK(forgetting.is_dirty());
+    REQUIRE(forgetting.push(std::make_unique<SetField>(lost, "two"))
+                .has_value());
+    CHECK(forgetting.is_dirty());
+    REQUIRE(forgetting.undo().has_value());
+    CHECK(forgetting.is_dirty());  // NOT back onto the save point
+    REQUIRE(forgetting.redo().has_value());
+    CHECK(forgetting.is_dirty());
+    REQUIRE(forgetting.mark_saved().has_value());
+    CHECK_FALSE(forgetting.is_dirty());
+}
+
+TEST_CASE("history is bounded by step count, oldest out first") {
+    Doc doc;
+    ws::app::UndoStack stack{2, 0};
+
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "1")).has_value());
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "2")).has_value());
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "3")).has_value());
+    // "1" evicted: permanently applied, no longer undoable - the
+    // doc never loses text to a bound.
+    CHECK(stack.undo_count() == 2);
+    CHECK(doc.text == "3");
+    REQUIRE(stack.undo().has_value());
+    CHECK(doc.text == "2");
+    REQUIRE(stack.undo().has_value());
+    CHECK(doc.text == "1");  // the evicted step is the floor
+    const ws::core::Status floored = stack.undo();
+    REQUIRE_FALSE(floored.has_value());
+    CHECK(code_of(floored.error()) == "app/2");
+
+    // An eviction under a save point at the BASE position (saved
+    // with NOTHING applied) makes it unreachable: the old base fell
+    // out with the evicted step - it is permanently applied now -
+    // so no undo reads clean until mark_saved re-arms it.
+    Doc saved;
+    ws::app::UndoStack bounded{2, 0};
+    REQUIRE(bounded.push(std::make_unique<SetField>(saved, "1")).has_value());
+    REQUIRE(bounded.push(std::make_unique<SetField>(saved, "2")).has_value());
+    REQUIRE(bounded.undo().has_value());
+    REQUIRE(bounded.undo().has_value());  // fully back to base
+    REQUIRE(bounded.mark_saved().has_value());
+    CHECK_FALSE(bounded.is_dirty());
+    REQUIRE(bounded.push(std::make_unique<SetField>(saved, "3")).has_value());
+    REQUIRE(bounded.push(std::make_unique<SetField>(saved, "4")).has_value());
+    REQUIRE(bounded.push(std::make_unique<SetField>(saved, "5")).has_value());
+    CHECK(bounded.is_dirty());  // "3" fell out, the save point with it
+    REQUIRE(bounded.undo().has_value());
+    CHECK(saved.text == "4");
+    CHECK(bounded.is_dirty());  // dirty all the way down
+    REQUIRE(bounded.undo().has_value());
+    CHECK(saved.text == "3");  // the permanent floor
+    CHECK(bounded.is_dirty());
+    const ws::core::Status floored_again = bounded.undo();
+    REQUIRE_FALSE(floored_again.has_value());
+    CHECK(code_of(floored_again.error()) == "app/2");
+    REQUIRE(bounded.mark_saved().has_value());
+    CHECK_FALSE(bounded.is_dirty());
+}
+
+TEST_CASE("history is bounded by the memory estimate, newest kept") {
+    Doc doc;
+    ws::app::UndoStack stack{0, 250};
+
+    REQUIRE(stack.push(std::make_unique<Heavy>(doc, "a", 100)).has_value());
+    REQUIRE(stack.push(std::make_unique<Heavy>(doc, "b", 100)).has_value());
+    CHECK(stack.memory_used() == 200);
+    REQUIRE(stack.push(std::make_unique<Heavy>(doc, "c", 100)).has_value());
+    // 300 over 250: the OLDEST step falls out; the doc keeps "a".
+    CHECK(stack.undo_count() == 2);
+    CHECK(stack.memory_used() == 200);
+    CHECK(doc.text == "abc");
+    // Undo trims from the END: "c" then "b" - the evicted "a" is
+    // the permanent floor, never the first thing to go.
+    REQUIRE(stack.undo().has_value());
+    CHECK(doc.text == "ab");
+    REQUIRE(stack.undo().has_value());
+    CHECK(doc.text == "a");
+
+    // A single over-limit step survives on its own: an undoable
+    // present beats a faithful bound.
+    Doc solo;
+    ws::app::UndoStack alone{0, 50};
+    REQUIRE(alone.push(std::make_unique<Heavy>(solo, "z", 100)).has_value());
+    CHECK(alone.undo_count() == 1);
+    CHECK(alone.memory_used() == 100);
+    REQUIRE(alone.undo().has_value());
+    CHECK(solo.text == "");
+
+    // set_limits enforces the new bounds immediately, oldest first.
+    Doc shrinking;
+    ws::app::UndoStack shrinkable;
+    for (const char chunk : {'a', 'b', 'c'}) {
+        REQUIRE(shrinkable
+                    .push(std::make_unique<Heavy>(
+                        shrinking, std::string{chunk}, 100))
+                    .has_value());
+    }
+    CHECK(shrinkable.memory_used() == 300);
+    REQUIRE(shrinkable.set_limits(0, 150).has_value());
+    CHECK(shrinkable.undo_count() == 1);
+    CHECK(shrinkable.memory_used() == 100);
+    CHECK(shrinking.text == "abc");  // only the history shrank
+}
+
+TEST_CASE("listeners see every change, in registration order") {
+    Doc doc;
+    ws::app::UndoStack stack;
+
+    // Both record into one vector: the order they appear in IS the
+    // registration order.
+    std::vector<std::string> runs;
+    const auto first = stack.add_listener([&runs] { runs.push_back("one"); });
+    REQUIRE(first.has_value());
+    REQUIRE(stack.add_listener([&runs] { runs.push_back("two"); }).has_value());
+
+    // A fire per state-changing call - including a push inside an
+    // open transaction, before its step has even landed (memory
+    // grew; the redo branch may have dropped). begin() itself and
+    // an empty end() change nothing and stay silent.
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "one")).has_value());
+    REQUIRE(stack.begin_transaction("Batch").has_value());
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "two")).has_value());
+    REQUIRE(stack.end_transaction().has_value());
+    REQUIRE(stack.undo().has_value());
+    REQUIRE(stack.redo().has_value());
+    REQUIRE(stack.mark_saved().has_value());
+    REQUIRE(stack.set_limits(10, 0).has_value());
+    std::vector<std::string> expected;
+    for (int i = 0; i < 7; ++i) {  // push, txn push, end, undo, redo,
+        expected.push_back("one");  // mark_saved, set_limits -
+        expected.push_back("two");   // begin never fires
+    }
+    CHECK(runs == expected);
+
+    const std::size_t quiet = runs.size();
+    REQUIRE(stack.begin_transaction("No-op").has_value());
+    REQUIRE(stack.end_transaction().has_value());
+    CHECK(runs.size() == quiet);  // the empty transaction: no fire
+
+    REQUIRE(stack.clear().has_value());
+    CHECK(runs.size() == quiet + 2);  // clear is a change
+
+    // Removal answers by id; the empty callback refuses.
+    CHECK(stack.remove_listener(*first));
+    CHECK_FALSE(stack.remove_listener(*first));  // already out
+    CHECK_FALSE(stack.remove_listener(999));
+    const auto empty = stack.add_listener(nullptr);
+    REQUIRE_FALSE(empty.has_value());
+    CHECK(code_of(empty.error()) == "app/1");
+
+    // A removal mid-notify takes effect immediately: the walk
+    // liveness-checks each id, so the removed listener never runs
+    // even though the snapshot holds it.
+    Doc mid_doc;
+    ws::app::UndoStack mid;
+    std::vector<std::string> mid_runs;
+    ws::app::UndoStack::ListenerId doomed = 0;
+    REQUIRE(mid.add_listener([&mid_runs] { mid_runs.push_back("1"); })
+                .has_value());
+    REQUIRE(mid.add_listener([&mid, &doomed, &mid_runs] {
+        mid_runs.push_back("2");
+        mid.remove_listener(doomed);
+    }).has_value());
+    const auto third_added =
+        mid.add_listener([&mid_runs] { mid_runs.push_back("3"); });
+    REQUIRE(third_added.has_value());
+    doomed = *third_added;
+    REQUIRE(mid.push(std::make_unique<SetField>(mid_doc, "x")).has_value());
+    CHECK(mid_runs == std::vector<std::string>{"1", "2"});
+    REQUIRE(mid.push(std::make_unique<SetField>(mid_doc, "y")).has_value());
+    CHECK(mid_runs == std::vector<std::string>{"1", "2", "1", "2"});
+
+    // An addition mid-notify waits for the next change: the new
+    // listener is not in the snapshot.
+    Doc late_doc;
+    ws::app::UndoStack late;
+    std::vector<std::string> late_runs;
+    bool installed = false;
+    REQUIRE(late.add_listener([&late_runs] { late_runs.push_back("a"); })
+                .has_value());
+    REQUIRE(late.add_listener([&late, &late_runs, &installed] {
+        late_runs.push_back("b");
+        if (!installed) {
+            installed = true;
+            CHECK(late.add_listener([&late_runs] { late_runs.push_back("c"); })
+                      .has_value());
+        }
+    }).has_value());
+    REQUIRE(late.push(std::make_unique<SetField>(late_doc, "x")).has_value());
+    CHECK(late_runs == std::vector<std::string>{"a", "b"});
+    REQUIRE(late.push(std::make_unique<SetField>(late_doc, "y")).has_value());
+    CHECK(late_runs == std::vector<std::string>{"a", "b", "a", "b", "c"});
+}
+
+TEST_CASE("clear drops the history and the save point") {
+    Doc doc;
+    ws::app::UndoStack stack;
+
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "one")).has_value());
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "two")).has_value());
+    REQUIRE(stack.mark_saved().has_value());
+    CHECK_FALSE(stack.is_dirty());
+
+    // The history goes, the doc keeps its text, and the save
+    // position no longer exists: clean needs a fresh mark_saved.
+    REQUIRE(stack.clear().has_value());
+    CHECK(doc.text == "two");
+    CHECK(stack.undo_count() == 0);
+    CHECK(stack.redo_count() == 0);
+    CHECK(stack.memory_used() == 0);
+    CHECK(stack.is_dirty());
+    const ws::core::Status nothing = stack.undo();
+    REQUIRE_FALSE(nothing.has_value());
+    CHECK(code_of(nothing.error()) == "app/2");
+    REQUIRE(stack.mark_saved().has_value());
+    CHECK_FALSE(stack.is_dirty());
+    REQUIRE(stack.push(std::make_unique<SetField>(doc, "three")).has_value());
+    CHECK(stack.is_dirty());
 }
