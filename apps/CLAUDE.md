@@ -58,7 +58,20 @@ CMakeLists only wire ws libraries together.
   OS by ws::ui's set_title, echoed as a line so Android - whose host
   no-ops the seam - sees the composition too; the cursor-shape
   radios over ws::ui's set_cursor; and the single-instance grab +
-  open-with argv parse in the desktop main), all five modal-dialog
+  open-with argv parse in the desktop main), the commands page
+  (the stage-13 story: one ws::app command registry driving a
+  generated menu bar, a toolbar and the Ctrl+Shift+P palette - the
+  hints are the live bindings, so a rebind renames every column at
+  once; the chords resolve through the shortcut resolver before the
+  frame begins and stand down while any overlay owns the keyboard;
+  the keymap editor rebinds the live table over the persisted keymap
+  file, so a rebind survives a restart and reset restores the
+  declared chords; and an undo demo whose every edit - typing, an
+  append, a clear - is a command pushed on the ws::app undo stack
+  through a revert-then-push funnel that keeps the stack the sole
+  executor, a typing run coalescing into one step, the Undo/Redo
+  labels host-composed from the step names, the dirty flag and the
+  save point), all five modal-dialog
   button sets, the toast store's whole story, and a status bar the page
   keeps clear of. No assets: the font is the system face resolved at the
   platform boundary (like playground's), so Windows and Android build it

@@ -16,7 +16,14 @@
 // drain, the recent-files MRU persisted through the settings seams,
 // the clipboard round trip, the file-drop log, and the autosave
 // crash-recovery pair whose startup probe asks its yes/no through a
-// native message box the same worker way); and a status bar the page
+// native message box the same worker way), and the commands page
+// (the stage-13 story: one command registry driving a generated menu
+// bar, a toolbar and the Ctrl+Shift+P palette, its chords resolved
+// live before the frame begins, the keymap editor rebinding the live
+// table over the persisted keymap file, and an undo demo whose every
+// edit is a command on the stack - the stack the sole executor, a
+// typing run coalescing into one step, the Undo/Redo labels composed
+// host-side from the step names); and a status bar the page
 // keeps clear of. The
 // gallery loads no
 // assets (its font is the system face, resolved here at the platform
@@ -43,6 +50,10 @@
 #include <ws/ui/app.hpp>
 #include <ws/input/event.hpp>
 #include <ws/input/input.hpp>
+#include <ws/app/command.hpp>
+#include <ws/app/keymap.hpp>
+#include <ws/app/shortcut.hpp>
+#include <ws/app/undo.hpp>
 #include <ws/jobs/job_system.hpp>
 #include <ws/jobs/errors.hpp>
 #include <ws/platform/autosave.hpp>
@@ -56,6 +67,7 @@
 #include <ws/platform/single_instance.hpp>
 #include <ws/platform/title.hpp>
 #include <ws/settings/filesystem.hpp>
+#include <ws/ui/gui/command_views.hpp>
 #include <ws/ui/gui/gui_context.hpp>
 #include <ws/ui/gui/job_progress.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
@@ -156,6 +168,13 @@ constexpr int kAccentCount = 5;
 constexpr const char* kLazyLine =
     "growing: " "\xC3" "\xA9" "\xC3" "\xB6" "\xC4" "\x85" " " "\xE4" "\xB8" "\x96";
 
+// The super keys' GLFW codes - the two ws::input::keys does not name
+// (the command-keymap chord loop composes Mod::super_key from held
+// keys, and the ws::app rule is GLFW numbering everywhere). The
+// command_keymap.cpp editor precedent for spelling them locally.
+constexpr int kLeftSuper = 343;   // GLFW_KEY_LEFT_SUPER
+constexpr int kRightSuper = 347;  // GLFW_KEY_RIGHT_SUPER
+
 // The page's sections, one collapsing header each; the bools are the
 // headers' own open state (caller-owned, like everything here).
 enum Section {
@@ -172,6 +191,7 @@ enum Section {
     kDisabled,
     kCustomLook,
     kPlatform,
+    kCommands,
     kSectionCount
 };
 
@@ -196,6 +216,60 @@ std::string platform_store_dir() {
 #endif
     return ".";
 }
+
+// The undo demo's one command type: a whole-buffer text edit over the
+// demo doc. apply() captures the buffer's CURRENT text as the inverse
+// INSIDE itself - the stack's rule, because redo replays apply, and at
+// redo time the buffer sits exactly where it sat at push - then lands
+// the new text (snprintf bounds the write; the doc is 63 chars of
+// content, a demo bound like the autosave draft's). The merge hook
+// coalesces a same-kind run: the TOP step's command absorbs the newer
+// one, so prior_ keeps the run's FIRST text while next_ moves forward
+// to the run's end, and the one undo() that reverts to prior_ undoes
+// the whole run. "Clear" never merges - it is a discrete gesture (and
+// its command body guards the empty doc, so two clears cannot even
+// arise back to back).
+class DocEdit final : public ws::app::UndoCommand {
+public:
+    DocEdit(char* doc, int cap, std::string next, std::string kind,
+            bool mergeable)
+        : doc_(doc),
+          cap_(cap),
+          next_(std::move(next)),
+          kind_(std::move(kind)),
+          mergeable_(mergeable) {}
+
+    void apply() override {
+        prior_.assign(doc_);  // the inverse, re-captured at every apply
+        std::snprintf(doc_, cap_, "%s", next_.c_str());
+    }
+
+    void undo() override { std::snprintf(doc_, cap_, "%s", prior_.c_str()); }
+
+    [[nodiscard]] std::string name() const override { return kind_; }
+
+    [[nodiscard]] bool merge_with(const ws::app::UndoCommand& later) override {
+        const auto* edit = dynamic_cast<const DocEdit*>(&later);
+        if (edit == nullptr || !mergeable_ || !edit->mergeable_ ||
+            kind_ != edit->kind_) {
+            return false;  // a different gesture never coalesces
+        }
+        next_ = edit->next_;  // the run's end moves forward; prior_ keeps the start
+        return true;
+    }
+
+    [[nodiscard]] std::size_t memory_estimate() const override {
+        return sizeof(DocEdit) + next_.size() + prior_.size();
+    }
+
+private:
+    char* doc_;          // the demo doc buffer (app-lifetime member storage)
+    int cap_;            // its capacity - snprintf's bound
+    std::string next_;   // the text this edit lands
+    std::string prior_;  // the text it reverts (captured inside apply)
+    std::string kind_;   // "Typing" / "Append" / "Clear": the step name + the merge tag
+    bool mergeable_;
+};
 
 class GalleryApp final : public ws::ui::App {
 public:
@@ -268,6 +342,29 @@ protected:
         if (probe_.has_value() && probe_.value()) {
             offer_recovery();
         }
+        // The stage-13 half: the registry (registration order is the
+        // menu order within a category), the resolver seeded from the
+        // declared chords, then the keymap file - a missing file is
+        // the first run and the seed stands; a saved one replaces
+        // the whole live table (no provenance - the rebinds ARE the
+        // table). The menu bar spec is described once here.
+        build_commands();
+        const ws::core::Status seeded = resolver_.install_defaults(commands_);
+        if (!seeded.has_value()) {
+            cmd_text_ = seeded.error().message;
+            toasts_.push({cmd_text_.c_str(), gui::ToastSeverity::error,
+                          nullptr, 5.0f});
+        }
+        const ws::core::Status keymap_loaded = keymap_file_.load(resolver_);
+        if (!keymap_loaded.has_value()) {
+            cmd_text_ = keymap_loaded.error().message;
+            toasts_.push({cmd_text_.c_str(), gui::ToastSeverity::error,
+                          nullptr, 5.0f});
+        }
+        menu_builder_.describe({{"&edit", "Edit"},
+                                {"&view", "View"},
+                                {"&tools", "Tools"},
+                                {"&help", "Help"}});
         section_.fill(true);
     }
 
@@ -322,7 +419,13 @@ protected:
         // drawn after it at their own stratum (50, above the modal
         // veil's 40). The status bar is one control height tall along
         // the bottom edge - that is the toasts' bottom clearance.
-        gui_.begin_frame(ws::input::frame_input());
+        // The chord loop runs BEFORE the frame: a fired command's
+        // effects (the toggled grid, the undone doc) are state the
+        // widgets below then draw, and the resolver sees only the
+        // InputFrame's key edges, never a held repeat.
+        const ws::input::InputFrame& frame_in = ws::input::frame_input();
+        resolve_chords(frame_in);
+        gui_.begin_frame(frame_in);
         r2d::begin();
         gui_.begin_layer(gui::Layer::base);
         draw_gallery(frame);
@@ -592,6 +695,290 @@ private:
         }
     }
 
+    // ---- the commands page (stage 13's bridge) ----
+    // The registry drives everything here and the stack is the demo
+    // doc's sole executor. Registration refusals are programmer
+    // errors, but the demo shows the channel anyway: a refusal names
+    // itself in a toast (the borrowed-bytes rule: cmd_text_ holds it).
+
+    void add_command(ws::app::Command command) {
+        const ws::core::Status added = commands_.add(std::move(command));
+        if (!added.has_value()) {
+            cmd_text_ = added.error().message;
+            toasts_.push({cmd_text_.c_str(), gui::ToastSeverity::error,
+                          nullptr, 5.0f});
+        }
+    }
+
+    // The registry, built once. Registration order is the menu order
+    // within a category, and the declared chords (GLFW numbers, the
+    // Mod bits mirroring GLFW_MOD_*) are what install_defaults seeds.
+    // The enabled/checked predicates are read live per frame - the
+    // Undo/Redo rows gray out with the stack, the view rows wear
+    // their checks. Command bodies carry no error channel (the lib's
+    // rule): a failing action posts its own toast, and the undo demo
+    // shows that pattern twice (a full doc, an empty-branch undo).
+    // Every member without its own default initializer is spelled
+    // out - .shortcut = {} / .enabled = {} / .checked = {} - because
+    // the NDK's clang treats a skipped no-default member as a
+    // -Wmissing-field-initializers error (-Wextra -Werror; MSVC
+    // carries no such warning), and the empty fill IS the lib's
+    // spelling: key 0 = no chord declared, an empty predicate =
+    // always enabled / never checked.
+    void build_commands() {
+        add_command({.id = "edit.undo",
+                     .label = "Undo",
+                     .category = "Edit",
+                     .shortcut = {90, ws::app::Mod::control},
+                     .enabled = [this] { return undo_.can_undo(); },
+                     .checked = {},
+                     .execute = [this](std::string_view) { do_undo(); }});
+        add_command({.id = "edit.redo",
+                     .label = "Redo",
+                     .category = "Edit",
+                     .shortcut = {89, ws::app::Mod::control},
+                     .enabled = [this] { return undo_.can_redo(); },
+                     .checked = {},
+                     .execute = [this](std::string_view) { do_redo(); }});
+        add_command({.id = "edit.append",
+                     .label = "Append Text...",
+                     .category = "Edit",
+                     .shortcut = {68, ws::app::Mod::control},
+                     .needs_argument = true,
+                     .enabled = {},
+                     .checked = {},
+                     .execute = [this](std::string_view argument) {
+                         std::string next = undo_doc_;
+                         next += argument.empty() ? " word" : " ";
+                         if (!argument.empty()) {
+                             next.append(argument);
+                         }
+                         if (next.size() >= sizeof undo_doc_) {
+                             cmd_text_ = "the append does not fit the demo doc";
+                             toasts_.push({cmd_text_.c_str(),
+                                           gui::ToastSeverity::warning,
+                                           nullptr, 4.0f});
+                             return;
+                         }
+                         push_doc_edit(next, "Append");
+                     }});
+        add_command({.id = "edit.clear",
+                     .label = "Clear the Demo Doc",
+                     .category = "Edit",
+                     // chordless on purpose: the keymap editor's
+                     // bind-path demo - Record gives it one below.
+                     .shortcut = {},
+                     .enabled = {},
+                     .checked = {},
+                     .execute = [this](std::string_view) {
+                         if (undo_doc_[0] == '\0') {
+                             return;  // an empty doc records nothing
+                         }
+                         push_doc_edit("", "Clear");
+                     }});
+        add_command({.id = "edit.mark_saved",
+                     .label = "Mark the Doc Saved",
+                     .category = "Edit",
+                     .shortcut = {},
+                     .enabled = {},
+                     .checked = {},
+                     .execute = [this](std::string_view) { do_mark_saved(); }});
+        add_command({.id = "view.grid",
+                     .label = "Grid Backdrop",
+                     .category = "View",
+                     .shortcut = {71, ws::app::Mod::control},
+                     .enabled = {},
+                     .checked = [this] { return view_grid_; },
+                     .execute = [this](std::string_view) {
+                         view_grid_ = !view_grid_;
+                         std::snprintf(status_, sizeof status_, "grid %s",
+                                       view_grid_ ? "on" : "off");
+                     }});
+        add_command({.id = "view.tooltips",
+                     .label = "Tooltips",
+                     .category = "View",
+                     .shortcut = {},
+                     .enabled = {},
+                     .checked = [this] { return view_tooltips_; },
+                     .execute = [this](std::string_view) {
+                         view_tooltips_ = !view_tooltips_;
+                         std::snprintf(status_, sizeof status_, "tooltips %s",
+                                       view_tooltips_ ? "on" : "off");
+                     }});
+        add_command({.id = "tools.palette",
+                     .label = "Command Palette",
+                     .category = "Tools",
+                     .shortcut = {80,
+                                  ws::app::Mod::control | ws::app::Mod::shift},
+                     .enabled = {},
+                     .checked = {},
+                     .execute = [this](std::string_view) {
+                         palette_open_ = true;
+                     }});
+        add_command({.id = "help.about",
+                     .label = "About the Gallery",
+                     .category = "Help",
+                     .shortcut = {290, ws::app::Mod::none},
+                     .enabled = {},
+                     .checked = {},
+                     .execute = [this](std::string_view) { open_about(); }});
+    }
+
+    // Whether the resolver stands down this frame: any overlay that
+    // owns the keyboard takes the keys - the palette (its search
+    // field), the shared dialog, the raw modal, either menu bar's
+    // open chain, the context menu, the combo's dropdown, and the
+    // keymap editor's Record capture (a chord being recorded must not
+    // also fire the command it would match live).
+    [[nodiscard]] bool chords_stand_down() const {
+        return palette_open_ || dialog_open_ || raw_modal_open_ ||
+               bar_open_ >= 0 || cmd_bar_open_ >= 0 || ctx_open_ ||
+               combo_open_ || keymap_state_.recording;
+    }
+
+    // The live chord loop: every key edge this frame, with the held
+    // modifiers composed into the chord, resolved at the global rung
+    // - the demo keeps one context (the ladder's bottom, where every
+    // command answers; the text rule never bites because every demo
+    // chord carries control or is F1, keys a focused field does not
+    // claim). The modifiers' own edges are skipped: pressing Ctrl
+    // alone is not a chord. A consumed resolution dispatches through
+    // the registry; a pending sequence step stays armed in the
+    // resolver for its second chord.
+    void resolve_chords(const ws::input::InputFrame& frame) {
+        if (chords_stand_down()) {
+            return;
+        }
+        ws::app::Mod mods = ws::app::Mod::none;
+        if (frame.key_down[ws::input::keys::kLeftShift] ||
+            frame.key_down[ws::input::keys::kRightShift]) {
+            mods = mods | ws::app::Mod::shift;
+        }
+        if (frame.key_down[ws::input::keys::kLeftControl] ||
+            frame.key_down[ws::input::keys::kRightControl]) {
+            mods = mods | ws::app::Mod::control;
+        }
+        if (frame.key_down[ws::input::keys::kLeftAlt] ||
+            frame.key_down[ws::input::keys::kRightAlt]) {
+            mods = mods | ws::app::Mod::alt;
+        }
+        if (frame.key_down[kLeftSuper] || frame.key_down[kRightSuper]) {
+            mods = mods | ws::app::Mod::super_key;
+        }
+        static constexpr int kModifierKeys[] = {
+            ws::input::keys::kLeftShift,   ws::input::keys::kRightShift,
+            ws::input::keys::kLeftControl, ws::input::keys::kRightControl,
+            ws::input::keys::kLeftAlt,     ws::input::keys::kRightAlt,
+            kLeftSuper,                    kRightSuper,
+        };
+        for (int key = 0; key < ws::input::InputFrame::kMaxKeys; ++key) {
+            if (!frame.key_pressed[key]) {
+                continue;
+            }
+            bool is_modifier = false;
+            for (const int mod_key : kModifierKeys) {
+                if (key == mod_key) {
+                    is_modifier = true;
+                    break;
+                }
+            }
+            if (is_modifier) {
+                continue;
+            }
+            const ws::app::Resolution hit =
+                resolver_.resolve({key, mods}, ws::app::KeyContext::global);
+            if (hit.consumed && !hit.command.empty()) {
+                dispatch_command(hit.command);
+            }
+        }
+    }
+
+    // The one dispatch funnel: menu items, toolbar fires, palette
+    // picks and chords all land here. execute() deliberately ignores
+    // enabled() - the views gate their own chrome, the caller decides
+    // a direct dispatch - and the registry's Result covers lookup
+    // only, so a refusal is the only error there is. Every fire is
+    // noted into the palette's recents, whatever entry point it came
+    // from - the empty-query list then shows what this app actually
+    // runs.
+    void dispatch_command(std::string_view id, std::string_view argument = {}) {
+        palette_.note_used(id);
+        const ws::core::Status done = commands_.execute(id, argument);
+        if (!done.has_value()) {
+            cmd_text_ = done.error().message;
+            toasts_.push({cmd_text_.c_str(), gui::ToastSeverity::error,
+                          nullptr, 5.0f});
+        }
+    }
+
+    // The one funnel for every demo-doc edit. PUSH IS THE EDIT (the
+    // stack's rule: the stack is the sole executor): a caller hands
+    // over the new text while the buffer already holds it, so the
+    // funnel reverts the buffer to the last frame's text and lets the
+    // push's apply() land the edit again - apply() then captures its
+    // inverse (the reverted text) at the right moment, and redo stays
+    // exact. The EditBuffer clamps make the one-frame revert safe:
+    // the field re-measures the shorter buffer and the frame-end
+    // write-back settles the caret into it. "Clear" is the one
+    // non-mergeable kind (see DocEdit).
+    void push_doc_edit(const std::string& next, const char* kind) {
+        std::snprintf(undo_doc_, sizeof undo_doc_, "%s", last_doc_.c_str());
+        const ws::core::Status pushed = undo_.push(std::make_unique<DocEdit>(
+            undo_doc_, static_cast<int>(sizeof undo_doc_), next, kind,
+            std::string_view{kind} != "Clear"));
+        if (!pushed.has_value()) {
+            cmd_text_ = pushed.error().message;
+            toasts_.push({cmd_text_.c_str(), gui::ToastSeverity::error,
+                          nullptr, 4.0f});
+        }
+    }
+
+    // The undo/redo pair, shared by the chords, the registry's Edit
+    // menu, the toolbar and the demo's own buttons. A refusal (the
+    // empty branch - a chord fires regardless of enabled()) speaks
+    // as a warning toast; a success echoes the reverted doc. Both
+    // re-sync last_doc_: the stack moved the buffer, and the funnel's
+    // revert source must follow it or the next typing step would
+    // revert to a stale text.
+    void do_undo() {
+        const ws::core::Status step = undo_.undo();
+        if (!step.has_value()) {
+            cmd_text_ = step.error().message;
+            toasts_.push({cmd_text_.c_str(), gui::ToastSeverity::warning,
+                          nullptr, 4.0f});
+        } else {
+            std::snprintf(status_, sizeof status_, "undo: %s", undo_doc_);
+        }
+        last_doc_ = undo_doc_;
+    }
+
+    void do_redo() {
+        const ws::core::Status step = undo_.redo();
+        if (!step.has_value()) {
+            cmd_text_ = step.error().message;
+            toasts_.push({cmd_text_.c_str(), gui::ToastSeverity::warning,
+                          nullptr, 4.0f});
+        } else {
+            std::snprintf(status_, sizeof status_, "redo: %s", undo_doc_);
+        }
+        last_doc_ = undo_doc_;
+    }
+
+    // The save point: is_dirty() flips the line below, and the doc
+    // reads clean again after undoing back onto the saved position -
+    // the position semantics, not a boolean the app tracks.
+    void do_mark_saved() {
+        const ws::core::Status saved = undo_.mark_saved();
+        if (!saved.has_value()) {
+            cmd_text_ = saved.error().message;
+            toasts_.push({cmd_text_.c_str(), gui::ToastSeverity::warning,
+                          nullptr, 4.0f});
+        } else {
+            std::snprintf(status_, sizeof status_,
+                          "the demo doc is marked saved");
+        }
+    }
+
     void draw_gallery(const ws::ui::r2d::FrameSize& frame);
 
     // The custom-look fields' shared paint over a text behavior answer:
@@ -735,6 +1122,46 @@ private:
     std::string recent_text_;
     std::string pick_text_;
     std::string ask_text_;
+
+    // ---- the commands page's state (stage 13) ----
+    // The app-framework trio, caller-owned (the lib's rule): the
+    // registry built once in on_setup, the resolver seeded from the
+    // declared chords then overlaid by the keymap file, the undo
+    // stack over the demo doc. keymap_file_ rides the settings seam
+    // like recent_/autosave_ above it - the whole live table
+    // persists, no provenance (the resolver keeps none).
+    ws::app::CommandRegistry commands_;
+    ws::app::ShortcutResolver resolver_;
+    ws::app::Keymap keymap_file_{
+        fs_, ws::platform::join_path(store_dir_, "keymap.json")};
+    ws::app::UndoStack undo_;
+    // The views' caller-owned state: the menu builder (described
+    // once, rebuilt every frame), the palette (its recents survive
+    // closes), the keymap editor, and the toolbar's chosen ids - the
+    // toolbar is a caller's id list by design, not the registry's
+    // whole walk.
+    gui::CommandMenuBuilder menu_builder_;
+    gui::CommandPalette palette_;
+    gui::KeymapEditor keymap_state_;
+    std::vector<std::string> toolbar_ids_{"edit.undo", "edit.redo",
+                                          "edit.append", "view.grid",
+                                          "help.about"};
+    bool palette_open_ = false;
+    int cmd_bar_open_ = -1;  // the commands menu bar's open index (-1 none)
+    // The undo demo's doc buffer and the funnel's revert source: the
+    // text as of the last sync (the section's end, and every stack
+    // move in do_undo/do_redo). last_doc_ is initialized from the
+    // buffer's own initializer, in declaration order.
+    char undo_doc_[64] = "the demo doc";
+    std::string last_doc_ = undo_doc_;
+    // The dynamic Undo/Redo button labels, host-composed from the
+    // stack's own step names (the bridge header never names the undo
+    // stack). The "###" tails keep the widget ids stable while the
+    // display text changes - the id-redirect rule.
+    char undo_label_[40] = "undo (nothing)###undo step";
+    char redo_label_[40] = "redo (nothing)###redo step";
+    // The command page's toast texts (the borrowed-bytes rule again).
+    std::string cmd_text_;
 };
 
 void GalleryApp::paint_bare_field(const gui::Rect& row,
@@ -807,6 +1234,28 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
                           ev.accepted ? gui::ToastSeverity::info
                                       : gui::ToastSeverity::warning,
                           nullptr, 3.0f});
+        }
+    }
+
+    // ---- the command palette: veil-first with the dialog ---------------------
+    // The centered modal over the registry: fuzzy search, the LIVE
+    // chords in the Shortcut column (rebind one in the keymap editor
+    // and this list renames too), recents first on an empty query.
+    // It must draw before the widgets it blocks - the same veil-first
+    // rule as the dialog above - and the chord that opened it is
+    // still in this frame's edges, so the palette answers no keys on
+    // its opening frame (its own rule, the modal_dialog's). `open` by
+    // value: the palette never clears the caller's flag itself.
+    if (palette_open_) {
+        const gui::PaletteEvent cmd_palette_ev = gui::command_palette(
+            gui_, chrome_, "command palette", palette_open_, commands_,
+            &resolver_, ws::app::KeyContext::global, palette_,
+            360.0f * scale_);
+        if (cmd_palette_ev.dispatch) {
+            dispatch_command(cmd_palette_ev.command, cmd_palette_ev.argument);
+        }
+        if (cmd_palette_ev.close) {
+            palette_open_ = false;
         }
     }
 
@@ -2036,6 +2485,163 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
                               kCursorNames[i]);
             }
         }
+    }
+
+    // --- commands (stage 13): the registry as menus, the palette,
+    //     the keymap editor, the undo demo --------------------------
+    if (gui::collapsing_header(gui_, layout_, chrome_,
+                               "commands: menus, palette, keymap editor, undo",
+                               section_[kCommands])) {
+        gui::text(layout_, chrome_,
+                  "one registry drives this page: the menu bar and the "
+                  "toolbar are generated from it, the palette searches it, "
+                  "and the chords fire through the resolver before the frame "
+                  "begins (the strip bar's chord texts are static strings; "
+                  "these columns are live)",
+                  page.width);
+
+        // The registry as menus, rebuilt every frame (the menus'
+        // discipline: per-frame data). The hints read the LIVE
+        // binding table, so a rebind in the keymap editor below
+        // renames this bar's columns the same frame.
+        menu_builder_.build(commands_, &resolver_,
+                            ws::app::KeyContext::global);
+        const gui::MenuEvent cmd_ev = gui::menu_bar(
+            gui_, layout_, chrome_, "commands menu", menu_builder_.menus(),
+            menu_builder_.count(), cmd_bar_open_);
+        const std::string_view menu_fired =
+            menu_builder_.command_of(cmd_ev.item);
+        if (!menu_fired.empty()) {
+            dispatch_command(menu_fired);
+        }
+
+        // The toolbar: a caller-chosen id list, not the registry's
+        // whole walk - the row is this app's own composition.
+        const std::string_view toolbar_fired = gui::command_toolbar(
+            gui_, layout_, chrome_, "commands toolbar", commands_,
+            toolbar_ids_);
+        if (!toolbar_fired.empty()) {
+            dispatch_command(toolbar_fired);
+        }
+
+        // The palette opener + its live chord hint - the same text
+        // the Tools menu shows (one spelling, describe_chord's rule).
+        if (gui::button(gui_, layout_, chrome_, "open the palette", half)) {
+            palette_open_ = true;
+        }
+        layout_.same_line();
+        const ws::app::Command* palette_cmd = commands_.find("tools.palette");
+        const std::string palette_chord =
+            palette_cmd != nullptr
+                ? gui::command_hint(*palette_cmd, &resolver_,
+                                    ws::app::KeyContext::global)
+                : std::string{};
+        char palette_hint[96];
+        if (palette_chord.empty()) {
+            std::snprintf(palette_hint, sizeof palette_hint,
+                          "the palette command is unbound - rebind it below");
+        } else {
+            std::snprintf(palette_hint, sizeof palette_hint,
+                          "or press %s - the resolver fires the chord",
+                          palette_chord.c_str());
+        }
+        gui::text(layout_, chrome_, palette_hint,
+                  layout_.remaining_width());
+
+        // The undo demo: a 64-char doc whose EVERY edit is a command
+        // on the stack - the funnel reverts the buffer and the push's
+        // apply() lands the edit, so the stack is the sole executor
+        // and redo stays exact. The buttons' "###" tails keep their
+        // ids stable while the display text follows the step names;
+        // they are host-composed because the bridge header never
+        // names the undo stack.
+        gui::text(layout_, chrome_,
+                  "the demo doc - every edit is a command on the undo stack",
+                  page.width);
+        if (gui::text_input(gui_, layout_, chrome_, "the demo doc",
+                            undo_doc_, static_cast<int>(sizeof undo_doc_),
+                            page.width)) {
+            // The field already wrote the edit: the argument binds its
+            // new text first, then the funnel reverts the buffer and
+            // the push's apply() lands the edit again.
+            push_doc_edit(undo_doc_, "Typing");
+        }
+        const std::string undo_name = undo_.name_to_undo();
+        const std::string redo_name = undo_.name_to_redo();
+        if (undo_name.empty()) {
+            std::snprintf(undo_label_, sizeof undo_label_,
+                          "undo (nothing)###undo step");
+        } else {
+            std::snprintf(undo_label_, sizeof undo_label_,
+                          "undo %s###undo step", undo_name.c_str());
+        }
+        if (redo_name.empty()) {
+            std::snprintf(redo_label_, sizeof redo_label_,
+                          "redo (nothing)###redo step");
+        } else {
+            std::snprintf(redo_label_, sizeof redo_label_,
+                          "redo %s###redo step", redo_name.c_str());
+        }
+        if (gui::button(gui_, layout_, chrome_, undo_label_, half, {},
+                        !undo_.can_undo())) {
+            do_undo();
+        }
+        layout_.same_line();
+        if (gui::button(gui_, layout_, chrome_, redo_label_, half, {},
+                        !undo_.can_redo())) {
+            do_redo();
+        }
+        // The rest of the doc vocabulary, dispatched through the
+        // registry so every entry point runs the same command bodies
+        // (the empty-argument append is the menu's path; the palette
+        // prompts for one).
+        if (gui::button(gui_, layout_, chrome_, "append a word", half)) {
+            dispatch_command("edit.append");
+        }
+        layout_.same_line();
+        if (gui::button(gui_, layout_, chrome_, "clear", half)) {
+            dispatch_command("edit.clear");
+        }
+        char doc_line[110];
+        std::snprintf(doc_line, sizeof doc_line,
+                      "the doc is %s - %d undo step(s), %d redo step(s)",
+                      undo_.is_dirty() ? "dirty" : "clean at the save point",
+                      static_cast<int>(undo_.undo_count()),
+                      static_cast<int>(undo_.redo_count()));
+        gui::text(layout_, chrome_, doc_line, half);
+        layout_.same_line();
+        if (gui::button(gui_, layout_, chrome_, "mark it saved", half)) {
+            do_mark_saved();
+        }
+        last_doc_ = undo_doc_;  // the funnel's revert source, synced
+
+        // The keymap editor over the live table: the context picker,
+        // a search, Record. A rebind here renames every hint on this
+        // page the same frame - menus, palette, this table - because
+        // they all read the one resolver.
+        gui::keymap_editor(gui_, layout_, chrome_, "keymap", commands_,
+                           resolver_, keymap_state_);
+        if (gui::button(gui_, layout_, chrome_, "save the keymap", half)) {
+            const ws::core::Status saved = keymap_file_.save(resolver_);
+            if (!saved.has_value()) {
+                cmd_text_ = saved.error().message;
+                toasts_.push({cmd_text_.c_str(), gui::ToastSeverity::error,
+                              nullptr, 5.0f});
+            } else {
+                std::snprintf(status_, sizeof status_,
+                              "the keymap was saved");
+            }
+        }
+        layout_.same_line();
+        if (gui::button(gui_, layout_, chrome_, "reset to defaults", half)) {
+            resolver_.reset_to_defaults();
+            std::snprintf(status_, sizeof status_,
+                          "the keymap was reset to the declared chords");
+        }
+        gui::text(layout_, chrome_,
+                  "rebind something above, save, and restart - the rebind "
+                  "survives; reset restores the declared chords",
+                  page.width);
     }
 
     gui::end_scroll_panel(gui_, layout_, chrome_);
