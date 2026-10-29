@@ -1,5 +1,6 @@
 #include "cards.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <optional>
 #include <utility>

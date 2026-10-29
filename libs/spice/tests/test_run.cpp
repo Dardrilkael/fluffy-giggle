@@ -4,6 +4,7 @@
 // at 1e-9 relative. No DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN here -
 // test_spice.cpp owns doctest's single implementation TU for this binary.
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <string>

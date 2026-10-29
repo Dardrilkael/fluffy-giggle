@@ -4,6 +4,7 @@
 
 #include <ws/math/geometry2d.hpp>
 
+#include <algorithm>
 #include <cmath>
 
 namespace ws::math {
