@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -71,12 +72,23 @@ struct AnalysisReport {
     std::size_t rejected_steps = 0;    // .tran: LTE-rejected attempts
 };
 
+// One evaluated .meas (§0.4): a value, or a failure note (a failed
+// measurement does NOT fail the run - ngspice semantics, §9.5; the CLI's
+// --strict-meas promotes failures to exit 1).
+struct Measurement {
+    std::string name;
+    std::string analysis;          // ".tran", ".dc", ...
+    std::optional<double> value;   // nullopt = failed
+    std::string note;              // failure reason when value is absent
+};
+
 struct RunOutput {
     // One (family) Table per analysis card, in deck order - a .step run
     // merges every point into one table with leading step axes (§7.6).
     Results results;
     std::vector<AnalysisReport> reports;  // per point-and-analysis, deck order
     std::uint64_t seed = 1;               // the Monte-Carlo seed (§8.5 rev)
+    std::vector<Measurement> measurements;  // .meas results, deck order (§0.4)
 };
 
 // Runs every analysis in the deck. `settings` carries the caller's

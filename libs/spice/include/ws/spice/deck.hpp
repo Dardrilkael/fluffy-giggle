@@ -94,6 +94,34 @@ struct IcCard {
     std::vector<std::pair<Token, ExprProgram>> node_values;  // node token, volts
 };
 
+// .meas (§0.4): one measurement over an analysis's results. The MODELS
+// are the §0.4 subset: TRIG/TARG, WHEN, AVG, RMS, MAX, MIN, PP, INTEG,
+// FIND...WHEN, FIND...AT, DERIV - a thin parser onto the measure::
+// library functions (measure.hpp); anything else rejects at parse.
+struct MeasCard {
+    enum class Mode {
+        TrigTarg, When, Avg, Rms, Max, Min, Pp, Integ, FindWhen, FindAt, Deriv,
+    };
+    enum class Analysis { Tran, Dc, Ac, Op };
+    SourceLoc loc;
+    Analysis analysis = Analysis::Tran;
+    Token result;                  // the measurement's name
+    Mode mode = Mode::Avg;
+    Token sig;                     // the measured signal ("v(out)")
+    Token find_sig;                // FIND: the signal whose VALUE is reported
+    Token trig_sig, targ_sig;      // TRIG/TARG signals
+    Token when_sig;                // WHEN signal
+    ExprProgram level;             // VAL= / WHEN level / DERIV AT (shared: the
+                                   // first numeric operand per mode)
+    ExprProgram targ_level;        // TARG VAL=
+    ExprProgram at;                // FIND x AT=t
+    ExprProgram from, to;          // FROM= TO= window
+    bool has_from = false, has_to = false;
+    bool has_at = false;
+    int rise = 1, targ_rise = 1;   // 1-based crossing counts; 0 = fall
+    bool trig_fall = false, targ_fall = false, when_fall = false;
+};
+
 // .step (§7.6): one stepped quantity. Forms:
 //   .step param NAME start stop inc          (linear)
 //   .step param NAME list v1 v2 ...          (explicit list)
@@ -142,6 +170,7 @@ struct DeckAst {
     std::vector<AnalysisCard> analyses;   // deck order
     std::vector<IcCard> ics;              // top-level .ic cards, in order
     std::vector<StepCard> steps;          // top-level .step cards, in order
+    std::vector<MeasCard> meas;           // top-level .meas cards, in order
     std::map<std::string, SubcktDef> subckts;  // key: lowercased name
 };
 

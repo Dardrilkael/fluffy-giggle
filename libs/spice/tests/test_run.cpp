@@ -14,6 +14,7 @@
 #include <ws/spice/error.hpp>
 #include <ws/spice/parse.hpp>
 #include <ws/spice/results.hpp>
+#include <ws/spice/measure.hpp>
 #include <ws/spice/run.hpp>
 
 using ws::spice::build_deck_ast;
@@ -1412,4 +1413,127 @@ TEST_CASE(".step: a failing point aborts with the step context; keep-going lists
     REQUIRE(!kg);
     // The failure list names the point AND the run kept the others.
     CHECK(kg.error().message.find("run=2") != std::string::npos);
+}
+
+// --- §0.4 rev: the measurement library + .meas -------------------------------------
+
+TEST_CASE("measure: library functions over analytic signals") {
+    namespace measure = ws::spice::measure;
+    // A fine unit ramp: axis 0..1, sig = t (exact interpolation
+    // everywhere; 101 samples keep the trapezoidal integrals close).
+    std::vector<double> axis;
+    std::vector<double> ramp;
+    for (int k = 0; k <= 100; ++k) {
+        axis.push_back(static_cast<double>(k) / 100.0);
+        ramp.push_back(static_cast<double>(k) / 100.0);
+    }
+    CHECK(measure::value_at(axis, ramp, 0.625) == approx(0.625));
+    CHECK(measure::average(axis, ramp) == approx(0.5));
+    CHECK(measure::maximum(ramp) == approx(1.0));
+    CHECK(measure::minimum(ramp) == approx(0.0));
+    CHECK(measure::peak_to_peak(ramp) == approx(1.0));
+    CHECK(measure::integral(axis, ramp) == approx(0.5).epsilon(1e-4));
+    CHECK(measure::rms(axis, ramp) ==
+          doctest::Approx(std::sqrt(1.0 / 3.0)).epsilon(1e-4));
+    CHECK(measure::derivative_at(axis, ramp, 0.5) == approx(1.0));
+    // Crossings: the ramp crosses 0.3 at t=0.3 (first), 0.3 again never.
+    CHECK(measure::cross_time(axis, ramp, 0.3, measure::Dir::Rise) == approx(0.3));
+    CHECK(!measure::cross_time(axis, ramp, 0.3, measure::Dir::Fall).has_value());
+    CHECK(!measure::cross_time(axis, ramp, 1.5, measure::Dir::Rise).has_value());
+    // rise_time of the ramp = 0.8 (10%..90%).
+    CHECK(measure::rise_time(axis, ramp) == approx(0.8));
+    CHECK(measure::fall_time(axis, ramp) == std::nullopt);  // never falls
+
+    // A triangle: up 0..1, down 1..2 - fall_time and windowing.
+    const std::vector<double> tax{0.0, 1.0, 2.0};
+    const std::vector<double> tri{0.0, 1.0, 0.0};
+    CHECK(measure::rise_time(tax, tri) == approx(0.8));
+    CHECK(measure::fall_time(tax, tri) == approx(0.8));
+    CHECK(measure::average(tax, tri) == approx(0.5));
+    // Window [0, 1]: just the rising leg.
+    CHECK(measure::average(tax, tri, measure::Window::between(0.0, 1.0)) ==
+          approx(0.5));
+    CHECK(measure::average(tax, tri, measure::Window::between(1.0, 2.0)) ==
+          approx(0.5));
+    // trig/targ between two signals: targ crosses 0.25s AFTER trig (the
+    // propagation-delay convention: the target search starts at the
+    // trigger's crossing).
+    const std::vector<double> five{0.0, 0.25, 0.5, 0.75, 1.0};
+    const std::vector<double> delayed{-0.25, 0.0, 0.25, 0.5, 0.75};
+    CHECK(measure::trig_targ(five, five, 0.5, measure::Dir::Rise, 1, five, delayed,
+                             0.5, measure::Dir::Rise, 1) == approx(0.25));
+}
+
+TEST_CASE(".meas: the §10.1 row - RC rise time = RC*ln(9)") {
+    const auto run = run_text(
+        "rc meas\n"
+        "V1 in 0 PULSE(0 5 1u 1n 1u 10m)\n"
+        "R1 in out 1k\n"
+        "C1 out 0 1n\n"
+        ".tran 10n 10u\n"
+        ".meas tran rt trig v(out) val=0.5 rise=1 targ v(out) val=4.5 rise=1\n"
+        ".meas tran rt1090 avg v(out) from=1.000001 to=1.000002\n");
+    REQUIRE(run);
+    REQUIRE(run->measurements.size() == 2);
+    REQUIRE(run->measurements[0].value.has_value());
+    CHECK(*run->measurements[0].value ==
+          doctest::Approx(1e3 * 1e-9 * std::log(9.0)).epsilon(1e-3));
+}
+
+TEST_CASE(".meas: AVG/RMS/MAX/MIN/PP/WHEN/FIND over a known transient") {
+    // Full-amplitude sine after t=1ms: rms = A/sqrt(2), avg ~ 0.
+    const auto run = run_text(
+        "sine meas\n"
+        "V1 in 0 SIN(0 2 1k 1m)\n"
+        "R1 in out 1k\n"
+        ".tran 10u 6m\n"
+        ".meas tran rms_out rms v(out) from=2m to=6m\n"
+        ".meas tran max_out max v(out) from=2m to=6m\n"
+        ".meas tran min_out min v(out) from=2m to=6m\n"
+        ".meas tran pp_out pp v(out) from=2m to=6m\n"
+        ".meas tran tzero when v(out)=1 rise=2\n");
+    REQUIRE(run);
+    REQUIRE(run->measurements.size() == 5);
+    const auto& rms_m = run->measurements[0];
+    REQUIRE(rms_m.value.has_value());
+    CHECK(*rms_m.value == doctest::Approx(2.0 / std::sqrt(2.0)).epsilon(2e-3));
+    REQUIRE(run->measurements[1].value.has_value());
+    CHECK(*run->measurements[1].value == doctest::Approx(2.0).epsilon(1e-2));
+    REQUIRE(run->measurements[2].value.has_value());
+    CHECK(*run->measurements[2].value == doctest::Approx(-2.0).epsilon(1e-2));
+    REQUIRE(run->measurements[3].value.has_value());
+    CHECK(*run->measurements[3].value == doctest::Approx(4.0).epsilon(2e-2));
+    // v(out)=1 (rise=2): the 2nd rising crossing - one period after the
+    // first at t = 1ms + T/12-ish... just check it is in [2ms, 5ms].
+    REQUIRE(run->measurements[4].value.has_value());
+    CHECK(*run->measurements[4].value > 2e-3);
+    CHECK(*run->measurements[4].value < 5e-3);
+}
+
+TEST_CASE(".meas: a failed measurement is a note, never a run failure") {
+    const auto run = run_text(
+        "nofire\n"
+        "V1 in 0 5\n"
+        "R1 in out 1k\n"
+        ".tran 1u 10u\n"
+        ".meas tran never when v(out)=99\n");
+    REQUIRE(run);  // the run itself succeeded (§9.5)
+    REQUIRE(run->measurements.size() == 1);
+    CHECK(!run->measurements[0].value.has_value());
+    CHECK(run->measurements[0].note.find("never crossed") != std::string::npos);
+}
+
+TEST_CASE(".meas: rise_time/fall_time as LIBRARY calls on a run's table") {
+    // The C++-first story: the same numbers .meas reports, without text.
+    const auto run = run_text(
+        "lib\n"
+        "V1 in 0 PULSE(0 5 1u 1n 1u 10m)\n"
+        "R1 in out 1k\n"
+        "C1 out 0 1n\n"
+        ".tran 10n 10u\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const auto rt = ws::spice::measure::rise_time(t.axis(), t.signal("v(out)"));
+    REQUIRE(rt.has_value());
+    CHECK(*rt == doctest::Approx(1e3 * 1e-9 * std::log(9.0)).epsilon(1e-3));
 }

@@ -29,6 +29,7 @@
 #include "mna.hpp"
 
 #include <ws/spice/deck.hpp>
+#include <ws/spice/measure.hpp>
 #include <ws/spice/run.hpp>
 #include <ws/spice/state.hpp>
 
@@ -880,6 +881,177 @@ void merge_into_family(Table& family, const Table& point, const StepPoint& sp,
 
 // --- the public entry (run.hpp) --------------------------------------------------------
 
+
+// --- .meas evaluation (§0.4) -------------------------------------------------------
+
+// Evaluates one MeasCard against a completed table. The modes map 1:1
+// onto the measure:: library (measure.hpp) - this function is the thin
+// parser half: names resolve to columns, levels to numbers, then the
+// library does the work.
+ws::core::Result<Measurement> evaluate_meas(const MeasCard& m, const Table& t,
+                                            const ParamTable& scope) {
+    auto note_fail = [&](std::string note) {
+        Measurement out;
+        out.name = m.result.text;
+        switch (m.analysis) {
+            case MeasCard::Analysis::Tran: out.analysis = ".tran"; break;
+            case MeasCard::Analysis::Dc: out.analysis = ".dc"; break;
+            case MeasCard::Analysis::Ac: out.analysis = ".ac"; break;
+            case MeasCard::Analysis::Op: out.analysis = ".op"; break;
+        }
+        out.note = std::move(note);
+        return out;
+    };
+    auto eval_level = [&](const ExprProgram& p) -> ws::core::Result<double> {
+        WS_TRY_ASSIGN(const std::vector<std::optional<double>> b, scope.bind(p));
+        WS_TRY_ASSIGN(const double v, p.evaluate(b));
+        return v;
+    };
+    auto sig_of = [&](const Token& name) -> std::optional<std::span<const double>> {
+        const std::span<const double> s = t.signal(name.text);
+        if (s.empty()) {
+            return std::nullopt;
+        }
+        return s;
+    };
+    const auto win = [&]() -> measure::Window {
+        if (!m.has_from && !m.has_to) {
+            return measure::Window::all();
+        }
+        double a = t.axis().empty() ? 0.0 : t.axis().front();
+        double b = t.axis().empty() ? 0.0 : t.axis().back();
+        if (m.has_from) {
+            if (const auto v = eval_level(m.from)) {
+                a = *v;
+            }
+        }
+        if (m.has_to) {
+            if (const auto v = eval_level(m.to)) {
+                b = *v;
+            }
+        }
+        return measure::Window::between(a, b);
+    };
+    auto dir_of = [](bool fall) {
+        return fall ? measure::Dir::Fall : measure::Dir::Rise;
+    };
+
+    // .op tables carry a single sample and no axis: only the point-wise
+    // modes make sense there.
+    if (m.analysis == MeasCard::Analysis::Op &&
+        (m.mode == MeasCard::Mode::TrigTarg || m.mode == MeasCard::Mode::When ||
+         m.mode == MeasCard::Mode::FindWhen || m.mode == MeasCard::Mode::FindAt ||
+         m.mode == MeasCard::Mode::Deriv)) {
+        return note_fail("this measurement needs a swept axis; .op has none");
+    }
+
+    std::optional<double> v;
+    std::string why;
+    switch (m.mode) {
+        case MeasCard::Mode::TrigTarg: {
+            const auto trig = sig_of(m.trig_sig);
+            const auto targ = sig_of(m.targ_sig);
+            if (!trig || !targ) {
+                return note_fail("unknown signal '" +
+                                 (!trig ? m.trig_sig.text : m.targ_sig.text) + "'");
+            }
+            WS_TRY_ASSIGN(const double lv, eval_level(m.level));
+            WS_TRY_ASSIGN(const double tv, eval_level(m.targ_level));
+            v = measure::trig_targ(t.axis(), *trig, lv, dir_of(m.trig_fall), m.rise,
+                                   t.axis(), *targ, tv, dir_of(m.targ_fall),
+                                   m.targ_rise);
+            why = "the TRIG/TARG crossings never happened in the window";
+            break;
+        }
+        case MeasCard::Mode::When: {
+            const auto sig = sig_of(m.when_sig);
+            if (!sig) {
+                return note_fail("unknown signal '" + m.when_sig.text + "'");
+            }
+            WS_TRY_ASSIGN(const double lv, eval_level(m.level));
+            v = measure::cross_time_n(t.axis(), *sig, lv, dir_of(m.when_fall), m.rise,
+                                      win());
+            why = "the level was never crossed in the window";
+            break;
+        }
+        case MeasCard::Mode::FindWhen: {
+            const auto sig = sig_of(m.find_sig);
+            const auto when = sig_of(m.when_sig);
+            if (!sig) {
+                return note_fail("unknown signal '" + m.find_sig.text + "'");
+            }
+            if (!when) {
+                return note_fail("unknown signal '" + m.when_sig.text + "'");
+            }
+            WS_TRY_ASSIGN(const double lv, eval_level(m.level));
+            v = measure::find_when(t.axis(), *sig, *when, lv, dir_of(m.when_fall), win());
+            why = "the WHEN level was never crossed in the window";
+            break;
+        }
+        case MeasCard::Mode::FindAt:
+        case MeasCard::Mode::Deriv: {
+            const auto sig = sig_of(m.sig.text.empty() ? m.find_sig : m.sig);
+            if (!sig) {
+                return note_fail("unknown signal '" +
+                                 (m.sig.text.empty() ? m.find_sig.text : m.sig.text) +
+                                 "'");
+            }
+            WS_TRY_ASSIGN(const double at, eval_level(m.at));
+            v = (m.mode == MeasCard::Mode::Deriv)
+                    ? measure::derivative_at(t.axis(), *sig, at)
+                    : measure::find_at(t.axis(), *sig, at);
+            why = "AT= lies outside the axis range";
+            break;
+        }
+        case MeasCard::Mode::Avg:
+        case MeasCard::Mode::Rms:
+        case MeasCard::Mode::Integ: {
+            const auto sig = sig_of(m.sig);
+            if (!sig) {
+                return note_fail("unknown signal '" + m.sig.text + "'");
+            }
+            if (t.row_count() < 2) {
+                // .op: the single sample is its own average/extreme.
+                v = sig->front();
+                break;
+            }
+            v = (m.mode == MeasCard::Mode::Avg) ? measure::average(t.axis(), *sig, win())
+                : (m.mode == MeasCard::Mode::Rms) ? measure::rms(t.axis(), *sig, win())
+                                                  : measure::integral(t.axis(), *sig, win());
+            why = "the window holds no samples";
+            break;
+        }
+        case MeasCard::Mode::Max:
+        case MeasCard::Mode::Min:
+        case MeasCard::Mode::Pp: {
+            const auto sig = sig_of(m.sig);
+            if (!sig) {
+                return note_fail("unknown signal '" + m.sig.text + "'");
+            }
+            v = (m.mode == MeasCard::Mode::Max) ? measure::maximum(*sig, win())
+                : (m.mode == MeasCard::Mode::Min) ? measure::minimum(*sig, win())
+                                                  : measure::peak_to_peak(*sig, win());
+            why = "the signal is empty";
+            break;
+        }
+    }
+
+    Measurement out;
+    out.name = m.result.text;
+    switch (m.analysis) {
+        case MeasCard::Analysis::Tran: out.analysis = ".tran"; break;
+        case MeasCard::Analysis::Dc: out.analysis = ".dc"; break;
+        case MeasCard::Analysis::Ac: out.analysis = ".ac"; break;
+        case MeasCard::Analysis::Op: out.analysis = ".op"; break;
+    }
+    if (v.has_value()) {
+        out.value = *v;
+    } else {
+        out.note = why.empty() ? "measurement could not be made" : why;
+    }
+    return out;
+}
+
 ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
                                      std::vector<Warning>& warnings) {
     // .options override the caller's defaults, later cards win (§5.1).
@@ -1071,6 +1243,42 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
                 out.results.tables.push_back(std::move(family[ai]));
             }
         }
+    }
+
+    // .meas (§0.4): evaluate every card against its analysis's completed
+    // family table; failures are notes, never run failures (§9.5).
+    for (const MeasCard& m : ast.meas) {
+        const AnalysisKind want = (m.analysis == MeasCard::Analysis::Tran)
+                                      ? AnalysisKind::Tran
+                                  : (m.analysis == MeasCard::Analysis::Dc)
+                                      ? AnalysisKind::Dc
+                                  : (m.analysis == MeasCard::Analysis::Ac)
+                                      ? AnalysisKind::Ac
+                                      : AnalysisKind::Op;
+        const Table* target = nullptr;
+        for (const Table& t : out.results.tables) {
+            if (t.analysis == want) {
+                target = &t;
+                break;
+            }
+        }
+        if (target == nullptr) {
+            Measurement failed;
+            failed.name = m.result.text;
+            failed.note = "the deck has no " +
+                          (m.analysis == MeasCard::Analysis::Tran
+                               ? std::string(".tran")
+                               : m.analysis == MeasCard::Analysis::Dc
+                                     ? std::string(".dc")
+                                     : m.analysis == MeasCard::Analysis::Ac
+                                           ? std::string(".ac")
+                                           : std::string(".op")) +
+                          " table to measure";
+            out.measurements.push_back(std::move(failed));
+            continue;
+        }
+        WS_TRY_ASSIGN(Measurement r, evaluate_meas(m, *target, global));
+        out.measurements.push_back(std::move(r));
     }
 
     if (!failure_list.empty()) {

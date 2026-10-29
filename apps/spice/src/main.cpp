@@ -29,7 +29,8 @@ int usage() {
                  "usage: spice run <deck.cir> [-o out.csv] [-I <include-dir>]...\n"
                  "                  [--keep-going]\n"
                  "  --keep-going   run the remaining .step points after a failure\n"
-                 "                 and report the list at the end (§7.6)\n");
+                 "                 and report the list at the end (§7.6)\n"
+                 "  --strict-meas  exit 1 when any .meas fails (§9.5)\n");
     return 2;  // §9.5: usage errors exit 2
 }
 
@@ -94,6 +95,7 @@ int cmd_run(const std::vector<std::string>& args) {
     std::string out_path;  // empty = stdout
     std::vector<std::string> include_dirs;
     bool keep_going = false;
+    bool strict_meas = false;
     for (std::size_t i = 1; i < args.size(); ++i) {
         if (args[i] == "-o") {
             if (i + 1 >= args.size()) {
@@ -109,6 +111,8 @@ int cmd_run(const std::vector<std::string>& args) {
             include_dirs.push_back(args[++i]);
         } else if (args[i] == "--keep-going") {
             keep_going = true;
+        } else if (args[i] == "--strict-meas") {
+            strict_meas = true;
         } else {
             std::fprintf(stderr, "error: unknown option '%s'\n", args[i].c_str());
             return usage();
@@ -154,6 +158,19 @@ int cmd_run(const std::vector<std::string>& args) {
         return 1;
     }
 
+    // .meas results print to stdout after the CSV (ngspice's shape);
+    // a failed measurement is a fact about the run, not an error (§9.5),
+    // unless --strict-meas promotes it.
+    bool meas_failed = false;
+    for (const ws::spice::Measurement& m : run->measurements) {
+        if (m.value.has_value()) {
+            std::fprintf(stdout, "%s: %.12g\n", m.name.c_str(), *m.value);
+        } else {
+            std::fprintf(stdout, "%s: FAILED (%s)\n", m.name.c_str(), m.note.c_str());
+            meas_failed = true;
+        }
+    }
+
     const std::string csv = ws::spice::results_csv(run->results);
     if (out_path.empty()) {
         std::fputs(csv.c_str(), stdout);
@@ -163,6 +180,9 @@ int cmd_run(const std::vector<std::string>& args) {
             return io_error("cannot write '" + out_path + "'");
         }
         out << csv;
+    }
+    if (meas_failed && strict_meas) {
+        return 1;  // §9.5: --strict-meas promotes .meas failures to exit 1
     }
     return 0;
 }

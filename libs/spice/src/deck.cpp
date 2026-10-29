@@ -27,7 +27,7 @@ const std::map<char, const char*>& device_milestones() {
 
 const std::map<std::string, const char*>& card_milestones() {
     static const std::map<std::string, const char*> table = {
-        {".noise", "M5"},   {".meas", "M5"},
+        {".noise", "M5"},
         {".save", "M5"},    {".print", "M5"},  {".probe", "M5"},
         {".nodeset", "M5"},
         {".lib", "backlog"},  {".global", "backlog"}, {".func", "backlog"},
@@ -223,6 +223,236 @@ ws::core::Result<ParsedCard> parse_card(const Record& rec, bool inside_subckt,
             }
             card.kind = ParsedCard::Kind::Ic;
             card.ic = std::move(ic);
+            return card;
+        }
+        if (first_lower == ".meas") {
+            if (inside_subckt) {
+                return spice_fail(card_diag(ErrorKind::Parse, "spice.parse.card_scope",
+                                            "'.meas' inside .subckt", rec.loc));
+            }
+            // .meas ANA result MODE operands...
+            if (rec.tokens.size() < 4) {
+                return spice_fail(card_diag(
+                    ErrorKind::Parse, "spice.parse.meas_arity",
+                    "'.meas' needs an analysis, a name and a mode", rec.loc));
+            }
+            MeasCard m;
+            m.loc = rec.loc;
+            const std::string ana = to_lower(rec.tokens[1].text);
+            if (ana == "tran") {
+                m.analysis = MeasCard::Analysis::Tran;
+            } else if (ana == "dc") {
+                m.analysis = MeasCard::Analysis::Dc;
+            } else if (ana == "ac") {
+                m.analysis = MeasCard::Analysis::Ac;
+            } else if (ana == "op") {
+                m.analysis = MeasCard::Analysis::Op;
+            } else {
+                return spice_fail(card_diag(
+                    ErrorKind::Parse, "spice.parse.meas_form",
+                    "'.meas' analysis must be tran, dc, ac or op, got '" +
+                        rec.tokens[1].text + "'",
+                    rec.tokens[1].loc));
+            }
+            m.result = rec.tokens[2];
+            const std::string mode = to_lower(rec.tokens[3].text);
+            auto expr_of = [&](const Token& t) -> ws::core::Result<ExprProgram> {
+                return expr_from_text(t.text, t.loc);
+            };
+            if (mode == "trig") {
+                // TRIG sig VAL=v [RISE=n|FALL=n] TARG sig VAL=v [RISE=..]
+                m.mode = MeasCard::Mode::TrigTarg;
+                if (rec.tokens.size() < 9) {
+                    return spice_fail(card_diag(
+                        ErrorKind::Parse, "spice.parse.meas_form",
+                        "'.meas ... TRIG sig VAL=v [...] TARG sig VAL=v [...]'"
+                        " expected",
+                        rec.loc));
+                }
+                m.trig_sig = rec.tokens[4];
+                std::size_t i = 5;
+                for (; i < rec.tokens.size(); ++i) {
+                    const std::string k = to_lower(rec.tokens[i].text);
+                    const std::size_t eq = k.find('=');
+                    const std::string key = (eq == std::string::npos) ? k : k.substr(0, eq);
+                    const std::string val =
+                        (eq == std::string::npos) ? "" : k.substr(eq + 1);
+                    if (key == "val" && m.level.code().empty()) {
+                        WS_TRY_ASSIGN(m.level, expr_of(Token{val, rec.tokens[i].loc}));
+                    } else if (key == "td") {
+                        // accepted, unused by the library window (FROM
+                        // covers it); kept for deck compatibility.
+                    } else if (key == "rise") {
+                        m.rise = std::max(1, static_cast<int>(std::atof(val.c_str())));
+                    } else if (key == "fall") {
+                        m.trig_fall = true;
+                        m.rise = std::max(1, static_cast<int>(std::atof(val.c_str())));
+                    } else if (key == "targ") {
+                        // 'TARG' is a bare keyword followed by the signal
+                        // token (ngspice); the glued 'targ=v(out)' spelling
+                        // rides along.
+                        if (!val.empty()) {
+                            m.targ_sig = Token{val, rec.tokens[i].loc};
+                            break;
+                        }
+                        if (i + 1 >= rec.tokens.size()) {
+                            return spice_fail(card_diag(
+                                ErrorKind::Parse, "spice.parse.meas_form",
+                                "'TARG sig VAL=v' expected", rec.tokens[i].loc));
+                        }
+                        m.targ_sig = rec.tokens[i + 1];
+                        i += 2;  // past TARG and its signal
+                        break;
+                    }
+                }
+                if (m.targ_sig.text.empty()) {
+                    return spice_fail(card_diag(
+                        ErrorKind::Parse, "spice.parse.meas_form",
+                        "'.meas ... TRIG ... TARG sig VAL=v' expected", rec.loc));
+                }
+                for (; i < rec.tokens.size(); ++i) {
+                    const std::string k = to_lower(rec.tokens[i].text);
+                    const std::size_t eq = k.find('=');
+                    const std::string key = (eq == std::string::npos) ? k : k.substr(0, eq);
+                    const std::string val =
+                        (eq == std::string::npos) ? "" : k.substr(eq + 1);
+                    if (key == "val" && m.targ_level.code().empty()) {
+                        WS_TRY_ASSIGN(m.targ_level, expr_of(Token{val, rec.tokens[i].loc}));
+                    } else if (key == "rise") {
+                        m.targ_rise = std::max(1, static_cast<int>(std::atof(val.c_str())));
+                    } else if (key == "fall") {
+                        m.targ_fall = true;
+                        m.targ_rise = std::max(1, static_cast<int>(std::atof(val.c_str())));
+                    }
+                }
+                if (m.level.code().empty() || m.targ_level.code().empty()) {
+                    return spice_fail(card_diag(ErrorKind::Parse, "spice.parse.meas_form",
+                                                "TRIG/TARG need VAL=", rec.loc));
+                }
+            } else if (mode == "when") {
+                // WHEN sig=v [RISE=|FALL=] [FROM= TO=]
+                m.mode = MeasCard::Mode::When;
+                if (rec.tokens.size() < 5) {
+                    return spice_fail(card_diag(
+                        ErrorKind::Parse, "spice.parse.meas_form",
+                        "'.meas ... WHEN sig=level' expected", rec.loc));
+                }
+                const std::string& t = rec.tokens[4].text;
+                const std::size_t eq = t.find('=');
+                if (eq == std::string::npos) {
+                    return spice_fail(card_diag(
+                        ErrorKind::Parse, "spice.parse.meas_form",
+                        "'.meas ... WHEN sig=level' expected, got '" + t + "'",
+                        rec.tokens[4].loc));
+                }
+                m.when_sig = Token{t.substr(0, eq), rec.tokens[4].loc};
+                WS_TRY_ASSIGN(m.level, expr_of(Token{t.substr(eq + 1), rec.tokens[4].loc}));
+                for (std::size_t i = 5; i < rec.tokens.size(); ++i) {
+                    const std::string k = to_lower(rec.tokens[i].text);
+                    if (k.rfind("rise=", 0) == 0) {
+                        m.rise = std::max(1, static_cast<int>(std::atof(k.c_str() + 5)));
+                    } else if (k.rfind("fall=", 0) == 0) {
+                        m.when_fall = true;
+                        m.rise = std::max(1, static_cast<int>(std::atof(k.c_str() + 5)));
+                    } else if (k.rfind("from=", 0) == 0) {
+                        WS_TRY_ASSIGN(m.from, expr_of(Token{k.substr(5), rec.tokens[i].loc}));
+                        m.has_from = true;
+                    } else if (k.rfind("to=", 0) == 0) {
+                        WS_TRY_ASSIGN(m.to, expr_of(Token{k.substr(3), rec.tokens[i].loc}));
+                        m.has_to = true;
+                    }
+                }
+            } else if (mode == "avg" || mode == "rms" || mode == "max" ||
+                       mode == "min" || mode == "pp" || mode == "integ") {
+                m.mode = (mode == "avg")     ? MeasCard::Mode::Avg
+                         : (mode == "rms")   ? MeasCard::Mode::Rms
+                         : (mode == "max")   ? MeasCard::Mode::Max
+                         : (mode == "min")   ? MeasCard::Mode::Min
+                         : (mode == "pp")    ? MeasCard::Mode::Pp
+                                             : MeasCard::Mode::Integ;
+                if (rec.tokens.size() < 5) {
+                    return spice_fail(card_diag(
+                        ErrorKind::Parse, "spice.parse.meas_form",
+                        "'.meas ... " + mode + " sig' expected", rec.loc));
+                }
+                m.sig = rec.tokens[4];
+                for (std::size_t i = 5; i < rec.tokens.size(); ++i) {
+                    const std::string k = to_lower(rec.tokens[i].text);
+                    if (k.rfind("from=", 0) == 0) {
+                        WS_TRY_ASSIGN(m.from, expr_of(Token{k.substr(5), rec.tokens[i].loc}));
+                        m.has_from = true;
+                    } else if (k.rfind("to=", 0) == 0) {
+                        WS_TRY_ASSIGN(m.to, expr_of(Token{k.substr(3), rec.tokens[i].loc}));
+                        m.has_to = true;
+                    }
+                }
+            } else if (mode == "find") {
+                // FIND sig WHEN other=v [RISE=|FALL=] | FIND sig AT=t
+                if (rec.tokens.size() < 6) {
+                    return spice_fail(card_diag(
+                        ErrorKind::Parse, "spice.parse.meas_form",
+                        "'.meas ... FIND sig WHEN other=v' or 'FIND sig AT=t'"
+                        " expected",
+                        rec.loc));
+                }
+                m.find_sig = rec.tokens[4];
+                const std::string sub = to_lower(rec.tokens[5].text);
+                if (sub == "when") {
+                    m.mode = MeasCard::Mode::FindWhen;
+                    if (rec.tokens.size() < 7) {
+                        return spice_fail(card_diag(
+                            ErrorKind::Parse, "spice.parse.meas_form",
+                            "'.meas ... FIND sig WHEN other=v' expected", rec.loc));
+                    }
+                    const std::string& t = rec.tokens[6].text;
+                    const std::size_t eq = t.find('=');
+                    if (eq == std::string::npos) {
+                        return spice_fail(card_diag(
+                            ErrorKind::Parse, "spice.parse.meas_form",
+                            "'WHEN sig=level' expected, got '" + t + "'",
+                            rec.tokens[6].loc));
+                    }
+                    m.when_sig = Token{t.substr(0, eq), rec.tokens[6].loc};
+                    WS_TRY_ASSIGN(m.level, expr_of(Token{t.substr(eq + 1), rec.tokens[6].loc}));
+                    for (std::size_t i = 7; i < rec.tokens.size(); ++i) {
+                        const std::string k = to_lower(rec.tokens[i].text);
+                        if (k.rfind("rise=", 0) == 0) {
+                            m.rise = std::max(1, static_cast<int>(std::atof(k.c_str() + 5)));
+                        } else if (k.rfind("fall=", 0) == 0) {
+                            m.when_fall = true;
+                            m.rise = std::max(1, static_cast<int>(std::atof(k.c_str() + 5)));
+                        }
+                    }
+                } else if (sub == "at") {
+                    m.mode = MeasCard::Mode::FindAt;
+                    WS_TRY_ASSIGN(m.at, expr_of(rec.tokens[6]));
+                    m.has_at = true;
+                } else {
+                    return spice_fail(card_diag(
+                        ErrorKind::Parse, "spice.parse.meas_form",
+                        "FIND needs WHEN or AT, got '" + rec.tokens[5].text + "'",
+                        rec.tokens[5].loc));
+                }
+            } else if (mode == "deriv") {
+                // DERIV sig AT=t
+                m.mode = MeasCard::Mode::Deriv;
+                if (rec.tokens.size() < 7 || to_lower(rec.tokens[5].text) != "at") {
+                    return spice_fail(card_diag(
+                        ErrorKind::Parse, "spice.parse.meas_form",
+                        "'.meas ... DERIV sig AT=t' expected", rec.loc));
+                }
+                m.sig = rec.tokens[4];
+                WS_TRY_ASSIGN(m.at, expr_of(rec.tokens[6]));
+                m.has_at = true;
+            } else {
+                return spice_fail(card_diag(
+                    ErrorKind::Parse, "spice.parse.meas_mode",
+                    "unknown .meas mode '" + rec.tokens[3].text +
+                        "' (TRIG, WHEN, AVG, RMS, MAX, MIN, PP, INTEG, FIND, DERIV)",
+                    rec.tokens[3].loc));
+            }
+            card.kind = ParsedCard::Kind::Meas;
+            card.meas = std::move(m);
             return card;
         }
         if (first_lower == ".step") {
@@ -657,6 +887,15 @@ ws::core::Result<DeckAst> build_deck_ast(const Deck& deck, std::vector<Warning>&
                         "'.step' inside .subckt", rec.loc));
                 }
                 ast.steps.push_back(card.step);
+                break;
+            }
+            case K::Meas: {
+                if (inside) {
+                    return spice_fail(ast_diag(
+                        ErrorKind::Parse, "spice.parse.card_scope",
+                        "'.meas' inside .subckt", rec.loc));
+                }
+                ast.meas.push_back(card.meas);
                 break;
             }
             case K::Subckt: {
