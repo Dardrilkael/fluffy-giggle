@@ -52,12 +52,18 @@ using ComplexSolver =
 template <class Scalar>
 Eigen::SparseMatrix<Scalar, Eigen::ColMajor> to_eigen(const SparsePattern& p,
                                                       const std::vector<Scalar>& values) {
+    // Triplets default StorageIndex is int (the SparseMatrix<Scalar, ColMajor>
+    // default), so cast the indices to int here. Eigen::Index is ptrdiff_t
+    // (8 bytes on x64), and constructing a Triplet<Scalar, int> from an
+    // Eigen::Index narrows - MSVC's C4244 fires under /WX. The circuit
+    // matrices this code builds have node-count dimensions (small, well
+    // within int range), so the narrowing is safe.
     std::vector<Eigen::Triplet<Scalar>> triplets;
     triplets.reserve(p.nnz());
     for (std::size_t col = 0; col < p.n; ++col) {
         for (std::size_t k = p.col_starts[col]; k < p.col_starts[col + 1]; ++k) {
-            triplets.emplace_back(static_cast<Eigen::Index>(p.row_indices[k]),
-                                  static_cast<Eigen::Index>(col), values[k]);
+            triplets.emplace_back(static_cast<int>(p.row_indices[k]),
+                                  static_cast<int>(col), values[k]);
         }
     }
     Eigen::SparseMatrix<Scalar, Eigen::ColMajor> m(static_cast<Eigen::Index>(p.n),
@@ -70,12 +76,13 @@ Eigen::SparseMatrix<Scalar, Eigen::ColMajor> to_eigen(const SparsePattern& p,
 template <class Scalar>
 Eigen::SparseMatrix<Scalar, Eigen::ColMajor> to_eigen_transpose(
     const SparsePattern& p, const std::vector<Scalar>& values) {
+    // Same int-StorageIndex cast as to_eigen - see the comment there.
     std::vector<Eigen::Triplet<Scalar>> triplets;
     triplets.reserve(p.nnz());
     for (std::size_t col = 0; col < p.n; ++col) {
         for (std::size_t k = p.col_starts[col]; k < p.col_starts[col + 1]; ++k) {
-            triplets.emplace_back(static_cast<Eigen::Index>(col),
-                                  static_cast<Eigen::Index>(p.row_indices[k]), values[k]);
+            triplets.emplace_back(static_cast<int>(col),
+                                  static_cast<int>(p.row_indices[k]), values[k]);
         }
     }
     Eigen::SparseMatrix<Scalar, Eigen::ColMajor> m(static_cast<Eigen::Index>(p.n),

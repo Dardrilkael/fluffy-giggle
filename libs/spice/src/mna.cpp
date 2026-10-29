@@ -5,7 +5,7 @@
 
 namespace ws::spice {
 
-namespace {
+namespace detail {
 
 // The pattern recorder (§3.2): records (row, col), ignores values; ground
 // entries never reach the builder (ground row/col dropped, §4.1).
@@ -63,7 +63,7 @@ private:
     std::size_t node_count_;
 };
 
-}  // namespace
+}  // namespace detail
 
 MnaSystem::MnaSystem(std::size_t node_count, std::size_t branch_count)
     : node_count_(node_count), branch_count_(branch_count),
@@ -71,7 +71,7 @@ MnaSystem::MnaSystem(std::size_t node_count, std::size_t branch_count)
 
 ws::core::Status MnaSystem::setup(const std::vector<std::unique_ptr<Device>>& devices) {
     {
-        PatternContext ctx(builder_, node_count_);
+        detail::PatternContext ctx(builder_, node_count_);
         for (const auto& dev : devices) {
             dev->load_dc(ctx);
         }
@@ -82,7 +82,7 @@ ws::core::Status MnaSystem::setup(const std::vector<std::unique_ptr<Device>>& de
 void MnaSystem::load(const std::vector<std::unique_ptr<Device>>& devices) {
     zero();
     if (matrix_) {
-        NumericContext ctx(*matrix_, rhs_, node_count_);
+        detail::NumericContext ctx(*matrix_, rhs_, node_count_);
         for (const auto& dev : devices) {
             dev->load_dc(ctx);
         }

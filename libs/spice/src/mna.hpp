@@ -16,6 +16,19 @@
 
 namespace ws::spice {
 
+// src-only detail namespace: the MNA pattern/numeric load contexts live
+// here (defined in mna.cpp). A named detail namespace - NOT an anonymous
+// one - so the friend declarations inside MnaSystem refer to the same
+// types as the definitions. An anonymous namespace would put the
+// definitions in ws::spice::<anon>::, a different type than the friend-
+// declared ws::spice::detail:: names; MSVC then flags the unqualified
+// reference as ambiguous, while GCC happens to resolve it. Spelling it
+// out keeps both compilers happy.
+namespace detail {
+class PatternContext;
+class NumericContext;
+}  // namespace detail
+
 class MnaSystem {
 public:
     MnaSystem(std::size_t node_count, std::size_t branch_count);
@@ -57,8 +70,8 @@ private:
     std::vector<double> rhs_;
     std::size_t load_count_ = 0;
 
-    friend class PatternContext;
-    friend class NumericContext;
+    friend class detail::PatternContext;
+    friend class detail::NumericContext;
 };
 
 }  // namespace ws::spice
