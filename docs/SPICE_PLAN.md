@@ -25,20 +25,22 @@ and DESIGN.md disagree, DESIGN.md wins.
 | `970f260` | tools     | Dropped the stray `cmake -T` call from `build.ps1`'s test phase. |
 | `1ee0167` | spice     | Fixed the CSV header shape and added the title-line-looks-like-a-card warning. |
 | `fa45283` | spice     | Four `.dc`/`.op` correctness fixes: convergence class passthrough, temp flow, first-point handling, and report counts. |
-| *(this commit)* | M1 hardening | Guarded the `.dc` point count (finite/range/1e6 cap), rejected nested `temp` and duplicate-source sweeps, routed `prepare()` failures through `wrap_solver_error()`, validated `AnalysisCard`, made the no-analysis path reject an empty circuit, and deduplicated warnings across analyses. |
+| `7b9649e` | spice     | M1 hardening: `.dc` point-count guards, nested-temp/duplicate-source rejection, `prepare()` error wrapping, `AnalysisCard` validation, empty-deck rejection, warning dedup. |
+| *(this commit)* | M2 | C/L/K/S/W devices, PULSE/SIN/EXP/PWL sources, `.tran` (trap+BE, LTE, breakpoints, .ic/UIC), `.ac` (complex MNA, re()/im() CSV), switch `.model SW`, the M2 analytic gate (RC/RLC/LC/AC/K/switch rows, trap-order via `fixed_dt`). |
 
-Working tree is clean; `main` is 10 commits ahead of `origin/main` (11 once
-this hardening commit lands) and **deliberately not pushed** (no remote
-credentials). If you want to share the work, push `main` to a remote you
-control, or zip the repo and hand it over.
+Working tree is clean; `main` is 12 commits ahead of `origin/main` and
+**deliberately not pushed** (no remote credentials). If you want to
+share the work, push `main` to a remote you control, or zip the repo and
+hand it over.
 
 ## Locked decisions (do NOT re-litigate)
 
 These four were batched and approved up front:
 
-1. **Scope = M0 + M1.** M2 (`.tran`/`.ac`/`.noise`, time integration,
-   PULSE/SIN/EXP/PWL sources) and beyond are **out of scope** and
-   deliberately reject at parse with file:line (DESIGN.md working rule 5).
+1. **Scope = M0 + M1 + M2 (M2 added by the user's `m2` directive,
+   2026-10-29).** M3+ (`.noise`, semiconductor devices, behavioral
+   sources, `.step`/`.meas`) remain out of scope and deliberately reject
+   at parse with file:line (DESIGN.md working rule 5).
 2. **All 5 DESIGN.md open questions answered with the default:**
    - Eigen sparse LU backend (NOT KLU/KLUAdopt).
    - AC CSV layout uses `re()/im()` columns (NOT mag/phase).
@@ -52,7 +54,8 @@ These four were batched and approved up front:
    during development.
 4. **Git discipline = one commit per milestone on `main`, no push.** M0 =
    one commit; M1 was split into 3 (start / a / complete) because of its
-   size. M2+ would each get one commit when they land.
+   size. M2 landed as one commit. M3+ would each get one commit when they
+   land.
 
 ## Build / test / run
 
@@ -133,7 +136,8 @@ libs/spice/
   tests/
     test_spice.cpp               # error taxonomy (owns the doctest main)
     test_parse.cpp               # records/numbers/includes
-    test_run.cpp                 # M1 gate: analytic .op/.dc, parse goldens, CSV shape
+    test_run.cpp                 # M1+M2 gate: analytic .op/.dc/.tran/.ac,
+                                 # parse goldens, CSV shape, trap-order hook
 
 apps/spice/
   CMakeLists.txt                 # ws_add_app(spice DEPENDS ws::spice)
@@ -163,26 +167,25 @@ docs/
 These all reject at parse with `file:line:col: error:` today (DESIGN.md
 working rule 5) and would each be a future milestone:
 
-- **M2** - `.tran`, `.ac`, `.noise`. Time integration (trapezoidal / Gear),
-  PULSE/SIN/EXP/PWL source waveforms, AC small-signal phasor analysis.
 - **M0b (alt backend)** - KLU sparse solver behind `solver=klu` in
   `.options`. The Eigen backend is the only one wired; the design leaves
   the policy layer abstract enough to add KLU later.
-- **M3** - semiconductor devices: Diode, BJT (NPN/PNP), MOSFET
-  (NMOS/PMOS), JFET. Linearization + Newton iteration for `.op`.
-- **M4** - lossy/lossless transmission lines (T, U), switches (S/W).
-- **M5** - `.options temp` and per-device temperature params (device
-  temperature coefficient models), `.measure` directives (already non-fatal
-  by decision but not implemented), `.step` (already default-abort by
-  decision but not implemented).
+- **M3** - semiconductor devices: Diode, Newton limiting, gmin/source
+  stepping (the convergence ladder), BJT (Gummel-Poon).
+- **M4** - MOS level 1, behavioral B sources (dual-number AD), lossless
+  T-lines (T).
+- **M5** - `.options temp` and per-device temperature params, `.noise`,
+  `.step`, `.meas`, `.save`/`.print`/`.probe`, `.nodeset`, text report.
+- **Multi-winding K** - a third inductor on an existing pair rejects
+  (backlog).
 - **`.lib`** - the ngspice library-file include mechanism. Backlog.
-- **Nonlinear convergence polish** - gmin stepping, source stepping, damped
-  Newton, junction charge models. M3+ land.
-- **Current iterate into `MnaSystem::load()`** - M1 devices are linear, so
-  `load(devices)` is already the exact stamp. When M3's nonlinear devices
-  arrive, the kernel must thread the CURRENT iterate into the load context
-  (DESIGN.md §3.6); the call site in `DcKernel::solve()` is marked with a
-  comment so it is not forgotten.
+- **Current iterate into `MnaSystem::load()`** - M2 devices are linear,
+  so `load(devices)`/`load_tran(devices, step)` is already the exact
+  stamp. When M3's nonlinear devices arrive, the kernel must thread the
+  CURRENT iterate into the load context (DESIGN.md §3.6); the call
+  sites in `DcKernel::solve()`/`solve_tran()` are commented.
+- **Gear(2)/TR-BDF2** - integration is trap + BE only (§6.1); Gear
+  orders > 2 are rejected by design.
 
 ## Next steps if memory is cleared
 
@@ -191,16 +194,19 @@ In rough priority order:
 1. **Re-read this file + `libs/spice/DESIGN.md` + `libs/spice/CLAUDE.md`.**
    DESIGN.md is the contract; CLAUDE.md is the lived rules-bite list; this
    file is the status. The three together are the full state.
-2. **Confirm the working tree.** `git log --oneline -10` should show the
-   5 commits listed above. `git status` should be clean.
+2. **Confirm the working tree.** `git log --oneline -12` should show the
+   commits listed above (HEAD = the M2 commit). `git status` should be
+   clean.
 3. **Run the gate.** `cmake --preset linux && cmake --build --preset linux
    && ctest --preset linux` should pass. If it does not, the break is
    load-bearing - investigate before adding anything.
-4. **Pick the next milestone.** The most natural next move is **M2** (`.op`
-   and `.dc` already drive MNA; `.tran` needs a time stepper over the same
-   MNA frame, `.ac` needs the complex LU path which already exists). Each
-   new analysis = one commit, one test row, one CLAUDE.md note - that's
-   the established rhythm (M1 commit 5e97912 is the template).
+4. **Pick the next milestone.** The natural next moves are **M0b** (the
+   KLU backend: both facades are stable, cross-validation tests are the
+   gate) or **M3** (diode + per-device limiting + the convergence ladder;
+   note the §3.6 current-iterate TODO marked at `DcKernel::solve()`).
+   Each new milestone = one commit, one test row, one CLAUDE.md note -
+   that's the established rhythm (M1 commit 5e97912 and the M2 commit
+   are the templates).
 5. **Do not regress scope.** If a request lands that wants M3+ devices,
    that's a new arc with its own decision round. The four locked decisions
    above stay locked unless the user explicitly reopens them.
@@ -211,9 +217,15 @@ In rough priority order:
   `libs/spice/include/ws/spice/error.hpp`.
 - The Device interface (the staged load): `struct Device` in
   `libs/spice/include/ws/spice/device.hpp`.
-- The MNA pattern = what load touches: `class MnaPattern` in
-  `libs/spice/src/mna.hpp`.
-- The analysis dispatch: `run_deck` in `libs/spice/src/analysis.cpp`.
+- The MNA pattern = what load touches: `class MnaSystem` (setup = the
+  dc+tran+ac union dry run) in `libs/spice/src/mna.hpp`.
+- The analysis dispatch: `run_deck` in `libs/spice/src/analysis.cpp`
+  (run_op/run_dc/run_tran/run_ac live there too).
+- The time loop + LTE/breakpoints: `run_tran` in
+  `libs/spice/src/analysis.cpp`; the companions in
+  `libs/spice/src/devices_m2.cpp` (`begin_step`/`commit`/`lte_ok`).
+- The waveform semantics (PULSE/SIN/EXP/PWL + breakpoints):
+  `class Waveform` in `libs/spice/src/waveform.hpp`.
 - The graph checks (voltage-source loops, no-DC-path): `check_graph` in
   `libs/spice/src/elaborate.cpp`.
 - The 1e-9 rel tolerance gate: `test_run.cpp` `approx` helper.

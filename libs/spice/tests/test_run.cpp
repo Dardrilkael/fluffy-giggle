@@ -4,6 +4,7 @@
 // at 1e-9 relative. No DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN here -
 // test_spice.cpp owns doctest's single implementation TU for this binary.
 
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -27,9 +28,11 @@ namespace {
 
 // Runs deck text end to end (the CLI's path minus argv). Returns the
 // RunOutput or the propagated error; `warnings` (optional) collects §9.3
-// warnings from every stage.
+// warnings from every stage; `settings` overrides the defaults (the
+// fixed_dt test hook reaches tests this way).
 ws::core::Result<RunOutput> run_text(const std::string& deck,
-                                     std::vector<Warning>* warnings = nullptr) {
+                                     std::vector<Warning>* warnings = nullptr,
+                                     const RunSettings& settings = RunSettings{}) {
     std::vector<Warning> local;
     std::vector<Warning>& w = warnings ? *warnings : local;
     const ws::core::Result<ws::spice::Deck> parsed =
@@ -41,7 +44,7 @@ ws::core::Result<RunOutput> run_text(const std::string& deck,
     if (!ast) {
         return ws::core::unexpected(ast.error());
     }
-    return run_deck(*ast, RunSettings{}, w);
+    return run_deck(*ast, settings, w);
 }
 
 // The rendered error message of a failed run.
@@ -443,7 +446,7 @@ TEST_CASE("unknown .options keys warn (rendered as warnings), never fail") {
     REQUIRE(run);
     REQUIRE(warnings.size() == 1);
     CHECK(warnings[0].render() ==
-          "t.cir:4:10: warning: ignored .options key 'foo=1'");
+          "t.cir:4:10: warning: ignored .options key 'foo'");
     CHECK(warnings[0].render().find("error") == std::string::npos);
 }
 
@@ -492,16 +495,22 @@ TEST_CASE("parse-error goldens: file:line:col prefixes") {
     const Golden goldens[] = {
         {".lib backlog\n* line 2 is a comment\n.lib foo\n",
          "t.cir:3:1: error: ", "card '.lib'"},
-        {"caps\nV1 a 0 5\nC1 a 0 1u\n",
-         "t.cir:3:1: error: ", "device 'C'"},
+        {"bjt\nV1 a 0 5\nQ1 a 0 0 qm\n",
+         "t.cir:3:1: error: ", "device 'Q'"},
         {"arity\nV1 a 0 5\nR1 a 0\n",
          "t.cir:3:1: error: ", "needs a value"},
-        {"pulse\nV1 a 0 PULSE(0 1 1)\nR1 a 0 1k\n",
-         "t.cir:2:1: error: ", "DC VALUE only"},
+        {"bad waveform\nV1 a 0 PULSE(0)\nR1 a 0 1k\n.op\n",
+         "t.cir:2:8: error: ", "PULSE needs at least"},
         {"sub\nX1 a b nosuch\nV1 a 0 5\nR1 a 0 1k\n.op\n",
          "t.cir:2:8: error: ", "unknown subcircuit"},
         {"dc arity\nV1 a 0 5\nR1 a 0 1k\n.dc V1 0 1\n",
          "t.cir:4:1: error: ", "'.dc' takes"},
+        {"tran arity\nV1 a 0 5\nR1 a 0 1k\n.tran 1u\n",
+         "t.cir:4:1: error: ", "'.tran' takes"},
+        {"ac mode\nV1 a 0 5 AC 1\nR1 a 0 1k\nC1 a 0 1u\n.ac foo 10 1 1k\n",
+         "t.cir:5:1: error: ", "not one of dec, oct, lin"},
+        {"ic form\nV1 a 0 5\nR1 a 0 1k\n.ic a 5\n",
+         "t.cir:4:5: error: ", "v(node)=value"},
         {"op in subckt\n.subckt s a\nRi a 0 1k\n.op\n.ends\n",
          "t.cir:4:1: error: ", "'.op' inside .subckt"},
         {"bad number\nV1 a 0 5\nR1 a 0 1.2.3\n.op\n",
@@ -588,4 +597,427 @@ TEST_CASE("expression evaluator: operators, functions, ternary") {
         REQUIRE(v);
         CHECK(*v == doctest::Approx(c.want));
     }
+}
+
+// --- M2 (§10.1 rows): .tran / .ac / C / L / K / switches --------------------------
+
+namespace {
+
+// The .tran row whose time is closest to `t`.
+const std::vector<double>& row_near(const Table& t, double when) {
+    std::size_t best = 0;
+    double best_diff = 1e30;
+    for (std::size_t i = 0; i < t.rows.size(); ++i) {
+        const double d = std::abs(t.rows[i][0] - when);
+        if (d < best_diff) {
+            best_diff = d;
+            best = i;
+        }
+    }
+    REQUIRE(best < t.rows.size());
+    return t.rows[best];
+}
+
+constexpr double kPi = 3.14159265358979323846;
+
+}  // namespace
+
+TEST_CASE(".tran: RC step against 1-e^{-t/RC}, at defaults and reltol=1e-6") {
+    const char* deck =
+        "rc step\n"
+        "V1 in 0 PULSE(0 1 1u 1n 1u 10m 10m)\n"
+        "R1 in out 1k\n"
+        "C1 out 0 1u\n"
+        ".tran 10u 5m\n";
+    // tau = 1 ms; the step lands at 1 us. Defaults gate: 1e-3 V.
+    {
+        const auto run = run_text(deck);
+        REQUIRE(run);
+        const Table& t = run->results.tables[0];
+        CHECK(t.sweep_names == std::vector<std::string>{"time"});
+        const auto& r1 = row_near(t, 1.001e-3);  // 1 tau after the edge
+        CHECK(std::abs(r1[col_of(t, "v(out)") + 1] - 0.632120558828) < 1e-3);
+        const auto& r3 = row_near(t, 3.001e-3);  // 3 tau
+        CHECK(std::abs(r3[col_of(t, "v(out)") + 1] - 0.950212931632) < 1e-3);
+    }
+    // Tightened gate: reltol=1e-6, smaller tstep -> 1e-5 V.
+    {
+        RunSettings s;
+        s.reltol = 1e-6;
+        const auto run = run_text(
+            "rc tight\n"
+            "V1 in 0 PULSE(0 1 1u 1n 1u 10m 10m)\n"
+            "R1 in out 1k\n"
+            "C1 out 0 1u\n"
+            ".tran 2u 5m\n"
+            ".options reltol=1e-6\n",
+            nullptr, s);
+        REQUIRE(run);
+        const Table& t = run->results.tables[0];
+        const auto& r1 = row_near(t, 1.001e-3);
+        CHECK(std::abs(r1[col_of(t, "v(out)") + 1] - 0.632120558828) < 1e-5);
+    }
+}
+
+TEST_CASE(".tran: trap order 2 - RC error ratio ~4 on halving fixed dt") {
+    // The test-only fixed-step hook: pure trapezoidal, no BE restarts, no
+    // LTE rejection, so the halving study is meaningful (§10.1). The step
+    // edge sits at 1 us with an OP before it (no UIC: a cold UIC start is
+    // deliberately inconsistent per §6.5 and its O(h) kink would mask the
+    // order); rows after the edge are 1.001us + k*dt (the 1 ns ramp
+    // breakpoint lands first) and each compares against the closed form
+    // from the ramp midpoint.
+    const char* deck =
+        "rc order\n"
+        "V1 in 0 PULSE(0 1 1u 1n 1u 10m)\n"
+        "R1 in out 1k\n"
+        "C1 out 0 1u\n"
+        ".tran 10u 5m\n";
+    auto max_err = [&](double h) {
+        RunSettings s;
+        s.fixed_dt = h;
+        const auto run = run_text(deck, nullptr, s);
+        REQUIRE(run);
+        const Table& t = run->results.tables[0];
+        const std::size_t vcol = col_of(t, "v(out)") + 1;
+        double worst = 0.0;
+        for (const auto& row : t.rows) {
+            if (row[0] <= 1.0011e-6) {
+                continue;  // pre-edge (all zeros) and the ramp step itself
+            }
+            const double want = 1.0 - std::exp(-(row[0] - 1.0005e-6) / 1e-3);
+            worst = std::max(worst, std::abs(want - row[vcol]));
+        }
+        return worst;
+    };
+    const double e_coarse = max_err(20e-6);
+    const double e_fine = max_err(10e-6);
+    REQUIRE(e_fine > 0.0);
+    const double ratio = e_coarse / e_fine;
+    CHECK(ratio > 3.8);
+    CHECK(ratio < 4.2);
+}
+
+TEST_CASE(".tran: series RLC step - ringing frequency and overshoot") {
+    // R=10, L=1m, C=1u: zeta = 0.158, f_d = 4.968 kHz, overshoot 0.605.
+    RunSettings s;
+    s.fixed_dt = 0.2e-6;  // ~1000 steps per ring
+    const auto run = run_text(
+        "rlc\n"
+        "V1 in 0 1\n"
+        "R1 in mid 10\n"
+        "L1 mid out 1m\n"
+        "C1 out 0 1u\n"
+        ".ic v(out)=0\n"
+        ".tran 1u 1m UIC\n",
+        nullptr, s);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const std::size_t vcol = col_of(t, "v(out)") + 1;
+
+    // Peak (overshoot) within 1e-3 V of the closed form.
+    double peak = 0.0;
+    for (const auto& row : t.rows) {
+        peak = std::max(peak, row[vcol]);
+    }
+    const double zeta = 10.0 / 2.0 * std::sqrt(1e-6 / 1e-3);
+    const double want_peak = 1.0 + std::exp(-kPi * zeta / std::sqrt(1 - zeta * zeta));
+    CHECK(std::abs(peak - want_peak) < 1e-3);
+
+    // Ringing frequency from the first two downward zero crossings of
+    // v - 1, within 0.2%.
+    std::vector<double> crossings;
+    for (std::size_t i = 1; i < t.rows.size(); ++i) {
+        const double a = t.rows[i - 1][vcol] - 1.0;
+        const double b = t.rows[i][vcol] - 1.0;
+        if (a > 0 && b <= 0) {
+            crossings.push_back(t.rows[i - 1][0] +
+                                a / (a - b) * (t.rows[i][0] - t.rows[i - 1][0]));
+            if (crossings.size() == 2) {
+                break;
+            }
+        }
+    }
+    REQUIRE(crossings.size() == 2);
+    const double period = crossings[1] - crossings[0];
+    const double fd = 1.0 / (2 * kPi * std::sqrt(1e-9)) * std::sqrt(1 - zeta * zeta);
+    CHECK(std::abs(1.0 / period - fd) / fd < 0.002);
+}
+
+TEST_CASE(".tran: undamped LC conserves amplitude over 50 periods") {
+    // v(t) = cos(t) with L = C = 1; the trap companion is the Cayley
+    // transform, so amplitude drift over 50 periods stays within 1%.
+    RunSettings s;
+    s.fixed_dt = 2 * kPi / 100.0;
+    const auto run = run_text(
+        "lc\n"
+        "L1 out 0 1\n"
+        "C1 out 0 1\n"
+        ".ic v(out)=1\n"
+        ".tran 0.1 400 UIC\n",
+        nullptr, s);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const std::size_t vcol = col_of(t, "v(out)") + 1;
+    double tail_peak = 0.0;
+    for (const auto& row : t.rows) {
+        if (row[0] > 49.0 * 2 * kPi) {
+            tail_peak = std::max(tail_peak, std::abs(row[vcol]));
+        }
+    }
+    CHECK(tail_peak > 0.99);
+    CHECK(tail_peak < 1.01);
+}
+
+TEST_CASE(".ac: RC low-pass re/im against the closed form, 1e-9 rel") {
+    const auto run = run_text(
+        "lp\n"
+        "V1 in 0 DC 0 AC 1\n"
+        "R1 in out 1k\n"
+        "C1 out 0 1u\n"
+        ".ac dec 4 1 1e6\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    CHECK(t.sweep_names == std::vector<std::string>{"frequency"});
+    CHECK(t.columns == std::vector<std::string>{"re(v(in))", "im(v(in))",
+                                                "re(v(out))", "im(v(out))",
+                                                "re(i(V1))", "im(i(V1))"});
+    REQUIRE(t.rows.size() > 10);
+    for (const auto& row : t.rows) {
+        const double w = 2 * kPi * row[0];
+        const double rc = 1e-3;
+        // v_out = 1/(1 + j w RC) = (1 - j w RC)/(1 + (w RC)^2)
+        const double want_re = 1.0 / (1.0 + (w * rc) * (w * rc));
+        const double want_im = -(w * rc) / (1.0 + (w * rc) * (w * rc));
+        const double got_re = row[col_of(t, "re(v(out))") + 1];
+        const double got_im = row[col_of(t, "im(v(out))") + 1];
+        CHECK(got_re == doctest::Approx(want_re).epsilon(1e-9));
+        CHECK(got_im == doctest::Approx(want_im).epsilon(1e-9));
+    }
+}
+
+TEST_CASE(".ac: series RLC - |Y| curve, resonance and Q, 1e-9 rel") {
+    // A fine linear grid around f0 = 5.033 kHz so the peak is resolved;
+    // every row still checks against the closed form.
+    const auto run = run_text(
+        "rlc ac\n"
+        "V1 in 0 DC 0 AC 1\n"
+        "R1 in mid 10\n"
+        "L1 mid out 1m\n"
+        "C1 out 0 1u\n"
+        ".ac lin 401 4k 6k\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    double best_f = 0.0;
+    double best_g = 0.0;
+    for (const auto& row : t.rows) {
+        const double w = 2 * kPi * row[0];
+        const double x = w * 1e-3 - 1.0 / (w * 1e-6);
+        // i(V1) carries the source convention: negative when delivering
+        // (same as .op), so i(V1) = -Y*V = -(R - jX)/(R^2 + X^2).
+        const double want_re = -10.0 / (100.0 + x * x);
+        const double want_im = x / (100.0 + x * x);
+        const double got_re = row[col_of(t, "re(i(V1))") + 1];
+        const double got_im = row[col_of(t, "im(i(V1))") + 1];
+        CHECK(got_re == doctest::Approx(want_re).epsilon(1e-9));
+        CHECK(got_im == doctest::Approx(want_im).epsilon(1e-9));
+        const double g = std::hypot(got_re, got_im);
+        if (g > best_g) {
+            best_g = g;
+            best_f = row[0];
+        }
+    }
+    // Peak conductance 1/R at f0 = 1/(2 pi sqrt(LC)); the grid is 5 Hz,
+    // so the peak row sits within one cell of f0.
+    CHECK(best_g == doctest::Approx(0.1).epsilon(1e-5));
+    const double f0 = 1.0 / (2 * kPi * std::sqrt(1e-9));
+    CHECK(std::abs(best_f - f0) < 10.0);
+}
+
+TEST_CASE(".ac: coupled inductors - voltage ratio ~ sqrt(L2/L1) as k -> 1") {
+    const auto run = run_text(
+        "xfmr\n"
+        "V1 a 0 AC 1\n"
+        "R1 a p 1\n"
+        "L1 p 0 1m\n"
+        "L2 b 0 4m\n"
+        "K1 L1 L2 0.9999\n"
+        "R2 b 0 100k\n"
+        ".ac dec 1 10k 100k\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    for (const auto& row : t.rows) {
+        const double vb = std::hypot(row[col_of(t, "re(v(b))") + 1],
+                                     row[col_of(t, "im(v(b))") + 1]);
+        CHECK(vb == doctest::Approx(2.0).epsilon(1e-3));  // sqrt(4m/1m)
+    }
+}
+
+TEST_CASE(".tran: switch + RC charge curve from the closing breakpoint") {
+    // The switch closes when the control PWL ramp crosses Vt = 2 V
+    // (t_c = 1.0004 us); from there v(out) follows the closed form.
+    const auto run = run_text(
+        "sw\n"
+        "V1 in 0 5\n"
+        "Vc ctl 0 PWL(0 0 1u 0 1.001u 5)\n"
+        "S1 in mid ctl 0 swmod\n"
+        "R1 mid out 1k\n"
+        "C1 out 0 1u\n"
+        "R2 out 0 1meg\n"
+        ".model swmod SW(Ron=1 Roff=1meg Vt=2)\n"
+        ".tran 1u 4m\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double tc = 1.0004e-6;
+    const double rs = 1001.0;          // Ron + R1
+    const double r2 = 1e6;
+    const double final_v = 5 * r2 / (rs + r2);
+    const double tau = (rs * r2 / (rs + r2)) * 1e-6;
+    const double v0 = 5 * r2 / (1e6 + rs + r2);
+    for (const double when : {0.5e-3, 1.5e-3, 3.0e-3}) {
+        const auto& row = row_near(t, when);
+        const double want = final_v + (v0 - final_v) * std::exp(-(row[0] - tc) / tau);
+        CHECK(std::abs(row[col_of(t, "v(out)") + 1] - want) < 1e-3);
+    }
+}
+
+TEST_CASE(".tran: W (current-controlled) switch flips on its sense current") {
+    // The sense source Vs sits in series with the drive: current flows
+    // INTO its + terminal (p -> n through the source), so i(Vs) reads
+    // positive while the ramp rises (a source shown delivering reads
+    // negative - the .op convention).
+    const auto run = run_text(
+        "wsw\n"
+        "Vd d 0 PWL(0 0 1u 0 1.001u 5)\n"
+        "R4 d x 1k\n"
+        "Vs x 0 DC 0\n"
+        "V1 in 0 5\n"
+        "R1 in mid 1k\n"
+        "W1 mid out Vs wmod\n"
+        "C1 out 0 1u\n"
+        "R2 out 0 1meg\n"
+        ".model wmod SW(Ron=1 Roff=1meg It=2.5m Ih=0)\n"
+        ".tran 1u 3m\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const std::size_t vcol = col_of(t, "v(out)") + 1;
+    // At the ramp start (1 us, switch still off): v(out) sits at the
+    // Roff divider 5*R2/(Roff+R1+R2) ~ 2.499.
+    const auto& before = row_near(t, 1.0e-6);
+    CHECK(before[vcol] == doctest::Approx(2.49875).epsilon(1e-3));
+    // After closing: charges toward 5 * R2/(1001 + R2) ~ 4.995 with
+    // tau ~ 1 ms; at 2.9 ms it is past 4.8 V.
+    const auto& late = row_near(t, 2.9e-3);
+    CHECK(late[vcol] > 4.8);
+}
+
+TEST_CASE(".tran: SIN/PWL/EXP waveform sources evaluate at their breakpoints") {
+    // SIN quarter-period peak: v(out) = sin(2*pi*1k*0.25m) = 1.
+    {
+        RunSettings s;
+        s.fixed_dt = 1e-6;
+        const auto run = run_text(
+            "sin\nV1 out 0 SIN(0 1 1k)\nR1 out 0 1meg\n.tran 1u 1m\n", nullptr, s);
+        REQUIRE(run);
+        const Table& t = run->results.tables[0];
+        const auto& row = row_near(t, 2.5e-4);
+        CHECK(row[col_of(t, "v(out)") + 1] == doctest::Approx(1.0).epsilon(1e-9));
+    }
+    // PWL ramp: v = t/2m at t = 1.5m.
+    {
+        RunSettings s;
+        s.fixed_dt = 1e-6;
+        const auto run = run_text(
+            "pwl\nV1 out 0 PWL(0 0 2m 1)\nR1 out 0 1meg\n.tran 1u 2m\n", nullptr, s);
+        REQUIRE(run);
+        const Table& t = run->results.tables[0];
+        const auto& row = row_near(t, 1.5e-3);
+        CHECK(row[col_of(t, "v(out)") + 1] == doctest::Approx(0.75).epsilon(1e-9));
+    }
+    // EXP single rise: TD2/TAU2 given explicitly (the ngspice default
+    // TD2 = TD1+TSTEP would fold the pulse back within a step).
+    {
+        RunSettings s;
+        s.fixed_dt = 1e-9;
+        const auto run = run_text(
+            "exp\nV1 out 0 EXP(0 1 1u 1u 1 1)\nR1 out 0 1meg\n.tran 1n 5u\n",
+            nullptr, s);
+        REQUIRE(run);
+        const Table& t = run->results.tables[0];
+        const auto& row = row_near(t, 2e-6);
+        CHECK(row[col_of(t, "v(out)") + 1] ==
+              doctest::Approx(1.0 - std::exp(-1.0)).epsilon(1e-6));
+    }
+}
+
+TEST_CASE("M2 errors: no AC stimulus, bad K, L loops, floating caps") {
+    // §7.4: a deck with .ac and no AC source is an error, never zeros.
+    CHECK(error_of(run_text(
+              "noac\nV1 in 0 1\nR1 in out 1k\nC1 out 0 1u\n.ac dec 10 1 1k\n"))
+              .find("no AC stimulus") != std::string::npos);
+
+    // |k| >= 1 is singular.
+    CHECK(error_of(run_text(
+              "kbad\nV1 a 0 1\nR1 a b 1\nL1 b 0 1m\nL2 c 0 1m\nR2 c 0 1k\n"
+              "K1 L1 L2 1\n.tran 1u 1m\n"))
+              .find("k = 1 is singular") != std::string::npos);
+
+    // K names an unknown inductor.
+    CHECK(error_of(run_text(
+              "kbad2\nV1 a 0 1\nR1 a b 1\nL1 b 0 1m\nK1 L1 L9 0.5\n.tran 1u 1m\n"))
+              .find("unknown inductor") != std::string::npos);
+
+    // An inductor across a V source is a constraint loop (§6.6).
+    CHECK(error_of(run_text(
+              "vl\nV1 a 0 5\nL1 a 0 1m\nR1 a 0 1k\n.op\n"))
+              .find("voltage-source/inductor loop") != std::string::npos);
+
+    // Two parallel inductors: an inductor loop.
+    CHECK(error_of(run_text(
+              "ll\nV1 a b 5\nL1 a b 1m\nL2 a b 2m\nR1 b 0 1k\n.op\n"))
+              .find("inductor loop") != std::string::npos);
+
+    // A node whose only path is through a capacitor has no DC path (§6.6).
+    CHECK(error_of(run_text(
+              "floatc\nI1 a b 1m\nR1 a 0 1k\nC1 b 0 1u\n.op\n"))
+              .find("no DC path to ground from node 'b'") != std::string::npos);
+
+    // .ic names an unknown node.
+    CHECK(error_of(run_text(
+              "icx\nV1 a 0 1\nR1 a 0 1k\n.tran 1u 1m\n.ic v(nope)=1\n"))
+              .find("unknown node 'nope'") != std::string::npos);
+
+    // .ic cannot force ground.
+    CHECK(error_of(run_text(
+              "icg\nV1 a 0 1\nR1 a 0 1k\n.tran 1u 1m\n.ic v(0)=1\n"))
+              .find("cannot force the ground node") != std::string::npos);
+
+    // A switch model with Ron >= Roff is rejected.
+    CHECK(error_of(run_text(
+              "swbad\nV1 a 0 1\nS1 a b a 0 m1\nR1 b 0 1k\n.model m1 SW(Ron=1 Roff=0.5)\n"
+              ".op\n"))
+              .find("0 < Ron < Roff") != std::string::npos);
+
+    // An unused .model warns (§9.3).
+    std::vector<Warning> warnings;
+    REQUIRE(run_text("unused\nV1 a 0 1\nR1 a 0 1k\n.op\n.model m1 SW\n",
+                     &warnings));
+    REQUIRE(warnings.size() == 1);
+    CHECK(warnings[0].render().find("unused .model") != std::string::npos);
+}
+
+TEST_CASE("CSV: .tran time column and .ac re()/im() pairs") {
+    const auto run = run_text(
+        "both\n"
+        "V1 in 0 DC 0 AC 1\n"
+        "R1 in out 1k\n"
+        "C1 out 0 1u\n"
+        ".tran 10u 50u\n"
+        ".ac dec 1 1k 10k\n");
+    REQUIRE(run);
+    const std::string csv = ws::spice::results_csv(run->results);
+    // Two sections joined by a blank line: time-first then frequency-first.
+    CHECK(csv.find("time,v(in),v(out),i(V1)\n") == 0);
+    CHECK(csv.find("\n\nfrequency,re(v(in)),im(v(in)),re(v(out)),im(v(out)),"
+                   "re(i(V1)),im(i(V1))\n") != std::string::npos);
 }

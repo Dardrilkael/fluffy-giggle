@@ -20,7 +20,6 @@ Diagnostic card_diag(ErrorKind kind, std::string code, std::string message, Sour
 // Milestone by device letter (§11): the not-yet story per kind.
 const std::map<char, const char*>& device_milestones() {
     static const std::map<char, const char*> table = {
-        {'C', "M2"}, {'L', "M2"}, {'K', "M2"}, {'S', "M2"}, {'W', "M2"},
         {'D', "M3"}, {'B', "M4"}, {'Q', "M4"}, {'M', "M4"}, {'T', "M4"},
     };
     return table;
@@ -28,9 +27,8 @@ const std::map<char, const char*>& device_milestones() {
 
 const std::map<std::string, const char*>& card_milestones() {
     static const std::map<std::string, const char*> table = {
-        {".tran", "M2"},   {".ac", "M2"},     {".ic", "M2"},
-        {".noise", "M5"},  {".step", "M5"},   {".meas", "M5"},
-        {".save", "M5"},   {".print", "M5"},  {".probe", "M5"},
+        {".noise", "M5"},   {".step", "M5"},   {".meas", "M5"},
+        {".save", "M5"},    {".print", "M5"},  {".probe", "M5"},
         {".nodeset", "M5"},
         {".lib", "backlog"},  {".global", "backlog"}, {".func", "backlog"},
         {".alter", "backlog"}, {".tf", "backlog"},    {".pz", "backlog"},
@@ -44,8 +42,8 @@ const std::map<std::string, const char*>& card_milestones() {
 bool known_option_key(const std::string& lower) {
     return lower == "reltol" || lower == "abstol" || lower == "vntol" ||
            lower == "gmin" || lower == "itl1" || lower == "itl2" || lower == "itl4" ||
-           lower == "temp" || lower == "tnom" || lower == "solver" ||
-           lower == "gshunt";
+           lower == "chgtol" || lower == "trtol" || lower == "temp" ||
+           lower == "tnom" || lower == "solver" || lower == "gshunt";
 }
 
 // "name=expr" -> (name token, expression text). The expression side may be
@@ -115,6 +113,117 @@ ws::core::Result<ParsedCard> parse_card(const Record& rec, bool inside_subckt,
             card.op = OpCard{rec.loc};
             return card;
         }
+        if (first_lower == ".tran") {
+            if (inside_subckt) {
+                return spice_fail(card_diag(ErrorKind::Parse, "spice.parse.card_scope",
+                                            "analysis card '.tran' inside .subckt", rec.loc));
+            }
+            // .tran tstep tstop [tstart [tmax]] [UIC] - UIC may appear
+            // anywhere after tstop (ngspice).
+            TranCard tran;
+            tran.loc = rec.loc;
+            std::vector<Token> nums;
+            for (std::size_t i = 1; i < rec.tokens.size(); ++i) {
+                if (to_lower(rec.tokens[i].text) == "uic") {
+                    tran.uic = true;
+                    continue;
+                }
+                nums.push_back(rec.tokens[i]);
+            }
+            if (nums.size() < 2 || nums.size() > 4) {
+                return spice_fail(card_diag(
+                    ErrorKind::Parse, "spice.parse.tran_arity",
+                    "'.tran' takes TSTEP TSTOP [TSTART [TMAX]] [UIC]", rec.loc));
+            }
+            WS_TRY_ASSIGN(tran.tstep, expr_from_text(nums[0].text, nums[0].loc));
+            WS_TRY_ASSIGN(tran.tstop, expr_from_text(nums[1].text, nums[1].loc));
+            if (nums.size() >= 3) {
+                WS_TRY_ASSIGN(tran.tstart, expr_from_text(nums[2].text, nums[2].loc));
+                tran.has_tstart = true;
+            }
+            if (nums.size() == 4) {
+                WS_TRY_ASSIGN(tran.tmax, expr_from_text(nums[3].text, nums[3].loc));
+                tran.has_tmax = true;
+            }
+            card.kind = ParsedCard::Kind::Tran;
+            card.tran = std::move(tran);
+            return card;
+        }
+        if (first_lower == ".ac") {
+            if (inside_subckt) {
+                return spice_fail(card_diag(ErrorKind::Parse, "spice.parse.card_scope",
+                                            "analysis card '.ac' inside .subckt", rec.loc));
+            }
+            if (rec.tokens.size() != 5) {
+                return spice_fail(card_diag(
+                    ErrorKind::Parse, "spice.parse.ac_arity",
+                    "'.ac' takes DEC|OCT|LIN N FSTART FSTOP", rec.loc));
+            }
+            AcCard ac;
+            ac.loc = rec.loc;
+            const std::string mode = to_lower(rec.tokens[1].text);
+            if (mode == "dec") {
+                ac.sweep = AcCard::Sweep::Dec;
+            } else if (mode == "oct") {
+                ac.sweep = AcCard::Sweep::Oct;
+            } else if (mode == "lin") {
+                ac.sweep = AcCard::Sweep::Lin;
+            } else {
+                return spice_fail(card_diag(
+                    ErrorKind::Parse, "spice.parse.ac_mode",
+                    "'.ac' sweep mode '" + rec.tokens[1].text +
+                        "' is not one of dec, oct, lin",
+                    rec.loc));
+            }
+            WS_TRY_ASSIGN(ac.n, expr_from_text(rec.tokens[2].text, rec.tokens[2].loc));
+            WS_TRY_ASSIGN(ac.fstart, expr_from_text(rec.tokens[3].text, rec.tokens[3].loc));
+            WS_TRY_ASSIGN(ac.fstop, expr_from_text(rec.tokens[4].text, rec.tokens[4].loc));
+            card.kind = ParsedCard::Kind::Ac;
+            card.ac = std::move(ac);
+            return card;
+        }
+        if (first_lower == ".ic") {
+            if (inside_subckt) {
+                return spice_fail(card_diag(ErrorKind::Parse, "spice.parse.card_scope",
+                                            "'.ic' inside .subckt", rec.loc));
+            }
+            if (rec.tokens.size() < 2) {
+                return spice_fail(card_diag(ErrorKind::Parse, "spice.parse.ic_arity",
+                                            "'.ic' needs v(node)=value ...", rec.loc));
+            }
+            IcCard ic;
+            ic.loc = rec.loc;
+            for (std::size_t i = 1; i < rec.tokens.size(); ++i) {
+                const std::string& t = rec.tokens[i].text;
+                const std::string lower = to_lower(t);
+                // v(node)=value: the node name is everything between the
+                // leading "v(" and the FIRST ')' - node names are single
+                // tokens, so no nested parens to worry about.
+                const std::size_t eq = t.find('=');
+                bool ok = lower.rfind("v(", 0) == 0 && eq != std::string::npos;
+                std::size_t close = std::string::npos;
+                if (ok) {
+                    close = t.find(')');
+                    ok = close != std::string::npos && close > 2 && close < eq &&
+                         eq + 1 < t.size();
+                }
+                if (!ok) {
+                    return spice_fail(card_diag(
+                        ErrorKind::Parse, "spice.parse.ic_form",
+                        "'.ic' entries look like v(node)=value, got '" + t + "'",
+                        rec.tokens[i].loc));
+                }
+                Token node;
+                node.text = t.substr(2, close - 2);
+                node.loc = rec.tokens[i].loc;
+                WS_TRY_ASSIGN(ExprProgram expr,
+                              expr_from_text(t.substr(eq + 1), rec.tokens[i].loc));
+                ic.node_values.emplace_back(std::move(node), std::move(expr));
+            }
+            card.kind = ParsedCard::Kind::Ic;
+            card.ic = std::move(ic);
+            return card;
+        }
         if (first_lower == ".dc") {
             if (inside_subckt) {
                 return spice_fail(card_diag(ErrorKind::Parse, "spice.parse.card_scope",
@@ -170,43 +279,81 @@ ws::core::Result<ParsedCard> parse_card(const Record& rec, bool inside_subckt,
                 return spice_fail(card_diag(ErrorKind::Parse, "spice.parse.model_arity",
                                             "'.model' needs NAME TYPE (params...)", rec.loc));
             }
-            const std::string type = to_lower(rec.tokens[2].text);
-            if (type != "r") {
+            // The type token may glue the opening paren - "SW(Ron=1" -
+            // or carry a lone "(" in the next token; normalize to TYPE +
+            // a flat param list whose entries may still carry parens
+            // ("Vt=2)") - apply_model strips them.
+            std::string type = rec.tokens[2].text;
+            std::string glued_param;
+            if (const std::size_t paren = type.find('('); paren != std::string::npos) {
+                glued_param = type.substr(paren + 1);
+                type = type.substr(0, paren);
+            }
+            const std::string type_lower = to_lower(type);
+            if (type_lower != "r" && type_lower != "sw") {
                 return spice_fail(card_diag(
                     ErrorKind::Parse, "spice.parse.model_type",
-                    "model type '" + rec.tokens[2].text +
-                        "' is not supported in v1 (resistor models only; diode M3, BJT/MOS M4)",
+                    "model type '" + type +
+                        "' is not supported in v1 (resistor models M5, switch models M2;"
+                        " diode M3, BJT/MOS M4)",
                     rec.loc));
             }
+            std::vector<Token> params;
+            if (!glued_param.empty() && glued_param != ")") {
+                Token t;
+                t.text = glued_param;
+                t.loc = rec.tokens[2].loc;
+                params.push_back(std::move(t));
+            }
+            for (std::size_t i = 3; i < rec.tokens.size(); ++i) {
+                params.push_back(rec.tokens[i]);
+            }
             card.kind = ParsedCard::Kind::Model;
-            card.model = ModelDef{rec.tokens[1], type,
-                                  std::vector<Token>(rec.tokens.begin() + 3,
-                                                     rec.tokens.end()),
+            card.model = ModelDef{rec.tokens[1], type_lower, std::move(params),
                                   rec.loc};
             return card;
         }
         if (first_lower == ".options") {
-            if ((rec.tokens.size() - 1) % 2 != 0) {
-                return spice_fail(card_diag(
-                    ErrorKind::Parse, "spice.parse.options_arity",
-                    "'.options' takes KEY VALUE pairs (dangling key '" +
-                        rec.tokens.back().text + "')",
-                    rec.loc));
-            }
+            // KEY VALUE pairs and ngspice's KEY=VALUE single tokens.
             card.kind = ParsedCard::Kind::Options;
             OptionsCard opts;
             opts.loc = rec.loc;
-            for (std::size_t i = 1; i + 1 < rec.tokens.size(); i += 2) {
-                const std::string key = to_lower(rec.tokens[i].text);
-                if (!known_option_key(key)) {
+            bool pair_ok = true;
+            for (std::size_t i = 1; i < rec.tokens.size(); ++i) {
+                Token key = rec.tokens[i];
+                Token value;
+                const std::size_t eq = key.text.find('=');
+                if (eq != std::string::npos && eq > 0 && eq + 1 < key.text.size()) {
+                    value.text = key.text.substr(eq + 1);
+                    value.loc = key.loc;
+                    key.text = key.text.substr(0, eq);
+                } else if (eq != std::string::npos) {
+                    return spice_fail(card_diag(
+                        ErrorKind::Parse, "spice.parse.options_arity",
+                        "'.options' key '" + key.text + "' needs a value", rec.loc));
+                } else if (i + 1 < rec.tokens.size()) {
+                    value = rec.tokens[++i];
+                } else {
+                    pair_ok = false;
+                    value = rec.tokens.back();
+                }
+                if (!pair_ok) {
+                    return spice_fail(card_diag(
+                        ErrorKind::Parse, "spice.parse.options_arity",
+                        "'.options' takes KEY VALUE pairs (dangling key '" +
+                            rec.tokens.back().text + "')",
+                        rec.loc));
+                }
+                const std::string key_lower = to_lower(key.text);
+                if (!known_option_key(key_lower)) {
                     Warning w;
                     w.diag = card_diag(ErrorKind::Parse, "spice.warn.options_ignored",
-                                       "ignored .options key '" + rec.tokens[i].text + "'",
-                                       rec.tokens[i].loc);
+                                       "ignored .options key '" + key.text + "'",
+                                       key.loc);
                     warnings.push_back(std::move(w));
                     continue;
                 }
-                opts.kv.emplace_back(rec.tokens[i], rec.tokens[i + 1]);
+                opts.kv.emplace_back(key, value);
             }
             card.options = std::move(opts);
             return card;
@@ -248,7 +395,7 @@ ws::core::Result<ParsedCard> parse_card(const Record& rec, bool inside_subckt,
     }
     const char letter =
         static_cast<char>(std::toupper(static_cast<unsigned char>(name_text[0])));
-    const std::string supported = "RVIEFGHX";
+    const std::string supported = "RVIEFGHXCLKSW";
     if (supported.find(letter) == std::string::npos) {
         if (device_milestones().count(letter) != 0) {
             return spice_fail(card_diag(
@@ -391,6 +538,29 @@ ws::core::Result<DeckAst> build_deck_ast(const Deck& deck, std::vector<Warning>&
                 a.loc = card.loc;
                 a.dc = card.dc;
                 ast.analyses.push_back(std::move(a));
+                break;
+            }
+            case K::Tran: {
+                AnalysisCard a;
+                a.loc = card.loc;
+                a.tran = card.tran;
+                ast.analyses.push_back(std::move(a));
+                break;
+            }
+            case K::Ac: {
+                AnalysisCard a;
+                a.loc = card.loc;
+                a.ac = card.ac;
+                ast.analyses.push_back(std::move(a));
+                break;
+            }
+            case K::Ic: {
+                if (inside) {
+                    return spice_fail(ast_diag(
+                        ErrorKind::Parse, "spice.parse.card_scope",
+                        "'.ic' inside .subckt", rec.loc));
+                }
+                ast.ics.push_back(card.ic);
                 break;
             }
             case K::Subckt: {

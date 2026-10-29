@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -81,32 +82,44 @@ std::vector<double> extract_row(const Circuit& c, const SaveList& s,
 
 class DcKernel {
 public:
-    DcKernel(const Circuit& circuit, const RunSettings& settings)
+    // Non-const: transient state (begin_step/commit/update_state) mutates
+    // devices through the circuit's unique_ptrs (§3.5).
+    DcKernel(Circuit& circuit, const RunSettings& settings)
         : circuit_(circuit), settings_(settings),
           mna_(circuit.node_count(), circuit.branch_count) {}
 
-    // Pattern dry run + symbolic analyze (§3.2): once per circuit.
-    ws::core::Status prepare() {
-        return mna_.setup(circuit_.devices);
-    }
+    // Pattern dry run (dc + tran + ac union) + symbolic analyze (§3.2).
+    ws::core::Status prepare() { return mna_.setup(circuit_.devices); }
+
+    // The complex twin over the same pattern (§7.4).
+    ws::core::Status prepare_ac() { return mna_.setup_ac(); }
 
     // One Newton solve to convergence. `x` is the warm start in, the
     // solution out. `context` rides into any Diagnostic (§9.2), e.g.
-    // ".dc V1 at 3.3 V".
+    // ".dc V1 at 3.3 V". `forces` (optional) stamps §6.5 .ic constraints
+    // (a stiff Norton per forced node) on every load pass.
     ws::core::Status solve(std::vector<double>& x, int max_iterations,
-                           const std::string& context, std::size_t& iterations) {
+                           const std::string& context, std::size_t& iterations,
+                           const std::vector<std::pair<std::size_t, double>>* forces =
+                               nullptr) {
         const std::size_t nc = circuit_.node_count();
+        double gforce = 0.0;
+        if (forces != nullptr && !forces->empty()) {
+            mna_.load(circuit_.devices);
+            gforce = 1e9 * std::max(mna_.max_diagonal(), 1e-9);
+        }
         // Cold start: an unsized (or stale-sized) x means all zeros.
         if (x.size() != mna_.dim()) {
             x.assign(mna_.dim(), 0.0);
         }
         for (int it = 1; it <= max_iterations; ++it) {
             ++iterations;
-            // M1 devices are linear, so the stamp cannot depend on x.
-            // M3's nonlinear devices will need the CURRENT iterate here
-            // (DESIGN.md §3.6: load must produce the exact linearization
-            // at the current iterate) - tracked in docs/SPICE_PLAN.md.
             mna_.load(circuit_.devices);
+            if (forces != nullptr) {
+                for (const auto& [node, volts] : *forces) {
+                    mna_.force_node(node, volts, gforce);
+                }
+            }
             std::vector<double> x_new;
             WS_TRY(mna_.solve(x_new));
 
@@ -120,16 +133,25 @@ public:
                 }
             }
 
+            // Switch controls re-evaluate against the candidate; a flip
+            // means the linearization changed - iterate again.
+            bool state_changed = false;
+            for (const auto& dev : circuit_.devices) {
+                state_changed = dev->update_state(x_new, nc) || state_changed;
+            }
+
             // §5.1: |dx| <= reltol*max(|new|,|old|) + tol_abs per unknown,
             // tol_abs = vntol on voltages, abstol on branch currents.
-            bool converged = true;
-            for (std::size_t i = 0; i < x_new.size(); ++i) {
-                const double tol = settings_.reltol *
-                                       std::max(std::abs(x_new[i]), std::abs(x[i])) +
-                                   (i < nc ? settings_.vntol : settings_.abstol);
-                if (std::abs(x_new[i] - x[i]) > tol) {
-                    converged = false;
-                    break;
+            bool converged = !state_changed;
+            if (converged) {
+                for (std::size_t i = 0; i < x_new.size(); ++i) {
+                    const double tol = settings_.reltol *
+                                           std::max(std::abs(x_new[i]), std::abs(x[i])) +
+                                       (i < nc ? settings_.vntol : settings_.abstol);
+                    if (std::abs(x_new[i] - x[i]) > tol) {
+                        converged = false;
+                        break;
+                    }
                 }
             }
             x = std::move(x_new);
@@ -145,10 +167,65 @@ public:
         return spice_fail(std::move(d));
     }
 
+    // One transient step: companion load (coefficients from the devices'
+    // begin_step) -> solve -> switch re-evaluation, iterating while a
+    // switch flips. Every M2 device is linear, so one solve is exact; the
+    // loop exists for the switches only.
+    ws::core::Status solve_tran(std::vector<double>& x, const TranStep& step,
+                                const std::string& context, std::size_t& iterations) {
+        const std::size_t nc = circuit_.node_count();
+        for (int it = 1; it <= settings_.itl4; ++it) {
+            ++iterations;
+            mna_.load_tran(circuit_.devices, step);
+            std::vector<double> x_new;
+            WS_TRY(mna_.solve(x_new));
+            for (const double v : x_new) {
+                if (!std::isfinite(v)) {
+                    Diagnostic d = run_diag(
+                        ErrorKind::Convergence, "spice.convergence.nan",
+                        "transient iterate is not finite");
+                    d.analysis = context;
+                    return spice_fail(std::move(d));
+                }
+            }
+            bool state_changed = false;
+            for (const auto& dev : circuit_.devices) {
+                state_changed = dev->update_state(x_new, nc) || state_changed;
+            }
+            x = std::move(x_new);
+            if (!state_changed) {
+                return {};
+            }
+        }
+        Diagnostic d = run_diag(
+            ErrorKind::Convergence, "spice.convergence.switch",
+            "switch state did not settle after " + std::to_string(settings_.itl4) +
+                " solves (chattering control?)");
+        d.analysis = context;
+        return spice_fail(std::move(d));
+    }
+
+    // One .ac point: complex load at omega + solve.
+    ws::core::Status solve_ac(std::vector<std::complex<double>>& xc, double omega,
+                              const std::string& context) {
+        mna_.load_ac(circuit_.devices, omega);
+        WS_TRY(mna_.solve_ac(xc));
+        for (const std::complex<double>& v : xc) {
+            if (!std::isfinite(v.real()) || !std::isfinite(v.imag())) {
+                Diagnostic d = run_diag(
+                    ErrorKind::Convergence, "spice.convergence.nan",
+                    "small-signal solution is not finite");
+                d.analysis = context;
+                return spice_fail(std::move(d));
+            }
+        }
+        return {};
+    }
+
     [[nodiscard]] std::size_t factorizations() const { return mna_.factorization_count(); }
 
 private:
-    const Circuit& circuit_;
+    Circuit& circuit_;
     const RunSettings& settings_;
     MnaSystem mna_;
 };
@@ -523,6 +600,448 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const DcCard& card,
     return t;
 }
 
+// --- .tran (§6) ----------------------------------------------------------------------
+
+constexpr double kTranInf = std::numeric_limits<double>::infinity();
+
+ws::core::Result<double> eval_expr(const ExprProgram& prog, const ParamTable& params) {
+    WS_TRY_ASSIGN(const std::vector<std::optional<double>> bindings, params.bind(prog));
+    WS_TRY_ASSIGN(const double v, prog.evaluate(bindings));
+    return v;
+}
+
+ws::core::Result<Table> run_tran(const DeckAst& ast, const TranCard& card,
+                                 const RunSettings& settings,
+                                 std::vector<Warning>& warnings, AnalysisReport& report) {
+    ParamTable global;
+    for (const ParamDef& def : ast.params) {
+        global.define(def);
+    }
+
+    WS_TRY_ASSIGN(Circuit circuit, elaborate_deck(ast, kDefaultTemp, warnings));
+    if (circuit.devices.empty()) {
+        return empty_circuit_error(".tran");
+    }
+
+    // --- resolve and validate the card ------------------------------------
+    WS_TRY_ASSIGN(const double tstep, eval_expr(card.tstep, global));
+    WS_TRY_ASSIGN(const double tstop, eval_expr(card.tstop, global));
+    double tstart = 0.0;
+    if (card.has_tstart) {
+        WS_TRY_ASSIGN(tstart, eval_expr(card.tstart, global));
+    }
+    double tmax = 0.0;
+    if (card.has_tmax) {
+        WS_TRY_ASSIGN(tmax, eval_expr(card.tmax, global));
+    }
+    auto tran_fail = [&](std::string message) -> ws::core::unexpected<ws::core::Error> {
+        Diagnostic d = run_diag(ErrorKind::Semantic, "spice.semantic.tran", std::move(message));
+        d.loc = card.loc;
+        return spice_fail(std::move(d));
+    };
+    if (!std::isfinite(tstep) || tstep <= 0.0) {
+        return tran_fail(".tran tstep must be positive");
+    }
+    if (!std::isfinite(tstop) || !std::isfinite(tstart) || tstop <= tstart || tstart < 0.0) {
+        return tran_fail(".tran needs 0 <= tstart < tstop");
+    }
+    if (card.has_tmax && (!std::isfinite(tmax) || tmax <= 0.0)) {
+        return tran_fail(".tran tmax must be positive");
+    }
+    // §6.3: dtmax = min(TMAX from the .tran card, (tstop-tstart)/50) - a
+    // CONSTANT, not (tstop-t)/50 (which would shrink toward zero at the
+    // end). TMAX omitted defaults to TSTEP (ngspice's default, pinned by
+    // the §10.1 RC row: with SPICE3's bare (tstop-tstart)/50 the 1-tau
+    // point misses the 1e-3*V gate on ordinary decks).
+    const double tmax_eff = card.has_tmax ? tmax : tstep;
+    const double dtmax = std::min(tmax_eff, (tstop - tstart) / 50.0);
+    const double dtmin = std::max(1e-18, tstop * 1e-15);
+
+    // Waveform defaults that depend on TSTEP/TSTOP resolve now (§6.2).
+    for (const auto& dev : circuit.devices) {
+        dev->finalize_waveform(tstep, tstop);
+    }
+
+    // --- .ic: node values (§6.5) ------------------------------------------
+    std::vector<std::pair<std::size_t, double>> ic_forces;
+    for (const IcCard& ic : ast.ics) {
+        for (const auto& [node_tok, expr] : ic.node_values) {
+            WS_TRY_ASSIGN(const double volts, eval_expr(expr, global));
+            const std::string node_lower = to_lower(node_tok.text);
+            if (node_lower == "0" || node_lower == "gnd") {
+                Diagnostic d = run_diag(ErrorKind::Semantic, "spice.semantic.ic",
+                                        "cannot force the ground node");
+                d.loc = node_tok.loc;
+                return spice_fail(std::move(d));
+            }
+            const auto it = circuit.node_ids.find(to_lower(node_tok.text));
+            if (it == circuit.node_ids.end()) {
+                Diagnostic d = run_diag(
+                    ErrorKind::Semantic, "spice.semantic.ic",
+                    ".ic names unknown node '" + node_tok.text + "'");
+                d.loc = node_tok.loc;
+                d.hint = "an .ic node must appear on a device card";
+                return spice_fail(std::move(d));
+            }
+            ic_forces.emplace_back(it->second, volts);
+        }
+    }
+
+    DcKernel kernel(circuit, settings);
+    if (const ws::core::Status st = kernel.prepare(); !st) {
+        return wrap_solver_error(st, ".tran");
+    }
+
+    const std::size_t nc = circuit.node_count();
+    std::vector<double> x;
+    std::size_t total_iterations = 0;
+
+    // --- the t=0 state (§6.5) ----------------------------------------------
+    if (card.uic) {
+        // UIC: no OP - .ic node values and device ic= overrides ARE the
+        // state; everything else starts at zero.
+        x.assign(circuit.dim(), 0.0);
+        for (const auto& [node, volts] : ic_forces) {
+            x[node] = volts;
+        }
+        for (const auto& dev : circuit.devices) {
+            if (dev->kind() == 'L' && dev->has_branch() && dev->has_ic()) {
+                x[nc + dev->branch()] = dev->ic_value();
+            }
+        }
+        for (const auto& dev : circuit.devices) {
+            dev->seed_state(x, nc);
+        }
+    } else {
+        // OP at t=0 with .ic enforced (stiff Norton, released when the
+        // transient starts).
+        std::size_t iterations = 0;
+        if (const ws::core::Status st =
+                kernel.solve(x, settings.itl1, ".tran t=0 op", iterations,
+                             ic_forces.empty() ? nullptr : &ic_forces);
+            !st) {
+            return wrap_solver_error(st, ".tran t=0 op");
+        }
+        total_iterations += iterations;
+        for (const auto& dev : circuit.devices) {
+            dev->seed_state(x, nc);
+        }
+    }
+
+    // --- the save-list + the t=0 row ----------------------------------------
+    SaveList save = default_save_list(circuit);
+    Table t;
+    t.analysis = AnalysisKind::Tran;
+    t.sweep = SweepKind::Time;
+    t.sweep_names.push_back("time");
+    auto push_row = [&](double now) {
+        std::vector<double> row;
+        row.reserve(1 + save.columns.size());
+        row.push_back(now);
+        for (const double v : extract_row(circuit, save, x)) {
+            row.push_back(v);
+        }
+        t.rows.push_back(std::move(row));
+    };
+    if (tstart <= 0.0) {
+        push_row(0.0);
+    }
+
+    // --- the time loop (§6.1/§6.3/§6.4) ------------------------------------
+    const bool fixed = settings.fixed_dt > 0.0;
+    double dt = fixed ? settings.fixed_dt : std::min(tstop / 50.0, dtmax);
+    double now = 0.0;  // simulation time (output gated at tstart)
+    bool be_next = true;  // §6.1: the first step after t=0 is BE
+    int consecutive_rejects = 0;
+    bool be_heuristic = false;  // §6.1 ringing damp: one BE step
+    std::size_t accepted = 0;
+    std::size_t rejected = 0;
+
+    while (now < tstop - 1e-12 * std::max(1.0, tstop)) {
+        // The next source event strictly after now (§6.4); dt truncates to
+        // land on it exactly, and the step AFTER the landing is BE.
+        double next_bp = kTranInf;
+        for (const auto& dev : circuit.devices) {
+            const double e = dev->next_event(now + dtmin);
+            if (e < next_bp) {
+                next_bp = e;
+            }
+        }
+        double step_dt = std::min(dt, tstop - now);
+        bool lands_bp = false;
+        if (next_bp < kTranInf && next_bp - now < step_dt) {
+            step_dt = next_bp - now;
+            lands_bp = true;
+        }
+        if (!(step_dt > 0.0) || step_dt < dtmin) {
+            step_dt = std::max(step_dt, dtmin);
+        }
+
+        const bool be = fixed ? false : (be_next || be_heuristic);
+        const TranStep step{now + step_dt, step_dt, be};
+
+        for (const auto& dev : circuit.devices) {
+            if (dev->is_dynamic()) {
+                dev->begin_step(step);
+            }
+        }
+
+        std::size_t iterations = 0;
+        {
+            char ctx[64];
+            std::snprintf(ctx, sizeof(ctx), ".tran t=%.6g s", step.time);
+            if (const ws::core::Status st = kernel.solve_tran(x, step, ctx, iterations);
+                !st) {
+                return wrap_solver_error(st, ctx);
+            }
+        }
+        total_iterations += iterations;
+
+        // LTE (§6.3) - skipped entirely in the fixed-step test mode.
+        double worst_ratio = 0.0;
+        if (!fixed) {
+            bool ok = true;
+            double shrink_factor = kTranInf;
+            for (const auto& dev : circuit.devices) {
+                if (!dev->is_dynamic()) {
+                    continue;
+                }
+                double ratio = 0.0;
+                if (!dev->lte_ok(step, x, nc, settings.reltol, settings.chgtol,
+                                 settings.trtol, &ratio)) {
+                    ok = false;
+                    // dt *= min(2, (tolq/eps)^(1/3)) per the violating device.
+                    const double f = (ratio > 0.0)
+                                         ? std::min(2.0, std::pow(1.0 / ratio, 1.0 / 3.0))
+                                         : 0.5;
+                    shrink_factor = std::min(shrink_factor, f);
+                }
+                worst_ratio = std::max(worst_ratio, ratio);
+            }
+            if (!ok) {
+                ++rejected;
+                ++consecutive_rejects;
+                // §6.1: LTE estimates alternating while dt already shrinks
+                // -> one BE step to damp the ringing, then back to trap.
+                be_heuristic = (consecutive_rejects >= 3);
+                if (shrink_factor < kTranInf) {
+                    dt *= shrink_factor;
+                }
+                if (!std::isfinite(dt) || dt < dtmin) {
+                    Diagnostic d = run_diag(
+                        ErrorKind::Timestep, "spice.timestep.too_small",
+                        "timestep fell below " + fmt_value(dtmin) +
+                            " s at t = " + fmt_value(now) +
+                            " s; the circuit cannot be resolved (stiff source"
+                            " edge or chattering switch?)");
+                    d.analysis = ".tran";
+                    d.hint = "tighten the source edges, raise chgtol/reltol, or add"
+                             " parasitic resistance";
+                    return spice_fail(std::move(d));
+                }
+                continue;  // retry; state is untouched until commit
+            }
+        }
+
+        // Accept.
+        now = step.time;
+        for (const auto& dev : circuit.devices) {
+            if (dev->is_dynamic()) {
+                dev->commit(x, nc, step);
+            }
+        }
+        ++accepted;
+        consecutive_rejects = 0;
+        be_heuristic = false;
+        be_next = lands_bp;  // §6.1: BE restart after a breakpoint landing
+
+        if (!fixed) {
+            // §6.3: growth never exceeds 2x; on accept ratio <= 1 so
+            // (tolq/eps)^(1/3) >= 1 grows the step within that cap.
+            double growth = 2.0;
+            if (worst_ratio > 0.0) {
+                growth = std::min(2.0, std::pow(1.0 / worst_ratio, 1.0 / 3.0));
+                if (growth < 1.0) {
+                    growth = 1.0;
+                }
+            }
+            dt = std::min(dt * growth, dtmax);
+        }
+
+        if (now >= tstart - 1e-12 * std::max(1.0, tstart)) {
+            push_row(now);
+        }
+    }
+
+    report.analysis = ".tran";
+    report.newton_iterations = total_iterations;
+    report.lu_factorizations = kernel.factorizations();
+    report.stage = fixed ? "trap(fixed)" : "trap";
+    report.accepted_steps = accepted;
+    report.rejected_steps = rejected;
+    t.columns = save.columns;
+    return t;
+}
+
+// --- .ac (§7.4) ----------------------------------------------------------------------
+
+ws::core::Result<std::vector<double>> ac_frequency_list(const AcCard& card,
+                                                        const ParamTable& params) {
+    WS_TRY_ASSIGN(const double n, eval_expr(card.n, params));
+    WS_TRY_ASSIGN(const double fstart, eval_expr(card.fstart, params));
+    WS_TRY_ASSIGN(const double fstop, eval_expr(card.fstop, params));
+
+    auto ac_fail = [&](std::string message) -> ws::core::unexpected<ws::core::Error> {
+        Diagnostic d = run_diag(ErrorKind::Semantic, "spice.semantic.ac",
+                                std::move(message));
+        d.loc = card.loc;
+        return spice_fail(std::move(d));
+    };
+    if (!std::isfinite(n) || n < 1.0 || std::floor(n) != n) {
+        return ac_fail(".ac N must be a positive integer");
+    }
+    if (!std::isfinite(fstart) || fstart <= 0.0 || !std::isfinite(fstop) || fstop < fstart) {
+        return ac_fail(".ac needs 0 < fstart <= fstop");
+    }
+
+    std::vector<double> freqs;
+    if (card.sweep == AcCard::Sweep::Lin) {
+        const std::size_t count = static_cast<std::size_t>(n);
+        if (count > kMaxSweepPoints) {
+            return ac_fail(".ac produces too many points");
+        }
+        freqs.reserve(count);
+        if (count == 1) {
+            freqs.push_back(fstart);
+        } else {
+            for (std::size_t k = 0; k < count; ++k) {
+                // Direct computation, never repeated multiplication (§7.4).
+                freqs.push_back(fstart + (fstop - fstart) *
+                                             static_cast<double>(k) /
+                                             static_cast<double>(count - 1));
+            }
+        }
+        return freqs;
+    }
+    // dec/oct: f_k = fstart * base^(k/N), k = 0..floor(N*log_base(fstop/fstart)+1e-9)
+    const double base = (card.sweep == AcCard::Sweep::Dec) ? 10.0 : 2.0;
+    const double log_ratio =
+        (card.sweep == AcCard::Sweep::Dec) ? std::log10(fstop / fstart)
+                                           : std::log2(fstop / fstart);
+    const double kd = std::floor(n * log_ratio + 1e-9) + 1.0;
+    if (!std::isfinite(kd) || kd < 1.0 || kd > static_cast<double>(kMaxSweepPoints)) {
+        return ac_fail(".ac produces too many points");
+    }
+    const std::size_t count = static_cast<std::size_t>(kd);
+    freqs.reserve(count);
+    for (std::size_t k = 0; k < count; ++k) {
+        freqs.push_back(fstart * std::pow(base, static_cast<double>(k) / n));
+    }
+    // Grid roundoff may leave the last point a hair above fstop; the
+    // endpoint is IN when it lands on the grid (§7.4), never above it.
+    if (!freqs.empty() && freqs.back() > fstop) {
+        freqs.back() = fstop;
+    }
+    return freqs;
+}
+
+ws::core::Result<Table> run_ac(const DeckAst& ast, const AcCard& card,
+                               const RunSettings& settings,
+                               std::vector<Warning>& warnings, AnalysisReport& report) {
+    ParamTable global;
+    for (const ParamDef& def : ast.params) {
+        global.define(def);
+    }
+
+    WS_TRY_ASSIGN(Circuit circuit, elaborate_deck(ast, kDefaultTemp, warnings));
+    if (circuit.devices.empty()) {
+        return empty_circuit_error(".ac");
+    }
+
+    WS_TRY_ASSIGN(const std::vector<double> freqs, ac_frequency_list(card, global));
+
+    DcKernel kernel(circuit, settings);
+    if (const ws::core::Status st = kernel.prepare(); !st) {
+        return wrap_solver_error(st, ".ac");
+    }
+
+    // §7.1: the OP is this analysis's own (never borrowed), sources at
+    // their DC values; switch states freeze wherever it settles.
+    {
+        std::vector<double> x_op;
+        std::size_t iterations = 0;
+        if (const ws::core::Status st = kernel.solve(x_op, settings.itl1, ".ac op",
+                                                     iterations);
+            !st) {
+            return wrap_solver_error(st, ".ac op");
+        }
+        report.newton_iterations = iterations;
+    }
+
+    // §7.4: a deck with no AC source is an error, never a table of zeros.
+    bool any_ac = false;
+    for (const auto& dev : circuit.devices) {
+        if (dev->has_ac()) {
+            any_ac = true;
+            break;
+        }
+    }
+    if (!any_ac) {
+        Diagnostic d = run_diag(ErrorKind::Semantic, "spice.semantic.ac_stimulus",
+                                "no AC stimulus: no source carries an 'AC magnitude'"
+                                " spec");
+        d.loc = card.loc;
+        d.hint = "write e.g. 'V1 in 0 DC 0 AC 1' and re-run";
+        return spice_fail(std::move(d));
+    }
+
+    if (const ws::core::Status st = kernel.prepare_ac(); !st) {
+        return wrap_solver_error(st, ".ac");
+    }
+
+    // Columns: frequency, then re()/im() pairs for the default save-list
+    // (the locked CSV decision: re()/im(), never mag/phase).
+    const SaveList save = default_save_list(circuit);
+    Table t;
+    t.analysis = AnalysisKind::Ac;
+    t.sweep = SweepKind::Frequency;
+    t.sweep_names.push_back("frequency");
+    for (const std::string& col : save.columns) {
+        t.columns.push_back("re(" + col + ")");
+        t.columns.push_back("im(" + col + ")");
+    }
+
+    for (const double f : freqs) {
+        std::vector<std::complex<double>> xc;
+        {
+            char ctx[64];
+            std::snprintf(ctx, sizeof(ctx), ".ac at %.6g Hz", f);
+            if (const ws::core::Status st =
+                     kernel.solve_ac(xc, 2.0 * 3.14159265358979323846 * f, ctx);
+                !st) {
+                return wrap_solver_error(st, ctx);
+            }
+        }
+        std::vector<double> row;
+        row.reserve(1 + 2 * save.columns.size());
+        row.push_back(f);
+        for (const std::size_t n : save.nodes) {
+            row.push_back(xc[n].real());
+            row.push_back(xc[n].imag());
+        }
+        for (const std::size_t b : save.branches) {
+            row.push_back(xc[circuit.node_count() + b].real());
+            row.push_back(xc[circuit.node_count() + b].imag());
+        }
+        t.rows.push_back(std::move(row));
+    }
+
+    report.analysis = ".ac";
+    report.lu_factorizations = kernel.factorizations();
+    report.stage = "ac";
+    return t;
+}
+
 }  // namespace
 
 // --- the public entry (run.hpp) --------------------------------------------------------
@@ -561,15 +1080,20 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
     // .options override the caller's defaults, later cards win (§5.1).
     WS_TRY(apply_options(ast.options, settings));
 
-    // The parser can only build exactly-one-of {op, dc}, but DeckAst is a
-    // public type: a hand-built AST could carry neither or both. Reject
-    // those up front instead of silently skipping the card (working-rule 5).
+    // The parser can only build exactly one analysis kind per card, but
+    // DeckAst is a public type: a hand-built AST could carry none or
+    // several. Reject those up front instead of silently skipping the
+    // card (working-rule 5).
     for (const AnalysisCard& card : ast.analyses) {
-        if (card.op.has_value() == card.dc.has_value()) {
+        const int kinds = (card.op ? 1 : 0) + (card.dc ? 1 : 0) + (card.tran ? 1 : 0) +
+                          (card.ac ? 1 : 0);
+        if (kinds != 1) {
             Diagnostic d = run_diag(
                 ErrorKind::Semantic, "spice.semantic.analysis_card",
-                card.op ? "analysis card carries both .op and .dc"
-                        : "analysis card carries neither .op nor .dc");
+                kinds == 0
+                    ? "analysis card carries neither .op nor .dc"
+                    : "analysis card carries more than one analysis"
+                      " (both .op and .dc, say)");
             d.loc = card.loc;
             return spice_fail(std::move(d));
         }
@@ -583,8 +1107,16 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
             WS_TRY_ASSIGN(Table t, run_op(ast, settings, warnings, report));
             out.results.tables.push_back(std::move(t));
             out.reports.push_back(std::move(report));
-        } else {
+        } else if (card.dc) {
             WS_TRY_ASSIGN(Table t, run_dc(ast, *card.dc, settings, warnings, report));
+            out.results.tables.push_back(std::move(t));
+            out.reports.push_back(std::move(report));
+        } else if (card.tran) {
+            WS_TRY_ASSIGN(Table t, run_tran(ast, *card.tran, settings, warnings, report));
+            out.results.tables.push_back(std::move(t));
+            out.reports.push_back(std::move(report));
+        } else {
+            WS_TRY_ASSIGN(Table t, run_ac(ast, *card.ac, settings, warnings, report));
             out.results.tables.push_back(std::move(t));
             out.reports.push_back(std::move(report));
         }

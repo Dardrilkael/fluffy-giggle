@@ -4,17 +4,20 @@
 #include <vector>
 
 // The Results API (DESIGN.md §7.8): per analysis a Table - analysis kind,
-// sweep column kind, column names as spelled, row-major samples. Real
-// values today; the complex twin for .ac rides the same shape in M2.
-// Nothing here references ws::math (the backend rule, §2.2); writers in
-// src/output.cpp consume Table only, so a future .raw writer is just
-// another consumer of the same type.
+// sweep column kind, column names as spelled, row-major samples. Samples
+// are real-valued; a .ac table carries its complex payload as paired
+// re()/im() columns (the locked CSV decision), so the public shape stays
+// real-only. Nothing here references ws::math (the backend rule, §2.2);
+// writers in src/output.cpp consume Table only, so a future .raw writer is
+// just another consumer of the same type.
 
 namespace ws::spice {
 
 enum class AnalysisKind {
-    Op,   // §7.2
-    Dc,   // §7.3
+    Op,    // §7.2
+    Dc,    // §7.3
+    Tran,  // §6 (M2)
+    Ac,    // §7.4 (M2)
 };
 
 // What the first column(s) of the table measure.

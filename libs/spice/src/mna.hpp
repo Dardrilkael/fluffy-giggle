@@ -5,6 +5,11 @@
 // never a re-export). System shape: [G B; C D][v; i] = [z; e] with the
 // ground row/col dropped - node ids ARE voltage-unknown indices and branch
 // rows number after the nodes.
+//
+// M2: one pattern is the union of the DC, transient-companion and AC
+// stamps (§3.2 - the dry run IS the pattern); the numeric phase runs
+// exactly one of them per assembly pass. The complex twin (.ac) builds
+// its matrix over the same frozen pattern.
 
 #include <cstddef>
 #include <optional>
@@ -27,20 +32,29 @@ namespace ws::spice {
 namespace detail {
 class PatternContext;
 class NumericContext;
+class AcPatternContext;
+class AcNumericContext;
 }  // namespace detail
 
 class MnaSystem {
 public:
     MnaSystem(std::size_t node_count, std::size_t branch_count);
 
-    // The pattern dry run over every device, then the symbolic analyze
-    // (§3.2) - once per circuit. The context classes are private to
-    // mna.cpp; devices load through these two passes only.
+    // The pattern dry run over every device (DC + tran + AC stamps - the
+    // union, §3.2), then the symbolic analyze - once per circuit.
     [[nodiscard]] ws::core::Status setup(
         const std::vector<std::unique_ptr<Device>>& devices);
 
-    // One numeric assembly pass: zero() + every device's load_dc.
+    // Builds the complex matrix + LU over the SAME frozen pattern (.ac).
+    // Call after setup(); the real side is untouched.
+    [[nodiscard]] ws::core::Status setup_ac();
+
+    // One numeric assembly pass each: zero() + every device's load_dc /
+    // load_tran / load_ac stamp.
     void load(const std::vector<std::unique_ptr<Device>>& devices);
+    void load_tran(const std::vector<std::unique_ptr<Device>>& devices,
+                   const TranStep& step);
+    void load_ac(const std::vector<std::unique_ptr<Device>>& devices, double omega);
 
     // Freezes the pattern (col-major dedupe) and runs the symbolic
     // analyze. Fails through Status on a malformed pattern.
@@ -48,14 +62,26 @@ public:
 
     // --- numeric phase ------------------------------------------------------
     void zero();  // values + rhs, pattern kept
+    void zero_ac();
 
     // Factorizes over the current values and solves; x receives the
     // unknowns. Returns Singular/... errors as-is from the facade.
     [[nodiscard]] ws::core::Status solve(std::vector<double>& x);
+    [[nodiscard]] ws::core::Status solve_ac(std::vector<std::complex<double>>& x);
+
+    // §6.5: enforces v(node) = volts during an OP solve by stamping a
+    // Norton (gforce from node to ground, gforce*volts injected) over the
+    // already-loaded system. The transient itself never includes it.
+    void force_node(std::size_t node, double volts, double gforce);
+
+    // Largest |diagonal| over the currently loaded real values (the .ic
+    // force scale, so gforce dominates the circuit by ~1e9 whatever its
+    // impedance level).
+    [[nodiscard]] double max_diagonal() const;
 
     [[nodiscard]] std::size_t dim() const { return node_count_ + branch_count_; }
     [[nodiscard]] std::size_t factorization_count() const {
-        return lu_.factorization_count();
+        return lu_.factorization_count() + ac_lu_.factorization_count();
     }
 
     // Diagnostic counter (§9.4): assembly passes run.
@@ -65,13 +91,19 @@ private:
     std::size_t node_count_;
     std::size_t branch_count_;
     ws::math::SparsePatternBuilder builder_;
+    ws::math::SparsePattern pattern_;  // frozen by analyze()
     std::optional<ws::math::SparseMatrix<double>> matrix_;
     ws::math::SparseLu lu_;
     std::vector<double> rhs_;
+    std::optional<ws::math::SparseMatrix<std::complex<double>>> ac_matrix_;
+    ws::math::ComplexSparseLu ac_lu_;
+    std::vector<std::complex<double>> ac_rhs_;
     std::size_t load_count_ = 0;
 
     friend class detail::PatternContext;
     friend class detail::NumericContext;
+    friend class detail::AcPatternContext;
+    friend class detail::AcNumericContext;
 };
 
 }  // namespace ws::spice

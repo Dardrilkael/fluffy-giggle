@@ -28,20 +28,25 @@ Diagnostic elab_diag(ErrorKind kind, std::string code, std::string message, Sour
     return d;
 }
 
-// Node arity + controlling-source token index per device letter. The
+// Node arity + device-name reference indices per device letter. The
 // factories re-validate arity; this table is the flattener's token
-// rewriter (which tokens are nodes vs values vs control names).
+// rewriter (which tokens are nodes vs values vs references to OTHER
+// devices by name - control sources, coupled inductors).
 struct DeviceShape {
     std::size_t nodes = 0;
-    int control_token = -1;  // index into card.rest, after the nodes
+    std::vector<std::size_t> name_refs;  // rest indices naming other devices
 };
 
 std::map<char, DeviceShape> device_shapes() {
     static const std::map<char, DeviceShape> table = {
-        {'R', {2, -1}}, {'V', {2, -1}}, {'I', {2, -1}},
-        {'E', {4, -1}}, {'G', {4, -1}},
-        {'F', {2, 2}},  // F n+ n- Vname gain
-        {'H', {2, 2}},  // H n+ n- Vname transresistance
+        {'R', {2, {}}},  {'V', {2, {}}},  {'I', {2, {}}},
+        {'C', {2, {}}},  {'L', {2, {}}},
+        {'E', {4, {}}},  {'G', {4, {}}},
+        {'F', {2, {2}}},  // F n+ n- Vname gain
+        {'H', {2, {2}}},  // H n+ n- Vname transresistance
+        {'W', {2, {2}}},  // W n+ n- Vname model (current-controlled switch)
+        {'K', {0, {0, 1}}},  // K L1 L2 k (no nodes of its own)
+        {'S', {4, {}}},  // S n+ n- nc+ nc- model (all four are nodes)
     };
     return table;
 }
@@ -72,6 +77,12 @@ ws::core::Status apply_options(const std::vector<OptionsCard>& options, RunSetti
                 out.itl1 = static_cast<int>(v);
             } else if (lower == "itl2") {
                 out.itl2 = static_cast<int>(v);
+            } else if (lower == "itl4") {
+                out.itl4 = static_cast<int>(v);
+            } else if (lower == "chgtol") {
+                out.chgtol = v;
+            } else if (lower == "trtol") {
+                out.trtol = v;
             } else if (lower == "temp" || lower == "tnom") {
                 return spice_fail(elab_diag(
                     ErrorKind::Parse, "spice.parse.unsupported_card",
@@ -103,7 +114,7 @@ class Elaborator final : private NodeResolver {
 public:
     Elaborator(const DeckAst& ast, std::vector<Warning>& warnings)
         : ast_(ast), warnings_(warnings) {
-        for (const auto& [letter, factory] : cards::builtin_device_factories()) {
+        for (const auto& [letter, factory] : builtin_device_factories()) {
             factories_[letter] = factory;
         }
     }
@@ -135,6 +146,8 @@ private:
                                const std::string& prefix,
                                std::vector<std::string>& subckt_stack);
     ws::core::Status resolve_controls();
+    ws::core::Status resolve_models();
+    ws::core::Status resolve_couplings();
     ws::core::Status check_topology();
 
     const DeckAst& ast_;
@@ -143,8 +156,14 @@ private:
     Circuit circuit_;
     ParamTable global_params_;  // deck-level .param scope (§8.4)
     std::vector<ControlRequest> pending_controls_;
+    std::vector<CouplingRequest> pending_couplings_;
+    std::vector<ModelRequest> pending_models_;
+    // Every device by lowercased name (control/coupling/model resolution).
+    std::map<std::string, Device*> devices_by_name_;
     // V-source branches by lowercased device name (control resolution).
     std::map<std::string, BranchId> vsource_branches_;
+    // Top-level models actually referenced by a device (unused -> §9.3 warn).
+    std::set<std::string> used_models_;
 };
 
 ws::core::Status Elaborator::add_device_card(const DeviceCard& card, char letter,
@@ -157,11 +176,15 @@ ws::core::Status Elaborator::add_device_card(const DeviceCard& card, char letter
                 cards::unsupported_device_milestone(letter) + ")",
             card.loc));
     }
-    ws::core::Result<std::unique_ptr<Device>> dev = it->second(card, *this, params,
-                                                               pending_controls_);
+    // *this IS the NodeResolver (private base); the reference member binds
+    // here, at construction.
+    FactoryServices services{*this, params, pending_controls_, pending_couplings_,
+                             pending_models_};
+    ws::core::Result<std::unique_ptr<Device>> dev = it->second(card, services);
     if (!dev) {
         return ws::core::unexpected(std::move(dev.error()));
     }
+    devices_by_name_[to_lower(dev.value()->name())] = dev.value().get();
     if (dev.value()->has_branch()) {
         vsource_branches_[to_lower(dev.value()->name())] = dev.value()->branch();
         circuit_.branch_devices.push_back(circuit_.devices.size());
@@ -331,7 +354,8 @@ ws::core::Status Elaborator::flatten_x(const DeviceCard& card,
                 }
                 continue;
             }
-            // Rewrite name, nodes and control names into scoped tokens.
+            // Rewrite name, nodes and device-name references into scoped
+            // tokens.
             DeviceCard scoped = c.device;
             scoped.name.text = my_prefix + c.device.name.text;
             const auto shapes = device_shapes();
@@ -347,11 +371,10 @@ ws::core::Status Elaborator::flatten_x(const DeviceCard& card,
                     scoped.rest[i].text = my_prefix + local.text;  // internal node
                 }
             }
-            if (shape.control_token >= 0 &&
-                static_cast<std::size_t>(shape.control_token) < scoped.rest.size()) {
-                scoped.rest[static_cast<std::size_t>(shape.control_token)].text =
-                    my_prefix +
-                    scoped.rest[static_cast<std::size_t>(shape.control_token)].text;
+            for (const std::size_t ref : shape.name_refs) {
+                if (ref < scoped.rest.size()) {
+                    scoped.rest[ref].text = my_prefix + scoped.rest[ref].text;
+                }
             }
             ws::core::Status st = add_device_card(scoped, c.letter, scope);
             if (!st) {
@@ -379,6 +402,79 @@ ws::core::Status Elaborator::resolve_controls() {
                 req.control.loc));
         }
         req.device->set_control_branch(it->second);
+    }
+    return {};
+}
+
+ws::core::Status Elaborator::resolve_models() {
+    for (const ModelRequest& req : pending_models_) {
+        const std::string key = to_lower(req.name.text);
+        const ModelDef* def = nullptr;
+        for (const ModelDef& m : ast_.models) {
+            if (to_lower(m.name.text) == key) {
+                def = &m;
+                break;
+            }
+        }
+        if (def == nullptr) {
+            return spice_fail(elab_diag(
+                ErrorKind::Semantic, "spice.semantic.unknown_model",
+                "unknown model '" + req.name.text + "'", req.name.loc));
+        }
+        WS_TRY(req.device->apply_model(*def));
+        used_models_.insert(key);
+    }
+    // §9.3: an unused .model is a fact about the deck, worth a warning.
+    for (const ModelDef& m : ast_.models) {
+        if (used_models_.count(to_lower(m.name.text)) == 0) {
+            Warning w;
+            w.diag = elab_diag(
+                ErrorKind::Parse, "spice.warn.unused_model",
+                "unused .model '" + m.name.text + "'", m.loc);
+            warnings_.push_back(std::move(w));
+        }
+    }
+    return {};
+}
+
+ws::core::Status Elaborator::resolve_couplings() {
+    for (const CouplingRequest& req : pending_couplings_) {
+        const std::string key_a = to_lower(req.a.text);
+        const std::string key_b = to_lower(req.b.text);
+        const auto it_a = devices_by_name_.find(key_a);
+        const auto it_b = devices_by_name_.find(key_b);
+        if (it_a == devices_by_name_.end() || it_b == devices_by_name_.end()) {
+            const Token& missing = (it_a == devices_by_name_.end()) ? req.a : req.b;
+            return spice_fail(elab_diag(
+                ErrorKind::Semantic, "spice.semantic.k_unknown_inductor",
+                "coupling " + req.device->name() + " names unknown inductor '" +
+                    missing.text + "'",
+                missing.loc));
+        }
+        if (it_a->second == it_b->second) {
+            return spice_fail(elab_diag(
+                ErrorKind::Semantic, "spice.semantic.k_self",
+                "coupling " + req.device->name() + " couples inductor '" +
+                    req.a.text + "' to itself",
+                req.a.loc));
+        }
+        if (it_a->second->kind() != 'L' || it_b->second->kind() != 'L') {
+            const Token& bad = (it_a->second->kind() != 'L') ? req.a : req.b;
+            return spice_fail(elab_diag(
+                ErrorKind::Semantic, "spice.semantic.k_not_inductor",
+                "coupling " + req.device->name() + " names '" + bad.text +
+                    "', which is not an inductor",
+                bad.loc));
+        }
+        if (!it_a->second->couple_to(*it_b->second, req.k) ||
+            !it_b->second->couple_to(*it_a->second, req.k)) {
+            return spice_fail(elab_diag(
+                ErrorKind::Semantic, "spice.semantic.k_multi",
+                "coupling " + req.device->name() +
+                    " overlaps an existing coupling on '" + req.a.text +
+                    "' (multi-winding transformers are backlog)",
+                req.a.loc));
+        }
     }
     return {};
 }
@@ -471,13 +567,28 @@ ws::core::Status Elaborator::check_topology() {
                         }
                         cycle.push_back(di);
                         std::set<std::size_t> unique(cycle.begin(), cycle.end());
+                        std::vector<std::size_t> names_idx(unique.begin(), unique.end());
+                        bool any_l = false, all_l = true;
+                        for (const std::size_t c : names_idx) {
+                            if (circuit_.devices[c]->kind() == 'L') {
+                                any_l = true;
+                            } else {
+                                all_l = false;
+                            }
+                        }
                         std::vector<std::string> names;
-                        for (const std::size_t c : unique) {
+                        for (const std::size_t c : names_idx) {
                             names.push_back(circuit_.devices[c]->name());
                         }
+                        // §6.6: inductors are shorts at DC, so an L in a
+                        // constraint loop is the same finding; name the mix.
+                        const char* what =
+                            all_l ? "inductor loop"
+                                  : (any_l ? "voltage-source/inductor loop"
+                                           : "voltage-source loop");
                         Diagnostic d = elab_diag(
-                            ErrorKind::Topology, "spice.topology.vsource_loop",
-                            "voltage-source loop", SourceLoc{});
+                            ErrorKind::Topology, "spice.topology.vsource_loop", what,
+                            SourceLoc{});
                         d.names = std::move(names);
                         d.hint = "add series resistance in one branch of the loop";
                         return spice_fail(std::move(d));
@@ -565,6 +676,8 @@ ws::core::Status Elaborator::elaborate() {
         }
     }
 
+    WS_TRY(resolve_models());
+    WS_TRY(resolve_couplings());
     WS_TRY(resolve_controls());
     return check_topology();
 }

@@ -65,6 +65,35 @@ struct DcCard {
     std::optional<DcSweep> second;  // optional outer sweep
 };
 
+// .tran tstep tstop [tstart [tmax]] [UIC] (§6/§11: M2)
+struct TranCard {
+    SourceLoc loc;
+    ExprProgram tstep;
+    ExprProgram tstop;
+    ExprProgram tstart;
+    ExprProgram tmax;
+    bool has_tstart = false;
+    bool has_tmax = false;
+    bool uic = false;
+};
+
+// .ac dec|oct|lin N fstart fstop (§7.4)
+struct AcCard {
+    enum class Sweep { Dec, Oct, Lin };
+    SourceLoc loc;
+    Sweep sweep = Sweep::Dec;
+    ExprProgram n;
+    ExprProgram fstart;
+    ExprProgram fstop;
+};
+
+// .ic v(node)=value ... (§6.5). One entry per v(name)=expr token; the
+// .tran driver resolves node names against the elaborated circuit.
+struct IcCard {
+    SourceLoc loc;
+    std::vector<std::pair<Token, ExprProgram>> node_values;  // node token, volts
+};
+
 struct SubcktDef {
     Token name;                       // ".subckt foo a b"
     std::vector<Token> ports;         // port node names, as spelled
@@ -74,10 +103,14 @@ struct SubcktDef {
 };
 
 // Analyses run in deck order (§7.1) - the variant keeps that order.
+// Exactly one of the four is set (validated by run_deck; the parser can
+// only build one per card).
 struct AnalysisCard {
     SourceLoc loc;
     std::optional<OpCard> op;
     std::optional<DcCard> dc;
+    std::optional<TranCard> tran;
+    std::optional<AcCard> ac;
 };
 
 struct DeckAst {
@@ -87,6 +120,7 @@ struct DeckAst {
     std::vector<ModelDef> models;         // top-level .model
     std::vector<OptionsCard> options;     // top-level .options, in order
     std::vector<AnalysisCard> analyses;   // deck order
+    std::vector<IcCard> ics;              // top-level .ic cards, in order
     std::map<std::string, SubcktDef> subckts;  // key: lowercased name
 };
 
