@@ -127,7 +127,6 @@ if ($LASTEXITCODE -ne 0) { throw "Build failed (exit $LASTEXITCODE)" }
 
 if ($Test) {
     Write-Host "Test: ctest --preset $Preset"
-    & $cmake --preset $Preset -T $Preset 2>$null  # no-op; just for the ctest below
     $ctest = Join-Path (Split-Path -Parent $cmake) "ctest.exe"
     if (-not (Test-Path $ctest)) {
         $ctest = Get-Command ctest -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
