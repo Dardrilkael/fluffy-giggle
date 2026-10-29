@@ -199,7 +199,13 @@ mark the seam clearly so a future full Part A can replace them.
   damped sine, the status-bar row with cancel, bars through r2d),
   app.undo/app.redo/app.clear/app.about/app.replot beside the shell's
   File/Window set, and the settings schema (shell.theme, plot.points,
-  plot.amplitude) the built-in settings panel renders.
+  plot.amplitude) the built-in settings panel renders. The host loads
+  the system face (bounce's rule: `C:/Windows/Fonts/segoeui.ttf` on
+  desktop, Roboto under Android) and installs it on the theme it
+  hands `AppShell::draw` each frame - the shell's stock themes are
+  constexpr and can never carry the pointer, and a fontless theme is
+  the v1 label bars by contract, which is what the example showed
+  before the wiring landed (every string a white placeholder bar).
 
 ## Latent breaks the full-workspace configure found (all fixed)
 

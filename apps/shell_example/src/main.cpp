@@ -75,6 +75,16 @@ constexpr int kF1 = 290;
 constexpr int kLeftSuper = 343;   // GLFW_KEY_LEFT_SUPER
 constexpr int kRightSuper = 347;  // GLFW_KEY_RIGHT_SUPER
 
+// The system UI face - the APP picks it, not the ui lib (r2d takes
+// caller-resolved paths; the gallery/bounce rule). A missing face
+// degrades to the fontless v1 label bars everywhere, gracefully -
+// which is exactly what this example showed before it loaded one.
+#ifdef __ANDROID__
+constexpr const char* kDefaultFontPath = "/system/fonts/Roboto-Regular.ttf";
+#else
+constexpr const char* kDefaultFontPath = "C:/Windows/Fonts/segoeui.ttf";
+#endif
+
 // The app's store dir: the OS data location on desktop (the gallery's
 // platform_store_dir, the same shape), the CWD on android.
 std::string platform_store_dir() {
@@ -208,6 +218,14 @@ protected:
         install_clipboard(gui_);
         install_job_system(jobs_);
 
+        // The one look asset (bounce's rule): the system face, baked
+        // once at the ui scale. The shell's stock themes are constexpr
+        // and can never carry the pointer, so the host installs it on
+        // the theme it hands draw() each frame - without it every
+        // label is the fontless v1 bar placeholder.
+        scale_ = ui_scale();
+        font_ = ws::ui::r2d::load_font(kDefaultFontPath, 16.0f * scale_);
+
         // The settings schema: the shell reads shell.theme itself; the
         // plot keys are the plot panel's own, rendered by the shell's
         // built-in settings panel (the property grid).
@@ -286,7 +304,14 @@ protected:
         r2d::begin();
         const r2d::FrameSize frame = r2d::frame_size();
         gui_.begin_layer(gui::Layer::base);
-        shell_->draw(gui_, shell_->theme(),
+        // The shell's live theme (dark or light, from settings) plus
+        // what the stock constants cannot carry: the density scale
+        // and the font pointer. The per-frame copy is the contract's
+        // shape (theme.hpp: the theme does NOT own the font; scaled()
+        // carries the pointer as-is, the app loads the bigger bake).
+        gui::ChromeTheme theme = shell_->theme().scaled(scale_);
+        theme.font = font_.empty() ? nullptr : &font_;
+        shell_->draw(gui_, theme,
                      gui::Rect{0.0f, 0.0f, frame.width, frame.height});
         gui_.end_layer();
         r2d::end();
@@ -707,6 +732,13 @@ private:
 
     GuiContext gui_;
     std::string last_title_;
+
+    // The look the shell cannot own: the baked face plus the ui scale
+    // it was baked for (an empty font keeps the fontless v1 bars, by
+    // design - the boxes this example shipped with were that
+    // degradation, not a renderer fault).
+    float scale_ = 1.0f;
+    ws::ui::r2d::Font font_;
 
     // The plot job's state.
     ws::jobs::JobSystem jobs_{2};
