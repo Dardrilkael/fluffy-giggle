@@ -285,11 +285,52 @@ Diagnostic ast_diag(ErrorKind kind, std::string code, std::string message, Sourc
     return d;
 }
 
+// The classic SPICE footgun: a deck whose first line IS a device card
+// ("V1 in 0 5" as line 1) silently loses that device to the title (§8.1:
+// line 1 is always the title, exactly like ngspice). Warn when the title
+// looks like a card, so the mystery zero output gets a name. Heuristic,
+// deliberately narrow to keep false positives off ordinary English titles:
+//   - a leading '.' (control card: ".op foo" as a title is always wrong)
+//   - a device-letter name whose remainder contains a digit ("V1", "R12")
+// Pure-alpha first tokens ("Running the show", "Voltage divider") never
+// warn; a letter-named device without digits ("Vsrc") slips through.
+void warn_when_title_looks_like_card(const Deck& deck, std::vector<Warning>& warnings) {
+    if (deck.title.empty()) {
+        return;
+    }
+    const std::size_t space = deck.title.find_first_of(" \t");
+    const std::string first = deck.title.substr(0, space);
+    bool suspicious = false;
+    if (first.front() == '.') {
+        suspicious = true;
+    } else if (first.size() >= 2 && std::isalpha(static_cast<unsigned char>(first.front()))) {
+        for (const char c : first.substr(1)) {
+            if (std::isdigit(static_cast<unsigned char>(c)) != 0) {
+                suspicious = true;
+                break;
+            }
+        }
+    }
+    if (!suspicious) {
+        return;
+    }
+    Warning w;
+    w.diag = ast_diag(
+        ErrorKind::Parse, "spice.warn.title_looks_like_card",
+        "the title line looks like a card ('" + first + "') but line 1 of a deck"
+        " is always the title and is ignored",
+        deck.title_loc);
+    w.diag.hint = "add a title line (even blank text on line 1) before the first"
+                  " card if '" + first + "' was meant as a device or control";
+    warnings.push_back(std::move(w));
+}
+
 }  // namespace
 
 ws::core::Result<DeckAst> build_deck_ast(const Deck& deck, std::vector<Warning>& warnings) {
     DeckAst ast;
     ast.title = deck.title;
+    warn_when_title_looks_like_card(deck, warnings);
 
     std::vector<SubcktDef> open_subckts;  // 0 or 1 deep (nesting rejected)
 

@@ -34,13 +34,24 @@ void append_row(std::string& out, const std::vector<double>& row) {
 
 std::string table_csv(const Table& t) {
     std::string out;
-    for (std::size_t i = 0; i < t.sweep_names.size(); ++i) {
-        out += ',';
-        out += t.sweep_names[i];
+    // §0.5: sweep column(s) first, then one column per saved quantity -
+    // a plain comma-join. A .op table (SweepKind::None, no sweep_names)
+    // starts directly with its node columns; the header must always have
+    // exactly as many fields as every data row.
+    bool first = true;
+    for (const std::string& name : t.sweep_names) {
+        if (!first) {
+            out += ',';
+        }
+        out += name;
+        first = false;
     }
     for (const std::string& col : t.columns) {
-        out += ',';
+        if (!first) {
+            out += ',';
+        }
         out += col;
+        first = false;
     }
     out += '\n';
     for (const std::vector<double>& row : t.rows) {

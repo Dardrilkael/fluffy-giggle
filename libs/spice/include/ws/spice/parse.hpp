@@ -34,6 +34,7 @@ struct Record {
 
 struct Deck {
     std::string title;          // line 1, ignored semantically
+    SourceLoc title_loc;        // where the title line is (diagnostics only)
     std::vector<Record> records;
 };
 

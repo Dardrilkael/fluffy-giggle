@@ -280,8 +280,18 @@ TEST_CASE("CSV: header row, %.12g numbers, op-only writes one row") {
         "divider\nV1 in 0 DC 5\nR1 in mid 1k\nR2 mid 0 2k\n.op\n");
     REQUIRE(run);
     CHECK(ws::spice::results_csv(run->results) ==
-          ",v(in),v(mid),i(V1)\n"
+          "v(in),v(mid),i(V1)\n"
           "5,3.33333333333,-0.00166666666667\n");
+}
+
+TEST_CASE("CSV: .dc sweep header, header fields == row fields") {
+    const auto run = run_text(
+        "sweep\nV1 in 0 DC 5\nR1 in 0 1k\n.dc V1 0 1 1\n");
+    REQUIRE(run);
+    CHECK(ws::spice::results_csv(run->results) ==
+          "V1,v(in),i(V1)\n"
+          "0,0,0\n"
+          "1,1,-0.001\n");
 }
 
 TEST_CASE("CSV: .op inside a multi-analysis run writes no section (§7.2)") {
@@ -291,12 +301,23 @@ TEST_CASE("CSV: .op inside a multi-analysis run writes no section (§7.2)") {
     REQUIRE(run->results.tables.size() == 2);  // both tables in Results
     const std::string csv = ws::spice::results_csv(run->results);
     // Exactly the .dc section: its sweep header, then two data rows -
-    // the .op table (which would lead with a bare node header) is
-    // skipped per §7.2, and no blank separator line appears.
+    // the .op table is skipped per §7.2, and no blank separator line
+    // appears.
     CHECK(csv ==
-          ",V1,v(in),i(V1)\n"
+          "V1,v(in),i(V1)\n"
           "0,0,0\n"
           "1,1,-0.001\n");
+}
+
+TEST_CASE(".op: bare source value (no DC keyword) parses the same") {
+    const auto run = run_text(
+        "bare\nV1 in 0 5\nR1 in mid 1k\nR2 mid 0 2k\n.op\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    CHECK(t.columns == std::vector<std::string>{"v(in)", "v(mid)", "i(V1)"});
+    CHECK(t.rows[0][col_of(t, "v(in)")] == approx(5.0));
+    CHECK(t.rows[0][col_of(t, "v(mid)")] == approx(5.0 * 2.0 / 3.0));
+    CHECK(t.rows[0][col_of(t, "i(V1)")] == approx(-5.0 / 3000.0));
 }
 
 // --- §9.3: warnings ------------------------------------------------------------
@@ -311,6 +332,40 @@ TEST_CASE("unknown .options keys warn (rendered as warnings), never fail") {
     CHECK(warnings[0].render() ==
           "t.cir:4:10: warning: ignored .options key 'foo=1'");
     CHECK(warnings[0].render().find("error") == std::string::npos);
+}
+
+TEST_CASE("a title line that looks like a card warns (the swallowed-device footgun)") {
+    // "V1 in 0 5" as line 1 IS the title (§8.1, same as ngspice) - the
+    // device is gone from the circuit. The warning names the mystery.
+    std::vector<Warning> warnings;
+    const auto run = run_text(
+        "V1 in 0 5\nR1 in mid 1k\nR2 mid 0 2k\n.op\n", &warnings);
+    REQUIRE(run);
+    REQUIRE(warnings.size() == 1);
+    CHECK(warnings[0].render().rfind(
+              "t.cir:1:1: warning: the title line looks like a card ('V1') but"
+              " line 1 of a deck is always the title and is ignored",
+              0) == 0);
+    CHECK(warnings[0].render().find("hint:") != std::string::npos);
+    // ...and the run itself still succeeds with the title-only V1 absent:
+    const Table& t = run->results.tables[0];
+    CHECK(t.columns == std::vector<std::string>{"v(in)", "v(mid)"});
+
+    // A dot-card title warns too.
+    std::vector<Warning> dot_warnings;
+    REQUIRE(run_text(".op\nV1 a 0 5\nR1 a 0 1k\n.op\n", &dot_warnings));
+    REQUIRE(dot_warnings.size() == 1);
+    CHECK(dot_warnings[0].render().find("'.op'") != std::string::npos);
+
+    // Ordinary English titles never warn.
+    std::vector<Warning> none;
+    REQUIRE(run_text(
+        "Voltage divider test\nV1 in 0 5\nR1 in 0 1k\n.op\n", &none));
+    CHECK(none.empty());
+    std::vector<Warning> none2;
+    REQUIRE(run_text(
+        "Running the show\nV1 in 0 5\nR1 in 0 1k\n.op\n", &none2));
+    CHECK(none2.empty());
 }
 
 // --- §10.4: parse-error goldens - line:col prefixes cannot drift ---------------

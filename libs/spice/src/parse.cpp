@@ -133,6 +133,7 @@ struct Reader {
             // (only for the primary deck; an included file has no title).
             if (li == 0 && active.empty()) {
                 deck.title = std::string(strip_comment(raw.text));
+                deck.title_loc = SourceLoc::make(path, 1, 1);
                 continue;
             }
 

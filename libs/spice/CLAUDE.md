@@ -60,14 +60,22 @@ SIN/EXP/PWL sources (M2), `.options temp` (M5), `solver=klu` (M0b).
 - **Deck-order execution** (§7.1): each analysis re-elaborates; a deck
   with no analysis still elaborates once (no silent gaps) but produces
   no tables.
+- **Line 1 is ALWAYS the title** (§8.1, same as ngspice): a deck whose
+  first line is a device card silently loses that device to the title.
+  build_deck_ast warns when the title looks like a card (device letter +
+  digit, or a leading '.') - `spice.warn.title_looks_like_card` - so the
+  footgun is never silent. Ordinary English titles never warn.
 - **.dc point grid**: `floor((stop-start)/step + 1e-9) + 1` points at
   `start + k*step` - never accumulated drift; first source innermost.
 - **Diagnostics** (§9.2): `file:line:col: error: msg` / `error: [analysis]
   msg`, optional `hint:` line, warnings render with `warning:` and never
   fail a run. Exit codes: 0 ok, 1 deck/sim error, 2 usage/IO (§9.5).
 - **CSV**: `%.12g`, comma separated, header row, sweep column(s) first;
-  nested sweeps get one column each (inner first). Deterministic
-  run-to-run (§10.5).
+  nested sweeps get one column each (inner first). Header field count
+  MUST equal every row's (a plain comma-join - a leading empty field
+  for an absent sweep column was the original shape bug). A `.op` table
+  has no sweep column: the header starts at the first `v()`.
+  Deterministic run-to-run (§10.5).
 - No global mutable state: the factory table lives on the elaborator
   object (§3.4); two runs in one process never interact.
 

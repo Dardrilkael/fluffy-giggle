@@ -72,10 +72,14 @@ ws::spice::IncludeResolver disk_resolver(const std::vector<std::string>& include
     };
 }
 
-void print_warnings(const std::vector<ws::spice::Warning>& warnings) {
-    for (const ws::spice::Warning& w : warnings) {
-        std::fprintf(stderr, "%s\n", w.render().c_str());
+// Warnings accumulate across stages (parse -> ast -> run); each stage's
+// print call emits only what it added, so nothing is printed twice.
+void print_warnings(const std::vector<ws::spice::Warning>& warnings,
+                    std::size_t& printed) {
+    for (std::size_t i = printed; i < warnings.size(); ++i) {
+        std::fprintf(stderr, "%s\n", warnings[i].render().c_str());
     }
+    printed = warnings.size();
 }
 
 int cmd_run(const std::vector<std::string>& args) {
@@ -118,6 +122,7 @@ int cmd_run(const std::vector<std::string>& args) {
                                        : fs::path("."));
 
     std::vector<ws::spice::Warning> warnings;
+    std::size_t warnings_printed = 0;
 
     ws::core::Result<ws::spice::Deck> deck =
         ws::spice::read_deck(deck_path.string(), *deck_text, parse_opts);
@@ -127,7 +132,7 @@ int cmd_run(const std::vector<std::string>& args) {
     }
 
     ws::core::Result<ws::spice::DeckAst> ast = ws::spice::build_deck_ast(*deck, warnings);
-    print_warnings(warnings);
+    print_warnings(warnings, warnings_printed);
     if (!ast) {
         std::fprintf(stderr, "%s\n", ast.error().message.c_str());
         return 1;
@@ -135,7 +140,7 @@ int cmd_run(const std::vector<std::string>& args) {
 
     const ws::core::Result<ws::spice::RunOutput> run =
         ws::spice::run_deck(*ast, ws::spice::RunSettings{}, warnings);
-    print_warnings(warnings);
+    print_warnings(warnings, warnings_printed);
     if (!run) {
         std::fprintf(stderr, "%s\n", run.error().message.c_str());
         return 1;
