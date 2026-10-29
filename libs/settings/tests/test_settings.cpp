@@ -1084,8 +1084,10 @@ TEST_CASE("migrations: the chain walks step by step") {
 
     // A step that rebuilds the root as a non-object answers corrupt_file.
     Migrations rebuilding;
-    REQUIRE(rebuilding.add(1, [](Value& doc) {
-        doc = Value::array();
+    // root, not doc: the TEST_CASE's own doc Value is live above -
+    // MSVC /W4 (C4456) rejects the shadowing spelling.
+    REQUIRE(rebuilding.add(1, [](Value& root) {
+        root = Value::array();
         return ws::core::Status{};
     }));
     Value wrecked = parsed(R"( {"version": 1} )");

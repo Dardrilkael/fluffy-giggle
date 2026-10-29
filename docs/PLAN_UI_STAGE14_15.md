@@ -227,3 +227,39 @@ cursor_y`, members that were never public - the cursor gained the
   paths.cpp (a pure std::filesystem utility that used to drag
   `os_location` into every headless link), and `test_platform` gates
   to the platforms whose OS halves it tests.
+
+## Latent MSVC /W4 breaks the full-workspace build found (all fixed)
+
+The stage-14/15 code had only ever been compiled by GCC through the
+spice-only presets; the first whole-workspace MSVC build (the `debug`
+preset, /W4 /WX) failed in `tessellation.cpp` (C4456: a join-corner
+`a_in` hiding the fringe alpha `a_in`) - and the same audit found more
+of the same class waiting behind it. GCC's `-Wall -Wextra` does not
+carry the /W4 shadowing or narrowing families, so the Linux side had
+stayed silent; `tools/audit_shadow.py` had the right idea but its
+default scope was the spice subset, so the ui lib had never been
+scanned. Fixed, with the classes MSVC actually rejects:
+
+- `tessellation.cpp`: the fringe alpha is `alpha_in` and the cap
+  lambda's normal is `nrm` (both hid locals of the same name).
+- `record.hpp`: the progress lambda reads `latest_fraction`/
+  `latest_message`, and the outer guard is `rec_lock` (the lambda's
+  per-iteration locks shadowed it).
+- Lambda parameters no longer hide enclosing locals: the gallery's
+  job lambda takes `job` (not `ctx`, the menu event), the settings
+  migration test rebuilds `root` (not `doc`), and the tab-strip test
+  writes through `current` (not `active`, the ActiveRenderer).
+- `test_ui.cpp` also carried a latent C4189 (GCC: unused-but-set) -
+  the `same_line` test's first rect now CHECKs the (0, 0) the comment
+  always claimed.
+- Narrowings made explicit: the box2d part id wraps the `-1u` inside
+  the uint8_t cast, and the texture mip count casts `bit_width`'s
+  int at the source.
+
+`tools/audit_shadow.py` now defaults to every first-party TU (the
+subset default is how this slipped through), and
+`tools/audit_conversions.py` joins it for the C4244/C4245/C4267
+families. Both stay GCC-side: MSVC needs no audit for what /W4
+already rejects. The member-shadow findings GCC also reports
+(constructor parameters named like their fields, ~800 across the
+input/jobs/ui headers) are MSVC-accepted and were left alone.

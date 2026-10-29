@@ -3909,6 +3909,8 @@ TEST_CASE("LayoutCursor: same_line places beside; the line advances below its ta
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
 
     const Rect a = layout.next(100.0f, 24.0f);  // (0, 0)
+    CHECK(a.x == 0.0f);
+    CHECK(a.y == 0.0f);
     layout.same_line();
     const Rect b = layout.next(50.0f, 40.0f);  // (100, 0): beside a
     CHECK(b.x == 100.0f);
@@ -11730,8 +11732,10 @@ TEST_CASE("the tab strip pair records the widget's output byte for byte") {
     };
 
     const char* const tabs[] = {"alpha", "beta", "gamma"};
+    // current, not active: the ActiveRenderer `active` is live in this
+    // scope - MSVC /W4 (C4456) rejects the shadowing spelling.
     const auto split_strip = [&](GuiContext& gui, LayoutCursor& layout,
-                                 int& active) {
+                                 int& current) {
         // The strip's own spelling: the id scope ladder and the flush
         // pitch are the caller's half, one behavior+draw per tab.
         gui.ids().push("strip");
@@ -11740,9 +11744,9 @@ TEST_CASE("the tab strip pair records the widget's output byte for byte") {
             const Rect rect = layout.next(80.0f, theme.control_height);
             const WidgetId tab_id = gui.ids().id("tab");
             const TabResult result = tab_behavior(gui, tab_id, rect);
-            tab_draw(rect, result, theme, tabs[i], i == active);
-            if (result.clicked && i != active) {
-                active = i;
+            tab_draw(rect, result, theme, tabs[i], i == current);
+            if (result.clicked && i != current) {
+                current = i;
             }
             gui.ids().pop();
             if (i + 1 < 3) {

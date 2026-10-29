@@ -1903,15 +1903,17 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
                 }
             };
             work_ = jobs_.submit<int>(
-                [](ws::jobs::JobContext& ctx) -> ws::core::Result<int> {
+                // job, not ctx: the menu ctx (MenuEvent) is still live in
+                // this scope - MSVC /W4 (C4456/57) rejects the shadow.
+                [](ws::jobs::JobContext& job) -> ws::core::Result<int> {
                     for (int step = 1; step <= 100; ++step) {
                         std::this_thread::sleep_for(
                             std::chrono::milliseconds(20));
-                        WS_TRY(ctx.check_cancel());
+                        WS_TRY(job.check_cancel());
                         char message[32];
                         std::snprintf(message, sizeof message,
                                       "counted %d/100", step);
-                        ctx.report_progress(step / 100.0f, message);
+                        job.report_progress(step / 100.0f, message);
                     }
                     return 100;
                 },

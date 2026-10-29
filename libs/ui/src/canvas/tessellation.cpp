@@ -374,10 +374,13 @@ void stroke_polyline(const Point* pts, int count, const Paint& paint,
     const float ho = half + 0.5f;              // outer fringe radius
     const float hi = std::max(half - 0.5f, 0.0f);  // core radius
     const bool hairline = half < 0.5f;
-    const float a_in = hairline
-                           ? std::min(paint.width, 1.0f)
-                           : 1.0f;  // the fringe's inner alpha
-    const Vec4 c_in{col.x, col.y, col.z, a_in};
+    // Named alpha_in, not a_in: the join bands below declare corner
+    // points named a_in/b_in (A/B at the inner radius), and MSVC /W4
+    // (C4456) rejects the shadow even though the types differ.
+    const float alpha_in = hairline
+                               ? std::min(paint.width, 1.0f)
+                               : 1.0f;  // the fringe's inner alpha
+    const Vec4 c_in{col.x, col.y, col.z, alpha_in};
     const Vec4 c_out{col.x, col.y, col.z, 0.0f};
     const Vec4 c_solid = col;
 
@@ -715,29 +718,29 @@ void stroke_polyline(const Point* pts, int count, const Paint& paint,
         auto emit_cap = [&](const StrokeSeg& s, bool at_end) {
             const Vec2 v = at_end ? s.b : s.a;
             const Vec2 d = at_end ? s.d : s.d * -1.0f;
-            const Vec2 n = s.n;
+            const Vec2 nrm = s.n;
             if (paint.cap == StrokeCap::butt) {
                 if (hairline) {
-                    const Vec2 q[4] = {v, v, v - n * ho,
-                                        v + n * ho};
+                    const Vec2 q[4] = {v, v, v - nrm * ho,
+                                        v + nrm * ho};
                     emit_quad(sink, q, c_in, c_in, c_out, c_out);
                 } else {
-                    const Vec2 q[4] = {v + n * hi,
-                                        v - n * hi,
-                                        v - n * ho,
-                                        v + n * ho};
+                    const Vec2 q[4] = {v + nrm * hi,
+                                        v - nrm * hi,
+                                        v - nrm * ho,
+                                        v + nrm * ho};
                     emit_quad(sink, q, c_in, c_in, c_out, c_out);
                 }
             } else if (paint.cap == StrokeCap::square) {
                 const Vec2 e = d * half;
-                const Vec2 p0 = v + n * hi;
-                const Vec2 p1 = (v + e) + n * hi;
-                const Vec2 p2 = (v + e) - n * hi;
-                const Vec2 p3 = v - n * hi;
-                const Vec2 q0o = v + n * ho;
-                const Vec2 q1o = (v + e) + n * ho;
-                const Vec2 q2o = (v + e) - n * ho;
-                const Vec2 q3o = v - n * ho;
+                const Vec2 p0 = v + nrm * hi;
+                const Vec2 p1 = (v + e) + nrm * hi;
+                const Vec2 p2 = (v + e) - nrm * hi;
+                const Vec2 p3 = v - nrm * hi;
+                const Vec2 q0o = v + nrm * ho;
+                const Vec2 q1o = (v + e) + nrm * ho;
+                const Vec2 q2o = (v + e) - nrm * ho;
+                const Vec2 q3o = v - nrm * ho;
                 const Vec2 side_a[4] = {p0, p1, q1o, q0o};
                 emit_quad(sink, side_a, c_in, c_in, c_out, c_out);
                 const Vec2 far[4] = {p1, p2, q2o, q1o};
@@ -747,13 +750,13 @@ void stroke_polyline(const Point* pts, int count, const Paint& paint,
             } else {  // round: the half-disc fan from v, through +d
                 // Same fan as the single-point cap_bands above: v is a
                 // corner of every fan quad, the arc edge fades to 0.
-                const float a0 = std::atan2(n.y, n.x);
+                const float a0 = std::atan2(nrm.y, nrm.x);
                 const float span = -kPi;
                 const float step = arc_step(ho, 0.25f);
                 int steps =
                     static_cast<int>(std::ceil(std::fabs(span) / step));
                 steps = std::max(1, std::min(steps, 64));
-                Vec2 prev_out = v + n * ho;
+                Vec2 prev_out = v + nrm * ho;
                 for (int i = 1; i <= steps; ++i) {
                     const float t =
                         static_cast<float>(i) / static_cast<float>(steps);

@@ -13,7 +13,7 @@ already covers it.
 
 Usage:
     python3 tools/audit_shadow.py [--build-dir build/linux]
-                                  [--libs core,math,spice,apps/spice]
+                                  [--libs libs,apps]
 """
 import argparse
 import json
@@ -33,8 +33,10 @@ def main() -> int:
     ap.add_argument('--build-dir', type=Path, default=Path('build/linux'),
                     help='build tree with compile_commands.json '
                          '(default: build/linux)')
-    ap.add_argument('--libs', default='core,math,spice,apps/spice',
-                    help='comma-separated path fragments selecting TUs')
+    ap.add_argument('--libs', default='libs,apps',
+                    help='comma-separated path fragments selecting TUs '
+                         '(default: every first-party TU - a subset default '
+                         'here once let new ui code ship unaudited)')
     args = ap.parse_args()
 
     cc_path = ROOT / args.build_dir / 'compile_commands.json'

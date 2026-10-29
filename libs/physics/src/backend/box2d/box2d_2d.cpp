@@ -953,7 +953,9 @@ class Box2DWorld final : public IWorld2DBackend {
       return false;
     }
     out_slot = static_cast<std::uint32_t>(raw & 0xFFFFFFFFull) - 1u;
-    out_part = static_cast<std::uint8_t>(raw >> 32) - 1u;
+    // The -1u lands on the uint8_t only inside the cast: computing it in
+    // unsigned first would narrow on assignment (MSVC /W4 C4244).
+    out_part = static_cast<std::uint8_t>((raw >> 32) - 1u);
     return true;
   }
 

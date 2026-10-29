@@ -168,7 +168,9 @@ inline void store_progress(const std::shared_ptr<RecordBase>& rec,
                            MarshalQueue& marshal,
                            const std::function<void(float, const char*)>& sink,
                            float fraction, const char* message) {
-    std::scoped_lock lock{rec->mutex};
+    // rec_lock, not lock: the progress lambda below re-locks in its own
+    // blocks, and MSVC /W4 (C4456) rejects the shadowing spelling.
+    std::scoped_lock rec_lock{rec->mutex};
     fraction = std::clamp(fraction, 0.f, 1.f);
     if (fraction > rec->progress) {
         rec->progress = fraction;
@@ -183,16 +185,18 @@ inline void store_progress(const std::shared_ptr<RecordBase>& rec,
     rec->progress_armed = true;
     marshal.post([rec, sink]() {
         for (;;) {
-            float fraction = 0.f;
-            std::string message;
+            // latest_*, not fraction/message: the enclosing parameters
+            // carry the incoming report; these are the mailbox's latest.
+            float latest_fraction = 0.f;
+            std::string latest_message;
             std::uint64_t seen = 0;
             {
                 std::scoped_lock lock{rec->mutex};
                 seen = rec->progress_seq;
-                fraction = rec->progress;
-                message = rec->progress_message;
+                latest_fraction = rec->progress;
+                latest_message = rec->progress_message;
             }
-            sink(fraction, message.c_str());
+            sink(latest_fraction, latest_message.c_str());
             {
                 std::scoped_lock lock{rec->mutex};
                 if (rec->progress_seq == seen) {

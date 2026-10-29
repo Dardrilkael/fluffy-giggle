@@ -1019,7 +1019,10 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
     // one before it, so a sprite drawn smaller than its bitmap samples
     // a pre-filtered mip. The 1x1 white lands at exactly 1 level and
     // skips the cascade.
-    const uint32_t mip_levels = std::bit_width(std::max(width, height));
+    // bit_width answers int; the mip count is uint32_t - cast at the
+    // source so the narrowing is explicit (MSVC /W4 C4245/C4244 class).
+    const uint32_t mip_levels = static_cast<uint32_t>(
+        std::bit_width(std::max(width, height)));
 
     TextureEntry entry{};
     gfx::ImageOut image{};
