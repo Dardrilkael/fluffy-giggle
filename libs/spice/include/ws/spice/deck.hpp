@@ -1,0 +1,142 @@
+#pragma once
+
+#include <map>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include <ws/core/result.hpp>
+#include <ws/spice/error.hpp>
+#include <ws/spice/expr.hpp>
+#include <ws/spice/parse.hpp>
+
+// Card AST (DESIGN.md §8.3-8.4): build_deck_ast turns records into typed
+// cards - one function per card, everything unimplemented rejected with a
+// line number, never a silent gap. Subckts keep their raw body records;
+// elaboration re-validates them per instance (flattening). .param lives in
+// ParamTable with lazy evaluation, scope chains and cycle naming.
+
+namespace ws::spice {
+
+// --- cards -------------------------------------------------------------------
+
+// A device instance card. Elaboration (which owns arity per device kind)
+// splits `rest` into values/gains/source names/params; parse_card only
+// validates the letter and the name.
+struct DeviceCard {
+    Token name;               // "R1", "V2", "X3"... first char = kind letter
+    std::vector<Token> rest;  // everything after the name, tokens as spelled
+    SourceLoc loc;
+};
+
+struct ParamDef {
+    Token name;      // "rload"
+    ExprProgram expr;
+};
+
+// .model name type ( key value ... ) - values stay raw tokens; elaboration
+// parses them (temperature re-evaluation, §7.7).
+struct ModelDef {
+    Token name;
+    std::string type;             // lowercased: "r" today, diode/bjt/mos later
+    std::vector<Token> params;    // flattened key value key value...
+    SourceLoc loc;
+};
+
+struct OptionsCard {
+    SourceLoc loc;
+    std::vector<std::pair<Token, Token>> kv;  // key (lowercased key inside), value
+};
+
+struct OpCard {
+    SourceLoc loc;
+};
+
+struct DcSweep {
+    Token source;  // V/I source name, or "temp" (§7.3)
+    ExprProgram start;
+    ExprProgram stop;
+    ExprProgram step;
+};
+
+struct DcCard {
+    SourceLoc loc;
+    DcSweep first;                  // first source is the INNERMOST (ngspice)
+    std::optional<DcSweep> second;  // optional outer sweep
+};
+
+struct SubcktDef {
+    Token name;                       // ".subckt foo a b"
+    std::vector<Token> ports;         // port node names, as spelled
+    std::vector<ParamDef> defaults;   // "params:" section of the card
+    std::vector<Record> body;         // records until .ends (validated later, per use)
+    SourceLoc loc;
+};
+
+// Analyses run in deck order (§7.1) - the variant keeps that order.
+struct AnalysisCard {
+    SourceLoc loc;
+    std::optional<OpCard> op;
+    std::optional<DcCard> dc;
+};
+
+struct DeckAst {
+    std::string title;
+    std::vector<DeviceCard> devices;      // top-level instances (incl. X)
+    std::vector<ParamDef> params;         // top-level .param, in order
+    std::vector<ModelDef> models;         // top-level .model
+    std::vector<OptionsCard> options;     // top-level .options, in order
+    std::vector<AnalysisCard> analyses;   // deck order
+    std::map<std::string, SubcktDef> subckts;  // key: lowercased name
+};
+
+// Turns records into the typed AST. Unknown cards/letters and every
+// known-but-unimplemented construct are Parse/Semantic errors with
+// file:line; ignored .options keys are warnings (§9.3), collected, never
+// fatal.
+[[nodiscard]] ws::core::Result<DeckAst> build_deck_ast(const Deck& deck,
+                                                       std::vector<Warning>& warnings);
+
+// --- parameter scopes (§8.4) ---------------------------------------------------
+
+// A lazily-evaluated .param scope with a parent chain (subckt instance
+// params -> subckt defaults -> global). Values memoize once resolved;
+// cycles are reported naming the chain.
+class ParamTable {
+public:
+    ParamTable() = default;
+    explicit ParamTable(const ParamTable* parent) : parent_(parent) {}
+
+    // Adds (or replaces) a definition.
+    void define(ParamDef def);
+
+    // Instantiates a scope that layers `overrides` (from an X card's
+    // params: section) over this table's definitions.
+    [[nodiscard]] ParamTable with_overrides(const std::vector<ParamDef>& overrides) const;
+
+    // True when `lower` (already lowercased) is defined here or in a parent.
+    [[nodiscard]] bool knows(const std::string& lower) const;
+
+    // Binds an expression's variables against this scope; unbound
+    // variables stay nullopt in the result (the expression evaluator
+    // reports them with its own context).
+    [[nodiscard]] ws::core::Result<std::vector<std::optional<double>>> bind(
+        const ExprProgram& prog) const;
+
+    // Resolves one name (lowercased) to a value, with cycle detection.
+    [[nodiscard]] ws::core::Result<double> value(const std::string& lower) const;
+
+private:
+    [[nodiscard]] ws::core::Result<double> resolve(
+        const std::string& lower, std::vector<std::string>& active) const;
+    // bind() with the cycle-detection chain threaded through, so a cycle
+    // spanning several definitions (a=b+1, b=a) is caught no matter how
+    // deep the reference nest goes.
+    [[nodiscard]] ws::core::Result<std::vector<std::optional<double>>> bind_active(
+        const ExprProgram& prog, std::vector<std::string>& active) const;
+
+    std::map<std::string, ParamDef> defs_;
+    const ParamTable* parent_ = nullptr;
+};
+
+}  // namespace ws::spice

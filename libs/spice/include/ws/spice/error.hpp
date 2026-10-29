@@ -68,6 +68,9 @@ struct Diagnostic {
 // promoted to errors by the CLI's --werror.
 struct Warning {
     Diagnostic diag;
+
+    // The §9.2 shape with "warning:" in place of "error:".
+    [[nodiscard]] std::string render() const;
 };
 
 }  // namespace ws::spice
