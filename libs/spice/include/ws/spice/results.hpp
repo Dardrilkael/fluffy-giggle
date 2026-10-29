@@ -63,6 +63,13 @@ struct Table {
     // The signals, in save-list order.
     std::vector<Signal> signals;
 
+    // §7.6: how many LEADING sweep axes are .step family axes (the step
+    // number plus one per stepped quantity). The analysis's own axis
+    // (time, frequency, the swept source) starts at this index; 0 for a
+    // plain table. .meas and friends must respect it - measuring against
+    // the step column is the classic family-table mistake.
+    std::size_t step_axes = 0;
+
     // --- accessors -----------------------------------------------------------
 
     // The number of samples in every column.

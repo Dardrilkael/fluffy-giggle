@@ -898,6 +898,8 @@ void merge_into_family(Table& family, const Table& point, const StepPoint& sp,
         for (Signal& sig : family.signals) {
             sig.data.clear();
         }
+        // The leading family axes: "step" + one per stepped quantity.
+        family.step_axes = 1 + step_names.size();
     }
     const std::size_t n = point.row_count();
     for (std::size_t i = 0; i < n; ++i) {
@@ -1477,7 +1479,9 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
     }
 
     // .meas (§0.4): evaluate every card against its analysis's completed
-    // family table; failures are notes, never run failures (§9.5).
+    // table - per step point for a family (ngspice measures each run;
+    // the results carry @2, @3, ... suffixes), once for a plain table.
+    // Failures are notes, never run failures (§9.5).
     for (const MeasCard& m : ast.meas) {
         const AnalysisKind want = (m.analysis == MeasCard::Analysis::Tran)
                                       ? AnalysisKind::Tran
@@ -1508,8 +1512,52 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
             out.measurements.push_back(std::move(failed));
             continue;
         }
-        WS_TRY_ASSIGN(Measurement r, evaluate_meas(m, *target, global));
-        out.measurements.push_back(std::move(r));
+        // Split the family into per-point tables (a plain table is its
+        // own single slice): .meas must see the analysis's own axis, not
+        // the step column.
+        std::vector<Table> parts;
+        {
+            const Table& f = *target;
+            if (f.step_axes == 0 || f.row_count() == 0) {
+                parts.push_back(f);
+            } else {
+                const std::vector<double>& steps = f.sweep_axes[0];
+                std::size_t i = 0;
+                while (i < steps.size()) {
+                    const double k = steps[i];
+                    std::size_t j = i;
+                    while (j < steps.size() && steps[j] == k) {
+                        ++j;
+                    }
+                    Table t;
+                    t.analysis = f.analysis;
+                    t.sweep = f.sweep;
+                    for (std::size_t a = f.step_axes; a < f.sweep_names.size(); ++a) {
+                        t.sweep_names.push_back(f.sweep_names[a]);
+                        t.sweep_axes.emplace_back(f.sweep_axes[a].begin() +
+                                                      static_cast<std::ptrdiff_t>(i),
+                                                  f.sweep_axes[a].begin() +
+                                                      static_cast<std::ptrdiff_t>(j));
+                    }
+                    for (const Signal& sig : f.signals) {
+                        Signal c;
+                        c.name = sig.name;
+                        c.data.assign(sig.data.begin() + static_cast<std::ptrdiff_t>(i),
+                                      sig.data.begin() + static_cast<std::ptrdiff_t>(j));
+                        t.signals.push_back(std::move(c));
+                    }
+                    parts.push_back(std::move(t));
+                    i = j;
+                }
+            }
+        }
+        for (std::size_t pi = 0; pi < parts.size(); ++pi) {
+            WS_TRY_ASSIGN(Measurement r, evaluate_meas(m, parts[pi], global));
+            if (pi != 0) {
+                r.name += "@" + std::to_string(pi + 1);  // per-point suffix
+            }
+            out.measurements.push_back(std::move(r));
+        }
     }
 
     if (!failure_list.empty()) {

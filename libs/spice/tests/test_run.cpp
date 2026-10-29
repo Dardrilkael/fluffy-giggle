@@ -1766,3 +1766,34 @@ TEST_CASE("compat: strict rejects the LTspice forms, naming the ngspice spelling
     REQUIRE(!bad);
     CHECK(bad.error().message.find("ngspice, ltspice or strict") != std::string::npos);
 }
+
+TEST_CASE(".meas: measures each .step point, never the step axis") {
+    // Regression: the family table's axis(0) is the step NUMBER column;
+    // .meas used it as the sweep axis and produced garbage (0s). Now the
+    // measurement splits per point and sees time.
+    const auto run = run_text(
+        "fam meas\n"
+        "V1 in 0 PULSE(1 5 1u 1n 1u 10m)\n"
+        "R1 in out 1k\n"
+        "R2 out 0 {rl}\n"
+        "C1 out 0 1n\n"
+        ".param rl=1k\n"
+        ".step param rl 1k 3k 1k\n"
+        ".tran 10n 10u\n"
+        ".meas tran rt trig v(out) val=1.5 rise=1 targ v(out) val=2 rise=1\n");
+    REQUIRE(run);
+    // One measurement per step point, @-suffixed past the first.
+    REQUIRE(run->measurements.size() == 3);
+    CHECK(run->measurements[0].name == "rt");
+    CHECK(run->measurements[1].name == "rt@2");
+    CHECK(run->measurements[2].name == "rt@3");
+    // Each is a real rise time against TIME (the step-axis bug produced
+    // uniform zeros): positive, sane, and the points differ.
+    for (const ws::spice::Measurement& m : run->measurements) {
+        REQUIRE(m.value.has_value());
+        CHECK(*m.value > 100e-9);
+        CHECK(*m.value < 10e-6);
+    }
+    CHECK(*run->measurements[0].value != *run->measurements[1].value);
+    CHECK(*run->measurements[1].value != *run->measurements[2].value);
+}
