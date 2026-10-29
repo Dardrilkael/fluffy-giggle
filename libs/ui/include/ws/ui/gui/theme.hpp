@@ -12,15 +12,25 @@ namespace ws::ui::gui {
 // look. Phase 6 wires colors and metrics; corner_radius is carried but
 // only honored once r2d can draw rounded quads (Phase 8).
 struct ChromeTheme {
-    // Faces, packed 0xRRGGBBAA (r2d::rgba order).
-    std::uint32_t panel_bg = r2d::rgba(38, 40, 46);
-    std::uint32_t control_bg = r2d::rgba(70, 73, 78);
-    std::uint32_t control_hovered = r2d::rgba(92, 96, 102);
-    std::uint32_t control_pressed = r2d::rgba(100, 160, 220);
-    std::uint32_t control_disabled = r2d::rgba(50, 52, 56);
-    std::uint32_t control_on = r2d::rgba(90, 168, 110);  // toggled/checked accent
-    std::uint32_t text = r2d::rgba(235, 238, 242);
-    std::uint32_t border = r2d::rgba(255, 255, 255, 36);
+    // Faces, packed 0xRRGGBBAA (r2d::rgba order). Three depth layers by
+    // design: bar_bg (the chrome strips) is a step away from panel_bg
+    // (the surfaces), and control_bg a step above that (the widgets) -
+    // the VS Code layering, so the frame reads as frame and the
+    // content as content instead of one flat gray void.
+    std::uint32_t panel_bg = r2d::rgba(33, 35, 41);
+    std::uint32_t control_bg = r2d::rgba(45, 48, 56);
+    std::uint32_t control_hovered = r2d::rgba(62, 66, 77);
+    std::uint32_t control_pressed = r2d::rgba(80, 128, 190);
+    std::uint32_t control_disabled = r2d::rgba(42, 44, 50);
+    std::uint32_t control_on = r2d::rgba(96, 156, 224);  // the accent:
+                                   // checked, toggled, selected, live data
+    std::uint32_t text = r2d::rgba(228, 231, 238);
+    std::uint32_t border = r2d::rgba(255, 255, 255, 26);
+    // The chrome strips - the menu bar, the toolbar, the tab strips,
+    // the status bar, the dock splitters. Darker than panel_bg on the
+    // dark theme (and a grayer step on the light one), the same role
+    // a window title bar plays: the frame the surfaces sit in.
+    std::uint32_t bar_bg = r2d::rgba(23, 25, 30);
     // The modal backdrop: a translucent wash drawn over the whole frame
     // at the modal stratum while a modal scope is open - the veil the
     // input rules already enforce, made visible. Not dim() territory:
@@ -36,8 +46,8 @@ struct ChromeTheme {
     std::uint32_t toast_error = r2d::rgba(190, 80, 70);
 
     // Metrics, gui-space pixels.
-    float control_height = 24.0f;
-    float corner_radius = 4.0f;  // drawn as real corners in Phase 8
+    float control_height = 26.0f;
+    float corner_radius = 5.0f;  // drawn as real corners in Phase 8
     float padding = 12.0f;       // panel content inset
     float spacing = 8.0f;        // the gap between widgets sharing a row
     float scroll_speed = 32.0f;  // px one wheel unit scrolls a scroll panel
@@ -131,20 +141,21 @@ inline constexpr ChromeTheme kDefaultChrome{};
 
 // The light stock theme - same metrics, a daylight face set: the dark
 // palette with every color flipped (pale chrome, dark text, a gray
-// veil instead of a black one). Aggregate-initialized through the nine
-// faces, so the toast severities keep their defaults and the metrics
-// and font stay exactly what kDefaultChrome{} leaves them - scale it
-// and install a font the same way.
+// veil instead of a black one). Designated initializers (the C++20
+// spelling, one name per face), so the toast severities keep their
+// defaults and the metrics and font stay exactly what kDefaultChrome{}
+// leaves them - scale it and install a font the same way.
 inline constexpr ChromeTheme kLightChrome{
-    r2d::rgba(240, 240, 244),    // panel_bg
-    r2d::rgba(210, 212, 216),    // control_bg
-    r2d::rgba(184, 187, 193),    // control_hovered
-    r2d::rgba(70, 110, 180),     // control_pressed
-    r2d::rgba(225, 226, 230),    // control_disabled
-    r2d::rgba(30, 128, 68),      // control_on
-    r2d::rgba(30, 32, 38),       // text
-    r2d::rgba(0, 0, 0, 40),      // border
-    r2d::rgba(96, 96, 96, 110),  // veil
+    .panel_bg = r2d::rgba(245, 245, 248),
+    .control_bg = r2d::rgba(222, 224, 230),
+    .control_hovered = r2d::rgba(202, 205, 214),
+    .control_pressed = r2d::rgba(62, 109, 178),
+    .control_disabled = r2d::rgba(228, 229, 233),
+    .control_on = r2d::rgba(38, 122, 203),
+    .text = r2d::rgba(28, 31, 38),
+    .border = r2d::rgba(0, 0, 0, 40),
+    .bar_bg = r2d::rgba(232, 233, 238),
+    .veil = r2d::rgba(96, 96, 96, 110),
 };
 
 // Multiplies a packed 0xRRGGBBAA color's alpha channel - the alpha is

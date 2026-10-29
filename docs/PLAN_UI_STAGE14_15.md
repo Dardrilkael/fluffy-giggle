@@ -288,3 +288,42 @@ workspace scan found exactly three sites, two already correct:
 - `playground`'s `std::fopen` asset-unpack is inside the
   `__ANDROID__` half - MSVC never compiles it, and desktop keeps
   `std::ifstream`.
+
+## The chrome restyle (the first screenshot review)
+
+The running example - font fixed, real file open - still looked like a
+day-3 prototype: one flat gray void (the menu/toolbar strips painted
+nothing and rode the r2d clear color), a saturated green accent doing
+every job at once (tabs, checks, plot bars), toolbar labels clipping
+into "Ne...", an invisible panel splitter, and editor text drawn like
+a status line. The restyle, values-first and seam-preserving:
+
+- ChromeTheme grows `bar_bg` - the chrome strips' own face (menu bar,
+  toolbar, tab strips, status bar, dock splitters), one depth step
+  away from panel_bg. Three layers now read as three layers: bar
+  (23,25,30) / panel (33,35,41) / control (45,48,56), the VS Code
+  depth system. theme_json carries the new face; kLightChrome moved
+  to designated initializers to say it too.
+- The accent is blue (96,156,224) and means "selected/live" only:
+  checked boxes, the slider fill, the selected tab's underline, the
+  plot's positive bars. The green is gone.
+- The selected tab wears the PANEL face plus a 2-px accent underline
+  at its bottom edge - it merges with the body it owns instead of
+  floating on the strip; idle tabs and idle menu titles wear nothing
+  (text on the bar), and the open menu title wears the popup's own
+  face so title and window read as one surface.
+- The toolbar buttons get fitting slack (no more clipped glyphs), the
+  strips get 1-px separator rules, the splitter is a visible recessed
+  gutter in bar_bg, the status bar rides bar_bg with quieter text,
+  and control_height/corner_radius breathe a little more (26/5).
+- shell_example: the editor is an editor now - a dim right-aligned
+  number gutter, content in consola (the UI font when it refuses),
+  comment lines a step quieter, and the CJK carrier stacked under
+  both fonts (msyh.ttc, the gallery rule) so the utils.h Chinese
+  comments render instead of tofu. The plot is a chart now: mid
+  baseline, +A and zero guides, rounded bars with the negative half
+  a step quieter, and axis labels off the live settings.
+
+Both stock palettes still pass contrast_failures() and the 0.05
+hover-gap contract (the dark hover was one Oklab step short at first;
+the test caught it - picked (62,66,77), light (202,205,214)).

@@ -78,24 +78,37 @@ void tab_draw(const Rect& rect, const TabResult& result,
     const float dim_by = dim_factor(result.state, theme);
 
     // Face priority: press feedback even on the selected tab, then
-    // the selection accent, then hover, then the dead face, then
-    // idle. A dead tab claims nothing, so its pressed/hover branches
-    // never fire - the Disabled slot is for the idle one.
-    std::uint32_t face = theme.control_bg;
+    // the selection itself, then hover. The selected tab wears the
+    // PANEL's face plus the accent underline along its bottom edge -
+    // the editor-tab look: it merges with the body it owns instead of
+    // floating on the strip. An idle unselected tab wears NOTHING:
+    // text on the strip, like a menu title at rest. A dead tab claims
+    // nothing, so its pressed/hover branches never fire.
     if (result.state == WidgetState::Pressed) {
-        face = theme.control_pressed;
+        r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                               theme.corner_radius,
+                               theme.control_pressed);
     } else if (selected) {
-        face = dim(theme.control_on, dim_by);
+        r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                               theme.corner_radius,
+                               dim(theme.panel_bg, dim_by));
+        // The underline: 2 px of accent flush with the bottom edge -
+        // the one mark the selection needs once the face stopped
+        // shouting. dim_by keeps a dead strip's selection faded.
+        r2d::draw_quad(rect.x, rect.y + rect.height - 2.0f, rect.width,
+                       2.0f, dim(theme.control_on, dim_by));
     } else if (result.state == WidgetState::Hovered) {
-        face = theme.control_hovered;
+        r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                               theme.corner_radius,
+                               theme.control_hovered);
     } else if (result.state == WidgetState::Disabled) {
-        face = theme.control_disabled;
+        // no face: a dead tab is dimmed text on the strip
     }
-    r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
-                           theme.corner_radius, face);
 
     // The tab's label, centered like a button's: fitted to the tab
-    // minus its padding. Tab labels never id (the strip ids by
+    // minus its padding. An unselected tab's label sits a step quieter
+    // than the selected one's - the selection reads at a glance, not
+    // glyph by glyph. Tab labels never id (the strip ids by
     // INDEX), so a "##" in a tab label is pure display sugar: it
     // cuts and keys nothing.
     char scratch[128];
@@ -103,8 +116,10 @@ void tab_draw(const Rect& rect, const TabResult& result,
         fit_text(label,
                  std::max(0.0f, rect.width - 2.0f * theme.padding), theme,
                  scratch, sizeof(scratch));
+    const std::uint32_t label_color =
+        selected ? theme.text : dim(theme.text, 0.72f);
     draw_label(rect.x + (rect.width - fit.advance) * 0.5f, rect.y,
-               rect.height, fit, dim(theme.text, dim_by), theme);
+               rect.height, fit, dim(label_color, dim_by), theme);
 }
 
 Rect begin_panel(GuiContext& gui, LayoutCursor& layout,

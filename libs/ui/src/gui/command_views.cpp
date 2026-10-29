@@ -113,7 +113,9 @@ std::string_view command_toolbar(GuiContext& gui, LayoutCursor& layout,
             continue;  // an unknown id lays nothing - the builder's skip rule
         }
         // The button fits its own label (the dialog-button width
-        // formula), so the row reads as buttons, not as equal blocks.
+        // formula) plus a few px of slack past the fitted advance -
+        // the fit's rounding has no room to clip a glyph into "Ne...",
+        // so the row reads as buttons, not as equal blocks.
         char scratch[128];
         const LabelFit fit = fit_text(cmd->label.c_str(), -1.0f, theme,
                                       scratch, sizeof scratch);
@@ -123,7 +125,7 @@ std::string_view command_toolbar(GuiContext& gui, LayoutCursor& layout,
         }
         first = false;
         if (button(gui, layout, theme, cmd->label.c_str(),
-                   fit.advance + 2.0f * theme.padding, {},
+                   fit.advance + 2.0f * theme.padding + 4.0f, {},
                    !ws::app::CommandRegistry::is_enabled(*cmd))) {
             return cmd->id;
         }

@@ -22,9 +22,12 @@
 // (needs the whole-workspace preset: the app links ws::ui's window
 // layer; the spice-only presets do not configure ui).
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <sstream>
@@ -83,6 +86,26 @@ constexpr int kRightSuper = 347;  // GLFW_KEY_RIGHT_SUPER
 constexpr const char* kDefaultFontPath = "/system/fonts/Roboto-Regular.ttf";
 #else
 constexpr const char* kDefaultFontPath = "C:/Windows/Fonts/segoeui.ttf";
+#endif
+
+// The CJK carrier (the gallery's second-face rule): every codepoint
+// past the inline bake resolves through the stack before the fallback
+// box, so a real header's Chinese comment lines render instead of
+// drawing tofu. A missing file refuses gracefully - the boxes stay,
+// nothing else changes.
+#ifdef __ANDROID__
+constexpr const char* kExtraFontPath =
+    "/system/fonts/NotoSansCJK-Regular.ttc";
+#else
+constexpr const char* kExtraFontPath = "C:/Windows/Fonts/msyh.ttc";
+#endif
+
+// The editor's monospace face. A missing face refuses and the editor
+// falls back to the UI font - readable, just not column-aligned.
+#ifdef __ANDROID__
+constexpr const char* kMonoFontPath = "/system/fonts/DroidSansMono.ttf";
+#else
+constexpr const char* kMonoFontPath = "C:/Windows/Fonts/consola.ttf";
 #endif
 
 // The app's store dir: the OS data location on desktop (the gallery's
@@ -219,12 +242,27 @@ protected:
         install_job_system(jobs_);
 
         // The one look asset (bounce's rule): the system face, baked
-        // once at the ui scale. The shell's stock themes are constexpr
-        // and can never carry the pointer, so the host installs it on
-        // the theme it hands draw() each frame - without it every
-        // label is the fontless v1 bar placeholder.
+        // once at the ui scale, with the CJK carrier stacked under it
+        // (the gallery's growing-font rule) so foreign text renders.
+        // The shell's stock themes are constexpr and can never carry
+        // the pointer, so the host installs it on the theme it hands
+        // draw() each frame - without it every label is the fontless
+        // v1 bar placeholder.
         scale_ = ui_scale();
         font_ = ws::ui::r2d::load_font(kDefaultFontPath, 16.0f * scale_);
+        if (!font_.empty()) {
+            // The primary face re-stacks for its own past-ASCII glyphs
+            // (Latin-1 supplements), then the Han carrier under it.
+            (void)ws::ui::r2d::font_add_face(font_, kDefaultFontPath, 0);
+            (void)ws::ui::r2d::font_add_face(font_, kExtraFontPath, 1);
+        }
+        // The editor's mono face, same stack shape: consola for the
+        // code, msyh for the comments consola cannot carry.
+        font_mono_ = ws::ui::r2d::load_font(kMonoFontPath, 15.0f * scale_);
+        if (!font_mono_.empty()) {
+            (void)ws::ui::r2d::font_add_face(font_mono_, kMonoFontPath, 0);
+            (void)ws::ui::r2d::font_add_face(font_mono_, kExtraFontPath, 1);
+        }
 
         // The settings schema: the shell reads shell.theme itself; the
         // plot keys are the plot panel's own, rendered by the shell's
@@ -293,6 +331,12 @@ protected:
 
     void on_update() override {
         namespace r2d = ws::ui::r2d;
+
+        // The lazy CJK bake: a small batch per frame, both fonts, so
+        // the first foreign-text frame never hitches (the gallery's
+        // amortized cadence).
+        (void)r2d::font_bake_pending(font_, 8u);
+        (void)r2d::font_bake_pending(font_mono_, 8u);
 
         // The chord loop, before the frame (the gallery's rule): the
         // shell says the rung (the editor panel declared scoped
@@ -491,21 +535,101 @@ private:
             return;
         }
 
-        // The lines, drawn from the panel's own flow.
-        std::size_t line_at = 0;
-        std::size_t search = 0;
-        while (search < document->content.size()) {
-            const std::size_t newline = document->content.find('\n', search);
-            const std::string line =
-                document->content.substr(search, newline - search);
-            char row[160];
-            std::snprintf(row, sizeof row, "%2zu  %s", ++line_at,
-                          line.c_str());
-            gui::text(layout, theme, row, layout.remaining_width());
-            if (newline == std::string::npos) {
-                break;
+        // The lazy-bake request: mark the document's codepoints once
+        // per content change (idempotent, the documented cadence), so
+        // the CJK stack fills in as the file draws.
+        if (requested_content_ != document->content) {
+            if (!font_mono_.empty()) {
+                (void)ws::ui::r2d::font_request_text(
+                    font_mono_, document->content.c_str());
             }
-            search = newline + 1;
+            requested_content_ = document->content;
+        }
+
+        // The editor rows: a dim right-aligned number in a gutter,
+        // then the content in the mono face with comment lines a step
+        // quieter - an editor, not a status line. The fontless theme
+        // keeps the old plain rows (the v1 bars carry it).
+        const ws::ui::r2d::Font* const mono =
+            font_mono_.empty() ? nullptr : &font_mono_;
+        const ws::ui::r2d::Font* const text_font =
+            mono != nullptr ? mono : theme.font;
+        std::size_t line_at = 0;
+        if (text_font != nullptr && theme.font != nullptr) {
+            const ws::ui::r2d::Font& num_font = *theme.font;
+            const float line_h = text_font->line_height();
+
+            // The gutter: wide enough for the last line's number plus
+            // air on both sides (one pass to count the lines).
+            std::size_t lines = 1;
+            for (const char c : document->content) {
+                lines += (c == '\n') ? 1u : 0u;
+            }
+            char widest[16];
+            std::snprintf(widest, sizeof widest, "%zu", lines);
+            const float gutter = num_font.measure_text(widest) + 16.0f;
+
+            const std::uint32_t num_color = gui::dim(theme.text, 0.42f);
+            const std::uint32_t code_color = theme.text;
+            const std::uint32_t comment_color = gui::dim(theme.text, 0.60f);
+
+            std::size_t search = 0;
+            while (search < document->content.size()) {
+                const std::size_t newline =
+                    document->content.find('\n', search);
+                const std::size_t len =
+                    (newline == std::string::npos ? document->content.size()
+                                                  : newline) -
+                    search;
+                char text_buf[512];
+                const std::size_t keep =
+                    std::min(len, sizeof text_buf - 1);
+                std::memcpy(text_buf, document->content.data() + search,
+                            keep);
+                text_buf[keep] = '\0';
+
+                const gui::Rect row =
+                    layout.next(layout.remaining_width(), line_h);
+                char num[16];
+                std::snprintf(num, sizeof num, "%zu", ++line_at);
+                (void)ws::ui::r2d::draw_text(
+                    row.x + gutter - 8.0f - num_font.measure_text(num),
+                    row.y, num, num_font, num_color);
+
+                // A comment line: the first non-blank chars are // or #.
+                std::size_t first = 0;
+                while (text_buf[first] == ' ' || text_buf[first] == '\t') {
+                    ++first;
+                }
+                const bool comment =
+                    text_buf[first] == '#' ||
+                    (text_buf[first] == '/' && text_buf[first + 1] == '/');
+                (void)ws::ui::r2d::draw_text(
+                    row.x + gutter, row.y, text_buf, *text_font,
+                    comment ? comment_color : code_color);
+
+                if (newline == std::string::npos) {
+                    break;
+                }
+                search = newline + 1;
+            }
+        } else {
+            // The fontless rows: the number rides the text, v1 style.
+            std::size_t search = 0;
+            while (search < document->content.size()) {
+                const std::size_t newline =
+                    document->content.find('\n', search);
+                const std::string line = document->content.substr(
+                    search, newline - search);
+                char row[160];
+                std::snprintf(row, sizeof row, "%2zu  %s", ++line_at,
+                              line.c_str());
+                gui::text(layout, theme, row, layout.remaining_width());
+                if (newline == std::string::npos) {
+                    break;
+                }
+                search = newline + 1;
+            }
         }
         if (line_at == 0) {
             gui::text(layout, theme, "(empty - type a line below)");
@@ -559,31 +683,84 @@ private:
 
     void draw_plot(GuiContext& gui, LayoutCursor& layout,
                    const gui::ChromeTheme& theme) {
+        // The header: the action, then what the chart shows.
         if (gui::button(gui, layout, theme, "regenerate")) {
             submit_plot_job();
         }
-        gui::text(layout, theme, plot_pending() ? "computing..."
-                                                : "damped sine samples");
+        char header[128];
+        std::snprintf(header, sizeof header, "damped sine - %zu samples",
+                      plot_data_.size());
+        gui::text(layout, theme, plot_pending() ? "computing..." : header);
+        gui::separator(layout, theme);
 
-        // The bars: the panel draws through the r2d seam directly (the
-        // same screen-space rule every widget rides). The chart area
-        // is the rest of the panel body.
+        // The chart: one rounded bar per sample against a mid
+        // baseline, guides at the peak and the zero, the peak value
+        // labeled - enough axis that the decay reads as data, not as
+        // decoration. The panel draws through the r2d seam directly
+        // (the same screen-space rule every widget rides).
         const gui::Rect body = layout.panel_content();
-        if (body.height <= 0.0f || plot_data_.empty()) {
+        if (body.height <= 4.0f * theme.padding || plot_data_.empty()) {
             return;
         }
-        const float bar_w = body.width / static_cast<float>(plot_data_.size());
-        const float baseline = body.y + body.height;
-        for (std::size_t i = 0; i < plot_data_.size(); ++i) {
+
+        const double amplitude =
+            settings_->get<double>("plot.amplitude")
+                .transform([](const ws::settings::SettingRead<double>& r) {
+                    return r.value;
+                })
+                .value_or(1.0);
+
+        const std::size_t n = plot_data_.size();
+        const float chart_h = body.height - 2.0f * theme.padding;
+        const gui::Rect chart{body.x, body.y + theme.padding, body.width,
+                              chart_h};
+        const float baseline = chart.y + chart_h * 0.72f;
+        const float peak_h = chart_h * 0.62f;  // where +amplitude sits
+        const float bar_w = chart.width / static_cast<float>(n);
+        const float bar_r = std::min(2.0f, std::max(0.0f, bar_w * 0.25f));
+
+        // The guides: +A at the top, the zero line at the baseline -
+        // the two lines the decay is measured against.
+        ws::ui::r2d::draw_quad(chart.x, chart.y, chart.width, 1.0f,
+                               theme.border);
+        ws::ui::r2d::draw_quad(chart.x, baseline, chart.width, 1.0f,
+                               gui::dim(theme.text, 0.35f));
+
+        // The bars: positive samples in the accent, negative ones a
+        // step quieter - the two halves of the sine read apart at a
+        // glance.
+        for (std::size_t i = 0; i < n; ++i) {
             const float sample = plot_data_[i];
-            const float h = std::max(1.0f, std::abs(sample) * body.height * 0.5f);
+            const float scaled = static_cast<float>(
+                std::abs(sample) / std::max(0.25, amplitude));
+            const float h = std::max(1.0f, scaled * peak_h);
             const float y = sample >= 0.0f ? baseline - h : baseline;
-            ws::ui::r2d::draw_quad(body.x + static_cast<float>(i) * bar_w, y,
-                                   std::max(1.0f, bar_w - 1.0f), h,
-                                   theme.control_on);
+            ws::ui::r2d::draw_rounded_quad(
+                chart.x + static_cast<float>(i) * bar_w, y,
+                std::max(1.0f, bar_w - 1.0f), h, bar_r,
+                sample >= 0.0f ? theme.control_on
+                                : gui::dim(theme.control_on, 0.55f));
         }
-        // The zero line.
-        ws::ui::r2d::draw_quad(body.x, baseline, body.width, 1.0f, theme.border);
+
+        // The axis labels, only when a font is installed (the
+        // fontless bars carry the chart alone): the peak value at the
+        // top guide, 0 at the baseline, the sample count bottom-right.
+        if (theme.font != nullptr) {
+            char label[32];
+            std::snprintf(label, sizeof label, "+%.1f", amplitude);
+            (void)ws::ui::r2d::draw_text(chart.x, chart.y + 2.0f, label,
+                                         *theme.font,
+                                         gui::dim(theme.text, 0.55f));
+            (void)ws::ui::r2d::draw_text(chart.x, baseline + 2.0f, "0",
+                                         *theme.font,
+                                         gui::dim(theme.text, 0.55f));
+            std::snprintf(label, sizeof label, "%zu samples", n);
+            const float label_w = theme.font->measure_text(label);
+            (void)ws::ui::r2d::draw_text(
+                chart.x + chart.width - label_w,
+                chart.y + chart.height - theme.font->line_height(), label,
+                *theme.font, gui::dim(theme.text, 0.55f));
+        }
     }
 
     // --- the background job ---------------------------------------------------
@@ -736,9 +913,13 @@ private:
     // The look the shell cannot own: the baked face plus the ui scale
     // it was baked for (an empty font keeps the fontless v1 bars, by
     // design - the boxes this example shipped with were that
-    // degradation, not a renderer fault).
+    // degradation, not a renderer fault). The mono face is the
+    // editor's own; requested_content_ is the lazy-bake request guard
+    // (mark once per content change, the documented cadence).
     float scale_ = 1.0f;
     ws::ui::r2d::Font font_;
+    ws::ui::r2d::Font font_mono_;
+    std::string requested_content_;
 
     // The plot job's state.
     ws::jobs::JobSystem jobs_{2};

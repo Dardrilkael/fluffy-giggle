@@ -31,6 +31,7 @@ constexpr FaceEntry kFaceEntries[] = {
     {"control_on", &ChromeTheme::control_on},
     {"text", &ChromeTheme::text},
     {"border", &ChromeTheme::border},
+    {"bar_bg", &ChromeTheme::bar_bg},
     {"veil", &ChromeTheme::veil},
     {"toast_info", &ChromeTheme::toast_info},
     {"toast_warning", &ChromeTheme::toast_warning},

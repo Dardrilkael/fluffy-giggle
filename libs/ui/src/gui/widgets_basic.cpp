@@ -416,19 +416,21 @@ Rect status_bar(const ChromeTheme& theme, const char* text) {
     const Rect rect{0.0f, frame.height - theme.control_height,
                     frame.width, theme.control_height};
 
-    // The chrome: the panel face with a 1-px rule along its top edge -
-    // the separator's own look, on the one edge that faces content.
-    r2d::draw_quad(rect.x, rect.y, rect.width, rect.height, theme.panel_bg);
+    // The chrome: the bar strip's own face (a depth step away from the
+    // panels) with a 1-px rule along its top edge - the separator's own
+    // look, on the one edge that faces content.
+    r2d::draw_quad(rect.x, rect.y, rect.width, rect.height, theme.bar_bg);
     r2d::draw_quad(rect.x, rect.y, rect.width, 1.0f, theme.border);
 
     // The text, fitted to the width less both insets - a long line
-    // truncates like any label.
+    // truncates like any label. A touch quieter than body text: the
+    // status line reports, it does not shout.
     char scratch[128];
     const LabelFit fit =
         fit_text(text, std::max(0.0f, rect.width - 2.0f * theme.padding),
                  theme, scratch, sizeof scratch);
     draw_label(rect.x + theme.padding, rect.y, rect.height, fit,
-               theme.text, theme);
+               dim(theme.text, 0.85f), theme);
     return rect;
 }
 

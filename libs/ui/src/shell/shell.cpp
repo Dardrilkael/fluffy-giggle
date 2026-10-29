@@ -705,21 +705,30 @@ void AppShell::draw(GuiContext& gui, const ChromeTheme& theme,
     LayoutCursor layout;
     (void)layout.begin_panel(frame, 0.0f, theme.spacing);
 
-    // The menu bar strip.
+    // The menu bar strip: the bar's own face first - the chrome is a
+    // depth layer away from the panels, so the frame reads as frame
+    // (nothing painted it before; the strip rode the r2d clear color,
+    // one flat void with the dock below it).
     const Rect bar{frame.x, frame.y, frame.width, theme.control_height};
+    r2d::draw_quad(bar.x, bar.y, bar.width, bar.height, theme.bar_bg);
     draw_menu_bar(gui, layout, theme, bar);
+    r2d::draw_quad(bar.x, bar.y + bar.height - 1.0f, bar.width, 1.0f,
+                   theme.border);
 
     // The toolbar strip (only when the host named commands for it).
     float top = frame.y + theme.control_height;
     if (!toolbar_ids_.empty()) {
         const Rect tool{frame.x, top, frame.width, theme.control_height};
-        layout.begin_panel(tool, 4.0f, theme.spacing);
+        r2d::draw_quad(tool.x, tool.y, tool.width, tool.height, theme.bar_bg);
+        layout.begin_panel(tool, 3.0f, theme.spacing);
         const std::string_view fired = gui::command_toolbar(
             gui, layout, theme, "shell.toolbar", commands_, toolbar_ids_);
         if (!fired.empty()) {
             (void)commands_.execute(fired);
         }
         layout.end_panel();
+        r2d::draw_quad(tool.x, tool.y + tool.height - 1.0f, tool.width,
+                       1.0f, theme.border);
         top += theme.control_height;
     }
 
@@ -908,9 +917,11 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
 
     // The splitters first: their hit claims land before any leaf
     // widget's, so a boundary grab always wins over content under it.
+    // The fill is the bar face - a visible recessed gutter between
+    // the panels, not a 1-px color change nobody can find.
     for (const DockTree::SplitterRect& splitter : resolved.splitters) {
         r2d::draw_quad(splitter.rect.x, splitter.rect.y, splitter.rect.width,
-                       splitter.rect.height, theme.border);
+                       splitter.rect.height, theme.bar_bg);
         const gui::WidgetId id = gui.ids().id("shell.splitter");
         const gui::HitTest hit = gui.hit_test(id, splitter.rect);
         if (hit.pressed) {
@@ -970,6 +981,15 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
                 std::max(40.0f, std::min(160.0f, leaf.rect.width /
                                                      static_cast<float>(
                                                          labels.size())));
+            // The strip's own face + a 1-px rule at its bottom edge,
+            // BEFORE the tabs: the selected tab's panel-bg face paints
+            // over the rule under itself, so it merges with its body
+            // while the unselected tabs keep the rule as their
+            // separator (the editor-tab geometry).
+            r2d::draw_quad(strip.x, strip.y, strip.width, strip.height,
+                           theme.bar_bg);
+            r2d::draw_quad(strip.x, strip.y + strip.height - 1.0f,
+                           strip.width, 1.0f, theme.border);
             layout.begin_panel(strip, 0.0f, 0.0f);
             if (gui::tab_bar(gui, layout, theme, "shell.tabs", labels.data(),
                              static_cast<int>(labels.size()), active, tab_w)) {

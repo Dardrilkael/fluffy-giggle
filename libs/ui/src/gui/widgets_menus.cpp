@@ -853,16 +853,23 @@ MenuEvent menu_bar(GuiContext& gui, LayoutCursor& layout,
         // --- the title's draw ---------------------------------------
         focus_ring(gui, id, rect, theme);
         const float dim_by = dim_factor(result.state, theme);
-        std::uint32_t face = theme.control_bg;
+        // Face priority: press feedback, then the open title, then
+        // hover. An idle title wears NOTHING - text on the bar strip,
+        // the VS Code menu look - and the OPEN title wears the popup
+        // window's own face (panel_bg), so the title and the menu
+        // below it read as one connected surface.
         if (result.state == WidgetState::Pressed) {
-            face = theme.control_pressed;
+            r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                                   theme.corner_radius,
+                                   theme.control_pressed);
         } else if (open == i) {
-            face = theme.control_on;  // the open title wears the accent
+            r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                                   theme.corner_radius, theme.panel_bg);
         } else if (result.state == WidgetState::Hovered) {
-            face = theme.control_hovered;
+            r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                                   theme.corner_radius,
+                                   theme.control_hovered);
         }
-        r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
-                               theme.corner_radius, face);
         // The label, centered like a tab's, mnemonic underlined.
         char fit_scratch[128];
         const LabelFit fit =
