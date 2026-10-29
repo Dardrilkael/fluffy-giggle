@@ -82,20 +82,26 @@ function(ws_add_app name)
   endif()
 endfunction()
 
-# ws_add_test(<lib> SOURCES <file>... [DEPENDS <target>...])
+# ws_add_test(<lib> SOURCES <file>... [DEPENDS <target>...] [LINK <target>])
 #
 # Creates test_<lib> linking ws::<lib> + doctest, and registers it with ctest.
+# LINK overrides the ws::<lib> default - for the pure-archive suites whose
+# lib is not their own name (test_ui_canvas/test_ui_shell link ws::ui_gui,
+# the renderer-free archive, not ws::ui).
 # No-op when WS_BUILD_TESTS is OFF.
 function(ws_add_test lib)
   if(NOT WS_BUILD_TESTS)
     return()
   endif()
-  cmake_parse_arguments(ARG "" "" "SOURCES;DEPENDS" ${ARGN})
+  cmake_parse_arguments(ARG "" "LINK" "SOURCES;DEPENDS" ${ARGN})
   if(NOT ARG_SOURCES)
     message(FATAL_ERROR "ws_add_test(${lib}): SOURCES is required.")
   endif()
+  if(NOT ARG_LINK)
+    set(ARG_LINK ws::${lib})
+  endif()
   add_executable(test_${lib} ${ARG_SOURCES})
-  target_link_libraries(test_${lib} PRIVATE ws::${lib} doctest::doctest ${ARG_DEPENDS})
+  target_link_libraries(test_${lib} PRIVATE ${ARG_LINK} doctest::doctest ${ARG_DEPENDS})
   target_compile_features(test_${lib} PRIVATE cxx_std_20)
   ws_set_warnings(test_${lib})
   add_test(NAME ${lib} COMMAND test_${lib})

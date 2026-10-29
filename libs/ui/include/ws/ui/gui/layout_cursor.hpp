@@ -83,6 +83,20 @@ public:
     // placing: hand it to next() and the widget spans to the edge.
     float remaining_width() const;
 
+    // The flow's current position: where the next full-line widget
+    // would land (gui space). A read for hosts placing custom content
+    // (a canvas view, an embedded viewport) at the flow's position -
+    // the cursor itself never moves. 0 with no panel open.
+    [[nodiscard]] float cursor_x() const;
+    [[nodiscard]] float cursor_y() const;
+
+    // Closes the current line and advances the flow past a block the
+    // host placed itself: custom content `height` px tall at the
+    // cursor (the canvas view's own geometry), the flow resuming one
+    // spacing below the block at the content's left edge. A no-op
+    // with no panel open.
+    void advance(float height);
+
     // How far the innermost panel's placements reach below its content
     // origin: the bottom of the last placed line, or of the line a
     // same_line() resumed onto - 0 with no panel open or nothing placed.

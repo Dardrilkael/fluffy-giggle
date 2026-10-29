@@ -1,9 +1,11 @@
 # UI Task — Stage 14/15 Working Plan
 
-Status: **in progress** (started 2026-10-29). This file is the on-repo copy of
-the two stages being executed now, so the work can stop and resume at any
-commit. Progress is tracked in the checklist at the bottom; every finished
-block lands as its own commit.
+Status: **complete** (finished 2026-10-29). Every block landed as its
+own commit; the checklist at the bottom is the record. The stage-15
+acceptance is `test_ui_shell` (headless, the r2d stub) plus
+`apps/shell_example`, and the whole-workspace configure the stage-14
+commits had silently broken (see the fixes note at the bottom) is
+green again.
 
 The stages below continue the `ws::ui` arc (stages 1-13 are merged; see
 `libs/ui/CLAUDE.md` for their summary).
@@ -155,9 +157,73 @@ mark the seam clearly so a future full Part A can replace them.
       slider_float, text→text_input, text+enum→combo; grouped by
       category with collapsing headers; PropertyGridState holds the
       per-category open-state + per-text-setting input buffers)
-- [ ] Stage 15 — dock host (split tree + serialization) + tests
-- [ ] Stage 15 — panel framework + tests
-- [ ] Stage 15 — Document/DocumentManager + session restore + tests
-- [ ] Stage 15 — AppShell + shutdown ordering + tests
-- [ ] Stage 15 — apps/shell_example
-- [ ] docs refresh (CLAUDE.md files) + final zip
+- [x] Stage 15 — dock host (split tree + serialization) + tests
+- [x] Stage 15 — panel framework + tests
+- [x] Stage 15 — Document/DocumentManager + session restore + tests
+- [x] Stage 15 — AppShell + shutdown ordering + tests
+- [x] Stage 15 — apps/shell_example
+- [x] docs refresh (CLAUDE.md files) + final zip
+
+## Stage 15 as-built notes (2026-10-29)
+
+- `include/ws/ui/shell/` + `src/shell/` (both joined the `ws_ui_gui`
+  pure archive, which gained PUBLIC deps `ws::math` - the canvas
+  layer's public Vec2 - and `ws::platform` - the shell's headless
+  services): `dock.hpp` (the split tree: add/remove/activate,
+  resolve() -> leaves + splitter bands, apply_drag with
+  kMinWeight-normalized clamps, tolerant json round-trip that drops
+  unknown panel ids), `panels.hpp` (PanelRegistry + PanelHost owning
+  the tree: single/multi-instance ids, focus with on_focus/on_close,
+  cycling), `document.hpp` (the Document interface - dirty via the
+  undo save point - and DocumentManager: open/adopt, the
+  ClosePlan/finish_close flow, session save/restore, per-document
+  Autosave pairs with probe/recover/discard), `shell.hpp` (AppShell:
+  the menu bar with the automatic Window menu - panel toggles, layout
+  save/restore/reset, recents submenu - the toolbar, the dock view
+  with tab strips and draggable splitters, status-job rows with
+  cancel, the close-with-dirty 3-button modal, the recovery prompt,
+  the named-layout prompt, the palette, the toasts, the ordered
+  shutdown: cancel_jobs -> close_panels -> autosaves -> session ->
+  layout -> recents -> flush_settings).
+- `test_ui_shell` (libs/ui/tests/test_ui_shell.cpp): the dock
+  geometry/serialization/clamp/prune cases, the panel validation and
+  focus cases, the document close-with-dirty and session-restore
+  cases, the autosave snapshot/recover/discard case, and the shell
+  cases - first-run startup, corrupt config startup, layout restore
+  with missing panels, the dirty title, the panel key rung, palette
+  dispatch, drops, the live theme key, and the shutdown ordering
+  (cancel_jobs precedes close_panels).
+- `apps/shell_example`: the scratchpad - a .txt document type with
+  whole-content undo commands, an Editor panel (append/remove-line
+  rows + the undo state), a Plot panel (a JobSystem job computing a
+  damped sine, the status-bar row with cancel, bars through r2d),
+  app.undo/app.redo/app.clear/app.about/app.replot beside the shell's
+  File/Window set, and the settings schema (shell.theme, plot.points,
+  plot.amplitude) the built-in settings panel renders.
+
+## Latent breaks the full-workspace configure found (all fixed)
+
+The stage-14/15 work had only ever been built through the spice-only
+presets; the whole-workspace configure (the `debug` preset) had gone
+quietly broken and nobody had run it:
+
+- `ws_add_test(ui_canvas ...)` linked `ws::ui_canvas`, a target that
+  never existed - `ws_add_test` grew a `LINK <target>` override and
+  the canvas/shell tests now link `ws::ui_gui` (the pure archive they
+  always meant to name).
+- `ws_ui_gui` never declared its `ws::math` dep even though the
+  canvas layer's public headers include `ws/math/vecmath.hpp`.
+- The gallery's stage-14 canvas page used `LayoutCursor::cursor_x/
+cursor_y`, members that were never public - the cursor gained the
+  `cursor_x()/cursor_y()/advance()` API the page always needed.
+- `apps/CMakeLists`' `ws_app_wants` checked the APP NAME against the
+  lib list (every call site spells "app, libs..."), so in any subset
+  build only an app named like its lib (spice) could ever configure;
+  the app name is now skipped, and playground's gate lists its
+  `audio` dep like the contract says.
+- The desktop-Linux configure (a dev-box convenience, not a shipped
+  platform) can now build the headless halves: `ws_platform` drops
+  the win/android OS TUs there, `ensure_directory` moved to
+  paths.cpp (a pure std::filesystem utility that used to drag
+  `os_location` into every headless link), and `test_platform` gates
+  to the platforms whose OS halves it tests.

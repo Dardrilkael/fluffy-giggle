@@ -23,7 +23,8 @@ ws_add_library(ui DEPENDS ws::core ws::math ws::input ws::gfx ws::jobs)
 # stage set out to prove.
 file(GLOB ui_gui_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/src/gui/*.cpp"
-  "${CMAKE_CURRENT_SOURCE_DIR}/src/canvas/*.cpp")
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/canvas/*.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/shell/*.cpp")
 add_library(ws_ui_gui STATIC ${ui_gui_srcs})
 add_library(ws::ui_gui ALIAS ws_ui_gui)
 target_include_directories(ws_ui_gui
@@ -31,7 +32,7 @@ target_include_directories(ws_ui_gui
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_features(ws_ui_gui PUBLIC cxx_std_20)
 ws_set_warnings(ws_ui_gui)
-target_link_libraries(ws_ui_gui PUBLIC ws::core ws::input ws::jobs ws::settings ws::app)
+target_link_libraries(ws_ui_gui PUBLIC ws::core ws::math ws::input ws::jobs ws::settings ws::app ws::platform)
 target_link_libraries(ws_ui PRIVATE ws_ui_gui)
 
 # Platform + gui sources: exactly one windowing TU builds (the WindowHost
@@ -118,9 +119,28 @@ ws_add_test(ui_canvas
           tests/ui_gui_r2d_stub.cpp
           src/text/font.cpp
           src/text/stb_impl.cpp
+  LINK ws::ui_gui
   DEPENDS stb)
 if(TARGET test_ui_canvas)
   target_include_directories(test_ui_canvas PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+
+# The stage-15 shell suite: the dock host, the panel framework, the
+# document layer and AppShell itself, headless over the same gui
+# archive + r2d stub. The shell's platform services (recent files,
+# autosave, title) ride ws::platform's headless halves - the fake
+# dialogs and fake boxes answer the injected interfaces, and the
+# FileSystem seam is the test's own in-memory fake, so no OS half
+# ever links here.
+ws_add_test(ui_shell
+  SOURCES tests/test_ui_shell.cpp
+          tests/ui_gui_r2d_stub.cpp
+          src/text/font.cpp
+          src/text/stb_impl.cpp
+  LINK ws::ui_gui
+  DEPENDS stb)
+if(TARGET test_ui_shell)
+  target_include_directories(test_ui_shell PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
 
 # --- Shader workflow targets (opt-in; the default build is unchanged) ------

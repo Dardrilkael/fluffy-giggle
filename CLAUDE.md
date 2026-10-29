@@ -58,7 +58,9 @@ One line each - the per-tree CLAUDE.md files carry the detail:
   is opaque void* handles; volk/vma stay PRIVATE and ui (the only
   consumer) is the unwrap point.
 - `libs/ui` - app shell (GLFW/Vulkan/ImGui/ImPlot, all private) + the
-  widget/renderer/gui drawing APIs.
+  widget/renderer/gui drawing APIs, the stage-14 canvas layer and the
+  stage-15 ws::ui::shell (AppShell: dock/panels/documents, the reusable
+  app skeleton - see libs/ui/src/shell/CLAUDE.md).
 - `libs/audio` - WAV decode + OpenAL Soft playback behind a Result-only API.
 - `libs/net` - event loop, framed TCP, UDP, LAN discovery.
 - `libs/physics` - 2D + 3D physics behind one API (Box2D/Jolt, private).

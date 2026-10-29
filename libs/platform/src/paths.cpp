@@ -1,9 +1,20 @@
 #include <ws/platform/paths.hpp>
 
+#include <ws/platform/errors.hpp>
+
+#include <filesystem>
+#include <system_error>
 #include <vector>
 
 namespace ws::platform {
 namespace {
+
+// utf-8 narrow -> fs::path. Routed through char8_t so non-ascii
+// paths survive Windows too (the StdFileSystem spelling - one routing
+// rule across the workspace's file seams).
+[[nodiscard]] std::filesystem::path to_fs_path(std::string_view path) {
+    return std::filesystem::path{std::u8string{path.begin(), path.end()}};
+}
 
 [[nodiscard]] bool is_sep(char c) { return c == '/' || c == '\\'; }
 
@@ -153,6 +164,23 @@ std::string parent_of(std::string_view path) {
         return std::string{head.substr(0, head.size() >= 2 && is_sep(head[1]) ? 2 : 1)};
     }
     return std::string{head.substr(0, cut)};
+}
+
+// The mkdir -p over utf-8 narrow paths: a pure std::filesystem utility
+// (moved here from locations.cpp so the headless consumers - the
+// autosave store, the recent list - link without the OS location half).
+ws::core::Status ensure_directory(std::string_view path) {
+    if (path.empty()) {
+        return fail(PlatformError::invalid_argument,
+                    "ensure_directory: the path is empty");
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(to_fs_path(path), ec);
+    if (ec) {
+        return fail(PlatformError::io_failed,
+                    "mkdir '" + std::string{path} + "': " + ec.message());
+    }
+    return {};
 }
 
 }  // namespace ws::platform

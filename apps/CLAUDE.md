@@ -76,3 +76,23 @@ CMakeLists only wire ws libraries together.
   keeps clear of. No assets: the font is the system face resolved at the
   platform boundary (like playground's), so Windows and Android build it
   from one source unchanged.
+- `apps/spice` - the ws::spice CLI (desktop console app): the thin
+  parse -> simulate -> write shell over the public API (`run`/`check`
+  subcommands, `-o -`, `--format raw`, `--keep-going`,
+  `--strict-meas`, `--werror`); argv, file I/O and exit codes only.
+- `apps/spice_example` - the smallest possible ws::spice embedding
+  (desktop console app): a hardcoded RC-transient deck through
+  read_deck -> build_deck_ast -> run_deck, the v(out) column and the
+  .meas result printed to stdout - the C++ front door in 15 lines.
+- `apps/shell_example` - the ws::ui::shell acceptance app (windowed,
+  desktop): a text-and-plot "scratchpad" built ONLY from AppShell - the
+  host registers a .txt document type (whole-content undo commands, the
+  dirty flag riding the undo save point), an Editor panel and a Plot
+  panel (a JobSystem job computing a damped sine, listed in the status
+  bar with its bar and a cancel button), a few commands
+  (undo/redo/clear/about/replot) beside the shell's own File/Window set,
+  and the settings schema (shell.theme, plot.points, plot.amplitude)
+  the shell's built-in settings panel renders. Everything else - menus,
+  the automatic Window menu, toolbar, docking with draggable splitters,
+  palette, toasts, recents, autosave/crash recovery, session restore,
+  the ordered shutdown - is the shell's.

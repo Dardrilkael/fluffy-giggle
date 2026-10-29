@@ -2754,9 +2754,9 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
         // Allocate a 600x400 rect for the canvas view.
         constexpr float kCanvasW = 600.0f;
         constexpr float kCanvasH = 400.0f;
-        const gui::Rect canvas_rect = {layout_.cursor_x, layout_.cursor_y,
+        const gui::Rect canvas_rect = {layout_.cursor_x(), layout_.cursor_y(),
                                        kCanvasW, kCanvasH};
-        layout_.cursor_y += kCanvasH + chrome_.padding;
+        layout_.advance(kCanvasH + chrome_.padding);
 
         // Feed this frame's input to the canvas view (the gui's input
         // is the same InputFrame the platform pumped).

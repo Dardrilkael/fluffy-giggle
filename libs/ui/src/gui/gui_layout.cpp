@@ -125,6 +125,36 @@ void LayoutCursor::end_panel() {
     }
 }
 
+float LayoutCursor::cursor_x() const {
+    if (top_ < 0) {
+        return 0.0f;
+    }
+    return panels_[static_cast<std::size_t>(std::min(top_, kMaxPanels - 1))]
+        .cursor_x;
+}
+
+float LayoutCursor::cursor_y() const {
+    if (top_ < 0) {
+        return 0.0f;
+    }
+    return panels_[static_cast<std::size_t>(std::min(top_, kMaxPanels - 1))]
+        .cursor_y;
+}
+
+void LayoutCursor::advance(float height) {
+    if (top_ < 0) {
+        return;  // no panel open: nothing to advance (drop-safe)
+    }
+    Panel& panel = slot();
+    // The host's block counts as the line's tallest placement: the
+    // flow closes the line and resumes one spacing below it, exactly
+    // where a widget of this height would have left it.
+    panel.line_height = std::max(panel.line_height, height);
+    panel.cursor_x = panel.content.x;
+    panel.cursor_y = panel.line_top + panel.line_height + panel.spacing;
+    panel.at_line_start = true;
+}
+
 Rect LayoutCursor::panel_content() const {
     if (top_ < 0) {
         return {};

@@ -26,8 +26,27 @@ if(platform_sources)
       "${CMAKE_CURRENT_SOURCE_DIR}/src/clipboard_win.cpp"
       "${CMAKE_CURRENT_SOURCE_DIR}/src/messagebox_win.cpp"
       "${CMAKE_CURRENT_SOURCE_DIR}/src/single_instance_win.cpp")
-  else()
+  elseif(WIN32)
     list(REMOVE_ITEM platform_sources
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/locations_android.cpp"
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/dialogs_android.cpp"
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/clipboard_android.cpp"
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/messagebox_android.cpp"
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/single_instance_android.cpp")
+  else()
+    # Linux/other desktop (not a shipped platform - the workspace's
+    # desktop is Windows): the headless halves only, so the pure
+    # consumers (ws_ui_gui's shell layer and its headless tests) build
+    # and run on a dev box. The OS halves (dialogs/clipboard/message
+    # box/single-instance/known-folders) have no implementation here;
+    # anything that references them fails the link naming them, the
+    # same loud-not-silent rule the windowing pairs keep.
+    list(REMOVE_ITEM platform_sources
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/locations_win.cpp"
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/dialogs_win.cpp"
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/clipboard_win.cpp"
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/messagebox_win.cpp"
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/single_instance_win.cpp"
       "${CMAKE_CURRENT_SOURCE_DIR}/src/locations_android.cpp"
       "${CMAKE_CURRENT_SOURCE_DIR}/src/dialogs_android.cpp"
       "${CMAKE_CURRENT_SOURCE_DIR}/src/clipboard_android.cpp"
@@ -51,4 +70,10 @@ if(NOT ANDROID AND WIN32)
   target_link_libraries(ws_platform PRIVATE shell32 ole32 user32)
 endif()
 
-ws_add_test(platform SOURCES tests/test_platform.cpp)
+# The suite exercises the OS halves (os_location, the native dialogs,
+# the clipboard) alongside the headless ones, so it builds only where
+# those halves do: windows or the NDK. The headless-only desktop-Linux
+# build (above) has nothing to test them against.
+if(WIN32 OR ANDROID)
+  ws_add_test(platform SOURCES tests/test_platform.cpp)
+endif()

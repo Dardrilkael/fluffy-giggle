@@ -11,6 +11,7 @@ Condensed from the 1,339-line `libs/ui/CLAUDE.md`. Every rule, invariant and ext
 - **`widgets.hpp`:** the ImGui/ImPlot-backed wrapper.
 - **`r2d`:** the 2D renderer.
 - **`gui/`:** an immediate-mode widget set that draws through r2d; the job-row helpers bridge `ws::jobs`, the theme-json layer `ws::settings` and the command views `ws::app` (all workspace deps of the same purity class as core/input — pure std, no platform).
+- **`shell/`** (stage 15): AppShell — the reusable app skeleton (dock host with tabbed leaves and draggable splitters, panel registry/host, document manager with session restore and autosave, the automatic Window menu, toolbar, status-job rows, the close-with-dirty/recovery/layout modals, palette, toasts, the ordered shutdown). Plain class the host's `App` subclass owns and drives from `on_update()`; headless-testable through the same r2d stub as the gui suite (`test_ui_shell`). `src/shell/CLAUDE.md` is its rulebook.
 
 Since stage 3, the input family lives in `libs/input`, and the Vulkan device, swapchain, frame sync and VMA live in `libs/gfx`. `ui` holds a `gfx::Gpu` and a `gfx::Swapchain`; `app.cpp` is the only place their opaque handles are cast.
 
@@ -34,8 +35,10 @@ libs/ui/
   include/ws/ui/
     app.hpp, render_command_queue.hpp, renderer2d.hpp, widgets.hpp
     gui/  command_views.hpp, gui_context.hpp, id_stack.hpp, job_progress.hpp,
-          layout_cursor.hpp, rect.hpp, theme.hpp, theme_color.hpp,
+          layout_cursor.hpp, property_grid.hpp, rect.hpp, theme.hpp, theme_color.hpp,
           theme_data.hpp, theme_json.hpp, widgets.hpp, scoped.hpp
+    canvas/  canvas2d.hpp, tessellation.hpp, view.hpp  (stage 14)
+    shell/  dock.hpp, document.hpp, errors.hpp, panels.hpp, shell.hpp  (stage 15)
   src/
     app/        app.cpp (pimpl: frame loop + backends)
     platform/   window.h, window_glfw.cpp, window_android.cpp (one builds per platform)
@@ -44,10 +47,22 @@ libs/ui/
     text/       font.h/.cpp, atlas_packer.h/.cpp, stb_impl.cpp
     gui/        gui.h, gui_context.cpp, gui_id.cpp, gui_layout.cpp, widgets_detail.hpp,
                 widgets_{buttons,basic,jobs,sliders,panels,scroll,overlays,
-                         dialogs,menus,toasts,combo,text_input,table}.cpp
+                         dialogs,menus,toasts,combo,text_input,table}.cpp,
+                command_{views,palette,keymap}.cpp, property_grid.cpp,
+                theme_{color,data,json}.cpp
+    canvas/     canvas2d.cpp, tessellation.cpp, view.cpp  (stage 14)
+    shell/      dock.cpp, panels.cpp, document.cpp, shell.cpp  (stage 15)
     widgets/    widgets.cpp (ImGui/ImPlot wrapper)
   tests/
 ```
+
+The `gui/`, `canvas/` and `shell/` trees all compile into `ws_ui_gui`, the
+pure archive (no Vulkan/GLFW on its link line) that `ws_ui` links in and
+the headless suites (`test_ui_gui`, `test_ui_canvas`, `test_ui_shell`)
+link with the r2d stub — the acceptance cut the stages set out to prove.
+The archive's PUBLIC deps are the pure workspace libs its public headers
+name: core, math (canvas Vec2), input, jobs, settings, app and platform
+(the shell's headless services).
 
 ## Event system
 

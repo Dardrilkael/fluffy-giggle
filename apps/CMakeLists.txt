@@ -1,10 +1,13 @@
 # Apps are added here, one line each. Like libs/ (see libs/CMakeLists.txt),
 # each app is gated on its whole lib set being configured: in a WS_BUILD_LIBS
 # subset build an app appears iff every ws::<lib> it links exists, so e.g. the
-# spice-only preset builds apps/spice and nothing else.
+# spice-only preset builds apps/spice and nothing else. The call sites spell
+# "app, lib, lib, ..." - the app name rides ARGN's front for readability and
+# is skipped by the check.
 function(ws_app_wants out)
   set(want TRUE)
   if(WS_BUILD_LIBS)
+    list(POP_FRONT ARGN)  # the app name, not a lib to check
     foreach(lib IN LISTS ARGN)
       if(NOT lib IN_LIST WS_ALL_LIBS)
         set(want FALSE)
@@ -15,7 +18,9 @@ function(ws_app_wants out)
 endfunction()
 
 # One ws_want_<app> variable per app (CMake's if() cannot call functions).
-ws_app_wants(_want playground ui)
+# (playground's sound panel links ws::audio on top of ws_add_app's ui - the
+# gate lists the whole set, the gating's own contract.)
+ws_app_wants(_want playground ui audio)
 set(ws_want_playground ${_want})
 ws_app_wants(_want chatter ui net)
 set(ws_want_chatter ${_want})
@@ -23,6 +28,8 @@ ws_app_wants(_want bounce physics audio ui)
 set(ws_want_bounce ${_want})
 ws_app_wants(_want ui_gallery ui jobs platform app)
 set(ws_want_ui_gallery ${_want})
+ws_app_wants(_want shell_example ui jobs platform app)
+set(ws_want_shell_example ${_want})
 ws_app_wants(_want wavplayer audio)
 set(ws_want_wavplayer ${_want})
 ws_app_wants(_want netdemo net)
@@ -55,6 +62,13 @@ if(ws_want_ui_gallery)
   # at the platform boundary), so it builds for the phone and the desktop
   # unchanged - ungated for the same reason as the gui apps above.
   add_subdirectory(ui_gallery)
+endif()
+if(NOT ANDROID AND ws_want_shell_example)
+  # shell_example is the stage-15 acceptance app: a text-and-plot
+  # scratchpad built ONLY from AppShell (two panels - an editor and a
+  # plot fed by a background job - a document type, a few commands and
+  # a settings schema). Desktop console-style gui app like the gallery.
+  add_subdirectory(shell_example)
 endif()
 if(NOT ANDROID)
   if(ws_want_wavplayer)
