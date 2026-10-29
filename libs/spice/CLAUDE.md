@@ -67,9 +67,19 @@ SIN/EXP/PWL sources (M2), `.options temp` (M5), `solver=klu` (M0b).
   footgun is never silent. Ordinary English titles never warn.
 - **.dc point grid**: `floor((stop-start)/step + 1e-9) + 1` points at
   `start + k*step` - never accumulated drift; first source innermost.
+- **`.dc temp` re-elaborates EVERY point** (§7.7) including the first
+  (the pre-sweep elaboration ran at 27 C, not the sweep start):
+  elaborate_deck takes the temperature, Circuit::temp records it. M1
+  devices are temp-invariant so rows do not move, but each point gets a
+  fresh kernel - and the report's lu_factorizations ACCUMULATES across
+  kernel swaps (delta vs the last read, never the raw counter).
 - **Diagnostics** (§9.2): `file:line:col: error: msg` / `error: [analysis]
   msg`, optional `hint:` line, warnings render with `warning:` and never
   fail a run. Exit codes: 0 ok, 1 deck/sim error, 2 usage/IO (§9.5).
+  wrap_solver_error only re-brands FACADE errors (category "math") as
+  spice.singular; kernel-classified Diagnostics (convergence, NaN)
+  pass through untouched - re-wrapping re-branded Convergence as
+  Singular and double-rendered the prefix.
 - **CSV**: `%.12g`, comma separated, header row, sweep column(s) first;
   nested sweeps get one column each (inner first). Header field count
   MUST equal every row's (a plain comma-join - a leading empty field

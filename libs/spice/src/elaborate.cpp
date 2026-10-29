@@ -571,11 +571,13 @@ ws::core::Status Elaborator::elaborate() {
 
 // --- public entry ----------------------------------------------------------------
 
-ws::core::Result<Circuit> elaborate_deck(const DeckAst& ast,
+ws::core::Result<Circuit> elaborate_deck(const DeckAst& ast, double temp,
                                          std::vector<Warning>& warnings) {
     Elaborator elab(ast, warnings);
     WS_TRY(elab.elaborate());
-    return elab.take_circuit();
+    Circuit c = elab.take_circuit();
+    c.temp = temp;  // §7.7: what the (future temp-aware) models build at
+    return c;
 }
 
 }  // namespace ws::spice

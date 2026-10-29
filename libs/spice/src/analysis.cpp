@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -155,10 +156,18 @@ ws::core::unexpected<ws::core::Error> empty_circuit_error(const std::string& ana
     return spice_fail(std::move(d));
 }
 
-// A solver/analysis failure surfacing from the facade keeps its message
-// but gains the spice taxonomy + analysis context (§9.1/§9.2).
+// A solver failure surfacing from the ws::math facade (category "math":
+// factorization, dimension, pattern) keeps its message but gains the spice
+// taxonomy + analysis context (§9.1/§9.2). Errors the kernel already
+// classified as a spice Diagnostic (category "spice": convergence, NaN
+// iterate, ...) pass through UNTOUCHED - re-wrapping them re-branded
+// Convergence as Singular, doubled the "error: [analysis]" prefix, and
+// lost the original code (spice.convergence.nan/newton).
 ws::core::unexpected<ws::core::Error> wrap_solver_error(const ws::core::Status& st,
                                                         const std::string& context) {
+    if (std::string_view(st.error().category) == "spice") {
+        return ws::core::unexpected(st.error());
+    }
     Diagnostic d = run_diag(ErrorKind::Singular, "spice.singular",
                             st.error().message.empty() ? "matrix factorization failed"
                                                        : st.error().message);
@@ -170,7 +179,7 @@ ws::core::unexpected<ws::core::Error> wrap_solver_error(const ws::core::Status& 
 
 ws::core::Result<Table> run_op(const DeckAst& ast, const RunSettings& settings,
                                std::vector<Warning>& warnings, AnalysisReport& report) {
-    WS_TRY_ASSIGN(Circuit circuit, elaborate_deck(ast, warnings));
+    WS_TRY_ASSIGN(Circuit circuit, elaborate_deck(ast, kDefaultTemp, warnings));
     if (circuit.devices.empty()) {
         return empty_circuit_error(".op");
     }
@@ -295,7 +304,7 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const DcCard& card,
         global.define(def);
     }
 
-    WS_TRY_ASSIGN(Circuit circuit, elaborate_deck(ast, warnings));
+    WS_TRY_ASSIGN(Circuit circuit, elaborate_deck(ast, kDefaultTemp, warnings));
     if (circuit.devices.empty()) {
         return empty_circuit_error(".dc");
     }
@@ -320,6 +329,7 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const DcCard& card,
     // elaboration only - re-elaborations are identical by construction.
     std::size_t total_iterations = 0;
     std::size_t total_factorizations = 0;
+    std::size_t kernel_factorizations = 0;  // last read from the LIVE kernel
     SaveList save = default_save_list(circuit);
     std::unique_ptr<DcKernel> kernel;
     std::vector<double> x;  // warm start across points (§7.3)
@@ -328,19 +338,28 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const DcCard& card,
     bool have_temp = false;
     bool elaborated_with_warnings = true;
 
-    auto ensure_kernel = [&](bool temp_changed) -> ws::core::Status {
+    // Builds (or rebuilds) the kernel at `temp`. A temp change
+    // re-elaborates at the NEW temperature - including the FIRST point of
+    // a temp sweep: the pre-loop elaboration above ran at the §7.7 default
+    // (27 C), not the sweep start, so the initial circuit is not reusable
+    // there. Warnings were already collected by that first elaboration
+    // (re-elaborations are identical modulo temperature), so theirs go to
+    // scratch. A new kernel's factorization counter starts at zero, so the
+    // accumulator baseline resets with it.
+    auto ensure_kernel = [&](bool temp_changed, double temp) -> ws::core::Status {
         if (kernel && !temp_changed) {
             return {};
         }
-        if (!elaborated_with_warnings) {
+        if (temp_changed || !elaborated_with_warnings) {
             std::vector<Warning> scratch;
-            WS_TRY_ASSIGN(circuit, elaborate_deck(ast, scratch));
+            WS_TRY_ASSIGN(circuit, elaborate_deck(ast, temp, scratch));
         }
         elaborated_with_warnings = false;
         if (circuit.devices.empty()) {
             return empty_circuit_error(".dc");
         }
         save = default_save_list(circuit);
+        kernel_factorizations = 0;
         kernel = std::make_unique<DcKernel>(circuit, settings);
         return kernel->prepare();
     };
@@ -354,18 +373,25 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const DcCard& card,
                 inner.start + static_cast<double>(i) * inner.step;
 
             // Apply the point: temp re-elaborates on change, sources patch.
+            double point_temp = kDefaultTemp;
+            if (outer && outer->is_temp) {
+                point_temp = outer_value;
+            }
+            if (inner.is_temp) {
+                point_temp = inner_value;  // innermost wins if both are temp
+            }
             bool temp_changed = false;
             if (inner.is_temp) {
                 temp_changed = !have_temp || inner_value != last_temp;
-                last_temp = inner_value;
-                have_temp = true;
             }
             if (outer && outer->is_temp) {
                 temp_changed = temp_changed || !have_temp || outer_value != last_temp;
-                last_temp = outer_value;
+            }
+            if (inner.is_temp || (outer && outer->is_temp)) {
+                last_temp = point_temp;
                 have_temp = true;
             }
-            WS_TRY(ensure_kernel(temp_changed));
+            WS_TRY(ensure_kernel(temp_changed, point_temp));
 
             for (const SweepPlan* plan : {&inner, outer ? &*outer : nullptr}) {
                 if (plan == nullptr || plan->is_temp) {
@@ -398,7 +424,12 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const DcCard& card,
                 return wrap_solver_error(st, ctx);
             }
             total_iterations += iterations;
-            total_factorizations = kernel->factorizations();
+            // Accumulate the DELTA since the last read: a temp change
+            // replaces the kernel, whose counter restarts at zero - reading
+            // the raw count here would drop every factorization before the
+            // last re-elaboration.
+            total_factorizations += kernel->factorizations() - kernel_factorizations;
+            kernel_factorizations = kernel->factorizations();
             first_point = false;
 
             std::vector<double> row;
@@ -450,7 +481,7 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
         // elaborates once - device values and topology are validated, so
         // an invalid deck never passes silently (§1, working-rule 5).
         Circuit circuit;
-        WS_TRY_ASSIGN(circuit, elaborate_deck(ast, warnings));
+        WS_TRY_ASSIGN(circuit, elaborate_deck(ast, kDefaultTemp, warnings));
         (void)circuit;
     }
     return out;

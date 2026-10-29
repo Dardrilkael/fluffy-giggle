@@ -246,6 +246,58 @@ TEST_CASE(".dc: temp sweep is accepted (M1 devices carry no temp dependence)") {
     for (const auto& row : t.rows) {
         CHECK(row[col_of(t, "v(in)") + 1] == approx(5.0));
     }
+
+    // Every temp point re-elaborates (§7.7) - INCLUDING the first (the
+    // pre-sweep elaboration ran at the 27 C default, not the sweep start)
+    // - so three fresh kernels: 2 Newton iterations cold, 1 per warm
+    // point. Both report totals must accumulate across the kernel
+    // swaps, not read the last kernel's counter.
+    REQUIRE(run->reports.size() == 1);
+    CHECK(run->reports[0].analysis == ".dc");
+    CHECK(run->reports[0].newton_iterations == 4);
+    CHECK(run->reports[0].lu_factorizations == 4);
+}
+
+TEST_CASE(".dc: non-temp sweep reports stay one kernel deep") {
+    const auto run = run_text(
+        "sweep\nV1 in 0 5\nR1 in 0 1k\n.dc V1 0 4 2\n");
+    REQUIRE(run);
+    REQUIRE(run->reports.size() == 1);
+    // No re-elaboration: one kernel throughout. Point 1 (V1=0) solves to
+    // all zeros, so the cold start converges in one iteration; points 2
+    // and 3 move the solution and take solve+confirm each: 1 + 2 + 2.
+    CHECK(run->reports[0].newton_iterations == 5);
+    CHECK(run->reports[0].lu_factorizations == 5);
+}
+
+TEST_CASE("a convergence failure stays a convergence error, never 'singular'") {
+    // itl1=1 starves the Newton loop: a linear circuit needs its second
+    // (confirming) iteration, so the run fails with the kernel's own
+    // spice.convergence.newton diagnostic. It must reach the caller
+    // untouched - the old wrap_solver_error re-branded every solve
+    // failure as spice.singular (ErrorKind::Singular) and double-rendered
+    // the "error: [.op]" prefix.
+    const auto run = run_text(
+        "conv\nV1 in 0 5\nR1 in 0 1k\n.options itl1 1\n.op\n");
+    REQUIRE(!run);
+    CHECK(run.error().category == std::string("spice"));
+    CHECK(run.error().code ==
+          static_cast<std::int32_t>(ws::spice::ErrorKind::Convergence));
+    CHECK(run.error().message.find(
+              "no convergence after 1 Newton iterations") != std::string::npos);
+    CHECK(run.error().message.find("singular") == std::string::npos);
+    CHECK(run.error().message.find("error: [.op] error:") == std::string::npos);
+
+    // Same for a .dc point: itl2 caps the non-first points (itl1 only
+    // gates point 1, whose V1=0 solution converges instantly).
+    const auto dc = run_text(
+        "convdc\nV1 in 0 5\nR1 in 0 1k\n.dc V1 0 4 2\n.options itl2 1\n");
+    REQUIRE(!dc);
+    CHECK(dc.error().code ==
+          static_cast<std::int32_t>(ws::spice::ErrorKind::Convergence));
+    CHECK(dc.error().message.find("error: [.dc ") != std::string::npos);
+    CHECK(dc.error().message.find("error: [.dc ") ==
+          dc.error().message.rfind("error: [.dc "));  // exactly one prefix
 }
 
 TEST_CASE(".dc: sweep expressions see .param") {
