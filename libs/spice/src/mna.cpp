@@ -163,6 +163,13 @@ ws::core::Status MnaSystem::setup(const std::vector<std::unique_ptr<Device>>& de
             ac_ctx.params_ = scratch_params_.data();
             devices[i]->load_ac(ac_ctx);
         }
+        // §5.2: every node diagonal joins the pattern (a legal structural
+        // zero) so the convergence ladder's gmin/source/PTC shunts can
+        // write (n, n) without tripping the §3.2 assert. Storage, not
+        // flops.
+        for (std::size_t n = 0; n < node_count_; ++n) {
+            builder_.add(n, n);
+        }
     }
     return analyze();
 }

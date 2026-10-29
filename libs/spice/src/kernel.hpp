@@ -109,17 +109,96 @@ public:
     // solution out. `context` rides into any Diagnostic (§9.2), e.g.
     // ".dc V1 at 3.3 V". `forces` (optional) stamps §6.5 .ic constraints
     // (a stiff Norton per forced node) on every load pass.
+    //
+    // §5.2 (rev: PTC promoted from the backlog): the FIXED ladder -
+    //   1. plain Newton,
+    //   2. gmin homotopy (junction-parallel conductance down a geometric
+    //      staircase to the deck's gmin; every stage warm-started),
+    //   3. source homotopy (every independent source scaled 0 -> 1),
+    //   4. pseudo-transient continuation (a shunt capacitor per node,
+    //      integrated in pseudo-time with a growing step until the
+    //      derivatives vanish - what rescues oscillators and latches
+    //      that stall stages 1-3).
+    // The stage that converged lands in `stage_` (the §9.4 record);
+    // every stage's final pass is an un-aided plain Newton confirm.
     ws::core::Status solve(std::vector<double>& x, int max_iterations,
                            const std::string& context, std::size_t& iterations,
                            const std::vector<std::pair<std::size_t, double>>* forces =
                                nullptr) {
+        stage_ = "newton";
+        if (newton_pass(x, max_iterations, context, iterations, forces)) {
+            return {};
+        }
+        // Stage 2: gmin staircase (§5.2). g_k = gmin * 10^k, k = steps..0;
+        // each solve warm-starts from the previous, and the k=0 pass IS
+        // the plain endpoint.
+        stage_ = "gmin";
+        for (int k = settings_.gmin_steps; k >= 0; --k) {
+            const double g = settings_.gmin * std::pow(10.0, static_cast<double>(k));
+            if (!newton_pass(x, max_iterations, context, iterations, forces, g)) {
+                break;
+            }
+            if (k == 0) {
+                return {};
+            }
+        }
+        // Stage 3: source homotopy (§5.2). The independent sources' dc
+        // parameter slots scale 0 -> 1 over srcsteps warm-started solves;
+        // values only (the pattern cannot move, §3.5 rev), restored by
+        // RAII whatever happens.
+        stage_ = "source";
+        {
+            SourceScale scale(circuit_, state_);
+            for (int k = 1; k <= settings_.src_steps; ++k) {
+                scale.apply(static_cast<double>(k) /
+                            static_cast<double>(settings_.src_steps));
+                if (!newton_pass(x, max_iterations, context, iterations, forces)) {
+                    break;
+                }
+                if (k == settings_.src_steps) {
+                    return {};
+                }
+            }
+        }
+        // Stage 4: pseudo-transient continuation (§5.2 rev, promoted from
+        // the backlog). Every node gets a shunt conductance c (a pseudo
+        // capacitor C = c*dt integrated in BE pseudo-time): the system
+        // (G + cI) x = b + c x_prev is solved repeatedly while c decays
+        // (the pseudo timestep grows), warm-started; switch states ride
+        // the pseudo-dynamics, so latches and oscillators settle where
+        // the homotopies chatter. A final plain Newton confirms.
+        stage_ = "ptc";
+        if (ptc_pass(x, max_iterations, context, iterations, forces)) {
+            return {};
+        }
+        // The ladder failed: report the richest context we have.
+        stage_ = "failed";
+        Diagnostic d = run_diag(
+            ErrorKind::Convergence, "spice.convergence.ladder",
+            "no convergence after newton, gmin stepping, source stepping and"
+            " pseudo-transient continuation");
+        d.analysis = context;
+        return spice_fail(std::move(d));
+    }
+
+    [[nodiscard]] const std::string& stage() const { return stage_; }
+
+    // The plain §5.1 Newton loop. `shunt_g` (when > 0) adds a conductance
+    // from every NODE to ground - the gmin stage; `shunt_ref` (when not
+    // null) makes it a Norton towards those values instead - the PTC
+    // pseudo-companion. Returns ok/nok without building a Diagnostic (the
+    // ladder builds the final one with the full stage record).
+    ws::core::Status newton_pass(
+        std::vector<double>& x, int max_iterations, const std::string& context,
+        std::size_t& iterations, const std::vector<std::pair<std::size_t, double>>* forces,
+        double shunt_g = 0.0, const std::vector<double>* shunt_ref = nullptr) {
+        (void)context;  // diagnostics are the ladder caller's job
         const std::size_t nc = circuit_.node_count();
         double gforce = 0.0;
         if (forces != nullptr && !forces->empty()) {
             mna_.load(circuit_.devices, state_);
             gforce = 1e9 * std::max(mna_.max_diagonal(), 1e-9);
         }
-        // Cold start: an unsized (or stale-sized) x means all zeros.
         if (x.size() != mna_.dim()) {
             x.assign(mna_.dim(), 0.0);
         }
@@ -131,21 +210,24 @@ public:
                     mna_.force_node(node, volts, gforce);
                 }
             }
-            std::vector<double> x_new;
-            WS_TRY(mna_.solve(x_new));
-
-            for (const double v : x_new) {
-                if (!std::isfinite(v)) {
-                    Diagnostic d = run_diag(
-                        ErrorKind::Convergence, "spice.convergence.nan",
-                        "Newton iterate is not finite");
-                    d.analysis = context;
-                    return spice_fail(std::move(d));
+            if (shunt_g > 0.0) {
+                for (std::size_t n = 0; n < nc; ++n) {
+                    const double target = (shunt_ref != nullptr) ? (*shunt_ref)[n] : 0.0;
+                    mna_.force_node(n, target, shunt_g);
                 }
             }
-
-            // Switch controls re-evaluate against the candidate; a flip
-            // means the linearization changed - iterate again.
+            std::vector<double> x_new;
+            if (!mna_.solve(x_new)) {
+                return ws::core::unexpected(ws::core::make_error(
+                    static_cast<std::int32_t>(1), "math", "factorization failed"));
+            }
+            for (const double v : x_new) {
+                if (!std::isfinite(v)) {
+                    return ws::core::unexpected(ws::core::make_error(
+                        static_cast<std::int32_t>(ErrorKind::Convergence), "spice",
+                        "Newton iterate is not finite"));
+                }
+            }
             bool state_changed = false;
             for (std::size_t i = 0; i < circuit_.devices.size(); ++i) {
                 state_changed = circuit_.devices[i]->update_state(
@@ -153,9 +235,6 @@ public:
                                                    circuit_.state_span[i].begin) ||
                                 state_changed;
             }
-
-            // §5.1: |dx| <= reltol*max(|new|,|old|) + tol_abs per unknown,
-            // tol_abs = vntol on voltages, abstol on branch currents.
             bool converged = !state_changed;
             if (converged) {
                 for (std::size_t i = 0; i < x_new.size(); ++i) {
@@ -173,12 +252,72 @@ public:
                 return {};
             }
         }
-        Diagnostic d = run_diag(
-            ErrorKind::Convergence, "spice.convergence.newton",
+        return ws::core::unexpected(ws::core::make_error(
+            static_cast<std::int32_t>(ErrorKind::Convergence), "spice",
             "no convergence after " + std::to_string(max_iterations) +
-                " Newton iterations (gmin/source stepping lands with M3)");
-        d.analysis = context;
-        return spice_fail(std::move(d));
+                " Newton iterations"));
+    }
+
+    // §5.2 stage 3 helper: scales every V/I source's dc parameter slot,
+    // restoring the originals on destruction (values only - the pattern
+    // cannot move, §3.5 rev).
+    class SourceScale {
+    public:
+        SourceScale(const Circuit& c, RunState& rs) : c_(c), rs_(rs) {
+            for (std::size_t i = 0; i < c_.devices.size(); ++i) {
+                if ((c_.devices[i]->kind() == 'V' || c_.devices[i]->kind() == 'I') &&
+                    c_.param_span[i].count > 0) {
+                    slots_.push_back(i);
+                    originals_.push_back(rs_.params_[c_.param_span[i].begin]);
+                }
+            }
+        }
+        ~SourceScale() {
+            for (std::size_t k = 0; k < slots_.size(); ++k) {
+                rs_.params_[c_.param_span[slots_[k]].begin] = originals_[k];
+            }
+        }
+        SourceScale(const SourceScale&) = delete;
+        SourceScale& operator=(const SourceScale&) = delete;
+        void apply(double scale) {
+            for (std::size_t k = 0; k < slots_.size(); ++k) {
+                rs_.params_[c_.param_span[slots_[k]].begin] = originals_[k] * scale;
+            }
+        }
+
+    private:
+        const Circuit& c_;
+        RunState& rs_;
+        std::vector<std::size_t> slots_;
+        std::vector<double> originals_;
+    };
+
+    // §5.2 stage 4 (rev): pseudo-transient continuation, promoted from the
+    // backlog. Every node carries a shunt pseudo-capacitor; the BE
+    // companion (G + cI)x = b + c x_prev integrates pseudo-time while c
+    // decays geometrically (the pseudo-step grows). Warm-started
+    // throughout; switch states ride the pseudo-dynamics - that is what
+    // settles chattering latches where the homotopies cannot. A final
+    // un-aided Newton confirms the endpoint.
+    bool ptc_pass(std::vector<double>& x, int max_iterations,
+                  const std::string& context, std::size_t& iterations,
+                  const std::vector<std::pair<std::size_t, double>>* forces) {
+        mna_.load(circuit_.devices, state_);
+        double c = 1e3 * std::max(mna_.max_diagonal(), 1e-9);
+        if (x.size() != mna_.dim()) {
+            x.assign(mna_.dim(), 0.0);
+        }
+        for (int it = 0; it < max_iterations; ++it) {
+            std::vector<double> x_prev = x;
+            if (!newton_pass(x, 20, context, iterations, forces, c, &x_prev)) {
+                return false;
+            }
+            c *= 0.5;
+            if (c <= settings_.gmin) {
+                break;
+            }
+        }
+        return static_cast<bool>(newton_pass(x, max_iterations, context, iterations, forces));
     }
 
     // One transient step: companion load (coefficients from the devices'
@@ -242,6 +381,7 @@ public:
     [[nodiscard]] std::size_t factorizations() const { return mna_.factorization_count(); }
 
 private:
+    std::string stage_;  // §5.2: the ladder stage that converged (§9.4)
     const Circuit& circuit_;
     RunState& state_;
     const RunSettings& settings_;

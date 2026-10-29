@@ -33,6 +33,8 @@ struct RunSettings {
     int itl4 = 10;   // .tran time point
     double chgtol = 1e-14;  // §6.3: charge/flux LTE floor
     double trtol = 7.0;     // §6.3: transient LTE tolerance factor
+    int gmin_steps = 10;    // §5.2: gmin homotopy staircase steps (ngspice)
+    int src_steps = 10;     // §5.2: source homotopy staircase steps
     std::string solver = "eigen";  // M0b flips the default to "klu"
 
     // §7.7: run temperature / model nominal temperature, °C. The circuit

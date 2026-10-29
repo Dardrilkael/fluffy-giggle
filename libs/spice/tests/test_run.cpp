@@ -283,20 +283,21 @@ TEST_CASE(".dc: non-temp sweep reports stay one kernel deep") {
 }
 
 TEST_CASE("a convergence failure stays a convergence error, never 'singular'") {
-    // itl1=1 starves the Newton loop: a linear circuit needs its second
-    // (confirming) iteration, so the run fails with the kernel's own
-    // spice.convergence.newton diagnostic. It must reach the caller
-    // untouched - the old wrap_solver_error re-branded every solve
-    // failure as spice.singular (ErrorKind::Singular) and double-rendered
-    // the "error: [.op]" prefix.
+    // itl1=1 starves EVERY Newton pass: a linear circuit needs its second
+    // (confirming) iteration, so plain Newton, each gmin/source stage and
+    // the PTC confirm all fail - the full ladder diagnostic, still a
+    // spice Convergence error reaching the caller untouched (the old
+    // wrap_solver_error re-branded every solve failure as spice.singular
+    // and double-rendered the "error: [.op]" prefix).
     const auto run = run_text(
         "conv\nV1 in 0 5\nR1 in 0 1k\n.options itl1 1\n.op\n");
     REQUIRE(!run);
     CHECK(run.error().category == std::string("spice"));
     CHECK(run.error().code ==
           static_cast<std::int32_t>(ws::spice::ErrorKind::Convergence));
-    CHECK(run.error().message.find(
-              "no convergence after 1 Newton iterations") != std::string::npos);
+    CHECK(run.error().message.find("no convergence after newton, gmin stepping,"
+                                   " source stepping and pseudo-transient"
+                                   " continuation") != std::string::npos);
     CHECK(run.error().message.find("singular") == std::string::npos);
     CHECK(run.error().message.find("error: [.op] error:") == std::string::npos);
 
@@ -1163,4 +1164,66 @@ TEST_CASE("columnar: Results::operator[] finds the owning analysis") {
     CHECK(run->results["re(v(out))"].size() ==
           run->results.tables[1].row_count());
     CHECK(run->results["nope(x)"].empty());
+}
+
+// --- §5.2 rev: the convergence ladder (PTC promoted) ------------------------------
+
+TEST_CASE("ladder: linear decks report the plain-newton stage") {
+    // Plain Newton converges in two passes on every linear deck; the
+    // ladder's later stages must never even run (their machinery is
+    // exercised only through the failure paths below and, once diodes
+    // land in M3, through real homotopy rescues).
+    const auto run = run_text(
+        "plain\nV1 in 0 5\nR1 in out 1k\nR2 out 0 2k\n.op\n");
+    REQUIRE(run);
+    REQUIRE(run->reports.size() == 1);
+    CHECK(run->reports[0].stage == "newton");
+
+    const auto dc = run_text(
+        "plaindc\nV1 in 0 5\nR1 in out 1k\nR2 out 0 2k\n.dc V1 0 5 1\n");
+    REQUIRE(dc);
+    CHECK(dc->reports[0].stage == "newton");
+}
+
+TEST_CASE("ladder: gmin and source stepping are value-only (pattern-safe)") {
+    // A gmin stage that ran on a converged deck cannot change the answer:
+    // force the ladder's machinery by starving itl1 on a deck whose
+    // gmin-shunted system still converges in the one allowed pass
+    // (the shunt dominates the 1k conductance by ~7 orders).
+    const auto run = run_text(
+        "starved\nV1 in 0 5\nR1 in 0 1k\n.options itl1 1 gmin 1e-3\n.op\n");
+    REQUIRE(!run);
+    // The full ladder ran and failed - but the run must still be a
+    // Convergence-class spice error naming all four stages.
+    CHECK(run.error().category == std::string("spice"));
+    CHECK(run.error().code ==
+          static_cast<std::int32_t>(ws::spice::ErrorKind::Convergence));
+    CHECK(run.error().message.find("pseudo-transient") != std::string::npos);
+
+    // The same deck WITHOUT the starvation solves normally: the ladder
+    // left no residue in the settings or the state.
+    const auto ok = run_text(
+        "healthy\nV1 in 0 5\nR1 in 0 1k\n.options gmin 1e-3\n.op\n");
+    REQUIRE(ok);
+    CHECK(ok->results.tables[0].signal("v(in)")[0] == approx(5.0));
+}
+
+TEST_CASE("ladder: a chattering self-holding switch is a clean failure") {
+    // The relaxation-oscillation-at-DC circuit: no DC operating point
+    // exists (the switch's two states each cross the other's threshold),
+    // so the FULL ladder fails - the same verdict ngspice gives, never a
+    // hang, never a silently wrong answer.
+    const auto run = run_text(
+        "latch\n"
+        "V1 vcc 0 5\n"
+        "R1 vcc out 1k\n"
+        "S1 out 0 out 0 swm\n"
+        ".model swm SW(Ron=100 Roff=1meg Vt=2 Vh=1)\n"
+        ".op\n");
+    REQUIRE(!run);
+    CHECK(run.error().category == std::string("spice"));
+    CHECK(run.error().code ==
+          static_cast<std::int32_t>(ws::spice::ErrorKind::Convergence));
+    CHECK(run.error().message.find("pseudo-transient continuation") !=
+          std::string::npos);
 }

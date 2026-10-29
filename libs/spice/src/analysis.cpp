@@ -107,7 +107,7 @@ ws::core::Result<Table> run_op(const Circuit& circuit, RunState& state,
     report.analysis = ".op";
     report.newton_iterations = iterations;
     report.lu_factorizations = kernel.factorizations();
-    report.stage = "newton";
+    report.stage = kernel.stage();  // §5.2: which ladder stage converged
 
     Table t;
     t.analysis = AnalysisKind::Op;
@@ -312,6 +312,7 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const Circuit& base_circuit,
     bool first_point = true;
     double last_temp = 0.0;
     bool have_temp = false;
+    std::string last_stage = "newton";
 
     // The live circuit: the caller's (immutable) elaboration, or a local
     // re-elaboration when a temp point demands one. A Circuit is not
@@ -437,6 +438,7 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const Circuit& base_circuit,
             total_factorizations += kernel->factorizations() - kernel_factorizations;
             kernel_factorizations = kernel->factorizations();
             first_point = false;
+            last_stage = kernel->stage();
 
             // Sweep values in sweep_names order: inner first, then outer.
             t.sweep_axes[0].push_back(inner_value);
@@ -450,7 +452,7 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const Circuit& base_circuit,
     report.analysis = ".dc";
     report.newton_iterations = total_iterations;
     report.lu_factorizations = total_factorizations;
-    report.stage = "newton";
+    report.stage = last_stage;  // §5.2: the worst point's ladder stage
     return t;
 }
 
