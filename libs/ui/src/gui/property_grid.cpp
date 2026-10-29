@@ -20,7 +20,6 @@
 #include <ws/ui/gui/property_grid.hpp>
 
 #include <algorithm>
-#include <cstring>
 #include <string>
 #include <vector>
 
@@ -196,8 +195,17 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                     // current value in; the text_input widget handles
                     // editing in-place). A full implementation would
                     // track focus and only sync on blur.
-                    std::strncpy(buf.data(), r->value.c_str(), buf.size() - 1);
-                    buf.data()[buf.size() - 1] = '\0';
+                    //
+                    // copy_n, not strncpy: MSVC C4996s the CRT copy (and
+                    // strncpy_s is MSVC-only), while copying the chars
+                    // and writing the terminator is the same truncating
+                    // copy with no deprecated call in it (app.cpp's
+                    // env_probe is the scoped-pragma case only because
+                    // getenv has no portable non-deprecated spelling).
+                    const std::size_t n =
+                        std::min(r->value.size(), buf.size() - 1);
+                    std::copy_n(r->value.data(), n, buf.data());
+                    buf.data()[n] = '\0';
                     if (text_input(gui, layout, theme, label, buf.data(),
                                    static_cast<int>(buf.size()))) {
                         if (settings.set(settings::Layer::user, desc->key,

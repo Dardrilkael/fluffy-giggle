@@ -263,3 +263,22 @@ families. Both stay GCC-side: MSVC needs no audit for what /W4
 already rejects. The member-shadow findings GCC also reports
 (constructor parameters named like their fields, ~800 across the
 input/jobs/ui headers) are MSVC-accepted and were left alone.
+
+### C4996: the deprecation family (the first Windows /WX build past the
+shadowing fixes found it in `property_grid.cpp`)
+
+MSVC deprecates the unchecked CRT calls (`strncpy`, `strcpy`, `sprintf`,
+`fopen`, `getenv`, ...) and `/WX` makes C4996 fatal - a family GCC has
+no equivalent for, so no Linux build or GCC audit can see it. The
+workspace scan found exactly three sites, two already correct:
+
+- `property_grid.cpp`'s text-buffer sync used `std::strncpy`; it is now
+  `std::copy_n` + terminator - the same truncating copy with no
+  deprecated call (this is the preferred shape whenever a portable
+  rewrite exists, unlike the pragma case below).
+- `app.cpp`'s `env_probe` keeps its scoped C4996 pragma: `getenv` is
+  the portable spelling and only MSVC objects, so the suppression is
+  one function, not the TU and not `_CRT_SECURE_NO_WARNINGS`.
+- `playground`'s `std::fopen` asset-unpack is inside the
+  `__ANDROID__` half - MSVC never compiles it, and desktop keeps
+  `std::ifstream`.
