@@ -19,7 +19,7 @@ and DESIGN.md disagree, DESIGN.md wins.
 | `9d369f1` | M1 start  | `libs/spice` skeleton + error taxonomy (kind enum -> int32_t code, `WS_*` error message strings, `Warning`/`parse_error` records). |
 | `a62d2b1` | M1a       | Records with `{file,line,col}` provenance through `.include`, the SPICE number grammar, the tokenizer. |
 | `5e97912` | M1        | Cards + `.param` scopes + expression VM, elaboration (`.subckt` flatten, node table, graph checks), devices R/V/I/E/F/G/H, MNA assembly over the dry-run pattern, `.op` and `.dc` drivers (incl. nested two-source sweeps, warm start, `temp` re-elaboration), the Results API + CSV writer, the `apps/spice` CLI, and the M1 test gate (`test_run.cpp`). |
-| (this delivery) | tooling   | Windows build scripts `tools/build.ps1` + `tools/build-spice.ps1`, the `spice-debug`/`spice-release` CMake presets, and this plan file. |
+| `8b5a79d` | tooling   | Windows build scripts `tools/build.ps1` + `tools/build-spice.ps1`, the `spice-debug`/`spice-release` CMake presets, and this plan file. |
 
 Working tree is clean; `main` is 4 + 1 = 5 commits ahead of `origin/main`
 and **deliberately not pushed** (no remote credentials). If you want to
