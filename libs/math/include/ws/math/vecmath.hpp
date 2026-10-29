@@ -178,6 +178,27 @@ Vec<T, 3> cross(const Vec<T, 3>& a, const Vec<T, 3>& b) {
     return Vec<T, 3>{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
 }
 
+// The 2D analog of cross: a single scalar, the signed area of the
+// parallelogram (a, b). Positive when b sits CLOCKWISE from a on the
+// y-down screen (the same convention canvas strokes use), which is the
+// math convention's CCW flipped by the y-flip. This is the turn-sign
+// everywhere in 2D geometry: cross(d_prev, d_cur) > 0 is a right turn.
+template <typename T>
+T cross(const Vec<T, 2>& a, const Vec<T, 2>& b) {
+    return a.x * b.y - a.y * b.x;
+}
+
+// The right-hand normal of a 2D direction: d rotated +90 degrees in math
+// terms, which is 90 degrees CLOCKWISE on the y-down screen (east -> south).
+// "Right" is the label everything downstream uses - facing along d, this
+// is the right-hand side. The 2D stroke/fill tessellators live on this
+// convention: the right normal of an east-bound edge points south, and
+// that is the side a clockwise-wound polygon's interior sits on.
+template <typename T>
+Vec<T, 2> right_normal(const Vec<T, 2>& d) {
+    return Vec<T, 2>{-d.y, d.x};
+}
+
 template <typename T, int N>
 T length(const Vec<T, N>& v) {
     static_assert(std::is_floating_point_v<T>, "length() needs a floating-point vector");

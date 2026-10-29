@@ -21,7 +21,9 @@ ws_add_library(ui DEPENDS ws::core ws::math ws::input ws::gfx ws::jobs)
 # (ws_ui links this archive in, so apps see no difference) and
 # test_ui_gui below links it WITHOUT the renderer - the acceptance the
 # stage set out to prove.
-file(GLOB ui_gui_srcs CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/gui/*.cpp")
+file(GLOB ui_gui_srcs CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/gui/*.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/canvas/*.cpp")
 add_library(ws_ui_gui STATIC ${ui_gui_srcs})
 add_library(ws::ui_gui ALIAS ws_ui_gui)
 target_include_directories(ws_ui_gui
@@ -104,6 +106,21 @@ ws_add_test(ui_gui
 if(TARGET test_ui_gui)
   # "text/font.h" from font.cpp + "ui_gui_stub.hpp" from the test pair.
   target_include_directories(test_ui_gui PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+
+# The stage-14 canvas suite: the pure tessellation half (stroke/fill/
+# flatten/dash) over the same gui archive + r2d stub. Same purity class
+# as test_ui_gui - no Vulkan or GLFW on the link line. The canvas
+# draws through the TessSink seam (a pure virtual the r2d stub
+# satisfies), so the test is headless.
+ws_add_test(ui_canvas
+  SOURCES tests/test_ui_canvas.cpp
+          tests/ui_gui_r2d_stub.cpp
+          src/text/font.cpp
+          src/text/stb_impl.cpp
+  DEPENDS stb)
+if(TARGET test_ui_canvas)
+  target_include_directories(test_ui_canvas PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
 
 # --- Shader workflow targets (opt-in; the default build is unchanged) ------
