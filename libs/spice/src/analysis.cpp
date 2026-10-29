@@ -341,7 +341,8 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const Circuit& base_circuit,
             // modulo temperature by construction, so warnings go to
             // scratch (the caller already saw the first elaboration's).
             std::vector<Warning> scratch;
-            WS_TRY_ASSIGN(*temp_circuit, elaborate_deck(ast, temp, scratch));
+            WS_TRY_ASSIGN(Circuit re, elaborate_deck(ast, temp, scratch));
+            temp_circuit.emplace(std::move(re));
             WS_TRY(finalize_circuit(*temp_circuit));
             live = &*temp_circuit;
         }
@@ -358,7 +359,8 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const Circuit& base_circuit,
             t.signals = signal_skeleton(save);
         }
         kernel_factorizations = 0;
-        WS_TRY_ASSIGN(*state, RunState::bind(circuit));
+        WS_TRY_ASSIGN(RunState rs, RunState::bind(circuit));
+        state.emplace(std::move(rs));
         kernel = std::make_unique<DcKernel>(circuit, *state, settings);
         if (const ws::core::Status st = kernel->prepare(); !st) {
             return wrap_solver_error(st, ".dc");
