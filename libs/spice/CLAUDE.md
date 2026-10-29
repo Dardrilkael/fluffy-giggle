@@ -67,12 +67,36 @@ SIN/EXP/PWL sources (M2), `.options temp` (M5), `solver=klu` (M0b).
   footgun is never silent. Ordinary English titles never warn.
 - **.dc point grid**: `floor((stop-start)/step + 1e-9) + 1` points at
   `start + k*step` - never accumulated drift; first source innermost.
+  The grid is guarded before the `size_t` cast: start/stop/step must be
+  finite, `stop-start` and the interval count must not overflow, and the
+  materialized point count is capped at 1,000,000 (`spice.semantic.dc_range`).
 - **`.dc temp` re-elaborates EVERY point** (§7.7) including the first
   (the pre-sweep elaboration ran at 27 C, not the sweep start):
   elaborate_deck takes the temperature, Circuit::temp records it. M1
   devices are temp-invariant so rows do not move, but each point gets a
   fresh kernel - and the report's lu_factorizations ACCUMULATES across
   kernel swaps (delta vs the last read, never the raw counter).
+- **Nested `.dc` sweeps must be distinct**: two `temp` sweeps (they would
+  share one temperature unknown) and two sweeps naming the same source
+  (the outer assignment silently overwrites the inner one) are Semantic
+  errors, not silent no-ops.
+- **`run_deck` validates the analysis cards**: a hand-built `DeckAst`
+  carrying an `AnalysisCard` with neither or both of `.op`/`.dc` is a
+  Semantic error instead of a silently skipped card, and a deck with no
+  analysis cards but no devices is the same `empty_circuit` error the
+  analyses raise.
+- **`prepare()` failures use the same wrapper as `solve()` failures**:
+  pattern/symbolic-analysis errors from the ws::math facade gain the
+  spice taxonomy + analysis context (`wrap_solver_error`), they do not
+  leak a bare math-category error.
+- **Warnings do not repeat across analyses**: each analysis re-elaborates
+  the same AST, so identical elaboration warnings are deduplicated after
+  every analysis; a genuinely new warning (different location, message,
+  or analysis context) still lands.
+- **M3 follow-up - current iterate into `load()`**: M1 devices are linear
+  so `MnaSystem::load(devices)` is exact, but nonlinear devices will need
+  the CURRENT iterate threaded into the stamp (§3.6). Tracked in
+  `docs/SPICE_PLAN.md`; do not forget when diode/BJT/MOS land.
 - **Diagnostics** (§9.2): `file:line:col: error: msg` / `error: [analysis]
   msg`, optional `hint:` line, warnings render with `warning:` and never
   fail a run. Exit codes: 0 ok, 1 deck/sim error, 2 usage/IO (§9.5).

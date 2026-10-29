@@ -20,11 +20,17 @@ and DESIGN.md disagree, DESIGN.md wins.
 | `a62d2b1` | M1a       | Records with `{file,line,col}` provenance through `.include`, the SPICE number grammar, the tokenizer. |
 | `5e97912` | M1        | Cards + `.param` scopes + expression VM, elaboration (`.subckt` flatten, node table, graph checks), devices R/V/I/E/F/G/H, MNA assembly over the dry-run pattern, `.op` and `.dc` drivers (incl. nested two-source sweeps, warm start, `temp` re-elaboration), the Results API + CSV writer, the `apps/spice` CLI, and the M1 test gate (`test_run.cpp`). |
 | `8b5a79d` | tooling   | Windows build scripts `tools/build.ps1` + `tools/build-spice.ps1`, the `spice-debug`/`spice-release` CMake presets, and this plan file. |
+| `60fa50c` | docs      | Pinned the delivery commit hash in this file. |
+| `e4cfd8c` | MSVC      | Fixed the friend/anonymous-namespace ambiguity and the Eigen Triplet narrowing so the Windows build is clean under `/WX`. |
+| `970f260` | tools     | Dropped the stray `cmake -T` call from `build.ps1`'s test phase. |
+| `1ee0167` | spice     | Fixed the CSV header shape and added the title-line-looks-like-a-card warning. |
+| `fa45283` | spice     | Four `.dc`/`.op` correctness fixes: convergence class passthrough, temp flow, first-point handling, and report counts. |
+| *(this commit)* | M1 hardening | Guarded the `.dc` point count (finite/range/1e6 cap), rejected nested `temp` and duplicate-source sweeps, routed `prepare()` failures through `wrap_solver_error()`, validated `AnalysisCard`, made the no-analysis path reject an empty circuit, and deduplicated warnings across analyses. |
 
-Working tree is clean; `main` is 4 + 1 = 5 commits ahead of `origin/main`
-and **deliberately not pushed** (no remote credentials). If you want to
-share the work, push `main` to a remote you control, or zip the repo and
-hand it over.
+Working tree is clean; `main` is 10 commits ahead of `origin/main` (11 once
+this hardening commit lands) and **deliberately not pushed** (no remote
+credentials). If you want to share the work, push `main` to a remote you
+control, or zip the repo and hand it over.
 
 ## Locked decisions (do NOT re-litigate)
 
@@ -172,6 +178,11 @@ working rule 5) and would each be a future milestone:
 - **`.lib`** - the ngspice library-file include mechanism. Backlog.
 - **Nonlinear convergence polish** - gmin stepping, source stepping, damped
   Newton, junction charge models. M3+ land.
+- **Current iterate into `MnaSystem::load()`** - M1 devices are linear, so
+  `load(devices)` is already the exact stamp. When M3's nonlinear devices
+  arrive, the kernel must thread the CURRENT iterate into the load context
+  (DESIGN.md §3.6); the call site in `DcKernel::solve()` is marked with a
+  comment so it is not forgotten.
 
 ## Next steps if memory is cleared
 

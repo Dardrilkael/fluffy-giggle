@@ -325,6 +325,67 @@ TEST_CASE(".dc errors: step direction, unknown source, non-source target") {
               .find("not a V or I source") != std::string::npos);
 }
 
+TEST_CASE(".dc errors: sweep range is validated before the point count") {
+    // A count that overflows size_t (or just materializes a billion rows)
+    // must be a semantic error, not a huge loop or UB.
+    const std::string huge = error_of(run_text(
+        "huge\nV1 a 0 1\nR1 a 0 1k\n.dc V1 0 1e308 1\n"));
+    CHECK(huge.find("maximum is 1000000") != std::string::npos);
+
+    // stop-start itself overflows double here; the guard fires before the
+    // floor/cast arithmetic can produce inf.
+    const std::string span = error_of(run_text(
+        "span\nV1 a 0 1\nR1 a 0 1k\n.dc V1 -1e308 1e308 1\n"));
+    CHECK(span.find("out of range") != std::string::npos);
+}
+
+TEST_CASE(".dc errors: nested temp and duplicate sources are rejected") {
+    CHECK(error_of(run_text(
+              "tt\nV1 a 0 1\nR1 a 0 1k\n.dc temp 0 10 5 temp 0 10 5\n"))
+              .find("cannot nest") != std::string::npos);
+    CHECK(error_of(run_text(
+              "dd\nV1 a 0 1\nR1 a 0 1k\n.dc V1 0 1 0.5 V1 0 1 0.5\n"))
+              .find("distinct source") != std::string::npos);
+}
+
+TEST_CASE("a deck with no analysis and no devices is an error, not silence") {
+    const std::string msg = error_of(run_text("empty deck\n"));
+    CHECK(msg.find("no devices to simulate") != std::string::npos);
+
+    // The valid counterpart: devices but no analysis card still elaborates
+    // and succeeds with no tables.
+    const auto ok = run_text("devices only\nV1 a 0 1\nR1 a 0 1k\n");
+    REQUIRE(ok);
+    CHECK(ok->results.tables.empty());
+}
+
+TEST_CASE("run_deck rejects a malformed AnalysisCard instead of skipping it") {
+    std::vector<Warning> warnings;
+    const auto parsed = read_deck(
+        "t.cir", "card\nV1 a 0 1\nR1 a 0 1k\n.op\n", ws::spice::ParseOptions{});
+    REQUIRE(parsed);
+    const auto ast = build_deck_ast(*parsed, warnings);
+    REQUIRE(ast);
+
+    // Neither .op nor .dc: silently skipping used to turn this into a
+    // successful run with no tables.
+    ws::spice::DeckAst neither = *ast;
+    ws::spice::AnalysisCard empty_card;
+    empty_card.loc = ws::spice::SourceLoc::make("t.cir", 4, 1);
+    neither.analyses.push_back(empty_card);
+    const auto r_neither = run_deck(neither, RunSettings{}, warnings);
+    REQUIRE(!r_neither);
+    CHECK(r_neither.error().message.find("neither .op nor .dc") !=
+          std::string::npos);
+
+    // Both at once: .op used to win silently.
+    ws::spice::DeckAst both = *ast;
+    both.analyses[0].dc = ws::spice::DcCard{};
+    const auto r_both = run_deck(both, RunSettings{}, warnings);
+    REQUIRE(!r_both);
+    CHECK(r_both.error().message.find("both .op and .dc") != std::string::npos);
+}
+
 // --- §0.5/§7.8: CSV shape ------------------------------------------------------
 
 TEST_CASE("CSV: header row, %.12g numbers, op-only writes one row") {

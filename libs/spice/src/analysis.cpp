@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <map>
 #include <memory>
@@ -101,6 +102,10 @@ public:
         }
         for (int it = 1; it <= max_iterations; ++it) {
             ++iterations;
+            // M1 devices are linear, so the stamp cannot depend on x.
+            // M3's nonlinear devices will need the CURRENT iterate here
+            // (DESIGN.md §3.6: load must produce the exact linearization
+            // at the current iterate) - tracked in docs/SPICE_PLAN.md.
             mna_.load(circuit_.devices);
             std::vector<double> x_new;
             WS_TRY(mna_.solve(x_new));
@@ -185,7 +190,9 @@ ws::core::Result<Table> run_op(const DeckAst& ast, const RunSettings& settings,
     }
 
     DcKernel kernel(circuit, settings);
-    WS_TRY(kernel.prepare());
+    if (const ws::core::Status st = kernel.prepare(); !st) {
+        return wrap_solver_error(st, ".op");
+    }
 
     std::vector<double> x;  // cold start: all zeros
     std::size_t iterations = 0;
@@ -219,6 +226,10 @@ struct SweepPlan {
     char unit = 'V';        // 'V', 'A' or 'C' - for the error context
 };
 
+// A .dc grid is materialized row by row; anything past this is almost
+// certainly a typo (start/stop/step units mismatch), not a real sweep.
+constexpr std::size_t kMaxSweepPoints = 1'000'000;
+
 ws::core::Result<double> eval_sweep_expr(const ExprProgram& prog,
                                          const ParamTable& params) {
     WS_TRY_ASSIGN(const std::vector<std::optional<double>> bindings, params.bind(prog));
@@ -234,6 +245,23 @@ ws::core::Result<SweepPlan> plan_sweep(const DcSweep& sweep, const ParamTable& p
     WS_TRY_ASSIGN(plan.start, eval_sweep_expr(sweep.start, params));
     WS_TRY_ASSIGN(plan.stop, eval_sweep_expr(sweep.stop, params));
     WS_TRY_ASSIGN(plan.step, eval_sweep_expr(sweep.step, params));
+
+    auto range_fail = [&](std::string message) -> ws::core::unexpected<ws::core::Error> {
+        Diagnostic d = run_diag(ErrorKind::Semantic, "spice.semantic.dc_range",
+                                std::move(message));
+        d.loc = sweep.source.loc;
+        return spice_fail(std::move(d));
+    };
+
+    // The expression evaluator already rejects NaN/inf results, but the
+    // arithmetic below can still overflow (stop-start, or the interval
+    // count). Guard both before the size_t cast - an out-of-range double
+    // cast to size_t is UB, and a huge count would loop forever.
+    if (!std::isfinite(plan.start) || !std::isfinite(plan.stop) ||
+        !std::isfinite(plan.step)) {
+        return range_fail("sweep values for '" + sweep.source.text +
+                          "' must be finite");
+    }
 
     if (plan.step == 0.0) {
         Diagnostic d = run_diag(ErrorKind::Semantic, "spice.semantic.dc_step",
@@ -251,9 +279,22 @@ ws::core::Result<SweepPlan> plan_sweep(const DcSweep& sweep, const ParamTable& p
         d.loc = sweep.source.loc;
         return spice_fail(std::move(d));
     }
-    plan.count = static_cast<std::size_t>(
-                     std::floor((plan.stop - plan.start) / plan.step + 1e-9)) +
-                 1;
+    const double span = plan.stop - plan.start;
+    const double intervals = std::floor(span / plan.step + 1e-9);
+    if (!std::isfinite(span) || !std::isfinite(intervals) || intervals < 0.0) {
+        return range_fail("sweep range for '" + sweep.source.text +
+                          "' is out of range (start " + fmt_value(plan.start) +
+                          ", stop " + fmt_value(plan.stop) + ", step " +
+                          fmt_value(plan.step) + ")");
+    }
+    const double points = intervals + 1.0;
+    if (!std::isfinite(points) || points < 1.0 ||
+        points > static_cast<double>(kMaxSweepPoints)) {
+        return range_fail("sweep for '" + sweep.source.text + "' produces " +
+                          fmt_value(points) + " points; the maximum is " +
+                          std::to_string(kMaxSweepPoints));
+    }
+    plan.count = static_cast<std::size_t>(points);
 
     // Classify the target: temp re-elaborates per point (§7.7); anything
     // else must name a V or I source in the circuit.
@@ -298,7 +339,9 @@ std::string sweep_context(const SweepPlan& inner, double inner_value,
 ws::core::Result<Table> run_dc(const DeckAst& ast, const DcCard& card,
                                const RunSettings& settings,
                                std::vector<Warning>& warnings, AnalysisReport& report) {
-    // Global .param scope for the sweep expressions.
+    // Global .param scope for the sweep expressions. ParamTable::define()
+    // is infallible by design (a later definition replaces an earlier one),
+    // so there is no error to drop here.
     ParamTable global;
     for (const ParamDef& def : ast.params) {
         global.define(def);
@@ -313,6 +356,29 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const DcCard& card,
     std::optional<SweepPlan> outer;
     if (card.second) {
         WS_TRY_ASSIGN(outer, plan_sweep(*card.second, global, circuit));
+    }
+
+    // Two temp sweeps would share one temperature unknown: the innermost
+    // value wins, so the outer temperature silently never changes. That is
+    // not a meaningful nested sweep - reject it instead of guessing.
+    if (outer && inner.is_temp && outer->is_temp) {
+        Diagnostic d = run_diag(
+            ErrorKind::Semantic, "spice.semantic.dc_nested_temp",
+            "both .dc sweeps target 'temp'; a temperature sweep cannot nest"
+            " another temperature sweep");
+        d.loc = outer->source.loc;
+        return spice_fail(std::move(d));
+    }
+    // Sweeping the same source twice is equally meaningless: the outer
+    // assignment overwrites the inner one, but the table would still show
+    // two sweep columns for the same value.
+    if (outer && to_lower(inner.source.text) == to_lower(outer->source.text)) {
+        Diagnostic d = run_diag(
+            ErrorKind::Semantic, "spice.semantic.dc_duplicate_source",
+            "both .dc sweeps target '" + inner.source.text +
+                "'; each sweep needs a distinct source");
+        d.loc = outer->source.loc;
+        return spice_fail(std::move(d));
     }
 
     Table t;
@@ -361,7 +427,10 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const DcCard& card,
         save = default_save_list(circuit);
         kernel_factorizations = 0;
         kernel = std::make_unique<DcKernel>(circuit, settings);
-        return kernel->prepare();
+        if (const ws::core::Status st = kernel->prepare(); !st) {
+            return wrap_solver_error(st, ".dc");
+        }
+        return {};
     };
 
     const std::size_t outer_count = outer ? outer->count : 1;
@@ -458,23 +527,68 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const DcCard& card,
 
 // --- the public entry (run.hpp) --------------------------------------------------------
 
+namespace {
+
+// Elaboration warnings repeat verbatim when a deck carries several
+// analyses (each one re-elaborates the same AST, §7.1). Keep the first
+// copy of a warning and drop the rest; anything genuinely new (a different
+// location, message, or analysis context) still lands.
+void drop_duplicate_warnings(std::vector<Warning>& warnings,
+                              std::size_t baseline) {
+    if (baseline >= warnings.size()) {
+        return;
+    }
+    std::vector<std::string> seen;
+    seen.reserve(baseline);
+    for (std::size_t i = 0; i < baseline; ++i) {
+        seen.push_back(warnings[i].render());
+    }
+    for (std::size_t i = baseline; i < warnings.size();) {
+        const std::string key = warnings[i].render();
+        if (std::find(seen.begin(), seen.end(), key) != seen.end()) {
+            warnings.erase(warnings.begin() + static_cast<std::ptrdiff_t>(i));
+        } else {
+            seen.push_back(std::move(key));
+            ++i;
+        }
+    }
+}
+
+}  // namespace
+
 ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
                                      std::vector<Warning>& warnings) {
     // .options override the caller's defaults, later cards win (§5.1).
     WS_TRY(apply_options(ast.options, settings));
 
+    // The parser can only build exactly-one-of {op, dc}, but DeckAst is a
+    // public type: a hand-built AST could carry neither or both. Reject
+    // those up front instead of silently skipping the card (working-rule 5).
+    for (const AnalysisCard& card : ast.analyses) {
+        if (card.op.has_value() == card.dc.has_value()) {
+            Diagnostic d = run_diag(
+                ErrorKind::Semantic, "spice.semantic.analysis_card",
+                card.op ? "analysis card carries both .op and .dc"
+                        : "analysis card carries neither .op nor .dc");
+            d.loc = card.loc;
+            return spice_fail(std::move(d));
+        }
+    }
+
     RunOutput out;
     for (const AnalysisCard& card : ast.analyses) {
         AnalysisReport report;
+        const std::size_t warnings_before = warnings.size();
         if (card.op) {
             WS_TRY_ASSIGN(Table t, run_op(ast, settings, warnings, report));
             out.results.tables.push_back(std::move(t));
             out.reports.push_back(std::move(report));
-        } else if (card.dc) {
+        } else {
             WS_TRY_ASSIGN(Table t, run_dc(ast, *card.dc, settings, warnings, report));
             out.results.tables.push_back(std::move(t));
             out.reports.push_back(std::move(report));
         }
+        drop_duplicate_warnings(warnings, warnings_before);
     }
     if (ast.analyses.empty()) {
         // No analysis cards: nothing to simulate, but the deck still
@@ -482,7 +596,9 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
         // an invalid deck never passes silently (§1, working-rule 5).
         Circuit circuit;
         WS_TRY_ASSIGN(circuit, elaborate_deck(ast, kDefaultTemp, warnings));
-        (void)circuit;
+        if (circuit.devices.empty()) {
+            return empty_circuit_error("");
+        }
     }
     return out;
 }
