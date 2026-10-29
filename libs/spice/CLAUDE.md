@@ -199,3 +199,12 @@ gate: analytic .op/.dc/.tran/.ac rows at 1e-9 rel, parse-error goldens
 pinning file:line:col prefixes, topology goldens, CSV shape, param
 scoping; the trap-order row rides the fixed_dt hook).
 A new device or analysis does not land without its row (§10.1).
+
+The Windows-facing CLI smoke is `tools/smoke-spice.ps1` (12 cases, 110
+assertions: the analytic decks through the real exe, headers/row counts/
+exit codes, a CRLF+BOM "Notepad deck" case, and a simulated all-zeros
+regression failing every case loudly). Its case list mirrors
+`scripts/smoke_linux.sh` in the dev sandbox - keep the two in sync when
+adding cases. The parser itself is encoding-clean: CRLF, UTF-8 BOM and a
+missing final newline all parse identically to LF (only legacy CR-only
+line endings reject, loudly).

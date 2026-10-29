@@ -26,9 +26,10 @@ and DESIGN.md disagree, DESIGN.md wins.
 | `1ee0167` | spice     | Fixed the CSV header shape and added the title-line-looks-like-a-card warning. |
 | `fa45283` | spice     | Four `.dc`/`.op` correctness fixes: convergence class passthrough, temp flow, first-point handling, and report counts. |
 | `7b9649e` | spice     | M1 hardening: `.dc` point-count guards, nested-temp/duplicate-source rejection, `prepare()` error wrapping, `AnalysisCard` validation, empty-deck rejection, warning dedup. |
-| *(this commit)* | M2 | C/L/K/S/W devices, PULSE/SIN/EXP/PWL sources, `.tran` (trap+BE, LTE, breakpoints, .ic/UIC), `.ac` (complex MNA, re()/im() CSV), switch `.model SW`, the M2 analytic gate (RC/RLC/LC/AC/K/switch rows, trap-order via `fixed_dt`). |
+| `ace0a9f` | M2        | C/L/K/S/W devices, PULSE/SIN/EXP/PWL sources, `.tran` (trap+BE, LTE, breakpoints, .ic/UIC), `.ac` (complex MNA, re()/im() CSV), switch `.model SW`, the M2 analytic gate (RC/RLC/LC/AC/K/switch rows, trap-order via `fixed_dt`). |
+| *(this commit)* | tools  | `tools/smoke-spice.ps1` - the self-verifying Windows CLI smoke (12 cases, 110 assertions; validated against a simulated all-zeros exe). |
 
-Working tree is clean; `main` is 12 commits ahead of `origin/main` and
+Working tree is clean; `main` is 13 commits ahead of `origin/main` and
 **deliberately not pushed** (no remote credentials). If you want to
 share the work, push `main` to a remote you control, or zip the repo and
 hand it over.
@@ -87,10 +88,30 @@ cmake/ninja are not on PATH in the dev sandbox; install with
 # Full workspace (heavy - pulls Vulkan, OpenAL, libuv, Box2D, Jolt):
 .\tools\build.ps1 -Preset debug
 .\tools\build.ps1 -Preset debug -Test
+
+# Windows smoke: builds spice-debug, then runs 12 analytic decks through
+# the real CLI asserting closed-form values, headers, row counts and exit
+# codes (110 assertions; exit 0 = all pass). Add -KeepWork to keep the
+# temp decks, -SkipBuild to reuse the built exe, -Spice <path> to smoke a
+# specific exe, -Preset spice-release for the release build:
+.\tools\smoke-spice.ps1
+.\tools\smoke-spice.ps1 -SkipBuild -KeepWork
+.\tools\smoke-spice.ps1 -Spice C:\some\old\spice.exe   # e.g. repro a report
 ```
 
 The CLI binary lands at `build\<preset>\bin\spice.exe` (or
 `build/<preset>/bin/spice` on Linux).
+
+Windows "all zeros" follow-up (2026-10-29): the reported symptom could not
+be reproduced in the shared code - the parser survives every Windows-typical
+deck encoding (CRLF, UTF-8 BOM, missing final newline all produce
+byte-identical results; only legacy CR-only line endings reject, loudly),
+and the smoke battery passes 110/110 against the Linux exe (plus 57/57 in
+the bash mirror). The earlier zero-output observations most plausibly
+predate the `1ee0167`/`fa45283` fixes. If it recurs on a Windows box, run
+`.\tools\smoke-spice.ps1 -Spice <the offending exe> -KeepWork` and send the
+failure list - it prints expected vs got per case plus the raw CSV and
+stderr, which localizes the break in one run.
 
 ### Running the simulator
 
@@ -151,8 +172,9 @@ CMakePresets.json                # debug/release/vs-*/linux/android + spice-debu
 libs/CMakeLists.txt              # WS_BUILD_LIBS closure + per-lib gating
 apps/CMakeLists.txt              # per-app gating on its lib set
 tools/
-  build.ps1                      # the configurable build driver (this delivery)
-  build-spice.ps1                # the spice-subset one-liner (this delivery)
+  build.ps1                      # the configurable build driver
+  build-spice.ps1                # the spice-subset one-liner
+  smoke-spice.ps1                # the self-verifying CLI smoke (this delivery)
   dev-shell.ps1                  # (pre-existing) loads vcvars64 in the prompt
   compile_shaders.ps1            # (pre-existing) ui shader regen
   package-android.ps1           # (pre-existing)
