@@ -37,8 +37,13 @@ and DESIGN.md disagree, DESIGN.md wins.
 | `1c0145b` | §0.4 | measure:: library + .meas parser (--strict-meas). |
 | `705cfd3` | §0.5 | .save/.print expressions + @dev[param], post-hoc. |
 | `f9e794a` | misc | .raw writer, `spice check` lint, compat=strict, CLI flags. |
+| `2126db1` | docs | The revision's docs: DESIGN.md Revision 2, `libs/spice/CLAUDE.md`, `libs/spice/STATUS.md`. |
+| `ec349ec` | spice | .meas over .step families measures each point (regression fix). |
+| `70e7e84` | spice | MSVC /W4 /WX portability: `struct Circuit` forward decl (C4099) + six shadowing renames (C4456/C4458). |
+| `b265ae7` | spice | .dc crash on MSVC debug fixed: `run_dc` assigned through empty `std::optional`s - UB that stayed silent on GCC and aborted (exit 3) on Windows. Found via ASan; see the audit tooling below. |
+| (HEAD, after `b265ae7`) | tools | Linux-side audit scanners for MSVC parity (`tools/audit_*.py`, `tools/build_*.py`) + this plan refresh. |
 
-Working tree is clean; `main` is 13 commits ahead of `origin/main` and
+Working tree is clean; `main` is 14 commits ahead of `origin/main` and
 **deliberately not pushed** (no remote credentials). If you want to
 share the work, push `main` to a remote you control, or zip the repo and
 hand it over.
@@ -183,7 +188,12 @@ apps/CMakeLists.txt              # per-app gating on its lib set
 tools/
   build.ps1                      # the configurable build driver
   build-spice.ps1                # the spice-subset one-liner
-  smoke-spice.ps1                # the self-verifying CLI smoke (this delivery)
+  smoke-spice.ps1                # the self-verifying CLI smoke
+  audit_class_struct.py          # MSVC-parity audits (see the tooling
+  audit_shadow.py                #   section above; read-only scanners +
+  audit_uninit.py                #   instrumented-build helpers, Python 3,
+  build_asan.py                  #   no deps beyond a GCC build tree)
+  build_checked.py
   dev-shell.ps1                  # (pre-existing) loads vcvars64 in the prompt
   compile_shaders.ps1            # (pre-existing) ui shader regen
   package-android.ps1           # (pre-existing)
@@ -192,6 +202,41 @@ docs/
   SPICE_PLAN.md                  # this file
   claude-md-archive.md            # (pre-existing)
 ```
+
+## Windows/Linux parity: audit tooling
+
+The Windows build is MSVC `/W4 /WX` + `/RTC1` (debug); the Linux preset
+is GCC `-Wall -Wextra -Wpedantic -Werror`. Those flag sets are NOT
+equal - two real Windows-only breaks shipped because of it (C4099
+class/struct mismatches in `70e7e84`, and the empty-optional UB in
+`b265ae7` that GCC's zero-filled stack masked). The five Python tools
+below close the gap from the Linux side; run them before handing a
+build to Windows:
+
+```
+python3 tools/audit_class_struct.py   # C4099: class vs struct key mismatches
+                                      #   (pure Python, no build tree needed)
+python3 tools/audit_shadow.py         # C4456/57/58/59: shadowing (-Wshadow
+                                      #   recompile; output to /dev/null)
+python3 tools/audit_uninit.py         # /RTCu: uninitialized reads
+                                      #   (-O2 -Wmaybe-uninitialized screen)
+python3 tools/build_asan.py           # ASan+UBSan build - the strong check;
+                                      #   this is what caught b265ae7
+python3 tools/build_checked.py        # _GLIBCCXX_ASSERTIONS = MSVC checked
+                                      #   iterators (bounds-checked operator[])
+```
+
+Notes:
+- The three `audit_*` tools are read-only (safe on any build tree). The
+  two `build_*` tools **instrument the tree in place** - clean-rebuild it
+  afterwards (`cmake --build <dir> --target clean`), or point them at a
+  scratch tree via `--build-dir`.
+- All five need the `linux` preset's `compile_commands.json` (GCC/Clang
+  commands). MSVC `cl.exe` entries are detected and skipped with a note
+  - on that side /W4 + /RTC1 already cover it.
+- `--libs core,math,spice,apps/spice` selects the TUs (default shown).
+- ASan reports leaks at exit by default; `ASAN_OPTIONS=detect_leaks=0`
+  focuses on hard errors.
 
 ## What is NOT done (deliberately deferred)
 
@@ -205,8 +250,10 @@ working rule 5) and would each be a future milestone:
   stepping (the convergence ladder), BJT (Gummel-Poon).
 - **M4** - MOS level 1, behavioral B sources (dual-number AD), lossless
   T-lines (T).
-- **M5** - `.options temp` and per-device temperature params, `.noise`,
-  `.step`, `.meas`, `.save`/`.print`/`.probe`, `.nodeset`, text report.
+- **M5 (remainder)** - `.noise`, `.nodeset`, per-device temperature
+  params (TC on models), text report. (The 2026-10-29 revision already
+  landed `.step`, `.meas`, `.save`/`.print` and `temp` sweeps - see the
+  table above; only these four M5 items still reject at parse.)
 - **Multi-winding K** - a third inductor on an existing pair rejects
   (backlog).
 - **`.lib`** - the ngspice library-file include mechanism. Backlog.
@@ -225,12 +272,15 @@ In rough priority order:
 1. **Re-read this file + `libs/spice/DESIGN.md` + `libs/spice/CLAUDE.md`.**
    DESIGN.md is the contract; CLAUDE.md is the lived rules-bite list; this
    file is the status. The three together are the full state.
-2. **Confirm the working tree.** `git log --oneline -12` should show the
-   commits listed above (HEAD = the M2 commit). `git status` should be
+2. **Confirm the working tree.** `git log --oneline -22` should show the
+   commits listed above (HEAD = the audit-tooling commit; `origin/main`
+   sits at the `8662844` smoke commit, 14 behind). `git status` should be
    clean.
 3. **Run the gate.** `cmake --preset linux && cmake --build --preset linux
-   && ctest --preset linux` should pass. If it does not, the break is
-   load-bearing - investigate before adding anything.
+   && ctest --preset linux` should pass (99 cases / 2239 assertions at the
+   time of writing). If it does not, the break is load-bearing -
+   investigate before adding anything. Before a Windows hand-off, also
+   run the five `tools/audit_*.py`/`tools/build_*.py` parity checks.
 4. **Pick the next milestone.** The natural next moves are **M0b** (the
    KLU backend: both facades are stable, cross-validation tests are the
    gate) or **M3** (diode + per-device limiting + the convergence ladder;

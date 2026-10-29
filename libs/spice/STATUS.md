@@ -8,8 +8,12 @@ disagree, DESIGN.md wins and this file gets fixed.
 
 M0 + M1 + M2 complete, plus the 2026-10-29 post-review revision (four
 structural changes + six usage wins) — all committed on `main`, all
-gates green: **2213 assertions, 98 test cases, 0 failures** (Linux
-preset: GCC 14, `-Wall -Wextra -Wpedantic -Werror`).
+gates green: **2239 assertions, 99 test cases, 0 failures** (Linux
+preset: GCC 14, `-Wall -Wextra -Wpedantic -Werror`). Windows parity
+restored the same day: the MSVC `/W4 /WX` build is clean again and the
+full smoke passes on Windows (97+6 cases → all green after `70e7e84` +
+`b265ae7`); the Linux-side parity checks live in `tools/audit_*.py` /
+`tools/build_*.py` (documented in `docs/SPICE_PLAN.md`).
 
 ## Landed (commit order)
 
@@ -24,6 +28,10 @@ preset: GCC 14, `-Wall -Wextra -Wpedantic -Werror`).
 | `1c0145b` | §0.4 rev — measure:: library + .meas parser; failures are notes; --strict-meas. Fixed the crossing-time interpolation bug the analytic tests caught. |
 | `705cfd3` | §0.5 rev — .save/.print expressions + @dev[param], post-hoc over stored columns; v(a,b) differential; axes as pseudo-columns. |
 | `f9e794a` | §7.8/§9.3/§8.3 — .raw writer (complex merging for .ac); `spice check` lint (M/milli, F/femto traps); compat=ngspice\|ltspice\|strict. |
+| `2126db1` | docs — DESIGN.md Revision 2, this file, CLAUDE.md. |
+| `ec349ec` | regression fix — .meas over .step families now measures each point (was measuring the last). |
+| `70e7e84` | MSVC /W4 /WX portability — `struct Circuit` forward decl (C4099) and six shadowing renames (C4456/C4458). |
+| `b265ae7` | .dc crash on MSVC debug — `run_dc` assigned through empty `std::optional`s (`WS_TRY_ASSIGN(*state, ...)`); silent on GCC, exit-3 abort on Windows. Fixed with emplace; caught via the ASan build helper. |
 
 ## Known sharp edges
 
@@ -41,6 +49,11 @@ preset: GCC 14, `-Wall -Wextra -Wpedantic -Werror`).
   spelling (`Tran{.tstop = 5_ms}`); GCC flags exactly that.
 - The M3 follow-up stands: nonlinear devices need the current iterate
   threaded into `load()` (tracked in `docs/SPICE_PLAN.md`).
+- **Windows-only breaks stay possible**: GCC's flag set is not MSVC's
+  (`-Wshadow` off, no /RTCu, no checked iterators). Run the five
+  `tools/audit_*` / `tools/build_*` parity checks before handing a
+  build to Windows — that is exactly how `70e7e84`/`b265ae7` were
+  found and will be how the next one is.
 
 ## Next (per §11, unchanged)
 
