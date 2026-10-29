@@ -81,5 +81,9 @@ if(NOT ANDROID)
   if(ws_want_spice)
     # spice is the ws::spice CLI: parse -> simulate -> write, nothing else.
     add_subdirectory(spice)
+    # spice_example is a tiny embedding: hardcoded RC deck -> v(out) +
+    # .meas to stdout. The smallest possible ws::spice C++ program. Built
+    # wherever the spice lib is (so the spice subset preset gets it too).
+    add_subdirectory(spice_example)
   endif()
 endif()
