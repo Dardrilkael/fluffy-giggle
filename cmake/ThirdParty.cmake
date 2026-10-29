@@ -37,18 +37,28 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 # building it we just expose the header as an interface target. Tests are never
 # cross-built (the android preset sets WS_BUILD_TESTS=OFF), so the fetch is
 # desktop-only too.
+#
+# Header-only deps use FetchContent_Declare(... SOURCE_SUBDIR <nonexistent>)
+# + FetchContent_MakeAvailable: SOURCE_SUBDIR pointing at a directory that
+# does not exist in the dep makes MakeAvailable populate the source tree
+# WITHOUT calling add_subdirectory on it (CMake skips the missing dir), so
+# the legacy FetchContent_Populate pattern is gone for good. CMP0169
+# (CMake 4.4+) deprecates FetchContent_Populate; this is the migration.
 if(ws_wants_doctest)
   FetchContent_Declare(doctest
     GIT_REPOSITORY https://github.com/doctest/doctest.git
     GIT_TAG v2.4.11
-    GIT_SHALLOW TRUE)
-  FetchContent_GetProperties(doctest)
-  if(NOT doctest_POPULATED)
-    FetchContent_Populate(doctest)
-  endif()
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR _ws_no_cmake)  # no CMakeLists.txt to add_subdirectory
+  FetchContent_MakeAvailable(doctest)
   add_library(doctest INTERFACE)
   add_library(doctest::doctest ALIAS doctest)
   target_include_directories(doctest SYSTEM INTERFACE "${doctest_SOURCE_DIR}")
+  # Pull in doctest_discover_tests() so ws_add_test can register each
+  # individual case as its own ctest entry (ctest -j parallelism + named
+  # failures, instead of one ctest entry per test_<lib> binary).
+  list(APPEND CMAKE_MODULE_PATH "${doctest_SOURCE_DIR}/scripts/cmake")
+  include(doctest)
 endif()
 
 # GLFW is the DESKTOP windowing platform. Android renders to the OS-owned
@@ -73,67 +83,70 @@ endif()
 
 # The ui-only fetches. Everything from here to the stb target is one family:
 # ws_ui wraps them all PRIVATE, so a build without ui fetches none of them.
+# Header-only / source-only - SOURCE_SUBDIR _ws_no_cmake on every Declare
+# makes MakeAvailable populate WITHOUT add_subdirectory (the hand-written
+# targets below assemble them; CMP0169 deprecates FetchContent_Populate).
 if(ws_wants_ui)
 FetchContent_Declare(vulkan_headers
   GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
   GIT_TAG v1.3.296
-  GIT_SHALLOW TRUE)
+  GIT_SHALLOW TRUE
+  SOURCE_SUBDIR _ws_no_cmake)
 FetchContent_Declare(volk
   GIT_REPOSITORY https://github.com/zeux/volk.git
   GIT_TAG vulkan-sdk-1.3.296.0
-  GIT_SHALLOW TRUE)
+  GIT_SHALLOW TRUE
+  SOURCE_SUBDIR _ws_no_cmake)
 FetchContent_Declare(vma
   GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
   GIT_TAG v3.2.1
-  GIT_SHALLOW TRUE)
+  GIT_SHALLOW TRUE
+  SOURCE_SUBDIR _ws_no_cmake)
 FetchContent_Declare(imgui
   GIT_REPOSITORY https://github.com/ocornut/imgui.git
   GIT_TAG v1.91.5-docking
-  GIT_SHALLOW TRUE)
+  GIT_SHALLOW TRUE
+  SOURCE_SUBDIR _ws_no_cmake)
 FetchContent_Declare(implot
   GIT_REPOSITORY https://github.com/epezent/implot.git
   GIT_TAG v0.16
-  GIT_SHALLOW TRUE)
+  GIT_SHALLOW TRUE
+  SOURCE_SUBDIR _ws_no_cmake)
 # stb has no release tags - pinned to a master commit. stb_image.h is
 # v2.30 (2024-05-31) at this hash.
 FetchContent_Declare(stb
   GIT_REPOSITORY https://github.com/nothings/stb.git
   GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20
-  GIT_SHALLOW TRUE)
+  GIT_SHALLOW TRUE
+  SOURCE_SUBDIR _ws_no_cmake)
 foreach(dep vulkan_headers volk vma imgui implot stb)
-  FetchContent_GetProperties(${dep})
-  if(NOT ${dep}_POPULATED)
-    FetchContent_Populate(${dep})
-  endif()
+  FetchContent_MakeAvailable(${dep})
 endforeach()
 endif()  # ws_wants_ui declares
 
 # Eigen (header-only; backing store for ws::math) - its own fetch, outside
-# the ui family: math builds without ui.
+# the ui family: math builds without ui. SOURCE_SUBDIR _ws_no_cmake keeps
+# MakeAvailable from adding its CMakeLists.txt (we just want the headers).
 if(ws_wants_math)
 FetchContent_Declare(eigen
   GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
   GIT_TAG 3.4.0
-  GIT_SHALLOW TRUE)
-FetchContent_GetProperties(eigen)
-if(NOT eigen_POPULATED)
-  FetchContent_Populate(eigen)
-endif()
+  GIT_SHALLOW TRUE
+  SOURCE_SUBDIR _ws_no_cmake)
+FetchContent_MakeAvailable(eigen)
 endif()
 
 # tl::expected is the std::expected backport backing ws::core's Result/Status
 # (result.hpp). Header-only, CC0, single include/tl/expected.hpp - the doctest/
 # dr_wav INTERFACE-target pattern. Unconditional inside the core gate: ws::core
-# builds on Android.
+# builds on Android. SOURCE_SUBDIR _ws_no_cmake: just populate the source.
 if(ws_wants_core)
 FetchContent_Declare(tl_expected
   GIT_REPOSITORY https://github.com/TartanLlama/expected.git
   GIT_TAG v1.1.0
-  GIT_SHALLOW TRUE)
-FetchContent_GetProperties(tl_expected)
-if(NOT tl_expected_POPULATED)
-  FetchContent_Populate(tl_expected)
-endif()
+  GIT_SHALLOW TRUE
+  SOURCE_SUBDIR _ws_no_cmake)
+FetchContent_MakeAvailable(tl_expected)
 endif()
 
 if(ws_wants_ui)
@@ -225,15 +238,14 @@ if(ws_wants_audio)
 # DR_WAV_IMPLEMENTATION translation unit lives in libs/audio
 # (src/dr_wav_impl.cpp) - the same one-TU rule as stb's. Pure C, so the
 # fetch is unconditional within the audio gate: ws::audio builds on Android
-# too (OpenAL Soft is fetched for both platforms below).
+# too (OpenAL Soft is fetched for both platforms below). SOURCE_SUBDIR
+# _ws_no_cmake: header-only, just populate the source.
 FetchContent_Declare(dr_wav
   GIT_REPOSITORY https://github.com/mackron/dr_libs.git
   GIT_TAG wav-0.14.5
-  GIT_SHALLOW TRUE)
-FetchContent_GetProperties(dr_wav)
-if(NOT dr_wav_POPULATED)
-  FetchContent_Populate(dr_wav)
-endif()
+  GIT_SHALLOW TRUE
+  SOURCE_SUBDIR _ws_no_cmake)
+FetchContent_MakeAvailable(dr_wav)
 add_library(dr_wav INTERFACE)
 add_library(dr_wav::dr_wav ALIAS dr_wav)
 target_include_directories(dr_wav SYSTEM INTERFACE "${dr_wav_SOURCE_DIR}")
@@ -269,11 +281,9 @@ if(ANDROID)
   FetchContent_Declare(oboe
     GIT_REPOSITORY https://github.com/google/oboe.git
     GIT_TAG 1.11.0
-    GIT_SHALLOW TRUE)
-  FetchContent_GetProperties(oboe)
-  if(NOT oboe_POPULATED)
-    FetchContent_Populate(oboe)
-  endif()
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR _ws_no_cmake)
+  FetchContent_MakeAvailable(oboe)
   set(OBOE_SOURCE "${oboe_SOURCE_DIR}" CACHE STRING
       "Source directory for Oboe (openal-soft's hook; ws sets it)" FORCE)
   set(ALSOFT_BACKEND_OBOE ON CACHE BOOL "" FORCE)

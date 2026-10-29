@@ -70,10 +70,16 @@ if(NOT ANDROID AND WIN32)
   target_link_libraries(ws_platform PRIVATE shell32 ole32 user32)
 endif()
 
-# The suite exercises the OS halves (os_location, the native dialogs,
-# the clipboard) alongside the headless ones, so it builds only where
-# those halves do: windows or the NDK. The headless-only desktop-Linux
-# build (above) has nothing to test them against.
-if(WIN32 OR ANDROID)
-  ws_add_test(platform SOURCES tests/test_platform.cpp)
-endif()
+# The suite exercises both the headless halves (paths, supplied-root
+# Locations, debounced watch over a fake and a real source, the recent-files
+# MRU over a FileSystem fake and the real seam, the autosave crash-recovery
+# state machine over a fake disk and the real seam, the scripted fake
+# dialogs/boxes and the UnavailableFileDialogs/UnavailableMessageBoxes
+# refusals, the window-title composer, the open_documents argv parse) AND
+# the OS-specific halves (os_location, make_file_dialogs/make_message_boxes
+# native construction, the single-instance grab). The OS-specific test
+# cases are #if'd to _WIN32 || __ANDROID__ inside test_platform.cpp, so the
+# file builds and runs on every platform - the headless cases (file watch,
+# recent-files, autosave) now run on Linux too, where they never did
+# before. No separate test binary; the single suite covers both halves.
+ws_add_test(platform SOURCES tests/test_platform.cpp)

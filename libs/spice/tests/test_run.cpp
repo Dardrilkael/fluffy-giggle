@@ -1419,6 +1419,27 @@ TEST_CASE(".step: a failing point aborts with the step context; keep-going lists
     CHECK(kg.error().message.find("run=2") != std::string::npos);
 }
 
+TEST_CASE(".step: cartesian product over the cap fails cleanly, never throws") {
+    // Two .step cards each pushing the per-axis cap (1M points) would
+    // compute a 1M x 1M cartesian product = 10^12 entries and abort with
+    // std::bad_alloc (exit 134) before any analysis ran. The product cap
+    // rejects the deck with a Semantic error naming the offending card.
+    // Each card uses 0..1e6 step 1 - exactly 1,000,001 points (the per-axis
+    // cap), well-formed on its own.
+    const std::string deck =
+        "huge\n"
+        "V1 in 0 5\n"
+        "R1 in out 1k\n"
+        "R2 out 0 1k\n"
+        ".step param a 0 1000000 1\n"
+        ".step param b 0 1000000 1\n"
+        ".op\n";
+    const auto run = run_text(deck);
+    REQUIRE(!run);
+    CHECK(run.error().category == std::string{"spice"});
+    CHECK(run.error().message.find("cartesian product") != std::string::npos);
+}
+
 // --- §0.4 rev: the measurement library + .meas -------------------------------------
 
 TEST_CASE("measure: library functions over analytic signals") {

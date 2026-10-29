@@ -3,7 +3,11 @@
 # transitively the same way. The include stays internal to src/ - the public
 # header keeps plain floats. ws::jobs is the same kind of workspace tier
 # (stage 8): App drains an installed system's marshal queue between frames.
-ws_add_library(ui DEPENDS ws::core ws::math ws::input ws::gfx ws::jobs)
+# ws::settings + ws::app + ws::platform join because ws_ui_gui (the gui
+# archive folded into ws_ui) links them PUBLIC - see the link line below.
+# The registry in cmake/WsHelpers.cmake must match this list verbatim;
+# ws_add_library fails configure on a mismatch.
+ws_add_library(ui DEPENDS ws::core ws::math ws::input ws::gfx ws::jobs ws::settings ws::app ws::platform)
 
 # The gui subset as its own archive - the stage-2 acceptance cut. It links
 # ws::core + ws::input (the frame snapshot it reads; itself core-only,

@@ -21,10 +21,11 @@ if(TARGET test_net)
   target_include_directories(test_net PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
 
-# The frame-parser fuzz driver: desktop-only and deliberately NOT in
+# The frame-parser fuzz driver: desktop-only, gated on WS_BUILD_TESTS (it
+# is a test-side tool, not a shipped binary), and deliberately NOT in
 # ctest - it runs long by design. Smoke it by hand:
 #   build/debug/bin/fuzz_net [seed] [iterations]
-if(NOT ANDROID)
+if(NOT ANDROID AND WS_BUILD_TESTS)
   add_executable(fuzz_net tests/fuzz_frame_main.cpp)
   target_include_directories(fuzz_net PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"

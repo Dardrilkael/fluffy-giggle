@@ -1,86 +1,16 @@
-# WS_BUILD_LIBS subset support: the add_subdirectory calls below are each
-# gated on the lib being wanted. "Wanted" = the WS_BUILD_LIBS cache list is
-# empty (the default: the whole workspace) or the lib is in it, or it is a
-# dependency of a wanted lib (the closure below spells the graph out, so a
-# preset naming only "spice" still configures core+math+spice). Order stays
-# dependency-first: core, math, then everything else.
+# libs/ subset support: the add_subdirectory calls below are each gated on
+# the lib being wanted. "Wanted" = the lib is in the configured closure of
+# WS_BUILD_LIBS (computed in cmake/WsHelpers.cmake from the dependency
+# registry - the single source of truth). Empty WS_BUILD_LIBS (the default:
+# the whole workspace) wants everything. Order stays dependency-first:
+# core, math, then everything else.
 
-# The libs/ dependency graph (first-party deps only; ws::core is implicit in
-# every entry and spelled anyway for clarity):
-#   math    <- core
-#   input   <- core
-#   gfx     <- core
-#   jobs    <- core
-#   settings<- core
-#   app     <- core, settings
-#   platform<- core, settings
-#   ui      <- core, math, input, gfx, jobs, settings, app
-#   audio   <- core
-#   net     <- core
-#   physics <- core
-#   spice   <- core, math
-function(ws_lib_deps out lib)
-  set(deps "")
-  if(lib STREQUAL "math")
-    set(deps core)
-  elseif(lib STREQUAL "input")
-    set(deps core)
-  elseif(lib STREQUAL "gfx")
-    set(deps core)
-  elseif(lib STREQUAL "jobs")
-    set(deps core)
-  elseif(lib STREQUAL "settings")
-    set(deps core)
-  elseif(lib STREQUAL "app")
-    set(deps core settings)
-  elseif(lib STREQUAL "platform")
-    set(deps core settings)
-  elseif(lib STREQUAL "ui")
-    set(deps core math input gfx jobs settings app)
-  elseif(lib STREQUAL "audio")
-    set(deps core)
-  elseif(lib STREQUAL "net")
-    set(deps core)
-  elseif(lib STREQUAL "physics")
-    set(deps core)
-  elseif(lib STREQUAL "spice")
-    set(deps core math)
-  endif()
-  set(${out} "${deps}" PARENT_SCOPE)
-endfunction()
-
-# Computes the transitive closure of WS_BUILD_LIBS over ws_lib_deps.
-function(ws_lib_closure out)
-  set(result "")
-  set(queue ${WS_BUILD_LIBS})
-  while(queue)
-    list(POP_FRONT queue lib)
-    if(lib IN_LIST result)
-      continue()
-    endif()
-    list(APPEND result ${lib})
-    ws_lib_deps(deps "${lib}")
-    list(APPEND queue ${deps})
-  endwhile()
-  set(${out} "${result}" PARENT_SCOPE)
-endfunction()
-
-function(ws_lib_wants out lib)
-  set(want TRUE)
-  if(WS_BUILD_LIBS AND NOT lib IN_LIST WS_ALL_LIBS)
-    set(want FALSE)
-  endif()
-  set(${out} ${want} PARENT_SCOPE)
-endfunction()
-
-ws_lib_closure(WS_ALL_LIBS)
-set(WS_ALL_LIBS "${WS_ALL_LIBS}" CACHE INTERNAL "libs/ closure actually configured")
-
-# One `ws_want_<lib>` variable per lib, computed up front - CMake's if()
-# cannot call functions, and spelling the result out keeps the gating below
-# readable.
-foreach(_lib core math input gfx jobs settings app ui audio net physics platform spice)
-  ws_lib_wants(_want ${_lib})
+# One ws_want_<lib> variable per lib - CMake's if() cannot call functions,
+# and spelling the result out keeps the gating below readable. ws_wants
+# lives in WsHelpers.cmake and tests WS_ALL_LIBS (the closure).
+get_property(_known_libs GLOBAL PROPERTY ws_lib_known_libs)
+foreach(_lib ${_known_libs})
+  ws_wants(_want ${_lib})
   set(ws_want_${_lib} ${_want})
 endforeach()
 unset(_lib)

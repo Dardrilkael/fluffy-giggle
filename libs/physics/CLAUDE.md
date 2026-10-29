@@ -279,7 +279,7 @@ world2d/world3d.cpp - the tests now pin it.
 (cwd in the repo root; the preset handles the build dir). Windows+MSVC and
 Android NDK (arm64-v8a, android-28) both build ws_physics from day one:
 run the suites on the desktop presets, and on the NDK LINK an app, not
-just the lib - `cmake --build --preset android-local --target ws_physics
+just the lib - `cmake --build --preset android --target ws_physics
 bounce`. A static-lib compile-check resolves nothing, and since
 backend_factory.cpp references every backend, even a 2D-only app pulls
 jolt3d_3d.cpp.o into the final image; that is how the -fno-rtti rule in

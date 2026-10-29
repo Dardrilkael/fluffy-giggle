@@ -34,11 +34,20 @@ if(WS_BUILD_APPS)
 endif()
 
 # Dependency-rule enforcement as a ctest test (see tools/check_deps.ps1).
-# PowerShell is the Windows shell script host; on Linux there is no
-# powershell on PATH, so the test only registers there.
-if(WS_BUILD_TESTS AND WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_deps.ps1")
-  add_test(NAME check_deps
-    COMMAND powershell -NoProfile -ExecutionPolicy Bypass
-            -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_deps.ps1"
-            -Root "${CMAKE_CURRENT_SOURCE_DIR}")
+# The script is PowerShell: on Windows the powershell.exe host is always
+# present; on Linux/macOS pwsh (PowerShell 7+) is opt-in. The test
+# registers wherever a powershell host is found so the rule runs in CI on
+# Linux too, not just on Windows.
+if(WS_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_deps.ps1")
+  if(WIN32)
+    set(_pwsh powershell)
+  else()
+    find_program(_pwsh NAMES pwsh powershell)
+  endif()
+  if(_pwsh)
+    add_test(NAME check_deps
+      COMMAND ${_pwsh} -NoProfile -ExecutionPolicy Bypass
+              -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_deps.ps1"
+              -Root "${CMAKE_CURRENT_SOURCE_DIR}")
+  endif()
 endif()

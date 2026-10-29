@@ -1,8 +1,9 @@
 # Build driver for the ws workspace on Windows. One script, every preset.
 # Loads the MSVC x64 environment (vcvars64) inline when cl.exe is not already
-# on PATH - so you can run this straight from Explorer or a plain PowerShell
-# prompt without dot-sourcing dev-shell.ps1 first. Then it runs the CMake
-# configure/build/test preset triplet you ask for.
+# on PATH - the loader is shared with tools/dev-shell.ps1 via Load-Vcvars
+# below (kept in sync with that file; dot-sourcing dev-shell first skips
+# the load). Then it runs the CMake configure/build/test preset triplet
+# you ask for.
 #
 # Usage:
 #   .\tools\build.ps1                                 # spice-debug, build only
@@ -59,15 +60,14 @@ function Find-Cmake {
     throw "cmake not found on PATH or under Visual Studio. Install CMake 3.28+ (https://cmake.org/download/) or open a Developer PowerShell."
 }
 
-# Locate and load vcvars64.bat into THIS process's environment, mirroring
-# tools/dev-shell.ps1 - but inline, since dot-sourcing this script from the
-# dev shell is opt-in and we want a one-command build from a plain prompt.
-# Skipped when -NoVcvars is set (the Visual Studio generator does not need
-# cl.exe on PATH - it shells out to MSBuild itself) or when cl.exe is already
-# on PATH (the user already dot-sourced dev-shell.ps1).
+# Locate and load vcvars64.bat into THIS process's environment. Mirrors
+# tools/dev-shell.ps1 - keep the two in sync. Skipped when -NoVcvars is set
+# (the Visual Studio generator does not need cl.exe on PATH - it shells out
+# to MSBuild itself) or when cl.exe is already on PATH (the user already
+# dot-sourced dev-shell.ps1).
 function Load-Vcvars {
-    if ($NoVcvars) { return }
-    if (Get-Command cl.exe -ErrorAction SilentlyContinue) { return }
+    param([switch]$SkipIfPresent)
+    if ($SkipIfPresent -and (Get-Command cl.exe -ErrorAction SilentlyContinue)) { return }
 
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     if (-not (Test-Path $vswhere)) {
@@ -92,14 +92,16 @@ function Load-Vcvars {
     }
 }
 
-Load-Vcvars
+if (-not $NoVcvars) { Load-Vcvars -SkipIfPresent }
 $cmake = Find-Cmake
 Write-Host "cmake: $cmake"
 
 # Validate the preset exists. CMakePresets.json v6 schema: configurePresets is
-# a flat array of { name: ... } objects.
+# a flat array of { name: ... } objects (hidden presets with "hidden": true
+# are skipped - they are _base/_base-msvc templates other presets inherit).
 $presetJson = Get-Content -Raw $presetFile | ConvertFrom-Json
-$validNames = $presetJson.configurePresets | ForEach-Object { $_.name }
+$validNames = $presetJson.configurePresets | Where-Object { -not $_.hidden } |
+    ForEach-Object { $_.name }
 if ($Preset -notin $validNames) {
     Write-Host "Unknown preset: '$Preset'. Available presets:"
     $validNames | ForEach-Object { Write-Host "  - $_" }

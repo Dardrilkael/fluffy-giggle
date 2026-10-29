@@ -841,8 +841,31 @@ ws::core::Result<std::vector<StepPoint>> enumerate_steps(
     points[0].temp = base_temp;
     for (const StepCard& card : cards) {
         WS_TRY_ASSIGN(const std::vector<double> values, step_values(card, scope));
+        // Cap the cartesian product, not just each axis. Two cards each at
+        // kMaxSweepPoints would otherwise try to reserve ~10^12 entries here
+        // and abort with std::bad_alloc before any analysis runs (the
+        // per-card cap above only guards a single axis). The product cap
+        // matches the per-card cap: anything past 1M total points is a typo,
+        // not a real sweep. Use double arithmetic so the check is robust on
+        // 32-bit size_t as well (1M * 1M overflows uint32_t).
+        const double product_d =
+            static_cast<double>(points.size()) * static_cast<double>(values.size());
+        if (!std::isfinite(product_d) ||
+            product_d > static_cast<double>(kMaxSweepPoints)) {
+            Diagnostic d = run_diag(
+                ErrorKind::Semantic, "spice.semantic.step_product",
+                ".step cartesian product exceeds " +
+                    std::to_string(kMaxSweepPoints) + " points (" +
+                    std::to_string(points.size()) + " x " +
+                    std::to_string(values.size()) +
+                    " on .step " + card.name.text +
+                    ") - narrow the ranges or split into separate runs");
+            d.loc = card.loc;
+            return spice_fail(std::move(d));
+        }
+        const std::size_t product = static_cast<std::size_t>(product_d);
         std::vector<StepPoint> next;
-        next.reserve(points.size() * values.size());
+        next.reserve(product);
         for (const StepPoint& p : points) {
             for (const double v : values) {
                 StepPoint q = p;

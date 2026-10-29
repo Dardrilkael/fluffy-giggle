@@ -186,6 +186,7 @@ TEST_CASE("ensure_directory answers io_failed when a file blocks the chain") {
 }
 
 TEST_CASE("os_location answers the Windows truth for an app") {
+#if defined(_WIN32) || defined(__ANDROID__)
     const auto cfg =
         ws::platform::os_location(ws::platform::Location::config, "ws-app");
     REQUIRE(cfg.has_value());
@@ -214,6 +215,13 @@ TEST_CASE("os_location answers the Windows truth for an app") {
     ws::platform::Locations locs{"ws-app"};
     REQUIRE(locs.get(ws::platform::Location::config).value() == cfg.value());
     REQUIRE(locs.get(ws::platform::Location::cache).value() == cache.value());
+#else
+    // On Linux/other desktops os_location is not implemented (the workspace's
+    // desktop is Windows-only today). The function would return unavailable;
+    // the headless halves (paths, supplied-root Locations, watch, MRU,
+    // autosave, fake dialogs/boxes, title composer) are exercised by the
+    // other cases in this suite. Skip the OS-truth assertions here.
+#endif
 }
 
 TEST_CASE("the watch fires a settled change once, after quiet") {
@@ -942,12 +950,18 @@ TEST_CASE("the unavailable dialog set refuses every kind") {
 }
 
 TEST_CASE("make_file_dialogs hands back the native set") {
+#if defined(_WIN32) || defined(__ANDROID__)
     // Constructed and destroyed only: a real call raises a modal
     // dialog and would hang the suite - the native set is exercised
     // interactively by the gallery (phase 7).
     const std::unique_ptr<ws::platform::FileDialogs> dialogs =
         ws::platform::make_file_dialogs();
     REQUIRE(dialogs != nullptr);
+#else
+    // No native file dialogs on Linux/other desktops - make_file_dialogs is
+    // not implemented there. The fake (FakeFileDialogs) and the refusal
+    // (UnavailableFileDialogs) are tested by the cases above.
+#endif
 }
 
 // ---- message boxes: the scripted fake + the refusal ----
@@ -1002,12 +1016,18 @@ TEST_CASE("the unavailable message boxes refuse") {
 }
 
 TEST_CASE("make_message_boxes hands back the native set") {
+#if defined(_WIN32) || defined(__ANDROID__)
     // Constructed and destroyed only: a real ask raises a modal box
     // and would hang the suite - the native set is exercised
     // interactively by the gallery (phase 7).
     const std::unique_ptr<ws::platform::MessageBoxes> boxes =
         ws::platform::make_message_boxes();
     REQUIRE(boxes != nullptr);
+#else
+    // No native message boxes on Linux/other desktops - make_message_boxes
+    // is not implemented there. The fake (FakeMessageBoxes) and the refusal
+    // are tested by the cases above.
+#endif
 }
 
 // ---- window title + single instance: the composer, the argv
@@ -1048,6 +1068,7 @@ TEST_CASE("open_documents skips the program and the switches") {
 }
 
 TEST_CASE("the single-instance grab is exclusive per key") {
+#if defined(_WIN32) || defined(__ANDROID__)
     // two grabs in one process contend for the same OS mutex - the
     // second sees the first's hold, exactly like a second launch
     {
@@ -1071,4 +1092,10 @@ TEST_CASE("the single-instance grab is exclusive per key") {
     // later launch is primary again
     const ws::platform::SingleInstance third{"ws-test-singleton"};
     REQUIRE(third.is_primary());
+#else
+    // SingleInstance's OS grab is not implemented on Linux/other desktops
+    // (single_instance_win.cpp / single_instance_android.cpp only). The
+    // open_documents argv parse above is the headless half of this header
+    // and runs everywhere.
+#endif
 }

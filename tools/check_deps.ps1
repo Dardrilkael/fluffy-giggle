@@ -21,7 +21,8 @@ $ErrorActionPreference = 'Stop'
 # between < and >). Anything matching is a leak in BOTH scopes except the
 # tl/expected.hpp carve-out. The list is the enforcement backstop for
 # third-party headers without a slash (uv.h, glfw3.h, imgui.h, ...) - the
-# structural "no slash = std" test cannot catch those on its own.
+# structural "no slash = std" test cannot catch those on its own, and a
+# slash-less third-party header would otherwise pass as std.
 $script:thirdParty = @(
   'uv\.h$', 'glfw3', 'vulkan', '^volk', '^vk_',
   '^AL/', '^al\.h$', '^alext', 'dr_wav',
@@ -30,7 +31,11 @@ $script:thirdParty = @(
   '^stb_',
   '^box2d/', '^Jolt/',
   '^tl/expected\.hpp',
-  '^oboe/', '^fmt/', '^spdlog/', '^doctest/', '^glm/', '^assimp/'
+  '^oboe/', '^fmt/', '^spdlog/', '^doctest/', '^glm/', '^assimp/',
+  '^android_native_app_glue\.h$'  # NDK platform glue - registered for apps
+                                  # below; listed here so a slash-less name
+                                  # cannot slip past the "no slash = std"
+                                  # shortcut in either scope.
 )
 
 function Test-ThirdParty([string]$Header) {
@@ -50,7 +55,14 @@ function Test-LibInclude([string]$Header, [string]$FilePath) {
     return $false
   }
   if ($Header.StartsWith('ws/')) { return $true }
-  if (-not $Header.Contains('/')) { return $true }  # standard C/C++ header
+  if (-not $Header.Contains('/')) {
+    # Slash-less: assume standard C/C++ header. The third-party regex list
+    # above is the backstop for slash-less third-party names (uv.h,
+    # dr_wav.h, android_native_app_glue.h, ...); anything not in the list
+    # and not starting with ws/ or a slash is treated as std. Add new
+    # slash-less third-party headers to $script:thirdParty, not here.
+    return $true
+  }
   return $false
 }
 
@@ -60,7 +72,11 @@ function Test-AppInclude([string]$Header) {
   if ($Header.StartsWith('ws/')) { return $true }
   if ($Header.StartsWith('android/')) { return $true }  # NDK platform, not a dep
   if ($Header.StartsWith('sys/')) { return $true }      # CRT/POSIX (sys/stat.h)
-  if (-not $Header.Contains('/')) { return $true }     # standard C/C++ header
+  if (-not $Header.Contains('/')) {
+    # Same slash-less shortcut as libs; the thirdParty list catches the
+    # known slash-less leaks (uv.h, glfw3.h, dr_wav.h, ...).
+    return $true
+  }
   return $false
 }
 

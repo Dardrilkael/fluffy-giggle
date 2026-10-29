@@ -3,76 +3,103 @@
   "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
   "configurePresets": [
     {
+      "name": "_base",
+      "hidden": true,
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/_fetchcontent"
+      }
+    },
+    {
+      "name": "_base-msvc",
+      "hidden": true,
+      "inherits": "_base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
       "name": "debug",
       "displayName": "Debug (Ninja, MSVC)",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/debug",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
-      }
+      "inherits": "_base-msvc",
+      "binaryDir": "${sourceDir}/build/debug"
     },
     {
       "name": "release",
       "displayName": "Release (Ninja, MSVC)",
-      "generator": "Ninja",
+      "inherits": "_base",
       "binaryDir": "${sourceDir}/build/release",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+        "CMAKE_BUILD_TYPE": "Release"
       }
     },
     {
       "name": "vs-debug",
       "displayName": "Debug (Visual Studio generator)",
-      "generator": "Visual Studio 18 2026",
+      "generator": "Visual Studio 17 2022",
       "binaryDir": "${sourceDir}/build/vs-debug",
-      "architecture": "x64"
+      "architecture": "x64",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/_fetchcontent"
+      }
     },
     {
       "name": "vs-release",
       "displayName": "Release (Visual Studio generator)",
-      "generator": "Visual Studio 18 2026",
+      "generator": "Visual Studio 17 2022",
       "binaryDir": "${sourceDir}/build/vs-release",
-      "architecture": "x64"
+      "architecture": "x64",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/_fetchcontent"
+      }
     },
     {
       "name": "linux",
-      "displayName": "Linux (Ninja, GCC, spice subset)",
-      "generator": "Ninja",
+      "displayName": "Linux (Ninja, GCC, headless subset)",
+      "inherits": "_base",
       "binaryDir": "${sourceDir}/build/linux",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "WS_BUILD_LIBS": "core;math;spice"
+        "WS_BUILD_LIBS": "core;math;spice;jobs;settings;net;physics"
+      }
+    },
+    {
+      "name": "linux-asan",
+      "displayName": "Linux + ASan/UBSan/_GLIBCXX_ASSERTIONS (inherits linux)",
+      "inherits": "linux",
+      "binaryDir": "${sourceDir}/build/linux-asan",
+      "cacheVariables": {
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -D_GLIBCXX_ASSERTIONS",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined",
+        "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address,undefined"
       }
     },
     {
       "name": "spice-debug",
       "displayName": "Spice subset Debug (Ninja, MSVC, core;math;spice)",
-      "generator": "Ninja",
+      "inherits": "_base-msvc",
       "binaryDir": "${sourceDir}/build/spice-debug",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "WS_BUILD_LIBS": "core;math;spice"
       }
     },
     {
       "name": "spice-release",
       "displayName": "Spice subset Release (Ninja, MSVC, core;math;spice)",
-      "generator": "Ninja",
+      "inherits": "_base",
       "binaryDir": "${sourceDir}/build/spice-release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "WS_BUILD_LIBS": "core;math;spice"
       }
     },
     {
       "name": "android",
       "displayName": "Android (Ninja, NDK, arm64-v8a)",
-      "generator": "Ninja",
+      "inherits": "_base",
       "binaryDir": "${sourceDir}/build/android",
       "toolchainFile": "$env{ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake",
       "cacheVariables": {
@@ -89,6 +116,7 @@
     { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
     { "name": "linux", "configurePreset": "linux" },
+    { "name": "linux-asan", "configurePreset": "linux-asan" },
     { "name": "spice-debug", "configurePreset": "spice-debug" },
     { "name": "spice-release", "configurePreset": "spice-release" },
     { "name": "vs-debug", "configurePreset": "vs-debug", "configuration": "Debug" },
@@ -99,6 +127,12 @@
     {
       "name": "linux",
       "configurePreset": "linux",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "linux-asan",
+      "configurePreset": "linux-asan",
       "output": { "outputOnFailure": true },
       "execution": { "noTestsAction": "error" }
     },

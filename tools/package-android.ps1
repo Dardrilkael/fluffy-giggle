@@ -1,22 +1,38 @@
 # Package an app into a signed, installable APK - no Gradle.
 # aapt2 links the manifest (+ assets/ when the app has any), the module
-# .so is zipped in as lib/arm64-v8a/, then zipalign + apksigner (the
-# standard debug keystore) finish it. An app may also keep Java shims in
-# apps/<App>/android/*.java: they are javac'd + d8'd into classes.dex and
-# that app's manifest must set hasCode="true" and point its activity at
-# the class (chatter's MulticastLock lives there). Apps with no .java
-# stay pure NativeActivity + hasCode=false - zero code besides lib<App>.so.
+# .so is zipped in as lib/arm64-v8a/, then zipalign + apksigner finish it.
+# An app may also keep Java shims in apps/<App>/android/*.java: they are
+# javac'd + d8'd into classes.dex and that app's manifest must set
+# hasCode="true" and point its activity at the class (chatter's
+# MulticastLock lives there). Apps with no .java stay pure NativeActivity +
+# hasCode=false - zero code besides lib<App>.so.
 #
 # Usage:
 #   tools/package-android.ps1                          playground (default)
 #   tools/package-android.ps1 -App chatter             ... apps/chatter
 #   tools/package-android.ps1 -App chatter -Install    ... then adb install -r
+#   tools/package-android.ps1 -Keystore C:\path\to\release.keystore `
+#                           -KeyAlias release -StorePass $secret -KeyPass $secret
+#                                                       ... sign with a real key
 #
-# Needs cmake + ninja on PATH and the android-local preset's NDK
-# (CMakeUserPresets.json - gitignored, pins this machine's NDK path); the
-# SDK lives under %LOCALAPPDATA%\Android\Sdk or $env:ANDROID_HOME.
+# Needs cmake + ninja on PATH and the public `android` preset (it lives in
+# CMakePresets.json - ANDROID_NDK_HOME must point at an NDK); the SDK lives
+# under %LOCALAPPDATA%\Android\Sdk or $env:ANDROID_HOME.
+#
+# Signing: defaults to the standard debug keystore (~\.android\debug.keystore,
+# auto-created if missing) so a fresh clone produces an installable APK with
+# no extra setup. Pass -Keystore / -KeyAlias / -StorePass / -KeyPass to sign
+# with a release key (the debug-key fallback is then skipped). A release
+# keystore is the developer's responsibility - never commit one.
 
-param([string]$App = 'playground', [switch]$Install)
+param(
+    [string]$App = 'playground',
+    [switch]$Install,
+    [string]$Keystore = "",
+    [string]$KeyAlias = "",
+    [string]$StorePass = "",
+    [string]$KeyPass = ""
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -28,9 +44,13 @@ if (-not (Test-Path $manifest)) {
 }
 $assets = Join-Path $repo ("apps\$App\assets")
 $sdk = if ($env:ANDROID_HOME) { $env:ANDROID_HOME }
+       elseif ($env:ANDROID_SDK_ROOT) { $env:ANDROID_SDK_ROOT }
        else { Join-Path $env:LOCALAPPDATA 'Android\Sdk' }
 if (-not (Test-Path $sdk)) {
     throw "Android SDK not found at $sdk (set ANDROID_HOME to override)."
+}
+if (-not $env:ANDROID_NDK_HOME) {
+    throw "ANDROID_NDK_HOME is not set - the public `android` preset needs it (point it at an NDK)."
 }
 
 # Newest build-tools (aapt2/zipalign/apksigner) + newest platform android.jar.
@@ -46,18 +66,28 @@ $apksigner  = Join-Path $buildTools.FullName 'apksigner.bat'
 $androidJar = Join-Path $platform.FullName 'android.jar'
 $adb        = Join-Path $sdk 'platform-tools\adb.exe'
 
-# javac/d8/apksigner all need a JVM: fall back to the Android Studio JBR
-# when JAVA_HOME is unset (decided once, used by steps 2.5 and 5).
-$jbr = 'C:\Program Files\Android\Android Studio\jbr'
-if (-not $env:JAVA_HOME -and (Test-Path $jbr)) { $env:JAVA_HOME = $jbr }
+# javac/d8/apksigner all need a JVM. JAVA_HOME wins; the Android Studio JBR
+# is a fallback (decided once, used by steps 2.5 and 5). keytool is found
+# the same way.
+if (-not $env:JAVA_HOME) {
+    $jbr = 'C:\Program Files\Android\Android Studio\jbr'
+    if (Test-Path $jbr) {
+        $env:JAVA_HOME = $jbr
+    } else {
+        throw "JAVA_HOME is not set and the Android Studio JBR was not found at $jbr. Set JAVA_HOME to a JDK (8+)."
+    }
+}
+$javaHome = $env:JAVA_HOME
+$javac  = Join-Path $javaHome 'bin\javac.exe'
+$keytool = Join-Path $javaHome 'bin\keytool.exe'
 
-# --- 1. build the module (the preset pins the NDK; no MSVC env needed) ------
+# --- 1. build the module (the public `android` preset; ANDROID_NDK_HOME pins the NDK) ---
 Push-Location $repo
 try {
-    cmake --preset android-local
-    if ($LASTEXITCODE -ne 0) { throw 'configure failed (cmake --preset android-local)' }
-    cmake --build --preset android-local
-    if ($LASTEXITCODE -ne 0) { throw 'build failed (cmake --build --preset android-local)' }
+    cmake --preset android
+    if ($LASTEXITCODE -ne 0) { throw 'configure failed (cmake --preset android)' }
+    cmake --build --preset android
+    if ($LASTEXITCODE -ne 0) { throw 'build failed (cmake --build --preset android)' }
 } finally { Pop-Location }
 
 $so = Join-Path $repo ("build\android\bin\lib$App.so")
@@ -78,14 +108,13 @@ if ($LASTEXITCODE -ne 0) { throw 'aapt2 link failed' }
 # --- 2.5. optional Java shim: apps/<App>/android/*.java -> classes.dex -------
 # Only apps that ship shims pay for this; the app's manifest must set
 # hasCode="true" and name the class as its activity. javac comes from the
-# same JVM apksigner uses (the JBR), d8 from build-tools. -target 8 keeps
+# same JVM apksigner uses (JAVA_HOME), d8 from build-tools. -target 8 keeps
 # the class file inside d8's comfort zone; --min-api tracks the app's
 # minSdkVersion (28).
 $javaFiles = @(Get-ChildItem (Join-Path $repo ("apps\$App\android")) -Filter *.java -ErrorAction SilentlyContinue)
 $dexPath = $null
 if ($javaFiles.Count -gt 0) {
-    $javac = Join-Path $jbr 'bin\javac.exe'
-    if (-not (Test-Path $javac)) { throw "javac not found in $jbr (need the Android Studio JBR, or set JAVA_HOME)" }
+    if (-not (Test-Path $javac)) { throw "javac not found in $javaHome (JAVA_HOME must point at a JDK, not a JRE)" }
     $d8 = Join-Path $buildTools.FullName 'd8.bat'
     $classDir = Join-Path $repo 'build\android\java'
     New-Item -ItemType Directory -Force $classDir | Out-Null
@@ -123,18 +152,37 @@ Remove-Item $aligned -ErrorAction SilentlyContinue
 & $zipalign -f 4 $unsigned $aligned
 if ($LASTEXITCODE -ne 0) { throw 'zipalign failed' }
 
-# --- 5. sign with the standard debug keystore -------------------------------
-$keystore = Join-Path $env:USERPROFILE '.android\debug.keystore'
-if (-not (Test-Path $keystore)) {
-    $keytool = 'C:\Program Files\Android\Android Studio\jbr\bin\keytool.exe'
-    if (-not (Test-Path $keytool)) { $keytool = 'keytool' }
-    New-Item -ItemType Directory -Force (Split-Path -Parent $keystore) | Out-Null
-    & $keytool -genkeypair -keystore $keystore -storepass android -keypass android -alias androiddebugkey -dname 'CN=Android Debug,O=Android,C=US' -keyalg RSA -keysize 2048 -validity 10000
-    if ($LASTEXITCODE -ne 0) { throw 'keytool failed' }
-}
+# --- 5. sign -----------------------------------------------------------------
+# A release keystore (all four params passed) wins; otherwise the standard
+# debug keystore is used (auto-created if missing) so a fresh clone still
+# produces an installable APK. The debug-signed build is NOT for production -
+# it shares a publicly-known key with every other debug APK in the world.
 $apk = Join-Path $repo ("build\android\$App.apk")
-& $apksigner sign --ks $keystore --ks-pass pass:android --key-pass pass:android --ks-key-alias androiddebugkey --out $apk $aligned
-if ($LASTEXITCODE -ne 0) { throw 'apksigner failed' }
+if ($Keystore -ne "") {
+    if (-not (Test-Path $Keystore)) {
+        throw "keystore not found: $Keystore"
+    }
+    if (-not $KeyAlias -or -not $StorePass -or -not $KeyPass) {
+        throw "-Keystore requires -KeyAlias, -StorePass and -KeyPass (release signing needs all four)."
+    }
+    & $apksigner sign --ks $Keystore --ks-pass "pass:$StorePass" `
+        --key-pass "pass:$KeyPass" --ks-key-alias $KeyAlias --out $apk $aligned
+    if ($LASTEXITCODE -ne 0) { throw 'apksigner (release) failed' }
+} else {
+    $debugKeystore = Join-Path $env:USERPROFILE '.android\debug.keystore'
+    if (-not (Test-Path $debugKeystore)) {
+        if (-not (Test-Path $keytool)) { throw "keytool not found in $javaHome (JAVA_HOME must point at a JDK)" }
+        New-Item -ItemType Directory -Force (Split-Path -Parent $debugKeystore) | Out-Null
+        & $keytool -genkeypair -keystore $debugKeystore -storepass android -keypass android `
+            -alias androiddebugkey -dname 'CN=Android Debug,O=Android,C=US' `
+            -keyalg RSA -keysize 2048 -validity 10000
+        if ($LASTEXITCODE -ne 0) { throw 'keytool failed' }
+    }
+    Write-Warning "Signing with the DEBUG keystore ($debugKeystore). Not for production - pass -Keystore for a release build."
+    & $apksigner sign --ks $debugKeystore --ks-pass 'pass:android' `
+        --key-pass 'pass:android' --ks-key-alias androiddebugkey --out $apk $aligned
+    if ($LASTEXITCODE -ne 0) { throw 'apksigner (debug) failed' }
+}
 
 # --- 6. optional install -----------------------------------------------------
 if ($Install) {

@@ -14,8 +14,11 @@
 #   .\tools\smoke-spice.ps1 -KeepWork                # keep the temp deck dir for debugging
 #
 # Exit code 0 = every assertion passed; 1 = at least one failed (a summary
-# lists each one). The deck battery mirrors scripts/smoke_linux.sh (the
-# dev-sandbox validation driver); keep the two in sync when adding cases.
+# lists each one). The deck battery mirrors tools/smoke_spice.py - the
+# Python port runs on Linux and in CI; this PowerShell script is retained
+# for Windows-only shops. Keep the two in sync when adding cases (the
+# Python file is the canonical CI driver, registered as a ctest entry by
+# apps/spice/CMakeLists.txt when WS_BUILD_TESTS is on).
 #
 # NOTE: keep this file pure ASCII. PowerShell 5.1 reads BOM-less files as
 # ANSI, so UTF-8 punctuation (em-dashes, smart quotes) breaks parsing.
