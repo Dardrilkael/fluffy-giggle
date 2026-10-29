@@ -195,6 +195,17 @@ public:
     [[nodiscard]] bool has_ic() const override { return has_ic_; }
     [[nodiscard]] double ic_value() const override { return ic_; }
 
+    [[nodiscard]] bool write_card(std::string& out,
+                                  const CardWriter& w) const override {
+        out += name_ + " " + w.node(p_) + " " + w.node(n_) + " " +
+               CardWriter::num(w.params(*this)[0]);
+        if (has_ic_) {
+            out += " ic=" + CardWriter::num(ic_);
+        }
+        out += "\n";
+        return true;
+    }
+
     [[nodiscard]] NodeId p() const { return p_; }
     [[nodiscard]] NodeId n() const { return n_; }
 
@@ -263,11 +274,22 @@ public:
     [[nodiscard]] bool has_branch() const override { return true; }
     [[nodiscard]] BranchId branch() const override { return branch_; }
     [[nodiscard]] std::vector<NodeId> terminals() const override { return {p_, n_}; }
-    // A short at DC: constraint edges (an L loop is a §6.6 loop finding;
-    // the constraint also connects nodes for the DC-path check).
+    // The graph edges must mirror the stamps exactly (§6.6): with Rser the
+    // device is p_ --[Rser]-- mid_ --[L proper]-- n_, so the DC short is
+    // (mid_, n_) and the series resistance conducts (p_, mid_). (Returning
+    // (p_, n_) here while stamping mid_-n_ made every Rser-to-ground
+    // inductor a false "no DC path" finding - caught by the round-trip
+    // test, which is exactly what it exists for.)
     [[nodiscard]] std::vector<std::pair<NodeId, NodeId>> constraint_edges()
         const override {
-        return {{p_, n_}};
+        return {{a(), b()}};
+    }
+    [[nodiscard]] std::vector<std::pair<NodeId, NodeId>> conductance_edges()
+        const override {
+        if (rser_ > 0.0) {
+            return {{p_, mid_}};
+        }
+        return {};
     }
 
     [[nodiscard]] std::vector<ParamSpec> param_specs() const override {
@@ -400,6 +422,20 @@ public:
     [[nodiscard]] bool has_ic() const override { return has_ic_; }
     [[nodiscard]] double ic_value() const override { return ic_; }
 
+    [[nodiscard]] bool write_card(std::string& out,
+                                  const CardWriter& w) const override {
+        out += name_ + " " + w.node(p_) + " " + w.node(n_) + " " +
+               CardWriter::num(w.params(*this)[0]);
+        if (rser_ > 0.0) {
+            out += " Rser=" + CardWriter::num(rser_);
+        }
+        if (has_ic_) {
+            out += " ic=" + CardWriter::num(ic_);
+        }
+        out += "\n";
+        return true;
+    }
+
     // --- coupling protocol (resolved by the elaborator) ---------------------
     [[nodiscard]] bool couple_to(Device& partner, double k) override {
         if (partner_ != nullptr || partner.kind() != 'L' || &partner == this) {
@@ -529,6 +565,12 @@ public:
     [[nodiscard]] const std::string& pair_a() const { return a_; }
     [[nodiscard]] const std::string& pair_b() const { return b_; }
     [[nodiscard]] double factor() const { return k_; }
+    [[nodiscard]] bool write_card(std::string& out,
+                                  const CardWriter& w) const override {
+        (void)w;
+        out += name_ + " " + a_ + " " + b_ + " " + CardWriter::num(k_) + "\n";
+        return true;
+    }
 
 private:
     std::string name_;
@@ -672,6 +714,21 @@ public:
     [[nodiscard]] double roff() const { return roff_; }
     [[nodiscard]] const std::string& model_name() const { return model_name_; }
 
+    // The shared S/W card body: nodes + model (+ the control slot) + ic=.
+    [[nodiscard]] bool write_switch_card(std::string& out, const CardWriter& w,
+                                         std::string_view control) const {
+        out += name_ + " " + w.node(p_) + " " + w.node(n_);
+        if (!control.empty()) {
+            out += " " + std::string(control);
+        }
+        out += " " + model_name_;
+        if (initial_on_) {
+            out += " ic=on";
+        }
+        out += "\n";
+        return true;
+    }
+
 protected:
     // Hysteresis band: on above thr+band, off below thr-band, sticky
     // in between (the SW model's Vh/Ih).
@@ -717,6 +774,16 @@ public:
         freeze_ac_state(next);
         return changed;
     }
+    [[nodiscard]] bool write_card(std::string& out,
+                                  const CardWriter& w) const override {
+        out += name_ + " " + w.node(p_) + " " + w.node(n_) + " " + w.node(cp_) + " " +
+               w.node(cn_) + " " + model_name_;
+        if (initial_on_) {
+            out += " ic=on";
+        }
+        out += "\n";
+        return true;
+    }
 
 private:
     NodeId cp_, cn_;
@@ -738,6 +805,16 @@ public:
         st[0] = next ? 1.0 : 0.0;
         freeze_ac_state(next);
         return changed;
+    }
+    [[nodiscard]] bool write_card(std::string& out,
+                                  const CardWriter& w) const override {
+        out += name_ + " " + w.node(p_) + " " + w.node(n_) + " " +
+               w.branch_owner(control_) + " " + model_name_;
+        if (initial_on_) {
+            out += " ic=on";
+        }
+        out += "\n";
+        return true;
     }
 
 private:
@@ -876,6 +953,9 @@ ws::core::Result<std::unique_ptr<Device>> make_coupling(const DeviceCard& card,
     }
     auto dev = std::make_unique<CouplingDevice>(card.name.text);
     dev->loc = card.loc;
+    // The pair names ride the device from construction (the netlist
+    // writer reads them); the elaborator resolves the actual inductors.
+    dev->set_pair(card.rest[0].text, card.rest[1].text, k);
     s.couplings.push_back(CouplingRequest{dev.get(), card.rest[0], card.rest[1], k});
     return dev;
 }

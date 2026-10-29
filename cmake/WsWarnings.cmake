@@ -11,6 +11,10 @@ function(ws_set_warnings target)
                # of gcc/clang -Wswitch): enum switches stay exhaustive or grow a default
     )
   else()
-    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    # -Wmissing-field-initializers is deliberately off: designated
+    # initializers with defaulted tails are the intended spelling of the
+    # aggregate APIs (Tran{.tstop = 5_ms}), and GCC flags exactly that.
+    target_compile_options(${target} PRIVATE
+      -Wall -Wextra -Wpedantic -Werror -Wno-missing-field-initializers)
   endif()
 endfunction()

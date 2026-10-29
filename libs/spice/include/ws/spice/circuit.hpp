@@ -50,6 +50,11 @@ struct Circuit {
     // The temperature this circuit was elaborated at (§7.7).
     double temp = kDefaultTemp;
 
+    // The .model cards this circuit's devices actually reference (filled
+    // by the elaborator): the netlist writer re-emits them, and the
+    // @dev[param] device-parameter syntax reads them.
+    std::vector<ModelDef> used_models;
+
     // The global .param scope device parameter expressions evaluate
     // against (subckt-flattened instances bake their overrides into
     // constant programs at elaboration, so one global table serves all).

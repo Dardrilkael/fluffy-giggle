@@ -180,6 +180,12 @@ public:
     void load_ac(AcLoadContext& cx) const override {
         cx.add_conductance(a_, b_, 1.0 / cx.par(0));
     }
+    [[nodiscard]] bool write_card(std::string& out,
+                                    const CardWriter& w) const override {
+        out += name_ + " " + w.node(a_) + " " + w.node(b_) + " " +
+               Device::CardWriter::num(w.params(*this)[0]) + "\n";
+        return true;
+    }
 
 private:
     std::string name_;
@@ -335,6 +341,42 @@ public:
     [[nodiscard]] std::vector<ParamSpec> source_param_specs(const ExprProgram& dc) const {
         return {ParamSpec{"dc", dc}, ParamSpec{"force", ExprProgram::constant(0.0)}};
     }
+
+    // The shared card tail: explicit DC value, then the waveform, then
+    // the AC spec. The DC is always spelled: a waveform-only card derives
+    // its DC from waveform(0) at parse time, so omitting it would not
+    // round-trip a source whose deck DC differs.
+    void write_source_tail(std::string& out, const Device::CardWriter& w,
+                           const Device& self) const {
+        const double* p = w.params(self);
+        out += "DC " + Device::Device::CardWriter::num(p[0]);
+        if (wave_) {
+            out += std::string(" ") + wave_->name() + "(";
+            if (wave_->kind == Waveform::Kind::Pwl) {
+                for (std::size_t i = 0; i < wave_->pwl.size(); ++i) {
+                    if (i != 0) out += " ";
+                    out += Device::CardWriter::num(wave_->pwl[i].first) + " " +
+                           Device::CardWriter::num(wave_->pwl[i].second);
+                }
+            } else {
+                const int count = (wave_->kind == Waveform::Kind::Pulse) ? 7
+                                  : (wave_->kind == Waveform::Kind::Sin)  ? 6
+                                                                          : 6;
+                for (int i = 0; i < count; ++i) {
+                    if (i != 0) out += " ";
+                    out += Device::CardWriter::num(wave_->p[i]);
+                }
+            }
+            out += ")";
+        }
+        if (ac_mag_) {
+            out += " AC " + Device::CardWriter::num(*ac_mag_);
+            if (ac_phase_ && *ac_phase_ != 0.0) {
+                out += " " + Device::CardWriter::num(*ac_phase_);
+            }
+        }
+    }
+
     [[nodiscard]] ws::core::Status source_check_params(const double* p,
                                                        SourceLoc loc) const {
         if (!std::isfinite(p[0])) {
@@ -398,6 +440,13 @@ public:
         return SourceCommon::next_event(t, tstep, tstop);
     }
     [[nodiscard]] bool has_ac() const override { return SourceCommon::has_ac(); }
+    [[nodiscard]] bool write_card(std::string& out,
+                                    const CardWriter& w) const override {
+        out += name_ + " " + w.node(p_) + " " + w.node(n_) + " ";
+        write_source_tail(out, w, *this);
+        out += "\n";
+        return true;
+    }
 
 private:
     NodeId p_, n_;
@@ -445,6 +494,13 @@ public:
         return SourceCommon::next_event(t, tstep, tstop);
     }
     [[nodiscard]] bool has_ac() const override { return SourceCommon::has_ac(); }
+    [[nodiscard]] bool write_card(std::string& out,
+                                    const CardWriter& w) const override {
+        out += name_ + " " + w.node(p_) + " " + w.node(n_) + " ";
+        write_source_tail(out, w, *this);
+        out += "\n";
+        return true;
+    }
 
 private:
     NodeId p_, n_;
@@ -522,6 +578,12 @@ public:
         cx.add_entry(p_, row, 1.0);
         cx.add_entry(n_, row, -1.0);
     }
+    [[nodiscard]] bool write_card(std::string& out,
+                                    const CardWriter& w) const override {
+        out += name_ + " " + w.node(p_) + " " + w.node(n_) + " " + w.node(cp_) + " " +
+               w.node(cn_) + " " + Device::CardWriter::num(w.params(*this)[0]) + "\n";
+        return true;
+    }
 
 private:
     std::string name_;
@@ -585,6 +647,12 @@ public:
         cx.add_entry(n_, cp_, -cx.par(0));
         cx.add_entry(n_, cn_, cx.par(0));
     }
+    [[nodiscard]] bool write_card(std::string& out,
+                                    const CardWriter& w) const override {
+        out += name_ + " " + w.node(p_) + " " + w.node(n_) + " " + w.node(cp_) + " " +
+               w.node(cn_) + " " + Device::CardWriter::num(w.params(*this)[0]) + "\n";
+        return true;
+    }
 
 private:
     std::string name_;
@@ -644,6 +712,13 @@ public:
         cx.add_entry(p_, ctl, cx.par(0));
         cx.add_entry(n_, ctl, -cx.par(0));
     }
+    [[nodiscard]] bool write_card(std::string& out,
+                                    const CardWriter& w) const override {
+        out += name_ + " " + w.node(p_) + " " + w.node(n_) + " " +
+               w.branch_owner(control_) + " " +
+               Device::CardWriter::num(w.params(*this)[0]) + "\n";
+        return true;
+    }
 
 private:
     std::string name_;
@@ -701,6 +776,13 @@ public:
         cx.add_entry(row, ctl, -cx.par(0));
         cx.add_entry(p_, row, 1.0);
         cx.add_entry(n_, row, -1.0);
+    }
+    [[nodiscard]] bool write_card(std::string& out,
+                                    const CardWriter& w) const override {
+        out += name_ + " " + w.node(p_) + " " + w.node(n_) + " " +
+               w.branch_owner(control_) + " " +
+               Device::CardWriter::num(w.params(*this)[0]) + "\n";
+        return true;
     }
 
 private:

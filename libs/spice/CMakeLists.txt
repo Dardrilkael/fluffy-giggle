@@ -9,4 +9,4 @@ ws_add_library(spice DEPENDS ws::core)
 # workspace rule, spelled out for this exact case in DESIGN.md §2.2.
 target_link_libraries(ws_spice PRIVATE ws::math)
 
-ws_add_test(spice SOURCES tests/test_spice.cpp tests/test_parse.cpp tests/test_run.cpp)
+ws_add_test(spice SOURCES tests/test_spice.cpp tests/test_parse.cpp tests/test_run.cpp tests/test_builder.cpp)

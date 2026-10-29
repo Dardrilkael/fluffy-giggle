@@ -355,6 +355,20 @@ public:
     // Fills the controlling branch for F/H (second elaboration pass,
     // after every V source claimed its branch). No-op on others.
     virtual void set_control_branch(BranchId /*branch*/) {}
+
+    // --- netlist round-trip (§10.2 rev) ---------------------------------------
+    //
+    // Writes this device as one netlist card. `w` names nodes and branch
+    // owners and exposes the CURRENT bound parameter values (the writer
+    // snapshots a RunState, so a flattened, fully-numeric deck comes out -
+    // exactly what a reference simulator wants to consume). Returns false
+    // when the device cannot be written: the writer then fails naming it -
+    // a loud gap, never a silently truncated netlist.
+    class CardWriter;
+    [[nodiscard]] virtual bool write_card(std::string& /*out*/,
+                                          const CardWriter& /*w*/) const {
+        return false;
+    }
 };
 
 // --- load contexts (§3.3) -------------------------------------------------------
@@ -462,5 +476,23 @@ public:
 // lives on the elaborator object, never a process-global (§3.4).
 using DeviceFactory = ws::core::Result<std::unique_ptr<Device>> (*)(
     const struct DeviceCard& card, FactoryServices& services);
+
+// The netlist-writing view a device's write_card() sees (§10.2 rev):
+// node names (ground included), the owning device's name for a branch
+// row (F/H/W control references), and this device's bound parameter
+// values. One concrete implementation lives in src/netlist.cpp over a
+// (Circuit, RunState) pair.
+class Device::CardWriter {
+public:
+    virtual ~CardWriter() = default;
+    // The node's display name; "0" for ground.
+    [[nodiscard]] virtual const std::string& node(NodeId id) const = 0;
+    // The name of the device owning branch `br` (a V/E/H/L source).
+    [[nodiscard]] virtual const std::string& branch_owner(BranchId br) const = 0;
+    // This device's bound parameter values (param_specs() order).
+    [[nodiscard]] virtual const double* params(const Device& dev) const = 0;
+    // The shortest exactly-round-tripping spelling of a double.
+    [[nodiscard]] static std::string num(double v);
+};
 
 }  // namespace ws::spice

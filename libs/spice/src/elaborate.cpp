@@ -698,6 +698,14 @@ ws::core::Status Elaborator::elaborate() {
     WS_TRY(resolve_models());
     WS_TRY(resolve_couplings());
     WS_TRY(resolve_controls());
+    // The referenced .model cards travel with the circuit (netlist writer,
+    // @dev[param] reads). Subckt-local models are flattened away, so this
+    // is the complete set the devices can consult.
+    for (const ModelDef& m : ast_.models) {
+        if (used_models_.count(to_lower(m.name.text)) != 0) {
+            circuit_.used_models.push_back(m);
+        }
+    }
     return check_topology();
 }
 

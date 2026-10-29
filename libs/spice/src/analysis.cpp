@@ -517,11 +517,11 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const Circuit& base_circuit,
     bool first_point = true;
     double last_temp = 0.0;
     bool have_temp = false;
-    bool elaborated_with_warnings = false;  // first ensure_kernel re-binds the base
 
     // The live circuit: the caller's (immutable) elaboration, or a local
     // re-elaboration when a temp point demands one. A Circuit is not
-    // copyable - and never needs to be: value changes ride RunState.
+    // copyable - and never needs to be: value changes ride RunState, so
+    // only temperature (an elaboration input, §7.7) swaps the circuit.
     std::optional<Circuit> temp_circuit;
     const Circuit* live = &base_circuit;
     std::optional<RunState> state;
@@ -539,18 +539,27 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const Circuit& base_circuit,
             return {};
         }
         kernel.reset();  // release the old circuit reference before a swap
-        if (temp_changed || !elaborated_with_warnings) {
+        if (temp_changed) {
+            // §7.7: re-elaborate at the point's temperature. Identical
+            // modulo temperature by construction, so warnings go to
+            // scratch (the caller already saw the first elaboration's).
             std::vector<Warning> scratch;
             WS_TRY_ASSIGN(*temp_circuit, elaborate_deck(ast, temp, scratch));
             WS_TRY(finalize_circuit(*temp_circuit));
             live = &*temp_circuit;
         }
-        elaborated_with_warnings = false;
         const Circuit& circuit = *live;
         if (circuit.devices.empty()) {
             return empty_circuit_error(".dc");
         }
-        save = default_save_list(circuit);
+        // A temp re-elaboration yields the same node/device layout by
+        // construction, so the columns (and the samples already collected)
+        // survive; a genuinely different save list rebuilds the skeleton.
+        SaveList fresh = default_save_list(circuit);
+        if (fresh.columns != save.columns) {
+            save = std::move(fresh);
+            t.signals = signal_skeleton(save);
+        }
         kernel_factorizations = 0;
         WS_TRY_ASSIGN(*state, RunState::bind(circuit));
         kernel = std::make_unique<DcKernel>(circuit, *state, settings);
@@ -1091,6 +1100,54 @@ ws::core::Result<Table> run_ac(const Circuit& circuit, RunState& state,
 }  // namespace
 
 // --- the public entry (run.hpp) --------------------------------------------------------
+
+namespace drivers {
+
+ws::core::Result<Table> run_op(const Circuit& circuit, RunState& state,
+                               const RunSettings& settings, AnalysisReport& report) {
+    return ::ws::spice::run_op(circuit, state, settings, report);
+}
+
+ws::core::Result<Table> run_dc(const DeckAst* ast, const Circuit& base_circuit,
+                               const DcCard& card, const RunSettings& settings,
+                               std::vector<Warning>& warnings, AnalysisReport& report) {
+    // No deck behind this circuit: value sweeps run fine (they only patch
+    // parameter slots), but a temperature sweep re-elaborates from the AST
+    // (§7.7) - name the limitation instead of guessing.
+    if (ast == nullptr) {
+        const auto is_temp = [](const DcSweep& sw) {
+            return to_lower(sw.source.text) == "temp";
+        };
+        if (is_temp(card.first) || (card.second && is_temp(*card.second))) {
+            Diagnostic d;
+            d.kind = ErrorKind::Usage;
+            d.code = "spice.usage.dc_temp_no_deck";
+            d.message = "a '.dc temp' sweep re-elaborates the deck per point; a"
+                        " Simulator-created circuit carries no deck - sweep a"
+                        " source value instead";
+            d.analysis = ".dc";
+            return spice_fail(std::move(d));
+        }
+        static const DeckAst empty;  // never consulted beyond temp paths
+        return ::ws::spice::run_dc(empty, base_circuit, card, settings, warnings, report);
+    }
+    return ::ws::spice::run_dc(*ast, base_circuit, card, settings, warnings, report);
+}
+
+ws::core::Result<Table> run_tran(const Circuit& circuit, RunState& state,
+                                  const TranCard& card, const RunSettings& settings,
+                                  const ParamTable& scope, const std::vector<IcCard>& ics,
+                                  AnalysisReport& report) {
+    return ::ws::spice::run_tran(circuit, state, card, settings, scope, ics, report);
+}
+
+ws::core::Result<Table> run_ac(const Circuit& circuit, RunState& state,
+                               const AcCard& card, const RunSettings& settings,
+                               const ParamTable& scope, AnalysisReport& report) {
+    return ::ws::spice::run_ac(circuit, state, card, settings, scope, report);
+}
+
+}  // namespace drivers
 
 ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
                                      std::vector<Warning>& warnings) {
