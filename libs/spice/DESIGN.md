@@ -1,9 +1,41 @@
 # ws::spice — design document
 
-Draft v1 (2026-10-26, revised 2026-10-27). Nothing is implemented yet: this document and
-`include/ws/spice/device.hpp` are the two artifacts awaiting approval.
-Implementation (§11) starts only after sign-off. Companion living docs once
-the lib lands: `libs/spice/CLAUDE.md` (rules) and `STATUS.md` (state).
+Draft v1 (2026-10-26, revised 2026-10-27). **Revision 2, 2026-10-29
+(post-review, implemented):** four structural changes landed as
+committed code, not proposals -
+
+1. **§3.5 rev** - device PARAMETERS and device STATE are split out of the
+   devices. A Circuit holds immutable devices; each run owns a RunState
+   (two flat arenas: bound parameter values + fixed-size dynamic state).
+   Consequence: the §7.6 pattern-hash check retires (a value write can
+   never move a stamp position, so symbolic reuse is guaranteed by
+   construction), reset/snapshot/restore become vector copies, and
+   parallel runs over one shared Circuit become structurally safe.
+2. **§2.1 rev** - the netlist is one front end, not the front door: the
+   elaborator's input is the public CircuitBuilder (nodes as handles,
+   SPICE unit literals, expression values) and Simulator (handle-based
+   set/set_source, snapshot/restore, rebind); a Circuit->netlist writer
+   makes every circuit - built or parsed - cross-checkable against
+   ngspice (§10.2).
+3. **§7.8 rev** - results are columnar: one shared sweep axis plus one
+   contiguous column per signal; res["v(out)"] is a span<const double>.
+   The .raw writer (promoted from the backlog) is a direct dump of that
+   shape.
+4. **§6 rev** - the transient is steppable and cancellable:
+   TransientRun::advance_to(t) marches whole accepted steps, a StopToken
+   cancels promptly (resumably), a progress callback observes every
+   accept, and Simulator::set/set_source between steps drive the next
+   step (closed-loop C++ control).
+
+Plus the cheap wins: PTC promoted into the §5.2 ladder (stage 4), .step
+families with Monte-Carlo gauss()/flat() draws and recorded seeds
+(§7.6/§8.5), measurements as library functions with .meas as a thin
+parser (§0.4), post-hoc .save/.print expression columns with @dev[param]
+(§0.5), `spice check` lint with the M/milli and F/femto traps (§9.3),
+and an explicit `.options compat=ngspice|ltspice|strict` (§8.3).
+
+Companion living docs: `libs/spice/CLAUDE.md` (rules) and `STATUS.md`
+(state). Sections below carry their revision inline where they changed.
 
 ## 0. Problems found in the brief (working-rule 2)
 
@@ -28,10 +60,14 @@ Flags raised before building, each with a proposal:
    concrete, verifiable order and leaves the rest to an explicit backlog.
    Anything outside the supported set is rejected at parse with a
    line-numbered error (working-rule 5) — never a silent wrong answer.
-4. **`.meas` is a small language in ngspice.** v1 implements the measured
-   subset (TRIG/TARG, WHEN, AVG, RMS, MAX, MIN, PP, INTEG, FIND...WHEN/AT,
-   DERIV) and rejects the rest with a line number; the full grammar is a
-   backlog milestone, not a silent gap.
+4. **`.meas` is a small language in ngspice.** The measured subset
+   (TRIG/TARG, WHEN, AVG, RMS, MAX, MIN, PP, INTEG, FIND...WHEN/AT,
+   DERIV) is IMPLEMENTED as library functions first (measure.hpp:
+   rise_time, rms, trig_targ, ... over the columnar signals) with .meas
+   as a thin parser onto them - C++ users get the same answers without
+   text (rev 2026-10-29). The full grammar remains a backlog milestone,
+   not a silent gap; a failed measurement is a note, never a run failure
+   (§9.5, --strict-meas promotes).
 5. **CSV needs a save-list semantics.** Decks say what to save
    (`.save`/`.print`/`.probe`); without one the default is all node
    voltages plus all voltage-source currents (ngspice's default). CSV
@@ -213,13 +249,28 @@ letter through an explicit table on the elaborator — no global registry
 the shared-library story clean). First letters not in the table → parse
 error with the line number.
 
-### 3.5 State ownership
+### 3.5 Parameter and state ownership (rev 2026-10-29)
 
-Devices own their dynamic state: previous charges/fluxes, junction
-voltages, limiting state, source schedule cursors. The simulator never
-pokes device internals; `reset_state()` clears them between analyses.
-This is what makes `Circuit` reusable across `.step` points and keeps the
-`Simulator` re-entrant per run.
+A Circuit holds IMMUTABLE devices: topology, models, waveforms. Two
+per-run arenas hold everything else -
+* **Parameters (§3.5a):** every card VALUE is captured as an expression
+  source (a constant for plain numbers, the parsed program for `{expr}`,
+  a lone variable for bare `.param` names). RunState::bind evaluates
+  them against the run's scope - a `.step` point's override, a
+  Monte-Carlo draw - and validates them through the device's
+  check_params exactly as a card value would be. A parameter write can
+  never move a stamp position, so the symbolic analysis is never redone.
+* **State (§3.5b):** fixed-size double slices per device (companion
+  coefficients, charge/flux LTE histories, switch positions), addressed
+  through the Circuit's frozen state_span layout. Zeroed at bind;
+  copyable (snapshot/restore IS copying the vectors); never read by
+  another run.
+
+The simulator never pokes device internals; dynamic hooks (begin_step /
+lte_ok / commit / update_state) receive their slice explicitly, and
+fold_state() folds bound parameters into the slice once per step attempt
+(cross-device data - a K-coupled partner's L - folds the same way, so
+the mutual M recomputes on rebind).
 
 ### 3.6 Nonlinear contract
 
@@ -366,9 +417,15 @@ Staircase endpoints and step counts follow ngspice (`gminsteps=10`,
 the comparison harness rather than invented here (working-rule 4). Which
 stage succeeded goes into the diagnostic record.
 
-**Rejected:** pseudo-transient continuation — interacts with ICs and adds
-a solver mode; gmin/source stepping covers the practical corpus (LTspice
-ships exactly these two). It stays in the backlog, not the ladder.
+4. **Pseudo-transient continuation (promoted from the backlog,
+   2026-10-29):** every node carries a shunt pseudo-capacitor integrated
+   in BE pseudo-time — (G + cI)x = b + c·x_prev with c decaying
+   geometrically (the pseudo-step grows), warm-started throughout. Switch
+   states ride the pseudo-dynamics, which is what settles chattering
+   latches and oscillators where the homotopies cannot; a final un-aided
+   Newton confirms the endpoint. (With the linear+switch device set,
+   genuinely fixed-point-free circuits still fail the full ladder - the
+   ngspice verdict - and real rescue tests arrive with the M3 diode.)
 
 ### 5.3 Limiting, before any homotopy
 
@@ -553,11 +610,19 @@ same frequency, giving the input-referred density `inoise = onoise/|H|`.
 optional source-value form (`.step V1 ...`). Multiple `.step` cards nest,
 first card outermost.
 
-- Each step point re-evaluates `.param` scope (§8.4) and re-elaborates
-  into a fresh `Circuit` (cheap relative to a transient). If the stamp
-  pattern hash is identical to the previous point's, the symbolic
-  analysis is reused; otherwise it is redone — correct either way, never
-  assumed.
+- Each step point re-elaborates with its param overrides in scope
+  (stepped names are elaboration-scope values; temp steps re-elaborate at
+  their temperature, §7.7) and binds a fresh RunState. **Rev
+  2026-10-29:** the old stamp-pattern-hash check is RETIRED - a value
+  write can never move a stamp position (§3.5 rev), so symbolic reuse is
+  guaranteed by construction, not checked.
+- **Monte Carlo (rev):** `gauss(sigma)` / `flat(range)` in `.param` or
+  device expressions draw at bind time through a per-run RNG stream
+  seeded from `.options seed=` (default 1, recorded in
+  `RunOutput::seed`); the whole family reproduces bit-for-bit. Draw
+  coherence is structural: the first evaluation of a drawn parameter
+  caches, so every device and analysis of a run sees the same draw while
+  each step point draws anew.
 - All analyses in the deck run per step point. CSV gains a leading `step`
   column plus one column per stepped parameter, so a single file holds
   the whole family.
@@ -577,10 +642,21 @@ overrides where ngspice allows it.
 ### 7.8 Results API
 
 `Results` (ws::spice-owned) holds, per analysis, a `Table`: analysis
-kind, sweep column kind (none / time / frequency / swept value), column
-names as spelled, and row-major samples — real or complex. Nothing in
-it references ws::math. Writers in `src/output.cpp` consume `Table`
-only; a future `.raw` writer is another consumer of the same type.
+kind, sweep axes (none / time / frequency / swept value[s]), and ONE
+CONTIGUOUS COLUMN PER SIGNAL (**rev 2026-10-29** — row-major storage is
+retired). `res["v(out)"]` returns `span<const double>` — what plotting,
+interpolation, `.meas` and the `.raw` writer consume; a column is
+memcpy-able and exactly the `.raw` payload layout. Nothing in it
+references ws::math. Writers (`src/output.cpp` CSV, `src/raw.cpp` .raw)
+consume `Table` only.
+
+**Save expressions (rev):** `.save`/`.print`/`.probe` accept
+EXPRESSIONS — `v(out)-v(in)`, `i(V1)*v(in)`, `@R1[value]` — computed
+post-hoc over the stored default columns (no hidden B sources). The
+expression language gained signal references (`v(node)`, `v(a,b)`
+differential, `i(Vsrc)`) and `@dev[param]` bound-value references; the
+sweep axes are pseudo-columns. A `.step` family evaluates them per point
+(the `@dev[param]` values are per point).
 
 ## 8. Netlist front end: records, numbers, scope, expressions
 
@@ -632,6 +708,14 @@ LTspice forms are accepted where unambiguous and listed in
 param`, `.meas`). Ambiguous or LTspice-only constructs (`.lib` models
 with encrypted content, `.model` of unsupported type, `.func` beyond
 the implemented subset) are rejected, not guessed.
+
+**Compat is an explicit mode (rev 2026-10-29):**
+`.options compat=ngspice|ltspice|strict` (default ngspice). `strict`
+REJECTS the LTspice-only accommodations — `{expr}` values, `Rser=`,
+`params:` sections — naming the ngspice spelling and the opting-in
+flag; an unknown mode is a parse error. Never silent leniency: the deck
+says what it wants to be. The targeting center of gravity stays what
+KiCad and LTspice actually export.
 
 ### 8.4 Parameters, scopes, subcircuits
 
@@ -858,11 +942,15 @@ M1 proceeds without waiting for M0b (§4.6); M0b must finish before M2.
 
 BSIM3/4 and MOS levels 2/3, JFET/MESFET, lossy transmission lines,
 `.lib`, `.alter`, `.tf`, `.pz`, `.four`, `.disto`, `.sens`, `.pss`,
-Gear(2) and TR-BDF2, pseudo-transient continuation, index-2 DAE handling
-(§6.6), hierarchical matrices (§8.4), full `.meas` grammar, `.raw` writer,
-AMD/BTF tuning and transpose-factor reuse (§4.5), multithreading,
-Verilog-A. Anything here is rejected at parse with a line number until it
-lands.
+Gear(2) and TR-BDF2, index-2 DAE handling (§6.6), hierarchical matrices
+(§8.4), full `.meas` grammar (the §0.4 subset landed 2026-10-29),
+AMD/BTF tuning and transpose-factor reuse (§4.5), multithreaded DRIVERS
+(the §3.5 rev state model is what makes them possible), Verilog-A.
+Promoted out of the backlog by the 2026-10-29 revision: pseudo-transient
+continuation (§5.2 stage 4), the `.raw` writer (§7.8), `.step`/Monte
+Carlo (§7.6), the measured `.meas` subset (§0.4), `.save`/`.print`
+expressions (§0.5). Anything here is rejected at parse with a line
+number until it lands.
 
 ### 11.2 Open questions for sign-off
 

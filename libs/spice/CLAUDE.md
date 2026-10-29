@@ -5,49 +5,75 @@ contract is `DESIGN.md` (this directory) - sections cited throughout the
 code as `§n.m`; when code and this file disagree, DESIGN.md wins and this
 file gets fixed.
 
-## What exists (M0 + M1 + M2 done)
+## What exists (M0-M2 + the 2026-10-29 structural revision)
 - `ws::math` sparse LU facade (lives in libs/math, grown for this arc):
   analyze once per topology, factorize per solve, real + complex,
   transpose solve for the future noise adjoint.
 - Netlist front end: records with `{file,line,col}` provenance through
   `.include` expansion, the SPICE number grammar (every suffix trap
-  pinned), the card AST, `.param` scopes, the expression language
-  (flat stack program, constants folded at parse).
-- Elaboration: `.subckt` flattening with `:`-scoped names, the node
-  table, control (F/H/W) resolution, K coupling and .model resolution,
-  and the §6.6 graph checks (voltage-source/inductor loops - including
-  parallel-to-ground - and no-DC-path findings) that turn solver
-  mysteries into named, hinted errors.
-- Devices R V I E F G H C L K S W through the staged `Device` interface
-  (`include/ws/spice/device.hpp`): load_dc, load_tran (companion),
-  load_ac (small-signal), and the begin_step/commit/lte_ok dynamic
-  state machine (§3.5/§6.2).
-- MNA assembly over the shared pattern (the dry run IS the pattern,
-  §3.2 - now the UNION of the dc + tran + ac stamps), the complex twin
-  for .ac over the same frozen pattern, `.op`/`.dc`/`.tran`/`.ac`
-  drivers (trap + BE restarts, §6.3 LTE control, §6.4 breakpoints,
-  §6.5 .ic/UIC), the Results API + CSV writer, and the `spice run
-  deck.cir -o out.csv` shell.
+  pinned), the card AST, `.param` scopes (rng-threaded for Monte-Carlo),
+  the expression language with SIGNAL references (`v(node)`,
+  `v(a,b)`, `i(Vsrc)`) and `@dev[param]` values.
+- **§3.5 rev - the arenas:** a Circuit is immutable topology + devices;
+  each run binds a RunState = {bound parameter values (expression
+  sources re-evaluated per run), fixed-size dynamic state slices,
+  pins}. Value writes never move stamp positions - symbolic reuse is
+  by construction (the §7.6 pattern-hash check is retired). Devices'
+  dynamic hooks take their state slice explicitly; fold_state() folds
+  bound params (and K-partner L) in per step attempt.
+- **§2.1 rev - two front ends, one elaborator:** CircuitBuilder (nodes
+  as handles, `10_k`/`100_n` unit literals, ExprVal scoped values)
+  emits the same card stream the parser does; Simulator::create/run/
+  set/set_source/release_source/snapshot/restore/rebind is the C++
+  surface. write_netlist(circuit, state) emits a flattened numeric
+  deck for any circuit - the ref-harness bridge; every device
+  implements write_card or the writer fails naming it.
+- **§7.8 rev - columnar results:** Table = sweep axes + one contiguous
+  column per signal; `t["v(out)"]` is a span. row(i)/rows() materialize
+  row-major for the CSV writer/tests. .raw writer: LTspice/ngspice
+  binary format, direct column dump, .ac re/im pairs merge to complex.
+- **§6 rev - steppable transient:** TranMarch (shared time loop) +
+  TransientRun::advance_to (whole accepted steps only), StopToken
+  (prompt, resumable), progress callback, set_source between steps =
+  closed-loop control. run_tran is a 3-line loop over TranMarch.
+- Analyses: .op/.dc/.tran/.ac over the shared kernel; the §5.2 ladder
+  (newton -> gmin staircase -> source homotopy -> PTC) with the stage
+  in AnalysisReport; .step families (param/temp/source, list/dec/oct,
+  first card outermost) merged into one family table with step axes;
+  Monte-Carlo gauss()/flat() through the per-run Rand (seeded, recorded).
+- measure:: library (rise_time, rms, trig_targ, ...) + .meas as a thin
+  parser (TRIG/TARG WHEN AVG RMS MAX MIN PP INTEG FIND...WHEN/AT
+  DERIV); failures are notes (--strict-meas promotes).
+- .save/.print/.probe expression columns evaluated post-hoc over the
+  stored defaults (no hidden B sources); the axes are pseudo-columns.
+- compat=ngspice|ltspice|strict (§8.3 rev); `spice check` lint (number
+  traps + topology + unused models, nothing simulates); CLI: -o -,
+  --format raw, --keep-going, --strict-meas, --werror.
 
 Everything else rejects at parse with file:line (working-rule 5): B/D/Q/M/T
-(M3+), `.lib` (backlog), `.noise/.step/.meas/.save/.print/.probe/.nodeset`
-(M5), `.options temp` (M5), `solver=klu` (M0b).
+(M3+), `.lib` (backlog), `.noise/.nodeset` (M5), `solver=klu` (M0b).
 
 ## Layout
 - Public surface (`include/ws/spice/`): parse.hpp, deck.hpp (cards +
-  ParamTable), expr.hpp, error.hpp, device.hpp, run.hpp (RunSettings +
-  run_deck), results.hpp (Table/Results + CSV). ws::core::Result only -
-  no exceptions, no exit() in lib paths (§0.6).
-- `src/`: parse.cpp (records/numbers), deck.cpp (cards, params),
-  expr.cpp (expression VM), waveform.cpp/.hpp (PULSE/SIN/EXP/PWL, src-
-  only), elaborate.cpp (flatten, node table, graph checks), devices.cpp
-  (M1 device set + waveform/AC sources + the factory table),
-  devices_m2.cpp (C, L, K, S, W), mna.cpp (pattern + numeric + complex
-  contexts), analysis.cpp (op/dc/tran/ac drivers), output.cpp (CSV).
-  `cards.hpp`/`circuit.hpp`/`mna.hpp` are src-only.
-- `apps/spice`: argv, file I/O, exit codes. Nothing else - every real
-  behavior lives in the lib.
-
+  ParamTable), expr.hpp, error.hpp, device.hpp (§3 contract v2),
+  circuit.hpp (the elaboration output - public for the builder),
+  state.hpp (RunState + Rand), analysis.hpp (Op/Dc/Tran/Ac aggregates),
+  builder.hpp (+ units.hpp literals), simulator.hpp, transient.hpp
+  (StopToken/TransientRun), results.hpp (columnar), measure.hpp,
+  raw.hpp, netlist.hpp, lint.hpp, run.hpp (run_deck + RunSettings),
+  results writers. ws::core::Result only - no exceptions, no exit() in
+  lib paths (§0.6); no ws::math type ever appears here (§2.2).
+- `src/`: parse.cpp, deck.cpp (cards/params), expr.cpp (VM + signal/@
+  refs), elaborate.cpp (flatten, node table, graph checks, subckt-local
+  value inlining), devices.cpp / devices_m2.cpp (the 12 kinds, param
+  specs + state slots + write_card), mna.cpp (pattern + numeric
+  contexts over (Circuit, RunState)), kernel.hpp (shared DcKernel +
+  the ladder), analysis.cpp (drivers + .step family + save-expression
+  evaluator + compat=strict), transient.cpp (TranMarch/TransientRun),
+  simulator.cpp, builder.cpp, state.cpp, circuit.cpp (finalize +
+  .options), measure.cpp, raw.cpp, netlist.cpp, lint.cpp, output.cpp.
+  cards.hpp/drivers.hpp are src-only.
+- `apps/spice`: argv, file I/O, exit codes - run + check subcommands.
 ## Rules that keep biting
 - **ws::math is PRIVATE** (§2.2): no ws::math type or header under
   include/; the MNA policy layer wraps, never re-exports.
@@ -189,22 +215,59 @@ Everything else rejects at parse with file:line (working-rule 5): B/D/Q/M/T
   non-whitespace tokens. Matching is case-insensitive via the lowercase
   key; display spellings (first seen) name the output columns.
 
+## Rules that keep biting (2026-10-29 additions)
+- **The arenas are the whole design**: a Circuit never changes after
+  elaborate_deck/finalize_circuit; everything mutable rides RunState.
+  If you find yourself wanting a setter on a Device, you want a
+  parameter slot (§3.5a) or a state slot (§3.5b) instead.
+- **fold_state() before begin_step()**: dynamic hooks read bound params
+  through their state slice's folded mirrors (kCParam/kLFold/...). The
+  driver folds once per STEP ATTEMPT - never inside the Newton loop
+  (params cannot change mid-solve). A new dynamic device must fold
+  every value its hooks read, or it silently uses zeros.
+- **Stamp positions never depend on values** (§3.2, now load-bearing):
+  the pattern dry-run stamps against zeroed scratch slices. The
+  §7.6-rev reuse guarantee IS this invariant - breaking it breaks .step,
+  Monte-Carlo and set() all at once.
+- **Subckt-local params inline at flatten time** (elaborate.cpp's
+  inline_local_values): a card inside a subckt referencing a subckt
+  param becomes a number token; GLOBAL references stay live so .step/
+  Monte-Carlo rebinds reach inside instances. knows_local() is the
+  predicate.
+- **One .param name = one draw per bind** (the ParamTable resolve
+  cache): never clear it inside a run - a plain run's .op and .tran
+  must see the SAME gauss draw (test pins this). .step points hand
+  bind a FRESH scope, so points draw anew by construction.
+- **advance_to never splits a step**: TransientRun marches whole
+  accepted steps to the target; breakpoints/LTE/BE semantics are
+  identical to a one-shot run (pinned bit-for-bit). If you "need" to
+  land exactly on t, you want a breakpoint, not a split.
+- **Save expressions run per .step point** (while that point's state is
+  live): @dev[param] reads the point's bound values. The axes are
+  pseudo-columns; a bare axis name dedupes to the axis itself.
+- **.raw determinism**: no Date/Offset lines unless supplied - a deck
+  produces byte-identical .raw output (§10.5). Same for the netlist
+  writer (to_chars shortest round-trip spellings).
+- **strict compat walks the AST, not the parser**: the LTspice forms
+  parse everywhere (they must - the default dialect accepts them) and
+  reject post-hoc in run_deck when compat=strict. Detection is on raw
+  tokens ('{' prefix, 'Rser=', 'params:'/'='), so it needs no parser
+  threading.
+
 ## Tests
 ```
 ctest --preset linux -R spice    # linux preset = core;math;spice subset
 ```
-One binary, three TUs: test_spice.cpp (error taxonomy, owns the doctest
-main), test_parse.cpp (records/numbers/includes), test_run.cpp (the M1+M2
-gate: analytic .op/.dc/.tran/.ac rows at 1e-9 rel, parse-error goldens
-pinning file:line:col prefixes, topology goldens, CSV shape, param
-scoping; the trap-order row rides the fixed_dt hook).
+One binary, five TUs: test_spice.cpp (error taxonomy, owns the doctest
+main), test_parse.cpp (records/numbers/includes), test_run.cpp (the
+gate: analytic .op/.dc/.tran/.ac rows, parse-error goldens, topology
+goldens, CSV shape, param scoping, the arenas' isolation, the ladder,
+.step/Monte-Carlo, .meas, save expressions, .raw, lint, compat), and
+test_builder.cpp (the C++ front end: the review's RC example, builder
+vs netlist equivalence, the round-trip writer, Simulator handles,
+snapshot/restore, the steppable/cancellable transient, units).
 A new device or analysis does not land without its row (§10.1).
 
-The Windows-facing CLI smoke is `tools/smoke-spice.ps1` (12 cases, 110
-assertions: the analytic decks through the real exe, headers/row counts/
-exit codes, a CRLF+BOM "Notepad deck" case, and a simulated all-zeros
-regression failing every case loudly). Its case list mirrors
-`scripts/smoke_linux.sh` in the dev sandbox - keep the two in sync when
-adding cases. The parser itself is encoding-clean: CRLF, UTF-8 BOM and a
-missing final newline all parse identically to LF (only legacy CR-only
-line endings reject, loudly).
+The Windows-facing CLI smoke is `tools/smoke-spice.ps1`; keep any new
+CLI cases (--format raw, check, --strict-meas) in sync there when the
+Windows box is next at hand.

@@ -27,7 +27,16 @@ and DESIGN.md disagree, DESIGN.md wins.
 | `fa45283` | spice     | Four `.dc`/`.op` correctness fixes: convergence class passthrough, temp flow, first-point handling, and report counts. |
 | `7b9649e` | spice     | M1 hardening: `.dc` point-count guards, nested-temp/duplicate-source rejection, `prepare()` error wrapping, `AnalysisCard` validation, empty-deck rejection, warning dedup. |
 | `ace0a9f` | M2        | C/L/K/S/W devices, PULSE/SIN/EXP/PWL sources, `.tran` (trap+BE, LTE, breakpoints, .ic/UIC), `.ac` (complex MNA, re()/im() CSV), switch `.model SW`, the M2 analytic gate (RC/RLC/LC/AC/K/switch rows, trap-order via `fixed_dt`). |
-| *(this commit)* | tools  | `tools/smoke-spice.ps1` - the self-verifying Windows CLI smoke (12 cases, 110 assertions; validated against a simulated all-zeros exe). |
+| `8662844` | tools  | `tools/smoke-spice.ps1` - the self-verifying Windows CLI smoke (12 cases, 110 assertions; validated against a simulated all-zeros exe). |
+| `8373c6e` | §3.5 rev | Param/state arenas: immutable Circuit + per-run RunState; pattern-hash check retired; subckt-local value inlining; gauss()/flat(). |
+| `5f2c8e7` | §7.8 rev | Columnar results: signals by name, spans; CSV byte-identical. |
+| `d8a7da0` | §2.1 rev | CircuitBuilder + units + Simulator + netlist writer + equivalence tests (caught the Rser §6.6 false positive). |
+| `8ab9534` | §6 rev | Steppable/cancellable transient (TranMarch/TransientRun, StopToken, closed-loop set_source). |
+| `025e91d` | §5.2 rev | Convergence ladder with PTC as stage 4 (backlog promotion). |
+| `01d5c56` | §7.6 | .step families + Monte-Carlo (recorded seeds, keep-going). |
+| `1c0145b` | §0.4 | measure:: library + .meas parser (--strict-meas). |
+| `705cfd3` | §0.5 | .save/.print expressions + @dev[param], post-hoc. |
+| `f9e794a` | misc | .raw writer, `spice check` lint, compat=strict, CLI flags. |
 
 Working tree is clean; `main` is 13 commits ahead of `origin/main` and
 **deliberately not pushed** (no remote credentials). If you want to
