@@ -77,32 +77,40 @@ void tab_draw(const Rect& rect, const TabResult& result,
     // legible in a dead strip, just faded.
     const float dim_by = dim_factor(result.state, theme);
 
-    // Face priority: press feedback even on the selected tab, then
-    // the selection itself, then hover. The selected tab wears the
-    // PANEL's face plus the accent underline along its bottom edge -
-    // the editor-tab look: it merges with the body it owns instead of
-    // floating on the strip. An idle unselected tab wears NOTHING:
-    // text on the strip, like a menu title at rest. A dead tab claims
-    // nothing, so its pressed/hover branches never fire.
+    // Face priority: the pointer's live states first - press, then
+    // hover, EVEN on the selected tab (a one-tab strip's only tab is
+    // always selected; a strip that never answers the pointer reads
+    // dead) - then the selection's resting face. The selected tab
+    // wears the PANEL's face plus the accent underline along its
+    // bottom edge - the editor-tab look: it merges with the body it
+    // owns instead of floating on the strip. Under the pointer it
+    // takes the hover face like any control and KEEPS the underline,
+    // so the selection stays legible while the tab answers. An idle
+    // unselected tab wears NOTHING: text on the strip, like a menu
+    // title at rest. A dead tab claims nothing, so its pressed/hovered
+    // branches never fire - and a dead SELECTED tab falls to the
+    // selection branch, its dimmed face and underline kept.
     if (result.state == WidgetState::Pressed) {
         r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
                                theme.corner_radius,
                                theme.control_pressed);
-    } else if (selected) {
-        r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
-                               theme.corner_radius,
-                               dim(theme.panel_bg, dim_by));
-        // The underline: 2 px of accent flush with the bottom edge -
-        // the one mark the selection needs once the face stopped
-        // shouting. dim_by keeps a dead strip's selection faded.
-        r2d::draw_quad(rect.x, rect.y + rect.height - 2.0f, rect.width,
-                       2.0f, dim(theme.control_on, dim_by));
     } else if (result.state == WidgetState::Hovered) {
         r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
                                theme.corner_radius,
                                theme.control_hovered);
-    } else if (result.state == WidgetState::Disabled) {
-        // no face: a dead tab is dimmed text on the strip
+    } else if (selected) {
+        r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                               theme.corner_radius,
+                               dim(theme.panel_bg, dim_by));
+    }
+    // The underline: 2 px of accent flush with the bottom edge - the
+    // one mark the selection needs once the face stopped shouting.
+    // dim_by keeps a dead strip's selection faded. Drawn on every face
+    // the selected tab wears, hover and press included: the selection
+    // never blinks out from under the pointer.
+    if (selected) {
+        r2d::draw_quad(rect.x, rect.y + rect.height - 2.0f, rect.width,
+                       2.0f, dim(theme.control_on, dim_by));
     }
 
     // The tab's label, centered like a button's: fitted to the tab

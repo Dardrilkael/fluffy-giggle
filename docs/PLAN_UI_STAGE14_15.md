@@ -327,3 +327,54 @@ a status line. The restyle, values-first and seam-preserving:
 Both stock palettes still pass contrast_failures() and the 0.05
 hover-gap contract (the dark hover was one Oklab step short at first;
 the test caught it - picked (62,66,77), light (202,205,214)).
+
+## The second screenshot review: the split dock's shared identity
+
+The restyled build surfaced what single-leaf testing never could: in
+the example's stock split (editor left, plot right) the Plot tab and
+the x beside it were dead buttons, the two strips lit up together
+under any press, nothing hovered, half the dock was a gray void, and
+closing the editor "opened plot" with no way back. Four separate
+causes, one delivery:
+
+- **Shared widget ids across leaves.** Every leaf's strip spelled the
+  same "shell.tabs" / "shell.closetab" ids, so two strips in one
+  frame were ONE widget in the census's eyes (the duplicate-id warn
+  fired for real): a press on either tab lit both (the press report
+  is id-keyed), and the earlier leaf's same-id widget consumed the
+  release edge before the later leaf's widget could read it as its
+  click - plot's tab and x were eaten whole. The strips now id under
+  their resolve index (`ScopedId(ids, leaf.leaf)`), the close button
+  with it. The splitters had the same disease ("shell.splitter" for
+  every band - a drag on one overwrote the last claim's splitter, so
+  the boundary you grabbed was not the one that moved); they now id
+  under their split node's path + pair index, and pop before acting.
+- **The phantom leaf.** `DockTree::add` split around an empty target
+  leaf unconditionally: editor placed left on the fresh empty root
+  left an empty sibling holding HALF the dock - dead chrome the
+  resolve painted as a void (and the saved layout round-tripped it;
+  from_json already drops empty leaves, so old files self-heal on
+  load). A side placement on an empty leaf now fills it like center
+  does. The stock split resolves to exactly two leaves now - pinned
+  by a scratch drive (pre-fix: three leaves, x at the wrong x).
+- **No hover on a one-tab strip.** tab_draw's ladder drew the
+  selection before the hover, and a single tab is always selected -
+  so the strip never answered the pointer. The live states (press,
+  then hover) now outrank the selection's resting face, and the
+  accent underline is drawn on every face the selected tab wears, so
+  the selection never blinks out under the pointer.
+- **The way back.** The strip's close was a bare 22-px square (the
+  label "shell.closetab" fit to nothing - a mystery button that
+  kills a panel): it now draws a real x glyph (the split spelling -
+  button_behavior/button_draw plus the glyph centered by hand, the
+  fontless bar as the v1 mark) with a "Close panel" tooltip, and an
+  empty dock paints "No panels open" plus one reopen button per
+  registered panel, so the exit has a visible entrance again. The
+  Window menu's check rows answer the same question from the bar.
+
+Verification beyond the suites: the shell suite (15 cases) and gui
+suite (52) pass; a scratch rig drove the real AppShell with
+three-frame taps (press/hold/release - a one-frame tap sidesteps the
+eat, which is why no test ever caught it): pre-fix the plot x click
+vanished and the duplicate-id warn fired; post-fix both strips click
+independently, each x closes its own leaf, and the warning is gone.

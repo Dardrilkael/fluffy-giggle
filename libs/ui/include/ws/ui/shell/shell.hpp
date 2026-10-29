@@ -198,6 +198,8 @@ private:
                        const gui::ChromeTheme& theme, const gui::Rect& bar);
     void draw_dock(gui::GuiContext& gui, gui::LayoutCursor& layout,
                    const gui::ChromeTheme& theme, const gui::Rect& bounds);
+    void draw_empty_dock(gui::GuiContext& gui, const gui::ChromeTheme& theme,
+                         const gui::Rect& content);
     void draw_status(gui::GuiContext& gui, gui::LayoutCursor& layout,
                      const gui::ChromeTheme& theme, const gui::Rect& frame,
                      float bottom_y);

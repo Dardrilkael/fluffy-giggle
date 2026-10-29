@@ -922,8 +922,23 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
     for (const DockTree::SplitterRect& splitter : resolved.splitters) {
         r2d::draw_quad(splitter.rect.x, splitter.rect.y, splitter.rect.width,
                        splitter.rect.height, theme.bar_bg);
+        // The splitter's identity: its split node's path plus the pair
+        // it divides - unique per band, stable while the tree holds its
+        // shape. One flat "shell.splitter" for every band made them one
+        // widget in the census's eyes (the duplicate-id warning's own
+        // case): with two or more splitters a press on either lit both
+        // and each drag overwrote the last claim, so the boundary you
+        // grabbed was not the one that moved.
+        for (const int leg : splitter.path) {
+            gui.ids().push(leg);
+        }
+        gui.ids().push(static_cast<int>(splitter.first_child));
         const gui::WidgetId id = gui.ids().id("shell.splitter");
         const gui::HitTest hit = gui.hit_test(id, splitter.rect);
+        for (std::size_t popped = 0;
+             popped < splitter.path.size() + 1; ++popped) {
+            gui.ids().pop();
+        }
         if (hit.pressed) {
             splitter_drag_.active = true;
             splitter_drag_.splitter = splitter;
@@ -973,40 +988,18 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
                                                      : tab.c_str());
             }
         }
-        int active = 0;
-        if (!labels.empty()) {
-            active = std::clamp(leaf.active, 0,
-                                static_cast<int>(labels.size()) - 1);
-            const float tab_w =
-                std::max(40.0f, std::min(160.0f, leaf.rect.width /
-                                                     static_cast<float>(
-                                                         labels.size())));
-            // The strip's own face + a 1-px rule at its bottom edge,
-            // BEFORE the tabs: the selected tab's panel-bg face paints
-            // over the rule under itself, so it merges with its body
-            // while the unselected tabs keep the rule as their
-            // separator (the editor-tab geometry).
-            r2d::draw_quad(strip.x, strip.y, strip.width, strip.height,
-                           theme.bar_bg);
-            r2d::draw_quad(strip.x, strip.y + strip.height - 1.0f,
-                           strip.width, 1.0f, theme.border);
-            layout.begin_panel(strip, 0.0f, 0.0f);
-            if (gui::tab_bar(gui, layout, theme, "shell.tabs", labels.data(),
-                             static_cast<int>(labels.size()), active, tab_w)) {
-                // The selection moved: the tree and the focus follow.
-                panel_host_.activate(panel_registry_,
-                                     (*leaf.tabs)[static_cast<std::size_t>(active)]);
-            }
-            // The tab strip's close button, right of the tabs.
-            layout.same_line(0.0f);
-            if (gui::button(gui, layout, theme, "shell.closetab", 22.0f)) {
-                panel_host_.close(panel_registry_,
-                                  (*leaf.tabs)[static_cast<std::size_t>(active)]);
-                layout.end_panel();
-                continue;  // the leaf's body is gone this frame
-            }
-            layout.end_panel();
-        }
+
+        // The strip's own face + a 1-px rule at its bottom edge, BEFORE
+        // the tabs: the selected tab's panel-bg face paints over the
+        // rule under itself, so it merges with its body while the
+        // unselected tabs keep the rule as their separator (the
+        // editor-tab geometry). Painted for an empty leaf too - the
+        // band is chrome, tabs or not, so an empty dock still reads as
+        // a docked frame rather than a hole in the face.
+        r2d::draw_quad(strip.x, strip.y, strip.width, strip.height,
+                       theme.bar_bg);
+        r2d::draw_quad(strip.x, strip.y + strip.height - 1.0f,
+                       strip.width, 1.0f, theme.border);
 
         const Rect content{leaf.rect.x, leaf.rect.y + strip_h, leaf.rect.width,
                            std::max(0.0f, leaf.rect.height - strip_h)};
@@ -1015,8 +1008,74 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
         }
         if (labels.empty()) {
             gui::panel_draw(content, theme);  // the empty-dock chrome
+            draw_empty_dock(gui, theme, content);
             continue;
         }
+
+        // The leaf's own id scope. Every leaf's strip used to spell the
+        // same "shell.tabs" ids, and two strips in one frame SHARE a
+        // widget (the census's duplicate-id warning, fired for real
+        // here): a press on either tab lit both, and the earlier
+        // leaf's release ate the later leaf's clicks whole - in the
+        // stock split, plot's tab and close were dead buttons beside a
+        // live editor's. The resolve index scopes the strips apart
+        // (stable while the tree holds its shape; nothing worth keeping
+        // keys under a strip - the bodies id by panel instance below).
+        const gui::ScopedId leaf_ids(gui.ids(), leaf.leaf);
+        int active = std::clamp(leaf.active, 0,
+                                static_cast<int>(labels.size()) - 1);
+        const float tab_w =
+            std::max(40.0f, std::min(160.0f, leaf.rect.width /
+                                                 static_cast<float>(
+                                                     labels.size())));
+        layout.begin_panel(strip, 0.0f, 0.0f);
+        if (gui::tab_bar(gui, layout, theme, "shell.tabs", labels.data(),
+                         static_cast<int>(labels.size()), active, tab_w)) {
+            // The selection moved: the tree and the focus follow.
+            panel_host_.activate(panel_registry_,
+                                 (*leaf.tabs)[static_cast<std::size_t>(active)]);
+        }
+        // The tab strip's close button, right of the tabs - the split
+        // spelling, because the mark a 22-px square can carry is not a
+        // label the padded fit would keep room for: the glyph is drawn
+        // here, centered like any button label, and a tooltip names the
+        // act (a bare square beside the tab reads as nothing at all,
+        // and a mystery button that kills a panel is how an editor
+        // gets lost with no visible way back).
+        layout.same_line(0.0f);
+        const Rect close_rect = layout.next(22.0f, theme.control_height);
+        const gui::ButtonResult close = gui::button_behavior(
+            gui, gui.ids().id("shell.closetab"), close_rect);
+        gui::button_draw(close_rect, close, theme, nullptr);
+        char glyph[16];
+        const gui::LabelFit glyph_fit =
+            gui::fit_text("\xC3\x97", -1.0f, theme, glyph, sizeof(glyph));
+        if (glyph_fit.advance > 0.0f) {
+            const float gx =
+                close_rect.x + (close_rect.width - glyph_fit.advance) * 0.5f;
+            if (theme.font != nullptr) {
+                const float line = theme.font->line_height();
+                r2d::draw_text(gx,
+                               close_rect.y +
+                                   (close_rect.height - line) * 0.5f,
+                               glyph_fit.text, *theme.font, theme.text);
+            } else {
+                // the fontless v1 mark: the bar every label wears
+                r2d::draw_quad(gx,
+                               close_rect.y + close_rect.height * 0.5f - 2.0f,
+                               glyph_fit.advance, 4.0f, theme.text);
+            }
+        }
+        gui::tooltip_text(gui, layout, theme, "shell.closetab", close_rect,
+                          "Close panel");
+        if (close.activated()) {
+            panel_host_.close(panel_registry_,
+                              (*leaf.tabs)[static_cast<std::size_t>(active)]);
+            layout.end_panel();
+            continue;  // the leaf's body is gone this frame
+        }
+        layout.end_panel();
+
         const PanelInstance* instance =
             panel_host_.find((*leaf.tabs)[static_cast<std::size_t>(active)]);
         const PanelDesc* desc =
@@ -1032,6 +1091,48 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
         desc->draw(gui, layout, theme, *instance);
         gui::end_scroll_panel(gui, layout, theme);
     }
+}
+
+void AppShell::draw_empty_dock(GuiContext& gui, const ChromeTheme& theme,
+                               const Rect& content) {
+    // The way back. The Window menu's check rows answer "reopen a
+    // panel" from the menu bar; this answers it where the eye already
+    // is - one button per registered panel type, a click reopening it
+    // at its default placement. Without it, closing the last panel
+    // leaves a bare face whose only exit is a menu you may never open.
+    const std::vector<PanelDesc>& descs = panel_registry_.descriptors();
+    if (descs.empty() || content.width <= 0.0f || content.height <= 0.0f) {
+        return;
+    }
+    const float row = theme.control_height;
+    const float block = row + theme.spacing +
+                        static_cast<float>(descs.size()) * (row + theme.spacing);
+    const float top =
+        content.y + std::max(theme.padding, (content.height - block) * 0.5f);
+    const float width =
+        std::min(220.0f, std::max(80.0f, content.width - 2.0f * theme.padding));
+    const Rect host{content.x + (content.width - width) * 0.5f, top, width,
+                    std::max(0.0f, content.y + content.height - top)};
+    if (host.height < 2.0f * row) {
+        return;  // not even a header and one row: the chrome alone
+    }
+    LayoutCursor reopen;
+    reopen.begin_panel(host, theme.padding, theme.spacing);
+    gui::text(reopen, theme, "No panels open");
+    {
+        // The loop-children discipline: a row index under one scope, so
+        // two descriptors sharing a title still id apart (the registry
+        // guarantees distinct ids, not distinct titles).
+        const gui::ScopedId reopen_ids(gui.ids(), "shell.reopen");
+        int index = 0;
+        for (const PanelDesc& desc : descs) {
+            const gui::ScopedId row_ids(gui.ids(), index++);
+            if (gui::button(gui, reopen, theme, desc.title.c_str(), -1.0f)) {
+                (void)panel_host_.open(panel_registry_, desc.id);
+            }
+        }
+    }
+    reopen.end_panel();
 }
 
 void AppShell::draw_status(GuiContext& gui, LayoutCursor& layout,

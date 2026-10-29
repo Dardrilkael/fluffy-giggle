@@ -109,7 +109,15 @@ void DockTree::add(std::string_view panel, DockPlacement placement) {
         return;
     }
     const std::string id{panel};
-    if (placement.area == DockPlacement::Area::center) {
+    if (placement.area == DockPlacement::Area::center ||
+        target->tabs.empty()) {
+        // CENTER fills the target leaf - and so does a side placement
+        // with nothing to side against. Splitting an empty leaf moves
+        // its (empty) payload into a sibling that resolve() paints as
+        // a phantom pane of dead chrome; the stage-15 default layout
+        // hit this daily - editor placed left, then plot right, on the
+        // fresh empty root left a ghost leaf holding half the dock
+        // until a close happened to prune it.
         target->tabs.push_back(id);
         target->active = static_cast<int>(target->tabs.size()) - 1;
         return;
