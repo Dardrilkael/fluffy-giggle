@@ -644,7 +644,9 @@ ws::core::Result<DeckAst> build_deck_ast(const Deck& deck, std::vector<Warning>&
 // --- ParamTable ---------------------------------------------------------------
 
 void ParamTable::define(ParamDef def) {
-    defs_[to_lower(def.name.text)] = std::move(def);
+    const std::string key = to_lower(def.name.text);
+    defs_[key] = std::move(def);
+    cache_.erase(key);  // a replaced definition invalidates its value
 }
 
 ParamTable ParamTable::with_overrides(const std::vector<ParamDef>& overrides) const {
@@ -660,6 +662,17 @@ bool ParamTable::knows(const std::string& lower) const {
         return true;
     }
     return parent_ != nullptr && parent_->knows(lower);
+}
+
+bool ParamTable::knows_local(const std::string& lower) const {
+    return defs_.count(lower) != 0;
+}
+
+void ParamTable::clear_cache() const {
+    cache_.clear();
+    if (parent_ != nullptr) {
+        parent_->clear_cache();
+    }
 }
 
 ws::core::Result<double> ParamTable::value(const std::string& lower) const {
@@ -685,6 +698,9 @@ ws::core::Result<double> ParamTable::resolve(const std::string& lower,
     }
     const auto it = defs_.find(lower);
     if (it != defs_.end()) {
+        if (const auto hit = cache_.find(lower); hit != cache_.end()) {
+            return hit->second;
+        }
         active.push_back(lower);
         const ws::core::Result<std::vector<std::optional<double>>> bindings =
             bind_active(it->second.expr, active);
@@ -701,6 +717,7 @@ ws::core::Result<double> ParamTable::resolve(const std::string& lower,
             d.message = "parameter '" + lower + "': " + v.error().message;
             return spice_fail(std::move(d));
         }
+        cache_.emplace(lower, *v);
         return v;
     }
     if (parent_ != nullptr) {

@@ -24,16 +24,16 @@ constexpr double kMinEdge = 1e-15;
 
 }  // namespace
 
-double Waveform::value(double t) const {
+double Waveform::value_with(const double q[7], double t) const {
     switch (kind) {
         case Kind::Pulse: {
-            const double v1 = p[0];
-            const double v2 = p[1];
-            const double td = p[2];
-            const double tr = clamp_edge(p[3]);
-            const double tf = clamp_edge(p[4]);
-            const double pw = p[5];
-            const double per = p[6];
+            const double v1 = q[0];
+            const double v2 = q[1];
+            const double td = q[2];
+            const double tr = clamp_edge(q[3]);
+            const double tf = clamp_edge(q[4]);
+            const double pw = q[5];
+            const double per = q[6];
             if (t < td) {
                 return v1;
             }
@@ -53,12 +53,12 @@ double Waveform::value(double t) const {
             return v1;
         }
         case Kind::Sin: {
-            const double vo = p[0];
-            const double va = p[1];
-            const double freq = p[2] > 0.0 ? p[2] : 1.0;
-            const double td = p[3];
-            const double theta = p[4];
-            const double phase = p[5] * 3.14159265358979323846 / 180.0;
+            const double vo = q[0];
+            const double va = q[1];
+            const double freq = q[2] > 0.0 ? q[2] : 1.0;
+            const double td = q[3];
+            const double theta = q[4];
+            const double phase = q[5] * 3.14159265358979323846 / 180.0;
             if (t < td) {
                 return vo + va * std::sin(phase);
             }
@@ -66,12 +66,12 @@ double Waveform::value(double t) const {
             return vo + va * std::sin(w + phase) * std::exp(-theta * (t - td));
         }
         case Kind::Exp: {
-            const double v1 = p[0];
-            const double v2 = p[1];
-            const double td1 = p[2];
-            const double tau1 = clamp_edge(p[3]);
-            const double td2 = p[4];
-            const double tau2 = clamp_edge(p[5]);
+            const double v1 = q[0];
+            const double v2 = q[1];
+            const double td1 = q[2];
+            const double tau1 = clamp_edge(q[3]);
+            const double td2 = q[4];
+            const double tau2 = clamp_edge(q[5]);
             if (t < td1) {
                 return v1;
             }
@@ -104,14 +104,14 @@ double Waveform::value(double t) const {
     return 0.0;
 }
 
-double Waveform::next_event(double t) const {
+double Waveform::next_event_with(const double q[7], double t) const {
     switch (kind) {
         case Kind::Pulse: {
-            const double td = p[2];
-            const double tr = clamp_edge(p[3]);
-            const double tf = clamp_edge(p[4]);
-            const double pw = p[5];
-            const double per = p[6];
+            const double td = q[2];
+            const double tr = clamp_edge(q[3]);
+            const double tf = clamp_edge(q[4]);
+            const double pw = q[5];
+            const double per = q[6];
             const double edges[4] = {td, td + tr, td + tr + pw, td + tr + pw + tf};
             double best = kInf;
             if (t < td) {
@@ -136,14 +136,14 @@ double Waveform::next_event(double t) const {
             return best;
         }
         case Kind::Sin:
-            return (t < p[3]) ? p[3] : kInf;
+            return (t < q[3]) ? q[3] : kInf;
         case Kind::Exp: {
             double best = kInf;
-            if (t < p[2]) {
-                best = p[2];
+            if (t < q[2]) {
+                best = q[2];
             }
-            if (t < p[4] && p[4] < best) {
-                best = p[4];
+            if (t < q[4] && q[4] < best) {
+                best = q[4];
             }
             return best;
         }
@@ -160,41 +160,66 @@ double Waveform::next_event(double t) const {
     return kInf;
 }
 
-void Waveform::finalize(double tstep, double tstop) {
+void Waveform::resolve_into(double out[7], double tstep, double tstop) const {
+    for (int i = 0; i < 7; ++i) {
+        out[i] = p[i];
+    }
     const double edge = tstep > kMinEdge ? tstep : kMinEdge;
     switch (kind) {
         case Kind::Pulse:
-            if (defaulted[3] || p[3] <= 0.0) {
-                p[3] = edge;  // TR <- TSTEP (ngspice)
+            if (defaulted[3] || out[3] <= 0.0) {
+                out[3] = edge;  // TR <- TSTEP (ngspice)
             }
-            if (defaulted[4] || p[4] <= 0.0) {
-                p[4] = edge;  // TF <- TSTEP
+            if (defaulted[4] || out[4] <= 0.0) {
+                out[4] = edge;  // TF <- TSTEP
             }
-            if (defaulted[5] || p[5] <= 0.0) {
-                p[5] = tstop;  // PW <- TSTOP (a single pulse spans the run)
+            if (defaulted[5] || out[5] <= 0.0) {
+                out[5] = tstop;  // PW <- TSTOP (a single pulse spans the run)
             }
             // PER defaulted stays 0: no repetition (PW already covers the
             // whole run). An explicit PER > 0 repeats.
             break;
         case Kind::Sin:
-            if (defaulted[2] || p[2] <= 0.0) {
-                p[2] = tstop > 0.0 ? 1.0 / tstop : 1.0;  // FREQ <- 1/TSTOP
+            if (defaulted[2] || out[2] <= 0.0) {
+                out[2] = tstop > 0.0 ? 1.0 / tstop : 1.0;  // FREQ <- 1/TSTOP
             }
             break;
         case Kind::Exp:
-            if (defaulted[3] || p[3] <= 0.0) {
-                p[3] = edge;  // TAU1 <- TSTEP
+            if (defaulted[3] || out[3] <= 0.0) {
+                out[3] = edge;  // TAU1 <- TSTEP
             }
             if (defaulted[4]) {
-                p[4] = p[2] + edge;  // TD2 <- TD1 + TSTEP
+                out[4] = out[2] + edge;  // TD2 <- TD1 + TSTEP
             }
-            if (defaulted[5] || p[5] <= 0.0) {
-                p[5] = p[3];  // TAU2 <- TAU1
+            if (defaulted[5] || out[5] <= 0.0) {
+                out[5] = out[3];  // TAU2 <- TAU1
             }
             break;
         case Kind::Pwl:
             break;  // nothing deferred
     }
+}
+
+double Waveform::value(double t, double tstep, double tstop) const {
+    if (kind == Kind::Pwl) {
+        return value_with(p, t);  // PWL defers nothing
+    }
+    double q[7];
+    resolve_into(q, tstep, tstop);
+    return value_with(q, t);
+}
+
+double Waveform::value(double t) const {
+    return value_with(p, t);
+}
+
+double Waveform::next_event(double t, double tstep, double tstop) const {
+    if (kind == Kind::Pwl) {
+        return next_event_with(p, t);
+    }
+    double q[7];
+    resolve_into(q, tstep, tstop);
+    return next_event_with(q, t);
 }
 
 // --- parsing -----------------------------------------------------------------------
@@ -295,7 +320,7 @@ ws::core::Result<Waveform> parse_waveform(const std::vector<Token>& tokens,
             WS_TRY_ASSIGN(w.p[i], arg_value(i));
         }
         for (std::size_t i = args.size(); i < 7; ++i) {
-            w.defaulted[i] = true;  // ngspice defaults, resolved by finalize()
+            w.defaulted[i] = true;  // ngspice defaults, resolved inline at evaluation
         }
         return w;
     }

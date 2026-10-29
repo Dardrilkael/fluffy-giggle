@@ -57,6 +57,11 @@ namespace ws::spice {
 
 // Shared device-factory helpers (defined in devices.cpp).
 
+// Evaluates a value program once, for elaboration-time validation only
+// (a gauss() draw here is dummy-seeded; the real draws happen at rebind).
+[[nodiscard]] ws::core::Result<double> eval_param_for_validation(
+    const ExprProgram& prog, const ParamTable& params);
+
 // Resolves exactly `count` node tokens starting at rest[base] (the common
 // arity pre-check every two/four-terminal factory starts with).
 [[nodiscard]] ws::core::Result<std::vector<NodeId>> take_nodes(const DeviceCard& card,

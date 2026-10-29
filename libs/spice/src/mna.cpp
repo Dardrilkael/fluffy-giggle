@@ -121,27 +121,47 @@ private:
 
 }  // namespace detail
 
-MnaSystem::MnaSystem(std::size_t node_count, std::size_t branch_count)
-    : node_count_(node_count), branch_count_(branch_count),
+MnaSystem::MnaSystem(std::size_t node_count, std::size_t branch_count,
+                     const Circuit& circuit)
+    : node_count_(node_count), branch_count_(branch_count), circuit_(circuit),
       rhs_(node_count + branch_count, 0.0),
-      ac_rhs_(node_count + branch_count, {0.0, 0.0}) {}
+      ac_rhs_(node_count + branch_count, {0.0, 0.0}) {
+    // Pattern-mode scratch: the largest device's slices, zeroed. Stamp
+    // POSITIONS never depend on values (§3.2), so zeroed scratch is as
+    // good as any for the dry run.
+    std::size_t max_params = 0;
+    std::size_t max_state = 0;
+    for (const auto& span : circuit.param_span) {
+        max_params = std::max(max_params, span.count);
+    }
+    for (const auto& span : circuit.state_span) {
+        max_state = std::max(max_state, span.count);
+    }
+    scratch_params_.assign(max_params, 0.0);
+    scratch_state_.assign(max_state, 0.0);
+}
 
 ws::core::Status MnaSystem::setup(const std::vector<std::unique_ptr<Device>>& devices) {
     {
         // §3.2: the pattern is the UNION of what any load phase can touch.
         // Coefficient VALUES change with dt/omega/method; POSITIONS never
-        // do, so the dry run stamps with arbitrary nominal parameters.
+        // do, so the dry run stamps with zeroed scratch slices.
         detail::PatternContext ctx(builder_, node_count_);
-        for (const auto& dev : devices) {
-            dev->load_dc(ctx);
+        for (std::size_t i = 0; i < devices.size(); ++i) {
+            ctx.params_ = scratch_params_.data();
+            ctx.state_ = scratch_state_.data();
+            devices[i]->load_dc(ctx);
         }
-        const TranStep nominal{0.0, 1e-9, false};
-        for (const auto& dev : devices) {
-            dev->load_tran(ctx, nominal);
+        const TranStep nominal{0.0, 1e-9, false, 1e-9, 1.0};
+        for (std::size_t i = 0; i < devices.size(); ++i) {
+            ctx.params_ = scratch_params_.data();
+            ctx.state_ = scratch_state_.data();
+            devices[i]->load_tran(ctx, nominal);
         }
         detail::AcPatternContext ac_ctx(builder_, node_count_);
-        for (const auto& dev : devices) {
-            dev->load_ac(ac_ctx);
+        for (std::size_t i = 0; i < devices.size(); ++i) {
+            ac_ctx.params_ = scratch_params_.data();
+            devices[i]->load_ac(ac_ctx);
         }
     }
     return analyze();
@@ -159,35 +179,41 @@ ws::core::Status MnaSystem::setup_ac() {
     return ac_lu_.analyze(std::move(copy));
 }
 
-void MnaSystem::load(const std::vector<std::unique_ptr<Device>>& devices) {
+void MnaSystem::load(const std::vector<std::unique_ptr<Device>>& devices,
+                      const RunState& rs) {
     zero();
     if (matrix_) {
         detail::NumericContext ctx(*matrix_, rhs_, node_count_);
-        for (const auto& dev : devices) {
-            dev->load_dc(ctx);
+        for (std::size_t i = 0; i < devices.size(); ++i) {
+            ctx.params_ = rs.params_.data() + circuit_.param_span[i].begin;
+            ctx.state_ = rs.state_.data() + circuit_.state_span[i].begin;
+            devices[i]->load_dc(ctx);
         }
     }
 }
 
 void MnaSystem::load_tran(const std::vector<std::unique_ptr<Device>>& devices,
-                          const TranStep& step) {
+                          const RunState& rs, const TranStep& step) {
     zero();
     if (matrix_) {
         detail::NumericContext ctx(*matrix_, rhs_, node_count_);
-        for (const auto& dev : devices) {
-            dev->load_tran(ctx, step);
+        for (std::size_t i = 0; i < devices.size(); ++i) {
+            ctx.params_ = rs.params_.data() + circuit_.param_span[i].begin;
+            ctx.state_ = rs.state_.data() + circuit_.state_span[i].begin;
+            devices[i]->load_tran(ctx, step);
         }
     }
 }
 
 void MnaSystem::load_ac(const std::vector<std::unique_ptr<Device>>& devices,
-                        double omega) {
+                        const RunState& rs, double omega) {
     zero_ac();
     if (ac_matrix_) {
         detail::AcNumericContext ctx(*ac_matrix_, ac_rhs_, node_count_, omega);
         ctx.omega = omega;
-        for (const auto& dev : devices) {
-            dev->load_ac(ctx);
+        for (std::size_t i = 0; i < devices.size(); ++i) {
+            ctx.params_ = rs.params_.data() + circuit_.param_span[i].begin;
+            devices[i]->load_ac(ctx);
         }
     }
 }

@@ -1,7 +1,7 @@
 # The headless circuit simulator (libs/spice/DESIGN.md): netlist parser,
 # elaboration with subckt flattening and topological checks, MNA assembly
-# over the ws::math sparse LU facade, and the analysis drivers (op, dc -
-# tran/ac/noise follow in M2+). Pure std + ws::core on the public surface.
+# over the ws::math sparse LU facade, and the analysis drivers (op, dc,
+# tran, ac). Pure std + ws::core on the public surface.
 ws_add_library(spice DEPENDS ws::core)
 
 # ws::math is a workspace lib (the sparse LU facade backing the MNA solver)

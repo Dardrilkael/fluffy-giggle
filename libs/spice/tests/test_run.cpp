@@ -1021,3 +1021,79 @@ TEST_CASE("CSV: .tran time column and .ac re()/im() pairs") {
     CHECK(csv.find("\n\nfrequency,re(v(in)),im(v(in)),re(v(out)),im(v(out)),"
                    "re(i(V1)),im(i(V1))\n") != std::string::npos);
 }
+
+// --- §3.5 rev: the param/state arenas ------------------------------------------
+
+TEST_CASE("rebind: two runs of one deck are independent and identical") {
+    const std::string deck =
+        "rc\nV1 in 0 PULSE(0 5 1u 1u 1u 10u)\nR1 in out 1k\nC1 out 0 1n\n.tran 1u 20u\n";
+    const auto a = run_text(deck);
+    const auto b = run_text(deck);
+    REQUIRE(a);
+    REQUIRE(b);
+    REQUIRE(a->results.tables.size() == 1);
+    REQUIRE(b->results.tables.size() == 1);
+    const Table& ta = a->results.tables[0];
+    const Table& tb = b->results.tables[0];
+    REQUIRE(ta.rows.size() == tb.rows.size());
+    REQUIRE(ta.rows.size() > 5);
+    for (std::size_t i = 0; i < ta.rows.size(); ++i) {
+        REQUIRE(ta.rows[i].size() == tb.rows[i].size());
+        for (std::size_t j = 0; j < ta.rows[i].size(); ++j) {
+            CHECK(ta.rows[i][j] == tb.rows[i][j]);  // bit-identical (§10.5)
+        }
+    }
+}
+
+TEST_CASE("rebind: a .dc sweep value never leaks into a later analysis") {
+    // The sweep mutates V1's dc parameter slot in the .dc run's own state;
+    // the .tran that follows rebinds from the deck scope, so its t=0 OP
+    // sees the deck's DC value (PULSE(0 5 ...) -> waveform(0) = 0).
+    const auto run = run_text(
+        "leak\n"
+        "V1 in 0 PULSE(0 5 1u 1u 1u 10u)\n"
+        "R1 in out 1k\n"
+        "C1 out 0 1n\n"
+        ".dc V1 0 5 1\n"
+        ".tran 1u 5u\n");
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 2);
+    const Table& tran = run->results.tables[1];
+    REQUIRE(tran.rows.size() >= 2);
+    CHECK(tran.rows[0][col_of(tran, "v(in)") + 1] == approx(0.0));
+    // The waveform drives the transient: 0 at t=0 (no .dc residue of the
+    // 5 V sweep endpoint), ramping through the PULSE, at the 5 V plateau
+    // by t = TD+TR = 2u (tstop = 5u).
+    for (const auto& row : tran.rows) {
+        CHECK(row[col_of(tran, "v(in)") + 1] <= 5.0 + 1e-9);
+    }
+    CHECK(tran.rows.back()[col_of(tran, "v(in)") + 1] == approx(5.0));
+}
+
+TEST_CASE("rebind: interleaved analyses keep their own dynamic state") {
+    // .tran's C companion state must not survive into the .ac that follows
+    // (a fresh arena per analysis - §3.5 rev's trivial reset_state()).
+    const auto run = run_text(
+        "interleave\n"
+        "V1 in 0 DC 1 AC 1\n"
+        "R1 in out 1k\n"
+        "C1 out 0 1u\n"
+        ".tran 10u 30u\n"
+        ".ac dec 2 1k 1meg\n");
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 2);
+    // The RC pole at 1/(2*pi*1k*1u) ~ 159 Hz: v(out)/v(in) = 1/(1 + jwRC)
+    // at the first frequency point, unaffected by the transient's history
+    // (verified against the same deck run .ac-only).
+    const Table& ac = run->results.tables[1];
+    const double f = ac.rows[0][0];
+    CHECK(f == approx(1000.0));
+    const double w = 2.0 * 3.14159265358979 * f;
+    const double x = w * 1e3 * 1e-6;  // wRC
+    const double expect_re = 1.0 / (1.0 + x * x);
+    const double expect_im = -x / (1.0 + x * x);
+    CHECK(ac.rows[0][col_of(ac, "re(v(out))") + 1] ==
+          doctest::Approx(expect_re).epsilon(1e-6));
+    CHECK(ac.rows[0][col_of(ac, "im(v(out))") + 1] ==
+          doctest::Approx(expect_im).epsilon(1e-6));
+}

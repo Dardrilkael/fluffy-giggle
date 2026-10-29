@@ -151,6 +151,12 @@ public:
     // True when `lower` (already lowercased) is defined here or in a parent.
     [[nodiscard]] bool knows(const std::string& lower) const;
 
+    // True when `lower` is defined in THIS table only - not a parent. The
+    // subckt flattener inlines locals into constants and leaves global
+    // references live, so a .step/Monte-Carlo override of a global param
+    // still reaches inside subckt instances.
+    [[nodiscard]] bool knows_local(const std::string& lower) const;
+
     // Binds an expression's variables against this scope; unbound
     // variables stay nullopt in the result (the expression evaluator
     // reports them with its own context).
@@ -159,6 +165,12 @@ public:
 
     // Resolves one name (lowercased) to a value, with cycle detection.
     [[nodiscard]] ws::core::Result<double> value(const std::string& lower) const;
+
+    // Resolve cache (§8.4 rev): within one bind, a name resolves to one
+    // value - two devices referencing the same Monte-Carlo parameter see
+    // the SAME draw. Cleared on (re)definition of that name and by
+    // RunState::bind; walks the parent chain.
+    void clear_cache() const;
 
 private:
     [[nodiscard]] ws::core::Result<double> resolve(
@@ -170,6 +182,7 @@ private:
         const ExprProgram& prog, std::vector<std::string>& active) const;
 
     std::map<std::string, ParamDef> defs_;
+    mutable std::map<std::string, double> cache_;  // per-bind resolution
     const ParamTable* parent_ = nullptr;
 };
 

@@ -10,6 +10,7 @@
 #include <utility>
 
 #include <ws/spice/parse.hpp>
+#include <ws/spice/state.hpp>
 
 namespace ws::spice {
 
@@ -55,6 +56,9 @@ const std::unordered_map<std::string, ExprProgram::Op>& unary_functions() {
         {"floor", ExprProgram::Op::Floor}, {"ceil", ExprProgram::Op::Ceil},
         {"int", ExprProgram::Op::Int},     {"uramp", ExprProgram::Op::Uramp},
         {"u", ExprProgram::Op::U},
+        // Monte-Carlo draws (§8.5 rev): never folded, always drawn at
+        // evaluation time through the Rand* in the eval context.
+        {"gauss", ExprProgram::Op::Gauss},  {"flat", ExprProgram::Op::Flat},
     };
     return table;
 }
@@ -586,7 +590,7 @@ ExprProgram ExprProgram::constant(double v) {
 }
 
 ws::core::Result<double> ExprProgram::evaluate(
-    const std::vector<std::optional<double>>& var_values) const {
+    const std::vector<std::optional<double>>& var_values, Rand* rng) const {
     if (var_values.size() != vars_.size()) {
         return spice_fail(mk_diag(
             ErrorKind::Usage, "spice.expr.bindings",
@@ -729,6 +733,30 @@ ws::core::Result<double> ExprProgram::evaluate(
             case Op::Int: stack.push_back(std::trunc(pop())); ++pc; break;
             case Op::Uramp: { const double a = pop(); stack.push_back(a > 0 ? a : 0.0); ++pc; break; }
             case Op::U: { const double a = pop(); stack.push_back(a > 0 ? 1.0 : 0.0); ++pc; break; }
+            case Op::Gauss: {
+                const double a = pop();
+                if (rng == nullptr) {
+                    return spice_fail(mk_diag(
+                        ErrorKind::Usage, "spice.expr.no_rng",
+                        "gauss() needs a random context: it draws at run time"
+                        " (.step / Monte-Carlo rebinds provide one)"));
+                }
+                stack.push_back(rng->normal(a));
+                ++pc;
+                break;
+            }
+            case Op::Flat: {
+                const double a = pop();
+                if (rng == nullptr) {
+                    return spice_fail(mk_diag(
+                        ErrorKind::Usage, "spice.expr.no_rng",
+                        "flat() needs a random context: it draws at run time"
+                        " (.step / Monte-Carlo rebinds provide one)"));
+                }
+                stack.push_back(rng->flat(a));
+                ++pc;
+                break;
+            }
             case Op::Atan2: { const double b = pop(), a = pop(); stack.push_back(std::atan2(a, b)); ++pc; break; }
             case Op::Min: { const double b = pop(), a = pop(); stack.push_back(std::min(a, b)); ++pc; break; }
             case Op::Max: { const double b = pop(), a = pop(); stack.push_back(std::max(a, b)); ++pc; break; }

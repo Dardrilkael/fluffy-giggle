@@ -2,8 +2,16 @@
 // stateless. Each factory resolves its own terminals and parameters
 // (arity belongs to the device, not the elaborator); F/H register control
 // requests that the elaborator resolves to branch ids once every V source
-// has claimed one. M2 grows the waveform/AC source specs here; C/L/K/S/W
-// live in devices_m2.cpp.
+// has claimed one. M2's C/L/K/S/W live in devices_m2.cpp.
+//
+// 2026-10-29 (§3.5 rev): every card VALUE is captured as a parameter
+// source (an ExprProgram - a constant for plain numbers, the parsed
+// expression for {...}, a lone variable reference for bare .param names)
+// instead of a resolved double. The double is still evaluated once at
+// elaboration for validation; the program re-evaluates per run against
+// the .param scope, which is what makes .step / Monte-Carlo / handle
+// writes (Simulator::set) value-only changes - the stamp pattern cannot
+// move.
 
 #include "cards.hpp"
 #include "waveform.hpp"
@@ -18,6 +26,7 @@
 
 #include <ws/spice/deck.hpp>
 #include <ws/spice/device.hpp>
+#include <ws/spice/state.hpp>
 
 namespace ws::spice {
 
@@ -55,6 +64,44 @@ ws::core::Result<double> resolve_value_token(const Token& tok, const ParamTable&
     return spice_fail(std::move(d));
 }
 
+// The same token as a parameter SOURCE: numbers become constant programs,
+// {expr} parses, bare names become lone variable references. This is the
+// per-run rebindable form of every device value.
+ws::core::Result<ExprProgram> resolve_value_program(const Token& tok,
+                                                    const ParamTable& params) {
+    auto bad = [&](std::string message) {
+        Diagnostic d;
+        d.kind = ErrorKind::Parse;
+        d.code = "spice.parse.value";
+        d.message = std::move(message);
+        d.loc = tok.loc;
+        return ws::core::unexpected(ws::spice::make_error(std::move(d)));
+    };
+    if (tok.text.size() >= 2 && tok.text.front() == '{' && tok.text.back() == '}') {
+        const ws::core::Result<ExprProgram> prog =
+            parse_expression(tok.text.substr(1, tok.text.size() - 2));
+        if (!prog) {
+            return bad(prog.error().message);
+        }
+        return prog;
+    }
+    if (const ws::core::Result<double> num = parse_number(tok.text)) {
+        return ExprProgram::constant(*num);
+    }
+    const std::string lower = to_lower(tok.text);
+    if (params.knows(lower)) {
+        // A lone variable reference: Load <slot> with vars_ = {name}. The
+        // program is assembled directly - parse_expression would need a
+        // source string, and the variable is already validated to exist.
+        ExprProgram p;
+        p.vars_ = {lower};
+        p.code_ = {ExprProgram::Instr{ExprProgram::Op::Load, 0, -1}};
+        return p;
+    }
+    return bad("expected a number, {expression} or parameter name, got '" + tok.text +
+               "'");
+}
+
 namespace {
 
 Diagnostic dev_diag(ErrorKind kind, std::string code, std::string message, SourceLoc loc) {
@@ -67,6 +114,16 @@ Diagnostic dev_diag(ErrorKind kind, std::string code, std::string message, Sourc
 }
 
 }  // namespace
+
+// Evaluates a value program once, for elaboration-time validation only
+// (a gauss() draw here is dummy-seeded; the real draws happen at rebind).
+// External linkage: devices_m2.cpp's factories share it through cards.hpp.
+ws::core::Result<double> eval_param_for_validation(const ExprProgram& prog,
+                                                   const ParamTable& params) {
+    WS_TRY_ASSIGN(const std::vector<std::optional<double>> bindings, params.bind(prog));
+    Rand dummy{0};  // seed 0: values discarded, only domain errors matter
+    return prog.evaluate(bindings, &dummy);
+}
 
 // Resolves exactly `count` node tokens starting at rest[base] - the
 // common arity pre-check every terminal-taking factory starts with.
@@ -94,8 +151,8 @@ namespace {
 
 class Resistor final : public Device {
 public:
-    Resistor(std::string display, NodeId a, NodeId b, double ohms)
-        : name_(std::move(display)), a_(a), b_(b), g_(ohms != 0.0 ? 1.0 / ohms : 0.0) {}
+    Resistor(std::string display, NodeId a, NodeId b, ExprProgram ohms)
+        : name_(std::move(display)), a_(a), b_(b), ohms_(std::move(ohms)) {}
 
     [[nodiscard]] const std::string& name() const override { return name_; }
     [[nodiscard]] char kind() const override { return 'R'; }
@@ -104,15 +161,30 @@ public:
         const override {
         return {{a_, b_}};
     }
-    void load_dc(DcLoadContext& cx) const override { cx.add_conductance(a_, b_, g_); }
+
+    [[nodiscard]] std::vector<ParamSpec> param_specs() const override {
+        return {ParamSpec{"value", ohms_}};
+    }
+    [[nodiscard]] ws::core::Status check_params(const double* p) const override {
+        if (!(p[0] > 0.0) || !std::isfinite(p[0])) {
+            return spice_fail(dev_diag(
+                ErrorKind::Semantic, "spice.semantic.r_value",
+                "resistor " + name_ + " needs a positive finite value", loc));
+        }
+        return {};
+    }
+
+    void load_dc(DcLoadContext& cx) const override {
+        cx.add_conductance(a_, b_, 1.0 / cx.par(0));
+    }
     void load_ac(AcLoadContext& cx) const override {
-        cx.add_conductance(a_, b_, g_);
+        cx.add_conductance(a_, b_, 1.0 / cx.par(0));
     }
 
 private:
     std::string name_;
     NodeId a_, b_;
-    double g_;
+    ExprProgram ohms_;
 };
 
 ws::core::Result<std::unique_ptr<Device>> make_resistor(const DeviceCard& card,
@@ -124,13 +196,8 @@ ws::core::Result<std::unique_ptr<Device>> make_resistor(const DeviceCard& card,
                                    card.loc));
     }
     // R name a b value | modelname [w= l= ...]
-    double ohms = 0.0;
-    const ws::core::Result<double> direct = resolve_value_token(card.rest[2], s.params);
-    if (!direct) {
-        // The inner error already carries its own file:line:col.
-        return ws::core::unexpected(direct.error());
-    }
-    ohms = *direct;
+    WS_TRY_ASSIGN(ExprProgram ohms, resolve_value_program(card.rest[2], s.params));
+    WS_TRY(eval_param_for_validation(ohms, s.params));
     if (card.rest.size() > 3) {
         return spice_fail(dev_diag(
             ErrorKind::Semantic, "spice.semantic.r_extra",
@@ -138,13 +205,9 @@ ws::core::Result<std::unique_ptr<Device>> make_resistor(const DeviceCard& card,
                 " takes a plain value in v1 (models/geometry land with M5)",
             card.loc));
     }
-    if (ohms <= 0.0 || !std::isfinite(ohms)) {
-        return spice_fail(dev_diag(ErrorKind::Semantic, "spice.semantic.r_value",
-                                   "resistor " + card.name.text +
-                                       " needs a positive finite value",
-                                   card.loc));
-    }
-    return std::make_unique<Resistor>(card.name.text, n[0], n[1], ohms);
+    auto dev = std::make_unique<Resistor>(card.name.text, n[0], n[1], std::move(ohms));
+    dev->loc = card.loc;
+    return dev;
 }
 
 // --- V / I: DC value, optional AC spec, optional waveform (§6.2/§7.4) ---------
@@ -154,7 +217,7 @@ ws::core::Result<std::unique_ptr<Device>> make_resistor(const DeviceCard& card,
 // The waveform may span several tokens ("PULSE(" "0" "1" ")"); the first
 // DC-position value may also be the waveform itself.
 struct SourceSpec {
-    double dc = 0.0;
+    ExprProgram dc;                 // the rebindable DC value (§3.5a)
     bool have_dc = false;
     std::optional<double> ac_mag;
     std::optional<double> ac_phase;  // degrees
@@ -174,7 +237,8 @@ struct SourceSpec {
                     "source " + card.name.text + ": 'DC' needs a value (once)",
                     card.loc));
             }
-            WS_TRY_ASSIGN(out.dc, resolve_value_token(card.rest[i + 1], params));
+            WS_TRY_ASSIGN(out.dc, resolve_value_program(card.rest[i + 1], params));
+            WS_TRY(eval_param_for_validation(out.dc, params));
             out.have_dc = true;
             i += 2;
             continue;
@@ -215,7 +279,8 @@ struct SourceSpec {
             continue;
         }
         if (!out.have_dc) {
-            WS_TRY_ASSIGN(out.dc, resolve_value_token(card.rest[i], params));
+            WS_TRY_ASSIGN(out.dc, resolve_value_program(card.rest[i], params));
+            WS_TRY(eval_param_for_validation(out.dc, params));
             out.have_dc = true;
             ++i;
             continue;
@@ -227,25 +292,35 @@ struct SourceSpec {
     }
     // ngspice: a waveform source without an explicit DC value uses the
     // waveform's value at t=0 for DC/OP solves (value(0) never depends on
-    // the deferred tstep/tstop defaults).
-    if (!out.have_dc && out.wave) {
-        out.dc = out.wave->value(0.0);
+    // the deferred tstep/tstop defaults). The DC PARAMETER stays a
+    // constant zero here; load paths that need waveform(0) consult the
+    // waveform first, exactly as before.
+    if (!out.have_dc) {
+        out.dc = ExprProgram::constant(out.wave ? out.wave->value(0.0) : 0.0);
         out.have_dc = true;
     }
     return {};
 }
 
-// The shared source body: DC value + optional AC phasor + waveform.
+// The shared source body. Parameters: [0] = dc (scoped), [1] = force - a
+// nonzero force pins the DC value OVER the waveform during .tran (what
+// Simulator::set_source writes mid-run for closed-loop use); without it
+// the waveform owns the transient, ngspice-style. The AC phasor and the
+// waveform itself are immutable construction data.
 class SourceCommon {
 public:
-    double value_at(double t) const { return wave_ ? wave_->value(t) : dc_; }
-    [[nodiscard]] double dc_value() const { return dc_; }
-    [[nodiscard]] bool set_sweep_value(double v) {
-        dc_ = v;
-        return true;
+    // slot 0 is the dc value; slot 1 the force flag
+    static constexpr std::size_t kParDc = 0;
+    static constexpr std::size_t kParForce = 1;
+
+    [[nodiscard]] double tran_value(const DcLoadContext& cx, const TranStep& step) const {
+        if (wave_ && cx.par(kParForce) == 0.0) {
+            return wave_->value(step.time, step.tstep, step.tstop);
+        }
+        return cx.par(kParDc);
     }
-    [[nodiscard]] double next_event(double t) const {
-        return wave_ ? wave_->next_event(t)
+    [[nodiscard]] double next_event(double t, double tstep, double tstop) const {
+        return wave_ ? wave_->next_event(t, tstep, tstop)
                      : std::numeric_limits<double>::infinity();
     }
     [[nodiscard]] bool has_ac() const { return ac_mag_.has_value(); }
@@ -256,18 +331,26 @@ public:
         const double phase_rad = (ac_phase_.value_or(0.0)) * 3.14159265358979323846 / 180.0;
         return std::polar(*ac_mag_, phase_rad);
     }
-    void finalize_waveform(double tstep, double tstop) {
-        if (wave_) {
-            wave_->finalize(tstep, tstop);
+
+    [[nodiscard]] std::vector<ParamSpec> source_param_specs(const ExprProgram& dc) const {
+        return {ParamSpec{"dc", dc}, ParamSpec{"force", ExprProgram::constant(0.0)}};
+    }
+    [[nodiscard]] ws::core::Status source_check_params(const double* p,
+                                                       SourceLoc loc) const {
+        if (!std::isfinite(p[0])) {
+            return spice_fail(dev_diag(ErrorKind::Semantic, "spice.semantic.source_form",
+                                       "source " + name_ + " needs a finite DC value",
+                                       loc));
         }
+        return {};
     }
 
 protected:
-    SourceCommon(const SourceSpec& spec)
-        : dc_(spec.dc), ac_mag_(spec.ac_mag), ac_phase_(spec.ac_phase),
+    SourceCommon(std::string name, const SourceSpec& spec)
+        : name_(std::move(name)), ac_mag_(spec.ac_mag), ac_phase_(spec.ac_phase),
           wave_(spec.wave) {}
 
-    double dc_;
+    std::string name_;
     std::optional<double> ac_mag_;
     std::optional<double> ac_phase_;
     std::optional<Waveform> wave_;
@@ -276,9 +359,11 @@ protected:
 class VoltageSource final : public Device, private SourceCommon {
 public:
     VoltageSource(std::string display, NodeId p, NodeId n, BranchId branch,
-                  const SourceSpec& spec)
-        : Device(), SourceCommon(spec), name_(std::move(display)), p_(p), n_(n),
-          branch_(branch) {}
+                  const SourceSpec& spec, SourceLoc loc)
+        : Device(), SourceCommon(std::move(display), spec), p_(p), n_(n),
+          branch_(branch), dc_(spec.dc) {
+        this->loc = loc;
+    }
 
     [[nodiscard]] const std::string& name() const override { return name_; }
     [[nodiscard]] char kind() const override { return 'V'; }
@@ -289,50 +374,65 @@ public:
         const override {
         return {{p_, n_}};
     }
+
+    [[nodiscard]] std::vector<ParamSpec> param_specs() const override {
+        return source_param_specs(dc_);
+    }
+    [[nodiscard]] ws::core::Status check_params(const double* p) const override {
+        return source_check_params(p, this->loc);
+    }
+
     void load_dc(DcLoadContext& cx) const override {
-        cx.stamp_branch_voltage(branch_, p_, n_, dc_value());
+        cx.stamp_branch_voltage(branch_, p_, n_, cx.par(kParDc));
     }
     void load_tran(DcLoadContext& cx, const TranStep& step) const override {
-        cx.stamp_branch_voltage(branch_, p_, n_, value_at(step.time));
+        cx.stamp_branch_voltage(branch_, p_, n_, tran_value(cx, step));
     }
     void load_ac(AcLoadContext& cx) const override {
         // A V source is a short to the small-signal system; the AC spec (or
         // zero) is the stimulus (§7.4).
         cx.stamp_branch_voltage(branch_, p_, n_, ac_phasor());
     }
-    [[nodiscard]] bool set_sweep_value(double v) override {
-        return SourceCommon::set_sweep_value(v);
-    }
-    [[nodiscard]] double next_event(double t) const override {
-        return SourceCommon::next_event(t);
+    [[nodiscard]] double next_event(double t, double tstep,
+                                     double tstop) const override {
+        return SourceCommon::next_event(t, tstep, tstop);
     }
     [[nodiscard]] bool has_ac() const override { return SourceCommon::has_ac(); }
-    void finalize_waveform(double tstep, double tstop) override {
-        SourceCommon::finalize_waveform(tstep, tstop);
-    }
 
 private:
-    std::string name_;
     NodeId p_, n_;
     BranchId branch_;
+    ExprProgram dc_;
 };
 
 class CurrentSource final : public Device, private SourceCommon {
 public:
-    CurrentSource(std::string display, NodeId p, NodeId n, const SourceSpec& spec)
-        : Device(), SourceCommon(spec), name_(std::move(display)), p_(p), n_(n) {}
+    CurrentSource(std::string display, NodeId p, NodeId n, const SourceSpec& spec,
+                  SourceLoc loc)
+        : Device(), SourceCommon(std::move(display), spec), p_(p), n_(n),
+          dc_(spec.dc) {
+        this->loc = loc;
+    }
 
     [[nodiscard]] const std::string& name() const override { return name_; }
     [[nodiscard]] char kind() const override { return 'I'; }
     [[nodiscard]] std::vector<NodeId> terminals() const override { return {p_, n_}; }
+
+    [[nodiscard]] std::vector<ParamSpec> param_specs() const override {
+        return source_param_specs(dc_);
+    }
+    [[nodiscard]] ws::core::Status check_params(const double* p) const override {
+        return source_check_params(p, this->loc);
+    }
+
     void load_dc(DcLoadContext& cx) const override {
         // ngspice: positive current flows from N+ through the source to
         // N- - it LEAVES p_ and ENTERS n_ ("I1 0 out 1m" charges 'out'
         // positive, the familiar orientation).
-        cx.add_current(n_, p_, dc_value());
+        cx.add_current(n_, p_, cx.par(kParDc));
     }
     void load_tran(DcLoadContext& cx, const TranStep& step) const override {
-        cx.add_current(n_, p_, value_at(step.time));
+        cx.add_current(n_, p_, tran_value(cx, step));
     }
     void load_ac(AcLoadContext& cx) const override {
         // No AC spec: open to the small-signal system (§7.4).
@@ -340,20 +440,15 @@ public:
             cx.add_current(n_, p_, ac_phasor());
         }
     }
-    [[nodiscard]] bool set_sweep_value(double v) override {
-        return SourceCommon::set_sweep_value(v);
-    }
-    [[nodiscard]] double next_event(double t) const override {
-        return SourceCommon::next_event(t);
+    [[nodiscard]] double next_event(double t, double tstep,
+                                     double tstop) const override {
+        return SourceCommon::next_event(t, tstep, tstop);
     }
     [[nodiscard]] bool has_ac() const override { return SourceCommon::has_ac(); }
-    void finalize_waveform(double tstep, double tstop) override {
-        SourceCommon::finalize_waveform(tstep, tstop);
-    }
 
 private:
-    std::string name_;
     NodeId p_, n_;
+    ExprProgram dc_;
 };
 
 ws::core::Result<std::unique_ptr<Device>> make_vsource(const DeviceCard& card,
@@ -362,7 +457,7 @@ ws::core::Result<std::unique_ptr<Device>> make_vsource(const DeviceCard& card,
     SourceSpec spec;
     WS_TRY(parse_source_spec(card, s.params, spec));
     return std::make_unique<VoltageSource>(card.name.text, n[0], n[1],
-                                           s.nodes.claim_branch(), spec);
+                                           s.nodes.claim_branch(), spec, card.loc);
 }
 
 ws::core::Result<std::unique_ptr<Device>> make_isource(const DeviceCard& card,
@@ -370,7 +465,7 @@ ws::core::Result<std::unique_ptr<Device>> make_isource(const DeviceCard& card,
     WS_TRY_ASSIGN(const std::vector<NodeId> n, take_nodes(card, s.nodes, 2, 0));
     SourceSpec spec;
     WS_TRY(parse_source_spec(card, s.params, spec));
-    return std::make_unique<CurrentSource>(card.name.text, n[0], n[1], spec);
+    return std::make_unique<CurrentSource>(card.name.text, n[0], n[1], spec, card.loc);
 }
 
 // --- E (VCVS) --------------------------------------------------------------------
@@ -378,9 +473,11 @@ ws::core::Result<std::unique_ptr<Device>> make_isource(const DeviceCard& card,
 class Vcvs final : public Device {
 public:
     Vcvs(std::string display, NodeId p, NodeId n, NodeId cp, NodeId cn, BranchId branch,
-         double gain)
+         ExprProgram gain, SourceLoc loc)
         : name_(std::move(display)), p_(p), n_(n), cp_(cp), cn_(cn), branch_(branch),
-          gain_(gain) {}
+          gain_(std::move(gain)) {
+        this->loc = loc;
+    }
 
     [[nodiscard]] const std::string& name() const override { return name_; }
     [[nodiscard]] char kind() const override { return 'E'; }
@@ -393,14 +490,26 @@ public:
         const override {
         return {{p_, n_}};  // output only; the control pair senses
     }
+
+    [[nodiscard]] std::vector<ParamSpec> param_specs() const override {
+        return {ParamSpec{"gain", gain_}};
+    }
+    [[nodiscard]] ws::core::Status check_params(const double* p) const override {
+        if (!std::isfinite(p[0])) {
+            return spice_fail(dev_diag(ErrorKind::Semantic, "spice.semantic.arity",
+                                       "device " + name_ + " needs a finite gain", loc));
+        }
+        return {};
+    }
+
     void load_dc(DcLoadContext& cx) const override {
         // v(p) - v(n) = gain * (v(cp) - v(cn)), branch current i flows p->n
         // through the source.
         const std::size_t row = cx.branch_row(branch_);
         cx.add_entry(row, p_, 1.0);
         cx.add_entry(row, n_, -1.0);
-        cx.add_entry(row, cp_, -gain_);
-        cx.add_entry(row, cn_, gain_);
+        cx.add_entry(row, cp_, -cx.par(0));
+        cx.add_entry(row, cn_, cx.par(0));
         cx.add_entry(p_, row, 1.0);
         cx.add_entry(n_, row, -1.0);
     }
@@ -408,8 +517,8 @@ public:
         const std::size_t row = cx.branch_row(branch_);
         cx.add_entry(row, p_, 1.0);
         cx.add_entry(row, n_, -1.0);
-        cx.add_entry(row, cp_, -gain_);
-        cx.add_entry(row, cn_, gain_);
+        cx.add_entry(row, cp_, -cx.par(0));
+        cx.add_entry(row, cn_, cx.par(0));
         cx.add_entry(p_, row, 1.0);
         cx.add_entry(n_, row, -1.0);
     }
@@ -418,7 +527,7 @@ private:
     std::string name_;
     NodeId p_, n_, cp_, cn_;
     BranchId branch_;
-    double gain_;
+    ExprProgram gain_;
 };
 
 ws::core::Result<std::unique_ptr<Device>> make_vcvs(const DeviceCard& card,
@@ -430,42 +539,57 @@ ws::core::Result<std::unique_ptr<Device>> make_vcvs(const DeviceCard& card,
                                        " takes four nodes and a gain",
                                    card.loc));
     }
-    double gain = 0.0;
-    WS_TRY_ASSIGN(gain, resolve_value_token(card.rest[4], s.params));
+    WS_TRY_ASSIGN(ExprProgram gain, resolve_value_program(card.rest[4], s.params));
+    WS_TRY(eval_param_for_validation(gain, s.params));
     return std::make_unique<Vcvs>(card.name.text, n[0], n[1], n[2], n[3],
-                                  s.nodes.claim_branch(), gain);
+                                  s.nodes.claim_branch(), std::move(gain), card.loc);
 }
 
 // --- G (VCCS) --------------------------------------------------------------------
 
 class Vccs final : public Device {
 public:
-    Vccs(std::string display, NodeId p, NodeId n, NodeId cp, NodeId cn, double gm)
-        : name_(std::move(display)), p_(p), n_(n), cp_(cp), cn_(cn), gm_(gm) {}
+    Vccs(std::string display, NodeId p, NodeId n, NodeId cp, NodeId cn, ExprProgram gm,
+         SourceLoc loc)
+        : name_(std::move(display)), p_(p), n_(n), cp_(cp), cn_(cn), gm_(std::move(gm)) {
+        this->loc = loc;
+    }
 
     [[nodiscard]] const std::string& name() const override { return name_; }
     [[nodiscard]] char kind() const override { return 'G'; }
     [[nodiscard]] std::vector<NodeId> terminals() const override {
         return {p_, n_, cp_, cn_};
     }
+
+    [[nodiscard]] std::vector<ParamSpec> param_specs() const override {
+        return {ParamSpec{"gm", gm_}};
+    }
+    [[nodiscard]] ws::core::Status check_params(const double* p) const override {
+        if (!std::isfinite(p[0])) {
+            return spice_fail(dev_diag(ErrorKind::Semantic, "spice.semantic.arity",
+                                       "device " + name_ + " needs a finite gm", loc));
+        }
+        return {};
+    }
+
     void load_dc(DcLoadContext& cx) const override {
         // i(p->n through the source) = gm * (v(cp) - v(cn))
-        cx.add_entry(p_, cp_, gm_);
-        cx.add_entry(p_, cn_, -gm_);
-        cx.add_entry(n_, cp_, -gm_);
-        cx.add_entry(n_, cn_, gm_);
+        cx.add_entry(p_, cp_, cx.par(0));
+        cx.add_entry(p_, cn_, -cx.par(0));
+        cx.add_entry(n_, cp_, -cx.par(0));
+        cx.add_entry(n_, cn_, cx.par(0));
     }
     void load_ac(AcLoadContext& cx) const override {
-        cx.add_entry(p_, cp_, gm_);
-        cx.add_entry(p_, cn_, -gm_);
-        cx.add_entry(n_, cp_, -gm_);
-        cx.add_entry(n_, cn_, gm_);
+        cx.add_entry(p_, cp_, cx.par(0));
+        cx.add_entry(p_, cn_, -cx.par(0));
+        cx.add_entry(n_, cp_, -cx.par(0));
+        cx.add_entry(n_, cn_, cx.par(0));
     }
 
 private:
     std::string name_;
     NodeId p_, n_, cp_, cn_;
-    double gm_;
+    ExprProgram gm_;
 };
 
 ws::core::Result<std::unique_ptr<Device>> make_vccs(const DeviceCard& card,
@@ -477,49 +601,65 @@ ws::core::Result<std::unique_ptr<Device>> make_vccs(const DeviceCard& card,
                                        " takes four nodes and a transconductance",
                                    card.loc));
     }
-    double gm = 0.0;
-    WS_TRY_ASSIGN(gm, resolve_value_token(card.rest[4], s.params));
-    return std::make_unique<Vccs>(card.name.text, n[0], n[1], n[2], n[3], gm);
+    WS_TRY_ASSIGN(ExprProgram gm, resolve_value_program(card.rest[4], s.params));
+    WS_TRY(eval_param_for_validation(gm, s.params));
+    return std::make_unique<Vccs>(card.name.text, n[0], n[1], n[2], n[3], std::move(gm),
+                                  card.loc);
 }
 
 // --- F (CCCS) / H (CCVS): controlled by a named V source's branch current ------
 
 class Cccs final : public Device {
 public:
-    Cccs(std::string display, NodeId p, NodeId n, double gain)
-        : name_(std::move(display)), p_(p), n_(n), gain_(gain) {}
+    Cccs(std::string display, NodeId p, NodeId n, ExprProgram gain, SourceLoc loc)
+        : name_(std::move(display)), p_(p), n_(n), gain_(std::move(gain)) {
+        this->loc = loc;
+    }
 
-    void set_control(BranchId br) { control_ = br; }
     void set_control_branch(BranchId br) override { control_ = br; }
 
     [[nodiscard]] const std::string& name() const override { return name_; }
     [[nodiscard]] char kind() const override { return 'F'; }
     [[nodiscard]] std::vector<NodeId> terminals() const override { return {p_, n_}; }
+
+    [[nodiscard]] std::vector<ParamSpec> param_specs() const override {
+        return {ParamSpec{"gain", gain_}};
+    }
+    [[nodiscard]] ws::core::Status check_params(const double* p) const override {
+        if (!std::isfinite(p[0])) {
+            return spice_fail(dev_diag(ErrorKind::Semantic, "spice.semantic.arity",
+                                       "device " + name_ + " needs a finite gain", loc));
+        }
+        return {};
+    }
+
     void load_dc(DcLoadContext& cx) const override {
         // i(p->n) = gain * i(control source)
         const std::size_t ctl = cx.branch_row(control_);
-        cx.add_entry(p_, ctl, gain_);
-        cx.add_entry(n_, ctl, -gain_);
+        cx.add_entry(p_, ctl, cx.par(0));
+        cx.add_entry(n_, ctl, -cx.par(0));
     }
     void load_ac(AcLoadContext& cx) const override {
         const std::size_t ctl = cx.branch_row(control_);
-        cx.add_entry(p_, ctl, gain_);
-        cx.add_entry(n_, ctl, -gain_);
+        cx.add_entry(p_, ctl, cx.par(0));
+        cx.add_entry(n_, ctl, -cx.par(0));
     }
 
 private:
     std::string name_;
     NodeId p_, n_;
     BranchId control_ = 0;
-    double gain_;
+    ExprProgram gain_;
 };
 
 class Ccvs final : public Device {
 public:
-    Ccvs(std::string display, NodeId p, NodeId n, BranchId branch, double r)
-        : name_(std::move(display)), p_(p), n_(n), branch_(branch), r_(r) {}
+    Ccvs(std::string display, NodeId p, NodeId n, BranchId branch, ExprProgram r,
+         SourceLoc loc)
+        : name_(std::move(display)), p_(p), n_(n), branch_(branch), r_(std::move(r)) {
+        this->loc = loc;
+    }
 
-    void set_control(BranchId br) { control_ = br; }
     void set_control_branch(BranchId br) override { control_ = br; }
 
     [[nodiscard]] const std::string& name() const override { return name_; }
@@ -531,13 +671,25 @@ public:
         const override {
         return {{p_, n_}};
     }
+
+    [[nodiscard]] std::vector<ParamSpec> param_specs() const override {
+        return {ParamSpec{"r", r_}};
+    }
+    [[nodiscard]] ws::core::Status check_params(const double* p) const override {
+        if (!std::isfinite(p[0])) {
+            return spice_fail(dev_diag(ErrorKind::Semantic, "spice.semantic.arity",
+                                       "device " + name_ + " needs a finite R", loc));
+        }
+        return {};
+    }
+
     void load_dc(DcLoadContext& cx) const override {
         // v(p) - v(n) = r * i(control source)
         const std::size_t row = cx.branch_row(branch_);
         const std::size_t ctl = cx.branch_row(control_);
         cx.add_entry(row, p_, 1.0);
         cx.add_entry(row, n_, -1.0);
-        cx.add_entry(row, ctl, -r_);
+        cx.add_entry(row, ctl, -cx.par(0));
         cx.add_entry(p_, row, 1.0);
         cx.add_entry(n_, row, -1.0);
     }
@@ -546,7 +698,7 @@ public:
         const std::size_t ctl = cx.branch_row(control_);
         cx.add_entry(row, p_, 1.0);
         cx.add_entry(row, n_, -1.0);
-        cx.add_entry(row, ctl, -r_);
+        cx.add_entry(row, ctl, -cx.par(0));
         cx.add_entry(p_, row, 1.0);
         cx.add_entry(n_, row, -1.0);
     }
@@ -556,7 +708,7 @@ private:
     NodeId p_, n_;
     BranchId branch_;
     BranchId control_ = 0;
-    double r_;
+    ExprProgram r_;
 };
 
 ws::core::Result<std::unique_ptr<Device>> make_cccs(const DeviceCard& card,
@@ -569,9 +721,10 @@ ws::core::Result<std::unique_ptr<Device>> make_cccs(const DeviceCard& card,
                                        " and a gain",
                                    card.loc));
     }
-    double gain = 0.0;
-    WS_TRY_ASSIGN(gain, resolve_value_token(card.rest[3], s.params));
-    auto dev = std::make_unique<Cccs>(card.name.text, n[0], n[1], gain);
+    WS_TRY_ASSIGN(ExprProgram gain, resolve_value_program(card.rest[3], s.params));
+    WS_TRY(eval_param_for_validation(gain, s.params));
+    auto dev = std::make_unique<Cccs>(card.name.text, n[0], n[1], std::move(gain),
+                                      card.loc);
     s.controls.push_back(ControlRequest{dev.get(), card.rest[2]});
     return dev;
 }
@@ -586,10 +739,10 @@ ws::core::Result<std::unique_ptr<Device>> make_ccvs(const DeviceCard& card,
                                        " and a transresistance",
                                    card.loc));
     }
-    double r = 0.0;
-    WS_TRY_ASSIGN(r, resolve_value_token(card.rest[3], s.params));
-    auto dev = std::make_unique<Ccvs>(card.name.text, n[0], n[1],
-                                      s.nodes.claim_branch(), r);
+    WS_TRY_ASSIGN(ExprProgram r, resolve_value_program(card.rest[3], s.params));
+    WS_TRY(eval_param_for_validation(r, s.params));
+    auto dev = std::make_unique<Ccvs>(card.name.text, n[0], n[1], s.nodes.claim_branch(),
+                                      std::move(r), card.loc);
     s.controls.push_back(ControlRequest{dev.get(), card.rest[2]});
     return dev;
 }

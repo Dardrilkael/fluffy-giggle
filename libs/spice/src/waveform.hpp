@@ -4,10 +4,12 @@
 // ngspice semantics. Params resolve against the .param scope at parse
 // time; the few whose ngspice defaults depend on the .tran card itself
 // (TR/TF/PW/PER -> TSTEP/TSTOP, SIN FREQ -> 1/TSTOP, EXP TAUs/TD2 ->
-// TSTEP) stay defaulted until finalize(tstep, tstop), which the .tran
-// driver calls before marching. value(0) is valid pre-finalize (none of
-// the t=0 forms depend on the deferred defaults), so a waveform source's
-// DC value for a plain .op is waveform(0) - ngspice's behavior.
+// TSTEP) stay flagged in `defaulted` and resolve INLINE at evaluation
+// time through the (tstep, tstop) overloads - the waveform never
+// mutates, so a Circuit stays immutable across runs with different .tran
+// cards. value(t) (no card context) is only safe where no deferred
+// default matters; the t=0 DC value never does (none of the t=0 forms
+// depend on them) - that is ngspice's "waveform(0) is the DC value".
 
 #include <cmath>
 #include <string>
@@ -35,15 +37,17 @@ public:
     // Pwl: corners (t, v), strictly increasing t.
     std::vector<std::pair<double, double>> pwl;
 
-    // The waveform value at t (ngspice piece definitions).
+    // The waveform value at t (ngspice piece definitions) with the
+    // tstep/tstop-dependent defaults resolved (see the header comment).
+    [[nodiscard]] double value(double t, double tstep, double tstop) const;
+
+    // The raw-parameter value - valid only where no deferred default
+    // matters (in practice: the t=0 DC value).
     [[nodiscard]] double value(double t) const;
 
     // The next schedule event strictly after `t` (a PULSE edge, SIN/EXP
-    // start, PWL corner), or +inf. Valid after finalize().
-    [[nodiscard]] double next_event(double t) const;
-
-    // Resolves the tstep/tstop-dependent defaults (see the header comment).
-    void finalize(double tstep, double tstop);
+    // start, PWL corner), or +inf, with defaults resolved.
+    [[nodiscard]] double next_event(double t, double tstep, double tstop) const;
 
     [[nodiscard]] const char* name() const {
         switch (kind) {
@@ -54,6 +58,14 @@ public:
         }
         return "?";
     }
+
+private:
+    // Effective parameters: p with every deferred default resolved
+    // against the .tran card's tstep/tstop (the old finalize(), made
+    // pure - a local array, never a mutation).
+    void resolve_into(double out[7], double tstep, double tstop) const;
+    [[nodiscard]] double value_with(const double q[7], double t) const;
+    [[nodiscard]] double next_event_with(const double q[7], double t) const;
 };
 
 // Parses a waveform from its card tokens. `tokens` are the raw record

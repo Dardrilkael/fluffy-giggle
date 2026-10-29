@@ -13,7 +13,8 @@
 #include <vector>
 
 #include "cards.hpp"
-#include "circuit.hpp"
+
+#include <ws/spice/circuit.hpp>
 
 namespace ws::spice {
 
@@ -58,56 +59,6 @@ std::map<char, DeviceShape> device_shapes() {
 
 }  // namespace
 
-// --- .options ------------------------------------------------------------------
-
-ws::core::Status apply_options(const std::vector<OptionsCard>& options, RunSettings& out) {
-    for (const OptionsCard& card : options) {
-        for (const auto& [key, value] : card.kv) {
-            const std::string lower = to_lower(key.text);
-            const double v = parse_number(value.text).value_or(0.0);
-            if (lower == "reltol") {
-                out.reltol = v;
-            } else if (lower == "abstol") {
-                out.abstol = v;
-            } else if (lower == "vntol") {
-                out.vntol = v;
-            } else if (lower == "gmin") {
-                out.gmin = v;
-            } else if (lower == "itl1") {
-                out.itl1 = static_cast<int>(v);
-            } else if (lower == "itl2") {
-                out.itl2 = static_cast<int>(v);
-            } else if (lower == "itl4") {
-                out.itl4 = static_cast<int>(v);
-            } else if (lower == "chgtol") {
-                out.chgtol = v;
-            } else if (lower == "trtol") {
-                out.trtol = v;
-            } else if (lower == "temp" || lower == "tnom") {
-                return spice_fail(elab_diag(
-                    ErrorKind::Parse, "spice.parse.unsupported_card",
-                    "'.options " + lower + "' lands with temperature (M5)", card.loc));
-            } else if (lower == "solver") {
-                const std::string backend = to_lower(value.text);
-                if (backend != "eigen") {
-                    return spice_fail(elab_diag(
-                        ErrorKind::Parse, "spice.parse.solver",
-                        "'.options solver=" + value.text +
-                            "': only the Eigen backend exists until KLU lands (M0b)",
-                        card.loc));
-                }
-                out.solver = backend;
-            } else if (lower == "gshunt") {
-                return spice_fail(elab_diag(
-                    ErrorKind::Parse, "spice.parse.unsupported_card",
-                    "'.options gshunt' lands with the convergence ladder (M3)",
-                    card.loc));
-            }
-        }
-    }
-    return {};
-}
-
 // --- the elaborator ----------------------------------------------------------------
 
 class Elaborator final : private NodeResolver {
@@ -122,6 +73,7 @@ public:
     ws::core::Status elaborate();
     [[nodiscard]] const Circuit& circuit() const { return circuit_; }
     [[nodiscard]] Circuit take_circuit() { return std::move(circuit_); }
+    [[nodiscard]] const ParamTable& global_params() const { return global_params_; }
 
 private:
     // --- NodeResolver -------------------------------------------------------
@@ -193,6 +145,59 @@ ws::core::Status Elaborator::add_device_card(const DeviceCard& card, char letter
     }
     circuit_.devices.push_back(std::move(*dev));
     return {};
+}
+
+// Inlines subckt-local parameter references in one value token (§8.4
+// rev): '{expr}' whose variables are (all) subckt-local, bare local
+// names, and 'key={expr}' / 'key=local' suffixes become plain numbers.
+// Tokens that fail to resolve locally pass through untouched - the global
+// scope owns them (or elaboration reports the error with provenance).
+void inline_local_values(Token& tok, const ParamTable& scope) {
+    auto try_rewrite = [&](std::string text) -> std::optional<std::string> {
+        const ws::core::Result<double> v = resolve_value_token(
+            Token{text, tok.loc}, scope);
+        if (!v || !std::isfinite(*v)) {
+            return std::nullopt;
+        }
+        // Every variable the expression references must be subckt-local -
+        // a global reference stays live for .step / Monte-Carlo rebinds.
+        if (tok.text.size() >= 2 && tok.text.front() == '{' &&
+            tok.text.back() == '}') {
+            const ws::core::Result<ExprProgram> prog =
+                parse_expression(tok.text.substr(1, tok.text.size() - 2));
+            if (!prog) {
+                return std::nullopt;
+            }
+            for (const std::string& var : prog->vars()) {
+                if (!scope.knows_local(var)) {
+                    return std::nullopt;
+                }
+            }
+        } else {
+            if (!scope.knows_local(to_lower(text))) {
+                return std::nullopt;
+            }
+        }
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.17g", *v);
+        return std::string(buf);
+    };
+    if (const auto whole = try_rewrite(tok.text)) {
+        tok.text = *whole;
+        return;
+    }
+    // 'key=value' forms (ic=, Rser=, ic=on|off stays textual).
+    const std::size_t eq = tok.text.find('=');
+    if (eq != std::string::npos && eq > 0) {
+        const std::string value = tok.text.substr(eq + 1);
+        if (value.size() >= 2 && value.front() == '{' && value.back() == '}') {
+            if (const auto tail = try_rewrite(value)) {
+                tok.text = tok.text.substr(0, eq + 1) + *tail;
+            }
+        } else if (const auto tail = try_rewrite(value)) {
+            tok.text = tok.text.substr(0, eq + 1) + *tail;
+        }
+    }
 }
 
 ws::core::Status Elaborator::flatten_x(const DeviceCard& card,
@@ -375,6 +380,20 @@ ws::core::Status Elaborator::flatten_x(const DeviceCard& card,
                 if (ref < scoped.rest.size()) {
                     scoped.rest[ref].text = my_prefix + scoped.rest[ref].text;
                 }
+            }
+            // Inline SUBCKT-LOCAL parameter values: a card inside a subckt
+            // references the subckt's params: defaults / instance
+            // overrides, which no longer exist once flattening finishes
+            // (the run's scope is the global one). Locals become number
+            // tokens spelled exactly; GLOBAL references stay live so a
+            // .step / Monte-Carlo rebind of a global param still reaches
+            // inside instances (§8.4 rev).
+            for (std::size_t i = shape.nodes; i < scoped.rest.size(); ++i) {
+                if (std::find(shape.name_refs.begin(), shape.name_refs.end(), i) !=
+                    shape.name_refs.end()) {
+                    continue;  // a device-name reference, not a value
+                }
+                inline_local_values(scoped.rest[i], scope);
             }
             ws::core::Status st = add_device_card(scoped, c.letter, scope);
             if (!st) {
@@ -690,6 +709,8 @@ ws::core::Result<Circuit> elaborate_deck(const DeckAst& ast, double temp,
     WS_TRY(elab.elaborate());
     Circuit c = elab.take_circuit();
     c.temp = temp;  // §7.7: what the (future temp-aware) models build at
+    c.params = elab.global_params();  // the scope every param expr evaluates against
+    WS_TRY(finalize_circuit(c));      // arena layout + cross-device links (§3.5 rev)
     return c;
 }
 

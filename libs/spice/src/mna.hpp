@@ -10,6 +10,11 @@
 // stamps (§3.2 - the dry run IS the pattern); the numeric phase runs
 // exactly one of them per assembly pass. The complex twin (.ac) builds
 // its matrix over the same frozen pattern.
+//
+// §3.5 rev: loads run over an IMMUTABLE circuit plus a per-run RunState;
+// the system re-points each context's parameter/state slices between
+// devices. Pattern mode points them at zeroed scratch sized to the
+// circuit's largest device.
 
 #include <cstddef>
 #include <optional>
@@ -18,6 +23,7 @@
 
 #include <ws/math/sparse.hpp>
 #include <ws/spice/device.hpp>
+#include <ws/spice/state.hpp>
 
 namespace ws::spice {
 
@@ -38,7 +44,8 @@ class AcNumericContext;
 
 class MnaSystem {
 public:
-    MnaSystem(std::size_t node_count, std::size_t branch_count);
+    MnaSystem(std::size_t node_count, std::size_t branch_count,
+              const Circuit& circuit);
 
     // The pattern dry run over every device (DC + tran + AC stamps - the
     // union, §3.2), then the symbolic analyze - once per circuit.
@@ -50,11 +57,14 @@ public:
     [[nodiscard]] ws::core::Status setup_ac();
 
     // One numeric assembly pass each: zero() + every device's load_dc /
-    // load_tran / load_ac stamp.
-    void load(const std::vector<std::unique_ptr<Device>>& devices);
+    // load_tran / load_ac stamp, with this run's parameter and state
+    // slices re-pointed per device.
+    void load(const std::vector<std::unique_ptr<Device>>& devices,
+              const RunState& rs);
     void load_tran(const std::vector<std::unique_ptr<Device>>& devices,
-                   const TranStep& step);
-    void load_ac(const std::vector<std::unique_ptr<Device>>& devices, double omega);
+                   const RunState& rs, const TranStep& step);
+    void load_ac(const std::vector<std::unique_ptr<Device>>& devices,
+                 const RunState& rs, double omega);
 
     // Freezes the pattern (col-major dedupe) and runs the symbolic
     // analyze. Fails through Status on a malformed pattern.
@@ -90,6 +100,7 @@ public:
 private:
     std::size_t node_count_;
     std::size_t branch_count_;
+    const Circuit& circuit_;  // arena layout for the per-device slices
     ws::math::SparsePatternBuilder builder_;
     ws::math::SparsePattern pattern_;  // frozen by analyze()
     std::optional<ws::math::SparseMatrix<double>> matrix_;
@@ -99,6 +110,10 @@ private:
     ws::math::ComplexSparseLu ac_lu_;
     std::vector<std::complex<double>> ac_rhs_;
     std::size_t load_count_ = 0;
+    // Zeroed scratch for the pattern dry run (sized to the largest
+    // device's param/state slot count in the circuit).
+    std::vector<double> scratch_params_;
+    std::vector<double> scratch_state_;
 
     friend class detail::PatternContext;
     friend class detail::NumericContext;

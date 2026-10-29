@@ -35,6 +35,13 @@ struct RunSettings {
     double trtol = 7.0;     // §6.3: transient LTE tolerance factor
     std::string solver = "eigen";  // M0b flips the default to "klu"
 
+    // §7.7: run temperature / model nominal temperature, °C. The circuit
+    // elaborates at `temp` (a `.dc temp` / `.step temp` point re-elaborates
+    // at ITS value); M1/M2 devices are temp-invariant, temp-dependent
+    // models land M5.
+    double temp = 27.0;
+    double tnom = 27.0;
+
     // Test-only fixed-step hook (§10.1 trap-order row): when > 0, .tran
     // marches at exactly this dt - pure trapezoidal (no BE restarts) and
     // no LTE rejection - so halving studies are meaningful. Breakpoints

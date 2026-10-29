@@ -1,8 +1,11 @@
 // M2 devices (DESIGN.md §6.2, §11): C and L with charge/flux-consistent
 // trapezoidal companions (§6.1/§6.3 LTE state machine), pairwise K
 // coupling, and S/W switches as Ron/Roff conductance models with
-// hysteresis control. All dynamic state lives on the device (§3.5); the
-// .tran driver drives begin_step -> load_tran -> lte_ok -> commit.
+// hysteresis control. Per the §3.5 revision, dynamic state lives in the
+// run's arena (fixed-size double slices indexed through the Circuit's
+// state_span), and card values are parameter sources rebindable per run.
+// The .tran driver drives begin_step -> load_tran -> lte_ok -> commit,
+// always through state slices.
 //
 // The make_* factories have external linkage: the builtin table lives in
 // devices.cpp and names them.
@@ -18,8 +21,10 @@
 #include <utility>
 #include <vector>
 
+#include <ws/spice/circuit.hpp>
 #include <ws/spice/deck.hpp>
 #include <ws/spice/device.hpp>
+#include <ws/spice/state.hpp>
 
 namespace ws::spice {
 
@@ -45,21 +50,28 @@ Diagnostic dev_diag(ErrorKind kind, std::string code, std::string message, Sourc
 // is h^3/12 * |q'''| with q''' estimated as 6 * dd3 over the last four
 // (t, q) points; tolq = trtol*(reltol*max(|q|,|q_prev|) + chgtol).
 // Returns eps/tolq through `ratio` and whether the step passes.
-bool dd3_lte(const std::vector<std::pair<double, double>>& hist, double t_new,
-             double q_new, double dt, double q_scale, double reltol, double chgtol,
-             double trtol, double* ratio) {
-    if (hist.size() < 3) {
+// The history rides the device's state slice: 3 (t, q) pairs, oldest
+// first, tracked by the device's commit().
+struct LteHist {
+    double t[3] = {0, 0, 0};
+    double q[3] = {0, 0, 0};
+    std::size_t n = 0;  // valid pairs, <= 3
+};
+
+bool dd3_lte(const LteHist& hist, double t_new, double q_new, double dt, double q_scale,
+             double reltol, double chgtol, double trtol, double* ratio) {
+    if (hist.n < 3) {
         if (ratio != nullptr) {
             *ratio = 0.0;
         }
         return true;  // not enough history (start / BE restart): accept
     }
-    const double t0 = hist[hist.size() - 3].first;
-    const double q0 = hist[hist.size() - 3].second;
-    const double t1 = hist[hist.size() - 2].first;
-    const double q1 = hist[hist.size() - 2].second;
-    const double t2 = hist[hist.size() - 1].first;
-    const double q2 = hist[hist.size() - 1].second;
+    const double t0 = hist.t[0];
+    const double q0 = hist.q[0];
+    const double t1 = hist.t[1];
+    const double q1 = hist.q[1];
+    const double t2 = hist.t[2];
+    const double q2 = hist.q[2];
     const double t3 = t_new;
     const double q3 = q_new;
     if (!(t1 > t0) || !(t2 > t1) || !(t3 > t2) || !(dt > 0.0)) {
@@ -85,11 +97,25 @@ bool dd3_lte(const std::vector<std::pair<double, double>>& hist, double t_new,
 
 // --- C -------------------------------------------------------------------------
 
+// State layout (state_slots == 12):
+//   [0] v_prev  [1] q_prev  [2] i_prev   companion inputs, seeded at t=0
+//   [3] geq     [4] jeq                 companion coefficients per attempt
+//   [5]         LTE history length (0..3)
+//   [6..11]     LTE history (t, q) x3, oldest first
+// The capacitance itself is a run parameter; the driver folds it into
+// the slice (kCParam) once per step attempt through fold_state(), so the
+// hooks never need a context beyond their own state.
 class Capacitor final : public Device {
 public:
-    Capacitor(std::string display, NodeId p, NodeId n, double farads, bool has_ic,
+    static constexpr std::size_t kV = 0, kQ = 1, kI = 2, kGeq = 3, kJeq = 4;
+    static constexpr std::size_t kHistN = 5;   // history length
+    static constexpr std::size_t kHist = 6;    // first (t, q) pair
+    static constexpr std::size_t kCParam = 12; // folded capacitance mirror
+
+    Capacitor(std::string display, NodeId p, NodeId n, ExprProgram farads, bool has_ic,
               double ic)
-        : name_(std::move(display)), p_(p), n_(n), c_(farads), has_ic_(has_ic), ic_(ic) {}
+        : name_(std::move(display)), p_(p), n_(n), c_(std::move(farads)), has_ic_(has_ic),
+          ic_(ic) {}
 
     [[nodiscard]] const std::string& name() const override { return name_; }
     [[nodiscard]] char kind() const override { return 'C'; }
@@ -101,78 +127,136 @@ public:
         // Norton companion: geq in parallel with jeq; i = geq*v + jeq
         // flows p -> n through the device, so jeq is injected into n and
         // pulled out of p.
-        cx.add_conductance(p_, n_, geq_);
-        cx.add_current(n_, p_, jeq_);
+        cx.add_conductance(p_, n_, cx.st(kGeq));
+        cx.add_current(n_, p_, cx.st(kJeq));
     }
     void load_ac(AcLoadContext& cx) const override {
-        cx.add_conductance(p_, n_, {0.0, cx.omega * c_});
+        cx.add_conductance(p_, n_, {0.0, cx.omega * cx.par(0)});
+    }
+
+    [[nodiscard]] std::vector<ParamSpec> param_specs() const override {
+        return {ParamSpec{"value", c_}};
+    }
+    [[nodiscard]] ws::core::Status check_params(const double* p) const override {
+        if (!(p[0] > 0.0) || !std::isfinite(p[0])) {
+            return spice_fail(dev_diag(
+                ErrorKind::Semantic, "spice.semantic.c_value",
+                "capacitor " + name_ + " needs a positive finite value", loc));
+        }
+        return {};
     }
 
     [[nodiscard]] bool is_dynamic() const override { return true; }
-    void begin_step(const TranStep& step) override {
+    [[nodiscard]] std::size_t state_slots() const override { return 13; }
+    void fold_state(double* st, const RunState& rs, const Circuit& c) const override;
+    [[nodiscard]] ws::core::Status link_dynamic(const Circuit& c,
+                                                std::size_t self) override;
+
+    void begin_step(const TranStep& step, double* st) override {
+        const double c = st[kCParam];
         if (step.be) {
-            geq_ = c_ / step.dt;
-            jeq_ = -q_prev_ / step.dt;
+            st[kGeq] = c / step.dt;
+            st[kJeq] = -st[kQ] / step.dt;
         } else {
-            geq_ = 2.0 * c_ / step.dt;
-            jeq_ = -(geq_ * v_prev_ + i_prev_);
+            st[kGeq] = 2.0 * c / step.dt;
+            st[kJeq] = -(st[kGeq] * st[kV] + st[kI]);
         }
     }
     void commit(const std::vector<double>& x, std::size_t node_count,
-                const TranStep& step) override {
+                const TranStep& step, double* st) override {
         (void)node_count;
+        const double c = st[kCParam];
         const double v = v_across(x, p_, n_);
-        v_prev_ = v;
-        q_prev_ = c_ * v;
-        i_prev_ = geq_ * v + jeq_;
+        st[kV] = v;
+        st[kQ] = c * v;
+        st[kI] = st[kGeq] * v + st[kJeq];
         if (step.be) {
-            hist_.clear();  // BE restart invalidates the trap LTE history
+            clear_hist(st);  // BE restart invalidates the trap LTE history
         } else {
-            hist_.emplace_back(step.time, q_prev_);
-            if (hist_.size() > 3) {
-                hist_.erase(hist_.begin());
-            }
+            push_hist(st, step.time, st[kQ]);
         }
     }
     [[nodiscard]] bool lte_ok(const TranStep& step, const std::vector<double>& x,
                               std::size_t node_count, double reltol, double chgtol,
-                              double trtol, double* ratio) const override {
+                              double trtol, const double* st, double* ratio) const override {
         (void)node_count;
-        const double q = c_ * v_across(x, p_, n_);
-        return dd3_lte(hist_, step.time, q, step.dt, q_prev_, reltol, chgtol, trtol,
-                       ratio);
+        const double q = st[kCParam] * v_across(x, p_, n_);
+        return dd3_lte(hist_of(st), step.time, q, step.dt, st[kQ], reltol, chgtol,
+                       trtol, ratio);
     }
-    void seed_state(const std::vector<double>& x, std::size_t node_count) override {
+    void seed_state(const std::vector<double>& x, std::size_t node_count,
+                    double* st) override {
         (void)node_count;
-        v_prev_ = has_ic_ ? ic_ : v_across(x, p_, n_);
-        q_prev_ = c_ * v_prev_;
-        i_prev_ = 0.0;
-        hist_.clear();
+        st[kV] = has_ic_ ? ic_ : v_across(x, p_, n_);
+        st[kQ] = st[kCParam] * st[kV];
+        st[kI] = 0.0;
+        clear_hist(st);
     }
     [[nodiscard]] bool has_ic() const override { return has_ic_; }
     [[nodiscard]] double ic_value() const override { return ic_; }
 
+    [[nodiscard]] NodeId p() const { return p_; }
+    [[nodiscard]] NodeId n() const { return n_; }
+
 private:
+    [[nodiscard]] static LteHist hist_of(const double* st) {
+        LteHist h;
+        h.n = static_cast<std::size_t>(st[kHistN]);
+        for (std::size_t i = 0; i < 3 && i < h.n; ++i) {
+            h.t[i] = st[kHist + 2 * i];
+            h.q[i] = st[kHist + 2 * i + 1];
+        }
+        return h;
+    }
+    static void clear_hist(double* st) { st[kHistN] = 0.0; }
+    static void push_hist(double* st, double t, double q) {
+        const std::size_t n = static_cast<std::size_t>(st[kHistN]);
+        if (n < 3) {
+            st[kHist + 2 * n] = t;
+            st[kHist + 2 * n + 1] = q;
+            st[kHistN] = static_cast<double>(n + 1);
+            return;
+        }
+        for (std::size_t i = 0; i < 2; ++i) {
+            st[kHist + 2 * i] = st[kHist + 2 * (i + 1)];
+            st[kHist + 2 * i + 1] = st[kHist + 2 * (i + 1) + 1];
+        }
+        st[kHist + 4] = t;
+        st[kHist + 5] = q;
+    }
+
     std::string name_;
     NodeId p_, n_;
-    double c_;
+    ExprProgram c_;
     bool has_ic_;
     double ic_;
-
-    // companion + state (§3.5)
-    double geq_ = 0.0, jeq_ = 0.0;
-    double v_prev_ = 0.0, i_prev_ = 0.0, q_prev_ = 0.0;
-    std::vector<std::pair<double, double>> hist_;  // last 3 accepted (t, q)
+    std::size_t self_index_ = 0;  // filled by link_dynamic
 };
 
 // --- L (with optional Rser and pairwise K coupling) ------------------------------
 
+// State layout (state_slots == 16):
+//   [0] i_prev  [1] v_prev  [2] phi_prev  companion inputs
+//   [3] ka  [4] kb  [5] rhs               companion coefficients
+//   [6]         LTE history length (0..3)
+//   [7..12]     LTE history (t, phi) x3
+//   [13]        [folded L | folded partner L] as two packed halves
+// The L values of BOTH inductors of a K pair fold in per step attempt
+// (fold_state): the mutual M = k*sqrt(L1*L2) recomputes from the CURRENT
+// values, so a .step/Monte-Carlo rebind of either inductor stays exact.
 class Inductor final : public Device {
 public:
-    Inductor(std::string display, NodeId p, NodeId n, NodeId mid, double henries,
+    static constexpr std::size_t kI = 0, kV = 1, kPhi = 2, kKa = 3, kKb = 4, kRhs = 5;
+    static constexpr std::size_t kHistN = 6;
+    static constexpr std::size_t kHist = 7;
+    static constexpr std::size_t kLFold = 13;         // own L mirror
+    static constexpr std::size_t kLPartnerFold = 14;  // partner L mirror
+    static constexpr std::size_t kPartnerV = 15;      // partner v_prev at last accept
+
+    Inductor(std::string display, NodeId p, NodeId n, NodeId mid, ExprProgram henries,
              double rser, bool has_ic, double ic, BranchId branch)
-        : name_(std::move(display)), p_(p), n_(n), mid_(mid), l_(henries), rser_(rser),
-          has_ic_(has_ic), ic_(ic), branch_(branch) {}
+        : name_(std::move(display)), p_(p), n_(n), mid_(mid), l_(std::move(henries)),
+          rser_(rser), has_ic_(has_ic), ic_(ic), branch_(branch) {}
 
     [[nodiscard]] const std::string& name() const override { return name_; }
     [[nodiscard]] char kind() const override { return 'L'; }
@@ -184,6 +268,18 @@ public:
     [[nodiscard]] std::vector<std::pair<NodeId, NodeId>> constraint_edges()
         const override {
         return {{p_, n_}};
+    }
+
+    [[nodiscard]] std::vector<ParamSpec> param_specs() const override {
+        return {ParamSpec{"value", l_}};
+    }
+    [[nodiscard]] ws::core::Status check_params(const double* p) const override {
+        if (!(p[0] > 0.0) || !std::isfinite(p[0])) {
+            return spice_fail(dev_diag(
+                ErrorKind::Semantic, "spice.semantic.l_value",
+                "inductor " + name_ + " needs a positive finite value", loc));
+        }
+        return {};
     }
 
     void load_dc(DcLoadContext& cx) const override {
@@ -204,13 +300,13 @@ public:
         // Branch equation: i - ka*v - kb*v_partner = rhs (§6.2 companion;
         // uncoupled: ka = k/L, kb = 0).
         cx.add_entry(row, row, 1.0);
-        cx.add_entry(row, a(), -ka_);
-        cx.add_entry(row, b(), ka_);
+        cx.add_entry(row, a(), -cx.st(kKa));
+        cx.add_entry(row, b(), cx.st(kKa));
         if (partner_ != nullptr) {
-            cx.add_entry(row, partner().a(), -kb_);
-            cx.add_entry(row, partner().b(), kb_);
+            cx.add_entry(row, partner().a(), -cx.st(kKb));
+            cx.add_entry(row, partner().b(), cx.st(kKb));
         }
-        cx.add_rhs(row, rhs_);
+        cx.add_rhs(row, cx.st(kRhs));
         // KCL coupling (branch current leaves a, enters b).
         cx.add_entry(a(), row, 1.0);
         cx.add_entry(b(), row, -1.0);
@@ -223,7 +319,7 @@ public:
         // v(a) - v(b) - jwL*i - jwM*i_partner = 0
         cx.add_entry(row, a(), 1.0);
         cx.add_entry(row, b(), -1.0);
-        cx.add_entry(row, row, -std::complex<double>(0.0, cx.omega * l_));
+        cx.add_entry(row, row, -std::complex<double>(0.0, cx.omega * cx.par(0)));
         if (partner_ != nullptr) {
             cx.add_entry(row, cx.branch_row(partner_->branch()),
                          -std::complex<double>(0.0, cx.omega * m_));
@@ -233,61 +329,73 @@ public:
     }
 
     [[nodiscard]] bool is_dynamic() const override { return true; }
-    void begin_step(const TranStep& step) override {
+    [[nodiscard]] std::size_t state_slots() const override { return 16; }
+    void fold_state(double* st, const RunState& rs, const Circuit& c) const override;
+    [[nodiscard]] ws::core::Status link_dynamic(const Circuit& c,
+                                                std::size_t self) override;
+
+    void begin_step(const TranStep& step, double* st) override {
+        const double l = st[kLFold];
         const double k = step.be ? step.dt : step.dt / 2.0;
         if (partner_ == nullptr) {
-            ka_ = k / l_;
-            kb_ = 0.0;
-            rhs_ = step.be ? i_prev_ : (i_prev_ + ka_ * v_prev_);
+            st[kKa] = k / l;
+            st[kKb] = 0.0;
+            st[kRhs] = step.be ? st[kI] : (st[kI] + st[kKa] * st[kV]);
             return;
         }
-        // Minv = 1/(L1*L2 - M^2) * [L2, -M; -M, L1]
-        const double l2 = partner().l_;
-        const double d = l_ * l2 - m_ * m_;
-        const double a = l2 / d;
-        const double b = -m_ / d;
-        ka_ = k * a;
-        kb_ = k * b;
-        rhs_ = step.be ? i_prev_
-                       : (i_prev_ + k * (a * v_prev_ + b * partner().v_prev_));
+        // Minv = 1/(L1*L2 - M^2) * [L2, -M; -M, L1], M from the CURRENT
+        // folded values (a rebind of either L updates the coupling).
+        const double lp = st[kLPartnerFold];
+        const double m = k_ * std::sqrt(l * lp);
+        m_ = m;  // AC-side mirror (mutable; .ac folds before sweeping)
+        const double d = l * lp - m * m;
+        const double aa = lp / d;
+        const double bb = -m / d;
+        st[kKa] = k * aa;
+        st[kKb] = k * bb;
+        st[kRhs] = step.be ? st[kI]
+                           : (st[kI] + k * (aa * st[kV] + bb * st[kPartnerV]));
     }
     void commit(const std::vector<double>& x, std::size_t node_count,
-                const TranStep& step) override {
+                const TranStep& step, double* st) override {
         const std::size_t row = node_count + branch_;
-        i_prev_ = x[row];
-        v_prev_ = v_across(x, a(), b());
+        st[kI] = x[row];
+        st[kV] = v_across(x, a(), b());
+        if (partner_ != nullptr) {
+            st[kPartnerV] = v_across(x, partner().a(), partner().b());
+        }
         // Flux linkage phi = L*i + M*i_partner is what the companion
         // integrates (exactly, trap or BE); read it from the solution.
-        phi_prev_ = l_ * i_prev_;
+        const double m = (partner_ != nullptr) ? k_ * std::sqrt(st[kLFold] * st[kLPartnerFold]) : 0.0;
+        st[kPhi] = st[kLFold] * st[kI];
         if (partner_ != nullptr) {
-            phi_prev_ += m_ * x[node_count + partner_->branch()];
+            st[kPhi] += m * x[node_count + partner_->branch()];
         }
         if (step.be) {
-            hist_.clear();
+            clear_hist(st);
         } else {
-            hist_.emplace_back(step.time, phi_prev_);
-            if (hist_.size() > 3) {
-                hist_.erase(hist_.begin());
-            }
+            push_hist(st, step.time, st[kPhi]);
         }
     }
     [[nodiscard]] bool lte_ok(const TranStep& step, const std::vector<double>& x,
                               std::size_t node_count, double reltol, double chgtol,
-                              double trtol, double* ratio) const override {
+                              double trtol, const double* st, double* ratio) const override {
         const std::size_t row = node_count + branch_;
-        double phi = l_ * x[row];
+        double phi = st[kLFold] * x[row];
         if (partner_ != nullptr) {
-            phi += m_ * x[node_count + partner_->branch()];
+            const double m = k_ * std::sqrt(st[kLFold] * st[kLPartnerFold]);
+            phi += m * x[node_count + partner_->branch()];
         }
-        return dd3_lte(hist_, step.time, phi, step.dt, phi_prev_, reltol, chgtol,
+        return dd3_lte(hist_of(st), step.time, phi, step.dt, st[kPhi], reltol, chgtol,
                        trtol, ratio);
     }
-    void seed_state(const std::vector<double>& x, std::size_t node_count) override {
+    void seed_state(const std::vector<double>& x, std::size_t node_count,
+                    double* st) override {
         const std::size_t row = node_count + branch_;
-        i_prev_ = has_ic_ ? ic_ : x[row];
-        v_prev_ = v_across(x, a(), b());
-        phi_prev_ = l_ * i_prev_;
-        hist_.clear();
+        st[kI] = has_ic_ ? ic_ : x[row];
+        st[kV] = v_across(x, a(), b());
+        st[kPhi] = st[kLFold] * st[kI];
+        clear_hist(st);
     }
     [[nodiscard]] bool has_ic() const override { return has_ic_; }
     [[nodiscard]] double ic_value() const override { return ic_; }
@@ -298,12 +406,15 @@ public:
             return false;
         }
         partner_ = &partner;
-        m_ = k * std::sqrt(l_ * partner.inductance());
+        k_ = k;
         return true;
     }
-    [[nodiscard]] double inductance() const override { return l_; }
-    [[nodiscard]] double dyn_i_prev() const override { return i_prev_; }
-    [[nodiscard]] double dyn_v_prev() const override { return v_prev_; }
+    [[nodiscard]] double inductance() const override { return bound_l_; }
+
+    [[nodiscard]] double bound_l() const { return bound_l_; }
+    void set_bound_l(double v) { bound_l_ = v; }
+    [[nodiscard]] NodeId a_node() const { return a(); }
+    [[nodiscard]] NodeId b_node() const { return b(); }
 
 private:
     // The inductor proper sits between a() and b(): mid and n when Rser
@@ -317,22 +428,87 @@ private:
         return *static_cast<const Inductor*>(partner_);
     }
 
+    [[nodiscard]] static LteHist hist_of(const double* st) {
+        LteHist h;
+        h.n = static_cast<std::size_t>(st[kHistN]);
+        for (std::size_t i = 0; i < 3 && i < h.n; ++i) {
+            h.t[i] = st[kHist + 2 * i];
+            h.q[i] = st[kHist + 2 * i + 1];
+        }
+        return h;
+    }
+    static void clear_hist(double* st) { st[kHistN] = 0.0; }
+    static void push_hist(double* st, double t, double q) {
+        const std::size_t n = static_cast<std::size_t>(st[kHistN]);
+        if (n < 3) {
+            st[kHist + 2 * n] = t;
+            st[kHist + 2 * n + 1] = q;
+            st[kHistN] = static_cast<double>(n + 1);
+            return;
+        }
+        for (std::size_t i = 0; i < 2; ++i) {
+            st[kHist + 2 * i] = st[kHist + 2 * (i + 1)];
+            st[kHist + 2 * i + 1] = st[kHist + 2 * (i + 1) + 1];
+        }
+        st[kHist + 4] = t;
+        st[kHist + 5] = q;
+    }
+
     std::string name_;
     NodeId p_, n_, mid_;  // mid_ == kGround when no Rser
-    double l_;
+    ExprProgram l_;
+    double bound_l_ = 0.0;  // elaboration-time value (validation + M at couple time)
     double rser_;
     bool has_ic_;
     double ic_;
     BranchId branch_;
 
-    Device* partner_ = nullptr;  // the other Inductor of a K pair
-    double m_ = 0.0;             // mutual inductance (signed by k)
-
-    // companion + state
-    double ka_ = 0.0, kb_ = 0.0, rhs_ = 0.0;
-    double v_prev_ = 0.0, i_prev_ = 0.0, phi_prev_ = 0.0;
-    std::vector<std::pair<double, double>> hist_;  // last 3 accepted (t, phi)
+    Device* partner_ = nullptr;       // the other Inductor of a K pair
+    double k_ = 0.0;                  // coupling factor (signed)
+    std::size_t self_index_ = 0;      // filled by link_dynamic
+    std::size_t partner_index_ = static_cast<std::size_t>(-1);
+    mutable double m_ = 0.0;          // mutual inductance mirror (AC path)
 };
+
+// --- fold/link implementations (state mirrors; §3.5b) ---------------------------
+
+void Capacitor::fold_state(double* st, const RunState& rs, const Circuit& c) const {
+    st[kCParam] = rs.params()[c.param_span[self_index_].begin];
+}
+
+ws::core::Status Capacitor::link_dynamic(const Circuit& c, std::size_t self) {
+    self_index_ = self;
+    (void)c;
+    return {};
+}
+
+void Inductor::fold_state(double* st, const RunState& rs, const Circuit& c) const {
+    st[kLFold] = rs.params()[c.param_span[self_index_].begin];
+    if (partner_ != nullptr && partner_index_ != static_cast<std::size_t>(-1)) {
+        st[kLPartnerFold] = rs.params()[c.param_span[partner_index_].begin];
+        // The mutual M recomputes from the CURRENT values (the .ac path
+        // reads this mirror; begin_step re-derives it the same way).
+        m_ = k_ * std::sqrt(st[kLFold] * st[kLPartnerFold]);
+    } else {
+        st[kLPartnerFold] = 0.0;
+    }
+}
+
+ws::core::Status Inductor::link_dynamic(const Circuit& c, std::size_t self) {
+    self_index_ = self;
+    if (partner_ != nullptr) {
+        for (std::size_t i = 0; i < c.devices.size(); ++i) {
+            if (c.devices[i].get() == partner_) {
+                partner_index_ = i;
+                return {};
+            }
+        }
+        return spice_fail(dev_diag(
+            ErrorKind::Usage, "spice.usage.link",
+            "inductor " + name_ + " lost its coupling partner at finalize", loc));
+    }
+    return {};
+}
 
 // --- K (pairwise coupling; the device itself stamps nothing) ---------------------
 
@@ -344,16 +520,30 @@ public:
     [[nodiscard]] std::vector<NodeId> terminals() const override { return {}; }
     void load_dc(DcLoadContext&) const override {}
 
+    // The resolved pair, for the netlist writer and diagnostics.
+    void set_pair(std::string a, std::string b, double k) {
+        a_ = std::move(a);
+        b_ = std::move(b);
+        k_ = k;
+    }
+    [[nodiscard]] const std::string& pair_a() const { return a_; }
+    [[nodiscard]] const std::string& pair_b() const { return b_; }
+    [[nodiscard]] double factor() const { return k_; }
+
 private:
     std::string name_;
+    std::string a_, b_;
+    double k_ = 0.0;
 };
 
 // --- S / W switches (§6.2: Ron/Roff conductance model, never a true open) --------
 
+// State layout (state_slots == 1): [0] = on (nonzero when closed).
+// Model values (Ron/Roff/Vt/Vh/It/Ih) are immutable construction data.
 class SwitchDeviceBase : public Device {
 public:
     SwitchDeviceBase(std::string display, NodeId p, NodeId n, bool initial_on)
-        : name_(std::move(display)), p_(p), n_(n), on_(initial_on) {}
+        : name_(std::move(display)), p_(p), n_(n), initial_on_(initial_on) {}
 
     [[nodiscard]] const std::string& name() const override { return name_; }
     [[nodiscard]] std::vector<NodeId> terminals() const override { return {p_, n_}; }
@@ -362,14 +552,17 @@ public:
         return {{p_, n_}};  // both states conduct (Roff is finite)
     }
     void load_dc(DcLoadContext& cx) const override {
-        cx.add_conductance(p_, n_, on_ ? gon_ : goff_);
+        cx.add_conductance(p_, n_, cx.st(0) != 0.0 ? gon_ : goff_);
     }
     void load_tran(DcLoadContext& cx, const TranStep&) const override {
-        cx.add_conductance(p_, n_, on_ ? gon_ : goff_);
+        cx.add_conductance(p_, n_, cx.st(0) != 0.0 ? gon_ : goff_);
     }
     void load_ac(AcLoadContext& cx) const override {
-        cx.add_conductance(p_, n_, on_ ? gon_ : goff_);
+        cx.add_conductance(p_, n_, on_state_ ? gon_ : goff_);
     }
+
+    [[nodiscard]] std::size_t state_slots() const override { return 1; }
+    void init_state(double* st) const override { st[0] = initial_on_ ? 1.0 : 0.0; }
 
     // .model SW (Ron= Roff= Vt= Vh= It= Ih=); S reads Vt/Vh, W reads It/Ih.
     ws::core::Status apply_model(const ModelDef& model) override {
@@ -379,6 +572,7 @@ public:
                 "switch " + name_ + " needs a SW model, got type '" + model.type + "'",
                 model.loc));
         }
+        model_name_ = model.name.text;
         double ron = 1.0, roff = 1e12, vt = 0.0, vh = 0.0, it = 0.0, ih = 0.0;
         const auto& toks = model.params;
         for (std::size_t i = 0; i < toks.size(); ++i) {
@@ -468,6 +662,16 @@ public:
         return {};
     }
 
+    // The AC linearization freezes wherever the OP settled; the OP solve
+    // reports the settled position through this mirror (kept current by
+    // update_state, read by load_ac which has no state slice).
+    void freeze_ac_state(bool on) const { on_state_ = on; }
+    [[nodiscard]] bool model_valid() const { return model_applied_; }
+
+    [[nodiscard]] double ron() const { return ron_; }
+    [[nodiscard]] double roff() const { return roff_; }
+    [[nodiscard]] const std::string& model_name() const { return model_name_; }
+
 protected:
     // Hysteresis band: on above thr+band, off below thr-band, sticky
     // in between (the SW model's Vh/Ih).
@@ -484,10 +688,13 @@ protected:
 
     std::string name_;
     NodeId p_, n_;
-    bool on_;
+    bool initial_on_;
     double ron_ = 1.0, roff_ = 1e12;
     double vt_ = 0.0, vh_ = 0.0, it_ = 0.0, ih_ = 0.0;
     double gon_ = 1.0, goff_ = 1e-12;
+    std::string model_name_;
+    bool model_applied_ = false;
+    mutable bool on_state_ = false;  // AC-side frozen mirror
 };
 
 class Vswitch final : public SwitchDeviceBase {
@@ -500,12 +707,14 @@ public:
         return {p_, n_, cp_, cn_};
     }
     [[nodiscard]] bool update_state(const std::vector<double>& x,
-                                    std::size_t node_count) override {
+                                    std::size_t node_count, double* st) override {
         (void)node_count;
         const double v = v_across(x, cp_, cn_);
-        const bool next = hysteresis_flip(on_, v, vt_, vh_);
-        const bool changed = next != on_;
-        on_ = next;
+        const bool on = st[0] != 0.0;
+        const bool next = hysteresis_flip(on, v, vt_, vh_);
+        const bool changed = next != on;
+        st[0] = next ? 1.0 : 0.0;
+        freeze_ac_state(next);
         return changed;
     }
 
@@ -521,11 +730,13 @@ public:
     [[nodiscard]] char kind() const override { return 'W'; }
     void set_control_branch(BranchId br) override { control_ = br; }
     [[nodiscard]] bool update_state(const std::vector<double>& x,
-                                    std::size_t node_count) override {
+                                    std::size_t node_count, double* st) override {
         const double i = x[node_count + control_];
-        const bool next = hysteresis_flip(on_, i, it_, ih_);
-        const bool changed = next != on_;
-        on_ = next;
+        const bool on = st[0] != 0.0;
+        const bool next = hysteresis_flip(on, i, it_, ih_);
+        const bool changed = next != on;
+        st[0] = next ? 1.0 : 0.0;
+        freeze_ac_state(next);
         return changed;
     }
 
@@ -546,12 +757,15 @@ ws::core::Result<std::unique_ptr<Device>> make_capacitor(const DeviceCard& card,
                                    card.loc));
     }
     // C name p n value [ic=V] - models (TC, Cjo) land with M5.
-    WS_TRY_ASSIGN(const double farads, resolve_value_token(card.rest[2], s.params));
-    if (farads <= 0.0 || !std::isfinite(farads)) {
-        return spice_fail(dev_diag(ErrorKind::Semantic, "spice.semantic.c_value",
-                                   "capacitor " + card.name.text +
-                                       " needs a positive finite value",
-                                   card.loc));
+    WS_TRY_ASSIGN(ExprProgram farads, resolve_value_program(card.rest[2], s.params));
+    {
+        WS_TRY_ASSIGN(const double v, eval_param_for_validation(farads, s.params));
+        if (!(v > 0.0) || !std::isfinite(v)) {
+            return spice_fail(dev_diag(ErrorKind::Semantic, "spice.semantic.c_value",
+                                       "capacitor " + card.name.text +
+                                           " needs a positive finite value",
+                                       card.loc));
+        }
     }
     bool has_ic = false;
     double ic = 0.0;
@@ -572,7 +786,10 @@ ws::core::Result<std::unique_ptr<Device>> make_capacitor(const DeviceCard& card,
             card.loc));
     }
     WS_TRY_ASSIGN(const std::vector<NodeId> n, take_nodes(card, s.nodes, 2, 0));
-    return std::make_unique<Capacitor>(card.name.text, n[0], n[1], farads, has_ic, ic);
+    auto dev = std::make_unique<Capacitor>(card.name.text, n[0], n[1], std::move(farads),
+                                           has_ic, ic);
+    dev->loc = card.loc;
+    return dev;
 }
 
 ws::core::Result<std::unique_ptr<Device>> make_inductor(const DeviceCard& card,
@@ -583,12 +800,16 @@ ws::core::Result<std::unique_ptr<Device>> make_inductor(const DeviceCard& card,
                                        " needs two nodes and a value",
                                    card.loc));
     }
-    WS_TRY_ASSIGN(const double henries, resolve_value_token(card.rest[2], s.params));
-    if (henries <= 0.0 || !std::isfinite(henries)) {
-        return spice_fail(dev_diag(ErrorKind::Semantic, "spice.semantic.l_value",
-                                   "inductor " + card.name.text +
-                                       " needs a positive finite value",
-                                   card.loc));
+    WS_TRY_ASSIGN(ExprProgram henries, resolve_value_program(card.rest[2], s.params));
+    double bound_l = 0.0;
+    {
+        WS_TRY_ASSIGN(bound_l, eval_param_for_validation(henries, s.params));
+        if (!(bound_l > 0.0) || !std::isfinite(bound_l)) {
+            return spice_fail(dev_diag(ErrorKind::Semantic, "spice.semantic.l_value",
+                                       "inductor " + card.name.text +
+                                           " needs a positive finite value",
+                                       card.loc));
+        }
     }
     double rser = 0.0;
     bool has_ic = false;
@@ -618,8 +839,7 @@ ws::core::Result<std::unique_ptr<Device>> make_inductor(const DeviceCard& card,
     }
     if (rser < 0.0 || !std::isfinite(rser)) {
         return spice_fail(dev_diag(ErrorKind::Semantic, "spice.semantic.l_rser",
-                                   "inductor " + card.name.text +
-                                       " needs Rser >= 0",
+                                   "inductor " + card.name.text + " needs Rser >= 0",
                                    card.loc));
     }
     WS_TRY_ASSIGN(const std::vector<NodeId> n, take_nodes(card, s.nodes, 2, 0));
@@ -630,8 +850,12 @@ ws::core::Result<std::unique_ptr<Device>> make_inductor(const DeviceCard& card,
         t.loc = card.loc;
         mid = s.nodes.node(t);
     }
-    return std::make_unique<Inductor>(card.name.text, n[0], n[1], mid, henries, rser,
-                                      has_ic, ic, s.nodes.claim_branch());
+    auto dev = std::make_unique<Inductor>(card.name.text, n[0], n[1], mid,
+                                          std::move(henries), rser, has_ic, ic,
+                                          s.nodes.claim_branch());
+    dev->set_bound_l(bound_l);
+    dev->loc = card.loc;
+    return dev;
 }
 
 ws::core::Result<std::unique_ptr<Device>> make_coupling(const DeviceCard& card,
@@ -651,6 +875,7 @@ ws::core::Result<std::unique_ptr<Device>> make_coupling(const DeviceCard& card,
                                    card.loc));
     }
     auto dev = std::make_unique<CouplingDevice>(card.name.text);
+    dev->loc = card.loc;
     s.couplings.push_back(CouplingRequest{dev.get(), card.rest[0], card.rest[1], k});
     return dev;
 }
@@ -679,6 +904,7 @@ ws::core::Result<std::unique_ptr<Device>> make_vswitch(const DeviceCard& card,
                                    card.loc));
     }
     auto dev = std::make_unique<Vswitch>(card.name.text, n[0], n[1], n[2], n[3], on);
+    dev->loc = card.loc;
     s.models.push_back(ModelRequest{dev.get(), card.rest[4]});
     return dev;
 }
@@ -709,6 +935,7 @@ ws::core::Result<std::unique_ptr<Device>> make_iswitch(const DeviceCard& card,
                                    card.loc));
     }
     auto dev = std::make_unique<Iswitch>(card.name.text, n[0], n[1], 0, on);
+    dev->loc = card.loc;
     s.controls.push_back(ControlRequest{dev.get(), card.rest[2]});
     s.models.push_back(ModelRequest{dev.get(), card.rest[3]});
     return dev;
