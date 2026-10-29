@@ -95,6 +95,15 @@ ws::core::Status apply_options(const std::vector<OptionsCard>& options, RunSetti
                 out.tnom = v;
             } else if (lower == "seed") {
                 out.seed = static_cast<std::uint64_t>(v);
+            } else if (lower == "compat") {
+                const std::string mode = to_lower(value.text);
+                if (mode != "ngspice" && mode != "ltspice" && mode != "strict") {
+                    return spice_fail(opt_diag(
+                        ErrorKind::Parse, "spice.parse.compat",
+                        "'.options compat=" + value.text +
+                            "': expected ngspice, ltspice or strict", card.loc));
+                }
+                out.compat = mode;
             } else if (lower == "solver") {
                 const std::string backend = to_lower(value.text);
                 if (backend != "eigen") {

@@ -42,7 +42,7 @@ bool known_option_key(const std::string& lower) {
            lower == "gmin" || lower == "itl1" || lower == "itl2" || lower == "itl4" ||
            lower == "chgtol" || lower == "trtol" || lower == "temp" ||
            lower == "tnom" || lower == "solver" || lower == "gshunt" ||
-           lower == "seed";
+           lower == "seed" || lower == "compat";
 }
 
 // "name=expr" -> (name token, expression text). The expression side may be

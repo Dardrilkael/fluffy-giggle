@@ -38,6 +38,11 @@ struct RunSettings {
     int gmin_steps = 10;    // §5.2: gmin homotopy staircase steps (ngspice)
     int src_steps = 10;     // §5.2: source homotopy staircase steps
     std::string solver = "eigen";  // M0b flips the default to "klu"
+    // §8.3 rev: the dialect this deck targets - ngspice (default),
+    // ltspice, or strict (rejects the LTspice-only accommodations:
+    // {expr} values, params: sections, Rser=). Explicit, never silent
+    // leniency: the deck says what it wants to be.
+    std::string compat = "ngspice";
 
     // §7.7: run temperature / model nominal temperature, °C. The circuit
     // elaborates at `temp` (a `.dc temp` / `.step temp` point re-elaborates

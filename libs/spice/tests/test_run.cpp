@@ -5,6 +5,7 @@
 // test_spice.cpp owns doctest's single implementation TU for this binary.
 
 #include <cmath>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,8 @@
 #include <ws/spice/deck.hpp>
 #include <ws/spice/error.hpp>
 #include <ws/spice/parse.hpp>
+#include <ws/spice/lint.hpp>
+#include <ws/spice/raw.hpp>
 #include <ws/spice/results.hpp>
 #include <ws/spice/measure.hpp>
 #include <ws/spice/run.hpp>
@@ -1626,4 +1629,140 @@ TEST_CASE("save expressions: per-point @dev[param] in a stepped family") {
         CHECK(t.signal("@R2[value]")[i] == approx(rl));
         CHECK(t.signal("v(out)")[i] == approx(5.0 * rl / (1e3 + rl)));
     }
+}
+
+// --- .raw (§7.8 rev) + the lint pass (§9.3 rev) ------------------------------------
+
+TEST_CASE("raw: header shape and binary payload round-trip") {
+    const auto run = run_text(
+        "rawtr\n"
+        "V1 in 0 5\n"
+        "R1 in out 1k\n"
+        "R2 out 0 1k\n"
+        ".op\n");
+    REQUIRE(run);
+    const std::string raw = ws::spice::table_raw(run->results.tables[0]);
+    // Header: title, plotname, real flags, counts, variables, binary mark.
+    CHECK(raw.find("Title: * ws-spice\n") == 0);
+    CHECK(raw.find("Plotname: Operating Point\n") != std::string::npos);
+    CHECK(raw.find("Flags: real\n") != std::string::npos);
+    CHECK(raw.find("No. Variables: 3\n") != std::string::npos);
+    CHECK(raw.find("No. Points: 1\n") != std::string::npos);
+    CHECK(raw.find("\t0\tv(in)\tvoltage\n") != std::string::npos);
+    CHECK(raw.find("\t2\ti(V1)\tcurrent\n") != std::string::npos);
+    CHECK(raw.find("Binary:\n") != std::string::npos);
+    // Payload: 1 point x 3 doubles after the "Binary:\n" mark.
+    const std::size_t mark = raw.find("Binary:\n") + std::strlen("Binary:\n");
+    CHECK(raw.size() - mark == 3 * sizeof(double));
+    double vals[3];
+    std::memcpy(vals, raw.data() + mark, sizeof(vals));
+    CHECK(vals[0] == doctest::Approx(5.0).epsilon(1e-9));
+    CHECK(vals[1] == doctest::Approx(2.5).epsilon(1e-9));
+    CHECK(vals[2] == doctest::Approx(-2.5e-3).epsilon(1e-9));
+    // Deterministic (§10.5): no Date/Offset lines by default.
+    CHECK(raw.find("Date:") == std::string::npos);
+    CHECK(raw.find("Offset:") == std::string::npos);
+}
+
+TEST_CASE("raw: transient axis type and .ac complex merging") {
+    const auto run = run_text(
+        "rawac\n"
+        "V1 in 0 DC 1 AC 1\n"
+        "R1 in out 1k\n"
+        "C1 out 0 1u\n"
+        ".tran 10u 20u\n"
+        ".ac dec 1 1k 10k\n");
+    REQUIRE(run);
+    const std::string tr = ws::spice::table_raw(run->results.tables[0]);
+    CHECK(tr.find("Plotname: Transient Analysis\n") != std::string::npos);
+    CHECK(tr.find("\t0\ttime\ttime\n") != std::string::npos);
+    CHECK(tr.find("Flags: real\n") != std::string::npos);
+
+    // .ac: re()/im() pairs merge into complex columns named v(out) etc.
+    const std::string ac = ws::spice::table_raw(run->results.tables[1]);
+    CHECK(ac.find("Plotname: AC Analysis\n") != std::string::npos);
+    CHECK(ac.find("Flags: complex\n") != std::string::npos);
+    CHECK(ac.find("\t2\tv(out)\tvoltage\n") != std::string::npos);
+    CHECK(ac.find("re(") == std::string::npos);  // wrappers gone
+    // Points x (axis + 3 signals) x 2 doubles.
+    const std::size_t mark = ac.find("Binary:\n") + std::strlen("Binary:\n");
+    CHECK((ac.size() - mark) % (2 * sizeof(double)) == 0);
+}
+
+TEST_CASE("lint: the M/milli and F/femto traps fire with hints") {
+    std::vector<Warning> warnings;
+    const auto parsed = read_deck("t.cir",
+                                  "traps\n"
+                                  "V1 in 0 5\n"
+                                  "R1 in out 10M\n"
+                                  "R2 out 0 2k\n"
+                                  "C1 out 0 100F\n"
+                                  "L1 in 0 1m\n"
+                                  "R3 in 0 3meg\n"
+                                  ".op\n",
+                                  ws::spice::ParseOptions{});
+    REQUIRE(parsed);
+    const auto ast = build_deck_ast(*parsed, warnings);
+    REQUIRE(ast);
+    REQUIRE(warnings.empty());  // parse-stage warnings: none expected here
+
+    ws::spice::lint_number_traps(*ast, warnings);
+    REQUIRE(warnings.size() == 2);
+    CHECK(warnings[0].diag.code == "spice.warn.milli_resistor");
+    CHECK(warnings[0].diag.loc.line == 3);
+    CHECK(warnings[0].render().find("milli") != std::string::npos);
+    CHECK(warnings[0].render().find("MEG") != std::string::npos);
+    CHECK(warnings[1].diag.code == "spice.warn.femto_cap");
+    CHECK(warnings[1].diag.loc.line == 5);
+    // 1m on an inductor (millihenry - the intended unit) and 3meg on a
+    // resistor are NOT findings.
+}
+
+TEST_CASE("lint: lint_deck surfaces topology findings without simulating") {
+    std::vector<Warning> warnings;
+    const auto parsed = read_deck(
+        "t.cir", "float\nV1 in 0 5\nC1 in 0 1n\nC2 in flt 1n\n.op\n",
+        ws::spice::ParseOptions{});
+    REQUIRE(parsed);
+    const auto ast = build_deck_ast(*parsed, warnings);
+    REQUIRE(ast);
+    const ws::core::Status st = ws::spice::lint_deck(*ast, warnings);
+    REQUIRE(!st);  // the §6.6 finding is a hard error, not a warning
+    CHECK(st.error().message.find("no DC path to ground") != std::string::npos);
+    CHECK(st.error().message.find("flt") != std::string::npos);
+}
+
+// --- §8.3 rev: the explicit compat mode ---------------------------------------------
+
+TEST_CASE("compat: strict rejects the LTspice forms, naming the ngspice spelling") {
+    const std::string deck =
+        "st\n.param rl=2k\nV1 in 0 5\nR1 in out 1k\nR2 out 0 {rl}\n.op\n";
+    // Default (ngspice): accepted, as ever.
+    REQUIRE(run_text(deck));
+    // strict: rejected with the fix spelled out.
+    const auto strict = run_text("st\n.options compat=strict\n.param rl=2k\n"
+                                 "V1 in 0 5\nR1 in out 1k\nR2 out 0 {rl}\n.op\n");
+    REQUIRE(!strict);
+    CHECK(strict.error().message.find("{rl") != std::string::npos);
+    CHECK(strict.error().message.find("compat=ltspice") != std::string::npos);
+
+    // ltspice: explicitly accepted.
+    REQUIRE(run_text("st\n.options compat=ltspice\n.param rl=2k\nV1 in 0 5\n"
+                     "R1 in out 1k\nR2 out 0 {rl}\n.op\n"));
+
+    // Rser= and params: sections reject under strict too.
+    const auto rser = run_text("st\n.options compat=strict\nV1 a b 5\n"
+                               "L1 a b 1m Rser=1\nR1 b 0 1k\n.op\n");
+    REQUIRE(!rser);
+    CHECK(rser.error().message.find("Rser=") != std::string::npos);
+    const auto par = run_text(
+        "st\n.options compat=strict\n.subckt d a b params: r=1k\n"
+        "Ri a b {r}\n.ends\nX1 x 0 d\nV1 x 0 5\n.op\n");
+    REQUIRE(!par);
+    CHECK(par.error().message.find("params:") != std::string::npos);
+
+    // An unknown mode is itself a parse error.
+    const auto bad = run_text("st\n.options compat=pspice\nV1 a 0 5\nR1 a 0 1k\n.op\n");
+    REQUIRE(!bad);
+    CHECK(bad.error().message.find("ngspice, ltspice or strict") != std::string::npos);
 }

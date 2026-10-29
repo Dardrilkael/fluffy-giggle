@@ -640,6 +640,51 @@ ws::core::Result<Table> run_ac(const Circuit& circuit, RunState& state,
 
 }  // namespace
 
+// --- compat=strict (§8.3 rev) -------------------------------------------------------
+
+// Rejects the LTspice-only forms the default dialect quietly accepts:
+// '{expr}' device values, 'Rser=' on inductors, and 'params:' sections on
+// subckt definitions or X cards. Everything the two simulators share -
+// plain cards, .param, ic=, .model - is dialect-neutral and stays legal.
+ws::core::Status check_compat_strict(const DeckAst& ast) {
+    auto reject = [&](SourceLoc loc, const std::string& what,
+                      const std::string& instead) {
+        Diagnostic d = run_diag(
+            ErrorKind::Parse, "spice.parse.compat_strict",
+            "rejected by compat=strict: " + what +
+                " is an LTspice form; the ngspice spelling is " + instead);
+        d.loc = std::move(loc);
+        d.hint = ".options compat=ltspice (or ngspice) accepts it";
+        return spice_fail(std::move(d));
+    };
+    for (const DeviceCard& card : ast.devices) {
+        const char letter = static_cast<char>(std::toupper(static_cast<unsigned char>(
+            card.name.text.empty() ? ' ' : card.name.text[0])));
+        for (const Token& tok : card.rest) {
+            if (!tok.text.empty() && tok.text.front() == '{') {
+                return reject(tok.loc, "'{" + tok.text.substr(1, tok.text.size() > 1 ? tok.text.size() - 1 : 0) +
+                                    "...}' values", "a .param name or a plain number");
+            }
+            if (letter == 'L' && to_lower(tok.text).rfind("rser=", 0) == 0) {
+                return reject(tok.loc, "'" + tok.text + "'",
+                              "an explicit series resistor device");
+            }
+            if (letter == 'X' &&
+                (to_lower(tok.text) == "params:" || tok.text.find('=') != std::string::npos)) {
+                return reject(tok.loc, "subcircuit 'params:' sections",
+                              ".subckt pins plus .param definitions");
+            }
+        }
+    }
+    for (const auto& [name, def] : ast.subckts) {
+        if (!def.defaults.empty()) {
+            return reject(def.loc, "params: defaults on .subckt '" + def.name.text + "'",
+                          "explicit .param definitions");
+        }
+    }
+    return {};
+}
+
 // --- the public entry (run.hpp) --------------------------------------------------------
 
 namespace drivers {
@@ -878,6 +923,7 @@ void merge_into_family(Table& family, const Table& point, const StepPoint& sp,
         }
     }
 }
+
 
 // --- the public entry (run.hpp) --------------------------------------------------------
 
@@ -1229,6 +1275,12 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
                                      std::vector<Warning>& warnings) {
     // .options override the caller's defaults, later cards win (§5.1).
     WS_TRY(apply_options(ast.options, settings));
+
+    // §8.3 rev: strict rejects the LTspice-only accommodations instead of
+    // silently accepting everything (the deck says what it wants to be).
+    if (settings.compat == "strict") {
+        WS_TRY(check_compat_strict(ast));
+    }
 
     // The parser can only build exactly one analysis kind per card, but
     // DeckAst is a public type: a hand-built AST could carry none or
