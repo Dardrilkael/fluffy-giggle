@@ -68,17 +68,29 @@ SaveList default_save_list(const Circuit& c) {
     return s;
 }
 
-std::vector<double> extract_row(const Circuit& c, const SaveList& s,
-                                const std::vector<double>& x) {
-    std::vector<double> row;
-    row.reserve(s.nodes.size() + s.branches.size());
-    for (std::size_t n : s.nodes) {
-        row.push_back(x[n]);
+// Appends one sample of every save-list signal from the solution vector
+// into the table's columns (columnar fill, §7.8 rev).
+void append_row_columns(const Circuit& c, const SaveList& s, Table& t,
+                        const std::vector<double>& x) {
+    std::size_t k = 0;
+    for (const std::size_t n : s.nodes) {
+        t.signals[k++].data.push_back(x[n]);
     }
-    for (std::size_t b : s.branches) {
-        row.push_back(x[c.node_count() + b]);
+    for (const std::size_t b : s.branches) {
+        t.signals[k++].data.push_back(x[c.node_count() + b]);
     }
-    return row;
+}
+
+// Signal skeletons from a save-list (names only; data fills per sample).
+std::vector<Signal> signal_skeleton(const SaveList& s) {
+    std::vector<Signal> out;
+    out.reserve(s.columns.size());
+    for (const std::string& name : s.columns) {
+        Signal sig;
+        sig.name = name;
+        out.push_back(std::move(sig));
+    }
+    return out;
 }
 
 // Folds every dynamic device's bound parameters into its state slice
@@ -305,8 +317,9 @@ ws::core::Result<Table> run_op(const Circuit& circuit, RunState& state,
     Table t;
     t.analysis = AnalysisKind::Op;
     t.sweep = SweepKind::None;
-    t.columns = default_save_list(circuit).columns;
-    t.rows.push_back(extract_row(circuit, default_save_list(circuit), x));
+    const SaveList save = default_save_list(circuit);
+    t.signals = signal_skeleton(save);
+    append_row_columns(circuit, save, t, x);
     return t;
 }
 
@@ -487,6 +500,7 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const Circuit& base_circuit,
     if (outer) {
         t.sweep_names.push_back(outer->source.text);
     }
+    t.sweep_axes.assign(t.sweep_names.size(), {});
 
     // Per-point state. A temp sweep re-elaborates when its value changes
     // (§7.7); everything else mutates only source parameter slots over
@@ -497,6 +511,7 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const Circuit& base_circuit,
     std::size_t total_factorizations = 0;
     std::size_t kernel_factorizations = 0;  // last read from the LIVE kernel
     SaveList save = default_save_list(base_circuit);
+    t.signals = signal_skeleton(save);
     std::unique_ptr<DcKernel> kernel;
     std::vector<double> x;  // warm start across points (§7.3)
     bool first_point = true;
@@ -619,17 +634,12 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const Circuit& base_circuit,
             kernel_factorizations = kernel->factorizations();
             first_point = false;
 
-            std::vector<double> row;
-            row.reserve(t.sweep_names.size() + save.columns.size());
             // Sweep values in sweep_names order: inner first, then outer.
-            row.push_back(inner_value);
+            t.sweep_axes[0].push_back(inner_value);
             if (outer) {
-                row.push_back(outer_value);
+                t.sweep_axes[1].push_back(outer_value);
             }
-            for (const double v : extract_row(circuit, save, x)) {
-                row.push_back(v);
-            }
-            t.rows.push_back(std::move(row));
+            append_row_columns(circuit, save, t, x);
         }
     }
 
@@ -637,7 +647,6 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const Circuit& base_circuit,
     report.newton_iterations = total_iterations;
     report.lu_factorizations = total_factorizations;
     report.stage = "newton";
-    t.columns = save.columns;
     return t;
 }
 
@@ -766,14 +775,11 @@ ws::core::Result<Table> run_tran(const Circuit& circuit, RunState& state,
     t.analysis = AnalysisKind::Tran;
     t.sweep = SweepKind::Time;
     t.sweep_names.push_back("time");
+    t.sweep_axes.assign(1, {});
+    t.signals = signal_skeleton(save);
     auto push_row = [&](double now) {
-        std::vector<double> row;
-        row.reserve(1 + save.columns.size());
-        row.push_back(now);
-        for (const double v : extract_row(circuit, save, x)) {
-            row.push_back(v);
-        }
-        t.rows.push_back(std::move(row));
+        t.sweep_axes[0].push_back(now);
+        append_row_columns(circuit, save, t, x);
     };
     if (tstart <= 0.0) {
         push_row(0.0);
@@ -918,7 +924,6 @@ ws::core::Result<Table> run_tran(const Circuit& circuit, RunState& state,
     report.stage = fixed ? "trap(fixed)" : "trap";
     report.accepted_steps = accepted;
     report.rejected_steps = rejected;
-    t.columns = save.columns;
     return t;
 }
 
@@ -1037,16 +1042,21 @@ ws::core::Result<Table> run_ac(const Circuit& circuit, RunState& state,
     // and the switches' settled positions ride their state slots.
     fold_all(circuit, state);
 
-    // Columns: frequency, then re()/im() pairs for the default save-list
-    // (the locked CSV decision: re()/im(), never mag/phase).
+    // Signals: frequency axis, then re()/im() pairs for the default
+    // save-list (the locked CSV decision: re()/im(), never mag/phase).
     const SaveList save = default_save_list(circuit);
     Table t;
     t.analysis = AnalysisKind::Ac;
     t.sweep = SweepKind::Frequency;
     t.sweep_names.push_back("frequency");
+    t.sweep_axes.assign(1, {});
     for (const std::string& col : save.columns) {
-        t.columns.push_back("re(" + col + ")");
-        t.columns.push_back("im(" + col + ")");
+        Signal re;
+        re.name = "re(" + col + ")";
+        t.signals.push_back(std::move(re));
+        Signal im;
+        im.name = "im(" + col + ")";
+        t.signals.push_back(std::move(im));
     }
 
     for (const double f : freqs) {
@@ -1060,18 +1070,16 @@ ws::core::Result<Table> run_ac(const Circuit& circuit, RunState& state,
                 return wrap_solver_error(st, ctx);
             }
         }
-        std::vector<double> row;
-        row.reserve(1 + 2 * save.columns.size());
-        row.push_back(f);
+        t.sweep_axes[0].push_back(f);
+        std::size_t k = 0;
         for (const std::size_t n : save.nodes) {
-            row.push_back(xc[n].real());
-            row.push_back(xc[n].imag());
+            t.signals[k++].data.push_back(xc[n].real());
+            t.signals[k++].data.push_back(xc[n].imag());
         }
         for (const std::size_t b : save.branches) {
-            row.push_back(xc[circuit.node_count() + b].real());
-            row.push_back(xc[circuit.node_count() + b].imag());
+            t.signals[k++].data.push_back(xc[circuit.node_count() + b].real());
+            t.signals[k++].data.push_back(xc[circuit.node_count() + b].imag());
         }
-        t.rows.push_back(std::move(row));
     }
 
     report.analysis = ".ac";

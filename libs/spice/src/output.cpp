@@ -2,7 +2,9 @@
 // shape is §0.5 - header row, sweep column(s) first, one column per saved
 // quantity named as the deck spells it, comma separated. Numbers print
 // %.12g: round-trip stable for the test suite's comparisons and
-// deterministic run to run (§10.5).
+// deterministic run to run (§10.5). Columnar storage means the writer
+// walks columns by sample index - and so will the .raw writer (a future
+// consumer of the same type, no reshape needed).
 
 #include <cstdio>
 #include <string>
@@ -20,24 +22,14 @@ void append_number(std::string& out, double v) {
     out += buf;
 }
 
-void append_row(std::string& out, const std::vector<double>& row) {
-    for (std::size_t i = 0; i < row.size(); ++i) {
-        if (i != 0) {
-            out += ',';
-        }
-        append_number(out, row[i]);
-    }
-    out += '\n';
-}
-
 }  // namespace
 
 std::string table_csv(const Table& t) {
     std::string out;
     // §0.5: sweep column(s) first, then one column per saved quantity -
     // a plain comma-join. A .op table (SweepKind::None, no sweep_names)
-    // starts directly with its node columns; the header must always have
-    // exactly as many fields as every data row.
+    // starts directly with its signal columns; the header must always
+    // have exactly as many fields as every data row.
     bool first = true;
     for (const std::string& name : t.sweep_names) {
         if (!first) {
@@ -46,16 +38,33 @@ std::string table_csv(const Table& t) {
         out += name;
         first = false;
     }
-    for (const std::string& col : t.columns) {
+    for (const Signal& s : t.signals) {
         if (!first) {
             out += ',';
         }
-        out += col;
+        out += s.name;
         first = false;
     }
     out += '\n';
-    for (const std::vector<double>& row : t.rows) {
-        append_row(out, row);
+
+    const std::size_t n = t.row_count();
+    for (std::size_t i = 0; i < n; ++i) {
+        bool row_first = true;
+        for (const auto& ax : t.sweep_axes) {
+            if (!row_first) {
+                out += ',';
+            }
+            append_number(out, i < ax.size() ? ax[i] : 0.0);
+            row_first = false;
+        }
+        for (const Signal& s : t.signals) {
+            if (!row_first) {
+                out += ',';
+            }
+            append_number(out, i < s.data.size() ? s.data[i] : 0.0);
+            row_first = false;
+        }
+        out += '\n';
     }
     return out;
 }

@@ -55,16 +55,25 @@ std::string error_of(const ws::core::Result<RunOutput>& r) {
 
 // Column index of `name` in the table (sweep columns excluded).
 std::size_t col_of(const Table& t, const std::string& name) {
-    for (std::size_t i = 0; i < t.columns.size(); ++i) {
-        if (t.columns[i] == name) {
-            return i;
-        }
+    const auto idx = t.signal_index(name);
+    if (idx.has_value()) {
+        return *idx;
     }
     REQUIRE_MESSAGE(false, ("missing column " + name).c_str());
     return 0;
 }
 
 doctest::Approx approx(double v) { return doctest::Approx(v).epsilon(1e-9); }
+
+// The table's signal names, in order (the old `columns` member).
+std::vector<std::string> signal_names(const Table& t) {
+    std::vector<std::string> out;
+    out.reserve(t.signals.size());
+    for (const ws::spice::Signal& s : t.signals) {
+        out.push_back(s.name);
+    }
+    return out;
+}
 
 }  // namespace
 
@@ -82,11 +91,11 @@ TEST_CASE(".op: resistor divider against the closed form") {
     const Table& t = run->results.tables[0];
     CHECK(t.analysis == ws::spice::AnalysisKind::Op);
     CHECK(t.sweep == ws::spice::SweepKind::None);
-    CHECK(t.columns == std::vector<std::string>{"v(in)", "v(mid)", "i(V1)"});
-    REQUIRE(t.rows.size() == 1);
-    CHECK(t.rows[0][col_of(t, "v(in)")] == approx(5.0));
-    CHECK(t.rows[0][col_of(t, "v(mid)")] == approx(5.0 * 2.0 / 3.0));
-    CHECK(t.rows[0][col_of(t, "i(V1)")] == approx(-5.0 / 3000.0));
+    CHECK(signal_names(t) == std::vector<std::string>{"v(in)", "v(mid)", "i(V1)"});
+    REQUIRE(t.rows().size() == 1);
+    CHECK(t.rows()[0][col_of(t, "v(in)")] == approx(5.0));
+    CHECK(t.rows()[0][col_of(t, "v(mid)")] == approx(5.0 * 2.0 / 3.0));
+    CHECK(t.rows()[0][col_of(t, "i(V1)")] == approx(-5.0 / 3000.0));
 
     // Two linear Newton iterations: solve, then a confirming pass.
     CHECK(run->reports.size() == 1);
@@ -113,19 +122,19 @@ TEST_CASE(".op: controlled sources E F G H against the closed form") {
     const Table& t = run->results.tables[0];
 
     const double i_v1 = -1.0 / 3000.0;  // -(R1 + Rload) path
-    CHECK(t.rows[0][col_of(t, "v(a)")] == approx(1.0));
-    CHECK(t.rows[0][col_of(t, "v(b)")] == approx(2.0 / 3.0));
-    CHECK(t.rows[0][col_of(t, "i(V1)")] == approx(i_v1));
+    CHECK(t.rows()[0][col_of(t, "v(a)")] == approx(1.0));
+    CHECK(t.rows()[0][col_of(t, "v(b)")] == approx(2.0 / 3.0));
+    CHECK(t.rows()[0][col_of(t, "i(V1)")] == approx(i_v1));
     // E: v(c) = 3 * v(b).
-    CHECK(t.rows[0][col_of(t, "v(c)")] == approx(2.0));
+    CHECK(t.rows()[0][col_of(t, "v(c)")] == approx(2.0));
     // G: draws 0.5*v(a) out of d through 500 Ohm.
-    CHECK(t.rows[0][col_of(t, "v(d)")] == approx(2.0 - 0.5 * 1.0 * 500.0));
+    CHECK(t.rows()[0][col_of(t, "v(d)")] == approx(2.0 - 0.5 * 1.0 * 500.0));
     // H: v(e) = 100 * i(V1).
-    CHECK(t.rows[0][col_of(t, "v(e)")] == approx(100.0 * i_v1));
+    CHECK(t.rows()[0][col_of(t, "v(e)")] == approx(100.0 * i_v1));
     // F: v(f) = 2 * i(V1) * R4.
-    CHECK(t.rows[0][col_of(t, "v(f)")] == approx(2.0 * i_v1 * 100.0));
-    CHECK(t.rows[0][col_of(t, "i(E1)")] == approx(-0.5));
-    CHECK(t.rows[0][col_of(t, "i(H1)")] == approx(-100.0 * i_v1 / 1000.0));
+    CHECK(t.rows()[0][col_of(t, "v(f)")] == approx(2.0 * i_v1 * 100.0));
+    CHECK(t.rows()[0][col_of(t, "i(E1)")] == approx(-0.5));
+    CHECK(t.rows()[0][col_of(t, "i(H1)")] == approx(-100.0 * i_v1 / 1000.0));
 }
 
 TEST_CASE(".op: I source orientation follows ngspice (positive: N+ to N-)") {
@@ -133,7 +142,7 @@ TEST_CASE(".op: I source orientation follows ngspice (positive: N+ to N-)") {
     const auto run = run_text("i orientation\nI1 0 out 1m\nR1 out 0 1k\n.op\n");
     REQUIRE(run);
     const Table& t = run->results.tables[0];
-    CHECK(t.rows[0][col_of(t, "v(out)")] == approx(1.0));
+    CHECK(t.rows()[0][col_of(t, "v(out)")] == approx(1.0));
 }
 
 TEST_CASE(".op: subckt flattening, scoped names and parameter overrides") {
@@ -152,14 +161,14 @@ TEST_CASE(".op: subckt flattening, scoped names and parameter overrides") {
     REQUIRE(run);
     const Table& t = run->results.tables[0];
     // Display names keep the instance scoping (§0.7/§8.4).
-    CHECK(t.columns == std::vector<std::string>{
-                           "v(in)", "v(X1:nm)", "v(out)", "i(V1)"});
+    CHECK(signal_names(t) == std::vector<std::string>{
+                               "v(in)", "v(X1:nm)", "v(out)", "i(V1)"});
     // Closed form: v(nm) = 4 * (Rb||R2) / (Rt + Rb||R2) with Rt=3k (the
     // override), Rb=1k, R2=5k.
-    CHECK(t.rows[0][col_of(t, "v(in)")] == approx(4.0));
-    CHECK(t.rows[0][col_of(t, "v(X1:nm)")] == approx(8.0 / 3.0));
-    CHECK(t.rows[0][col_of(t, "v(out)")] == approx(20.0 / 9.0));
-    CHECK(t.rows[0][col_of(t, "i(V1)")] == approx(-4.0 / 9000.0));
+    CHECK(t.rows()[0][col_of(t, "v(in)")] == approx(4.0));
+    CHECK(t.rows()[0][col_of(t, "v(X1:nm)")] == approx(8.0 / 3.0));
+    CHECK(t.rows()[0][col_of(t, "v(out)")] == approx(20.0 / 9.0));
+    CHECK(t.rows()[0][col_of(t, "i(V1)")] == approx(-4.0 / 9000.0));
 }
 
 TEST_CASE(".op: nested subckt instances chain prefixes") {
@@ -178,8 +187,8 @@ TEST_CASE(".op: nested subckt instances chain prefixes") {
     REQUIRE(run);
     const Table& t = run->results.tables[0];
     // 2k total: i(V1) = -1mA; internal node X1:mid sits at 1 V.
-    CHECK(t.rows[0][col_of(t, "v(X1:mid)")] == approx(1.0));
-    CHECK(t.rows[0][col_of(t, "i(V1)")] == approx(-1e-3));
+    CHECK(t.rows()[0][col_of(t, "v(X1:mid)")] == approx(1.0));
+    CHECK(t.rows()[0][col_of(t, "i(V1)")] == approx(-1e-3));
 }
 
 // --- §7.3: .dc ----------------------------------------------------------------
@@ -198,10 +207,10 @@ TEST_CASE(".dc: point grid is exact, values are start + k*step") {
     CHECK(t.sweep_names == std::vector<std::string>{"V1"});
     // floor(1/0.3 + 1e-9) + 1 = 4 points: 0, 0.3, 0.6, 0.9 - no float
     // drift, no phantom endpoint.
-    REQUIRE(t.rows.size() == 4);
-    for (std::size_t k = 0; k < t.rows.size(); ++k) {
-        CHECK(t.rows[k][0] == approx(0.3 * static_cast<double>(k)));
-        CHECK(t.rows[k][col_of(t, "v(mid)") + 1] ==
+    REQUIRE(t.rows().size() == 4);
+    for (std::size_t k = 0; k < t.rows().size(); ++k) {
+        CHECK(t.rows()[k][0] == approx(0.3 * static_cast<double>(k)));
+        CHECK(t.rows()[k][col_of(t, "v(mid)") + 1] ==
               approx(0.3 * static_cast<double>(k) * 2.0 / 3.0));
     }
 }
@@ -210,13 +219,13 @@ TEST_CASE(".dc: negative direction and single-point sweeps") {
     const auto back = run_text(
         "down\nV1 in 0 5\nR1 in 0 1k\n.dc V1 5 0 -2.5\n");
     REQUIRE(back);
-    REQUIRE(back->results.tables[0].rows.size() == 3);
-    CHECK(back->results.tables[0].rows[2][0] == approx(0.0));
+    REQUIRE(back->results.tables[0].rows().size() == 3);
+    CHECK(back->results.tables[0].rows()[2][0] == approx(0.0));
 
     const auto one = run_text("single\nV1 in 0 5\nR1 in 0 1k\n.dc V1 3 3 1\n");
     REQUIRE(one);
-    REQUIRE(one->results.tables[0].rows.size() == 1);
-    CHECK(one->results.tables[0].rows[0][0] == approx(3.0));
+    REQUIRE(one->results.tables[0].rows().size() == 1);
+    CHECK(one->results.tables[0].rows()[0][0] == approx(3.0));
 }
 
 TEST_CASE(".dc: two nested sweeps, first source innermost") {
@@ -233,11 +242,11 @@ TEST_CASE(".dc: two nested sweeps, first source innermost") {
     // 3 inner points x 2 outer points = 6 rows. Inner (V1) cycles
     // fastest; the outer I1 draws current OUT of mid (ngspice
     // orientation): at V1=4, I1=1m: v(mid) = 4*2/3 - 1m*666.7.
-    REQUIRE(t.rows.size() == 6);
+    REQUIRE(t.rows().size() == 6);
     const std::size_t last = 5;
-    CHECK(t.rows[last][0] == approx(4.0));
-    CHECK(t.rows[last][1] == approx(1e-3));
-    CHECK(t.rows[last][col_of(t, "v(mid)") + 2] == approx(2.0));
+    CHECK(t.rows()[last][0] == approx(4.0));
+    CHECK(t.rows()[last][1] == approx(1e-3));
+    CHECK(t.rows()[last][col_of(t, "v(mid)") + 2] == approx(2.0));
 }
 
 TEST_CASE(".dc: temp sweep is accepted (M1 devices carry no temp dependence)") {
@@ -245,8 +254,8 @@ TEST_CASE(".dc: temp sweep is accepted (M1 devices carry no temp dependence)") {
         "temp\nV1 in 0 5\nR1 in 0 1k\n.dc temp 0 100 50\n");
     REQUIRE(run);
     const Table& t = run->results.tables[0];
-    REQUIRE(t.rows.size() == 3);
-    for (const auto& row : t.rows) {
+    REQUIRE(t.rows().size() == 3);
+    for (const auto& row : t.rows()) {
         CHECK(row[col_of(t, "v(in)") + 1] == approx(5.0));
     }
 
@@ -312,9 +321,9 @@ TEST_CASE(".dc: sweep expressions see .param") {
         ".dc V1 vstart vstop vstep\n");
     REQUIRE(run);
     const Table& t = run->results.tables[0];
-    REQUIRE(t.rows.size() == 5);  // 1, 1.5, 2, 2.5, 3
-    CHECK(t.rows[0][0] == approx(1.0));
-    CHECK(t.rows[4][0] == approx(3.0));
+    REQUIRE(t.rows().size() == 5);  // 1, 1.5, 2, 2.5, 3
+    CHECK(t.rows()[0][0] == approx(1.0));
+    CHECK(t.rows()[4][0] == approx(3.0));
 }
 
 TEST_CASE(".dc errors: step direction, unknown source, non-source target") {
@@ -430,10 +439,10 @@ TEST_CASE(".op: bare source value (no DC keyword) parses the same") {
         "bare\nV1 in 0 5\nR1 in mid 1k\nR2 mid 0 2k\n.op\n");
     REQUIRE(run);
     const Table& t = run->results.tables[0];
-    CHECK(t.columns == std::vector<std::string>{"v(in)", "v(mid)", "i(V1)"});
-    CHECK(t.rows[0][col_of(t, "v(in)")] == approx(5.0));
-    CHECK(t.rows[0][col_of(t, "v(mid)")] == approx(5.0 * 2.0 / 3.0));
-    CHECK(t.rows[0][col_of(t, "i(V1)")] == approx(-5.0 / 3000.0));
+    CHECK(signal_names(t) == std::vector<std::string>{"v(in)", "v(mid)", "i(V1)"});
+    CHECK(t.rows()[0][col_of(t, "v(in)")] == approx(5.0));
+    CHECK(t.rows()[0][col_of(t, "v(mid)")] == approx(5.0 * 2.0 / 3.0));
+    CHECK(t.rows()[0][col_of(t, "i(V1)")] == approx(-5.0 / 3000.0));
 }
 
 // --- §9.3: warnings ------------------------------------------------------------
@@ -465,7 +474,7 @@ TEST_CASE("a title line that looks like a card warns (the swallowed-device footg
     CHECK(warnings[0].render().find("hint:") != std::string::npos);
     // ...and the run itself still succeeds with the title-only V1 absent:
     const Table& t = run->results.tables[0];
-    CHECK(t.columns == std::vector<std::string>{"v(in)", "v(mid)"});
+    CHECK(signal_names(t) == std::vector<std::string>{"v(in)", "v(mid)"});
 
     // A dot-card title warns too.
     std::vector<Warning> dot_warnings;
@@ -573,9 +582,9 @@ TEST_CASE(".param: values flow into devices three ways") {
     REQUIRE(run);
     const Table& t = run->results.tables[0];
     // R1 (2k) parallels the R2+R3 branch (1k+2k = 3k): 1.2k total.
-    CHECK(t.rows[0][col_of(t, "v(a)")] == approx(3.0));
-    CHECK(t.rows[0][col_of(t, "v(b)")] == approx(2.0));
-    CHECK(t.rows[0][col_of(t, "i(V1)")] == approx(-2.5e-3));
+    CHECK(t.rows()[0][col_of(t, "v(a)")] == approx(3.0));
+    CHECK(t.rows()[0][col_of(t, "v(b)")] == approx(2.0));
+    CHECK(t.rows()[0][col_of(t, "i(V1)")] == approx(-2.5e-3));
 }
 
 TEST_CASE("expression evaluator: operators, functions, ternary") {
@@ -603,19 +612,21 @@ TEST_CASE("expression evaluator: operators, functions, ternary") {
 
 namespace {
 
-// The .tran row whose time is closest to `t`.
-const std::vector<double>& row_near(const Table& t, double when) {
+// The .tran row whose time is closest to `t` (by value: rows() is a
+// materialized view).
+std::vector<double> row_near(const Table& t, double when) {
+    const std::vector<std::vector<double>> rows = t.rows();
     std::size_t best = 0;
     double best_diff = 1e30;
-    for (std::size_t i = 0; i < t.rows.size(); ++i) {
-        const double d = std::abs(t.rows[i][0] - when);
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        const double d = std::abs(rows[i][0] - when);
         if (d < best_diff) {
             best_diff = d;
             best = i;
         }
     }
-    REQUIRE(best < t.rows.size());
-    return t.rows[best];
+    REQUIRE(best < rows.size());
+    return rows[best];
 }
 
 constexpr double kPi = 3.14159265358979323846;
@@ -681,7 +692,7 @@ TEST_CASE(".tran: trap order 2 - RC error ratio ~4 on halving fixed dt") {
         const Table& t = run->results.tables[0];
         const std::size_t vcol = col_of(t, "v(out)") + 1;
         double worst = 0.0;
-        for (const auto& row : t.rows) {
+        for (const auto& row : t.rows()) {
             if (row[0] <= 1.0011e-6) {
                 continue;  // pre-edge (all zeros) and the ramp step itself
             }
@@ -717,7 +728,7 @@ TEST_CASE(".tran: series RLC step - ringing frequency and overshoot") {
 
     // Peak (overshoot) within 1e-3 V of the closed form.
     double peak = 0.0;
-    for (const auto& row : t.rows) {
+    for (const auto& row : t.rows()) {
         peak = std::max(peak, row[vcol]);
     }
     const double zeta = 10.0 / 2.0 * std::sqrt(1e-6 / 1e-3);
@@ -727,12 +738,12 @@ TEST_CASE(".tran: series RLC step - ringing frequency and overshoot") {
     // Ringing frequency from the first two downward zero crossings of
     // v - 1, within 0.2%.
     std::vector<double> crossings;
-    for (std::size_t i = 1; i < t.rows.size(); ++i) {
-        const double a = t.rows[i - 1][vcol] - 1.0;
-        const double b = t.rows[i][vcol] - 1.0;
+    for (std::size_t i = 1; i < t.rows().size(); ++i) {
+        const double a = t.rows()[i - 1][vcol] - 1.0;
+        const double b = t.rows()[i][vcol] - 1.0;
         if (a > 0 && b <= 0) {
-            crossings.push_back(t.rows[i - 1][0] +
-                                a / (a - b) * (t.rows[i][0] - t.rows[i - 1][0]));
+            crossings.push_back(t.rows()[i - 1][0] +
+                                a / (a - b) * (t.rows()[i][0] - t.rows()[i - 1][0]));
             if (crossings.size() == 2) {
                 break;
             }
@@ -760,7 +771,7 @@ TEST_CASE(".tran: undamped LC conserves amplitude over 50 periods") {
     const Table& t = run->results.tables[0];
     const std::size_t vcol = col_of(t, "v(out)") + 1;
     double tail_peak = 0.0;
-    for (const auto& row : t.rows) {
+    for (const auto& row : t.rows()) {
         if (row[0] > 49.0 * 2 * kPi) {
             tail_peak = std::max(tail_peak, std::abs(row[vcol]));
         }
@@ -779,11 +790,11 @@ TEST_CASE(".ac: RC low-pass re/im against the closed form, 1e-9 rel") {
     REQUIRE(run);
     const Table& t = run->results.tables[0];
     CHECK(t.sweep_names == std::vector<std::string>{"frequency"});
-    CHECK(t.columns == std::vector<std::string>{"re(v(in))", "im(v(in))",
+    CHECK(signal_names(t) == std::vector<std::string>{"re(v(in))", "im(v(in))",
                                                 "re(v(out))", "im(v(out))",
                                                 "re(i(V1))", "im(i(V1))"});
-    REQUIRE(t.rows.size() > 10);
-    for (const auto& row : t.rows) {
+    REQUIRE(t.rows().size() > 10);
+    for (const auto& row : t.rows()) {
         const double w = 2 * kPi * row[0];
         const double rc = 1e-3;
         // v_out = 1/(1 + j w RC) = (1 - j w RC)/(1 + (w RC)^2)
@@ -810,7 +821,7 @@ TEST_CASE(".ac: series RLC - |Y| curve, resonance and Q, 1e-9 rel") {
     const Table& t = run->results.tables[0];
     double best_f = 0.0;
     double best_g = 0.0;
-    for (const auto& row : t.rows) {
+    for (const auto& row : t.rows()) {
         const double w = 2 * kPi * row[0];
         const double x = w * 1e-3 - 1.0 / (w * 1e-6);
         // i(V1) carries the source convention: negative when delivering
@@ -846,7 +857,7 @@ TEST_CASE(".ac: coupled inductors - voltage ratio ~ sqrt(L2/L1) as k -> 1") {
         ".ac dec 1 10k 100k\n");
     REQUIRE(run);
     const Table& t = run->results.tables[0];
-    for (const auto& row : t.rows) {
+    for (const auto& row : t.rows()) {
         const double vb = std::hypot(row[col_of(t, "re(v(b))") + 1],
                                      row[col_of(t, "im(v(b))") + 1]);
         CHECK(vb == doctest::Approx(2.0).epsilon(1e-3));  // sqrt(4m/1m)
@@ -1035,12 +1046,12 @@ TEST_CASE("rebind: two runs of one deck are independent and identical") {
     REQUIRE(b->results.tables.size() == 1);
     const Table& ta = a->results.tables[0];
     const Table& tb = b->results.tables[0];
-    REQUIRE(ta.rows.size() == tb.rows.size());
-    REQUIRE(ta.rows.size() > 5);
-    for (std::size_t i = 0; i < ta.rows.size(); ++i) {
-        REQUIRE(ta.rows[i].size() == tb.rows[i].size());
-        for (std::size_t j = 0; j < ta.rows[i].size(); ++j) {
-            CHECK(ta.rows[i][j] == tb.rows[i][j]);  // bit-identical (§10.5)
+    REQUIRE(ta.rows().size() == tb.rows().size());
+    REQUIRE(ta.rows().size() > 5);
+    for (std::size_t i = 0; i < ta.rows().size(); ++i) {
+        REQUIRE(ta.rows()[i].size() == tb.rows()[i].size());
+        for (std::size_t j = 0; j < ta.rows()[i].size(); ++j) {
+            CHECK(ta.rows()[i][j] == tb.rows()[i][j]);  // bit-identical (§10.5)
         }
     }
 }
@@ -1059,15 +1070,15 @@ TEST_CASE("rebind: a .dc sweep value never leaks into a later analysis") {
     REQUIRE(run);
     REQUIRE(run->results.tables.size() == 2);
     const Table& tran = run->results.tables[1];
-    REQUIRE(tran.rows.size() >= 2);
-    CHECK(tran.rows[0][col_of(tran, "v(in)") + 1] == approx(0.0));
+    REQUIRE(tran.rows().size() >= 2);
+    CHECK(tran.rows()[0][col_of(tran, "v(in)") + 1] == approx(0.0));
     // The waveform drives the transient: 0 at t=0 (no .dc residue of the
     // 5 V sweep endpoint), ramping through the PULSE, at the 5 V plateau
     // by t = TD+TR = 2u (tstop = 5u).
-    for (const auto& row : tran.rows) {
+    for (const auto& row : tran.rows()) {
         CHECK(row[col_of(tran, "v(in)") + 1] <= 5.0 + 1e-9);
     }
-    CHECK(tran.rows.back()[col_of(tran, "v(in)") + 1] == approx(5.0));
+    CHECK(tran.rows().back()[col_of(tran, "v(in)") + 1] == approx(5.0));
 }
 
 TEST_CASE("rebind: interleaved analyses keep their own dynamic state") {
@@ -1086,14 +1097,70 @@ TEST_CASE("rebind: interleaved analyses keep their own dynamic state") {
     // at the first frequency point, unaffected by the transient's history
     // (verified against the same deck run .ac-only).
     const Table& ac = run->results.tables[1];
-    const double f = ac.rows[0][0];
+    const double f = ac.rows()[0][0];
     CHECK(f == approx(1000.0));
     const double w = 2.0 * 3.14159265358979 * f;
     const double x = w * 1e3 * 1e-6;  // wRC
     const double expect_re = 1.0 / (1.0 + x * x);
     const double expect_im = -x / (1.0 + x * x);
-    CHECK(ac.rows[0][col_of(ac, "re(v(out))") + 1] ==
+    CHECK(ac.rows()[0][col_of(ac, "re(v(out))") + 1] ==
           doctest::Approx(expect_re).epsilon(1e-6));
-    CHECK(ac.rows[0][col_of(ac, "im(v(out))") + 1] ==
+    CHECK(ac.rows()[0][col_of(ac, "im(v(out))") + 1] ==
           doctest::Approx(expect_im).epsilon(1e-6));
+}
+
+// --- §7.8 rev: columnar access ---------------------------------------------------
+
+TEST_CASE("columnar: signals by name, contiguous, axis shared") {
+    const auto run = run_text(
+        "cols\n"
+        "V1 in 0 PULSE(0 5 1u 1u 1u 10u)\n"
+        "R1 in out 1k\n"
+        "C1 out 0 1n\n"
+        ".tran 1u 20u\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+
+    // Signal by name: a contiguous span of row_count() samples.
+    const std::span<const double> vout = t.signal("v(out)");
+    REQUIRE(vout.size() == t.row_count());
+    CHECK(t.row_count() > 5);
+    // Contiguity: the span points straight into the column storage.
+    const auto idx = t.signal_index("v(out)");
+    REQUIRE(idx.has_value());
+    CHECK(vout.data() == t.signals[*idx].data.data());
+    // A missing name is an empty span, not an error.
+    CHECK(t.signal("v(nope)").empty());
+
+    // The time axis is the shared sweep column.
+    const std::span<const double> time = t.axis();
+    REQUIRE(time.size() == t.row_count());
+    CHECK(time.front() == 0.0);
+    CHECK(time.back() == doctest::Approx(20e-6).epsilon(1e-9));
+
+    // rows()[i] agrees with the columnar view.
+    for (std::size_t i : {std::size_t{0}, std::size_t{1}, t.row_count() - 1}) {
+        const std::vector<double> row = t.row(i);
+        REQUIRE(row.size() == 1 + t.signals.size());
+        CHECK(row[0] == time[i]);
+        CHECK(row[1 + *idx] == vout[i]);
+    }
+}
+
+TEST_CASE("columnar: Results::operator[] finds the owning analysis") {
+    const auto run = run_text(
+        "multi\n"
+        "V1 in 0 DC 1 AC 1\n"
+        "R1 in out 1k\n"
+        "C1 out 0 1u\n"
+        ".tran 10u 20u\n"
+        ".ac dec 1 1k 100k\n");
+    REQUIRE(run);
+    // v(out) exists only in the .tran table; re(v(out)) only in .ac.
+    CHECK(!run->results["v(out)"].empty());
+    CHECK(run->results["v(out)"].size() == run->results.tables[0].row_count());
+    CHECK(!run->results["re(v(out))"].empty());
+    CHECK(run->results["re(v(out))"].size() ==
+          run->results.tables[1].row_count());
+    CHECK(run->results["nope(x)"].empty());
 }
