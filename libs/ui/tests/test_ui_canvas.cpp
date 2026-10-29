@@ -5,18 +5,24 @@
 // ear-clip/AA geometry. All headless: a TessBuffer is the whole raster
 // backend these tests need.
 //
-// (test_ui_shell.cpp is part 2; both link the same gui archive + the
+// Part 2 (below) exercises the Canvas2D interface via CommandListCanvas:
+// transform stack, path API, convenience wrappers, text/image recording.
+//
+// (test_ui_shell.cpp is part 3; both link the same gui archive + the
 // r2d stub, the test_ui_gui precedent.)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
 #include <ws/ui/canvas/tessellation.hpp>
+#include <ws/ui/canvas/canvas2d.hpp>
 
 #include <cmath>
 #include <vector>
 
 using namespace ws::ui::canvas;
+using ws::ui::r2d::Font;
+using ws::ui::r2d::Texture;
 
 namespace {
 
@@ -534,5 +540,167 @@ TEST_CASE("fill: the ear-clipped core and the AA fringe") {
         const Point line3[] = {{0.0f, 0.0f}, {5.0f, 0.0f}, {10.0f, 0.0f}};
         fill_polygon(line3, 3, 0xFFFFFFFFu, buf);
         CHECK(buf.quad_count() == 0);
+    }
+}
+
+// =============================================================================
+// Part 2: the Canvas2D interface (CommandListCanvas recording)
+// =============================================================================
+
+TEST_CASE("canvas2d: transform stack maps local to screen") {
+    CommandListCanvas c;
+
+    SUBCASE("translate shifts points") {
+        c.translate(5.0f, 10.0f);
+        c.stroke_line({0.0f, 0.0f}, {10.0f, 0.0f}, Paint{});
+        REQUIRE(c.cmds.size() == 1);
+        CHECK(c.cmds[0].points[0].x == doctest::Approx(5.0f));
+        CHECK(c.cmds[0].points[0].y == doctest::Approx(10.0f));
+        CHECK(c.cmds[0].points[1].x == doctest::Approx(15.0f));
+        CHECK(c.cmds[0].points[1].y == doctest::Approx(10.0f));
+    }
+
+    SUBCASE("scale multiplies coordinates") {
+        c.scale(2.0f, 3.0f);
+        c.stroke_line({1.0f, 1.0f}, {5.0f, 5.0f}, Paint{});
+        REQUIRE(c.cmds.size() == 1);
+        CHECK(c.cmds[0].points[0].x == doctest::Approx(2.0f));
+        CHECK(c.cmds[0].points[0].y == doctest::Approx(3.0f));
+        CHECK(c.cmds[0].points[1].x == doctest::Approx(10.0f));
+        CHECK(c.cmds[0].points[1].y == doctest::Approx(15.0f));
+    }
+
+    SUBCASE("push/pop restores the transform") {
+        c.translate(5.0f, 5.0f);
+        c.push_transform();
+        c.translate(100.0f, 100.0f);
+        c.stroke_line({0.0f, 0.0f}, {1.0f, 0.0f}, Paint{});
+        c.pop_transform();
+        c.stroke_line({0.0f, 0.0f}, {1.0f, 0.0f}, Paint{});
+        REQUIRE(c.cmds.size() == 2);
+        // The first line (under both translates) is at (105, 105).
+        CHECK(c.cmds[0].points[0].x == doctest::Approx(105.0f));
+        // The second line (popped back to the first translate) is at (5, 5).
+        CHECK(c.cmds[1].points[0].x == doctest::Approx(5.0f));
+    }
+
+    SUBCASE("view_scale tracks the transform scale") {
+        CHECK(c.view_scale() == doctest::Approx(1.0f));
+        c.scale(2.0f, 2.0f);
+        CHECK(c.view_scale() == doctest::Approx(2.0f));
+        c.push_transform();
+        c.scale(3.0f, 3.0f);
+        CHECK(c.view_scale() == doctest::Approx(6.0f));
+        c.pop_transform();
+        CHECK(c.view_scale() == doctest::Approx(2.0f));
+    }
+}
+
+TEST_CASE("canvas2d: convenience wrappers record the right commands") {
+    CommandListCanvas c;
+
+    SUBCASE("stroke_line records one stroke_polyline") {
+        c.stroke_line({0.0f, 0.0f}, {10.0f, 0.0f}, Paint{});
+        CHECK(c.count(CanvasCmdKind::stroke_polyline) == 1);
+        CHECK(c.cmds[0].points.size() == 2);
+    }
+
+    SUBCASE("fill_polygon records one fill_polygon") {
+        const Point tri[] = {{0.0f, 0.0f}, {10.0f, 0.0f}, {5.0f, 10.0f}};
+        c.fill_polygon(tri, 3, 0xFF0000FFu);
+        CHECK(c.count(CanvasCmdKind::fill_polygon) == 1);
+        CHECK(c.cmds[0].color == 0xFF0000FFu);
+        CHECK(c.cmds[0].points.size() == 4);  // 3 + close
+    }
+
+    SUBCASE("stroke_circle records a 32-segment closed polyline") {
+        c.stroke_circle({0.0f, 0.0f}, 5.0f, Paint{});
+        CHECK(c.count(CanvasCmdKind::stroke_polyline) == 1);
+        CHECK(c.cmds[0].points.size() == 32);
+    }
+
+    SUBCASE("fill_circle records a 32-point polygon") {
+        c.fill_circle({0.0f, 0.0f}, 5.0f, 0xFFFFFFFFu);
+        CHECK(c.count(CanvasCmdKind::fill_polygon) == 1);
+        CHECK(c.cmds[0].points.size() == 33);  // 32 + close
+    }
+
+    SUBCASE("clip push/pop records commands") {
+        c.push_clip(0.0f, 0.0f, 100.0f, 100.0f);
+        c.pop_clip();
+        CHECK(c.count(CanvasCmdKind::push_clip) == 1);
+        CHECK(c.count(CanvasCmdKind::pop_clip) == 1);
+    }
+}
+
+TEST_CASE("canvas2d: path API accumulates and strokes") {
+    CommandListCanvas c;
+
+    SUBCASE("a path with quadratic_to flattens") {
+        c.begin_path();
+        c.move_to({0.0f, 0.0f});
+        c.quadratic_to({50.0f, 50.0f}, {100.0f, 0.0f});
+        c.stroke(Paint{});
+        // A curved quadratic flattens to multiple points; the dash
+        // walk (solid pattern) emits one run.
+        CHECK(c.count(CanvasCmdKind::stroke_polyline) == 1);
+        CHECK(c.cmds[0].points.size() > 2);  // flattened
+        // The last point is the curve's end.
+        const auto& last = c.cmds[0].points.back();
+        CHECK(last.x == doctest::Approx(100.0f));
+        CHECK(last.y == doctest::Approx(0.0f));
+    }
+
+    SUBCASE("a path with cubic_to flattens") {
+        c.begin_path();
+        c.move_to({0.0f, 0.0f});
+        c.cubic_to({0.0f, 100.0f}, {100.0f, 100.0f}, {100.0f, 0.0f});
+        c.stroke(Paint{});
+        CHECK(c.count(CanvasCmdKind::stroke_polyline) == 1);
+        CHECK(c.cmds[0].points.size() > 3);  // flattened
+    }
+
+    SUBCASE("close_path joints back to the start") {
+        c.begin_path();
+        c.move_to({0.0f, 0.0f});
+        c.line_to({10.0f, 0.0f});
+        c.line_to({10.0f, 10.0f});
+        c.close_path();
+        c.stroke(Paint{});
+        // The closed path's last point is the first move_to.
+        const auto& pts = c.cmds[0].points;
+        CHECK(pts.back().x == doctest::Approx(0.0f));
+        CHECK(pts.back().y == doctest::Approx(0.0f));
+    }
+}
+
+TEST_CASE("canvas2d: text and image recording") {
+    CommandListCanvas c;
+    // A null font (never baked) measures 0 and draws nothing - the
+    // canvas records the command anyway (the test asserts the stream,
+    // not the raster).
+    Font font;
+
+    SUBCASE("draw_text records a draw_text command") {
+        c.draw_text(10.0f, 20.0f, "hello", font, 0xFFFFFFFFu);
+        CHECK(c.count(CanvasCmdKind::draw_text) == 1);
+        CHECK(c.cmds[0].text == "hello");
+        CHECK(c.cmds[0].x == doctest::Approx(10.0f));
+        CHECK(c.cmds[0].y == doctest::Approx(20.0f));
+    }
+
+    SUBCASE("measure_text accounts for view scale") {
+        c.scale(2.0f, 2.0f);
+        // An empty font measures 0 regardless of scale.
+        CHECK(c.measure_text("test", font) == doctest::Approx(0.0f));
+    }
+
+    SUBCASE("draw_image records a draw_image command") {
+        Texture tex{42};
+        c.draw_image(0.0f, 0.0f, 100.0f, 50.0f, tex, 0xFFFFFFFFu);
+        CHECK(c.count(CanvasCmdKind::draw_image) == 1);
+        CHECK(c.cmds[0].texture.id == 42);
+        CHECK(c.cmds[0].w == doctest::Approx(100.0f));
+        CHECK(c.cmds[0].h == doctest::Approx(50.0f));
     }
 }

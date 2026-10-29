@@ -64,6 +64,16 @@ void draw_rounded_quad(float, float, float, float, float, std::uint32_t,
     gui_test::stub.rounded++;
 }
 
+// The canvas layer's tessellation sink lands here (Renderer2DCanvas's
+// R2DSink forwards every quad through this seam). The stub records the
+// call so canvas-via-r2d tests can assert the quad count; the test
+// suite mostly uses CommandListCanvas (no r2d), but the symbol must
+// resolve so the pure archive links.
+void draw_vertex_quad(const float (&)[4][2], const float (&)[4][2],
+                      const float (&)[4][4], Texture) {
+    gui_test::stub.quads++;
+}
+
 float draw_text(float, float, const char* utf8_text, const Font& font,
                 std::uint32_t) {
     gui_test::stub.texts++;

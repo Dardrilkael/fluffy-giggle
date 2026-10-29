@@ -137,10 +137,12 @@ mark the seam clearly so a future full Part A can replace them.
 - [x] Stage 14 — geometry helpers in ws::math (point_segment, polyline,
       point_in_polygon, segment_clip_rect, bounds; + Vec2 cross,
       right_normal, unpack_color, arc_step for the canvas)
-- [ ] Stage 14 — r2d per-corner-color primitive
+- [x] Stage 14 — r2d per-corner-color primitive (draw_vertex_quad,
+      already in renderer2d.hpp)
 - [x] Stage 14 — tessellation core + tests (stroke/fill/flatten/dash,
       math-lib vector math, Vec2[4]/Vec4[4] seam)
-- [ ] Stage 14 — Canvas2D / CommandListCanvas / Renderer2DCanvas
+- [x] Stage 14 — Canvas2D / CommandListCanvas / Renderer2DCanvas
+      (interface + recording sink for tests + r2d-driving sink)
 - [ ] Stage 14 — ViewTransform2D + adaptive grid + CanvasView + tests
 - [ ] Stage 14 — gallery canvas page
 - [ ] Stage 15 — property grid + tests
