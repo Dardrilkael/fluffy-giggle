@@ -77,6 +77,8 @@
 #include <ws/ui/gui/theme_data.hpp>
 #include <ws/ui/gui/widgets.hpp>
 #include <ws/ui/renderer2d.hpp>
+#include <ws/ui/canvas/canvas2d.hpp>
+#include <ws/ui/canvas/view.hpp>
 
 #include <algorithm>
 #include <array>
@@ -94,6 +96,7 @@
 namespace {
 
 namespace gui = ws::ui::gui;
+namespace canvas = ws::ui::canvas;
 
 // The system UI face - the APP picks it, not the ui lib (r2d takes
 // caller-resolved paths; font-directory knowledge lives in this TU, the
@@ -192,6 +195,7 @@ enum Section {
     kCustomLook,
     kPlatform,
     kCommands,
+    kCanvas,
     kSectionCount
 };
 
@@ -393,6 +397,98 @@ protected:
                 }
                 return true;  // the gallery owns drops: consumed
             });
+    }
+
+    // The canvas page's draw callback: every primitive, joins/caps/dashes,
+    // and a 100k-primitive stress test. Drawn in WORLD space (the canvas
+    // view set the transform from its pan/zoom).
+    void draw_canvas_content(canvas::Canvas2D& c,
+                             const canvas::ViewTransform2D& /*view*/) {
+        // --- every primitive (row 1: lines, polyline, arc, circle) ---
+        canvas::Paint paint;
+        paint.width = 2.0f;
+        paint.color = 0xFF00CCFFu;  // cyan
+
+        // A line.
+        c.stroke_line({0.0f, 0.0f}, {50.0f, 0.0f}, paint);
+        // A polyline (open L).
+        const canvas::Point ell[] = {{60.0f, 0.0f}, {60.0f, 30.0f}, {90.0f, 30.0f}};
+        c.stroke_polyline(ell, 3, paint, false);
+        // An arc.
+        paint.color = 0xFFFF8800u;  // orange
+        c.begin_path();
+        c.move_to({110.0f, 30.0f});
+        c.arc({130.0f, 30.0f}, 20.0f, 20.0f, 0.0f, canvas::kPi);
+        c.stroke(paint);
+        // A filled circle.
+        c.fill_circle({170.0f, 15.0f}, 15.0f, 0x80FF0000u);  // translucent red
+        // A circle outline.
+        paint.color = 0xFFFFFFFFu;
+        c.stroke_circle({170.0f, 15.0f}, 15.0f, paint);
+
+        // --- joins/caps/dashes (row 2) ---
+        paint.width = 4.0f;
+        const canvas::Point join_ell[] = {{0.0f, 60.0f}, {30.0f, 60.0f}, {30.0f, 90.0f}};
+
+        // Miter join, butt cap.
+        paint.join = canvas::StrokeJoin::miter;
+        paint.cap = canvas::StrokeCap::butt;
+        paint.color = 0xFF00FF00u;
+        c.stroke_polyline(join_ell, 3, paint, false);
+
+        // Bevel join, round cap.
+        paint.join = canvas::StrokeJoin::bevel;
+        paint.cap = canvas::StrokeCap::round;
+        paint.color = 0xFF0000FFu;
+        canvas::Point bevel_ell[] = {{60.0f, 60.0f}, {90.0f, 60.0f}, {90.0f, 90.0f}};
+        c.stroke_polyline(bevel_ell, 3, paint, false);
+
+        // Round join, square cap.
+        paint.join = canvas::StrokeJoin::round;
+        paint.cap = canvas::StrokeCap::square;
+        paint.color = 0xFFFF00FFu;
+        canvas::Point round_ell[] = {{120.0f, 60.0f}, {150.0f, 60.0f}, {150.0f, 90.0f}};
+        c.stroke_polyline(round_ell, 3, paint, false);
+
+        // Dashed line.
+        paint.dash.lengths[0] = 5.0f;
+        paint.dash.lengths[1] = 3.0f;
+        paint.dash.count = 2;
+        paint.color = 0xFFFFFF00u;
+        c.stroke_line({0.0f, 110.0f}, {90.0f, 110.0f}, paint);
+        paint.dash = {};  // reset
+
+        // --- beziers + rounded rect (row 3) ---
+        paint.color = 0xFF00FFFFu;
+        c.begin_path();
+        c.move_to({0.0f, 130.0f});
+        c.cubic_to({0.0f, 160.0f}, {50.0f, 160.0f}, {50.0f, 130.0f});
+        c.stroke(paint);
+
+        paint.color = 0xFFFF0088u;
+        c.stroke_rounded_rect(70.0f, 130.0f, 40.0f, 30.0f, 8.0f, paint);
+        c.fill_rounded_rect(120.0f, 130.0f, 40.0f, 30.0f, 8.0f, 0x800088FFu);
+
+        // --- filled polygons (row 4) ---
+        const canvas::Point star[] = {
+            {0.0f, 170.0f}, {10.0f, 175.0f}, {20.0f, 170.0f},
+            {16.0f, 180.0f}, {20.0f, 190.0f}, {10.0f, 185.0f},
+            {0.0f, 190.0f}, {4.0f, 180.0f}};
+        c.fill_polygon(star, 8, 0xFF888800u);
+
+        // --- the 100k primitive stress test ---
+        // 100k short lines in a dense grid, all in one stroke_polyline
+        // call per row (amortized). The frame-time readout above shows
+        // the cost.
+        paint.width = 1.0f;
+        paint.color = 0x40FFFFFFu;  // faint, so overlap reads as density
+        paint.cap = canvas::StrokeCap::butt;
+        constexpr int kStressRows = 100;
+        constexpr int kStressCols = 1000;
+        for (int row = 0; row < kStressRows; ++row) {
+            const float y = 220.0f + row * 0.5f;
+            c.stroke_line({0.0f, y}, {static_cast<float>(kStressCols), y}, paint);
+        }
     }
 
     void on_update() override {
@@ -1009,6 +1105,10 @@ private:
 
     // ---- caller-owned widget state (the gallery IS this list) ----
     std::array<bool, kSectionCount> section_{};
+    // The canvas page's view + renderer (stage 14).
+    canvas::CanvasView canvas_view_{};
+    canvas::Renderer2DCanvas canvas_renderer_{};
+    float canvas_frame_ms_ = 0.0f;  // the stress test's frame-time readout
     int clicks_ = 0;
     bool checked_ = false;
     bool dead_check_ = true;  // starts checked: a dimmed-on box reads too
@@ -2641,6 +2741,61 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
         gui::text(layout_, chrome_,
                   "rebind something above, save, and restart - the rebind "
                   "survives; reset restores the declared chords",
+                  page.width);
+    }
+
+    // --- canvas (stage 14) ------------------------------------------------
+    // A zoomable canvas with every primitive, joins/caps/dashes, an
+    // adaptive grid, and a 100k-primitive stress test with a frame-time
+    // readout. The CanvasView owns the pan/zoom; wheel zooms toward the
+    // cursor, middle-drag pans.
+    if (gui::collapsing_header(gui_, layout_, chrome_, "canvas",
+                               section_[kCanvas])) {
+        // Allocate a 600x400 rect for the canvas view.
+        constexpr float kCanvasW = 600.0f;
+        constexpr float kCanvasH = 400.0f;
+        const gui::Rect canvas_rect = {layout_.cursor_x, layout_.cursor_y,
+                                       kCanvasW, kCanvasH};
+        layout_.cursor_y += kCanvasH + chrome_.padding;
+
+        // Feed this frame's input to the canvas view (the gui's input
+        // is the same InputFrame the platform pumped).
+        const auto& in = gui_.input();
+        canvas_view_.feed_mouse_moved(in.mouse_x, in.mouse_y);
+        for (int b = 0; b < 3; ++b) {
+            if (in.mouse_pressed[b]) {
+                canvas_view_.feed_mouse_button(b, true);
+            }
+            if (in.mouse_released[b]) {
+                canvas_view_.feed_mouse_button(b, false);
+            }
+        }
+        if (in.scroll_dy != 0.0f) {
+            canvas_view_.feed_scroll(in.mouse_x, in.mouse_y, 0.0f, in.scroll_dy);
+        }
+        canvas_view_.feed_key(32, in.key_down[32]);  // space
+
+        // The draw callback: every primitive + joins/caps/dashes + the
+        // stress test. Drawn in WORLD space (the canvas view set the
+        // transform). Measure the draw time for the stress readout.
+        canvas_view_.set_draw_callback(
+            [this](canvas::Canvas2D& c, const canvas::ViewTransform2D& v) {
+                draw_canvas_content(c, v);
+            });
+
+        // Time the draw + feed the frame-time readout.
+        const auto t0 = std::chrono::steady_clock::now();
+        canvas_view_.draw(canvas_rect, canvas_renderer_, true);
+        const auto t1 = std::chrono::steady_clock::now();
+        canvas_frame_ms_ = std::chrono::duration<float, std::milli>(t1 - t0).count();
+
+        // The frame-time readout (drawn in screen space, after the canvas).
+        char ms_line[80];
+        std::snprintf(ms_line, sizeof ms_line, "frame: %.2f ms  zoom: %.2fx",
+                      canvas_frame_ms_, canvas_view_.view.zoom);
+        gui::text(layout_, chrome_, ms_line, page.width);
+        gui::text(layout_, chrome_,
+                  "wheel: zoom toward cursor | middle-drag (or space+drag): pan",
                   page.width);
     }
 
