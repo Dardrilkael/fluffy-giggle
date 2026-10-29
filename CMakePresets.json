@@ -37,6 +37,17 @@
       "architecture": "x64"
     },
     {
+      "name": "linux",
+      "displayName": "Linux (Ninja, GCC, spice subset)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "WS_BUILD_LIBS": "core;math;spice"
+      }
+    },
+    {
       "name": "android",
       "displayName": "Android (Ninja, NDK, arm64-v8a)",
       "generator": "Ninja",
@@ -55,11 +66,18 @@
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
+    { "name": "linux", "configurePreset": "linux" },
     { "name": "vs-debug", "configurePreset": "vs-debug", "configuration": "Debug" },
     { "name": "vs-release", "configurePreset": "vs-release", "configuration": "Release" },
     { "name": "android", "configurePreset": "android" }
   ],
   "testPresets": [
+    {
+      "name": "linux",
+      "configurePreset": "linux",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
     {
       "name": "debug",
       "configurePreset": "debug",

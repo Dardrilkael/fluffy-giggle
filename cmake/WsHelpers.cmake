@@ -2,6 +2,20 @@ include_guard(GLOBAL)
 
 include(WsWarnings)
 
+# WS_BUILD_LIBS (cache STRING, default ""): when non-empty, only the named
+# libs under libs/ configure - and only the third-party backends those libs
+# wrap are fetched (ThirdParty.cmake gates on the same list). Empty/unset =
+# the whole workspace, the unchanged default. Lets a headless checkout
+# build a pure-console subset without the gui/audio/net/physics stack: the
+# linux preset builds "core;math;spice".
+function(ws_wants out lib)
+  set(want TRUE)
+  if(WS_BUILD_LIBS AND NOT lib IN_LIST WS_BUILD_LIBS)
+    set(want FALSE)
+  endif()
+  set(${out} ${want} PARENT_SCOPE)
+endfunction()
+
 # ws_add_library(<name> [DEPENDS <target>...])
 #
 # Creates a static library target ws_<name> with alias ws::<name>.

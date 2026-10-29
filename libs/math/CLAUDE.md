@@ -11,6 +11,16 @@ sees no third-party headers at all: everything under include/ is ws-owned.
   Eigen's PartialPivLU - but only inside `src/lu.cpp`.
 - `vecmath.hpp`: fixed-size graphics math - `Vec2/3/4`, `DVec*`, `IVec*`,
   `Mat2/3/4`, `Quat`, plus `dot/cross/normalize/length/...` - all ws-owned.
+- Sparse LU with symbolic reuse (`ws/math/sparse.hpp`, grew out of the
+  ws::spice arc, DESIGN.md §4): `SparsePatternBuilder` freezes stamped
+  (row,col) pairs into a CSC `SparsePattern`; `SparseMatrix<T>` holds the
+  numeric values over that pattern (`slot()/at()/add()`, an out-of-pattern
+  write is a WS_CORE_ASSERT programmer error); `SparseLu` /
+  `ComplexSparseLu` do analyze-once / factorize-many / solve, plus
+  `solve_transpose` (noise adjoint). Backend is Eigen's SparseLU + COLAMD,
+  PRIVATE in `src/sparse.cpp` (the KLU swap in M0b touches that file only);
+  the facade is KLU-shaped so the swap is invisible to spice. Errors come
+  back as `ws::core::Status` - singularity included, never an exception.
 
 ## The split (important)
 - Sizes known at compile time -> vecmath.hpp types.
@@ -29,6 +39,11 @@ sees no third-party headers at all: everything under include/ is ws-owned.
   (matmul, matvec, scalar), `operator+`, `data()`.
 - `ws::math::lu_decompose(Matrix<double>) -> LuFactors`,
   `ws::math::lu_solve(LuFactors, b) -> std::vector<double>`.
+- `ws::math::SparsePatternBuilder::build(n) -> SparsePattern`,
+  `SparseMatrix<T>::slot/at/add/zero/values`, `SparseLu::analyze/
+  factorize/solve/solve_transpose -> ws::core::Status` (same shape for
+  `ComplexSparseLu` over `std::complex<double>`). `factorization_count()`
+  feeds caller diagnostics.
 - `ws::math::Vec2/3/4`, `DVec*`, `IVec*`, `Mat2/3/4`, `Quat`, and the free
   functions (dot, cross, length, normalize, distance, mix, radians,
   degrees). Vectors are aggregates (`Vec3{1, 2, 3}`) that zero-fill by

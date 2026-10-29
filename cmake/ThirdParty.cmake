@@ -4,9 +4,31 @@ include_guard(GLOBAL)
 # doctest and glfw ship proper CMake support and are used directly.
 # Vulkan-Headers, volk, VMA, Dear ImGui and ImPlot get small hand-written
 # targets below (marked SYSTEM so their warnings never leak into our build).
+#
+# Subset builds (WS_BUILD_LIBS, set by e.g. the linux preset to
+# "core;math;spice") fetch only what the configured libs wrap. The wants_*
+# flags below are the single gate: every fetch and hand-written target in
+# this file sits behind one of them, so an unconfigured lib's backend never
+# reaches the build. An empty WS_BUILD_LIBS (the default) wants everything -
+# the full-workspace build is byte-for-byte what it was before the gate.
 
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
+
+# ws_wants lives in WsHelpers.cmake (included before this file by the root
+# CMakeLists) - spelled out here per backend family.
+ws_wants(ws_wants_core core)
+ws_wants(ws_wants_math math)
+ws_wants(ws_wants_ui ui)
+ws_wants(ws_wants_audio audio)
+ws_wants(ws_wants_net net)
+ws_wants(ws_wants_physics physics)
+# doctest rides with WS_BUILD_TESTS on desktop, whichever libs are built.
+if(NOT ANDROID AND WS_BUILD_TESTS)
+  set(ws_wants_doctest TRUE)
+else()
+  set(ws_wants_doctest FALSE)
+endif()
 
 # Some pinned third-party releases predate CMake 3.5; allow them to configure.
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
@@ -15,7 +37,7 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 # building it we just expose the header as an interface target. Tests are never
 # cross-built (the android preset sets WS_BUILD_TESTS=OFF), so the fetch is
 # desktop-only too.
-if(NOT ANDROID)
+if(ws_wants_doctest)
   FetchContent_Declare(doctest
     GIT_REPOSITORY https://github.com/doctest/doctest.git
     GIT_TAG v2.4.11
@@ -35,7 +57,7 @@ endif()
 # simply do not exist there. Everything that
 # references glfw is desktop-only as well: the imgui platform backend below
 # and ws_ui's link list in libs/ui/CMakeLists.txt.
-if(NOT ANDROID)
+if(ws_wants_ui AND NOT ANDROID)
   set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
   set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
   set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -49,6 +71,9 @@ if(NOT ANDROID)
   FetchContent_MakeAvailable(glfw)
 endif()
 
+# The ui-only fetches. Everything from here to the stb target is one family:
+# ws_ui wraps them all PRIVATE, so a build without ui fetches none of them.
+if(ws_wants_ui)
 FetchContent_Declare(vulkan_headers
   GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
   GIT_TAG v1.3.296
@@ -69,30 +94,49 @@ FetchContent_Declare(implot
   GIT_REPOSITORY https://github.com/epezent/implot.git
   GIT_TAG v0.16
   GIT_SHALLOW TRUE)
-FetchContent_Declare(eigen
-  GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-  GIT_TAG 3.4.0
-  GIT_SHALLOW TRUE)
-# tl::expected is the std::expected backport backing ws::core's Result/Status
-# (result.hpp). Header-only, CC0, single include/tl/expected.hpp - the doctest/
-# dr_wav INTERFACE-target pattern. Unconditional: ws::core builds on Android.
-FetchContent_Declare(tl_expected
-  GIT_REPOSITORY https://github.com/TartanLlama/expected.git
-  GIT_TAG v1.1.0
-  GIT_SHALLOW TRUE)
 # stb has no release tags - pinned to a master commit. stb_image.h is
 # v2.30 (2024-05-31) at this hash.
 FetchContent_Declare(stb
   GIT_REPOSITORY https://github.com/nothings/stb.git
   GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20
   GIT_SHALLOW TRUE)
-foreach(dep vulkan_headers volk vma imgui implot eigen tl_expected stb)
+foreach(dep vulkan_headers volk vma imgui implot stb)
   FetchContent_GetProperties(${dep})
   if(NOT ${dep}_POPULATED)
     FetchContent_Populate(${dep})
   endif()
 endforeach()
+endif()  # ws_wants_ui declares
 
+# Eigen (header-only; backing store for ws::math) - its own fetch, outside
+# the ui family: math builds without ui.
+if(ws_wants_math)
+FetchContent_Declare(eigen
+  GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
+  GIT_TAG 3.4.0
+  GIT_SHALLOW TRUE)
+FetchContent_GetProperties(eigen)
+if(NOT eigen_POPULATED)
+  FetchContent_Populate(eigen)
+endif()
+endif()
+
+# tl::expected is the std::expected backport backing ws::core's Result/Status
+# (result.hpp). Header-only, CC0, single include/tl/expected.hpp - the doctest/
+# dr_wav INTERFACE-target pattern. Unconditional inside the core gate: ws::core
+# builds on Android.
+if(ws_wants_core)
+FetchContent_Declare(tl_expected
+  GIT_REPOSITORY https://github.com/TartanLlama/expected.git
+  GIT_TAG v1.1.0
+  GIT_SHALLOW TRUE)
+FetchContent_GetProperties(tl_expected)
+if(NOT tl_expected_POPULATED)
+  FetchContent_Populate(tl_expected)
+endif()
+endif()
+
+if(ws_wants_ui)
 # --- Vulkan-Headers ---------------------------------------------------------
 add_library(vulkan-headers INTERFACE)
 add_library(Vulkan::Headers ALIAS vulkan-headers)
@@ -150,32 +194,38 @@ add_library(implot STATIC
 target_include_directories(implot SYSTEM PUBLIC "${implot_SOURCE_DIR}")
 target_link_libraries(implot PUBLIC imgui)
 
-# --- Eigen (header-only; backing store for ws::math) -------------------------
-add_library(eigen3 INTERFACE)
-add_library(Eigen3::Eigen ALIAS eigen3)
-target_include_directories(eigen3 SYSTEM INTERFACE "${eigen_SOURCE_DIR}")
-
 # --- stb (header-only; stb_image decodes textures for libs/ui's 2D renderer) --
 # The STB_IMAGE_IMPLEMENTATION translation unit lives in libs/ui
 # (src/text/stb_impl.cpp) - the same one-TU rule as VMA's.
 add_library(stb INTERFACE)
 add_library(stb::stb ALIAS stb)
 target_include_directories(stb SYSTEM INTERFACE "${stb_SOURCE_DIR}")
+endif()  # ws_wants_ui targets
+
+# --- Eigen (header-only; backing store for ws::math) -------------------------
+if(ws_wants_math)
+add_library(eigen3 INTERFACE)
+add_library(Eigen3::Eigen ALIAS eigen3)
+target_include_directories(eigen3 SYSTEM INTERFACE "${eigen_SOURCE_DIR}")
+endif()
 
 # --- tl::expected (header-only; ws::core's Result/Status backing store) ------
 # The ONE third-party linked PUBLIC: ws::core::Result is this type in the
 # public API (result.hpp aliases it behind a ws-owned name), so dependents
 # must see the header transitively.
+if(ws_wants_core)
 add_library(tl_expected INTERFACE)
 add_library(tl::expected ALIAS tl_expected)
 target_include_directories(tl_expected SYSTEM INTERFACE "${tl_expected_SOURCE_DIR}/include")
+endif()
 
+if(ws_wants_audio)
 # --- dr_wav (header-only; decodes RIFF/WAVE for ws::audio) --------------------
 # dr_wav lives in the dr_libs monorepo, header at its root. The
 # DR_WAV_IMPLEMENTATION translation unit lives in libs/audio
 # (src/dr_wav_impl.cpp) - the same one-TU rule as stb's. Pure C, so the
-# fetch is unconditional: ws::audio builds on Android too (OpenAL Soft is
-# fetched for both platforms below).
+# fetch is unconditional within the audio gate: ws::audio builds on Android
+# too (OpenAL Soft is fetched for both platforms below).
 FetchContent_Declare(dr_wav
   GIT_REPOSITORY https://github.com/mackron/dr_libs.git
   GIT_TAG wav-0.14.5
@@ -246,7 +296,9 @@ unset(LIBTYPE)
 if(ANDROID)
   unset(OBOE_SOURCE CACHE)
 endif()
+endif()  # ws_wants_audio
 
+if(ws_wants_net)
 # --- libuv (async I/O backend for ws::net) -----------------------------------
 # A real CMake project - FetchContent_MakeAvailable, the glfw/openal
 # pattern. STATIC like every third-party here: LIBUV_BUILD_SHARED OFF means
@@ -266,7 +318,9 @@ FetchContent_Declare(libuv
   GIT_TAG v1.53.0
   GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(libuv)
+endif()  # ws_wants_net
 
+if(ws_wants_physics)
 # --- Box2D (2D physics backend for ws::physics) --------------------------------
 # A real CMake project - FetchContent_MakeAvailable, the glfw/openal/libuv
 # pattern. v3's target is `box2d` (alias box2d::box2d), STATIC via the
@@ -331,3 +385,4 @@ FetchContent_Declare(jolt
   GIT_SHALLOW TRUE
   SOURCE_SUBDIR Build)
 FetchContent_MakeAvailable(jolt)
+endif()  # ws_wants_physics
