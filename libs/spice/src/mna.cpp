@@ -92,9 +92,9 @@ class AcNumericContext final : public AcLoadContext {
 public:
     AcNumericContext(ws::math::SparseMatrix<std::complex<double>>& matrix,
                      std::vector<std::complex<double>>& rhs, std::size_t node_count,
-                     double omega)
+                     double w)
         : matrix_(matrix), rhs_(rhs), node_count_(node_count) {
-        this->omega = omega;
+        this->omega = w;
     }
 
     void add_entry(std::size_t row, std::size_t col, std::complex<double> v) override {

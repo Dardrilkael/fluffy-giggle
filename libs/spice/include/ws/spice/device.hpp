@@ -51,7 +51,7 @@ class DcLoadContext;
 class AcLoadContext;
 struct ModelDef;
 class ParamTable;
-class Circuit;
+struct Circuit;
 class RunState;
 
 // --- elaboration-time services (handed to device factories) -------------------
@@ -251,13 +251,13 @@ public:
     // begin_step: parameters never change mid-solve, so the fold is safe
     // to keep out of the Newton loop.
     virtual void fold_state(double* /*st*/, const class RunState& /*rs*/,
-                            const class Circuit& /*c*/) const {}
+                            const Circuit& /*c*/) const {}
 
     // Resolves cross-device links once the arena layout exists (called
     // by finalize_circuit with the device's own index). K-coupled
     // inductors record their partner's parameter slot here so a rebind
     // of either L re-computes the mutual M exactly.
-    [[nodiscard]] virtual ws::core::Status link_dynamic(const class Circuit& /*c*/,
+    [[nodiscard]] virtual ws::core::Status link_dynamic(const Circuit& /*c*/,
                                                         std::size_t /*self*/) {
         return {};
     }

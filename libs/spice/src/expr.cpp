@@ -699,7 +699,6 @@ ws::core::Result<double> ExprProgram::evaluate(
 
     for (std::size_t pc = 0; pc < code_.size();) {
         const Instr& in = code_[pc];
-        using Op = ExprProgram::Op;
         switch (in.op) {
             case Op::Const:
                 stack.push_back(consts_[static_cast<std::size_t>(in.a)]);

@@ -522,13 +522,13 @@ ws::core::Result<ParsedCard> parse_card(const Record& rec, bool inside_subckt,
             StepCard st;
             st.loc = rec.loc;
             std::size_t i = 1;
-            std::string first = to_lower(rec.tokens[1].text);
-            if (first == "dec" || first == "oct") {
-                st.kind = (first == "dec") ? StepCard::Kind::Dec : StepCard::Kind::Oct;
+            std::string first_operand = to_lower(rec.tokens[1].text);
+            if (first_operand == "dec" || first_operand == "oct") {
+                st.kind = (first_operand == "dec") ? StepCard::Kind::Dec : StepCard::Kind::Oct;
                 if (rec.tokens.size() != 7 || to_lower(rec.tokens[2].text) != "param") {
                     return spice_fail(card_diag(
                         ErrorKind::Parse, "spice.parse.step_form",
-                        "'.step " + first + " param NAME START STOP N' expected",
+                        "'.step " + first_operand + " param NAME START STOP N' expected",
                         rec.loc));
                 }
                 st.name = rec.tokens[3];
@@ -542,8 +542,8 @@ ws::core::Result<ParsedCard> parse_card(const Record& rec, bool inside_subckt,
                 card.step = std::move(st);
                 return card;
             }
-            if (first == "param" || first == "temp") {
-                if (first == "temp") {
+            if (first_operand == "param" || first_operand == "temp") {
+                if (first_operand == "temp") {
                     st.is_temp = true;
                     st.name = rec.tokens[1];  // "temp"
                     i = 2;

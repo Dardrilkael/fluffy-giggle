@@ -98,13 +98,13 @@ std::vector<std::string> waveform_tokens(const SourceValue& value) {
         push_all("SIN", {s->vo, s->va, s->freq, s->td, s->theta, s->phase});
     } else if (const ExpSource* e = std::get_if<ExpSource>(&value)) {
         push_all("EXP", {e->v1, e->v2, e->td1, e->tau1, e->td2, e->tau2});
-    } else if (const Pwl* p = std::get_if<Pwl>(&value)) {
+    } else if (const Pwl* pwl = std::get_if<Pwl>(&value)) {
         std::string card = "PWL(";
-        for (std::size_t i = 0; i < p->points.size(); ++i) {
+        for (std::size_t i = 0; i < pwl->points.size(); ++i) {
             if (i != 0) {
                 card += " ";
             }
-            card += num(p->points[i].first) + " " + num(p->points[i].second);
+            card += num(pwl->points[i].first) + " " + num(pwl->points[i].second);
         }
         card += ")";
         out.push_back(std::move(card));

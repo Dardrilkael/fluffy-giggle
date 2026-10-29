@@ -405,10 +405,10 @@ protected:
 class VoltageSource final : public Device, private SourceCommon {
 public:
     VoltageSource(std::string display, NodeId p, NodeId n, BranchId branch,
-                  const SourceSpec& spec, SourceLoc loc)
+                  const SourceSpec& spec, SourceLoc sl)
         : Device(), SourceCommon(std::move(display), spec), p_(p), n_(n),
           branch_(branch), dc_(spec.dc) {
-        this->loc = loc;
+        this->loc = sl;
     }
 
     [[nodiscard]] const std::string& name() const override { return name_; }
@@ -461,10 +461,10 @@ private:
 class CurrentSource final : public Device, private SourceCommon {
 public:
     CurrentSource(std::string display, NodeId p, NodeId n, const SourceSpec& spec,
-                  SourceLoc loc)
+                  SourceLoc sl)
         : Device(), SourceCommon(std::move(display), spec), p_(p), n_(n),
           dc_(spec.dc) {
-        this->loc = loc;
+        this->loc = sl;
     }
 
     [[nodiscard]] const std::string& name() const override { return name_; }
@@ -533,10 +533,10 @@ ws::core::Result<std::unique_ptr<Device>> make_isource(const DeviceCard& card,
 class Vcvs final : public Device {
 public:
     Vcvs(std::string display, NodeId p, NodeId n, NodeId cp, NodeId cn, BranchId branch,
-         ExprProgram gain, SourceLoc loc)
+         ExprProgram gain, SourceLoc sl)
         : name_(std::move(display)), p_(p), n_(n), cp_(cp), cn_(cn), branch_(branch),
           gain_(std::move(gain)) {
-        this->loc = loc;
+        this->loc = sl;
     }
 
     [[nodiscard]] const std::string& name() const override { return name_; }
@@ -616,9 +616,9 @@ ws::core::Result<std::unique_ptr<Device>> make_vcvs(const DeviceCard& card,
 class Vccs final : public Device {
 public:
     Vccs(std::string display, NodeId p, NodeId n, NodeId cp, NodeId cn, ExprProgram gm,
-         SourceLoc loc)
+         SourceLoc sl)
         : name_(std::move(display)), p_(p), n_(n), cp_(cp), cn_(cn), gm_(std::move(gm)) {
-        this->loc = loc;
+        this->loc = sl;
     }
 
     [[nodiscard]] const std::string& name() const override { return name_; }
@@ -683,9 +683,9 @@ ws::core::Result<std::unique_ptr<Device>> make_vccs(const DeviceCard& card,
 
 class Cccs final : public Device {
 public:
-    Cccs(std::string display, NodeId p, NodeId n, ExprProgram gain, SourceLoc loc)
+    Cccs(std::string display, NodeId p, NodeId n, ExprProgram gain, SourceLoc sl)
         : name_(std::move(display)), p_(p), n_(n), gain_(std::move(gain)) {
-        this->loc = loc;
+        this->loc = sl;
     }
 
     void set_control_branch(BranchId br) override { control_ = br; }
@@ -734,9 +734,9 @@ private:
 class Ccvs final : public Device {
 public:
     Ccvs(std::string display, NodeId p, NodeId n, BranchId branch, ExprProgram r,
-         SourceLoc loc)
+         SourceLoc sl)
         : name_(std::move(display)), p_(p), n_(n), branch_(branch), r_(std::move(r)) {
-        this->loc = loc;
+        this->loc = sl;
     }
 
     void set_control_branch(BranchId br) override { control_ = br; }
