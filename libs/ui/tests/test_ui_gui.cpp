@@ -17,6 +17,7 @@
 #include <ws/ui/gui/gui_context.hpp>
 #include <ws/ui/gui/job_progress.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
+#include <ws/ui/gui/property_grid.hpp>
 #include <ws/ui/gui/theme.hpp>
 #include <ws/ui/gui/theme_color.hpp>
 #include <ws/ui/gui/theme_data.hpp>
@@ -3027,4 +3028,81 @@ TEST_CASE("the keymap editor records, warns and cancels") {
     CHECK(bound->key == 67);
     CHECK(ws::app::has_mod(bound->mods, ws::app::Mod::control));
     CHECK(ws::app::has_mod(bound->mods, ws::app::Mod::shift));
+}
+
+// --- property grid (stage 15) ------------------------------------------------
+
+TEST_CASE("property_grid: renders schema settings without crashing") {
+    ws::ui::gui_test::stub.reset();
+    // Build a small schema covering the four scalar types.
+    ws::settings::Schema schema;
+    CHECK(schema.declare({
+        .key = "ui.dark",
+        .type = ws::settings::SettingType::boolean,
+        .default_value = ws::settings::SettingValue::boolean(true),
+        .description = "dark theme",
+        .category = "appearance",
+    }).has_value());
+
+    ws::settings::RangeConstraint font_range;
+    font_range.min = 8.0;
+    font_range.max = 32.0;
+    font_range.action = ws::settings::ConstraintAction::clamp;
+    CHECK(schema.declare({
+        .key = "ui.font_size",
+        .type = ws::settings::SettingType::integer,
+        .default_value = ws::settings::SettingValue::integer(14),
+        .constraints = {font_range},
+        .description = "font size in pixels",
+        .category = "appearance",
+    }).has_value());
+
+    ws::settings::RangeConstraint opacity_range;
+    opacity_range.min = 0.0;
+    opacity_range.max = 1.0;
+    opacity_range.action = ws::settings::ConstraintAction::clamp;
+    CHECK(schema.declare({
+        .key = "ui.opacity",
+        .type = ws::settings::SettingType::real,
+        .default_value = ws::settings::SettingValue::real(0.8),
+        .constraints = {opacity_range},
+        .description = "panel opacity",
+        .category = "appearance",
+    }).has_value());
+
+    CHECK(schema.declare({
+        .key = "ui.theme_name",
+        .type = ws::settings::SettingType::text,
+        .default_value = ws::settings::SettingValue::text("dark"),
+        .description = "theme name",
+        .category = "appearance",
+    }).has_value());
+
+    ws::settings::SettingsStore store{std::move(schema)};
+    GuiContext gui;
+    LayoutCursor layout;
+    ws::ui::gui::PropertyGridState pg_state;
+
+    // One frame: the grid renders the "appearance" category header + 4 rows.
+    gui.begin_frame(snap(-100.0f, -100.0f));  // no interaction
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 600.0f});
+    const std::size_t changed = ws::ui::gui::property_grid(
+        gui, layout, kDefaultChrome, store.schema(), store, pg_state);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+
+    // The grid drew something (the header + the rows' widgets).
+    CHECK(ws::ui::gui_test::stub.quads > 0);
+    // No interaction this frame: nothing changed.
+    CHECK(changed == 0);
+    // The category's open-state was tracked.
+    CHECK(pg_state.category_open.count("appearance") > 0);
+    // The values are readable through the store (the defaults).
+    auto dark = store.get<bool>("ui.dark");
+    REQUIRE(dark.has_value());
+    CHECK(dark->value == true);
+    auto font = store.get<std::int64_t>("ui.font_size");
+    REQUIRE(font.has_value());
+    CHECK(font->value == 14);
 }

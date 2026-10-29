@@ -150,7 +150,11 @@ mark the seam clearly so a future full Part A can replace them.
 - [x] Stage 14 — gallery canvas page (apps/ui_gallery: every primitive,
       joins/caps/dashes, zoomable infinite grid, 100k stress test with
       frame-time readout)
-- [ ] Stage 15 — property grid + tests
+- [x] Stage 15 — property grid + tests (schema-driven widget rows:
+      bool→checkbox, int+range→slider_int, int+enum→combo, real+range→
+      slider_float, text→text_input, text+enum→combo; grouped by
+      category with collapsing headers; PropertyGridState holds the
+      per-category open-state + per-text-setting input buffers)
 - [ ] Stage 15 — dock host (split tree + serialization) + tests
 - [ ] Stage 15 — panel framework + tests
 - [ ] Stage 15 — Document/DocumentManager + session restore + tests
