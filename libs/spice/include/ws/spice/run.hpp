@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,13 @@ struct RunSettings {
     double temp = 27.0;
     double tnom = 27.0;
 
+    // §8.5 rev / §7.6: the Monte-Carlo seed recorded per run - the whole
+    // .step family reproduces bit-for-bit from it (.options seed=).
+    std::uint64_t seed = 1;
+    // §7.6: on a failing step point, run the remaining points and fail at
+    // the end with the per-point list (the CLI's --keep-going).
+    bool keep_going = false;
+
     // Test-only fixed-step hook (§10.1 trap-order row): when > 0, .tran
     // marches at exactly this dt - pure trapezoidal (no BE restarts) and
     // no LTE rejection - so halving studies are meaningful. Breakpoints
@@ -64,9 +72,11 @@ struct AnalysisReport {
 };
 
 struct RunOutput {
-    // One Table per analysis card, in deck order.
+    // One (family) Table per analysis card, in deck order - a .step run
+    // merges every point into one table with leading step axes (§7.6).
     Results results;
-    std::vector<AnalysisReport> reports;  // parallel to results.tables
+    std::vector<AnalysisReport> reports;  // per point-and-analysis, deck order
+    std::uint64_t seed = 1;               // the Monte-Carlo seed (§8.5 rev)
 };
 
 // Runs every analysis in the deck. `settings` carries the caller's

@@ -689,6 +689,197 @@ ws::core::Result<Table> run_ac(const Circuit& circuit, RunState& state,
 
 }  // namespace drivers
 
+// --- .step point enumeration (§7.6) ---------------------------------------------
+
+// One point of the (nested) step family: the overridden param values, the
+// elaboration temperature (temp steps), the swept source values, and the
+// 1-based point number.
+struct StepPoint {
+    std::vector<std::pair<std::string, double>> params;  // (lowercased name, value)
+    std::vector<std::pair<std::string, double>> sources;  // swept source dc values
+    double temp = kDefaultTemp;
+    bool temp_from_step = false;  // a temp step card set it
+    std::size_t number = 1;
+    std::string spell;  // "rload=2k, run=3" - error context
+};
+
+// Materializes one StepCard's values (lin/list/dec/oct grids, the §7.3
+// guards: finite, nonzero step, direction, count cap).
+ws::core::Result<std::vector<double>> step_values(const StepCard& card,
+                                                  const ParamTable& scope) {
+    auto eval = [&](const ExprProgram& p) -> ws::core::Result<double> {
+        WS_TRY_ASSIGN(const std::vector<std::optional<double>> b, scope.bind(p));
+        WS_TRY_ASSIGN(const double v, p.evaluate(b));
+        return v;
+    };
+    auto fail = [&](std::string m) -> ws::core::unexpected<ws::core::Error> {
+        Diagnostic d = run_diag(ErrorKind::Semantic, "spice.semantic.step", std::move(m));
+        d.loc = card.loc;
+        return spice_fail(std::move(d));
+    };
+    std::vector<double> out;
+    switch (card.kind) {
+        case StepCard::Kind::List: {
+            for (const ExprProgram& p : card.list) {
+                WS_TRY_ASSIGN(const double v, eval(p));
+                out.push_back(v);
+            }
+            return out;
+        }
+        case StepCard::Kind::Dec:
+        case StepCard::Kind::Oct: {
+            WS_TRY_ASSIGN(const double start, eval(card.start));
+            WS_TRY_ASSIGN(const double stop, eval(card.stop));
+            WS_TRY_ASSIGN(const double n, eval(card.inc));  // N in this form
+            if (!std::isfinite(start) || !std::isfinite(stop) || !std::isfinite(n) ||
+                n < 1.0 || std::floor(n) != n) {
+                return fail(".step dec/oct needs a positive integer N");
+            }
+            if (!(start > 0.0) || !(stop >= start)) {
+                return fail(".step dec/oct needs 0 < start <= stop");
+            }
+            const double base = (card.kind == StepCard::Kind::Dec) ? 10.0 : 2.0;
+            const double log_ratio = (card.kind == StepCard::Kind::Dec)
+                                         ? std::log10(stop / start)
+                                         : std::log2(stop / start);
+            const double kd = std::floor(n * log_ratio + 1e-9) + 1.0;
+            if (!std::isfinite(kd) || kd < 1.0 ||
+                kd > static_cast<double>(kMaxSweepPoints)) {
+                return fail(".step produces too many points");
+            }
+            for (std::size_t k = 0; k < static_cast<std::size_t>(kd); ++k) {
+                out.push_back(start * std::pow(base, static_cast<double>(k) / n));
+            }
+            if (!out.empty() && out.back() > stop) {
+                out.back() = stop;
+            }
+            return out;
+        }
+        case StepCard::Kind::Lin: {
+            WS_TRY_ASSIGN(const double start, eval(card.start));
+            WS_TRY_ASSIGN(const double stop, eval(card.stop));
+            WS_TRY_ASSIGN(const double inc, eval(card.inc));
+            if (!std::isfinite(start) || !std::isfinite(stop) || !std::isfinite(inc)) {
+                return fail(".step values must be finite");
+            }
+            if (inc == 0.0) {
+                return fail(".step increment is zero");
+            }
+            if ((stop > start && inc < 0.0) || (stop < start && inc > 0.0)) {
+                return fail(".step increment must point toward stop");
+            }
+            const double span = stop - start;
+            const double intervals = std::floor(span / inc + 1e-9);
+            if (!std::isfinite(span) || !std::isfinite(intervals) || intervals < 0.0) {
+                return fail(".step range is out of range");
+            }
+            const double points = intervals + 1.0;
+            if (points > static_cast<double>(kMaxSweepPoints)) {
+                return fail(".step produces too many points");
+            }
+            for (std::size_t k = 0; k < static_cast<std::size_t>(points); ++k) {
+                out.push_back(start + static_cast<double>(k) * inc);
+            }
+            return out;
+        }
+    }
+    return fail("internal: unhandled .step kind");
+}
+
+// The cartesian product, first card outermost (§7.6).
+ws::core::Result<std::vector<StepPoint>> enumerate_steps(
+    const std::vector<StepCard>& cards, const ParamTable& scope, double base_temp) {
+    std::vector<StepPoint> points(1);  // the empty product
+    points[0].temp = base_temp;
+    for (const StepCard& card : cards) {
+        WS_TRY_ASSIGN(const std::vector<double> values, step_values(card, scope));
+        std::vector<StepPoint> next;
+        next.reserve(points.size() * values.size());
+        for (const StepPoint& p : points) {
+            for (const double v : values) {
+                StepPoint q = p;
+                if (card.is_temp) {
+                    q.temp = v;
+                    q.temp_from_step = true;
+                } else if (card.is_source) {
+                    q.sources.emplace_back(to_lower(card.name.text), v);
+                } else {
+                    q.params.emplace_back(to_lower(card.name.text), v);
+                }
+                next.push_back(std::move(q));
+            }
+        }
+        points = std::move(next);
+    }
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        points[i].number = i + 1;
+        for (const auto& [name, v] : points[i].params) {
+            points[i].spell +=
+                (points[i].spell.empty() ? std::string() : std::string(", ")) +
+                name + "=" + fmt_value(v);
+        }
+        for (const auto& [name, v] : points[i].sources) {
+            points[i].spell +=
+                (points[i].spell.empty() ? std::string() : std::string(", ")) +
+                name + "=" + fmt_value(v);
+        }
+        if (points[i].temp_from_step) {
+            points[i].spell +=
+                (points[i].spell.empty() ? std::string() : std::string(", ")) +
+                "temp=" + fmt_value(points[i].temp);
+        }
+    }
+    return points;
+}
+
+// Merges one point's analysis table into the family table: the step axes
+// prepend (step number, then each stepped quantity), the analysis's own
+// axes and signals append.
+void merge_into_family(Table& family, const Table& point, const StepPoint& sp,
+                        const std::vector<std::string>& step_names) {
+    if (family.signals.empty()) {
+        family.analysis = point.analysis;
+        family.sweep = point.sweep;
+        family.sweep_names.push_back("step");
+        for (const std::string& n : step_names) {
+            family.sweep_names.push_back(n);
+        }
+        for (const std::string& n : point.sweep_names) {
+            family.sweep_names.push_back(n);
+        }
+        family.sweep_axes.assign(family.sweep_names.size(), {});
+        family.signals = point.signals;  // names
+        for (Signal& sig : family.signals) {
+            sig.data.clear();
+        }
+    }
+    const std::size_t n = point.row_count();
+    for (std::size_t i = 0; i < n; ++i) {
+        family.sweep_axes[0].push_back(static_cast<double>(sp.number));
+        std::size_t ax = 1;
+        for (const auto& [name, v] : sp.params) {
+            (void)name;
+            family.sweep_axes[ax++].push_back(v);
+        }
+        for (const auto& [name, v] : sp.sources) {
+            (void)name;
+            family.sweep_axes[ax++].push_back(v);
+        }
+        if (sp.temp_from_step) {
+            family.sweep_axes[ax++].push_back(sp.temp);
+        }
+        for (const auto& a : point.sweep_axes) {
+            family.sweep_axes[ax++].push_back(i < a.size() ? a[i] : 0.0);
+        }
+        std::size_t k = 0;
+        for (const Signal& sig : point.signals) {
+            family.signals[k++].data.push_back(i < sig.data.size() ? sig.data[i] : 0.0);
+        }
+    }
+}
+
+// --- the public entry (run.hpp) --------------------------------------------------------
+
 ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
                                      std::vector<Warning>& warnings) {
     // .options override the caller's defaults, later cards win (§5.1).
@@ -713,54 +904,191 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
         }
     }
 
-    // One elaboration serves every analysis (§7.1 deck order never
-    // changes an answer: each analysis gets a FRESH RunState, so value
-    // sweeps and dynamic state cannot leak across). Temperature is the
-    // one elaboration input - a `.dc temp` point re-elaborates itself.
-    WS_TRY_ASSIGN(Circuit circuit, elaborate_deck(ast, settings.temp, warnings));
-    WS_TRY(finalize_circuit(circuit));
-    if (circuit.devices.empty() && !ast.analyses.empty()) {
-        // The per-analysis drivers report with their own context.
-    }
-
     ParamTable global;
     for (const ParamDef& def : ast.params) {
         global.define(def);
     }
+    if (ast.steps.empty()) {
+        // Cycle check (§8.4) on the plain scope. A stepped run checks per
+        // point (the elaborator's own eager pass, with the point's
+        // overrides in scope); here a gauss()/flat() definition defers to
+        // run time (§8.5 rev).
+        for (const ParamDef& def : ast.params) {
+            const ws::core::Result<double> v = global.value(to_lower(def.name.text));
+            if (!v && v.error().category == std::string("spice") &&
+                v.error().message.find("needs a random context") != std::string::npos) {
+                continue;
+            }
+            WS_TRY(v);
+        }
+    }
+
+    // The step family (§7.6): the cartesian product of the .step cards,
+    // first card outermost. Without .step cards this is the single empty
+    // point - the plain run.
+    WS_TRY_ASSIGN(const std::vector<StepPoint> points,
+                  enumerate_steps(ast.steps, global, settings.temp));
+
+    // Step names for the family axes: the stepped params (then sources,
+    // then temp) in card order.
+    std::vector<std::string> step_names;
+    for (const StepCard& card : ast.steps) {
+        step_names.push_back(card.name.text);
+    }
+
+    // Elaboration: a stepped run elaborates per point (the stepped params
+    // are elaboration-scope values - devices referencing them bake in at
+    // the point's number, and a temp step re-elaborates at ITS value,
+    // §7.7); a plain run elaborates once.
+    std::optional<Circuit> base;
+    if (ast.steps.empty()) {
+        WS_TRY_ASSIGN(base, elaborate_deck(ast, settings.temp, warnings));
+    }
+
+    // The Monte-Carlo source (§8.5 rev): one stream per run, advanced
+    // point by point - the recorded seed reproduces the whole family.
+    Rand rng(settings.seed);
 
     RunOutput out;
-    for (const AnalysisCard& card : ast.analyses) {
-        AnalysisReport report;
-        // A fresh RunState per analysis: parameters rebind from the deck's
-        // scope, state re-seeds. This is the reset that §3.5 rev makes
-        // trivial.
-        WS_TRY_ASSIGN(RunState state, RunState::bind(circuit));
-        if (card.op) {
-            WS_TRY_ASSIGN(Table t, run_op(circuit, state, settings, report));
-            out.results.tables.push_back(std::move(t));
-            out.reports.push_back(std::move(report));
-        } else if (card.dc) {
-            WS_TRY_ASSIGN(Table t, run_dc(ast, circuit, *card.dc, settings, warnings,
-                                          report));
-            out.results.tables.push_back(std::move(t));
-            out.reports.push_back(std::move(report));
-        } else if (card.tran) {
-            WS_TRY_ASSIGN(Table t, run_tran(circuit, state, *card.tran, settings, global,
-                                            ast.ics, report));
-            out.results.tables.push_back(std::move(t));
-            out.reports.push_back(std::move(report));
+    out.seed = settings.seed;
+    std::vector<Table> family(ast.analyses.size());
+    std::vector<std::string> failure_list;
+    bool elaborated_any_devices = false;
+
+    for (const StepPoint& sp : points) {
+        // The point's scope: global defs + the stepped constants. A
+        // re-definition clears that name's resolve cache, so devices and
+        // .params referencing the stepped name re-draw correctly.
+        ParamTable scope(global);
+        for (const auto& [name, v] : sp.params) {
+            ParamDef def;
+            def.name.text = name;
+            def.expr = ExprProgram::constant(v);
+            scope.define(std::move(def));
+        }
+
+        // The circuit for this point: the plain run's single elaboration,
+        // or a per-point elaboration carrying the stepped values.
+        Circuit point_circuit;
+        if (base.has_value()) {
+            point_circuit = std::move(*base);
+            base.reset();  // the single plain point consumed it
         } else {
-            WS_TRY_ASSIGN(Table t, run_ac(circuit, state, *card.ac, settings, global,
-                                          report));
-            out.results.tables.push_back(std::move(t));
+            std::vector<Warning> scratch;  // identical modulo the step values
+            ws::core::Result<Circuit> re =
+                elaborate_deck(ast, sp.temp, scratch, &sp.params);
+            if (!re) {
+                Diagnostic d = run_diag(ErrorKind::Semantic,
+                                        "spice.semantic.step_elaborate",
+                                        "step point {" + sp.spell +
+                                            "}: " + re.error().message);
+                return spice_fail(std::move(d));
+            }
+            point_circuit = std::move(*re);
+        }
+        const Circuit* live = &point_circuit;
+        if (live->devices.empty()) {
+            return empty_circuit_error("");
+        }
+        elaborated_any_devices = true;
+
+        // Each analysis binds a FRESH RunState against the point's scope
+        // (the §3.5 rev reset) and appends into its family table. A bind
+        // failure (a Monte-Carlo draw outside a device's domain, a
+        // check_params rejection) carries the step context.
+        for (std::size_t ai = 0; ai < ast.analyses.size(); ++ai) {
+            const AnalysisCard& card = ast.analyses[ai];
+            ws::core::Result<RunState> bound = RunState::bind(*live, &scope, &rng);
+            if (!bound) {
+                if (ast.steps.empty()) {
+                    return ws::core::unexpected(bound.error());
+                }
+                Diagnostic d = run_diag(
+                    ErrorKind::Semantic, "spice.semantic.step_failed",
+                    "step point {" + sp.spell + "}: " + bound.error().message);
+                if (!settings.keep_going) {
+                    return spice_fail(std::move(d));
+                }
+                failure_list.push_back("step " + std::to_string(sp.number) + " {" +
+                                       sp.spell + "}: " + bound.error().message);
+                continue;
+            }
+            RunState state = std::move(*bound);
+            // Swept sources patch their dc slot (values only, §3.5 rev).
+            for (const auto& [name, v] : sp.sources) {
+                if (const auto di = RunState::device_index(*live, name)) {
+                    if (live->param_span[*di].count > 0) {
+                        state.params_[live->param_span[*di].begin] = v;
+                    }
+                }
+            }
+            AnalysisReport report;
+            ws::core::Result<Table> t = ws::core::unexpected(
+                ws::core::make_error(1, "spice", "internal: no analysis"));
+            if (card.op) {
+                t = run_op(*live, state, settings, report);
+            } else if (card.dc) {
+                t = run_dc(ast, *live, *card.dc, settings, warnings, report);
+            } else if (card.tran) {
+                t = run_tran(*live, state, *card.tran, settings, scope, ast.ics, report);
+            } else {
+                t = run_ac(*live, state, *card.ac, settings, scope, report);
+            }
+            if (!t) {
+                if (ast.steps.empty()) {
+                    // A plain run: the driver's own diagnostic reaches the
+                    // caller untouched (the §9 taxonomy, never re-branded).
+                    return ws::core::unexpected(t.error());
+                }
+                // §7.6: abort naming the step point; --keep-going runs the
+                // rest and reports the list at the end.
+                Diagnostic d = run_diag(ErrorKind::Semantic, "spice.semantic.step_failed",
+                                        "step point {" + sp.spell +
+                                            "} failed: " + t.error().message);
+                if (!settings.keep_going) {
+                    return spice_fail(std::move(d));
+                }
+                failure_list.push_back("step " + std::to_string(sp.number) + " {" +
+                                       sp.spell + "}: " + t.error().message);
+                continue;
+            }
+            if (ast.steps.empty()) {
+                // No .step cards: the point's table IS the result (no
+                // leading step column - the plain §0.5 shape).
+                out.results.tables.push_back(std::move(*t));
+            } else {
+                merge_into_family(family[ai], *t, sp, step_names);
+            }
             out.reports.push_back(std::move(report));
         }
     }
+
+    // A stepped run's family tables replace the per-point ones (§7.6: one
+    // file holds the whole family, a leading step axis per §7.6).
+    if (!ast.steps.empty()) {
+        for (std::size_t ai = 0; ai < ast.analyses.size(); ++ai) {
+            if (!family[ai].signals.empty()) {
+                out.results.tables.push_back(std::move(family[ai]));
+            }
+        }
+    }
+
+    if (!failure_list.empty()) {
+        std::string msg = "step run completed with failures:\n";
+        for (const std::string& f : failure_list) {
+            msg += "  " + f + "\n";
+        }
+        Diagnostic d = run_diag(ErrorKind::Semantic, "spice.semantic.step_failures",
+                                std::move(msg));
+        return spice_fail(std::move(d));
+    }
+
     if (ast.analyses.empty()) {
         // No analysis cards: nothing to simulate, but the deck still
         // elaborates once - device values and topology are validated, so
         // an invalid deck never passes silently (§1, working-rule 5).
-        if (circuit.devices.empty()) {
+        // (The step loop above already elaborated every point.)
+        if (!elaborated_any_devices) {
             return empty_circuit_error("");
         }
     }

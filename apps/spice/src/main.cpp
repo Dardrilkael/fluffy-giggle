@@ -26,7 +26,10 @@ namespace fs = std::filesystem;
 
 int usage() {
     std::fprintf(stderr,
-                 "usage: spice run <deck.cir> [-o out.csv] [-I <include-dir>]...\n");
+                 "usage: spice run <deck.cir> [-o out.csv] [-I <include-dir>]...\n"
+                 "                  [--keep-going]\n"
+                 "  --keep-going   run the remaining .step points after a failure\n"
+                 "                 and report the list at the end (§7.6)\n");
     return 2;  // §9.5: usage errors exit 2
 }
 
@@ -90,6 +93,7 @@ int cmd_run(const std::vector<std::string>& args) {
     const fs::path deck_path = args[0];
     std::string out_path;  // empty = stdout
     std::vector<std::string> include_dirs;
+    bool keep_going = false;
     for (std::size_t i = 1; i < args.size(); ++i) {
         if (args[i] == "-o") {
             if (i + 1 >= args.size()) {
@@ -103,6 +107,8 @@ int cmd_run(const std::vector<std::string>& args) {
                 return usage();
             }
             include_dirs.push_back(args[++i]);
+        } else if (args[i] == "--keep-going") {
+            keep_going = true;
         } else {
             std::fprintf(stderr, "error: unknown option '%s'\n", args[i].c_str());
             return usage();
@@ -138,8 +144,10 @@ int cmd_run(const std::vector<std::string>& args) {
         return 1;
     }
 
+    ws::spice::RunSettings settings;
+    settings.keep_going = keep_going;  // §7.6: run the remaining step points
     const ws::core::Result<ws::spice::RunOutput> run =
-        ws::spice::run_deck(*ast, ws::spice::RunSettings{}, warnings);
+        ws::spice::run_deck(*ast, settings, warnings);
     print_warnings(warnings, warnings_printed);
     if (!run) {
         std::fprintf(stderr, "%s\n", run.error().message.c_str());

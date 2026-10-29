@@ -1227,3 +1227,189 @@ TEST_CASE("ladder: a chattering self-holding switch is a clean failure") {
     CHECK(run.error().message.find("pseudo-transient continuation") !=
           std::string::npos);
 }
+
+// --- §7.6: .step families + Monte Carlo (§8.5 rev) --------------------------------
+
+TEST_CASE(".step: param sweep produces a family table with step axes") {
+    const auto run = run_text(
+        "family\n"
+        ".param rbot=1k\n"
+        "V1 in 0 5\n"
+        "R1 in out 1k\n"
+        "R2 out 0 {rbot}\n"
+        ".step param rbot 1k 3k 1k\n"
+        ".op\n");
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 1);
+    const Table& t = run->results.tables[0];
+    // Axes: step, rbot (the .op's own axis is empty).
+    CHECK(t.sweep_names == std::vector<std::string>{"step", "rbot"});
+    REQUIRE(t.row_count() == 3);
+    for (std::size_t i = 0; i < 3; ++i) {
+        CHECK(t.axis(0)[i] == static_cast<double>(i + 1));
+        CHECK(t.axis(1)[i] == approx(1e3 * static_cast<double>(i + 1)));
+        // Divider: v(out) = 5 * rbot / (1k + rbot).
+        const double rb = t.axis(1)[i];
+        CHECK(t.signal("v(out)")[i] == approx(5.0 * rb / (1e3 + rb)));
+    }
+}
+
+TEST_CASE(".step: list form and nested cards, first outermost") {
+    const auto run = run_text(
+        "nested\n"
+        "V1 in 0 {vin}\n"
+        "R1 in out 1k\n"
+        "R2 out 0 {rl}\n"
+        ".step param rl list 1k 2k\n"
+        ".step param vin 4 6 2\n"
+        ".op\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    CHECK(t.sweep_names == std::vector<std::string>{"step", "rl", "vin"});
+    REQUIRE(t.row_count() == 4);
+    // First card outermost: rl changes slowest.
+    CHECK(t.axis(1)[0] == approx(1e3));
+    CHECK(t.axis(1)[1] == approx(1e3));
+    CHECK(t.axis(1)[2] == approx(2e3));
+    CHECK(t.axis(1)[3] == approx(2e3));
+    CHECK(t.axis(2)[0] == approx(4.0));
+    CHECK(t.axis(2)[1] == approx(6.0));
+    for (std::size_t i = 0; i < 4; ++i) {
+        const double rl = t.axis(1)[i];
+        const double vin = t.axis(2)[i];
+        CHECK(t.signal("v(out)")[i] == approx(vin * rl / (1e3 + rl)));
+    }
+}
+
+TEST_CASE(".step: the source-value form patches the dc slot") {
+    const auto run = run_text(
+        "srcstep\n"
+        "V1 in 0 5\n"
+        "R1 in out 1k\n"
+        "R2 out 0 1k\n"
+        ".step V1 1 5 2\n"
+        ".op\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    REQUIRE(t.row_count() == 3);
+    for (std::size_t i = 0; i < 3; ++i) {
+        CHECK(t.signal("v(in)")[i] == approx(t.axis(1)[i]));
+        CHECK(t.signal("v(out)")[i] == approx(t.axis(1)[i] / 2.0));
+    }
+}
+
+TEST_CASE(".step: a temp step re-elaborates per point") {
+    // M1/M2 devices are temp-invariant, so the VALUES stay identical -
+    // what is pinned here is the family shape and that the run completes
+    // through the re-elaboration path.
+    const auto run = run_text(
+        "tempstep\n"
+        "V1 in 0 5\n"
+        "R1 in out 1k\n"
+        "R2 out 0 1k\n"
+        ".step temp list 0 100\n"
+        ".op\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    CHECK(t.sweep_names == std::vector<std::string>{"step", "temp"});
+    REQUIRE(t.row_count() == 2);
+    CHECK(t.signal("v(out)")[0] == approx(2.5));
+    CHECK(t.signal("v(out)")[1] == approx(2.5));
+}
+
+TEST_CASE(".step: Monte Carlo - gauss/flat draw per point, seed reproduces") {
+    const std::string deck =
+        "mc\n"
+        ".param rl=2k+gauss(200)\n"
+        "V1 in 0 5\n"
+        "R1 in out 1k\n"
+        "R2 out 0 {rl}\n"
+        ".step param run 1 40 1\n"
+        ".op\n";
+    auto a = run_text(deck);
+    REQUIRE(a);
+    auto b = run_text(deck);
+    REQUIRE(b);
+    const Table& ta = a->results.tables[0];
+    const Table& tb = b->results.tables[0];
+    REQUIRE(ta.row_count() == 40);
+    REQUIRE(tb.row_count() == 40);
+    // Deterministic: the recorded seed reproduces the family bit-for-bit.
+    for (std::size_t i = 0; i < 40; ++i) {
+        CHECK(ta.signal("v(out)")[i] == tb.signal("v(out)")[i]);
+    }
+    // And the draws actually varied (40 distinct values would be extreme
+    // chance; a handful suffices).
+    std::size_t distinct = 0;
+    for (std::size_t i = 1; i < 40; ++i) {
+        if (ta.signal("v(out)")[i] != ta.signal("v(out)")[0]) {
+            ++distinct;
+        }
+    }
+    CHECK(distinct > 10);
+
+    // A different seed gives a different family.
+    auto c = run_text("mc\n.options seed=7\n.param rl=2k+gauss(200)\n"
+                      "V1 in 0 5\nR1 in out 1k\nR2 out 0 {rl}\n"
+                      ".step param run 1 40 1\n.op\n");
+    REQUIRE(c);
+    const Table& tc = c->results.tables[0];
+    std::size_t differing = 0;
+    for (std::size_t i = 0; i < 40; ++i) {
+        if (tc.signal("v(out)")[i] != ta.signal("v(out)")[i]) {
+            ++differing;
+        }
+    }
+    CHECK(differing > 10);
+    CHECK(a->seed == 1);
+    CHECK(c->seed == 7);
+}
+
+TEST_CASE(".step: gauss in a plain run draws ONCE, coherently across analyses") {
+    // No .step cards: the family is the single default point, and the
+    // draw happens once - both analyses of the deck see the SAME rl
+    // (a per-analysis redraw would silently change the circuit between
+    // the .op and the .tran that follows).
+    const std::string deck =
+        "nog\n"
+        ".param rl=2k+gauss(200)\n"
+        "V1 in 0 PULSE(0 5 1u 1u 1u 10u)\n"
+        "R1 in out 1k\n"
+        "R2 out 0 {rl}\n"
+        "C1 out 0 1n\n"
+        ".op\n"
+        ".tran 1u 5u\n";
+    const auto run = run_text(deck);
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 2);
+    const Table& op = run->results.tables[0];
+    const Table& tran = run->results.tables[1];
+    CHECK(op.signal("v(out)")[0] == tran.signal("v(out)")[0]);
+    // Deterministic under the recorded seed.
+    const auto again = run_text(deck);
+    REQUIRE(again);
+    CHECK(op.signal("v(out)")[0] ==
+          again->results.tables[0].signal("v(out)")[0]);
+}
+
+TEST_CASE(".step: a failing point aborts with the step context; keep-going lists") {
+    // Point run=2 forces a zero-valued resistor (check_params rejects).
+    const std::string deck =
+        "failing\n"
+        ".param rl=2k*(run!=2)\n"
+        "V1 in 0 5\n"
+        "R1 in out 1k\n"
+        "R2 out 0 {rl}\n"
+        ".step param run 1 3 1\n"
+        ".op\n";
+    const auto run = run_text(deck);
+    REQUIRE(!run);
+    CHECK(run.error().message.find("run=2") != std::string::npos);
+
+    RunSettings s;
+    s.keep_going = true;
+    const auto kg = run_text(deck, nullptr, s);
+    REQUIRE(!kg);
+    // The failure list names the point AND the run kept the others.
+    CHECK(kg.error().message.find("run=2") != std::string::npos);
+}

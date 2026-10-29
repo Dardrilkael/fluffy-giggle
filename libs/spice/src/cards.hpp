@@ -22,6 +22,7 @@ struct ParsedCard {
         Tran,
         Ac,
         Ic,
+        Step,    // ".step" - deck level only
         Subckt,  // ".subckt" opener - only meaningful at deck level
         Ends,    // ".ends" - ditto
     };
@@ -36,6 +37,7 @@ struct ParsedCard {
     TranCard tran;
     AcCard ac;
     IcCard ic;
+    StepCard step;
     SourceLoc loc;
 
     // Device letter, uppercased ('R', 'V', 'X', ...), valid for Kind::Device.

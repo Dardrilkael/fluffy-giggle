@@ -56,10 +56,12 @@ ws::core::Result<RunState> RunState::bind(const Circuit& c, const ParamTable* sc
     rs.pins_.clear();
 
     const ParamTable& table = (scope != nullptr) ? *scope : c.params;
-    // One .param name must mean one value within a bind (two devices
-    // referencing the same Monte-Carlo parameter see the SAME draw):
-    // resolve through a cache-coherent evaluation of the scope.
-    table.clear_cache();
+    // Draw coherence WITHOUT a cache clear: the first evaluation of a
+    // gauss()/flat() parameter caches, so every device AND every analysis
+    // of the run sees the same draw (§8.5 rev). A .step point hands bind
+    // a FRESH scope per point (the driver's table), so each point draws
+    // anew; a re-definition (a stepped override, Simulator::rebind with
+    // an updated table) clears that name's cache by construction.
 
     for (std::size_t i = 0; i < c.devices.size(); ++i) {
         const Device& dev = *c.devices[i];
@@ -67,7 +69,7 @@ ws::core::Result<RunState> RunState::bind(const Circuit& c, const ParamTable* sc
         for (std::size_t j = 0; j < span.count; ++j) {
             const ParamSpec& spec = c.param_table[span.begin + j];
             const ws::core::Result<std::vector<std::optional<double>>> bindings =
-                table.bind(spec.source);
+                table.bind(spec.source, rng);
             if (!bindings) {
                 // The scope's own error (a cycle, an unknown param) already
                 // names the chain; add the device context on top.

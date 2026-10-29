@@ -27,7 +27,7 @@ const std::map<char, const char*>& device_milestones() {
 
 const std::map<std::string, const char*>& card_milestones() {
     static const std::map<std::string, const char*> table = {
-        {".noise", "M5"},   {".step", "M5"},   {".meas", "M5"},
+        {".noise", "M5"},   {".meas", "M5"},
         {".save", "M5"},    {".print", "M5"},  {".probe", "M5"},
         {".nodeset", "M5"},
         {".lib", "backlog"},  {".global", "backlog"}, {".func", "backlog"},
@@ -43,7 +43,8 @@ bool known_option_key(const std::string& lower) {
     return lower == "reltol" || lower == "abstol" || lower == "vntol" ||
            lower == "gmin" || lower == "itl1" || lower == "itl2" || lower == "itl4" ||
            lower == "chgtol" || lower == "trtol" || lower == "temp" ||
-           lower == "tnom" || lower == "solver" || lower == "gshunt";
+           lower == "tnom" || lower == "solver" || lower == "gshunt" ||
+           lower == "seed";
 }
 
 // "name=expr" -> (name token, expression text). The expression side may be
@@ -222,6 +223,92 @@ ws::core::Result<ParsedCard> parse_card(const Record& rec, bool inside_subckt,
             }
             card.kind = ParsedCard::Kind::Ic;
             card.ic = std::move(ic);
+            return card;
+        }
+        if (first_lower == ".step") {
+            if (inside_subckt) {
+                return spice_fail(card_diag(ErrorKind::Parse, "spice.parse.card_scope",
+                                            "'.step' inside .subckt", rec.loc));
+            }
+            // .step param NAME start stop inc | .step param NAME list v...
+            // .step dec|oct param NAME start stop N | .step temp ...
+            // .step SRC start stop inc [list ...]
+            if (rec.tokens.size() < 3) {
+                return spice_fail(card_diag(
+                    ErrorKind::Parse, "spice.parse.step_arity",
+                    "'.step' needs a target and values", rec.loc));
+            }
+            StepCard st;
+            st.loc = rec.loc;
+            std::size_t i = 1;
+            std::string first = to_lower(rec.tokens[1].text);
+            if (first == "dec" || first == "oct") {
+                st.kind = (first == "dec") ? StepCard::Kind::Dec : StepCard::Kind::Oct;
+                if (rec.tokens.size() != 7 || to_lower(rec.tokens[2].text) != "param") {
+                    return spice_fail(card_diag(
+                        ErrorKind::Parse, "spice.parse.step_form",
+                        "'.step " + first + " param NAME START STOP N' expected",
+                        rec.loc));
+                }
+                st.name = rec.tokens[3];
+                WS_TRY_ASSIGN(st.start, expr_from_text(rec.tokens[4].text,
+                                                       rec.tokens[4].loc));
+                WS_TRY_ASSIGN(st.stop, expr_from_text(rec.tokens[5].text,
+                                                      rec.tokens[5].loc));
+                WS_TRY_ASSIGN(st.inc, expr_from_text(rec.tokens[6].text,
+                                                     rec.tokens[6].loc));
+                card.kind = ParsedCard::Kind::Step;
+                card.step = std::move(st);
+                return card;
+            }
+            if (first == "param" || first == "temp") {
+                if (first == "temp") {
+                    st.is_temp = true;
+                    st.name = rec.tokens[1];  // "temp"
+                    i = 2;
+                } else {
+                    if (rec.tokens.size() < 4) {
+                        return spice_fail(card_diag(
+                            ErrorKind::Parse, "spice.parse.step_form",
+                            "'.step param NAME START STOP INC' expected", rec.loc));
+                    }
+                    st.name = rec.tokens[2];
+                    i = 3;
+                }
+            } else {
+                // Source-value form: .step V1 start stop inc / ... list ...
+                st.is_source = true;
+                st.name = rec.tokens[1];
+                i = 2;
+            }
+            if (i < rec.tokens.size() && to_lower(rec.tokens[i].text) == "list") {
+                st.kind = StepCard::Kind::List;
+                for (std::size_t k = i + 1; k < rec.tokens.size(); ++k) {
+                    WS_TRY_ASSIGN(ExprProgram e, expr_from_text(rec.tokens[k].text,
+                                                                rec.tokens[k].loc));
+                    st.list.push_back(std::move(e));
+                }
+                if (st.list.empty()) {
+                    return spice_fail(card_diag(ErrorKind::Parse, "spice.parse.step_list",
+                                                "'.step ... list' needs values",
+                                                rec.loc));
+                }
+            } else {
+                if (rec.tokens.size() < i + 3) {
+                    return spice_fail(card_diag(
+                        ErrorKind::Parse, "spice.parse.step_form",
+                        "'.step' linear form takes START STOP INC", rec.loc));
+                }
+                st.kind = StepCard::Kind::Lin;
+                WS_TRY_ASSIGN(st.start, expr_from_text(rec.tokens[i].text,
+                                                       rec.tokens[i].loc));
+                WS_TRY_ASSIGN(st.stop, expr_from_text(rec.tokens[i + 1].text,
+                                                      rec.tokens[i + 1].loc));
+                WS_TRY_ASSIGN(st.inc, expr_from_text(rec.tokens[i + 2].text,
+                                                     rec.tokens[i + 2].loc));
+            }
+            card.kind = ParsedCard::Kind::Step;
+            card.step = std::move(st);
             return card;
         }
         if (first_lower == ".dc") {
@@ -563,6 +650,15 @@ ws::core::Result<DeckAst> build_deck_ast(const Deck& deck, std::vector<Warning>&
                 ast.ics.push_back(card.ic);
                 break;
             }
+            case K::Step: {
+                if (inside) {
+                    return spice_fail(ast_diag(
+                        ErrorKind::Parse, "spice.parse.card_scope",
+                        "'.step' inside .subckt", rec.loc));
+                }
+                ast.steps.push_back(card.step);
+                break;
+            }
             case K::Subckt: {
                 SubcktDef def;
                 def.loc = rec.loc;
@@ -675,13 +771,15 @@ void ParamTable::clear_cache() const {
     }
 }
 
-ws::core::Result<double> ParamTable::value(const std::string& lower) const {
+ws::core::Result<double> ParamTable::value(const std::string& lower,
+                                            Rand* rng) const {
     std::vector<std::string> active;
-    return resolve(lower, active);
+    return resolve(lower, active, rng);
 }
 
 ws::core::Result<double> ParamTable::resolve(const std::string& lower,
-                                             std::vector<std::string>& active) const {
+                                             std::vector<std::string>& active,
+                                             Rand* rng) const {
     for (const std::string& a : active) {
         if (a == lower) {
             std::string chain;
@@ -708,9 +806,17 @@ ws::core::Result<double> ParamTable::resolve(const std::string& lower,
             active.pop_back();
             return ws::core::unexpected(bindings.error());
         }
-        const ws::core::Result<double> v = it->second.expr.evaluate(*bindings);
+        const ws::core::Result<double> v = it->second.expr.evaluate(*bindings, rng);
         active.pop_back();
         if (!v) {
+            if (v.error().category == std::string("spice") &&
+                v.error().message.find("needs a random context") !=
+                    std::string::npos) {
+                // A gauss()/flat() draw without a Rand: run-time by design
+                // (§8.5 rev) - pass the error through untouched so the
+                // elaborator can defer it to bind time.
+                return ws::core::unexpected(v.error());
+            }
             Diagnostic d;
             d.kind = ErrorKind::Semantic;
             d.code = "spice.param.eval";
@@ -731,17 +837,17 @@ ws::core::Result<double> ParamTable::resolve(const std::string& lower,
 }
 
 ws::core::Result<std::vector<std::optional<double>>> ParamTable::bind(
-    const ExprProgram& prog) const {
+    const ExprProgram& prog, Rand* rng) const {
     std::vector<std::string> active;
-    return bind_active(prog, active);
+    return bind_active(prog, active, rng);
 }
 
 ws::core::Result<std::vector<std::optional<double>>> ParamTable::bind_active(
-    const ExprProgram& prog, std::vector<std::string>& active) const {
+    const ExprProgram& prog, std::vector<std::string>& active, Rand* rng) const {
     std::vector<std::optional<double>> out(prog.vars().size());
     for (std::size_t i = 0; i < prog.vars().size(); ++i) {
         if (knows(prog.vars()[i])) {
-            WS_TRY_ASSIGN(out[i], resolve(prog.vars()[i], active));
+            WS_TRY_ASSIGN(out[i], resolve(prog.vars()[i], active, rng));
         }
     }
     return out;

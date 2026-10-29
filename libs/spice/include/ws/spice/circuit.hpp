@@ -99,8 +99,12 @@ struct Circuit {
 // Elaborates the AST into a Circuit: models table, subckt flattening,
 // node table, the §6.6 graph checks (§8.4). `temp` is the §7.7
 // temperature the devices are built at (`.dc temp` / `.step temp`
-// re-elaborate per point). Warnings append, never fatal.
-[[nodiscard]] ws::core::Result<Circuit> elaborate_deck(const DeckAst& ast, double temp,
-                                                       std::vector<Warning>& warnings);
+// re-elaborate per point). `step_overrides` (the §7.6 step point's param
+// constants) join the global scope ahead of the device cards, so devices
+// referencing a stepped name elaborate at the point's value. Warnings
+// append, never fatal.
+[[nodiscard]] ws::core::Result<Circuit> elaborate_deck(
+    const DeckAst& ast, double temp, std::vector<Warning>& warnings,
+    const std::vector<std::pair<std::string, double>>* step_overrides = nullptr);
 
 }  // namespace ws::spice

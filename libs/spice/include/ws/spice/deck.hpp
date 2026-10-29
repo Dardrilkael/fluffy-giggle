@@ -94,6 +94,26 @@ struct IcCard {
     std::vector<std::pair<Token, ExprProgram>> node_values;  // node token, volts
 };
 
+// .step (§7.6): one stepped quantity. Forms:
+//   .step param NAME start stop inc          (linear)
+//   .step param NAME list v1 v2 ...          (explicit list)
+//   .step dec|oct param NAME start stop N    (logarithmic)
+//   .step temp start stop inc [list|dec...]  (temperature; re-elaborates)
+//   .step SRC start stop inc                 (a V/I source's value)
+// Multiple .step cards nest, first card outermost.
+struct StepCard {
+    enum class Kind { Lin, List, Dec, Oct };
+    SourceLoc loc;
+    Kind kind = Kind::Lin;
+    bool is_temp = false;   // re-elaborate per point (§7.7)
+    bool is_source = false;  // patch the named V/I source's dc slot
+    Token name;              // param name, "temp", or a source name
+    ExprProgram start;
+    ExprProgram stop;
+    ExprProgram inc;         // lin: step; dec/oct: N
+    std::vector<ExprProgram> list;  // list form values
+};
+
 struct SubcktDef {
     Token name;                       // ".subckt foo a b"
     std::vector<Token> ports;         // port node names, as spelled
@@ -121,6 +141,7 @@ struct DeckAst {
     std::vector<OptionsCard> options;     // top-level .options, in order
     std::vector<AnalysisCard> analyses;   // deck order
     std::vector<IcCard> ics;              // top-level .ic cards, in order
+    std::vector<StepCard> steps;          // top-level .step cards, in order
     std::map<std::string, SubcktDef> subckts;  // key: lowercased name
 };
 
@@ -159,12 +180,15 @@ public:
 
     // Binds an expression's variables against this scope; unbound
     // variables stay nullopt in the result (the expression evaluator
-    // reports them with its own context).
+    // reports them with its own context). `rng` (when given) serves
+    // gauss()/flat() draws inside REFERENCED definitions - the §8.5 rev
+    // Monte-Carlo chain.
     [[nodiscard]] ws::core::Result<std::vector<std::optional<double>>> bind(
-        const ExprProgram& prog) const;
+        const ExprProgram& prog, class Rand* rng = nullptr) const;
 
     // Resolves one name (lowercased) to a value, with cycle detection.
-    [[nodiscard]] ws::core::Result<double> value(const std::string& lower) const;
+    [[nodiscard]] ws::core::Result<double> value(const std::string& lower,
+                                                 class Rand* rng = nullptr) const;
 
     // Resolve cache (§8.4 rev): within one bind, a name resolves to one
     // value - two devices referencing the same Monte-Carlo parameter see
@@ -174,12 +198,14 @@ public:
 
 private:
     [[nodiscard]] ws::core::Result<double> resolve(
-        const std::string& lower, std::vector<std::string>& active) const;
+        const std::string& lower, std::vector<std::string>& active,
+        Rand* rng = nullptr) const;
     // bind() with the cycle-detection chain threaded through, so a cycle
     // spanning several definitions (a=b+1, b=a) is caught no matter how
     // deep the reference nest goes.
     [[nodiscard]] ws::core::Result<std::vector<std::optional<double>>> bind_active(
-        const ExprProgram& prog, std::vector<std::string>& active) const;
+        const ExprProgram& prog, std::vector<std::string>& active,
+        Rand* rng = nullptr) const;
 
     std::map<std::string, ParamDef> defs_;
     mutable std::map<std::string, double> cache_;  // per-bind resolution

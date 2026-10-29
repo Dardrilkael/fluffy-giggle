@@ -70,7 +70,8 @@ public:
         }
     }
 
-    ws::core::Status elaborate();
+    ws::core::Status elaborate(
+        const std::vector<std::pair<std::string, double>>* step_overrides);
     [[nodiscard]] const Circuit& circuit() const { return circuit_; }
     [[nodiscard]] Circuit take_circuit() { return std::move(circuit_); }
     [[nodiscard]] const ParamTable& global_params() const { return global_params_; }
@@ -670,15 +671,32 @@ ws::core::Status Elaborator::check_topology() {
     return {};
 }
 
-ws::core::Status Elaborator::elaborate() {
+ws::core::Status Elaborator::elaborate(
+    const std::vector<std::pair<std::string, double>>* step_overrides) {
     // Global parameter scope. Every definition is resolved eagerly even
     // when nothing references it: an unreferenced cycle (a=b+1, b=a) is
-    // still an error naming the cycle (§8.4), not a silent pass.
+    // still an error naming the cycle (§8.4), not a silent pass. The one
+    // exception: a gauss()/flat() draw without a Rand is run-time by
+    // design (§8.5 rev) - the .step driver rebinds with one, and a plain
+    // run fails at bind time with the no-rng Usage error.
     for (const ParamDef& def : ast_.params) {
         global_params_.define(def);
     }
+    if (step_overrides != nullptr) {
+        for (const auto& [name, v] : *step_overrides) {
+            ParamDef def;
+            def.name.text = name;
+            def.expr = ExprProgram::constant(v);
+            global_params_.define(std::move(def));
+        }
+    }
     for (const ParamDef& def : ast_.params) {
-        WS_TRY(global_params_.value(to_lower(def.name.text)));
+        const ws::core::Result<double> v = global_params_.value(to_lower(def.name.text));
+        if (!v && v.error().category == std::string("spice") &&
+            v.error().message.find("needs a random context") != std::string::npos) {
+            continue;  // deferred to run time (§8.5 rev)
+        }
+        WS_TRY(v);
     }
 
     // Devices in deck order; X cards flatten recursively. The kind letter
@@ -711,10 +729,11 @@ ws::core::Status Elaborator::elaborate() {
 
 // --- public entry ----------------------------------------------------------------
 
-ws::core::Result<Circuit> elaborate_deck(const DeckAst& ast, double temp,
-                                         std::vector<Warning>& warnings) {
+ws::core::Result<Circuit> elaborate_deck(
+    const DeckAst& ast, double temp, std::vector<Warning>& warnings,
+    const std::vector<std::pair<std::string, double>>* step_overrides) {
     Elaborator elab(ast, warnings);
-    WS_TRY(elab.elaborate());
+    WS_TRY(elab.elaborate(step_overrides));
     Circuit c = elab.take_circuit();
     c.temp = temp;  // §7.7: what the (future temp-aware) models build at
     c.params = elab.global_params();  // the scope every param expr evaluates against

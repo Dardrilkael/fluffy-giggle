@@ -120,8 +120,12 @@ Diagnostic dev_diag(ErrorKind kind, std::string code, std::string message, Sourc
 // External linkage: devices_m2.cpp's factories share it through cards.hpp.
 ws::core::Result<double> eval_param_for_validation(const ExprProgram& prog,
                                                    const ParamTable& params) {
-    WS_TRY_ASSIGN(const std::vector<std::optional<double>> bindings, params.bind(prog));
-    Rand dummy{0};  // seed 0: values discarded, only domain errors matter
+    // A dummy-seeded rng serves both the direct draw and any gauss() in
+    // the referenced .param chain - validation only cares that things
+    // RESOLVE; the real draws happen per run at bind time.
+    Rand dummy{0};
+    WS_TRY_ASSIGN(const std::vector<std::optional<double>> bindings,
+                  params.bind(prog, &dummy));
     return prog.evaluate(bindings, &dummy);
 }
 

@@ -93,6 +93,8 @@ ws::core::Status apply_options(const std::vector<OptionsCard>& options, RunSetti
                 // Accepted and recorded; no M1/M2 device reads it yet
                 // (temp-dependent models land M5).
                 out.tnom = v;
+            } else if (lower == "seed") {
+                out.seed = static_cast<std::uint64_t>(v);
             } else if (lower == "solver") {
                 const std::string backend = to_lower(value.text);
                 if (backend != "eigen") {
