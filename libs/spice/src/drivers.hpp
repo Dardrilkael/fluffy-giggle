@@ -7,6 +7,8 @@
 // a Simulator-created circuit passes null and temp sweeps report a Usage
 // error naming the limitation instead of guessing.
 
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -14,8 +16,42 @@
 #include <ws/spice/deck.hpp>
 #include <ws/spice/run.hpp>
 #include <ws/spice/state.hpp>
+#include <ws/spice/transient.hpp>
 
 namespace ws::spice::drivers {
+
+// The time loop behind run_tran AND TransientRun (§6 rev): prepare()
+// validates the card and seeds t=0; step() marches exactly one accepted
+// step; hooks cancel or observe per attempt/accept.
+class TranMarch {
+public:
+    struct Hooks {
+        const StopToken* stop = nullptr;                // cancel (prompt)
+        std::function<bool(double now, double tstop)> on_accept;  // false = stop
+    };
+
+    TranMarch(const Circuit& circuit, RunState& state, const RunSettings& settings,
+              const TranCard& card, const ParamTable& scope,
+              const std::vector<IcCard>& ics);
+    ~TranMarch();
+    TranMarch(TranMarch&&) = default;
+
+    ws::core::Status prepare();
+    ws::core::Status step(const Hooks& hooks);
+
+    [[nodiscard]] bool done() const;
+    [[nodiscard]] bool stopped() const;  // a hook asked to stop (resumable)
+    [[nodiscard]] double now() const;
+    [[nodiscard]] double tstop() const;
+    [[nodiscard]] Table table() const;
+    [[nodiscard]] Table take_table();
+    [[nodiscard]] AnalysisReport report() const;
+    [[nodiscard]] const std::vector<double>& solution() const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 // §7.2
 [[nodiscard]] ws::core::Result<Table> run_op(const Circuit& circuit, RunState& state,

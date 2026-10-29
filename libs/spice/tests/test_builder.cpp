@@ -395,3 +395,157 @@ TEST_CASE("units: the SPICE scale factors as literals") {
     CHECK(47_p == approx(47e-12));
     CHECK(1_G == approx(1e9));
 }
+
+// --- the steppable transient (§6 rev) ---------------------------------------------
+
+TEST_CASE("transient: advance_to marches in whole steps to the target") {
+    CircuitBuilder c;
+    auto in = c.node("in"), out = c.node("out");
+    (void)c.resistor("R1", in, out, 1_k);
+    (void)c.capacitor("C1", out, gnd, 1_u);
+    (void)c.vsource("V1", in, gnd, Pulse{.v1 = 0, .v2 = 5, .td = 100_u, .tr = 1_u,
+                                         .pw = 10_ms});
+    auto circuit = c.finish();
+    REQUIRE(circuit);
+    auto sim = Simulator::create(std::move(*circuit));
+    REQUIRE(sim);
+
+    auto run = sim->begin_transient(TranAnalysis{.tstep = 10_u, .tstop = 1_ms});
+    REQUIRE(run);
+    CHECK(run->now() == approx(0.0));
+    CHECK(!run->done());
+
+    // Advance in ten 100us chunks (integer counters: accumulated floats
+    // drift below `now` and freeze the march). A step is never SPLIT to
+    // land on the target exactly, so now() may overshoot by up to one
+    // whole step (dtmax = tstep = 10us here).
+    for (int k = 1; k <= 10; ++k) {
+        const double t = static_cast<double>(k) * 100_u;
+        REQUIRE(run->advance_to(t));
+        CHECK(run->now() <= t + 10_u + 1e-12);
+        CHECK(run->now() > t - 30_u);
+    }
+    CHECK(run->done());
+
+    // The stepped table equals a one-shot run's table bit-for-bit: same
+    // card, same stepping logic, only the driving loop differs.
+    auto oneshot = sim->run(TranAnalysis{.tstep = 10_u, .tstop = 1_ms});
+    REQUIRE(oneshot);
+    const Table stepped = run->table();
+    REQUIRE(stepped.row_count() == oneshot->row_count());
+    CHECK(columns_agree(stepped.signal("v(out)"), oneshot->signal("v(out)"), 0.0));
+    CHECK(columns_agree(stepped.signal("v(in)"), oneshot->signal("v(in)"), 0.0));
+}
+
+TEST_CASE("transient: stop token cancels promptly and resumably") {
+    CircuitBuilder c;
+    auto in = c.node("in"), out = c.node("out");
+    (void)c.resistor("R1", in, out, 1_k);
+    (void)c.capacitor("C1", out, gnd, 1_u);
+    (void)c.vsource("V1", in, gnd, Pulse{.v1 = 0, .v2 = 5, .td = 100_u, .tr = 1_u,
+                                         .pw = 10_ms});
+    auto circuit = c.finish();
+    REQUIRE(circuit);
+    auto sim = Simulator::create(std::move(*circuit));
+    REQUIRE(sim);
+
+    auto run = sim->begin_transient(TranAnalysis{.tstep = 10_u, .tstop = 1_ms});
+    REQUIRE(run);
+
+    ws::spice::StopToken token;
+    run->set_stop_token(token);
+    REQUIRE(run->advance_to(200_u));
+    token.request_stop();
+    REQUIRE(run->advance_to(1_ms));
+    CHECK(run->cancelled());
+    CHECK(!run->done());
+    CHECK(run->now() < 400_u);  // stopped soon after the request
+
+    // Resume to the end: the run continues from the same state and lands
+    // on the SAME trajectory a one-shot run takes (bit-for-bit).
+    ws::spice::StopToken fresh;
+    run->set_stop_token(fresh);
+    REQUIRE(run->advance_to(1_ms));
+    CHECK(run->done());
+    auto oneshot = sim->run(TranAnalysis{.tstep = 10_u, .tstop = 1_ms});
+    REQUIRE(oneshot);
+    const Table resumed = run->table();
+    REQUIRE(resumed.row_count() == oneshot->row_count());
+    CHECK(columns_agree(resumed.signal("v(out)"), oneshot->signal("v(out)"), 0.0));
+}
+
+TEST_CASE("transient: closed-loop set_source between steps") {
+    // A bang-bang controller around 2 V: set_source() between advance_to
+    // calls drives the very next step - the embedded-control pattern.
+    CircuitBuilder c;
+    auto in = c.node("in"), out = c.node("out");
+    (void)c.resistor("R1", in, out, 100.0);
+    (void)c.capacitor("C1", out, gnd, 1_u);
+    (void)c.vsource("V1", in, gnd, 0.0);
+    auto circuit = c.finish();
+    REQUIRE(circuit);
+    auto sim = Simulator::create(std::move(*circuit));
+    REQUIRE(sim);
+
+    auto run = sim->begin_transient(TranAnalysis{.tstep = 10_u, .tstop = 2_ms});
+    REQUIRE(run);
+    const auto node_id = [&sim](const char* name) {
+        for (std::size_t i = 0; i < sim->circuit().node_count(); ++i) {
+            if (sim->circuit().node_names[i] == name) {
+                return i;
+            }
+        }
+        return std::size_t{0};
+    };
+    const std::size_t out_id = node_id("out");
+    int flips = 0;
+    bool high = false;
+    for (int k = 1; k <= 40; ++k) {
+        const double t = static_cast<double>(k) * 50_u;
+        const bool want = run->solution()[out_id] < 2.0;
+        if (want != high) {
+            ++flips;
+            high = want;
+        }
+        REQUIRE(sim->set_source("V1", high ? 5.0 : 0.0));
+        REQUIRE(run->advance_to(t));
+        if (run->done()) {
+            break;
+        }
+    }
+    // The controller switched repeatedly and regulates around 2 V.
+    CHECK(flips > 5);
+    const double vfinal = run->solution()[out_id];
+    CHECK(vfinal < 5.0);
+    CHECK(vfinal > 0.5);
+}
+
+TEST_CASE("transient: progress callback observes every accepted step") {
+    CircuitBuilder c;
+    auto in = c.node("in"), out = c.node("out");
+    (void)c.resistor("R1", in, out, 1_k);
+    (void)c.capacitor("C1", out, gnd, 1_u);
+    (void)c.vsource("V1", in, gnd, 5.0);
+    auto circuit = c.finish();
+    REQUIRE(circuit);
+    auto sim = Simulator::create(std::move(*circuit));
+    REQUIRE(sim);
+
+    auto run = sim->begin_transient(TranAnalysis{.tstep = 10_u, .tstop = 500_u});
+    REQUIRE(run);
+
+    std::vector<double> seen;
+    run->set_progress([&](double now, double tstop) {
+        seen.push_back(now);
+        CHECK(tstop == approx(500e-6));
+    });
+    REQUIRE(run->advance_to(500_u));
+    CHECK(run->done());
+    // Every accepted sample (including t=0's row? no - accepts only) and
+    // monotonic times.
+    REQUIRE(seen.size() >= 5);
+    for (std::size_t i = 1; i < seen.size(); ++i) {
+        CHECK(seen[i] > seen[i - 1]);
+    }
+    CHECK(seen.back() == approx(500e-6));
+}

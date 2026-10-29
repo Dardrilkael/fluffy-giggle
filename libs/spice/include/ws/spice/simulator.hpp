@@ -13,6 +13,7 @@
 #include <ws/spice/results.hpp>
 #include <ws/spice/run.hpp>
 #include <ws/spice/state.hpp>
+#include <ws/spice/transient.hpp>
 
 // The Simulator (DESIGN.md §2.1 rev): one value owning a run over an
 // immutable Circuit. The CLI's run_deck stays for whole-deck runs; this
@@ -30,9 +31,11 @@
 // snapshot()/restore() copy the whole arena (rewind, retry, checkpoint).
 //
 // A steppable transient (advance_to / cancellation / progress) is the
-// TransientRun class in transient.hpp.
+// TransientRun returned by begin_transient().
 
 namespace ws::spice {
+
+class TransientRun;
 
 class Simulator {
 public:
@@ -64,6 +67,14 @@ public:
     [[nodiscard]] ws::core::Status set_source(std::string_view source, double value);
     // Releases the force pin; the construction waveform drives again.
     [[nodiscard]] ws::core::Status release_source(std::string_view source);
+
+    // A steppable, cancellable transient over THIS Simulator's state
+    // (transient.hpp): advance_to(t) marches whole accepted steps;
+    // set()/set_source() between calls drive the next step - the
+    // closed-loop pattern. The Simulator must outlive the run and must
+    // not run other analyses while it is live (they share the state).
+    [[nodiscard]] ws::core::Result<TransientRun> begin_transient(
+        const TranAnalysis& a, const std::vector<IcNode>& ics = {});
 
     // The whole run state as a value: parameters + dynamic state + pins.
     // Copying IS snapshot/restore (§3.5 rev).
