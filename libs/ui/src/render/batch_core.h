@@ -181,6 +181,15 @@ public:
     bool push_quad(const float (&pos)[4][3], const float (&uv)[4][2],
                    const float (&color)[4], std::uint32_t texture_id);
 
+    // The canvas layer's per-corner-color sibling: same guards, same cap
+    // split, but every vertex carries its OWN rgba - the CPU-tessellated
+    // antialiasing fringes ramp alpha across a quad's corners. A solid
+    // quad is this with four identical rows (the plain push_quad is the
+    // cheaper spelling of exactly that).
+    bool push_quad_vcol(const float (&pos)[4][3], const float (&uv)[4][2],
+                        const float (&colors)[4][4],
+                        std::uint32_t texture_id);
+
     // The rounded-rect sibling: same guards and cap split, but the quad
     // names no texture. `radius` is the corner radius in WORLD units;
     // each vertex's tex_index carries it NEGATIVE and normalized to the

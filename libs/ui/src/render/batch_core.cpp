@@ -334,6 +334,37 @@ bool BatchCore::push_quad(const float (&pos)[4][3], const float (&uv)[4][2],
     return true;
 }
 
+bool BatchCore::push_quad_vcol(const float (&pos)[4][3],
+                               const float (&uv)[4][2],
+                               const float (&colors)[4][4],
+                               std::uint32_t texture_id) {
+    if (!segment_open_ || chunks_.empty()) {
+        ++dropped_quads_;
+        return false;
+    }
+    if (chunks_.back().quad_count >= kMaxQuadsPerChunk) {
+        split_full_chunk();
+    }
+    const std::uint32_t tex_index =
+        global_tex_ids_ ? texture_id : texture_slot(texture_id);
+    for (int i = 0; i < 4; ++i) {
+        Vertex v;
+        v.pos[0] = pos[i][0];
+        v.pos[1] = pos[i][1];
+        v.pos[2] = pos[i][2];
+        v.color[0] = colors[i][0];
+        v.color[1] = colors[i][1];
+        v.color[2] = colors[i][2];
+        v.color[3] = colors[i][3];
+        v.uv[0] = uv[i][0];
+        v.uv[1] = uv[i][1];
+        v.tex_index = static_cast<float>(tex_index);
+        vertices_.push_back(v);
+    }
+    ++chunks_.back().quad_count;
+    return true;
+}
+
 bool BatchCore::push_rounded_quad(const float (&pos)[4][3],
                                   const float (&uv)[4][2],
                                   const float (&color)[4], float radius) {

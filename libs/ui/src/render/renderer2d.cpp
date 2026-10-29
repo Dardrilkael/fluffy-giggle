@@ -120,19 +120,23 @@ void Renderer2D::frame_end() {
                 open_clip[i] = cmd.clip[i];
             }
         }
-        float color[4];
-        batch::unpack_rgba(cmd.color, color);
+        float color[4][4];
+        for (int i = 0; i < 4; ++i) {
+            batch::unpack_rgba(cmd.color[i], color[i]);
+        }
         if (cmd.radius > 0.0f) {
             // draw_rounded_quad's SDF form: one quad, no texture slot -
             // the batch packs the radius into a negative tex_index.
-            (void)batch_.push_rounded_quad(cmd.pos, cmd.uv, color,
+            (void)batch_.push_rounded_quad(cmd.pos, cmd.uv, color[0],
                                             cmd.radius);
         } else {
             // The SLOT, not the full id: the batch's tables (chunk
             // tables, the bindless tex_index) key on registry slots, and
-            // record() already proved the id's generation.
-            (void)batch_.push_quad(cmd.pos, cmd.uv, color,
-                                   cmd.texture.id & kSlotMask);
+            // record() already proved the id's generation. Per-corner
+            // colors ride the vcol push (identical rows for the plain
+            // draws - the same vertices push_quad would have built).
+            (void)batch_.push_quad_vcol(cmd.pos, cmd.uv, color,
+                                        cmd.texture.id & kSlotMask);
         }
     }
     batch_.close_segment();
@@ -284,8 +288,60 @@ void Renderer2D::record(const char* what, const float (&pos)[4][3],
     // embedded in the command.
     cmd.camera_epoch = current_epoch_;
     cmd.texture = texture;
-    cmd.color = color;
+    cmd.color[0] = color;
+    cmd.color[1] = color;
+    cmd.color[2] = color;
+    cmd.color[3] = color;
     cmd.radius = radius;
+    const float* clip = active_clip();
+    for (int i = 0; i < 4; ++i) {
+        cmd.clip[i] = clip[i];
+        cmd.pos[i][0] = pos[i][0];
+        cmd.pos[i][1] = pos[i][1];
+        cmd.pos[i][2] = pos[i][2];
+        cmd.uv[i][0] = uv[i][0];
+        cmd.uv[i][1] = uv[i][1];
+    }
+    commands_.push_back(cmd);
+}
+
+void Renderer2D::record_vcol(const char* what, const float (&pos)[4][3],
+                             const float (&uv)[4][2], const float (&rgba)[4][4],
+                             Texture texture) {
+    if (!camera_stashed_) {
+        warn_drop(what);  // outside any begin()/end() block
+        return;
+    }
+    // Same generation check as record(): a stale handle must never reach
+    // the descriptor write at flush time.
+    if (!textures_.empty() && texture.id != 0) {
+        const std::uint32_t slot = texture.id & kSlotMask;
+        const std::uint32_t gen = (texture.id >> kGenShift) & kGenMask;
+        if (slot >= textures_.size() || textures_[slot].generation != gen) {
+            warn_unknown_texture(texture.id);
+            texture = Texture{};
+        }
+    }
+    DrawCommand cmd;
+    cmd.sort_layer = current_layer_;
+    cmd.camera_epoch = current_epoch_;
+    cmd.texture = texture;
+    for (int i = 0; i < 4; ++i) {
+        // Clamp then pack: the tessellator's weighted blends may overshoot
+        // [0, 1] by an epsilon, and a negative float would pack garbage.
+        float r = rgba[i][0];
+        float g = rgba[i][1];
+        float b = rgba[i][2];
+        float a = rgba[i][3];
+        r = r < 0.0f ? 0.0f : (r > 1.0f ? 1.0f : r);
+        g = g < 0.0f ? 0.0f : (g > 1.0f ? 1.0f : g);
+        b = b < 0.0f ? 0.0f : (b > 1.0f ? 1.0f : b);
+        a = a < 0.0f ? 0.0f : (a > 1.0f ? 1.0f : a);
+        cmd.color[i] = (std::uint32_t(r * 255.0f + 0.5f) << 24) |
+                       (std::uint32_t(g * 255.0f + 0.5f) << 16) |
+                       (std::uint32_t(b * 255.0f + 0.5f) << 8) |
+                       std::uint32_t(a * 255.0f + 0.5f);
+    }
     const float* clip = active_clip();
     for (int i = 0; i < 4; ++i) {
         cmd.clip[i] = clip[i];
@@ -476,6 +532,31 @@ void Renderer2D::draw_line(float x0, float y0, float x1, float y1,
         return;  // degenerate: live app data, not worth a warning
     }
     record("draw_line", pos, uv, color, Texture{});  // lines are solid color
+}
+
+void Renderer2D::draw_vertex_quad(const float (&pos)[4][2],
+                                  const float (&uv)[4][2],
+                                  const float (&rgba)[4][4], Texture texture) {
+    if (!accept("draw_vertex_quad")) {
+        return;
+    }
+    if (!camera_stashed_) {
+        warn_drop("draw_vertex_quad");  // outside any begin()/end() block
+        return;
+    }
+    if (current_perspective_) {
+        warn_kind("draw_vertex_quad");  // a 3D block is open: 2D-only form
+        return;
+    }
+    // Straight into the per-corner record path; z is written 0 (every 2D
+    // draw sits on the world's z=0 plane, quad_corners' rule).
+    float pos3[4][3];
+    for (int i = 0; i < 4; ++i) {
+        pos3[i][0] = pos[i][0];
+        pos3[i][1] = pos[i][1];
+        pos3[i][2] = 0.0f;
+    }
+    record_vcol("draw_vertex_quad", pos3, uv, rgba, texture);
 }
 
 void Renderer2D::draw_line(float x0, float y0, float z0, float x1, float y1,
@@ -1088,6 +1169,15 @@ void draw_line(float x0, float y0, float x1, float y1, float thickness,
         g_active->draw_line(x0, y0, x1, y1, thickness, color);
     } else {
         warn_no_app("draw_line");
+    }
+}
+
+void draw_vertex_quad(const float (&pos)[4][2], const float (&uv)[4][2],
+                      const float (&rgba)[4][4], Texture texture) {
+    if (g_active != nullptr) {
+        g_active->draw_vertex_quad(pos, uv, rgba, texture);
+    } else {
+        warn_no_app("draw_vertex_quad");
     }
 }
 

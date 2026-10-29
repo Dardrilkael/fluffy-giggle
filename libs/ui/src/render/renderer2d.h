@@ -47,7 +47,12 @@ struct DrawCommand {
                                     // splits chunks wherever it changes in
                                     // record order (one chunk = one scissor)
     Texture texture;            // {} = flat color (the white texture)
-    std::uint32_t color = 0;  // packed 0xRRGGBBAA, unpacked at replay
+    std::uint32_t color[4] = {};  // packed 0xRRGGBBAA, one per corner
+                                 // (TL, TR, BR, BL), unpacked at replay.
+                                 // The plain draws fill all four with one
+                                 // value; the canvas tessellation path
+                                 // (draw_vertex_quad) ramps alpha across
+                                 // the corners for its AA fringes.
 
     float pos[4][3] = {};  // TL, TR, BR, BL; z = 0 (2D) or the 3D camera's world
     float uv[4][2] = {};
@@ -198,6 +203,17 @@ public:
                    float thickness, std::uint32_t color);
     void draw_rounded_quad(float x, float y, float w, float h, float radius,
                            std::uint32_t color, float rotation = 0.0f);
+    // The canvas layer's free-form quad: four corners in the current
+    // camera's space (2D blocks only - a 3D block warns like the 2D
+    // overloads' reverse), per-corner rgba floats (rasterize-ready
+    // 0..1, NOT packed), caller-managed UVs, optional texture. Winding
+    // is the caller's: both index triangles (0,1,2 / 2,3,0) carry
+    // whatever order the corners name, and a triangle is a quad with
+    // its fourth corner duplicated (degenerate, zero-area - the batch
+    // needs no triangle path). This is the tessellation sink the
+    // ws::ui::canvas layer emits into; nothing else should need it.
+    void draw_vertex_quad(const float (&pos)[4][2], const float (&uv)[4][2],
+                          const float (&rgba)[4][4], Texture texture = {});
     FrameSize frame_size() const;
     Texture load_texture(const char* path);
     std::vector<Sprite> load_atlas(std::initializer_list<const char*> paths);
@@ -275,6 +291,13 @@ private:
     void record(const char* what, const float (&pos)[4][3],
                 const float (&uv)[4][2], std::uint32_t color, Texture texture,
                 float radius = 0.0f);
+    // record()'s per-corner spelling (draw_vertex_quad): same guards, same
+    // command list, but each corner's packed color comes from its own rgba
+    // row (clamped 0..1 before packing - the canvas math may overshoot on
+    // the way to a weighted average).
+    void record_vcol(const char* what, const float (&pos)[4][3],
+                     const float (&uv)[4][2], const float (&rgba)[4][4],
+                     Texture texture);
 
     // --- GPU half helpers ---
     // Unknown texture id, while a registry exists: once per frame.

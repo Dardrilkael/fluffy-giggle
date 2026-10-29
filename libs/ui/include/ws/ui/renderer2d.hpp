@@ -202,6 +202,23 @@ void draw_line(float x0, float y0, float x1, float y1, float thickness,
 void draw_line(float x0, float y0, float z0, float x1, float y1, float z1,
                float thickness, std::uint32_t color);
 
+// Free-form vertex-colored quad - the canvas layer's tessellation sink
+// (ws::ui::canvas draws everything through it). Four corners in the
+// current camera's space, 2D blocks only (inside a begin(Camera3D) block
+// it warns once per frame and records nothing, the reverse of the 3D
+// overloads' rule); a PER-CORNER rgba of rasterize-ready floats 0..1 -
+// not packed, not clamped here (record_vcol clamps before packing); and
+// caller-managed UVs with an optional texture ({} = flat color). Winding
+// is the caller's to keep consistent: both index triangles (0,1,2 /
+// 2,3,0) carry the corner order as named, and a TRIANGLE is spelled as a
+// quad whose fourth corner duplicates the third (degenerate, zero-area -
+// the fixed index pattern needs no triangle path). Same layer/clip/
+// camera-block contract as every other draw; degenerate input (coincident
+// corners making zero area) is not dropped - a caller tessellating a
+// fan's last wedge relies on it landing where it lands.
+void draw_vertex_quad(const float (&pos)[4][2], const float (&uv)[4][2],
+                      const float (&rgba)[4][4], Texture texture = {});
+
 // Flat-color rounded rectangle: ONE quad shaded by an analytic rounded-box
 // SDF in the fragment shader (the radius rides the batch's per-vertex
 // channel - no mask texture, so the radius is exact and antialiased at any

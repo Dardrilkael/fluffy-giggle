@@ -4,4 +4,4 @@ ws_add_library(math DEPENDS ws::core)
 # consumers.
 target_link_libraries(ws_math PRIVATE eigen3)
 
-ws_add_test(math SOURCES tests/test_math.cpp tests/test_vecmath.cpp tests/test_sparse.cpp)
+ws_add_test(math SOURCES tests/test_math.cpp tests/test_vecmath.cpp tests/test_sparse.cpp tests/test_geometry2d.cpp)
