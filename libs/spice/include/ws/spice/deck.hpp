@@ -122,6 +122,18 @@ struct MeasCard {
     bool trig_fall = false, targ_fall = false, when_fall = false;
 };
 
+// .save / .print / .probe (§0.5 rev): the deck's REQUESTED save-list as
+// expressions - plain names (v(out), i(V1)) or post-hoc waveform math
+// (v(out)-v(in), i(V1)*v(in), @R1[value]). Evaluated against the stored
+// default columns after the run; without any save cards the default list
+// stands (all node voltages + branch currents, §0.5).
+struct SaveCard {
+    SourceLoc loc;
+    bool all_analyses = true;  // .save: every analysis; .print names one
+    MeasCard::Analysis which = MeasCard::Analysis::Tran;
+    std::vector<Token> exprs;  // one per listed quantity
+};
+
 // .step (§7.6): one stepped quantity. Forms:
 //   .step param NAME start stop inc          (linear)
 //   .step param NAME list v1 v2 ...          (explicit list)
@@ -171,6 +183,7 @@ struct DeckAst {
     std::vector<IcCard> ics;              // top-level .ic cards, in order
     std::vector<StepCard> steps;          // top-level .step cards, in order
     std::vector<MeasCard> meas;           // top-level .meas cards, in order
+    std::vector<SaveCard> saves;          // .save/.print/.probe, in order
     std::map<std::string, SubcktDef> subckts;  // key: lowercased name
 };
 

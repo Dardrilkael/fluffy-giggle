@@ -1537,3 +1537,93 @@ TEST_CASE(".meas: rise_time/fall_time as LIBRARY calls on a run's table") {
     REQUIRE(rt.has_value());
     CHECK(*rt == doctest::Approx(1e3 * 1e-9 * std::log(9.0)).epsilon(1e-3));
 }
+
+// --- §0.5 rev: .save/.print expressions + @dev[param] -------------------------------
+
+TEST_CASE("save expressions: difference, power and a bound parameter") {
+    const auto run = run_text(
+        "pw\n"
+        "V1 in 0 5\n"
+        "R1 in out 1k\n"
+        "R2 out 0 1k\n"
+        ".op\n"
+        ".print op v(out)-v(in) v(in)*i(V1) @R1[value] @V1[dc]\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    CHECK(signal_names(t) == std::vector<std::string>{
+                                 "v(out)-v(in)", "v(in)*i(V1)", "@R1[value]",
+                                 "@V1[dc]"});
+    REQUIRE(t.row_count() == 1);
+    // v(out) = 2.5, v(in) = 5, i(V1) = -2.5mA.
+    CHECK(t.signal("v(out)-v(in)")[0] == approx(-2.5));
+    CHECK(t.signal("v(in)*i(V1)")[0] == approx(5.0 * -2.5e-3));
+    CHECK(t.signal("@R1[value]")[0] == approx(1e3));
+    CHECK(t.signal("@V1[dc]")[0] == approx(5.0));
+}
+
+TEST_CASE("save expressions: transient math over the stored columns") {
+    // PULSE starts at 1 V so the ratio never divides by zero (a 0/0 is a
+    // domain error by §8.5, not a silent NaN).
+    const auto run = run_text(
+        "trig math\n"
+        "V1 in 0 PULSE(1 5 1u 1n 1u 10m)\n"
+        "R1 in out 1k\n"
+        "C1 out 0 1n\n"
+        ".tran 10n 10u\n"
+        ".print tran time v(out) v(out)/v(in)\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    // The axis is the time column (no duplicate); the ratio is post-hoc.
+    CHECK(signal_names(t) == std::vector<std::string>{"v(out)", "v(out)/v(in)"});
+    REQUIRE(t.row_count() > 100);
+    // Long after the edge: v(out)/v(in) -> 1 (the DC transfer).
+    CHECK(t.signal("v(out)/v(in)").back() == doctest::Approx(1.0).epsilon(1e-3));
+}
+
+TEST_CASE("save expressions: differential v(a,b) and unknown names") {
+    const auto run = run_text(
+        "diff\n"
+        "V1 a 0 3\n"
+        "V2 b 0 2\n"
+        "R1 a x 1k\n"
+        "R2 x b 1k\n"
+        ".op\n"
+        ".print op v(a,b) v(x,b)\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    CHECK(t.signal("v(a,b)")[0] == approx(1.0));
+    CHECK(t.signal("v(x,b)")[0] == approx(0.5));
+
+    // An unknown node names itself in the error.
+    const auto bad = run_text(
+        "bad\nV1 a 0 3\nR1 a 0 1k\n.op\n.print op v(nope)\n");
+    REQUIRE(!bad);
+    CHECK(bad.error().message.find("v(nope)") != std::string::npos);
+
+    // A model quantity that no device carries yet says so (M4).
+    const auto gm = run_text(
+        "gm\nV1 a 0 3\nR1 a 0 1k\n.op\n.print op @R1[gm]\n");
+    REQUIRE(!gm);
+    CHECK(gm.error().message.find("@r1[gm]") != std::string::npos);
+}
+
+TEST_CASE("save expressions: per-point @dev[param] in a stepped family") {
+    const auto run = run_text(
+        "familysave\n"
+        ".param rl=1k\n"
+        "V1 in 0 5\n"
+        "R1 in out 1k\n"
+        "R2 out 0 {rl}\n"
+        ".step param rl 1k 3k 1k\n"
+        ".op\n"
+        ".print op v(out) @R2[value]\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    // Axes: step, rl; then the requested expressions.
+    REQUIRE(t.row_count() == 3);
+    for (std::size_t i = 0; i < 3; ++i) {
+        const double rl = t.axis(1)[i];
+        CHECK(t.signal("@R2[value]")[i] == approx(rl));
+        CHECK(t.signal("v(out)")[i] == approx(5.0 * rl / (1e3 + rl)));
+    }
+}

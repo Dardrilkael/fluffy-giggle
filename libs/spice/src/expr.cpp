@@ -311,6 +311,9 @@ struct ExprParser {
         if (pos >= text.size()) {
             return spice_fail(expr_diag("unexpected end of expression", pos));
         }
+        if (peek('@')) {
+            return parse_at_ref();
+        }
         if (peek('(')) {
             ++pos;
             WS_TRY(parse_ternary());
@@ -363,6 +366,38 @@ struct ExprParser {
         return {};
     }
 
+    ws::core::Status parse_at_ref() {
+        // @dev[param] (§7.8 rev): a device's bound parameter value - the
+        // ngspice spelling people use constantly (@m1[gm] lands with the
+        // semiconductor models, M4; today it reads bound construction
+        // parameters like @R1[value] or @V1[dc]).
+        const std::size_t start = pos;
+        ++pos;  // '@'
+        const std::size_t d0 = pos;
+        while (pos < text.size() && is_ident_char(text[pos])) {
+            ++pos;
+        }
+        if (pos == d0) {
+            return spice_fail(expr_diag("expected a device name after '@'", start));
+        }
+        const std::string dev(text.substr(d0, pos - d0));
+        if (!eat('[')) {
+            return spice_fail(expr_diag("expected '[param]' after '@" + dev + "'", start));
+        }
+        const std::size_t p0 = pos;
+        while (pos < text.size() && text[pos] != ']') {
+            ++pos;
+        }
+        if (pos == p0 || pos >= text.size()) {
+            return spice_fail(expr_diag("expected ']' in '@" + dev + "[...]'", start));
+        }
+        const std::string param(text.substr(p0, pos - p0));
+        ++pos;  // ']'
+        const std::string var = "@" + to_lower(dev) + "[" + to_lower(param) + "]";
+        emit(ExprProgram::Op::Load, var_slot(var));
+        return {};
+    }
+
     ws::core::Status parse_ident() {
         const std::size_t start = pos;
         while (pos < text.size() && is_ident_char(text[pos])) {
@@ -371,6 +406,58 @@ struct ExprParser {
         const std::string name(text.substr(start, pos - start));
         skip_ws();
         if (peek('(')) {
+            // Signal reference (§7.8 rev): v(node), v(a,b), i(Vsrc) - a
+            // VARIABLE named by its spelling, not a function call. The
+            // save-list evaluator binds it against the result columns.
+            const std::string lower_name = to_lower(name);
+            if (lower_name == "v" || lower_name == "i") {
+                const std::size_t ref_start = start;
+                ++pos;  // '('
+                skip_ws();
+                std::vector<std::string> args;
+                for (;;) {
+                    const std::size_t a0 = pos;
+                    while (pos < text.size() && text[pos] != ',' && text[pos] != ')' &&
+                           !std::isspace(static_cast<unsigned char>(text[pos]))) {
+                        ++pos;
+                    }
+                    if (pos == a0) {
+                        return spice_fail(expr_diag(
+                            "expected a node or source name inside '" + name + "(...)'",
+                            ref_start));
+                    }
+                    args.emplace_back(text.substr(a0, pos - a0));
+                    skip_ws();
+                    if (peek(',')) {
+                        ++pos;
+                        skip_ws();
+                        continue;
+                    }
+                    break;
+                }
+                if (!eat(')')) {
+                    return spice_fail(expr_diag("expected ')' after '" + name + "(...)'",
+                                                ref_start));
+                }
+                if (lower_name == "v" && (args.size() < 1 || args.size() > 2)) {
+                    return spice_fail(expr_diag(
+                        "v() takes one node or two (v(a,b) is the differential)",
+                        ref_start));
+                }
+                if (lower_name == "i" && args.size() != 1) {
+                    return spice_fail(expr_diag("i() takes one source name", ref_start));
+                }
+                std::string var = lower_name + "(";
+                for (std::size_t k = 0; k < args.size(); ++k) {
+                    if (k != 0) {
+                        var += ",";
+                    }
+                    var += to_lower(args[k]);
+                }
+                var += ")";
+                emit(ExprProgram::Op::Load, var_slot(var));
+                return {};
+            }
             // function call
             ++pos;
             std::vector<ExprProgram::Op> arg_shape;  // not used; arity checked inline

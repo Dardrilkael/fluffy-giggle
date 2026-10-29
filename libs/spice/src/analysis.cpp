@@ -882,6 +882,179 @@ void merge_into_family(Table& family, const Table& point, const StepPoint& sp,
 // --- the public entry (run.hpp) --------------------------------------------------------
 
 
+
+// --- .save/.print expression columns (§0.5 rev) ------------------------------------
+
+// Rewrites a completed table's signals to the deck's REQUESTED save-list
+// expressions, evaluated POST-HOC over the stored default columns (every
+// node voltage and branch current is already there, §0.5) plus the bound
+// @dev[param] values - no hidden B sources, no re-solve. AC tables
+// reject expressions (their columns are re()/im() pairs; vm()/vp() land
+// with the AC derived forms, §7.4).
+ws::core::Status apply_save_expressions(Table& t, const Circuit& c,
+                                         const RunState& state,
+                                         const std::vector<SaveCard>& saves) {
+    // Collect this analysis's requested expressions (.save applies to
+    // every analysis; .print names one).
+    const auto kind_of = [](MeasCard::Analysis a) {
+        switch (a) {
+            case MeasCard::Analysis::Tran: return AnalysisKind::Tran;
+            case MeasCard::Analysis::Dc: return AnalysisKind::Dc;
+            case MeasCard::Analysis::Ac: return AnalysisKind::Ac;
+            case MeasCard::Analysis::Op: return AnalysisKind::Op;
+        }
+        return AnalysisKind::Op;
+    };
+    std::vector<std::pair<Token, ExprProgram>> wanted;
+    for (const SaveCard& sv : saves) {
+        if (!sv.all_analyses && kind_of(sv.which) != t.analysis) {
+            continue;
+        }
+        for (const Token& e : sv.exprs) {
+            const ws::core::Result<ExprProgram> prog = parse_expression(e.text);
+            if (!prog) {
+                Diagnostic d = run_diag(ErrorKind::Parse, "spice.parse.save_expr",
+                                        prog.error().message);
+                d.loc = e.loc;
+                return spice_fail(std::move(d));
+            }
+            wanted.emplace_back(e, *prog);
+        }
+    }
+    // An expression that merely names a sweep axis ('time', 'frequency')
+    // is the axis itself - already in the output; drop it instead of
+    // duplicating the column.
+    wanted.erase(std::remove_if(wanted.begin(), wanted.end(),
+                                [&](const std::pair<Token, ExprProgram>& w) {
+                                    return std::any_of(
+                                        t.sweep_names.begin(), t.sweep_names.end(),
+                                        [&](const std::string& ax) {
+                                            return to_lower(w.first.text) ==
+                                                   to_lower(ax);
+                                        });
+                                }),
+                 wanted.end());
+    if (wanted.empty()) {
+        return {};
+    }
+    if (t.analysis == AnalysisKind::Ac) {
+        Diagnostic d = run_diag(
+            ErrorKind::Semantic, "spice.semantic.save_ac",
+            "expression save-lists over .ac land with the vm()/vp() derived"
+            " forms (§7.4); .print ac re(v(out)) im(v(out)) works today");
+        d.analysis = ".ac";
+        return spice_fail(std::move(d));
+    }
+
+    // Column lookup, case-insensitive (expressions lowercase their
+    // references; display spellings name the columns). The sweep axes are
+    // pseudo-columns ('time', 'frequency', a swept source's name).
+    std::map<std::string, const std::vector<double>*> columns;
+    for (const Signal& sig : t.signals) {
+        columns[to_lower(sig.name)] = &sig.data;
+    }
+    for (std::size_t k = 0; k < t.sweep_names.size(); ++k) {
+        const std::string lower = to_lower(t.sweep_names[k]);
+        if (k < t.sweep_axes.size()) {
+            columns.emplace(lower, &t.sweep_axes[k]);
+        }
+    }
+    auto column = [&](const std::string& lower) -> const std::vector<double>* {
+        const auto it = columns.find(lower);
+        return (it == columns.end()) ? nullptr : it->second;
+    };
+
+    const std::size_t n = t.row_count();
+    std::vector<Signal> out_signals;
+    out_signals.reserve(wanted.size());
+
+    for (auto& [tok, prog] : wanted) {
+        Signal sig;
+        sig.name = tok.text;
+        sig.data.reserve(n);
+        // Bind each variable once per sample; v(a,b) unfolds to the two
+        // columns' difference, @dev[param] to the bound value.
+        const std::vector<std::string>& vars = prog.vars();
+        std::vector<std::optional<double>> binds(vars.size());
+        std::vector<const std::vector<double>*> var_col(vars.size(), nullptr);
+        std::vector<std::pair<const std::vector<double>*, const std::vector<double>*>>
+            var_diff(vars.size(), {nullptr, nullptr});
+        std::vector<double> var_const(vars.size(), 0.0);
+        for (std::size_t vi = 0; vi < vars.size(); ++vi) {
+            const std::string& v = vars[vi];
+            if (v.rfind("v(", 0) == 0 && v.back() == ')' &&
+                v.find(',') != std::string::npos) {
+                // v(a,b): differential.
+                const std::size_t comma = v.find(',');
+                const std::string pa = "v(" + v.substr(2, comma - 2) + ")";
+                const std::string pb = "v(" + v.substr(comma + 1, v.size() - comma - 2) +
+                                       ")";
+                var_diff[vi] = {column(pa), column(pb)};
+                if (var_diff[vi].first == nullptr || var_diff[vi].second == nullptr) {
+                    Diagnostic d = run_diag(
+                        ErrorKind::Semantic, "spice.semantic.save_unknown",
+                        "expression '" + tok.text + "' references unknown node '" +
+                            (var_diff[vi].first == nullptr ? pa : pb) + "'");
+                    d.loc = tok.loc;
+                    return spice_fail(std::move(d));
+                }
+            } else if (v.rfind("@", 0) == 0) {
+                // @dev[param].
+                const std::size_t lb = v.find('[');
+                const std::size_t rb = v.rfind(']');
+                const std::string dev = v.substr(1, lb - 1);
+                const std::string param = v.substr(lb + 1, rb - lb - 1);
+                const auto slot = RunState::param_slot(c, dev, param);
+                if (!slot) {
+                    Diagnostic d = run_diag(
+                        ErrorKind::Semantic, "spice.semantic.save_unknown",
+                        "expression '" + tok.text + "' references @" + dev + "[" +
+                            param + "], which no device carries (model quantities"
+                            " like gm land with the semiconductor models, M4)");
+                    d.loc = tok.loc;
+                    return spice_fail(std::move(d));
+                }
+                var_const[vi] =
+                    state.params()[c.param_span[slot->first].begin + slot->second];
+                var_col[vi] = nullptr;
+            } else {
+                var_col[vi] = column(v);
+                if (var_col[vi] == nullptr) {
+                    Diagnostic d = run_diag(
+                        ErrorKind::Semantic, "spice.semantic.save_unknown",
+                        "expression '" + tok.text + "' references unknown signal '" +
+                            v + "'");
+                    d.loc = tok.loc;
+                    return spice_fail(std::move(d));
+                }
+            }
+        }
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t vi = 0; vi < vars.size(); ++vi) {
+                if (var_diff[vi].first != nullptr) {
+                    binds[vi] = (*var_diff[vi].first)[i] - (*var_diff[vi].second)[i];
+                } else if (var_col[vi] != nullptr) {
+                    binds[vi] = (*var_col[vi])[i];
+                } else {
+                    binds[vi] = var_const[vi];
+                }
+            }
+            const ws::core::Result<double> r = prog.evaluate(binds);
+            if (!r) {
+                Diagnostic d = run_diag(ErrorKind::Semantic, "spice.semantic.save_eval",
+                                        "expression '" + tok.text + "': " +
+                                            r.error().message);
+                d.loc = tok.loc;
+                return spice_fail(std::move(d));
+            }
+            sig.data.push_back(*r);
+        }
+        out_signals.push_back(std::move(sig));
+    }
+    t.signals = std::move(out_signals);
+    return {};
+}
+
 // --- .meas evaluation (§0.4) -------------------------------------------------------
 
 // Evaluates one MeasCard against a completed table. The modes map 1:1
@@ -1223,6 +1396,12 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
                 failure_list.push_back("step " + std::to_string(sp.number) + " {" +
                                        sp.spell + "}: " + t.error().message);
                 continue;
+            }
+            // §0.5 rev: the deck's requested save-list expressions,
+            // evaluated post-hoc while this point's state is live (the
+            // @dev[param] values are per point in a family).
+            if (!ast.saves.empty()) {
+                WS_TRY(apply_save_expressions(*t, *live, state, ast.saves));
             }
             if (ast.steps.empty()) {
                 // No .step cards: the point's table IS the result (no

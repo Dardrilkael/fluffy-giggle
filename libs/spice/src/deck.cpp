@@ -27,9 +27,7 @@ const std::map<char, const char*>& device_milestones() {
 
 const std::map<std::string, const char*>& card_milestones() {
     static const std::map<std::string, const char*> table = {
-        {".noise", "M5"},
-        {".save", "M5"},    {".print", "M5"},  {".probe", "M5"},
-        {".nodeset", "M5"},
+        {".noise", "M5"},   {".nodeset", "M5"},
         {".lib", "backlog"},  {".global", "backlog"}, {".func", "backlog"},
         {".alter", "backlog"}, {".tf", "backlog"},    {".pz", "backlog"},
         {".four", "backlog"},  {".disto", "backlog"}, {".sens", "backlog"},
@@ -223,6 +221,59 @@ ws::core::Result<ParsedCard> parse_card(const Record& rec, bool inside_subckt,
             }
             card.kind = ParsedCard::Kind::Ic;
             card.ic = std::move(ic);
+            return card;
+        }
+        if (first_lower == ".save" || first_lower == ".print" ||
+            first_lower == ".probe") {
+            if (inside_subckt) {
+                return spice_fail(card_diag(ErrorKind::Parse, "spice.parse.card_scope",
+                                            "'" + first_lower + "' inside .subckt",
+                                            rec.loc));
+            }
+            if (rec.tokens.size() < 2) {
+                return spice_fail(card_diag(
+                    ErrorKind::Parse, "spice.parse.save_arity",
+                    "'" + first_lower + "' needs at least one expression", rec.loc));
+            }
+            SaveCard sv;
+            sv.loc = rec.loc;
+            std::size_t i = 1;
+            if (first_lower != ".save") {
+                // .print/.probe name an analysis first (TRAN/DC/AC/OP).
+                const std::string ana = to_lower(rec.tokens[1].text);
+                if (ana == "tran") {
+                    sv.which = MeasCard::Analysis::Tran;
+                } else if (ana == "dc") {
+                    sv.which = MeasCard::Analysis::Dc;
+                } else if (ana == "ac") {
+                    sv.which = MeasCard::Analysis::Ac;
+                } else if (ana == "op") {
+                    sv.which = MeasCard::Analysis::Op;
+                } else {
+                    return spice_fail(card_diag(
+                        ErrorKind::Parse, "spice.parse.save_form",
+                        "'" + first_lower + "' needs an analysis (tran, dc, ac, op),"
+                        " got '" +
+                            rec.tokens[1].text + "'",
+                        rec.tokens[1].loc));
+                }
+                sv.all_analyses = false;
+                i = 2;
+                if (rec.tokens.size() < 3) {
+                    return spice_fail(card_diag(
+                        ErrorKind::Parse, "spice.parse.save_arity",
+                        "'" + first_lower + "' needs at least one expression", rec.loc));
+                }
+            }
+            for (; i < rec.tokens.size(); ++i) {
+                // An expression may span tokens when it carries spaces
+                // (v(out) - v(in)); .save/.print take whitespace-separated
+                // quantities in v1 - spaces inside one quantity are a
+                // parse error the user sees immediately.
+                sv.exprs.push_back(rec.tokens[i]);
+            }
+            card.kind = ParsedCard::Kind::Save;
+            card.save = std::move(sv);
             return card;
         }
         if (first_lower == ".meas") {
@@ -896,6 +947,15 @@ ws::core::Result<DeckAst> build_deck_ast(const Deck& deck, std::vector<Warning>&
                         "'.meas' inside .subckt", rec.loc));
                 }
                 ast.meas.push_back(card.meas);
+                break;
+            }
+            case K::Save: {
+                if (inside) {
+                    return spice_fail(ast_diag(
+                        ErrorKind::Parse, "spice.parse.card_scope",
+                        "save card inside .subckt", rec.loc));
+                }
+                ast.saves.push_back(card.save);
                 break;
             }
             case K::Subckt: {
