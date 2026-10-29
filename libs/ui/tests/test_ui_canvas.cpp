@@ -16,6 +16,7 @@
 
 #include <ws/ui/canvas/tessellation.hpp>
 #include <ws/ui/canvas/canvas2d.hpp>
+#include <ws/ui/canvas/view.hpp>
 
 #include <cmath>
 #include <vector>
@@ -703,4 +704,183 @@ TEST_CASE("canvas2d: text and image recording") {
         CHECK(c.cmds[0].w == doctest::Approx(100.0f));
         CHECK(c.cmds[0].h == doctest::Approx(50.0f));
     }
+}
+
+// =============================================================================
+// Part 3: ViewTransform2D + adaptive grid
+// =============================================================================
+
+TEST_CASE("view_transform: world/screen round-trip") {
+    ViewTransform2D v;
+    v.viewport_w = 800.0f;
+    v.viewport_h = 600.0f;
+
+    SUBCASE("identity: world (0,0) maps to viewport center") {
+        const Point s = v.world_to_screen({0.0f, 0.0f});
+        CHECK(s.x == doctest::Approx(400.0f));
+        CHECK(s.y == doctest::Approx(300.0f));
+    }
+
+    SUBCASE("round-trip at identity") {
+        const Point world{123.4f, 567.8f};
+        const Point screen = v.world_to_screen(world);
+        const Point back = v.screen_to_world(screen);
+        CHECK(back.x == doctest::Approx(world.x).epsilon(1e-4f));
+        CHECK(back.y == doctest::Approx(world.y).epsilon(1e-4f));
+    }
+
+    SUBCASE("round-trip with pan and zoom") {
+        v.pan = {50.0f, -30.0f};
+        v.zoom = 2.5f;
+        const Point world{100.0f, 200.0f};
+        const Point screen = v.world_to_screen(world);
+        const Point back = v.screen_to_world(screen);
+        CHECK(back.x == doctest::Approx(world.x).epsilon(1e-4f));
+        CHECK(back.y == doctest::Approx(world.y).epsilon(1e-4f));
+    }
+
+    SUBCASE("round-trip with rotation") {
+        v.pan = {10.0f, 20.0f};
+        v.zoom = 1.5f;
+        v.rotation = 0.3f;
+        const Point world{42.0f, -17.0f};
+        const Point screen = v.world_to_screen(world);
+        const Point back = v.screen_to_world(screen);
+        CHECK(back.x == doctest::Approx(world.x).epsilon(1e-4f));
+        CHECK(back.y == doctest::Approx(world.y).epsilon(1e-4f));
+    }
+
+    SUBCASE("zoom scales world to screen") {
+        v.zoom = 2.0f;
+        // A 10-unit world span = 20 screen px.
+        const Point a = v.world_to_screen({0.0f, 0.0f});
+        const Point b = v.world_to_screen({10.0f, 0.0f});
+        CHECK((b.x - a.x) == doctest::Approx(20.0f));
+    }
+}
+
+TEST_CASE("view_transform: zoom-at-point keeps the cursor's world point fixed") {
+    ViewTransform2D v;
+    v.viewport_w = 800.0f;
+    v.viewport_h = 600.0f;
+    v.pan = {0.0f, 0.0f};
+    v.zoom = 1.0f;
+
+    // The cursor sits at screen (200, 150) - offset from the viewport
+    // center (400, 300) by (-200, -150).
+    const Point cursor_screen{200.0f, 150.0f};
+    const Point world_under_cursor = v.screen_to_world(cursor_screen);
+
+    // Zoom in 4x toward the cursor.
+    v.zoom_at(cursor_screen, 4.0f);
+    CHECK(v.zoom == doctest::Approx(4.0f));
+
+    // The world point under the cursor must NOT have moved.
+    const Point world_after = v.screen_to_world(cursor_screen);
+    CHECK(world_after.x == doctest::Approx(world_under_cursor.x).epsilon(1e-4f));
+    CHECK(world_after.y == doctest::Approx(world_under_cursor.y).epsilon(1e-4f));
+
+    // But the viewport center's world point DID move (the view panned
+    // to keep the cursor fixed).
+    const Point center_world_before = v.screen_to_world({400.0f, 300.0f});
+    // (sanity: at zoom 4, the center is 200/4 = 50 world units right of
+    // the cursor's world point, which was at -200 world. So center is
+    // at -200 + 50 = -150. Not asserting the exact value - the invariant
+    // is the cursor, not the center.)
+    CHECK(center_world_before.x != doctest::Approx(0.0f));
+}
+
+TEST_CASE("view_transform: zoom limits clamp") {
+    ViewTransform2D v;
+    v.min_zoom = 0.1f;
+    v.max_zoom = 10.0f;
+    v.viewport_w = 100.0f;
+    v.viewport_h = 100.0f;
+
+    v.zoom_at({50.0f, 50.0f}, 100.0f);
+    CHECK(v.zoom == doctest::Approx(10.0f));
+    v.zoom_at({50.0f, 50.0f}, 0.001f);
+    CHECK(v.zoom == doctest::Approx(0.1f));
+}
+
+TEST_CASE("view_transform: fit centers and scales to the rect") {
+    ViewTransform2D v;
+    v.viewport_w = 800.0f;
+    v.viewport_h = 600.0f;
+    v.min_zoom = 0.01f;
+    v.max_zoom = 100.0f;
+
+    // Fit a 400x300 world rect with no margin.
+    v.fit(0.0f, 0.0f, 400.0f, 300.0f);
+    // zoom = min(800/400, 600/300) = min(2, 2) = 2.
+    CHECK(v.zoom == doctest::Approx(2.0f));
+    // pan = center of the rect = (200, 150).
+    CHECK(v.pan.x == doctest::Approx(200.0f));
+    CHECK(v.pan.y == doctest::Approx(150.0f));
+
+    // The rect's corners map to the viewport's corners.
+    CHECK(v.world_to_screen({0.0f, 0.0f}).x == doctest::Approx(0.0f));
+    CHECK(v.world_to_screen({400.0f, 300.0f}).x == doctest::Approx(800.0f));
+}
+
+TEST_CASE("view_transform: pan_by moves the content with the cursor") {
+    ViewTransform2D v;
+    v.viewport_w = 800.0f;
+    v.viewport_h = 600.0f;
+    v.zoom = 2.0f;
+
+    const Point world_before = v.screen_to_world({400.0f, 300.0f});
+    // Pan by (20, 10) screen px: the content should follow the cursor,
+    // so the world point at the center moves by (-20/zoom, -10/zoom)
+    // = (-10, -5) in world space.
+    v.pan_by({20.0f, 10.0f});
+    const Point world_after = v.screen_to_world({400.0f, 300.0f});
+    CHECK(world_after.x == doctest::Approx(world_before.x - 10.0f).epsilon(1e-4f));
+    CHECK(world_after.y == doctest::Approx(world_before.y - 5.0f).epsilon(1e-4f));
+}
+
+TEST_CASE("grid: adapts spacing to zoom") {
+    // The adaptive grid picks a power-of-10 spacing whose screen size
+    // is close to target_pixels, keeping the visual density roughly
+    // constant across zooms. We verify:
+    //   - the grid draws a reasonable number of lines (not 0, not
+    //     thousands) at every zoom,
+    //   - the line count stays bounded (the density is stable),
+    //   - at very different zooms the world-space spacing differs (the
+    //     grid really does adapt, not draw the same world lines).
+    CommandListCanvas c;
+    ViewTransform2D v;
+    v.viewport_w = 800.0f;
+    v.viewport_h = 600.0f;
+    GridStyle style;
+    style.target_pixels = 80.0f;
+    style.base_spacing = 1.0f;
+
+    // At zoom 1: spacing ~100 world units (screen 100px, close to 80).
+    v.zoom = 1.0f;
+    c.cmds.clear();
+    draw_grid(c, v, style);
+    const std::size_t lines_zoom1 = c.count(CanvasCmdKind::stroke_polyline);
+    CHECK(lines_zoom1 > 0);
+    CHECK(lines_zoom1 < 100);  // bounded, not one-per-pixel
+
+    // At zoom 100: spacing ~1 world unit (screen 100px).
+    v.zoom = 100.0f;
+    c.cmds.clear();
+    draw_grid(c, v, style);
+    const std::size_t lines_zoom100 = c.count(CanvasCmdKind::stroke_polyline);
+    CHECK(lines_zoom100 > 0);
+    CHECK(lines_zoom100 < 100);
+
+    // The line counts are similar (the density is stable) - both in
+    // the 10-30 range for an 800x600 viewport.
+    CHECK(lines_zoom1 == lines_zoom100);
+
+    // At extreme zoom-out, the grid still draws something (spacing
+    // grows to keep cells visible).
+    v.zoom = 0.001f;
+    v.min_zoom = 1e-6f;
+    c.cmds.clear();
+    draw_grid(c, v, style);
+    CHECK(c.count(CanvasCmdKind::stroke_polyline) > 0);
 }

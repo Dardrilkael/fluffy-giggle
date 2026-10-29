@@ -143,7 +143,10 @@ mark the seam clearly so a future full Part A can replace them.
       math-lib vector math, Vec2[4]/Vec4[4] seam)
 - [x] Stage 14 — Canvas2D / CommandListCanvas / Renderer2DCanvas
       (interface + recording sink for tests + r2d-driving sink)
-- [ ] Stage 14 — ViewTransform2D + adaptive grid + CanvasView + tests
+- [x] Stage 14 — ViewTransform2D + adaptive grid + CanvasView + tests
+      (world/screen round-trip, zoom-at-point invariant, fit, pan_by,
+      grid spacing adapts to zoom; CanvasView with wheel/middle-drag/
+      space+drag/touch-pinch input policy, retained-layer API stub)
 - [ ] Stage 14 — gallery canvas page
 - [ ] Stage 15 — property grid + tests
 - [ ] Stage 15 — dock host (split tree + serialization) + tests
