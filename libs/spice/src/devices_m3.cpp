@@ -84,13 +84,23 @@ constexpr double kVtPerK = 8.617333262145e-5;
     return arg;
 }
 
-// --- D (diode, §3.6/§5.3/§11 M3) ------------------------------------------------
+// --- D (diode, §3.6/§5.3/§11 M3, §6.2 M4b: Cjo charge companion) ------------------
 
 class Diode final : public Device {
 public:
+    // M3 state slots (always present):
     static constexpr std::size_t kVdPrev = 0;
     static constexpr std::size_t kICur = 1;
     static constexpr std::size_t kIPrev = 2;
+    // M4b companion state slots (present when cjo_ > 0):
+    static constexpr std::size_t kVComp = 3;   // V at last committed step
+    static constexpr std::size_t kQComp = 4;   // Q at last committed step
+    static constexpr std::size_t kIComp = 5;   // companion I at last step
+    static constexpr std::size_t kGeq = 6;     // companion conductance (per attempt)
+    static constexpr std::size_t kJeq = 7;     // companion current source
+    static constexpr std::size_t kHistN = 8;   // LTE history length (0..3)
+    static constexpr std::size_t kHist = 9;    // first (t, q) pair, 6 slots
+    static constexpr std::size_t kCjoEff = 15; // folded Cjo*area
 
     Diode(std::string display, NodeId anode, NodeId cathode, ExprProgram area,
           bool has_ic, double ic)
@@ -128,13 +138,19 @@ public:
         cx.add_current(cathode_, anode_, ieq);
     }
 
-    // M3: no companion (Cjo lands with the BJT/MOS cap model in M4).
-    // load_tran defaults to load_dc, which is correct - the diode is a
-    // nonlinear resistor at each operating point.
+    // M4b: when Cjo > 0, load_tran stamps the DC Shockley part PLUS the
+    // charge companion (geq, jeq from begin_step). The companion uses
+    // the same Norton form as the linear C: geq in parallel with jeq.
+    void load_tran(DcLoadContext& cx, const TranStep&) const override {
+        load_dc(cx);  // DC Shockley stamp
+        if (!has_cap()) return;
+        // Charge companion (trap/BE, same as the linear C in devices_m2.cpp).
+        cx.add_conductance(anode_, cathode_, cx.st(kGeq));
+        cx.add_current(cathode_, anode_, cx.st(kJeq));
+    }
 
-    // The small-signal conductance at the OP (frozen Vd from state[kVdPrev],
-    // set by update_state during the .ac OP solve). M3 has no Cjo, so this
-    // is a pure real conductance (no j*omega*Cjo contribution).
+    // The small-signal conductance at the OP (frozen Vd from state[kVdPrev]).
+    // M4b: adds j*omega*Cj(Vd) — the junction capacitance at the OP.
     void load_ac(AcLoadContext& cx) const override {
         const double area = cx.par(kAreaParam);
         const double is_eff = is_ * area;
@@ -143,6 +159,10 @@ public:
         const double ex = std::exp(arg);
         const double gd_op = is_eff / (n_ * vt_) * ex;
         cx.add_conductance(anode_, cathode_, {gd_op, 0.0});
+        if (has_cap()) {
+            const double cj = c_dep(vd, cjo_ * area);
+            cx.add_conductance(anode_, cathode_, {0.0, cx.omega * cj});
+        }
     }
 
     // --- parameter model (§3.5a) -----------------------------------------
@@ -159,7 +179,25 @@ public:
     }
 
     // --- state model (§3.5b) ---------------------------------------------
-    [[nodiscard]] std::size_t state_slots() const override { return 3; }
+    // M3: 3 slots (Vd_prev, I_cur, I_prev). M4b: 16 slots when Cjo > 0
+    // (adds companion state + LTE history + folded Cjo*area).
+    [[nodiscard]] std::size_t state_slots() const override {
+        return has_cap() ? 16 : 3;
+    }
+    [[nodiscard]] bool is_dynamic() const override { return has_cap(); }
+
+    // Folds Cjo*area into state[kCjoEff] once per step attempt (same
+    // pattern as the Capacitor's kCParam fold). link_dynamic sets self_index_.
+    void fold_state(double* st, const RunState& rs, const Circuit& c) const override {
+        if (has_cap()) {
+            st[kCjoEff] = cjo_ * rs.params()[c.param_span[self_index_].begin];
+        }
+    }
+    [[nodiscard]] ws::core::Status link_dynamic(const Circuit& /*c*/,
+                                                 std::size_t self) override {
+        self_index_ = self;
+        return {};
+    }
     // init_state defaults to zero, which is correct: Vd_prev=0 (cold start),
     // I_cur=I_prev=0 (no previous load).
 
@@ -197,6 +235,106 @@ public:
         return {std::abs(i_cur - i_prev), std::max(std::abs(i_cur), std::abs(i_prev))};
     }
 
+    // --- M4b dynamic hooks (charge companion, only when Cjo > 0) ----------
+    // Same pattern as the linear C in devices_m2.cpp: begin_step computes
+    // geq/jeq from the last committed step's V/Q/I; load_tran stamps them;
+    // commit stores the new V/Q/I and pushes LTE history; lte_ok uses the
+    // divided-difference LTE on the charge history.
+
+    void begin_step(const TranStep& step, double* st) override {
+        if (!has_cap()) return;
+        const double cjo_eff = st[kCjoEff];
+        // Capacitance at the last committed V (begin_step runs once per
+        // step attempt, before the Newton loop - it can't see the current
+        // iterate, so it uses V_comp from the last commit).
+        const double c = c_dep(st[kVComp], cjo_eff);
+        if (step.be) {
+            st[kGeq] = c / step.dt;
+            st[kJeq] = -st[kQComp] / step.dt;
+        } else {
+            st[kGeq] = 2.0 * c / step.dt;
+            st[kJeq] = -(st[kGeq] * st[kVComp] + st[kIComp]);
+        }
+    }
+
+    void commit(const std::vector<double>& x, std::size_t /*nc*/,
+                const TranStep& step, double* st) override {
+        if (!has_cap()) return;
+        const double cjo_eff = st[kCjoEff];
+        const double vd = v_across(x, anode_, cathode_);
+        const double q = q_dep(vd, cjo_eff);
+        st[kVComp] = vd;
+        st[kQComp] = q;
+        st[kIComp] = st[kGeq] * vd + st[kJeq];
+        // LTE history (3 (t, q) pairs, oldest first).
+        if (step.be) {
+            st[kHistN] = 0.0;  // BE restart invalidates trap LTE history
+        } else {
+            const double n = st[kHistN];
+            if (n < 3.0) {
+                const std::size_t idx = static_cast<std::size_t>(n);
+                st[kHist + idx * 2] = step.time;
+                st[kHist + idx * 2 + 1] = q;
+                st[kHistN] = n + 1.0;
+            } else {
+                // Shift: drop oldest, append newest.
+                for (std::size_t i = 0; i < 2; ++i) {
+                    st[kHist + i * 2] = st[kHist + (i + 1) * 2];
+                    st[kHist + i * 2 + 1] = st[kHist + (i + 1) * 2 + 1];
+                }
+                st[kHist + 4] = step.time;
+                st[kHist + 5] = q;
+            }
+        }
+    }
+
+    [[nodiscard]] bool lte_ok(const TranStep& step, const std::vector<double>& x,
+                              std::size_t /*nc*/, double reltol, double chgtol,
+                              double trtol, const double* st, double* ratio) const override {
+        if (!has_cap()) {
+            if (ratio) *ratio = 0.0;
+            return true;
+        }
+        const double cjo_eff = st[kCjoEff];
+        const double vd = v_across(x, anode_, cathode_);
+        const double q_new = q_dep(vd, cjo_eff);
+        // Reuse the dd3_lte logic from devices_m2.cpp (inline here since
+        // it's in a different TU's anonymous namespace).
+        const double n = st[kHistN];
+        if (n < 3.0) {
+            if (ratio) *ratio = 0.0;
+            return true;  // not enough history
+        }
+        const double t0 = st[kHist], q0 = st[kHist + 1];
+        const double t1 = st[kHist + 2], q1 = st[kHist + 3];
+        const double t2 = st[kHist + 4], q2 = st[kHist + 5];
+        const double t3 = step.time, q3 = q_new;
+        if (!(t1 > t0) || !(t2 > t1) || !(t3 > t2) || !(step.dt > 0)) {
+            if (ratio) *ratio = 0.0;
+            return true;
+        }
+        const double d1a = (q1 - q0) / (t1 - t0);
+        const double d1b = (q2 - q1) / (t2 - t1);
+        const double d1c = (q3 - q2) / (t3 - t2);
+        const double d2a = (d1b - d1a) / (t2 - t0);
+        const double d2b = (d1c - d1b) / (t3 - t1);
+        const double dd3 = (d2b - d2a) / (t3 - t0);
+        const double eps = step.dt * step.dt * step.dt * std::abs(dd3) / 2.0;
+        const double tolq = trtol * (reltol * std::max(std::abs(q3), std::abs(st[kQComp])) + chgtol);
+        if (ratio) *ratio = (tolq > 0) ? (eps / tolq) : std::numeric_limits<double>::infinity();
+        return tolq > 0 && eps <= tolq;
+    }
+
+    void seed_state(const std::vector<double>& x, std::size_t /*nc*/,
+                    double* st) override {
+        if (!has_cap()) return;
+        const double vd = v_across(x, anode_, cathode_);
+        st[kVComp] = vd;
+        st[kQComp] = q_dep(vd, st[kCjoEff]);
+        st[kIComp] = 0.0;
+        st[kHistN] = 0.0;
+    }
+
     // .model name D(Is=... N=... Rs=... Cjo=... ...). M3 implements Is, N,
     // Tnom (for Vt/vcrit); accepts Rs/Cjo/M/Vj/Bv/Ibv/Xti/Eg/Kf/Af/Fc
     // silently (warned once per model in `spice check`) - they land with
@@ -210,11 +348,12 @@ public:
                 model.loc));
         }
         model_name_ = model.name.text;
-        // ngspice defaults: Is=1e-14 A, N=1, Tnom=27°C (the TEMP option
-        // overrides the run temperature; Tnom is the model's reference).
+        // ngspice defaults: Is=1e-14 A, N=1, Tnom=27°C, Cjo=0 (no cap),
+        // M=0.5, Vj=1V, Fc=0.5.
         double is_val = 1e-14;
         double n_val = 1.0;
         double tnom = 27.0;
+        double cjo_val = 0.0, m_val = 0.5, vj_val = 1.0, fc_val = 0.5;
         const auto& toks = model.params;
         for (std::size_t i = 0; i < toks.size(); ++i) {
             std::string text = toks[i].text;
@@ -267,11 +406,20 @@ public:
                 n_val = v;
             } else if (key == "tnom") {
                 tnom = v;
-            } else if (key == "rs" || key == "cjo" || key == "m" || key == "vj" ||
-                       key == "bv" || key == "ibv" || key == "xti" || key == "eg" ||
-                       key == "kf" || key == "af" || key == "fc") {
+            } else if (key == "cjo") {
+                cjo_val = v;
+            } else if (key == "m") {
+                m_val = v;
+            } else if (key == "vj") {
+                vj_val = v;
+            } else if (key == "fc") {
+                fc_val = v;
+            } else if (key == "rs" || key == "bv" || key == "ibv" ||
+                       key == "xti" || key == "eg" || key == "kf" ||
+                       key == "af" || key == "tt") {
                 // Accepted (so ngspice decks parse cleanly) but not
-                // implemented in M3. `spice check` warns per-model.
+                // implemented in M4b. `spice check` warns per-model.
+                // TT (diffusion charge) lands M4c; Rs/Bv/Ibv/Xti/Eg/Kf/Af land M5.
             } else {
                 return spice_fail(dev_diag(
                     ErrorKind::Semantic, "spice.semantic.model_param",
@@ -292,13 +440,18 @@ public:
         }
         is_ = is_val;
         n_ = n_val;
-        // Vt at Tnom. M5 will re-evaluate per-run against TEMP; M3 freezes
+        // Vt at Tnom. M5 will re-evaluate per-run against TEMP; M3/M4b freezes
         // at Tnom (the Lambert-W gate uses the default 27°C).
         vt_ = (tnom + 273.15) * kVtPerK;
         // SPICE3 vcrit = N*Vt*ln(N*Vt / (sqrt(2)*Is)). With Is=1e-14, N=1,
         // Tnom=27: vcrit ≈ 0.728 V - the knee past which pnjlim engages.
         const double arg = n_ * vt_ / (std::sqrt(2.0) * is_val);
         vcrit_ = (arg > 1.0) ? n_ * vt_ * std::log(arg) : n_ * vt_;
+        // M4b: junction capacitance params.
+        cjo_ = cjo_val;
+        m_ = m_val;
+        vj_ = vj_val;
+        fc_ = fc_val;
         return {};
     }
 
@@ -324,6 +477,43 @@ public:
 private:
     static constexpr std::size_t kAreaParam = 0;
 
+    // --- M4b: junction capacitance (Cjo) charge model -------------------
+    // True when the diode has a junction cap (Cjo > 0) - gates is_dynamic,
+    // state_slots, and all the companion hooks.
+    [[nodiscard]] bool has_cap() const { return cjo_ > 0.0; }
+
+    // Depletion charge Q_dep(Vd) and capacitance C_dep(Vd), using the
+    // SPICE3/ngspice depletion model with the Fc linear extension past
+    // Fc*Vj. cjo_eff = Cjo*area (folded into state[kCjoEff]).
+    [[nodiscard]] double q_dep(double vd, double cjo_eff) const {
+        if (cjo_eff <= 0.0) return 0.0;
+        const double fc_vj = fc_ * vj_;
+        if (vd < fc_vj) {
+            double arg = 1.0 - vd / vj_;
+            if (arg < 1e-12) arg = 1e-12;  // avoid singularity at Vd=Vj
+            return cjo_eff * vj_ / (1.0 - m_) * (1.0 - std::pow(arg, 1.0 - m_));
+        }
+        // Linear extension past Fc*Vj (SPICE3 formula).
+        const double f1 = vj_ * (1.0 - std::pow(1.0 - fc_, 1.0 - m_)) / (1.0 - m_);
+        const double f2 = std::pow(1.0 - fc_, -m_);
+        const double q_fcvj = cjo_eff * f1;
+        const double c_fcvj = cjo_eff * f2;
+        const double dv = vd - fc_vj;
+        return q_fcvj + c_fcvj * dv * (1.0 + m_ * dv / (2.0 * vj_ * (1.0 - fc_)));
+    }
+    [[nodiscard]] double c_dep(double vd, double cjo_eff) const {
+        if (cjo_eff <= 0.0) return 0.0;
+        const double fc_vj = fc_ * vj_;
+        if (vd < fc_vj) {
+            double arg = 1.0 - vd / vj_;
+            if (arg < 1e-12) arg = 1e-12;
+            return cjo_eff / std::pow(arg, m_);
+        }
+        const double f2 = std::pow(1.0 - fc_, -m_);
+        const double dv = vd - fc_vj;
+        return cjo_eff * f2 * (1.0 + m_ * dv / (vj_ * (1.0 - fc_)));
+    }
+
     std::string name_;
     NodeId anode_, cathode_;
     ExprProgram area_;
@@ -334,6 +524,12 @@ private:
     double n_ = 1.0;        // emission coefficient
     double vt_ = 0.02585;   // thermal voltage at Tnom (V)
     double vcrit_ = 0.7;    // pnjlim knee (V)
+    // M4b: junction capacitance model params (Cjo > 0 enables the companion)
+    double cjo_ = 0.0;      // zero-bias junction capacitance (F)
+    double m_ = 0.5;        // grading coefficient
+    double vj_ = 1.0;       // junction potential (V)
+    double fc_ = 0.5;       // forward-bias depletion cap coefficient
+    std::size_t self_index_ = 0;  // filled by link_dynamic (for fold_state)
     std::string model_name_;
 };
 

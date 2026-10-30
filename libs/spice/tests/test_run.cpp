@@ -2240,3 +2240,41 @@ TEST_CASE("M4a BJT: PNP - polarity flips, same magnitudes") {
     const double ref_ic_mag = 1e-16 * std::exp(0.7 / kVt27);
     CHECK(i_vc == doctest::Approx(ref_ic_mag).epsilon(1e-4));
 }
+
+TEST_CASE("M4b diode Cjo: .ac low-pass cutoff matches RC formula") {
+    // A reverse-biased diode (Vd=0) with Cjo acts as a capacitor Cjo.
+    // R1=1k, Cjo=10pF → fc = 1/(2π*R*C) ≈ 15.9 MHz. Below fc, |v(out)| ≈ 1;
+    // at fc, |v(out)| = 1/√2 ≈ 0.707; above fc, rolls off at -20 dB/dec.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "diode cjo ac\n"
+        "V1 in 0 DC 0 AC 1\n"
+        "R1 in out 1k\n"
+        "D1 out 0 dx\n"
+        ".model dx D(Is=1e-14 N=1 Cjo=10p M=0.5 Vj=0.7)\n"
+        ".ac dec 10 1Meg 1G\n",
+        nullptr, settings);
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 1);
+    const Table& t = run->results.tables[0];
+    const std::size_t col_re = col_of(t, "re(v(out))");
+    const std::size_t col_im = col_of(t, "im(v(out))");
+    REQUIRE(t.signals[col_re].data.size() > 10);
+    // At 1 MHz (well below fc=16 MHz): |v(out)| ≈ 1.
+    double f_low = t.signals[0].data[0]; (void)f_low; // frequency column
+    double mag_low = std::hypot(t.signals[col_re].data[0], t.signals[col_im].data[0]);
+    CHECK(mag_low == doctest::Approx(1.0).epsilon(1e-3));
+    // Find the point near fc=15.9 MHz and check |v(out)| ≈ 0.707.
+    for (std::size_t k = 0; k < t.signals[0].data.size(); ++k) {
+        const double f = t.signals[0].data[k];
+        if (f > 15e6 && f < 17e6) {
+            const double mag = std::hypot(t.signals[col_re].data[k], t.signals[col_im].data[k]);
+            CHECK(mag == doctest::Approx(0.707).epsilon(0.05));  // 5% (frequency grid may not hit fc exactly)
+            break;
+        }
+    }
+    // At 1 GHz (well above fc): |v(out)| << 0.1.
+    double mag_hi = std::hypot(t.signals[col_re].data.back(), t.signals[col_im].data.back());
+    CHECK(mag_hi < 0.05);
+}
