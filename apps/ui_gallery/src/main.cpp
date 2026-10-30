@@ -83,6 +83,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -594,6 +595,25 @@ private:
             (void)ws::ui::r2d::font_add_face(font_, kDefaultFontPath, 0);
             (void)ws::ui::r2d::font_add_face(font_, kExtraFontPath, 1);
         }
+        last_baked_px_ = font_px_ * scale_;  // remember what we baked at
+    }
+
+    // slider_float fires 'changed' every frame while the pointer is held
+    // (the documented contract, widgets.hpp). An unconditional rebuild_font
+    // on every such frame re-reads the TTF from disk, re-rasterizes every
+    // glyph at the new height and re-uploads the atlas - on a slow box
+    // that freezes the UI during a font-px or scale drag. Glyph
+    // rasterization is per INTEGER pixel height, so two bake sizes that
+    // round to the same integer produce a byte-identical atlas: skip the
+    // rebuild in that case. Turns a per-frame re-bake into at most one
+    // rebuild per integer pixel of size change - the chrome's font
+    // pointer stays valid, the metrics survive, the UI stays responsive.
+    void rebuild_font_if_changed() {
+        const float want = font_px_ * scale_;
+        if (font_.empty() ||
+            std::lround(want) != std::lround(last_baked_px_)) {
+            rebuild_font();
+        }
     }
 
     void sync_chrome() {
@@ -1100,6 +1120,10 @@ private:
     std::uint32_t accent_color_ = 0u;   // 0 = the stock hand-picked palette
     int accent_pick_ = 0;               // the accent radio row
     float font_px_ = 16.0f;             // the live bake size (the doc mirrors it)
+    float last_baked_px_ = 0.0f;        // font_px_*scale_ at the last rebuild_font;
+                                        // rebuild_font_if_changed skips the
+                                        // disk+CPU+GPU re-bake when the integer
+                                        // pixel height hasn't moved (slider drag)
     bool stack_faces_ = false;          // the growing-font demo's stack state
     std::uint32_t lazy_baked_ = 0;      // glyphs landed through font_bake_pending
 
@@ -1377,7 +1401,8 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
         {"&new", {}, "Ctrl+N"},
         {"open...", {}, "Ctrl+O"},
         {.kind = gui::MenuItemKind::separator},
-        {"recent", {}, nullptr, recent, 2},
+        {"recent", {}, nullptr, recent,
+         static_cast<int>(sizeof(recent) / sizeof(recent[0]))},
         {.kind = gui::MenuItemKind::separator},
         {"&about the gallery", {}, "F1"},
     };
@@ -1400,9 +1425,9 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
          .disabled_reason = "not shipped yet"},
     };
     const gui::MenuDesc bar[] = {
-        {"&demo", demo_items, 6},
-        {"&view", view_items, 7},
-        {"&help", help_items, 2},
+        {"&demo", demo_items, sizeof(demo_items) / sizeof(demo_items[0])},
+        {"&view", view_items, sizeof(view_items) / sizeof(view_items[0])},
+        {"&help", help_items, sizeof(help_items) / sizeof(help_items[0])},
     };
     const gui::MenuEvent ev = gui::menu_bar(gui_, layout_, chrome_, "the bar",
                                             bar, 3, bar_open_);
@@ -1455,7 +1480,9 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
     };
     const gui::MenuEvent ctx = gui::context_menu(gui_, layout_, chrome_,
                                                  "gallery ctx", strip,
-                                                 ctx_items, 5, ctx_open_);
+                                                 ctx_items,
+                                                 sizeof(ctx_items) / sizeof(ctx_items[0]),
+                                                 ctx_open_);
     if (ctx.item != nullptr) {
         if (ctx.item == &ctx_items[0]) {
             reset_counters();
@@ -1534,10 +1561,15 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
         // again, the stack re-added, the lazy glyphs re-requested on
         // first use - and the scale slider multiplies every metric and
         // the bake size with it. Both feed the same rebuild pair.
+        // rebuild_font_if_changed (not rebuild_font) because slider_float
+        // fires 'changed' every frame during a drag: an unconditional
+        // rebuild would re-read the TTF and re-bake the atlas every frame
+        // and freeze the UI. The debounced helper skips rebuilds whose
+        // integer pixel height matches the last bake.
         if (gui::slider_float(gui_, layout_, chrome_, "font px", font_px_,
                               10.0f, 28.0f, half)) {
             theme_.regular.size = font_px_;
-            rebuild_font();
+            rebuild_font_if_changed();
             sync_chrome();
             std::snprintf(status_, sizeof status_, "font re-baked at %.0f px",
                           font_px_);
@@ -1545,7 +1577,7 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
         layout_.same_line();
         if (gui::slider_float(gui_, layout_, chrome_, "scale x", scale_,
                               0.75f, 2.0f, half)) {
-            rebuild_font();
+            rebuild_font_if_changed();
             sync_chrome();
             std::snprintf(status_, sizeof status_, "ui scale: %.2f", scale_);
         }
