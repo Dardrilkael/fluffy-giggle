@@ -37,6 +37,9 @@ struct RunSettings {
     double trtol = 7.0;     // §6.3: transient LTE tolerance factor
     int gmin_steps = 10;    // §5.2: gmin homotopy staircase steps (ngspice)
     int src_steps = 10;     // §5.2: source homotopy staircase steps
+    double gshunt = 0.0;    // §5.3: opt-in per-node conductance to ground
+                            //   (default off - masks §4.4's floating-node
+                            //   errors; .options gshunt=1e-9 opts in)
     std::string solver = "eigen";  // M0b flips the default to "klu"
     // §8.3 rev: the dialect this deck targets - ngspice (default),
     // ltspice, or strict (rejects the LTspice-only accommodations:

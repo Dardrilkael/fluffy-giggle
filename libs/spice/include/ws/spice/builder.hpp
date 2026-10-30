@@ -105,6 +105,16 @@ struct SwitchModel {
     std::optional<double> ih;
 };
 
+// A diode .model the builder registers (card form: .model name D(Is=... N=...)).
+// M3 implements Is, N, Tnom (for Vt/vcrit); the other ngspice diode params
+// (Rs, Cjo, M, Vj, Bv, Ibv, ...) are accepted by the parser but not yet
+// implemented - the builder mirrors only the M3 set.
+struct DiodeModel {
+    double is_val = 1e-14;  // saturation current (A)
+    double n = 1.0;         // emission coefficient
+    double tnom = 27.0;     // model reference temperature (°C)
+};
+
 class CircuitBuilder {
 public:
     CircuitBuilder() = default;
@@ -156,6 +166,15 @@ public:
                  bool initial_on = false);
     void switch_model(std::string name, const SwitchModel& m);
 
+    // Diode (M3): names a .model registered with diode_model(). `area`
+    // defaults to 1.0 (multiplies Is); `ic` is the optional Vd initial
+    // condition (UIC only - accepted but not load-bearing in M3 since
+    // the diode has no dynamic state yet).
+    void diode(std::string name, NodeHandle anode, NodeHandle cathode,
+               std::string model, double area = 1.0,
+               std::optional<double> ic = std::nullopt);
+    void diode_model(std::string name, const DiodeModel& m);
+
     // Elaborates: same path the deck takes (flatten-free - the builder
     // emits top-level cards only - plus the §6.6 graph checks and the
     // §3.5 rev arena freeze). `temp` is the §7.7 elaboration temperature.
@@ -170,6 +189,7 @@ private:
     std::vector<Card> cards_;
     std::vector<std::pair<std::string, std::string>> params_;  // name -> expression
     std::vector<std::pair<std::string, SwitchModel>> models_;
+    std::vector<std::pair<std::string, DiodeModel>> diode_models_;
 };
 
 }  // namespace ws::spice

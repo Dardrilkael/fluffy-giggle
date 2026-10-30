@@ -41,6 +41,7 @@ and DESIGN.md disagree, DESIGN.md wins.
 | `ec349ec` | spice | .meas over .step families measures each point (regression fix). |
 | `70e7e84` | spice | MSVC /W4 /WX portability: `struct Circuit` forward decl (C4099) + six shadowing renames (C4456/C4458). |
 | `b265ae7` | spice | .dc crash on MSVC debug fixed: `run_dc` assigned through empty `std::optional`s - UB that stayed silent on GCC and aborted (exit 3) on Windows. Found via ASan; see the audit tooling below. |
+| (M3, this commit) | spice | The diode + the §3.6 current iterate: `DcLoadContext::node_v/branch_i/gmin`, `AcLoadContext::state_`, `NonlinResid` + the §5.1 nonlinear-residual convergence gate, `update_state` `x_prev` param, pnjlim (SPICE3 devlim), `solve_tran` upgraded to a real Newton loop, `gminsteps`/`srcsteps`/`gshunt` options, `Builder::diode()`/`diode_model()`. Gate: Lambert-W .op (1e-7 rel at reltol=1e-9), .dc sweep vs Lambert-W, pnjlim stiff-bias convergence (diode at 100V), rectifier .tran sanity, Jacobian vs central finite differences, builder .op equivalence. 2306 assertions / 106 cases / 0 failures. |
 | (HEAD, after `b265ae7`) | tools | Linux-side audit scanners for MSVC parity (`tools/audit_*.py`, `tools/build_*.py`) + this plan refresh. |
 
 Working tree is clean; `main` is 14 commits ahead of `origin/main` and
@@ -52,9 +53,10 @@ hand it over.
 
 These four were batched and approved up front:
 
-1. **Scope = M0 + M1 + M2 (M2 added by the user's `m2` directive,
-   2026-10-29).** M3+ (`.noise`, semiconductor devices, behavioral
-   sources, `.step`/`.meas`) remain out of scope and deliberately reject
+1. **Scope = M0 + M1 + M2 + M3.** M3 (the diode + Newton limiting +
+   the convergence ladder) was reopened and landed by the user's
+   `follow the plan` directive. M4+ (BJT/MOS/B/T-line, `.noise`,
+   semiconductor caps) remain out of scope and deliberately reject
    at parse with file:line (DESIGN.md working rule 5).
 2. **All 5 DESIGN.md open questions answered with the default:**
    - Eigen sparse LU backend (NOT KLU/KLUAdopt).
@@ -164,6 +166,8 @@ libs/spice/
     expr.cpp                     # expression VM
     elaborate.cpp                # .subckt flatten, node table, graph checks
     devices.cpp                  # R V I E F G H + factory table
+    devices_m2.cpp               # C L K S W (M2 companions + switches)
+    devices_m3.cpp               # D - the diode (Shockley + pnjlim)
     mna.cpp                      # pattern assembly + numeric contexts
     analysis.cpp                 # .op and .dc drivers
     output.cpp                   # CSV
@@ -246,24 +250,23 @@ working rule 5) and would each be a future milestone:
 - **M0b (alt backend)** - KLU sparse solver behind `solver=klu` in
   `.options`. The Eigen backend is the only one wired; the design leaves
   the policy layer abstract enough to add KLU later.
-- **M3** - semiconductor devices: Diode, Newton limiting, gmin/source
-  stepping (the convergence ladder), BJT (Gummel-Poon).
-- **M4** - MOS level 1, behavioral B sources (dual-number AD), lossless
-  T-lines (T).
+- **M4** - semiconductor devices: BJT (Gummel-Poon), MOS level 1,
+  behavioral B sources (dual-number AD), lossless T-lines (T). The diode
+  (M3) is the foundation; BJT/MOS reuse the §3.6 current-iterate
+  threading and the nonlinear-residual convergence gate.
 - **M5 (remainder)** - `.noise`, `.nodeset`, per-device temperature
-  params (TC on models), text report. (The 2026-10-29 revision already
-  landed `.step`, `.meas`, `.save`/`.print` and `temp` sweeps - see the
-  table above; only these four M5 items still reject at parse.)
+  params (TC on models, temp-dependent diode Vt), text report. (The
+  2026-10-29 revision already landed `.step`, `.meas`, `.save`/`.print`
+  and `temp` sweeps - see the table above; only these M5 items still
+  reject at parse.)
 - **Multi-winding K** - a third inductor on an existing pair rejects
   (backlog).
 - **`.lib`** - the ngspice library-file include mechanism. Backlog.
-- **Current iterate into `MnaSystem::load()`** - M2 devices are linear,
-  so `load(devices)`/`load_tran(devices, step)` is already the exact
-  stamp. When M3's nonlinear devices arrive, the kernel must thread the
-  CURRENT iterate into the load context (DESIGN.md §3.6); the call
-  sites in `DcKernel::solve()`/`solve_tran()` are commented.
 - **Gear(2)/TR-BDF2** - integration is trap + BE only (§6.1); Gear
   orders > 2 are rejected by design.
+- **Diode M4/M5 params** - Cjo/M/Vj (junction cap, M4), Bv/Ibv
+  (breakdown, M5), Tnom/Xti/Eg (temp model, M5), Kf/Af (noise, M5+).
+  Accepted at parse but not implemented in M3.
 
 ## Next steps if memory is cleared
 
@@ -277,17 +280,18 @@ In rough priority order:
    sits at the `8662844` smoke commit, 14 behind). `git status` should be
    clean.
 3. **Run the gate.** `cmake --preset linux && cmake --build --preset linux
-   && ctest --preset linux` should pass (99 cases / 2239 assertions at the
+   && ctest --preset linux` should pass (106 cases / 2306 assertions at the
    time of writing). If it does not, the break is load-bearing -
    investigate before adding anything. Before a Windows hand-off, also
    run the five `tools/audit_*.py`/`tools/build_*.py` parity checks.
 4. **Pick the next milestone.** The natural next moves are **M0b** (the
    KLU backend: both facades are stable, cross-validation tests are the
-   gate) or **M3** (diode + per-device limiting + the convergence ladder;
-   note the §3.6 current-iterate TODO marked at `DcKernel::solve()`).
-   Each new milestone = one commit, one test row, one CLAUDE.md note -
-   that's the established rhythm (M1 commit 5e97912 and the M2 commit
-   are the templates).
+   gate) or **M4** (BJT Gummel-Poon, MOS level 1, behavioral B with
+   dual-number AD, lossless T-line; the diode's §3.6 current-iterate
+   threading from M3 is the foundation - BJT/MOS reuse the same
+   nonlinear contract). Each new milestone = one commit, one test row,
+   one CLAUDE.md note - that's the established rhythm (M1 commit 5e97912,
+   the M2 commit, and the M3 commit are the templates).
 5. **Do not regress scope.** If a request lands that wants M3+ devices,
    that's a new arc with its own decision round. The four locked decisions
    above stay locked unless the user explicitly reopens them.

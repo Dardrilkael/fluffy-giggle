@@ -144,6 +144,16 @@ struct ParamSpec {
     ExprProgram source;
 };
 
+// §3.6/§5.1 (M3): a nonlinear device's terminal-current convergence
+// metric, complementing the kernel's voltage-delta check. `delta` is the
+// worst |ΔI| since the previous load; `ref` is the normalization
+// magnitude (max(|I_new|, |I_old|)). The kernel accepts when
+// `delta ≤ reltol*ref + abstol`. Linear devices return {0, 0}.
+struct NonlinResid {
+    double delta = 0.0;
+    double ref = 0.0;
+};
+
 class Device {
 public:
     virtual ~Device() = default;
@@ -308,15 +318,35 @@ public:
         (void)st;
     }
 
-    // Re-evaluates a solution-dependent device state (a switch control)
-    // against the candidate x; true when the state changed and the solve
-    // must iterate again. Called by the Newton loop after every solve.
+    // Re-evaluates a solution-dependent device state (a switch control,
+    // a diode's per-iterate Vd/I trackers for pnjlim + nonlinear_residual)
+    // against the candidate x; true when the state changed in a way that
+    // demands another solve (a switch flipping). Called by the Newton loop
+    // after every solve.
+    //
+    // §3.6 (M3): `x_prev` (when not null) is the PRE-solve iterate - the x
+    // the load just linearized against. Nonlinear devices use it to
+    // advance their pnjlim/reference slots: at iteration k the load sees
+    // x = x_prev = x[k-1], and the diode stores Vd(x[k-1]) as next
+    // iteration's vold. May be null in non-Newton contexts (initial seed
+    // passes); devices must tolerate that.
     [[nodiscard]] virtual bool update_state(const std::vector<double>& x,
-                                            std::size_t node_count, double* st) {
+                                            std::size_t node_count, double* st,
+                                            const std::vector<double>* x_prev = nullptr) {
         (void)x;
         (void)node_count;
         (void)st;
+        (void)x_prev;
         return false;
+    }
+
+    // §3.6/§5.1 (M3): the worst normalized terminal-current change since
+    // the previous load, complementing the kernel's voltage-delta
+    // convergence check. Linear devices (the default) report {0, 0} and
+    // never gate convergence. Read from the device's state slice (the
+    // diode stores I_cur and I_prev there through update_state).
+    [[nodiscard]] virtual NonlinResid nonlinear_residual(const double* /*st*/) const {
+        return {0.0, 0.0};
     }
 
     // The next source-schedule event strictly after `t` (§6.4), or +inf
@@ -375,6 +405,14 @@ public:
 
 // DC/OP/transient stamping surface. The pattern recorder is a private
 // subclass inside the MNA layer, so pattern mode runs this same code path.
+//
+// §3.6 (M3): nonlinear devices need the CURRENT iterate to linearize
+// against - `node_v()`/`branch_i()` expose it. The pattern recorder
+// returns 0 for both (a linearization around V=0 still produces finite,
+// well-defined stamp POSITIONS, which is all the pattern dry run needs).
+// `gmin()` exposes the run's junction-parallel conductance (§5.2 ladder
+// stage 2) so nonlinear devices can fold it into their stamp without
+// reaching into RunSettings.
 class DcLoadContext {
 public:
     virtual ~DcLoadContext() = default;
@@ -393,6 +431,18 @@ public:
     // True while the pattern dry run records (state-dependent devices
     // stamp the union of their states, §3.2).
     [[nodiscard]] virtual bool pattern_mode() const = 0;
+
+    // §3.6: the current iterate's node voltage (V to ground; ground → 0)
+    // and branch current. Pattern mode returns 0 - the linearization
+    // around zero produces the right POSITIONS, which is all the dry run
+    // records.
+    [[nodiscard]] virtual double node_v(NodeId n) const = 0;
+    [[nodiscard]] virtual double branch_i(BranchId br) const = 0;
+
+    // §5.2: the run's gmin (junction-parallel conductance floor) so
+    // nonlinear devices can fold it into their linearization without
+    // reaching into RunSettings. Pattern mode returns the default.
+    [[nodiscard]] virtual double gmin() const = 0;
 
     // --- this device's slices (set by the system before every call) ------
     //
@@ -436,7 +486,10 @@ public:
 
 // The small-signal twin for .ac (§7.4): same shape, complex values.
 // `omega` is the angular frequency being stamped; the device
-// linearization is the one frozen at the OP.
+// linearization is the one frozen at the OP. §3.6 (M3): the device's
+// state slice IS exposed (read-only) so nonlinear devices can recover
+// their OP linearization point (a diode's Gd_op from Vd_prev) without
+// re-solving.
 class AcLoadContext {
 public:
     virtual ~AcLoadContext() = default;
@@ -445,10 +498,13 @@ public:
     virtual void add_rhs(std::size_t row, std::complex<double> v) = 0;
     [[nodiscard]] virtual std::size_t branch_row(BranchId br) const = 0;
 
-    // This device's parameter slice (state never enters an AC stamp - the
-    // linearization is frozen at the OP).
+    // This device's parameter slice + (M3) state slice: the OP
+    // linearization is frozen at the .ac solve, and nonlinear devices
+    // read their OP operating point (Vd, Vgs, ...) back through `st()`.
     const double* params_ = nullptr;
+    const double* state_ = nullptr;
     [[nodiscard]] double par(std::size_t i) const { return params_[i]; }
+    [[nodiscard]] double st(std::size_t i) const { return state_[i]; }
 
     double omega = 0.0;
 

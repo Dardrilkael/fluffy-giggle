@@ -87,6 +87,9 @@ namespace ws::spice {
     const DeviceCard& card, FactoryServices& s);
 [[nodiscard]] ws::core::Result<std::unique_ptr<Device>> make_iswitch(
     const DeviceCard& card, FactoryServices& s);
+// The M3 device factory (devices_m3.cpp).
+[[nodiscard]] ws::core::Result<std::unique_ptr<Device>> make_diode(
+    const DeviceCard& card, FactoryServices& s);
 
 // The builtin device factory table ('R','V','I','E','F','G','H' + M2's
 // 'C','L','K','S','W'), defined in devices.cpp. The elaborator copies it

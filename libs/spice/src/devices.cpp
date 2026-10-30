@@ -852,6 +852,7 @@ const std::map<char, DeviceFactory>& builtin_device_factories() {
         {'E', make_vcvs},      {'G', make_vccs},      {'F', make_cccs},
         {'H', make_ccvs},      {'C', make_capacitor}, {'L', make_inductor},
         {'K', make_coupling},  {'S', make_vswitch},   {'W', make_iswitch},
+        {'D', make_diode},
     };
     return table;
 }

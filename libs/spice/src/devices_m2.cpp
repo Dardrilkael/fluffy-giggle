@@ -764,8 +764,10 @@ public:
         return {p_, n_, cp_, cn_};
     }
     [[nodiscard]] bool update_state(const std::vector<double>& x,
-                                    std::size_t node_count, double* st) override {
+                                    std::size_t node_count, double* st,
+                                    const std::vector<double>* x_prev = nullptr) override {
         (void)node_count;
+        (void)x_prev;  // switches don't track the pre-solve iterate
         const double v = v_across(x, cp_, cn_);
         const bool on = st[0] != 0.0;
         const bool next = hysteresis_flip(on, v, vt_, vh_);
@@ -797,7 +799,9 @@ public:
     [[nodiscard]] char kind() const override { return 'W'; }
     void set_control_branch(BranchId br) override { control_ = br; }
     [[nodiscard]] bool update_state(const std::vector<double>& x,
-                                    std::size_t node_count, double* st) override {
+                                    std::size_t node_count, double* st,
+                                    const std::vector<double>* x_prev = nullptr) override {
+        (void)x_prev;
         const double i = x[node_count + control_];
         const bool on = st[0] != 0.0;
         const bool next = hysteresis_flip(on, i, it_, ih_);

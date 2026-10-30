@@ -48,6 +48,7 @@ std::map<char, DeviceShape> device_shapes() {
         {'W', {2, {2}}},  // W n+ n- Vname model (current-controlled switch)
         {'K', {0, {0, 1}}},  // K L1 L2 k (no nodes of its own)
         {'S', {4, {}}},  // S n+ n- nc+ nc- model (all four are nodes)
+        {'D', {2, {}}},  // D anode cathode model [area] (M3)
     };
     return table;
 }

@@ -115,10 +115,27 @@ ws::core::Status apply_options(const std::vector<OptionsCard>& options, RunSetti
                 }
                 out.solver = backend;
             } else if (lower == "gshunt") {
-                return spice_fail(opt_diag(
-                    ErrorKind::Parse, "spice.parse.unsupported_card",
-                    "'.options gshunt' lands with the convergence ladder (M3)",
-                    card.loc));
+                // §5.3 (M3): opt-in per-node conductance to ground.
+                // Default off (0.0) - masks §4.4's floating-node errors;
+                // a positive value shunts every node to ground in the
+                // Newton load (the convergence ladder's steady aid).
+                out.gshunt = v;
+            } else if (lower == "gminsteps") {
+                const int n = static_cast<int>(v);
+                if (n < 0) {
+                    return spice_fail(opt_diag(
+                        ErrorKind::Parse, "spice.parse.gminsteps",
+                        "'.options gminsteps=' must be non-negative", card.loc));
+                }
+                out.gmin_steps = n;
+            } else if (lower == "srcsteps") {
+                const int n = static_cast<int>(v);
+                if (n < 0) {
+                    return spice_fail(opt_diag(
+                        ErrorKind::Parse, "spice.parse.srcsteps",
+                        "'.options srcsteps=' must be non-negative", card.loc));
+                }
+                out.src_steps = n;
             }
         }
     }

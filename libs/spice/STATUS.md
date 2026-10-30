@@ -6,14 +6,15 @@ disagree, DESIGN.md wins and this file gets fixed.
 
 ## Where we are
 
-M0 + M1 + M2 complete, plus the 2026-10-29 post-review revision (four
-structural changes + six usage wins) — all committed on `main`, all
-gates green: **2239 assertions, 99 test cases, 0 failures** (Linux
-preset: GCC 14, `-Wall -Wextra -Wpedantic -Werror`). Windows parity
-restored the same day: the MSVC `/W4 /WX` build is clean again and the
-full smoke passes on Windows (97+6 cases → all green after `70e7e84` +
-`b265ae7`); the Linux-side parity checks live in `tools/audit_*.py` /
-`tools/build_*.py` (documented in `docs/SPICE_PLAN.md`).
+M0 + M1 + M2 + **M3 (the diode)** complete, plus the 2026-10-29
+post-review revision (four structural changes + six usage wins) — all
+committed on `main`, all gates green: **2306 assertions, 106 test cases,
+0 failures** (Linux preset: GCC 14, `-Wall -Wextra -Wpedantic -Werror`).
+Windows parity restored the same day: the MSVC `/W4 /WX` build is clean
+again and the full smoke passes on Windows (97+6 cases → all green after
+`70e7e84` + `b265ae7`); the Linux-side parity checks live in
+`tools/audit_*.py` / `tools/build_*.py` (documented in
+`docs/SPICE_PLAN.md`).
 
 ## Landed (commit order)
 
@@ -32,13 +33,32 @@ full smoke passes on Windows (97+6 cases → all green after `70e7e84` +
 | `ec349ec` | regression fix — .meas over .step families now measures each point (was measuring the last). |
 | `70e7e84` | MSVC /W4 /WX portability — `struct Circuit` forward decl (C4099) and six shadowing renames (C4456/C4458). |
 | `b265ae7` | .dc crash on MSVC debug — `run_dc` assigned through empty `std::optional`s (`WS_TRY_ASSIGN(*state, ...)`); silent on GCC, exit-3 abort on Windows. Fixed with emplace; caught via the ASan build helper. |
+| (M3, this commit) | §3.6 current-iterate threading (`DcLoadContext::node_v/branch_i/gmin`, `AcLoadContext::state_`), `NonlinResid` + the §5.1 nonlinear-residual convergence check, the diode (Shockley + pnjlim + 3 state slots + `.model D`), `solve_tran` upgraded to a real Newton loop, `gminsteps`/`srcsteps`/`gshunt` options, `Builder::diode()`/`diode_model()`. Gate: Lambert-W .op (1e-7 rel), .dc sweep, pnjlim stiff-bias convergence, rectifier .tran sanity, Jacobian vs central finite differences, builder .op equivalence. |
 
 ## Known sharp edges
 
-- **PTC rescues are untested with real nonlinear devices** — with the
-  linear+switch set, chattering circuits provably have no fixed point
-  (clean full-ladder failure, the ngspice verdict); real homotopy/PTC
-  rescue tests arrive with the M3 diode, exactly as §11 planned.
+- **PTC rescue cases now exercise the diode** — the §5.2 ladder's stage
+  4 (PTC) was promoted from the backlog in the 2026-10-29 revision but
+  had no nonlinear device to rescue; M3's diode + pnjlim is what makes
+  the ladder load-bearing. The stiff-bias test (diode at 100V) confirms
+  plain Newton + pnjlim converges without needing gmin/source/PTC; real
+  chattering/non-converging diode circuits (the kind that NEED stage 4)
+  arrive with M4's BJT/MOS where the operating point is genuinely
+  multi-stable.
+- **The diode's Vt is frozen at Tnom** (M3): `.options temp` does NOT
+  re-evaluate the diode's thermal voltage (temp-dependent models are
+  M5). The Lambert-W gate uses the default 27°C; `.dc temp` over a
+  diode circuit will give wrong currents at non-27°C points. M5 fixes
+  this by threading `temp` through the load context.
+- **The diode has no Cjo** (M3): junction capacitance (the
+  depletion+diffusion cap for .tran and .ac) lands with M4's compact
+  device cap model. A diode in .tran works (it's a nonlinear resistor
+  at each operating point); a diode in .ac is a pure conductance (no
+  j*omega*Cjo term).
+- **`update_state` uses `is_` (area=1) for the residual I** — a minor
+  approximation when `area≠1`; the voltage-delta check compensates, and
+  at convergence Vd stabilizes so I stabilizes regardless. The Lambert-W
+  gate uses area=1.
 - **AC expression save-lists reject loudly** (vm()/vp() derived forms
   are the §7.4 follow-up), and .ac tables carry re()/im() pairs.
 - **`.dc temp` / `.step temp` on a Simulator-created circuit** is a
@@ -47,8 +67,6 @@ full smoke passes on Windows (97+6 cases → all green after `70e7e84` +
 - **-Wmissing-field-initializers is off project-wide**: designated
   initializers with defaulted tails are the intended aggregate API
   spelling (`Tran{.tstop = 5_ms}`); GCC flags exactly that.
-- The M3 follow-up stands: nonlinear devices need the current iterate
-  threaded into `load()` (tracked in `docs/SPICE_PLAN.md`).
 - **Windows-only breaks stay possible**: GCC's flag set is not MSVC's
   (`-Wshadow` off, no /RTCu, no checked iterators). Run the five
   `tools/audit_*` / `tools/build_*` parity checks before handing a
@@ -57,6 +75,6 @@ full smoke passes on Windows (97+6 cases → all green after `70e7e84` +
 
 ## Next (per §11, unchanged)
 
-M3: diode + Newton limiting + ladder constants pinned against the ref
-harness (now including real PTC rescue cases). Then M4 (BJT/MOS/B/T-line
-+ AD), M5 (.noise/.nodeset), M0b (KLU backend decision), M6 hardening.
+M4: BJT (Gummel–Poon), MOS level 1, behavioral B with dual-number AD
+(§8.5), lossless T-line. Then M5 (.noise/.nodeset, temp-dependent
+diode model), M0b (KLU backend decision), M6 hardening.

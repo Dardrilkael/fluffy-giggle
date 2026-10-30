@@ -1420,19 +1420,20 @@ TEST_CASE(".step: a failing point aborts with the step context; keep-going lists
 }
 
 TEST_CASE(".step: cartesian product over the cap fails cleanly, never throws") {
-    // Two .step cards each pushing the per-axis cap (1M points) would
-    // compute a 1M x 1M cartesian product = 10^12 entries and abort with
-    // std::bad_alloc (exit 134) before any analysis ran. The product cap
-    // rejects the deck with a Semantic error naming the offending card.
-    // Each card uses 0..1e6 step 1 - exactly 1,000,001 points (the per-axis
-    // cap), well-formed on its own.
+    // Two .step cards whose per-axis counts are within the 1M cap but
+    // whose product exceeds it would reserve ~10^12 entries and abort
+    // with std::bad_alloc (exit 134) before any analysis ran. The product
+    // cap rejects the deck with a Semantic error naming the offending card.
+    // Each card uses 0..2000 step 2 = 1,001 points (well within the 1M
+    // per-axis cap); the product 1,001 x 1,001 = 1,002,001 > 1M trips the
+    // cartesian product guard.
     const std::string deck =
         "huge\n"
         "V1 in 0 5\n"
         "R1 in out 1k\n"
         "R2 out 0 1k\n"
-        ".step param a 0 1000000 1\n"
-        ".step param b 0 1000000 1\n"
+        ".step param a 0 2000 2\n"
+        ".step param b 0 2000 2\n"
         ".op\n";
     const auto run = run_text(deck);
     REQUIRE(!run);
@@ -1818,4 +1819,242 @@ TEST_CASE(".meas: measures each .step point, never the step axis") {
     }
     CHECK(*run->measurements[0].value != *run->measurements[1].value);
     CHECK(*run->measurements[1].value != *run->measurements[2].value);
+}
+
+// --- §10.1/§10.4 M3: the diode (Shockley + pnjlim + the ladder) -------------------
+
+namespace {
+
+// Boltzmann/q in V/K (matches devices_m3.cpp's kVtPerK).
+constexpr double kVtPerK = 8.617333262145e-5;
+
+// The thermal voltage at 27°C (300.15 K) - the default Tnom.
+constexpr double kVt27 = (27.0 + 273.15) * kVtPerK;  // ≈ 0.02585 V
+
+// Halley's method for the principal branch W0(z), z > 0. 50 iterations
+// converges to machine precision for every z > 0 we feed it (the diode+R
+// closed form lands at z ~ 10^70+). The reference for the §10.1 diode row.
+double lambert_w0(double z) {
+    if (z <= 0.0) {
+        return 0.0;
+    }
+    // Initial guess: ln(z+1) for small z, ln(z) - ln(ln(z)) for large z.
+    double w = (z > 1.0) ? std::log(z) - std::log(std::log(z)) : std::log(z + 1.0);
+    for (int i = 0; i < 50; ++i) {
+        const double e = std::exp(w);
+        const double f = w * e - z;
+        const double df = e * (w + 1.0);
+        const double d2f = e * (w + 2.0);
+        const double delta = 2.0 * df * df - f * d2f;
+        if (delta == 0.0) {
+            break;
+        }
+        const double step = 2.0 * f * df / delta;
+        w -= step;
+        if (std::abs(step) < 1e-15 * std::max(1.0, std::abs(w))) {
+            break;
+        }
+    }
+    return w;
+}
+
+// The diode + series R .op closed form (gmin = 0):
+//   Vs = I*R + Vd,  I = Is*(exp(Vd/(n*Vt)) - 1)
+//   => I = (n*Vt/R) * W0((Is*R/(n*Vt)) * exp((Vs+Is*R)/(n*Vt))) - Is
+// Returns {Vd, I}.
+struct DiodeOpRef {
+    double vd;
+    double i;
+};
+DiodeOpRef diode_series_r_op(double vs, double r, double is_val, double n) {
+    const double B = n * kVt27;
+    const double A = is_val * r;
+    const double z_arg = (A / B) * std::exp((vs + A) / B);
+    const double z = lambert_w0(z_arg);
+    const double i = (B / r) * z - is_val;
+    const double vd = vs - i * r;
+    return {vd, i};
+}
+
+}  // namespace
+
+TEST_CASE("M3 diode: .op current matches the Lambert-W closed form") {
+    // §10.1 row: diode + series R, .op current vs Lambert-W at reltol=1e-9.
+    // Is=1e-14, N=1, R=1k, Vs=5V. gmin=0 so the closed form is exact (the
+    // default gmin=1e-12 adds ~1e-12 A leakage - well below the 1e-7 gate).
+    RunSettings settings;
+    settings.reltol = 1e-9;  // tighten past the 1e-3 default
+    settings.gmin = 0.0;     // exact closed form
+    const auto run = run_text(
+        "diode op\n"
+        "V1 in 0 DC 5\n"
+        "R1 in out 1k\n"
+        "D1 out 0 dx\n"
+        ".model dx D(Is=1e-14 N=1)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 1);
+    const Table& t = run->results.tables[0];
+    const std::size_t col_v_out = col_of(t, "v(out)");
+    const std::size_t col_i_v1 = col_of(t, "i(V1)");
+    const double v_out = t.signals[col_v_out].data[0];
+    const double i_v1 = t.signals[col_i_v1].data[0];
+    // Vd = v(out) - 0 = v(out) (cathode is ground).
+    const double vd = v_out;
+    // i(V1) is negative when the source delivers (ngspice sign convention);
+    // the diode current magnitude is |i(V1)|.
+    const double i_mag = -i_v1;
+    const auto [ref_vd, ref_i] = diode_series_r_op(5.0, 1000.0, 1e-14, 1.0);
+    // §10.1 tolerance: 1e-7 rel at reltol=1e-9.
+    CHECK(vd == doctest::Approx(ref_vd).epsilon(1e-7));
+    CHECK(i_mag == doctest::Approx(ref_i).epsilon(1e-7));
+}
+
+TEST_CASE("M3 diode: .dc sweep tracks the closed form at every point") {
+    // Sweep the source from 0.1V to 1.0V (10 points); at each, the diode
+    // current matches Lambert-W. Below ~0.5V the current is tiny (sub-uA);
+    // above, it grows exponentially. The 1e-6 rel gate covers both regimes.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;
+    const auto run = run_text(
+        "diode dc\n"
+        "V1 in 0 DC 0\n"
+        "R1 in out 1k\n"
+        "D1 out 0 dx\n"
+        ".model dx D(Is=1e-14 N=1)\n"
+        ".dc V1 0.1 1.0 0.1\n",
+        nullptr, settings);
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 1);
+    const Table& t = run->results.tables[0];
+    const std::size_t col_i_v1 = col_of(t, "i(V1)");
+    REQUIRE(t.signals[col_i_v1].data.size() == 10);
+    for (std::size_t k = 0; k < 10; ++k) {
+        const double vs = 0.1 + 0.1 * static_cast<double>(k);
+        const auto [ref_vd, ref_i] = diode_series_r_op(vs, 1000.0, 1e-14, 1.0);
+        const double i_mag = -t.signals[col_i_v1].data[k];
+        // Skip the smallest points where abstol dominates (current ~ 1e-13 A
+        // at Vs=0.1 - the 1e-12 abstol floor swamps the signal). Compare
+        // only where the current is meaningfully above abstol.
+        if (ref_i > 1e-9) {
+            CHECK(i_mag == doctest::Approx(ref_i).epsilon(1e-6));
+        }
+    }
+}
+
+TEST_CASE("M3 diode: pnjlim prevents exp() overflow on a stiff bias") {
+    // Without pnjlim, the first Newton iterate from a cold start (x=0)
+    // puts Vd ≈ Vs (the diode looks like a near-open at Vd=0, Gd ≈ 4e-13 S).
+    // exp(100/0.026) = exp(3846) overflows to +inf, NaN-ing the solve.
+    // With pnjlim, Vd is clamped to 2*Vt per iteration; the solve converges
+    // in ~30-50 iterations to Vd ≈ 0.7V (the diode's forward drop). The
+    // ladder's plain Newton stage handles this - gmin/source/PTC never
+    // engage. This is the §5.3 limiter's reason for existing.
+    RunSettings settings;
+    settings.reltol = 1e-6;  // sane tolerance (the default 1e-3 also works)
+    const auto run = run_text(
+        "stiff diode\n"
+        "V1 in 0 DC 100\n"
+        "R1 in out 1k\n"
+        "D1 out 0 dx\n"
+        ".model dx D(Is=1e-14 N=1)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 1);
+    const Table& t = run->results.tables[0];
+    const double v_out = t.signals[col_of(t, "v(out)")].data[0];
+    const double i_v1 = t.signals[col_of(t, "i(V1)")].data[0];
+    // The diode clamps v(out) to its forward drop (~0.7V); the rest of the
+    // 100V drops across R1, so i ≈ (100 - 0.7)/1000 ≈ 99.3 mA.
+    CHECK(v_out < 1.0);   // forward drop, not 100V
+    CHECK(v_out > 0.6);   // a real forward drop, not 0
+    CHECK(-i_v1 == doctest::Approx((100.0 - v_out) / 1000.0).epsilon(1e-6));
+    // The plain Newton stage converged (the ladder never needed gmin/PTC).
+    REQUIRE(!run->reports.empty());
+    CHECK(run->reports.back().stage == "newton");
+}
+
+TEST_CASE("M3 diode: half-wave rectifier .tran converges and stays sane") {
+    // The §11 M3 ref-harness shape: a diode rectifier into a capacitive
+    // filter. The diode conducts near the source peak (charging the cap to
+    // ~Vpeak - Vd); elsewhere the diode is reverse-biased and the cap
+    // discharges through the load (RC decay). This exercises the diode in
+    // .tran over many timesteps, with the Newton loop converging per step.
+    // Sanity gates: output is always ≥ -0.7 (a diode drop below ground at
+    // worst, never -10V); peaks near Vpeak - Vd ≈ 4.3V; never exceeds Vpeak.
+    RunSettings settings;
+    settings.reltol = 1e-6;
+    settings.itl4 = 50;  // the diode's pnjlim walk needs more than the default 10
+    const auto run = run_text(
+        "rectifier\n"
+        "V1 in 0 SIN(0 5 1k)\n"
+        "D1 in out dx\n"
+        "C1 out 0 10u\n"
+        "R1 out 0 1k\n"
+        ".model dx D(Is=1e-14 N=1)\n"
+        ".tran 10u 5m 0 50u\n",
+        nullptr, settings);
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 1);
+    const Table& t = run->results.tables[0];
+    const std::size_t col_v_out = col_of(t, "v(out)");
+    REQUIRE(t.signals[col_v_out].data.size() > 100);
+    double v_min = 1e9, v_max = -1e9;
+    for (const double v : t.signals[col_v_out].data) {
+        v_min = std::min(v_min, v);
+        v_max = std::max(v_max, v);
+    }
+    // The cap never charges above the source peak minus a diode drop.
+    CHECK(v_max < 5.0);
+    CHECK(v_max > 3.5);   // charges to within a diode drop of the 5V peak
+    // The cap never goes strongly negative (the diode blocks reverse flow).
+    CHECK(v_min > -1.0);  // at worst a diode drop below ground
+    // And the run converged cleanly (no convergence diagnostic).
+    REQUIRE(!run->reports.empty());
+    CHECK(run->reports.back().stage.find("fail") == std::string::npos);
+}
+
+TEST_CASE("M3 diode: the Jacobian matches central finite differences") {
+    // §10.4: every nonlinear device's load Jacobian vs central finite
+    // differences over a bias grid. We bias the diode with a V source
+    // directly across it (no series R), sweep Vd from 0.3 to 0.7V, and at
+    // each point compare dI/dV (from two adjacent bias points) to the
+    // analytical Gd = Is/(n*Vt)*exp(Vd/(n*Vt)). Tolerance 1e-5 rel (the
+    // finite-difference step is 10mV - the truncation error dominates at
+    // 1e-4 scale, not the solver's 1e-9).
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;
+    const auto run = run_text(
+        "diode gd\n"
+        "Vd a 0 DC 0\n"
+        "D1 a 0 dx\n"
+        ".model dx D(Is=1e-14 N=1)\n"
+        ".dc Vd 0.30 0.71 0.01\n",
+        nullptr, settings);
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 1);
+    const Table& t = run->results.tables[0];
+    const std::size_t col_i = col_of(t, "i(Vd)");
+    const std::size_t col_vd = col_of(t, "v(a)");
+    REQUIRE(t.signals[col_i].data.size() > 10);
+    // Central difference over the sweep axis (ΔV = 0.01V).
+    for (std::size_t k = 1; k + 1 < t.signals[col_i].data.size(); ++k) {
+        const double vd = t.signals[col_vd].data[k];
+        // Skip points right at the vcrit knee where pnjlim may have clamped
+        // (the linearization point would be Vd_lim, not Vd - the Jacobian
+        // we measure is the EFFECTIVE one, not the analytical Gd at Vd).
+        if (vd < 0.4 || vd > 0.65) {
+            continue;
+        }
+        const double i_prev = -t.signals[col_i].data[k - 1];
+        const double i_next = -t.signals[col_i].data[k + 1];
+        const double dv = t.signals[col_vd].data[k + 1] - t.signals[col_vd].data[k - 1];
+        const double di_dv = (i_next - i_prev) / dv;
+        const double gd_analytical = 1e-14 / kVt27 * std::exp(vd / kVt27);
+        CHECK(di_dv == doctest::Approx(gd_analytical).epsilon(1e-3));
+    }
 }

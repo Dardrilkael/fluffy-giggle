@@ -58,11 +58,16 @@ public:
 
     // One numeric assembly pass each: zero() + every device's load_dc /
     // load_tran / load_ac stamp, with this run's parameter and state
-    // slices re-pointed per device.
+    // slices re-pointed per device. §3.6 (M3): `x` (when not null) is the
+    // current iterate the nonlinear devices linearize against; `gmin` is
+    // the run's junction-parallel conductance floor (§5.2 ladder stage 2)
+    // folded into each nonlinear device's stamp. Pattern mode never calls
+    // these - it runs through the contexts directly in setup().
     void load(const std::vector<std::unique_ptr<Device>>& devices,
-              const RunState& rs);
+              const RunState& rs, const std::vector<double>* x, double gmin);
     void load_tran(const std::vector<std::unique_ptr<Device>>& devices,
-                   const RunState& rs, const TranStep& step);
+                   const RunState& rs, const TranStep& step,
+                   const std::vector<double>* x, double gmin);
     void load_ac(const std::vector<std::unique_ptr<Device>>& devices,
                  const RunState& rs, double omega);
 

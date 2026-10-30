@@ -5,7 +5,7 @@ contract is `DESIGN.md` (this directory) - sections cited throughout the
 code as `§n.m`; when code and this file disagree, DESIGN.md wins and this
 file gets fixed.
 
-## What exists (M0-M2 + the 2026-10-29 structural revision)
+## What exists (M0-M3 + the 2026-10-29 structural revision)
 - `ws::math` sparse LU facade (lives in libs/math, grown for this arc):
   analyze once per topology, factorize per solve, real + complex,
   transpose solve for the future noise adjoint.
@@ -41,6 +41,19 @@ file gets fixed.
   in AnalysisReport; .step families (param/temp/source, list/dec/oct,
   first card outermost) merged into one family table with step axes;
   Monte-Carlo gauss()/flat() through the per-run Rand (seeded, recorded).
+- **M3 - the diode + the §3.6 current iterate:** `DcLoadContext` now
+  exposes `node_v()`/`branch_i()`/`gmin()` so nonlinear devices
+  linearize against the current iterate (the pattern recorder returns
+  0 - positions only, §3.2); `AcLoadContext` gained `state_` so the
+  diode's `load_ac` reads its frozen OP `Vd_prev`. `Device` gained
+  `NonlinResid nonlinear_residual(st)` and `update_state` gained an
+  `x_prev` param (the pre-solve iterate, for pnjlim reference slots).
+  The kernel's Newton loop now checks BOTH the voltage-delta AND the
+  per-device nonlinear residual (§5.1's two-gate convergence). The
+  diode: Shockley `I = Is*(exp(Vd/(n*Vt))-1) + gmin*Vd`, hand-
+  differentiated, pnjlim (SPICE3 devlim, §5.3) clamps the per-iteration
+  junction-voltage jump past vcrit. `solve_tran` is now a real Newton
+  loop (was switch-only when every device was linear).
 - measure:: library (rise_time, rms, trig_targ, ...) + .meas as a thin
   parser (TRIG/TARG WHEN AVG RMS MAX MIN PP INTEG FIND...WHEN/AT
   DERIV); failures are notes (--strict-meas promotes).
@@ -50,8 +63,8 @@ file gets fixed.
   traps + topology + unused models, nothing simulates); CLI: -o -,
   --format raw, --keep-going, --strict-meas, --werror.
 
-Everything else rejects at parse with file:line (working-rule 5): B/D/Q/M/T
-(M3+), `.lib` (backlog), `.noise/.nodeset` (M5), `solver=klu` (M0b).
+Everything else rejects at parse with file:line (working-rule 5): B/Q/M/T
+(M4), `.lib` (backlog), `.noise/.nodeset` (M5), `solver=klu` (M0b).
 
 ## Layout
 - Public surface (`include/ws/spice/`): parse.hpp, deck.hpp (cards +
@@ -65,14 +78,15 @@ Everything else rejects at parse with file:line (working-rule 5): B/D/Q/M/T
   lib paths (§0.6); no ws::math type ever appears here (§2.2).
 - `src/`: parse.cpp, deck.cpp (cards/params), expr.cpp (VM + signal/@
   refs), elaborate.cpp (flatten, node table, graph checks, subckt-local
-  value inlining), devices.cpp / devices_m2.cpp (the 12 kinds, param
-  specs + state slots + write_card), mna.cpp (pattern + numeric
-  contexts over (Circuit, RunState)), kernel.hpp (shared DcKernel +
-  the ladder), analysis.cpp (drivers + .step family + save-expression
-  evaluator + compat=strict), transient.cpp (TranMarch/TransientRun),
-  simulator.cpp, builder.cpp, state.cpp, circuit.cpp (finalize +
-  .options), measure.cpp, raw.cpp, netlist.cpp, lint.cpp, output.cpp.
-  cards.hpp/drivers.hpp are src-only.
+  value inlining), devices.cpp / devices_m2.cpp / devices_m3.cpp (the 13
+  kinds R/V/I/E/F/G/H/C/L/K/S/W/D, param specs + state slots +
+  write_card), mna.cpp (pattern + numeric contexts over (Circuit,
+  RunState, x, gmin)), kernel.hpp (shared DcKernel + the ladder +
+  NonlinResid convergence), analysis.cpp (drivers + .step family +
+  save-expression evaluator + compat=strict), transient.cpp
+  (TranMarch/TransientRun), simulator.cpp, builder.cpp, state.cpp,
+  circuit.cpp (finalize + .options), measure.cpp, raw.cpp, netlist.cpp,
+  lint.cpp, output.cpp. cards.hpp/drivers.hpp are src-only.
 - `apps/spice`: argv, file I/O, exit codes - run + check subcommands.
 ## Rules that keep biting
 - **ws::math is PRIVATE** (§2.2): no ws::math type or header under
@@ -126,10 +140,55 @@ Everything else rejects at parse with file:line (working-rule 5): B/D/Q/M/T
   the same AST, so identical elaboration warnings are deduplicated after
   every analysis; a genuinely new warning (different location, message,
   or analysis context) still lands.
-- **M3 follow-up - current iterate into `load()`**: M1 devices are linear
-  so `MnaSystem::load(devices)` is exact, but nonlinear devices will need
-  the CURRENT iterate threaded into the stamp (§3.6). Tracked in
-  `docs/SPICE_PLAN.md`; do not forget when diode/BJT/MOS land.
+- **M3 landed - the §3.6 current iterate is threaded**: `MnaSystem::load`
+  and `load_tran` take `(devices, rs, x, gmin)` where `x` is the current
+  iterate (nullptr in pattern mode / measure-only loads). Nonlinear
+  devices read `cx.node_v(n)` / `cx.branch_i(br)` to linearize against
+  it. The kernel passes `&x` (the pre-solve iterate) and `settings_.gmin`
+  every Newton iteration; the initial "measure max_diagonal" load passes
+  nullptr (the diode at Vd=0 produces finite Gd = Is/(n*Vt) + gmin).
+  `update_state` takes an `x_prev` param (the pre-solve iterate) so
+  nonlinear devices can advance their pnjlim/reference slots - the
+  diode stores `Vd_lim = pnjlim(Vd(x_prev), vold, ...)` as `vold` for
+  the next iteration (NOT the raw Vd - that's the bug that stuck the
+  diode at Vd=100V from the first iterate; see STATUS.md).
+- **§5.1 two-gate convergence** (M3): the Newton loop accepts only when
+  BOTH (a) every unknown's `|Δx| ≤ reltol*max(|x_new|,|x_old|) + tol_abs`
+  AND (b) every device's `nonlinear_residual().delta ≤
+  reltol*ref + abstol`. Linear devices return `{0,0}` and never gate.
+  The diode returns `{|I_cur - I_prev|, max(|I_cur|,|I_prev|)}` tracked
+  through update_state. Both gates must pass - a stable Vd with a still-
+  changing I (exponential regime) keeps iterating.
+- **pnjlim** (§5.3, M3): SPICE3's `pnjlim` simplified (the `icheck`
+  first-time flag folded into the always-directional form - the
+  difference only matters on the first clamp of a sequence, where vold
+  is typically 0 so both forms step up by 2*Vt). Clamps `|ΔVd|` to `2*Vt`
+  when `vnew > vcrit` (≈ 0.7V for defaults). vcrit = `N*Vt*ln(N*Vt/(√2*Is))`
+  (SPICE3 formula). The clamp is essential: without it, the first Newton
+  iterate from a cold start puts Vd ≈ Vs (the diode looks like a near-
+  open at Vd=0), and `exp(Vs/Vt)` overflows for Vs > ~1V.
+- **Diode state** (3 slots, M3): `[0] Vd_prev` (the clamped Vd from the
+  last iteration, for pnjlim's vold), `[1] I_cur`, `[2] I_prev` (for
+  nonlinear_residual). All zeroed at bind. `update_state` stores the
+  CLAMPED `Vd_lim` as `Vd_prev` (not the raw iterate), recomputing
+  `pnjlim(Vd(x_prev), vold, ...)` identically to `load_dc` - both use
+  the same vold, so they agree. The diode is NOT dynamic (`is_dynamic()`
+  false) - no companion, no Cjo in M3; `load_tran` defaults to `load_dc`.
+- **Diode temp** (M3 limitation): `Vt` is frozen at `Tnom` (default 27°C)
+  at `apply_model` time. `.options temp` does NOT re-revaluate the
+  diode's thermal voltage (temp-dependent models are M5). The Lambert-W
+  gate uses the default 27°C; `.dc temp` over a diode gives wrong
+  currents at non-27°C points. M5 threads `temp` through the load context.
+- **Diode model params** (M3): `.model name D(Is=... N=... Tnom=...)`
+  implemented. Rs, Cjo, M, Vj, Bv, Ibv, Xti, Eg, Kf, Af, Fc are ACCEPTED
+  (so ngspice decks parse cleanly) but NOT implemented - they land with
+  M4 (Cjo/M/Vj junction cap) or M5 (Tnom/Xti/Eg temp, Bv/Ibv breakdown,
+  Kf/Af noise). Unknown keys reject at parse naming the allow-list.
+- **`.options gshunt`/`gminsteps`/`srcsteps`** (M3): `gshunt` (default 0,
+  off) is the opt-in per-node conductance to ground (§5.3) - masks §4.4's
+  floating-node errors, so off by default; a positive value shunts every
+  node diagonal in every Newton load. `gminsteps`/`srcsteps` (default 10,
+  ngspice) control the §5.2 ladder's stage 2/3 staircase counts.
 - **Diagnostics** (§9.2): `file:line:col: error: msg` / `error: [analysis]
   msg`, optional `hint:` line, warnings render with `warning:` and never
   fail a run. Exit codes: 0 ok, 1 deck/sim error, 2 usage/IO (§9.5).

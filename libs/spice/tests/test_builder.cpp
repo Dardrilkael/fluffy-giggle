@@ -29,6 +29,7 @@ using ws::spice::Analysis;
 using ws::spice::CircuitBuilder;
 using ws::spice::DcAnalysis;
 using ws::spice::OpAnalysis;
+using ws::spice::RunSettings;
 using ws::spice::Simulator;
 using ws::spice::Table;
 using ws::spice::TranAnalysis;
@@ -548,4 +549,56 @@ TEST_CASE("transient: progress callback observes every accepted step") {
         CHECK(seen[i] > seen[i - 1]);
     }
     CHECK(seen.back() == approx(500e-6));
+}
+
+// --- M3: the diode via the C++ builder front end ----------------------------------
+
+TEST_CASE("M3 diode: builder .op matches the Lambert-W closed form") {
+    // The builder front end (CircuitBuilder + Simulator) produces the same
+    // diode .op as the card front end (test_run.cpp's Lambert-W row). This
+    // is the §2.1 rev equivalence guarantee: two front ends, one elaborator.
+    CircuitBuilder c;
+    auto in = c.node("in"), out = c.node("out");
+    (void)c.resistor("R1", in, out, 1_k);
+    c.diode("D1", out, gnd, "dx");
+    c.diode_model("dx", {.is_val = 1e-14, .n = 1.0, .tnom = 27.0});
+    (void)c.vsource("V1", in, gnd, 5.0);
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;
+    auto circuit = c.finish();
+    REQUIRE(circuit);
+    auto sim = Simulator::create(std::move(*circuit), settings);
+    REQUIRE(sim);
+
+    auto op = sim->run(OpAnalysis{});
+    REQUIRE(op);
+    // v(out) is the diode's Vd (cathode at ground); i(V1) is negative when
+    // delivering. The closed form is the same Lambert-W as the card test.
+    const double vd = op->signal("v(out)")[0];
+    const double i_mag = -op->signal("i(V1)")[0];
+    // Lambert-W reference (mirrors test_run.cpp's diode_series_r_op). Use
+    // the precise Vt = (Tnom+273.15) * k/q, matching devices_m3.cpp.
+    constexpr double kVtPerK = 8.617333262145e-5;
+    const double vt = (27.0 + 273.15) * kVtPerK;
+    const double B = 1.0 * vt;       // n * Vt at 27°C
+    const double A = 1e-14 * 1000.0; // Is * R
+    const double z_arg = (A / B) * std::exp((5.0 + A) / B);
+    // Halley's method for W0 (sufficient for this z ~ 10^70).
+    double w = std::log(z_arg) - std::log(std::log(z_arg));
+    for (int i = 0; i < 50; ++i) {
+        const double e = std::exp(w);
+        const double f = w * e - z_arg;
+        const double df = e * (w + 1.0);
+        const double d2f = e * (w + 2.0);
+        const double delta = 2.0 * df * df - f * d2f;
+        if (delta == 0.0) break;
+        const double step = 2.0 * f * df / delta;
+        w -= step;
+        if (std::abs(step) < 1e-15 * std::max(1.0, std::abs(w))) break;
+    }
+    const double ref_i = (B / 1000.0) * w - 1e-14;
+    const double ref_vd = 5.0 - ref_i * 1000.0;
+    CHECK(vd == doctest::Approx(ref_vd).epsilon(1e-7));
+    CHECK(i_mag == doctest::Approx(ref_i).epsilon(1e-7));
 }

@@ -10,7 +10,10 @@ namespace ws::spice {
 namespace detail {
 
 // The pattern recorder (§3.2): records (row, col), ignores values; ground
-// entries never reach the builder (ground row/col dropped, §4.1).
+// entries never reach the builder (ground row/col dropped, §4.1). §3.6
+// (M3): node_v/branch_i/gmin return 0/default - a linearization around
+// zero produces the right stamp POSITIONS (only coefficients depend on
+// the iterate), which is all the dry run records.
 class PatternContext final : public DcLoadContext {
 public:
     PatternContext(ws::math::SparsePatternBuilder& builder, std::size_t node_count)
@@ -27,6 +30,9 @@ public:
         return node_count_ + br;
     }
     [[nodiscard]] bool pattern_mode() const override { return true; }
+    [[nodiscard]] double node_v(NodeId) const override { return 0.0; }
+    [[nodiscard]] double branch_i(BranchId) const override { return 0.0; }
+    [[nodiscard]] double gmin() const override { return 1e-12; }
 
 private:
     ws::math::SparsePatternBuilder& builder_;
@@ -35,12 +41,14 @@ private:
 
 // The numeric context: entries accumulate into the values array, rhs into
 // the vector. A numeric write outside the recorded pattern is a
-// programmer error (§3.2) - SparseMatrix::add asserts it.
+// programmer error (§3.2) - SparseMatrix::add asserts it. §3.6 (M3): the
+// current iterate is exposed to nonlinear devices through node_v/branch_i;
+// gmin is the run's junction-parallel conductance floor.
 class NumericContext final : public DcLoadContext {
 public:
     NumericContext(ws::math::SparseMatrix<double>& matrix, std::vector<double>& rhs,
-                   std::size_t node_count)
-        : matrix_(matrix), rhs_(rhs), node_count_(node_count) {}
+                   std::size_t node_count, const std::vector<double>* x, double gmin)
+        : matrix_(matrix), rhs_(rhs), node_count_(node_count), x_(x), gmin_(gmin) {}
 
     void add_entry(std::size_t row, std::size_t col, double v) override {
         if (row == kGround || col == kGround) {
@@ -58,11 +66,26 @@ public:
         return node_count_ + br;
     }
     [[nodiscard]] bool pattern_mode() const override { return false; }
+    [[nodiscard]] double node_v(NodeId n) const override {
+        if (n == kGround || x_ == nullptr) {
+            return 0.0;
+        }
+        return (*x_)[n];
+    }
+    [[nodiscard]] double branch_i(BranchId br) const override {
+        if (x_ == nullptr) {
+            return 0.0;
+        }
+        return (*x_)[node_count_ + br];
+    }
+    [[nodiscard]] double gmin() const override { return gmin_; }
 
 private:
     ws::math::SparseMatrix<double>& matrix_;
     std::vector<double>& rhs_;
     std::size_t node_count_;
+    const std::vector<double>* x_;
+    double gmin_;
 };
 
 // The AC pattern twin: same coordinates, complex values ignored.
@@ -161,6 +184,11 @@ ws::core::Status MnaSystem::setup(const std::vector<std::unique_ptr<Device>>& de
         detail::AcPatternContext ac_ctx(builder_, node_count_);
         for (std::size_t i = 0; i < devices.size(); ++i) {
             ac_ctx.params_ = scratch_params_.data();
+            // §3.6 (M3): nonlinear devices' load_ac reads state (a diode's
+            // Gd_op from Vd_prev); in pattern mode the scratch slice is
+            // zeroed, which produces a finite small Gd - the right
+            // POSITIONS, which is all the dry run records.
+            ac_ctx.state_ = scratch_state_.data();
             devices[i]->load_ac(ac_ctx);
         }
         // §5.2: every node diagonal joins the pattern (a legal structural
@@ -187,10 +215,11 @@ ws::core::Status MnaSystem::setup_ac() {
 }
 
 void MnaSystem::load(const std::vector<std::unique_ptr<Device>>& devices,
-                      const RunState& rs) {
+                      const RunState& rs, const std::vector<double>* x,
+                      double gmin) {
     zero();
     if (matrix_) {
-        detail::NumericContext ctx(*matrix_, rhs_, node_count_);
+        detail::NumericContext ctx(*matrix_, rhs_, node_count_, x, gmin);
         for (std::size_t i = 0; i < devices.size(); ++i) {
             ctx.params_ = rs.params_.data() + circuit_.param_span[i].begin;
             ctx.state_ = rs.state_.data() + circuit_.state_span[i].begin;
@@ -200,10 +229,11 @@ void MnaSystem::load(const std::vector<std::unique_ptr<Device>>& devices,
 }
 
 void MnaSystem::load_tran(const std::vector<std::unique_ptr<Device>>& devices,
-                          const RunState& rs, const TranStep& step) {
+                          const RunState& rs, const TranStep& step,
+                          const std::vector<double>* x, double gmin) {
     zero();
     if (matrix_) {
-        detail::NumericContext ctx(*matrix_, rhs_, node_count_);
+        detail::NumericContext ctx(*matrix_, rhs_, node_count_, x, gmin);
         for (std::size_t i = 0; i < devices.size(); ++i) {
             ctx.params_ = rs.params_.data() + circuit_.param_span[i].begin;
             ctx.state_ = rs.state_.data() + circuit_.state_span[i].begin;
@@ -220,6 +250,9 @@ void MnaSystem::load_ac(const std::vector<std::unique_ptr<Device>>& devices,
         ctx.omega = omega;
         for (std::size_t i = 0; i < devices.size(); ++i) {
             ctx.params_ = rs.params_.data() + circuit_.param_span[i].begin;
+            // §3.6 (M3): nonlinear devices read their OP linearization
+            // point back through state (a diode's Gd_op from Vd_prev).
+            ctx.state_ = rs.state_.data() + circuit_.state_span[i].begin;
             devices[i]->load_ac(ctx);
         }
     }

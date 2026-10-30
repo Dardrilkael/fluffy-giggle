@@ -196,7 +196,10 @@ public:
         const std::size_t nc = circuit_.node_count();
         double gforce = 0.0;
         if (forces != nullptr && !forces->empty()) {
-            mna_.load(circuit_.devices, state_);
+            // Measure-only load: nullptr for x means nonlinear devices
+            // linearize around zero - fine for sizing gforce, and the
+            // diode's Gd at Vd=0 is finite (Is/(n*Vt) + gmin).
+            mna_.load(circuit_.devices, state_, nullptr, settings_.gmin);
             gforce = 1e9 * std::max(mna_.max_diagonal(), 1e-9);
         }
         if (x.size() != mna_.dim()) {
@@ -204,7 +207,20 @@ public:
         }
         for (int it = 1; it <= max_iterations; ++it) {
             ++iterations;
-            mna_.load(circuit_.devices, state_);
+            // §3.6: thread the current iterate `x` so nonlinear devices
+            // (the diode) linearize against it. `x` here is x[k-1] - the
+            // previous iterate / warm start.
+            mna_.load(circuit_.devices, state_, &x, settings_.gmin);
+            // §5.3 (M3): opt-in gshunt - a per-node conductance to ground
+            // that masks floating-node stiffness. Default 0 (off); a
+            // positive value shunts every node diagonal in every Newton
+            // load (the §5.2 ladder's steady aid, always-on when the
+            // deck asks for it).
+            if (settings_.gshunt > 0.0) {
+                for (std::size_t n = 0; n < nc; ++n) {
+                    mna_.force_node(n, 0.0, settings_.gshunt);
+                }
+            }
             if (forces != nullptr) {
                 for (const auto& [node, volts] : *forces) {
                     mna_.force_node(node, volts, gforce);
@@ -230,12 +246,30 @@ public:
             }
             bool state_changed = false;
             for (std::size_t i = 0; i < circuit_.devices.size(); ++i) {
+                // §3.6: pass &x as x_prev so nonlinear devices can advance
+                // their pnjlim/reference slots (x is still the pre-solve
+                // iterate here - it's moved into x_new BELOW).
                 state_changed = circuit_.devices[i]->update_state(
                                     x_new, nc, state_.state_.data() +
-                                                   circuit_.state_span[i].begin) ||
+                                                   circuit_.state_span[i].begin,
+                                    &x) ||
                                 state_changed;
             }
             bool converged = !state_changed;
+            // §5.1 (M3): the nonlinear-residual check complements the
+            // voltage-delta check. Both must pass. Linear devices return
+            // {0,0} and never gate convergence.
+            if (converged) {
+                for (std::size_t i = 0; i < circuit_.devices.size(); ++i) {
+                    const NonlinResid r = circuit_.devices[i]->nonlinear_residual(
+                        state_.state_.data() + circuit_.state_span[i].begin);
+                    const double tol = settings_.reltol * r.ref + settings_.abstol;
+                    if (r.delta > tol) {
+                        converged = false;
+                        break;
+                    }
+                }
+            }
             if (converged) {
                 for (std::size_t i = 0; i < x_new.size(); ++i) {
                     const double tol = settings_.reltol *
@@ -302,7 +336,10 @@ public:
     bool ptc_pass(std::vector<double>& x, int max_iterations,
                   const std::string& context, std::size_t& iterations,
                   const std::vector<std::pair<std::size_t, double>>* forces) {
-        mna_.load(circuit_.devices, state_);
+        // Measure-only load for the initial pseudo-capacitor sizing;
+        // nullptr for x linearizes nonlinear devices around zero (fine
+        // for max_diagonal, which only sizes the pseudo-C).
+        mna_.load(circuit_.devices, state_, nullptr, settings_.gmin);
         double c = 1e3 * std::max(mna_.max_diagonal(), 1e-9);
         if (x.size() != mna_.dim()) {
             x.assign(mna_.dim(), 0.0);
@@ -321,15 +358,21 @@ public:
     }
 
     // One transient step: companion load (coefficients from the devices'
-    // begin_step over their state slices) -> solve -> switch re-evaluation,
-    // iterating while a switch flips. Every M2 device is linear, so one
-    // solve is exact; the loop exists for the switches only.
+    // begin_step over their state slices) -> Newton loop -> switch
+    // re-evaluation. M3 (diode): this is now a real Newton loop (was
+    // switch-only when every device was linear) - the same §5.1
+    // voltage-delta + nonlinear-residual convergence gate as `newton_pass`,
+    // just over `load_tran` and capped at itl4. Switch state changes still
+    // force another solve (a switch flipping changes the circuit).
     ws::core::Status solve_tran(std::vector<double>& x, const TranStep& step,
                                 const std::string& context, std::size_t& iterations) {
         const std::size_t nc = circuit_.node_count();
         for (int it = 1; it <= settings_.itl4; ++it) {
             ++iterations;
-            mna_.load_tran(circuit_.devices, state_, step);
+            // §3.6: thread the current iterate so the diode linearizes
+            // against it (the tran companion from C/L is already in `x`
+            // via begin_step's state slots).
+            mna_.load_tran(circuit_.devices, state_, step, &x, settings_.gmin);
             std::vector<double> x_new;
             WS_TRY(mna_.solve(x_new));
             for (const double v : x_new) {
@@ -345,18 +388,48 @@ public:
             for (std::size_t i = 0; i < circuit_.devices.size(); ++i) {
                 state_changed = circuit_.devices[i]->update_state(
                                     x_new, nc, state_.state_.data() +
-                                                   circuit_.state_span[i].begin) ||
+                                                   circuit_.state_span[i].begin,
+                                    &x) ||
                                 state_changed;
             }
-            x = std::move(x_new);
+            // §5.1 (M3): both the switch-state gate (a flip demands
+            // another solve regardless of convergence) and the
+            // voltage/residual gate. A switch flip forces another iteration;
+            // otherwise the standard Newton convergence check decides.
             if (!state_changed) {
-                return {};
+                bool converged = true;
+                for (std::size_t i = 0; i < circuit_.devices.size(); ++i) {
+                    const NonlinResid r = circuit_.devices[i]->nonlinear_residual(
+                        state_.state_.data() + circuit_.state_span[i].begin);
+                    const double tol = settings_.reltol * r.ref + settings_.abstol;
+                    if (r.delta > tol) {
+                        converged = false;
+                        break;
+                    }
+                }
+                if (converged) {
+                    for (std::size_t i = 0; i < x_new.size(); ++i) {
+                        const double tol = settings_.reltol *
+                                               std::max(std::abs(x_new[i]), std::abs(x[i])) +
+                                           (i < nc ? settings_.vntol : settings_.abstol);
+                        if (std::abs(x_new[i] - x[i]) > tol) {
+                            converged = false;
+                            break;
+                        }
+                    }
+                }
+                x = std::move(x_new);
+                if (converged) {
+                    return {};
+                }
+            } else {
+                x = std::move(x_new);
             }
         }
         Diagnostic d = run_diag(
-            ErrorKind::Convergence, "spice.convergence.switch",
-            "switch state did not settle after " + std::to_string(settings_.itl4) +
-                " solves (chattering control?)");
+            ErrorKind::Convergence, "spice.convergence.tran",
+            "transient step did not converge after " + std::to_string(settings_.itl4) +
+                " Newton iterations (switch chatter or nonlinear stiffness?)");
         d.analysis = context;
         return spice_fail(std::move(d));
     }
