@@ -117,11 +117,14 @@ FetchContent_Declare(implot
   GIT_SHALLOW TRUE
   SOURCE_SUBDIR _ws_no_cmake)
 # stb has no release tags - pinned to a master commit. stb_image.h is
-# v2.30 (2024-05-31) at this hash.
+# v2.30 (2024-05-31) at this hash. GIT_SHALLOW is OFF: GitHub blocks
+# shallow-fetching arbitrary commit SHAs (it only allows shallow fetch of
+# tags and branches), so GIT_SHALLOW TRUE + a raw hash fails at checkout
+# with "unable to read tree". The stb repo is small (~20 MB), so a full
+# clone is cheap and always works.
 FetchContent_Declare(stb
   GIT_REPOSITORY https://github.com/nothings/stb.git
   GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20
-  GIT_SHALLOW TRUE
   SOURCE_SUBDIR _ws_no_cmake)
 foreach(dep vulkan_headers volk vma imgui implot stb)
   FetchContent_MakeAvailable(${dep})
