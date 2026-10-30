@@ -55,10 +55,14 @@ if(ws_wants_doctest)
   add_library(doctest::doctest ALIAS doctest)
   target_include_directories(doctest SYSTEM INTERFACE "${doctest_SOURCE_DIR}")
   # Pull in doctest_discover_tests() so ws_add_test can register each
-  # individual case as its own ctest entry (ctest -j parallelism + named
-  # failures, instead of one ctest entry per test_<lib> binary).
-  list(APPEND CMAKE_MODULE_PATH "${doctest_SOURCE_DIR}/scripts/cmake")
-  include(doctest)
+  # individual case as its own ctest entry. Best-effort: if the repo
+  # structure ever moves the cmake helper, the suite-level ctest entry
+  # (added unconditionally by ws_add_test) still covers the run - we just
+  # lose the per-case fan-out.
+  if(EXISTS "${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake")
+    list(APPEND CMAKE_MODULE_PATH "${doctest_SOURCE_DIR}/scripts/cmake")
+    include(doctest)
+  endif()
 endif()
 
 # GLFW is the DESKTOP windowing platform. Android renders to the OS-owned

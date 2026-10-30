@@ -222,9 +222,14 @@ function(ws_add_test lib)
   # Suite-level entry: always present, runs every case in one process.
   add_test(NAME ${lib} COMMAND test_${lib})
   # Per-case discovery (ctest -j parallelism + named failures). Best-effort:
-  # if doctest_discover_tests is unavailable (older CMake) the suite entry
-  # above still covers the run.
+  # if doctest_discover_tests is unavailable (older CMake, or the doctest
+  # cmake helper wasn't found) the suite entry above still covers the run.
+  # DISCOVERY_MODE PRE_TEST defers the discovery to ctest time (the test
+  # binary runs its --list-test-cases right before the cases execute) instead
+  # of POST_BUILD (which runs the binary at BUILD time and can fail when
+  # third-party DLLs aren't on PATH yet - a build-breaking failure that has
+  # nothing to do with the test itself).
   if(COMMAND doctest_discover_tests)
-    doctest_discover_tests(test_${lib} TEST_PREFIX "${lib}." TEST_LIST FILE_LIST)
+    doctest_discover_tests(test_${lib} TEST_PREFIX "${lib}." DISCOVERY_MODE PRE_TEST)
   endif()
 endfunction()

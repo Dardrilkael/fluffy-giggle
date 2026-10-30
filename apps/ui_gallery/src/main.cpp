@@ -1124,6 +1124,9 @@ private:
                                         // rebuild_font_if_changed skips the
                                         // disk+CPU+GPU re-bake when the integer
                                         // pixel height hasn't moved (slider drag)
+    bool font_size_dirty_ = false;      // a size slider moved; the font atlas
+                                        // re-bake is deferred to the frame the
+                                        // slider stopped changing (drag end)
     bool stack_faces_ = false;          // the growing-font demo's stack state
     std::uint32_t lazy_baked_ = 0;      // glyphs landed through font_bake_pending
 
@@ -1560,26 +1563,43 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
         // The size knobs. A size change IS a new font - the whole bake
         // again, the stack re-added, the lazy glyphs re-requested on
         // first use - and the scale slider multiplies every metric and
-        // the bake size with it. Both feed the same rebuild pair.
-        // rebuild_font_if_changed (not rebuild_font) because slider_float
-        // fires 'changed' every frame during a drag: an unconditional
-        // rebuild would re-read the TTF and re-bake the atlas every frame
-        // and freeze the UI. The debounced helper skips rebuilds whose
-        // integer pixel height matches the last bake.
+        // the bake size with it.
+        //
+        // PERF: slider_float fires 'changed' every frame during a drag.
+        // rebuild_font() re-reads the TTF from disk, re-rasterizes all 95
+        // baked glyphs and re-uploads the atlas - ~50-200 ms per call on
+        // a slow box. Calling it every changed frame freezes the UI.
+        // Instead we DEFER the rebuild: sync_chrome() (cheap - just the
+        // scaled metrics + the font pointer, no disk/CPU/GPU work) runs
+        // every frame so the layout tracks the slider live, and the
+        // expensive font atlas re-bake runs only on the frame the slider
+        // STOPPED changing (the drag ended). A full drag is then ONE
+        // rebuild, not dozens.
+        bool size_changed_this_frame = false;
         if (gui::slider_float(gui_, layout_, chrome_, "font px", font_px_,
                               10.0f, 28.0f, half)) {
             theme_.regular.size = font_px_;
-            rebuild_font_if_changed();
             sync_chrome();
+            size_changed_this_frame = true;
+            font_size_dirty_ = true;
             std::snprintf(status_, sizeof status_, "font re-baked at %.0f px",
                           font_px_);
         }
         layout_.same_line();
         if (gui::slider_float(gui_, layout_, chrome_, "scale x", scale_,
                               0.75f, 2.0f, half)) {
+            sync_chrome();
+            size_changed_this_frame = true;
+            font_size_dirty_ = true;
+            std::snprintf(status_, sizeof status_, "ui scale: %.2f", scale_);
+        }
+        // The sliders did NOT change this frame but the font is dirty:
+        // the drag just ended (or the user clicked once and released).
+        // Rebuild the atlas now - one re-bake per drag, not per frame.
+        if (font_size_dirty_ && !size_changed_this_frame) {
             rebuild_font_if_changed();
             sync_chrome();
-            std::snprintf(status_, sizeof status_, "ui scale: %.2f", scale_);
+            font_size_dirty_ = false;
         }
 
         // The growing font, live. The line below draws tofu for
