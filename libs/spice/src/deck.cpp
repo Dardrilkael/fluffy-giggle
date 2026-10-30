@@ -19,10 +19,10 @@ Diagnostic card_diag(ErrorKind kind, std::string code, std::string message, Sour
 }
 
 // Milestone by device letter (§11): the not-yet story per kind.
-// D landed in M3; B/Q/M/T remain M4+.
+// D landed in M3; Q landed in M4a; B/M/T remain M4+.
 const std::map<char, const char*>& device_milestones() {
     static const std::map<char, const char*> table = {
-        {'B', "M4"}, {'Q', "M4"}, {'M', "M4"}, {'T', "M4"},
+        {'B', "M4"}, {'M', "M4"}, {'T', "M4"},
     };
     return table;
 }
@@ -661,12 +661,13 @@ ws::core::Result<ParsedCard> parse_card(const Record& rec, bool inside_subckt,
                 type = type.substr(0, paren);
             }
             const std::string type_lower = to_lower(type);
-            if (type_lower != "r" && type_lower != "sw" && type_lower != "d") {
+            if (type_lower != "r" && type_lower != "sw" && type_lower != "d" &&
+                type_lower != "npn" && type_lower != "pnp") {
                 return spice_fail(card_diag(
                     ErrorKind::Parse, "spice.parse.model_type",
                     "model type '" + type +
                         "' is not supported in v1 (resistor models M5, switch models M2,"
-                        " diode M3; BJT/MOS M4)",
+                        " diode M3, BJT M4; MOS M4)",
                     rec.loc));
             }
             std::vector<Token> params;
@@ -766,7 +767,7 @@ ws::core::Result<ParsedCard> parse_card(const Record& rec, bool inside_subckt,
     }
     const char letter =
         static_cast<char>(std::toupper(static_cast<unsigned char>(name_text[0])));
-    const std::string supported = "RVIEFGHXCLKSWD";
+    const std::string supported = "RVIEFGHXCLKSWDQ";
     if (supported.find(letter) == std::string::npos) {
         if (device_milestones().count(letter) != 0) {
             return spice_fail(card_diag(

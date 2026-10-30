@@ -258,6 +258,19 @@ void CircuitBuilder::diode_model(std::string name, const DiodeModel& m) {
     diode_models_.emplace_back(std::move(name), m);
 }
 
+void CircuitBuilder::bjt(std::string name, NodeHandle c, NodeHandle b, NodeHandle e,
+                         std::string model, double area) {
+    std::vector<std::string> rest{c.name, b.name, e.name, std::move(model)};
+    if (area != 1.0) {
+        rest.push_back(num(area));
+    }
+    cards_.push_back({std::move(name), std::move(rest)});
+}
+
+void CircuitBuilder::bjt_model(std::string name, const BjtModel& m) {
+    bjt_models_.emplace_back(std::move(name), m);
+}
+
 ws::core::Result<Circuit> CircuitBuilder::finish(double temp,
                                                  std::vector<Warning>* warnings) {
     std::vector<Warning> scratch;
@@ -322,6 +335,28 @@ ws::core::Result<Circuit> CircuitBuilder::finish(double temp,
         };
         kv("Is", m.is_val);
         kv("N", m.n);
+        if (m.tnom != 27.0) {
+            kv("Tnom", m.tnom);
+        }
+        ast.models.push_back(std::move(def));
+    }
+    for (const auto& [name, m] : bjt_models_) {
+        ModelDef def;
+        def.name.text = name;
+        def.type = m.pnp ? "pnp" : "npn";
+        auto kv = [&](const char* key, double v) {
+            Token kt;
+            kt.text = key;
+            Token vt;
+            vt.text = num(v);
+            def.params.push_back(std::move(kt));
+            def.params.push_back(std::move(vt));
+        };
+        kv("Is", m.is_val);
+        kv("Bf", m.bf);
+        kv("Br", m.br);
+        kv("Nf", m.nf);
+        kv("Nr", m.nr);
         if (m.tnom != 27.0) {
             kv("Tnom", m.tnom);
         }

@@ -6,10 +6,11 @@ disagree, DESIGN.md wins and this file gets fixed.
 
 ## Where we are
 
-M0 + M1 + M2 + **M3 (the diode)** complete, plus the 2026-10-29
-post-review revision (four structural changes + six usage wins) — all
-committed on `main`, all gates green: **2306 assertions, 106 test cases,
-0 failures** (Linux preset: GCC 14, `-Wall -Wextra -Wpedantic -Werror`).
+M0 + M1 + M2 + **M3 (the diode)** + **M4a (the BJT)** complete, plus the
+2026-10-29 post-review revision (four structural changes + six usage wins)
+— all committed on `main`, all gates green: **2334 assertions, 112 test
+cases, 0 failures** (Linux preset: GCC 14, `-Wall -Wextra -Wpedantic
+-Werror`).
 Windows parity restored the same day: the MSVC `/W4 /WX` build is clean
 again and the full smoke passes on Windows (97+6 cases → all green after
 `70e7e84` + `b265ae7`); the Linux-side parity checks live in
@@ -34,6 +35,7 @@ again and the full smoke passes on Windows (97+6 cases → all green after
 | `70e7e84` | MSVC /W4 /WX portability — `struct Circuit` forward decl (C4099) and six shadowing renames (C4456/C4458). |
 | `b265ae7` | .dc crash on MSVC debug — `run_dc` assigned through empty `std::optional`s (`WS_TRY_ASSIGN(*state, ...)`); silent on GCC, exit-3 abort on Windows. Fixed with emplace; caught via the ASan build helper. |
 | (M3, this commit) | §3.6 current-iterate threading (`DcLoadContext::node_v/branch_i/gmin`, `AcLoadContext::state_`), `NonlinResid` + the §5.1 nonlinear-residual convergence check, the diode (Shockley + pnjlim + 3 state slots + `.model D`), `solve_tran` upgraded to a real Newton loop, `gminsteps`/`srcsteps`/`gshunt` options, `Builder::diode()`/`diode_model()`. Gate: Lambert-W .op (1e-7 rel), .dc sweep, pnjlim stiff-bias convergence, rectifier .tran sanity, Jacobian vs central finite differences, builder .op equivalence. |
+| (M4a, this commit) | The BJT (Ebers-Moll transport model): direct terminal-current stamp (Ic/Ib/Ie + derivatives into G, Norton offsets into rhs), two pnjlim slots (Vbe/Vbc), `.model NPN\|PNP(Is= Bf= Br= Nf= Nr=)`, NPN+PNP via sgn (G entries polarity-independent, RHS flips), `Builder::bjt()`/`bjt_model()`. Gate: forward-active .op (1e-4 rel vs Ebers-Moll), cutoff, saturation, .dc Vbe sweep (exp I-V), stiff cold-start convergence, PNP polarity. |
 
 ## Known sharp edges
 
@@ -75,6 +77,8 @@ again and the full smoke passes on Windows (97+6 cases → all green after
 
 ## Next (per §11, unchanged)
 
-M4: BJT (Gummel–Poon), MOS level 1, behavioral B with dual-number AD
-(§8.5), lossless T-line. Then M5 (.noise/.nodeset, temp-dependent
-diode model), M0b (KLU backend decision), M6 hardening.
+M4b: diode Cjo + BJT junction caps (Cje/Cjc) — the nonlinear charge
+companion (clears M3 limitations #2 and #3). Then M4c (MOS level 1 +
+fetlim), M4d (behavioral B with dual-number AD), M4e (lossless T-line).
+Then M5 (.noise/.nodeset, temp-dependent models), M0b (KLU backend
+decision), M6 hardening.

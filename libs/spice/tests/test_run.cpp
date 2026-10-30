@@ -510,8 +510,8 @@ TEST_CASE("parse-error goldens: file:line:col prefixes") {
     const Golden goldens[] = {
         {".lib backlog\n* line 2 is a comment\n.lib foo\n",
          "t.cir:3:1: error: ", "card '.lib'"},
-        {"bjt\nV1 a 0 5\nQ1 a 0 0 qm\n",
-         "t.cir:3:1: error: ", "device 'Q'"},
+        {"bjt\nV1 a 0 5\nB1 a 0 0 qm\n",
+         "t.cir:3:1: error: ", "device 'B'"},
         {"arity\nV1 a 0 5\nR1 a 0\n",
          "t.cir:3:1: error: ", "needs a value"},
         {"bad waveform\nV1 a 0 PULSE(0)\nR1 a 0 1k\n.op\n",
@@ -2057,4 +2057,186 @@ TEST_CASE("M3 diode: the Jacobian matches central finite differences") {
         const double gd_analytical = 1e-14 / kVt27 * std::exp(vd / kVt27);
         CHECK(di_dv == doctest::Approx(gd_analytical).epsilon(1e-3));
     }
+}
+
+// --- §10.1/§10.4 M4a: the BJT (Ebers-Moll) ---------------------------------------
+
+TEST_CASE("M4a BJT: forward-active .op matches Ebers-Moll closed form") {
+    // §10.1 row: BJT forward-active bias, Ic/Ib/Vbe vs Ebers-Moll at 1e-4 rel.
+    // NPN with Vbe=0.7V (forward-biased BE), Vc=5V (Vbc=-4.3V, reverse-biased
+    // BC → forward-active region). Is=1e-16, Bf=100, Br=1, Nf=Nr=1.
+    // Closed form (forward-active, Vbc << 0): Ic ≈ Is*exp(Vbe/Vt), Ib ≈ Ic/Bf.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;
+    const auto run = run_text(
+        "bjt forward-active\n"
+        "Vbe b 0 DC 0.7\n"
+        "Vc c 0 DC 5\n"
+        "Q1 c b 0 qn\n"
+        ".model qn NPN(Is=1e-16 Bf=100 Br=1 Nf=1 Nr=1)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 1);
+    const Table& t = run->results.tables[0];
+    const double i_vc = t.signals[col_of(t, "i(Vc)")].data[0];   // delivers Ic
+    const double i_vbe = t.signals[col_of(t, "i(Vbe)")].data[0]; // delivers Ib
+    // Ebers-Moll forward-active closed form.
+    const double vt = kVt27;
+    const double is_val = 1e-16;
+    const double bf = 100.0;
+    const double af = bf / (bf + 1.0);
+    const double i_be = is_val / af * (std::exp(0.7 / vt) - 1.0);
+    const double i_bc = is_val / (1.0 / 2.0) * (std::exp((0.7 - 5.0) / vt) - 1.0);
+    const double ref_ic = af * i_be - i_bc;   // into collector
+    const double ref_ib = i_be * (1.0 - af) + i_bc * (1.0 - 1.0 / 2.0);
+    // i(Vc) is negative when delivering (convention); |i(Vc)| ≈ Ic.
+    // i(Vbe) is negative when delivering; |i(Vbe)| ≈ Ib.
+    CHECK(-i_vc == doctest::Approx(ref_ic).epsilon(1e-4));
+    CHECK(-i_vbe == doctest::Approx(ref_ib).epsilon(1e-4));
+    // Sanity: in forward-active, Ic >> Ib and Ib ≈ Ic/Bf.
+    CHECK(-i_vc > 1e-6);   // Ic is µA-scale
+    CHECK(-i_vbe < -i_vc / 50.0);  // Ib << Ic
+    CHECK(-i_vbe == doctest::Approx(-i_vc / bf).epsilon(1e-3));
+}
+
+TEST_CASE("M4a BJT: cutoff - both junctions off, Ic ≈ 0") {
+    // Vbe=0, Vbc=0: both junctions at zero bias. Ibe=Ibc=0, so Ic=Ib=0
+    // (only gmin leakage). The BJT is in cutoff.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "bjt cutoff\n"
+        "Vbe b 0 DC 0\n"
+        "Vc c 0 DC 0\n"
+        "Q1 c b 0 qn\n"
+        ".model qn NPN(Is=1e-16 Bf=100)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double i_vc = t.signals[col_of(t, "i(Vc)")].data[0];
+    const double i_vbe = t.signals[col_of(t, "i(Vbe)")].data[0];
+    // With gmin=1e-12 (default), leakage is ~gmin*V = 0 (V=0). So Ic ≈ 0.
+    CHECK(std::abs(i_vc) < 1e-9);
+    CHECK(std::abs(i_vbe) < 1e-9);
+}
+
+TEST_CASE("M4a BJT: saturation - both junctions forward-biased") {
+    // Vbe=0.8V, Vc=0.3V → Vbc=0.5V (both forward-biased → saturation).
+    // In the transport model, Ic = Is*(exp(Vbe/Vt) - exp(Vbc/Vt)). With
+    // voltage sources directly on the terminals (no collector resistor),
+    // Ic is NOT dramatically lower than forward-active — the external
+    // circuit doesn't limit it. But Ic IS less than the forward-active
+    // value (Vbc=0 would give Is*exp(Vbe/Vt)); the exp(Vbc/Vt) term
+    // subtracts. Sanity: Ic < forward-active, and Ib > Ic/Bf (the base
+    // drives both junctions).
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "bjt saturation\n"
+        "Vbe b 0 DC 0.8\n"
+        "Vc c 0 DC 0.3\n"
+        "Q1 c b 0 qn\n"
+        ".model qn NPN(Is=1e-16 Bf=100 Br=1)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double i_vc = t.signals[col_of(t, "i(Vc)")].data[0];
+    const double i_vbe = t.signals[col_of(t, "i(Vbe)")].data[0];
+    const double i_mag = -i_vc;  // |Ic|
+    const double ib_mag = -i_vbe;
+    // Forward-active Ic at Vbe=0.8V (Vbc<<0): Is*exp(0.8/Vt) ≈ 2.9 mA.
+    const double fa_ic = 1e-16 * std::exp(0.8 / kVt27);
+    // In saturation Ic = Is*(exp(Vbe/Vt) - exp(Vbc/Vt)) < fa_ic.
+    CHECK(i_mag < fa_ic);
+    CHECK(i_mag > 0.0);  // still sourcing current (collector sinks)
+    // The saturation Ic matches the transport formula.
+    const double ref_ic = 1e-16 * (std::exp(0.8 / kVt27) - std::exp(0.5 / kVt27));
+    CHECK(i_mag == doctest::Approx(ref_ic).epsilon(1e-4));
+    // Ib is larger than Ic/Bf because the base drives both junctions
+    // (Ib = Is/Bf*(exp(Vbe/Vt)-1) + Is/Br*(exp(Vbc/Vt)-1)).
+    CHECK(ib_mag > i_mag / 100.0);
+}
+
+TEST_CASE("M4a BJT: .dc sweep of Vbe tracks exp(Vbe/Vt)") {
+    // Sweep Vbe from 0.5 to 0.7V; at each point Ic ≈ Is*exp(Vbe/Vt)
+    // (forward-active, since Vc=5V keeps Vbc << 0). The exponential I-V
+    // is the BJT's signature - 60mV/decade of current.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;
+    const auto run = run_text(
+        "bjt dc sweep\n"
+        "Vbe b 0 DC 0\n"
+        "Vc c 0 DC 5\n"
+        "Q1 c b 0 qn\n"
+        ".model qn NPN(Is=1e-16 Bf=100)\n"
+        ".dc Vbe 0.5 0.7 0.05\n",
+        nullptr, settings);
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 1);
+    const Table& t = run->results.tables[0];
+    const std::size_t col_vc = col_of(t, "i(Vc)");
+    const std::size_t col_vbe = col_of(t, "v(b)");
+    REQUIRE(t.signals[col_vc].data.size() == 5);
+    for (std::size_t k = 0; k < t.signals[col_vc].data.size(); ++k) {
+        const double vbe = t.signals[col_vbe].data[k];
+        const double i_mag = -t.signals[col_vc].data[k];
+        // Ebers-Moll forward-active: Ic ≈ Is*exp(Vbe/Vt) (the -1 and Ibc
+        // terms are negligible at these biases).
+        const double ref_ic = 1e-16 * std::exp(vbe / kVt27);
+        if (ref_ic > 1e-9) {  // skip points where abstol dominates
+            CHECK(i_mag == doctest::Approx(ref_ic).epsilon(1e-4));
+        }
+    }
+}
+
+TEST_CASE("M4a BJT: the ladder converges a stiff cold start") {
+    // Vbe=0.8V directly across the BE junction - the first Newton iterate
+    // from cold start (x=0) would put Vbe≈0.8V, and exp(0.8/0.026)=exp(31)
+    // ≈ 3e13. pnjlim clamps the per-iteration jump to 2*Vt, walking Vbe_lim
+    // up from 0 to ~0.8V in ~15 steps. The ladder's plain Newton stage
+    // handles this (gmin/source/PTC never engage).
+    RunSettings settings;
+    settings.reltol = 1e-6;
+    const auto run = run_text(
+        "bjt stiff\n"
+        "Vbe b 0 DC 0.8\n"
+        "Vc c 0 DC 5\n"
+        "Q1 c b 0 qn\n"
+        ".model qn NPN(Is=1e-16 Bf=100)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    REQUIRE(!run->reports.empty());
+    CHECK(run->reports.back().stage == "newton");
+}
+
+TEST_CASE("M4a BJT: PNP - polarity flips, same magnitudes") {
+    // A PNP with Veb=0.7V (emitter at 0.7, base at 0) and Vc=-5V (collector
+    // below base → Vcb reverse-biased for PNP → forward-active). The PNP's
+    // Ic should flow OUT of the collector (negative i(Vc) by the "into the
+    // terminal" convention), with the same magnitude as the NPN at Vbe=0.7V.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;
+    const auto run = run_text(
+        "pnp forward-active\n"
+        "Veb e 0 DC 0.7\n"
+        "Vc c 0 DC -5\n"
+        "Q1 c 0 e qp\n"
+        ".model qp PNP(Is=1e-16 Bf=100)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double i_vc = t.signals[col_of(t, "i(Vc)")].data[0];
+    // PNP: collector sources current → i(Vc) is POSITIVE (current flows
+    // out of collector, so the Vc source sinks it → positive i(Vc)).
+    // Magnitude matches the NPN at the same |Vbe|.
+    const double ref_ic_mag = 1e-16 * std::exp(0.7 / kVt27);
+    CHECK(i_vc == doctest::Approx(ref_ic_mag).epsilon(1e-4));
 }

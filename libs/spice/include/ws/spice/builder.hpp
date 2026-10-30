@@ -115,6 +115,20 @@ struct DiodeModel {
     double tnom = 27.0;     // model reference temperature (°C)
 };
 
+// A BJT .model the builder registers (card form: .model name NPN|PNP(Is=... Bf=...)).
+// M4a implements Is, Bf, Br, Nf, Nr, Tnom (Ebers-Moll); the Gummel-Poon
+// refinements (Vaf, Var, Cje, Cjc, Tf, ...) are accepted by the parser but
+// not yet implemented.
+struct BjtModel {
+    bool pnp = false;       // NPN by default
+    double is_val = 1e-16;  // saturation current (A)
+    double bf = 100.0;      // forward current gain
+    double br = 1.0;        // reverse current gain
+    double nf = 1.0;        // BE emission coefficient
+    double nr = 1.0;        // BC emission coefficient
+    double tnom = 27.0;     // model reference temperature (°C)
+};
+
 class CircuitBuilder {
 public:
     CircuitBuilder() = default;
@@ -175,6 +189,13 @@ public:
                std::optional<double> ic = std::nullopt);
     void diode_model(std::string name, const DiodeModel& m);
 
+    // BJT (M4a, Ebers-Moll): names a .model registered with bjt_model().
+    // Terminals are collector, base, emitter. `area` defaults to 1.0.
+    // The 4-terminal substrate form lands with M4b.
+    void bjt(std::string name, NodeHandle c, NodeHandle b, NodeHandle e,
+             std::string model, double area = 1.0);
+    void bjt_model(std::string name, const BjtModel& m);
+
     // Elaborates: same path the deck takes (flatten-free - the builder
     // emits top-level cards only - plus the §6.6 graph checks and the
     // §3.5 rev arena freeze). `temp` is the §7.7 elaboration temperature.
@@ -190,6 +211,7 @@ private:
     std::vector<std::pair<std::string, std::string>> params_;  // name -> expression
     std::vector<std::pair<std::string, SwitchModel>> models_;
     std::vector<std::pair<std::string, DiodeModel>> diode_models_;
+    std::vector<std::pair<std::string, BjtModel>> bjt_models_;
 };
 
 }  // namespace ws::spice
