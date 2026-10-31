@@ -7,8 +7,11 @@
 // vectors (one allocation at create, none after), and the reverse direction
 // rides Box2D body userData as slot + 1 (0 = never set). Contact/sensor
 // events name SHAPES, so each shape's userData packs its full owner -
-// (slot + 1) | (part + 1) << 32 - and the drain reads body AND part in one
-// call (owner_of_shape): the lib's touching table keys on the shape pair.
+// (slot + 1) | (part + 1) << 32 on 64-bit ABIs; the userData slot is
+// pointer-sized, so 32-bit ABIs narrow the split to 16 slot bits + 4 part
+// bits (pack_shape_owner/owner_of_shape) - and the drain reads body AND
+// part in one call (owner_of_shape): the lib's touching table keys on the
+// shape pair.
 //
 // Task pool (Desc::thread_count = N > 0): N worker threads with FIXED
 // indices 0..N-1; the stepping thread is worker N. Box2D gets
@@ -928,11 +931,21 @@ class Box2DWorld final : public IWorld2DBackend {
   }
 
   // (slot + 1) | (part + 1) << 32 - zero only when never set, mirroring the
-  // body userData sentinel.
+  // body userData sentinel. The shape userData slot is pointer-sized, so
+  // 32-bit ABIs (armv7, x86) cannot hold the 64-bit split: there the pack
+  // narrows to 16 slot bits + 4 part bits - exactly the workspace bounds,
+  // pinned below (the +1 halves can still never produce a zero word).
   [[nodiscard]] static std::uintptr_t pack_shape_owner(std::uint32_t slot,
                                                        std::uint32_t part) {
-    return (static_cast<std::uintptr_t>(slot) + 1u) |
-           ((static_cast<std::uintptr_t>(part) + 1u) << 32);
+    static_assert(ws::physics::kMaxBodiesPerWorld <= 0xFFFFu);
+    static_assert(ws::physics::kMaxPartsPerBody <= 15u);
+    if constexpr (sizeof(std::uintptr_t) >= 8) {
+      return (static_cast<std::uintptr_t>(slot) + 1u) |
+             ((static_cast<std::uintptr_t>(part) + 1u) << 32);
+    } else {
+      return (static_cast<std::uintptr_t>(slot) + 1u) |
+             ((static_cast<std::uintptr_t>(part) + 1u) << 16);
+    }
   }
 
   // Shape id -> its owning (slot, part), packed at create. End events can
@@ -952,10 +965,15 @@ class Box2DWorld final : public IWorld2DBackend {
     if (raw == 0) {
       return false;
     }
-    out_slot = static_cast<std::uint32_t>(raw & 0xFFFFFFFFull) - 1u;
-    // The -1u lands on the uint8_t only inside the cast: computing it in
-    // unsigned first would narrow on assignment (MSVC /W4 C4244).
-    out_part = static_cast<std::uint8_t>((raw >> 32) - 1u);
+    if constexpr (sizeof(std::uintptr_t) >= 8) {
+      out_slot = static_cast<std::uint32_t>(raw & 0xFFFFFFFFull) - 1u;
+      // The -1u lands on the uint8_t only inside the cast: computing it in
+      // unsigned first would narrow on assignment (MSVC /W4 C4244).
+      out_part = static_cast<std::uint8_t>((raw >> 32) - 1u);
+    } else {
+      out_slot = static_cast<std::uint32_t>(raw & 0xFFFFu) - 1u;
+      out_part = static_cast<std::uint8_t>((raw >> 16) - 1u);
+    }
     return true;
   }
 
