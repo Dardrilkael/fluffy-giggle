@@ -216,6 +216,12 @@ public:
             (x_prev != nullptr && !x_prev->empty()) ? *x_prev : x;
         const double vd_load = v_across(x_load, anode_, cathode_);
         const double vd_lim = pnjlim(vd_load, st[kVdPrev], vt_, vcrit_);
+        // §5.3: return true (force another iteration) when pnjlim is
+        // actively clamping — the linearization point differs from the
+        // iterate, so convergence would be premature. Without this, a
+        // stiff cold start (e.g. Vd=12V) falsely converges at Vd_lim=0.05
+        // because I(Vd_lim) is below abstol and the residual check passes.
+        const bool clamped = vd_lim != vd_load;
         // Track I at the clamped linearization point (the "current
         // predicted by the linearization", §5.1). Using is_ (area=1) is a
         // minor approximation when area≠1; the voltage-delta check
@@ -225,7 +231,7 @@ public:
         st[kIPrev] = st[kICur];
         st[kICur] = i_lim;
         st[kVdPrev] = vd_lim;  // CLAMPED, for the NEXT iteration's pnjlim vold
-        return false;
+        return clamped;
     }
 
     // §5.1: |ΔI| since the previous load, normalized by max(|I_cur|,|I_prev|).

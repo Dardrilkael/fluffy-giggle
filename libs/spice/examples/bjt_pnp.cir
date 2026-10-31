@@ -1,0 +1,6 @@
+PNP: polarity flips, same magnitudes as NPN
+Veb e 0 DC 0.7
+Vc c 0 DC -5
+Q1 c 0 e qp
+.model qp PNP(Is=1e-16 Bf=100)
+.op

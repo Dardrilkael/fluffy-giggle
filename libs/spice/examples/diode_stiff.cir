@@ -1,0 +1,6 @@
+diode at 100 V: pnjlim prevents exp() overflow
+V1 in 0 DC 100
+R1 in out 1k
+D1 out 0 dx
+.model dx D(Is=1e-14 N=1)
+.op

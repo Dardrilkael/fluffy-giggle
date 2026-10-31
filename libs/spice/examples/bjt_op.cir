@@ -1,0 +1,6 @@
+BJT forward-active: Ic = Is*exp(Vbe/Vt), beta = 100
+Vbe b 0 DC 0.7
+Vc c 0 DC 5
+Q1 c b 0 qn
+.model qn NPN(Is=1e-16 Bf=100 Br=1)
+.op

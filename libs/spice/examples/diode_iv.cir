@@ -1,0 +1,5 @@
+diode I-V curve: exponential knee at ~0.6 V
+Vd a 0 DC 0
+D1 a 0 dx
+.model dx D(Is=1e-14 N=1)
+.dc Vd 0 0.8 0.05

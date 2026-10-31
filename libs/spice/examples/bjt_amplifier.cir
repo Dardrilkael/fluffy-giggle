@@ -1,0 +1,10 @@
+common-emitter amplifier with emitter degeneration
+* Direct base bias (Vb=2V) for clean convergence; a real amplifier
+* would use a divider, but the cold-start from Vbe=12V is stiff.
+Vcc cc 0 DC 12
+Vb b 0 DC 2.0
+Rc cc c 4.7k
+Re e 0 1k
+Q1 c b e qn
+.model qn NPN(Is=1e-15 Bf=200)
+.op

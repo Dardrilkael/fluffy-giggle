@@ -1,0 +1,6 @@
+BJT Ic vs Vbe: the 60 mV/decade exponential
+Vbe b 0 DC 0
+Vc c 0 DC 5
+Q1 c b 0 qn
+.model qn NPN(Is=1e-16 Bf=100)
+.dc Vbe 0.5 0.7 0.02

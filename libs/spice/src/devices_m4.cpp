@@ -405,7 +405,11 @@ public:
         st[kICur] = ic_lim;
         st[kVbePrev] = vbe_lim;
         st[kVbcPrev] = vbc_lim;
-        return false;
+        // §5.3: return true when either pnjlim is clamping — forces another
+        // iteration so convergence isn't declared at a stale linearization
+        // point (same fix as the diode; prevents false convergence when the
+        // BJT current is below abstol at small Vbe_lim).
+        return vbe_lim != vbe_raw || vbc_lim != vbc_raw;
     }
 
     // §5.1: |ΔIc| since the previous load, normalized by max(|Ic|).

@@ -1,0 +1,6 @@
+diode .ac with Cjo: RC low-pass cutoff
+V1 src 0 DC 0 AC 1
+R1 src out 1k
+D1 out 0 dx
+.model dx D(Is=1e-14 N=1 Cjo=10p M=0.5 Vj=0.7)
+.ac dec 10 1Meg 1G

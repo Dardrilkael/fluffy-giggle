@@ -1,0 +1,7 @@
+BJT .ac with Cje: base low-pass
+V1 src 0 DC 0 AC 1
+R1 src b 1k
+Vc c 0 DC 5
+Q1 c b 0 qn
+.model qn NPN(Is=1e-16 Bf=100 Cje=10p Mje=0.5 Vje=0.75)
+.ac dec 10 1Meg 1G
