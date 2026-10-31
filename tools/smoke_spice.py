@@ -52,10 +52,12 @@ class Smoke:
         path = self.work / f"{name}.cir"
         # BOM mode = UTF-8 BOM + CRLF (Notepad authoring scenario).
         encoding_bom = mode == "bom"
+        # write_bytes, never write_text: text mode translates \n to
+        # os.linesep, which would double the explicit \r\n on Windows.
+        data = text.encode("utf-8")
         if encoding_bom:
-            path.write_bytes(b"\xef\xbb\xbf" + text.encode("utf-8"))
-        else:
-            path.write_text(text, encoding="utf-8")
+            data = b"\xef\xbb\xbf" + data
+        path.write_bytes(data)
         return path
 
     def run_spice(self, *args: str) -> dict:

@@ -68,6 +68,10 @@ function Test-LibInclude([string]$Header, [string]$FilePath) {
 
 # Scope 2: apps - ws/ + std + the OS platform surface.
 function Test-AppInclude([string]$Header) {
+  # The NDK entry glue is third-party-named but __ANDROID__-guarded app
+  # platform surface - allowed before the third-party gate; libs keep
+  # rejecting it (Test-LibInclude has no such carve-out).
+  if ($Header -eq 'android_native_app_glue.h') { return $true }
   if (Test-ThirdParty $Header) { return $false }
   if ($Header.StartsWith('ws/')) { return $true }
   if ($Header.StartsWith('android/')) { return $true }  # NDK platform, not a dep
