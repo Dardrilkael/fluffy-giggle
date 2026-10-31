@@ -4214,7 +4214,7 @@ TEST_CASE("button: hover alone claims hot but never clicks") {
 
 TEST_CASE("button: the theme drives the widget's metrics") {
     using namespace ws::ui::gui;
-    CHECK(kDefaultChrome.control_height == 24.0f);  // the layout-affecting default
+    CHECK(kDefaultChrome.control_height == 26.0f);  // the layout-affecting default
 
     // A tall variant: with 40 px controls the second button's rect sits
     // at y = 40 - a click there must land on it, not on the first.
@@ -4623,7 +4623,7 @@ TEST_CASE("button and slider: a negative width fills the rest of the line") {
     (void)slider_float(gui, layout, theme, "gain", gain, 0.0f, 1.0f, -1.0f);
     const Rect probe = layout.next(10.0f, 10.0f);
     CHECK(probe.y ==
-          doctest::Approx(44.0f + theme.control_height + theme.spacing));
+          doctest::Approx(46.0f + theme.control_height + theme.spacing));
     end_panel(gui, layout);
     gui.end_frame();
 
@@ -4876,7 +4876,7 @@ TEST_CASE("tab_bar: a click moves the selection; the strip is one line") {
     (void)tab_bar(gui, layout, kDefaultChrome, "views", kTabs, 3, active,
                   60.0f);
     const Rect after = layout.next(100.0f, 10.0f);
-    CHECK(after.y == 24.0f);
+    CHECK(after.y == 26.0f);
     layout.end_panel();
     gui.end_frame();
 
@@ -5267,7 +5267,7 @@ TEST_CASE("scroll: nests inside a panel and measures its own flow") {
         // The outer cursor resumes below the header plus one spacing,
         // parked while the scroll region flowed its own rows.
         const Rect after = layout.next(50.0f, 10.0f);
-        CHECK(after.y == 44.0f);  // the header's bottom (36) + spacing (8)
+        CHECK(after.y == 46.0f);  // the header's bottom (38) + spacing (8)
         end_panel(gui, layout);
         gui.end_frame();
     };
@@ -5991,20 +5991,20 @@ TEST_CASE("scroll: two fingers drag one region, one lift confuses nothing") {
                             {2, 60.0f, 40.0f}})) == -1);
 
     // Frame 3: both drag 10 px more - BOTH deltas apply (offset 20): at
-    // offset 20 row 1 spans y 24..48 and the probe at (60, 24) clicks
+    // offset 20 row 1 spans y 26..52 and the probe at (60, 26) clicks
     // row 1 (its scrolled top edge). A single-track drag would sit at
     // offset 10 and click row 0.
     CHECK(pass(touch_frame({{1, 60.0f, 0.0f},
                             {2, 60.0f, 30.0f},
-                            {99, 60.0f, 24.0f, true, true}})) == 1);
+                            {99, 60.0f, 26.0f, true, true}})) == 1);
 
     // Frame 4: finger 1 lifts; finger 2 drags 10 more (offset 30) - the
     // survivor's bookkeeping is its own. At offset 30 row 1 spans
-    // y 14..38 and the probe at (60, 14) clicks row 1 (at offset 20 it
+    // y 16..42 and the probe at (60, 16) clicks row 1 (at offset 20 it
     // would still be row 0).
     CHECK(pass(touch_frame({{1, 60.0f, 0.0f, false, true},
                             {2, 60.0f, 20.0f},
-                            {99, 60.0f, 14.0f, true, true}})) == 1);
+                            {99, 60.0f, 16.0f, true, true}})) == 1);
 }
 
 TEST_CASE("scroll: drag_threshold is the theme's metric") {
@@ -6056,9 +6056,9 @@ TEST_CASE("hit clips: a scrolled-out row cannot claim what sits under the panel"
     GuiContext gui;
     LayoutCursor layout;
 
-    // The reported bug, end to end: 11 rows of 24 px at the 32-px pitch
-    // = 344 px of content inside a 200x100 panel (viewport (12, 12, 176,
-    // 76), scroll range 268). Even unscrolled, the rows past y 88 sit
+    // The reported bug, end to end: 11 rows of 26 px at the 34-px pitch
+    // = 366 px of content inside a 200x100 panel (viewport (12, 12, 176,
+    // 76), scroll range 290). Even unscrolled, the rows past y 88 sit
     // below the viewport, and scrolled to offset 100 they straddle both
     // ends - rows 0..2 above, row 3 poking past the top, row 5 past the
     // bottom, rows 6..10 fully below. A widget UNDER the panel must win
@@ -6090,7 +6090,7 @@ TEST_CASE("hit clips: a scrolled-out row cannot claim what sits under the panel"
     CHECK(!under.pressed);
 
     // A click at (60, 116), below the viewport at offset 0: row 3 spans
-    // y 108..132 there - fully hidden by the clip, so without the fix
+    // y 114..140 there - fully hidden by the clip, so without the fix
     // it wins the first-hit-test press and the under-panel widget sees
     // nothing. With it the row claims nothing and the widget below the
     // panel takes the click.
@@ -6106,26 +6106,27 @@ TEST_CASE("hit clips: a scrolled-out row cannot claim what sits under the panel"
     CHECK(!under.pressed);
 
     // -3.125 wheel units = exactly 100 px of offset. Rows now flow
-    // from y -88: row 4 spans 40..64, row 5 straddles the bottom edge
-    // (72..88 visible), row 6 spans 104..128 - fully below again.
+    // from y -88: row 4 spans 48..74, row 5 straddles the bottom edge
+    // (82..88 visible), row 6 spans 116..142 - fully below again.
     ws::input::InputFrame wheel = snap(60.0f, 50.0f);
     wheel.scroll_dy = -100.0f / kDefaultChrome.scroll_speed;
     CHECK(pass(wheel, under) == -1);
 
-    // The same spot at the scrolled offset - hidden row 6's center -
-    // still belongs to the widget below the panel, not to the row.
-    CHECK(pass(snap(60.0f, 116.0f, false, true, true), under) == -1);
+    // A tap on hidden row 6 (116..142) at y 122 - inside the under
+    // widget's band - still belongs to the widget below the panel, not
+    // to the row.
+    CHECK(pass(snap(60.0f, 122.0f, false, true, true), under) == -1);
     CHECK(under.pressed);
     CHECK(under.clicked);
 
     // The visible rows still claim at their scrolled positions: row 4
-    // (40..64) takes a click at its center.
-    CHECK(pass(snap(60.0f, 52.0f, false, true, true), under) == 4);
+    // (48..74) takes a click at its center.
+    CHECK(pass(snap(60.0f, 61.0f, false, true, true), under) == 4);
 
-    // Row 5 straddles the bottom edge: its visible part claims (y 80),
+    // Row 5 straddles the bottom edge: its visible part claims (y 85),
     // its clipped part (y 92, past the edge at 88) does not - the
     // under-panel widget owns that spot instead.
-    CHECK(pass(snap(60.0f, 80.0f, false, true, true), under) == 5);
+    CHECK(pass(snap(60.0f, 85.0f, false, true, true), under) == 5);
     CHECK(pass(snap(60.0f, 92.0f, false, true, true), under) == -1);
     CHECK(under.pressed);
     CHECK(under.clicked);
@@ -6525,7 +6526,7 @@ TEST_CASE("text: a static label sizes its row and never touches the focus") {
     text(layout, kDefaultChrome, "Saving", 50.0f);  // a fixed width pins the
     layout.same_line();                              // row whatever the label
     CHECK(layout.remaining_width() == 302.0f);  // 352 - 50
-    CHECK(layout.flow_extent() == 24.0f);  // one line, control_height tall
+    CHECK(layout.flow_extent() == 26.0f);  // one line, control_height tall
     layout.end_panel();
     gui.end_frame();
 
@@ -6561,7 +6562,7 @@ TEST_CASE("separator: a fill-width rule, 2 px of flow") {
     text(layout, kDefaultChrome, "above");
     text(layout, kDefaultChrome, "below");
     separator(layout, kDefaultChrome);    // a negative width fills the line
-    CHECK(layout.flow_extent() == 50.0f);  // 24 + 24 + the 2-px rule, flush
+    CHECK(layout.flow_extent() == 54.0f);  // 26 + 26 + the 2-px rule, flush
     layout.same_line();
     CHECK(layout.remaining_width() == 0.0f);  // it consumed the rest
     layout.end_panel();
@@ -6574,7 +6575,7 @@ TEST_CASE("separator: a fill-width rule, 2 px of flow") {
     spaced.same_line();
     CHECK(spaced.remaining_width() == 62.0f);  // 100 - 30 - the 8-px gap
     text(spaced, kDefaultChrome, "two");  // rides the rule's line, taller
-    CHECK(spaced.flow_extent() == 56.0f);  // 24 + 8 + the line's tallest, 24
+    CHECK(spaced.flow_extent() == 60.0f);  // 26 + 8 + the line's tallest, 26
     spaced.end_panel();
     gui.end_frame();
 }
@@ -6593,7 +6594,7 @@ TEST_CASE("progress: fractions clamp and the widths land like button's") {
     progress(layout, kDefaultChrome, 2.0f);
     progress(layout, kDefaultChrome,
              std::numeric_limits<float>::quiet_NaN());
-    CHECK(layout.flow_extent() == 96.0f);  // 4 x control_height, flush panel
+    CHECK(layout.flow_extent() == 104.0f);  // 4 x control_height, flush panel
     progress(layout, kDefaultChrome, 0.25f, 40.0f);  // a fixed width leaves
     layout.same_line();                              // the rest of the line
     CHECK(layout.remaining_width() == 60.0f);
@@ -6840,7 +6841,7 @@ TEST_CASE("collapsing_header: the flip, the child under it, the keyboard") {
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     hdr = collapsing_header(gui, layout, kDefaultChrome, "opts", open);
     CHECK(!hdr);  // closed: the return is the state, not the change
-    CHECK(layout.flow_extent() == 24.0f);
+    CHECK(layout.flow_extent() == 26.0f);
     layout.same_line();
     CHECK(layout.remaining_width() == 0.0f);
     layout.end_panel();
@@ -6981,7 +6982,7 @@ TEST_CASE("selectable: the caller keeps the selection, the row reports clicks") 
     ra = selectable(gui, layout, kDefaultChrome, "alpha", chosen == 0, 60.0f);
     rb = selectable(gui, layout, kDefaultChrome, "beta", chosen == 1, 60.0f);
     rg = selectable(gui, layout, kDefaultChrome, "gamma", chosen == 2, 60.0f);
-    CHECK(layout.flow_extent() == 72.0f);  // three 24-px rows, no spacing
+    CHECK(layout.flow_extent() == 78.0f);  // three 26-px rows, no spacing
     if (ra) chosen = 0;
     if (rb) chosen = 1;
     if (rg) chosen = 2;
@@ -7092,7 +7093,7 @@ TEST_CASE("drag_float: grab, travel, clamp - and a plain click moves nothing") {
     moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
                        0.0f, 1.0f, 0.01f);
     CHECK(moved == false);  // the grab never jumps the value
-    CHECK(layout.flow_extent() == 24.0f);
+    CHECK(layout.flow_extent() == 26.0f);
     layout.end_panel();
     gui.end_frame();
     CHECK(value == doctest::Approx(0.0f));
@@ -10985,9 +10986,9 @@ TEST_CASE("statics: the spinner, the indeterminate bar and the status "
     // frame's bottom - and it takes no row in any flow.
     const Rect bar = status_bar(kDefaultChrome, "ready");
     CHECK(bar.x == 0.0f);
-    CHECK(bar.y == 576.0f);
+    CHECK(bar.y == 574.0f);
     CHECK(bar.width == 800.0f);
-    CHECK(bar.height == 24.0f);
+    CHECK(bar.height == 26.0f);
 
     r.end();
     r.frame_end();
@@ -11902,13 +11903,13 @@ TEST_CASE("the combo pair records the widget's output byte for byte") {
     theme.font = &font;  // the theme points; it never owns
 
     const ws::input::InputFrame quiet = snap(-100.0f, -100.0f);
-    // The row lays at (12,12,120,24) inside the padded panel; the tap on
-    // it opens the dropdown this same frame (bounds (12,36,120,112),
-    // item 0 at (24,48,96,24)), and the item tap at (60,48) picks it.
+    // The row lays at (12,12,120,26) inside the padded panel; the tap on
+    // it opens the dropdown this same frame (bounds (12,38,120,118),
+    // item 0 at (24,50,96,26)), and the item tap at (60,50) picks it.
     const ws::input::InputFrame tap_row =
         snap(60.0f, 12.0f, false, true, true);
     const ws::input::InputFrame tap_item =
-        snap(60.0f, 48.0f, false, true, true);
+        snap(60.0f, 50.0f, false, true, true);
 
     const auto record = [&](auto&& run, const ws::input::InputFrame& frame) {
         r.frame_begin(800.0f, 600.0f);
