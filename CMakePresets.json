@@ -7,8 +7,7 @@
       "hidden": true,
       "generator": "Ninja",
       "cacheVariables": {
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/_fetchcontent"
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       }
     },
     {
@@ -23,7 +22,10 @@
       "name": "debug",
       "displayName": "Debug (Ninja, MSVC)",
       "inherits": "_base-msvc",
-      "binaryDir": "${sourceDir}/build/debug"
+      "binaryDir": "${sourceDir}/build/debug",
+      "cacheVariables": {
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-msvc-debug"
+      }
     },
     {
       "name": "release",
@@ -31,29 +33,30 @@
       "inherits": "_base",
       "binaryDir": "${sourceDir}/build/release",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
+        "CMAKE_BUILD_TYPE": "Release",
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-msvc-release"
       }
     },
     {
       "name": "vs-debug",
       "displayName": "Debug (Visual Studio generator)",
-      "generator": "Visual Studio 17 2022",
+      "generator": "Visual Studio 18 2026",
       "binaryDir": "${sourceDir}/build/vs-debug",
       "architecture": "x64",
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/_fetchcontent"
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-msvc-debug"
       }
     },
     {
       "name": "vs-release",
       "displayName": "Release (Visual Studio generator)",
-      "generator": "Visual Studio 17 2022",
+      "generator": "Visual Studio 18 2026",
       "binaryDir": "${sourceDir}/build/vs-release",
       "architecture": "x64",
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/_fetchcontent"
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-msvc-release"
       }
     },
     {
@@ -63,7 +66,8 @@
       "binaryDir": "${sourceDir}/build/linux",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "WS_BUILD_LIBS": "core;math;spice;jobs;settings;net;physics"
+        "WS_BUILD_LIBS": "core;math;spice;jobs;settings;net;physics",
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-linux"
       }
     },
     {
@@ -74,7 +78,8 @@
       "cacheVariables": {
         "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -D_GLIBCXX_ASSERTIONS",
         "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined",
-        "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address,undefined"
+        "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address,undefined",
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-linux-asan"
       }
     },
     {
@@ -83,7 +88,8 @@
       "inherits": "_base-msvc",
       "binaryDir": "${sourceDir}/build/spice-debug",
       "cacheVariables": {
-        "WS_BUILD_LIBS": "core;math;spice"
+        "WS_BUILD_LIBS": "core;math;spice",
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-msvc-debug"
       }
     },
     {
@@ -93,7 +99,8 @@
       "binaryDir": "${sourceDir}/build/spice-release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "WS_BUILD_LIBS": "core;math;spice"
+        "WS_BUILD_LIBS": "core;math;spice",
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-msvc-release"
       }
     },
     {
@@ -108,7 +115,8 @@
         "ANDROID_PLATFORM": "android-28",
         "ANDROID_STL": "c++_static",
         "WS_BUILD_TESTS": "OFF",
-        "WS_BUILD_APPS": "ON"
+        "WS_BUILD_APPS": "ON",
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-android-arm64"
       }
     },
     {
@@ -117,7 +125,8 @@
       "inherits": "android",
       "binaryDir": "${sourceDir}/build/android-armv7",
       "cacheVariables": {
-        "ANDROID_ABI": "armeabi-v7a"
+        "ANDROID_ABI": "armeabi-v7a",
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-android-armv7"
       }
     },
     {
@@ -126,7 +135,8 @@
       "inherits": "android",
       "binaryDir": "${sourceDir}/build/android-x86",
       "cacheVariables": {
-        "ANDROID_ABI": "x86"
+        "ANDROID_ABI": "x86",
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-android-x86"
       }
     },
     {
@@ -135,7 +145,8 @@
       "inherits": "android",
       "binaryDir": "${sourceDir}/build/android-x8664",
       "cacheVariables": {
-        "ANDROID_ABI": "x86_64"
+        "ANDROID_ABI": "x86_64",
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-android-x8664"
       }
     }
   ],
