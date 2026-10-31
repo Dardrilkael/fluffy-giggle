@@ -2278,3 +2278,59 @@ TEST_CASE("M4b diode Cjo: .ac low-pass cutoff matches RC formula") {
     double mag_hi = std::hypot(t.signals[col_re].data.back(), t.signals[col_im].data.back());
     CHECK(mag_hi < 0.05);
 }
+
+TEST_CASE("M4b BJT Cje: .ac cutoff matches RC formula") {
+    // A BJT with Cje=10pF: the BE junction cap forms a low-pass with the
+    // source resistance. V1 drives through R1=1k into the base; Cje(B-E)
+    // shunts the base to ground. fc = 1/(2π*R*C) ≈ 15.9 MHz.
+    // Below fc: |v(b)| ≈ 1. Above fc: rolls off at -20 dB/dec.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "bjt cje ac\n"
+        "V1 src 0 DC 0 AC 1\n"
+        "R1 src b 1k\n"
+        "Vc c 0 DC 5\n"
+        "Q1 c b 0 qn\n"
+        ".model qn NPN(Is=1e-16 Bf=100 Cje=10p Mje=0.5 Vje=0.75)\n"
+        ".ac dec 10 1Meg 1G\n",
+        nullptr, settings);
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 1);
+    const Table& t = run->results.tables[0];
+    const std::size_t col_re = col_of(t, "re(v(b))");
+    const std::size_t col_im = col_of(t, "im(v(b))");
+    REQUIRE(t.signals[col_re].data.size() > 10);
+    // At 1 MHz (well below fc=16 MHz): |v(b)| ≈ 1.
+    const double mag_low = std::hypot(t.signals[col_re].data[0], t.signals[col_im].data[0]);
+    CHECK(mag_low == doctest::Approx(1.0).epsilon(1e-3));
+    // At 1 GHz (well above fc): |v(b)| << 0.1.
+    const double mag_hi = std::hypot(t.signals[col_re].data.back(), t.signals[col_im].data.back());
+    CHECK(mag_hi < 0.05);
+}
+
+TEST_CASE("M4b BJT Cje/Cjc: ngspice cross-validation of .op") {
+    // The junction caps don't affect the DC operating point (caps are
+    // open at DC). Verify the .op matches ngspice when Cje/Cjc are set.
+    // This confirms the model parses correctly and the caps don't break
+    // the DC solve. ngspice 39 gives (with Is=1e-16, Bf=100, Vbe=0.7,
+    // Vc=5): i(Vbe)=-5.67e-7, i(Vc)=-5.67e-5.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "bjt cje ngspice xval\n"
+        "Vbe b 0 DC 0.7\n"
+        "Vc c 0 DC 5\n"
+        "Q1 c b 0 qn\n"
+        ".model qn NPN(Is=1e-16 Bf=100 Cje=10p Cjc=5p)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double i_vc = t.signals[col_of(t, "i(Vc)")].data[0];
+    const double i_vbe = t.signals[col_of(t, "i(Vbe)")].data[0];
+    // ngspice values (from the M4a comparison): Ic ≈ 56.7 µA, Ib ≈ 0.567 µA.
+    // The caps don't change the DC op.
+    CHECK(-i_vc == doctest::Approx(5.67e-5).epsilon(1e-3));
+    CHECK(-i_vbe == doctest::Approx(5.67e-7).epsilon(1e-3));
+}

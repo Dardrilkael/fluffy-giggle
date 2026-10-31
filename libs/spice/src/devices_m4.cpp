@@ -37,6 +37,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -87,10 +88,31 @@ constexpr double kVtPerK = 8.617333262145e-5;
 
 class Bjt final : public Device {
 public:
+    // M4a state slots (always present):
     static constexpr std::size_t kVbePrev = 0;
     static constexpr std::size_t kVbcPrev = 1;
     static constexpr std::size_t kICur = 2;
     static constexpr std::size_t kIPrev = 3;
+    // M4b BE junction companion (when Cje > 0):
+    static constexpr std::size_t kVbeComp = 4;
+    static constexpr std::size_t kQbeComp = 5;
+    static constexpr std::size_t kIbeComp = 6;
+    static constexpr std::size_t kGeqBe = 7;
+    static constexpr std::size_t kJeqBe = 8;
+    // M4b BC junction companion (when Cjc > 0):
+    static constexpr std::size_t kVbcComp = 9;
+    static constexpr std::size_t kQbcComp = 10;
+    static constexpr std::size_t kIbcComp = 11;
+    static constexpr std::size_t kGeqBc = 12;
+    static constexpr std::size_t kJeqBc = 13;
+    // LTE history (3 (t,q) pairs per junction):
+    static constexpr std::size_t kHistNBe = 14;
+    static constexpr std::size_t kHistBe = 15;   // 6 slots
+    static constexpr std::size_t kHistNBc = 21;
+    static constexpr std::size_t kHistBc = 22;   // 6 slots
+    // Folded params:
+    static constexpr std::size_t kCjeEff = 28;
+    static constexpr std::size_t kCjcEff = 29;
 
     Bjt(std::string display, NodeId c, NodeId b, NodeId e,
         ExprProgram area, bool has_ic, double ic_vbe, double ic_vbc)
@@ -224,6 +246,35 @@ public:
         cx.add_entry(e_, b_, {die_dvb, 0.0});
         cx.add_entry(e_, c_, {die_dvc, 0.0});
         cx.add_entry(e_, e_, {die_dve, 0.0});
+        // M4b: junction caps Cje(Vbe_op) and Cjc(Vbc_op) as j*omega*C.
+        if (has_caps()) {
+            const double area = cx.par(kAreaParam);
+            if (cje_ > 0.0) {
+                const double cje_eff = cje_ * area;
+                const double cj_be = c_dep_be(vbe, cje_eff);
+                cx.add_conductance(b_, e_, {0.0, cx.omega * cj_be});
+            }
+            if (cjc_ > 0.0) {
+                const double cjc_eff = cjc_ * area;
+                const double cj_bc = c_dep_bc(vbc, cjc_eff);
+                cx.add_conductance(b_, c_, {0.0, cx.omega * cj_bc});
+            }
+        }
+    }
+
+    // M4b: load_tran stamps the DC terminal currents PLUS the junction cap
+    // companions (geq_be/jeq_be between B and E, geq_bc/jeq_bc between B and C).
+    void load_tran(DcLoadContext& cx, const TranStep&) const override {
+        load_dc(cx);  // DC terminal-current stamp (M4a)
+        if (!has_caps()) return;
+        if (cje_ > 0.0) {
+            cx.add_conductance(b_, e_, cx.st(kGeqBe));
+            cx.add_current(e_, b_, cx.st(kJeqBe));
+        }
+        if (cjc_ > 0.0) {
+            cx.add_conductance(b_, c_, cx.st(kGeqBc));
+            cx.add_current(c_, b_, cx.st(kJeqBc));
+        }
     }
 
     // --- parameter model (§3.5a) -----------------------------------------
@@ -240,7 +291,95 @@ public:
     }
 
     // --- state model (§3.5b) ---------------------------------------------
-    [[nodiscard]] std::size_t state_slots() const override { return 4; }
+    // M4a: 4 slots. M4b: 30 slots when Cje or Cjc > 0.
+    [[nodiscard]] std::size_t state_slots() const override {
+        return has_caps() ? 30 : 4;
+    }
+    [[nodiscard]] bool is_dynamic() const override { return has_caps(); }
+
+    void fold_state(double* st, const RunState& rs, const Circuit& c) const override {
+        if (has_caps()) {
+            const double area = rs.params()[c.param_span[self_index_].begin];
+            st[kCjeEff] = cje_ * area;
+            st[kCjcEff] = cjc_ * area;
+        }
+    }
+    [[nodiscard]] ws::core::Status link_dynamic(const Circuit& /*c*/,
+                                                 std::size_t self) override {
+        self_index_ = self;
+        return {};
+    }
+
+    // --- M4b dynamic hooks (junction cap companions, only when Cje/Cjc > 0) ---
+    void begin_step(const TranStep& step, double* st) override {
+        if (!has_caps()) return;
+        if (cje_ > 0.0) {
+            const double c = c_dep_be(st[kVbeComp], st[kCjeEff]);
+            if (step.be) { st[kGeqBe] = c / step.dt; st[kJeqBe] = -st[kQbeComp] / step.dt; }
+            else { st[kGeqBe] = 2.0 * c / step.dt; st[kJeqBe] = -(st[kGeqBe] * st[kVbeComp] + st[kIbeComp]); }
+        }
+        if (cjc_ > 0.0) {
+            const double c = c_dep_bc(st[kVbcComp], st[kCjcEff]);
+            if (step.be) { st[kGeqBc] = c / step.dt; st[kJeqBc] = -st[kQbcComp] / step.dt; }
+            else { st[kGeqBc] = 2.0 * c / step.dt; st[kJeqBc] = -(st[kGeqBc] * st[kVbcComp] + st[kIbcComp]); }
+        }
+    }
+
+    void commit(const std::vector<double>& x, std::size_t /*nc*/,
+                const TranStep& step, double* st) override {
+        if (!has_caps()) return;
+        const double vbe = v_across(x, b_, e_);
+        const double vbc = v_across(x, b_, c_);
+        if (cje_ > 0.0) {
+            const double q = q_dep_be(vbe, st[kCjeEff]);
+            st[kVbeComp] = vbe; st[kQbeComp] = q;
+            st[kIbeComp] = st[kGeqBe] * vbe + st[kJeqBe];
+            push_hist(st, kHistNBe, kHistBe, step.time, q, step.be);
+        }
+        if (cjc_ > 0.0) {
+            const double q = q_dep_bc(vbc, st[kCjcEff]);
+            st[kVbcComp] = vbc; st[kQbcComp] = q;
+            st[kIbcComp] = st[kGeqBc] * vbc + st[kJeqBc];
+            push_hist(st, kHistNBc, kHistBc, step.time, q, step.be);
+        }
+    }
+
+    [[nodiscard]] bool lte_ok(const TranStep& step, const std::vector<double>& x,
+                              std::size_t /*nc*/, double reltol, double chgtol,
+                              double trtol, const double* st, double* ratio) const override {
+        if (!has_caps()) { if (ratio) *ratio = 0.0; return true; }
+        double worst = 0.0;
+        if (cje_ > 0.0) {
+            const double q = q_dep_be(v_across(x, b_, e_), st[kCjeEff]);
+            double r = 0.0;
+            dd3_lte_check(st + kHistNBe, st + kHistBe, step, q, st[kQbeComp],
+                          reltol, chgtol, trtol, &r);
+            worst = std::max(worst, r);
+        }
+        if (cjc_ > 0.0) {
+            const double q = q_dep_bc(v_across(x, b_, c_), st[kCjcEff]);
+            double r = 0.0;
+            dd3_lte_check(st + kHistNBc, st + kHistBc, step, q, st[kQbcComp],
+                          reltol, chgtol, trtol, &r);
+            worst = std::max(worst, r);
+        }
+        if (ratio) *ratio = worst;
+        return worst <= 1.0;
+    }
+
+    void seed_state(const std::vector<double>& x, std::size_t /*nc*/, double* st) override {
+        if (!has_caps()) return;
+        const double vbe = v_across(x, b_, e_);
+        const double vbc = v_across(x, b_, c_);
+        if (cje_ > 0.0) {
+            st[kVbeComp] = vbe; st[kQbeComp] = q_dep_be(vbe, st[kCjeEff]);
+            st[kIbeComp] = 0.0; st[kHistNBe] = 0.0;
+        }
+        if (cjc_ > 0.0) {
+            st[kVbcComp] = vbc; st[kQbcComp] = q_dep_bc(vbc, st[kCjcEff]);
+            st[kIbcComp] = 0.0; st[kHistNBc] = 0.0;
+        }
+    }
 
     // Advances both junctions' pnjlim vold and the Ic residual trackers.
     // §5.3: vold stored is the CLAMPED V (same lesson as the diode).
@@ -290,8 +429,11 @@ public:
         }
         pnp_ = (model.type == "pnp");
         model_name_ = model.name.text;
-        // ngspice defaults: Is=1e-16, Bf=100, Br=1, Nf=1, Nr=1, Tnom=27.
+        // ngspice defaults: Is=1e-16, Bf=100, Br=1, Nf=1, Nr=1, Tnom=27,
+        // Cje=0, Cjc=0 (no caps), Mje=0.5, Mjc=0.5, Vje=0.75, Vjc=0.75, Fc=0.5.
         double is_val = 1e-16, bf = 100.0, br = 1.0, nf = 1.0, nr = 1.0, tnom = 27.0;
+        double cje_val = 0.0, cjc_val = 0.0, mje_val = 0.5, mjc_val = 0.5;
+        double vje_val = 0.75, vjc_val = 0.75, fc_val = 0.5;
         const auto& toks = model.params;
         for (std::size_t i = 0; i < toks.size(); ++i) {
             std::string text = toks[i].text;
@@ -332,15 +474,22 @@ public:
             else if (key == "nf") nf = v;
             else if (key == "nr") nr = v;
             else if (key == "tnom") tnom = v;
-            // Accepted but not implemented in M4a:
+            else if (key == "cje") cje_val = v;
+            else if (key == "cjc") cjc_val = v;
+            else if (key == "mje") mje_val = v;
+            else if (key == "mjc") mjc_val = v;
+            else if (key == "vje") vje_val = v;
+            else if (key == "vjc") vjc_val = v;
+            else if (key == "fc") fc_val = v;
+            // Accepted but not implemented in M4b:
             else if (key == "vaf" || key == "var" || key == "ikf" || key == "ikr" ||
-                     key == "cje" || key == "cjc" || key == "mje" || key == "mjc" ||
-                     key == "vje" || key == "vjc" || key == "tf" || key == "tr" ||
+                     key == "tf" || key == "tr" ||
                      key == "xti" || key == "eg" || key == "kf" || key == "af" ||
-                     key == "fc" || key == "pe" || key == "pc" || key == "ise" ||
+                     key == "pe" || key == "pc" || key == "ise" ||
                      key == "isc" || key == "ne" || key == "nc" || key == "rb" ||
                      key == "rc" || key == "re") {
-                // Gummel-Poon refinements - land M4b (caps) / M5 (temp, Early).
+                // Gummel-Poon refinements - land M4c/M5 (Tf/Tr diffusion charge,
+                // Early effect, temp model, noise, parasitic resistances).
             } else {
                 return spice_fail(dev_diag(
                     ErrorKind::Semantic, "spice.semantic.model_param",
@@ -378,6 +527,11 @@ public:
         vcrit_be_ = (arg_be > 1.0) ? nf_ * vt_ * std::log(arg_be) : nf_ * vt_;
         const double arg_bc = nr_ * vt_ / (std::sqrt(2.0) * is_bc);
         vcrit_bc_ = (arg_bc > 1.0) ? nr_ * vt_ * std::log(arg_bc) : nr_ * vt_;
+        // M4b: junction cap params.
+        cje_ = cje_val; cjc_ = cjc_val;
+        mje_ = mje_val; mjc_ = mjc_val;
+        vje_ = vje_val; vjc_ = vjc_val;
+        fc_ = fc_val;
         return {};
     }
 
@@ -415,6 +569,98 @@ private:
         return vp - vn;
     }
 
+    // --- M4b: junction capacitance --------------------------------------
+    [[nodiscard]] bool has_caps() const { return cje_ > 0.0 || cjc_ > 0.0; }
+
+    // Generic depletion charge/cap (same SPICE formula as the diode's Cjo,
+    // parameterized by the junction's Cj/M/Vj/Fc).
+    [[nodiscard]] static double q_dep_jn(double v, double cj, double m, double vj, double fc) {
+        if (cj <= 0.0) return 0.0;
+        const double fc_vj = fc * vj;
+        if (v < fc_vj) {
+            double arg = 1.0 - v / vj;
+            if (arg < 1e-12) arg = 1e-12;
+            return cj * vj / (1.0 - m) * (1.0 - std::pow(arg, 1.0 - m));
+        }
+        const double f1 = vj * (1.0 - std::pow(1.0 - fc, 1.0 - m)) / (1.0 - m);
+        const double f2 = std::pow(1.0 - fc, -m);
+        const double dv = v - fc_vj;
+        return cj * f1 + cj * f2 * dv * (1.0 + m * dv / (2.0 * vj * (1.0 - fc)));
+    }
+    [[nodiscard]] static double c_dep_jn(double v, double cj, double m, double vj, double fc) {
+        if (cj <= 0.0) return 0.0;
+        const double fc_vj = fc * vj;
+        if (v < fc_vj) {
+            double arg = 1.0 - v / vj;
+            if (arg < 1e-12) arg = 1e-12;
+            return cj / std::pow(arg, m);
+        }
+        const double f2 = std::pow(1.0 - fc, -m);
+        const double dv = v - fc_vj;
+        return cj * f2 * (1.0 + m * dv / (vj * (1.0 - fc)));
+    }
+    // BE/BC junction wrappers (use the effective Cj from fold_state).
+    [[nodiscard]] double q_dep_be(double vbe, double cje_eff) const {
+        return q_dep_jn(vbe, cje_eff, mje_, vje_, fc_);
+    }
+    [[nodiscard]] double c_dep_be(double vbe, double cje_eff) const {
+        return c_dep_jn(vbe, cje_eff, mje_, vje_, fc_);
+    }
+    [[nodiscard]] double q_dep_bc(double vbc, double cjc_eff) const {
+        return q_dep_jn(vbc, cjc_eff, mjc_, vjc_, fc_);
+    }
+    [[nodiscard]] double c_dep_bc(double vbc, double cjc_eff) const {
+        return c_dep_jn(vbc, cjc_eff, mjc_, vjc_, fc_);
+    }
+
+    // LTE history push (3 (t,q) pairs, oldest first). BE restart clears.
+    static void push_hist(double* st, std::size_t n_slot, std::size_t hist_slot,
+                          double t, double q, bool be) {
+        if (be) { st[n_slot] = 0.0; return; }
+        const double n = st[n_slot];
+        if (n < 3.0) {
+            const auto idx = static_cast<std::size_t>(n);
+            st[hist_slot + idx * 2] = t;
+            st[hist_slot + idx * 2 + 1] = q;
+            st[n_slot] = n + 1.0;
+        } else {
+            for (std::size_t i = 0; i < 2; ++i) {
+                st[hist_slot + i * 2] = st[hist_slot + (i + 1) * 2];
+                st[hist_slot + i * 2 + 1] = st[hist_slot + (i + 1) * 2 + 1];
+            }
+            st[hist_slot + 4] = t;
+            st[hist_slot + 5] = q;
+        }
+    }
+
+    // Divided-difference LTE check (same formula as devices_m2.cpp's dd3_lte).
+    static void dd3_lte_check(const double* n_ptr, const double* hist,
+                              const TranStep& step, double q_new, double q_scale,
+                              double reltol, double chgtol, double trtol, double* ratio) {
+        const double n = *n_ptr;
+        if (n < 3.0) {
+            if (ratio) *ratio = 0.0;
+            return;
+        }
+        const double t0 = hist[0], q0 = hist[1];
+        const double t1 = hist[2], q1 = hist[3];
+        const double t2 = hist[4], q2 = hist[5];
+        const double t3 = step.time, q3 = q_new;
+        if (!(t1 > t0) || !(t2 > t1) || !(t3 > t2) || !(step.dt > 0)) {
+            if (ratio) *ratio = 0.0;
+            return;
+        }
+        const double d1a = (q1 - q0) / (t1 - t0);
+        const double d1b = (q2 - q1) / (t2 - t1);
+        const double d1c = (q3 - q2) / (t3 - t2);
+        const double d2a = (d1b - d1a) / (t2 - t0);
+        const double d2b = (d1c - d1b) / (t3 - t1);
+        const double dd3 = (d2b - d2a) / (t3 - t0);
+        const double eps = step.dt * step.dt * step.dt * std::abs(dd3) / 2.0;
+        const double tolq = trtol * (reltol * std::max(std::abs(q3), std::abs(q_scale)) + chgtol);
+        if (ratio) *ratio = (tolq > 0) ? (eps / tolq) : std::numeric_limits<double>::infinity();
+    }
+
     std::string name_;
     NodeId c_, b_, e_;
     ExprProgram area_;
@@ -429,7 +675,13 @@ private:
     double vt_ = 0.02585;
     double vcrit_be_ = 0.7;
     double vcrit_bc_ = 0.7;
+    // M4b: junction cap params (Cje/Cjc > 0 enables the companions)
+    double cje_ = 0.0, cjc_ = 0.0;
+    double mje_ = 0.5, mjc_ = 0.5;
+    double vje_ = 0.75, vjc_ = 0.75;
+    double fc_ = 0.5;
     bool pnp_ = false;
+    std::size_t self_index_ = 0;  // filled by link_dynamic
     std::string model_name_;
 };
 
