@@ -248,7 +248,6 @@ public:
         cx.add_entry(e_, e_, {die_dve, 0.0});
         // M4b: junction caps Cje(Vbe_op) and Cjc(Vbc_op) as j*omega*C.
         if (has_caps()) {
-            const double area = cx.par(kAreaParam);
             if (cje_ > 0.0) {
                 const double cje_eff = cje_ * area;
                 const double cj_be = c_dep_be(vbe, cje_eff);
