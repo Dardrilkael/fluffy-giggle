@@ -100,7 +100,7 @@
       "name": "android",
       "displayName": "Android (Ninja, NDK, arm64-v8a)",
       "inherits": "_base",
-      "binaryDir": "${sourceDir}/build/android",
+      "binaryDir": "${sourceDir}/build/android-arm64",
       "toolchainFile": "$env{ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
@@ -109,6 +109,33 @@
         "ANDROID_STL": "c++_static",
         "WS_BUILD_TESTS": "OFF",
         "WS_BUILD_APPS": "ON"
+      }
+    },
+    {
+      "name": "android-armv7",
+      "displayName": "Android (Ninja, NDK, armeabi-v7a)",
+      "inherits": "android",
+      "binaryDir": "${sourceDir}/build/android-armv7",
+      "cacheVariables": {
+        "ANDROID_ABI": "armeabi-v7a"
+      }
+    },
+    {
+      "name": "android-x86",
+      "displayName": "Android (Ninja, NDK, x86)",
+      "inherits": "android",
+      "binaryDir": "${sourceDir}/build/android-x86",
+      "cacheVariables": {
+        "ANDROID_ABI": "x86"
+      }
+    },
+    {
+      "name": "android-x8664",
+      "displayName": "Android (Ninja, NDK, x86_64)",
+      "inherits": "android",
+      "binaryDir": "${sourceDir}/build/android-x8664",
+      "cacheVariables": {
+        "ANDROID_ABI": "x86_64"
       }
     }
   ],
@@ -121,7 +148,10 @@
     { "name": "spice-release", "configurePreset": "spice-release" },
     { "name": "vs-debug", "configurePreset": "vs-debug", "configuration": "Debug" },
     { "name": "vs-release", "configurePreset": "vs-release", "configuration": "Release" },
-    { "name": "android", "configurePreset": "android" }
+    { "name": "android", "configurePreset": "android" },
+    { "name": "android-armv7", "configurePreset": "android-armv7" },
+    { "name": "android-x86", "configurePreset": "android-x86" },
+    { "name": "android-x8664", "configurePreset": "android-x8664" }
   ],
   "testPresets": [
     {
