@@ -5,7 +5,7 @@ contract is `DESIGN.md` (this directory) - sections cited throughout the
 code as `§n.m`; when code and this file disagree, DESIGN.md wins and this
 file gets fixed.
 
-## What exists (M0-M3 + the 2026-10-29 structural revision)
+## What exists (M0-M4c + the 2026-10-29 structural revision)
 - `ws::math` sparse LU facade (lives in libs/math, grown for this arc):
   analyze once per topology, factorize per solve, real + complex,
   transpose solve for the future noise adjoint.
@@ -54,6 +54,28 @@ file gets fixed.
   differentiated, pnjlim (SPICE3 devlim, §5.3) clamps the per-iteration
   junction-voltage jump past vcrit. `solve_tran` is now a real Newton
   loop (was switch-only when every device was linear).
+- **M4a - the BJT** (Ebers-Moll transport model): direct terminal-current
+  stamp (Ic/Ib/Ie + derivatives into G, Norton offsets into rhs), two
+  pnjlim slots (Vbe/Vbc), `.model NPN|PNP(Is= Bf= Br= Nf= Nr=)`; NPN and
+  PNP share polarity-independent G entries - only the RHS flips (sgn).
+  `Builder::bjt()`/`bjt_model()`.
+- **M4b - junction caps**: the nonlinear charge companion (SPICE3
+  depletion Q/C + the Fc*Vj linear extension), shared by the diode
+  (Cjo/M/Vj/Fc; state 3 -> 16 slots) and both BJT junctions
+  (Cje/Cjc/Mje/Mjc/Vje/Vjc/Fc; state 4 -> 30 slots) - the
+  q_dep_jn/c_dep_jn helpers live in devices_m4.cpp. begin_step freezes
+  geq/jeq at the last COMMITTED V; commit stores Q(V_new) + the LTE
+  (t,Q) history; seed_state takes the OP. A device with caps is dynamic
+  (is_dynamic flips true; Cjo=0 keeps the M3 diode byte-identical).
+  .ac adds j*omega*Cj(V_op).
+- **M4c - the MOSFET** (level 1 Shichman-Hodges + body effect): triode
+  and saturation Id with (1+lambda*Vds) channel-length modulation,
+  Vth = Vto + gamma*(sqrt(2*phi-Vbs) - sqrt(2*phi)); `M name d g s b
+  model [L= W=]`, `.model NMOS|PMOS(Vto= Kp= Lambda= Gamma= Phi=)`. No
+  fetlim by design (quadratic, not exponential - converges plain) and
+  no Meyer caps yet. NOTE: no §10.1 analytic test row yet - validation
+  is the ngspice 39 cross-check + the mos_* decks; the test row is the
+  first gap to close.
 - measure:: library (rise_time, rms, trig_targ, ...) + .meas as a thin
   parser (TRIG/TARG WHEN AVG RMS MAX MIN PP INTEG FIND...WHEN/AT
   DERIV); failures are notes (--strict-meas promotes).
@@ -63,8 +85,9 @@ file gets fixed.
   traps + topology + unused models, nothing simulates); CLI: -o -,
   --format raw, --keep-going, --strict-meas, --werror.
 
-Everything else rejects at parse with file:line (working-rule 5): B/Q/M/T
-(M4), `.lib` (backlog), `.noise/.nodeset` (M5), `solver=klu` (M0b).
+Everything else rejects at parse with file:line (working-rule 5): B
+(M4d), T (M4e), `.lib` (backlog), `.noise/.nodeset` (M5), `solver=klu`
+(M0b).
 
 ## Layout
 - Public surface (`include/ws/spice/`): parse.hpp, deck.hpp (cards +
@@ -77,16 +100,19 @@ Everything else rejects at parse with file:line (working-rule 5): B/Q/M/T
   results writers. ws::core::Result only - no exceptions, no exit() in
   lib paths (§0.6); no ws::math type ever appears here (§2.2).
 - `src/`: parse.cpp, deck.cpp (cards/params), expr.cpp (VM + signal/@
-  refs), elaborate.cpp (flatten, node table, graph checks, subckt-local
-  value inlining), devices.cpp / devices_m2.cpp / devices_m3.cpp (the 13
-  kinds R/V/I/E/F/G/H/C/L/K/S/W/D, param specs + state slots +
-  write_card), mna.cpp (pattern + numeric contexts over (Circuit,
-  RunState, x, gmin)), kernel.hpp (shared DcKernel + the ladder +
-  NonlinResid convergence), analysis.cpp (drivers + .step family +
-  save-expression evaluator + compat=strict), transient.cpp
+  refs), error.cpp (the taxonomy), elaborate.cpp (flatten, node table,
+  graph checks, subckt-local value inlining), devices.cpp /
+  devices_m2.cpp / devices_m3.cpp / devices_m4.cpp (the 15 kinds
+  R/V/I/E/F/G/H/C/L/K/S/W/D/Q/M - param specs + state slots +
+  write_card; _m4 = the BJT/MOSFET + the shared junction-cap
+  companion), mna.cpp + mna.hpp (pattern + numeric contexts over
+  (Circuit, RunState, x, gmin)), kernel.hpp (shared DcKernel + the
+  ladder + NonlinResid convergence), analysis.cpp (drivers + .step
+  family + save-expression evaluator + compat=strict), transient.cpp
   (TranMarch/TransientRun), simulator.cpp, builder.cpp, state.cpp,
-  circuit.cpp (finalize + .options), measure.cpp, raw.cpp, netlist.cpp,
-  lint.cpp, output.cpp. cards.hpp/drivers.hpp are src-only.
+  circuit.cpp (finalize + .options), waveform.cpp (PULSE/SIN/EXP/PWL,
+  §6.2/§6.4), measure.cpp, raw.cpp, netlist.cpp, lint.cpp, output.cpp.
+  cards.hpp/drivers.hpp/waveform.hpp are src-only.
 - `apps/spice`: argv, file I/O, exit codes - run + check subcommands.
 ## Rules that keep biting
 - **ws::math is PRIVATE** (§2.2): no ws::math type or header under
@@ -166,24 +192,30 @@ Everything else rejects at parse with file:line (working-rule 5): B/Q/M/T
   when `vnew > vcrit` (≈ 0.7V for defaults). vcrit = `N*Vt*ln(N*Vt/(√2*Is))`
   (SPICE3 formula). The clamp is essential: without it, the first Newton
   iterate from a cold start puts Vd ≈ Vs (the diode looks like a near-
-  open at Vd=0), and `exp(Vs/Vt)` overflows for Vs > ~1V.
-- **Diode state** (3 slots, M3): `[0] Vd_prev` (the clamped Vd from the
-  last iteration, for pnjlim's vold), `[1] I_cur`, `[2] I_prev` (for
-  nonlinear_residual). All zeroed at bind. `update_state` stores the
-  CLAMPED `Vd_lim` as `Vd_prev` (not the raw iterate), recomputing
+  open at Vd=0), and `exp(Vs/Vt)` overflows for Vs > ~1V. Since the
+  M4c fix, `update_state` returns TRUE while the limiter is actively
+  clamping (Vd_lim != Vd_load; both BJT junctions likewise) - otherwise
+  a stiff cold start falsely converges at a stale linearization point
+  (the device current sits below abstol, so the residual gate passes).
+- **Diode state** (3 slots, M3; grows to 16 when Cjo > 0): `[0] Vd_prev`
+  (the clamped Vd from the last iteration, for pnjlim's vold), `[1]
+  I_cur`, `[2] I_prev` (for nonlinear_residual), then the M4b companion
+  slots (V_comp/Q_comp/I_comp/geq/jeq + the LTE history + folded
+  Cjo*area). All zeroed at bind. `update_state` stores the CLAMPED
+  `Vd_lim` as `Vd_prev` (not the raw iterate), recomputing
   `pnjlim(Vd(x_prev), vold, ...)` identically to `load_dc` - both use
-  the same vold, so they agree. The diode is NOT dynamic (`is_dynamic()`
-  false) - no companion, no Cjo in M3; `load_tran` defaults to `load_dc`.
+  the same vold, so they agree. Dynamic ONLY when Cjo > 0
+  (`is_dynamic()`); with no caps `load_tran` defaults to `load_dc`.
 - **Diode temp** (M3 limitation): `Vt` is frozen at `Tnom` (default 27°C)
   at `apply_model` time. `.options temp` does NOT re-revaluate the
   diode's thermal voltage (temp-dependent models are M5). The Lambert-W
   gate uses the default 27°C; `.dc temp` over a diode gives wrong
   currents at non-27°C points. M5 threads `temp` through the load context.
-- **Diode model params** (M3): `.model name D(Is=... N=... Tnom=...)`
-  implemented. Rs, Cjo, M, Vj, Bv, Ibv, Xti, Eg, Kf, Af, Fc are ACCEPTED
-  (so ngspice decks parse cleanly) but NOT implemented - they land with
-  M4 (Cjo/M/Vj junction cap) or M5 (Tnom/Xti/Eg temp, Bv/Ibv breakdown,
-  Kf/Af noise). Unknown keys reject at parse naming the allow-list.
+- **Diode model params**: `.model name D(Is=... N=... Cjo= M= Vj= Fc=
+  Tnom=...)` implemented (M3 + M4b's junction cap). Rs, TT, Bv, Ibv,
+  Xti, Eg, Kf, Af are ACCEPTED (so ngspice decks parse cleanly) but NOT
+  implemented - M5 (Tnom/Xti/Eg temp, Bv/Ibv breakdown, Kf/Af noise).
+  Unknown keys reject at parse naming the allow-list.
 - **`.options gshunt`/`gminsteps`/`srcsteps`** (M3): `gshunt` (default 0,
   off) is the opt-in per-node conductance to ground (§5.3) - masks §4.4's
   floating-node errors, so off by default; a positive value shunts every
@@ -317,7 +349,7 @@ Everything else rejects at parse with file:line (working-rule 5): B/Q/M/T
 ```
 ctest --preset linux -R spice    # linux preset = core;math;spice subset
 ```
-One binary, five TUs: test_spice.cpp (error taxonomy, owns the doctest
+One binary, four TUs: test_spice.cpp (error taxonomy, owns the doctest
 main), test_parse.cpp (records/numbers/includes), test_run.cpp (the
 gate: analytic .op/.dc/.tran/.ac rows, parse-error goldens, topology
 goldens, CSV shape, param scoping, the arenas' isolation, the ladder,

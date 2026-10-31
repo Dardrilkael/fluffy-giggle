@@ -88,6 +88,11 @@ One line each - the per-tree CLAUDE.md files carry the detail:
   settings seams) and the undo stack - the headless halves of stage
   13; the menu/toolbar builders, the command palette and the keymap
   editor that view them live in ws::ui.
+- `libs/spice` - the headless SPICE circuit simulator: netlist parser,
+  elaboration, MNA over the ws::math sparse-LU facade (linked PRIVATE),
+  the .op/.dc/.tran/.ac analyses and the compact-device family (R/C/L/
+  sources through the diode/BJT/MOSFET M4 devices). The contract is
+  `libs/spice/DESIGN.md` - sections cited as §n.m throughout the code.
 - `apps/*` - the executables.
 
 ## Read when

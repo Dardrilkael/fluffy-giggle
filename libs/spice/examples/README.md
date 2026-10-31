@@ -34,6 +34,14 @@ On Windows: `.\build\spice-debug\bin\spice.exe run <example>.cir`
 | `diode_ac_cjo.cir` | `.ac` | Reverse-biased diode as a cap; RC low-pass cutoff at fc = 1/(2πRC) |
 | `bjt_ac_cje.cir` | `.ac` | BJT Cje cap; base low-pass with the source resistance |
 
+## M4c — the MOSFET (level 1, Shichman-Hodges)
+
+| File | Analysis | What it shows |
+|---|---|---|
+| `mos_saturation.cir` | `.op` | NMOS saturation: Id = ½·Kp·W/L·(Vgs−Vth)²·(1+λVds) = 11.0 µA (matches ngspice 39 exactly) |
+| `mos_iv.cir` | `.dc` | Id vs Vds — the triode-to-saturation knee |
+| `mos_cutoff.cir` | `.op` | Vgs < Vth — Id ≈ 0 |
+
 ## ngspice cross-validation
 
 The `.op` examples produce values that match ngspice 39 to 5+ significant
