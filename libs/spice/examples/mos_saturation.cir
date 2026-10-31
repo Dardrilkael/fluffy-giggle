@@ -1,0 +1,6 @@
+NMOS saturation: Id = 0.5*Kp*W/L*(Vgs-Vth)^2*(1+lambda*Vds)
+Vgs g 0 DC 2
+Vds d 0 DC 5
+M1 d g 0 0 mn L=10u W=10u
+.model mn NMOS(Vto=1 Kp=20u Lambda=0.02)
+.op

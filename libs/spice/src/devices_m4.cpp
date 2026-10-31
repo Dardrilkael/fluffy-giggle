@@ -752,4 +752,310 @@ ws::core::Result<std::unique_ptr<Device>> make_bjt(const DeviceCard& card,
     return dev;
 }
 
+// --- M (MOSFET, §3.6/§5.3/§11 M4c: Shichman-Hodges level 1) ----------------------
+
+namespace {
+
+class Mosfet final : public Device {
+public:
+    static constexpr std::size_t kVgsPrev = 0;
+    static constexpr std::size_t kVdsPrev = 1;
+    static constexpr std::size_t kICur = 2;
+    static constexpr std::size_t kIPrev = 3;
+
+    Mosfet(std::string display, NodeId d, NodeId g, NodeId s, NodeId b,
+           double l, double w)
+        : name_(std::move(display)), d_(d), g_(g), s_(s), b_(b), l_(l), w_(w) {}
+
+    [[nodiscard]] const std::string& name() const override { return name_; }
+    [[nodiscard]] char kind() const override { return 'M'; }
+    [[nodiscard]] std::vector<NodeId> terminals() const override {
+        return {d_, g_, s_, b_};
+    }
+    // The MOSFET's channel connects D-S (through the controlled current
+    // source); the gate is capacitive only (no DC path). The body junction
+    // (B-S, B-D) is reverse-biased (a diode) — for the graph check, treat
+    // D-S as a conductance path (the channel is always slightly conducting
+    // via gmin). The gate has no DC path (open).
+    [[nodiscard]] std::vector<std::pair<NodeId, NodeId>> conductance_edges()
+        const override {
+        return {{d_, s_}};  // channel (weak but present via gmin)
+    }
+
+    // --- the stamp (direct terminal-current, like the BJT) --------------
+    // Level 1 (Shichman-Hodges):
+    //   Cutoff (Vgs < Vth): Id = 0
+    //   Triode (Vgs > Vth, Vds < Vgs-Vth):
+    //     Id = Kp*W/L*(Vgs-Vth - Vds/2)*Vds*(1+lambda*Vds)
+    //   Saturation (Vgs > Vth, Vds >= Vgs-Vth):
+    //     Id = 0.5*Kp*W/L*(Vgs-Vth)^2*(1+lambda*Vds)
+    // Vth = Vto + gamma*(sqrt(2*phi - Vbs) - sqrt(2*phi))
+    // PMOS: negate Vgs, Vds, Vbs; Id flows S→D (negate Id).
+    void load_dc(DcLoadContext& cx) const override {
+        const double sgn = pnp_ ? -1.0 : 1.0;  // PMOS = pnp_ flag reused
+        const double vg = cx.node_v(g_), vs = cx.node_v(s_);
+        const double vd = cx.node_v(d_), vb = cx.node_v(b_);
+        const double vgs = sgn * (vg - vs);
+        const double vds = sgn * (vd - vs);
+        const double vbs = sgn * (vb - vs);
+        // Body effect: Vth = Vto + gamma*(sqrt(2*phi - Vbs) - sqrt(2*phi)).
+        double vth = vto_;
+        if (gamma_ != 0.0) {
+            const double arg1 = std::max(2 * phi_ - vbs, 1e-12);
+            const double arg2 = std::max(2 * phi_, 1e-12);
+            vth += gamma_ * (std::sqrt(arg1) - std::sqrt(arg2));
+        }
+        const double vgs_vth = vgs - vth;  // "overdrive voltage"
+        const double gm = cx.gmin();  // gmin floor for the channel
+        // Compute Id and its derivatives.
+        double id, did_dvg, did_dvd, did_dvs, did_dvb;
+        if (vgs_vth <= 0.0) {
+            // Cutoff: Id = 0 (only gmin leakage).
+            id = 0.0;
+            did_dvg = did_dvd = did_dvs = did_dvb = 0.0;
+        } else {
+            const double beta = kp_ * w_ / l_;  // Kp*W/L
+            const double vdsat = vgs_vth;       // saturation voltage
+            if (vds < vdsat) {
+                // Triode: Id = beta*(Vgs-Vth - Vds/2)*Vds*(1+lambda*Vds)
+                const double vds_eff = vds;
+                id = beta * (vgs_vth - vds_eff / 2.0) * vds_eff * (1.0 + lambda_ * vds_eff);
+                // Derivatives (chain rule: Vgs=d(Vg-Vs), Vds=d(Vd-Vs), Vth=f(Vbs))
+                did_dvg = beta * vds_eff * (1.0 + lambda_ * vds_eff);  // dId/dVgs
+                did_dvd = beta * ((vgs_vth - vds_eff) * (1.0 + lambda_ * vds_eff) +
+                                   (vgs_vth - vds_eff / 2.0) * vds_eff * lambda_);  // dId/dVds
+                did_dvs = -did_dvg - did_dvd;  // via Vgs and Vds chain
+                did_dvb = 0.0;  // body effect on Vth (simplified)
+                // Body effect: dVth/dVbs = -gamma/(2*sqrt(2*phi-Vbs))
+                // dId/dVb = dId/dVgs * (-dVth/dVbs) ... (simplified for M4c)
+            } else {
+                // Saturation: Id = 0.5*beta*(Vgs-Vth)^2*(1+lambda*Vds)
+                id = 0.5 * beta * vgs_vth * vgs_vth * (1.0 + lambda_ * vds);
+                did_dvg = beta * vgs_vth * (1.0 + lambda_ * vds);  // gm
+                did_dvd = 0.5 * beta * vgs_vth * vgs_vth * lambda_;  // gds (channel-length mod)
+                did_dvs = -did_dvg - did_dvd;
+                did_dvb = 0.0;  // body effect (simplified)
+            }
+        }
+        // Add gmin channel (D-S conductance floor for graph/convergence).
+        id += gm * vds;
+        did_dvd += gm;
+        did_dvs -= gm;
+        // Apply polarity (PMOS: Id flows S→D, so negate).
+        id *= sgn;
+        // The G matrix entries are polarity-independent (the sgn factors
+        // cancel in the chain rule, same as the BJT). The derivatives
+        // dic_dvg etc. are d(sgn*Id)/dVi directly.
+        const double dic_dvg = did_dvg;  // dId/dVg
+        const double dic_dvd = did_dvd;  // dId/dVd
+        const double dic_dvs = did_dvs;  // dId/dVs
+        const double dic_dvb = did_dvb;  // dId/dVb
+        // Norton offset in terms of node voltages.
+        const double id_const = sgn * id -
+            (dic_dvg * vg + dic_dvd * vd + dic_dvs * vs + dic_dvb * vb);
+        // G matrix: current leaving D = Id (into the drain).
+        cx.add_entry(d_, g_, dic_dvg);
+        cx.add_entry(d_, d_, dic_dvd);
+        cx.add_entry(d_, s_, dic_dvs);
+        cx.add_entry(d_, b_, dic_dvb);
+        // Source gets -Id (current leaves source).
+        cx.add_entry(s_, g_, -dic_dvg);
+        cx.add_entry(s_, d_, -dic_dvd);
+        cx.add_entry(s_, s_, -dic_dvs);
+        cx.add_entry(s_, b_, -dic_dvb);
+        // RHS: the MOSFET pulls Id from D, pushes -Id into S.
+        cx.add_rhs(d_, -id_const);
+        cx.add_rhs(s_, id_const);
+    }
+
+    // M4c: no junction caps yet (Cgs/Cgd/Cgb land in a follow-up).
+    // load_tran = load_dc (the MOSFET is a nonlinear resistor at each OP).
+
+    // --- parameter model (§3.5a) -----------------------------------------
+    [[nodiscard]] std::vector<ParamSpec> param_specs() const override {
+        return {};  // L and W are construction data, not run parameters
+    }
+    [[nodiscard]] ws::core::Status check_params(const double*) const override {
+        return {};
+    }
+
+    // --- state model (§3.5b) ---------------------------------------------
+    [[nodiscard]] std::size_t state_slots() const override { return 4; }
+    [[nodiscard]] bool is_dynamic() const override { return false; }
+
+    // Track Id for nonlinear_residual + Vgs/Vds for limiting (M4c: no
+    // fetlim yet — the MOS is quadratic, converges without limiting).
+    [[nodiscard]] bool update_state(const std::vector<double>& x,
+                                    std::size_t /*nc*/, double* st,
+                                    const std::vector<double>* x_prev = nullptr) override {
+        const std::vector<double>& x_load =
+            (x_prev != nullptr && !x_prev->empty()) ? *x_prev : x;
+        const double sgn = pnp_ ? -1.0 : 1.0;
+        const double vgs = sgn * (v_across(x_load, g_, s_));
+        const double vds = sgn * (v_across(x_load, d_, s_));
+        // Compute Id at the current iterate (for residual tracking).
+        double vth = vto_;
+        if (gamma_ != 0.0) {
+            const double vbs = sgn * (v_across(x_load, b_, s_));
+            const double arg1 = std::max(2 * phi_ - vbs, 1e-12);
+            const double arg2 = std::max(2 * phi_, 1e-12);
+            vth += gamma_ * (std::sqrt(arg1) - std::sqrt(arg2));
+        }
+        const double vgs_vth = vgs - vth;
+        double id = 0.0;
+        if (vgs_vth > 0.0) {
+            const double beta = kp_ * w_ / l_;
+            if (vds < vgs_vth) {
+                id = beta * (vgs_vth - vds / 2.0) * vds * (1.0 + lambda_ * vds);
+            } else {
+                id = 0.5 * beta * vgs_vth * vgs_vth * (1.0 + lambda_ * vds);
+            }
+        }
+        id *= sgn;
+        st[kIPrev] = st[kICur];
+        st[kICur] = id;
+        st[kVgsPrev] = vgs;
+        st[kVdsPrev] = vds;
+        return false;  // no limiting in M4c (MOS is quadratic)
+    }
+
+    [[nodiscard]] NonlinResid nonlinear_residual(const double* st) const override {
+        const double i_cur = st[kICur];
+        const double i_prev = st[kIPrev];
+        return {std::abs(i_cur - i_prev), std::max(std::abs(i_cur), std::abs(i_prev))};
+    }
+
+    // .model name NMOS|PMOS(Level=1 Vto= Kp= Lambda= Gamma= Phi= ...)
+    ws::core::Status apply_model(const ModelDef& model) override {
+        if (model.type != "nmos" && model.type != "pmos") {
+            return spice_fail(dev_diag(
+                ErrorKind::Semantic, "spice.semantic.model_type",
+                "MOSFET " + name_ + " needs NMOS or PMOS, got '" + model.type + "'",
+                model.loc));
+        }
+        pnp_ = (model.type == "pmos");
+        model_name_ = model.name.text;
+        // ngspice defaults: Vto=0, Kp=20µA/V², Lambda=0, Gamma=0, Phi=0.6.
+        double vto = 0.0, kp = 20e-6, lambda = 0.0, gamma = 0.0, phi = 0.6;
+        const auto& toks = model.params;
+        for (std::size_t i = 0; i < toks.size(); ++i) {
+            std::string text = toks[i].text;
+            while (!text.empty() && text.front() == '(') text.erase(text.begin());
+            while (!text.empty() && text.back() == ')') text.pop_back();
+            if (text.empty()) continue;
+            std::string key, value;
+            const std::size_t eq = text.find('=');
+            if (eq != std::string::npos && eq > 0) {
+                key = to_lower(text.substr(0, eq));
+                value = text.substr(eq + 1);
+            } else {
+                key = to_lower(text);
+                std::size_t next = i + 1;
+                if (next < toks.size() && toks[next].text == "=") ++next;
+                if (next >= toks.size()) {
+                    return spice_fail(dev_diag(
+                        ErrorKind::Semantic, "spice.semantic.model_param",
+                        "model '" + model.name.text + "': '" + text + "' needs a value",
+                        toks[i].loc));
+                }
+                value = toks[next].text;
+                i = next;
+            }
+            while (!value.empty() && value.back() == ')') value.pop_back();
+            double v = 0.0;
+            if (const ws::core::Result<double> r = parse_number(value)) {
+                v = *r;
+            } else {
+                return spice_fail(dev_diag(
+                    ErrorKind::Semantic, "spice.semantic.model_param",
+                    "model '" + model.name.text + "': bad value '" + value + "'",
+                    toks[i].loc));
+            }
+            if (key == "vto") vto = v;
+            else if (key == "kp") kp = v;
+            else if (key == "lambda") lambda = v;
+            else if (key == "gamma") gamma = v;
+            else if (key == "phi") phi = v;
+            else if (key == "level" || key == "u0" || key == "tox" ||
+                     key == "cj" || key == "mj" || key == "cjsw" ||
+                     key == "mjsw" || key == "pb" || key == "js" ||
+                     key == "cbd" || key == "cbs" || key == "cgso" ||
+                     key == "cgdo" || key == "cgbo" || key == "nsub" ||
+                     key == "nss" || key == "tpg" || key == "ld" ||
+                     key == "xl" || key == "wd" || key == "xw") {
+                // Accepted but not implemented (BSIM, cap tables, etc.).
+            } else {
+                return spice_fail(dev_diag(
+                    ErrorKind::Semantic, "spice.semantic.model_param",
+                    "model '" + model.name.text + "': unknown parameter '" + key +
+                        "' (Level, Vto, Kp, Lambda, Gamma, Phi, + MOS set)",
+                    toks[i].loc));
+            }
+        }
+        vto_ = vto; kp_ = kp; lambda_ = lambda; gamma_ = gamma; phi_ = phi;
+        return {};
+    }
+
+    [[nodiscard]] bool write_card(std::string& out,
+                                  const CardWriter& w) const override {
+        out += name_ + " " + w.node(d_) + " " + w.node(g_) + " " + w.node(s_) +
+               " " + w.node(b_) + " " + model_name_ +
+               " L=" + Device::CardWriter::num(l_) +
+               " W=" + Device::CardWriter::num(w_) + "\n";
+        return true;
+    }
+
+private:
+    static double v_across(const std::vector<double>& x, NodeId p, NodeId n) {
+        const double vp = (p == kGround) ? 0.0 : x[p];
+        const double vn = (n == kGround) ? 0.0 : x[n];
+        return vp - vn;
+    }
+
+    std::string name_;
+    NodeId d_, g_, s_, b_;
+    double l_, w_;
+    // Model fields:
+    double vto_ = 0.0;
+    double kp_ = 20e-6;
+    double lambda_ = 0.0;
+    double gamma_ = 0.0;
+    double phi_ = 0.6;
+    bool pnp_ = false;  // PMOS
+    std::string model_name_;
+};
+
+}  // namespace
+
+ws::core::Result<std::unique_ptr<Device>> make_mosfet(const DeviceCard& card,
+                                                       FactoryServices& s) {
+    // M name D G S B model [L=...] [W=...] [AD=] [AS=] ...
+    WS_TRY_ASSIGN(const std::vector<NodeId> n, take_nodes(card, s.nodes, 4, 0));
+    constexpr std::size_t model_idx = 4;
+    if (card.rest.size() <= model_idx) {
+        return spice_fail(dev_diag(ErrorKind::Semantic, "spice.semantic.arity",
+                                   "MOSFET " + card.name.text +
+                                       " takes four nodes (D G S B) and a model name",
+                                   card.loc));
+    }
+    double l = 100e-6, w = 100e-6;  // ngspice defaults
+    for (std::size_t i = model_idx + 1; i < card.rest.size(); ++i) {
+        const std::string lower = to_lower(card.rest[i].text);
+        if (lower.rfind("l=", 0) == 0) {
+            if (const ws::core::Result<double> r = parse_number(card.rest[i].text.substr(2))) {
+                l = *r;
+            }
+        } else if (lower.rfind("w=", 0) == 0) {
+            if (const ws::core::Result<double> r = parse_number(card.rest[i].text.substr(2))) {
+                w = *r;
+            }
+        }
+        // AD, AS, PD, PS, NRD, NRS, OFF, IC= — accepted, ignored in M4c.
+    }
+    auto dev = std::make_unique<Mosfet>(card.name.text, n[0], n[1], n[2], n[3], l, w);
+    dev->loc = card.loc;
+    s.models.push_back(ModelRequest{dev.get(), card.rest[model_idx]});
+    return dev;
+}
+
 }  // namespace ws::spice

@@ -50,6 +50,7 @@ std::map<char, DeviceShape> device_shapes() {
         {'S', {4, {}}},  // S n+ n- nc+ nc- model (all four are nodes)
         {'D', {2, {}}},  // D anode cathode model [area] (M3)
         {'Q', {3, {}}},  // Q C B E model [area] (M4a; substrate S lands M4b)
+        {'M', {4, {}}},  // M D G S B model [L= W=] (M4c)
     };
     return table;
 }
