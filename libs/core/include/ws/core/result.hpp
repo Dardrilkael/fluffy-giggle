@@ -26,6 +26,11 @@ struct Error {
 template <class T, class E = Error>
 using Result = tl::expected<T, E>;
 
+// Spell the argument explicitly at call sites:
+//   ws::core::unexpected<ws::core::Error>(e)
+// The deduction form `ws::core::unexpected(e)` (alias CTAD, P1814R0)
+// compiles on MSVC and GCC but NDK r27's clang 18 rejects alias-template
+// deduction - keep every call site clang-18-clean.
 template <class E>
 using unexpected = tl::unexpected<E>;
 

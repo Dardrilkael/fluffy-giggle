@@ -43,11 +43,11 @@ ws::core::Result<RunOutput> run_text(const std::string& deck,
     const ws::core::Result<ws::spice::Deck> parsed =
         read_deck("t.cir", deck, ws::spice::ParseOptions{});
     if (!parsed) {
-        return ws::core::unexpected(parsed.error());
+        return ws::core::unexpected<ws::core::Error>(parsed.error());
     }
     const ws::core::Result<ws::spice::DeckAst> ast = build_deck_ast(*parsed, w);
     if (!ast) {
-        return ws::core::unexpected(ast.error());
+        return ws::core::unexpected<ws::core::Error>(ast.error());
     }
     return run_deck(*ast, settings, w);
 }

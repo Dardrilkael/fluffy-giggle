@@ -859,7 +859,7 @@ ws::core::Result<DeckAst> build_deck_ast(const Deck& deck, std::vector<Warning>&
         ws::core::Result<cards::ParsedCard> parsed =
             cards::parse_card(rec, inside, warnings);
         if (!parsed) {
-            return ws::core::unexpected(std::move(parsed.error()));
+            return ws::core::unexpected<ws::core::Error>(std::move(parsed.error()));
         }
         const cards::ParsedCard& card = *parsed;
 
@@ -1108,7 +1108,7 @@ ws::core::Result<double> ParamTable::resolve(const std::string& lower,
             bind_active(it->second.expr, active);
         if (!bindings) {
             active.pop_back();
-            return ws::core::unexpected(bindings.error());
+            return ws::core::unexpected<ws::core::Error>(bindings.error());
         }
         const ws::core::Result<double> v = it->second.expr.evaluate(*bindings, rng);
         active.pop_back();
@@ -1119,7 +1119,7 @@ ws::core::Result<double> ParamTable::resolve(const std::string& lower,
                 // A gauss()/flat() draw without a Rand: run-time by design
                 // (§8.5 rev) - pass the error through untouched so the
                 // elaborator can defer it to bind time.
-                return ws::core::unexpected(v.error());
+                return ws::core::unexpected<ws::core::Error>(v.error());
             }
             Diagnostic d;
             d.kind = ErrorKind::Semantic;

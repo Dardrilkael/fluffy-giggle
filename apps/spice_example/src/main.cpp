@@ -51,7 +51,7 @@ int main() {
     ParseOptions parse_opts;
     parse_opts.include_resolver = [](const std::string&) {
         return ws::core::Result<std::string>(
-            ws::core::unexpected(make_error(Diagnostic{
+            ws::core::unexpected<ws::core::Error>(make_error(Diagnostic{
                 ErrorKind::Io, "spice_example.no_includes", "no includes"})));
     };
     const ws::core::Result<Deck> deck =

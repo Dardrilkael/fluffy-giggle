@@ -93,7 +93,7 @@ ws::core::Result<RunState> RunState::bind(const Circuit& c, const ParamTable* sc
             !st) {
             // check_params failures arrive pre-wrapped as spice errors
             // carrying the device name; pass them through untouched.
-            return ws::core::unexpected(st.error());
+            return ws::core::unexpected<ws::core::Error>(st.error());
         }
         dev.init_state(rs.state_.data() + c.state_span[i].begin);
     }

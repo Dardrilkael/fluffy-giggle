@@ -75,7 +75,7 @@ ws::core::Result<ExprProgram> resolve_value_program(const Token& tok,
         d.code = "spice.parse.value";
         d.message = std::move(message);
         d.loc = tok.loc;
-        return ws::core::unexpected(ws::spice::make_error(std::move(d)));
+        return ws::core::unexpected<ws::core::Error>(ws::spice::make_error(std::move(d)));
     };
     if (tok.text.size() >= 2 && tok.text.front() == '{' && tok.text.back() == '}') {
         const ws::core::Result<ExprProgram> prog =

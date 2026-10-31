@@ -207,7 +207,7 @@ ws::core::Status MnaSystem::setup_ac() {
         ws::core::Error e = ws::core::make_error(
             static_cast<std::int32_t>(1), "math",
             "MnaSystem::setup_ac before setup()");
-        return ws::core::unexpected(std::move(e));
+        return ws::core::unexpected<ws::core::Error>(std::move(e));
     }
     ac_matrix_.emplace(pattern_);
     ws::math::SparsePattern copy = pattern_;

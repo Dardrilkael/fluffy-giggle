@@ -62,7 +62,7 @@ ws::core::Result<double> eval_expr(const ExprProgram& prog, const ParamTable& pa
 ws::core::unexpected<ws::core::Error> wrap_solver_error(const ws::core::Status& st,
                                                         const std::string& context) {
     if (std::string_view(st.error().category) == "spice") {
-        return ws::core::unexpected(st.error());
+        return ws::core::unexpected<ws::core::Error>(st.error());
     }
     Diagnostic d = march_diag(ErrorKind::Singular, "spice.singular",
                               st.error().message.empty() ? "matrix factorization failed"

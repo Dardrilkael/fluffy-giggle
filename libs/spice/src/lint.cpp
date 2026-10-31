@@ -148,7 +148,7 @@ ws::core::Status lint_deck(const DeckAst& ast, std::vector<Warning>& warnings) {
     // unused-model warnings; its circuit is discarded - nothing simulates.
     ws::core::Result<Circuit> circuit = elaborate_deck(ast, kDefaultTemp, warnings);
     if (!circuit) {
-        return ws::core::unexpected(circuit.error());
+        return ws::core::unexpected<ws::core::Error>(circuit.error());
     }
     return {};
 }

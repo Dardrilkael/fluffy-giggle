@@ -58,7 +58,7 @@ ws::core::Result<std::string> read_file(const fs::path& path) {
         ws::core::Error e = ws::core::make_error(
             static_cast<std::int32_t>(ws::spice::ErrorKind::Io), "spice",
             "cannot open '" + path.string() + "'");
-        return ws::core::unexpected(std::move(e));
+        return ws::core::unexpected<ws::core::Error>(std::move(e));
     }
     std::ostringstream buf;
     buf << in.rdbuf();
@@ -85,7 +85,7 @@ ws::spice::IncludeResolver disk_resolver(const std::vector<std::string>& include
         ws::core::Error e = ws::core::make_error(
             static_cast<std::int32_t>(ws::spice::ErrorKind::Io), "spice",
             "cannot resolve include '" + path + "'");
-        return ws::core::Result<std::string>(ws::core::unexpected(std::move(e)));
+        return ws::core::Result<std::string>(ws::core::unexpected<ws::core::Error>(std::move(e)));
     };
 }
 
@@ -111,7 +111,7 @@ ws::core::Result<ws::spice::DeckAst> load_ast(const fs::path& deck_path,
     const ws::core::Result<std::string> deck_text = read_file(deck_path);
     if (!deck_text) {
         exit_code = io_error(deck_text.error().message);
-        return ws::core::unexpected(deck_text.error());
+        return ws::core::unexpected<ws::core::Error>(deck_text.error());
     }
     ws::spice::ParseOptions parse_opts;
     parse_opts.include_dirs = include_dirs;
@@ -124,7 +124,7 @@ ws::core::Result<ws::spice::DeckAst> load_ast(const fs::path& deck_path,
     if (!deck) {
         std::fprintf(stderr, "%s\n", deck.error().message.c_str());
         exit_code = 1;
-        return ws::core::unexpected(deck.error());
+        return ws::core::unexpected<ws::core::Error>(deck.error());
     }
     const ws::core::Result<ws::spice::DeckAst> ast = ws::spice::build_deck_ast(*deck, warnings);
     if (const int w = print_warnings(warnings, printed, werror); w != 0 && exit_code == 0) {
@@ -133,7 +133,7 @@ ws::core::Result<ws::spice::DeckAst> load_ast(const fs::path& deck_path,
     if (!ast) {
         std::fprintf(stderr, "%s\n", ast.error().message.c_str());
         exit_code = (exit_code == 0) ? 1 : exit_code;
-        return ws::core::unexpected(ast.error());
+        return ws::core::unexpected<ws::core::Error>(ast.error());
     }
     return ast;
 }

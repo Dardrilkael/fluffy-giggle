@@ -234,12 +234,12 @@ public:
             }
             std::vector<double> x_new;
             if (!mna_.solve(x_new)) {
-                return ws::core::unexpected(ws::core::make_error(
+                return ws::core::unexpected<ws::core::Error>(ws::core::make_error(
                     static_cast<std::int32_t>(1), "math", "factorization failed"));
             }
             for (const double v : x_new) {
                 if (!std::isfinite(v)) {
-                    return ws::core::unexpected(ws::core::make_error(
+                    return ws::core::unexpected<ws::core::Error>(ws::core::make_error(
                         static_cast<std::int32_t>(ErrorKind::Convergence), "spice",
                         "Newton iterate is not finite"));
                 }
@@ -286,7 +286,7 @@ public:
                 return {};
             }
         }
-        return ws::core::unexpected(ws::core::make_error(
+        return ws::core::unexpected<ws::core::Error>(ws::core::make_error(
             static_cast<std::int32_t>(ErrorKind::Convergence), "spice",
             "no convergence after " + std::to_string(max_iterations) +
                 " Newton iterations"));

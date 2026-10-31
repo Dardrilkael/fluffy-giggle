@@ -76,7 +76,7 @@ ws::core::unexpected<ws::core::Error> empty_circuit_error(const std::string& ana
 ws::core::unexpected<ws::core::Error> wrap_solver_error(const ws::core::Status& st,
                                                         const std::string& context) {
     if (std::string_view(st.error().category) == "spice") {
-        return ws::core::unexpected(st.error());
+        return ws::core::unexpected<ws::core::Error>(st.error());
     }
     Diagnostic d = run_diag(ErrorKind::Singular, "spice.singular",
                             st.error().message.empty() ? "matrix factorization failed"
@@ -460,8 +460,6 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const Circuit& base_circuit,
 }
 
 // --- .tran (§6) ----------------------------------------------------------------------
-
-constexpr double kTranInf = std::numeric_limits<double>::infinity();
 
 ws::core::Result<Table> run_tran(const Circuit& circuit, RunState& state,
                                  const TranCard& card, const RunSettings& settings,
@@ -1425,7 +1423,7 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
             ws::core::Result<RunState> bound = RunState::bind(*live, &scope, &rng);
             if (!bound) {
                 if (ast.steps.empty()) {
-                    return ws::core::unexpected(bound.error());
+                    return ws::core::unexpected<ws::core::Error>(bound.error());
                 }
                 Diagnostic d = run_diag(
                     ErrorKind::Semantic, "spice.semantic.step_failed",
@@ -1447,7 +1445,7 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
                 }
             }
             AnalysisReport report;
-            ws::core::Result<Table> t = ws::core::unexpected(
+            ws::core::Result<Table> t = ws::core::unexpected<ws::core::Error>(
                 ws::core::make_error(1, "spice", "internal: no analysis"));
             if (card.op) {
                 t = run_op(*live, state, settings, report);
@@ -1462,7 +1460,7 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
                 if (ast.steps.empty()) {
                     // A plain run: the driver's own diagnostic reaches the
                     // caller untouched (the §9 taxonomy, never re-branded).
-                    return ws::core::unexpected(t.error());
+                    return ws::core::unexpected<ws::core::Error>(t.error());
                 }
                 // §7.6: abort naming the step point; --keep-going runs the
                 // rest and reports the list at the end.

@@ -138,7 +138,7 @@ ws::core::Status Elaborator::add_device_card(const DeviceCard& card, char letter
                              pending_models_};
     ws::core::Result<std::unique_ptr<Device>> dev = it->second(card, services);
     if (!dev) {
-        return ws::core::unexpected(std::move(dev.error()));
+        return ws::core::unexpected<ws::core::Error>(std::move(dev.error()));
     }
     devices_by_name_[to_lower(dev.value()->name())] = dev.value().get();
     if (dev.value()->has_branch()) {
@@ -326,7 +326,7 @@ ws::core::Status Elaborator::flatten_x(const DeviceCard& card,
             cards::parse_card(rec, true, warnings_);
         if (!parsed) {
             subckt_stack.pop_back();
-            return ws::core::unexpected(std::move(parsed.error()));
+            return ws::core::unexpected<ws::core::Error>(std::move(parsed.error()));
         }
         const cards::ParsedCard& c = *parsed;
         if (c.kind == cards::ParsedCard::Kind::Device) {

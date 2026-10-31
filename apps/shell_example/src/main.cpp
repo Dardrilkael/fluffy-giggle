@@ -147,7 +147,7 @@ public:
     [[nodiscard]] ws::core::Status load() override {
         std::ifstream in(path_, std::ios::binary);
         if (!in) {
-            return ws::core::unexpected(ws::core::make_error(
+            return ws::core::unexpected<ws::core::Error>(ws::core::make_error(
                 static_cast<std::int32_t>(shell::ShellError::document),
                 "scratchpad", "cannot open '" + path_ + "'"));
         }
@@ -159,7 +159,7 @@ public:
     [[nodiscard]] ws::core::Status save() override {
         std::ofstream out(path_, std::ios::binary | std::ios::trunc);
         if (!out) {
-            return ws::core::unexpected(ws::core::make_error(
+            return ws::core::unexpected<ws::core::Error>(ws::core::make_error(
                 static_cast<std::int32_t>(shell::ShellError::document),
                 "scratchpad", "cannot write '" + path_ + "'"));
         }
