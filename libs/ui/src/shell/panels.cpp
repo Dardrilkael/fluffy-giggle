@@ -13,13 +13,13 @@ namespace ws::ui::shell {
 
 ws::core::Status PanelRegistry::add(PanelDesc desc) {
     if (desc.id.empty() || desc.title.empty() || !desc.draw) {
-        return ws::core::unexpected(shell_error(
+        return ws::core::unexpected<ws::core::Error>(shell_error(
             ShellError::invalid,
             "panel needs a non-empty id, a title and a draw callback: '" +
                 desc.id + "'"));
     }
     if (contains(desc.id)) {
-        return ws::core::unexpected(shell_error(
+        return ws::core::unexpected<ws::core::Error>(shell_error(
             ShellError::invalid, "panel id already registered: '" + desc.id + "'"));
     }
     descs_.push_back(std::move(desc));
@@ -43,11 +43,11 @@ ws::core::Result<std::string> PanelHost::open(const PanelRegistry& registry,
                                               std::string_view type) {
     const PanelDesc* desc = registry.find(type);
     if (desc == nullptr) {
-        return ws::core::unexpected(shell_error(
+        return ws::core::unexpected<ws::core::Error>(shell_error(
             ShellError::invalid, "unknown panel type: '" + std::string{type} + "'"));
     }
     if (!desc->multi_instance && is_open(type)) {
-        return ws::core::unexpected(shell_error(
+        return ws::core::unexpected<ws::core::Error>(shell_error(
             ShellError::invalid,
             "panel already open (single-instance): '" + std::string{type} + "'"));
     }

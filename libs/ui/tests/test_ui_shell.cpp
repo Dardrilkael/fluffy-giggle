@@ -72,7 +72,7 @@ public:
         std::string_view path) const override {
         const auto found = files.find(std::string{path});
         if (found == files.end()) {
-            return ws::core::unexpected(ws::core::make_error(
+            return ws::core::unexpected<ws::core::Error>(ws::core::make_error(
                 1, "io", "no such file: " + std::string{path}));
         }
         return found->second;
@@ -86,7 +86,7 @@ public:
                             std::string_view to) override {
         const auto found = files.find(std::string{from});
         if (found == files.end()) {
-            return ws::core::unexpected(
+            return ws::core::unexpected<ws::core::Error>(
                 ws::core::make_error(1, "io", "no such file"));
         }
         files[std::string{to}] = std::move(found->second);
@@ -132,7 +132,7 @@ public:
     [[nodiscard]] ws::core::Status load() override {
         const auto found = disk.find(path_);
         if (found == disk.end()) {
-            return ws::core::unexpected(
+            return ws::core::unexpected<ws::core::Error>(
                 ws::core::make_error(1, "io", "cannot open '" + path_ + "'"));
         }
         content = found->second;
@@ -140,7 +140,7 @@ public:
     }
     [[nodiscard]] ws::core::Status save() override {
         if (fail_saves) {
-            return ws::core::unexpected(
+            return ws::core::unexpected<ws::core::Error>(
                 ws::core::make_error(1, "io", "save refused (injected)"));
         }
         disk[path_] = content;

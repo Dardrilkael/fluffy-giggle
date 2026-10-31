@@ -11,13 +11,29 @@ through. `ws::ui` is the only consumer — apps never include this lib.
 ## The one rule: no Vulkan vocabulary under include/
 
 The public headers (`ws/gfx/gpu.hpp`, `ws/gfx/swapchain.hpp`) carry zero
-Vulkan types. Handles
-cross the lib boundary as `void*`, each getter commented with the type it
-actually is (`// VkDevice`); the consumer (`ui`'s `src/app/app.cpp`, which
-includes volk.h) is the single unwrap point. `volk`, `vma` and
-`vulkan-headers` are all PRIVATE on the link line — if a Vulkan type or
-entry point ever needs to appear in a signature, it goes through `void*`
-or a plain `uint32_t` (formats), never the spelled type.
+Vulkan types. Handles cross the lib boundary by ABI class, each getter
+commented with the type it actually is (`// VkDevice`):
+
+- **Dispatchable handles + VmaAllocator — `void*`.** VkInstance,
+  VkPhysicalDevice, VkDevice, VkQueue, VkCommandBuffer and VmaAllocator
+  are real pointers on every ABI (32- and 64-bit), so `void*` carries
+  them everywhere.
+- **Non-dispatchable handles — `std::uint64_t`.** VkSurfaceKHR,
+  VkRenderPass, VkBuffer, VkImage, VkShaderModule and VmaAllocation are
+  pointers on 64-bit ABIs but plain integers on 32-bit ones (armv7, x86),
+  so no `void*` can carry them; they cross as a 64-bit integer. Neither
+  cast direction is a plain static_cast on every ABI, so both sides go
+  through helpers: the wrap side `gfx::handle_to_u64()`, the unwrap side
+  `gfx::handle_from_u64<T>()` — reinterpret_cast where the handle is a
+  pointer, static_cast where it is an integer. VmaAllocation rides the
+  same integer but is VMA's own pointer typedef on every ABI; the
+  consumer only hands it back to gfx.
+
+The consumer (`ui`'s `src/app/app.cpp`, which includes volk.h) is the
+single unwrap point. `volk`, `vma` and `vulkan-headers` are all PRIVATE
+on the link line — if a Vulkan type or entry point ever needs to appear
+in a signature, it goes through `void*`, `std::uint64_t` (handles) or a
+plain `uint32_t` (formats), never the spelled type.
 
 `gfx` also must not include platform or GLFW code: the surface arrives
 through `SurfaceSource` — `{ instance_extensions (+ count),
@@ -82,8 +98,9 @@ the swapchain, its image views, the depth attachment (one per swapchain
 the framebuffers, and the whole frame sync — `kMaxFramesInFlight`
 frame slots (a fence, a command pool+buffer and an acquire semaphore
 each) plus one render-finished semaphore per image. `ws::ui` holds one
-Swapchain beside its Gpu and is the only consumer; handles cross as
-opaque `void*` exactly like Gpu's.
+Swapchain beside its Gpu and is the only consumer; the command buffer
+crosses as `void*` and the render pass as `std::uint64_t`, per the
+ABI-class rule above.
 
 - **Lifecycle**: `create(Gpu&, fb_w, fb_h, options)` needs a Gpu with
   its device stage up and a surface attached (a dead Gpu is a `Status`,

@@ -149,7 +149,7 @@ struct Swapchain::Impl {
     VkPhysicalDevice physical() const {
         return static_cast<VkPhysicalDevice>(gpu->physical_device());
     }
-    VkSurfaceKHR surface() const { return static_cast<VkSurfaceKHR>(gpu->surface()); }
+    VkSurfaceKHR surface() const { return handle_from_u64<VkSurfaceKHR>(gpu->surface()); }
     VkDevice device() const { return static_cast<VkDevice>(gpu->device()); }
     VkQueue queue() const { return static_cast<VkQueue>(gpu->queue()); }
     VmaAllocator allocator() const {
@@ -569,7 +569,7 @@ core::Status Swapchain::create(Gpu& gpu, int fb_width, int fb_height,
                           "create() on an already-created Swapchain - "
                           "destroy() first");
     }
-    if (gpu.device() == nullptr || gpu.surface() == nullptr) {
+    if (gpu.device() == nullptr || gpu.surface() == 0) {
         return core::fail(kErrOrder, "gfx",
                           "create() needs a Gpu with its device stage up and "
                           "a surface attached");
@@ -592,7 +592,7 @@ core::Status Swapchain::recreate(int fb_width, int fb_height) {
     // one whose Gpu went down (device stage torn, surface detached) is a
     // Status, never a crash - the same null-state contract gpu.cpp keeps.
     if (impl_->gpu == nullptr || impl_->gpu->device() == nullptr ||
-        impl_->gpu->surface() == nullptr) {
+        impl_->gpu->surface() == 0) {
         return core::fail(kErrOrder, "gfx",
                           "recreate() before create(), or after its Gpu went "
                           "down - create() again instead");
@@ -772,8 +772,8 @@ void Swapchain::wait_frames() {
     }
 }
 
-void* Swapchain::render_pass() const {
-    return impl_->render_pass;  // VkRenderPass
+std::uint64_t Swapchain::render_pass() const {
+    return handle_to_u64(impl_->render_pass);  // VkRenderPass
 }
 
 uint32_t Swapchain::format() const {

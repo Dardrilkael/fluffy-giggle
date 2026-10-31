@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <type_traits>
 
 #include <ws/core/result.hpp>
 
@@ -18,8 +19,9 @@ struct SurfaceSource {
     uint32_t instance_extension_count = 0;
     // `instance` is the Gpu's raw VkInstance (opaque here; the adapter
     // casts it with its own Vulkan headers). On success writes the raw
-    // VkSurfaceKHR to `*surface_out`.
-    bool (*create_surface)(void* instance, void** surface_out, void* user) = nullptr;
+    // VkSurfaceKHR to `*surface_out` - a non-dispatchable handle, so it
+    // crosses as a 64-bit integer (handle_to_u64 below).
+    bool (*create_surface)(void* instance, std::uint64_t* surface_out, void* user) = nullptr;
     void* user = nullptr;
 };
 
@@ -42,6 +44,38 @@ struct DescriptorIndexing {
     bool update_after_bind = false;  // ... and its writes may land mid-flight
 };
 
+// Non-dispatchable Vulkan handles (VkBuffer, VkImage, VkSurfaceKHR,
+// VkRenderPass, VkShaderModule) are real pointers on 64-bit ABIs but
+// plain uint64_t values on 32-bit ones - a void* cannot carry them on
+// 32-bit, so they cross this boundary as a 64-bit integer. Neither cast
+// direction is a plain static_cast on every ABI (integer -> pointer is
+// not a static_cast at all), so both sides go through helpers:
+// handle_to_u64 folds a handle in, handle_from_u64 unwraps it back -
+// reinterpret_cast where the handle is a pointer, static_cast where it
+// is an integer. VmaAllocation rides the same integer but is VMA's own
+// pointer typedef on every ABI; the consumer never unwraps an
+// allocation, it only hands it back to gfx.
+template <class Handle>
+std::uint64_t handle_to_u64(Handle handle) {
+    if constexpr (std::is_pointer_v<Handle>) {
+        return reinterpret_cast<std::uint64_t>(handle);
+    } else {
+        return static_cast<std::uint64_t>(handle);
+    }
+}
+
+// The unwrap twin, for the owner's unwrap points (gfx internally, and
+// ui where it includes volk.h). VmaAllocation (VMA's own pointer
+// typedef) unwraps through this too, inside gfx.
+template <class Handle>
+Handle handle_from_u64(std::uint64_t value) {
+    if constexpr (std::is_pointer_v<Handle>) {
+        return reinterpret_cast<Handle>(value);
+    } else {
+        return static_cast<Handle>(value);
+    }
+}
+
 // Device-memory + object descriptors (phase C). The `usage`/`format`
 // fields carry the Vulkan enums as plain numbers - the consumer spells
 // them with its own Vulkan headers; no Vulkan type crosses the boundary.
@@ -55,9 +89,9 @@ struct BufferDesc {
 // host-visible window to write through (the buffer stays mapped for its
 // lifetime).
 struct BufferOut {
-    void* buffer = nullptr;      // VkBuffer
-    void* allocation = nullptr;  // VmaAllocation
-    void* mapped = nullptr;      // host-visible write window
+    std::uint64_t buffer = 0;      // VkBuffer (non-dispatchable)
+    std::uint64_t allocation = 0;  // VmaAllocation (non-dispatchable)
+    void* mapped = nullptr;        // host-visible write window (a real pointer)
 };
 
 // The image shape ui uploads: 2D, one layer, optimal tiling, starting
@@ -76,17 +110,21 @@ struct ImageDesc {
 // for destroy_image. The image view stays the consumer's (a plain vk
 // object, not memory).
 struct ImageOut {
-    void* image = nullptr;       // VkImage
-    void* allocation = nullptr;  // VmaAllocation
+    std::uint64_t image = 0;       // VkImage (non-dispatchable)
+    std::uint64_t allocation = 0;  // VmaAllocation (non-dispatchable)
 };
 
 // The Vulkan device layer: loader, instance (+ optional validation),
 // surface, physical-device/queue selection, device and VMA allocator.
 //
-// Handles cross the boundary as opaque void* - the no-leak rule keeps
-// Vulkan headers out of include/, so the consumer casts them at its own
-// single unwrap point (it includes volk.h privately). Every getter is
-// null/0 until its stage is up.
+// Handles cross the boundary without Vulkan vocabulary - the no-leak
+// rule keeps Vulkan headers out of include/, so the consumer casts them
+// at its own single unwrap point (it includes volk.h privately).
+// Dispatchable handles (instance, physical device, device, queue) and
+// VmaAllocator are pointers on every ABI and cross as void*;
+// non-dispatchable ones (the surface, buffers, images, shader modules,
+// VmaAllocation) cross as a 64-bit integer (handle_to_u64 above).
+// Every getter is null/0 until its stage is up.
 //
 // The stages mirror the shell's Android-surface-loss contract:
 //   init()            context stage, once per process (loader + instance)
@@ -110,7 +148,7 @@ public:
     // Opaque raw handles - the named Vulkan/VMA objects, null until their
     // stage is up:
     void* instance() const;         // VkInstance
-    void* surface() const;         // VkSurfaceKHR (window stage only)
+    std::uint64_t surface() const;  // VkSurfaceKHR (window stage only)
     void* physical_device() const;  // VkPhysicalDevice (device stage)
     void* device() const;          // VkDevice (device stage)
     void* queue() const;            // VkQueue (device stage)
@@ -132,16 +170,16 @@ public:
     // crash. The destroys and the flush are null-tolerant no-ops, so
     // failure-path teardown calls them uniformly.
     core::Status create_buffer(const BufferDesc& desc, BufferOut& out) const;
-    void destroy_buffer(void* buffer, void* allocation) const;
+    void destroy_buffer(std::uint64_t buffer, std::uint64_t allocation) const;
     // Makes the whole buffer's host writes visible - vma may hand back
     // non-coherent memory, so a writer flushes after filling `mapped`.
-    void flush_buffer(void* allocation) const;
+    void flush_buffer(std::uint64_t allocation) const;
     core::Status create_image(const ImageDesc& desc, ImageOut& out) const;
-    void destroy_image(void* image, void* allocation) const;
+    void destroy_image(std::uint64_t image, std::uint64_t allocation) const;
     core::Status create_shader_module(const uint32_t* code,
                                       std::size_t word_count,
-                                      void** module) const;
-    void destroy_shader_module(void* module) const;
+                                      std::uint64_t* module) const;
+    void destroy_shader_module(std::uint64_t module) const;
 
 private:
     struct Impl;

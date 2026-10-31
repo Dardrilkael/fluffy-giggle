@@ -43,9 +43,12 @@ enum class PresentStatus {
 // semaphore each) plus one render-finished semaphore per image. Promoted
 // out of ws::ui's app shell (stage 3b); ws::ui stays the only consumer.
 //
-// Handles cross the boundary as opaque void* exactly like Gpu's (no Vulkan
-// vocabulary may appear in a signature); the consumer unwraps at its own
-// single cast point. Creation and teardown return core::Status - the
+// Handles cross the boundary without Vulkan vocabulary, exactly like
+// Gpu's (no Vulkan type may appear in a signature); the consumer unwraps
+// at its own single cast point. The command buffer is dispatchable (a
+// pointer on every ABI, so void*); the render pass is non-dispatchable
+// (a 64-bit integer - see Gpu's handle_to_u64). Creation and teardown
+// return core::Status - the
 // consumer logs it. The Gpu must be attached (surface + device stage up)
 // at create(), and must outlive the Swapchain.
 class Swapchain {
@@ -111,7 +114,7 @@ public:
     void wait_frames();
 
     // --- opaque state (valid between create/recreate and destroy) ----------
-    void* render_pass() const;       // VkRenderPass
+    std::uint64_t render_pass() const;  // VkRenderPass (non-dispatchable)
     uint32_t format() const;         // VkFormat, numeric
     uint32_t present_mode() const;   // VkPresentModeKHR, numeric
     uint32_t image_count() const;

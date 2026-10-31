@@ -80,31 +80,31 @@ core::Status Gpu::create_buffer(const BufferDesc& desc, BufferOut& out) const {
                         &mapped) != VK_SUCCESS) {
         return core::fail(kErrBuffer, "gfx", "vmaCreateBuffer failed");
     }
-    out.buffer = buffer;
-    out.allocation = allocation;
+    out.buffer = handle_to_u64(buffer);
+    out.allocation = handle_to_u64(allocation);
     out.mapped = mapped.pMappedData;
     return {};
 }
 
-void Gpu::destroy_buffer(void* buffer, void* allocation) const {
+void Gpu::destroy_buffer(std::uint64_t buffer, std::uint64_t allocation) const {
     const VmaAllocator alloc = static_cast<VmaAllocator>(allocator());
-    // Null-tolerated (failure teardowns call uniformly); a half-empty
+    // Zero-tolerated (failure teardowns call uniformly); a half-empty
     // pair is nothing gfx could free through anyway.
-    if (alloc == nullptr || buffer == nullptr || allocation == nullptr) {
+    if (alloc == nullptr || buffer == 0 || allocation == 0) {
         return;
     }
-    vmaDestroyBuffer(alloc, static_cast<VkBuffer>(buffer),
-                     static_cast<VmaAllocation>(allocation));
+    vmaDestroyBuffer(alloc, handle_from_u64<VkBuffer>(buffer),
+                     handle_from_u64<VmaAllocation>(allocation));
 }
 
-void Gpu::flush_buffer(void* allocation) const {
+void Gpu::flush_buffer(std::uint64_t allocation) const {
     const VmaAllocator alloc = static_cast<VmaAllocator>(allocator());
-    if (alloc == nullptr || allocation == nullptr) {
+    if (alloc == nullptr || allocation == 0) {
         return;
     }
     // Whole-allocation: every consumer flushes everything it wrote since
     // the create or the last flush (vmaFlushAllocation reports nothing).
-    vmaFlushAllocation(alloc, static_cast<VmaAllocation>(allocation), 0,
+    vmaFlushAllocation(alloc, handle_from_u64<VmaAllocation>(allocation), 0,
                        VK_WHOLE_SIZE);
 }
 
@@ -151,27 +151,27 @@ core::Status Gpu::create_image(const ImageDesc& desc, ImageOut& out) const {
                        nullptr) != VK_SUCCESS) {
         return core::fail(kErrImage, "gfx", "vmaCreateImage failed");
     }
-    out.image = image;
-    out.allocation = allocation;
+    out.image = handle_to_u64(image);
+    out.allocation = handle_to_u64(allocation);
     return {};
 }
 
-void Gpu::destroy_image(void* image, void* allocation) const {
+void Gpu::destroy_image(std::uint64_t image, std::uint64_t allocation) const {
     const VmaAllocator alloc = static_cast<VmaAllocator>(allocator());
-    if (alloc == nullptr || image == nullptr || allocation == nullptr) {
+    if (alloc == nullptr || image == 0 || allocation == 0) {
         return;
     }
-    vmaDestroyImage(alloc, static_cast<VkImage>(image),
-                    static_cast<VmaAllocation>(allocation));
+    vmaDestroyImage(alloc, handle_from_u64<VkImage>(image),
+                    handle_from_u64<VmaAllocation>(allocation));
 }
 
 // --- shader modules ----------------------------------------------------------
 
 core::Status Gpu::create_shader_module(const std::uint32_t* code,
                                        std::size_t word_count,
-                                       void** module) const {
+                                       std::uint64_t* module) const {
     if (module != nullptr) {
-        *module = nullptr;  // the failure contract: cleared before anything
+        *module = 0;  // the failure contract: cleared before anything
     }
     if (code == nullptr || word_count == 0 || module == nullptr) {
         return core::fail(kErrInvalid, "gfx",
@@ -191,16 +191,16 @@ core::Status Gpu::create_shader_module(const std::uint32_t* code,
         return core::fail(kErrShaderModule, "gfx",
                           "vkCreateShaderModule failed");
     }
-    *module = created;
+    *module = handle_to_u64(created);
     return {};
 }
 
-void Gpu::destroy_shader_module(void* module) const {
+void Gpu::destroy_shader_module(std::uint64_t module) const {
     const VkDevice vk_device = static_cast<VkDevice>(device());
-    if (vk_device == nullptr || module == nullptr) {
+    if (vk_device == nullptr || module == 0) {
         return;
     }
-    vkDestroyShaderModule(vk_device, static_cast<VkShaderModule>(module),
+    vkDestroyShaderModule(vk_device, handle_from_u64<VkShaderModule>(module),
                           nullptr);
 }
 

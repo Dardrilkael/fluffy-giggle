@@ -239,7 +239,7 @@ TEST_CASE("choose_composite_alpha prefers opaque, else the lowest bit") {
 TEST_CASE("a default-constructed Gpu reports the null state") {
     ws::gfx::Gpu gpu;
     CHECK(gpu.instance() == nullptr);          // VkInstance
-    CHECK(gpu.surface() == nullptr);          // VkSurfaceKHR
+    CHECK(gpu.surface() == 0);                // VkSurfaceKHR
     CHECK(gpu.physical_device() == nullptr);  // VkPhysicalDevice
     CHECK(gpu.device() == nullptr);            // VkDevice
     CHECK(gpu.queue() == nullptr);             // VkQueue
@@ -278,7 +278,7 @@ TEST_CASE("init rejects an unusable SurfaceSource before any loader call") {
         ws::gfx::SurfaceSource source{};
         source.instance_extension_count = 2;
         source.instance_extensions = nullptr;
-        source.create_surface = [](void*, void**, void*) { return true; };
+        source.create_surface = [](void*, std::uint64_t*, void*) { return true; };
         const ws::core::Status status = gpu.init(source, ws::gfx::DeviceOptions{});
         REQUIRE_FALSE(status);
         CHECK(gpu.instance() == nullptr);
@@ -303,14 +303,14 @@ TEST_CASE("the creates reject bad descriptors first") {
 
     SUBCASE("a zero-size buffer desc") {
         ws::gfx::BufferOut out;
-        out.buffer = reinterpret_cast<void*>(1);  // cleared on failure
+        out.buffer = 1;  // cleared on failure
         const ws::core::Status st =
             gpu.create_buffer(ws::gfx::BufferDesc{0, 1u}, out);
         REQUIRE_FALSE(st);
         CHECK(st.error().category == std::string_view("gfx"));
         CHECK(st.error().code != 0);
-        CHECK(out.buffer == nullptr);
-        CHECK(out.allocation == nullptr);
+        CHECK(out.buffer == 0);
+        CHECK(out.allocation == 0);
         CHECK(out.mapped == nullptr);
     }
     SUBCASE("a zero-extent image desc") {
@@ -319,8 +319,8 @@ TEST_CASE("the creates reject bad descriptors first") {
             gpu.create_image(ws::gfx::ImageDesc{0, 64, 37u, 4u}, out);
         REQUIRE_FALSE(st);
         CHECK(st.error().code != 0);
-        CHECK(out.image == nullptr);
-        CHECK(out.allocation == nullptr);
+        CHECK(out.image == 0);
+        CHECK(out.allocation == 0);
     }
     SUBCASE("a zero-mip image desc") {
         ws::gfx::ImageOut out;
@@ -328,16 +328,16 @@ TEST_CASE("the creates reject bad descriptors first") {
             gpu.create_image(ws::gfx::ImageDesc{64, 64, 37u, 4u, 0u}, out);
         REQUIRE_FALSE(st);
         CHECK(st.error().code != 0);
-        CHECK(out.image == nullptr);
-        CHECK(out.allocation == nullptr);
+        CHECK(out.image == 0);
+        CHECK(out.allocation == 0);
     }
     SUBCASE("empty shader words") {
-        void* module = reinterpret_cast<void*>(1);
+        std::uint64_t module = 1;
         const ws::core::Status st =
             gpu.create_shader_module(nullptr, 4, &module);
         REQUIRE_FALSE(st);
         CHECK(st.error().code != 0);
-        CHECK(module == nullptr);
+        CHECK(module == 0);
     }
 }
 
@@ -351,7 +351,7 @@ TEST_CASE("the creates need the device stage - a Status, never a crash") {
     REQUIRE_FALSE(buffer_st);
     CHECK(buffer_st.error().category == std::string_view("gfx"));
     CHECK(buffer_st.error().code != 0);
-    CHECK(buffer.buffer == nullptr);
+    CHECK(buffer.buffer == 0);
 
     ws::gfx::ImageOut image;
     const ws::core::Status image_st =
@@ -359,33 +359,33 @@ TEST_CASE("the creates need the device stage - a Status, never a crash") {
     REQUIRE_FALSE(image_st);
     CHECK(image_st.error().code != 0);
 
-    void* module = nullptr;
+    std::uint64_t module = 0;
     const ws::core::Status module_st =
         gpu.create_shader_module(words, 4, &module);
     REQUIRE_FALSE(module_st);
     CHECK(module_st.error().code != 0);
-    CHECK(module == nullptr);
+    CHECK(module == 0);
 }
 
 TEST_CASE("destroy and flush are null-tolerant no-ops on a dead Gpu") {
     ws::gfx::Gpu gpu;  // no device stage: nothing to free through
-    gpu.destroy_buffer(nullptr, nullptr);
-    gpu.destroy_image(nullptr, nullptr);
-    gpu.flush_buffer(nullptr);
-    gpu.destroy_shader_module(nullptr);
+    gpu.destroy_buffer(0, 0);
+    gpu.destroy_image(0, 0);
+    gpu.flush_buffer(0);
+    gpu.destroy_shader_module(0);
     // Even non-null handles: without the device stage there is no
     // allocator to free through, so the destroys stay no-ops - failure
     // teardowns never need their own stage checks.
-    gpu.destroy_buffer(reinterpret_cast<void*>(1), reinterpret_cast<void*>(2));
-    gpu.destroy_image(reinterpret_cast<void*>(1), reinterpret_cast<void*>(2));
-    gpu.destroy_shader_module(reinterpret_cast<void*>(1));
+    gpu.destroy_buffer(1, 2);
+    gpu.destroy_image(1, 2);
+    gpu.destroy_shader_module(1);
 }
 
 // --- Swapchain's null-state contract (no device, never created) ---------------
 
 TEST_CASE("a default-constructed Swapchain reports the null state") {
     ws::gfx::Swapchain swapchain;
-    CHECK(swapchain.render_pass() == nullptr);  // VkRenderPass
+    CHECK(swapchain.render_pass() == 0);  // VkRenderPass
     CHECK(swapchain.format() == 0);             // VK_FORMAT_UNDEFINED
     CHECK(swapchain.present_mode() == 2);       // VK_PRESENT_MODE_FIFO_KHR
     CHECK(swapchain.image_count() == 0);
@@ -418,7 +418,7 @@ TEST_CASE("Swapchain lifecycle misuse is a Status, never a crash") {
     swapchain.destroy();
 
     // The null state survives the whole cycle.
-    CHECK(swapchain.render_pass() == nullptr);
+    CHECK(swapchain.render_pass() == 0);
     CHECK(swapchain.image_count() == 0);
 }
 
@@ -437,5 +437,5 @@ TEST_CASE("Swapchain's frame flow is guarded when empty") {
     swapchain.end_render_pass(frame);
     swapchain.submit(frame);
     swapchain.wait_frames();  // no fences were ever submitted
-    CHECK(swapchain.render_pass() == nullptr);
+    CHECK(swapchain.render_pass() == 0);
 }

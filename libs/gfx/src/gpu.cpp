@@ -691,12 +691,12 @@ core::Status Gpu::attach_surface() {
         return core::fail(kErrOrder, "gfx",
                           "attach_surface() while a surface is already attached");
     }
-    void* surface = nullptr;
+    std::uint64_t surface = 0;
     if (!impl_->source.create_surface(impl_->instance, &surface, impl_->source.user) ||
-        surface == nullptr) {
+        surface == 0) {
         return core::fail(kErrSurface, "gfx", "failed to create the window surface");
     }
-    impl_->surface = static_cast<VkSurfaceKHR>(surface);
+    impl_->surface = handle_from_u64<VkSurfaceKHR>(surface);
     if (!impl_->device_stage_up) {
         // First attach also brings up the device stage: present support is
         // queried against the surface, so selection cannot run before one
@@ -740,8 +740,8 @@ void* Gpu::instance() const {
     return impl_->instance;  // VkInstance
 }
 
-void* Gpu::surface() const {
-    return impl_->surface;  // VkSurfaceKHR (window stage only)
+std::uint64_t Gpu::surface() const {
+    return handle_to_u64(impl_->surface);  // VkSurfaceKHR (window stage only)
 }
 
 void* Gpu::physical_device() const {

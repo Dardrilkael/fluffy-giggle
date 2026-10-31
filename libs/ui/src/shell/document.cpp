@@ -35,21 +35,21 @@ ws::core::Result<int> DocumentManager::open_path(const std::string& path) {
         }
     }
     if (!factory_) {
-        return ws::core::unexpected(
+        return ws::core::unexpected<ws::core::Error>(
             shell_error(ShellError::unavailable, "no document factory set"));
     }
     ws::core::Result<std::unique_ptr<Document>> made = factory_(path);
     if (!made) {
-        return ws::core::unexpected(made.error());
+        return ws::core::unexpected<ws::core::Error>(made.error());
     }
     std::unique_ptr<Document> document = std::move(*made);
     if (!document) {
-        return ws::core::unexpected(
+        return ws::core::unexpected<ws::core::Error>(
             shell_error(ShellError::document, "factory made no document for '" +
                                                   path + "'"));
     }
     if (const ws::core::Status st = document->load(); !st) {
-        return ws::core::unexpected(st.error());
+        return ws::core::unexpected<ws::core::Error>(st.error());
     }
     (void)document->undo().mark_saved();
     const int index = adopt(std::move(document));
@@ -71,16 +71,16 @@ int DocumentManager::adopt(std::unique_ptr<Document> document) {
 
 ws::core::Result<int> DocumentManager::new_document() {
     if (!factory_) {
-        return ws::core::unexpected(
+        return ws::core::unexpected<ws::core::Error>(
             shell_error(ShellError::unavailable, "no document factory set"));
     }
     ws::core::Result<std::unique_ptr<Document>> made = factory_("");
     if (!made) {
-        return ws::core::unexpected(made.error());
+        return ws::core::unexpected<ws::core::Error>(made.error());
     }
     std::unique_ptr<Document> document = std::move(*made);
     if (!document) {
-        return ws::core::unexpected(shell_error(
+        return ws::core::unexpected<ws::core::Error>(shell_error(
             ShellError::document, "factory made no untitled document"));
     }
     (void)document->undo().mark_saved();
@@ -103,12 +103,12 @@ DocumentManager::ClosePlan DocumentManager::plan_close(std::size_t index) {
 ws::core::Status DocumentManager::finish_close(std::size_t index,
                                                bool save_first) {
     if (index >= documents_.size()) {
-        return ws::core::unexpected(shell_error(
+        return ws::core::unexpected<ws::core::Error>(shell_error(
             ShellError::invalid, "close: no document " + std::to_string(index)));
     }
     Document* document = documents_[index].document.get();
     if (document == nullptr) {
-        return ws::core::unexpected(
+        return ws::core::unexpected<ws::core::Error>(
             shell_error(ShellError::invalid, "close: null document"));
     }
     if (save_first) {
@@ -276,7 +276,7 @@ DocumentManager::probe_recovery(const std::vector<std::string>& paths) const {
 ws::core::Result<std::string> DocumentManager::take_recovery(
     const std::string& document_path) {
     if (fs_ == nullptr || autosave_dir_.empty()) {
-        return ws::core::unexpected(
+        return ws::core::unexpected<ws::core::Error>(
             shell_error(ShellError::unavailable, "autosave disabled"));
     }
     ws::platform::Autosave pair(*fs_, document_path, autosave_dir_);

@@ -57,7 +57,7 @@ AppShell::AppShell(ShellConfig config, ws::app::CommandRegistry& commands,
         [this](const std::string& path) -> ws::core::Result<
             std::unique_ptr<Document>> {
             if (!document_factory_) {
-                return ws::core::unexpected(shell_error(
+                return ws::core::unexpected<ws::core::Error>(shell_error(
                     ShellError::unavailable, "no document factory set"));
             }
             return document_factory_(path);
@@ -408,7 +408,7 @@ ws::core::Status AppShell::save_settings_layer() {
     const ws::core::Result<ws::settings::json::Value> doc =
         settings_.save_layer(ws::settings::Layer::user);
     if (!doc) {
-        return ws::core::unexpected(doc.error());
+        return ws::core::unexpected<ws::core::Error>(doc.error());
     }
     return config_.fs->write(path_of("settings.json"),
                              ws::settings::json::write(*doc));
@@ -416,13 +416,13 @@ ws::core::Status AppShell::save_settings_layer() {
 
 ws::core::Status AppShell::load_layout() {
     if (config_.fs == nullptr || config_.config_dir.empty()) {
-        return ws::core::unexpected(
+        return ws::core::unexpected<ws::core::Error>(
             shell_error(ShellError::unavailable, "no config dir"));
     }
     const ws::core::Result<std::string> text =
         config_.fs->read(path_of("layout.json"));
     if (!text) {
-        return ws::core::unexpected(text.error());
+        return ws::core::unexpected<ws::core::Error>(text.error());
     }
     const ws::core::Result<ws::settings::json::Value> parsed =
         ws::settings::json::parse(*text);
@@ -431,7 +431,7 @@ ws::core::Status AppShell::load_layout() {
                            return panel_host_.find(panel) != nullptr;
                        })) {
         status_ = "layout.json would not parse; the default layout stands";
-        return ws::core::unexpected(
+        return ws::core::unexpected<ws::core::Error>(
             shell_error(ShellError::parse_failed, "layout.json is corrupt"));
     }
     return {};
@@ -524,7 +524,7 @@ std::vector<std::string> AppShell::layout_names() {
 ws::core::Status AppShell::save_named_layout(const std::string& name) {
     if (config_.fs == nullptr || config_.config_dir.empty() ||
         name.empty()) {
-        return ws::core::unexpected(
+        return ws::core::unexpected<ws::core::Error>(
             shell_error(ShellError::invalid, "layout name is empty"));
     }
     // layouts/<name>.json + the index entry (no listdir on the seam,
@@ -555,13 +555,13 @@ ws::core::Status AppShell::save_named_layout(const std::string& name) {
 
 ws::core::Status AppShell::load_named_layout(const std::string& name) {
     if (config_.fs == nullptr || config_.config_dir.empty()) {
-        return ws::core::unexpected(
+        return ws::core::unexpected<ws::core::Error>(
             shell_error(ShellError::unavailable, "no config dir"));
     }
     const ws::core::Result<std::string> text = config_.fs->read(
         config_.config_dir + "/layouts/" + name + ".json");
     if (!text) {
-        return ws::core::unexpected(text.error());
+        return ws::core::unexpected<ws::core::Error>(text.error());
     }
     const ws::core::Result<ws::settings::json::Value> parsed =
         ws::settings::json::parse(*text);
@@ -569,7 +569,7 @@ ws::core::Status AppShell::load_named_layout(const std::string& name) {
                        *parsed, [this](std::string_view panel) {
                            return panel_host_.find(panel) != nullptr;
                        })) {
-        return ws::core::unexpected(
+        return ws::core::unexpected<ws::core::Error>(
             shell_error(ShellError::parse_failed,
                         "layout '" + name + "' is corrupt"));
     }
@@ -635,14 +635,14 @@ void AppShell::request_close_active() {
 ws::core::Status AppShell::save_active() {
     Document* document = documents_->active();
     if (document == nullptr) {
-        return ws::core::unexpected(
+        return ws::core::unexpected<ws::core::Error>(
             shell_error(ShellError::invalid, "no active document"));
     }
     if (document->path().empty()) {
         // Untitled: the save-as pick (the dialogs injection is the
         // whole story; without it the save refuses).
         if (config_.dialogs == nullptr) {
-            return ws::core::unexpected(shell_error(
+            return ws::core::unexpected<ws::core::Error>(shell_error(
                 ShellError::unavailable, "cannot save an untitled document"));
         }
         ws::platform::FileDialogOptions options;
@@ -671,7 +671,7 @@ ws::core::Status AppShell::open_paths(const std::vector<std::string>& paths) {
             toast_text_ = "open failed: " + index.error().message;
             toasts_.push({toast_text_.c_str(), gui::ToastSeverity::error,
                           nullptr, 5.0f});
-            return ws::core::unexpected(index.error());
+            return ws::core::unexpected<ws::core::Error>(index.error());
         }
         set_status("opened " + path);
     }

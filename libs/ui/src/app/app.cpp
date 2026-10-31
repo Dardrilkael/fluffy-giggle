@@ -125,17 +125,18 @@ using AnyEvent = std::variant<ws::input::WindowCloseEvent, ws::input::WindowResi
                              ws::input::TextInputEvent, ws::input::FileDroppedEvent>;
 
 // The gfx::SurfaceSource adapter: WindowHost speaks Vulkan handles (it
-// includes volk.h internally), gfx speaks opaque void* - this fn-ptr is
-// one of this file's two cast points for that boundary (the other is the
-// Impl accessors below). Wired once at init_gpu(); called by gfx at
-// every attach_surface().
-bool ui_gfx_create_surface(void* instance, void** surface_out, void* user) {
+// includes volk.h internally), gfx speaks opaque handles (void* for the
+// dispatchable ones, a 64-bit integer for the non-dispatchable ones) -
+// this fn-ptr is one of this file's two cast points for that boundary
+// (the other is the Impl accessors below). Wired once at init_gpu();
+// called by gfx at every attach_surface().
+bool ui_gfx_create_surface(void* instance, std::uint64_t* surface_out, void* user) {
     auto* host = static_cast<WindowHost*>(user);
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     if (!host->create_surface(static_cast<VkInstance>(instance), &surface)) {
         return false;
     }
-    *surface_out = surface;
+    *surface_out = gfx::handle_to_u64(surface);
     return true;
 }
 
@@ -274,7 +275,7 @@ struct App::Impl {
     // init and the renderer's drift checks read; null / UNDEFINED before
     // the window stage creates a swapchain.
     VkRenderPass render_pass() const {
-        return static_cast<VkRenderPass>(swapchain_.render_pass());
+        return gfx::handle_from_u64<VkRenderPass>(swapchain_.render_pass());
     }
     VkFormat format() const { return static_cast<VkFormat>(swapchain_.format()); }
 

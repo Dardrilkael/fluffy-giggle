@@ -462,7 +462,7 @@ private:
     struct TextureEntry {
         VkImage image = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
-        void* allocation = nullptr;  // the gfx image allocation (destroy_image's pair)
+        std::uint64_t allocation = 0;  // the gfx image allocation (destroy_image's pair; a 64-bit handle)
         std::uint32_t generation = 0;  // the slot's reuse counter (id's high bits)
     };
     std::vector<TextureEntry> textures_;
@@ -500,7 +500,7 @@ private:
     // in-flight submission.
     struct FrameArena {
         VkBuffer buffer = VK_NULL_HANDLE;
-        void* allocation = nullptr;  // the gfx buffer allocation (flush/destroy's handle)
+        std::uint64_t allocation = 0;  // the gfx buffer allocation (flush/destroy's handle; a 64-bit handle)
         batch::Vertex* mapped = nullptr;
         std::size_t capacity = 0;  // vertices
     };
@@ -515,7 +515,7 @@ private:
     // indices never leave the u16 space (batch::kMaxQuadsPerChunk).
     struct IndexArena {
         VkBuffer buffer = VK_NULL_HANDLE;
-        void* allocation = nullptr;  // the gfx buffer allocation (flush/destroy's handle)
+        std::uint64_t allocation = 0;  // the gfx buffer allocation (flush/destroy's handle; a 64-bit handle)
         std::uint16_t* mapped = nullptr;
         std::size_t capacity = 0;  // quads
     };

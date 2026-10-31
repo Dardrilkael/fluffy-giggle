@@ -55,8 +55,9 @@ One line each - the per-tree CLAUDE.md files carry the detail:
   allocator, the swapchain and frame sync, and (phase C) the
   buffer/image/shader-module helpers ui's renderer draws through - no
   vma target or vk_mem_alloc.h include remains under libs/ui. Public API
-  is opaque void* handles; volk/vma stay PRIVATE and ui (the only
-  consumer) is the unwrap point.
+  is opaque handles (dispatchable as void*, non-dispatchable as uint64_t
+  - they are pointers only on 64-bit ABIs); volk/vma stay PRIVATE and ui
+  (the only consumer) is the unwrap point.
 - `libs/ui` - app shell (GLFW/Vulkan/ImGui/ImPlot, all private) + the
   widget/renderer/gui drawing APIs, the stage-14 canvas layer and the
   stage-15 ws::ui::shell (AppShell: dock/panels/documents, the reusable

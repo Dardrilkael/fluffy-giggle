@@ -326,7 +326,7 @@ void Renderer2D::shutdown() {
         TextureEntry& entry = textures_[retire.slot];
         if (entry.image != VK_NULL_HANDLE) {
             vkDestroyImageView(device_, entry.view, nullptr);
-            gpu_->destroy_image(entry.image, entry.allocation);
+            gpu_->destroy_image(gfx::handle_to_u64(entry.image), entry.allocation);
             entry.image = VK_NULL_HANDLE;
         }
     }
@@ -336,7 +336,7 @@ void Renderer2D::shutdown() {
             continue;  // freed above, or by the retire drain
         }
         vkDestroyImageView(device_, entry.view, nullptr);
-        gpu_->destroy_image(entry.image, entry.allocation);
+        gpu_->destroy_image(gfx::handle_to_u64(entry.image), entry.allocation);
     }
     textures_.clear();
     // Registry-derived state dies with the registry: after a re-init the
@@ -509,11 +509,11 @@ bool Renderer2D::create_frame_resources() {
 
 void Renderer2D::destroy_frame_resources() {
     for (const FrameArena& arena : arenas_) {
-        gpu_->destroy_buffer(arena.buffer, arena.allocation);
+        gpu_->destroy_buffer(gfx::handle_to_u64(arena.buffer), arena.allocation);
     }
     arenas_.clear();
     for (const IndexArena& arena : index_arenas_) {
-        gpu_->destroy_buffer(arena.buffer, arena.allocation);
+        gpu_->destroy_buffer(gfx::handle_to_u64(arena.buffer), arena.allocation);
     }
     index_arenas_.clear();
     pending_table_slots_.clear();
@@ -559,12 +559,12 @@ bool Renderer2D::grow_vertex_arena(uint32_t frame_slot,
         return false;
     }
     if (arena.buffer != VK_NULL_HANDLE) {
-        gpu_->destroy_buffer(arena.buffer, arena.allocation);
+        gpu_->destroy_buffer(gfx::handle_to_u64(arena.buffer), arena.allocation);
         ws::core::info("ui: r2d grew frame slot {}'s vertex arena {} -> {} "
                        "vertices",
                        frame_slot, arena.capacity, capacity);
     }
-    arena.buffer = static_cast<VkBuffer>(buffer.buffer);
+    arena.buffer = gfx::handle_from_u64<VkBuffer>(buffer.buffer);
     arena.allocation = buffer.allocation;
     arena.mapped = static_cast<batch::Vertex*>(buffer.mapped);
     arena.capacity = capacity;
@@ -600,12 +600,12 @@ bool Renderer2D::grow_index_arena(uint32_t frame_slot, std::size_t min_quads) {
     // capacity - the flush fills exactly what it draws.
     auto* const indices = static_cast<std::uint16_t*>(buffer.mapped);
     if (arena.buffer != VK_NULL_HANDLE) {
-        gpu_->destroy_buffer(arena.buffer, arena.allocation);
+        gpu_->destroy_buffer(gfx::handle_to_u64(arena.buffer), arena.allocation);
         ws::core::info("ui: r2d grew frame slot {}'s index arena {} -> {} "
                        "quads",
                        frame_slot, arena.capacity, capacity);
     }
-    arena.buffer = static_cast<VkBuffer>(buffer.buffer);
+    arena.buffer = gfx::handle_from_u64<VkBuffer>(buffer.buffer);
     arena.allocation = buffer.allocation;
     arena.mapped = indices;
     arena.capacity = capacity;
@@ -705,7 +705,7 @@ void Renderer2D::free_retired_textures() {
         }
         TextureEntry& entry = textures_[it->slot];
         vkDestroyImageView(device_, entry.view, nullptr);
-        gpu_->destroy_image(entry.image, entry.allocation);
+        gpu_->destroy_image(gfx::handle_to_u64(entry.image), entry.allocation);
         // Park the row on white: the chunked tier rebuilds its chunk
         // tables from textures_[slot].view every flush, and the
         // bindless rebind queued below writes the same field - no table
@@ -714,7 +714,7 @@ void Renderer2D::free_retired_textures() {
         // empty slot.
         entry.view = textures_[kWhiteIndex].view;
         entry.image = VK_NULL_HANDLE;
-        entry.allocation = nullptr;
+        entry.allocation = 0;
         if (it->slot < page_of_texture_.size()) {
             page_of_texture_[it->slot] = kNoAtlasPage;
         }
@@ -819,7 +819,7 @@ bool Renderer2D::create_pipeline(VkRenderPass render_pass) {
     // (nonuniformEXT) shader or the chunked 32-slot one, fixed at init.
     const spirv::ShaderWords vert_words = spirv::vert_words();
     const spirv::ShaderWords frag_words = spirv::frag_words(tier_.bindless);
-    void* vert_raw = nullptr;
+    std::uint64_t vert_raw = 0;
     const ws::core::Status vert_module = gpu_->create_shader_module(
         vert_words.words, vert_words.count, &vert_raw);
     if (!vert_module) {
@@ -827,7 +827,7 @@ bool Renderer2D::create_pipeline(VkRenderPass render_pass) {
                         vert_module.error().message);
         return false;
     }
-    void* frag_raw = nullptr;
+    std::uint64_t frag_raw = 0;
     const ws::core::Status frag_module = gpu_->create_shader_module(
         frag_words.words, frag_words.count, &frag_raw);
     if (!frag_module) {
@@ -836,8 +836,8 @@ bool Renderer2D::create_pipeline(VkRenderPass render_pass) {
                         frag_module.error().message);
         return false;
     }
-    const VkShaderModule vert = static_cast<VkShaderModule>(vert_raw);
-    const VkShaderModule frag = static_cast<VkShaderModule>(frag_raw);
+    const VkShaderModule vert = gfx::handle_from_u64<VkShaderModule>(vert_raw);
+    const VkShaderModule frag = gfx::handle_from_u64<VkShaderModule>(frag_raw);
 
     VkPipelineShaderStageCreateInfo stages[2]{};
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -966,8 +966,8 @@ bool Renderer2D::create_pipeline(VkRenderPass render_pass) {
     pipeline_info.pDepthStencilState = &depth_on;
     const VkResult err_3d = vkCreateGraphicsPipelines(
         device_, pipeline_cache_, 1, &pipeline_info, nullptr, &pipeline_3d_);
-    gpu_->destroy_shader_module(vert);  // baked into the pipelines
-    gpu_->destroy_shader_module(frag);
+    gpu_->destroy_shader_module(gfx::handle_to_u64(vert));  // baked into the pipelines
+    gpu_->destroy_shader_module(gfx::handle_to_u64(frag));
     if (err_2d != VK_SUCCESS || err_3d != VK_SUCCESS) {
         // Both in lockstep or neither: the callers (shutdown, the drift
         // path) tolerate nulls, and flush checks one - they must agree.
@@ -1037,7 +1037,7 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
                         width, height, image_created.error().message);
         return false;
     }
-    entry.image = static_cast<VkImage>(image.image);
+    entry.image = gfx::handle_from_u64<VkImage>(image.image);
     entry.allocation = image.allocation;
     VkImageViewCreateInfo view_info{};
     view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -1051,7 +1051,7 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
         VK_SUCCESS) {
         ws::core::error("ui: r2d - vkCreateImageView failed ({}x{})", width,
                         height);
-        gpu_->destroy_image(entry.image, entry.allocation);
+        gpu_->destroy_image(gfx::handle_to_u64(entry.image), entry.allocation);
         return false;
     }
 
@@ -1063,10 +1063,10 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
         ws::core::error("ui: r2d - staging buffer allocation failed: {}",
                         staging_created.error().message);
         vkDestroyImageView(device_, entry.view, nullptr);
-        gpu_->destroy_image(entry.image, entry.allocation);
+        gpu_->destroy_image(gfx::handle_to_u64(entry.image), entry.allocation);
         return false;
     }
-    const VkBuffer staging = static_cast<VkBuffer>(staging_out.buffer);
+    const VkBuffer staging = gfx::handle_from_u64<VkBuffer>(staging_out.buffer);
     std::memcpy(staging_out.mapped, pixels,
                 static_cast<std::size_t>(size));
     gpu_->flush_buffer(staging_out.allocation);
@@ -1219,7 +1219,7 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
         ws::core::error("ui: r2d - texture upload failed (VkResult {})",
                         static_cast<int>(err));
         vkDestroyImageView(device_, entry.view, nullptr);
-        gpu_->destroy_image(entry.image, entry.allocation);
+        gpu_->destroy_image(gfx::handle_to_u64(entry.image), entry.allocation);
         return false;
     }
 
