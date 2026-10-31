@@ -8,6 +8,7 @@
 #   tools/build-android-all.ps1 -Release          Release
 #   tools/build-android-all.ps1 -Abis arm64-v8a   just one ABI
 #   tools/build-android-all.ps1 -Abis arm64-v8a,x86_64  subset
+#   tools/build-android-all.ps1 -LibsOut build/android-libs  .so output dir
 #
 # Needs:
 #   - cmake + ninja on PATH
@@ -18,7 +19,7 @@ param(
     [switch]$Release,
     [string[]]$Abis = @('arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64'),
     [string]$Ndk = $env:ANDROID_NDK_HOME,
-    [string]$LibsOut = 'libs'  # collects .so files per ABI
+    [string]$LibsOut = 'build/android-libs'  # collects .so files per ABI
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,7 +40,13 @@ if (-not $ninja) { throw "ninja not on PATH" }
 $buildType = if ($Release) { 'Release' } else { 'Debug' }
 $presetBase = if ($Release) { 'android' } else { 'android' }
 
-# Collect the .so output directory for each ABI.
+# Collect the .so output directory for each ABI. This WIPES $LibsOut -
+# refuse anything that resolves to the source libs/ tree.
+$libsOutFull = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $LibsOut))
+$srcLibsFull = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\libs'))
+if ($libsOutFull -ieq $srcLibsFull) {
+    throw "-LibsOut '$LibsOut' resolves to the SOURCE libs/ tree - pass an output path like build/android-libs"
+}
 if (Test-Path $LibsOut) { Remove-Item -Recurse -Force $LibsOut }
 New-Item -ItemType Directory -Path $LibsOut | Out-Null
 
@@ -119,6 +126,6 @@ if ($failed.Count -gt 0) {
     Write-Host "All ABIs built successfully." -ForegroundColor Green
     Write-Host "Native libraries collected in $LibsOut/"
     Get-ChildItem -Recurse $LibsOut -Filter "*.so" | ForEach-Object {
-        Write-Host "  $($_.DirectoryName | Split-Leaf)/$($_.Name)"
+        Write-Host "  $((Split-Path $_.DirectoryName -Leaf))/$($_.Name)"
     }
 }
