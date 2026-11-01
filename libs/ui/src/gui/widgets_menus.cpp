@@ -99,7 +99,11 @@ bool resolve_chain_level(MenuState& state, const MenuItem* root_items,
             return false;
         }
         const MenuItem& opener = items[static_cast<std::size_t>(into)];
-        if (opener.submenu == nullptr || opener.submenu_count <= 0) {
+        // Separators are rules, not rows: the renderer skips them before
+        // the anchor capture, so a separator opener would leave level
+        // l + 1 with no anchor - refuse it here, same as a dead submenu.
+        if (opener.kind == MenuItemKind::separator ||
+            opener.submenu == nullptr || opener.submenu_count <= 0) {
             close_chain_from(state, l + 1);
             return false;
         }
