@@ -10101,6 +10101,18 @@ const ws::ui::gui::MenuItem kParentItems[] = {
 };
 const ws::ui::gui::MenuDesc kParentBar[] = {{"&a", kParentItems, 2}};
 
+// The broken re-describe: index 0 - the child's parent row - swapped
+// for a separator that still carries the submenu. Same shape and
+// count, so the swap is exactly the re-describe the resolver guards:
+// a rule is not a row, and the renderer skips it before the
+// child-anchor capture.
+const ws::ui::gui::MenuItem kSepSwapBroken[] = {
+    {.submenu = kSubDeep, .submenu_count = 1,
+     .kind = ws::ui::gui::MenuItemKind::separator},
+    {"plain"},
+};
+const ws::ui::gui::MenuDesc kSepSwapBarBroken[] = {{"&a", kSepSwapBroken, 2}};
+
 // The context menus' list: two rows, no art - the window is
 // 2*padding + "bravo" wide (54), count*24 + 2*padding tall (72).
 const ws::ui::gui::MenuItem kCtxItems[] = {
@@ -10493,6 +10505,70 @@ TEST_CASE("menu chain: Escape climbs one level a press; an outside press "
     CHECK(open == -1);
     CHECK(ev.item == nullptr);
     CHECK(catches == 1);
+
+    r.end();
+    r.frame_end();
+    set_active(nullptr);
+}
+
+TEST_CASE("menu chain: swapping the parent row for a separator closes "
+          "the child") {
+    // The malformed re-describe: the child's parent row becomes a
+    // separator that still carries the submenu. A rule is not a row -
+    // the renderer skips it before the anchor capture - so the resolver
+    // refuses the opener: the chain closes at the broken link (the
+    // root holds) instead of laying the child with no anchor. The
+    // witness is the Escape cycle: one climb closes everything now;
+    // a surviving child would win that cycle and hold the root.
+    using namespace ws::ui::gui;
+    using namespace ws::ui::r2d;
+    Renderer2D r;
+    r.frame_begin(800.0f, 600.0f);
+    set_active(&r);
+    r.begin_screen();
+    GuiContext gui;
+    LayoutCursor layout;
+    int open = -1;
+    MenuEvent ev;
+
+    bool broken = false;
+    const auto pass = [&](const ws::input::InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        ev = broken ? menu_bar(gui, layout, kDefaultChrome, "swap",
+                               kSepSwapBarBroken, 1, open)
+                    : menu_bar(gui, layout, kDefaultChrome, "swap",
+                               kParentBar, 1, open);
+        layout.end_panel();
+        gui.end_frame();
+    };
+    const auto hover = [&](float x, float y, float dt) {
+        ws::input::InputFrame frame = snap(x, y);
+        frame.dt_seconds = dt;
+        pass(frame);
+    };
+    ws::input::InputFrame esc = snap(400.0f, 300.0f);
+    esc.key_pressed[static_cast<std::size_t>(ws::input::keys::kEscape)] =
+        true;
+
+    // Open the root and rest the child open under row 0 ("parent" at
+    // (12,36,60,24), the child anchored right of it).
+    pass(snap(15.0f, 12.0f, false, true, true));
+    hover(42.0f, 48.0f, 0.3f);
+    CHECK(open == 0);
+
+    // The swap frame: the resolver closes from the broken link - the
+    // child is gone, the root holds.
+    broken = true;
+    pass(snap(400.0f, 300.0f));
+    CHECK(open == 0);
+
+    // One Escape cycle now closes the whole chain: the child is
+    // already dead, so the root's own claim wins it.
+    pass(esc);
+    pass(snap(400.0f, 300.0f));
+    CHECK(open == -1);
+    CHECK(ev.item == nullptr);
 
     r.end();
     r.frame_end();
