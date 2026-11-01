@@ -1,0 +1,7 @@
+* Behavioral B source: a voltage multiplier.
+* B1 copies v(in) x 2 onto out; the .dc sweep shows the exact
+* proportionality and its derivative (the AD gradient at every point).
+V1 in 0 DC 0
+B1 out 0 V=2*v(in)
+R1 out 0 1k
+.dc V1 0 2 0.25

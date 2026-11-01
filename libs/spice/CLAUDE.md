@@ -5,7 +5,7 @@ contract is `DESIGN.md` (this directory) - sections cited throughout the
 code as `§n.m`; when code and this file disagree, DESIGN.md wins and this
 file gets fixed.
 
-## What exists (M0-M4c + the 2026-10-29 structural revision)
+## What exists (M0-M4d + the 2026-10-29 structural revision)
 - `ws::math` sparse LU facade (lives in libs/math, grown for this arc):
   analyze once per topology, factorize per solve, real + complex,
   transpose solve for the future noise adjoint.
@@ -73,9 +73,34 @@ file gets fixed.
   Vth = Vto + gamma*(sqrt(2*phi-Vbs) - sqrt(2*phi)); `M name d g s b
   model [L= W=]`, `.model NMOS|PMOS(Vto= Kp= Lambda= Gamma= Phi=)`. No
   fetlim by design (quadratic, not exponential - converges plain) and
-  no Meyer caps yet. NOTE: no §10.1 analytic test row yet - validation
-  is the ngspice 39 cross-check + the mos_* decks; the test row is the
-  first gap to close.
+  no Meyer caps yet. The §10.1 analytic rows landed with the PMOS rhs
+  fix they caught (a double polarity negation in the Norton offset -
+  every PMOS operating point was wrong; NMOS and the ngspice
+  cross-check never noticed).
+- **M4d - the behavioral B source** (`B name n+ n- V=expr | I=expr`): a
+  nonlinear source whose value is a §8.5 expression over v(node),
+  v(a,b), i(Vname), `time` and .param names, linearized per Newton
+  iteration by dual-number AD - one value pass plus one directional
+  pass per signal reference, all in fixed-size stack arrays (caps
+  reject loudly at elaboration: 64 vars / 32 refs / 256 stack). The
+  stamp is the Norton linearization: Jacobian entries at the
+  referenced unknowns (the VCCS convention: +dr leaves p_, -dr at n_),
+  the remainder in the rhs. Domain failures (sqrt/ln/log/pow outside
+  the domain, division by zero, non-finite) are Convergence errors
+  naming the source and the iterate through Device::load_error - a
+  NEW interface channel the kernel's FatalErr path turns into an
+  immediate ladder abort (no homotopy rescues an out-of-domain
+  expression). Kink slopes (sqrt/asin/acos/pow at their edges) are
+  nudged 1e-12 inside the domain - the pnjlim spirit: clamp the
+  linearization, never the value; the cold start x=0 sits on sqrt's
+  kink, so value-pass-only failures would make every sqrt deck
+  unrunnable. .ac = the gradient at the frozen OP (ref values live in
+  the state slice); behavioral sources are never a stimulus and never
+  publish breakpoints. `update_state` gained a `params` tail param
+  (behavioral residual needs the true gains); `set_control_branch`
+  gained a `which` index (a B names one i() slot per occurrence).
+  write_card round-trips plain expressions; a .param-referencing one
+  fails the writer naming the device (no AST rewrite yet).
 - measure:: library (rise_time, rms, trig_targ, ...) + .meas as a thin
   parser (TRIG/TARG WHEN AVG RMS MAX MIN PP INTEG FIND...WHEN/AT
   DERIV); failures are notes (--strict-meas promotes).
@@ -85,8 +110,8 @@ file gets fixed.
   traps + topology + unused models, nothing simulates); CLI: -o -,
   --format raw, --keep-going, --strict-meas, --werror.
 
-Everything else rejects at parse with file:line (working-rule 5): B
-(M4d), T (M4e), `.lib` (backlog), `.noise/.nodeset` (M5), `solver=klu`
+Everything else rejects at parse with file:line (working-rule 5): T
+(M4e), `.lib` (backlog), `.noise/.nodeset` (M5), `solver=klu`
 (M0b).
 
 ## Layout
@@ -102,10 +127,11 @@ Everything else rejects at parse with file:line (working-rule 5): B
 - `src/`: parse.cpp, deck.cpp (cards/params), expr.cpp (VM + signal/@
   refs), error.cpp (the taxonomy), elaborate.cpp (flatten, node table,
   graph checks, subckt-local value inlining), devices.cpp /
-  devices_m2.cpp / devices_m3.cpp / devices_m4.cpp (the 15 kinds
-  R/V/I/E/F/G/H/C/L/K/S/W/D/Q/M - param specs + state slots +
-  write_card; _m4 = the BJT/MOSFET + the shared junction-cap
-  companion), mna.cpp + mna.hpp (pattern + numeric contexts over
+  devices_m2.cpp / devices_m3.cpp / devices_m4.cpp / devices_m4d.cpp
+  (the 16 kinds R/V/I/E/F/G/H/C/L/K/S/W/D/Q/M/B - param specs +
+  state slots + write_card; _m4 = the BJT/MOSFET + the shared
+  junction-cap companion, _m4d = the behavioral B source), mna.cpp +
+  mna.hpp (pattern + numeric contexts over
   (Circuit, RunState, x, gmin)), kernel.hpp (shared DcKernel + the
   ladder + NonlinResid convergence), analysis.cpp (drivers + .step
   family + save-expression evaluator + compat=strict), transient.cpp

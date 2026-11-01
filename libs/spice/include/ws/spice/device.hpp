@@ -88,6 +88,10 @@ public:
 struct ControlRequest {
     class Device* device = nullptr;  // F/H instance, filled by its factory
     Token control;                   // the V source token it names
+    std::size_t which = 0;           // index among the device's control
+                                     //   references (a behavioral B may name
+                                     //   several i(Vname) sources; F/H/W
+                                     //   have exactly one)
 };
 
 // K coupling (§6.2): two inductor names + k, resolved after every device
@@ -329,14 +333,18 @@ public:
     // advance their pnjlim/reference slots: at iteration k the load sees
     // x = x_prev = x[k-1], and the diode stores Vd(x[k-1]) as next
     // iteration's vold. May be null in non-Newton contexts (initial seed
-    // passes); devices must tolerate that.
-    [[nodiscard]] virtual bool update_state(const std::vector<double>& x,
-                                            std::size_t node_count, double* st,
-                                            const std::vector<double>* x_prev = nullptr) {
+    // passes); devices must tolerate that. `params` (M4d) is this device's
+    // bound parameter slice - behavioral sources need it to evaluate their
+    // residual against the true gains; null in contexts that have none.
+    [[nodiscard]] virtual bool update_state(
+        const std::vector<double>& x, std::size_t node_count, double* st,
+        const std::vector<double>* x_prev = nullptr,
+        const double* params = nullptr) {
         (void)x;
         (void)node_count;
         (void)st;
         (void)x_prev;
+        (void)params;
         return false;
     }
 
@@ -347,6 +355,22 @@ public:
     // diode stores I_cur and I_prev there through update_state).
     [[nodiscard]] virtual NonlinResid nonlinear_residual(const double* /*st*/) const {
         return {0.0, 0.0};
+    }
+
+    // A load-path failure channel (§8.5, M4d): loads are const and void,
+    // so a nonlinear device whose evaluation left its domain (a behavioral
+    // expression at sqrt(-1), a division by zero) cannot report it inline.
+    // The kernel calls this right after every numeric load pass with the
+    // SAME iterate the load used; a non-empty Status aborts the pass (and
+    // the ladder - no homotopy rescues an out-of-domain expression).
+    // `step` (when not null) is the transient step being loaded. `params`
+    // is this device's bound parameter slice, `node_count` the MNA node
+    // count (branch unknowns index past it). The default (every linear
+    // device) never fails.
+    [[nodiscard]] virtual ws::core::Status load_error(
+        const std::vector<double>& /*x*/, const TranStep* /*step*/,
+        const double* /*params*/, std::size_t /*node_count*/) const {
+        return {};
     }
 
     // The next source-schedule event strictly after `t` (§6.4), or +inf
@@ -383,8 +407,11 @@ public:
     [[nodiscard]] virtual double ic_value() const { return 0.0; }
 
     // Fills the controlling branch for F/H (second elaboration pass,
-    // after every V source claimed its branch). No-op on others.
-    virtual void set_control_branch(BranchId /*branch*/) {}
+    // after every V source claimed its branch). No-op on others. `which`
+    // selects among the device's control references (a behavioral B names
+    // one slot per i(Vname) occurrence; F/H/W have a single slot and
+    // ignore it).
+    virtual void set_control_branch(BranchId /*branch*/, std::size_t /*which*/ = 0) {}
 
     // --- netlist round-trip (§10.2 rev) ---------------------------------------
     //

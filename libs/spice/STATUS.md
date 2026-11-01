@@ -7,10 +7,11 @@ disagree, DESIGN.md wins and this file gets fixed.
 ## Where we are
 
 M0 + M1 + M2 + **M3 (the diode)** + **M4 (the compact devices — BJT,
-junction caps, MOSFET)** complete: M4a `a756afe`, M4b `3644e21` +
-`48e050d`, M4c `117d647` — plus the 2026-10-29 post-review revision
+junction caps, MOSFET, behavioral B source)** complete: M4a `a756afe`,
+M4b `3644e21` + `48e050d`, M4c `117d647` + the §10.1-row/PMOS-fix pass
+`4514d91`, M4d (this commit) — plus the 2026-10-29 post-review revision
 (four structural changes + six usage wins) — all committed on `main`.
-Latest recorded gate (M4c): **2347 assertions, 118 test cases, 0
+Latest recorded gate (M4d): **2579 assertions, 132 test cases, 0
 failures** (Linux preset: GCC 14, `-Wall -Wextra -Wpedantic -Werror`).
 Windows parity: the MSVC `/W4 /WX` build is clean (the one M4a shadow,
 C4456, fixed in `523774b`; the earlier 97+6-case Windows smoke ran
@@ -42,6 +43,8 @@ in `tools/audit_*.py` / `tools/build_*.py` (documented in
 | `2a94c32` | 13 example decks (M3 diode + M4a BJT, `examples/README.md`) + the pnjlim false-convergence fix: `update_state` returns true while the limiter actively clamps (Vd_lim/Vbe_lim/Vbc_lim ≠ raw) — a stiff cold start no longer declares convergence at a stale linearization point (device current below abstol). |
 | `117d647` | M4c — the MOSFET (level 1 Shichman-Hodges + body effect): triode/saturation Id with (1+λ·Vds), `M name d g s b model [L= W=]`, `.model NMOS\|PMOS(Vto= Kp= Lambda= Gamma= Phi=)`; no fetlim by design (quadratic, not exponential), no Meyer caps yet. 3 mos_* decks; ngspice 39 exact (Id = 11.0 µA). **No §10.1 analytic test row yet** (known gap). |
 | `523774b` | MSVC C4456 — shadowed `area` in BJT `load_ac`. |
+| `4514d91` | M4c gap closed — the MOSFET §10.1 analytic rows (triode/saturation .op, the Id(Vds) knee .dc, cutoff), which caught the PMOS Norton-offset double negation: every PMOS operating point was wrong (NMOS + the ngspice cross-check never noticed — the fix is one sign, the rows are what made it visible). |
+| (this commit) | M4d — the behavioral B source (`B n+ n- V=expr \| I=expr`): §8.5 expressions over `v(node)`/`v(a,b)`/`i(Vname)`/`time`/.param names, linearized per Newton iteration by **dual-number AD** (one value pass + one directional pass per signal reference, fixed-size stack arrays — 64 vars/32 refs/256 stack caps that reject loudly at elaboration); the Norton stamp (Jacobian entries at the referenced unknowns, remainder in rhs); domain failures (sqrt/ln/log/pow out of domain, /0, non-finite) as **Convergence errors through the new `Device::load_error` channel** — the ladder aborts immediately, no homotopy rescues an out-of-domain expression; kink slopes nudged 1e-12 inside the domain (the pnjlim spirit: clamp the linearization, never the value); `.ac` = the gradient at the frozen OP; `update_state` gained a `params` tail, `set_control_branch` a `which` index; 3 b_* example decks. Gate: 2x multiplier .dc (exact), exp-as-diode .op vs Lambert-W, tanh soft-limiter .tran over `time`, domain-error goldens, AD Jacobian vs central finite differences. |
 
 ## Known sharp edges
 
@@ -55,9 +58,11 @@ in `tools/audit_*.py` / `tools/build_*.py` (documented in
   M5). The Lambert-W gate uses the default 27°C; `.dc temp` over a
   diode circuit will give wrong currents at non-27°C points. M5 fixes
   this by threading `temp` through the load context.
-- **The MOSFET has no §10.1 analytic test row** (M4c): validation is
-  the ngspice 39 cross-check (exact) + the mos_* decks; the test-row
-  gap is the first thing the next pass should close.
+- **B `write_card` cannot round-trip .param-referencing expressions**
+  (M4d): a behavioral source whose expression names a `.param` fails
+  the netlist writer naming the device (no AST rewrite yet); plain
+  expressions round-trip fine. The B source otherwise participates in
+  write_netlist like any device.
 - **Deferred device physics** (accepted-but-not-implemented model keys,
   so ngspice decks parse): the MOS Meyer caps (Cgs/Cgd/Cgb), BJT Early
   effect (Vaf/Var), diode/BJT diffusion charge (TT/Tf/Tr), diode Rs.
@@ -87,9 +92,9 @@ in `tools/audit_*.py` / `tools/build_*.py` (documented in
 
 ## Next (per §11)
 
-Close the M4 gap first: the MOSFET's §10.1 analytic test row. Then
-M4d (behavioral B with dual-number AD), M4e (lossless T-line). The
-deferred device physics (Meyer caps, Early effect, TT/Tf/Tr, diode Rs)
-and the temp-dependent models (the diode's frozen Vt) queue behind M5
-(.noise/.nodeset, temp threading through the load context), with M0b
-(KLU backend decision) and M6 hardening after.
+M4 is closed (the MOSFET §10.1 rows landed in `4514d91`; M4d — the
+behavioral B source — in this commit). Next: **M4e (the lossless
+T-line)**, then M5 (`.noise`/`.nodeset`, temp threading through the
+load context — the diode's frozen Vt), the deferred device physics
+(Meyer caps, Early effect, TT/Tf/Tr, diode Rs), with M0b (the KLU
+backend decision) and M6 hardening after.

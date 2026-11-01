@@ -211,7 +211,8 @@ public:
     // the next iteration. Returns false: the diode has no discrete state.
     [[nodiscard]] bool update_state(const std::vector<double>& x,
                                     std::size_t /*node_count*/, double* st,
-                                    const std::vector<double>* x_prev = nullptr) override {
+                                    const std::vector<double>* x_prev = nullptr,
+                                    const double* /*params*/ = nullptr) override {
         const std::vector<double>& x_load =
             (x_prev != nullptr && !x_prev->empty()) ? *x_prev : x;
         const double vd_load = v_across(x_load, anode_, cathode_);

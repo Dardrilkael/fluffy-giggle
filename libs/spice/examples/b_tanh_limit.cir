@@ -1,0 +1,8 @@
+* Behavioral B source: a soft limiter (tanh) over a differential input.
+* v(out) = -R * 1m * tanh(v(p,n)/0.5): linear below ~0.25 V differential,
+* clamping toward -1 V above.
+V1 p 0 PWL(0 0 2m 1)
+V2 n 0 0.5
+B1 out 0 I=1m*tanh(v(p,n)/0.5)
+R1 out 0 1k
+.tran 20u 2m

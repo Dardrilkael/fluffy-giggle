@@ -33,6 +33,17 @@ inline Diagnostic run_diag(ErrorKind kind, std::string code, std::string message
     return d;
 }
 
+// §8.5 (M4d): a behavioral expression outside its domain is FATAL to the
+// convergence ladder - no homotopy rescues an expression whose evaluation
+// point is invalid, so the pass (and the ladder) aborts with the
+// device-named Diagnostic instead of collapsing into the generic "no
+// convergence after ..." report. newton_pass/ptc_pass set this; solve()
+// returns the carried Status the moment it sees it.
+struct FatalErr {
+    bool set = false;
+    ws::core::Status st;
+};
+
 // --- the default save-list (§0.5) ----------------------------------------------
 
 struct SaveList {
@@ -125,9 +136,14 @@ public:
                            const std::string& context, std::size_t& iterations,
                            const std::vector<std::pair<std::size_t, double>>* forces =
                                nullptr) {
+        FatalErr fe;
         stage_ = "newton";
-        if (newton_pass(x, max_iterations, context, iterations, forces)) {
+        if (newton_pass(x, max_iterations, context, iterations, forces, 0.0, nullptr,
+                        &fe)) {
             return {};
+        }
+        if (fe.set) {
+            return fe.st;
         }
         // Stage 2: gmin staircase (§5.2). g_k = gmin * 10^k, k = steps..0;
         // each solve warm-starts from the previous, and the k=0 pass IS
@@ -135,7 +151,11 @@ public:
         stage_ = "gmin";
         for (int k = settings_.gmin_steps; k >= 0; --k) {
             const double g = settings_.gmin * std::pow(10.0, static_cast<double>(k));
-            if (!newton_pass(x, max_iterations, context, iterations, forces, g)) {
+            if (!newton_pass(x, max_iterations, context, iterations, forces, g, nullptr,
+                             &fe)) {
+                if (fe.set) {
+                    return fe.st;
+                }
                 break;
             }
             if (k == 0) {
@@ -152,7 +172,11 @@ public:
             for (int k = 1; k <= settings_.src_steps; ++k) {
                 scale.apply(static_cast<double>(k) /
                             static_cast<double>(settings_.src_steps));
-                if (!newton_pass(x, max_iterations, context, iterations, forces)) {
+                if (!newton_pass(x, max_iterations, context, iterations, forces, 0.0,
+                                 nullptr, &fe)) {
+                    if (fe.set) {
+                        return fe.st;
+                    }
                     break;
                 }
                 if (k == settings_.src_steps) {
@@ -168,8 +192,11 @@ public:
         // the pseudo-dynamics, so latches and oscillators settle where
         // the homotopies chatter. A final plain Newton confirms.
         stage_ = "ptc";
-        if (ptc_pass(x, max_iterations, context, iterations, forces)) {
+        if (ptc_pass(x, max_iterations, context, iterations, forces, &fe)) {
             return {};
+        }
+        if (fe.set) {
+            return fe.st;
         }
         // The ladder failed: report the richest context we have.
         stage_ = "failed";
@@ -191,7 +218,8 @@ public:
     ws::core::Status newton_pass(
         std::vector<double>& x, int max_iterations, const std::string& context,
         std::size_t& iterations, const std::vector<std::pair<std::size_t, double>>* forces,
-        double shunt_g = 0.0, const std::vector<double>* shunt_ref = nullptr) {
+        double shunt_g = 0.0, const std::vector<double>* shunt_ref = nullptr,
+        FatalErr* fe = nullptr) {
         (void)context;  // diagnostics are the ladder caller's job
         const std::size_t nc = circuit_.node_count();
         double gforce = 0.0;
@@ -211,6 +239,23 @@ public:
             // (the diode) linearize against it. `x` here is x[k-1] - the
             // previous iterate / warm start.
             mna_.load(circuit_.devices, state_, &x, settings_.gmin);
+            // §8.5 (M4d): a load that evaluated outside its domain is
+            // fatal to the pass AND the ladder - checked against the same
+            // iterate the load just used. The measure-only load above
+            // (nullptr x) is deliberately NOT checked: it linearizes
+            // around zero, where e.g. ln(v(x)) is legitimately invalid.
+            if (fe != nullptr) {
+                for (std::size_t i = 0; i < circuit_.devices.size(); ++i) {
+                    const ws::core::Status st = circuit_.devices[i]->load_error(
+                        x, nullptr,
+                        state_.params_.data() + circuit_.param_span[i].begin, nc);
+                    if (!st) {
+                        fe->set = true;
+                        fe->st = st;
+                        return st;
+                    }
+                }
+            }
             // §5.3 (M3): opt-in gshunt - a per-node conductance to ground
             // that masks floating-node stiffness. Default 0 (off); a
             // positive value shunts every node diagonal in every Newton
@@ -252,7 +297,9 @@ public:
                 state_changed = circuit_.devices[i]->update_state(
                                     x_new, nc, state_.state_.data() +
                                                    circuit_.state_span[i].begin,
-                                    &x) ||
+                                    &x,
+                                    state_.params_.data() +
+                                        circuit_.param_span[i].begin) ||
                                 state_changed;
             }
             bool converged = !state_changed;
@@ -335,7 +382,8 @@ public:
     // un-aided Newton confirms the endpoint.
     bool ptc_pass(std::vector<double>& x, int max_iterations,
                   const std::string& context, std::size_t& iterations,
-                  const std::vector<std::pair<std::size_t, double>>* forces) {
+                  const std::vector<std::pair<std::size_t, double>>* forces,
+                  FatalErr* fe = nullptr) {
         // Measure-only load for the initial pseudo-capacitor sizing;
         // nullptr for x linearizes nonlinear devices around zero (fine
         // for max_diagonal, which only sizes the pseudo-C).
@@ -346,7 +394,7 @@ public:
         }
         for (int it = 0; it < max_iterations; ++it) {
             std::vector<double> x_prev = x;
-            if (!newton_pass(x, 20, context, iterations, forces, c, &x_prev)) {
+            if (!newton_pass(x, 20, context, iterations, forces, c, &x_prev, fe)) {
                 return false;
             }
             c *= 0.5;
@@ -354,7 +402,8 @@ public:
                 break;
             }
         }
-        return static_cast<bool>(newton_pass(x, max_iterations, context, iterations, forces));
+        return static_cast<bool>(newton_pass(x, max_iterations, context, iterations,
+                                              forces, 0.0, nullptr, fe));
     }
 
     // One transient step: companion load (coefficients from the devices'
@@ -373,6 +422,17 @@ public:
             // against it (the tran companion from C/L is already in `x`
             // via begin_step's state slots).
             mna_.load_tran(circuit_.devices, state_, step, &x, settings_.gmin);
+            // §8.5 (M4d): the transient twin of newton_pass's domain check
+            // - the same iterate, plus the step (time-dependent
+            // expressions name it in the message).
+            for (std::size_t i = 0; i < circuit_.devices.size(); ++i) {
+                const ws::core::Status st = circuit_.devices[i]->load_error(
+                    x, &step, state_.params_.data() + circuit_.param_span[i].begin,
+                    nc);
+                if (!st) {
+                    return st;
+                }
+            }
             std::vector<double> x_new;
             WS_TRY(mna_.solve(x_new));
             for (const double v : x_new) {
@@ -389,7 +449,9 @@ public:
                 state_changed = circuit_.devices[i]->update_state(
                                     x_new, nc, state_.state_.data() +
                                                    circuit_.state_span[i].begin,
-                                    &x) ||
+                                    &x,
+                                    state_.params_.data() +
+                                        circuit_.param_span[i].begin) ||
                                 state_changed;
             }
             // §5.1 (M3): both the switch-state gate (a flip demands

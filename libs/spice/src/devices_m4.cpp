@@ -384,7 +384,8 @@ public:
     // §5.3: vold stored is the CLAMPED V (same lesson as the diode).
     [[nodiscard]] bool update_state(const std::vector<double>& x,
                                     std::size_t /*node_count*/, double* st,
-                                    const std::vector<double>* x_prev = nullptr) override {
+                                    const std::vector<double>* x_prev = nullptr,
+                                    const double* /*params*/ = nullptr) override {
         const std::vector<double>& x_load =
             (x_prev != nullptr && !x_prev->empty()) ? *x_prev : x;
         const double sgn = pnp_ ? -1.0 : 1.0;
@@ -890,7 +891,8 @@ public:
     // fetlim yet — the MOS is quadratic, converges without limiting).
     [[nodiscard]] bool update_state(const std::vector<double>& x,
                                     std::size_t /*nc*/, double* st,
-                                    const std::vector<double>* x_prev = nullptr) override {
+                                    const std::vector<double>* x_prev = nullptr,
+                                    const double* /*params*/ = nullptr) override {
         const std::vector<double>& x_load =
             (x_prev != nullptr && !x_prev->empty()) ? *x_prev : x;
         const double sgn = pnp_ ? -1.0 : 1.0;

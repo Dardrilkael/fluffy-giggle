@@ -42,6 +42,14 @@ On Windows: `.\build\spice-debug\bin\spice.exe run <example>.cir`
 | `mos_iv.cir` | `.dc` | Id vs Vds — the triode-to-saturation knee |
 | `mos_cutoff.cir` | `.op` | Vgs < Vth — Id ≈ 0 |
 
+## M4d — the behavioral B source (dual-number AD)
+
+| File | Analysis | What it shows |
+|---|---|---|
+| `b_multiplier.cir` | `.dc` | `V=2*v(in)` — an exact gain-of-2 buffer at every sweep point |
+| `b_exp.cir` | `.op` | `I=10f*(exp(v(a)/25.85m)-1)` — the B source as a diode; converges to the Lambert-W point |
+| `b_tanh_limit.cir` | `.tran` | `I=1m*tanh(v(p,n)/0.5)` — a soft limiter over a differential ref, `time`-swept |
+
 ## ngspice cross-validation
 
 The `.op` examples produce values that match ngspice 39 to 5+ significant

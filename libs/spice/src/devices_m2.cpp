@@ -765,7 +765,8 @@ public:
     }
     [[nodiscard]] bool update_state(const std::vector<double>& x,
                                     std::size_t node_count, double* st,
-                                    const std::vector<double>* x_prev = nullptr) override {
+                                    const std::vector<double>* x_prev = nullptr,
+                                    const double* /*params*/ = nullptr) override {
         (void)node_count;
         (void)x_prev;  // switches don't track the pre-solve iterate
         const double v = v_across(x, cp_, cn_);
@@ -797,10 +798,11 @@ public:
         : SwitchDeviceBase(std::move(display), p, n, on), control_(control) {}
 
     [[nodiscard]] char kind() const override { return 'W'; }
-    void set_control_branch(BranchId br) override { control_ = br; }
+    void set_control_branch(BranchId br, std::size_t /*which*/) override { control_ = br; }
     [[nodiscard]] bool update_state(const std::vector<double>& x,
                                     std::size_t node_count, double* st,
-                                    const std::vector<double>* x_prev = nullptr) override {
+                                    const std::vector<double>* x_prev = nullptr,
+                                    const double* /*params*/ = nullptr) override {
         (void)x_prev;
         const double i = x[node_count + control_];
         const bool on = st[0] != 0.0;

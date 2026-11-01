@@ -95,6 +95,9 @@ namespace ws::spice {
     const DeviceCard& card, FactoryServices& s);
 [[nodiscard]] ws::core::Result<std::unique_ptr<Device>> make_mosfet(
     const DeviceCard& card, FactoryServices& s);
+// The M4d device factory (devices_m4d.cpp).
+[[nodiscard]] ws::core::Result<std::unique_ptr<Device>> make_bsource(
+    const DeviceCard& card, FactoryServices& s);
 
 // The builtin device factory table ('R','V','I','E','F','G','H' + M2's
 // 'C','L','K','S','W'), defined in devices.cpp. The elaborator copies it

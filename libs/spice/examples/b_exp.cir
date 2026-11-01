@@ -1,0 +1,7 @@
+* Behavioral B source as a diode: I = Is*(exp(v(a)/Vt)-1) in a series R.
+* No pnjlim exists for behavioral sources; the residual gate walks the
+* exponential to the Lambert-W fixed point (Vd ~ 0.662 V, I ~ 1.34 mA).
+V1 src 0 DC 2
+R1 src a 1k
+B1 a 0 I=10f*(exp(v(a)/25.85m)-1)
+.op

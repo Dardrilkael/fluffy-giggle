@@ -12,9 +12,12 @@
 
 #include <doctest/doctest.h>
 
+#include <ws/spice/circuit.hpp>
 #include <ws/spice/deck.hpp>
 #include <ws/spice/error.hpp>
+#include <ws/spice/netlist.hpp>
 #include <ws/spice/parse.hpp>
+#include <ws/spice/state.hpp>
 #include <ws/spice/lint.hpp>
 #include <ws/spice/raw.hpp>
 #include <ws/spice/results.hpp>
@@ -511,7 +514,7 @@ TEST_CASE("parse-error goldens: file:line:col prefixes") {
         {".lib backlog\n* line 2 is a comment\n.lib foo\n",
          "t.cir:3:1: error: ", "card '.lib'"},
         {"bjt\nV1 a 0 5\nB1 a 0 0 qm\n",
-         "t.cir:3:1: error: ", "device 'B'"},
+         "t.cir:3:1: error: ", "expected V= or I="},
         {"arity\nV1 a 0 5\nR1 a 0\n",
          "t.cir:3:1: error: ", "needs a value"},
         {"bad waveform\nV1 a 0 PULSE(0)\nR1 a 0 1k\n.op\n",
@@ -2529,4 +2532,386 @@ TEST_CASE("M4c MOSFET: PMOS - polarity flips, same magnitudes") {
     const double ref_sat =
         mos_level1_id(2.0, 2.0, 0.0, 1.0, 20e-6, 0.01, 0.0, 0.6, 1e-6, 1e-6);
     CHECK(i_vd == doctest::Approx(ref_sat).epsilon(1e-9));
+}
+
+// --- §10.1/§10.4 M4d: the behavioral B source (dual-number AD) --------------------
+
+namespace {
+
+// Runs one .ac point and returns re(v(out)) for `expr` biased at `dc`
+// through R=1k: the small-signal transfer IS the AD gradient at the OP
+// (§8.5: "the small-signal element is the gradient at the OP"), so this
+// measures the dual-number derivative exactly - no finite-difference
+// truncation anywhere.
+double b_ac_gradient(const std::string& expr, double dc) {
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "b ac grad\n"
+        "V1 in 0 DC " + std::to_string(dc) + " AC 1\n"
+        "B1 out 0 I=1m*(" + expr + ")\n"
+        "R1 out 0 1k\n"
+        ".ac lin 1 1k 1k\n",
+        nullptr, settings);
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 1);
+    const Table& t = run->results.tables[0];
+    // re(v(out)) = -R * d/dv(in) [1m*(expr)] at v(in)=dc.
+    return t.signals[col_of(t, "re(v(out))")].data[0];
+}
+
+}  // namespace
+
+TEST_CASE("M4d B: §10.1 row - .op and .dc against the closed form") {
+    // A behavioral current source I=1m*(2*v(in)+0.5*v(in)^2) over R=1k:
+    // v(out) = -(2*v + 0.5*v^2), a quadratic - closed-form at 1e-9 and
+    // exactly finite-difference-differentiable (a quadratic's central
+    // difference has zero truncation error, which the derivative row uses).
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;
+    const auto run = run_text(
+        "b op dc\n"
+        "V1 in 0 DC 1\n"
+        "B1 out 0 I=1m*(2*v(in)+0.5*v(in)**2)\n"
+        "R1 out 0 1k\n"
+        ".op\n"
+        ".dc V1 0 2 0.25\n",
+        nullptr, settings);
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 2);
+    const Table& op = run->results.tables[0];
+    CHECK(op.signals[col_of(op, "v(out)")].data[0] == approx(-2.5));  // v(in)=1
+    const Table& dc = run->results.tables[1];
+    const std::size_t col_vo = col_of(dc, "v(out)");
+    REQUIRE(dc.signals[col_vo].data.size() == 9);
+    for (std::size_t k = 0; k < 9; ++k) {
+        const double v = 0.25 * static_cast<double>(k);
+        CHECK(dc.signals[col_vo].data[k] == approx(-(2.0 * v + 0.5 * v * v)));
+    }
+}
+
+TEST_CASE("M4d B: the derivative row - central finite difference at 1e-6") {
+    // §10.1: "behavioral B | .op, and derivative | closed form; central
+    // finite difference | 1e-9; 1e-6". The quadratic's central difference
+    // is exact, so the FD-vs-AD comparison isolates the AD from FD noise.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;
+    const auto run = run_text(
+        "b deriv fd\n"
+        "V1 in 0 DC 0\n"
+        "B1 out 0 I=1m*(2*v(in)+0.5*v(in)**2)\n"
+        "R1 out 0 1k\n"
+        ".dc V1 0.25 1.75 0.25\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const std::size_t col_vo = col_of(t, "v(out)");
+    const std::size_t col_vi = col_of(t, "v(in)");
+    for (std::size_t k = 1; k + 1 < t.signals[col_vo].data.size(); ++k) {
+        const double dv = t.signals[col_vi].data[k + 1] - t.signals[col_vi].data[k - 1];
+        const double fd = (t.signals[col_vo].data[k + 1] - t.signals[col_vo].data[k - 1]) / dv;
+        // d(v_out)/d(v_in) = -(2 + v).
+        CHECK(fd == doctest::Approx(-(2.0 + t.signals[col_vi].data[k])).epsilon(1e-6));
+    }
+}
+
+TEST_CASE("M4d B: the AD gradient at the OP via .ac (§10.4 battery)") {
+    // One row per §8.5 function family: the .ac transfer is the frozen
+    // gradient, compared against the hand derivative at 1e-9. This is the
+    // "every AD derivative is checked against finite differences" gate in
+    // its exact form - stronger than FD (no truncation), and the FD row
+    // above cross-checks the same machinery end to end.
+    const double r = 1000.0;
+    struct Row {
+        const char* expr;
+        double dc;
+        double derv;  // d/dv of the expr at dc
+    };
+    const Row rows[] = {
+        {"sqrt(v(in))", 1.0, 0.5},
+        {"sqrt(v(in))", 4.0, 0.25},
+        {"exp(v(in)/0.5)", 0.3, 2.0 * std::exp(0.6)},
+        {"ln(1+v(in))", 1.0, 0.5},
+        {"log10(1+v(in))", 1.0, 1.0 / (2.0 * std::log(10.0))},
+        {"sin(v(in))", 0.7, std::cos(0.7)},
+        {"cos(v(in))", 0.7, -std::sin(0.7)},
+        {"tan(v(in))", 0.4, 1.0 / (std::cos(0.4) * std::cos(0.4))},
+        {"atan(v(in))", 1.5, 1.0 / (1.0 + 1.5 * 1.5)},
+        {"sinh(v(in))", 0.3, std::cosh(0.3)},
+        {"tanh(v(in))", 0.5, 1.0 - std::tanh(0.5) * std::tanh(0.5)},
+        {"abs(v(in))", 1.5, 1.0},
+        {"abs(v(in))", -1.5, -1.0},
+        {"uramp(v(in)-1)", 1.5, 1.0},
+        {"uramp(v(in)-1)", 0.5, 0.0},
+        {"pow(v(in),3)", 1.2, 3.0 * 1.2 * 1.2},
+        {"v(in)**2.5", 1.5, 2.5 * std::pow(1.5, 1.5)},
+        {"min(v(in),1)", 1.5, 0.0},
+        {"max(v(in),1)", 1.5, 1.0},
+        {"if(v(in)>1, v(in)**2)", 1.5, 3.0},
+        {"if(v(in)>1, v(in)**2)", 0.5, 0.0},
+        {"(v(in)>1 ? v(in) : 0.5*v(in))", 1.5, 1.0},
+        {"(v(in)>1 ? v(in) : 0.5*v(in))", 0.5, 0.5},
+    };
+    for (const Row& row : rows) {
+        const double got = b_ac_gradient(row.expr, row.dc);
+        // transfer = -R * 1m * d(expr)/dv.
+        CHECK_MESSAGE(got == doctest::Approx(-r * 1e-3 * row.derv).epsilon(1e-9),
+                      ("expr: " + std::string(row.expr) + " at v=" +
+                       std::to_string(row.dc))
+                          .c_str());
+    }
+}
+
+TEST_CASE("M4d B: exponential source converges to the Lambert-W closed form") {
+    // The B source as a diode: I = Is*(exp(v(a)/Vt)-1) with the series R.
+    // No limiter exists for behavioral sources (§8.5 defines none), so
+    // this row pins the §5.1 residual-gate convergence: the two-gate
+    // check walks the exponential to the fixed point from a cold start.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;
+    const auto run = run_text(
+        "b lambert\n"
+        "V1 src 0 DC 2\n"
+        "R1 src a 1k\n"
+        "B1 a 0 I=10f*(exp(v(a)/25.85m)-1)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double v_a = t.signals[col_of(t, "v(a)")].data[0];
+    const double i_mag = -t.signals[col_of(t, "i(V1)")].data[0];
+    // The same closed form as the diode row, with the deck's exact Vt.
+    const double vt = 25.85e-3;
+    const double is_val = 10e-15;
+    const double r = 1000.0;
+    const double z = lambert_w0((is_val * r / vt) * std::exp((2.0 + is_val * r) / vt));
+    const double ref_i = (vt / r) * z - is_val;
+    const double ref_vd = 2.0 - ref_i * r;
+    CHECK(v_a == doctest::Approx(ref_vd).epsilon(1e-9));
+    CHECK(i_mag == doctest::Approx(ref_i).epsilon(1e-9));
+}
+
+TEST_CASE("M4d B: V-type source - .op, .dc and the .ac gradient") {
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;
+    const auto run = run_text(
+        "b vtype\n"
+        "V1 in 0 DC 1\n"
+        "B1 out 0 V=2*v(in)\n"
+        "R1 out 0 1k\n"
+        ".op\n"
+        ".dc V1 0 2 0.5\n",
+        nullptr, settings);
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 2);
+    CHECK(run->results.tables[0].signals[col_of(run->results.tables[0], "v(out)")].data[0]
+          == approx(2.0));
+    const Table& dc = run->results.tables[1];
+    const std::size_t col_vo = col_of(dc, "v(out)");
+    for (std::size_t k = 0; k < dc.signals[col_vo].data.size(); ++k) {
+        CHECK(dc.signals[col_vo].data[k] == approx(2.0 * 0.5 * static_cast<double>(k)));
+    }
+    // The branch current is an unknown with the ngspice sign convention.
+    CHECK(run->results.tables[0].signals[col_of(run->results.tables[0], "i(B1)")].data[0]
+          == approx(-2.0 / 1000.0));
+
+    // .ac: the small-signal of V=2*v(in) is a gain of 2 - exactly the E
+    // source with gain 2, pinned against the same closed form.
+    const auto ac = run_text(
+        "b vtype ac\n"
+        "V1 in 0 DC 0 AC 1\n"
+        "B1 out 0 V=2*v(in)\n"
+        "R1 out 0 1k\n"
+        ".ac lin 1 1k 1k\n",
+        nullptr, settings);
+    REQUIRE(ac);
+    CHECK(ac->results.tables[0].signals[col_of(ac->results.tables[0], "re(v(out))")]
+              .data[0] == approx(2.0));
+    CHECK(ac->results.tables[0].signals[col_of(ac->results.tables[0], "im(v(out))")]
+              .data[0] == approx(0.0));
+}
+
+TEST_CASE("M4d B: domain errors name the source and the iterate (§8.5/§9.1)") {
+    // ln(1+v(in)) with the source at -2 V: the cold iterate (v=0) is in
+    // domain, the first solve leaves it - the error fires on the second
+    // load with the offending operand, never as a NaN, and never as the
+    // ladder's generic "no convergence after ...".
+    const auto run = run_text(
+        "b domain\n"
+        "V1 in 0 DC -2\n"
+        "B1 out 0 I=ln(1+v(in))\n"
+        "R1 out 0 1k\n"
+        ".op\n");
+    const std::string msg = error_of(run);
+    CHECK(msg.find("behavioral source B1") != std::string::npos);
+    CHECK(msg.find("'ln'") != std::string::npos);
+    CHECK(msg.find("operand -1") != std::string::npos);
+    CHECK(msg.find("no convergence after") == std::string::npos);
+
+    // The .tran twin names the step time (in-domain at the t=0 OP,
+    // out of it once t passes 2u).
+    const auto tran = run_text(
+        "b domain tran\n"
+        "B1 out 0 I=ln(2u-time)\n"
+        "R1 out 0 1k\n"
+        ".tran 0.5u 3u\n");
+    const std::string tmsg = error_of(tran);
+    CHECK(tmsg.find("behavioral source B1") != std::string::npos);
+    CHECK(tmsg.find("at t = ") != std::string::npos);
+}
+
+TEST_CASE("M4d B: i(Vname) and v(a,b) references against closed forms") {
+    // i(V1) = -1mA (V1 delivers into R1); the B multiplies by 2 and the
+    // current then charges out through R2.
+    const auto run = run_text(
+        "b iref\n"
+        "V1 a 0 DC 1\n"
+        "R1 a 0 1k\n"
+        "B1 out 0 I=2*i(V1)\n"
+        "R2 out 0 500\n"
+        ".op\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    CHECK(t.signals[col_of(t, "v(out)")].data[0] == approx(1.0));
+
+    // v(p,n) is the differential: 1m*(3-1) drains out through 1k.
+    const auto run2 = run_text(
+        "b vdiff\n"
+        "V1 p 0 DC 3\n"
+        "V2 n 0 DC 1\n"
+        "B1 out 0 I=1m*v(p,n)\n"
+        "R1 out 0 1k\n"
+        ".op\n");
+    REQUIRE(run2);
+    CHECK(run2->results.tables[0].signals[col_of(run2->results.tables[0], "v(out)")].data[0]
+          == approx(-2.0));
+
+    // An unknown i() source is a Semantic error naming it (the message
+    // lowercases the name, like every name match in the deck layer).
+    const auto bad = run_text(
+        "b iref unknown\n"
+        "V1 a 0 DC 1\n"
+        "R1 a 0 1k\n"
+        "B1 out 0 I=2*i(Vnope)\n"
+        "R2 out 0 500\n"
+        ".op\n");
+    const std::string msg = error_of(bad);
+    CHECK(msg.find("vnope") != std::string::npos);
+    CHECK(msg.find("voltage source") != std::string::npos);
+}
+
+TEST_CASE("M4d B: the time variable in .tran (ramp exactness)") {
+    // v(out) = -R*1m*t is algebraic in the state at every sample point -
+    // exact regardless of the integrator, so the time binding is pinned
+    // to 1e-9 at several samples.
+    const auto run = run_text(
+        "b time ramp\n"
+        "B1 out 0 I=1m*time\n"
+        "R1 out 0 1k\n"
+        ".tran 0.1m 2m\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const std::size_t col_vo = col_of(t, "v(out)");
+    REQUIRE(t.signals[col_vo].data.size() > 10);
+    for (std::size_t k = 0; k < t.signals[col_vo].data.size(); ++k) {
+        const double time_k = t.rows()[k][0];  // the time axis
+        CHECK(t.signals[col_vo].data[k] ==
+              doctest::Approx(-1000.0 * 1e-3 * time_k).epsilon(1e-9));
+    }
+}
+
+TEST_CASE("M4d B: .param binding and .step rebinding reach the expression") {
+    // A plain name inside the expression is a parameter slot: .step
+    // rebinds it per point like any device value.
+    const auto run = run_text(
+        "b step gain\n"
+        ".param gain=1\n"
+        "V1 in 0 DC 1\n"
+        "B1 out 0 I=gain*1m*v(in)\n"
+        "R1 out 0 1k\n"
+        ".dc V1 1 1 1\n"
+        ".step param gain list 1 2 4\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const std::size_t col_vo = col_of(t, "v(out)");
+    REQUIRE(t.signals[col_vo].data.size() == 3);
+    CHECK(t.signals[col_vo].data[0] == approx(-1.0));
+    CHECK(t.signals[col_vo].data[1] == approx(-2.0));
+    CHECK(t.signals[col_vo].data[2] == approx(-4.0));
+}
+
+TEST_CASE("M4d B: rejections are loud and line-numbered") {
+    // No V=/I= spec.
+    CHECK(error_of(run_text("b none\nB1 a b 5\nR1 a 0 1k\nR2 b 0 1k\n.op\n"))
+              .find("V= or I=") != std::string::npos);
+    // A second spec token is a parse error in the expression, not silence.
+    CHECK(!run_text("b both\nB1 a b V=1 I=2\nR1 a 0 1k\nR2 b 0 1k\n.op\n"));
+    // Monte-Carlo draws are .param-only.
+    CHECK(error_of(run_text("b gauss\nB1 a b I=gauss(1m)\nR1 a 0 1k\n.op\n"))
+              .find(".param-only") != std::string::npos);
+    // @dev[param] is a save-list form.
+    CHECK(error_of(run_text("b at\nV1 a 0 1\nB1 b 0 I=@V1[dc]\nR1 b 0 1k\n.op\n"))
+              .find(".save/.print") != std::string::npos);
+    // v() arity is checked at parse.
+    CHECK(error_of(run_text("b varity\nV1 a 0 1\nB1 b 0 I=v(a,b,c)\nR1 b 0 1k\n.op\n"))
+              .find("one node or two") != std::string::npos);
+}
+
+TEST_CASE("M4d B: the netlist round-trip writes and re-solves equivalently") {
+    // A B without .param references round-trips; one WITH a plain name
+    // fails the writer naming the device (the flattened deck has no
+    // .params - a loud gap, never a silently wrong card).
+    const std::string deck =
+        "b roundtrip\n"
+        "V1 in 0 DC 1\n"
+        "B1 out 0 I=3m*v(in)\n"
+        "R1 out 0 1k\n"
+        ".op\n";
+    const ws::core::Result<ws::spice::Deck> parsed =
+        read_deck("t.cir", deck, ws::spice::ParseOptions{});
+    REQUIRE(parsed);
+    std::vector<Warning> w;
+    const ws::core::Result<ws::spice::DeckAst> ast = build_deck_ast(*parsed, w);
+    REQUIRE(ast);
+    const ws::core::Result<ws::spice::Circuit> circ = elaborate_deck(*ast, 27.0, w);
+    REQUIRE(circ);
+    const ws::core::Result<ws::spice::RunState> rs = ws::spice::RunState::bind(*circ);
+    REQUIRE(rs);
+    const ws::core::Result<std::string> net = write_netlist(*circ, *rs);
+    REQUIRE(net);
+    CHECK(net->find("B1 out 0 I=3m*v(in)") != std::string::npos);
+    // Re-running the written deck (with an analysis card inserted ahead of
+    // its .end - the writer emits devices/models only) gives the same
+    // answer.
+    const std::size_t end_pos = net->rfind(".end");
+    REQUIRE(end_pos != std::string::npos);
+    const auto again = run_text(net->substr(0, end_pos) + ".op\n.end\n");
+    REQUIRE(again);
+    REQUIRE(again->results.tables.size() == 1);
+    CHECK(again->results.tables[0].signals[col_of(again->results.tables[0], "v(out)")].data[0]
+          == approx(-3.0));
+
+    const std::string param_deck =
+        "b paramgap\n"
+        ".param gain=3\n"
+        "V1 in 0 DC 1\n"
+        "B1 out 0 I=gain*v(in)\n"
+        "R1 out 0 1k\n"
+        ".op\n";
+    const ws::core::Result<ws::spice::Deck> p2 =
+        read_deck("t.cir", param_deck, ws::spice::ParseOptions{});
+    REQUIRE(p2);
+    const ws::core::Result<ws::spice::DeckAst> a2 = build_deck_ast(*p2, w);
+    REQUIRE(a2);
+    const ws::core::Result<ws::spice::Circuit> c2 = elaborate_deck(*a2, 27.0, w);
+    REQUIRE(c2);
+    const ws::core::Result<ws::spice::RunState> r2 = ws::spice::RunState::bind(*c2);
+    REQUIRE(r2);
+    const ws::core::Result<std::string> n2 = write_netlist(*c2, *r2);
+    REQUIRE(!n2);
+    CHECK(n2.error().message.find("B1") != std::string::npos);
 }

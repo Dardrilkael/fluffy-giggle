@@ -421,10 +421,11 @@ ws::core::Status Elaborator::resolve_controls() {
             return spice_fail(elab_diag(
                 ErrorKind::Semantic, "spice.semantic.control_source",
                 "controlling source '" + req.control.text +
-                    "' is not a known voltage source (v1 controls name V sources)",
+                    "' is not a known voltage source (F/H controls and the"
+                    " behavioral i() reference name V sources)",
                 req.control.loc));
         }
-        req.device->set_control_branch(it->second);
+        req.device->set_control_branch(it->second, req.which);
     }
     return {};
 }

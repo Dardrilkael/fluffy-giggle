@@ -688,7 +688,7 @@ public:
         this->loc = sl;
     }
 
-    void set_control_branch(BranchId br) override { control_ = br; }
+    void set_control_branch(BranchId br, std::size_t /*which*/) override { control_ = br; }
 
     [[nodiscard]] const std::string& name() const override { return name_; }
     [[nodiscard]] char kind() const override { return 'F'; }
@@ -739,7 +739,7 @@ public:
         this->loc = sl;
     }
 
-    void set_control_branch(BranchId br) override { control_ = br; }
+    void set_control_branch(BranchId br, std::size_t /*which*/) override { control_ = br; }
 
     [[nodiscard]] const std::string& name() const override { return name_; }
     [[nodiscard]] char kind() const override { return 'H'; }
@@ -853,6 +853,7 @@ const std::map<char, DeviceFactory>& builtin_device_factories() {
         {'H', make_ccvs},      {'C', make_capacitor}, {'L', make_inductor},
         {'K', make_coupling},  {'S', make_vswitch},   {'W', make_iswitch},
         {'D', make_diode},     {'Q', make_bjt},     {'M', make_mosfet},
+        {'B', make_bsource},
     };
     return table;
 }

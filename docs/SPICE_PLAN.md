@@ -43,8 +43,9 @@ and DESIGN.md disagree, DESIGN.md wins.
 | `b265ae7` | spice | .dc crash on MSVC debug fixed: `run_dc` assigned through empty `std::optional`s - UB that stayed silent on GCC and aborted (exit 3) on Windows. Found via ASan; see the audit tooling below. |
 | (M3, this commit) | spice | The diode + the §3.6 current iterate: `DcLoadContext::node_v/branch_i/gmin`, `AcLoadContext::state_`, `NonlinResid` + the §5.1 nonlinear-residual convergence gate, `update_state` `x_prev` param, pnjlim (SPICE3 devlim), `solve_tran` upgraded to a real Newton loop, `gminsteps`/`srcsteps`/`gshunt` options, `Builder::diode()`/`diode_model()`. Gate: Lambert-W .op (1e-7 rel at reltol=1e-9), .dc sweep vs Lambert-W, pnjlim stiff-bias convergence (diode at 100V), rectifier .tran sanity, Jacobian vs central finite differences, builder .op equivalence. 2306 assertions / 106 cases / 0 failures. |
 | (HEAD, after `b265ae7`) | tools | Linux-side audit scanners for MSVC parity (`tools/audit_*.py`, `tools/build_*.py`) + this plan refresh. |
+| (see `libs/spice/STATUS.md`) | M4 | M4a (BJT, `a756afe`), M4b (junction caps, `3644e21`+`48e050d`), M4c (MOSFET `117d647` + the §10.1 rows/PMOS fix `4514d91`), M4d (behavioral B source, dual-number AD). The authoritative landed table lives in STATUS.md from M4a on. |
 
-Working tree is clean; `main` is 14 commits ahead of `origin/main` and
+Working tree is clean; `main` is ahead of `origin/main` and
 **deliberately not pushed** (no remote credentials). If you want to
 share the work, push `main` to a remote you control, or zip the repo and
 hand it over.
@@ -250,10 +251,10 @@ working rule 5) and would each be a future milestone:
 - **M0b (alt backend)** - KLU sparse solver behind `solver=klu` in
   `.options`. The Eigen backend is the only one wired; the design leaves
   the policy layer abstract enough to add KLU later.
-- **M4** - semiconductor devices: BJT (Gummel-Poon), MOS level 1,
-  behavioral B sources (dual-number AD), lossless T-lines (T). The diode
-  (M3) is the foundation; BJT/MOS reuse the §3.6 current-iterate
-  threading and the nonlinear-residual convergence gate.
+- **M4e (T-line only remains)** - the BJT (Ebers-Moll, M4a), the MOSFET
+  (level 1 Shichman-Hodges, M4c) and the behavioral B source
+  (dual-number AD, M4d) all landed - see `libs/spice/STATUS.md`. Only
+  the lossless T-line (T) still rejects at parse.
 - **M5 (remainder)** - `.noise`, `.nodeset`, per-device temperature
   params (TC on models, temp-dependent diode Vt), text report. (The
   2026-10-29 revision already landed `.step`, `.meas`, `.save`/`.print`
@@ -275,23 +276,22 @@ In rough priority order:
 1. **Re-read this file + `libs/spice/DESIGN.md` + `libs/spice/CLAUDE.md`.**
    DESIGN.md is the contract; CLAUDE.md is the lived rules-bite list; this
    file is the status. The three together are the full state.
-2. **Confirm the working tree.** `git log --oneline -22` should show the
-   commits listed above (HEAD = the audit-tooling commit; `origin/main`
-   sits at the `8662844` smoke commit, 14 behind). `git status` should be
-   clean.
+2. **Confirm the working tree.** `git status` should be clean;
+   `git log --oneline -- libs/spice` shows the arc's commits (the
+   authoritative landed table is `libs/spice/STATUS.md`).
 3. **Run the gate.** `cmake --preset linux && cmake --build --preset linux
-   && ctest --preset linux` should pass (106 cases / 2306 assertions at the
-   time of writing). If it does not, the break is load-bearing -
+   && ctest --preset linux` should pass (132 cases / 2579 assertions at the
+   M4d gate). If it does not, the break is load-bearing -
    investigate before adding anything. Before a Windows hand-off, also
    run the five `tools/audit_*.py`/`tools/build_*.py` parity checks.
-4. **Pick the next milestone.** The natural next moves are **M0b** (the
-   KLU backend: both facades are stable, cross-validation tests are the
-   gate) or **M4** (BJT Gummel-Poon, MOS level 1, behavioral B with
-   dual-number AD, lossless T-line; the diode's §3.6 current-iterate
-   threading from M3 is the foundation - BJT/MOS reuse the same
-   nonlinear contract). Each new milestone = one commit, one test row,
-   one CLAUDE.md note - that's the established rhythm (M1 commit 5e97912,
-   the M2 commit, and the M3 commit are the templates).
+4. **Pick the next milestone.** The natural next moves are **M4e** (the
+   lossless T-line - the last M4 device; the §3.6 current-iterate
+   threading + the nonlinear-residual gate from M3 are the foundation
+   every nonlinear device reuses) or **M0b** (the KLU backend: both
+   facades are stable, cross-validation tests are the gate). Each new
+   milestone = one commit, one test row, one CLAUDE.md note - that's the
+   established rhythm (M1 commit 5e97912, the M2 commit, and the M3
+   commit are the templates).
 5. **Do not regress scope.** If a request lands that wants M3+ devices,
    that's a new arc with its own decision round. The four locked decisions
    above stay locked unless the user explicitly reopens them.
