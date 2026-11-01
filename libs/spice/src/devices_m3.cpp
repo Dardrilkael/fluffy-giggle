@@ -115,16 +115,29 @@ public:
     // The diode is a conductance path between its terminals (Gd is always
     // finite and nonzero - at Vd=0, Gd = Is/(n*Vt) + gmin, ~4e-13 S for
     // defaults; tiny but a real DC path, matching ngspice's graph check).
+    // With Rs > 0 the path is the two-edge chain anode --[Rs]-- mid --
+    // [junction]-- cathode (the internal node is NOT a terminal, the
+    // L#mid precedent).
     [[nodiscard]] std::vector<std::pair<NodeId, NodeId>> conductance_edges()
         const override {
+        if (mid_ != kGround) {
+            return {{anode_, mid_}, {mid_, cathode_}};
+        }
         return {{anode_, cathode_}};
     }
 
     // --- the stamp (§3.6: linearize at the current iterate) --------------
+    // With Rs > 0 the junction sits at the internal mid node: the device
+    // is anode --[Rs/area]-- mid --[Shockley (+Cjo companion)]-- cathode,
+    // SPICE3's topology. Rs = 0 (the default) keeps the M3 two-terminal
+    // stamp byte-identical - no mid node exists at all.
+    [[nodiscard]] NodeId jnode() const { return (mid_ != kGround) ? mid_ : anode_; }
+
     void load_dc(DcLoadContext& cx) const override {
         const double area = cx.par(kAreaParam);
         const double is_eff = is_ * area;
-        const double vd = cx.node_v(anode_) - cx.node_v(cathode_);
+        const NodeId j = jnode();
+        const double vd = cx.node_v(j) - cx.node_v(cathode_);
         const double vd_lim = pnjlim(vd, cx.st(kVdPrev), vt_, vcrit_);
         const double arg = safe_exp_arg(vd_lim / (n_ * vt_));
         const double ex = std::exp(arg);
@@ -132,21 +145,26 @@ public:
         const double gd = is_eff / (n_ * vt_) * ex + gm;
         const double i = is_eff * (ex - 1.0) + gm * vd_lim;
         const double ieq = i - gd * vd_lim;  // Norton offset
-        // Conductance gd between anode and cathode; current source ieq
+        // Series resistance (every mode; Rs scales as Rs/area, SPICE3).
+        if (mid_ != kGround) {
+            cx.add_conductance(anode_, mid_, area / rs_);
+        }
+        // Conductance gd between the junction nodes; current source ieq
         // flowing anode→cathode (the diode's forward-current direction).
-        cx.add_conductance(anode_, cathode_, gd);
-        cx.add_current(cathode_, anode_, ieq);
+        cx.add_conductance(j, cathode_, gd);
+        cx.add_current(cathode_, j, ieq);
     }
 
     // M4b: when Cjo > 0, load_tran stamps the DC Shockley part PLUS the
     // charge companion (geq, jeq from begin_step). The companion uses
     // the same Norton form as the linear C: geq in parallel with jeq.
     void load_tran(DcLoadContext& cx, const TranStep&) const override {
-        load_dc(cx);  // DC Shockley stamp
+        load_dc(cx);  // DC Shockley stamp (+ Rs when present)
         if (!has_cap()) return;
         // Charge companion (trap/BE, same as the linear C in devices_m2.cpp).
-        cx.add_conductance(anode_, cathode_, cx.st(kGeq));
-        cx.add_current(cathode_, anode_, cx.st(kJeq));
+        const NodeId j = jnode();
+        cx.add_conductance(j, cathode_, cx.st(kGeq));
+        cx.add_current(cathode_, j, cx.st(kJeq));
     }
 
     // The small-signal conductance at the OP (frozen Vd from state[kVdPrev]).
@@ -158,10 +176,14 @@ public:
         const double arg = safe_exp_arg(vd / (n_ * vt_));
         const double ex = std::exp(arg);
         const double gd_op = is_eff / (n_ * vt_) * ex;
-        cx.add_conductance(anode_, cathode_, {gd_op, 0.0});
+        if (mid_ != kGround) {
+            cx.add_conductance(anode_, mid_, area / rs_);
+        }
+        const NodeId j = jnode();
+        cx.add_conductance(j, cathode_, {gd_op, 0.0});
         if (has_cap()) {
             const double cj = c_dep(vd, cjo_ * area);
-            cx.add_conductance(anode_, cathode_, {0.0, cx.omega * cj});
+            cx.add_conductance(j, cathode_, {0.0, cx.omega * cj});
         }
     }
 
@@ -215,7 +237,7 @@ public:
                                     const double* /*params*/ = nullptr) override {
         const std::vector<double>& x_load =
             (x_prev != nullptr && !x_prev->empty()) ? *x_prev : x;
-        const double vd_load = v_across(x_load, anode_, cathode_);
+        const double vd_load = v_across(x_load, jnode(), cathode_);
         const double vd_lim = pnjlim(vd_load, st[kVdPrev], vt_, vcrit_);
         // §5.3: return true (force another iteration) when pnjlim is
         // actively clamping — the linearization point differs from the
@@ -268,7 +290,7 @@ public:
                 const TranStep& step, double* st) override {
         if (!has_cap()) return;
         const double cjo_eff = st[kCjoEff];
-        const double vd = v_across(x, anode_, cathode_);
+        const double vd = v_across(x, jnode(), cathode_);
         const double q = q_dep(vd, cjo_eff);
         st[kVComp] = vd;
         st[kQComp] = q;
@@ -303,7 +325,7 @@ public:
             return true;
         }
         const double cjo_eff = st[kCjoEff];
-        const double vd = v_across(x, anode_, cathode_);
+        const double vd = v_across(x, jnode(), cathode_);
         const double q_new = q_dep(vd, cjo_eff);
         // Reuse the dd3_lte logic from devices_m2.cpp (inline here since
         // it's in a different TU's anonymous namespace).
@@ -335,19 +357,20 @@ public:
     void seed_state(const std::vector<double>& x, std::size_t /*nc*/,
                     double* st) override {
         if (!has_cap()) return;
-        const double vd = v_across(x, anode_, cathode_);
+        const double vd = v_across(x, jnode(), cathode_);
         st[kVComp] = vd;
         st[kQComp] = q_dep(vd, st[kCjoEff]);
         st[kIComp] = 0.0;
         st[kHistN] = 0.0;
     }
 
-    // .model name D(Is=... N=... Rs=... Cjo=... ...). M3 implements Is, N,
-    // Tnom (for Vt/vcrit); accepts Rs/Cjo/M/Vj/Bv/Ibv/Xti/Eg/Kf/Af/Fc
-    // silently (warned once per model in `spice check`) - they land with
-    // M4 (Cjo/M/Vj for the junction cap) or M5 (Tnom/Xti/Eg temp model,
-    // Kf/Af noise, Bv/Ibv breakdown).
-    ws::core::Status apply_model(const ModelDef& model) override {
+    // .model name D(Is=... N=... Rs=... Cjo=... ...). Implements Is, N,
+    // Tnom (for Vt/vcrit), Cjo/M/Vj/Fc (M4b junction charge) and Rs
+    // (series resistance — the internal-node form); accepts Bv/Ibv/Xti/
+    // Eg/Kf/Af/TT silently (warned once per model in `spice check`) - they
+    // land with M5 (breakdown, temp model, noise) and the diffusion charge.
+    ws::core::Status apply_model(const ModelDef& model,
+                                 NodeResolver& nodes) override {
         if (model.type != "d") {
             return spice_fail(dev_diag(
                 ErrorKind::Semantic, "spice.semantic.model_type",
@@ -361,6 +384,7 @@ public:
         double n_val = 1.0;
         double tnom = 27.0;
         double cjo_val = 0.0, m_val = 0.5, vj_val = 1.0, fc_val = 0.5;
+        double rs_val = 0.0;
         const auto& toks = model.params;
         for (std::size_t i = 0; i < toks.size(); ++i) {
             std::string text = toks[i].text;
@@ -413,6 +437,8 @@ public:
                 n_val = v;
             } else if (key == "tnom") {
                 tnom = v;
+            } else if (key == "rs") {
+                rs_val = v;
             } else if (key == "cjo") {
                 cjo_val = v;
             } else if (key == "m") {
@@ -421,12 +447,13 @@ public:
                 vj_val = v;
             } else if (key == "fc") {
                 fc_val = v;
-            } else if (key == "rs" || key == "bv" || key == "ibv" ||
+            } else if (key == "bv" || key == "ibv" ||
                        key == "xti" || key == "eg" || key == "kf" ||
                        key == "af" || key == "tt") {
                 // Accepted (so ngspice decks parse cleanly) but not
-                // implemented in M4b. `spice check` warns per-model.
-                // TT (diffusion charge) lands M4c; Rs/Bv/Ibv/Xti/Eg/Kf/Af land M5.
+                // implemented. `spice check` warns per-model.
+                // TT (diffusion charge), Bv/Ibv (breakdown), Xti/Eg
+                // (temp), Kf/Af (noise) land with M5.
             } else {
                 return spice_fail(dev_diag(
                     ErrorKind::Semantic, "spice.semantic.model_param",
@@ -445,8 +472,29 @@ public:
                 ErrorKind::Semantic, "spice.semantic.d_n",
                 "model '" + model.name.text + "' needs N > 0", model.loc));
         }
+        // Series resistance: 0 (the default) disables the internal node;
+        // negative values are meaningless - reject loudly.
+        if (!(rs_val >= 0.0) || !std::isfinite(rs_val)) {
+            return spice_fail(dev_diag(
+                ErrorKind::Semantic, "spice.semantic.d_rs",
+                "model '" + model.name.text + "' needs Rs >= 0"
+                " (0 disables the series resistance)",
+                model.loc));
+        }
         is_ = is_val;
         n_ = n_val;
+        rs_ = rs_val;
+        // The series node exists only when Rs > 0 (the L Rser precedent:
+        // an always-present internal node would flood every deck's save
+        // list). apply_model runs BEFORE the §6.6 graph checks, so the
+        // claimed node joins them like any other.
+        mid_ = kGround;
+        if (rs_ > 0.0) {
+            Token mid_tok;
+            mid_tok.text = name_ + "#mid";
+            mid_tok.loc = model.loc;
+            mid_ = nodes.node(mid_tok);
+        }
         // Vt at Tnom. M5 will re-evaluate per-run against TEMP; M3/M4b freezes
         // at Tnom (the Lambert-W gate uses the default 27°C).
         vt_ = (tnom + 273.15) * kVtPerK;
@@ -523,6 +571,9 @@ private:
 
     std::string name_;
     NodeId anode_, cathode_;
+    // The Rs series node (kGround when Rs == 0 - no node exists at all,
+    // the stamp is byte-identical M3).
+    NodeId mid_ = kGround;
     ExprProgram area_;
     bool has_ic_;
     double ic_;
@@ -531,6 +582,7 @@ private:
     double n_ = 1.0;        // emission coefficient
     double vt_ = 0.02585;   // thermal voltage at Tnom (V)
     double vcrit_ = 0.7;    // pnjlim knee (V)
+    double rs_ = 0.0;       // series resistance (ohms; 0 = no mid node)
     // M4b: junction capacitance model params (Cjo > 0 enables the companion)
     double cjo_ = 0.0;      // zero-bias junction capacitance (F)
     double m_ = 0.5;        // grading coefficient

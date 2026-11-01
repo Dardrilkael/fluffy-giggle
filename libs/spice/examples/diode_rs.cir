@@ -1,0 +1,10 @@
+* diode with series resistance: the junction sits at the internal
+* D1#mid node behind Rs (SPICE3's topology). The .op of the series-R
+* diode is the Lambert-W closed form with Rext + Rs in the loop:
+* V = I*(Rext+Rs) + n*Vt*ln(I/Is + 1).
+V1 in 0 5
+R1 in out 1k
+D1 out 0 dx
+.model dx D(Is=1e-14 N=1 Rs=200)
+.op
+.end

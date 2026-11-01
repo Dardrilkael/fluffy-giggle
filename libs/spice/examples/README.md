@@ -17,6 +17,7 @@ On Windows: `.\build\spice-debug\bin\spice.exe run <example>.cir`
 | `diode_iv.cir` | `.dc` | Diode I-V curve (0 → 0.8 V); the exponential knee at ~0.6 V |
 | `diode_rectifier.cir` | `.tran` | Half-wave rectifier + RC filter; cap charges to ~Vpeak−Vd |
 | `diode_stiff.cir` | `.op` | Diode at 100 V — pnjlim prevents exp() overflow; converges to ~0.7 V |
+| `diode_rs.cir` | `.op` | Series resistance (Rs=200): the junction voltage appears at the internal `D1#mid` node; the OP is the Lambert-W form with R+Rs in the loop |
 
 ## M4a — the BJT (Ebers-Moll transport model)
 

@@ -607,7 +607,8 @@ public:
     void init_state(double* st) const override { st[0] = initial_on_ ? 1.0 : 0.0; }
 
     // .model SW (Ron= Roff= Vt= Vh= It= Ih=); S reads Vt/Vh, W reads It/Ih.
-    ws::core::Status apply_model(const ModelDef& model) override {
+    ws::core::Status apply_model(const ModelDef& model,
+                                 NodeResolver& /*nodes*/) override {
         if (model.type != "sw") {
             return spice_fail(dev_diag(
                 ErrorKind::Semantic, "spice.semantic.model_type",

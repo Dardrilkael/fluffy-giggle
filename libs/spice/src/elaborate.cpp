@@ -447,7 +447,7 @@ ws::core::Status Elaborator::resolve_models() {
                 ErrorKind::Semantic, "spice.semantic.unknown_model",
                 "unknown model '" + req.name.text + "'", req.name.loc));
         }
-        WS_TRY(req.device->apply_model(*def));
+        WS_TRY(req.device->apply_model(*def, *this));
         used_models_.insert(key);
     }
     // §9.3: an unused .model is a fact about the deck, worth a warning.

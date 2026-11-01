@@ -449,7 +449,8 @@ public:
     // form, no roll-off); the remaining Gummel-Poon params (Ikf, Ikr,
     // Tf, Tr, Xti, Eg, Kf, Af, ...) are accepted but not implemented -
     // they land with M5 (temp model, noise, diffusion charge).
-    ws::core::Status apply_model(const ModelDef& model) override {
+    ws::core::Status apply_model(const ModelDef& model,
+                                 NodeResolver& /*nodes*/) override {
         if (model.type != "npn" && model.type != "pnp") {
             return spice_fail(dev_diag(
                 ErrorKind::Semantic, "spice.semantic.model_type",
@@ -978,7 +979,8 @@ public:
     }
 
     // .model name NMOS|PMOS(Level=1 Vto= Kp= Lambda= Gamma= Phi= ...)
-    ws::core::Status apply_model(const ModelDef& model) override {
+    ws::core::Status apply_model(const ModelDef& model,
+                                 NodeResolver& /*nodes*/) override {
         if (model.type != "nmos" && model.type != "pmos") {
             return spice_fail(dev_diag(
                 ErrorKind::Semantic, "spice.semantic.model_type",

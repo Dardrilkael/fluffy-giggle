@@ -264,10 +264,10 @@ working rule 5) and would each be a future milestone:
 - **`.lib`** - the ngspice library-file include mechanism. Backlog.
 - **Gear(2)/TR-BDF2** - integration is trap + BE only (§6.1); Gear
   orders > 2 are rejected by design.
-- **Diode M4/M5 params** - Cjo/M/Vj (junction cap, M4, landed), Bv/Ibv
-  (breakdown, M5), Tnom/Xti/Eg (temp model, M5), Kf/Af (noise, M5+).
-  Accepted at parse but not implemented in M3. The BJT Early voltages
-  (Vaf/Var) landed post-M4e.
+- **Diode M4/M5 params** - Cjo/M/Vj (junction cap, M4, landed), Rs
+  (series resistance, landed post-M4e), Bv/Ibv (breakdown, M5),
+  Tnom/Xti/Eg (temp model, M5), Kf/Af (noise, M5+). The BJT Early
+  voltages (Vaf/Var) landed post-M4e too.
 
 ## Next steps if memory is cleared
 

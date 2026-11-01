@@ -260,11 +260,16 @@ Everything else rejects at parse with file:line (working-rule 5):
   diode's thermal voltage (temp-dependent models are M5). The Lambert-W
   gate uses the default 27°C; `.dc temp` over a diode gives wrong
   currents at non-27°C points. M5 threads `temp` through the load context.
-- **Diode model params**: `.model name D(Is=... N=... Cjo= M= Vj= Fc=
-  Tnom=...)` implemented (M3 + M4b's junction cap). Rs, TT, Bv, Ibv,
-  Xti, Eg, Kf, Af are ACCEPTED (so ngspice decks parse cleanly) but NOT
-  implemented - M5 (Tnom/Xti/Eg temp, Bv/Ibv breakdown, Kf/Af noise).
-  Unknown keys reject at parse naming the allow-list.
+- **Diode model params**: `.model name D(Is=... N=... Rs= Cjo= M= Vj=
+  Fc= Tnom=...)` implemented (M3 + M4b's junction cap + the series
+  resistance). TT, Bv, Ibv, Xti, Eg, Kf, Af are ACCEPTED (so ngspice
+  decks parse cleanly) but NOT implemented - M5 (Tnom/Xti/Eg temp,
+  Bv/Ibv breakdown, Kf/Af noise). Unknown keys reject at parse naming
+  the allow-list. Rs > 0 moves the junction to an internal 'name#mid'
+  node (SPICE3's topology; Rs scales as Rs/area); Rs = 0 creates NO
+  node - the M3 stamp is byte-identical. apply_model takes the
+  NodeResolver so the model itself claims the node (models resolve
+  after every factory; the graph checks run after resolve_models).
 - **`.options gshunt`/`gminsteps`/`srcsteps`** (M3): `gshunt` (default 0,
   off) is the opt-in per-node conductance to ground (§5.3) - masks §4.4's
   floating-node errors, so off by default; a positive value shunts every

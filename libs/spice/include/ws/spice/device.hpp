@@ -407,7 +407,13 @@ public:
     [[nodiscard]] virtual double inductance() const { return 0.0; }
 
     // Applies a resolved .model card (S/W switches; R models land M5).
-    [[nodiscard]] virtual ws::core::Status apply_model(const ModelDef& model);
+    // `nodes` (post-M4e-diode-Rs) lets a model create INTERNAL nodes -
+    // the diode's Rs needs a series node, and the model (hence Rs) is
+    // only resolved after every factory has run. resolve_models sits
+    // BEFORE the §6.6 graph checks, so a node claimed here joins them
+    // like any other; the MNA pattern dry run runs later still.
+    [[nodiscard]] virtual ws::core::Status apply_model(const ModelDef& model,
+                                                        NodeResolver& nodes);
 
     // ic= initial conditions (§6.5): C carries volts, L carries amps.
     [[nodiscard]] virtual bool has_ic() const { return false; }

@@ -3484,3 +3484,198 @@ TEST_CASE("BJT Vaf/Var: Vaf=0 disables the term; negative values reject") {
                             ".op\n"))
               .find("Var >= 0") != std::string::npos);
 }
+
+// --- diode Rs (series resistance: the deferred-device-physics pull-in) -----------
+//
+// Rs > 0 moves the junction to an internal 'name#mid' node (SPICE3's
+// topology, the L Rser precedent): anode --[Rs/area]-- mid --[Shockley +
+// Cjo companion]-- cathode. The .op of a series-R diode is the SAME
+// Lambert-W closed form as the M3 row, with R + Rs as the loop
+// resistance - the internal and external resistors are in series.
+
+namespace {
+
+// Halley-iterated Lambert-W solution of V = I*(Rext+Rs) + n*Vt*ln(I/Is + 1)
+// (the same reference as the M3 diode_series_r_op row).
+double diode_rs_op_current(double v, double r_total, double is_val, double n) {
+    constexpr double vt = (27.0 + 273.15) * 8.617333262145e-5;
+    const double b = n * vt;
+    const double a = is_val * r_total;
+    const double z_arg = (a / b) * std::exp((v + a) / b);
+    double w = std::log(z_arg) - std::log(std::log(z_arg));
+    for (int i = 0; i < 80; ++i) {
+        const double e = std::exp(w);
+        const double f = w * e - z_arg;
+        const double df = e * (w + 1.0);
+        const double d2f = e * (w + 2.0);
+        const double den = 2.0 * df * df - f * d2f;
+        if (den == 0.0) {
+            break;
+        }
+        const double step = 2.0 * f * df / den;
+        w -= step;
+        if (std::abs(step) < 1e-15 * std::max(1.0, std::abs(w))) {
+            break;
+        }
+    }
+    return (b / r_total) * w - is_val;
+}
+
+}  // namespace
+
+TEST_CASE("diode Rs: the .op is the Lambert-W form with R+Rs in the loop") {
+    const auto run = run_text(
+        "rs op\n"
+        "V1 in 0 5\n"
+        "R1 in out 1k\n"
+        "D1 out 0 dx\n"
+        ".model dx D(Is=1e-14 N=1 Rs=200)\n"
+        ".op\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    REQUIRE(t.rows().size() == 1);
+    const double ref_i = diode_rs_op_current(5.0, 1200.0, 1e-14, 1.0);
+    CHECK(t.rows()[0][col_of(t, "i(V1)")] == doctest::Approx(-ref_i).epsilon(1e-7));
+    CHECK(t.rows()[0][col_of(t, "v(out)")] ==
+          doctest::Approx(5.0 - ref_i * 1000.0).epsilon(1e-7));
+    // The internal node carries the TRUE junction voltage: Vd = V - I*(R+Rs)
+    // (a deliverable: v(D1#mid) is what a probing engineer would call Vd).
+    CHECK(t.rows()[0][col_of(t, "v(D1#mid)")] ==
+          doctest::Approx(5.0 - ref_i * 1200.0).epsilon(1e-7));
+    // And with Rs = 0 the #mid node does not exist at all (the M3 save
+    // list is untouched).
+    const auto plain = run_text(
+        "rs none\n"
+        "V1 in 0 5\n"
+        "R1 in out 1k\n"
+        "D1 out 0 dx\n"
+        ".model dx D(Is=1e-14 N=1)\n"
+        ".op\n");
+    REQUIRE(plain);
+    for (const std::string& name :
+         signal_names(plain->results.tables[0])) {
+        CHECK(name.find("#mid") == std::string::npos);
+    }
+    CHECK(plain->results.tables[0].rows()[0][col_of(plain->results.tables[0], "i(V1)")] ==
+          doctest::Approx(-diode_rs_op_current(5.0, 1000.0, 1e-14, 1.0)).epsilon(1e-7));
+}
+
+TEST_CASE("diode Rs: .dc tracks the Lambert-W point; area scales Rs down") {
+    const auto run = run_text(
+        "rs dc\n"
+        "V1 in 0 3\n"
+        "R1 in out 1k\n"
+        "D1 out 0 dx 2\n"
+        ".model dx D(Is=1e-14 N=1 Rs=400)\n"
+        ".dc V1 1 3 1\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    REQUIRE(t.signals[col_of(t, "i(V1)")].data.size() == 3);
+    for (std::size_t k = 0; k < 3; ++k) {
+        const double v = t.sweep_axes[0][k];
+        // Area 2: Is*2 conductance but Rs/2 = 200 ohms - the effective
+        // loop resistance is Rext + Rs/area, and Is scales up.
+        const double ref = diode_rs_op_current(v, 1000.0 + 200.0, 2e-14, 1.0);
+        CHECK(t.signals[col_of(t, "i(V1)")].data[k] ==
+              doctest::Approx(-ref).epsilon(1e-7));
+    }
+}
+
+TEST_CASE("diode Rs: .tran settles to the same OP through the Rs*Cjo pole") {
+    // The Rs x Cjo pair is a real RC now: the ramp charges the junction
+    // through it and the transient settles at the Lambert-W OP (the Cjo
+    // companion rides the mid node). The settle carries the classic trap
+    // ring on this stiff pole (dt >> tau): the alternating component sits
+    // inside the trtol-scaled LTE and never trips the 6.1 BE-damping
+    // (which fires on REJECTED steps) - ngspice rings the same way - so
+    // the gate takes the mean of the tail, where the alternating part
+    // cancels to 1e-9 and the OP is left.
+    const auto run = run_text(
+        "rs tran\n"
+        "V1 in 0 PWL(0 0 20u 5)\n"
+        "R1 in out 1k\n"
+        "D1 out 0 dx\n"
+        ".model dx D(Is=1e-14 N=1 Rs=200 Cjo=10p)\n"
+        ".tran 1u 60u\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double ref_i = diode_rs_op_current(5.0, 1200.0, 1e-14, 1.0);
+    const std::size_t col_out = col_of(t, "v(out)");
+    const std::size_t col_mid = col_of(t, "v(D1#mid)");
+    REQUIRE(t.signals[col_out].data.size() > 8);
+    double mean_out = 0.0;
+    double mean_mid = 0.0;
+    std::size_t n = 0;
+    for (std::size_t k = t.signals[col_out].data.size() - 6;
+         k < t.signals[col_out].data.size(); ++k, ++n) {
+        mean_out += t.signals[col_out].data[k];
+        mean_mid += t.signals[col_mid].data[k];
+    }
+    mean_out /= static_cast<double>(n);
+    mean_mid /= static_cast<double>(n);
+    CHECK(mean_out == doctest::Approx(5.0 - ref_i * 1000.0).epsilon(1e-6));
+    CHECK(mean_mid == doctest::Approx(5.0 - ref_i * 1200.0).epsilon(1e-6));
+}
+
+TEST_CASE("diode Rs: .ac sees Rs + 1/(gd + j*w*Cj) at the frozen OP") {
+    // Reverse-biased diode, AC-driven through the anode: the small-signal
+    // impedance is the series combination of Rs and the junction (gd in
+    // parallel with Cj(Vd_op)). With a deep reverse bias gd is ~0 and
+    // Cj(-5V) = Cjo/sqrt(1 + 5/Vj) - the real part isolates Rs.
+    const auto run = run_text(
+        "rs ac\n"
+        "V1 a 0 DC -5 AC 1\n"
+        "D1 a 0 dx\n"
+        ".model dx D(Is=1e-14 N=1 Rs=200 Cjo=10p Vj=1 M=0.5)\n"
+        ".ac lin 1 1meg 1meg\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    constexpr double vt = (27.0 + 273.15) * 8.617333262145e-5;
+    const double cj = 10e-12 / std::sqrt(1.0 + 5.0 / 1.0);
+    const double gd = 1e-14 / vt * std::exp(-5.0 / vt);  // ~0 at -5 V
+    const double w = 2.0 * 3.14159265358979323846 * 1e6;
+    // Y_junction = gd + j*w*Cj; Z_total = Rs + 1/Y_junction.
+    const std::complex<double> yj(gd, w * cj);
+    const std::complex<double> z_total = 200.0 + 1.0 / yj;
+    const std::complex<double> y_total = 1.0 / z_total;
+    // i(V1) is negative when delivering into the diode.
+    CHECK(t.signals[col_of(t, "re(i(V1))")].data[0] ==
+          doctest::Approx(-y_total.real()).epsilon(1e-6));
+    CHECK(t.signals[col_of(t, "im(i(V1))")].data[0] ==
+          doctest::Approx(-y_total.imag()).epsilon(1e-6));
+}
+
+TEST_CASE("diode Rs: rejections and the netlist round-trip") {
+    CHECK(error_of(run_text("rs bad\nV1 a 0 1\nD1 a 0 dx\n.model dx D(Is=1e-14 Rs=-1)\nR1 a 0 1k\n.op\n"))
+              .find("Rs >= 0") != std::string::npos);
+    // The writer re-emits the model card (Rs rides along in the raw
+    // tokens); the written deck re-solves to the same OP.
+    const std::string deck =
+        "rs roundtrip\n"
+        "V1 in 0 5\n"
+        "R1 in out 1k\n"
+        "D1 out 0 dx\n"
+        ".model dx D(Is=1e-14 N=1 Rs=200)\n"
+        ".op\n";
+    const ws::core::Result<ws::spice::Deck> parsed =
+        read_deck("t.cir", deck, ws::spice::ParseOptions{});
+    REQUIRE(parsed);
+    std::vector<Warning> w;
+    const ws::core::Result<ws::spice::DeckAst> ast = build_deck_ast(*parsed, w);
+    REQUIRE(ast);
+    const ws::core::Result<ws::spice::Circuit> circ = elaborate_deck(*ast, 27.0, w);
+    REQUIRE(circ);
+    const ws::core::Result<ws::spice::RunState> rs = ws::spice::RunState::bind(*circ);
+    REQUIRE(rs);
+    const ws::core::Result<std::string> net = write_netlist(*circ, *rs);
+    REQUIRE(net);
+    CHECK(net->find("Rs=200") != std::string::npos);
+    const std::size_t end_pos = net->rfind(".end");
+    REQUIRE(end_pos != std::string::npos);
+    const auto again = run_text(net->substr(0, end_pos) + ".op\n.end\n");
+    REQUIRE(again);
+    const double ref_i = diode_rs_op_current(5.0, 1200.0, 1e-14, 1.0);
+    CHECK(again->results.tables[0]
+              .signals[col_of(again->results.tables[0], "i(V1)")]
+              .data[0] == doctest::Approx(-ref_i).epsilon(1e-7));
+}

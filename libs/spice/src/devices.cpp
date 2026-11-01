@@ -838,7 +838,8 @@ ws::core::Result<std::unique_ptr<Device>> make_ccvs(const DeviceCard& card,
 
 // The default: only switches consume .model cards today (R models land
 // with M5, and the R factory already rejects a model *value* form).
-ws::core::Status Device::apply_model(const ModelDef& model) {
+ws::core::Status Device::apply_model(const ModelDef& model, NodeResolver& nodes) {
+    (void)nodes;
     return spice_fail(dev_diag(
         ErrorKind::Semantic, "spice.semantic.model_target",
         "device '" + name() + "' does not take .model '" + model.name.text + "'",
