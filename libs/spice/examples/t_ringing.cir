@@ -1,0 +1,11 @@
+* mismatched load, matched source: RL = 3*Z0, load reflection +0.5.
+* The first arrival lands at 2*RL/(RL+Z0) * V/2 = 0.75 - already the DC
+* wire value V*RL/(Rs+RL); the reflected wave returns at 4n, is absorbed
+* by the matched source, and lifts v(a) to the same 0.75. One round
+* trip, no ringing: ringing needs BOTH ends mismatched.
+V1 in 0 PWL(0 0 0.1n 1)
+Rs in a 50
+T1 a 0 b 0 Z0=50 Td=2n
+Rl b 0 150
+.tran 0.5n 12n
+.end

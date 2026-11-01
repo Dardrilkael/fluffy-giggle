@@ -2915,3 +2915,421 @@ TEST_CASE("M4d B: the netlist round-trip writes and re-solves equivalently") {
     REQUIRE(!n2);
     CHECK(n2.error().message.find("B1") != std::string::npos);
 }
+
+// --- M4e: the lossless T-line (§6.2 method of characteristics) ------------------
+//
+// All rows are closed-form: the matched line carries legs intact and
+// delayed exactly (linear-interp pickup is exact on piecewise-linear
+// legs), the mismatched line's reflection ladder is geometric, and the
+// wire-pair DC is the t->infinity limit the delay hides.
+
+namespace {
+
+// The (time, value) of column `name` in the row whose sweep value is
+// nearest `at`. The closed form is then evaluated at the ROW's time, so
+// the check holds on whatever grid the march chose (the march lands
+// exactly on source breakpoints and delayed vertices, so the nearest
+// row IS the event of interest).
+struct RowPoint {
+    double t;
+    double v;
+};
+
+RowPoint point_at(const Table& t, double at, const std::string& name) {
+    const std::size_t col = col_of(t, name);
+    std::size_t best = 0;
+    for (std::size_t i = 0; i < t.signals[col].data.size(); ++i) {
+        if (std::abs(t.sweep_axes[0][i] - at) <
+            std::abs(t.sweep_axes[0][best] - at)) {
+            best = i;
+        }
+    }
+    return {t.sweep_axes[0][best], t.signals[col].data[best]};
+}
+
+}  // namespace
+
+TEST_CASE("M4e T: .op is the wire pair - divider through the line") {
+    const auto run = run_text(
+        "t op divider\n"
+        "V1 in 0 DC 5\n"
+        "R1 in a 1k\n"
+        "T1 a 0 b 0 Z0=75 Td=5n\n"
+        "R2 b 0 2k\n"
+        ".op\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    REQUIRE(t.rows().size() == 1);
+    CHECK(t.rows()[0][col_of(t, "v(a)")] == approx(5.0 * 2.0 / 3.0));
+    CHECK(t.rows()[0][col_of(t, "v(b)")] == approx(5.0 * 2.0 / 3.0));
+    // i(T1) is the port-1 branch current: the wire current itself.
+    CHECK(t.rows()[0][col_of(t, "i(T1)")] == approx(5.0 / 3000.0));
+    CHECK(t.rows()[0][col_of(t, "i(V1)")] == approx(-5.0 / 3000.0));
+}
+
+TEST_CASE("M4e T: .dc sweep through the line tracks the wire at every point") {
+    const auto run = run_text(
+        "t dc through\n"
+        "V1 in 0 DC 5\n"
+        "R1 in a 1k\n"
+        "T1 a 0 b 0 Z0=50 Td=1n\n"
+        "R2 b 0 2k\n"
+        ".dc V1 0 5 1\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    REQUIRE(t.signals[col_of(t, "v(b)")].data.size() == 6);
+    for (std::size_t k = 0; k < 6; ++k) {
+        const double v = static_cast<double>(k);
+        CHECK(t.signals[col_of(t, "v(a)")].data[k] == approx(v * 2.0 / 3.0));
+        CHECK(t.signals[col_of(t, "v(b)")].data[k] == approx(v * 2.0 / 3.0));
+    }
+}
+
+TEST_CASE("M4e T: matched line carries a ramp delayed and intact (§10.1)") {
+    // Rs = RL = Z0: no reflection ever returns, so v(b)(t) = v(a)(t-Td)
+    // exactly and v(a) is the Z0 divider of the PWL source. The pickup
+    // lands on stored vertices (delay crossings are breakpoints), so the
+    // delayed legs reproduce bit-close, not just within LTE tolerance.
+    const auto run = run_text(
+        "t matched ramp\n"
+        "V1 in 0 PWL(0 0 1n 1)\n"
+        "Rs in a 50\n"
+        "T1 a 0 b 0 Z0=50 Td=2n\n"
+        "Rl b 0 50\n"
+        ".tran 0.2n 8n\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    // v(a) is the divider all along the ramp; v(b) is 0 before Td.
+    for (const double at : {0.4e-9, 0.8e-9, 1.0e-9, 1.4e-9}) {
+        const auto [tt, va] = point_at(t, at, "v(a)");
+        CHECK(va == approx(0.5 * std::clamp(tt / 1e-9, 0.0, 1.0)));
+        CHECK(point_at(t, at, "v(b)").v == approx(0.0));
+    }
+    // After Td: v(b) = v(a)(t - Td) - the same legs, two nanoseconds
+    // later, down to the last double digit.
+    for (const double at : {2.4e-9, 2.8e-9, 3.0e-9, 3.4e-9, 5e-9, 7e-9}) {
+        const auto [tt, vb] = point_at(t, at, "v(b)");
+        CHECK(vb == approx(0.5 * std::clamp((tt - 2e-9) / 1e-9, 0.0, 1.0)));
+    }
+    // Settled: the line's DC limit is the wire - but matched, so both
+    // ends sit at V/2 and the port current is v(a)/Z0 forever.
+    CHECK(point_at(t, 7e-9, "v(a)").v == approx(0.5));
+    CHECK(point_at(t, 7e-9, "i(T1)").v == approx(0.5 / 50.0));
+}
+
+TEST_CASE("M4e T: open-end reflection ladder matches the closed form") {
+    // Port 2 left genuinely open (the line's constraint edges are its DC
+    // path, §6.6 - the wire at DC). The source side is matched (Rs = Z0),
+    // so every reflection the open end returns is absorbed: W1 = V(s)
+    // always, and the ladder closes exactly -
+    //   v(b) = V(t-Td),   v(a) = (V(t) + V(t-2Td))/2,   final v = V.
+    const auto run = run_text(
+        "t open reflections\n"
+        "V1 in 0 PWL(0 0 1n 1)\n"
+        "Rs in a 50\n"
+        "T1 a 0 b 0 Z0=50 Td=2n\n"
+        ".tran 0.5n 9n\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    // Before the wave arrives: v(b) = 0, v(a) = V/2 (the Z0 divider).
+    CHECK(point_at(t, 1.0e-9, "v(a)").v == approx(0.5));
+    CHECK(point_at(t, 1.0e-9, "v(b)").v == approx(0.0));
+    // The arrival doubles at the open end: v(b) = V(t - Td) exactly.
+    for (const double at : {2.4e-9, 2.8e-9, 3.2e-9}) {
+        const auto [tt, vb] = point_at(t, at, "v(b)");
+        CHECK(vb == approx(std::clamp((tt - 2e-9) / 1e-9, 0.0, 1.0)));
+    }
+    // The reflection returns: v(a) = (V(t) + V(t - 2Td))/2 exactly.
+    for (const double at : {4.4e-9, 4.8e-9, 5.2e-9, 6.0e-9}) {
+        const auto [tt, va] = point_at(t, at, "v(a)");
+        CHECK(va == approx((1.0 + std::clamp((tt - 4e-9) / 1e-9, 0.0, 1.0)) / 2.0));
+    }
+    // Steady state: the open line charges to V with zero current - the
+    // DC wire answer with no load to leak through.
+    CHECK(point_at(t, 8.5e-9, "v(a)").v == approx(1.0));
+    CHECK(point_at(t, 8.5e-9, "v(b)").v == approx(1.0));
+    CHECK(point_at(t, 8.5e-9, "i(T1)").v == approx(0.0));
+}
+
+TEST_CASE("M4e T: .ac - quarter-wave open, half-wave open, matched delay") {
+    // Open far end: the input is a short at odd quarter-waves (v(a) = 0,
+    // v(b) full) and an open at half-waves (i(T1) = 0, v(b) = -v(a)).
+    const auto run = run_text(
+        "t quarter wave\n"
+        "V1 in 0 AC 1\n"
+        "Rs in a 50\n"
+        "T1 a 0 b 0 Z0=50 Td=1u\n"
+        ".ac lin 3 250k 750k\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    REQUIRE(t.signals[col_of(t, "re(v(a))")].data.size() == 3);
+    const auto re_im = [&](const std::string& n, std::size_t k) {
+        return std::complex<double>(t.signals[col_of(t, "re(" + n + ")")].data[k],
+                                    t.signals[col_of(t, "im(" + n + ")")].data[k]);
+    };
+    for (std::size_t k = 0; k < 3; ++k) {
+        const double f = t.sweep_axes[0][k];
+        const double w_td = 2.0 * 3.14159265358979323846 * f * 1e-6;
+        // omega*Td in units of pi/2: odd = quarter-wave (input short),
+        // even = half-wave (input open).
+        const long q = std::lround(w_td / (3.14159265358979323846 / 2.0));
+        CHECK((q == 1 || q == 2 || q == 3));
+        if (q % 2 == 1) {
+            // Odd quarter-wave: input short, full magnitude at the open.
+            CHECK(std::abs(re_im("v(a)", k)) < 1e-3);
+            CHECK(std::abs(re_im("v(b)", k)) == approx(1.0).epsilon(1e-6));
+        } else {
+            // Half-wave: input open (no current drawn from the source
+            // chain beyond the RL leakage), v(b) = -v(a).
+            CHECK(std::abs(re_im("i(T1)", k)) < 1e-6);
+            CHECK(std::abs(re_im("v(b)", k) + re_im("v(a)", k)) < 1e-6);
+        }
+    }
+
+    // Matched line: v(b)/v(a) = e^{-j*omega*Td}. At omega*Td = pi/4 the
+    // ratio is (1 - j)/sqrt(2) to integration precision.
+    const auto run2 = run_text(
+        "t matched phase\n"
+        "V1 in 0 AC 1\n"
+        "Rs in a 50\n"
+        "T1 a 0 b 0 Z0=50 Td=1u\n"
+        "Rl b 0 50\n"
+        ".ac lin 1 125k 125k\n");
+    REQUIRE(run2);
+    const Table& t2 = run2->results.tables[0];
+    const std::complex<double> va(t2.signals[col_of(t2, "re(v(a))")].data[0],
+                                  t2.signals[col_of(t2, "im(v(a))")].data[0]);
+    const std::complex<double> vb(t2.signals[col_of(t2, "re(v(b))")].data[0],
+                                  t2.signals[col_of(t2, "im(v(b))")].data[0]);
+    const std::complex<double> ratio = vb / va;
+    CHECK(std::abs(ratio) == approx(1.0).epsilon(1e-6));
+    CHECK(ratio.real() == approx(std::sqrt(0.5)).epsilon(1e-6));
+    CHECK(ratio.imag() == approx(-std::sqrt(0.5)).epsilon(1e-6));
+}
+
+TEST_CASE("M4e T: rejections are loud and line-numbered") {
+    // No Z0 (ngspice requires it).
+    CHECK(error_of(run_text("t none\nV1 a 0 1\nT1 a 0 b 0 Td=1n\nR1 b 0 1k\n.op\n"))
+              .find("Z0") != std::string::npos);
+    // Z0 must be positive.
+    CHECK(error_of(run_text("t badz0\nV1 a 0 1\nT1 a 0 b 0 Z0=0 Td=1n\nR1 b 0 1k\n.op\n"))
+              .find("Z0 > 0") != std::string::npos);
+    // Zero delay is a wire pair, not a line.
+    CHECK(error_of(run_text("t zerotd\nV1 a 0 1\nT1 a 0 b 0 Z0=50 Td=0\nR1 b 0 1k\n.op\n"))
+              .find("TD > 0") != std::string::npos);
+    // No delay given at all.
+    CHECK(error_of(run_text("t notd\nV1 a 0 1\nT1 a 0 b 0 Z0=50\nR1 b 0 1k\n.op\n"))
+              .find("TD=") != std::string::npos);
+    // TD= and F= are mutually exclusive.
+    CHECK(error_of(run_text("t both\nV1 a 0 1\nT1 a 0 b 0 Z0=50 Td=1n F=1meg\nR1 b 0 1k\n.op\n"))
+              .find("not both") != std::string::npos);
+    // F must be positive.
+    CHECK(error_of(run_text("t badf\nV1 a 0 1\nT1 a 0 b 0 Z0=50 F=0 NL=1\nR1 b 0 1k\n.op\n"))
+              .find("F > 0") != std::string::npos);
+    // Arity: four nodes.
+    CHECK(error_of(run_text("t arity\nV1 a 0 1\nT1 a b Z0=50\nR1 b 0 1k\n.op\n"))
+              .find("4 nodes") != std::string::npos);
+    // Unknown key.
+    CHECK(error_of(run_text("t badkey\nV1 a 0 1\nT1 a 0 b 0 Z0=50 Td=1n foo=1\nR1 b 0 1k\n.op\n"))
+              .find("foo=") != std::string::npos);
+    // IC takes at most four values.
+    CHECK(error_of(run_text("t badic\nV1 a 0 1\nT1 a 0 b 0 Z0=50 Td=1n IC=1 2 3 4 5\nR1 b 0 1k\n.op\n"))
+              .find("one to four") != std::string::npos);
+    // Bridging the same node pair at both ports is degenerate at DC.
+    CHECK(error_of(run_text("t bridge\nV1 a 0 1\nT1 a 0 a 0 Z0=50 Td=1n\nR1 a 0 1k\n.op\n"))
+              .find("same node pair") != std::string::npos);
+    // Two lines in parallel over one node pair: a constraint loop.
+    CHECK(error_of(run_text("t two\nV1 a 0 1\nT1 a 0 b 0 Z0=50 Td=1n\nT2 a 0 b 0 Z0=75 Td=2n\nR1 b 0 1k\n.op\n"))
+              .find("voltage-source loop") != std::string::npos);
+    // A V source bridging a line pair: same finding, named.
+    CHECK(error_of(run_text("t vloop\nV1 a 0 1\nT1 a 0 b 0 Z0=50 Td=1n\nV2 a b 0\nR1 b 0 1k\n.op\n"))
+              .find("voltage-source loop") != std::string::npos);
+}
+
+TEST_CASE("M4e T: F=/NL= is the TD= spelling (TD = NL/F, NL defaults 0.25)") {
+    const auto run = run_text(
+        "t fnl\n"
+        "V1 in 0 DC 5\n"
+        "R1 in a 1k\n"
+        "T1 a 0 b 0 Z0=75 F=1meg NL=0.25\n"
+        "R2 b 0 2k\n"
+        ".op\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    CHECK(t.rows()[0][col_of(t, "v(b)")] == approx(5.0 * 2.0 / 3.0));
+    // And the delay really is NL/F = 1/5meg = 200n: the ramp comes out
+    // 200n late (the run must outlast the delay).
+    const auto run2 = run_text(
+        "t fnl delay\n"
+        "V1 in 0 PWL(0 0 1n 1)\n"
+        "Rs in a 50\n"
+        "T1 a 0 b 0 Z0=50 F=5meg NL=1\n"
+        "Rl b 0 50\n"
+        ".tran 50n 250n\n");
+    REQUIRE(run2);
+    const Table& t2 = run2->results.tables[0];
+    CHECK(point_at(t2, 190e-9, "v(b)").v == approx(0.0));
+    CHECK(point_at(t2, 210e-9, "v(b)").v == approx(0.5));
+}
+
+TEST_CASE("M4e T: UIC + IC= seeds the waves, delay still exact") {
+    // IC=0 0 0 0 matches the OP here, so the UIC run must reproduce the
+    // plain run's delayed ramp - the seed path is exercised without any
+    // order-accuracy claim (a cold UIC start is deliberately
+    // inconsistent, §6.5).
+    const std::string body =
+        "V1 in 0 PWL(0 0 1n 1)\n"
+        "Rs in a 50\n"
+        "T1 a 0 b 0 Z0=50 Td=2n IC=0 0 0 0\n"
+        "Rl b 0 50\n"
+        ".tran 0.5n 5n";
+    const auto plain = run_text("t uic plain\n" + body);
+    const auto uic = run_text("t uic\n" + body + " UIC\n");
+    REQUIRE(plain);
+    REQUIRE(uic);
+    const Table& tp = plain->results.tables[0];
+    const Table& tu = uic->results.tables[0];
+    CHECK(point_at(tu, 1.5e-9, "v(b)").v == approx(0.0));
+    CHECK(point_at(tu, 3.0e-9, "v(b)").v == approx(0.5));
+    // Same grid, same values: IC=0 on an all-zero OP is a no-op seed.
+    REQUIRE(tu.signals[col_of(tu, "v(b)")].data.size() ==
+            tp.signals[col_of(tp, "v(b)")].data.size());
+    for (std::size_t k = 0; k < tu.signals[col_of(tu, "v(b)")].data.size(); ++k) {
+        CHECK(tu.signals[col_of(tu, "v(b)")].data[k] ==
+              doctest::Approx(tp.signals[col_of(tp, "v(b)")].data[k]).epsilon(1e-12));
+    }
+}
+
+TEST_CASE("M4e T: the history ring overflows loudly (§8.5 channel)") {
+    // 1 ps resolved steps inside a 2.05 ns delay window: more than the
+    // 2048-sample ring can hold. The Timestep error names the device.
+    RunSettings settings;
+    settings.fixed_dt = 1e-12;
+    const auto run = run_text(
+        "t overflow\n"
+        "V1 in 0 1\n"
+        "Rs in a 50\n"
+        "T1 a 0 b 0 Z0=50 Td=2.05n\n"
+        "Rl b 0 50\n"
+        ".tran 1p 4n\n", nullptr, settings);
+    REQUIRE(!run);
+    CHECK(run.error().message.find("T1") != std::string::npos);
+    CHECK(run.error().message.find("delay window") != std::string::npos);
+}
+
+TEST_CASE("M4e T: the netlist round-trip writes and re-solves equivalently") {
+    const std::string deck =
+        "t roundtrip\n"
+        "V1 in 0 DC 5\n"
+        "R1 in a 1k\n"
+        "T1 a 0 b 0 Z0=75 Td=5n\n"
+        "R2 b 0 2k\n"
+        ".op\n";
+    const ws::core::Result<ws::spice::Deck> parsed =
+        read_deck("t.cir", deck, ws::spice::ParseOptions{});
+    REQUIRE(parsed);
+    std::vector<Warning> w;
+    const ws::core::Result<ws::spice::DeckAst> ast = build_deck_ast(*parsed, w);
+    REQUIRE(ast);
+    const ws::core::Result<ws::spice::Circuit> circ = elaborate_deck(*ast, 27.0, w);
+    REQUIRE(circ);
+    const ws::core::Result<ws::spice::RunState> rs = ws::spice::RunState::bind(*circ);
+    REQUIRE(rs);
+    const ws::core::Result<std::string> net = write_netlist(*circ, *rs);
+    REQUIRE(net);
+    // The writer spells numbers through to_chars (shortest round-trip).
+    CHECK(net->find("T1 a 0 b 0 Z0=75 Td=5e-09") != std::string::npos);
+    const std::size_t end_pos = net->rfind(".end");
+    REQUIRE(end_pos != std::string::npos);
+    const auto again = run_text(net->substr(0, end_pos) + ".op\n.end\n");
+    REQUIRE(again);
+    CHECK(again->results.tables[0]
+              .signals[col_of(again->results.tables[0], "v(b)")]
+              .data[0] == approx(5.0 * 2.0 / 3.0));
+
+    // The IC= spelling round-trips too (comma form).
+    const std::string ic_deck =
+        "t ic roundtrip\n"
+        "V1 in 0 PWL(0 0 1n 1)\n"
+        "Rs in a 50\n"
+        "T1 a 0 b 0 Z0=50 Td=2n IC=0,0,0,0\n"
+        "Rl b 0 50\n"
+        ".tran 0.5n 4n UIC\n";
+    const ws::core::Result<ws::spice::Deck> p2 =
+        read_deck("t.cir", ic_deck, ws::spice::ParseOptions{});
+    REQUIRE(p2);
+    const ws::core::Result<ws::spice::DeckAst> a2 = build_deck_ast(*p2, w);
+    REQUIRE(a2);
+    const ws::core::Result<ws::spice::Circuit> c2 = elaborate_deck(*a2, 27.0, w);
+    REQUIRE(c2);
+    const ws::core::Result<ws::spice::RunState> r2 = ws::spice::RunState::bind(*c2);
+    REQUIRE(r2);
+    const ws::core::Result<std::string> n2 = write_netlist(*c2, *r2);
+    REQUIRE(n2);
+    CHECK(n2->find("T1 a 0 b 0 Z0=50 Td=2e-09 IC=0,0,0,0") != std::string::npos);
+    // The written deck re-runs to the same delayed answer.
+    const std::size_t end2 = n2->rfind(".end");
+    const auto again2 =
+        run_text(n2->substr(0, end2) + ".tran 0.5n 4n UIC\n.end\n");
+    REQUIRE(again2);
+    const Table& t2 = again2->results.tables[0];
+    CHECK(point_at(t2, 1.5e-9, "v(b)").v == approx(0.0));
+    CHECK(point_at(t2, 3.0e-9, "v(b)").v == approx(0.5));
+}
+
+TEST_CASE("M4e T: .step rebinding reaches Z0 and TD (the §3.5a promise)") {
+    // Z0 as a bare .param name: the .step point rebinds it without any
+    // re-elaboration - the value change reaches the stamping coefficients
+    // through the parameter arena alone. Family table: axes are
+    // (step, z, time), one row per accepted time point per z point.
+    const auto run = run_text(
+        "t step z0\n"
+        ".param z=50\n"
+        "V1 in 0 PWL(0 0 1n 1)\n"
+        "Rs in a 50\n"
+        "T1 a 0 b 0 Z0=z Td=1n\n"
+        "Rl b 0 50\n"
+        ".tran 0.5n 3n\n"
+        ".step param z list 50 100\n");
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 1);
+    const Table& t = run->results.tables[0];
+    REQUIRE(t.sweep_names == std::vector<std::string>{"step", "z", "time"});
+    // Per z point: the nearest row to a time, inside that point's rows.
+    auto point = [&](double z, double at, const char* name) {
+        const std::size_t col = col_of(t, name);
+        std::size_t best = static_cast<std::size_t>(-1);
+        for (std::size_t i = 0; i < t.signals[col].data.size(); ++i) {
+            if (t.sweep_axes[1][i] != z) {
+                continue;
+            }
+            if (best == static_cast<std::size_t>(-1) ||
+                std::abs(t.sweep_axes[2][i] - at) <
+                    std::abs(t.sweep_axes[2][best] - at)) {
+                best = i;
+            }
+        }
+        REQUIRE(best != static_cast<std::size_t>(-1));
+        return std::pair{t.sweep_axes[2][best], t.signals[col].data[best]};
+    };
+    // Before any reflection returns (t < Td) the line's input IS Z0:
+    // v(a) = V * z/(Rs+z) - the rebind is visible at the input directly.
+    for (const double z : {50.0, 100.0}) {
+        const auto [tt, va] = point(z, 1.0e-9, "v(a)");
+        CHECK(va == approx(std::clamp(tt / 1e-9, 0.0, 1.0) * z / (50.0 + z)));
+        CHECK(point(z, 1.0e-9, "v(b)").second == approx(0.0));
+    }
+    // z=50 (matched): the output is the delayed divider.
+    {
+        const auto [tt, vb] = point(50.0, 2.5e-9, "v(b)");
+        CHECK(vb == approx(0.5 * std::clamp((tt - 1e-9) / 1e-9, 0.0, 1.0)));
+    }
+    // z=100 (mismatched): the launched wave W1 = 2Vz/(Rs+z), the arrival
+    // re-divides at the load, v(b) = W1 * RL/(RL+z).
+    {
+        const auto [tt, vb] = point(100.0, 2.5e-9, "v(b)");
+        CHECK(vb == approx(2.0 * 100.0 / 150.0 * 50.0 / 150.0 *
+                           std::clamp((tt - 1e-9) / 1e-9, 0.0, 1.0)));
+    }
+}
+

@@ -257,11 +257,18 @@ ws::core::Status TranMarch::Impl::one_step(const Hooks& hooks) {
             return {};
         }
 
-        // The next source event strictly after now (§6.4); dt truncates to
-        // land on it exactly, and the step AFTER the landing is BE.
+        // The next source-schedule event strictly after now (§6.4); dt
+        // truncates to land on it exactly, and the step AFTER the
+        // landing is BE. M4e: the T-line rides the same channel - its
+        // delay-crossing breakpoints come off its state-slice history
+        // ring, so the hook takes the slice (§3.5's explicit-slice
+        // convention).
         double next_bp = kInf;
-        for (const auto& dev : circuit.devices) {
-            const double e = dev->next_event(now + dtmin, tstep, tstop);
+        for (std::size_t i = 0; i < circuit.devices.size(); ++i) {
+            const double e =
+                circuit.devices[i]->next_event(now + dtmin, tstep, tstop,
+                                               state.state_.data() +
+                                                   circuit.state_span[i].begin);
             if (e < next_bp) {
                 next_bp = e;
             }

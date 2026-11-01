@@ -375,12 +375,19 @@ public:
 
     // The next source-schedule event strictly after `t` (§6.4), or +inf
     // when the device publishes none. tstep/tstop resolve the deferred
-    // waveform defaults (see TranStep).
+    // waveform defaults (see TranStep). `st` (M4e) is this device's
+    // state slice - the §3.5 explicit-slice convention the other dynamic
+    // hooks already follow - so a state-scheduled device (the T-line's
+    // delay-crossing breakpoints over its history ring) can publish
+    // events without reaching into a RunState. Null in contexts that
+    // have no state bound (default-implementations must tolerate it).
     [[nodiscard]] virtual double next_event(double t, double tstep,
-                                             double tstop) const {
+                                             double tstop,
+                                             const double* st = nullptr) const {
         (void)t;
         (void)tstep;
         (void)tstop;
+        (void)st;
         return std::numeric_limits<double>::infinity();
     }
 

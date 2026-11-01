@@ -182,6 +182,13 @@ ws::core::Status MnaSystem::setup(const std::vector<std::unique_ptr<Device>>& de
             devices[i]->load_tran(ctx, nominal);
         }
         detail::AcPatternContext ac_ctx(builder_, node_count_);
+        // The AC dry run stamps at a NOMINAL omega, not 0 (M4e): the
+        // T-line's omega==0 fallback writes the DC wire rows - a strict
+        // subset of the nonzero-omega positions - and a dry run at
+        // omega==0 would record only those, tripping the §3.2 assert on
+        // the first real frequency. Positions never depend on omega
+        // (§3.2); any representative value exercises the richest shape.
+        ac_ctx.omega = 1.0;
         for (std::size_t i = 0; i < devices.size(); ++i) {
             ac_ctx.params_ = scratch_params_.data();
             // §3.6 (M3): nonlinear devices' load_ac reads state (a diode's

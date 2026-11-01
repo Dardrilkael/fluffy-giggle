@@ -3,6 +3,7 @@
 // that. No DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN here - test_spice.cpp owns
 // doctest's single implementation TU for this binary.
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -601,4 +602,88 @@ TEST_CASE("M3 diode: builder .op matches the Lambert-W closed form") {
     const double ref_vd = 5.0 - ref_i * 1000.0;
     CHECK(vd == doctest::Approx(ref_vd).epsilon(1e-7));
     CHECK(i_mag == doctest::Approx(ref_i).epsilon(1e-7));
+}
+
+// --- M4e: the T-line through the builder (§2.1 rev: two front ends, one answer) ---
+
+TEST_CASE("M4e T: builder tline() matches the card front end and the writer") {
+    // The same matched-delay circuit three ways: builder + Simulator,
+    // its written netlist, and the hand-written deck. All three must
+    // agree to the last CSV digit (the delay legs are exact).
+    CircuitBuilder c;
+    auto in = c.node("in"), a = c.node("a"), b = c.node("b");
+    (void)c.resistor("Rs", in, a, 50.0);
+    auto T1 = c.tline("T1", a, gnd, b, gnd, 50.0, 2e-9);
+    (void)c.resistor("Rl", b, gnd, 50.0);
+    (void)c.vsource("V1", in, gnd, Pwl{{ {0.0, 0.0}, {1e-9, 1.0} }});
+    auto circuit = c.finish();
+    REQUIRE(circuit);
+    auto sim = Simulator::create(std::move(*circuit));
+    REQUIRE(sim);
+    auto built = sim->run(TranAnalysis{.tstep = 0.2e-9, .tstop = 6e-9});
+    REQUIRE(built);
+    CHECK(built->row_count() > 10);
+
+    // The closed form: v(a) is the Z0 divider of the ramp, v(b) its
+    // delayed copy; both exact on the legs (evaluate at the ROW's time -
+    // the grid is whatever the march chose).
+    const auto point = [&built](const char* name, double at) {
+        std::size_t best = 0;
+        for (std::size_t i = 0; i < built->axis().size(); ++i) {
+            if (std::abs(built->axis()[i] - at) <
+                std::abs(built->axis()[best] - at)) {
+                best = i;
+            }
+        }
+        return std::pair{built->axis()[best], built->signal(name)[best]};
+    };
+    {
+        const auto [tt, va] = point("v(a)", 0.4e-9);
+        CHECK(va == approx(0.5 * std::clamp(tt / 1e-9, 0.0, 1.0)));
+        CHECK(point("v(b)", 0.4e-9).second == approx(0.0));
+    }
+    {
+        const auto [tt, vb] = point("v(b)", 2.4e-9);
+        CHECK(vb == approx(0.5 * std::clamp((tt - 2e-9) / 1e-9, 0.0, 1.0)));
+    }
+
+    // The written netlist re-runs to the identical table.
+    CircuitBuilder c2;
+    auto in2 = c2.node("in"), a2 = c2.node("a"), b2 = c2.node("b");
+    (void)c2.resistor("Rs", in2, a2, 50.0);
+    (void)c2.tline("T1", a2, gnd, b2, gnd, 50.0, 2e-9);
+    (void)c2.resistor("Rl", b2, gnd, 50.0);
+    (void)c2.vsource("V1", in2, gnd, Pwl{{ {0.0, 0.0}, {1e-9, 1.0} }});
+    auto circuit2 = c2.finish();
+    REQUIRE(circuit2);
+    auto bound = ws::spice::RunState::bind(*circuit2);
+    REQUIRE(bound);
+    const auto netlist = ws::spice::write_netlist(*circuit2, *bound);
+    REQUIRE(netlist);
+    CHECK(netlist->find("T1 a 0 b 0 Z0=50 Td=2e-09") != std::string::npos);
+    std::string deck_text = *netlist;
+    const std::size_t end_at = deck_text.rfind(".end\n");
+    REQUIRE(end_at != std::string::npos);
+    deck_text.insert(end_at, ".tran 0.2n 6n\n");
+    const auto deck_run = run_deck_text(deck_text);
+    REQUIRE(deck_run);
+    REQUIRE(deck_run->results.tables.size() == 1);
+    const Table& net = deck_run->results.tables[0];
+    REQUIRE(net.row_count() == built->row_count());
+    CHECK(columns_agree(net.signal("v(a)"), built->signal("v(a)"), 1e-12));
+    CHECK(columns_agree(net.signal("v(b)"), built->signal("v(b)"), 1e-12));
+
+    // And the handle path: Td rebinds without re-elaboration (§3.5a).
+    REQUIRE(sim->set(T1.param("td"), 4e-9));
+    auto later = sim->run(TranAnalysis{.tstep = 0.2e-9, .tstop = 6e-9});
+    REQUIRE(later);
+    // Nothing arrives before 4 ns now.
+    std::size_t ic = 0;
+    for (std::size_t i = 0; i < later->axis().size(); ++i) {
+        if (std::abs(later->axis()[i] - 3.0e-9) <
+            std::abs(later->axis()[ic] - 3.0e-9)) {
+            ic = i;
+        }
+    }
+    CHECK(later->signal("v(b)")[ic] == approx(0.0));
 }

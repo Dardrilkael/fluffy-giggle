@@ -251,10 +251,9 @@ working rule 5) and would each be a future milestone:
 - **M0b (alt backend)** - KLU sparse solver behind `solver=klu` in
   `.options`. The Eigen backend is the only one wired; the design leaves
   the policy layer abstract enough to add KLU later.
-- **M4e (T-line only remains)** - the BJT (Ebers-Moll, M4a), the MOSFET
-  (level 1 Shichman-Hodges, M4c) and the behavioral B source
-  (dual-number AD, M4d) all landed - see `libs/spice/STATUS.md`. Only
-  the lossless T-line (T) still rejects at parse.
+- **M4 is complete** - the BJT (M4a), junction caps (M4b), the MOSFET
+  (M4c), the behavioral B source (M4d) and the lossless T-line (M4e)
+  all landed - see `libs/spice/STATUS.md` for the authoritative table.
 - **M5 (remainder)** - `.noise`, `.nodeset`, per-device temperature
   params (TC on models, temp-dependent diode Vt), text report. (The
   2026-10-29 revision already landed `.step`, `.meas`, `.save`/`.print`
@@ -280,16 +279,16 @@ In rough priority order:
    `git log --oneline -- libs/spice` shows the arc's commits (the
    authoritative landed table is `libs/spice/STATUS.md`).
 3. **Run the gate.** `cmake --preset linux && cmake --build --preset linux
-   && ctest --preset linux` should pass (132 cases / 2579 assertions at the
-   M4d gate). If it does not, the break is load-bearing -
+   && ctest --preset linux` should pass (144 cases / 2785 assertions at the
+   M4e gate). If it does not, the break is load-bearing -
    investigate before adding anything. Before a Windows hand-off, also
    run the five `tools/audit_*.py`/`tools/build_*.py` parity checks.
-4. **Pick the next milestone.** The natural next moves are **M4e** (the
-   lossless T-line - the last M4 device; the §3.6 current-iterate
-   threading + the nonlinear-residual gate from M3 are the foundation
-   every nonlinear device reuses) or **M0b** (the KLU backend: both
-   facades are stable, cross-validation tests are the gate). Each new
-   milestone = one commit, one test row, one CLAUDE.md note - that's the
+4. **Pick the next milestone.** M4 is closed (M4e - the lossless
+   T-line - was the last M4 device). The natural next moves are **M5**
+   (.noise/.nodeset, temp threading through the load context - the
+   diode's frozen Vt) or **M0b** (the KLU backend: both facades are
+   stable, cross-validation tests are the gate). Each new milestone =
+   one commit, one test row, one CLAUDE.md note - that's the
    established rhythm (M1 commit 5e97912, the M2 commit, and the M3
    commit are the templates).
 5. **Do not regress scope.** If a request lands that wants M3+ devices,

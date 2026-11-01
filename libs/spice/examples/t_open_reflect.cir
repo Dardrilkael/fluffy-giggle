@@ -1,0 +1,8 @@
+* open-ended line: the wave doubles at the open end, the reflection
+* returns at 2*Td and re-divides at the matched source, then settles
+* (the DC wire pair: v = V, i = 0)
+V1 in 0 PWL(0 0 1n 1)
+Rs in a 50
+T1 a 0 b 0 Z0=50 Td=2n
+.tran 0.5n 9n
+.end

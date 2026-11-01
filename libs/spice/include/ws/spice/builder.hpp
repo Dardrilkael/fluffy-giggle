@@ -196,6 +196,14 @@ public:
              std::string model, double area = 1.0);
     void bjt_model(std::string name, const BjtModel& m);
 
+    // Lossless transmission line (M4e): ports are (in+, in-) and
+    // (out+, out-); `z0` the characteristic impedance, `td` the delay
+    // (both rebindable Values). The handle's primary parameter is "z0";
+    // `.param("td")` reaches the delay.
+    [[nodiscard]] DeviceHandle tline(std::string name, NodeHandle in_p,
+                                     NodeHandle in_n, NodeHandle out_p,
+                                     NodeHandle out_n, Value z0, Value td);
+
     // Elaborates: same path the deck takes (flatten-free - the builder
     // emits top-level cards only - plus the §6.6 graph checks and the
     // §3.5 rev arena freeze). `temp` is the §7.7 elaboration temperature.

@@ -329,7 +329,8 @@ public:
         }
         return cx.par(kParDc);
     }
-    [[nodiscard]] double next_event(double t, double tstep, double tstop) const {
+    [[nodiscard]] double next_event(double t, double tstep, double tstop,
+                                    const double* /*st*/) const {
         return wave_ ? wave_->next_event(t, tstep, tstop)
                      : std::numeric_limits<double>::infinity();
     }
@@ -440,8 +441,8 @@ public:
         cx.stamp_branch_voltage(branch_, p_, n_, ac_phasor());
     }
     [[nodiscard]] double next_event(double t, double tstep,
-                                     double tstop) const override {
-        return SourceCommon::next_event(t, tstep, tstop);
+                                     double tstop, const double* st) const override {
+        return SourceCommon::next_event(t, tstep, tstop, st);
     }
     [[nodiscard]] bool has_ac() const override { return SourceCommon::has_ac(); }
     [[nodiscard]] bool write_card(std::string& out,
@@ -494,8 +495,8 @@ public:
         }
     }
     [[nodiscard]] double next_event(double t, double tstep,
-                                     double tstop) const override {
-        return SourceCommon::next_event(t, tstep, tstop);
+                                     double tstop, const double* st) const override {
+        return SourceCommon::next_event(t, tstep, tstop, st);
     }
     [[nodiscard]] bool has_ac() const override { return SourceCommon::has_ac(); }
     [[nodiscard]] bool write_card(std::string& out,
@@ -853,7 +854,7 @@ const std::map<char, DeviceFactory>& builtin_device_factories() {
         {'H', make_ccvs},      {'C', make_capacitor}, {'L', make_inductor},
         {'K', make_coupling},  {'S', make_vswitch},   {'W', make_iswitch},
         {'D', make_diode},     {'Q', make_bjt},     {'M', make_mosfet},
-        {'B', make_bsource},
+        {'B', make_bsource},   {'T', make_tline},
     };
     return table;
 }

@@ -271,6 +271,14 @@ void CircuitBuilder::bjt_model(std::string name, const BjtModel& m) {
     bjt_models_.emplace_back(std::move(name), m);
 }
 
+DeviceHandle CircuitBuilder::tline(std::string name, NodeHandle in_p,
+                                   NodeHandle in_n, NodeHandle out_p,
+                                   NodeHandle out_n, Value z0, Value td) {
+    cards_.push_back({name, {in_p.name, in_n.name, out_p.name, out_n.name,
+                             "Z0=" + value_token(z0), "Td=" + value_token(td)}});
+    return DeviceHandle{name, ParamHandle{name, "z0"}};
+}
+
 ws::core::Result<Circuit> CircuitBuilder::finish(double temp,
                                                  std::vector<Warning>* warnings) {
     std::vector<Warning> scratch;

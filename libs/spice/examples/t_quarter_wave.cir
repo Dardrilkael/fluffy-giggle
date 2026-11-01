@@ -1,0 +1,9 @@
+* quarter-wave transformer: a 1 us line, open at the far end.
+* At odd quarter-wave frequencies (250k, 750k, ...) the input is a
+* short (v(a) ~ 0, full magnitude at the open); at half-waves (500k)
+* the input is an open (i ~ 0, v(b) = -v(a)).
+V1 in 0 AC 1
+Rs in a 50
+T1 a 0 b 0 Z0=50 Td=1u
+.ac lin 3 250k 750k
+.end

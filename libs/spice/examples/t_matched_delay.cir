@@ -1,0 +1,8 @@
+* matched lossless line: 1 ns ramp in, the same ramp out 2 ns later
+* Rs = RL = Z0: no reflection ever returns; v(b) = v(a)(t - Td)
+V1 in 0 PWL(0 0 1n 1)
+Rs in a 50
+T1 a 0 b 0 Z0=50 Td=2n
+Rl b 0 50
+.tran 0.2n 8n
+.end

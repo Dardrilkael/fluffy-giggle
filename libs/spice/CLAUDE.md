@@ -5,7 +5,7 @@ contract is `DESIGN.md` (this directory) - sections cited throughout the
 code as `§n.m`; when code and this file disagree, DESIGN.md wins and this
 file gets fixed.
 
-## What exists (M0-M4d + the 2026-10-29 structural revision)
+## What exists (M0-M4e + the 2026-10-29 structural revision)
 - `ws::math` sparse LU facade (lives in libs/math, grown for this arc):
   analyze once per topology, factorize per solve, real + complex,
   transpose solve for the future noise adjoint.
@@ -101,6 +101,23 @@ file gets fixed.
   gained a `which` index (a B names one i() slot per occurrence).
   write_card round-trips plain expressions; a .param-referencing one
   fails the writer naming the device (no AST rewrite yet).
+- **M4e - the lossless T-line** (`T in+ in- out+ out- Z0= TD=`, or
+  `F=`/`NL=` with TD = NL/F, `IC=` 1-4 values under UIC): the method of
+  characteristics over two port-current branch rows. Each port is a
+  Thevenin `v_k = Z0*i_k + E_k` whose EMF is the wave the OTHER port
+  launched one delay ago; DC/OP is the wire pair stamped as an ideal
+  1:1 transformer over the same rows (constraint edges
+  (in+,out+)/(in-,out-)); .ac is the lossless two-port
+  `V1 - Z0*I1 = (V2+Z0*I2)e^{-j*w*TD}`. The history: a 2048-sample
+  (t, W1, W2) ring in the state slice, pruned to the pickup bracket,
+  seeded with the t=0 state over [-TD, 0], LINEAR-interpolated at the
+  pickup (exact on legs; ngspice's quadratic bends across a vertex).
+  Delay crossings register breakpoints: `next_event` takes the §3.5
+  state slice and returns the earliest sample+TD, capping dt at TD and
+  landing every delayed kink on a grid point (BE restart after). No
+  line LTE (nothing charge-like to integrate; the ports' curvature is
+  the attached dynamic devices' LTE). Ring overflow fails loudly
+  through load_error. `Builder::tline()`.
 - measure:: library (rise_time, rms, trig_targ, ...) + .meas as a thin
   parser (TRIG/TARG WHEN AVG RMS MAX MIN PP INTEG FIND...WHEN/AT
   DERIV); failures are notes (--strict-meas promotes).
@@ -110,9 +127,8 @@ file gets fixed.
   traps + topology + unused models, nothing simulates); CLI: -o -,
   --format raw, --keep-going, --strict-meas, --werror.
 
-Everything else rejects at parse with file:line (working-rule 5): T
-(M4e), `.lib` (backlog), `.noise/.nodeset` (M5), `solver=klu`
-(M0b).
+Everything else rejects at parse with file:line (working-rule 5):
+`.lib` (backlog), `.noise/.nodeset` (M5), `solver=klu` (M0b).
 
 ## Layout
 - Public surface (`include/ws/spice/`): parse.hpp, deck.hpp (cards +
@@ -127,10 +143,12 @@ Everything else rejects at parse with file:line (working-rule 5): T
 - `src/`: parse.cpp, deck.cpp (cards/params), expr.cpp (VM + signal/@
   refs), error.cpp (the taxonomy), elaborate.cpp (flatten, node table,
   graph checks, subckt-local value inlining), devices.cpp /
-  devices_m2.cpp / devices_m3.cpp / devices_m4.cpp / devices_m4d.cpp
-  (the 16 kinds R/V/I/E/F/G/H/C/L/K/S/W/D/Q/M/B - param specs +
+  devices_m2.cpp / devices_m3.cpp / devices_m4.cpp / devices_m4d.cpp /
+  devices_m4e.cpp
+  (the 17 kinds R/V/I/E/F/G/H/C/L/K/S/W/D/Q/M/B/T - param specs +
   state slots + write_card; _m4 = the BJT/MOSFET + the shared
-  junction-cap companion, _m4d = the behavioral B source), mna.cpp +
+  junction-cap companion, _m4d = the behavioral B source, _m4e = the
+  lossless T-line), mna.cpp +
   mna.hpp (pattern + numeric contexts over
   (Circuit, RunState, x, gmin)), kernel.hpp (shared DcKernel + the
   ladder + NonlinResid convergence), analysis.cpp (drivers + .step
@@ -314,6 +332,36 @@ Everything else rejects at parse with file:line (working-rule 5): T
 - **.ic forces via a stiff Norton** (§6.5): gforce = 1e9*max diagonal,
   stamped during the t=0 OP only and released when the transient
   starts; .ic on ground or an unknown node is a Semantic error.
+- **T-line DC is the wire pair** (M4e): the lossless line's steady
+  state is v1 = v2, i1 = -i2, stamped as an ideal 1:1 transformer over
+  the two port-current branch rows - NOT node merging (elaboration
+  cannot know a tran will run) and NOT a near-zero gmin fudge. The
+  constraint edges (in+,out+)/(in-,out-) mirror it for the §6.6 graph
+  checks: parallel lines / V sources bridging a line pair are
+  constraint loops, and a far port with no other connection still has
+  its DC path through the line.
+- **T-line stamps never depend on state in pattern mode** (M4e,
+  §3.2): the tran Thevenin row's -Z0 is a legal structural zero at dry
+  run (zeroed scratch), and load_ac stamps the full two-port at ANY
+  omega - the omega==0 numeric fallback writes a POSITION SUBSET (the
+  wire rows), so MnaSystem::setup's AC dry run stamps at a nominal
+  omega=1 to record the superset.
+- **The T-line's breakpoints come from its state** (M4e): next_event
+  takes the state slice (the §3.5 explicit-slice convention) and
+  returns the earliest stored-sample+TD - it both caps dt at TD
+  (causality: the pickup t-TD must not extrapolate past the newest
+  sample) and lands delayed kinks on grid points. Sources ignore the
+  new parameter; every next_event override must keep tolerating it.
+- **T-line IC= replaces the waves wholesale** (M4e, the C/L ic=
+  precedent): seed_state computes W_k from the four IC values when
+  given, else from the t=0 solution (OP exact; UIC without IC uses the
+  UIC vector - ngspice zeroes instead, documented deviation). The
+  port-current branch unknowns are NOT seeded from IC.
+- **The T-line overflow latch is device-side** (M4e): load_error (the
+  §8.5 channel) receives no state slice, so the ring-full flag is a
+  one-shot `mutable bool` on the device - set by commit, cleared at
+  seed and when it fires. The same sharing argument as the inductor's
+  m_ mirror covers parallel runs.
 
 ## Dialect notes (ngspice-canonical, §8.3)
 - Accepted LTspice forms: `{expr}` values (devices and `.param`),

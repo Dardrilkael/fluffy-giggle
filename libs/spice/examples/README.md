@@ -50,6 +50,15 @@ On Windows: `.\build\spice-debug\bin\spice.exe run <example>.cir`
 | `b_exp.cir` | `.op` | `I=10f*(exp(v(a)/25.85m)-1)` — the B source as a diode; converges to the Lambert-W point |
 | `b_tanh_limit.cir` | `.tran` | `I=1m*tanh(v(p,n)/0.5)` — a soft limiter over a differential ref, `time`-swept |
 
+## M4e — the lossless transmission line (method of characteristics)
+
+| File | Analysis | What it shows |
+|---|---|---|
+| `t_matched_delay.cir` | `.tran` | Rs = RL = Z0: the 1 ns ramp reappears at the far end exactly 2 ns later, no reflections |
+| `t_open_reflect.cir` | `.tran` | Open far end: the wave doubles at the open, the reflection returns at 2·Td and settles to the DC wire (v = V, i = 0) |
+| `t_ringing.cir` | `.tran` | RL = 3·Z0 with a matched source: one round trip to the DC wire value, no ringing |
+| `t_quarter_wave.cir` | `.ac` | Open 1 µs line: input short at odd quarter-waves, open at half-waves |
+
 ## ngspice cross-validation
 
 The `.op` examples produce values that match ngspice 39 to 5+ significant

@@ -18,12 +18,11 @@ Diagnostic card_diag(ErrorKind kind, std::string code, std::string message, Sour
     return d;
 }
 
-// Milestone by device letter (§11): the not-yet story per kind.
-// D landed in M3; Q landed in M4a; M landed in M4c; B in M4d. T remains M4+.
+// Milestone by device letter (§11): the not-yet story per kind. M4e
+// landed the last M4 device (T); the table is empty until M5's .noise
+// companions arrive (none are devices).
 const std::map<char, const char*>& device_milestones() {
-    static const std::map<char, const char*> table = {
-        {'T', "M4"},
-    };
+    static const std::map<char, const char*> table = {};
     return table;
 }
 
@@ -768,7 +767,7 @@ ws::core::Result<ParsedCard> parse_card(const Record& rec, bool inside_subckt,
     }
     const char letter =
         static_cast<char>(std::toupper(static_cast<unsigned char>(name_text[0])));
-    const std::string supported = "RVIEFGHXCLKSWDQMB";
+    const std::string supported = "RVIEFGHXCLKSWDQMBT";
     if (supported.find(letter) == std::string::npos) {
         if (device_milestones().count(letter) != 0) {
             return spice_fail(card_diag(

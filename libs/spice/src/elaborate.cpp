@@ -51,6 +51,8 @@ std::map<char, DeviceShape> device_shapes() {
         {'D', {2, {}}},  // D anode cathode model [area] (M3)
         {'Q', {3, {}}},  // Q C B E model [area] (M4a; substrate S lands M4b)
         {'M', {4, {}}},  // M D G S B model [L= W=] (M4c)
+        {'T', {4, {}}},  // T in+ in- out+ out- Z0=... Td=... (M4e)
+        {'B', {2, {}}},  // B n+ n- V=expr | I=expr (M4d)
     };
     return table;
 }
