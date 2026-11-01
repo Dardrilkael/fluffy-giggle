@@ -840,17 +840,21 @@ public:
         id += gm * vds;
         did_dvd += gm;
         did_dvs -= gm;
-        // Apply polarity (PMOS: Id flows S→D, so negate).
+        // Apply polarity (PMOS: Id flows S→D, so negate). After this line
+        // `id` IS the real-frame current into the drain (the mirror
+        // circuit's currents flip with its negated voltages), and the
+        // derivatives below are d(that current)/d(real node voltage) -
+        // the sgn factors cancel in the chain rule, same as the BJT.
         id *= sgn;
-        // The G matrix entries are polarity-independent (the sgn factors
-        // cancel in the chain rule, same as the BJT). The derivatives
-        // dic_dvg etc. are d(sgn*Id)/dVi directly.
         const double dic_dvg = did_dvg;  // dId/dVg
         const double dic_dvd = did_dvd;  // dId/dVd
         const double dic_dvs = did_dvs;  // dId/dVs
         const double dic_dvb = did_dvb;  // dId/dVb
-        // Norton offset in terms of node voltages.
-        const double id_const = sgn * id -
+        // Norton offset in terms of node voltages. `id` is already the
+        // real-frame drain current - no second sgn here (the M4c PMOS bug
+        // the §10.1 analytic row caught: a double negation flipped the
+        // PMOS rhs constant while the G entries stayed right).
+        const double id_const = id -
             (dic_dvg * vg + dic_dvd * vd + dic_dvs * vs + dic_dvb * vb);
         // G matrix: current leaving D = Id (into the drain).
         cx.add_entry(d_, g_, dic_dvg);

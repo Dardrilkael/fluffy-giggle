@@ -2334,3 +2334,199 @@ TEST_CASE("M4b BJT Cje/Cjc: ngspice cross-validation of .op") {
     CHECK(-i_vc == doctest::Approx(5.67e-5).epsilon(1e-3));
     CHECK(-i_vbe == doctest::Approx(5.67e-7).epsilon(1e-3));
 }
+
+// --- §10.1 M4c: the MOSFET (level 1 Shichman-Hodges) ------------------------------
+
+namespace {
+
+// The level-1 model equation (the §10.1 reference, written out exactly as
+// DESIGN.md pins it): cutoff below threshold, triode below Vdsat,
+// saturation above, with channel-length modulation and the body effect.
+// gmin is excluded here (the tests run at gmin=0 so the closed form is
+// exact).
+double mos_level1_id(double vgs, double vds, double vbs, double vto, double kp,
+                     double lambda, double gamma, double phi, double l, double w) {
+    double vth = vto;
+    if (gamma != 0.0) {
+        vth += gamma * (std::sqrt(2.0 * phi - vbs) - std::sqrt(2.0 * phi));
+    }
+    const double vov = vgs - vth;
+    if (vov <= 0.0) {
+        return 0.0;
+    }
+    const double beta = kp * w / l;
+    if (vds < vov) {
+        return beta * (vov - vds / 2.0) * vds * (1.0 + lambda * vds);
+    }
+    return 0.5 * beta * vov * vov * (1.0 + lambda * vds);
+}
+
+}  // namespace
+
+TEST_CASE("M4c MOSFET: .op Id in cutoff/triode/saturation vs the model equations") {
+    // §10.1 row: MOS level 1, Id in triode/saturation vs model equations at
+    // 1e-9 rel. Four-terminal bias through V sources (the terminal voltages
+    // are exact, so Id is the model equation verbatim). Vto=1, Kp=20u,
+    // Lambda=0.01, L=W=1u unless stated; gmin=0 kills the channel floor so
+    // the closed form is exact to the solver's 1e-9.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;
+    const auto run = run_text(
+        "mos level1 op\n"
+        "Vd d 0 DC 2\n"
+        "Vg g 0 DC 2\n"
+        "Vs s 0 DC 0\n"
+        "Vb b 0 DC 0\n"
+        "M1 d g s b mn L=1u W=1u\n"
+        ".model mn NMOS(Vto=1 Kp=20u Lambda=0.01)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 1);
+    const Table& t = run->results.tables[0];
+    const double i_vd = t.signals[col_of(t, "i(Vd)")].data[0];
+    const double i_vg = t.signals[col_of(t, "i(Vg)")].data[0];
+    // Vgs=2, Vds=2: overdrive 1 V, Vds >= Vdsat -> saturation.
+    // Id = 0.5*Kp*W/L*(Vgs-Vth)^2*(1+lambda*Vds) = 0.5*20u*1*(1.02).
+    const double ref_sat =
+        mos_level1_id(2.0, 2.0, 0.0, 1.0, 20e-6, 0.01, 0.0, 0.6, 1e-6, 1e-6);
+    CHECK(ref_sat == doctest::Approx(10.2e-6).epsilon(1e-12));  // the reference itself
+    CHECK(-i_vd == doctest::Approx(ref_sat).epsilon(1e-9));
+    // The gate is capacitive: no DC gate current.
+    CHECK(std::abs(i_vg) < 1e-20);
+}
+
+TEST_CASE("M4c MOSFET: triode region and the L/W geometry factor") {
+    // Vds=0.5 < Vdsat=1 -> triode, with L=2u W=1u (beta halves). The M4c
+    // ngspice cross-check used W=L; this row pins the geometry factor the
+    // analytic gate never covered.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;
+    const auto run = run_text(
+        "mos triode\n"
+        "Vd d 0 DC 0.5\n"
+        "Vg g 0 DC 2\n"
+        "Vs s 0 DC 0\n"
+        "Vb b 0 DC 0\n"
+        "M1 d g s b mn L=2u W=1u\n"
+        ".model mn NMOS(Vto=1 Kp=20u Lambda=0.01)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double i_vd = t.signals[col_of(t, "i(Vd)")].data[0];
+    const double ref_triode =
+        mos_level1_id(2.0, 0.5, 0.0, 1.0, 20e-6, 0.01, 0.0, 0.6, 2e-6, 1e-6);
+    // Id = 10u*(1-0.25)*0.5*(1.005) = 3.76875 uA.
+    CHECK(ref_triode == doctest::Approx(3.76875e-6).epsilon(1e-12));
+    CHECK(-i_vd == doctest::Approx(ref_triode).epsilon(1e-9));
+}
+
+TEST_CASE("M4c MOSFET: cutoff below threshold is exactly off") {
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;
+    const auto run = run_text(
+        "mos cutoff\n"
+        "Vd d 0 DC 2\n"
+        "Vg g 0 DC 0.5\n"
+        "Vs s 0 DC 0\n"
+        "Vb b 0 DC 0\n"
+        "M1 d g s b mn\n"
+        ".model mn NMOS(Vto=1 Kp=20u)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double i_vd = t.signals[col_of(t, "i(Vd)")].data[0];
+    CHECK(std::abs(i_vd) < 1e-20);  // no gmin floor: the channel is exactly off
+}
+
+TEST_CASE("M4c MOSFET: body effect shifts Vth per the model") {
+    // Vbs=-1 with Gamma=0.5, Phi=0.6: Vth = 1 + 0.5*(sqrt(2.2)-sqrt(1.2)).
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;
+    const auto run = run_text(
+        "mos body effect\n"
+        "Vd d 0 DC 3\n"
+        "Vg g 0 DC 3\n"
+        "Vs s 0 DC 0\n"
+        "Vb b 0 DC -1\n"
+        "M1 d g s b mn L=1u W=1u\n"
+        ".model mn NMOS(Vto=1 Kp=20u Lambda=0.01 Gamma=0.5 Phi=0.6)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double i_vd = t.signals[col_of(t, "i(Vd)")].data[0];
+    const double ref_body =
+        mos_level1_id(3.0, 3.0, -1.0, 1.0, 20e-6, 0.01, 0.5, 0.6, 1e-6, 1e-6);
+    CHECK(ref_body == doctest::Approx(3.3598672045603675e-5).epsilon(1e-9));
+    CHECK(-i_vd == doctest::Approx(ref_body).epsilon(1e-9));
+}
+
+TEST_CASE("M4c MOSFET: .dc Vgs sweep crosses cutoff into saturation") {
+    // A .dc sweep over Vgs at fixed Vds=2 (>= Vdsat everywhere above
+    // threshold): every point is either cutoff (Vgs <= Vth) or saturation.
+    // This is the sweep form of the analytic row - the region boundary is
+    // crossed mid-sweep and each point still matches the equation.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;
+    const auto run = run_text(
+        "mos dc sweep\n"
+        "Vd d 0 DC 2\n"
+        "Vg g 0 DC 0\n"
+        "Vs s 0 DC 0\n"
+        "Vb b 0 DC 0\n"
+        "M1 d g s b mn L=1u W=1u\n"
+        ".model mn NMOS(Vto=1 Kp=20u Lambda=0.01)\n"
+        ".dc Vg 0 3 0.25\n",
+        nullptr, settings);
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 1);
+    const Table& t = run->results.tables[0];
+    const std::size_t col_i = col_of(t, "i(Vd)");
+    const std::size_t col_vg = col_of(t, "v(g)");
+    REQUIRE(t.signals[col_i].data.size() == 13);
+    for (std::size_t k = 0; k < 13; ++k) {
+        const double vgs = t.signals[col_vg].data[k];
+        const double ref = mos_level1_id(vgs, 2.0, 0.0, 1.0, 20e-6, 0.01, 0.0, 0.6,
+                                         1e-6, 1e-6);
+        const double i_mag = -t.signals[col_i].data[k];
+        if (ref > 0.0) {
+            CHECK(i_mag == doctest::Approx(ref).epsilon(1e-9));
+        } else {
+            CHECK(std::abs(i_mag) < 1e-20);
+        }
+    }
+}
+
+TEST_CASE("M4c MOSFET: PMOS - polarity flips, same magnitudes") {
+    // Same biases negated on a PMOS: |Id| matches the NMOS saturation
+    // equation. The drain sits at -2 V, so the drain source SINKS current
+    // and i(Vd) reads POSITIVE (the ngspice sign convention: a delivering
+    // source reads negative, an absorbing one positive).
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;
+    const auto run = run_text(
+        "mos pmos\n"
+        "Vd d 0 DC -2\n"
+        "Vg g 0 DC -2\n"
+        "Vs s 0 DC 0\n"
+        "Vb b 0 DC 0\n"
+        "M1 d g s b mp L=1u W=1u\n"
+        ".model mp PMOS(Vto=1 Kp=20u Lambda=0.01)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double i_vd = t.signals[col_of(t, "i(Vd)")].data[0];
+    const double ref_sat =
+        mos_level1_id(2.0, 2.0, 0.0, 1.0, 20e-6, 0.01, 0.0, 0.6, 1e-6, 1e-6);
+    CHECK(i_vd == doctest::Approx(ref_sat).epsilon(1e-9));
+}
