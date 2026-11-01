@@ -116,9 +116,10 @@ struct DiodeModel {
 };
 
 // A BJT .model the builder registers (card form: .model name NPN|PNP(Is=... Bf=...)).
-// M4a implements Is, Bf, Br, Nf, Nr, Tnom (Ebers-Moll); the Gummel-Poon
-// refinements (Vaf, Var, Cje, Cjc, Tf, ...) are accepted by the parser but
-// not yet implemented.
+// M4a implements Is, Bf, Br, Nf, Nr, Tnom (Ebers-Moll); the Early
+// voltages Vaf/Var are implemented (the SPICE3 base-charge form); the
+// Gummel-Poon refinements (Cje, Cjc, Tf, ...) are accepted by the parser
+// but not yet implemented.
 struct BjtModel {
     bool pnp = false;       // NPN by default
     double is_val = 1e-16;  // saturation current (A)
@@ -127,6 +128,8 @@ struct BjtModel {
     double nf = 1.0;        // BE emission coefficient
     double nr = 1.0;        // BC emission coefficient
     double tnom = 27.0;     // model reference temperature (°C)
+    std::optional<double> vaf;  // forward Early voltage (V; 0/absent = off)
+    std::optional<double> var;  // reverse Early voltage (V; 0/absent = off)
 };
 
 class CircuitBuilder {

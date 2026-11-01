@@ -1,0 +1,10 @@
+* Early effect: the output characteristic is a ramp, not a flat line.
+* Ic(Vce) = Ic0 * (1 + (Vce - Vbe)/Vaf): the collector current rises
+* with Vce, extrapolating to zero at Vce - Vbe = -Vaf (the Early
+* voltage). ro = Vaf/Ic at the bias point.
+Vbe b 0 0.7
+Vce c 0 1
+Q1 c b 0 qn
+.model qn NPN(Is=1e-14 Bf=100 Vaf=50)
+.dc Vce 1 5 0.5
+.end

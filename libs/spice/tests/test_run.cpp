@@ -3333,3 +3333,154 @@ TEST_CASE("M4e T: .step rebinding reaches Z0 and TD (the §3.5a promise)") {
     }
 }
 
+
+// --- BJT Early effect (Vaf/Var: the deferred-device-physics follow-up) ----------
+//
+// SPICE3's base charge without roll-off: the transport current is divided
+// by qb = 1/oef, oef = 1 - Vbc/Vaf - Vbe/Var. Vaf is the finite output
+// conductance (go = Ic/Vaf, ro = Vaf/Ic); Var is its reverse-active
+// mirror. All rows are the exact closed form - the .dc ramp IS the
+// derivative, so dIc/dVbc is pinned digit-for-digit.
+
+namespace {
+
+// Vt at the model's default Tnom = 27 C (matches devices_m4.cpp).
+constexpr double kBjtVt = (27.0 + 273.15) * 8.617333262145e-5;
+
+// The ws::spice BJT collector current (forward/reverse transport times
+// the Early factor): Ic = Is*(e^{Vbe/(Nf*Vt)} - e^{Vbc/(Nr*Vt)})*oef.
+double bjt_ic_early(double vbe, double vbc, double is_val, double nf, double nr,
+                    double vaf, double var_val) {
+    const double t = is_val * (std::exp(vbe / (nf * kBjtVt)) -
+                               std::exp(vbc / (nr * kBjtVt)));
+    const double oef = 1.0 - (vaf > 0.0 ? vbc / vaf : 0.0) -
+                       (var_val > 0.0 ? vbe / var_val : 0.0);
+    return t * oef;
+}
+
+}  // namespace
+
+TEST_CASE("BJT Vaf/Var: the output characteristic is the Early ramp (exact)") {
+    const auto run = run_text(
+        "early output characteristic\n"
+        "Vbe b 0 0.7\n"
+        "Vce c 0 1\n"
+        "Q1 c b 0 qn\n"
+        ".model qn NPN(Is=1e-14 Bf=100 Vaf=50)\n"
+        ".dc Vce 1 5 1\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    REQUIRE(t.signals[col_of(t, "i(Vce)")].data.size() == 5);
+    for (std::size_t k = 0; k < 5; ++k) {
+        const double vce = t.sweep_axes[0][k];
+        // i(Vce) is negative when delivering: the collector source sinks
+        // Ic. The Early ramp: Ic(Vce) = Ic0*(1 + (Vce - Vbe)/Vaf) plus
+        // the (utterly negligible but exact) reverse exponent.
+        CHECK(t.signals[col_of(t, "i(Vce)")].data[k] ==
+              approx(-bjt_ic_early(0.7, 0.7 - vce, 1e-14, 1.0, 1.0, 50.0, 0.0)));
+    }
+    // The ramp's slope is the output conductance: dIc/dVce = Ic0/Vaf.
+    const double slope = (t.signals[col_of(t, "i(Vce)")].data[4] -
+                          t.signals[col_of(t, "i(Vce)")].data[0]) / 4.0;
+    const double ic0 = bjt_ic_early(0.7, 0.7 - 3.0, 1e-14, 1.0, 1.0, 0.0, 0.0);
+    CHECK(slope == approx(-ic0 / 50.0));
+}
+
+TEST_CASE("BJT Vaf/Var: Var scales the forward current; saturation combines both") {
+    // Reverse Early: the forward Ic picks up the (1 - Vbe/Var) factor.
+    // Fixed-bias sources keep Vbe/Vbc identical with and without Var, so
+    // the ratio of two .op runs isolates the factor exactly.
+    const std::string body =
+        "Vbe b 0 0.65\n"
+        "Vce c 0 5\n"
+        "Q1 c b 0 qn\n"
+        ".model qn NPN(Is=1e-14 Bf=100 {early})\n"
+        ".op\n";
+    const auto plain = run_text("early none\n" + std::string(body).replace(body.find("{early}"), 7, ""));
+    const auto with_var = run_text("early var\n" + body.substr(0, body.find("{early}")) + "Var=20)\n.op\n");
+    REQUIRE(plain);
+    REQUIRE(with_var);
+    const double ic_plain =
+        -plain->results.tables[0].signals[col_of(plain->results.tables[0], "i(Vce)")].data[0];
+    const double ic_var =
+        -with_var->results.tables[0]
+             .signals[col_of(with_var->results.tables[0], "i(Vce)")]
+             .data[0];
+    CHECK(ic_plain == approx(bjt_ic_early(0.65, 0.65 - 5.0, 1e-14, 1.0, 1.0, 0.0, 0.0)));
+    CHECK(ic_var == approx(bjt_ic_early(0.65, 0.65 - 5.0, 1e-14, 1.0, 1.0, 0.0, 20.0)));
+    CHECK(ic_var / ic_plain == approx(1.0 - 0.65 / 20.0));
+
+    // Saturation: both junctions forward, both Early terms live at once -
+    // the closed form covers it exactly.
+    const auto sat = run_text(
+        "early saturation\n"
+        "Vbe b 0 0.8\n"
+        "Vce c 0 0.3\n"
+        "Q1 c b 0 qs\n"
+        ".model qs NPN(Is=1e-14 Bf=100 Vaf=50 Var=20)\n"
+        ".op\n");
+    REQUIRE(sat);
+    const double ic_sat =
+        -sat->results.tables[0].signals[col_of(sat->results.tables[0], "i(Vce)")].data[0];
+    CHECK(ic_sat == approx(bjt_ic_early(0.8, 0.8 - 0.3, 1e-14, 1.0, 1.0, 50.0, 20.0)));
+}
+
+TEST_CASE("BJT Vaf/Var: .ac exposes go = Ic/Vaf at the frozen OP") {
+    // Base AC-grounded (a V source without an AC spec is a small-signal
+    // short), collector AC-driven: the collector admittance is
+    // dIc/dVc = gm_r*oef + Ic_transport/Vaf - the Early output
+    // conductance plus the (here negligible) reverse junction term.
+    const auto run = run_text(
+        "early go\n"
+        "Vbe b 0 DC 0.7\n"
+        "Vce c 0 DC 5 AC 1\n"
+        "Q1 c b 0 qn\n"
+        ".model qn NPN(Is=1e-14 Bf=100 Vaf=50)\n"
+        ".ac lin 1 1k 1k\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double re_i =
+        t.signals[col_of(t, "re(i(Vce))")].data[0];
+    const double vbe = 0.7;
+    const double vbc = vbe - 5.0;
+    const double t_tran = 1e-14 * (std::exp(vbe / kBjtVt) - std::exp(vbc / kBjtVt));
+    const double gm_r = 1e-14 / (1.0 * kBjtVt) * std::exp(vbc / (1.0 * kBjtVt));
+    const double oef = 1.0 - vbc / 50.0;
+    const double go = gm_r * oef + t_tran / 50.0;
+    CHECK(re_i == approx(-go));
+    CHECK(t.signals[col_of(t, "im(i(Vce))")].data[0] == approx(0.0));
+}
+
+TEST_CASE("BJT Vaf/Var: Vaf=0 disables the term; negative values reject") {
+    // Vaf=0 is the documented off switch: the M4a answer comes back
+    // bit-for-bit (the stamp is byte-identical with both terms off).
+    const auto run = run_text(
+        "early off\n"
+        "Vbe b 0 0.7\n"
+        "Vce c 0 5\n"
+        "Q1 c b 0 qn\n"
+        ".model qn NPN(Is=1e-14 Bf=100 Vaf=0)\n"
+        ".op\n");
+    REQUIRE(run);
+    CHECK(-run->results.tables[0]
+               .signals[col_of(run->results.tables[0], "i(Vce)")]
+               .data[0] ==
+          approx(bjt_ic_early(0.7, 0.7 - 5.0, 1e-14, 1.0, 1.0, 0.0, 0.0)));
+
+    // Negative Early voltages flip the output conductance's sign -
+    // rejected loudly, not silently simulated.
+    CHECK(error_of(run_text("early bad\n"
+                            "Vbe b 0 0.7\n"
+                            "Vce c 0 5\n"
+                            "Q1 c b 0 qn\n"
+                            ".model qn NPN(Is=1e-14 Vaf=-50)\n"
+                            ".op\n"))
+              .find("Vaf >= 0") != std::string::npos);
+    CHECK(error_of(run_text("early badr\n"
+                            "Vbe b 0 0.7\n"
+                            "Vce c 0 5\n"
+                            "Q1 c b 0 qn\n"
+                            ".model qn NPN(Is=1e-14 Var=-20)\n"
+                            ".op\n"))
+              .find("Var >= 0") != std::string::npos);
+}

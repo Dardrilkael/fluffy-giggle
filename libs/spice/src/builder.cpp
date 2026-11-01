@@ -368,6 +368,12 @@ ws::core::Result<Circuit> CircuitBuilder::finish(double temp,
         if (m.tnom != 27.0) {
             kv("Tnom", m.tnom);
         }
+        if (m.vaf) {
+            kv("Vaf", *m.vaf);
+        }
+        if (m.var) {
+            kv("Var", *m.var);
+        }
         ast.models.push_back(std::move(def));
     }
     return elaborate_deck(ast, temp, w);

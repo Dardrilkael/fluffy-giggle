@@ -687,3 +687,32 @@ TEST_CASE("M4e T: builder tline() matches the card front end and the writer") {
     }
     CHECK(later->signal("v(b)")[ic] == approx(0.0));
 }
+
+TEST_CASE("BJT Vaf/Var: builder BjtModel matches the card front end") {
+    // The Early voltages through the builder vs the .model card: one
+    // answer (the §2.1 rev guarantee), plus the Vaf output-characteristic
+    // spot check.
+    CircuitBuilder c;
+    auto b = c.node("b"), cc = c.node("c");
+    (void)c.vsource("Vbe", b, gnd, 0.7);
+    (void)c.vsource("Vce", cc, gnd, 1.0);
+    c.bjt("Q1", cc, b, gnd, "qn");
+    c.bjt_model("qn", {.is_val = 1e-14, .bf = 100.0, .vaf = 50.0});
+    auto circuit = c.finish();
+    REQUIRE(circuit);
+    auto sim = Simulator::create(std::move(*circuit));
+    REQUIRE(sim);
+    auto dc = sim->run(DcAnalysis{.source = "Vce", .start = 1.0, .stop = 5.0,
+                                  .step = 1.0});
+    REQUIRE(dc);
+    REQUIRE(dc->row_count() == 5);
+    constexpr double vt = (27.0 + 273.15) * 8.617333262145e-5;
+    for (std::size_t k = 0; k < 5; ++k) {
+        const double vce = dc->axis(0)[k];
+        const double vbc = 0.7 - vce;
+        const double ic = 1e-14 *
+                          (std::exp(0.7 / vt) - std::exp(vbc / vt)) *
+                          (1.0 - vbc / 50.0);
+        CHECK(-dc->signal("i(Vce)")[k] == approx(ic));
+    }
+}

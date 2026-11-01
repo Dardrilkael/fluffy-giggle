@@ -58,7 +58,12 @@ file gets fixed.
   stamp (Ic/Ib/Ie + derivatives into G, Norton offsets into rhs), two
   pnjlim slots (Vbe/Vbc), `.model NPN|PNP(Is= Bf= Br= Nf= Nr=)`; NPN and
   PNP share polarity-independent G entries - only the RHS flips (sgn).
-  `Builder::bjt()`/`bjt_model()`.
+  `Builder::bjt()`/`bjt_model()`. The Early voltages (Vaf/Var) are
+  implemented: oef = 1 - Vbc/Vaf - Vbe/Var multiplies the TRANSPORT
+  current only (SPICE3's base charge sans roll-off), the derivatives
+  gain go = Ic/Vaf and its Vbe-side mirror; Vaf/Var=0 (default) is
+  byte-identical M4a; negatives reject. Builder BjtModel: optional
+  vaf/var.
 - **M4b - junction caps**: the nonlinear charge companion (SPICE3
   depletion Q/C + the Fc*Vj linear extension), shared by the diode
   (Cjo/M/Vj/Fc; state 3 -> 16 slots) and both BJT junctions

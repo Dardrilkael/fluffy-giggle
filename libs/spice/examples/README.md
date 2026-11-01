@@ -26,6 +26,7 @@ On Windows: `.\build\spice-debug\bin\spice.exe run <example>.cir`
 | `bjt_iv.cir` | `.dc` | BJT Ic vs Vbe — the 60 mV/decade exponential |
 | `bjt_amplifier.cir` | `.op` | Common-emitter with emitter degeneration; proper quiescent bias |
 | `bjt_pnp.cir` | `.op` | PNP — polarity flips, same magnitudes |
+| `bjt_early.cir` | `.dc` | Early effect (Vaf=50): Ic(Vce) is a ramp with slope Ic0/Vaf — the finite output resistance ro = Vaf/Ic |
 
 ## M4b — junction capacitance (Cjo / Cje / Cjc)
 

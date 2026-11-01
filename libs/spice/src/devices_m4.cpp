@@ -156,18 +156,32 @@ public:
         const double arg_bc = safe_exp_arg(vbc / (nr_ * vt_));
         const double ex_bc = std::exp(arg_bc);
         const double gm = cx.gmin();
+        // Early effect (SPICE3's base charge, roll-off terms dropped):
+        // the transport current is divided by qb = 1/oef with
+        //   oef = 1 - Vbc/Vaf - Vbe/Var
+        // (SPICE3's q1, evaluated at the clamped junction voltages). The
+        // forward term is the finite output conductance go = Ic/Vaf; the
+        // reverse term is its mirror in reverse-active. Vaf/Var = 0
+        // (default) disables each term - oef == 1.0 and the stamp is
+        // byte-identical to M4a. The base diode currents are NOT scaled
+        // (SPICE3 likewise divides only the transport current).
+        const double oef = 1.0 - vbc * inv_vaf_ - vbe * inv_var_;
         // Transport terminal currents (into the terminals, sgn-scaled):
-        //   Ic = Is*(ex_be - ex_bc)
+        //   Ic = Is*(ex_be - ex_bc) * oef
         //   Ib = Is/Bf*(ex_be-1) + Is/Br*(ex_bc-1)  + gmin*(Vbe+Vbc)
         //   Ie = -(Ic + Ib)
-        const double ic = sgn * is_eff * (ex_be - ex_bc);
+        const double t_tran = is_eff * (ex_be - ex_bc);
+        const double ic = sgn * t_tran * oef;
         const double ib = sgn * (is_eff / bf_ * (ex_be - 1.0) +
                                   is_eff / br_ * (ex_bc - 1.0) +
                                   gm * (vbe + vbc));
         const double ie = -(ic + ib);
         // Derivatives w.r.t. the EFFECTIVE junction voltages:
-        //   dIc/dVbe_eff = Is/(Nf*Vt)*ex_be = gm_f
-        //   dIc/dVbc_eff = -Is/(Nr*Vt)*ex_bc = -gm_r
+        //   dIc/dVbe_eff = (Is/(Nf*Vt)*ex_be - Is/(Nr*Vt)*ex_bc)*oef - T/Var
+        //   dIc/dVbc_eff = -Is/(Nr*Vt)*ex_bc*oef - T/Vaf
+        // (the Early terms: d(oef)/dVbe = -1/Var, d(oef)/dVbc = -1/Vaf;
+        // T = the unscaled transport current). The pure junction
+        // conductances:
         //   dIb/dVbe_eff = Is/(Bf*Nf*Vt)*ex_be + gmin = gd_ib_f
         //   dIb/dVbc_eff = Is/(Br*Nr*Vt)*ex_bc + gmin = gd_ib_r
         const double gm_f = is_eff / (nf_ * vt_) * ex_be;
@@ -177,10 +191,12 @@ public:
         // Chain rule to node voltages. For NPN: Vbe_eff=Vb-Ve, Vbc_eff=Vb-Vc.
         // For PNP: Vbe_eff=Ve-Vb, Vbc_eff=Vc-Vb. The sgn factors cancel
         // (d(sgn*Ic)/dVb = sgn * dIc/dVbe_eff * dVbe_eff/dVb = sgn*gm_f*sgn = gm_f),
-        // so dIc/dVb is the same for both polarities.
-        const double dic_dvb = gm_f - gm_r;
-        const double dic_dvc = gm_r;          // dIc/dVc = -(-gm_r) = gm_r
-        const double dic_dve = -gm_f;         // dIc/dVe = gm_f*(-1) = -gm_f
+        // so dIc/dVb is the same for both polarities - the Early terms
+        // inherit the cancellation (they are functions of the effective
+        // junction voltages only).
+        const double dic_dvb = (gm_f - gm_r) * oef - t_tran * inv_var_;
+        const double dic_dvc = gm_r * oef + t_tran * inv_vaf_;  // go side
+        const double dic_dve = -gm_f * oef + t_tran * inv_var_;
         const double dib_dvb = gd_ib_f + gd_ib_r;
         const double dib_dvc = -gd_ib_r;
         const double dib_dve = -gd_ib_f;
@@ -231,8 +247,13 @@ public:
         const double gm_r = is_eff / (nr_ * vt_) * ex_bc;
         const double gd_ib_f = is_eff / (bf_ * nf_ * vt_) * ex_be;
         const double gd_ib_r = is_eff / (br_ * nr_ * vt_) * ex_bc;
+        // The Early terms at the frozen OP (go and its Vbe-side mirror).
+        const double oef = 1.0 - vbc * inv_vaf_ - vbe * inv_var_;
+        const double t_tran = is_eff * (ex_be - ex_bc);
         // Same G entries as load_dc (real only - no caps in M4a).
-        const double dic_dvb = gm_f - gm_r, dic_dvc = gm_r, dic_dve = -gm_f;
+        const double dic_dvb = (gm_f - gm_r) * oef - t_tran * inv_var_;
+        const double dic_dvc = gm_r * oef + t_tran * inv_vaf_;
+        const double dic_dve = -gm_f * oef + t_tran * inv_var_;
         const double dib_dvb = gd_ib_f + gd_ib_r, dib_dvc = -gd_ib_r, dib_dve = -gd_ib_f;
         const double die_dvb = -(dic_dvb + dib_dvb);
         const double die_dvc = -(dic_dvc + dib_dvc);
@@ -400,7 +421,10 @@ public:
         const double i_be = is_ / af_ * (std::exp(arg_be) - 1.0);
         const double arg_bc = safe_exp_arg(vbc_lim / (nr_ * vt_));
         const double i_bc = is_ / ar_ * (std::exp(arg_bc) - 1.0);
-        const double ic_lim = sgn * (af_ * i_be - i_bc);
+        // Early factor at the clamped point (the linearization the load
+        // just used; Vaf/Var = 0 leaves ic_lim untouched).
+        const double oef = 1.0 - vbc_lim * inv_vaf_ - vbe_lim * inv_var_;
+        const double ic_lim = sgn * (af_ * i_be - i_bc) * oef;
         st[kIPrev] = st[kICur];
         st[kICur] = ic_lim;
         st[kVbePrev] = vbe_lim;
@@ -420,10 +444,11 @@ public:
     }
 
     // .model name NPN|PNP (Is= Bf= Br= Nf= Nr= Tnom= ...). M4a implements
-    // Is, Bf, Br, Nf, Nr, Tnom; the Gummel-Poon params (Vaf, Var, Ikf,
-    // Ikr, Cje, Cjc, Mje, Mjc, Vje, Vjc, Tf, Tr, Xti, Eg, Kf, Af, ...) are
-    // accepted but not implemented - they land with M4b (junction caps) or
-    // M5 (temp model, noise, Early effect).
+    // Is, Bf, Br, Nf, Nr, Tnom; M4b adds Cje/Cjc/Mje/Mjc/Vje/Vjc/Fc; the
+    // Early voltages Vaf/Var are implemented (the SPICE3 base-charge
+    // form, no roll-off); the remaining Gummel-Poon params (Ikf, Ikr,
+    // Tf, Tr, Xti, Eg, Kf, Af, ...) are accepted but not implemented -
+    // they land with M5 (temp model, noise, diffusion charge).
     ws::core::Status apply_model(const ModelDef& model) override {
         if (model.type != "npn" && model.type != "pnp") {
             return spice_fail(dev_diag(
@@ -436,6 +461,7 @@ public:
         // ngspice defaults: Is=1e-16, Bf=100, Br=1, Nf=1, Nr=1, Tnom=27,
         // Cje=0, Cjc=0 (no caps), Mje=0.5, Mjc=0.5, Vje=0.75, Vjc=0.75, Fc=0.5.
         double is_val = 1e-16, bf = 100.0, br = 1.0, nf = 1.0, nr = 1.0, tnom = 27.0;
+        double vaf_val = 0.0, var_val = 0.0;
         double cje_val = 0.0, cjc_val = 0.0, mje_val = 0.5, mjc_val = 0.5;
         double vje_val = 0.75, vjc_val = 0.75, fc_val = 0.5;
         const auto& toks = model.params;
@@ -478,6 +504,8 @@ public:
             else if (key == "nf") nf = v;
             else if (key == "nr") nr = v;
             else if (key == "tnom") tnom = v;
+            else if (key == "vaf") vaf_val = v;
+            else if (key == "var") var_val = v;
             else if (key == "cje") cje_val = v;
             else if (key == "cjc") cjc_val = v;
             else if (key == "mje") mje_val = v;
@@ -485,15 +513,15 @@ public:
             else if (key == "vje") vje_val = v;
             else if (key == "vjc") vjc_val = v;
             else if (key == "fc") fc_val = v;
-            // Accepted but not implemented in M4b:
-            else if (key == "vaf" || key == "var" || key == "ikf" || key == "ikr" ||
+            // Accepted but not implemented (M5: temp model, noise,
+            // diffusion charge, parasitic resistances, high-current
+            // roll-off):
+            else if (key == "ikf" || key == "ikr" ||
                      key == "tf" || key == "tr" ||
                      key == "xti" || key == "eg" || key == "kf" || key == "af" ||
                      key == "pe" || key == "pc" || key == "ise" ||
                      key == "isc" || key == "ne" || key == "nc" || key == "rb" ||
                      key == "rc" || key == "re") {
-                // Gummel-Poon refinements - land M4c/M5 (Tf/Tr diffusion charge,
-                // Early effect, temp model, noise, parasitic resistances).
             } else {
                 return spice_fail(dev_diag(
                     ErrorKind::Semantic, "spice.semantic.model_param",
@@ -517,9 +545,22 @@ public:
                 ErrorKind::Semantic, "spice.semantic.q_n",
                 "model '" + model.name.text + "' needs Nf > 0 and Nr > 0", model.loc));
         }
+        // Early voltages: 0 (the default) disables the term; negative
+        // values would flip the output-conductance sign - reject loudly.
+        if (!(vaf_val >= 0.0) || !std::isfinite(vaf_val) ||
+            !(var_val >= 0.0) || !std::isfinite(var_val)) {
+            return spice_fail(dev_diag(
+                ErrorKind::Semantic, "spice.semantic.q_early",
+                "model '" + model.name.text + "' needs Vaf >= 0 and Var >= 0"
+                " (0 disables the Early effect)",
+                model.loc));
+        }
         is_ = is_val;
         bf_ = bf; br_ = br;
         nf_ = nf; nr_ = nr;
+        vaf_ = vaf_val; var_ = var_val;
+        inv_vaf_ = (vaf_ > 0.0) ? 1.0 / vaf_ : 0.0;
+        inv_var_ = (var_ > 0.0) ? 1.0 / var_ : 0.0;
         af_ = bf / (bf + 1.0);
         ar_ = br / (br + 1.0);
         vt_ = (tnom + 273.15) * kVtPerK;
@@ -679,6 +720,12 @@ private:
     double vt_ = 0.02585;
     double vcrit_be_ = 0.7;
     double vcrit_bc_ = 0.7;
+    // Early voltages (Vaf forward, Var reverse; 0 = off, the default).
+    // The reciprocal is what the stamp multiplies by, precomputed so the
+    // no-Early path costs one 1.0 multiply and two 0.0 adds - with both
+    // off, oef == 1.0 exactly and the stamp is byte-identical to M4a.
+    double vaf_ = 0.0, var_ = 0.0;
+    double inv_vaf_ = 0.0, inv_var_ = 0.0;
     // M4b: junction cap params (Cje/Cjc > 0 enables the companions)
     double cje_ = 0.0, cjc_ = 0.0;
     double mje_ = 0.5, mjc_ = 0.5;
