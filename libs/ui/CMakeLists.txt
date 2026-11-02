@@ -211,6 +211,19 @@ if(TARGET test_ui_painters)
   target_include_directories(test_ui_painters PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
 
+# The P4 motion suite (the ui-skin plan): the one helper, the four
+# travelers and the tint bracket - the gui archive + the r2d stub.
+ws_add_test(ui_motion
+  SOURCES tests/test_ui_motion.cpp
+          tests/ui_gui_r2d_stub.cpp
+          src/text/font.cpp
+          src/text/stb_impl.cpp
+  LINK ws::ui_gui
+  DEPENDS stb)
+if(TARGET test_ui_motion)
+  target_include_directories(test_ui_motion PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+
 # --- Shader workflow targets (opt-in; the default build is unchanged) ------
 # The committed spirv.h stays the build input (no shader compiler needed);
 # these targets make staleness visible and regeneration explicit. The flags

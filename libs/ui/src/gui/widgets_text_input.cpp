@@ -23,8 +23,9 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
                 int capacity, float width, bool disabled) {
     const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
     TextInputState& edit = gui.persistent_state<TextInputState>(row.id);
-    const TextInputResult result = text_input_behavior(
+    TextInputResult result = text_input_behavior(
         gui, row.id, row.rect, buf, capacity, edit, theme, disabled);
+    fold_hover_t(gui, row.id, result, theme);  // P4: the face traveler
     paint(theme, &WidgetPainters::text_input, &text_input_draw, row.rect,
           result, theme, label, buf, capacity);
     return result.edited;
@@ -295,7 +296,7 @@ void text_input_draw(const Rect& rect, const TextInputResult& result,
     ring_draw(result.focused, rect, theme);
     const float dim_by = dim_factor(result.state, theme);
     // The field reads held while a press owns it: the plain ladder.
-    const std::uint32_t face = control_face(result.state, theme);
+    const std::uint32_t face = control_face_of(result, theme);
     r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
                            theme.corner_radius, face);
 

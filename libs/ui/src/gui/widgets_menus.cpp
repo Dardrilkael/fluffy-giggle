@@ -703,7 +703,7 @@ void menu_item_draw(const Rect& rect, const MenuItemPaint& paint,
         } else if (item.kind == MenuItemKind::check) {
             r2d::draw_rounded_quad(rect.x, rect.y, gh, gh,
                                    theme.corner_radius,
-                                   control_face(paint.state, theme));
+                                   control_face_of(paint, theme));
             if (item.checked) {
                 const float inset =
                     std::max(theme.check_inset, theme.corner_radius);
@@ -716,7 +716,7 @@ void menu_item_draw(const Rect& rect, const MenuItemPaint& paint,
             }
         } else if (item.kind == MenuItemKind::radio) {
             r2d::draw_rounded_quad(rect.x, rect.y, gh, gh, gh * 0.5f,
-                                   control_face(paint.state, theme));
+                                   control_face_of(paint, theme));
             if (item.checked) {
                 const float dot = gh - 2.0f * theme.check_inset;
                 if (dot > 0.0f) {

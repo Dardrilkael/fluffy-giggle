@@ -64,6 +64,20 @@ void draw_rounded_quad(float, float, float, float, float, std::uint32_t,
     gui_test::stub.rounded++;
 }
 
+// The tint bracket: the stub records the push/pop pairing and the
+// most recent tint so the motion suite can assert the overlay fades;
+// it does not multiply (the stub records counts and a few lasts, not
+// every color - the real multiply is the renderer's, tested by its
+// own suite).
+void push_tint(std::uint32_t tint) {
+    gui_test::stub.tint_pushes++;
+    gui_test::stub.last_tint = tint;
+}
+
+void pop_tint() {
+    gui_test::stub.tint_pops++;
+}
+
 // The canvas layer's tessellation sink lands here (Renderer2DCanvas's
 // R2DSink forwards every quad through this seam). The stub records the
 // call so canvas-via-r2d tests can assert the quad count; the test

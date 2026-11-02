@@ -33,7 +33,12 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
         // the lock, and the selection below cannot move (a dead row
         // reports no click, holds no focus for the keys).
         const WidgetId tab_id = gui.ids().id("tab");
-        const TabResult result = tab_behavior(gui, tab_id, rect, disabled);
+        TabResult result = tab_behavior(gui, tab_id, rect, disabled);
+        fold_hover_t(gui, tab_id, result, theme);  // P4: the face traveler
+        // P4: the accent traveler - the selected tab's underline fades
+        // in under the tab's own id.
+        result.accent_t = gui.animate_toward(tab_id, i == active ? 1.0f : 0.0f,
+                                             motion_duration(theme));
         paint(theme, &WidgetPainters::tab, &tab_draw, rect, result, theme,
               tabs != nullptr ? tabs[i] : nullptr, i == active);
         // A full click or the focused tab's Enter/Space moves the
@@ -94,6 +99,13 @@ void tab_draw(const Rect& rect, const TabResult& result,
         r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
                                theme.corner_radius,
                                theme.control_pressed);
+    } else if (result.state == WidgetState::Hovered && result.hover_t >= 0.0f) {
+        // P4: an idle tab wears nothing, so the hover face fades IN
+        // (alpha) rather than blending from another face.
+        r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                               theme.corner_radius,
+                               fade_alpha(theme.control_hovered,
+                                          result.hover_t));
     } else if (result.state == WidgetState::Hovered) {
         r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
                                theme.corner_radius,
@@ -109,8 +121,12 @@ void tab_draw(const Rect& rect, const TabResult& result,
     // the selected tab wears, hover and press included: the selection
     // never blinks out from under the pointer.
     if (selected) {
+        // P4: the underline fades in on the accent traveler (full
+        // strength when no animation speaks).
+        const float at =
+            result.accent_t >= 0.0f ? result.accent_t : 1.0f;
         r2d::draw_quad(rect.x, rect.y + rect.height - 2.0f, rect.width,
-                       2.0f, dim(theme.control_on, dim_by));
+                       2.0f, fade_alpha(dim(theme.control_on, dim_by), at));
     }
 
     // The tab's label, centered like a button's: fitted to the tab

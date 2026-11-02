@@ -73,6 +73,13 @@ struct WidgetPaint {
     WidgetState state = WidgetState::Disabled;
     bool focused = false;
     HitTest hit{};
+    // P4's face-blend traveler: how far the row's resting face has
+    // blended toward its hover face, [0, 1]. -1 (the default) means "no
+    // animation spoke" - the look snaps to the state's own face, the
+    // exact pre-P4 behavior; hand-built results and
+    // animation-disabled themes both land there. The behavior folds it
+    // from animate_toward; a custom painter reads it to blend its own.
+    float hover_t = -1.0f;
 };
 
 // A push button: true on a full click inside it (press and release over
@@ -205,6 +212,13 @@ bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
 // `value`; the draw takes the (already flipped) value as `on`.
 struct ToggleSwitchResult : WidgetPaint {
     bool toggled = false;  // `value` flipped this frame (click or key)
+    // P4's knob traveler: the knob's position along its travel, [0, 1]
+    // (0 = the off end, 1 = the on end). -1 (the default) = "no
+    // animation spoke" - the knob snaps to `on`'s end, the exact
+    // pre-P4 behavior. The composed widget folds it from
+    // animate_toward (the behavior stays theme-free); a custom painter
+    // reads it to travel its own knob.
+    float travel = -1.0f;
 };
 
 ToggleSwitchResult toggle_switch_behavior(GuiContext& gui, WidgetId id,
@@ -503,6 +517,12 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
 // never writes, like selectable's.
 struct TabResult : WidgetPaint {
     bool clicked = false;  // a full click or the focused tab's Enter/Space
+    // P4's accent traveler: the selected tab's accent underline fade,
+    // [0, 1]. -1 (the default) = "no animation spoke" - the underline
+    // draws at full strength, the exact pre-P4 behavior. The composed
+    // strip folds it from animate_toward under the tab's own id; a
+    // custom painter reads it to fade its own selection mark.
+    float accent_t = -1.0f;
 };
 
 TabResult tab_behavior(GuiContext& gui, WidgetId id, const Rect& rect,

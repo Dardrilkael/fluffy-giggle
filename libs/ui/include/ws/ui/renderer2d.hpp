@@ -163,6 +163,20 @@ void pop_clip();
 // contract as push_clip.
 void push_clip_escape(float x, float y, float width, float height);
 
+// The TINT BRACKET (the ui-skin plan's P4): pushes a packed 0xRRGGBBAA
+// color that MULTIPLIES every draw recorded until the matching
+// pop_tint() - per channel, out.c = c * tint.c / 255, applied at record
+// time on the CPU (no shader change, and headless stubs see the same
+// calls). 0xFFFFFFFF is the identity; a white tint with a partial alpha
+// is a pure fade (only the alpha channel scales), which is how the
+// gui's overlay scopes fade their whole window in - frame, children and
+// all, one bracket around the scope. Depth cap 4 with the usual
+// balanced-overflow degrade (a push past the cap tints nothing, warned
+// once); pop_tint() with nothing pushed is a no-op; the stack never
+// leaks across frames (it empties with the batch's frame reset).
+void push_tint(std::uint32_t tint);
+void pop_tint();
+
 // Top-left anchored quad; rotation pivots the center (positive = clockwise,
 // radians). Flat colors pass texture = {}.
 void draw_quad(float x, float y, float w, float h, std::uint32_t color,

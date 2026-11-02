@@ -117,8 +117,9 @@ bool collapsing_header(GuiContext& gui, LayoutCursor& layout,
                        bool& open, float width, bool disabled) {
     // Fill-width: a header wants its container's line.
     const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
-    const CollapsingHeaderResult result =
+    CollapsingHeaderResult result =
         collapsing_header_behavior(gui, row.id, row.rect, open, disabled);
+    fold_hover_t(gui, row.id, result, theme);  // P4: the face traveler
     paint(theme, &WidgetPainters::collapsing_header,
           &collapsing_header_draw, row.rect, result, theme, label, open);
     // The answer is the state AFTER the flip: the caller's `if` places
@@ -185,8 +186,9 @@ bool selectable(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
                const char* label, bool selected, float width, bool disabled) {
     // Fill-width: list rows want their container's line.
     const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
-    const SelectableResult result =
+    SelectableResult result =
         selectable_behavior(gui, row.id, row.rect, disabled);
+    fold_hover_t(gui, row.id, result, theme);  // P4: the face traveler
     paint(theme, &WidgetPainters::selectable, &selectable_draw,
           row.rect, result, theme, label, selected);
     return result.clicked;
@@ -215,7 +217,7 @@ void selectable_draw(const Rect& rect, const SelectableResult& result,
 
     // The bare-list face: an unselected, unhovered row draws nothing at
     // all - hover, press and the disabled scope take the usual faces.
-    if (const auto face = list_face(result.state, theme)) {
+    if (const auto face = list_face_of(result, theme)) {
         r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
                                theme.corner_radius, *face);
     }

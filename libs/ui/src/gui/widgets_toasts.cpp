@@ -204,7 +204,16 @@ int draw_toasts(GuiContext& gui, const ChromeTheme& theme, Toasts& toasts,
         // panel's FULL height outside the content clip - so the escape
         // pair opens at the bounds, the chrome and band paint inside
         // it (toast_draw, the split look half), and the intersecting
-        // content pair narrows the rows.
+        // content pair narrows the rows. P4: the fade-in bracket rides
+        // the toast's OWN age clock (a fresh push starts at 0), one
+        // tint over chrome and content alike - INSTANT when the
+        // theme's motion is off.
+        const float fade =
+            theme.anim_enabled
+                ? std::min(1.0f, s.age / std::max(theme.anim_duration,
+                                                  0.0001f))
+                : 1.0f;
+        r2d::push_tint(fade_tint(fade));
         r2d::push_clip_escape(bounds.x, bounds.y, bounds.width, bounds.height);
         gui.push_hit_clip_escape(bounds);
         paint(theme, &WidgetPainters::toast, &toast_draw, bounds,
@@ -281,6 +290,7 @@ int draw_toasts(GuiContext& gui, const ChromeTheme& theme, Toasts& toasts,
         layout.end_panel();
         gui.pop_hit_clip();  // the escape pair, opened at the bounds
         r2d::pop_clip();
+        r2d::pop_tint();     // the fade bracket
     }
     gui.end_layer();
     return fired;

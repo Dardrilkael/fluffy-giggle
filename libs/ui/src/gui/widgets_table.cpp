@@ -74,7 +74,7 @@ void table_row_draw(const Rect& row_rect, const TableRowPaint& paint,
 
     // The bare-list face - selectable's look, no idle rung: an
     // unhovered, unselected row is text on the parent's chrome.
-    if (const auto face = list_face(paint.state, theme)) {
+    if (const auto face = list_face_of(paint, theme)) {
         r2d::draw_rounded_quad(row_rect.x, row_rect.y, row_rect.width,
                                row_rect.height, theme.corner_radius, *face);
     }

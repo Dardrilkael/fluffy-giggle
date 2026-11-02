@@ -43,6 +43,14 @@ inline void paint(const ChromeTheme& theme, Row WidgetPainters::*row,
     }
 }
 
+// --- P4's motion spelling ----------------------------------------------------
+// The duration a traveler runs: the theme's one knob, gated by its own
+// switch - 0 (INSTANT) whenever animation is off, so every traveler
+// below collapses to the exact pre-P4 value by construction.
+inline float motion_duration(const ChromeTheme& theme) {
+    return theme.anim_enabled ? theme.anim_duration : 0.0f;
+}
+
 // Where a label's line box starts vertically: the font's line height
 // centered on the row (draw_text's y is the box top, not a baseline), or
 // (fontless) half the row - the bar centering the bar branch does inline.
@@ -256,6 +264,92 @@ inline std::optional<std::uint32_t> list_face(WidgetState state,
     return std::nullopt;
 }
 
+// The channel-wise blend of two packed colors at t in [0, 1]: exact at
+// both ends (t = 0 answers a byte-for-byte, t = 1 answers b), so the
+// blend never shifts the instant look.
+inline std::uint32_t mix_colors(std::uint32_t a, std::uint32_t b, float t) {
+    if (t <= 0.0f) {
+        return a;
+    }
+    if (t >= 1.0f) {
+        return b;
+    }
+    const auto channel = [](std::uint32_t ca, std::uint32_t cb, float k) {
+        const float blended =
+            static_cast<float>(ca) +
+            (static_cast<float>(cb) - static_cast<float>(ca)) * k;
+        return static_cast<std::uint32_t>(blended + 0.5f);
+    };
+    const std::uint32_t r = channel(a >> 24, b >> 24, t);
+    const std::uint32_t g = channel((a >> 16) & 0xFFu, (b >> 16) & 0xFFu, t);
+    const std::uint32_t bl = channel((a >> 8) & 0xFFu, (b >> 8) & 0xFFu, t);
+    const std::uint32_t al = channel(a & 0xFFu, b & 0xFFu, t);
+    return (r << 24) | (g << 16) | (bl << 8) | al;
+}
+
+// The alpha-only fade of a packed color at t in [0, 1]: exact at both
+// ends, the channel the "face fades IN from transparent" travelers use
+// (a bare-list row blends nothing - its hover face arrives).
+inline std::uint32_t fade_alpha(std::uint32_t color, float t) {
+    if (t <= 0.0f) {
+        return color & 0xFFFFFF00u;  // fully transparent, hue kept
+    }
+    if (t >= 1.0f) {
+        return color;
+    }
+    const float a = static_cast<float>(color & 0xFFu) * t;
+    return (color & 0xFFFFFF00u) | static_cast<std::uint32_t>(a + 0.5f);
+}
+
+// The overlay scopes' fade bookkeeping (P4): one TYPE for the side
+// table, shared by the open and closed branches of every overlay scope
+// (two same-named local structs would be two distinct types - two
+// tables - and the closed branch's re-arm would never reach the open
+// branch's state).
+struct OverlayFade {
+    bool was_open = false;
+};
+
+// The overlay fade's tint: white with the alpha scaled by t - a pure
+// fade, exact at both ends (t = 1 is the identity tint, t = 0 hides
+// everything - the traveler's first frame draws nothing, the fade-in).
+inline std::uint32_t fade_tint(float t) {
+    if (t <= 0.0f) {
+        return 0xFFFFFF00u;
+    }
+    if (t >= 1.0f) {
+        return 0xFFFFFFFFu;
+    }
+    const std::uint32_t a = static_cast<std::uint32_t>(t * 255.0f + 0.5f);
+    return 0xFFFFFF00u | a;
+}
+
+// The control face a row wears, P4's blend included: the plain ladder
+// when no animation speaks (hover_t < 0 - hand-built paints, disabled
+// themes), the resting face blended toward its hover face otherwise.
+// Pressed and dead stay INSTANT whatever the traveler says - latency
+// beats smoothness on the states that confirm a touch.
+inline std::uint32_t control_face_of(const WidgetPaint& paint,
+                                     const ChromeTheme& theme) {
+    if (paint.hover_t < 0.0f || paint.state == WidgetState::Pressed ||
+        paint.state == WidgetState::Disabled) {
+        return control_face(paint.state, theme);
+    }
+    return mix_colors(theme.control_bg, theme.control_hovered, paint.hover_t);
+}
+
+// The bare-list face a row wears, P4's fade included: nothing at rest
+// (as ever), the hover face fading IN on the traveler when animation
+// speaks. Pressed and dead stay instant; the disabled scope's dim still
+// rides the caller's dim_by.
+inline std::optional<std::uint32_t> list_face_of(const WidgetPaint& paint,
+                                                 const ChromeTheme& theme) {
+    if (paint.hover_t >= 0.0f && paint.state == WidgetState::Hovered) {
+        return fade_alpha(theme.control_hovered, paint.hover_t);
+    }
+    return list_face(paint.state, theme);
+}
+
 // One label draw for every row: the fitted text through the font's line
 // box, or (fontless) the v1 bar at the fitted advance - vertically
 // centered like label_top, at the caller's x (centered, left or right
@@ -304,10 +398,12 @@ inline RowLayout begin_widget_row(GuiContext& gui, LayoutCursor& layout,
 // The behavior half's opening fold: the focusable registration (unless
 // dead - Tab walks past), state()'s one hit-test, and the focus read the
 // draw's ring keys on - taken after state(), because a press's focus
-// claim latches inside it.
+// claim latches inside it. Deliberately theme-free (the behavior
+// contract): P4's face traveler folds in the COMPOSED widget, which
+// owns the theme - see fold_hover_t below.
 inline WidgetPaint begin_widget_paint(GuiContext& gui, WidgetId id,
                                       const Rect& rect, bool disabled,
-                                      const HitShape& hit_shape) {
+                                      const HitShape& hit_shape = {}) {
     if (!disabled) {
         gui.register_focusable(id);
     }
@@ -317,6 +413,20 @@ inline WidgetPaint begin_widget_paint(GuiContext& gui, WidgetId id,
     paint.hit = fold.hit;
     paint.focused = gui.is_focused(id);
     return paint;
+}
+
+// P4's face traveler, the composed widget's fold: the hover blend value
+// under the behavior's id, INSTANT (0 or 1 exactly) whenever the theme's
+// motion is off. A distinct side-table type per traveler, so a widget's
+// own state and its hover blend never collide under one id.
+inline void fold_hover_t(GuiContext& gui, WidgetId id, WidgetPaint& paint,
+                         const ChromeTheme& theme) {
+    paint.hover_t = gui.animate_toward(
+        id,
+        paint.state == WidgetState::Hovered || paint.state == WidgetState::Pressed
+            ? 1.0f
+            : 0.0f,
+        motion_duration(theme));
 }
 
 }  // namespace ws::ui::gui

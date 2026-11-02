@@ -15,6 +15,7 @@
 #include "text/atlas_packer.h"  // internal: pure-CPU atlas packer (src/ on the test include path)
 #include "render/batch_core.h"     // internal: pure-CPU batch builder (same path)
 #include "text/font.h"           // internal: pure-CPU font bake + utf8 decoder (same path)
+#include "gui/widgets_detail.hpp"  // internal: the P4 traveler folds (the pair tests spell them)
 #include "render/renderer2d.h"     // internal: command recording + sort/replay (same path)
 #include <ws/input/input.hpp>
 #include <ws/ui/app.hpp>
@@ -11884,13 +11885,19 @@ TEST_CASE("the tab strip pair records the widget's output byte for byte") {
     const auto split_strip = [&](GuiContext& gui, LayoutCursor& layout,
                                  int& current) {
         // The strip's own spelling: the id scope ladder and the flush
-        // pitch are the caller's half, one behavior+draw per tab.
+        // pitch are the caller's half, one behavior+draw per tab - and
+        // P4's two travelers fold exactly as the composed strip does
+        // (the face blend and the accent fade), or the pair would
+        // record different bytes by construction.
         gui.ids().push("strip");
         for (int i = 0; i < 3; ++i) {
             gui.ids().push(i);
             const Rect rect = layout.next(80.0f, theme.control_height);
             const WidgetId tab_id = gui.ids().id("tab");
-            const TabResult result = tab_behavior(gui, tab_id, rect);
+            TabResult result = tab_behavior(gui, tab_id, rect);
+            fold_hover_t(gui, tab_id, result, theme);
+            result.accent_t = gui.animate_toward(
+                tab_id, i == current ? 1.0f : 0.0f, motion_duration(theme));
             tab_draw(rect, result, theme, tabs[i], i == current);
             if (result.clicked && i != current) {
                 current = i;

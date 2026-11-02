@@ -18,8 +18,9 @@ bool combo(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
            int& selected, bool& open, float width, bool disabled) {
     const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
     const bool empty = count <= 0 || items == nullptr;
-    const ComboResult result =
+    ComboResult result =
         combo_behavior(gui, row.id, row.rect, open, empty, disabled);
+    fold_hover_t(gui, row.id, result, theme);  // P4: the face traveler
     paint(theme, &WidgetPainters::combo, &combo_draw, row.rect, result,
           theme, label, items, count, selected, open);
 
@@ -106,7 +107,7 @@ void combo_draw(const Rect& rect, const ComboResult& result,
     const float dim_by = dim_factor(result.state, theme);
 
     // The row: the faces a button wears, rounded by the theme.
-    const std::uint32_t face = control_face(result.state, theme);
+    const std::uint32_t face = control_face_of(result, theme);
     r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
                            theme.corner_radius, face);
 

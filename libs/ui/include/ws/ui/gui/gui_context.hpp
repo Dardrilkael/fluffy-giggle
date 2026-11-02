@@ -164,6 +164,25 @@ public:
     // a Tab move keeps the focus it earned.
     void end_frame();
 
+    // --- motion: the one helper, the one want (P4) -------------------------
+    // animate_toward moves a persistent float under `id` toward `target`
+    // on the frame clock (dt_seconds from the frame input - the injected
+    // seam, so tests drive it deterministically): an exponential settle
+    // that reaches 95% of the way at `duration` seconds and snaps exact
+    // at the settle. duration <= 0 is INSTANT - the value jumps to the
+    // target and answers it, byte-identical to a no-animation build (the
+    // travelers pass the theme's motion_duration, which lands here as 0
+    // whenever anim_enabled is off). One float per (Travel, id) in the
+    // persistent side tables - swept like any other state, bounded by
+    // the same rules. The first call ever starts from 0.0f.
+    float animate_toward(WidgetId id, float target, float duration);
+    // True when some animator is still traveling (moved this frame or
+    // sits unsettled): the app loop's "render at least one more frame"
+    // hint. Advisory by design - the stock loop renders every frame and
+    // nothing breaks when it ignores this; it resets at each begin_frame
+    // and answers for the frame that just ran.
+    [[nodiscard]] bool wants_redraw() const { return redraw_wanted_; }
+
     // --- layer scopes: one layer concept for hit tests AND drawing ---
     // begin_layer opens a stratum: until the matching end_layer, the
     // context hit-tests widgets at `layer`'s precedence and r2d draws
@@ -705,6 +724,9 @@ private:
     // ~2 years of 60 fps frames; a wrap reads as ancient stamps for one
     // window, keeping a few entries one sweep longer - benign.
     std::uint32_t frame_stamp_ = 0;
+    // P4's redraw want: set by any animator that moved or sits
+    // unsettled, read by wants_redraw(), reset at begin_frame.
+    bool redraw_wanted_ = false;
     // The sweep's exemptions, fixed like every gui table: 64 pins with
     // the warn-once degrade past the cap, deduplicated on insert.
     static constexpr int kMaxPinnedIds = 64;

@@ -17,8 +17,8 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             const char* label, float width, r2d::Sprite icon,
             bool disabled) {
     const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
-    const ButtonResult result =
-        button_behavior(gui, row.id, row.rect, disabled);
+    ButtonResult result = button_behavior(gui, row.id, row.rect, disabled);
+    fold_hover_t(gui, row.id, result, theme);  // P4: the face traveler
     paint(theme, &WidgetPainters::button, &button_draw, row.rect,
           result, theme, label, icon);
     return result.activated();
@@ -49,7 +49,7 @@ void button_draw(const Rect& rect, const ButtonResult& result,
     // 1.0 is the identity for the live states.
     const float dim_by = dim_factor(result.state, theme);
 
-    const std::uint32_t face = control_face(result.state, theme);
+    const std::uint32_t face = control_face_of(result, theme);
     r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
                            theme.corner_radius, face);
 
@@ -94,8 +94,9 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     const RowLayout row = begin_widget_row(gui, layout, theme, label,
                                            theme.control_height + gap +
                                                fit.advance);
-    const CheckboxResult result =
+    CheckboxResult result =
         checkbox_behavior(gui, row.id, row.rect, value, disabled);
+    fold_hover_t(gui, row.id, result, theme);  // P4: the face traveler
     paint(theme, &WidgetPainters::checkbox, &checkbox_draw, row.rect,
           result, theme, label, value);
     return result.toggled;
@@ -131,7 +132,7 @@ void checkbox_draw(const Rect& rect, const CheckboxResult& result,
 
     // The box: a control_height square with the same faces a button
     // wears, corners rounded by the theme.
-    const std::uint32_t face = control_face(result.state, theme);
+    const std::uint32_t face = control_face_of(result, theme);
     r2d::draw_rounded_quad(rect.x, rect.y, box, box, theme.corner_radius, face);
 
     // The check: the accent fill, inset past the box's corners so a
@@ -167,8 +168,9 @@ bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     const RowLayout row = begin_widget_row(gui, layout, theme, label,
                                            theme.control_height + gap +
                                                fit.advance);
-    const RadioResult result =
+    RadioResult result =
         radio_behavior(gui, row.id, row.rect, value, this_option, disabled);
+    fold_hover_t(gui, row.id, result, theme);  // P4: the face traveler
     paint(theme, &WidgetPainters::radio, &radio_draw, row.rect, result,
           theme, label, value == this_option);
     return result.moved;
@@ -207,7 +209,7 @@ void radio_draw(const Rect& rect, const RadioResult& result,
     // The dot: a control_height circle - the radius asks for half the
     // box, exactly what the draw clamps to - with the faces a button
     // wears.
-    const std::uint32_t face = control_face(result.state, theme);
+    const std::uint32_t face = control_face_of(result, theme);
     r2d::draw_rounded_quad(rect.x, rect.y, box, box, box * 0.5f, face);
 
     // The selection: an accent circle inset by check_inset alone - the
@@ -243,8 +245,13 @@ bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
         fit_text(label, -1.0f, theme, scratch, sizeof(scratch));
     const RowLayout row =
         begin_widget_row(gui, layout, theme, label, track_w + gap + fit.advance);
-    const ToggleSwitchResult result =
+    ToggleSwitchResult result =
         toggle_switch_behavior(gui, row.id, row.rect, value, disabled);
+    fold_hover_t(gui, row.id, result, theme);  // P4: the face traveler
+    // P4: the knob traveler - off's end to on's end under the same id
+    // (a distinct side-table type; no collision with the face blend).
+    result.travel = gui.animate_toward(row.id, value ? 1.0f : 0.0f,
+                                       motion_duration(theme));
     paint(theme, &WidgetPainters::toggle_switch, &toggle_switch_draw,
           row.rect, result, theme, label, value);
     return result.toggled;
@@ -285,7 +292,7 @@ void toggle_switch_draw(const Rect& rect, const ToggleSwitchResult& result,
     // while on - dimmed under the disabled scope rather than deadened,
     // so the state stays readable. The radius asks for half the height
     // and clamps to exactly that: the full pill.
-    std::uint32_t face = control_face(result.state, theme);
+    std::uint32_t face = control_face_of(result, theme);
     if (on) {
         face = dim(theme.control_on, dim_by);
     }
@@ -293,14 +300,19 @@ void toggle_switch_draw(const Rect& rect, const ToggleSwitchResult& result,
 
     // The knob: a near-white circle (the text color - the bright head
     // reads on both faces) filling the pill's height minus the check
-    // inset, SNAPPED to its end - off left, on right. No travel
-    // animation in v1: the frame clock's first consumer, the text
-    // input's caret blink, spends the tick on typing instead.
+    // inset, traveling between its ends on the result's P4 traveler
+    // (snapped when no animation speaks).
     const float knob = box - 2.0f * theme.check_inset;
     if (knob > 0.0f) {
-        const float x =
-            on ? rect.x + track_w - theme.check_inset - knob
-               : rect.x + theme.check_inset;
+        // P4: the knob travels on the result's traveler - snapped to
+        // its end when no animation speaks (-1) or motion is off (the
+        // traveler reads exactly 0 or 1 then, and mix_colors is exact
+        // at its ends).
+        const float at = result.travel >= 0.0f
+                             ? result.travel
+                             : (on ? 1.0f : 0.0f);
+        const float span = track_w - 2.0f * theme.check_inset - knob;
+        const float x = rect.x + theme.check_inset + at * span;
         r2d::draw_rounded_quad(x, rect.y + theme.check_inset, knob, knob,
                                knob * 0.5f, dim(theme.text, dim_by));
     }

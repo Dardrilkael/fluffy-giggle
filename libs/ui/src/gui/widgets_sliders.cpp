@@ -22,9 +22,10 @@ bool slider_float(GuiContext& gui, LayoutCursor& layout,
                   float min, float max, float width, bool disabled) {
     // The float keyboard step: 1% of the range per arrow press.
     const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
-    const SliderResult result =
+    SliderResult result =
         slider_behavior(gui, row.id, row.rect, value, min, max,
                         (max - min) / 100.0f, disabled);
+    fold_hover_t(gui, row.id, result, theme);  // P4: the face traveler
     paint(theme, &WidgetPainters::slider, &slider_draw, row.rect,
           result, theme, label, value, min, max);
     return result.changed;
@@ -36,9 +37,10 @@ bool slider_int(GuiContext& gui, LayoutCursor& layout,
     float v = static_cast<float>(value);
     // The int keyboard step: 1 per arrow press.
     const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
-    const SliderResult result =
+    SliderResult result =
         slider_behavior(gui, row.id, row.rect, v, static_cast<float>(min),
                         static_cast<float>(max), 1.0f, disabled);
+    fold_hover_t(gui, row.id, result, theme);  // P4: the face traveler
     paint(theme, &WidgetPainters::slider, &slider_draw, row.rect, result,
           theme, label, v, static_cast<float>(min),
                 static_cast<float>(max));
@@ -106,7 +108,7 @@ void slider_draw(const Rect& rect, const SliderResult& result,
                  float min, float max) {
     // The rail: a half-height strip down the middle of the row, wearing
     // the same faces a button wears, ends rounded by the theme.
-    const std::uint32_t face = control_face(result.state, theme);
+    const std::uint32_t face = control_face_of(result, theme);
     const float rail_height = rect.height * 0.5f;
     const float rail_y = rect.y + (rect.height - rail_height) * 0.5f;
 
@@ -171,9 +173,10 @@ bool drag_float(GuiContext& gui, LayoutCursor& layout,
                float min, float max, float speed, float width,
                bool disabled) {
     const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
-    const DragFloatResult result =
+    DragFloatResult result =
         drag_float_behavior(gui, row.id, row.rect, value, min, max, speed,
                             disabled);
+    fold_hover_t(gui, row.id, result, theme);  // P4: the face traveler
     paint(theme, &WidgetPainters::drag_float, &drag_float_draw, row.rect,
           result, theme, label, value);
     return result.changed;
@@ -259,7 +262,7 @@ void drag_float_draw(const Rect& rect, const DragFloatResult& result,
 
     // The row: the faces a button wears, rounded by the theme - a drag
     // value reads as a control, not a text line.
-    const std::uint32_t face = control_face(result.state, theme);
+    const std::uint32_t face = control_face_of(result, theme);
     r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
                            theme.corner_radius, face);
 

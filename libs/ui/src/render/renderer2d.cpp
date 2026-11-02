@@ -1087,6 +1087,58 @@ Font Renderer2D::publish_baked_font(const font::BakedFont& baked,
     return font;
 }
 
+// --- the tint bracket's stack (the free-function layer's own) ----------
+// A tiny color-multiplication stack: push_tint/pop_tint manage it here,
+// every colored draw call multiplies through tint_apply() on its way to
+// the active renderer, and the frame entries (begin) empty it so a
+// stray pop-less scope cannot leak into the next frame. Depth cap 4
+// with the usual balanced degrade.
+namespace {
+constexpr int kMaxTints = 4;
+std::uint32_t g_tints[kMaxTints] = {};
+int g_tint_depth = 0;
+bool g_tint_overflow_warned = false;
+
+// The per-channel multiply, exact at the identity (255 * c / 255 == c).
+inline std::uint32_t tint_apply(std::uint32_t color) {
+    if (g_tint_depth <= 0) {
+        return color;
+    }
+    const std::uint32_t tint = g_tints[g_tint_depth - 1];
+    if (tint == 0xFFFFFFFFu) {
+        return color;  // the identity fast path: byte-for-byte unchanged
+    }
+    const auto channel = [](std::uint32_t a, std::uint32_t b) {
+        return (a * b + 127u) / 255u;  // rounded, exact at 0 and 255
+    };
+    const std::uint32_t r = channel(color >> 24, tint >> 24);
+    const std::uint32_t g = channel((color >> 16) & 0xFFu,
+                                    (tint >> 16) & 0xFFu);
+    const std::uint32_t b = channel((color >> 8) & 0xFFu,
+                                    (tint >> 8) & 0xFFu);
+    const std::uint32_t a = channel(color & 0xFFu, tint & 0xFFu);
+    return (r << 24) | (g << 16) | (b << 8) | a;
+}
+
+// The vertex-quad form: four float colors scaled by the tint.
+inline void tint_apply_rgba(float (&rgba)[4][4]) {
+    if (g_tint_depth <= 0 || g_tints[g_tint_depth - 1] == 0xFFFFFFFFu) {
+        return;
+    }
+    const std::uint32_t tint = g_tints[g_tint_depth - 1];
+    for (int v = 0; v < 4; ++v) {
+        for (int c = 0; c < 4; ++c) {
+            const std::uint32_t scale = (tint >> (24 - 8 * c)) & 0xFFu;
+            rgba[v][c] = rgba[v][c] * static_cast<float>(scale) / 255.0f;
+        }
+    }
+}
+
+void tint_stack_reset() {
+    g_tint_depth = 0;
+}
+}  // namespace
+
 // --- public free functions ----------------------------------------------------
 
 namespace {
@@ -1112,6 +1164,7 @@ void set_active(Renderer2D* renderer) {
 }
 
 void begin() {
+    tint_stack_reset();
     if (g_active != nullptr) {
         g_active->begin_screen();
     } else {
@@ -1120,6 +1173,7 @@ void begin() {
 }
 
 void begin(const Camera2D& camera) {
+    tint_stack_reset();
     if (g_active != nullptr) {
         g_active->begin(camera);
     } else {
@@ -1128,6 +1182,7 @@ void begin(const Camera2D& camera) {
 }
 
 void begin(const Camera3D& camera) {
+    tint_stack_reset();
     if (g_active != nullptr) {
         g_active->begin(camera);
     } else {
@@ -1175,10 +1230,30 @@ void push_clip_escape(float x, float y, float width, float height) {
     }
 }
 
+void push_tint(std::uint32_t tint) {
+    if (g_tint_depth >= kMaxTints) {
+        if (!g_tint_overflow_warned) {
+            g_tint_overflow_warned = true;
+            ws::core::warn("ui: r2d tint stack clamped at {} - a deeper "
+                           "bracket tints nothing",
+                           kMaxTints);
+        }
+        return;
+    }
+    g_tints[g_tint_depth++] = tint;
+}
+
+void pop_tint() {
+    if (g_tint_depth > 0) {
+        --g_tint_depth;
+    }
+}
+
 void draw_quad(float x, float y, float w, float h, std::uint32_t color,
                Texture texture, float rotation) {
     if (g_active != nullptr) {
-        g_active->draw_quad(x, y, w, h, color, texture, rotation);
+        g_active->draw_quad(x, y, w, h, tint_apply(color), texture,
+                            rotation);
     } else {
         warn_no_app("draw_quad");
     }
@@ -1187,7 +1262,7 @@ void draw_quad(float x, float y, float w, float h, std::uint32_t color,
 void draw_quad(float x, float y, float z, float w, float h,
                std::uint32_t color, Texture texture) {
     if (g_active != nullptr) {
-        g_active->draw_quad(x, y, z, w, h, color, texture);
+        g_active->draw_quad(x, y, z, w, h, tint_apply(color), texture);
     } else {
         warn_no_app("draw_quad");
     }
@@ -1196,7 +1271,7 @@ void draw_quad(float x, float y, float z, float w, float h,
 void draw_line(float x0, float y0, float x1, float y1, float thickness,
                std::uint32_t color) {
     if (g_active != nullptr) {
-        g_active->draw_line(x0, y0, x1, y1, thickness, color);
+        g_active->draw_line(x0, y0, x1, y1, thickness, tint_apply(color));
     } else {
         warn_no_app("draw_line");
     }
@@ -1205,7 +1280,14 @@ void draw_line(float x0, float y0, float x1, float y1, float thickness,
 void draw_vertex_quad(const float (&pos)[4][2], const float (&uv)[4][2],
                       const float (&rgba)[4][4], Texture texture) {
     if (g_active != nullptr) {
-        g_active->draw_vertex_quad(pos, uv, rgba, texture);
+        float tinted[4][4];
+        for (int v = 0; v < 4; ++v) {
+            for (int c = 0; c < 4; ++c) {
+                tinted[v][c] = rgba[v][c];
+            }
+        }
+        tint_apply_rgba(tinted);
+        g_active->draw_vertex_quad(pos, uv, tinted, texture);
     } else {
         warn_no_app("draw_vertex_quad");
     }
@@ -1214,7 +1296,8 @@ void draw_vertex_quad(const float (&pos)[4][2], const float (&uv)[4][2],
 void draw_line(float x0, float y0, float z0, float x1, float y1, float z1,
                float thickness, std::uint32_t color) {
     if (g_active != nullptr) {
-        g_active->draw_line(x0, y0, z0, x1, y1, z1, thickness, color);
+        g_active->draw_line(x0, y0, z0, x1, y1, z1, thickness,
+                            tint_apply(color));
     } else {
         warn_no_app("draw_line");
     }
@@ -1223,7 +1306,8 @@ void draw_line(float x0, float y0, float z0, float x1, float y1, float z1,
 void draw_rounded_quad(float x, float y, float w, float h, float radius,
                        std::uint32_t color, float rotation) {
     if (g_active != nullptr) {
-        g_active->draw_rounded_quad(x, y, w, h, radius, color, rotation);
+        g_active->draw_rounded_quad(x, y, w, h, radius, tint_apply(color),
+                                    rotation);
     } else {
         warn_no_app("draw_rounded_quad");
     }
@@ -1271,7 +1355,8 @@ std::vector<Sprite> load_atlas(std::initializer_list<const char*> paths) {
 void draw_sprite(float x, float y, float w, float h, std::uint32_t color,
                  Sprite sprite, float rotation) {
     if (g_active != nullptr) {
-        g_active->draw_sprite(x, y, w, h, color, sprite, rotation);
+        g_active->draw_sprite(x, y, w, h, tint_apply(color), sprite,
+                              rotation);
     } else {
         warn_no_app("draw_sprite");
     }
@@ -1280,7 +1365,7 @@ void draw_sprite(float x, float y, float w, float h, std::uint32_t color,
 void draw_sprite(float x, float y, float z, float w, float h,
                  std::uint32_t color, Sprite sprite) {
     if (g_active != nullptr) {
-        g_active->draw_sprite(x, y, z, w, h, color, sprite);
+        g_active->draw_sprite(x, y, z, w, h, tint_apply(color), sprite);
     } else {
         warn_no_app("draw_sprite");
     }
@@ -1413,7 +1498,8 @@ std::uint32_t font_bake_pending(Font& font, std::uint32_t batch_cap) {
 float draw_text(float x, float y, const char* utf8_text, const Font& font,
                 std::uint32_t color) {
     if (g_active != nullptr) {
-        return g_active->draw_text(x, y, utf8_text, font, color);
+        return g_active->draw_text(x, y, utf8_text, font,
+                                   tint_apply(color));
     }
     // No app: the draw drops (warned once, like every call here), but the
     // width is still the honest measure - layout code keeps working.

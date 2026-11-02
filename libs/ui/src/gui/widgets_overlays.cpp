@@ -59,6 +59,11 @@ bool begin_popup(GuiContext& gui, LayoutCursor& layout,
                  const ChromeTheme& theme, const char* label,
                  const Rect& anchor, const Rect& bounds, bool& open) {
     if (!open) {
+        // A closed frame re-arms the fade: the NEXT open starts from
+        // nothing again (the state cannot reset while closed - nothing
+        // runs then - so the closed branch does it).
+        gui.persistent_state<OverlayFade>(gui.ids().id(label)).was_open =
+            false;
         return false;
     }
 
@@ -112,6 +117,21 @@ bool begin_popup(GuiContext& gui, LayoutCursor& layout,
     // must draw AND hit-test past its host's hole).
     gui.begin_layer(Layer::popup);
     gui.claim_esc(&open);
+    // P4: the fade-in bracket - one tint over the whole window (frame,
+    // children and all), a fresh open starting from nothing. INSTANT
+    // (the identity tint) whenever the theme's motion is off. A fresh
+    // open resets the traveler itself (the value under this id, not
+    // just a flag): the fade replays from 0 every time the window
+    // reopens. Nothing else lives under a popup scope's own id, so the
+    // clear is surgical.
+    const WidgetId pid = gui.ids().id(label);
+    if (!gui.persistent_state<OverlayFade>(pid).was_open) {
+        gui.clear_persistent_state(pid);  // the traveler restarts
+    }
+    gui.persistent_state<OverlayFade>(pid).was_open = true;
+    const float t =
+        gui.animate_toward(pid, 1.0f, motion_duration(theme));
+    r2d::push_tint(fade_tint(t));
     push_overlay_panel(gui, layout, theme, label, bounds, theme.spacing);
     return open;
 }
@@ -119,11 +139,12 @@ bool begin_popup(GuiContext& gui, LayoutCursor& layout,
 void end_popup(GuiContext& gui, LayoutCursor& layout) {
     // Drop-safe through the layer: a begin_popup that answered false
     // pushed nothing, and this guard keeps a stray end from eating an
-    // outer scope.
+    // outer scope. The fade bracket pops with the scope it wrapped.
     if (gui.current_layer() != Layer::popup) {
         return;
     }
     pop_overlay_panel(gui, layout);
+    r2d::pop_tint();
     gui.end_layer();
 }
 
@@ -178,6 +199,9 @@ bool begin_tooltip(GuiContext& gui, LayoutCursor& layout,
                    const ChromeTheme& theme, const char* label,
                    const Rect& bounds, bool show) {
     if (!show) {
+        // The closed frame re-arms the fade, like a popup's.
+        gui.persistent_state<OverlayFade>(gui.ids().id(label)).was_open =
+            false;
         return false;
     }
 
@@ -187,6 +211,16 @@ bool begin_tooltip(GuiContext& gui, LayoutCursor& layout,
     // claim, and a caller who puts a live widget in one asked for exactly
     // what they get (it claims at the tooltip stratum, unclipped).
     gui.begin_layer(Layer::tooltip);
+    // P4: the fade-in bracket, a popup's own spelling (the fresh-open
+    // reset included).
+    const WidgetId pid = gui.ids().id(label);
+    if (!gui.persistent_state<OverlayFade>(pid).was_open) {
+        gui.clear_persistent_state(pid);  // the traveler restarts
+    }
+    gui.persistent_state<OverlayFade>(pid).was_open = true;
+    const float t =
+        gui.animate_toward(pid, 1.0f, motion_duration(theme));
+    r2d::push_tint(fade_tint(t));
     r2d::push_clip_escape(bounds.x, bounds.y, bounds.width, bounds.height);
     paint(theme, &WidgetPainters::popup_frame, &popup_frame_draw, bounds,
           theme);
@@ -196,13 +230,15 @@ bool begin_tooltip(GuiContext& gui, LayoutCursor& layout,
 }
 
 void end_tooltip(GuiContext& gui, LayoutCursor& layout) {
-    // Drop-safe through the layer, like end_popup.
+    // Drop-safe through the layer, like end_popup. The fade bracket
+    // pops with the scope it wrapped.
     if (gui.current_layer() != Layer::tooltip) {
         return;
     }
     gui.ids().pop();
     layout.end_panel();
     r2d::pop_clip();
+    r2d::pop_tint();
     gui.end_layer();
 }
 

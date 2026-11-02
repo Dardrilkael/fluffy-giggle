@@ -21,6 +21,9 @@ struct StubDraws {
     std::uint32_t layer_sets = 0;    // set_layer
     std::uint32_t last_layer = 0;     // the most recent set_layer value
     std::uint32_t max_layer = 0;      // the highest set_layer value
+    std::uint32_t tint_pushes = 0;   // push_tint (the P4 overlay fades)
+    std::uint32_t tint_pops = 0;     // pop_tint
+    std::uint32_t last_tint = 0xFFFFFFFFu;  // the most recent push_tint color
     float last_text_advance = -1.0f;  // the most recent draw_text return
 
     void reset() { *this = StubDraws{}; }

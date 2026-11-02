@@ -5,6 +5,8 @@
 
 #include <ws/ui/gui/gui_context.hpp>
 
+#include <cmath>
+
 #include <ws/core/log.hpp>
 #include <ws/ui/renderer2d.hpp>  // begin_layer drives r2d::set_layer - the
                                  // "one layer concept" is a real coupling
@@ -134,6 +136,7 @@ void GuiContext::begin_frame(const ws::input::InputFrame& input) {
     esc_claim_count_ = 0;
     escape_consumed_ = false;
     ++frame_stamp_;
+    redraw_wanted_ = false;  // the motion want answers per frame
     focus_into_view_ = focus_into_view_next_;
     focus_into_view_next_ = false;
     focused_rect_known_ = false;
@@ -319,6 +322,38 @@ void GuiContext::end_frame() {
         }
     }
     esc_winner_ = esc_winner;
+}
+
+float GuiContext::animate_toward(WidgetId id, float target,
+                                 float duration) {
+    // The traveler's persistent float - one per (Travel, id), swept and
+    // bounded by the side tables' own rules.
+    struct Travel {
+        float value = 0.0f;
+    };
+    Travel& travel = persistent_state<Travel>(id);
+    if (duration <= 0.0f) {
+        // INSTANT: exactly the value a no-animation build would draw.
+        travel.value = target;
+        return target;
+    }
+    const float dt = input_.dt_seconds;
+    if (dt > 0.0f) {
+        // The exponential settle: k = 3/duration reaches 95% at
+        // `duration` (1 - e^-3 = 0.9502), frame-rate independent.
+        const float step =
+            1.0f - std::exp(-dt * 3.0f / duration);
+        travel.value += (target - travel.value) * step;
+    }
+    if (target - travel.value < 0.0005f &&
+        travel.value - target < 0.0005f) {
+        // The settle snaps exact - a settled traveler never asks for
+        // another frame.
+        travel.value = target;
+    } else {
+        redraw_wanted_ = true;  // still traveling: one more frame owed
+    }
+    return travel.value;
 }
 
 void GuiContext::begin_layer(Layer layer) {
