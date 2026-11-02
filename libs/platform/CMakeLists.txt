@@ -32,7 +32,8 @@ if(platform_sources)
       "${CMAKE_CURRENT_SOURCE_DIR}/src/dialogs_android.cpp"
       "${CMAKE_CURRENT_SOURCE_DIR}/src/clipboard_android.cpp"
       "${CMAKE_CURRENT_SOURCE_DIR}/src/messagebox_android.cpp"
-      "${CMAKE_CURRENT_SOURCE_DIR}/src/single_instance_android.cpp")
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/single_instance_android.cpp"
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/locations_posix.cpp")
   else()
     # Linux/other desktop: the headless halves plus locations_posix.cpp
     # (the XDG env truth), so ws::platform - and everything that links
