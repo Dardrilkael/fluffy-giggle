@@ -11,6 +11,7 @@
 // left for ws::gfx) and flushes that batch inside the render pass.
 
 #include "text/atlas_packer.h"
+#include "text/font.h"  // font::BakedFont (publish_baked_font's parameter)
 #include "render/batch_core.h"
 
 #include <array>
@@ -241,7 +242,15 @@ public:
     // Bakes a font (src/text/font.*, pure CPU) and uploads its glyph pages -
     // the font's OWN pages, never shared with load_atlas. The loaders'
     // failure contract: warn once, return an empty Font.
-    Font load_font(const char* path, float pixel_height);
+    Font load_font(const char* path, float pixel_height,
+                   const FontBakeOptions& options = {});
+    // The same page pipeline over the BUNDLED default face (Inter,
+    // embedded in src/text/default_font_*.cpp - the stock look, no
+    // filesystem). `weight` picks regular or semibold.
+    Font load_default_font(DefaultFontWeight weight, float pixel_height,
+                           const FontBakeOptions& options = {});
+    Font publish_baked_font(const font::BakedFont& baked,
+                            const FontBakeOptions& options);
     // The texture-lifecycle pair (the public header's
     // load_texture_from_memory / destroy_texture route here).
     // from_memory is the in-memory spelling of load_texture; destroy

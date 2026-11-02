@@ -107,6 +107,141 @@ std::vector<std::uint8_t> read_file(const char* path) {
     return data;
 }
 
+// The coverage LUT: a' = 255 * (a/255)^gamma, built once per bake.
+// gamma 1 (and any degenerate <= 0) is the identity table - the
+// pre-P1 bake's bytes, exactly, the escape hatch FontBakeOptions::
+// identity() names. The table is monotonic by construction, so it can
+// never reorder coverage (a darker sample cannot out-ink a brighter
+// one) and the tofu's binary 0/255 ends map to themselves.
+struct CoverageLut {
+    std::uint8_t v[256];
+    explicit CoverageLut(float gamma) {
+        if (gamma <= 0.0f || gamma == 1.0f) {
+            for (int i = 0; i < 256; ++i) {
+                v[static_cast<std::size_t>(i)] =
+                    static_cast<std::uint8_t>(i);
+            }
+            return;
+        }
+        for (int i = 0; i < 256; ++i) {
+            const double shaded =
+                std::pow(static_cast<double>(i) / 255.0,
+                         static_cast<double>(gamma));
+            v[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(
+                std::lround(shaded * 255.0));
+        }
+    }
+};
+
+// One glyph's rasterization, the P1 quality pass's single step (shared
+// by the primary bake and every lazy face bake): render at
+// `oversample_x` samples per final column, box-average the groups down,
+// then run the coverage through the LUT. Metrics are EXACT whatever
+// the options: the advance rides the face's h-metrics, the vertical
+// geometry the single-sampled box, and offset_x the final column grid
+// (an integer by the glyph-snap contract, its sub-pixel residue folded
+// into the first column group's width - the same rounding the ox = 1
+// bake always did, one final pixel of phase at worst).
+BakedGlyph rasterize_glyph(const stbtt_fontinfo& info,
+                           std::uint32_t codepoint, float scale,
+                           float baseline, const FontBakeOptions& options,
+                           const CoverageLut& lut) {
+    BakedGlyph g;
+    g.codepoint = codepoint;
+    int advance = 0;
+    int lsb = 0;  // unused: offset_x comes from the bitmap box below
+    stbtt_GetCodepointHMetrics(&info, static_cast<int>(codepoint), &advance,
+                               &lsb);
+    g.advance = static_cast<float>(advance) * scale;
+
+    // The oversampling factor, clamped once (a bogus 0 or a huge value
+    // are configuration noise, not bake failures).
+    const int ox = options.oversample_x < 1
+                       ? 1
+                       : (options.oversample_x > 4 ? 4
+                                                   : options.oversample_x);
+
+    // The box at the oversampled horizontal scale: x lands on the
+    // oversampled grid, y on the final one (vertical never supersamples
+    // - the snap quantizes x, and a vertical box change would move
+    // offset_y, a metric).
+    int x0 = 0;
+    int y0 = 0;
+    int x1 = 0;
+    int y1 = 0;
+    stbtt_GetCodepointBitmapBoxSubpixel(&info, static_cast<int>(codepoint),
+                                        scale * static_cast<float>(ox),
+                                        scale, 0.0f, 0.0f, &x0, &y0, &x1,
+                                        &y1);
+    const int w_over = x1 - x0;  // oversampled columns
+    const int h = y1 - y0;       // final rows
+    if (w_over <= 0 || h <= 0) {
+        return g;  // the blanks: an advance to honor, no bitmap
+    }
+
+    // The oversampled buffer, rendered at whole-sample shift 0. The
+    // final column j covers oversampled coordinates [j*ox, (j+1)*ox)
+    // ABSOLUTE (not relative to x0), so the grouping keys on x0's
+    // phase: the first group may be short, the ink lands in the
+    // column the screen pixel it occupies owns, and offset_x is the
+    // final pixel containing x0 (floor division - negative x0
+    // included).
+    const int phase = ((x0 % ox) + ox) % ox;
+    const int w = (w_over + phase + ox - 1) / ox;  // final columns
+    std::vector<std::uint8_t> over(
+        static_cast<std::size_t>(w_over) * static_cast<std::size_t>(h), 0);
+    stbtt_MakeCodepointBitmapSubpixel(
+        &info, over.data(), w_over, h,
+        w_over,  // stride: rows are tight
+        scale * static_cast<float>(ox), scale, 0.0f, 0.0f,
+        static_cast<int>(codepoint));
+
+    g.w = static_cast<std::uint32_t>(w);
+    g.h = static_cast<std::uint32_t>(h);
+    // Floor division, negatives included: the final pixel x0 sits in.
+    g.offset_x = static_cast<float>((x0 - phase) / ox);
+    // stbtt's box is baseline-relative; the glyph contract measures
+    // from the LINE TOP, which sits `baseline` px above it (the
+    // primary bake passes the ascent, a stacked face the shared
+    // baseline).
+    g.offset_y = baseline + static_cast<float>(y0);
+
+    // The downsample + tint: RGB white, coverage in alpha - the vertex
+    // tint at draw time supplies the text color. Column group j spans
+    // oversampled [j*ox - phase, (j + 1)*ox - phase), clamped to the
+    // rendered width; a partial group averages what it has (the ink
+    // area carries, the exact sample count does not).
+    g.rgba.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) *
+                      4u,
+                  255);
+    for (int row = 0; row < h; ++row) {
+        const std::uint8_t* src =
+            over.data() + static_cast<std::size_t>(row) *
+                              static_cast<std::size_t>(w_over);
+        std::uint8_t* dst =
+            g.rgba.data() +
+            (static_cast<std::size_t>(row) * static_cast<std::size_t>(w)) *
+                4u;
+        for (int col = 0; col < w; ++col) {
+            const int lo = col * ox - phase;
+            const int hi = lo + ox;
+            const int begin = lo < 0 ? 0 : lo;
+            const int end = hi > w_over ? w_over : hi;
+            int acc = 0;
+            int count = 0;
+            for (int k = begin; k < end; ++k) {
+                acc += src[k];
+                ++count;
+            }
+            const int averaged =
+                count > 0 ? (acc + count / 2) / count : 0;
+            dst[static_cast<std::size_t>(col) * 4u + 3u] =
+                lut.v[static_cast<std::size_t>(averaged)];
+        }
+    }
+    return g;
+}
+
 }  // namespace
 
 std::uint32_t utf8_next(const char*& s) {
@@ -150,7 +285,8 @@ std::uint32_t utf8_next(const char*& s) {
     return cp;
 }
 
-BakedFont bake_file(const char* path, float pixel_height) {
+BakedFont bake_file(const char* path, float pixel_height,
+                    const FontBakeOptions& options) {
     BakedFont out;
     if (path == nullptr || pixel_height <= 0.0f) {
         return out;
@@ -166,6 +302,16 @@ BakedFont bake_file(const char* path, float pixel_height) {
     if (offset < 0 || !stbtt_InitFont(&info, data.data(), offset)) {
         return out;
     }
+    return bake_info(info, pixel_height, options);
+}
+
+BakedFont bake_info(const stbtt_fontinfo& info, float pixel_height,
+                    const FontBakeOptions& options) {
+    BakedFont out;
+    if (pixel_height <= 0.0f) {
+        return out;
+    }
+    const CoverageLut lut{options.gamma};
 
     const float scale = stbtt_ScaleForPixelHeight(&info, pixel_height);
     int ascent = 0;
@@ -182,42 +328,8 @@ BakedFont bake_file(const char* path, float pixel_height) {
     out.glyphs.reserve(kBakedCount + 1);
     for (std::uint32_t cp = kFirstCodepoint;
          cp < kFirstCodepoint + kBakedCount; ++cp) {
-        BakedGlyph g;
-        g.codepoint = cp;
-        int advance = 0;
-        int lsb = 0;  // unused: offset_x comes from the bitmap box below
-        stbtt_GetCodepointHMetrics(&info, static_cast<int>(cp), &advance,
-                                  &lsb);
-        g.advance = static_cast<float>(advance) * scale;
-        int x0 = 0;
-        int y0 = 0;
-        int x1 = 0;
-        int y1 = 0;
-        stbtt_GetCodepointBitmapBox(&info, static_cast<int>(cp), scale,
-                                   scale, &x0, &y0, &x1, &y1);
-        g.offset_x = static_cast<float>(x0);
-        // stbtt's box is baseline-relative; the glyph contract measures
-        // from the LINE TOP, which sits ascent px above the baseline.
-        g.offset_y = ascent_px + static_cast<float>(y0);
-        const int w = x1 - x0;
-        const int h = y1 - y0;
-        if (w > 0 && h > 0) {
-            g.w = static_cast<std::uint32_t>(w);
-            g.h = static_cast<std::uint32_t>(h);
-            std::vector<std::uint8_t> coverage(static_cast<std::size_t>(w) *
-                                               static_cast<std::size_t>(h));
-            stbtt_MakeCodepointBitmap(&info, coverage.data(), w, h,
-                                      w,  // stride: rows are tight
-                                      scale, scale, static_cast<int>(cp));
-            // The tint convention: RGB white, coverage in alpha - the
-            // vertex tint at draw time supplies the text color.
-            constexpr std::uint8_t white = 255;
-            g.rgba.assign(coverage.size() * 4u, white);
-            for (std::size_t i = 0; i < coverage.size(); ++i) {
-                g.rgba[i * 4u + 3u] = coverage[i];
-            }
-        }
-        out.glyphs.push_back(std::move(g));
+        out.glyphs.push_back(
+            rasterize_glyph(info, cp, scale, ascent_px, options, lut));
     }
 
     // The fallback box - the bake's one glyph past the ASCII range, the
@@ -292,51 +404,17 @@ FaceBake load_face(const char* path, float pixel_height) {
 }
 
 BakedGlyph bake_face_glyph(const FaceBake& face, std::uint32_t codepoint,
-                           float baseline_y) {
-    // The lazy path's single-glyph step: bake_file's per-glyph math, one
-    // codepoint at a time, against the font's shared baseline.
-    BakedGlyph g;
-    g.codepoint = codepoint;
+                           float baseline_y, const FontBakeOptions& options) {
+    // The lazy path's single-glyph step: bake_info's per-glyph math, one
+    // codepoint at a time, against the font's shared baseline. Blank
+    // when the face does not carry the codepoint (nothing to draw,
+    // nothing to advance - the fallback box keeps answering it).
     if (!face.ok || !face.carries(codepoint)) {
-        return g;  // blank: nothing to draw, nothing to advance
+        return {};
     }
-    int advance = 0;
-    int lsb = 0;  // unused: offset_x comes from the bitmap box below
-    stbtt_GetCodepointHMetrics(&face.info, static_cast<int>(codepoint),
-                               &advance, &lsb);
-    g.advance = static_cast<float>(advance) * face.scale;
-    int x0 = 0;
-    int y0 = 0;
-    int x1 = 0;
-    int y1 = 0;
-    stbtt_GetCodepointBitmapBox(&face.info, static_cast<int>(codepoint),
-                                face.scale, face.scale, &x0, &y0, &x1, &y1);
-    g.offset_x = static_cast<float>(x0);
-    // The one typographic fold of the lazy path: the stacked face's box is
-    // baseline-relative, and the font's line top sits baseline_y above the
-    // SHARED baseline - so the glyph lands where the primary bake's inline
-    // glyphs sit, whatever this face's own ascent.
-    g.offset_y = baseline_y + static_cast<float>(y0);
-    const int w = x1 - x0;
-    const int h = y1 - y0;
-    if (w > 0 && h > 0) {
-        g.w = static_cast<std::uint32_t>(w);
-        g.h = static_cast<std::uint32_t>(h);
-        std::vector<std::uint8_t> coverage(static_cast<std::size_t>(w) *
-                                           static_cast<std::size_t>(h));
-        stbtt_MakeCodepointBitmap(&face.info, coverage.data(), w, h,
-                                  w,  // stride: rows are tight
-                                  face.scale, face.scale,
-                                  static_cast<int>(codepoint));
-        // The tint convention, same as bake_file: RGB white, coverage in
-        // alpha - the vertex tint at draw time supplies the text color.
-        constexpr std::uint8_t white = 255;
-        g.rgba.assign(coverage.size() * 4u, white);
-        for (std::size_t i = 0; i < coverage.size(); ++i) {
-            g.rgba[i * 4u + 3u] = coverage[i];
-        }
-    }
-    return g;
+    const CoverageLut lut{options.gamma};
+    return rasterize_glyph(face.info, codepoint, face.scale, baseline_y,
+                           options, lut);
 }
 
 const FaceBake* FontExtra::resolve(std::uint32_t codepoint) const {

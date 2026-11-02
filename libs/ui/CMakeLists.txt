@@ -162,6 +162,27 @@ if(TARGET test_ui_gui_splits)
   target_include_directories(test_ui_gui_splits PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
 
+# The P1 font-bake quality suite (the ui-skin plan): the pure-CPU bake
+# + the embedded Inter arrays, nothing else on the link line - no gui
+# archive, no renderer, no window (the same purity class the font half
+# of test_ui_gui set).
+ws_add_test(ui_font
+  SOURCES tests/test_ui_font.cpp
+          src/text/font.cpp
+          src/text/stb_impl.cpp
+          src/text/default_font.cpp
+          src/text/default_font_regular.cpp
+          src/text/default_font_semibold.cpp
+  LINK ws::core
+  DEPENDS stb)
+if(TARGET test_ui_font)
+  # ws::core's link carries core's includes only; the ui include is
+  # local to this test (font.h reaches the public renderer2d.hpp).
+  target_include_directories(test_ui_font PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+
 # --- Shader workflow targets (opt-in; the default build is unchanged) ------
 # The committed spirv.h stays the build input (no shader compiler needed);
 # these targets make staleness visible and regeneration explicit. The flags

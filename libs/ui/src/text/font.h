@@ -18,6 +18,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <span>
 
 #if defined(_MSC_VER)
 #pragma warning(push, 0)
@@ -87,7 +88,16 @@ struct BakedFont {
 // Reads the ttf/otf at `path`, rasterizes it at `pixel_height` px and
 // appends the synthesized fallback box - kBakedCount + 1 glyphs in all.
 // Pure CPU; the caller owns the upload (Renderer2D::load_font does).
-BakedFont bake_file(const char* path, float pixel_height);
+// `options` rides the public FontBakeOptions contract (coverage only,
+// never metrics).
+BakedFont bake_file(const char* path, float pixel_height,
+                    const FontBakeOptions& options = {});
+
+// bake_file's core over an ALREADY-INITIALIZED face - the half the
+// bundled default font rides (its bytes never touch the filesystem).
+// The info must outlive the call's rasterization only.
+BakedFont bake_info(const stbtt_fontinfo& info, float pixel_height,
+                    const FontBakeOptions& options = {});
 
 // --- the face stack (the growing Font's fallback chain) ---------------------
 // A Font is one typeface at one size, but one font can STACK more typeface
@@ -132,8 +142,12 @@ FaceBake load_face(const char* path, float pixel_height);
 // primary ascent, so a stacked face's glyphs sit on the font's shared
 // baseline). Blank (w == 0, advance 0) when the face does not carry the
 // codepoint - never the fallback box, which stays the Font's own answer.
+// `options` should be the OWNING font's (the bake that made the font
+// carries through to its lazy glyphs - the caller reads it off
+// FontExtra).
 BakedGlyph bake_face_glyph(const FaceBake& face, std::uint32_t codepoint,
-                           float baseline_y);
+                           float baseline_y,
+                           const FontBakeOptions& options = {});
 
 // The public Font's out-of-line half (the growing font): the face stack,
 // the lazily-baked table and the pending queue. Eagerly allocated in
@@ -162,6 +176,12 @@ struct FontExtra {
     // built by hand (the fill ctor) borrows its first added face's.
     float baseline_y = 0.0f;
     bool baseline_known = false;
+    // The options the font's OWN bake ran with - the lazy face bakes
+    // match it, so a gamma-tuned font stays tuned as it grows past
+    // ASCII. Set by the load that baked the font; a hand-built font
+    // keeps the default (a conservative app can overwrite it before
+    // adding faces).
+    FontBakeOptions options;
     // The first face in stack order that carries the codepoint - null
     // when none does (the fallback box keeps answering). Owner-thread
     // only: resolve and bake with no font_add_face in between, or the

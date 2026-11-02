@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstring>
 
+#include "text/default_font.h"
 #include "text/font.h"
 
 #if defined(_MSC_VER)
@@ -985,7 +986,8 @@ std::vector<Sprite> Renderer2D::load_atlas(
     return sprites;
 }
 
-Font Renderer2D::load_font(const char* path, float pixel_height) {
+Font Renderer2D::load_font(const char* path, float pixel_height,
+                         const FontBakeOptions& options) {
     if (device_ == VK_NULL_HANDLE) {
         // Headless or pre-init: the loaders' contract - warn, degrade to
         // empty (draw_text then draws nothing, measure_text reports 0).
@@ -995,17 +997,42 @@ Font Renderer2D::load_font(const char* path, float pixel_height) {
         return {};
     }
 
-    // Bake first (pure CPU), then the same page pipeline as load_atlas.
-    // The font gets its OWN pages: atlas::pack is one-shot (a packed
-    // atlas never grows), so glyph sprites can never share a page with
-    // icon sprites - two Font instances bake two page sets, by design.
-    const font::BakedFont baked = font::bake_file(path, pixel_height);
+    // Bake first (pure CPU), then the shared page pipeline.
+    const font::BakedFont baked = font::bake_file(path, pixel_height, options);
     if (!baked.ok) {
         ws::core::warn("ui: r2d::load_font('{}') failed - empty font",
                        path != nullptr ? path : "(null)");
         return {};
     }
+    return publish_baked_font(baked, options);
+}
 
+Font Renderer2D::load_default_font(DefaultFontWeight weight,
+                                   float pixel_height,
+                                   const FontBakeOptions& options) {
+    if (device_ == VK_NULL_HANDLE) {
+        ws::core::warn("ui: r2d::load_default_font({}) fell back to an empty "
+                       "font - no GPU context is alive",
+                       pixel_height);
+        return {};
+    }
+    // The embedded face cannot fail to parse; an invalid size still
+    // bakes nothing (bake_inter's own guard), so the warn-and-empty
+    // contract covers it the same way load_font's does.
+    const std::span<const std::uint8_t> ttf =
+        weight == DefaultFontWeight::semibold ? font::inter_semibold_ttf()
+                                             : font::inter_regular_ttf();
+    const font::BakedFont baked = font::bake_inter(ttf, pixel_height, options);
+    if (!baked.ok) {
+        ws::core::warn("ui: r2d::load_default_font({}) failed - empty font",
+                       pixel_height);
+        return {};
+    }
+    return publish_baked_font(baked, options);
+}
+
+Font Renderer2D::publish_baked_font(const font::BakedFont& baked,
+                                    const FontBakeOptions& options) {
     // Every glyph's metrics first (advances and offsets need no atlas);
     // sprites patch in after packing. Only glyphs WITH bitmaps feed the
     // packer - the space and other blanks advance but never draw, and a
@@ -1052,8 +1079,11 @@ Font Renderer2D::load_font(const char* path, float pixel_height) {
     // The growing half's baseline comes from the primary bake's own
     // ascent - the number a stacked face's glyphs fold against, so its
     // lazy bakes sit on the same baseline the inline glyphs drew on.
+    // The options ride along too: a font baked with a coverage tuning
+    // keeps that tuning for every glyph it grows later.
     font.extras_state()->baseline_y = baked.ascent_px;
     font.extras_state()->baseline_known = true;
+    font.extras_state()->options = options;
     return font;
 }
 
@@ -1263,11 +1293,26 @@ FrameSize sprite_size(Sprite sprite) {
     return FrameSize{};
 }
 
-Font load_font(const char* path, float pixel_height) {
+Font load_font(const char* path, float pixel_height,
+               const FontBakeOptions& options) {
     if (g_active != nullptr) {
-        return g_active->load_font(path, pixel_height);
+        return g_active->load_font(path, pixel_height, options);
     }
     warn_no_app("load_font");
+    return {};
+}
+
+Font load_default_font(float pixel_height, const FontBakeOptions& options) {
+    return load_default_font(DefaultFontWeight::regular, pixel_height,
+                             options);
+}
+
+Font load_default_font(DefaultFontWeight weight, float pixel_height,
+                       const FontBakeOptions& options) {
+    if (g_active != nullptr) {
+        return g_active->load_default_font(weight, pixel_height, options);
+    }
+    warn_no_app("load_default_font");
     return {};
 }
 
@@ -1298,8 +1343,9 @@ std::uint32_t font_bake_pending(Font& font, std::uint32_t batch_cap) {
         if (face == nullptr) {
             continue;
         }
-        font::BakedGlyph g =
-            font::bake_face_glyph(*face, cp, extra->baseline_y);
+        font::BakedGlyph g = font::bake_face_glyph(*face, cp,
+                                                    extra->baseline_y,
+                                                    extra->options);
         if (g.w > 0u || g.advance > 0.0f) {
             cps.push_back(cp);
             baked.push_back(std::move(g));

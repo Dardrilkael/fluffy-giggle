@@ -366,13 +366,71 @@ private:
     std::shared_ptr<font::FontExtra> extras_;
 };
 
+// How a font bakes (the P1 quality pass). Both knobs are coverage-only:
+// no metric ever moves (advances, offsets and line heights are exact
+// whatever they say), so measure_text == draw_text's return and every
+// layout stays put while the pixels between sharpen.
+struct FontBakeOptions {
+    // The coverage exponent applied at bake time: a' = 255 * (a/255)^g.
+    // 1.0 is the identity - the pre-P1 bake byte-for-byte. The DEFAULT
+    // (1.7) is tuned for light-on-dark text (the stock chrome): an sRGB
+    // framebuffer blooms a bright glyph's edges, so the mids darken a
+    // step and small text reads crisp instead of washed-out. A
+    // dark-on-light app (the light stock chrome) passes 1.35 - the
+    // same correction, a smaller step, evaluated side by side on both
+    // stock backgrounds. Both numbers were picked by rendering the
+    // bundled Inter over both stock panel colors and judging the rows;
+    // they are defaults, not laws.
+    float gamma = 1.7f;
+    // Horizontal supersampling: the glyph rasterizes at N samples per
+    // final pixel column and box-averages down (1 = off, the old
+    // single-sample bake). Horizontal because that is the axis the
+    // renderer's whole-pixel glyph snapping quantizes - vertical stems
+    // land anywhere modulo a pixel, and the averaged coverage carries
+    // the sub-pixel area the snap would otherwise drop. Clamped to
+    // [1, 4] at bake time.
+    int oversample_x = 3;
+
+    // The pre-P1 bake exactly: every knob at its identity. The escape
+    // hatch a byte-pinned test (or a very conservative app) wants.
+    [[nodiscard]] static constexpr FontBakeOptions identity() {
+        return FontBakeOptions{.gamma = 1.0f, .oversample_x = 1};
+    }
+};
+
 // Rasterizes the ttf/otf at `path` at one pixel height and returns the
 // baked font. Valid from on_setup(), synchronous, like the texture
 // loads. The path is the CALLER's to resolve - the library knows nothing
 // about platforms or font directories; picking a face (the system one
 // included) is app code, by design. On failure - missing file, not a
-// font, no GPU context - logs once and returns an empty Font.
-Font load_font(const char* path, float pixel_height);
+// font, no GPU context - logs once and returns an empty Font. `options`
+// tunes the coverage (see FontBakeOptions); the default is the library's
+// current quality pass.
+Font load_font(const char* path, float pixel_height,
+               const FontBakeOptions& options = {});
+
+// The bundled default face's weights: Inter Regular and Inter SemiBold
+// (v4.1, SIL Open Font License 1.1 - libs/ui/assets/fonts/ carries the
+// license and the subset provenance; the bytes are compiled in, so no
+// file loads at runtime).
+enum class DefaultFontWeight : std::uint8_t { regular, semibold };
+
+// Bakes the BUNDLED default face at one pixel height - the stock look,
+// identical on every platform (no system font walk, no app-side path).
+// The intended shape: load it once in on_setup(), keep it for the app's
+// lifetime, and point the theme's font (and P2's font_strong) at it -
+//   const r2d::Font ui_font = r2d::load_default_font(16.0f);
+//   const r2d::Font ui_strong = r2d::load_default_font(
+//       r2d::DefaultFontWeight::semibold, 16.0f);
+// The strong weight is a SECOND font (one font stays one weight; the
+// theme carries the pointer), not a stacked face. Same contract as
+// load_font otherwise: valid from on_setup(), synchronous, an empty
+// Font only without a GPU context (the embedded bytes cannot fail to
+// parse).
+Font load_default_font(float pixel_height,
+                       const FontBakeOptions& options = {});
+Font load_default_font(DefaultFontWeight weight, float pixel_height,
+                       const FontBakeOptions& options = {});
 
 // The face stack's failure codes (font_add_face): every failure is a
 // ws::core::Error with category "ui" and one of these as its code.
