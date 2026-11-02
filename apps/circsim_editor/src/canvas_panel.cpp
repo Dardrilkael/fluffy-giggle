@@ -326,6 +326,78 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
 
     handle_pointer(ed, gui, body);
 
+    // --- the grid, in SCREEN space and pixel-snapped.
+    // Why not world space: a 1px stroke centred between two pixel rows
+    // splits its coverage over both, so with a fractional pan/zoom some
+    // lines come out crisp and others half-intensity, and the whole
+    // grid shimmers while panning. Here every line's centre is placed
+    // on a pixel centre (floor + 0.5) so each one covers exactly one
+    // pixel column/row at full alpha.
+    // Spacing follows the schematic's snap grid (s.grid), in levels of
+    // x5: the next level's minors ARE this level's majors, so a level
+    // change never moves a visible line - minors just fade in/out.
+    {
+        const double zoom = ed.view.zoom;
+        const double base = s.grid > 0.0 ? s.grid : 1.0;
+        constexpr double kMinCellPx = 10.0;   // densest minor cell
+        constexpr double kFullCellPx = 24.0;  // minors at full alpha
+        double step = base;
+        for (int guard = 0; step * zoom < kMinCellPx && guard < 32; ++guard) {
+            step *= 5.0;
+        }
+        const double cell = step * zoom;
+        double fade = (cell - kMinCellPx) / (kFullCellPx - kMinCellPx);
+        fade = std::clamp(fade, 0.0, 1.0);
+        fade = fade * fade * (3.0 - 2.0 * fade);  // smoothstep
+
+        const float left = body.x;
+        const float top = body.y;
+        const float right = body.x + body.width;
+        const float bottom = body.y + body.height;
+        const double cx = static_cast<double>(body.x) + body.width * 0.5;
+        const double cy = static_cast<double>(body.y) + body.height * 0.5;
+        const double half_w = static_cast<double>(body.width) * 0.5 / zoom;
+        const double half_h = static_cast<double>(body.height) * 0.5 / zoom;
+
+        Paint line;
+        line.width = 1.0f;
+        const auto paint_for = [&](long long i) -> Paint {
+            Paint p = line;
+            if (i == 0) {
+                p.color = gui::dim(theme.text, 0.34f);
+            } else if (i % 5 == 0) {
+                p.color = gui::dim(theme.text, 0.20f);
+            } else {
+                p.color = gui::dim(theme.text, static_cast<float>(0.10 * fade));
+            }
+            return p;
+        };
+
+        const long long ix0 = static_cast<long long>(
+            std::ceil((ed.view.center.x - half_w) / step));
+        const long long ix1 = static_cast<long long>(
+            std::floor((ed.view.center.x + half_w) / step));
+        const long long iy0 = static_cast<long long>(
+            std::ceil((ed.view.center.y - half_h) / step));
+        const long long iy1 = static_cast<long long>(
+            std::floor((ed.view.center.y + half_h) / step));
+        if (ix1 - ix0 < 4000 && iy1 - iy0 < 4000) {
+            for (long long i = ix0; i <= ix1; ++i) {
+                const double sx =
+                    cx + (static_cast<double>(i) * step - ed.view.center.x) * zoom;
+                const float px = std::floor(static_cast<float>(sx)) + 0.5f;
+                ed.renderer.stroke_line(Point{px, top}, Point{px, bottom}, paint_for(i));
+            }
+            for (long long i = iy0; i <= iy1; ++i) {
+                // y is flipped: model y-up -> screen y-down
+                const double sy =
+                    cy - (static_cast<double>(i) * step - ed.view.center.y) * zoom;
+                const float py = std::floor(static_cast<float>(sy)) + 0.5f;
+                ed.renderer.stroke_line(Point{left, py}, Point{right, py}, paint_for(i));
+            }
+        }
+    }
+
     // The canvas: the camera transform with the y flip, then the world.
     canvas::Renderer2DCanvas& rc = ed.renderer;
     rc.set_view_scale(static_cast<float>(ed.view.zoom));
@@ -339,51 +411,6 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         in.mouse_x >= body.x && in.mouse_x < body.x + body.width &&
         in.mouse_y >= body.y && in.mouse_y < body.y + body.height;
     const Pos world = ed.view.s2w({in.mouse_x, in.mouse_y});
-
-    // --- the grid: minor every step, stronger every five, axes
-    {
-        const double step =
-            ed.view.zoom >= 7.0 ? 1.0 : (ed.view.zoom >= 1.5 ? 5.0 : 10.0);
-        const Bounds visible{
-            ed.view.center.x - static_cast<double>(body.width) * 0.5 /
-                                   ed.view.zoom,
-            ed.view.center.y - static_cast<double>(body.height) * 0.5 /
-                                   ed.view.zoom,
-            ed.view.center.x + static_cast<double>(body.width) * 0.5 /
-                                   ed.view.zoom,
-            ed.view.center.y + static_cast<double>(body.height) * 0.5 /
-                                   ed.view.zoom};
-        Paint grid;
-        grid.width = 1.0f;
-        grid.color = gui::dim(theme.text, 0.14f);
-        Paint major = grid;
-        major.color = gui::dim(theme.text, 0.22f);
-        Paint axes = grid;
-        axes.color = gui::dim(theme.text, 0.32f);
-        const double x0 = std::floor(visible.min_x / step) * step;
-        const double x1 = std::ceil(visible.max_x / step) * step;
-        const double y0 = std::floor(visible.min_y / step) * step;
-        const double y1 = std::ceil(visible.max_y / step) * step;
-        const auto is_major = [&](double v) {
-            return std::fmod(std::fabs(v), step * 5.0) < step * 0.5;
-        };
-        for (double x = x0; x <= x1; x += step) {
-            const bool axis = std::fabs(x) < step * 0.5;
-            rc.stroke_line(Point{static_cast<float>(x),
-                                 static_cast<float>(visible.min_y)},
-                           Point{static_cast<float>(x),
-                                 static_cast<float>(visible.max_y)},
-                           axis ? axes : (is_major(x) ? major : grid));
-        }
-        for (double y = y0; y <= y1; y += step) {
-            const bool axis = std::fabs(y) < step * 0.5;
-            rc.stroke_line(Point{static_cast<float>(visible.min_x),
-                                 static_cast<float>(y)},
-                           Point{static_cast<float>(visible.max_x),
-                                 static_cast<float>(y)},
-                           axis ? axes : (is_major(y) ? major : grid));
-        }
-    }
 
     // --- wires, junctions, labels
     Paint wire_paint;
