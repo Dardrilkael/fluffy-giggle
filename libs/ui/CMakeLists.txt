@@ -129,6 +129,21 @@ if(TARGET test_ui_canvas)
   target_include_directories(test_ui_canvas PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
 
+# The stage-16 grid suite: the x5 level ladder, the no-pop fade
+# contract, the index math at fractional centers/zooms, the mark cap
+# and the pixel-snapped draw - the gui archive + the r2d stub, the
+# same purity class as test_ui_canvas.
+ws_add_test(ui_grid
+  SOURCES tests/test_ui_grid.cpp
+          tests/ui_gui_r2d_stub.cpp
+          src/text/font.cpp
+          src/text/stb_impl.cpp
+  LINK ws::ui_gui
+  DEPENDS stb)
+if(TARGET test_ui_grid)
+  target_include_directories(test_ui_grid PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+
 # The stage-15 shell suite: the dock host, the panel framework, the
 # document layer and AppShell itself, headless over the same gui
 # archive + r2d stub. The shell's platform services (recent files,

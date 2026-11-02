@@ -1,8 +1,8 @@
 // view.hpp's implementation. ViewTransform2D is pure math (world <->
-// screen mapping, zoom-at-point, fit); the adaptive grid reads the
-// view to place world-space lines in screen space; CanvasView owns a
-// view, feeds it input, and drives a Renderer2DCanvas through the
-// host's draw callback.
+// screen mapping, zoom-at-point, fit); CanvasView owns a view, feeds
+// it input, and drives a Renderer2DCanvas through the host's draw
+// callback. The grid is grid.hpp's (one system for the whole
+// library); this file only maps the view onto a GridFrame.
 
 #include <ws/ui/canvas/view.hpp>
 
@@ -82,97 +82,31 @@ void ViewTransform2D::fit(float wx, float wy, float ww, float wh, float margin) 
     pan = {wx + ww * 0.5f, wy + wh * 0.5f};
 }
 
-// --- adaptive grid -----------------------------------------------------------
+// --- the view -> grid frame mapping -----------------------------------------
 
-void draw_grid(Canvas2D& canvas, const ViewTransform2D& view,
-               const GridStyle& style) {
-    if (view.viewport_w <= 0.0f || view.viewport_h <= 0.0f ||
-        style.base_spacing <= 0.0f) {
-        return;
-    }
+namespace {
 
-    // Pick the grid spacing: snap the ideal (target_pixels / zoom) to
-    // the nearest power-of-10 multiple of base_spacing. This keeps the
-    // screen-cell-size close to target_pixels at every zoom, so the
-    // visual density is stable.
-    const float ideal = style.target_pixels / view.zoom;
-    float exponent = 0.0f;
-    if (ideal > 0.0f && style.base_spacing > 0.0f) {
-        exponent = std::round(std::log10(ideal / style.base_spacing));
-    }
-    float spacing = style.base_spacing *
-                    std::pow(10.0f, exponent);
-    if (spacing < style.base_spacing) {
-        spacing = style.base_spacing;  // never finer than the base
-    }
-
-    // The world bounds visible in the viewport (the four corners).
-    const Vec2 tl = view.screen_to_world({0.0f, 0.0f});
-    const Vec2 tr = view.screen_to_world({view.viewport_w, 0.0f});
-    const Vec2 bl = view.screen_to_world({0.0f, view.viewport_h});
-    const Vec2 br = view.screen_to_world({view.viewport_w, view.viewport_h});
-    const float min_x = std::min({tl.x, tr.x, bl.x, br.x});
-    const float max_x = std::max({tl.x, tr.x, bl.x, br.x});
-    const float min_y = std::min({tl.y, tr.y, bl.y, br.y});
-    const float max_y = std::max({tl.y, tr.y, bl.y, br.y});
-
-    // Snap the line positions to the spacing (so lines land on world
-    // units, not arbitrary fractions).
-    const float first_x = std::ceil(min_x / spacing) * spacing;
-    const float first_y = std::ceil(min_y / spacing) * spacing;
-
-    // The fade: alpha ramps 0->1 as the spacing's screen size grows from
-    // half the target to the target. This prevents pop-in when the spacing
-    // level transitions (the spacing jumps 10x at each level, so the fade
-    // smooths the visual step).
-    const float screen_spacing = spacing * view.zoom;
-    float fade = (screen_spacing - style.target_pixels * 0.5f) /
-                 (style.target_pixels * 0.5f);
-    fade = std::max(0.0f, std::min(1.0f, fade));
-
-    // The minor color's alpha scales by fade; major lines are full strength.
-    auto scale_alpha = [](std::uint32_t color, float a) {
-        const std::uint32_t alpha = static_cast<std::uint32_t>(
-            (color & 0xFFu) * a);
-        return (color & 0xFFFFFF00u) | alpha;
-    };
-    const std::uint32_t minor = scale_alpha(style.minor_color, fade);
-    const std::uint32_t major = scale_alpha(style.major_color, fade);
-
-    // Draw vertical lines (world x = first_x + i*spacing).
-    Paint paint;
-    paint.width = 1.0f;
-    paint.cap = StrokeCap::butt;
-
-    // Vertical lines.
-    for (float x = first_x; x <= max_x; x += spacing) {
-        const bool is_major =
-            static_cast<int>(std::round(x / spacing)) % style.major_every == 0;
-        const bool is_origin = std::fabs(x) < spacing * 0.01f;
-        paint.color = is_origin ? style.origin_color
-                                : (is_major ? major : minor);
-        if (paint.color == 0) continue;  // skip fully-transparent lines
-        const Vec2 a = view.world_to_screen({x, min_y});
-        const Vec2 b = view.world_to_screen({x, max_y});
-        canvas.stroke_line(a, b, paint);
-    }
-    // Horizontal lines.
-    for (float y = first_y; y <= max_y; y += spacing) {
-        const bool is_major =
-            static_cast<int>(std::round(y / spacing)) % style.major_every == 0;
-        const bool is_origin = std::fabs(y) < spacing * 0.01f;
-        paint.color = is_origin ? style.origin_color
-                                : (is_major ? major : minor);
-        if (paint.color == 0) continue;
-        const Vec2 a = view.world_to_screen({min_x, y});
-        const Vec2 b = view.world_to_screen({max_x, y});
-        canvas.stroke_line(a, b, paint);
-    }
+// CanvasView's world is screen-convention (y down, rotation aside),
+// so the frame passes no flip.
+[[nodiscard]] GridFrame view_grid_frame(const ViewTransform2D& view,
+                                        const ws::ui::gui::Rect& rect) {
+    GridFrame frame;
+    frame.center_x = view.pan.x;
+    frame.center_y = view.pan.y;
+    frame.zoom = view.zoom;
+    frame.ox = rect.x;
+    frame.oy = rect.y;
+    frame.view_w = rect.width;
+    frame.view_h = rect.height;
+    frame.y_flip = false;
+    return frame;
 }
+
+}  // namespace
 
 // --- CanvasView --------------------------------------------------------------
 
-void CanvasView::draw(const ws::ui::gui::Rect& rect, Renderer2DCanvas& canvas,
+void CanvasView::draw(const ws::ui::gui::Rect& rect, Canvas2D& canvas,
                       bool show_grid) {
     // Update the view's viewport size.
     view.viewport_w = rect.width;
@@ -184,13 +118,11 @@ void CanvasView::draw(const ws::ui::gui::Rect& rect, Renderer2DCanvas& canvas,
     // Clip to the view's rect, then draw grid + host content.
     canvas.push_clip(rect.x, rect.y, rect.width, rect.height);
 
-    if (show_grid) {
-        // The grid draws in viewport-relative screen space (0..vw),
-        // so offset by the rect's origin.
-        canvas.push_transform();
-        canvas.translate(rect.x, rect.y);
-        draw_grid(canvas, view);
-        canvas.pop_transform();
+    if (show_grid && view.rotation == 0.0f) {
+        // grid.hpp's system, the view mapped onto a frame. Rotated: no
+        // grid (the header's documented limit - the lattice is
+        // axis-aligned by contract).
+        draw_grid(canvas, view_grid_frame(view, rect), grid);
     }
 
     // Set the world transform: world -> screen = rect_origin + viewport_center

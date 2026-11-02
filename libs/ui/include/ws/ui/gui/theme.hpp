@@ -95,6 +95,20 @@ struct ChromeTheme {
     std::uint32_t danger = r2d::rgba(219, 68, 58);
     std::uint32_t danger_hover = r2d::rgba(232, 96, 84);
     std::uint32_t danger_pressed = r2d::rgba(204, 56, 46);
+    // The canvas floor (stage 16): the schematic viewport's own faces,
+    // consumed by ws::ui::canvas's grid system (grid.hpp). canvas_bg is
+    // the viewport's step away from panel_bg (a dark gray on the dark
+    // stock, never black); the grid faces ride their own alpha bands
+    // - minor ~6-8% so the fine lattice reads as texture, not lines,
+    // major ~16-20% so every fifth dot carries the structure, and the
+    // axis face is the accent at a modest alpha (a subtle x=0/y=0
+    // reading, not a loud crosshair). Decorative faces in border's
+    // class - no WCAG pair is checked; the alphas are the brief's own
+    // contrast answer on the canvas background.
+    std::uint32_t canvas_bg = r2d::rgba(28, 30, 36);
+    std::uint32_t grid_minor = r2d::rgba(255, 255, 255, 18);   // 7%
+    std::uint32_t grid_major = r2d::rgba(255, 255, 255, 46);  // 18%
+    std::uint32_t grid_axis = r2d::rgba(84, 144, 212, 76);    // 30%
 
     // Metrics, gui-space pixels.
     float control_height = 28.0f;  // the one deliberate stock bump of
@@ -299,6 +313,10 @@ inline constexpr ChromeTheme kLightChrome{
     .bar_bg = r2d::rgba(232, 233, 238),
     .veil = r2d::rgba(96, 96, 96, 110),
     .shadow = r2d::rgba(50, 50, 55, 70),
+    .canvas_bg = r2d::rgba(238, 239, 243),
+    .grid_minor = r2d::rgba(0, 0, 0, 20),   // 8%
+    .grid_major = r2d::rgba(0, 0, 0, 51),  // 20%
+    .grid_axis = r2d::rgba(38, 122, 203, 80),
 };
 
 // Multiplies a packed 0xRRGGBBAA color's alpha channel - the alpha is

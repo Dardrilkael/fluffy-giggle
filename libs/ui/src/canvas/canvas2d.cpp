@@ -240,6 +240,23 @@ void CommandListCanvas::fill_rounded_rect(float x, float y, float w, float h,
     fill(color);
 }
 
+void CommandListCanvas::fill_rects(const Point* corners, int count, float w,
+                                   float h, std::uint32_t color) {
+    if (count <= 0 || !(w > 0.0f) || !(h > 0.0f)) {
+        return;
+    }
+    CanvasCmd c;
+    c.kind = CanvasCmdKind::fill_rects;
+    c.points.resize(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        c.points[static_cast<std::size_t>(i)] = to_screen(corners[i]);
+    }
+    c.w = w;
+    c.h = h;
+    c.color = color;
+    cmds.push_back(std::move(c));
+}
+
 float CommandListCanvas::draw_text(float x, float y, const char* utf8,
                                    const r2d::Font& font, std::uint32_t color) {
     const Point screen = to_screen({x, y});
@@ -462,6 +479,23 @@ void Renderer2DCanvas::fill_rounded_rect(float x, float y, float w, float h,
     }
     close_path();
     fill(color);
+}
+
+void Renderer2DCanvas::fill_rects(const Point* corners, int count, float w,
+                                  float h, std::uint32_t color) {
+    // Each rect is ONE r2d quad - the draw_image contract (the
+    // transformed top-left and bottom-right), no tessellation and no
+    // per-rect vector. The batch's own storage is the caller's stack
+    // buffer, so a 20k-dot grid frame allocates nothing per dot.
+    if (count <= 0 || !(w > 0.0f) || !(h > 0.0f)) {
+        return;
+    }
+    for (int i = 0; i < count; ++i) {
+        const Point& p = corners[i];
+        const Point tl = to_screen(p);
+        const Point br = to_screen({p.x + w, p.y + h});
+        r2d::draw_quad(tl.x, tl.y, br.x - tl.x, br.y - tl.y, color);
+    }
 }
 
 float Renderer2DCanvas::draw_text(float x, float y, const char* utf8,

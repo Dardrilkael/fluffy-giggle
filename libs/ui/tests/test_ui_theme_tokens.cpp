@@ -167,6 +167,10 @@ TEST_CASE("every new token round-trips through the theme json") {
     styled.chrome.shadow_offset_y = 4.0f;
     styled.chrome.anim_duration = 0.2f;
     styled.chrome.anim_enabled = false;
+    styled.chrome.canvas_bg = 0x1C1E24FFu;
+    styled.chrome.grid_minor = 0xFFFFFF13u;
+    styled.chrome.grid_major = 0xFFFFFF2Eu;
+    styled.chrome.grid_axis = 0x5490D04Cu;
 
     const std::string text = write_theme(styled);
 
@@ -184,6 +188,10 @@ TEST_CASE("every new token round-trips through the theme json") {
     CHECK(text.find("\"shadow_offset_y\": 4.0") != std::string::npos);
     CHECK(text.find("\"anim_duration\": 0.2") != std::string::npos);
     CHECK(text.find("\"anim_enabled\": false") != std::string::npos);
+    CHECK(text.find("\"canvas_bg\": \"#1C1E24FF\"") != std::string::npos);
+    CHECK(text.find("\"grid_minor\": \"#FFFFFF13\"") != std::string::npos);
+    CHECK(text.find("\"grid_major\": \"#FFFFFF2E\"") != std::string::npos);
+    CHECK(text.find("\"grid_axis\": \"#5490D04C\"") != std::string::npos);
 
     // Reading over the OTHER stock recovers every token - and the
     // write(read(.)) pair is byte-stable.
@@ -206,6 +214,10 @@ TEST_CASE("every new token round-trips through the theme json") {
           styled.chrome.shadow_offset_y);
     CHECK(over_light->chrome.anim_duration == styled.chrome.anim_duration);
     CHECK(over_light->chrome.anim_enabled == styled.chrome.anim_enabled);
+    CHECK(over_light->chrome.canvas_bg == styled.chrome.canvas_bg);
+    CHECK(over_light->chrome.grid_minor == styled.chrome.grid_minor);
+    CHECK(over_light->chrome.grid_major == styled.chrome.grid_major);
+    CHECK(over_light->chrome.grid_axis == styled.chrome.grid_axis);
     CHECK(write_theme(*over_light) == text);
 }
 
@@ -231,6 +243,10 @@ TEST_CASE("an old theme file loads with every new token at its default") {
     CHECK(loaded->chrome.shadow_blur == stock.shadow_blur);
     CHECK(loaded->chrome.anim_duration == stock.anim_duration);
     CHECK(loaded->chrome.anim_enabled == stock.anim_enabled);
+    CHECK(loaded->chrome.canvas_bg == stock.canvas_bg);
+    CHECK(loaded->chrome.grid_minor == stock.grid_minor);
+    CHECK(loaded->chrome.grid_major == stock.grid_major);
+    CHECK(loaded->chrome.grid_axis == stock.grid_axis);
 
     // A wrong-typed flag is refused like any wrong member: the fold is
     // all-or-nothing.
@@ -241,6 +257,29 @@ TEST_CASE("an old theme file loads with every new token at its default") {
         })json",
         default_dark());
     CHECK(!refused);
+}
+
+TEST_CASE("the canvas grid tokens answer the brief on both stocks") {
+    // The stage-16 faces: the canvas floor is its own step away from
+    // panel_bg (never black), the grid alphas sit in the brief's bands
+    // (minor 6-8%, major 16-20% - the contrast answer for decorative
+    // marks on the canvas background), and the axis face is an
+    // accent-family color at a modest alpha. Decorative like border:
+    // no WCAG pair is checked.
+    for (const ChromeTheme* chrome : {&kDefaultChrome, &kLightChrome}) {
+        CHECK((chrome->canvas_bg & 0xFFu) == 0xFFu);  // opaque floor
+        CHECK(chrome->canvas_bg != chrome->panel_bg);  // its own step
+        const int minor = chrome->grid_minor & 0xFFu;
+        const int major = chrome->grid_major & 0xFFu;
+        CHECK(minor >= 15);   // ~6%
+        CHECK(minor <= 21);   // ~8%
+        CHECK(major >= 41);   // ~16%
+        CHECK(major <= 51);   // ~20%
+        CHECK(major > minor * 2);  // structure carries, texture fades
+        const int axis = chrome->grid_axis & 0xFFu;
+        CHECK(axis > major);   // the origin reads above the lattice
+        CHECK(axis < 128);     // ...without shouting
+    }
 }
 
 TEST_CASE("the stock documents name the bundled face") {

@@ -141,6 +141,15 @@ public:
     // A filled rounded rectangle.
     virtual void fill_rounded_rect(float x, float y, float w, float h,
                                    float r, std::uint32_t color) = 0;
+    // A batch of axis-aligned rects, one uniform size, one color -
+    // the dot grid's fast path. The Points are the rects' top-left
+    // corners in LOCAL space; w/h are the size in local units (the
+    // canvas transforms the corners; a rotated transform is not this
+    // call's contract). One call per style group: no path, no
+    // tessellation, and on the renderer side each rect is one r2d
+    // quad - never a vector per dot.
+    virtual void fill_rects(const Point* corners, int count, float w,
+                            float h, std::uint32_t color) = 0;
 
     // --- text ----------------------------------------------------------------
     // Draws one line of UTF-8 text at (x, y) [the line box's top-left
@@ -181,6 +190,7 @@ enum class CanvasCmdKind : std::uint8_t {
     draw_image = 4,
     push_clip = 5,
     pop_clip = 6,
+    fill_rects = 7,  // the batched dot-grid quads (w/h are the uniform size)
 };
 
 struct CanvasCmd {
@@ -235,6 +245,8 @@ public:
                              float r, const Paint& paint) override;
     void fill_rounded_rect(float x, float y, float w, float h,
                            float r, std::uint32_t color) override;
+    void fill_rects(const Point* corners, int count, float w,
+                    float h, std::uint32_t color) override;
 
     float draw_text(float x, float y, const char* utf8,
                     const r2d::Font& font,
@@ -310,6 +322,8 @@ public:
                              float r, const Paint& paint) override;
     void fill_rounded_rect(float x, float y, float w, float h,
                            float r, std::uint32_t color) override;
+    void fill_rects(const Point* corners, int count, float w,
+                    float h, std::uint32_t color) override;
 
     float draw_text(float x, float y, const char* utf8,
                     const r2d::Font& font,

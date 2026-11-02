@@ -3,12 +3,14 @@
 // ViewTransform2D: the camera a CanvasView drives. Pan, zoom (and
 // optional rotation) with world<->screen mapping, zoom-at-point (the
 // invariant: the world point under the cursor does not move), zoom
-// limits, fit-to-rect. The adaptive grid renderer draws major/minor
-// lines (or dots) that fade by zoom and snap in world units.
+// limits, fit-to-rect.
 //
 // All pure math - no gui, no input, no allocation. The CanvasView
 // widget owns one of these, feeds it input events, and hands it (plus
-// a Canvas2D&) to the host's draw callback each frame.
+// a Canvas2D&) to the host's draw callback each frame. The GRID is
+// not this header's - grid.hpp owns it (one implementation for the
+// whole library); CanvasView carries a GridSpec and draws it through
+// the same compute/draw pair the schematic editor rides.
 
 #include <cmath>
 #include <cstdint>
@@ -16,6 +18,7 @@
 
 #include <ws/math/vecmath.hpp>
 #include <ws/ui/canvas/canvas2d.hpp>
+#include <ws/ui/canvas/grid.hpp>  // the grid CanvasView draws (one system)
 #include <ws/ui/gui/rect.hpp>  // gui::Rect (the layout rect the view occupies)
 
 namespace ws::ui::canvas {
@@ -73,34 +76,15 @@ private:
     float rot_sin() const { return std::sin(rotation); }
 };
 
-// --- adaptive grid -----------------------------------------------------------
-// Draws a grid that adapts to the zoom: at any zoom, the grid spacing
-// (in world units) is the largest power-of-10 multiple of the base
-// spacing that yields ~2-10 screen pixels per cell. Major lines every
-// 5 or 10 cells; minor lines fade by zoom (alpha ramps 0->1->0 as the
-// spacing transitions between levels, so the grid never pops).
-//
-// `grid` is the Canvas2D to draw into (the canvas's transform should be
-// the identity - the grid draws in SCREEN space, reading the view's
-// world_to_screen to place lines). `base_spacing` is the smallest world
-// unit the grid ever snaps to (1.0 for a unit grid, 0.001 for a mm
-// grid).
-struct GridStyle {
-    float base_spacing = 1.0f;       // smallest world unit (snap)
-    std::uint32_t minor_color = 0xFFFFFF20;  // faint
-    std::uint32_t major_color = 0xFFFFFF60;  // stronger
-    std::uint32_t origin_color = 0xFFFFFF80;  // the x=0 / y=0 axes
-    int major_every = 5;             // major line every N minor cells
-    float target_pixels = 80.0f;     // ~this many screen px per cell
-    bool dots = false;               // dots at intersections (else lines)
-};
-
-// Draws the adaptive grid into `canvas` for the given view. The grid
-// covers the viewport (view.viewport_w x view.viewport_h) with lines
-// in world space, rendered through the canvas. The canvas's transform
-// should be the identity (the grid uses world_to_screen directly).
-void draw_grid(Canvas2D& canvas, const ViewTransform2D& view,
-               const GridStyle& style = {});
+// --- the grid -----------------------------------------------------------------
+// The grid the view draws is grid.hpp's (GridSpec + compute_grid +
+// draw_grid): the x5 level ladder over the spec's base spacing, dots
+// or hairlines pixel-snapped in SCREEN space. CanvasView maps itself
+// onto a GridFrame each draw (world y-down, no flip - its own
+// convention) and skips the grid entirely while rotated: the lattice
+// is axis-aligned by contract, and snapping a rotated lattice to
+// device pixels is meaningless (rotation has no user today; the
+// limit is documented, not silently wrong).
 
 // --- CanvasView --------------------------------------------------------------
 // A widget that owns a view transform, applies a pan/zoom input policy,
@@ -141,6 +125,12 @@ public:
     ViewTransform2D view;
     CanvasViewInputPolicy input_policy;
 
+    // The grid the view draws under its content (grid.hpp's system -
+    // the same one the schematic editor rides). Defaults to the stock
+    // dot lattice; a host restyles it in place (spacing, faces, dots
+    // vs lines, thresholds).
+    GridSpec grid;
+
     // Sets the host's draw callback. Called every frame the view is
     // visible; the callback draws into the canvas (transform already
     // applied from the view).
@@ -149,13 +139,15 @@ public:
     // Drives the view for one frame: processes pending input (wheel,
     // drag), applies the view to the canvas, calls the draw callback,
     // and draws the grid (if show_grid). `rect` is the screen-space
-    // rect the view occupies (from the gui layout). `canvas` is the
-    // renderer canvas (the view sets its transform from `view`).
+    // rect the view occupies (from the gui layout). `canvas` is any
+    // Canvas2D (the base: a live app passes its Renderer2DCanvas, a
+    // headless test a CommandListCanvas - the view sets the canvas's
+    // transform from `view`).
     //
     // Input is fed via the feed_* methods (the gui or the host calls
     // them from its event dispatch); the view accumulates pending
     // deltas and applies them on the next draw.
-    void draw(const ws::ui::gui::Rect& rect, Renderer2DCanvas& canvas,
+    void draw(const ws::ui::gui::Rect& rect, Canvas2D& canvas,
               bool show_grid = true);
 
     // Input feeders (called by the host's event handler; the view

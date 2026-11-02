@@ -37,7 +37,9 @@ libs/ui/
     gui/  command_views.hpp, gui_context.hpp, id_stack.hpp, job_progress.hpp,
           layout_cursor.hpp, property_grid.hpp, rect.hpp, theme.hpp, theme_color.hpp,
           theme_data.hpp, theme_json.hpp, widgets.hpp, scoped.hpp
-    canvas/  canvas2d.hpp, tessellation.hpp, view.hpp  (stage 14)
+    canvas/  canvas2d.hpp, tessellation.hpp, view.hpp  (stage 14),
+              grid.hpp  (stage 16: the one grid system - spec, math,
+              pixel-snapped draw - shared by CanvasView and apps)
     shell/  dock.hpp, document.hpp, errors.hpp, panels.hpp, shell.hpp  (stage 15)
   src/
     app/        app.cpp (pimpl: frame loop + backends)
@@ -50,7 +52,8 @@ libs/ui/
                          dialogs,menus,toasts,combo,text_input,table}.cpp,
                 command_{views,palette,keymap}.cpp, property_grid.cpp,
                 theme_{color,data,json}.cpp
-    canvas/     canvas2d.cpp, tessellation.cpp, view.cpp  (stage 14)
+    canvas/     canvas2d.cpp, tessellation.cpp, view.cpp  (stage 14),
+                grid.cpp  (stage 16)
     shell/      dock.cpp, panels.cpp, document.cpp, shell.cpp  (stage 15)
     widgets/    widgets.cpp (ImGui/ImPlot wrapper)
   tests/

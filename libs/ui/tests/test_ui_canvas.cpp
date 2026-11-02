@@ -839,48 +839,58 @@ TEST_CASE("view_transform: pan_by moves the content with the cursor") {
     CHECK(world_after.y == doctest::Approx(world_before.y - 5.0f).epsilon(1e-4f));
 }
 
-TEST_CASE("grid: adapts spacing to zoom") {
-    // The adaptive grid picks a power-of-10 spacing whose screen size
-    // is close to target_pixels, keeping the visual density roughly
-    // constant across zooms. We verify:
-    //   - the grid draws a reasonable number of lines (not 0, not
-    //     thousands) at every zoom,
-    //   - the line count stays bounded (the density is stable),
-    //   - at very different zooms the world-space spacing differs (the
-    //     grid really does adapt, not draw the same world lines).
+TEST_CASE("grid: the view draws the shared grid system") {
+    // CanvasView::draw rides grid.hpp's system (one implementation
+    // for the whole library - the stage-16 rework). The view's own
+    // GridSpec member restyles it; the drawn lattice stays bounded
+    // and non-empty at every zoom, extreme or idle.
     CommandListCanvas c;
-    ViewTransform2D v;
-    v.viewport_w = 800.0f;
-    v.viewport_h = 600.0f;
-    GridStyle style;
-    style.target_pixels = 80.0f;
-    style.base_spacing = 1.0f;
+    CanvasView view;
+    GridSpec spec;  // defaults: the dot lattice
+    spec.show_dots = false;  // ...restyled to hairlines here
+    view.grid = spec;
 
-    // At zoom 1: spacing ~100 world units (screen 100px, close to 80).
-    v.zoom = 1.0f;
+    const ws::ui::gui::Rect rect{0.0f, 0.0f, 800.0f, 600.0f};
+
+    // Idle zoom: a reasonable, bounded line count.
+    view.view.viewport_w = 800.0f;
+    view.view.viewport_h = 600.0f;
+    view.view.zoom = 26.0f;
     c.cmds.clear();
-    draw_grid(c, v, style);
-    const std::size_t lines_zoom1 = c.count(CanvasCmdKind::stroke_polyline);
-    CHECK(lines_zoom1 > 0);
-    CHECK(lines_zoom1 < 100);  // bounded, not one-per-pixel
+    view.draw(rect, c, true);
+    const std::size_t lines_zoom26 = c.count(CanvasCmdKind::stroke_polyline);
+    CHECK(lines_zoom26 > 10);   // a real grid, axes included
+    CHECK(lines_zoom26 < 400);  // bounded by the level ladder + cap
 
-    // At zoom 100: spacing ~1 world unit (screen 100px).
-    v.zoom = 100.0f;
+    // Deep zoom-out: the ladder coarsens, the count stays bounded
+    // (no dense gray block), and the grid never disappears.
+    view.view.zoom = 0.001f;
+    view.view.min_zoom = 1e-6f;
     c.cmds.clear();
-    draw_grid(c, v, style);
-    const std::size_t lines_zoom100 = c.count(CanvasCmdKind::stroke_polyline);
-    CHECK(lines_zoom100 > 0);
-    CHECK(lines_zoom100 < 100);
+    view.draw(rect, c, true);
+    const std::size_t lines_out = c.count(CanvasCmdKind::stroke_polyline);
+    CHECK(lines_out > 0);
+    CHECK(lines_out < 400);
 
-    // The line counts are similar (the density is stable) - both in
-    // the 10-30 range for an 800x600 viewport.
-    CHECK(lines_zoom1 == lines_zoom100);
-
-    // At extreme zoom-out, the grid still draws something (spacing
-    // grows to keep cells visible).
-    v.zoom = 0.001f;
-    v.min_zoom = 1e-6f;
+    // Deep zoom-in: the base grid is never subdivided, so the count
+    // only falls as the cells grow past the screen.
+    view.view.zoom = 200.0f;
+    view.view.max_zoom = 1e6f;
     c.cmds.clear();
-    draw_grid(c, v, style);
-    CHECK(c.count(CanvasCmdKind::stroke_polyline) > 0);
+    view.draw(rect, c, true);
+    const std::size_t lines_in = c.count(CanvasCmdKind::stroke_polyline);
+    CHECK(lines_in > 0);
+    CHECK(lines_in < lines_zoom26);
+
+    // The default spec draws dots (the schematic look), through the
+    // batched fill_rects path - never a fill_circle per dot.
+    CanvasView dots_view;
+    dots_view.view.viewport_w = 800.0f;
+    dots_view.view.viewport_h = 600.0f;
+    dots_view.view.zoom = 26.0f;
+    c.cmds.clear();
+    dots_view.draw(rect, c, true);
+    CHECK(c.count(CanvasCmdKind::fill_rects) > 0);
+    CHECK(c.count(CanvasCmdKind::fill_circle) == 0);
+    CHECK(c.count(CanvasCmdKind::fill_polygon) == 0);
 }
