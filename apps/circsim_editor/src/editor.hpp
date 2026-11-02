@@ -51,6 +51,7 @@
 #include <ws/circsim/model.hpp>
 #include <ws/circsim/nets.hpp>
 #include <ws/circsim/plot.hpp>
+#include <ws/circsim/render.hpp>
 #include <ws/math/vecmath.hpp>
 #include <ws/spice/run.hpp>
 #include <ws/ui/canvas/canvas2d.hpp>
@@ -466,10 +467,12 @@ struct Editor {
 // The shared symbol renderer: `draw` prims + pin stubs through a
 // canvas, in WORLD space (the canvas transform must be the editor's).
 // `pos`/`rot`/`mirror` are the placement; used for placed parts, the
-// placement ghost and the palette's previews alike. The pin stubs
-// connect each pin to the picture (the built-in tables' draw prims
-// already carry their leads; the stubs only fire for symbols whose
-// prims fall short of their pins - a .csym safety net).
+// placement ghost and the palette's previews alike. The geometry is
+// ws::circsim::render_symbol's (the stage-17a seam shared with the
+// CLI's SVG dump and the lib's tests); this is the painting half -
+// strokes to canvas calls. The pin-lead safety net rides the seam: a
+// pin no prim vertex touches gets a stub into the body (the .csym
+// path's net for symbols whose prims fall short of their pins).
 void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
                  Pos pos, int rot, bool mirror,
                  const canvas::Paint& body, std::uint32_t text_color,

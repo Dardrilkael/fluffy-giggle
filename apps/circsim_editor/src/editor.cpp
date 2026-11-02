@@ -485,147 +485,55 @@ void Editor::status(std::string text) const {
 void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
                  Pos pos, int rot, bool mirror, const Paint& body,
                  std::uint32_t text_color, const ws::ui::r2d::Font* font) {
-    // The placement is a Part-shaped transform (transform_pos's exact
-    // math - mirror, then rotation, then translation - so the picture
-    // and the pins can never disagree).
+    // The geometry lives in ws::circsim's render seam (render_symbol):
+    // one pure flattening shared with the CLI's SVG dump and the tests.
+    // This is the painting half only - strokes to canvas calls.
     ws::circsim::Part placement{};
     placement.pos = pos;
     placement.rot = rot;
     placement.mirror = mirror;
-    const auto place = [&](Pos local) {
-        const Pos w = ws::circsim::transform_pos(placement, local);
-        return canvas::Point{static_cast<float>(w.x),
-                             static_cast<float>(w.y)};
-    };
-
-    // Does any draw primitive vertex sit on this pin? (The built-in
-    // tables carry their own leads; the stub below is the .csym
-    // safety net for symbols whose prims fall short of their pins.)
-    const auto prim_touches = [&](const Pos& pin) {
-        for (const ws::circsim::DrawPrim& d : sym.draw) {
-            for (const Pos& v : d.pts) {
-                if (eps_eq(v.x, pin.x, 0.25) && eps_eq(v.y, pin.y, 0.25)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    };
-
-    for (const ws::circsim::DrawPrim& d : sym.draw) {
-        switch (d.kind) {
-            case ws::circsim::DrawPrim::Kind::Line:
-                if (d.pts.size() >= 2u) {
-                    c.stroke_line(place(d.pts[0]), place(d.pts[1]), body);
-                }
+    constexpr double kRad = 3.14159265358979323846 / 180.0;
+    for (const ws::circsim::SymbolStroke& s :
+         ws::circsim::render_symbol(sym, placement)) {
+        const auto pt = [&](std::size_t i) {
+            return Point{static_cast<float>(s.pts[i].x),
+                         static_cast<float>(s.pts[i].y)};
+        };
+        switch (s.kind) {
+            case ws::circsim::SymbolStroke::Kind::Line:
+                c.stroke_line(pt(0), pt(1), body);
                 break;
-            case ws::circsim::DrawPrim::Kind::Poly: {
-                std::vector<canvas::Point> pts;
-                pts.reserve(d.pts.size());
-                for (const Pos& p : d.pts) {
-                    pts.push_back(place(p));
+            case ws::circsim::SymbolStroke::Kind::Poly: {
+                std::vector<Point> pts;
+                pts.reserve(s.pts.size());
+                for (std::size_t i = 0; i < s.pts.size(); ++i) {
+                    pts.push_back(pt(i));
                 }
-                if (pts.size() >= 2u) {
-                    c.stroke_polyline(pts.data(), static_cast<int>(pts.size()),
-                                      body, true);
-                }
+                c.stroke_polyline(pts.data(),
+                                  static_cast<int>(pts.size()), body,
+                                  s.closed);
                 break;
             }
-            case ws::circsim::DrawPrim::Kind::Rect: {
-                if (d.pts.size() >= 2u) {
-                    const canvas::Point a = place(d.pts[0]);
-                    const canvas::Point b = place(d.pts[1]);
-                    // A closed quad, not an axis-aligned rect call: the
-                    // placement may have rotated the box.
-                    const canvas::Point quad[4] = {
-                        a, {b.x, a.y}, b, {a.x, b.y}};
-                    c.stroke_polyline(quad, 4, body, true);
-                }
+            case ws::circsim::SymbolStroke::Kind::Circle:
+                c.stroke_circle(pt(0), static_cast<float>(s.r), body);
                 break;
-            }
-            case ws::circsim::DrawPrim::Kind::Circle:
-                if (!d.pts.empty()) {
-                    c.stroke_circle(place(d.pts[0]),
-                                    static_cast<float>(d.r), body);
-                }
-                break;
-            case ws::circsim::DrawPrim::Kind::Arc: {
-                if (d.pts.empty()) {
-                    break;
-                }
-                // Mirror flips an arc to its reflection (angles
-                // negated about the y axis, sweep swapped); rotation
-                // adds to both ends. Both in degrees here, radians at
-                // the canvas seam.
-                double a0 = d.a0;
-                double a1 = d.a1;
-                if (mirror) {
-                    a0 = 180.0 - d.a1;
-                    a1 = 180.0 - d.a0;
-                }
-                const int add = ((rot % 360) + 360) % 360;
-                a0 += static_cast<double>(add);
-                a1 += static_cast<double>(add);
-                constexpr double kRad = 3.14159265358979323846 / 180.0;
-                c.arc(place(d.pts[0]), static_cast<float>(d.r),
-                      static_cast<float>(d.r), static_cast<float>(a0 * kRad),
-                      static_cast<float>(a1 * kRad));
+            case ws::circsim::SymbolStroke::Kind::Arc:
+                c.arc(pt(0), static_cast<float>(s.r),
+                      static_cast<float>(s.r),
+                      static_cast<float>(s.a0 * kRad),
+                      static_cast<float>(s.a1 * kRad));
                 c.stroke(body);
                 break;
-            }
-            case ws::circsim::DrawPrim::Kind::Dot:
-                if (!d.pts.empty()) {
-                    c.fill_circle(place(d.pts[0]), static_cast<float>(d.r),
-                                  body.color);
-                }
+            case ws::circsim::SymbolStroke::Kind::Dot:
+                c.fill_circle(pt(0), static_cast<float>(s.r), body.color);
                 break;
-            case ws::circsim::DrawPrim::Kind::Text:
-                if (!d.pts.empty() && font != nullptr && !d.text.empty()) {
-                    const canvas::Point at = place(d.pts[0]);
-                    (void)c.draw_text(at.x, at.y, d.text.c_str(), *font,
-                                      text_color);
+            case ws::circsim::SymbolStroke::Kind::Text:
+                if (font != nullptr && !s.text.empty()) {
+                    (void)c.draw_text(pt(0).x, pt(0).y, s.text.c_str(),
+                                      *font, text_color);
                 }
                 break;
         }
-    }
-
-    // The pin-lead safety net: a pin nothing touches gets a stub
-    // pointing into the body (opposite the pin's own direction).
-    const Bounds b = ws::circsim::symbol_bounds(sym);
-    for (const ws::circsim::PinDef& pin : sym.pins) {
-        const Pos local{pin.dx, pin.dy};
-        if (prim_touches(local)) {
-            continue;
-        }
-        const Pos u = [&] {
-            switch ((((pin.dir + 180) % 360) + 360) % 360) {
-                case 0: return Pos{1.0, 0.0};
-                case 90: return Pos{0.0, 1.0};
-                case 180: return Pos{-1.0, 0.0};
-                default: return Pos{0.0, -1.0};
-            }
-        }();
-        // Until the bounds' edge (plus a little overlap), one unit
-        // minimum, three maximum - a lead, not a transmission line.
-        const bool outside_x =
-            local.x < b.min_x || local.x > b.max_x;
-        const bool outside_y =
-            local.y < b.min_y || local.y > b.max_y;
-        double reach = 1.0;
-        if (outside_x) {
-            reach = std::fabs(u.x) > 0.0
-                        ? std::fabs(local.x - (u.x > 0.0 ? b.max_x : b.min_x))
-                        : 1.0;
-        } else if (outside_y) {
-            reach = std::fabs(u.y) > 0.0
-                        ? std::fabs(local.y - (u.y > 0.0 ? b.max_y : b.min_y))
-                        : 1.0;
-        }
-        reach = std::max(1.0, std::min(3.0, reach + 0.5));
-        c.stroke_line(place(local),
-                      place(Pos{local.x + u.x * reach,
-                                local.y + u.y * reach}),
-                      body);
     }
 }
 
