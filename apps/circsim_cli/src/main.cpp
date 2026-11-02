@@ -3,9 +3,15 @@
 // lives in the lib.
 //
 //   circsim_cli run <file.csim> [-o out.csv|-] [--analysis spec]...
-//                        [--format csv|json] [-I <dir>]...
-//   circsim_cli erc <file.csim>
-//   circsim_cli netlist <file.csim> [-o out|-]
+//                        [--format csv|json] [-I <dir>]... [-S <lib.csym>]...
+//   circsim_cli erc <file.csim> [-S <lib.csym>]...
+//   circsim_cli netlist <file.csim> [-o out|-] [-S <lib.csym>]...
+//   circsim_cli symbols [-S <lib.csym>]... [--json]
+//
+// -S layers .csym symbol libraries over the built-in table (later files
+// win; redefinitions report a warning). `symbols` lists the effective
+// table - every key, its SPICE letter and pin count; --json dumps the
+// full table (pins, emit, typed params, draw primitives).
 //
 // Exit codes: 0 success; 1 simulation or ERC error; 2 usage or file I/O
 // (the workspace convention). Warnings print to stderr and never fail a
@@ -21,6 +27,7 @@
 #include <ws/circsim/erc.hpp>
 #include <ws/circsim/export.hpp>
 #include <ws/circsim/format.hpp>
+#include <ws/circsim/library.hpp>
 #include <ws/spice/error.hpp>
 #include <ws/spice/results.hpp>
 
@@ -31,13 +38,18 @@ namespace fs = std::filesystem;
 int usage() {
     std::fprintf(stderr,
                  "usage: circsim_cli run <file.csim> [-o out.csv|-]"
-                 " [--analysis spec]... [--format csv|json] [-I <dir>]...\n"
+                 " [--analysis spec]... [--format csv|json] [-I <dir>]..."
+                 " [-S <lib.csym>]...\n"
                  "                  --analysis spec: 'op' | 'dc V1 0 5 0.1' |"
                  " 'tran 1u 1m [tstart [tmax]] [uic]' | 'ac dec 10 1 100k'\n"
                  "                                  (repeatable; replaces the"
                  " file's setup; default .op)\n"
-                 "       circsim_cli erc <file.csim>\n"
-                 "       circsim_cli netlist <file.csim> [-o out|-]\n");
+                 "                  -S: layer a .csym symbol library over the"
+                 " built-ins (repeatable, later wins)\n"
+                 "       circsim_cli erc <file.csim> [-S <lib.csym>]...\n"
+                 "       circsim_cli netlist <file.csim> [-o out|-]"
+                 " [-S <lib.csym>]...\n"
+                 "       circsim_cli symbols [-S <lib.csym>]... [--json]\n");
     return 2;
 }
 
@@ -75,6 +87,42 @@ int load(const fs::path& path, ws::circsim::Schematic& out) {
     }
     out = std::move(*loaded);
     return 0;
+}
+
+// Layers every -S library (in order) onto `lib`, printing diagnostics.
+// Hard failures (unreadable file, not a library) fail to exit 2.
+int load_symbols(const std::vector<std::string>& paths,
+                 ws::circsim::SymbolLibrary& lib) {
+    for (const std::string& path : paths) {
+        const auto text = read_file(fs::path(path));
+        if (!text) {
+            return io_error(text.error().message);
+        }
+        std::vector<ws::circsim::Diag> diags;
+        const ws::core::Status st =
+            lib.load_text(*text, path, diags);
+        for (const ws::circsim::Diag& d : diags) {
+            std::fprintf(stderr, "%s\n", d.render().c_str());
+        }
+        if (!st) {
+            std::fprintf(stderr, "error: %s\n", st.error().message.c_str());
+            return 2;
+        }
+    }
+    return 0;
+}
+
+// Consumes one -S/--symbols value (the caller matched the flag);
+// returns false (after printing) when the flag has no argument left.
+bool take_symbols_value(const std::vector<std::string>& args, std::size_t& i,
+                         std::vector<std::string>& out) {
+    if (i + 1 >= args.size()) {
+        std::fprintf(stderr, "error: %s needs a .csym file name\n",
+                     args[i].c_str());
+        return false;
+    }
+    out.push_back(args[++i]);
+    return true;
 }
 
 int write_out(const std::string& out_path, const std::string& body) {
@@ -123,6 +171,7 @@ int cmd_run(const std::vector<std::string>& args) {
     std::string out_path;
     std::string format = "csv";
     std::vector<std::string> include_dirs;
+    std::vector<std::string> symbol_libs;
     std::vector<ws::circsim::AnalysisSpec> analyses;
     bool have_override = false;
     for (std::size_t i = 1; i < args.size(); ++i) {
@@ -145,6 +194,10 @@ int cmd_run(const std::vector<std::string>& args) {
                 return usage();
             }
             include_dirs.push_back(args[++i]);
+        } else if (args[i] == "-S" || args[i] == "--symbols") {
+            if (!take_symbols_value(args, i, symbol_libs)) {
+                return usage();
+            }
         } else if (args[i] == "--analysis") {
             if (i + 1 >= args.size()) {
                 std::fprintf(stderr, "error: --analysis needs a spec\n");
@@ -169,12 +222,17 @@ int cmd_run(const std::vector<std::string>& args) {
     if (const int rc = load(csim_path, s); rc != 0) {
         return rc;
     }
+    ws::circsim::SymbolLibrary lib;
+    if (const int rc = load_symbols(symbol_libs, lib); rc != 0) {
+        return rc;
+    }
 
     const ws::circsim::RunOutcome out = ws::circsim::run_schematic(
         s, have_override ? &analyses : nullptr,
         disk_resolver(include_dirs, csim_path.has_parent_path()
                                         ? csim_path.parent_path()
-                                        : fs::path(".")));
+                                        : fs::path(".")),
+        symbol_libs.empty() ? nullptr : &lib);
     for (const ws::circsim::Diag& d : out.problems) {
         std::fprintf(stderr, "%s\n", d.render().c_str());
     }
@@ -204,14 +262,31 @@ int cmd_run(const std::vector<std::string>& args) {
 }
 
 int cmd_erc(const std::vector<std::string>& args) {
-    if (args.size() != 1) {
+    if (args.empty()) {
         return usage();
+    }
+    std::vector<std::string> symbol_libs;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "-S" || args[i] == "--symbols") {
+            if (!take_symbols_value(args, i, symbol_libs)) {
+                return usage();
+            }
+        } else {
+            std::fprintf(stderr, "error: unknown option '%s'\n",
+                         args[i].c_str());
+            return usage();
+        }
     }
     ws::circsim::Schematic s;
     if (const int rc = load(fs::path(args[0]), s); rc != 0) {
         return rc;
     }
-    const std::vector<ws::circsim::Diag> diags = ws::circsim::run_erc(s);
+    ws::circsim::SymbolLibrary lib;
+    if (const int rc = load_symbols(symbol_libs, lib); rc != 0) {
+        return rc;
+    }
+    const std::vector<ws::circsim::Diag> diags = ws::circsim::run_erc(
+        s, symbol_libs.empty() ? nullptr : &lib);
     std::size_t errors = 0;
     std::size_t warnings = 0;
     for (const ws::circsim::Diag& d : diags) {
@@ -232,6 +307,7 @@ int cmd_netlist(const std::vector<std::string>& args) {
         return usage();
     }
     std::string out_path;
+    std::vector<std::string> symbol_libs;
     for (std::size_t i = 1; i < args.size(); ++i) {
         if (args[i] == "-o") {
             if (i + 1 >= args.size()) {
@@ -239,6 +315,10 @@ int cmd_netlist(const std::vector<std::string>& args) {
                 return usage();
             }
             out_path = args[++i];
+        } else if (args[i] == "-S" || args[i] == "--symbols") {
+            if (!take_symbols_value(args, i, symbol_libs)) {
+                return usage();
+            }
         } else {
             std::fprintf(stderr, "error: unknown option '%s'\n",
                          args[i].c_str());
@@ -250,16 +330,59 @@ int cmd_netlist(const std::vector<std::string>& args) {
     if (const int rc = load(fs::path(args[0]), s); rc != 0) {
         return rc;
     }
-    const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+    ws::circsim::SymbolLibrary lib;
+    if (const int rc = load_symbols(symbol_libs, lib); rc != 0) {
+        return rc;
+    }
+    const ws::circsim::NetBuild nets =
+        ws::circsim::build_nets(s, symbol_libs.empty() ? nullptr : &lib);
     for (const ws::circsim::Diag& d : nets.diags) {
         std::fprintf(stderr, "%s\n", d.render().c_str());
     }
-    const auto deck = ws::circsim::export_deck(s, nets.nets);
+    const auto deck = ws::circsim::export_deck(
+        s, nets.nets, nullptr, nullptr,
+        symbol_libs.empty() ? nullptr : &lib);
     if (!deck) {
         std::fprintf(stderr, "error: %s\n", deck.error().message.c_str());
         return 1;
     }
     return write_out(out_path, deck->text);
+}
+
+int cmd_symbols(const std::vector<std::string>& args) {
+    std::vector<std::string> symbol_libs;
+    bool json = false;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == "--json") {
+            json = true;
+        } else if (args[i] == "-S" || args[i] == "--symbols") {
+            if (!take_symbols_value(args, i, symbol_libs)) {
+                return usage();
+            }
+        } else {
+            std::fprintf(stderr, "error: unknown option '%s'\n",
+                         args[i].c_str());
+            return usage();
+        }
+    }
+    ws::circsim::SymbolLibrary lib;
+    if (const int rc = load_symbols(symbol_libs, lib); rc != 0) {
+        return rc;
+    }
+    if (json) {
+        return write_out("", lib.save(true));  // the full effective table
+    }
+    std::fprintf(stdout, "%-12s %-5s %-4s %-24s %s\n", "KEY", "SPICE",
+                 "PINS", "NAME", "REF");
+    for (const ws::circsim::SymbolDef& s : lib.symbols()) {
+        const std::string letter =
+            s.spice_letter == 0 ? std::string("-")
+                                : std::string(1, s.spice_letter);
+        std::fprintf(stdout, "%-12s %-5s %-4zu %-24s %s\n", s.key.c_str(),
+                     letter.c_str(), s.pins.size(), s.name.c_str(),
+                     s.ref_prefix.c_str());
+    }
+    return 0;
 }
 
 }  // namespace
@@ -277,6 +400,10 @@ int main(int argc, char** argv) {
     }
     if (args[0] == "netlist") {
         return cmd_netlist(
+            std::vector<std::string>(args.begin() + 1, args.end()));
+    }
+    if (args[0] == "symbols") {
+        return cmd_symbols(
             std::vector<std::string>(args.begin() + 1, args.end()));
     }
     std::fprintf(stderr, "error: unknown command '%s'\n", args[0].c_str());

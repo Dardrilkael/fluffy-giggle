@@ -1,0 +1,27 @@
+{
+    "format": "circsim",
+    "version": 1,
+    "grid": 1.0,
+    "next_id": 12,
+    "parts": [
+        {"id": 1, "symbol": "v", "ref": "V1", "value": "1", "pos": [0.0, -6.0], "rot": 0, "mirror": false, "params": {"ac": "1"}},
+        {"id": 2, "symbol": "r", "ref": "Rs", "value": "50", "pos": [8.0, 0.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 3, "symbol": "tline", "ref": "T1", "value": "", "pos": [15.0, -2.0], "rot": 0, "mirror": false, "params": {"z0": "50", "td": "1u"}},
+        {"id": 4, "symbol": "gnd", "ref": "", "value": "", "pos": [1.0, -6.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 5, "symbol": "gnd", "ref": "", "value": "", "pos": [11.0, -3.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 6, "symbol": "gnd", "ref": "", "value": "", "pos": [19.0, -3.0], "rot": 0, "mirror": false, "params": {}}
+    ],
+    "junctions": [],
+    "wires": [
+        {"id": 7, "a": {"pin": {"part": 1, "pin": 0}}, "b": {"pin": {"part": 2, "pin": 0}}, "waypoints": [[-1.0, 0.0]], "ortho": true},
+        {"id": 8, "a": {"pin": {"part": 2, "pin": 1}}, "b": {"pin": {"part": 3, "pin": 0}}, "waypoints": [], "ortho": true}
+    ],
+    "labels": [
+        {"id": 9, "pos": [2.0, 0.0], "name": "in"},
+        {"id": 10, "pos": [11.0, -0.5], "name": "a"},
+        {"id": 11, "pos": [19.0, -1.0], "name": "b"}
+    ],
+    "analysis": {"entries": [{"ac": {"sweep": "lin", "n": 3, "fstart": 250000.0, "fstop": 750000.0}}]},
+    "directives": "",
+    "view": {"zoom": 1.0, "center": [9.0, -3.0]}
+}

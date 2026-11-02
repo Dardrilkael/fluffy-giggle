@@ -98,9 +98,13 @@ One line each - the per-tree CLAUDE.md files carry the detail:
   (parts/junctions/wires/labels, ids never reused), the `.csim` JSON
   format (unknown fields preserved, tolerant load, atomic writes through
   the settings FileSystem), graph-based net building (reference edges +
-  exact-position coincidence; crossings never connect), ERC, and the
-  ws::spice deck export with its back-map - ws::spice is the only
-  simulator it ever talks to. Its CLI is `apps/circsim_cli`.
+  exact-position coincidence; crossings never connect), ERC, the
+  ws::spice deck export with its back-map, and the stage-2 `.csym`
+  symbol library (typed param specs ERC validates, drawing primitives
+  + bounds for the editor, layered over the built-ins - later
+  definitions win; `-S` on the CLI, `symbols` lists/dumps the effective
+  table) - ws::spice is the only simulator it ever talks to. Its CLI is
+  `apps/circsim_cli`.
 - `apps/*` - the executables.
 
 ## Read when

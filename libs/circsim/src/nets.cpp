@@ -111,9 +111,10 @@ Diag net_warn(std::string code, std::string message, std::string where) {
 
 }  // namespace
 
-NetBuild build_nets(const Schematic& s,
-                    const SymbolDef* (*find)(std::string_view)) {
+NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
     NetBuild out;
+    const SymbolLibrary& lib =
+        symbols != nullptr ? *symbols : builtin_library();
 
     // --- entities: pins of known-symbol parts, junctions, labels -------------
     std::vector<Entity> ents;
@@ -128,7 +129,7 @@ NetBuild build_nets(const Schematic& s,
     };
 
     for (const Part& p : s.parts()) {
-        const SymbolDef* sym = find(p.symbol);
+        const SymbolDef* sym = lib.find(p.symbol);
         if (sym == nullptr) {
             continue;  // the unknown-symbol diagnostic is ERC's to make
         }
@@ -315,7 +316,7 @@ NetBuild build_nets(const Schematic& s,
             }
         };
         for (const Part& p : s.parts()) {
-            const SymbolDef* sym = find(p.symbol);
+            const SymbolDef* sym = lib.find(p.symbol);
             if (sym == nullptr || !sym->fixed_net.has_value()) {
                 continue;
             }
@@ -398,7 +399,7 @@ NetBuild build_nets(const Schematic& s,
             if (p == nullptr) {
                 continue;
             }
-            const SymbolDef* sym = find(p->symbol);
+            const SymbolDef* sym = lib.find(p->symbol);
             if (sym == nullptr || !sym->fixed_net.has_value()) {
                 continue;
             }

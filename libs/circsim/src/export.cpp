@@ -285,8 +285,10 @@ ws::core::Result<AnalysisSpec> parse_analysis_spec(std::string_view text) {
 
 ws::core::Result<SpiceExport> export_deck(
     const Schematic& s, const NetList& nets, const std::vector<AnalysisSpec>* analyses,
-    std::vector<Diag>* diags) {
+    std::vector<Diag>* diags, const SymbolLibrary* symbols) {
     SpiceExport out;
+    const SymbolLibrary& lib =
+        symbols != nullptr ? *symbols : builtin_library();
 
     // Node tokens per net (ground is "0"), collision-checked ci.
     std::map<std::string, std::uint32_t, CiLess> token_owner;
@@ -323,7 +325,7 @@ ws::core::Result<SpiceExport> export_deck(
     };
     std::vector<Card> cards;
     for (const Part& p : s.parts()) {
-        const SymbolDef* sym = find_symbol(p.symbol);
+        const SymbolDef* sym = lib.find(p.symbol);
         if (sym == nullptr) {
             if (diags != nullptr) {
                 diags->push_back(mapped_diag(
@@ -511,10 +513,11 @@ Diag map_spice_error(const Schematic& s, const SpiceExport& map,
 
 RunOutcome run_schematic(const Schematic& s,
                          const std::vector<AnalysisSpec>* override_analyses,
-                         const ws::spice::IncludeResolver& include) {
+                         const ws::spice::IncludeResolver& include,
+                         const SymbolLibrary* symbols) {
     RunOutcome out;
 
-    NetBuild build = build_nets(s);
+    NetBuild build = build_nets(s, symbols);
     out.problems = build.diags;
     out.nets = build.nets;
 
@@ -528,7 +531,7 @@ RunOutcome run_schematic(const Schematic& s,
         effective.push_back(OpSpec{});  // the friendly default: one .op
     }
 
-    auto deck = export_deck(s, out.nets, &effective, &out.problems);
+    auto deck = export_deck(s, out.nets, &effective, &out.problems, symbols);
     if (!deck) {
         out.run = ws::core::unexpected<ws::core::Error>(deck.error());
         out.problems.push_back(mapped_diag(

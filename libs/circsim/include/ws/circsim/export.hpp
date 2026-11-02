@@ -7,6 +7,7 @@
 
 #include <ws/core/result.hpp>
 #include <ws/circsim/diag.hpp>
+#include <ws/circsim/library.hpp>
 #include <ws/circsim/model.hpp>
 #include <ws/circsim/nets.hpp>
 #include <ws/circsim/symbols.hpp>
@@ -54,13 +55,15 @@ struct SpiceExport {
 
 // Builds the deck. `analyses` overrides the schematic's stored setup
 // (null = use it; an empty vector emits no analysis cards - the caller
-// decides the default). Fails when two distinct nets sanitize to the same
-// node token (the message names them); net-build problems ride in `diags`
-// and never fail the export.
+// decides the default). `symbols` resolves keys against a .csym library
+// layered over the built-ins (null = built-ins alone). Fails when two
+// distinct nets sanitize to the same node token (the message names
+// them); net-build problems ride in `diags` and never fail the export.
 [[nodiscard]] ws::core::Result<SpiceExport> export_deck(
     const Schematic& s, const NetList& nets,
     const std::vector<AnalysisSpec>* analyses = nullptr,
-    std::vector<Diag>* diags = nullptr);
+    std::vector<Diag>* diags = nullptr,
+    const SymbolLibrary* symbols = nullptr);
 
 // The analysis card text for one spec: ".op", ".dc V1 0 5 0.1",
 // ".tran 1u 1m", ".ac dec 10 1 1meg" (numbers print %.12g; a TranSpec
@@ -89,7 +92,8 @@ struct RunOutcome {
 [[nodiscard]] RunOutcome run_schematic(
     const Schematic& s,
     const std::vector<AnalysisSpec>* override_analyses = nullptr,
-    const ws::spice::IncludeResolver& include = {});
+    const ws::spice::IncludeResolver& include = {},
+    const SymbolLibrary* symbols = nullptr);
 
 // The CLI's --format json writer: {"format":"circsim-results",...} with
 // one object per table (analysis kind, sweep names, columns, rows).

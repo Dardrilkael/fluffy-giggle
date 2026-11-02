@@ -5,6 +5,7 @@
 #include <vector>
 
 #include <ws/circsim/erc.hpp>
+#include <ws/spice/parse.hpp>
 
 namespace ws::circsim {
 
@@ -44,9 +45,10 @@ bool is_identifier(std::string_view s) {
 }
 
 // "R3 pin b" (or "part 12 pin b" for the ref-less).
-std::string part_pin_where(const Schematic& s, PinRef pr) {
+std::string part_pin_where(const Schematic& s, PinRef pr,
+                           const SymbolLibrary& lib) {
     const Part* p = s.find_part(pr.part);
-    const SymbolDef* sym = p != nullptr ? find_symbol(p->symbol) : nullptr;
+    const SymbolDef* sym = p != nullptr ? lib.find(p->symbol) : nullptr;
     std::string pin_name =
         sym != nullptr && pr.pin < sym->pins.size()
             ? sym->pins[pr.pin].name
@@ -64,6 +66,7 @@ std::string part_pin_where(const Schematic& s, PinRef pr) {
 // 2-cycle (parallel edges) or a self-loop (both pins on one net) - is a
 // loop. A BFS over the edges seen so far recovers the cycle's members.
 void check_constraint_loops(const Schematic& s, const NetList& nets,
+                            const SymbolLibrary& lib,
                             std::vector<Diag>& out) {
     struct Edge {
         std::uint32_t net_a, net_b;  // net ids
@@ -72,7 +75,7 @@ void check_constraint_loops(const Schematic& s, const NetList& nets,
     };
     std::vector<Edge> edges;
     for (const Part& p : s.parts()) {
-        const SymbolDef* sym = find_symbol(p.symbol);
+        const SymbolDef* sym = lib.find(p.symbol);
         if (sym == nullptr ||
             (sym->spice_letter != 'V' && sym->spice_letter != 'L')) {
             continue;
@@ -174,6 +177,7 @@ void check_constraint_loops(const Schematic& s, const NetList& nets,
 // Remove every I source; any I source then bridging two components of the
 // rest crosses an all-current-source cut.
 void check_isource_cutsets(const Schematic& s, const NetList& nets,
+                           const SymbolLibrary& lib,
                            std::vector<Diag>& out) {
     std::map<std::uint32_t, std::uint32_t> parent;
     const auto find = [&parent](std::uint32_t x) {
@@ -195,7 +199,7 @@ void check_isource_cutsets(const Schematic& s, const NetList& nets,
     }
     // Every non-I part unions all its pins' nets.
     for (const Part& p : s.parts()) {
-        const SymbolDef* sym = find_symbol(p.symbol);
+        const SymbolDef* sym = lib.find(p.symbol);
         if (sym == nullptr || sym->spice_letter == 'I') {
             continue;
         }
@@ -218,7 +222,7 @@ void check_isource_cutsets(const Schematic& s, const NetList& nets,
         }
     }
     for (const Part& p : s.parts()) {
-        const SymbolDef* sym = find_symbol(p.symbol);
+        const SymbolDef* sym = lib.find(p.symbol);
         if (sym == nullptr || sym->spice_letter != 'I' ||
             sym->pins.size() != 2) {
             continue;
@@ -241,16 +245,19 @@ void check_isource_cutsets(const Schematic& s, const NetList& nets,
 
 }  // namespace
 
-std::vector<Diag> run_erc(const Schematic& s, const NetBuild& build) {
+std::vector<Diag> run_erc(const Schematic& s, const NetBuild& build,
+                          const SymbolLibrary* symbols) {
     std::vector<Diag> out = build.diags;
     const NetList& nets = build.nets;
+    const SymbolLibrary& lib =
+        symbols != nullptr ? *symbols : builtin_library();
 
     // --- per-part checks -------------------------------------------------------
     std::map<std::string, std::vector<const Part*>> by_ref;
     for (const Part& p : s.parts()) {
         const std::string where =
             p.ref.empty() ? p.symbol + " " + std::to_string(p.id) : p.ref;
-        const SymbolDef* sym = find_symbol(p.symbol);
+        const SymbolDef* sym = lib.find(p.symbol);
         if (sym == nullptr) {
             out.push_back(make(Severity::Error, "circsim.erc.unknown_symbol",
                                "unknown symbol '" + p.symbol + "'", where));
@@ -293,6 +300,90 @@ std::vector<Diag> run_erc(const Schematic& s, const NetBuild& build) {
                     "part names no .model (set the 'model' parameter)", where));
             }
         }
+        // --- param typing (stage 2): the symbol's specs are the truth ---
+        // A non-optional emit entry names a param the card cannot stand
+        // without (the T-line's Z0=/TD=).
+        for (const ParamEmit& pe : sym->emit) {
+            if (pe.optional) {
+                continue;
+            }
+            const auto it = p.params.find(pe.key);
+            if (it == p.params.end() || it->second.empty()) {
+                out.push_back(make(
+                    Severity::Error, "circsim.erc.missing_param",
+                    "parameter '" + pe.key + "' is required by symbol '" +
+                        sym->key + "'",
+                    where));
+            }
+        }
+        for (const ParamSpec& ps : sym->params) {
+            const auto it = p.params.find(ps.key);
+            if (it == p.params.end() || it->second.empty()) {
+                continue;  // absence is ERC's other checks' business
+            }
+            const std::string shown =
+                ps.label.empty() ? ps.key : ps.label;
+            if (ps.type == ParamSpec::Type::Number) {
+                if (!ws::spice::parse_number(it->second)) {
+                    out.push_back(make(
+                        Severity::Error, "circsim.erc.bad_param",
+                        "parameter '" + shown + "' is '" + it->second +
+                            "', not a SPICE number (try 10k, 2.5, 1n)",
+                        where));
+                }
+            } else if (ps.type == ParamSpec::Type::Choice) {
+                const std::string value = lower(it->second);
+                bool ok = false;
+                for (const std::string& c : ps.choices) {
+                    if (lower(c) == value) {
+                        ok = true;
+                        break;
+                    }
+                }
+                if (!ok) {
+                    std::string list;
+                    for (const std::string& c : ps.choices) {
+                        if (!list.empty()) {
+                            list += ", ";
+                        }
+                        list += c;
+                    }
+                    out.push_back(make(
+                        Severity::Warning, "circsim.erc.bad_param",
+                        "parameter '" + shown + "' is '" + it->second +
+                            "'; allowed: " + list,
+                        where));
+                }
+            }
+        }
+        // A param the symbol neither specs nor emits can never reach
+        // the deck - say so instead of dropping it silently.
+        for (const auto& [key, value] : p.params) {
+            if (value.empty()) {
+                continue;
+            }
+            bool known = false;
+            for (const ParamSpec& ps : sym->params) {
+                if (ps.key == key) {
+                    known = true;
+                    break;
+                }
+            }
+            for (const ParamEmit& pe : sym->emit) {
+                if (pe.key == key) {
+                    known = true;
+                    break;
+                }
+            }
+            if (!known) {
+                out.push_back(make(
+                    Severity::Warning, "circsim.erc.unused_param",
+                    "parameter '" + key +
+                        "' is not used by symbol '" + sym->key +
+                        "'; it never reaches the netlist",
+                    where));
+            }
+        }
     }
     for (const auto& [ref, group] : by_ref) {
         if (group.size() > 1) {
@@ -327,13 +418,13 @@ std::vector<Diag> run_erc(const Schematic& s, const NetBuild& build) {
             const PinRef pr = n.pins.front();
             const Part* p = s.find_part(pr.part);
             const SymbolDef* sym =
-                p != nullptr ? find_symbol(p->symbol) : nullptr;
+                p != nullptr ? lib.find(p->symbol) : nullptr;
             const bool fixed = sym != nullptr && sym->fixed_net.has_value();
             if (!fixed && !has_attachment) {
                 out.push_back(make(
                     Severity::Warning, "circsim.erc.floating_pin",
-                    part_pin_where(s, pr) + " is not connected to anything",
-                    part_pin_where(s, pr)));
+                    part_pin_where(s, pr, lib) + " is not connected to anything",
+                    part_pin_where(s, pr, lib)));
             } else if (!fixed) {
                 out.push_back(make(
                     Severity::Warning, "circsim.erc.one_pin_net",
@@ -350,14 +441,14 @@ std::vector<Diag> run_erc(const Schematic& s, const NetBuild& build) {
                            ""));
     }
 
-    check_constraint_loops(s, nets, out);
-    check_isource_cutsets(s, nets, out);
+    check_constraint_loops(s, nets, lib, out);
+    check_isource_cutsets(s, nets, lib, out);
     return out;
 }
 
-std::vector<Diag> run_erc(const Schematic& s) {
-    const NetBuild build = build_nets(s);
-    return run_erc(s, build);
+std::vector<Diag> run_erc(const Schematic& s, const SymbolLibrary* symbols) {
+    const NetBuild build = build_nets(s, symbols);
+    return run_erc(s, build, symbols);
 }
 
 }  // namespace ws::circsim

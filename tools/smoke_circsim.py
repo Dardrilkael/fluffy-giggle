@@ -10,6 +10,7 @@ CLI, asserting closed-form values, exit codes and output shapes - the
 """
 
 import argparse
+import json
 import math
 import subprocess
 import sys
@@ -45,6 +46,8 @@ def main():
 
     divider = EXAMPLES / "divider.csim"
     rc = EXAMPLES / "rc_step.csim"
+    tline_lib = EXAMPLES / "tline.csym"
+    tline = EXAMPLES / "tline_demo.csim"
 
     # --- erc: both examples are clean (exit 0, no errors) ------------------
     r = run(args.cli, "erc", divider)
@@ -153,6 +156,97 @@ def main():
         missing = Path(tmp) / "nope.csim"
         r = run(args.cli, "run", missing)
         check(r.returncode == 2, "missing file exits 2")
+
+    # --- the stage-2 symbol library: -S, symbols, the override path ------------
+    with tempfile.TemporaryDirectory() as tmp:
+        # The symbols listing starts from the built-ins and grows with -S.
+        r = run(args.cli, "symbols")
+        check(r.returncode == 0, "symbols exit 0")
+        check(r.stdout.splitlines()[1].split()[0] == "r",
+              "symbols lists the built-ins first")
+        r = run(args.cli, "symbols", "-S", tline_lib)
+        check(r.returncode == 0, "symbols -S exit 0")
+        check(r.stdout.rstrip().endswith("tline        T     4    Lossless transmission line T"),
+              "symbols -S lists the library symbol")
+
+        # The full-table JSON dump parses and carries the stage-2 fields.
+        r = run(args.cli, "symbols", "-S", tline_lib, "--json")
+        check(r.returncode == 0, "symbols --json exit 0")
+        table = json.loads(r.stdout)
+        check(table["format"] == "circsim-symbols", "json table format")
+        by_key = {s["key"]: s for s in table["symbols"]}
+        check(len(table["symbols"]) == 13, "12 built-ins + tline")
+        check(by_key["tline"]["spice"] == "T", "tline json letter")
+        check(by_key["tline"]["draw"][4] == {"rect": [-1.0, -2.0, 1.0, 2.0]},
+              "tline json draw primitives")
+        check(by_key["nmos"]["params"][1] ==
+              {"key": "l", "type": "number", "label": "L", "default": ""},
+              "nmos json param specs")
+
+        # The quarter-wave demo: netlist golden, closed-form run, honest erc.
+        r = run(args.cli, "netlist", tline, "-S", tline_lib)
+        check(r.returncode == 0, "tline netlist exit 0")
+        expected = (
+            "circsim export\n"
+            "Rs in a 50\n"
+            "T1 a 0 b 0 Z0=50 TD=1u\n"
+            "V1 in 0 1 AC 1\n"
+            ".ac lin 3 250000 750000\n"
+            ".end\n"
+        )
+        check(r.stdout == expected, "tline golden netlist through the library")
+
+        r = run(args.cli, "run", tline, "-S", tline_lib, "-o", "-")
+        check(r.returncode == 0, f"tline run exit 0 (stderr: {r.stderr.strip()!r})")
+        header, rows = parse_csv(r.stdout)
+        va = header.index("re(v(a))")
+        check(len(rows) == 3, "tline ac has 3 points")
+        for row, want in zip(rows, (0.0, 1.0, 0.0)):
+            if abs(row[va] - want) > 0.05:
+                check(False, f"tline re(v(a)) at {row[0]}: {row[va]} != ~{want}")
+        check(True, "tline quarter-wave: short, open, short")
+
+        r = run(args.cli, "erc", tline, "-S", tline_lib)
+        check(r.returncode == 0, "tline erc exit 0 (open port warns, not errors)")
+        check("0 errors" in r.stdout, "tline erc zero errors")
+        check("net b has only one connection" in r.stdout,
+              "tline erc warns about the open port")
+
+        # Without the library the demo silently loses its line: the run
+        # still exits 0 (the deck is legal), but the mapped error diag
+        # names the unknown symbol on stderr.
+        r = run(args.cli, "run", tline, "-o", "-")
+        check(r.returncode == 0, "tline without -S still runs (deck is legal)")
+        check("unknown symbol 'tline'" in r.stderr,
+              "tline without -S names the unknown symbol on stderr")
+
+        # A library override: redefining a built-in warns and wins (the
+        # definition REPLACES the built-in wholesale - spice/ref included).
+        wide = Path(tmp) / "wide.csym"
+        wide.write_text(
+            '{"format": "circsim-symbols", "version": 1,'
+            ' "symbols": [{"key": "r", "name": "Wide resistor", "spice": "R",'
+            ' "ref": "R",'
+            ' "pins": [{"name": "a", "pos": [-4.0, 0.0], "dir": 180},'
+            ' {"name": "b", "pos": [4.0, 0.0], "dir": 0}],'
+            ' "value": true, "emit": []}]}'
+        )
+        r = run(args.cli, "symbols", "-S", wide)
+        check("redefines the built-in 'r'" in r.stderr,
+              "override warns on stderr")
+        r = run(args.cli, "netlist", divider, "-S", wide)
+        check(r.returncode == 0, "divider netlist through the override")
+        check("R1 N001 out 10k" in r.stdout,
+              "override keeps the divider exporting (reference edges)")
+
+        # A broken library fails loudly with exit 2.
+        badlib = Path(tmp) / "bad.csym"
+        badlib.write_text("{not json")
+        r = run(args.cli, "symbols", "-S", badlib)
+        check(r.returncode == 2, "broken library exits 2")
+
+        r = run(args.cli, "run", tline, "-S")
+        check(r.returncode == 2, "-S without a file exits 2")
 
     print("circsim smoke: all green")
 

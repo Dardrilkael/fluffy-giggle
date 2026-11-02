@@ -1,0 +1,36 @@
+{
+    "format": "circsim-symbols",
+    "version": 1,
+    "symbols": [
+        {
+            "key": "tline",
+            "name": "Lossless transmission line",
+            "spice": "T",
+            "ref": "T",
+            "pins": [
+                {"name": "a1", "pos": [-4.0, 1.0], "dir": 180},
+                {"name": "a2", "pos": [-4.0, -1.0], "dir": 180},
+                {"name": "b1", "pos": [4.0, 1.0], "dir": 0},
+                {"name": "b2", "pos": [4.0, -1.0], "dir": 0}
+            ],
+            "value": false,
+            "model": false,
+            "emit": [
+                {"param": "z0", "prefix": "Z0=", "optional": false},
+                {"param": "td", "prefix": "TD=", "optional": false}
+            ],
+            "params": [
+                {"key": "z0", "type": "number", "label": "Z0 (ohms)", "default": "50"},
+                {"key": "td", "type": "number", "label": "TD (seconds)", "default": "1n"}
+            ],
+            "draw": [
+                {"line": [[-4.0, 1.0], [-1.0, 1.0]]},
+                {"line": [[-4.0, -1.0], [-1.0, -1.0]]},
+                {"line": [[1.0, 1.0], [4.0, 1.0]]},
+                {"line": [[1.0, -1.0], [4.0, -1.0]]},
+                {"rect": [-1.0, -2.0, 1.0, 2.0]},
+                {"line": [[-1.0, 2.0], [1.0, -2.0]]}
+            ]
+        }
+    ]
+}

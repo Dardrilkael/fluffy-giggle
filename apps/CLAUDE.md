@@ -87,8 +87,11 @@ CMakeLists only wire ws libraries together.
 - `apps/circsim_cli` - the ws::circsim front door (desktop console app):
   `run file.csim` loads a schematic, exports it to a ws::spice deck and
   runs it (--analysis overrides, CSV/JSON out), `erc` lints the
-  schematic (floating pins, V loops, I cutsets...), `netlist` prints the
-  exported deck. argv, file I/O and exit codes only.
+  schematic (floating pins, V loops, I cutsets, bad params...),
+  `netlist` prints the exported deck, and `symbols` lists the effective
+  symbol table (--json dumps it whole). `-S lib.csym` (repeatable,
+  later wins) layers .csym symbol libraries over the built-ins for every
+  subcommand. argv, file I/O and exit codes only.
 - `apps/shell_example` - the ws::ui::shell acceptance app (windowed,
   desktop): a text-and-plot "scratchpad" built ONLY from AppShell - the
   host registers a .txt document type (whole-content undo commands, the

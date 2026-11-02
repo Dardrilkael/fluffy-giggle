@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <ws/circsim/diag.hpp>
+#include <ws/circsim/library.hpp>
 #include <ws/circsim/model.hpp>
 #include <ws/circsim/symbols.hpp>
 
@@ -79,12 +80,11 @@ struct NetBuild {
     std::vector<Diag> diags;
 };
 
-// Builds the nets. `find` resolves symbol keys (the built-in table by
-// default; stage 2 passes the JSON library's lookup). Unknown symbols are
-// errors in `diags` and their parts join no net; wires referencing their
-// pins are dropped with a warning.
-[[nodiscard]] NetBuild build_nets(
-    const Schematic& s,
-    const SymbolDef* (*find)(std::string_view) = find_symbol);
+// Builds the nets. `symbols` resolves symbol keys (null = the built-in
+// table alone; a .csym SymbolLibrary layers its definitions on top -
+// stage 2). Unknown symbols are errors in `diags` and their parts join
+// no net; wires referencing their pins are dropped with a warning.
+[[nodiscard]] NetBuild build_nets(const Schematic& s,
+                                  const SymbolLibrary* symbols = nullptr);
 
 }  // namespace ws::circsim
