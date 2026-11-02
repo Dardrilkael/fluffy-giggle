@@ -152,7 +152,7 @@ std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir) {
         // Approach b ALONG b_dir: stop one lead short of it.
         target = {b.x - u.x * kLead, b.y - u.y * kLead};
     }
-    if (!near(from.x, target.x, 1e-9) && !near(from.y, target.y, 1e-9)) {
+    if (!eps_eq(from.x, target.x, 1e-9) && !eps_eq(from.y, target.y, 1e-9)) {
         // One corner (an L): the leg out of `from` continues the
         // committed direction (horizontal when free), the leg into
         // `target` closes. The final approach leg target -> b already
@@ -174,15 +174,15 @@ std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir) {
     // waypoints; noise would ride straight into the .csim).
     std::vector<Pos> folded;
     for (const Pos& p : full) {
-        if (!folded.empty() && near(folded.back().x, p.x, 1e-9) &&
-            near(folded.back().y, p.y, 1e-9)) {
+        if (!folded.empty() && eps_eq(folded.back().x, p.x, 1e-9) &&
+            eps_eq(folded.back().y, p.y, 1e-9)) {
             continue;
         }
         if (folded.size() >= 2u) {
             const Pos& p0 = folded[folded.size() - 2u];
             const Pos& p1 = folded[folded.size() - 1u];
-            if ((near(p0.x, p1.x, 1e-9) && near(p1.x, p.x, 1e-9)) ||
-                (near(p0.y, p1.y, 1e-9) && near(p1.y, p.y, 1e-9))) {
+            if ((eps_eq(p0.x, p1.x, 1e-9) && eps_eq(p1.x, p.x, 1e-9)) ||
+                (eps_eq(p0.y, p1.y, 1e-9) && eps_eq(p1.y, p.y, 1e-9))) {
                 folded.back() = p;  // collinear: extend the leg
                 continue;
             }
@@ -492,7 +492,7 @@ void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
     const auto prim_touches = [&](const Pos& pin) {
         for (const ws::circsim::DrawPrim& d : sym.draw) {
             for (const Pos& v : d.pts) {
-                if (near(v.x, pin.x, 0.25) && near(v.y, pin.y, 0.25)) {
+                if (eps_eq(v.x, pin.x, 0.25) && eps_eq(v.y, pin.y, 0.25)) {
                     return true;
                 }
             }

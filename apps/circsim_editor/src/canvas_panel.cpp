@@ -113,8 +113,8 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
             const Pos at = ed.snap(
                 Pos{world.x - ed.drag.grab_offset.x,
                     world.y - ed.drag.grab_offset.y});
-            if (!near(at.x, ed.drag.start_world.x, 1e-9) ||
-                !near(at.y, ed.drag.start_world.y, 1e-9)) {
+            if (!eps_eq(at.x, ed.drag.start_world.x, 1e-9) ||
+                !eps_eq(at.y, ed.drag.start_world.y, 1e-9)) {
                 ed.drag.moved = true;
             }
             if (ed.drag.moved && ed.schem() != nullptr) {
@@ -245,8 +245,8 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                 // can, so the wire's endpoint names it).
                 const SnapTarget t = snap_wire_target(ed, world);
                 if (t.kind == SnapTarget::Kind::Free &&
-                    near(t.pos.x, ed.wire_draft.a_pos.x, 1e-9) &&
-                    near(t.pos.y, ed.wire_draft.a_pos.y, 1e-9)) {
+                    eps_eq(t.pos.x, ed.wire_draft.a_pos.x, 1e-9) &&
+                    eps_eq(t.pos.y, ed.wire_draft.a_pos.y, 1e-9)) {
                     break;  // a zero-length wire is not a commitment
                 }
                 ws::circsim::Wire w;
@@ -538,8 +538,8 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     // --- the wire draft preview
     if (ed.wire_draft.active && inside) {
         const SnapTarget t = snap_wire_target(ed, world);
-        if (!near(t.pos.x, ed.wire_draft.a_pos.x, 1e-9) ||
-            !near(t.pos.y, ed.wire_draft.a_pos.y, 1e-9)) {
+        if (!eps_eq(t.pos.x, ed.wire_draft.a_pos.x, 1e-9) ||
+            !eps_eq(t.pos.y, ed.wire_draft.a_pos.y, 1e-9)) {
             const std::vector<Pos> route = Editor::route_wire(
                 ed.wire_draft.a_pos, ed.wire_draft.a_dir, t.pos, t.dir);
             std::vector<Point> pts;

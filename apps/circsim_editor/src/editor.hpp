@@ -74,7 +74,7 @@ using ws::circsim::Bounds;
 using ws::circsim::Pos;
 
 // Epsilon compare on world coordinates (grid units).
-inline bool near(double a, double b, double eps) {
+inline bool eps_eq(double a, double b, double eps) {
     return std::fabs(a - b) <= eps;
 }
 
