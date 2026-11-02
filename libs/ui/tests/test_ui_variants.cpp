@@ -53,8 +53,8 @@ ws::input::InputFrame at(float x, float y, bool down = false,
 // --- the icon raster -----------------------------------------------------------
 
 TEST_CASE("every built-in icon bakes with coverage and stable metrics") {
-    for (std::uint32_t i = 0; i < ws::ui::r2d::font::kIconCount; ++i) {
-        const std::uint32_t cp = ws::ui::r2d::font::kIconFirst + i;
+    for (std::uint32_t icon_idx = 0; icon_idx < ws::ui::r2d::font::kIconCount; ++icon_idx) {
+        const std::uint32_t cp = ws::ui::r2d::font::kIconFirst + icon_idx;
         ws::ui::r2d::font::BakedGlyph glyph;
         REQUIRE(ws::ui::r2d::font::bake_icon_glyph(cp, 16.0f, glyph));
         CHECK(glyph.codepoint == cp);
@@ -64,8 +64,8 @@ TEST_CASE("every built-in icon bakes with coverage and stable metrics") {
         // Real coverage, read off the ALPHA bytes (rgb stay 255 - the
         // baked-mask convention): some pixel draws, some does not.
         std::uint32_t inked = 0;
-        for (std::size_t i = 3; i < glyph.rgba.size(); i += 4) {
-            if (glyph.rgba[i] != 0u) {
+        for (std::size_t rgba_idx = 3; rgba_idx < glyph.rgba.size(); rgba_idx += 4) {
+            if (glyph.rgba[rgba_idx] != 0u) {
                 ++inked;
             }
         }
