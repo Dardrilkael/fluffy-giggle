@@ -13,10 +13,13 @@
 #include <ws/circsim/plot.hpp>
 
 using ws::circsim::PlotRange;
+using ws::circsim::clamp_view;
 using ws::circsim::decimate_minmax;
 using ws::circsim::expand_range;
 using ws::circsim::format_eng;
 using ws::circsim::nice_ticks;
+using ws::circsim::pan_range;
+using ws::circsim::zoom_range;
 
 namespace {
 
@@ -164,6 +167,115 @@ TEST_CASE("expand range opens a degenerate span around its magnitude") {
     CHECK(bad.lo == 0.0);
     CHECK(bad.hi == 1.0);
     CHECK(expand_range(std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()).hi == 1.0);
+}
+
+TEST_CASE("clamp view keeps the window inside home") {
+    const PlotRange home = expand_range(0.0, 10.0);  // -0.5 .. 10.5
+
+    // Already inside: untouched.
+    const PlotRange in = clamp_view({2.0, 5.0}, home);
+    CHECK(in.lo == doctest::Approx(2.0));
+    CHECK(in.hi == doctest::Approx(5.0));
+
+    // Spilling one way slides the minimal distance.
+    const PlotRange left = clamp_view({-2.0, 1.0}, home);
+    CHECK(left.lo == doctest::Approx(-0.5));
+    CHECK(left.hi == doctest::Approx(2.5));
+    const PlotRange right = clamp_view({9.0, 12.0}, home);
+    CHECK(right.lo == doctest::Approx(7.5));
+    CHECK(right.hi == doctest::Approx(10.5));
+
+    // A window at or past home's span cannot slide inside: home.
+    CHECK(clamp_view({-5.0, 20.0}, home).lo == doctest::Approx(home.lo));
+    CHECK(clamp_view({-5.0, 20.0}, home).hi == doctest::Approx(home.hi));
+    CHECK(clamp_view({home.lo, home.hi}, home).lo == home.lo);
+    CHECK(clamp_view({home.lo, home.hi}, home).hi == home.hi);
+
+    // Degenerate or inverted windows: home, never a crash or a flip.
+    CHECK(clamp_view({3.0, 3.0}, home).lo == doctest::Approx(home.lo));
+    CHECK(clamp_view({5.0, 1.0}, home).hi == doctest::Approx(home.hi));
+
+    // Non-finite answers home - the auto fit is the recovery.
+    CHECK(clamp_view({std::nan(""), 2.0}, home).hi == doctest::Approx(home.hi));
+    CHECK(clamp_view({2.0, std::numeric_limits<double>::infinity()}, home).lo ==
+          doctest::Approx(home.lo));
+
+    // An unusable home answers itself.
+    const PlotRange bad = clamp_view({2.0, 5.0}, {std::nan(""), 1.0});
+    CHECK(std::isnan(bad.lo));
+    const PlotRange flat = clamp_view({2.0, 5.0}, {4.0, 4.0});
+    CHECK(flat.lo == doctest::Approx(4.0));
+    CHECK(flat.hi == doctest::Approx(4.0));
+}
+
+TEST_CASE("zoom range pins the anchor and floors at the mush limit") {
+    const PlotRange home{0.0, 1000.0};
+
+    // Zoom in 2x about the center: the anchor stays exactly put.
+    const PlotRange mid = zoom_range({0.0, 1000.0}, home, 500.0, 2.0);
+    CHECK(mid.lo == doctest::Approx(250.0));
+    CHECK(mid.hi == doctest::Approx(750.0));
+
+    // Zoom in about an off-center anchor: that data point keeps its
+    // fractional position in the window.
+    const PlotRange off = zoom_range({0.0, 1000.0}, home, 100.0, 2.0);
+    CHECK(off.lo == doctest::Approx(50.0));
+    CHECK(off.hi == doctest::Approx(550.0));
+
+    // Zoom out: the window grows, clamped into home - a wheel spun
+    // out forever settles on home, never past it.
+    const PlotRange out = zoom_range({100.0, 200.0}, home, 150.0, 0.01);
+    CHECK(out.lo == doctest::Approx(home.lo));
+    CHECK(out.hi == doctest::Approx(home.hi));
+
+    // An anchor outside the view acts at the nearest edge.
+    const PlotRange edge = zoom_range({0.0, 100.0}, home, -50.0, 10.0);
+    CHECK(edge.lo == doctest::Approx(0.0));
+    CHECK(edge.hi == doctest::Approx(10.0));
+
+    // The mush floor: an enormous factor lands on home's span x 1e-6,
+    // centered on the anchor, still inside home.
+    const PlotRange deep = zoom_range({400.0, 600.0}, home, 500.0, 1e30);
+    CHECK((deep.hi - deep.lo) == doctest::Approx(1e-3).epsilon(1e-4));
+    CHECK(deep.lo >= home.lo);
+    CHECK(deep.hi <= home.hi);
+    CHECK((deep.lo + deep.hi) * 0.5 == doctest::Approx(500.0).epsilon(1e-4));
+
+    // No-ops and nonsense: the view comes back untouched.
+    CHECK(zoom_range({100.0, 200.0}, home, 150.0, 1.0).lo == 100.0);
+    CHECK(zoom_range({100.0, 200.0}, home, 150.0, 0.0).hi == 200.0);
+    CHECK(zoom_range({100.0, 200.0}, home, 150.0, -2.0).lo == 100.0);
+    CHECK(zoom_range({100.0, 200.0}, home, 150.0, std::nan("")).hi == 200.0);
+
+    // A degenerate view has no direction to grow in.
+    CHECK(zoom_range({5.0, 5.0}, home, 5.0, 2.0).lo == 5.0);
+    CHECK(zoom_range({5.0, 5.0}, home, 5.0, 2.0).hi == 5.0);
+}
+
+TEST_CASE("pan range slides and parks flush at the data's edge") {
+    const PlotRange home{0.0, 100.0};
+
+    // A pan that stays inside: the exact shift.
+    const PlotRange moved = pan_range({10.0, 20.0}, home, 5.0);
+    CHECK(moved.lo == doctest::Approx(15.0));
+    CHECK(moved.hi == doctest::Approx(25.0));
+
+    // Panning right past the edge parks flush against home's hi.
+    const PlotRange parked = pan_range({10.0, 20.0}, home, 500.0);
+    CHECK(parked.lo == doctest::Approx(90.0));
+    CHECK(parked.hi == doctest::Approx(100.0));
+
+    // Panning left past the edge parks flush against home's lo.
+    const PlotRange left = pan_range({10.0, 20.0}, home, -500.0);
+    CHECK(left.lo == doctest::Approx(0.0));
+    CHECK(left.hi == doctest::Approx(10.0));
+
+    // Negative delta pans left; zero and NaN are no-ops.
+    CHECK(pan_range({10.0, 20.0}, home, -5.0).lo == doctest::Approx(5.0));
+    CHECK(pan_range({10.0, 20.0}, home, 0.0).lo == 10.0);
+    CHECK(pan_range({10.0, 20.0}, home, std::nan("")).hi == 20.0);
+    CHECK(pan_range({10.0, 20.0}, home,
+                    std::numeric_limits<double>::infinity()).lo == 10.0);
 }
 
 TEST_CASE("decimate declines work it cannot do") {

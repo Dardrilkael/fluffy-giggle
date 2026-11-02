@@ -15,6 +15,17 @@
 // padding and tick ladder, and long sweeps ride its min/max
 // decimation so a 100k-point tran still shows its envelope at ~1
 // vertex per pixel.
+//
+// Stage 5 adds the plot's hands: the wheel zooms both axes toward the
+// cursor (the plot registers its own wheel claim - the innermost rect
+// beats the enclosing scroll panel's), a left-drag rubber band zooms
+// to the box, dragging on an axis strip stretches that axis, the
+// middle/space drag pans, a double-click resets, a right-click
+// cancels an in-flight drag. Every gesture rides ws::circsim::plot's
+// clamp/zoom/pan math (headless, tested) against the HOME range - the
+// padded auto fit - so the view can never leave the data; the
+// decimation slices to the visible x window so a zoomed-in view
+// spends its pixel budget on the samples it shows.
 
 #include "results_panel.hpp"
 
@@ -26,6 +37,7 @@
 #include <vector>
 #include <span>
 
+#include <ws/input/input.hpp>
 #include <ws/spice/results.hpp>
 #include <ws/ui/renderer2d.hpp>
 
@@ -144,15 +156,310 @@ void stroke_series(canvas::Canvas2D& rc,
 
 // --- the plot -----------------------------------------------------------------
 
+// The plot rect's margins: the frame sits inside; the x axis's strip
+// is the bottom margin (its labels live there), the y axis's is the
+// left one. The strips are the axis-drag zooms' handles, so they are
+// interaction geometry, not just spacing.
+constexpr float kPlotHeight = 220.0f;
+constexpr float kMarginLeft = 46.0f;
+constexpr float kMarginBottom = 17.0f;
+constexpr float kMarginTop = 6.0f;
+constexpr float kMarginRight = 10.0f;
+
+// The band's fill/outline: the theme's accent, alpha-split (a wash
+// under the series, a line around the box). r2d packs 0xRRGGBBAA, so
+// the alpha is the low byte.
+[[nodiscard]] std::uint32_t with_alpha(std::uint32_t color,
+                                       std::uint8_t a) {
+    return (color & 0xFFFFFF00u) | std::uint32_t(a);
+}
+
+// The frame geometry plus the two range pairs the interaction pass
+// works on: home (the auto fit - the outermost view) and the
+// effective view (the manual window riding over it). The input pass
+// mutates the effective pair; the draw pass reads it. wx/wy map
+// screen px to data through the CURRENT effective view.
+struct PlotFrame {
+    float fx = 0.0f, fy = 0.0f, iw = 0.0f, ih = 0.0f;
+    ws::circsim::PlotRange xr{};   // home x
+    ws::circsim::PlotRange yr{};   // home y
+    ws::circsim::PlotRange vxr{};  // effective x
+    ws::circsim::PlotRange vyr{};  // effective y
+
+    [[nodiscard]] double wx(float px) const {
+        return vxr.lo + (static_cast<double>(px) - fx) / iw *
+                            (vxr.hi - vxr.lo);
+    }
+    [[nodiscard]] double wy(float py) const {
+        return vyr.hi - (static_cast<double>(py) - fy) / ih *
+                            (vyr.hi - vyr.lo);
+    }
+};
+
+// One pointer frame over the plot (stage 5): the wheel zoom (its own
+// wheel claim - the innermost rect beats the enclosing scroll
+// panel's), the rubber-band box zoom in the frame, the axis-drag
+// zooms on the two strips, the middle/space pan, the double-click
+// reset, and the right-click cancel. The Schematic panel's idioms:
+// raw InputFrame edges gated on claims_open, a drag keeps running
+// wherever the pointer goes once armed, and every drag rebases from
+// its press-time capture each frame so a cancel restores the view
+// exactly and a drag never drifts.
+void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
+    using ws::circsim::clamp_view;
+    using ws::circsim::pan_range;
+    using ws::circsim::zoom_range;
+
+    ResultsCache& cache = ed.results;
+    PlotGesture& g = cache.gesture;
+    const ws::input::InputFrame& in = gui.input();
+
+    // The manual view is per-table: a combo switch (or the fresh run
+    // that reset view_for) drops back to the auto fit.
+    if (cache.view_for != cache.table) {
+        cache.view = PlotView{};
+        cache.view_for = cache.table;
+    }
+
+    // The effective view: the manual window clamped into home, or
+    // home itself.
+    pf.vxr = cache.view.active
+                 ? clamp_view({cache.view.x_lo, cache.view.x_hi}, pf.xr)
+                 : pf.xr;
+    pf.vyr = cache.view.active
+                 ? clamp_view({cache.view.y_lo, cache.view.y_hi}, pf.yr)
+                 : pf.yr;
+
+    // The claimable rect: frame + both strips, so the wheel works over
+    // the axes too. The innermost rect beats the scroll panel's claim;
+    // the win settles one frame later (the gui's contract), which is
+    // why the consumption gates on wheel_won - the first notch after
+    // arriving over the plot still scrolls the panel.
+    const gui::Rect claimable{
+        pf.fx - kMarginLeft, pf.fy - kMarginTop,
+        pf.iw + kMarginLeft + kMarginRight,
+        pf.ih + kMarginTop + kMarginBottom};
+    gui.register_wheel_claim(claimable, &cache.view);
+
+    const bool in_frame =
+        in.mouse_x >= pf.fx && in.mouse_x < pf.fx + pf.iw &&
+        in.mouse_y >= pf.fy && in.mouse_y < pf.fy + pf.ih;
+    const bool on_x_axis =
+        in.mouse_x >= pf.fx && in.mouse_x < pf.fx + pf.iw &&
+        in.mouse_y >= pf.fy + pf.ih &&
+        in.mouse_y < pf.fy + pf.ih + kMarginBottom;
+    const bool on_y_axis =
+        in.mouse_x >= pf.fx - kMarginLeft && in.mouse_x < pf.fx &&
+        in.mouse_y >= pf.fy && in.mouse_y < pf.fy + pf.ih;
+    const bool over = in_frame || on_x_axis || on_y_axis;
+
+    // The double-click clock: runs while the pointer is over the plot,
+    // resets on every press there, dies when it leaves - the "two
+    // clicks, same spot, soon" detector the reset rides.
+    if (over) {
+        g.click_clock += in.dt_seconds;
+    } else {
+        g.click_clock = 100.0f;
+    }
+
+    if (!gui.claims_open()) {
+        return;  // a modal veil freezes the plot, the canvas's rule
+    }
+
+    // The right press cancels the in-flight gesture, restoring the
+    // press-time view exactly.
+    if (g.kind != PlotGesture::Kind::None && in.mouse_pressed[2] != 0) {
+        cache.view.active = g.was_active;
+        if (g.was_active) {
+            cache.view.x_lo = g.x_lo;
+            cache.view.x_hi = g.x_hi;
+            cache.view.y_lo = g.y_lo;
+            cache.view.y_hi = g.y_hi;
+        }
+        g.kind = PlotGesture::Kind::None;
+        return;
+    }
+
+    // The wheel: zoom both axes toward the cursor at the canvas's
+    // 1.15-per-notch factor - but never mid-gesture (the band's press
+    // point is captured in the view it started in).
+    if (in_frame && in.scroll_dy != 0.0f &&
+        g.kind == PlotGesture::Kind::None &&
+        gui.wheel_won(&cache.view)) {
+        if (!cache.view.active) {
+            cache.view = PlotView{true, pf.vxr.lo, pf.vxr.hi,
+                                  pf.vyr.lo, pf.vyr.hi};
+        }
+        const double wx = pf.wx(in.mouse_x);
+        const double wy = pf.wy(in.mouse_y);
+        const double f = in.scroll_dy > 0.0f ? 1.15 : 1.0 / 1.15;
+        const ws::circsim::PlotRange nx =
+            zoom_range({cache.view.x_lo, cache.view.x_hi}, pf.xr, wx, f);
+        const ws::circsim::PlotRange ny =
+            zoom_range({cache.view.y_lo, cache.view.y_hi}, pf.yr, wy, f);
+        cache.view.x_lo = nx.lo;
+        cache.view.x_hi = nx.hi;
+        cache.view.y_lo = ny.lo;
+        cache.view.y_hi = ny.hi;
+        pf.vxr = nx;
+        pf.vyr = ny;
+    }
+
+    // The pan: middle-drag, or space+left-drag (the Schematic panel's
+    // rule). Content follows the cursor: dragging right slides the
+    // window left, dragging down slides it up (the y flip).
+    const bool space_down = in.key_down[ws::input::keys::kSpace] != 0;
+    const bool pan_held =
+        in.mouse_down[1] != 0 || (space_down && in.mouse_down[0] != 0);
+    if (pan_held && (in_frame || g.kind == PlotGesture::Kind::Pan)) {
+        if (g.kind != PlotGesture::Kind::Pan) {
+            g.kind = PlotGesture::Kind::Pan;
+            g.from_x = in.mouse_x;
+            g.from_y = in.mouse_y;
+            g.x_lo = pf.vxr.lo;
+            g.x_hi = pf.vxr.hi;
+            g.y_lo = pf.vyr.lo;
+            g.y_hi = pf.vyr.hi;
+            g.was_active = cache.view.active;
+            if (!cache.view.active) {
+                cache.view = PlotView{true, pf.vxr.lo, pf.vxr.hi,
+                                      pf.vyr.lo, pf.vyr.hi};
+            }
+        }
+        const double dx =
+            -(static_cast<double>(in.mouse_x - g.from_x) /
+              static_cast<double>(pf.iw)) *
+            (g.x_hi - g.x_lo);
+        const double dy =
+            (static_cast<double>(in.mouse_y - g.from_y) /
+             static_cast<double>(pf.ih)) *
+            (g.y_hi - g.y_lo);
+        const ws::circsim::PlotRange nx =
+            pan_range({g.x_lo, g.x_hi}, pf.xr, dx);
+        const ws::circsim::PlotRange ny =
+            pan_range({g.y_lo, g.y_hi}, pf.yr, dy);
+        cache.view.x_lo = nx.lo;
+        cache.view.x_hi = nx.hi;
+        cache.view.y_lo = ny.lo;
+        cache.view.y_hi = ny.hi;
+        pf.vxr = nx;
+        pf.vyr = ny;
+        return;  // a pan frame owns the pointer
+    }
+    if (g.kind == PlotGesture::Kind::Pan && !pan_held) {
+        g.kind = PlotGesture::Kind::None;
+    }
+
+    // The left-button gestures run to release wherever the pointer
+    // goes (the press owns it): the band commits its box on release,
+    // the axis zooms land live as the drag moves.
+    if (g.kind == PlotGesture::Kind::Band ||
+        g.kind == PlotGesture::Kind::ZoomX ||
+        g.kind == PlotGesture::Kind::ZoomY) {
+        if (in.mouse_down[0] == 0) {
+            const bool was_band = g.kind == PlotGesture::Kind::Band;
+            bool committed = false;
+            if (was_band && std::fabs(in.mouse_x - g.from_x) >= 4.0f &&
+                std::fabs(in.mouse_y - g.from_y) >= 4.0f) {
+                const double x0 = pf.wx(g.from_x);
+                const double x1 = pf.wx(in.mouse_x);
+                const double y0 = pf.wy(g.from_y);
+                const double y1 = pf.wy(in.mouse_y);
+                const ws::circsim::PlotRange bx =
+                    clamp_view({std::min(x0, x1), std::max(x0, x1)},
+                               pf.xr);
+                const ws::circsim::PlotRange by =
+                    clamp_view({std::min(y0, y1), std::max(y0, y1)},
+                               pf.yr);
+                cache.view = PlotView{true, bx.lo, bx.hi, by.lo, by.hi};
+                pf.vxr = bx;
+                pf.vyr = by;
+                committed = true;
+            }
+            g.kind = PlotGesture::Kind::None;
+            if (!was_band || committed) {
+                return;
+            }
+            // A tiny band's release falls through so the second press
+            // of a double click still lands on the arming block below.
+        } else {
+            if (g.kind == PlotGesture::Kind::ZoomX) {
+                // Dragging right stretches the axis: zoom in.
+                const double f =
+                    std::exp((static_cast<double>(in.mouse_x) - g.from_x) *
+                             0.005);
+                const ws::circsim::PlotRange nx =
+                    zoom_range({g.x_lo, g.x_hi}, pf.xr, g.anchor_x, f);
+                cache.view.active = true;
+                cache.view.x_lo = nx.lo;
+                cache.view.x_hi = nx.hi;
+                pf.vxr = nx;
+            } else if (g.kind == PlotGesture::Kind::ZoomY) {
+                // Dragging up on the strip zooms in (pulling the range
+                // open reads like pulling the axis up).
+                const double f =
+                    std::exp((g.from_y - static_cast<double>(in.mouse_y)) *
+                             0.005);
+                const ws::circsim::PlotRange ny =
+                    zoom_range({g.y_lo, g.y_hi}, pf.yr, g.anchor_y, f);
+                cache.view.active = true;
+                cache.view.y_lo = ny.lo;
+                cache.view.y_hi = ny.hi;
+                pf.vyr = ny;
+            }
+            return;  // a gesture frame owns the pointer
+        }
+    }
+
+    // Arming: the second click of a pair inside the frame resets the
+    // view; the first click starts the band (frame) or an axis zoom
+    // (strips).
+    if (in.mouse_pressed[0] != 0 && over) {
+        if (in_frame && g.click_clock < 0.35f &&
+            std::fabs(in.mouse_x - g.click_x) < 5.0f &&
+            std::fabs(in.mouse_y - g.click_y) < 5.0f) {
+            cache.view = PlotView{};
+            pf.vxr = pf.xr;
+            pf.vyr = pf.yr;
+            g.click_clock = 100.0f;
+            return;
+        }
+        g.click_clock = 0.0f;
+        g.click_x = in.mouse_x;
+        g.click_y = in.mouse_y;
+        g.from_x = in.mouse_x;
+        g.from_y = in.mouse_y;
+        g.x_lo = pf.vxr.lo;
+        g.x_hi = pf.vxr.hi;
+        g.y_lo = pf.vyr.lo;
+        g.y_hi = pf.vyr.hi;
+        g.was_active = cache.view.active;
+        if (on_x_axis) {
+            g.kind = PlotGesture::Kind::ZoomX;
+            g.anchor_x = pf.wx(in.mouse_x);
+            // The axis zooms write one axis over the other's landed
+            // window: seed the manual view with the effective one
+            // (the wheel and the pan seed the same way).
+            if (!cache.view.active) {
+                cache.view = PlotView{true, pf.vxr.lo, pf.vxr.hi,
+                                      pf.vyr.lo, pf.vyr.hi};
+            }
+        } else if (on_y_axis) {
+            g.kind = PlotGesture::Kind::ZoomY;
+            g.anchor_y = pf.wy(in.mouse_y);
+            if (!cache.view.active) {
+                cache.view = PlotView{true, pf.vxr.lo, pf.vxr.hi,
+                                      pf.vyr.lo, pf.vyr.hi};
+            }
+        } else if (in_frame) {
+            g.kind = PlotGesture::Kind::Band;  // the box lands at release
+        }
+    }
+}
+
 void draw_plot(Editor& ed, gui::GuiContext& gui,
                gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
                const ws::spice::Table& t, const char* x_name) {
-    constexpr float kPlotHeight = 220.0f;
-    constexpr float kMarginLeft = 46.0f;
-    constexpr float kMarginBottom = 17.0f;
-    constexpr float kMarginTop = 6.0f;
-    constexpr float kMarginRight = 10.0f;
-
     const gui::Rect plot =
         layout.next(layout.remaining_width(), kPlotHeight);
     const float iw = plot.width - kMarginLeft - kMarginRight;
@@ -176,8 +483,9 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
         return;
     }
 
-    // The ranges: y over the VISIBLE signals, x over the axis (or the
-    // index run); padded by plot's expand_range on both.
+    // The home ranges: y over the VISIBLE signals, x over the axis
+    // (or the index run); padded by plot's expand_range on both. Home
+    // is the outermost view - every manual window clamps inside it.
     double y_lo = std::numeric_limits<double>::infinity();
     double y_hi = -std::numeric_limits<double>::infinity();
     double x_lo = 0.0;
@@ -202,14 +510,23 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
         y_lo = 0.0;  // nothing visible: an empty-but-sane frame
         y_hi = 1.0;
     }
-    const ws::circsim::PlotRange xr = ws::circsim::expand_range(x_lo, x_hi);
-    const ws::circsim::PlotRange yr = ws::circsim::expand_range(y_lo, y_hi);
+
+    PlotFrame pf;
+    pf.fx = fx;
+    pf.fy = fy;
+    pf.iw = iw;
+    pf.ih = ih;
+    pf.xr = ws::circsim::expand_range(x_lo, x_hi);
+    pf.yr = ws::circsim::expand_range(y_lo, y_hi);
+    handle_plot_input(ed, gui, pf);  // the hands; pf carries the effective view
 
     const auto sx = [&](double v) {
-        return static_cast<float>(fx + (v - xr.lo) / (xr.hi - xr.lo) * iw);
+        return static_cast<float>(
+            fx + (v - pf.vxr.lo) / (pf.vxr.hi - pf.vxr.lo) * iw);
     };
     const auto sy = [&](double v) {
-        return static_cast<float>(fy + (yr.hi - v) / (yr.hi - yr.lo) * ih);
+        return static_cast<float>(
+            fy + (pf.vyr.hi - v) / (pf.vyr.hi - pf.vyr.lo) * ih);
     };
 
     canvas::Canvas2D& rc = ed.results_draw_canvas();
@@ -223,11 +540,12 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                            {fx, fy + ih}};
     rc.stroke_polyline(quad, 4, frame_paint, true);
 
-    // --- the grid + tick labels
+    // --- the grid + tick labels (over the EFFECTIVE view - a manual
+    // window relabels its own axis)
     const std::vector<double> x_ticks =
-        ws::circsim::nice_ticks(xr.lo, xr.hi, 6u);
+        ws::circsim::nice_ticks(pf.vxr.lo, pf.vxr.hi, 6u);
     const std::vector<double> y_ticks =
-        ws::circsim::nice_ticks(yr.lo, yr.hi, 5u);
+        ws::circsim::nice_ticks(pf.vyr.lo, pf.vyr.hi, 5u);
     Paint grid_paint;
     grid_paint.width = 1.0f;
     grid_paint.color = gui::dim(theme.text, 0.12f);
@@ -278,8 +596,8 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     const bool x_sorted = !by_index && strictly_increasing(xs);
     if (hovering) {
         const double wx =
-            xr.lo + (static_cast<double>(in.mouse_x) - fx) / iw *
-                        (xr.hi - xr.lo);
+            pf.vxr.lo + (static_cast<double>(in.mouse_x) - fx) / iw *
+                            (pf.vxr.hi - pf.vxr.lo);
         if (by_index) {
             std::vector<double> idx;
             idx.reserve(n);
@@ -322,17 +640,35 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                                           quiet_NaN()});
         };
         if (!by_index && x_sorted) {
+            // The decimation window: the visible x slice (one sample
+            // of slack each side), so a zoomed-in view spends the
+            // pixel budget on the samples it shows. The auto view's
+            // padded home spans all the data, so the slice is
+            // transparent there - one code path, no special case.
             const std::size_t rows = std::min(n, ys.size());
+            const auto b0 = std::lower_bound(xs.begin(),
+                                             xs.begin() + rows, pf.vxr.lo);
+            const auto b1 = std::upper_bound(xs.begin(),
+                                             xs.begin() + rows, pf.vxr.hi);
+            const std::size_t i0 =
+                b0 != xs.begin()
+                    ? static_cast<std::size_t>(b0 - xs.begin()) - 1u
+                    : 0u;
+            const std::size_t i1 =
+                b1 != xs.begin() + rows
+                    ? static_cast<std::size_t>(b1 - xs.begin()) + 1u
+                    : rows;
             const std::vector<std::size_t> keep =
-                ws::circsim::decimate_minmax(xs.first(rows), ys.first(rows),
+                ws::circsim::decimate_minmax(xs.subspan(i0, i1 - i0),
+                                             ys.subspan(i0, i1 - i0),
                                              budget);
             if (keep.empty()) {
-                for (std::size_t k = 0; k < n; ++k) {
+                for (std::size_t k = i0; k < i1; ++k) {
                     push(k);
                 }
             } else {
                 for (std::size_t k : keep) {
-                    push(k);
+                    push(i0 + k);
                 }
             }
         } else {
@@ -366,6 +702,42 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                 rc.fill_circle({px, sy(yv)}, 3.0f, series_color(i));
             }
         }
+    }
+
+    // --- the in-flight band + the manual-view hint -------------------
+    const PlotGesture& g = ed.results.gesture;
+    if (g.kind == PlotGesture::Kind::Band) {
+        const float bx0 = std::min(g.from_x, in.mouse_x);
+        const float bx1 = std::max(g.from_x, in.mouse_x);
+        const float by0 = std::min(g.from_y, in.mouse_y);
+        const float by1 = std::max(g.from_y, in.mouse_y);
+        const Point box[4] = {{bx0, by0}, {bx1, by0}, {bx1, by1},
+                              {bx0, by1}};
+        const std::uint32_t accent = theme.control_on;
+        rc.fill_polygon(box, 4, with_alpha(accent, 36));
+        Paint band;
+        band.width = 1.0f;
+        band.color = with_alpha(accent, 200);
+        rc.stroke_polyline(box, 4, band, true);
+        if (can_label) {
+            // The cursor reads the band exists for: the data-space
+            // deltas of its two corners, the scope's pair.
+            const double dx = std::fabs(pf.wx(in.mouse_x) -
+                                        pf.wx(g.from_x));
+            const double dy = std::fabs(pf.wy(in.mouse_y) -
+                                        pf.wy(g.from_y));
+            char readout[96];
+            std::snprintf(readout, sizeof readout, "dx %s  dy %s",
+                          ws::circsim::format_eng(dx).c_str(),
+                          ws::circsim::format_eng(dy).c_str());
+            (void)rc.draw_text(bx0 + 4.0f, by0 + 2.0f, readout, *font,
+                               gui::dim(theme.text, 0.75f));
+        }
+    } else if (ed.results.view.active && can_label) {
+        const char* hint = "double-click resets";
+        const float w = rc.measure_text(hint, *font);
+        (void)rc.draw_text(fx + iw - w - 5.0f, fy + 3.0f, hint, *font,
+                           gui::dim(theme.text, 0.35f));
     }
 }
 

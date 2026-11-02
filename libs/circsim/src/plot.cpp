@@ -199,6 +199,75 @@ PlotRange expand_range(double lo, double hi, double frac) {
     return {lo - pad, hi + pad};
 }
 
+// --- the manual view (stage 5, see plot.hpp for the contracts) -----------------
+
+PlotRange clamp_view(PlotRange view, PlotRange home) {
+    if (std::isnan(home.lo) || std::isnan(home.hi) || std::isinf(home.lo) ||
+        std::isinf(home.hi) || !(home.lo < home.hi)) {
+        return home;  // nothing sane to clamp against
+    }
+    if (std::isnan(view.lo) || std::isnan(view.hi) || std::isinf(view.lo) ||
+        std::isinf(view.hi)) {
+        return home;
+    }
+    // Degenerate, or a window at or past home's span (it cannot slide
+    // inside; spilling both ways is the same case): the home fit wins.
+    if (!(view.lo < view.hi) ||
+        (view.hi - view.lo) >= (home.hi - home.lo)) {
+        return home;
+    }
+    // Both ends inside and narrower than home: slide the minimal
+    // distance. At most one shift fires (the span fits), but run both
+    // so an already-clamped caller stays clamped.
+    if (view.lo < home.lo) {
+        const double d = home.lo - view.lo;
+        view.lo += d;
+        view.hi += d;
+    }
+    if (view.hi > home.hi) {
+        const double d = view.hi - home.hi;
+        view.lo -= d;
+        view.hi -= d;
+    }
+    return view;
+}
+
+PlotRange zoom_range(PlotRange view, PlotRange home, double anchor,
+                     double factor) {
+    if (!(factor > 0.0) || std::isnan(factor) || factor == 1.0) {
+        return view;
+    }
+    if (std::isnan(view.lo) || std::isnan(view.hi) || std::isinf(view.lo) ||
+        std::isinf(view.hi) || !(view.lo < view.hi)) {
+        return view;  // degenerate/non-finite: no direction to grow in
+    }
+    if (anchor < view.lo) {
+        anchor = view.lo;
+    }
+    if (anchor > view.hi) {
+        anchor = view.hi;
+    }
+    const double k = 1.0 / factor;
+    PlotRange out{anchor + (view.lo - anchor) * k,
+                  anchor + (view.hi - anchor) * k};
+    // The float-mush floor: a window narrower than 1e-6 of home's span
+    // prints degenerate tick ladders and loses the data to rounding.
+    if (std::isnan(out.lo) || std::isnan(out.hi) || std::isinf(out.lo) ||
+        std::isinf(out.hi) || !(out.lo < out.hi) ||
+        (out.hi - out.lo) < (home.hi - home.lo) * 1e-6) {
+        const double span = (home.hi - home.lo) * 1e-6;
+        out = {anchor - span * 0.5, anchor + span * 0.5};
+    }
+    return clamp_view(out, home);
+}
+
+PlotRange pan_range(PlotRange view, PlotRange home, double delta) {
+    if (std::isnan(delta) || std::isinf(delta)) {
+        return view;
+    }
+    return clamp_view({view.lo + delta, view.hi + delta}, home);
+}
+
 std::vector<std::size_t> decimate_minmax(std::span<const double> xs,
                                         std::span<const double> ys,
                                         std::size_t budget) {

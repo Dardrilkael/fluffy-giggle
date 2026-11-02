@@ -144,7 +144,7 @@ fetched privately, which would duplicate a first-party capability.
   a wire's polyline, a label's anchor grown one unit; the caller's
   NetList saves a build for the Net case.
 
-## Plot (plot.hpp, stage 4)
+## Plot (plot.hpp, stage 4-5)
 - The axis math every plot surface shares (the editor's Results
   panel today; a raster exporter later): `nice_ticks` (the 1/2/5 x 10^k
   ladder, endpoints never forced), `format_eng` (SI engineering
@@ -156,6 +156,13 @@ fetched privately, which would duplicate a first-party capability.
   in occurrence order plus the exact ends - spikes and envelope
   survive any budget; non-increasing axes answer EMPTY = draw raw,
   the nested-.dc rule).
+- The manual view (stage 5): `clamp_view` (a window slides back
+  inside home; wider-than-home, degenerate or non-finite answers
+  home), `zoom_range` (anchor clamped into the view first, floored at
+  home's span x 1e-6, clamped into home - a wheel spun out forever
+  settles on the data, never past it), `pan_range` (slides and parks
+  flush at the edge). "home" is always the padded auto fit - the
+  outermost view; the editor's gestures all ride these three.
 - Pure doubles and strings: no ws::spice, no ui, no font. The panel
   consumes it; the tests gate it.
 
@@ -190,7 +197,9 @@ the full-path analytic sims, error mapping), test_symbols.cpp (the
 library: load/save round-trips, tolerance, layering/overrides, param
 typing, draw prims, bounds, and the tline full path), test_locate.cpp
 (stage 3: every `where` spelling, the back-map paths, the focus
-bounds), test_plot.cpp (stage 4: the tick ladder, the prefix walk, the
-decimation contract - the exact-envelope sine among them). The
+bounds), test_plot.cpp (stage 4-5: the tick ladder, the prefix walk,
+the decimation contract - the exact-envelope sine among them - and
+the manual-view math: clamp/zoom/pan against home, the mush floor,
+the flush park). The
 editor's own suite lives in the app: test_circsim_editor_panel (the
 Results panel's draw through the plot_canvas seam, on the ui tree).

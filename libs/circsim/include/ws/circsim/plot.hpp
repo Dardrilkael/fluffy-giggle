@@ -3,11 +3,13 @@
 // The results story's headless half (stage 4, docs/CIRCSIM_PLAN.md):
 // the pure math every plot axis and readout needs - nice tick
 // positions, engineering-notation labels, range padding, and min/max
-// decimation for long sweeps. The editor's Results panel is the ui
-// consumer; the tests are the headless gate. Nothing here touches a
-// font, a canvas, or ws::spice - the functions answer doubles and
-// strings, so any plot surface (the panel today, a raster exporter
-// later) shares one set of axis decisions.
+// decimation for long sweeps. Stage 5 joins the manual-view math -
+// clamp/zoom/pan - that the panel's wheel, rubber band, axis drags
+// and pan all share. The editor's Results panel is the ui consumer;
+// the tests are the headless gate. Nothing here touches a font, a
+// canvas, or ws::spice - the functions answer doubles and strings, so
+// any plot surface (the panel today, a raster exporter later) shares
+// one set of axis decisions.
 
 #include <cstddef>
 #include <span>
@@ -56,6 +58,45 @@ struct PlotRange {
 // a narrowing).
 [[nodiscard]] PlotRange expand_range(double lo, double hi,
                                      double frac = 0.05);
+
+// --- the manual view (stage 5) -----------------------------------------------
+//
+// The plot interaction pass's shared math. "home" is always the
+// AUTOMATIC fit - expand_range over the data extent, the outermost
+// view a wheel or a drag can ever leave; "view" is the manual window
+// riding over it (what the rubber band, the axis drags and the pan
+// produce). The pair of invariants every caller gets for free:
+// the view never shows beyond home (zooming out past the data is
+// dead pixels, and a pan needs a bound or the waveform is lost), and
+// the view stays a healthy interval (ordered, finite) so the tick
+// ladder and the transforms downstream never see garbage.
+
+// Clamps `view` back inside `home`: a non-finite endpoint answers
+// home (the caller's auto fit), a view wider than home answers home
+// (there is nothing to show beyond the data), otherwise the window
+// slides the minimal distance so both ends sit inside. A home that
+// is itself non-finite or degenerate (lo >= hi) answers home as-is -
+// a degenerate axis never opens a manual view.
+[[nodiscard]] PlotRange clamp_view(PlotRange view, PlotRange home);
+
+// Zooms `view` about `anchor` (a data coordinate, clamped into the
+// view first - a zoom anchored outside the window acts at the
+// nearest edge) by `factor`: > 1 zooms IN (the span shrinks), < 1
+// out, 1 or a non-finite or non-positive factor answers the view
+// unchanged. A degenerate view answers itself (a zero span has no
+// direction to grow in). The result is floored at home's span x 1e-6
+// - below that the axis is float mush - and clamped into home, so a
+// wheel spun out forever settles on home, never on an inverted or
+// infinite window.
+[[nodiscard]] PlotRange zoom_range(PlotRange view, PlotRange home,
+                                   double anchor, double factor);
+
+// Slides `view` by `delta` data units (positive = right) and clamps
+// the result into home - a pan past the data's edge parks flush
+// against it instead of losing the waveform. A non-finite delta
+// answers the view unchanged.
+[[nodiscard]] PlotRange pan_range(PlotRange view, PlotRange home,
+                                  double delta);
 
 // The index list that carries a long waveform's shape through a narrow
 // pixel budget: the strictly-increasing `xs` split into budget/2

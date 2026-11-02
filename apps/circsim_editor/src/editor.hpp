@@ -198,10 +198,42 @@ struct NetlistCache {
     std::vector<std::string> lines;   // split for the panel's rows
 };
 
+// The Results plot's manual view (stage 5): the zoom/pan window the
+// wheel, the rubber band and the drags produce, in DATA units,
+// riding over the automatic fit (ws::circsim::clamp_view keeps it
+// inside the data's padded extent). Inactive = the auto fit, the
+// stage-4 behavior exactly.
+struct PlotView {
+    bool active = false;
+    double x_lo = 0.0, x_hi = 0.0;
+    double y_lo = 0.0, y_hi = 0.0;
+};
+
+// The plot's in-flight pointer gesture (stage 5): the rubber-band box
+// zoom, the two axis-drag zooms, and the pan. The press-time view is
+// captured so the drag rebases from it every frame (no drift) and a
+// right-click restores it exactly. The double-click clock rides the
+// input frame's dt - the reset gesture's "two clicks, same spot".
+struct PlotGesture {
+    enum class Kind : std::uint8_t { None, Band, ZoomX, ZoomY, Pan };
+    Kind kind = Kind::None;
+    float from_x = 0.0f, from_y = 0.0f;     // the press point, screen px
+    double anchor_x = 0.0, anchor_y = 0.0;  // the data point under the press
+    double x_lo = 0.0, x_hi = 0.0;          // the x view at press
+    double y_lo = 0.0, y_hi = 0.0;          // the y view at press
+    bool was_active = false;                // the view at press (the cancel restore)
+    // The double-click detector: the clock runs while the pointer is
+    // over the plot, resets on every press there.
+    float click_clock = 100.0f;
+    float click_x = 0.0f, click_y = 0.0f;
+};
+
 // The Results panel's cache (stage 4): the last run's output plus the
 // view over it - which table is shown, which signals are visible, and
 // the sample the cursor hovers (the crosshair's index, -1 when off).
-// A document switch clears it (document_changed); an EDIT does not -
+// Stage 5 adds the plot's manual view and its in-flight gesture, both
+// keyed to the table they belong to. A document switch clears it
+// (document_changed); an EDIT does not -
 // the panel marks itself stale against the schematic's version, the
 // same contract the Problems and Netlist panels keep.
 struct ResultsCache {
@@ -214,6 +246,9 @@ struct ResultsCache {
     std::size_t visible_for = kNoTable;  // the table `visible` belongs to
     std::vector<std::uint8_t> visible;   // per-signal flags of that table
     int hover = -1;                      // sample index under the cursor
+    PlotView view;                       // the manual zoom/pan window
+    std::size_t view_for = kNoTable;     // the table `view` belongs to
+    PlotGesture gesture;                 // the in-flight plot gesture
 };
 
 // One editable field's caller-owned buffer (the Properties panel's

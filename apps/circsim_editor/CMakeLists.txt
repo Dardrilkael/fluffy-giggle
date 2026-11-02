@@ -7,6 +7,9 @@
 # undo stack, and the simulate job over run_schematic. Stage 4 adds the
 # Results panel (the plot over ws::spice's tables through
 # ws::circsim's axis math, the hover crosshair, the CSV/JSON export).
+# Stage 5 gives the plot its hands: the wheel zoom, the rubber-band box
+# zoom, the axis-drag zooms, the pan, the double-click reset - all
+# riding ws::circsim/plot.hpp's clamp/zoom/pan math.
 # The direct deps follow the shell_example's rule (ws::ui links the gui
 # archive PRIVATEly, so the app lists the libs it names itself).
 ws_add_app(circsim_editor DEPENDS ws::ui ws::circsim ws::jobs ws::platform

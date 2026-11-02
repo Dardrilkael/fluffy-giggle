@@ -1,4 +1,4 @@
-// apps/circsim_editor stage 4 - the Results panel's headless gate.
+// apps/circsim_editor stage 4/5 - the Results panel's headless gate.
 // The panel is app code, so its purity seam is the Editor's
 // plot_canvas injection (a CommandListCanvas stands in for the r2d
 // canvas): the cases below drive draw_results_panel the way the shell
@@ -6,7 +6,11 @@
 // assert the recorded command stream: the plot frame, the grid, the
 // series polylines (point counts, colors, and the data-to-screen
 // mapping), the decimation of a long sweep, the hover crosshair
-// markers, and the .op table's value-row shape (no plot at all).
+// markers, the .op table's value-row shape (no plot at all), and -
+// stage 5 - the plot interaction: the wheel zoom, the rubber band
+// (box, outline, commit), the axis-drag zooms, the pan, the
+// double-click reset, the right-click cancel, and the per-table view
+// reset.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -31,6 +35,8 @@ namespace {
 namespace gui = ws::ui::gui;
 namespace canvas = ws::ui::canvas;
 using editor::Editor;
+using editor::PlotGesture;
+using editor::PlotView;
 using editor::ResultsCache;
 using editor::SchematicDocument;
 
@@ -110,15 +116,44 @@ struct Bench {
         ed.results.visible_for = ResultsCache::kNoTable;
         ed.results.visible.clear();
         ed.results.hover = -1;
+        // The app's run delivery resets the manual view and the
+        // gesture too - the bench mirrors it (main.cpp's block).
+        ed.results.view = PlotView{};
+        ed.results.view_for = ResultsCache::kNoTable;
+        ed.results.gesture = PlotGesture{};
     }
+
+    // The scripted mouse one draw sees. Defaults keep the stage-4
+    // shape: a pointer parked off-panel, no buttons, no scroll, no
+    // clock (dt 0 - the double-click detector only runs when a test
+    // feeds it time).
+    struct Mouse {
+        float x = -1000.0f, y = -1000.0f;
+        bool left_down = false;
+        bool left_pressed = false;
+        bool left_released = false;
+        bool middle_down = false;
+        bool right_pressed = false;
+        float scroll_dy = 0.0f;
+        float dt = 0.0f;
+    };
 
     // Draws the panel once with the given mouse; clc.cmds holds
     // exactly this frame's commands on return.
-    void draw(float mouse_x = -1000.0f, float mouse_y = -1000.0f) {
+    void draw(const Mouse& m) {
         clc.cmds.clear();
         ws::input::InputFrame in{};
-        in.mouse_x = mouse_x;
-        in.mouse_y = mouse_y;
+        in.mouse_x = m.x;
+        in.mouse_y = m.y;
+        in.mouse_present = true;  // a scripted session has a mouse - the
+                                  // wheel resolution gates on it
+        in.mouse_down[0] = m.left_down;
+        in.mouse_pressed[0] = m.left_pressed;
+        in.mouse_released[0] = m.left_released;
+        in.mouse_down[1] = m.middle_down;
+        in.mouse_pressed[2] = m.right_pressed;
+        in.scroll_dy = m.scroll_dy;
+        in.dt_seconds = m.dt;
         gui.begin_frame(in);
         gui::LayoutCursor layout;
         (void)layout.begin_panel(gui::Rect{0.0f, 0.0f, 640.0f, 520.0f},
@@ -127,6 +162,13 @@ struct Bench {
         editor::draw_results_panel(ed, gui, layout, theme);
         layout.end_panel();
         gui.end_frame();
+    }
+
+    void draw(float mouse_x = -1000.0f, float mouse_y = -1000.0f) {
+        Mouse m;
+        m.x = mouse_x;
+        m.y = mouse_y;
+        draw(m);
     }
 
     // The plot frame: the first 4-point stroke (the legend swatches are
@@ -351,4 +393,351 @@ TEST_CASE("stale results note themselves but still draw") {
     b.draw();
     CHECK(b.frame_cmd() != nullptr);  // the plot draws regardless
     CHECK(b.series_cmds().size() == 2u);
+}
+
+// --- stage 5: the plot's hands --------------------------------------------------
+//
+// The bench's home windows for ramp_table(41): x = [-2e-4, 4.2e-3]
+// (span 4.4e-3); y spans the ramp AND the sine's dip - the sine
+// touches exactly -1e-3 at i = 30 - so the padded fit is
+// [-0.25105, 5.25005] (span 5.5011), the numbers the band and zoom
+// asserts below read against.
+constexpr double kHomeXLo = -2.0e-4;
+constexpr double kHomeXHi = 4.2e-3;
+constexpr double kHomeXSpan = kHomeXHi - kHomeXLo;
+constexpr double kHomeYLo = -0.25105;
+constexpr double kHomeYHi = 5.25005;
+constexpr double kHomeYSpan = kHomeYHi - kHomeYLo;
+
+// The band's fill/outline (results_panel.cpp's with_alpha split of
+// kDefaultChrome's accent).
+constexpr std::uint32_t kBandFill = ws::ui::r2d::rgba(84, 144, 212, 36);
+constexpr std::uint32_t kBandLine = ws::ui::r2d::rgba(84, 144, 212, 200);
+
+TEST_CASE("the wheel zooms both axes toward the cursor") {
+    Bench b;
+    b.load(ramp_table(41u));
+    b.draw();  // pass 0: a frame locates the plot geometry
+    // Pass 1: the cursor ARRIVES over the plot - the claim registers
+    // and its win settles for the next frame (the gui's one-frame
+    // rule: the first notch after arriving still scrolls the panel).
+    const Bench::FrameBox f0 = b.frame_box(b.frame_cmd());
+    b.draw((f0.fx + f0.fx2) * 0.5f, (f0.fy + f0.fy2) * 0.5f);
+
+    const Bench::FrameBox f = b.frame_box(b.frame_cmd());
+    Bench::Mouse m;
+    m.x = (f.fx + f.fx2) * 0.5f;
+    m.y = (f.fy + f.fy2) * 0.5f;
+    m.scroll_dy = 1.0f;  // one notch in
+    b.draw(m);           // pass 2: the settled win consumes the notch
+
+    const PlotView& v = b.ed.results.view;
+    CHECK(v.active);
+    // Both windows narrowed by the 1.15 notch, still centered.
+    CHECK((v.x_hi - v.x_lo) ==
+          doctest::Approx(kHomeXSpan / 1.15).epsilon(1e-6));
+    CHECK((v.y_hi - v.y_lo) ==
+          doctest::Approx(kHomeYSpan / 1.15).epsilon(1e-6));
+
+    // A second notch: the x slice bites. The decimation window keeps
+    // one sample of slack past each edge (the stroke needs the
+    // neighbor to draw across the boundary), so one 1.15 notch still
+    // carries every sample; two leave the ends out for real.
+    b.draw(m);
+    CHECK((v.x_hi - v.x_lo) ==
+          doctest::Approx(kHomeXSpan / (1.15 * 1.15)).epsilon(1e-5));
+    const std::vector<const canvas::CanvasCmd*> series = b.series_cmds();
+    REQUIRE(series.size() == 2u);
+    CHECK(series[0]->points.size() < 41u);
+
+    // Two notches back out at the same spot return both spans (the
+    // math is invertible about the same anchor).
+    m.scroll_dy = -1.0f;
+    b.draw(m);
+    b.draw(m);
+    CHECK((v.x_hi - v.x_lo) ==
+          doctest::Approx(kHomeXSpan).epsilon(1e-5));
+    CHECK((v.y_hi - v.y_lo) ==
+          doctest::Approx(kHomeYSpan).epsilon(1e-5));
+}
+
+TEST_CASE("a rubber band zooms to the box and draws itself") {
+    Bench b;
+    b.load(ramp_table(41u));
+    b.draw();  // locate the frame
+
+    const Bench::FrameBox f = b.frame_box(b.frame_cmd());
+    const float iw = f.fx2 - f.fx;
+    const float ih = f.fy2 - f.fy;
+    Bench::Mouse m;
+    m.x = f.fx + iw * 0.25f;
+    m.y = f.fy + ih * 0.75f;
+    m.left_pressed = true;
+    m.left_down = true;
+    b.draw(m);
+    CHECK(b.ed.results.gesture.kind == PlotGesture::Kind::Band);
+    CHECK_FALSE(b.ed.results.view.active);  // nothing commits mid-drag
+
+    // The in-flight band paints: an accent wash, an accent outline.
+    bool saw_fill = false;
+    bool saw_line = false;
+    for (const canvas::CanvasCmd& c : b.clc.cmds) {
+        saw_fill = saw_fill || (c.kind == canvas::CanvasCmdKind::fill_polygon &&
+                                c.color == kBandFill);
+        saw_line = saw_line ||
+                   (c.kind == canvas::CanvasCmdKind::stroke_polyline &&
+                    c.points.size() == 4u && c.color == kBandLine);
+    }
+    CHECK(saw_fill);
+    CHECK(saw_line);
+
+    // Drag to the opposite corner and release: the view is the band.
+    m.x = f.fx + iw * 0.75f;
+    m.y = f.fy + ih * 0.25f;
+    m.left_pressed = false;
+    b.draw(m);
+    m.left_down = false;
+    m.left_released = true;
+    b.draw(m);
+    CHECK(b.ed.results.gesture.kind == PlotGesture::Kind::None);
+    const PlotView& v = b.ed.results.view;
+    CHECK(v.active);
+    // The middle half of the home window, both axes (the band's box,
+    // clamped into home - well inside here).
+    CHECK(v.x_lo == doctest::Approx(kHomeXLo + 0.25 * kHomeXSpan)
+                       .epsilon(1e-3));
+    CHECK(v.x_hi == doctest::Approx(kHomeXLo + 0.75 * kHomeXSpan)
+                       .epsilon(1e-3));
+    CHECK(v.y_lo == doctest::Approx(kHomeYHi - 0.75 * kHomeYSpan)
+                       .epsilon(1e-3));
+    CHECK(v.y_hi == doctest::Approx(kHomeYHi - 0.25 * kHomeYSpan)
+                       .epsilon(1e-3));
+    // The series now covers only the band's samples (the x slice).
+    const std::vector<const canvas::CanvasCmd*> series = b.series_cmds();
+    REQUIRE(series.size() == 2u);
+    CHECK(series[0]->points.size() < 41u);
+}
+
+TEST_CASE("dragging an axis strip stretches that axis only") {
+    Bench b;
+    b.load(ramp_table(41u));
+    b.draw();
+
+    const Bench::FrameBox f = b.frame_box(b.frame_cmd());
+    const float iw = f.fx2 - f.fx;
+    const float ih = f.fy2 - f.fy;
+
+    // The x strip: inside the frame's width, below its bottom edge.
+    Bench::Mouse m;
+    m.x = (f.fx + f.fx2) * 0.5f;
+    m.y = f.fy2 + 5.0f;
+    m.left_pressed = true;
+    m.left_down = true;
+    b.draw(m);
+    CHECK(b.ed.results.gesture.kind == PlotGesture::Kind::ZoomX);
+    // The arm seeded the manual view with the effective (home) window
+    // - the axis zoom lands its axis into that base as the drag moves.
+    CHECK(b.ed.results.view.active);
+    CHECK(b.ed.results.view.y_lo ==
+          doctest::Approx(kHomeYLo).epsilon(1e-6));
+    CHECK(b.ed.results.view.y_hi ==
+          doctest::Approx(kHomeYHi).epsilon(1e-6));
+
+    // 100 px right: e^0.5 in. The x window narrows about the anchor;
+    // the y window is untouched.
+    m.x += 100.0f;
+    m.left_pressed = false;
+    b.draw(m);
+    const PlotView& v = b.ed.results.view;
+    CHECK(v.active);
+    CHECK((v.x_hi - v.x_lo) ==
+          doctest::Approx(kHomeXSpan * std::exp(-0.5)).epsilon(1e-3));
+    CHECK(v.y_lo == doctest::Approx(kHomeYLo).epsilon(1e-6));
+    CHECK(v.y_hi == doctest::Approx(kHomeYHi).epsilon(1e-6));
+
+    // Release, then the y strip: inside the frame's height, left of
+    // its left edge. 100 px up: e^0.5 in, y only.
+    m.left_down = false;
+    m.left_released = true;
+    b.draw(m);
+    CHECK(b.ed.results.gesture.kind == PlotGesture::Kind::None);
+
+    Bench::Mouse my;
+    my.x = f.fx - 5.0f;
+    my.y = (f.fy + f.fy2) * 0.5f;
+    my.left_pressed = true;
+    my.left_down = true;
+    b.draw(my);
+    CHECK(b.ed.results.gesture.kind == PlotGesture::Kind::ZoomY);
+    my.y -= 100.0f;
+    my.left_pressed = false;
+    b.draw(my);
+    CHECK(b.ed.results.view.active);
+    CHECK((b.ed.results.view.y_hi - b.ed.results.view.y_lo) ==
+          doctest::Approx(kHomeYSpan * std::exp(-0.5)).epsilon(1e-3));
+    // The x window kept its drag-1 answer.
+    CHECK((b.ed.results.view.x_hi - b.ed.results.view.x_lo) ==
+          doctest::Approx(kHomeXSpan * std::exp(-0.5)).epsilon(1e-3));
+}
+
+TEST_CASE("middle-drag pans and a double-click resets") {
+    Bench b;
+    b.load(ramp_table(41u));
+    b.draw();
+
+    const Bench::FrameBox f = b.frame_box(b.frame_cmd());
+    const float iw = f.fx2 - f.fx;
+    const float ih = f.fy2 - f.fy;
+    const float cx = f.fx + iw * 0.5f;
+    const float cy = f.fy + ih * 0.5f;
+
+    // Establish a manual view (the band's middle half).
+    Bench::Mouse m;
+    m.x = f.fx + iw * 0.25f;
+    m.y = f.fy + ih * 0.75f;
+    m.left_pressed = true;
+    m.left_down = true;
+    b.draw(m);
+    m.x = f.fx + iw * 0.75f;
+    m.y = f.fy + ih * 0.25f;
+    m.left_pressed = false;
+    b.draw(m);
+    m.left_down = false;
+    m.left_released = true;
+    b.draw(m);
+    const double band_lo = b.ed.results.view.x_lo;
+    const double band_span = b.ed.results.view.x_hi - band_lo;
+    REQUIRE(b.ed.results.view.active);
+
+    // Age the double-click clock (the pointer stays OVER the plot -
+    // the clock dies when it leaves), then pan right 100 px: the
+    // window slides LEFT by the data-space shift (content follows
+    // the cursor).
+    Bench::Mouse gap;
+    gap.x = cx;
+    gap.y = cy;
+    gap.dt = 0.5f;
+    b.draw(gap);
+    b.draw(gap);
+    Bench::Mouse pan;
+    pan.x = cx;
+    pan.y = cy;
+    pan.middle_down = true;
+    pan.dt = 0.016f;
+    b.draw(pan);
+    CHECK(b.ed.results.gesture.kind == PlotGesture::Kind::Pan);
+    pan.x = cx + 100.0f;
+    b.draw(pan);
+    const double shift = -(100.0 / static_cast<double>(iw)) * band_span;
+    CHECK(b.ed.results.view.active);
+    CHECK(b.ed.results.view.x_lo ==
+          doctest::Approx(band_lo + shift).epsilon(1e-3));
+
+    // The middle releases: the pan ends, the view stays where it
+    // landed.
+    pan.middle_down = false;
+    b.draw(pan);
+    CHECK(b.ed.results.gesture.kind == PlotGesture::Kind::None);
+    CHECK(b.ed.results.view.active);
+
+    // The double click: two presses, same spot, inside the clock.
+    // Press 1 arms a band (the clock is aged past 0.35 by the gaps).
+    Bench::Mouse click;
+    click.x = cx;
+    click.y = cy;
+    click.left_pressed = true;
+    click.left_down = true;
+    click.dt = 0.1f;
+    b.draw(click);
+    CHECK(b.ed.results.gesture.kind == PlotGesture::Kind::Band);
+    click.left_pressed = false;  // the release carries no press edge
+    click.left_down = false;
+    b.draw(click);               // the tiny band's release
+    click.left_pressed = true;
+    click.left_down = true;
+    b.draw(click);               // press 2, ~0.2 s later, same spot
+    CHECK(b.ed.results.gesture.kind == PlotGesture::Kind::None);
+    CHECK_FALSE(b.ed.results.view.active);
+    // The auto fit is back: every sample draws again.
+    const std::vector<const canvas::CanvasCmd*> series = b.series_cmds();
+    REQUIRE(series.size() == 2u);
+    CHECK(series[0]->points.size() == 41u);
+}
+
+TEST_CASE("a right-click cancels the drag and restores the press view") {
+    Bench b;
+    b.load(ramp_table(41u));
+    b.draw();  // pass 0: a frame locates the plot geometry
+    {   // The cursor arrives over the plot: the claim registers, the
+        // win settles for the next frame.
+        const Bench::FrameBox f0 = b.frame_box(b.frame_cmd());
+        b.draw((f0.fx + f0.fx2) * 0.5f, (f0.fy + f0.fy2) * 0.5f);
+    }
+
+    // A manual view to endanger: one wheel notch.
+    const Bench::FrameBox f = b.frame_box(b.frame_cmd());
+    Bench::Mouse wheel;
+    wheel.x = (f.fx + f.fx2) * 0.5f;
+    wheel.y = (f.fy + f.fy2) * 0.5f;
+    wheel.scroll_dy = 1.0f;
+    b.draw(wheel);
+    REQUIRE(b.ed.results.view.active);
+    const PlotView before = b.ed.results.view;
+
+    // A band drag goes astray; a right-click kills it and restores
+    // the press-time window exactly.
+    Bench::Mouse m;
+    m.x = f.fx + 30.0f;
+    m.y = f.fy + 30.0f;
+    m.left_pressed = true;
+    m.left_down = true;
+    b.draw(m);
+    REQUIRE(b.ed.results.gesture.kind == PlotGesture::Kind::Band);
+    m.x += 200.0f;
+    m.y += 100.0f;
+    m.left_pressed = false;
+    b.draw(m);
+    m.right_pressed = true;
+    b.draw(m);
+    CHECK(b.ed.results.gesture.kind == PlotGesture::Kind::None);
+    CHECK(b.ed.results.view.active);
+    CHECK(b.ed.results.view.x_lo == before.x_lo);
+    CHECK(b.ed.results.view.x_hi == before.x_hi);
+    CHECK(b.ed.results.view.y_lo == before.y_lo);
+    CHECK(b.ed.results.view.y_hi == before.y_hi);
+}
+
+TEST_CASE("a table switch drops the manual view") {
+    Bench b;
+    b.load(ramp_table(41u));
+    b.ed.results.run.results.tables.push_back(ramp_table(10u));
+    b.draw();
+
+    // A manual view on table 0.
+    const Bench::FrameBox f = b.frame_box(b.frame_cmd());
+    const float iw = f.fx2 - f.fx;
+    const float ih = f.fy2 - f.fy;
+    Bench::Mouse m;
+    m.x = f.fx + iw * 0.25f;
+    m.y = f.fy + ih * 0.75f;
+    m.left_pressed = true;
+    m.left_down = true;
+    b.draw(m);
+    m.x = f.fx + iw * 0.75f;
+    m.y = f.fy + ih * 0.25f;
+    m.left_pressed = false;
+    b.draw(m);
+    m.left_down = false;
+    m.left_released = true;
+    b.draw(m);
+    REQUIRE(b.ed.results.view.active);
+
+    // The combo moves to table 1: the view drops (it belonged to
+    // table 0), and moving back does not resurrect it.
+    b.ed.results.table = 1;
+    b.draw();
+    CHECK_FALSE(b.ed.results.view.active);
+    b.ed.results.table = 0;
+    b.draw();
+    CHECK_FALSE(b.ed.results.view.active);
 }
