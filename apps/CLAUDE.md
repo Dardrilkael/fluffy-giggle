@@ -84,14 +84,32 @@ CMakeLists only wire ws libraries together.
   (desktop console app): a hardcoded RC-transient deck through
   read_deck -> build_deck_ast -> run_deck, the v(out) column and the
   .meas result printed to stdout - the C++ front door in 15 lines.
-- `apps/circsim_cli` - the ws::circsim front door (desktop console app):
-  `run file.csim` loads a schematic, exports it to a ws::spice deck and
+- `apps/circsim_cli` - the ws::circsim front door (desktop console
+  app): `run file.csim` loads a schematic, exports it to a ws::spice deck and
   runs it (--analysis overrides, CSV/JSON out), `erc` lints the
   schematic (floating pins, V loops, I cutsets, bad params...),
   `netlist` prints the exported deck, and `symbols` lists the effective
   symbol table (--json dumps it whole). `-S lib.csym` (repeatable,
   later wins) layers .csym symbol libraries over the built-ins for every
   subcommand. argv, file I/O and exit codes only.
+- `apps/circsim_editor` - the ws::circsim stage-3 editor (windowed,
+  desktop): the schematic capture app built ONLY from AppShell over
+  libs/circsim - five panels (the Schematic canvas through ws::ui's
+  canvas layer: place/move/rotate/mirror parts with every edit an undo
+  command, wire routing with the ortho constraint, net labels; the
+  Palette over `symbols()` with fitted mini previews; the Properties
+  grid over ParamSpecs plus the analysis-setup and directives editors;
+  the Problems list over Diags with select-and-zoom through
+  libs/circsim's locate seam; the Netlist view), the .csim document
+  type (autosave/crash recovery/session ride the shell), and the
+  simulate job over `run_schematic` (a status row with cancel, a
+  summary toast, the run's mapped problems in the Problems panel). The
+  bare editor keys (R/M/W/L/F/Del/Esc) bind on the shortcut resolver's
+  panel rung - the Schematic panel's own scope, kept out of focused
+  text fields by the resolver's text rule. Windows is the shipped
+  desktop (native dialogs, single instance); a posix dev box builds and
+  runs it under X with dejavu/liberation font fallbacks and the
+  Unavailable* dialog refusals - the `ae60fd2` story.
 - `apps/shell_example` - the ws::ui::shell acceptance app (windowed,
   desktop): a text-and-plot "scratchpad" built ONLY from AppShell - the
   host registers a .txt document type (whole-content undo commands, the

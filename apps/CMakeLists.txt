@@ -42,6 +42,8 @@ ws_app_wants(_want spice spice)
 set(ws_want_spice ${_want})
 ws_app_wants(_want circsim_cli circsim)
 set(ws_want_circsim_cli ${_want})
+ws_app_wants(_want circsim_editor ui circsim jobs platform app settings)
+set(ws_want_circsim_editor ${_want})
 unset(_want)
 
 if(ws_want_playground)
@@ -112,5 +114,13 @@ if(NOT ANDROID)
     # analysis through ws::circsim -> ws::spice, write CSV/JSON (plus erc
     # and netlist subcommands). Desktop console app like apps/spice.
     add_subdirectory(circsim_cli)
+  endif()
+  if(NOT ANDROID AND ws_want_circsim_editor)
+    # circsim_editor is the stage-3 acceptance app: the schematic editor
+    # (place/move/rotate/mirror parts, wire routing, the property grid,
+    # the problems panel, the netlist view) over AppShell + ws::circsim.
+    # Desktop gui app like shell_example (a windowed main; android is a
+    # later port - the touch interactions need their own pass).
+    add_subdirectory(circsim_editor)
   endif()
 endif()

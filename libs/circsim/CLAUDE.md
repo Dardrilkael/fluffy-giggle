@@ -1,10 +1,11 @@
 # libs/circsim - CLAUDE.md
 
 `ws::circsim` - the schematic side of the circsim app (model, `.csim`
-format, net building, ERC, ws::spice export, the `.csym` symbol library)
-plus its headless CLI (`apps/circsim_cli`). Headless by construction: no
-ui include anywhere; `ws::spice` is the ONLY simulator this lib ever
-talks to.
+format, net building, ERC, ws::spice export, the `.csym` symbol library,
+the stage-3 locate seam) plus its headless CLI (`apps/circsim_cli`) and
+its editor (`apps/circsim_editor`, the one ui-bearing consumer - the
+lib itself stays headless). Headless by construction: no ui include
+anywhere; `ws::spice` is the ONLY simulator this lib ever talks to.
 
 Deps: `ws::core`, `ws::math` (DVec2 positions), `ws::spice`, and
 `ws::settings` (json::Object - the unknown-field carrier - plus the
@@ -127,27 +128,49 @@ fetched privately, which would duplicate a first-party capability.
   `--analysis` grammar ("tran 1u 1m", "ac dec 10 1 100k") parses with
   ws::spice's number grammar.
 
+## Locate (locate.hpp, stage 3)
+- The Problems panel's jump seam: `locate_diag` parses a Diag's
+  pre-rendered `where` ("R3", "R3 pin b", "npn 7", "part 12",
+  "net N004", "wire 5", "label out", "directives", "analysis setup",
+  comma lists) back into a `DiagTarget` (Part+optional pin / Net id /
+  Wire id / Label id / the two no-geometry blocks / None).
+- Element names resolve through the export back-map FIRST (the mangled
+  included), then the schematic's own refs (ci), then "symbol id",
+  then the raw "part id". Net names go through NetList::by_name then
+  node_net. Nothing guesses: unresolvable answers None and the panel
+  shows the row without a jump target.
+- `focus_bounds` is the zoom answer: a part's transformed
+  symbol_bounds, a net's member extent (pins/wires/junctions/labels),
+  a wire's polyline, a label's anchor grown one unit; the caller's
+  NetList saves a build for the Net case.
+
 ## Layout
 - `include/ws/circsim/`: model.hpp, symbols.hpp, library.hpp, diag.hpp,
-  nets.hpp, format.hpp, erc.hpp, export.hpp. ws::core::Result only; no
-  exceptions.
+  nets.hpp, format.hpp, erc.hpp, export.hpp, locate.hpp.
+  ws::core::Result only; no exceptions.
 - `src/`: model.cpp, symbols.cpp, library.cpp, nets.cpp, format.cpp,
-  erc.cpp, export.cpp. The built-in symbol table in symbols.cpp (with
-  its specs and draw) is the shape the .csym library feeds.
+  erc.cpp, export.cpp, locate.cpp. The built-in symbol table in
+  symbols.cpp (with its specs and draw) is the shape the .csym library
+  feeds.
 - `examples/`: divider.csim, rc_step.csim (the smoke suite's decks),
   tline.csym + tline_demo.csim (the stage-2 library demo: a T-line
   symbol the built-ins do not ship, run with `-S tline.csym`).
 - `apps/circsim_cli`: run / erc / netlist / symbols subcommands, `-S
   <lib.csym>` (repeatable, later wins) on run/erc/netlist; exit codes
   0 ok, 1 sim/ERC error, 2 usage/IO (the ws::spice CLI convention).
+- `apps/circsim_editor` (stage 3): the ws::ui::shell editor app over
+  this lib - the only ui-bearing consumer. The lib itself stays
+  headless (no ui include, unchanged).
 
 ## Tests
 ```
 ctest --preset linux -R circsim    # plus circsim_smoke over the CLI
 ```
-One binary, five TUs: test_format.cpp (round-trip, unknowns, migration,
+One binary, six TUs: test_format.cpp (round-trip, unknowns, migration,
 tolerant load - owns the doctest main), test_nets.cpp (the connectivity
 rules), test_erc.cpp (one case per check), test_export.cpp (golden decks,
 the full-path analytic sims, error mapping), test_symbols.cpp (the
 library: load/save round-trips, tolerance, layering/overrides, param
-typing, draw prims, bounds, and the tline full path).
+typing, draw prims, bounds, and the tline full path), test_locate.cpp
+(stage 3: every `where` spelling, the back-map paths, the focus
+bounds).
