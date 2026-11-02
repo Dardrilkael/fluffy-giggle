@@ -102,7 +102,15 @@ CMakeLists only wire ws libraries together.
   libs/circsim - six panels (the Schematic canvas through ws::ui's
   canvas layer: place/move/rotate/mirror parts with every edit an undo
   command, wire routing with the ortho constraint, net labels; the
-  Palette over `symbols()` with fitted mini previews; the Properties
+  canvas floor and dot grid ride the canvas layer's stage-16 grid
+  system - one GridSpec (Schematic::grid as the base) shared by the
+  pixel-snapped draw and the snap, the x5 level ladder fading its
+  minors so zooming never pops a mark, the lattice brightening ~150ms
+  while a tool is engaged, snap feedback (a ring on the wire tool's
+  pin/junction target, an accent dot on the landing intersection) and
+  Shift as the coarse major-lattice snap for placements, part drags
+  and labels - wires, pins and junctions always snap fine; the Palette
+  over `symbols()` with fitted mini previews; the Properties
   grid over ParamSpecs plus the analysis-setup and directives editors;
   the Problems list over Diags with select-and-zoom through
   libs/circsim's locate seam; the Netlist view; the Results panel - the

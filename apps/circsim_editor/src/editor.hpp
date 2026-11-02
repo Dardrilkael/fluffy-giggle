@@ -53,6 +53,7 @@
 #include <ws/math/vecmath.hpp>
 #include <ws/spice/run.hpp>
 #include <ws/ui/canvas/canvas2d.hpp>
+#include <ws/ui/canvas/grid.hpp>  // GridSpec: the grid the panel draws
 #include <ws/ui/canvas/tessellation.hpp>
 #include <ws/ui/gui/theme.hpp>
 #include <ws/ui/gui/widgets.hpp>
@@ -382,8 +383,21 @@ struct Editor {
     [[nodiscard]] const ws::circsim::SymbolDef* sym_of(
         const ws::circsim::Part& p) const;
 
-    // Snap to the schematic's grid.
-    [[nodiscard]] Pos snap(Pos world) const;
+    // The grid spec the canvas panel draws AND snap() reads - one
+    // source of truth (ws::ui::canvas::GridSpec): the base spacing is
+    // the schematic's own grid (Schematic::grid, default 1), the
+    // major interval the x5 ladder. The panel paints its theme's
+    // grid tokens over the faces; the spacing answers both halves.
+    [[nodiscard]] canvas::GridSpec grid_spec() const;
+
+    // Snap to the grid spec's fine lattice - the same one the drawn
+    // dots mark. `coarse` snaps to the major lattice instead (base *
+    // major_interval, an integer multiple: a coarse position is
+    // always a fine position too, so wires, pins and junctions can
+    // never leave the fine grid). The wire tool and junction drags
+    // always pass false; the Shift modifier carries the coarse
+    // placement/drag snap.
+    [[nodiscard]] Pos snap(Pos world, bool coarse = false) const;
 
     // The part's world AABB (the transformed symbol bounds).
     [[nodiscard]] std::optional<Bounds> part_bounds(std::uint32_t id) const;

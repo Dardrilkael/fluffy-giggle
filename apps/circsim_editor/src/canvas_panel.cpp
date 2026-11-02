@@ -3,8 +3,13 @@
 // One frame, in order: adopt the viewport, sync the camera with the
 // document's stored view, handle the pointer (the interaction model
 // from editor.hpp, gated on the gui's claims so an open modal veil
-// freezes the canvas), then render the world - grid, wires, junctions,
-// labels, parts, the selection highlight, and the tool ghosts/preview.
+// freezes the canvas), then render the world - the canvas floor and
+// the dot grid (ws::ui::canvas's grid system, pixel-snapped in screen
+// space - one spec with the snap, its brightness eased up while a
+// tool is engaged), the snap feedback (a ring on the wire tool's
+// pin/junction target, an accent dot on the grid intersection a
+// placement or drag is about to land on), wires, junctions, labels,
+// parts, the selection highlight, and the tool ghosts/preview.
 //
 // The viewport is the scroll scope's content rect: the panel NEVER
 // advances the flow (no layout.next()/advance() calls anywhere in this
@@ -16,7 +21,10 @@
 // The canvas transform is the camera with the y flip baked in
 // (translate to the viewport's center, scale by zoom, negate y), so
 // every draw below speaks the model's y-up grid units while strokes
-// and text stay screen-sized (the canvas layer's own convention).
+// and text stay screen-sized (the canvas layer's own convention). The
+// grid and the snap feedback are the two exceptions: they draw in
+// SCREEN space before the transform so their 1px marks land on device
+// pixels at any pan/zoom.
 
 #include "canvas_panel.hpp"
 
@@ -36,6 +44,12 @@ using canvas::Point;
 // The screen-space pick radius: hits are converted to world units by
 // the zoom, so picks stay steady at every magnification.
 constexpr float kPickPx = 9.0f;
+
+// The snap feedback's reach: the accent dot shows while the cursor is
+// within this many screen px of the grid intersection it would land
+// on (and the dot's own px).
+constexpr float kSnapFeedbackPx = 8.0f;
+constexpr float kSnapDotPx = 5.0f;
 
 [[nodiscard]] double pick_world(const EditorView& view) {
     return view.valid() ? static_cast<double>(kPickPx) / view.zoom : 0.35;
@@ -86,6 +100,14 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
     const Pos world = ed.view.s2w(mouse);
     const double pick = pick_world(ed.view);
     const bool space_down = in.key_down[32] != 0;
+    // Shift = the coarse snap: placements, part drags and labels land
+    // on the major lattice (base * 5, an integer multiple of the fine
+    // grid - a coarse position is always a fine position too). Wires,
+    // pins and junctions never read it: their snaps below always pass
+    // fine, so nets.cpp's exact-grid joins keep their invariant.
+    const bool coarse =
+        in.key_down[ws::input::keys::kLeftShift] != 0 ||
+        in.key_down[ws::input::keys::kRightShift] != 0;
 
     // Wheel: zoom toward the cursor (the scroll panel's own claim is
     // the harmless no-op the header note explains).
@@ -110,9 +132,14 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
     // A drag in flight outranks every tool arming.
     if (ed.drag.kind != Editor::Drag::Kind::None) {
         if (in.mouse_down[0] != 0) {
+            // A junction drag always stays on the fine grid; parts
+            // and labels follow the Shift modifier.
+            const bool drag_coarse =
+                coarse && ed.drag.kind != Editor::Drag::Kind::Junction;
             const Pos at = ed.snap(
                 Pos{world.x - ed.drag.grab_offset.x,
-                    world.y - ed.drag.grab_offset.y});
+                    world.y - ed.drag.grab_offset.y},
+                drag_coarse);
             if (!eps_eq(at.x, ed.drag.start_world.x, 1e-9) ||
                 !eps_eq(at.y, ed.drag.start_world.y, 1e-9)) {
                 ed.drag.moved = true;
@@ -150,9 +177,12 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
         }
         // Release: land the undo command when the drag actually moved.
         if (ed.drag.moved && ed.doc != nullptr) {
+            const bool drag_coarse =
+                coarse && ed.drag.kind != Editor::Drag::Kind::Junction;
             const Pos to = ed.snap(
                 Pos{world.x - ed.drag.grab_offset.x,
-                    world.y - ed.drag.grab_offset.y});
+                    world.y - ed.drag.grab_offset.y},
+                drag_coarse);
             if (ed.drag.kind == Editor::Drag::Kind::Part) {
                 push_move_part(*ed.doc, ed.drag.id, to);
             } else if (ed.drag.kind == Editor::Drag::Kind::Junction) {
@@ -218,7 +248,7 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                 }
                 ws::circsim::Part p = ws::circsim::Part::make(
                     sym->key, next_ref(*ed.schem(), *sym), "",
-                    ed.snap(world));
+                    ed.snap(world, coarse));
                 p.rot = ed.ghost_rot;
                 p.mirror = ed.ghost_mirror;
                 p.params = ws::circsim::default_params(*sym);
@@ -275,7 +305,7 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                     break;
                 }
                 ws::circsim::Label l;
-                l.pos = ed.snap(world);
+                l.pos = ed.snap(world, coarse);
                 l.name = ed.label_text;
                 push_place_label(*ed.doc, std::move(l));
                 break;
@@ -326,74 +356,96 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
 
     handle_pointer(ed, gui, body);
 
-    // --- the grid, in SCREEN space and pixel-snapped.
-    // Why not world space: a 1px stroke centred between two pixel rows
-    // splits its coverage over both, so with a fractional pan/zoom some
-    // lines come out crisp and others half-intensity, and the whole
-    // grid shimmers while panning. Here every line's centre is placed
-    // on a pixel centre (floor + 0.5) so each one covers exactly one
-    // pixel column/row at full alpha.
-    // Spacing follows the schematic's snap grid (s.grid), in levels of
-    // x5: the next level's minors ARE this level's majors, so a level
-    // change never moves a visible line - minors just fade in/out.
+    // The pointer facts the render halves share (screen-space inside,
+    // world cursor, the Shift modifier the ghosts follow).
+    const ws::input::InputFrame& in = gui.input();
+    const bool inside =
+        in.mouse_x >= body.x && in.mouse_x < body.x + body.width &&
+        in.mouse_y >= body.y && in.mouse_y < body.y + body.height;
+    const Pos world = ed.view.s2w({in.mouse_x, in.mouse_y});
+    const bool coarse =
+        in.key_down[ws::input::keys::kLeftShift] != 0 ||
+        in.key_down[ws::input::keys::kRightShift] != 0;
+
+    // --- the canvas floor + the dot grid (SCREEN space, pixel-snapped).
+    // grid.hpp's system - ONE spec with the snap: the base spacing is
+    // the schematic's own grid (Schematic::grid through
+    // Editor::grid_spec), the faces the theme's tokens, the density
+    // the x5 level ladder whose minors fade in and out so a level
+    // change never moves or pops a mark. Every dot's centre is
+    // snapped from its integer index, so panning at fractional
+    // offsets is shimmer-free at any zoom. While a tool is armed or
+    // a drag is in flight the lattice brightens (a ~150ms ease,
+    // instant when the theme's motion is off); a view change alone
+    // never triggers it (view changes are not edits - the camera
+    // sync above rides the same rule).
+    std::optional<Pos> ring_target;  // the wire tool's pin/junction hit
     {
-        const double zoom = ed.view.zoom;
-        const double base = s.grid > 0.0 ? s.grid : 1.0;
-        constexpr double kMinCellPx = 10.0;   // densest minor cell
-        constexpr double kFullCellPx = 24.0;  // minors at full alpha
-        double step = base;
-        for (int guard = 0; step * zoom < kMinCellPx && guard < 32; ++guard) {
-            step *= 5.0;
-        }
-        const double cell = step * zoom;
-        double fade = (cell - kMinCellPx) / (kFullCellPx - kMinCellPx);
-        fade = std::clamp(fade, 0.0, 1.0);
-        fade = fade * fade * (3.0 - 2.0 * fade);  // smoothstep
+        canvas::GridSpec spec = ed.grid_spec();
+        spec.minor_color = theme.grid_minor;
+        spec.major_color = theme.grid_major;
+        spec.axis_color = theme.grid_axis;
+        spec.show_dots = true;
 
-        const float left = body.x;
-        const float top = body.y;
-        const float right = body.x + body.width;
-        const float bottom = body.y + body.height;
-        const double cx = static_cast<double>(body.x) + body.width * 0.5;
-        const double cy = static_cast<double>(body.y) + body.height * 0.5;
-        const double half_w = static_cast<double>(body.width) * 0.5 / zoom;
-        const double half_h = static_cast<double>(body.height) * 0.5 / zoom;
+        canvas::GridFrame frame;
+        frame.center_x = ed.view.center.x;
+        frame.center_y = ed.view.center.y;
+        frame.zoom = ed.view.zoom;
+        frame.ox = body.x;
+        frame.oy = body.y;
+        frame.view_w = body.width;
+        frame.view_h = body.height;
+        frame.y_flip = true;  // the model's y-up world
 
-        Paint line;
-        line.width = 1.0f;
-        const auto paint_for = [&](long long i) -> Paint {
-            Paint p = line;
-            if (i == 0) {
-                p.color = gui::dim(theme.text, 0.34f);
-            } else if (i % 5 == 0) {
-                p.color = gui::dim(theme.text, 0.20f);
+        const bool tool_engaged =
+            ed.tool != Tool::Select ||
+            ed.drag.kind != Editor::Drag::Kind::None || ed.wire_draft.active;
+        const float ease = theme.anim_enabled ? 0.15f : 0.0f;
+        const float travel = gui.animate_toward(
+            gui.ids().internal_id("schematic grid"),
+            tool_engaged ? 1.0f : 0.0f, ease);
+        const float brightness = 0.6f + 0.4f * travel;
+
+        const Point floor{body.x, body.y};
+        ed.renderer.fill_rects(&floor, 1, body.width, body.height,
+                               theme.canvas_bg);
+        canvas::draw_grid(ed.renderer, frame, spec, brightness);
+    }
+
+    // --- the snap feedback (SCREEN space, drawing only - the snap
+    // itself is exactly what it always was). The wire tool's answer
+    // rings pins and junctions (in world space, with the wires
+    // below); a free landing spot dots the grid intersection the
+    // cursor is within kSnapFeedbackPx of.
+    if (inside && gui.claims_open()) {
+        std::optional<Pos> free_spot;
+        if (ed.tool == Tool::Wire || ed.wire_draft.active) {
+            const SnapTarget t = snap_wire_target(ed, world);
+            if (t.kind == SnapTarget::Kind::Free) {
+                free_spot = t.pos;
             } else {
-                p.color = gui::dim(theme.text, static_cast<float>(0.10 * fade));
+                ring_target = t.pos;
             }
-            return p;
-        };
-
-        const long long ix0 = static_cast<long long>(
-            std::ceil((ed.view.center.x - half_w) / step));
-        const long long ix1 = static_cast<long long>(
-            std::floor((ed.view.center.x + half_w) / step));
-        const long long iy0 = static_cast<long long>(
-            std::ceil((ed.view.center.y - half_h) / step));
-        const long long iy1 = static_cast<long long>(
-            std::floor((ed.view.center.y + half_h) / step));
-        if (ix1 - ix0 < 4000 && iy1 - iy0 < 4000) {
-            for (long long i = ix0; i <= ix1; ++i) {
-                const double sx =
-                    cx + (static_cast<double>(i) * step - ed.view.center.x) * zoom;
-                const float px = std::floor(static_cast<float>(sx)) + 0.5f;
-                ed.renderer.stroke_line(Point{px, top}, Point{px, bottom}, paint_for(i));
-            }
-            for (long long i = iy0; i <= iy1; ++i) {
-                // y is flipped: model y-up -> screen y-down
-                const double sy =
-                    cy - (static_cast<double>(i) * step - ed.view.center.y) * zoom;
-                const float py = std::floor(static_cast<float>(sy)) + 0.5f;
-                ed.renderer.stroke_line(Point{left, py}, Point{right, py}, paint_for(i));
+        } else if (ed.drag.kind != Editor::Drag::Kind::None) {
+            // The drag's own landing spot (a junction drag stays on
+            // the fine grid; parts and labels follow Shift).
+            free_spot = ed.snap(
+                Pos{world.x - ed.drag.grab_offset.x,
+                    world.y - ed.drag.grab_offset.y},
+                coarse && ed.drag.kind != Editor::Drag::Kind::Junction);
+        } else if (ed.tool == Tool::Place || ed.tool == Tool::Label) {
+            free_spot = ed.snap(world, coarse);
+        }
+        if (free_spot.has_value()) {
+            const ws::math::Vec2 sp = ed.view.w2s(*free_spot);
+            const float dx = sp.x - in.mouse_x;
+            const float dy = sp.y - in.mouse_y;
+            if (dx * dx + dy * dy <=
+                kSnapFeedbackPx * kSnapFeedbackPx) {
+                const Point dot{canvas::snap_mark(sp.x, kSnapDotPx),
+                                canvas::snap_mark(sp.y, kSnapDotPx)};
+                ed.renderer.fill_rects(&dot, 1, kSnapDotPx, kSnapDotPx,
+                                       theme.control_on);
             }
         }
     }
@@ -405,12 +457,6 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     rc.translate(body.x + body.width * 0.5f, body.y + body.height * 0.5f);
     rc.scale(static_cast<float>(ed.view.zoom),
              -static_cast<float>(ed.view.zoom));
-
-    const ws::input::InputFrame& in = gui.input();
-    const bool inside =
-        in.mouse_x >= body.x && in.mouse_x < body.x + body.width &&
-        in.mouse_y >= body.y && in.mouse_y < body.y + body.height;
-    const Pos world = ed.view.s2w({in.mouse_x, in.mouse_y});
 
     // --- wires, junctions, labels
     Paint wire_paint;
@@ -522,17 +568,16 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         }
     }
 
-    // --- the pin target highlight (the wire tool's cursor)
-    if (ed.tool == Tool::Wire && inside && gui.claims_open()) {
-        if (const std::optional<PinHit> pin =
-                ed.hit_pin(world, pick_world(ed.view))) {
-            Paint pin_paint;
-            pin_paint.width = 2.0f;
-            pin_paint.color = theme.control_on;
-            rc.stroke_circle(Point{static_cast<float>(pin->pos.x),
-                                   static_cast<float>(pin->pos.y)},
-                             0.35f, pin_paint);
-        }
+    // --- the pin/junction target highlight (the wire tool's cursor):
+    // a ring on whatever snap_wire_target answered - pins and
+    // junctions alike, the same target the preview routes to.
+    if (ring_target.has_value()) {
+        Paint ring;
+        ring.width = 2.0f;
+        ring.color = theme.control_on;
+        rc.stroke_circle(Point{static_cast<float>(ring_target->x),
+                               static_cast<float>(ring_target->y)},
+                         0.35f, ring);
     }
 
     // --- the wire draft preview
@@ -567,13 +612,13 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         if (ed.tool == Tool::Place && !ed.place_symbol.empty()) {
             if (const ws::circsim::SymbolDef* sym =
                     ed.library.find(ed.place_symbol)) {
-                draw_symbol(rc, *sym, ed.snap(world), ed.ghost_rot,
+                draw_symbol(rc, *sym, ed.snap(world, coarse), ed.ghost_rot,
                             ed.ghost_mirror, ghost_paint,
                             gui::dim(theme.text, 0.45f), theme.font);
             }
         } else if (ed.tool == Tool::Label && ed.label_text[0] != '\0' &&
                    theme.font != nullptr) {
-            const Pos at = ed.snap(world);
+            const Pos at = ed.snap(world, coarse);
             (void)rc.draw_text(static_cast<float>(at.x + 0.45f),
                                static_cast<float>(at.y - 0.1f),
                                ed.label_text, *theme.font,

@@ -43,11 +43,23 @@ const ws::circsim::SymbolDef* Editor::sym_of(
     return library.find(p.symbol);
 }
 
-Pos Editor::snap(Pos world) const {
+canvas::GridSpec Editor::grid_spec() const {
+    // The schematic's own grid is the base; everything else (faces,
+    // thresholds, cap) is the spec's stock, which the panel paints
+    // over with the theme's tokens.
+    canvas::GridSpec spec;
     const ws::circsim::Schematic* s = schem();
-    const double grid = s != nullptr && s->grid > 0.0 ? s->grid : 1.0;
-    return {std::round(world.x / grid) * grid,
-            std::round(world.y / grid) * grid};
+    spec.base = s != nullptr && s->grid > 0.0 ? s->grid : 1.0;
+    spec.major_interval = 5;  // the x5 ladder the draw assumes
+    return spec;
+}
+
+Pos Editor::snap(Pos world, bool coarse) const {
+    // snap_coord reads the SAME spec the grid renderer draws (the
+    // drawn dots and the snap targets can never disagree).
+    const canvas::GridSpec spec = grid_spec();
+    return {canvas::snap_coord(world.x, spec, coarse),
+            canvas::snap_coord(world.y, spec, coarse)};
 }
 
 std::optional<Bounds> Editor::part_bounds(std::uint32_t id) const {
