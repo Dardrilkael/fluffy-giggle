@@ -101,7 +101,10 @@ if (Test-Path (Join-Path $Root 'libs')) {
 $appFiles = @()
 $appsDir = Join-Path $Root 'apps'
 if (Test-Path $appsDir) {
-  $appFiles = @(Get-ChildItem -Path $appsDir -Recurse -Include $extensions -File)
+  $allAppFiles = @(Get-ChildItem -Path $appsDir -Recurse -Include $extensions -File)
+  # Exclude test files (apps/*/tests/*) from the dependency check - they
+  # legitimately include third-party test frameworks like doctest.
+  $appFiles = @($allAppFiles | Where-Object { $_.FullName -notmatch '\\tests\\' })
 }
 
 $violations = New-Object System.Collections.Generic.List[string]
