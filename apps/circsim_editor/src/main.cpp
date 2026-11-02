@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -108,6 +109,33 @@ constexpr const char* kMonoFontPath =
     return file_exists(primary) ? primary : fallback;
 }
 
+// The bake pair follows the ACTIVE chrome's brightness (the P1b rule):
+// the dark stock's light-on-dark text wants the boldening pair, the
+// light stock's dark-on-light text the near-identity one. The shell's
+// theme is a live setting, so the fonts re-bake when it flips.
+[[nodiscard]] ws::ui::r2d::FontBakeOptions bake_options_for(bool dark) {
+    return dark ? ws::ui::r2d::FontBakeOptions::dark_chrome()
+                : ws::ui::r2d::FontBakeOptions::light_chrome();
+}
+
+// The UI face: the BUNDLED Inter by default (the stock look, identical
+// on every platform - no system font walk), with a path override for
+// custom fonts: WS_FONT_PATH wins when it is set and loadable, the
+// bundled face answers otherwise. The caller's options carry the
+// theme-brightness pick.
+[[nodiscard]] ws::ui::r2d::Font load_ui_font(
+    float pixel_height, const ws::ui::r2d::FontBakeOptions& options) {
+    if (const char* custom = std::getenv("WS_FONT_PATH")) {
+        ws::ui::r2d::Font loaded =
+            ws::ui::r2d::load_font(custom, pixel_height, options);
+        if (!loaded.empty()) {
+            return loaded;
+        }
+        // A dead override falls through to the bundled face.
+    }
+    return ws::ui::r2d::load_default_font(pixel_height, options);
+}
+
 // --- the app ----------------------------------------------------------------
 
 class CircsimApp final : public ws::ui::App {
@@ -130,22 +158,12 @@ class CircsimApp final : public ws::ui::App {
         install_clipboard(gui_);
         install_job_system(jobs_);
 
-        // The faces: the UI face baked once at the ui scale with the
-        // CJK carrier stacked under it, and the netlist panel's mono
-        // face (the shell_example's stack shape).
+        // The faces (the shell_example's shape): the BUNDLED Inter
+        // (regular + semibold) baked at the brightness pick, the CJK
+        // carrier stacked under it, and the netlist panel's mono face
+        // beside them.
         scale_ = ui_scale();
-        font_ = ws::ui::r2d::load_font(font_or(kUiFontPath, kExtraFontPath),
-                                       16.0f * scale_);
-        if (!font_.empty()) {
-            (void)ws::ui::r2d::font_add_face(
-                font_, font_or(kUiFontPath, kExtraFontPath), 0);
-            (void)ws::ui::r2d::font_add_face(font_, kExtraFontPath, 1);
-        }
-        font_mono_ = ws::ui::r2d::load_font(kMonoFontPath, 15.0f * scale_);
-        if (!font_mono_.empty()) {
-            (void)ws::ui::r2d::font_add_face(font_mono_, kMonoFontPath, 0);
-            (void)ws::ui::r2d::font_add_face(font_mono_, kExtraFontPath, 1);
-        }
+        rebuild_fonts();
 
         // The settings schema: the shell reads shell.theme itself.
         declare_settings();
@@ -294,7 +312,18 @@ class CircsimApp final : public ws::ui::App {
         const r2d::FrameSize frame = r2d::frame_size();
         gui_.begin_layer(gui::Layer::base);
         gui::ChromeTheme theme = shell_->theme().scaled(scale_);
+        // The bake pair follows the chrome's brightness. The shell's
+        // theme is a live setting with no change event, so this
+        // per-frame copy is the detector: a flip re-bakes every face
+        // once (the size slider's documented ~50-200 ms, three faces
+        // here - the frame hitches once, then it is done).
+        const bool dark = gui::is_dark(theme);
+        if (dark != font_dark_) {
+            font_dark_ = dark;
+            rebuild_fonts();
+        }
         theme.font = font_.empty() ? nullptr : &font_;
+        theme.font_strong = font_strong_.empty() ? nullptr : &font_strong_;
         shell_->draw(gui_, theme,
                      gui::Rect{0.0f, 0.0f, frame.width, frame.height});
         gui_.end_layer();
@@ -311,6 +340,37 @@ class CircsimApp final : public ws::ui::App {
     }
 
   private:
+    // The faces, re-baked on demand: the bundled Inter (regular +
+    // semibold) at the brightness pick, the system mono beside it, the
+    // past-ASCII carriers stacked under each. A theme flip calls this
+    // again - a bake is a snapshot of its options.
+    void rebuild_fonts() {
+        const ws::ui::r2d::FontBakeOptions bake = bake_options_for(font_dark_);
+        font_ = load_ui_font(16.0f * scale_, bake);
+        if (!font_.empty()) {
+            // The primary face re-stacks for its own past-ASCII glyphs
+            // (Latin-1 supplements), then the Han carrier under it.
+            (void)ws::ui::r2d::font_add_face(
+                font_, font_or(kUiFontPath, kExtraFontPath), 0);
+            (void)ws::ui::r2d::font_add_face(font_, kExtraFontPath, 1);
+        }
+        font_strong_ = ws::ui::r2d::load_default_font(
+            ws::ui::r2d::DefaultFontWeight::semibold, 16.0f * scale_, bake);
+        if (!font_strong_.empty()) {
+            // The strong face answers the same carriers: a net label
+            // outlives ASCII too.
+            (void)ws::ui::r2d::font_add_face(font_strong_, kUiFontPath, 0);
+            (void)ws::ui::r2d::font_add_face(font_strong_, kExtraFontPath, 1);
+        }
+        // The netlist panel's mono face, same stack shape.
+        font_mono_ =
+            ws::ui::r2d::load_font(kMonoFontPath, 15.0f * scale_, bake);
+        if (!font_mono_.empty()) {
+            (void)ws::ui::r2d::font_add_face(font_mono_, kMonoFontPath, 0);
+            (void)ws::ui::r2d::font_add_face(font_mono_, kExtraFontPath, 1);
+        }
+    }
+
     void declare_settings() {
         using ws::settings::SettingDesc;
         using ws::settings::SettingType;
@@ -977,7 +1037,11 @@ class CircsimApp final : public ws::ui::App {
 
     float scale_ = 1.0f;
     ws::ui::r2d::Font font_;
+    ws::ui::r2d::Font font_strong_;  // the semibold sibling (headings)
     ws::ui::r2d::Font font_mono_;
+    bool font_dark_ = true;  // the brightness the fonts are baked for
+                             // (the stock default; a persisted light
+                             // shell theme flips it on the first frame)
     std::string about_text_;
     std::string error_text_;
 };

@@ -107,12 +107,17 @@ std::vector<std::uint8_t> read_file(const char* path) {
     return data;
 }
 
-// The coverage LUT: a' = 255 * (a/255)^gamma, built once per bake.
+// The coverage LUT: a' = 255 * (a/255)^(1/gamma), built once per bake.
+// The exponent INVERTS the knob, so a LARGER gamma is BOLDER - the mids
+// lift toward full coverage (the P1b redefinition; the original spelled
+// a^gamma, which compounded the thinning a gamma-space blend already
+// gives light-on-dark text while its comment claimed the opposite).
 // gamma 1 (and any degenerate <= 0) is the identity table - the
 // pre-P1 bake's bytes, exactly, the escape hatch FontBakeOptions::
-// identity() names. The table is monotonic by construction, so it can
-// never reorder coverage (a darker sample cannot out-ink a brighter
-// one) and the tofu's binary 0/255 ends map to themselves.
+// identity() names. The table is monotonic by construction (x^(1/g) is
+// monotone for any fixed g > 0), so it can never reorder coverage (a
+// darker sample cannot out-ink a brighter one) and the tofu's binary
+// 0/255 ends map to themselves.
 struct CoverageLut {
     std::uint8_t v[256];
     explicit CoverageLut(float gamma) {
@@ -123,12 +128,16 @@ struct CoverageLut {
             }
             return;
         }
+        const double exponent = 1.0 / static_cast<double>(gamma);
         for (int i = 0; i < 256; ++i) {
             const double shaded =
-                std::pow(static_cast<double>(i) / 255.0,
-                         static_cast<double>(gamma));
+                std::pow(static_cast<double>(i) / 255.0, exponent);
+            // x in [0,1] to a positive power stays in [0,1], so the
+            // rounding can never leave the byte range - the clamp is
+            // belt and braces, not arithmetic the LUT needs.
+            const long scaled = std::lround(shaded * 255.0);
             v[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(
-                std::lround(shaded * 255.0));
+                scaled < 0 ? 0 : (scaled > 255 ? 255 : scaled));
         }
     }
 };
@@ -235,8 +244,18 @@ BakedGlyph rasterize_glyph(const stbtt_fontinfo& info,
             }
             const int averaged =
                 count > 0 ? (acc + count / 2) / count : 0;
+            // The boost: a straight multiplier AFTER the LUT - the last
+            // word on weight, clamped at 255 (never a wrap). 1.0 is the
+            // identity; a positive multiplier keeps the LUT's monotone
+            // order, so coverage still cannot reorder.
+            const int boosted = static_cast<int>(std::lround(
+                static_cast<float>(lut.v[static_cast<std::size_t>(averaged)]) *
+                options.boost));
             dst[static_cast<std::size_t>(col) * 4u + 3u] =
-                lut.v[static_cast<std::size_t>(averaged)];
+                static_cast<std::uint8_t>(boosted < 0
+                                              ? 0
+                                              : (boosted > 255 ? 255
+                                                               : boosted));
         }
     }
     return g;

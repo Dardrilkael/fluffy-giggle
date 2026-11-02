@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <span>
 #include <string>
@@ -54,16 +55,25 @@
 
 namespace {
 
-// The system UI face - the APP picks it, not the ui lib (r2d takes
-// caller-resolved paths; font-directory knowledge lives in this TU, the
-// platform boundary, and never inside the lib). One constant per TU, per
-// the house rule. Roboto ships on every Android device; a missing face
-// degrades to the fontless v1 bars, same as a missing Windows face.
-#ifdef __ANDROID__
-constexpr const char* kDefaultFontPath = "/system/fonts/Roboto-Regular.ttf";
-#else
-constexpr const char* kDefaultFontPath = "C:/Windows/Fonts/segoeui.ttf";
-#endif
+// The UI face: the BUNDLED Inter by default (the stock look, identical
+// on every platform - no system font walk), with a path override for
+// custom fonts: WS_FONT_PATH wins when it is set and loadable, the
+// bundled face answers otherwise. The bake options follow the active
+// theme's brightness (playground is dark-chrome-only: the dark pair).
+// The app still owns the choice - r2d takes caller-resolved paths; only
+// the bytes live in the lib.
+[[nodiscard]] ws::ui::r2d::Font load_ui_font(
+    float pixel_height, const ws::ui::r2d::FontBakeOptions& options) {
+    if (const char* custom = std::getenv("WS_FONT_PATH")) {
+        ws::ui::r2d::Font loaded =
+            ws::ui::r2d::load_font(custom, pixel_height, options);
+        if (!loaded.empty()) {
+            return loaded;
+        }
+        // A dead override falls through to the bundled face.
+    }
+    return ws::ui::r2d::load_default_font(pixel_height, options);
+}
 
 // One rule for panel geometry, stated once. The gui block draws at these
 // rects; the pinch gate reads them back so a two-finger pinch over a panel
@@ -165,6 +175,7 @@ private:
     // ---- density + theme ----
     float ui_scale_ = 1.0f;
     ws::ui::r2d::Font font_;
+    ws::ui::r2d::Font font_strong_;  // the semibold sibling (headings)
     ws::ui::gui::ChromeTheme chrome_ = ws::ui::gui::kDefaultChrome;
 
     // ---- extracted concerns ----
@@ -197,9 +208,18 @@ void PlaygroundApp::on_setup() {
                                       "assets/icon_purple.png"});
     ui_scale_ = ui_scale();
     net_.set_ui_scale(ui_scale_);
-    font_ = ws::ui::r2d::load_font(kDefaultFontPath, 16.0f * ui_scale_);
+    // The stock look, baked from the bundled Inter at the ui scale: the
+    // regular for the body labels, the semibold for the strong reads -
+    // both through the dark-chrome bake pair (this app is dark-only).
+    const ws::ui::r2d::FontBakeOptions bake =
+        ws::ui::r2d::FontBakeOptions::dark_chrome();
+    font_ = load_ui_font(16.0f * ui_scale_, bake);
+    font_strong_ = ws::ui::r2d::load_default_font(
+        ws::ui::r2d::DefaultFontWeight::semibold, 16.0f * ui_scale_, bake);
     chrome_ = ws::ui::gui::kDefaultChrome.scaled(ui_scale_);
     chrome_.font = font_.empty() ? nullptr : &font_;
+    chrome_.font_strong =
+        font_strong_.empty() ? nullptr : &font_strong_;
     install_clipboard(gui_);
     audio_.setup();
 }

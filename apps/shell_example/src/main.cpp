@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -78,10 +79,12 @@ constexpr int kF1 = 290;
 constexpr int kLeftSuper = 343;   // GLFW_KEY_LEFT_SUPER
 constexpr int kRightSuper = 347;  // GLFW_KEY_RIGHT_SUPER
 
-// The system UI face - the APP picks it, not the ui lib (r2d takes
-// caller-resolved paths; the gallery/bounce rule). A missing face
-// degrades to the fontless v1 label bars everywhere, gracefully -
-// which is exactly what this example showed before it loaded one.
+// The past-ASCII carrier faces (the face stack feeds from these; the
+// PRIMARY bake itself is the BUNDLED Inter - see load_ui_font below):
+// every codepoint past the inline bake resolves through the stack
+// before the fallback box, so a real header's Chinese comment lines
+// render instead of drawing tofu. A missing file refuses gracefully -
+// the boxes stay, nothing else changes.
 #ifdef __ANDROID__
 constexpr const char* kDefaultFontPath = "/system/fonts/Roboto-Regular.ttf";
 #else
@@ -107,6 +110,33 @@ constexpr const char* kMonoFontPath = "/system/fonts/DroidSansMono.ttf";
 #else
 constexpr const char* kMonoFontPath = "C:/Windows/Fonts/consola.ttf";
 #endif
+
+// The bake pair follows the ACTIVE chrome's brightness (the P1b rule):
+// the dark stock's light-on-dark text wants the boldening pair, the
+// light stock's dark-on-light text the near-identity one. The shell's
+// theme is a live setting, so the fonts re-bake when it flips.
+[[nodiscard]] ws::ui::r2d::FontBakeOptions bake_options_for(bool dark) {
+    return dark ? ws::ui::r2d::FontBakeOptions::dark_chrome()
+                : ws::ui::r2d::FontBakeOptions::light_chrome();
+}
+
+// The UI face: the BUNDLED Inter by default (the stock look, identical
+// on every platform - no system font walk), with a path override for
+// custom fonts: WS_FONT_PATH wins when it is set and loadable, the
+// bundled face answers otherwise. The caller's options carry the
+// theme-brightness pick.
+[[nodiscard]] ws::ui::r2d::Font load_ui_font(
+    float pixel_height, const ws::ui::r2d::FontBakeOptions& options) {
+    if (const char* custom = std::getenv("WS_FONT_PATH")) {
+        ws::ui::r2d::Font loaded =
+            ws::ui::r2d::load_font(custom, pixel_height, options);
+        if (!loaded.empty()) {
+            return loaded;
+        }
+        // A dead override falls through to the bundled face.
+    }
+    return ws::ui::r2d::load_default_font(pixel_height, options);
+}
 
 // The app's store dir: the OS data location on desktop (the gallery's
 // platform_store_dir, the same shape), the CWD on android.
@@ -241,28 +271,16 @@ protected:
         install_clipboard(gui_);
         install_job_system(jobs_);
 
-        // The one look asset (bounce's rule): the system face, baked
-        // once at the ui scale, with the CJK carrier stacked under it
-        // (the gallery's growing-font rule) so foreign text renders.
-        // The shell's stock themes are constexpr and can never carry
-        // the pointer, so the host installs it on the theme it hands
-        // draw() each frame - without it every label is the fontless
-        // v1 bar placeholder.
+        // The one look asset (the P1b rule): the BUNDLED face baked at
+        // the ui scale - regular + semibold from the embedded Inter,
+        // the bake pair picked by the chrome's brightness, the past-ASCII
+        // carriers stacked under it (the gallery's growing-font rule) so
+        // foreign text renders. The shell's stock themes are constexpr
+        // and can never carry the pointer, so the host installs it on
+        // the theme it hands draw() each frame - without it every label
+        // is the fontless v1 bar placeholder.
         scale_ = ui_scale();
-        font_ = ws::ui::r2d::load_font(kDefaultFontPath, 16.0f * scale_);
-        if (!font_.empty()) {
-            // The primary face re-stacks for its own past-ASCII glyphs
-            // (Latin-1 supplements), then the Han carrier under it.
-            (void)ws::ui::r2d::font_add_face(font_, kDefaultFontPath, 0);
-            (void)ws::ui::r2d::font_add_face(font_, kExtraFontPath, 1);
-        }
-        // The editor's mono face, same stack shape: consola for the
-        // code, msyh for the comments consola cannot carry.
-        font_mono_ = ws::ui::r2d::load_font(kMonoFontPath, 15.0f * scale_);
-        if (!font_mono_.empty()) {
-            (void)ws::ui::r2d::font_add_face(font_mono_, kMonoFontPath, 0);
-            (void)ws::ui::r2d::font_add_face(font_mono_, kExtraFontPath, 1);
-        }
+        rebuild_fonts();
 
         // The settings schema: the shell reads shell.theme itself; the
         // plot keys are the plot panel's own, rendered by the shell's
@@ -362,7 +380,18 @@ protected:
         // shape (theme.hpp: the theme does NOT own the font; scaled()
         // carries the pointer as-is, the app loads the bigger bake).
         gui::ChromeTheme theme = shell_->theme().scaled(scale_);
+        // The bake pair follows the chrome's brightness. The shell's
+        // theme is a live setting with no change event, so this
+        // per-frame copy is the detector: a flip re-bakes every face
+        // once (the size slider's documented ~50-200 ms, three faces
+        // here - the frame hitches once, then it is done).
+        const bool dark = gui::is_dark(theme);
+        if (dark != font_dark_) {
+            font_dark_ = dark;
+            rebuild_fonts();
+        }
         theme.font = font_.empty() ? nullptr : &font_;
+        theme.font_strong = font_strong_.empty() ? nullptr : &font_strong_;
         shell_->draw(gui_, theme,
                      gui::Rect{0.0f, 0.0f, frame.width, frame.height});
         gui_.end_layer();
@@ -379,6 +408,38 @@ protected:
     }
 
 private:
+    // The faces, re-baked on demand: the bundled Inter (regular +
+    // semibold) at the brightness pick, the system mono beside it, the
+    // past-ASCII carriers stacked under each. A theme flip calls this
+    // again - a bake is a snapshot of its options.
+    void rebuild_fonts() {
+        const ws::ui::r2d::FontBakeOptions bake = bake_options_for(font_dark_);
+        font_ = load_ui_font(16.0f * scale_, bake);
+        if (!font_.empty()) {
+            // The primary face re-stacks for its own past-ASCII glyphs
+            // (Latin-1 supplements), then the Han carrier under it.
+            (void)ws::ui::r2d::font_add_face(font_, kDefaultFontPath, 0);
+            (void)ws::ui::r2d::font_add_face(font_, kExtraFontPath, 1);
+        }
+        font_strong_ = ws::ui::r2d::load_default_font(
+            ws::ui::r2d::DefaultFontWeight::semibold, 16.0f * scale_, bake);
+        if (!font_strong_.empty()) {
+            // The strong face answers the same carriers: a document
+            // name in a tab outlives ASCII too.
+            (void)ws::ui::r2d::font_add_face(font_strong_, kDefaultFontPath,
+                                             0);
+            (void)ws::ui::r2d::font_add_face(font_strong_, kExtraFontPath, 1);
+        }
+        // The editor's mono face, same stack shape: consola for the
+        // code, msyh for the comments consola cannot carry.
+        font_mono_ =
+            ws::ui::r2d::load_font(kMonoFontPath, 15.0f * scale_, bake);
+        if (!font_mono_.empty()) {
+            (void)ws::ui::r2d::font_add_face(font_mono_, kMonoFontPath, 0);
+            (void)ws::ui::r2d::font_add_face(font_mono_, kExtraFontPath, 1);
+        }
+    }
+
     void declare_settings() {
         using ws::settings::SettingDesc;
         using ws::settings::SettingType;
@@ -926,7 +987,11 @@ private:
     // (mark once per content change, the documented cadence).
     float scale_ = 1.0f;
     ws::ui::r2d::Font font_;
+    ws::ui::r2d::Font font_strong_;  // the semibold sibling (headings)
     ws::ui::r2d::Font font_mono_;
+    bool font_dark_ = true;  // the brightness the fonts are baked for
+                             // (the stock default; a persisted light
+                             // shell theme flips it on the first frame)
     std::string requested_content_;
 
     // The plot job's state.

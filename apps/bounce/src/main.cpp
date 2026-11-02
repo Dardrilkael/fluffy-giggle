@@ -8,9 +8,10 @@
 // one-shot synthesized thud - pitch and gain follow the impact speed.
 //
 // Desktop and phone alike (chatter's entry pattern): on Android the glue
-// hands android_main the shell handle, the system Roboto face stands in
-// for segoeui, and primary touch already bridges to mouse button 0 in the
-// ui backend - so tap-to-drop works with zero lib edits.
+// hands android_main the shell handle, and primary touch already bridges
+// to mouse button 0 in the ui backend - so tap-to-drop works with zero
+// lib edits. The UI face is the bundled Inter on every platform (no
+// system font walk; WS_FONT_PATH overrides it with a custom face).
 
 #include <algorithm>
 #include <atomic>
@@ -18,6 +19,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <numbers>
 #include <optional>
@@ -61,6 +63,22 @@ namespace r2d = ws::ui::r2d;
 namespace gui = ws::ui::gui;
 namespace p2d = ws::physics2d;
 using ws::math::Vec2;
+
+// The UI face: the BUNDLED Inter by default (the stock look, identical
+// on every platform), with a path override for custom fonts -
+// WS_FONT_PATH wins when it is set and loadable. The bake options are
+// the dark-chrome pair: this app draws the stock dark chrome only.
+[[nodiscard]] r2d::Font load_ui_font(float pixel_height,
+                                     const r2d::FontBakeOptions& options) {
+  if (const char* custom = std::getenv("WS_FONT_PATH")) {
+    r2d::Font loaded = r2d::load_font(custom, pixel_height, options);
+    if (!loaded.empty()) {
+      return loaded;
+    }
+    // A dead override falls through to the bundled face.
+  }
+  return r2d::load_default_font(pixel_height, options);
+}
 
 // --- the pit ------------------------------------------------------------------
 // The world's units are pixels: r2d is y-down (world +y renders downward),
@@ -219,15 +237,15 @@ class BounceApp final : public ws::ui::App {
   void on_setup() override {
     ui_scale_ = ui_scale();
     chrome_ = gui::kDefaultChrome.scaled(ui_scale_);
-#ifdef __ANDROID__
-    // System face this side of the fence - no font ships in the APK
-    // (chatter's choice; an empty font just drops text, the pit lives on).
-    font_ = r2d::load_font("/system/fonts/Roboto-Regular.ttf",
-                           15.0f * ui_scale_);
-#else
-    font_ = r2d::load_font("C:/Windows/Fonts/segoeui.ttf", 15.0f * ui_scale_);
-#endif
+    // The bundled face at the dark-chrome bake pair (this app is
+    // dark-only): the regular for the labels, the semibold for the
+    // strong reads. No font ships to load - the bytes ride in the lib.
+    const r2d::FontBakeOptions bake = r2d::FontBakeOptions::dark_chrome();
+    font_ = load_ui_font(15.0f * ui_scale_, bake);
+    font_strong_ = r2d::load_default_font(
+        r2d::DefaultFontWeight::semibold, 15.0f * ui_scale_, bake);
     chrome_.font = font_.empty() ? nullptr : &font_;
+    chrome_.font_strong = font_strong_.empty() ? nullptr : &font_strong_;
 
     // --- physics: the pit world ---------------------------------------------
     p2d::World2D::Desc desc{};
@@ -551,6 +569,7 @@ class BounceApp final : public ws::ui::App {
   gui::LayoutCursor layout_;
   gui::ChromeTheme chrome_ = gui::kDefaultChrome;
   r2d::Font font_;
+  r2d::Font font_strong_;  // the semibold sibling (headings)
   float ui_scale_ = 1.0f;
   std::optional<std::chrono::steady_clock::time_point> last_time_;
   bool dead_ = false;

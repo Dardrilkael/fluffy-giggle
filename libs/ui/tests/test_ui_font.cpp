@@ -12,6 +12,7 @@
 #include "text/default_font.h"
 #include "text/font.h"
 
+#include <cmath>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -120,14 +121,93 @@ TEST_CASE("the bake knobs move coverage, never a metric") {
         CHECK(dx <= 1.0f);
     }
 
-    // The knobs really turn: the default's gamma darkens the mids, so
-    // a curvy glyph carries LESS ink than the identity's, and a heavier
-    // gamma less again.
+    // The knobs really turn: the default's gamma LIFTS the mids (the
+    // exponent inverts, so gamma > 1 is bolder), so a curvy glyph
+    // carries MORE ink than the identity's, and a heavier gamma more
+    // again.
     const std::uint64_t plain_ink = ink_of(glyph_of(plain, 'g'));
     const std::uint64_t quality_ink = ink_of(glyph_of(quality, 'g'));
     const std::uint64_t heavy_ink = ink_of(glyph_of(heavy, 'g'));
-    CHECK(quality_ink < plain_ink);
-    CHECK(heavy_ink < quality_ink);
+    CHECK(quality_ink > plain_ink);
+    CHECK(heavy_ink > quality_ink);
+}
+
+TEST_CASE("boost multiplies after the LUT and clamps at 255") {
+    // The third knob: a straight multiplier on the LUT's output. More
+    // boost, more ink; a mild boost rides byte-exact through the
+    // multiplier (clamping where the product overflows); an absurd
+    // boost SATURATES every nonzero byte at 255 - clamped, never a
+    // byte wrap - and not a metric moves.
+    const auto baked_at = [](const FontBakeOptions& options) {
+        return ws::ui::r2d::font::bake_inter(
+            ws::ui::r2d::font::inter_regular_ttf(), 18.0f, options);
+    };
+    const BakedFont plain =
+        baked_at(FontBakeOptions{.gamma = 1.6f, .boost = 1.0f,
+                                 .oversample_x = 1});
+    const BakedFont boosted =
+        baked_at(FontBakeOptions{.gamma = 1.6f, .boost = 1.2f,
+                                 .oversample_x = 1});
+    const BakedFont mild =
+        baked_at(FontBakeOptions{.gamma = 1.6f, .boost = 1.5f,
+                                 .oversample_x = 1});
+    const BakedFont absurd =
+        baked_at(FontBakeOptions{.gamma = 1.6f, .boost = 40.0f,
+                                 .oversample_x = 1});
+    REQUIRE(plain.ok);
+    REQUIRE(boosted.ok);
+    REQUIRE(mild.ok);
+    REQUIRE(absurd.ok);
+
+    const BakedGlyph& base = glyph_of(plain, 'g');
+    const BakedGlyph& tuned = glyph_of(boosted, 'g');
+    const BakedGlyph& half_again = glyph_of(mild, 'g');
+    const BakedGlyph& maxed = glyph_of(absurd, 'g');
+    // Coverage-only: the dimensions and metrics are the same bake's.
+    CHECK(tuned.w == base.w);
+    CHECK(tuned.h == base.h);
+    CHECK(tuned.advance == base.advance);
+    CHECK(tuned.offset_x == base.offset_x);
+    CHECK(tuned.offset_y == base.offset_y);
+    CHECK(ink_of(tuned) > ink_of(base));
+
+    // The mild boost, byte-exact: every coverage byte is the
+    // multiplier's own answer, clamped at 255. The 18px 'g' exercises
+    // both halves of the clamp - the AA fringe scales through below
+    // the ceiling, the stem pins against it.
+    bool saturated = false;
+    bool scaled_through = false;
+    for (std::size_t i = 0; i < base.rgba.size() / 4u; ++i) {
+        const float low = static_cast<float>(base.rgba[i * 4u + 3u]);
+        long expected = std::lround(low * 1.5f);
+        if (expected > 255) {
+            expected = 255;
+            if (low < 255.0f) {
+                saturated = true;  // the clamp did the work, not the LUT
+            }
+        } else if (low > 0.0f) {
+            scaled_through = true;
+        }
+        CHECK(half_again.rgba[i * 4u + 3u] ==
+              static_cast<std::uint8_t>(expected));
+    }
+    CHECK(saturated);
+    CHECK(scaled_through);
+
+    // The absurd boost: everything nonzero pins at 255 (the smallest
+    // nonzero byte the gamma-1.6 LUT emits is 8, and 8 * 40 overflows),
+    // zeros stay zero, and the ink is exactly 255 per lit pixel.
+    std::size_t lit = 0;
+    for (std::size_t i = 0; i < base.rgba.size() / 4u; ++i) {
+        if (base.rgba[i * 4u + 3u] != 0u) {
+            ++lit;
+            CHECK(maxed.rgba[i * 4u + 3u] == 255u);
+        } else {
+            CHECK(maxed.rgba[i * 4u + 3u] == 0u);
+        }
+    }
+    CHECK(ink_of(maxed) == 255u * lit);
+    CHECK(ink_of(maxed) > ink_of(half_again));
 }
 
 TEST_CASE("supersampling preserves the ink area") {
@@ -249,5 +329,5 @@ TEST_CASE("the lazy face bake rides the owning font's options") {
     CHECK(plain.w > 0u);
     CHECK(plain.advance == tuned.advance);   // metrics exact
     CHECK(plain.offset_y == tuned.offset_y);
-    CHECK(ink_of(tuned) < ink_of(plain));    // the gamma really applied
+    CHECK(ink_of(tuned) > ink_of(plain));    // the gamma really applied
 }

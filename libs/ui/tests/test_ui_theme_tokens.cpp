@@ -252,3 +252,22 @@ TEST_CASE("the stock documents name the bundled face") {
     CHECK(default_light().regular.family == "Inter");
     CHECK(default_light().mono.family.empty());  // the caller's pick
 }
+
+TEST_CASE("is_dark reads the chrome's brightness off the panel face") {
+    // The P1b pick the bake pair follows: the stock dark chrome's
+    // panel is a dark face, the light chrome's a pale one - and a
+    // custom theme that flips the panel flips the answer.
+    CHECK(ws::ui::gui::is_dark(kDefaultChrome));
+    CHECK(!ws::ui::gui::is_dark(kLightChrome));
+    CHECK(ws::ui::gui::is_dark(kDefaultChrome.panel_bg));
+    CHECK(!ws::ui::gui::is_dark(kLightChrome.panel_bg));
+
+    // The packed-face order: 0xRRGGBBAA, so a white face with any
+    // alpha reads light and a black face reads dark.
+    CHECK(!ws::ui::gui::is_dark(ws::ui::r2d::rgba(255, 255, 255)));
+    CHECK(ws::ui::gui::is_dark(ws::ui::r2d::rgba(0, 0, 0)));
+    // The midpoint guard: exactly luma 128 is light (the pick is
+    // "dark means luma below half").
+    CHECK(ws::ui::gui::is_dark(ws::ui::r2d::rgba(127, 127, 127)));
+    CHECK(!ws::ui::gui::is_dark(ws::ui::r2d::rgba(128, 128, 128)));
+}

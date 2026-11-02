@@ -298,4 +298,23 @@ constexpr std::uint32_t dim(std::uint32_t color, float factor) {
     return (color & 0xFFFFFF00u) | static_cast<std::uint32_t>(a);
 }
 
+// The brightness pick the font bake follows (the P1b story): the
+// rec.709 luma of a face, on the packed 0xRRGGBBAA order. The stock
+// dark chrome's light-on-dark text wants the boldening bake pair
+// (FontBakeOptions::dark_chrome()), the light chrome's dark-on-light
+// text the near-identity one (light_chrome()) - an app reads this
+// against its active chrome's panel_bg (or passes the ChromeTheme
+// overload) and re-bakes when the answer flips. constexpr, so the
+// stock constants answer at compile time.
+[[nodiscard]] constexpr bool is_dark(std::uint32_t face) noexcept {
+    const std::uint32_t r = (face >> 24) & 0xFFu;
+    const std::uint32_t g = (face >> 16) & 0xFFu;
+    const std::uint32_t b = (face >> 8) & 0xFFu;
+    return (299u * r + 587u * g + 114u * b) < 128000u;
+}
+
+[[nodiscard]] constexpr bool is_dark(const ChromeTheme& theme) noexcept {
+    return is_dark(theme.panel_bg);
+}
+
 }  // namespace ws::ui::gui

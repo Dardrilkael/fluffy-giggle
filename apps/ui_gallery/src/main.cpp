@@ -26,10 +26,12 @@
 // host-side from the step names); and a status bar the page
 // keeps clear of. The
 // gallery loads no
-// assets (its font is the system face, resolved here at the platform
-// boundary the same way playground resolves its own), so it builds for
-// Windows and Android unchanged: the gui draws through r2d and reads
-// one InputFrame, neither of which cares what platform is underneath.
+// assets (its font is the BUNDLED face - the embedded Inter regular +
+// semibold, baked through the brightness-picked pair and re-baked live
+// from the Fonts page's sliders; WS_FONT_PATH overrides with a custom
+// face), so it builds for Windows and Android unchanged: the gui draws
+// through r2d and reads one InputFrame, neither of which cares what
+// platform is underneath.
 //
 // Everything below is caller-owned state driven by immediate-mode
 // widget calls - that IS the gui's contract, and GalleryApp's member
@@ -99,10 +101,11 @@ namespace {
 namespace gui = ws::ui::gui;
 namespace canvas = ws::ui::canvas;
 
-// The system UI face - the APP picks it, not the ui lib (r2d takes
-// caller-resolved paths; font-directory knowledge lives in this TU, the
-// platform boundary). One constant per TU, per the house rule. A
-// missing face degrades to the fontless v1 bars everywhere, gracefully.
+// The past-ASCII carrier faces - the PRIMARY bake is the bundled
+// Inter (load_ui_font below); these stack under it as faces 0/1 so
+// everything past the inline bake (Latin-1 supplements, the Han
+// demo line) still renders. A missing file refuses gracefully: the
+// status bar says so, the line keeps its tofu.
 #ifdef __ANDROID__
 constexpr const char* kDefaultFontPath = "/system/fonts/Roboto-Regular.ttf";
 #else
@@ -118,6 +121,46 @@ constexpr const char* kExtraFontPath = "/system/fonts/NotoSansCJK-Regular.ttc";
 #else
 constexpr const char* kExtraFontPath = "C:/Windows/Fonts/msyh.ttc";
 #endif
+
+// The bake pair follows the ACTIVE document's brightness (the P1b
+// rule): the dark stock's light-on-dark text wants the boldening pair,
+// the light stock's dark-on-light text the near-identity one. A theme
+// flip re-picks (and re-bakes); the Fonts page's sliders take over
+// from there.
+[[nodiscard]] ws::ui::r2d::FontBakeOptions bake_options_for(bool dark) {
+    return dark ? ws::ui::r2d::FontBakeOptions::dark_chrome()
+                : ws::ui::r2d::FontBakeOptions::light_chrome();
+}
+
+// The UI face: the BUNDLED Inter by default (the stock look, identical
+// on every platform - no system font walk), with a path override for
+// custom fonts: WS_FONT_PATH wins when it is set and loadable, the
+// bundled face answers otherwise. `used_override` (the Fonts page's
+// readout wants it) reports which one answered.
+[[nodiscard]] ws::ui::r2d::Font load_ui_font(
+    float pixel_height, const ws::ui::r2d::FontBakeOptions& options,
+    bool* used_override = nullptr) {
+    if (used_override != nullptr) {
+        *used_override = false;
+    }
+    if (const char* custom = std::getenv("WS_FONT_PATH")) {
+        ws::ui::r2d::Font loaded =
+            ws::ui::r2d::load_font(custom, pixel_height, options);
+        if (!loaded.empty()) {
+            if (used_override != nullptr) {
+                *used_override = true;
+            }
+            return loaded;
+        }
+        // A dead override falls through to the bundled face.
+    }
+    return ws::ui::r2d::load_default_font(pixel_height, options);
+}
+
+// The Fonts page's sample line (pure ASCII - the inline bake's range,
+// so the sample is exactly the bake's own work, no lazy half).
+constexpr const char* kFontsSampleLine =
+    "Hamburgefonstiv 0123456789 !? the quick brown fox";
 
 constexpr std::uint32_t kBackdrop = ws::ui::r2d::rgba(22, 24, 30);
 constexpr std::uint32_t kGridLine = ws::ui::r2d::rgba(34, 38, 48);
@@ -183,6 +226,7 @@ constexpr int kRightSuper = 347;  // GLFW_KEY_RIGHT_SUPER
 // headers' own open state (caller-owned, like everything here).
 enum Section {
     kTheme,
+    kFonts,
     kButtons,
     kChoices,
     kSliders,
@@ -306,6 +350,8 @@ protected:
         theme_pick_ = theme_dark_ ? 0 : 1;
         theme_ = theme_dark_ ? gui::default_dark() : gui::default_light();
         font_px_ = theme_.regular.size;
+        font_opts_ = bake_options_for(theme_dark_);  // the brightness pick
+        sync_font_knobs();                           // mirror the sliders
         rebuild_font();
         sync_chrome();
         install_clipboard(gui_);  // Ctrl+C/X/V in the text inputs
@@ -586,16 +632,47 @@ private:
             gui::apply_accent(theme_, accent_color_);
         }
         theme_.regular.size = font_px_;  // the size slider survives flips
+        // P1b: the bake pair re-picks from the flipped document's
+        // brightness and the fonts re-bake - a bake is a snapshot of
+        // its options, and a light chrome's dark-on-light text must not
+        // wear the dark chrome's boldening. The Fonts page's sliders
+        // re-mirror the new pair (tweaks from the old chrome do not
+        // survive the flip - the brightness pick wins).
+        font_opts_ = bake_options_for(theme_dark_);
+        sync_font_knobs();
+        rebuild_font();
         sync_chrome();
     }
 
     void rebuild_font() {
-        font_ = ws::ui::r2d::load_font(kDefaultFontPath, font_px_ * scale_);
+        // The BUNDLED face (WS_FONT_PATH overrides) at the live knob
+        // set: the regular for the labels, the semibold sibling for the
+        // strong reads - a second font, not a stacked face (one font
+        // stays one weight; the theme carries both pointers).
+        font_ = load_ui_font(font_px_ * scale_, font_opts_,
+                             &font_used_override_);
+        font_strong_ = ws::ui::r2d::load_default_font(
+            ws::ui::r2d::DefaultFontWeight::semibold, font_px_ * scale_,
+            font_opts_);
         if (!font_.empty() && stack_faces_) {
             (void)ws::ui::r2d::font_add_face(font_, kDefaultFontPath, 0);
             (void)ws::ui::r2d::font_add_face(font_, kExtraFontPath, 1);
         }
+        if (!font_strong_.empty() && stack_faces_) {
+            (void)ws::ui::r2d::font_add_face(font_strong_, kDefaultFontPath,
+                                             0);
+            (void)ws::ui::r2d::font_add_face(font_strong_, kExtraFontPath, 1);
+        }
         last_baked_px_ = font_px_ * scale_;  // remember what we baked at
+    }
+
+    // The Fonts page's slider mirrors of font_opts_ - the knobs live in
+    // the bake options; the sliders read these (and re-pick them on a
+    // theme flip).
+    void sync_font_knobs() {
+        font_gamma_ = font_opts_.gamma;
+        font_boost_ = font_opts_.boost;
+        font_oversample_ = font_opts_.oversample_x;
     }
 
     // slider_float fires 'changed' every frame while the pointer is held
@@ -619,6 +696,8 @@ private:
     void sync_chrome() {
         chrome_ = theme_.chrome.scaled(scale_);
         chrome_.font = font_.empty() ? nullptr : &font_;
+        chrome_.font_strong =
+            font_strong_.empty() ? nullptr : &font_strong_;
     }
 
     // ---- the platform page (stage 12's bridge) ----
@@ -1111,6 +1190,17 @@ private:
     gui::LayoutCursor layout_;
     gui::ChromeTheme chrome_ = gui::kDefaultChrome;
     ws::ui::r2d::Font font_;
+    ws::ui::r2d::Font font_strong_;      // the semibold sibling (headings)
+    ws::ui::r2d::FontBakeOptions font_opts_ =
+        ws::ui::r2d::FontBakeOptions::dark_chrome();  // the live bake pair
+    bool font_used_override_ = false;    // WS_FONT_PATH answered?
+    float font_gamma_ = font_opts_.gamma;      // the Fonts page's mirrors
+    float font_boost_ = font_opts_.boost;
+    int font_oversample_ = font_opts_.oversample_x;
+    bool font_opts_dirty_ = false;       // a knob moved; the re-bake is
+                                         // throttled (150 ms) then flushed
+                                         // on drag end - live, not per frame
+    std::chrono::steady_clock::time_point last_opts_bake_{};
     float scale_ = 1.0f;
 
     // ---- the theme demo (stage 10) ----
@@ -1704,6 +1794,87 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
                 gui::text(layout_, chrome_, ratio_line, -1.0f);
             }
         }
+    }
+
+    // --- fonts (P1b): the bake knobs, live ----------------------------------
+    // The bake pair the theme picked, exposed: gamma lifts the mids
+    // (larger = bolder), boost multiplies after the LUT, oversample_x
+    // supersamples the stems. Every change re-bakes LIVE - throttled to
+    // one bake per 150 ms while a drag runs (a full bake is the size
+    // slider's documented ~50-200 ms), and the final value flushes the
+    // frame the drag ends.
+    if (gui::collapsing_header(gui_, layout_, chrome_,
+                               "fonts: the bake knobs", section_[kFonts])) {
+        bool knobs_changed = false;
+        if (gui::slider_float(gui_, layout_, chrome_, "gamma", font_gamma_,
+                              0.5f, 3.0f, half)) {
+            font_opts_.gamma = font_gamma_;
+            knobs_changed = true;
+        }
+        layout_.same_line();
+        if (gui::slider_float(gui_, layout_, chrome_, "boost", font_boost_,
+                              0.5f, 2.0f, half)) {
+            font_opts_.boost = font_boost_;
+            knobs_changed = true;
+        }
+        if (gui::slider_int(gui_, layout_, chrome_, "oversample x",
+                            font_oversample_, 1, 4, half)) {
+            font_opts_.oversample_x = font_oversample_;
+            knobs_changed = true;
+        }
+        if (knobs_changed) {
+            font_opts_dirty_ = true;
+        }
+        if (font_opts_dirty_) {
+            const std::chrono::steady_clock::time_point now =
+                std::chrono::steady_clock::now();
+            if (!knobs_changed ||
+                now - last_opts_bake_ > std::chrono::milliseconds(150)) {
+                rebuild_font();
+                sync_chrome();
+                last_opts_bake_ = now;
+                font_opts_dirty_ = false;
+                std::snprintf(status_, sizeof status_,
+                              "font re-baked: gamma %.2f, boost %.2f, "
+                              "oversample %d",
+                              font_opts_.gamma, font_opts_.boost,
+                              font_opts_.oversample_x);
+            }
+        }
+
+        // The readout: which face answered, at what pair and size.
+        char bake_line[128];
+        std::snprintf(bake_line, sizeof bake_line, "face: %s   bake: gamma "
+                                                   "%.2f, boost %.2f, "
+                                                   "oversample x%d",
+                      font_used_override_ ? "WS_FONT_PATH override"
+                                          : "the bundled Inter (regular + "
+                                            "semibold)",
+                      font_opts_.gamma, font_opts_.boost,
+                      font_opts_.oversample_x);
+        gui::text(layout_, chrome_, bake_line, -1.0f);
+
+        // The bake, sampled: the same line at both weights, drawn
+        // straight through the freshly re-baked atlases - drag a knob
+        // and the rows re-render through the new coverage next frame.
+        if (chrome_.font != nullptr) {
+            const gui::Rect row = layout_.next(layout_.remaining_width(),
+                                               chrome_.font->line_height());
+            (void)ws::ui::r2d::draw_text(row.x, row.y, kFontsSampleLine,
+                                         *chrome_.font, chrome_.text);
+        }
+        if (chrome_.font_strong != nullptr) {
+            const gui::Rect row =
+                layout_.next(layout_.remaining_width(),
+                             chrome_.font_strong->line_height());
+            (void)ws::ui::r2d::draw_text(row.x, row.y, kFontsSampleLine,
+                                         *chrome_.font_strong, chrome_.text);
+        }
+        gui::text(layout_, chrome_,
+                  "flipping the theme re-picks this pair from the chrome's "
+                  "brightness (dark: gamma 1.6 + boost 1.1, light: gamma "
+                  "1.05) and re-bakes.",
+                  -1.0f);
     }
 
     // --- buttons -----------------------------------------------------------

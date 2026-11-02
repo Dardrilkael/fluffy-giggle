@@ -380,35 +380,67 @@ private:
     std::shared_ptr<font::FontExtra> extras_;
 };
 
-// How a font bakes (the P1 quality pass). Both knobs are coverage-only:
-// no metric ever moves (advances, offsets and line heights are exact
-// whatever they say), so measure_text == draw_text's return and every
-// layout stays put while the pixels between sharpen.
+// How a font bakes (the P1 quality pass, P1b-revised). All knobs are
+// coverage-only: no metric ever moves (advances, offsets and line
+// heights are exact whatever they say), so measure_text == draw_text's
+// return and every layout stays put while the pixels between sharpen.
 struct FontBakeOptions {
-    // The coverage exponent applied at bake time: a' = 255 * (a/255)^g.
-    // 1.0 is the identity - the pre-P1 bake byte-for-byte. The DEFAULT
-    // (1.7) is tuned for light-on-dark text (the stock chrome): an sRGB
-    // framebuffer blooms a bright glyph's edges, so the mids darken a
-    // step and small text reads crisp instead of washed-out. A
-    // dark-on-light app (the light stock chrome) passes 1.35 - the
-    // same correction, a smaller step, evaluated side by side on both
-    // stock backgrounds. Both numbers were picked by rendering the
-    // bundled Inter over both stock panel colors and judging the rows;
-    // they are defaults, not laws.
-    float gamma = 1.7f;
+    // The coverage exponent applied at bake time:
+    // a' = 255 * (a/255)^(1/g). 1.0 is the identity - the pre-P1 bake
+    // byte-for-byte. P1b redefined the knob's DIRECTION: the blend runs
+    // in gamma (UNORM) space, which already thins light-on-dark text on
+    // its own, so the exponent now INVERTS and the mids LIFT - a LARGER
+    // gamma is BOLDER, a smaller one thinner. (The pre-P1b spelling,
+    // a^g, compounded the thinning instead: its 1.7 default visibly
+    // lightened the stock chrome's text while its comment claimed the
+    // opposite.) The DEFAULT (1.6) tunes the stock dark chrome's
+    // light-on-dark text: small text reads full-weight instead of
+    // hairline. A dark-on-light app (the light stock chrome) passes
+    // ~1.05 - a near-identity nudge, just enough that anti-aliasing
+    // does not wash the glyph out on white. Both numbers were picked by
+    // rendering the bundled Inter over both stock panel colors and
+    // judging the rows; they are defaults, not laws.
+    float gamma = 1.6f;
+    // A straight weight multiplier on every coverage byte, applied
+    // AFTER the gamma LUT and clamped to 255. 1.0 is the identity;
+    // ~1.1 is the stock dark chrome's final step (the lifted mids read
+    // right, and the last tenth adds the density small text on a dark
+    // panel wants). Like gamma: coverage-only, no metric moves.
+    float boost = 1.0f;
     // Horizontal supersampling: the glyph rasterizes at N samples per
     // final pixel column and box-averages down (1 = off, the old
     // single-sample bake). Horizontal because that is the axis the
     // renderer's whole-pixel glyph snapping quantizes - vertical stems
     // land anywhere modulo a pixel, and the averaged coverage carries
     // the sub-pixel area the snap would otherwise drop. Clamped to
-    // [1, 4] at bake time.
+    // [1, 4] at bake time. P1b re-judged the default with a
+    // side-by-side ASCII bake at 13/14/15/16 px (oversample 1 vs 3,
+    // the dark-chrome LUT on both sides): 3 kept 3.5-8% more of the
+    // glyphs' true area, turned MORE fringe pixels into full-coverage
+    // stem pixels and read at least as crisp - so the default stays 3,
+    // and 1 remains the option (the hard-snapped look, or a byte-pinned
+    // bake).
     int oversample_x = 3;
 
     // The pre-P1 bake exactly: every knob at its identity. The escape
     // hatch a byte-pinned test (or a very conservative app) wants.
     [[nodiscard]] static constexpr FontBakeOptions identity() {
-        return FontBakeOptions{.gamma = 1.0f, .oversample_x = 1};
+        return FontBakeOptions{.gamma = 1.0f, .boost = 1.0f,
+                               .oversample_x = 1};
+    }
+    // The stock dark chrome's pair (light-on-dark text): the lifted
+    // mids plus a tenth of boost. Apps pick between this and
+    // light_chrome() by the active theme's brightness, and re-bake when
+    // the theme flips - a bake is a snapshot of its options.
+    [[nodiscard]] static constexpr FontBakeOptions dark_chrome() {
+        return FontBakeOptions{.gamma = 1.6f, .boost = 1.1f,
+                               .oversample_x = 3};
+    }
+    // The light stock chrome's pair (dark-on-light text): a
+    // near-identity gamma, no boost.
+    [[nodiscard]] static constexpr FontBakeOptions light_chrome() {
+        return FontBakeOptions{.gamma = 1.05f, .boost = 1.0f,
+                               .oversample_x = 3};
     }
 };
 

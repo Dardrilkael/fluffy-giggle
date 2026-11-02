@@ -46,6 +46,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <map>
 #include <memory>
 #include <set>
@@ -463,6 +464,23 @@ std::uint32_t name_color(std::string_view name) {
   return kTints[hash % (sizeof(kTints) / sizeof(kTints[0]))];
 }
 
+// The UI face: the BUNDLED Inter by default, with a path override for
+// custom fonts - WS_FONT_PATH wins when it is set and loadable, the
+// bundled face answers otherwise (playground's helper, this app's copy:
+// one constant per TU, the platform boundary lives in the app).
+[[nodiscard]] ws::ui::r2d::Font load_ui_font(
+    float pixel_height, const ws::ui::r2d::FontBakeOptions& options) {
+  if (const char* custom = std::getenv("WS_FONT_PATH")) {
+    ws::ui::r2d::Font loaded =
+        ws::ui::r2d::load_font(custom, pixel_height, options);
+    if (!loaded.empty()) {
+      return loaded;
+    }
+    // A dead override falls through to the bundled face.
+  }
+  return ws::ui::r2d::load_default_font(pixel_height, options);
+}
+
 // The gui: a status line, the feed (newest at the bottom, auto-trimmed to
 // what fits - no scroll in v1), and the palette. All input flows through
 // the gui widgets, all drawing through r2d; chatter draws no ImGui
@@ -480,16 +498,20 @@ class ChatterApp final : public ws::ui::App {
  protected:
   void on_setup() override {
     scale_ = ui_scale();
-    // The system face, playground's platform-conditional constant - the
-    // lib's rule is the caller resolves the path.
-#ifdef __ANDROID__
-    const char* font_path = "/system/fonts/Roboto-Regular.ttf";
-#else
-    const char* font_path = "C:/Windows/Fonts/segoeui.ttf";
-#endif
-    font_ = ws::ui::r2d::load_font(font_path, 16.0f * scale_);
+    // The UI face: the BUNDLED Inter by default (the stock look, the
+    // same on every platform - no system font walk), with a path
+    // override for custom fonts: WS_FONT_PATH wins when it is set and
+    // loadable. The bake pair follows the active theme's brightness
+    // (chatter draws the stock dark chrome only): the dark one.
+    const ws::ui::r2d::FontBakeOptions bake =
+        ws::ui::r2d::FontBakeOptions::dark_chrome();
+    font_ = load_ui_font(16.0f * scale_, bake);
+    font_strong_ = ws::ui::r2d::load_default_font(
+        ws::ui::r2d::DefaultFontWeight::semibold, 16.0f * scale_, bake);
     chrome_ = ws::ui::gui::kDefaultChrome.scaled(scale_);
     chrome_.font = font_.empty() ? nullptr : &font_;
+    chrome_.font_strong =
+        font_strong_.empty() ? nullptr : &font_strong_;
     core_.start(display_name_);
   }
 
@@ -594,6 +616,7 @@ class ChatterApp final : public ws::ui::App {
   ws::ui::gui::LayoutCursor layout_;
   ws::ui::gui::ChromeTheme chrome_;
   ws::ui::r2d::Font font_;
+  ws::ui::r2d::Font font_strong_;  // the semibold sibling (headings)
   float scale_ = 1.0f;
   std::vector<ChatLine> lines_;
 };
