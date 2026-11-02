@@ -264,7 +264,7 @@ TEST_CASE("a null table and a null row both answer the stock look") {
     gui.end_frame();
     const std::uint32_t stock_quads = ws::ui::gui_test::stub.quads;
     const std::uint32_t stock_rounded = ws::ui::gui_test::stub.rounded;
-    CHECK(stock_rounded == 1);  // the face
+    CHECK(stock_rounded == 3);  // the P5 panel outline pair + the face
     CHECK(stock_quads >= 1);    // the label bar (fontless)
 
     // A table whose button row is NULL falls back to that stock draw -

@@ -615,6 +615,58 @@ void Renderer2D::draw_rounded_quad(float x, float y, float w, float h,
     record("draw_rounded_quad", pos, kQuadUV, color, Texture{}, radius);
 }
 
+void Renderer2D::draw_rounded_outline(float x, float y, float w, float h,
+                                      float radius, float thickness,
+                                      std::uint32_t color,
+                                      std::uint32_t face) {
+    // Degenerate gates first: a non-positive stroke or an empty rect is
+    // nothing (live app data, not worth a warning - the draw contract).
+    if (thickness <= 0.0f || w <= 0.0f || h <= 0.0f) {
+        return;
+    }
+    // The outer rounded quad - the ring's outer edge.
+    draw_rounded_quad(x, y, w, h, radius, color);
+    // The inner face quad, inset by the stroke: the caller's surface,
+    // repainted over the outer quad's middle. When the stroke eats the
+    // whole rect the inner is nothing - the ring IS the face, honestly
+    // drawn as the outer quad alone.
+    const float iw = w - 2.0f * thickness;
+    const float ih = h - 2.0f * thickness;
+    if (iw > 0.0f && ih > 0.0f) {
+        draw_rounded_quad(x + thickness, y + thickness, iw, ih,
+                          std::max(0.0f, radius - thickness), face);
+    }
+}
+
+void Renderer2D::draw_shadow(float x, float y, float w, float h, float radius,
+                             float blur, std::uint32_t color) {
+    // A non-positive blur, an empty rect or a transparent shadow draws
+    // nothing - the theme-gated contract (blur 0 is the stock's "no
+    // shadow").
+    if (blur <= 0.0f || w <= 0.0f || h <= 0.0f || (color & 0xFFu) == 0u) {
+        return;
+    }
+    // The documented 4-layer stack, OUTERMOST first (painter's order: the
+    // faint wide layers sit under, the tight strong one paints last on
+    // top near the surface). Layer i: outset = blur * step (1.0 down to
+    // 0.25), alpha the color's own times the matching weight (0.15 up to
+    // 0.45) - the center accumulates the stack, the outer fringe sees
+    // only the last faint layer, and the falloff reads soft. The steps
+    // were picked by eye against the stock popup face on both chromes
+    // and written down here so the look is a spec, not a mood.
+    constexpr float kOutset[4] = {1.0f, 0.75f, 0.50f, 0.25f};
+    constexpr float kAlpha[4] = {0.15f, 0.20f, 0.30f, 0.45f};
+    const float base_alpha = static_cast<float>(color & 0xFFu);
+    for (int i = 0; i < 4; ++i) {
+        const float o = blur * kOutset[i];
+        const float a = base_alpha * kAlpha[i];
+        const std::uint32_t layer = (color & 0xFFFFFF00u) |
+                                    static_cast<std::uint32_t>(a + 0.5f);
+        draw_rounded_quad(x - o, y - o, w + 2.0f * o, h + 2.0f * o,
+                          radius + o, layer);
+    }
+}
+
 FrameSize Renderer2D::frame_size() const {
     return FrameSize{fb_width_, fb_height_};
 }
@@ -1310,6 +1362,26 @@ void draw_rounded_quad(float x, float y, float w, float h, float radius,
                                     rotation);
     } else {
         warn_no_app("draw_rounded_quad");
+    }
+}
+
+void draw_rounded_outline(float x, float y, float w, float h, float radius,
+                          float thickness, std::uint32_t color,
+                          std::uint32_t face) {
+    if (g_active != nullptr) {
+        g_active->draw_rounded_outline(x, y, w, h, radius, thickness,
+                                       tint_apply(color), tint_apply(face));
+    } else {
+        warn_no_app("draw_rounded_outline");
+    }
+}
+
+void draw_shadow(float x, float y, float w, float h, float radius, float blur,
+                 std::uint32_t color) {
+    if (g_active != nullptr) {
+        g_active->draw_shadow(x, y, w, h, radius, blur, tint_apply(color));
+    } else {
+        warn_no_app("draw_shadow");
     }
 }
 

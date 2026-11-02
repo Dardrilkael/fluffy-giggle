@@ -242,6 +242,38 @@ void draw_vertex_quad(const float (&pos)[4][2], const float (&uv)[4][2],
 void draw_rounded_quad(float x, float y, float w, float h, float radius,
                        std::uint32_t color, float rotation = 0.0f);
 
+// A rounded-rectangle RING: the stroke of a rounded rect, `thickness` px
+// wide, in `color` - two quads, no shader change. The seam can only layer
+// (the batch blends src-over; a transparent quad punches no hole), so the
+// primitive is spelled as the pair it is: the OUTER rounded quad at the
+// given rect in `color`, then the INNER rounded quad inset by `thickness`
+// (radius reduced to match) in `face` - the caller's surface color, the
+// one thing a ring-on-a-surface needs to know. Paint the pair OVER the
+// face (the painter knows it), or behind an opaque body (then `face` is
+// irrelevant - the body masks the middle anyway; that behind-body form is
+// what the gui's focus rings ride). Exactly 2 quads; a degenerate inner
+// (thickness >= half the shorter side) records only the outer; thickness
+// <= 0 and a degenerate rect record nothing. Radii clamp like
+// draw_rounded_quad's, both levels. No rotation (frames do not rotate;
+// draw_rounded_quad's covers that case by hand).
+void draw_rounded_outline(float x, float y, float w, float h, float radius,
+                          float thickness, std::uint32_t color,
+                          std::uint32_t face);
+
+// A soft rectangular drop shadow: `layers` stacked rounded quads (the
+// documented count, 4) under the given rect, each outset a step further
+// and drawn a step fainter, all in `color` (its alpha carries the
+// strength). Pure painter's-order layering - a cheap gaussian stand-in
+// with a bounded quad count: 4 quads is the whole cost, every frame, no
+// allocation, no shader change. Draw it BEFORE the surface it belongs to
+// (the surface masks the stack's center); `blur` is the outermost outset
+// in px - the softness, not an offset: drop `y` by the theme's
+// shadow_offset_y at the call site. blur <= 0, a non-positive alpha or a
+// degenerate rect record nothing. The radius follows each layer's outset
+// and clamps per layer like draw_rounded_quad's.
+void draw_shadow(float x, float y, float w, float h, float radius,
+                 float blur, std::uint32_t color);
+
 // Loads an image file (PNG/JPG/..., whatever stb_image reads) and returns
 // its handle. Valid from on_setup() onward. On failure logs and returns the
 // white texture. Loading is synchronous - fine at load granularity. One

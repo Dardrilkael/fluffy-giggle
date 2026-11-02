@@ -155,7 +155,9 @@ TEST_CASE("the face traveler blends the composed button's hover, exactly when di
     ws::ui::gui::end_panel(gui, layout);
     gui.end_frame();
     // The stub counts; the exactness is the helpers' own test above.
-    CHECK(ws::ui::gui_test::stub.rounded == 1);
+    // (The P5 panel chrome is an outline = a rounded pair, so the count
+    // is the pair plus the button's face.)
+    CHECK(ws::ui::gui_test::stub.rounded == 3);
     CHECK(!gui.wants_redraw());
 
     // Animation ON, dt 0 (the headless clock): the face traveler sits

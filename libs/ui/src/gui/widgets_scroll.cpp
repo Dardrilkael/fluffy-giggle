@@ -377,10 +377,15 @@ void scrollbar_draw(const Rect& viewport, const ScrollbarThumb& thumb,
     if (!thumb.shows) {
         return;  // a fitted region wears no dead chrome
     }
+    // The thumb is the pill role (P5): a themed radius_pill, else the
+    // corner radius it always wore - draw_rounded_quad clamps either to
+    // the 2px thumb's own half-width, so the stock stays a full pill.
     r2d::draw_rounded_quad(viewport.x + viewport.width -
                               theme.scrollbar_thumb_width,
                           thumb.top, theme.scrollbar_thumb_width,
-                          thumb.height, theme.corner_radius, theme.border);
+                          thumb.height, pill_or_half(theme,
+                                                     theme.corner_radius),
+                          theme.border);
 }
 
 }  // namespace ws::ui::gui

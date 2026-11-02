@@ -290,13 +290,15 @@ void toggle_switch_draw(const Rect& rect, const ToggleSwitchResult& result,
 
     // The pill: the control faces while off; the accent IS the track
     // while on - dimmed under the disabled scope rather than deadened,
-    // so the state stays readable. The radius asks for half the height
-    // and clamps to exactly that: the full pill.
+    // so the state stays readable. The radius is the pill role (P5): a
+    // themed radius_pill, else the track's own half-height - the full
+    // pill the stock has always drawn.
     std::uint32_t face = control_face_of(result, theme);
     if (on) {
         face = dim(theme.control_on, dim_by);
     }
-    r2d::draw_rounded_quad(rect.x, rect.y, track_w, box, box * 0.5f, face);
+    r2d::draw_rounded_quad(rect.x, rect.y, track_w, box,
+                           pill_or_half(theme, box * 0.5f), face);
 
     // The knob: a near-white circle (the text color - the bright head
     // reads on both faces) filling the pill's height minus the check

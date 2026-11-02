@@ -224,6 +224,21 @@ if(TARGET test_ui_motion)
   target_include_directories(test_ui_motion PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
 
+# The P5 primitives suite (the ui-skin plan): the layered outline/shadow
+# pair and the stock adoption - the gui archive + the r2d stub, like
+# test_ui_gui. widget_detail.hpp's helpers (shadow_bounds, the pill
+# fold) are internal, so the src/ include rides too.
+ws_add_test(ui_primitives
+  SOURCES tests/test_ui_primitives.cpp
+          tests/ui_gui_r2d_stub.cpp
+          src/text/font.cpp
+          src/text/stb_impl.cpp
+  LINK ws::ui_gui
+  DEPENDS stb)
+if(TARGET test_ui_primitives)
+  target_include_directories(test_ui_primitives PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+
 # --- Shader workflow targets (opt-in; the default build is unchanged) ------
 # The committed spirv.h stays the build input (no shader compiler needed);
 # these targets make staleness visible and regeneration explicit. The flags

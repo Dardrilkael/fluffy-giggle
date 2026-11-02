@@ -405,23 +405,24 @@ TEST_CASE("the job row draws through the seam and its cancel button cancels") {
     // lines draw their v1 bars (plain quads) rather than draw_texts;
     // the row's rounded quads are the bar's track, the bar's fill and
     // the cancel button's face. Frame 1 with an empty mirror draws
-    // exactly track + button - no fill - plus the panel chrome's two
-    // plain quads. The pointer parks on the cancel button's center:
-    // the row's second line, right end - content 12 px in, the bar
-    // taking everything but the button's 80 px and one spacing, so the
-    // button spans x 308..388, y 44..68.
+    // exactly track + button - no fill - plus the panel chrome's P5
+    // outline (its rounded pair). The pointer parks on the cancel
+    // button's center: the row's second line, right end - content 12 px
+    // in, the bar taking everything but the button's 80 px and one
+    // spacing, so the button spans x 308..388, y 44..68.
     CHECK(!draw_row(snap(348.0f, 56.0f)));
-    CHECK(ws::ui::gui_test::stub.quads == 4);  // panel chrome + 2 label bars
-    CHECK(ws::ui::gui_test::stub.rounded == 2);  // track + button, no fill
+    CHECK(ws::ui::gui_test::stub.quads == 2);  // the 2 label bars
+    CHECK(ws::ui::gui_test::stub.outlines == 1);  // the panel chrome
+    CHECK(ws::ui::gui_test::stub.rounded == 4);  // outline pair + track + button
 
     // Script the mirror with what the drain would have delivered and
-    // redraw: the fill appears - the frame's third rounded quad, the
+    // redraw: the fill appears - the frame's third row rounded quad, the
     // row's fraction flowing from the mirror to the bar. The counters
-    // are cumulative, so frame 2 adds its whole redraw: track + the
-    // new fill + the button face.
+    // are cumulative, so frame 2 adds its whole redraw: the outline
+    // pair again + track + the new fill + the button face.
     mirror.report(0.9f, "almost there");
     CHECK(!draw_row(snap(348.0f, 56.0f)));
-    CHECK(ws::ui::gui_test::stub.rounded == 5);
+    CHECK(ws::ui::gui_test::stub.rounded == 9);
 
     // The full click fires exactly once and requests the cancel.
     CHECK(!draw_row(snap(348.0f, 56.0f, true, true)));       // press
@@ -1624,14 +1625,16 @@ TEST_CASE("custom looks paint over the tab behavior, panel_draw the chrome") {
     CHECK(ws::ui::gui_test::stub.texts == 0);
 
     // panel_draw: the chrome alone for a custom container - exactly the
-    // border and the inset face, and no clip, layer or id push rides
-    // along (those are begin_panel's).
+    // P5 rounded outline (the border pair), and no clip, layer or id
+    // push rides along (those are begin_panel's).
     ws::ui::gui_test::stub.reset();
     gui.begin_frame(snap(-100.0f, -100.0f));
     ws::ui::gui::panel_draw(ws::ui::gui::Rect{10.0f, 20.0f, 200.0f, 100.0f},
                             kDefaultChrome);
     gui.end_frame();
-    CHECK(ws::ui::gui_test::stub.quads == 2);
+    CHECK(ws::ui::gui_test::stub.outlines == 1);
+    CHECK(ws::ui::gui_test::stub.rounded == 2);
+    CHECK(ws::ui::gui_test::stub.quads == 0);
     CHECK(ws::ui::gui_test::stub.clip_pushes == 0);
     CHECK(ws::ui::gui_test::stub.layer_sets == 0);
 }

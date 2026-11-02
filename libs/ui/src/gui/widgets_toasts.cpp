@@ -214,7 +214,12 @@ int draw_toasts(GuiContext& gui, const ChromeTheme& theme, Toasts& toasts,
                                                   0.0001f))
                 : 1.0f;
         r2d::push_tint(fade_tint(fade));
-        r2d::push_clip_escape(bounds.x, bounds.y, bounds.width, bounds.height);
+        // P5: the escape opens on the shadow's bounds, the overlay
+        // scopes' own rule - a themed shadow spreads past the toast
+        // rect without painting past the frame edge (the r2d
+        // normalization clamps the escape to the frame anyway).
+        const Rect escape = shadow_bounds(bounds, theme);
+        r2d::push_clip_escape(escape.x, escape.y, escape.width, escape.height);
         gui.push_hit_clip_escape(bounds);
         paint(theme, &WidgetPainters::toast, &toast_draw, bounds,
               s.toast.severity, theme);

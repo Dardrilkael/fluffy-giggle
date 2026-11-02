@@ -102,17 +102,33 @@ inline ScrollDragTrack* drag_track_for(ScrollDragState& drag, ws::input::Pointer
     return nullptr;
 }
 
-// The panel chrome begin_panel and begin_scroll_panel share: a 1px
-// border-colored quad behind the panel face inset by 1. Drawn BEFORE the
-// clip push, so the frame never clips against the content it contains.
-// Degenerate panels clamp their face to nothing instead of drawing
-// backwards.
+// The rect a themed shadow needs around `bounds` (P5): the window grown
+// by the blur on every side and the vertical drop below, or the bounds
+// themselves when the theme's shadow tokens are zero - the one spelling
+// every overlay scope opens its clip escape on, so a shadow paints past
+// the window rect and a shadowless theme clips exactly as before.
+inline Rect shadow_bounds(const Rect& bounds, const ChromeTheme& theme) {
+    const float blur = theme.shadow_blur;
+    if (blur <= 0.0f) {
+        return bounds;
+    }
+    const float drop = std::max(0.0f, theme.shadow_offset_y);
+    return {bounds.x - blur, bounds.y - blur, bounds.width + 2.0f * blur,
+            bounds.height + 2.0f * blur + drop};
+}
+
+// The panel chrome begin_panel and begin_scroll_panel share: the border
+// as a rounded outline (P5) - the outer rounded quad in the border face,
+// the inner one inset by border_width in the panel face - at the theme's
+// PANEL radius. A sub-pixel radius renders the same squares the old
+// straight-quad pair did (draw_rounded_quad's own clamp), so one spelling
+// covers square and rounded skins alike. Degenerate panels clamp their
+// face to nothing instead of drawing backwards.
 inline void panel_chrome(const Rect& bounds, const ChromeTheme& theme) {
-    r2d::draw_quad(bounds.x, bounds.y, bounds.width, bounds.height,
-                   theme.border);
-    r2d::draw_quad(bounds.x + 1.0f, bounds.y + 1.0f,
-                   std::max(0.0f, bounds.width - 2.0f),
-                   std::max(0.0f, bounds.height - 2.0f), theme.panel_bg);
+    r2d::draw_rounded_outline(bounds.x, bounds.y, bounds.width, bounds.height,
+                              theme.panel_radius(),
+                              std::max(1.0f, theme.border_width),
+                              theme.border, theme.panel_bg);
 }
 
 // The overlay panel scope every stratum-raised window shares - the
@@ -131,7 +147,12 @@ inline void panel_chrome(const Rect& bounds, const ChromeTheme& theme) {
 inline void push_overlay_panel(GuiContext& gui, LayoutCursor& layout,
                                const ChromeTheme& theme, const char* label,
                                const Rect& bounds, float spacing) {
-    r2d::push_clip_escape(bounds.x, bounds.y, bounds.width, bounds.height);
+    // The clip ESCAPE opens on the shadow's bounds, not the panel's (P5):
+    // a themed shadow spreads past the window rect, and the escape exists
+    // exactly so a floating window may paint past its host's clip. The
+    // HIT escape stays at the bounds - a shadow is not a target.
+    const Rect escape = shadow_bounds(bounds, theme);
+    r2d::push_clip_escape(escape.x, escape.y, escape.width, escape.height);
     gui.push_hit_clip_escape(bounds);
     paint(theme, &WidgetPainters::popup_frame, &popup_frame_draw, bounds,
           theme);
@@ -181,16 +202,21 @@ inline bool key_activated(const GuiContext& gui, WidgetId id) {
             gui.input().key_pressed[ws::input::keys::kSpace]);
 }
 
-// The focus ring: the on-accent as a 1px outline behind `body` - the
-// rect the widget itself paints - so Tab navigation is legible. The
-// draw is a SOLID quad that the body then masks to an outline, so body
-// must be exactly what covers the row: a full-face row (a button's)
-// passes the row rect; a partial one (the slider's rail, the
-// checkbox's box) passes the part - the row's exposed area would
+// The focus ring: the on-accent outline behind `body` - the rect the
+// widget itself paints - so Tab navigation is legible. The draw is a
+// SOLID rounded quad expanded by the theme's focus_ring_width that the
+// body then masks to a ring (the behind-body form: a true stroke would
+// need the body's face to repaint its middle, which the ring must not
+// know), so body must be exactly what covers the row: a full-face row
+// (a button's) passes the row rect; a partial one (the slider's rail,
+// the checkbox's box) passes the part - the row's exposed area would
 // otherwise flood with the accent the moment focus lands. `radius` is
 // the body's own rounding; the circle and pill bodies pass their
-// half-height. Skipped for degenerate rects - a zero-width body would
-// show the ring with nothing in it.
+// half-height. The width is the theme's focus_ring_width (P5, was a
+// hardcoded 1 - the stock default keeps every ring at today's weight);
+// the expansion grows with it so a thicker ring reads as a thicker
+// ring, not a halo. Skipped for degenerate rects - a zero-width body
+// would show the ring with nothing in it.
 //
 // ring_draw is the draw half's spelling: focus arrives as a value the
 // behavior already captured, so a look never reads the context.
@@ -198,9 +224,10 @@ inline bool key_activated(const GuiContext& gui, WidgetId id) {
 inline void ring_draw(bool focused, const Rect& body, const ChromeTheme& theme,
                       float radius) {
     if (focused && body.width > 0.0f && body.height > 0.0f) {
-        r2d::draw_rounded_quad(body.x - 1.0f, body.y - 1.0f,
-                               body.width + 2.0f, body.height + 2.0f,
-                               radius + 1.0f, theme.control_on);
+        const float w = std::max(1.0f, theme.focus_ring_width);
+        r2d::draw_rounded_quad(body.x - w, body.y - w, body.width + 2.0f * w,
+                               body.height + 2.0f * w, radius + w,
+                               theme.control_on);
     }
 }
 
@@ -244,6 +271,15 @@ inline std::uint32_t control_face(WidgetState state,
         return theme.control_hovered;
     }
     return theme.control_bg;
+}
+
+// The pill shapes' radius (P5): the theme's radius_pill when a skin set
+// one, else the shape's OWN half-height - the full pill, the stock look.
+// (ChromeTheme::pill_radius() falls back to corner_radius, the radius
+// ROLES' shared rule; the toggle track and the scrollbar thumb predate
+// that fallback and stay full pills unless a theme says otherwise.)
+inline float pill_or_half(const ChromeTheme& theme, float half_height) {
+    return theme.radius_pill >= 0.0f ? theme.radius_pill : half_height;
 }
 
 // The bare-list face: the ladder minus its resting rung. Selectable

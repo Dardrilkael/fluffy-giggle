@@ -44,17 +44,21 @@ TEST_CASE("popup_frame_draw paints the panel chrome, the seam every overlay wear
 
     ws::ui::gui::popup_frame_draw(bounds, kDefaultChrome);
 
-    // The stock spelling: the border quad behind the face inset by 1 -
-    // exactly panel_draw's two quads, and nothing else.
-    CHECK(ws::ui::gui_test::stub.quads == 2);
+    // The stock spelling (P5): the border as a rounded OUTLINE at the
+    // popup radius - exactly panel_draw's pair, no straight quads, and
+    // no shadow while the stock tokens stay zero.
+    CHECK(ws::ui::gui_test::stub.outlines == 1);
+    CHECK(ws::ui::gui_test::stub.quads == 0);
+    CHECK(ws::ui::gui_test::stub.shadows == 0);
     CHECK(ws::ui::gui_test::stub.clip_pushes == 0);
 
     // The parity with the panel's own public chrome: the same bounds
-    // through panel_draw is the same two quads (the counts pin the
-    // bytes; the values are the two quads' own).
+    // through panel_draw is the same outline (the counts pin the
+    // bytes; the values are the pair's own).
     ws::ui::gui_test::stub.reset();
     ws::ui::gui::panel_draw(bounds, kDefaultChrome);
-    CHECK(ws::ui::gui_test::stub.quads == 2);
+    CHECK(ws::ui::gui_test::stub.outlines == 1);
+    CHECK(ws::ui::gui_test::stub.quads == 0);
 }
 
 TEST_CASE("toast_draw paints the floating frame plus the severity band") {
@@ -64,9 +68,10 @@ TEST_CASE("toast_draw paints the floating frame plus the severity band") {
     ws::ui::gui::toast_draw(bounds, ws::ui::gui::ToastSeverity::info,
                             kDefaultChrome);
 
-    // popup_frame_draw's two quads + the 3-px severity band = three
-    // quads, no rounded calls, nothing clipped.
-    CHECK(ws::ui::gui_test::stub.quads == 3);
+    // popup_frame_draw's outline (the frame pair) + the 3-px severity
+    // band = one outline call and one straight quad, nothing clipped.
+    CHECK(ws::ui::gui_test::stub.outlines == 1);
+    CHECK(ws::ui::gui_test::stub.quads == 1);
 
     // Every severity answers the same shape - the accent is a color
     // choice, never a geometry change.
@@ -75,7 +80,8 @@ TEST_CASE("toast_draw paints the floating frame plus the severity band") {
           ws::ui::gui::ToastSeverity::error}) {
         ws::ui::gui_test::stub.reset();
         ws::ui::gui::toast_draw(bounds, severity, kDefaultChrome);
-        CHECK(ws::ui::gui_test::stub.quads == 3);
+        CHECK(ws::ui::gui_test::stub.outlines == 1);
+        CHECK(ws::ui::gui_test::stub.quads == 1);
     }
 }
 

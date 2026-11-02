@@ -204,6 +204,15 @@ public:
                    float thickness, std::uint32_t color);
     void draw_rounded_quad(float x, float y, float w, float h, float radius,
                            std::uint32_t color, float rotation = 0.0f);
+    // The layered pair (see the public header): outline = 2 rounded quads
+    // (outer color + inner face), shadow = the documented 4-layer stack.
+    // Both compose from draw_rounded_quad's own record path - no new batch
+    // plumbing, the stub sees plain rounded quads.
+    void draw_rounded_outline(float x, float y, float w, float h, float radius,
+                              float thickness, std::uint32_t color,
+                              std::uint32_t face);
+    void draw_shadow(float x, float y, float w, float h, float radius,
+                     float blur, std::uint32_t color);
     // The canvas layer's free-form quad: four corners in the current
     // camera's space (2D blocks only - a 3D block warns like the 2D
     // overloads' reverse), per-corner rgba floats (rasterize-ready

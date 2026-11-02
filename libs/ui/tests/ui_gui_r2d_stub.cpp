@@ -43,12 +43,16 @@ void pop_clip() {
     gui_test::stub.clip_pops++;
 }
 
-void draw_quad(float, float, float, float, std::uint32_t, Texture, float) {
+void draw_quad(float, float, float, float, std::uint32_t color, Texture,
+               float) {
     gui_test::stub.quads++;
+    gui_test::stub.last_quad_color = color;
 }
 
-void draw_quad(float, float, float, float, float, std::uint32_t, Texture) {
+void draw_quad(float, float, float, float, float, std::uint32_t color,
+               Texture) {
     gui_test::stub.quads++;  // the 3D billboard form, for completeness
+    gui_test::stub.last_quad_color = color;
 }
 
 void draw_sprite(float, float, float, float, std::uint32_t, Sprite, float) {
@@ -59,9 +63,42 @@ void draw_sprite(float, float, float, float, float, std::uint32_t, Sprite) {
     gui_test::stub.sprites++;  // the 3D billboard form, for completeness
 }
 
-void draw_rounded_quad(float, float, float, float, float, std::uint32_t,
-                       float) {
+void draw_rounded_quad(float, float, float, float, float radius,
+                       std::uint32_t color, float) {
     gui_test::stub.rounded++;
+    if (gui_test::stub.first_rounded_radius < 0.0f) {
+        gui_test::stub.first_rounded_radius = radius;
+    }
+    gui_test::stub.last_rounded_color = color;
+    gui_test::stub.last_rounded_radius = radius;
+}
+
+// The P5 primitives, mirrored at their own seams: the outline counts
+// itself AND its two quads (the real renderer's draw_rounded_quad pair),
+// the shadow itself and its four layers - so `rounded` stays the count
+// of rounded quads the GPU would shade, whatever seam recorded them.
+void draw_rounded_outline(float, float, float w, float h, float,
+                          float thickness, std::uint32_t, std::uint32_t) {
+    // The real gates, mirrored: no stroke or an empty rect is nothing,
+    // and a stroke that eats the rect leaves the outer quad alone - the
+    // headless count stays the count the GPU would shade.
+    if (thickness <= 0.0f || w <= 0.0f || h <= 0.0f) {
+        return;
+    }
+    gui_test::stub.outlines++;
+    gui_test::stub.rounded += 1;
+    if (w - 2.0f * thickness > 0.0f && h - 2.0f * thickness > 0.0f) {
+        gui_test::stub.rounded += 1;
+    }
+}
+
+void draw_shadow(float, float, float, float, float, float blur,
+                 std::uint32_t color) {
+    if (blur <= 0.0f || (color & 0xFFu) == 0u) {
+        return;
+    }
+    gui_test::stub.shadows++;
+    gui_test::stub.rounded += 4;
 }
 
 // The tint bracket: the stub records the push/pop pairing and the

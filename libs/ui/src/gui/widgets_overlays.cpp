@@ -45,14 +45,24 @@ Rect place_popup(const Rect& anchor, float width, float height,
 }
 
 void popup_frame_draw(const Rect& bounds, const ChromeTheme& theme) {
-    // The overlay window's chrome: today the panel's own two quads -
-    // the border frame behind the face inset by 1, exactly what a
-    // panel wears (panel_draw's spelling). The seam is the point, not
-    // a difference: floating chrome grows (rounded corners, a drop
-    // shadow) without the panels it floats over following, and a skin
-    // restyles every floating window in one override. Drawn inside the
-    // caller's clip escape, before the content clips narrow.
-    panel_chrome(bounds, theme);
+    // The overlay window's chrome (P5): a themed shadow first - the 4
+    // layer stack under the window, gated on the theme's own shadow
+    // tokens (blur 0 = the flat stock of the pre-P5 look, and the
+    // custom-skin spelling of "none") - then the border as a rounded
+    // outline at the POPUP radius, the same panel_chrome pair at the
+    // popup's own role radius. Drawn inside the caller's clip escape,
+    // which push_overlay_panel (and the tooltip/toast scopes) opens on
+    // shadow_bounds so the spread paints past the window rect without
+    // ever painting past the host panel.
+    if (theme.shadow_blur > 0.0f) {
+        r2d::draw_shadow(bounds.x, bounds.y + theme.shadow_offset_y,
+                         bounds.width, bounds.height, theme.popup_radius(),
+                         theme.shadow_blur, theme.shadow);
+    }
+    r2d::draw_rounded_outline(bounds.x, bounds.y, bounds.width, bounds.height,
+                              theme.popup_radius(),
+                              std::max(1.0f, theme.border_width),
+                              theme.border, theme.panel_bg);
 }
 
 bool begin_popup(GuiContext& gui, LayoutCursor& layout,
@@ -221,7 +231,11 @@ bool begin_tooltip(GuiContext& gui, LayoutCursor& layout,
     const float t =
         gui.animate_toward(pid, 1.0f, motion_duration(theme));
     r2d::push_tint(fade_tint(t));
-    r2d::push_clip_escape(bounds.x, bounds.y, bounds.width, bounds.height);
+    // P5: the escape opens on the shadow's bounds - the same rule
+    // push_overlay_panel spells - so a themed shadow spreads past the
+    // hint rect without painting past the host panel.
+    const Rect escape = shadow_bounds(bounds, theme);
+    r2d::push_clip_escape(escape.x, escape.y, escape.width, escape.height);
     paint(theme, &WidgetPainters::popup_frame, &popup_frame_draw, bounds,
           theme);
     layout.begin_panel(bounds, theme.padding, theme.spacing);
