@@ -258,6 +258,7 @@ void draw_mnemonic_underline(float x, float row_top, float row_height,
                    chw, 1.0f, color);
 }
 
+
 // Opens level l+1 under row `i` of level l - the one write the keyboard,
 // the rest delay and a click all funnel through. Past the depth cap it
 // opens nothing and warns once per process.
@@ -495,6 +496,14 @@ void lay_menu_chain(GuiContext& gui, LayoutCursor& layout,
         push_overlay_panel(gui, layout, theme, level_label, state.bounds[l],
                            0.0f);  // flush rows: the menu's own spacing
 
+        // The rows' shared geometry - the measurement pass above folded
+        // into the split draw's carrier, so menu_item_draw walks the
+        // same columns the window was sized from.
+        const MenuGeometry geometry{
+            gutter,        marker,        marker_room,
+            shortcut_col,  content_w,     label_budget,
+            widest_shortcut};
+
         bool mouse_in_row = false;  // any pointer resting on any row
         Rect child_anchor{};        // level l+1's anchor: its parent row
         for (int i = 0; i < level.count; ++i) {
@@ -523,8 +532,7 @@ void lay_menu_chain(GuiContext& gui, LayoutCursor& layout,
             // A separator: a rule, not a row - no id, no hit-test,
             // nothing to fire, the row's full height to breathe.
             if (item.kind == MenuItemKind::separator) {
-                r2d::draw_quad(rect.x, rect.y + rect.height * 0.5f - 1.0f,
-                               rect.width, 2.0f, theme.border);
+                menu_item_separator_draw(rect, theme);
                 continue;
             }
 
@@ -534,7 +542,6 @@ void lay_menu_chain(GuiContext& gui, LayoutCursor& layout,
             // menu's keyboard, and Tab walks only the bar's titles.
             const WidgetResult result = gui.state(id, rect, item.disabled);
             const HitTest& hit = result.hit;
-            const float dim_by = dim_factor(result.state, theme);
             const bool is_parent =
                 item.submenu != nullptr && item.submenu_count > 0;
 
@@ -609,109 +616,19 @@ void lay_menu_chain(GuiContext& gui, LayoutCursor& layout,
                 }
             }
 
-            // --- the row's draw ----------------------------------------
-            // The face: the bare-list look - nothing at all until the
-            // highlight or a press marks the row - but the highlight
-            // wears the selected-tab accent, and a dead row wears the
-            // one dead face wherever it sits.
-            if (item.disabled) {
-                r2d::draw_quad(rect.x, rect.y, rect.width, rect.height,
-                               theme.control_disabled);
-            } else if (result.state == WidgetState::Pressed) {
-                r2d::draw_quad(rect.x, rect.y, rect.width, rect.height,
-                               theme.control_pressed);
-            } else if (i == state.highlight[l]) {
-                r2d::draw_quad(rect.x, rect.y, rect.width, rect.height,
-                               theme.control_on);
-            }
-            // The gutter art, centered in a control_height square at
-            // the row's left - a button's icon inset, a checkbox's
-            // box, a radio's dot: the same shapes the row widgets
-            // wear, drawn as the caller's `checked` displays them.
-            if (gutter > 0.0f) {
-                const float gh = theme.control_height;
-                if (item.icon.page != 0) {
-                    const float inset = std::min(theme.corner_radius, gh * 0.5f);
-                    const float side = gh - 2.0f * inset;
-                    if (side > 0.0f) {
-                        // white: the glyph-tint convention - the sprite
-                        // shades through its own alpha.
-                        r2d::draw_sprite(rect.x + inset, rect.y + inset,
-                                         side, side, dim(0xFFFFFFFFu, dim_by),
-                                         item.icon);
-                    }
-                } else if (item.kind == MenuItemKind::check) {
-                    r2d::draw_rounded_quad(rect.x, rect.y, gh, gh,
-                                           theme.corner_radius,
-                                           control_face(result.state, theme));
-                    if (item.checked) {
-                        const float inset =
-                            std::max(theme.check_inset, theme.corner_radius);
-                        const float fill = gh - 2.0f * inset;
-                        if (fill > 0.0f) {
-                            r2d::draw_rounded_quad(
-                                rect.x + inset, rect.y + inset, fill, fill,
-                                theme.corner_radius,
-                                dim(theme.control_on, dim_by));
-                        }
-                    }
-                } else if (item.kind == MenuItemKind::radio) {
-                    r2d::draw_rounded_quad(rect.x, rect.y, gh, gh, gh * 0.5f,
-                                           control_face(result.state, theme));
-                    if (item.checked) {
-                        const float dot = gh - 2.0f * theme.check_inset;
-                        if (dot > 0.0f) {
-                            r2d::draw_rounded_quad(
-                                rect.x + theme.check_inset,
-                                rect.y + theme.check_inset, dot, dot, dot * 0.5f,
-                                dim(theme.control_on, dim_by));
-                        }
-                    }
-                }
-            }
-            // The label: the STRIPPED text, fitted to the room the
-            // columns left, with its mnemonic underlined.
-            char strip[128];
-            const Mnemonic m = parse_mnemonic(item.label, strip, sizeof strip);
-            char fit_scratch[128];
-            const LabelFit fit = fit_text(m.text, label_budget, theme,
-                                          fit_scratch, sizeof fit_scratch);
-            const float label_x = rect.x + gutter;
-            const std::uint32_t label_color = dim(theme.text, dim_by);
-            draw_label(label_x, rect.y, rect.height, fit, label_color, theme);
-            draw_mnemonic_underline(label_x, rect.y, rect.height, m, fit,
-                                    label_color, theme);
-            // The shortcut hint, right-aligned into its column, the
-            // theme's disabled alpha for its faded look.
-            if (item.shortcut != nullptr && item.shortcut[0] != '\0') {
-                char hint_scratch[128];
-                const LabelFit hint_fit =
-                    fit_text(item.shortcut, widest_shortcut, theme,
-                             hint_scratch, sizeof hint_scratch);
-                if (hint_fit.advance > 0.0f) {
-                    draw_label(rect.x + content_w - marker_room -
-                                   hint_fit.advance,
-                               rect.y, rect.height, hint_fit,
-                               dim(dim(theme.text, theme.disabled_alpha),
-                                   dim_by),
-                               theme);
-                }
-            }
-            // The submenu marker: a small diamond (a rotated square,
-            // center-pivot) in the marker column - the accent while
-            // this row's child is open, the faint border while not.
-            if (is_parent) {
-                const float side = marker * 0.5f;
-                const bool child_live = l + 1 < MenuState::kDepth &&
-                                        state.open[l + 1] &&
-                                        state.parent[l + 1] == i;
-                const std::uint32_t mark =
-                    child_live ? theme.control_on : theme.border;
-                const float cx = rect.x + content_w - marker * 0.5f;
-                const float cy = rect.y + rect.height * 0.5f;
-                r2d::draw_quad(cx - side * 0.5f, cy - side * 0.5f, side, side,
-                               dim(mark, dim_by), {}, 0.785398f);
-            }
+            // --- the row's draw: the split half over this frame's answer --
+            // The whole stock look (face ladder, gutter art, label +
+            // mnemonic, shortcut hint, submenu diamond) lives in
+            // menu_item_draw - the chain hands it the state() fold, the
+            // aim and the open-child flag, and paints nothing itself.
+            MenuItemPaint paint;
+            paint.state = result.state;
+            paint.focused = false;  // items are not citizens: never a ring
+            paint.hit = hit;
+            paint.highlighted = i == state.highlight[l];
+            paint.child_open = l + 1 < MenuState::kDepth && state.open[l + 1] &&
+                               state.parent[l + 1] == i;
+            menu_item_draw(rect, paint, theme, item, geometry);
             // The child's anchor: its parent row, captured for the
             // next level's place_popup.
             if (l + 1 < MenuState::kDepth && state.open[l + 1] &&
@@ -735,6 +652,154 @@ void lay_menu_chain(GuiContext& gui, LayoutCursor& layout,
 }
 
 }  // namespace
+
+
+// --- the split draws (public): the row looks over the chain's answers ---
+
+void menu_item_separator_draw(const Rect& rect, const ChromeTheme& theme) {
+    // A rule, not a row: the border face across the middle, the row's
+    // full height to breathe. No id, no hit-test, nothing to fire.
+    r2d::draw_quad(rect.x, rect.y + rect.height * 0.5f - 1.0f, rect.width,
+                   2.0f, theme.border);
+}
+
+void menu_item_draw(const Rect& rect, const MenuItemPaint& paint,
+                    const ChromeTheme& theme, const MenuItem& item,
+                    const MenuGeometry& geometry) {
+    // The face: the bare-list look - nothing at all until the highlight
+    // or a press marks the row - but the highlight wears the
+    // selected-tab accent, and a dead row wears the one dead face
+    // wherever it sits.
+    if (item.disabled) {
+        r2d::draw_quad(rect.x, rect.y, rect.width, rect.height,
+                       theme.control_disabled);
+    } else if (paint.state == WidgetState::Pressed) {
+        r2d::draw_quad(rect.x, rect.y, rect.width, rect.height,
+                       theme.control_pressed);
+    } else if (paint.highlighted) {
+        r2d::draw_quad(rect.x, rect.y, rect.width, rect.height,
+                       theme.control_on);
+    }
+    // The gutter art, centered in a control_height square at the row's
+    // left - a button's icon inset, a checkbox's box, a radio's dot:
+    // the same shapes the row widgets wear, drawn as the caller's
+    // `checked` displays them.
+    const float dim_by = dim_factor(paint.state, theme);
+    if (geometry.gutter > 0.0f) {
+        const float gh = theme.control_height;
+        if (item.icon.page != 0) {
+            const float inset = std::min(theme.corner_radius, gh * 0.5f);
+            const float side = gh - 2.0f * inset;
+            if (side > 0.0f) {
+                // white: the glyph-tint convention - the sprite shades
+                // through its own alpha.
+                r2d::draw_sprite(rect.x + inset, rect.y + inset, side, side,
+                                 dim(0xFFFFFFFFu, dim_by), item.icon);
+            }
+        } else if (item.kind == MenuItemKind::check) {
+            r2d::draw_rounded_quad(rect.x, rect.y, gh, gh,
+                                   theme.corner_radius,
+                                   control_face(paint.state, theme));
+            if (item.checked) {
+                const float inset =
+                    std::max(theme.check_inset, theme.corner_radius);
+                const float fill = gh - 2.0f * inset;
+                if (fill > 0.0f) {
+                    r2d::draw_rounded_quad(
+                        rect.x + inset, rect.y + inset, fill, fill,
+                        theme.corner_radius, dim(theme.control_on, dim_by));
+                }
+            }
+        } else if (item.kind == MenuItemKind::radio) {
+            r2d::draw_rounded_quad(rect.x, rect.y, gh, gh, gh * 0.5f,
+                                   control_face(paint.state, theme));
+            if (item.checked) {
+                const float dot = gh - 2.0f * theme.check_inset;
+                if (dot > 0.0f) {
+                    r2d::draw_rounded_quad(
+                        rect.x + theme.check_inset,
+                        rect.y + theme.check_inset, dot, dot, dot * 0.5f,
+                        dim(theme.control_on, dim_by));
+                }
+            }
+        }
+    }
+    // The label: the STRIPPED text, fitted to the room the columns
+    // left, with its mnemonic underlined.
+    char strip[128];
+    const Mnemonic m = parse_mnemonic(item.label, strip, sizeof strip);
+    char fit_scratch[128];
+    const LabelFit fit = fit_text(m.text, geometry.label_budget, theme,
+                                  fit_scratch, sizeof fit_scratch);
+    const float label_x = rect.x + geometry.gutter;
+    const std::uint32_t label_color = dim(theme.text, dim_by);
+    draw_label(label_x, rect.y, rect.height, fit, label_color, theme);
+    draw_mnemonic_underline(label_x, rect.y, rect.height, m, fit,
+                            label_color, theme);
+    // The shortcut hint, right-aligned into its column, the theme's
+    // disabled alpha for its faded look.
+    if (item.shortcut != nullptr && item.shortcut[0] != '\0') {
+        char hint_scratch[128];
+        const LabelFit hint_fit =
+            fit_text(item.shortcut, geometry.widest_shortcut, theme,
+                     hint_scratch, sizeof hint_scratch);
+        if (hint_fit.advance > 0.0f) {
+            draw_label(rect.x + geometry.content_width -
+                           geometry.marker_room - hint_fit.advance,
+                       rect.y, rect.height, hint_fit,
+                       dim(dim(theme.text, theme.disabled_alpha), dim_by),
+                       theme);
+        }
+    }
+    // The submenu marker: a small diamond (a rotated square, center
+    // pivot) in the marker column - the accent while this row's child
+    // is open, the faint border while not.
+    if (item.submenu != nullptr && item.submenu_count > 0) {
+        const float side = geometry.marker * 0.5f;
+        const std::uint32_t mark =
+            paint.child_open ? theme.control_on : theme.border;
+        const float cx = rect.x + geometry.content_width -
+                         geometry.marker * 0.5f;
+        const float cy = rect.y + rect.height * 0.5f;
+        r2d::draw_quad(cx - side * 0.5f, cy - side * 0.5f, side, side,
+                       dim(mark, dim_by), {}, 0.785398f);
+    }
+}
+
+void menu_title_draw(const Rect& rect, const MenuTitlePaint& paint,
+                     const ChromeTheme& theme, const char* title) {
+    // The ring first, behind whatever face follows - the citizenship
+    // ladder's spelling every focused row takes.
+    ring_draw(paint.focused, rect, theme);
+    const float dim_by = dim_factor(paint.state, theme);
+    // Face priority: press feedback, then the open title, then hover.
+    // An idle title wears NOTHING - text on the bar strip, the VS Code
+    // menu look - and the OPEN title wears the popup window's own face
+    // (panel_bg), so the title and the menu below it read as one
+    // connected surface.
+    if (paint.state == WidgetState::Pressed) {
+        r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                               theme.corner_radius, theme.control_pressed);
+    } else if (paint.open) {
+        r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                               theme.corner_radius, theme.panel_bg);
+    } else if (paint.state == WidgetState::Hovered) {
+        r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
+                               theme.corner_radius, theme.control_hovered);
+    }
+    // The label, centered like a tab's, mnemonic underlined.
+    char strip[128];
+    const Mnemonic m = parse_mnemonic(title, strip, sizeof strip);
+    char fit_scratch[128];
+    const LabelFit fit =
+        fit_text(m.text, std::max(0.0f, rect.width - 2.0f * theme.padding),
+                 theme, fit_scratch, sizeof fit_scratch);
+    const float label_x = rect.x + (rect.width - fit.advance) * 0.5f;
+    draw_label(label_x, rect.y, rect.height, fit, dim(theme.text, dim_by),
+               theme);
+    draw_mnemonic_underline(label_x, rect.y, rect.height, m, fit,
+                            dim(theme.text, dim_by), theme);
+}
 
 // --- the hover engine -------------------------------------------------------
 //
@@ -854,36 +919,18 @@ MenuEvent menu_bar(GuiContext& gui, LayoutCursor& layout,
             alt_fired = true;
         }
 
-        // --- the title's draw ---------------------------------------
-        focus_ring(gui, id, rect, theme);
-        const float dim_by = dim_factor(result.state, theme);
-        // Face priority: press feedback, then the open title, then
-        // hover. An idle title wears NOTHING - text on the bar strip,
-        // the VS Code menu look - and the OPEN title wears the popup
-        // window's own face (panel_bg), so the title and the menu
-        // below it read as one connected surface.
-        if (result.state == WidgetState::Pressed) {
-            r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
-                                   theme.corner_radius,
-                                   theme.control_pressed);
-        } else if (open == i) {
-            r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
-                                   theme.corner_radius, theme.panel_bg);
-        } else if (result.state == WidgetState::Hovered) {
-            r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
-                                   theme.corner_radius,
-                                   theme.control_hovered);
-        }
-        // The label, centered like a tab's, mnemonic underlined.
-        char fit_scratch[128];
-        const LabelFit fit =
-            fit_text(m.text, std::max(0.0f, rect.width - 2.0f * theme.padding),
-                     theme, fit_scratch, sizeof fit_scratch);
-        const float label_x = rect.x + (rect.width - fit.advance) * 0.5f;
-        draw_label(label_x, rect.y, rect.height, fit, dim(theme.text, dim_by),
-                   theme);
-        draw_mnemonic_underline(label_x, rect.y, rect.height, m, fit,
-                                dim(theme.text, dim_by), theme);
+        // --- the title's draw: the split half over this frame's answer --
+        // The stock title look (ring, face ladder keyed on the open
+        // flag, the centered label with its mnemonic) lives in
+        // menu_title_draw; the strip hands it the fold plus `open`.
+        // focused reads FRESH, after the strip's own handling - the
+        // same timing focus_ring had here.
+        MenuTitlePaint paint;
+        paint.state = result.state;
+        paint.focused = gui.is_focused(id);
+        paint.hit = hit;
+        paint.open = open == i;
+        menu_title_draw(rect, paint, theme, menu.title);
 
         if (open == i) {
             open_title = rect;  // captured every frame, click or not

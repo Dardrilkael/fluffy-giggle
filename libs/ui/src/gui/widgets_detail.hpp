@@ -88,7 +88,8 @@ inline void panel_chrome(const Rect& bounds, const ChromeTheme& theme) {
 // caller pushes its layer (and the modal paints its veil), this pushes
 // the clip ESCAPE at the bounds - r2d and the hit mirror push-for-push,
 // so a window hanging past its host panel's edge draws AND hit-tests
-// there - then the chrome, the content panel (`spacing` is the one
+// there - then the chrome (popup_frame_draw, the split look seam every
+// floating window wears), the content panel (`spacing` is the one
 // caller difference: the gui's own overlays flow their theme's, menu
 // windows lay their rows flush), the keyless wheel claim (an open
 // overlay eats the wheel over the panel beneath) and the content clip
@@ -100,7 +101,7 @@ inline void push_overlay_panel(GuiContext& gui, LayoutCursor& layout,
                                const Rect& bounds, float spacing) {
     r2d::push_clip_escape(bounds.x, bounds.y, bounds.width, bounds.height);
     gui.push_hit_clip_escape(bounds);
-    panel_chrome(bounds, theme);
+    popup_frame_draw(bounds, theme);
     const Rect content =
         layout.begin_panel(bounds, theme.padding, spacing);
     gui.register_wheel_claim(bounds, nullptr);

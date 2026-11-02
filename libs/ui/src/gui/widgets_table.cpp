@@ -2,6 +2,9 @@
 // the table - the column grid, its header chrome and the selectable
 // rows under the loop-children id discipline. The rows fold through the
 // shared begin but keep their own late key edge under the grid walk.
+// The look halves are public (table_header_draw / table_row_draw over
+// TableGeometry) - the composed widget owns the geometry resolution
+// and the walk, the draws own the pixels.
 
 #include "widgets_detail.hpp"
 
@@ -11,6 +14,98 @@
 namespace ws::ui::gui {
 
 // --- M21: the table --------------------------------------------------------
+
+// The column walk's one step, shared by both draws: the policy width
+// (fixed, or the stretch width the composed table resolved) clamped to
+// what the table has left of itself, so a fixed set that sums past the
+// width clamps the CELLS to the table's own right edge - the walk reads
+// the clamp, so every column past the edge lays at it and draws
+// nothing, never outside the rect.
+namespace {
+float column_width(const TableGeometry& geom, float x, float policy) {
+    return std::min(policy,
+                    std::max(0.0f, geom.rect.x + geom.rect.width - x));
+}
+}  // namespace
+
+void table_header_draw(const TableGeometry& geom, bool disabled,
+                       const ChromeTheme& theme) {
+    // The header: a control face bar, its labels in the cell geometry,
+    // then the rule that anchors the grid. Chrome - no id, no
+    // hit-test, nothing focusable (a header click claims nothing;
+    // sorting is a future seam, not a hidden one). A locked grid's
+    // chrome reads dead from its top.
+    const float row_h = geom.row_height;
+    const float dim_by = disabled ? theme.disabled_alpha : 1.0f;
+    r2d::draw_rounded_quad(geom.rect.x, geom.rect.y, geom.rect.width, row_h,
+                           theme.corner_radius,
+                           disabled ? theme.control_disabled : theme.control_bg);
+    {
+        float x = geom.rect.x;
+        for (int j = 0; j < geom.column_count; ++j) {
+            const TableColumn& col =
+                geom.columns[static_cast<std::size_t>(j)];
+            const float cw = column_width(
+                geom, x, col.width > 0.0f ? col.width : geom.stretch_width);
+            if (col.label != nullptr && cw > 0.0f) {
+                char scratch[128];
+                const LabelFit fit = fit_text(
+                    col.label, std::max(0.0f, cw - 2.0f * theme.label_inset),
+                    theme, scratch, sizeof(scratch));
+                draw_label(x + theme.label_inset, geom.rect.y, row_h, fit,
+                           dim(theme.text, dim_by), theme);
+            }
+            x += cw;
+        }
+    }
+    r2d::draw_quad(geom.rect.x, geom.rect.y + row_h, geom.rect.width, 2.0f,
+                   dim(theme.border, dim_by));
+}
+
+void table_row_draw(const Rect& row_rect, const TableRowPaint& paint,
+                    const char* const* cells, const TableGeometry& geom,
+                    const ChromeTheme& theme) {
+    const float dim_by = paint.dimmed ? theme.disabled_alpha : 1.0f;
+
+    // The ring: reads the paint's captured focus (the composed walk
+    // reads it after its neighbor stepping - the capture timing is the
+    // walk's, not the draw's).
+    ring_draw(paint.focused, row_rect, theme);
+
+    // The bare-list face - selectable's look, no idle rung: an
+    // unhovered, unselected row is text on the parent's chrome.
+    if (const auto face = list_face(paint.state, theme)) {
+        r2d::draw_rounded_quad(row_rect.x, row_rect.y, row_rect.width,
+                               row_rect.height, theme.corner_radius, *face);
+    }
+
+    // The selection marker: selectable's 3-px accent bar down the
+    // row's left edge, riding every face, dimmed under the lock.
+    if (paint.selected && row_rect.width > 0.0f && row_rect.height > 0.0f) {
+        r2d::draw_quad(row_rect.x, row_rect.y, 3.0f, row_rect.height,
+                       dim(theme.control_on, dim_by));
+    }
+
+    // The cells in the column walk - the same draw the header's labels
+    // take, at the row's own y.
+    float x = geom.rect.x;
+    for (int j = 0; j < geom.column_count; ++j) {
+        const TableColumn& col = geom.columns[static_cast<std::size_t>(j)];
+        const float cw = column_width(
+            geom, x, col.width > 0.0f ? col.width : geom.stretch_width);
+        const char* cell = cells != nullptr ? cells[static_cast<std::size_t>(j)]
+                                            : nullptr;
+        if (cell != nullptr && cw > 0.0f) {
+            char scratch[128];
+            const LabelFit fit = fit_text(
+                cell, std::max(0.0f, cw - 2.0f * theme.label_inset), theme,
+                scratch, sizeof(scratch));
+            draw_label(x + theme.label_inset, row_rect.y, geom.row_height, fit,
+                       dim(theme.text, dim_by), theme);
+        }
+        x += cw;
+    }
+}
 
 bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
            const char* label, const TableColumn* columns, int column_count,
@@ -57,74 +152,18 @@ bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
                                  static_cast<float>(stretch_count))
             : 0.0f;
 
-    // One cell-draw shared by the header and every row: the fitted text
-    // at the column's x, one label_inset clear of each side - the same
-    // draw every widget's label takes, so a cell wider than its column
-    // truncates with "..." instead of spilling into the next.
-    const auto cell_text = [&](const char* cell, float x, float cell_w,
-                               float y, std::uint32_t color) {
-        if (cell == nullptr || cell_w <= 0.0f) {
-            return;
-        }
-        char scratch[128];
-        const LabelFit fit =
-            fit_text(cell, std::max(0.0f, cell_w - 2.0f * theme.label_inset),
-                     theme, scratch, sizeof(scratch));
-        draw_label(x + theme.label_inset, y, row_h, fit, color, theme);
-    };
-    // The column walk's one step: the policy width clamped to what the
-    // table has left of itself, so a fixed set that sums past the width
-    // clamps the CELLS to the table's own right edge - the walk reads
-    // the clamp, so every column past the edge lays at it and draws
-    // nothing, never outside the rect.
-    const auto column_width = [&](float x, float policy) {
-        return std::min(policy, std::max(0.0f, rect.x + rect.width - x));
-    };
+    // The resolved grid the split draws walk - the same numbers the
+    // geometry above computed, handed to the look halves whole.
+    const TableGeometry geom{rect, row_h, columns, column_count, stretch_w};
 
-    // The disabled scope dims the whole table as one - the header is
-    // chrome, but a locked grid reads dead from its top. One factor for
-    // every non-face color; the rows' faces come from their own state().
-    const float dim_by = gui.disabled() ? theme.disabled_alpha : 1.0f;
-
-    // The header: a control face bar, its labels in the cell geometry,
-    // then the rule that anchors the grid. Chrome - no id, no
-    // hit-test, nothing focusable (a header click claims nothing;
-    // sorting is a future seam, not a hidden one).
-    r2d::draw_rounded_quad(rect.x, rect.y, rect.width, row_h,
-                           theme.corner_radius,
-                           gui.disabled() ? theme.control_disabled
-                                          : theme.control_bg);
-    {
-        float x = rect.x;
-        for (int j = 0; j < column_count; ++j) {
-            const TableColumn& col = columns[static_cast<std::size_t>(j)];
-            const float cw =
-                column_width(x, col.width > 0.0f ? col.width : stretch_w);
-            cell_text(col.label, x, cw, rect.y, dim(theme.text, dim_by));
-            x += cw;
-        }
-    }
-    r2d::draw_quad(rect.x, rect.y + row_h, rect.width, 2.0f,
-                   dim(theme.border, dim_by));
-
-    // One row's cells in the column walk - the same draw the header's
-    // labels take, at the row's own y.
-    const auto draw_cells = [&](const char* const* row_cells, float y) {
-        float x = rect.x;
-        for (int j = 0; j < column_count; ++j) {
-            const TableColumn& col = columns[static_cast<std::size_t>(j)];
-            const float cw =
-                column_width(x, col.width > 0.0f ? col.width : stretch_w);
-            cell_text(row_cells[static_cast<std::size_t>(j)], x, cw, y,
-                      dim(theme.text, dim_by));
-            x += cw;
-        }
-    };
+    // The header: chrome, the split draw's half.
+    table_header_draw(geom, gui.disabled(), theme);
 
     // The rows. Interactive ones (a non-null selected) are citizens -
     // selectable's exact look and answer; a null selected lays the same
     // grid as pure chrome, no ids at all (the statics' "cannot interact"
-    // spelled by the pointer).
+    // spelled by the pointer). The row look is the split draw's half;
+    // the walk (focus stepping, the pick) stays here.
     bool changed = false;
     const float body_top = rect.y + row_h + 2.0f;
     {
@@ -144,7 +183,13 @@ bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
                 cells + static_cast<std::size_t>(i) *
                             static_cast<std::size_t>(column_count);
             if (selected == nullptr) {
-                draw_cells(row_cells, row_rect.y);
+                // The chrome path: the resting paint - no face, no ring,
+                // no selection bar (a null selected lays text on the
+                // parent's chrome), the scope's dim the only mark.
+                TableRowPaint rest;
+                rest.state = WidgetState::Normal;
+                rest.dimmed = gui.disabled();
+                table_row_draw(row_rect, rest, row_cells, geom, theme);
                 continue;
             }
 
@@ -181,27 +226,17 @@ bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             // focus once the walk has moved it.
             const bool key_clicked = key_activated(gui, rid);
 
-            // The ring reads the context, not the fold's capture, for
-            // the same reason: the walk above may have moved focus since
-            // the fold took it.
-            focus_ring(gui, rid, row_rect, theme);
-
-            // The bare-list face - selectable's look, no idle rung: an
-            // unhovered, unselected row is text on the parent's chrome.
-            if (const auto face = list_face(row.state, theme)) {
-                r2d::draw_rounded_quad(row_rect.x, row_rect.y, row_rect.width,
-                                       row_rect.height, theme.corner_radius,
-                                       *face);
-            }
-
-            // The selection marker: selectable's 3-px accent bar down the
-            // row's left edge, riding every face, dimmed under the lock.
-            // An out-of-range *selected (the caller's own) marks nothing.
-            if (*selected == i && row_rect.width > 0.0f &&
-                row_rect.height > 0.0f) {
-                r2d::draw_quad(row_rect.x, row_rect.y, 3.0f, row_rect.height,
-                               dim(theme.control_on, dim_by));
-            }
+            // The row's paint over the walk's answer: the focus reads
+            // FRESH (the walk above may have moved it since the fold
+            // took it), the selection is the caller's display state,
+            // and the disabled scope's whole-table dim rides the paint.
+            TableRowPaint paint;
+            paint.state = row.state;
+            paint.focused = gui.is_focused(rid);
+            paint.hit = row.hit;
+            paint.selected = *selected == i;  // out-of-range marks nothing
+            paint.dimmed = gui.disabled();
+            table_row_draw(row_rect, paint, row_cells, geom, theme);
 
             // The pick: a click or the focused row's key writes the
             // caller's int and answers ONLY on a real move - the radio's
@@ -210,7 +245,6 @@ bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
                 *selected = i;
                 changed = true;
             }
-            draw_cells(row_cells, row_rect.y);
         }
     }
     return changed;

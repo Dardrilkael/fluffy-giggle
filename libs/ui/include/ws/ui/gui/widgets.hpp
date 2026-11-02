@@ -464,6 +464,15 @@ void end_panel(GuiContext& gui, LayoutCursor& layout);
 // panel scope: draw this, then push your own clips.
 void panel_draw(const Rect& bounds, const ChromeTheme& theme);
 
+// The OVERLAY window's chrome: the floating frame a popup, a menu, a
+// tooltip or a toast wears. Today the panel's own two quads - the seam
+// is the point, not a difference: floating chrome grows (rounded
+// corners, a drop shadow) without the panels it floats over following,
+// and a skin restyles every floating window in one override. The
+// overlay scopes call this at their bounds, inside the clip escape;
+// nothing else about the scope changes here.
+void popup_frame_draw(const Rect& bounds, const ChromeTheme& theme);
+
 // A tab strip: `count` tabs side by side on one line, `width` px each
 // (the strip is count*width wide), theme.control_height tall. The
 // caller's `active` IS the selection state - a full click on a tab
@@ -1112,6 +1121,51 @@ bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
            const char* const* cells, int row_count,
            int* selected = nullptr, float width = -1.0f);
 
+// --- the table's split halves ------------------------------------------------
+// table's look seam, the same shape every split family takes: the
+// composed widget owns the geometry resolution and the grid walk (the
+// focus stepping, the pick), the draws own the pixels - a custom grid
+// recomputes nothing to repaint the stock look, and a skin replaces
+// the header and the row independently.
+
+// The resolved grid a header or row draw walks: the whole table's rect
+// (the header at its top), the row height, the caller's column array
+// and the stretch width the composed table resolved once. The column
+// walk (fixed first, stretch sharing the remainder, clamped at the
+// table's right edge) is recomputed by the draws, never stored.
+struct TableGeometry {
+    Rect rect{};
+    float row_height = 0.0f;
+    const TableColumn* columns = nullptr;
+    int column_count = 0;
+    float stretch_width = 0.0f;
+};
+
+// What one row's behavior hands its draw: the citizenship fold plus
+// the selection display state (the caller's int, read and never
+// written - the pick stays the composed walk's). `dimmed` carries the
+// disabled scope's whole-table factor: a locked grid dims as one, the
+// rows' own faces still ladder by their state.
+struct TableRowPaint : WidgetPaint {
+    bool selected = false;
+    bool dimmed = false;
+};
+
+// The header's look: the face bar, the column labels in the cell
+// geometry, and the 2-px rule that anchors the grid. `disabled` takes
+// the scope's answer so a locked grid's chrome reads dead from its
+// top. Chrome - the draw claims nothing.
+void table_header_draw(const TableGeometry& geom, bool disabled,
+                       const ChromeTheme& theme);
+
+// One row's look: the ring, the bare-list face, the selected row's
+// 3-px accent bar, then the row's cells in the column walk. Reads no
+// context; `cells` is the row's slice of the caller's row-major array
+// (column_count entries, null cells empty).
+void table_row_draw(const Rect& row_rect, const TableRowPaint& paint,
+                    const char* const* cells, const TableGeometry& geom,
+                    const ChromeTheme& theme);
+
 // --- menus ------------------------------------------------------------------
 // Menus are data-driven: the caller owns a plain array of item structs
 // and re-describes it every frame, the same discipline as combo's item
@@ -1196,6 +1250,66 @@ enum class MenuHoverAction {
 MenuHoverAction menu_hover_step(MenuHoverState& hover, int item, float dt,
                                 float open_delay, float tooltip_delay,
                                 bool parent, bool tooltip);
+
+// --- the menus' split halves --------------------------------------------------
+// The chain and the bar own the interaction (the hover engine, the
+// open chain, the keyboard walk - deeply stateful, and a skin never
+// needs to re-run any of it); these draws own the row looks. A custom
+// menu repaints its rows through them; the painters seam (P3) routes
+// here.
+
+// One menu level's resolved columns - what every row of the level
+// lays out of, computed by the chain (it sizes the window from the
+// same numbers). The gutter column exists when any row carries art
+// (an icon, a check, a radio), the shortcut column when any row
+// carries a hint, the marker room when any row opens a submenu.
+struct MenuGeometry {
+    float gutter = 0.0f;           // the art column's width (0: none)
+    float marker = 0.0f;           // the submenu diamond's size
+    float marker_room = 0.0f;      // the diamond's column (0: no parent)
+    float shortcut_column = 0.0f;  // the hints' column (0: none)
+    float content_width = 0.0f;    // the window's inner width
+    float label_budget = 0.0f;     // the label column's fit budget
+    float widest_shortcut = 0.0f;  // the hint column's measured width
+};
+
+// What one item's behavior hands its draw: the state() fold (items
+// are not focusable citizens - the arrow walk is the menu's keyboard -
+// so `focused` stays false on the stock chain, but a custom menu may
+// drive it), the chain's aim on this row, and whether THIS row's
+// submenu stands open.
+struct MenuItemPaint : WidgetPaint {
+    bool highlighted = false;  // the keyboard/hover aim rests here
+    bool child_open = false;   // this row's submenu is open
+};
+
+// One menu item's look: the face ladder (dead, pressed, the
+// highlight's accent, nothing at rest - the bare-list look), the
+// gutter art (the icon, the check box, the radio dot), the label with
+// its mnemonic underlined, the right-aligned shortcut hint, and the
+// submenu diamond. Reads no context; the label fits recompute here.
+void menu_item_draw(const Rect& rect, const MenuItemPaint& paint,
+                    const ChromeTheme& theme, const MenuItem& item,
+                    const MenuGeometry& geometry);
+
+// The separator's look: the border-colored rule across the row's
+// middle - a rule, not a row, nothing else to it.
+void menu_item_separator_draw(const Rect& rect, const ChromeTheme& theme);
+
+// What one bar title's behavior hands its draw: the citizenship fold
+// plus the open flag (the title's face keys on it - the OPEN title
+// wears the popup window's own face, so title and menu read as one
+// connected surface).
+struct MenuTitlePaint : WidgetPaint {
+    bool open = false;  // this title's menu is open
+};
+
+// One bar title's look: the ring, the face ladder (press feedback,
+// then the open title's panel face, then hover, nothing at rest - text
+// on the bar strip), and the centered label with its mnemonic
+// underlined. `title` carries the '&' mnemonic spelling.
+void menu_title_draw(const Rect& rect, const MenuTitlePaint& paint,
+                     const ChromeTheme& theme, const char* title);
 
 // The menu bar: `menus` (count of them) laid as title rows flowing
 // left, `open` the caller's index of the open menu (-1 = none, where
@@ -1358,5 +1472,13 @@ private:
 // Returns the slot whose action fired this frame, -1 when none did.
 int draw_toasts(GuiContext& gui, const ChromeTheme& theme, Toasts& toasts,
                 float bottom_clearance = 0.0f);
+
+// One toast's chrome: the floating frame (popup_frame_draw) plus the
+// severity's accent band down the panel's left edge, the full height.
+// The scope's content - the text row, the action button - stays the
+// composed draw_toasts' own half; a skin replaces the chrome, the
+// citizen rows inside keep working.
+void toast_draw(const Rect& bounds, ToastSeverity severity,
+                const ChromeTheme& theme);
 
 }  // namespace ws::ui::gui

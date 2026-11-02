@@ -147,6 +147,21 @@ if(TARGET test_ui_shell)
   target_include_directories(test_ui_shell PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
 
+# The P0 split-draw acceptance (the ui-skin plan): every look half
+# lifted out of the composed widgets, driven standalone and through the
+# composed calls - same purity class as test_ui_gui (the gui archive,
+# the r2d stub, the real font bake; no renderer on the link line).
+ws_add_test(ui_gui_splits
+  SOURCES tests/test_ui_gui_splits.cpp
+          tests/ui_gui_r2d_stub.cpp
+          src/text/font.cpp
+          src/text/stb_impl.cpp
+  LINK ws::ui_gui
+  DEPENDS stb)
+if(TARGET test_ui_gui_splits)
+  target_include_directories(test_ui_gui_splits PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+
 # --- Shader workflow targets (opt-in; the default build is unchanged) ------
 # The committed spirv.h stays the build input (no shader compiler needed);
 # these targets make staleness visible and regeneration explicit. The flags

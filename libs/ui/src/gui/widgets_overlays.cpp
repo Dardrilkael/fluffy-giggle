@@ -44,6 +44,17 @@ Rect place_popup(const Rect& anchor, float width, float height,
     return popup_placement(anchor, width, height, side, r2d::frame_size());
 }
 
+void popup_frame_draw(const Rect& bounds, const ChromeTheme& theme) {
+    // The overlay window's chrome: today the panel's own two quads -
+    // the border frame behind the face inset by 1, exactly what a
+    // panel wears (panel_draw's spelling). The seam is the point, not
+    // a difference: floating chrome grows (rounded corners, a drop
+    // shadow) without the panels it floats over following, and a skin
+    // restyles every floating window in one override. Drawn inside the
+    // caller's clip escape, before the content clips narrow.
+    panel_chrome(bounds, theme);
+}
+
 bool begin_popup(GuiContext& gui, LayoutCursor& layout,
                  const ChromeTheme& theme, const char* label,
                  const Rect& anchor, const Rect& bounds, bool& open) {
@@ -177,7 +188,7 @@ bool begin_tooltip(GuiContext& gui, LayoutCursor& layout,
     // what they get (it claims at the tooltip stratum, unclipped).
     gui.begin_layer(Layer::tooltip);
     r2d::push_clip_escape(bounds.x, bounds.y, bounds.width, bounds.height);
-    panel_chrome(bounds, theme);
+    popup_frame_draw(bounds, theme);
     layout.begin_panel(bounds, theme.padding, theme.spacing);
     gui.ids().push(label);
     return show;

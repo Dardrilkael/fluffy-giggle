@@ -88,7 +88,23 @@ int Toasts::count() const {
     return live_count_;
 }
 
-// --- the draw ---------------------------------------------------------------
+// --- the draws ---------------------------------------------------------------
+
+void toast_draw(const Rect& bounds, ToastSeverity severity,
+                const ChromeTheme& theme) {
+    // The floating frame first - popup_frame_draw, the seam every
+    // overlay window wears - then the severity's accent band down the
+    // panel's left edge, the FULL height: 3px, a hardcoded pixel like
+    // the selectable's accent bar.
+    popup_frame_draw(bounds, theme);
+    std::uint32_t accent = theme.toast_info;
+    if (severity == ToastSeverity::warning) {
+        accent = theme.toast_warning;
+    } else if (severity == ToastSeverity::error) {
+        accent = theme.toast_error;
+    }
+    r2d::draw_quad(bounds.x, bounds.y, 3.0f, bounds.height, accent);
+}
 
 int draw_toasts(GuiContext& gui, const ChromeTheme& theme, Toasts& toasts,
                 float bottom_clearance) {
@@ -186,19 +202,11 @@ int draw_toasts(GuiContext& gui, const ChromeTheme& theme, Toasts& toasts,
         // (no wheel claim), and the severity band must paint the
         // panel's FULL height outside the content clip - so the escape
         // pair opens at the bounds, the chrome and band paint inside
-        // it, and the intersecting content pair narrows the rows.
+        // it (toast_draw, the split look half), and the intersecting
+        // content pair narrows the rows.
         r2d::push_clip_escape(bounds.x, bounds.y, bounds.width, bounds.height);
         gui.push_hit_clip_escape(bounds);
-        panel_chrome(bounds, theme);
-        std::uint32_t accent = theme.toast_info;
-        if (s.toast.severity == ToastSeverity::warning) {
-            accent = theme.toast_warning;
-        } else if (s.toast.severity == ToastSeverity::error) {
-            accent = theme.toast_error;
-        }
-        // The severity band: 3px down the left edge, the full panel
-        // height - a hardcoded pixel like the selectable's accent bar.
-        r2d::draw_quad(bounds.x, bounds.y, 3.0f, bounds.height, accent);
+        toast_draw(bounds, s.toast.severity, theme);
         const Rect content =
             layout.begin_panel(bounds, theme.padding, theme.spacing);
         r2d::push_clip(content.x, content.y, content.width, content.height);
