@@ -162,12 +162,29 @@ std::vector<ContrastFailure> contrast_failures(const ChromeTheme& theme) {
     const Pair pairs[] = {
         {"text / panel_bg", theme.text, theme.panel_bg, 4.5},
         {"text / control_bg", theme.text, theme.control_bg, 4.5},
+        // The quiet rung is real text: the same AA body-text demand.
+        {"text_secondary / panel_bg", theme.text_secondary,
+         theme.panel_bg, 4.5},
+        {"text_secondary / control_bg", theme.text_secondary,
+         theme.control_bg, 4.5},
         {"control_on / panel_bg", theme.control_on, theme.panel_bg, 3.0},
         {"control_on / control_bg", theme.control_on, theme.control_bg, 3.0},
         {"control_pressed / panel_bg", theme.control_pressed,
          theme.panel_bg, 3.0},
         {"control_pressed / control_bg", theme.control_pressed,
          theme.control_bg, 3.0},
+        // The on-accent label: an accent-face component's own text
+        // (a primary button's label, the checked fill's mark). Checked
+        // at the 3:1 component ratio, WCAG 1.4.11's own class for
+        // identifying an interactive state - a 4.5 demand here is
+        // unsatisfiable against the dark stock's backgrounds (an
+        // accent white enough for 4.5 fails control_on's own 3:1
+        // pair), and 3:1 is the line the on-accent labels of every
+        // major design system sit on.
+        {"text_on_accent / control_on", theme.text_on_accent,
+         theme.control_on, 3.0},
+        {"text_on_accent / control_pressed", theme.text_on_accent,
+         theme.control_pressed, 3.0},
     };
     std::vector<ContrastFailure> failures;
     for (const Pair& pair : pairs) {
@@ -272,6 +289,24 @@ void apply_accent(ChromeTheme& theme, std::uint32_t accent) {
     dead.C *= 0.5;
     dead.L += (oklch_from_rgb(theme.panel_bg).L - dead.L) * 0.4;
     theme.control_disabled = rgb_from_oklch(dead);
+
+    // accent_hover: the ACCENT's own hover rung (control_hovered is the
+    // control face's) - the same hue a half-step further from the
+    // background's polarity. Exempt like every hover: the pointer is
+    // the indicator.
+    Oklch accent_hov = oklch_from_rgb(theme.control_on);
+    accent_hov.L += away * 0.05;
+    theme.accent_hover = rgb_from_oklch(accent_hov);
+
+    // text_on_accent: the on-accent label. White when it clears the
+    // component ratio against both accent faces; otherwise walked
+    // toward black - the only other answer an on-accent label has -
+    // with ensure_contrast's best-effort landing if the accent sits
+    // mid-lightness where neither end clears (the shortfall stays
+    // visible through contrast_failures, the function's contract).
+    theme.text_on_accent =
+        ensure_contrast(0xFFFFFFFFu, theme.control_on,
+                        theme.control_pressed, 3.0, -1.0);
 }
 
 }  // namespace ws::ui::gui

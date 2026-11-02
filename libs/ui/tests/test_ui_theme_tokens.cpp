@@ -1,0 +1,254 @@
+// The P2 token-pass acceptance (the ui-skin plan): every new
+// ChromeTheme field is real data - defaulted, overridable, scaled where
+// px, carried where timing, serialized where serializable - and the
+// stock themes still answer the (now larger) contrast table. The JSON
+// half rides the same read/write fold tables the stage-10 suite pinned.
+
+#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include <doctest/doctest.h>
+
+#include <ws/ui/gui/theme.hpp>
+#include <ws/ui/gui/theme_color.hpp>
+#include <ws/ui/gui/theme_data.hpp>
+#include <ws/ui/gui/theme_json.hpp>
+
+#include <string>
+
+namespace {
+
+using ws::ui::gui::ChromeTheme;
+using ws::ui::gui::contrast_failures;
+using ws::ui::gui::contrast_ratio;
+using ws::ui::gui::default_dark;
+using ws::ui::gui::default_light;
+using ws::ui::gui::kDefaultChrome;
+using ws::ui::gui::kLightChrome;
+using ws::ui::gui::read_theme;
+using ws::ui::gui::write_theme;
+
+}  // namespace
+
+TEST_CASE("the radius roles inherit corner_radius until overridden") {
+    // The back-compat rule: one number restyles everything.
+    CHECK(kDefaultChrome.control_radius() == kDefaultChrome.corner_radius);
+    CHECK(kDefaultChrome.panel_radius() == kDefaultChrome.corner_radius);
+    CHECK(kDefaultChrome.popup_radius() == kDefaultChrome.corner_radius);
+    CHECK(kDefaultChrome.pill_radius() == kDefaultChrome.corner_radius);
+
+    // Four numbers restyle one role each.
+    ChromeTheme square = kDefaultChrome;
+    square.corner_radius = 7.0f;
+    square.radius_control = 0.0f;
+    square.radius_popup = 2.0f;
+    CHECK(square.control_radius() == 0.0f);
+    CHECK(square.popup_radius() == 2.0f);
+    CHECK(square.panel_radius() == 7.0f);   // the inherited default
+    CHECK(square.pill_radius() == 7.0f);
+
+    // scaled() keeps the sentinel a sentinel and scales the resolved
+    // answer with it.
+    const ChromeTheme big = square.scaled(2.0f);
+    CHECK(big.radius_control == 0.0f);
+    CHECK(big.radius_popup == 4.0f);
+    CHECK(big.panel_radius() == 14.0f);  // corner_radius scaled
+    CHECK(big.control_radius() == 0.0f);
+    CHECK(big.panel_radius() == 14.0f);
+}
+
+TEST_CASE("the new metrics scale like px and the motion tokens do not") {
+    ChromeTheme t = kDefaultChrome;
+    t.border_width = 2.0f;
+    t.focus_ring_width = 1.5f;
+    t.shadow_blur = 9.0f;
+    t.shadow_offset_y = 3.0f;
+    t.anim_duration = 0.25f;
+    t.anim_enabled = false;
+
+    const ChromeTheme big = t.scaled(2.0f);
+    CHECK(big.control_height == t.control_height * 2.0f);
+    CHECK(big.border_width == 4.0f);
+    CHECK(big.focus_ring_width == 3.0f);
+    CHECK(big.shadow_blur == 18.0f);
+    CHECK(big.shadow_offset_y == 6.0f);
+    // Timings and switches carry as-is: a denser screen does not make a
+    // user faster.
+    CHECK(big.anim_duration == 0.25f);
+    CHECK(big.anim_enabled == false);
+    CHECK(big.tooltip_delay == t.tooltip_delay);
+
+    // The one deliberate stock bump, pinned.
+    CHECK(kDefaultChrome.control_height == 28.0f);
+    // The shadow tokens wait for P5's render: the stock default is none.
+    CHECK(kDefaultChrome.shadow_blur == 0.0f);
+    CHECK(kDefaultChrome.shadow_offset_y == 0.0f);
+}
+
+TEST_CASE("both stock themes answer the grown contrast table") {
+    for (const ChromeTheme* chrome : {&kDefaultChrome, &kLightChrome}) {
+        const auto failures = contrast_failures(*chrome);
+        for (const ws::ui::gui::ContrastFailure& failure : failures) {
+            MESSAGE("unpinned pair: ", failure.pair, " ratio ",
+                    failure.ratio, " required ", failure.required);
+        }
+        CHECK(failures.empty());
+    }
+
+    // The new pairs specifically: the quiet rung is real text (4.5) and
+    // the on-accent label clears the component ratio (3.0) on both
+    // accent faces.
+    for (const ChromeTheme* chrome : {&kDefaultChrome, &kLightChrome}) {
+        CHECK(contrast_ratio(chrome->text_secondary, chrome->panel_bg) >=
+              4.5);
+        CHECK(contrast_ratio(chrome->text_secondary, chrome->control_bg) >=
+              4.5);
+        CHECK(contrast_ratio(chrome->text_on_accent, chrome->control_on) >=
+              3.0);
+        CHECK(contrast_ratio(chrome->text_on_accent,
+                             chrome->control_pressed) >= 3.0);
+    }
+
+    // A theme that breaks a new pair is caught: the quiet rung drowned
+    // into the background fails by name.
+    ChromeTheme drowned = kDefaultChrome;
+    drowned.text_secondary = drowned.panel_bg;
+    const auto failures = contrast_failures(drowned);
+    REQUIRE(failures.size() >= 2);
+    CHECK(std::string{failures.front().pair} ==
+          std::string{"text_secondary / panel_bg"});
+}
+
+TEST_CASE("apply_accent derives the accent's hover rung and the on-accent label") {
+    using ws::ui::gui::apply_accent;
+
+    for (const ChromeTheme* stock : {&kDefaultChrome, &kLightChrome}) {
+        ChromeTheme theme = *stock;
+        apply_accent(theme, 0x54A054FFu);  // a mid green
+
+        // The on-accent label clears 3:1 against BOTH derived accent
+        // faces (or best-effort lands as far as it could - a mid
+        // lightness accent can be unwinnable, the contract says; green
+        // at L .62 on dark clears with white after control_on walks).
+        CHECK(contrast_ratio(theme.text_on_accent, theme.control_on) >=
+              3.0 - 1e-9);
+        // The hover rung exists and differs from the resting accent.
+        CHECK(theme.accent_hover != theme.control_on);
+        // Idempotence: deriving the same accent twice answers the same
+        // faces.
+        const ChromeTheme again = theme;
+        apply_accent(theme, 0x54A054FFu);
+        CHECK(theme.control_on == again.control_on);
+        CHECK(theme.accent_hover == again.accent_hover);
+        CHECK(theme.text_on_accent == again.text_on_accent);
+    }
+
+    // A pale accent on the dark stock walks control_on darker until it
+    // clears its pairs; the on-accent label follows (white clears on a
+    // walked-dark accent, black on a bright one - either way it is
+    // DERIVED, never hand-picked).
+    ChromeTheme pale = kDefaultChrome;
+    apply_accent(pale, 0xE8E8E8FFu);
+    CHECK(contrast_ratio(pale.text_on_accent, pale.control_on) >= 3.0);
+}
+
+TEST_CASE("every new token round-trips through the theme json") {
+    ws::ui::gui::ThemeData styled = default_dark();
+    styled.chrome.text_on_accent = 0x101820FFu;
+    styled.chrome.accent_hover = 0x70B0E0FFu;
+    styled.chrome.text_secondary = 0x99A0AAFFu;
+    styled.chrome.border_strong = 0xFFFFFF66u;
+    styled.chrome.shadow = 0x00000077u;
+    styled.chrome.radius_control = 0.0f;
+    styled.chrome.radius_panel = 8.0f;
+    styled.chrome.radius_popup = 10.0f;
+    styled.chrome.radius_pill = 999.0f;
+    styled.chrome.border_width = 2.0f;
+    styled.chrome.focus_ring_width = 1.5f;
+    styled.chrome.shadow_blur = 12.0f;
+    styled.chrome.shadow_offset_y = 4.0f;
+    styled.chrome.anim_duration = 0.2f;
+    styled.chrome.anim_enabled = false;
+
+    const std::string text = write_theme(styled);
+
+    // The canonical shape names them all.
+    CHECK(text.find("\"text_on_accent\": \"#101820FF\"") != std::string::npos);
+    CHECK(text.find("\"accent_hover\": \"#70B0E0FF\"") != std::string::npos);
+    CHECK(text.find("\"text_secondary\": \"#99A0AAFF\"") != std::string::npos);
+    CHECK(text.find("\"border_strong\": \"#FFFFFF66\"") != std::string::npos);
+    CHECK(text.find("\"shadow\": \"#00000077\"") != std::string::npos);
+    CHECK(text.find("\"radius_control\": 0.0") != std::string::npos);
+    CHECK(text.find("\"radius_pill\": 999.0") != std::string::npos);
+    CHECK(text.find("\"border_width\": 2.0") != std::string::npos);
+    CHECK(text.find("\"focus_ring_width\": 1.5") != std::string::npos);
+    CHECK(text.find("\"shadow_blur\": 12.0") != std::string::npos);
+    CHECK(text.find("\"shadow_offset_y\": 4.0") != std::string::npos);
+    CHECK(text.find("\"anim_duration\": 0.2") != std::string::npos);
+    CHECK(text.find("\"anim_enabled\": false") != std::string::npos);
+
+    // Reading over the OTHER stock recovers every token - and the
+    // write(read(.)) pair is byte-stable.
+    const auto over_light = read_theme(text, default_light());
+    REQUIRE(over_light);
+    CHECK(over_light->chrome.text_on_accent == styled.chrome.text_on_accent);
+    CHECK(over_light->chrome.accent_hover == styled.chrome.accent_hover);
+    CHECK(over_light->chrome.text_secondary == styled.chrome.text_secondary);
+    CHECK(over_light->chrome.border_strong == styled.chrome.border_strong);
+    CHECK(over_light->chrome.shadow == styled.chrome.shadow);
+    CHECK(over_light->chrome.radius_control == styled.chrome.radius_control);
+    CHECK(over_light->chrome.radius_panel == styled.chrome.radius_panel);
+    CHECK(over_light->chrome.radius_popup == styled.chrome.radius_popup);
+    CHECK(over_light->chrome.radius_pill == styled.chrome.radius_pill);
+    CHECK(over_light->chrome.border_width == styled.chrome.border_width);
+    CHECK(over_light->chrome.focus_ring_width ==
+          styled.chrome.focus_ring_width);
+    CHECK(over_light->chrome.shadow_blur == styled.chrome.shadow_blur);
+    CHECK(over_light->chrome.shadow_offset_y ==
+          styled.chrome.shadow_offset_y);
+    CHECK(over_light->chrome.anim_duration == styled.chrome.anim_duration);
+    CHECK(over_light->chrome.anim_enabled == styled.chrome.anim_enabled);
+    CHECK(write_theme(*over_light) == text);
+}
+
+TEST_CASE("an old theme file loads with every new token at its default") {
+    // The migration is "absent = default": a pre-P2 file (no new
+    // members) reads clean, and only its old members fold.
+    const auto loaded = read_theme(
+        R"json({
+            "version": 1,
+            "chrome": {"control_height": 30, "corner_radius": 6.5}
+        })json",
+        default_dark());
+    REQUIRE(loaded);
+    CHECK(loaded->chrome.control_height == 30.0f);
+    CHECK(loaded->chrome.corner_radius == 6.5f);
+    // The new family, all at the stock defaults.
+    const ChromeTheme& stock = kDefaultChrome;
+    CHECK(loaded->chrome.radius_control == stock.radius_control);
+    CHECK(loaded->chrome.control_radius() == 6.5f);  // inherits the folded one
+    CHECK(loaded->chrome.text_secondary == stock.text_secondary);
+    CHECK(loaded->chrome.text_on_accent == stock.text_on_accent);
+    CHECK(loaded->chrome.border_width == stock.border_width);
+    CHECK(loaded->chrome.shadow_blur == stock.shadow_blur);
+    CHECK(loaded->chrome.anim_duration == stock.anim_duration);
+    CHECK(loaded->chrome.anim_enabled == stock.anim_enabled);
+
+    // A wrong-typed flag is refused like any wrong member: the fold is
+    // all-or-nothing.
+    const auto refused = read_theme(
+        R"json({
+            "version": 1,
+            "chrome": {"anim_enabled": 1}
+        })json",
+        default_dark());
+    CHECK(!refused);
+}
+
+TEST_CASE("the stock documents name the bundled face") {
+    // P1's Inter: the families record what the stock look runs; the
+    // app still resolves them (load_default_font), the library opens
+    // nothing.
+    CHECK(default_dark().regular.family == "Inter");
+    CHECK(default_dark().bold.family == "Inter SemiBold");
+    CHECK(default_light().regular.family == "Inter");
+    CHECK(default_light().mono.family.empty());  // the caller's pick
+}

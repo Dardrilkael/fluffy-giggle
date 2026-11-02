@@ -1670,7 +1670,7 @@ TEST_CASE("the table keeps its late reads under the grid walk") {
     // A tap on the last row picks it and latches the focus: the pressed
     // face and the ring both draw on the tapped row this frame (with the
     // header bar, three rounded quads).
-    pass(snap(150.0f, 80.0f, false, true, true));
+    pass(snap(150.0f, 86.0f, false, true, true));
     CHECK(selected == 2);
     CHECK(changed);
     CHECK(gui.is_focused(row_w(2)));

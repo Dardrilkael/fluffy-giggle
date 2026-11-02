@@ -183,6 +183,20 @@ if(TARGET test_ui_font)
     "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
 
+# The P2 token-pass suite (the ui-skin plan): the theme data, its
+# contrast math and its json persistence - the gui archive's value
+# types, no widgets, the r2d stub only for the theme's font borrow.
+ws_add_test(ui_theme_tokens
+  SOURCES tests/test_ui_theme_tokens.cpp
+          tests/ui_gui_r2d_stub.cpp
+          src/text/font.cpp
+          src/text/stb_impl.cpp
+  LINK ws::ui_gui
+  DEPENDS stb)
+if(TARGET test_ui_theme_tokens)
+  target_include_directories(test_ui_theme_tokens PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+
 # --- Shader workflow targets (opt-in; the default build is unchanged) ------
 # The committed spirv.h stays the build input (no shader compiler needed);
 # these targets make staleness visible and regeneration explicit. The flags

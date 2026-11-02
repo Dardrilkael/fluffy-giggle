@@ -22,10 +22,38 @@ struct ChromeTheme {
     std::uint32_t control_hovered = r2d::rgba(62, 66, 77);
     std::uint32_t control_pressed = r2d::rgba(80, 128, 190);
     std::uint32_t control_disabled = r2d::rgba(42, 44, 50);
-    std::uint32_t control_on = r2d::rgba(96, 156, 224);  // the accent:
-                                   // checked, toggled, selected, live data
+    std::uint32_t control_on = r2d::rgba(84, 144, 212);  // the accent:
+                                   // checked, toggled, selected, live data.
+                                   // One step deeper than the pre-P2 blue
+                                   // so text_on_accent (a near-white label
+                                   // on an accent face) clears its pair.
+    // The label color on ACCENT faces - a primary button's text, the
+    // checked fill's mark: near-white on both stocks, derived by
+    // apply_accent (white when it clears, walked to black when only
+    // black can). Checked at the component ratio (3:1), the WCAG
+    // 1.4.11 reading an on-accent label sits under - the AA 4.5 the
+    // body-text pairs carry is mathematically out of reach for a
+    // near-white on any accent that itself clears 3:1 against the
+    // dark stock's backgrounds.
+    std::uint32_t text_on_accent = r2d::rgba(255, 255, 255);
+    // The accent's own hover rung - the toggle/slider handle brightens
+    // while the pointer rests on it (control_hovered is the CONTROL
+    // face's rung; this is the accent's). Exempt like every hover: the
+    // pointer is the indicator. apply_accent derives it.
+    std::uint32_t accent_hover = r2d::rgba(112, 168, 228);
     std::uint32_t text = r2d::rgba(228, 231, 238);
+    // The quiet rung of text - placeholders, shortcut hints, secondary
+    // labels: a real text color (checked 4.5:1 against both
+    // backgrounds, like `text`), a step toward the background in
+    // lightness. NOT dim(text): a theme that wants its quiet rung
+    // bluer or warmer says so here, once.
+    std::uint32_t text_secondary = r2d::rgba(150, 156, 170);
     std::uint32_t border = r2d::rgba(255, 255, 255, 26);
+    // The strong divider - table rules, active edges, the separator
+    // a busy screen needs to read as structure. A step above `border`
+    // in the same translucency family; exempt from checks (decorative
+    // face, the border's own class).
+    std::uint32_t border_strong = r2d::rgba(255, 255, 255, 51);
     // The chrome strips - the menu bar, the toolbar, the tab strips,
     // the status bar, the dock splitters. Darker than panel_bg on the
     // dark theme (and a grayer step on the light one), the same role
@@ -44,10 +72,28 @@ struct ChromeTheme {
     std::uint32_t toast_info = r2d::rgba(72, 132, 192);
     std::uint32_t toast_warning = r2d::rgba(200, 150, 60);
     std::uint32_t toast_error = r2d::rgba(190, 80, 70);
+    // The color shadows multiply toward - black at low alpha on the
+    // dark stock, a warm gray on the light one. Drawn by the P5
+    // shadow primitive against the theme's shadow metrics below;
+    // until then it rides as data.
+    std::uint32_t shadow = r2d::rgba(0, 0, 0, 110);
 
     // Metrics, gui-space pixels.
-    float control_height = 26.0f;
+    float control_height = 28.0f;  // the one deliberate stock bump of
+                                   // the token pass (26 before): room
+                                   // for the text quality pass's
+                                   // crisper small glyphs to breathe
     float corner_radius = 5.0f;  // drawn as real corners in Phase 8
+    // The radius PER ROLE - each defaults to -1.0f, "corner_radius's
+    // own": an app that overrides only corner_radius still restyles
+    // every role (the back-compat rule), and an app that wants square
+    // controls in a rounded world sets radius_control = 0 alone. Read
+    // them through the accessors below (control_radius() et al.),
+    // never the raw fields.
+    float radius_control = -1.0f;
+    float radius_panel = -1.0f;
+    float radius_popup = -1.0f;
+    float radius_pill = -1.0f;
     float padding = 12.0f;       // panel content inset
     float spacing = 8.0f;        // the gap between widgets sharing a row
     float scroll_speed = 32.0f;  // px one wheel unit scrolls a scroll panel
@@ -94,6 +140,27 @@ struct ChromeTheme {
                                   // accent) through dim(); 1.0 is the
                                   // identity. A ratio, not a px metric -
                                   // scaled() carries it as-is
+    // The line weights, px. border_width feeds the panel/popup frame
+    // stroke (P5 adopts it; today's frames hardcode 1); focus_ring_width
+    // the keyboard ring's stroke. scaled() carries them like any px.
+    float border_width = 1.0f;
+    float focus_ring_width = 1.0f;
+    // The shadow metrics, px: blur is the softness, offset_y the drop.
+    // Both 0 = the stock draws no shadow - until P5 adopts them, every
+    // theme's shadows wait as data (a theme that sets them early just
+    // draws them the day P5 lands).
+    float shadow_blur = 0.0f;
+    float shadow_offset_y = 0.0f;
+
+    // Motion. anim_duration is the seconds an animated value takes to
+    // settle (95%) - the P4 helper's one knob; 0 or less is INSTANT,
+    // the pre-P4 behavior exactly. anim_enabled is the master switch
+    // (false = every traveler jumps, byte-identical to a no-animation
+    // build) so an app can offer reduced-motion without losing its
+    // configured durations. Timings and switches: scaled() carries
+    // them as-is, like tooltip_delay.
+    float anim_duration = 0.10f;
+    bool anim_enabled = true;
 
     // The font labels draw with - the one look asset that is a loaded
     // object instead of a value. Null (the default) keeps the v1 label
@@ -105,18 +172,49 @@ struct ChromeTheme {
     // not a rework of this pointer.
     const r2d::Font* font = nullptr;
 
+    // The strong weight - headings, the selected tab, a dialog's
+    // title. Null (the default) falls back to `font` everywhere it is
+    // read: a one-font theme stays one font, and a two-weight look is
+    // load_default_font(semibold, ...) plus this pointer (see P1's
+    // bundled Inter). Same borrowing contract as `font` - the theme
+    // owns nothing.
+    const r2d::Font* font_strong = nullptr;
+
+    // The role radii, resolved: -1 (the default) inherits
+    // corner_radius, so the back-compat rule holds - one number
+    // restyles everything, four numbers restyle one role each.
+    // constexpr, like the whole struct.
+    [[nodiscard]] constexpr float control_radius() const {
+        return radius_control >= 0.0f ? radius_control : corner_radius;
+    }
+    [[nodiscard]] constexpr float panel_radius() const {
+        return radius_panel >= 0.0f ? radius_panel : corner_radius;
+    }
+    [[nodiscard]] constexpr float popup_radius() const {
+        return radius_popup >= 0.0f ? radius_popup : corner_radius;
+    }
+    [[nodiscard]] constexpr float pill_radius() const {
+        return radius_pill >= 0.0f ? radius_pill : corner_radius;
+    }
+
     // A copy with every px METRIC multiplied - the touch-density move.
     // The shell reports the platform's ui scale (App::ui_scale(): display
     // density / 160 on Android, content scale on desktop); an app that
     // scales its theme, its font bake and its panel rects by the same
     // factor gets a gui that is finger-sized on a phone and unchanged on
     // a 100%-scaling desktop (1.0 is the identity). Faces and the font
-    // pointer carry as-is - the caller loads the bigger font - and so do
-    // the timing metrics and disabled_alpha (their fields say why).
+    // pointers carry as-is - the caller loads the bigger font - and so do
+    // the timing metrics, the motion switch, disabled_alpha and the
+    // radius sentinels (their fields say why).
     constexpr ChromeTheme scaled(float scale) const {
         ChromeTheme t = *this;
         t.control_height = control_height * scale;
         t.corner_radius = corner_radius * scale;
+        t.radius_control =
+            radius_control < 0.0f ? -1.0f : radius_control * scale;
+        t.radius_panel = radius_panel < 0.0f ? -1.0f : radius_panel * scale;
+        t.radius_popup = radius_popup < 0.0f ? -1.0f : radius_popup * scale;
+        t.radius_pill = radius_pill < 0.0f ? -1.0f : radius_pill * scale;
         t.padding = padding * scale;
         t.spacing = spacing * scale;
         t.scroll_speed = scroll_speed * scale;
@@ -128,6 +226,10 @@ struct ChromeTheme {
         t.scrollbar_thumb_width = scrollbar_thumb_width * scale;
         t.scrollbar_band_width = scrollbar_band_width * scale;
         t.scrollbar_min_thumb = scrollbar_min_thumb * scale;
+        t.border_width = border_width * scale;
+        t.focus_ring_width = focus_ring_width * scale;
+        t.shadow_blur = shadow_blur * scale;
+        t.shadow_offset_y = shadow_offset_y * scale;
         return t;
     }
 };
@@ -152,10 +254,15 @@ inline constexpr ChromeTheme kLightChrome{
     .control_pressed = r2d::rgba(62, 109, 178),
     .control_disabled = r2d::rgba(228, 229, 233),
     .control_on = r2d::rgba(38, 122, 203),
+    .text_on_accent = r2d::rgba(255, 255, 255),
+    .accent_hover = r2d::rgba(70, 150, 224),
     .text = r2d::rgba(28, 31, 38),
+    .text_secondary = r2d::rgba(94, 98, 108),
     .border = r2d::rgba(0, 0, 0, 40),
+    .border_strong = r2d::rgba(0, 0, 0, 70),
     .bar_bg = r2d::rgba(232, 233, 238),
     .veil = r2d::rgba(96, 96, 96, 110),
+    .shadow = r2d::rgba(50, 50, 55, 70),
 };
 
 // Multiplies a packed 0xRRGGBBAA color's alpha channel - the alpha is

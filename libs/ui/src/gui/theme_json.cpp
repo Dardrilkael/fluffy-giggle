@@ -29,13 +29,18 @@ constexpr FaceEntry kFaceEntries[] = {
     {"control_pressed", &ChromeTheme::control_pressed},
     {"control_disabled", &ChromeTheme::control_disabled},
     {"control_on", &ChromeTheme::control_on},
+    {"text_on_accent", &ChromeTheme::text_on_accent},
+    {"accent_hover", &ChromeTheme::accent_hover},
     {"text", &ChromeTheme::text},
+    {"text_secondary", &ChromeTheme::text_secondary},
     {"border", &ChromeTheme::border},
+    {"border_strong", &ChromeTheme::border_strong},
     {"bar_bg", &ChromeTheme::bar_bg},
     {"veil", &ChromeTheme::veil},
     {"toast_info", &ChromeTheme::toast_info},
     {"toast_warning", &ChromeTheme::toast_warning},
     {"toast_error", &ChromeTheme::toast_error},
+    {"shadow", &ChromeTheme::shadow},
 };
 
 struct MetricEntry {
@@ -45,6 +50,10 @@ struct MetricEntry {
 constexpr MetricEntry kMetricEntries[] = {
     {"control_height", &ChromeTheme::control_height},
     {"corner_radius", &ChromeTheme::corner_radius},
+    {"radius_control", &ChromeTheme::radius_control},
+    {"radius_panel", &ChromeTheme::radius_panel},
+    {"radius_popup", &ChromeTheme::radius_popup},
+    {"radius_pill", &ChromeTheme::radius_pill},
     {"padding", &ChromeTheme::padding},
     {"spacing", &ChromeTheme::spacing},
     {"scroll_speed", &ChromeTheme::scroll_speed},
@@ -60,6 +69,21 @@ constexpr MetricEntry kMetricEntries[] = {
     {"scrollbar_band_width", &ChromeTheme::scrollbar_band_width},
     {"scrollbar_min_thumb", &ChromeTheme::scrollbar_min_thumb},
     {"disabled_alpha", &ChromeTheme::disabled_alpha},
+    {"border_width", &ChromeTheme::border_width},
+    {"focus_ring_width", &ChromeTheme::focus_ring_width},
+    {"shadow_blur", &ChromeTheme::shadow_blur},
+    {"shadow_offset_y", &ChromeTheme::shadow_offset_y},
+    {"anim_duration", &ChromeTheme::anim_duration},
+};
+
+// The boolean members (motion's master switch): JSON true/false, not
+// a number - a hand edit writing 1 is refused like any wrong type.
+struct FlagEntry {
+    const char* name;
+    bool ChromeTheme::*member;
+};
+constexpr FlagEntry kFlagEntries[] = {
+    {"anim_enabled", &ChromeTheme::anim_enabled},
 };
 
 struct FontEntry {
@@ -233,6 +257,15 @@ namespace {
                                       std::string{"chrome."} + entry.name));
             out.chrome.*entry.member = static_cast<float>(number);
         }
+        for (const FlagEntry& entry : kFlagEntries) {
+            const json::Value* value = chrome_obj->find(entry.name);
+            if (value == nullptr) {
+                continue;
+            }
+            WS_TRY_ASSIGN(bool flag,
+                          value->get_bool());  // wrong types refused there
+            out.chrome.*entry.member = flag;
+        }
     }
 
     if (const json::Value* fonts = obj->find("fonts")) {
@@ -331,6 +364,10 @@ namespace {
     for (const MetricEntry& entry : kMetricEntries) {
         out.set(entry.name,
                 json::Value::real(static_cast<double>(chrome.*entry.member)));
+    }
+    for (const FlagEntry& entry : kFlagEntries) {
+        out.set(entry.name,
+                json::Value::boolean(chrome.*entry.member));
     }
     return json::Value::object(std::move(out));
 }

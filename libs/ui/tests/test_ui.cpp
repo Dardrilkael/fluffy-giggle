@@ -4215,7 +4215,7 @@ TEST_CASE("button: hover alone claims hot but never clicks") {
 
 TEST_CASE("button: the theme drives the widget's metrics") {
     using namespace ws::ui::gui;
-    CHECK(kDefaultChrome.control_height == 26.0f);  // the layout-affecting default
+    CHECK(kDefaultChrome.control_height == 28.0f);  // the layout-affecting default (P2's deliberate 26 -> 28 bump)
 
     // A tall variant: with 40 px controls the second button's rect sits
     // at y = 40 - a click there must land on it, not on the first.
@@ -4624,7 +4624,7 @@ TEST_CASE("button and slider: a negative width fills the rest of the line") {
     (void)slider_float(gui, layout, theme, "gain", gain, 0.0f, 1.0f, -1.0f);
     const Rect probe = layout.next(10.0f, 10.0f);
     CHECK(probe.y ==
-          doctest::Approx(46.0f + theme.control_height + theme.spacing));
+          doctest::Approx(48.0f + theme.control_height + theme.spacing));
     end_panel(gui, layout);
     gui.end_frame();
 
@@ -4871,13 +4871,13 @@ TEST_CASE("tab_bar: a click moves the selection; the strip is one line") {
     CHECK(active == 1);
 
     // The strip occupied ONE line: the widget placed after it starts
-    // below the 24-tall tabs, not 72 down.
+    // below the control-height tabs, not 72 down.
     gui.begin_frame(snap(400.0f, 400.0f));
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     (void)tab_bar(gui, layout, kDefaultChrome, "views", kTabs, 3, active,
                   60.0f);
     const Rect after = layout.next(100.0f, 10.0f);
-    CHECK(after.y == 26.0f);
+    CHECK(after.y == 28.0f);
     layout.end_panel();
     gui.end_frame();
 
@@ -4987,10 +4987,10 @@ TEST_CASE("scroll: the wheel moves the flow - clamps at both ends and persists")
     // gaps) = 312 px of content; the scroll range is 312 - 76 = 236.
     // Two click snapshots recur through the frames: a full click at the
     // unscrolled row 0's center, and one at row 3's visible center at
-    // offset 32 (the row pokes past the viewport; the click lands
-    // mid-visible, clear of the clip's edges).
+    // offset 64 (two wheel units; the row pokes past the viewport; the
+    // click lands mid-visible, clear of the clip's edges).
     const ws::input::InputFrame click_origin = snap(60.0f, 24.0f, false, true, true);
-    const ws::input::InputFrame click_row3 = snap(60.0f, 82.0f, false, true, true);
+    const ws::input::InputFrame click_row3 = snap(60.0f, 70.0f, false, true, true);
 
     // Frame 1: a wheel-down unit aims to scroll, but a fresh panel has no
     // measured range yet - the immediate-mode first frame cannot scroll.
@@ -5015,12 +5015,12 @@ TEST_CASE("scroll: the wheel moves the flow - clamps at both ends and persists")
         CHECK(clicked == 0);
     }
 
-    // Frame 3: a wheel-down unit now moves the flow up 32 px
-    // (kDefaultChrome.scroll_speed) - and row 3, laid out at y 76..100
-    // (content 108..132 minus the scroll, visible 76..88), takes the same
+    // Frame 3: two wheel-down units now move the flow up 64 px
+    // (2 x kDefaultChrome.scroll_speed) - and row 3, laid out at y 56..84
+    // (content 120..148 minus the scroll, visible 56..84), takes the same
     // frame's click at its visible center.
     f = click_row3;
-    f.scroll_dy = -1.0f;
+    f.scroll_dy = -2.0f;
     {
         const auto [view, clicked] = pass(f, 10);
         CHECK(view.y == 12.0f);  // the viewport never shifts with the scroll
@@ -5218,16 +5218,17 @@ TEST_CASE("scroll: two regions keep independent offsets") {
     CHECK(b == -1);
 
     // Frame 2: the pointer sits inside the LEFT viewport only; its wheel
-    // scrolls the left panel 32 px and must not touch the right one.
+    // (two units, 64 px) scrolls the left panel and must not touch the
+    // right one.
     ws::input::InputFrame f = snap(60.0f, 50.0f);
-    f.scroll_dy = -1.0f;
+    f.scroll_dy = -2.0f;
     pass(f, a, b);
     CHECK(a == -1);
     CHECK(b == -1);
 
-    // Frame 3: the left panel's row 3 (y 76..100 at offset 32, visible
-    // 76..88) takes the click at its visible center - the right panel
-    // would put row 3 at y 108..132.
+    // Frame 3: the left panel's row 3 (y 56..84 at offset 64, visible
+    // 56..84) takes the click at its visible center - the right panel
+    // would put row 3 at y 120..148.
     pass(snap(60.0f, 82.0f, false, true, true), a, b);
     CHECK(a == 3);
     CHECK(b == -1);
@@ -5268,7 +5269,7 @@ TEST_CASE("scroll: nests inside a panel and measures its own flow") {
         // The outer cursor resumes below the header plus one spacing,
         // parked while the scroll region flowed its own rows.
         const Rect after = layout.next(50.0f, 10.0f);
-        CHECK(after.y == 46.0f);  // the header's bottom (38) + spacing (8)
+        CHECK(after.y == 48.0f);  // the header's bottom (40) + spacing (8)
         end_panel(gui, layout);
         gui.end_frame();
     };
@@ -5296,11 +5297,11 @@ TEST_CASE("scroll: nests inside a panel and measures its own flow") {
     pass(snap(60.0f, 76.0f), clicked);
     CHECK(clicked == -1);
 
-    // A wheel unit scrolls the inner region 32 - row 3, laid out at y
-    // 88..112 (visible 88..100), takes the click at its visible center;
+    // Two wheel units scroll the inner region 64 - row 3, laid out at y
+    // 68..96 (visible 68..96), takes the click at its visible center;
     // the header, laid out by the OUTER panel, never moved.
     ws::input::InputFrame f = snap(60.0f, 94.0f, false, true, true);
-    f.scroll_dy = -1.0f;
+    f.scroll_dy = -2.0f;
     pass(f, clicked);
     CHECK(clicked == 3);
 }
@@ -5367,14 +5368,13 @@ TEST_CASE("scroll: the wheel settles one frame, then the innermost panel "
     CHECK(inner == 0);
     CHECK(outer == -1);
 
-    // The second notch over the inner viewport scrolls - the INNERMOST
-    // panel won the settle (both claim the pointer; the smaller bounds
-    // take it), so the inner moves 32 and the outer moves nothing:
-    // the nested double-scroll defect. Inner row 3 (content y 120..144)
-    // lands at 88..112 (visible 88..100); the outer's row 0 never left
-    // y 12..36.
+    // The second scroll over the inner viewport (two units this time) -
+    // the INNERMOST panel won the settle (both claim the pointer; the
+    // smaller bounds take it), so the inner moves 64 and the outer moves
+    // nothing: the nested double-scroll defect. Inner row 3 (content y
+    // 132..160) lands at 68..96; the outer's row 0 never left y 12..40.
     f = snap(130.0f, 60.0f);
-    f.scroll_dy = -1.0f;
+    f.scroll_dy = -2.0f;
     pass(f, outer, inner);
     f = snap(142.0f, 94.0f, false, true, true);
     pass(f, outer, inner);
@@ -5549,8 +5549,8 @@ TEST_CASE("scroll: a nested touch drag takes only the innermost panel") {
         gui.end_frame();
     };
 
-    // Press on the inner's row 2 (content y 88..112; its visible center
-    // is 94 - the clip cuts the row at the viewport's bottom edge) - the
+    // Press on the inner's row 2 (content y 96..124; its visible center
+    // is 98 - the clip cuts the row at the viewport's bottom edge) - the
     // row claims the tap in progress; both panels' begins watch it,
     // and the arm claim hands the drag to the inner (its begin runs
     // after the outer's, later wins).
@@ -5562,7 +5562,7 @@ TEST_CASE("scroll: a nested touch drag takes only the innermost panel") {
         return ids.id("row");
     };
     int outer = -2, inner = -2;
-    pass(touch_frame({{4, 130.0f, 94.0f, true, false}}), outer, inner);
+    pass(touch_frame({{4, 130.0f, 98.0f, true, false}}), outer, inner);
     CHECK(inner == -1);
     CHECK(gui.active_id(ws::input::PointerId{4}) == inner_row_id(2));  // the tap in
                                                            // progress
@@ -5570,7 +5570,7 @@ TEST_CASE("scroll: a nested touch drag takes only the innermost panel") {
     // Up 14 px: past the 8-px threshold. The inner crossed and owns the
     // finger - its row's press is cancelled, no click on the lift -
     // and the drag starts at the crossing.
-    pass(touch_frame({{4, 130.0f, 80.0f}}), outer, inner);
+    pass(touch_frame({{4, 130.0f, 84.0f}}), outer, inner);
     CHECK(inner == -1);
     CHECK(gui.active_id(ws::input::PointerId{4}) ==
           kInvalidWidgetId);  // the crossing cancelled the row's press
@@ -5579,11 +5579,11 @@ TEST_CASE("scroll: a nested touch drag takes only the innermost panel") {
     // content); the cancelled row clicks nothing on the lift, and the
     // outer's watched track dropped silently - the outer's rows never
     // moved.
-    pass(touch_frame({{4, 130.0f, 70.0f, false, true}}), outer, inner);
+    pass(touch_frame({{4, 130.0f, 74.0f, false, true}}), outer, inner);
     CHECK(inner == -1);  // cancelled at the crossing: the lift clicks nothing
 
     // The outer's row 0 is exactly where it started, and the inner's
-    // row 0 (content y 24..48, now at 14..38 after the 10-px scroll)
+    // row 0 (content y 24..52, now at 14..42 after the 10-px scroll)
     // takes a click at its scrolled center. A click answers one panel:
     // the outer's spot is x 50 (its rows span 12..92), the inner's x
     // 130 (rows 112..172).
@@ -5732,16 +5732,16 @@ TEST_CASE("scroll: Tab lands the focus in view") {
     pass(snap(60.0f, 76.0f, false, true, true), clicked);
     CHECK(clicked == 9);
 
-    // Shift+Tab walks BACK to row 8 - at offset 164 it sits at
-    // 40..64, already fully in view, and the shift is a no-op: the
-    // same click spot finds row 8 again, not a scrolled-away row.
+    // Shift+Tab walks BACK to row 8 - at the row-9 pull's offset it sits
+    // at 24..52, already fully in view, and the shift is a no-op: the
+    // click inside the row finds it again, not a scrolled-away row.
     ws::input::InputFrame back = snap(400.0f, 400.0f);
     back.key_pressed[ws::input::keys::kTab] = true;
     back.key_down[static_cast<std::size_t>(ws::input::keys::kLeftShift)] = true;
     pass(back, clicked);
     CHECK(gui.is_focused(row_id(8)));
     pass(snap(400.0f, 400.0f), clicked);
-    pass(snap(60.0f, 52.0f, false, true, true), clicked);
+    pass(snap(60.0f, 48.0f, false, true, true), clicked);
     CHECK(clicked == 8);
 }
 
@@ -5811,28 +5811,28 @@ TEST_CASE("scroll: a touch drag scrolls 1:1 and cancels the press it started on"
         return ids.id("row");
     };
 
-    // Frame 1: finger 7 presses row 2 (y 76..100, at its visible center
-    // 82). The child claims the press - the tap is the CHILD's so far,
+    // Frame 1: finger 7 presses row 2 (y 84..112, at its visible center
+    // 86). The child claims the press - the tap is the CHILD's so far,
     // the panel only watches.
-    CHECK(pass(touch_frame({{7, 60.0f, 82.0f, /*pressed=*/true}})) == -1);
+    CHECK(pass(touch_frame({{7, 60.0f, 86.0f, /*pressed=*/true}})) == -1);
     CHECK(gui.active_id(ws::input::PointerId{7}) == row_id(2));
 
     // Frame 2: 20 px up - past the 8 px threshold. The crossing frame
     // cancels the child's press (finger 7 will never click now) and
     // applies NO jump: the offset is still 0, so the probe tap at
     // (60, 24) still lands on row 0.
-    CHECK(pass(touch_frame({{7, 60.0f, 62.0f},
+    CHECK(pass(touch_frame({{7, 60.0f, 66.0f},
                             {99, 60.0f, 24.0f, true, true}})) == 0);
     CHECK(gui.active_id(ws::input::PointerId{7}) == kInvalidWidgetId);  // the scroll owns the finger
 
     // Frame 3: 30 px more of drag - the offset follows 1:1. At offset 30
-    // row 1 spans y 14..38, so the same probe point now clicks row 1.
-    CHECK(pass(touch_frame({{7, 60.0f, 32.0f},
+    // row 1 spans y 18..46, so the same probe point now clicks row 1.
+    CHECK(pass(touch_frame({{7, 60.0f, 36.0f},
                             {99, 60.0f, 24.0f, true, true}})) == 1);
 
-    // Frame 4: finger 7 lifts at (60, 32) - INSIDE row 1's scrolled rect
-    // (y 14..38). The cancelled press means its release clicks nothing.
-    CHECK(pass(touch_frame({{7, 60.0f, 32.0f, false, true}})) == -1);
+    // Frame 4: finger 7 lifts at (60, 36) - INSIDE row 1's scrolled rect
+    // (y 18..46). The cancelled press means its release clicks nothing.
+    CHECK(pass(touch_frame({{7, 60.0f, 36.0f, false, true}})) == -1);
 
     // Frame 5: the offset held after the lift; the same probe still hits
     // row 1 - the content stayed put.
@@ -5914,11 +5914,11 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
         return ids.id("row");
     };
 
-    // Frame 1: contact 7 presses row 2 (at its visible center, y 82) -
+    // Frame 1: contact 7 presses row 2 (at its visible center, y 86) -
     // the mouse mirrors the press, so BOTH tracks claim the row (the
     // documented duplicate).
     ws::input::InputFrame press;
-    press.touch_down(ws::input::PointerId{7}, 60.0f, 82.0f);
+    press.touch_down(ws::input::PointerId{7}, 60.0f, 86.0f);
     press.mouse_present = true;
     CHECK(pass(press) == -1);
     CHECK(gui.active_id() == row_id(2));  // the mouse's track pressed...
@@ -5927,8 +5927,8 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
     // Frame 2: 20 px up - the crossing. cancel_pointer(7) must take the
     // mouse's claim down with the touch's.
     ws::input::InputFrame cross;
-    cross.touch_down(ws::input::PointerId{7}, 60.0f, 82.0f);  // the entry; bridges again
-    cross.touch_move(ws::input::PointerId{7}, 60.0f, 62.0f);  // the bridge mirrors the position
+    cross.touch_down(ws::input::PointerId{7}, 60.0f, 86.0f);  // the entry; bridges again
+    cross.touch_move(ws::input::PointerId{7}, 60.0f, 66.0f);  // the bridge mirrors the position
     cross.touches[0].pressed = false;  // held, not pressed: clear the
     cross.mouse_pressed[0] = false;    // edges both sides of the bridge
     cross.mouse_present = true;
@@ -5941,7 +5941,7 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
     // The probe is a same-frame tap: its press edge STAYS (a click is
     // press-then-release; a bare release edge clicks nothing).
     ws::input::InputFrame back;
-    back.touch_down(ws::input::PointerId{7}, 60.0f, 82.0f);
+    back.touch_down(ws::input::PointerId{7}, 60.0f, 86.0f);
     back.touch_down(ws::input::PointerId{99}, 60.0f, 24.0f);  // the probe (not the bridge - 7 is)
     back.touch_up(ws::input::PointerId{99}, 60.0f, 24.0f, false);
     back.touches[0].pressed = false;
@@ -5950,11 +5950,11 @@ TEST_CASE("scroll: the bridged finger's drag cancels mouse and touch both") {
     CHECK(pass(back) == 0);
 
     // Frame 4: release exactly where it pressed - row 2 still spans
-    // y 76..100, so the lift is INSIDE the row. The cancelled press clicks
+    // y 84..112, so the lift is INSIDE the row. The cancelled press clicks
     // nothing; had the mouse's claim survived, this would click row 2.
     ws::input::InputFrame lift;
-    lift.touch_down(ws::input::PointerId{7}, 60.0f, 82.0f);  // the entry, back for its lift
-    lift.touch_up(ws::input::PointerId{7}, 60.0f, 82.0f, false);  // mirrors the mouse's release
+    lift.touch_down(ws::input::PointerId{7}, 60.0f, 86.0f);  // the entry, back for its lift
+    lift.touch_up(ws::input::PointerId{7}, 60.0f, 86.0f, false);  // mirrors the mouse's release
     lift.touches[0].pressed = false;  // down+up in one frame: the press
     lift.mouse_pressed[0] = false;    // edge is not this frame's fact
     lift.mouse_present = true;
@@ -5992,20 +5992,20 @@ TEST_CASE("scroll: two fingers drag one region, one lift confuses nothing") {
                             {2, 60.0f, 40.0f}})) == -1);
 
     // Frame 3: both drag 10 px more - BOTH deltas apply (offset 20): at
-    // offset 20 row 1 spans y 26..52 and the probe at (60, 26) clicks
+    // offset 20 row 1 spans y 28..56 and the probe at (60, 28) clicks
     // row 1 (its scrolled top edge). A single-track drag would sit at
     // offset 10 and click row 0.
     CHECK(pass(touch_frame({{1, 60.0f, 0.0f},
                             {2, 60.0f, 30.0f},
-                            {99, 60.0f, 26.0f, true, true}})) == 1);
+                            {99, 60.0f, 28.0f, true, true}})) == 1);
 
     // Frame 4: finger 1 lifts; finger 2 drags 10 more (offset 30) - the
     // survivor's bookkeeping is its own. At offset 30 row 1 spans
-    // y 16..42 and the probe at (60, 16) clicks row 1 (at offset 20 it
+    // y 18..46 and the probe at (60, 18) clicks row 1 (at offset 20 it
     // would still be row 0).
     CHECK(pass(touch_frame({{1, 60.0f, 0.0f, false, true},
                             {2, 60.0f, 20.0f},
-                            {99, 60.0f, 16.0f, true, true}})) == 1);
+                            {99, 60.0f, 18.0f, true, true}})) == 1);
 }
 
 TEST_CASE("scroll: drag_threshold is the theme's metric") {
@@ -6090,12 +6090,12 @@ TEST_CASE("hit clips: a scrolled-out row cannot claim what sits under the panel"
     CHECK(pass(snap(60.0f, 50.0f), under) == -1);
     CHECK(!under.pressed);
 
-    // A click at (60, 116), below the viewport at offset 0: row 3 spans
-    // y 114..140 there - fully hidden by the clip, so without the fix
+    // A click at (60, 124), below the viewport at offset 0: row 3 spans
+    // y 120..148 there - fully hidden by the clip, so without the fix
     // it wins the first-hit-test press and the under-panel widget sees
     // nothing. With it the row claims nothing and the widget below the
     // panel takes the click.
-    CHECK(pass(snap(60.0f, 116.0f, false, true, true), under) == -1);
+    CHECK(pass(snap(60.0f, 124.0f, false, true, true), under) == -1);
     CHECK(under.pressed);
     CHECK(under.clicked);
 
@@ -6106,14 +6106,14 @@ TEST_CASE("hit clips: a scrolled-out row cannot claim what sits under the panel"
     CHECK(pass(snap(60.0f, 50.0f), under) == -1);
     CHECK(!under.pressed);
 
-    // -3.125 wheel units = exactly 100 px of offset. Rows now flow
-    // from y -88: row 4 spans 48..74, row 5 straddles the bottom edge
-    // (82..88 visible), row 6 spans 116..142 - fully below again.
+    // -3.75 wheel units = exactly 120 px of offset. Rows now flow
+    // from y -108: row 4 spans 36..64, row 5 straddles the bottom edge
+    // (72..88 visible), row 6 spans 108..136 - fully below again.
     ws::input::InputFrame wheel = snap(60.0f, 50.0f);
-    wheel.scroll_dy = -100.0f / kDefaultChrome.scroll_speed;
+    wheel.scroll_dy = -120.0f / kDefaultChrome.scroll_speed;
     CHECK(pass(wheel, under) == -1);
 
-    // A tap on hidden row 6 (116..142) at y 122 - inside the under
+    // A tap on hidden row 6 (108..136) at y 122 - inside the under
     // widget's band - still belongs to the widget below the panel, not
     // to the row.
     CHECK(pass(snap(60.0f, 122.0f, false, true, true), under) == -1);
@@ -6121,7 +6121,7 @@ TEST_CASE("hit clips: a scrolled-out row cannot claim what sits under the panel"
     CHECK(under.clicked);
 
     // The visible rows still claim at their scrolled positions: row 4
-    // (48..74) takes a click at its center.
+    // (36..64) takes a click at its center.
     CHECK(pass(snap(60.0f, 61.0f, false, true, true), under) == 4);
 
     // Row 5 straddles the bottom edge: its visible part claims (y 85),
@@ -6587,7 +6587,7 @@ TEST_CASE("text: a static label sizes its row and never touches the focus") {
     text(layout, kDefaultChrome, "Saving", 50.0f);  // a fixed width pins the
     layout.same_line();                              // row whatever the label
     CHECK(layout.remaining_width() == 302.0f);  // 352 - 50
-    CHECK(layout.flow_extent() == 26.0f);  // one line, control_height tall
+    CHECK(layout.flow_extent() == 28.0f);  // one line, control_height tall
     layout.end_panel();
     gui.end_frame();
 
@@ -6623,7 +6623,7 @@ TEST_CASE("separator: a fill-width rule, 2 px of flow") {
     text(layout, kDefaultChrome, "above");
     text(layout, kDefaultChrome, "below");
     separator(layout, kDefaultChrome);    // a negative width fills the line
-    CHECK(layout.flow_extent() == 54.0f);  // 26 + 26 + the 2-px rule, flush
+    CHECK(layout.flow_extent() == 58.0f);  // 28 + 28 + the 2-px rule, flush
     layout.same_line();
     CHECK(layout.remaining_width() == 0.0f);  // it consumed the rest
     layout.end_panel();
@@ -6636,7 +6636,7 @@ TEST_CASE("separator: a fill-width rule, 2 px of flow") {
     spaced.same_line();
     CHECK(spaced.remaining_width() == 62.0f);  // 100 - 30 - the 8-px gap
     text(spaced, kDefaultChrome, "two");  // rides the rule's line, taller
-    CHECK(spaced.flow_extent() == 60.0f);  // 26 + 8 + the line's tallest, 26
+    CHECK(spaced.flow_extent() == 64.0f);  // 28 + 8 + the line's tallest, 28
     spaced.end_panel();
     gui.end_frame();
 }
@@ -6655,7 +6655,7 @@ TEST_CASE("progress: fractions clamp and the widths land like button's") {
     progress(layout, kDefaultChrome, 2.0f);
     progress(layout, kDefaultChrome,
              std::numeric_limits<float>::quiet_NaN());
-    CHECK(layout.flow_extent() == 104.0f);  // 4 x control_height, flush panel
+    CHECK(layout.flow_extent() == 112.0f);  // 4 x control_height, flush panel
     progress(layout, kDefaultChrome, 0.25f, 40.0f);  // a fixed width leaves
     layout.same_line();                              // the rest of the line
     CHECK(layout.remaining_width() == 60.0f);
@@ -6902,7 +6902,7 @@ TEST_CASE("collapsing_header: the flip, the child under it, the keyboard") {
     (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
     hdr = collapsing_header(gui, layout, kDefaultChrome, "opts", open);
     CHECK(!hdr);  // closed: the return is the state, not the change
-    CHECK(layout.flow_extent() == 26.0f);
+    CHECK(layout.flow_extent() == 28.0f);
     layout.same_line();
     CHECK(layout.remaining_width() == 0.0f);
     layout.end_panel();
@@ -7043,7 +7043,7 @@ TEST_CASE("selectable: the caller keeps the selection, the row reports clicks") 
     ra = selectable(gui, layout, kDefaultChrome, "alpha", chosen == 0, 60.0f);
     rb = selectable(gui, layout, kDefaultChrome, "beta", chosen == 1, 60.0f);
     rg = selectable(gui, layout, kDefaultChrome, "gamma", chosen == 2, 60.0f);
-    CHECK(layout.flow_extent() == 78.0f);  // three 26-px rows, no spacing
+    CHECK(layout.flow_extent() == 84.0f);  // three 28-px rows, no spacing
     if (ra) chosen = 0;
     if (rb) chosen = 1;
     if (rg) chosen = 2;
@@ -7154,7 +7154,7 @@ TEST_CASE("drag_float: grab, travel, clamp - and a plain click moves nothing") {
     moved = drag_float(gui, layout, kDefaultChrome, "gain", value,
                        0.0f, 1.0f, 0.01f);
     CHECK(moved == false);  // the grab never jumps the value
-    CHECK(layout.flow_extent() == 26.0f);
+    CHECK(layout.flow_extent() == 28.0f);
     layout.end_panel();
     gui.end_frame();
     CHECK(value == doctest::Approx(0.0f));
@@ -10471,24 +10471,24 @@ TEST_CASE("menu rows: a separator and a disabled row never fire; the "
     CHECK(open == 0);
     CHECK(ev.item == nullptr);
 
-    // The disabled row (row 3, centered (27,120)): the click lands
+    // The disabled row (row 3, centered (27,138)): the click lands
     // inside the window and dies there - nothing claims a dead row.
     ev = {};
-    pass(snap(27.0f, 120.0f, false, true, true));
+    pass(snap(27.0f, 138.0f, false, true, true));
     CHECK(open == 0);
     CHECK(ev.item == nullptr);
 
     // A rest on the disabled row past tooltip_delay hands the caller's
     // reason to the tooltip scope - chrome: it claims nothing, so the
     // menu holds through it.
-    hover(27.0f, 120.0f, 0.5f);
-    hover(27.0f, 120.0f, 0.5f);
+    hover(27.0f, 138.0f, 0.5f);
+    hover(27.0f, 138.0f, 0.5f);
     CHECK(open == 0);
 
     // And the menu is still live after all of it: "four" (row 4,
-    // centered (27,144)) fires.
+    // centered (27,166)) fires.
     ev = {};
-    pass(snap(27.0f, 144.0f, false, true, true));
+    pass(snap(27.0f, 166.0f, false, true, true));
     CHECK(open == -1);
     REQUIRE(ev.item != nullptr);
     CHECK(ev.item == &kWalkItems[4]);
@@ -11132,9 +11132,9 @@ TEST_CASE("statics: the spinner, the indeterminate bar and the status "
     // frame's bottom - and it takes no row in any flow.
     const Rect bar = status_bar(kDefaultChrome, "ready");
     CHECK(bar.x == 0.0f);
-    CHECK(bar.y == 574.0f);
+    CHECK(bar.y == 572.0f);
     CHECK(bar.width == 800.0f);
-    CHECK(bar.height == 26.0f);
+    CHECK(bar.height == 28.0f);
 
     r.end();
     r.frame_end();
@@ -12049,13 +12049,13 @@ TEST_CASE("the combo pair records the widget's output byte for byte") {
     theme.font = &font;  // the theme points; it never owns
 
     const ws::input::InputFrame quiet = snap(-100.0f, -100.0f);
-    // The row lays at (12,12,120,26) inside the padded panel; the tap on
-    // it opens the dropdown this same frame (bounds (12,38,120,118),
-    // item 0 at (24,50,96,26)), and the item tap at (60,50) picks it.
+    // The row lays at (12,12,120,28) inside the padded panel; the tap on
+    // it opens the dropdown this same frame (bounds (12,40,120,124),
+    // item 0 at (24,52,96,28)), and the item tap at (60,66) picks it.
     const ws::input::InputFrame tap_row =
         snap(60.0f, 12.0f, false, true, true);
     const ws::input::InputFrame tap_item =
-        snap(60.0f, 50.0f, false, true, true);
+        snap(60.0f, 66.0f, false, true, true);
 
     const auto record = [&](auto&& run, const ws::input::InputFrame& frame) {
         r.frame_begin(800.0f, 600.0f);
