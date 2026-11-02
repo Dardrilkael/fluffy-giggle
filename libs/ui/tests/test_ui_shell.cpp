@@ -292,6 +292,52 @@ TEST_CASE("the dock tree splits, resolves and drags its splitters") {
           doctest::Approx(100.0f * ws::ui::shell::kMinWeight));
 }
 
+TEST_CASE("dock placements carry a weight and can split the whole tree") {
+    // The circsim editor's default: palette 14% | canvas | properties,
+    // the problems strip full width under all of them.
+    DockTree tree;
+    DockPlacement left{DockPlacement::Area::left};
+    left.weight = 0.14f;
+    DockPlacement right{DockPlacement::Area::right};
+    right.weight = 0.28f;  // of the canvas leaf (86% of the window)
+    DockPlacement bottom{DockPlacement::Area::bottom};
+    bottom.weight = 0.26f;
+    bottom.at_root = true;
+
+    tree.add("canvas", {DockPlacement::Area::center});
+    tree.add("palette", left);
+    tree.add("properties", right);
+    tree.add("problems", bottom);
+    // Another bottom panel tabs into the last leaf (the strip).
+    tree.add("netlist", {DockPlacement::Area::center});
+    CHECK(tree.leaf_count() == 4);
+    CHECK(tree.leaf_of("netlist") == tree.leaf_of("problems"));
+
+    const DockTree::Layout laid = tree.resolve({0.0f, 0.0f, 1000.0f, 1000.0f});
+    REQUIRE(laid.leaves.size() == 4);
+    // resolve order: palette, canvas, properties, problems
+    CHECK(laid.leaves[0].rect.width == doctest::Approx(140.0f));
+    CHECK(laid.leaves[1].rect.width == doctest::Approx(619.2f).epsilon(0.01));
+    CHECK(laid.leaves[2].rect.width == doctest::Approx(240.8f).epsilon(0.01));
+    CHECK(laid.leaves[0].rect.height == doctest::Approx(740.0f).epsilon(0.01));
+    // The strip spans the whole width and takes ~26% of the height.
+    CHECK(laid.leaves[3].rect.x == doctest::Approx(0.0f));
+    CHECK(laid.leaves[3].rect.width == doctest::Approx(1000.0f));
+    CHECK(laid.leaves[3].rect.height == doctest::Approx(260.0f).epsilon(0.01));
+
+    // A weight of 0 is the old even split; at_root on an empty tree
+    // just fills it.
+    DockTree even;
+    even.add("a", {DockPlacement::Area::center});
+    even.add("b", {DockPlacement::Area::right});
+    CHECK(even.resolve({0.0f, 0.0f, 100.0f, 100.0f}).leaves[0].rect.width ==
+          doctest::Approx(50.0f));
+    DockTree empty;
+    empty.add("a", bottom);
+    CHECK(empty.leaf_count() == 1);
+    CHECK(empty.contains("a"));
+}
+
 TEST_CASE("the dock tree serializes, restores, and drops missing panels") {
     DockTree tree;
     tree.add("editor", {DockPlacement::Area::center});

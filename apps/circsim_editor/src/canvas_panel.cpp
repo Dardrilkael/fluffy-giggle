@@ -412,7 +412,7 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         const float travel = gui.animate_toward(
             gui.ids().internal_id("schematic grid"),
             tool_engaged ? 1.0f : 0.0f, ease);
-        const float brightness = 0.6f + 0.4f * travel;
+        const float brightness = 0.85f + 0.15f * travel;
 
         const Point floor{body.x, body.y};
         rc.fill_rects(&floor, 1, body.width, body.height, theme.canvas_bg);

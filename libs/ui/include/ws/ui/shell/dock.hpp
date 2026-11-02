@@ -51,6 +51,17 @@ struct DockPlacement {
     };
     Area area = Area::center;
     int leaf = -1;  // target leaf index (resolve order); -1 = the last
+    // The share of the split the NEW leaf takes, in (0,1) - clamped to
+    // [kMinWeight, 1 - kMinWeight]. 0 (the default) = an even split,
+    // the pre-weight behavior. The share is of the TARGET's own span:
+    // a leaf that is itself 86% of the window, split with weight 0.28,
+    // hands the new leaf ~24% of the window.
+    float weight = 0.0f;
+    // Side placements only: split the WHOLE tree (the new leaf spans
+    // the full width/height) instead of one leaf. How a bottom panel
+    // gets the window's full width under every column. Ignored for
+    // center, and on an empty tree (the panel just fills the root).
+    bool at_root = false;
 };
 
 // The lower bound every weight is clamped to - a splitter cannot be

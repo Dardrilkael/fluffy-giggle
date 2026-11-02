@@ -105,12 +105,22 @@ void DockTree::add(std::string_view panel, DockPlacement placement) {
         return;  // already docked: the caller activates instead
     }
     Node* target = leaf_at_index(*root_, placement.leaf);
-    if (target == nullptr || target->split) {
+    // A whole-tree split: only for a side placement on a tree that
+    // already holds something (an empty tree falls through to the
+    // fill below, like any side placement with nothing to side
+    // against).
+    const bool root_split =
+        placement.at_root && placement.area != DockPlacement::Area::center &&
+        (root_->split || !root_->tabs.empty());
+    if (root_split) {
+        target = root_.get();
+    }
+    if (target == nullptr || (target->split && !root_split)) {
         return;
     }
     const std::string id{panel};
-    if (placement.area == DockPlacement::Area::center ||
-        target->tabs.empty()) {
+    if (!root_split && (placement.area == DockPlacement::Area::center ||
+                        target->tabs.empty())) {
         // CENTER fills the target leaf - and so does a side placement
         // with nothing to side against. Splitting an empty leaf moves
         // its (empty) payload into a sibling that resolve() paints as
@@ -138,16 +148,22 @@ void DockTree::add(std::string_view panel, DockPlacement placement) {
                     : DockDir::vertical;
     const bool before = placement.area == DockPlacement::Area::left ||
                         placement.area == DockPlacement::Area::top;
+    split.tabs.clear();
+    split.active = 0;
     split.children.clear();
     split.weights.clear();
+    // The new leaf's share of the pair; 0 (unset) = the even split.
+    float share = placement.weight > 0.0f ? placement.weight : 0.5f;
+    share = std::clamp(share, kMinWeight, 1.0f - kMinWeight);
     if (before) {
         split.children.push_back(std::move(fresh));
         split.children.push_back(std::move(moved));
+        split.weights = {share, 1.0f - share};
     } else {
         split.children.push_back(std::move(moved));
         split.children.push_back(std::move(fresh));
+        split.weights = {1.0f - share, share};
     }
-    split.weights.assign(split.children.size(), 1.0f);
 }
 
 void DockTree::remove(std::string_view panel) {

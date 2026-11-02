@@ -41,6 +41,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -302,6 +303,10 @@ struct Editor {
     int ghost_rot = 0;
     bool ghost_mirror = false;
     char label_text[64] = "net";
+    // The Palette panel's view state: the search box, and the groups
+    // the user collapsed (open is the default, so a new group shows).
+    char palette_filter[48] = "";
+    std::set<std::string> palette_closed;
     Selection sel;
 
     // The move-drag (press to release). `live` writes the position

@@ -63,3 +63,17 @@ if(TARGET test_circsim_editor_canvas)
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${PROJECT_SOURCE_DIR}/libs/ui/src")
 endif()
+
+# The Palette's grouping + search: pure data over ws::circsim (no gui),
+# so the suite links the library and nothing else - the symbol table
+# the panel groups, the .csym "category" field, the case-insensitive
+# filter.
+ws_add_test(circsim_editor_palette
+  SOURCES tests/test_palette_groups.cpp
+          src/palette_groups.cpp
+  LINK ws::circsim
+  DEPENDS ws::settings)
+if(TARGET test_circsim_editor_palette)
+  target_include_directories(test_circsim_editor_palette PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()

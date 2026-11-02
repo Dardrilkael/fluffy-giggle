@@ -168,9 +168,9 @@ TEST_CASE("every new token round-trips through the theme json") {
     styled.chrome.anim_duration = 0.2f;
     styled.chrome.anim_enabled = false;
     styled.chrome.canvas_bg = 0x1C1E24FFu;
-    styled.chrome.grid_minor = 0xFFFFFF13u;
-    styled.chrome.grid_major = 0xFFFFFF2Eu;
-    styled.chrome.grid_axis = 0x5490D04Cu;
+    styled.chrome.grid_minor = 0xFFFFFF2Cu;
+    styled.chrome.grid_major = 0xFFFFFF60u;
+    styled.chrome.grid_axis = 0x5490D038u;
 
     const std::string text = write_theme(styled);
 
@@ -189,9 +189,9 @@ TEST_CASE("every new token round-trips through the theme json") {
     CHECK(text.find("\"anim_duration\": 0.2") != std::string::npos);
     CHECK(text.find("\"anim_enabled\": false") != std::string::npos);
     CHECK(text.find("\"canvas_bg\": \"#1C1E24FF\"") != std::string::npos);
-    CHECK(text.find("\"grid_minor\": \"#FFFFFF13\"") != std::string::npos);
-    CHECK(text.find("\"grid_major\": \"#FFFFFF2E\"") != std::string::npos);
-    CHECK(text.find("\"grid_axis\": \"#5490D04C\"") != std::string::npos);
+    CHECK(text.find("\"grid_minor\": \"#FFFFFF2C\"") != std::string::npos);
+    CHECK(text.find("\"grid_major\": \"#FFFFFF60\"") != std::string::npos);
+    CHECK(text.find("\"grid_axis\": \"#5490D038\"") != std::string::npos);
 
     // Reading over the OTHER stock recovers every token - and the
     // write(read(.)) pair is byte-stable.
@@ -271,14 +271,15 @@ TEST_CASE("the canvas grid tokens answer the brief on both stocks") {
         CHECK(chrome->canvas_bg != chrome->panel_bg);  // its own step
         const int minor = chrome->grid_minor & 0xFFu;
         const int major = chrome->grid_major & 0xFFu;
-        CHECK(minor >= 15);   // ~6%
-        CHECK(minor <= 21);   // ~8%
-        CHECK(major >= 41);   // ~16%
-        CHECK(major <= 51);   // ~20%
+        CHECK(minor >= 40);   // ~16%
+        CHECK(minor <= 44);   // ~17%
+        CHECK(major >= 92);   // ~36%
+        CHECK(major <= 96);   // ~38%
         CHECK(major > minor * 2);  // structure carries, texture fades
         const int axis = chrome->grid_axis & 0xFFu;
-        CHECK(axis > major);   // the origin reads above the lattice
-        CHECK(axis < 128);     // ...without shouting
+        CHECK(axis < major);   // axis is a subtle reading, major carries structure
+        CHECK(axis >= 56);     // ~22% - visible but not loud
+        CHECK(axis <= 60);     // ~24%
     }
 }
 

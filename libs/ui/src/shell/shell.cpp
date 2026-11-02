@@ -482,6 +482,26 @@ void AppShell::rebuild_default_layout() {
     // Keep the open set, rebuild the tree: every open instance lands
     // at its descriptor's default placement, in open order.
     std::vector<std::string> ids = panel_host_.dock().panels();
+    // Registration order, not the old tree's walk: the default
+    // placements are written against it (the first panel fills the
+    // empty root; later ones split or tab against what is there), so
+    // a layout the user dragged around must not change what the reset
+    // builds.
+    const std::vector<PanelDesc>& order = panel_registry_.descriptors();
+    const auto rank = [&](const std::string& id) {
+        const PanelInstance* instance = panel_host_.find(id);
+        for (std::size_t i = 0; instance != nullptr && i < order.size();
+             ++i) {
+            if (order[i].id == instance->type) {
+                return i;
+            }
+        }
+        return order.size();
+    };
+    std::stable_sort(ids.begin(), ids.end(),
+                     [&](const std::string& a, const std::string& b) {
+                         return rank(a) < rank(b);
+                     });
     panel_host_.dock().clear();
     for (const std::string& id : ids) {
         const PanelInstance* instance = panel_host_.find(id);

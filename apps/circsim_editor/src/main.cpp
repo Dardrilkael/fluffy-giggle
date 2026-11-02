@@ -416,6 +416,7 @@ class CircsimApp final : public ws::ui::App {
         palette.id = "palette";
         palette.title = "Palette";
         palette.placement.area = shell::DockPlacement::Area::left;
+        palette.placement.weight = 0.14f;  // ~14% of the window
         palette.draw = [this](GuiContext& g, LayoutCursor& l,
                               const gui::ChromeTheme& t,
                               const shell::PanelInstance&) {
@@ -427,6 +428,9 @@ class CircsimApp final : public ws::ui::App {
         properties.id = "properties";
         properties.title = "Properties";
         properties.placement.area = shell::DockPlacement::Area::right;
+        // Of the canvas leaf (86% after the palette): ~24% overall,
+        // leaving the schematic ~62%.
+        properties.placement.weight = 0.28f;
         properties.draw = [this](GuiContext& g, LayoutCursor& l,
                                  const gui::ChromeTheme& t,
                                  const shell::PanelInstance&) {
@@ -438,6 +442,8 @@ class CircsimApp final : public ws::ui::App {
         problems.id = "problems";
         problems.title = "Problems";
         problems.placement.area = shell::DockPlacement::Area::bottom;
+        problems.placement.at_root = true;  // full width under all columns
+        problems.placement.weight = 0.26f;
         problems.draw = [this](GuiContext& g, LayoutCursor& l,
                                const gui::ChromeTheme& t,
                                const shell::PanelInstance&) {
@@ -448,7 +454,8 @@ class CircsimApp final : public ws::ui::App {
         shell::PanelDesc netlist;
         netlist.id = "netlist";
         netlist.title = "Netlist";
-        netlist.placement.area = shell::DockPlacement::Area::bottom;
+        netlist.placement.area = shell::DockPlacement::Area::center;  // tab
+        // with Problems (the last leaf: the bottom strip)
         netlist.draw = [this](GuiContext& g, LayoutCursor& l,
                               const gui::ChromeTheme& t,
                               const shell::PanelInstance&) {
@@ -459,7 +466,7 @@ class CircsimApp final : public ws::ui::App {
         shell::PanelDesc results;
         results.id = "results";
         results.title = "Results";
-        results.placement.area = shell::DockPlacement::Area::bottom;
+        results.placement.area = shell::DockPlacement::Area::center;  // tab
         results.draw = [this](GuiContext& g, LayoutCursor& l,
                              const gui::ChromeTheme& t,
                              const shell::PanelInstance&) {

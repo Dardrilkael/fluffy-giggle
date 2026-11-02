@@ -99,16 +99,18 @@ struct ChromeTheme {
     // consumed by ws::ui::canvas's grid system (grid.hpp). canvas_bg is
     // the viewport's step away from panel_bg (a dark gray on the dark
     // stock, never black); the grid faces ride their own alpha bands
-    // - minor ~6-8% so the fine lattice reads as texture, not lines,
-    // major ~16-20% so every fifth dot carries the structure, and the
-    // axis face is the accent at a modest alpha (a subtle x=0/y=0
-    // reading, not a loud crosshair). Decorative faces in border's
+    // - minor ~17% so the fine lattice reads as texture, not lines
+    // (the canvas panel eases the whole lattice from 85% to 100% while
+    // a tool is engaged; at the old 7% the 1-2px dots were lost on
+    // real displays), major ~38% so every fifth dot carries the
+    // structure, and the axis face is the accent at a modest alpha (a
+    // subtle x=0/y=0 reading, not a loud crosshair). Decorative faces in border's
     // class - no WCAG pair is checked; the alphas are the brief's own
     // contrast answer on the canvas background.
     std::uint32_t canvas_bg = r2d::rgba(28, 30, 36);
-    std::uint32_t grid_minor = r2d::rgba(255, 255, 255, 18);   // 7%
-    std::uint32_t grid_major = r2d::rgba(255, 255, 255, 46);  // 18%
-    std::uint32_t grid_axis = r2d::rgba(84, 144, 212, 76);    // 30%
+    std::uint32_t grid_minor = r2d::rgba(255, 255, 255, 44);   // 17%
+    std::uint32_t grid_major = r2d::rgba(255, 255, 255, 96);  // 38%
+    std::uint32_t grid_axis = r2d::rgba(84, 144, 212, 56);    // 22%
 
     // Metrics, gui-space pixels.
     float control_height = 28.0f;  // the one deliberate stock bump of
@@ -314,9 +316,9 @@ inline constexpr ChromeTheme kLightChrome{
     .veil = r2d::rgba(96, 96, 96, 110),
     .shadow = r2d::rgba(50, 50, 55, 70),
     .canvas_bg = r2d::rgba(238, 239, 243),
-    .grid_minor = r2d::rgba(0, 0, 0, 20),   // 8%
-    .grid_major = r2d::rgba(0, 0, 0, 51),  // 20%
-    .grid_axis = r2d::rgba(38, 122, 203, 80),
+    .grid_minor = r2d::rgba(0, 0, 0, 40),   // 16%
+    .grid_major = r2d::rgba(0, 0, 0, 92),  // 36%
+    .grid_axis = r2d::rgba(38, 122, 203, 60),
 };
 
 // Multiplies a packed 0xRRGGBBAA color's alpha channel - the alpha is

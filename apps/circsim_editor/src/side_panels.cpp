@@ -14,12 +14,17 @@
 
 #include "side_panels.hpp"
 
+#include "palette_groups.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <string_view>
 #include <vector>
 
+#include <ws/input/input.hpp>
 #include <ws/spice/parse.hpp>
 #include <ws/ui/renderer2d.hpp>
 
@@ -287,6 +292,83 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
 
 // --- the palette --------------------------------------------------------------
 
+namespace {
+
+// The Palette's tile grid: a tile is ~52 px wide (the columns stretch
+// to fill the panel), 44 px tall - the symbol's picture fitted inside,
+// the name in a tooltip.
+constexpr float kTileTargetW = 52.0f;
+constexpr float kTileH = 44.0f;
+constexpr float kTilePad = 6.0f;
+
+// One symbol tile; true on a click (or Enter/Space while focused). The
+// caller owns the id scope: the tile's id and its tooltip's are both
+// "tile" under the scope it pushed.
+[[nodiscard]] bool symbol_tile(Editor& ed, gui::GuiContext& gui,
+                               gui::LayoutCursor& layout,
+                               const gui::ChromeTheme& theme,
+                               const ws::circsim::SymbolDef& sym,
+                               float width, bool armed) {
+    const gui::Rect r = layout.next(width, kTileH);
+    const auto id = gui.ids().id("tile");
+    const gui::SelectableResult res = gui::selectable_behavior(gui, id, r);
+
+    canvas::Canvas2D& rc = ed.renderer;
+    rc.set_view_scale(1.0f);  // the transform below carries the scale
+    std::uint32_t face = theme.control_bg;
+    if (res.hit.pressed) {
+        face = theme.control_pressed;
+    } else if (res.hit.hovered) {
+        face = theme.control_hovered;
+    }
+    rc.fill_rounded_rect(r.x, r.y, r.width, r.height, theme.corner_radius,
+                         face);
+    if (armed) {
+        // The armed tile: an accent wash and outline (a selectable's
+        // accent bar, grown to fit a tile).
+        rc.fill_rounded_rect(r.x, r.y, r.width, r.height,
+                             theme.corner_radius,
+                             gui::dim(theme.control_on, 0.28f));
+        canvas::Paint outline;
+        outline.width = 1.5f;
+        outline.color = theme.control_on;
+        rc.stroke_rounded_rect(r.x + 0.75f, r.y + 0.75f, r.width - 1.5f,
+                               r.height - 1.5f, theme.corner_radius, outline);
+    } else if (res.focused) {
+        canvas::Paint ring;
+        ring.width = 1.0f;
+        ring.color = gui::dim(theme.control_on, 0.7f);
+        rc.stroke_rounded_rect(r.x + 0.5f, r.y + 0.5f, r.width - 1.0f,
+                               r.height - 1.0f, theme.corner_radius, ring);
+    }
+
+    // The picture: fitted to the tile and centered on the symbol's own
+    // bounds (pins included), so an asymmetric symbol sits in the middle
+    // instead of hanging off its origin. No font - a tile has no text.
+    const Bounds b = ws::circsim::symbol_bounds(sym);
+    const double bw = std::max(1.0, b.max_x - b.min_x);
+    const double bh = std::max(1.0, b.max_y - b.min_y);
+    const double fit = std::min(
+        18.0, std::min(static_cast<double>(r.width - 2.0f * kTilePad) / bw,
+                       static_cast<double>(r.height - 2.0f * kTilePad) / bh));
+    canvas::Paint paint;
+    paint.width = 1.5f;
+    paint.color = armed ? theme.control_on : gui::dim(theme.text, 0.85f);
+    rc.push_transform();
+    rc.translate(r.x + r.width * 0.5f, r.y + r.height * 0.5f);
+    rc.scale(static_cast<float>(fit), -static_cast<float>(fit));
+    rc.translate(static_cast<float>(-(b.min_x + b.max_x) * 0.5),
+                 static_cast<float>(-(b.min_y + b.max_y) * 0.5));
+    draw_symbol(rc, sym, Pos{0.0, 0.0}, 0, false, paint, 0u, nullptr);
+    rc.pop_transform();
+
+    const std::string hint = sym.name + " (" + sym.key + ")";
+    gui::tooltip_text(gui, layout, theme, "tile", r, hint.c_str());
+    return res.clicked;
+}
+
+}  // namespace
+
 void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
                         gui::LayoutCursor& layout,
                         const gui::ChromeTheme& theme) {
@@ -310,51 +392,84 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
                               static_cast<int>(sizeof ed.label_text));
     }
     gui::separator(layout, theme);
-    gui::text(layout, theme, "symbols (click to place)");
 
-    int index = 0;
-    for (const ws::circsim::SymbolDef& sym : ed.library.symbols()) {
-        gui.ids().push(index++);
-        // The preview strip, then the row beside it.
-        const float preview_w = 46.0f;
-        const float preview_h = 30.0f;
-        const gui::Rect preview = layout.next(preview_w, preview_h);
-        const float row_w = std::max(60.0f, layout.remaining_width());
-        char label[160];
-        std::snprintf(label, sizeof label, "%s (%s)", sym.name.c_str(),
-                      sym.key.c_str());
-        const bool armed =
-            ed.tool == Tool::Place && ed.place_symbol == sym.key;
-        if (gui::selectable(gui, layout, theme, label, armed, row_w)) {
-            ed.tool = Tool::Place;
-            ed.place_symbol = sym.key;
-            ed.ghost_rot = 0;
-            ed.ghost_mirror = false;
+    // The search box. The label is its placeholder; Enter arms the
+    // first match, so "res" Enter drops straight into placing a resistor.
+    (void)text_input_tracked(ed, gui, layout, theme, "search symbols",
+                             ed.palette_filter,
+                             static_cast<int>(sizeof ed.palette_filter));
+    const bool filter_focused =
+        gui.is_focused(gui.ids().id("search symbols"));
+    const std::string_view filter{ed.palette_filter};
+    const bool filtering = !filter.empty();
+    const std::vector<PaletteGroup> groups =
+        palette_groups(ed.library, filter);
+
+    const auto arm = [&ed](const ws::circsim::SymbolDef& sym) {
+        ed.tool = Tool::Place;
+        ed.place_symbol = sym.key;
+        ed.ghost_rot = 0;
+        ed.ghost_mirror = false;
+    };
+    if (filter_focused && !groups.empty() &&
+        gui.input().key_pressed[ws::input::keys::kEnter] != 0) {
+        arm(*groups.front().items.front());
+    }
+
+    if (groups.empty()) {
+        gui::text(layout, theme, "no symbols match");
+    }
+
+    // The columns stretch the tiles to fill the panel's width.
+    const float gap = theme.spacing;
+    const float avail = std::max(kTileTargetW, layout.remaining_width());
+    const int cols = std::max(
+        1, static_cast<int>((avail + gap) / (kTileTargetW + gap)));
+    const float tile_w =
+        (avail - static_cast<float>(cols - 1) * gap) /
+        static_cast<float>(cols);
+
+    int tile_index = 0;
+    int group_index = 0;
+    for (const PaletteGroup& g : groups) {
+        gui.ids().push(group_index++);
+        // A search shows every match, open; browsing remembers what the
+        // user collapsed. "##name" keeps the header's id steady while
+        // the count in its label changes with the filter.
+        bool open = filtering || ed.palette_closed.count(g.name) == 0;
+        const bool was_open = open;
+        const std::string header = g.name + " (" +
+                                   std::to_string(g.items.size()) + ")##" +
+                                   g.name;
+        (void)gui::collapsing_header(gui, layout, theme, header.c_str(),
+                                     open);
+        if (!filtering && open != was_open) {
+            if (open) {
+                ed.palette_closed.erase(g.name);
+            } else {
+                ed.palette_closed.insert(g.name);
+            }
+        }
+        if (open) {
+            std::size_t n = 0;
+            for (const ws::circsim::SymbolDef* sym : g.items) {
+                if (n % static_cast<std::size_t>(cols) != 0) {
+                    layout.same_line();
+                }
+                ++n;
+                gui.ids().push(tile_index++);
+                const bool armed =
+                    ed.tool == Tool::Place && ed.place_symbol == sym->key;
+                if (symbol_tile(ed, gui, layout, theme, *sym, tile_w,
+                                armed)) {
+                    arm(*sym);
+                }
+                gui.ids().pop();
+            }
         }
         gui.ids().pop();
-
-        // The mini preview: the same world renderer, fitted and flipped
-        // into the strip (no font - a 30px preview has no text to show).
-        const Bounds b = ws::circsim::symbol_bounds(sym);
-        const double bw = std::max(1.0, b.max_x - b.min_x);
-        const double bh = std::max(1.0, b.max_y - b.min_y);
-        const double fit =
-            std::min(static_cast<double>(preview_w - 8) / bw,
-                     static_cast<double>(preview_h - 8) / bh);
-        canvas::Paint preview_paint;
-        preview_paint.width = 1.5f;
-        preview_paint.color =
-            armed ? theme.control_on : gui::dim(theme.text, 0.8f);
-        ed.renderer.push_transform();
-        ed.renderer.translate(preview.x + preview.width * 0.5f,
-                              preview.y + preview.height * 0.5f);
-        ed.renderer.scale(static_cast<float>(fit), -static_cast<float>(fit));
-        draw_symbol(ed.renderer, sym, Pos{0.0, 0.0}, 0, false, preview_paint,
-                    0u, nullptr);
-        ed.renderer.pop_transform();
     }
-    gui::text(layout, theme,
-              "R rotate - M mirror - Esc cancel");
+    gui::text(layout, theme, "R rotate - M mirror - Esc cancel");
 }
 
 // --- the properties -------------------------------------------------------------
