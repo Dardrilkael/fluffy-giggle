@@ -183,6 +183,26 @@ def main():
               {"key": "l", "type": "number", "label": "L", "default": ""},
               "nmos json param specs")
 
+        # The stage-17 headless render: every symbol through the render
+        # seam as SVG - one file per key plus the contact sheet. The
+        # structural contract only (existence, svg header, pin marks);
+        # the geometry lives in test_symbol_render's cases.
+        svg_dir = Path(tmp) / "svg"
+        r = run(args.cli, "symbols", "-S", tline_lib, "--svg", svg_dir)
+        check(r.returncode == 0, "symbols --svg exit 0")
+        for key in ("r", "v", "gnd", "vcc", "npn", "tline"):
+            f = svg_dir / f"{key}.svg"
+            check(f.is_file() and f.stat().st_size > 0,
+                  f"svg written: {key}.svg")
+        sheet = (svg_dir / "symbols.svg").read_text()
+        check(sheet.startswith("<?xml"), "svg sheet is xml")
+        check(all(f">{k} (" in sheet or f">{k.upper()} (" in sheet
+                  or k in sheet for k in ("Resistor", "Ground", "Supply")),
+              "svg sheet captions the symbols")
+        one = (svg_dir / "r.svg").read_text()
+        check(one.count("#b4443c") == 4,
+              "svg marks both pins (a and b dots + names)")
+
         # The quarter-wave demo: netlist golden, closed-form run, honest erc.
         r = run(args.cli, "netlist", tline, "-S", tline_lib)
         check(r.returncode == 0, "tline netlist exit 0")

@@ -6,12 +6,15 @@
 //                        [--format csv|json] [-I <dir>]... [-S <lib.csym>]...
 //   circsim_cli erc <file.csim> [-S <lib.csym>]...
 //   circsim_cli netlist <file.csim> [-o out|-] [-S <lib.csym>]...
-//   circsim_cli symbols [-S <lib.csym>]... [--json]
+//   circsim_cli symbols [-S <lib.csym>]... [--json] [--svg <dir>]
 //
 // -S layers .csym symbol libraries over the built-in table (later files
 // win; redefinitions report a warning). `symbols` lists the effective
 // table - every key, its SPICE letter and pin count; --json dumps the
-// full table (pins, emit, typed params, draw primitives).
+// full table (pins, emit, typed params, draw primitives); --svg
+// renders every symbol through ws::circsim's render seam (the
+// stage-17 headless render: one SVG per symbol plus a contact sheet,
+// the before/after comparison harness for the symbol redesign).
 //
 // Exit codes: 0 success; 1 simulation or ERC error; 2 usage or file I/O
 // (the workspace convention). Warnings print to stderr and never fail a
@@ -31,6 +34,8 @@
 #include <ws/spice/error.hpp>
 #include <ws/spice/results.hpp>
 
+#include "svg_dump.hpp"
+
 namespace {
 
 namespace fs = std::filesystem;
@@ -49,7 +54,8 @@ int usage() {
                  "       circsim_cli erc <file.csim> [-S <lib.csym>]...\n"
                  "       circsim_cli netlist <file.csim> [-o out|-]"
                  " [-S <lib.csym>]...\n"
-                 "       circsim_cli symbols [-S <lib.csym>]... [--json]\n");
+                 "       circsim_cli symbols [-S <lib.csym>]... [--json]"
+                 " [--svg <dir>]\n");
     return 2;
 }
 
@@ -351,10 +357,17 @@ int cmd_netlist(const std::vector<std::string>& args) {
 
 int cmd_symbols(const std::vector<std::string>& args) {
     std::vector<std::string> symbol_libs;
+    std::string svg_dir;
     bool json = false;
     for (std::size_t i = 0; i < args.size(); ++i) {
         if (args[i] == "--json") {
             json = true;
+        } else if (args[i] == "--svg") {
+            if (i + 1 >= args.size()) {
+                std::fprintf(stderr, "error: --svg needs a directory\n");
+                return usage();
+            }
+            svg_dir = args[++i];
         } else if (args[i] == "-S" || args[i] == "--symbols") {
             if (!take_symbols_value(args, i, symbol_libs)) {
                 return usage();
@@ -368,6 +381,9 @@ int cmd_symbols(const std::vector<std::string>& args) {
     ws::circsim::SymbolLibrary lib;
     if (const int rc = load_symbols(symbol_libs, lib); rc != 0) {
         return rc;
+    }
+    if (!svg_dir.empty()) {
+        return svg::write_symbol_svgs(lib, svg_dir);
     }
     if (json) {
         return write_out("", lib.save(true));  // the full effective table

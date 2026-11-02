@@ -94,9 +94,12 @@ CMakeLists only wire ws libraries together.
   runs it (--analysis overrides, CSV/JSON out), `erc` lints the
   schematic (floating pins, V loops, I cutsets, bad params...),
   `netlist` prints the exported deck, and `symbols` lists the effective
-  symbol table (--json dumps it whole). `-S lib.csym` (repeatable,
-  later wins) layers .csym symbol libraries over the built-ins for every
-  subcommand. argv, file I/O and exit codes only.
+  symbol table (--json dumps it whole; --svg DIR renders every symbol
+  through ws::circsim's render seam - one SVG per key plus a contact
+  sheet with pin markers, the stage-17 headless render and the
+  before/after harness for the symbol redesign). `-S lib.csym`
+  (repeatable, later wins) layers .csym symbol libraries over the
+  built-ins for every subcommand. argv, file I/O and exit codes only.
 - `apps/circsim_editor` - the ws::circsim stage-3/4/5 editor (windowed,
   desktop): the schematic capture app built ONLY from AppShell over
   libs/circsim - six panels (the Schematic canvas through ws::ui's
