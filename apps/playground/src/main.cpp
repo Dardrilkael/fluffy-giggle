@@ -64,15 +64,29 @@ namespace {
 // the bytes live in the lib.
 [[nodiscard]] ws::ui::r2d::Font load_ui_font(
     float pixel_height, const ws::ui::r2d::FontBakeOptions& options) {
-    if (const char* custom = std::getenv("WS_FONT_PATH")) {
-        ws::ui::r2d::Font loaded =
-            ws::ui::r2d::load_font(custom, pixel_height, options);
-        if (!loaded.empty()) {
-            return loaded;
-        }
-        // A dead override falls through to the bundled face.
+#if defined(_WIN32)
+  char* custom = nullptr;
+  size_t len = 0;
+  _dupenv_s(&custom, &len, "WS_FONT_PATH");
+  const char* custom_c = custom;
+#else
+  const char* custom_c = std::getenv("WS_FONT_PATH");
+#endif
+  if (custom_c) {
+    ws::ui::r2d::Font loaded =
+        ws::ui::r2d::load_font(custom_c, pixel_height, options);
+    if (!loaded.empty()) {
+#if defined(_WIN32)
+      free(custom);
+#endif
+      return loaded;
     }
-    return ws::ui::r2d::load_default_font(pixel_height, options);
+    // A dead override falls through to the bundled face.
+  }
+#if defined(_WIN32)
+  free(custom);
+#endif
+  return ws::ui::r2d::load_default_font(pixel_height, options);
 }
 
 // One rule for panel geometry, stated once. The gui block draws at these
