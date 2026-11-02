@@ -6,6 +6,10 @@
 
 namespace ws::ui::gui {
 
+// The painter seam's table (painters.hpp defines it; the theme carries
+// only the pointer, so no include cycle).
+struct WidgetPainters;
+
 // The look of the gui: one struct of plain values, no registries and no
 // inheritance. Widgets take a const ChromeTheme& and read it inline, so
 // a panel can carry its own variant without touching anyone else's
@@ -179,6 +183,14 @@ struct ChromeTheme {
     // bundled Inter). Same borrowing contract as `font` - the theme
     // owns nothing.
     const r2d::Font* font_strong = nullptr;
+
+    // The painter table (painters.hpp): null = stock (every composed
+    // widget calls its own file's draw, the library's built-in look); a
+    // skin installs a WidgetPainters here and every row it filled
+    // follows it. The theme POINTS, it owns nothing - the table must
+    // outlive every theme carrying it (the font pointers' own rule),
+    // and scaled() carries it as-is (a skin is not a metric).
+    const WidgetPainters* painters = nullptr;
 
     // The role radii, resolved: -1 (the default) inherits
     // corner_radius, so the back-compat rule holds - one number

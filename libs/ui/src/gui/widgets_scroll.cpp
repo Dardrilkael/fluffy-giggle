@@ -17,7 +17,8 @@ Rect begin_scroll_panel(GuiContext& gui, LayoutCursor& layout,
                         const ChromeTheme& theme, const char* label,
                         const Rect& bounds) {
     // The same chrome as begin_panel, before any clip.
-    panel_chrome(bounds, theme);
+    // The chrome through the painter seam, like every surface.
+    paint(theme, &WidgetPainters::panel, &panel_draw, bounds, theme);
 
     // The viewport: bounds inset by the padding, clamped empty when the
     // bounds cannot hold it (a backwards rect must not reach r2d). This
@@ -150,7 +151,8 @@ void end_scroll_panel(GuiContext& gui, LayoutCursor& layout,
     // carries.
     const ScrollbarThumb thumb =
         scroll_thumb_behavior(gui, scroll, drag, viewport, theme);
-    scrollbar_draw(viewport, thumb, theme);
+    paint(theme, &WidgetPainters::scrollbar, &scrollbar_draw, viewport,
+          thumb, theme);
 
     // The reverse of begin_scroll_panel's pushes.
     r2d::pop_clip();

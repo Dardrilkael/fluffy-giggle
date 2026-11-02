@@ -19,7 +19,8 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
     const ButtonResult result =
         button_behavior(gui, row.id, row.rect, disabled);
-    button_draw(row.rect, result, theme, label, icon);
+    paint(theme, &WidgetPainters::button, &button_draw, row.rect,
+          result, theme, label, icon);
     return result.activated();
 }
 
@@ -95,7 +96,8 @@ bool checkbox(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
                                                fit.advance);
     const CheckboxResult result =
         checkbox_behavior(gui, row.id, row.rect, value, disabled);
-    checkbox_draw(row.rect, result, theme, label, value);
+    paint(theme, &WidgetPainters::checkbox, &checkbox_draw, row.rect,
+          result, theme, label, value);
     return result.toggled;
 }
 
@@ -167,7 +169,8 @@ bool radio(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
                                                fit.advance);
     const RadioResult result =
         radio_behavior(gui, row.id, row.rect, value, this_option, disabled);
-    radio_draw(row.rect, result, theme, label, value == this_option);
+    paint(theme, &WidgetPainters::radio, &radio_draw, row.rect, result,
+          theme, label, value == this_option);
     return result.moved;
 }
 
@@ -242,7 +245,8 @@ bool toggle_switch(GuiContext& gui, LayoutCursor& layout,
         begin_widget_row(gui, layout, theme, label, track_w + gap + fit.advance);
     const ToggleSwitchResult result =
         toggle_switch_behavior(gui, row.id, row.rect, value, disabled);
-    toggle_switch_draw(row.rect, result, theme, label, value);
+    paint(theme, &WidgetPainters::toggle_switch, &toggle_switch_draw,
+          row.rect, result, theme, label, value);
     return result.toggled;
 }
 

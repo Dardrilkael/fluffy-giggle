@@ -20,7 +20,8 @@ bool combo(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     const bool empty = count <= 0 || items == nullptr;
     const ComboResult result =
         combo_behavior(gui, row.id, row.rect, open, empty, disabled);
-    combo_draw(row.rect, result, theme, label, items, count, selected, open);
+    paint(theme, &WidgetPainters::combo, &combo_draw, row.rect, result,
+          theme, label, items, count, selected, open);
 
     // The dropdown, placed by the widget through the shared placement:
     // below the row while the frame has room, else flipped above,

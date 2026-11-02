@@ -96,7 +96,8 @@ void toast_draw(const Rect& bounds, ToastSeverity severity,
     // overlay window wears - then the severity's accent band down the
     // panel's left edge, the FULL height: 3px, a hardcoded pixel like
     // the selectable's accent bar.
-    popup_frame_draw(bounds, theme);
+    paint(theme, &WidgetPainters::popup_frame, &popup_frame_draw, bounds,
+          theme);
     std::uint32_t accent = theme.toast_info;
     if (severity == ToastSeverity::warning) {
         accent = theme.toast_warning;
@@ -206,7 +207,8 @@ int draw_toasts(GuiContext& gui, const ChromeTheme& theme, Toasts& toasts,
         // content pair narrows the rows.
         r2d::push_clip_escape(bounds.x, bounds.y, bounds.width, bounds.height);
         gui.push_hit_clip_escape(bounds);
-        toast_draw(bounds, s.toast.severity, theme);
+        paint(theme, &WidgetPainters::toast, &toast_draw, bounds,
+              s.toast.severity, theme);
         const Rect content =
             layout.begin_panel(bounds, theme.padding, theme.spacing);
         r2d::push_clip(content.x, content.y, content.width, content.height);

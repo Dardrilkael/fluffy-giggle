@@ -157,7 +157,8 @@ bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     const TableGeometry geom{rect, row_h, columns, column_count, stretch_w};
 
     // The header: chrome, the split draw's half.
-    table_header_draw(geom, gui.disabled(), theme);
+    paint(theme, &WidgetPainters::table_header, &table_header_draw, geom,
+          gui.disabled(), theme);
 
     // The rows. Interactive ones (a non-null selected) are citizens -
     // selectable's exact look and answer; a null selected lays the same
@@ -189,7 +190,8 @@ bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
                 TableRowPaint rest;
                 rest.state = WidgetState::Normal;
                 rest.dimmed = gui.disabled();
-                table_row_draw(row_rect, rest, row_cells, geom, theme);
+                paint(theme, &WidgetPainters::table_row, &table_row_draw,
+                      row_rect, rest, row_cells, geom, theme);
                 continue;
             }
 
@@ -230,13 +232,14 @@ bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             // FRESH (the walk above may have moved it since the fold
             // took it), the selection is the caller's display state,
             // and the disabled scope's whole-table dim rides the paint.
-            TableRowPaint paint;
-            paint.state = row.state;
-            paint.focused = gui.is_focused(rid);
-            paint.hit = row.hit;
-            paint.selected = *selected == i;  // out-of-range marks nothing
-            paint.dimmed = gui.disabled();
-            table_row_draw(row_rect, paint, row_cells, geom, theme);
+            TableRowPaint row_paint;
+            row_paint.state = row.state;
+            row_paint.focused = gui.is_focused(rid);
+            row_paint.hit = row.hit;
+            row_paint.selected = *selected == i;  // out-of-range marks none
+            row_paint.dimmed = gui.disabled();
+            paint(theme, &WidgetPainters::table_row, &table_row_draw,
+                  row_rect, row_paint, row_cells, geom, theme);
 
             // The pick: a click or the focused row's key writes the
             // caller's int and answers ONLY on a real move - the radio's

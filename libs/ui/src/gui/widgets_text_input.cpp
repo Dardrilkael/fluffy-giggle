@@ -25,7 +25,8 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
     TextInputState& edit = gui.persistent_state<TextInputState>(row.id);
     const TextInputResult result = text_input_behavior(
         gui, row.id, row.rect, buf, capacity, edit, theme, disabled);
-    text_input_draw(row.rect, result, theme, label, buf, capacity);
+    paint(theme, &WidgetPainters::text_input, &text_input_draw, row.rect,
+          result, theme, label, buf, capacity);
     return result.edited;
 }
 

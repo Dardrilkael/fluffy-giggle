@@ -25,7 +25,8 @@ bool slider_float(GuiContext& gui, LayoutCursor& layout,
     const SliderResult result =
         slider_behavior(gui, row.id, row.rect, value, min, max,
                         (max - min) / 100.0f, disabled);
-    slider_draw(row.rect, result, theme, label, value, min, max);
+    paint(theme, &WidgetPainters::slider, &slider_draw, row.rect,
+          result, theme, label, value, min, max);
     return result.changed;
 }
 
@@ -38,7 +39,8 @@ bool slider_int(GuiContext& gui, LayoutCursor& layout,
     const SliderResult result =
         slider_behavior(gui, row.id, row.rect, v, static_cast<float>(min),
                         static_cast<float>(max), 1.0f, disabled);
-    slider_draw(row.rect, result, theme, label, v, static_cast<float>(min),
+    paint(theme, &WidgetPainters::slider, &slider_draw, row.rect, result,
+          theme, label, v, static_cast<float>(min),
                 static_cast<float>(max));
     // Written only on a real change: a huge int that rounds through float
     // must not silently rewrite itself on idle frames.
@@ -172,7 +174,8 @@ bool drag_float(GuiContext& gui, LayoutCursor& layout,
     const DragFloatResult result =
         drag_float_behavior(gui, row.id, row.rect, value, min, max, speed,
                             disabled);
-    drag_float_draw(row.rect, result, theme, label, value);
+    paint(theme, &WidgetPainters::drag_float, &drag_float_draw, row.rect,
+          result, theme, label, value);
     return result.changed;
 }
 

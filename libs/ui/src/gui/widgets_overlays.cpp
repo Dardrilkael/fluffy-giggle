@@ -188,7 +188,8 @@ bool begin_tooltip(GuiContext& gui, LayoutCursor& layout,
     // what they get (it claims at the tooltip stratum, unclipped).
     gui.begin_layer(Layer::tooltip);
     r2d::push_clip_escape(bounds.x, bounds.y, bounds.width, bounds.height);
-    popup_frame_draw(bounds, theme);
+    paint(theme, &WidgetPainters::popup_frame, &popup_frame_draw, bounds,
+          theme);
     layout.begin_panel(bounds, theme.padding, theme.spacing);
     gui.ids().push(label);
     return show;

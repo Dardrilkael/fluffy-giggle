@@ -8,6 +8,7 @@
 // every family TU.
 
 #include <ws/ui/gui/widgets.hpp>
+#include <ws/ui/gui/painters.hpp>
 
 #include <ws/ui/renderer2d.hpp>
 
@@ -16,8 +17,31 @@
 #include <cstdint>
 #include <cstring>
 #include <optional>
+#include <type_traits>
+#include <utility>
 
 namespace ws::ui::gui {
+
+// --- the painter routing fold ------------------------------------------------
+// The one indirection every composed widget walks (P3's seam): the
+// theme's row when a skin installed a table AND filled that row, the
+// stock draw otherwise. A null table and a null row are the same
+// answer - the stock look - so partial skins are legal and the stock
+// path stays a predictable never-taken branch. The static assertion
+// pins the pair: `stock` must name exactly the function type its row
+// holds, so the two spellings cannot drift apart at a call site.
+template <typename Row, typename Stock, typename... Args>
+inline void paint(const ChromeTheme& theme, Row WidgetPainters::*row,
+                  Stock stock, Args&&... args) {
+    static_assert(std::is_same_v<Row, Stock>,
+                  "the painter row and the stock draw must agree");
+    const WidgetPainters* table = theme.painters;
+    if (table != nullptr && (table->*row) != nullptr) {
+        (table->*row)(std::forward<Args>(args)...);
+    } else {
+        stock(std::forward<Args>(args)...);
+    }
+}
 
 // Where a label's line box starts vertically: the font's line height
 // centered on the row (draw_text's y is the box top, not a baseline), or
@@ -101,7 +125,8 @@ inline void push_overlay_panel(GuiContext& gui, LayoutCursor& layout,
                                const Rect& bounds, float spacing) {
     r2d::push_clip_escape(bounds.x, bounds.y, bounds.width, bounds.height);
     gui.push_hit_clip_escape(bounds);
-    popup_frame_draw(bounds, theme);
+    paint(theme, &WidgetPainters::popup_frame, &popup_frame_draw, bounds,
+          theme);
     const Rect content =
         layout.begin_panel(bounds, theme.padding, spacing);
     gui.register_wheel_claim(bounds, nullptr);

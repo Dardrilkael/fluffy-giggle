@@ -532,7 +532,8 @@ void lay_menu_chain(GuiContext& gui, LayoutCursor& layout,
             // A separator: a rule, not a row - no id, no hit-test,
             // nothing to fire, the row's full height to breathe.
             if (item.kind == MenuItemKind::separator) {
-                menu_item_separator_draw(rect, theme);
+                paint(theme, &WidgetPainters::menu_item_separator,
+                      &menu_item_separator_draw, rect, theme);
                 continue;
             }
 
@@ -621,14 +622,17 @@ void lay_menu_chain(GuiContext& gui, LayoutCursor& layout,
             // mnemonic, shortcut hint, submenu diamond) lives in
             // menu_item_draw - the chain hands it the state() fold, the
             // aim and the open-child flag, and paints nothing itself.
-            MenuItemPaint paint;
-            paint.state = result.state;
-            paint.focused = false;  // items are not citizens: never a ring
-            paint.hit = hit;
-            paint.highlighted = i == state.highlight[l];
-            paint.child_open = l + 1 < MenuState::kDepth && state.open[l + 1] &&
-                               state.parent[l + 1] == i;
-            menu_item_draw(rect, paint, theme, item, geometry);
+            MenuItemPaint item_paint;
+            item_paint.state = result.state;
+            item_paint.focused = false;  // items are not citizens: never a
+                                         // ring
+            item_paint.hit = hit;
+            item_paint.highlighted = i == state.highlight[l];
+            item_paint.child_open = l + 1 < MenuState::kDepth &&
+                                    state.open[l + 1] &&
+                                    state.parent[l + 1] == i;
+            paint(theme, &WidgetPainters::menu_item, &menu_item_draw, rect,
+                  item_paint, theme, item, geometry);
             // The child's anchor: its parent row, captured for the
             // next level's place_popup.
             if (l + 1 < MenuState::kDepth && state.open[l + 1] &&
@@ -925,12 +929,13 @@ MenuEvent menu_bar(GuiContext& gui, LayoutCursor& layout,
         // menu_title_draw; the strip hands it the fold plus `open`.
         // focused reads FRESH, after the strip's own handling - the
         // same timing focus_ring had here.
-        MenuTitlePaint paint;
-        paint.state = result.state;
-        paint.focused = gui.is_focused(id);
-        paint.hit = hit;
-        paint.open = open == i;
-        menu_title_draw(rect, paint, theme, menu.title);
+        MenuTitlePaint title_paint;
+        title_paint.state = result.state;
+        title_paint.focused = gui.is_focused(id);
+        title_paint.hit = hit;
+        title_paint.open = open == i;
+        paint(theme, &WidgetPainters::menu_title, &menu_title_draw, rect,
+              title_paint, theme, menu.title);
 
         if (open == i) {
             open_title = rect;  // captured every frame, click or not

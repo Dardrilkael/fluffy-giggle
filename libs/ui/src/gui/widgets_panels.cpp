@@ -34,8 +34,8 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
         // reports no click, holds no focus for the keys).
         const WidgetId tab_id = gui.ids().id("tab");
         const TabResult result = tab_behavior(gui, tab_id, rect, disabled);
-        tab_draw(rect, result, theme, tabs != nullptr ? tabs[i] : nullptr,
-                 i == active);
+        paint(theme, &WidgetPainters::tab, &tab_draw, rect, result, theme,
+              tabs != nullptr ? tabs[i] : nullptr, i == active);
         // A full click or the focused tab's Enter/Space moves the
         // selection; selecting the already-selected tab is a no-op that
         // reports nothing.
@@ -134,8 +134,9 @@ Rect begin_panel(GuiContext& gui, LayoutCursor& layout,
                  const ChromeTheme& theme, const char* label,
                  const Rect& bounds) {
     // Chrome first, BEFORE the clip push, so the frame and face never clip
-    // against the content rect they contain (see panel_chrome).
-    panel_chrome(bounds, theme);
+    // against the content rect they contain (see panel_chrome) - through
+    // the painter seam, so a skin's panel row restyles every surface.
+    paint(theme, &WidgetPainters::panel, &panel_draw, bounds, theme);
 
     // Then the four pushes: the layout panel (it computes the content
     // rect), the clip at that rect and its hit-testing twin (children
@@ -167,7 +168,9 @@ void end_panel(GuiContext& gui, LayoutCursor& layout) {
 
 void panel_draw(const Rect& bounds, const ChromeTheme& theme) {
     // The one-line public spelling of the private chrome begin_panel
-    // paints before it pushes anything - the same draw both call.
+    // paints before it pushes anything - the same draw both call. The
+    // stock function itself never routes (a skin's panel row replaces
+    // it whole); the composed callers route TO it.
     panel_chrome(bounds, theme);
 }
 

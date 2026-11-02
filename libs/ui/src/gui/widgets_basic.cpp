@@ -119,7 +119,8 @@ bool collapsing_header(GuiContext& gui, LayoutCursor& layout,
     const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
     const CollapsingHeaderResult result =
         collapsing_header_behavior(gui, row.id, row.rect, open, disabled);
-    collapsing_header_draw(row.rect, result, theme, label, open);
+    paint(theme, &WidgetPainters::collapsing_header,
+          &collapsing_header_draw, row.rect, result, theme, label, open);
     // The answer is the state AFTER the flip: the caller's `if` places
     // this frame's children when the click just opened it.
     return open;
@@ -186,7 +187,8 @@ bool selectable(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
     const SelectableResult result =
         selectable_behavior(gui, row.id, row.rect, disabled);
-    selectable_draw(row.rect, result, theme, label, selected);
+    paint(theme, &WidgetPainters::selectable, &selectable_draw,
+          row.rect, result, theme, label, selected);
     return result.clicked;
 }
 
@@ -312,7 +314,8 @@ void spinner(GuiContext& gui, LayoutCursor& layout,
     size = std::max(size, 0.0f);
     const Rect rect = layout.next(size, size);
     const SpinnerResult result = spinner_behavior(gui, gui.ids().id(label));
-    spinner_draw(rect, result, theme);
+    paint(theme, &WidgetPainters::spinner, &spinner_draw, rect, result,
+          theme);
 }
 
 SpinnerResult spinner_behavior(GuiContext& gui, WidgetId id) {
@@ -364,7 +367,8 @@ void progress_indeterminate(GuiContext& gui, LayoutCursor& layout,
     const Rect rect = layout.next(width, theme.control_height);
     const IndeterminateResult result =
         progress_indeterminate_behavior(gui, gui.ids().id(label));
-    progress_indeterminate_draw(rect, result, theme);
+    paint(theme, &WidgetPainters::progress_indeterminate,
+          &progress_indeterminate_draw, rect, result, theme);
 }
 
 IndeterminateResult progress_indeterminate_behavior(GuiContext& gui,
