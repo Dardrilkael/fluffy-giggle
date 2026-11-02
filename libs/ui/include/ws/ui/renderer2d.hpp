@@ -387,6 +387,13 @@ public:
     // data (a zeroed fallback is that skip again).
     const Glyph* glyph(std::uint32_t codepoint) const;
 
+    // glyph() without the fallback box: null for every codepoint the
+    // font does not CARRY (the inline bake and the lazily-baked table
+    // only). The built-in icon mapping's resolution - a missing icon
+    // must read as "no sprite", never as the tofu box's sprite. Same
+    // rules as glyph() otherwise.
+    const Glyph* find_glyph(std::uint32_t codepoint) const;
+
     // The width draw_text advances for utf8_text: the glyphs' advance
     // sum - the fallback's included when the font carries one.
     // draw_text returns exactly this value.

@@ -185,6 +185,17 @@ std::vector<ContrastFailure> contrast_failures(const ChromeTheme& theme) {
          theme.control_on, 3.0},
         {"text_on_accent / control_pressed", theme.text_on_accent,
          theme.control_pressed, 3.0},
+        // The danger family (P6): the resting face is checked like
+        // control_on (a button face on both chromes), and the on-accent
+        // label rides the danger face and its pressed rung at the same
+        // component ratio. The hover rung is exempt like every hover -
+        // the pointer is the indicator.
+        {"danger / panel_bg", theme.danger, theme.panel_bg, 3.0},
+        {"danger / control_bg", theme.danger, theme.control_bg, 3.0},
+        {"text_on_accent / danger", theme.text_on_accent, theme.danger,
+         3.0},
+        {"text_on_accent / danger_pressed", theme.text_on_accent,
+         theme.danger_pressed, 3.0},
     };
     std::vector<ContrastFailure> failures;
     for (const Pair& pair : pairs) {
@@ -307,6 +318,30 @@ void apply_accent(ChromeTheme& theme, std::uint32_t accent) {
     theme.text_on_accent =
         ensure_contrast(0xFFFFFFFFu, theme.control_on,
                         theme.control_pressed, 3.0, -1.0);
+
+    // The danger family (P6): the theme's own red stays the resting
+    // face - walked to the LABEL ratio first, because a light accent's
+    // on-accent label can land on black, and black on the stock red
+    // would fail the pair (the walk answers 'away' from the background,
+    // which also only ever helps the face's own background pairs). The
+    // rungs derive around the walked face - hover a half-step away from
+    // the background's polarity, pressed a quarter toward the control
+    // face, then walked to the same label ratio (the on-accent label
+    // rides the pressed rung; the transient face itself is the hover
+    // exemption's class, not a background pair).
+    theme.danger = ensure_contrast(theme.danger, theme.text_on_accent,
+                                   theme.text_on_accent, 3.0, away);
+    Oklch danger_hov = oklch_from_rgb(theme.danger);
+    danger_hov.L += away * 0.05;
+    theme.danger_hover = rgb_from_oklch(danger_hov);
+
+    Oklch danger_press = oklch_from_rgb(theme.danger);
+    danger_press.C *= 0.7;
+    danger_press.L +=
+        (oklch_from_rgb(theme.control_bg).L - danger_press.L) * 0.25;
+    theme.danger_pressed =
+        ensure_contrast(rgb_from_oklch(danger_press), theme.text_on_accent,
+                        theme.text_on_accent, 3.0, away);
 }
 
 }  // namespace ws::ui::gui

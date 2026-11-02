@@ -1093,7 +1093,7 @@ Font Renderer2D::publish_baked_font(const font::BakedFont& baked,
     std::vector<Font::Glyph> glyphs(baked.glyphs.size());
     std::vector<atlas::SourceImage> sources;
     std::vector<std::size_t> baked_index;  // sources[i] -> baked.glyphs slot
-    sources.reserve(baked.glyphs.size());
+    sources.reserve(baked.glyphs.size() + font::kIconCount);
     for (std::size_t i = 0; i < baked.glyphs.size(); ++i) {
         const font::BakedGlyph& g = baked.glyphs[i];
         Font::Glyph& out = glyphs[i];
@@ -1105,6 +1105,35 @@ Font Renderer2D::publish_baked_font(const font::BakedFont& baked,
         if (g.w > 0 && g.h > 0) {
             sources.push_back(atlas::SourceImage{g.rgba.data(), g.w, g.h});
             baked_index.push_back(i);
+        }
+    }
+
+    // The built-in icons ride the same pack (P6): rasterized at the
+    // font's own pixel height, appended as sources, their sprites
+    // patched into side entries that land in the lazy table after the
+    // Font exists - every baked font carries the set, so the stock icon
+    // mapping is just the theme font's own glyphs. advance 0 and the
+    // sentinel-sprite degrade keep them out of the text flow: a missing
+    // icon draws no sprite, the pre-icon square instead.
+    std::vector<Font::Glyph> icon_glyphs(font::kIconCount);
+    for (std::uint32_t i = 0; i < font::kIconCount; ++i) {
+        font::BakedGlyph icon;
+        if (!font::bake_icon_glyph(font::kIconFirst + i, baked.pixel_height,
+                                   icon)) {
+            continue;
+        }
+        Font::Glyph& out = icon_glyphs[i];
+        out.advance = 0.0f;
+        out.offset_x = 0.0f;
+        out.offset_y = 0.0f;
+        out.width = static_cast<float>(icon.w);
+        out.height = static_cast<float>(icon.h);
+        if (icon.w > 0 && icon.h > 0) {
+            sources.push_back(
+                atlas::SourceImage{icon.rgba.data(), icon.w, icon.h});
+            // sources[i] -> icon_glyphs slot, encoded past the bake's
+            // own size and decoded after packing.
+            baked_index.push_back(baked.glyphs.size() + i);
         }
     }
 
@@ -1120,9 +1149,15 @@ Font Renderer2D::publish_baked_font(const font::BakedFont& baked,
         }
         for (std::size_t s = 0; s < baked_index.size(); ++s) {
             const atlas::Placement& place = packed.assigned[s];
-            if (place.page < page_ids.size() && page_ids[place.page] != 0) {
-                glyphs[baked_index[s]].sprite =
-                    Sprite{page_ids[place.page], place.index};
+            if (place.page >= page_ids.size() || page_ids[place.page] == 0) {
+                continue;
+            }
+            const std::size_t slot = baked_index[s];
+            const Sprite sprite{page_ids[place.page], place.index};
+            if (slot < baked.glyphs.size()) {
+                glyphs[slot].sprite = sprite;
+            } else {
+                icon_glyphs[slot - baked.glyphs.size()].sprite = sprite;
             }
         }
     }
@@ -1136,6 +1171,12 @@ Font Renderer2D::publish_baked_font(const font::BakedFont& baked,
     font.extras_state()->baseline_y = baked.ascent_px;
     font.extras_state()->baseline_known = true;
     font.extras_state()->options = options;
+    // The icons, into the lazy table (find_glyph answers them; a font
+    // that somehow baked none keeps the sentinel degrade).
+    for (std::uint32_t i = 0; i < font::kIconCount; ++i) {
+        font.extras_state()->glyphs.emplace(font::kIconFirst + i,
+                                            icon_glyphs[i]);
+    }
     return font;
 }
 

@@ -151,22 +151,32 @@ void collapsing_header_draw(const Rect& rect,
     // label dimmed through the one helper.
     const float dim_by = dim_factor(result.state, theme);
 
-    // The row: the faces a button wears, rounded by the theme.
+    // The row: the faces a button wears, rounded by the theme - the
+    // snapped rect (P6).
     const std::uint32_t face = control_face(result.state, theme);
-    r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
-                           theme.corner_radius, face);
+    const Rect snapped = snap_rect(rect);
+    r2d::draw_rounded_quad(snapped.x, snapped.y, snapped.width,
+                           snapped.height, theme.corner_radius, face);
 
-    // The marker: a square inset like a checkbox's fill - the faint
-    // border color closed, the accent open. The state at a glance. The
-    // inset clears the row's rounded corners the same way the checkbox
-    // fill clears its box's (a heavily-rounded theme cannot let the
-    // square poke past the arcs).
+    // The marker (P6): the built-in chevrons through the icon mapping -
+    // right closed, down open, the accent open and the faint border
+    // closed exactly like the square's colors. The sentinel sprite
+    // (no font, no set) keeps the pre-icon square: today's look.
     const float box = theme.control_height;
     const float inset = std::max(theme.check_inset, theme.corner_radius);
     const float marker = box - 2.0f * inset;
     if (marker > 0.0f) {
-        r2d::draw_quad(rect.x + inset, rect.y + inset, marker, marker,
-                       open ? dim(theme.control_on, dim_by) : theme.border);
+        const std::uint32_t mark_color =
+            open ? dim(theme.control_on, dim_by) : dim(theme.border, dim_by);
+        const r2d::Sprite mark = icon_sprite_of(
+            theme, open ? Icon::chevron_down : Icon::chevron_right);
+        if (mark.page != 0) {
+            draw_icon(snapped.x + inset, snapped.y + inset, marker, mark,
+                      mark_color);
+        } else {
+            r2d::draw_quad(snapped.x + inset, snapped.y + inset, marker,
+                           marker, mark_color);
+        }
     }
 
     // The label beside the marker, like a checkbox's - LEFT-aligned: a

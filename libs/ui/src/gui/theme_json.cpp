@@ -41,6 +41,9 @@ constexpr FaceEntry kFaceEntries[] = {
     {"toast_warning", &ChromeTheme::toast_warning},
     {"toast_error", &ChromeTheme::toast_error},
     {"shadow", &ChromeTheme::shadow},
+    {"danger", &ChromeTheme::danger},
+    {"danger_hover", &ChromeTheme::danger_hover},
+    {"danger_pressed", &ChromeTheme::danger_pressed},
 };
 
 struct MetricEntry {

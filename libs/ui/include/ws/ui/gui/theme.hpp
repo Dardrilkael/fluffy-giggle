@@ -81,6 +81,20 @@ struct ChromeTheme {
     // shadow primitive against the theme's shadow metrics below;
     // until then it rides as data.
     std::uint32_t shadow = r2d::rgba(0, 0, 0, 110);
+    // The danger family (P6, appended after the stock color block per
+    // the designated-initializer rule): the destructive button's face
+    // and its two live rungs, the error family's answer to the accent's
+    // control_on/hover/pressed. The resting face is checked like
+    // control_on (3:1 against both backgrounds, both chromes - the
+    // defaults clear with margin); the label on the face and its
+    // pressed rung is text_on_accent at the component ratio (checked in
+    // theme_color); the HOVER rung is exempt like every hover - the
+    // pointer is the indicator. apply_accent derives the rungs around
+    // the theme's own danger, so an accented theme keeps its family
+    // coherent; a theme that never touches these still passes.
+    std::uint32_t danger = r2d::rgba(219, 68, 58);
+    std::uint32_t danger_hover = r2d::rgba(232, 96, 84);
+    std::uint32_t danger_pressed = r2d::rgba(204, 56, 46);
 
     // Metrics, gui-space pixels.
     float control_height = 28.0f;  // the one deliberate stock bump of
@@ -183,6 +197,16 @@ struct ChromeTheme {
     // bundled Inter). Same borrowing contract as `font` - the theme
     // owns nothing.
     const r2d::Font* font_strong = nullptr;
+
+    // The optional small and mono faces (P6, the same borrowing
+    // contract, null = fall back to `font`): a theme may point them and
+    // its own draws (and skins, which read them like any token) size
+    // dense rows and code from them. No stock widget consumes them yet
+    // - they are the data the P7 skins page and a denser stock can grow
+    // into, without a second breaking pass. Not JSON: like font and
+    // font_strong, a face is a loaded object, not a value.
+    const r2d::Font* font_small = nullptr;
+    const r2d::Font* font_mono = nullptr;
 
     // The painter table (painters.hpp): null = stock (every composed
     // widget calls its own file's draw, the library's built-in look); a

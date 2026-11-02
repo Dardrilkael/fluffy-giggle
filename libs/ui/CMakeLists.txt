@@ -239,6 +239,21 @@ if(TARGET test_ui_primitives)
   target_include_directories(test_ui_primitives PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
 
+# The P6 variants suite (the ui-skin plan): the icon set (raster,
+# mapping, override), the button variants' token-resolved faces and the
+# snap helpers - the gui archive + the r2d stub, like test_ui_gui; the
+# icon raster and the detail helpers ride src/.
+ws_add_test(ui_variants
+  SOURCES tests/test_ui_variants.cpp
+          tests/ui_gui_r2d_stub.cpp
+          src/text/font.cpp
+          src/text/stb_impl.cpp
+  LINK ws::ui_gui
+  DEPENDS stb)
+if(TARGET test_ui_variants)
+  target_include_directories(test_ui_variants PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+
 # --- Shader workflow targets (opt-in; the default build is unchanged) ------
 # The committed spirv.h stays the build input (no shader compiler needed);
 # these targets make staleness visible and regeneration explicit. The flags

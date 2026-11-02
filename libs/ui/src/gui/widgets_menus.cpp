@@ -755,18 +755,27 @@ void menu_item_draw(const Rect& rect, const MenuItemPaint& paint,
                        theme);
         }
     }
-    // The submenu marker: a small diamond (a rotated square, center
-    // pivot) in the marker column - the accent while this row's child
-    // is open, the faint border while not.
+    // The submenu marker (P6): the built-in chevron-right through the
+    // icon mapping - the accent while this row's child is open, the
+    // faint border while not (the diamond's own colors). A theme
+    // without the set keeps the rotated square: the sentinel means
+    // "draw the fallback".
     if (item.submenu != nullptr && item.submenu_count > 0) {
-        const float side = geometry.marker * 0.5f;
         const std::uint32_t mark =
             paint.child_open ? theme.control_on : theme.border;
+        const float side = geometry.marker * 0.5f;
         const float cx = rect.x + geometry.content_width -
                          geometry.marker * 0.5f;
         const float cy = rect.y + rect.height * 0.5f;
-        r2d::draw_quad(cx - side * 0.5f, cy - side * 0.5f, side, side,
-                       dim(mark, dim_by), {}, 0.785398f);
+        const r2d::Sprite mark_sprite = icon_sprite_of(theme,
+                                                       Icon::chevron_right);
+        if (mark_sprite.page != 0) {
+            draw_icon(cx - side * 0.5f, cy - side * 0.5f, side, mark_sprite,
+                      dim(mark, dim_by));
+        } else {
+            r2d::draw_quad(cx - side * 0.5f, cy - side * 0.5f, side, side,
+                           dim(mark, dim_by), {}, 0.785398f);
+        }
     }
 }
 

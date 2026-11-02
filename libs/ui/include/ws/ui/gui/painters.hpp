@@ -40,6 +40,7 @@
 // from the primitives it gets here.
 
 #include <ws/ui/gui/widgets.hpp>
+#include <ws/ui/gui/icons.hpp>  // Icon - the icon_of row's vocabulary
 
 namespace ws::ui::gui {
 
@@ -99,6 +100,15 @@ struct WidgetPainters {
     void (*table_row)(const Rect&, const TableRowPaint&, const char* const*,
                       const TableGeometry&, const ChromeTheme&);
     void (*toast)(const Rect&, ToastSeverity, const ChromeTheme&);
+
+    // --- the icon mapping (P6) -------------------------------------------
+    // A LOOKUP, not a draw: the sprite an Icon resolves to under this
+    // skin (the stock answer is the theme font's own baked glyph). The
+    // theme rides the signature because a Sprite is a font-bound handle
+    // and the theme is the font's carrier; a skin with its own atlas
+    // ignores the theme and answers its own sprites. The sentinel
+    // sprite means "nothing" - the consumers draw their pre-icon square.
+    r2d::Sprite (*icon_of)(const ChromeTheme&, Icon);
 };
 
 // The stock look: every row filled with the library's own draw - the
@@ -128,6 +138,21 @@ inline constexpr WidgetPainters kStockPainters{
     &table_header_draw,
     &table_row_draw,
     &toast_draw,
+    &stock_icon_sprite,
 };
+
+// The icon mapping's fold - stock_icon_sprite unless a skin installed an
+// icon_of row (the same fold the draw halves walk through paint(), spelled
+// once here because four families read it; this is the one header where
+// WidgetPainters, ChromeTheme and Icon are all complete). Returns the
+// sprite the caller draws; the sentinel means "nothing" (the consumer's
+// pre-icon square rides).
+[[nodiscard]] inline r2d::Sprite icon_sprite_of(const ChromeTheme& theme,
+                                                Icon icon) {
+    if (theme.painters != nullptr && theme.painters->icon_of != nullptr) {
+        return theme.painters->icon_of(theme, icon);
+    }
+    return stock_icon_sprite(theme, icon);
+}
 
 }  // namespace ws::ui::gui

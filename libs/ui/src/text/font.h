@@ -99,6 +99,33 @@ BakedFont bake_file(const char* path, float pixel_height,
 BakedFont bake_info(const stbtt_fontinfo& info, float pixel_height,
                     const FontBakeOptions& options = {});
 
+// --- the built-in icon set (P6) ---------------------------------------------
+// Seven minimal interface icons, rasterized procedurally (no icon font,
+// no third-party asset) and baked into every font's own pages under a
+// private-use codepoint range - the gui's stock mapping serves them from
+// the theme's font, and a skin re-points the painters' icon_of row at its
+// own atlas. The gui-side enum lives in <ws/ui/gui/icons.hpp>; this is
+// the raster half, private to ui.
+
+// The set's first codepoint: 0xE000 + the Icon enum's index. Private Use
+// Area - no text pipeline reaches here by accident (draw_text on these
+// codepoints answers the baked glyph and advances zero: an icon is not a
+// letter).
+inline constexpr std::uint32_t kIconFirst = 0xE000;
+inline constexpr std::uint32_t kIconCount = 7;  // chevron down/right,
+                                                // check, close, search,
+                                                // plus, minus
+
+// Rasterizes one built-in icon at `pixel_height` (a square bitmap, ~1 px
+// headroom) into `out`. False when `codepoint` is outside the set - the
+// caller then treats the codepoint like any other past-the-bake request.
+// Pure CPU, coverage-only: every icon of the same size bakes the same
+// footprint (advance 0, offsets 0 - draw_icon places the quad itself),
+// and the geometry never rides the FontBakeOptions (icons are shapes,
+// not text; the gamma/boost LUTs are the letters' tuning).
+bool bake_icon_glyph(std::uint32_t codepoint, float pixel_height,
+                     BakedGlyph& out);
+
 // --- the face stack (the growing Font's fallback chain) ---------------------
 // A Font is one typeface at one size, but one font can STACK more typeface
 // files under its primary bake: every codepoint past the inline bake

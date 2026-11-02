@@ -106,20 +106,32 @@ void combo_draw(const Rect& rect, const ComboResult& result,
     // label dimmed through the one helper.
     const float dim_by = dim_factor(result.state, theme);
 
-    // The row: the faces a button wears, rounded by the theme.
+    // The row: the faces a button wears, rounded by the theme - the
+    // snapped rect (P6).
     const std::uint32_t face = control_face_of(result, theme);
-    r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
-                           theme.corner_radius, face);
+    const Rect snapped = snap_rect(rect);
+    r2d::draw_rounded_quad(snapped.x, snapped.y, snapped.width,
+                           snapped.height, theme.corner_radius, face);
 
-    // The marker at the RIGHT edge - the collapsing_header's marker
-    // mirrored: the faint border closed, the accent open. The same
-    // square-inset geometry, one gap from the row's right side.
+    // The marker at the RIGHT edge (P6): the built-in chevron-down
+    // through the icon mapping - accent while the dropdown hangs open,
+    // the quiet border color closed (the colors the square wore). A
+    // theme without the set (fontless, or a skin answering nothing)
+    // keeps the pre-icon square: the sentinel means "draw the fallback".
     const float inset = std::max(theme.check_inset, theme.corner_radius);
     const float marker = theme.control_height - 2.0f * inset;
     if (marker > 0.0f) {
-        r2d::draw_quad(rect.x + rect.width - inset - marker, rect.y + inset,
-                       marker, marker,
-                       open ? dim(theme.control_on, dim_by) : theme.border);
+        const std::uint32_t mark_color =
+            open ? dim(theme.control_on, dim_by) : dim(theme.border, dim_by);
+        const r2d::Sprite mark = icon_sprite_of(theme, Icon::chevron_down);
+        if (mark.page != 0) {
+            const float mark_x = snapped.x + snapped.width - inset - marker;
+            const float mark_y = snapped.y + inset;
+            draw_icon(mark_x, mark_y, marker, mark, mark_color);
+        } else {
+            r2d::draw_quad(snapped.x + snapped.width - inset - marker,
+                           snapped.y + inset, marker, marker, mark_color);
+        }
     }
 
     // The "label: item" line, drag_float's shape: the display cut first,

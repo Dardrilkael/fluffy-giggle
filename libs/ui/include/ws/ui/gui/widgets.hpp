@@ -95,6 +95,16 @@ struct WidgetPaint {
 // instead FILLS the rest of the current line (the panel content's
 // remaining run, from the cursor to the content's right edge).
 //
+// The button variants (P6): plain values, resolved through the theme's
+// tokens at draw time - no widget hardcodes a color, and a skin that
+// overrides the button row owns every variant's pixels.
+enum class ButtonStyle : std::uint8_t {
+    secondary,  // the plain control ladder - today's look, the default
+    primary,    // the accent face, the on-accent label
+    ghost,      // no face at rest, the hover/press faces on the live states
+    danger,     // the destructive action - the theme's danger family
+};
+//
 // Buttons take the keyboard: they register focusable (a press on one
 // takes the focus at the press edge, Tab reaches them), Enter and Space
 // activate the focused button exactly like a click, and the focused
@@ -106,15 +116,26 @@ struct WidgetPaint {
 // scope needed.
 bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             const char* label, float width = 120.0f, r2d::Sprite icon = {},
-            bool disabled = false);
+            bool disabled = false,
+            ButtonStyle style = ButtonStyle::secondary);
 
 // The split halves: button's interaction without a single draw, and its
 // stock look over the answer. Composing them in order IS the widget
 // above; swapping the draw half for your own is the custom-look seam -
 // the behavior owns identity, focus and the click, the draw owns pixels.
+//
+// ButtonStyle (P6): the variant the row wears, resolved ENTIRELY through
+// tokens - secondary is the plain control ladder (today's look, the
+// default), primary the accent family labeled text_on_accent, ghost a
+// transparent idle that takes the hover/press faces (a focused-at-rest
+// ghost takes the plain background so its ring reads), danger the danger
+// family. The style rides ButtonResult so the PAINTER ROW's signature
+// stays frozen - a draw half reads result.style and needs no extra
+// parameter, and skins that predate the variants keep compiling.
 struct ButtonResult : WidgetPaint {
     bool clicked = false;      // a full click inside the rect this frame
     bool key_clicked = false;  // Enter or Space on the focused row
+    ButtonStyle style = ButtonStyle::secondary;
     bool activated() const { return clicked || key_clicked; }
 };
 
@@ -122,7 +143,8 @@ struct ButtonResult : WidgetPaint {
 // the one hit-test, reads the key edge. Draws nothing.
 ButtonResult button_behavior(GuiContext& gui, WidgetId id, const Rect& rect,
                              bool disabled = false,
-                             const HitShape& hit_shape = {});
+                             const HitShape& hit_shape = {},
+                             ButtonStyle style = ButtonStyle::secondary);
 
 // The look half: the stock face, ring, icon and centered label. Reads no
 // context - the whole look rides the result, the theme and the label.

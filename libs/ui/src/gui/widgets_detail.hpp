@@ -273,6 +273,33 @@ inline std::uint32_t control_face(WidgetState state,
     return theme.control_bg;
 }
 
+// --- pixel snapping (P6) ------------------------------------------------------
+// The stock painters' alignment: static rects and 1px-class strokes snap
+// to whole device pixels so a scaled theme's fractional metrics
+// (control_height 28 at 1.3 scale = 36.4) land on the pixel grid instead
+// of smearing the SDF's antialiasing over every edge. PAINT ONLY - the
+// behavior halves never snap (the hit rects stay fractional; only the
+// pixels round), and the ANIMATED values (the toggle knob's travel x, a
+// slider handle mid-drag) stay unsnapped: a moving element that jumps
+// pixel to pixel reads as stepping, and the SDF's AA is the softer
+// answer while something moves.
+
+// Half-up rounding, the one spelling (std::round's banker's-rounding
+// ties would make 36.5 land differently at 36 and 37).
+inline float snap_v(float v) { return std::floor(v + 0.5f); }
+
+// The rect snap: origin rounds, the edges round in place and the size
+// re-derives from them - a snapped rect keeps its snapped edges crisp
+// (rounding x and width independently could grow the rect by a pixel on
+// the far side).
+inline Rect snap_rect(const Rect& r) {
+    const float x = snap_v(r.x);
+    const float y = snap_v(r.y);
+    const float x2 = snap_v(r.x + r.width);
+    const float y2 = snap_v(r.y + r.height);
+    return {x, y, std::max(0.0f, x2 - x), std::max(0.0f, y2 - y)};
+}
+
 // The pill shapes' radius (P5): the theme's radius_pill when a skin set
 // one, else the shape's OWN half-height - the full pill, the stock look.
 // (ChromeTheme::pill_radius() falls back to corner_radius, the radius
@@ -398,12 +425,16 @@ inline void draw_label(float x, float row_top, float row_height,
     if (fit.advance <= 0.0f) {
         return;
     }
+    // The label's origin snaps (P6): a fractional row center must not
+    // smear every glyph over a pixel boundary - the box top snaps, in
+    // whichever branch draws.
+    x = snap_v(x);
     if (theme.font != nullptr) {
-        r2d::draw_text(x, label_top(row_top, row_height, theme), fit.text,
-                       *theme.font, color);
+        r2d::draw_text(x, snap_v(label_top(row_top, row_height, theme)),
+                       fit.text, *theme.font, color);
     } else {
         const float bar_height = row_height * 0.5f;
-        r2d::draw_quad(x, row_top + (row_height - bar_height) * 0.5f,
+        r2d::draw_quad(x, snap_v(row_top + (row_height - bar_height) * 0.5f),
                        fit.advance, bar_height, color);
     }
 }

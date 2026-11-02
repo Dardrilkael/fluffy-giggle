@@ -70,6 +70,21 @@ const Font::Glyph* Font::glyph(std::uint32_t codepoint) const {
     return &glyphs_[codepoint - kFirstBaked];
 }
 
+const Font::Glyph* Font::find_glyph(std::uint32_t codepoint) const {
+    // glyph() without the fallback: the carried-only answer the icon
+    // mapping wants (a missing icon must degrade to "no sprite", never
+    // to the tofu box's sprite - the icon consumers draw their pre-icon
+    // square instead). Same resolution order, the fallback branch cut.
+    if (codepoint < kFirstBaked) {
+        return nullptr;
+    }
+    if (codepoint >= kFirstBaked + kBakedCount) {
+        const auto at = extras_->glyphs.find(codepoint);
+        return at != extras_->glyphs.end() ? &at->second : nullptr;
+    }
+    return &glyphs_[codepoint - kFirstBaked];
+}
+
 float Font::measure_text(const char* utf8_text) const {
     if (utf8_text == nullptr) {
         return 0.0f;
@@ -383,6 +398,127 @@ BakedFont bake_info(const stbtt_fontinfo& info, float pixel_height,
     out.glyphs.push_back(std::move(tofu));
     out.ok = true;
     return out;
+}
+
+// --- the built-in icon set (P6) ----------------------------------------------
+// Seven interface icons as analytic shapes: each is a small list of line
+// segments (round-capped) plus at most one circle, rasterized by Euclidean
+// distance to the nearest stroke edge with a one-pixel antialiasing ramp.
+// The geometry is spelled in a 0..1 unit square (y down, like the gui) and
+// scaled to the font's pixel height at bake time, so every size bakes the
+// same icon at the same weight. The stroke is proportional (a tenth of the
+// box, floored at 1.25 px) - chunky enough to read at 14 px, fine enough
+// not to blob at 28.
+namespace {
+
+struct IconSegment {
+    float x0, y0, x1, y1;
+};
+struct IconShape {
+    const IconSegment* segments;
+    std::uint32_t segment_count;
+    float circle_x, circle_y, circle_r;  // r <= 0: no circle
+};
+
+// Distance from (px, py) to a segment, round caps included (the plain
+// point-to-segment distance's clamp already reads as a cap).
+float segment_distance(float px, float py, const IconSegment& s) {
+    const float dx = s.x1 - s.x0;
+    const float dy = s.y1 - s.y0;
+    const float len2 = dx * dx + dy * dy;
+    float t = 0.0f;
+    if (len2 > 0.0f) {
+        t = ((px - s.x0) * dx + (py - s.y0) * dy) / len2;
+        t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+    }
+    const float cx = s.x0 + t * dx;
+    const float cy = s.y0 + t * dy;
+    const float ex = px - cx;
+    const float ey = py - cy;
+    return std::sqrt(ex * ex + ey * ey);
+}
+
+}  // namespace
+
+bool bake_icon_glyph(std::uint32_t codepoint, float pixel_height,
+                     BakedGlyph& out) {
+    if (codepoint < kIconFirst || codepoint >= kIconFirst + kIconCount ||
+        pixel_height <= 0.0f) {
+        return false;
+    }
+
+    // The shapes, in enum order (chevron down, chevron right, check,
+    // close, search, plus, minus) - a static table, the whole "look" of
+    // the set in one place.
+    static const IconSegment kChevronDown[] = {{0.28f, 0.36f, 0.50f, 0.62f},
+                                               {0.50f, 0.62f, 0.72f, 0.36f}};
+    static const IconSegment kChevronRight[] = {{0.36f, 0.28f, 0.62f, 0.50f},
+                                                {0.62f, 0.50f, 0.36f, 0.72f}};
+    static const IconSegment kCheck[] = {{0.20f, 0.52f, 0.42f, 0.74f},
+                                         {0.42f, 0.74f, 0.80f, 0.30f}};
+    static const IconSegment kClose[] = {{0.26f, 0.26f, 0.74f, 0.74f},
+                                         {0.74f, 0.26f, 0.26f, 0.74f}};
+    static const IconSegment kSearchTail[] = {{0.62f, 0.62f, 0.82f, 0.82f}};
+    static const IconSegment kPlus[] = {{0.50f, 0.22f, 0.50f, 0.78f},
+                                        {0.22f, 0.50f, 0.78f, 0.50f}};
+    static const IconSegment kMinus[] = {{0.22f, 0.50f, 0.78f, 0.50f}};
+    static const IconShape kShapes[] = {
+        {kChevronDown, 2, 0, 0, -1.0f},
+        {kChevronRight, 2, 0, 0, -1.0f},
+        {kCheck, 2, 0, 0, -1.0f},
+        {kClose, 2, 0, 0, -1.0f},
+        {kSearchTail, 1, 0.42f, 0.42f, 0.22f},
+        {kPlus, 2, 0, 0, -1.0f},
+        {kMinus, 1, 0, 0, -1.0f},
+    };
+    const IconShape& shape = kShapes[codepoint - kIconFirst];
+
+    // The bitmap: the box plus a 1 px apron so the AA ramp never clips.
+    const float stroke = std::max(1.25f, 0.10f * pixel_height);
+    const std::uint32_t side =
+        static_cast<std::uint32_t>(pixel_height) + 2u;
+    out = BakedGlyph{};
+    out.codepoint = codepoint;
+    out.w = side;
+    out.h = side;
+    out.advance = 0.0f;   // draw_icon places the quad; this never flows
+    out.offset_x = 0.0f;  // text
+    out.offset_y = 0.0f;
+    out.rgba.assign(static_cast<std::size_t>(side) * side * 4u, 255);
+    for (std::uint32_t py = 0; py < side; ++py) {
+        for (std::uint32_t px = 0; px < side; ++px) {
+            // Pixel center in the unit square, against the apron: the
+            // box's (0,0) sits at (-1, -1) px in the bitmap.
+            const float ux =
+                (static_cast<float>(px) - 1.0f + 0.5f) / pixel_height;
+            const float uy =
+                (static_cast<float>(py) - 1.0f + 0.5f) / pixel_height;
+            float d = 1e9f;
+            for (std::uint32_t i = 0; i < shape.segment_count; ++i) {
+                d = std::min(d, segment_distance(ux, uy, shape.segments[i]));
+            }
+            if (shape.circle_r > 0.0f) {
+                const float ex = ux - shape.circle_x;
+                const float ey = uy - shape.circle_y;
+                // The ring's edge: |distance from center| minus radius,
+                // the same SDF the batch shader shades.
+                d = std::min(
+                    d, std::sqrt(ex * ex + ey * ey) - shape.circle_r);
+            }
+            // Half the stroke on each side of the ideal line, the usual
+            // 1 px ramp over the edge. The distance converts to PIXELS
+            // first (it is unit-square; the stroke and the ramp are px)
+            // - mixed units would scale the stroke with the bake and
+            // blob every icon at small sizes. Colors stay white,
+            // coverage in alpha (the baked-mask convention).
+            const float d_px = d * pixel_height;
+            const float coverage =
+                std::clamp(stroke * 0.5f + 0.5f - d_px, 0.0f, 1.0f);
+            out.rgba[(static_cast<std::size_t>(py) * side + px) * 4u + 3u] =
+                static_cast<std::uint8_t>(coverage * 255.0f + 0.5f);
+        }
+    }
+    return true;
 }
 
 // --- the face stack (the growing Font's fallback chain) --------------------
