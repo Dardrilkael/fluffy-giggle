@@ -49,7 +49,9 @@
 #include <ws/circsim/locate.hpp>
 #include <ws/circsim/model.hpp>
 #include <ws/circsim/nets.hpp>
+#include <ws/circsim/plot.hpp>
 #include <ws/math/vecmath.hpp>
+#include <ws/spice/run.hpp>
 #include <ws/ui/canvas/canvas2d.hpp>
 #include <ws/ui/canvas/tessellation.hpp>
 #include <ws/ui/gui/theme.hpp>
@@ -196,6 +198,24 @@ struct NetlistCache {
     std::vector<std::string> lines;   // split for the panel's rows
 };
 
+// The Results panel's cache (stage 4): the last run's output plus the
+// view over it - which table is shown, which signals are visible, and
+// the sample the cursor hovers (the crosshair's index, -1 when off).
+// A document switch clears it (document_changed); an EDIT does not -
+// the panel marks itself stale against the schematic's version, the
+// same contract the Problems and Netlist panels keep.
+struct ResultsCache {
+    static constexpr std::size_t kNoTable = static_cast<std::size_t>(-1);
+
+    bool has = false;
+    std::uint64_t version = 0;           // the schematic version it ran against
+    ws::spice::RunOutput run;            // tables + measurements
+    std::size_t table = 0;               // the selected table
+    std::size_t visible_for = kNoTable;  // the table `visible` belongs to
+    std::vector<std::uint8_t> visible;   // per-signal flags of that table
+    int hover = -1;                      // sample index under the cursor
+};
+
 // One editable field's caller-owned buffer (the Properties panel's
 // editing state): the bytes the text_input edits, the model value it
 // loaded from, and the epoch it loaded at - an epoch move (a selection
@@ -218,6 +238,10 @@ struct Editor {
     ws::ui::r2d::Font* font_mono = nullptr;     // the netlist panel's face
     gui::Toasts* toasts = nullptr;              // the shell's store
     std::function<void(std::string)> set_status;
+    // The Results panel's export button: true = JSON, false = CSV.
+    // The app installs it (the path policy - derive from the
+    // document, write through the fs seam - is the app's to own).
+    std::function<void(bool json)> export_results;
 
     // The active document (null = none open). The app re-points this
     // on every activation change and calls document_changed().
@@ -261,6 +285,7 @@ struct Editor {
     EditorView view;
     ProblemsCache problems;
     NetlistCache netlist;
+    ResultsCache results;
 
     // The Properties panel's editing state: the field buffers keyed
     // by stable strings, the epoch that reloads them, the selection
@@ -284,6 +309,18 @@ struct Editor {
     // The canvas the schematic panel renders through (one per
     // editor; the canvas layer's own state is per-instance).
     canvas::Renderer2DCanvas renderer;
+
+    // The Results panel's draw seam: null = &renderer (the live app);
+    // a headless test injects a CommandListCanvas here and asserts the
+    // plot geometry the panel emits (the same purity seam the gui
+    // suite rides - the results panel is app code, so the injection
+    // point is a member, not a link-time stub).
+    canvas::Canvas2D* plot_canvas = nullptr;
+
+    // The canvas the Results panel draws through.
+    [[nodiscard]] canvas::Canvas2D& results_draw_canvas() {
+        return plot_canvas != nullptr ? *plot_canvas : renderer;
+    }
 
     // --- helpers (editor.cpp) ---
 

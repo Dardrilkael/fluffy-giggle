@@ -50,6 +50,7 @@
 
 #include "canvas_panel.hpp"
 #include "editor.hpp"
+#include "results_panel.hpp"
 #include "side_panels.hpp"
 
 #ifdef _WIN32
@@ -195,8 +196,11 @@ class CircsimApp final : public ws::ui::App {
                                        });
                         return out;
                     }();
-                    if (lower.size() < 5u ||
-                        lower.compare(lower.size() - 4u, 4u, ".csim") != 0) {
+                    // ends_with, not a sized compare: the stage-3 check
+                    // compared the last 4 chars with ".csim" (5 chars)
+                    // - never equal, so EVERY open and session restore
+                    // was refused. Caught by the stage-4 visual gate.
+                    if (!lower.ends_with(".csim")) {
                         return ws::core::unexpected<ws::core::Error>(
                             ws::core::make_error(
                                 static_cast<std::int32_t>(
@@ -242,6 +246,7 @@ class CircsimApp final : public ws::ui::App {
         editor_.set_status = [this](std::string text) {
             shell_->set_status(std::move(text));
         };
+        editor_.export_results = [this](bool json) { export_run(json); };
 
         (void)shell_->startup();
 
@@ -380,6 +385,17 @@ class CircsimApp final : public ws::ui::App {
             editor::draw_netlist_panel(editor_, g, l, t);
         };
         (void)shell_->panels().add(std::move(netlist));
+
+        shell::PanelDesc results;
+        results.id = "results";
+        results.title = "Results";
+        results.placement.area = shell::DockPlacement::Area::bottom;
+        results.draw = [this](GuiContext& g, LayoutCursor& l,
+                             const gui::ChromeTheme& t,
+                             const shell::PanelInstance&) {
+            editor::draw_results_panel(editor_, g, l, t);
+        };
+        (void)shell_->panels().add(std::move(results));
     }
 
     // --- the command set ----------------------------------------------------
@@ -557,6 +573,34 @@ class CircsimApp final : public ws::ui::App {
         run_cmd.execute = [this](std::string_view) { submit_run(); };
         add(std::move(run_cmd));
 
+        Command results_cmd;
+        results_cmd.id = "circuit.results";
+        results_cmd.label = "Show Results";
+        results_cmd.category = "Circuit";
+        results_cmd.enabled = [this] { return editor_.doc != nullptr; };
+        results_cmd.execute = [this](std::string_view) {
+            if (!shell_->panel_host().is_open("results")) {
+                (void)shell_->panel_host().open(shell_->panels(), "results");
+            }
+        };
+        add(std::move(results_cmd));
+
+        Command csv_cmd;
+        csv_cmd.id = "circuit.export_csv";
+        csv_cmd.label = "Export Results CSV";
+        csv_cmd.category = "Circuit";
+        csv_cmd.enabled = [this] { return editor_.results.has; };
+        csv_cmd.execute = [this](std::string_view) { export_run(false); };
+        add(std::move(csv_cmd));
+
+        Command json_cmd;
+        json_cmd.id = "circuit.export_json";
+        json_cmd.label = "Export Results JSON";
+        json_cmd.category = "Circuit";
+        json_cmd.enabled = [this] { return editor_.results.has; };
+        json_cmd.execute = [this](std::string_view) { export_run(true); };
+        add(std::move(json_cmd));
+
         Command about_cmd;
         about_cmd.id = "app.about";
         about_cmd.label = "About circsim editor";
@@ -718,20 +762,40 @@ class CircsimApp final : public ws::ui::App {
             true, std::move(outcome.problems),
             outcome.run.has_value() ? "run" : "run (failed)");
         if (outcome.run.has_value()) {
+            // The Results panel's half of the delivery: the run itself
+            // (tables + measurements) keyed to the version it saw, the
+            // view reset to the first table, and the panel opened -
+            // the simulate act ends with the waveforms on screen.
+            editor_.results.has = true;
+            editor_.results.version = editor_.schem() != nullptr
+                                          ? editor_.schem()->version()
+                                          : 0;
+            editor_.results.run = std::move(*outcome.run);
+            editor_.results.table = 0;
+            editor_.results.visible_for = editor::ResultsCache::kNoTable;
+            editor_.results.visible.clear();
+            editor_.results.hover = -1;
+            if (!shell_->panel_host().is_open("results")) {
+                (void)shell_->panel_host().open(shell_->panels(), "results");
+            }
+
             std::size_t rows = 0;
-            for (const ws::spice::Table& t : outcome.run->results.tables) {
+            for (const ws::spice::Table& t : editor_.results.run.results.tables) {
                 rows += t.row_count();
             }
             char summary[160];
             std::snprintf(summary, sizeof summary,
                           "simulation ok: %zu table%s, %zu row%s, %zu "
                           "measurement%s",
-                          outcome.run->results.tables.size(),
-                          outcome.run->results.tables.size() == 1 ? ""
-                                                                  : "s",
+                          editor_.results.run.results.tables.size(),
+                          editor_.results.run.results.tables.size() == 1
+                              ? ""
+                              : "s",
                           rows, rows == 1 ? "" : "s",
-                          outcome.run->measurements.size(),
-                          outcome.run->measurements.size() == 1 ? "" : "s");
+                          editor_.results.run.measurements.size(),
+                          editor_.results.run.measurements.size() == 1
+                              ? ""
+                              : "s");
             editor_.toast(summary, gui::ToastSeverity::info);
             editor_.status(count == 0 ? summary
                                       : editor_.problems.header);
@@ -740,6 +804,46 @@ class CircsimApp final : public ws::ui::App {
                               outcome.run.error().message,
                           gui::ToastSeverity::error);
             editor_.status(editor_.problems.header);
+        }
+    }
+
+    // --- the export (the Results panel's buttons and the Circuit menu) ---
+
+    // The path policy: the document's stem with the new extension,
+    // beside the schematic it came from; an untitled document exports
+    // to the working directory. The write rides the fs seam (atomic
+    // by contract), and the body is the writers ws::spice already
+    // owns - the same bytes the CLI's --format emits.
+    void export_run(bool json) {
+        if (!editor_.results.has || editor_.doc == nullptr) {
+            return;
+        }
+        std::string stem = editor_.doc->path();
+        if (stem.empty()) {
+            stem = "circsim-results";
+        } else {
+            const std::size_t slash = stem.find_last_of("/\\");
+            const std::size_t dot = stem.find_last_of('.');
+            if (dot != std::string::npos &&
+                (slash == std::string::npos || dot > slash)) {
+                stem.resize(dot);
+            }
+            if (stem.empty() ||
+                (slash != std::string::npos && dot == slash + 1u)) {
+                stem = "circsim-results";
+            }
+        }
+        const std::string path =
+            stem + (json ? ".json" : ".csv");
+        const std::string body =
+            json ? ws::circsim::results_json(editor_.results.run)
+                 : ws::spice::results_csv(editor_.results.run.results);
+        const ws::core::Status done = fs_.write(path, body);
+        if (done.has_value()) {
+            editor_.toast("wrote " + path, gui::ToastSeverity::info);
+        } else {
+            editor_.toast("export failed: " + done.error().message,
+                          gui::ToastSeverity::error);
         }
     }
 

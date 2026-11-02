@@ -9,15 +9,15 @@ read `libs/circsim/CLAUDE.md` (the lived rules) and the SPICE arc's
 ## Status (2026-11-02)
 
 Working tree clean; `main` ahead of origin and deliberately not pushed
-(no remote credentials) - same policy as the SPICE arc. Stage 3 landed
-on top of `ae60fd2` (the posix dev-box commit that made the whole ui
-family build and test on Linux).
+(no remote credentials) - same policy as the SPICE arc. Stage 4 landed
+on top of stage 3's `99ae630`.
 
 | Commit    | Stage | What landed |
 |-----------|-------|-------------|
 | `ce7c14a` | 1     | Schematic model (parts/junctions/wires/labels, ids never reused), the `.csim` JSON format (unknown fields preserved, tolerant load, migrations, atomic writes), graph-based net building (reference edges + exact-position coincidence, crossings never connect), ERC (floating pins, V/L loops, I cutsets, ...), the ws::spice deck export with the back-map, `run_schematic` through spice's own front end, the `circsim_cli` run/erc/netlist subcommands, the smoke suite. |
 | `812fc68` | 2     | The `.csym` symbol library: `SymbolLibrary` (built-ins + layered files, ci, later wins, override warnings), typed `ParamSpec`s (Text/Number/Choice - Number validated with ws::spice's grammar; defaults are new-part prefill, never injected at export), `DrawPrim` drawing primitives + `transform_pos` + `symbol_bounds`, ERC's stage-2 checks (bad_param, missing_param on non-optional emits, unused_param), `-S` on the CLI + the `symbols` subcommand (--json full-table dump), `tline.csym`/`tline_demo.csim` (a library-only T symbol simulated through the quarter-wave closed form). |
-| (this commit) | 3 | The editor: `apps/circsim_editor`, the ws::ui::shell app over the model - the schematic canvas (place/move/rotate/mirror parts, wire routing with the ortho constraint, labels; every edit an undo command with typing-run coalescing), the palette over `symbols()` with fitted mini previews, the property grid over ParamSpecs (plus the analysis-setup and directives editors), the Problems panel over Diags with select-and-zoom through the back-map (the new headless `libs/circsim/locate` seam, tested), the netlist view, and the simulate job over `run_schematic` (status row + summary toast). The bare editor keys (R/M/W/L/F/Del/Esc) bind on the resolver's PANEL rung; the text rule keeps them out of focused fields. |
+| `99ae630` | 3     | The editor: `apps/circsim_editor`, the ws::ui::shell app over the model - the schematic canvas (place/move/rotate/mirror parts, wire routing with the ortho constraint, labels; every edit an undo command with typing-run coalescing), the palette over `symbols()` with fitted mini previews, the property grid over ParamSpecs (plus the analysis-setup and directives editors), the Problems panel over Diags with select-and-zoom through the back-map (the new headless `libs/circsim/locate` seam, tested), the netlist view, and the simulate job over `run_schematic` (status row + summary toast). The bare editor keys (R/M/W/L/F/Del/Esc) bind on the resolver's PANEL rung; the text rule keeps them out of focused fields. |
+| (this commit) | 4 | The results story: `libs/circsim/plot.hpp` - the headless axis math (nice 1/2/5 ticks, SI engineering labels, range padding, min/max decimation that keeps every bucket's y-extremes so spikes and envelope survive any pixel budget), 14 test cases; the editor's Results panel over it - one analysis at a time from a combo, per-signal visibility checkboxes with live legend readouts (the hover sample, else the last), the plot through the canvas layer (frame, grid + engineering tick labels, colored series, NaN-broken segments), a hover crosshair with per-series markers, `.op` tables and `.meas` as value rows, and CSV/JSON export riding the writers ws::spice already owns (the document's stem, the fs seam). The panel's draw is gated headless by `tests/test_results_panel.cpp` through the new `Editor::plot_canvas` seam (a CommandListCanvas asserting the recorded geometry: frame, grid, series point counts/colors/mapping, decimation envelope, crosshair, markers, the no-plot .op shape). The fix the visual gate caught: the stage-3 document factory's extension check compared the last 4 chars with ".csim" (5 chars) - never equal, so every File > Open and session restore was refused; now `ends_with`. |
 
 ## Locked decisions
 
@@ -50,17 +50,23 @@ ctest --preset linux                                    # headless gate
 python3 tools/smoke_circsim.py --cli build/linux/bin/circsim_cli
 ```
 
-The stage-3 gate at land time: 591/591 ctest on the `linux` preset
-(headless subset; test_circsim now 80 cases / 503 assertions, of which
-10 cases are test_locate.cpp) and 851/851 on the Linux ui tree (the
+The stage-4 gate at land time: 605/605 ctest on the `linux` preset
+(headless subset; test_circsim now 94 cases / 589 assertions, of which
+14 cases are test_plot.cpp) and 872/872 on the Linux ui tree (the
 whole-workspace build `ae60fd2` unlocked: every headless suite
-including test_ui/test_ui_gui/test_ui_canvas/test_ui_shell, plus the
-circsim_editor link), ASan+UBSan clean over the arc's own suites
-(circsim+spice: 247/247; the pre-existing physics.3D allocation-
-counting cases are sanitizer artifacts, untouched by this arc), the
-conversion audit clean over the editor TUs, the shadow audit clean
-over the arc's own files (the input event-header findings are
-pre-existing, outside this arc's TUs).
+including test_ui/test_ui_gui/test_ui_canvas/test_ui_shell, the
+circsim_editor link, and the new test_circsim_editor_panel - 6 cases /
+115 assertions over the Results panel's draw), ASan+UBSan clean over
+the arc's own suites (circsim+spice: 261/261; the pre-existing
+physics.3D allocation-counting cases are sanitizer artifacts,
+untouched by this arc), the conversion audit clean over the arc's own
+TUs (the vecmath.hpp header finding is pre-existing, in every
+stage-1..3 TU alike), the shadow audit clean over the arc's own
+files (the ui/input findings are pre-existing, outside this arc's
+TUs), the CLI smoke green. The visual gate: the editor booted under
+Xvfb + lavapipe, restored a session, simulated (Ctrl+Enter), and the
+Results panel drew legend readouts and the plot - the run that found
+the stage-3 factory bug above.
 
 The Linux ui tree (the editor's own build):
 
@@ -79,7 +85,7 @@ The editor itself is a windowed app (Windows the shipped desktop; a
 posix box runs it under X with the dejavu/liberation font fallbacks
 and the Unavailable* dialog refusals - see apps/CLAUDE.md).
 
-## What exists (stage 3 file map)
+## What exists (stage 4 file map)
 
 ```
 libs/circsim/
@@ -94,10 +100,13 @@ libs/circsim/
     erc.hpp       # run_erc(s[, build][, SymbolLibrary*])
     export.hpp    # export_deck/run_schematic (+ SymbolLibrary*), results_json
     locate.hpp    # locate_diag/focus_bounds (stage 3 - the jump seam)
+    plot.hpp      # nice_ticks/format_eng/expand_range/decimate_minmax
+                  # (stage 4 - the axis math every plot surface shares)
   src/
     symbols.cpp   # the built-in table, now with specs + draw
     library.cpp   # the .csym reader/writer + the layering rules
     locate.cpp    # the where-parser + the focus bounds
+    plot.cpp      # the tick ladder, the SI prefix walk, the bucket walk
     ...           # model/nets/format/erc/export (stage 1, threaded)
   examples/
     divider.csim, rc_step.csim      # stage-1 smoke decks
@@ -105,25 +114,36 @@ libs/circsim/
   tests/
     test_symbols.cpp                # the stage-2 gate (no main; test_format owns it)
     test_locate.cpp                 # the stage-3 lib gate (no main)
+    test_plot.cpp                   # the stage-4 lib gate (no main)
 apps/circsim_cli/src/main.cpp       # run/erc/netlist/symbols, -S
 apps/circsim_editor/                # stage 3: the editor (see its src/)
   src/editor.hpp        # the shared core: EditorView (y-up camera),
-                        # Selection/Tool/PinHit, the caches, Editor
+                        # Selection/Tool/PinHit, the caches (now the
+                        # ResultsCache + the plot_canvas test seam),
+                        # Editor
   src/editor.cpp        # snap/bounds/hit/route + draw_symbol + refreshers
   src/document.hpp/.cpp # the .csim Document + the undo command set
   src/canvas_panel.hpp/.cpp  # the Schematic panel (input + world render)
   src/side_panels.hpp/.cpp   # palette/properties/problems/netlist
+  src/results_panel.hpp/.cpp # stage 4: the Results panel (plot + legend
+                        # + value rows + export buttons; the axis math
+                        # stays in ws::circsim/plot)
   src/main.cpp          # the App: shell wiring, commands, the run job
+                        # (delivering to the Results panel), the export
+  tests/test_results_panel.cpp  # the stage-4 app gate: the panel driven
+                        # headless through the plot_canvas seam
 tools/smoke_circsim.py              # the CLI smoke (incl. library cases)
 ```
 
 ## Not done (the natural next stages)
 
-- **Stage 4 candidates, editor-side:** the results story (a plot panel
-  over ws::spice's tables - ImPlot or the gui's own chart seams),
-  CSV/JSON export of a run through the save dialog, waypoint editing
-  on placed wires, multi-select + marquee, an android port (the touch
-  interactions need their own pass).
+- **Stage 5 candidates, editor-side:** zoom/pan and rubber-band cursor
+  reads on the plot itself (the crosshair is sample-snapped today;
+  axis-drag zoom and a box zoom are the natural next cuts), multiple
+  Y axes for mixed V/I legends, a CSV/JSON save dialog (the export
+  derives the path from the document today - deliberate v1), waypoint
+  editing on placed wires, multi-select + marquee, an android port
+  (the touch interactions need their own pass).
 - **Schematic-side libraries of the model's own**: a .csim "libraries"
   field naming .csym files (the CLI's -S is the seam today; the format
   deliberately does not carry it yet - it would be a .csim version

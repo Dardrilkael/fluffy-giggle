@@ -440,6 +440,7 @@ void Editor::document_changed() {
     wire_draft = WireDraft{};
     problems = ProblemsCache{};
     netlist = NetlistCache{};
+    results = ResultsCache{};
     const ws::circsim::Schematic* s = schem();
     if (s != nullptr) {
         view.zoom = s->view.zoom > 0.0 ? s->view.zoom : 26.0;

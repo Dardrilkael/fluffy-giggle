@@ -92,18 +92,27 @@ CMakeLists only wire ws libraries together.
   symbol table (--json dumps it whole). `-S lib.csym` (repeatable,
   later wins) layers .csym symbol libraries over the built-ins for every
   subcommand. argv, file I/O and exit codes only.
-- `apps/circsim_editor` - the ws::circsim stage-3 editor (windowed,
+- `apps/circsim_editor` - the ws::circsim stage-3/4 editor (windowed,
   desktop): the schematic capture app built ONLY from AppShell over
-  libs/circsim - five panels (the Schematic canvas through ws::ui's
+  libs/circsim - six panels (the Schematic canvas through ws::ui's
   canvas layer: place/move/rotate/mirror parts with every edit an undo
   command, wire routing with the ortho constraint, net labels; the
   Palette over `symbols()` with fitted mini previews; the Properties
   grid over ParamSpecs plus the analysis-setup and directives editors;
   the Problems list over Diags with select-and-zoom through
-  libs/circsim's locate seam; the Netlist view), the .csim document
-  type (autosave/crash recovery/session ride the shell), and the
+  libs/circsim's locate seam; the Netlist view; the Results panel - the
+  stage-4 plot over ws::spice's tables: one analysis at a time through
+  ws::circsim's headless axis math (nice 1/2/5 ticks, SI engineering
+  labels, min/max decimation for long sweeps), per-signal visibility
+  with live legend readouts, a hover crosshair with per-series markers,
+  .op tables and .meas as value rows, and CSV/JSON export through the
+  writers ws::spice already owns), the .csim document type
+  (autosave/crash recovery/session ride the shell), and the
   simulate job over `run_schematic` (a status row with cancel, a
-  summary toast, the run's mapped problems in the Problems panel). The
+  summary toast, the run's mapped problems in the Problems panel, the
+  tables delivered to the Results panel). The panel's draw is gated
+  headless by `tests/test_results_panel.cpp` through the Editor's
+  plot_canvas seam (a CommandListCanvas asserting the geometry). The
   bare editor keys (R/M/W/L/F/Del/Esc) bind on the shortcut resolver's
   panel rung - the Schematic panel's own scope, kept out of focused
   text fields by the resolver's text rule. Windows is the shipped

@@ -144,12 +144,27 @@ fetched privately, which would duplicate a first-party capability.
   a wire's polyline, a label's anchor grown one unit; the caller's
   NetList saves a build for the Net case.
 
+## Plot (plot.hpp, stage 4)
+- The axis math every plot surface shares (the editor's Results
+  panel today; a raster exporter later): `nice_ticks` (the 1/2/5 x 10^k
+  ladder, endpoints never forced), `format_eng` (SI engineering
+  notation, ASCII "u" for micro, m/M case matters, renormalizes a
+  mantissa that rounds up through its decade, plain %g outside f..T),
+  `expand_range` (5% padding, a degenerate span opens around its
+  magnitude, non-finite answers {0,1}), `decimate_minmax` (buckets on
+  a strictly-increasing x, keeps each bucket's y-min and y-max SAMPLE
+  in occurrence order plus the exact ends - spikes and envelope
+  survive any budget; non-increasing axes answer EMPTY = draw raw,
+  the nested-.dc rule).
+- Pure doubles and strings: no ws::spice, no ui, no font. The panel
+  consumes it; the tests gate it.
+
 ## Layout
 - `include/ws/circsim/`: model.hpp, symbols.hpp, library.hpp, diag.hpp,
-  nets.hpp, format.hpp, erc.hpp, export.hpp, locate.hpp.
+  nets.hpp, format.hpp, erc.hpp, export.hpp, locate.hpp, plot.hpp.
   ws::core::Result only; no exceptions.
 - `src/`: model.cpp, symbols.cpp, library.cpp, nets.cpp, format.cpp,
-  erc.cpp, export.cpp, locate.cpp. The built-in symbol table in
+  erc.cpp, export.cpp, locate.cpp, plot.cpp. The built-in symbol table in
   symbols.cpp (with its specs and draw) is the shape the .csym library
   feeds.
 - `examples/`: divider.csim, rc_step.csim (the smoke suite's decks),
@@ -158,19 +173,24 @@ fetched privately, which would duplicate a first-party capability.
 - `apps/circsim_cli`: run / erc / netlist / symbols subcommands, `-S
   <lib.csym>` (repeatable, later wins) on run/erc/netlist; exit codes
   0 ok, 1 sim/ERC error, 2 usage/IO (the ws::spice CLI convention).
-- `apps/circsim_editor` (stage 3): the ws::ui::shell editor app over
+- `apps/circsim_editor` (stages 3-4): the ws::ui::shell editor app over
   this lib - the only ui-bearing consumer. The lib itself stays
-  headless (no ui include, unchanged).
+  headless (no ui include, unchanged); the editor's Results panel
+  draws through plot.hpp and is gated headless by its own
+  tests/test_results_panel.cpp over the Editor's plot_canvas seam.
 
 ## Tests
 ```
 ctest --preset linux -R circsim    # plus circsim_smoke over the CLI
 ```
-One binary, six TUs: test_format.cpp (round-trip, unknowns, migration,
+One binary, seven TUs: test_format.cpp (round-trip, unknowns, migration,
 tolerant load - owns the doctest main), test_nets.cpp (the connectivity
 rules), test_erc.cpp (one case per check), test_export.cpp (golden decks,
 the full-path analytic sims, error mapping), test_symbols.cpp (the
 library: load/save round-trips, tolerance, layering/overrides, param
 typing, draw prims, bounds, and the tline full path), test_locate.cpp
 (stage 3: every `where` spelling, the back-map paths, the focus
-bounds).
+bounds), test_plot.cpp (stage 4: the tick ladder, the prefix walk, the
+decimation contract - the exact-envelope sine among them). The
+editor's own suite lives in the app: test_circsim_editor_panel (the
+Results panel's draw through the plot_canvas seam, on the ui tree).
