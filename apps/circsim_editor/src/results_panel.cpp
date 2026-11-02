@@ -26,6 +26,19 @@
 // padded auto fit - so the view can never leave the data; the
 // decimation slices to the visible x window so a zoomed-in view
 // spends its pixel budget on the samples it shows.
+//
+// Stage 6 gives a mixed V/I legend its second spine. The y fit splits
+// per axis (ws::circsim::signal_y_axis): the voltage columns keep the
+// left scale, the current columns earn a right one - own padded fit,
+// own tick ladder, own label strip (the frame's right margin widens
+// for it), own drag strip. Every stage-5 gesture now works on three
+// windows: the wheel zooms x toward the cursor and each y spine
+// toward its own mapped anchor, the band commits its box through each
+// spine's own transform, the pan slides both y windows by the same
+// pixels, and the right strip's drag stretches the amp window alone.
+// A table with no visible current column draws exactly the stage-5
+// shape - the right margin, strip and ticks only exist when the
+// second spine does.
 
 #include "results_panel.hpp"
 
@@ -159,12 +172,16 @@ void stroke_series(canvas::Canvas2D& rc,
 // The plot rect's margins: the frame sits inside; the x axis's strip
 // is the bottom margin (its labels live there), the y axis's is the
 // left one. The strips are the axis-drag zooms' handles, so they are
-// interaction geometry, not just spacing.
+// interaction geometry, not just spacing. Stage 6: a right axis
+// widens the right margin to a label strip of its own - and that
+// strip is the right spine's drag handle. The no-axis margin is the
+// stage-5 shape exactly.
 constexpr float kPlotHeight = 220.0f;
 constexpr float kMarginLeft = 46.0f;
 constexpr float kMarginBottom = 17.0f;
 constexpr float kMarginTop = 6.0f;
 constexpr float kMarginRight = 10.0f;
+constexpr float kMarginRightAxis = 46.0f;
 
 // The band's fill/outline: the theme's accent, alpha-split (a wash
 // under the series, a line around the box). r2d packs 0xRRGGBBAA, so
@@ -174,17 +191,22 @@ constexpr float kMarginRight = 10.0f;
     return (color & 0xFFFFFF00u) | std::uint32_t(a);
 }
 
-// The frame geometry plus the two range pairs the interaction pass
-// works on: home (the auto fit - the outermost view) and the
-// effective view (the manual window riding over it). The input pass
-// mutates the effective pair; the draw pass reads it. wx/wy map
-// screen px to data through the CURRENT effective view.
+// The frame geometry plus the range pairs the interaction pass works
+// on: home (the auto fit - the outermost view) and the effective view
+// (the manual window riding over it), per spine - x, the left y and
+// (stage 6) the right y. The input pass mutates the effective pair;
+// the draw pass reads it. wx/wy/wy1 map screen px to data through the
+// CURRENT effective view of their own spine.
 struct PlotFrame {
     float fx = 0.0f, fy = 0.0f, iw = 0.0f, ih = 0.0f;
+    float mr = kMarginRight;       // the right margin (wider with an axis)
+    bool has_right = false;        // a right (current) spine exists
     ws::circsim::PlotRange xr{};   // home x
-    ws::circsim::PlotRange yr{};   // home y
+    ws::circsim::PlotRange yr{};   // home y, left (V)
+    ws::circsim::PlotRange yr1{};  // home y, right (A) - sane-empty when absent
     ws::circsim::PlotRange vxr{};  // effective x
-    ws::circsim::PlotRange vyr{};  // effective y
+    ws::circsim::PlotRange vyr{};  // effective y, left
+    ws::circsim::PlotRange vyr1{}; // effective y, right
 
     [[nodiscard]] double wx(float px) const {
         return vxr.lo + (static_cast<double>(px) - fx) / iw *
@@ -193,6 +215,10 @@ struct PlotFrame {
     [[nodiscard]] double wy(float py) const {
         return vyr.hi - (static_cast<double>(py) - fy) / ih *
                             (vyr.hi - vyr.lo);
+    }
+    [[nodiscard]] double wy1(float py) const {
+        return vyr1.hi - (static_cast<double>(py) - fy) / ih *
+                             (vyr1.hi - vyr1.lo);
     }
 };
 
@@ -221,24 +247,35 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
         cache.view_for = cache.table;
     }
 
-    // The effective view: the manual window clamped into home, or
-    // home itself.
+    // The effective view: the manual windows clamped into their home,
+    // or home itself - x and the left spine exactly as stage 5 left
+    // them; the right spine (stage 6) additionally refuses a degenerate
+    // window (span 0 can survive a clamp when the axis membership
+    // changed under a stored view), because a zero-span spine cannot
+    // map a single pixel.
     pf.vxr = cache.view.active
                  ? clamp_view({cache.view.x_lo, cache.view.x_hi}, pf.xr)
                  : pf.xr;
     pf.vyr = cache.view.active
                  ? clamp_view({cache.view.y_lo, cache.view.y_hi}, pf.yr)
                  : pf.yr;
+    pf.vyr1 = pf.yr1;
+    if (pf.has_right && cache.view.active) {
+        const ws::circsim::PlotRange c =
+            clamp_view({cache.view.y1_lo, cache.view.y1_hi}, pf.yr1);
+        if (c.hi > c.lo) {
+            pf.vyr1 = c;
+        }
+    }
 
-    // The claimable rect: frame + both strips, so the wheel works over
-    // the axes too. The innermost rect beats the scroll panel's claim;
-    // the win settles one frame later (the gui's contract), which is
-    // why the consumption gates on wheel_won - the first notch after
-    // arriving over the plot still scrolls the panel.
+    // The claimable rect: frame + all three strips, so the wheel works
+    // over the axes too. The innermost rect beats the scroll panel's
+    // claim; the win settles one frame later (the gui's contract),
+    // which is why the consumption gates on wheel_won - the first
+    // notch after arriving over the plot still scrolls the panel.
     const gui::Rect claimable{
         pf.fx - kMarginLeft, pf.fy - kMarginTop,
-        pf.iw + kMarginLeft + kMarginRight,
-        pf.ih + kMarginTop + kMarginBottom};
+        pf.iw + kMarginLeft + pf.mr, pf.ih + kMarginTop + kMarginBottom};
     gui.register_wheel_claim(claimable, &cache.view);
 
     const bool in_frame =
@@ -251,7 +288,14 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
     const bool on_y_axis =
         in.mouse_x >= pf.fx - kMarginLeft && in.mouse_x < pf.fx &&
         in.mouse_y >= pf.fy && in.mouse_y < pf.fy + pf.ih;
-    const bool over = in_frame || on_x_axis || on_y_axis;
+    // The right spine's strip (stage 6): right of the frame, inside
+    // its height - the amp window's drag handle. It exists only when
+    // the second spine does.
+    const bool on_y1_axis =
+        pf.has_right && in.mouse_x >= pf.fx + pf.iw &&
+        in.mouse_x < pf.fx + pf.iw + pf.mr && in.mouse_y >= pf.fy &&
+        in.mouse_y < pf.fy + pf.ih;
+    const bool over = in_frame || on_x_axis || on_y_axis || on_y1_axis;
 
     // The double-click clock: runs while the pointer is over the plot,
     // resets on every press there, dies when it leaves - the "two
@@ -267,7 +311,7 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
     }
 
     // The right press cancels the in-flight gesture, restoring the
-    // press-time view exactly.
+    // press-time view exactly - both spines included (stage 6).
     if (g.kind != PlotGesture::Kind::None && in.mouse_pressed[2] != 0) {
         cache.view.active = g.was_active;
         if (g.was_active) {
@@ -275,12 +319,17 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
             cache.view.x_hi = g.x_hi;
             cache.view.y_lo = g.y_lo;
             cache.view.y_hi = g.y_hi;
+            cache.view.y1_lo = g.y1_lo;
+            cache.view.y1_hi = g.y1_hi;
         }
         g.kind = PlotGesture::Kind::None;
         return;
     }
 
-    // The wheel: zoom both axes toward the cursor at the canvas's
+    // The wheel: zoom x toward the cursor and each y spine toward its
+    // own mapped anchor (the same screen point, mapped per spine -
+    // that is what both spines zooming "toward the cursor" means when
+    // they disagree about what the cursor sits on) at the canvas's
     // 1.15-per-notch factor - but never mid-gesture (the band's press
     // point is captured in the view it started in).
     if (in_frame && in.scroll_dy != 0.0f &&
@@ -288,26 +337,37 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
         gui.wheel_won(&cache.view)) {
         if (!cache.view.active) {
             cache.view = PlotView{true, pf.vxr.lo, pf.vxr.hi,
-                                  pf.vyr.lo, pf.vyr.hi};
+                                  pf.vyr.lo, pf.vyr.hi,
+                                  pf.vyr1.lo, pf.vyr1.hi};
         }
         const double wx = pf.wx(in.mouse_x);
         const double wy = pf.wy(in.mouse_y);
+        const double wy1 = pf.wy1(in.mouse_y);
         const double f = in.scroll_dy > 0.0f ? 1.15 : 1.0 / 1.15;
         const ws::circsim::PlotRange nx =
             zoom_range({cache.view.x_lo, cache.view.x_hi}, pf.xr, wx, f);
         const ws::circsim::PlotRange ny =
             zoom_range({cache.view.y_lo, cache.view.y_hi}, pf.yr, wy, f);
+        const ws::circsim::PlotRange ny1 =
+            zoom_range({cache.view.y1_lo, cache.view.y1_hi}, pf.yr1,
+                       wy1, f);
         cache.view.x_lo = nx.lo;
         cache.view.x_hi = nx.hi;
         cache.view.y_lo = ny.lo;
         cache.view.y_hi = ny.hi;
+        cache.view.y1_lo = ny1.lo;
+        cache.view.y1_hi = ny1.hi;
         pf.vxr = nx;
         pf.vyr = ny;
+        pf.vyr1 = pf.has_right ? ny1 : pf.vyr1;
     }
 
     // The pan: middle-drag, or space+left-drag (the Schematic panel's
     // rule). Content follows the cursor: dragging right slides the
-    // window left, dragging down slides it up (the y flip).
+    // window left, dragging down slides it up (the y flip). The same
+    // pixel shift maps through each spine's own span (stage 6) - the
+    // two y windows slide by different data amounts and stay in step
+    // on screen.
     const bool space_down = in.key_down[ws::input::keys::kSpace] != 0;
     const bool pan_held =
         in.mouse_down[1] != 0 || (space_down && in.mouse_down[0] != 0);
@@ -320,30 +380,41 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
             g.x_hi = pf.vxr.hi;
             g.y_lo = pf.vyr.lo;
             g.y_hi = pf.vyr.hi;
+            g.y1_lo = pf.vyr1.lo;
+            g.y1_hi = pf.vyr1.hi;
             g.was_active = cache.view.active;
             if (!cache.view.active) {
                 cache.view = PlotView{true, pf.vxr.lo, pf.vxr.hi,
-                                      pf.vyr.lo, pf.vyr.hi};
+                                      pf.vyr.lo, pf.vyr.hi,
+                                      pf.vyr1.lo, pf.vyr1.hi};
             }
         }
         const double dx =
             -(static_cast<double>(in.mouse_x - g.from_x) /
               static_cast<double>(pf.iw)) *
             (g.x_hi - g.x_lo);
-        const double dy =
-            (static_cast<double>(in.mouse_y - g.from_y) /
-             static_cast<double>(pf.ih)) *
-            (g.y_hi - g.y_lo);
+        const double frac =
+            static_cast<double>(in.mouse_y - g.from_y) /
+            static_cast<double>(pf.ih);
+        const double dy0 = frac * (g.y_hi - g.y_lo);
+        const double dy1 = frac * (g.y1_hi - g.y1_lo);
         const ws::circsim::PlotRange nx =
             pan_range({g.x_lo, g.x_hi}, pf.xr, dx);
         const ws::circsim::PlotRange ny =
-            pan_range({g.y_lo, g.y_hi}, pf.yr, dy);
+            pan_range({g.y_lo, g.y_hi}, pf.yr, dy0);
+        const ws::circsim::PlotRange ny1 =
+            pan_range({g.y1_lo, g.y1_hi}, pf.yr1, dy1);
         cache.view.x_lo = nx.lo;
         cache.view.x_hi = nx.hi;
         cache.view.y_lo = ny.lo;
         cache.view.y_hi = ny.hi;
+        cache.view.y1_lo = ny1.lo;
+        cache.view.y1_hi = ny1.hi;
         pf.vxr = nx;
         pf.vyr = ny;
+        if (pf.has_right) {
+            pf.vyr1 = ny1;
+        }
         return;  // a pan frame owns the pointer
     }
     if (g.kind == PlotGesture::Kind::Pan && !pan_held) {
@@ -361,19 +432,32 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
             bool committed = false;
             if (was_band && std::fabs(in.mouse_x - g.from_x) >= 4.0f &&
                 std::fabs(in.mouse_y - g.from_y) >= 4.0f) {
+                // The box's corners map through each spine's OWN
+                // transform (stage 6): one screen band, three windows
+                // - x, the left spine's volts, the right spine's amps
+                // - each clamped into its own home.
                 const double x0 = pf.wx(g.from_x);
                 const double x1 = pf.wx(in.mouse_x);
                 const double y0 = pf.wy(g.from_y);
                 const double y1 = pf.wy(in.mouse_y);
+                const double y10 = pf.wy1(g.from_y);
+                const double y11 = pf.wy1(in.mouse_y);
                 const ws::circsim::PlotRange bx =
                     clamp_view({std::min(x0, x1), std::max(x0, x1)},
                                pf.xr);
                 const ws::circsim::PlotRange by =
                     clamp_view({std::min(y0, y1), std::max(y0, y1)},
                                pf.yr);
-                cache.view = PlotView{true, bx.lo, bx.hi, by.lo, by.hi};
+                const ws::circsim::PlotRange by1 =
+                    clamp_view({std::min(y10, y11),
+                                std::max(y10, y11)}, pf.yr1);
+                cache.view = PlotView{true, bx.lo, bx.hi, by.lo, by.hi,
+                                      by1.lo, by1.hi};
                 pf.vxr = bx;
                 pf.vyr = by;
+                if (pf.has_right) {
+                    pf.vyr1 = by1;
+                }
                 committed = true;
             }
             g.kind = PlotGesture::Kind::None;
@@ -394,9 +478,11 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
                 cache.view.x_lo = nx.lo;
                 cache.view.x_hi = nx.hi;
                 pf.vxr = nx;
-            } else if (g.kind == PlotGesture::Kind::ZoomY) {
-                // Dragging up on the strip zooms in (pulling the range
-                // open reads like pulling the axis up).
+            } else if (g.kind == PlotGesture::Kind::ZoomY &&
+                       g.zoom_axis == 0) {
+                // Dragging up on the left strip zooms the volt window
+                // in (pulling the range open reads like pulling the
+                // axis up).
                 const double f =
                     std::exp((g.from_y - static_cast<double>(in.mouse_y)) *
                              0.005);
@@ -406,6 +492,21 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
                 cache.view.y_lo = ny.lo;
                 cache.view.y_hi = ny.hi;
                 pf.vyr = ny;
+            } else if (g.kind == PlotGesture::Kind::ZoomY) {
+                // The right strip's drag (stage 6): the amp window's
+                // own zoom, same gesture language, its own anchor.
+                const double f =
+                    std::exp((g.from_y - static_cast<double>(in.mouse_y)) *
+                             0.005);
+                const ws::circsim::PlotRange ny1 =
+                    zoom_range({g.y1_lo, g.y1_hi}, pf.yr1, g.anchor_y1,
+                               f);
+                cache.view.active = true;
+                cache.view.y1_lo = ny1.lo;
+                cache.view.y1_hi = ny1.hi;
+                if (pf.has_right) {
+                    pf.vyr1 = ny1;
+                }
             }
             return;  // a gesture frame owns the pointer
         }
@@ -413,7 +514,8 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
 
     // Arming: the second click of a pair inside the frame resets the
     // view; the first click starts the band (frame) or an axis zoom
-    // (strips).
+    // (strips - the left one owns the volt window, the right one the
+    // amp window, stage 6).
     if (in.mouse_pressed[0] != 0 && over) {
         if (in_frame && g.click_clock < 0.35f &&
             std::fabs(in.mouse_x - g.click_x) < 5.0f &&
@@ -421,6 +523,7 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
             cache.view = PlotView{};
             pf.vxr = pf.xr;
             pf.vyr = pf.yr;
+            pf.vyr1 = pf.yr1;
             g.click_clock = 100.0f;
             return;
         }
@@ -433,6 +536,8 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
         g.x_hi = pf.vxr.hi;
         g.y_lo = pf.vyr.lo;
         g.y_hi = pf.vyr.hi;
+        g.y1_lo = pf.vyr1.lo;
+        g.y1_hi = pf.vyr1.hi;
         g.was_active = cache.view.active;
         if (on_x_axis) {
             g.kind = PlotGesture::Kind::ZoomX;
@@ -442,14 +547,26 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
             // (the wheel and the pan seed the same way).
             if (!cache.view.active) {
                 cache.view = PlotView{true, pf.vxr.lo, pf.vxr.hi,
-                                      pf.vyr.lo, pf.vyr.hi};
+                                      pf.vyr.lo, pf.vyr.hi,
+                                      pf.vyr1.lo, pf.vyr1.hi};
             }
         } else if (on_y_axis) {
             g.kind = PlotGesture::Kind::ZoomY;
+            g.zoom_axis = 0;
             g.anchor_y = pf.wy(in.mouse_y);
             if (!cache.view.active) {
                 cache.view = PlotView{true, pf.vxr.lo, pf.vxr.hi,
-                                      pf.vyr.lo, pf.vyr.hi};
+                                      pf.vyr.lo, pf.vyr.hi,
+                                      pf.vyr1.lo, pf.vyr1.hi};
+            }
+        } else if (on_y1_axis) {
+            g.kind = PlotGesture::Kind::ZoomY;
+            g.zoom_axis = 1;
+            g.anchor_y1 = pf.wy1(in.mouse_y);
+            if (!cache.view.active) {
+                cache.view = PlotView{true, pf.vxr.lo, pf.vxr.hi,
+                                      pf.vyr.lo, pf.vyr.hi,
+                                      pf.vyr1.lo, pf.vyr1.hi};
             }
         } else if (in_frame) {
             g.kind = PlotGesture::Kind::Band;  // the box lands at release
@@ -462,7 +579,26 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                const ws::spice::Table& t, const char* x_name) {
     const gui::Rect plot =
         layout.next(layout.remaining_width(), kPlotHeight);
-    const float iw = plot.width - kMarginLeft - kMarginRight;
+
+    // The two-axis split (stage 6) FIRST: whether the visible signals
+    // earn a right spine decides the frame's right margin, so it is
+    // plot geometry, not a draw detail. The classification is a
+    // per-signal constant of the frame - the flags the mapping,
+    // markers and legend all read.
+    std::vector<std::uint8_t> on_right(t.signals.size(), 0u);
+    bool has_right = false;
+    for (std::size_t i = 0; i < t.signals.size(); ++i) {
+        if (ws::circsim::signal_y_axis(t.signals[i].name) ==
+            ws::circsim::PlotYAxis::Right) {
+            on_right[i] = 1u;
+            if (i < ed.results.visible.size() &&
+                ed.results.visible[i] != 0u) {
+                has_right = true;
+            }
+        }
+    }
+    const float mr = has_right ? kMarginRightAxis : kMarginRight;
+    const float iw = plot.width - kMarginLeft - mr;
     const float ih = plot.height - kMarginTop - kMarginBottom;
     if (iw < 40.0f || ih < 30.0f) {
         return;  // too narrow to be worth a frame
@@ -483,11 +619,15 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
         return;
     }
 
-    // The home ranges: y over the VISIBLE signals, x over the axis
-    // (or the index run); padded by plot's expand_range on both. Home
-    // is the outermost view - every manual window clamps inside it.
+    // The home ranges: each y spine fits ITS OWN visible company
+    // (stage 6 - the volts on the left, the amps on the right), x
+    // over the axis (or the index run); padded by plot's expand_range
+    // on all three. Home is the outermost view - every manual window
+    // clamps inside its own spine's home.
     double y_lo = std::numeric_limits<double>::infinity();
     double y_hi = -std::numeric_limits<double>::infinity();
+    double y1_lo = std::numeric_limits<double>::infinity();
+    double y1_hi = -std::numeric_limits<double>::infinity();
     double x_lo = 0.0;
     double x_hi = static_cast<double>(n - 1u);
     if (!by_index) {
@@ -499,16 +639,26 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
             continue;
         }
         const std::span<const double> ys = t.signals[i].data;
+        const bool right = on_right[i] != 0u;
         for (std::size_t k = 0; k < ys.size() && k < n; ++k) {
             if (std::isfinite(ys[k])) {
-                y_lo = std::min(y_lo, ys[k]);
-                y_hi = std::max(y_hi, ys[k]);
+                if (right) {
+                    y1_lo = std::min(y1_lo, ys[k]);
+                    y1_hi = std::max(y1_hi, ys[k]);
+                } else {
+                    y_lo = std::min(y_lo, ys[k]);
+                    y_hi = std::max(y_hi, ys[k]);
+                }
             }
         }
     }
     if (y_lo > y_hi) {
-        y_lo = 0.0;  // nothing visible: an empty-but-sane frame
+        y_lo = 0.0;  // nothing visible on the left: an empty-but-sane frame
         y_hi = 1.0;
+    }
+    if (y1_lo > y1_hi) {
+        y1_lo = 0.0;  // same sane-empty answer for the right spine
+        y1_hi = 1.0;
     }
 
     PlotFrame pf;
@@ -516,8 +666,11 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     pf.fy = fy;
     pf.iw = iw;
     pf.ih = ih;
+    pf.mr = mr;
+    pf.has_right = has_right;
     pf.xr = ws::circsim::expand_range(x_lo, x_hi);
     pf.yr = ws::circsim::expand_range(y_lo, y_hi);
+    pf.yr1 = ws::circsim::expand_range(y1_lo, y1_hi);
     handle_plot_input(ed, gui, pf);  // the hands; pf carries the effective view
 
     const auto sx = [&](double v) {
@@ -527,6 +680,15 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     const auto sy = [&](double v) {
         return static_cast<float>(
             fy + (pf.vyr.hi - v) / (pf.vyr.hi - pf.vyr.lo) * ih);
+    };
+    const auto sy1 = [&](double v) {
+        return static_cast<float>(
+            fy + (pf.vyr1.hi - v) / (pf.vyr1.hi - pf.vyr1.lo) * ih);
+    };
+    // A series maps through its OWN spine (stage 6): the flag is the
+    // classifier's answer, the visibility gates the caller already ran.
+    const auto sy_of = [&](std::size_t i, double v) {
+        return on_right[i] != 0u ? sy1(v) : sy(v);
     };
 
     canvas::Canvas2D& rc = ed.results_draw_canvas();
@@ -579,6 +741,29 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                                py - font->line_height() * 0.5f,
                                label.c_str(), *font,
                                gui::dim(theme.text, 0.6f));
+        }
+    }
+    // The right spine's ticks (stage 6): marks on the frame's right
+    // edge and labels in the widened margin - no grid lines, the left
+    // axis's rows already carry the plot's horizontal rails, and a
+    // second set would fight the series for them.
+    if (has_right) {
+        const std::vector<double> y1_ticks =
+            ws::circsim::nice_ticks(pf.vyr1.lo, pf.vyr1.hi, 5u);
+        for (double tick : y1_ticks) {
+            const float py = sy1(tick);
+            if (py < fy || py > fy + ih) {
+                continue;
+            }
+            rc.stroke_line({fx + iw, py}, {fx + iw + 3.0f, py},
+                           grid_paint);
+            if (can_label) {
+                const std::string label = ws::circsim::format_eng(tick);
+                (void)rc.draw_text(fx + iw + 4.0f,
+                                   py - font->line_height() * 0.5f,
+                                   label.c_str(), *font,
+                                   gui::dim(theme.text, 0.6f));
+            }
         }
     }
     // The x axis's name, quiet, inside the frame's top-left.
@@ -635,7 +820,7 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
             const double yv = ys[k];
             pts.push_back(Point{sx(x_at(k)),
                                 std::isfinite(yv)
-                                    ? sy(yv)
+                                    ? sy_of(i, yv)
                                     : std::numeric_limits<float>::
                                           quiet_NaN()});
         };
@@ -699,7 +884,7 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
             }
             const double yv = t.signals[i].data[k];
             if (std::isfinite(yv)) {
-                rc.fill_circle({px, sy(yv)}, 3.0f, series_color(i));
+                rc.fill_circle({px, sy_of(i, yv)}, 3.0f, series_color(i));
             }
         }
     }
@@ -721,7 +906,9 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
         rc.stroke_polyline(box, 4, band, true);
         if (can_label) {
             // The cursor reads the band exists for: the data-space
-            // deltas of its two corners, the scope's pair.
+            // deltas of its two corners - dx on the sweep, dy on the
+            // LEFT spine (the primary scale; the right spine's units
+            // ride its own legend readouts).
             const double dx = std::fabs(pf.wx(in.mouse_x) -
                                         pf.wx(g.from_x));
             const double dy = std::fabs(pf.wy(in.mouse_y) -
@@ -866,10 +1053,16 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
                 ? t.sweep_names[x_index].c_str()
                 : "sample";
 
-        // The legend: swatch + visibility + the live readout (the
-        // hover sample, else the last one - the waveform's resting
-        // state is the readout people want at a glance).
+        // The legend: swatch + visibility + the spine tag + the live
+        // readout (the hover sample, else the last one - the
+        // waveform's resting state is the readout people want at a
+        // glance). The tag (stage 6) is which y spine the signal
+        // rides, spelled in units: V on the left scale, A on the
+        // right one - the classifier's answer, quiet, so a mixed
+        // legend reads its split without opening the plot.
         gui::separator(layout, theme);
+        gui::ChromeTheme quiet = theme;
+        quiet.text = gui::dim(theme.text, 0.45f);
         const int at = ed.results.hover >= 0
                            ? ed.results.hover
                            : static_cast<int>(t.row_count()) - 1;
@@ -890,6 +1083,13 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
                     ed.results.visible[i] = vis ? 1u : 0u;
                 }
             }
+            layout.same_line();
+            gui::text(layout, quiet,
+                      ws::circsim::signal_y_axis(s.name) ==
+                              ws::circsim::PlotYAxis::Right
+                          ? "A"
+                          : "V",
+                      14.0f);
             if (at >= 0 && static_cast<std::size_t>(at) < s.data.size()) {
                 layout.same_line();
                 const std::string value =

@@ -13,12 +13,14 @@
 #include <ws/circsim/plot.hpp>
 
 using ws::circsim::PlotRange;
+using ws::circsim::PlotYAxis;
 using ws::circsim::clamp_view;
 using ws::circsim::decimate_minmax;
 using ws::circsim::expand_range;
 using ws::circsim::format_eng;
 using ws::circsim::nice_ticks;
 using ws::circsim::pan_range;
+using ws::circsim::signal_y_axis;
 using ws::circsim::zoom_range;
 
 namespace {
@@ -361,6 +363,42 @@ TEST_CASE("decimate keeps the exact envelope of a sine") {
     CHECK(kept_hi == true_hi);
     CHECK(true_lo <= -0.99);  // the sine itself reaches its rails
     CHECK(true_hi >= 0.99);
+}
+
+TEST_CASE("signal_y_axis splits the V and I columns") {
+    // Voltage rides the left spine in every spelling the kernel
+    // generates: the node refs and the differential pair.
+    CHECK(signal_y_axis("v(out)") == PlotYAxis::Left);
+    CHECK(signal_y_axis("v(a,b)") == PlotYAxis::Left);
+    CHECK(signal_y_axis("V(out)") == PlotYAxis::Left);  // case cannot flip it
+    // Current rides the right spine.
+    CHECK(signal_y_axis("i(V1)") == PlotYAxis::Right);
+    CHECK(signal_y_axis("i(v1)") == PlotYAxis::Right);
+    CHECK(signal_y_axis("I(V1)") == PlotYAxis::Right);
+    // .ac wraps both as re()/im() pairs - the unit lives one paren in.
+    CHECK(signal_y_axis("re(v(out))") == PlotYAxis::Left);
+    CHECK(signal_y_axis("im(v(out))") == PlotYAxis::Left);
+    CHECK(signal_y_axis("re(i(V1))") == PlotYAxis::Right);
+    CHECK(signal_y_axis("im(i(V1))") == PlotYAxis::Right);
+    // Only ONE wrapper unwraps; a current under two is still a
+    // current only if the inner ref survives - re() over im() leaves
+    // im(i(V1)), which is no i( ref at the front and stays left. The
+    // conservative answer for a name the rule cannot vouch for.
+    CHECK(signal_y_axis("re(im(i(V1)))") == PlotYAxis::Left);
+}
+
+TEST_CASE("signal_y_axis answers left for the names it cannot vouch for") {
+    // The empty name and the index fallback are no currents.
+    CHECK(signal_y_axis("") == PlotYAxis::Left);
+    CHECK(signal_y_axis("sample") == PlotYAxis::Left);
+    // A bare letter is not a ref; a broken ref is not one either.
+    CHECK(signal_y_axis("i") == PlotYAxis::Left);
+    CHECK(signal_y_axis("i(") == PlotYAxis::Left);
+    CHECK(signal_y_axis("re(v(out)") == PlotYAxis::Left);  // unclosed wrapper
+    // A foreign prefix stays unclassified - and a wrapper glued to
+    // nothing inside unwraps to a name with no i( left.
+    CHECK(signal_y_axis("pwr(v(out))") == PlotYAxis::Left);
+    CHECK(signal_y_axis("im(i") == PlotYAxis::Left);
 }
 
 TEST_CASE("decimate answers a monotone but sparse sweep") {

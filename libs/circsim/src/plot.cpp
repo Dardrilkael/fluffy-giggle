@@ -358,4 +358,40 @@ std::vector<std::size_t> decimate_minmax(std::span<const double> xs,
     return out;
 }
 
+// --- the two-axis split (stage 6) --------------------------------------------
+
+namespace {
+
+[[nodiscard]] char lower_ascii(char c) {
+    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+}
+
+}  // namespace
+
+PlotYAxis signal_y_axis(std::string_view name) {
+    // One re()/im() wrapper unwraps: .ac names its columns re(v(out))
+    // and im(i(V1)), the unit one paren in. The wrapper must open at
+    // byte 0 AND close at the last byte - "re(v(out)" is an unclosed
+    // name, "pwr(v(out))" a foreign prefix; neither classifies.
+    if (name.size() >= 4 && name.back() == ')') {
+        const char c0 = lower_ascii(name[0]);
+        const char c1 = lower_ascii(name[1]);
+        if (c0 == 'r' && c1 == 'e' && name[2] == '(') {
+            name.remove_prefix(3);
+            name.remove_suffix(1);
+        } else if (c0 == 'i' && c1 == 'm' && name[2] == '(') {
+            name.remove_prefix(3);
+            name.remove_suffix(1);
+        }
+    }
+    // The unwrap left the signal ref itself: i( - any case, as the
+    // deck parser reads save names - is a current. Everything else
+    // (v(...), a bare name, an empty one) keeps the left spine.
+    if (name.size() >= 3 && lower_ascii(name[0]) == 'i' &&
+        name[1] == '(') {
+        return PlotYAxis::Right;
+    }
+    return PlotYAxis::Left;
+}
+
 }  // namespace ws::circsim

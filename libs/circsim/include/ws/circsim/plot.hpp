@@ -5,15 +5,19 @@
 // positions, engineering-notation labels, range padding, and min/max
 // decimation for long sweeps. Stage 5 joins the manual-view math -
 // clamp/zoom/pan - that the panel's wheel, rubber band, axis drags
-// and pan all share. The editor's Results panel is the ui consumer;
-// the tests are the headless gate. Nothing here touches a font, a
-// canvas, or ws::spice - the functions answer doubles and strings, so
-// any plot surface (the panel today, a raster exporter later) shares
-// one set of axis decisions.
+// and pan all share. Stage 6 joins the two-axis split - which y axis
+// a signal rides - so a mixed V/I legend reads on two spines instead
+// of one flattened scale. The editor's Results panel is the ui
+// consumer; the tests are the headless gate. Nothing here touches a
+// font, a canvas, or ws::spice - the functions answer doubles and
+// strings, so any plot surface (the panel today, a raster exporter
+// later) shares one set of axis decisions.
 
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ws::circsim {
@@ -97,6 +101,38 @@ struct PlotRange {
 // answers the view unchanged.
 [[nodiscard]] PlotRange pan_range(PlotRange view, PlotRange home,
                                   double delta);
+
+// --- the two-axis split (stage 6) --------------------------------------------
+//
+// A mixed V/I legend on one y scale flattens itself into a lie: a
+// ramp to 5 V shares the plot with a sine of +-1 mA, and whichever
+// signal wins the fit turns the other into a flat line. The two-axis
+// answer gives each unit its own spine - voltage on the left, current
+// on the right - each with its own fit, ticks, and manual view. The
+// classifier below is that split's shared half: every plot surface
+// asks it which axis a column rides instead of growing its own
+// prefix-parse.
+
+// Which y axis a signal draws against. Left is the plot's primary
+// spine (the sweep's own unit company); Right is the second spine a
+// mixed legend earns.
+enum class PlotYAxis : std::uint8_t { Left, Right };
+
+// Classifies a signal NAME into its y axis. The columns ws::spice
+// generates are v(node), v(a,b) and i(Vsrc); .ac wraps both as
+// re(...)/im(...) pairs. The rule, in order:
+//   * one re()/im() wrapper unwraps (the unit lives one paren in) -
+//     the wrapper must open at byte 0 and close at the last byte, so
+//     "re(v(out)" (unclosed) and "pwr(v(out))" (a foreign prefix)
+//     stay unclassified;
+//   * what remains starting with i( - case-insensitively, as the deck
+//     parser reads save names - answers Right (current, amperes);
+//   * everything else - v(...), the bare and the foreign, an empty
+//     name, the sample-index fallback - answers Left, the sweep
+//     axis's own company. An unknown name keeping the primary axis is
+//     the conservative reading: a mis-classified column changes one
+//     spine's fit, never vanishes from the plot.
+[[nodiscard]] PlotYAxis signal_y_axis(std::string_view name);
 
 // The index list that carries a long waveform's shape through a narrow
 // pixel budget: the strictly-increasing `xs` split into budget/2

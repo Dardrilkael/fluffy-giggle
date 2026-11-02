@@ -6,13 +6,13 @@ This file is the **continuation memory** for the `libs/circsim` +
 read `libs/circsim/CLAUDE.md` (the lived rules) and the SPICE arc's
 `docs/SPICE_PLAN.md` for the simulator underneath.
 
-## Status (2026-11-02)
+## Status (2026-11-03)
 
 Working tree clean. The arc lives on origin now (the earlier
 "pushed never, no credentials" policy ended when the remote gained the
 arc's history - the P1b font fix `f7ad8b0` and the Windows getenv fix
-`a516992` ride on top of stage 4); stage 5 landed on a fresh fetch of
-that history.
+`a516992` ride on top of stage 4); stages 5 and 6 landed on fresh
+fetches of that history.
 
 | Commit    | Stage | What landed |
 |-----------|-------|-------------|
@@ -20,7 +20,8 @@ that history.
 | `812fc68` | 2     | The `.csym` symbol library: `SymbolLibrary` (built-ins + layered files, ci, later wins, override warnings), typed `ParamSpec`s (Text/Number/Choice - Number validated with ws::spice's grammar; defaults are new-part prefill, never injected at export), `DrawPrim` drawing primitives + `transform_pos` + `symbol_bounds`, ERC's stage-2 checks (bad_param, missing_param on non-optional emits, unused_param), `-S` on the CLI + the `symbols` subcommand (--json full-table dump), `tline.csym`/`tline_demo.csim` (a library-only T symbol simulated through the quarter-wave closed form). |
 | `99ae630` | 3     | The editor: `apps/circsim_editor`, the ws::ui::shell app over the model - the schematic canvas (place/move/rotate/mirror parts, wire routing with the ortho constraint, labels; every edit an undo command with typing-run coalescing), the palette over `symbols()` with fitted mini previews, the property grid over ParamSpecs (plus the analysis-setup and directives editors), the Problems panel over Diags with select-and-zoom through the back-map (the new headless `libs/circsim/locate` seam, tested), the netlist view, and the simulate job over `run_schematic` (status row + summary toast). The bare editor keys (R/M/W/L/F/Del/Esc) bind on the resolver's PANEL rung; the text rule keeps them out of focused fields. |
 | `c015926` | 4     | The results story: `libs/circsim/plot.hpp` - the headless axis math (nice 1/2/5 ticks, SI engineering labels, range padding, min/max decimation that keeps every bucket's y-extremes so spikes and envelope survive any pixel budget), 14 test cases; the editor's Results panel over it - one analysis at a time from a combo, per-signal visibility checkboxes with live legend readouts (the hover sample, else the last), the plot through the canvas layer (frame, grid + engineering tick labels, colored series, NaN-broken segments), a hover crosshair with per-series markers, `.op` tables and `.meas` as value rows, and CSV/JSON export riding the writers ws::spice already owns (the document's stem, the fs seam). The panel's draw is gated headless by `tests/test_results_panel.cpp` through the new `Editor::plot_canvas` seam (a CommandListCanvas asserting the recorded geometry: frame, grid, series point counts/colors/mapping, decimation envelope, crosshair, markers, the no-plot .op shape). The fix the visual gate caught: the stage-3 document factory's extension check compared the last 4 chars with ".csim" (5 chars) - never equal, so every File > Open and session restore was refused; now `ends_with`. |
-| (this commit) | 5 | The plot's hands: `plot.hpp` gains the manual-view math - `clamp_view` (a window slides back inside home, wider-than-home answers home, non-finite recovers to home), `zoom_range` (anchor-pinned, floored at home's span x 1e-6 before the float mush, clamped into home so a wheel spun out forever settles on the data), `pan_range` (slides and parks flush at the data's edge) - 3 more test_plot cases. The Results panel rides them: the wheel zooms both axes toward the cursor at the canvas's 1.15-per-notch factor (the plot registers its own wheel claim - the innermost rect beats the enclosing scroll panel's; the gui's one-frame settle is why the first notch after arriving still scrolls), a left-drag rubber band zooms to the box (an accent-washed rect with a dx/dy readout while it flies), dragging on an axis strip stretches that axis alone (right/up = in), the middle/space drag pans, a double-click resets, a right-click cancels and restores the press-time view exactly. Every gesture rebases from its press-time capture each frame; `ResultsCache` carries the per-table `PlotView` + the in-flight `PlotGesture` (a table switch, a fresh run, a document switch drop back to the auto fit); the decimation window slices to the visible x samples (one slack sample each side) so a zoomed-in tran spends its pixel budget on what it shows. |
+| `8f42b2d` | 5     | The plot's hands: `plot.hpp` gains the manual-view math - `clamp_view` (a window slides back inside home, wider-than-home answers home, non-finite recovers to home), `zoom_range` (anchor-pinned, floored at home's span x 1e-6 before the float mush, clamped into home so a wheel spun out forever settles on the data), `pan_range` (slides and parks flush at the data's edge) - 3 more test_plot cases. The Results panel rides them: the wheel zooms both axes toward the cursor at the canvas's 1.15-per-notch factor (the plot registers its own wheel claim - the innermost rect beats the enclosing scroll panel's; the gui's one-frame settle is why the first notch after arriving still scrolls), a left-drag rubber band zooms to the box (an accent-washed rect with a dx/dy readout while it flies), dragging on an axis strip stretches that axis alone (right/up = in), the middle/space drag pans, a double-click resets, a right-click cancels and restores the press-time view exactly. Every gesture rebases from its press-time capture each frame; `ResultsCache` carries the per-table `PlotView` + the in-flight `PlotGesture` (a table switch, a fresh run, a document switch drop back to the auto fit); the decimation window slices to the visible x samples (one slack sample each side) so a zoomed-in tran spends its pixel budget on what it shows. |
+| (this commit) | 6 | The second spine: `plot.hpp` gains the two-axis split - `PlotYAxis` + `signal_y_axis(name)`, the V/I classifier (one `re(`/`im(` wrapper unwraps when it opens at byte 0 and closes at the last byte; a leading `i(` - case-insensitively - answers Right; everything else answers Left, the conservative reading for a name the rule cannot vouch for), 2 more test_plot cases. The Results panel splits its y fit per visible company: the volts keep the left spine, the amps earn a right one - own padded home, own tick ladder (marks on the frame's right edge + labels in a widened right margin; no second set of grid lines, the left axis's rows carry the rails), own drag strip, own manual window. Every stage-5 gesture now works on three windows: the wheel zooms x toward the cursor and each y spine toward its own mapped anchor, the band commits its corners through each spine's own transform, the pan slides both y windows by the same pixels, the right strip's drag stretches the amp window alone, the cancel restores both. A table with no visible current column draws exactly the stage-5 shape (the margin, strip and ticks only exist when the second spine does). `PlotView` carries `y1_*` beside `y_*`; `PlotGesture` carries `zoom_axis` + the right spine's press-time capture. The legend rows grow a quiet V/A spine tag between the checkbox and the readout. |
 
 ## Locked decisions
 
@@ -88,6 +89,17 @@ readout is the one bit the headless gate cannot see: it rides the font
 seam the bench leaves null. The editor-under-Xvfb visual pass stays
 with the ui tree's owner.
 
+The stage-6 gate at land time (the same headless box, the same
+shape): 610/610 ctest on the `linux` preset (test_circsim 99 cases /
+962 assertions, the 2 new classifier cases among them), the CLI smoke
+green, and the panel suite hand-built with the stage-5 script - now
+15 cases / 209 assertions (the 3 new two-spine cases and the stage-5
+constants re-derived per spine: the mixed fixture's y home SPLIT, so
+its old single-scale numbers retired), ASan+UBSan clean over the same
+15, the app TUs syntax-clean. The spine tag's width and the right
+labels' spacing are the bits the fontless bench cannot see; the
+editor-under-Xvfb visual pass stays with the ui tree's owner.
+
 The Linux ui tree (the editor's own build):
 
 ```sh
@@ -124,6 +136,8 @@ libs/circsim/
                   # (stage 4 - the axis math every plot surface shares)
                   # + clamp_view/zoom_range/pan_range (stage 5 - the
                   # manual view's clamp/zoom/pan over the home fit)
+                  # + PlotYAxis/signal_y_axis (stage 6 - the V/I
+                  # classifier behind the two-spine split)
   src/
     symbols.cpp   # the built-in table, now with specs + draw
     library.cpp   # the .csym reader/writer + the layering rules
@@ -147,10 +161,12 @@ apps/circsim_editor/                # stage 3: the editor (see its src/)
   src/document.hpp/.cpp # the .csim Document + the undo command set
   src/canvas_panel.hpp/.cpp  # the Schematic panel (input + world render)
   src/side_panels.hpp/.cpp   # palette/properties/problems/netlist
-  src/results_panel.hpp/.cpp # stage 4-5: the Results panel (plot + legend
+  src/results_panel.hpp/.cpp # stage 4-6: the Results panel (plot + legend
                         # + value rows + export buttons; the axis math
                         # stays in ws::circsim/plot; stage 5 adds the
-                        # wheel/band/axis-drag/pan/reset gestures over it)
+                        # wheel/band/axis-drag/pan/reset gestures over it;
+                        # stage 6 splits the y fit per V/I company - the
+                        # right spine's ticks/strip/window)
   src/main.cpp          # the App: shell wiring, commands, the run job
                         # (delivering to the Results panel), the export
   tests/test_results_panel.cpp  # the stage-4 app gate: the panel driven
@@ -158,19 +174,21 @@ apps/circsim_editor/                # stage 3: the editor (see its src/)
                         # extends it to the gestures (the wheel's slice,
                         # the band's geometry + commit, the axis drags,
                         # the pan, the reset, the cancel, the per-table
-                        # drop)
+                        # drop); stage 6 extends it to the two spines
+                        # (the split mapping, the right strip's drag,
+                        # the v-only shape)
 tools/smoke_circsim.py              # the CLI smoke (incl. library cases)
 ```
 
 ## Not done (the natural next stages)
 
-- **Stage 6 candidates, editor-side:** multiple Y axes for mixed V/I
-  legends, a CSV/JSON save dialog (the export derives the path from
-  the document today - deliberate v1), waypoint editing on placed
-  wires, multi-select + marquee, an android port (the touch
-  interactions need their own pass). The plot's own remaining wants:
-  a zoom-to-fit-y-in-window after an x-only zoom, and a cursor pair
-  (two pinned readouts) beyond the drag-time dx/dy.
+- **Stage 7 candidates, editor-side:** a CSV/JSON save dialog (the
+  export derives the path from the document today - deliberate v1),
+  waypoint editing on placed wires, multi-select + marquee, an android
+  port (the touch interactions need their own pass). The plot's own
+  remaining wants: a zoom-to-fit-y-in-window after an x-only zoom
+  (which per spine would answer "fit the visible span of MY signals"),
+  and a cursor pair (two pinned readouts) beyond the drag-time dx/dy.
 - **Schematic-side libraries of the model's own**: a .csim "libraries"
   field naming .csym files (the CLI's -S is the seam today; the format
   deliberately does not carry it yet - it would be a .csim version

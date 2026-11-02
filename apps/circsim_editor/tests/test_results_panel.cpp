@@ -83,6 +83,14 @@ using editor::SchematicDocument;
     return t;
 }
 
+// The mixed table's voltage column alone: the stage-6 contrast bench
+// for the right spine (no current column, no second axis).
+[[nodiscard]] ws::spice::Table v_only_table(std::size_t rows) {
+    ws::spice::Table t = ramp_table(rows);
+    t.signals.erase(t.signals.begin() + 1);  // drop i(V1)
+    return t;
+}
+
 [[nodiscard]] ws::spice::Table op_table() {
     ws::spice::Table t;
     t.analysis = ws::spice::AnalysisKind::Op;
@@ -395,19 +403,27 @@ TEST_CASE("stale results note themselves but still draw") {
     CHECK(b.series_cmds().size() == 2u);
 }
 
-// --- stage 5: the plot's hands --------------------------------------------------
+// --- stage 5/6: the plot's hands, on two spines ---------------------------------
 //
-// The bench's home windows for ramp_table(41): x = [-2e-4, 4.2e-3]
-// (span 4.4e-3); y spans the ramp AND the sine's dip - the sine
-// touches exactly -1e-3 at i = 30 - so the padded fit is
-// [-0.25105, 5.25005] (span 5.5011), the numbers the band and zoom
-// asserts below read against.
+// The bench's home windows for ramp_table(41) SPLIT per axis (stage
+// 6 - the fixture is the mixed V/I table the split exists for): the
+// ramp v(out) owns the LEFT spine, the sine i(V1) the RIGHT one. x =
+// [-2e-4, 4.2e-3] (span 4.4e-3); the LEFT y spans the ramp alone -
+// expand(0, 5) = [-0.25, 5.25] (span 5.5); the RIGHT y spans the
+// sine alone - expand pads 5% of the SPAN, so expand(-1e-3, 1e-3) =
+// [-1.1e-3, 1.1e-3] (span 2.2e-3). The numbers the band and zoom
+// asserts below read against; the single-scale fit the stage-5
+// constants answered (-0.25105.. 5.25005, the sine dip dragging the
+// volts' span) is exactly what the split un-does.
 constexpr double kHomeXLo = -2.0e-4;
 constexpr double kHomeXHi = 4.2e-3;
 constexpr double kHomeXSpan = kHomeXHi - kHomeXLo;
-constexpr double kHomeYLo = -0.25105;
-constexpr double kHomeYHi = 5.25005;
+constexpr double kHomeYLo = -0.25;
+constexpr double kHomeYHi = 5.25;
 constexpr double kHomeYSpan = kHomeYHi - kHomeYLo;
+constexpr double kHomeY1Lo = -1.1e-3;
+constexpr double kHomeY1Hi = 1.1e-3;
+constexpr double kHomeY1Span = kHomeY1Hi - kHomeY1Lo;
 
 // The band's fill/outline (results_panel.cpp's with_alpha split of
 // kDefaultChrome's accent).
@@ -433,11 +449,14 @@ TEST_CASE("the wheel zooms both axes toward the cursor") {
 
     const PlotView& v = b.ed.results.view;
     CHECK(v.active);
-    // Both windows narrowed by the 1.15 notch, still centered.
+    // All three windows narrowed by the 1.15 notch, still centered -
+    // each y spine toward its own mapped anchor (stage 6).
     CHECK((v.x_hi - v.x_lo) ==
           doctest::Approx(kHomeXSpan / 1.15).epsilon(1e-6));
     CHECK((v.y_hi - v.y_lo) ==
           doctest::Approx(kHomeYSpan / 1.15).epsilon(1e-6));
+    CHECK((v.y1_hi - v.y1_lo) ==
+          doctest::Approx(kHomeY1Span / 1.15).epsilon(1e-6));
 
     // A second notch: the x slice bites. The decimation window keeps
     // one sample of slack past each edge (the stroke needs the
@@ -450,8 +469,8 @@ TEST_CASE("the wheel zooms both axes toward the cursor") {
     REQUIRE(series.size() == 2u);
     CHECK(series[0]->points.size() < 41u);
 
-    // Two notches back out at the same spot return both spans (the
-    // math is invertible about the same anchor).
+    // Two notches back out at the same spot return all three spans
+    // (the math is invertible about the same anchor).
     m.scroll_dy = -1.0f;
     b.draw(m);
     b.draw(m);
@@ -459,6 +478,8 @@ TEST_CASE("the wheel zooms both axes toward the cursor") {
           doctest::Approx(kHomeXSpan).epsilon(1e-5));
     CHECK((v.y_hi - v.y_lo) ==
           doctest::Approx(kHomeYSpan).epsilon(1e-5));
+    CHECK((v.y1_hi - v.y1_lo) ==
+          doctest::Approx(kHomeY1Span).epsilon(1e-5));
 }
 
 TEST_CASE("a rubber band zooms to the box and draws itself") {
@@ -512,6 +533,13 @@ TEST_CASE("a rubber band zooms to the box and draws itself") {
                        .epsilon(1e-3));
     CHECK(v.y_hi == doctest::Approx(kHomeYHi - 0.25 * kHomeYSpan)
                        .epsilon(1e-3));
+    // The band's y corners map through the RIGHT spine's own
+    // transform too (stage 6): the same screen band, in amps - the
+    // sine's window lands on the box's middle half of ITS span.
+    CHECK(v.y1_lo ==
+          doctest::Approx(kHomeY1Hi - 0.75 * kHomeY1Span).epsilon(1e-3));
+    CHECK(v.y1_hi ==
+          doctest::Approx(kHomeY1Hi - 0.25 * kHomeY1Span).epsilon(1e-3));
     // The series now covers only the band's samples (the x slice).
     const std::vector<const canvas::CanvasCmd*> series = b.series_cmds();
     REQUIRE(series.size() == 2u);
@@ -524,8 +552,6 @@ TEST_CASE("dragging an axis strip stretches that axis only") {
     b.draw();
 
     const Bench::FrameBox f = b.frame_box(b.frame_cmd());
-    const float iw = f.fx2 - f.fx;
-    const float ih = f.fy2 - f.fy;
 
     // The x strip: inside the frame's width, below its bottom edge.
     Bench::Mouse m;
@@ -536,12 +562,17 @@ TEST_CASE("dragging an axis strip stretches that axis only") {
     b.draw(m);
     CHECK(b.ed.results.gesture.kind == PlotGesture::Kind::ZoomX);
     // The arm seeded the manual view with the effective (home) window
-    // - the axis zoom lands its axis into that base as the drag moves.
+    // - the axis zoom lands its axis into that base as the drag moves
+    // (both spines seed together, stage 6).
     CHECK(b.ed.results.view.active);
     CHECK(b.ed.results.view.y_lo ==
           doctest::Approx(kHomeYLo).epsilon(1e-6));
     CHECK(b.ed.results.view.y_hi ==
           doctest::Approx(kHomeYHi).epsilon(1e-6));
+    CHECK(b.ed.results.view.y1_lo ==
+          doctest::Approx(kHomeY1Lo).epsilon(1e-6));
+    CHECK(b.ed.results.view.y1_hi ==
+          doctest::Approx(kHomeY1Hi).epsilon(1e-6));
 
     // 100 px right: e^0.5 in. The x window narrows about the anchor;
     // the y window is untouched.
@@ -705,6 +736,8 @@ TEST_CASE("a right-click cancels the drag and restores the press view") {
     CHECK(b.ed.results.view.x_hi == before.x_hi);
     CHECK(b.ed.results.view.y_lo == before.y_lo);
     CHECK(b.ed.results.view.y_hi == before.y_hi);
+    CHECK(b.ed.results.view.y1_lo == before.y1_lo);
+    CHECK(b.ed.results.view.y1_hi == before.y1_hi);
 }
 
 TEST_CASE("a table switch drops the manual view") {
@@ -739,5 +772,131 @@ TEST_CASE("a table switch drops the manual view") {
     CHECK_FALSE(b.ed.results.view.active);
     b.ed.results.table = 0;
     b.draw();
+    CHECK_FALSE(b.ed.results.view.active);
+}
+
+// --- stage 6: the second spine ---------------------------------------------------
+
+TEST_CASE("mixed V/I split the axes: the sine reads on the right spine") {
+    Bench b;
+    b.load(ramp_table(41u));
+    b.draw();
+
+    const Bench::FrameBox both = b.frame_box(b.frame_cmd());
+    const float ih = both.fy2 - both.fy;
+
+    // The sine rides the RIGHT window alone: its peak (+1e-3 at
+    // sample 10 - the sine tops a quarter-period in) maps near the
+    // frame's TOP; the trough (sample 30) mirrors it. Under the
+    // single-scale fit the stage-5 plot drew, 1e-3 against a 5.5-volt
+    // span sat squashed against the axis zero - the split is what
+    // gives the sine its own rails.
+    const std::vector<const canvas::CanvasCmd*> series = b.series_cmds();
+    REQUIRE(series.size() == 2u);
+    const canvas::CanvasCmd* sine =
+        series[0]->color == series_color(1) ? series[0] : series[1];
+    const canvas::CanvasCmd* ramp =
+        series[0] == sine ? series[1] : series[0];
+    CHECK(sine->points[10].y < both.fy + ih * 0.25f);
+    CHECK(sine->points[30].y > both.fy + ih * 0.75f);
+    // The ramp rides the LEFT window: its own mid (2.5 V at sample
+    // 20) maps to mid-height, the split's whole point - neither
+    // spine flattens the other.
+    CHECK(ramp->points[20].y > both.fy + ih * 0.45f);
+    CHECK(ramp->points[20].y < both.fy + ih * 0.55f);
+
+    // The right spine's ticks: 2-point strokes leaving the frame's
+    // right edge rightward - the y-grid lines leave from the LEFT
+    // edge, so the direction tells them apart.
+    bool saw_right_tick = false;
+    for (const canvas::CanvasCmd& c : b.clc.cmds) {
+        if (c.kind == canvas::CanvasCmdKind::stroke_polyline &&
+            c.points.size() == 2u &&
+            std::fabs(c.points[0].x - both.fx2) < 0.5f &&
+            c.points[1].x > both.fx2 + 1.0f) {
+            saw_right_tick = true;
+        }
+    }
+    CHECK(saw_right_tick);
+
+    // A v-only table keeps the stage-5 shape: no right ticks, and the
+    // frame reclaims the amp axis's label strip.
+    Bench solo;
+    solo.load(v_only_table(41u));
+    solo.draw();
+    const Bench::FrameBox f = solo.frame_box(solo.frame_cmd());
+    bool solo_right_tick = false;
+    for (const canvas::CanvasCmd& c : solo.clc.cmds) {
+        if (c.kind == canvas::CanvasCmdKind::stroke_polyline &&
+            c.points.size() == 2u &&
+            std::fabs(c.points[0].x - f.fx2) < 0.5f &&
+            c.points[1].x > f.fx2 + 1.0f) {
+            solo_right_tick = true;
+        }
+    }
+    CHECK_FALSE(solo_right_tick);
+    CHECK(f.fx2 > both.fx2 + 20.0f);  // 46 - 10: the label strip's width
+}
+
+TEST_CASE("the right strip drags the amp window alone") {
+    Bench b;
+    b.load(ramp_table(41u));
+    b.draw();
+
+    const Bench::FrameBox f = b.frame_box(b.frame_cmd());
+    // Press the RIGHT strip: right of the frame's right edge, inside
+    // its height - the right spine's drag handle (the widened margin
+    // the second axis earns).
+    Bench::Mouse m;
+    m.x = f.fx2 + 5.0f;
+    m.y = (f.fy + f.fy2) * 0.5f;
+    m.left_pressed = true;
+    m.left_down = true;
+    b.draw(m);
+    CHECK(b.ed.results.gesture.kind == PlotGesture::Kind::ZoomY);
+    CHECK(b.ed.results.gesture.zoom_axis == 1);
+    CHECK(b.ed.results.view.active);
+
+    // 100 px up: e^0.5 in - on the amp window ONLY. The volt window
+    // and the sweep keep their homes.
+    m.y -= 100.0f;
+    m.left_pressed = false;
+    b.draw(m);
+    CHECK((b.ed.results.view.y1_hi - b.ed.results.view.y1_lo) ==
+          doctest::Approx(kHomeY1Span * std::exp(-0.5)).epsilon(1e-3));
+    CHECK((b.ed.results.view.y_hi - b.ed.results.view.y_lo) ==
+          doctest::Approx(kHomeYSpan).epsilon(1e-6));
+    CHECK((b.ed.results.view.x_hi - b.ed.results.view.x_lo) ==
+          doctest::Approx(kHomeXSpan).epsilon(1e-6));
+
+    // The sine re-scales with its window: the drag zoomed IN about
+    // the strip's mid (0 A), so the amp span closed to +-0.64 mA and
+    // the peak (1 mA) now maps ABOVE the frame - the waveform leaving
+    // the frame is what a y zoom-in on its own spine looks like. The
+    // ramp's geometry is untouched (its own spine never moved).
+    const std::vector<const canvas::CanvasCmd*> series = b.series_cmds();
+    REQUIRE(series.size() == 2u);
+    const canvas::CanvasCmd* sine =
+        series[0]->color == series_color(1) ? series[0] : series[1];
+    CHECK(sine->points[10].y < f.fy);   // the peak: past the top edge
+    CHECK(sine->points[30].y > f.fy2);  // the trough: past the bottom
+}
+
+TEST_CASE("a v-only table has no right strip and the press falls nowhere") {
+    Bench b;
+    b.load(v_only_table(41u));
+    b.draw();
+
+    const Bench::FrameBox f = b.frame_box(b.frame_cmd());
+    // Where a right strip WOULD be, if the table had currents: no
+    // spine, no handle - the press is outside every claimable region
+    // and arms nothing.
+    Bench::Mouse m;
+    m.x = f.fx2 + 5.0f;
+    m.y = (f.fy + f.fy2) * 0.5f;
+    m.left_pressed = true;
+    m.left_down = true;
+    b.draw(m);
+    CHECK(b.ed.results.gesture.kind == PlotGesture::Kind::None);
     CHECK_FALSE(b.ed.results.view.active);
 }

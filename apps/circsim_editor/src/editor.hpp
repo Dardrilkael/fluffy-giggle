@@ -202,11 +202,15 @@ struct NetlistCache {
 // wheel, the rubber band and the drags produce, in DATA units,
 // riding over the automatic fit (ws::circsim::clamp_view keeps it
 // inside the data's padded extent). Inactive = the auto fit, the
-// stage-4 behavior exactly.
+// stage-4 behavior exactly. Stage 6 gives the two-axis plot its
+// second window: y_* is the LEFT spine's window (the volt company),
+// y1_* the RIGHT one's (the amp company) - each clamped into its own
+// home, so a mixed legend zooms one spine without dragging the other.
 struct PlotView {
     bool active = false;
     double x_lo = 0.0, x_hi = 0.0;
-    double y_lo = 0.0, y_hi = 0.0;
+    double y_lo = 0.0, y_hi = 0.0;    // the left y axis (volts)
+    double y1_lo = 0.0, y1_hi = 0.0;  // the right y axis (amperes)
 };
 
 // The plot's in-flight pointer gesture (stage 5): the rubber-band box
@@ -214,13 +218,19 @@ struct PlotView {
 // captured so the drag rebases from it every frame (no drift) and a
 // right-click restores it exactly. The double-click clock rides the
 // input frame's dt - the reset gesture's "two clicks, same spot".
+// Stage 6 adds the right strip's drag (zoom_axis 1 vs 0) and the
+// right spine's press-time capture (y1_*, anchor_y1) so its drag
+// rebases and cancels exactly like the left one always did.
 struct PlotGesture {
     enum class Kind : std::uint8_t { None, Band, ZoomX, ZoomY, Pan };
     Kind kind = Kind::None;
     float from_x = 0.0f, from_y = 0.0f;     // the press point, screen px
     double anchor_x = 0.0, anchor_y = 0.0;  // the data point under the press
+    double anchor_y1 = 0.0;                 // ... on the right spine (stage 6)
     double x_lo = 0.0, x_hi = 0.0;          // the x view at press
-    double y_lo = 0.0, y_hi = 0.0;          // the y view at press
+    double y_lo = 0.0, y_hi = 0.0;          // the left y view at press
+    double y1_lo = 0.0, y1_hi = 0.0;        // the right y view at press
+    int zoom_axis = 0;  // the ZoomY strip: 0 = left, 1 = right (stage 6)
     bool was_active = false;                // the view at press (the cancel restore)
     // The double-click detector: the clock runs while the pointer is
     // over the plot, resets on every press there.
@@ -232,7 +242,10 @@ struct PlotGesture {
 // view over it - which table is shown, which signals are visible, and
 // the sample the cursor hovers (the crosshair's index, -1 when off).
 // Stage 5 adds the plot's manual view and its in-flight gesture, both
-// keyed to the table they belong to. A document switch clears it
+// keyed to the table they belong to. Stage 6 widens both to the two
+// spines: the view carries the right axis's window beside the left's,
+// the gesture its press-time capture - a mixed V/I legend zooms and
+// pans each spine alone. A document switch clears it
 // (document_changed); an EDIT does not -
 // the panel marks itself stale against the schematic's version, the
 // same contract the Problems and Netlist panels keep.
