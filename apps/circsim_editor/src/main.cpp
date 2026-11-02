@@ -19,8 +19,8 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <utility>
@@ -101,11 +101,7 @@ constexpr const char* kMonoFontPath =
 #endif
 
 [[nodiscard]] bool file_exists(const char* path) {
-    if (FILE* f = std::fopen(path, "rb")) {
-        std::fclose(f);
-        return true;
-    }
-    return false;
+    return std::filesystem::exists(path);
 }
 
 [[nodiscard]] const char* font_or(const char* primary, const char* fallback) {
