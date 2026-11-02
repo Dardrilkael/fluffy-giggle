@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -6402,7 +6403,67 @@ TEST_CASE("r2d free functions route through set_active") {
 
 namespace {
 
+// The system face, resolved at the test's own platform boundary (the
+// apps' rule): the bake tests assert STRUCTURE, not exact Segoe
+// metrics, so any real face keeps them green. A posix dev box walks
+// the common faces - dejavu (Debian/Fedora), liberation (RH/Ubuntu),
+// noto (minimal images) - and the first that exists answers; none
+// present fails the bake loudly naming the path (a box with no fonts
+// at all cannot run a font suite).
+#ifdef _WIN32
 constexpr const char* kDefaultTestFontPath = "C:/Windows/Fonts/segoeui.ttf";
+constexpr const char* kBoldFacePath = "C:/Windows/Fonts/segoeuib.ttf";
+constexpr const char* kMonoFacePath = "C:/Windows/Fonts/consola.ttf";
+constexpr const char* kHanFacePath = "C:/Windows/Fonts/msyh.ttc";
+#else
+// The first candidate that exists answers (fopen probes, no stat
+// machinery); none present falls through to candidates[0] so the bake
+// fails loudly naming a path.
+const char* first_existing_font(const char* const* candidates,
+                                std::size_t count) {
+    for (std::size_t i = 0; i < count; ++i) {
+        if (std::FILE* f = std::fopen(candidates[i], "rb")) {
+            std::fclose(f);
+            return candidates[i];
+        }
+    }
+    return candidates[0];
+}
+const char* default_test_font_path() {
+    static const char* const candidates[] = {
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    };
+    return first_existing_font(candidates, std::size(candidates));
+}
+const char* bold_test_font_path() {
+    static const char* const candidates[] = {
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    };
+    return first_existing_font(candidates, std::size(candidates));
+}
+const char* mono_test_font_path() {
+    static const char* const candidates[] = {
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+    };
+    return first_existing_font(candidates, std::size(candidates));
+}
+const char* han_test_font_path() {
+    static const char* const candidates[] = {
+        "/usr/share/fonts/truetype/chinese/NotoSansSC-Regular.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    };
+    return first_existing_font(candidates, std::size(candidates));
+}
+const char* const kDefaultTestFontPath = default_test_font_path();
+const char* const kBoldFacePath = bold_test_font_path();
+const char* const kMonoFacePath = mono_test_font_path();
+const char* const kHanFacePath = han_test_font_path();
+#endif
 
 // A hand-built font for the draw tests: 'A' and 'B' advance 10 and 5 with
 // known offsets and sprites on a synthetic page; the space advances 3
@@ -9022,13 +9083,12 @@ TEST_CASE("font faces stack by priority and resolve per codepoint") {
     using namespace ws::ui::r2d;
     // Two real faces with DIFFERENT metrics for the same codepoint, so
     // which face answered is observable in the advance: Segoe UI Bold vs
-    // Consolas (its omega advance is the mono width).
-    constexpr const char* kBoldPath = "C:/Windows/Fonts/segoeuib.ttf";
-    constexpr const char* kMonoPath = "C:/Windows/Fonts/consola.ttf";
-    const font::FaceBake bold = font::load_face(kBoldPath, 24.0f);
-    const font::FaceBake mono = font::load_face(kMonoPath, 24.0f);
+    // Consolas (its omega advance is the mono width) on Windows, DejaVu
+    // Bold vs DejaVu Mono on a posix dev box.
+    const font::FaceBake bold = font::load_face(kBoldFacePath, 24.0f);
+    const font::FaceBake mono = font::load_face(kMonoFacePath, 24.0f);
     if (!bold.ok || !mono.ok) {
-        MESSAGE("segoeuib.ttf/consola.ttf not present - face checks skipped");
+        MESSAGE("no bold/mono pair present - face checks skipped");
         return;
     }
     // Both carry omega (U+03A9), and the pair must disagree on its
@@ -9043,8 +9103,8 @@ TEST_CASE("font faces stack by priority and resolve per codepoint") {
 
     // Lower priority value answers first - even when it was added second.
     Font stack = ab_font();
-    REQUIRE(font_add_face(stack, kBoldPath, 1).has_value());
-    REQUIRE(font_add_face(stack, kMonoPath, 0).has_value());
+    REQUIRE(font_add_face(stack, kBoldFacePath, 1).has_value());
+    REQUIRE(font_add_face(stack, kMonoFacePath, 0).has_value());
     // The hand-built font borrows the FIRST-arriving face's baseline.
     CHECK(stack.extras_state()->baseline_y == bold.ascent_px);
     // The insert kept the stack sorted: mono (0) sits before bold (1).
@@ -9062,8 +9122,8 @@ TEST_CASE("font faces stack by priority and resolve per codepoint") {
 
     // Flipped priorities flip the answer.
     Font flipped = ab_font();
-    REQUIRE(font_add_face(flipped, kBoldPath, 0).has_value());
-    REQUIRE(font_add_face(flipped, kMonoPath, 1).has_value());
+    REQUIRE(font_add_face(flipped, kBoldFacePath, 0).has_value());
+    REQUIRE(font_add_face(flipped, kMonoFacePath, 1).has_value());
     CHECK(font_request_text(flipped, kOmega) == 1u);
     CHECK(font_bake_pending(flipped, 8u) == 1u);
     const Font::Glyph* bold_answer = flipped.glyph(0x03A9);
@@ -9072,8 +9132,8 @@ TEST_CASE("font faces stack by priority and resolve per codepoint") {
 
     // Equal priorities keep addition order: bold added first answers.
     Font tied = ab_font();
-    REQUIRE(font_add_face(tied, kBoldPath, 0).has_value());
-    REQUIRE(font_add_face(tied, kMonoPath, 0).has_value());
+    REQUIRE(font_add_face(tied, kBoldFacePath, 0).has_value());
+    REQUIRE(font_add_face(tied, kMonoFacePath, 0).has_value());
     CHECK(font_request_text(tied, kOmega) == 1u);
     CHECK(font_bake_pending(tied, 8u) == 1u);
     const Font::Glyph* tie_answer = tied.glyph(0x03A9);
@@ -9089,11 +9149,13 @@ TEST_CASE("font_request_text marks only what a stacked face carries") {
 
     const font::FaceBake segoe = font::load_face(kDefaultTestFontPath, 24.0f);
     if (!segoe.ok) {
-        MESSAGE("segoeui.ttf not present - face checks skipped");
+        MESSAGE("no system face present - face checks skipped");
         return;
     }
-    // The fixture's split: Segoe UI carries e-acute but not the Han
-    // codepoint; YaHei (face 0 of the collection) carries the Han one.
+    // The fixture's split: the system face carries e-acute but not the
+    // Han codepoint (Segoe UI and DejaVu Sans alike); the Han carrier
+    // (YaHei on Windows, Noto Sans CJK on a posix box) carries the Han
+    // one.
     REQUIRE(segoe.carries(0x00E9));
     REQUIRE_FALSE(segoe.carries(0x4E16));
     REQUIRE(font_add_face(font, kDefaultTestFontPath, 0).has_value());
@@ -9107,8 +9169,16 @@ TEST_CASE("font_request_text marks only what a stacked face carries") {
     CHECK(font.glyph(0x00E9) == font.glyph(0x10FF00));
 
     // A second face - added AFTER the request - answers what the first
-    // could not: the request must be made again.
-    REQUIRE(font_add_face(font, "C:/Windows/Fonts/msyh.ttc", 1).has_value());
+    // could not: the request must be made again. A box with no CJK face
+    // at all stops here (the split above already proved the system face
+    // carries no Han).
+    const font::FaceBake han = font::load_face(kHanFacePath, 24.0f);
+    if (!han.ok) {
+        MESSAGE("no CJK face present - Han checks skipped");
+        return;
+    }
+    REQUIRE(han.carries(0x4E16));
+    REQUIRE(font_add_face(font, kHanFacePath, 1).has_value());
     CHECK(font_request_text(font, "\xE4\xB8\x96") == 1u);
     CHECK(font_bake_pending(font, 8u) == 2u);  // e-acute + the Han codepoint
 

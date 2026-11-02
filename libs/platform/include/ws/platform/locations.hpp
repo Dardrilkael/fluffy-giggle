@@ -61,9 +61,12 @@ class Locations {
 
 // The raw OS truth behind the app-name constructor, public for hosts
 // that want it without owning a Locations. Windows answers the
-// KnownFolders (app-suffixed where the location is app-scoped);
-// Android answers `unavailable` - the activity owns the package dirs,
-// so the app TU installs a LocationRoots at startup instead.
+// KnownFolders (app-suffixed where the location is app-scoped); a
+// posix dev box answers the XDG Base Directory truth (config/data/
+// cache app-suffixed under their XDG roots, documents the home
+// directory, temp TMPDIR or /tmp); Android answers `unavailable` -
+// the activity owns the package dirs, so the app TU installs a
+// LocationRoots at startup instead.
 [[nodiscard]] ws::core::Result<std::string> os_location(
     Location which, std::string_view app_name);
 

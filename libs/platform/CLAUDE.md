@@ -34,8 +34,10 @@ no platform header ever crosses into include/.
   SettingsStore shape: no globals, one owner thread): built with an app
   name it answers the OS truth, built with roots it answers those.
   `os_location` is the raw truth (Windows: the KnownFolders, cache under
-  data/cache; Android: `unavailable` - the activity owns the package
-  dirs, the app TU installs a LocationRoots at startup).
+  data/cache; a posix dev box: the XDG Base Directory env truth,
+  app-suffixed config/data/cache, documents the home, TMPDIR or /tmp;
+  Android: `unavailable` - the activity owns the package dirs, the
+  app TU installs a LocationRoots at startup).
   `ensure_directory` is mkdir -p over utf-8 narrow paths (the
   StdFileSystem char8_t routing), `io_failed` on any blocker.
 - `watch.hpp` - the "changed on disk" detector: `WatchSource` (the time
@@ -182,7 +184,11 @@ no platform header ever crosses into include/.
   the package dirs; the app-TU install lands with the first android
   consumer.
 - `locations_win.cpp` is the desktop half (the workspace's desktop is
-  Windows-only today, the ws::ui windowing precedent).
+  Windows-only today, the ws::ui windowing precedent);
+  `locations_posix.cpp` is the dev-box half - the XDG env truth, no
+  portal, no dbus - so a posix box links and tests the lib at all. A
+  relative XDG var reads as unset (the spec's own rule), and no $HOME
+  is the one refusal.
 - `normalize_path` is purely lexical: it never touches the disk, so
   symlinked segments resolve by name, not by target.
 - The watch sees the file's stamp move, not same-stamp rewrites: two

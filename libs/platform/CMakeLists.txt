@@ -34,13 +34,15 @@ if(platform_sources)
       "${CMAKE_CURRENT_SOURCE_DIR}/src/messagebox_android.cpp"
       "${CMAKE_CURRENT_SOURCE_DIR}/src/single_instance_android.cpp")
   else()
-    # Linux/other desktop (not a shipped platform - the workspace's
-    # desktop is Windows): the headless halves only, so the pure
-    # consumers (ws_ui_gui's shell layer and its headless tests) build
-    # and run on a dev box. The OS halves (dialogs/clipboard/message
-    # box/single-instance/known-folders) have no implementation here;
-    # anything that references them fails the link naming them, the
-    # same loud-not-silent rule the windowing pairs keep.
+    # Linux/other desktop: the headless halves plus locations_posix.cpp
+    # (the XDG env truth), so ws::platform - and everything that links
+    # it - builds, links and tests on a posix dev box; the headless
+    # suites' own docs promise exactly that. The remaining OS halves
+    # (dialogs/clipboard/message box/single-instance) have no
+    # implementation here; anything that references them fails the link
+    # naming them, the same loud-not-silent rule the windowing pairs
+    # keep (the Unavailable* classes in the headers are the refusal to
+    # inject instead).
     list(REMOVE_ITEM platform_sources
       "${CMAKE_CURRENT_SOURCE_DIR}/src/locations_win.cpp"
       "${CMAKE_CURRENT_SOURCE_DIR}/src/dialogs_win.cpp"

@@ -58,11 +58,16 @@ if(ws_want_bounce)
   # ws::physics2d pit drawn through ws::ui, with ws::audio thuds on impact.
   add_subdirectory(bounce)
 endif()
-if(ws_want_ui_gallery)
+if(ws_want_ui_gallery AND NOT (UNIX AND NOT APPLE))
   # ui_gallery is the gui widget set's acceptance view: one screen with every
   # ws::ui::gui widget family on it, no assets (the system font face, resolved
   # at the platform boundary), so it builds for the phone and the desktop
-  # unchanged - ungated for the same reason as the gui apps above.
+  # unchanged - ungated for the same reason as the gui apps above. The one
+  # build it cannot make is a posix DESKTOP one: its platform page exercises
+  # the OS halves (the native dialogs, the message boxes, the clipboard, the
+  # single-instance grab) whose TUs exist only for Windows and Android - the
+  # workspace's shipped platforms. Excluded there rather than stubbed: the
+  # page's whole point is the real OS round trips.
   add_subdirectory(ui_gallery)
 endif()
 if(NOT ANDROID AND ws_want_shell_example)

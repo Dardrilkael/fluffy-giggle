@@ -15,6 +15,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -216,11 +217,65 @@ TEST_CASE("os_location answers the Windows truth for an app") {
     REQUIRE(locs.get(ws::platform::Location::config).value() == cfg.value());
     REQUIRE(locs.get(ws::platform::Location::cache).value() == cache.value());
 #else
-    // On Linux/other desktops os_location is not implemented (the workspace's
-    // desktop is Windows-only today). The function would return unavailable;
-    // the headless halves (paths, supplied-root Locations, watch, MRU,
-    // autosave, fake dialogs/boxes, title composer) are exercised by the
-    // other cases in this suite. Skip the OS-truth assertions here.
+    // The posix dev box: the XDG truth (locations_posix.cpp). The env
+    // is process state, so the case both reads it (absolute-path
+    // answers whatever it says) and pins the spec's own shape through
+    // the constructor seam - a supplied root always wins, which is the
+    // part this suite can assert without owning the environment.
+    const auto cfg =
+        ws::platform::os_location(ws::platform::Location::config, "ws-app");
+    REQUIRE(cfg.has_value());
+    REQUIRE(ws::platform::is_absolute_path(cfg.value()));
+    REQUIRE(cfg.value().find("/ws-app") != std::string::npos);
+
+    const auto temp =
+        ws::platform::os_location(ws::platform::Location::temp, "ws-app");
+    REQUIRE(temp.has_value());
+    REQUIRE(ws::platform::is_absolute_path(temp.value()));
+
+    const auto refused = ws::platform::os_location(
+        ws::platform::Location::config, std::string_view{""});
+    REQUIRE_FALSE(refused.has_value());
+    REQUIRE(code_of(refused.error()) == "platform/6");
+
+    // The app-name constructor rides the same truth.
+    ws::platform::Locations locs{"ws-app"};
+    REQUIRE(locs.get(ws::platform::Location::config).value() == cfg.value());
+
+#if defined(__linux__) && defined(_POSIX_VERSION)
+    // The env halves, pinned against the live environment: an XDG var
+    // set to an absolute path is honored verbatim (app-suffixed), and
+    // a relative one is ignored per the spec. Restores whatever the
+    // box had set - a good citizen never leaks env edits.
+    struct EnvGuard {
+        std::string name;
+        std::string was;
+        bool had;
+        explicit EnvGuard(const char* n)
+            : name(n), was(::getenv(n) != nullptr ? ::getenv(n) : ""),
+              had(::getenv(n) != nullptr) {}
+        ~EnvGuard() {
+            if (had) {
+                ::setenv(name.c_str(), was.c_str(), 1);
+            } else {
+                ::unsetenv(name.c_str());
+            }
+        }
+    };
+    const EnvGuard guard{"XDG_CACHE_HOME"};
+    ::setenv("XDG_CACHE_HOME", "/tmp/ws-xdg-cache", 1);
+    const auto cache =
+        ws::platform::os_location(ws::platform::Location::cache, "ws-app");
+    REQUIRE(cache.has_value());
+    REQUIRE(cache.value() == "/tmp/ws-xdg-cache/ws-app");
+
+    ::setenv("XDG_CACHE_HOME", "relative/not/absolute", 1);
+    const auto fallback =
+        ws::platform::os_location(ws::platform::Location::cache, "ws-app");
+    REQUIRE(fallback.has_value());
+    REQUIRE(fallback.value() != "relative/not/absolute/ws-app");
+    REQUIRE(fallback.value().find("/ws-app") != std::string::npos);
+#endif
 #endif
 }
 

@@ -275,7 +275,15 @@ protected:
         config.config_dir =
             ws::platform::join_path(store_dir_, "shell-example");
         config.fs = &fs_;
+        // The pickers: the native set on Windows, the documented
+        // refusal on a posix dev box (the workspace's desktop is
+        // Windows; UnavailableFileDialogs is the same answer android
+        // gets, so the app still builds and runs for a look).
+#ifdef _WIN32
         dialogs_ = ws::platform::make_file_dialogs();
+#else
+        dialogs_ = std::make_unique<ws::platform::UnavailableFileDialogs>();
+#endif
         config.dialogs = dialogs_.get();
         config.jobs = &jobs_;
         shell_ = std::make_unique<shell::AppShell>(config, commands_,
@@ -939,7 +947,11 @@ private:
 
 #ifndef __ANDROID__
 int main() {
+#ifdef _WIN32
     // The single-instance grab: a second launch complains and exits.
+    // A posix dev box skips it (the grab is an OS-half with no Linux
+    // TU, the dialogs' rule) - it is a nicety, not a function of the
+    // example.
     const ws::platform::SingleInstance guard{"ws shell example"};
     if (!guard.is_primary()) {
         const std::unique_ptr<ws::platform::MessageBoxes> boxes =
@@ -953,6 +965,7 @@ int main() {
         (void)boxes->ask(request);
         return 1;
     }
+#endif
     ws::ui::AppConfig config;
     config.title = "scratchpad";
     config.width = 1200;
