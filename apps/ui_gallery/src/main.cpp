@@ -71,8 +71,10 @@
 #include <ws/settings/filesystem.hpp>
 #include <ws/ui/gui/command_views.hpp>
 #include <ws/ui/gui/gui_context.hpp>
+#include <ws/ui/gui/icons.hpp>
 #include <ws/ui/gui/job_progress.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
+#include <ws/ui/gui/painters.hpp>
 #include <ws/ui/gui/scoped.hpp>
 #include <ws/ui/gui/theme.hpp>
 #include <ws/ui/gui/theme_color.hpp>
@@ -252,11 +254,118 @@ enum Section {
     kOverlays,
     kDisabled,
     kCustomLook,
+    kSkins,
     kPlatform,
     kCommands,
     kCanvas,
     kSectionCount
 };
+
+// ---- the flat skin (the P7 proof) ----------------------------------------
+// One custom look, built ENTIRELY from the public seam - the theme's
+// tokens, r2d's primitives, fit_text - replacing three rows of the stock
+// painters table: square faces with hard border_strong frames, a square
+// knob, panels with square corners, no shadow, no animation (the theme
+// half of the skin sets those tokens; these draws honor them). The same
+// widget board renders under it unchanged: no fork of the library, no
+// rebuild of any behavior.
+namespace flat_skin {
+
+// The state face the ladder answers, spelled on the public API (the
+// library's own control_face_of is internal by design - an app writes
+// its own four lines).
+std::uint32_t face_of(gui::WidgetState state, const gui::ChromeTheme& theme) {
+    if (state == gui::WidgetState::Disabled) {
+        return theme.control_disabled;
+    }
+    if (state == gui::WidgetState::Pressed) {
+        return theme.control_pressed;
+    }
+    if (state == gui::WidgetState::Hovered) {
+        return theme.control_hovered;
+    }
+    return theme.control_bg;
+}
+
+float dim_of(gui::WidgetState state, const gui::ChromeTheme& theme) {
+    return state == gui::WidgetState::Disabled ? theme.disabled_alpha : 1.0f;
+}
+
+void button(const gui::Rect& rect, const gui::ButtonResult& result,
+            const gui::ChromeTheme& theme, const char* label,
+            ws::ui::r2d::Sprite) {
+    const float dim_by = dim_of(result.state, theme);
+    const std::uint32_t face = face_of(result.state, theme);
+    // The square face, then the hard frame - the flat skin's signature
+    // (the frame rides border_strong, the skin's divider token).
+    ws::ui::r2d::draw_quad(rect.x, rect.y, rect.width, rect.height,
+                           gui::dim(face, dim_by));
+    ws::ui::r2d::draw_rounded_outline(rect.x, rect.y, rect.width, rect.height,
+                                      0.0f, 1.0f,
+                                      gui::dim(theme.border_strong, dim_by),
+                                      gui::dim(face, dim_by));
+    // The label, centered, through the stock fit - the icon row is
+    // deliberately dropped (this skin has no icons; its atlas is empty).
+    char scratch[128];
+    const gui::LabelFit fit = gui::fit_text(
+        label, std::max(0.0f, rect.width - 2.0f * theme.padding), theme,
+        scratch, sizeof scratch);
+    if (fit.advance > 0.0f && theme.font != nullptr) {
+        ws::ui::r2d::draw_text(
+            rect.x + (rect.width - fit.advance) * 0.5f,
+            rect.y + (rect.height - theme.font->line_height()) * 0.5f,
+            fit.text, *theme.font, gui::dim(theme.text, dim_by));
+    }
+}
+
+void toggle_switch(const gui::Rect& rect, const gui::ToggleSwitchResult& result,
+                   const gui::ChromeTheme& theme, const char*, bool on) {
+    const float box = theme.control_height;
+    const float track_w = 2.0f * box;
+    const float dim_by = dim_of(result.state, theme);
+    // The square track, hard-framed; the accent IS the track while on,
+    // the stock's own rule.
+    std::uint32_t face = face_of(result.state, theme);
+    if (on) {
+        face = theme.control_on;
+    }
+    ws::ui::r2d::draw_quad(rect.x, rect.y, track_w, box,
+                           gui::dim(face, dim_by));
+    ws::ui::r2d::draw_rounded_outline(rect.x, rect.y, track_w, box, 0.0f,
+                                      1.0f,
+                                      gui::dim(theme.border_strong, dim_by),
+                                      gui::dim(face, dim_by));
+    // The square knob, at its end (the skin's theme runs anim off, so
+    // the traveler sits at 0 or 1; a traveler that speaks is honored).
+    const float knob = box - 2.0f * theme.check_inset;
+    if (knob > 0.0f) {
+        const float at =
+            result.travel >= 0.0f ? result.travel : (on ? 1.0f : 0.0f);
+        const float span = track_w - 2.0f * theme.check_inset - knob;
+        ws::ui::r2d::draw_quad(rect.x + theme.check_inset + at * span,
+                               rect.y + theme.check_inset, knob, knob,
+                               gui::dim(theme.text, dim_by));
+    }
+}
+
+void panel(const gui::Rect& bounds, const gui::ChromeTheme& theme) {
+    // The square chrome: face + hard border_strong frame, no radius.
+    ws::ui::r2d::draw_rounded_outline(bounds.x, bounds.y, bounds.width,
+                                      bounds.height, 0.0f, 1.0f,
+                                      theme.border_strong, theme.panel_bg);
+}
+
+// The table: stock everywhere, these three rows replaced. Copy then
+// override - the exact spelling the painters header's contract names.
+const gui::WidgetPainters table = [] {
+    gui::WidgetPainters p = gui::kStockPainters;
+    p.button = &button;
+    p.toggle_switch = &toggle_switch;
+    p.panel = &panel;
+    return p;
+}();
+
+}  // namespace flat_skin
 
 // The platform page's store dir, computed once at construction: the
 // OS data location for this app on desktop (made on the spot by the
@@ -1236,6 +1345,12 @@ private:
 
     // ---- caller-owned widget state (the gallery IS this list) ----
     std::array<bool, kSectionCount> section_{};
+    // The skins page's three boards share this state: the SAME widgets
+    // under three themes, one caller-owned set per board column.
+    bool skin_check_[3] = {true, false, true};
+    bool skin_toggle_[3] = {false, true, true};
+    int skin_pick_[3] = {0, 1, 2};
+    float skin_slide_[3] = {0.3f, 0.6f, 0.8f};
     // The canvas page's view + renderer (stage 14).
     canvas::CanvasView canvas_view_{};
     canvas::Renderer2DCanvas canvas_renderer_{};
@@ -2512,6 +2627,88 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
                                std::max(0.0f, digit_row.height - 2.0f),
                                chrome_.panel_bg);
         paint_bare_field(digit_row, digits, digit_buf_);
+    }
+
+    // --- skins (the P7 proof): one board, three looks -------------------
+    // The SAME widget board under three themes, side by side: the stock
+    // dark, the stock light, and one CUSTOM skin - flat/square (every
+    // radius 0, border_strong dividers, no shadow, animation off) built
+    // from a token override plus a painters table replacing three rows.
+    // The page IS the acceptance: the library restyled without forking,
+    // live, the behaviors identical under every look.
+    if (gui::collapsing_header(gui_, layout_, chrome_,
+                               "skins: one board, three looks",
+                               section_[kSkins])) {
+        gui::text(layout_, chrome_,
+                  "the same widgets under three themes - token overrides "
+                  "and a 3-row painters table, no fork", -1.0f);
+
+        // The three themes. Dark and light are the stocks carried by the
+        // app's own scale and font; the flat skin derives from the dark
+        // one and overrides tokens + the painter rows (flat_skin::table).
+        const float board_w =
+            std::max(0.0f, (page.width - 2.0f * chrome_.spacing) / 3.0f);
+        const float board_h = 5.0f * chrome_.control_height +
+                              5.0f * chrome_.spacing + 2.0f * chrome_.padding;
+
+        gui::ChromeTheme boards[3];
+        boards[0] = chrome_;  // stock dark (the app's live accent included)
+        boards[1] = gui::kLightChrome.scaled(scale_);
+        boards[2] = chrome_;
+        for (int i = 0; i < 3; ++i) {
+            // The font pointers ride every board (the borrow rule: the
+            // app owns the faces, the themes point).
+            boards[i].font = chrome_.font;
+            boards[i].font_strong = chrome_.font_strong;
+        }
+        // The flat skin's token half: square everything, the strong
+        // divider, no shadow, no motion.
+        boards[2].corner_radius = 0.0f;
+        boards[2].radius_control = 0.0f;
+        boards[2].radius_panel = 0.0f;
+        boards[2].radius_popup = 0.0f;
+        boards[2].radius_pill = 0.0f;
+        boards[2].border = boards[2].border_strong;
+        boards[2].shadow_blur = 0.0f;
+        boards[2].anim_enabled = false;
+        boards[2].painters = &flat_skin::table;
+
+        static const char* const kBoardNames[3] = {
+            "stock dark", "stock light", "flat skin (custom painters)"};
+        for (int board = 0; board < 3; ++board) {
+            const gui::ChromeTheme& theme = boards[board];
+            const gui::Rect bounds{page.x + static_cast<float>(board) *
+                                             (board_w + chrome_.spacing),
+                                   layout_.cursor_y(), board_w, board_h};
+            (void)gui::begin_panel(gui_, layout_, theme, kBoardNames[board],
+                                   bounds);
+            {
+                if (gui::button(gui_, layout_, theme, "button", -1.0f, {},
+                                false,
+                                board == 2 ? gui::ButtonStyle::secondary
+                                           : gui::ButtonStyle::primary)) {
+                    std::snprintf(status_, sizeof status_, "skins: %s button",
+                                  kBoardNames[board]);
+                }
+                (void)gui::checkbox(gui_, layout_, theme, "check",
+                                    skin_check_[board]);
+                (void)gui::toggle_switch(gui_, layout_, theme, "toggle",
+                                         skin_toggle_[board]);
+                (void)gui::radio(gui_, layout_, theme, "pick", skin_pick_[board],
+                                 board);
+                (void)gui::slider_float(gui_, layout_, theme, "slide",
+                                        skin_slide_[board], 0.0f, 1.0f, -1.0f);
+            }
+            gui::end_panel(gui_, layout_);
+        }
+        // The row the boards sat in: the parent cursor parked at the
+        // header (panels take explicit bounds and advance nothing), so
+        // the page resumes below the tallest board by hand.
+        (void)layout_.next(page.width, board_h);
+        gui::text(layout_, chrome_,
+                  "every behavior identical under every look: hit tests, "
+                  "focus, keyboard, animation - the painters own the "
+                  "pixels, nothing else", -1.0f);
     }
 
     // --- platform (stage 12): dialogs, recent files, clipboard, drops,

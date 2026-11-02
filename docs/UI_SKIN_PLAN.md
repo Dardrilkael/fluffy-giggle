@@ -1,6 +1,6 @@
 # UI Task — the Skinnable-Library Plan (tokens, painters, motion, text, icons)
 
-Status: **in progress**. The premise: `ws::ui` is a LIBRARY, and an app
+Status: **landed** (P0-P7; see the commit trail - P5's outline takes a `face` parameter, the one deviation from this text, documented in the r2d header). The premise: `ws::ui` is a LIBRARY, and an app
 must be able to restyle it — deeply, not just recolor it — without
 forking. Every improvement in this plan lands as exactly one of two
 things:

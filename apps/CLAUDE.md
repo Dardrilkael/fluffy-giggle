@@ -44,7 +44,12 @@ CMakeLists only wire ws libraries together.
   frames - the overlays, the disabled scope, custom look - the stage 11
   story: one slider value and one text buffer, each drawn three ways: the
   composed widgets, a custom paint over the stock behavior, and a widget
-  the app owns outright off the raw state() seam), and the platform
+  the app owns outright off the raw state() seam), the skins page (the
+  ui-skin plan's P7 acceptance: the SAME widget board under three looks
+  side by side - stock dark, stock light, and one custom flat/square
+  skin built from a token override plus a painters table replacing three
+  rows, no fork of the library; the behaviors read identical under every
+  look), and the platform
   page (the stage-12 story: the native file dialogs and the recovery
   ask each running on a ws::jobs worker - they block while the user
   decides - with every answer marshalled back through the frame

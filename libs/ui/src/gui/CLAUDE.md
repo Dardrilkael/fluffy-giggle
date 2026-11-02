@@ -70,3 +70,30 @@ stock. A painter receives the behavior's answer (state/focus/hit),
 the rect, the theme and the row's data; it draws ONLY - no context,
 no state change, no allocation - and may compose (a skin's row may
 call any stock draw).
+
+## The skin pass's own halves (P5-P7, on top of the map above)
+
+- `painters.hpp` also carries the ICON mapping: one extra row,
+  `icon_of(theme, Icon) -> r2d::Sprite` (a LOOKUP, not a draw; the
+  theme rides because a Sprite is font-bound), folded by
+  `icon_sprite_of` - stock answers the theme font's own glyph out of
+  the private-use set every bake carries (0xE000+ seven procedural
+  shapes, see src/text/font.h's icon half; `Font::find_glyph` is the
+  carried-only resolution). Sentinel sprite = draw the pre-icon square.
+- The r2d layered pair lives in the renderer, not here:
+  `draw_rounded_outline` (exactly 2 quads - outer color + inner face
+  inset by the stroke; src-over cannot punch a hole, so `face` is the
+  caller's surface) and `draw_shadow` (the documented 4-layer stack).
+  The stock adoption: panel_chrome/popup_frame_draw draw the border as
+  the outline at the role radii + border_width, popups/toasts/menus
+  shadow only when the theme's shadow tokens say so (the clip escapes
+  open on `shadow_bounds`), ring_draw expands by `focus_ring_width`,
+  the toggle track and scrollbar thumb read the pill role.
+- `snap_v`/`snap_rect` (widgets_detail.hpp): the stock painters' static
+  rects snap to whole device pixels; behavior rects and ANIMATED values
+  never do.
+- ButtonStyle { secondary, primary, ghost, danger } rides ButtonResult
+  (the painter row's signature stays frozen); faces resolve through the
+  tokens - the danger family derives in apply_accent and is checked
+  like control_on (face 3:1 both backgrounds, the on-accent label on
+  the face and its pressed rung, hover exempt).
