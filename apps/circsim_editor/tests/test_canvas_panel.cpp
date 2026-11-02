@@ -91,7 +91,7 @@ struct Bench {
 };
 
 // Per-axis float compare (the assertions' tolerance helper).
-[[nodiscard]] bool near(ws::math::Vec2 a, ws::math::Vec2 b, float tol) {
+[[nodiscard]] bool vec2_near(ws::math::Vec2 a, ws::math::Vec2 b, float tol) {
     const float dx = a.x - b.x;
     const float dy = a.y - b.y;
     return std::fabs(dx) <= tol && std::fabs(dy) <= tol;
@@ -113,8 +113,8 @@ struct Bench {
         }
         const ws::math::Vec2& p0 = cmd.points[0];
         const ws::math::Vec2& p1 = cmd.points[1];
-        if ((near(p0, a, 0.01f) && near(p1, c, 0.01f)) ||
-            (near(p0, c, 0.01f) && near(p1, a, 0.01f))) {
+        if ((vec2_near(p0, a, 0.01f) && vec2_near(p1, c, 0.01f)) ||
+            (vec2_near(p0, c, 0.01f) && vec2_near(p1, a, 0.01f))) {
             return &cmd;
         }
     }
@@ -139,7 +139,7 @@ struct Bench {
     // first); average the distinct vertices only, or the duplicate
     // biases the answer toward vertex 0 by ~r/n px.
     std::size_t n = c.points.size();
-    if (n > 1u && near(c.points.front(), c.points.back(), 1e-4f)) {
+    if (n > 1u && vec2_near(c.points.front(), c.points.back(), 1e-4f)) {
         --n;
     }
     ws::math::Vec2 sum{0.0f, 0.0f};
@@ -175,14 +175,14 @@ void assert_camera_agreement(Bench& b) {
     const canvas::CanvasCmd* wire = wire_cmd(b);
     REQUIRE(wire != nullptr);
     REQUIRE(wire->points.size() == 2u);
-    CHECK(near(wire->points[0], view.w2s({1.0, 1.0}), 0.01f));
-    CHECK(near(wire->points[1], view.w2s({4.0, 1.0}), 0.01f));
+    CHECK(vec2_near(wire->points[0], view.w2s({1.0, 1.0}), 0.01f));
+    CHECK(vec2_near(wire->points[1], view.w2s({4.0, 1.0}), 0.01f));
 
     const std::vector<const canvas::CanvasCmd*> junctions =
         junction_cmds(b);
     REQUIRE(junctions.size() == 2u);
-    CHECK(near(centroid(*junctions[0]), view.w2s({1.0, 1.0}), 0.05f));
-    CHECK(near(centroid(*junctions[1]), view.w2s({4.0, 1.0}), 0.05f));
+    CHECK(vec2_near(centroid(*junctions[0]), view.w2s({1.0, 1.0}), 0.05f));
+    CHECK(vec2_near(centroid(*junctions[1]), view.w2s({4.0, 1.0}), 0.05f));
 
     // Is the base lattice among the drawn rungs? The same frame the
     // panel builds, through the grid's own pure half: step == base
@@ -212,13 +212,13 @@ void assert_camera_agreement(Bench& b) {
     const ws::math::Vec2 corner{std::floor(end.x), std::floor(end.y)};
     bool mark_found = false;
     for (const ws::math::Vec2& mk : mark_corners(b)) {
-        if (near(mk, corner, 0.01f)) {
+        if (vec2_near(mk, corner, 0.01f)) {
             mark_found = true;
             break;
         }
     }
     CHECK(mark_found);
-    CHECK(near(wire->points[0],
+    CHECK(vec2_near(wire->points[0],
                {corner.x + 0.5f, corner.y + 0.5f}, 0.5f));
 }
 
