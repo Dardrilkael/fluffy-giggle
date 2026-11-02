@@ -94,6 +94,13 @@ One line each - the per-tree CLAUDE.md files carry the detail:
   the .op/.dc/.tran/.ac analyses and the compact-device family (R/C/L/
   sources through the diode/BJT/MOSFET M4 devices). The contract is
   `libs/spice/DESIGN.md` - sections cited as §n.m throughout the code.
+- `libs/circsim` - the schematic side of the circsim app: the data model
+  (parts/junctions/wires/labels, ids never reused), the `.csim` JSON
+  format (unknown fields preserved, tolerant load, atomic writes through
+  the settings FileSystem), graph-based net building (reference edges +
+  exact-position coincidence; crossings never connect), ERC, and the
+  ws::spice deck export with its back-map - ws::spice is the only
+  simulator it ever talks to. Its CLI is `apps/circsim_cli`.
 - `apps/*` - the executables.
 
 ## Read when

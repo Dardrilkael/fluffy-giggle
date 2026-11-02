@@ -84,6 +84,11 @@ CMakeLists only wire ws libraries together.
   (desktop console app): a hardcoded RC-transient deck through
   read_deck -> build_deck_ast -> run_deck, the v(out) column and the
   .meas result printed to stdout - the C++ front door in 15 lines.
+- `apps/circsim_cli` - the ws::circsim front door (desktop console app):
+  `run file.csim` loads a schematic, exports it to a ws::spice deck and
+  runs it (--analysis overrides, CSV/JSON out), `erc` lints the
+  schematic (floating pins, V loops, I cutsets...), `netlist` prints the
+  exported deck. argv, file I/O and exit codes only.
 - `apps/shell_example` - the ws::ui::shell acceptance app (windowed,
   desktop): a text-and-plot "scratchpad" built ONLY from AppShell - the
   host registers a .txt document type (whole-content undo commands, the

@@ -40,6 +40,8 @@ ws_app_wants(_want bench_physics physics)
 set(ws_want_bench_physics ${_want})
 ws_app_wants(_want spice spice)
 set(ws_want_spice ${_want})
+ws_app_wants(_want circsim_cli circsim)
+set(ws_want_circsim_cli ${_want})
 unset(_want)
 
 if(ws_want_playground)
@@ -99,5 +101,11 @@ if(NOT ANDROID)
     # .meas to stdout. The smallest possible ws::spice C++ program. Built
     # wherever the spice lib is (so the spice subset preset gets it too).
     add_subdirectory(spice_example)
+  endif()
+  if(ws_want_circsim_cli)
+    # circsim_cli is the ws::circsim front door: load a .csim, run an
+    # analysis through ws::circsim -> ws::spice, write CSV/JSON (plus erc
+    # and netlist subcommands). Desktop console app like apps/spice.
+    add_subdirectory(circsim_cli)
   endif()
 endif()

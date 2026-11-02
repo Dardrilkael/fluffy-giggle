@@ -100,3 +100,11 @@ if(ws_want_spice)
   # analysis drivers. Pure std + ws::core + ws::math; its CLI is apps/spice.
   add_subdirectory(spice)
 endif()
+if(ws_want_circsim)
+  # ws::circsim is the schematic model + .csim format + nets + ERC + the
+  # ws::spice export (the circsim app's headless core, stage 1): the
+  # schematic data model and every simulation path over ws::spice - never a
+  # second solver. The settings link is the json + FileSystem seam (the
+  # format's carrier); no ui include anywhere. Its CLI is apps/circsim_cli.
+  add_subdirectory(circsim)
+endif()
