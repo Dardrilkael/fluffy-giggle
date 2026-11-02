@@ -109,8 +109,11 @@ CMakeLists only wire ws libraries together.
   while a tool is engaged, snap feedback (a ring on the wire tool's
   pin/junction target, an accent dot on the landing intersection) and
   Shift as the coarse major-lattice snap for placements, part drags
-  and labels - wires, pins and junctions always snap fine; the Palette
-  over `symbols()` with fitted mini previews; the Properties
+  and labels - wires, pins and junctions always snap fine; the
+  panel's canvas transform composes the exact inverse of its w2s
+  (viewport center, zoom with the y flip, -center), so the world
+  lands on the same pixels the grid marks at every pan/zoom; the
+  Palette over `symbols()` with fitted mini previews; the Properties
   grid over ParamSpecs plus the analysis-setup and directives editors;
   the Problems list over Diags with select-and-zoom through
   libs/circsim's locate seam; the Netlist view; the Results panel - the
@@ -133,8 +136,11 @@ CMakeLists only wire ws libraries together.
   summary toast, the run's mapped problems in the Problems panel, the
   tables delivered to the Results panel). The panel's draw is gated
   headless by `tests/test_results_panel.cpp` through the Editor's
-  plot_canvas seam (a CommandListCanvas asserting the geometry), the
-  gestures among it. The
+  plot_canvas seam (a CommandListCanvas asserting the plot geometry),
+  the gestures among it, and the Schematic panel's camera mapping by
+  `tests/test_canvas_panel.cpp` through the canvas_panel_canvas seam
+  (every element's recorded geometry equals its w2s answer - the grid
+  marks, the snap feedback and the picks speak the same mapping). The
   bare editor keys (R/M/W/L/F/Del/Esc) bind on the shortcut resolver's
   panel rung - the Schematic panel's own scope, kept out of focused
   text fields by the resolver's text rule. Windows is the shipped

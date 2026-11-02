@@ -371,6 +371,19 @@ struct Editor {
         return plot_canvas != nullptr ? *plot_canvas : renderer;
     }
 
+    // The Schematic panel's draw seam: the same pattern one panel over
+    // - null = &renderer (the live app), a headless test injects a
+    // CommandListCanvas and asserts the camera mapping the panel
+    // emits (every element must land where EditorView::w2s answers -
+    // the grid, the snap feedback and the picks speak that mapping).
+    canvas::Canvas2D* canvas_panel_canvas = nullptr;
+
+    // The canvas the Schematic panel draws through.
+    [[nodiscard]] canvas::Canvas2D& schematic_draw_canvas() {
+        return canvas_panel_canvas != nullptr ? *canvas_panel_canvas
+                                              : renderer;
+    }
+
     // --- helpers (editor.cpp) ---
 
     [[nodiscard]] ws::circsim::Schematic* schem() {

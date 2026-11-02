@@ -3,7 +3,8 @@
 // apps/circsim_editor - the Schematic panel: the canvas the model
 // draws on and edits through (editor.hpp's interaction model). One
 // draw call per frame: set the camera, handle the pointer, render the
-// world through ws::ui::canvas's Renderer2DCanvas.
+// world through the Editor's schematic canvas seam (the live
+// Renderer2DCanvas; a headless test injects a CommandListCanvas).
 //
 // The floor and the grid (stage 16) are ws::ui::canvas's grid system:
 // one GridSpec (Editor::grid_spec - Schematic::grid as the base) feeds

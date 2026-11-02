@@ -40,3 +40,26 @@ if(TARGET test_circsim_editor_panel)
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${PROJECT_SOURCE_DIR}/libs/ui/src")
 endif()
+
+# The Schematic panel's headless gate: the camera mapping. The panel
+# draws through the Editor's canvas_panel_canvas seam (same pattern as
+# the plot seam above); the suite asserts every element's recorded
+# screen geometry lands where EditorView::w2s answers - the contract
+# the grid, the snap feedback and the picks all ride (the panned-
+# camera case is the regression: the panel once drew its world offset
+# by center * zoom the moment the camera left the origin).
+ws_add_test(circsim_editor_canvas
+  SOURCES tests/test_canvas_panel.cpp
+          src/editor.cpp
+          src/document.cpp
+          src/canvas_panel.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/tests/ui_gui_r2d_stub.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
+  LINK ws::circsim
+  DEPENDS ws::ui_gui ws::app ws::settings stb)
+if(TARGET test_circsim_editor_canvas)
+  target_include_directories(test_circsim_editor_canvas PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${PROJECT_SOURCE_DIR}/libs/ui/src")
+endif()

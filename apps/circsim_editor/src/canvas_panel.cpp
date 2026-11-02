@@ -19,12 +19,14 @@
 // same InputFrame for its zoom.
 //
 // The canvas transform is the camera with the y flip baked in
-// (translate to the viewport's center, scale by zoom, negate y), so
-// every draw below speaks the model's y-up grid units while strokes
-// and text stay screen-sized (the canvas layer's own convention). The
-// grid and the snap feedback are the two exceptions: they draw in
-// SCREEN space before the transform so their 1px marks land on device
-// pixels at any pan/zoom.
+// (translate to the viewport's center, scale by zoom, negate y,
+// translate by the negated camera center) - the exact inverse of
+// EditorView::s2w, so every draw below speaks the model's y-up grid
+// units from the camera's own eye while strokes and text stay
+// screen-sized (the canvas layer's own convention). The grid and the
+// snap feedback are the two exceptions: they draw in SCREEN space
+// before the transform so their 1px marks land on device pixels at
+// any pan/zoom.
 
 #include "canvas_panel.hpp"
 
@@ -380,6 +382,12 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     // never triggers it (view changes are not edits - the camera
     // sync above rides the same rule).
     std::optional<Pos> ring_target;  // the wire tool's pin/junction hit
+
+    // The frame's one drawing surface: the live renderer, or the
+    // headless test's injected CommandListCanvas (the seam's comment
+    // in editor.hpp). Everything below - the floor, the grid, the
+    // feedback, the world - records through it.
+    canvas::Canvas2D& rc = ed.schematic_draw_canvas();
     {
         canvas::GridSpec spec = ed.grid_spec();
         spec.minor_color = theme.grid_minor;
@@ -407,9 +415,8 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         const float brightness = 0.6f + 0.4f * travel;
 
         const Point floor{body.x, body.y};
-        ed.renderer.fill_rects(&floor, 1, body.width, body.height,
-                               theme.canvas_bg);
-        canvas::draw_grid(ed.renderer, frame, spec, brightness);
+        rc.fill_rects(&floor, 1, body.width, body.height, theme.canvas_bg);
+        canvas::draw_grid(rc, frame, spec, brightness);
     }
 
     // --- the snap feedback (SCREEN space, drawing only - the snap
@@ -444,19 +451,27 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                 kSnapFeedbackPx * kSnapFeedbackPx) {
                 const Point dot{canvas::snap_mark(sp.x, kSnapDotPx),
                                 canvas::snap_mark(sp.y, kSnapDotPx)};
-                ed.renderer.fill_rects(&dot, 1, kSnapDotPx, kSnapDotPx,
-                                       theme.control_on);
+                rc.fill_rects(&dot, 1, kSnapDotPx, kSnapDotPx,
+                              theme.control_on);
             }
         }
     }
 
-    // The canvas: the camera transform with the y flip, then the world.
-    canvas::Renderer2DCanvas& rc = ed.renderer;
+    // The canvas: the camera transform with the y flip, then the
+    // world. Composed exactly as EditorView::w2s answers it - viewport
+    // center, zoom with the y flip, then -center in the scaled space -
+    // so a world point's drawn pixel IS its w2s pixel (what the grid
+    // marks, the snap feedback and the picks already assume). Dropping
+    // the last translate once drew every element offset by center *
+    // zoom from the grid the moment the camera left the origin -
+    // test_canvas_panel.cpp pins the agreement.
     rc.set_view_scale(static_cast<float>(ed.view.zoom));
     rc.push_transform();
     rc.translate(body.x + body.width * 0.5f, body.y + body.height * 0.5f);
     rc.scale(static_cast<float>(ed.view.zoom),
              -static_cast<float>(ed.view.zoom));
+    rc.translate(-static_cast<float>(ed.view.center.x),
+                 -static_cast<float>(ed.view.center.y));
 
     // --- wires, junctions, labels
     Paint wire_paint;
