@@ -300,3 +300,90 @@ TEST_CASE("the netlist lookups answer for pins, wires and junctions") {
                         nets.nets.by_name("n001") == wn;
     CHECK(named);
 }
+
+// --- silent joins (stage 18): the connections the drawing never shows ---------
+
+TEST_CASE("silent joins: a pin on a wire's interior is reported") {
+    Bench b;
+    Part* r1 = b.part("r", "R1", {0.0, 0.0});  // pin 1 at (3, 0)
+    const std::uint32_t w = b.wire_j(3.0, 3.0, 3.0, -3.0);
+    const NetBuild nets = ws::circsim::build_nets(b.s);
+    REQUIRE(nets.silent_joins.size() == 1);
+    const auto& join = nets.silent_joins[0];
+    CHECK(join.kind == ws::circsim::SilentJoin::Kind::PinOnWire);
+    CHECK(join.pos == Pos{3.0, 0.0});
+    CHECK(join.part == r1->id);
+    CHECK(join.pin == 1);
+    CHECK(join.wire == w);
+}
+
+TEST_CASE("silent joins: a wire's vertex riding another wire is reported") {
+    Bench b;
+    const std::uint32_t horizontal = b.wire_j(0.0, 0.0, 10.0, 0.0);
+    // The elbow at (5, 0) lands on the horizontal's interior: a T.
+    const std::uint32_t drop = b.wire_j(5.0, 8.0, 5.0, -8.0, {Pos{5.0, 0.0}});
+    const NetBuild nets = ws::circsim::build_nets(b.s);
+    REQUIRE(nets.silent_joins.size() == 1);
+    const auto& join = nets.silent_joins[0];
+    CHECK(join.kind == ws::circsim::SilentJoin::Kind::WireOnWire);
+    CHECK(join.pos == Pos{5.0, 0.0});
+    CHECK(join.wire == drop);
+    CHECK(join.other == horizontal);
+}
+
+TEST_CASE("silent joins: a pin on the rider wins over the wire entry") {
+    Bench b;
+    const std::uint32_t horizontal = b.wire_j(0.0, 0.0, 10.0, 0.0);
+    Part* r2 = b.part("r", "R2", {2.0, 0.0});  // pin 1 at (5, 0)
+    // The rider's elbow lands exactly on that pin: a WireOnWire (the
+    // elbow riding the horizontal) and a PinOnWire (the pin picked up
+    // by both wires) compete for one position - the pin wins, and the
+    // position reports once.
+    const std::uint32_t drop = b.wire_j(5.0, 8.0, 5.0, -8.0, {Pos{5.0, 0.0}});
+    const NetBuild nets = ws::circsim::build_nets(b.s);
+    REQUIRE(nets.silent_joins.size() == 1);  // one position, one entry
+    CHECK(nets.silent_joins[0].kind ==
+          ws::circsim::SilentJoin::Kind::PinOnWire);
+    CHECK(nets.silent_joins[0].pos == Pos{5.0, 0.0});
+    CHECK(nets.silent_joins[0].part == r2->id);
+    CHECK(nets.silent_joins[0].wire == horizontal);
+    (void)drop;
+}
+
+TEST_CASE("silent joins: landings, crossings and touches stay silent-free") {
+    // A wire END on a pin is a landing, not a pickup.
+    Bench landing;
+    Part* r1 = landing.part("r", "R1", {0.0, 0.0});
+    Part* r2 = landing.part("r", "R2", {10.0, 0.0});
+    landing.pin_wire(PinRef{r1->id, 1}, PinRef{r2->id, 0});
+    CHECK(ws::circsim::build_nets(landing.s).silent_joins.empty());
+
+    // Two wires CROSSING with no shared vertex connect nothing - and
+    // report nothing.
+    Bench crossing;
+    crossing.wire_j(5.0, -5.0, 5.0, 5.0);
+    crossing.wire_j(0.0, 0.0, 10.0, 0.0);
+    CHECK(ws::circsim::build_nets(crossing.s).silent_joins.empty());
+
+    // Coincident pins are their own (visible) mark - the tline deck's
+    // grounding idiom rides exactly this.
+    Bench touching;
+    touching.part("r", "R1", {0.0, 0.0});
+    touching.part("r", "R2", {6.0, 0.0});  // pin 0 on R1's pin 1
+    CHECK(ws::circsim::build_nets(touching.s).silent_joins.empty());
+}
+
+TEST_CASE("silent joins: an authored junction suppresses the record") {
+    // A junction entity lying on a wire's interior draws its own dot.
+    Bench b;
+    b.wire_j(0.0, 0.0, 10.0, 0.0);
+    b.junction(5.0, 0.0);
+    CHECK(ws::circsim::build_nets(b.s).silent_joins.empty());
+
+    // Even a pin pickup hides behind a junction at the same spot.
+    Bench c;
+    c.wire_j(3.0, 3.0, 3.0, -3.0);
+    c.part("r", "R1", {0.0, 0.0});  // pin 1 at (3, 0), picked up...
+    c.junction(3.0, 0.0);           // ...but the junction says it first
+    CHECK(ws::circsim::build_nets(c.s).silent_joins.empty());
+}

@@ -503,6 +503,17 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                        ? theme.control_on
                        : gui::dim(theme.text, 0.85f));
     }
+    // The silent joins' dots (stage 18): pins a wire's path picked up,
+    // vertices T-riding another wire - the net rules connect them, so
+    // the canvas says so, the same dot the authored junctions wear.
+    // nets.cpp already suppressed every position an authored junction
+    // or a wire landing covers, so what arrives here is exactly the
+    // invisible set.
+    for (const Pos& p : ed.auto_junction_dots()) {
+        rc.fill_circle(Point{static_cast<float>(p.x),
+                             static_cast<float>(p.y)},
+                        0.14f, gui::dim(theme.text, 0.85f));
+    }
     if (theme.font != nullptr) {
         for (const ws::circsim::Label& l : s.labels()) {
             const Point at{static_cast<float>(l.pos.x),

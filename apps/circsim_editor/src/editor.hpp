@@ -342,6 +342,13 @@ struct Editor {
     NetlistCache netlist;
     ResultsCache results;
 
+    // auto_junction_dots' cache (stage 18): the positions themselves,
+    // the schematic version they were built against, and whether a
+    // build ever ran (a fresh Editor starts invalid, not version 0).
+    std::vector<Pos> join_dots_;
+    std::uint64_t joins_version_ = 0;
+    bool joins_valid_ = false;
+
     // The Properties panel's editing state: the field buffers keyed
     // by stable strings, the epoch that reloads them, the selection
     // they were built for, and the analysis entry being edited.
@@ -454,6 +461,12 @@ struct Editor {
                           std::string header);
     void run_erc();
     void refresh_netlist();
+
+    // The canvas' auto-junction dots (stage 18): the silent joins the
+    // net rules make - pins a wire's path picked up, vertices T-riding
+    // another wire - cached against the schematic version, one rebuild
+    // per edit, not per frame.
+    [[nodiscard]] const std::vector<Pos>& auto_junction_dots();
 
     // Clear every per-document surface (the app calls this when the
     // active document changes).

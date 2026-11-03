@@ -112,7 +112,12 @@ CMakeLists only wire ws libraries together.
   while a tool is engaged, snap feedback (a ring on the wire tool's
   pin/junction target, an accent dot on the landing intersection) and
   Shift as the coarse major-lattice snap for placements, part drags
-  and labels - wires, pins and junctions always snap fine; the
+  and labels - wires, pins and junctions always snap fine; the canvas
+  paints ws::circsim's reported silent joins as auto-junction dots
+  (stage 18: pins a wire's path picked up mid-route, wire vertices
+  T-riding another wire - the same dot the authored junctions wear,
+  Editor::auto_junction_dots caching one build_nets per edit against
+  Schematic::version(), never per frame); the
   panel's canvas transform composes the exact inverse of its w2s
   (viewport center, zoom with the y flip, -center), so the world
   lands on the same pixels the grid marks at every pan/zoom; the

@@ -442,6 +442,28 @@ void Editor::refresh_netlist() {
     }
 }
 
+const std::vector<Pos>& Editor::auto_junction_dots() {
+    const ws::circsim::Schematic* s = schem();
+    if (s == nullptr) {
+        join_dots_.clear();
+        joins_valid_ = false;
+        return join_dots_;
+    }
+    if (!joins_valid_ || joins_version_ != s->version()) {
+        // The same seam ERC and the export read: one build_nets per
+        // edit (millisecond work at editor scales), never per frame.
+        const ws::circsim::NetBuild build =
+            ws::circsim::build_nets(*s, &library);
+        join_dots_.clear();
+        for (const ws::circsim::SilentJoin& j : build.silent_joins) {
+            join_dots_.push_back(j.pos);
+        }
+        joins_version_ = s->version();
+        joins_valid_ = true;
+    }
+    return join_dots_;
+}
+
 void Editor::document_changed() {
     tool = Tool::Select;
     place_symbol.clear();
@@ -453,6 +475,8 @@ void Editor::document_changed() {
     problems = ProblemsCache{};
     netlist = NetlistCache{};
     results = ResultsCache{};
+    join_dots_.clear();
+    joins_valid_ = false;
     const ws::circsim::Schematic* s = schem();
     if (s != nullptr) {
         view.zoom = s->view.zoom > 0.0 ? s->view.zoom : 26.0;

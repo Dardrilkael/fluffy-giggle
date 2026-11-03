@@ -75,6 +75,15 @@ fetched privately, which would duplicate a first-party capability.
   a wire vertex (endpoint or waypoint) on another wire's polyline unions
   the wires (T-junctions); a pin or junction on a wire's path unions with
   that wire. Two wires CROSSING where neither has a vertex NEVER connect.
+- Those coincidence pickups that drew nothing are reported: NetBuild
+  carries `silent_joins` - a pin on a wire's path interior (PinOnWire,
+  named part/pin + wire) or a wire vertex on another wire's interior
+  (WireOnWire) - one entry per position, a pin entry over a wire entry;
+  an authored junction at the position suppresses it (its own dot), and
+  pin-to-pin touches stay out (overlapping leads are their own mark -
+  the tline deck's grounds ride them on purpose). The editor paints the
+  positions as auto-junction dots; landings (wire ends on named
+  entities) and crossings never report.
 - Labels attach at their position (pin/junction/vertex, else the unique
   wire whose interior carries them - a crossing attaches to nothing and
   warns). Same-name labels merge, case-insensitively, ALWAYS - including

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -74,6 +75,10 @@ bool on_polyline(const std::vector<Pos>& path, Pos p) {
         }
     }
     return false;
+}
+
+bool same_pos(Pos a, Pos b) {
+    return a.x == b.x && a.y == b.y;
 }
 
 bool is_vertex(const std::vector<Pos>& path, Pos p) {
@@ -153,6 +158,33 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
 
     Dsu dsu(ents.size());
 
+    // --- the silent-join recorder (stage 18) ----------------------------------
+    // Positions where the coincidence rules below connect things with no
+    // authored junction dot. An explicit junction anywhere suppresses the
+    // record (it draws its own dot); one entry per position, a pin entry
+    // replacing a wire entry at the same spot.
+    std::set<PosKey> junction_at;
+    for (const Junction& j : s.junctions()) {
+        junction_at.insert({j.pos.x, j.pos.y});
+    }
+    const auto record_join = [&](SilentJoin join) {
+        const PosKey key{join.pos.x, join.pos.y};
+        for (SilentJoin& seen : out.silent_joins) {
+            const PosKey at{seen.pos.x, seen.pos.y};
+            if (!(at < key) && !(key < at)) {
+                // Upgrade a wire entry to the pin that names it; a
+                // second wire at the same spot changes nothing (the
+                // first answer stands).
+                if (join.kind == SilentJoin::Kind::PinOnWire &&
+                    seen.kind == SilentJoin::Kind::WireOnWire) {
+                    seen = join;
+                }
+                return;
+            }
+        }
+        out.silent_joins.push_back(join);
+    };
+
     // --- wires: validate, path, union endpoints --------------------------------
     std::vector<const Wire*> wires;
     std::vector<std::vector<Pos>> paths;
@@ -214,8 +246,23 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
     for (std::size_t wi = 0; wi < paths.size(); ++wi) {
         for (const Pos& v : paths[wi]) {
             for (std::size_t wj = 0; wj < paths.size(); ++wj) {
-                if (wj != wi && on_polyline(paths[wj], v)) {
-                    dsu.unite(wire_ents[wi].first, wire_ents[wj].first);
+                if (wj == wi || !on_polyline(paths[wj], v)) {
+                    continue;
+                }
+                dsu.unite(wire_ents[wi].first, wire_ents[wj].first);
+                // v on wj's path INTERIOR (not its endpoints), with no
+                // junction drawn there: a merge nothing on the canvas
+                // says. If v is wj's endpoint the contact sits on an
+                // entity both wires reference - a visible landing.
+                if (!same_pos(v, paths[wj].front()) &&
+                    !same_pos(v, paths[wj].back()) &&
+                    junction_at.count({v.x, v.y}) == 0) {
+                    SilentJoin join;
+                    join.kind = SilentJoin::Kind::WireOnWire;
+                    join.pos = v;
+                    join.wire = wires[wi]->id;
+                    join.other = wires[wj]->id;
+                    record_join(join);
                 }
             }
         }
@@ -226,8 +273,25 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
         const Pos p{key.x, key.y};
         for (std::uint32_t e : group) {
             for (std::size_t wi = 0; wi < paths.size(); ++wi) {
-                if (on_polyline(paths[wi], p)) {
-                    dsu.unite(e, wire_ents[wi].first);
+                if (!on_polyline(paths[wi], p)) {
+                    continue;
+                }
+                dsu.unite(e, wire_ents[wi].first);
+                // A PIN on the path's interior, no junction dot, is a
+                // silent pickup (junction entities draw their own dot;
+                // a pin at a path ENDPOINT is a wire landing on a named
+                // entity - visible). One per position, pins over wires.
+                if (ents[e].kind == Entity::Kind::Pin &&
+                    !same_pos(p, paths[wi].front()) &&
+                    !same_pos(p, paths[wi].back()) &&
+                    junction_at.count(key) == 0) {
+                    SilentJoin join;
+                    join.kind = SilentJoin::Kind::PinOnWire;
+                    join.pos = p;
+                    join.part = ents[e].pin.part;
+                    join.pin = ents[e].pin.pin;
+                    join.wire = wires[wi]->id;
+                    record_join(join);
                 }
             }
         }
