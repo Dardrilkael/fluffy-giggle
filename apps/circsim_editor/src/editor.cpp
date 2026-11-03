@@ -343,6 +343,75 @@ std::optional<Editor::WirePointSnap> Editor::hit_wire_point(
     return best;
 }
 
+std::vector<WireRoute> Editor::attached_wire_routes(
+    Drag::Kind kind, std::uint32_t id) const {
+    std::vector<WireRoute> out;
+    const ws::circsim::Schematic* s = schem();
+    if (s == nullptr) {
+        return out;
+    }
+    const auto hits = [&](const ws::circsim::WireEndpoint& e) {
+        if (kind == Drag::Kind::Part) {
+            const auto* pin = std::get_if<ws::circsim::PinRef>(&e);
+            return pin != nullptr && pin->part == id;
+        }
+        const auto* j = std::get_if<ws::circsim::JunctionRef>(&e);
+        return j != nullptr && j->junction == id;
+    };
+    for (const ws::circsim::Wire& w : s->wires()) {
+        // A cosmetic freeform wire's shape is the author's - only the
+        // ortho constraint re-routes.
+        if (!w.ortho) {
+            continue;
+        }
+        const bool a_hit = hits(w.a);
+        const bool b_hit = hits(w.b);
+        if (!a_hit && !b_hit) {
+            continue;
+        }
+        const std::vector<Pos> path = wire_path(w);
+        if (path.size() < 2u) {
+            continue;  // dangling: nothing to keep straight
+        }
+        // Straight or one-bend wires (and anything with both ends on
+        // the same move) re-route as a fresh horizontal-first L; a
+        // multi-bend wire keeps its shape - only the adjacent waypoint
+        // slides, chosen so both touching legs stay axis-aligned.
+        std::vector<Pos> mid(path.begin() + 1, path.end() - 1);
+        if (mid.size() <= 1u || (a_hit && b_hit)) {
+            WireRoute r;
+            r.wire = w.id;
+            r.waypoints = route_wire(path.front(), -1, path.back(), -1);
+            out.push_back(std::move(r));
+            continue;
+        }
+        if (a_hit) {
+            // The leg into mid[1] keeps its orientation: a vertical
+            // continuation keeps x (the first leg turns horizontal),
+            // a horizontal one keeps y (the first leg turns vertical).
+            if (eps_eq(mid[0].x, mid[1].x, 1e-9)) {
+                mid[0].y = path.front().y;
+            } else {
+                mid[0].x = path.front().x;
+            }
+        }
+        if (b_hit) {
+            Pos& last = mid.back();
+            const Pos& prev = mid[mid.size() - 2u];
+            if (eps_eq(prev.y, last.y, 1e-9)) {
+                last.x = path.back().x;
+            } else {
+                last.y = path.back().y;
+            }
+        }
+        WireRoute r;
+        r.wire = w.id;
+        r.waypoints = std::move(mid);
+        out.push_back(std::move(r));
+    }
+    return out;
+}
+
 Selection Editor::hit_any(Pos world, double radius,
                           double label_radius) const {
     const ws::circsim::Schematic* s = schem();
@@ -562,6 +631,13 @@ const std::vector<Pos>& Editor::auto_junction_dots() {
     if (s == nullptr) {
         join_dots_.clear();
         joins_valid_ = false;
+        return join_dots_;
+    }
+    // A live drag bumps the version every frame (that is how the
+    // panels mark themselves stale); the dots sit still until the
+    // drag lands - one rebuild per edit, this comment's own rule,
+    // not one per drag frame.
+    if (joins_valid_ && drag.kind != Drag::Kind::None) {
         return join_dots_;
     }
     if (!joins_valid_ || joins_version_ != s->version()) {

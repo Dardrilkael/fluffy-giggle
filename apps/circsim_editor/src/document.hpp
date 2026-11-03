@@ -81,8 +81,19 @@ void push_place_part(SchematicDocument& doc, ws::circsim::Part part);
 // junctions those wires orphan.
 void push_delete_part(SchematicDocument& doc, std::uint32_t part_id);
 
+// One attached wire's re-route (the move commands' extra cargo): the
+// wire's id and the waypoints that keep its legs axis-aligned at the
+// landing position. The editor computes the new shape (it owns the
+// symbol geometry the endpoints resolve through); the command captures
+// each wire's CURRENT waypoints as the undo shape.
+struct WireRoute {
+    std::uint32_t wire = 0;
+    std::vector<ws::circsim::Pos> waypoints;
+};
+
 void push_move_part(SchematicDocument& doc, std::uint32_t part_id,
-                    ws::circsim::Pos to);
+                    ws::circsim::Pos to,
+                    std::vector<WireRoute> wire_routes = {});
 
 // rot/mirror are the FINAL values ("Rotate" or "Mirror" is the step's
 // name - the undo label reads what the user did).
@@ -103,7 +114,8 @@ void push_place_wire(SchematicDocument& doc, ws::circsim::Wire wire,
 void push_delete_wire(SchematicDocument& doc, std::uint32_t wire_id);
 
 void push_move_junction(SchematicDocument& doc, std::uint32_t junction_id,
-                        ws::circsim::Pos to);
+                        ws::circsim::Pos to,
+                        std::vector<WireRoute> wire_routes = {});
 
 void push_place_label(SchematicDocument& doc, ws::circsim::Label label);
 void push_delete_label(SchematicDocument& doc, std::uint32_t label_id);

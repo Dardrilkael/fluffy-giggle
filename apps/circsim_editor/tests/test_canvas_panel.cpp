@@ -668,4 +668,90 @@ TEST_CASE("the wire tool: a start anchor deleted mid-draft cancels at "
     CHECK(b.ed.tool == editor::Tool::Wire);
 }
 
+// --- the move re-route: attached ortho wires keep their legs --------
+
+TEST_CASE("a moved junction re-routes its attached wire, the undo "
+          "restores it") {
+    Bench b;
+    ws::circsim::Junction ja;
+    ja.id = b.doc.schem.alloc_id();
+    ja.pos = {0.0, 0.0};
+    ws::circsim::Junction jb;
+    jb.id = b.doc.schem.alloc_id();
+    jb.pos = {10.0, 0.0};
+    b.doc.schem.junctions_mut().push_back(ja);
+    b.doc.schem.junctions_mut().push_back(jb);
+    ws::circsim::Wire w;
+    w.id = b.doc.schem.alloc_id();
+    w.a = ws::circsim::JunctionRef{ja.id};
+    w.b = ws::circsim::JunctionRef{jb.id};
+    b.doc.schem.wires_mut().push_back(w);
+    // Slide ja to (0,5) and read the routes from the editor (the
+    // entity is at its landing, the routes' contract).
+    for (ws::circsim::Junction& j : b.doc.schem.junctions_mut()) {
+        if (j.id == ja.id) {
+            j.pos = {0.0, 5.0};
+        }
+    }
+    const std::vector<editor::WireRoute> routes =
+        b.ed.attached_wire_routes(editor::Editor::Drag::Kind::Junction,
+                                  ja.id);
+    REQUIRE(routes.size() == 1u);
+    REQUIRE(routes[0].waypoints.size() == 1u);  // the fresh L
+    CHECK(routes[0].waypoints[0].x == 10.0);    // horizontal-first
+    CHECK(routes[0].waypoints[0].y == 5.0);
+    // The command lands the route with the move. The entity goes home
+    // before the push (the release flow's set_drag_pos(start_world)),
+    // so the command's from is the press position, not the landing.
+    for (ws::circsim::Junction& j : b.doc.schem.junctions_mut()) {
+        if (j.id == ja.id) {
+            j.pos = {0.0, 0.0};
+        }
+    }
+    editor::push_move_junction(b.doc, ja.id, {0.0, 5.0}, routes);
+    CHECK(b.doc.schem.find_junction(ja.id)->pos.y == 5.0);
+    CHECK(b.doc.schem.find_wire(w.id)->waypoints.size() == 1u);
+    (void)b.doc.undo().undo();
+    CHECK(b.doc.schem.find_junction(ja.id)->pos.y == 0.0);
+    CHECK(b.doc.schem.find_wire(w.id)->waypoints.empty());
+    (void)b.doc.undo().redo();
+    CHECK(b.doc.schem.find_junction(ja.id)->pos.y == 5.0);
+    CHECK(b.doc.schem.find_wire(w.id)->waypoints.size() == 1u);
+}
+
+TEST_CASE("a moved endpoint slides a multi-bend wire's adjacent waypoint") {
+    Bench b;
+    ws::circsim::Junction ja;
+    ja.id = b.doc.schem.alloc_id();
+    ja.pos = {0.0, 0.0};
+    ws::circsim::Junction jb;
+    jb.id = b.doc.schem.alloc_id();
+    jb.pos = {10.0, -4.0};
+    b.doc.schem.junctions_mut().push_back(ja);
+    b.doc.schem.junctions_mut().push_back(jb);
+    ws::circsim::Wire w;
+    w.id = b.doc.schem.alloc_id();
+    w.a = ws::circsim::JunctionRef{ja.id};
+    w.b = ws::circsim::JunctionRef{jb.id};
+    w.waypoints = {{5.0, 0.0}, {5.0, -4.0}};  // the user's Z
+    b.doc.schem.wires_mut().push_back(w);
+    for (ws::circsim::Junction& j : b.doc.schem.junctions_mut()) {
+        if (j.id == ja.id) {
+            j.pos = {2.0, 3.0};
+        }
+    }
+    const std::vector<editor::WireRoute> routes =
+        b.ed.attached_wire_routes(editor::Editor::Drag::Kind::Junction,
+                                  ja.id);
+    REQUIRE(routes.size() == 1u);
+    // Only the adjacent waypoint slides (the leg into it is vertical,
+    // so it keeps x and takes the endpoint's y); the rest of the Z
+    // survives.
+    REQUIRE(routes[0].waypoints.size() == 2u);
+    CHECK(routes[0].waypoints[0].x == 5.0);
+    CHECK(routes[0].waypoints[0].y == 3.0);
+    CHECK(routes[0].waypoints[1].x == 5.0);
+    CHECK(routes[0].waypoints[1].y == -4.0);
+}
+
 }  // namespace

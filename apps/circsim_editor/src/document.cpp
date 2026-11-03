@@ -258,14 +258,37 @@ class DeletePartCommand final : public EditCommand {
 class MovePartCommand final : public EditCommand {
   public:
     MovePartCommand(SchematicDocument* doc, std::uint32_t id,
-                    ws::circsim::Pos from, ws::circsim::Pos to)
-        : EditCommand(doc), id_(id), from_(from), to_(to) {}
+                    ws::circsim::Pos from, ws::circsim::Pos to,
+                    std::vector<WireRoute> routes,
+                    std::vector<WireRoute> undo_routes)
+        : EditCommand(doc), id_(id), from_(from), to_(to),
+          routes_(std::move(routes)), undo_routes_(std::move(undo_routes)) {}
 
-    void apply() override { land(to_); }
-    void undo() override { land(from_); }
+    void apply() override {
+        land(to_);
+        land_routes(routes_);
+    }
+    void undo() override {
+        land(from_);
+        land_routes(undo_routes_);
+    }
     [[nodiscard]] std::string name() const override { return "Move Part"; }
 
   private:
+    // The attached wires' waypoints ride the same step as the part
+    // (the endpoints resolve live through their refs; without the
+    // re-route the adjacent legs would go diagonal). A wire the step
+    // no longer finds is skipped - the undo shape stays honest.
+    void land_routes(const std::vector<WireRoute>& routes) {
+        for (const WireRoute& r : routes) {
+            for (Wire& w : schem().wires_mut()) {
+                if (w.id == r.wire) {
+                    w.waypoints = r.waypoints;
+                    break;
+                }
+            }
+        }
+    }
     void land(ws::circsim::Pos at) {
         if (Part* p = schem().find_part(id_)) {
             p->pos = at;
@@ -274,6 +297,7 @@ class MovePartCommand final : public EditCommand {
     }
     std::uint32_t id_;
     ws::circsim::Pos from_, to_;
+    std::vector<WireRoute> routes_, undo_routes_;
 };
 
 class TransformPartCommand final : public EditCommand {
@@ -397,14 +421,25 @@ void push_delete_part(SchematicDocument& doc, std::uint32_t part_id) {
 }
 
 void push_move_part(SchematicDocument& doc, std::uint32_t part_id,
-                    ws::circsim::Pos to) {
+                    ws::circsim::Pos to,
+                    std::vector<WireRoute> wire_routes) {
     const Part* p = doc.schem.find_part(part_id);
     if (p == nullptr) {
         return;
     }
     const ws::circsim::Pos from = p->pos;
-    (void)doc.undo().push(
-        std::make_unique<MovePartCommand>(&doc, part_id, from, to));
+    // The undo shape: every routed wire's CURRENT waypoints (a wire
+    // the routes mention but the schematic lost is just skipped).
+    std::vector<WireRoute> undo_routes;
+    undo_routes.reserve(wire_routes.size());
+    for (const WireRoute& r : wire_routes) {
+        if (const Wire* w = doc.schem.find_wire(r.wire)) {
+            undo_routes.push_back(WireRoute{r.wire, w->waypoints});
+        }
+    }
+    (void)doc.undo().push(std::make_unique<MovePartCommand>(
+        &doc, part_id, from, to, std::move(wire_routes),
+        std::move(undo_routes)));
 }
 
 void push_transform_part(SchematicDocument& doc, std::uint32_t part_id,
@@ -502,14 +537,36 @@ class DeleteWireCommand final : public EditCommand {
 class MoveJunctionCommand final : public EditCommand {
   public:
     MoveJunctionCommand(SchematicDocument& doc, std::uint32_t id,
-                        ws::circsim::Pos from, ws::circsim::Pos to)
-        : EditCommand(&doc), id_(id), from_(from), to_(to) {}
+                        ws::circsim::Pos from, ws::circsim::Pos to,
+                        std::vector<WireRoute> routes,
+                        std::vector<WireRoute> undo_routes)
+        : EditCommand(&doc), id_(id), from_(from), to_(to),
+          routes_(std::move(routes)), undo_routes_(std::move(undo_routes)) {}
 
-    void apply() override { land(to_); }
-    void undo() override { land(from_); }
-    [[nodiscard]] std::string name() const override { return "Move Junction"; }
+    void apply() override {
+        land(to_);
+        land_routes(routes_);
+    }
+    void undo() override {
+        land(from_);
+        land_routes(undo_routes_);
+    }
+    [[nodiscard]] std::string name() const override {
+        return "Move Junction";
+    }
 
   private:
+    // The attached wires ride the step, same as the part move's.
+    void land_routes(const std::vector<WireRoute>& routes) {
+        for (const WireRoute& r : routes) {
+            for (Wire& w : schem().wires_mut()) {
+                if (w.id == r.wire) {
+                    w.waypoints = r.waypoints;
+                    break;
+                }
+            }
+        }
+    }
     void land(ws::circsim::Pos at) {
         // Junctions are loader-managed ids: the *_mut() walk.
         for (Junction& j : schem().junctions_mut()) {
@@ -522,6 +579,7 @@ class MoveJunctionCommand final : public EditCommand {
     }
     std::uint32_t id_;
     ws::circsim::Pos from_, to_;
+    std::vector<WireRoute> routes_, undo_routes_;
 };
 
 }  // namespace
@@ -544,11 +602,20 @@ void push_delete_wire(SchematicDocument& doc, std::uint32_t wire_id) {
 }
 
 void push_move_junction(SchematicDocument& doc, std::uint32_t junction_id,
-                        ws::circsim::Pos to) {
+                        ws::circsim::Pos to,
+                        std::vector<WireRoute> wire_routes) {
     for (const Junction& j : doc.schem.junctions()) {
         if (j.id == junction_id) {
+            std::vector<WireRoute> undo_routes;
+            undo_routes.reserve(wire_routes.size());
+            for (const WireRoute& r : wire_routes) {
+                if (const Wire* w = doc.schem.find_wire(r.wire)) {
+                    undo_routes.push_back(WireRoute{r.wire, w->waypoints});
+                }
+            }
             (void)doc.undo().push(std::make_unique<MoveJunctionCommand>(
-                doc, junction_id, j.pos, to));
+                doc, junction_id, j.pos, to, std::move(wire_routes),
+                std::move(undo_routes)));
             return;
         }
     }

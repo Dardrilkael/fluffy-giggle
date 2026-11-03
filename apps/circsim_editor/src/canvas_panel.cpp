@@ -65,8 +65,10 @@ constexpr float kSnapDotPx = 5.0f;
 constexpr float kDotFloorPx = 2.0f;
 
 [[nodiscard]] float dot_world(const EditorView& view) {
-    return view.zoom > 0.0f ? std::max(0.14f, kDotFloorPx / view.zoom)
-                            : 0.14f;
+    return view.zoom > 0.0f
+               ? std::max(0.14f,
+                          static_cast<float>(kDotFloorPx / view.zoom))
+               : 0.14f;
 }
 
 [[nodiscard]] double pick_world(const EditorView& view) {
@@ -130,28 +132,27 @@ struct SnapTarget {
                    coarse && ed.drag.kind != Editor::Drag::Kind::Junction);
 }
 
-// The live drag wrote the position straight into the schematic (no
-// undo); the command landing at release must capture the PRESS
-// position as its from, or from == to and undo is a no-op - so the
-// entity goes home before the push. PUSH IS THE EDIT: apply() lands
-// the release position right after, and undo() now has a real start
-// to restore.
-void restore_drag_start(Editor& ed) {
-    const ws::circsim::Schematic* s = ed.schem();
-    if (s == nullptr) {
+// Slides the dragged entity to `at`. Used twice at release: the
+// entity visits the landing so the attached-wire routes read the
+// resolved endpoint positions, then goes home so the command captures
+// the press position as its from. The live frames write their own
+// positions inline (they need the bump per frame too).
+void set_drag_pos(Editor& ed, Pos at) {
+    if (ed.schem() == nullptr) {
         return;
     }
     switch (ed.drag.kind) {
         case Editor::Drag::Kind::Part: {
-            if (ws::circsim::Part* p = s->find_part(ed.drag.id)) {
-                p->pos = ed.drag.start_world;
+            if (ws::circsim::Part* p =
+                    ed.schem()->find_part(ed.drag.id)) {
+                p->pos = at;
             }
             break;
         }
         case Editor::Drag::Kind::Junction: {
             for (ws::circsim::Junction& j : ed.schem()->junctions_mut()) {
                 if (j.id == ed.drag.id) {
-                    j.pos = ed.drag.start_world;
+                    j.pos = at;
                     break;
                 }
             }
@@ -160,7 +161,7 @@ void restore_drag_start(Editor& ed) {
         case Editor::Drag::Kind::Label: {
             for (ws::circsim::Label& l : ed.schem()->labels_mut()) {
                 if (l.id == ed.drag.id) {
-                    l.pos = ed.drag.start_world;
+                    l.pos = at;
                     break;
                 }
             }
@@ -308,17 +309,23 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
             return;
         }
         // Release: land the undo command when the drag actually moved.
-        // The entity first goes back to its press position, so the
-        // command captures THAT as its from - the live drag had left
-        // it at the release position, and a from == to command is an
-        // undo no-op (nothing would ever move back).
+        // The entity first visits the landing (the attached ortho
+        // wires re-route from the resolved endpoints there), then goes
+        // back to its press position, so the command captures THAT as
+        // its from - the live drag had left it at the release
+        // position, and a from == to command is an undo no-op (nothing
+        // would ever move back).
         if (ed.drag.moved && ed.doc != nullptr) {
             const Pos to = drag_landing(ed, in, world);
-            restore_drag_start(ed);
+            set_drag_pos(ed, to);
+            std::vector<WireRoute> routes =
+                ed.attached_wire_routes(ed.drag.kind, ed.drag.id);
+            set_drag_pos(ed, ed.drag.start_world);
             if (ed.drag.kind == Editor::Drag::Kind::Part) {
-                push_move_part(*ed.doc, ed.drag.id, to);
+                push_move_part(*ed.doc, ed.drag.id, to, std::move(routes));
             } else if (ed.drag.kind == Editor::Drag::Kind::Junction) {
-                push_move_junction(*ed.doc, ed.drag.id, to);
+                push_move_junction(*ed.doc, ed.drag.id, to,
+                                   std::move(routes));
             } else if (ed.drag.kind == Editor::Drag::Kind::Label) {
                 push_move_label(*ed.doc, ed.drag.id, to);
             }

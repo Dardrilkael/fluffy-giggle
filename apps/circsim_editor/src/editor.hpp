@@ -460,8 +460,21 @@ struct Editor {
     // free) to `b` (approached along `b_dir`, -1 = free): the waypoint
     // list between the two endpoints - a leads out, an L or Z lands,
     // collinear legs folded away.
-    [[nodiscard]] static std::vector<Pos> route_wire(Pos a, int a_dir,
-                                                     Pos b, int b_dir);
+    [[nodiscard]] static std::vector<Pos> route_wire(
+        Pos a, int a_dir, Pos b, int b_dir, bool a_vertical = false);
+
+    // The move-drag's wire re-route data: every ORTHO wire whose
+    // endpoint references the entity, carrying the waypoints that keep
+    // its legs axis-aligned at the landing position. The endpoints
+    // resolve live through their refs - only the waypoints would stay
+    // put and turn the adjacent leg diagonal. A straight or one-bend
+    // wire gets a fresh route_wire L (and so does any wire when BOTH
+    // ends ride the same move); a multi-bend wire keeps its Z and only
+    // the adjacent waypoint slides. Call with the entity ALREADY at
+    // its landing position. (WireRoute is the document layer's
+    // command cargo - document.hpp.)
+    [[nodiscard]] std::vector<WireRoute> attached_wire_routes(
+        Drag::Kind kind, std::uint32_t id) const;
 
     // Hit tests (world space). Every radius is in world units (screen
     // px / zoom), so picks stay steady across zooms - including the
