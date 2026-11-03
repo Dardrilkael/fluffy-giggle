@@ -385,6 +385,35 @@ TEST_CASE("hit_wire_point: among several wires, the nearest segment wins") {
     CHECK(hit->pos.y == 0.0);
 }
 
+// --- route_wire: the reversal keeps its lead, the degrees normalize ----
+
+TEST_CASE("route_wire: a reversal target keeps the lead-out corner") {
+    // A pin at (0,0) facing +x (dir 0) with the target at (-5,0): the
+    // collinear fold once read the reversal as a continuation and
+    // swallowed the (1,0) lead - the wire ran straight back through
+    // the part body it just left.
+    const std::vector<Pos> route =
+        editor::Editor::route_wire({0.0, 0.0}, 0, {-5.0, 0.0}, -1);
+    REQUIRE(route.size() == 1u);
+    CHECK(route[0].x == 1.0);
+    CHECK(route[0].y == 0.0);
+}
+
+TEST_CASE("route_wire: 360 degrees routes exactly as 0") {
+    // start_horizontal compared raw degrees, so 360 fell through the
+    // 0/180 test and turned the L vertical-first. The normalization
+    // makes every spelling of east route the same.
+    const std::vector<Pos> a =
+        editor::Editor::route_wire({0.0, 0.0}, 0, {4.0, 3.0}, -1);
+    const std::vector<Pos> b =
+        editor::Editor::route_wire({0.0, 0.0}, 360, {4.0, 3.0}, -1);
+    REQUIRE(a.size() == b.size());
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        CHECK(a[i].x == b[i].x);
+        CHECK(a[i].y == b[i].y);
+    }
+}
+
 // --- the zero-length commit guard (stage 18c) --------------------------------
 //
 // The commit guard fired for Free landings only, so a second click on

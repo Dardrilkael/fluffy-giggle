@@ -148,6 +148,17 @@ std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir) {
         }
     };
 
+    // Normalize once: every direction test below reads the same
+    // canonical degrees, so 360 routes as 0 (it once fell through
+    // start_horizontal's raw 0/180 comparison and turned the L the
+    // wrong way). -1 stays the free-start sentinel.
+    if (a_dir >= 0) {
+        a_dir %= 360;
+    }
+    if (b_dir >= 0) {
+        b_dir %= 360;
+    }
+
     // Full polyline a -> ... -> b; the stored waypoints are its
     // interior after folding.
     std::vector<Pos> full;
@@ -183,7 +194,11 @@ std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir) {
     full.push_back(b);
 
     // Fold duplicates and collinear middles (these become the stored
-    // waypoints; noise would ride straight into the .csim).
+    // waypoints; noise would ride straight into the .csim). A fold
+    // needs the leg to CONTINUE: a reversal is collinear too, but
+    // folding it would drop the lead and run the wire straight back
+    // through the part it just left - a pin at (0,0) facing +x with a
+    // target at (-5,0) keeps its (1,0) lead-out corner.
     std::vector<Pos> folded;
     for (const Pos& p : full) {
         if (!folded.empty() && eps_eq(folded.back().x, p.x, 1e-9) &&
@@ -193,9 +208,13 @@ std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir) {
         if (folded.size() >= 2u) {
             const Pos& p0 = folded[folded.size() - 2u];
             const Pos& p1 = folded[folded.size() - 1u];
-            if ((eps_eq(p0.x, p1.x, 1e-9) && eps_eq(p1.x, p.x, 1e-9)) ||
-                (eps_eq(p0.y, p1.y, 1e-9) && eps_eq(p1.y, p.y, 1e-9))) {
-                folded.back() = p;  // collinear: extend the leg
+            const bool collinear =
+                (eps_eq(p0.x, p1.x, 1e-9) && eps_eq(p1.x, p.x, 1e-9)) ||
+                (eps_eq(p0.y, p1.y, 1e-9) && eps_eq(p1.y, p.y, 1e-9));
+            const double along = (p1.x - p0.x) * (p.x - p1.x) +
+                                 (p1.y - p0.y) * (p.y - p1.y);
+            if (collinear && along > 0.0) {
+                folded.back() = p;  // the leg extends
                 continue;
             }
         }
