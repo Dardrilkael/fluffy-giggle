@@ -294,10 +294,20 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                 // a wire's body), deferred to here so a cancel leaves
                 // nothing behind.
                 const SnapTarget t = snap_wire_target(ed, world);
-                if (t.kind == SnapTarget::Kind::Free &&
-                    eps_eq(t.pos.x, ed.wire_draft.a_pos.x, 1e-9) &&
+                // A zero-length wire is not a commitment - whatever the
+                // landing kind. The old guard fired for Free landings
+                // only, so a second click on the START entity (the same
+                // pin, the same junction, the same wire-point) committed
+                // a degenerate self-loop: identical endpoints, an empty
+                // folded route, and for a wire-point start two junctions
+                // minted at one position. The preview already drew
+                // nothing for the case - the commit now agrees. Nothing
+                // is lost: the same position is already one net (the
+                // coincidence rules unite coincident pins and junctions,
+                // and a wire-point landing sits on its own wire).
+                if (eps_eq(t.pos.x, ed.wire_draft.a_pos.x, 1e-9) &&
                     eps_eq(t.pos.y, ed.wire_draft.a_pos.y, 1e-9)) {
-                    break;  // a zero-length wire is not a commitment
+                    break;
                 }
                 ws::circsim::Wire w;
                 std::vector<ws::circsim::Junction> junctions;

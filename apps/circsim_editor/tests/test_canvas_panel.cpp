@@ -35,6 +35,7 @@ namespace canvas = ws::ui::canvas;
 using editor::Editor;
 using editor::EditorView;
 using editor::SchematicDocument;
+using ws::circsim::Pos;
 
 // The bench: an Editor over an untitled document, a CommandListCanvas
 // injected at the schematic seam, and one drawn frame per call. The
@@ -87,6 +88,42 @@ struct Bench {
         editor::draw_canvas_panel(ed, gui, layout, theme);
         layout.end_panel();
         gui.end_frame();
+    }
+
+    // One clicked frame: the mouse at `world`'s own screen position
+    // (the same view the pointer handler reads), left button pressed -
+    // the edge the wire tool arms and commits on. The first call draws
+    // a prime frame first: the view's viewport (vx..vh) is adopted
+    // inside draw_canvas_panel, so w2s before any draw would map
+    // through a zero rect and land the click outside the panel.
+    void click_at(Pos world) {
+        if (!ed.view.valid()) {
+            draw();
+        }
+        const ws::math::Vec2 sp = ed.view.w2s(world);
+        clc.cmds.clear();
+        ws::input::InputFrame in{};
+        in.mouse_x = sp.x;
+        in.mouse_y = sp.y;
+        in.mouse_present = true;
+        in.mouse_pressed[0] = true;
+        gui.begin_frame(in);
+        gui::LayoutCursor layout;
+        (void)layout.begin_panel(gui::Rect{0.0f, 0.0f, 640.0f, 520.0f},
+                                 12.0f, 8.0f);
+        body = layout.panel_content();
+        const gui::ChromeTheme theme = gui::kDefaultChrome;
+        editor::draw_canvas_panel(ed, gui, layout, theme);
+        layout.end_panel();
+        gui.end_frame();
+    }
+
+    // The two-click wire draft over `world` points: arm the tool, click
+    // the start, click the end.
+    void wire_click(Pos a, Pos b) {
+        ed.tool = editor::Tool::Wire;
+        click_at(a);
+        click_at(b);
     }
 };
 
@@ -346,6 +383,60 @@ TEST_CASE("hit_wire_point: among several wires, the nearest segment wins") {
     const auto hit = b.ed.hit_wire_point({5.0, 0.2}, 1.0);
     REQUIRE(hit.has_value());
     CHECK(hit->pos.y == 0.0);
+}
+
+// --- the zero-length commit guard (stage 18c) --------------------------------
+//
+// The commit guard fired for Free landings only, so a second click on
+// the START entity committed a degenerate self-loop wire: identical
+// endpoints, an empty folded route - and for a wire-point start, two
+// junctions minted at one position. The preview drew nothing for the
+// case (its own t.pos == a_pos check), so the user saw no preview and
+// a junk wire: the exact preview-vs-commit disagreement the wire tool
+// must never have. The guard now covers every landing kind; the cases
+// below drive the real two-click draft through draw_canvas_panel.
+
+TEST_CASE("the wire tool: a second click on the start pin commits nothing") {
+    Bench b;
+    ws::circsim::Part p = ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0});
+    p.id = b.doc.schem.alloc_id();
+    b.doc.schem.parts_mut().push_back(p);
+    // Pin 1 of the built-in r sits at (3, 0). Click it twice: the draft
+    // arms on the first click and stays armed on the second - no wire,
+    // no disarm, the user can still reach a real target.
+    b.wire_click({3.0, 0.0}, {3.0, 0.0});
+    CHECK(b.doc.schem.wires().empty());
+    CHECK(b.ed.wire_draft.active);
+    CHECK(b.ed.tool == editor::Tool::Wire);
+}
+
+TEST_CASE("the wire tool: a second click on the start junction commits "
+          "nothing") {
+    Bench b;
+    b.place_wire();  // junctions at (1,1) and (4,1), one wire
+    b.wire_click({1.0, 1.0}, {1.0, 1.0});
+    CHECK(b.doc.schem.wires().size() == 1u);
+    CHECK(b.doc.schem.junctions().size() == 2u);
+    CHECK(b.ed.wire_draft.active);
+}
+
+TEST_CASE("the wire tool: a second click on the start wire-point mints "
+          "nothing") {
+    Bench b;
+    b.place_wire();  // path (1,1) -> (4,1); (3,1) is its grid-snapped body
+    b.wire_click({2.9, 1.0}, {2.9, 1.0});
+    CHECK(b.doc.schem.wires().size() == 1u);
+    CHECK(b.doc.schem.junctions().size() == 2u);  // no minted pair
+    CHECK(b.ed.wire_draft.active);
+}
+
+TEST_CASE("the wire tool: a real two-click draft still commits one wire") {
+    Bench b;
+    b.place_wire();
+    b.wire_click({1.0, 1.0}, {4.0, 1.0});
+    CHECK(b.doc.schem.wires().size() == 2u);
+    CHECK_FALSE(b.ed.wire_draft.active);  // the commit disarms
+    CHECK(b.ed.tool == editor::Tool::Select);
 }
 
 }  // namespace
