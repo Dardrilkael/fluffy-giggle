@@ -91,12 +91,13 @@ struct Bench {
     }
 
     // One clicked frame: the mouse at `world`'s own screen position
-    // (the same view the pointer handler reads), left button pressed -
-    // the edge the wire tool arms and commits on. The first call draws
-    // a prime frame first: the view's viewport (vx..vh) is adopted
-    // inside draw_canvas_panel, so w2s before any draw would map
-    // through a zero rect and land the click outside the panel.
-    void click_at(Pos world) {
+    // (the same view the pointer handler reads), `button` pressed -
+    // the edge the wire tool arms and commits on (button 0) or
+    // cancels on (button 2). The first call draws a prime frame
+    // first: the view's viewport (vx..vh) is adopted inside
+    // draw_canvas_panel, so w2s before any draw would map through a
+    // zero rect and land the click outside the panel.
+    void click_at(Pos world, int button = 0) {
         if (!ed.view.valid()) {
             draw();
         }
@@ -106,7 +107,7 @@ struct Bench {
         in.mouse_x = sp.x;
         in.mouse_y = sp.y;
         in.mouse_present = true;
-        in.mouse_pressed[0] = true;
+        in.mouse_pressed[button] = true;
         gui.begin_frame(in);
         gui::LayoutCursor layout;
         (void)layout.begin_panel(gui::Rect{0.0f, 0.0f, 640.0f, 520.0f},
@@ -516,6 +517,19 @@ TEST_CASE("hit_any: the label pick reach rides the zoom") {
     CHECK(near.id == 7);
 }
 
+TEST_CASE("route_wire: a free start flips the L with a_vertical") {
+    const std::vector<Pos> h =
+        editor::Editor::route_wire({0.0, 0.0}, -1, {4.0, 3.0}, -1);
+    const std::vector<Pos> v =
+        editor::Editor::route_wire({0.0, 0.0}, -1, {4.0, 3.0}, -1, true);
+    REQUIRE(h.size() == 1u);  // horizontal-first: run east, then north
+    CHECK(h[0].x == 4.0);
+    CHECK(h[0].y == 0.0);
+    REQUIRE(v.size() == 1u);  // vertical-first: climb, then run east
+    CHECK(v[0].x == 0.0);
+    CHECK(v[0].y == 3.0);
+}
+
 // --- the zero-length commit guard (stage 18c) --------------------------------
 //
 // The commit guard fired for Free landings only, so a second click on
@@ -561,13 +575,97 @@ TEST_CASE("the wire tool: a second click on the start wire-point mints "
     CHECK(b.ed.wire_draft.active);
 }
 
-TEST_CASE("the wire tool: a real two-click draft still commits one wire") {
+TEST_CASE("the wire tool: a commit chains the next draft at the landing") {
     Bench b;
-    b.place_wire();
+    b.place_wire();  // junctions (1,1) and (4,1), one wire
     b.wire_click({1.0, 1.0}, {4.0, 1.0});
     CHECK(b.doc.schem.wires().size() == 2u);
-    CHECK_FALSE(b.ed.wire_draft.active);  // the commit disarms
-    CHECK(b.ed.tool == editor::Tool::Select);
+    // The tool stays armed and the draft chains: the next start is
+    // the landing junction, so a multi-segment net is one run of
+    // clicks (every segment used to cost a W press and a re-pick).
+    CHECK(b.ed.tool == editor::Tool::Wire);
+    CHECK(b.ed.wire_draft.active);
+    CHECK(b.ed.wire_draft.a_pos.x == 4.0);
+    CHECK(b.ed.wire_draft.a_pos.y == 1.0);
+    const auto* j =
+        std::get_if<ws::circsim::JunctionRef>(&b.ed.wire_draft.a);
+    REQUIRE(j != nullptr);
+    bool landing_exists = false;
+    for (const ws::circsim::Junction& jj : b.doc.schem.junctions()) {
+        landing_exists = landing_exists || jj.id == j->junction;
+    }
+    CHECK(landing_exists);
+    // A third click commits the second segment with no re-arm.
+    b.click_at({7.0, 1.0});
+    CHECK(b.doc.schem.wires().size() == 3u);
+}
+
+TEST_CASE("the wire tool: a click on free space starts a draft now") {
+    Bench b;
+    ws::circsim::Part p =
+        ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0});
+    p.id = b.doc.schem.alloc_id();
+    b.doc.schem.parts_mut().push_back(p);
+    b.ed.tool = editor::Tool::Wire;
+    b.click_at({6.0, 3.0});  // free grid - the old start ignored it
+    CHECK(b.ed.wire_draft.active);
+    CHECK(b.ed.wire_draft.a_free);
+    CHECK(b.ed.wire_draft.a_mint);
+    CHECK(b.ed.wire_draft.a_dir == -1);
+    // The commit mints the start junction and lands on the pin.
+    b.click_at({3.0, 0.0});  // pin 1 of r
+    CHECK(b.doc.schem.wires().size() == 1u);
+    CHECK(b.doc.schem.junctions().size() == 1u);  // the minted start
+    const ws::circsim::Wire& w = b.doc.schem.wires().front();
+    CHECK(std::holds_alternative<ws::circsim::JunctionRef>(w.a));
+    CHECK(std::holds_alternative<ws::circsim::PinRef>(w.b));
+    const auto* pin =
+        std::get_if<ws::circsim::PinRef>(&b.ed.wire_draft.a);
+    REQUIRE(pin != nullptr);  // the chain starts at the pin
+    CHECK(pin->part == p.id);
+}
+
+TEST_CASE("the wire tool: the first right click cancels only the draft") {
+    Bench b;
+    b.place_wire();
+    b.ed.tool = editor::Tool::Wire;
+    b.click_at({1.0, 1.0});
+    CHECK(b.ed.wire_draft.active);
+    b.click_at({9.0, 9.0}, 2);
+    CHECK_FALSE(b.ed.wire_draft.active);
+    CHECK(b.ed.tool == editor::Tool::Wire);  // the tool survives
+    b.click_at({9.0, 9.0}, 2);
+    CHECK(b.ed.tool == editor::Tool::Select);  // the second disarms
+}
+
+TEST_CASE("the wire tool: a start anchor deleted mid-draft cancels at "
+          "commit") {
+    Bench b;
+    ws::circsim::Junction a;
+    a.id = b.doc.schem.alloc_id();
+    a.pos = {1.0, 1.0};
+    ws::circsim::Junction c;
+    c.id = b.doc.schem.alloc_id();
+    c.pos = {4.0, 1.0};
+    b.doc.schem.junctions_mut().push_back(a);
+    b.doc.schem.junctions_mut().push_back(c);
+    ws::circsim::Wire w;
+    w.id = b.doc.schem.alloc_id();
+    w.a = ws::circsim::JunctionRef{a.id};
+    w.b = ws::circsim::JunctionRef{c.id};
+    b.doc.schem.wires_mut().push_back(w);
+    b.ed.tool = editor::Tool::Wire;
+    b.click_at({1.0, 1.0});  // the draft starts on the junction
+    CHECK(b.ed.wire_draft.active);
+    // The wire - and with it both junctions - dies before the commit.
+    editor::push_delete_wire(b.doc, w.id);
+    CHECK(b.doc.schem.junctions().empty());
+    b.click_at({7.0, 1.0});
+    // No dangling endpoint landed: the commit revalidated, cancelled
+    // the draft with a word, and the schematic is untouched.
+    CHECK(b.doc.schem.wires().empty());
+    CHECK_FALSE(b.ed.wire_draft.active);
+    CHECK(b.ed.tool == editor::Tool::Wire);
 }
 
 }  // namespace

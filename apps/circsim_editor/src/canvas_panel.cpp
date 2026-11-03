@@ -171,6 +171,55 @@ void restore_drag_start(Editor& ed) {
     }
 }
 
+// The draft's start anchor may be gone by the commit (an undo, a
+// delete, any edit between the two clicks): the document layer's rule
+// is that the editor never creates a dangling endpoint, so the commit
+// revalidates before it builds. A free start has no anchor - a
+// position is always its own anchor; a wire-point start needs its
+// anchor wire still passing through a_pos (the commit mints the
+// junction there); a pin or junction start needs its entity.
+[[nodiscard]] bool pos_on_path(const std::vector<Pos>& path, Pos p) {
+    for (std::size_t i = 1; i < path.size(); ++i) {
+        const Pos& a = path[i - 1];
+        const Pos& b = path[i];
+        const double cross =
+            (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+        if (cross == 0.0 && p.x >= std::min(a.x, b.x) &&
+            p.x <= std::max(a.x, b.x) && p.y >= std::min(a.y, b.y) &&
+            p.y <= std::max(a.y, b.y)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool draft_start_valid(const Editor& ed) {
+    const ws::circsim::Schematic& s = *ed.schem();
+    const Editor::WireDraft& d = ed.wire_draft;
+    if (d.a_free) {
+        return true;
+    }
+    if (d.a_mint) {
+        for (const ws::circsim::Wire& w : s.wires()) {
+            if (pos_on_path(ed.wire_path(w), d.a_pos)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (const auto* pin = std::get_if<ws::circsim::PinRef>(&d.a)) {
+        const ws::circsim::Part* p = s.find_part(pin->part);
+        const ws::circsim::SymbolDef* sym =
+            p != nullptr ? ed.sym_of(*p) : nullptr;
+        return p != nullptr && sym != nullptr &&
+               pin->pin < sym->pins.size();
+    }
+    if (const auto* j = std::get_if<ws::circsim::JunctionRef>(&d.a)) {
+        return s.find_junction(j->junction) != nullptr;
+    }
+    return false;
+}
+
 // --- one pointer frame -------------------------------------------------------
 
 void handle_pointer(Editor& ed, gui::GuiContext& gui,
@@ -348,15 +397,24 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                     break;
                 }
                 if (!ed.wire_draft.active) {
-                    // Start only on a connection point: a pin, a
-                    // junction, or another wire's body (stage 18b: the
-                    // editor mints a junction on that wire at commit,
-                    // the standard EDA T-tap from a bus).
+                    // Start on a connection point (a pin, a junction,
+                    // another wire's body - stage 18b's T-tap) or on
+                    // free grid: the commit side always supported free
+                    // landings, so a free START anchors the draft to
+                    // the grid point and mints its junction at commit
+                    // (a cancel leaves nothing behind). Shift at the
+                    // start flips the L's first leg.
                     const SnapTarget t = snap_wire_target(ed, world);
-                    if (t.kind != SnapTarget::Kind::Free) {
-                        ed.wire_draft.active = true;
-                        ed.wire_draft.a = t.end;  // unused when a_mint
-                        ed.wire_draft.a_pos = t.pos;
+                    ed.wire_draft = Editor::WireDraft{};
+                    ed.wire_draft.active = true;
+                    ed.wire_draft.a_pos = t.pos;
+                    ed.wire_draft.a_vertical = coarse;
+                    if (t.kind == SnapTarget::Kind::Free) {
+                        ed.wire_draft.a_dir = -1;
+                        ed.wire_draft.a_mint = true;
+                        ed.wire_draft.a_free = true;
+                    } else {
+                        ed.wire_draft.a = t.end;
                         ed.wire_draft.a_dir = t.dir;
                         ed.wire_draft.a_mint =
                             t.kind == SnapTarget::Kind::WirePoint;
@@ -364,25 +422,37 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                     break;
                 }
                 // Commit: onto a pin/junction, a wire's body (a fresh
-                // junction there - its id minted now, the same path the
-                // free case takes), or free space (also a fresh
-                // junction). The a side may also need a mint (a start on
-                // a wire's body), deferred to here so a cancel leaves
-                // nothing behind.
+                // junction there - its id minted now, the same path
+                // the free case takes), or free space (also a fresh
+                // junction). The a side may also need a mint (a start
+                // on a wire's body or free space), deferred to here
+                // so a cancel leaves nothing behind.
                 const SnapTarget t = snap_wire_target(ed, world);
-                // A zero-length wire is not a commitment - whatever the
-                // landing kind. The old guard fired for Free landings
-                // only, so a second click on the START entity (the same
-                // pin, the same junction, the same wire-point) committed
-                // a degenerate self-loop: identical endpoints, an empty
-                // folded route, and for a wire-point start two junctions
-                // minted at one position. The preview already drew
-                // nothing for the case - the commit now agrees. Nothing
-                // is lost: the same position is already one net (the
-                // coincidence rules unite coincident pins and junctions,
-                // and a wire-point landing sits on its own wire).
+                // A zero-length wire is not a commitment - whatever
+                // the landing kind. The old guard fired for Free
+                // landings only, so a second click on the START
+                // entity (the same pin, the same junction, the same
+                // wire-point) committed a degenerate self-loop:
+                // identical endpoints, an empty folded route, and for
+                // a wire-point start two junctions minted at one
+                // position. The preview already drew nothing for the
+                // case - the commit now agrees. Nothing is lost: the
+                // same position is already one net (the coincidence
+                // rules unite coincident pins and junctions, and a
+                // wire-point landing sits on its own wire).
                 if (eps_eq(t.pos.x, ed.wire_draft.a_pos.x, 1e-9) &&
                     eps_eq(t.pos.y, ed.wire_draft.a_pos.y, 1e-9)) {
+                    break;
+                }
+                // The start anchor may have died between the clicks
+                // (an undo, a delete): the editor never creates a
+                // dangling endpoint, so the draft is cancelled with
+                // a word instead.
+                if (!draft_start_valid(ed)) {
+                    ed.toast("the wire's start is gone - the draft is "
+                             "cancelled",
+                             gui::ToastSeverity::warning);
+                    ed.wire_draft = Editor::WireDraft{};
                     break;
                 }
                 ws::circsim::Wire w;
@@ -406,13 +476,25 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                 } else {
                     w.b = t.end;
                 }
-                w.waypoints = Editor::route_wire(ed.wire_draft.a_pos,
-                                                 ed.wire_draft.a_dir, t.pos,
-                                                 t.dir);
+                w.waypoints =
+                    Editor::route_wire(ed.wire_draft.a_pos,
+                                       ed.wire_draft.a_dir, t.pos, t.dir,
+                                       ed.wire_draft.a_vertical);
                 w.ortho = true;
-                push_place_wire(*ed.doc, std::move(w), std::move(junctions));
+                const ws::circsim::WireEndpoint landing = w.b;
+                push_place_wire(*ed.doc, std::move(w),
+                                std::move(junctions));
+                // The tool stays armed and the next draft starts at
+                // the landing: a multi-segment net is one run of
+                // clicks (the old commit disarmed, so every segment
+                // cost a W press). The landing endpoint exists now -
+                // a minted junction included - so the chain binds to
+                // it directly, no mint pending.
                 ed.wire_draft = Editor::WireDraft{};
-                ed.tool = Tool::Select;  // every commit disarms (W re-arms)
+                ed.wire_draft.active = true;
+                ed.wire_draft.a = landing;
+                ed.wire_draft.a_pos = t.pos;
+                ed.wire_draft.a_dir = t.dir;
                 break;
             }
             case Tool::Label: {
@@ -429,11 +511,14 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
         return;
     }
 
-    // Right click: cancel the tool / clear the selection.
+    // Right click: cancel the in-flight draft first (a stray click
+    // used to kill the draft AND the tool in one go), then disarm the
+    // tool, then clear the selection.
     if (in.mouse_pressed[2] != 0) {
-        if (ed.tool != Tool::Select) {
-            ed.tool = Tool::Select;
+        if (ed.wire_draft.active) {
             ed.wire_draft = Editor::WireDraft{};
+        } else if (ed.tool != Tool::Select) {
+            ed.tool = Tool::Select;
         } else {
             ed.sel.clear();
         }
@@ -732,7 +817,8 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         if (!eps_eq(t.pos.x, ed.wire_draft.a_pos.x, 1e-9) ||
             !eps_eq(t.pos.y, ed.wire_draft.a_pos.y, 1e-9)) {
             const std::vector<Pos> route = Editor::route_wire(
-                ed.wire_draft.a_pos, ed.wire_draft.a_dir, t.pos, t.dir);
+                ed.wire_draft.a_pos, ed.wire_draft.a_dir, t.pos, t.dir,
+                ed.wire_draft.a_vertical);
             std::vector<Point> pts;
             pts.push_back(Point{static_cast<float>(ed.wire_draft.a_pos.x),
                                 static_cast<float>(ed.wire_draft.a_pos.y)});

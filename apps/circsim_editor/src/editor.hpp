@@ -25,12 +25,17 @@
 //                snapped cursor; R/M rotate/mirror the ghost; each
 //                click places one part (the tool stays armed); Esc or
 //                a right click disarms.
-//   Wire tool    click a pin or junction starts a draft; the preview
-//                follows the cursor with the ortho route (the first
-//                leg honors the pin's dir, the last approaches the
-//                target's); clicking a pin/junction commits, clicking
-//                free space commits onto a fresh junction; every
-//                commit disarms (W re-arms cheaply).
+//   Wire tool    click a pin, junction, wire body or free grid point
+//                starts a draft (free and wire-body starts mint their
+//                junction at commit - a cancel leaves nothing behind;
+//                Shift at the start click flips the L's first leg to
+//                vertical); the preview follows the cursor with the
+//                ortho route (the first leg honors the pin's dir, the
+//                last approaches the target's); every commit CHAINS -
+//                the next draft starts at the landing, so a
+//                multi-segment net is one run of clicks; the first
+//                right click (or Esc) cancels the draft, the second
+//                disarms.
 //   Label tool   armed with the Palette's name field; each click
 //                places one label; stays armed.
 // Wheel zooms toward the cursor; middle-drag and space+left-drag pan.
@@ -333,12 +338,19 @@ struct Editor {
         ws::circsim::WireEndpoint a{};
         Pos a_pos{0.0, 0.0};
         int a_dir = 0;  // the start pin's direction, -1 when free
-        // A start on a wire's body (stage 18b): the start endpoint is
-        // not a pin or junction, so it has no WireEndpoint to bind to.
-        // The commit mints a junction at `a_pos` on the wire `a_wire`
-        // and binds the new wire's `a` to it - the same path the
-        // commit-side wire-point takes, just deferred past a cancel.
+        // A start with no entity behind it (a wire's body - stage
+        // 18b - or free space): the start endpoint is not a pin or
+        // junction, so the commit mints a junction at `a_pos` and
+        // binds the new wire's `a` to it. Deferred past a cancel, so
+        // abandoning the draft leaves nothing behind. `a_free` marks
+        // the free-space flavor (no anchor wire to revalidate).
         bool a_mint = false;
+        bool a_free = false;
+        // A free start's L flips: horizontal-first by default, the
+        // Shift modifier at the start click picks vertical-first.
+        // Recorded AT THE START so the preview and the commit route
+        // from the same answer.
+        bool a_vertical = false;
     } wire_draft;
 
     // True when the last frame's Properties draw saw a focused text

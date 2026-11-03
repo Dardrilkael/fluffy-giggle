@@ -135,7 +135,8 @@ std::vector<Pos> Editor::wire_path(const ws::circsim::Wire& w) const {
     return out;
 }
 
-std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir) {
+std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir,
+                                    bool a_vertical) {
     // The lead length: how far a route commits to a direction before
     // it may turn. One grid unit reads clean at every zoom (a pin's
     // own lead is typically three).
@@ -178,11 +179,12 @@ std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir) {
     }
     if (!eps_eq(from.x, target.x, 1e-9) && !eps_eq(from.y, target.y, 1e-9)) {
         // One corner (an L): the leg out of `from` continues the
-        // committed direction (horizontal when free), the leg into
-        // `target` closes. The final approach leg target -> b already
-        // runs along b_dir, so one corner always suffices.
+        // committed direction (horizontal when free, unless the
+        // caller's Shift flip chose vertical), the leg into `target`
+        // closes. The final approach leg target -> b already runs
+        // along b_dir, so one corner always suffices.
         const bool start_horizontal =
-            a_dir == 0 || a_dir == 180 || a_dir < 0;
+            a_dir >= 0 ? (a_dir == 0 || a_dir == 180) : !a_vertical;
         if (start_horizontal) {
             full.push_back(Pos{target.x, from.y});
         } else {

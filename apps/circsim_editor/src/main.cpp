@@ -592,9 +592,13 @@ class CircsimApp final : public ws::ui::App {
         escape_cmd.label = "Cancel Tool";
         escape_cmd.category = "Place";
         escape_cmd.execute = [this](std::string_view) {
-            if (editor_.tool != editor::Tool::Select) {
-                editor_.tool = editor::Tool::Select;
+            // The right click's staging: the in-flight draft cancels
+            // first, the tool disarms second, the selection clears
+            // last.
+            if (editor_.wire_draft.active) {
                 editor_.wire_draft = editor::Editor::WireDraft{};
+            } else if (editor_.tool != editor::Tool::Select) {
+                editor_.tool = editor::Tool::Select;
             } else {
                 editor_.sel.clear();
             }
