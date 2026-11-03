@@ -66,6 +66,7 @@ struct SnapTarget {
     ws::circsim::WireEndpoint end{};  // valid for Pin / Junction
     Pos pos{0.0, 0.0};
     int dir = -1;  // the approach direction, -1 when free
+    std::uint32_t wire = 0;             // the wire id for WirePoint
 };
 
 [[nodiscard]] SnapTarget snap_wire_target(const Editor& ed, Pos world) {
@@ -93,6 +94,7 @@ struct SnapTarget {
         t.kind = SnapTarget::Kind::WirePoint;
         t.pos = wp->pos;
         t.dir = -1;  // no approach constraint - the new wire leaves freely
+        t.wire = wp->wire;
         return t;
     }
     SnapTarget t;
@@ -168,9 +170,12 @@ bool set_drag_pos(Editor& ed, Pos at) {
 [[nodiscard]] bool wire_draft_start_valid(const Editor& ed) {
     const Editor::WireDraft& d = ed.wire_draft;
     if (d.a_mint) {
-        // A start on a wire's body: some wire's path must still pass
-        // through the point (exact: a_pos came from such a path).
-        return ed.hit_wire_point(d.a_pos, 1e-9).has_value();
+        // A start on a wire's body: the SAME wire must still pass
+        // through the point. hit_wire_point returns the wire id,
+        // so we verify it matches the original wire.
+        const std::optional<Editor::WirePointSnap> wp =
+            ed.hit_wire_point(d.a_pos, 1e-9);
+        return wp.has_value() && wp->wire == d.a_wire;
     }
     // A pin/junction start: resolve it through wire_path (a probe wire
     // with both ends on the start - empty when the endpoint is gone,
@@ -187,6 +192,12 @@ bool set_drag_pos(Editor& ed, Pos at) {
 
 void handle_pointer(Editor& ed, gui::GuiContext& gui,
                      const gui::Rect& body) {
+    // If the tool changed away from Wire, cancel any in-flight draft.
+    // This catches tool switches via hotkeys, commands, or menu clicks.
+    if (ed.tool != Tool::Wire && ed.wire_draft.active) {
+        ed.wire_draft = Editor::WireDraft{};
+    }
+
     // A draft whose start vanished (undo, redo, a delete elsewhere)
     // would commit a wire onto a dead endpoint: cancel it first.
     if (ed.wire_draft.active && !wire_draft_start_valid(ed)) {
@@ -221,11 +232,13 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
     const bool pan_modifiers =
         in.mouse_down[ws::input::mouse::kMiddle] != 0 ||
         (space_down && in.mouse_down[ws::input::mouse::kLeft] != 0);
-    if (pan_modifiers && inside) {
+    if (pan_modifiers) {
         if (!ed.pan.armed) {
             ed.pan.armed = true;
             ed.pan.from = mouse;
         }
+        // Keep panning while the button is held, even if cursor leaves
+        // the panel. Only disarm when the button is released.
         ed.view.pan_by({mouse.x - ed.pan.from.x, mouse.y - ed.pan.from.y});
         ed.pan.from = mouse;
         return;  // a pan frame owns the pointer
@@ -248,19 +261,20 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
             return;
         }
         // Release: land the undo command when the drag actually moved.
-        if (ed.drag.moved && ed.doc != nullptr) {
+        if (ed.drag.moved) {
             const Pos to = drag_target(ed, world, coarse);
             // The live writes above already moved the entity, and a
             // push_move_* command records `from` as the position it
             // finds - which would be the LAST live position, making
             // undo a no-op (or, for a from == to command, no entry at
             // all). Put the entity back at the press position first so
-            // the command captures the real from/to pair.
+            // the command captures the real from/to pair. Do this even
+            // when doc is null so the entity is always restored.
             set_drag_pos(ed, ed.drag.start_world);
             const bool landed =
                 !eps_eq(to.x, ed.drag.start_world.x, 1e-9) ||
                 !eps_eq(to.y, ed.drag.start_world.y, 1e-9);
-            if (landed) {  // dragged back to where it started: no edit
+            if (landed && ed.doc != nullptr) {  // dragged back to where it started: no edit
                 if (ed.drag.kind == Editor::Drag::Kind::Part) {
                     push_move_part(*ed.doc, ed.drag.id, to);
                 } else if (ed.drag.kind == Editor::Drag::Kind::Junction) {
@@ -351,6 +365,7 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                         ed.wire_draft.a_dir = t.dir;
                         ed.wire_draft.a_mint =
                             t.kind == SnapTarget::Kind::WirePoint;
+                        ed.wire_draft.a_wire = t.wire;
                     }
                     break;
                 }

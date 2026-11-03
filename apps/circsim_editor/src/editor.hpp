@@ -342,8 +342,11 @@ struct Editor {
         // The commit mints a junction at `a_pos` (a point on some
         // wire's path) and binds the new wire's `a` to it - the same
         // path the commit-side wire-point takes, just deferred past a
-        // cancel.
+        // cancel. a_wire is the id of the wire that was hit when the
+        // draft started; the commit validates that the same wire still
+        // exists at that position.
         bool a_mint = false;
+        std::uint32_t a_wire = 0;
     } wire_draft;
 
     // True when the last frame's Properties draw saw a focused text

@@ -584,6 +584,7 @@ class CircsimApp final : public ws::ui::App {
         label_cmd.enabled = [this] { return editor_.doc != nullptr; };
         label_cmd.execute = [this](std::string_view) {
             editor_.tool = editor::Tool::Label;
+            editor_.wire_draft = editor::Editor::WireDraft{};
         };
         add(std::move(label_cmd));
 
