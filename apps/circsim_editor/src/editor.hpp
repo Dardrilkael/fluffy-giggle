@@ -368,6 +368,12 @@ struct Editor {
     std::uint64_t joins_version_ = 0;
     bool joins_valid_ = false;
 
+    // part_bounds cache: per-part world AABBs keyed by part id,
+    // invalidated when the schematic version changes.
+    mutable std::map<std::uint32_t, Bounds> part_bounds_cache_;
+    mutable std::uint64_t bounds_version_ = 0;
+    mutable bool bounds_valid_ = false;
+
     // The Properties panel's editing state: the field buffers keyed
     // by stable strings, the epoch that reloads them, the selection
     // they were built for, and the analysis entry being edited.

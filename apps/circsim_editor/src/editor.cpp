@@ -66,14 +66,27 @@ Pos Editor::snap(Pos world, bool coarse) const {
 std::optional<Bounds> Editor::part_bounds(std::uint32_t id) const {
     const ws::circsim::Schematic* s = schem();
     const ws::circsim::Part* p = s != nullptr ? s->find_part(id) : nullptr;
-    const ws::circsim::SymbolDef* sym =
-        p != nullptr ? sym_of(*p) : nullptr;
     if (p == nullptr) {
         return std::nullopt;
     }
+    // Fast path: cache hit.
+    if (bounds_valid_ && s != nullptr && bounds_version_ == s->version()) {
+        const auto it = part_bounds_cache_.find(id);
+        if (it != part_bounds_cache_.end()) {
+            return it->second;
+        }
+    }
+    // Cache miss or invalid: compute and store.
+    const ws::circsim::SymbolDef* sym = sym_of(*p);
     if (sym == nullptr) {
-        return Bounds{p->pos.x - 1.0, p->pos.y - 1.0, p->pos.x + 1.0,
-                      p->pos.y + 1.0};
+        Bounds b{p->pos.x - 1.0, p->pos.y - 1.0, p->pos.x + 1.0,
+                  p->pos.y + 1.0};
+        if (s != nullptr) {
+            bounds_version_ = s->version();
+            part_bounds_cache_[id] = b;
+            bounds_valid_ = true;
+        }
+        return b;
     }
     const Bounds local = ws::circsim::symbol_bounds(*sym);
     std::optional<Bounds> out;
@@ -91,6 +104,11 @@ std::optional<Bounds> Editor::part_bounds(std::uint32_t id) const {
          {Pos{local.min_x, local.min_y}, Pos{local.max_x, local.min_y},
           Pos{local.min_x, local.max_y}, Pos{local.max_x, local.max_y}}) {
         grow(ws::circsim::transform_pos(*p, corner));
+    }
+    if (s != nullptr && out.has_value()) {
+        bounds_version_ = s->version();
+        part_bounds_cache_[id] = *out;
+        bounds_valid_ = true;
     }
     return out;
 }
@@ -274,6 +292,13 @@ std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir) {
             if ((eps_eq(p0.x, p1.x, kEps) && eps_eq(p1.x, p.x, kEps)) ||
                 (eps_eq(p0.y, p1.y, kEps) && eps_eq(p1.y, p.y, kEps))) {
                 folded.back() = p;  // collinear: extend the leg
+                // p might equal p0 (spike straight back), creating a
+                // consecutive duplicate. Remove it immediately to
+                // maintain the "no consecutive duplicates" invariant.
+                if (folded.size() >= 2u &&
+                    same(folded[folded.size() - 2u], folded.back())) {
+                    folded.pop_back();
+                }
                 continue;
             }
         }
@@ -627,6 +652,8 @@ void Editor::document_changed() {
     results = ResultsCache{};
     join_dots_.clear();
     joins_valid_ = false;
+    part_bounds_cache_.clear();
+    bounds_valid_ = false;
     const ws::circsim::Schematic* s = schem();
     if (s != nullptr) {
         view.zoom = s->view.zoom > 0.0 ? s->view.zoom : 26.0;
