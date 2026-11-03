@@ -11,4 +11,5 @@ ws_add_library(circsim DEPENDS ws::core ws::math ws::spice ws::settings)
 ws_add_test(circsim SOURCES tests/test_format.cpp tests/test_nets.cpp
                               tests/test_erc.cpp tests/test_export.cpp
                               tests/test_symbols.cpp tests/test_locate.cpp
-                              tests/test_plot.cpp tests/test_symbol_render.cpp)
+                              tests/test_plot.cpp tests/test_symbol_render.cpp
+                              tests/test_symbol_draw.cpp)

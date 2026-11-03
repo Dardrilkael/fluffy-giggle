@@ -174,11 +174,14 @@ fetched privately, which would duplicate a first-party capability.
   pin_pos applies it to pins. The editor's `draw_symbol` paints them,
   the CLI's SVG dump writes them, the tests assert them - no parallel
   transforms to drift (the stage-16c lesson, applied to symbols).
-- The safety net: a pin no prim VERTEX touches (quarter-unit eps)
-  gets a stub line into the body, opposite the pin's dir. The reach
-  math's outside-bounds branches are dead code (bounds include the
-  pins) - every stub is the 1.5-unit default. A stub is a LEAD, never
-  a connection: net building never reads it.
+- The safety net: a pin no prim VERTEX touches and no curve carries
+  (circle/arc curve within a quarter unit, dot interior; the geometric
+  rule is stage 17g's - the vertex-only one drew stubs through the
+  v/i sources AND the inductor's coil) gets a stub line into the
+  body, opposite the pin's dir. The reach math's outside-bounds
+  branches are dead code (bounds include the pins) - every stub is
+  the 1.5-unit default. A stub is a LEAD, never a connection: net
+  building never reads it.
 - Rect prims flatten to closed quads (the placement may rotate the
   box); arcs fold mirror (reflect + sweep swap) and rotation into
   their ANGLES while the center rides the transform. Malformed prims
@@ -193,11 +196,11 @@ fetched privately, which would duplicate a first-party capability.
   nets.hpp, format.hpp, erc.hpp, export.hpp, locate.hpp, plot.hpp,
   render.hpp (stage 17a - the symbol render seam).
   ws::core::Result only; no exceptions.
-- `src/`: model.cpp, symbols.cpp, library.cpp, nets.cpp, format.cpp,
-  erc.cpp, export.cpp, locate.cpp, plot.cpp, render.cpp (the
-  stage-17a seam's flattening). The built-in symbol table in
-  symbols.cpp (with its specs and draw) is the shape the .csym library
-  feeds.
+- `src/`: model.cpp, symbols.cpp (the geometry half: lookup,
+  transform_pos/pin_pos, symbol_bounds, default_params),
+  symbols_table.cpp (the built-in table + its prim builders - pure
+  data), library.cpp, nets.cpp, format.cpp, erc.cpp, export.cpp,
+  locate.cpp, plot.cpp, render.cpp (the stage-17a seam's flattening).
 - `examples/`: divider.csim, rc_step.csim (the smoke suite's decks),
   tline.csym + tline_demo.csim (the stage-2 library demo: a T-line
   symbol the built-ins do not ship, run with `-S tline.csym`).
@@ -214,7 +217,7 @@ fetched privately, which would duplicate a first-party capability.
 ```
 ctest --preset linux -R circsim    # plus circsim_smoke over the CLI
 ```
-One binary, eight TUs: test_format.cpp (round-trip, unknowns, migration,
+One binary, nine TUs: test_format.cpp (round-trip, unknowns, migration,
 tolerant load - owns the doctest main), test_nets.cpp (the connectivity
 rules), test_erc.cpp (one case per check), test_export.cpp (golden decks,
 the full-path analytic sims, error mapping), test_symbols.cpp (the
@@ -227,6 +230,10 @@ the manual-view math: clamp/zoom/pan against home, the mush floor,
 the flush park), test_symbol_render.cpp (stage 17a: the render seam's
 characterization - the transform, the arc angle folding, the safety
 net, and the stage-2 warts the stage-17 redesign commits flip one by
-one). The
+one), test_symbol_draw.cpp (stage 17g: the table-level invariants -
+pin reachability, pin direction with its lead, non-degenerate fills,
+whole-grid pin offsets - over every built-in AND the .csym-authored
+tline; the suite caught the inductor's phantom stubs on its first
+run). The
 editor's own suite lives in the app: test_circsim_editor_panel (the
 Results panel's draw through the plot_canvas seam, on the ui tree).

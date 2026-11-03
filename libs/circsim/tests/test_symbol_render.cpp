@@ -274,6 +274,21 @@ TEST_CASE("polyfill rides the part transform and fills, not strokes") {
     CHECK_FALSE(out[0].closed);  // fill closes; the flag never applies
 }
 
+TEST_CASE("the inductor's coil owns its pins - no stubs") {
+    // The pins sit ON the outermost arcs' curves (no prim vertex
+    // anywhere near them), so the stage-2 vertex-only touch rule fired
+    // the safety net and drew a 1.5-unit stub straight through the
+    // coil from each end. The touch rule is geometric now: a pin on a
+    // circle/arc's curve (or inside a dot) is touched.
+    const SymbolDef* l = ws::circsim::find_symbol("l");
+    REQUIRE(l != nullptr);
+    const std::vector<SymbolStroke> out =
+        render_symbol(*l, placement(Pos{0.0, 0.0}));
+    CHECK(out.size() == 4);  // the four arcs, and nothing else
+    CHECK(count_kind(out, SymbolStroke::Kind::Arc) == 4);
+    CHECK(count_kind(out, SymbolStroke::Kind::Line) == 0);  // no stubs
+}
+
 TEST_CASE("transistors wear arrowheads that carry direction") {
     // The BJT emitter arrow (stage 17f): a FILLED head on the emitter
     // stroke - the tip toward the emitter pin (NPN) vs toward the bar

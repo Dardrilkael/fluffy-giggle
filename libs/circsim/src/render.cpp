@@ -12,6 +12,10 @@ namespace {
     return std::fabs(a - b) <= eps;
 }
 
+[[nodiscard]] double len(Pos p) {
+    return std::sqrt(p.x * p.x + p.y * p.y);
+}
+
 }  // namespace
 
 std::vector<SymbolStroke> render_symbol(const SymbolDef& sym,
@@ -138,15 +142,38 @@ std::vector<SymbolStroke> render_symbol(const SymbolDef& sym,
         }
     }
 
-    // Does any draw primitive vertex sit on this pin? (The built-in
-    // tables carry their own leads; the stub below is the .csym
-    // safety net for symbols whose prims fall short of their pins.)
+    // Does any draw primitive reach this pin? A prim VERTEX within a
+    // quarter unit, or a pin ON a curve - a circle/arc's own curve
+    // (the inductor's coil: its pins sit on the outermost bump, no
+    // vertex anywhere near, and the vertex-only rule drew a stub
+    // straight through the coil) or inside a dot.
     const auto prim_touches = [&](const Pos& pin) {
         for (const DrawPrim& d : sym.draw) {
             for (const Pos& v : d.pts) {
                 if (near(v.x, pin.x, 0.25) && near(v.y, pin.y, 0.25)) {
                     return true;
                 }
+            }
+            const double curve_off =
+                std::fabs(len(Pos{d.pts.empty() ? 0.0 : d.pts[0].x - pin.x,
+                                  d.pts.empty() ? 0.0 : d.pts[0].y - pin.y}) -
+                          d.r);
+            switch (d.kind) {
+                case DrawPrim::Kind::Circle:
+                case DrawPrim::Kind::Arc:
+                    if (!d.pts.empty() && curve_off <= 0.25) {
+                        return true;
+                    }
+                    break;
+                case DrawPrim::Kind::Dot:
+                    if (!d.pts.empty() &&
+                        len(Pos{d.pts[0].x - pin.x, d.pts[0].y - pin.y}) <=
+                            d.r + 0.25) {
+                        return true;
+                    }
+                    break;
+                default:
+                    break;
             }
         }
         return false;
