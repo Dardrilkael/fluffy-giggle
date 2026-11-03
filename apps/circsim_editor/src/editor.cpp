@@ -177,7 +177,7 @@ std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir,
         // Approach b ALONG b_dir: stop one lead short of it.
         target = {b.x - u.x * kLead, b.y - u.y * kLead};
     }
-    if (!eps_eq(from.x, target.x, 1e-9) && !eps_eq(from.y, target.y, 1e-9)) {
+    if (!eps_eq(from.x, target.x) && !eps_eq(from.y, target.y)) {
         // One corner (an L): the leg out of `from` continues the
         // committed direction (horizontal when free, unless the
         // caller's Shift flip chose vertical), the leg into `target`
@@ -204,16 +204,16 @@ std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir,
     // target at (-5,0) keeps its (1,0) lead-out corner.
     std::vector<Pos> folded;
     for (const Pos& p : full) {
-        if (!folded.empty() && eps_eq(folded.back().x, p.x, 1e-9) &&
-            eps_eq(folded.back().y, p.y, 1e-9)) {
+        if (!folded.empty() && eps_eq(folded.back().x, p.x) &&
+            eps_eq(folded.back().y, p.y)) {
             continue;
         }
         if (folded.size() >= 2u) {
             const Pos& p0 = folded[folded.size() - 2u];
             const Pos& p1 = folded[folded.size() - 1u];
             const bool collinear =
-                (eps_eq(p0.x, p1.x, 1e-9) && eps_eq(p1.x, p.x, 1e-9)) ||
-                (eps_eq(p0.y, p1.y, 1e-9) && eps_eq(p1.y, p.y, 1e-9));
+                (eps_eq(p0.x, p1.x) && eps_eq(p1.x, p.x)) ||
+                (eps_eq(p0.y, p1.y) && eps_eq(p1.y, p.y));
             const double along = (p1.x - p0.x) * (p.x - p1.x) +
                                  (p1.y - p0.y) * (p.y - p1.y);
             if (collinear && along > 0.0) {
@@ -389,7 +389,7 @@ std::vector<WireRoute> Editor::attached_wire_routes(
             // The leg into mid[1] keeps its orientation: a vertical
             // continuation keeps x (the first leg turns horizontal),
             // a horizontal one keeps y (the first leg turns vertical).
-            if (eps_eq(mid[0].x, mid[1].x, 1e-9)) {
+            if (eps_eq(mid[0].x, mid[1].x)) {
                 mid[0].y = path.front().y;
             } else {
                 mid[0].x = path.front().x;
@@ -398,7 +398,7 @@ std::vector<WireRoute> Editor::attached_wire_routes(
         if (b_hit) {
             Pos& last = mid.back();
             const Pos& prev = mid[mid.size() - 2u];
-            if (eps_eq(prev.y, last.y, 1e-9)) {
+            if (eps_eq(prev.y, last.y)) {
                 last.x = path.back().x;
             } else {
                 last.y = path.back().y;
@@ -668,12 +668,21 @@ void Editor::document_changed() {
     results = ResultsCache{};
     join_dots_.clear();
     joins_valid_ = false;
+    // The Properties panel's field state rides too: a new document
+    // whose first selection happens to share a kind and id with the
+    // old one must never show the old document's typing.
+    fields.clear();
+    field_stamp = 1;
+    fields_sel_kind = -1;
+    fields_sel_id = 0;
+    analysis_index = -1;
     const ws::circsim::Schematic* s = schem();
     if (s != nullptr) {
-        view.zoom = s->view.zoom > 0.0 ? s->view.zoom : 26.0;
+        view.zoom =
+            s->view.zoom > 0.0 ? s->view.zoom : kZoomDefault;
         view.center = s->view.center;
     } else {
-        view.zoom = 26.0;
+        view.zoom = kZoomDefault;
         view.center = {0.0, 0.0};
     }
 }

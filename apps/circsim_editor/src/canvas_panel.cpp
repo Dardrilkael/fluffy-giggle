@@ -12,9 +12,10 @@
 // parts, the selection highlight, and the tool ghosts/preview.
 //
 // The viewport is the scroll scope's content rect: the panel NEVER
-// advances the flow (no layout.next()/advance() calls anywhere in this
-// file), so the scroll range stays zero and the content rect the
-// cursor sees is exactly the unscrolled viewport. The shell's wheel
+// advances the flow (the one exception: the no-document early-out
+// prints a single text row - nothing else runs in that frame), so the
+// scroll range stays zero and the content rect the cursor sees is
+// exactly the unscrolled viewport. The shell's wheel
 // claim on the panel is then a harmless no-op and the canvas reads the
 // same InputFrame for its zoom.
 //
@@ -57,6 +58,10 @@ constexpr float kLabelPickPx = 6.0f;
 // on (and the dot's own px).
 constexpr float kSnapFeedbackPx = 8.0f;
 constexpr float kSnapDotPx = 5.0f;
+
+// The wheel zoom's step per scroll notch (pow reads the notch count,
+// so fractional deltas zoom fractionally).
+constexpr float kZoomStep = 1.15f;
 
 // The junction dots' screen floor: a dot is 0.14 world units at the
 // working zooms, but below ~zoom 14 that is under 2px on screen -
@@ -232,7 +237,8 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
     const ws::math::Vec2 mouse{in.mouse_x, in.mouse_y};
     const Pos world = ed.view.s2w(mouse);
     const double pick = pick_world(ed.view);
-    const bool space_down = in.key_down[32] != 0;
+    const bool space_down =
+        in.key_down[ws::input::keys::kSpace] != 0;
     // Shift = the coarse snap: placements, part drags and labels land
     // on the major lattice (base * 5, an integer multiple of the fine
     // grid - a coarse position is always a fine position too). Wires,
@@ -247,7 +253,11 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
     // veil freezes the canvas - the zoom with it (the header's own
     // contract; only the tools used to check the claims).
     if (inside && gui.claims_open() && in.scroll_dy != 0.0f) {
-        ed.view.zoom_at(mouse, in.scroll_dy > 0.0f ? 1.15 : 1.0 / 1.15);
+        // One notch = one kZoomStep; a trackpad's many small deltas
+        // ride the same curve gently instead of jumping whole notches
+        // (the exponent clamps against a wild scroll burst).
+        const float deltas = std::clamp(in.scroll_dy, -4.0f, 4.0f);
+        ed.view.zoom_at(mouse, std::pow(kZoomStep, deltas));
     }
 
     // Middle-drag pans; space+left-drag pans too (the gallery's rule).
@@ -277,8 +287,8 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
             // at release with the from/to pair (push IS the edit,
             // and apply() re-landing the same position is exact).
             const Pos at = drag_landing(ed, in, world);
-            if (!eps_eq(at.x, ed.drag.start_world.x, 1e-9) ||
-                !eps_eq(at.y, ed.drag.start_world.y, 1e-9)) {
+            if (!eps_eq(at.x, ed.drag.start_world.x) ||
+                !eps_eq(at.y, ed.drag.start_world.y)) {
                 ed.drag.moved = true;
             }
             if (ed.drag.moved && ed.schem() != nullptr) {
@@ -448,8 +458,8 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                 // same position is already one net (the coincidence
                 // rules unite coincident pins and junctions, and a
                 // wire-point landing sits on its own wire).
-                if (eps_eq(t.pos.x, ed.wire_draft.a_pos.x, 1e-9) &&
-                    eps_eq(t.pos.y, ed.wire_draft.a_pos.y, 1e-9)) {
+                if (eps_eq(t.pos.x, ed.wire_draft.a_pos.x) &&
+                    eps_eq(t.pos.y, ed.wire_draft.a_pos.y)) {
                     break;
                 }
                 // The start anchor may have died between the clicks
@@ -541,7 +551,8 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                        gui::LayoutCursor& layout,
                        const gui::ChromeTheme& theme) {
     // The scroll scope's content rect IS the viewport (this panel
-    // never advances the flow - the file header's invariant).
+    // never advances the flow - the file header's invariant; the
+    // no-document early-out below is the stated exception).
     const gui::Rect body = layout.panel_content();
     if (body.width <= 8.0f || body.height <= 8.0f) {
         return;
@@ -620,8 +631,8 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
             tool_engaged ? 1.0f : 0.0f, ease);
         const float brightness = 0.85f + 0.15f * travel;
 
-        const Point floor{body.x, body.y};
-        rc.fill_rects(&floor, 1, body.width, body.height, theme.canvas_bg);
+        const Point origin{body.x, body.y};
+        rc.fill_rects(&origin, 1, body.width, body.height, theme.canvas_bg);
         canvas::draw_grid(rc, frame, spec, brightness);
     }
 
@@ -785,14 +796,14 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
             const double top = b.has_value() ? b->max_y : p.pos.y;
             const double bottom = b.has_value() ? b->min_y : p.pos.y;
             if (!p.ref.empty()) {
-                (void)rc.draw_text(static_cast<float>(p.pos.x - 0.4f),
-                                   static_cast<float>(top + 0.35f),
+                (void)rc.draw_text(static_cast<float>(p.pos.x - 0.4),
+                                   static_cast<float>(top + 0.35),
                                    p.ref.c_str(), *theme.font,
                                    gui::dim(theme.text, 0.75f));
             }
             if (!p.value.empty()) {
-                (void)rc.draw_text(static_cast<float>(p.pos.x - 0.4f),
-                                   static_cast<float>(bottom - 0.9f),
+                (void)rc.draw_text(static_cast<float>(p.pos.x - 0.4),
+                                   static_cast<float>(bottom - 0.9),
                                    p.value.c_str(), *theme.font,
                                    gui::dim(theme.text, 0.75f));
             }
@@ -822,8 +833,8 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     // --- the wire draft preview
     if (ed.wire_draft.active && inside) {
         const SnapTarget t = snap_wire_target(ed, world);
-        if (!eps_eq(t.pos.x, ed.wire_draft.a_pos.x, 1e-9) ||
-            !eps_eq(t.pos.y, ed.wire_draft.a_pos.y, 1e-9)) {
+        if (!eps_eq(t.pos.x, ed.wire_draft.a_pos.x) ||
+            !eps_eq(t.pos.y, ed.wire_draft.a_pos.y)) {
             const std::vector<Pos> route = Editor::route_wire(
                 ed.wire_draft.a_pos, ed.wire_draft.a_dir, t.pos, t.dir,
                 ed.wire_draft.a_vertical);

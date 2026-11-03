@@ -83,10 +83,18 @@ namespace canvas = ws::ui::canvas;
 using ws::circsim::Bounds;
 using ws::circsim::Pos;
 
-// Epsilon compare on world coordinates (grid units).
-inline bool eps_eq(double a, double b, double eps) {
+// Epsilon compare on world coordinates (grid units): a position is
+// "the same" far below any drawn pixel.
+inline constexpr double kEps = 1e-9;
+inline bool eps_eq(double a, double b, double eps = kEps) {
     return std::fabs(a - b) <= eps;
 }
+
+// The camera's clamps and default (zoom_at and fit clamp into the
+// range; a fresh Editor and document_changed adopt the default).
+inline constexpr double kZoomMin = 3.0;
+inline constexpr double kZoomMax = 400.0;
+inline constexpr double kZoomDefault = 26.0;
 
 // The GLFW mouse button indices the panels read (libs/input passes
 // the platform's numbers straight through): 0 left, 1 right, 2
@@ -100,7 +108,7 @@ inline constexpr int kMouseMiddle = 2;
 // --- the camera -------------------------------------------------------------
 
 struct EditorView {
-    double zoom = 26.0;   // screen pixels per grid unit
+    double zoom = kZoomDefault;  // screen pixels per grid unit
     Pos center{0.0, 0.0};  // the world point at the viewport's center
 
     // The viewport, set each frame before use (screen px, the panel
@@ -129,12 +137,7 @@ struct EditorView {
         }
         const Pos under = s2w(anchor);
         zoom *= factor;
-        if (zoom < 3.0) {
-            zoom = 3.0;
-        }
-        if (zoom > 400.0) {
-            zoom = 400.0;
-        }
+        zoom = std::clamp(zoom, kZoomMin, kZoomMax);
         // Keep `under` at the anchor: center = under + (center-anchor
         // in world units at the new zoom).
         const double dx = (vx + vw * 0.5f - anchor.x) / zoom;
@@ -162,12 +165,7 @@ struct EditorView {
         }
         zoom = std::min(static_cast<double>(vw) / w,
                         static_cast<double>(vh) / h);
-        if (zoom < 3.0) {
-            zoom = 3.0;
-        }
-        if (zoom > 400.0) {
-            zoom = 400.0;
-        }
+        zoom = std::clamp(zoom, kZoomMin, kZoomMax);
     }
 };
 
