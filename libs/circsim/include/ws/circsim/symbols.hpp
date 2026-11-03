@@ -111,6 +111,13 @@ struct SymbolDef {
 [[nodiscard]] Pos pin_pos(const SymbolDef& s, const Part& p,
                           std::uint32_t pin_index);
 
+// A placed part's pin DIRECTION in world space, degrees CCW (y up), one
+// of 0/90/180/270: the symbol's local PinDef::dir pushed through the same
+// mirror-then-rotation as pin_pos (via transform_pos, so the two can never
+// disagree). A pin_index out of range answers 0.
+[[nodiscard]] int pin_dir(const SymbolDef& s, const Part& p,
+                          std::uint32_t pin_index);
+
 // The shared part transform: mirror (x-flip) first, then rotation (CCW,
 // y up), then the part position. pin_pos applies it to pin offsets; the
 // editor applies the same to DrawPrim points so the picture and the pins

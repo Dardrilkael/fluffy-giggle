@@ -677,7 +677,7 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                 rc.stroke_polyline(corners, 4, footprint, true);
 
                 for (std::size_t i = 0; i < sym->pins.size(); ++i) {
-                    const Pos pin = ws::circsim::pin_pos(*sym, ghost, i);
+                    const Pos pin = ws::circsim::pin_pos(*sym, ghost, static_cast<std::uint32_t>(i));
                     rc.fill_circle(Point{static_cast<float>(pin.x),
                                          static_cast<float>(pin.y)},
                                    0.12f, theme.control_on);

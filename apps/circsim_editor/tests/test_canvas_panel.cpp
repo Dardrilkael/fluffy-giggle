@@ -262,3 +262,112 @@ TEST_CASE("the schematic panel draws the world at its w2s position") {
 }
 
 }  // namespace
+
+// --- wire routing and the pin direction it reads --------------------------------
+
+namespace {
+
+using ws::circsim::Pos;
+
+[[nodiscard]] int leg_heading(Pos p, Pos q) {
+    if (p.y == q.y && p.x != q.x) {
+        return q.x > p.x ? 0 : 180;
+    }
+    if (p.x == q.x && p.y != q.y) {
+        return q.y > p.y ? 90 : 270;
+    }
+    return -1;  // zero-length or diagonal
+}
+
+// a -> waypoints -> b, as the canvas draws it.
+[[nodiscard]] std::vector<Pos> full_route(Pos a, int ad, Pos b, int bd) {
+    std::vector<Pos> p{a};
+    for (const Pos& w : Editor::route_wire(a, ad, b, bd)) {
+        p.push_back(w);
+    }
+    p.push_back(b);
+    return p;
+}
+
+}  // namespace
+
+TEST_CASE("route_wire leaves a pin outward and reaches one from outside") {
+    // Resistor-style pins: left pin faces 180, right pin faces 0.
+    SUBCASE("facing pins: a straight run, no waypoints") {
+        CHECK(Editor::route_wire({3.0, 0.0}, 0, {9.0, 0.0}, 180).empty());
+    }
+    SUBCASE("the end approaches from outside the part, not through it") {
+        // b = (10,0) faces left (180): the wire must arrive travelling
+        // +x from x < 10 - never from x = 11 (the body side).
+        const std::vector<Pos> p = full_route({0.0, 0.0}, -1, {10.0, 0.0}, 180);
+        REQUIRE(p.size() >= 2u);
+        CHECK(leg_heading(p[p.size() - 2u], p.back()) == 0);
+    }
+    SUBCASE("a target behind the start pin wraps around instead of doubling back") {
+        // a faces +x but the partner sits to its left.
+        const std::vector<Pos> p = full_route({5.0, 0.0}, 0, {0.0, 3.0}, 180);
+        REQUIRE(p.size() >= 3u);
+        CHECK(leg_heading(p[0], p[1]) == 0);  // out along a_dir first
+        int prev = -1;
+        for (std::size_t i = 0; i + 1 < p.size(); ++i) {
+            const int h = leg_heading(p[i], p[i + 1]);
+            CHECK(h >= 0);  // axis-aligned, no zero-length leg
+            if (prev >= 0) {
+                CHECK((prev + 180) % 360 != h);  // never reverses
+            }
+            prev = h;
+        }
+        CHECK(leg_heading(p[p.size() - 2u], p.back()) == 0);  // arrives +x
+    }
+    SUBCASE("every pin/pin orientation pair stays orthogonal and reversal-free") {
+        for (const int ad : {-1, 0, 90, 180, 270}) {
+            for (const int bd : {-1, 0, 90, 180, 270}) {
+                for (int dx = -3; dx <= 3; ++dx) {
+                    for (int dy = -3; dy <= 3; ++dy) {
+                        if (dx == 0 && dy == 0) {
+                            continue;
+                        }
+                        const std::vector<Pos> p = full_route(
+                            {0.0, 0.0}, ad, {double(dx), double(dy)}, bd);
+                        int prev = -1;
+                        for (std::size_t i = 0; i + 1 < p.size(); ++i) {
+                            const int h = leg_heading(p[i], p[i + 1]);
+                            REQUIRE(h >= 0);
+                            if (i == 0 && ad >= 0) {
+                                REQUIRE(h == ad);
+                            }
+                            if (prev >= 0) {
+                                REQUIRE((prev + 180) % 360 != h);
+                            }
+                            prev = h;
+                        }
+                        if (bd >= 0) {
+                            REQUIRE(prev == (bd + 180) % 360);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("hit_pin reports the pin's direction in world space") {
+    Bench b;
+    ws::circsim::Part r = ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0});
+    r.id = b.doc.schem.alloc_id();
+    r.rot = 90;  // a (local 180) now faces down, b (local 0) faces up
+    b.doc.schem.parts_mut().push_back(r);
+    const ws::circsim::Part& placed = b.doc.schem.parts().back();
+    const ws::circsim::SymbolDef* sym = b.ed.sym_of(placed);
+    REQUIRE(sym != nullptr);
+
+    const Pos a_at = ws::circsim::pin_pos(*sym, placed, 0);
+    const auto a_hit = b.ed.hit_pin(a_at, 0.1);
+    REQUIRE(a_hit.has_value());
+    CHECK(a_hit->dir == 270);
+
+    const Pos b_at = ws::circsim::pin_pos(*sym, placed, 1);
+    const auto b_hit = b.ed.hit_pin(b_at, 0.1);
+    REQUIRE(b_hit.has_value());
+    CHECK(b_hit->dir == 90);
+}

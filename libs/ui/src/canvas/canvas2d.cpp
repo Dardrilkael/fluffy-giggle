@@ -216,8 +216,18 @@ void CommandListCanvas::stroke_rounded_rect(float x, float y, float w, float h,
     const float angles[4][2] = {{-kHalfPi, 0.0f}, {0.0f, kHalfPi},
                                  {kHalfPi, kPi}, {kPi, 1.5f * kPi}};
     for (int i = 0; i < 4; ++i) {
-        move_to({corners[i].x + rad * std::cos(angles[i][0]),
-                  corners[i].y + rad * std::sin(angles[i][0])});
+        // ONE subpath: only the first corner move_to's. A move_to per
+        // corner re-pointed last_move_, so close_path() closed to the
+        // last corner's start and cut a diagonal across the top-left.
+        // (line_to, not nothing: a zero radius makes arc() a no-op, and
+        // the corner points alone must still draw the rectangle.)
+        const Point start{corners[i].x + rad * std::cos(angles[i][0]),
+                          corners[i].y + rad * std::sin(angles[i][0])};
+        if (i == 0) {
+            move_to(start);
+        } else {
+            line_to(start);
+        }
         arc(corners[i], rad, rad, angles[i][0], angles[i][1]);
     }
     close_path();
@@ -233,8 +243,18 @@ void CommandListCanvas::fill_rounded_rect(float x, float y, float w, float h,
     const float angles[4][2] = {{-kHalfPi, 0.0f}, {0.0f, kHalfPi},
                                  {kHalfPi, kPi}, {kPi, 1.5f * kPi}};
     for (int i = 0; i < 4; ++i) {
-        move_to({corners[i].x + rad * std::cos(angles[i][0]),
-                  corners[i].y + rad * std::sin(angles[i][0])});
+        // ONE subpath: only the first corner move_to's. A move_to per
+        // corner re-pointed last_move_, so close_path() closed to the
+        // last corner's start and cut a diagonal across the top-left.
+        // (line_to, not nothing: a zero radius makes arc() a no-op, and
+        // the corner points alone must still draw the rectangle.)
+        const Point start{corners[i].x + rad * std::cos(angles[i][0]),
+                          corners[i].y + rad * std::sin(angles[i][0])};
+        if (i == 0) {
+            move_to(start);
+        } else {
+            line_to(start);
+        }
         arc(corners[i], rad, rad, angles[i][0], angles[i][1]);
     }
     close_path();
@@ -457,8 +477,18 @@ void Renderer2DCanvas::stroke_rounded_rect(float x, float y, float w, float h,
     const float angles[4][2] = {{-kHalfPi, 0.0f}, {0.0f, kHalfPi},
                                  {kHalfPi, kPi}, {kPi, 1.5f * kPi}};
     for (int i = 0; i < 4; ++i) {
-        move_to({corners[i].x + rad * std::cos(angles[i][0]),
-                  corners[i].y + rad * std::sin(angles[i][0])});
+        // ONE subpath: only the first corner move_to's. A move_to per
+        // corner re-pointed last_move_, so close_path() closed to the
+        // last corner's start and cut a diagonal across the top-left.
+        // (line_to, not nothing: a zero radius makes arc() a no-op, and
+        // the corner points alone must still draw the rectangle.)
+        const Point start{corners[i].x + rad * std::cos(angles[i][0]),
+                          corners[i].y + rad * std::sin(angles[i][0])};
+        if (i == 0) {
+            move_to(start);
+        } else {
+            line_to(start);
+        }
         arc(corners[i], rad, rad, angles[i][0], angles[i][1]);
     }
     close_path();
@@ -474,8 +504,18 @@ void Renderer2DCanvas::fill_rounded_rect(float x, float y, float w, float h,
     const float angles[4][2] = {{-kHalfPi, 0.0f}, {0.0f, kHalfPi},
                                  {kHalfPi, kPi}, {kPi, 1.5f * kPi}};
     for (int i = 0; i < 4; ++i) {
-        move_to({corners[i].x + rad * std::cos(angles[i][0]),
-                  corners[i].y + rad * std::sin(angles[i][0])});
+        // ONE subpath: only the first corner move_to's. A move_to per
+        // corner re-pointed last_move_, so close_path() closed to the
+        // last corner's start and cut a diagonal across the top-left.
+        // (line_to, not nothing: a zero radius makes arc() a no-op, and
+        // the corner points alone must still draw the rectangle.)
+        const Point start{corners[i].x + rad * std::cos(angles[i][0]),
+                          corners[i].y + rad * std::sin(angles[i][0])};
+        if (i == 0) {
+            move_to(start);
+        } else {
+            line_to(start);
+        }
         arc(corners[i], rad, rad, angles[i][0], angles[i][1]);
     }
     close_path();

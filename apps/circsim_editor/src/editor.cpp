@@ -147,57 +147,149 @@ std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir) {
             default: return {0.0, -1.0};  // 270
         }
     };
+    // The heading of an axis-aligned leg (0/90/180/270), -1 for a
+    // zero-length leg, -2 for a diagonal.
+    const auto heading = [](Pos p, Pos q) -> int {
+        if (eps_eq(p.x, q.x, 1e-9) && eps_eq(p.y, q.y, 1e-9)) {
+            return -1;
+        }
+        if (eps_eq(p.y, q.y, 1e-9)) {
+            return q.x > p.x ? 0 : 180;
+        }
+        if (eps_eq(p.x, q.x, 1e-9)) {
+            return q.y > p.y ? 90 : 270;
+        }
+        return -2;
+    };
 
-    // Full polyline a -> ... -> b; the stored waypoints are its
-    // interior after folding.
-    std::vector<Pos> full;
-    full.push_back(a);
+    // A pin's dir points OUT of its part. A route leaves `a` along
+    // a_dir (one lead out), and reaches `b` from OUTSIDE: its last
+    // lead sits one unit out along b_dir and the final leg runs back
+    // in toward the pin (never across the symbol body).
     Pos from = a;
     if (a_dir >= 0) {
         const Pos u = unit(a_dir);
         from = {a.x + u.x * kLead, a.y + u.y * kLead};
-        full.push_back(from);
     }
     Pos target = b;
     if (b_dir >= 0) {
         const Pos u = unit(b_dir);
-        // Approach b ALONG b_dir: stop one lead short of it.
-        target = {b.x - u.x * kLead, b.y - u.y * kLead};
+        target = {b.x + u.x * kLead, b.y + u.y * kLead};
     }
-    if (!eps_eq(from.x, target.x, 1e-9) && !eps_eq(from.y, target.y, 1e-9)) {
-        // One corner (an L): the leg out of `from` continues the
-        // committed direction (horizontal when free), the leg into
-        // `target` closes. The final approach leg target -> b already
-        // runs along b_dir, so one corner always suffices.
-        const bool start_horizontal =
-            a_dir == 0 || a_dir == 180 || a_dir < 0;
-        if (start_horizontal) {
-            full.push_back(Pos{target.x, from.y});
-        } else {
-            full.push_back(Pos{from.x, target.y});
-        }
-    }
-    if (b_dir >= 0) {
-        full.push_back(target);
-    }
-    full.push_back(b);
 
-    // Fold duplicates and collinear middles (these become the stored
-    // waypoints; noise would ride straight into the .csim).
-    std::vector<Pos> folded;
-    for (const Pos& p : full) {
-        if (!folded.empty() && eps_eq(folded.back().x, p.x, 1e-9) &&
-            eps_eq(folded.back().y, p.y, 1e-9)) {
+    const auto assemble = [&](const std::vector<Pos>& mid) {
+        std::vector<Pos> full;
+        full.push_back(a);
+        if (a_dir >= 0) {
+            full.push_back(from);
+        }
+        for (const Pos& m : mid) {
+            full.push_back(m);
+        }
+        if (b_dir >= 0) {
+            full.push_back(target);
+        }
+        full.push_back(b);
+        std::vector<Pos> dedup;  // drop zero-length legs
+        for (const Pos& p : full) {
+            if (dedup.empty() || heading(dedup.back(), p) != -1) {
+                dedup.push_back(p);
+            }
+        }
+        return dedup;
+    };
+
+    // Valid: every leg axis-aligned, no leg reverses the one before
+    // it, the first leg is a_dir and the last arrives against b_dir.
+    const auto valid = [&](const std::vector<Pos>& path) {
+        if (path.size() < 2u) {
+            return false;
+        }
+        int prev = -1;
+        for (std::size_t i = 0; i + 1 < path.size(); ++i) {
+            const int h = heading(path[i], path[i + 1]);
+            if (h < 0) {
+                return false;
+            }
+            if (i == 0 && a_dir >= 0 && h != ((a_dir % 360) + 360) % 360) {
+                return false;
+            }
+            if (prev >= 0 && (prev + 180) % 360 == h) {
+                return false;
+            }
+            prev = h;
+        }
+        return b_dir < 0 || prev == (((b_dir % 360) + 360) % 360 + 180) % 360;
+    };
+
+    // Candidate middles between `from` and `target`, simplest first:
+    // straight, the two Ls (the one continuing a_dir first), the
+    // midpoint Zs, then the U detours that go one lead past both ends
+    // (what a pin facing away from its partner needs).
+    const double mx = std::floor((from.x + target.x) * 0.5);
+    const double my = std::floor((from.y + target.y) * 0.5);
+    const double hi_x = std::max(from.x, target.x) + kLead;
+    const double lo_x = std::min(from.x, target.x) - kLead;
+    const double hi_y = std::max(from.y, target.y) + kLead;
+    const double lo_y = std::min(from.y, target.y) - kLead;
+    const std::vector<Pos> l_h{Pos{target.x, from.y}};
+    const std::vector<Pos> l_v{Pos{from.x, target.y}};
+    const bool vertical_first = a_dir == 90 || a_dir == 270;
+    std::vector<std::vector<Pos>> candidates;
+    candidates.push_back({});
+    candidates.push_back(vertical_first ? l_v : l_h);
+    candidates.push_back(vertical_first ? l_h : l_v);
+    candidates.push_back({Pos{mx, from.y}, Pos{mx, target.y}});
+    candidates.push_back({Pos{from.x, my}, Pos{target.x, my}});
+    for (const double ox : {hi_x, lo_x}) {
+        candidates.push_back({Pos{ox, from.y}, Pos{ox, target.y}});
+    }
+    for (const double oy : {hi_y, lo_y}) {
+        candidates.push_back({Pos{from.x, oy}, Pos{target.x, oy}});
+    }
+
+    std::vector<Pos> best;
+    std::size_t best_bends = 0;
+    double best_len = 0.0;
+    for (const std::vector<Pos>& mid : candidates) {
+        const std::vector<Pos> path = assemble(mid);
+        if (!valid(path)) {
             continue;
         }
-        if (folded.size() >= 2u) {
-            const Pos& p0 = folded[folded.size() - 2u];
-            const Pos& p1 = folded[folded.size() - 1u];
-            if ((eps_eq(p0.x, p1.x, 1e-9) && eps_eq(p1.x, p.x, 1e-9)) ||
-                (eps_eq(p0.y, p1.y, 1e-9) && eps_eq(p1.y, p.y, 1e-9))) {
-                folded.back() = p;  // collinear: extend the leg
-                continue;
+        // Score: corners first (collinear middles do not count), then
+        // length. Strict < keeps the earlier (simpler) candidate on ties.
+        std::size_t bends = 0;
+        double len = 0.0;
+        for (std::size_t i = 0; i + 1 < path.size(); ++i) {
+            len += std::fabs(path[i + 1].x - path[i].x) +
+                   std::fabs(path[i + 1].y - path[i].y);
+            if (i + 2 < path.size() &&
+                heading(path[i], path[i + 1]) !=
+                    heading(path[i + 1], path[i + 2])) {
+                ++bends;
             }
+        }
+        if (best.empty() || bends < best_bends ||
+            (bends == best_bends && len < best_len - 1e-9)) {
+            best = path;
+            best_bends = bends;
+            best_len = len;
+        }
+    }
+    if (best.empty()) {
+        // No clean shape (e.g. a == b): a bare a -> b, no waypoints.
+        return {};
+    }
+
+    // Fold collinear middles (these become the stored waypoints; noise
+    // would ride straight into the .csim).
+    std::vector<Pos> folded;
+    for (const Pos& p : best) {
+        if (folded.size() >= 2u &&
+            heading(folded[folded.size() - 2u], folded.back()) ==
+                heading(folded.back(), p)) {
+            folded.back() = p;
+            continue;
         }
         folded.push_back(p);
     }
@@ -225,8 +317,12 @@ std::optional<PinHit> Editor::hit_pin(Pos world, double radius) const {
             const double d = len(Pos{at.x - world.x, at.y - world.y});
             if (d <= best_d) {
                 best_d = d;
+                // The WORLD direction: the symbol's local pin dir pushed
+                // through the part's mirror/rotation, so a wire leaves a
+                // rotated or mirrored part the way its pin really faces.
                 best = PinHit{PinRef{p.id, static_cast<std::uint32_t>(i)}, at,
-                              sym->pins[i].dir};
+                              ws::circsim::pin_dir(
+                                  *sym, p, static_cast<std::uint32_t>(i))};
             }
         }
     }

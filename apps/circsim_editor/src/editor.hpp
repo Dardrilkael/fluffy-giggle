@@ -336,6 +336,11 @@ struct Editor {
     // same cadence every gui claim rides).
     bool text_field_focused = false;
 
+    // Call once per frame before resolve_chords to reset transient
+    // focus state. The Properties draw will set it back to true if a
+    // field is actually focused this frame.
+    void begin_frame() { text_field_focused = false; }
+
     // The camera + the caches.
     EditorView view;
     ProblemsCache problems;

@@ -46,7 +46,9 @@ fetched privately, which would duplicate a first-party capability.
 - `DrawPrim` (stage 2): line/poly/rect/circle/arc/dot/text, grid units,
   origin-relative, transformed by the part's mirror-then-rotation
   exactly like pins (`transform_pos` - the one shared transform, so the
-  picture and the pins can never disagree). `symbol_bounds` is the
+  picture and the pins can never disagree). `pin_dir` is the same
+  transform applied to a pin's `PinDef::dir` (world 0/90/180/270; the
+  editor's wire tool reads it, never the raw local dir). `symbol_bounds` is the
   conservative AABB (arcs bound by full circles, text by its anchor).
 - The built-in table (symbols.cpp, 12 keys) carries specs + draw for
   every symbol; `find_symbol` is the BUILT-IN-ONLY lookup.

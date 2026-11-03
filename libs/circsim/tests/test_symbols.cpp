@@ -22,6 +22,7 @@ using ws::circsim::OpSpec;
 using ws::circsim::ParamEmit;
 using ws::circsim::ParamSpec;
 using ws::circsim::Part;
+using ws::circsim::PinDef;
 using ws::circsim::PinRef;
 using ws::circsim::Pos;
 using ws::circsim::Schematic;
@@ -263,6 +264,52 @@ TEST_CASE("transform_pos mirrors before rotating") {
     p.pos = {0.0, 0.0};
     CHECK(ws::circsim::pin_pos(*two, p, 0) ==
           ws::circsim::transform_pos(p, Pos{two->pins[0].dx, two->pins[0].dy}));
+}
+
+TEST_CASE("pin_dir follows the part's mirror and rotation") {
+    const SymbolDef* r = ws::circsim::find_symbol("r");  // a: 180, b: 0
+    REQUIRE(r != nullptr);
+    Part p{};
+    CHECK(ws::circsim::pin_dir(*r, p, 0) == 180);
+    CHECK(ws::circsim::pin_dir(*r, p, 1) == 0);
+    p.rot = 90;
+    CHECK(ws::circsim::pin_dir(*r, p, 0) == 270);
+    CHECK(ws::circsim::pin_dir(*r, p, 1) == 90);
+    p.rot = 0;
+    p.mirror = true;  // x-flip: a now faces +x
+    CHECK(ws::circsim::pin_dir(*r, p, 0) == 0);
+    CHECK(ws::circsim::pin_dir(*r, p, 1) == 180);
+    p.rot = 90;       // mirror first, then rotate
+    CHECK(ws::circsim::pin_dir(*r, p, 0) == 90);
+    CHECK(ws::circsim::pin_dir(*r, p, 1) == 270);
+    CHECK(ws::circsim::pin_dir(*r, p, 9) == 0);  // out of range
+
+    // Every built-in, every orientation: stepping one unit from the pin
+    // along its world direction is the same as transforming the local
+    // step - the direction and the position can never disagree.
+    for (const SymbolDef& sym : ws::circsim::builtin_symbols()) {
+        for (const bool mirror : {false, true}) {
+            for (const int rot : {0, 90, 180, 270}) {
+                Part q{};
+                q.pos = {5.0, -7.0};
+                q.rot = rot;
+                q.mirror = mirror;
+                for (std::uint32_t i = 0; i < sym.pins.size(); ++i) {
+                    const PinDef& pin = sym.pins[i];
+                    const int d = ws::circsim::pin_dir(sym, q, i);
+                    const Pos at = ws::circsim::pin_pos(sym, q, i);
+                    const Pos step{d == 0 ? 1.0 : d == 180 ? -1.0 : 0.0,
+                                   d == 90 ? 1.0 : d == 270 ? -1.0 : 0.0};
+                    const Pos lu{pin.dir == 0 ? 1.0 : pin.dir == 180 ? -1.0 : 0.0,
+                                 pin.dir == 90 ? 1.0 : pin.dir == 270 ? -1.0 : 0.0};
+                    const Pos want = ws::circsim::transform_pos(
+                        q, Pos{pin.dx + lu.x, pin.dy + lu.y});
+                    CHECK(at.x + step.x == want.x);
+                    CHECK(at.y + step.y == want.y);
+                }
+            }
+        }
+    }
 }
 
 // --- the library object ---------------------------------------------------------

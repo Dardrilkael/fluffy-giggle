@@ -978,6 +978,7 @@ class CircsimApp final : public ws::ui::App {
     // --- the chord loop -------------------------------------------------------------
 
     void resolve_chords(const ws::input::InputFrame& frame) {
+        editor_.begin_frame();
         if (shell_->palette_open) {
             return;  // the palette owns the keys while it is open
         }

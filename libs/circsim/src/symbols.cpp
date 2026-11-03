@@ -62,6 +62,32 @@ Pos pin_pos(const SymbolDef& s, const Part& p, std::uint32_t pin_index) {
     return transform_pos(p, Pos{s.pins[pin_index].dx, s.pins[pin_index].dy});
 }
 
+int pin_dir(const SymbolDef& s, const Part& p, std::uint32_t pin_index) {
+    if (pin_index >= s.pins.size()) {
+        return 0;
+    }
+    // Local direction -> unit vector (nearest quarter turn), carried
+    // through the part's transform at the origin, back to a quarter turn.
+    const int d = ((s.pins[pin_index].dir % 360) + 360) % 360;
+    Pos u{1.0, 0.0};
+    switch (((d + 45) / 90) % 4) {
+        case 1: u = Pos{0.0, 1.0}; break;
+        case 2: u = Pos{-1.0, 0.0}; break;
+        case 3: u = Pos{0.0, -1.0}; break;
+        default: break;
+    }
+    Part at_origin = p;
+    at_origin.pos = Pos{0.0, 0.0};
+    const Pos t = transform_pos(at_origin, u);
+    if (t.x > 0.5) {
+        return 0;
+    }
+    if (t.y > 0.5) {
+        return 90;
+    }
+    return t.x < -0.5 ? 180 : 270;
+}
+
 Bounds symbol_bounds(const SymbolDef& s) {
     Bounds b{0.0, 0.0, 0.0, 0.0};
     bool first = true;
