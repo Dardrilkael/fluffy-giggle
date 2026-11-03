@@ -158,8 +158,8 @@ struct Bench {
         in.mouse_down[0] = m.left_down;
         in.mouse_pressed[0] = m.left_pressed;
         in.mouse_released[0] = m.left_released;
-        in.mouse_down[1] = m.middle_down;
-        in.mouse_pressed[2] = m.right_pressed;
+        in.mouse_down[editor::kMouseMiddle] = m.middle_down;
+        in.mouse_pressed[editor::kMouseRight] = m.right_pressed;
         in.scroll_dy = m.scroll_dy;
         in.dt_seconds = m.dt;
         gui.begin_frame(in);

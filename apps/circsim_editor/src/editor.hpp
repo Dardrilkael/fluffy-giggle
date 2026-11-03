@@ -88,6 +88,15 @@ inline bool eps_eq(double a, double b, double eps) {
     return std::fabs(a - b) <= eps;
 }
 
+// The GLFW mouse button indices the panels read (libs/input passes
+// the platform's numbers straight through): 0 left, 1 right, 2
+// middle. The editor's panels once read 1 and 2 with the names
+// swapped - the pan rode the right button and the right-click cancel
+// the middle one; these names are the GLFW truth.
+inline constexpr int kMouseLeft = 0;
+inline constexpr int kMouseRight = 1;
+inline constexpr int kMouseMiddle = 2;
+
 // --- the camera -------------------------------------------------------------
 
 struct EditorView {

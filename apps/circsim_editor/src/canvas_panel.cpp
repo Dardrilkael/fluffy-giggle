@@ -256,7 +256,8 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
     // mid-pan no longer drops the pan (the drags' own rule). An open
     // modal veil disarms.
     const bool pan_modifiers =
-        in.mouse_down[1] != 0 || (space_down && in.mouse_down[0] != 0);
+        in.mouse_down[kMouseMiddle] != 0 ||
+        (space_down && in.mouse_down[kMouseLeft] != 0);
     if (pan_modifiers && gui.claims_open() &&
         (ed.pan.armed || inside)) {
         if (!ed.pan.armed) {
@@ -271,7 +272,7 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
 
     // A drag in flight outranks every tool arming.
     if (ed.drag.kind != Editor::Drag::Kind::None) {
-        if (in.mouse_down[0] != 0) {
+        if (in.mouse_down[kMouseLeft] != 0) {
             // Live move: direct writes, no undo - the command lands
             // at release with the from/to pair (push IS the edit,
             // and apply() re-landing the same position is exact).
@@ -341,7 +342,7 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
         return;
     }
 
-    if (in.mouse_pressed[0] != 0) {
+    if (in.mouse_pressed[kMouseLeft] != 0) {
         switch (ed.tool) {
             case Tool::Select: {
                 const double label_pick =
@@ -521,7 +522,7 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
     // Right click: cancel the in-flight draft first (a stray click
     // used to kill the draft AND the tool in one go), then disarm the
     // tool, then clear the selection.
-    if (in.mouse_pressed[2] != 0) {
+    if (in.mouse_pressed[kMouseRight] != 0) {
         if (ed.wire_draft.active) {
             ed.wire_draft = Editor::WireDraft{};
         } else if (ed.tool != Tool::Select) {

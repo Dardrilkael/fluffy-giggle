@@ -631,10 +631,10 @@ TEST_CASE("the wire tool: the first right click cancels only the draft") {
     b.ed.tool = editor::Tool::Wire;
     b.click_at({1.0, 1.0});
     CHECK(b.ed.wire_draft.active);
-    b.click_at({9.0, 9.0}, 2);
+    b.click_at({9.0, 9.0}, editor::kMouseRight);
     CHECK_FALSE(b.ed.wire_draft.active);
     CHECK(b.ed.tool == editor::Tool::Wire);  // the tool survives
-    b.click_at({9.0, 9.0}, 2);
+    b.click_at({9.0, 9.0}, editor::kMouseRight);
     CHECK(b.ed.tool == editor::Tool::Select);  // the second disarms
 }
 

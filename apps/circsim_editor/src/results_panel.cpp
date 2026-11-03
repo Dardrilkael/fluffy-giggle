@@ -312,7 +312,8 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
 
     // The right press cancels the in-flight gesture, restoring the
     // press-time view exactly - both spines included (stage 6).
-    if (g.kind != PlotGesture::Kind::None && in.mouse_pressed[2] != 0) {
+    if (g.kind != PlotGesture::Kind::None &&
+        in.mouse_pressed[kMouseRight] != 0) {
         cache.view.active = g.was_active;
         if (g.was_active) {
             cache.view.x_lo = g.x_lo;
@@ -370,7 +371,8 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
     // on screen.
     const bool space_down = in.key_down[ws::input::keys::kSpace] != 0;
     const bool pan_held =
-        in.mouse_down[1] != 0 || (space_down && in.mouse_down[0] != 0);
+        in.mouse_down[kMouseMiddle] != 0 ||
+        (space_down && in.mouse_down[kMouseLeft] != 0);
     if (pan_held && (in_frame || g.kind == PlotGesture::Kind::Pan)) {
         if (g.kind != PlotGesture::Kind::Pan) {
             g.kind = PlotGesture::Kind::Pan;
@@ -427,7 +429,7 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
     if (g.kind == PlotGesture::Kind::Band ||
         g.kind == PlotGesture::Kind::ZoomX ||
         g.kind == PlotGesture::Kind::ZoomY) {
-        if (in.mouse_down[0] == 0) {
+        if (in.mouse_down[kMouseLeft] == 0) {
             const bool was_band = g.kind == PlotGesture::Kind::Band;
             bool committed = false;
             if (was_band && std::fabs(in.mouse_x - g.from_x) >= 4.0f &&
@@ -516,7 +518,7 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
     // view; the first click starts the band (frame) or an axis zoom
     // (strips - the left one owns the volt window, the right one the
     // amp window, stage 6).
-    if (in.mouse_pressed[0] != 0 && over) {
+    if (in.mouse_pressed[kMouseLeft] != 0 && over) {
         if (in_frame && g.click_clock < 0.35f &&
             std::fabs(in.mouse_x - g.click_x) < 5.0f &&
             std::fabs(in.mouse_y - g.click_y) < 5.0f) {
