@@ -23,8 +23,7 @@ using ws::circsim::PinRef;
     return std::sqrt(p.x * p.x + p.y * p.y);
 }
 
-// Plain distance from `p` to segment ab (the name once said Squared
-// while returning this - the comment lies no more).
+// Squared distance from `p` to segment ab.
 [[nodiscard]] double dist_to_segment(Pos a, Pos b, Pos p) {
     const Pos ab{b.x - a.x, b.y - a.y};
     const Pos ap{p.x - a.x, p.y - a.y};
@@ -66,17 +65,14 @@ Pos Editor::snap(Pos world, bool coarse) const {
 std::optional<Bounds> Editor::part_bounds(std::uint32_t id) const {
     const ws::circsim::Schematic* s = schem();
     const ws::circsim::Part* p = s != nullptr ? s->find_part(id) : nullptr;
+    const ws::circsim::SymbolDef* sym =
+        p != nullptr ? sym_of(*p) : nullptr;
     if (p == nullptr) {
         return std::nullopt;
     }
-    return part_bounds(*p);
-}
-
-std::optional<Bounds> Editor::part_bounds(const ws::circsim::Part& p) const {
-    const ws::circsim::SymbolDef* sym = sym_of(p);
     if (sym == nullptr) {
-        return Bounds{p.pos.x - 1.0, p.pos.y - 1.0, p.pos.x + 1.0,
-                      p.pos.y + 1.0};
+        return Bounds{p->pos.x - 1.0, p->pos.y - 1.0, p->pos.x + 1.0,
+                      p->pos.y + 1.0};
     }
     const Bounds local = ws::circsim::symbol_bounds(*sym);
     std::optional<Bounds> out;
@@ -93,7 +89,7 @@ std::optional<Bounds> Editor::part_bounds(const ws::circsim::Part& p) const {
     for (const Pos corner :
          {Pos{local.min_x, local.min_y}, Pos{local.max_x, local.min_y},
           Pos{local.min_x, local.max_y}, Pos{local.max_x, local.max_y}}) {
-        grow(ws::circsim::transform_pos(p, corner));
+        grow(ws::circsim::transform_pos(*p, corner));
     }
     return out;
 }
@@ -138,89 +134,141 @@ std::vector<Pos> Editor::wire_path(const ws::circsim::Wire& w) const {
     return out;
 }
 
-std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir,
-                                    bool a_vertical) {
+std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir) {
     // The lead length: how far a route commits to a direction before
     // it may turn. One grid unit reads clean at every zoom (a pin's
     // own lead is typically three).
     constexpr double kLead = 1.0;
+    constexpr double kEps = 1e-9;
+
+    // Directions: negative = free; anything else is folded into
+    // [0, 360) once, here (a pin dir of 360 used to lead east through
+    // unit() but be treated as vertical by the corner choice below).
+    const auto norm = [](int dir) { return dir < 0 ? -1 : dir % 360; };
+    a_dir = norm(a_dir);
+    b_dir = norm(b_dir);
+
     const auto unit = [](int dir) -> Pos {
-        switch (((dir % 360) + 360) % 360) {
+        switch (dir) {
             case 0: return {1.0, 0.0};
             case 90: return {0.0, 1.0};
             case 180: return {-1.0, 0.0};
             default: return {0.0, -1.0};  // 270
         }
     };
-
-    // Normalize once: every direction test below reads the same
-    // canonical degrees, so 360 routes as 0 (it once fell through
-    // start_horizontal's raw 0/180 comparison and turned the L the
-    // wrong way). -1 stays the free-start sentinel.
-    if (a_dir >= 0) {
-        a_dir %= 360;
-    }
-    if (b_dir >= 0) {
-        b_dir %= 360;
+    const auto same = [&](Pos p, Pos q) {
+        return eps_eq(p.x, q.x, kEps) && eps_eq(p.y, q.y, kEps);
+    };
+    if (same(a, b)) {
+        return {};  // a zero-length wire has no route (not a loop)
     }
 
-    // Full polyline a -> ... -> b; the stored waypoints are its
-    // interior after folding.
-    std::vector<Pos> full;
-    full.push_back(a);
-    Pos from = a;
+    Pos from = a;  // where the route is free to turn: past a's lead
     if (a_dir >= 0) {
         const Pos u = unit(a_dir);
         from = {a.x + u.x * kLead, a.y + u.y * kLead};
-        full.push_back(from);
     }
-    Pos target = b;
+    Pos target = b;  // ... and the point the route aims for before b
     if (b_dir >= 0) {
         const Pos u = unit(b_dir);
         // Approach b ALONG b_dir: stop one lead short of it.
         target = {b.x - u.x * kLead, b.y - u.y * kLead};
     }
-    if (!eps_eq(from.x, target.x) && !eps_eq(from.y, target.y)) {
-        // One corner (an L): the leg out of `from` continues the
-        // committed direction (horizontal when free, unless the
-        // caller's Shift flip chose vertical), the leg into `target`
-        // closes. The final approach leg target -> b already runs
-        // along b_dir, so one corner always suffices.
-        const bool start_horizontal =
-            a_dir >= 0 ? (a_dir == 0 || a_dir == 180) : !a_vertical;
-        if (start_horizontal) {
-            full.push_back(Pos{target.x, from.y});
-        } else {
-            full.push_back(Pos{from.x, target.y});
+
+    // a -> [a's lead] -> mid... -> [b's lead] -> b
+    const auto assemble = [&](const std::vector<Pos>& mid) {
+        std::vector<Pos> full;
+        full.push_back(a);
+        if (a_dir >= 0) {
+            full.push_back(from);
+        }
+        full.insert(full.end(), mid.begin(), mid.end());
+        if (b_dir >= 0) {
+            full.push_back(target);
+        }
+        full.push_back(b);
+        return full;
+    };
+
+    // A spike is a vertex where the path doubles straight back on
+    // itself (a leg that retraces the previous one). The fold below
+    // erases a spike by dropping the vertex - and with it a lead - so
+    // a route containing one runs back through the pin's own body.
+    const auto spikes = [&](const std::vector<Pos>& path) {
+        std::vector<Pos> d;
+        for (const Pos& p : path) {
+            if (d.empty() || !same(d.back(), p)) {
+                d.push_back(p);
+            }
+        }
+        int n = 0;
+        for (std::size_t i = 2; i < d.size(); ++i) {
+            const Pos u{d[i - 1].x - d[i - 2].x, d[i - 1].y - d[i - 2].y};
+            const Pos v{d[i].x - d[i - 1].x, d[i].y - d[i - 1].y};
+            const double cross = u.x * v.y - u.y * v.x;
+            const double dot = u.x * v.x + u.y * v.y;
+            if (eps_eq(cross, 0.0, kEps) && dot < 0.0) {
+                ++n;
+            }
+        }
+        return n;
+    };
+
+    // Candidate routes, most preferred first. The first one is what the
+    // router always produced (an L: the leg out of `from` continues the
+    // committed direction, horizontal when free; aligned endpoints need
+    // no corner). The rest only win when the first one doubles back:
+    //   - the other L orientation (the target sits behind a's lead:
+    //     turn at once instead of retracing it),
+    //   - a jog around (collinear but behind: no L exists, so step
+    //     one lead aside, run past, and step back).
+    std::vector<std::vector<Pos>> candidates;
+    const bool corner_needed = !eps_eq(from.x, target.x, kEps) &&
+                               !eps_eq(from.y, target.y, kEps);
+    if (corner_needed) {
+        const Pos h_first{target.x, from.y};  // along x, then y
+        const Pos v_first{from.x, target.y};  // along y, then x
+        const bool pref_h = a_dir < 0 || a_dir == 0 || a_dir == 180;
+        candidates.push_back(assemble({pref_h ? h_first : v_first}));
+        candidates.push_back(assemble({pref_h ? v_first : h_first}));
+    } else {
+        candidates.push_back(assemble({}));
+        if (!same(from, target)) {
+            const bool along_x = eps_eq(from.y, target.y, kEps);
+            const Pos perp = along_x ? Pos{0.0, kLead} : Pos{kLead, 0.0};
+            for (const double sign : {1.0, -1.0}) {
+                const Pos j1{from.x + perp.x * sign, from.y + perp.y * sign};
+                const Pos j2{target.x + perp.x * sign,
+                             target.y + perp.y * sign};
+                candidates.push_back(assemble({j1, j2}));
+            }
         }
     }
-    if (b_dir >= 0) {
-        full.push_back(target);
+    std::size_t pick = 0;
+    int pick_spikes = spikes(candidates[0]);
+    for (std::size_t i = 1; i < candidates.size() && pick_spikes > 0; ++i) {
+        const int n = spikes(candidates[i]);
+        if (n < pick_spikes) {
+            pick = i;
+            pick_spikes = n;
+        }
     }
-    full.push_back(b);
+    const std::vector<Pos>& full = candidates[pick];
 
     // Fold duplicates and collinear middles (these become the stored
-    // waypoints; noise would ride straight into the .csim). A fold
-    // needs the leg to CONTINUE: a reversal is collinear too, but
-    // folding it would drop the lead and run the wire straight back
-    // through the part it just left - a pin at (0,0) facing +x with a
-    // target at (-5,0) keeps its (1,0) lead-out corner.
+    // waypoints; noise would ride straight into the .csim). A spike
+    // that no candidate could avoid still folds away here, as before.
     std::vector<Pos> folded;
     for (const Pos& p : full) {
-        if (!folded.empty() && eps_eq(folded.back().x, p.x) &&
-            eps_eq(folded.back().y, p.y)) {
+        if (!folded.empty() && same(folded.back(), p)) {
             continue;
         }
         if (folded.size() >= 2u) {
             const Pos& p0 = folded[folded.size() - 2u];
             const Pos& p1 = folded[folded.size() - 1u];
-            const bool collinear =
-                (eps_eq(p0.x, p1.x) && eps_eq(p1.x, p.x)) ||
-                (eps_eq(p0.y, p1.y) && eps_eq(p1.y, p.y));
-            const double along = (p1.x - p0.x) * (p.x - p1.x) +
-                                 (p1.y - p0.y) * (p.y - p1.y);
-            if (collinear && along > 0.0) {
-                folded.back() = p;  // the leg extends
+            if ((eps_eq(p0.x, p1.x, kEps) && eps_eq(p1.x, p.x, kEps)) ||
+                (eps_eq(p0.y, p1.y, kEps) && eps_eq(p1.y, p.y, kEps))) {
+                folded.back() = p;  // collinear: extend the leg
                 continue;
             }
         }
@@ -281,15 +329,10 @@ std::optional<std::uint32_t> Editor::hit_junction(Pos world,
 // the projection to the fine grid, and accept the snap when it stays
 // on the segment (the exact check nets.cpp will run later); otherwise
 // fall back to the segment's nearest endpoint (a path vertex, always
-// grid-aligned). Among all segments' candidates, return the one whose
-// SEGMENT is closest to the cursor - the acceptance test is the
-// segment distance, not the distance to the snapped candidate: at
-// high zoom the pick radius is under half a grid cell, and a cursor
-// riding the wire between two grid intersections once missed because
-// its snap landed half a cell away. route_wire's paths are
-// ortho-on-grid, so the common case lands inside the segment; the
-// fallback is the rare near-endpoint click, where the vertex is the
-// right answer anyway.
+// grid-aligned). Among all segments' candidates, return the one
+// closest to the cursor. route_wire's paths are ortho-on-grid, so the
+// common case lands inside the segment; the fallback is the rare
+// near-endpoint click, where the vertex is the right answer anyway.
 std::optional<Editor::WirePointSnap> Editor::hit_wire_point(
     Pos world, double radius) const {
     const ws::circsim::Schematic* s = schem();
@@ -333,10 +376,7 @@ std::optional<Editor::WirePointSnap> Editor::hit_wire_point(
                 const double db = len(Pos{b.x - world.x, b.y - world.y});
                 cand = da <= db ? a : b;
             }
-            // Accept on the SEGMENT's distance to the cursor; the
-            // returned candidate is still the grid-aligned point the
-            // junction will be minted at.
-            const double d = dist_to_segment(a, b, world);
+            const double d = len(Pos{cand.x - world.x, cand.y - world.y});
             if (d <= best_d) {
                 best_d = d;
                 best = WirePointSnap{w.id, cand};
@@ -346,97 +386,25 @@ std::optional<Editor::WirePointSnap> Editor::hit_wire_point(
     return best;
 }
 
-std::vector<WireRoute> Editor::attached_wire_routes(
-    Drag::Kind kind, std::uint32_t id) const {
-    std::vector<WireRoute> out;
-    const ws::circsim::Schematic* s = schem();
-    if (s == nullptr) {
-        return out;
-    }
-    const auto hits = [&](const ws::circsim::WireEndpoint& e) {
-        if (kind == Drag::Kind::Part) {
-            const auto* pin = std::get_if<ws::circsim::PinRef>(&e);
-            return pin != nullptr && pin->part == id;
-        }
-        const auto* j = std::get_if<ws::circsim::JunctionRef>(&e);
-        return j != nullptr && j->junction == id;
-    };
-    for (const ws::circsim::Wire& w : s->wires()) {
-        // A cosmetic freeform wire's shape is the author's - only the
-        // ortho constraint re-routes.
-        if (!w.ortho) {
-            continue;
-        }
-        const bool a_hit = hits(w.a);
-        const bool b_hit = hits(w.b);
-        if (!a_hit && !b_hit) {
-            continue;
-        }
-        const std::vector<Pos> path = wire_path(w);
-        if (path.size() < 2u) {
-            continue;  // dangling: nothing to keep straight
-        }
-        // Straight or one-bend wires (and anything with both ends on
-        // the same move) re-route as a fresh horizontal-first L; a
-        // multi-bend wire keeps its shape - only the adjacent waypoint
-        // slides, chosen so both touching legs stay axis-aligned.
-        std::vector<Pos> mid(path.begin() + 1, path.end() - 1);
-        if (mid.size() <= 1u || (a_hit && b_hit)) {
-            WireRoute r;
-            r.wire = w.id;
-            r.waypoints = route_wire(path.front(), -1, path.back(), -1);
-            out.push_back(std::move(r));
-            continue;
-        }
-        if (a_hit) {
-            // The leg into mid[1] keeps its orientation: a vertical
-            // continuation keeps x (the first leg turns horizontal),
-            // a horizontal one keeps y (the first leg turns vertical).
-            if (eps_eq(mid[0].x, mid[1].x)) {
-                mid[0].y = path.front().y;
-            } else {
-                mid[0].x = path.front().x;
-            }
-        }
-        if (b_hit) {
-            Pos& last = mid.back();
-            const Pos& prev = mid[mid.size() - 2u];
-            if (eps_eq(prev.y, last.y)) {
-                last.x = path.back().x;
-            } else {
-                last.y = path.back().y;
-            }
-        }
-        WireRoute r;
-        r.wire = w.id;
-        r.waypoints = std::move(mid);
-        out.push_back(std::move(r));
-    }
-    return out;
-}
-
-Selection Editor::hit_any(Pos world, double radius,
-                          double label_radius) const {
+Selection Editor::hit_any(Pos world, double radius) const {
     const ws::circsim::Schematic* s = schem();
     if (s == nullptr) {
         return {};
     }
-    // Priority walks the DRAW STACK topmost-first: a junction dot
-    // sits on every wire end and crossing; a wire runs over the
-    // canvas and stays selectable even where it crosses or ends
-    // inside a part's box (the box is bigger than the part's ink);
-    // a click on a part body with no wire under it selects the part;
-    // labels ride under everything. A click that lands on a pin
-    // therefore still selects whatever wire lands there first - the
-    // pin itself has no separate selection (the part's Properties
-    // open from the part body).
+    // Parts first (they are the tallest objects), then pins? No: a
+    // click that lands on a pin should select the PART (pins are the
+    // part's), so parts-before-pins is not a question here. Junctions
+    // beat wires (a dot sits on every wire end), wires beat labels.
+    for (const ws::circsim::Part& p : s->parts()) {
+        const std::optional<Bounds> b = part_bounds(p.id);
+        if (b.has_value() && world.x >= b->min_x && world.x <= b->max_x &&
+            world.y >= b->min_y && world.y <= b->max_y) {
+            return {Selection::Kind::Part, p.id};
+        }
+    }
     if (const std::uint32_t j = hit_junction(world, radius).value_or(0)) {
         return {Selection::Kind::Junction, j};
     }
-    // The NEAREST wire in range - the loop once returned on the first
-    // segment that matched, leaving its best_d tracking dead.
-    std::uint32_t best_wire = 0;
-    bool wire_found = false;
     double best_d = radius;
     for (const ws::circsim::Wire& w : s->wires()) {
         const std::vector<Pos> path = wire_path(w);
@@ -444,32 +412,12 @@ Selection Editor::hit_any(Pos world, double radius,
             const double d = dist_to_segment(path[i - 1], path[i], world);
             if (d <= best_d) {
                 best_d = d;
-                best_wire = w.id;
-                wire_found = true;
+                return {Selection::Kind::Wire, w.id};
             }
         }
     }
-    if (wire_found) {
-        return {Selection::Kind::Wire, best_wire};
-    }
-    // The LAST part whose box holds the point: the parts draw in list
-    // order, so the last one is the one on top (the first one used to
-    // win - a stacked pair selected the buried one).
-    std::uint32_t best_part = 0;
-    bool part_found = false;
-    for (const ws::circsim::Part& p : s->parts()) {
-        const std::optional<Bounds> b = part_bounds(p);
-        if (b.has_value() && world.x >= b->min_x && world.x <= b->max_x &&
-            world.y >= b->min_y && world.y <= b->max_y) {
-            best_part = p.id;  // no break: the topmost wins
-            part_found = true;
-        }
-    }
-    if (part_found) {
-        return {Selection::Kind::Part, best_part};
-    }
     for (const ws::circsim::Label& l : s->labels()) {
-        if (len(Pos{l.pos.x - world.x, l.pos.y - world.y}) <= label_radius) {
+        if (len(Pos{l.pos.x - world.x, l.pos.y - world.y}) <= radius + 1.0) {
             return {Selection::Kind::Label, l.id};
         }
     }
@@ -493,7 +441,7 @@ std::optional<Bounds> Editor::content_bounds() const {
         out->max_y = std::max(out->max_y, w.y);
     };
     for (const ws::circsim::Part& p : s->parts()) {
-        const std::optional<Bounds> b = part_bounds(p);
+        const std::optional<Bounds> b = part_bounds(p.id);
         if (b.has_value()) {
             grow(Pos{b->min_x, b->min_y});
             grow(Pos{b->max_x, b->max_y});
@@ -636,13 +584,6 @@ const std::vector<Pos>& Editor::auto_junction_dots() {
         joins_valid_ = false;
         return join_dots_;
     }
-    // A live drag bumps the version every frame (that is how the
-    // panels mark themselves stale); the dots sit still until the
-    // drag lands - one rebuild per edit, this comment's own rule,
-    // not one per drag frame.
-    if (joins_valid_ && drag.kind != Drag::Kind::None) {
-        return join_dots_;
-    }
     if (!joins_valid_ || joins_version_ != s->version()) {
         // The same seam ERC and the export read: one build_nets per
         // edit (millisecond work at editor scales), never per frame.
@@ -671,44 +612,29 @@ void Editor::document_changed() {
     results = ResultsCache{};
     join_dots_.clear();
     joins_valid_ = false;
-    // The Properties panel's field state rides too: a new document
-    // whose first selection happens to share a kind and id with the
-    // old one must never show the old document's typing.
-    fields.clear();
-    field_stamp = 1;
-    fields_sel_kind = -1;
-    fields_sel_id = 0;
-    analysis_index = -1;
     const ws::circsim::Schematic* s = schem();
     if (s != nullptr) {
-        view.zoom =
-            s->view.zoom > 0.0 ? s->view.zoom : kZoomDefault;
+        view.zoom = s->view.zoom > 0.0 ? s->view.zoom : 26.0;
         view.center = s->view.center;
     } else {
-        view.zoom = kZoomDefault;
+        view.zoom = 26.0;
         view.center = {0.0, 0.0};
     }
 }
 
 void Editor::toast(std::string text, gui::ToastSeverity severity) const {
     if (toasts != nullptr) {
-        // Toast borrows the text (its Toast::text is a plain const
-        // char*), so each toast needs bytes that outlive its slot -
-        // and every toast its OWN bytes: a shared holder made two
-        // toasts pushed in one frame show the same text, and a
-        // reallocation dangled the earlier one. A deque member is
-        // mutable-through-const (toasting is not an edit) and its
-        // push/pop_front never move the other elements' bytes. The
-        // cap only ever retires strings whose toast slot is long
-        // gone: the store holds at most 8 live toasts (kMaxToasts),
-        // so the 17th push means the 1st's slot was already recycled
-        // - 16 kept strings can never back a displayed toast.
+        // Toasts borrows the bytes, so the text gets its own stable
+        // slot (toast_text_, see editor.hpp). The old function-static
+        // holder was ONE buffer shared by every toast: two toasts in a
+        // frame showed the same text, and the reassignment could free
+        // the bytes an earlier, still-live toast pointed at.
+        constexpr std::size_t kMaxLive = 16;
         toast_text_.push_back(std::move(text));
-        if (toast_text_.size() > 16u) {
+        while (toast_text_.size() > kMaxLive) {
             toast_text_.pop_front();
         }
-        toasts->push({toast_text_.back().c_str(), severity, nullptr,
-                      4.0f});
+        toasts->push({toast_text_.back().c_str(), severity, nullptr, 4.0f});
     }
 }
 

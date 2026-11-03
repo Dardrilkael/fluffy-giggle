@@ -184,7 +184,8 @@ SymbolSvg draw_one(const ws::circsim::SymbolDef& sym) {
 bool write_file(const fs::path& path, const std::string& text) {
     std::ofstream out(path, std::ios::binary);
     if (!out) {
-        std::fprintf(stderr, "error: cannot write '%s'\n", path.c_str());
+        // On Windows path::value_type is wchar_t; use %ls for wide strings
+        std::fprintf(stderr, "error: cannot write '%ls'\n", path.c_str());
         return false;
     }
     out << text;

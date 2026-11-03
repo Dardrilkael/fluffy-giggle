@@ -78,6 +78,13 @@ struct PointerView {
     bool released = false;
 };
 
+// GLFW mouse button codes the gui and apps give meaning to:
+namespace mouse {
+inline constexpr int kLeft = 0;      // GLFW_MOUSE_BUTTON_LEFT
+inline constexpr int kRight = 1;     // GLFW_MOUSE_BUTTON_RIGHT
+inline constexpr int kMiddle = 2;    // GLFW_MOUSE_BUTTON_MIDDLE
+}  // namespace mouse
+
 // The GLFW key codes the gui itself gives meaning to: Tab cycles focus,
 // Shift+Tab cycles back, Enter and Space activate the focused widget
 // (button, checkbox, tab), the horizontal arrows step the focused

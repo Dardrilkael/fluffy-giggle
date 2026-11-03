@@ -25,23 +25,19 @@
 //                snapped cursor; R/M rotate/mirror the ghost; each
 //                click places one part (the tool stays armed); Esc or
 //                a right click disarms.
-//   Wire tool    click a pin, junction, wire body or free grid point
-//                starts a draft (free and wire-body starts mint their
-//                junction at commit - a cancel leaves nothing behind;
-//                Shift at the start click flips the L's first leg to
-//                vertical); the preview follows the cursor with the
-//                ortho route (the first leg honors the pin's dir, the
-//                last approaches the target's); every commit CHAINS -
-//                the next draft starts at the landing, so a
-//                multi-segment net is one run of clicks; the first
-//                right click (or Esc) cancels the draft, the second
-//                disarms.
+//   Wire tool    click a pin or junction starts a draft; the preview
+//                follows the cursor with the ortho route (the first
+//                leg honors the pin's dir, the last approaches the
+//                target's); clicking a pin/junction commits, clicking
+//                free space commits onto a fresh junction; every
+//                commit disarms (W re-arms cheaply).
 //   Label tool   armed with the Palette's name field; each click
 //                places one label; stays armed.
 // Wheel zooms toward the cursor; middle-drag and space+left-drag pan.
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cmath>
 #include <deque>
@@ -83,32 +79,15 @@ namespace canvas = ws::ui::canvas;
 using ws::circsim::Bounds;
 using ws::circsim::Pos;
 
-// Epsilon compare on world coordinates (grid units): a position is
-// "the same" far below any drawn pixel.
-inline constexpr double kEps = 1e-9;
-inline bool eps_eq(double a, double b, double eps = kEps) {
+// Epsilon compare on world coordinates (grid units).
+inline bool eps_eq(double a, double b, double eps) {
     return std::fabs(a - b) <= eps;
 }
-
-// The camera's clamps and default (zoom_at and fit clamp into the
-// range; a fresh Editor and document_changed adopt the default).
-inline constexpr double kZoomMin = 3.0;
-inline constexpr double kZoomMax = 400.0;
-inline constexpr double kZoomDefault = 26.0;
-
-// The GLFW mouse button indices the panels read (libs/input passes
-// the platform's numbers straight through): 0 left, 1 right, 2
-// middle. The editor's panels once read 1 and 2 with the names
-// swapped - the pan rode the right button and the right-click cancel
-// the middle one; these names are the GLFW truth.
-inline constexpr int kMouseLeft = 0;
-inline constexpr int kMouseRight = 1;
-inline constexpr int kMouseMiddle = 2;
 
 // --- the camera -------------------------------------------------------------
 
 struct EditorView {
-    double zoom = kZoomDefault;  // screen pixels per grid unit
+    double zoom = 26.0;   // screen pixels per grid unit
     Pos center{0.0, 0.0};  // the world point at the viewport's center
 
     // The viewport, set each frame before use (screen px, the panel
@@ -137,7 +116,12 @@ struct EditorView {
         }
         const Pos under = s2w(anchor);
         zoom *= factor;
-        zoom = std::clamp(zoom, kZoomMin, kZoomMax);
+        if (zoom < 3.0) {
+            zoom = 3.0;
+        }
+        if (zoom > 400.0) {
+            zoom = 400.0;
+        }
         // Keep `under` at the anchor: center = under + (center-anchor
         // in world units at the new zoom).
         const double dx = (vx + vw * 0.5f - anchor.x) / zoom;
@@ -165,7 +149,12 @@ struct EditorView {
         }
         zoom = std::min(static_cast<double>(vw) / w,
                         static_cast<double>(vh) / h);
-        zoom = std::clamp(zoom, kZoomMin, kZoomMax);
+        if (zoom < 3.0) {
+            zoom = 3.0;
+        }
+        if (zoom > 400.0) {
+            zoom = 400.0;
+        }
     }
 };
 
@@ -302,10 +291,13 @@ struct Editor {
     ws::ui::r2d::Font* font = nullptr;          // the UI face
     ws::ui::r2d::Font* font_mono = nullptr;     // the netlist panel's face
     gui::Toasts* toasts = nullptr;              // the shell's store
-    // The toast texts' stable home (toast() borrows from it; mutable
-    // through const - toasting is not an edit).
-    mutable std::deque<std::string> toast_text_;
     std::function<void(std::string)> set_status;
+    // Backing store for toast text. Toasts BORROWS the bytes, so every
+    // toast needs a string of its own whose address stays put until the
+    // toast expires (a deque never moves its elements on push/pop at
+    // the ends). Bounded: the oldest entries are long expired by the
+    // time the cap recycles them (4s toasts, 16 slots).
+    mutable std::deque<std::string> toast_text_;
     // The Results panel's export button: true = JSON, false = CSV.
     // The app installs it (the path policy - derive from the
     // document, write through the fs seam - is the app's to own).
@@ -345,19 +337,13 @@ struct Editor {
         ws::circsim::WireEndpoint a{};
         Pos a_pos{0.0, 0.0};
         int a_dir = 0;  // the start pin's direction, -1 when free
-        // A start with no entity behind it (a wire's body - stage
-        // 18b - or free space): the start endpoint is not a pin or
-        // junction, so the commit mints a junction at `a_pos` and
-        // binds the new wire's `a` to it. Deferred past a cancel, so
-        // abandoning the draft leaves nothing behind. `a_free` marks
-        // the free-space flavor (no anchor wire to revalidate).
+        // A start on a wire's body (stage 18b): the start endpoint is
+        // not a pin or junction, so it has no WireEndpoint to bind to.
+        // The commit mints a junction at `a_pos` (a point on some
+        // wire's path) and binds the new wire's `a` to it - the same
+        // path the commit-side wire-point takes, just deferred past a
+        // cancel.
         bool a_mint = false;
-        bool a_free = false;
-        // A free start's L flips: horizontal-first by default, the
-        // Shift modifier at the start click picks vertical-first.
-        // Recorded AT THE START so the preview and the commit route
-        // from the same answer.
-        bool a_vertical = false;
     } wire_draft;
 
     // True when the last frame's Properties draw saw a focused text
@@ -455,13 +441,8 @@ struct Editor {
     // placement/drag snap.
     [[nodiscard]] Pos snap(Pos world, bool coarse = false) const;
 
-    // The part's world AABB (the transformed symbol bounds). The id
-    // form re-finds the part; the reference form serves the loops
-    // that already hold it (the draw and the hit loops - no find_part
-    // inside the loop).
+    // The part's world AABB (the transformed symbol bounds).
     [[nodiscard]] std::optional<Bounds> part_bounds(std::uint32_t id) const;
-    [[nodiscard]] std::optional<Bounds> part_bounds(
-        const ws::circsim::Part& p) const;
 
     // The wire's world polyline (endpoints through their refs, then
     // the waypoints between).
@@ -472,26 +453,11 @@ struct Editor {
     // free) to `b` (approached along `b_dir`, -1 = free): the waypoint
     // list between the two endpoints - a leads out, an L or Z lands,
     // collinear legs folded away.
-    [[nodiscard]] static std::vector<Pos> route_wire(
-        Pos a, int a_dir, Pos b, int b_dir, bool a_vertical = false);
+    [[nodiscard]] static std::vector<Pos> route_wire(Pos a, int a_dir,
+                                                     Pos b, int b_dir);
 
-    // The move-drag's wire re-route data: every ORTHO wire whose
-    // endpoint references the entity, carrying the waypoints that keep
-    // its legs axis-aligned at the landing position. The endpoints
-    // resolve live through their refs - only the waypoints would stay
-    // put and turn the adjacent leg diagonal. A straight or one-bend
-    // wire gets a fresh route_wire L (and so does any wire when BOTH
-    // ends ride the same move); a multi-bend wire keeps its Z and only
-    // the adjacent waypoint slides. Call with the entity ALREADY at
-    // its landing position. (WireRoute is the document layer's
-    // command cargo - document.hpp.)
-    [[nodiscard]] std::vector<WireRoute> attached_wire_routes(
-        Drag::Kind kind, std::uint32_t id) const;
-
-    // Hit tests (world space). Every radius is in world units (screen
-    // px / zoom), so picks stay steady across zooms - including the
-    // label's own reach, passed separately so its tag-sized margin
-    // (a few px, not a world unit) scales with the magnification.
+    // Hit tests (world space). The pin hit radius is in world units
+    // (screen px / zoom), so picks stay steady across zooms.
     [[nodiscard]] std::optional<PinHit> hit_pin(Pos world,
                                                 double radius) const;
     [[nodiscard]] std::optional<std::uint32_t> hit_junction(
@@ -511,12 +477,7 @@ struct Editor {
     };
     [[nodiscard]] std::optional<WirePointSnap> hit_wire_point(
         Pos world, double radius) const;
-    // Selection priority walks the draw stack topmost-first:
-    // junctions, then the NEAREST wire in range (a wire stays
-    // selectable where it crosses a part's box), then the LAST part
-    // whose box holds the point (the drawn-on-top one), then labels.
-    [[nodiscard]] Selection hit_any(Pos world, double radius,
-                                    double label_radius) const;
+    [[nodiscard]] Selection hit_any(Pos world, double radius) const;
 
     // The whole schematic's content extent (for the fit command).
     [[nodiscard]] std::optional<Bounds> content_bounds() const;
