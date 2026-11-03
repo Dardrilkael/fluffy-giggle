@@ -120,12 +120,12 @@ Schematic tline_schematic() {
     Part* t = s.add_part(Part::make("tline", "T1", "", {15.0, -2.0}));
     t->params["z0"] = "50";
     t->params["td"] = "1u";
-    s.add_part(Part::make("gnd", "", "", {1.0, -6.0}));
+    s.add_part(Part::make("gnd", "", "", {3.0, -6.0}));  // v.n moved to +3 (stage 17d)
     s.add_part(Part::make("gnd", "", "", {11.0, -3.0}));
     s.add_part(Part::make("gnd", "", "", {19.0, -3.0}));
     s.add_wire(ws::circsim::Wire::endpoints(PinRef{v->id, 0},
                                             PinRef{rs->id, 0}))
-        ->waypoints = {Pos{-1.0, 0.0}};
+        ->waypoints = {Pos{-3.0, 0.0}};  // v.p moved to -3 (stage 17d)
     s.add_wire(ws::circsim::Wire::endpoints(PinRef{rs->id, 1},
                                             PinRef{t->id, 0}));
     Label* in = s.add_label({});
@@ -195,7 +195,7 @@ TEST_CASE("symbol_bounds covers pins and primitives") {
     const SymbolDef* v = ws::circsim::find_symbol("v");
     REQUIRE(v != nullptr);
     const Bounds vb = ws::circsim::symbol_bounds(*v);
-    CHECK(vb == Bounds{-1.0, -1.0, 1.0, 1.0});
+    CHECK(vb == Bounds{-3.0, -1.0, 3.0, 1.0});  // stage 17d: pins/leads at +-3
 
     const SymbolDef* d = ws::circsim::find_symbol("d");
     REQUIRE(d != nullptr);
@@ -290,6 +290,7 @@ TEST_CASE("every draw primitive kind parses") {
             "draw": [
                 {"line": [[0.0, 0.0], [1.0, 1.0]]},
                 {"poly": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]},
+                {"polyfill": [[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]]},
                 {"rect": [0.0, 0.0, 2.0, 2.0]},
                 {"circle": [0.0, 0.0, 1.5]},
                 {"arc": [0.0, 0.0, 1.5, 10.0, 170.0]},
@@ -302,19 +303,21 @@ TEST_CASE("every draw primitive kind parses") {
     CHECK(diags.empty());
     const SymbolDef* k = lib.find("k");
     REQUIRE(k != nullptr);
-    REQUIRE(k->draw.size() == 7);
+    REQUIRE(k->draw.size() == 8);
     CHECK(k->draw[0].kind == DrawPrim::Kind::Line);
     CHECK(k->draw[1].kind == DrawPrim::Kind::Poly);
     CHECK(k->draw[1].pts.size() == 3);
-    CHECK(k->draw[2].kind == DrawPrim::Kind::Rect);
-    CHECK(k->draw[3].kind == DrawPrim::Kind::Circle);
-    CHECK(k->draw[3].r == 1.5);
-    CHECK(k->draw[4].kind == DrawPrim::Kind::Arc);
-    CHECK(k->draw[4].a0 == 10.0);
-    CHECK(k->draw[4].a1 == 170.0);
-    CHECK(k->draw[5].kind == DrawPrim::Kind::Dot);
-    CHECK(k->draw[6].kind == DrawPrim::Kind::Text);
-    CHECK(k->draw[6].text == "hello");
+    CHECK(k->draw[2].kind == DrawPrim::Kind::PolyFill);
+    CHECK(k->draw[2].pts.size() == 3);
+    CHECK(k->draw[3].kind == DrawPrim::Kind::Rect);
+    CHECK(k->draw[4].kind == DrawPrim::Kind::Circle);
+    CHECK(k->draw[4].r == 1.5);
+    CHECK(k->draw[5].kind == DrawPrim::Kind::Arc);
+    CHECK(k->draw[5].a0 == 10.0);
+    CHECK(k->draw[5].a1 == 170.0);
+    CHECK(k->draw[6].kind == DrawPrim::Kind::Dot);
+    CHECK(k->draw[7].kind == DrawPrim::Kind::Text);
+    CHECK(k->draw[7].text == "hello");
 }
 
 TEST_CASE("tolerant load: repairs and skips with diagnostics") {

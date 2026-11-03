@@ -24,13 +24,14 @@ namespace ws::circsim {
 // One flattened stroke of a placed symbol's picture, in WORLD space.
 struct SymbolStroke {
     enum class Kind : std::uint8_t {
-        Line,    // pts[0] -> pts[1]
-        Poly,    // polyline through pts; `closed` closes it back to pts[0]
-        Circle,  // pts[0] center, r radius (outline)
-        Arc,     // pts[0] center, r radius, a0..a1 degrees CCW (y up);
-                 // the placement's mirror/rotation is already folded in
-        Dot,     // filled circle at pts[0], r radius
-        Text,    // `text` anchored at pts[0]
+        Line,     // pts[0] -> pts[1]
+        Poly,     // polyline through pts; `closed` closes it back to pts[0]
+        PolyFill, // filled polygon through pts (the fill closes it)
+        Circle,   // pts[0] center, r radius (outline)
+        Arc,      // pts[0] center, r radius, a0..a1 degrees CCW (y up);
+                  // the placement's mirror/rotation is already folded in
+        Dot,      // filled circle at pts[0], r radius
+        Text,     // `text` anchored at pts[0]
     };
     Kind kind = Kind::Line;
     std::vector<Pos> pts;

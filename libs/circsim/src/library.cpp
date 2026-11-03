@@ -364,6 +364,13 @@ bool read_draw(const json::Object& o, DrawPrim& d, const std::string& key,
             return bad("needs two or more [x, y] points");
         }
         d.pts = *pts;
+    } else if (shape == "polyfill") {
+        d.kind = DrawPrim::Kind::PolyFill;
+        const auto pts = pos_array(&val, 3);
+        if (!pts.has_value()) {
+            return bad("needs three or more [x, y] points");
+        }
+        d.pts = *pts;
     } else if (shape == "rect") {
         d.kind = DrawPrim::Kind::Rect;
         const auto n = number_array(&val, 4);
@@ -848,6 +855,17 @@ std::string SymbolLibrary::save(bool include_builtin) const {
                         pts.push_back(pos_value(p));
                     }
                     e.set("poly", json::Value::array(std::move(pts)));
+                    break;
+                }
+                case DrawPrim::Kind::PolyFill: {
+                    if (d.pts.size() < 3) {
+                        break;
+                    }
+                    json::Array pts;
+                    for (const Pos& p : d.pts) {
+                        pts.push_back(pos_value(p));
+                    }
+                    e.set("polyfill", json::Value::array(std::move(pts)));
                     break;
                 }
                 case DrawPrim::Kind::Rect: {

@@ -101,6 +101,18 @@ SymbolSvg draw_one(const ws::circsim::SymbolDef& sym) {
                         " stroke-linecap=\"round\"/>\n";
                 break;
             }
+            case SymbolStroke::Kind::PolyFill: {
+                // A filled <polygon> - the fill closes the loop.
+                body += "<polygon points=\"";
+                for (std::size_t i = 0; i < s.pts.size(); ++i) {
+                    if (i > 0) {
+                        body += ' ';
+                    }
+                    body += px(i);
+                }
+                body += "\" fill=\"" + kInk + "\"/>\n";
+                break;
+            }
             case SymbolStroke::Kind::Circle:
                 body += "<circle cx=\"" + num(tx(s.pts[0].x)) + "\" cy=\"" +
                         num(ty(s.pts[0].y)) + "\" r=\"" + num(s.r * kUnit) +

@@ -56,6 +56,19 @@ std::vector<SymbolStroke> render_symbol(const SymbolDef& sym,
                 out.push_back(std::move(s));
                 break;
             }
+            case DrawPrim::Kind::PolyFill: {
+                if (d.pts.size() < 3u) {
+                    break;
+                }
+                SymbolStroke s;
+                s.kind = SymbolStroke::Kind::PolyFill;
+                s.pts.reserve(d.pts.size());
+                for (const Pos& p : d.pts) {
+                    s.pts.push_back(place(p));
+                }
+                out.push_back(std::move(s));
+                break;
+            }
             case DrawPrim::Kind::Rect: {
                 if (d.pts.size() < 2u) {
                     break;

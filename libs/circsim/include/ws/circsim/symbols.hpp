@@ -62,13 +62,15 @@ struct ParamSpec {
 // CLI's table dump; the editor is the renderer.
 struct DrawPrim {
     enum class Kind : std::uint8_t {
-        Line,    // pts[0] -> pts[1]
-        Poly,    // open polyline through pts
-        Rect,    // axis-aligned, pts[0]/pts[1] opposite corners
-        Circle,  // pts[0] center, r radius
-        Arc,     // pts[0] center, r radius, a0..a1 degrees CCW (y up)
-        Dot,     // filled circle (junction arrows, tap points)
-        Text,    // text anchored at pts[0], editor-styled
+        Line,     // pts[0] -> pts[1]
+        Poly,     // open polyline through pts
+        PolyFill, // filled polygon through pts (arrowheads); the fill
+                  // closes the loop, no repeated vertex needed
+        Rect,     // axis-aligned, pts[0]/pts[1] opposite corners
+        Circle,   // pts[0] center, r radius
+        Arc,      // pts[0] center, r radius, a0..a1 degrees CCW (y up)
+        Dot,      // filled circle (junction dots, tap points)
+        Text,     // text anchored at pts[0], editor-styled
     };
     Kind kind = Kind::Line;
     std::vector<Pos> pts;

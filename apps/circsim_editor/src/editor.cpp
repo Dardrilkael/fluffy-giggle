@@ -514,6 +514,18 @@ void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
                                   s.closed);
                 break;
             }
+            case ws::circsim::SymbolStroke::Kind::PolyFill: {
+                std::vector<Point> pts;
+                pts.reserve(s.pts.size());
+                for (std::size_t i = 0; i < s.pts.size(); ++i) {
+                    pts.push_back(pt(i));
+                }
+                if (pts.size() >= 3u) {
+                    c.fill_polygon(pts.data(),
+                                   static_cast<int>(pts.size()), body.color);
+                }
+                break;
+            }
             case ws::circsim::SymbolStroke::Kind::Circle:
                 c.stroke_circle(pt(0), static_cast<float>(s.r), body);
                 break;

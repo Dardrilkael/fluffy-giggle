@@ -41,6 +41,13 @@ DrawPrim poly(std::vector<Pos> pts) {
     return d;
 }
 
+DrawPrim polyfill(std::vector<Pos> pts) {
+    DrawPrim d;
+    d.kind = DrawPrim::Kind::PolyFill;
+    d.pts = std::move(pts);
+    return d;
+}
+
 DrawPrim circle(double cx, double cy, double r) {
     DrawPrim d;
     d.kind = DrawPrim::Kind::Circle;
@@ -169,20 +176,32 @@ const std::vector<SymbolDef>& table() {
              arc(0.75, 0.0, 0.75, 0.0, 180.0), arc(2.25, 0.0, 0.75, 0.0, 180.0)},
             {spec(ParamSpec::Type::Number, "ic", "IC")}),
         // Sources: p/n, value then AC then waveform (the ngspice grammar
-        // order - "V1 a b 5 AC 1 PULSE(...)").
+        // order - "V1 a b 5 AC 1 PULSE(...)"). Pins at +-3 with real
+        // lead prims (the safety net must never fire: a pin ON the
+        // circle has no prim vertex there, and the net's stub drew a
+        // diameter line straight through the body - the stage-17d fix).
+        // Polarity drawn as LINES, not text: + and - read identically
+        // headless, at any zoom, in any font.
         [] {
             SymbolDef s;
             s.key = "v";
             s.name = "Voltage source";
             s.spice_letter = 'V';
             s.ref_prefix = "V";
-            s.pins = {PinDef{.name = "p", .dx = -1.0, .dy = 0.0, .dir = 180},
-                      PinDef{.name = "n", .dx = 1.0, .dy = 0.0, .dir = 0}};
+            s.pins = {PinDef{.name = "p", .dx = -3.0, .dy = 0.0, .dir = 180},
+                      PinDef{.name = "n", .dx = 3.0, .dy = 0.0, .dir = 0}};
             s.emit = {ParamEmit{.key = "ac", .prefix = "AC "},
                       ParamEmit{.key = "wave", .prefix = ""}};
             s.params = {spec(ParamSpec::Type::Text, "ac", "AC"),
                         spec(ParamSpec::Type::Text, "wave", "Waveform")};
-            s.draw = {circle(0.0, 0.0, 1.0), text(-0.55, -0.15, "+")};
+            s.draw = {// the leads: circle edge to pin, prim vertices ON
+                      // the pins so the picture owns them
+                      line(-3.0, 0.0, -1.0, 0.0), line(1.0, 0.0, 3.0, 0.0),
+                      circle(0.0, 0.0, 1.0),
+                      // + at the p side, - at the n side (line-drawn)
+                      line(-0.65, 0.0, -0.05, 0.0),
+                      line(-0.35, -0.3, -0.35, 0.3),
+                      line(0.05, 0.0, 0.65, 0.0)};
             return s;
         }(),
         [] {
@@ -191,14 +210,20 @@ const std::vector<SymbolDef>& table() {
             s.name = "Current source";
             s.spice_letter = 'I';
             s.ref_prefix = "I";
-            s.pins = {PinDef{.name = "p", .dx = -1.0, .dy = 0.0, .dir = 180},
-                      PinDef{.name = "n", .dx = 1.0, .dy = 0.0, .dir = 0}};
+            s.pins = {PinDef{.name = "p", .dx = -3.0, .dy = 0.0, .dir = 180},
+                      PinDef{.name = "n", .dx = 3.0, .dy = 0.0, .dir = 0}};
             s.emit = {ParamEmit{.key = "ac", .prefix = "AC "},
                       ParamEmit{.key = "wave", .prefix = ""}};
             s.params = {spec(ParamSpec::Type::Text, "ac", "AC"),
                         spec(ParamSpec::Type::Text, "wave", "Waveform")};
-            s.draw = {circle(0.0, 0.0, 1.0), line(0.0, -0.6, 0.0, 0.6),
-                      line(0.0, 0.6, -0.25, 0.3), line(0.0, 0.6, 0.25, 0.3)};
+            s.draw = {// the leads, like the v source
+                      line(-3.0, 0.0, -1.0, 0.0), line(1.0, 0.0, 3.0, 0.0),
+                      circle(0.0, 0.0, 1.0),
+                      // the arrow: shaft up the middle, head a filled
+                      // triangle (pointing +y; the fill closes it)
+                      line(0.0, -0.7, 0.0, 0.25),
+                      polyfill({Pos{0.0, 0.75}, Pos{-0.3, 0.25},
+                                Pos{0.3, 0.25}})};
             return s;
         }(),
         // Diode: anode/cathode; the model token rides where a value would.

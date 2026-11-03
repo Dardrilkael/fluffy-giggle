@@ -187,27 +187,91 @@ TEST_CASE("the pin-lead safety net fires only for untouched pins") {
     CHECK(render_symbol(s, placement(Pos{0.0, 0.0})).size() == 2);
 }
 
-TEST_CASE("characterization: sources ride the safety net today") {
-    // The v source's pins sit ON its circle - no prim VERTEX there -
-    // so the stage-2 safety net draws a stub from each pin INTO the
-    // body: a diameter line straight through the source. This case
-    // pins the wart the stage-17d redesign removes (the pins move out
-    // to +-3 with real lead prims).
+TEST_CASE("sources own their pins: leads, polarity, no stubs") {
+    // The stage-17d redesign: pins moved out to +-3 with real lead
+    // prims - a prim vertex ON each pin retires the safety net (the
+    // stage-2 wart drew a 1.5-unit stub straight through each source
+    // body because a pin ON the circle has no prim vertex). The +/-
+    // polarity is line-drawn inside the circle (no font, no Text
+    // prim), and the current source's arrow head is a triangle closed
+    // by construction.
     const SymbolDef* v = ws::circsim::find_symbol("v");
     REQUIRE(v != nullptr);
+    REQUIRE(v->pins.size() == 2);
+    CHECK(v->pins[0].dx == -3.0);
+    CHECK(v->pins[1].dx == 3.0);
     const std::vector<SymbolStroke> out =
         render_symbol(*v, placement(Pos{0.0, 0.0}));
-    REQUIRE(count_kind(out, SymbolStroke::Kind::Circle) == 1);
-    REQUIRE(count_kind(out, SymbolStroke::Kind::Text) == 1);
-    const std::size_t lines = count_kind(out, SymbolStroke::Kind::Line);
-    REQUIRE(lines == 2);  // one stub per pin - the wart
-    const SymbolStroke* first =
-        find_kind(out, SymbolStroke::Kind::Line);
-    REQUIRE(first != nullptr);
-    // Pin p at (-1,0) dir 180: the stub crosses 1.5 units into the
-    // body - past the center, over the polarity text's anchor.
-    CHECK(pts_eq(*first, 0, Pos{-1.0, 0.0}));
-    CHECK(pts_eq(*first, 1, Pos{0.5, 0.0}));
+    CHECK(count_kind(out, SymbolStroke::Kind::Circle) == 1);
+    CHECK(count_kind(out, SymbolStroke::Kind::Text) == 0);
+    CHECK(count_kind(out, SymbolStroke::Kind::Line) ==
+          5);  // 2 leads + the + cross (2) + the - bar (1)
+    CHECK(out.size() == 6);  // and nothing else - no safety-net stubs
+
+    // The first lead: circle edge to the p pin.
+    const SymbolStroke* l0 = find_kind(out, SymbolStroke::Kind::Line);
+    REQUIRE(l0 != nullptr);
+    CHECK(pts_eq(*l0, 0, Pos{-3.0, 0.0}));
+    CHECK(pts_eq(*l0, 1, Pos{-1.0, 0.0}));
+
+    // The polarity marks: + at the p side, - at the n side.
+    bool plus_h = false, plus_v = false, minus = false;
+    for (const SymbolStroke& s : out) {
+        if (s.kind != SymbolStroke::Kind::Line) {
+            continue;
+        }
+        if (pts_eq(s, 0, Pos{-0.65, 0.0}) && pts_eq(s, 1, Pos{-0.05, 0.0})) {
+            plus_h = true;
+        }
+        if (pts_eq(s, 0, Pos{-0.35, -0.3}) && pts_eq(s, 1, Pos{-0.35, 0.3})) {
+            plus_v = true;
+        }
+        if (pts_eq(s, 0, Pos{0.05, 0.0}) && pts_eq(s, 1, Pos{0.65, 0.0})) {
+            minus = true;
+        }
+    }
+    CHECK(plus_h);
+    CHECK(plus_v);
+    CHECK(minus);
+
+    // The current source: the same lead contract, plus the arrow head
+    // as a FILLED triangle (PolyFill - the fill closes it, no repeated
+    // vertex, and the head reads solid at every zoom).
+    const SymbolDef* i = ws::circsim::find_symbol("i");
+    REQUIRE(i != nullptr);
+    const std::vector<SymbolStroke> io =
+        render_symbol(*i, placement(Pos{0.0, 0.0}));
+    CHECK(count_kind(io, SymbolStroke::Kind::Line) == 3);  // 2 leads + shaft
+    CHECK(io.size() == 5);                                 // + circle + head
+    const SymbolStroke* head = find_kind(io, SymbolStroke::Kind::PolyFill);
+    REQUIRE(head != nullptr);
+    REQUIRE(head->pts.size() == 3);
+    double top = head->pts[0].y;
+    for (const Pos& p : head->pts) {
+        top = std::max(top, p.y);
+    }
+    CHECK(head->pts[0].y == top);  // the head points +y
+}
+
+TEST_CASE("polyfill rides the part transform and fills, not strokes") {
+    // The filled-polygon prim (the arrowhead kind): three points, no
+    // repeated vertex, the placement transforms each, and the stroke
+    // kind says FILL - the consumer never strokes it.
+    SymbolDef s;
+    s.key = "arrowish";
+    DrawPrim d;
+    d.kind = DrawPrim::Kind::PolyFill;
+    d.pts = {Pos{0.0, 1.0}, Pos{-0.3, 0.0}, Pos{0.3, 0.0}};
+    s.draw.push_back(d);
+
+    const std::vector<SymbolStroke> out =
+        render_symbol(s, placement(Pos{10.0, 10.0}, 90));
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].kind == SymbolStroke::Kind::PolyFill);
+    REQUIRE(out[0].pts.size() == 3);
+    // (0,1) rot90 -> (-1,0), + (10,10)
+    CHECK(pts_eq(out[0], 0, Pos{9.0, 10.0}));
+    CHECK_FALSE(out[0].closed);  // fill closes; the flag never applies
 }
 
 TEST_CASE("polylines render open; closed shapes close by construction") {
