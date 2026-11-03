@@ -66,14 +66,6 @@ DrawPrim arc(double cx, double cy, double r, double a0, double a1) {
     return d;
 }
 
-DrawPrim dot(double cx, double cy, double r) {
-    DrawPrim d;
-    d.kind = DrawPrim::Kind::Dot;
-    d.pts = {Pos{cx, cy}};
-    d.r = r;
-    return d;
-}
-
 DrawPrim text(double x, double y, std::string s) {
     DrawPrim d;
     d.kind = DrawPrim::Kind::Text;
@@ -104,6 +96,11 @@ SymbolDef two_terminal(std::string key, std::string name, char letter,
 
 // The BJT / MOSFET families share everything but the arrow and the
 // substrate blob; one body, small per-flavor deltas.
+//
+// The emitter arrow is a FILLED head riding the emitter stroke: out
+// toward the emitter pin (NPN), in at the bar (PNP) - the convention
+// that tells the two apart at a glance. The stage-2 table marked the
+// spot with a dot; a dot carries no direction.
 SymbolDef bjt(std::string key, std::string name, bool pnp) {
     SymbolDef s;
     s.key = std::move(key);
@@ -122,8 +119,14 @@ SymbolDef bjt(std::string key, std::string name, bool pnp) {
               line(-3.0, 0.0, -1.0, 0.0), line(-1.0, -1.6, -1.0, 1.6),
               // collector + emitter strokes
               line(-1.0, 0.8, 2.0, 3.0), line(-1.0, -0.8, 2.0, -3.0)};
-    // The emitter arrow: out along the emitter (NPN), in at the bar (PNP).
-    s.draw.push_back(pnp ? dot(-0.25, -1.35, 0.35) : dot(1.25, -2.45, 0.35));
+    // The emitter arrowhead (computed on the emitter stroke's own
+    // direction: tip at t=0.78 for the NPN, t=0.25 for the PNP; base
+    // 0.19 behind it, half-width 0.28).
+    s.draw.push_back(pnp
+                         ? polyfill({Pos{-0.25, -1.35}, Pos{0.486, -1.542},
+                                     Pos{0.154, -1.994}})
+                         : polyfill({Pos{1.34, -2.516}, Pos{0.966, -1.894},
+                                     Pos{0.634, -2.346}}));
     return s;
 }
 
@@ -133,10 +136,13 @@ SymbolDef mosfet(std::string key, std::string name, bool pmos) {
     s.name = std::move(name);
     s.spice_letter = 'M';
     s.ref_prefix = "M";
+    // The bulk pin points LEFT (dir 180): its lead arrives from the
+    // right along y=-3, so a wire leaving the pin runs left, away
+    // from the body (the stage-2 table said 270 - down its own lead).
     s.pins = {PinDef{.name = "d", .dx = 2.0, .dy = 3.0, .dir = 90},
               PinDef{.name = "g", .dx = -3.0, .dy = 0.0, .dir = 180},
               PinDef{.name = "s", .dx = 2.0, .dy = -3.0, .dir = 270},
-              PinDef{.name = "b", .dx = -3.0, .dy = -3.0, .dir = 270}};
+              PinDef{.name = "b", .dx = -3.0, .dy = -3.0, .dir = 180}};
     s.emit = {ParamEmit{.key = "model"}, ParamEmit{.key = "l", .prefix = "L="},
               ParamEmit{.key = "w", .prefix = "W="}};
     s.needs_value = false;
@@ -144,16 +150,25 @@ SymbolDef mosfet(std::string key, std::string name, bool pmos) {
     s.params = {spec(ParamSpec::Type::Text, "model", "Model"),
                 spec(ParamSpec::Type::Number, "l", "L"),
                 spec(ParamSpec::Type::Number, "w", "W")};
+    // The bulk tees off the CHANNEL BAR's bottom (0,-1.6), drops to
+    // y=-3 and runs left to the pin. The stage-2 route teed at
+    // (0,-1) - the source stroke's own start - reading as a
+    // source-to-bulk short at every zoom.
     s.draw = {// gate lead + gate bar + channel bar
               line(-3.0, 0.0, -1.0, 0.0), line(-1.0, -1.6, -1.0, 1.6),
               line(0.0, -1.6, 0.0, 1.6),
               // drain + source strokes
               line(0.0, 1.0, 2.0, 3.0), line(0.0, -1.0, 2.0, -3.0),
               // bulk route down and out to the b pin
-              poly({Pos{0.0, -1.0}, Pos{-1.0, -1.0}, Pos{-1.0, -3.0},
-                    Pos{-3.0, -3.0}})};
-    // The substrate arrow: at the channel (PMOS) vs at the pin (NMOS).
-    s.draw.push_back(pmos ? dot(-0.55, -1.0, 0.3) : dot(-2.45, -3.0, 0.3));
+              poly({Pos{0.0, -1.6}, Pos{0.0, -3.0}, Pos{-3.0, -3.0}})};
+    // The substrate arrow at the top of the bulk drop: INTO the
+    // channel (up, NMOS - the P bulk's diode pointing at the N
+    // channel) vs AWAY from it (down, PMOS).
+    s.draw.push_back(pmos
+                         ? polyfill({Pos{0.0, -2.15}, Pos{-0.28, -1.6},
+                                     Pos{0.28, -1.6}})
+                         : polyfill({Pos{0.0, -1.6}, Pos{-0.28, -2.15},
+                                     Pos{0.28, -2.15}}));
     return s;
 }
 

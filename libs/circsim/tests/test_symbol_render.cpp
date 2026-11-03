@@ -274,6 +274,130 @@ TEST_CASE("polyfill rides the part transform and fills, not strokes") {
     CHECK_FALSE(out[0].closed);  // fill closes; the flag never applies
 }
 
+TEST_CASE("transistors wear arrowheads that carry direction") {
+    // The BJT emitter arrow (stage 17f): a FILLED head on the emitter
+    // stroke - the tip toward the emitter pin (NPN) vs toward the bar
+    // (PNP). The stage-2 table marked the spot with a dot, which
+    // carries no direction at all.
+    const Pos bar_end{-1.0, -0.8};   // the emitter stroke's start
+    const Pos emitter_pin{2.0, -3.0};
+    const auto dist = [](Pos a, Pos b) {
+        return std::sqrt((a.x - b.x) * (a.x - b.x) +
+                         (a.y - b.y) * (a.y - b.y));
+    };
+    for (const char* key : {"npn", "pnp"}) {
+        const SymbolDef* t = ws::circsim::find_symbol(key);
+        REQUIRE(t != nullptr);
+        const std::vector<SymbolStroke> out =
+            render_symbol(*t, placement(Pos{0.0, 0.0}));
+        const SymbolStroke* head =
+            find_kind(out, SymbolStroke::Kind::PolyFill);
+        REQUIRE(head != nullptr);
+        REQUIRE(head->pts.size() == 3);
+        // The tip is the vertex farthest from the base edge's
+        // midpoint (the lone apex of the triangle).
+        std::size_t apex = 0;
+        double best = -1.0;
+        for (std::size_t i = 0; i < 3; ++i) {
+            const Pos& a = head->pts[(i + 1) % 3];
+            const Pos& b = head->pts[(i + 2) % 3];
+            const Pos mid{(a.x + b.x) * 0.5, (a.y + b.y) * 0.5};
+            const double d = dist(head->pts[i], mid);
+            if (d > best) {
+                best = d;
+                apex = i;
+            }
+        }
+        const bool npn = key[0] == 'n';
+        // NPN: the apex sits closer to the emitter pin than to the
+        // bar; PNP: closer to the bar than to the pin.
+        if (npn) {
+            CHECK(dist(head->pts[apex], emitter_pin) <
+                  dist(head->pts[apex], bar_end));
+        } else {
+            CHECK(dist(head->pts[apex], bar_end) <
+                  dist(head->pts[apex], emitter_pin));
+        }
+        // The head rides the stroke: its apex lies between the ends,
+        // nearer the stroke line than its own half-width.
+        double to_line = 1e9;
+        for (std::size_t i = 0; i < 3; ++i) {
+            const Pos& p = head->pts[i];
+            const Pos ab{emitter_pin.x - bar_end.x,
+                         emitter_pin.y - bar_end.y};
+            const Pos ap{p.x - bar_end.x, p.y - bar_end.y};
+            const double proj = (ap.x * ab.x + ap.y * ab.y) /
+                             (ab.x * ab.x + ab.y * ab.y);
+            if (proj < 0.0 || proj > 1.0) {
+                continue;
+            }
+            const Pos q{bar_end.x + ab.x * proj, bar_end.y + ab.y * proj};
+            to_line = std::min(to_line, dist(p, q));
+        }
+        CHECK(to_line < 0.3);
+    }
+}
+
+TEST_CASE("the mosfet bulk tees off the channel, not the source") {
+    // Stage 17f: the bulk route starts at the CHANNEL BAR's bottom
+    // (0,-1.6). The stage-2 route teed at (0,-1) - the source
+    // stroke's own start point - so the bulk looked tied to the
+    // source at every zoom. The substrate arrow sits at the top of
+    // the drop: up into the channel (NMOS), down away from it (PMOS);
+    // and the b pin points LEFT (dir 180), the way its lead arrives.
+    for (const char* key : {"nmos", "pmos"}) {
+        const SymbolDef* t = ws::circsim::find_symbol(key);
+        REQUIRE(t != nullptr);
+        REQUIRE(t->pins.size() == 4);
+        CHECK(t->pins[3].name == "b");
+        CHECK(t->pins[3].dir == 180);
+
+        const std::vector<SymbolStroke> out =
+            render_symbol(*t, placement(Pos{0.0, 0.0}));
+        // The bulk route: an open poly (0,-1.6) -> (0,-3) -> (-3,-3).
+        const SymbolStroke* route = nullptr;
+        for (const SymbolStroke& s : out) {
+            if (s.kind == SymbolStroke::Kind::Poly) {
+                route = &s;
+            }
+        }
+        REQUIRE(route != nullptr);
+        REQUIRE(route->pts.size() == 3);
+        CHECK(pts_eq(*route, 0, Pos{0.0, -1.6}));  // the channel bottom
+        CHECK(pts_eq(*route, 1, Pos{0.0, -3.0}));
+        CHECK(pts_eq(*route, 2, Pos{-3.0, -3.0}));
+        CHECK_FALSE(route->closed);
+
+        // The substrate arrow at the top of the drop.
+        const SymbolStroke* arrow =
+            find_kind(out, SymbolStroke::Kind::PolyFill);
+        REQUIRE(arrow != nullptr);
+        REQUIRE(arrow->pts.size() == 3);
+        double top = arrow->pts[0].y;
+        std::size_t apex = 0;
+        for (std::size_t i = 0; i < 3; ++i) {
+            if (arrow->pts[i].y > top) {
+                top = arrow->pts[i].y;
+                apex = i;
+            }
+        }
+        const bool nmos = key[0] == 'n';
+        // NMOS: the apex is the TOP vertex (the arrow points up, into
+        // the channel); PMOS: the apex is the BOTTOM one.
+        if (nmos) {
+            CHECK(arrow->pts[apex].y == top);
+            CHECK(top < -1.5);  // just under the channel bottom
+        } else {
+            double bottom = arrow->pts[0].y;
+            for (const Pos& p : arrow->pts) {
+                bottom = std::min(bottom, p.y);
+            }
+            CHECK(arrow->pts[apex].y > bottom);  // apex is not the low point
+            CHECK(bottom > -2.2);  // the head sits at the top of the drop
+        }
+    }
+}
+
 TEST_CASE("polylines render open; closed shapes close by construction") {
     // symbols.hpp's contract: Poly is an OPEN polyline. A shape that
     // means to close repeats its first vertex (the diode's triangle) -
