@@ -250,3 +250,39 @@ Stage-18 candidates that did NOT land (the audit's other two options):
 ERC warnings on un-authored pickups (the data is there now -
 `silent_joins` is the list), and an on-wire snap that mints a junction
 when a wire endpoint or part drag lands on another wire's path.
+
+## Stage 19 (2026-11-03): the editor bug sweep - toasts, undo, picks, routes, buttons
+
+A full adversarial review of `circsim_editor` (nine numbered bugs, four
+wire-tool UX gaps, a structure/quality list) audited line-by-line
+against the code; every claim checked out or revealed something worse.
+One task per commit, on the `stage19-editor-fixes` branch:
+
+| Commit | What landed |
+|-----------|-------------|
+| `2b5fd9c` | 19a: the toasts borrow their text (Toast::text is a plain `const char*`), but a `static std::string holder` served every toast - two toasts in one frame showed one text, and a reallocation dangled the earlier one. Each `Editor` now owns a `std::deque<std::string>` (stable addresses; the 16-string cap only ever retires bytes whose 8-slot toast is long gone). |
+| `9a30ebd` | 19b: the drag release restores the press position before `push_move_*` (the live drag had left the entity at the landing, the command read `from == to`, undo was a no-op); the drag-landing formula (live, release, feedback) is one `drag_landing()` helper; a modal veil freezes the wheel and the pan (only the tools checked `claims_open()`); an armed pan keeps the pointer off-panel; the canvas scale resets after `pop_transform()`. |
+| `543a630` | 19c: `route_wire`'s collinear fold read a REVERSAL as a continuation - a pin at (0,0) facing +x with a target at (-5,0) lost its lead and the wire ran straight back through the part body. The fold now extends only a continuing leg (`along > 0`); directions normalize once at the top (360 used to fall through `start_horizontal`'s raw 0/180 test and turned the L the wrong way). |
+| `e7afbbf` | 19d: `hit_any` returned the FIRST wire in range (the nearest-tracking was dead), tested parts' AABBs before wires (a wire crossing a part's box was unpickable) and picked the first part while the last one draws on top; the label reach was a fixed world unit (400px at max zoom). Now: junctions, then the nearest wire, then the LAST part whose box holds the point, then labels with a zoom-scaled reach (`hit_any` grew a `label_radius` parameter). `hit_wire_point` accepts on the SEGMENT's distance - measuring the snapped candidate missed a cursor riding the wire between grid lines at high zoom. |
+| `416a755` | 19e: the pick ring (0.35 world) and the dots (0.14 world) agreed with the 9px pick only near zoom 26. The ring IS the pick radius now; the dots never shrink under 2px on screen. |
+| `fcdcb9b` | 19f: the wire tool keeps the conversation - a click on FREE grid starts a draft (the commit side always supported free landings; the start junction mints at commit), every commit CHAINS (the next draft starts at the landing - a multi-segment net is one run of clicks, no W press per segment), the first right click (or Esc) cancels only the draft and the second disarms, and Shift at the start flips the L's first leg (recorded at start so preview and commit route identically). The commit revalidates its start anchor (bug: a draft surviving undo/deletes could commit a dangling endpoint) and cancels with a word when the anchor died. |
+| `9ca8f4d` | 19g: waypoints are absolute, so a moved endpoint turned the adjacent wire leg diagonal. The move commands now carry `WireRoute` cargo: every ORTHO wire attached to the moved entity re-routes (straight/one-bend wires get a fresh `route_wire` L; multi-bend wires keep their Z - only the adjacent waypoint slides), the push captures each wire's current waypoints as the undo shape, and undo restores both the entity and the exact former bend. The junction-dot cache sits still through a drag's per-frame bumps (one rebuild per edit, not per frame). |
+| `408934a` | 19h: the panels read `mouse_down[1]` as "middle" and `mouse_pressed[2]` as "right" - GLFW's indices are 0 left, 1 RIGHT, 2 MIDDLE, and libs/input passes them straight through: panning rode the right button and the cancel the middle one. Named `kMouseLeft/kMouseRight/kMouseMiddle` constants (the GLFW truth) across both panels and both test harnesses. |
+| `7b6bd53` | 19i: the magic numbers get names (`kZoomMin/kZoomMax/kZoomDefault`, `eps_eq`'s `kEps` default, `kZoomStep`); the wheel zooms by `pow(kZoomStep, scroll_dy)` clamped, so trackpads stop jumping whole notches; `document_changed` clears the Properties field buffers, stamp, selection keys and analysis index (a new document could show the old one's typing); the ghost footprint transforms each corner once; the local `floor` no longer shadows `::floor`; the `p.pos.x - 0.4f` mixes went double; the header comment admits the no-document `gui::text` exception. |
+| `7494304` | 19j: the 260-line `handle_pointer` and the 360-line `draw_canvas_panel` split by concern - wheel/pan, drag live/release, per-tool presses (the wire start/commit their own functions), right-click staging; the draw per layer (grid, snap feedback, wires+junctions+dots+labels, parts, target ring, preview, ghosts). The wire tool's `snap_wire_target` runs ONCE per idle frame (the pointer handler's press edges and the draw halves share it; a click frame recomputes for the draw - the click may have changed the schematic) instead of up to three times per frame. `part_bounds` grew a `const Part&` overload so the draw and hit loops stop re-finding by id. |
+
+The stage-19 gate at `7494304`: 944/953 ctest on the full workspace
+(the 9 audio cases fail on this box for lack of an audio device -
+pre-existing and unrelated), `test_circsim_editor_canvas` 22 cases /
+125 assertions green against the split file, `test_circsim_editor_panel`
+15 cases / 209, `test_circsim_editor_palette` 4 / 25, the shadow audit
+clean (114 TUs), the conversions audit clean on every circsim/editor
+TU (the physics/math backends' pre-existing sign-conversion noise
+untouched), the uninit and class-struct audits at their known
+pre-existing single findings (spice devices, gui_context).
+
+Not landed from the review: the Editor god-struct split (a whole-stage
+refactor touching every seam; the per-tool/per-layer function split in
+19j is its first slice), and re-routing wires that pass THROUGH a
+moved junction as a T (the silent-join dots already show the lost
+join).
