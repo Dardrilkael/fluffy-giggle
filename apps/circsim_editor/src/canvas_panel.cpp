@@ -100,6 +100,61 @@ struct SnapTarget {
     return t;
 }
 
+// The drag's landing spot - one helper for the three former copies
+// (the live frame, the release, the feedback dot): the entity follows
+// the cursor minus its grab offset, snapped. A junction drag always
+// stays on the fine grid; parts and labels follow the Shift modifier.
+[[nodiscard]] Pos drag_landing(const Editor& ed,
+                               const ws::input::InputFrame& in, Pos world) {
+    const bool coarse =
+        in.key_down[ws::input::keys::kLeftShift] != 0 ||
+        in.key_down[ws::input::keys::kRightShift] != 0;
+    return ed.snap(Pos{world.x - ed.drag.grab_offset.x,
+                       world.y - ed.drag.grab_offset.y},
+                   coarse && ed.drag.kind != Editor::Drag::Kind::Junction);
+}
+
+// The live drag wrote the position straight into the schematic (no
+// undo); the command landing at release must capture the PRESS
+// position as its from, or from == to and undo is a no-op - so the
+// entity goes home before the push. PUSH IS THE EDIT: apply() lands
+// the release position right after, and undo() now has a real start
+// to restore.
+void restore_drag_start(Editor& ed) {
+    const ws::circsim::Schematic* s = ed.schem();
+    if (s == nullptr) {
+        return;
+    }
+    switch (ed.drag.kind) {
+        case Editor::Drag::Kind::Part: {
+            if (ws::circsim::Part* p = s->find_part(ed.drag.id)) {
+                p->pos = ed.drag.start_world;
+            }
+            break;
+        }
+        case Editor::Drag::Kind::Junction: {
+            for (ws::circsim::Junction& j : ed.schem()->junctions_mut()) {
+                if (j.id == ed.drag.id) {
+                    j.pos = ed.drag.start_world;
+                    break;
+                }
+            }
+            break;
+        }
+        case Editor::Drag::Kind::Label: {
+            for (ws::circsim::Label& l : ed.schem()->labels_mut()) {
+                if (l.id == ed.drag.id) {
+                    l.pos = ed.drag.start_world;
+                    break;
+                }
+            }
+            break;
+        }
+        case Editor::Drag::Kind::None:
+            break;
+    }
+}
+
 // --- one pointer frame -------------------------------------------------------
 
 void handle_pointer(Editor& ed, gui::GuiContext& gui,
@@ -122,15 +177,22 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
         in.key_down[ws::input::keys::kRightShift] != 0;
 
     // Wheel: zoom toward the cursor (the scroll panel's own claim is
-    // the harmless no-op the header note explains).
-    if (inside && in.scroll_dy != 0.0f) {
+    // the harmless no-op the header note explains). An open modal
+    // veil freezes the canvas - the zoom with it (the header's own
+    // contract; only the tools used to check the claims).
+    if (inside && gui.claims_open() && in.scroll_dy != 0.0f) {
         ed.view.zoom_at(mouse, in.scroll_dy > 0.0f ? 1.15 : 1.0 / 1.15);
     }
 
     // Middle-drag pans; space+left-drag pans too (the gallery's rule).
+    // Armed inside the panel; once armed the gesture keeps the pointer
+    // until the buttons go up - a cursor that slips off the panel edge
+    // mid-pan no longer drops the pan (the drags' own rule). An open
+    // modal veil disarms.
     const bool pan_modifiers =
         in.mouse_down[1] != 0 || (space_down && in.mouse_down[0] != 0);
-    if (pan_modifiers && inside) {
+    if (pan_modifiers && gui.claims_open() &&
+        (ed.pan.armed || inside)) {
         if (!ed.pan.armed) {
             ed.pan.armed = true;
             ed.pan.from = mouse;
@@ -144,22 +206,15 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
     // A drag in flight outranks every tool arming.
     if (ed.drag.kind != Editor::Drag::Kind::None) {
         if (in.mouse_down[0] != 0) {
-            // A junction drag always stays on the fine grid; parts
-            // and labels follow the Shift modifier.
-            const bool drag_coarse =
-                coarse && ed.drag.kind != Editor::Drag::Kind::Junction;
-            const Pos at = ed.snap(
-                Pos{world.x - ed.drag.grab_offset.x,
-                    world.y - ed.drag.grab_offset.y},
-                drag_coarse);
+            // Live move: direct writes, no undo - the command lands
+            // at release with the from/to pair (push IS the edit,
+            // and apply() re-landing the same position is exact).
+            const Pos at = drag_landing(ed, in, world);
             if (!eps_eq(at.x, ed.drag.start_world.x, 1e-9) ||
                 !eps_eq(at.y, ed.drag.start_world.y, 1e-9)) {
                 ed.drag.moved = true;
             }
             if (ed.drag.moved && ed.schem() != nullptr) {
-                // Live move: direct writes, no undo - the command lands
-                // at release with the from/to pair (push IS the edit,
-                // and apply() re-landing the same position is exact).
                 if (ed.drag.kind == Editor::Drag::Kind::Part) {
                     if (ws::circsim::Part* p =
                             ed.schem()->find_part(ed.drag.id)) {
@@ -188,13 +243,13 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
             return;
         }
         // Release: land the undo command when the drag actually moved.
+        // The entity first goes back to its press position, so the
+        // command captures THAT as its from - the live drag had left
+        // it at the release position, and a from == to command is an
+        // undo no-op (nothing would ever move back).
         if (ed.drag.moved && ed.doc != nullptr) {
-            const bool drag_coarse =
-                coarse && ed.drag.kind != Editor::Drag::Kind::Junction;
-            const Pos to = ed.snap(
-                Pos{world.x - ed.drag.grab_offset.x,
-                    world.y - ed.drag.grab_offset.y},
-                drag_coarse);
+            const Pos to = drag_landing(ed, in, world);
+            restore_drag_start(ed);
             if (ed.drag.kind == Editor::Drag::Kind::Part) {
                 push_move_part(*ed.doc, ed.drag.id, to);
             } else if (ed.drag.kind == Editor::Drag::Kind::Junction) {
@@ -472,11 +527,9 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
             }
         } else if (ed.drag.kind != Editor::Drag::Kind::None) {
             // The drag's own landing spot (a junction drag stays on
-            // the fine grid; parts and labels follow Shift).
-            free_spot = ed.snap(
-                Pos{world.x - ed.drag.grab_offset.x,
-                    world.y - ed.drag.grab_offset.y},
-                coarse && ed.drag.kind != Editor::Drag::Kind::Junction);
+            // the fine grid; parts and labels follow Shift) - the
+            // same helper the live frame and the release read.
+            free_spot = drag_landing(ed, in, world);
         } else if (ed.tool == Tool::Place || ed.tool == Tool::Label) {
             free_spot = ed.snap(world, coarse);
         }
@@ -731,6 +784,11 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     }
 
     rc.pop_transform();
+    // The camera's scale comes off with the transform: the Results
+    // panel draws through the same canvas and sets 1.0 itself, but
+    // the reset here keeps the renderer's default honest for whoever
+    // draws next.
+    rc.set_view_scale(1.0f);
 }
 
 }  // namespace editor
