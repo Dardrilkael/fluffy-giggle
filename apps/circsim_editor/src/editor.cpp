@@ -551,12 +551,23 @@ void Editor::document_changed() {
 
 void Editor::toast(std::string text, gui::ToastSeverity severity) const {
     if (toasts != nullptr) {
-        // The caller's string must outlive the toast's borrow: this
-        // holder is mutable-through-const exactly for that (the
-        // shell_example's message_ precedent).
-        static std::string holder;
-        holder = std::move(text);
-        toasts->push({holder.c_str(), severity, nullptr, 4.0f});
+        // Toast borrows the text (its Toast::text is a plain const
+        // char*), so each toast needs bytes that outlive its slot -
+        // and every toast its OWN bytes: a shared holder made two
+        // toasts pushed in one frame show the same text, and a
+        // reallocation dangled the earlier one. A deque member is
+        // mutable-through-const (toasting is not an edit) and its
+        // push/pop_front never move the other elements' bytes. The
+        // cap only ever retires strings whose toast slot is long
+        // gone: the store holds at most 8 live toasts (kMaxToasts),
+        // so the 17th push means the 1st's slot was already recycled
+        // - 16 kept strings can never back a displayed toast.
+        toast_text_.push_back(std::move(text));
+        if (toast_text_.size() > 16u) {
+            toast_text_.pop_front();
+        }
+        toasts->push({toast_text_.back().c_str(), severity, nullptr,
+                      4.0f});
     }
 }
 

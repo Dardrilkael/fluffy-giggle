@@ -35,9 +35,11 @@
 //                places one label; stays armed.
 // Wheel zooms toward the cursor; middle-drag and space+left-drag pan.
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cmath>
+#include <deque>
 #include <functional>
 #include <map>
 #include <optional>
@@ -288,6 +290,9 @@ struct Editor {
     ws::ui::r2d::Font* font = nullptr;          // the UI face
     ws::ui::r2d::Font* font_mono = nullptr;     // the netlist panel's face
     gui::Toasts* toasts = nullptr;              // the shell's store
+    // The toast texts' stable home (toast() borrows from it; mutable
+    // through const - toasting is not an edit).
+    mutable std::deque<std::string> toast_text_;
     std::function<void(std::string)> set_status;
     // The Results panel's export button: true = JSON, false = CSV.
     // The app installs it (the path policy - derive from the
