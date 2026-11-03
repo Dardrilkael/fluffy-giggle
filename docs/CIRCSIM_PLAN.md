@@ -225,3 +225,26 @@ assertions green, the shadow audit clean, the editor TUs
 syntax-clean against the seam. The svg sheets pixel-probed at every
 step: the phantom closing line, the source stubs, the supply's old
 orientation and the bulk's old tee all verified gone.
+
+## Stage 18 (2026-11-03): the silent joins get their dots
+
+A wiring audit (a Python mirror of nets.cpp's rules, cross-checked
+against the CLI netlist partition on every deck) proved two classes of
+connection that NOTHING on the canvas showed and NO diagnostic named:
+a wire whose path passes through a pin position picks the pin up
+mid-segment (a 1k with both pins riding one wire netlists as
+`R1 N001 N001 1k` - shorted, ERC 0/0), and a wire's interior vertex
+riding another wire's path merges the nets (its own `R N002 N002`).
+The editor cannot author either through the pointer (wire commits land
+on pins/junctions/minted junctions), but part drags and hand-written
+decks produce them freely. Fix #1 of the three options - report them,
+paint them:
+
+| Commit | What landed |
+|-----------|-------------|
+| `2965623` | 18a: `NetBuild::silent_joins` - nets.cpp records every pickup its coincidence rules make where no authored junction sits: `PinOnWire` (a pin on a wire's path interior, the part/pin/wire named) and `WireOnWire` (a wire vertex on another wire's interior), one entry per position, a pin entry upgrading a wire entry at the same spot. Landings (wire ends on named entities), crossings and pin-to-pin touches never report (the tline deck's grounding idiom stays clean). The editor paints the positions as auto-junction dots - the same dot the authored junctions wear - through `Editor::auto_junction_dots()`, one build_nets per edit cached against `Schematic::version()`, reset with the document. 5 test_nets cases; the probe on the three example decks answers 0 joins each, on the two adversarial decks exactly the proven shorts. |
+
+Stage-18 candidates that did NOT land (the audit's other two options):
+ERC warnings on un-authored pickups (the data is there now -
+`silent_joins` is the list), and an on-wire snap that mints a junction
+when a wire endpoint or part drag lands on another wire's path.
