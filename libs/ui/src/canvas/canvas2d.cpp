@@ -150,6 +150,7 @@ void CommandListCanvas::stroke(const Paint& paint) {
         for (const auto& p : run) c.points.push_back(to_screen(p));
         c.color = paint.color;
         c.width = paint.width;
+        c.closed = path_closed_;
         c.join = paint.join;
         c.cap = paint.cap;
         cmds.push_back(std::move(c));

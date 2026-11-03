@@ -198,6 +198,11 @@ struct CanvasCmd {
     std::vector<Point> points;  // stroke/fill polyline (screen space)
     std::uint32_t color = 0xFFFFFFFFu;
     float width = 1.0f;         // stroke width (screen px)
+    bool closed = false;        // stroke_polyline only: the path closes
+                                // back to points.front() when the paint
+                                // lands (a tessellation-time property -
+                                // the recorded points never include the
+                                // closing segment)
     StrokeJoin join = StrokeJoin::miter;
     StrokeCap cap = StrokeCap::butt;
     // text/image payload

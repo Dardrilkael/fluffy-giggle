@@ -46,12 +46,13 @@ std::vector<SymbolStroke> render_symbol(const SymbolDef& sym,
                 for (const Pos& p : d.pts) {
                     s.pts.push_back(place(p));
                 }
-                // Mirrors the editor's stage-2 renderer: every Poly
-                // closes. (The diode's triangle closes by repeating
-                // its first vertex; this flag is the closed-path bug
-                // the zigzag wears - pinned by test_symbol_render's
-                // characterization until the fix flips it.)
-                s.closed = true;
+                // symbols.hpp's contract: Poly is an OPEN polyline -
+                // a shape that means to close repeats its first vertex
+                // (the diode's triangle, the transistor arrowheads).
+                // The stage-2 renderer closed every poly unconditionally
+                // instead, hanging a phantom segment off the resistor's
+                // zigzag; the flag now answers the contract.
+                s.closed = false;
                 out.push_back(std::move(s));
                 break;
             }

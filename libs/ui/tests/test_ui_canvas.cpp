@@ -618,6 +618,26 @@ TEST_CASE("canvas2d: convenience wrappers record the right commands") {
         c.stroke_circle({0.0f, 0.0f}, 5.0f, Paint{});
         CHECK(c.count(CanvasCmdKind::stroke_polyline) == 1);
         CHECK(c.cmds[0].points.size() == 32);
+        CHECK(c.cmds[0].closed);  // the tessellation joints the loop
+    }
+
+    SUBCASE("stroke_polyline records its closed flag") {
+        // The flag decides whether the PAINT joints the path back to
+        // its first point (a tessellation-time property; the recorded
+        // points never carry the closing segment). The editor's symbol
+        // path rides it: an open polyline must stay open - the stage-2
+        // renderer once closed every poly and the resistor's zigzag
+        // wore a phantom straight segment.
+        const Point tri[] = {{0.0f, 0.0f}, {10.0f, 0.0f}, {5.0f, 10.0f}};
+        c.stroke_polyline(tri, 3, Paint{});
+        CHECK(c.count(CanvasCmdKind::stroke_polyline) == 1);
+        CHECK(c.cmds[0].points.size() == 3);
+        CHECK_FALSE(c.cmds[0].closed);
+        c.cmds.clear();
+        c.stroke_polyline(tri, 3, Paint{}, true);
+        CHECK(c.count(CanvasCmdKind::stroke_polyline) == 1);
+        CHECK(c.cmds[0].points.size() == 3);  // the close is not a point
+        CHECK(c.cmds[0].closed);
     }
 
     SUBCASE("fill_circle records a 32-point polygon") {

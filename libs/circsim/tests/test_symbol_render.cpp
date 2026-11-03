@@ -210,14 +210,13 @@ TEST_CASE("characterization: sources ride the safety net today") {
     CHECK(pts_eq(*first, 1, Pos{0.5, 0.0}));
 }
 
-TEST_CASE("characterization: every Poly closes today") {
-    // The stage-2 renderer closed every polyline (the editor passed
-    // closed=true unconditionally): the resistor's OPEN zigzag wore a
-    // phantom closing segment back through its teeth, and the diode's
-    // triangle - closed by construction, its first vertex repeated at
-    // the end - closed again. The stage-17c fix flips this flag to
-    // false (closed shapes close by construction); until then this
-    // case is the honest characterization.
+TEST_CASE("polylines render open; closed shapes close by construction") {
+    // symbols.hpp's contract: Poly is an OPEN polyline. A shape that
+    // means to close repeats its first vertex (the diode's triangle) -
+    // the stroke's closed flag stays false and the shape is still
+    // whole. The stage-2 renderer closed every poly unconditionally,
+    // hanging a phantom segment off the resistor's zigzag from (3,0)
+    // back to (-3,0); this case is the fix's pin.
     const SymbolDef* r = ws::circsim::find_symbol("r");
     REQUIRE(r != nullptr);
     const std::vector<SymbolStroke> rz =
@@ -225,7 +224,13 @@ TEST_CASE("characterization: every Poly closes today") {
     const SymbolStroke* poly = find_kind(rz, SymbolStroke::Kind::Poly);
     REQUIRE(poly != nullptr);
     REQUIRE(poly->pts.size() == 7);
-    CHECK(poly->closed);  // the bug, characterized
+    CHECK_FALSE(poly->closed);
+    // And the open path is exactly the table's zigzag - no phantom
+    // eighth segment, no reordered teeth.
+    CHECK(pts_eq(*poly, 0, Pos{-3.0, 0.0}));
+    CHECK(pts_eq(*poly, 1, Pos{-2.0, 0.6}));
+    CHECK(pts_eq(*poly, 4, Pos{1.0, -0.6}));
+    CHECK(pts_eq(*poly, 6, Pos{3.0, 0.0}));
 
     const SymbolDef* d = ws::circsim::find_symbol("d");
     REQUIRE(d != nullptr);
@@ -236,7 +241,7 @@ TEST_CASE("characterization: every Poly closes today") {
     REQUIRE(poly->pts.size() == 4);
     CHECK(poly->pts.front().x == poly->pts.back().x);
     CHECK(poly->pts.front().y == poly->pts.back().y);
-    CHECK(poly->closed);
+    CHECK_FALSE(poly->closed);  // closed by construction, not by flag
 }
 
 TEST_CASE("malformed prims are skipped, not repaired") {

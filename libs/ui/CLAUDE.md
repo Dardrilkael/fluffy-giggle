@@ -67,6 +67,13 @@ The archive's PUBLIC deps are the pure workspace libs its public headers
 name: core, math (canvas Vec2), input, jobs, settings, app and platform
 (the shell's headless services).
 
+CommandListCanvas records every stroke's `closed` flag on the command
+(stage 17c): the flag decides whether the PAINT joints the path back to
+its first point - a tessellation-time property, so the recorded points
+never carry the closing segment. Tests assert the flag (an open
+polyline must stay open; the stage-2 symbol renderer once closed every
+poly and the resistor's zigzag wore a phantom straight segment).
+
 ## Event system
 
 - Event types: `WindowClose`, `WindowResize`, `KeyPressed`, `KeyReleased`, `MouseButtonPressed`, `MouseButtonReleased`, `MouseMoved`, `MouseScrolled`, `TouchPressed`, `TouchMoved`, `TouchReleased`, `TextInput`, `FileDropped`.
