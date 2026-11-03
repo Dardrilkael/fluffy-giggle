@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <string>
 
 namespace ws::ui::gui {
 
@@ -56,7 +57,10 @@ int Toasts::push(const Toast& toast) {
         }
     }
     Slot& s = slots_[static_cast<std::size_t>(slot)];
-    s.toast = toast;
+    s.text = toast.text ? toast.text : "";
+    s.action = toast.action ? toast.action : "";
+    s.severity = toast.severity;
+    s.duration = toast.duration;
     s.age = 0.0f;
     s.live = true;
     if (!evicted) {
@@ -120,7 +124,7 @@ int draw_toasts(GuiContext& gui, const ChromeTheme& theme, Toasts& toasts,
             continue;
         }
         s.age += in.dt_seconds;
-        if (s.toast.duration > 0.0f && s.age >= s.toast.duration) {
+        if (s.duration > 0.0f && s.age >= s.duration) {
             toasts.dismiss(i);
         }
     }
@@ -169,16 +173,15 @@ int draw_toasts(GuiContext& gui, const ChromeTheme& theme, Toasts& toasts,
         // them; a frame too narrow caps the panel and the text refits
         // into the room that is left.
         char text_scratch[128];
-        LabelFit text_fit = fit_text(s.toast.text, -1.0f, theme, text_scratch,
+        LabelFit text_fit = fit_text(s.text.c_str(), -1.0f, theme, text_scratch,
                                      sizeof text_scratch);
-        const bool has_action =
-            s.toast.action != nullptr && s.toast.action[0] != '\0';
+        const bool has_action = !s.action.empty();
         const float gap = has_action ? theme.spacing : 0.0f;
         float button_w = 0.0f;
         if (has_action) {
             char action_scratch[128];
             const LabelFit action_fit =
-                fit_text(s.toast.action, -1.0f, theme, action_scratch,
+                fit_text(s.action.c_str(), -1.0f, theme, action_scratch,
                          sizeof action_scratch);
             button_w = action_fit.advance + 2.0f * pad;
         }
@@ -189,7 +192,7 @@ int draw_toasts(GuiContext& gui, const ChromeTheme& theme, Toasts& toasts,
             const float room =
                 std::max(0.0f, toast_w - 2.0f * pad -
                                      (has_action ? gap + button_w : 0.0f));
-            text_fit = fit_text(s.toast.text, room, theme, text_scratch,
+            text_fit = fit_text(s.text.c_str(), room, theme, text_scratch,
                                 sizeof text_scratch);
         }
         const Rect bounds{frame.width - toast_w - pad, y, toast_w, toast_h};
@@ -222,7 +225,7 @@ int draw_toasts(GuiContext& gui, const ChromeTheme& theme, Toasts& toasts,
         r2d::push_clip_escape(escape.x, escape.y, escape.width, escape.height);
         gui.push_hit_clip_escape(bounds);
         paint(theme, &WidgetPainters::toast, &toast_draw, bounds,
-              s.toast.severity, theme);
+              s.severity, theme);
         const Rect content =
             layout.begin_panel(bounds, theme.padding, theme.spacing);
         r2d::push_clip(content.x, content.y, content.width, content.height);
@@ -238,7 +241,7 @@ int draw_toasts(GuiContext& gui, const ChromeTheme& theme, Toasts& toasts,
         Rect button_rect{};
         bool action_fired = false;
         if (has_action) {
-            text(layout, theme, s.toast.text, text_room);
+            text(layout, theme, s.text.c_str(), text_room);
             layout.same_line();  // one panel-spacing: the `gap` above
             button_rect = Rect{content.x + text_room + gap, content.y,
                                button_w, theme.control_height};
@@ -246,9 +249,9 @@ int draw_toasts(GuiContext& gui, const ChromeTheme& theme, Toasts& toasts,
             // clickable, working above a modal veil (50 > 40 - the
             // layer numbers are the whole gate).
             action_fired =
-                button(gui, layout, theme, s.toast.action, button_w);
+                button(gui, layout, theme, s.action.c_str(), button_w);
         } else {
-            text(layout, theme, s.toast.text, -1.0f);
+            text(layout, theme, s.text.c_str(), -1.0f);
         }
 
         // --- the dismissal -------------------------------------------------

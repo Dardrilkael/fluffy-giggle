@@ -406,15 +406,19 @@ Selection Editor::hit_any(Pos world, double radius) const {
         return {Selection::Kind::Junction, j};
     }
     double best_d = radius;
+    Selection best_wire{};
     for (const ws::circsim::Wire& w : s->wires()) {
         const std::vector<Pos> path = wire_path(w);
         for (std::size_t i = 1; i < path.size(); ++i) {
             const double d = dist_to_segment(path[i - 1], path[i], world);
-            if (d <= best_d) {
+            if (d < best_d) {
                 best_d = d;
-                return {Selection::Kind::Wire, w.id};
+                best_wire = {Selection::Kind::Wire, w.id};
             }
         }
+    }
+    if (best_wire.kind == Selection::Kind::Wire) {
+        return best_wire;
     }
     for (const ws::circsim::Label& l : s->labels()) {
         if (len(Pos{l.pos.x - world.x, l.pos.y - world.y}) <= radius + 1.0) {

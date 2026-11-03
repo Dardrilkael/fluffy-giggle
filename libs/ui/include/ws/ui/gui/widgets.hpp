@@ -1494,8 +1494,12 @@ struct Toasts {
 private:
     static constexpr int kMaxToasts = 8;
     struct Slot {
-        Toast toast;
-        float age = 0.0f;  // seconds since push, drawn down against duration
+        // Owned strings - the public Toast API uses borrowed pointers
+        std::string text;
+        std::string action;
+        ToastSeverity severity = ToastSeverity::info;
+        float duration = 4.0f;
+        float age = 0.0f;   // seconds since push, drawn down against duration
         bool live = false;
     };
     std::array<Slot, kMaxToasts> slots_{};

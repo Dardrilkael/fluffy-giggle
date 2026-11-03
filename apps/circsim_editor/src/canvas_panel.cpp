@@ -115,24 +115,31 @@ struct SnapTarget {
 }
 
 // Writes the dragged entity's position straight into the schematic (no
-// undo - the command lands at release).
-void set_drag_pos(Editor& ed, Pos at) {
+// undo - the command lands at release). Returns true if the position
+// actually changed (and a bump was done).
+bool set_drag_pos(Editor& ed, Pos at) {
     ws::circsim::Schematic* s = ed.schem();
     if (s == nullptr) {
-        return;
+        return false;
     }
     switch (ed.drag.kind) {
         case Editor::Drag::Kind::Part:
             if (ws::circsim::Part* p = s->find_part(ed.drag.id)) {
-                p->pos = at;
-                s->bump();
+                if (!eps_eq(p->pos.x, at.x, 1e-9) || !eps_eq(p->pos.y, at.y, 1e-9)) {
+                    p->pos = at;
+                    s->bump();
+                    return true;
+                }
             }
             break;
         case Editor::Drag::Kind::Junction:
             for (ws::circsim::Junction& j : s->junctions_mut()) {
                 if (j.id == ed.drag.id) {
-                    j.pos = at;
-                    s->bump();
+                    if (!eps_eq(j.pos.x, at.x, 1e-9) || !eps_eq(j.pos.y, at.y, 1e-9)) {
+                        j.pos = at;
+                        s->bump();
+                        return true;
+                    }
                     break;
                 }
             }
@@ -140,8 +147,11 @@ void set_drag_pos(Editor& ed, Pos at) {
         case Editor::Drag::Kind::Label:
             for (ws::circsim::Label& l : s->labels_mut()) {
                 if (l.id == ed.drag.id) {
-                    l.pos = at;
-                    s->bump();
+                    if (!eps_eq(l.pos.x, at.x, 1e-9) || !eps_eq(l.pos.y, at.y, 1e-9)) {
+                        l.pos = at;
+                        s->bump();
+                        return true;
+                    }
                     break;
                 }
             }
@@ -149,6 +159,7 @@ void set_drag_pos(Editor& ed, Pos at) {
         case Editor::Drag::Kind::None:
             break;
     }
+    return false;
 }
 
 // The wire draft's start can disappear under it (undo/redo, a delete
