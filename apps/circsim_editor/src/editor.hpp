@@ -328,6 +328,12 @@ struct Editor {
         ws::circsim::WireEndpoint a{};
         Pos a_pos{0.0, 0.0};
         int a_dir = 0;  // the start pin's direction, -1 when free
+        // A start on a wire's body (stage 18b): the start endpoint is
+        // not a pin or junction, so it has no WireEndpoint to bind to.
+        // The commit mints a junction at `a_pos` on the wire `a_wire`
+        // and binds the new wire's `a` to it - the same path the
+        // commit-side wire-point takes, just deferred past a cancel.
+        bool a_mint = false;
     } wire_draft;
 
     // True when the last frame's Properties draw saw a focused text
@@ -445,6 +451,21 @@ struct Editor {
     [[nodiscard]] std::optional<PinHit> hit_pin(Pos world,
                                                 double radius) const;
     [[nodiscard]] std::optional<std::uint32_t> hit_junction(
+        Pos world, double radius) const;
+    // A point on an existing wire's path within `radius` of `world`
+    // (stage 18b): the nearest grid-aligned point lying on some wire's
+    // polyline, falling back to the nearest path vertex when the grid
+    // snap would drift off the segment. The returned point is bit-equal
+    // to a position the wire's path passes through, so nets.cpp's
+    // exact-double on_polyline accepts it when the editor mints a
+    // junction there. The wire tool snaps a click near another wire's
+    // body to this point and connects through that junction - the
+    // standard EDA T-tap, the one thing the wire tool was missing.
+    struct WirePointSnap {
+        std::uint32_t wire = 0;  // the wire whose path was hit
+        Pos pos{0.0, 0.0};       // grid-aligned, on the wire's path
+    };
+    [[nodiscard]] std::optional<WirePointSnap> hit_wire_point(
         Pos world, double radius) const;
     [[nodiscard]] Selection hit_any(Pos world, double radius) const;
 

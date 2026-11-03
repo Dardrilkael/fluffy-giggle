@@ -251,6 +251,68 @@ std::optional<std::uint32_t> Editor::hit_junction(Pos world,
     return best;
 }
 
+// A point on an existing wire's path the cursor would land on (stage
+// 18b): for every segment, project the cursor onto the segment, snap
+// the projection to the fine grid, and accept the snap when it stays
+// on the segment (the exact check nets.cpp will run later); otherwise
+// fall back to the segment's nearest endpoint (a path vertex, always
+// grid-aligned). Among all segments' candidates, return the one
+// closest to the cursor. route_wire's paths are ortho-on-grid, so the
+// common case lands inside the segment; the fallback is the rare
+// near-endpoint click, where the vertex is the right answer anyway.
+std::optional<Editor::WirePointSnap> Editor::hit_wire_point(
+    Pos world, double radius) const {
+    const ws::circsim::Schematic* s = schem();
+    if (s == nullptr) {
+        return std::nullopt;
+    }
+    std::optional<WirePointSnap> best;
+    double best_d = radius;
+    const canvas::GridSpec spec = grid_spec();
+    const auto snap_one = [&](double v) {
+        return canvas::snap_coord(v, spec, false);
+    };
+    for (const ws::circsim::Wire& w : s->wires()) {
+        const std::vector<Pos> path = wire_path(w);
+        for (std::size_t i = 1; i < path.size(); ++i) {
+            const Pos a = path[i - 1];
+            const Pos b = path[i];
+            const Pos ab{b.x - a.x, b.y - a.y};
+            const Pos ap{world.x - a.x, world.y - a.y};
+            const double denom = ab.x * ab.x + ab.y * ab.y;
+            double t = denom > 0.0 ? (ap.x * ab.x + ap.y * ab.y) / denom
+                                  : 0.0;
+            t = std::max(0.0, std::min(1.0, t));
+            const Pos proj{a.x + t * ab.x, a.y + t * ab.y};
+            // Snap the projection to the fine grid; for an ortho
+            // segment one coordinate is the segment's stationary
+            // value (already grid-aligned) and snaps to itself, the
+            // other rounds to the nearest grid line.
+            Pos cand{snap_one(proj.x), snap_one(proj.y)};
+            // Verify cand lies on segment ab with exact equality
+            // (the same on_segment nets.cpp runs). If not, the grid
+            // snap drifted off the segment - use the nearer endpoint.
+            const double cross =
+                (b.x - a.x) * (cand.y - a.y) - (b.y - a.y) * (cand.x - a.x);
+            const bool on_seg =
+                cross == 0.0 &&
+                cand.x >= std::min(a.x, b.x) && cand.x <= std::max(a.x, b.x) &&
+                cand.y >= std::min(a.y, b.y) && cand.y <= std::max(a.y, b.y);
+            if (!on_seg) {
+                const double da = len(Pos{a.x - world.x, a.y - world.y});
+                const double db = len(Pos{b.x - world.x, b.y - world.y});
+                cand = da <= db ? a : b;
+            }
+            const double d = len(Pos{cand.x - world.x, cand.y - world.y});
+            if (d <= best_d) {
+                best_d = d;
+                best = WirePointSnap{w.id, cand};
+            }
+        }
+    }
+    return best;
+}
+
 Selection Editor::hit_any(Pos world, double radius) const {
     const ws::circsim::Schematic* s = schem();
     if (s == nullptr) {

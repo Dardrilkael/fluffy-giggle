@@ -261,4 +261,91 @@ TEST_CASE("the schematic panel draws the world at its w2s position") {
     }
 }
 
+// --- wire-on-wire snap (stage 18b): the manual-wiring fix ---------------------
+//
+// The wire tool's snap was pin -> junction -> grid, and never a wire's
+// body. A click near another wire landed a hair off the grid, the new
+// wire's endpoint sat at the wrong position, and nets.cpp's exact
+// on_polyline missed the connection - the "manually setting up the
+// wire goes wrong" symptom. The fix snaps to the nearest grid point on
+// a wire's path and mints a junction there (the standard EDA T-tap);
+// the cases below pin the geometry helper that does that snap.
+
+TEST_CASE("hit_wire_point: a click near a wire's body snaps onto it") {
+    Bench b;
+    b.place_wire();  // path (1,1) -> (4,1), grid=1
+    const auto hit = b.ed.hit_wire_point({2.7, 1.05}, 0.4);
+    REQUIRE(hit.has_value());
+    CHECK(hit->pos.x == 3.0);  // the nearest grid x on the segment
+    CHECK(hit->pos.y == 1.0);  // the segment's stationary y
+}
+
+TEST_CASE("hit_wire_point: a click far from every wire returns nothing") {
+    Bench b;
+    b.place_wire();
+    CHECK_FALSE(b.ed.hit_wire_point({20.0, 20.0}, 0.4).has_value());
+}
+
+TEST_CASE("hit_wire_point: the snap lands on the nearer endpoint when "
+          "the grid snap would drift off the segment") {
+    Bench b;
+    b.place_wire();  // (1,1) -> (4,1); a click at (4.6, 1) is past b
+    const auto hit = b.ed.hit_wire_point({4.6, 1.0}, 0.7);
+    REQUIRE(hit.has_value());
+    CHECK(hit->pos.x == 4.0);
+    CHECK(hit->pos.y == 1.0);
+}
+
+TEST_CASE("hit_wire_point: the snap is bit-equal to a path vertex when "
+          "the cursor sits on one") {
+    Bench b;
+    // A two-segment path (an L): (0,0) -> (3,0) -> (3,3). route_wire
+    // produces ortho-on-grid vertices; the elbow at (3,0) is the
+    // vertex a T-tap would land on.
+    ws::circsim::Junction a;
+    a.id = b.doc.schem.alloc_id();
+    a.pos = {0.0, 0.0};
+    ws::circsim::Junction c;
+    c.id = b.doc.schem.alloc_id();
+    c.pos = {3.0, 3.0};
+    b.doc.schem.junctions_mut().push_back(a);
+    b.doc.schem.junctions_mut().push_back(c);
+    ws::circsim::Wire w;
+    w.a = ws::circsim::JunctionRef{a.id};
+    w.b = ws::circsim::JunctionRef{c.id};
+    w.waypoints.push_back({3.0, 0.0});
+    w.ortho = true;
+    b.doc.schem.wires_mut().push_back(w);
+    const auto hit = b.ed.hit_wire_point({3.2, 0.1}, 0.4);
+    REQUIRE(hit.has_value());
+    CHECK(hit->pos.x == 3.0);
+    CHECK(hit->pos.y == 0.0);
+}
+
+TEST_CASE("hit_wire_point: among several wires, the nearest segment wins") {
+    Bench b;
+    // Two horizontal wires on y=0 and y=5.
+    auto add_wire = [&](double y) {
+        ws::circsim::Junction a;
+        a.id = b.doc.schem.alloc_id();
+        a.pos = {0.0, y};
+        ws::circsim::Junction c;
+        c.id = b.doc.schem.alloc_id();
+        c.pos = {10.0, y};
+        b.doc.schem.junctions_mut().push_back(a);
+        b.doc.schem.junctions_mut().push_back(c);
+        ws::circsim::Wire w;
+        w.a = ws::circsim::JunctionRef{a.id};
+        w.b = ws::circsim::JunctionRef{c.id};
+        w.ortho = true;
+        b.doc.schem.wires_mut().push_back(w);
+    };
+    add_wire(0.0);
+    add_wire(5.0);
+    // A click at (5, 0.2) is much closer to the y=0 wire.
+    const auto hit = b.ed.hit_wire_point({5.0, 0.2}, 1.0);
+    REQUIRE(hit.has_value());
+    CHECK(hit->pos.y == 0.0);
+}
+
 }  // namespace

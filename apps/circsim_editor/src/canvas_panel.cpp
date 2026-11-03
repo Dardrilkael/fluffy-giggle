@@ -57,9 +57,11 @@ constexpr float kSnapDotPx = 5.0f;
     return view.valid() ? static_cast<double>(kPickPx) / view.zoom : 0.35;
 }
 
-// The wire tool's snap: pins first, then junctions, then the grid.
+// The wire tool's snap: pins first, then junctions, then a point on
+// an existing wire's body (stage 18b - the editor mints a junction
+// there at commit, the standard EDA T-tap), then the grid.
 struct SnapTarget {
-    enum class Kind : std::uint8_t { Free, Pin, Junction };
+    enum class Kind : std::uint8_t { Free, Pin, Junction, WirePoint };
     Kind kind = Kind::Free;
     ws::circsim::WireEndpoint end{};  // valid for Pin / Junction
     Pos pos{0.0, 0.0};
@@ -83,6 +85,14 @@ struct SnapTarget {
         t.end = ws::circsim::JunctionRef{j};
         const ws::circsim::Junction* found = ed.schem()->find_junction(j);
         t.pos = found != nullptr ? found->pos : world;
+        return t;
+    }
+    if (const std::optional<Editor::WirePointSnap> wp =
+            ed.hit_wire_point(world, pick_world(ed.view))) {
+        SnapTarget t;
+        t.kind = SnapTarget::Kind::WirePoint;
+        t.pos = wp->pos;
+        t.dir = -1;  // no approach constraint - the new wire leaves freely
         return t;
     }
     SnapTarget t;
@@ -262,19 +272,27 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                     break;
                 }
                 if (!ed.wire_draft.active) {
-                    // Start only on a connection point.
+                    // Start only on a connection point: a pin, a
+                    // junction, or another wire's body (stage 18b: the
+                    // editor mints a junction on that wire at commit,
+                    // the standard EDA T-tap from a bus).
                     const SnapTarget t = snap_wire_target(ed, world);
                     if (t.kind != SnapTarget::Kind::Free) {
                         ed.wire_draft.active = true;
-                        ed.wire_draft.a = t.end;
+                        ed.wire_draft.a = t.end;  // unused when a_mint
                         ed.wire_draft.a_pos = t.pos;
                         ed.wire_draft.a_dir = t.dir;
+                        ed.wire_draft.a_mint =
+                            t.kind == SnapTarget::Kind::WirePoint;
                     }
                     break;
                 }
-                // Commit: onto a pin/junction, or free space (a fresh
-                // junction there - its id minted now, the one path that
-                // can, so the wire's endpoint names it).
+                // Commit: onto a pin/junction, a wire's body (a fresh
+                // junction there - its id minted now, the same path the
+                // free case takes), or free space (also a fresh
+                // junction). The a side may also need a mint (a start on
+                // a wire's body), deferred to here so a cancel leaves
+                // nothing behind.
                 const SnapTarget t = snap_wire_target(ed, world);
                 if (t.kind == SnapTarget::Kind::Free &&
                     eps_eq(t.pos.x, ed.wire_draft.a_pos.x, 1e-9) &&
@@ -283,7 +301,17 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                 }
                 ws::circsim::Wire w;
                 std::vector<ws::circsim::Junction> junctions;
-                if (t.kind == SnapTarget::Kind::Free) {
+                if (ed.wire_draft.a_mint) {
+                    ws::circsim::Junction j;
+                    j.pos = ed.wire_draft.a_pos;
+                    j.id = ed.schem()->alloc_id();
+                    junctions.push_back(j);
+                    w.a = ws::circsim::JunctionRef{j.id};
+                } else {
+                    w.a = ed.wire_draft.a;
+                }
+                if (t.kind == SnapTarget::Kind::Free ||
+                    t.kind == SnapTarget::Kind::WirePoint) {
                     ws::circsim::Junction j;
                     j.pos = t.pos;
                     j.id = ed.schem()->alloc_id();
@@ -292,7 +320,6 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                 } else {
                     w.b = t.end;
                 }
-                w.a = ed.wire_draft.a;
                 w.waypoints = Editor::route_wire(ed.wire_draft.a_pos,
                                                  ed.wire_draft.a_dir, t.pos,
                                                  t.dir);
