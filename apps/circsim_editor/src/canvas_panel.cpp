@@ -58,6 +58,17 @@ constexpr float kLabelPickPx = 6.0f;
 constexpr float kSnapFeedbackPx = 8.0f;
 constexpr float kSnapDotPx = 5.0f;
 
+// The junction dots' screen floor: a dot is 0.14 world units at the
+// working zooms, but below ~zoom 14 that is under 2px on screen -
+// the radius never shrinks past this many px (the ring and the pick
+// agree by construction: the ring IS the pick radius in world units).
+constexpr float kDotFloorPx = 2.0f;
+
+[[nodiscard]] float dot_world(const EditorView& view) {
+    return view.zoom > 0.0f ? std::max(0.14f, kDotFloorPx / view.zoom)
+                            : 0.14f;
+}
+
 [[nodiscard]] double pick_world(const EditorView& view) {
     return view.valid() ? static_cast<double>(kPickPx) / view.zoom : 0.35;
 }
@@ -599,9 +610,10 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     for (const ws::circsim::Junction& j : s.junctions()) {
         rc.fill_circle(
             Point{static_cast<float>(j.pos.x), static_cast<float>(j.pos.y)},
-            0.14f, ed.sel.is(Selection::Kind::Junction, j.id)
-                       ? theme.control_on
-                       : gui::dim(theme.text, 0.85f));
+            dot_world(ed.view),
+            ed.sel.is(Selection::Kind::Junction, j.id)
+                ? theme.control_on
+                : gui::dim(theme.text, 0.85f));
     }
     // The silent joins' dots (stage 18): pins a wire's path picked up,
     // vertices T-riding another wire - the net rules connect them, so
@@ -612,7 +624,7 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     for (const Pos& p : ed.auto_junction_dots()) {
         rc.fill_circle(Point{static_cast<float>(p.x),
                              static_cast<float>(p.y)},
-                        0.14f, gui::dim(theme.text, 0.85f));
+                        dot_world(ed.view), gui::dim(theme.text, 0.85f));
     }
     if (theme.font != nullptr) {
         for (const ws::circsim::Label& l : s.labels()) {
@@ -701,9 +713,17 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         Paint ring;
         ring.width = 2.0f;
         ring.color = theme.control_on;
+        // The ring IS the pick area: the pick radius in world units,
+        // so what you see ringed is exactly what a click would catch
+        // at every zoom (a fixed 0.35 world ring once agreed with the
+        // 9px pick only near zoom 26 - 35px wide at zoom 100, and
+        // the 0.14 dots under 1px at zoom 3).
+        const float ring_r = ed.view.zoom > 0.0f
+                                 ? kPickPx / static_cast<float>(ed.view.zoom)
+                                 : 0.35f;
         rc.stroke_circle(Point{static_cast<float>(ring_target->x),
                                static_cast<float>(ring_target->y)},
-                         0.35f, ring);
+                         ring_r, ring);
     }
 
     // --- the wire draft preview
