@@ -179,6 +179,39 @@ TEST_CASE("built-in symbols carry stage-2 specs and draw") {
     const SymbolDef* gnd = ws::circsim::find_symbol("gnd");
     REQUIRE(gnd != nullptr);
     CHECK(gnd->draw.size() == 4);
+    // Stage 17e: the ground hangs BELOW its pin and the pin points UP
+    // into the circuit (the stage-2 table said 270 - into its own
+    // bars, so a wire leaving the pin ran through the symbol).
+    REQUIRE(gnd->pins.size() == 1);
+    CHECK(gnd->pins[0].dir == 90);
+    for (const DrawPrim& d : gnd->draw) {
+        for (const Pos& p : d.pts) {
+            CHECK(p.y <= 0.0);
+        }
+    }
+
+    // The supply faces UP: the bar and label above the node, the pin
+    // pointing down into the circuit below it.
+    const SymbolDef* vcc = ws::circsim::find_symbol("vcc");
+    REQUIRE(vcc != nullptr);
+    REQUIRE(vcc->pins.size() == 1);
+    CHECK(vcc->pins[0].dir == 270);
+    REQUIRE(vcc->draw.size() == 3);
+    bool bar_above = false;
+    for (const DrawPrim& d : vcc->draw) {
+        if (d.kind == DrawPrim::Kind::Line && !d.pts.empty() &&
+            d.pts[0].y > 0.0 && d.pts[1].y > 0.0) {
+            bar_above = true;
+        }
+    }
+    CHECK(bar_above);
+    bool label_above = false;
+    for (const DrawPrim& d : vcc->draw) {
+        if (d.kind == DrawPrim::Kind::Text && d.pts[0].y > 1.0) {
+            label_above = true;
+        }
+    }
+    CHECK(label_above);
 }
 
 TEST_CASE("symbol_bounds covers pins and primitives") {

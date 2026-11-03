@@ -252,12 +252,16 @@ const std::vector<SymbolDef>& table() {
         // MOSFETs: D G S B pin order, y-up (drain on top).
         mosfet("nmos", "N-channel MOSFET", false),
         mosfet("pmos", "P-channel MOSFET", true),
-        // Ground / power: single fixed-net pins, never exported.
+        // Ground / power: single fixed-net pins, never exported. The
+        // pin is where the wire lands; the body hangs BELOW it (the
+        // bars) and the pin points UP into the circuit (dir 90 - the
+        // wire-start direction; the stage-2 table said 270, straight
+        // into its own bars).
         [] {
             SymbolDef s;
             s.key = "gnd";
             s.name = "Ground";
-            s.pins = {PinDef{.name = "0", .dx = 0.0, .dy = 0.0, .dir = 270}};
+            s.pins = {PinDef{.name = "0", .dx = 0.0, .dy = 0.0, .dir = 90}};
             s.fixed_net = "0";
             s.needs_value = false;
             s.draw = {line(0.0, 0.0, 0.0, -1.0), line(-1.5, -1.0, 1.5, -1.0),
@@ -265,15 +269,18 @@ const std::vector<SymbolDef>& table() {
                       line(-0.5, -3.0, 0.5, -3.0)};
             return s;
         }(),
+        // The supply faces UP: the bar and label sit ABOVE the node
+        // (the stage-2 table hung them below - a ground with text).
+        // The pin points DOWN into the circuit below it.
         [] {
             SymbolDef s;
             s.key = "vcc";
             s.name = "Supply (VCC)";
-            s.pins = {PinDef{.name = "p", .dx = 0.0, .dy = 0.0, .dir = 90}};
+            s.pins = {PinDef{.name = "p", .dx = 0.0, .dy = 0.0, .dir = 270}};
             s.fixed_net = "VCC";
             s.needs_value = false;
-            s.draw = {line(0.0, 0.0, 0.0, -1.0), line(-1.5, -1.0, 1.5, -1.0),
-                      text(-1.4, -2.4, "VCC")};
+            s.draw = {line(0.0, 0.0, 0.0, 1.0), line(-1.5, 1.0, 1.5, 1.0),
+                      text(-1.4, 2.4, "VCC")};
             return s;
         }(),
     };
