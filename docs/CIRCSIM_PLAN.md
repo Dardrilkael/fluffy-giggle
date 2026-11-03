@@ -198,3 +198,30 @@ tools/smoke_circsim.py              # the CLI smoke (incl. library cases)
   pin allowances per symbol) - would ride ParamSpec-shaped data in
   .csym; nothing today.
 - **Multi-page / hierarchical sheets** (subsheet ports) - not started.
+
+## Stage 17 (2026-11-03): the symbol set redrawn
+
+Seven commits, one per fix, on the stage-17a render seam
+(`libs/circsim/render.hpp`: `render_symbol` flattens a placed symbol
+into world-space strokes - the editor paints them, the CLI's
+`symbols --svg` writes them, the tests assert them; no parallel
+transforms to drift):
+
+| Commit | What landed |
+|-----------|-------------|
+| `2e457a4` | 17a: the seam itself, with characterization tests pinning the stage-2 warts it moved verbatim. |
+| `0c2b24d` | 17b: `circsim_cli symbols --svg DIR` - one SVG per symbol plus a contact sheet, pins marked; the before/after harness (both sets under `download/symbol-redesign/`). |
+| `4f06879` | 17c: the closed-path fix - Poly renders OPEN per symbols.hpp's contract (the resistor's zigzag wore a phantom closing segment); CommandListCanvas records the `closed` flag so tests can see it. |
+| `3451a29` | 17d: the v/i sources move their pins to +-3 with real lead prims (the safety net's stub used to cross each body), line-drawn +/− polarity marks, the i arrow a filled head - which earns DrawPrim a `PolyFill` kind ("polyfill" in .csym). The tline demo's ground followed v.n (a coincidence connection); golden netlists unchanged. |
+| `69a7431` | 17e: the ground's pin points up out of its bars (dir 90); the supply's bar and label sit ABOVE its node with the pin pointing down (dir 270). |
+| `30a7540` | 17f: BJT emitter arrowheads (filled, direction-computed on the emitter stroke - out for NPN, in for PNP); the MOSFET bulk tees off the CHANNEL BAR's bottom instead of the source stroke's start (it read as a source-bulk short), the substrate arrow at the top of the drop, and the b pin points left (dir 180). |
+| `27bf83d` | 17g: the code split (symbols.cpp -> symbols.cpp + symbols_table.cpp; test_symbol_draw.cpp its own TU) and the invariant suite - pin reachability, pin direction with its lead, non-degenerate fills, whole-grid pin offsets, over every built-in AND the tline example. First run: caught the INDUCTOR's phantom stubs (its pins ride the arcs' curves; the touch rule is geometric now - a pin on a curve is touched). |
+
+The stage-17 gate at the final commit: 625/625 ctest on the `linux`
+preset (test_circsim 113 cases / 1288 assertions), the CLI smoke
+green (62 checks, golden decks byte-identical), the hand-built
+ui-canvas suite (this box builds no ui tree) 18 cases / 250
+assertions green, the shadow audit clean, the editor TUs
+syntax-clean against the seam. The svg sheets pixel-probed at every
+step: the phantom closing line, the source stubs, the supply's old
+orientation and the bulk's old tee all verified gone.
