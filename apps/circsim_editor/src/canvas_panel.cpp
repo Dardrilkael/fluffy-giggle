@@ -627,9 +627,50 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         if (ed.tool == Tool::Place && !ed.place_symbol.empty()) {
             if (const ws::circsim::SymbolDef* sym =
                     ed.library.find(ed.place_symbol)) {
-                draw_symbol(rc, *sym, ed.snap(world, coarse), ed.ghost_rot,
-                            ed.ghost_mirror, ghost_paint,
-                            gui::dim(theme.text, 0.45f), theme.font);
+                // Draw the preview from the same transformed Part used
+                // on placement. The outline and pin markers make the
+                // symbol's footprint and connection points legible
+                // before committing it, including after rotate/mirror.
+                ws::circsim::Part ghost = ws::circsim::Part::make(
+                    sym->key, "", "", ed.snap(world, coarse));
+                ghost.rot = ed.ghost_rot;
+                ghost.mirror = ed.ghost_mirror;
+
+                draw_symbol(rc, *sym, ghost.pos, ghost.rot, ghost.mirror,
+                            ghost_paint, gui::dim(theme.text, 0.45f),
+                            theme.font);
+
+                const Bounds local = ws::circsim::symbol_bounds(*sym);
+                const Point corners[4] = {
+                    {static_cast<float>(ws::circsim::transform_pos(
+                         ghost, Pos{local.min_x, local.min_y}).x),
+                     static_cast<float>(ws::circsim::transform_pos(
+                         ghost, Pos{local.min_x, local.min_y}).y)},
+                    {static_cast<float>(ws::circsim::transform_pos(
+                         ghost, Pos{local.max_x, local.min_y}).x),
+                     static_cast<float>(ws::circsim::transform_pos(
+                         ghost, Pos{local.max_x, local.min_y}).y)},
+                    {static_cast<float>(ws::circsim::transform_pos(
+                         ghost, Pos{local.max_x, local.max_y}).x),
+                     static_cast<float>(ws::circsim::transform_pos(
+                         ghost, Pos{local.max_x, local.max_y}).y)},
+                    {static_cast<float>(ws::circsim::transform_pos(
+                         ghost, Pos{local.min_x, local.max_y}).x),
+                     static_cast<float>(ws::circsim::transform_pos(
+                         ghost, Pos{local.min_x, local.max_y}).y)}};
+                Paint footprint = ghost_paint;
+                footprint.width = 1.0f;
+                footprint.dash.count = 2;
+                footprint.dash.lengths[0] = 0.22f;
+                footprint.dash.lengths[1] = 0.18f;
+                rc.stroke_polyline(corners, 4, footprint, true);
+
+                for (std::size_t i = 0; i < sym->pins.size(); ++i) {
+                    const Pos pin = ws::circsim::pin_pos(*sym, ghost, i);
+                    rc.fill_circle(Point{static_cast<float>(pin.x),
+                                         static_cast<float>(pin.y)},
+                                   0.12f, theme.control_on);
+                }
             }
         } else if (ed.tool == Tool::Label && ed.label_text[0] != '\0' &&
                    theme.font != nullptr) {
