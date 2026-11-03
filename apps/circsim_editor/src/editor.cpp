@@ -142,9 +142,10 @@ std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir) {
     constexpr double kLead = 1.0;
     constexpr double kEps = 1e-9;
 
-    // Directions: negative = free; anything else is folded into
-    // [0, 360) once, here (a pin dir of 360 used to lead east through
-    // unit() but be treated as vertical by the corner choice below).
+    // Directions: negative = free; non-negative dirs are folded into
+    // [0, 360). A negative pin dir is "free" (no forced lead-out).
+    // Note: pin dirs are always non-negative cardinals (0, 90, 180, 270)
+    // so negative is only used for "free" wire drafts.
     const auto norm = [](int dir) { return dir < 0 ? -1 : dir % 360; };
     a_dir = norm(a_dir);
     b_dir = norm(b_dir);
@@ -300,7 +301,7 @@ std::optional<PinHit> Editor::hit_pin(Pos world, double radius) const {
             const Pos at = ws::circsim::pin_pos(*sym, p,
                                                 static_cast<std::uint32_t>(i));
             const double d = len(Pos{at.x - world.x, at.y - world.y});
-            if (d <= best_d) {
+            if (d < best_d) {
                 best_d = d;
                 best = PinHit{PinRef{p.id, static_cast<std::uint32_t>(i)}, at,
                               sym->pins[i].dir};
@@ -320,7 +321,7 @@ std::optional<std::uint32_t> Editor::hit_junction(Pos world,
     double best_d = radius;
     for (const ws::circsim::Junction& j : s->junctions()) {
         const double d = len(Pos{j.pos.x - world.x, j.pos.y - world.y});
-        if (d <= best_d) {
+        if (d < best_d) {
             best_d = d;
             best = j.id;
         }
@@ -369,6 +370,12 @@ std::optional<Editor::WirePointSnap> Editor::hit_wire_point(
             // Verify cand lies on segment ab with exact equality
             // (the same on_segment nets.cpp runs). If not, the grid
             // snap drifted off the segment - use the nearer endpoint.
+            // Note: the endpoint may be a pin or junction position.
+            // snap_wire_target checks pin -> junction -> wire-point in
+            // that order with the same radius, so the caller is safe
+            // today - but this is a fragile ordering dependency. A more
+            // robust approach would explicitly skip endpoints that are
+            // pins/junctions here.
             const double cross =
                 (b.x - a.x) * (cand.y - a.y) - (b.y - a.y) * (cand.x - a.x);
             const bool on_seg =
