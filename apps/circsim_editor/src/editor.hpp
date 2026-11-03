@@ -455,8 +455,13 @@ struct Editor {
     // placement/drag snap.
     [[nodiscard]] Pos snap(Pos world, bool coarse = false) const;
 
-    // The part's world AABB (the transformed symbol bounds).
+    // The part's world AABB (the transformed symbol bounds). The id
+    // form re-finds the part; the reference form serves the loops
+    // that already hold it (the draw and the hit loops - no find_part
+    // inside the loop).
     [[nodiscard]] std::optional<Bounds> part_bounds(std::uint32_t id) const;
+    [[nodiscard]] std::optional<Bounds> part_bounds(
+        const ws::circsim::Part& p) const;
 
     // The wire's world polyline (endpoints through their refs, then
     // the waypoints between).

@@ -66,14 +66,17 @@ Pos Editor::snap(Pos world, bool coarse) const {
 std::optional<Bounds> Editor::part_bounds(std::uint32_t id) const {
     const ws::circsim::Schematic* s = schem();
     const ws::circsim::Part* p = s != nullptr ? s->find_part(id) : nullptr;
-    const ws::circsim::SymbolDef* sym =
-        p != nullptr ? sym_of(*p) : nullptr;
     if (p == nullptr) {
         return std::nullopt;
     }
+    return part_bounds(*p);
+}
+
+std::optional<Bounds> Editor::part_bounds(const ws::circsim::Part& p) const {
+    const ws::circsim::SymbolDef* sym = sym_of(p);
     if (sym == nullptr) {
-        return Bounds{p->pos.x - 1.0, p->pos.y - 1.0, p->pos.x + 1.0,
-                      p->pos.y + 1.0};
+        return Bounds{p.pos.x - 1.0, p.pos.y - 1.0, p.pos.x + 1.0,
+                      p.pos.y + 1.0};
     }
     const Bounds local = ws::circsim::symbol_bounds(*sym);
     std::optional<Bounds> out;
@@ -90,7 +93,7 @@ std::optional<Bounds> Editor::part_bounds(std::uint32_t id) const {
     for (const Pos corner :
          {Pos{local.min_x, local.min_y}, Pos{local.max_x, local.min_y},
           Pos{local.min_x, local.max_y}, Pos{local.max_x, local.max_y}}) {
-        grow(ws::circsim::transform_pos(*p, corner));
+        grow(ws::circsim::transform_pos(p, corner));
     }
     return out;
 }
@@ -455,7 +458,7 @@ Selection Editor::hit_any(Pos world, double radius,
     std::uint32_t best_part = 0;
     bool part_found = false;
     for (const ws::circsim::Part& p : s->parts()) {
-        const std::optional<Bounds> b = part_bounds(p.id);
+        const std::optional<Bounds> b = part_bounds(p);
         if (b.has_value() && world.x >= b->min_x && world.x <= b->max_x &&
             world.y >= b->min_y && world.y <= b->max_y) {
             best_part = p.id;  // no break: the topmost wins
@@ -490,7 +493,7 @@ std::optional<Bounds> Editor::content_bounds() const {
         out->max_y = std::max(out->max_y, w.y);
     };
     for (const ws::circsim::Part& p : s->parts()) {
-        const std::optional<Bounds> b = part_bounds(p.id);
+        const std::optional<Bounds> b = part_bounds(p);
         if (b.has_value()) {
             grow(Pos{b->min_x, b->min_y});
             grow(Pos{b->max_x, b->max_y});
