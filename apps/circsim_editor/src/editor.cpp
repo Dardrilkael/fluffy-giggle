@@ -23,7 +23,8 @@ using ws::circsim::PinRef;
     return std::sqrt(p.x * p.x + p.y * p.y);
 }
 
-// Squared distance from `p` to segment ab.
+// Plain distance from `p` to segment ab (the name once said Squared
+// while returning this - the comment lies no more).
 [[nodiscard]] double dist_to_segment(Pos a, Pos b, Pos p) {
     const Pos ab{b.x - a.x, b.y - a.y};
     const Pos ap{p.x - a.x, p.y - a.y};
@@ -275,10 +276,15 @@ std::optional<std::uint32_t> Editor::hit_junction(Pos world,
 // the projection to the fine grid, and accept the snap when it stays
 // on the segment (the exact check nets.cpp will run later); otherwise
 // fall back to the segment's nearest endpoint (a path vertex, always
-// grid-aligned). Among all segments' candidates, return the one
-// closest to the cursor. route_wire's paths are ortho-on-grid, so the
-// common case lands inside the segment; the fallback is the rare
-// near-endpoint click, where the vertex is the right answer anyway.
+// grid-aligned). Among all segments' candidates, return the one whose
+// SEGMENT is closest to the cursor - the acceptance test is the
+// segment distance, not the distance to the snapped candidate: at
+// high zoom the pick radius is under half a grid cell, and a cursor
+// riding the wire between two grid intersections once missed because
+// its snap landed half a cell away. route_wire's paths are
+// ortho-on-grid, so the common case lands inside the segment; the
+// fallback is the rare near-endpoint click, where the vertex is the
+// right answer anyway.
 std::optional<Editor::WirePointSnap> Editor::hit_wire_point(
     Pos world, double radius) const {
     const ws::circsim::Schematic* s = schem();
@@ -322,7 +328,10 @@ std::optional<Editor::WirePointSnap> Editor::hit_wire_point(
                 const double db = len(Pos{b.x - world.x, b.y - world.y});
                 cand = da <= db ? a : b;
             }
-            const double d = len(Pos{cand.x - world.x, cand.y - world.y});
+            // Accept on the SEGMENT's distance to the cursor; the
+            // returned candidate is still the grid-aligned point the
+            // junction will be minted at.
+            const double d = dist_to_segment(a, b, world);
             if (d <= best_d) {
                 best_d = d;
                 best = WirePointSnap{w.id, cand};
@@ -332,25 +341,28 @@ std::optional<Editor::WirePointSnap> Editor::hit_wire_point(
     return best;
 }
 
-Selection Editor::hit_any(Pos world, double radius) const {
+Selection Editor::hit_any(Pos world, double radius,
+                          double label_radius) const {
     const ws::circsim::Schematic* s = schem();
     if (s == nullptr) {
         return {};
     }
-    // Parts first (they are the tallest objects), then pins? No: a
-    // click that lands on a pin should select the PART (pins are the
-    // part's), so parts-before-pins is not a question here. Junctions
-    // beat wires (a dot sits on every wire end), wires beat labels.
-    for (const ws::circsim::Part& p : s->parts()) {
-        const std::optional<Bounds> b = part_bounds(p.id);
-        if (b.has_value() && world.x >= b->min_x && world.x <= b->max_x &&
-            world.y >= b->min_y && world.y <= b->max_y) {
-            return {Selection::Kind::Part, p.id};
-        }
-    }
+    // Priority walks the DRAW STACK topmost-first: a junction dot
+    // sits on every wire end and crossing; a wire runs over the
+    // canvas and stays selectable even where it crosses or ends
+    // inside a part's box (the box is bigger than the part's ink);
+    // a click on a part body with no wire under it selects the part;
+    // labels ride under everything. A click that lands on a pin
+    // therefore still selects whatever wire lands there first - the
+    // pin itself has no separate selection (the part's Properties
+    // open from the part body).
     if (const std::uint32_t j = hit_junction(world, radius).value_or(0)) {
         return {Selection::Kind::Junction, j};
     }
+    // The NEAREST wire in range - the loop once returned on the first
+    // segment that matched, leaving its best_d tracking dead.
+    std::uint32_t best_wire = 0;
+    bool wire_found = false;
     double best_d = radius;
     for (const ws::circsim::Wire& w : s->wires()) {
         const std::vector<Pos> path = wire_path(w);
@@ -358,12 +370,32 @@ Selection Editor::hit_any(Pos world, double radius) const {
             const double d = dist_to_segment(path[i - 1], path[i], world);
             if (d <= best_d) {
                 best_d = d;
-                return {Selection::Kind::Wire, w.id};
+                best_wire = w.id;
+                wire_found = true;
             }
         }
     }
+    if (wire_found) {
+        return {Selection::Kind::Wire, best_wire};
+    }
+    // The LAST part whose box holds the point: the parts draw in list
+    // order, so the last one is the one on top (the first one used to
+    // win - a stacked pair selected the buried one).
+    std::uint32_t best_part = 0;
+    bool part_found = false;
+    for (const ws::circsim::Part& p : s->parts()) {
+        const std::optional<Bounds> b = part_bounds(p.id);
+        if (b.has_value() && world.x >= b->min_x && world.x <= b->max_x &&
+            world.y >= b->min_y && world.y <= b->max_y) {
+            best_part = p.id;  // no break: the topmost wins
+            part_found = true;
+        }
+    }
+    if (part_found) {
+        return {Selection::Kind::Part, best_part};
+    }
     for (const ws::circsim::Label& l : s->labels()) {
-        if (len(Pos{l.pos.x - world.x, l.pos.y - world.y}) <= radius + 1.0) {
+        if (len(Pos{l.pos.x - world.x, l.pos.y - world.y}) <= label_radius) {
             return {Selection::Kind::Label, l.id};
         }
     }

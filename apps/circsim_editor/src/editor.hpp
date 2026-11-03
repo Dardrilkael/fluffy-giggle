@@ -451,8 +451,10 @@ struct Editor {
     [[nodiscard]] static std::vector<Pos> route_wire(Pos a, int a_dir,
                                                      Pos b, int b_dir);
 
-    // Hit tests (world space). The pin hit radius is in world units
-    // (screen px / zoom), so picks stay steady across zooms.
+    // Hit tests (world space). Every radius is in world units (screen
+    // px / zoom), so picks stay steady across zooms - including the
+    // label's own reach, passed separately so its tag-sized margin
+    // (a few px, not a world unit) scales with the magnification.
     [[nodiscard]] std::optional<PinHit> hit_pin(Pos world,
                                                 double radius) const;
     [[nodiscard]] std::optional<std::uint32_t> hit_junction(
@@ -472,7 +474,12 @@ struct Editor {
     };
     [[nodiscard]] std::optional<WirePointSnap> hit_wire_point(
         Pos world, double radius) const;
-    [[nodiscard]] Selection hit_any(Pos world, double radius) const;
+    // Selection priority walks the draw stack topmost-first:
+    // junctions, then the NEAREST wire in range (a wire stays
+    // selectable where it crosses a part's box), then the LAST part
+    // whose box holds the point (the drawn-on-top one), then labels.
+    [[nodiscard]] Selection hit_any(Pos world, double radius,
+                                    double label_radius) const;
 
     // The whole schematic's content extent (for the fit command).
     [[nodiscard]] std::optional<Bounds> content_bounds() const;

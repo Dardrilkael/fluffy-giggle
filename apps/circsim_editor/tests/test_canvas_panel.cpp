@@ -414,6 +414,108 @@ TEST_CASE("route_wire: 360 degrees routes exactly as 0") {
     }
 }
 
+// --- hit_wire_point rides the segment, hit_any walks the draw stack ----
+
+TEST_CASE("hit_wire_point: a cursor riding the wire between grid lines "
+          "still lands") {
+    // The acceptance test once measured the distance to the SNAPPED
+    // candidate: at zoom 400 the pick radius is 0.0225 world units,
+    // and a cursor on the wire halfway between grid intersections
+    // missed - its snap sat half a cell away. The segment's own
+    // distance is what a wire pick means.
+    Bench b;
+    b.place_wire();  // (1,1) -> (4,1), grid 1; (2.5,1) has no grid line
+    const double pick = 9.0 / 400.0;
+    const auto hit = b.ed.hit_wire_point({2.5, 1.02}, pick);
+    REQUIRE(hit.has_value());
+    CHECK(hit->pos.x == 3.0);  // the candidate is still grid-aligned
+    CHECK(hit->pos.y == 1.0);
+}
+
+TEST_CASE("hit_any: the nearest wire wins, not the first in the list") {
+    Bench b;
+    // Two wires on y=0 and y=0.4 (the nearer one SECOND in the list -
+    // the old loop returned the first wire in range and never
+    // compared). Wires need ids: the bench's own helper leaves them 0.
+    auto add_wire = [&](double y, std::uint32_t id) {
+        ws::circsim::Junction a;
+        a.id = b.doc.schem.alloc_id();
+        a.pos = {0.0, y};
+        ws::circsim::Junction c;
+        c.id = b.doc.schem.alloc_id();
+        c.pos = {10.0, y};
+        b.doc.schem.junctions_mut().push_back(a);
+        b.doc.schem.junctions_mut().push_back(c);
+        ws::circsim::Wire w;
+        w.id = id;
+        w.a = ws::circsim::JunctionRef{a.id};
+        w.b = ws::circsim::JunctionRef{c.id};
+        b.doc.schem.wires_mut().push_back(w);
+    };
+    add_wire(0.4, 101);
+    add_wire(0.0, 102);
+    const editor::Selection hit = b.ed.hit_any({5.0, 0.05}, 1.0, 1.0);
+    CHECK(hit.kind == editor::Selection::Kind::Wire);
+    CHECK(hit.id == 102);
+}
+
+TEST_CASE("hit_any: a wire crossing a part's box stays selectable") {
+    Bench b;
+    ws::circsim::Part p = ws::circsim::Part::make("r", "R1", "1k",
+                                                  {5.0, 0.0});
+    p.id = b.doc.schem.alloc_id();
+    b.doc.schem.parts_mut().push_back(p);
+    // A horizontal wire straight through the part's box center (the
+    // box is read from the editor's own bounds, so the case needs no
+    // assumption about the r symbol's shape).
+    const ws::circsim::Bounds box = b.ed.part_bounds(p.id).value_or(
+        ws::circsim::Bounds{4.0, -1.0, 6.0, 1.0});
+    const double cy = (box.min_y + box.max_y) * 0.5;
+    ws::circsim::Junction a;
+    a.id = b.doc.schem.alloc_id();
+    a.pos = {box.min_x - 2.0, cy};
+    ws::circsim::Junction c;
+    c.id = b.doc.schem.alloc_id();
+    c.pos = {box.max_x + 2.0, cy};
+    b.doc.schem.junctions_mut().push_back(a);
+    b.doc.schem.junctions_mut().push_back(c);
+    ws::circsim::Wire w;
+    w.id = b.doc.schem.alloc_id();
+    w.a = ws::circsim::JunctionRef{a.id};
+    w.b = ws::circsim::JunctionRef{c.id};
+    b.doc.schem.wires_mut().push_back(w);
+    // The click lands inside the part's box AND on the wire.
+    const editor::Selection hit = b.ed.hit_any(
+        {(box.min_x + box.max_x) * 0.5, cy}, 0.35, 0.35);
+    CHECK(hit.kind == editor::Selection::Kind::Wire);
+    // Without the wire the same click is the part's.
+    b.doc.schem.wires_mut().clear();
+    b.doc.schem.junctions_mut().clear();
+    const editor::Selection again = b.ed.hit_any(
+        {(box.min_x + box.max_x) * 0.5, cy}, 0.35, 0.35);
+    CHECK(again.kind == editor::Selection::Kind::Part);
+    CHECK(again.id == p.id);
+}
+
+TEST_CASE("hit_any: the label pick reach rides the zoom") {
+    Bench b;
+    ws::circsim::Label l;
+    l.id = 7;
+    l.pos = {0.0, 0.0};
+    l.name = "net";
+    b.doc.schem.labels_mut().push_back(l);
+    // At zoom 400 a fixed world-unit margin once answered clicks 1
+    // unit (400px!) away. The zoom-scaled reach is a few px.
+    const double pick = 9.0 / 400.0;
+    const double label_pick = pick + 6.0 / 400.0;
+    CHECK_FALSE(b.ed.hit_any({0.5, 0.0}, pick, label_pick)
+                     .kind == editor::Selection::Kind::Label);
+    const editor::Selection near =
+        b.ed.hit_any({0.01, 0.0}, pick, label_pick);
+    CHECK(near.kind == editor::Selection::Kind::Label);
+    CHECK(near.id == 7);
+}
+
 // --- the zero-length commit guard (stage 18c) --------------------------------
 //
 // The commit guard fired for Free landings only, so a second click on

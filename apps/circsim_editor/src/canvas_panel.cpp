@@ -47,6 +47,11 @@ using canvas::Point;
 // the zoom, so picks stay steady at every magnification.
 constexpr float kPickPx = 9.0f;
 
+// The label pick's own reach beyond the pick radius: a label's tag is
+// screen-sized text, so its margin rides the zoom too (a fixed world
+// unit once made the pick area 400px wide at max zoom).
+constexpr float kLabelPickPx = 6.0f;
+
 // The snap feedback's reach: the accent dot shows while the cursor is
 // within this many screen px of the grid intersection it would land
 // on (and the dot's own px).
@@ -272,7 +277,12 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
     if (in.mouse_pressed[0] != 0) {
         switch (ed.tool) {
             case Tool::Select: {
-                const Selection hit = ed.hit_any(world, pick);
+                const double label_pick =
+                    pick + (ed.view.zoom > 0.0
+                                ? static_cast<double>(kLabelPickPx) /
+                                      ed.view.zoom
+                                : 0.0);
+                const Selection hit = ed.hit_any(world, pick, label_pick);
                 ed.sel = hit;
                 if (hit.kind == Selection::Kind::Part) {
                     if (const ws::circsim::Part* p =
