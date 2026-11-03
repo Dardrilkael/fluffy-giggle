@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 
+#include <ws/core/assert.hpp>
 #include <ws/circsim/erc.hpp>
 
 namespace editor {
@@ -153,7 +154,10 @@ std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir) {
             case 0: return {1.0, 0.0};
             case 90: return {0.0, 1.0};
             case 180: return {-1.0, 0.0};
-            default: return {0.0, -1.0};  // 270
+            case 270: return {0.0, -1.0};
+            default:
+                WS_CORE_ASSERT(false && "route_wire: non-cardinal pin direction");
+                return {0.0, -1.0};  // fallback to south (270)
         }
     };
     const auto same = [&](Pos p, Pos q) {
