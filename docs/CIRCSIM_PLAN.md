@@ -286,3 +286,39 @@ refactor touching every seam; the per-tool/per-layer function split in
 19j is its first slice), and re-routing wires that pass THROUGH a
 moved junction as a T (the silent-join dots already show the lost
 join).
+
+## Stage 20 (2026-11-05): the stage-19 refactor's regressions put back
+
+The squashed "Stage 19 editor refactor" (`2cc347d`, pre-existing working
+tree) regressed seven certified stage-19 behaviors - the canvas gate
+fell from 22 cases to 13 passing - and the follow-up cache commit
+(`54c8a54`) added an eighth bug of its own. Every fix below restores
+the exact stage-19j semantics the suites pin (audited against
+`7494304`, the last certified-green state), on the refactored 4-arg
+APIs:
+
+| What | The bug | The fix |
+|-----------|---------|---------|
+| `route_wire` | the refactor's candidate/spike picker picked the jog-around route, and its fold read a REVERSAL as a continuation - the 19c lead-out corner was lost again (a pin facing +x with a target behind it folded its lead away) | back to the single-L route + the `along > 0` fold guard (a reversal is collinear but never folds) |
+| `hit_wire_point` | acceptance measured the distance to the SNAPPED candidate - the 19d fix was gone, a cursor riding a wire between grid lines at high zoom missed (pick < half a cell) | accept on the SEGMENT's distance, return the grid-aligned candidate |
+| `hit_any` | parts were tested before wires (a wire crossing a part's box was unpickable), the first part won instead of the topmost, and the label reach was a fixed `radius + 1.0` world units | junctions, nearest wire, LAST part, labels last - with the zoom-scaled reach (`radius + 6px/zoom`) |
+| right click | read `mouse_pressed[2]` - GLFW's MIDDLE, not RIGHT - so the cancel never fired on a real right click, and when it did (middle) it killed draft AND tool in one press | `kRight`, and the 19f staging: draft first, tool second, selection last (the Esc command's own ladder) |
+| wire starts | a click on FREE grid was ignored at the start (the 19f free-start was gone); `a_free` was missing from WireDraft so a minted start could not skip anchor revalidation | free starts arm the draft (`a_mint`, `a_free`, `a_dir = -1`), the junction mints at commit, and `a_free` answers `true` to the validity check |
+| wire commits | every commit DISARMED the tool (the 19f chain was gone - every segment cost a W press); the per-frame draft cancel ate the commit click and re-armed a fresh draft in the same press | the commit chains the next draft at the landing endpoint, and the dead-anchor check moved back into the commit (a toast cancels it) |
+| move re-route | `attached_wire_routes` was deleted - a moved part/junction left its attached ortho wires' legs DIAGONAL (waypoints are absolute), the 19g fix gone | restored, and the drag release lands it: entity to the landing, routes read there, entity restored to the press position, `push_move_*` carries them |
+| `part_bounds` cache | a version change only re-stamped the ONE entry asked for - every other part served bounds from before the edit forever (a dragged part's highlight and refdes text lagged at the pre-drag position while the symbol moved) | a new version retires the WHOLE cache |
+| wheel/pan | the wheel and the pan lost `claims_open()` (a modal veil no longer froze them), the pan armed anywhere on screen (a middle-drag in another panel panned the schematic), and the wheel jumped a whole notch per frame - the 19b/19i fixes gone | claims-gated, armed inside the panel only (held keeps it), `pow(1.15, clamp(dy, -4, 4))` per frame |
+| `document_changed` | the 19i Properties reset was gone - a new document could show the old one's typing | `fields`/stamp/selection keys/analysis index reset again |
+
+Also fixed while in the tree: `circsim_cli/svg_dump.cpp` printed a
+`std::filesystem::path` with `%ls` unconditionally - right on Windows
+(wchar_t), a `-Werror=format=` error on POSIX (char); the error print
+is now per-platform.
+
+The stage-20 gate: the linux preset builds clean (the GCC 14
+`-Wmaybe-uninitialized` false positives on default-constructed
+`AnalysisSpec` variants in three circsim test TUs are suppressed with
+local-only pragmas, MSVC unaffected), `test_circsim_editor_canvas`
+20/20 (102 assertions), `test_circsim_editor_panel` 15/15 (209),
+`test_circsim_editor_palette` 4/4 (25), and the full ctest 1008/1008
+including both CLI smokes.

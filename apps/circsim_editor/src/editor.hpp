@@ -337,15 +337,18 @@ struct Editor {
         ws::circsim::WireEndpoint a{};
         Pos a_pos{0.0, 0.0};
         int a_dir = 0;  // the start pin's direction, -1 when free
-        // A start on a wire's body (stage 18b): the start endpoint is
-        // not a pin or junction, so it has no WireEndpoint to bind to.
-        // The commit mints a junction at `a_pos` (a point on some
-        // wire's path) and binds the new wire's `a` to it - the same
-        // path the commit-side wire-point takes, just deferred past a
-        // cancel. a_wire is the id of the wire that was hit when the
-        // draft started; the commit validates that the same wire still
-        // exists at that position.
+        // A start with no entity behind it (a wire's body - stage
+        // 18b - or free space - stage 19f): the start endpoint is not
+        // a pin or junction, so the commit mints a junction at `a_pos`
+        // and binds the new wire's `a` to it - the same path the
+        // commit-side wire-point takes, just deferred past a cancel.
+        // a_wire is the id of the wire that was hit when the draft
+        // started; the commit validates that the same wire still
+        // exists at that position. `a_free` marks the free-space
+        // flavor: no anchor wire to revalidate (the point is just a
+        // grid position; it cannot go stale).
         bool a_mint = false;
+        bool a_free = false;
         std::uint32_t a_wire = 0;
     } wire_draft;
 
@@ -460,10 +463,20 @@ struct Editor {
 
     // The ortho route for a wire from `a` (leaving along `a_dir`, -1 =
     // free) to `b` (approached along `b_dir`, -1 = free): the waypoint
-    // list between the two endpoints - a leads out, an L or Z lands,
-    // collinear legs folded away.
+    // list between the two endpoints - a leads out, an L lands,
+    // collinear legs folded away (a reversal keeps its lead-out
+    // corner; folding it would run the wire back through the part
+    // body it just left).
     [[nodiscard]] static std::vector<Pos> route_wire(Pos a, int a_dir,
                                                      Pos b, int b_dir);
+
+    // The attached ortho wires' fresh shapes for a move of `id` (the
+    // drag-release re-route: a moved endpoint would otherwise leave
+    // the adjacent legs diagonal). Read at the entity's LANDING - the
+    // caller puts the entity there first, then restores the press
+    // position and hands the routes to push_move_*.
+    [[nodiscard]] std::vector<WireRoute> attached_wire_routes(
+        Drag::Kind kind, std::uint32_t id) const;
 
     // Hit tests (world space). The pin hit radius is in world units
     // (screen px / zoom), so picks stay steady across zooms.

@@ -169,6 +169,9 @@ bool set_drag_pos(Editor& ed, Pos at) {
 // committable while its start still exists where it was drawn from.
 [[nodiscard]] bool wire_draft_start_valid(const Editor& ed) {
     const Editor::WireDraft& d = ed.wire_draft;
+    if (d.a_free) {
+        return true;  // a free grid point has no anchor to lose
+    }
     if (d.a_mint) {
         // A start on a wire's body: the SAME wire must still pass
         // through the point. hit_wire_point returns the wire id,
@@ -194,15 +197,11 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                      const gui::Rect& body) {
     // If the tool changed away from Wire, cancel any in-flight draft.
     // This catches tool switches via hotkeys, commands, or menu clicks.
+    // (A draft whose start DIED is the commit's own check, not this
+    // frame's: cancelling here would eat the next click's commit and,
+    // with free starts, re-arm a fresh draft in the same press.)
     if (ed.tool != Tool::Wire && ed.wire_draft.active) {
         ed.wire_draft = Editor::WireDraft{};
-    }
-
-    // A draft whose start vanished (undo, redo, a delete elsewhere)
-    // would commit a wire onto a dead endpoint: cancel it first.
-    if (ed.wire_draft.active && !wire_draft_start_valid(ed)) {
-        ed.wire_draft = Editor::WireDraft{};
-        ed.status("wire cancelled: its start point changed");
     }
 
     const ws::input::InputFrame& in = gui.input();
@@ -223,22 +222,32 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
         in.key_down[ws::input::keys::kRightShift] != 0;
 
     // Wheel: zoom toward the cursor (the scroll panel's own claim is
-    // the harmless no-op the header note explains).
-    if (inside && in.scroll_dy != 0.0f) {
-        ed.view.zoom_at(mouse, in.scroll_dy > 0.0f ? 1.15 : 1.0 / 1.15);
+    // the harmless no-op the header note explains). An open modal veil
+    // freezes the canvas - the zoom with it (the header's own
+    // contract; only the tools used to check the claims). One notch =
+    // one kZoomStep; a trackpad's many small deltas ride the same
+    // curve gently instead of jumping whole notches (the exponent
+    // clamps against a wild scroll burst).
+    constexpr double kZoomStep = 1.15;
+    if (inside && gui.claims_open() && in.scroll_dy != 0.0f) {
+        const float deltas =
+            std::clamp(in.scroll_dy, -4.0f, 4.0f);
+        ed.view.zoom_at(mouse, std::pow(kZoomStep, deltas));
     }
 
     // Middle-drag pans; space+left-drag pans too (the gallery's rule).
+    // Armed inside the panel; once armed the gesture keeps the pointer
+    // until the buttons go up - a cursor that slips off the panel edge
+    // mid-pan no longer drops the pan (the drags' own rule). An open
+    // modal veil disarms.
     const bool pan_modifiers =
         in.mouse_down[ws::input::mouse::kMiddle] != 0 ||
         (space_down && in.mouse_down[ws::input::mouse::kLeft] != 0);
-    if (pan_modifiers) {
+    if (pan_modifiers && gui.claims_open() && (ed.pan.armed || inside)) {
         if (!ed.pan.armed) {
             ed.pan.armed = true;
             ed.pan.from = mouse;
         }
-        // Keep panning while the button is held, even if cursor leaves
-        // the panel. Only disarm when the button is released.
         ed.view.pan_by({mouse.x - ed.pan.from.x, mouse.y - ed.pan.from.y});
         ed.pan.from = mouse;
         return;  // a pan frame owns the pointer
@@ -263,22 +272,30 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
         // Release: land the undo command when the drag actually moved.
         if (ed.drag.moved) {
             const Pos to = drag_target(ed, world, coarse);
-            // The live writes above already moved the entity, and a
-            // push_move_* command records `from` as the position it
-            // finds - which would be the LAST live position, making
-            // undo a no-op (or, for a from == to command, no entry at
-            // all). Put the entity back at the press position first so
-            // the command captures the real from/to pair. Do this even
-            // when doc is null so the entity is always restored.
+            // The entity first visits the landing (the attached ortho
+            // wires re-route from the resolved endpoints there), then
+            // goes back to its press position so the command captures
+            // THAT as its from - the live drag had left it at the
+            // release position, and a from == to command is an undo
+            // no-op (nothing would ever move back). Restore even when
+            // doc is null so the entity is never left stranded.
+            std::vector<WireRoute> routes;
+            if (ed.doc != nullptr) {
+                set_drag_pos(ed, to);
+                routes =
+                    ed.attached_wire_routes(ed.drag.kind, ed.drag.id);
+            }
             set_drag_pos(ed, ed.drag.start_world);
             const bool landed =
                 !eps_eq(to.x, ed.drag.start_world.x, 1e-9) ||
                 !eps_eq(to.y, ed.drag.start_world.y, 1e-9);
             if (landed && ed.doc != nullptr) {  // dragged back to where it started: no edit
                 if (ed.drag.kind == Editor::Drag::Kind::Part) {
-                    push_move_part(*ed.doc, ed.drag.id, to);
+                    push_move_part(*ed.doc, ed.drag.id, to,
+                                   std::move(routes));
                 } else if (ed.drag.kind == Editor::Drag::Kind::Junction) {
-                    push_move_junction(*ed.doc, ed.drag.id, to);
+                    push_move_junction(*ed.doc, ed.drag.id, to,
+                                       std::move(routes));
                 } else if (ed.drag.kind == Editor::Drag::Kind::Label) {
                     push_move_label(*ed.doc, ed.drag.id, to);
                 }
@@ -353,20 +370,25 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                     break;
                 }
                 if (!ed.wire_draft.active) {
-                    // Start only on a connection point: a pin, a
-                    // junction, or another wire's body (stage 18b: the
-                    // editor mints a junction on that wire at commit,
-                    // the standard EDA T-tap from a bus).
+                    // Start on a connection point: a pin, a junction,
+                    // another wire's body (stage 18b: the editor mints
+                    // a junction on that wire at commit, the standard
+                    // EDA T-tap from a bus) - or on FREE grid (stage
+                    // 19f: the commit side always supported free
+                    // landings; the start junction mints at commit too,
+                    // so a cancel leaves nothing behind).
                     const SnapTarget t = snap_wire_target(ed, world);
-                    if (t.kind != SnapTarget::Kind::Free) {
-                        ed.wire_draft.active = true;
-                        ed.wire_draft.a = t.end;  // unused when a_mint
-                        ed.wire_draft.a_pos = t.pos;
-                        ed.wire_draft.a_dir = t.dir;
-                        ed.wire_draft.a_mint =
-                            t.kind == SnapTarget::Kind::WirePoint;
-                        ed.wire_draft.a_wire = t.wire;
-                    }
+                    ed.wire_draft = Editor::WireDraft{};
+                    ed.wire_draft.active = true;
+                    ed.wire_draft.a_pos = t.pos;
+                    ed.wire_draft.a = t.end;  // unused when a_mint
+                    ed.wire_draft.a_dir = t.dir;
+                    ed.wire_draft.a_mint =
+                        t.kind == SnapTarget::Kind::WirePoint ||
+                        t.kind == SnapTarget::Kind::Free;
+                    ed.wire_draft.a_free =
+                        t.kind == SnapTarget::Kind::Free;
+                    ed.wire_draft.a_wire = t.wire;
                     break;
                 }
                 // Commit: onto a pin/junction, a wire's body (a fresh
@@ -389,6 +411,17 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                 // and a wire-point landing sits on its own wire).
                 if (eps_eq(t.pos.x, ed.wire_draft.a_pos.x, 1e-9) &&
                     eps_eq(t.pos.y, ed.wire_draft.a_pos.y, 1e-9)) {
+                    break;
+                }
+                // The start anchor may have died between the clicks
+                // (an undo, a delete from another panel): the editor
+                // never creates a dangling endpoint, so the draft is
+                // cancelled with a word instead.
+                if (!wire_draft_start_valid(ed)) {
+                    ed.toast("the wire's start is gone - the draft is "
+                             "cancelled",
+                             gui::ToastSeverity::warning);
+                    ed.wire_draft = Editor::WireDraft{};
                     break;
                 }
                 ws::circsim::Wire w;
@@ -416,9 +449,19 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                                                  ed.wire_draft.a_dir, t.pos,
                                                  t.dir);
                 w.ortho = true;
+                const ws::circsim::WireEndpoint landing = w.b;
                 push_place_wire(*ed.doc, std::move(w), std::move(junctions));
+                // The tool stays armed and the next draft starts at the
+                // landing: a multi-segment net is one run of clicks
+                // (the old commit disarmed, so every segment cost a W
+                // press and a re-pick). The landing endpoint exists now
+                // - a minted junction included - so the chain binds to
+                // it directly, no mint pending.
                 ed.wire_draft = Editor::WireDraft{};
-                ed.tool = Tool::Select;  // every commit disarms (W re-arms)
+                ed.wire_draft.active = true;
+                ed.wire_draft.a = landing;
+                ed.wire_draft.a_pos = t.pos;
+                ed.wire_draft.a_dir = t.dir;
                 break;
             }
             case Tool::Label: {
@@ -435,11 +478,15 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
         return;
     }
 
-    // Right click: cancel the tool / clear the selection.
-    if (in.mouse_pressed[2] != 0) {
-        if (ed.tool != Tool::Select) {
-            ed.tool = Tool::Select;
+    // Right click: the staging - the in-flight draft cancels first, the
+    // tool disarms second, the selection clears last (a stray click
+    // used to kill the draft AND the tool in one go; the Esc command
+    // keeps the same ladder).
+    if (in.mouse_pressed[ws::input::mouse::kRight] != 0) {
+        if (ed.wire_draft.active) {
             ed.wire_draft = Editor::WireDraft{};
+        } else if (ed.tool != Tool::Select) {
+            ed.tool = Tool::Select;
         } else {
             ed.sel.clear();
         }

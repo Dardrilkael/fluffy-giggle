@@ -184,8 +184,14 @@ SymbolSvg draw_one(const ws::circsim::SymbolDef& sym) {
 bool write_file(const fs::path& path, const std::string& text) {
     std::ofstream out(path, std::ios::binary);
     if (!out) {
-        // On Windows path::value_type is wchar_t; use %ls for wide strings
+        // path::value_type is wchar_t on Windows (printf wants %ls
+        // there) and char on POSIX (%s): print through the native
+        // c_str with the matching conversion either way.
+#ifdef _WIN32
         std::fprintf(stderr, "error: cannot write '%ls'\n", path.c_str());
+#else
+        std::fprintf(stderr, "error: cannot write '%s'\n", path.c_str());
+#endif
         return false;
     }
     out << text;
