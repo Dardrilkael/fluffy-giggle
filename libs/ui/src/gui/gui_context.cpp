@@ -164,6 +164,8 @@ void GuiContext::begin_frame(const ws::input::InputFrame& input) {
         matched[p].hot = kInvalidWidgetId;  // hot re-claims every frame
         matched[p].active_fresh = false;  // a carried drag is not fresh:
                                            // capture, never stolen
+        matched[p].click_floor = 0;  // the floor is a this-frame rule:
+                                     // every frame starts unspent
     }
     pointers_ = matched;
 }
@@ -924,7 +926,18 @@ HitTest GuiContext::hit_test_pointer(WidgetId id, const Rect& claimable,
     // precedence allows - the press and its hover belong to the same
     // widget from the moment the claim moves (the hot-claim block above
     // already ran, blocked by the victim's then-ownership).
-    if (inside && view.pressed && !track.cancelled && !blocked) {
+    // The click floor gates the whole block, both branches: after a
+    // publication this frame, a contact that is already over (a pure tap)
+    // may not claim again at or below the publishing stratum - one
+    // physical tap, one click per stratum, the first hit-tested claimant
+    // wins. A live contact (view.down - the same-frame id reuse's new
+    // gesture) is exempt wholesale, which is also why the steal branch
+    // needs no floor test of its own: in a floor-set, contact-over frame
+    // every earlier claimant's release report has already freed its claim
+    // inline below, so nothing is left to steal; the reuse frame, where
+    // the re-claimed press IS stealable, runs with view.down.
+    if (inside && view.pressed && !track.cancelled && !blocked &&
+        (view.down || layer > track.click_floor)) {
         if (track.active == kInvalidWidgetId) {
             track.active = id;
             track.active_layer = layer;
@@ -957,6 +970,14 @@ HitTest GuiContext::hit_test_pointer(WidgetId id, const Rect& claimable,
         if (view.released && !(track.active_fresh && view.down)) {
             part.released = true;   // the drag ended, inside or out
             part.clicked = inside;  // full click only if inside
+            if (part.clicked) {
+                // The publication raises this pointer's click floor: a
+                // later claimant at or below this stratum would be a
+                // second click from the same physical tap. A release that
+                // publishes nothing (outside, or shape-missed) raises
+                // nothing.
+                track.click_floor = layer;
+            }
             track.active = kInvalidWidgetId;  // the press is over either way
         }
     }

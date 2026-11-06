@@ -675,6 +675,13 @@ private:
         bool active_fresh = false;  // claimed THIS frame: a strictly higher
                                     // layer may steal it; a carried drag is
                                     // capture and never stolen
+        // The click floor: the highest stratum that already published this
+        // pointer's click THIS frame (0 = none - strata start at base 10).
+        // A pure tap - the contact lifts this frame - may not claim again
+        // at or below it, so one physical tap clicks at most one widget
+        // per stratum; a live contact (view.down - the reuse's new
+        // gesture) claims as ever. Reset every frame at the track match.
+        std::uint32_t click_floor = 0;
         bool cancelled = false;
         // The scroll-arm claim (claim_scroll_arm): the panel whose
         // touch-drag this pointer is, from the press until the

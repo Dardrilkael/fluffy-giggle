@@ -269,6 +269,21 @@ if(TARGET test_ui_variants)
   target_include_directories(test_ui_variants PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
 
+# The tap-defect suite (the M7 leftover): the click floor - a same-frame
+# tap clicks one widget per stratum, cascades strictly upward only, and
+# the reuse frame's new contact is exempt. The gui archive + the r2d
+# stub, the same purity class as test_ui_gui.
+ws_add_test(ui_tap
+  SOURCES tests/test_ui_tap.cpp
+          tests/ui_gui_r2d_stub.cpp
+          src/text/font.cpp
+          src/text/stb_impl.cpp
+  LINK ws::ui_gui
+  DEPENDS stb)
+if(TARGET test_ui_tap)
+  target_include_directories(test_ui_tap PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+
 # --- Shader workflow targets (opt-in; the default build is unchanged) ------
 # The committed spirv.h stays the build input (no shader compiler needed);
 # these targets make staleness visible and regeneration explicit. The flags

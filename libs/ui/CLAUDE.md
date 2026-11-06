@@ -149,6 +149,7 @@ Widget functions hold no state; persistence lives in `GuiContext` side tables.
   - `hit_test` OR-folds pointers, and `HitTest::pointer` is the lowest slot.
   - `hovered` is the settled value (last frame's hot, gated on this frame's inside-ness).
   - Touch has no hover.
+  - The click floor: within one frame a pointer's click publications rise strictly through the strata - a same-frame tap clicks at most one widget per stratum (the first hit-tested claimant), and the reuse frame's new contact (still down) is exempt.
 - **Layers:** base 10, popup 20, tooltip 30, modal 40, toast 50.
   - One numbering drives both hit-testing and `r2d::set_layer`.
   - A higher layer wins hot and steals a same-frame press. Within a layer the later widget wins.
