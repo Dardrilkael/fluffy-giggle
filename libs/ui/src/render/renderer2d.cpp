@@ -1116,12 +1116,18 @@ Font Renderer2D::publish_baked_font(const font::BakedFont& baked,
     // sentinel-sprite degrade keep them out of the text flow: a missing
     // icon draws no sprite, the pre-icon square instead.
     std::vector<Font::Glyph> icon_glyphs(font::kIconCount);
+    // The icons' bitmaps must OUTLIVE the pack below: sources borrow
+    // rgba.data() raw pointers (the ASCII loop borrows baked.glyphs the
+    // same way), so the BakedGlyphs live here for the whole function -
+    // a per-iteration local would free its buffer at every loop's end
+    // and the packer would blit freed memory into the icon cells.
+    std::vector<font::BakedGlyph> icon_bitmaps(font::kIconCount);
     for (std::uint32_t i = 0; i < font::kIconCount; ++i) {
-        font::BakedGlyph icon;
         if (!font::bake_icon_glyph(font::kIconFirst + i, baked.pixel_height,
-                                   icon)) {
+                                   icon_bitmaps[i])) {
             continue;
         }
+        const font::BakedGlyph& icon = icon_bitmaps[i];
         Font::Glyph& out = icon_glyphs[i];
         out.advance = 0.0f;
         out.offset_x = 0.0f;
