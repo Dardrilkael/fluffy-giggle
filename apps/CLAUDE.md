@@ -101,8 +101,9 @@ CMakeLists only wire ws libraries together.
   (repeatable, later wins) layers .csym symbol libraries over the
   built-ins for every subcommand. argv, file I/O and exit codes only.
 - `apps/circsim_editor` - the ws::circsim stage-3/4/5 editor (windowed,
-  desktop): the schematic capture app built ONLY from AppShell over
-  libs/circsim - six panels (the Schematic canvas through ws::ui's
+  desktop and Android; its APK is `tools/package-android.ps1 -App
+  circsim_editor`): the schematic capture app built ONLY from AppShell
+  over libs/circsim - six panels (the Schematic canvas through ws::ui's
   canvas layer: place/move/rotate/mirror parts with every edit an undo
   command, wire routing with the ortho constraint, net labels; the
   canvas floor and dot grid ride the canvas layer's stage-16 grid
@@ -121,8 +122,13 @@ CMakeLists only wire ws libraries together.
   panel's canvas transform composes the exact inverse of its w2s
   (viewport center, zoom with the y flip, -center), so the world
   lands on the same pixels the grid marks at every pan/zoom; the
-  Palette over `symbols()` with fitted mini previews; the Properties
-  grid over ParamSpecs plus the analysis-setup and directives editors;
+  Palette over `symbols()` with fitted mini previews and the fuzzy
+  word-start search ("res" and "rstr" both arm the resistor; a
+  mid-word letter never opens a match, so "res" leaves the sources
+  alone); the Properties panel as a three-tab strip - the selection's
+  rows, the Netlist view, the Simulation setup (the analysis list +
+  the directives editor, always reachable instead of hidden behind an
+  empty selection);
   the Problems list over Diags with select-and-zoom through
   libs/circsim's locate seam; the Netlist view; the Results panel - the
   stage-4 plot over ws::spice's tables: one analysis at a time through
@@ -140,7 +146,14 @@ CMakeLists only wire ws libraries together.
   leave the data, and the decimation slices to the visible x window),
   the .csim document type
   (autosave/crash recovery/session ride the shell), and the
-  simulate job over `run_schematic` (a status row with cancel, a
+  simulate job over `run_schematic`. The shell toolbar rides the
+  icon-and-tooltip spelling: the chrome actions (New/Open/Save/
+  Undo/Redo/Delete/Rotate/Mirror/Wire/ERC) wear the built-in icon
+  set's standard glyphs through `set_toolbar_icons`, every button
+  carries a label+chord tooltip (the live binding, the menus' own
+  hint text), and Simulate keeps its text button - the one act that
+  deserves the word. Redo's chords are the standard pair, Ctrl+Y
+  declared (the hints spell it) with Ctrl+Shift+Z bound as the alias (a status row with cancel, a
   summary toast, the run's mapped problems in the Problems panel, the
   tables delivered to the Results panel). The panel's draw is gated
   headless by `tests/test_results_panel.cpp` through the Editor's

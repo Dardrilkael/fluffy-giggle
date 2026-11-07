@@ -8,7 +8,9 @@
 // (headless, tested); this file is only the chrome. Stage 5 gave the
 // plot its hands (wheel/band/axis drags/pan/reset); stage 6 gives a
 // mixed V/I legend its second spine - the currents read on a right
-// axis with their own fit, ticks and manual window.
+// axis with their own fit, ticks and manual window. Stage 7 is the
+// polish pass: hover tooltip, legend sparklines, bulk visibility, a
+// fit-view button, aligned value rows with units.
 
 #include "editor.hpp"
 

@@ -14,7 +14,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <utility>
+#include <vector>
 
 #include <ws/jobs/job_system.hpp>
 #include <ws/platform/title.hpp>
@@ -42,6 +44,31 @@ constexpr int kKeyW = 87;
 [[nodiscard]] bool point_in(const Rect& rect, float x, float y) {
     return x >= rect.x && x < rect.x + rect.width && y >= rect.y &&
            y < rect.y + rect.height;
+}
+
+// Pointer-in-array without the unspecified relational compare of
+// unrelated pointers (std::less gives a total order).
+template <class T>
+[[nodiscard]] bool within(const std::vector<T>& items, const T* p) {
+    return p != nullptr && !items.empty() &&
+           !std::less<const T*>{}(p, items.data()) &&
+           std::less<const T*>{}(p, items.data() + items.size());
+}
+
+// A layout name becomes a file name under <config>/layouts/: no
+// separators, no drive colons, no dot-dot, no control characters.
+[[nodiscard]] bool valid_layout_name(const std::string& name) {
+    if (name.empty() || name == "." || name == ".." || name.size() > 128) {
+        return false;
+    }
+    for (const char c : name) {
+        if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' ||
+            c == '"' || c == '<' || c == '>' || c == '|' ||
+            static_cast<unsigned char>(c) < 0x20) {
+            return false;
+        }
+    }
+    return name.find("..") == std::string::npos;
 }
 
 }  // namespace
@@ -94,6 +121,10 @@ void AppShell::set_document_factory(DocumentFactory factory) {
 
 void AppShell::set_toolbar_commands(std::vector<std::string> ids) {
     toolbar_ids_ = std::move(ids);
+}
+
+void AppShell::set_toolbar_icons(std::vector<gui::ToolbarIcon> icons) {
+    toolbar_icons_ = std::move(icons);
 }
 
 void AppShell::set_menu_specs(std::vector<gui::CommandMenuSpec> specs) {
@@ -220,11 +251,17 @@ void AppShell::register_commands() {
         }
         ws::platform::FileDialogOptions options;
         options.title = "open document";
-        const ws::core::Result<std::optional<std::string>> picked =
-            config_.dialogs->open_file(options);
-        if (picked && picked->has_value()) {
-            (void)open_paths({**picked});
-        }
+        // The pick rides a worker when one is installed (see
+        // dispatch_dialog_pick): the completion opens what came back,
+        // between frames where the shell's state is safe to touch.
+        dispatch_dialog_pick(
+            [this, options] { return config_.dialogs->open_file(options); },
+            [this](const ws::core::Result<std::optional<std::string>>&
+                       picked) {
+                if (picked && picked->has_value()) {
+                    (void)open_paths({**picked});
+                }
+            });
     };
     add_or_ignore(std::move(open_cmd));
 
@@ -246,25 +283,29 @@ void AppShell::register_commands() {
         if (config_.dialogs == nullptr) {
             return;
         }
+        Document* const document = documents_->active();
+        if (document == nullptr) {
+            return;
+        }
         ws::platform::FileDialogOptions options;
         options.title = "save document";
-        const ws::core::Result<std::optional<std::string>> picked =
-            config_.dialogs->save_file(options);
-        if (picked && picked->has_value() && documents_->active() != nullptr) {
-            Document* document = documents_->active();
-            document->set_path(**picked);
-            if (const ws::core::Status st = document->save(); st) {
-                (void)document->undo().mark_saved();
-                (void)documents_->finish_autosave(
-                    static_cast<std::size_t>(
-                        std::max(0, documents_->active_index())));
-                set_status("saved " + document->display_name());
-            } else {
-                toast_text_ = "save failed: " + st.error().message;
-                toasts_.push({toast_text_.c_str(), gui::ToastSeverity::error,
-                              nullptr, 5.0f});
-            }
-        }
+        // The pick rides a worker when one is installed; the save lands
+        // with it between frames. The document may close while the
+        // picker was up - the answer lands only while it is still open.
+        dispatch_dialog_pick(
+            [this, options] { return config_.dialogs->save_file(options); },
+            [this, document](const ws::core::Result<std::optional<std::string>>&
+                                 picked) {
+                if (find_document(document) < 0 || !picked ||
+                    !picked->has_value()) {
+                    return;
+                }
+                const ws::core::Status st =
+                    apply_save_as(document, **picked);
+                if (!st) {
+                    toast_save_failure(st);
+                }
+            });
     };
     add_or_ignore(std::move(save_as_cmd));
 
@@ -543,9 +584,9 @@ std::vector<std::string> AppShell::layout_names() {
 
 ws::core::Status AppShell::save_named_layout(const std::string& name) {
     if (config_.fs == nullptr || config_.config_dir.empty() ||
-        name.empty()) {
-        return ws::core::unexpected<ws::core::Error>(
-            shell_error(ShellError::invalid, "layout name is empty"));
+        !valid_layout_name(name)) {
+        return ws::core::unexpected<ws::core::Error>(shell_error(
+            ShellError::invalid, "layout name is empty or not a valid file name"));
     }
     // layouts/<name>.json + the index entry (no listdir on the seam,
     // the names ride layouts.json).
@@ -564,10 +605,13 @@ ws::core::Status AppShell::save_named_layout(const std::string& name) {
             list.push_back(ws::settings::json::Value::text(n));
         }
         root.set("names", ws::settings::json::Value::array(std::move(list)));
-        (void)config_.fs->write(
+        const ws::core::Status index_st = config_.fs->write(
             path_of("layouts.json"),
             ws::settings::json::write(
                 ws::settings::json::Value::object(std::move(root))));
+        if (!index_st) {
+            return index_st;  // the file exists but the menu would never list it
+        }
     }
     set_status("layout saved: " + name);
     return {};
@@ -577,6 +621,10 @@ ws::core::Status AppShell::load_named_layout(const std::string& name) {
     if (config_.fs == nullptr || config_.config_dir.empty()) {
         return ws::core::unexpected<ws::core::Error>(
             shell_error(ShellError::unavailable, "no config dir"));
+    }
+    if (!valid_layout_name(name)) {
+        return ws::core::unexpected<ws::core::Error>(
+            shell_error(ShellError::invalid, "invalid layout name"));
     }
     const ws::core::Result<std::string> text = config_.fs->read(
         config_.config_dir + "/layouts/" + name + ".json");
@@ -667,33 +715,134 @@ ws::core::Status AppShell::save_active() {
         }
         ws::platform::FileDialogOptions options;
         options.title = "save document";
+        if (config_.jobs != nullptr) {
+            // The pick rides a worker and the save lands with it
+            // between frames (dispatch_dialog_pick's rule); the
+            // command's answer is "accepted", and a landed failure
+            // toasts on its own.
+            dispatch_dialog_pick(
+                [this, options] { return config_.dialogs->save_file(options); },
+                [this, document](const ws::core::Result<
+                                     std::optional<std::string>>& picked) {
+                    if (find_document(document) < 0 || !picked ||
+                        !picked->has_value()) {
+                        return;
+                    }
+                    // A save that landed meanwhile (a second Ctrl+S
+                    // through the picker) wins; the stale pick answers
+                    // nothing.
+                    if (!document->path().empty()) {
+                        return;
+                    }
+                    const ws::core::Status st =
+                        apply_save_as(document, **picked);
+                    if (!st) {
+                        toast_save_failure(st);
+                    }
+                });
+            return {};
+        }
         const ws::core::Result<std::optional<std::string>> picked =
             config_.dialogs->save_file(options);
         if (!picked || !picked->has_value()) {
             return {};
         }
-        document->set_path(**picked);
+        return apply_save_as(document, **picked);
     }
-    if (const ws::core::Status st = document->save(); !st) {
+    return apply_save_as(document, document->path());
+}
+
+// --- the pickers' dispatch (the header's own contract) ------------------------
+
+void AppShell::dispatch_dialog_pick(DialogPick pick, DialogLanded landed) {
+    if (config_.jobs == nullptr) {
+        // No pool: the historic inline shape - the headless hosts and
+        // every existing test.
+        landed(pick());
+        return;
+    }
+    // The dialogs header's rule, honoured: the blocking call runs on a
+    // worker (on android the surface lifecycle marches on while the
+    // SAF picker is up - the render thread must never be the waiter),
+    // and the answer lands on the main thread between frames, where
+    // the shell's state is safe to touch. The handle drops on the
+    // floor: the completion owns the follow-up, and a completion
+    // still queued at teardown is dropped by the job system (never
+    // run) - a picker open at shutdown closes nothing.
+    // The completion rides the callbacks struct the way every host
+    // spells it (the jobs suite's own shape).
+    ws::jobs::JobCallbacks<std::optional<std::string>> callbacks;
+    callbacks.on_complete = [landed =
+                                 std::move(landed)](
+                                ws::jobs::JobHandle<std::optional<std::string>>
+                                    handle) {
+        landed(handle.take());
+    };
+    (void)config_.jobs->submit<std::optional<std::string>>(
+        [pick = std::move(pick)](
+            ws::jobs::JobContext&) -> ws::core::Result<std::optional<std::string>> {
+            return pick();  // blocks the worker until the user decides
+        },
+        ws::jobs::Priority::normal, {}, std::move(callbacks));
+}
+
+ws::core::Status AppShell::apply_save_as(Document* document,
+                                         const std::string& path) {
+    const std::string previous_path = document->path();
+    document->set_path(path);
+    const ws::core::Status st = document->save();
+    if (!st) {
+        // the save failed: keep the old identity
+        document->set_path(previous_path);
         return st;
     }
     (void)document->undo().mark_saved();
-    (void)documents_->finish_autosave(
-        static_cast<std::size_t>(std::max(0, documents_->active_index())));
+    (void)documents_->finish_autosave(static_cast<std::size_t>(
+        std::max(0, find_document(document))));
     set_status("saved " + document->display_name());
     return {};
 }
 
+int AppShell::find_document(const Document* document) const {
+    if (document == nullptr) {
+        return -1;
+    }
+    for (std::size_t i = 0; i < documents_->count(); ++i) {
+        if (documents_->at(i) == document) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+void AppShell::toast_save_failure(const ws::core::Status& st) {
+    toast_text_ = "save failed: " + st.error().message;
+    toasts_.push({toast_text_.c_str(), gui::ToastSeverity::error, nullptr,
+                  5.0f});
+}
+
 ws::core::Status AppShell::open_paths(const std::vector<std::string>& paths) {
+    std::optional<ws::core::Error> first_error;
+    std::size_t failed = 0;
     for (const std::string& path : paths) {
         const ws::core::Result<int> index = documents_->open_path(path);
         if (!index) {
-            toast_text_ = "open failed: " + index.error().message;
-            toasts_.push({toast_text_.c_str(), gui::ToastSeverity::error,
-                          nullptr, 5.0f});
-            return ws::core::unexpected<ws::core::Error>(index.error());
+            if (!first_error) {
+                first_error = index.error();
+            }
+            ++failed;
+            continue;  // the rest of the drop still opens
         }
         set_status("opened " + path);
+    }
+    if (first_error) {
+        toast_text_ = "open failed: " + first_error->message;
+        if (failed > 1) {
+            toast_text_ += " (+" + std::to_string(failed - 1) + " more)";
+        }
+        toasts_.push({toast_text_.c_str(), gui::ToastSeverity::error, nullptr,
+                      5.0f});
+        return ws::core::unexpected<ws::core::Error>(*first_error);
     }
     return {};
 }
@@ -736,13 +885,19 @@ void AppShell::draw(GuiContext& gui, const ChromeTheme& theme,
                    theme.border);
 
     // The toolbar strip (only when the host named commands for it).
+    // The icon-and-tooltip spelling: every button carries its hint
+    // (the live chord through the shell's own resolver at the frame's
+    // key context), and a command the host mapped in set_toolbar_icons
+    // wears its glyph instead of the text.
     float top = frame.y + theme.control_height;
     if (!toolbar_ids_.empty()) {
         const Rect tool{frame.x, top, frame.width, theme.control_height};
         r2d::draw_quad(tool.x, tool.y, tool.width, tool.height, theme.bar_bg);
         layout.begin_panel(tool, 3.0f, theme.spacing);
         const std::string_view fired = gui::command_toolbar(
-            gui, layout, theme, "shell.toolbar", commands_, toolbar_ids_);
+            gui, layout, theme, "shell.toolbar", commands_, toolbar_ids_,
+            toolbar_icons_.empty() ? nullptr : toolbar_icons_.data(),
+            toolbar_icons_.size(), &shortcuts_, key_context());
         if (!fired.empty()) {
             (void)commands_.execute(fired);
         }
@@ -880,6 +1035,12 @@ void AppShell::draw_menu_bar(GuiContext& gui, LayoutCursor& layout,
         return;
     }
     if (event.menu == window_index) {
+        if (within(recent_items_, event.item)) {
+            return;  // submenu rows live in recent_items_: not an index into window_items_
+        }
+        if (!within(window_items_, event.item)) {
+            return;
+        }
         const std::ptrdiff_t index = event.item - window_items_.data();
         if (index >= 0 &&
             static_cast<std::size_t>(index) < window_actions_.size()) {
@@ -995,7 +1156,9 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
 
     // The leaves: a tab strip, then the active tab's panel body in a
     // scroll scope.
-    for (const DockTree::LeafRect& leaf : resolved.leaves) {
+    std::string closing_panel;  // closed after the walk: see below
+    for (std::size_t leaf_idx = 0; leaf_idx < resolved.leaves.size(); ++leaf_idx) {
+        const DockTree::LeafRect& leaf = resolved.leaves[leaf_idx];
         const float strip_h = theme.control_height;
         const Rect strip{leaf.rect.x, leaf.rect.y, leaf.rect.width, strip_h};
 
@@ -1089,8 +1252,9 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
         gui::tooltip_text(gui, layout, theme, "shell.closetab", close_rect,
                           "Close panel");
         if (close.activated()) {
-            panel_host_.close(panel_registry_,
-                              (*leaf.tabs)[static_cast<std::size_t>(active)]);
+            // Not closed here: closing prunes the tree and moves nodes, and
+            // the later leaves' LeafRect::tabs still point into it.
+            closing_panel = (*leaf.tabs)[static_cast<std::size_t>(active)];
             layout.end_panel();
             continue;  // the leaf's body is gone this frame
         }
@@ -1110,6 +1274,9 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
                                       content);
         desc->draw(gui, layout, theme, *instance);
         gui::end_scroll_panel(gui, layout, theme);
+    }
+    if (!closing_panel.empty()) {
+        panel_host_.close(panel_registry_, closing_panel);
     }
 }
 
@@ -1283,10 +1450,35 @@ void AppShell::draw_close_prompt(GuiContext& gui, const ChromeTheme& theme,
         return;  // Cancel
     }
     if (answer == 0) {  // Save: a failed save keeps the document open
+        documents_->activate(index);  // save_active() saves the active one
+        Document* const doc = documents_->at(index);
+        if (doc != nullptr && doc->path().empty() &&
+            config_.dialogs != nullptr && config_.jobs != nullptr) {
+            // An untitled save through the worker (the pickers' rule):
+            // the close lands WITH the save, in the completion. A
+            // dismissed picker keeps the document open - the prompt
+            // stays answered, the user re-asks.
+            ws::platform::FileDialogOptions options;
+            options.title = "save document";
+            dispatch_dialog_pick(
+                [this, options] { return config_.dialogs->save_file(options); },
+                [this, doc](const ws::core::Result<
+                                     std::optional<std::string>>& picked) {
+                    const int at = find_document(doc);
+                    if (at < 0 || !picked || !picked->has_value()) {
+                        return;
+                    }
+                    if (apply_save_as(doc, **picked)) {
+                        (void)documents_->finish_close(
+                            static_cast<std::size_t>(at), false);
+                        set_status("saved and closed");
+                    }
+                    // a failed save toasts; the document stays open
+                });
+            return;  // the modal is answered; the completion closes
+        }
         if (const ws::core::Status st = save_active(); !st) {
-            toast_text_ = "save failed: " + st.error().message;
-            toasts_.push({toast_text_.c_str(), gui::ToastSeverity::error,
-                          nullptr, 5.0f});
+            toast_save_failure(st);
             return;
         }
     }
@@ -1329,6 +1521,10 @@ void AppShell::draw_recovery_prompt(GuiContext& gui,
                     document->adopt_autosave_content(*content);
                 }
                 set_status("recovered " + offer.document);
+            } else {
+                toast_text_ = "recovery failed: " + index.error().message;
+                toasts_.push({toast_text_.c_str(), gui::ToastSeverity::error,
+                              nullptr, 5.0f});
             }
         } else {
             toast_text_ = "recovery failed: " + content.error().message;

@@ -8,6 +8,7 @@
 #include <cfloat>
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 #include <vector>
 
 // The workspace's fixed-size vecmath (Vec3, dot/cross/normalize) for the 3D
@@ -55,11 +56,24 @@ struct Vertex {
     float tex_index;
 };
 static_assert(sizeof(Vertex) == 40, "vertex layout is load-bearing (shaders, pipeline)");
+// Pin every attribute offset, not just the total: a reordered member keeps
+// sizeof intact and silently scrambles the pipeline's vertex input state.
+// The no-padding guarantee is also what lets BatchCore::frame_hash() hash
+// the vertex array as raw bytes.
+static_assert(offsetof(Vertex, pos) == 0 && offsetof(Vertex, color) == 12 &&
+                  offsetof(Vertex, uv) == 28 && offsetof(Vertex, tex_index) == 36,
+              "vertex attribute offsets are load-bearing (pipeline)");
+static_assert(std::is_trivially_copyable_v<Vertex>,
+              "vertices are memcpy'd into the mapped GPU buffer");
+static_assert(kMaxQuadsPerChunk * 4u <= 65536u,
+              "a chunk's vertices must stay addressable by u16 indices");
 
 // Column-major 4x4, GLSL upload order (m[0..3] = column 0).
 struct Mat4 {
     float m[16];
 };
+static_assert(sizeof(Mat4) == 64 && std::is_trivially_copyable_v<Mat4>,
+              "Mat4 is a push constant: 64 bytes, plain data");
 
 // One draw-call-sized slice of the frame: shared VP, own clip, own texture
 // table (chunked tier only - the bindless tier leaves it empty and indexes
@@ -89,7 +103,7 @@ struct Chunk {
 // world maps with no sign flip. Degenerate inputs (zoom <= 0, empty frame)
 // stay finite - the GPU flush guards zero extents anyway, but a NaN matrix
 // would poison the whole batch.
-Mat4 camera_vp(const Camera2D& camera, float frame_width, float frame_height);
+[[nodiscard]] Mat4 camera_vp(const Camera2D& camera, float frame_width, float frame_height);
 
 // 0xRRGGBBAA -> [0,1] floats, in that order.
 void unpack_rgba(std::uint32_t color, float out[4]);
@@ -109,7 +123,7 @@ void quad_corners_pivot(float x, float y, float w, float h, float pivot_x,
 // Expands a segment into a thickness quad (u runs along the line, v
 // across). Returns false for degenerate input - dropped silently, that is
 // plausibly live app data (e.g. a zero-length drag). z is written 0.
-bool line_quad(float x0, float y0, float x1, float y1, float thickness,
+[[nodiscard]] bool line_quad(float x0, float y0, float x1, float y1, float thickness,
                float out_pos[4][3], float out_uv[4][2]);
 
 // --- 3D camera (perspective) --------------------------------------------------
@@ -129,13 +143,13 @@ struct CamBasis {
     ws::math::Vec3 up;
     ws::math::Vec3 forward;
 };
-CamBasis camera_basis(const Camera3D& camera);
+[[nodiscard]] CamBasis camera_basis(const Camera3D& camera);
 
 // Perspective view-projection for Vulkan NDC (y down, z in [0,1] forward):
 // clip.w IS the view depth, so the homogeneous divide is the perspective
 // divide. Degenerate inputs stay finite, camera_vp's contract - a NaN
 // matrix would poison the whole batch.
-Mat4 camera_vp3d(const Camera3D& camera, float frame_width, float frame_height);
+[[nodiscard]] Mat4 camera_vp3d(const Camera3D& camera, float frame_width, float frame_height);
 
 // Billboard corners TL, TR, BR, BL - the 2D quads' order and UV assignment:
 // centered on (x, y, z), spread w/h along the basis, facing the camera.
@@ -145,7 +159,7 @@ void billboard_corners(float x, float y, float z, float w, float h,
 // line_quad's 3D sibling: a thickness quad perpendicular to segment and
 // view, thickness in WORLD units (the 2D form's is framebuffer pixels).
 // False for degenerate input, line_quad's contract.
-bool line_quad3d(float x0, float y0, float z0, float x1, float y1, float z1,
+[[nodiscard]] bool line_quad3d(float x0, float y0, float z0, float x1, float y1, float z1,
                  float thickness, const CamBasis& basis,
                  float out_pos[4][3], float out_uv[4][2]);
 
@@ -168,9 +182,16 @@ public:
     void use_global_texture_ids(bool enabled) { global_tex_ids_ = enabled; }
 
     void begin_frame();
-    // Closes the current chunk (if any) and opens one with the given VP,
-    // clip and depth mode. Always succeeds - the chunk array grows on
-    // demand (M9 removed the cap; see kInitialChunkCapacity).
+    // Closes the current chunk (if any) and opens a segment with the given
+    // VP, clip and depth mode. Always succeeds - the chunk array grows on
+    // demand (M9 removed the cap; see kInitialChunkCapacity). Two
+    // draw-call savers, both invisible to painter order (vertex ranges stay
+    // contiguous, chunks flush in creation order):
+    //  - a trailing chunk that recorded no quads is recycled in place, so
+    //    open/close pairs around nothing never reach the flush;
+    //  - a segment whose state is bit-identical to the previous (closed)
+    //    chunk continues it instead of opening a new one - e.g. several
+    //    begin() blocks with the same camera and clip become one draw.
     void open_segment(const Mat4& vp, const float (&clip)[4] = kFullClip,
                       bool depth_test = false);
     void close_segment();
@@ -214,17 +235,43 @@ public:
     // overflow accounting M5 added is down to this one counter.
     std::uint32_t dropped_quads() const { return dropped_quads_; }
 
+    // Per-frame diagnostics (reset at begin_frame()). Pure bookkeeping, a
+    // handful of integer increments on paths that already branch: cheap
+    // enough to leave on in release, meant to feed a profiler overlay.
+    struct FrameStats {
+        std::uint32_t texture_splits = 0;   // chunks opened because a texture table filled
+        std::uint32_t quad_cap_splits = 0;  // chunks opened at kMaxQuadsPerChunk
+        std::uint32_t merged_segments = 0;  // open_segment() calls folded into the previous chunk
+        std::uint32_t elided_chunks = 0;    // empty chunks recycled instead of flushed
+    };
+    const FrameStats& stats() const { return stats_; }
+
+    // 64-bit FNV-1a over everything the GPU half would consume: every
+    // chunk's state and used texture table, then the raw vertex bytes.
+    // Two builds that record the same draws hash equal, so a headless test
+    // can snapshot a whole frame as ONE integer ("golden frame") instead of
+    // diffing thousands of floats. Deterministic per platform/toolchain;
+    // do not compare hashes across different libm implementations (the
+    // sin/cos in the helpers may differ in the last ulp).
+    std::uint64_t frame_hash() const;
+
 private:
-    // Appends a fresh chunk; the array grows (never drops).
-    void start_chunk(const Mat4& vp, const float (&clip)[4], bool depth_test);
-    // Splits the current chunk at kMaxQuadsPerChunk (both push paths call
-    // this at the cap): the fresh chunk inherits the segment's VP, clip,
-    // depth mode and the whole texture table - the fresh chunk's vertices
-    // still name the old slots. Index-based access throughout:
-    // start_chunk's push_back may move the elements, so references into
-    // chunks_ do not survive it (the clip array is read inside start_chunk
-    // before its own push, so binding it as an argument is safe).
-    void split_full_chunk();
+    // A fresh, empty chunk positioned at the current end of the vertex
+    // array. Returned by value so callers never hold a reference into
+    // chunks_ across a push_back (which may reallocate).
+    Chunk make_chunk(const Mat4& vp, const float (&clip)[4],
+                     bool depth_test) const;
+    // Common prologue of every push: drops (and counts) when no segment is
+    // open, and splits at kMaxQuadsPerChunk. True when a quad may be written.
+    bool prepare_quad();
+    // Common epilogue: appends the four vertices and bumps the quad count.
+    void write_quad(const float (&pos)[4][3], const float (&uv)[4][2],
+                    const float (&colors)[4][4], float tex_index);
+    // Opens a continuation of the current chunk (same VP, clip, depth mode).
+    // keep_textures = true copies the texture table (the quad-cap split: the
+    // fresh chunk's vertices still name the old slots), false starts it
+    // empty (the table-full split, which then seeds the new binding itself).
+    void split_chunk(bool keep_textures);
     // Slot for texture_id in the current chunk, splitting the chunk when
     // its table is full. Chunked mode only (bindless writes the global id
     // straight into the vertex and never calls this).
@@ -235,6 +282,7 @@ private:
     bool segment_open_ = false;
     bool global_tex_ids_ = false;         // tex_index semantics (see above)
     std::uint32_t dropped_quads_ = 0;     // no-open-segment drops (M9)
+    FrameStats stats_{};
 };
 
 }  // namespace ws::ui::r2d::batch

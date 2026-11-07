@@ -101,6 +101,11 @@ public:
     void set_document_factory(DocumentFactory factory);
     // The toolbar's commands, in order (empty = no toolbar row).
     void set_toolbar_commands(std::vector<std::string> ids);
+    // The toolbar's icon overrides: a command named here lays as an
+    // icon button (the built-in set's glyph plus a tooltip - see
+    // command_toolbar) instead of its text label. Commands not named
+    // keep the text button, and an empty list is the all-text v1 row.
+    void set_toolbar_icons(std::vector<gui::ToolbarIcon> icons);
     // The host's menu order (categories become menus). The shell
     // appends its own "Window" menu after these.
     void set_menu_specs(std::vector<gui::CommandMenuSpec> specs);
@@ -232,6 +237,41 @@ private:
     // The shell's own commands (registered at startup).
     void register_commands();
     void autosave_tick();
+
+    // --- the pickers' dispatch ------------------------------------------------
+    //
+    // One blocking picker call plus where its answer lands. The pick
+    // runs on a worker when a job system is installed - the dialogs
+    // header's own rule ("run it on a worker, never the render
+    // loop"): a call BLOCKS while the user decides, and on android the
+    // surface lifecycle marches on while the Storage Access picker is
+    // up, so the render thread must never be the one waiting.
+    // `landed` then runs on the main thread between frames (the jobs
+    // marshal queue), where the shell's state is safe to touch.
+    // Without a job system the pick runs inline on the caller - the
+    // historic shape every headless host (and test) rides.
+    using DialogPick =
+        std::function<ws::core::Result<std::optional<std::string>>()>;
+    using DialogLanded = std::function<
+        void(const ws::core::Result<std::optional<std::string>>&)>;
+    void dispatch_dialog_pick(DialogPick pick, DialogLanded landed);
+
+    // The save-as body the paths share: re-point the document, save,
+    // mark the save point and finish the autosave - or restore the old
+    // identity and answer the error. No toasts: the callers own the
+    // reporting (a landed failure cannot channel a Status anywhere, so
+    // they toast; a synchronous caller hands it onward).
+    [[nodiscard]] ws::core::Status apply_save_as(Document* document,
+                                                 const std::string& path);
+
+    // The document's current index, -1 when it is no longer open. The
+    // async completions re-validate their captured documents this way -
+    // a close while the picker was up must not resurrect a document.
+    [[nodiscard]] int find_document(const Document* document) const;
+
+    // The save-failure toast the dialog flows share.
+    void toast_save_failure(const ws::core::Status& st);
+
     // The Window menu's action strings, index-matched to window_items_
     // ("panel:type", "layout:reset", "layout:save", "layout:load:name",
     // "recent:path", "cmd:id").
@@ -255,6 +295,7 @@ private:
     gui::CommandMenuBuilder menu_builder_;
     std::vector<gui::CommandMenuSpec> menu_specs_;
     std::vector<std::string> toolbar_ids_;
+    std::vector<gui::ToolbarIcon> toolbar_icons_;
     std::function<std::vector<StatusJob>()> status_jobs_;
 
     std::string status_;

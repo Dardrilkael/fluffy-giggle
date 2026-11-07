@@ -401,14 +401,20 @@ BakedFont bake_info(const stbtt_fontinfo& info, float pixel_height,
 }
 
 // --- the built-in icon set (P6) ----------------------------------------------
-// Seven interface icons as analytic shapes: each is a small list of line
-// segments (round-capped) plus at most one circle, rasterized by Euclidean
-// distance to the nearest stroke edge with a one-pixel antialiasing ramp.
-// The geometry is spelled in a 0..1 unit square (y down, like the gui) and
-// scaled to the font's pixel height at bake time, so every size bakes the
-// same icon at the same weight. The stroke is proportional (a tenth of the
-// box, floored at 1.25 px) - chunky enough to read at 14 px, fine enough
-// not to blob at 28.
+// Seventeen interface icons as analytic shapes: each is a small list of
+// line segments (round-capped) plus up to two filled dots, rasterized by
+// Euclidean distance to the nearest stroke edge with a one-pixel
+// antialiasing ramp. The geometry is spelled in a 0..1 unit square (y
+// down, like the gui) and scaled to the font's pixel height at bake
+// time, so every size bakes the same icon at the same weight. The
+// stroke is proportional (a tenth of the box, floored at 1.25 px) -
+// chunky enough to read at 14 px, fine enough not to blob at 28.
+// The first seven are the chrome's own markers (chevrons, check,
+// close, search, plus, minus); the toolbar ten after them (document,
+// folder, save, undo, redo, trash, rotate, mirror, wire,
+// clipboard_check) are the app toolbars' standard glyphs - the wire is
+// the one that needs TWO dots (its junction endpoints), hence the
+// second circle in IconShape.
 namespace {
 
 struct IconSegment {
@@ -417,7 +423,8 @@ struct IconSegment {
 struct IconShape {
     const IconSegment* segments;
     std::uint32_t segment_count;
-    float circle_x, circle_y, circle_r;  // r <= 0: no circle
+    float circle_x, circle_y, circle_r;   // r <= 0: no first dot
+    float circle2_x, circle2_y, circle2_r;  // r <= 0: no second dot
 };
 
 // Distance from (px, py) to a segment, round caps included (the plain
@@ -448,8 +455,11 @@ bool bake_icon_glyph(std::uint32_t codepoint, float pixel_height,
     }
 
     // The shapes, in enum order (chevron down, chevron right, check,
-    // close, search, plus, minus) - a static table, the whole "look" of
-    // the set in one place.
+    // close, search, plus, minus, document, folder, save, undo, redo,
+    // trash, rotate, mirror, wire, clipboard_check) - a static table,
+    // the whole "look" of the set in one place. The toolbar ten's
+    // arcs (undo, redo, rotate) are approximated by short polyline
+    // runs; their arrowheads are two-segment barbs off the arc's end.
     static const IconSegment kChevronDown[] = {{0.28f, 0.36f, 0.50f, 0.62f},
                                                {0.50f, 0.62f, 0.72f, 0.36f}};
     static const IconSegment kChevronRight[] = {{0.36f, 0.28f, 0.62f, 0.50f},
@@ -462,14 +472,119 @@ bool bake_icon_glyph(std::uint32_t codepoint, float pixel_height,
     static const IconSegment kPlus[] = {{0.50f, 0.22f, 0.50f, 0.78f},
                                         {0.22f, 0.50f, 0.78f, 0.50f}};
     static const IconSegment kMinus[] = {{0.22f, 0.50f, 0.78f, 0.50f}};
+    // document: a page with a folded corner (the dog-ear reads at
+    // toolbar sizes where a bare rectangle would not).
+    static const IconSegment kDocument[] = {
+        {0.30f, 0.14f, 0.62f, 0.14f},   // the top edge to the fold
+        {0.62f, 0.14f, 0.78f, 0.30f},  // the diagonal tear
+        {0.78f, 0.30f, 0.78f, 0.86f},  // the right edge
+        {0.78f, 0.86f, 0.30f, 0.86f},  // the bottom edge
+        {0.30f, 0.86f, 0.30f, 0.14f},  // the left edge
+        {0.62f, 0.14f, 0.62f, 0.30f},  // the fold's vertical
+        {0.62f, 0.30f, 0.78f, 0.30f},  // the fold's horizontal
+    };
+    // folder: tab, then the body under it.
+    static const IconSegment kFolder[] = {
+        {0.16f, 0.28f, 0.40f, 0.28f},   // the tab's top
+        {0.40f, 0.28f, 0.48f, 0.36f},  // the tab's shoulder
+        {0.48f, 0.36f, 0.84f, 0.36f},  // the body's top
+        {0.84f, 0.36f, 0.84f, 0.78f},  // the body's right
+        {0.84f, 0.78f, 0.16f, 0.78f},  // the body's bottom
+        {0.16f, 0.78f, 0.16f, 0.28f},  // the body's left + the tab's
+    };
+    // save: the floppy - body, shutter slot at the top, one label
+    // bar near the bottom (the classic three-part read).
+    static const IconSegment kSave[] = {
+        {0.22f, 0.14f, 0.78f, 0.14f},   // body top
+        {0.78f, 0.14f, 0.78f, 0.86f},  // body right
+        {0.78f, 0.86f, 0.22f, 0.86f},  // body bottom
+        {0.22f, 0.86f, 0.22f, 0.14f},  // body left
+        {0.42f, 0.14f, 0.42f, 0.42f},  // shutter left
+        {0.42f, 0.42f, 0.62f, 0.42f},  // shutter bottom
+        {0.62f, 0.42f, 0.62f, 0.14f},  // shutter right
+        {0.38f, 0.68f, 0.62f, 0.68f},  // the label bar
+    };
+    // undo: the arc over the top, the head pointing left at its end.
+    static const IconSegment kUndo[] = {
+        {0.74f, 0.36f, 0.66f, 0.26f}, {0.66f, 0.26f, 0.50f, 0.22f},
+        {0.50f, 0.22f, 0.34f, 0.26f}, {0.34f, 0.26f, 0.26f, 0.40f},
+        {0.26f, 0.40f, 0.37f, 0.34f},  // the head's upper barb
+        {0.26f, 0.40f, 0.37f, 0.46f},  // the head's lower barb
+    };
+    // redo: undo's mirror (the arc over the top, head pointing right).
+    static const IconSegment kRedo[] = {
+        {0.26f, 0.36f, 0.34f, 0.26f}, {0.34f, 0.26f, 0.50f, 0.22f},
+        {0.50f, 0.22f, 0.66f, 0.26f}, {0.66f, 0.26f, 0.74f, 0.40f},
+        {0.74f, 0.40f, 0.63f, 0.34f},  // the head's upper barb
+        {0.74f, 0.40f, 0.63f, 0.46f},  // the head's lower barb
+    };
+    // trash: the lid + handle, the tapered body, the base.
+    static const IconSegment kTrash[] = {
+        {0.24f, 0.28f, 0.76f, 0.28f},   // the lid
+        {0.42f, 0.20f, 0.58f, 0.20f},   // the handle's top
+        {0.42f, 0.20f, 0.42f, 0.28f},  // the handle's left
+        {0.58f, 0.20f, 0.58f, 0.28f},  // the handle's right
+        {0.32f, 0.28f, 0.35f, 0.82f},  // the body's left, tapering in
+        {0.68f, 0.28f, 0.65f, 0.82f},  // the body's right
+        {0.35f, 0.82f, 0.65f, 0.82f},  // the base
+    };
+    // rotate: a near-full clockwise circle whose head points down at
+    // the lower left (the standard "rotate CW" read).
+    static const IconSegment kRotate[] = {
+        {0.74f, 0.42f, 0.70f, 0.28f}, {0.70f, 0.28f, 0.58f, 0.20f},
+        {0.58f, 0.20f, 0.42f, 0.20f}, {0.42f, 0.20f, 0.30f, 0.28f},
+        {0.30f, 0.28f, 0.26f, 0.42f}, {0.26f, 0.42f, 0.28f, 0.56f},
+        {0.28f, 0.56f, 0.21f, 0.47f},  // the head's left barb
+        {0.28f, 0.56f, 0.37f, 0.47f},  // the head's right barb
+    };
+    // mirror: two horizontal arrows meeting at the center (the
+    // "flip horizontally" read).
+    static const IconSegment kMirror[] = {
+        {0.16f, 0.50f, 0.44f, 0.50f},   // the left arrow's shaft
+        {0.44f, 0.50f, 0.35f, 0.41f},  // its head, upper barb
+        {0.44f, 0.50f, 0.35f, 0.59f},  // its head, lower barb
+        {0.84f, 0.50f, 0.56f, 0.50f},  // the right arrow's shaft
+        {0.56f, 0.50f, 0.65f, 0.41f},  // its head, upper barb
+        {0.56f, 0.50f, 0.65f, 0.59f},  // its head, lower barb
+    };
+    // wire: an ortho route between two junction dots - the dots are
+    // the IconShape's two circles (filled disks under the SDF, like
+    // the search lens).
+    static const IconSegment kWire[] = {
+        {0.22f, 0.74f, 0.22f, 0.44f}, {0.22f, 0.44f, 0.50f, 0.44f},
+        {0.50f, 0.44f, 0.50f, 0.30f}, {0.50f, 0.30f, 0.78f, 0.30f},
+    };
+    // clipboard_check: the ERC's list - a clipboard body, the clip
+    // tab riding its top edge, a check inside.
+    static const IconSegment kClipboardCheck[] = {
+        {0.28f, 0.18f, 0.72f, 0.18f},   // body top
+        {0.72f, 0.18f, 0.72f, 0.86f},  // body right
+        {0.72f, 0.86f, 0.28f, 0.86f},  // body bottom
+        {0.28f, 0.86f, 0.28f, 0.18f},  // body left
+        {0.42f, 0.14f, 0.42f, 0.24f},  // the clip's left
+        {0.42f, 0.24f, 0.58f, 0.24f},  // the clip's bottom
+        {0.58f, 0.24f, 0.58f, 0.14f},  // the clip's right
+        {0.40f, 0.54f, 0.47f, 0.62f},  // the check's short leg
+        {0.47f, 0.62f, 0.62f, 0.42f},  // the check's long leg
+    };
     static const IconShape kShapes[] = {
-        {kChevronDown, 2, 0, 0, -1.0f},
-        {kChevronRight, 2, 0, 0, -1.0f},
-        {kCheck, 2, 0, 0, -1.0f},
-        {kClose, 2, 0, 0, -1.0f},
-        {kSearchTail, 1, 0.42f, 0.42f, 0.22f},
-        {kPlus, 2, 0, 0, -1.0f},
-        {kMinus, 1, 0, 0, -1.0f},
+        {kChevronDown, 2, 0, 0, -1.0f, 0, 0, -1.0f},
+        {kChevronRight, 2, 0, 0, -1.0f, 0, 0, -1.0f},
+        {kCheck, 2, 0, 0, -1.0f, 0, 0, -1.0f},
+        {kClose, 2, 0, 0, -1.0f, 0, 0, -1.0f},
+        {kSearchTail, 1, 0.42f, 0.42f, 0.22f, 0, 0, -1.0f},
+        {kPlus, 2, 0, 0, -1.0f, 0, 0, -1.0f},
+        {kMinus, 1, 0, 0, -1.0f, 0, 0, -1.0f},
+        {kDocument, 7, 0, 0, -1.0f, 0, 0, -1.0f},
+        {kFolder, 6, 0, 0, -1.0f, 0, 0, -1.0f},
+        {kSave, 8, 0, 0, -1.0f, 0, 0, -1.0f},
+        {kUndo, 6, 0, 0, -1.0f, 0, 0, -1.0f},
+        {kRedo, 6, 0, 0, -1.0f, 0, 0, -1.0f},
+        {kTrash, 7, 0, 0, -1.0f, 0, 0, -1.0f},
+        {kRotate, 8, 0, 0, -1.0f, 0, 0, -1.0f},
+        {kMirror, 6, 0, 0, -1.0f, 0, 0, -1.0f},
+        {kWire, 4, 0.22f, 0.74f, 0.11f, 0.78f, 0.30f, 0.11f},
+        {kClipboardCheck, 9, 0, 0, -1.0f, 0, 0, -1.0f},
     };
     const IconShape& shape = kShapes[codepoint - kIconFirst];
 
@@ -497,13 +612,19 @@ bool bake_icon_glyph(std::uint32_t codepoint, float pixel_height,
             for (std::uint32_t i = 0; i < shape.segment_count; ++i) {
                 d = std::min(d, segment_distance(ux, uy, shape.segments[i]));
             }
+            // The dots (a filled disk each, the search lens's own SDF):
+            // |distance from center| minus radius, min'd into the walk.
             if (shape.circle_r > 0.0f) {
                 const float ex = ux - shape.circle_x;
                 const float ey = uy - shape.circle_y;
-                // The ring's edge: |distance from center| minus radius,
-                // the same SDF the batch shader shades.
                 d = std::min(
                     d, std::sqrt(ex * ex + ey * ey) - shape.circle_r);
+            }
+            if (shape.circle2_r > 0.0f) {
+                const float ex = ux - shape.circle2_x;
+                const float ey = uy - shape.circle2_y;
+                d = std::min(
+                    d, std::sqrt(ex * ex + ey * ey) - shape.circle2_r);
             }
             // Half the stroke on each side of the ideal line, the usual
             // 1 px ramp over the edge. The distance converts to PIXELS

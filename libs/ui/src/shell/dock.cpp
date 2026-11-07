@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <unordered_set>
 #include <utility>
 
 namespace ws::ui::shell {
@@ -173,6 +174,9 @@ void DockTree::remove(std::string_view panel) {
                 if (n.tabs[i] == panel) {
                     n.tabs.erase(n.tabs.begin() +
                                  static_cast<std::ptrdiff_t>(i));
+                    if (static_cast<int>(i) < n.active) {
+                        --n.active;  // an earlier tab left: same tab stays in front
+                    }
                     if (n.active >= static_cast<int>(n.tabs.size())) {
                         n.active = n.tabs.empty()
                                        ? 0
@@ -195,6 +199,11 @@ void DockTree::remove(std::string_view panel) {
     }
     if (root_->split) {
         prune(*root_);
+    }
+    if (root_->split && root_->children.empty()) {
+        // A split that lost every child is not a tree add() can land in
+        // (no leaf to find): back to the empty root leaf.
+        root_ = std::make_unique<Node>();
     }
     if (!root_->split && root_->tabs.empty()) {
         root_->active = 0;  // the empty root leaf stays - the invariant
@@ -489,6 +498,37 @@ bool DockTree::from_json(const ws::settings::json::Value& value,
         return false;
     }
     root_ = std::move(parsed);
+    // One panel, one tab: a hand-edited or merged layout may name an id
+    // twice, and a doubled id is two leaves fighting over one instance.
+    std::unordered_set<std::string> seen;
+    const std::function<void(Node&)> dedupe = [&](Node& n) {
+        if (!n.split) {
+            std::vector<std::string> kept;
+            kept.reserve(n.tabs.size());
+            for (const std::string& tab : n.tabs) {
+                if (seen.insert(tab).second) {
+                    kept.push_back(tab);
+                }
+            }
+            if (kept.size() != n.tabs.size()) {
+                n.active = std::clamp(
+                    n.active, 0,
+                    std::max(0, static_cast<int>(kept.size()) - 1));
+            }
+            n.tabs = std::move(kept);
+            return;
+        }
+        for (const std::unique_ptr<Node>& child : n.children) {
+            dedupe(*child);
+        }
+    };
+    dedupe(*root_);
+    if (root_->split) {
+        prune(*root_);
+        if (root_->split && root_->children.empty()) {
+            root_ = std::make_unique<Node>();
+        }
+    }
     if (!root_->split && root_->tabs.empty()) {
         root_->active = 0;
     }

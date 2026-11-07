@@ -38,6 +38,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <map>
 #include <memory>
 #include <optional>
@@ -184,6 +185,7 @@ struct Rig {
     ws::app::ShortcutResolver shortcuts;
     ws::settings::Schema schema;
     std::unique_ptr<ws::settings::SettingsStore> settings;
+    ws::platform::FakeFileDialogs dialogs;  // the scripted pickers
     std::unique_ptr<AppShell> shell;
     ws::jobs::JobSystem* jobs = nullptr;  // set BEFORE build()
     GuiContext gui;
@@ -208,6 +210,7 @@ struct Rig {
         config.app_name = "scratchpad";
         config.config_dir = config_dir;
         config.fs = &fs;
+        config.dialogs = &dialogs;
         config.jobs = jobs;
         shell = std::make_unique<AppShell>(config, commands, shortcuts,
                                            *settings);
@@ -819,6 +822,103 @@ TEST_CASE("shutdown cancels jobs before the panels are destroyed") {
     CHECK(cancel_at < panels_at);  // jobs die before panels are destroyed
     CHECK(rig.closed.size() == 1);  // the editor panel
     jobs.wait_all();  // the shell never waits: the test does
+}
+
+TEST_CASE("the pickers ride the job system when one is installed") {
+    // One worker: the scripted fake answers from its queue, so the
+    // pick never blocks long - the case's subject is WHERE the call
+    // runs (a worker, never the command's own stack) and WHERE the
+    // answer lands (the marshal drain, between frames).
+    ws::jobs::JobSystem jobs(1);
+    Rig rig;
+    rig.jobs = &jobs;
+    rig.build();
+    FakeDocument::disk.clear();
+    FakeDocument::disk["/picked.txt"] = "picked";
+    CHECK(rig.shell->startup());
+
+    // Open: the command returns before the pick lands.
+    rig.dialogs.open_queue.push_back("/picked.txt");
+    CHECK(rig.commands.execute("shell.open_document"));
+    CHECK(rig.shell->documents().count() == 0);  // nothing inline: async
+    for (int i = 0; i < 10000 && rig.shell->documents().count() == 0;
+         ++i) {
+        (void)jobs.drain();
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    REQUIRE(rig.shell->documents().count() == 1);
+    CHECK(rig.shell->documents().active()->path() == "/picked.txt");
+    REQUIRE(rig.dialogs.open_calls.size() == 1);
+    CHECK(rig.dialogs.open_calls[0].title == "open document");
+
+    // Save an untitled document: the pick lands, then the save.
+    CHECK(rig.commands.execute("shell.new_document"));
+    FakeDocument* const untitled =
+        static_cast<FakeDocument*>(rig.shell->documents().active());
+    (void)untitled->undo().push(
+        std::make_unique<EditCommand>(untitled, "", "typed"));
+    rig.dialogs.save_queue.push_back("/saved.txt");
+    CHECK(rig.commands.execute("shell.save_document"));
+    for (int i = 0; i < 10000 && untitled->path().empty(); ++i) {
+        (void)jobs.drain();
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    CHECK(untitled->path() == "/saved.txt");
+    CHECK(FakeDocument::disk["/saved.txt"] == "typed");
+    CHECK(!untitled->undo().is_dirty());  // the landed save marked it
+
+    // A dismissed save-as answers nothing: the document keeps its
+    // identity (the empty queue is the fake's "user cancelled").
+    CHECK(rig.commands.execute("shell.new_document"));
+    CHECK(rig.commands.execute("shell.save_document_as"));
+    for (int i = 0; i < 10000 && rig.dialogs.save_calls.size() < 2;
+         ++i) {
+        (void)jobs.drain();
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    REQUIRE(rig.dialogs.save_calls.size() == 2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    (void)jobs.drain();  // the dismissed pick's completion (a no-op)
+    CHECK(rig.shell->documents().at(2)->path().empty());
+
+    // Close-with-dirty on an untitled document: the prompt's Save
+    // rides the worker too, and the close lands WITH the save.
+    FakeDocument* const dirty =
+        static_cast<FakeDocument*>(rig.shell->documents().active());
+    (void)dirty->undo().push(
+        std::make_unique<EditCommand>(dirty, "", "more"));
+    rig.shell->request_close_active();
+    rig.frame();  // the modal lays (the veil rises)
+    rig.frame(ws::input::InputFrame{});
+    // The Save button: draw_close_prompt's centered three-button row
+    // (a 360x170 modal at the frame's center, two control-height text
+    // rows above the buttons - the same layout math the shell runs).
+    rig.dialogs.save_queue.push_back("/closed.txt");
+    {
+        ws::input::InputFrame press;
+        press.mouse_present = true;
+        press.mouse_x = 566.0f;
+        press.mouse_y = 365.0f;
+        press.mouse_down[0] = true;
+        press.mouse_pressed[0] = true;
+        rig.frame(press);
+    }
+    {
+        ws::input::InputFrame release;
+        release.mouse_present = true;
+        release.mouse_x = 566.0f;
+        release.mouse_y = 365.0f;
+        release.mouse_released[0] = true;
+        rig.frame(release);
+    }
+    for (int i = 0; i < 10000 && rig.shell->documents().count() > 2;
+         ++i) {
+        (void)jobs.drain();
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    CHECK(rig.shell->documents().count() == 2);  // the dirty one closed
+    CHECK(FakeDocument::disk["/closed.txt"] == "more");
+    (void)rig.shell->shutdown();
 }
 
 TEST_CASE("dropped files open as documents") {

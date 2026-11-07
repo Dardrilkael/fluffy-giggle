@@ -1,26 +1,19 @@
 #pragma once
 
-// Internal to ws::ui - never visible to apps. The warn-once flags owned
-// outside gui_context.cpp: the seam reset_warn_once() re-arms (tests reach
-// that function through the public header; the flags themselves never
-// leave src/). The input plumbing this header once carried moved to
-// ws::input with the input family (stage 3a): set_active_input is public
-// in <ws/input/input.hpp> now, and the frame_input() glue lives in
-// libs/input/src/input.cpp.
+// Internal to ws::ui - never visible to apps.
+//
+// The warn-once flags behind the id-stack, panel-stack, toast-store and
+// menu-stack overflow warnings: each warning prints once, then stays quiet
+// until reset_warn_once() re-arms it (defined in gui_context.cpp; tests
+// reach it through the public header, the flags themselves never leave
+// src/). The flags have external linkage solely so that one function can
+// reach them. Single-threaded, like every gui global.
 
-namespace ws::ui::gui {
-namespace detail {
+namespace ws::ui::gui::detail {
 
-// The id-stack and panel-stack overflow warn-once flags (gui_id.cpp /
-// gui_layout.cpp own the definitions), and the toast-store cap's
-// (widgets_toasts.cpp). External linkage solely so
-// reset_warn_once() - defined in gui_context.cpp - can re-arm them;
-// single-threaded like every gui global.
-extern bool id_overflow_warned;
-extern bool panel_overflow_warned;
-extern bool toast_overflow_warned;
+extern bool id_overflow_warned;     // defined in gui_id.cpp
+extern bool panel_overflow_warned;  // defined in gui_layout.cpp
+extern bool toast_overflow_warned;  // defined in widgets_toasts.cpp
 extern bool menu_overflow_warned;
 
 }  // namespace ws::ui::gui::detail
-
-}  // namespace ws::ui::gui

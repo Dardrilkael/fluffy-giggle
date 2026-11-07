@@ -97,7 +97,7 @@ void CommandListCanvas::begin_path() {
     path_.clear(); has_path_ = false; path_closed_ = false;
 }
 void CommandListCanvas::move_to(Point p) {
-    path_.push_back(p); last_move_ = p; has_path_ = true;
+    path_.push_back(p); has_path_ = true;
 }
 void CommandListCanvas::line_to(Point p) {
     if (!has_path_) { move_to(p); return; }
@@ -131,7 +131,14 @@ void CommandListCanvas::arc(Point center, float rx, float ry, float a0, float a1
 }
 void CommandListCanvas::close_path() {
     if (has_path_ && !path_.empty()) {
-        path_.push_back(last_move_);
+        // The ring's OWN start, not the last move_to: a path may carry
+        // several move_tos (the rounded rects' per-corner jumps), and
+        // closing to the latest one would splice a phantom chord
+        // across the shape instead of finishing the ring. Both
+        // consumers already define closure as "back joins front" - the
+        // stroker's synthetic closing segment and fill's ring walk -
+        // so the first point is the only close target they agree on.
+        path_.push_back(path_.front());
         path_closed_ = true;
     }
 }
@@ -339,7 +346,7 @@ void Renderer2DCanvas::begin_path() {
     path_.clear(); has_path_ = false; path_closed_ = false;
 }
 void Renderer2DCanvas::move_to(Point p) {
-    path_.push_back(p); last_move_ = p; has_path_ = true;
+    path_.push_back(p); has_path_ = true;
 }
 void Renderer2DCanvas::line_to(Point p) {
     if (!has_path_) { move_to(p); return; }
@@ -373,7 +380,11 @@ void Renderer2DCanvas::arc(Point center, float rx, float ry, float a0, float a1)
 }
 void Renderer2DCanvas::close_path() {
     if (has_path_ && !path_.empty()) {
-        path_.push_back(last_move_);
+        // See CommandListCanvas::close_path: close to the ring's start,
+        // never to the last move_to (the rounded rects' per-corner
+        // move_tos would otherwise close the ring across a phantom
+        // chord through the shape's interior).
+        path_.push_back(path_.front());
         path_closed_ = true;
     }
 }

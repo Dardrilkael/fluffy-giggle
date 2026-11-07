@@ -39,6 +39,13 @@
 // A table with no visible current column draws exactly the stage-5
 // shape - the right margin, strip and ticks only exist when the
 // second spine does.
+//
+// Stage 7 is the polish pass: a floating hover tooltip (x plus every
+// visible signal, units included), a sparkline per legend row, show
+// all / hide all and a "fit view" button, a zero rail, an empty-state
+// message, aligned value rows with units, and a one-line gesture
+// cheat sheet under the plot. The per-frame debug logging and the
+// per-frame index vector in the hover path are gone.
 
 #include "results_panel.hpp"
 
@@ -46,6 +53,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <string>
 #include <utility>
 #include <vector>
 #include <span>
@@ -89,8 +97,42 @@ constexpr std::size_t kSeriesCount = sizeof kSeries / sizeof kSeries[0];
     return "?";
 }
 
+// The unit a signal is read in: the classifier's spine, spelled out.
+[[nodiscard]] const char* unit_of(const std::string& name) {
+    return ws::circsim::signal_y_axis(name) ==
+                   ws::circsim::PlotYAxis::Right
+               ? "A"
+               : "V";
+}
+
+[[nodiscard]] std::string with_unit(double v, const char* unit,
+                                    int digits = 4) {
+    std::string out = ws::circsim::format_eng(v, digits);
+    out += ' ';
+    out += unit;
+    return out;
+}
+
+struct ValueRow {
+    std::string name;
+    double value = 0.0;
+    const char* unit = "";
+};
+
 // Keeps the per-signal visibility flags aligned with the table being
 // shown (all-visible on a table switch; the flags survive frames).
+//
+// The size half of the condition guards the INVARIANT "visible has
+// exactly t.signals.size() flags for the shown table": a mismatch can
+// only mean the flags and `visible_for` disagree about which table
+// they belong to (a delivery that reset one and not the other, or a
+// table switch that landed mid-frame), and every reader downstream
+// indexes visible[i] against t.signals[i] - the legend's checkbox
+// write (which re-checks the size before it indexes, the same guard
+// reading the same invariant from the write side) and the plot's
+// series loop. Re-assigning on the mismatch restores all-visible,
+// the same honest answer as a table switch, instead of drawing
+// against flags sized for some other table.
 void sync_visibility(Editor& ed, const ws::spice::Table& t) {
     if (ed.results.visible_for != ed.results.table ||
         ed.results.visible.size() != t.signals.size()) {
@@ -147,9 +189,10 @@ void sync_visibility(Editor& ed, const ws::spice::Table& t) {
 // samples break the line into segments rather than poisoning the
 // tessellator with NaN vertices.
 void stroke_series(canvas::Canvas2D& rc,
-                   const std::vector<Point>& pts, std::uint32_t color) {
+                   const std::vector<Point>& pts, std::uint32_t color,
+                   float width = 2.0f) {
     Paint paint;
-    paint.width = 2.0f;
+    paint.width = width;
     paint.color = color;
     paint.join = canvas::StrokeJoin::round;
     std::size_t run = 0;
@@ -189,6 +232,82 @@ constexpr float kMarginRightAxis = 46.0f;
 [[nodiscard]] std::uint32_t with_alpha(std::uint32_t color,
                                        std::uint8_t a) {
     return (color & 0xFFFFFF00u) | std::uint32_t(a);
+}
+
+// A legend sparkline: the whole signal squeezed into `r` as a min/max
+// envelope (so a spike survives the squeeze), scaled to its own range,
+// with a dot at the hover sample. It is a thumbnail of the SHAPE - the
+// plot carries the numbers.
+void draw_sparkline(canvas::Canvas2D& rc, const gui::Rect& r,
+                    std::span<const double> ys, std::uint32_t color,
+                    int mark) {
+    constexpr std::size_t kBuckets = 40;
+    const std::size_t n = ys.size();
+    if (n < 2u) {
+        return;
+    }
+    double lo = std::numeric_limits<double>::infinity();
+    double hi = -std::numeric_limits<double>::infinity();
+    for (double v : ys) {
+        if (std::isfinite(v)) {
+            lo = std::min(lo, v);
+            hi = std::max(hi, v);
+        }
+    }
+    if (lo > hi) {
+        return;  // nothing finite to draw
+    }
+    if (!(hi > lo)) {
+        lo -= 1.0;  // a flat signal rides the middle rail
+        hi += 1.0;
+    }
+    const float h = r.height - 4.0f;
+    const auto py = [&](double v) {
+        return static_cast<float>(r.y + 2.0f + (hi - v) / (hi - lo) * h);
+    };
+    const std::size_t buckets = std::min(kBuckets, n);
+    std::vector<Point> pts;
+    pts.reserve(buckets * 2u);
+    for (std::size_t b = 0; b < buckets; ++b) {
+        const std::size_t i0 = b * n / buckets;
+        const std::size_t i1 = std::max(i0 + 1u, (b + 1u) * n / buckets);
+        const float px = r.x + static_cast<float>(b) *
+                                   (r.width - 1.0f) /
+                                   static_cast<float>(buckets - 1u);
+        std::size_t imin = n;
+        std::size_t imax = n;
+        for (std::size_t k = i0; k < i1 && k < n; ++k) {
+            if (!std::isfinite(ys[k])) {
+                continue;
+            }
+            if (imin == n || ys[k] < ys[imin]) {
+                imin = k;
+            }
+            if (imax == n || ys[k] > ys[imax]) {
+                imax = k;
+            }
+        }
+        if (imin == n) {
+            pts.push_back(Point{px, std::numeric_limits<float>::quiet_NaN()});
+            continue;
+        }
+        // Index order inside the bucket, so a falling edge does not zigzag.
+        const std::size_t first = std::min(imin, imax);
+        const std::size_t second = std::max(imin, imax);
+        pts.push_back(Point{px, py(ys[first])});
+        if (second != first) {
+            pts.push_back(Point{px, py(ys[second])});
+        }
+    }
+    stroke_series(rc, pts, with_alpha(color, 200), 1.2f);
+    if (mark >= 0 && static_cast<std::size_t>(mark) < n &&
+        std::isfinite(ys[static_cast<std::size_t>(mark)])) {
+        const float mx = r.x + static_cast<float>(mark) *
+                                   (r.width - 1.0f) /
+                                   static_cast<float>(n - 1u);
+        rc.fill_circle({mx, py(ys[static_cast<std::size_t>(mark)])}, 2.2f,
+                       color);
+    }
 }
 
 // The frame geometry plus the range pairs the interaction pass works
@@ -620,6 +739,17 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     if (n == 0u) {
         return;
     }
+    // The axis's sortedness is a per-table constant of the run (the
+    // axis data is immutable once delivered), so it rides the cache
+    // keyed to the table (ResultsCache::x_sorted_for) instead of the
+    // per-frame walk strictly_increasing used to cost - the same key
+    // shape `visible` and `view` keep. A delivery resets the key
+    // (main.cpp's block beside visible_for): a same-indexed table of
+    // a new run is a different axis.
+    if (ed.results.x_sorted_for != ed.results.table) {
+        ed.results.x_sorted = !by_index && strictly_increasing(xs);
+        ed.results.x_sorted_for = ed.results.table;
+    }
 
     // The home ranges: each y spine fits ITS OWN visible company
     // (stage 6 - the volts on the left, the amps on the right), x
@@ -630,6 +760,7 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     double y_hi = -std::numeric_limits<double>::infinity();
     double y1_lo = std::numeric_limits<double>::infinity();
     double y1_hi = -std::numeric_limits<double>::infinity();
+    bool any_visible = false;
     double x_lo = 0.0;
     double x_hi = static_cast<double>(n - 1u);
     if (!by_index) {
@@ -640,6 +771,7 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
         if (i >= ed.results.visible.size() || ed.results.visible[i] == 0u) {
             continue;
         }
+        any_visible = true;
         const std::span<const double> ys = t.signals[i].data;
         const bool right = on_right[i] != 0u;
         for (std::size_t k = 0; k < ys.size() && k < n; ++k) {
@@ -768,10 +900,26 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
             }
         }
     }
+    // The zero rail: a brighter line where the left spine crosses 0,
+    // so a signal's sign reads without counting ticks.
+    if (pf.vyr.lo < 0.0 && pf.vyr.hi > 0.0) {
+        Paint zero_paint;
+        zero_paint.width = 1.0f;
+        zero_paint.color = gui::dim(theme.text, 0.32f);
+        rc.stroke_line({fx, sy(0.0)}, {fx + iw, sy(0.0)}, zero_paint);
+    }
     // The x axis's name, quiet, inside the frame's top-left.
     if (can_label) {
         (void)rc.draw_text(fx + 5.0f, fy + 3.0f, x_name, *font,
                            gui::dim(theme.text, 0.45f));
+    }
+    // Everything unchecked: say so instead of showing a mystery frame.
+    if (!any_visible && can_label) {
+        const char* msg = "all signals hidden - tick one in the legend";
+        const float w = rc.measure_text(msg, *font);
+        (void)rc.draw_text(fx + (iw - w) * 0.5f,
+                           fy + (ih - font->line_height()) * 0.5f, msg,
+                           *font, gui::dim(theme.text, 0.5f));
     }
 
     // --- the hover index (before the series, so the readout rows
@@ -780,18 +928,17 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     const bool hovering = gui.claims_open() &&
                           in.mouse_x >= fx && in.mouse_x < fx + iw &&
                           in.mouse_y >= fy && in.mouse_y < fy + ih;
-    const bool x_sorted = !by_index && strictly_increasing(xs);
+    // The x axis's sortedness: the cached per-table answer (computed
+    // at the top of the draw, keyed like `visible`).
+    const bool x_sorted = ed.results.x_sorted;
     if (hovering) {
         const double wx =
             pf.vxr.lo + (static_cast<double>(in.mouse_x) - fx) / iw *
                             (pf.vxr.hi - pf.vxr.lo);
         if (by_index) {
-            std::vector<double> idx;
-            idx.reserve(n);
-            for (std::size_t k = 0; k < n; ++k) {
-                idx.push_back(static_cast<double>(k));
-            }
-            ed.results.hover = nearest_sample(idx, wx, true, n);
+            // The axis IS the index: round and clamp, no scan.
+            ed.results.hover = static_cast<int>(std::clamp<long long>(
+                std::llround(wx), 0, static_cast<long long>(n) - 1));
         } else {
             ed.results.hover = nearest_sample(xs, wx, x_sorted, n);
         }
@@ -889,6 +1036,80 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                 rc.fill_circle({px, sy_of(i, yv)}, 3.0f, series_color(i));
             }
         }
+
+        // The floating tooltip: x on top, then one colored row per
+        // visible signal (capped, "+N more" past the cap). It flips to
+        // the cursor's left near the right edge and stays inside the
+        // frame; it hides while a gesture is in flight.
+        if (can_label &&
+            ed.results.gesture.kind == PlotGesture::Kind::None) {
+            struct Row {
+                std::string text;
+                std::uint32_t color;  // 0 = no swatch
+            };
+            constexpr std::size_t kMaxRows = 8;
+            std::vector<Row> rows;
+            std::size_t overflow = 0;
+            rows.push_back(Row{std::string(x_name) + " = " +
+                                   ws::circsim::format_eng(hx, 5),
+                               0u});
+            for (std::size_t i = 0; i < t.signals.size(); ++i) {
+                if (i >= ed.results.visible.size() ||
+                    ed.results.visible[i] == 0u ||
+                    k >= t.signals[i].data.size() ||
+                    !std::isfinite(t.signals[i].data[k])) {
+                    continue;
+                }
+                if (rows.size() > kMaxRows) {
+                    ++overflow;
+                    continue;
+                }
+                rows.push_back(Row{
+                    t.signals[i].name + "  " +
+                        with_unit(t.signals[i].data[k],
+                                  unit_of(t.signals[i].name)),
+                    series_color(i)});
+            }
+            if (overflow > 0u) {
+                rows.push_back(
+                    Row{"+" + std::to_string(overflow) + " more", 0u});
+            }
+            const float lh = font->line_height();
+            float text_w = 0.0f;
+            for (const Row& r : rows) {
+                text_w = std::max(text_w,
+                                  rc.measure_text(r.text.c_str(), *font));
+            }
+            const float bw = text_w + 26.0f;
+            const float bh = lh * static_cast<float>(rows.size()) + 10.0f;
+            float bx = px + 12.0f;
+            if (bx + bw > fx + iw) {
+                bx = px - 12.0f - bw;
+            }
+            bx = std::max(bx, fx);
+            float by = fy + 6.0f;
+            by = std::max(fy, std::min(by, fy + ih - bh));
+            rc.fill_rounded_rect(bx, by, bw, bh, 4.0f,
+                                 ws::ui::r2d::rgba(18, 20, 26, 232));
+            const Point tip[4] = {{bx, by}, {bx + bw, by},
+                                  {bx + bw, by + bh}, {bx, by + bh}};
+            Paint tip_border;
+            tip_border.width = 1.0f;
+            tip_border.color = ws::ui::r2d::rgba(255, 255, 255, 40);
+            rc.stroke_polyline(tip, 4, tip_border, true);
+            for (std::size_t r = 0; r < rows.size(); ++r) {
+                const float ty = by + 5.0f + lh * static_cast<float>(r);
+                if (rows[r].color != 0u) {
+                    rc.fill_circle({bx + 10.0f, ty + lh * 0.5f}, 3.0f,
+                                   rows[r].color);
+                }
+                (void)rc.draw_text(
+                    bx + 18.0f, ty, rows[r].text.c_str(), *font,
+                    rows[r].color != 0u
+                        ? ws::ui::r2d::rgba(236, 239, 246)
+                        : ws::ui::r2d::rgba(160, 166, 180));
+            }
+        }
     }
 
     // --- the in-flight band + the manual-view hint -------------------
@@ -934,28 +1155,36 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
 
 void draw_value_rows(Editor& ed, gui::LayoutCursor& layout,
                      const gui::ChromeTheme& theme,
-                     const std::vector<std::pair<std::string, double>>& rows) {
+                     const std::vector<ValueRow>& rows) {
     const ws::ui::r2d::Font* font =
         ed.font_mono != nullptr && !ed.font_mono->empty() ? ed.font_mono
                                                           : theme.font;
     if (font == nullptr || font->line_height() <= 0.0f) {
         // The fontless fallback: plain text rows.
-        for (const auto& [name, value] : rows) {
-            char line[192];
-            std::snprintf(line, sizeof line, "%s = %s", name.c_str(),
-                          ws::circsim::format_eng(value).c_str());
-            gui::text(layout, theme, line);
+        for (const ValueRow& r : rows) {
+            const std::string line =
+                r.name + " = " + with_unit(r.value, r.unit, 5);
+            gui::text(layout, theme, line.c_str());
         }
         return;
     }
-    const float line_h = font->line_height() + 2.0f;
-    for (const auto& [name, value] : rows) {
+    // Two aligned columns - names left, values on a common edge - so a
+    // long .op printout scans like a table instead of ragged "a = b" text.
+    canvas::Canvas2D& rc = ed.results_draw_canvas();
+    rc.set_view_scale(1.0f);
+    float name_w = 0.0f;
+    for (const ValueRow& r : rows) {
+        name_w = std::max(name_w, rc.measure_text(r.name.c_str(), *font));
+    }
+    const float col = name_w + 14.0f;
+    const float line_h = font->line_height() + 3.0f;
+    for (const ValueRow& r : rows) {
         const gui::Rect row = layout.next(layout.remaining_width(), line_h);
-        char line[192];
-        std::snprintf(line, sizeof line, "%s = %s", name.c_str(),
-                      ws::circsim::format_eng(value, 5).c_str());
-        (void)ws::ui::r2d::draw_text(row.x, row.y, line, *font,
-                                     gui::dim(theme.text, 0.85f));
+        (void)ws::ui::r2d::draw_text(row.x, row.y, r.name.c_str(), *font,
+                                     gui::dim(theme.text, 0.65f));
+        const std::string value = with_unit(r.value, r.unit, 5);
+        (void)ws::ui::r2d::draw_text(row.x + col, row.y, value.c_str(),
+                                     *font, gui::dim(theme.text, 0.95f));
     }
 }
 
@@ -1027,7 +1256,10 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
             ed.export_results(true);
         }
         if (stale) {
-            gui::text(layout, theme, "stale - edited since the run");
+            gui::ChromeTheme warn = theme;
+            warn.text = gui::dim(theme.toast_warning, 0.95f);
+            gui::text(layout, warn,
+                      "stale - edited since the run (Ctrl+Enter re-runs)");
         }
     }
 
@@ -1035,11 +1267,12 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
     if (t.sweep == ws::spice::SweepKind::None) {
         // The .op shape: one value row per signal, no plot.
         gui::separator(layout, theme);
-        std::vector<std::pair<std::string, double>> rows;
+        std::vector<ValueRow> rows;
         rows.reserve(t.signals.size());
         for (const ws::spice::Signal& s : t.signals) {
             if (!s.data.empty()) {
-                rows.emplace_back(s.name, s.data.front());
+                rows.push_back(
+                    ValueRow{s.name, s.data.front(), unit_of(s.name)});
             }
         }
         draw_value_rows(ed, layout, theme, rows);
@@ -1065,6 +1298,34 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
         gui::separator(layout, theme);
         gui::ChromeTheme quiet = theme;
         quiet.text = gui::dim(theme.text, 0.45f);
+        // The toolbar: bulk visibility, the discoverable "fit view"
+        // (the double-click still works), and the hover x readout.
+        if (gui::button(gui, layout, theme, "show all", 64.0f)) {
+            ed.results.visible.assign(t.signals.size(), 1u);
+        }
+        layout.same_line();
+        if (gui::button(gui, layout, theme, "hide all", 64.0f)) {
+            ed.results.visible.assign(t.signals.size(), 0u);
+        }
+        if (ed.results.view.active) {
+            layout.same_line();
+            if (gui::button(gui, layout, theme, "fit view", 64.0f)) {
+                ed.results.view = PlotView{};
+            }
+        }
+        if (ed.results.hover >= 0) {
+            const std::span<const double> hxs = t.axis(x_index);
+            const std::size_t hk =
+                static_cast<std::size_t>(ed.results.hover);
+            const double hx = hxs.empty() ? static_cast<double>(hk)
+                                          : (hk < hxs.size() ? hxs[hk] : 0.0);
+            char xline[128];
+            std::snprintf(xline, sizeof xline, "%s = %s  (sample %d)",
+                          x_name, ws::circsim::format_eng(hx, 5).c_str(),
+                          ed.results.hover);
+            layout.same_line();
+            gui::text(layout, quiet, xline);
+        }
         const int at = ed.results.hover >= 0
                            ? ed.results.hover
                            : static_cast<int>(t.row_count()) - 1;
@@ -1092,20 +1353,26 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
                           ? "A"
                           : "V",
                       14.0f);
+            layout.same_line();
+            const gui::Rect spark = layout.next(48.0f, 14.0f);
+            draw_sparkline(sw, spark, s.data, series_color(i),
+                           ed.results.hover);
             if (at >= 0 && static_cast<std::size_t>(at) < s.data.size()) {
                 layout.same_line();
-                const std::string value =
-                    ws::circsim::format_eng(s.data[static_cast<std::size_t>(at)], 4);
-                char readout[96];
-                std::snprintf(readout, sizeof readout, "%s @ %d",
-                              value.c_str(), at);
-                gui::text(layout, theme, readout);
+                const std::string value = with_unit(
+                    s.data[static_cast<std::size_t>(at)], unit_of(s.name));
+                gui::text(layout, theme,
+                          (ed.results.hover >= 0 ? value : value + "  (end)")
+                              .c_str());
             }
             gui.ids().pop();
         }
 
         gui::separator(layout, theme);
         draw_plot(ed, gui, layout, theme, t, x_name);
+        gui::text(layout, quiet,
+                  "wheel zoom | drag box | drag axis | space+drag pan | "
+                  "dbl-click fit | right-click cancel");
     }
 
     // --- the measurements

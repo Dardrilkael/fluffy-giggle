@@ -8,14 +8,16 @@ ThemeData default_dark() {
     ThemeData out;
     out.chrome = kDefaultChrome;
     // Everything else stays default-constructed except the families:
-    // the stock documents NAME the bundled face (P1's Inter) so a
-    // saved theme records what the stock look ran - the app still
-    // resolves the name (r2d::load_default_font answers it), the
-    // library never opens a file. Role sizes and the icon set stay
+    // the stock documents NAME the bundled faces (P1's Inter, the
+    // typography pass's JetBrains Mono) so a saved theme records what
+    // the stock look ran - the app still resolves the name
+    // (r2d::load_default_font / load_default_mono_font answer them),
+    // the library never opens a file. Role sizes and the icon set stay
     // the caller's pick; the documents are starting points, not
     // prescriptions.
     out.regular.family = "Inter";
     out.bold.family = "Inter SemiBold";
+    out.mono.family = "JetBrains Mono";
     return out;
 }
 
@@ -24,6 +26,7 @@ ThemeData default_light() {
     out.chrome = kLightChrome;
     out.regular.family = "Inter";
     out.bold.family = "Inter SemiBold";
+    out.mono.family = "JetBrains Mono";
     return out;
 }
 

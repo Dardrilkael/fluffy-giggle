@@ -35,6 +35,11 @@
 
 #include "ui_gui_stub.hpp"
 
+// The internal font half (kIconFirst + the growing Font's lazy table),
+// for the icon-toolbar test's hand-built font - the test_ui_variants
+// precedent; the target carries the src include path.
+#include "text/font.h"
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -226,6 +231,181 @@ TEST_CASE("fit_text truncates through the real font bake") {
                                              scratch, sizeof scratch);
     CHECK(std::strcmp(whole.text, "abcdef") == 0);
     CHECK(whole.advance == 36.0f);
+}
+
+// --- the typography pass: the hierarchy rung, the muted rung ----------------------
+
+namespace {
+
+// The font hierarchy's own pair, built synthetic: a body face at the
+// body size and a strong face a step larger - the shape circsim bakes
+// (16 px Inter over 18 px semibold), without the bake. The glyph
+// tables fill BEFORE the Font members construct (the fill ctor copies
+// the table - member order and the helper both exist for that).
+using TypoGlyphs = std::array<ws::ui::r2d::Font::Glyph, 95>;
+
+TypoGlyphs make_glyphs(float advance) {
+    TypoGlyphs glyphs{};
+    for (ws::ui::r2d::Font::Glyph& g : glyphs) {
+        g.advance = advance;
+    }
+    return glyphs;
+}
+
+struct TypoFonts {
+    TypoGlyphs body_glyphs = make_glyphs(8.0f);
+    TypoGlyphs strong_glyphs = make_glyphs(9.0f);
+    ws::ui::r2d::Font body{16.0f, 20.0f, body_glyphs.data(), 95};
+    ws::ui::r2d::Font strong{18.0f, 23.0f, strong_glyphs.data(), 95};
+};
+
+}  // namespace
+
+TEST_CASE("heading draws the strong face on a taller row") {
+    TypoFonts fonts;
+    REQUIRE(!fonts.body.empty());
+    REQUIRE(!fonts.strong.empty());
+    ws::ui::gui_test::stub.reset();
+    GuiContext gui;
+    LayoutCursor layout;
+
+    ws::ui::gui::ChromeTheme theme = kDefaultChrome;
+    theme.font = &fonts.body;
+    theme.font_strong = &fonts.strong;
+
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    (void)ws::ui::gui::begin_panel(gui, layout, theme, "panel",
+                                   {0.0f, 0.0f, 300.0f, 400.0f});
+    ws::ui::gui::text(layout, theme, "body one");
+    const float after_body = layout.cursor_y();
+    ws::ui::gui::text(layout, theme, "body two");
+    const float body_pitch = layout.cursor_y() - after_body;
+    ws::ui::gui::heading(layout, theme, "tools");
+    const float after_heading = layout.cursor_y();
+    ws::ui::gui::heading(layout, theme, "schematic");
+    const float heading_pitch = layout.cursor_y() - after_heading;
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+
+    // The hierarchy, in the layout itself: a heading's row is taller
+    // than a body row (the strong face's own line box plus air, against
+    // the control_height body row) - same flow, same spacing, one
+    // taller widget.
+    CHECK(body_pitch == doctest::Approx(28.0f + 8.0f));   // row + spacing
+    CHECK(heading_pitch == doctest::Approx(33.0f + 8.0f));  // 23 + 10 air
+    CHECK(heading_pitch > body_pitch);
+
+    // The strong face is what drew: the heading's label went through
+    // the r2d seam as font_strong, in the body text color (a heading is
+    // structure, not a hint).
+    CHECK(ws::ui::gui_test::stub.texts >= 4);
+    CHECK(ws::ui::gui_test::stub.last_text_font == &fonts.strong);
+    CHECK(ws::ui::gui_test::stub.last_text_color == theme.text);
+}
+
+TEST_CASE("a heading without a strong face falls back to the body font") {
+    TypoFonts fonts;
+    ws::ui::gui_test::stub.reset();
+    GuiContext gui;
+    LayoutCursor layout;
+
+    ws::ui::gui::ChromeTheme theme = kDefaultChrome;
+    theme.font = &fonts.body;
+    // font_strong stays null - the one-font theme rule.
+
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    (void)ws::ui::gui::begin_panel(gui, layout, theme, "panel",
+                                   {0.0f, 0.0f, 300.0f, 400.0f});
+    ws::ui::gui::heading(layout, theme, "tools");
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+
+    // The heading still draws, through the BODY face (null falls back
+    // to font, exactly like every other strong read), on its taller
+    // row - a one-font theme stays one font.
+    CHECK(ws::ui::gui_test::stub.texts == 1);
+    CHECK(ws::ui::gui_test::stub.last_text_font == &fonts.body);
+}
+
+TEST_CASE("the empty field's placeholder wears the muted rung") {
+    TypoFonts fonts;
+    ws::ui::gui_test::stub.reset();
+    GuiContext gui;
+    LayoutCursor layout;
+
+    ws::ui::gui::ChromeTheme theme = kDefaultChrome;
+    theme.font = &fonts.body;
+
+    char buf[8] = "";
+    const auto run_field = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)ws::ui::gui::begin_panel(gui, layout, theme, "panel",
+                                       {0.0f, 0.0f, 300.0f, 200.0f});
+        (void)ws::ui::gui::text_input(gui, layout, theme, "search symbols",
+                                      buf, sizeof buf);
+        ws::ui::gui::end_panel(gui, layout);
+        gui.end_frame();
+    };
+
+    // The empty buffer shows the placeholder - in the theme's muted
+    // gray (the brief's #858585 on the dark stock), its own token
+    // rather than a dim of body text.
+    run_field(snap(-100.0f, -100.0f));
+    CHECK(ws::ui::gui_test::stub.texts == 1);
+    CHECK(ws::ui::gui_test::stub.last_text_color == theme.text_muted);
+    CHECK(ws::ui::gui_test::stub.last_text_color ==
+          ws::ui::r2d::rgba(133, 133, 133));
+
+    // Real content answers in the body color: claim the field (a press
+    // inside it takes the focus), type, and the placeholder is gone -
+    // the muted rung is the empty field's look, not the widget's.
+    run_field(snap(60.0f, 20.0f, true, true));
+    run_field(snap(60.0f, 20.0f, false, false, true));
+    InputFrame typing = snap(-100.0f, -100.0f);
+    typing.text_input = {'r', 'e', 's'};
+    run_field(typing);
+    CHECK(std::strcmp(buf, "res") == 0);
+    CHECK(ws::ui::gui_test::stub.last_text_color == theme.text);
+}
+
+TEST_CASE("the inactive tab's label is muted, the active one body text") {
+    TypoFonts fonts;
+    ws::ui::gui_test::stub.reset();
+    GuiContext gui;
+    LayoutCursor layout;
+
+    ws::ui::gui::ChromeTheme theme = kDefaultChrome;
+    theme.font = &fonts.body;
+
+    const char* const tabs[] = {"Properties", "Netlist", "Simulation"};
+
+    // A one-tab strip, selected: the active label wears body text.
+    int active = 0;
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    (void)ws::ui::gui::begin_panel(gui, layout, theme, "panel",
+                                   {0.0f, 0.0f, 300.0f, 200.0f});
+    (void)ws::ui::gui::tab_bar(gui, layout, theme, "solo", tabs, 1, active,
+                               100.0f);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(ws::ui::gui_test::stub.texts == 1);
+    CHECK(ws::ui::gui_test::stub.last_text_color == theme.text);
+
+    // Three tabs, the first active: the LAST label the strip drew is
+    // tab 3's - inactive, the muted rung, not an alpha dim of body
+    // text. The selection reads at a glance, not glyph by glyph.
+    ws::ui::gui_test::stub.reset();
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    (void)ws::ui::gui::begin_panel(gui, layout, theme, "panel",
+                                   {0.0f, 0.0f, 300.0f, 200.0f});
+    (void)ws::ui::gui::tab_bar(gui, layout, theme, "strip", tabs, 3, active,
+                               100.0f);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(ws::ui::gui_test::stub.texts == 3);
+    CHECK(ws::ui::gui_test::stub.last_text_color == theme.text_muted);
+    CHECK(ws::ui::gui_test::stub.last_text_color ==
+          ws::ui::r2d::rgba(133, 133, 133));
 }
 
 TEST_CASE("layer scopes drive r2d::set_layer through the seam") {
@@ -2664,6 +2844,137 @@ TEST_CASE("the toolbar fires its buttons and lays the dead rows dead") {
     ws::ui::gui::end_panel(gui, layout);
     gui.end_frame();
     CHECK(fired == "app.quit");
+}
+
+TEST_CASE("the icon toolbar draws its glyphs and degrades to text") {
+    namespace icons_font = ws::ui::r2d::font;
+    ws::ui::gui_test::stub.reset();
+    ws::app::CommandRegistry registry;
+    (void)registry.add(ws::app::Command{
+        .id = "app.save",
+        .label = "Save",
+        .category = "File",
+        .shortcut = ws::app::Shortcut{'S', ws::app::Mod::control},
+        .execute = [](std::string_view) {},
+    });
+    (void)registry.add(ws::app::Command{
+        .id = "app.sim",
+        .label = "Simulate",
+        .category = "File",
+        .execute = [](std::string_view) {},
+    });
+    const std::vector<std::string> ids{"app.save", "app.sim"};
+
+    // A hand-built font carrying ONE seeded glyph - the save icon's
+    // codepoint - so the mapped button draws a sprite and every other
+    // icon answers the sentinel (the fontless degrade).
+    ws::ui::r2d::Font baked(16.0f, 20.0f, nullptr, 0);
+    const ws::ui::r2d::Sprite seeded{9u, 4u};
+    baked.extras_state()->glyphs.emplace(
+        icons_font::kIconFirst +
+            static_cast<std::uint32_t>(ws::ui::gui::Icon::save),
+        ws::ui::r2d::Font::Glyph{seeded, 0.0f, 0, 0, 16, 16});
+    ws::ui::gui::ChromeTheme themed = kDefaultChrome;
+    themed.font = &baked;
+
+    const std::vector<ws::ui::gui::ToolbarIcon> icons{
+        ws::ui::gui::ToolbarIcon{"app.save", ws::ui::gui::Icon::save},
+        ws::ui::gui::ToolbarIcon{"app.sim", ws::ui::gui::Icon::folder},
+    };
+
+    GuiContext gui;
+    LayoutCursor layout;
+    std::string_view fired;
+
+    // One frame at rest: the mapped-and-served Save lays as an icon
+    // button (the glyph is a sprite draw, no label quads for it), the
+    // Simulate command's folder sprite is the sentinel - the mapping
+    // degrades to its TEXT button (a draw_text call, no sprite).
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    (void)ws::ui::gui::begin_panel(gui, layout, themed, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    fired = ws::ui::gui::command_toolbar(
+        gui, layout, themed, "bar", registry, ids, icons.data(),
+        icons.size(), nullptr, ws::app::KeyContext::global);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(fired.empty());
+    CHECK(ws::ui::gui_test::stub.sprites == 1);  // the save glyph alone
+
+    // The click on the icon button fires its command: the square sits
+    // at the panel content's head (inset by the theme's padding),
+    // control_height wide and tall.
+    gui.begin_frame(snap(26.0f, 26.0f, true, true));
+    (void)ws::ui::gui::begin_panel(gui, layout, themed, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    fired = ws::ui::gui::command_toolbar(
+        gui, layout, themed, "bar", registry, ids, icons.data(),
+        icons.size(), nullptr, ws::app::KeyContext::global);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    gui.begin_frame(snap(26.0f, 26.0f, false, false, true));
+    (void)ws::ui::gui::begin_panel(gui, layout, themed, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    fired = ws::ui::gui::command_toolbar(
+        gui, layout, themed, "bar", registry, ids, icons.data(),
+        icons.size(), nullptr, ws::app::KeyContext::global);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(fired == "app.save");
+}
+
+TEST_CASE("a ripened tooltip keeps laying - the fade reset never eats "
+          "the hover clock") {
+    ws::ui::gui_test::stub.reset();
+    GuiContext gui;
+    LayoutCursor layout;
+    const ws::ui::gui::Rect anchor{0.0f, 0.0f, 120.0f, 24.0f};
+
+    // What counts as "the hint laid": begin_tooltip pushes its P4 fade
+    // tint unconditionally (the chrome outline itself would gate on
+    // the stub's empty frame size and never register headless), and
+    // nothing else in this frame tints - so one tint push IS the
+    // tooltip, the way the motion suite counts the overlay fades.
+    const auto laid_hint = [] {
+        return ws::ui::gui_test::stub.tint_pushes == 1;
+    };
+
+    // Frame 1: a long rest - the pointer has sat on the widget past
+    // the theme's delay, so the hint lays.
+    InputFrame rest = snap(60.0f, 20.0f);
+    rest.dt_seconds = 1.0f;
+    gui.begin_frame(rest);
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    (void)ws::ui::gui::button(gui, layout, kDefaultChrome, "hovered",
+                              120.0f);
+    ws::ui::gui::tooltip_text(gui, layout, kDefaultChrome, "hovered",
+                              anchor, "the hint");
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(laid_hint());
+
+    // THE REGRESSION: the frame after the ripen lays the hint AGAIN.
+    // The fresh-open fade reset once ran as clear_persistent_state on
+    // the widget's id, which wiped the hover clock tooltip_delayed
+    // banks under the same id - the rest restarted from zero, the
+    // hint blinked off for a whole delay, then re-ripened and stayed
+    // (the first-hover flicker).
+    for (int frame = 0; frame < 3; ++frame) {
+        ws::ui::gui_test::stub.reset();
+        InputFrame held = snap(60.0f, 20.0f);
+        held.dt_seconds = 1.0f / 60.0f;
+        gui.begin_frame(held);
+        (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                       {0.0f, 0.0f, 400.0f, 300.0f});
+        (void)ws::ui::gui::button(gui, layout, kDefaultChrome, "hovered",
+                                  120.0f);
+        ws::ui::gui::tooltip_text(gui, layout, kDefaultChrome, "hovered",
+                                  anchor, "the hint");
+        ws::ui::gui::end_panel(gui, layout);
+        gui.end_frame();
+        CHECK(laid_hint());
+    }
 }
 
 TEST_CASE("the command palette searches, fires, prompts and closes") {

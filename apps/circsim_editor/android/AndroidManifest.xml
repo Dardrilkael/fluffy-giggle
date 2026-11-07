@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Input to tools/package-android.ps1 (aapt2 link). The one Java class
+     the app ships is the SAF shim (CircsimActivity.java - the picker
+     intents and their onActivityResult hop, which pure native code can
+     never see), so hasCode="true" and the activity names the class;
+     everything else still lives in libcircsim_editor.so through the
+     android.app.lib_name meta-data below, which the activity hands to
+     native_app_glue untouched.
+     Follows device rotation (no screenOrientation lock): configChanges
+     below keeps the activity - and android_main's state - alive across
+     the turn, so the surface round-trips through APP_CMD_TERM/INIT_
+     WINDOW, and the shell builds its swapchain with preTransform
+     IDENTITY: the compositor rotates at present, the app never
+     pre-rotates content. extractNativeLibs keeps lib loading on the
+     classic install-time extraction path (the packager deflates the .so;
+     stored page-aligned .so's would need zipalign -p). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.ws.circsim_editor"
+    android:versionCode="1"
+    android:versionName="0.2">
+
+    <!-- minSdk tracks ANDROID_PLATFORM (CMakePresets.json): libuv 1.53's
+         unix spawn path calls posix_spawn, which bionic declares only
+         from API 28. -->
+    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="35" />
+
+    <application
+        android:hasCode="true"
+        android:label="circsim editor"
+        android:extractNativeLibs="true"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+        <activity
+            android:name=".CircsimActivity"
+            android:exported="true"
+            android:label="circsim editor"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density">
+            <!-- The module base name: libcircsim_editor.so, no prefix, no suffix. -->
+            <meta-data android:name="android.app.lib_name"
+                android:value="circsim_editor" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

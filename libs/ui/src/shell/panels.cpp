@@ -63,7 +63,12 @@ ws::core::Result<std::string> PanelHost::open(const PanelRegistry& registry,
     PanelInstance instance;
     instance.id = id;
     instance.type = desc->id;
-    instance.title = desc->title;
+    // "Editor 1", "Editor 2": tabs of one multi-instance type must be
+    // tellable apart (the number is the id's own, so a title never
+    // changes under the user).
+    instance.title = desc->multi_instance
+                         ? desc->title + " " + std::to_string(multi_counter_)
+                         : desc->title;
     dock_.add(id, desc->placement);
     instances_.push_back(std::move(instance));
     activate(registry, id);
@@ -72,22 +77,41 @@ ws::core::Result<std::string> PanelHost::open(const PanelRegistry& registry,
 
 bool PanelHost::close(const PanelRegistry& registry,
                       std::string_view instance) {
-    for (std::size_t i = 0; i < instances_.size(); ++i) {
-        if (instances_[i].id != instance) {
-            continue;
-        }
-        const PanelDesc* desc = registry.find(instances_[i].type);
-        if (desc != nullptr && desc->on_close) {
-            desc->on_close(instances_[i]);
-        }
-        if (active_ == instance) {
-            active_.clear();
-        }
-        dock_.remove(instance);
-        instances_.erase(instances_.begin() + static_cast<std::ptrdiff_t>(i));
-        return true;
+    const auto find_it = [this](const std::string& id) {
+        return std::find_if(instances_.begin(), instances_.end(),
+                            [&](const PanelInstance& p) { return p.id == id; });
+    };
+    // Copy first: `instance` may be a view INTO the element about to go
+    // (close_type/close_all pass ids that live in the vectors).
+    auto it = find_it(std::string{instance});
+    if (it == instances_.end()) {
+        return false;
     }
-    return false;
+    const PanelInstance closing = *it;  // callbacks get a copy that cannot dangle
+    const bool was_active = active_ == closing.id;
+
+    if (const PanelDesc* desc = registry.find(closing.type);
+        desc != nullptr && desc->on_close) {
+        desc->on_close(closing);
+    }
+    // on_close may have opened or closed panels (even this one).
+    it = find_it(closing.id);
+    if (it == instances_.end()) {
+        return true;  // the callback already closed it
+    }
+    const auto pos = static_cast<std::size_t>(it - instances_.begin());
+    dock_.remove(closing.id);
+    instances_.erase(it);
+    if (was_active) {
+        active_.clear();
+        if (!instances_.empty()) {
+            // Focus goes to the neighbour, like a tab strip: shortcuts
+            // scoped to a panel must not go dead until the next click.
+            activate(registry,
+                     instances_[std::min(pos, instances_.size() - 1)].id);
+        }
+    }
+    return true;
 }
 
 void PanelHost::close_type(const PanelRegistry& registry,
@@ -128,13 +152,15 @@ void PanelHost::activate(const PanelRegistry& registry,
     if (found == nullptr) {
         return;
     }
-    const bool changed = active_ != found->id;
-    active_ = found->id;
-    dock_.activate(found->id);
+    // A copy: on_focus may open/close panels and reshape instances_.
+    const PanelInstance focused = *found;
+    const bool changed = active_ != focused.id;
+    active_ = focused.id;
+    dock_.activate(focused.id);
     if (changed) {
-        const PanelDesc* desc = registry.find(found->type);
+        const PanelDesc* desc = registry.find(focused.type);
         if (desc != nullptr && desc->on_focus) {
-            desc->on_focus(*found);
+            desc->on_focus(focused);
         }
     }
 }
@@ -173,6 +199,9 @@ const PanelInstance* PanelHost::active_instance() const {
 
 void PanelHost::close_all(const PanelRegistry& registry) {
     // Dock order; the ids are collected first because close() mutates.
+    // Unfocus up front: tearing everything down must not refocus a
+    // neighbour (and fire its on_focus) once per panel.
+    active_.clear();
     const std::vector<std::string> ids = dock_.panels();
     for (const std::string& id : ids) {
         close(registry, id);

@@ -96,6 +96,62 @@ TEST_CASE("icon_codepoint spells the private-use range") {
     CHECK(icon_codepoint(Icon::minus) == 0xE000u + 6u);
 }
 
+TEST_CASE("the toolbar glyphs append after the widget markers, stably") {
+    // The P6 seven keep their codepoints (a skin baked against the old
+    // range answers unchanged); the toolbar ten ride after them, in
+    // enum order - the append-only contract the mapping's whole design
+    // leans on. The count itself: 7 + 10.
+    using ws::ui::gui::Icon;
+    using ws::ui::gui::icon_codepoint;
+    CHECK(icon_codepoint(Icon::minus) == 0xE006u);
+    CHECK(icon_codepoint(Icon::document) == 0xE007u);
+    CHECK(icon_codepoint(Icon::folder) == 0xE008u);
+    CHECK(icon_codepoint(Icon::save) == 0xE009u);
+    CHECK(icon_codepoint(Icon::undo) == 0xE00Au);
+    CHECK(icon_codepoint(Icon::redo) == 0xE00Bu);
+    CHECK(icon_codepoint(Icon::trash) == 0xE00Cu);
+    CHECK(icon_codepoint(Icon::rotate) == 0xE00Du);
+    CHECK(icon_codepoint(Icon::mirror) == 0xE00Eu);
+    CHECK(icon_codepoint(Icon::wire) == 0xE00Fu);
+    CHECK(icon_codepoint(Icon::clipboard_check) == 0xE010u);
+    CHECK(ws::ui::r2d::font::kIconCount == 17u);
+    // The bake refuses the codepoint one past the set's end, so the
+    // loop coverage above ("every built-in icon bakes") walks exactly
+    // the table that exists - no silent holes.
+    ws::ui::r2d::font::BakedGlyph glyph;
+    CHECK_FALSE(ws::ui::r2d::font::bake_icon_glyph(
+        ws::ui::r2d::font::kIconFirst + ws::ui::r2d::font::kIconCount, 16.0f,
+        glyph));
+}
+
+TEST_CASE("the toolbar glyphs bake distinct shapes at a second size") {
+    // The whole-set loop above bakes at 16 px; the toolbar draws them
+    // nearer 18 (the control square's insets). The same coverage
+    // bounds hold at 28, and - the raster's own contract - every icon
+    // of one size bakes the same square footprint (advance 0, offsets
+    // 0, side = pixel_height + the 1 px apron).
+    using ws::ui::r2d::font::BakedGlyph;
+    using ws::ui::r2d::font::bake_icon_glyph;
+    for (std::uint32_t cp = ws::ui::r2d::font::kIconFirst + 7u;
+         cp < ws::ui::r2d::font::kIconFirst + ws::ui::r2d::font::kIconCount;
+         ++cp) {
+        BakedGlyph glyph;
+        REQUIRE(bake_icon_glyph(cp, 28.0f, glyph));
+        CHECK(glyph.w == 30u);
+        CHECK(glyph.h == 30u);
+        CHECK(glyph.advance == 0.0f);
+        std::uint32_t inked = 0;
+        for (std::size_t at = 3; at < glyph.rgba.size(); at += 4) {
+            if (glyph.rgba[at] != 0u) {
+                ++inked;
+            }
+        }
+        const std::size_t pixels = static_cast<std::size_t>(glyph.w) * glyph.h;
+        CHECK(inked > pixels / 20);  // not empty
+        CHECK(inked < pixels / 2);   // not a blob
+    }
+}
+
 // --- the stock mapping and its override ----------------------------------------
 
 TEST_CASE("the stock mapping answers the theme font's own glyph") {

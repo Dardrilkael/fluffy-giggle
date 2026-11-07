@@ -5,6 +5,8 @@
 #include <ws/ui/shell/document.hpp>
 
 #include <algorithm>
+#include <filesystem>
+#include <system_error>
 #include <utility>
 
 #include <ws/ui/shell/errors.hpp>
@@ -13,6 +15,25 @@ namespace ws::ui::shell {
 namespace {
 
 using Document = ws::ui::shell::Document;
+
+// "The same file", not "the same string": C:/a/b.ws, c:/A/B.ws and
+// ./b.ws are one document. equivalent() answers for files that exist
+// (case, symlinks, relative spellings); the lexical compare covers a
+// path that is not on disk yet. An empty path is never "the same".
+bool same_file(const std::string& a, const std::string& b) {
+    if (a.empty() || b.empty()) {
+        return false;
+    }
+    if (a == b) {
+        return true;
+    }
+    std::error_code ec;
+    if (std::filesystem::equivalent(a, b, ec) && !ec) {
+        return true;
+    }
+    return std::filesystem::path{a}.lexically_normal() ==
+           std::filesystem::path{b}.lexically_normal();
+}
 
 }  // namespace
 
@@ -26,10 +47,15 @@ DocumentManager::DocumentManager(DocumentFactory factory,
 DocumentManager::~DocumentManager() = default;
 
 ws::core::Result<int> DocumentManager::open_path(const std::string& path) {
+    if (path.empty()) {
+        // "" is the untitled marker, not a file: new_document() owns it.
+        return ws::core::unexpected<ws::core::Error>(
+            shell_error(ShellError::invalid, "open: empty path"));
+    }
     // The same file twice: activate, do not duplicate.
     for (std::size_t i = 0; i < documents_.size(); ++i) {
         if (documents_[i].document != nullptr &&
-            documents_[i].document->path() == path) {
+            same_file(documents_[i].document->path(), path)) {
             activate(i);
             return static_cast<int>(i);
         }
@@ -125,6 +151,13 @@ ws::core::Status DocumentManager::finish_close(std::size_t index,
         } else {
             (void)documents_[index].autosave->discard();
         }
+    } else if (!save_first && fs_ != nullptr && !autosave_dir_.empty() &&
+               !document->path().empty()) {
+        // No pair object this session, but a restored document may have
+        // left one on disk: a discard must not leave it to nag at the
+        // next start.
+        ws::platform::Autosave stale(*fs_, document->path(), autosave_dir_);
+        (void)stale.discard();
     }
     documents_.erase(documents_.begin() + static_cast<std::ptrdiff_t>(index));
     if (documents_.empty()) {
@@ -179,20 +212,29 @@ DocumentManager::Session DocumentManager::session() const {
 int DocumentManager::restore_session(const Session& session,
                                      std::vector<std::string>* failures) {
     int reopened = 0;
-    for (const std::string& path : session.paths) {
+    int active_index = -1;
+    // session.active indexes the SAVED list, which still holds the
+    // untitled entries (skipped here) and the paths that fail to reopen
+    // (dropped), and the live set may already hold documents: so the tab
+    // to front is the index open_path() actually returned for that entry.
+    for (std::size_t i = 0; i < session.paths.size(); ++i) {
+        const std::string& path = session.paths[i];
         if (path.empty()) {
             continue;  // an untitled document is not session state
         }
         const ws::core::Result<int> index = open_path(path);
         if (index) {
             ++reopened;
+            if (static_cast<int>(i) == session.active) {
+                active_index = *index;
+            }
         } else if (failures != nullptr) {
             failures->push_back(path + ": " + index.error().message);
         }
     }
-    if (session.active >= 0 &&
-        static_cast<std::size_t>(session.active) < documents_.size()) {
-        activate(static_cast<std::size_t>(session.active));
+    if (active_index >= 0 &&
+        static_cast<std::size_t>(active_index) < documents_.size()) {
+        activate(static_cast<std::size_t>(active_index));
     }
     return reopened;
 }

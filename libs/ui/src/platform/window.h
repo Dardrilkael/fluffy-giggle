@@ -126,9 +126,10 @@ public:
     // get/set pair onto the app's GuiContext (text_input's Ctrl+C/X/V
     // ride it; App::install_clipboard is the app-side spelling). The
     // base default installs nothing - the unset seam, "no clipboard",
-    // which is the honest answer on a host without wiring (Android
-    // today: a JNI hop is a later item) - so a platform opts in by
-    // overriding, like every other capability here.
+    // which is the honest answer on a host without wiring (a posix
+    // desktop today: GLFW's is the windows answer, android's override
+    // reaches the ClipboardManager through the JNI) - so a platform
+    // opts in by overriding, like every other capability here.
     virtual void install_clipboard(gui::GuiContext& gui) { (void)gui; }
 
     // The stage-12 halves the window itself owns. set_title hands the

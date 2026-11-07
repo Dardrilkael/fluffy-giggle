@@ -115,12 +115,16 @@ if(NOT ANDROID)
     # and netlist subcommands). Desktop console app like apps/spice.
     add_subdirectory(circsim_cli)
   endif()
-  if(NOT ANDROID AND ws_want_circsim_editor)
-    # circsim_editor is the stage-3 acceptance app: the schematic editor
-    # (place/move/rotate/mirror parts, wire routing, the property grid,
-    # the problems panel, the netlist view) over AppShell + ws::circsim.
-    # Desktop gui app like shell_example (a windowed main; android is a
-    # later port - the touch interactions need their own pass).
-    add_subdirectory(circsim_editor)
-  endif()
+endif()
+
+if(ws_want_circsim_editor)
+  # circsim_editor is the stage-3 acceptance app: the schematic editor
+  # (place/move/rotate/mirror parts, wire routing, the property grid,
+  # the problems panel, the netlist view) over AppShell + ws::circsim.
+  # A phone app too now (the android port): android_main hands the
+  # glue's handle to the shell, the activity's paths answer Locations,
+  # and the file pickers ride the Storage Access Framework through the
+  # app TU's bridge - the pickers' worker dispatch and the touch
+  # ->mouse bridge the window layer already owns.
+  add_subdirectory(circsim_editor)
 endif()

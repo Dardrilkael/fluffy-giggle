@@ -101,6 +101,26 @@ std::string_view CommandMenuBuilder::command_of(const MenuItem* item) const {
 
 // --- command_toolbar --------------------------------------------------------
 
+namespace {
+
+// The toolbar tooltip's one line: the label (the icon button dropped
+// it, the text button shows it - the hint carries it either way) plus
+// the live chord in parens when one answers at `context`.
+[[nodiscard]] std::string toolbar_hint(
+    const ws::app::Command& cmd, const ws::app::ShortcutResolver* resolver,
+    ws::app::KeyContext context) {
+    std::string hint = cmd.label;
+    const std::string chord = command_hint(cmd, resolver, context);
+    if (!chord.empty()) {
+        hint += " (";
+        hint += chord;
+        hint += ')';
+    }
+    return hint;
+}
+
+}  // namespace
+
 std::string_view command_toolbar(GuiContext& gui, LayoutCursor& layout,
                                  const ChromeTheme& theme, const char* label,
                                  const ws::app::CommandRegistry& registry,
@@ -129,6 +149,91 @@ std::string_view command_toolbar(GuiContext& gui, LayoutCursor& layout,
                    !ws::app::CommandRegistry::is_enabled(*cmd))) {
             return cmd->id;
         }
+    }
+    return {};
+}
+
+std::string_view command_toolbar(
+    GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
+    const char* label, const ws::app::CommandRegistry& registry,
+    const std::vector<std::string>& ids, const ToolbarIcon* icons,
+    std::size_t icon_count, const ws::app::ShortcutResolver* resolver,
+    ws::app::KeyContext context) {
+    const ScopedId scope(gui.ids(), label);
+    bool first = true;
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        const ws::app::Command* cmd = registry.find(ids[i]);
+        if (cmd == nullptr) {
+            continue;  // an unknown id lays nothing - the builder's skip rule
+        }
+        const bool disabled = !ws::app::CommandRegistry::is_enabled(*cmd);
+
+        // The mapped icon, when the theme can serve its sprite: a
+        // square icon button. A command without a mapping - or one
+        // whose sprite came back the sentinel (a fontless theme, a
+        // skin that answers nothing) - keeps the text button, so a
+        // toolbar never lays a blank square.
+        const ToolbarIcon* mapped = nullptr;
+        for (std::size_t m = 0; m < icon_count; ++m) {
+            if (icons[m].command == ids[i]) {
+                mapped = &icons[m];
+                break;
+            }
+        }
+        const r2d::Sprite sprite =
+            mapped != nullptr ? icon_sprite_of(theme, mapped->icon)
+                              : r2d::Sprite{};
+        const bool as_icon = mapped != nullptr && sprite.page != 0;
+
+        // Both branches compose the button from the split halves (the
+        // composed call's own internals) so the laid rect stays in
+        // hand for the glyph centering and the tooltip's anchor. A
+        // "##"-only label ids the icon button but draws no text
+        // (label_display's cut) - the name moves into the tooltip.
+        const char* const button_label =
+            as_icon ? "##icon" : cmd->label.c_str();
+        float width = theme.control_height;  // the icon button is square
+        if (!as_icon) {
+            char scratch[128];
+            const LabelFit fit = fit_text(cmd->label.c_str(), -1.0f, theme,
+                                          scratch, sizeof scratch);
+            width = fit.advance + 2.0f * theme.padding + 4.0f;
+        }
+
+        const ScopedId row(gui.ids(), static_cast<int>(i));
+        if (!first) {
+            layout.same_line();
+        }
+        first = false;
+        const Rect rect = layout.next(width, theme.control_height);
+        const WidgetId id = gui.ids().id(button_label);
+        ButtonResult result = button_behavior(gui, id, rect, disabled);
+        fold_hover_t(gui, id, result, theme);
+        paint(theme, &WidgetPainters::button, &button_draw, rect, result,
+              theme, button_label, r2d::Sprite{});
+        if (as_icon) {
+            // The glyph: the height minus the corner insets (the
+            // button's own icon room), centered, wearing the text
+            // color the label would draw - a coverage mask tinted
+            // white would vanish on the light theme - and dimmed with
+            // the dead lock.
+            const float inset =
+                std::min(theme.corner_radius, rect.height * 0.5f);
+            const float side = std::max(1.0f, rect.height - 2.0f * inset);
+            draw_icon(rect.x + (rect.width - side) * 0.5f,
+                      rect.y + (rect.height - side) * 0.5f, side, sprite,
+                      dim(theme.text, dim_factor(result.state, theme)));
+        }
+        if (result.activated()) {
+            return cmd->id;
+        }
+
+        // The tooltip every button wears, after the theme's rest
+        // delay: the label (the icon button dropped it from the face)
+        // plus the live chord. tooltip_text keys the hover clock on
+        // the button's own id under this row's scope.
+        const std::string hint = toolbar_hint(*cmd, resolver, context);
+        tooltip_text(gui, layout, theme, button_label, rect, hint.c_str());
     }
     return {};
 }

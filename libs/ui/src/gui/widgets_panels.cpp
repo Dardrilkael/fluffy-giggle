@@ -130,9 +130,11 @@ void tab_draw(const Rect& rect, const TabResult& result,
     }
 
     // The tab's label, centered like a button's: fitted to the tab
-    // minus its padding. An unselected tab's label sits a step quieter
-    // than the selected one's - the selection reads at a glance, not
-    // glyph by glyph. Tab labels never id (the strip ids by
+    // minus its padding. An unselected tab's label wears the MUTED rung
+    // - its own gray (#858585 on the dark stock), not an alpha dim of
+    // body text - so the selection reads at a glance, not glyph by
+    // glyph, and the inactive strip never competes with the panel it
+    // fronts. Tab labels never id (the strip ids by
     // INDEX), so a "##" in a tab label is pure display sugar: it
     // cuts and keys nothing.
     char scratch[128];
@@ -141,7 +143,7 @@ void tab_draw(const Rect& rect, const TabResult& result,
                  std::max(0.0f, rect.width - 2.0f * theme.padding), theme,
                  scratch, sizeof(scratch));
     const std::uint32_t label_color =
-        selected ? theme.text : dim(theme.text, 0.72f);
+        selected ? theme.text : theme.text_muted;
     draw_label(rect.x + (rect.width - fit.advance) * 0.5f, rect.y,
                rect.height, fit, dim(label_color, dim_by), theme);
 }

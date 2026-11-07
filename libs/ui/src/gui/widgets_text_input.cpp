@@ -397,14 +397,16 @@ void text_input_draw(const Rect& rect, const TextInputResult& result,
                            dim(theme.text, dim_by));
         }
     } else {
-        // The placeholder: the label dimmed, saying what the field
-        // wants - only an empty buffer shows it.
+        // The placeholder: the muted rung, saying what the field wants -
+        // only an empty buffer shows it. The typography brief's own
+        // class: a hint that must not compete with real content, its
+        // own token (#858585 on the dark stock) rather than an alpha
+        // dim of body text, so a theme tunes it once for every field.
         char scratch[128];
         const LabelFit fit =
             fit_text(label, content_room, theme, scratch, sizeof(scratch));
         if (fit.advance > 0.0f) {
-            const std::uint32_t ph =
-                dim(dim(theme.text, theme.disabled_alpha), dim_by);
+            const std::uint32_t ph = dim(theme.text_muted, dim_by);
             if (theme.font != nullptr) {
                 r2d::draw_text(content_x, label_top(rect.y, rect.height, theme),
                                fit.text, *theme.font, ph);

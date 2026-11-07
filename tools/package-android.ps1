@@ -90,13 +90,14 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'build failed (cmake --build --preset android)' }
 } finally { Pop-Location }
 
-$so = Join-Path $repo ("build\android\bin\lib$App.so")
+# The android preset uses build/android-arm64/ as its binaryDir.
+$so = Join-Path $repo ("build\android-arm64\bin\lib$App.so")
 if (-not (Test-Path $so)) { throw "module not found: $so" }
 
 # --- 2. aapt2 link: manifest (+ assets/ if the app has any) -> unsigned apk --
 # Not every app ships assets (chatter carries none) - -A goes in only
 # when the dir exists.
-$outDir = Join-Path $repo 'build\android\apk'
+$outDir = Join-Path $repo 'build\android-arm64\apk'
 New-Item -ItemType Directory -Force $outDir | Out-Null
 $unsigned = Join-Path $outDir 'unsigned.apk'
 Remove-Item $unsigned -ErrorAction SilentlyContinue
@@ -116,7 +117,7 @@ $dexPath = $null
 if ($javaFiles.Count -gt 0) {
     if (-not (Test-Path $javac)) { throw "javac not found in $javaHome (JAVA_HOME must point at a JDK, not a JRE)" }
     $d8 = Join-Path $buildTools.FullName 'd8.bat'
-    $classDir = Join-Path $repo 'build\android\java'
+    $classDir = Join-Path $repo 'build\android-arm64\java'
     New-Item -ItemType Directory -Force $classDir | Out-Null
     Remove-Item (Join-Path $classDir '*') -Recurse -Force -ErrorAction SilentlyContinue
     & $javac -source 8 -target 8 -Xlint:-options -bootclasspath $androidJar -d $classDir @($javaFiles.FullName)
@@ -157,7 +158,7 @@ if ($LASTEXITCODE -ne 0) { throw 'zipalign failed' }
 # debug keystore is used (auto-created if missing) so a fresh clone still
 # produces an installable APK. The debug-signed build is NOT for production -
 # it shares a publicly-known key with every other debug APK in the world.
-$apk = Join-Path $repo ("build\android\$App.apk")
+$apk = Join-Path $repo ("build\android-arm64\$App.apk")
 if ($Keystore -ne "") {
     if (-not (Test-Path $Keystore)) {
         throw "keystore not found: $Keystore"

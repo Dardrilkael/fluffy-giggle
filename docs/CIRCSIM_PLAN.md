@@ -322,3 +322,74 @@ local-only pragmas, MSVC unaffected), `test_circsim_editor_canvas`
 20/20 (102 assertions), `test_circsim_editor_panel` 15/15 (209),
 `test_circsim_editor_palette` 4/4 (25), and the full ctest 1008/1008
 including both CLI smokes.
+
+## Stage 21 (2026-11-06): the UI/UX refinement pass
+
+The editor's chrome catches up with its content (the commits' own
+record; the plan doc catch-up lands with stage 22):
+
+- **Toolbar icons** - the chrome actions (new/open/save, undo/redo,
+  delete, rotate, mirror, wire, erc) wear the built-in icon set's
+  standard glyphs with name + chord tooltips; `circuit.run` keeps its
+  text button (Simulate is the one act that deserves the word).
+- **Fuzzy palette search** - the search box matches on word starts,
+  case-insensitive, across name/key/group ("res" finds "resistor",
+  "vsrc" finds the sources); Enter arms the first match.
+- **The right panel tabs** - Properties / Netlist / Simulation instead
+  of the vertical stack; each concern gets the full height, the
+  selection, the deck and the setup never scroll off under each other.
+- **Shortcut keys** - Ctrl+Z/Ctrl+Y (redo keeps Ctrl+Shift+Z as the
+  alias), R/M/Del bind on the panel rung through the resolver's
+  text-editing rule (a focused field keeps its letters).
+
+## Stage 22 (2026-11-07): the typography & text rendering pass
+
+The editor renders its own text, so it owns the hierarchy - three
+rungs, one theme token each, every one covered by a suite:
+
+- **The font hierarchy** - `gui::heading()` is the section break: the
+  theme's `font_strong` face at its own baked size on a row taller
+  than a body row. The editor bakes the semibold at 18 px against the
+  16 px body ("bold and slightly larger"), and the palette's `tools`,
+  the Simulation tab's `schematic` and `analyses (deck order)` wear
+  it. `font_strong` finally has its first consumer; a null strong face
+  falls back to `font` (the one-font rule), fontless to the taller
+  bar.
+- **Mono for data** - JetBrains Mono v2.304 (OFL) is vendored and
+  subset beside the Inter faces, embedded through `embed_font.py` and
+  served by the new `r2d::load_default_mono_font()` - the same bundled
+  answer the UI face gets, no system font walk (the pre-pass walked
+  `consola.ttf`/`DejaVuSansMono.ttf`, so a box without them silently
+  lost its columns; `WS_MONO_FONT_PATH` stays as the override). The
+  Netlist tab's deck lines and the Results measurements already wore
+  the mono face; the **Problems rows** join them (a finding line is
+  code-ish text - refdeses, net names, `[E]/[W]/[N]` tags - and reads
+  easier with honest columns), through the swapped-theme idiom the
+  panels already use for fades. The netlist draw's unconditional
+  `*theme.font` deref is gone too: a fontless theme now falls back to
+  plain rows instead of UB.
+- **The muted rung** - `text_muted` is the theme's own token for the
+  chrome hints that must not compete with content: the brief pinned
+  `#858585` on the dark stock, the light stock picks its own gray
+  `(120,122,128)` because the dark one cannot clear the light faces.
+  The text field's placeholder and the inactive tab's label consume it
+  (both were alpha dims of body text before); the class is WCAG's
+  placeholder/inactive-component exemption, so the pair checks sit at
+  the 3:1 component ratio against panel, control and bar faces - the
+  `text_on_accent` precedent - and the token round-trips through the
+  theme json like every face.
+
+The build fixes the pass needed on the posix box: imgui's GLFW
+backend compiles with `GLFW_INCLUDE_NONE` (it needs GLFW's types,
+never the GL headers `glfw3.h` pulls by default - the workspace's own
+`window_glfw.cpp` already spelled it), and the autorun probe's MSVC
+pragma gains its `#if defined(_MSC_VER)` guard.
+
+The stage-22 gate: the full ctest 1058/1058 - `test_ui_font` 8/8 (the
+mono table's uniform-advance contract), `test_ui_theme_tokens` 10/10
+(the muted rung's pinned gray, its 3:1 pairs, the json round-trip),
+`test_ui_gui` 58/58 (the heading's strong face and taller row, the
+placeholder's muted color, the inactive tab's), and
+`test_circsim_editor_side_panels` 15/15 (the palette heading through
+the strong face, the problems rows through the mono face, the netlist
+tab's fontless survival).

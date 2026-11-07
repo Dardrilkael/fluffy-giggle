@@ -580,9 +580,13 @@ struct App::Impl {
     }
 
     bool init_imgui(App& app) {
+        core::warn("ui: init_imgui() starting");
         IMGUI_CHECKVERSION();
+        core::warn("ui: IMGUI_CHECKVERSION passed");
         ImGui::CreateContext();
+        core::warn("ui: ImGui::CreateContext() done");
         ImPlot::CreateContext();
+        core::warn("ui: ImPlot::CreateContext() done");
 
         ImGuiIO& io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -592,23 +596,30 @@ struct App::Impl {
         // on_setup() - the main loop honors it either way.
 
         ImGui::StyleColorsDark();
+        core::warn("ui: StyleColorsDark done");
 
         // The Vulkan backend needs the swapchain (render pass + image
         // count), so it inits in init_imgui_backend() once the window
         // stage created one; the platform backend binds to the current
         // window right after this - both called from attach_window(),
         // which owns their lifecycle (Android re-runs them per attach).
+        core::warn("ui: calling init_imgui_backend()");
         if (!init_imgui_backend()) {
+            core::warn("ui: init_imgui_backend() failed");
             return false;
         }
+        core::warn("ui: init_imgui_backend() succeeded");
 
+        core::warn("ui: calling app.on_setup()");
         app.on_setup();
+        core::warn("ui: app.on_setup() returned");
         return true;
     }
 
     // --- frame loop ---------------------------------------------------------
 
     int main_loop(App& app) {
+        core::warn("ui: main_loop() starting");
         // The frame clock's "previous": the pump's own start, so the
         // first frame's dt measures real time and not a default
         // epoch's.
@@ -650,6 +661,7 @@ struct App::Impl {
             if (jobs_ != nullptr) {
                 jobs_->drain();
             }
+            core::warn("ui: after jobs drain, should_close={}", host_->should_close());
             if (host_->should_close()) {
                 break;
             }
@@ -659,6 +671,7 @@ struct App::Impl {
             // (Android surface loss; desktop stays ready for the whole
             // run), and block on the platform while there is nothing to
             // render instead of spinning.
+            core::warn("ui: window_ready={}, window_stage_up={}", host_->window_ready(), window_stage_up);
             if (!host_->window_ready()) {
                 if (window_stage_up) {
                     detach_window();
@@ -669,7 +682,9 @@ struct App::Impl {
                 host_->wait_for_window();
                 continue;
             }
+            core::warn("ui: calling attach_window, window_stage_up={}", window_stage_up);
             if (!window_stage_up && !attach_window(app)) {
+                core::warn("ui: attach_window failed");
                 return 1;
             }
 
@@ -724,19 +739,29 @@ struct App::Impl {
                 style.Colors[ImGuiCol_WindowBg].w = 1.0f;
                 viewport_style_set = true;
             }
+            core::warn("ui: attach_window succeeded");
+            core::warn("ui: window_hidden={}", host_->is_hidden());
+            core::warn("ui: entering render loop");
+            core::warn("ui: calling ImGui_ImplVulkan_NewFrame()");
 
             ImGui_ImplVulkan_NewFrame();
+            core::warn("ui: calling host_->imgui_platform_new_frame()");
             host_->imgui_platform_new_frame();
+            core::warn("ui: calling ImGui::NewFrame()");
             ImGui::NewFrame();
+            core::warn("ui: calling renderer2d_.frame_begin()");
 
             // One r2d frame per ImGui frame: begin before on_update() records
             // its draws, sort + replay once it returned.
             renderer2d_.frame_begin(static_cast<float>(swapchain_.width()),
                                     static_cast<float>(swapchain_.height()));
             bool frame_abandoned = false;
+            core::warn("ui: calling app.on_update()");
             try {
                 app.on_update();
+                core::warn("ui: app.on_update() returned");
                 renderer2d_.frame_end();
+                core::warn("ui: renderer2d_.frame_end() returned");
             } catch (const std::exception& e) {
                 core::error("ui: exception in on_update(): {}", e.what());
                 host_->request_stop();
@@ -867,7 +892,9 @@ struct App::Impl {
     // re-initialize only what the OS round-trip actually invalidated, so
     // app state (fonts, textures, ImGui contexts) survives untouched.
     bool attach_window(App& app) {
+        core::warn("ui: attach_window() starting");
         const core::Status attached = gpu_.attach_surface();
+        core::warn("ui: gpu_.attach_surface() returned {}", attached.has_value());
         if (!attached) {
             core::log_error(attached.error());
             return false;
@@ -876,26 +903,35 @@ struct App::Impl {
         // attach, reused by every re-attach - a null pool IS the "not up
         // yet" marker (the device/queue/allocator half is gfx's own
         // tracking).
+        core::warn("ui: imgui_pool={}, creating pool...", (imgui_pool == VK_NULL_HANDLE ? "null" : "valid"));
         if (imgui_pool == VK_NULL_HANDLE && !create_imgui_pool()) {
+            core::warn("ui: create_imgui_pool failed");
             return false;
         }
+        core::warn("ui: imgui_pool created");
         int fb_width = 0;
         int fb_height = 0;
         host_->framebuffer_size(&fb_width, &fb_height);
+        core::warn("ui: framebuffer_size={}x{}", fb_width, fb_height);
         if (fb_width <= 0 || fb_height <= 0) {
+            core::warn("ui: invalid framebuffer size");
             return false;
         }
         // The window stage's presentation half: the swapchain (with the
         // render pass + framebuffers it carries) against the Gpu the
         // surface attach above brought up. A failure cleans up after
         // itself inside gfx - the Status carries the diagnostic.
+        core::warn("ui: creating swapchain...");
         const core::Status created =
             swapchain_.create(gpu_, fb_width, fb_height, {config.vsync});
+        core::warn("ui: swapchain.create() returned {}", created.has_value());
         if (!created) {
             core::log_error(created.error());
             return false;
         }
+        core::warn("ui: swapchain created, gpu_context_up={}", gpu_context_up);
         if (!gpu_context_up) {
+            core::warn("ui: first attach - initializing GPU context");
             // First attach only. Before on_setup(): apps load textures
             // there, and the r2d free functions need an active renderer.
             // init() may fail mid-way; shutdown() doubles as the
@@ -904,20 +940,27 @@ struct App::Impl {
             // table size at init_gpu()) maps onto the renderer's own
             // spelling.
             const gfx::DescriptorIndexing indexing = gpu_.descriptor_indexing();
+            core::warn("ui: descriptor_indexing: bindless={}, update_after_bind={}", indexing.bindless, indexing.update_after_bind);
             texture_tier_ = r2d::TextureTier{.bindless = indexing.bindless,
                                             .update_after_bind =
                                                 indexing.update_after_bind};
+            core::warn("ui: calling renderer2d_.init()");
             if (!renderer2d_.init(device(), physical_device(), gpu_, queue(),
                                   queue_family(), render_pass(), format(),
                                   texture_tier_)) {
+                core::warn("ui: renderer2d_.init() failed");
                 return false;
             }
+            core::warn("ui: renderer2d_.init() succeeded");
             r2d::set_active(&renderer2d_);
             // The gui input snapshot publishes the same way (ws::input::frame_input()).
             ws::input::set_active_input(&gui_input_);
+            core::warn("ui: calling init_imgui(app)");
             if (!init_imgui(app)) {
+                core::warn("ui: init_imgui(app) failed");
                 return false;
             }
+            core::warn("ui: init_imgui(app) succeeded");
             gpu_context_up = true;
         } else {
             // Re-attach: the renderer and the ImGui/ImPlot contexts are
@@ -1030,11 +1073,15 @@ struct App::Impl {
     }
 
     int run(App& app) {
+        core::warn("ui: run() starting");
         if (!startup_context()) {
+            core::warn("ui: startup_context() failed");
             shutdown();  // failure-path cleanup; every destroy is guarded
             return 1;
         }
+        core::warn("ui: startup_context() succeeded, entering main_loop");
         const int result = main_loop(app);
+        core::warn("ui: main_loop returned {}", result);
         shutdown();
         return result;
     }

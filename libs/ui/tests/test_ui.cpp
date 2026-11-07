@@ -374,13 +374,18 @@ TEST_CASE("chunk capacity grows instead of dropping (M9)") {
     core.begin_frame();
     // One segment past the old hard cap (kInitialChunkCapacity WAS the
     // cap, M5-M8): every segment opens, every draw lands.
+    // M9 removed the cap; M10+ merges identical consecutive segments into
+    // one chunk (fewer draw calls). Use the SAME VP so they merge.
     for (std::uint32_t i = 0;
          i < ws::ui::r2d::batch::kInitialChunkCapacity + 1; ++i) {
         core.open_segment(default_vp());
         REQUIRE(push_test_quad(core, 0u));
     }
-    CHECK(core.chunk_count() == ws::ui::r2d::batch::kInitialChunkCapacity + 1);
+    // All 17 identical segments merge into 1 chunk (M10+ optimization).
+    CHECK(core.chunk_count() == 1);
+    CHECK(core.chunk(0).quad_count == ws::ui::r2d::batch::kInitialChunkCapacity + 1);
     CHECK(core.dropped_quads() == 0);
+    CHECK(core.stats().merged_segments == ws::ui::r2d::batch::kInitialChunkCapacity);
 
     // The ONE drop that remains (M9): a quad pushed with no open segment
     // - counted, never silent. The renderer warns once per frame.
@@ -8320,6 +8325,8 @@ TEST_CASE("text input: the clipboard trio rides the seam") {
     std::string clip_sink;  // what set received
     gui.set_clipboard([&]() -> const char* { return clip_src.c_str(); },
                       [&](const char* t) { clip_sink = t; });
+    CHECK(gui.has_clipboard() == true);  // the one-bit answer a Copy
+                                         // button asks before it sets
     const WidgetId field_w = IdStack{}.id("name");
     gui.set_focus(field_w);
 
@@ -8370,6 +8377,7 @@ TEST_CASE("text input: the clipboard trio rides the seam") {
     // The unwired seam: a fresh context answers null (its own contract)
     // and the trio no-ops - paste reads nothing, nothing changes.
     GuiContext bare;
+    CHECK(bare.has_clipboard() == false);
     CHECK(bare.get_clipboard_text() == nullptr);
     bare.set_clipboard_text("dropped");  // nowhere to drop it INTO
     char bare_buf[8] = "";

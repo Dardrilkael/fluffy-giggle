@@ -37,6 +37,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
@@ -46,6 +47,8 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include <ws/circsim/export.hpp>
@@ -84,15 +87,111 @@ inline bool eps_eq(double a, double b, double eps) {
     return std::fabs(a - b) <= eps;
 }
 
+// The "Tidy Wires" command's seam (document.cpp): lands the given
+// shapes as ONE undo step, skipping wires that would not change, and
+// returns how many wires actually changed (0 = nothing pushed). Declared
+// here because document.hpp was not part of the change; moving this
+// declaration into document.hpp is the intended home (a redeclaration
+// in both places is harmless).
+std::size_t push_tidy_wires(SchematicDocument& doc,
+                            std::vector<WireRoute> routes);
+
+// Rotate/mirror WITH the attached wires' fresh shapes, as one undo step
+// (push_transform_part stays for callers with no routes). The Editor's
+// transform_part() computes the routes and calls this.
+void push_transform_part_routed(SchematicDocument& doc, std::uint32_t part_id,
+                                int rot, bool mirror, std::string name,
+                                std::vector<WireRoute> wire_routes);
+
+// A whole-sheet renumbering as one undo step: (part id, new ref) pairs;
+// entries that would not change a ref are dropped. Returns how many refs
+// changed (0 = nothing pushed). Same declaration note as push_tidy_wires.
+std::size_t push_annotate(
+    SchematicDocument& doc,
+    std::vector<std::pair<std::uint32_t, std::string>> changes);
+
 // --- the camera -------------------------------------------------------------
 
 struct EditorView {
-    double zoom = 26.0;   // screen pixels per grid unit
-    Pos center{0.0, 0.0};  // the world point at the viewport's center
+    // The zoom range and the default, in screen pixels per grid unit.
+    // One source of truth: zoom_at, fit, fly_to and the document load
+    // all clamp through clamp_zoom (the limits used to be magic numbers
+    // repeated at every call site).
+    static constexpr double kMinZoom = 3.0;
+    static constexpr double kMaxZoom = 400.0;
+    static constexpr double kDefaultZoom = 26.0;
+    [[nodiscard]] static double clamp_zoom(double z) {
+        return std::clamp(z, kMinZoom, kMaxZoom);
+    }
+
+    double zoom = kDefaultZoom;  // screen pixels per grid unit
+    Pos center{0.0, 0.0};        // the world point at the viewport's center
 
     // The viewport, set each frame before use (screen px, the panel
     // body's rect). Invalid (w/h <= 0) until the first draw.
     float vx = 0.0f, vy = 0.0f, vw = 0.0f, vh = 0.0f;
+
+    // --- the smooth camera (opt-in) ---------------------------------------
+    // fly_to() glides the camera to a target (an ease-in-out in log-zoom,
+    // so a big zoom change feels even). It is OFF by default: with
+    // `animate == false` fly_to() snaps, exactly the old behavior, so
+    // nothing changes until the app opts in. When on, the app calls
+    // step(dt) once per frame (dt in seconds) and keeps redrawing while
+    // it returns true. Any manual zoom/pan cancels a glide in flight -
+    // the user's hands always win over the camera's.
+    struct Glide {
+        bool active = false;
+        Pos from_center{0.0, 0.0};
+        Pos to_center{0.0, 0.0};
+        double from_zoom = kDefaultZoom;
+        double to_zoom = kDefaultZoom;
+        double t = 0.0;         // seconds elapsed
+        double duration = 0.35;  // seconds
+    };
+    bool animate = false;
+    Glide glide;
+
+    void cancel_glide() { glide.active = false; }
+
+    void fly_to(Pos target, double target_zoom, double seconds = 0.35) {
+        target_zoom = clamp_zoom(target_zoom);
+        if (!animate || seconds <= 0.0 || !valid()) {
+            center = target;
+            zoom = target_zoom;
+            glide.active = false;
+            return;
+        }
+        glide.active = true;
+        glide.from_center = center;
+        glide.to_center = target;
+        glide.from_zoom = zoom;
+        glide.to_zoom = target_zoom;
+        glide.t = 0.0;
+        glide.duration = seconds;
+    }
+
+    // Advance a glide by `dt` seconds; true while it is still moving.
+    bool step(double dt) {
+        if (!glide.active) {
+            return false;
+        }
+        glide.t += dt;
+        const double u = std::min(1.0, glide.t / glide.duration);
+        const double e = u * u * (3.0 - 2.0 * u);  // smoothstep
+        center = {glide.from_center.x +
+                      (glide.to_center.x - glide.from_center.x) * e,
+                  glide.from_center.y +
+                      (glide.to_center.y - glide.from_center.y) * e};
+        const double lz0 = std::log(glide.from_zoom);
+        const double lz1 = std::log(glide.to_zoom);
+        zoom = clamp_zoom(std::exp(lz0 + (lz1 - lz0) * e));
+        if (u >= 1.0) {
+            center = glide.to_center;
+            zoom = glide.to_zoom;
+            glide.active = false;
+        }
+        return glide.active;
+    }
 
     [[nodiscard]] bool valid() const { return vw > 1.0f && vh > 1.0f; }
 
@@ -114,14 +213,9 @@ struct EditorView {
         if (!valid()) {
             return;
         }
+        glide.active = false;  // the wheel beats a glide in flight
         const Pos under = s2w(anchor);
-        zoom *= factor;
-        if (zoom < 3.0) {
-            zoom = 3.0;
-        }
-        if (zoom > 400.0) {
-            zoom = 400.0;
-        }
+        zoom = clamp_zoom(zoom * factor);
         // Keep `under` at the anchor: center = under + (center-anchor
         // in world units at the new zoom).
         const double dx = (vx + vw * 0.5f - anchor.x) / zoom;
@@ -131,6 +225,7 @@ struct EditorView {
 
     // Pan by a screen-pixel delta.
     void pan_by(ws::math::Vec2 screen_delta) {
+        glide.active = false;  // a drag beats a glide in flight
         center.x -= screen_delta.x / zoom;
         center.y += screen_delta.y / zoom;
     }
@@ -141,20 +236,16 @@ struct EditorView {
         if (!valid()) {
             return;
         }
-        center = {(b.min_x + b.max_x) * 0.5, (b.min_y + b.max_y) * 0.5};
+        const Pos target{(b.min_x + b.max_x) * 0.5, (b.min_y + b.max_y) * 0.5};
         const double w = (b.max_x - b.min_x) + 2.0 * margin;
         const double h = (b.max_y - b.min_y) + 2.0 * margin;
         if (w <= 0.0 || h <= 0.0) {
+            fly_to(target, zoom);  // degenerate: center, keep the zoom
             return;
         }
-        zoom = std::min(static_cast<double>(vw) / w,
-                        static_cast<double>(vh) / h);
-        if (zoom < 3.0) {
-            zoom = 3.0;
-        }
-        if (zoom > 400.0) {
-            zoom = 400.0;
-        }
+        // fly_to clamps the zoom, and glides when `animate` is on.
+        fly_to(target, std::min(static_cast<double>(vw) / w,
+                                static_cast<double>(vh) / h));
     }
 };
 
@@ -268,6 +359,14 @@ struct ResultsCache {
     PlotView view;                       // the manual zoom/pan window
     std::size_t view_for = kNoTable;     // the table `view` belongs to
     PlotGesture gesture;                 // the in-flight plot gesture
+    // The shown table's x axis is strictly increasing - a per-table
+    // constant of the run (the axis data is immutable once delivered),
+    // cached with the same key shape as `visible`/`view` so the plot
+    // does not re-walk every sample every frame. Reset with the other
+    // per-run keys when a delivery lands (a same-indexed table of a
+    // NEW run is a different axis).
+    bool x_sorted = false;
+    std::size_t x_sorted_for = kNoTable;  // the table `x_sorted` belongs to
 };
 
 // One editable field's caller-owned buffer (the Properties panel's
@@ -317,6 +416,13 @@ struct Editor {
     // the user collapsed (open is the default, so a new group shows).
     char palette_filter[48] = "";
     std::set<std::string> palette_closed;
+    // The Palette's recently-armed symbols, newest first, capped at
+    // six. Editor-lifetime convenience state, not document state: a
+    // document switch keeps it ("what did I place last?" is the same
+    // question in the next schematic), and each Editor owns its own -
+    // the file-static list it replaces was process-wide, so two
+    // editors (the app and a test bench) shared one history.
+    std::vector<std::string> palette_recent;
     Selection sel;
 
     // The move-drag (press to release). `live` writes the position
@@ -350,6 +456,13 @@ struct Editor {
         bool a_mint = false;
         bool a_free = false;
         std::uint32_t a_wire = 0;
+        // Which way the route's corner bends: false = horizontal
+        // first (the stock L), true = vertical first. The panel flips
+        // it on Tab while a draft is live and passes it to route_wire
+        // for BOTH the preview and the commit, so what you see is what
+        // lands. Cleared with the draft.
+        bool flip_route = false;
+        void flip() { flip_route = !flip_route; }
     } wire_draft;
 
     // True when the last frame's Properties draw saw a focused text
@@ -361,6 +474,18 @@ struct Editor {
     // The camera + the caches.
     EditorView view;
     ProblemsCache problems;
+    // The Problems panel's cursor: the diag index the row highlight
+    // stands on and the Prev/Next walk steps from (-1 = none). It
+    // indexes problems.diags and resets wherever that list is replaced
+    // (refresh_problems, document_changed) - a cursor left over from a
+    // replaced check would highlight a stranger's row.
+    int problems_cursor = -1;
+    // The severity filter's three toggles, all on by default: the walk
+    // and the row draw both skip a hidden severity, while the header's
+    // counts stay the full counts whatever is hidden.
+    bool problems_show_error = true;
+    bool problems_show_warning = true;
+    bool problems_show_note = true;
     NetlistCache netlist;
     ResultsCache results;
 
@@ -379,12 +504,16 @@ struct Editor {
 
     // The Properties panel's editing state: the field buffers keyed
     // by stable strings, the epoch that reloads them, the selection
-    // they were built for, and the analysis entry being edited.
+    // they were built for, and the analysis entry being edited. The
+    // tab strip's selection rides beside them (0 Properties, 1
+    // Netlist, 2 Simulation) - caller-owned state the tab_bar writes,
+    // surviving frames and document switches like every panel view.
     std::map<std::string, FieldBuf> fields;
     std::uint64_t field_stamp = 1;
     int fields_sel_kind = -1;
     std::uint32_t fields_sel_id = 0;
     int analysis_index = -1;
+    int properties_tab = 0;
 
     // Bumps the edit epoch (the app wires the undo stacks' listeners
     // here, so an undo/redo lands back into the field rows).
@@ -395,6 +524,46 @@ struct Editor {
         bool armed = false;
         ws::math::Vec2 from{0.0f, 0.0f};
     } pan;
+
+    // --- the frame tick, the locate pulse, the panel's key edges ---------
+    // The Schematic panel calls tick() once per frame: it advances the
+    // smooth camera and the pulse by the REAL elapsed time (steady
+    // clock, clamped to 100 ms so a stalled frame never teleports the
+    // view). It returns true while something is still moving - the app
+    // may use that to keep requesting frames.
+    [[nodiscard]] bool tick();
+
+    // The locate pulse: a ring that blooms at a world point and fades
+    // (jump_to and zoom_to_selection fire it, so "where did the view
+    // just go?" answers itself). Drawn by the panel, skipped when the
+    // theme's motion is off.
+    struct Pulse {
+        static constexpr double kLife = 0.9;  // seconds
+        bool active = false;
+        Pos pos{0.0, 0.0};
+        double age = 0.0;
+    } pulse;
+    void pulse_at(Pos p) {
+        pulse.active = true;
+        pulse.pos = p;
+        pulse.age = 0.0;
+    }
+
+    // Key-edge memory for the panel's own shortcuts (F frames the
+    // selection, / flips the wire corner): "was down last frame".
+    bool key_frame_prev_ = false;
+    bool key_flip_prev_ = false;
+    bool key_tidy_prev_ = false;
+    bool key_annotate_prev_ = false;
+
+    // Quiet toasts: an identical toast pushed while its twin is still
+    // on screen is dropped instead of stacking (a command mashed ten
+    // times used to paint ten copies). Off switch for tests.
+    bool dedupe_toasts = true;
+    mutable std::string last_toast_;
+    mutable std::chrono::steady_clock::time_point last_toast_until_{};
+    std::chrono::steady_clock::time_point last_tick_{};
+    bool tick_started_ = false;
 
     // The canvas the schematic panel renders through (one per
     // editor; the canvas layer's own state is per-instance).
@@ -423,6 +592,19 @@ struct Editor {
     [[nodiscard]] canvas::Canvas2D& schematic_draw_canvas() {
         return canvas_panel_canvas != nullptr ? *canvas_panel_canvas
                                               : renderer;
+    }
+
+    // The Palette panel's draw seam: the same pattern a third time.
+    // The palette's tiles draw the symbols' pictures directly, so the
+    // seam exists for the same reason the other two do - null =
+    // &renderer (the live app); a headless test injects a
+    // CommandListCanvas here and asserts the tile grid's geometry
+    // (fills, outlines, the fitted symbol strokes) without a renderer.
+    canvas::Canvas2D* palette_canvas = nullptr;
+
+    // The canvas the Palette panel draws through.
+    [[nodiscard]] canvas::Canvas2D& palette_draw_canvas() {
+        return palette_canvas != nullptr ? *palette_canvas : renderer;
     }
 
     // --- helpers (editor.cpp) ---
@@ -466,9 +648,12 @@ struct Editor {
     // list between the two endpoints - a leads out, an L lands,
     // collinear legs folded away (a reversal keeps its lead-out
     // corner; folding it would run the wire back through the part
-    // body it just left).
+    // body it just left). `flip` bends the corner the other way
+    // (vertical-first instead of horizontal-first) - the Tab toggle;
+    // it only matters when the route needs a corner at all.
     [[nodiscard]] static std::vector<Pos> route_wire(Pos a, int a_dir,
-                                                     Pos b, int b_dir);
+                                                     Pos b, int b_dir,
+                                                     bool flip = false);
 
     // The attached ortho wires' fresh shapes for a move of `id` (the
     // drag-release re-route: a moved endpoint would otherwise leave
@@ -504,14 +689,78 @@ struct Editor {
     // The whole schematic's content extent (for the fit command).
     [[nodiscard]] std::optional<Bounds> content_bounds() const;
 
+    // Tidy: re-straightens ortho wires. tidy_route() is the pure core -
+    // given a wire's full world path (endpoint, waypoints, endpoint) it
+    // returns the cleaned INTERIOR waypoints: every diagonal leg gets an
+    // axis-aligned corner, duplicate points and collinear continuing
+    // middles fold away, the rest of the author's shape is kept (a
+    // gentle fix-up, not a re-route). tidy_selection() applies it, as
+    // ONE undo step, to the selected wire - or to every wire on the
+    // selected part or junction - and returns how many changed. Freeform
+    // (non-ortho) wires are the author's and are left alone.
+    [[nodiscard]] static std::vector<Pos> tidy_route(
+        const std::vector<Pos>& path);
+    std::size_t tidy_selection();
+
+    // Rotate / mirror a placed part to the GIVEN orientation (the caller
+    // owns the rot/mirror semantics - this does not guess the units) and
+    // keep its ortho wires straight, all as ONE undo step. The part
+    // visits the new orientation, the attached wires re-route from the
+    // pins' resolved positions there, then it goes back so the command
+    // captures the real "was" (the drag-release trick). False when the
+    // part is gone or there is no document.
+    bool transform_part(std::uint32_t id, int rot, bool mirror,
+                        std::string name);
+
+    // Annotate: renumbers every part that has a reference prefix
+    // (R, C, U...) 1..N per prefix in reading order - top to bottom in
+    // rows, left to right within a row - as ONE undo step. Parts whose
+    // ref is custom (not prefix+digits, e.g. "R_load") are left alone
+    // and never collide, since generated refs are always prefix+digits.
+    // Rows: parts within `row_tol_cells` grid cells of the row's top
+    // part share a row (hand-placed symbols are rarely pixel-exact).
+    // Warns when a renamed ref is named in the directives. Returns how
+    // many refs changed.
+    std::size_t annotate(double row_tol_cells = 2.0);
+    // The pure ordering core: indices into `at` in reading order.
+    [[nodiscard]] static std::vector<std::size_t> annotation_order(
+        const std::vector<Pos>& at, double row_tol);
+
+    // The current selection's world extent (nullopt = nothing selected
+    // or the selection's entity is gone), and the "frame selected"
+    // command built on it: fits the selection with `margin` grid units
+    // of air (a lone junction/label just centers, keeping the zoom).
+    // Returns false (with a status hint) when there is nothing to frame.
+    [[nodiscard]] std::optional<Bounds> selection_bounds() const;
+    bool zoom_to_selection(double margin = 3.0);
+
+    // The Place tool's "pin magnetism": the snapped position for a
+    // ghost of `sym` at `world`, nudged so the ghost's nearest pin
+    // lands exactly on an existing pin within `magnet_radius` (world
+    // units; <= 0 turns it off and this is just snap()). A part dropped
+    // near another one mates pin-to-pin instead of a cell off.
+    [[nodiscard]] Pos place_snap(const ws::circsim::SymbolDef& sym, Pos world,
+                                 int rot, bool mirror, bool coarse,
+                                 double magnet_radius) const;
+
+    // A one-line, context-sensitive hint for the status bar - what the
+    // pointer and keys do RIGHT NOW (tool, draft, drag). Static text,
+    // safe to call every frame; the app feeds it to its status line.
+    [[nodiscard]] std::string_view hint() const;
+
     // Select-and-zoom for a Problems row (locate.hpp's seam).
     void jump_to(const ws::circsim::DiagTarget& t);
 
     // Cache refreshers (the commands' act; synchronous - ERC and the
-    // export are millisecond work at editor scales).
+    // export are millisecond work at editor scales). `version` is the
+    // schematic version the check ran AGAINST: the synchronous ERC
+    // path passes the live version; a delivered run passes the version
+    // its job snapshot carried at submit time, so an edit that landed
+    // mid-run leaves the Problems panel honestly stale instead of
+    // re-stamping itself fresh.
     void refresh_problems(bool from_run,
                           std::vector<ws::circsim::Diag> diags,
-                          std::string header);
+                          std::string header, std::uint64_t version);
     void run_erc();
     void refresh_netlist();
 
@@ -525,8 +774,12 @@ struct Editor {
     // active document changes).
     void document_changed();
 
-    // The toast pair the commands and panels use.
-    void toast(std::string text, gui::ToastSeverity severity) const;
+    // The toast pair the commands and panels use. `seconds` is the
+    // toast's lifetime (the stock 4s; the chord loop's command errors
+    // ask for 5) - the text rides toast_text_'s stable slots either
+    // way.
+    void toast(std::string text, gui::ToastSeverity severity,
+               float seconds = 4.0f) const;
     void status(std::string text) const;
 };
 

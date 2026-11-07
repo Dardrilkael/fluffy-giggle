@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <string_view>
@@ -28,6 +29,41 @@ struct IndeterminatePhase {
     float phase = 0.0f;  // [0, 1): the sweep, the band's trip across
 };
 
+// Capacity of the stack buffer each widget hands fit_text. A label that
+// needs more than this truncates, whatever width it was given.
+constexpr std::size_t kLabelScratchBytes = 128;
+
+// Hard pixel metrics: literals on purpose (not theme metrics), named here
+// so each is stated once and the draw code reads as intent.
+constexpr float kSelectionBarWidth = 3.0f;   // selectable's left accent bar
+constexpr float kSeparatorThickness = 2.0f;  // separator's rule
+constexpr float kFillInset = 1.0f;           // progress fill / band, per side
+constexpr float kStatusTextDim = 0.85f;      // status_bar text, vs. body text
+
+// Busy-indicator timing and geometry.
+constexpr float kSpinnerPeriodSeconds = 0.8f;  // one full turn
+constexpr float kSweepPeriodSeconds = 1.2f;    // one band trip
+constexpr int kSpinnerDots = 8;
+constexpr float kSpinnerTwoPi = 6.2831853f;
+constexpr float kSpinnerHalfPi = 1.5707963f;
+
+// True for a UTF-8 continuation byte (10xxxxxx): never the start of a
+// codepoint, so a cut must not land on it.
+bool is_utf8_continuation(char c) {
+    return (static_cast<unsigned char>(c) & 0xC0u) == 0x80u;
+}
+
+// Advance a wrap-around phase on the frame clock. A zero dt (headless),
+// a negative one (clock stepped back) or a non-finite one holds the
+// phase: a negative phase would index a negative dot / start the band
+// off-screen, and NaN would poison the state for good.
+float advance_phase(float phase, float dt_seconds, float period_seconds) {
+    if (!(dt_seconds > 0.0f) || !std::isfinite(dt_seconds)) {
+        return phase;
+    }
+    return std::fmod(phase + dt_seconds / period_seconds, 1.0f);
+}
+
 }  // namespace
 
 // fit_text's body. The display cut first (label_display - "##" id
@@ -44,6 +80,9 @@ struct IndeterminatePhase {
 LabelFit fit_text(const char* label, float max_width,
                   const ChromeTheme& theme, char* scratch,
                   std::size_t scratch_bytes) {
+    if (label == nullptr) {
+        return {"", 0.0f};  // no label at all: nothing to draw
+    }
     const std::string_view display = label_display(label);
     if (display.empty()) {
         return {"", 0.0f};  // nothing to say: nothing to draw
@@ -92,8 +131,7 @@ LabelFit fit_text(const char* label, float max_width,
         // UTF-8: back up while the byte at the cut continues the
         // codepoint before it - the prefix keeps whole codepoints
         // (corrupt bytes stay corrupt; utf8_next forgives them).
-        while (k > 0 && k < display.size() &&
-               (static_cast<unsigned char>(display[k]) & 0xC0u) == 0x80u) {
+        while (k > 0 && is_utf8_continuation(display[k])) {
             --k;
         }
         std::memcpy(scratch, display.data(), k);
@@ -140,9 +178,9 @@ CollapsingHeaderResult collapsing_header_behavior(
 }
 
 void collapsing_header_draw(const Rect& rect,
-                           const CollapsingHeaderResult& result,
-                           const ChromeTheme& theme, const char* label,
-                           bool open) {
+                            const CollapsingHeaderResult& result,
+                            const ChromeTheme& theme, const char* label,
+                            bool open) {
     // The focus ring: the on-accent as a 1px outline behind the row, so
     // Tab navigation is legible. Skipped for degenerate rows.
     ring_draw(result.focused, rect, theme);
@@ -183,7 +221,7 @@ void collapsing_header_draw(const Rect& rect,
     // header reads from the left. Fitted to the room the marker leaves
     // (minus a face inset each side).
     const float gap = theme.spacing;
-    char scratch[128];
+    char scratch[kLabelScratchBytes];
     const LabelFit fit =
         fit_text(label, std::max(0.0f, rect.width - box - gap -
                                           2.0f * theme.label_inset),
@@ -192,8 +230,9 @@ void collapsing_header_draw(const Rect& rect,
                dim(theme.text, dim_by), theme);
 }
 
-bool selectable(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
-               const char* label, bool selected, float width, bool disabled) {
+bool selectable(GuiContext& gui, LayoutCursor& layout,
+                const ChromeTheme& theme, const char* label, bool selected,
+                float width, bool disabled) {
     // Fill-width: list rows want their container's line.
     const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
     SelectableResult result =
@@ -236,13 +275,13 @@ void selectable_draw(const Rect& rect, const SelectableResult& result,
     // the v1 look, a hardcoded pixel like the separator's 2. It rides
     // every face (or the bare row), dimmed under the disabled scope.
     if (selected && rect.width > 0.0f && rect.height > 0.0f) {
-        r2d::draw_quad(rect.x, rect.y, 3.0f, rect.height,
+        r2d::draw_quad(rect.x, rect.y, kSelectionBarWidth, rect.height,
                        dim(theme.control_on, dim_by));
     }
 
     // The label, left-aligned past the bar's room (selected and
     // unselected rows align).
-    char scratch[128];
+    char scratch[kLabelScratchBytes];
     const LabelFit fit =
         fit_text(label, std::max(0.0f, rect.width - theme.check_inset -
                                           theme.label_inset),
@@ -257,7 +296,7 @@ void text(LayoutCursor& layout, const ChromeTheme& theme,
     // that is all. A caller wanting a faded label dims its own theme
     // copy; the gui does not invent a Disabled state for something that
     // cannot be disabled.
-    char scratch[128];
+    char scratch[kLabelScratchBytes];
     const LabelFit fit = fit_text(label, width < 0.0f ? -1.0f : width, theme,
                                   scratch, sizeof(scratch));
     // A negative width sizes the row to the label's DISPLAY advance -
@@ -270,6 +309,34 @@ void text(LayoutCursor& layout, const ChromeTheme& theme,
     draw_label(rect.x, rect.y, rect.height, fit, theme.text, theme);
 }
 
+void heading(LayoutCursor& layout, const ChromeTheme& theme,
+             const char* label, float width) {
+    // The section break: the strong face at its own baked size, on a
+    // row a step taller than a body row. The strong face is the
+    // CALLER'S bake (circsim's 18 px semibold against the 16 px body),
+    // so the hierarchy is two bakes and one pointer - the theme's
+    // documented shape - and the heading just follows whatever size
+    // that face carries. fit_text and draw_label read the font off the
+    // theme, so the heading rides a swapped COPY (the palette-fade
+    // idiom's own move: a local theme variant, never a mutation); a
+    // null font_strong falls back to `font`, and fontless the taller
+    // bar carries the hierarchy alone.
+    const r2d::Font* face =
+        theme.font_strong != nullptr ? theme.font_strong : theme.font;
+    ChromeTheme strong = theme;
+    strong.font = face;
+    const float line_h = face != nullptr ? face->line_height()
+                                         : theme.control_height * 0.55f;
+    const float row_h =
+        std::max(theme.control_height + 2.0f, line_h + 10.0f);
+    char scratch[kLabelScratchBytes];
+    const LabelFit fit = fit_text(label, width < 0.0f ? -1.0f : width, strong,
+                                  scratch, sizeof(scratch));
+    const Rect rect =
+        layout.next(width < 0.0f ? fit.advance : width, row_h);
+    draw_label(rect.x, rect.y, rect.height, fit, theme.text, strong);
+}
+
 void separator(LayoutCursor& layout, const ChromeTheme& theme, float width) {
     // Fill-width, like button: a negative width means "the rest of the
     // line", resolved against the cursor before the clamp.
@@ -278,7 +345,7 @@ void separator(LayoutCursor& layout, const ChromeTheme& theme, float width) {
     // theme metric. theme.border is the faint line that never competes
     // with content, and the flow's own spacing gives it air on both
     // sides.
-    const Rect rect = layout.next(width, 2.0f);
+    const Rect rect = layout.next(width, kSeparatorThickness);
     r2d::draw_quad(rect.x, rect.y, rect.width, rect.height, theme.border);
 }
 
@@ -306,16 +373,16 @@ void progress(LayoutCursor& layout, const ChromeTheme& theme,
     // track's own outline - the accent reading as escaped. The draw also
     // clamps the radius to the fill's own half-height, so a thin sliver
     // reads as a dot rather than an over-rounded bar.
-    const float fill = fraction * rect.width - 2.0f;
+    const float fill = fraction * rect.width - 2.0f * kFillInset;
     if (fill > 0.0f) {
-        r2d::draw_rounded_quad(rect.x + 1.0f, rect.y + 1.0f, fill,
-                               rect.height - 2.0f, theme.corner_radius,
-                               theme.control_on);
+        r2d::draw_rounded_quad(rect.x + kFillInset, rect.y + kFillInset, fill,
+                               rect.height - 2.0f * kFillInset,
+                               theme.corner_radius, theme.control_on);
     }
 }
 
-void spinner(GuiContext& gui, LayoutCursor& layout,
-            const ChromeTheme& theme, const char* label, float size) {
+void spinner(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
+             const char* label, float size) {
     // The busy indicator: a square of chasing dots that claims nothing
     // and ids only for its phase - `label` never draws (progress's own
     // label discipline: the caller composes the caption beside it).
@@ -336,8 +403,8 @@ SpinnerResult spinner_behavior(GuiContext& gui, WidgetId id) {
     // second, the pace the chase reads at any control size. Headless
     // the frame clock reads 0: the phase holds, the honest answer
     // without time.
-    state.phase = std::fmod(
-        state.phase + gui.input().dt_seconds / 0.8f, 1.0f);
+    state.phase = advance_phase(state.phase, gui.input().dt_seconds,
+                                kSpinnerPeriodSeconds);
     return {state.phase};
 }
 
@@ -356,10 +423,14 @@ void spinner_draw(const Rect& rect, const SpinnerResult& result,
     const float center_y = rect.y + rect.height * 0.5f;
     const float dot = std::max(1.0f, rect.width / 16.0f);
     const float ring = std::max(0.0f, rect.width * 0.5f - dot);
-    const int bright = static_cast<int>(result.phase * 8.0f) % 8;
-    for (int i = 0; i < 8; ++i) {
+    const int bright =
+        static_cast<int>(result.phase * static_cast<float>(kSpinnerDots)) %
+        kSpinnerDots;
+    for (int i = 0; i < kSpinnerDots; ++i) {
         const float angle =
-            static_cast<float>(i) * (6.2831853f / 8.0f) - 1.5707963f;
+            static_cast<float>(i) *
+                (kSpinnerTwoPi / static_cast<float>(kSpinnerDots)) -
+            kSpinnerHalfPi;
         const float x = center_x + ring * std::cos(angle);
         const float y = center_y + ring * std::sin(angle);
         r2d::draw_rounded_quad(x - dot, y - dot, 2.0f * dot, 2.0f * dot,
@@ -388,8 +459,8 @@ IndeterminateResult progress_indeterminate_behavior(GuiContext& gui,
     IndeterminatePhase& state = gui.persistent_state<IndeterminatePhase>(id);
     // One sweep per 1.2 s: fast enough to read as alive, slow enough
     // not to strobe. Headless the band holds.
-    state.phase =
-        std::fmod(state.phase + gui.input().dt_seconds / 1.2f, 1.0f);
+    state.phase = advance_phase(state.phase, gui.input().dt_seconds,
+                                kSweepPeriodSeconds);
     return {state.phase};
 }
 
@@ -398,7 +469,7 @@ void progress_indeterminate_draw(const Rect& rect,
                                  const ChromeTheme& theme) {
     r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
                            theme.corner_radius, theme.control_bg);
-    if (rect.width <= 2.0f) {
+    if (rect.width <= 2.0f * kFillInset) {
         return;  // no room for a band (headless degenerate included)
     }
 
@@ -409,12 +480,12 @@ void progress_indeterminate_draw(const Rect& rect,
     const float band = rect.width / 3.0f;
     const float span = rect.width + band;  // off-left in to off-right out
     const float pos = -band + result.phase * span;  // the band's left edge
-    const float lo = std::max(pos, 1.0f);
-    const float hi = std::min(pos + band, rect.width - 1.0f);
+    const float lo = std::max(pos, kFillInset);
+    const float hi = std::min(pos + band, rect.width - kFillInset);
     if (hi > lo) {
-        r2d::draw_rounded_quad(rect.x + lo, rect.y + 1.0f, hi - lo,
-                               rect.height - 2.0f, theme.corner_radius,
-                               theme.control_on);
+        r2d::draw_rounded_quad(rect.x + lo, rect.y + kFillInset, hi - lo,
+                               rect.height - 2.0f * kFillInset,
+                               theme.corner_radius, theme.control_on);
     }
 }
 
@@ -441,12 +512,12 @@ Rect status_bar(const ChromeTheme& theme, const char* text) {
     // The text, fitted to the width less both insets - a long line
     // truncates like any label. A touch quieter than body text: the
     // status line reports, it does not shout.
-    char scratch[128];
+    char scratch[kLabelScratchBytes];
     const LabelFit fit =
         fit_text(text, std::max(0.0f, rect.width - 2.0f * theme.padding),
-                 theme, scratch, sizeof scratch);
+                 theme, scratch, sizeof(scratch));
     draw_label(rect.x + theme.padding, rect.y, rect.height, fit,
-               dim(theme.text, 0.85f), theme);
+               dim(theme.text, kStatusTextDim), theme);
     return rect;
 }
 

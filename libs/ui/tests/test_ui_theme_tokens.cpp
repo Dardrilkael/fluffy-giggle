@@ -93,14 +93,18 @@ TEST_CASE("both stock themes answer the grown contrast table") {
         CHECK(failures.empty());
     }
 
-    // The new pairs specifically: the quiet rung is real text (4.5) and
-    // the on-accent label clears the component ratio (3.0) on both
-    // accent faces.
+    // The new pairs specifically: the quiet rung is real text (4.5),
+    // the muted rung a hint at the component ratio (3.0) on every face
+    // it can land on, and the on-accent label clears the component
+    // ratio (3.0) on both accent faces.
     for (const ChromeTheme* chrome : {&kDefaultChrome, &kLightChrome}) {
         CHECK(contrast_ratio(chrome->text_secondary, chrome->panel_bg) >=
               4.5);
         CHECK(contrast_ratio(chrome->text_secondary, chrome->control_bg) >=
               4.5);
+        CHECK(contrast_ratio(chrome->text_muted, chrome->panel_bg) >= 3.0);
+        CHECK(contrast_ratio(chrome->text_muted, chrome->control_bg) >= 3.0);
+        CHECK(contrast_ratio(chrome->text_muted, chrome->bar_bg) >= 3.0);
         CHECK(contrast_ratio(chrome->text_on_accent, chrome->control_on) >=
               3.0);
         CHECK(contrast_ratio(chrome->text_on_accent,
@@ -150,11 +154,37 @@ TEST_CASE("apply_accent derives the accent's hover rung and the on-accent label"
     CHECK(contrast_ratio(pale.text_on_accent, pale.control_on) >= 3.0);
 }
 
+TEST_CASE("the muted rung answers the typography brief") {
+    // The brief's own gray, pinned: #858585 on the dark stock - the
+    // placeholder/inactive-tab gray that does not compete with
+    // content.
+    CHECK(kDefaultChrome.text_muted == ws::ui::r2d::rgba(133, 133, 133));
+
+    // The not-competing rule, made measurable: the muted rung sits a
+    // full contrast STEP under the body text on its own background,
+    // on both stocks (a dark stock dims toward the panel, a light one
+    // lightens toward it - the polarity flips, the gap does not).
+    for (const ChromeTheme* chrome : {&kDefaultChrome, &kLightChrome}) {
+        CHECK(contrast_ratio(chrome->text_muted, chrome->panel_bg) <
+              contrast_ratio(chrome->text, chrome->panel_bg));
+        CHECK(contrast_ratio(chrome->text_muted, chrome->control_bg) <
+              contrast_ratio(chrome->text, chrome->control_bg));
+    }
+
+    // And it is its OWN face, not a derived one: dim(text_muted, x)
+    // can never equal text again, but more to the point the stocks
+    // pick different grays for their polarity - the dark stock's
+    // #858585 would fail the light faces, so the light stock picks
+    // its own (the same rule text_secondary follows).
+    CHECK(kLightChrome.text_muted != kDefaultChrome.text_muted);
+}
+
 TEST_CASE("every new token round-trips through the theme json") {
     ws::ui::gui::ThemeData styled = default_dark();
     styled.chrome.text_on_accent = 0x101820FFu;
     styled.chrome.accent_hover = 0x70B0E0FFu;
     styled.chrome.text_secondary = 0x99A0AAFFu;
+    styled.chrome.text_muted = 0x858585FFu;
     styled.chrome.border_strong = 0xFFFFFF66u;
     styled.chrome.shadow = 0x00000077u;
     styled.chrome.radius_control = 0.0f;
@@ -178,6 +208,7 @@ TEST_CASE("every new token round-trips through the theme json") {
     CHECK(text.find("\"text_on_accent\": \"#101820FF\"") != std::string::npos);
     CHECK(text.find("\"accent_hover\": \"#70B0E0FF\"") != std::string::npos);
     CHECK(text.find("\"text_secondary\": \"#99A0AAFF\"") != std::string::npos);
+    CHECK(text.find("\"text_muted\": \"#858585FF\"") != std::string::npos);
     CHECK(text.find("\"border_strong\": \"#FFFFFF66\"") != std::string::npos);
     CHECK(text.find("\"shadow\": \"#00000077\"") != std::string::npos);
     CHECK(text.find("\"radius_control\": 0.0") != std::string::npos);
@@ -200,6 +231,7 @@ TEST_CASE("every new token round-trips through the theme json") {
     CHECK(over_light->chrome.text_on_accent == styled.chrome.text_on_accent);
     CHECK(over_light->chrome.accent_hover == styled.chrome.accent_hover);
     CHECK(over_light->chrome.text_secondary == styled.chrome.text_secondary);
+    CHECK(over_light->chrome.text_muted == styled.chrome.text_muted);
     CHECK(over_light->chrome.border_strong == styled.chrome.border_strong);
     CHECK(over_light->chrome.shadow == styled.chrome.shadow);
     CHECK(over_light->chrome.radius_control == styled.chrome.radius_control);
@@ -238,6 +270,7 @@ TEST_CASE("an old theme file loads with every new token at its default") {
     CHECK(loaded->chrome.radius_control == stock.radius_control);
     CHECK(loaded->chrome.control_radius() == 6.5f);  // inherits the folded one
     CHECK(loaded->chrome.text_secondary == stock.text_secondary);
+    CHECK(loaded->chrome.text_muted == stock.text_muted);
     CHECK(loaded->chrome.text_on_accent == stock.text_on_accent);
     CHECK(loaded->chrome.border_width == stock.border_width);
     CHECK(loaded->chrome.shadow_blur == stock.shadow_blur);
@@ -283,14 +316,16 @@ TEST_CASE("the canvas grid tokens answer the brief on both stocks") {
     }
 }
 
-TEST_CASE("the stock documents name the bundled face") {
-    // P1's Inter: the families record what the stock look runs; the
-    // app still resolves them (load_default_font), the library opens
-    // nothing.
+TEST_CASE("the stock documents name the bundled faces") {
+    // P1's Inter for the UI rungs, the typography pass's JetBrains Mono
+    // for the data rung: the families record what the stock look runs;
+    // the app still resolves them (load_default_font /
+    // load_default_mono_font), the library opens nothing.
     CHECK(default_dark().regular.family == "Inter");
     CHECK(default_dark().bold.family == "Inter SemiBold");
+    CHECK(default_dark().mono.family == "JetBrains Mono");
     CHECK(default_light().regular.family == "Inter");
-    CHECK(default_light().mono.family.empty());  // the caller's pick
+    CHECK(default_light().mono.family == "JetBrains Mono");
 }
 
 TEST_CASE("is_dark reads the chrome's brightness off the panel face") {

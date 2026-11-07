@@ -126,10 +126,12 @@ void draw_vertex_quad(const float (&)[4][2], const float (&)[4][2],
 }
 
 float draw_text(float, float, const char* utf8_text, const Font& font,
-                std::uint32_t) {
+                std::uint32_t color) {
     gui_test::stub.texts++;
     const float advance = font.measure_text(utf8_text);
     gui_test::stub.last_text_advance = advance;
+    gui_test::stub.last_text_color = color;
+    gui_test::stub.last_text_font = &font;
     return advance;
 }
 

@@ -6,8 +6,12 @@
 #include "editor.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <cmath>
+#include <map>
 #include <cstdio>
+#include <string_view>
 
 #include <ws/core/assert.hpp>
 #include <ws/circsim/erc.hpp>
@@ -30,7 +34,7 @@ using ws::circsim::PinRef;
 // (which at max zoom answered clicks 400px away).
 constexpr double kLabelPickPx = 6.0;
 
-// Squared distance from `p` to segment ab.
+// Distance (not squared) from `p` to segment ab.
 [[nodiscard]] double dist_to_segment(Pos a, Pos b, Pos p) {
     const Pos ab{b.x - a.x, b.y - a.y};
     const Pos ap{p.x - a.x, p.y - a.y};
@@ -41,6 +45,111 @@ constexpr double kLabelPickPx = 6.0;
     double t = (ap.x * ab.x + ap.y * ab.y) / denom;
     t = std::max(0.0, std::min(1.0, t));
     return len(Pos{ap.x - t * ab.x, ap.y - t * ab.y});
+}
+
+constexpr double kPi = 3.14159265358979323846;
+
+// Grows a world AABB point by point. Part bounds, content bounds and
+// selection bounds all used to carry their own copy of this lambda.
+struct BoundsBuilder {
+    std::optional<Bounds> box;
+
+    void add(Pos w) {
+        if (!box.has_value()) {
+            box = Bounds{w.x, w.y, w.x, w.y};
+            return;
+        }
+        box->min_x = std::min(box->min_x, w.x);
+        box->min_y = std::min(box->min_y, w.y);
+        box->max_x = std::max(box->max_x, w.x);
+        box->max_y = std::max(box->max_y, w.y);
+    }
+    void add(const Bounds& b) {
+        add(Pos{b.min_x, b.min_y});
+        add(Pos{b.max_x, b.max_y});
+    }
+};
+
+// Folds duplicate points and collinear CONTINUING middles out of a full
+// polyline (endpoint, corners, endpoint) and returns the INTERIOR - the
+// waypoints the .csim stores. A fold needs the leg to continue: a
+// reversal is collinear too, but folding it would run the wire straight
+// back through the part it just left. Shared by route_wire (fresh
+// routes) and tidy_route (existing wires).
+[[nodiscard]] std::vector<Pos> fold_interior(const std::vector<Pos>& full) {
+    constexpr double kEps = 1e-9;
+    const auto same = [&](Pos p, Pos q) {
+        return eps_eq(p.x, q.x, kEps) && eps_eq(p.y, q.y, kEps);
+    };
+    std::vector<Pos> folded;
+    for (const Pos& p : full) {
+        if (!folded.empty() && same(folded.back(), p)) {
+            continue;
+        }
+        if (folded.size() >= 2u) {
+            const Pos& p0 = folded[folded.size() - 2u];
+            const Pos& p1 = folded[folded.size() - 1u];
+            const bool collinear =
+                (eps_eq(p0.x, p1.x, kEps) && eps_eq(p1.x, p.x, kEps)) ||
+                (eps_eq(p0.y, p1.y, kEps) && eps_eq(p1.y, p.y, kEps));
+            const double along = (p1.x - p0.x) * (p.x - p1.x) +
+                                 (p1.y - p0.y) * (p.y - p1.y);
+            if (collinear && along > 0.0) {
+                folded.back() = p;  // the leg extends
+                continue;
+            }
+        }
+        folded.push_back(p);
+    }
+    if (folded.size() < 2u) {
+        return {};
+    }
+    return {folded.begin() + 1, folded.end() - 1};
+}
+
+// prefix + digits only ("R12"): a ref Annotate may regenerate. "R_load"
+// and "TP1a" are the author's and stay put.
+[[nodiscard]] bool is_auto_ref(const std::string& ref,
+                               const std::string& prefix) {
+    if (ref.size() <= prefix.size() || ref.compare(0, prefix.size(), prefix) != 0) {
+        return false;
+    }
+    for (std::size_t i = prefix.size(); i < ref.size(); ++i) {
+        if (std::isdigit(static_cast<unsigned char>(ref[i])) == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Is `token` named in `text` as a whole word (ASCII case-insensitive,
+// like SPICE)? "R1" matches ".meas I(R1)" but not "R10" or "XR1".
+[[nodiscard]] bool mentions_token(const std::string& text,
+                                  const std::string& token) {
+    if (token.empty()) {
+        return false;
+    }
+    const auto lower = [](std::string s) {
+        for (char& ch : s) {
+            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        }
+        return s;
+    };
+    const auto word = [](char ch) {
+        return std::isalnum(static_cast<unsigned char>(ch)) != 0 || ch == '_';
+    };
+    const std::string hay = lower(text);
+    const std::string needle = lower(token);
+    for (std::size_t at = hay.find(needle); at != std::string::npos;
+         at = hay.find(needle, at + 1)) {
+        const std::size_t end = at + needle.size();
+        const bool left = at == 0 || !word(hay[at - 1]);
+        const bool right = end >= hay.size() || !word(hay[end]);
+        if (left && right) {
+            return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -100,26 +209,16 @@ std::optional<Bounds> Editor::part_bounds(std::uint32_t id) const {
         return b;
     }
     const Bounds local = ws::circsim::symbol_bounds(*sym);
-    std::optional<Bounds> out;
-    const auto grow = [&](Pos w) {
-        if (!out.has_value()) {
-            out = Bounds{w.x, w.y, w.x, w.y};
-            return;
-        }
-        out->min_x = std::min(out->min_x, w.x);
-        out->min_y = std::min(out->min_y, w.y);
-        out->max_x = std::max(out->max_x, w.x);
-        out->max_y = std::max(out->max_y, w.y);
-    };
+    BoundsBuilder out;
     for (const Pos corner :
          {Pos{local.min_x, local.min_y}, Pos{local.max_x, local.min_y},
           Pos{local.min_x, local.max_y}, Pos{local.max_x, local.max_y}}) {
-        grow(ws::circsim::transform_pos(*p, corner));
+        out.add(ws::circsim::transform_pos(*p, corner));
     }
-    if (out.has_value()) {
-        part_bounds_cache_[id] = *out;
+    if (out.box.has_value()) {
+        part_bounds_cache_[id] = *out.box;
     }
-    return out;
+    return out.box;
 }
 
 std::vector<Pos> Editor::wire_path(const ws::circsim::Wire& w) const {
@@ -162,7 +261,8 @@ std::vector<Pos> Editor::wire_path(const ws::circsim::Wire& w) const {
     return out;
 }
 
-std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir) {
+std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir,
+                                    bool flip) {
     // The lead length: how far a route commits to a direction before
     // it may turn. One grid unit reads clean at every zoom (a pin's
     // own lead is typically three).
@@ -203,8 +303,15 @@ std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir) {
     Pos target = b;  // ... and the point the route aims for before b
     if (b_dir >= 0) {
         const Pos u = unit(b_dir);
-        // Approach b ALONG b_dir: stop one lead short of it.
-        target = {b.x - u.x * kLead, b.y - u.y * kLead};
+        // Approach b AGAINST b_dir: a pin's dir faces outward (away
+        // from the part's body - the a side's from = a + u*lead reads
+        // it exactly that way), so a wire lands tip-first, traveling
+        // the reverse of the facing from the pin's own outside. The
+        // stop is one lead short of the tip ON that outside
+        // (b + u*lead). The old b - u*lead sat the stop inside the
+        // part: the final leg ran out through the body and doubled
+        // back to the pin - every pin landing stabbed its part.
+        target = {b.x + u.x * kLead, b.y + u.y * kLead};
     }
 
     // Full polyline a -> ... -> b; the stored waypoints are its
@@ -223,8 +330,10 @@ std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir) {
         // committed direction (horizontal when free), the leg into
         // `target` closes. The final approach leg target -> b already
         // runs along b_dir, so one corner always suffices.
+        // `flip` swaps the stock choice (the Tab toggle): the same
+        // two endpoints, the corner on the other diagonal.
         const bool start_horizontal =
-            a_dir < 0 || a_dir == 0 || a_dir == 180;
+            (a_dir < 0 || a_dir == 0 || a_dir == 180) != flip;
         if (start_horizontal) {
             full.push_back(Pos{target.x, from.y});
         } else {
@@ -242,30 +351,226 @@ std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir) {
     // folding it would drop the lead and run the wire straight back
     // through the part it just left - a pin at (0,0) facing +x with a
     // target at (-5,0) keeps its (1,0) lead-out corner.
-    std::vector<Pos> folded;
-    for (const Pos& p : full) {
-        if (!folded.empty() && same(folded.back(), p)) {
-            continue;
-        }
-        if (folded.size() >= 2u) {
-            const Pos& p0 = folded[folded.size() - 2u];
-            const Pos& p1 = folded[folded.size() - 1u];
-            const bool collinear =
-                (eps_eq(p0.x, p1.x, kEps) && eps_eq(p1.x, p.x, kEps)) ||
-                (eps_eq(p0.y, p1.y, kEps) && eps_eq(p1.y, p.y, kEps));
-            const double along = (p1.x - p0.x) * (p.x - p1.x) +
-                                 (p1.y - p0.y) * (p.y - p1.y);
-            if (collinear && along > 0.0) {
-                folded.back() = p;  // the leg extends
-                continue;
-            }
-        }
-        folded.push_back(p);
-    }
-    if (folded.size() < 2u) {
+    return fold_interior(full);
+}
+
+std::vector<Pos> Editor::tidy_route(const std::vector<Pos>& path) {
+    constexpr double kEps = 1e-9;
+    if (path.size() < 2u) {
         return {};
     }
-    return {folded.begin() + 1, folded.end() - 1};
+    // Every diagonal leg gets one axis-aligned corner (horizontal
+    // first - the stock bend); axis-aligned legs pass through. The fold
+    // then merges the corner into a neighbouring collinear leg where it
+    // can, so a wire that only had a stray diagonal comes out with the
+    // fewest bends that keep the rest of its shape.
+    std::vector<Pos> full;
+    full.reserve(path.size() * 2u);
+    full.push_back(path.front());
+    for (std::size_t i = 1; i < path.size(); ++i) {
+        const Pos p = full.back();
+        const Pos q = path[i];
+        if (!eps_eq(p.x, q.x, kEps) && !eps_eq(p.y, q.y, kEps)) {
+            full.push_back(Pos{q.x, p.y});
+        }
+        full.push_back(q);
+    }
+    return fold_interior(full);
+}
+
+std::size_t Editor::tidy_selection() {
+    const ws::circsim::Schematic* s = schem();
+    if (s == nullptr || doc == nullptr) {
+        return 0;
+    }
+    // Which wires does the selection cover?
+    const auto covered = [&](const ws::circsim::Wire& w) {
+        switch (sel.kind) {
+            case Selection::Kind::Wire:
+                return w.id == sel.id;
+            case Selection::Kind::Part: {
+                const PinRef* a = std::get_if<PinRef>(&w.a);
+                const PinRef* b = std::get_if<PinRef>(&w.b);
+                return (a != nullptr && a->part == sel.id) ||
+                       (b != nullptr && b->part == sel.id);
+            }
+            case Selection::Kind::Junction: {
+                const JunctionRef* a = std::get_if<JunctionRef>(&w.a);
+                const JunctionRef* b = std::get_if<JunctionRef>(&w.b);
+                return (a != nullptr && a->junction == sel.id) ||
+                       (b != nullptr && b->junction == sel.id);
+            }
+            case Selection::Kind::Label:
+            case Selection::Kind::None:
+                return false;
+        }
+        return false;
+    };
+    std::vector<WireRoute> routes;
+    std::size_t in_scope = 0;
+    std::size_t freeform = 0;
+    for (const ws::circsim::Wire& w : s->wires()) {
+        if (!covered(w)) {
+            continue;
+        }
+        ++in_scope;
+        if (!w.ortho) {
+            ++freeform;  // the author's shape: only ortho wires tidy
+            continue;
+        }
+        const std::vector<Pos> path = wire_path(w);
+        if (path.size() < 2u) {
+            continue;  // dangling: nothing to straighten
+        }
+        routes.push_back(WireRoute{w.id, tidy_route(path)});
+    }
+    if (in_scope == 0u) {
+        status("nothing to tidy - select a wire, part or junction");
+        return 0;
+    }
+    const std::size_t changed = push_tidy_wires(*doc, std::move(routes));
+    if (changed == 0u) {
+        status(freeform == in_scope ? "freeform wires are left as drawn"
+                                    : "already tidy");
+        return 0;
+    }
+    status("tidied " + std::to_string(changed) +
+           (changed == 1u ? " wire" : " wires"));
+    if (const std::optional<Bounds> b = selection_bounds()) {
+        pulse_at(Pos{(b->min_x + b->max_x) * 0.5, (b->min_y + b->max_y) * 0.5});
+    }
+    return changed;
+}
+
+bool Editor::transform_part(std::uint32_t id, int rot, bool mirror,
+                            std::string name) {
+    ws::circsim::Schematic* s = schem();
+    if (s == nullptr || doc == nullptr) {
+        return false;
+    }
+    ws::circsim::Part* p = s->find_part(id);
+    if (p == nullptr) {
+        return false;
+    }
+    const int was_rot = p->rot;
+    const bool was_mirror = p->mirror;
+    // The part visits the new orientation; the attached wires' endpoints
+    // resolve live through their pins, so the routes read from the
+    // landing; then the part goes back so the command captures the real
+    // "was". Each hop bumps so nothing reads a stale cache.
+    p->rot = rot;
+    p->mirror = mirror;
+    s->bump();
+    std::vector<WireRoute> routes = attached_wire_routes(Drag::Kind::Part, id);
+    p->rot = was_rot;
+    p->mirror = was_mirror;
+    s->bump();
+    push_transform_part_routed(*doc, id, rot, mirror, std::move(name),
+                               std::move(routes));
+    return true;
+}
+
+std::vector<std::size_t> Editor::annotation_order(const std::vector<Pos>& at,
+                                                  double row_tol) {
+    std::vector<std::size_t> idx(at.size());
+    for (std::size_t i = 0; i < idx.size(); ++i) {
+        idx[i] = i;
+    }
+    // Top first (world y points up); equal heights keep list order.
+    std::stable_sort(idx.begin(), idx.end(), [&](std::size_t a, std::size_t b) {
+        return at[a].y > at[b].y;
+    });
+    // Sweep into rows anchored at each row's top part, then left to
+    // right inside the row (stable: identical x keeps the order above).
+    std::size_t i = 0;
+    while (i < idx.size()) {
+        const double anchor = at[idx[i]].y;
+        std::size_t j = i + 1;
+        while (j < idx.size() && anchor - at[idx[j]].y <= row_tol) {
+            ++j;
+        }
+        std::stable_sort(idx.begin() + static_cast<std::ptrdiff_t>(i),
+                         idx.begin() + static_cast<std::ptrdiff_t>(j),
+                         [&](std::size_t a, std::size_t b) {
+                             return at[a].x < at[b].x;
+                         });
+        i = j;
+    }
+    return idx;
+}
+
+std::size_t Editor::annotate(double row_tol_cells) {
+    const ws::circsim::Schematic* s = schem();
+    if (s == nullptr || doc == nullptr) {
+        return 0;
+    }
+    struct Item {
+        std::uint32_t id;
+        Pos at;
+        std::string ref;
+    };
+    std::map<std::string, std::vector<Item>> groups;
+    std::size_t custom = 0;
+    for (const ws::circsim::Part& p : s->parts()) {
+        const ws::circsim::SymbolDef* sym = sym_of(p);
+        if (sym == nullptr || sym->ref_prefix.empty()) {
+            continue;  // no designator (grounds, flags...): not ours
+        }
+        if (!p.ref.empty() && !is_auto_ref(p.ref, sym->ref_prefix)) {
+            ++custom;  // the author's name: kept
+            continue;
+        }
+        groups[sym->ref_prefix].push_back(Item{p.id, p.pos, p.ref});
+    }
+    const double tol = row_tol_cells * grid_spec().base;
+    std::vector<std::pair<std::uint32_t, std::string>> changes;
+    std::size_t total = 0;
+    std::size_t in_directives = 0;
+    for (auto& entry : groups) {
+        const std::string& prefix = entry.first;
+        const std::vector<Item>& items = entry.second;
+        std::vector<Pos> at;
+        at.reserve(items.size());
+        for (const Item& it : items) {
+            at.push_back(it.at);
+        }
+        const std::vector<std::size_t> order = annotation_order(at, tol);
+        for (std::size_t n = 0; n < order.size(); ++n) {
+            const Item& it = items[order[n]];
+            ++total;
+            std::string want = prefix + std::to_string(n + 1);
+            if (want != it.ref) {
+                if (mentions_token(s->directives, it.ref)) {
+                    ++in_directives;
+                }
+                changes.emplace_back(it.id, std::move(want));
+            }
+        }
+    }
+    if (total == 0u) {
+        status("nothing to annotate - no parts with reference prefixes");
+        return 0;
+    }
+    const std::size_t changed = push_annotate(*doc, std::move(changes));
+    if (changed == 0u) {
+        status("references already in reading order");
+        return 0;
+    }
+    std::string msg = "annotated " + std::to_string(changed) +
+                      (changed == 1u ? " reference" : " references");
+    if (custom != 0u) {
+        msg += " (" + std::to_string(custom) + " custom kept)";
+    }
+    if (in_directives != 0u) {
+        // Renumbering can silently re-aim a directive that names a part
+        // (.meas I(R3), .param...): say so, loudly, once.
+        toast(msg + " - " + std::to_string(in_directives) +
+                  " renamed ref(s) appear in your directives: check them",
+              gui::ToastSeverity::warning, 6.0f);
+    } else {
+        status(msg);
+    }
+    return changed;
 }
 
 // The attached ortho wires' fresh shapes for a move of `id` (kind =
@@ -532,36 +837,146 @@ std::optional<Bounds> Editor::content_bounds() const {
     if (s == nullptr) {
         return std::nullopt;
     }
-    std::optional<Bounds> out;
-    const auto grow = [&](Pos w) {
-        if (!out.has_value()) {
-            out = Bounds{w.x, w.y, w.x, w.y};
-            return;
-        }
-        out->min_x = std::min(out->min_x, w.x);
-        out->min_y = std::min(out->min_y, w.y);
-        out->max_x = std::max(out->max_x, w.x);
-        out->max_y = std::max(out->max_y, w.y);
-    };
+    BoundsBuilder out;
     for (const ws::circsim::Part& p : s->parts()) {
-        const std::optional<Bounds> b = part_bounds(p.id);
-        if (b.has_value()) {
-            grow(Pos{b->min_x, b->min_y});
-            grow(Pos{b->max_x, b->max_y});
+        if (const std::optional<Bounds> b = part_bounds(p.id)) {
+            out.add(*b);
         }
     }
     for (const ws::circsim::Junction& j : s->junctions()) {
-        grow(j.pos);
+        out.add(j.pos);
     }
     for (const ws::circsim::Label& l : s->labels()) {
-        grow(l.pos);
+        out.add(l.pos);
     }
     for (const ws::circsim::Wire& w : s->wires()) {
         for (const Pos& p : wire_path(w)) {
-            grow(p);
+            out.add(p);
         }
     }
-    return out;
+    return out.box;
+}
+
+std::optional<Bounds> Editor::selection_bounds() const {
+    const ws::circsim::Schematic* s = schem();
+    if (s == nullptr) {
+        return std::nullopt;
+    }
+    BoundsBuilder out;
+    switch (sel.kind) {
+        case Selection::Kind::None:
+            break;
+        case Selection::Kind::Part:
+            if (const std::optional<Bounds> b = part_bounds(sel.id)) {
+                out.add(*b);
+            }
+            break;
+        case Selection::Kind::Junction:
+            if (const ws::circsim::Junction* j = s->find_junction(sel.id)) {
+                out.add(j->pos);
+            }
+            break;
+        case Selection::Kind::Wire:
+            for (const ws::circsim::Wire& w : s->wires()) {
+                if (w.id == sel.id) {
+                    for (const Pos& p : wire_path(w)) {
+                        out.add(p);
+                    }
+                    break;
+                }
+            }
+            break;
+        case Selection::Kind::Label:
+            for (const ws::circsim::Label& l : s->labels()) {
+                if (l.id == sel.id) {
+                    out.add(l.pos);
+                    break;
+                }
+            }
+            break;
+    }
+    return out.box;
+}
+
+bool Editor::zoom_to_selection(double margin) {
+    const std::optional<Bounds> b = selection_bounds();
+    if (!b.has_value()) {
+        status("nothing selected to frame - click a part or wire first");
+        return false;
+    }
+    const Pos mid{(b->min_x + b->max_x) * 0.5, (b->min_y + b->max_y) * 0.5};
+    if (b->max_x - b->min_x <= 0.0 && b->max_y - b->min_y <= 0.0) {
+        // A lone point: zooming "to fit" it would dive to max zoom.
+        view.fly_to(mid, view.zoom);
+    } else {
+        view.fit(*b, margin);
+    }
+    pulse_at(mid);
+    return true;
+}
+
+Pos Editor::place_snap(const ws::circsim::SymbolDef& sym, Pos world, int rot,
+                       bool mirror, bool coarse, double magnet_radius) const {
+    const Pos base = snap(world, coarse);
+    if (magnet_radius <= 0.0) {
+        return base;
+    }
+    // Where would each ghost pin land at the snapped position? If one
+    // is close to a real pin, shift the whole ghost so they coincide.
+    ws::circsim::Part probe{};
+    probe.pos = base;
+    probe.rot = rot;
+    probe.mirror = mirror;
+    std::optional<Pos> best_shift;
+    double best_d = magnet_radius;
+    for (std::size_t i = 0; i < sym.pins.size(); ++i) {
+        const Pos at = ws::circsim::pin_pos(sym, probe,
+                                            static_cast<std::uint32_t>(i));
+        const std::optional<PinHit> hit = hit_pin(at, best_d);
+        if (!hit.has_value()) {
+            continue;
+        }
+        const Pos shift{hit->pos.x - at.x, hit->pos.y - at.y};
+        const double d = len(shift);
+        if (d < best_d || !best_shift.has_value()) {
+            best_d = d;
+            best_shift = shift;
+        }
+    }
+    if (!best_shift.has_value()) {
+        return base;
+    }
+    return {base.x + best_shift->x, base.y + best_shift->y};
+}
+
+std::string_view Editor::hint() const {
+    if (doc == nullptr) {
+        return "Open or create a schematic to get started";
+    }
+    switch (tool) {
+        case Tool::Select:
+            if (drag.kind != Drag::Kind::None && drag.moved) {
+                return "Release to drop - hold Shift for the coarse grid";
+            }
+            if (sel.kind != Selection::Kind::None) {
+                return "Drag to move - F frames - T tidies wires - click "
+                       "empty space to deselect";
+            }
+            return "Click to select - wheel zooms - middle-drag or "
+                   "Space+drag pans - Shift+A numbers the refs";
+        case Tool::Place:
+            return "Click to place - R rotates - M mirrors - Shift snaps "
+                   "coarse - Esc or right-click to finish";
+        case Tool::Wire:
+            if (wire_draft.active) {
+                return "Click a pin or junction to connect, or free space "
+                       "for a new junction - / flips the corner";
+            }
+            return "Click a pin, junction or wire to start a run";
+        case Tool::Label:
+            return "Click to drop the label - it stays armed for the next";
+    }
+    return {};
 }
 
 void Editor::jump_to(const ws::circsim::DiagTarget& t) {
@@ -589,6 +1004,7 @@ void Editor::jump_to(const ws::circsim::DiagTarget& t) {
         t, *s, problems.nets_valid ? &problems.nets : nullptr, &library);
     if (b.has_value()) {
         view.fit(*b, 3.0);
+        pulse_at(Pos{(b->min_x + b->max_x) * 0.5, (b->min_y + b->max_y) * 0.5});
     }
     if (t.kind == ws::circsim::DiagTarget::Kind::Net) {
         const ws::circsim::Net* n = nullptr;
@@ -606,17 +1022,21 @@ void Editor::jump_to(const ws::circsim::DiagTarget& t) {
 
 void Editor::refresh_problems(bool from_run,
                               std::vector<ws::circsim::Diag> diags,
-                              std::string header) {
+                              std::string header, std::uint64_t version) {
     const ws::circsim::Schematic* s = schem();
     if (s == nullptr) {
         return;
     }
     problems.has = true;
     problems.from_run = from_run;
-    problems.version = s->version();
+    problems.version = version;
     problems.header = std::move(header);
     problems.diags = std::move(diags);
     problems.lines.clear();
+    // The cursor indexed the list this call just replaced; it resets
+    // with it, so the walk starts over at the new check's first
+    // finding instead of landing wherever the old one stood.
+    problems_cursor = -1;
     std::size_t errors = 0;
     std::size_t warnings = 0;
     for (const ws::circsim::Diag& d : problems.diags) {
@@ -644,8 +1064,9 @@ void Editor::run_erc() {
     problems.nets = build.nets;
     problems.nets_valid = true;
     problems.map_valid = false;
+    // Synchronous check: the version it ran against IS the live one.
     refresh_problems(false, ws::circsim::run_erc(*s, build, &library),
-                     "erc");
+                     "erc", s->version());
 }
 
 void Editor::refresh_netlist() {
@@ -711,6 +1132,7 @@ void Editor::document_changed() {
     drag = Drag{};
     wire_draft = WireDraft{};
     problems = ProblemsCache{};
+    problems_cursor = -1;  // the rows it indexed are another document's
     netlist = NetlistCache{};
     results = ResultsCache{};
     join_dots_.clear();
@@ -726,17 +1148,55 @@ void Editor::document_changed() {
     fields_sel_id = 0;
     analysis_index = -1;
     const ws::circsim::Schematic* s = schem();
+    view.cancel_glide();  // a document switch snaps, never glides
     if (s != nullptr) {
-        view.zoom = s->view.zoom > 0.0 ? s->view.zoom : 26.0;
+        // A saved zoom is file data: clamp it into the editor's range
+        // (a hand-edited 0.001 or 1e9 must not brick the canvas).
+        view.zoom = EditorView::clamp_zoom(
+            s->view.zoom > 0.0 ? s->view.zoom : EditorView::kDefaultZoom);
         view.center = s->view.center;
     } else {
-        view.zoom = 26.0;
+        view.zoom = EditorView::kDefaultZoom;
         view.center = {0.0, 0.0};
     }
 }
 
-void Editor::toast(std::string text, gui::ToastSeverity severity) const {
+bool Editor::tick() {
+    const auto now = std::chrono::steady_clock::now();
+    double dt = 0.0;
+    if (tick_started_) {
+        dt = std::chrono::duration<double>(now - last_tick_).count();
+    }
+    last_tick_ = now;
+    tick_started_ = true;
+    dt = std::clamp(dt, 0.0, 0.1);  // a stalled frame must not teleport
+
+    bool busy = view.step(dt);
+    if (pulse.active) {
+        pulse.age += dt;
+        if (pulse.age >= Pulse::kLife) {
+            pulse.active = false;
+        } else {
+            busy = true;
+        }
+    }
+    return busy;
+}
+
+void Editor::toast(std::string text, gui::ToastSeverity severity,
+                   float seconds) const {
     if (toasts != nullptr) {
+        // Quiet mode: the same words while the last copy is still on
+        // screen add nothing but noise.
+        const auto now = std::chrono::steady_clock::now();
+        if (dedupe_toasts && text == last_toast_ && now < last_toast_until_) {
+            return;
+        }
+        last_toast_ = text;
+        last_toast_until_ =
+            now + std::chrono::duration_cast<
+                      std::chrono::steady_clock::duration>(
+                      std::chrono::duration<float>(seconds));
         // Toasts borrows the bytes, so the text gets its own stable
         // slot (toast_text_, see editor.hpp). The old function-static
         // holder was ONE buffer shared by every toast: two toasts in a
@@ -747,7 +1207,8 @@ void Editor::toast(std::string text, gui::ToastSeverity severity) const {
         while (toast_text_.size() > kMaxLive) {
             toast_text_.pop_front();
         }
-        toasts->push({toast_text_.back().c_str(), severity, nullptr, 4.0f});
+        toasts->push({toast_text_.back().c_str(), severity, nullptr,
+                      seconds});
     }
 }
 
@@ -769,7 +1230,7 @@ void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
     placement.pos = pos;
     placement.rot = rot;
     placement.mirror = mirror;
-    constexpr double kRad = 3.14159265358979323846 / 180.0;
+    constexpr double kRad = kPi / 180.0;
     for (const ws::circsim::SymbolStroke& s :
          ws::circsim::render_symbol(sym, placement)) {
         const auto pt = [&](std::size_t i) {

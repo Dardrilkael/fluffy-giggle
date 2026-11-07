@@ -4,22 +4,169 @@
     "grid": 1.0,
     "next_id": 10,
     "parts": [
-        {"id": 1, "symbol": "v", "ref": "V1", "value": "0", "pos": [0.0, -4.0], "rot": 0, "mirror": false, "params": {"wave": "PULSE(0 5 1n 1n 20m 20m)"}},
-        {"id": 2, "symbol": "r", "ref": "R1", "value": "1k", "pos": [6.0, 0.0], "rot": 0, "mirror": false, "params": {}},
-        {"id": 3, "symbol": "c", "ref": "C1", "value": "1u", "pos": [14.0, 0.0], "rot": 0, "mirror": false, "params": {}},
-        {"id": 4, "symbol": "gnd", "ref": "", "value": "", "pos": [7.0, -6.0], "rot": 0, "mirror": false, "params": {}}
+        {
+            "id": 1,
+            "symbol": "v",
+            "ref": "V1",
+            "value": "0",
+            "pos": [
+                0.0,
+                -4.0
+            ],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "wave": "PULSE(0 5 1n 1n 20m 20m)"
+            }
+        },
+        {
+            "id": 2,
+            "symbol": "r",
+            "ref": "R1",
+            "value": "1k",
+            "pos": [
+                6.0,
+                0.0
+            ],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 3,
+            "symbol": "c",
+            "ref": "C1",
+            "value": "1u",
+            "pos": [
+                14.0,
+                0.0
+            ],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 4,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [
+                7.0,
+                -6.0
+            ],
+            "rot": 0,
+            "mirror": false
+        }
     ],
     "junctions": [],
     "wires": [
-        {"id": 5, "a": {"pin": {"part": 1, "pin": 0}}, "b": {"pin": {"part": 2, "pin": 0}}, "waypoints": [[-3.0, 0.0]], "ortho": true},
-        {"id": 6, "a": {"pin": {"part": 2, "pin": 1}}, "b": {"pin": {"part": 3, "pin": 0}}, "waypoints": [], "ortho": true},
-        {"id": 7, "a": {"pin": {"part": 3, "pin": 1}}, "b": {"pin": {"part": 4, "pin": 0}}, "waypoints": [[17.0, -6.0]], "ortho": true},
-        {"id": 8, "a": {"pin": {"part": 4, "pin": 0}}, "b": {"pin": {"part": 1, "pin": 1}}, "waypoints": [[3.0, -6.0]], "ortho": true}
+        {
+            "id": 5,
+            "a": {
+                "pin": {
+                    "part": 1,
+                    "pin": 0
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 2,
+                    "pin": 0
+                }
+            },
+            "waypoints": [
+                [
+                    -3.0,
+                    0.0
+                ]
+            ],
+            "ortho": true
+        },
+        {
+            "id": 6,
+            "a": {
+                "pin": {
+                    "part": 2,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 3,
+                    "pin": 0
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 7,
+            "a": {
+                "pin": {
+                    "part": 3,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 4,
+                    "pin": 0
+                }
+            },
+            "waypoints": [
+                [
+                    17.0,
+                    -6.0
+                ]
+            ],
+            "ortho": true
+        },
+        {
+            "id": 8,
+            "a": {
+                "pin": {
+                    "part": 4,
+                    "pin": 0
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 1,
+                    "pin": 1
+                }
+            },
+            "waypoints": [
+                [
+                    3.0,
+                    -6.0
+                ]
+            ],
+            "ortho": true
+        }
     ],
     "labels": [
-        {"id": 9, "pos": [10.0, 0.0], "name": "out"}
+        {
+            "id": 9,
+            "pos": [
+                10.0,
+                0.0
+            ],
+            "name": "out"
+        }
     ],
-    "analysis": {"entries": [{"tran": {"tstep": 0.0001, "tstop": 0.01}}]},
+    "analysis": {
+        "entries": [
+            {
+                "tran": {
+                    "tstep": 0.0001,
+                    "tstop": 0.01
+                }
+            }
+        ]
+    },
     "directives": "",
-    "view": {"zoom": 1.0, "center": [0.0, 0.0]}
+    "view": {
+        "zoom": 1.0,
+        "center": [
+            0.0,
+            0.0
+        ]
+    }
 }

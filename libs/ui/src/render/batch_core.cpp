@@ -1,8 +1,50 @@
 #include "render/batch_core.h"
 
 #include <cmath>
+#include <cstring>
+#include <type_traits>
 
 namespace ws::ui::r2d::batch {
+
+namespace {
+
+// Squared-length threshold below which a vector counts as degenerate. Every
+// guard uses the "not greater than" form so NaN lands on the fallback too.
+constexpr float kDegenerateLen2 = 1e-12f;
+
+// u runs along the line, v across - shared by the 2D and 3D ribbons.
+constexpr float kLineUv[4][2] = {{0.0f, 0.0f}, {0.0f, 1.0f},
+                                 {1.0f, 1.0f}, {1.0f, 0.0f}};
+
+void write_line_uv(float out_uv[4][2]) {
+    std::memcpy(out_uv, kLineUv, sizeof kLineUv);
+}
+
+// One color for all four corners, in push_quad_vcol's shape.
+void splat_color(const float (&color)[4], float (&out)[4][4]) {
+    for (int i = 0; i < 4; ++i) {
+        std::memcpy(out[i], color, sizeof out[i]);
+    }
+}
+
+// FNV-1a, 64-bit (frame_hash).
+constexpr std::uint64_t kFnvOffset = 14695981039346656037ull;
+constexpr std::uint64_t kFnvPrime = 1099511628211ull;
+
+void fnv_bytes(std::uint64_t& h, const void* data, std::size_t size) {
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    for (std::size_t i = 0; i < size; ++i) {
+        h = (h ^ bytes[i]) * kFnvPrime;
+    }
+}
+
+template <typename T>
+void fnv_value(std::uint64_t& h, const T& value) {
+    static_assert(std::is_trivially_copyable_v<T>);
+    fnv_bytes(h, &value, sizeof value);
+}
+
+}  // namespace
 
 Mat4 camera_vp(const Camera2D& camera, float frame_width, float frame_height) {
     const float zoom = camera.zoom > 1e-4f ? camera.zoom : 1e-4f;
@@ -64,7 +106,7 @@ bool line_quad(float x0, float y0, float x1, float y1, float thickness,
     const float dx = x1 - x0;
     const float dy = y1 - y0;
     const float len2 = dx * dx + dy * dy;
-    if (len2 <= 1e-12f || thickness <= 0.0f) {
+    if (len2 <= kDegenerateLen2 || thickness <= 0.0f) {
         return false;
     }
     const float inv_len = 1.0f / std::sqrt(len2);
@@ -79,10 +121,7 @@ bool line_quad(float x0, float y0, float x1, float y1, float thickness,
     for (int i = 0; i < 4; ++i) {
         out_pos[i][2] = 0.0f;  // 2D draws sit on the world's z=0 plane
     }
-    out_uv[0][0] = 0.0f; out_uv[0][1] = 0.0f;
-    out_uv[1][0] = 0.0f; out_uv[1][1] = 1.0f;
-    out_uv[2][0] = 1.0f; out_uv[2][1] = 1.0f;
-    out_uv[3][0] = 1.0f; out_uv[3][1] = 0.0f;
+    write_line_uv(out_uv);
     return true;
 }
 
@@ -98,7 +137,7 @@ CamBasis camera_basis(const Camera3D& camera) {
     Vec3 forward{camera.target[0] - camera.eye[0],
                  camera.target[1] - camera.eye[1],
                  camera.target[2] - camera.eye[2]};
-    if (!(ws::math::dot(forward, forward) > 1e-12f)) {
+    if (!(ws::math::dot(forward, forward) > kDegenerateLen2)) {
         forward = Vec3{0.0f, 0.0f, 1.0f};
     }
     forward = ws::math::normalize(forward);
@@ -108,10 +147,10 @@ CamBasis camera_basis(const Camera3D& camera) {
     // to the view).
     const Vec3 hint{camera.up[0], camera.up[1], camera.up[2]};
     Vec3 right = ws::math::cross(forward, hint);
-    if (!(ws::math::dot(right, right) > 1e-12f)) {
+    if (!(ws::math::dot(right, right) > kDegenerateLen2)) {
         right = ws::math::cross(forward, Vec3{0.0f, 0.0f, 1.0f});
     }
-    if (!(ws::math::dot(right, right) > 1e-12f)) {
+    if (!(ws::math::dot(right, right) > kDegenerateLen2)) {
         right = ws::math::cross(forward, Vec3{0.0f, 1.0f, 0.0f});
     }
     right = ws::math::normalize(right);
@@ -191,7 +230,7 @@ bool line_quad3d(float x0, float y0, float z0, float x1, float y1, float z1,
     const Vec3 p0{x0, y0, z0};
     const Vec3 p1{x1, y1, z1};
     const Vec3 segment = p1 - p0;
-    if (!(ws::math::dot(segment, segment) > 1e-12f) ||
+    if (!(ws::math::dot(segment, segment) > kDegenerateLen2) ||
         !(thickness > 0.0f)) {
         return false;
     }
@@ -203,7 +242,7 @@ bool line_quad3d(float x0, float y0, float z0, float x1, float y1, float z1,
     // world-scaled either way).
     Vec3 normal = ws::math::cross(dir, basis.forward);
     float len2 = ws::math::dot(normal, normal);
-    if (!(len2 > 1e-12f)) {
+    if (!(len2 > kDegenerateLen2)) {
         normal = basis.up;
         len2 = 1.0f;  // the basis is orthonormal - up is already unit
     }
@@ -217,23 +256,18 @@ bool line_quad3d(float x0, float y0, float z0, float x1, float y1, float z1,
         out_pos[i][1] = pos[i].y;
         out_pos[i][2] = pos[i].z;
     }
-    out_uv[0][0] = 0.0f; out_uv[0][1] = 0.0f;
-    out_uv[1][0] = 0.0f; out_uv[1][1] = 1.0f;
-    out_uv[2][0] = 1.0f; out_uv[2][1] = 1.0f;
-    out_uv[3][0] = 1.0f; out_uv[3][1] = 0.0f;
+    write_line_uv(out_uv);
     return true;
 }
 
-void BatchCore::start_chunk(const Mat4& vp, const float (&clip)[4],
-                            bool depth_test) {
+Chunk BatchCore::make_chunk(const Mat4& vp, const float (&clip)[4],
+                            bool depth_test) const {
     Chunk chunk;
     chunk.vp = vp;
+    std::memcpy(chunk.clip, clip, sizeof chunk.clip);
     chunk.depth_test = depth_test;
-    for (int i = 0; i < 4; ++i) {
-        chunk.clip[i] = clip[i];
-    }
     chunk.vertex_offset = static_cast<std::uint32_t>(vertices_.size());
-    chunks_.push_back(chunk);
+    return chunk;
 }
 
 BatchCore::BatchCore() {
@@ -248,16 +282,53 @@ void BatchCore::begin_frame() {
     chunks_.clear();
     segment_open_ = false;
     dropped_quads_ = 0;
+    stats_ = FrameStats{};
 }
 
 void BatchCore::open_segment(const Mat4& vp, const float (&clip)[4],
                              bool depth_test) {
-    start_chunk(vp, clip, depth_test);
+    segment_open_ = false;  // opening over an open segment closes it first
+    if (!chunks_.empty()) {
+        Chunk& tail = chunks_.back();
+        if (tail.quad_count == 0) {
+            // Nothing recorded into the tail: recycle it rather than hand
+            // the flush a zero-quad chunk. vertex_offset is unchanged (no
+            // vertices were added since it opened).
+            tail = make_chunk(vp, clip, depth_test);
+            ++stats_.elided_chunks;
+            segment_open_ = true;
+            return;
+        }
+        // Bitwise compare: the matrices are NaN-free by construction, and a
+        // false negative (-0 vs +0) only costs a chunk, never correctness.
+        if (tail.depth_test == depth_test &&
+            std::memcmp(tail.vp.m, vp.m, sizeof vp.m) == 0 &&
+            std::memcmp(tail.clip, clip, sizeof tail.clip) == 0) {
+            ++stats_.merged_segments;
+            segment_open_ = true;
+            return;
+        }
+    }
+    chunks_.push_back(make_chunk(vp, clip, depth_test));
     segment_open_ = true;
 }
 
 void BatchCore::close_segment() {
     segment_open_ = false;
+}
+
+void BatchCore::split_chunk(bool keep_textures) {
+    // Value copy: push_back may reallocate chunks_, so nothing may alias an
+    // element across it. The copy inherits VP, clip and depth mode - it is
+    // the same segment - and the stale chunk keeps its vertices, so flush
+    // order is unchanged.
+    Chunk fresh = chunks_.back();
+    fresh.vertex_offset = static_cast<std::uint32_t>(vertices_.size());
+    fresh.quad_count = 0;
+    if (!keep_textures) {
+        fresh.texture_count = 0;
+    }
+    chunks_.push_back(fresh);
 }
 
 std::uint32_t BatchCore::texture_slot(std::uint32_t texture_id) {
@@ -272,108 +343,69 @@ std::uint32_t BatchCore::texture_slot(std::uint32_t texture_id) {
         chunk.texture_ids[slot] = texture_id;
         return slot;
     }
-    // Table full: split. The stale chunk keeps its vertices; the fresh one
-    // continues right where it left off, so flush order is unchanged. The
-    // split inherits the segment's VP, clip and depth mode - it is the same
-    // segment.
-    const Mat4 vp = chunk.vp;
-    start_chunk(vp, chunk.clip, chunk.depth_test);
-    chunks_.back().texture_ids[0] = texture_id;
-    chunks_.back().texture_count = 1;
+    // Table full: continue in a fresh chunk seeded with this texture.
+    split_chunk(/*keep_textures=*/false);
+    ++stats_.texture_splits;
+    Chunk& fresh = chunks_.back();  // taken AFTER the push_back
+    fresh.texture_ids[0] = texture_id;
+    fresh.texture_count = 1;
     return 0;
 }
 
-void BatchCore::split_full_chunk() {
-    // The u16 index space caps one chunk at kMaxQuadsPerChunk: split at
-    // the cap exactly like the texture-table split, but COPY the table -
-    // the fresh chunk's vertices still name the old slots, so its table
-    // must resolve them. Index-based access throughout: start_chunk's
-    // push_back may move the elements, so references into chunks_ do not
-    // survive it (the clip array is read inside start_chunk before its
-    // own push, so binding it as an argument is safe).
-    const std::size_t old_index = chunks_.size() - 1;
-    const Mat4 vp = chunks_[old_index].vp;
-    start_chunk(vp, chunks_[old_index].clip,
-                chunks_[old_index].depth_test);
-    Chunk& fresh = chunks_.back();
-    for (std::uint32_t i = 0; i < chunks_[old_index].texture_count; ++i) {
-        fresh.texture_ids[i] = chunks_[old_index].texture_ids[i];
-    }
-    fresh.texture_count = chunks_[old_index].texture_count;
-}
-
-bool BatchCore::push_quad(const float (&pos)[4][3], const float (&uv)[4][2],
-                          const float (&color)[4], std::uint32_t texture_id) {
+bool BatchCore::prepare_quad() {
     if (!segment_open_ || chunks_.empty()) {
         ++dropped_quads_;
         return false;
     }
     if (chunks_.back().quad_count >= kMaxQuadsPerChunk) {
-        split_full_chunk();
+        // The u16 index space caps one chunk: COPY the table, the fresh
+        // chunk's vertices still name the old slots.
+        split_chunk(/*keep_textures=*/true);
+        ++stats_.quad_cap_splits;
     }
-    // Chunked tier: the chunk-local table slot (with splits). Bindless
-    // tier: the global registry id - the shader's table is the registry,
-    // so no remap, no split, and the chunk's own table stays empty.
-    const std::uint32_t tex_index =
-        global_tex_ids_ ? texture_id : texture_slot(texture_id);
+    return true;
+}
+
+void BatchCore::write_quad(const float (&pos)[4][3], const float (&uv)[4][2],
+                           const float (&colors)[4][4], float tex_index) {
     for (int i = 0; i < 4; ++i) {
-        Vertex v;
-        v.pos[0] = pos[i][0];
-        v.pos[1] = pos[i][1];
-        v.pos[2] = pos[i][2];
-        v.color[0] = color[0];
-        v.color[1] = color[1];
-        v.color[2] = color[2];
-        v.color[3] = color[3];
-        v.uv[0] = uv[i][0];
-        v.uv[1] = uv[i][1];
-        v.tex_index = static_cast<float>(tex_index);
-        vertices_.push_back(v);
+        vertices_.push_back(Vertex{
+            {pos[i][0], pos[i][1], pos[i][2]},
+            {colors[i][0], colors[i][1], colors[i][2], colors[i][3]},
+            {uv[i][0], uv[i][1]},
+            tex_index});
     }
     ++chunks_.back().quad_count;
-    return true;
+}
+
+bool BatchCore::push_quad(const float (&pos)[4][3], const float (&uv)[4][2],
+                          const float (&color)[4], std::uint32_t texture_id) {
+    float colors[4][4];
+    splat_color(color, colors);
+    return push_quad_vcol(pos, uv, colors, texture_id);
 }
 
 bool BatchCore::push_quad_vcol(const float (&pos)[4][3],
                                const float (&uv)[4][2],
                                const float (&colors)[4][4],
                                std::uint32_t texture_id) {
-    if (!segment_open_ || chunks_.empty()) {
-        ++dropped_quads_;
+    if (!prepare_quad()) {
         return false;
     }
-    if (chunks_.back().quad_count >= kMaxQuadsPerChunk) {
-        split_full_chunk();
-    }
+    // Chunked tier: the chunk-local table slot (with splits). Bindless
+    // tier: the global registry id - the shader's table is the registry,
+    // so no remap, no split, and the chunk's own table stays empty.
     const std::uint32_t tex_index =
         global_tex_ids_ ? texture_id : texture_slot(texture_id);
-    for (int i = 0; i < 4; ++i) {
-        Vertex v;
-        v.pos[0] = pos[i][0];
-        v.pos[1] = pos[i][1];
-        v.pos[2] = pos[i][2];
-        v.color[0] = colors[i][0];
-        v.color[1] = colors[i][1];
-        v.color[2] = colors[i][2];
-        v.color[3] = colors[i][3];
-        v.uv[0] = uv[i][0];
-        v.uv[1] = uv[i][1];
-        v.tex_index = static_cast<float>(tex_index);
-        vertices_.push_back(v);
-    }
-    ++chunks_.back().quad_count;
+    write_quad(pos, uv, colors, static_cast<float>(tex_index));
     return true;
 }
 
 bool BatchCore::push_rounded_quad(const float (&pos)[4][3],
                                   const float (&uv)[4][2],
                                   const float (&color)[4], float radius) {
-    if (!segment_open_ || chunks_.empty()) {
-        ++dropped_quads_;
+    if (!prepare_quad()) {
         return false;
-    }
-    if (chunks_.back().quad_count >= kMaxQuadsPerChunk) {
-        split_full_chunk();
     }
     // No texture slot, either tier: tex_index carries the SDF radius
     // NEGATIVE, normalized to the rect's width (see the header). TL -> TR
@@ -384,22 +416,29 @@ bool BatchCore::push_rounded_quad(const float (&pos)[4][3],
     const float dy = pos[1][1] - pos[0][1];
     const float w = std::sqrt(dx * dx + dy * dy);
     const float tex_index = w > 1e-6f ? -(radius / w) : 0.0f;
-    for (int i = 0; i < 4; ++i) {
-        Vertex v;
-        v.pos[0] = pos[i][0];
-        v.pos[1] = pos[i][1];
-        v.pos[2] = pos[i][2];
-        v.color[0] = color[0];
-        v.color[1] = color[1];
-        v.color[2] = color[2];
-        v.color[3] = color[3];
-        v.uv[0] = uv[i][0];
-        v.uv[1] = uv[i][1];
-        v.tex_index = tex_index;
-        vertices_.push_back(v);
-    }
-    ++chunks_.back().quad_count;
+    float colors[4][4];
+    splat_color(color, colors);
+    write_quad(pos, uv, colors, tex_index);
     return true;
+}
+
+std::uint64_t BatchCore::frame_hash() const {
+    std::uint64_t h = kFnvOffset;
+    fnv_value(h, static_cast<std::uint64_t>(chunks_.size()));
+    for (const Chunk& c : chunks_) {
+        // Field by field: Chunk has padding, and padding bytes are
+        // indeterminate.
+        fnv_bytes(h, c.vp.m, sizeof c.vp.m);
+        fnv_bytes(h, c.clip, sizeof c.clip);
+        fnv_value(h, static_cast<std::uint8_t>(c.depth_test));
+        fnv_value(h, c.vertex_offset);
+        fnv_value(h, c.quad_count);
+        fnv_value(h, c.texture_count);
+        fnv_bytes(h, c.texture_ids, c.texture_count * sizeof(std::uint32_t));
+    }
+    // Vertex has no padding (static_assert in the header), so raw bytes.
+    fnv_bytes(h, vertices_.data(), vertices_.size() * sizeof(Vertex));
+    return h;
 }
 
 }  // namespace ws::ui::r2d::batch

@@ -22,6 +22,8 @@
 #include "platform/window.h"
 
 #include <cstddef>  // std::size_t - the OS pointer indices
+#include <optional>
+#include <string>
 
 #include <ws/core/log.hpp>
 
@@ -95,6 +97,195 @@ int glfw_key(int32_t keycode) {
         case AKEYCODE_GRAVE: return '`';
         default: return kKeyUnknown;
     }
+}
+
+// The clipboard's JNI hops. The ClipboardManager is a system service
+// every activity can reach (getSystemService), so no Java shim is
+// involved - the reflection walks the framework classes directly.
+// Both halves attach the calling thread for the call's span: the
+// shell thread is not the Java thread (the glue owns android_main's
+// own), the clipboard is cold, and a detach-per-call keeps no
+// thread-local state that could race the loop's exit.
+struct ScopedJavaThread {
+    JavaVM* vm = nullptr;
+    JNIEnv* env = nullptr;
+    bool attached = false;
+
+    explicit ScopedJavaThread(JavaVM* v) : vm(v) {
+        if (vm == nullptr) {
+            return;
+        }
+        const jint state =
+            vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+        if (state == JNI_OK) {
+            return;  // the caller already rides the JVM
+        }
+        if (state == JNI_EDETACHED &&
+            vm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
+            attached = true;
+        }
+    }
+    ~ScopedJavaThread() {
+        if (attached) {
+            (void)vm->DetachCurrentThread();
+        }
+    }
+    [[nodiscard]] bool ok() const { return env != nullptr; }
+};
+
+// A pending Java exception, if any: described, cleared and logged -
+// a failed hop degrades (no clip) rather than aborts, the seam's
+// honest-answer rule.
+bool jni_threw(JNIEnv* env, const char* what) {
+    if (!env->ExceptionCheck()) {
+        return false;
+    }
+    env->ExceptionDescribe();
+    env->ExceptionClear();
+    core::error("ui: android clipboard: {}", what);
+    return true;
+}
+
+[[nodiscard]] std::string jstring_to_std(JNIEnv* env, jstring text) {
+    if (text == nullptr) {
+        return {};
+    }
+    const char* bytes = env->GetStringUTFChars(text, nullptr);
+    if (bytes == nullptr) {
+        (void)env->ExceptionCheck();  // the VM refused: cleared or none
+        return {};
+    }
+    std::string out{bytes};
+    env->ReleaseStringUTFChars(text, bytes);
+    return out;
+}
+
+// The activity's ClipboardManager, or null (no service / a threw hop).
+[[nodiscard]] jobject clipboard_manager(JNIEnv* env, jobject activity) {
+    jclass const cls = env->GetObjectClass(activity);
+    jmethodID const get_service = env->GetMethodID(
+        cls, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;");
+    if (get_service == nullptr || jni_threw(env, "getSystemService missing")) {
+        return nullptr;
+    }
+    jstring const name = env->NewStringUTF("clipboard");
+    jobject const manager =
+        env->CallObjectMethod(activity, get_service, name);
+    if (jni_threw(env, "getSystemService(clipboard) threw")) {
+        return nullptr;
+    }
+    return manager;  // null-safe: the callers null-check before use
+}
+
+// getPrimaryClip's first item as text, nullopt over every failure and
+// every empty clipboard (the gui's null-means-empty contract).
+[[nodiscard]] std::optional<std::string> android_clipboard_text(
+    JavaVM* vm, jobject activity) {
+    ScopedJavaThread java{vm};
+    if (!java.ok()) {
+        core::error("ui: android clipboard: no JNIEnv for the read");
+        return std::nullopt;
+    }
+    JNIEnv* const env = java.env;
+    jobject const manager = clipboard_manager(env, activity);
+    if (manager == nullptr) {
+        return std::nullopt;
+    }
+    jclass const cm = env->GetObjectClass(manager);
+    jmethodID const has_clip = env->GetMethodID(cm, "hasPrimaryClip", "()Z");
+    if (has_clip == nullptr ||
+        !env->CallBooleanMethod(manager, has_clip) ||
+        jni_threw(env, "hasPrimaryClip threw")) {
+        return std::nullopt;
+    }
+    jmethodID const get_clip = env->GetMethodID(
+        cm, "getPrimaryClip", "()Landroid/content/ClipData;");
+    jobject const clip = get_clip != nullptr
+                             ? env->CallObjectMethod(manager, get_clip)
+                             : nullptr;
+    if (jni_threw(env, "getPrimaryClip threw")) {
+        return std::nullopt;
+    }
+    if (clip == nullptr) {
+        return std::nullopt;
+    }
+    jclass const clip_cls = env->GetObjectClass(clip);
+    jmethodID const item_at = env->GetMethodID(
+        clip_cls, "getItemAt", "(I)Landroid/content/ClipData$Item;");
+    jobject const item =
+        item_at != nullptr ? env->CallObjectMethod(clip, item_at, 0) : nullptr;
+    if (jni_threw(env, "getItemAt threw")) {
+        return std::nullopt;
+    }
+    if (item == nullptr) {
+        return std::nullopt;
+    }
+    // coerceToText(Context) flattens whatever the clip holds (text,
+    // an intent's EXTRA_TEXT, a URI) into a CharSequence.
+    jmethodID const coerce = env->GetMethodID(
+        env->GetObjectClass(item), "coerceToText",
+        "(Landroid/content/Context;)Ljava/lang/CharSequence;");
+    jobject const chars =
+        coerce != nullptr ? env->CallObjectMethod(item, coerce, activity)
+                          : nullptr;
+    if (jni_threw(env, "coerceToText threw")) {
+        return std::nullopt;
+    }
+    if (chars == nullptr) {
+        return std::nullopt;
+    }
+    jmethodID const to_string = env->GetMethodID(
+        env->GetObjectClass(chars), "toString", "()Ljava/lang/String;");
+    jstring const text = to_string != nullptr
+                             ? static_cast<jstring>(
+                                   env->CallObjectMethod(chars, to_string))
+                             : nullptr;
+    if (jni_threw(env, "toString threw")) {
+        return std::nullopt;
+    }
+    return jstring_to_std(env, text);
+}
+
+// setPrimaryClip(ClipData.newPlainText(label, text)).
+[[nodiscard]] bool android_clipboard_set(JavaVM* vm, jobject activity,
+                                         const char* text) {
+    ScopedJavaThread java{vm};
+    if (!java.ok()) {
+        core::error("ui: android clipboard: no JNIEnv for the write");
+        return false;
+    }
+    JNIEnv* const env = java.env;
+    jobject const manager = clipboard_manager(env, activity);
+    if (manager == nullptr) {
+        return false;
+    }
+    jclass const clip_cls = env->FindClass("android/content/ClipData");
+    jmethodID const new_plain = clip_cls != nullptr
+                                    ? env->GetStaticMethodID(
+                                          clip_cls, "newPlainText",
+                                          "(Ljava/lang/CharSequence;"
+                                          "Ljava/lang/CharSequence;)"
+                                          "Landroid/content/ClipData;")
+                                    : nullptr;
+    jstring const payload = env->NewStringUTF(text != nullptr ? text : "");
+    jobject const clip =
+        new_plain != nullptr
+            ? env->CallStaticObjectMethod(clip_cls, new_plain, payload, payload)
+            : nullptr;
+    if (jni_threw(env, "ClipData.newPlainText threw")) {
+        return false;
+    }
+    if (clip == nullptr) {
+        return false;
+    }
+    jmethodID const set_clip = env->GetMethodID(
+        env->GetObjectClass(manager), "setPrimaryClip",
+        "(Landroid/content/ClipData;)V");
+    if (set_clip == nullptr) {
+        return false;
+    }
+    env->CallVoidMethod(manager, set_clip, clip);
+    return !jni_threw(env, "setPrimaryClip threw");
 }
 
 // WindowHost on native_app_glue. The cmd/input callbacks run on this same
@@ -212,6 +403,34 @@ public:
     void imgui_platform_new_frame() override { ImGui_ImplAndroid_NewFrame(); }
 
     void imgui_platform_shutdown() override { ImGui_ImplAndroid_Shutdown(); }
+
+    // The gui clipboard seam's platform half (window.h's contract, the
+    // GLFW override's android twin): the activity's ClipboardManager
+    // through the JNI - a system service every activity reaches, so no
+    // Java shim rides along. A hop that fails degrades to the empty
+    // answer (null text, a dropped set), never a crash - the honest
+    // refusal the seam's headless default models. `clipboard_read_` is
+    // the seam's platform-owned buffer: valid until the next call, the
+    // glfwGetClipboardString contract the gui documents.
+    void install_clipboard(gui::GuiContext& gui) override {
+        JavaVM* const vm = app_->activity->vm;
+        jobject const activity = app_->activity->clazz;
+        gui.set_clipboard(
+            [vm, activity, this] {
+                clipboard_read_.clear();
+                if (const std::optional<std::string> text =
+                        android_clipboard_text(vm, activity)) {
+                    clipboard_read_ = *text;
+                }
+                // null over an empty clipboard is the seam's own
+                // "nothing there" spelling.
+                return clipboard_read_.empty() ? nullptr
+                                               : clipboard_read_.c_str();
+            },
+            [vm, activity](const char* text) {
+                (void)android_clipboard_set(vm, activity, text);
+            });
+    }
 
 private:
     // One round of the glue looper. `timeout` is ALooper_pollOnce's argument:
@@ -647,6 +866,7 @@ private:
     float ui_scale_ = 1.0f;  // density / 160, cached at init (see init)
     int32_t mouse_buttons_ = 0;  // last seen AMOTION_EVENT_BUTTON_* mask
     bool touch_cap_warned_ = false;  // the touch-table cap warn fired once
+    std::string clipboard_read_;  // the seam's read buffer (see install_clipboard)
 };
 
 }  // namespace

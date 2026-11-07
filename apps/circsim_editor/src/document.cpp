@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <deque>
 #include <memory>
+#include <set>
 #include <utility>
 
 namespace editor {
@@ -85,9 +86,18 @@ void reinsert_label(Schematic& s, ws::circsim::Label l) {
 // The junctions `removing` orphans: referenced by one of its wires,
 // by no wire outside the set. Pure - the callers build payloads
 // without mutating, and the command's apply() owns the one true
-// removal.
+// removal. The "outside the set" test is keyed by id, which holds
+// because every wire owns a distinct one (placement mints, the
+// loader preserves disk ids) - the removed-id set states that
+// contract up front instead of per-wire "the one being removed"
+// guesses (the identity shortcut would NOT work here: `removing`
+// holds copies, never the schematic's own elements).
 [[nodiscard]] std::vector<Junction> orphaned_junctions(
     const Schematic& s, const std::vector<Wire>& removing) {
+    std::set<std::uint32_t> removed;
+    for (const Wire& w : removing) {
+        removed.insert(w.id);
+    }
     std::vector<Junction> out;
     for (const Wire& w : removing) {
         for (const WireEndpoint end : {w.a, w.b}) {
@@ -97,8 +107,8 @@ void reinsert_label(Schematic& s, ws::circsim::Label l) {
             }
             bool other = false;
             for (const Wire& w2 : s.wires()) {
-                if (w2.id == w.id) {
-                    continue;  // the one being removed
+                if (removed.count(w2.id) != 0u) {
+                    continue;  // one of the ones being removed
                 }
                 const JunctionRef* a = std::get_if<JunctionRef>(&w2.a);
                 const JunctionRef* b = std::get_if<JunctionRef>(&w2.b);
@@ -158,7 +168,7 @@ ws::core::Status SchematicDocument::load() {
     report = ws::circsim::LoadReport{};
     const auto loaded = ws::circsim::read_csim(*fs_, path_, report);
     if (!loaded.has_value()) {
-        return ws::core::unexpected(loaded.error());
+        return ws::core::unexpected<ws::core::Error>(loaded.error());
     }
     schem = std::move(*loaded);
     (void)undo_.clear();
@@ -300,22 +310,66 @@ class MovePartCommand final : public EditCommand {
     std::vector<WireRoute> routes_, undo_routes_;
 };
 
+// Lands each route's waypoints on its wire (a wire the step no longer
+// finds is skipped - the undo shape stays honest). True if any wire was
+// touched. Shared by the commands that re-route alongside an edit
+// (Transform Part, Tidy Wires).
+bool land_wire_routes(ws::circsim::Schematic& s,
+                      const std::vector<WireRoute>& routes) {
+    bool any = false;
+    for (const WireRoute& r : routes) {
+        for (Wire& w : s.wires_mut()) {
+            if (w.id == r.wire) {
+                w.waypoints = r.waypoints;
+                any = true;
+                break;
+            }
+        }
+    }
+    return any;
+}
+
+[[nodiscard]] std::size_t routes_bytes(const std::vector<WireRoute>& routes) {
+    std::size_t n = routes.size() * sizeof(WireRoute);
+    for (const WireRoute& r : routes) {
+        n += r.waypoints.size() * sizeof(ws::circsim::Pos);
+    }
+    return n;
+}
+
+// Rotate / mirror. A rotation moves the part's PINS, so the attached
+// ortho wires ride the same undo step with fresh shapes (the move
+// command's contract: without the re-route the adjacent legs go
+// diagonal). The routes are optional - the plain seam passes none.
 class TransformPartCommand final : public EditCommand {
   public:
     TransformPartCommand(SchematicDocument* doc, std::uint32_t id, int rot,
                          bool mirror, int was_rot, bool was_mirror,
-                         std::string name)
+                         std::string name, std::vector<WireRoute> routes = {},
+                         std::vector<WireRoute> undo_routes = {})
         : EditCommand(doc),
           id_(id),
           rot_(rot),
           mirror_(mirror),
           was_rot_(was_rot),
           was_mirror_(was_mirror),
-          name_(std::move(name)) {}
+          name_(std::move(name)),
+          routes_(std::move(routes)),
+          undo_routes_(std::move(undo_routes)) {}
 
-    void apply() override { land(rot_, mirror_); }
-    void undo() override { land(was_rot_, was_mirror_); }
+    void apply() override {
+        land(rot_, mirror_);
+        (void)land_wire_routes(schem(), routes_);
+    }
+    void undo() override {
+        land(was_rot_, was_mirror_);
+        (void)land_wire_routes(schem(), undo_routes_);
+    }
     [[nodiscard]] std::string name() const override { return name_; }
+    [[nodiscard]] std::size_t memory_estimate() const override {
+        return sizeof(*this) + name_.size() + routes_bytes(routes_) +
+               routes_bytes(undo_routes_);
+    }
 
   private:
     void land(int rot, bool mirror) {
@@ -331,6 +385,7 @@ class TransformPartCommand final : public EditCommand {
     int was_rot_;
     bool was_mirror_;
     std::string name_;
+    std::vector<WireRoute> routes_, undo_routes_;
 };
 
 // One part text field: ref (kind 0), value (kind 1), params[key] (2).
@@ -396,6 +451,14 @@ class PartTextCommand final : public EditCommand {
 }  // namespace
 
 void push_place_part(SchematicDocument& doc, ws::circsim::Part part) {
+    // Ids start at 1 (0 is the "none" sentinel), so a zero id is a
+    // caller that never minted one. The canvas mints at construction;
+    // this seam mint guarantees no future placement path can land an
+    // entity the find/take/select machinery would key wrong (the
+    // id-0 wire class: every hand-drawn entity colliding on 0).
+    if (part.id == 0) {
+        part.id = doc.schem.alloc_id();
+    }
     (void)doc.undo().push(
         std::make_unique<AddPartCommand>(&doc, std::move(part)));
 }
@@ -450,6 +513,26 @@ void push_transform_part(SchematicDocument& doc, std::uint32_t part_id,
     }
     (void)doc.undo().push(std::make_unique<TransformPartCommand>(
         &doc, part_id, rot, mirror, p->rot, p->mirror, std::move(name)));
+}
+
+void push_transform_part_routed(SchematicDocument& doc, std::uint32_t part_id,
+                                int rot, bool mirror, std::string name,
+                                std::vector<WireRoute> wire_routes) {
+    const Part* p = doc.schem.find_part(part_id);
+    if (p == nullptr) {
+        return;
+    }
+    // The undo shape: every routed wire's CURRENT waypoints.
+    std::vector<WireRoute> undo_routes;
+    undo_routes.reserve(wire_routes.size());
+    for (const WireRoute& r : wire_routes) {
+        if (const Wire* w = doc.schem.find_wire(r.wire)) {
+            undo_routes.push_back(WireRoute{r.wire, w->waypoints});
+        }
+    }
+    (void)doc.undo().push(std::make_unique<TransformPartCommand>(
+        &doc, part_id, rot, mirror, p->rot, p->mirror, std::move(name),
+        std::move(wire_routes), std::move(undo_routes)));
 }
 
 void push_part_text(SchematicDocument& doc, std::uint32_t part_id, int kind,
@@ -582,10 +665,94 @@ class MoveJunctionCommand final : public EditCommand {
     std::vector<WireRoute> routes_, undo_routes_;
 };
 
+// "Tidy Wires": re-straightens a set of wires in ONE undo step. Pure
+// waypoint swaps - no entity moves, no ids change - so apply() lands
+// the new shapes and undo() lands the captured old ones. Wires the step
+// no longer finds are skipped (the same honesty the move commands keep).
+class TidyWiresCommand final : public EditCommand {
+  public:
+    TidyWiresCommand(SchematicDocument* doc, std::vector<WireRoute> routes,
+                     std::vector<WireRoute> undo_routes)
+        : EditCommand(doc), routes_(std::move(routes)),
+          undo_routes_(std::move(undo_routes)) {}
+
+    void apply() override { land(routes_); }
+    void undo() override { land(undo_routes_); }
+    [[nodiscard]] std::string name() const override { return "Tidy Wires"; }
+    [[nodiscard]] std::size_t memory_estimate() const override {
+        return sizeof(*this) + routes_bytes(routes_) +
+               routes_bytes(undo_routes_);
+    }
+
+  private:
+    void land(const std::vector<WireRoute>& routes) {
+        if (land_wire_routes(schem(), routes)) {
+            schem().bump();  // the move commands bump through land(pos)
+        }
+    }
+    std::vector<WireRoute> routes_, undo_routes_;
+};
+
+// "Annotate": a whole-sheet renumbering as ONE undo step. `next` and
+// `was` are (part id, ref) lists over the SAME parts, so the final refs
+// land together - no transient duplicates, nothing to merge.
+class AnnotateCommand final : public EditCommand {
+  public:
+    using Refs = std::vector<std::pair<std::uint32_t, std::string>>;
+    AnnotateCommand(SchematicDocument* doc, Refs next, Refs was)
+        : EditCommand(doc), next_(std::move(next)), was_(std::move(was)) {}
+
+    void apply() override { land(next_); }
+    void undo() override { land(was_); }
+    [[nodiscard]] std::string name() const override { return "Annotate"; }
+    [[nodiscard]] std::size_t memory_estimate() const override {
+        std::size_t n = sizeof(*this);
+        for (const auto& r : next_) { n += sizeof(r) + r.second.size(); }
+        for (const auto& r : was_) { n += sizeof(r) + r.second.size(); }
+        return n;
+    }
+
+  private:
+    void land(const Refs& refs) {
+        bool any = false;
+        for (const auto& r : refs) {
+            if (Part* p = schem().find_part(r.first)) {
+                p->ref = r.second;
+                any = true;
+            }
+        }
+        if (any) {
+            schem().bump();
+        }
+    }
+    Refs next_, was_;
+};
+
+[[nodiscard]] bool same_waypoints(const std::vector<ws::circsim::Pos>& a,
+                                  const std::vector<ws::circsim::Pos>& b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (a[i].x != b[i].x || a[i].y != b[i].y) {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 void push_place_wire(SchematicDocument& doc, ws::circsim::Wire wire,
                      std::vector<ws::circsim::Junction> junctions) {
+    // The belt-and-braces twin of push_place_part's mint: 0 is the
+    // "none" sentinel, so a wire that arrives un-minted gets its id
+    // here - the command layer preserves the id it is handed, and
+    // every id-keyed consumer (find/take_wire, Selection::is, the
+    // orphan scan) presupposes uniqueness.
+    if (wire.id == 0) {
+        wire.id = doc.schem.alloc_id();
+    }
     (void)doc.undo().push(std::make_unique<AddWireCommand>(
         &doc, std::move(wire), std::move(junctions)));
 }
@@ -619,6 +786,54 @@ void push_move_junction(SchematicDocument& doc, std::uint32_t junction_id,
             return;
         }
     }
+}
+
+std::size_t push_tidy_wires(SchematicDocument& doc,
+                            std::vector<WireRoute> routes) {
+    // Keep only the routes that CHANGE something: an already-tidy wire
+    // must not pad the undo step, and a tidy that changes nothing must
+    // not land an empty undo entry at all.
+    std::vector<WireRoute> apply;
+    std::vector<WireRoute> undo;
+    for (WireRoute& r : routes) {
+        const Wire* w = doc.schem.find_wire(r.wire);
+        if (w == nullptr || same_waypoints(w->waypoints, r.waypoints)) {
+            continue;
+        }
+        undo.push_back(WireRoute{r.wire, w->waypoints});
+        apply.push_back(std::move(r));
+    }
+    if (apply.empty()) {
+        return 0;
+    }
+    const std::size_t changed = apply.size();
+    (void)doc.undo().push(std::make_unique<TidyWiresCommand>(
+        &doc, std::move(apply), std::move(undo)));
+    return changed;
+}
+
+std::size_t push_annotate(
+    SchematicDocument& doc,
+    std::vector<std::pair<std::uint32_t, std::string>> changes) {
+    // Only the parts whose ref actually changes ride the step; a no-op
+    // renumbering lands nothing on the undo stack.
+    AnnotateCommand::Refs next;
+    AnnotateCommand::Refs was;
+    for (auto& c : changes) {
+        const Part* p = doc.schem.find_part(c.first);
+        if (p == nullptr || p->ref == c.second) {
+            continue;
+        }
+        was.emplace_back(c.first, p->ref);
+        next.push_back(std::move(c));
+    }
+    if (next.empty()) {
+        return 0;
+    }
+    const std::size_t changed = next.size();
+    (void)doc.undo().push(std::make_unique<AnnotateCommand>(
+        &doc, std::move(next), std::move(was)));
+    return changed;
 }
 
 // --- labels ---------------------------------------------------------------
@@ -718,6 +933,10 @@ class LabelTextCommand final : public EditCommand {
 }  // namespace
 
 void push_place_label(SchematicDocument& doc, ws::circsim::Label label) {
+    // Same mint as the part and wire seams: 0 is the "none" sentinel.
+    if (label.id == 0) {
+        label.id = doc.schem.alloc_id();
+    }
     (void)doc.undo().push(
         std::make_unique<AddLabelCommand>(&doc, std::move(label)));
 }

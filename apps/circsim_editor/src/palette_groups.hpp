@@ -11,8 +11,8 @@
 //   3. else "Other".
 // The built-in groups come first in that fixed order, then any custom
 // ones in first-seen order, then "Other" last; empty groups are
-// dropped. The filter is a
-// case-insensitive substring over the name, the key and the group.
+// dropped. The filter is the fuzzy word-start match over the name,
+// the key and the group (see palette_matches).
 
 #include <string>
 #include <string_view>
@@ -30,7 +30,13 @@ struct PaletteGroup {
 
 [[nodiscard]] std::string palette_category(const ws::circsim::SymbolDef& sym);
 
-// Case-insensitive (ASCII) substring; an empty needle matches.
+// Case-insensitive (ASCII) fuzzy match, the acronym-then-subsequence
+// shape: the first needle character must land on a word start (the
+// first character, or one after a non-alphanumeric), the rest may
+// skip letters in between - "res" and "rstr" both find "Resistor",
+// "vsrc" finds "Voltage source", while an out-of-order "se" does
+// not. A superset of the old substring match - every query that
+// worked before still works. An empty needle matches.
 [[nodiscard]] bool palette_matches(std::string_view haystack,
                                    std::string_view needle);
 
