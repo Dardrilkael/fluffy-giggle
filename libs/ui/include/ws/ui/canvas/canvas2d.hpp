@@ -113,8 +113,11 @@ public:
     // a0 to a1 (radians). The arc starts at angle a0; if the current
     // point differs from the arc's start, a line_to connects them.
     virtual void arc(Point center, float rx, float ry, float a0, float a1) = 0;
-    // Closes the path (line_to the last move_to point, marks the path
-    // closed for stroke).
+    // Closes the path: line_to the path's FIRST point (the ring's
+    // start), marks the path closed for stroke. A path may carry
+    // several move_tos; the close always finishes the ring it began,
+    // never a jump to the latest move_to (that would splice a chord
+    // through the shape's interior).
     virtual void close_path() = 0;
     // Strokes the current path with `paint` (screen-space width, joins,
     // caps, dashes). The path is consumed (a new begin_path is needed
@@ -271,7 +274,6 @@ private:
     std::vector<Affine> xform_stack_{1};  // identity at the bottom
     std::vector<Point> path_;
     bool path_closed_ = false;
-    Point last_move_{};
     bool has_path_ = false;
 
     Point to_screen(Point p) const;
@@ -344,7 +346,6 @@ private:
     std::vector<Affine> xform_stack_{1};
     std::vector<Point> path_;
     bool path_closed_ = false;
-    Point last_move_{};
     bool has_path_ = false;
 
     Point to_screen(Point p) const;

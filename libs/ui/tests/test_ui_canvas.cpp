@@ -693,6 +693,65 @@ TEST_CASE("canvas2d: path API accumulates and strokes") {
         CHECK(pts.back().x == doctest::Approx(0.0f));
         CHECK(pts.back().y == doctest::Approx(0.0f));
     }
+
+    SUBCASE("close_path closes to the ring's start, not the last move_to"
+            " (the rounded-rect top-edge artifact)") {
+        // The rounded rects build one ring out of four move_to + arc
+        // pairs. close_path once appended the LAST move_to's target -
+        // the top-left arc's start - so the ring finished through a
+        // phantom chord from the top-left arc's end across to the
+        // path's start, and every filled/stroked rounded rect wore a
+        // diagonal smear across its top part. The close must finish
+        // the ring at ITS OWN first point.
+        c.begin_path();
+        c.move_to({0.0f, 0.0f});    // the ring's start
+        c.line_to({10.0f, 0.0f});
+        c.move_to({10.0f, 10.0f});  // an interior jump, as the arcs do
+        c.line_to({0.0f, 10.0f});
+        c.close_path();
+        c.stroke(Paint{});
+        const auto& pts = c.cmds[0].points;
+        CHECK(pts.back().x == doctest::Approx(0.0f));
+        CHECK(pts.back().y == doctest::Approx(0.0f));
+    }
+
+    SUBCASE("fill_rounded_rect closes the ring along the top edge") {
+        // fill_rounded_rect(10, 10, 40, 30, 6): the ring starts at the
+        // top-right arc's start (44, 10) and the last arc ends at the
+        // top-left arc's end (16, 10); the close must walk the TOP
+        // edge (16, 10) -> (44, 10), ending at the ring's start.
+        c.fill_rounded_rect(10.0f, 10.0f, 40.0f, 30.0f, 6.0f, 0xFF0000FFu);
+        const CanvasCmd* fill =
+            c.first(CanvasCmdKind::fill_polygon);
+        REQUIRE(fill != nullptr);
+        const auto& pts = fill->points;
+        CHECK(pts.front().x == doctest::Approx(44.0f));
+        CHECK(pts.front().y == doctest::Approx(10.0f));
+        CHECK(pts.back().x == doctest::Approx(44.0f));
+        CHECK(pts.back().y == doctest::Approx(10.0f));
+        // The ring's vertices all lie in the rect's box (the phantom
+        // chord's points did too - its damage was the diagonal EDGE,
+        // which the ring's END above is the tell for; this loop pins
+        // the arcs' flattening to the box regardless).
+        for (const auto& p : pts) {
+            CHECK(p.x >= 10.0f - 1e-3f);
+            CHECK(p.x <= 50.0f + 1e-3f);
+            CHECK(p.y >= 10.0f - 1e-3f);
+            CHECK(p.y <= 40.0f + 1e-3f);
+        }
+    }
+
+    SUBCASE("stroke_rounded_rect closes the ring along the top edge") {
+        c.stroke_rounded_rect(10.0f, 10.0f, 40.0f, 30.0f, 6.0f, Paint{});
+        const CanvasCmd* stroke_cmd = c.first(CanvasCmdKind::stroke_polyline);
+        REQUIRE(stroke_cmd != nullptr);
+        CHECK(stroke_cmd->closed);
+        const auto& pts = stroke_cmd->points;
+        CHECK(pts.front().x == doctest::Approx(44.0f));
+        CHECK(pts.front().y == doctest::Approx(10.0f));
+        CHECK(pts.back().x == doctest::Approx(44.0f));
+        CHECK(pts.back().y == doctest::Approx(10.0f));
+    }
 }
 
 TEST_CASE("canvas2d: text and image recording") {
