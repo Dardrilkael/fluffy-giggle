@@ -33,8 +33,9 @@ using editor::Editor;
 using editor::SchematicDocument;
 
 // A .csym layer with the collision case the field-identity tests need:
-// a Text param whose DISPLAY label is "value" - the same label the
-// Properties panel's built-in value row wears.
+// a Text param whose DISPLAY label is "Value" - the same label the
+// Properties panel's built-in value row wears (capitalized since the
+// patch).
 constexpr const char* kCollideCsym = R"json({
     "format": "circsim-symbols",
     "version": 1,
@@ -47,7 +48,7 @@ constexpr const char* kCollideCsym = R"json({
             "pins": [],
             "value": true,
             "params": [
-                {"key": "temp", "type": "text", "label": "value",
+                {"key": "temp", "type": "text", "label": "Value",
                  "default": ""}
             ],
             "draw": []
@@ -265,7 +266,7 @@ TEST_CASE("refresh_problems keys to the version it is handed, not the live one")
 
 // --- the field rows' "##" identity ----------------------------------------------
 
-TEST_CASE("a param labeled value is its own field, not the built-in value row") {
+TEST_CASE("a param labeled Value is its own field, not the built-in value row") {
     Bench b;
     std::vector<ws::circsim::Diag> diags;
     REQUIRE(b.ed.library.load_text(kCollideCsym, "", diags).has_value());
@@ -273,22 +274,22 @@ TEST_CASE("a param labeled value is its own field, not the built-in value row") 
     const std::string part = "p" + std::to_string(id);
 
     // Frame 1: the panel registers its focusables in draw order -
-    // ref, the BUILT-IN value row, then the "value"-labeled param row.
+    // Reference, the BUILT-IN Value row, then the "Value"-labeled param row.
     // A Tab queued after the body resolves against that list, so the
     // ids it lands on are the panel's own field identity.
     b.draw_properties([&] {
-        b.gui.set_focus(b.gui.ids().id(("ref##" + part + ".ref").c_str()));
-        b.gui.nav_next();  // Tab off the ref row
+        b.gui.set_focus(b.gui.ids().id(("Reference##" + part + ".ref").c_str()));
+        b.gui.nav_next();  // Tab off the Reference row
     });
 
-    // Frame 2: the focus must sit on the built-in value field alone -
+    // Frame 2: the focus must sit on the built-in Value field alone -
     // the param sharing its display label is a different widget, and
     // the tracked flag answers for the focused field.
     b.draw_properties();
     CHECK(b.gui.is_focused(
-        b.gui.ids().id(("value##" + part + ".value").c_str())));
+        b.gui.ids().id(("Value##" + part + ".value").c_str())));
     CHECK(!b.gui.is_focused(
-        b.gui.ids().id(("value##" + part + ".param.temp").c_str())));
+        b.gui.ids().id(("Value##" + part + ".param.temp").c_str())));
     CHECK(b.ed.text_field_focused == true);
 
     // Tab again: the NEXT focusable is the param row - two rows, two
@@ -298,9 +299,9 @@ TEST_CASE("a param labeled value is its own field, not the built-in value row") 
     });
     b.draw_properties();
     CHECK(b.gui.is_focused(
-        b.gui.ids().id(("value##" + part + ".param.temp").c_str())));
+        b.gui.ids().id(("Value##" + part + ".param.temp").c_str())));
     CHECK(!b.gui.is_focused(
-        b.gui.ids().id(("value##" + part + ".value").c_str())));
+        b.gui.ids().id(("Value##" + part + ".value").c_str())));
     CHECK(b.ed.text_field_focused == true);
 
     // Focus gone (cleared): the tracked flag quiets.
