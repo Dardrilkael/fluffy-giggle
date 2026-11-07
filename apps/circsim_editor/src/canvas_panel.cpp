@@ -32,6 +32,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <string>
 #include <vector>
 
 #include <ws/input/input.hpp>
@@ -52,6 +54,20 @@ constexpr float kPickPx = 9.0f;
 // on (and the dot's own px).
 constexpr float kSnapFeedbackPx = 8.0f;
 constexpr float kSnapDotPx = 5.0f;
+
+// The panel's own shortcuts, as raw key_down[] indices (the same
+// indexing the Space check below uses: 32 is Space, and the printable
+// keys share ASCII/GLFW values). Edge-detected here, gated on the
+// pointer being over the canvas and no text field holding focus. If a
+// binding belongs in the chord loop instead, call
+// Editor::zoom_to_selection() / Editor::wire_draft.flip() from there
+// and delete these two lines.
+constexpr int kKeyFrameSelection = 'F';  // frame the selection
+constexpr int kKeyFlipCorner = '/';      // flip the wire draft's corner
+constexpr int kKeyTidyWires = 'T';       // tidy the selection's wires
+
+// Pin magnetism's reach for the Place tool, in grid cells.
+constexpr double kMagnetCells = 1.5;
 
 [[nodiscard]] double pick_world(const EditorView& view) {
     return view.valid() ? static_cast<double>(kPickPx) / view.zoom : 0.35;
@@ -100,6 +116,17 @@ struct SnapTarget {
     SnapTarget t;
     t.pos = ed.snap(world);
     return t;
+}
+
+// Where a Place-tool click / ghost lands: the snapped cursor, nudged
+// so a pin of the part mates with a pin within kMagnetCells. Shift (the
+// coarse snap) is an explicit "put it exactly here" and skips the
+// magnet. One formula for the ghost, the click and the snap dot.
+[[nodiscard]] Pos place_pos(const Editor& ed, const ws::circsim::SymbolDef& sym,
+                            Pos world, bool coarse) {
+    const double radius = coarse ? 0.0 : kMagnetCells * ed.grid_spec().base;
+    return ed.place_snap(sym, world, ed.ghost_rot, ed.ghost_mirror, coarse,
+                         radius);
 }
 
 // --- drag helpers --------------------------------------------------------------
@@ -220,6 +247,30 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
     const bool coarse =
         in.key_down[ws::input::keys::kLeftShift] != 0 ||
         in.key_down[ws::input::keys::kRightShift] != 0;
+
+    // The panel's keyboard conveniences (edge-detected; the memory rides
+    // the Editor). Only while the pointer is over the canvas, the claims
+    // are open and no text field has focus (Properties typing is safe).
+    {
+        const bool keys_ok =
+            inside && gui.claims_open() && !ed.text_field_focused;
+        const bool frame_down =
+            keys_ok && in.key_down[kKeyFrameSelection] != 0;
+        const bool flip_down = keys_ok && in.key_down[kKeyFlipCorner] != 0;
+        const bool tidy_down = keys_ok && in.key_down[kKeyTidyWires] != 0;
+        if (frame_down && !ed.key_frame_prev_) {
+            (void)ed.zoom_to_selection();
+        }
+        if (flip_down && !ed.key_flip_prev_ && ed.wire_draft.active) {
+            ed.wire_draft.flip();
+        }
+        if (tidy_down && !ed.key_tidy_prev_ && ed.tool == Tool::Select) {
+            (void)ed.tidy_selection();
+        }
+        ed.key_frame_prev_ = frame_down;
+        ed.key_flip_prev_ = flip_down;
+        ed.key_tidy_prev_ = tidy_down;
+    }
 
     // Wheel: zoom toward the cursor (the scroll panel's own claim is
     // the harmless no-op the header note explains). An open modal veil
@@ -358,7 +409,7 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                 }
                 ws::circsim::Part p = ws::circsim::Part::make(
                     sym->key, next_ref(*ed.schem(), *sym), "",
-                    ed.snap(world, coarse));
+                    place_pos(ed, *sym, world, coarse));
                 // Minted for the same reason as the wire commit's id:
                 // the command layer preserves the id it is handed, and
                 // the palette is the parts' only creation path (0 is
@@ -467,7 +518,8 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                 }
                 w.waypoints = Editor::route_wire(ed.wire_draft.a_pos,
                                                  ed.wire_draft.a_dir, t.pos,
-                                                 t.dir);
+                                                 t.dir,
+                                                 ed.wire_draft.flip_route);
                 w.ortho = true;
                 const ws::circsim::WireEndpoint landing = w.b;
                 push_place_wire(*ed.doc, std::move(w), std::move(junctions));
@@ -542,6 +594,11 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     ed.view.vy = body.y;
     ed.view.vw = body.width;
     ed.view.vh = body.height;
+    // Motion: the smooth camera and the locate pulse follow the theme's
+    // animation switch (instant when motion is off, like every other
+    // eased thing in this panel). tick() advances both by real time.
+    ed.view.animate = theme.anim_enabled;
+    (void)ed.tick();
     ws::circsim::Schematic& s = *ed.schem();
     s.view.zoom = ed.view.zoom;
     s.view.center = ed.view.center;
@@ -639,6 +696,12 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
             free_spot = drag_target(ed, world, coarse);
         } else if (ed.tool == Tool::Place || ed.tool == Tool::Label) {
             free_spot = ed.snap(world, coarse);
+            if (ed.tool == Tool::Place && !ed.place_symbol.empty()) {
+                if (const ws::circsim::SymbolDef* sym =
+                        ed.library.find(ed.place_symbol)) {
+                    free_spot = place_pos(ed, *sym, world, coarse);
+                }
+            }
         }
         if (free_spot.has_value()) {
             const ws::math::Vec2 sp = ed.view.w2s(*free_spot);
@@ -817,7 +880,8 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         if (!eps_eq(t.pos.x, ed.wire_draft.a_pos.x, 1e-9) ||
             !eps_eq(t.pos.y, ed.wire_draft.a_pos.y, 1e-9)) {
             const std::vector<Pos> route = Editor::route_wire(
-                ed.wire_draft.a_pos, ed.wire_draft.a_dir, t.pos, t.dir);
+                ed.wire_draft.a_pos, ed.wire_draft.a_dir, t.pos, t.dir,
+                ed.wire_draft.flip_route);
             std::vector<Point> pts;
             pts.push_back(Point{static_cast<float>(ed.wire_draft.a_pos.x),
                                 static_cast<float>(ed.wire_draft.a_pos.y)});
@@ -835,6 +899,30 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
             preview.dash.lengths[1] = 0.35f;
             rc.stroke_polyline(pts.data(), static_cast<int>(pts.size()),
                                preview);
+
+            // The length readout: the run's routed length in grid
+            // cells, riding beside the cursor target - no more
+            // counting dots to see how far a wire reaches.
+            if (theme.font != nullptr) {
+                double length = 0.0;
+                for (std::size_t i = 1; i < pts.size(); ++i) {
+                    length += std::hypot(
+                        static_cast<double>(pts[i].x - pts[i - 1].x),
+                        static_cast<double>(pts[i].y - pts[i - 1].y));
+                }
+                const double cells = length / ed.grid_spec().base;
+                const long whole = std::lround(cells);
+                char label[32];
+                if (std::fabs(cells - static_cast<double>(whole)) < 1e-6) {
+                    std::snprintf(label, sizeof label, "%ld cell%s", whole,
+                                  whole == 1 ? "" : "s");
+                } else {
+                    std::snprintf(label, sizeof label, "%.1f cells", cells);
+                }
+                (void)rc.draw_text(static_cast<float>(t.pos.x + 0.45),
+                                   static_cast<float>(t.pos.y + 0.35), label,
+                                   *theme.font, gui::dim(theme.text, 0.8f));
+            }
         }
     }
 
@@ -848,7 +936,7 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                 // symbol's footprint and connection points legible
                 // before committing it, including after rotate/mirror.
                 ws::circsim::Part ghost = ws::circsim::Part::make(
-                    sym->key, "", "", ed.snap(world, coarse));
+                    sym->key, "", "", place_pos(ed, *sym, world, coarse));
                 ghost.rot = ed.ghost_rot;
                 ghost.mirror = ed.ghost_mirror;
 
@@ -899,7 +987,35 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         }
     }
 
+    // --- the locate pulse (world space): a ring that blooms and fades
+    // where jump_to / "frame selected" sent the camera. Its radius is
+    // screen px over the zoom, so it reads the same at every
+    // magnification. Skipped when the theme's motion is off.
+    if (ed.pulse.active && theme.anim_enabled) {
+        const double t = std::min(1.0, ed.pulse.age / Editor::Pulse::kLife);
+        const double ease = 1.0 - (1.0 - t) * (1.0 - t);
+        Paint ring;
+        ring.width = static_cast<float>(3.0 - 1.5 * t);
+        ring.color = gui::dim(theme.control_on, static_cast<float>(1.0 - t));
+        rc.stroke_circle(
+            Point{static_cast<float>(ed.pulse.pos.x),
+                  static_cast<float>(ed.pulse.pos.y)},
+            static_cast<float>((12.0 + 56.0 * ease) / ed.view.zoom), ring);
+    }
+
     rc.pop_transform();
+
+    // --- the hint strip (SCREEN space): what the pointer and keys do
+    // right now, bottom-left, only while the pointer is over the canvas.
+    if (inside && gui.claims_open() && theme.font != nullptr) {
+        const std::string text(ed.hint());
+        if (!text.empty()) {
+            rc.set_view_scale(1.0f);
+            (void)rc.draw_text(body.x + 10.0f,
+                               body.y + body.height - 24.0f, text.c_str(),
+                               *theme.font, gui::dim(theme.text, 0.55f));
+        }
+    }
 }
 
 }  // namespace editor

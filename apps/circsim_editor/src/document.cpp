@@ -600,6 +600,53 @@ class MoveJunctionCommand final : public EditCommand {
     std::vector<WireRoute> routes_, undo_routes_;
 };
 
+// "Tidy Wires": re-straightens a set of wires in ONE undo step. Pure
+// waypoint swaps - no entity moves, no ids change - so apply() lands
+// the new shapes and undo() lands the captured old ones. Wires the step
+// no longer finds are skipped (the same honesty the move commands keep).
+class TidyWiresCommand final : public EditCommand {
+  public:
+    TidyWiresCommand(SchematicDocument* doc, std::vector<WireRoute> routes,
+                     std::vector<WireRoute> undo_routes)
+        : EditCommand(doc), routes_(std::move(routes)),
+          undo_routes_(std::move(undo_routes)) {}
+
+    void apply() override { land(routes_); }
+    void undo() override { land(undo_routes_); }
+    [[nodiscard]] std::string name() const override { return "Tidy Wires"; }
+
+  private:
+    void land(const std::vector<WireRoute>& routes) {
+        bool any = false;
+        for (const WireRoute& r : routes) {
+            for (Wire& w : schem().wires_mut()) {
+                if (w.id == r.wire) {
+                    w.waypoints = r.waypoints;
+                    any = true;
+                    break;
+                }
+            }
+        }
+        if (any) {
+            schem().bump();  // the move commands bump through land(pos)
+        }
+    }
+    std::vector<WireRoute> routes_, undo_routes_;
+};
+
+[[nodiscard]] bool same_waypoints(const std::vector<ws::circsim::Pos>& a,
+                                  const std::vector<ws::circsim::Pos>& b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (a[i].x != b[i].x || a[i].y != b[i].y) {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 void push_place_wire(SchematicDocument& doc, ws::circsim::Wire wire,
@@ -645,6 +692,30 @@ void push_move_junction(SchematicDocument& doc, std::uint32_t junction_id,
             return;
         }
     }
+}
+
+std::size_t push_tidy_wires(SchematicDocument& doc,
+                            std::vector<WireRoute> routes) {
+    // Keep only the routes that CHANGE something: an already-tidy wire
+    // must not pad the undo step, and a tidy that changes nothing must
+    // not land an empty undo entry at all.
+    std::vector<WireRoute> apply;
+    std::vector<WireRoute> undo;
+    for (WireRoute& r : routes) {
+        const Wire* w = doc.schem.find_wire(r.wire);
+        if (w == nullptr || same_waypoints(w->waypoints, r.waypoints)) {
+            continue;
+        }
+        undo.push_back(WireRoute{r.wire, w->waypoints});
+        apply.push_back(std::move(r));
+    }
+    if (apply.empty()) {
+        return 0;
+    }
+    const std::size_t changed = apply.size();
+    (void)doc.undo().push(std::make_unique<TidyWiresCommand>(
+        &doc, std::move(apply), std::move(undo)));
+    return changed;
 }
 
 // --- labels ---------------------------------------------------------------

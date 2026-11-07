@@ -926,7 +926,7 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
         gui::text(layout, theme, "No document open");
         return;
     }
-    gui::heading(layout, theme, "Schematic")
+    gui::heading(layout, theme, "Schematic");
     char grid[64];
     std::snprintf(grid, sizeof grid, "%.12g", ed.schem()->grid);
     label_line(layout, theme, "Grid", grid);

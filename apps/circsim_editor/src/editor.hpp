@@ -37,6 +37,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
@@ -46,6 +47,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <ws/circsim/export.hpp>
@@ -84,15 +86,97 @@ inline bool eps_eq(double a, double b, double eps) {
     return std::fabs(a - b) <= eps;
 }
 
+// The "Tidy Wires" command's seam (document.cpp): lands the given
+// shapes as ONE undo step, skipping wires that would not change, and
+// returns how many wires actually changed (0 = nothing pushed). Declared
+// here because document.hpp was not part of the change; moving this
+// declaration into document.hpp is the intended home (a redeclaration
+// in both places is harmless).
+std::size_t push_tidy_wires(SchematicDocument& doc,
+                            std::vector<WireRoute> routes);
+
 // --- the camera -------------------------------------------------------------
 
 struct EditorView {
-    double zoom = 26.0;   // screen pixels per grid unit
-    Pos center{0.0, 0.0};  // the world point at the viewport's center
+    // The zoom range and the default, in screen pixels per grid unit.
+    // One source of truth: zoom_at, fit, fly_to and the document load
+    // all clamp through clamp_zoom (the limits used to be magic numbers
+    // repeated at every call site).
+    static constexpr double kMinZoom = 3.0;
+    static constexpr double kMaxZoom = 400.0;
+    static constexpr double kDefaultZoom = 26.0;
+    [[nodiscard]] static double clamp_zoom(double z) {
+        return std::clamp(z, kMinZoom, kMaxZoom);
+    }
+
+    double zoom = kDefaultZoom;  // screen pixels per grid unit
+    Pos center{0.0, 0.0};        // the world point at the viewport's center
 
     // The viewport, set each frame before use (screen px, the panel
     // body's rect). Invalid (w/h <= 0) until the first draw.
     float vx = 0.0f, vy = 0.0f, vw = 0.0f, vh = 0.0f;
+
+    // --- the smooth camera (opt-in) ---------------------------------------
+    // fly_to() glides the camera to a target (an ease-in-out in log-zoom,
+    // so a big zoom change feels even). It is OFF by default: with
+    // `animate == false` fly_to() snaps, exactly the old behavior, so
+    // nothing changes until the app opts in. When on, the app calls
+    // step(dt) once per frame (dt in seconds) and keeps redrawing while
+    // it returns true. Any manual zoom/pan cancels a glide in flight -
+    // the user's hands always win over the camera's.
+    struct Glide {
+        bool active = false;
+        Pos from_center{0.0, 0.0};
+        Pos to_center{0.0, 0.0};
+        double from_zoom = kDefaultZoom;
+        double to_zoom = kDefaultZoom;
+        double t = 0.0;         // seconds elapsed
+        double duration = 0.35;  // seconds
+    };
+    bool animate = false;
+    Glide glide;
+
+    void cancel_glide() { glide.active = false; }
+
+    void fly_to(Pos target, double target_zoom, double seconds = 0.35) {
+        target_zoom = clamp_zoom(target_zoom);
+        if (!animate || seconds <= 0.0 || !valid()) {
+            center = target;
+            zoom = target_zoom;
+            glide.active = false;
+            return;
+        }
+        glide.active = true;
+        glide.from_center = center;
+        glide.to_center = target;
+        glide.from_zoom = zoom;
+        glide.to_zoom = target_zoom;
+        glide.t = 0.0;
+        glide.duration = seconds;
+    }
+
+    // Advance a glide by `dt` seconds; true while it is still moving.
+    bool step(double dt) {
+        if (!glide.active) {
+            return false;
+        }
+        glide.t += dt;
+        const double u = std::min(1.0, glide.t / glide.duration);
+        const double e = u * u * (3.0 - 2.0 * u);  // smoothstep
+        center = {glide.from_center.x +
+                      (glide.to_center.x - glide.from_center.x) * e,
+                  glide.from_center.y +
+                      (glide.to_center.y - glide.from_center.y) * e};
+        const double lz0 = std::log(glide.from_zoom);
+        const double lz1 = std::log(glide.to_zoom);
+        zoom = clamp_zoom(std::exp(lz0 + (lz1 - lz0) * e));
+        if (u >= 1.0) {
+            center = glide.to_center;
+            zoom = glide.to_zoom;
+            glide.active = false;
+        }
+        return glide.active;
+    }
 
     [[nodiscard]] bool valid() const { return vw > 1.0f && vh > 1.0f; }
 
@@ -114,14 +198,9 @@ struct EditorView {
         if (!valid()) {
             return;
         }
+        glide.active = false;  // the wheel beats a glide in flight
         const Pos under = s2w(anchor);
-        zoom *= factor;
-        if (zoom < 3.0) {
-            zoom = 3.0;
-        }
-        if (zoom > 400.0) {
-            zoom = 400.0;
-        }
+        zoom = clamp_zoom(zoom * factor);
         // Keep `under` at the anchor: center = under + (center-anchor
         // in world units at the new zoom).
         const double dx = (vx + vw * 0.5f - anchor.x) / zoom;
@@ -131,6 +210,7 @@ struct EditorView {
 
     // Pan by a screen-pixel delta.
     void pan_by(ws::math::Vec2 screen_delta) {
+        glide.active = false;  // a drag beats a glide in flight
         center.x -= screen_delta.x / zoom;
         center.y += screen_delta.y / zoom;
     }
@@ -141,20 +221,16 @@ struct EditorView {
         if (!valid()) {
             return;
         }
-        center = {(b.min_x + b.max_x) * 0.5, (b.min_y + b.max_y) * 0.5};
+        const Pos target{(b.min_x + b.max_x) * 0.5, (b.min_y + b.max_y) * 0.5};
         const double w = (b.max_x - b.min_x) + 2.0 * margin;
         const double h = (b.max_y - b.min_y) + 2.0 * margin;
         if (w <= 0.0 || h <= 0.0) {
+            fly_to(target, zoom);  // degenerate: center, keep the zoom
             return;
         }
-        zoom = std::min(static_cast<double>(vw) / w,
-                        static_cast<double>(vh) / h);
-        if (zoom < 3.0) {
-            zoom = 3.0;
-        }
-        if (zoom > 400.0) {
-            zoom = 400.0;
-        }
+        // fly_to clamps the zoom, and glides when `animate` is on.
+        fly_to(target, std::min(static_cast<double>(vw) / w,
+                                static_cast<double>(vh) / h));
     }
 };
 
@@ -358,6 +434,13 @@ struct Editor {
         bool a_mint = false;
         bool a_free = false;
         std::uint32_t a_wire = 0;
+        // Which way the route's corner bends: false = horizontal
+        // first (the stock L), true = vertical first. The panel flips
+        // it on Tab while a draft is live and passes it to route_wire
+        // for BOTH the preview and the commit, so what you see is what
+        // lands. Cleared with the draft.
+        bool flip_route = false;
+        void flip() { flip_route = !flip_route; }
     } wire_draft;
 
     // True when the last frame's Properties draw saw a focused text
@@ -407,6 +490,45 @@ struct Editor {
         bool armed = false;
         ws::math::Vec2 from{0.0f, 0.0f};
     } pan;
+
+    // --- the frame tick, the locate pulse, the panel's key edges ---------
+    // The Schematic panel calls tick() once per frame: it advances the
+    // smooth camera and the pulse by the REAL elapsed time (steady
+    // clock, clamped to 100 ms so a stalled frame never teleports the
+    // view). It returns true while something is still moving - the app
+    // may use that to keep requesting frames.
+    [[nodiscard]] bool tick();
+
+    // The locate pulse: a ring that blooms at a world point and fades
+    // (jump_to and zoom_to_selection fire it, so "where did the view
+    // just go?" answers itself). Drawn by the panel, skipped when the
+    // theme's motion is off.
+    struct Pulse {
+        static constexpr double kLife = 0.9;  // seconds
+        bool active = false;
+        Pos pos{0.0, 0.0};
+        double age = 0.0;
+    } pulse;
+    void pulse_at(Pos p) {
+        pulse.active = true;
+        pulse.pos = p;
+        pulse.age = 0.0;
+    }
+
+    // Key-edge memory for the panel's own shortcuts (F frames the
+    // selection, / flips the wire corner): "was down last frame".
+    bool key_frame_prev_ = false;
+    bool key_flip_prev_ = false;
+    bool key_tidy_prev_ = false;
+
+    // Quiet toasts: an identical toast pushed while its twin is still
+    // on screen is dropped instead of stacking (a command mashed ten
+    // times used to paint ten copies). Off switch for tests.
+    bool dedupe_toasts = true;
+    mutable std::string last_toast_;
+    mutable std::chrono::steady_clock::time_point last_toast_until_{};
+    std::chrono::steady_clock::time_point last_tick_{};
+    bool tick_started_ = false;
 
     // The canvas the schematic panel renders through (one per
     // editor; the canvas layer's own state is per-instance).
@@ -491,9 +613,12 @@ struct Editor {
     // list between the two endpoints - a leads out, an L lands,
     // collinear legs folded away (a reversal keeps its lead-out
     // corner; folding it would run the wire back through the part
-    // body it just left).
+    // body it just left). `flip` bends the corner the other way
+    // (vertical-first instead of horizontal-first) - the Tab toggle;
+    // it only matters when the route needs a corner at all.
     [[nodiscard]] static std::vector<Pos> route_wire(Pos a, int a_dir,
-                                                     Pos b, int b_dir);
+                                                     Pos b, int b_dir,
+                                                     bool flip = false);
 
     // The attached ortho wires' fresh shapes for a move of `id` (the
     // drag-release re-route: a moved endpoint would otherwise leave
@@ -528,6 +653,41 @@ struct Editor {
 
     // The whole schematic's content extent (for the fit command).
     [[nodiscard]] std::optional<Bounds> content_bounds() const;
+
+    // Tidy: re-straightens ortho wires. tidy_route() is the pure core -
+    // given a wire's full world path (endpoint, waypoints, endpoint) it
+    // returns the cleaned INTERIOR waypoints: every diagonal leg gets an
+    // axis-aligned corner, duplicate points and collinear continuing
+    // middles fold away, the rest of the author's shape is kept (a
+    // gentle fix-up, not a re-route). tidy_selection() applies it, as
+    // ONE undo step, to the selected wire - or to every wire on the
+    // selected part or junction - and returns how many changed. Freeform
+    // (non-ortho) wires are the author's and are left alone.
+    [[nodiscard]] static std::vector<Pos> tidy_route(
+        const std::vector<Pos>& path);
+    std::size_t tidy_selection();
+
+    // The current selection's world extent (nullopt = nothing selected
+    // or the selection's entity is gone), and the "frame selected"
+    // command built on it: fits the selection with `margin` grid units
+    // of air (a lone junction/label just centers, keeping the zoom).
+    // Returns false (with a status hint) when there is nothing to frame.
+    [[nodiscard]] std::optional<Bounds> selection_bounds() const;
+    bool zoom_to_selection(double margin = 3.0);
+
+    // The Place tool's "pin magnetism": the snapped position for a
+    // ghost of `sym` at `world`, nudged so the ghost's nearest pin
+    // lands exactly on an existing pin within `magnet_radius` (world
+    // units; <= 0 turns it off and this is just snap()). A part dropped
+    // near another one mates pin-to-pin instead of a cell off.
+    [[nodiscard]] Pos place_snap(const ws::circsim::SymbolDef& sym, Pos world,
+                                 int rot, bool mirror, bool coarse,
+                                 double magnet_radius) const;
+
+    // A one-line, context-sensitive hint for the status bar - what the
+    // pointer and keys do RIGHT NOW (tool, draft, drag). Static text,
+    // safe to call every frame; the app feeds it to its status line.
+    [[nodiscard]] std::string_view hint() const;
 
     // Select-and-zoom for a Problems row (locate.hpp's seam).
     void jump_to(const ws::circsim::DiagTarget& t);
