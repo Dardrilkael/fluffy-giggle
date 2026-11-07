@@ -373,6 +373,25 @@ struct OverlayFade {
     bool was_open = false;
 };
 
+// The id the overlay fade keys: the label's own scope, entered just
+// long enough to derive a RESERVED id inside it. The fade stays
+// per-anchor (two overlays sharing a label under one scope are one
+// window), yet the key sits in the reserved family no label or index
+// can spell, so the fresh-open reset's clear_persistent_state can
+// never touch the ANCHOR widget's own state under the same label id -
+// the rest clock tooltip_delayed banks there, and so do the rows' face
+// travelers. (The fade once keyed the anchor's id itself: the first
+// tooltip a widget ever showed erased its own hover clock on the very
+// frame it fired, the hint blinked out for another full delay and
+// healed only because the closed re-arm branch never runs for a
+// hover-gated scope - the "flickers the first time only" defect.)
+inline WidgetId overlay_fade_id(IdStack& ids, const char* label) {
+    ids.push(label);
+    const WidgetId fade = ids.internal_id("fade");
+    ids.pop();
+    return fade;
+}
+
 // The overlay fade's tint: white with the alpha scaled by t - a pure
 // fade, exact at both ends (t = 1 is the identity tint, t = 0 hides
 // everything - the traveler's first frame draws nothing, the fade-in).

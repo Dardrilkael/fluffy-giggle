@@ -18,6 +18,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 namespace {
 
@@ -294,4 +295,67 @@ TEST_CASE("the toast fade rides the store's own age clock") {
     ws::ui::r2d::pop_tint();
     ws::ui::r2d::pop_tint();  // a stray pop: a no-op
     CHECK(true);  // balanced, nothing threw
+}
+
+TEST_CASE("a tooltip's fresh-open fade reset never eats the hover clock") {
+    GuiContext gui;
+    LayoutCursor layout;
+    ws::ui::gui::ChromeTheme theme = kDefaultChrome;
+    theme.tooltip_delay = 0.25f;
+
+    // The hover-to-hint pattern exactly as tooltip_text spells it (minus
+    // the placement, which the headless frame zeroes): a hovered widget
+    // whose id keys tooltip_delayed's rest clock, gating a begin_tooltip
+    // under the SAME label - the collision every palette tile runs. The
+    // firing frame's fresh-open fade reset once keyed that same widget
+    // id, and its clear_persistent_state erased the just-satisfied clock
+    // with it: the hint blinked out on its very first fire and came back
+    // only after re-banking the whole delay - once per widget, because
+    // the closed re-arm branch never runs for a hover-gated scope ("it
+    // flickers the first time only").
+    int frame = 0;
+    std::vector<int> fired_on;
+    const auto hover_frame = [&](float dt, bool over) {
+        ++frame;
+        gui.begin_frame(snap(over ? 30.0f : -100.0f, 26.0f, dt));
+        (void)ws::ui::gui::begin_panel(gui, layout, theme, "board",
+                                       {0.0f, 0.0f, 300.0f, 200.0f});
+        const WidgetId wid = gui.ids().id("go");
+        (void)ws::ui::gui::button(gui, layout, theme, "go", 60.0f);
+        if (ws::ui::gui::tooltip_delayed(gui, wid, theme)) {
+            fired_on.push_back(frame);
+            if (ws::ui::gui::begin_tooltip(gui, layout, theme, "go",
+                                           {10.0f, 60.0f, 120.0f, 30.0f},
+                                           true)) {
+                ws::ui::gui::text(layout, theme, "the hint", -1.0f);
+                ws::ui::gui::end_tooltip(gui, layout);
+            }
+        }
+        ws::ui::gui::end_panel(gui, layout);
+        gui.end_frame();
+    };
+
+    // Six frames of rest at 0.1s: the clock ripens on frame 3 (0.3 >=
+    // 0.25) and then answers true EVERY frame after - the fade's
+    // fresh-open reset must restart the fade, not the clock.
+    for (int i = 0; i < 6; ++i) {
+        hover_frame(0.1f, true);
+    }
+    REQUIRE(fired_on.size() == 4);  // 3, 4, 5, 6 - no blink-out frame
+    CHECK(fired_on[0] == 3);
+    CHECK(fired_on[1] == 4);
+    CHECK(fired_on[2] == 5);
+    CHECK(fired_on[3] == 6);
+
+    // Off the widget the clock zeroes; back on, the same continuity -
+    // ripe after the delay, then every frame.
+    hover_frame(0.1f, false);
+    frame = 0;
+    fired_on.clear();
+    for (int i = 0; i < 6; ++i) {
+        hover_frame(0.1f, true);
+    }
+    REQUIRE(fired_on.size() == 4);
+    CHECK(fired_on[0] == 3);
+    CHECK(fired_on.back() == 6);
 }

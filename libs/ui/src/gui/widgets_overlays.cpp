@@ -72,8 +72,8 @@ bool begin_popup(GuiContext& gui, LayoutCursor& layout,
         // A closed frame re-arms the fade: the NEXT open starts from
         // nothing again (the state cannot reset while closed - nothing
         // runs then - so the closed branch does it).
-        gui.persistent_state<OverlayFade>(gui.ids().id(label)).was_open =
-            false;
+        gui.persistent_state<OverlayFade>(overlay_fade_id(gui.ids(), label))
+            .was_open = false;
         return false;
     }
 
@@ -132,9 +132,11 @@ bool begin_popup(GuiContext& gui, LayoutCursor& layout,
     // (the identity tint) whenever the theme's motion is off. A fresh
     // open resets the traveler itself (the value under this id, not
     // just a flag): the fade replays from 0 every time the window
-    // reopens. Nothing else lives under a popup scope's own id, so the
-    // clear is surgical.
-    const WidgetId pid = gui.ids().id(label);
+    // reopens. The id is the OVERLAY'S own (a reserved key inside the
+    // label's scope - overlay_fade_id), so the clear is surgical: the
+    // anchor widget's state under the label id - a combo row's face
+    // traveler - survives the open untouched.
+    const WidgetId pid = overlay_fade_id(gui.ids(), label);
     if (!gui.persistent_state<OverlayFade>(pid).was_open) {
         gui.clear_persistent_state(pid);  // the traveler restarts
     }
@@ -209,9 +211,10 @@ bool begin_tooltip(GuiContext& gui, LayoutCursor& layout,
                    const ChromeTheme& theme, const char* label,
                    const Rect& bounds, bool show) {
     if (!show) {
-        // The closed frame re-arms the fade, like a popup's.
-        gui.persistent_state<OverlayFade>(gui.ids().id(label)).was_open =
-            false;
+        // The closed frame re-arms the fade, like a popup's - under the
+        // tooltip's own key, the same id the open branch keys.
+        gui.persistent_state<OverlayFade>(overlay_fade_id(gui.ids(), label))
+            .was_open = false;
         return false;
     }
 
@@ -222,8 +225,13 @@ bool begin_tooltip(GuiContext& gui, LayoutCursor& layout,
     // what they get (it claims at the tooltip stratum, unclipped).
     gui.begin_layer(Layer::tooltip);
     // P4: the fade-in bracket, a popup's own spelling (the fresh-open
-    // reset included).
-    const WidgetId pid = gui.ids().id(label);
+    // reset included) - but keyed the overlay's OWN id, a reserved key
+    // inside the label's scope (overlay_fade_id). The anchor widget
+    // shares this label: its rest clock (tooltip_delayed) and face
+    // travelers live under the label id, and the fresh-open clear must
+    // restart the fade without erasing them - the clock's blink-out
+    // was the first-hover flicker.
+    const WidgetId pid = overlay_fade_id(gui.ids(), label);
     if (!gui.persistent_state<OverlayFade>(pid).was_open) {
         gui.clear_persistent_state(pid);  // the traveler restarts
     }
