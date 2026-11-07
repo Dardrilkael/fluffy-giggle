@@ -1083,6 +1083,27 @@ Font Renderer2D::load_default_font(DefaultFontWeight weight,
     return publish_baked_font(baked, options);
 }
 
+Font Renderer2D::load_default_mono_font(float pixel_height,
+                                         const FontBakeOptions& options) {
+    if (device_ == VK_NULL_HANDLE) {
+        ws::core::warn("ui: r2d::load_default_mono_font({}) fell back to an "
+                       "empty font - no GPU context is alive",
+                       pixel_height);
+        return {};
+    }
+    // The mono face's own bytes through the same bake: the same
+    // cannot-fail-to-parse contract, the same invalid-size refusal.
+    const font::BakedFont baked =
+        font::bake_inter(font::jetbrains_mono_ttf(), pixel_height, options);
+    if (!baked.ok) {
+        ws::core::warn("ui: r2d::load_default_mono_font({}) failed - empty "
+                       "font",
+                       pixel_height);
+        return {};
+    }
+    return publish_baked_font(baked, options);
+}
+
 Font Renderer2D::publish_baked_font(const font::BakedFont& baked,
                                     const FontBakeOptions& options) {
     // Every glyph's metrics first (advances and offsets need no atlas);
@@ -1517,6 +1538,15 @@ Font load_default_font(DefaultFontWeight weight, float pixel_height,
         return g_active->load_default_font(weight, pixel_height, options);
     }
     warn_no_app("load_default_font");
+    return {};
+}
+
+Font load_default_mono_font(float pixel_height,
+                            const FontBakeOptions& options) {
+    if (g_active != nullptr) {
+        return g_active->load_default_mono_font(pixel_height, options);
+    }
+    warn_no_app("load_default_mono_font");
     return {};
 }
 

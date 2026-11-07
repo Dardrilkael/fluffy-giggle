@@ -188,6 +188,7 @@ ws_add_test(ui_font
           src/text/default_font.cpp
           src/text/default_font_regular.cpp
           src/text/default_font_semibold.cpp
+          src/text/default_font_mono.cpp
   LINK ws::core
   DEPENDS stb)
 if(TARGET test_ui_font)

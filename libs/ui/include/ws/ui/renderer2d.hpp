@@ -517,6 +517,19 @@ Font load_default_font(float pixel_height,
 Font load_default_font(DefaultFontWeight weight, float pixel_height,
                        const FontBakeOptions& options = {});
 
+// Bakes the BUNDLED mono face - JetBrains Mono v2.304 (SIL Open Font
+// License 1.1, vendored and subset beside the Inter faces) - the stock
+// answer for data that reads in columns: netlists, problem rows,
+// measurements. Not a DefaultFontWeight on purpose: mono is a ROLE, not
+// a weight of the UI face, so it gets its own loader (the same page
+// pipeline and contract as load_default_font - valid from on_setup(),
+// synchronous, an empty Font only without a GPU context). The intended
+// shape is the theme's font_mono slot:
+//   const r2d::Font ui_mono = r2d::load_default_mono_font(15.0f);
+//   theme.font_mono = &ui_mono;  // and the panels that read it follow
+Font load_default_mono_font(float pixel_height,
+                            const FontBakeOptions& options = {});
+
 // The face stack's failure codes (font_add_face): every failure is a
 // ws::core::Error with category "ui" and one of these as its code.
 // Append-only: never renumber, only add.

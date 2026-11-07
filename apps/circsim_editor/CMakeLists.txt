@@ -73,7 +73,9 @@ endif()
 # walk proves two stops where the shared-label bug fused them into
 # one), refresh_problems' snapshot version, and the Palette's draw
 # seam. side_panels needs palette_groups (the panel groups its
-# symbols); the link shape is the suites' own again.
+# symbols); the link shape is the suites' own again. The typography
+# pass's cases read the r2d stub the palette/problems rows draw
+# through, so the stub header's dir rides the include path.
 ws_add_test(circsim_editor_side_panels
   SOURCES tests/test_side_panels.cpp
           src/editor.cpp
@@ -88,7 +90,8 @@ ws_add_test(circsim_editor_side_panels
 if(TARGET test_circsim_editor_side_panels)
   target_include_directories(test_circsim_editor_side_panels PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    "${PROJECT_SOURCE_DIR}/libs/ui/src")
+    "${PROJECT_SOURCE_DIR}/libs/ui/src"
+    "${PROJECT_SOURCE_DIR}/libs/ui/tests")
 endif()
 
 # The Palette's grouping + search: pure data over ws::circsim (no gui),

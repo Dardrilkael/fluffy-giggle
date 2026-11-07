@@ -492,7 +492,10 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
                         gui::LayoutCursor& layout,
                         const gui::ChromeTheme& theme) {
     ws::core::warn("palette: draw_palette_panel start");
-    gui::text(layout, theme, "tools");
+    // The section header: the strong face, a step larger than the body
+    // (the font hierarchy's loud rung - the tools list reads as a
+    // section, not a longer label).
+    gui::heading(layout, theme, "tools");
     if (gui::selectable(gui, layout, theme, "select",
                         ed.tool == Tool::Select)) {
         ed.tool = Tool::Select;
@@ -806,7 +809,7 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
 void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
                            gui::LayoutCursor& layout,
                            const gui::ChromeTheme& theme) {
-    gui::text(layout, theme, "schematic");
+    gui::heading(layout, theme, "schematic");
     char grid_line[64];
     std::snprintf(grid_line, sizeof grid_line, "grid: %.12g",
                   ed.schem()->grid);
@@ -814,7 +817,7 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
     gui::separator(layout, theme);
 
     // --- the analysis list
-    gui::text(layout, theme, "analyses (deck order)");
+    gui::heading(layout, theme, "analyses (deck order)");
     int index = 0;
     for (const ws::circsim::AnalysisSpec& spec :
          ed.schem()->analysis.entries) {
@@ -915,6 +918,17 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
         return;
     }
 
+    // The data rows wear the mono face: a finding line is code-ish
+    // text (refdeses, net names, [E]/[W]/[N] tags) that reads easier
+    // with honest columns, the typography brief's own class. The
+    // swapped-theme idiom (the palette fade's own move): every face
+    // and metric stays the panel's, only the label font swaps - and a
+    // missing mono face keeps the body font, readable either way.
+    gui::ChromeTheme rows_theme = theme;
+    if (ed.font_mono != nullptr && !ed.font_mono->empty()) {
+        rows_theme.font = ed.font_mono;
+    }
+
     const bool stale =
         ed.problems.has && ed.problems.version != ed.schem()->version();
     if (gui::button(gui, layout, theme, "re-check")) {
@@ -937,7 +951,7 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
         int index = 0;
         for (const ws::circsim::Diag& d : ed.doc->report.diags) {
             gui.ids().push(index);
-            (void)gui::selectable(gui, layout, theme, d.render().c_str(),
+            (void)gui::selectable(gui, layout, rows_theme, d.render().c_str(),
                                   false);
             gui.ids().pop();
             ++index;
@@ -953,7 +967,7 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
                 ? "[E] "
                 : (d.severity == ws::circsim::Severity::Warning ? "[W] "
                                                                 : "[N] ");
-        if (gui::selectable(gui, layout, theme,
+        if (gui::selectable(gui, layout, rows_theme,
                             (prefix + ed.problems.lines[static_cast<std::size_t>(
                                            index)])
                                 .c_str(),
@@ -998,16 +1012,24 @@ void draw_netlist_panel(Editor& ed, gui::GuiContext& gui,
               stale ? "stale - edited since the export" : "the deck");
 
     // The lines, in the mono face when there is one (the theme's face
-    // otherwise - readable, just not column-aligned).
-    const ws::ui::r2d::Font& font =
-        ed.font_mono != nullptr && !ed.font_mono->empty() ? *ed.font_mono
-                                                          : *theme.font;
-    const float line_h = font.line_height() + 2.0f;
+    // otherwise - readable, just not column-aligned). A fontless
+    // theme with no mono face falls back to plain text rows, the
+    // value rows' own ladder - never a null deref on the way down.
+    const ws::ui::r2d::Font* font =
+        ed.font_mono != nullptr && !ed.font_mono->empty() ? ed.font_mono
+                                                          : theme.font;
+    if (font == nullptr || font->line_height() <= 0.0f) {
+        for (const std::string& line : ed.netlist.lines) {
+            gui::text(layout, theme, line.c_str());
+        }
+        return;
+    }
+    const float line_h = font->line_height() + 2.0f;
     int index = 0;
     for (const std::string& line : ed.netlist.lines) {
         gui.ids().push(index);
         const gui::Rect row = layout.next(layout.remaining_width(), line_h);
-        (void)ws::ui::r2d::draw_text(row.x, row.y, line.c_str(), font,
+        (void)ws::ui::r2d::draw_text(row.x, row.y, line.c_str(), *font,
                                      gui::dim(theme.text, 0.85f));
         gui.ids().pop();
         ++index;

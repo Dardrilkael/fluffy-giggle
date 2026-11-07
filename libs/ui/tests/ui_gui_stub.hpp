@@ -9,6 +9,10 @@
 
 #include <cstdint>
 
+namespace ws::ui::r2d {
+class Font;  // the last-text font records a pointer identity, nothing more
+}
+
 namespace ws::ui::gui_test {
 
 struct StubDraws {
@@ -25,6 +29,14 @@ struct StubDraws {
     std::uint32_t tint_pops = 0;     // pop_tint
     std::uint32_t last_tint = 0xFFFFFFFFu;  // the most recent push_tint color
     float last_text_advance = -1.0f;  // the most recent draw_text return
+    // The typography pass's own pair: the most recent draw_text COLOR
+    // and FONT (pointer identity - the muted rung's placeholder/tab
+    // assertions and the heading's strong-face assertion compare
+    // against the theme's tokens and the caller's face, never the
+    // glyphs). The font is opaque here on purpose: the stub never
+    // dereferences it.
+    std::uint32_t last_text_color = 0u;
+    const ws::ui::r2d::Font* last_text_font = nullptr;
     // The P5 primitives, counted at their own seams: an outline records
     // itself here AND its two quads in `rounded` (the real renderer emits
     // exactly that pair of draw_rounded_quad calls; the shadow's four

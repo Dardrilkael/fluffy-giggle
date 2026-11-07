@@ -52,6 +52,17 @@ struct ChromeTheme {
     // lightness. NOT dim(text): a theme that wants its quiet rung
     // bluer or warmer says so here, once.
     std::uint32_t text_secondary = r2d::rgba(150, 156, 170);
+    // The muted rung - the chrome hints that must not compete with
+    // content: a field's placeholder, an inactive tab's label. Its own
+    // face, NOT dim(text) and NOT text_secondary's quieter sibling by
+    // accident: the typography brief pinned the dark stock's gray at
+    // #858585, and the class it serves is WCAG's inactive-component /
+    // placeholder exemption, not body text - so it is checked at the
+    // 3:1 component ratio (theme_color) against the panel, control and
+    // bar faces it can land on, like text_on_accent's own class. A
+    // muted label never carries meaning alone: the active rung
+    // (selection underline, focus ring, the pointer) answers for it.
+    std::uint32_t text_muted = r2d::rgba(133, 133, 133);  // #858585
     std::uint32_t border = r2d::rgba(255, 255, 255, 26);
     // The strong divider - table rules, active edges, the separator
     // a busy screen needs to read as structure. A step above `border`
@@ -310,6 +321,11 @@ inline constexpr ChromeTheme kLightChrome{
     .accent_hover = r2d::rgba(70, 150, 224),
     .text = r2d::rgba(28, 31, 38),
     .text_secondary = r2d::rgba(94, 98, 108),
+    // The muted rung on the daylight side: the same gray family pulled
+    // only as light as the 3:1 component ratio allows on every light
+    // face (panel, control, bar) - dimmer than `text`, still legible
+    // as a hint, never competing with the active label.
+    .text_muted = r2d::rgba(120, 122, 128),
     .border = r2d::rgba(0, 0, 0, 40),
     .border_strong = r2d::rgba(0, 0, 0, 70),
     .bar_bg = r2d::rgba(232, 233, 238),

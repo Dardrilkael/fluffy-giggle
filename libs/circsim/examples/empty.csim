@@ -1,0 +1,424 @@
+{
+    "format": "circsim",
+    "version": 1,
+    "grid": 1.0,
+    "next_id": 200,
+    "parts": [
+        {
+            "id": "B1",
+            "type": "voltage_source",
+            "position": [-14, 8],
+            "rotation": 0,
+            "properties": {
+                "value": "12*u(time-1m)",
+                "source_type": "behavioral"
+            },
+            "pins": [
+                {"name": "+", "x": -14, "y": 9},
+                {"name": "-", "x": -14, "y": 7}
+            ]
+        },
+        {
+            "id": "B2",
+            "type": "voltage_source",
+            "position": [-14, -8],
+            "rotation": 0,
+            "properties": {
+                "value": "3300m*u(time-1)",
+                "source_type": "behavioral"
+            },
+            "pins": [
+                {"name": "+", "x": -14, "y": -7},
+                {"name": "-", "x": -14, "y": -9}
+            ]
+        },
+        {
+            "id": "XU1",
+            "type": "subcircuit",
+            "position": [-5, -4],
+            "rotation": 0,
+            "properties": {
+                "name": "PC817",
+                "params": {"Igain": "2.3m"}
+            },
+            "pins": [
+                {"name": "1", "x": -7, "y": -5},
+                {"name": "2", "x": -7, "y": -3},
+                {"name": "3", "x": -3, "y": -5},
+                {"name": "4", "x": -3, "y": -3}
+            ]
+        },
+        {
+            "id": "R9",
+            "type": "resistor",
+            "position": [-11, -8],
+            "rotation": 0,
+            "properties": {"value": "220"},
+            "pins": [
+                {"name": "1", "x": -12, "y": -8},
+                {"name": "2", "x": -10, "y": -8}
+            ]
+        },
+        {
+            "id": "R11",
+            "type": "resistor",
+            "position": [-11, 0],
+            "rotation": 0,
+            "properties": {"value": "47k"},
+            "pins": [
+                {"name": "1", "x": -12, "y": 0},
+                {"name": "2", "x": -10, "y": 0}
+            ]
+        },
+        {
+            "id": "R1",
+            "type": "resistor",
+            "position": [-11, 8],
+            "rotation": 0,
+            "properties": {"value": "1"},
+            "pins": [
+                {"name": "1", "x": -12, "y": 8},
+                {"name": "2", "x": -10, "y": 8}
+            ]
+        },
+        {
+            "id": "C1",
+            "type": "capacitor",
+            "position": [-8, 8],
+            "rotation": 0,
+            "properties": {"value": "3300u"},
+            "pins": [
+                {"name": "1", "x": -9, "y": 8},
+                {"name": "2", "x": -7, "y": 8}
+            ]
+        },
+        {
+            "id": "C2",
+            "type": "capacitor",
+            "position": [8, 4],
+            "rotation": 0,
+            "properties": {"value": "3300u"},
+            "pins": [
+                {"name": "1", "x": 7, "y": 4},
+                {"name": "2", "x": 9, "y": 4}
+            ]
+        },
+        {
+            "id": "D5",
+            "type": "diode",
+            "position": [0, 8],
+            "rotation": 0,
+            "properties": {"model": "D1N4148"},
+            "pins": [
+                {"name": "A", "x": -1, "y": 8},
+                {"name": "K", "x": 1, "y": 8}
+            ]
+        },
+        {
+            "id": "D6",
+            "type": "diode",
+            "position": [4, 8],
+            "rotation": 0,
+            "properties": {"model": "D1N4148"},
+            "pins": [
+                {"name": "A", "x": 3, "y": 8},
+                {"name": "K", "x": 5, "y": 8}
+            ]
+        },
+        {
+            "id": "D7",
+            "type": "diode",
+            "position": [8, 8],
+            "rotation": 0,
+            "properties": {"model": "MUR460"},
+            "pins": [
+                {"name": "A", "x": 7, "y": 8},
+                {"name": "K", "x": 9, "y": 8}
+            ]
+        },
+        {
+            "id": "D8",
+            "type": "diode",
+            "position": [12, 8],
+            "rotation": 0,
+            "properties": {"model": "D1N4007"},
+            "pins": [
+                {"name": "A", "x": 11, "y": 8},
+                {"name": "K", "x": 13, "y": 8}
+            ]
+        },
+        {
+            "id": "D1",
+            "type": "diode",
+            "position": [-4, 12],
+            "rotation": 0,
+            "properties": {"model": "D1N4148"},
+            "pins": [
+                {"name": "A", "x": -5, "y": 12},
+                {"name": "K", "x": -3, "y": 12}
+            ]
+        },
+        {
+            "id": "D2",
+            "type": "diode",
+            "position": [0, 12],
+            "rotation": 0,
+            "properties": {"model": "D1N4148"},
+            "pins": [
+                {"name": "A", "x": -1, "y": 12},
+                {"name": "K", "x": 1, "y": 12}
+            ]
+        },
+        {
+            "id": "D3",
+            "type": "diode",
+            "position": [4, 12],
+            "rotation": 0,
+            "properties": {"model": "D1N4148"},
+            "pins": [
+                {"name": "A", "x": 3, "y": 12},
+                {"name": "K", "x": 5, "y": 12}
+            ]
+        },
+        {
+            "id": "D4",
+            "type": "diode",
+            "position": [8, 12],
+            "rotation": 0,
+            "properties": {"model": "D1N4148"},
+            "pins": [
+                {"name": "A", "x": 7, "y": 12},
+                {"name": "K", "x": 9, "y": 12}
+            ]
+        },
+        {
+            "id": "Q1",
+            "type": "npn",
+            "position": [0, 4],
+            "rotation": 0,
+            "properties": {"model": "TIP41C"},
+            "pins": [
+                {"name": "C", "x": 0, "y": 3},
+                {"name": "B", "x": -1, "y": 4},
+                {"name": "E", "x": 0, "y": 5}
+            ]
+        },
+        {
+            "id": "Q2",
+            "type": "npn",
+            "position": [0, -8],
+            "rotation": 0,
+            "properties": {"model": "BC337"},
+            "pins": [
+                {"name": "C", "x": 0, "y": -9},
+                {"name": "B", "x": -1, "y": -8},
+                {"name": "E", "x": 0, "y": -7}
+            ]
+        },
+        {
+            "id": "Q3",
+            "type": "npn",
+            "position": [4, -8],
+            "rotation": 0,
+            "properties": {"model": "BC337"},
+            "pins": [
+                {"name": "C", "x": 4, "y": -9},
+                {"name": "B", "x": 3, "y": -8},
+                {"name": "E", "x": 4, "y": -7}
+            ]
+        },
+        {
+            "id": "R10",
+            "type": "resistor",
+            "position": [4, 4],
+            "rotation": 0,
+            "properties": {"value": "470k"},
+            "pins": [
+                {"name": "1", "x": 3, "y": 4},
+                {"name": "2", "x": 5, "y": 4}
+            ]
+        },
+        {
+            "id": "R2",
+            "type": "resistor",
+            "position": [0, -4],
+            "rotation": 0,
+            "properties": {"value": "120"},
+            "pins": [
+                {"name": "1", "x": -1, "y": -4},
+                {"name": "2", "x": 1, "y": -4}
+            ]
+        },
+        {
+            "id": "R3",
+            "type": "resistor",
+            "position": [4, -4],
+            "rotation": 0,
+            "properties": {"value": "470"},
+            "pins": [
+                {"name": "1", "x": 3, "y": -4},
+                {"name": "2", "x": 5, "y": -4}
+            ]
+        },
+        {
+            "id": "R4",
+            "type": "resistor",
+            "position": [4, 0],
+            "rotation": 0,
+            "properties": {"value": "1"},
+            "pins": [
+                {"name": "1", "x": 3, "y": 0},
+                {"name": "2", "x": 5, "y": 0}
+            ]
+        },
+        {
+            "id": "R5",
+            "type": "resistor",
+            "position": [8, 0],
+            "rotation": 0,
+            "properties": {"value": "680m"},
+            "pins": [
+                {"name": "1", "x": 7, "y": 0},
+                {"name": "2", "x": 9, "y": 0}
+            ]
+        },
+        {
+            "id": "R6",
+            "type": "resistor",
+            "position": [12, 0],
+            "rotation": 0,
+            "properties": {"value": "5000"},
+            "pins": [
+                {"name": "1", "x": 11, "y": 0},
+                {"name": "2", "x": 13, "y": 0}
+            ]
+        },
+        {
+            "id": "R7",
+            "type": "resistor",
+            "position": [12, -4],
+            "rotation": 0,
+            "properties": {"value": "5000"},
+            "pins": [
+                {"name": "1", "x": 11, "y": -4},
+                {"name": "2", "x": 13, "y": -4}
+            ]
+        },
+        {
+            "id": "R8",
+            "type": "resistor",
+            "position": [12, 4],
+            "rotation": 0,
+            "properties": {"value": "5000"},
+            "pins": [
+                {"name": "1", "x": 11, "y": 4},
+                {"name": "2", "x": 13, "y": 4}
+            ]
+        },
+        {
+            "id": "S_SCR",
+            "type": "switch",
+            "position": [8, -8],
+            "rotation": 0,
+            "properties": {"model": "SW_SCR"},
+            "pins": [
+                {"name": "1", "x": 7, "y": -8},
+                {"name": "2", "x": 9, "y": -8},
+                {"name": "3", "x": 8, "y": -9},
+                {"name": "4", "x": 8, "y": -7}
+            ]
+        },
+        {
+            "id": "D_SCR",
+            "type": "diode",
+            "position": [12, -8],
+            "rotation": 0,
+            "properties": {"model": "D_SCR"},
+            "pins": [
+                {"name": "A", "x": 11, "y": -8},
+                {"name": "K", "x": 13, "y": -8}
+            ]
+        }
+    ],
+    "junctions": [],
+    "wires": [],
+    "labels": [
+        {"text": "f1", "position": [-13, 9], "rotation": 0},
+        {"text": "0", "position": [-13, 7], "rotation": 0},
+        {"text": "f2", "position": [-13, -7], "rotation": 0},
+        {"text": "0", "position": [-13, -9], "rotation": 0},
+        {"text": "f1", "position": [-12.5, 8], "rotation": 0},
+        {"text": "12v", "position": [-9.5, 8], "rotation": 0},
+        {"text": "0", "position": [-6.5, 8], "rotation": 0},
+        {"text": "f2", "position": [-12.5, -8], "rotation": 0},
+        {"text": "N001", "position": [-9.5, -8], "rotation": 0},
+        {"text": "12v", "position": [-12.5, 0], "rotation": 0},
+        {"text": "bq2", "position": [-9.5, 0], "rotation": 0},
+        {"text": "f2", "position": [-7.5, -5], "rotation": 0},
+        {"text": "0", "position": [-7.5, -3], "rotation": 0},
+        {"text": "bq2", "position": [-2.5, -5], "rotation": 0},
+        {"text": "0", "position": [-2.5, -3], "rotation": 0},
+        {"text": "bq1", "position": [-1, 8], "rotation": 0},
+        {"text": "ve", "position": [1, 8], "rotation": 0},
+        {"text": "0", "position": [3, 8], "rotation": 0},
+        {"text": "ve", "position": [5, 8], "rotation": 0},
+        {"text": "ve", "position": [7, 8], "rotation": 0},
+        {"text": "vo", "position": [9, 8], "rotation": 0},
+        {"text": "0", "position": [11, 8], "rotation": 0},
+        {"text": "vo", "position": [13, 8], "rotation": 0},
+        {"text": "bq3", "position": [-5, 12], "rotation": 0},
+        {"text": "n_gate1", "position": [-3, 12], "rotation": 0},
+        {"text": "n_gate1", "position": [-1, 12], "rotation": 0},
+        {"text": "n_gate2", "position": [1, 12], "rotation": 0},
+        {"text": "n_gate2", "position": [3, 12], "rotation": 0},
+        {"text": "n_gate3", "position": [5, 12], "rotation": 0},
+        {"text": "n_gate3", "position": [7, 12], "rotation": 0},
+        {"text": "0", "position": [9, 12], "rotation": 0},
+        {"text": "bq1", "position": [0, 3], "rotation": 0},
+        {"text": "0", "position": [-1, 4], "rotation": 0},
+        {"text": "ve", "position": [0, 5], "rotation": 0},
+        {"text": "bq2", "position": [0, -9], "rotation": 0},
+        {"text": "0", "position": [-1, -8], "rotation": 0},
+        {"text": "eq2", "position": [0, -7], "rotation": 0},
+        {"text": "bq3", "position": [4, -9], "rotation": 0},
+        {"text": "0", "position": [3, -8], "rotation": 0},
+        {"text": "eq3", "position": [4, -7], "rotation": 0},
+        {"text": "12v", "position": [-1, -4], "rotation": 0},
+        {"text": "eq2", "position": [1, -4], "rotation": 0},
+        {"text": "12v", "position": [3, -4], "rotation": 0},
+        {"text": "eq3", "position": [5, -4], "rotation": 0},
+        {"text": "bq1", "position": [3, 4], "rotation": 0},
+        {"text": "ve", "position": [5, 4], "rotation": 0},
+        {"text": "bq1", "position": [3, 0], "rotation": 0},
+        {"text": "ve", "position": [5, 0], "rotation": 0},
+        {"text": "ve", "position": [7, 0], "rotation": 0},
+        {"text": "N002", "position": [9, 0], "rotation": 0},
+        {"text": "ve", "position": [7, 4], "rotation": 0},
+        {"text": "12v", "position": [9, 4], "rotation": 0},
+        {"text": "vo", "position": [11, 0], "rotation": 0},
+        {"text": "N003", "position": [13, 0], "rotation": 0},
+        {"text": "N003", "position": [11, -4], "rotation": 0},
+        {"text": "0", "position": [13, -4], "rotation": 0},
+        {"text": "vo", "position": [11, 4], "rotation": 0},
+        {"text": "N004", "position": [13, 4], "rotation": 0},
+        {"text": "bq1", "position": [7, -8], "rotation": 0},
+        {"text": "0", "position": [9, -8], "rotation": 0},
+        {"text": "bq3", "position": [8, -9], "rotation": 0},
+        {"text": "0", "position": [8, -7], "rotation": 0},
+        {"text": "bq1", "position": [11, -8], "rotation": 0},
+        {"text": "0", "position": [13, -8], "rotation": 0}
+    ],
+    "analysis": {
+        "entries": [
+            {
+                "type": "tran",
+                "params": "1m 1100m uic"
+            }
+        ]
+    },
+    "directives": ".option scale=1u\n.options TEMP=27\n.subckt PC817 1 2 3 4 params: Igain=2.3m\nR1 N003 2 2\nD1 1 N003 LD\nG1 3 N004 N003 2 {Igain}\nC1 1 2 18p\nQ1 3 N004 4 NP\n.model LD D(Is=1e-20 Cjo=18p)\n.model NP NPN(Bf=1200 Vaf=140 Ikf=100m Rc=1 Cjc=19p Cje=7p Cjs=7p C2=3e-15)\n.ends PC817\n.model D1N4148 D(IS=4.352E-9 N=1.906 BV=110 IBV=0.0001 RS=0.6458 CJO=7.048E-13 VJ=0.869 M=0.03 FC=0.5 TT=3.48E-9 EG=1.11 XTI=3)\n.model D1N4007 D(IS=1e-14 N=1.05 RS=10)\n.model MUR460 D(IS=1e-14 N=1.05 RS=10 BV=600)\n.model TIP41C NPN(IS=1e-14 BF=100 VAF=100 IKF=1 RC=0.1)\n.model BC337 NPN(IS=1e-14 BF=100 VAF=100 IKF=0.1 RC=1)\n.model SW_SCR SW(Ron=10m Roff=100Meg Vt=0.5 Vh=-0.4)\n.model D_SCR D(Is=1e-14)",
+    "view": {
+        "zoom": 1.0,
+        "center": [0.0, 0.0]
+    }
+}

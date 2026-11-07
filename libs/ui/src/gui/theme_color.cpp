@@ -167,6 +167,18 @@ std::vector<ContrastFailure> contrast_failures(const ChromeTheme& theme) {
          theme.panel_bg, 4.5},
         {"text_secondary / control_bg", theme.text_secondary,
          theme.control_bg, 4.5},
+        // The muted rung is a HINT, not content: a placeholder, an
+        // inactive tab - WCAG's inactive-component / placeholder class,
+        // checked at the 3:1 component ratio like text_on_accent's own
+        // pairs, against every face the rung lands on (the panel a
+        // field sits in, the control face inside the field, the bar a
+        // tab strip rides). The active rung - the selection underline,
+        // the focus ring, the pointer - carries the meaning; the muted
+        // gray only needs to be READ.
+        {"text_muted / panel_bg", theme.text_muted, theme.panel_bg, 3.0},
+        {"text_muted / control_bg", theme.text_muted,
+         theme.control_bg, 3.0},
+        {"text_muted / bar_bg", theme.text_muted, theme.bar_bg, 3.0},
         {"control_on / panel_bg", theme.control_on, theme.panel_bg, 3.0},
         {"control_on / control_bg", theme.control_on, theme.control_bg, 3.0},
         {"control_pressed / panel_bg", theme.control_pressed,

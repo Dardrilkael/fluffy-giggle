@@ -1,0 +1,78 @@
+* SCR Trigger Circuit - NGSpice Test Netlist - CORRECTED
+.option scale=1u
+.options TEMP=27
+
+* --- Power Supplies & Inputs ---
+B1 f1 0 V = 12*u(time-1m)
+B2 f2 0 V = 3300m*u(time-1)
+
+* --- Optocoupler PC817 Subcircuit ---
+.subckt PC817 1 2 3 4 params: Igain=2.3m
+R1 N003 2 2
+D1 1 N003 LD
+G1 3 N004 N003 2 {Igain}
+C1 1 2 18p
+Q1 3 N004 4 NP
+.model LD D(Is=1e-20 Cjo=18p)
+.model NP NPN(Bf=1200 Vaf=140 Ikf=100m Rc=1 Cjc=19p Cje=7p Cjs=7p C2=3e-15)
+.ends PC817
+
+* --- Optocoupler Instance ---
+XU1 f2 0 bq2 0 PC817
+
+* --- Input Resistors ---
+R9 f2 N001 220
+R11 12v bq2 47k
+R1 f1 12v 1
+
+* --- Capacitors ---
+C1 12v 0 3300u
+C2 ve 12v 3300u
+
+* --- Diode Bridge & Snubber ---
+D5 bq1 ve D1N4148
+D6 0 ve D1N4148
+D7 ve vo MUR460
+D8 0 vo D1N4007
+
+* --- Gate Drive Diode String ---
+D1 bq3 n_gate1 D1N4148
+D2 n_gate1 n_gate2 D1N4148
+D3 n_gate2 n_gate3 D1N4148
+D4 n_gate3 0 D1N4148
+
+* --- Transistors ---
+Q1 bq1 0 ve TIP41C
+Q2 bq2 0 eq2 BC337
+Q3 bq3 0 eq3 BC337
+
+* --- Resistors (Top Section) ---
+R10 bq1 ve 470k
+R2 12v eq2 120
+R3 12v eq3 470
+R4 bq1 ve 1
+R5 ve N002 680m
+
+* --- Resistors (Output Section) ---
+R6 vo N003 5000
+R7 N003 0 5000
+R8 vo N004 5000
+
+* --- SCR Equivalent Circuit (Discrete) ---
+S_SCR bq1 0 bq3 0 SW_SCR
+D_SCR bq1 0 D_SCR
+.model SW_SCR SW(Ron=10m Roff=100Meg Vt=0.5 Vh=-0.4)
+.model D_SCR D(Is=1e-14)
+
+* --- Model Definitions ---
+.model D1N4148 D(IS=4.352E-9 N=1.906 BV=110 IBV=0.0001 RS=0.6458 CJO=7.048E-13 VJ=0.869 M=0.03 FC=0.5 TT=3.48E-9 EG=1.11 XTI=3)
+.model D1N4007 D(IS=1e-14 N=1.05 RS=10)
+.model MUR460 D(IS=1e-14 N=1.05 RS=10 BV=600)
+.model TIP41C NPN(IS=1e-14 BF=100 VAF=100 IKF=1 RC=0.1)
+.model BC337 NPN(IS=1e-14 BF=100 VAF=100 IKF=0.1 RC=1)
+
+* --- Simulation Commands ---
+* FIXED: Replaced LTspice 'startup' with NGSpice valid syntax
+.tran 1m 1100m uic
+
+.end

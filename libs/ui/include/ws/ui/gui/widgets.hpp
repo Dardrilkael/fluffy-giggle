@@ -409,6 +409,19 @@ void drag_float_draw(const Rect& rect, const DragFloatResult& result,
 void text(LayoutCursor& layout, const ChromeTheme& theme,
           const char* label, float width = -1.0f);
 
+// A section heading - the font hierarchy's loud rung. Draws `label`
+// through the theme's STRONG face (font_strong, null = `font`, the
+// one-font rule) at that face's own baked size on a row taller than
+// text's: the app bakes its strong face a step larger than the body
+// (circsim's 18 px against the 16 px body), and the heading simply
+// follows it - bold-ish and slightly larger, like a document's h2.
+// Chrome like text(): no id, no hit-test, no GuiContext. The width
+// contract is text()'s own (negative = size to the label, fixed =
+// truncate into it), and the color is the theme's body `text`: a
+// heading is structure, not a hint - the muted rung is not invited.
+void heading(LayoutCursor& layout, const ChromeTheme& theme,
+             const char* label, float width = -1.0f);
+
 // A horizontal rule: a theme.border-colored 2-px line (a hardcoded
 // pixel like the focus ring's 1, not a theme metric) with the flow's
 // own spacing for air on both sides. A negative `width` fills the rest

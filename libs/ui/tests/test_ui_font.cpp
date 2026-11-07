@@ -12,6 +12,7 @@
 #include "text/default_font.h"
 #include "text/font.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <span>
@@ -32,7 +33,7 @@ std::uint64_t ink_of(const BakedGlyph& g) {
     return sum;
 }
 
-const BakedGlyph& glyph_of(const BakedFont& baked, char c) {
+const BakedGlyph& glyph_of(const BakedFont& baked, std::uint32_t c) {
     return baked.glyphs[static_cast<std::size_t>(c - 32)];
 }
 
@@ -284,6 +285,40 @@ TEST_CASE("an invalid size bakes nothing, on any face") {
     // The empty span is the same refusal.
     const BakedFont empty_span = ws::ui::r2d::font::bake_inter({}, 16.0f);
     CHECK(!empty_span.ok);
+}
+
+TEST_CASE("the bundled JetBrains Mono bakes a truly mono table") {
+    // The typography pass's data face: the netlist, the problems rows
+    // and the measurements read in columns, and a column is an advance
+    // every glyph shares - the one property this face must carry that
+    // Inter never will.
+    const BakedFont mono = ws::ui::r2d::font::bake_inter(
+        ws::ui::r2d::font::jetbrains_mono_ttf(), 15.0f);
+    REQUIRE(mono.ok);
+    REQUIRE(mono.glyphs.size() == 96u);  // ASCII + the fallback box
+
+    // Every printable advances the same (a hair of bake rounding
+    // aside): the wide 'W', the thin 'i', the pipe - one column pitch.
+    const float pitch = glyph_of(mono, 'M').advance;
+    CHECK(pitch > 0.0f);
+    float widest = 0.0f;
+    float narrowest = pitch;
+    for (std::uint32_t cp = 33; cp <= 126; ++cp) {
+        const float advance = glyph_of(mono, cp).advance;
+        CHECK(advance > 0.0f);
+        widest = std::max(widest, advance);
+        narrowest = std::min(narrowest, advance);
+    }
+    CHECK(widest - narrowest < 0.01f);
+
+    // And it is a FACE at the data size: ink on the glyphs, a sane
+    // line box, real columns to read. (No cross-face size claim: a
+    // 15 px mono column is narrower than a 16 px Inter lowercase run
+    // by design - mono's pitch is one column, not an average.)
+    CHECK(ink_of(glyph_of(mono, 'r')) > 0);
+    CHECK(ink_of(glyph_of(mono, '0')) > 0);
+    CHECK(mono.line_height > 12.0f);
+    CHECK(mono.line_height < 24.0f);
 }
 
 TEST_CASE("the lazy face bake rides the owning font's options") {

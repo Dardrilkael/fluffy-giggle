@@ -153,6 +153,40 @@ constexpr const char* kMonoFontPath =
   return ws::ui::r2d::load_default_font(pixel_height, options);
 }
 
+// The mono face, the same override ladder for the data runs (the
+// netlist, the problems rows, the measurements): WS_MONO_FONT_PATH
+// wins when it is set and loadable, and the BUNDLED JetBrains Mono
+// answers otherwise - the stock look on every platform, the same rule
+// load_ui_font gives the UI face (the pre-typography pass walked the
+// system mono paths instead, so a box without one silently lost its
+// columns).
+[[nodiscard]] ws::ui::r2d::Font load_mono_font(
+    float pixel_height, const ws::ui::r2d::FontBakeOptions& options) {
+#if defined(_WIN32)
+  char* custom = nullptr;
+  size_t len = 0;
+  _dupenv_s(&custom, &len, "WS_MONO_FONT_PATH");
+  const char* custom_c = custom;
+#else
+  const char* custom_c = std::getenv("WS_MONO_FONT_PATH");
+#endif
+  if (custom_c) {
+    ws::ui::r2d::Font loaded =
+        ws::ui::r2d::load_font(custom_c, pixel_height, options);
+    if (!loaded.empty()) {
+#if defined(_WIN32)
+      free(custom);
+#endif
+      return loaded;
+    }
+    // A dead override falls through to the bundled face.
+  }
+#if defined(_WIN32)
+  free(custom);
+#endif
+  return ws::ui::r2d::load_default_mono_font(pixel_height, options);
+}
+
 // --- the app ----------------------------------------------------------------
 
 class CircsimApp final : public ws::ui::App {
@@ -338,8 +372,14 @@ class CircsimApp final : public ws::ui::App {
         // variable set.
         if (!autorun_checked_) {
             autorun_checked_ = true;
-#pragma warning(suppress : 4996)  // the debug probe reads an env var
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)  // the debug probe reads an env var
+#endif
             if (const char* env = std::getenv("CIRCSIM_AUTORUN_SECS")) {
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
                 autorun_secs_ = static_cast<float>(std::atof(env));
             }
             ws::core::warn("circsim: autorun {}",
@@ -400,6 +440,7 @@ class CircsimApp final : public ws::ui::App {
         }
         theme.font = font_.empty() ? nullptr : &font_;
         theme.font_strong = font_strong_.empty() ? nullptr : &font_strong_;
+        theme.font_mono = font_mono_.empty() ? nullptr : &font_mono_;
         ws::core::warn("circsim: shell_->draw");
         shell_->draw(gui_, theme,
                      gui::Rect{0.0f, 0.0f, frame.width, frame.height});
@@ -422,10 +463,12 @@ class CircsimApp final : public ws::ui::App {
     }
 
   private:
-    // The faces, re-baked on demand: the bundled Inter (regular +
-    // semibold) at the brightness pick, the system mono beside it, the
-    // past-ASCII carriers stacked under each. A theme flip calls this
-    // again - a bake is a snapshot of its options.
+    // The faces, re-baked on demand: the bundled Inter (regular + the
+    // semibold HEADING bake, a step larger than the body - the font
+    // hierarchy's own pair) at the brightness pick, the bundled
+    // JetBrains Mono beside them, the past-ASCII carriers stacked under
+    // each. A theme flip calls this again - a bake is a snapshot of its
+    // options.
     void rebuild_fonts() {
         const ws::ui::r2d::FontBakeOptions bake = bake_options_for(font_dark_);
         font_ = load_ui_font(16.0f * scale_, bake);
@@ -436,8 +479,12 @@ class CircsimApp final : public ws::ui::App {
                 font_, font_or(kUiFontPath, kExtraFontPath), 0);
             (void)ws::ui::r2d::font_add_face(font_, kExtraFontPath, 1);
         }
+        // The heading face: the semibold at 18 px against the body's
+        // 16 - "bold and slightly larger", the typography brief's own
+        // hierarchy rung. gui::heading() follows whatever size this
+        // bake carries; one font stays one (weight, size) pair.
         font_strong_ = ws::ui::r2d::load_default_font(
-            ws::ui::r2d::DefaultFontWeight::semibold, 16.0f * scale_, bake);
+            ws::ui::r2d::DefaultFontWeight::semibold, 18.0f * scale_, bake);
         if (!font_strong_.empty()) {
             // The strong face answers the same carriers - and the same
             // face-0 fallback as font_ above (a box whose dejavu is
@@ -448,11 +495,14 @@ class CircsimApp final : public ws::ui::App {
                 font_strong_, font_or(kUiFontPath, kExtraFontPath), 0);
             (void)ws::ui::r2d::font_add_face(font_strong_, kExtraFontPath, 1);
         }
-        // The netlist panel's mono face, same stack shape.
-        font_mono_ =
-            ws::ui::r2d::load_font(kMonoFontPath, 15.0f * scale_, bake);
+        // The data face (netlist, problems, measurements): the bundled
+        // JetBrains Mono through the same override ladder as the UI
+        // face, the system mono stacked under it for its past-ASCII
+        // glyphs, the Han carrier under that.
+        font_mono_ = load_mono_font(15.0f * scale_, bake);
         if (!font_mono_.empty()) {
-            (void)ws::ui::r2d::font_add_face(font_mono_, kMonoFontPath, 0);
+            (void)ws::ui::r2d::font_add_face(
+                font_mono_, font_or(kMonoFontPath, kExtraFontPath), 0);
             (void)ws::ui::r2d::font_add_face(font_mono_, kExtraFontPath, 1);
         }
     }

@@ -258,6 +258,10 @@ public:
     // filesystem). `weight` picks regular or semibold.
     Font load_default_font(DefaultFontWeight weight, float pixel_height,
                            const FontBakeOptions& options = {});
+    // The bundled MONO face's pipeline (JetBrains Mono, embedded the
+    // same way) - the public load_default_mono_font routes here.
+    Font load_default_mono_font(float pixel_height,
+                                const FontBakeOptions& options = {});
     Font publish_baked_font(const font::BakedFont& baked,
                             const FontBakeOptions& options);
     // The texture-lifecycle pair (the public header's

@@ -16,7 +16,9 @@
 #include "../src/editor.hpp"
 #include "../src/side_panels.hpp"
 
+#include <array>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <ws/settings/filesystem.hpp>
@@ -24,6 +26,9 @@
 #include <ws/ui/gui/gui_context.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
 #include <ws/ui/gui/theme.hpp>
+#include <ws/ui/renderer2d.hpp>
+
+#include "ui_gui_stub.hpp"
 
 namespace {
 
@@ -92,12 +97,30 @@ struct Bench {
 
     // Draws the Palette panel once (the seam test's surface).
     void draw_palette() {
+        draw_palette(gui::kDefaultChrome);
+    }
+
+    // The themed spelling: the typography cases pin the heading's face
+    // through the r2d stub the whole panel draws past.
+    void draw_palette(const gui::ChromeTheme& theme) {
         gui.begin_frame(ws::input::InputFrame{});
         gui::LayoutCursor layout;
         (void)layout.begin_panel(gui::Rect{0.0f, 0.0f, 200.0f, 640.0f},
                                  12.0f, 8.0f);
-        const gui::ChromeTheme theme = gui::kDefaultChrome;
         editor::draw_palette_panel(ed, gui, layout, theme);
+        layout.end_panel();
+        gui.end_frame();
+    }
+
+    // Draws the Problems panel once (the stock fontless chrome - the
+    // mono cases install ed.font_mono themselves).
+    void draw_problems() {
+        gui.begin_frame(ws::input::InputFrame{});
+        gui::LayoutCursor layout;
+        (void)layout.begin_panel(gui::Rect{0.0f, 0.0f, 480.0f, 240.0f},
+                                 12.0f, 8.0f);
+        const gui::ChromeTheme theme = gui::kDefaultChrome;
+        editor::draw_problems_panel(ed, gui, layout, theme);
         layout.end_panel();
         gui.end_frame();
     }
@@ -394,4 +417,120 @@ TEST_CASE("two toasts in quick succession keep both messages' bytes live") {
     CHECK(b.ed.toast_text_.front().c_str() == first);
     CHECK(std::string{b.ed.toast_text_.back().c_str()} ==
           "a second about, four seconds early");
+}
+
+// --- the typography pass: the hierarchy rung, the mono data face ------------------
+
+namespace {
+
+// The synthetic faces the typography cases install: a strong table at
+// the heading size (18 px against the 16 px body, the app's own bake
+// pair) and a mono table at the data size. The fill ctor copies the
+// table, so the arrays fill before the Font members construct.
+using GlyphTable = std::array<ws::ui::r2d::Font::Glyph, 95>;
+
+GlyphTable glyph_table(float advance) {
+    GlyphTable glyphs{};
+    for (ws::ui::r2d::Font::Glyph& g : glyphs) {
+        g.advance = advance;
+    }
+    return glyphs;
+}
+
+}  // namespace
+
+TEST_CASE("the palette's tools header draws through the strong face") {
+    Bench b;
+    b.ed.palette_canvas = &b.clc;
+
+    const GlyphTable strong_glyphs = glyph_table(9.0f);
+    const ws::ui::r2d::Font strong(18.0f, 23.0f, strong_glyphs.data(), 95);
+    gui::ChromeTheme theme = gui::kDefaultChrome;  // fontless body rows
+    theme.font_strong = &strong;
+
+    ws::ui::gui_test::stub.reset();
+    b.draw_palette(theme);
+
+    // The ONE text the whole palette draws: the "tools" heading, through
+    // the strong face at its own baked size - every other row (the tool
+    // selectables, the search placeholder, the group headers, the hint
+    // line) is fontless chrome and answers in bars, so the seam's count
+    // is the heading's own proof.
+    CHECK(ws::ui::gui_test::stub.texts == 1u);
+    CHECK(ws::ui::gui_test::stub.last_text_font == &strong);
+
+    // And without a strong face the heading degrades to a bar like
+    // every other row - one text fewer, no crash, the one-font rule.
+    ws::ui::gui_test::stub.reset();
+    b.draw_palette();  // the stock fontless theme
+    CHECK(ws::ui::gui_test::stub.texts == 0u);
+}
+
+TEST_CASE("the problems rows wear the mono face, the chrome stays body") {
+    Bench b;
+    std::vector<ws::circsim::Diag> diags;
+    ws::circsim::Diag floating;
+    floating.severity = ws::circsim::Severity::Error;
+    floating.code = "erc.floating";
+    floating.message = "output pin floats";
+    floating.where = "R1";
+    diags.push_back(floating);
+    ws::circsim::Diag dup;
+    dup.severity = ws::circsim::Severity::Warning;
+    dup.code = "erc.dupref";
+    dup.message = "duplicate refdes";
+    dup.where = "R1";
+    diags.push_back(dup);
+    b.ed.refresh_problems(false, std::move(diags), "erc",
+                          b.doc.schem.version());
+    REQUIRE(b.ed.problems.has);
+
+    const GlyphTable mono_glyphs = glyph_table(8.0f);
+    ws::ui::r2d::Font mono(15.0f, 19.0f, mono_glyphs.data(), 95);
+    b.ed.font_mono = &mono;
+
+    ws::ui::gui_test::stub.reset();
+    b.draw_problems();
+
+    // The two findings drew through the mono face (the data rows - the
+    // [E]/[W] prefixes, the refdeses, the columns), and nothing else
+    // drew text at all: the button, the header and the counts are
+    // fontless chrome in this bench.
+    CHECK(ws::ui::gui_test::stub.texts == 2u);
+    CHECK(ws::ui::gui_test::stub.last_text_font == &mono);
+
+    // The fontless ladder: no mono face installed, the rows fall back
+    // to the theme's face - null here, so bars, and the panel still
+    // draws (never a deref on the way down).
+    b.ed.font_mono = nullptr;
+    ws::ui::gui_test::stub.reset();
+    b.draw_problems();
+    CHECK(ws::ui::gui_test::stub.texts == 0u);
+}
+
+TEST_CASE("the netlist tab honors the mono face and survives a fontless theme") {
+    Bench b;
+    b.ed.properties_tab = 1;  // the right panel's Netlist tab
+    b.ed.netlist.has = true;
+    b.ed.netlist.version = b.doc.schem.version();
+    b.ed.netlist.lines = {"* the deck", "V1 in 0 dc 5", "R1 in out 1k",
+                          ".end"};
+
+    // The fontless frame FIRST (the regression): no mono face and no
+    // body font - the deck still draws, as plain rows, where the old
+    // path deref'd *theme.font unconditionally.
+    ws::ui::gui_test::stub.reset();
+    b.draw_properties();
+    CHECK(ws::ui::gui_test::stub.texts == 0u);
+
+    // With the mono face installed: every deck line answers through it,
+    // and only the deck - the tab strip, the re-export button and the
+    // "the deck" label stay fontless chrome.
+    const GlyphTable mono_glyphs = glyph_table(8.0f);
+    ws::ui::r2d::Font mono(15.0f, 19.0f, mono_glyphs.data(), 95);
+    b.ed.font_mono = &mono;
+    ws::ui::gui_test::stub.reset();
+    b.draw_properties();
+    CHECK(ws::ui::gui_test::stub.texts == 4u);
+    CHECK(ws::ui::gui_test::stub.last_text_font == &mono);
 }

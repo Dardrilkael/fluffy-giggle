@@ -205,6 +205,13 @@ target_include_directories(imgui SYSTEM PUBLIC
   "${imgui_SOURCE_DIR}/backends")
 target_link_libraries(imgui PUBLIC ${WS_IMGUI_PLATFORM_DEPS})
 target_compile_definitions(imgui PUBLIC IMGUI_IMPL_VULKAN_USE_VOLK)
+# The GLFW backend needs GLFW's own types, never the GL headers glfw3.h
+# pulls by default (the Vulkan renderer supplies the GL types it uses) -
+# the same GLFW_INCLUDE_NONE the workspace's own window_glfw.cpp spells,
+# so a posix box without the GL development headers still builds.
+if(NOT ANDROID)
+  target_compile_definitions(imgui PRIVATE GLFW_INCLUDE_NONE)
+endif()
 
 # --- ImPlot -----------------------------------------------------------------
 add_library(implot STATIC

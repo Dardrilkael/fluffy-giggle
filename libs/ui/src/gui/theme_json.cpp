@@ -33,6 +33,7 @@ constexpr FaceEntry kFaceEntries[] = {
     {"accent_hover", &ChromeTheme::accent_hover},
     {"text", &ChromeTheme::text},
     {"text_secondary", &ChromeTheme::text_secondary},
+    {"text_muted", &ChromeTheme::text_muted},
     {"border", &ChromeTheme::border},
     {"border_strong", &ChromeTheme::border_strong},
     {"bar_bg", &ChromeTheme::bar_bg},

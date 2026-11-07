@@ -270,6 +270,34 @@ void text(LayoutCursor& layout, const ChromeTheme& theme,
     draw_label(rect.x, rect.y, rect.height, fit, theme.text, theme);
 }
 
+void heading(LayoutCursor& layout, const ChromeTheme& theme,
+             const char* label, float width) {
+    // The section break: the strong face at its own baked size, on a
+    // row a step taller than a body row. The strong face is the
+    // CALLER'S bake (circsim's 18 px semibold against the 16 px body),
+    // so the hierarchy is two bakes and one pointer - the theme's
+    // documented shape - and the heading just follows whatever size
+    // that face carries. fit_text and draw_label read the font off the
+    // theme, so the heading rides a swapped COPY (the palette-fade
+    // idiom's own move: a local theme variant, never a mutation); a
+    // null font_strong falls back to `font`, and fontless the taller
+    // bar carries the hierarchy alone.
+    const r2d::Font* face =
+        theme.font_strong != nullptr ? theme.font_strong : theme.font;
+    ChromeTheme strong = theme;
+    strong.font = face;
+    const float line_h = face != nullptr ? face->line_height()
+                                         : theme.control_height * 0.55f;
+    const float row_h =
+        std::max(theme.control_height + 2.0f, line_h + 10.0f);
+    char scratch[128];
+    const LabelFit fit = fit_text(label, width < 0.0f ? -1.0f : width, strong,
+                                  scratch, sizeof(scratch));
+    const Rect rect =
+        layout.next(width < 0.0f ? fit.advance : width, row_h);
+    draw_label(rect.x, rect.y, rect.height, fit, theme.text, strong);
+}
+
 void separator(LayoutCursor& layout, const ChromeTheme& theme, float width) {
     // Fill-width, like button: a negative width means "the rest of the
     // line", resolved against the cursor before the clamp.
