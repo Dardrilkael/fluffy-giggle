@@ -64,6 +64,33 @@ if(TARGET test_circsim_editor_canvas)
     "${PROJECT_SOURCE_DIR}/libs/ui/src")
 endif()
 
+# The side panels' headless gate: the Properties panel's editing state
+# driven the same way (a GuiContext frame + a panel rect) - the
+# directives split/join round-trip (an emptied last row must survive a
+# reload), the analysis list's remove guard (nothing selected removes
+# nothing), the field rows' "##" identity (a param labeled "value" is
+# its own widget, not the built-in value row - the focus-navigation
+# walk proves two stops where the shared-label bug fused them into
+# one), refresh_problems' snapshot version, and the Palette's draw
+# seam. side_panels needs palette_groups (the panel groups its
+# symbols); the link shape is the suites' own again.
+ws_add_test(circsim_editor_side_panels
+  SOURCES tests/test_side_panels.cpp
+          src/editor.cpp
+          src/document.cpp
+          src/side_panels.cpp
+          src/palette_groups.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/tests/ui_gui_r2d_stub.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
+  LINK ws::circsim
+  DEPENDS ws::ui_gui ws::app ws::settings stb)
+if(TARGET test_circsim_editor_side_panels)
+  target_include_directories(test_circsim_editor_side_panels PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${PROJECT_SOURCE_DIR}/libs/ui/src")
+endif()
+
 # The Palette's grouping + search: pure data over ws::circsim (no gui),
 # so the suite links the library and nothing else - the symbol table
 # the panel groups, the .csym "category" field, the case-insensitive

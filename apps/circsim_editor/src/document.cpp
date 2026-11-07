@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <deque>
 #include <memory>
+#include <set>
 #include <utility>
 
 namespace editor {
@@ -85,9 +86,18 @@ void reinsert_label(Schematic& s, ws::circsim::Label l) {
 // The junctions `removing` orphans: referenced by one of its wires,
 // by no wire outside the set. Pure - the callers build payloads
 // without mutating, and the command's apply() owns the one true
-// removal.
+// removal. The "outside the set" test is keyed by id, which holds
+// because every wire owns a distinct one (placement mints, the
+// loader preserves disk ids) - the removed-id set states that
+// contract up front instead of per-wire "the one being removed"
+// guesses (the identity shortcut would NOT work here: `removing`
+// holds copies, never the schematic's own elements).
 [[nodiscard]] std::vector<Junction> orphaned_junctions(
     const Schematic& s, const std::vector<Wire>& removing) {
+    std::set<std::uint32_t> removed;
+    for (const Wire& w : removing) {
+        removed.insert(w.id);
+    }
     std::vector<Junction> out;
     for (const Wire& w : removing) {
         for (const WireEndpoint end : {w.a, w.b}) {
@@ -97,8 +107,8 @@ void reinsert_label(Schematic& s, ws::circsim::Label l) {
             }
             bool other = false;
             for (const Wire& w2 : s.wires()) {
-                if (w2.id == w.id) {
-                    continue;  // the one being removed
+                if (removed.count(w2.id) != 0u) {
+                    continue;  // one of the ones being removed
                 }
                 const JunctionRef* a = std::get_if<JunctionRef>(&w2.a);
                 const JunctionRef* b = std::get_if<JunctionRef>(&w2.b);
@@ -396,6 +406,14 @@ class PartTextCommand final : public EditCommand {
 }  // namespace
 
 void push_place_part(SchematicDocument& doc, ws::circsim::Part part) {
+    // Ids start at 1 (0 is the "none" sentinel), so a zero id is a
+    // caller that never minted one. The canvas mints at construction;
+    // this seam mint guarantees no future placement path can land an
+    // entity the find/take/select machinery would key wrong (the
+    // id-0 wire class: every hand-drawn entity colliding on 0).
+    if (part.id == 0) {
+        part.id = doc.schem.alloc_id();
+    }
     (void)doc.undo().push(
         std::make_unique<AddPartCommand>(&doc, std::move(part)));
 }
@@ -586,6 +604,14 @@ class MoveJunctionCommand final : public EditCommand {
 
 void push_place_wire(SchematicDocument& doc, ws::circsim::Wire wire,
                      std::vector<ws::circsim::Junction> junctions) {
+    // The belt-and-braces twin of push_place_part's mint: 0 is the
+    // "none" sentinel, so a wire that arrives un-minted gets its id
+    // here - the command layer preserves the id it is handed, and
+    // every id-keyed consumer (find/take_wire, Selection::is, the
+    // orphan scan) presupposes uniqueness.
+    if (wire.id == 0) {
+        wire.id = doc.schem.alloc_id();
+    }
     (void)doc.undo().push(std::make_unique<AddWireCommand>(
         &doc, std::move(wire), std::move(junctions)));
 }
@@ -718,6 +744,10 @@ class LabelTextCommand final : public EditCommand {
 }  // namespace
 
 void push_place_label(SchematicDocument& doc, ws::circsim::Label label) {
+    // Same mint as the part and wire seams: 0 is the "none" sentinel.
+    if (label.id == 0) {
+        label.id = doc.schem.alloc_id();
+    }
     (void)doc.undo().push(
         std::make_unique<AddLabelCommand>(&doc, std::move(label)));
 }

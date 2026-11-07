@@ -268,6 +268,14 @@ struct ResultsCache {
     PlotView view;                       // the manual zoom/pan window
     std::size_t view_for = kNoTable;     // the table `view` belongs to
     PlotGesture gesture;                 // the in-flight plot gesture
+    // The shown table's x axis is strictly increasing - a per-table
+    // constant of the run (the axis data is immutable once delivered),
+    // cached with the same key shape as `visible`/`view` so the plot
+    // does not re-walk every sample every frame. Reset with the other
+    // per-run keys when a delivery lands (a same-indexed table of a
+    // NEW run is a different axis).
+    bool x_sorted = false;
+    std::size_t x_sorted_for = kNoTable;  // the table `x_sorted` belongs to
 };
 
 // One editable field's caller-owned buffer (the Properties panel's
@@ -425,6 +433,19 @@ struct Editor {
                                               : renderer;
     }
 
+    // The Palette panel's draw seam: the same pattern a third time.
+    // The palette's tiles draw the symbols' pictures directly, so the
+    // seam exists for the same reason the other two do - null =
+    // &renderer (the live app); a headless test injects a
+    // CommandListCanvas here and asserts the tile grid's geometry
+    // (fills, outlines, the fitted symbol strokes) without a renderer.
+    canvas::Canvas2D* palette_canvas = nullptr;
+
+    // The canvas the Palette panel draws through.
+    [[nodiscard]] canvas::Canvas2D& palette_draw_canvas() {
+        return palette_canvas != nullptr ? *palette_canvas : renderer;
+    }
+
     // --- helpers (editor.cpp) ---
 
     [[nodiscard]] ws::circsim::Schematic* schem() {
@@ -508,10 +529,15 @@ struct Editor {
     void jump_to(const ws::circsim::DiagTarget& t);
 
     // Cache refreshers (the commands' act; synchronous - ERC and the
-    // export are millisecond work at editor scales).
+    // export are millisecond work at editor scales). `version` is the
+    // schematic version the check ran AGAINST: the synchronous ERC
+    // path passes the live version; a delivered run passes the version
+    // its job snapshot carried at submit time, so an edit that landed
+    // mid-run leaves the Problems panel honestly stale instead of
+    // re-stamping itself fresh.
     void refresh_problems(bool from_run,
                           std::vector<ws::circsim::Diag> diags,
-                          std::string header);
+                          std::string header, std::uint64_t version);
     void run_erc();
     void refresh_netlist();
 
@@ -525,8 +551,12 @@ struct Editor {
     // active document changes).
     void document_changed();
 
-    // The toast pair the commands and panels use.
-    void toast(std::string text, gui::ToastSeverity severity) const;
+    // The toast pair the commands and panels use. `seconds` is the
+    // toast's lifetime (the stock 4s; the chord loop's command errors
+    // ask for 5) - the text rides toast_text_'s stable slots either
+    // way.
+    void toast(std::string text, gui::ToastSeverity severity,
+               float seconds = 4.0f) const;
     void status(std::string text) const;
 };
 

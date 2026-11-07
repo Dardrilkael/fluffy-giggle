@@ -57,7 +57,11 @@ struct Bench {
 
     // A wire (1,1)->(4,1) over two junctions - the drawn world's
     // simplest honest geometry (one 2-point polyline, two 32-point
-    // circle fills).
+    // circle fills). The wire owns a minted id the way a loaded
+    // one does: every entity the schematic stores carries a distinct
+    // id (ids start at 1; 0 is the "none" sentinel), and the bench's
+    // old id-0 shortcut collided with exactly the bug class the
+    // drawn-wire path had.
     void place_wire() {
         ws::circsim::Junction a;
         a.id = doc.schem.alloc_id();
@@ -68,6 +72,7 @@ struct Bench {
         doc.schem.junctions_mut().push_back(a);
         doc.schem.junctions_mut().push_back(b);
         ws::circsim::Wire w;
+        w.id = doc.schem.alloc_id();
         w.a = ws::circsim::JunctionRef{a.id};
         w.b = ws::circsim::JunctionRef{b.id};
         w.ortho = true;
@@ -669,6 +674,7 @@ TEST_CASE("a moved junction re-routes its attached wire, the undo "
     w.id = b.doc.schem.alloc_id();
     w.a = ws::circsim::JunctionRef{ja.id};
     w.b = ws::circsim::JunctionRef{jb.id};
+    w.ortho = true;  // only ortho wires re-route (freeform keeps its shape)
     b.doc.schem.wires_mut().push_back(w);
     // Slide ja to (0,5) and read the routes from the editor (the
     // entity is at its landing, the routes' contract).
@@ -677,32 +683,283 @@ TEST_CASE("a moved junction re-routes its attached wire, the undo "
             j.pos = {0.0, 5.0};
         }
     }
-    // Note: attached_wire_routes was removed in the refactor; this test
-    // is retained as a placeholder for the new move re-route API.
-    // const std::vector<editor::WireRoute> routes =
-    //     b.ed.attached_wire_routes(editor::Editor::Drag::Kind::Junction,
-    //                               ja.id);
-    // REQUIRE(routes.size() == 1u);
-    // REQUIRE(routes[0].waypoints.size() == 1u);  // the fresh L
-    // CHECK(routes[0].waypoints[0].x == 10.0);    // horizontal-first
-    // CHECK(routes[0].waypoints[0].y == 5.0);
+    const std::vector<editor::WireRoute> routes =
+        b.ed.attached_wire_routes(editor::Editor::Drag::Kind::Junction,
+                                  ja.id);
+    REQUIRE(routes.size() == 1u);
+    REQUIRE(routes[0].wire == w.id);
+    REQUIRE(routes[0].waypoints.size() == 1u);  // the fresh L
+    CHECK(routes[0].waypoints[0].x == 10.0);    // horizontal-first
+    CHECK(routes[0].waypoints[0].y == 5.0);
     // The command lands the route with the move. The entity goes home
     // before the push (the release flow's set_drag_pos(start_world)),
     // so the command's from is the press position, not the landing.
-    // for (ws::circsim::Junction& j : b.doc.schem.junctions_mut()) {
-    //     if (j.id == ja.id) {
-    //         j.pos = {0.0, 0.0};
-    //     }
-    // }
-    // editor::push_move_junction(b.doc, ja.id, {0.0, 5.0}, routes);
-    // CHECK(b.doc.schem.find_junction(ja.id)->pos.y == 5.0);
-    // CHECK(b.doc.schem.find_wire(w.id)->waypoints.size() == 1u);
-    // (void)b.doc.undo().undo();
-    // CHECK(b.doc.schem.find_junction(ja.id)->pos.y == 0.0);
-    // CHECK(b.doc.schem.find_wire(w.id)->waypoints.empty());
-    // (void)b.doc.undo().redo();
-    // CHECK(b.doc.schem.find_junction(ja.id)->pos.y == 5.0);
-    // CHECK(b.doc.schem.find_wire(w.id)->waypoints.size() == 1u);
+    for (ws::circsim::Junction& j : b.doc.schem.junctions_mut()) {
+        if (j.id == ja.id) {
+            j.pos = {0.0, 0.0};
+        }
+    }
+    editor::push_move_junction(b.doc, ja.id, {0.0, 5.0}, routes);
+    CHECK(b.doc.schem.find_junction(ja.id)->pos.y == 5.0);
+    CHECK(b.doc.schem.find_wire(w.id)->waypoints.size() == 1u);
+    (void)b.doc.undo().undo();
+    CHECK(b.doc.schem.find_junction(ja.id)->pos.y == 0.0);
+    CHECK(b.doc.schem.find_wire(w.id)->waypoints.empty());
+    (void)b.doc.undo().redo();
+    CHECK(b.doc.schem.find_junction(ja.id)->pos.y == 5.0);
+    CHECK(b.doc.schem.find_wire(w.id)->waypoints.size() == 1u);
+}
+
+// --- the pin-approach route: wires land on pins tip-first ---------------------
+//
+// A pin's dir is its OUTWARD facing (the lead away from the body), and
+// route_wire's a side reads it that way (from = a + u*lead, one lead
+// OUTSIDE). The b side once computed its approach target as
+// b - u*lead - one lead INSIDE the part - so the final leg ran out of
+// the part's own body to the pin tip: every wire that landed on a pin
+// stabbed through the part and doubled back.
+
+TEST_CASE("route_wire: a pin landing approaches tip-first from the pin's "
+          "own outside") {
+    // The most ordinary wire there is: two facing pins, R1.b at (3,0)
+    // facing east, R2.a at (7,0) facing west. The route is the
+    // straight run between them - no corner, and never a point inside
+    // either part's body span ([-3,3] and [7,13]).
+    const std::vector<Pos> route =
+        editor::Editor::route_wire({3.0, 0.0}, 0, {7.0, 0.0}, 180);
+    for (const Pos& p : route) {
+        CHECK(p.x > 3.0);
+        CHECK(p.x < 7.0);
+    }
+    // The free-run case lands on a pin from a corner: the approach leg
+    // stops one lead EAST of R1's east pin (x=4, outside the body) and
+    // closes west into the tip - not at x=2, inside the zigzag.
+    const std::vector<Pos> cornered =
+        editor::Editor::route_wire({6.0, 3.0}, -1, {3.0, 0.0}, 0);
+    REQUIRE(cornered.size() == 2u);
+    CHECK(cornered.back().x == 4.0);
+    CHECK(cornered.back().y == 0.0);
+}
+
+TEST_CASE("the wire tool: a pin-to-pin wire runs straight between facing "
+          "pins and connects them in one net") {
+    Bench b;
+    ws::circsim::Part r1 =
+        ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0});
+    r1.id = b.doc.schem.alloc_id();
+    b.doc.schem.parts_mut().push_back(r1);
+    ws::circsim::Part r2 =
+        ws::circsim::Part::make("r", "R2", "2k", {10.0, 0.0});
+    r2.id = b.doc.schem.alloc_id();
+    b.doc.schem.parts_mut().push_back(r2);
+    // R1's b pin sits at (3,0); R2's a pin at (7,0) - facing tips.
+    b.wire_click({3.0, 0.0}, {7.0, 0.0});
+    REQUIRE(b.doc.schem.wires().size() == 1u);
+    const ws::circsim::Wire& w = b.doc.schem.wires().front();
+    const std::vector<Pos> path = b.ed.wire_path(w);
+    // The straight run: endpoints and nothing else - the old inside-out
+    // approach put a waypoint PAST the landing pin (x=8, inside R2).
+    REQUIRE(path.size() == 2u);
+    CHECK(path.front().x == 3.0);
+    CHECK(path.front().y == 0.0);
+    CHECK(path.back().x == 7.0);
+    CHECK(path.back().y == 0.0);
+    // Both pins ride the wire: one net, the wire in it.
+    ws::circsim::NetBuild nb =
+        ws::circsim::build_nets(b.doc.schem, &b.ed.library);
+    const ws::circsim::Net* n1 =
+        nb.nets.net_of_pin(ws::circsim::PinRef{r1.id, 1u});
+    const ws::circsim::Net* n2 =
+        nb.nets.net_of_pin(ws::circsim::PinRef{r2.id, 0u});
+    REQUIRE(n1 != nullptr);
+    REQUIRE(n2 != nullptr);
+    CHECK(n1->id == n2->id);
+    CHECK(n1->wires.size() == 1u);
+}
+
+TEST_CASE("the wire tool: a landing on a pin from a corner stays outside "
+          "the part's body") {
+    Bench b;
+    ws::circsim::Part r1 =
+        ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0});
+    r1.id = b.doc.schem.alloc_id();
+    b.doc.schem.parts_mut().push_back(r1);
+    // Free start at (6,3), land on R1's b pin at (3,0): the approach
+    // runs east to (4,0) then closes west into the tip - the last
+    // interior vertex is OUTSIDE the body (x > 3), never x=2.
+    b.wire_click({6.0, 3.0}, {3.0, 0.0});
+    REQUIRE(b.doc.schem.wires().size() == 1u);
+    const std::vector<Pos> path = b.ed.wire_path(b.doc.schem.wires().front());
+    REQUIRE(path.size() == 4u);
+    CHECK(path[0].x == 6.0);
+    CHECK(path[0].y == 3.0);
+    CHECK(path[1].x == 4.0);  // the corner above the pin's outside
+    CHECK(path[1].y == 3.0);
+    CHECK(path[2].x == 4.0);  // the approach stop, one lead outside
+    CHECK(path[2].y == 0.0);
+    CHECK(path[3].x == 3.0);  // the pin tip
+    CHECK(path[3].y == 0.0);
+}
+
+TEST_CASE("the wire tool: a T-tap onto a wire's body joins the nets") {
+    Bench b;
+    b.place_wire();  // junctions (1,1)/(4,1), one wire between
+    // Tap the wire's body at (3,1) and run up to free grid (3,5).
+    b.wire_click({2.9, 1.0}, {3.0, 5.0});
+    REQUIRE(b.doc.schem.wires().size() == 2u);
+    // The tap minted a junction ON the first wire's path, the landing
+    // another; the new wire runs straight (3,1) -> (3,5).
+    CHECK(b.doc.schem.junctions().size() == 4u);
+    const std::vector<Pos> path =
+        b.ed.wire_path(b.doc.schem.wires().back());
+    REQUIRE(path.size() == 2u);
+    CHECK(path.front().x == 3.0);
+    CHECK(path.front().y == 1.0);
+    CHECK(path.back().x == 3.0);
+    CHECK(path.back().y == 5.0);
+    // The nets say what the drawing says: the tap rides the first wire.
+    const std::uint32_t old_wire = b.doc.schem.wires().front().id;
+    const std::uint32_t new_wire = b.doc.schem.wires().back().id;
+    ws::circsim::NetBuild nb =
+        ws::circsim::build_nets(b.doc.schem, &b.ed.library);
+    const ws::circsim::Net* a = nb.nets.net_of_wire(old_wire);
+    const ws::circsim::Net* c = nb.nets.net_of_wire(new_wire);
+    REQUIRE(a != nullptr);
+    REQUIRE(c != nullptr);
+    CHECK(a->id == c->id);
+}
+
+// --- the id-mint regressions (the "vanishing wire" class) ------------------
+//
+// Every entity the schematic stores owns a DISTINCT id (ids start at
+// 1; 0 is the "none" sentinel). The wire commit, the palette's part
+// placement and the label placement all mint theirs now; the
+// push_place_* seams mint as belt-and-braces. The old default-0 wires
+// collided on one id, and everything keyed on Wire::id answered wrong.
+
+TEST_CASE("the wire tool: every drawn wire owns a distinct id") {
+    Bench b;
+    // Two segments through the real click path: the first mints its
+    // own junctions, the second chains off the landing.
+    b.wire_click({1.0, 1.0}, {4.0, 1.0});
+    b.click_at({7.0, 1.0});
+    REQUIRE(b.doc.schem.wires().size() == 2u);
+    const std::uint32_t first = b.doc.schem.wires().front().id;
+    const std::uint32_t second = b.doc.schem.wires().back().id;
+    CHECK(first != 0u);
+    CHECK(second != 0u);
+    CHECK(first != second);
+}
+
+TEST_CASE("the wire tool: deleting a wire keeps the junctions its "
+          "survivors use") {
+    Bench b;
+    // Wire A (1,1)->(4,1); wire B chains off A's landing junction and
+    // runs to (7,1) - B and A SHARE the middle junction.
+    b.wire_click({1.0, 1.0}, {4.0, 1.0});
+    b.click_at({7.0, 1.0});
+    REQUIRE(b.doc.schem.wires().size() == 2u);
+    REQUIRE(b.doc.schem.junctions().size() == 3u);
+    const std::uint32_t survivor = b.doc.schem.wires().front().id;
+    const std::uint32_t doomed = b.doc.schem.wires().back().id;
+    editor::push_delete_wire(b.doc, doomed);
+    // Exactly B went, and only ITS private junction followed it: the
+    // shared one survives, so A still resolves and still draws. The
+    // id-0 collision used to skip no wire in the orphan scan - the
+    // shared junction was wrongly orphaned and A stopped drawing (the
+    // "vanishing wire").
+    REQUIRE(b.doc.schem.wires().size() == 1u);
+    CHECK(b.doc.schem.wires().front().id == survivor);
+    CHECK(b.doc.schem.junctions().size() == 2u);
+    const std::vector<Pos> path =
+        b.ed.wire_path(b.doc.schem.wires().front());
+    REQUIRE(path.size() == 2u);
+    CHECK(path.front().x == 1.0);
+    CHECK(path.front().y == 1.0);
+    CHECK(path.back().x == 4.0);
+    CHECK(path.back().y == 1.0);
+}
+
+TEST_CASE("the wire tool: undo removes the segment just drawn, not the "
+          "oldest wire") {
+    Bench b;
+    b.wire_click({1.0, 1.0}, {4.0, 1.0});
+    b.click_at({7.0, 1.0});
+    REQUIRE(b.doc.schem.wires().size() == 2u);
+    const std::uint32_t survivor = b.doc.schem.wires().front().id;
+    (void)b.doc.undo().undo();
+    // The LAST segment is the one that goes (AddWireCommand::undo
+    // takes wire_.id): the id-0 collision used to make take_wire(0)
+    // answer the oldest wire instead - and the survivor then dangled
+    // off the junction the undo really took, so it stopped drawing.
+    REQUIRE(b.doc.schem.wires().size() == 1u);
+    CHECK(b.doc.schem.wires().front().id == survivor);
+    CHECK(b.doc.schem.junctions().size() == 2u);
+    const std::vector<Pos> path =
+        b.ed.wire_path(b.doc.schem.wires().front());
+    REQUIRE(path.size() == 2u);
+    CHECK(path.front().x == 1.0);  // A's geometry, not B's
+    CHECK(path.back().x == 4.0);
+}
+
+TEST_CASE("a placed part owns a fresh id") {
+    Bench b;
+    b.ed.tool = editor::Tool::Place;
+    b.ed.place_symbol = "r";
+    b.click_at({0.0, 0.0});
+    REQUIRE(b.doc.schem.parts().size() == 1u);
+    const std::uint32_t first = b.doc.schem.parts().front().id;
+    CHECK(first != 0u);
+    b.click_at({6.0, 0.0});
+    REQUIRE(b.doc.schem.parts().size() == 2u);
+    CHECK(b.doc.schem.parts().back().id != 0u);
+    CHECK(b.doc.schem.parts().back().id != first);
+}
+
+TEST_CASE("a placed label owns a fresh id") {
+    Bench b;
+    b.ed.tool = editor::Tool::Label;
+    b.click_at({2.0, 3.0});  // label_text defaults to "net"
+    REQUIRE(b.doc.schem.labels().size() == 1u);
+    CHECK(b.doc.schem.labels().front().id != 0u);
+}
+
+TEST_CASE("push_place_* mints the id when the caller never set one") {
+    Bench b;
+    // The seams' belt-and-braces: 0 is the "none" sentinel, so an
+    // un-minted entity gets its id at the door - no future placement
+    // path can repeat the id-0 collision.
+    ws::circsim::Junction a;
+    a.id = b.doc.schem.alloc_id();
+    a.pos = {1.0, 1.0};
+    ws::circsim::Junction c;
+    c.id = b.doc.schem.alloc_id();
+    c.pos = {4.0, 1.0};
+    ws::circsim::Wire w;  // id 0 - deliberately un-minted
+    w.a = ws::circsim::JunctionRef{a.id};
+    w.b = ws::circsim::JunctionRef{c.id};
+    editor::push_place_wire(b.doc, w, {a, c});
+    REQUIRE(b.doc.schem.wires().size() == 1u);
+    CHECK(b.doc.schem.wires().front().id != 0u);
+
+    ws::circsim::Part p =
+        ws::circsim::Part::make("r", "R9", "1k", {0.0, 0.0});
+    editor::push_place_part(b.doc, p);
+    REQUIRE(b.doc.schem.parts().size() == 1u);
+    CHECK(b.doc.schem.parts().front().id != 0u);
+
+    ws::circsim::Label l;
+    l.pos = {2.0, 2.0};
+    l.name = "VCC";
+    editor::push_place_label(b.doc, l);
+    REQUIRE(b.doc.schem.labels().size() == 1u);
+    CHECK(b.doc.schem.labels().front().id != 0u);
+
+    // And the minted ids stay mutually distinct.
+    CHECK(b.doc.schem.wires().front().id !=
+          b.doc.schem.parts().front().id);
+    CHECK(b.doc.schem.parts().front().id !=
+          b.doc.schem.labels().front().id);
 }
 
 }  // namespace

@@ -129,6 +129,11 @@ struct Bench {
         ed.results.view = PlotView{};
         ed.results.view_for = ResultsCache::kNoTable;
         ed.results.gesture = PlotGesture{};
+        // ... and the x-sortedness key with them (main.cpp's block
+        // beside visible_for): a same-indexed table of a new run is a
+        // different axis.
+        ed.results.x_sorted_for = ResultsCache::kNoTable;
+        ed.results.x_sorted = false;
     }
 
     // The scripted mouse one draw sees. Defaults keep the stage-4
@@ -899,4 +904,43 @@ TEST_CASE("a v-only table has no right strip and the press falls nowhere") {
     b.draw(m);
     CHECK(b.ed.results.gesture.kind == PlotGesture::Kind::None);
     CHECK_FALSE(b.ed.results.view.active);
+}
+
+// --- the x-sortedness cache (the per-table constant) ---------------------------
+
+TEST_CASE("the x-sortedness caches per table and follows table switches") {
+    Bench b;
+
+    // A wrap-shaped table: the axis rises then FALLS back (the .dc
+    // double-sweep shape), so it is NOT strictly increasing.
+    ws::spice::Table wrap = ramp_table(41u);
+    for (std::size_t i = 0; i < wrap.sweep_axes[0].size(); ++i) {
+        wrap.sweep_axes[0][i] =
+            1.0e-4 * static_cast<double>(i < 21u ? i : 40u - i);
+    }
+    b.load(std::move(wrap));
+    b.draw();
+    CHECK(b.ed.results.x_sorted == false);
+    CHECK(b.ed.results.x_sorted_for == 0u);
+
+    // The sorted ramp, delivered as a SECOND table: switching to it
+    // re-derives (the cache key moved), and switching back re-derives
+    // again - a stale key would have carried the old answer across.
+    b.ed.results.run.results.tables.push_back(ramp_table(41u));
+    b.ed.results.table = 1u;
+    b.draw();
+    CHECK(b.ed.results.x_sorted == true);
+    CHECK(b.ed.results.x_sorted_for == 1u);
+
+    b.ed.results.table = 0u;
+    b.draw();
+    CHECK(b.ed.results.x_sorted == false);
+    CHECK(b.ed.results.x_sorted_for == 0u);
+
+    // A fresh delivery of the same-indexed table re-derives too (the
+    // load resets the key): a new run's axis 0 is not the old run's.
+    b.load(ramp_table(41u));
+    b.draw();
+    CHECK(b.ed.results.x_sorted == true);
+    CHECK(b.ed.results.x_sorted_for == 0u);
 }

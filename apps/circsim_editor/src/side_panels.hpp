@@ -11,6 +11,30 @@
 
 namespace editor {
 
+// The directives block's split/join pair (the Properties panel's
+// serialization of the schematic's verbatim .model/.include text).
+// SEPARATOR semantics, netlist-lines-style: `text` splits into the
+// lines BETWEEN its newlines, so a trailing newline yields a trailing
+// EMPTY line ("a\n" is {"a", ""}) and an empty text is one empty
+// line; `join` glues the lines back with single newlines and no
+// trailing one, so a final empty line keeps its newline ({"a", ""}
+// is "a\n") - the round-trip that preserves every line the user
+// cleared. (The old splice dropped the trailing empty line and the
+// old join stripped the newline, so clearing the last row to empty
+// silently deleted it on the next reload.)
+[[nodiscard]] std::vector<std::string> split_directive_lines(
+    const std::string& text);
+[[nodiscard]] std::string join_directive_lines(
+    const std::vector<std::string>& lines);
+
+// The analysis list's "remove selected" act, on its own so it is
+// headless-testable: removes the analysis `ed.analysis_index` names,
+// nothing at all when nothing is selected (index < 0) or the index
+// has gone stale beyond the list - the old clamp turned "no
+// selection" (index -1) into SIZE_MAX and deleted the LAST entry.
+// True when a removal actually landed.
+bool remove_selected_analysis(Editor& ed);
+
 void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
                         gui::LayoutCursor& layout,
                         const gui::ChromeTheme& theme);

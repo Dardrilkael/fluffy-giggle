@@ -24,6 +24,8 @@
 #include <string_view>
 #include <vector>
 
+#include <ws/core/assert.hpp>
+#include <ws/core/log.hpp>
 #include <ws/input/input.hpp>
 #include <ws/spice/parse.hpp>
 #include <ws/ui/renderer2d.hpp>
@@ -58,14 +60,27 @@ namespace {
 // text_input plus the focus watch: the flag feeds the chord loop's
 // rung choice, so the editor's bare panel keys never land in a field
 // the keyboard is editing.
+//
+// `id_label` is the field's full identity - the DISPLAYED label, then
+// "##" and the field's buffer key, so two fields that share a display
+// label are two widgets to the gui: separate caret state, separate
+// focus, separate Tab stops. The "##" suffix rides the id and never
+// the display (id_stack.hpp's marker rule), which is what keeps a
+// param labeled "value" (or "ref", or any duplicated label) from
+// MERGING with the built-in value row - one widget id would mean one
+// shared TextInputState and one focus answer for both rows, and
+// typing in one would drag the other's caret. The focus check below
+// derives the SAME id the widget did, so the watched flag is the
+// field's own truth.
 [[nodiscard]] bool text_input_tracked(Editor& ed, gui::GuiContext& gui,
                                      gui::LayoutCursor& layout,
                                      const gui::ChromeTheme& theme,
-                                     const char* label, char* buf,
+                                     const std::string& id_label, char* buf,
                                      int capacity, float width = -1.0f) {
     const bool changed =
-        gui::text_input(gui, layout, theme, label, buf, capacity, width);
-    if (gui.is_focused(gui.ids().id(label))) {
+        gui::text_input(gui, layout, theme, id_label.c_str(), buf,
+                        capacity, width);
+    if (gui.is_focused(gui.ids().id(id_label.c_str()))) {
         ed.text_field_focused = true;
     }
     return changed;
@@ -86,12 +101,14 @@ namespace {
 
 // Bumps the edit epoch when the selection moved (the panel's own
 // watch - the app bumps it on undo/redo through the stack listener).
+// The bump rides the Editor's own seam like every other one in this
+// file: the panel never mutates the epoch directly.
 void watch_selection(Editor& ed) {
     if (ed.fields_sel_kind != static_cast<int>(ed.sel.kind) ||
         ed.fields_sel_id != ed.sel.id) {
         ed.fields_sel_kind = static_cast<int>(ed.sel.kind);
         ed.fields_sel_id = ed.sel.id;
-        ++ed.field_stamp;
+        ed.bump_edit_epoch();
     }
 }
 
@@ -129,13 +146,17 @@ void label_line(gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
 }
 
 // A text row that pushes the edit on every change (the typing-run
-// coalescer makes this one undo step per run).
+// coalescer makes this one undo step per run). The widget id embeds
+// the buffer key (text_input_tracked's "##" rule): the built-in
+// "ref"/"value" rows and a symbol's own param rows can share display
+// labels without sharing a widget.
 void part_text_row(Editor& ed, gui::GuiContext& gui,
                    gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
                    const char* label, std::uint32_t part_id, int kind,
                    const std::string& param, const std::string& current) {
     const std::string key = part_field_key(part_id, kind, param);
-    if (text_input_tracked(ed, gui, layout, theme, label,
+    if (text_input_tracked(ed, gui, layout, theme,
+                           std::string{label} + "##" + key,
                            field_buf(ed, key, current), 128)) {
         push_part_text(*ed.doc, part_id, kind, param,
                        std::string{field_of(ed, key).buf.data()},
@@ -160,13 +181,18 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
     const std::string key = "a" + std::to_string(index);
 
     // A number row over a member pointer: parse, land, push; a bad
-    // value keeps the old and says so on the status line.
+    // value keeps the old and says so on the status line. The id
+    // embeds the buffer key (skey + "." + label) - one analysis is
+    // edited at a time, but the key still keeps the row's state its
+    // own across analysis switches.
     const auto number_row = [&](const char* label, const std::string& skey,
                                 double current, const auto& land) {
         char current_text[64];
         std::snprintf(current_text, sizeof current_text, "%.12g", current);
-        char* buf = field_buf(ed, skey + "." + label, current_text);
-        if (text_input_tracked(ed, gui, layout, theme, label, buf, 128)) {
+        const std::string key = skey + "." + label;
+        char* buf = field_buf(ed, key, current_text);
+        if (text_input_tracked(ed, gui, layout, theme,
+                               std::string{label} + "##" + key, buf, 128)) {
             const auto parsed = ws::spice::parse_number(buf);
             if (parsed.has_value()) {
                 land(*parsed);
@@ -185,7 +211,9 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
             std::get_if<ws::circsim::DcSpec>(&spec)) {
         const std::string skey = key + ".dc";
         char* src = field_buf(ed, skey + ".source", dc->source);
-        if (text_input_tracked(ed, gui, layout, theme, "source", src, 128)) {
+        if (text_input_tracked(ed, gui, layout, theme, "source##" + skey +
+                                                              ".source",
+                               src, 128)) {
             ws::circsim::DcSpec next = *dc;
             next.source = src;
             push_set_analysis(*ed.doc, index, next);
@@ -253,8 +281,18 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
             sweep.stamp = ed.field_stamp;
             sweep.combo_open = false;
         }
-        if (gui::combo(gui, layout, theme, "sweep", kSweeps, 3, selected,
-                       sweep.combo_open)) {
+        // The combo answers true only on a REAL move (its own
+        // contract - `selected` is written and the return fires when
+        // the picked item differs from the current one), so the
+        // spec-copy and the push below recompute nothing when the
+        // user re-picks the value that is already set: the dropdown
+        // closes, the model stays untouched, no SetAnalysis lands.
+        // `selected` re-derives from the live spec each frame by
+        // design - the row is a view of the model, the model is the
+        // truth.
+        if (gui::combo(gui, layout, theme,
+                       ("sweep##" + skey + ".sweep").c_str(), kSweeps, 3,
+                       selected, sweep.combo_open)) {
             ws::circsim::AcSpec next = *ac;
             next.sweep = static_cast<ws::circsim::AcSpec::Sweep>(selected);
             push_set_analysis(*ed.doc, index, next);
@@ -262,7 +300,9 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
         char n_text[32];
         std::snprintf(n_text, sizeof n_text, "%d", ac->n);
         char* n_buf = field_buf(ed, skey + ".n", n_text);
-        if (text_input_tracked(ed, gui, layout, theme, "points", n_buf, 128)) {
+        if (text_input_tracked(ed, gui, layout, theme, "points##" + skey +
+                                                             ".n",
+                               n_buf, 128)) {
             char* end = nullptr;
             const long parsed = std::strtol(n_buf, &end, 10);
             if (end != nullptr && *end == '\0' && parsed > 0) {
@@ -290,6 +330,72 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
 
 }  // namespace
 
+// --- the directives split/join (side_panels.hpp's contract) -------------------
+
+std::vector<std::string> split_directive_lines(const std::string& text) {
+    // SEPARATOR semantics (the netlist panel's own loop shape): the
+    // lines BETWEEN the newlines, so a trailing newline yields a
+    // trailing EMPTY line and an empty text is one empty line. The
+    // `at < size` loop this replaces dropped whatever followed the
+    // final newline, so "a\n" reloaded as one line - and with the
+    // join stripping the tail, a row cleared to empty vanished on
+    // the next reload.
+    std::vector<std::string> lines;
+    if (text.empty()) {
+        lines.push_back("");
+        return lines;
+    }
+    std::size_t at = 0;
+    while (at <= text.size()) {
+        const std::size_t nl = text.find('\n', at);
+        lines.push_back(text.substr(
+            at, nl == std::string::npos ? std::string::npos : nl - at));
+        if (nl == std::string::npos) {
+            break;
+        }
+        at = nl + 1;
+    }
+    return lines;
+}
+
+std::string join_directive_lines(const std::vector<std::string>& lines) {
+    // The matching half: newline as a SEPARATOR, never a terminator -
+    // a final empty line keeps its newline ({"a", ""} is "a\n"), a
+    // final non-empty line adds none ({"a"} stays "a"), and the
+    // round-trip preserves every row.
+    std::string joined;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        if (i != 0) {
+            joined += '\n';
+        }
+        joined += lines[i];
+    }
+    return joined;
+}
+
+bool remove_selected_analysis(Editor& ed) {
+    if (ed.doc == nullptr || ed.schem() == nullptr) {
+        return false;
+    }
+    // The guard the button owes its caller: NO selection (index < 0)
+    // removes nothing - the old path cast -1 to size_t (SIZE_MAX) and
+    // let std::min clamp it to the last entry, so "remove selected"
+    // with nothing selected deleted the LAST analysis. A stale index
+    // past the end (the list shrank under it) is equally not a
+    // selection.
+    if (ed.analysis_index < 0) {
+        return false;
+    }
+    const std::size_t at = static_cast<std::size_t>(ed.analysis_index);
+    if (at >= ed.schem()->analysis.entries.size()) {
+        return false;
+    }
+    push_remove_analysis(*ed.doc, at);
+    ed.analysis_index = -1;
+    ed.bump_edit_epoch();
+    return true;
+}
+
 // --- the palette --------------------------------------------------------------
 
 namespace {
@@ -309,11 +415,16 @@ constexpr float kTilePad = 6.0f;
                                const gui::ChromeTheme& theme,
                                const ws::circsim::SymbolDef& sym,
                                float width, bool armed) {
+    ws::core::warn("symbol_tile: start for sym {}", sym.key);
     const gui::Rect r = layout.next(width, kTileH);
+    ws::core::warn("symbol_tile: layout.next done, rect x={} y={} w={} h={}", r.x, r.y, r.width, r.height);
     const auto id = gui.ids().id("tile");
+    ws::core::warn("symbol_tile: gui.ids().id done");
     const gui::SelectableResult res = gui::selectable_behavior(gui, id, r);
+    ws::core::warn("symbol_tile: selectable_behavior done");
 
-    canvas::Canvas2D& rc = ed.renderer;
+    canvas::Canvas2D& rc = ed.palette_draw_canvas();
+    ws::core::warn("symbol_tile: palette_draw_canvas done");
     rc.set_view_scale(1.0f);  // the transform below carries the scale
     std::uint32_t face = theme.control_bg;
     if (res.hit.pressed) {
@@ -321,8 +432,10 @@ constexpr float kTilePad = 6.0f;
     } else if (res.hit.hovered) {
         face = theme.control_hovered;
     }
+    ws::core::warn("symbol_tile: about to fill_rounded_rect");
     rc.fill_rounded_rect(r.x, r.y, r.width, r.height, theme.corner_radius,
                          face);
+    ws::core::warn("symbol_tile: fill_rounded_rect done");
     if (armed) {
         // The armed tile: an accent wash and outline (a selectable's
         // accent bar, grown to fit a tile).
@@ -345,7 +458,9 @@ constexpr float kTilePad = 6.0f;
     // The picture: fitted to the tile and centered on the symbol's own
     // bounds (pins included), so an asymmetric symbol sits in the middle
     // instead of hanging off its origin. No font - a tile has no text.
+    ws::core::warn("symbol_tile: about to symbol_bounds");
     const Bounds b = ws::circsim::symbol_bounds(sym);
+    ws::core::warn("symbol_tile: symbol_bounds done min_x={} max_x={} min_y={} max_y={}", b.min_x, b.max_x, b.min_y, b.max_y);
     const double bw = std::max(1.0, b.max_x - b.min_x);
     const double bh = std::max(1.0, b.max_y - b.min_y);
     const double fit = std::min(
@@ -354,12 +469,16 @@ constexpr float kTilePad = 6.0f;
     canvas::Paint paint;
     paint.width = 1.5f;
     paint.color = armed ? theme.control_on : gui::dim(theme.text, 0.85f);
+    ws::core::warn("symbol_tile: about to push_transform");
     rc.push_transform();
+    ws::core::warn("symbol_tile: push_transform done");
     rc.translate(r.x + r.width * 0.5f, r.y + r.height * 0.5f);
     rc.scale(static_cast<float>(fit), -static_cast<float>(fit));
     rc.translate(static_cast<float>(-(b.min_x + b.max_x) * 0.5),
                  static_cast<float>(-(b.min_y + b.max_y) * 0.5));
+    ws::core::warn("symbol_tile: about to draw_symbol");
     draw_symbol(rc, sym, Pos{0.0, 0.0}, 0, false, paint, 0u, nullptr);
+    ws::core::warn("symbol_tile: draw_symbol done");
     rc.pop_transform();
 
     const std::string hint = sym.name + " (" + sym.key + ")";
@@ -372,6 +491,7 @@ constexpr float kTilePad = 6.0f;
 void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
                         gui::LayoutCursor& layout,
                         const gui::ChromeTheme& theme) {
+    ws::core::warn("palette: draw_palette_panel start");
     gui::text(layout, theme, "tools");
     if (gui::selectable(gui, layout, theme, "select",
                         ed.tool == Tool::Select)) {
@@ -395,15 +515,18 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
 
     // The search box. The label is its placeholder; Enter arms the
     // first match, so "res" Enter drops straight into placing a resistor.
-    (void)text_input_tracked(ed, gui, layout, theme, "search symbols",
+    (void)text_input_tracked(ed, gui, layout, theme,
+                             std::string{"search symbols"},
                              ed.palette_filter,
                              static_cast<int>(sizeof ed.palette_filter));
     const bool filter_focused =
         gui.is_focused(gui.ids().id("search symbols"));
     const std::string_view filter{ed.palette_filter};
     const bool filtering = !filter.empty();
+    ws::core::warn("palette: calling palette_groups");
     const std::vector<PaletteGroup> groups =
         palette_groups(ed.library, filter);
+    ws::core::warn("palette: palette_groups returned {} groups", groups.size());
 
     const auto arm = [&ed](const ws::circsim::SymbolDef& sym) {
         ed.tool = Tool::Place;
@@ -529,7 +652,13 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
                         field.stamp = ed.field_stamp;
                         field.combo_open = false;
                     }
-                    if (gui::combo(gui, layout, theme, shown.c_str(),
+                    // The "##" rule again (text_input_tracked's note):
+                    // two Choice params sharing a display label stay
+                    // two combos.
+                    if (gui::combo(gui, layout, theme,
+                                   (std::string{shown} + "##" +
+                                    part_field_key(p->id, 2, spec.key))
+                                       .c_str(),
                                    items.data(),
                                    static_cast<int>(items.size()), selected,
                                    field.combo_open) &&
@@ -614,7 +743,10 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
         }
         char* buf = field_buf(ed, "l" + std::to_string(l->id) + ".name",
                               l->name);
-        if (text_input_tracked(ed, gui, layout, theme, "net name", buf, 128)) {
+        if (text_input_tracked(
+                ed, gui, layout, theme,
+                "net name##l" + std::to_string(l->id) + ".name", buf,
+                128)) {
             push_label_text(*ed.doc, l->id, buf);
         }
         if (gui::button(gui, layout, theme, "delete")) {
@@ -642,7 +774,7 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
         const bool selected = ed.analysis_index == index;
         if (gui::selectable(gui, layout, theme, card.c_str(), selected)) {
             ed.analysis_index = index;
-            ++ed.field_stamp;  // the field rows below reload
+            ed.bump_edit_epoch();  // the field rows below reload
         }
         gui.ids().pop();
         ++index;
@@ -667,16 +799,15 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
         push_add_analysis(*ed.doc, spec);
         ed.analysis_index = static_cast<int>(
             ed.schem()->analysis.entries.size() - 1u);
-        ++ed.field_stamp;
+        ed.bump_edit_epoch();
     }
     if (!ed.schem()->analysis.entries.empty()) {
-        if (gui::button(gui, layout, theme, "remove selected")) {
-            const std::size_t at = std::min<std::size_t>(
-                static_cast<std::size_t>(ed.analysis_index),
-                ed.schem()->analysis.entries.size() - 1u);
-            push_remove_analysis(*ed.doc, at);
-            ed.analysis_index = -1;
-            ++ed.field_stamp;
+        // Dead until something is selected (the disabled face), and
+        // the act itself re-checks - a stale index past a shrunken
+        // list is as selectionless as -1.
+        if (gui::button(gui, layout, theme, "remove selected", 120.0f, {},
+                        ed.analysis_index < 0)) {
+            (void)remove_selected_analysis(ed);
         }
         const std::size_t at = std::min<std::size_t>(
             static_cast<std::size_t>(ed.analysis_index),
@@ -691,39 +822,25 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
     // --- the directives block: one row per line
     gui::separator(layout, theme);
     gui::text(layout, theme, "directives (.model/.include, verbatim)");
-    std::vector<std::string> lines;
-    {
-        const std::string& text = ed.schem()->directives;
-        std::size_t at = 0;
-        if (text.empty()) {
-            lines.push_back("");
-        }
-        while (at < text.size()) {
-            const std::size_t nl = text.find('\n', at);
-            lines.push_back(text.substr(
-                at, nl == std::string::npos ? std::string::npos : nl - at));
-            if (nl == std::string::npos) {
-                break;
-            }
-            at = nl + 1;
-        }
-    }
+    const std::vector<std::string> lines = split_directive_lines(
+        ed.schem()->directives);
     int line_at = 0;
     for (const std::string& line : lines) {
         gui.ids().push(line_at);
         char* buf = field_buf(ed, "directives." + std::to_string(line_at),
                               line);
-        if (text_input_tracked(ed, gui, layout, theme, "line", buf, 128)) {
-            lines[static_cast<std::size_t>(line_at)] = buf;
-            std::string joined;
-            for (const std::string& l : lines) {
-                joined += l;
-                joined += '\n';
-            }
-            if (!joined.empty()) {
-                joined.pop_back();
-            }
-            push_directives(*ed.doc, joined);
+        if (text_input_tracked(ed, gui, layout, theme,
+                               std::string{"line##directives."} +
+                                   std::to_string(line_at),
+                               buf, 128)) {
+            // The row edited: re-join with the (possibly cleared to
+            // empty) row kept in place - the split/join pair's
+            // round-trip is what preserves an emptied last line (the
+            // index scope above keeps the rows' ids apart; the "##"
+            // key keeps each row's widget state its own).
+            std::vector<std::string> next = lines;
+            next[static_cast<std::size_t>(line_at)] = buf;
+            push_directives(*ed.doc, join_directive_lines(next));
         }
         gui.ids().pop();
         ++line_at;
@@ -735,7 +852,7 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
         }
         joined += ' ';
         push_directives(*ed.doc, joined);
-        ++ed.field_stamp;
+        ed.bump_edit_epoch();
     }
 }
 

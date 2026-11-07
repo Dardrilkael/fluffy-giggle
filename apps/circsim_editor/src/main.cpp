@@ -18,7 +18,9 @@
 // cadence every gui claim rides).
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -169,18 +171,24 @@ class CircsimApp final : public ws::ui::App {
 
   protected:
     void on_setup() override {
+        ws::core::warn("circsim: on_setup() starting");
         install_clipboard(gui_);
+        ws::core::warn("circsim: install_clipboard done");
         install_job_system(jobs_);
+        ws::core::warn("circsim: install_job_system done");
 
         // The faces (the shell_example's shape): the BUNDLED Inter
         // (regular + semibold) baked at the brightness pick, the CJK
         // carrier stacked under it, and the netlist panel's mono face
         // beside them.
         scale_ = ui_scale();
+        ws::core::warn("circsim: ui_scale={}", scale_);
         rebuild_fonts();
+        ws::core::warn("circsim: rebuild_fonts done");
 
         // The settings schema: the shell reads shell.theme itself.
         declare_settings();
+        ws::core::warn("circsim: declare_settings done");
 
         // The shell.
         shell::ShellConfig config;
@@ -303,15 +311,49 @@ class CircsimApp final : public ws::ui::App {
     }
 
     void on_update() override {
+        ws::core::warn("circsim: on_update() starting");
         namespace r2d = ws::ui::r2d;
+
+        // The autorun probe (debug): CIRCSIM_AUTORUN_SECS fires the
+        // simulate command N seconds in, so the simulate path can be
+        // reproduced headless - the same command the Ctrl+Enter chord
+        // and the Circuit menu both ride. Harmless without the
+        // variable set.
+        if (!autorun_checked_) {
+            autorun_checked_ = true;
+#pragma warning(suppress : 4996)  // the debug probe reads an env var
+            if (const char* env = std::getenv("CIRCSIM_AUTORUN_SECS")) {
+                autorun_secs_ = static_cast<float>(std::atof(env));
+            }
+            ws::core::warn("circsim: autorun {}",
+                           autorun_secs_ > 0.0f ? "armed" : "off");
+        }
+        if (autorun_secs_ > 0.0f) {
+            const auto now = std::chrono::steady_clock::now();
+            if (autorun_start_.time_since_epoch().count() == 0) {
+                autorun_start_ = now;
+            } else if (std::chrono::duration<float>(now - autorun_start_)
+                           .count() >= autorun_secs_) {
+                autorun_start_ = now;
+                ++autorun_fires_;
+                ws::core::warn("circsim: autorun firing circuit.run #{}",
+                               autorun_fires_);
+                const ws::core::Status st = commands_.execute("circuit.run");
+                ws::core::warn("circsim: autorun circuit.run #{} -> {}",
+                               autorun_fires_,
+                               st.has_value() ? "ok" : "failed");
+            }
+        }
 
         // The lazy CJK bake: a small batch per frame, both fonts.
         (void)r2d::font_bake_pending(font_, 8u);
         (void)r2d::font_bake_pending(font_mono_, 8u);
+        ws::core::warn("circsim: font_bake_pending done");
 
         // The active document watch (a switch re-points the editor and
         // clears every per-document surface).
         watch_active_document(false);
+        ws::core::warn("circsim: watch_active_document done");
 
         // The chord loop, before the frame (the gallery's rule): the
         // rung is the text_editing one while a field held the keyboard
@@ -320,29 +362,37 @@ class CircsimApp final : public ws::ui::App {
         // control-carrying chords (undo, run) still answer.
         const ws::input::InputFrame& frame_in = ws::input::frame_input();
         resolve_chords(frame_in);
+        ws::core::warn("circsim: resolve_chords done");
 
+        ws::core::warn("circsim: gui_.begin_frame");
         gui_.begin_frame(frame_in);
+        ws::core::warn("circsim: r2d::begin");
         r2d::begin();
+        ws::core::warn("circsim: r2d::frame_size");
         const r2d::FrameSize frame = r2d::frame_size();
+        ws::core::warn("circsim: gui_.begin_layer");
         gui_.begin_layer(gui::Layer::base);
+        ws::core::warn("circsim: shell_->theme().scaled");
         gui::ChromeTheme theme = shell_->theme().scaled(scale_);
-        // The bake pair follows the chrome's brightness. The shell's
-        // theme is a live setting with no change event, so this
-        // per-frame copy is the detector: a flip re-bakes every face
-        // once (the size slider's documented ~50-200 ms, three faces
-        // here - the frame hitches once, then it is done).
+        ws::core::warn("circsim: gui::is_dark");
         const bool dark = gui::is_dark(theme);
+        ws::core::warn("circsim: dark={}", dark);
         if (dark != font_dark_) {
             font_dark_ = dark;
             rebuild_fonts();
         }
         theme.font = font_.empty() ? nullptr : &font_;
         theme.font_strong = font_strong_.empty() ? nullptr : &font_strong_;
+        ws::core::warn("circsim: shell_->draw");
         shell_->draw(gui_, theme,
                      gui::Rect{0.0f, 0.0f, frame.width, frame.height});
+        ws::core::warn("circsim: gui_.end_layer");
         gui_.end_layer();
+        ws::core::warn("circsim: r2d::end");
         r2d::end();
+        ws::core::warn("circsim: r2d::set_layer(0)");
         r2d::set_layer(0);
+        ws::core::warn("circsim: gui_.end_frame");
         gui_.end_frame();
 
         // The composed title, handed to the OS window when it changes.
@@ -351,6 +401,7 @@ class CircsimApp final : public ws::ui::App {
             set_title(title);
             last_title_ = title;
         }
+        ws::core::warn("circsim: on_update() done");
     }
 
   private:
@@ -371,9 +422,13 @@ class CircsimApp final : public ws::ui::App {
         font_strong_ = ws::ui::r2d::load_default_font(
             ws::ui::r2d::DefaultFontWeight::semibold, 16.0f * scale_, bake);
         if (!font_strong_.empty()) {
-            // The strong face answers the same carriers: a net label
-            // outlives ASCII too.
-            (void)ws::ui::r2d::font_add_face(font_strong_, kUiFontPath, 0);
+            // The strong face answers the same carriers - and the same
+            // face-0 fallback as font_ above (a box whose dejavu is
+            // missing must not build a strong face whose Latin-1
+            // supplement rides the CJK carrier instead: the two faces
+            // would disagree about every past-ASCII glyph).
+            (void)ws::ui::r2d::font_add_face(
+                font_strong_, font_or(kUiFontPath, kExtraFontPath), 0);
             (void)ws::ui::r2d::font_add_face(font_strong_, kExtraFontPath, 1);
         }
         // The netlist panel's mono face, same stack shape.
@@ -689,11 +744,20 @@ class CircsimApp final : public ws::ui::App {
         about_cmd.category = "Help";
         about_cmd.shortcut = {kF1, Mod::none};
         about_cmd.execute = [this](std::string_view) {
-            about_text_ =
+            // The message rides the editor's toast pair, whose
+            // toast_text_ deque gives every toast its own stable
+            // bytes (editor.hpp's borrowed-bytes contract): a second
+            // About inside the first toast's life re-points nothing -
+            // the app-owned about_text_ this replaced could be
+            // reassigned under a still-live toast, dangling its
+            // message.
+            editor_.toast(
                 "circsim editor - the ws::circsim stage-3 schematic "
-                "editor over ws::ui::shell";
-            shell_->toasts().push({about_text_.c_str(),
-                                   gui::ToastSeverity::info, nullptr, 4.0f});
+                "editor over ws::ui::shell - panel keys (R rotate, M "
+                "mirror, W wire, L label, F fit, Del) answer one frame "
+                "after a text field gives the keyboard back: leave the "
+                "field, then press",
+                gui::ToastSeverity::info);
         };
         add(std::move(about_cmd));
 
@@ -800,30 +864,55 @@ class CircsimApp final : public ws::ui::App {
     // --- the simulate job -------------------------------------------------------
 
     void submit_run() {
+        ws::core::warn("circsim: submit_run enter (busy={}, doc={})",
+                       run_job_.busy(), editor_.doc != nullptr);
         if (run_job_.busy() || editor_.doc == nullptr) {
+            ws::core::warn("circsim: submit_run early-out");
             return;
         }
         // The job owns a snapshot (the schematic and the symbol table
         // are value types; the run never sees the live document).
         ws::circsim::Schematic schem = editor_.doc->schem;
         ws::circsim::SymbolLibrary lib = editor_.library;
+        ws::core::warn("circsim: submit_run snapshot copied");
+        // The version THIS run was submitted against - the staleness
+        // stamp the delivery must answer with. Reading the schematic's
+        // version at delivery instead would bless every edit that
+        // landed while the job was in flight: a run against a
+        // schematic the user has already moved on from would show as
+        // fresh. The snapshot rides the job's completion, so it is the
+        // version the results and the Problems header both key to.
+        const std::uint64_t submitted = editor_.schem()->version();
         run_progress_.reset();
         ws::jobs::JobCallbacks<ws::circsim::RunOutcome> callbacks =
             run_progress_.callbacks<ws::circsim::RunOutcome>();
         callbacks.on_complete =
-            [this](ws::jobs::JobHandle<ws::circsim::RunOutcome> handle) {
-                deliver_run(handle.take());
+            [this, submitted](ws::jobs::JobHandle<ws::circsim::RunOutcome>
+                                  handle) {
+                deliver_run(handle.take(), submitted);
             };
         run_job_ = jobs_.submit<ws::circsim::RunOutcome>(
             [schem = std::move(schem),
              lib = std::move(lib)](ws::jobs::JobContext&)
                 -> ws::core::Result<ws::circsim::RunOutcome> {
-                return ws::circsim::run_schematic(schem, nullptr, {}, &lib);
+                ws::core::warn("circsim: worker run_schematic enter");
+                const auto r =
+                    ws::circsim::run_schematic(schem, nullptr, {}, &lib);
+                ws::core::warn("circsim: worker run_schematic done "
+                               "(run_has={})",
+                               r.run.has_value());
+                return r;
             },
             ws::jobs::Priority::normal, {}, std::move(callbacks));
+        ws::core::warn("circsim: submit_run submitted (busy={})",
+                       run_job_.busy());
     }
 
-    void deliver_run(ws::core::Result<ws::circsim::RunOutcome> result) {
+    void deliver_run(ws::core::Result<ws::circsim::RunOutcome> result,
+                     std::uint64_t submitted_version) {
+        ws::core::warn("circsim: deliver_run enter (has_value={}, "
+                       "version={})",
+                       result.has_value(), submitted_version);
         if (editor_.doc == nullptr || !result.has_value()) {
             if (!result.has_value()) {
                 editor_.toast("simulation job failed: " +
@@ -840,22 +929,28 @@ class CircsimApp final : public ws::ui::App {
         editor_.problems.map = std::move(outcome.map);
         editor_.problems.map_valid = true;
         const std::size_t count = outcome.problems.size();
+        ws::core::warn("circsim: deliver_run problems={} run_has={}", count,
+                       outcome.run.has_value());
         editor_.refresh_problems(
             true, std::move(outcome.problems),
-            outcome.run.has_value() ? "run" : "run (failed)");
+            outcome.run.has_value() ? "run" : "run (failed)",
+            submitted_version);
+        ws::core::warn("circsim: deliver_run refresh_problems done");
         if (outcome.run.has_value()) {
             // The Results panel's half of the delivery: the run itself
-            // (tables + measurements) keyed to the version it saw, the
-            // view reset to the first table, and the panel opened -
-            // the simulate act ends with the waveforms on screen.
+            // (tables + measurements) keyed to the version it was
+            // SUBMITTED against - the snapshot the job carried, not
+            // the live document's version (an edit that landed mid-run
+            // must leave the result stale) - the view reset to the
+            // first table, and the panel opened - the simulate act
+            // ends with the waveforms on screen.
             editor_.results.has = true;
-            editor_.results.version = editor_.schem() != nullptr
-                                          ? editor_.schem()->version()
-                                          : 0;
+            editor_.results.version = submitted_version;
             editor_.results.run = std::move(*outcome.run);
             editor_.results.table = 0;
             editor_.results.visible_for = editor::ResultsCache::kNoTable;
             editor_.results.visible.clear();
+            editor_.results.x_sorted_for = editor::ResultsCache::kNoTable;
             editor_.results.hover = -1;
             // A fresh run's waveforms start on the auto fit: the old
             // plot's zoom/pan window and any in-flight gesture belong
@@ -863,9 +958,11 @@ class CircsimApp final : public ws::ui::App {
             editor_.results.view = editor::PlotView{};
             editor_.results.view_for = editor::ResultsCache::kNoTable;
             editor_.results.gesture = editor::PlotGesture{};
+            ws::core::warn("circsim: deliver_run results set, opening panel");
             if (!shell_->panel_host().is_open("results")) {
                 (void)shell_->panel_host().open(shell_->panels(), "results");
             }
+            ws::core::warn("circsim: deliver_run panel open done");
 
             std::size_t rows = 0;
             for (const ws::spice::Table& t : editor_.results.run.results.tables) {
@@ -893,6 +990,7 @@ class CircsimApp final : public ws::ui::App {
                           gui::ToastSeverity::error);
             editor_.status(editor_.problems.header);
         }
+        ws::core::warn("circsim: deliver_run done");
     }
 
     // --- the export (the Results panel's buttons and the Circuit menu) ---
@@ -1034,16 +1132,34 @@ class CircsimApp final : public ws::ui::App {
             if (hit.consumed && !hit.command.empty()) {
                 const ws::core::Status done = commands_.execute(hit.command);
                 if (!done.has_value()) {
-                    error_text_ = done.error().message;
-                    shell_->toasts().push({error_text_.c_str(),
-                                           gui::ToastSeverity::error,
-                                           nullptr, 5.0f});
+                    // The editor's toast pair again, not an app-owned
+                    // string: two different command errors inside one
+                    // toast's life would re-point a shared buffer and
+                    // dangle the earlier message's bytes.
+                    editor_.toast(done.error().message,
+                                  gui::ToastSeverity::error, 5.0f);
                 }
             }
         }
     }
 
     // --- the members (order matters: the shell borrows them all) -------------------
+    //
+    // Destruction runs in REVERSE declaration order, so shell_ is
+    // declared LAST: it is destroyed FIRST, while every object it
+    // borrows is still alive. The shell's own fallback (~AppShell
+    // calls shutdown() when the host never did) touches the borrowed
+    // jobs (config.jobs), dialogs, settings, commands, resolver and fs
+    // through raw pointers - with the old order (shell_ declared above
+    // jobs_/dialogs_/editor_) those died first and the fallback rode
+    // dangling pointers. The explicit ~CircsimApp shutdown above still
+    // runs first (the ordered exit), but the member order is what
+    // makes even the skipped-shutdown path safe. The same rule stacks
+    // the rest: the fonts cover editor_ (whose font/font_mono point at
+    // them), editor_ covers the shell's panel bodies (they draw through
+    // it), and run_job_/run_progress_ sit after shell_ only because
+    // their records are shared_ptr-owned and never talk back to the
+    // system at destruction - jobs_ itself stays here, under shell_.
 
     ws::settings::StdFileSystem fs_;
 
@@ -1051,21 +1167,11 @@ class CircsimApp final : public ws::ui::App {
     std::unique_ptr<ws::settings::SettingsStore> settings_;
     ws::app::CommandRegistry commands_;
     ws::app::ShortcutResolver resolver_;
-    std::unique_ptr<shell::AppShell> shell_;
 
     GuiContext gui_;
-    std::string last_title_;
-
-    editor::Editor editor_;
 
     ws::jobs::JobSystem jobs_{2};
     std::unique_ptr<ws::platform::FileDialogs> dialogs_;
-    gui::JobProgress run_progress_;
-    ws::jobs::JobHandle<ws::circsim::RunOutcome> run_job_{};
-
-    int watched_index_ = -1;
-    std::size_t watched_count_ = 0;
-    ws::app::UndoStack::ListenerId undo_listener_ = 0;
 
     float scale_ = 1.0f;
     ws::ui::r2d::Font font_;
@@ -1074,14 +1180,182 @@ class CircsimApp final : public ws::ui::App {
     bool font_dark_ = true;  // the brightness the fonts are baked for
                              // (the stock default; a persisted light
                              // shell theme flips it on the first frame)
-    std::string about_text_;
-    std::string error_text_;
+
+    editor::Editor editor_;
+
+    std::unique_ptr<shell::AppShell> shell_;
+
+    gui::JobProgress run_progress_;
+    ws::jobs::JobHandle<ws::circsim::RunOutcome> run_job_{};
+
+    std::string last_title_;
+    int watched_index_ = -1;
+    std::size_t watched_count_ = 0;
+    ws::app::UndoStack::ListenerId undo_listener_ = 0;
+
+    // The autorun probe (debug): fires circuit.run every N seconds.
+    bool autorun_checked_ = false;
+    int autorun_fires_ = 0;
+    float autorun_secs_ = -1.0f;
+    std::chrono::steady_clock::time_point autorun_start_{};
 };
 
 }  // namespace
 
+#ifdef _WIN32
+// The debug crash probe (temporary): on any unhandled exception, print
+// the faulting address and the symbolized call tree to stderr - the
+// VS-debugger call stack, headless. dbghelp loads at runtime, so the
+// link line stays ws::-only. Removed once the simulate crash is fixed.
+#include <windows.h>
+#include <crtdbg.h>
+#include <csignal>
+#include <dbghelp.h>
+
+namespace {
+
+using RtlFn = WORD(__stdcall*)(ULONG, ULONG, void**, ULONG*);
+using SymInitFn = BOOL(__stdcall*)(HANDLE, PCWSTR, BOOL);
+using SymSetOptsFn = DWORD(__stdcall*)(DWORD);
+using SymFromAddrFn =
+    BOOL(__stdcall*)(HANDLE, DWORD64, PDWORD64, PSYMBOL_INFO);
+using SymLineFn =
+    BOOL(__stdcall*)(HANDLE, DWORD64, PDWORD, PIMAGEHLP_LINEW64);
+using SymBaseFn = DWORD64(__stdcall*)(HANDLE, DWORD64);
+
+// The debug CRT's assertion funnel: _STL_VERIFY (iterator debugging)
+// and every invalid-parameter call land here before the CRT fast-fails
+// (which would bypass the filter below). Print the assert, then raise
+// so crash_filter prints the call tree at the assert site.
+void invalid_param_handler(const wchar_t* expr, const wchar_t* func,
+                           const wchar_t* file, unsigned line, uintptr_t) {
+    std::fprintf(stderr,
+                 "=== INVALID PARAM: expr=%ls func=%ls file=%ls line=%u "
+                 "===\n",
+                 expr != nullptr ? expr : L"?",
+                 func != nullptr ? func : L"?",
+                 file != nullptr ? file : L"?", line);
+    std::fflush(stderr);
+    RaiseException(0xE0000001, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+}
+
+void abort_handler(int) {
+    std::fprintf(stderr, "=== ABORT ===\n");
+    std::fflush(stderr);
+    RaiseException(0xE0000002, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+}
+
+LONG WINAPI crash_filter(EXCEPTION_POINTERS* info) {
+    static bool in_filter = false;
+    if (in_filter) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    in_filter = true;
+    std::fprintf(stderr,
+                 "=== CRASH: code=0x%08lX addr=%p ===\n",
+                 static_cast<unsigned long>(
+                     info->ExceptionRecord->ExceptionCode),
+                 info->ExceptionRecord->ExceptionAddress);
+    if (info->ContextRecord != nullptr) {
+        std::fprintf(stderr, "rip=%p rsp=%p rbp=%p\n",
+                     reinterpret_cast<void*>(info->ContextRecord->Rip),
+                     reinterpret_cast<void*>(info->ContextRecord->Rsp),
+                     reinterpret_cast<void*>(info->ContextRecord->Rbp));
+    }
+
+    void* frames[40] = {};
+    ULONG count = 0;
+    const HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
+    const RtlFn walk = k32 == nullptr
+                           ? nullptr
+                           : reinterpret_cast<RtlFn>(GetProcAddress(
+                                 k32, "RtlCaptureStackBackTrace"));
+    if (walk != nullptr) {
+        walk(0, 40, frames, &count);  // skip 0: frame 0 is this filter
+    }
+
+    const HMODULE dbg = LoadLibraryA("dbghelp.dll");
+    if (dbg == nullptr) {
+        std::fprintf(stderr, "crash probe: no dbghelp\n");
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    const SymFromAddrFn from_addr = reinterpret_cast<SymFromAddrFn>(
+        GetProcAddress(dbg, "SymFromAddrW"));
+    const SymLineFn line_addr = reinterpret_cast<SymLineFn>(
+        GetProcAddress(dbg, "SymGetLineFromAddrW64"));
+    const SymBaseFn mod_base = reinterpret_cast<SymBaseFn>(
+        GetProcAddress(dbg, "SymGetModuleBase64"));
+    const DWORD64 fault =
+        reinterpret_cast<DWORD64>(info->ExceptionRecord->ExceptionAddress);
+    const HANDLE proc = GetCurrentProcess();
+    if (mod_base != nullptr) {
+        const DWORD64 fbase = mod_base(proc, fault);
+        std::fprintf(stderr, "fault module base=%llX rva=%llX\n", fbase,
+                     fbase != 0 ? fault - fbase : 0);
+    }
+    for (ULONG i = 0; i < count; ++i) {
+        const DWORD64 pc = reinterpret_cast<DWORD64>(frames[i]);
+        const DWORD64 base = mod_base != nullptr ? mod_base(proc, pc) : 0;
+        std::fprintf(stderr, "frame %2lu: %p (module+%llX)",
+                     static_cast<unsigned long>(i), frames[i],
+                     base != 0 ? pc - base : pc);
+        if (from_addr != nullptr) {
+            char buf[sizeof(SYMBOL_INFO) + 256] = {};
+            SYMBOL_INFO* sym = reinterpret_cast<SYMBOL_INFO*>(buf);
+            sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+            sym->MaxNameLen = 255;
+            DWORD64 disp = 0;
+            if (from_addr(proc, pc, &disp, sym) != 0) {
+                std::fprintf(stderr, "  %s+0x%llX", sym->Name,
+                             static_cast<unsigned long long>(disp));
+            }
+        }
+        if (line_addr != nullptr) {
+            IMAGEHLP_LINEW64 line = {};
+            line.SizeOfStruct = sizeof(IMAGEHLP_LINEW64);
+            DWORD line_disp = 0;
+            if (line_addr(proc, pc, &line_disp, &line) != 0 &&
+                line.FileName != nullptr) {
+                std::fprintf(stderr, "  [%ls:%lu]",
+                             line.FileName,
+                             static_cast<unsigned long>(line.LineNumber));
+            }
+        }
+        std::fprintf(stderr, "\n");
+    }
+    std::fprintf(stderr, "=== CRASH END ===\n");
+    std::fflush(stderr);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+void crash_probe_install() {
+    const HMODULE dbg = LoadLibraryA("dbghelp.dll");
+    if (dbg != nullptr) {
+        const SymSetOptsFn set_opts = reinterpret_cast<SymSetOptsFn>(
+            GetProcAddress(dbg, "SymSetOptions"));
+        const SymInitFn init =
+            reinterpret_cast<SymInitFn>(GetProcAddress(dbg,
+                                                       "SymInitializeW"));
+        if (set_opts != nullptr) {
+            set_opts(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS |
+                     SYMOPT_LOAD_LINES);
+        }
+        if (init != nullptr) {
+            init(GetCurrentProcess(), nullptr, TRUE);
+        }
+    }
+    SetUnhandledExceptionFilter(&crash_filter);
+    _set_invalid_parameter_handler(&invalid_param_handler);
+    std::signal(SIGABRT, &abort_handler);
+    ws::core::warn("circsim: crash probe installed");
+}
+
+}  // namespace
+#endif  // _WIN32
+
 int main() {
 #ifdef _WIN32
+    crash_probe_install();
     // The single-instance grab (the shell_example's rule; a posix dev
     // box has no grab TU and skips the nicety).
     const ws::platform::SingleInstance guard{"ws circsim editor"};

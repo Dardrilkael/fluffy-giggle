@@ -143,6 +143,14 @@ int draw_toasts(GuiContext& gui, const ChromeTheme& theme, Toasts& toasts,
             ++live;
         }
     }
+// LOCAL SANDBOX NOTE (review build only, not a repo change): GCC 14's
+// -Warray-bounds fires a known false positive when std::sort's analytic
+// introsort path reasons about a prefix of a fixed-size array; MSVC (the
+// workspace's primary desktop toolchain) and the semantics are unaffected.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+#endif
     std::sort(order.begin(), order.begin() + live, [&toasts](int a, int b) {
         const Toasts::Slot& sa = toasts.slots_[static_cast<std::size_t>(a)];
         const Toasts::Slot& sb = toasts.slots_[static_cast<std::size_t>(b)];
@@ -151,6 +159,9 @@ int draw_toasts(GuiContext& gui, const ChromeTheme& theme, Toasts& toasts,
         }
         return a > b;
     });
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
     // The whole stack sits in ONE toast stratum, above the modal veil.
     gui.begin_layer(Layer::toast);

@@ -203,8 +203,15 @@ std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir) {
     Pos target = b;  // ... and the point the route aims for before b
     if (b_dir >= 0) {
         const Pos u = unit(b_dir);
-        // Approach b ALONG b_dir: stop one lead short of it.
-        target = {b.x - u.x * kLead, b.y - u.y * kLead};
+        // Approach b AGAINST b_dir: a pin's dir faces outward (away
+        // from the part's body - the a side's from = a + u*lead reads
+        // it exactly that way), so a wire lands tip-first, traveling
+        // the reverse of the facing from the pin's own outside. The
+        // stop is one lead short of the tip ON that outside
+        // (b + u*lead). The old b - u*lead sat the stop inside the
+        // part: the final leg ran out through the body and doubled
+        // back to the pin - every pin landing stabbed its part.
+        target = {b.x + u.x * kLead, b.y + u.y * kLead};
     }
 
     // Full polyline a -> ... -> b; the stored waypoints are its
@@ -606,14 +613,14 @@ void Editor::jump_to(const ws::circsim::DiagTarget& t) {
 
 void Editor::refresh_problems(bool from_run,
                               std::vector<ws::circsim::Diag> diags,
-                              std::string header) {
+                              std::string header, std::uint64_t version) {
     const ws::circsim::Schematic* s = schem();
     if (s == nullptr) {
         return;
     }
     problems.has = true;
     problems.from_run = from_run;
-    problems.version = s->version();
+    problems.version = version;
     problems.header = std::move(header);
     problems.diags = std::move(diags);
     problems.lines.clear();
@@ -644,8 +651,9 @@ void Editor::run_erc() {
     problems.nets = build.nets;
     problems.nets_valid = true;
     problems.map_valid = false;
+    // Synchronous check: the version it ran against IS the live one.
     refresh_problems(false, ws::circsim::run_erc(*s, build, &library),
-                     "erc");
+                     "erc", s->version());
 }
 
 void Editor::refresh_netlist() {
@@ -735,7 +743,8 @@ void Editor::document_changed() {
     }
 }
 
-void Editor::toast(std::string text, gui::ToastSeverity severity) const {
+void Editor::toast(std::string text, gui::ToastSeverity severity,
+                   float seconds) const {
     if (toasts != nullptr) {
         // Toasts borrows the bytes, so the text gets its own stable
         // slot (toast_text_, see editor.hpp). The old function-static
@@ -747,7 +756,8 @@ void Editor::toast(std::string text, gui::ToastSeverity severity) const {
         while (toast_text_.size() > kMaxLive) {
             toast_text_.pop_front();
         }
-        toasts->push({toast_text_.back().c_str(), severity, nullptr, 4.0f});
+        toasts->push({toast_text_.back().c_str(), severity, nullptr,
+                      seconds});
     }
 }
 

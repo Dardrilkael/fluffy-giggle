@@ -50,6 +50,7 @@
 #include <vector>
 #include <span>
 
+#include <ws/core/log.hpp>
 #include <ws/input/input.hpp>
 #include <ws/spice/results.hpp>
 #include <ws/ui/renderer2d.hpp>
@@ -91,6 +92,18 @@ constexpr std::size_t kSeriesCount = sizeof kSeries / sizeof kSeries[0];
 
 // Keeps the per-signal visibility flags aligned with the table being
 // shown (all-visible on a table switch; the flags survive frames).
+//
+// The size half of the condition guards the INVARIANT "visible has
+// exactly t.signals.size() flags for the shown table": a mismatch can
+// only mean the flags and `visible_for` disagree about which table
+// they belong to (a delivery that reset one and not the other, or a
+// table switch that landed mid-frame), and every reader downstream
+// indexes visible[i] against t.signals[i] - the legend's checkbox
+// write (which re-checks the size before it indexes, the same guard
+// reading the same invariant from the write side) and the plot's
+// series loop. Re-assigning on the mismatch restores all-visible,
+// the same honest answer as a table switch, instead of drawing
+// against flags sized for some other table.
 void sync_visibility(Editor& ed, const ws::spice::Table& t) {
     if (ed.results.visible_for != ed.results.table ||
         ed.results.visible.size() != t.signals.size()) {
@@ -620,6 +633,17 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     if (n == 0u) {
         return;
     }
+    // The axis's sortedness is a per-table constant of the run (the
+    // axis data is immutable once delivered), so it rides the cache
+    // keyed to the table (ResultsCache::x_sorted_for) instead of the
+    // per-frame walk strictly_increasing used to cost - the same key
+    // shape `visible` and `view` keep. A delivery resets the key
+    // (main.cpp's block beside visible_for): a same-indexed table of
+    // a new run is a different axis.
+    if (ed.results.x_sorted_for != ed.results.table) {
+        ed.results.x_sorted = !by_index && strictly_increasing(xs);
+        ed.results.x_sorted_for = ed.results.table;
+    }
 
     // The home ranges: each y spine fits ITS OWN visible company
     // (stage 6 - the volts on the left, the amps on the right), x
@@ -780,7 +804,9 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     const bool hovering = gui.claims_open() &&
                           in.mouse_x >= fx && in.mouse_x < fx + iw &&
                           in.mouse_y >= fy && in.mouse_y < fy + ih;
-    const bool x_sorted = !by_index && strictly_increasing(xs);
+    // The x axis's sortedness: the cached per-table answer (computed
+    // at the top of the draw, keyed like `visible`).
+    const bool x_sorted = ed.results.x_sorted;
     if (hovering) {
         const double wx =
             pf.vxr.lo + (static_cast<double>(in.mouse_x) - fx) / iw *
@@ -966,6 +992,7 @@ void draw_value_rows(Editor& ed, gui::LayoutCursor& layout,
 void draw_results_panel(Editor& ed, gui::GuiContext& gui,
                         gui::LayoutCursor& layout,
                         const gui::ChromeTheme& theme) {
+    ws::core::warn("results.draw enter (has={})", ed.results.has);
     if (ed.doc == nullptr || ed.schem() == nullptr) {
         gui::text(layout, theme, "no document");
         return;
@@ -985,6 +1012,7 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
     }
     const ws::spice::Table& t = res.tables[ed.results.table];
     sync_visibility(ed, t);
+    ws::core::warn("results.draw sync_visibility done");
 
     const bool stale = ed.results.version != ed.schem()->version();
 
@@ -1000,7 +1028,9 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
         for (const std::string& label : labels) {
             items.push_back(label.c_str());
         }
+        ws::core::warn("results.draw before fields lookup");
         FieldBuf& combo = ed.fields["results.table"];
+        ws::core::warn("results.draw fields lookup done");
         if (combo.stamp != ed.field_stamp) {
             combo.stamp = ed.field_stamp;
             combo.combo_open = false;

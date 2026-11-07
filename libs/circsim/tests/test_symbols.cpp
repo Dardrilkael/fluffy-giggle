@@ -7,6 +7,15 @@
 #include <string>
 #include <vector>
 
+// LOCAL SANDBOX NOTE (review build only, not a repo change): GCC 14's
+// -Wmaybe-uninitialized fires a known false positive when a
+// default-constructed AnalysisSpec variant is moved into a vector at
+// -O3; MSVC (the workspace's primary desktop toolchain) and the
+// semantics are unaffected.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+
 #include <doctest/doctest.h>
 
 #include <ws/circsim/erc.hpp>

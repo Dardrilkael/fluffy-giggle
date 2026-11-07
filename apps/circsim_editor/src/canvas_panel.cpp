@@ -359,6 +359,13 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                 ws::circsim::Part p = ws::circsim::Part::make(
                     sym->key, next_ref(*ed.schem(), *sym), "",
                     ed.snap(world, coarse));
+                // Minted for the same reason as the wire commit's id:
+                // the command layer preserves the id it is handed, and
+                // the palette is the parts' only creation path (0 is
+                // the "none" sentinel - every placed part used to
+                // share it, so part picks and deletes answered the
+                // oldest part).
+                p.id = ed.schem()->alloc_id();
                 p.rot = ed.ghost_rot;
                 p.mirror = ed.ghost_mirror;
                 p.params = ws::circsim::default_params(*sym);
@@ -425,6 +432,19 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                     break;
                 }
                 ws::circsim::Wire w;
+                // The wire's id is minted HERE, in the same breath as
+                // its junctions below: the command layer PRESERVES the
+                // id it is handed (reinsert_wire -> raise_next_id only
+                // raises the counter past it; the library's add_wire,
+                // which mints, is not on this path). The old default
+                // 0 - the "none" sentinel (ids start at 1) - landed on
+                // every hand-drawn wire at once: find_wire/take_wire
+                // answered the oldest one, Selection::is lit them all,
+                // and the delete path's orphan scan skipped no wire,
+                // so deleting any wire orphaned junctions its
+                // survivors still referenced (their wires then stopped
+                // drawing - the "vanishing wire").
+                w.id = ed.schem()->alloc_id();
                 std::vector<ws::circsim::Junction> junctions;
                 if (ed.wire_draft.a_mint) {
                     ws::circsim::Junction j;
@@ -469,6 +489,10 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                     break;
                 }
                 ws::circsim::Label l;
+                // The label joins the mint: the command layer preserves
+                // ids, and 0 is the "none" sentinel (same class as the
+                // wire and part placements).
+                l.id = ed.schem()->alloc_id();
                 l.pos = ed.snap(world, coarse);
                 l.name = ed.label_text;
                 push_place_label(*ed.doc, std::move(l));
@@ -525,7 +549,17 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     handle_pointer(ed, gui, body);
 
     // The pointer facts the render halves share (screen-space inside,
-    // world cursor, the Shift modifier the ghosts follow).
+    // world cursor, the Shift modifier the ghosts follow). These are
+    // re-derived AFTER handle_pointer on purpose, not shared with its
+    // opening reads: `inside` and `coarse` are functions of this
+    // frame's input alone (identical either way), but `world` maps
+    // through ed.view - and handle_pointer MOVES the view (the wheel
+    // zooms toward the cursor, the pan drags it). A world cursor
+    // captured before the interaction would lag one frame behind the
+    // camera it belongs to, so the snap feedback and the ghosts would
+    // draw against the pre-zoom geometry. The input itself never
+    // changes mid-frame (gui.input() is the frame's own copy); the
+    // second derivation is the one that speaks the CURRENT camera.
     const ws::input::InputFrame& in = gui.input();
     const bool inside =
         in.mouse_x >= body.x && in.mouse_x < body.x + body.width &&

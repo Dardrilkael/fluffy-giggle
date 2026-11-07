@@ -721,9 +721,12 @@ void AppShell::autosave_tick() {
 
 void AppShell::draw(GuiContext& gui, const ChromeTheme& theme,
                     const Rect& frame) {
+    ws::core::warn("shell: draw() starting");
     autosave_tick();
+    ws::core::warn("shell: autosave_tick done");
     LayoutCursor layout;
     (void)layout.begin_panel(frame, 0.0f, theme.spacing);
+    ws::core::warn("shell: layout.begin_panel done");
 
     // The menu bar strip: the bar's own face first - the chrome is a
     // depth layer away from the panels, so the frame reads as frame
@@ -731,7 +734,9 @@ void AppShell::draw(GuiContext& gui, const ChromeTheme& theme,
     // one flat void with the dock below it).
     const Rect bar{frame.x, frame.y, frame.width, theme.control_height};
     r2d::draw_quad(bar.x, bar.y, bar.width, bar.height, theme.bar_bg);
+    ws::core::warn("shell: draw_menu_bar starting");
     draw_menu_bar(gui, layout, theme, bar);
+    ws::core::warn("shell: draw_menu_bar done");
     r2d::draw_quad(bar.x, bar.y + bar.height - 1.0f, bar.width, 1.0f,
                    theme.border);
 
@@ -762,11 +767,18 @@ void AppShell::draw(GuiContext& gui, const ChromeTheme& theme,
                              : frame.y + frame.height;
     const Rect dock{frame.x, top, frame.width,
                     std::max(0.0f, bottom - top)};
+    ws::core::warn("shell: draw_dock starting");
     draw_dock(gui, layout, theme, dock);
+    ws::core::warn("shell: draw_dock done");
 
     layout.end_panel();
+    ws::core::warn("shell: draw_status starting");
     draw_status(gui, layout, theme, frame, bottom);
+    ws::core::warn("shell: draw_status done");
+    ws::core::warn("shell: draw_overlays starting");
     draw_overlays(gui, theme, frame);
+    ws::core::warn("shell: draw_overlays done");
+    ws::core::warn("shell: draw() completed");
 }
 
 void AppShell::draw_menu_bar(GuiContext& gui, LayoutCursor& layout,
@@ -929,16 +941,23 @@ void AppShell::run_window_action(const std::string& action) {
 
 void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
                          const ChromeTheme& theme, const Rect& bounds) {
+    ws::core::warn("shell: draw_dock entry");
     if (bounds.width <= 0.0f || bounds.height <= 0.0f) {
+        ws::core::warn("shell: draw_dock early return - bounds invalid");
         return;
     }
+    ws::core::warn("shell: draw_dock drawing background");
     r2d::draw_quad(bounds.x, bounds.y, bounds.width, bounds.height, theme.panel_bg);
+    ws::core::warn("shell: draw_dock resolving dock layout");
     const DockTree::Layout resolved = panel_host_.dock().resolve(bounds);
+    ws::core::warn("shell: draw_dock resolved, splitters=%zu leaves=%zu",
+                   resolved.splitters.size(), resolved.leaves.size());
 
     // The splitters first: their hit claims land before any leaf
     // widget's, so a boundary grab always wins over content under it.
     // The fill is the bar face - a visible recessed gutter between
     // the panels, not a 1-px color change nobody can find.
+    ws::core::warn("shell: draw_dock drawing splitters");
     for (const DockTree::SplitterRect& splitter : resolved.splitters) {
         r2d::draw_quad(splitter.rect.x, splitter.rect.y, splitter.rect.width,
                        splitter.rect.height, theme.bar_bg);
@@ -976,12 +995,14 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
             splitter_drag_.active = false;
         }
     }
+    ws::core::warn("shell: draw_dock splitters done");
 
     // Focus follows press: a press inside a leaf activates that leaf's
     // front tab (the tab strip's own selection does the same on click).
     const ws::input::InputFrame& in = gui.input();
     const bool pressed = in.mouse_present && in.mouse_pressed[0];
     if (pressed) {
+        ws::core::warn("shell: draw_dock processing focus press");
         for (const DockTree::LeafRect& leaf : resolved.leaves) {
             if (point_in(leaf.rect, in.mouse_x, in.mouse_y) &&
                 leaf.tabs != nullptr && !leaf.tabs->empty()) {
@@ -992,10 +1013,14 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
             }
         }
     }
+    ws::core::warn("shell: draw_dock focus done");
 
     // The leaves: a tab strip, then the active tab's panel body in a
     // scroll scope.
-    for (const DockTree::LeafRect& leaf : resolved.leaves) {
+    ws::core::warn("shell: draw_dock processing leaves, count=%zu", resolved.leaves.size());
+    for (std::size_t leaf_idx = 0; leaf_idx < resolved.leaves.size(); ++leaf_idx) {
+        const DockTree::LeafRect& leaf = resolved.leaves[leaf_idx];
+        ws::core::warn("shell: draw_dock leaf %zu", leaf_idx);
         const float strip_h = theme.control_height;
         const Rect strip{leaf.rect.x, leaf.rect.y, leaf.rect.width, strip_h};
 
@@ -1008,6 +1033,7 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
                                                      : tab.c_str());
             }
         }
+        ws::core::warn("shell: draw_dock leaf %zu labels=%zu", leaf_idx, labels.size());
 
         // The strip's own face + a 1-px rule at its bottom edge, BEFORE
         // the tabs: the selected tab's panel-bg face paints over the
@@ -1024,9 +1050,11 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
         const Rect content{leaf.rect.x, leaf.rect.y + strip_h, leaf.rect.width,
                            std::max(0.0f, leaf.rect.height - strip_h)};
         if (content.height <= 0.0f) {
+            ws::core::warn("shell: draw_dock leaf %zu content height 0, continue", leaf_idx);
             continue;
         }
         if (labels.empty()) {
+            ws::core::warn("shell: draw_dock leaf %zu empty labels, drawing empty dock", leaf_idx);
             gui::panel_draw(content, theme);  // the empty-dock chrome
             draw_empty_dock(gui, theme, content);
             continue;
@@ -1041,6 +1069,7 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
         // live editor's. The resolve index scopes the strips apart
         // (stable while the tree holds its shape; nothing worth keeping
         // keys under a strip - the bodies id by panel instance below).
+        ws::core::warn("shell: draw_dock leaf %zu tab strip", leaf_idx);
         const gui::ScopedId leaf_ids(gui.ids(), leaf.leaf);
         int active = std::clamp(leaf.active, 0,
                                 static_cast<int>(labels.size()) - 1);
@@ -1095,22 +1124,29 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
             continue;  // the leaf's body is gone this frame
         }
         layout.end_panel();
+        ws::core::warn("shell: draw_dock leaf %zu tab strip done", leaf_idx);
 
         const PanelInstance* instance =
             panel_host_.find((*leaf.tabs)[static_cast<std::size_t>(active)]);
         const PanelDesc* desc =
             instance == nullptr ? nullptr
                                 : panel_registry_.find(instance->type);
+        ws::core::warn("shell: draw_dock leaf panel_id={}", instance ? instance->id : "null");
         if (desc == nullptr || !desc->draw) {
+            ws::core::warn("shell: draw_dock leaf no desc or no draw, panel_draw");
             gui::panel_draw(content, theme);
             continue;
         }
+        ws::core::warn("shell: draw_dock leaf drawing panel body type={}", instance->type);
         const std::string label = "shell.body." + instance->id;
         (void)gui::begin_scroll_panel(gui, layout, theme, label.c_str(),
                                       content);
+        ws::core::warn("shell: draw_dock leaf calling desc->draw for type={}", instance->type);
         desc->draw(gui, layout, theme, *instance);
+        ws::core::warn("shell: draw_dock leaf desc->draw done for type={}", instance->type);
         gui::end_scroll_panel(gui, layout, theme);
     }
+    ws::core::warn("shell: draw_dock done");
 }
 
 void AppShell::draw_empty_dock(GuiContext& gui, const ChromeTheme& theme,
