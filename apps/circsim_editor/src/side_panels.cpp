@@ -25,7 +25,6 @@
 #include <vector>
 
 #include <ws/core/assert.hpp>
-#include <ws/core/log.hpp>
 #include <ws/input/input.hpp>
 #include <ws/spice/parse.hpp>
 #include <ws/ui/renderer2d.hpp>
@@ -122,6 +121,53 @@ void label_line(gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
     gui::text(layout, theme, line);
 }
 
+// A dim, secondary line: hints, units, validation notes. Drawn the way
+// the netlist rows are (one layout row + draw_text) so it costs a single
+// row and never competes with the primary text.
+void hint_line(gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
+               const std::string& text) {
+    if (theme.font != nullptr && theme.font->line_height() > 0.0f) {
+        const ws::ui::r2d::Font& font = *theme.font;
+        const gui::Rect row =
+            layout.next(layout.remaining_width(), font.line_height() + 2.0f);
+        (void)ws::ui::r2d::draw_text(row.x, row.y, text.c_str(), font,
+                                     gui::dim(theme.text, 0.6f));
+    } else {
+        // Fontless fallback: use the text widget which handles null font.
+        const gui::Rect row =
+            layout.next(layout.remaining_width(), 16.0f);
+        gui::text(layout, theme, text.c_str());
+    }
+}
+
+// The panels' section break: a separator and a heading.
+void panel_section(gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
+                   const char* title) {
+    gui::separator(layout, theme);
+    gui::text(layout, theme, title);
+}
+
+// "3 errors" / "1 error": the count with its noun.
+[[nodiscard]] std::string counted(std::size_t n, const char* noun) {
+    return std::to_string(n) + " " + noun + (n == 1 ? "" : "s");
+}
+
+// What a value field reads back as: "4.7k" says "= 4700". Empty when the
+// text is not a SPICE number or already is the plain number (free-form
+// values like "SIN(0 1 1k)" simply get no readback).
+[[nodiscard]] std::string value_readback(const char* text) {
+    const auto parsed = ws::spice::parse_number(text);
+    if (!parsed.has_value()) {
+        return {};
+    }
+    char plain[64];
+    std::snprintf(plain, sizeof plain, "%.12g", *parsed);
+    if (std::string_view{text} == plain) {
+        return {};
+    }
+    return std::string{"= "} + plain;
+}
+
 [[nodiscard]] std::string endpoint_label(const Editor& ed,
                                          const ws::circsim::WireEndpoint& e) {
     if (const ws::circsim::PinRef* pin = std::get_if<ws::circsim::PinRef>(&e)) {
@@ -162,6 +208,13 @@ void part_text_row(Editor& ed, gui::GuiContext& gui,
                        std::string{field_of(ed, key).buf.data()},
                        std::string{"Edit "} + label);
     }
+    if (kind == 1) {
+        const std::string readback =
+            value_readback(field_of(ed, key).buf.data());
+        if (!readback.empty()) {
+            hint_line(layout, theme, readback);
+        }
+    }
 }
 
 // --- the analysis editor ---------------------------------------------------
@@ -201,10 +254,14 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
                           "' is not a SPICE number - kept the old value");
             }
         }
+        if (!ws::spice::parse_number(buf).has_value()) {
+            hint_line(layout, theme,
+                      "Not a SPICE number - try 1u, 4.7k or 1meg");
+        }
     };
 
     if (std::get_if<ws::circsim::OpSpec>(&spec) != nullptr) {
-        gui::text(layout, theme, ".op - no fields");
+        gui::text(layout, theme, "Operating point: no settings needed");
         return;
     }
     if (const ws::circsim::DcSpec* dc =
@@ -407,6 +464,25 @@ constexpr float kTileTargetW = 52.0f;
 constexpr float kTileH = 44.0f;
 constexpr float kTilePad = 6.0f;
 
+// The symbols armed most recently, newest first. Process-wide on purpose:
+// it is a UI convenience, not document state, so it survives a document
+// switch. (Move it onto Editor if a second editor ever needs its own.)
+constexpr std::size_t kRecentMax = 6;
+
+[[nodiscard]] std::vector<std::string>& recent_symbols() {
+    static std::vector<std::string> keys;
+    return keys;
+}
+
+void note_recent_symbol(const std::string& key) {
+    std::vector<std::string>& r = recent_symbols();
+    r.erase(std::remove(r.begin(), r.end(), key), r.end());
+    r.insert(r.begin(), key);
+    if (r.size() > kRecentMax) {
+        r.resize(kRecentMax);
+    }
+}
+
 // One symbol tile; true on a click (or Enter/Space while focused). The
 // caller owns the id scope: the tile's id and its tooltip's are both
 // "tile" under the scope it pushed.
@@ -415,16 +491,11 @@ constexpr float kTilePad = 6.0f;
                                const gui::ChromeTheme& theme,
                                const ws::circsim::SymbolDef& sym,
                                float width, bool armed) {
-    ws::core::warn("symbol_tile: start for sym {}", sym.key);
     const gui::Rect r = layout.next(width, kTileH);
-    ws::core::warn("symbol_tile: layout.next done, rect x={} y={} w={} h={}", r.x, r.y, r.width, r.height);
     const auto id = gui.ids().id("tile");
-    ws::core::warn("symbol_tile: gui.ids().id done");
     const gui::SelectableResult res = gui::selectable_behavior(gui, id, r);
-    ws::core::warn("symbol_tile: selectable_behavior done");
 
     canvas::Canvas2D& rc = ed.palette_draw_canvas();
-    ws::core::warn("symbol_tile: palette_draw_canvas done");
     rc.set_view_scale(1.0f);  // the transform below carries the scale
     std::uint32_t face = theme.control_bg;
     if (res.hit.pressed) {
@@ -432,10 +503,8 @@ constexpr float kTilePad = 6.0f;
     } else if (res.hit.hovered) {
         face = theme.control_hovered;
     }
-    ws::core::warn("symbol_tile: about to fill_rounded_rect");
     rc.fill_rounded_rect(r.x, r.y, r.width, r.height, theme.corner_radius,
                          face);
-    ws::core::warn("symbol_tile: fill_rounded_rect done");
     if (armed) {
         // The armed tile: an accent wash and outline (a selectable's
         // accent bar, grown to fit a tile).
@@ -458,9 +527,7 @@ constexpr float kTilePad = 6.0f;
     // The picture: fitted to the tile and centered on the symbol's own
     // bounds (pins included), so an asymmetric symbol sits in the middle
     // instead of hanging off its origin. No font - a tile has no text.
-    ws::core::warn("symbol_tile: about to symbol_bounds");
     const Bounds b = ws::circsim::symbol_bounds(sym);
-    ws::core::warn("symbol_tile: symbol_bounds done min_x={} max_x={} min_y={} max_y={}", b.min_x, b.max_x, b.min_y, b.max_y);
     const double bw = std::max(1.0, b.max_x - b.min_x);
     const double bh = std::max(1.0, b.max_y - b.min_y);
     const double fit = std::min(
@@ -469,16 +536,12 @@ constexpr float kTilePad = 6.0f;
     canvas::Paint paint;
     paint.width = 1.5f;
     paint.color = armed ? theme.control_on : gui::dim(theme.text, 0.85f);
-    ws::core::warn("symbol_tile: about to push_transform");
     rc.push_transform();
-    ws::core::warn("symbol_tile: push_transform done");
     rc.translate(r.x + r.width * 0.5f, r.y + r.height * 0.5f);
     rc.scale(static_cast<float>(fit), -static_cast<float>(fit));
     rc.translate(static_cast<float>(-(b.min_x + b.max_x) * 0.5),
                  static_cast<float>(-(b.min_y + b.max_y) * 0.5));
-    ws::core::warn("symbol_tile: about to draw_symbol");
     draw_symbol(rc, sym, Pos{0.0, 0.0}, 0, false, paint, 0u, nullptr);
-    ws::core::warn("symbol_tile: draw_symbol done");
     rc.pop_transform();
 
     const std::string hint = sym.name + " (" + sym.key + ")";
@@ -491,12 +554,11 @@ constexpr float kTilePad = 6.0f;
 void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
                         gui::LayoutCursor& layout,
                         const gui::ChromeTheme& theme) {
-    ws::core::warn("palette: draw_palette_panel start");
     // The section header: the strong face, a step larger than the body
     // (the font hierarchy's loud rung - the tools list reads as a
     // section, not a longer label).
-    gui::heading(layout, theme, "tools");
-    if (gui::selectable(gui, layout, theme, "select",
+    gui::heading(layout, theme, "Tools");
+    if (gui::selectable(gui, layout, theme, "Select",
                         ed.tool == Tool::Select)) {
         ed.tool = Tool::Select;
         ed.wire_draft = Editor::WireDraft{};
@@ -511,39 +573,59 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
         ed.tool = Tool::Label;
     }
     if (ed.tool == Tool::Label) {
-        (void)gui::text_input(gui, layout, theme, "name", ed.label_text,
-                              static_cast<int>(sizeof ed.label_text));
+        // Tracked, so typing a net name never fires the bare panel keys.
+        (void)text_input_tracked(ed, gui, layout, theme,
+                                 std::string{"Net name##tool.label"},
+                                 ed.label_text,
+                                 static_cast<int>(sizeof ed.label_text));
+    }
+    if (ed.tool == Tool::Place) {
+        gui::text(layout, theme, ("Placing: " + ed.place_symbol).c_str());
+        hint_line(layout, theme,
+                  "Click to place - R rotate - M mirror - Esc cancel");
     }
     gui::separator(layout, theme);
 
     // The search box. The label is its placeholder; Enter arms the
     // first match, so "res" Enter drops straight into placing a resistor.
-    (void)text_input_tracked(ed, gui, layout, theme,
-                             std::string{"search symbols"},
-                             ed.palette_filter,
-                             static_cast<int>(sizeof ed.palette_filter));
+    // With text in the box the field shrinks to make room for a Clear
+    // button (no hunting for the backspace key to get the palette back).
+    const bool had_filter = ed.palette_filter[0] != '\0';
+    (void)text_input_tracked(
+        ed, gui, layout, theme, std::string{"Search symbols"},
+        ed.palette_filter, static_cast<int>(sizeof ed.palette_filter),
+        had_filter ? std::max(60.0f, layout.remaining_width() - 64.0f)
+                   : -1.0f);
+    if (had_filter) {
+        layout.same_line();
+        if (gui::button(gui, layout, theme, "Clear", 56.0f)) {
+            ed.palette_filter[0] = '\0';
+        }
+    }
     const bool filter_focused =
-        gui.is_focused(gui.ids().id("search symbols"));
+        gui.is_focused(gui.ids().id("Search symbols"));
     const std::string_view filter{ed.palette_filter};
     const bool filtering = !filter.empty();
-    ws::core::warn("palette: calling palette_groups");
     const std::vector<PaletteGroup> groups =
         palette_groups(ed.library, filter);
-    ws::core::warn("palette: palette_groups returned {} groups", groups.size());
 
     const auto arm = [&ed](const ws::circsim::SymbolDef& sym) {
         ed.tool = Tool::Place;
         ed.place_symbol = sym.key;
         ed.ghost_rot = 0;
         ed.ghost_mirror = false;
+        note_recent_symbol(sym.key);
     };
-    if (filter_focused && !groups.empty() &&
+    if (filter_focused && !groups.empty() && !groups.front().items.empty() &&
         gui.input().key_pressed[ws::input::keys::kEnter] != 0) {
         arm(*groups.front().items.front());
     }
 
     if (groups.empty()) {
-        gui::text(layout, theme, "no symbols match");
+        gui::text(layout, theme,
+                  ("No symbols match \"" + std::string{filter} + "\"")
+                      .c_str());
+        hint_line(layout, theme, "Try a shorter name, e.g. res, cap or gnd");
     }
 
     // The columns stretch the tiles to fill the panel's width.
@@ -556,6 +638,47 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
         static_cast<float>(cols);
 
     int tile_index = 0;
+    // One wrapped run of tiles; the id scope is the running tile index.
+    const auto tile_run = [&](const auto& items) {
+        std::size_t n = 0;
+        for (const ws::circsim::SymbolDef* sym : items) {
+            if (n % static_cast<std::size_t>(cols) != 0) {
+                layout.same_line();
+            }
+            ++n;
+            gui.ids().push(tile_index++);
+            const bool armed =
+                ed.tool == Tool::Place && ed.place_symbol == sym->key;
+            if (symbol_tile(ed, gui, layout, theme, *sym, tile_w, armed)) {
+                arm(*sym);
+            }
+            gui.ids().pop();
+        }
+    };
+
+    // Recent: the last few symbols armed, one click from re-arming.
+    // Browsing only - a search shows its matches alone.
+    if (!filtering) {
+        std::vector<const ws::circsim::SymbolDef*> recent;
+        for (const std::string& key : recent_symbols()) {
+            for (const PaletteGroup& g : groups) {
+                const auto it = std::find_if(
+                    g.items.begin(), g.items.end(),
+                    [&key](const ws::circsim::SymbolDef* s) {
+                        return s->key == key;
+                    });
+                if (it != g.items.end()) {
+                    recent.push_back(*it);
+                    break;
+                }
+            }
+        }
+        if (!recent.empty()) {
+            gui::text(layout, theme, "Recent");
+            tile_run(recent);
+        }
+    }
+
     int group_index = 0;
     for (const PaletteGroup& g : groups) {
         gui.ids().push(group_index++);
@@ -577,25 +700,10 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
             }
         }
         if (open) {
-            std::size_t n = 0;
-            for (const ws::circsim::SymbolDef* sym : g.items) {
-                if (n % static_cast<std::size_t>(cols) != 0) {
-                    layout.same_line();
-                }
-                ++n;
-                gui.ids().push(tile_index++);
-                const bool armed =
-                    ed.tool == Tool::Place && ed.place_symbol == sym->key;
-                if (symbol_tile(ed, gui, layout, theme, *sym, tile_w,
-                                armed)) {
-                    arm(*sym);
-                }
-                gui.ids().pop();
-            }
+            tile_run(g.items);
         }
         gui.ids().pop();
     }
-    gui::text(layout, theme, "R rotate - M mirror - Esc cancel");
 }
 
 // --- the properties -------------------------------------------------------------
@@ -616,7 +724,7 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
     watch_selection(ed);
     ed.text_field_focused = false;  // this frame's draw sets it back
     if (ed.doc == nullptr || ed.schem() == nullptr) {
-        gui::text(layout, theme, "no document");
+        gui::text(layout, theme, "No document open");
         return;
     }
 
@@ -643,8 +751,8 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
 
     // --- the Properties tab: the selection's rows
     if (ed.sel.kind == Selection::Kind::None) {
-        gui::text(layout, theme, "nothing selected");
-        gui::text(layout, theme, "click a part, wire or label");
+        gui::text(layout, theme, "Nothing selected");
+        hint_line(layout, theme, "Click a part, wire or label to edit it");
         return;
     }
 
@@ -656,14 +764,18 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
             return;
         }
         const ws::circsim::SymbolDef* sym = ed.sym_of(*p);
-        label_line(layout, theme, "symbol",
+        label_line(layout, theme, "Symbol",
                    sym != nullptr
                        ? sym->name + " (" + sym->key + ")"
                        : p->symbol + " (unknown)");
-        part_text_row(ed, gui, layout, theme, "ref", p->id, 0, "", p->ref);
+        part_text_row(ed, gui, layout, theme, "Reference", p->id, 0, "",
+                      p->ref);
         if (sym == nullptr || sym->needs_value || !p->value.empty()) {
-            part_text_row(ed, gui, layout, theme, "value", p->id, 1, "",
+            part_text_row(ed, gui, layout, theme, "Value", p->id, 1, "",
                           p->value);
+        }
+        if (sym != nullptr && !sym->params.empty()) {
+            panel_section(layout, theme, "Parameters");
         }
         if (sym != nullptr) {
             for (const ws::circsim::ParamSpec& spec : sym->params) {
@@ -716,10 +828,11 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
             }
         }
         char where[64];
-        std::snprintf(where, sizeof where, "at (%.12g, %.12g)", p->pos.x,
-                      p->pos.y);
-        gui::text(layout, theme, where);
-        if (gui::button(gui, layout, theme, "delete")) {
+        std::snprintf(where, sizeof where, "Position: (%.12g, %.12g)",
+                      p->pos.x, p->pos.y);
+        gui::separator(layout, theme);
+        hint_line(layout, theme, where);
+        if (gui::button(gui, layout, theme, "Delete part")) {
             push_delete_part(*ed.doc, p->id);
             ed.sel.clear();
         }
@@ -732,9 +845,9 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
             ed.sel.clear();
             return;
         }
-        label_line(layout, theme, "wire " + std::to_string(w->id),
+        label_line(layout, theme, "Wire " + std::to_string(w->id),
                    endpoint_label(ed, w->a) + " to " + endpoint_label(ed, w->b));
-        if (gui::button(gui, layout, theme, "delete")) {
+        if (gui::button(gui, layout, theme, "Delete wire")) {
             push_delete_wire(*ed.doc, w->id);
             ed.sel.clear();
         }
@@ -749,10 +862,10 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
             return;
         }
         char where[64];
-        std::snprintf(where, sizeof where, "junction at (%.12g, %.12g)",
+        std::snprintf(where, sizeof where, "Junction at (%.12g, %.12g)",
                       j->pos.x, j->pos.y);
         gui::text(layout, theme, where);
-        if (gui::button(gui, layout, theme, "delete")) {
+        if (gui::button(gui, layout, theme, "Delete junction")) {
             // A junction delete is the first wire through it; find the
             // id BEFORE the command runs (it mutates the deque this
             // walk would still hold).
@@ -786,11 +899,11 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
                               l->name);
         if (text_input_tracked(
                 ed, gui, layout, theme,
-                "net name##l" + std::to_string(l->id) + ".name", buf,
+                "Net name##l" + std::to_string(l->id) + ".name", buf,
                 128)) {
             push_label_text(*ed.doc, l->id, buf);
         }
-        if (gui::button(gui, layout, theme, "delete")) {
+        if (gui::button(gui, layout, theme, "Delete label")) {
             push_delete_label(*ed.doc, l->id);
             ed.sel.clear();
         }
@@ -809,15 +922,25 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
 void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
                            gui::LayoutCursor& layout,
                            const gui::ChromeTheme& theme) {
-    gui::heading(layout, theme, "schematic");
-    char grid_line[64];
-    std::snprintf(grid_line, sizeof grid_line, "grid: %.12g",
-                  ed.schem()->grid);
-    gui::text(layout, theme, grid_line);
+    if (ed.doc == nullptr || ed.schem() == nullptr) {
+        gui::text(layout, theme, "No document open");
+        return;
+    }
+    gui::heading(layout, theme, "Schematic")
+    char grid[64];
+    std::snprintf(grid, sizeof grid, "%.12g", ed.schem()->grid);
+    label_line(layout, theme, "Grid", grid);
     gui::separator(layout, theme);
 
     // --- the analysis list
-    gui::heading(layout, theme, "analyses (deck order)");
+    gui::heading(layout, theme, "Analyses (in deck order)");
+    if (ed.analysis_index >=
+        static_cast<int>(ed.schem()->analysis.entries.size())) {
+        ed.analysis_index = -1;  // the list shrank under the selection
+    }
+    if (ed.schem()->analysis.entries.empty()) {
+        hint_line(layout, theme, "None yet - add one below");
+    }
     int index = 0;
     for (const ws::circsim::AnalysisSpec& spec :
          ed.schem()->analysis.entries) {
@@ -831,18 +954,24 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
         gui.ids().pop();
         ++index;
     }
-    static const char* const kKinds[] = {"op", "dc", "tran", "ac"};
-    FieldBuf& add = field_of(ed, "analysis.add");
-    if (add.stamp != ed.field_stamp) {
-        add.stamp = ed.field_stamp;
-        add.combo_open = false;
+
+    // One button per kind. (The old "add" combo answered only on a real
+    // move off its first item, so ".op" - item 0 - could never be added.)
+    static const char* const kKinds[] = {"+ op", "+ dc", "+ tran", "+ ac"};
+    const float add_w = std::max(
+        40.0f, (layout.remaining_width() - 3.0f * theme.spacing) / 4.0f);
+    int add_kind = -1;
+    for (int k = 0; k < 4; ++k) {
+        if (k != 0) {
+            layout.same_line();
+        }
+        if (gui::button(gui, layout, theme, kKinds[k], add_w)) {
+            add_kind = k;
+        }
     }
-    int picked = 0;
-    const float add_w = std::max(60.0f, layout.remaining_width() - 80.0f);
-    if (gui::combo(gui, layout, theme, "add", kKinds, 4, picked,
-                   add.combo_open, add_w)) {
+    if (add_kind >= 0) {
         ws::circsim::AnalysisSpec spec;
-        switch (picked) {
+        switch (add_kind) {
             case 1: spec = ws::circsim::DcSpec{}; break;
             case 2: spec = ws::circsim::TranSpec{.tstop = 1.0e-3}; break;
             case 3: spec = ws::circsim::AcSpec{}; break;
@@ -853,57 +982,72 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
             ed.schem()->analysis.entries.size() - 1u);
         ed.bump_edit_epoch();
     }
+
     if (!ed.schem()->analysis.entries.empty()) {
-        // Dead until something is selected (the disabled face), and
-        // the act itself re-checks - a stale index past a shrunken
-        // list is as selectionless as -1.
-        if (gui::button(gui, layout, theme, "remove selected", 120.0f, {},
+        // Dead until something is selected (the disabled face), and the
+        // act itself re-checks.
+        if (gui::button(gui, layout, theme, "Remove selected", 120.0f, {},
                         ed.analysis_index < 0)) {
             (void)remove_selected_analysis(ed);
         }
-        const std::size_t at = std::min<std::size_t>(
-            static_cast<std::size_t>(ed.analysis_index),
-            ed.schem()->analysis.entries.size() - 1u);
+        // A stale index is NOT clamped onto the last entry any more (that
+        // edited the wrong analysis); the check above already reset it.
         if (ed.analysis_index >= 0) {
-            gui::separator(layout, theme);
-            gui::text(layout, theme, "edit analysis");
-            analysis_fields(ed, gui, layout, theme, at);
+            panel_section(layout, theme, "Edit analysis");
+            analysis_fields(ed, gui, layout, theme,
+                            static_cast<std::size_t>(ed.analysis_index));
+        } else {
+            hint_line(layout, theme, "Select an analysis to edit it");
         }
     }
 
     // --- the directives block: one row per line
-    gui::separator(layout, theme);
-    gui::text(layout, theme, "directives (.model/.include, verbatim)");
+    panel_section(layout, theme, "Directives (.model / .include, verbatim)");
+    hint_line(layout, theme, "One line per row, e.g. .include models.lib");
     const std::vector<std::string> lines = split_directive_lines(
         ed.schem()->directives);
+    constexpr float kRowButtonW = 24.0f;
     int line_at = 0;
+    int remove_at = -1;
     for (const std::string& line : lines) {
         gui.ids().push(line_at);
         char* buf = field_buf(ed, "directives." + std::to_string(line_at),
                               line);
+        const float field_w = std::max(
+            60.0f, layout.remaining_width() - kRowButtonW - theme.spacing);
         if (text_input_tracked(ed, gui, layout, theme,
                                std::string{"line##directives."} +
                                    std::to_string(line_at),
-                               buf, 128)) {
+                               buf, 128, field_w)) {
             // The row edited: re-join with the (possibly cleared to
             // empty) row kept in place - the split/join pair's
-            // round-trip is what preserves an emptied last line (the
-            // index scope above keeps the rows' ids apart; the "##"
-            // key keeps each row's widget state its own).
+            // round-trip is what preserves an emptied last line.
             std::vector<std::string> next = lines;
             next[static_cast<std::size_t>(line_at)] = buf;
             push_directives(*ed.doc, join_directive_lines(next));
         }
+        layout.same_line();
+        // Per-row delete; dead on the lone empty row (nothing to delete).
+        if (gui::button(gui, layout, theme, "x", kRowButtonW, {},
+                        lines.size() == 1 && line.empty())) {
+            remove_at = line_at;
+        }
         gui.ids().pop();
         ++line_at;
     }
-    if (gui::button(gui, layout, theme, "add line")) {
-        std::string joined = ed.schem()->directives;
-        if (!joined.empty()) {
-            joined += '\n';
-        }
-        joined += ' ';
-        push_directives(*ed.doc, joined);
+    if (remove_at >= 0) {
+        std::vector<std::string> next = lines;
+        next.erase(next.begin() + remove_at);
+        push_directives(*ed.doc, join_directive_lines(next));
+        ed.bump_edit_epoch();  // the rows' buffers are keyed by position
+    }
+    if (gui::button(gui, layout, theme, "Add line")) {
+        // Through the join, so a new row is a truly empty row (the old
+        // path appended a lone space, and on an empty block it produced
+        // a single " " row instead of a second one).
+        std::vector<std::string> next = lines;
+        next.emplace_back();
+        push_directives(*ed.doc, join_directive_lines(next));
         ed.bump_edit_epoch();
     }
 }
@@ -914,7 +1058,7 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
                          gui::LayoutCursor& layout,
                          const gui::ChromeTheme& theme) {
     if (ed.doc == nullptr || ed.schem() == nullptr) {
-        gui::text(layout, theme, "no document");
+        gui::text(layout, theme, "No document open");
         return;
     }
 
@@ -931,23 +1075,20 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
 
     const bool stale =
         ed.problems.has && ed.problems.version != ed.schem()->version();
-    if (gui::button(gui, layout, theme, "re-check")) {
+    if (gui::button(gui, layout, theme, "Re-check")) {
         ed.run_erc();
     }
     layout.same_line();
-    if (ed.problems.has) {
-        gui::text(layout, theme,
-                  stale ? std::string(ed.problems.header + " - stale")
-                              .c_str()
-                        : ed.problems.header.c_str());
-    } else {
+    if (!ed.problems.has) {
         // No check yet: the load report stands in (the tolerant loader's
         // repairs are problems too).
         const std::size_t count = ed.doc->report.diags.size();
-        char header[128];
-        std::snprintf(header, sizeof header, "load: %zu note%s", count,
-                      count == 1 ? "" : "s");
-        gui::text(layout, theme, header);
+        gui::text(layout, theme,
+                  ("Load report: " + counted(count, "note")).c_str());
+        if (count == 0) {
+            hint_line(layout, theme,
+                      "Nothing to report - press Re-check to run ERC");
+        }
         int index = 0;
         for (const ws::circsim::Diag& d : ed.doc->report.diags) {
             gui.ids().push(index);
@@ -959,6 +1100,31 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
         return;
     }
 
+    std::string header = ed.problems.header;
+    if (stale) {
+        header += " - stale, press Re-check";
+    }
+    gui::text(layout, theme, header.c_str());
+
+    std::size_t errors = 0;
+    std::size_t warnings = 0;
+    std::size_t notes = 0;
+    for (const ws::circsim::Diag& d : ed.problems.diags) {
+        if (d.severity == ws::circsim::Severity::Error) {
+            ++errors;
+        } else if (d.severity == ws::circsim::Severity::Warning) {
+            ++warnings;
+        } else {
+            ++notes;
+        }
+    }
+    if (!ed.problems.diags.empty()) {
+        hint_line(layout, theme,
+                  counted(errors, "error") + ", " +
+                      counted(warnings, "warning") + ", " +
+                      counted(notes, "note") + " - click a row to jump");
+    }
+
     int index = 0;
     for (const ws::circsim::Diag& d : ed.problems.diags) {
         gui.ids().push(index);
@@ -967,10 +1133,13 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
                 ? "[E] "
                 : (d.severity == ws::circsim::Severity::Warning ? "[W] "
                                                                 : "[N] ");
-        if (gui::selectable(gui, layout, rows_theme,
-                            (prefix + ed.problems.lines[static_cast<std::size_t>(
-                                           index)])
-                                .c_str(),
+        // The rendered lines run parallel to the diags; fall back to the
+        // diag's own rendering rather than index past a short list.
+        const std::size_t at = static_cast<std::size_t>(index);
+        const std::string text = at < ed.problems.lines.size()
+                                     ? ed.problems.lines[at]
+                                     : d.render();
+        if (gui::selectable(gui, layout, rows_theme, (prefix + text).c_str(),
                             false)) {
             // The jump: locate through the back-maps, then select and
             // zoom in one act.
@@ -985,7 +1154,9 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
         ++index;
     }
     if (ed.problems.diags.empty()) {
-        gui::text(layout, theme, "no findings");
+        gui::text(layout, theme,
+                  stale ? "No findings at the last check"
+                        : "No findings - all clear");
     }
 }
 
@@ -995,26 +1166,30 @@ void draw_netlist_panel(Editor& ed, gui::GuiContext& gui,
                         gui::LayoutCursor& layout,
                         const gui::ChromeTheme& theme) {
     if (ed.doc == nullptr || ed.schem() == nullptr) {
-        gui::text(layout, theme, "no document");
+        gui::text(layout, theme, "No document open");
         return;
     }
     const bool stale =
         ed.netlist.has && ed.netlist.version != ed.schem()->version();
-    if (gui::button(gui, layout, theme, "re-export")) {
+    if (gui::button(gui, layout, theme, "Re-export")) {
         ed.refresh_netlist();
     }
     layout.same_line();
     if (!ed.netlist.has) {
-        gui::text(layout, theme, "not exported yet");
+        gui::text(layout, theme, "Not exported yet - press Re-export");
         return;
     }
-    gui::text(layout, theme,
-              stale ? "stale - edited since the export" : "the deck");
+    const std::string head =
+        std::string{stale ? "Stale - edited since the export" : "The deck"} +
+        " (" + counted(ed.netlist.lines.size(), "line") + ")";
+    gui::text(layout, theme, head.c_str());
 
     // The lines, in the mono face when there is one (the theme's face
     // otherwise - readable, just not column-aligned). A fontless
     // theme with no mono face falls back to plain text rows, the
     // value rows' own ladder - never a null deref on the way down.
+    // A dim line-number gutter on the left; comments recede and
+    // dot-commands (.tran, .model ...) take the accent.
     const ws::ui::r2d::Font* font =
         ed.font_mono != nullptr && !ed.font_mono->empty() ? ed.font_mono
                                                           : theme.font;
@@ -1025,12 +1200,26 @@ void draw_netlist_panel(Editor& ed, gui::GuiContext& gui,
         return;
     }
     const float line_h = font->line_height() + 2.0f;
+    const std::size_t digits =
+        std::to_string(ed.netlist.lines.size()).size();
+    const float gutter =
+        static_cast<float>(digits) * font->line_height() * 0.55f + 10.0f;
     int index = 0;
     for (const std::string& line : ed.netlist.lines) {
         gui.ids().push(index);
         const gui::Rect row = layout.next(layout.remaining_width(), line_h);
-        (void)ws::ui::r2d::draw_text(row.x, row.y, line.c_str(), *font,
-                                     gui::dim(theme.text, 0.85f));
+        char number[16];
+        std::snprintf(number, sizeof number, "%d", index + 1);
+        (void)ws::ui::r2d::draw_text(row.x, row.y, number, *font,
+                                     gui::dim(theme.text, 0.4f));
+        std::uint32_t color = gui::dim(theme.text, 0.85f);
+        if (!line.empty() && line[0] == '*') {
+            color = gui::dim(theme.text, 0.5f);
+        } else if (!line.empty() && line[0] == '.') {
+            color = theme.control_on;
+        }
+        (void)ws::ui::r2d::draw_text(row.x + gutter, row.y, line.c_str(),
+                                     *font, color);
         gui.ids().pop();
         ++index;
     }

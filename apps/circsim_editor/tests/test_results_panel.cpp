@@ -196,13 +196,16 @@ struct Bench {
         return nullptr;
     }
 
-    // The series strokes: polylines carrying more than 4 points.
+    // The series strokes: polylines carrying more than 4 points AND
+    // the main data-series width (~2.0f, full opacity). Sparklines use
+    // width 1.2f with alpha 200 so they are excluded by the width gate.
     [[nodiscard]] std::vector<const canvas::CanvasCmd*>
     series_cmds() const {
         std::vector<const canvas::CanvasCmd*> out;
         for (const canvas::CanvasCmd& c : clc.cmds) {
             if (c.kind == canvas::CanvasCmdKind::stroke_polyline &&
-                c.points.size() > 4u) {
+                c.points.size() > 4u &&
+                c.width >= 1.5f) {
                 out.push_back(&c);
             }
         }
