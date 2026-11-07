@@ -112,9 +112,14 @@ BakedFont bake_info(const stbtt_fontinfo& info, float pixel_height,
 // codepoints answers the baked glyph and advances zero: an icon is not a
 // letter).
 inline constexpr std::uint32_t kIconFirst = 0xE000;
-inline constexpr std::uint32_t kIconCount = 7;  // chevron down/right,
+inline constexpr std::uint32_t kIconCount = 17;  // chevron down/right,
                                                 // check, close, search,
-                                                // plus, minus
+                                                // plus, minus, then the
+                                                // toolbar ten: document,
+                                                // folder, save, undo,
+                                                // redo, trash, rotate,
+                                                // mirror, wire,
+                                                // clipboard_check
 
 // Rasterizes one built-in icon at `pixel_height` (a square bitmap, ~1 px
 // headroom) into `out`. False when `codepoint` is outside the set - the

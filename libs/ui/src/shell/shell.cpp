@@ -96,6 +96,10 @@ void AppShell::set_toolbar_commands(std::vector<std::string> ids) {
     toolbar_ids_ = std::move(ids);
 }
 
+void AppShell::set_toolbar_icons(std::vector<gui::ToolbarIcon> icons) {
+    toolbar_icons_ = std::move(icons);
+}
+
 void AppShell::set_menu_specs(std::vector<gui::CommandMenuSpec> specs) {
     menu_specs_ = std::move(specs);
 }
@@ -741,13 +745,19 @@ void AppShell::draw(GuiContext& gui, const ChromeTheme& theme,
                    theme.border);
 
     // The toolbar strip (only when the host named commands for it).
+    // The icon-and-tooltip spelling: every button carries its hint
+    // (the live chord through the shell's own resolver at the frame's
+    // key context), and a command the host mapped in set_toolbar_icons
+    // wears its glyph instead of the text.
     float top = frame.y + theme.control_height;
     if (!toolbar_ids_.empty()) {
         const Rect tool{frame.x, top, frame.width, theme.control_height};
         r2d::draw_quad(tool.x, tool.y, tool.width, tool.height, theme.bar_bg);
         layout.begin_panel(tool, 3.0f, theme.spacing);
         const std::string_view fired = gui::command_toolbar(
-            gui, layout, theme, "shell.toolbar", commands_, toolbar_ids_);
+            gui, layout, theme, "shell.toolbar", commands_, toolbar_ids_,
+            toolbar_icons_.empty() ? nullptr : toolbar_icons_.data(),
+            toolbar_icons_.size(), &shortcuts_, key_context());
         if (!fired.empty()) {
             (void)commands_.execute(fired);
         }

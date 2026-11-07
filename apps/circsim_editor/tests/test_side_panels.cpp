@@ -180,6 +180,7 @@ TEST_CASE("the directives round-trip preserves every row") {
 TEST_CASE("a directives block with a trailing newline lays out two rows") {
     Bench b;
     b.doc.schem.directives = ".model d dn\n";
+    b.ed.properties_tab = 2;  // Simulation tab
     b.draw_properties();
     // The field rows the panel minted: directives.0 AND directives.1 -
     // the old split dropped the empty second row, so a cleared line

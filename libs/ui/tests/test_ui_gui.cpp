@@ -35,6 +35,11 @@
 
 #include "ui_gui_stub.hpp"
 
+// The internal font half (kIconFirst + the growing Font's lazy table),
+// for the icon-toolbar test's hand-built font - the test_ui_variants
+// precedent; the target carries the src include path.
+#include "text/font.h"
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -2664,6 +2669,137 @@ TEST_CASE("the toolbar fires its buttons and lays the dead rows dead") {
     ws::ui::gui::end_panel(gui, layout);
     gui.end_frame();
     CHECK(fired == "app.quit");
+}
+
+TEST_CASE("the icon toolbar draws its glyphs and degrades to text") {
+    namespace icons_font = ws::ui::r2d::font;
+    ws::ui::gui_test::stub.reset();
+    ws::app::CommandRegistry registry;
+    (void)registry.add(ws::app::Command{
+        .id = "app.save",
+        .label = "Save",
+        .category = "File",
+        .shortcut = ws::app::Shortcut{'S', ws::app::Mod::control},
+        .execute = [](std::string_view) {},
+    });
+    (void)registry.add(ws::app::Command{
+        .id = "app.sim",
+        .label = "Simulate",
+        .category = "File",
+        .execute = [](std::string_view) {},
+    });
+    const std::vector<std::string> ids{"app.save", "app.sim"};
+
+    // A hand-built font carrying ONE seeded glyph - the save icon's
+    // codepoint - so the mapped button draws a sprite and every other
+    // icon answers the sentinel (the fontless degrade).
+    ws::ui::r2d::Font baked(16.0f, 20.0f, nullptr, 0);
+    const ws::ui::r2d::Sprite seeded{9u, 4u};
+    baked.extras_state()->glyphs.emplace(
+        icons_font::kIconFirst +
+            static_cast<std::uint32_t>(ws::ui::gui::Icon::save),
+        ws::ui::r2d::Font::Glyph{seeded, 0.0f, 0, 0, 16, 16});
+    ws::ui::gui::ChromeTheme themed = kDefaultChrome;
+    themed.font = &baked;
+
+    const std::vector<ws::ui::gui::ToolbarIcon> icons{
+        ws::ui::gui::ToolbarIcon{"app.save", ws::ui::gui::Icon::save},
+        ws::ui::gui::ToolbarIcon{"app.sim", ws::ui::gui::Icon::folder},
+    };
+
+    GuiContext gui;
+    LayoutCursor layout;
+    std::string_view fired;
+
+    // One frame at rest: the mapped-and-served Save lays as an icon
+    // button (the glyph is a sprite draw, no label quads for it), the
+    // Simulate command's folder sprite is the sentinel - the mapping
+    // degrades to its TEXT button (a draw_text call, no sprite).
+    gui.begin_frame(snap(-100.0f, -100.0f));
+    (void)ws::ui::gui::begin_panel(gui, layout, themed, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    fired = ws::ui::gui::command_toolbar(
+        gui, layout, themed, "bar", registry, ids, icons.data(),
+        icons.size(), nullptr, ws::app::KeyContext::global);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(fired.empty());
+    CHECK(ws::ui::gui_test::stub.sprites == 1);  // the save glyph alone
+
+    // The click on the icon button fires its command: the square sits
+    // at the panel content's head (inset by the theme's padding),
+    // control_height wide and tall.
+    gui.begin_frame(snap(26.0f, 26.0f, true, true));
+    (void)ws::ui::gui::begin_panel(gui, layout, themed, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    fired = ws::ui::gui::command_toolbar(
+        gui, layout, themed, "bar", registry, ids, icons.data(),
+        icons.size(), nullptr, ws::app::KeyContext::global);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    gui.begin_frame(snap(26.0f, 26.0f, false, false, true));
+    (void)ws::ui::gui::begin_panel(gui, layout, themed, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    fired = ws::ui::gui::command_toolbar(
+        gui, layout, themed, "bar", registry, ids, icons.data(),
+        icons.size(), nullptr, ws::app::KeyContext::global);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(fired == "app.save");
+}
+
+TEST_CASE("a ripened tooltip keeps laying - the fade reset never eats "
+          "the hover clock") {
+    ws::ui::gui_test::stub.reset();
+    GuiContext gui;
+    LayoutCursor layout;
+    const ws::ui::gui::Rect anchor{0.0f, 0.0f, 120.0f, 24.0f};
+
+    // What counts as "the hint laid": begin_tooltip pushes its P4 fade
+    // tint unconditionally (the chrome outline itself would gate on
+    // the stub's empty frame size and never register headless), and
+    // nothing else in this frame tints - so one tint push IS the
+    // tooltip, the way the motion suite counts the overlay fades.
+    const auto laid_hint = [] {
+        return ws::ui::gui_test::stub.tint_pushes == 1;
+    };
+
+    // Frame 1: a long rest - the pointer has sat on the widget past
+    // the theme's delay, so the hint lays.
+    InputFrame rest = snap(60.0f, 20.0f);
+    rest.dt_seconds = 1.0f;
+    gui.begin_frame(rest);
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    (void)ws::ui::gui::button(gui, layout, kDefaultChrome, "hovered",
+                              120.0f);
+    ws::ui::gui::tooltip_text(gui, layout, kDefaultChrome, "hovered",
+                              anchor, "the hint");
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(laid_hint());
+
+    // THE REGRESSION: the frame after the ripen lays the hint AGAIN.
+    // The fresh-open fade reset once ran as clear_persistent_state on
+    // the widget's id, which wiped the hover clock tooltip_delayed
+    // banks under the same id - the rest restarted from zero, the
+    // hint blinked off for a whole delay, then re-ripened and stayed
+    // (the first-hover flicker).
+    for (int frame = 0; frame < 3; ++frame) {
+        ws::ui::gui_test::stub.reset();
+        InputFrame held = snap(60.0f, 20.0f);
+        held.dt_seconds = 1.0f / 60.0f;
+        gui.begin_frame(held);
+        (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                       {0.0f, 0.0f, 400.0f, 300.0f});
+        (void)ws::ui::gui::button(gui, layout, kDefaultChrome, "hovered",
+                                  120.0f);
+        ws::ui::gui::tooltip_text(gui, layout, kDefaultChrome, "hovered",
+                                  anchor, "the hint");
+        ws::ui::gui::end_panel(gui, layout);
+        gui.end_frame();
+        CHECK(laid_hint());
+    }
 }
 
 TEST_CASE("the command palette searches, fires, prompts and closes") {

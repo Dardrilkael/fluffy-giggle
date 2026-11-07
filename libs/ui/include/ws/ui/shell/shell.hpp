@@ -101,6 +101,11 @@ public:
     void set_document_factory(DocumentFactory factory);
     // The toolbar's commands, in order (empty = no toolbar row).
     void set_toolbar_commands(std::vector<std::string> ids);
+    // The toolbar's icon overrides: a command named here lays as an
+    // icon button (the built-in set's glyph plus a tooltip - see
+    // command_toolbar) instead of its text label. Commands not named
+    // keep the text button, and an empty list is the all-text v1 row.
+    void set_toolbar_icons(std::vector<gui::ToolbarIcon> icons);
     // The host's menu order (categories become menus). The shell
     // appends its own "Window" menu after these.
     void set_menu_specs(std::vector<gui::CommandMenuSpec> specs);
@@ -255,6 +260,7 @@ private:
     gui::CommandMenuBuilder menu_builder_;
     std::vector<gui::CommandMenuSpec> menu_specs_;
     std::vector<std::string> toolbar_ids_;
+    std::vector<gui::ToolbarIcon> toolbar_icons_;
     std::function<std::vector<StatusJob>()> status_jobs_;
 
     std::string status_;

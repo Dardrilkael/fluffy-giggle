@@ -20,6 +20,14 @@
 namespace ws::ui::gui {
 namespace {
 
+// The animate_toward traveler's side-table type, named at file scope so
+// reset_animation reaches the SAME table (a function-local struct would
+// be animate_toward's own type; typeid keys the tables, and two struct
+// spellings are two types). One float per (Travel, id).
+struct Travel {
+    float value = 0.0f;
+};
+
 // A widget id hit-tested twice in one frame means two widgets share
 // identity (same-label siblings without a push(index) between them).
 // Flagged once per process; the duplicate is tolerated after.
@@ -330,9 +338,6 @@ float GuiContext::animate_toward(WidgetId id, float target,
                                  float duration) {
     // The traveler's persistent float - one per (Travel, id), swept and
     // bounded by the side tables' own rules.
-    struct Travel {
-        float value = 0.0f;
-    };
     Travel& travel = persistent_state<Travel>(id);
     if (duration <= 0.0f) {
         // INSTANT: exactly the value a no-animation build would draw.
@@ -356,6 +361,14 @@ float GuiContext::animate_toward(WidgetId id, float target,
         redraw_wanted_ = true;  // still traveling: one more frame owed
     }
     return travel.value;
+}
+
+void GuiContext::reset_animation(WidgetId id) {
+    // The overlay fade's fresh-open restart, touching the traveler
+    // table ONLY: the id's other side-table entries (a tooltip's hover
+    // clock, a scroll offset) keep their state - see the header's note
+    // on the first-hover flicker this spelling replaced.
+    persistent_state<Travel>(id).value = 0.0f;
 }
 
 void GuiContext::begin_layer(Layer layer) {

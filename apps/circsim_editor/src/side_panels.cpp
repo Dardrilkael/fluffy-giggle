@@ -597,6 +597,16 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
 
 // --- the properties -------------------------------------------------------------
 
+namespace {
+
+// The Properties panel's tab strip labels (index-matched to
+// Editor::properties_tab): the selection's rows, the exported deck,
+// the schematic's own setup.
+constexpr const char* const kPropertyTabs[] = {"Properties", "Netlist",
+                                               "Simulation"};
+
+}  // namespace
+
 void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
                            gui::LayoutCursor& layout,
                            const gui::ChromeTheme& theme) {
@@ -604,6 +614,34 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
     ed.text_field_focused = false;  // this frame's draw sets it back
     if (ed.doc == nullptr || ed.schem() == nullptr) {
         gui::text(layout, theme, "no document");
+        return;
+    }
+
+    // The tabs instead of the stack: the right panel's three concerns
+    // (the selection, the deck, the schematic's setup) each get the
+    // full height, so nothing scrolls off under the others. The strip
+    // divides the panel's width; the caller's int IS the state.
+    const float tab_w =
+        std::max(60.0f, layout.remaining_width() / 3.0f);
+    (void)gui::tab_bar(gui, layout, theme, "props tabs", kPropertyTabs, 3,
+                       ed.properties_tab, tab_w);
+
+    if (ed.properties_tab == 1) {
+        // The Netlist tab: the bottom panel's own view, beside the
+        // selection (the same cache, the same re-export button - the
+        // ids scope under this panel keeps them apart).
+        draw_netlist_panel(ed, gui, layout, theme);
+        return;
+    }
+    if (ed.properties_tab == 2) {
+        draw_simulation_setup(ed, gui, layout, theme);
+        return;
+    }
+
+    // --- the Properties tab: the selection's rows
+    if (ed.sel.kind == Selection::Kind::None) {
+        gui::text(layout, theme, "nothing selected");
+        gui::text(layout, theme, "click a part, wire or label");
         return;
     }
 
@@ -756,7 +794,18 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
         return;
     }
 
-    // Nothing selected: the schematic's own setup.
+    // A selection kind the rows above did not cover (None is the
+    // tab branch's own early return; a future kind lands here).
+    gui::text(layout, theme, "(nothing to edit)");
+}
+
+// The Simulation tab: the schematic's own setup - the grid readout,
+// the analysis list (add/remove/edit) and the directives block. The
+// stack's bottom half, always reachable now that the tabs hold it
+// open instead of the selection hiding it.
+void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
+                           gui::LayoutCursor& layout,
+                           const gui::ChromeTheme& theme) {
     gui::text(layout, theme, "schematic");
     char grid_line[64];
     std::snprintf(grid_line, sizeof grid_line, "grid: %.12g",

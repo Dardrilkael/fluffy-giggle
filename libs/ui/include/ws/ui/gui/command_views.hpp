@@ -35,6 +35,7 @@
 
 #include <ws/app/command.hpp>
 #include <ws/app/shortcut.hpp>
+#include <ws/ui/gui/icons.hpp>
 #include <ws/ui/gui/widgets.hpp>
 
 #include <cstddef>
@@ -139,6 +140,41 @@ private:
     GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     const char* label, const ws::app::CommandRegistry& registry,
     const std::vector<std::string>& ids);
+
+// One toolbar button's glyph: the command id and the built-in icon it
+// wears. A command not in the list keeps its text button; an icon whose
+// sprite the theme cannot serve (a fontless theme, a skin that answers
+// nothing) degrades to the text button too - a toolbar never lays a
+// blank square.
+struct ToolbarIcon {
+    std::string command;
+    Icon icon;
+};
+
+// The icon-and-tooltip toolbar: command_toolbar's row with the chrome
+// every busy toolbar wants.
+//
+//   * A command mapped in `icons` (and whose sprite the theme serves)
+//     lays as a SQUARE ICON BUTTON - the button's own face, ring and
+//     keyboard citizenship, the glyph centered and tinted with the
+//     label color (never white: the baked set is a coverage mask, and
+//     white on the light theme would vanish). The command's label
+//     never draws on the button - it moves into the tooltip.
+//   * Every button, icon or text, carries a tooltip after the theme's
+//     rest delay: "Label (Chord)" - the label the icon button dropped,
+//     the LIVE binding through `resolver` at `context` when one is
+//     given (a rebind renames the hint, the same text the menus hint).
+//
+// The rest is command_toolbar's own contract, unchanged: the skip
+// rule, the enabled lock, the row's id scope, the fired-id answer.
+// `icons`/`icon_count` may be null/0 (a plain text toolbar with
+// tooltips); `resolver` may be null (hints carry no chord).
+[[nodiscard]] std::string_view command_toolbar(
+    GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
+    const char* label, const ws::app::CommandRegistry& registry,
+    const std::vector<std::string>& ids, const ToolbarIcon* icons,
+    std::size_t icon_count, const ws::app::ShortcutResolver* resolver,
+    ws::app::KeyContext context);
 
 // --- the command palette ----------------------------------------------------
 // The palette's pure scoring half: a case-insensitive subsequence

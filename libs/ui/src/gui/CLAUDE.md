@@ -77,8 +77,9 @@ call any stock draw).
   `icon_of(theme, Icon) -> r2d::Sprite` (a LOOKUP, not a draw; the
   theme rides because a Sprite is font-bound), folded by
   `icon_sprite_of` - stock answers the theme font's own glyph out of
-  the private-use set every bake carries (0xE000+ seven procedural
-  shapes, see src/text/font.h's icon half; `Font::find_glyph` is the
+  the private-use set every bake carries (0xE000+ seventeen procedural
+  shapes - the seven chrome markers plus the toolbar ten app actions
+  cover, see src/text/font.h's icon half; `Font::find_glyph` is the
   carried-only resolution). Sentinel sprite = draw the pre-icon square.
 - The r2d layered pair lives in the renderer, not here:
   `draw_rounded_outline` (exactly 2 quads - outer color + inner face

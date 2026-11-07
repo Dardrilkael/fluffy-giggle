@@ -74,6 +74,7 @@ constexpr int kKeyM = 77;
 constexpr int kKeyW = 87;
 constexpr int kKeyL = 76;
 constexpr int kKeyF = 70;
+constexpr int kKeyY = 89;  // Ctrl+Y - the standard redo chord
 constexpr int kKeyZ = 90;
 constexpr int kF1 = 290;
 constexpr int kLeftSuper = 343;   // GLFW_KEY_LEFT_SUPER
@@ -270,6 +271,22 @@ class CircsimApp final : public ws::ui::App {
             "app.wire",
             "circuit.erc",
             "circuit.run",
+        });
+        // The toolbar's icons: the chrome actions wear the built-in
+        // set's standard glyphs (floppy, arrows, bin...) with their
+        // name + chord in the tooltip; circuit.run keeps its text
+        // button - Simulate is the one act that deserves the word.
+        shell_->set_toolbar_icons({
+            {"shell.new_document", gui::Icon::document},
+            {"shell.open_document", gui::Icon::folder},
+            {"shell.save_document", gui::Icon::save},
+            {"app.undo", gui::Icon::undo},
+            {"app.redo", gui::Icon::redo},
+            {"app.delete", gui::Icon::trash},
+            {"app.rotate_cw", gui::Icon::rotate},
+            {"app.mirror", gui::Icon::mirror},
+            {"app.wire", gui::Icon::wire},
+            {"circuit.erc", gui::Icon::clipboard_check},
         });
         shell_->set_status_job_provider([this] { return status_jobs(); });
 
@@ -559,7 +576,11 @@ class CircsimApp final : public ws::ui::App {
         redo_cmd.id = "app.redo";
         redo_cmd.label = "Redo";
         redo_cmd.category = "Edit";
-        redo_cmd.shortcut = {kKeyZ, Mod::control | Mod::shift};
+        // Ctrl+Y, the standard redo chord (the declared default the
+        // menus and the toolbar tooltip hint); Ctrl+Shift+Z rides
+        // beside it as the alias below - the text editor's habit keeps
+        // answering.
+        redo_cmd.shortcut = {kKeyY, Mod::control};
         redo_cmd.enabled = [this] {
             return editor_.doc != nullptr && editor_.doc->undo().can_redo();
         };
@@ -767,6 +788,11 @@ class CircsimApp final : public ws::ui::App {
         // panel is active and never inside a focused field.
         (void)resolver_.install_defaults(commands_,
                                          ws::app::KeyContext::global);
+        // The redo alias: Ctrl+Shift+Z answers wherever Ctrl+Y does
+        // (install_defaults seeded only the declared chord; a second
+        // binding on the same command is the alias, not a conflict).
+        (void)resolver_.bind({kKeyZ, Mod::control | Mod::shift}, "app.redo",
+                             ws::app::KeyContext::global);
         const auto panel = [this](int key, const char* id) {
             (void)resolver_.bind({key, ws::app::Mod::none}, id,
                                  ws::app::KeyContext::panel);

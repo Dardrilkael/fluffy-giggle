@@ -1,11 +1,12 @@
 #pragma once
 
 // apps/circsim_editor - the side/bottom panels: the symbol Palette
-// (placement arming + the wire/label tools), the Properties grid (the
-// selection's fields over ParamSpecs; the schematic's analysis setup
-// and directives when nothing is selected), the Problems list (ERC /
-// run / load diags, click to select-and-zoom through locate.hpp) and
-// the Netlist view (the exported deck).
+// (placement arming + the wire/label tools, the fuzzy search), the
+// Properties panel (a three-tab strip: the selection's fields over
+// ParamSpecs, the Netlist view, and the Simulation setup - the
+// analysis list and directives), the Problems list (ERC / run / load
+// diags, click to select-and-zoom through locate.hpp) and the Netlist
+// view's own bottom panel (the exported deck).
 
 #include "editor.hpp"
 
@@ -39,6 +40,12 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
                         gui::LayoutCursor& layout,
                         const gui::ChromeTheme& theme);
 void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
+                           gui::LayoutCursor& layout,
+                           const gui::ChromeTheme& theme);
+// The Properties panel's Simulation tab, on its own seam: the
+// schematic's analysis setup + directives editor (the tab body, but
+// named so a headless test can drive it directly like the panels).
+void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
                            gui::LayoutCursor& layout,
                            const gui::ChromeTheme& theme);
 void draw_problems_panel(Editor& ed, gui::GuiContext& gui,

@@ -387,12 +387,16 @@ struct Editor {
 
     // The Properties panel's editing state: the field buffers keyed
     // by stable strings, the epoch that reloads them, the selection
-    // they were built for, and the analysis entry being edited.
+    // they were built for, and the analysis entry being edited. The
+    // tab strip's selection rides beside them (0 Properties, 1
+    // Netlist, 2 Simulation) - caller-owned state the tab_bar writes,
+    // surviving frames and document switches like every panel view.
     std::map<std::string, FieldBuf> fields;
     std::uint64_t field_stamp = 1;
     int fields_sel_kind = -1;
     std::uint32_t fields_sel_id = 0;
     int analysis_index = -1;
+    int properties_tab = 0;
 
     // Bumps the edit epoch (the app wires the undo stacks' listeners
     // here, so an undo/redo lands back into the field rows).

@@ -138,7 +138,7 @@ bool begin_popup(GuiContext& gui, LayoutCursor& layout,
     // traveler - survives the open untouched.
     const WidgetId pid = overlay_fade_id(gui.ids(), label);
     if (!gui.persistent_state<OverlayFade>(pid).was_open) {
-        gui.clear_persistent_state(pid);  // the traveler restarts
+        gui.reset_animation(pid);  // the traveler restarts, nothing else
     }
     gui.persistent_state<OverlayFade>(pid).was_open = true;
     const float t =
@@ -233,7 +233,7 @@ bool begin_tooltip(GuiContext& gui, LayoutCursor& layout,
     // was the first-hover flicker.
     const WidgetId pid = overlay_fade_id(gui.ids(), label);
     if (!gui.persistent_state<OverlayFade>(pid).was_open) {
-        gui.clear_persistent_state(pid);  // the traveler restarts
+        gui.reset_animation(pid);  // the traveler restarts
     }
     gui.persistent_state<OverlayFade>(pid).was_open = true;
     const float t =

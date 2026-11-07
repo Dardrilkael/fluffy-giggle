@@ -176,6 +176,15 @@ public:
     // persistent side tables - swept like any other state, bounded by
     // the same rules. The first call ever starts from 0.0f.
     float animate_toward(WidgetId id, float target, float duration);
+    // Zeroes the animate_toward traveler under `id` - the overlay
+    // scopes' fresh-open fade restart, spelled as the ONE entry it
+    // touches. clear_persistent_state(id) used to do this job, but it
+    // evicts the id's entry from EVERY side table: a tooltip's fade
+    // reset would eat the hover clock tooltip_delayed keeps under the
+    // same widget id, and the ripened hint blinked off for a whole
+    // delay before the rest re-banked (the first-hover flicker). The
+    // clock survives this spelling.
+    void reset_animation(WidgetId id);
     // True when some animator is still traveling (moved this frame or
     // sits unsettled): the app loop's "render at least one more frame"
     // hint. Advisory by design - the stock loop renders every frame and

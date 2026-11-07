@@ -14,8 +14,11 @@
 namespace ws::ui::gui {
 
 // The set, in its bake order (the index IS the codepoint offset - see
-// font::kIconFirst). Seven glyphs, a floor not a ceiling: an app with
-// real icon needs brings an atlas and overrides icon_of.
+// font::kIconFirst). Seventeen glyphs, a floor not a ceiling: an app
+// with real icon needs brings an atlas and overrides icon_of. The first
+// seven are the chrome's own markers; the toolbar ten after them are
+// the standard action glyphs app toolbars map their commands to (the
+// circsim editor's New/Open/Save/Undo/... row).
 enum class Icon : std::uint8_t {
     chevron_down,   // combo closed-row marker, collapsing header open
     chevron_right,  // collapsing header closed, the submenu arrow
@@ -24,6 +27,17 @@ enum class Icon : std::uint8_t {
     search,
     plus,
     minus,
+    // --- the toolbar ten (app action glyphs) ---
+    document,         // New - a page with a folded corner
+    folder,           // Open - the folder with its tab
+    save,             // Save - the floppy
+    undo,             // the arc + left head
+    redo,             // undo's mirror
+    trash,            // Delete - the bin
+    rotate,           // Rotate - the clockwise circle arrow
+    mirror,           // Mirror - the two meeting arrows
+    wire,             // Place Wire - the ortho route between two dots
+    clipboard_check,  // the check list (ERC and friends)
 };
 
 // The private-use codepoint the stock mapping serves for `icon`
