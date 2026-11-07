@@ -771,6 +771,52 @@ TEST_CASE("install_defaults seeds the declared chords, whole or not at all") {
           ctrl(79));
 }
 
+TEST_CASE("a command can carry a second chord beside its declared default") {
+    // The editor's Redo shape: Ctrl+Y declared (the seeded default,
+    // the hint every menu shows) with the muscle-memory Ctrl+Shift+Z
+    // bound beside it after the seed - one command, two live chords.
+    // GLFW numbering: Y = 89, Z = 90.
+    constexpr ws::app::Shortcut kCtrlY{89, ws::app::Mod::control};
+    constexpr ws::app::Shortcut kCtrlShiftZ{
+        90, ws::app::Mod::control | ws::app::Mod::shift};
+    constexpr ws::app::Shortcut kCtrlZ{90, ws::app::Mod::control};
+
+    ws::app::CommandRegistry registry;
+    ws::app::Command undo = make_command("app.undo");
+    undo.shortcut = kCtrlZ;
+    REQUIRE(registry.add(std::move(undo)).has_value());
+    ws::app::Command redo = make_command("app.redo");
+    redo.shortcut = kCtrlY;
+    REQUIRE(registry.add(std::move(redo)).has_value());
+
+    ws::app::ShortcutResolver resolver;
+    REQUIRE(resolver.install_defaults(registry).has_value());
+    // The second chord lands on the same rung, no conflict: it owns a
+    // chord nobody else has (undo's Ctrl+Z carries no shift).
+    REQUIRE(resolver.bind(kCtrlShiftZ, "app.redo",
+                          ws::app::KeyContext::global)
+              .has_value());
+
+    // Both chords resolve to the one command, and undo keeps its own.
+    CHECK(resolver.resolve(kCtrlY, ws::app::KeyContext::global).command ==
+          "app.redo");
+    CHECK(resolver.resolve(kCtrlShiftZ, ws::app::KeyContext::global).command ==
+          "app.redo");
+    CHECK(resolver.resolve(kCtrlZ, ws::app::KeyContext::global).command ==
+          "app.undo");
+    CHECK(resolver.resolve(kCtrlShiftZ, ws::app::KeyContext::global).consumed);
+
+    // A chord that WOULD collide with another command's is refused,
+    // and the standing bindings survive the refusal.
+    const auto clash = resolver.bind(kCtrlZ, "app.redo",
+                                     ws::app::KeyContext::global);
+    REQUIRE_FALSE(clash.has_value());
+    CHECK(resolver.resolve(kCtrlZ, ws::app::KeyContext::global).command ==
+          "app.undo");
+    CHECK(resolver.resolve(kCtrlShiftZ, ws::app::KeyContext::global).command ==
+          "app.redo");
+}
+
 TEST_CASE("install replaces every context's table whole or not at all") {
     FakeClock clock;
     ws::app::ShortcutResolver resolver{[&clock] { return clock.now; }};
