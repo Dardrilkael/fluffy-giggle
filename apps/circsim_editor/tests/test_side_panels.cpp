@@ -1148,6 +1148,155 @@ TEST_CASE("compose_source_wave is canonical and round-trips") {
     CHECK(editor::compose_source_wave(pwl) == "PWL(0 0 1m 5)");
 }
 
+TEST_CASE("the wave baseline reads each form's own level") {
+    // The number the DC value row takes when the mode flips back to DC
+    // (source_wave_baseline): each form's t=0 level, never a guess.
+    using editor::parse_source_wave;
+    using editor::source_wave_baseline;
+    CHECK(source_wave_baseline(parse_source_wave("SIN(2 5 1k)")) == "2");
+    CHECK(source_wave_baseline(
+              parse_source_wave("PULSE(0 5 1u 1u 1u 2u 4u)")) == "0");
+    CHECK(source_wave_baseline(parse_source_wave("EXP(1 5 1m 10m)")) ==
+          "1");
+    CHECK(source_wave_baseline(parse_source_wave("PWL(0 3 1m 5)")) == "3");
+    // One corner is still a pair (t=1m, v=5 - the level the form holds
+    // from t=0); a lone number is no pair at all; a Raw text and a
+    // None form have no level the editor could honestly name.
+    CHECK(source_wave_baseline(parse_source_wave("PWL(1m 5)")) == "5");
+    CHECK(source_wave_baseline(parse_source_wave("PWL(1m)")).empty());
+    CHECK(source_wave_baseline(parse_source_wave("banana 42")).empty());
+    CHECK(source_wave_baseline(parse_source_wave("")).empty());
+}
+
+TEST_CASE("the source mode flip is one undo step and carries the level") {
+    Bench b;
+    ws::circsim::Part p = ws::circsim::Part::make("v", "V1", "5", {0, 0});
+    p.id = b.doc.schem.alloc_id();
+    p.params["wave"] = "SIN(2 5 1k)";
+    b.doc.schem.parts_mut().push_back(p);
+
+    // DC -> AC (the mode dropdown's act): the wave lands and the DC
+    // value clears TOGETHER - one step on the stack, never a hybrid.
+    const std::size_t before = b.doc.undo().undo_count();
+    editor::push_source_mode(b.doc, p.id, "", "SIN(5 1 1000 0 0 0)");
+    const ws::circsim::Part* q = b.doc.schem.find_part(p.id);
+    REQUIRE(q != nullptr);
+    CHECK(q->value == "");
+    CHECK(q->params.at("wave") == "SIN(5 1 1000 0 0 0)");
+    CHECK(b.doc.undo().undo_count() == before + 1u);
+    CHECK(b.doc.undo().name_to_undo() == "Set source mode");
+
+    // AC -> DC: the wave's own baseline becomes the DC value, the wave
+    // param itself erases (a blank param never rides the model).
+    editor::push_source_mode(
+        b.doc, p.id,
+        editor::source_wave_baseline(editor::parse_source_wave(
+            b.doc.schem.find_part(p.id)->params.at("wave"))),
+        "");
+    q = b.doc.schem.find_part(p.id);
+    REQUIRE(q != nullptr);
+    CHECK(q->value == "5");
+    CHECK(q->params.find("wave") == q->params.end());
+    CHECK(b.doc.undo().undo_count() == before + 2u);
+
+    // One undo reverts the whole flip: both halves together, back to
+    // the AC pair exactly as it stood.
+    REQUIRE(b.doc.undo().undo().has_value());
+    q = b.doc.schem.find_part(p.id);
+    REQUIRE(q != nullptr);
+    CHECK(q->value == "");
+    CHECK(q->params.at("wave") == "SIN(5 1 1000 0 0 0)");
+
+    // A no-op flip (the same pair already standing) pushes nothing.
+    const std::size_t held = b.doc.undo().undo_count();
+    editor::push_source_mode(b.doc, p.id, "", "SIN(5 1 1000 0 0 0)");
+    CHECK(b.doc.undo().undo_count() == held);
+}
+
+TEST_CASE("the source's mode dropdown decides which rows exist") {
+    // DC mode (a fresh bench, no wave param): the DC value row, the
+    // mode combo's state, and NOTHING of the AC side - no picker, no
+    // per-number rows.
+    Bench b;
+    ws::circsim::Part p = ws::circsim::Part::make("v", "V1", "5", {0, 0});
+    p.id = b.doc.schem.alloc_id();
+    b.doc.schem.parts_mut().push_back(p);
+    b.ed.sel.kind = editor::Selection::Kind::Part;
+    b.ed.sel.id = p.id;
+    b.draw_properties();
+    const std::string base = "p" + std::to_string(p.id) + ".param.wave.";
+    CHECK(b.ed.fields.count("p" + std::to_string(p.id) + ".value") == 1u);
+    CHECK(b.ed.fields.count(base + "mode") == 1u);
+    CHECK(b.ed.fields.count(base + "fmt") == 0u);
+    CHECK(b.ed.fields.count(base + "Offset (VO)") == 0u);
+    CHECK(b.ed.fields.count("p" + std::to_string(p.id) + ".param.ac") ==
+          0u);
+
+    // AC mode from the start (a fresh bench again, so the DC draw's
+    // buffers cannot linger): the waveform rows mint, the mode combo
+    // mints, the DC value row never does.
+    Bench ac;
+    ws::circsim::Part w = ws::circsim::Part::make("v", "V1", "", {0, 0});
+    w.id = ac.doc.schem.alloc_id();
+    w.params["wave"] = "SIN(0 1 1k)";
+    ac.doc.schem.parts_mut().push_back(w);
+    ac.ed.sel.kind = editor::Selection::Kind::Part;
+    ac.ed.sel.id = w.id;
+    ac.draw_properties();
+    const std::string abase = "p" + std::to_string(w.id) + ".param.wave.";
+    CHECK(ac.ed.fields.count(abase + "mode") == 1u);
+    CHECK(ac.ed.fields.count(abase + "fmt") == 1u);
+    CHECK(ac.ed.fields.count(abase + "Offset (VO)") == 1u);
+    // The magnitude row (its own key, not under .wave.):  the .ac side
+    // stays reachable in AC mode.
+    CHECK(ac.ed.fields.count("p" + std::to_string(w.id) + ".param.ac") ==
+          1u);
+    CHECK(ac.ed.fields.count("p" + std::to_string(w.id) + ".value") == 0u);
+}
+
+TEST_CASE("the analysis briefs name the kind and spell the parameters") {
+    using ws::circsim::AcSpec;
+    using ws::circsim::AnalysisSpec;
+    using ws::circsim::DcSpec;
+    using ws::circsim::OpSpec;
+    using ws::circsim::TranSpec;
+
+    // The name: what kind of simulation it is, token beside word.
+    CHECK(editor::analysis_brief(OpSpec{}) == "Operating point (.op)");
+    CHECK(editor::analysis_brief(DcSpec{}) == "DC sweep (.dc)");
+    CHECK(editor::analysis_brief(TranSpec{}) == "Transient (.tran)");
+    CHECK(editor::analysis_brief(AcSpec{}) == "AC sweep (.ac)");
+
+    // The parameters, readable: .op takes none, .dc spells its sweep
+    // plain (0.1 stays "0.1", not "100m"), .tran and .ac wear
+    // engineering units.
+    CHECK(editor::analysis_params_brief(OpSpec{}) ==
+          "the DC bias solution - no parameters");
+    DcSpec dc{.source = "V1", .start = 0.0, .stop = 5.0, .step = 0.1};
+    CHECK(editor::analysis_params_brief(dc) ==
+          "sweeps V1 from 0 to 5, step 0.1");
+    TranSpec tran{.tstep = 1e-6, .tstop = 1e-3};
+    CHECK(editor::analysis_params_brief(tran) == "step 1us, stop 1ms");
+    tran.tstart = 1e-4;
+    tran.tmax = 1e-5;
+    tran.uic = true;
+    CHECK(editor::analysis_params_brief(tran) ==
+          "step 1us, stop 1ms, start 100us, max 10us, UIC");
+    // tstep 0 spells "tstop/100" - the card layer's own default.
+    TranSpec lazy{.tstep = 0.0, .tstop = 1.0};
+    CHECK(editor::analysis_params_brief(lazy) == "step 10ms, stop 1s");
+    AcSpec ac{.sweep = AcSpec::Sweep::Dec, .n = 10, .fstart = 1.0,
+              .fstop = 1e6};
+    CHECK(editor::analysis_params_brief(ac) ==
+          "10 pts/dec, 1Hz to 1MHz");
+    ac.sweep = AcSpec::Sweep::Lin;
+    ac.n = 20;
+    ac.fstart = 100.0;
+    ac.fstop = 1000.0;
+    CHECK(editor::analysis_params_brief(ac) ==
+          "20 pts/lin, 100Hz to 1kHz");
+}
+
 TEST_CASE("a selected source edits its waveform through the fields") {
     Bench b;
     // A voltage source, hand-typed waveform and all.
@@ -1169,10 +1318,14 @@ TEST_CASE("a selected source edits its waveform through the fields") {
     CHECK(b.ed.fields.count(base + "Frequency (FREQ)") == 1u);
     CHECK(std::string{b.ed.fields.at(base + "Frequency (FREQ)").buf.data()} ==
           "1000");
-    // The format picker's combo state minted too, and the DC value row
-    // wears its source name.
+    // The format picker's and the mode selector's combo states minted
+    // too. The DC value row does NOT: the wave param puts the source
+    // in AC mode, where the form's own offset is the level (the stale
+    // "5" stays on the model, named by the panel's clear hint instead
+    // of a second row for the same number).
     CHECK(b.ed.fields.count(base + "fmt") == 1u);
-    CHECK(b.ed.fields.count("p" + std::to_string(p.id) + ".value") == 1u);
+    CHECK(b.ed.fields.count(base + "mode") == 1u);
+    CHECK(b.ed.fields.count("p" + std::to_string(p.id) + ".value") == 0u);
 
     // A field edit through the keyboard (the focus + verbs the gui
     // suite drives its own fields by): backspace the "1", type "2.5".

@@ -245,9 +245,12 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
     // value keeps the old and says so on the status line. The id
     // embeds the buffer key (skey + "." + label) - one analysis is
     // edited at a time, but the key still keeps the row's state its
-    // own across analysis switches.
+    // own across analysis switches. `unit` (when given) adds the
+    // engineering readback - "1e-06" says "= 1us" - the Value row's
+    // own "= 4700" teaching with the row's unit spelled.
     const auto number_row = [&](const char* label, const std::string& skey,
-                                double current, const auto& land) {
+                                double current, const auto& land,
+                                const char* unit = nullptr) {
         char current_text[64];
         std::snprintf(current_text, sizeof current_text, "%.12g", current);
         const std::string key = skey + "." + label;
@@ -262,9 +265,16 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
                           "' is not a SPICE number - kept the old value");
             }
         }
-        if (!ws::spice::parse_number(buf).has_value()) {
+        const auto shown = ws::spice::parse_number(buf);
+        if (!shown.has_value()) {
             hint_line(layout, theme,
                       "Not a SPICE number - try 1u, 4.7k or 1meg");
+        } else if (unit != nullptr && *shown != 0.0) {
+            const std::string eng =
+                ws::circsim::format_eng(*shown) + unit;
+            if (eng != std::string{buf}) {
+                hint_line(layout, theme, "= " + eng);
+            }
         }
     };
 
@@ -315,26 +325,26 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
             ws::circsim::TranSpec next = *tran;
             next.tstep = v;
             push_set_analysis(*ed.doc, index, next);
-        });
+        }, "s");
         number_row("end (tstop)", skey, tran->tstop, [&](double v) {
             ws::circsim::TranSpec next = *tran;
             next.tstop = v;
             push_set_analysis(*ed.doc, index, next);
-        });
+        }, "s");
         number_row("begin (tstart)", skey, tran->tstart.value_or(0.0),
                    [&](double v) {
                        ws::circsim::TranSpec next = *tran;
                        next.tstart = v > 0.0 ? std::optional<double>{v}
                                              : std::nullopt;
                        push_set_analysis(*ed.doc, index, next);
-                   });
+                   }, "s");
         number_row("max step (tmax)", skey, tran->tmax.value_or(0.0),
                    [&](double v) {
                        ws::circsim::TranSpec next = *tran;
                        next.tmax = v > 0.0 ? std::optional<double>{v}
                                            : std::nullopt;
                        push_set_analysis(*ed.doc, index, next);
-                   });
+                   }, "s");
         hint_line(layout, theme,
                   "0 on begin/max step leaves them at SPICE's defaults");
         bool flag = tran->uic;
@@ -393,12 +403,12 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
             ws::circsim::AcSpec next = *ac;
             next.fstart = v;
             push_set_analysis(*ed.doc, index, next);
-        });
+        }, "Hz");
         number_row("end (fstop)", skey, ac->fstop, [&](double v) {
             ws::circsim::AcSpec next = *ac;
             next.fstop = v;
             push_set_analysis(*ed.doc, index, next);
-        });
+        }, "Hz");
         hint_line(layout, theme,
                   "Small-signal sweep from begin to end frequency");
         return;
@@ -406,6 +416,78 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
 }
 
 }  // namespace
+
+// --- the analysis list's readable face (side_panels.hpp) ----------------------
+
+namespace {
+
+// The dc sweep's numbers, plain (no engineering prefix - a 0.1 step
+// should read "0.1", not "100m"; the swept source's unit is the
+// user's, not the row's to guess).
+[[nodiscard]] std::string plain_num(double v) {
+    char text[64];
+    std::snprintf(text, sizeof text, "%.12g", v);
+    return text;
+}
+
+}  // namespace
+
+std::string analysis_brief(const ws::circsim::AnalysisSpec& spec) {
+    if (std::get_if<ws::circsim::OpSpec>(&spec) != nullptr) {
+        return "Operating point (.op)";
+    }
+    if (std::get_if<ws::circsim::DcSpec>(&spec) != nullptr) {
+        return "DC sweep (.dc)";
+    }
+    if (std::get_if<ws::circsim::TranSpec>(&spec) != nullptr) {
+        return "Transient (.tran)";
+    }
+    return "AC sweep (.ac)";
+}
+
+std::string analysis_params_brief(const ws::circsim::AnalysisSpec& spec) {
+    if (std::get_if<ws::circsim::OpSpec>(&spec) != nullptr) {
+        return "the DC bias solution - no parameters";
+    }
+    if (const ws::circsim::DcSpec* dc =
+            std::get_if<ws::circsim::DcSpec>(&spec)) {
+        return "sweeps " + dc->source + " from " + plain_num(dc->start) +
+               " to " + plain_num(dc->stop) + ", step " +
+               plain_num(dc->step);
+    }
+    if (const ws::circsim::TranSpec* tran =
+            std::get_if<ws::circsim::TranSpec>(&spec)) {
+        // tstep 0 spells "tstop/100" - the card layer's own default
+        // (analysis_card's rule, mirrored so the row never disagrees
+        // with the deck it will export).
+        const double tstep =
+            tran->tstep > 0.0 ? tran->tstep : tran->tstop / 100.0;
+        std::string s = "step " + ws::circsim::format_eng(tstep) + "s, " +
+                        "stop " + ws::circsim::format_eng(tran->tstop) +
+                        "s";
+        if (tran->tstart.has_value()) {
+            s += ", start " + ws::circsim::format_eng(*tran->tstart) + "s";
+        }
+        if (tran->tmax.has_value()) {
+            s += ", max " + ws::circsim::format_eng(*tran->tmax) + "s";
+        }
+        if (tran->uic) {
+            s += ", UIC";
+        }
+        return s;
+    }
+    const ws::circsim::AcSpec* ac =
+        std::get_if<ws::circsim::AcSpec>(&spec);
+    const char* sweep = "dec";
+    if (ac->sweep == ws::circsim::AcSpec::Sweep::Oct) {
+        sweep = "oct";
+    } else if (ac->sweep == ws::circsim::AcSpec::Sweep::Lin) {
+        sweep = "lin";
+    }
+    return std::to_string(ac->n) + " pts/" + sweep + ", " +
+           ws::circsim::format_eng(ac->fstart) + "Hz to " +
+           ws::circsim::format_eng(ac->fstop) + "Hz";
+}
 
 // --- the source waveform editor (the pure half: side_panels.hpp) -------------
 
@@ -542,6 +624,45 @@ std::string compose_source_wave(const SourceWave& w) {
         case SourceWave::Kind::Pwl:
         case SourceWave::Kind::Raw:
             return w.raw;
+    }
+    return {};
+}
+
+std::string source_wave_baseline(const SourceWave& w) {
+    switch (w.kind) {
+        case SourceWave::Kind::Sin:
+        case SourceWave::Kind::Pulse:
+        case SourceWave::Kind::Exp: {
+            char text[64];
+            std::snprintf(text, sizeof text, "%.12g", w.p[0]);
+            return text;
+        }
+        case SourceWave::Kind::Pwl: {
+            // The first (t, v) corner's value, when the numbers read:
+            // "PWL(0 3 1m 5)" answers 3. Anything else - no pair, a
+            // bad number - answers "" (the row starts empty rather
+            // than a guess).
+            const std::size_t open = w.raw.find('(');
+            if (open == std::string::npos) {
+                return {};
+            }
+            const std::size_t close = w.raw.find_last_of(')');
+            const std::string inside =
+                w.raw.substr(open + 1,
+                             close != std::string::npos && close > open
+                                 ? close - open - 1
+                                 : std::string::npos);
+            std::vector<double> numbers;
+            if (!split_numbers(inside, numbers) || numbers.size() < 2u) {
+                return {};
+            }
+            char text[64];
+            std::snprintf(text, sizeof text, "%.12g", numbers[1]);
+            return text;
+        }
+        case SourceWave::Kind::None:
+        case SourceWave::Kind::Raw:
+            return {};
     }
     return {};
 }
@@ -1307,10 +1428,20 @@ constexpr const char* const kPropertyTabs[] = {"Properties", "Netlist",
     return false;
 }
 
+// The source's stimulus, parsed from its `wave` param - the mode
+// dropdown's own truth (a None kind is DC mode; every other kind,
+// Raw included, is AC).
+[[nodiscard]] SourceWave source_wave_of(const ws::circsim::Part& p) {
+    const auto it = p.params.find("wave");
+    return it != p.params.end() ? parse_source_wave(it->second)
+                                : SourceWave{};
+}
+
 // The waveform format combo's items, index-matched to the template a
 // switch lands (parse_source_wave's Kind order, Pwl last because its
-// body stays the free-form text row).
-constexpr const char* const kWaveFormats[] = {"DC only", "Sine", "Pulse",
+// body stays the free-form text row). No "DC only" item: the MODE
+// dropdown above owns that choice.
+constexpr const char* const kWaveFormats[] = {"Sine", "Pulse",
                                               "Exponential", "Piecewise"};
 
 // One slot's label per kind: ngspice's parameter names, spelled for a
@@ -1483,11 +1614,17 @@ void draw_wave_preview(Editor& ed, gui::LayoutCursor& layout,
                        label);
 }
 
-// The source editor: the AC magnitude row plus the waveform section -
-// a format picker and one number field per parameter, the whole
-// `wave` param text composed/decomposed through parse/compose so the
-// deck line is never hand-typed. Every edit lands through
-// push_part_text, so the undo stack and the coalescing are the rows'
+// The source editor: ONE dropdown picks the stimulus mode, then only
+// that mode's fields exist. DC mode is the DC value row (with its
+// flat-level picture) and nothing else - no AC rows, no waveform
+// section. AC mode is the waveform - a format picker and one number
+// field per parameter, the whole `wave` param text
+// composed/decomposed through parse/compose so the deck line is never
+// hand-typed - and the form's own first number IS the DC offset (the
+// engine solves the bias point from waveform(0) when the card spells
+// no value), so no DC row appears beside it either: never two places
+// for one number. Every edit lands through push_part_text or
+// push_source_mode, so the undo stack and the coalescing are the rows'
 // own story everywhere else in this panel.
 void source_wave_editor(Editor& ed, gui::GuiContext& gui,
                         gui::LayoutCursor& layout,
@@ -1495,30 +1632,101 @@ void source_wave_editor(Editor& ed, gui::GuiContext& gui,
                         const ws::circsim::Part& p) {
     panel_section(layout, theme, "Source setup");
 
-    // The AC magnitude (the `ac` param): the small-signal level a .ac
-    // sweep reads; blank = none.
-    const auto ac_at = p.params.find("ac");
-    part_text_row(ed, gui, layout, theme, "AC magnitude", p.id, 2, "ac",
-                  ac_at != p.params.end() ? ac_at->second : "");
-    hint_line(layout, theme,
-              "Small-signal level for .ac sweeps - blank means none");
-
-    // The waveform (the `wave` param).
+    // The waveform (the `wave` param) - the mode's own truth.
     const auto wave_at = p.params.find("wave");
     const std::string wave_text =
         wave_at != p.params.end() ? wave_at->second : "";
-    SourceWave wave = parse_source_wave(wave_text);
+    const SourceWave wave = parse_source_wave(wave_text);
+    const bool ac_mode = wave.kind != SourceWave::Kind::None;
+
+    // The mode selector: selected re-derives from the model every
+    // frame (the view-of-model rule every combo in this panel keeps);
+    // a REAL move lands the flip as ONE undo step through
+    // push_source_mode - both halves travel together, so one Ctrl+Z
+    // reverts the whole switch.
+    static const char* const kModes[] = {"DC (constant)",
+                                         "AC (waveform)"};
+    int selected = ac_mode ? 1 : 0;
+    const std::string mode_key = part_field_key(p.id, 2, "wave") + ".mode";
+    FieldBuf& mode_f = field_of(ed, mode_key);
+    if (mode_f.stamp != ed.field_stamp) {
+        mode_f.stamp = ed.field_stamp;
+        mode_f.combo_open = false;
+    }
+    if (gui::combo(gui, layout, theme, ("Mode##" + mode_key).c_str(),
+                   kModes, 2, selected, mode_f.combo_open)) {
+        if (selected == 1 && !ac_mode) {
+            // DC -> AC: a Sine template carrying the current level as
+            // its offset (nothing the user shaped is lost), and the DC
+            // value cleared - the waveform is the whole stimulus now.
+            SourceWave next;
+            next.kind = SourceWave::Kind::Sin;
+            next.p[0] = ws::spice::parse_number(p.value).value_or(0.0);
+            next.p[1] = 1.0;
+            next.p[2] = 1000.0;
+            push_source_mode(*ed.doc, p.id, "",
+                             compose_source_wave(next));
+        } else if (selected == 0 && ac_mode) {
+            // AC -> DC: the wave's own baseline becomes the DC value;
+            // the wave param itself clears.
+            push_source_mode(*ed.doc, p.id, source_wave_baseline(wave),
+                             "");
+        }
+        ed.bump_edit_epoch();  // the rows reload for the new mode
+        return;  // the model moved: the next frame draws the new mode
+    }
+
+    if (!ac_mode) {
+        // DC mode: the value row with its flat-level picture is the
+        // whole editor. A stale AC magnitude (set before a switch, or
+        // ridden in from an older file) stays editable - out of the
+        // way, never silently dropped.
+        part_text_row(ed, gui, layout, theme, "DC value", p.id, 1, "",
+                      p.value);
+        const auto level = ws::spice::parse_number(p.value);
+        if (level.has_value()) {
+            const WavePreview flat = sample_source_wave(wave, *level);
+            if (flat.drawable) {
+                draw_wave_preview(ed, layout, theme, flat);
+            }
+        }
+        hint_line(layout, theme,
+                  "A steady level - .op solves it, .dc sweeps it");
+        const auto ac_at = p.params.find("ac");
+        if (ac_at != p.params.end() && !ac_at->second.empty()) {
+            part_text_row(ed, gui, layout, theme, "AC magnitude", p.id,
+                          2, "ac", ac_at->second);
+            hint_line(layout, theme,
+                      "Small-signal level for .ac sweeps - blank means "
+                      "none");
+        }
+        return;
+    }
+
+    // A stale DC value (an older file's "5" beside the wave, or a deck
+    // that spelled both): the engine reads the explicit DC FIRST for
+    // the bias point, so it would pin .op over the waveform's offset -
+    // named and clearable here, never silently kept.
+    if (!p.value.empty()) {
+        hint_line(layout, theme,
+                  "DC value '" + p.value +
+                      "' still pins the .op bias over the waveform's "
+                      "offset");
+        if (gui::button(gui, layout, theme, "Clear DC value")) {
+            push_source_mode(*ed.doc, p.id, "", wave_text);
+            ed.bump_edit_epoch();
+        }
+    }
 
     // The format picker: selected re-derives from the model every
     // frame (the view-of-model rule the analysis combo keeps); a REAL
     // move lands the picked format's editable template - sane numbers
     // the user then shapes, never a bare "SIN(".
-    int selected = wave.kind == SourceWave::Kind::None   ? 0
-                   : wave.kind == SourceWave::Kind::Sin   ? 1
-                   : wave.kind == SourceWave::Kind::Pulse ? 2
-                   : wave.kind == SourceWave::Kind::Exp   ? 3
-                   : wave.kind == SourceWave::Kind::Pwl   ? 4
-                                                          : -1;
+    selected = wave.kind == SourceWave::Kind::Sin   ? 0
+               : wave.kind == SourceWave::Kind::Pulse ? 1
+               : wave.kind == SourceWave::Kind::Exp   ? 2
+               : wave.kind == SourceWave::Kind::Pwl   ? 3
+                                                      : -1;
     const std::string fmt_key = part_field_key(p.id, 2, "wave") + ".fmt";
     FieldBuf& fmt = field_of(ed, fmt_key);
     if (fmt.stamp != ed.field_stamp) {
@@ -1526,33 +1734,30 @@ void source_wave_editor(Editor& ed, gui::GuiContext& gui,
         fmt.combo_open = false;
     }
     if (gui::combo(gui, layout, theme,
-                   ("Waveform##" + fmt_key).c_str(), kWaveFormats, 5,
+                   ("Waveform##" + fmt_key).c_str(), kWaveFormats, 4,
                    selected, fmt.combo_open) &&
         selected >= 0) {
         SourceWave next;  // the editable templates, one per format
         switch (selected) {
-            case 1:
+            case 0:
                 next.kind = SourceWave::Kind::Sin;
                 next.p[0] = 0.0; next.p[1] = 1.0; next.p[2] = 1000.0;
                 break;  // SIN(0 1 1k): a 1V 1kHz sine
-            case 2:
+            case 1:
                 next.kind = SourceWave::Kind::Pulse;
                 next.p[0] = 0.0; next.p[1] = 5.0;
                 next.p[3] = 1e-6; next.p[4] = 1e-6;
                 next.p[5] = 1e-3; next.p[6] = 2e-3;
                 break;  // PULSE(0 5 0 1u 1u 1m 2m): a 5V square wave
-            case 3:
+            case 2:
                 next.kind = SourceWave::Kind::Exp;
                 next.p[0] = 0.0; next.p[1] = 5.0;
                 next.p[3] = 1e-5; next.p[4] = 1e-3; next.p[5] = 1e-4;
                 break;  // EXP(0 5 0 10u 1m 100u): a rise-and-settle step
-            case 4:
+            case 3:
                 next.kind = SourceWave::Kind::Pwl;
                 next.raw = "PWL(0 0 1m 5)";
                 break;  // corners: time/value pairs, free-form below
-            default:
-                next.kind = SourceWave::Kind::None;
-                break;  // DC only: the Value row is the whole story
         }
         push_part_text(*ed.doc, p.id, 2, "wave",
                        compose_source_wave(next), "Set waveform");
@@ -1563,8 +1768,7 @@ void source_wave_editor(Editor& ed, gui::GuiContext& gui,
     // re-derived from the model every frame (the fields' own
     // view-of-model rule - a field edit lands and the very next draw
     // shows the new shape). A form the sampler cannot picture draws
-    // nothing, never a guess: Raw, an unreadable PWL, a DC value that
-    // is not a number.
+    // nothing, never a guess: Raw, an unreadable PWL.
     const double dc_level = [&] {
         const auto parsed = ws::spice::parse_number(p.value);
         return parsed.has_value()
@@ -1593,46 +1797,54 @@ void source_wave_editor(Editor& ed, gui::GuiContext& gui,
                   wave.kind == SourceWave::Kind::Pwl
                       ? "Piecewise corners: PWL(t1 v1 t2 v2 ...)"
                       : "Not a form the editor reads - kept verbatim");
-        return;
-    }
-    if (wave.kind == SourceWave::Kind::None) {
-        hint_line(layout, theme, "DC only - the DC value row is the level");
-        return;
-    }
-
-    // One number row per parameter: parse, re-compose the whole form,
-    // push; a bad value keeps the old and says so on the status line
-    // (the analysis rows' own contract).
-    const WaveFieldLabel* labels = wave.kind == SourceWave::Kind::Sin
-                                       ? kSinLabels
-                                       : (wave.kind == SourceWave::Kind::Pulse
-                                              ? kPulseLabels
-                                              : kExpLabels);
-    const int slots = wave.kind == SourceWave::Kind::Pulse ? 7 : 6;
-    const std::string base = part_field_key(p.id, 2, "wave");
-    for (int slot = 0; slot < slots; ++slot) {
-        const char* label = labels[slot].label;
-        char current_text[64];
-        std::snprintf(current_text, sizeof current_text, "%.12g",
-                      wave.p[slot]);
-        const std::string key = base + "." + label;
-        char* buf = field_buf(ed, key, current_text);
-        if (text_input_tracked(ed, gui, layout, theme,
-                               std::string{label} + "##" + key, buf, 128)) {
-            const auto parsed = ws::spice::parse_number(buf);
-            if (parsed.has_value()) {
-                SourceWave next = wave;
-                next.p[slot] = *parsed;
-                push_part_text(*ed.doc, p.id, 2, "wave",
-                               compose_source_wave(next), "Edit waveform");
-            } else {
-                ed.status(std::string{"'"} + buf +
-                          "' is not a SPICE number - kept the old value");
+    } else {
+        // One number row per parameter: parse, re-compose the whole
+        // form, push; a bad value keeps the old and says so on the
+        // status line (the analysis rows' own contract).
+        const WaveFieldLabel* labels =
+            wave.kind == SourceWave::Kind::Sin
+                ? kSinLabels
+                : (wave.kind == SourceWave::Kind::Pulse ? kPulseLabels
+                                                        : kExpLabels);
+        const int slots = wave.kind == SourceWave::Kind::Pulse ? 7 : 6;
+        const std::string base = part_field_key(p.id, 2, "wave");
+        for (int slot = 0; slot < slots; ++slot) {
+            const char* label = labels[slot].label;
+            char current_text[64];
+            std::snprintf(current_text, sizeof current_text, "%.12g",
+                          wave.p[slot]);
+            const std::string key = base + "." + label;
+            char* buf = field_buf(ed, key, current_text);
+            if (text_input_tracked(ed, gui, layout, theme,
+                                   std::string{label} + "##" + key, buf,
+                                   128)) {
+                const auto parsed = ws::spice::parse_number(buf);
+                if (parsed.has_value()) {
+                    SourceWave next = wave;
+                    next.p[slot] = *parsed;
+                    push_part_text(*ed.doc, p.id, 2, "wave",
+                                   compose_source_wave(next),
+                                   "Edit waveform");
+                } else {
+                    ed.status(std::string{"'"} + buf +
+                              "' is not a SPICE number - kept the old value");
+                }
             }
         }
+        hint_line(layout, theme,
+                  "Times accept SPICE units - 1u, 2.5n, 1meg");
     }
+
+    // The AC magnitude (the `ac` param): the small-signal level a .ac
+    // sweep reads; blank = none. Last on purpose - it belongs to the
+    // frequency-domain analysis, not to the waveform the rows above
+    // shape, and in DC mode it only shows when something is already
+    // set.
+    const auto ac_at = p.params.find("ac");
+    part_text_row(ed, gui, layout, theme, "AC magnitude", p.id, 2, "ac",
+                  ac_at != p.params.end() ? ac_at->second : "");
     hint_line(layout, theme,
-              "Times accept SPICE units - 1u, 2.5n, 1meg");
+              "Small-signal level for .ac sweeps - blank means none");
 }
 
 }  // namespace
@@ -1689,13 +1901,16 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
                        : p->symbol + " (unknown)");
         part_text_row(ed, gui, layout, theme, "Reference", p->id, 0, "",
                       p->ref);
-        // A source's value row names what it is: the level the deck
-        // prints between the nets and any AC/waveform tail.
+        // A source's value row lives INSIDE its mode editor, under the
+        // Mode dropdown that decides it exists (DC mode shows it, AC
+        // mode shows the waveform's own offset instead - never the
+        // same number in two rows). Every other part keeps the
+        // built-in row right here.
         const bool source_editor =
             sym != nullptr && source_wave_editable(*sym);
-        if (sym == nullptr || sym->needs_value || !p->value.empty()) {
-            part_text_row(ed, gui, layout, theme,
-                          source_editor ? "DC value" : "Value", p->id, 1, "",
+        if (sym == nullptr ||
+            (!source_editor && (sym->needs_value || !p->value.empty()))) {
+            part_text_row(ed, gui, layout, theme, "Value", p->id, 1, "",
                           p->value);
         }
         if (sym != nullptr && !sym->params.empty() && !source_editor) {
@@ -1871,8 +2086,8 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
     // --- the analysis list
     gui::heading(layout, theme, "Analyses (in deck order)");
     hint_line(layout, theme,
-              "The deck runs these in order - .tran plots signals over "
-              "time");
+              "Run executes these top to bottom - click one to edit "
+              "its parameters");
     if (ed.analysis_index >=
         static_cast<int>(ed.schem()->analysis.entries.size())) {
         ed.analysis_index = -1;  // the list shrank under the selection
@@ -1884,12 +2099,19 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
     for (const ws::circsim::AnalysisSpec& spec :
          ed.schem()->analysis.entries) {
         gui.ids().push(index);
-        const std::string card = ws::circsim::analysis_card(spec);
+        // The readable face: WHAT kind of simulation this is (the
+        // plain word with the SPICE token beside it) on the selectable
+        // row, then its own parameters in engineering units under it.
+        // The raw card stays in the Netlist tab, where the deck's
+        // vocabulary lives.
+        const std::string title =
+            std::to_string(index + 1) + ". " + analysis_brief(spec);
         const bool selected = ed.analysis_index == index;
-        if (gui::selectable(gui, layout, theme, card.c_str(), selected)) {
+        if (gui::selectable(gui, layout, theme, title.c_str(), selected)) {
             ed.analysis_index = index;
             ed.bump_edit_epoch();  // the field rows below reload
         }
+        hint_line(layout, theme, analysis_params_brief(spec));
         gui.ids().pop();
         ++index;
     }
@@ -1938,7 +2160,12 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
         // A stale index is NOT clamped onto the last entry any more (that
         // edited the wrong analysis); the check above already reset it.
         if (ed.analysis_index >= 0) {
-            panel_section(layout, theme, "Edit analysis");
+            const std::string editing =
+                "Edit analysis: " +
+                analysis_brief(
+                    ed.schem()->analysis.entries[static_cast<std::size_t>(
+                        ed.analysis_index)]);
+            panel_section(layout, theme, editing.c_str());
             analysis_fields(ed, gui, layout, theme,
                             static_cast<std::size_t>(ed.analysis_index));
         } else {

@@ -105,6 +105,15 @@ void push_transform_part(SchematicDocument& doc, std::uint32_t part_id,
 void push_part_text(SchematicDocument& doc, std::uint32_t part_id, int kind,
                     std::string param, std::string next, std::string name);
 
+// One source's DC/AC mode flip: the value AND the wave param land as
+// ONE named step (the Properties panel's mode dropdown). The caller
+// hands the FINAL pair - next_value and next_wave (an empty wave means
+// none) - and the command captures both halves' current state, so a
+// single undo reverts the whole switch instead of leaving a half-set
+// hybrid (a wave beside a stale DC value) on the model.
+void push_source_mode(SchematicDocument& doc, std::uint32_t part_id,
+                      std::string next_value, std::string next_wave);
+
 // The wire carries its endpoints and route; the junction (when the
 // route ends on free space) is placed in the same named transaction.
 void push_place_wire(SchematicDocument& doc, ws::circsim::Wire wire,

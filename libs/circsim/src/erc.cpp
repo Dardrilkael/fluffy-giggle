@@ -288,7 +288,16 @@ std::vector<Diag> run_erc(const Schematic& s, const NetBuild& build,
                     where));
             }
         }
-        if (sym->needs_value && p.value.empty()) {
+        // A waveform-carrying source is self-valued: the engine derives
+        // its DC/bias level from waveform(0) when the card spells no
+        // value ("V1 a b SIN(0 5 1)" is whole SPICE - ws::spice's own
+        // source rule), so the wave param satisfies the value
+        // requirement the way a spelled value would. Anything else
+        // with no value still complains.
+        const auto wave_at = p.params.find("wave");
+        const bool self_valued =
+            wave_at != p.params.end() && !wave_at->second.empty();
+        if (sym->needs_value && p.value.empty() && !self_valued) {
             out.push_back(make(Severity::Error, "circsim.erc.missing_value",
                                "part has no value", where));
         }

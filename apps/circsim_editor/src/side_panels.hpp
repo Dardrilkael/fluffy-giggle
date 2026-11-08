@@ -36,6 +36,18 @@ namespace editor {
 // True when a removal actually landed.
 bool remove_selected_analysis(Editor& ed);
 
+// The Simulation tab's readable spellings, pure and headless so the
+// rows' words are testable without a gui: WHAT kind of simulation an
+// entry is (the plain word with the SPICE token beside it - the
+// deck's own name stays teachable) and its parameters in engineering
+// units ("step 1us, stop 1ms"). The two lines each analysis-list row
+// wears; the raw card stays in the Netlist tab, where the deck's
+// vocabulary lives.
+[[nodiscard]] std::string analysis_brief(
+    const ws::circsim::AnalysisSpec& spec);
+[[nodiscard]] std::string analysis_params_brief(
+    const ws::circsim::AnalysisSpec& spec);
+
 // --- the source waveform editor's pure half ----------------------------------
 // A source part's `wave` param is the verbatim SPICE tail its deck
 // line carries after the DC value and the AC magnitude - "SIN(0 1 1k)",
@@ -76,6 +88,14 @@ struct SourceWave {
 // unchanged. parse(compose(w)) == w for every kind, so an edit cycle
 // never drifts.
 [[nodiscard]] std::string compose_source_wave(const SourceWave& w);
+
+// The level a wave form carries at its baseline: the number the DC
+// value row takes when the mode flips back from AC to DC, so the
+// switch never loses what the user shaped. SIN/PULSE/EXP read their
+// first parameter (VO/V1 - the level before any delay); a PWL reads
+// its first corner's value; None/Raw/unreadable answer "" (the row
+// starts empty rather than a guess).
+[[nodiscard]] std::string source_wave_baseline(const SourceWave& w);
 
 // --- the source waveform editor's preview half -------------------------------
 // The picture of the form the fields are shaping: the waveform sampled

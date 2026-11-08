@@ -448,6 +448,55 @@ class PartTextCommand final : public EditCommand {
     std::string name_;
 };
 
+// One source's DC/AC mode flip: the value row and the wave param are
+// ONE stimulus, so the flip lands both halves in one step (push_
+// source_mode is the only caller). No merge_with on purpose - every
+// switch is its own named step, never glued to the next one.
+class SourceModeCommand final : public EditCommand {
+  public:
+    SourceModeCommand(SchematicDocument* doc, std::uint32_t id,
+                      std::string was_value, std::string next_value,
+                      std::string was_wave, std::string next_wave)
+        : EditCommand(doc),
+          id_(id),
+          was_value_(std::move(was_value)),
+          next_value_(std::move(next_value)),
+          was_wave_(std::move(was_wave)),
+          next_wave_(std::move(next_wave)) {}
+
+    void apply() override { land(next_value_, next_wave_); }
+    void undo() override { land(was_value_, was_wave_); }
+    [[nodiscard]] std::string name() const override {
+        return "Set source mode";
+    }
+    [[nodiscard]] std::size_t memory_estimate() const override {
+        return sizeof(*this) + was_value_.size() + next_value_.size() +
+               was_wave_.size() + next_wave_.size();
+    }
+
+  private:
+    // The pair lands exactly the way the two PartTextCommand halves
+    // would: the value verbatim, an empty wave ERASED (a blank param
+    // never rides the model).
+    void land(const std::string& value, const std::string& wave) {
+        Part* p = schem().find_part(id_);
+        if (p == nullptr) {
+            return;
+        }
+        p->value = value;
+        if (wave.empty()) {
+            p->params.erase("wave");
+        } else {
+            p->params["wave"] = wave;
+        }
+        schem().bump();
+    }
+
+    std::uint32_t id_;
+    std::string was_value_, next_value_;
+    std::string was_wave_, next_wave_;
+};
+
 }  // namespace
 
 void push_place_part(SchematicDocument& doc, ws::circsim::Part part) {
@@ -557,6 +606,22 @@ void push_part_text(SchematicDocument& doc, std::uint32_t part_id, int kind,
     (void)doc.undo().push(std::make_unique<PartTextCommand>(
         &doc, part_id, kind, std::move(param), std::move(was),
         std::move(next), std::move(name)));
+}
+
+void push_source_mode(SchematicDocument& doc, std::uint32_t part_id,
+                      std::string next_value, std::string next_wave) {
+    const Part* p = doc.schem.find_part(part_id);
+    if (p == nullptr) {
+        return;
+    }
+    const auto it = p->params.find("wave");
+    const std::string was_wave = it != p->params.end() ? it->second : "";
+    if (p->value == next_value && was_wave == next_wave) {
+        return;  // already there: no step, no bump
+    }
+    (void)doc.undo().push(std::make_unique<SourceModeCommand>(
+        &doc, part_id, p->value, std::move(next_value), was_wave,
+        std::move(next_wave)));
 }
 
 // --- wires & junctions ----------------------------------------------------

@@ -184,6 +184,22 @@ TEST_CASE("missing value and missing model error per the symbol") {
         const auto diags = ws::circsim::run_erc(b.s);
         CHECK_FALSE(has(diags, "circsim.erc.missing_model"));
     }
+    SUBCASE("a waveform source is self-valued") {
+        // The wave param IS the stimulus: the engine derives the DC/bias
+        // level from waveform(0) when the card spells no value ("V1 a b
+        // SIN(0 5 1)" runs as-is), so a source with a wave and no value
+        // is not a missing-value error. A wave-less source with no value
+        // still complains.
+        Bench b;
+        Part* v1 = b.part("v", "V1", "", {0.0, 0.0});
+        v1->params["wave"] = "SIN(0 5 1)";
+        CHECK_FALSE(has(ws::circsim::run_erc(b.s),
+                        "circsim.erc.missing_value"));
+        Bench bare;
+        bare.part("v", "V1", "", {0.0, 0.0});
+        CHECK(has(ws::circsim::run_erc(bare.s),
+                  "circsim.erc.missing_value"));
+    }
 }
 
 TEST_CASE("unknown symbols error") {
