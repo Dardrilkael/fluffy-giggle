@@ -393,3 +393,47 @@ placeholder's muted color, the inactive tab's), and
 `test_circsim_editor_side_panels` 15/15 (the palette heading through
 the strong face, the problems rows through the mono face, the netlist
 tab's fontless survival).
+
+## Stage 23 (2026-11-08): the interactive canvas - the run paints back
+
+The canvas stops being a passive drawing the moment a run lands. Three
+layers, one seam each:
+
+- **The i(Dn) probe (ws::spice)** - the save list grows terminal-current
+  columns: a device without a branch row that can evaluate its current
+  at the accepted solution (the diode - Shockley at the terminal
+  voltages, the Rs>0 path reading the series element) answers
+  `probes_current()`/`terminal_current()`, and `default_save_list`
+  carries `i(D1)` in .op/.dc/.tran (.ac opts out - a DC probe cannot
+  answer the small-signal system). The Lambert-W test pins it against
+  the closed form and the series loop's own i(V1).
+- **The LED (ws::circsim)** - the 13th built-in: the diode's SPICE
+  identity plus a display-only `color` Choice (spec'd, never emitted -
+  the deck cannot tell an LED from a diode) and two emission
+  arrowheads. `led_demo.csim` ships the acceptance picture: 5 V over
+  220/680/2.2k into red/yellow/green - 15/5/1.6 mA of glow, the smoke
+  suite's three brightness steps.
+- **The canvas (apps/circsim_editor)** - `Editor::net_cache()` shares
+  one build_nets per edit between the auto-junction dots and the new
+  wire coloring; the mode toggle (top-right, canvas-drawn: Plain /
+  Nets / Voltage) picks the ink. Nets hashes each net's NAME onto the
+  series wheel the Results plot already wears (ground a fixed slate);
+  Voltage rides the run's node voltages through a sqrt-spread
+  blue-gray-red ramp with a legend; unknown nets honestly fall back to
+  the plain ink (a missing reading is not a zero reading). The LED
+  glows: the probe current maps through a 20 mA-full sqrt brightness
+  into three halo discs in the part's own color, eased ~120 ms. A
+  .tran run grows the transport strip - play/pause, a scrub bar, the
+  format_eng readout - whose playhead the voltages and glows follow:
+  a delivery parks it at the run's end (the settled state), one press
+  sweeps the whole transient across the canvas in ~4 s, looping. The
+  run's net build and back-map now live in the Results cache (the
+  Problems cache keeps its copies for locate), so an ERC pass can
+  never dim the canvas.
+
+The stage-23 gate: the full linux ctest 633/633, the circsim and
+spice smokes green (the LED demo's three steps among them), and the
+editor's headless suites over the r2d stub - canvas 33/33 (the wire
+modes' ink contract, the ramp reference, the glow discs, the
+transport's park/play/scrub), side panels 34/34, results 16/16,
+palette 5/5 (the LED joins Semiconductors).

@@ -9,7 +9,17 @@
 // tool is engaged), the snap feedback (a ring on the wire tool's
 // pin/junction target, an accent dot on the grid intersection a
 // placement or drag is about to land on), wires, junctions, labels,
-// parts, the selection highlight, and the tool ghosts/preview.
+// parts, the selection highlight, and the tool ghosts/preview - then
+// the screen-space chrome: the wire-color mode toggle (top-right),
+// the .tran transport (bottom center) and the voltage legend
+// (bottom-right), the interactive canvas's own controls.
+//
+// The wires and the LED glow are the run's half of the drawing: the
+// paint mode (Plain / Nets / Voltage - the toggle's three buttons)
+// decides each wire's ink through Editor::net_cache's one build per
+// edit, and an LED's halo follows its i(<element>) probe column at
+// the transport playhead's sample (run_painting resolves the run's
+// tables once per frame for both).
 //
 // The viewport is the scroll scope's content rect: the panel NEVER
 // advances the flow (no layout.next()/advance() calls anywhere in this
@@ -33,7 +43,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <span>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <ws/input/input.hpp>
@@ -69,6 +82,195 @@ constexpr int kKeyAnnotate = 'A';        // Shift+A: renumber the refs
 
 // Pin magnetism's reach for the Place tool, in grid cells.
 constexpr double kMagnetCells = 1.5;
+
+// --- the interactive canvas's paint helpers (the run paints back) ---------
+
+// One net's wheel color: the series wheel indexed by an FNV-1a hash of
+// the NAME (a labeled net keeps its color across rebuilds and renumbered
+// ids; auto names shift with the topology, which is honest). Ground is
+// the one fixed face - a slate that reads as structure, not signal.
+[[nodiscard]] std::uint32_t net_color(const ws::circsim::Net& n) {
+    if (n.is_ground) {
+        return ws::ui::r2d::rgba(112, 122, 138);
+    }
+    std::uint32_t h = 2166136261u;  // FNV-1a over the name
+    for (const char c : n.name) {
+        h ^= static_cast<unsigned char>(c);
+        h *= 16777619u;
+    }
+    return series_color(h);
+}
+
+// The voltage ramp: v normalized by the run's max |v|, mapped through a
+// sqrt (perceptual - the interesting near-zero mids spread) from the
+// canvas's neutral gray toward red (positive) or blue (negative).
+// Pure data for the legend too, which walks the same u ladder.
+[[nodiscard]] std::uint32_t voltage_color(double v, double vmax) {
+    const double u = std::clamp(v / std::max(vmax, 1e-9), -1.0, 1.0);
+    const double a = std::sqrt(std::fabs(u));
+    constexpr double kBase[3] = {122.0, 126.0, 134.0};  // neutral ink
+    constexpr double kHot[3] = {255.0, 86.0, 60.0};     // positive: red
+    constexpr double kCold[3] = {86.0, 150.0, 255.0};   // negative: blue
+    const double* hot = u >= 0.0 ? kHot : kCold;
+    std::uint8_t rgb[3];
+    for (int i = 0; i < 3; ++i) {
+        rgb[i] = static_cast<std::uint8_t>(
+            std::lround(kBase[i] + (hot[i] - kBase[i]) * a));
+    }
+    return ws::ui::r2d::rgba(rgb[0], rgb[1], rgb[2], 242);
+}
+
+// The glow's full-scale and floor: 20 mA reads as full-on, sub-100 uA
+// conduction (reverse leakage, the solver's gmin ghost) is dark. The
+// sqrt between them is the eye's own curve - half current reads as
+// clearly dimmer, not as 50% of nothing.
+constexpr double kLedFullAmps = 0.020;
+constexpr double kLedFloorAmps = 100e-6;
+[[nodiscard]] double led_brightness(double amps) {
+    const double a = std::fabs(amps);
+    if (a < kLedFloorAmps) {
+        return 0.0;
+    }
+    return std::sqrt(std::min(1.0, a / kLedFullAmps));
+}
+
+// The LED's own hue from its `color` param (the Choice the symbol
+// specs; anything unrecognized - a hand-edited file, a .csym library
+// without the param - lights the classic red).
+[[nodiscard]] std::uint32_t led_hue(
+    const std::map<std::string, std::string>& params) {
+    const auto it = params.find("color");
+    const std::string& c = it != params.end() ? it->second : "";
+    if (c == "yellow") {
+        return ws::ui::r2d::rgba(255, 202, 44);
+    }
+    if (c == "green") {
+        return ws::ui::r2d::rgba(84, 220, 92);
+    }
+    if (c == "blue") {
+        return ws::ui::r2d::rgba(72, 148, 255);
+    }
+    if (c == "white") {
+        return ws::ui::r2d::rgba(235, 238, 242);
+    }
+    if (c == "orange") {
+        return ws::ui::r2d::rgba(255, 142, 36);
+    }
+    return ws::ui::r2d::rgba(255, 76, 60);  // red
+}
+
+// What the run paints back, resolved for THIS frame: the table and the
+// sample the playhead sits on, every net's node voltage at that sample,
+// every element's probe current (the LED glow reads i(Dn)). Built from
+// the Results cache's own copy of the run's net build and back-map, so
+// an ERC pass replacing the Problems cache never dims the canvas.
+struct RunPainting {
+    bool ok = false;       // a run with node voltages worth painting
+    bool stale = false;    // the drawing moved on since the run
+    const ws::spice::Table* table = nullptr;
+    std::size_t sample = 0;
+    std::unordered_map<std::uint32_t, double> volts;    // net id -> V
+    std::unordered_map<std::uint32_t, double> amps;     // part id -> A
+    double vmax = 1e-9;     // the ramp's scale (max |v|)
+};
+
+[[nodiscard]] RunPainting run_painting(const Editor& ed) {
+    RunPainting rp;
+    const ws::circsim::Schematic* s = ed.schem();
+    if (!ed.results.has || s == nullptr ||
+        ed.results.run.results.tables.empty()) {
+        return rp;
+    }
+    // The transient the transport scrubs, else the run's first table
+    // at its last row (an .op's single answer, a .dc's sweep end).
+    const ws::spice::Table* t = ed.canvas_tran_table();
+    if (t == nullptr) {
+        t = &ed.results.run.results.tables.front();
+    }
+    rp.table = t;
+    rp.sample = Editor::shown_sample(*t, ed.playback.t);
+    // net id -> node token (the export map is token -> net; invert once)
+    std::unordered_map<std::uint32_t, std::string> token_of;
+    token_of.reserve(ed.results.map.node_net.size());
+    for (const auto& [tok, net_id] : ed.results.map.node_net) {
+        token_of.emplace(net_id, tok);
+    }
+    for (const auto& [net_id, tok] : token_of) {
+        const std::span<const double> col = t->signal("v(" + tok + ")");
+        if (col.size() > rp.sample && std::isfinite(col[rp.sample])) {
+            const double v = col[rp.sample];
+            rp.volts.emplace(net_id, v);
+            rp.vmax = std::max(rp.vmax, std::fabs(v));
+        }
+    }
+    // part id -> the element's probe current at the same sample (only
+    // devices with a probe column answer; resistors stay absent).
+    for (const auto& [name, part_id] : ed.results.map.element_part) {
+        const std::span<const double> col = t->signal("i(" + name + ")");
+        if (col.size() > rp.sample && std::isfinite(col[rp.sample])) {
+            rp.amps.emplace(part_id, col[rp.sample]);
+        }
+    }
+    rp.ok = !rp.volts.empty();
+    rp.stale = ed.results.version != s->version();
+    return rp;
+}
+
+// --- the screen-space overlays' geometry (the layout the header exports;
+// draw + pointer + the headless suite share it) --------------------------
+
+// The wire-color mode toggle: three square buttons, top-right.
+constexpr float kModeButtonPx = 26.0f;
+constexpr float kModeGapPx = 4.0f;
+
+}  // namespace
+
+ModeToggleLayout mode_toggle_layout(const gui::Rect& body) {
+    ModeToggleLayout out;
+    const float w = 3.0f * kModeButtonPx + 2.0f * kModeGapPx;
+    const float x = body.x + body.width - w - 8.0f;
+    const float y = body.y + 8.0f;
+    for (std::size_t i = 0; i < 3; ++i) {
+        out.buttons[i] = {x + static_cast<float>(i) *
+                                  (kModeButtonPx + kModeGapPx),
+                          y, kModeButtonPx, kModeButtonPx};
+    }
+    return out;
+}
+
+TransportStripLayout transport_strip_layout(const gui::Rect& body) {
+    const float w = std::min(300.0f, std::max(150.0f, body.width * 0.5f));
+    const float h = 30.0f;
+    TransportStripLayout out;
+    out.strip = {body.x + (body.width - w) * 0.5f,
+                 body.y + body.height - h - 34.0f, w, h};
+    out.button = {out.strip.x + 3.0f, out.strip.y + 3.0f, h - 6.0f,
+                  h - 6.0f};
+    out.bar = {out.strip.x + h + 4.0f, out.strip.y + h * 0.5f - 3.0f,
+               std::max(20.0f, w - h - 8.0f - 62.0f), 6.0f};
+    return out;
+}
+
+namespace {
+
+// Scrubs the playhead to the bar position under `mouse_x`.
+void scrub_to(Editor& ed, const ws::spice::Table& t, const gui::Rect& bar,
+              float mouse_x) {
+    const std::span<const double> axis = t.axis(0);
+    if (axis.empty() || bar.width <= 1.0f) {
+        return;
+    }
+    const double t0 = axis.front();
+    const double t1 = axis.back();
+    const double frac = std::clamp(
+        (mouse_x - bar.x) / static_cast<double>(bar.width), 0.0, 1.0);
+    ed.playback.t = t0 + frac * (t1 - t0);
+}
+
+// True when the point sits in the rect (the half-open screen rule).
+[[nodiscard]] bool in_rect(const gui::Rect& r, float x, float y) {
+    return x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
+}
 
 [[nodiscard]] double pick_world(const EditorView& view) {
     return view.valid() ? static_cast<double>(kPickPx) / view.zoom : 0.35;
@@ -293,6 +495,57 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
         const float deltas =
             std::clamp(in.scroll_dy, -4.0f, 4.0f);
         ed.view.zoom_at(mouse, std::pow(kZoomStep, deltas));
+    }
+
+    // --- the screen-space overlays own the LEFT press before any tool:
+    // the wire-color mode's three buttons (top-right) and the .tran
+    // transport (bottom strip - a scrub in flight keeps the pointer
+    // until release, the pan drag's own rule). Space+left stays a pan:
+    // the modifier wins over every left-press claim below.
+    if (gui.claims_open() && !space_down) {
+        // A scrub in flight outranks everything but its own release.
+        if (ed.transport_scrub) {
+            const ws::spice::Table* tran = ed.canvas_tran_table();
+            if (tran == nullptr ||
+                in.mouse_down[ws::input::mouse::kLeft] == 0) {
+                ed.transport_scrub = false;
+            } else {
+                scrub_to(ed, *tran, transport_strip_layout(body).bar,
+                         in.mouse_x);
+                return;  // the scrub owns the pointer
+            }
+        }
+        if (inside && in.mouse_pressed[ws::input::mouse::kLeft] != 0) {
+            const ModeToggleLayout modes = mode_toggle_layout(body);
+            for (std::size_t i = 0; i < 3; ++i) {
+                if (in_rect(modes.buttons[i], in.mouse_x, in.mouse_y)) {
+                    ed.wire_colors = static_cast<WireColorMode>(i);
+                    return;  // the click never reaches the tools
+                }
+            }
+            const ws::spice::Table* tran = ed.canvas_tran_table();
+            if (tran != nullptr) {
+                const TransportStripLayout tl =
+                    transport_strip_layout(body);
+                if (in_rect(tl.button, in.mouse_x, in.mouse_y)) {
+                    // Play from the START when the playhead sits at the
+                    // end (a paused canvas shows the settled state); a
+                    // resume keeps wherever the scrub parked it.
+                    const std::span<const double> axis = tran->axis(0);
+                    if (!ed.playback.playing && !axis.empty() &&
+                        ed.playback.t >= axis.back()) {
+                        ed.playback.t = axis.front();
+                    }
+                    ed.playback.playing = !ed.playback.playing;
+                    return;
+                }
+                if (in_rect(tl.strip, in.mouse_x, in.mouse_y)) {
+                    ed.transport_scrub = true;
+                    scrub_to(ed, *tran, tl.bar, in.mouse_x);
+                    return;
+                }
+            }
+        }
     }
 
     // Middle-drag pans; space+left-drag pans too (the gallery's rule).
@@ -742,13 +995,55 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     rc.translate(-static_cast<float>(ed.view.center.x),
                  -static_cast<float>(ed.view.center.y));
 
-    // --- wires, junctions, labels
+    // --- wires, junctions, labels. The interactive canvas's first half:
+    // the paint mode decides the ink. Plain keeps the classic single
+    // stroke; Nets and Voltage resolve each wire through net_cache (one
+    // build per edit, the auto-junction dots' own seam) - Nets wears the
+    // name-hashed wheel, Voltage the last run's node-voltage ramp. A
+    // wire nobody can resolve (an edit the run never saw, a net the
+    // build dropped) falls back to the plain ink, so a stale run never
+    // erases the drawing. The selection keeps the accent either way.
+    const RunPainting rp = run_painting(ed);
+    const ws::circsim::NetList* wire_nets =
+        ed.wire_colors == WireColorMode::Plain ? nullptr : &ed.net_cache();
+
     Paint wire_paint;
     wire_paint.width = 2.0f;
     wire_paint.color = gui::dim(theme.text, 0.85f);
     Paint wire_sel = wire_paint;
     wire_sel.color = theme.control_on;
     wire_sel.width = 3.0f;
+
+    // A net id -> its Net (the join dots carry ids; NetList indexes
+    // names/pins/wires, so this is the one walk over the public list).
+    const auto net_of_id = [wire_nets](std::uint32_t id) {
+        const ws::circsim::Net* out = nullptr;
+        if (wire_nets != nullptr) {
+            for (const ws::circsim::Net& n : wire_nets->nets) {
+                if (n.id == id) {
+                    out = &n;
+                    break;
+                }
+            }
+        }
+        return out;
+    };
+    // One entity's ink: the plain color until a net resolves, then the
+    // mode's answer for it (Voltage falls back to plain for unknown
+    // nets - a missing reading is not a zero reading).
+    const auto entity_color = [&](const ws::circsim::Net* n) {
+        if (n == nullptr || wire_nets == nullptr) {
+            return wire_paint.color;
+        }
+        if (ed.wire_colors == WireColorMode::Voltage) {
+            const auto it = rp.volts.find(n->id);
+            if (it == rp.volts.end()) {
+                return wire_paint.color;
+            }
+            return voltage_color(it->second, rp.vmax);
+        }
+        return net_color(*n);
+    };
 
     for (const ws::circsim::Wire& w : s.wires()) {
         const std::vector<Pos> path = ed.wire_path(w);
@@ -761,34 +1056,44 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
             pts.push_back(Point{static_cast<float>(p.x),
                                 static_cast<float>(p.y)});
         }
+        const bool selected = ed.sel.is(Selection::Kind::Wire, w.id);
+        Paint paint = selected ? wire_sel : wire_paint;
+        if (!selected) {
+            paint.color = entity_color(wire_nets != nullptr
+                                           ? wire_nets->net_of_wire(w.id)
+                                           : nullptr);
+        }
         rc.stroke_polyline(
-            pts.data(), static_cast<int>(pts.size()),
-            ed.sel.is(Selection::Kind::Wire, w.id) ? wire_sel : wire_paint);
+            pts.data(), static_cast<int>(pts.size()), paint);
     }
     for (const ws::circsim::Junction& j : s.junctions()) {
         rc.fill_circle(
             Point{static_cast<float>(j.pos.x), static_cast<float>(j.pos.y)},
-            0.14f, ed.sel.is(Selection::Kind::Junction, j.id)
-                       ? theme.control_on
-                       : gui::dim(theme.text, 0.85f));
+            0.14f,
+            ed.sel.is(Selection::Kind::Junction, j.id)
+                ? theme.control_on
+                : entity_color(wire_nets != nullptr
+                                   ? wire_nets->net_of_junction(j.id)
+                                   : nullptr));
     }
     // The silent joins' dots (stage 18): pins a wire's path picked up,
     // vertices T-riding another wire - the net rules connect them, so
     // the canvas says so, the same dot the authored junctions wear.
     // nets.cpp already suppressed every position an authored junction
     // or a wire landing covers, so what arrives here is exactly the
-    // invisible set.
-    // Skipped while a drag is moving something: the live writes bump
-    // the schematic version EVERY frame, and the dots' cache is keyed on
-    // it, so drawing them here would run a full build_nets per frame.
-    // They come back at release (the one rebuild per edit).
+    // invisible set. Skipped while a drag is moving something: the
+    // live writes bump the schematic version EVERY frame, and the dots'
+    // cache is keyed on it, so drawing them here would run a full
+    // build_nets per frame. They come back at release (the one rebuild
+    // per edit).
     const bool drag_moving =
         ed.drag.kind != Editor::Drag::Kind::None && ed.drag.moved;
     if (!drag_moving) {
-        for (const Pos& p : ed.auto_junction_dots()) {
-            rc.fill_circle(Point{static_cast<float>(p.x),
-                                 static_cast<float>(p.y)},
-                            0.14f, gui::dim(theme.text, 0.85f));
+        for (const auto& [dot_pos, dot_net] : ed.auto_junction_dots()) {
+            rc.fill_circle(
+                Point{static_cast<float>(dot_pos.x),
+                      static_cast<float>(dot_pos.y)},
+                0.14f, entity_color(net_of_id(dot_net)));
         }
     }
     if (theme.font != nullptr) {
@@ -831,6 +1136,35 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
             }
         }
         const ws::circsim::SymbolDef* sym = ed.sym_of(p);
+        // The LED glow (the interactive canvas's payoff): the run's
+        // i(<element>) probe maps to a brightness, and the halo discs
+        // carry it UNDER the strokes - alpha falling with radius, the
+        // color param's own hue, a bright die at the center. The
+        // intensity eases toward the run's answer (a light turning on
+        // reads as a light, not a flip); instant when the theme's
+        // motion is off. No run, no probe column: the target is dark.
+        if (sym != nullptr && sym->key == "led") {
+            double target = 0.0;
+            const auto lit = rp.amps.find(p.id);
+            if (lit != rp.amps.end()) {
+                target = led_brightness(lit->second);
+            }
+            char glow_id[32];
+            std::snprintf(glow_id, sizeof glow_id, "led glow %u", p.id);
+            const float glow = gui.animate_toward(
+                gui.ids().internal_id(glow_id),
+                static_cast<float>(target),
+                theme.anim_enabled ? 0.12f : 0.0f);
+            if (glow > 0.015f) {
+                const std::uint32_t hue = led_hue(p.params);
+                const Point center{static_cast<float>(p.pos.x),
+                                   static_cast<float>(p.pos.y)};
+                rc.fill_circle(center, 1.15f, gui::dim(hue, 0.50f * glow));
+                rc.fill_circle(center, 1.90f, gui::dim(hue, 0.28f * glow));
+                rc.fill_circle(center, 2.75f, gui::dim(hue, 0.13f * glow));
+                rc.fill_circle(center, 0.22f, gui::dim(hue, glow));
+            }
+        }
         if (sym != nullptr) {
             draw_symbol(rc, *sym, p.pos, p.rot, p.mirror, body_paint,
                         theme.text, theme.font);
@@ -1014,12 +1348,181 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
 
     rc.pop_transform();
 
+    // --- the screen-space overlays: the mode toggle (top-right), the
+    // .tran transport (bottom center) and the voltage legend
+    // (bottom-right). The hint strip keeps the bottom-left corner.
+    rc.set_view_scale(1.0f);
+
+    // The wire-color mode toggle: three glyph buttons - the plain ink
+    // stroke, the net wheel, the voltage ramp. The active one wears the
+    // accent's fill and border; the rest stay quiet outlines.
+    {
+        const ModeToggleLayout modes = mode_toggle_layout(body);
+        for (std::size_t i = 0; i < 3; ++i) {
+            const gui::Rect& r = modes.buttons[i];
+            const bool active =
+                ed.wire_colors == static_cast<WireColorMode>(i);
+            if (active) {
+                rc.fill_rounded_rect(r.x, r.y, r.width, r.height, 5.0f,
+                                     gui::dim(theme.control_on, 0.18f));
+            }
+            Paint box;
+            box.width = active ? 1.5f : 1.0f;
+            box.color = active ? theme.control_on
+                               : gui::dim(theme.text, 0.40f);
+            rc.stroke_rounded_rect(r.x, r.y, r.width, r.height, 5.0f, box);
+            const std::uint32_t glyph =
+                active ? theme.control_on : gui::dim(theme.text, 0.75f);
+            switch (static_cast<WireColorMode>(i)) {
+                case WireColorMode::Plain: {
+                    Paint line;
+                    line.width = 2.0f;
+                    line.color = glyph;
+                    rc.stroke_line(Point{r.x + 6.0f, r.y + r.height * 0.5f},
+                                   Point{r.x + r.width - 6.0f,
+                                         r.y + r.height * 0.5f},
+                                   line);
+                    break;
+                }
+                case WireColorMode::Nets: {
+                    Paint line;
+                    line.width = 2.0f;
+                    for (int k = 0; k < 3; ++k) {
+                        line.color = gui::dim(series_color(k),
+                                              active ? 1.0f : 0.60f);
+                        rc.stroke_line(
+                            Point{r.x + 6.0f, r.y + 7.0f + 4.0f * k},
+                            Point{r.x + r.width - 6.0f,
+                                  r.y + 7.0f + 4.0f * k},
+                            line);
+                    }
+                    break;
+                }
+                case WireColorMode::Voltage: {
+                    // The mini ramp: cold, base, hot.
+                    const std::uint32_t cols[3] = {
+                        voltage_color(-1.0, 1.0), voltage_color(0.0, 1.0),
+                        voltage_color(1.0, 1.0)};
+                    const float bw = (r.width - 12.0f) / 3.0f;
+                    for (int k = 0; k < 3; ++k) {
+                        const Point corner{r.x + 6.0f + bw * k,
+                                           r.y + r.height * 0.5f - 3.0f};
+                        rc.fill_rects(&corner, 1, bw - 1.0f, 6.0f,
+                                      gui::dim(cols[k],
+                                               active ? 1.0f : 0.60f));
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // The .tran transport: the play/pause button, the scrub track with
+    // the playhead knob, and the time readout. Drawn only when the run
+    // has a transient to scrub.
+    if (const ws::spice::Table* tran = ed.canvas_tran_table();
+        tran != nullptr) {
+        const TransportStripLayout tl = transport_strip_layout(body);
+        const std::span<const double> axis = tran->axis(0);
+        const double t0 = axis.empty() ? 0.0 : axis.front();
+        const double t1 = axis.empty() ? 0.0 : axis.back();
+        const double span = std::max(t1 - t0, 1e-12);
+        const double frac =
+            std::clamp((ed.playback.t - t0) / span, 0.0, 1.0);
+
+        rc.fill_rounded_rect(tl.strip.x, tl.strip.y, tl.strip.width,
+                             tl.strip.height, tl.strip.height * 0.5f,
+                             theme.control_bg);
+        Paint border;
+        border.width = 1.0f;
+        border.color = gui::dim(theme.text, 0.35f);
+        rc.stroke_rounded_rect(tl.strip.x, tl.strip.y, tl.strip.width,
+                               tl.strip.height, tl.strip.height * 0.5f,
+                               border);
+
+        // Play (a triangle) / pause (two bars).
+        const gui::Rect& b = tl.button;
+        if (ed.playback.playing) {
+            const Point bars[2] = {
+                {b.x + b.width * 0.30f, b.y + b.height * 0.22f},
+                {b.x + b.width * 0.62f, b.y + b.height * 0.22f}};
+            rc.fill_rects(bars, 2, b.width * 0.12f, b.height * 0.56f,
+                          theme.control_on);
+        } else {
+            const Point tri[3] = {
+                {b.x + b.width * 0.32f, b.y + b.height * 0.18f},
+                {b.x + b.width * 0.32f, b.y + b.height * 0.82f},
+                {b.x + b.width * 0.80f, b.y + b.height * 0.50f}};
+            rc.fill_polygon(tri, 3, theme.control_on);
+        }
+
+        // The track, the played span, the knob.
+        const gui::Rect& bar = tl.bar;
+        const float track_y = bar.y + bar.height * 0.5f - 1.0f;
+        const Point track{bar.x, track_y};
+        rc.fill_rects(&track, 1, bar.width, 2.0f,
+                      gui::dim(theme.text, 0.30f));
+        const Point prog{bar.x, track_y};
+        rc.fill_rects(&prog, 1,
+                      static_cast<float>(bar.width * frac), 2.0f,
+                      theme.control_on);
+        rc.fill_circle(
+            Point{bar.x + static_cast<float>(bar.width * frac),
+                  bar.y + bar.height * 0.5f},
+            5.0f, theme.control_on);
+
+        // The readout (a fontless theme draws the shape alone).
+        if (theme.font != nullptr) {
+            std::string label = ws::circsim::format_eng(ed.playback.t);
+            label += 's';
+            const float w = rc.measure_text(label.c_str(), *theme.font);
+            (void)rc.draw_text(
+                tl.strip.x + tl.strip.width - w - 8.0f,
+                tl.strip.y + tl.strip.height * 0.5f - 6.0f,
+                label.c_str(), *theme.font, gui::dim(theme.text, 0.85f));
+        }
+    }
+
+    // The voltage legend: the ramp and its ends, bottom-right, only in
+    // Voltage mode with a run behind it. A stale run says so.
+    if (ed.wire_colors == WireColorMode::Voltage && rp.ok) {
+        constexpr float kLegendW = 108.0f;
+        constexpr float kLegendH = 6.0f;
+        constexpr int kLegendSteps = 9;
+        const float lx = body.x + body.width - kLegendW - 10.0f;
+        const float ly = body.y + body.height - 44.0f;
+        const float sw = kLegendW / kLegendSteps;
+        for (int k = 0; k < kLegendSteps; ++k) {
+            const double u =
+                -1.0 + 2.0 * static_cast<double>(k) / (kLegendSteps - 1);
+            const Point c{lx + sw * k, ly};
+            rc.fill_rects(&c, 1, sw + 0.5f, kLegendH,
+                          voltage_color(u * rp.vmax, rp.vmax));
+        }
+        if (theme.font != nullptr) {
+            const std::string lo =
+                "-" + ws::circsim::format_eng(rp.vmax) + "V";
+            const std::string hi =
+                "+" + ws::circsim::format_eng(rp.vmax) + "V";
+            (void)rc.draw_text(lx, ly - 13.0f, lo.c_str(), *theme.font,
+                               gui::dim(theme.text, 0.70f));
+            const float hw = rc.measure_text(hi.c_str(), *theme.font);
+            (void)rc.draw_text(lx + kLegendW - hw, ly - 13.0f, hi.c_str(),
+                               *theme.font, gui::dim(theme.text, 0.70f));
+            if (rp.stale) {
+                (void)rc.draw_text(lx, ly + kLegendH + 4.0f,
+                                   "last run - the drawing moved on",
+                                   *theme.font,
+                                   gui::dim(theme.text, 0.55f));
+            }
+        }
+    }
+
     // --- the hint strip (SCREEN space): what the pointer and keys do
     // right now, bottom-left, only while the pointer is over the canvas.
     if (inside && gui.claims_open() && theme.font != nullptr) {
         const std::string text(ed.hint());
         if (!text.empty()) {
-            rc.set_view_scale(1.0f);
             (void)rc.draw_text(body.x + 10.0f,
                                body.y + body.height - 24.0f, text.c_str(),
                                *theme.font, gui::dim(theme.text, 0.55f));

@@ -264,6 +264,29 @@ public:
         return {std::abs(i_cur - i_prev), std::max(std::abs(i_cur), std::abs(i_prev))};
     }
 
+    // --- terminal-current probe (§7.8): the i(<name>) column ----------------
+    // The diode's current at the ACCEPTED solution, anode -> cathode. With
+    // Rs > 0 the honest reading is the series resistor's own current
+    // (v(a)-v(mid)) * area/Rs - it never exponentiates, so a wild forward
+    // bias saturates gracefully instead of overflowing. Without Rs it is
+    // the Shockley current at the raw terminal voltage (the gmin term is
+    // deliberately excluded: it is the solver's crutch, not the device -
+    // at the defaults it is ~1e-12 A and invisible next to any conduction
+    // the glow would care about).
+    [[nodiscard]] bool probes_current() const override { return true; }
+    [[nodiscard]] double terminal_current(const std::vector<double>& x,
+                                          std::size_t /*node_count*/,
+                                          const double* params) const override {
+        const double area =
+            params != nullptr ? params[kAreaParam] : 1.0;
+        if (mid_ != kGround) {
+            return v_across(x, anode_, mid_) * area / rs_;
+        }
+        const double is_eff = is_ * area;
+        const double vd = v_across(x, anode_, cathode_);
+        return is_eff * (std::exp(safe_exp_arg(vd / (n_ * vt_))) - 1.0);
+    }
+
     // --- M4b dynamic hooks (charge companion, only when Cjo > 0) ----------
     // Same pattern as the linear C in devices_m2.cpp: begin_step computes
     // geq/jeq from the last committed step's V/Q/I; load_tran stamps them;

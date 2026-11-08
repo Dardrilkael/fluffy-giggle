@@ -32,6 +32,12 @@ file gets fixed.
   column per signal; `t["v(out)"]` is a span. row(i)/rows() materialize
   row-major for the CSV writer/tests. .raw writer: LTspice/ngspice
   binary format, direct column dump, .ac re/im pairs merge to complex.
+  The default save list also probes TERMINAL CURRENTS: a device without
+  a branch row that implements probes_current()/terminal_current()
+  (the diode - i(D1) from the Shockley equation at the accepted
+  solution, the Rs path reading the series element) grows an i(name)
+  column in .op/.dc/.tran; .ac opts out (a DC probe cannot answer the
+  small-signal system).
 - **§6 rev - steppable transient:** TranMarch (shared time loop) +
   TransientRun::advance_to (whole accepted steps only), StopToken
   (prompt, resumable), progress callback, set_source between steps =

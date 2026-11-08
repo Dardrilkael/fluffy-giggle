@@ -11,6 +11,7 @@
 #include <cmath>
 #include <map>
 #include <cstdio>
+#include <span>
 #include <string_view>
 
 #include <ws/core/assert.hpp>
@@ -1101,7 +1102,8 @@ void Editor::refresh_netlist() {
     }
 }
 
-const std::vector<Pos>& Editor::auto_junction_dots() {
+const std::vector<std::pair<Pos, std::uint32_t>>&
+Editor::auto_junction_dots() {
     const ws::circsim::Schematic* s = schem();
     if (s == nullptr) {
         join_dots_.clear();
@@ -1111,16 +1113,93 @@ const std::vector<Pos>& Editor::auto_junction_dots() {
     if (!joins_valid_ || joins_version_ != s->version()) {
         // The same seam ERC and the export read: one build_nets per
         // edit (millisecond work at editor scales), never per frame.
+        // The NetList itself lands in net_cache_; the dots resolve
+        // their nets through it AFTER the move (net_of_pin answers
+        // from the indexed lookup maps).
         const ws::circsim::NetBuild build =
             ws::circsim::build_nets(*s, &library);
+        nets_cache_ = std::move(build.nets);
+        nets_version_ = s->version();
+        nets_valid_ = true;
         join_dots_.clear();
         for (const ws::circsim::SilentJoin& j : build.silent_joins) {
-            join_dots_.push_back(j.pos);
+            const ws::circsim::Net* n = nullptr;
+            if (j.kind == ws::circsim::SilentJoin::Kind::PinOnWire) {
+                n = nets_cache_.net_of_pin(ws::circsim::PinRef{j.part, j.pin});
+            } else {
+                n = nets_cache_.net_of_wire(j.other);
+            }
+            join_dots_.push_back(
+                {j.pos, n != nullptr ? n->id : 0u});
         }
         joins_version_ = s->version();
         joins_valid_ = true;
     }
     return join_dots_;
+}
+
+const ws::circsim::NetList& Editor::net_cache() {
+    const ws::circsim::Schematic* s = schem();
+    if (s == nullptr) {
+        nets_cache_ = ws::circsim::NetList{};
+        nets_valid_ = false;
+        return nets_cache_;
+    }
+    if (!nets_valid_ || nets_version_ != s->version()) {
+        // auto_junction_dots shares this cache and refreshes it on its
+        // own staleness; when the dots have not run this edit, the
+        // coloring is the one that pays the build.
+        const ws::circsim::NetBuild build =
+            ws::circsim::build_nets(*s, &library);
+        nets_cache_ = std::move(build.nets);
+        nets_version_ = s->version();
+        nets_valid_ = true;
+        // The dots rode the OLD build; their cache must not outlive it.
+        joins_valid_ = false;
+    }
+    return nets_cache_;
+}
+
+const ws::spice::Table* Editor::canvas_tran_table() const {
+    if (!results.has || results.run.results.tables.empty()) {
+        return nullptr;
+    }
+    const std::vector<ws::spice::Table>& tables =
+        results.run.results.tables;
+    // What the Results panel shows, when it shows a time sweep - the
+    // canvas animates the plot the user is looking at.
+    if (results.table < tables.size() &&
+        tables[results.table].sweep == ws::spice::SweepKind::Time) {
+        return &tables[results.table];
+    }
+    for (const ws::spice::Table& t : tables) {
+        if (t.sweep == ws::spice::SweepKind::Time) {
+            return &t;
+        }
+    }
+    return nullptr;
+}
+
+std::size_t Editor::shown_sample(const ws::spice::Table& t,
+                                 double playhead) {
+    const std::size_t rows = t.row_count();
+    if (rows == 0) {
+        return 0;
+    }
+    if (t.sweep != ws::spice::SweepKind::Time || t.sweep_axes.empty()) {
+        return rows - 1;  // the sweep's end - the settled answer
+    }
+    const std::span<const double> axis = t.axis(0);
+    if (axis.empty()) {
+        return rows - 1;
+    }
+    // The last sample at or before the playhead (a .tran axis is
+    // strictly increasing; upper_bound lands past it).
+    const auto it = std::upper_bound(axis.begin(), axis.end(), playhead);
+    if (it == axis.begin()) {
+        return 0;
+    }
+    return static_cast<std::size_t>(it - axis.begin()) - 1;
 }
 
 void Editor::document_changed() {
@@ -1135,8 +1214,12 @@ void Editor::document_changed() {
     problems_cursor = -1;  // the rows it indexed are another document's
     netlist = NetlistCache{};
     results = ResultsCache{};
+    playback = Playback{};      // another document has no transient yet
+    transport_scrub = false;
     join_dots_.clear();
     joins_valid_ = false;
+    nets_cache_ = ws::circsim::NetList{};
+    nets_valid_ = false;
     part_bounds_cache_.clear();
     bounds_valid_ = false;
     // The Properties panel's field state rides too: a new document
@@ -1180,6 +1263,30 @@ bool Editor::tick() {
             busy = true;
         }
     }
+    // The .tran playback advances with the same clock: the whole run
+    // sweeps by in kLoopSeconds of wall time, looping at the window's
+    // end. A run with no transient (or an empty table) parks itself -
+    // the transport strip still scrubs it by hand.
+    if (playback.playing) {
+        const ws::spice::Table* t = canvas_tran_table();
+        const std::span<const double> axis =
+            t != nullptr ? t->axis(0) : std::span<const double>{};
+        if (axis.empty()) {
+            playback.playing = false;
+        } else {
+            const double t0 = axis.front();
+            const double t1 = axis.back();
+            const double span = std::max(t1 - t0, 1e-12);
+            playback.t += dt * span / Playback::kLoopSeconds;
+            while (playback.t > t1) {
+                playback.t -= span;  // loop
+            }
+            if (playback.t < t0) {
+                playback.t = t0;
+            }
+            busy = true;  // keep the frames coming
+        }
+    }
     return busy;
 }
 
@@ -1219,6 +1326,23 @@ void Editor::status(std::string text) const {
 }
 
 // --- the symbol renderer ------------------------------------------------------
+
+// The data-color wheel (see editor.hpp's declaration comment): the same
+// eight the Results plot has always painted its signals in, now the
+// canvas's nets wear them too.
+std::uint32_t series_color(std::size_t i) {
+    static constexpr std::uint32_t kSeries[] = {
+        ws::ui::r2d::rgba(224, 90, 78),    // red
+        ws::ui::r2d::rgba(78, 161, 224),   // blue
+        ws::ui::r2d::rgba(88, 181, 92),    // green
+        ws::ui::r2d::rgba(211, 154, 42),   // amber
+        ws::ui::r2d::rgba(154, 111, 211),  // purple
+        ws::ui::r2d::rgba(78, 201, 192),   // teal
+        ws::ui::r2d::rgba(211, 90, 158),   // pink
+        ws::ui::r2d::rgba(143, 154, 78),   // olive
+    };
+    return kSeries[i % (sizeof kSeries / sizeof kSeries[0])];
+}
 
 void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
                  Pos pos, int rot, bool mirror, const Paint& body,

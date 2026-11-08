@@ -115,7 +115,7 @@ ws::core::Result<Table> run_op(const Circuit& circuit, RunState& state,
     t.sweep = SweepKind::None;
     const SaveList save = default_save_list(circuit);
     t.signals = signal_skeleton(save);
-    append_row_columns(circuit, save, t, x);
+    append_row_columns(circuit, save, t, x, &state);
     return t;
 }
 
@@ -448,7 +448,7 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const Circuit& base_circuit,
             if (outer) {
                 t.sweep_axes[1].push_back(outer_value);
             }
-            append_row_columns(circuit, save, t, x);
+            append_row_columns(circuit, save, t, x, &*state);
         }
     }
 
@@ -594,7 +594,9 @@ ws::core::Result<Table> run_ac(const Circuit& circuit, RunState& state,
 
     // Signals: frequency axis, then re()/im() pairs for the default
     // save-list (the locked CSV decision: re()/im(), never mag/phase).
-    const SaveList save = default_save_list(circuit);
+    // The terminal-current probes opt out: they answer a DC solution,
+    // not the small-signal system.
+    const SaveList save = default_save_list(circuit, false);
     Table t;
     t.analysis = AnalysisKind::Ac;
     t.sweep = SweepKind::Frequency;

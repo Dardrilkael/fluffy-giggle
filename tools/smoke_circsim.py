@@ -124,6 +124,29 @@ def main():
         check(abs(row[out] - want) < 2e-3 * 5.0,
               f"tran v(out) at ~{target} ~= {want:.4f} (got {row[out]:.4f})")
 
+    # --- led_demo: the glow demo's three brightness steps --------------------
+    # 5 V over 220/680/2.2k into LEDs (Vf ~1.7 V): the last row (the
+    # settled state the editor's transport parks on) answers three
+    # distinct currents - the i(Dn) probe columns the canvas glow reads.
+    led = EXAMPLES / "led_demo.csim"
+    r = run(args.cli, "erc", led)
+    check(r.returncode == 0, "led_demo erc exit 0")
+
+    r = run(args.cli, "run", led, "-o", "-")
+    check(r.returncode == 0, f"led_demo run exit 0 (stderr: {r.stderr.strip()!r})")
+    header, rows = parse_csv(r.stdout)
+    check(header[0] == "time", "led_demo tran time column leads the CSV")
+    d1 = header.index("i(D1)")
+    d2 = header.index("i(D2)")
+    d3 = header.index("i(D3)")
+    last = rows[-1]
+    # ~15 mA / ~5 mA / ~1.6 mA: bright, medium, dim.
+    check(13e-3 < last[d1] < 17e-3, f"i(D1) ~15 mA (got {last[d1]})")
+    check(4e-3 < last[d2] < 6e-3, f"i(D2) ~5 mA (got {last[d2]})")
+    check(1.2e-3 < last[d3] < 2e-3, f"i(D3) ~1.6 mA (got {last[d3]})")
+    check(last[d1] > last[d2] > last[d3],
+          "the three LEDs land on distinct brightness steps")
+
     # --- a broken file exits 1 with a mapped problem -------------------------
     with tempfile.TemporaryDirectory() as tmp:
         bad = Path(tmp) / "bad.csim"
@@ -175,7 +198,7 @@ def main():
         table = json.loads(r.stdout)
         check(table["format"] == "circsim-symbols", "json table format")
         by_key = {s["key"]: s for s in table["symbols"]}
-        check(len(table["symbols"]) == 13, "12 built-ins + tline")
+        check(len(table["symbols"]) == 14, "13 built-ins + tline")
         check(by_key["tline"]["spice"] == "T", "tline json letter")
         check(by_key["tline"]["draw"][4] == {"rect": [-1.0, -2.0, 1.0, 2.0]},
               "tline json draw primitives")

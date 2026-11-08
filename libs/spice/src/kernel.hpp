@@ -50,9 +50,11 @@ struct SaveList {
     std::vector<std::string> columns;
     std::vector<std::size_t> nodes;      // node ids (v(name) columns)
     std::vector<std::size_t> branches;   // branch ids (i(name) columns)
+    std::vector<std::size_t> probes;     // device ids (i(name) columns the
+                                         // device evaluates itself)
 };
 
-inline SaveList default_save_list(const Circuit& c) {
+inline SaveList default_save_list(const Circuit& c, bool with_probes = true) {
     SaveList s;
     for (std::size_t i = 0; i < c.node_count(); ++i) {
         s.columns.push_back("v(" + c.node_names[i] + ")");
@@ -62,19 +64,43 @@ inline SaveList default_save_list(const Circuit& c) {
         s.columns.push_back("i(" + c.devices[di]->name() + ")");
         s.branches.push_back(c.devices[di]->branch());
     }
+    // Terminal-current probes: devices without a branch row that can still
+    // evaluate their current at a solution (the diode - the i(D1) column a
+    // plot or an LED glow wants, which MNA never carries as an unknown).
+    // Opt-out for .ac, whose columns are the re()/im() pairs of the
+    // small-signal system a DC probe cannot answer.
+    if (with_probes) {
+        for (std::size_t di = 0; di < c.devices.size(); ++di) {
+            if (!c.devices[di]->has_branch() && c.devices[di]->probes_current()) {
+                s.columns.push_back("i(" + c.devices[di]->name() + ")");
+                s.probes.push_back(di);
+            }
+        }
+    }
     return s;
 }
 
 // Appends one sample of every save-list signal from the solution vector
-// into the table's columns (columnar fill, §7.8 rev).
+// into the table's columns (columnar fill, §7.8 rev). `state` (when not
+// null) lends each probe device its bound parameter slice - the same
+// convention update_state's `params` follows.
 inline void append_row_columns(const Circuit& c, const SaveList& s, Table& t,
-                        const std::vector<double>& x) {
+                        const std::vector<double>& x,
+                        const RunState* state = nullptr) {
     std::size_t k = 0;
     for (const std::size_t n : s.nodes) {
         t.signals[k++].data.push_back(x[n]);
     }
     for (const std::size_t b : s.branches) {
         t.signals[k++].data.push_back(x[c.node_count() + b]);
+    }
+    for (const std::size_t di : s.probes) {
+        const double* par = nullptr;
+        if (state != nullptr && di < c.param_span.size()) {
+            par = state->params().data() + c.param_span[di].begin;
+        }
+        t.signals[k++].data.push_back(
+            c.devices[di]->terminal_current(x, c.node_count(), par));
     }
 }
 

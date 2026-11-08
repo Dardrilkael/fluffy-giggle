@@ -260,6 +260,48 @@ const std::vector<SymbolDef>& table() {
                       line(1.0, -1.0, 1.0, 1.0), line(1.0, 0.0, 3.0, 0.0)};
             return s;
         }(),
+        // LED: a diode that reports its light. The SPICE identity is the
+        // diode's (letter D, model + area, ref Dn) - the deck cannot tell
+        // them apart. The `color` Choice is the editor's alone: spec'd (so
+        // ERC's unused_param never fires and the property grid offers the
+        // list) but NOT emitted (the deck stays a plain diode card), and
+        // the canvas paints the glow in it. The emission arrows ride the
+        // same 45-degree up-right the convention draws them at; the
+        // arrowheads are hand-placed triangles in the BJT's own style.
+        [] {
+            SymbolDef s;
+            s.key = "led";
+            s.name = "LED (light emitting)";
+            s.spice_letter = 'D';
+            s.ref_prefix = "D";
+            s.pins = {PinDef{.name = "a", .dx = -3.0, .dy = 0.0, .dir = 180},
+                      PinDef{.name = "k", .dx = 3.0, .dy = 0.0, .dir = 0}};
+            s.emit = {ParamEmit{.key = "model"}, ParamEmit{.key = "area"}};
+            s.needs_value = false;
+            s.needs_model = true;
+            s.params = {
+                spec(ParamSpec::Type::Text, "model", "Model"),
+                spec(ParamSpec::Type::Number, "area", "Area"),
+                spec(ParamSpec::Type::Choice, "color", "Color", "red")};
+            s.params.back().choices = {"red", "yellow", "green",
+                                       "blue", "white", "orange"};
+            s.draw = {// the diode body: leads, triangle, bar
+                      line(-3.0, 0.0, -1.0, 0.0),
+                      poly({Pos{-1.0, 1.0}, Pos{-1.0, -1.0}, Pos{1.0, 0.0},
+                            Pos{-1.0, 1.0}}),
+                      line(1.0, -1.0, 1.0, 1.0), line(1.0, 0.0, 3.0, 0.0),
+                      // the light: two emission arrows at 45 degrees
+                      // up-right, clear of the triangle's upper edge and
+                      // the bar (hand-placed in the BJT arrowhead's style:
+                      // head length 0.34, half-width 0.15)
+                      line(0.35, 0.55, 0.81, 1.01),
+                      polyfill({Pos{1.05, 1.25}, Pos{0.704, 1.116},
+                                Pos{0.916, 0.904}}),
+                      line(0.05, 0.90, 0.41, 1.26),
+                      polyfill({Pos{0.65, 1.50}, Pos{0.304, 1.366},
+                                Pos{0.516, 1.154}})};
+            return s;
+        }(),
         // BJTs: C B E pin order, y-up (collector on top).
         bjt("npn", "NPN transistor", false),
         bjt("pnp", "PNP transistor", true),

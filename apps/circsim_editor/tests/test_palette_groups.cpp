@@ -33,7 +33,7 @@ TEST_CASE("the built-in symbols land in the fixed group order") {
     CHECK(keys_of(groups[1]) == std::vector<std::string>{"v", "i"});
     CHECK(groups[2].name == "Semiconductors");
     CHECK(keys_of(groups[2]) ==
-          std::vector<std::string>{"d", "npn", "pnp", "nmos", "pmos"});
+          std::vector<std::string>{"d", "led", "npn", "pnp", "nmos", "pmos"});
     CHECK(groups[3].name == "Power");
     CHECK(keys_of(groups[3]) == std::vector<std::string>{"gnd", "vcc"});
 }

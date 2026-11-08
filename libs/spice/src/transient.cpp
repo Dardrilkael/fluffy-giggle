@@ -116,7 +116,7 @@ struct TranMarch::Impl {
 
     void push_row(double at) {
         table.sweep_axes[0].push_back(at);
-        append_row_columns(circuit, save, table, x);
+        append_row_columns(circuit, save, table, x, &state);
     }
 
     ws::core::Status validate_card();

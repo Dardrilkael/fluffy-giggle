@@ -1947,6 +1947,98 @@ TEST_CASE("M3 diode: .dc sweep tracks the closed form at every point") {
     }
 }
 
+TEST_CASE("M3 diode: the i(D1) probe column rides every real analysis") {
+    // §7.8's terminal-current probe: the save list grows an "i(D1)" column
+    // the device itself evaluates (MNA never carries a diode branch). In a
+    // series loop it must agree with the source's own branch current to
+    // solver precision, Lambert-W to closed form, and survive the Rs>0
+    // mid-node path.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;
+    SUBCASE(".op: Lambert-W, and the series loop's own i(V1)") {
+        const auto run = run_text(
+            "diode probe op\n"
+            "V1 in 0 DC 5\n"
+            "R1 in out 1k\n"
+            "D1 out 0 dx\n"
+            ".model dx D(Is=1e-14 N=1)\n"
+            ".op\n",
+            nullptr, settings);
+        REQUIRE(run);
+        const Table& t = run->results.tables[0];
+        const auto i_d1 = t.signal("i(D1)");
+        REQUIRE(i_d1.size() == 1);
+        const auto [ref_vd, ref_i] = diode_series_r_op(5.0, 1000.0, 1e-14, 1.0);
+        CHECK(i_d1[0] == doctest::Approx(ref_i).epsilon(1e-7));
+        // One loop, one current: the probe and the source branch agree.
+        CHECK(i_d1[0] == doctest::Approx(-t.signal("i(V1)")[0]).epsilon(1e-9));
+    }
+    SUBCASE(".op: Rs > 0 reads the series element, not the junction") {
+        // With Rs=5 the honest probe is (v(a)-v(mid))*area/Rs - and the
+        // loop invariant still pins it to i(V1).
+        const auto run = run_text(
+            "diode probe rs\n"
+            "V1 in 0 DC 5\n"
+            "R1 in out 1k\n"
+            "D1 out 0 dx\n"
+            ".model dx D(Is=1e-14 N=1 Rs=5)\n"
+            ".op\n",
+            nullptr, settings);
+        REQUIRE(run);
+        const Table& t = run->results.tables[0];
+        const auto i_d1 = t.signal("i(D1)");
+        REQUIRE(i_d1.size() == 1);
+        CHECK(i_d1[0] > 0.0);  // forward conduction, anode -> cathode
+        CHECK(i_d1[0] == doctest::Approx(-t.signal("i(V1)")[0]).epsilon(1e-9));
+    }
+    SUBCASE(".dc and .tran carry the column per sample") {
+        const auto run = run_text(
+            "diode probe sweep\n"
+            "V1 in 0 DC 0\n"
+            "R1 in out 1k\n"
+            "D1 out 0 dx\n"
+            ".model dx D(Is=1e-14 N=1)\n"
+            ".dc V1 0.4 1.0 0.2\n"
+            ".tran 1m 3m\n",
+            nullptr, settings);
+        REQUIRE(run);
+        REQUIRE(run->results.tables.size() == 2);
+        const Table& dc = run->results.tables[0];
+        REQUIRE(dc.signal("i(D1)").size() == 4);
+        for (std::size_t k = 0; k < 4; ++k) {
+            const double vs = 0.4 + 0.2 * static_cast<double>(k);
+            const auto [ref_vd, ref_i] = diode_series_r_op(vs, 1000.0, 1e-14, 1.0);
+            if (ref_i > 1e-9) {
+                CHECK(dc.signal("i(D1)")[k] ==
+                      doctest::Approx(ref_i).epsilon(1e-6));
+            }
+        }
+        const Table& tran = run->results.tables[1];
+        const auto i_d1 = tran.signal("i(D1)");
+        REQUIRE(i_d1.size() == tran.row_count());
+        REQUIRE(i_d1.size() > 2);
+        for (const double v : i_d1) {
+            CHECK(std::isfinite(v));
+        }
+        // A DC-biased loop: every sample is the same operating point.
+        CHECK(i_d1.front() == doctest::Approx(i_d1.back()).epsilon(1e-3));
+    }
+    SUBCASE(".ac stays re()/im() over the small-signal save list") {
+        const auto run = run_text(
+            "diode probe ac\n"
+            "V1 in 0 DC 5 AC 1\n"
+            "R1 in out 1k\n"
+            "D1 out 0 dx\n"
+            ".model dx D(Is=1e-14 N=1)\n"
+            ".ac dec 2 1k 10k\n");
+        REQUIRE(run);
+        const Table& t = run->results.tables[0];
+        CHECK(t.signal("i(D1)").empty());  // the probe opts out of .ac
+        CHECK(!t.signal("re(v(out))").empty());
+    }
+}
+
 TEST_CASE("M3 diode: pnjlim prevents exp() overflow on a stiff bias") {
     // Without pnjlim, the first Newton iterate from a cold start (x=0)
     // puts Vd ≈ Vs (the diode looks like a near-open at Vd=0, Gd ≈ 4e-13 S).

@@ -118,8 +118,24 @@ CMakeLists only wire ws libraries together.
   (stage 18: pins a wire's path picked up mid-route, wire vertices
   T-riding another wire - the same dot the authored junctions wear,
   Editor::auto_junction_dots caching one build_nets per edit against
-  Schematic::version(), never per frame); the
-  panel's canvas transform composes the exact inverse of its w2s
+  Schematic::version(), never per frame - the dots now carry each
+  join's net id and Editor::net_cache shares that one build with the
+  wire coloring); the canvas is INTERACTIVE after a run: the wire-color
+  mode toggle (top-right, canvas-drawn) picks Plain / Nets / Voltage -
+  Nets hashes each net's NAME onto the shared series wheel (the same
+  eight the Results plot wears; ground is a fixed slate), Voltage maps
+  the last run's node voltages through a sqrt-spread blue-gray-red
+  ramp with a legend (and honest fallbacks: no reading, no run, a
+  stale run - the plain ink, never a false zero), and the LED symbol
+  glows: its i(<element>) probe column (ws::spice's terminal-current
+  save) maps through a 20 mA-full sqrt brightness into three halo
+  discs under the strokes in the part's `color` param, eased ~120 ms
+  so a light reads as a light; a .tran run grows a transport strip
+  (bottom center: play/pause, a scrub bar, the format_eng time
+  readout) whose playhead the voltages and glows follow - a delivery
+  parks it at the run's end (the settled state), one press sweeps the
+  whole transient across the canvas in ~4 s, looping;
+  the panel's canvas transform composes the exact inverse of its w2s
   (viewport center, zoom with the y flip, -center), so the world
   lands on the same pixels the grid marks at every pan/zoom; the
   Palette over `symbols()` with fitted mini previews and the fuzzy

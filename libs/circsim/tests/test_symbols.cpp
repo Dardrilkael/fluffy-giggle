@@ -4,6 +4,7 @@
 // through a library-defined symbol.
 
 #include <cmath>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -223,12 +224,59 @@ TEST_CASE("built-in symbols carry stage-2 specs and draw") {
     CHECK(label_above);
 }
 
+TEST_CASE("the LED is a diode the editor can light") {
+    // The built-in LED: the diode's SPICE identity (letter D, model +
+    // area, ref Dn) plus the display-only `color` Choice the canvas glow
+    // reads - spec'd so ERC never flags it, absent from the emit list so
+    // the deck stays a plain diode card.
+    const SymbolDef* led = ws::circsim::find_symbol("led");
+    REQUIRE(led != nullptr);
+    CHECK(led->spice_letter == 'D');
+    CHECK(led->ref_prefix == "D");
+    CHECK(led->needs_model);
+    CHECK(!led->needs_value);
+    REQUIRE(led->pins.size() == 2);
+    CHECK(led->pins[0].name == "a");
+    CHECK(led->pins[1].name == "k");
+
+    // The params: model, area, then the color choice with its list.
+    REQUIRE(led->params.size() == 3);
+    CHECK(led->params[0].key == "model");
+    CHECK(led->params[2].key == "color");
+    CHECK(led->params[2].type == ParamSpec::Type::Choice);
+    CHECK(led->params[2].default_value == "red");
+    REQUIRE(led->params[2].choices.size() == 6);
+    CHECK(led->params[2].choices[0] == "red");
+    CHECK(led->params[2].choices[5] == "orange");
+
+    // The emit tail carries model + area only - the color never decks.
+    REQUIRE(led->emit.size() == 2);
+    CHECK(led->emit[0].key == "model");
+    CHECK(led->emit[1].key == "area");
+
+    // The picture: the diode body plus two filled emission arrowheads.
+    std::size_t fills = 0;
+    for (const DrawPrim& d : led->draw) {
+        if (d.kind == DrawPrim::Kind::PolyFill) {
+            ++fills;
+        }
+    }
+    CHECK(fills == 2);
+    const Bounds b = ws::circsim::symbol_bounds(*led);
+    CHECK(b == Bounds{-3.0, -1.0, 3.0, 1.5});  // the arrows reach past the body
+
+    // default_params prefills the color; a NEW part carries it without
+    // ever reaching the deck.
+    const std::map<std::string, std::string> dp =
+        ws::circsim::default_params(*led);
+    CHECK(dp.at("color") == "red");
+}
+
 TEST_CASE("symbol_bounds covers pins and primitives") {
     const SymbolDef* r = ws::circsim::find_symbol("r");
     REQUIRE(r != nullptr);
     const Bounds rb = ws::circsim::symbol_bounds(*r);
     CHECK(rb == Bounds{-3.0, -0.6, 3.0, 0.6});
-
     const SymbolDef* l = ws::circsim::find_symbol("l");
     REQUIRE(l != nullptr);
     const Bounds lb = ws::circsim::symbol_bounds(*l);

@@ -1,0 +1,190 @@
+{
+    "format": "circsim",
+    "version": 1,
+    "grid": 1.0,
+    "next_id": 11,
+    "parts": [
+        {
+            "id": 1,
+            "symbol": "v",
+            "ref": "V1",
+            "value": "0",
+            "pos": [
+                0.0,
+                -4.0
+            ],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "wave": "SIN(0 5 1)"
+            }
+        },
+        {
+            "id": 2,
+            "symbol": "r",
+            "ref": "R1",
+            "value": "220",
+            "pos": [
+                6.0,
+                0.0
+            ],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 3,
+            "symbol": "led",
+            "ref": "D1",
+            "value": "",
+            "pos": [
+                14.0,
+                0.0
+            ],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "LED_RED"
+            }
+        },
+        {
+            "id": 4,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [
+                7.0,
+                -6.0
+            ],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 10,
+            "symbol": "led",
+            "ref": "D2",
+            "value": "",
+            "pos": [
+                21.0,
+                -4.0
+            ],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "color": "red"
+            }
+        }
+    ],
+    "junctions": [],
+    "wires": [
+        {
+            "id": 5,
+            "a": {
+                "pin": {
+                    "part": 1,
+                    "pin": 0
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 2,
+                    "pin": 0
+                }
+            },
+            "waypoints": [
+                [
+                    -3.0,
+                    0.0
+                ]
+            ],
+            "ortho": true
+        },
+        {
+            "id": 6,
+            "a": {
+                "pin": {
+                    "part": 2,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 3,
+                    "pin": 0
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 7,
+            "a": {
+                "pin": {
+                    "part": 3,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 4,
+                    "pin": 0
+                }
+            },
+            "waypoints": [
+                [
+                    17.0,
+                    -6.0
+                ]
+            ],
+            "ortho": true
+        },
+        {
+            "id": 8,
+            "a": {
+                "pin": {
+                    "part": 4,
+                    "pin": 0
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 1,
+                    "pin": 1
+                }
+            },
+            "waypoints": [
+                [
+                    3.0,
+                    -6.0
+                ]
+            ],
+            "ortho": true
+        }
+    ],
+    "labels": [
+        {
+            "id": 9,
+            "pos": [
+                10.0,
+                0.0
+            ],
+            "name": "led"
+        }
+    ],
+    "analysis": {
+        "entries": [
+            {
+                "tran": {
+                    "tstep": 0.001,
+                    "tstop": 5.0
+                }
+            }
+        ]
+    },
+    "directives": ".model LED_RED D(Is=1.6e-14 N=2.5 Rs=0.5)\n",
+    "view": {
+        "zoom": 37.12636081575672,
+        "center": [
+            14.294593341896428,
+            -2.864651326124597
+        ]
+    }
+}

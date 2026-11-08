@@ -352,6 +352,15 @@ struct ResultsCache {
     bool has = false;
     std::uint64_t version = 0;           // the schematic version it ran against
     ws::spice::RunOutput run;            // tables + measurements
+    // The run's OWN net build and export back-map (deliver_run moves the
+    // outcome's originals here; the Problems cache holds a copy for its
+    // locate seam, and an ERC pass may replace that copy without ever
+    // touching these). The canvas's voltage coloring and the LED glow
+    // read THEM: node_net answers net id -> node token (the v(name)
+    // column), element_part answers part id -> deck element (the i(name)
+    // probe column).
+    ws::circsim::NetList nets;
+    ws::circsim::SpiceExport map;
     std::size_t table = 0;               // the selected table
     std::size_t visible_for = kNoTable;  // the table `visible` belongs to
     std::vector<std::uint8_t> visible;   // per-signal flags of that table
@@ -378,6 +387,31 @@ struct FieldBuf {
     std::string shadow;
     std::uint64_t stamp = 0;
     bool combo_open = false;  // the Choice rows' dropdown state
+};
+
+// --- the interactive canvas: how the run paints back -------------------------
+
+// The wires' paint mode. Plain is the classic single-ink look; Nets
+// gives every net its own wheel color (the drawing reads back the
+// connectivity - which pins share a net is visible at a glance);
+// Voltage rides the LAST run's node voltages as a blue-gray-red ramp
+// (needs results; unknown nets fall back to the plain ink). Editor view
+// state, not document state: it survives a document switch like the
+// palette's search does, because "how this user reads a canvas" is the
+// same question in the next schematic.
+enum class WireColorMode : std::uint8_t { Plain, Nets, Voltage };
+
+// The .tran playback: the transport strip's playhead, in SECONDS. A
+// paused canvas shows the sample at playback.t (a delivery parks it at
+// the run's END - the settled state, what an .op reader means by "the
+// answer"); playing sweeps t across the table's window at a pace that
+// fits the whole run into ~4 s of wall clock, looping. The voltage
+// coloring and the LED glow both read the playhead's sample, so a
+// playing transient animates the canvas.
+struct Playback {
+    static constexpr double kLoopSeconds = 4.0;  // wall clock per sweep
+    bool playing = false;
+    double t = 0.0;
 };
 
 // --- the editor ----------------------------------------------------------------
@@ -425,6 +459,13 @@ struct Editor {
     std::vector<std::string> palette_recent;
     Selection sel;
 
+    // The interactive canvas's view state: the wire paint mode and the
+    // .tran playback (see WireColorMode / Playback above). The
+    // transport scrub's drag arm rides beside the playback - a scrub in
+    // flight owns the pointer the way the pan drag does.
+    WireColorMode wire_colors = WireColorMode::Nets;
+    Playback playback;
+    bool transport_scrub = false;
     // The move-drag (press to release). `live` writes the position
     // directly (no undo) while the pointer holds; the command lands at
     // release with the captured from/to.
@@ -489,12 +530,22 @@ struct Editor {
     NetlistCache netlist;
     ResultsCache results;
 
-    // auto_junction_dots' cache (stage 18): the positions themselves,
-    // the schematic version they were built against, and whether a
-    // build ever ran (a fresh Editor starts invalid, not version 0).
-    std::vector<Pos> join_dots_;
+    // auto_junction_dots' cache (stage 18): the positions themselves
+    // paired with the net each join landed on (the dots wear the net's
+    // color in Nets/Voltage mode), the schematic version they were built
+    // against, and whether a build ever ran (a fresh Editor starts
+    // invalid, not version 0). The net build the dots came from is the
+    // net_cache below - one build_nets per edit feeds both.
+    std::vector<std::pair<Pos, std::uint32_t>> join_dots_;
     std::uint64_t joins_version_ = 0;
     bool joins_valid_ = false;
+
+    // The canvas's own net build: one build_nets per edit (the same seam
+    // ERC and the export read), cached against the schematic version.
+    // The wire coloring and the auto-junction dots both read it.
+    ws::circsim::NetList nets_cache_;
+    std::uint64_t nets_version_ = 0;
+    bool nets_valid_ = false;
 
     // part_bounds cache: per-part world AABBs keyed by part id,
     // invalidated when the schematic version changes.
@@ -780,8 +831,31 @@ struct Editor {
     // The canvas' auto-junction dots (stage 18): the silent joins the
     // net rules make - pins a wire's path picked up, vertices T-riding
     // another wire - cached against the schematic version, one rebuild
-    // per edit, not per frame.
-    [[nodiscard]] const std::vector<Pos>& auto_junction_dots();
+    // per edit, not per frame. Each dot pairs with the NET it landed on
+    // (the id net_cache answers), so the canvas can paint it in the
+    // net's color.
+    [[nodiscard]] const std::vector<std::pair<Pos, std::uint32_t>>&
+    auto_junction_dots();
+
+    // The canvas's net build (the auto-junction dots' own seam, shared):
+    // one build_nets per edit, cached against the schematic version.
+    // The wire coloring reads it; ERC and the export keep their own
+    // builds (the same millisecond work, independent staleness).
+    [[nodiscard]] const ws::circsim::NetList& net_cache();
+
+    // The canvas's .tran table: the Results panel's selected table when
+    // it IS a time sweep, else the run's first - what the transport
+    // strip scrubs and the playback animates. Null when the run has no
+    // transient (or no run at all).
+    [[nodiscard]] const ws::spice::Table* canvas_tran_table() const;
+
+    // The table's sample the canvas should show: the playback playhead
+    // resolved onto the time axis (a .tran axis is strictly increasing;
+    // the LAST sample at or before t, clamped to the ends). For a
+    // non-time table the answer is its last row - the sweep's end, the
+    // state an .op reader means by "the answer".
+    [[nodiscard]] static std::size_t shown_sample(
+        const ws::spice::Table& t, double playhead);
 
     // Clear every per-document surface (the app calls this when the
     // active document changes).
@@ -809,5 +883,11 @@ void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
                  Pos pos, int rot, bool mirror,
                  const canvas::Paint& body, std::uint32_t text_color,
                  const ws::ui::r2d::Font* font);
+
+// The data-color wheel every colored series in the app shares (i mod N,
+// the scope's rule): the Results plot's signals and the canvas's per-NET
+// wire coloring both ride it, so a net and its waveform can never look
+// like strangers. Pure data - no canvas, no theme.
+[[nodiscard]] std::uint32_t series_color(std::size_t i);
 
 }  // namespace editor

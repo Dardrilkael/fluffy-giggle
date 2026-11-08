@@ -1,0 +1,349 @@
+{
+    "format": "circsim",
+    "version": 1,
+    "grid": 1.0,
+    "next_id": 22,
+    "parts": [
+        {
+            "id": 1,
+            "symbol": "v",
+            "ref": "V1",
+            "value": "5",
+            "pos": [
+                0.0,
+                -3.0
+            ],
+            "rot": 270,
+            "mirror": false,
+            "params": {
+                "wave": "PULSE(0 5 5m 5m 5m 20m 40m)"
+            }
+        },
+        {
+            "id": 2,
+            "symbol": "r",
+            "ref": "R1",
+            "value": "220",
+            "pos": [
+                5.0,
+                10.0
+            ],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 3,
+            "symbol": "r",
+            "ref": "R2",
+            "value": "680",
+            "pos": [
+                5.0,
+                5.0
+            ],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 4,
+            "symbol": "r",
+            "ref": "R3",
+            "value": "2.2k",
+            "pos": [
+                5.0,
+                0.0
+            ],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 5,
+            "symbol": "led",
+            "ref": "D1",
+            "value": "",
+            "pos": [
+                12.0,
+                10.0
+            ],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "led",
+                "color": "red"
+            }
+        },
+        {
+            "id": 6,
+            "symbol": "led",
+            "ref": "D2",
+            "value": "",
+            "pos": [
+                12.0,
+                5.0
+            ],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "led",
+                "color": "yellow"
+            }
+        },
+        {
+            "id": 7,
+            "symbol": "led",
+            "ref": "D3",
+            "value": "",
+            "pos": [
+                12.0,
+                0.0
+            ],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "led",
+                "color": "green"
+            }
+        },
+        {
+            "id": 8,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [
+                0.0,
+                -9.0
+            ],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 9,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [
+                15.0,
+                8.0
+            ],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 10,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [
+                15.0,
+                3.0
+            ],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 11,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [
+                15.0,
+                -2.0
+            ],
+            "rot": 0,
+            "mirror": false
+        }
+    ],
+    "junctions": [],
+    "wires": [
+        {
+            "id": 12,
+            "a": {
+                "pin": {
+                    "part": 1,
+                    "pin": 0
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 4,
+                    "pin": 0
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 13,
+            "a": {
+                "pin": {
+                    "part": 1,
+                    "pin": 0
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 3,
+                    "pin": 0
+                }
+            },
+            "waypoints": [
+                [
+                    0.0,
+                    5.0
+                ]
+            ],
+            "ortho": true
+        },
+        {
+            "id": 14,
+            "a": {
+                "pin": {
+                    "part": 1,
+                    "pin": 0
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 2,
+                    "pin": 0
+                }
+            },
+            "waypoints": [
+                [
+                    0.0,
+                    10.0
+                ]
+            ],
+            "ortho": true
+        },
+        {
+            "id": 15,
+            "a": {
+                "pin": {
+                    "part": 2,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 5,
+                    "pin": 0
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 16,
+            "a": {
+                "pin": {
+                    "part": 3,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 6,
+                    "pin": 0
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 17,
+            "a": {
+                "pin": {
+                    "part": 4,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 7,
+                    "pin": 0
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 18,
+            "a": {
+                "pin": {
+                    "part": 5,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 9,
+                    "pin": 0
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 19,
+            "a": {
+                "pin": {
+                    "part": 6,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 10,
+                    "pin": 0
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 20,
+            "a": {
+                "pin": {
+                    "part": 7,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 11,
+                    "pin": 0
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 21,
+            "a": {
+                "pin": {
+                    "part": 1,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 8,
+                    "pin": 0
+                }
+            },
+            "ortho": true
+        }
+    ],
+    "labels": [],
+    "analysis": {
+        "entries": [
+            {
+                "tran": {
+                    "tstep": 0.0002,
+                    "tstop": 0.1
+                }
+            }
+        ]
+    },
+    "directives": ".model led D(Is=1e-16 N=2)",
+    "view": {
+        "zoom": 1.0,
+        "center": [
+            0.0,
+            0.0
+        ]
+    }
+}

@@ -357,6 +357,25 @@ public:
         return {0.0, 0.0};
     }
 
+    // --- terminal-current probes (§7.8: the i(name) columns a device can
+    // answer that MNA does not carry as an unknown) --------------------------
+    //
+    // A device WITHOUT a branch row can still know its terminal current at
+    // a solution: the diode evaluates Shockley directly from its terminal
+    // voltages. probes_current() says the save list should carry an
+    // "i(<name>)" column for this device; terminal_current() evaluates it
+    // against the ACCEPTED solution `x` (node voltages then branch
+    // unknowns; ground is kGround). `params` is this device's bound
+    // parameter slice (the update_state convention), null when the caller
+    // has none bound. Sign convention: positive current flows from the
+    // first terminal to the second (the diode: anode -> cathode).
+    [[nodiscard]] virtual bool probes_current() const { return false; }
+    [[nodiscard]] virtual double terminal_current(
+        const std::vector<double>& /*x*/, std::size_t /*node_count*/,
+        const double* /*params*/) const {
+        return 0.0;
+    }
+
     // A load-path failure channel (§8.5, M4d): loads are const and void,
     // so a nonlinear device whose evaluation left its domain (a behavioral
     // expression at sqrt(-1), a division by zero) cannot report it inline.

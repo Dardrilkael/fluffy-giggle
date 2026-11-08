@@ -18,8 +18,10 @@
 #include "../src/editor.hpp"
 
 #include <cmath>
+#include <string>
 #include <vector>
 
+#include <ws/circsim/export.hpp>
 #include <ws/circsim/model.hpp>
 #include <ws/input/input.hpp>
 #include <ws/settings/filesystem.hpp>
@@ -49,6 +51,10 @@ struct Bench {
     gui::GuiContext gui;
     canvas::CommandListCanvas clc;
     gui::Rect body{};  // the viewport the last draw adopted
+    // The theme the frames draw with - a copy the case may tune (the
+    // glow's ease test parks the motion switch, the way the app's own
+    // theme setting does).
+    gui::ChromeTheme theme = gui::kDefaultChrome;
 
     Bench() {
         ed.doc = &doc;
@@ -90,7 +96,6 @@ struct Bench {
         (void)layout.begin_panel(gui::Rect{0.0f, 0.0f, 640.0f, 520.0f},
                                  12.0f, 8.0f);
         body = layout.panel_content();
-        const gui::ChromeTheme theme = gui::kDefaultChrome;
         editor::draw_canvas_panel(ed, gui, layout, theme);
         layout.end_panel();
         gui.end_frame();
@@ -108,10 +113,19 @@ struct Bench {
             draw();
         }
         const ws::math::Vec2 sp = ed.view.w2s(world);
+        click_screen(sp.x, sp.y, button);
+    }
+
+    // One clicked frame at raw SCREEN coordinates - the overlays (the
+    // mode toggle, the transport) live there, not in the world.
+    void click_screen(float x, float y, int button = 0) {
+        if (!ed.view.valid()) {
+            draw();
+        }
         clc.cmds.clear();
         ws::input::InputFrame in{};
-        in.mouse_x = sp.x;
-        in.mouse_y = sp.y;
+        in.mouse_x = x;
+        in.mouse_y = y;
         in.mouse_present = true;
         in.mouse_pressed[button] = true;
         gui.begin_frame(in);
@@ -119,7 +133,6 @@ struct Bench {
         (void)layout.begin_panel(gui::Rect{0.0f, 0.0f, 640.0f, 520.0f},
                                  12.0f, 8.0f);
         body = layout.panel_content();
-        const gui::ChromeTheme theme = gui::kDefaultChrome;
         editor::draw_canvas_panel(ed, gui, layout, theme);
         layout.end_panel();
         gui.end_frame();
@@ -165,19 +178,12 @@ struct Bench {
     return nullptr;
 }
 
-// The junction fills: the frame's only fill_polygons (32 segments
-// each, uniformly sampled - the centroid is the circle's center).
-[[nodiscard]] std::vector<const canvas::CanvasCmd*> junction_cmds(
-    const Bench& b) {
-    std::vector<const canvas::CanvasCmd*> out;
-    for (const canvas::CanvasCmd& c : b.clc.cmds) {
-        if (c.kind == canvas::CanvasCmdKind::fill_polygon) {
-            out.push_back(&c);
-        }
-    }
-    return out;
-}
-
+// The junction fills: the circle rings whose CENTROIDS sit on the two
+// junctions' w2s answers. Matched by content, not by order or
+// exclusivity in the stream - the interactive canvas's overlays (the
+// mode toggle's active face, the transport) draw fills of their own,
+// so "the frame's only fill_polygons" stopped being the junctions'
+// signature the day the canvas grew chrome.
 [[nodiscard]] ws::math::Vec2 centroid(const canvas::CanvasCmd& c) {
     // The recorded ring closes itself (the last vertex repeats the
     // first); average the distinct vertices only, or the duplicate
@@ -193,6 +199,26 @@ struct Bench {
     }
     const float f = static_cast<float>(n);
     return {sum.x / f, sum.y / f};
+}
+
+[[nodiscard]] std::vector<const canvas::CanvasCmd*> junction_cmds(
+    const Bench& b) {
+    const EditorView& view = b.ed.view;
+    const ws::math::Vec2 want[2] = {view.w2s({1.0, 1.0}),
+                                    view.w2s({4.0, 1.0})};
+    std::vector<const canvas::CanvasCmd*> out;
+    for (const canvas::CanvasCmd& c : b.clc.cmds) {
+        if (c.kind != canvas::CanvasCmdKind::fill_polygon) {
+            continue;
+        }
+        for (const ws::math::Vec2& w : want) {
+            if (vec2_near(centroid(c), w, 1.0f)) {
+                out.push_back(&c);
+                break;
+            }
+        }
+    }
+    return out;
 }
 
 // The grid marks: every fill_rects corner the frame recorded.
@@ -960,6 +986,320 @@ TEST_CASE("push_place_* mints the id when the caller never set one") {
           b.doc.schem.parts().front().id);
     CHECK(b.doc.schem.parts().front().id !=
           b.doc.schem.labels().front().id);
+}
+
+// --- the interactive canvas: the run paints back -----------------------------
+
+namespace {
+
+// FNV-1a over a name, the wheel index net_color hashes with (the
+// mapping is the contract: a net's color is its name's wheel slot).
+[[nodiscard]] std::uint32_t fnv1a(const std::string& s) {
+    std::uint32_t h = 2166136261u;
+    for (const char c : s) {
+        h ^= static_cast<unsigned char>(c);
+        h *= 16777619u;
+    }
+    return h;
+}
+
+// The voltage ramp's reference (the spec the canvas paints): the same
+// blue-gray-red ladder, sqrt-spread, written out so a ramp change is a
+// deliberate flip of this test.
+[[nodiscard]] std::uint32_t ref_voltage_color(double v, double vmax) {
+    const double u = std::clamp(v / std::max(vmax, 1e-9), -1.0, 1.0);
+    const double a = std::sqrt(std::fabs(u));
+    const double base[3] = {122.0, 126.0, 134.0};
+    const double hot[3] = {255.0, 86.0, 60.0};
+    const double cold[3] = {86.0, 150.0, 255.0};
+    const double* toward = u >= 0.0 ? hot : cold;
+    std::uint8_t rgb[3];
+    for (int i = 0; i < 3; ++i) {
+        rgb[i] = static_cast<std::uint8_t>(
+            std::lround(base[i] + (toward[i] - base[i]) * a));
+    }
+    return ws::ui::r2d::rgba(rgb[0], rgb[1], rgb[2], 242);
+}
+
+// Delivers a run the way the app's deliver_run does (the Problems
+// cache's copies, the Results cache's originals, the transport parked
+// at the run's end) - the editor half, minus the panel opening.
+void deliver(Editor& ed, ws::circsim::RunOutcome outcome) {
+    const std::uint64_t v = ed.schem()->version();
+    ed.problems.nets = outcome.nets;
+    ed.problems.nets_valid = true;
+    ed.problems.map = outcome.map;
+    ed.problems.map_valid = true;
+    ed.refresh_problems(true, std::move(outcome.problems), "run", v);
+    if (!outcome.run.has_value()) {
+        return;
+    }
+    ed.results.has = true;
+    ed.results.version = v;
+    ed.results.run = std::move(*outcome.run);
+    ed.results.nets = std::move(outcome.nets);
+    ed.results.map = std::move(outcome.map);
+    ed.playback = editor::Playback{};
+    ed.transport_scrub = false;
+    if (const ws::spice::Table* tran = ed.canvas_tran_table();
+        tran != nullptr && !tran->axis(0).empty()) {
+        ed.playback.t = tran->axis(0).back();
+    }
+    ed.results.table = 0;
+    ed.results.visible_for = editor::ResultsCache::kNoTable;
+    ed.results.visible.clear();
+    ed.results.x_sorted_for = editor::ResultsCache::kNoTable;
+    ed.results.hover = -1;
+    ed.results.view = editor::PlotView{};
+    ed.results.view_for = editor::ResultsCache::kNoTable;
+    ed.results.gesture = editor::PlotGesture{};
+}
+
+// The frame's fills whose centroid is within `tol` of `at` (the glow
+// discs, the transport chrome - anything round drawn at a known spot).
+[[nodiscard]] std::vector<const canvas::CanvasCmd*> fills_near(
+    const Bench& b, ws::math::Vec2 at, float tol) {
+    std::vector<const canvas::CanvasCmd*> out;
+    for (const canvas::CanvasCmd& c : b.clc.cmds) {
+        if (c.kind == canvas::CanvasCmdKind::fill_polygon &&
+            vec2_near(centroid(c), at, tol)) {
+            out.push_back(&c);
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("wire colors: the mode picks the ink") {
+    SUBCASE("plain is the classic dim stroke") {
+        Bench b;
+        b.place_wire();
+        b.ed.wire_colors = editor::WireColorMode::Plain;
+        b.draw();
+        const canvas::CanvasCmd* wire = wire_cmd(b);
+        REQUIRE(wire != nullptr);
+        CHECK(wire->color ==
+              gui::dim(gui::kDefaultChrome.text, 0.85f));
+    }
+    SUBCASE("nets wears the wheel color of the net's name") {
+        Bench b;
+        b.place_wire();
+        b.ed.wire_colors = editor::WireColorMode::Nets;
+        b.draw();
+        const canvas::CanvasCmd* wire = wire_cmd(b);
+        REQUIRE(wire != nullptr);
+        REQUIRE(!b.doc.schem.wires().empty());
+        const ws::circsim::Net* n =
+            b.ed.net_cache().net_of_wire(
+                b.doc.schem.wires().front().id);
+        REQUIRE(n != nullptr);
+        CHECK(wire->color ==
+              editor::series_color(fnv1a(n->name)));
+    }
+    SUBCASE("voltage without a run falls back to the plain ink") {
+        Bench b;
+        b.place_wire();
+        b.ed.wire_colors = editor::WireColorMode::Voltage;
+        b.draw();
+        const canvas::CanvasCmd* wire = wire_cmd(b);
+        REQUIRE(wire != nullptr);
+        CHECK(wire->color ==
+              gui::dim(gui::kDefaultChrome.text, 0.85f));
+    }
+    SUBCASE("voltage with a run rides the node-voltage ramp") {
+        // The divider: 5 V at the source net, 2.5 V at "out", ground.
+        Bench b;
+        ws::circsim::Part* v = b.doc.schem.add_part(
+            ws::circsim::Part::make("v", "V1", "5", {0.0, -4.0}));
+        ws::circsim::Part* r1 = b.doc.schem.add_part(
+            ws::circsim::Part::make("r", "R1", "10k", {6.0, 0.0}));
+        ws::circsim::Part* r2 = b.doc.schem.add_part(
+            ws::circsim::Part::make("r", "R2", "10k", {14.0, 0.0}));
+        ws::circsim::Part* g = b.doc.schem.add_part(
+            ws::circsim::Part::make("gnd", "", "", {7.0, -6.0}));
+        b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+            ws::circsim::PinRef{v->id, 0}, ws::circsim::PinRef{r1->id, 0}));
+        b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+            ws::circsim::PinRef{r1->id, 1}, ws::circsim::PinRef{r2->id, 0}));
+        b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+            ws::circsim::PinRef{r2->id, 1}, ws::circsim::PinRef{g->id, 0}));
+        b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+            ws::circsim::PinRef{g->id, 0}, ws::circsim::PinRef{v->id, 1}));
+        ws::circsim::Label* out = b.doc.schem.add_label({});
+        out->pos = Pos{10.0, 0.0};
+        out->name = "out";
+        b.doc.schem.analysis.entries.push_back(ws::circsim::OpSpec{});
+        deliver(b.ed, ws::circsim::run_schematic(b.doc.schem));
+        REQUIRE(b.ed.results.has);
+
+        b.ed.wire_colors = editor::WireColorMode::Voltage;
+        b.draw();
+        // The source wire (N001, 5 V = the ramp's max) and the out wire
+        // (2.5 V): each wears the ramp's answer for its own net.
+        const ws::circsim::NetList& nets = b.ed.net_cache();
+        for (const ws::circsim::Wire& w : b.doc.schem.wires()) {
+            const ws::circsim::Net* n = nets.net_of_wire(w.id);
+            REQUIRE(n != nullptr);
+            // the recorded stroke of exactly this wire: match by the
+            // full path the wire resolves to
+            const std::vector<Pos> path = b.ed.wire_path(w);
+            REQUIRE(path.size() >= 2u);
+            const canvas::CanvasCmd* found = nullptr;
+            for (const canvas::CanvasCmd& cmd : b.clc.cmds) {
+                if (cmd.kind != canvas::CanvasCmdKind::stroke_polyline ||
+                    cmd.points.size() != path.size()) {
+                    continue;
+                }
+                bool ok = true;
+                for (std::size_t i = 0; i < path.size(); ++i) {
+                    if (!vec2_near(cmd.points[i],
+                                   b.ed.view.w2s(path[i]), 0.01f)) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (ok) {
+                    found = &cmd;
+                    break;
+                }
+            }
+            REQUIRE(found != nullptr);
+            if (n->is_ground) {
+                continue;  // ground never rides the ramp (no v(0) column)
+            }
+            const double volts =
+                n->name == "out"
+                    ? 2.5
+                    : 5.0;  // the divider's two named answers
+            CHECK(found->color == ref_voltage_color(volts, 5.0));
+        }
+    }
+    SUBCASE("the toggle buttons pick the mode") {
+        Bench b;
+        b.place_wire();
+        b.draw();  // adopt the viewport
+        const editor::ModeToggleLayout modes =
+            editor::mode_toggle_layout(b.body);
+        b.click_screen(modes.buttons[0].x + 3.0f,
+                       modes.buttons[0].y + 3.0f);
+        CHECK(b.ed.wire_colors == editor::WireColorMode::Plain);
+        b.click_screen(modes.buttons[2].x + 3.0f,
+                       modes.buttons[2].y + 3.0f);
+        CHECK(b.ed.wire_colors == editor::WireColorMode::Voltage);
+        b.click_screen(modes.buttons[1].x + 3.0f,
+                       modes.buttons[1].y + 3.0f);
+        CHECK(b.ed.wire_colors == editor::WireColorMode::Nets);
+    }
+}
+
+TEST_CASE("the LED glows with the run's current") {
+    Bench b;
+    b.theme.anim_enabled = false;  // snap: the eased path needs real dt
+    ws::circsim::Part* v = b.doc.schem.add_part(
+        ws::circsim::Part::make("v", "V1", "5", {0.0, -4.0}));
+    ws::circsim::Part* r = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "330", {6.0, 0.0}));
+    ws::circsim::Part* led = b.doc.schem.add_part(
+        ws::circsim::Part::make("led", "D1", "", {14.0, 0.0}));
+    led->params["model"] = "led";
+    led->params["color"] = "red";
+    ws::circsim::Part* g = b.doc.schem.add_part(
+        ws::circsim::Part::make("gnd", "", "", {7.0, -6.0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{v->id, 0}, ws::circsim::PinRef{r->id, 0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{r->id, 1}, ws::circsim::PinRef{led->id, 0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{led->id, 1}, ws::circsim::PinRef{g->id, 0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{g->id, 0}, ws::circsim::PinRef{v->id, 1}));
+    b.doc.schem.directives = ".model led D(Is=1e-16 N=2)";
+    b.doc.schem.analysis.entries.push_back(ws::circsim::OpSpec{});
+
+    // No run yet: the LED draws dark (its picture, no halo).
+    b.draw();
+    CHECK(fills_near(b, b.ed.view.w2s(led->pos), 3.0f).empty());
+
+    deliver(b.ed, ws::circsim::run_schematic(b.doc.schem));
+    REQUIRE(b.ed.results.has);
+    // ~10 mA through the probe column: a bright halo in the LED's red.
+    b.draw();
+    const std::vector<const canvas::CanvasCmd*> glow =
+        fills_near(b, b.ed.view.w2s(led->pos), 3.0f);
+    REQUIRE(glow.size() >= 4u);  // three halos + the die dot
+    for (const canvas::CanvasCmd* c : glow) {
+        const std::uint32_t col = c->color;
+        const std::uint32_t rr = (col >> 24) & 0xFFu;
+        const std::uint32_t gg = (col >> 16) & 0xFFu;
+        const std::uint32_t bb = (col >> 8) & 0xFFu;
+        CHECK(rr > gg);  // the hue is red-dominant
+        CHECK(rr > bb);
+        CHECK((col & 0xFFu) > 0u);  // and it glows (a nonzero alpha)
+    }
+}
+
+TEST_CASE("the transport scrubs and plays the transient") {
+    Bench b;
+    ws::circsim::Part* v = b.doc.schem.add_part(
+        ws::circsim::Part::make("v", "V1", "5", {0.0, -4.0}));
+    ws::circsim::Part* r = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "1k", {6.0, 0.0}));
+    ws::circsim::Part* g = b.doc.schem.add_part(
+        ws::circsim::Part::make("gnd", "", "", {7.0, -6.0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{v->id, 0}, ws::circsim::PinRef{r->id, 0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{r->id, 1}, ws::circsim::PinRef{g->id, 0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{g->id, 0}, ws::circsim::PinRef{v->id, 1}));
+    b.doc.schem.analysis.entries.push_back(ws::circsim::TranSpec{
+        .tstep = 1e-3, .tstop = 3e-3});
+    deliver(b.ed, ws::circsim::run_schematic(b.doc.schem));
+    const ws::spice::Table* tran = b.ed.canvas_tran_table();
+    REQUIRE(tran != nullptr);
+    REQUIRE(!tran->axis(0).empty());
+    const double t0 = tran->axis(0).front();
+    const double t1 = tran->axis(0).back();
+
+    // The delivery parks the playhead at the run's end - the settled
+    // state an .op reader means by "the answer".
+    CHECK(b.ed.playback.t == doctest::Approx(t1));
+    CHECK(!b.ed.playback.playing);
+
+    // The strip drew: chrome lands inside its own layout.
+    b.draw();
+    const editor::TransportStripLayout tl =
+        editor::transport_strip_layout(b.body);
+    const ws::math::Vec2 center{tl.strip.x + tl.strip.width * 0.5f,
+                                tl.strip.y + tl.strip.height * 0.5f};
+    CHECK(!fills_near(b, center, tl.strip.width * 0.5f).empty());
+
+    // Play: the button toggles, and a playhead at the end restarts.
+    b.click_screen(tl.button.x + tl.button.width * 0.5f,
+                   tl.button.y + tl.button.height * 0.5f);
+    CHECK(b.ed.playback.playing);
+    CHECK(b.ed.playback.t == doctest::Approx(t0));
+    b.click_screen(tl.button.x + tl.button.width * 0.5f,
+                   tl.button.y + tl.button.height * 0.5f);
+    CHECK(!b.ed.playback.playing);
+
+    // Scrub: a press at the bar's left end parks at the start, the
+    // right end at the finish (a pixel inside the bar is a hair inside
+    // the window - the assertion honors the fraction it clicked).
+    const double span = t1 - t0;
+    b.click_screen(tl.bar.x + 1.0f, tl.bar.y + tl.bar.height * 0.5f);
+    CHECK(b.ed.transport_scrub);
+    CHECK(b.ed.playback.t <= t0 + span * 0.01);
+    b.click_screen(tl.bar.x + tl.bar.width - 1.0f,
+                   tl.bar.y + tl.bar.height * 0.5f);
+    CHECK(b.ed.playback.t >= t1 - span * 0.01);
+
+    // The playhead resolves to the sample at or before it: the canvas's
+    // shown_sample is the axis walk the colors and glow ride.
+    CHECK(editor::Editor::shown_sample(*tran, t1) + 1u ==
+          tran->row_count());
+    CHECK(editor::Editor::shown_sample(*tran, t0) == 0u);
 }
 
 }  // namespace

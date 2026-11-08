@@ -17,6 +17,7 @@
 
 #include <doctest/doctest.h>
 
+#include <ws/circsim/erc.hpp>
 #include <ws/circsim/export.hpp>
 #include <ws/circsim/nets.hpp>
 
@@ -397,4 +398,54 @@ TEST_CASE("the export back-map answers for every element and node") {
     const ws::circsim::Net* ground = nets.nets.by_name("0");
     REQUIRE(ground != nullptr);
     CHECK(deck->node_net.at("0") == ground->id);
+}
+
+TEST_CASE("the LED decks as a diode and lights its probe current") {
+    // 5 V over 330 R into an LED (.model led D(Is=1e-16 N=2) - Vf ~1.7 V,
+    // so ~10 mA flows). The color param rides the part but never the
+    // deck; the run answers the i(D1) probe the canvas glow reads.
+    Schematic s;
+    Part* v = s.add_part(Part::make("v", "V1", "5", {0.0, -4.0}));
+    Part* r = s.add_part(Part::make("r", "R1", "330", {6.0, 0.0}));
+    Part* led = s.add_part(Part::make("led", "D1", "", {14.0, 0.0}));
+    led->params["model"] = "led";
+    led->params["color"] = "green";
+    Part* g = s.add_part(Part::make("gnd", "", "", {7.0, -6.0}));
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{v->id, 0}, PinRef{r->id, 0}));
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{r->id, 1}, PinRef{led->id, 0}));
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{led->id, 1}, PinRef{g->id, 0}));
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{g->id, 0}, PinRef{v->id, 1}));
+    s.directives = ".model led D(Is=1e-16 N=2)";
+    s.analysis.entries.push_back(OpSpec{});
+
+    // ERC is quiet: the color is spec'd (no unused_param), the model
+    // rides (no missing_model), the ref carries the D prefix.
+    const std::vector<ws::circsim::Diag> erc = ws::circsim::run_erc(s);
+    CHECK(erc.empty());
+
+    const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+    const auto deck = ws::circsim::export_deck(s, nets.nets);
+    REQUIRE(deck.has_value());
+    CHECK(deck->text ==
+          "circsim export\n"
+          ".model led D(Is=1e-16 N=2)\n"
+          "D1 N002 0 led\n"
+          "R1 N001 N002 330\n"
+          "V1 N001 0 5\n"
+          ".op\n"
+          ".end\n");
+    REQUIRE(deck->element_part.count("D1") != 0);
+    CHECK(deck->element_part.at("D1") == led->id);
+
+    const ws::circsim::RunOutcome out = ws::circsim::run_schematic(s);
+    REQUIRE(out.run.has_value());
+    REQUIRE(out.run->results.tables.size() == 1);
+    const ws::spice::Table& t = out.run->results.tables.front();
+    const auto i_led = t.signal("i(D1)");
+    REQUIRE(i_led.size() == 1);
+    // ~10 mA forward conduction (the 1.7 V drop over 330 R), and the
+    // loop invariant: the LED carries exactly what the source delivers.
+    CHECK(i_led[0] > 8e-3);
+    CHECK(i_led[0] < 12e-3);
+    CHECK(i_led[0] == doctest::Approx(-t.signal("i(V1)")[0]).epsilon(1e-9));
 }

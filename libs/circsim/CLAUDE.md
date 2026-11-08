@@ -48,8 +48,12 @@ fetched privately, which would duplicate a first-party capability.
   exactly like pins (`transform_pos` - the one shared transform, so the
   picture and the pins can never disagree). `symbol_bounds` is the
   conservative AABB (arcs bound by full circles, text by its anchor).
-- The built-in table (symbols.cpp, 12 keys) carries specs + draw for
-  every symbol; `find_symbol` is the BUILT-IN-ONLY lookup.
+- The built-in table (symbols.cpp, 13 keys) carries specs + draw for
+  every symbol; `find_symbol` is the BUILT-IN-ONLY lookup. The `led`
+  key is the diode plus a display-only `color` Choice (spec'd, never
+  emitted - the deck cannot tell an LED from a diode) and two emission
+  arrowheads; the editor's glow reads the color and ws::spice's i(Dn)
+  probe column for the intensity.
 - `SymbolLibrary` (library.hpp) is the effective table: built-ins at
   construction, `.csym` files layered on by `load_text` - same key (ci)
   REPLACES in place, later files win, every redefinition warns
@@ -211,7 +215,9 @@ fetched privately, which would duplicate a first-party capability.
   data), library.cpp, nets.cpp, format.cpp, erc.cpp, export.cpp,
   locate.cpp, plot.cpp, render.cpp (the stage-17a seam's flattening).
 - `examples/`: divider.csim, rc_step.csim (the smoke suite's decks),
-  tline.csym + tline_demo.csim (the stage-2 library demo: a T-line
+  led_demo.csim (three LEDs over 220/680/2.2k sharing a PULSE source -
+  the glow demo: 15/5/1.6 mA of red/yellow/green), tline.csym +
+  tline_demo.csim (the stage-2 library demo: a T-line
   symbol the built-ins do not ship, run with `-S tline.csym`).
 - `apps/circsim_cli`: run / erc / netlist / symbols subcommands, `-S
   <lib.csym>` (repeatable, later wins) on run/erc/netlist; exit codes

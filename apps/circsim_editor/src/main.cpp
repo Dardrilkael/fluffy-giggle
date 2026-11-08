@@ -1123,9 +1123,14 @@ class CircsimApp final : public ws::ui::App {
         ws::circsim::RunOutcome& outcome = *result;
         // The problems carry both halves of a failure: the net diags
         // plus the mapped run error (run_schematic's own contract).
-        editor_.problems.nets = std::move(outcome.nets);
+        // The run's net build and back-map go to BOTH caches: the
+        // Problems panel's locate seam reads its copy, and the
+        // Results cache keeps the originals the canvas paints from
+        // (wire voltages, the LED glow) - an ERC pass can replace the
+        // Problems copy without ever dimming the canvas.
+        editor_.problems.nets = outcome.nets;
         editor_.problems.nets_valid = true;
-        editor_.problems.map = std::move(outcome.map);
+        editor_.problems.map = outcome.map;
         editor_.problems.map_valid = true;
         const std::size_t count = outcome.problems.size();
         ws::core::warn("circsim: deliver_run problems={} run_has={}", count,
@@ -1146,6 +1151,20 @@ class CircsimApp final : public ws::ui::App {
             editor_.results.has = true;
             editor_.results.version = submitted_version;
             editor_.results.run = std::move(*outcome.run);
+            // The canvas's own half: the run's net build and back-map
+            // (the originals - the Problems cache holds its copy), and
+            // the transport parked at the run's END - the settled
+            // state, the reading an .op user means by "the answer".
+            // One press plays the whole transient across the canvas.
+            editor_.results.nets = std::move(outcome.nets);
+            editor_.results.map = std::move(outcome.map);
+            editor_.playback = editor::Playback{};
+            editor_.transport_scrub = false;
+            if (const ws::spice::Table* tran =
+                    editor_.canvas_tran_table();
+                tran != nullptr && !tran->axis(0).empty()) {
+                editor_.playback.t = tran->axis(0).back();
+            }
             editor_.results.table = 0;
             editor_.results.visible_for = editor::ResultsCache::kNoTable;
             editor_.results.visible.clear();

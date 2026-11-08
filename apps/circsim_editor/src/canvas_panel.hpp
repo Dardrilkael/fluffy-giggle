@@ -25,4 +25,28 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                        gui::LayoutCursor& layout,
                        const gui::ChromeTheme& theme);
 
+// --- the screen-space overlays' layout -------------------------------------
+// The draw and the pointer handler share these (one geometry, one
+// truth - a click can never land where a pixel was not), and the
+// headless suite asserts against them the same way.
+
+// The wire-color mode toggle: three square buttons at the body's
+// top-right, index-matched to WireColorMode's declaration order
+// (Plain, Nets, Voltage).
+struct ModeToggleLayout {
+    gui::Rect buttons[3];
+};
+[[nodiscard]] ModeToggleLayout mode_toggle_layout(const gui::Rect& body);
+
+// The .tran transport: the pill at the bottom center - the play/pause
+// button at its left, the scrub track filling the middle, the time
+// readout riding the right end.
+struct TransportStripLayout {
+    gui::Rect strip;   // the whole pill (the press target)
+    gui::Rect button;  // play/pause
+    gui::Rect bar;     // the scrub track
+};
+[[nodiscard]] TransportStripLayout transport_strip_layout(
+    const gui::Rect& body);
+
 }  // namespace editor

@@ -69,23 +69,11 @@ namespace canvas = ws::ui::canvas;
 using canvas::Paint;
 using canvas::Point;
 
-// The series palette: data colors, not chrome - a fixed wheel the
-// legend swatches and the polylines share (i mod N, like every scope).
-constexpr std::uint32_t kSeries[] = {
-    ws::ui::r2d::rgba(224, 90, 78),    // red
-    ws::ui::r2d::rgba(78, 161, 224),   // blue
-    ws::ui::r2d::rgba(88, 181, 92),    // green
-    ws::ui::r2d::rgba(211, 154, 42),   // amber
-    ws::ui::r2d::rgba(154, 111, 211),  // purple
-    ws::ui::r2d::rgba(78, 201, 192),   // teal
-    ws::ui::r2d::rgba(211, 90, 158),   // pink
-    ws::ui::r2d::rgba(143, 154, 78),   // olive
-};
-constexpr std::size_t kSeriesCount = sizeof kSeries / sizeof kSeries[0];
-
-[[nodiscard]] std::uint32_t series_color(std::size_t i) {
-    return kSeries[i % kSeriesCount];
-}
+// The series palette: data colors, not chrome - the shared wheel the
+// legend swatches, the polylines AND the canvas's net-colored wires all
+// ride (i mod N, like every scope) - editor.hpp's series_color, the
+// one definition the app owns.
+using editor::series_color;
 
 [[nodiscard]] const char* analysis_name(ws::spice::AnalysisKind kind) {
     switch (kind) {
