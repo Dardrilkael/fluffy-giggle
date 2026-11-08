@@ -43,6 +43,14 @@ struct StubDraws {
     // layers land in `rounded` too), so one counter stays the whole truth.
     std::uint32_t outlines = 0;       // draw_rounded_outline calls
     std::uint32_t shadows = 0;        // draw_shadow calls
+    // The line primitive, at its own seam: the tab strip's close x is
+    // two crossing strokes, so the counter is the whole mark (a
+    // closable strip of N tabs answers exactly 2N). The most recent
+    // stroke's thickness and color pin the mark's ink (muted at rest,
+    // full text under the pointer).
+    std::uint32_t lines = 0;          // draw_line calls (the 2D form)
+    float last_line_thickness = -1.0f;  // the most recent draw_line stroke
+    std::uint32_t last_line_color = 0u;
     // The most recent rounded-quad color (the P6 variant tests resolve
     // button faces through it - the stub keeps the last, the tests pin
     // the draw order they know).

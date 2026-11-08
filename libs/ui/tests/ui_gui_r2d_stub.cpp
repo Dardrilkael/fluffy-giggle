@@ -101,6 +101,22 @@ void draw_shadow(float, float, float, float, float, float blur,
     gui_test::stub.rounded += 4;
 }
 
+// The line seam, mirrored: the 2D form is the one the gui's own marks
+// ride (the tab strip's close x is two crossing strokes), so it keeps
+// the thickness and the color the tests reason about; the 3D form
+// counts itself for completeness, the same pair the quad stubs keep.
+void draw_line(float, float, float, float, float thickness,
+               std::uint32_t color) {
+    gui_test::stub.lines++;
+    gui_test::stub.last_line_thickness = thickness;
+    gui_test::stub.last_line_color = color;
+}
+
+void draw_line(float, float, float, float, float, float, float,
+               std::uint32_t) {
+    gui_test::stub.lines++;  // the 3D ribbon form, for completeness
+}
+
 // The tint bracket: the stub records the push/pop pairing and the
 // most recent tint so the motion suite can assert the overlay fades;
 // it does not multiply (the stub records counts and a few lasts, not

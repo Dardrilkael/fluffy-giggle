@@ -116,11 +116,18 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             active = i;
             changed = true;
         }
-        // The tab's own x: a ghost button in the circle - no resting
-        // face (the tab's face shows through), a round hover/press disc,
-        // and the muted x mark that goes full ink the moment the pointer
-        // arrives. Hit-tested as the circle it is drawn as, registered
-        // AFTER the tab so painter order and claim order agree.
+        // The tab's own x: a small round BUTTON, not a blank corner of
+        // the tab. The face is the radio's own spelling - a circle in
+        // the control face ladder (rest, the hover blend, press, the
+        // dead face), so the hitbox is visible as the round target it
+        // is before the pointer ever arrives. The mark is the
+        // multiplication x drawn as TWO CROSSING STROKES, geometry and
+        // not a glyph: the symbol table's own rule (a line-drawn mark
+        // reads identically headless, at any zoom, in any font - a
+        // glyph needs the face to carry it, and a fontless theme would
+        // leave the button an empty circle). Hit-tested as the circle
+        // it is drawn as, registered AFTER the tab so painter order
+        // and claim order agree.
         if (closable) {
             const WidgetId close_id = gui.ids().id("close");
             HitShape close_hit;
@@ -129,44 +136,30 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
                                                  disabled, close_hit,
                                                  ButtonStyle::ghost);
             fold_hover_t(gui, close_id, close, theme);
-            if (close.state == WidgetState::Pressed) {
-                r2d::draw_rounded_quad(close_rect.x, close_rect.y,
-                                       kCloseHit, kCloseHit,
-                                       kCloseHit * 0.5f,
-                                       theme.control_pressed);
-            } else if (close.state == WidgetState::Hovered) {
-                const float t =
-                    close.hover_t >= 0.0f ? close.hover_t : 1.0f;
-                r2d::draw_rounded_quad(
-                    close_rect.x, close_rect.y, kCloseHit, kCloseHit,
-                    kCloseHit * 0.5f,
-                    fade_alpha(theme.control_hovered, t));
-            }
-            // The mark: the multiplication x every close button wears,
-            // muted at rest so the label owns the tab and full ink under
-            // the pointer. The fontless v1 spelling rides the bar, like
-            // every label without a face.
-            char glyph[16];
-            const LabelFit mark = fit_text("\xC3\x97", -1.0f, theme, glyph,
-                                           sizeof(glyph));
-            if (mark.advance > 0.0f) {
-                const bool live = close.state == WidgetState::Hovered ||
-                                  close.state == WidgetState::Pressed;
-                const std::uint32_t ink =
-                    live ? theme.text : theme.text_muted;
-                const float mx =
-                    close_rect.x + (kCloseHit - mark.advance) * 0.5f;
-                if (theme.font != nullptr) {
-                    r2d::draw_text(mx, close_rect.y +
-                                           (kCloseHit -
-                                            theme.font->line_height()) *
-                                               0.5f,
-                                   mark.text, *theme.font, ink);
-                } else {
-                    r2d::draw_quad(mx, close_rect.y + kCloseHit * 0.5f - 2.0f,
-                                   mark.advance, 4.0f, ink);
-                }
-            }
+            // The round face, one draw for every state: control_face_of
+            // walks the ladder (the rest face, the P4 hover blend, the
+            // press face, the disabled face) the way the checkbox and
+            // the radio resolve theirs.
+            r2d::draw_rounded_quad(close_rect.x, close_rect.y, kCloseHit,
+                                   kCloseHit, kCloseHit * 0.5f,
+                                   control_face_of(close, theme));
+            // The x mark: two strokes corner to corner of an inset
+            // square, muted at rest so the label owns the tab and full
+            // ink under the pointer; a dead strip dims through the one
+            // helper like every widget's chrome.
+            const float cx = close_rect.center_x();
+            const float cy = close_rect.center_y();
+            constexpr float kArm = kCloseHit * 0.29f;
+            constexpr float kMark = 1.6f;
+            const bool live = close.state == WidgetState::Hovered ||
+                              close.state == WidgetState::Pressed;
+            const std::uint32_t ink =
+                dim(live ? theme.text : theme.text_muted,
+                    dim_factor(close.state, theme));
+            r2d::draw_line(cx - kArm, cy - kArm, cx + kArm, cy + kArm, kMark,
+                           ink);
+            r2d::draw_line(cx - kArm, cy + kArm, cx + kArm, cy - kArm, kMark,
+                           ink);
             // The keyboard's legibility: the ring, round like the button
             // it frames (Enter or Space on the focused x closes the tab,
             // exactly like a click).

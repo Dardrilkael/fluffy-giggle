@@ -408,6 +408,82 @@ TEST_CASE("the inactive tab's label is muted, the active one body text") {
           ws::ui::r2d::rgba(133, 133, 133));
 }
 
+TEST_CASE("the close x is a drawn circle with two crossing strokes") {
+    ws::ui::gui_test::stub.reset();
+    GuiContext gui;
+    LayoutCursor layout;
+    static const char* const kTabs[] = {"alpha", "beta", "gamma"};
+    int active = 0;
+    int closed = -1;
+
+    // The strip driven twice over the same chrome: the plain call
+    // first, then the closable one - the draw counts read as deltas so
+    // the panel's own chrome never has to be counted.
+    const auto draw = [&](bool closable) {
+        gui.begin_frame(InputFrame{});
+        (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome,
+                                       "panel", {0.0f, 0.0f, 400.0f, 300.0f});
+        if (closable) {
+            (void)ws::ui::gui::tab_bar(gui, layout, kDefaultChrome, "views",
+                                       kTabs, 3, active, 60.0f, false,
+                                       &closed);
+        } else {
+            (void)ws::ui::gui::tab_bar(gui, layout, kDefaultChrome, "views",
+                                       kTabs, 3, active, 60.0f);
+        }
+        ws::ui::gui::end_panel(gui, layout);
+        gui.end_frame();
+    };
+
+    // The plain strip draws no strokes anywhere - the line seam is the
+    // close mark's own vocabulary.
+    ws::ui::gui_test::stub.reset();
+    draw(false);
+    const std::uint32_t plain_rounded = ws::ui::gui_test::stub.rounded;
+    CHECK(ws::ui::gui_test::stub.lines == 0u);
+
+    // The closable strip: every tab's x is TWO crossing strokes (3
+    // tabs - 6 lines, the whole mark, never a glyph), and one round
+    // DISC per tab over the plain strip's faces - the visible circle
+    // the hitbox always was, at the 12-px button's own radius.
+    ws::ui::gui_test::stub.reset();
+    draw(true);
+    CHECK(ws::ui::gui_test::stub.lines == 6u);
+    CHECK(ws::ui::gui_test::stub.rounded == plain_rounded + 3u);
+    CHECK(ws::ui::gui_test::stub.last_rounded_radius == 6.0f);
+    CHECK(ws::ui::gui_test::stub.last_line_thickness ==
+          doctest::Approx(1.6f));
+    // The mark's ink at rest: the muted rung, dimmed by nothing.
+    CHECK(ws::ui::gui_test::stub.last_line_color == kDefaultChrome.text_muted);
+
+    // Under the pointer the same mark goes full ink: a one-tab strip,
+    // the mouse parked dead-centre on the x. The gui begin_panel
+    // insets content by the theme's 12-px padding, so the tab spans
+    // x [12, 72] and its circle is centred (54, 26). A fresh hover
+    // settles one frame later (state()'s hot_prev rule), so the
+    // settling frame runs first - the way every hover case does.
+    static const char* const kOne[] = {"alpha"};
+    ws::ui::gui_test::stub.reset();
+    gui.begin_frame(snap(54.0f, 26.0f));
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    (void)ws::ui::gui::tab_bar(gui, layout, kDefaultChrome, "solo", kOne, 1,
+                               active, 60.0f, false, &closed);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(closed == -1);  // the settling frame claims, never clicks
+    gui.begin_frame(snap(54.0f, 26.0f));
+    (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                   {0.0f, 0.0f, 400.0f, 300.0f});
+    (void)ws::ui::gui::tab_bar(gui, layout, kDefaultChrome, "solo", kOne, 1,
+                               active, 60.0f, false, &closed);
+    ws::ui::gui::end_panel(gui, layout);
+    gui.end_frame();
+    CHECK(ws::ui::gui_test::stub.lines == 4u);  // both frames' marks
+    CHECK(ws::ui::gui_test::stub.last_line_color == kDefaultChrome.text);
+    CHECK(closed == -1);  // a hover is not a click
+}
+
 TEST_CASE("layer scopes drive r2d::set_layer through the seam") {
     ws::ui::gui_test::stub.reset();
     GuiContext gui;
