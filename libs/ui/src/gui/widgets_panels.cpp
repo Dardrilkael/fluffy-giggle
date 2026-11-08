@@ -44,12 +44,16 @@ bool tab_hit_outside_close(const void* user, float x, float y) {
 
 bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
              const char* label, const char* const* tabs, int count,
-             int& active, float width, bool disabled, int* closed) {
+             int& active, float width, bool disabled, int* closed,
+             int* held_tab) {
     width = std::max(width, 0.0f);  // like button: no mirrored quads
 
     bool changed = false;
     if (closed != nullptr) {
         *closed = -1;  // no tab's x has fired (yet) this frame
+    }
+    if (held_tab != nullptr) {
+        *held_tab = -1;  // no tab's press is held (yet) this frame
     }
     // The strip's own scope: each tab ids by index under it, so duplicate
     // tab labels in one strip stay distinct widgets (the loop-children
@@ -87,6 +91,13 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
         const WidgetId tab_id = gui.ids().id("tab");
         TabResult result = tab_behavior(gui, tab_id, rect, disabled,
                                         tab_shape);
+        // The held claim: the press that started inside this tab, kept
+        // while it lasts (capture) wherever the pointer carries it -
+        // the drag's arm, reported before the paint so a caller can
+        // act on the same frame the press lands.
+        if (held_tab != nullptr && result.hit.pressed) {
+            *held_tab = i;
+        }
         fold_hover_t(gui, tab_id, result, theme);  // P4: the face traveler
         // P4: the accent traveler - the selected tab's underline fades
         // in under the tab's own id.

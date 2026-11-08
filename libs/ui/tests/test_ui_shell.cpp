@@ -256,6 +256,25 @@ struct Rig {
                     ws::ui::gui::Rect{0.0f, 0.0f, 1280.0f, 720.0f});
         gui.end_frame();
     }
+
+    // One scripted pointer frame: position, the button's held state,
+    // and the edges (a press spells down+pressed, a carry down alone,
+    // a release released alone). `dt` drives the shell's own clocks -
+    // the splitter double-click reads the frame's dt_seconds, and a
+    // hand-built frame defaults to 0, where every press lands
+    // "instantly".
+    void point(float x, float y, bool down, bool pressed, bool released,
+               float dt = 0.0f) {
+        ws::input::InputFrame in;
+        in.mouse_present = true;
+        in.mouse_x = x;
+        in.mouse_y = y;
+        in.mouse_down[0] = down;
+        in.mouse_pressed[0] = pressed;
+        in.mouse_released[0] = released;
+        in.dt_seconds = dt;
+        frame(in);
+    }
 };
 
 }  // namespace
@@ -400,6 +419,518 @@ TEST_CASE("removing the last tab prunes the tree back to one leaf") {
     tree.remove("settings");
     CHECK(tree.leaf_count() == 1);
     CHECK(tree.panels().empty());
+}
+
+TEST_CASE("side placements fuse into a matching split, keeping the pixels") {
+    // The circsim editor's default row: palette 14% | canvas |
+    // properties 28% of canvas. The nested spelling drew it as
+    // [palette | [canvas | properties]]; the fused one is ONE flat
+    // split - and the PIXELS are the same, which is the whole point
+    // (the share is of the target's span either way).
+    DockTree tree;
+    DockPlacement left{DockPlacement::Area::left};
+    left.weight = 0.14f;
+    DockPlacement right{DockPlacement::Area::right};
+    right.weight = 0.28f;
+
+    tree.add("canvas", {DockPlacement::Area::center});
+    tree.add("palette", left);
+    tree.add("properties", right);
+    CHECK(tree.leaf_count() == 3);  // flat: no phantom nesting level
+
+    const DockTree::Layout laid = tree.resolve({0.0f, 0.0f, 1000.0f, 1000.0f});
+    REQUIRE(laid.leaves.size() == 3);
+    CHECK(laid.leaves[0].rect.width == doctest::Approx(140.0f));
+    CHECK(laid.leaves[1].rect.width ==
+          doctest::Approx(619.2f).epsilon(0.01));
+    CHECK(laid.leaves[2].rect.width ==
+          doctest::Approx(240.8f).epsilon(0.01));
+    // Two adjacent children, two bands - the drag moves the boundary
+    // the pointer grabbed, with no intermediate split to confuse it.
+    REQUIRE(laid.splitters.size() == 2);
+
+    // The json is the flat shape: one split, three children - and it
+    // round-trips into the same flat tree.
+    const ws::settings::json::Value shape = tree.to_json();
+    const ws::settings::json::Object* root_obj = shape.as_object();
+    REQUIRE(root_obj != nullptr);
+    const ws::settings::json::Value* kids = root_obj->find("children");
+    REQUIRE(kids != nullptr);
+    REQUIRE(kids->is_array());
+    CHECK(kids->as_array()->size() == 3);
+    DockTree back;
+    REQUIRE(back.from_json(
+        ws::settings::json::parse(ws::settings::json::write(shape)).value(),
+        [](std::string_view) { return true; }));
+    CHECK(back.leaf_count() == 3);
+    const DockTree::Layout restored =
+        back.resolve({0.0f, 0.0f, 1000.0f, 1000.0f});
+    CHECK(restored.leaves[1].rect.width ==
+          doctest::Approx(619.2f).epsilon(0.01));
+
+    // The at_root fuse: a second strip panel joins the FIRST strip's
+    // split instead of nesting a fresh split over the tree. The pixels
+    // are the ones the wrap would have drawn - the second strip takes
+    // an even share of the whole, the first split's children scale by
+    // their cut - but the strip stays ONE split, so a later drag
+    // between the two strips is the boundary the pointer sees.
+    DockTree strip;
+    strip.add("canvas", {DockPlacement::Area::center});
+    DockPlacement bottom{DockPlacement::Area::bottom};
+    bottom.weight = 0.26f;
+    bottom.at_root = true;
+    strip.add("problems", bottom);
+    DockPlacement bottom_even{DockPlacement::Area::bottom};
+    bottom_even.at_root = true;  // weight 0 = the even share
+    strip.add("output", bottom_even);
+    CHECK(strip.leaf_count() == 3);
+    const DockTree::Layout strip_laid =
+        strip.resolve({0.0f, 0.0f, 1000.0f, 1000.0f});
+    REQUIRE(strip_laid.leaves.size() == 3);
+    // canvas 74% * (1 - 0.5), problems 26% * (1 - 0.5), output 50%:
+    // the exact heights a wrap into [old | output] would have given.
+    CHECK(strip_laid.leaves[0].rect.height ==
+          doctest::Approx(370.0f).epsilon(0.01));
+    CHECK(strip_laid.leaves[1].rect.height ==
+          doctest::Approx(130.0f).epsilon(0.01));
+    CHECK(strip_laid.leaves[2].rect.height ==
+          doctest::Approx(500.0f).epsilon(0.01));
+}
+
+TEST_CASE("move re-docks a panel across the tree") {
+    DockTree tree;
+    tree.add("a", {DockPlacement::Area::center});
+    tree.add("b", {DockPlacement::Area::right});
+    // [a | b]
+
+    // A center move retabs: b joins a's leaf, fronts it, and b's old
+    // leaf prunes.
+    DockPlacement into_a{DockPlacement::Area::center};
+    into_a.leaf = 0;
+    tree.move("b", into_a);
+    CHECK(tree.leaf_count() == 1);
+    CHECK(tree.tab_index("a") == 0);
+    CHECK(tree.tab_index("b") == 1);
+    const DockTree::Layout retabbed =
+        tree.resolve({0.0f, 0.0f, 100.0f, 100.0f});
+    REQUIRE(retabbed.leaves.size() == 1);
+    CHECK(retabbed.leaves[0].active == 1);  // the dropped tab fronts
+
+    // A side move onto its own multi-tab leaf is a real split: a's tab
+    // leaves the strip, a fresh leaf takes the left.
+    DockPlacement left{DockPlacement::Area::left};
+    tree.move("a", left);
+    CHECK(tree.leaf_count() == 2);
+    CHECK(tree.leaf_of("a") == 0);
+    CHECK(tree.leaf_of("b") == 1);
+    CHECK(tree.tab_index("b") == 0);  // b kept its leaf alone
+
+    // A side move onto its own LONE leaf is the activate no-op:
+    // nothing to side against.
+    DockPlacement self_right{DockPlacement::Area::right};
+    tree.move("b", self_right);
+    CHECK(tree.leaf_count() == 2);
+    CHECK(tree.leaf_of("b") == 1);
+
+    // A side move under FUSION: c lands left of leaf 0, one flat
+    // split - and c's old leaf (it was alone) prunes behind it.
+    tree.add("c", {DockPlacement::Area::right});
+    // [a | b | c] now (b's add wrapped the root, c's fused in)
+    CHECK(tree.leaf_count() == 3);
+    DockPlacement left_of_a{DockPlacement::Area::left};
+    left_of_a.leaf = 0;
+    tree.move("c", left_of_a);
+    CHECK(tree.leaf_count() == 3);  // c moved, not duplicated
+    CHECK(tree.panels() ==
+          std::vector<std::string>{"c", "a", "b"});
+    // The pixels: c took half of A'S SPAN (the share semantics), b
+    // kept its own, and the space c's old leaf released folds back in
+    // - three equal weights, an even thirds row.
+    const DockTree::Layout fused = tree.resolve({0.0f, 0.0f, 300.0f, 100.0f});
+    CHECK(fused.leaves[0].rect.width == doctest::Approx(100.0f));
+    CHECK(fused.leaves[1].rect.width == doctest::Approx(100.0f));
+    CHECK(fused.leaves[2].rect.width == doctest::Approx(100.0f));
+
+    // A whole-tree side move: a leaves the row and takes the full
+    // width under it (the at_root wrap - the root split's axis
+    // mismatches the vertical ask).
+    DockPlacement strip_bottom{DockPlacement::Area::bottom};
+    strip_bottom.at_root = true;
+    tree.move("a", strip_bottom);
+    CHECK(tree.leaf_count() == 3);
+    CHECK(tree.panels() == std::vector<std::string>{"c", "b", "a"});
+    const DockTree::Layout stripped = tree.resolve({0.0f, 0.0f, 300.0f, 100.0f});
+    CHECK(stripped.leaves[2].rect.width ==
+          doctest::Approx(300.0f));  // the strip spans the whole width
+
+    // A center move onto the leaf the panel already shares is the
+    // reorder's activate no-op (move_tab owns reorders).
+    DockPlacement own_center{DockPlacement::Area::center};
+    own_center.leaf = 0;
+    tree.move("c", own_center);
+    CHECK(tree.leaf_count() == 3);
+    CHECK(tree.panels() == std::vector<std::string>{"c", "b", "a"});
+
+    // Unknown ids are no-ops, never throws.
+    tree.move("ghost", into_a);
+    tree.move("ghost", left);
+    CHECK(tree.leaf_count() == 3);
+}
+
+TEST_CASE("move_tab reorders and retabs") {
+    DockTree tree;
+    tree.add("x", {DockPlacement::Area::center});
+    tree.add("y", {DockPlacement::Area::center});
+    tree.add("z", {DockPlacement::Area::center});
+    CHECK(tree.leaf_count() == 1);
+    CHECK(tree.tab_index("z") == 2);  // [x, y, z], z fronts
+
+    // A reorder inside the strip: x to the end. The front tab (z)
+    // stays the front tab - it steps past what slid in behind it.
+    tree.move_tab("x", 0, 2);
+    CHECK(tree.tab_index("x") == 2);
+    CHECK(tree.tab_index("y") == 0);
+    CHECK(tree.tab_index("z") == 1);
+    const DockTree::Layout pushed =
+        tree.resolve({0.0f, 0.0f, 100.0f, 100.0f});
+    CHECK(pushed.leaves[0].active == 1);  // z still fronts
+
+    // The front tab follows its own move.
+    tree.move_tab("z", 0, 0);
+    CHECK(tree.tab_index("z") == 0);
+    CHECK(tree.resolve({0.0f, 0.0f, 100.0f, 100.0f}).leaves[0].active == 0);
+
+    // A retab across leaves: y joins the solo leaf and fronts it.
+    tree.add("solo", {DockPlacement::Area::right});
+    // leaves: [z, y, x] | [solo]
+    tree.move_tab("y", 1, 1);
+    CHECK(tree.leaf_of("y") == 1);
+    CHECK(tree.tab_index("y") == 1);
+    const DockTree::Layout retabbed =
+        tree.resolve({0.0f, 0.0f, 100.0f, 100.0f});
+    REQUIRE(retabbed.leaves.size() == 2);
+    CHECK(retabbed.leaves[1].active == 1);  // y fronts its new strip
+
+    // Emptying a leaf retabs it away: both of solo's tabs leave, the
+    // leaf prunes (solo lands at the FRONT - index 0 - of the row).
+    tree.move_tab("y", 0, 0);
+    tree.move_tab("solo", 0, 0);
+    CHECK(tree.leaf_count() == 1);
+    CHECK(tree.panels() ==
+          std::vector<std::string>{"solo", "y", "z", "x"});
+
+    // Unknown ids are no-ops.
+    tree.move_tab("ghost", 0, 0);
+    CHECK(tree.tab_index("ghost") == -1);
+}
+
+TEST_CASE("maximize zooms the resolve, restore gives the layout back") {
+    DockTree tree;
+    tree.add("a", {DockPlacement::Area::center});
+    tree.add("b", {DockPlacement::Area::right});
+    DockPlacement bottom{DockPlacement::Area::bottom};
+    bottom.at_root = true;
+    tree.add("c", bottom);
+    const ws::ui::gui::Rect bounds{0.0f, 0.0f, 100.0f, 100.0f};
+    CHECK(tree.resolve(bounds).leaves.size() == 3);
+
+    const std::string shape =
+        ws::settings::json::write(tree.to_json());
+
+    // The zoom: resolve answers ONE leaf - the whole bounds, b's tabs,
+    // b fronting - and no splitters. The tree underneath is whole.
+    tree.maximize("b");
+    CHECK(tree.maximized() == "b");
+    const DockTree::Layout zoomed = tree.resolve(bounds);
+    REQUIRE(zoomed.leaves.size() == 1);
+    CHECK(zoomed.leaves[0].rect.x == doctest::Approx(0.0f));
+    CHECK(zoomed.leaves[0].rect.y == doctest::Approx(0.0f));
+    CHECK(zoomed.leaves[0].rect.width == doctest::Approx(100.0f));
+    CHECK(zoomed.leaves[0].rect.height == doctest::Approx(100.0f));
+    REQUIRE(zoomed.leaves[0].tabs != nullptr);
+    REQUIRE(zoomed.leaves[0].tabs->size() == 1);
+    CHECK((*zoomed.leaves[0].tabs)[0] == "b");
+    CHECK(zoomed.splitters.empty());
+    CHECK(tree.leaf_count() == 3);       // the full tree, zoom or not
+    CHECK(tree.panels().size() == 3);
+    // The zoom is transient state: the saved shape never moves.
+    CHECK(ws::settings::json::write(tree.to_json()) == shape);
+
+    // The zoom follows the panel through a move.
+    DockPlacement into_a{DockPlacement::Area::center};
+    into_a.leaf = 0;
+    tree.move("b", into_a);
+    CHECK(tree.maximized() == "b");
+    const DockTree::Layout followed = tree.resolve(bounds);
+    REQUIRE(followed.leaves.size() == 1);
+    REQUIRE(followed.leaves[0].tabs != nullptr);
+    CHECK(followed.leaves[0].tabs->size() == 2);  // [a, b]
+    CHECK(followed.leaves[0].active == 1);        // b still fronts
+
+    // Removing the zoomed panel clears the zoom: no stale projection.
+    tree.remove("b");
+    CHECK(tree.maximized().empty());
+    CHECK(tree.resolve(bounds).leaves.size() == 2);
+
+    // An unknown id never zooms; restore without a zoom is a no-op.
+    tree.maximize("ghost");
+    CHECK(tree.maximized().empty());
+    tree.restore();
+    CHECK(tree.maximized().empty());
+
+    // from_json drops the zoom: a restored layout starts unzoomed.
+    tree.maximize("a");
+    CHECK(tree.maximized() == "a");
+    REQUIRE(tree.from_json(
+        ws::settings::json::parse(shape).value(),
+        [](std::string_view) { return true; }));
+    CHECK(tree.maximized().empty());
+    // And so does clear().
+    tree.maximize("c");
+    tree.clear();
+    CHECK(tree.maximized().empty());
+    CHECK(tree.leaf_count() == 1);
+}
+
+TEST_CASE("distribute evens the split a splitter divides") {
+    DockTree tree;
+    tree.add("a", {DockPlacement::Area::center});
+    tree.add("b", {DockPlacement::Area::right});
+    tree.add("c", {DockPlacement::Area::right});
+    // Fused: one flat split, three children.
+    const DockTree::Layout laid = tree.resolve({0.0f, 0.0f, 300.0f, 100.0f});
+    REQUIRE(laid.leaves.size() == 3);
+    REQUIRE(laid.splitters.size() == 2);
+
+    // Drag the first boundary hard right: the pair (a, b) clamps, the
+    // row is far from even.
+    tree.apply_drag(laid.splitters[0], 290.0f);
+    const DockTree::Layout moved = tree.resolve({0.0f, 0.0f, 300.0f, 100.0f});
+    CHECK(moved.leaves[0].rect.width > 150.0f);
+
+    // The distribute: every child of that split evens out - a thirds
+    // row, the weights the resolve normalizes to equal shares.
+    tree.distribute(laid.splitters[0]);
+    const DockTree::Layout even = tree.resolve({0.0f, 0.0f, 300.0f, 100.0f});
+    CHECK(even.leaves[0].rect.width == doctest::Approx(100.0f));
+    CHECK(even.leaves[1].rect.width == doctest::Approx(100.0f));
+    CHECK(even.leaves[2].rect.width == doctest::Approx(100.0f));
+
+    // A stale band (a path the tree no longer holds) is a no-op.
+    DockTree::SplitterRect stale;
+    stale.path = {7, 7, 7};
+    tree.distribute(stale);
+    const DockTree::Layout after =
+        tree.resolve({0.0f, 0.0f, 300.0f, 100.0f});
+    CHECK(after.leaves[0].rect.width == doctest::Approx(100.0f));
+}
+
+TEST_CASE("dock_hit answers the five drop zones") {
+    DockTree tree;
+    tree.add("a", {DockPlacement::Area::center});
+    tree.add("b", {DockPlacement::Area::right});
+    const DockTree::Layout laid = tree.resolve({0.0f, 0.0f, 100.0f, 100.0f});
+    REQUIRE(laid.leaves.size() == 2);
+
+    // The zones of leaf 0 ({0,0,50,100}) with a 20-px band.
+    CHECK(dock_hit(laid, 25.0f, 50.0f, 20.0f).leaf == 0);
+    CHECK(dock_hit(laid, 25.0f, 50.0f, 20.0f).area ==
+          DockPlacement::Area::center);
+    CHECK(dock_hit(laid, 2.0f, 50.0f, 20.0f).area ==
+          DockPlacement::Area::left);
+    CHECK(dock_hit(laid, 48.0f, 50.0f, 20.0f).area ==
+          DockPlacement::Area::right);
+    CHECK(dock_hit(laid, 25.0f, 2.0f, 20.0f).area ==
+          DockPlacement::Area::top);
+    CHECK(dock_hit(laid, 25.0f, 98.0f, 20.0f).area ==
+          DockPlacement::Area::bottom);
+    // The x edges outrank the y edges: a corner answers the side.
+    CHECK(dock_hit(laid, 2.0f, 2.0f, 20.0f).area ==
+          DockPlacement::Area::left);
+
+    // The neighbor leaf's center, and the outside.
+    CHECK(dock_hit(laid, 75.0f, 50.0f, 20.0f).leaf == 1);
+    CHECK(dock_hit(laid, 75.0f, 50.0f, 20.0f).area ==
+          DockPlacement::Area::center);
+    CHECK(dock_hit(laid, -5.0f, 50.0f, 20.0f).leaf == -1);
+    CHECK(dock_hit(laid, 50.0f, -5.0f, 20.0f).leaf == -1);
+
+    // The band clamps to a quarter of the span per side: a 60-px band
+    // on a 50-px leaf reads as 12.5 - edges at the fringes, a center
+    // that is most of the leaf, never a leaf that is all edge.
+    CHECK(dock_hit(laid, 5.0f, 50.0f, 60.0f).area ==
+          DockPlacement::Area::left);
+    CHECK(dock_hit(laid, 25.0f, 50.0f, 60.0f).area ==
+          DockPlacement::Area::center);
+    CHECK(dock_hit(laid, 45.0f, 50.0f, 60.0f).area ==
+          DockPlacement::Area::right);
+}
+
+// --- the dock view (the gestures the shell drives) -----------------------------
+
+TEST_CASE("the tab drag re-docks a panel through the shell") {
+    Rig rig;
+    rig.build();
+    CHECK(rig.shell->startup());
+    (void)rig.shell->panel_host().open(rig.shell->panels(), "editor");
+    (void)rig.shell->panel_host().open(rig.shell->panels(), "plot");
+
+    // The dock view's bounds, the way draw() lays them: below the menu
+    // bar, above the status bar (the stub's frame is empty, so the
+    // status strip measures from the frame's own bottom).
+    const float chrome = ws::ui::gui::kDefaultChrome.control_height;
+    const ws::ui::gui::Rect dock{0.0f, chrome, 1280.0f, 720.0f - chrome};
+    DockTree& tree = rig.shell->panel_host().dock();
+    REQUIRE(tree.leaf_count() == 2);  // editor left, plot right
+
+    const DockTree::Layout laid = tree.resolve(dock);
+    const float strip_y =
+        laid.leaves[0].rect.y + chrome * 0.5f;  // the strips' midline
+    const float editor_tab_x = laid.leaves[0].rect.x + 20.0f;
+    const float plot_tab_x = laid.leaves[1].rect.x + 20.0f;
+    const float plot_cx = laid.leaves[1].rect.x +
+                          laid.leaves[1].rect.width * 0.5f;
+    const float plot_cy = laid.leaves[1].rect.y +
+                          laid.leaves[1].rect.height * 0.5f;
+
+    // The retab drop: carry editor's tab onto plot's body and release.
+    rig.point(editor_tab_x, strip_y, true, true, false);
+    rig.point(plot_cx, plot_cy, true, false, false);
+    rig.point(plot_cx, plot_cy, false, false, true);
+    CHECK(tree.leaf_count() == 1);  // one merged leaf
+    CHECK(tree.tab_index("plot") == 0);
+    CHECK(tree.tab_index("editor") == 1);  // the dropped tab lands at the end
+    CHECK(rig.shell->panel_host().active() != nullptr);
+    CHECK(rig.shell->panel_host().active()->id == "editor");
+
+    // The split drop: carry plot's tab (tab 0 of the now whole-dock
+    // strip) to the right edge and release - the panel takes the
+    // right half.
+    const float merged_tab_x = dock.x + 20.0f;
+    const float right_edge = dock.x + dock.width - 8.0f;
+    rig.point(merged_tab_x, strip_y, true, true, false);
+    rig.point(right_edge, plot_cy, true, false, false);
+    rig.point(right_edge, plot_cy, false, false, true);
+    CHECK(tree.leaf_count() == 2);
+    CHECK(tree.leaf_of("editor") == 0);
+    CHECK(tree.leaf_of("plot") == 1);
+
+    // A drop outside every leaf cancels: carried over the menu bar and
+    // released there, the tree never moves.
+    rig.point(editor_tab_x, strip_y, true, true, false);
+    rig.point(600.0f, 10.0f, true, false, false);  // the menu bar's band
+    rig.point(600.0f, 10.0f, false, false, true);
+    CHECK(tree.leaf_count() == 2);
+
+    // A press-and-release that never crosses the threshold is the
+    // strip's own click: the selection moves, the tree does not.
+    rig.point(plot_tab_x, strip_y, true, true, false);
+    rig.point(plot_tab_x, strip_y, false, false, true);
+    CHECK(tree.leaf_count() == 2);
+    CHECK(rig.shell->panel_host().active() != nullptr);
+    CHECK(rig.shell->panel_host().active()->id == "plot");
+    (void)rig.shell->shutdown();
+}
+
+TEST_CASE("the strip's zoom button maximizes the pane and restores it") {
+    Rig rig;
+    rig.build();
+    CHECK(rig.shell->startup());
+    (void)rig.shell->panel_host().open(rig.shell->panels(), "editor");
+    (void)rig.shell->panel_host().open(rig.shell->panels(), "plot");
+
+    const float chrome = ws::ui::gui::kDefaultChrome.control_height;
+    const float pad = ws::ui::gui::kDefaultChrome.padding;
+    const ws::ui::gui::Rect dock{0.0f, chrome, 1280.0f, 720.0f - chrome};
+    DockTree& tree = rig.shell->panel_host().dock();
+    const DockTree::Layout laid = tree.resolve(dock);
+
+    // The zoom button: the strip's right end (12-px round hitbox,
+    // padded in from the leaf's edge), the editor leaf's strip.
+    const float zoom_x = laid.leaves[0].rect.x +
+                         laid.leaves[0].rect.width - pad - 6.0f;
+    const float zoom_y = laid.leaves[0].rect.y + chrome * 0.5f;
+    rig.point(zoom_x, zoom_y, true, true, false);
+    rig.point(zoom_x, zoom_y, false, false, true);
+
+    // The zoom: one leaf, the whole dock, the front tab's panels - the
+    // tree underneath whole (the strip's restore answers).
+    CHECK(tree.maximized() == "editor");
+    const DockTree::Layout zoomed = tree.resolve(dock);
+    REQUIRE(zoomed.leaves.size() == 1);
+    CHECK(zoomed.leaves[0].rect.width == doctest::Approx(1280.0f));
+    REQUIRE(zoomed.leaves[0].tabs != nullptr);
+    CHECK(zoomed.leaves[0].tabs->size() == 1);
+    CHECK(tree.leaf_count() == 2);  // plot still docked, just hidden
+
+    // The restore: the zoomed strip spans the dock; the same formula
+    // on ITS right end.
+    const float restore_x = dock.x + dock.width - pad - 6.0f;
+    rig.point(restore_x, zoom_y, true, true, false);
+    rig.point(restore_x, zoom_y, false, false, true);
+    CHECK(tree.maximized().empty());
+    CHECK(tree.resolve(dock).leaves.size() == 2);
+    (void)rig.shell->shutdown();
+}
+
+TEST_CASE("a double click on a splitter evens it") {
+    Rig rig;
+    rig.build();
+    CHECK(rig.shell->startup());
+    (void)rig.shell->panel_host().open(rig.shell->panels(), "editor");
+    (void)rig.shell->panel_host().open(rig.shell->panels(), "plot");
+
+    const float chrome = ws::ui::gui::kDefaultChrome.control_height;
+    const ws::ui::gui::Rect dock{0.0f, chrome, 1280.0f, 720.0f - chrome};
+    DockTree& tree = rig.shell->panel_host().dock();
+    const DockTree::Layout laid = tree.resolve(dock);
+    const float band_x = laid.splitters[0].rect.center_x();
+    const float mid_y = dock.y + dock.height * 0.5f;
+
+    // Drag the boundary to 3/4 first (press, carry, release) - the
+    // double-click needs an UNEVEN split to prove itself on.
+    rig.point(band_x, mid_y, true, true, false, 0.05f);
+    rig.point(960.0f, mid_y, true, false, false, 0.05f);
+    rig.point(960.0f, mid_y, false, false, true, 0.05f);
+    const DockTree::Layout dragged = tree.resolve(dock);
+    REQUIRE(dragged.leaves.size() == 2);
+    CHECK(dragged.leaves[0].rect.width == doctest::Approx(960.0f));
+
+    // Let the drag's press expire: idle frames advance the clock past
+    // the window, so the next press is a FRESH first, not a pair's
+    // second half.
+    for (int i = 0; i < 12; ++i) {
+        rig.point(960.0f, mid_y, false, false, false, 0.05f);
+    }
+
+    // One press alone does not distribute.
+    rig.point(960.0f, mid_y, true, true, false, 0.05f);
+    rig.point(960.0f, mid_y, false, false, true, 0.05f);
+    CHECK(tree.resolve(dock).leaves[0].rect.width ==
+          doctest::Approx(960.0f));
+
+    // The second press inside the window is the double-click: the
+    // split evens out.
+    rig.point(960.0f, mid_y, true, true, false, 0.05f);
+    rig.point(960.0f, mid_y, false, false, true, 0.05f);
+    const DockTree::Layout even = tree.resolve(dock);
+    REQUIRE(even.leaves.size() == 2);
+    CHECK(even.leaves[0].rect.width == doctest::Approx(640.0f));
+    CHECK(even.leaves[1].rect.width == doctest::Approx(640.0f));
+
+    // Slow presses never pair: drag again, wait past the window, press
+    // again - the boundary stays where the drag left it.
+    rig.point(640.0f, mid_y, true, true, false, 0.05f);
+    rig.point(900.0f, mid_y, true, false, false, 0.05f);
+    rig.point(900.0f, mid_y, false, false, true, 0.05f);
+    for (int i = 0; i < 12; ++i) {
+        rig.point(900.0f, mid_y, false, false, false, 0.2f);
+    }
+    rig.point(900.0f, mid_y, true, true, false, 0.05f);
+    rig.point(900.0f, mid_y, false, false, true, 0.05f);
+    CHECK(tree.resolve(dock).leaves[0].rect.width ==
+          doctest::Approx(900.0f));
+    (void)rig.shell->shutdown();
 }
 
 // --- the panel framework --------------------------------------------------------

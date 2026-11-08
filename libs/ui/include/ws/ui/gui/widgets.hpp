@@ -557,10 +557,20 @@ void popup_frame_draw(const Rect& bounds, const ChromeTheme& theme);
 // fit runs here, before the painter row, so skins see the ellipsized
 // text like any tab label). A null `closed` is the plain strip - no
 // button drawn, no room reserved, byte-for-byte the old behavior.
+//
+// THE DRAG-READY STRIP: pass a non-null `held_tab` and the strip
+// reports, every frame, the index of the tab whose press is still
+// HELD (-1 when none): the tab's capture claim, not a fresh edge - a
+// press that started inside a tab keeps reporting it wherever the
+// pointer goes, until the release. That is the half a drag needs: the
+// shell arms its tab-drag off the claim, waits for the pointer to
+// carry it past a threshold, and reads the release as the drop. The
+// strip stays the selection primitive; the drag is the caller's
+// gesture, built on the same claim the click is.
 bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
              const char* label, const char* const* tabs, int count,
              int& active, float width = 120.0f, bool disabled = false,
-             int* closed = nullptr);
+             int* closed = nullptr, int* held_tab = nullptr);
 
 // The split halves, the tab strip's seam: the behavior is ONE tab's
 // interaction (the strip loops it - the caller owns the id scope, so

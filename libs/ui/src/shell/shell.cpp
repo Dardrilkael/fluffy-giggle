@@ -46,6 +46,42 @@ constexpr int kKeyW = 87;
            y < rect.y + rect.height;
 }
 
+// --- the dock view's geometry constants -----------------------------------
+//
+// The tab drag's threshold: the pointer must carry a held tab this far
+// before the drag arms, so a click with a jiggle stays the tab bar's
+// click (the selection primitive) and never a re-dock.
+constexpr float kTabDragPx = 6.0f;
+// The drop-zone edge band: within this many pixels of a leaf's edge a
+// drop splits to that side (dock_hit clamps the band to a quarter of
+// the leaf's span per side, so a center zone always exists).
+constexpr float kDockDropBandPx = 36.0f;
+// The splitter double-click window, seconds of the frame clock.
+constexpr float kSplitterDblClickS = 0.35f;
+// The strip's zoom/restore button: a 12-px round hitbox, the close
+// x's own size (the strip's two round affordances read as a pair).
+constexpr float kZoomHit = 12.0f;
+
+// `color` with its alpha channel replaced - the r2d packing is
+// (r,g,b,a) one byte each, alpha in the low 8. The drop-preview veil:
+// the theme's accent at a fraction of its ink, so the highlight reads
+// as a tint over whatever it covers, not a hole.
+[[nodiscard]] std::uint32_t with_alpha(std::uint32_t color,
+                                       std::uint8_t alpha) {
+    return (color & 0xffffff00u) | static_cast<std::uint32_t>(alpha);
+}
+
+// A square outline of four strokes, the geometry-drawn glyph spelling
+// the strip's zoom/restore marks (the symbol table's own rule: a
+// line-drawn mark reads in any font and none).
+void square_outline(float cx, float cy, float arm, float weight,
+                    std::uint32_t ink) {
+    r2d::draw_line(cx - arm, cy - arm, cx + arm, cy - arm, weight, ink);
+    r2d::draw_line(cx + arm, cy - arm, cx + arm, cy + arm, weight, ink);
+    r2d::draw_line(cx + arm, cy + arm, cx - arm, cy + arm, weight, ink);
+    r2d::draw_line(cx - arm, cy + arm, cx - arm, cy - arm, weight, ink);
+}
+
 // Pointer-in-array without the unspecified relational compare of
 // unrelated pointers (std::less gives a total order).
 template <class T>
@@ -1095,6 +1131,12 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
     }
     r2d::draw_quad(bounds.x, bounds.y, bounds.width, bounds.height, theme.panel_bg);
     const DockTree::Layout resolved = panel_host_.dock().resolve(bounds);
+    // The one input view for the whole dock view, and the splitter
+    // clock's tick: the frame's dt is the honest clock a double-click
+    // needs (a hand-built test frame reports 0 - every press then
+    // lands "instantly", and the window still needs TWO of them).
+    const ws::input::InputFrame& in = gui.input();
+    splitter_clock_ += in.dt_seconds;
 
     // The splitters first: their hit claims land before any leaf
     // widget's, so a boundary grab always wins over content under it.
@@ -1121,18 +1163,44 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
             gui.ids().pop();
         }
         if (hit.pressed) {
+            // A FRESH press on this band (the claim rides the whole
+            // hold; the edge is the frame's own) may be the second
+            // half of a double-click: two presses on one band inside
+            // the window even the split - the splitter's reset, the
+            // gesture every dock ships. The same hold must not then
+            // also drag the boundary it just evened under the pointer.
+            if (in.mouse_pressed[0]) {
+                const bool same_band =
+                    splitter_last_press_.path == splitter.path &&
+                    splitter_last_press_.first_child ==
+                        splitter.first_child;
+                if (same_band &&
+                    splitter_clock_ - splitter_last_press_at_ <
+                        kSplitterDblClickS) {
+                    panel_host_.dock().distribute(splitter);
+                    splitter_last_press_at_ = -1.0e30f;  // consumed: a
+                    // third press is a fresh first, not a triple
+                    splitter_drag_.consumed = true;
+                } else {
+                    splitter_last_press_at_ = splitter_clock_;
+                    splitter_last_press_ = splitter;
+                    splitter_drag_.consumed = false;
+                }
+            }
             splitter_drag_.active = true;
             splitter_drag_.splitter = splitter;
         }
     }
     if (splitter_drag_.active) {
-        const ws::input::InputFrame& in = gui.input();
         if (in.mouse_down[0] && in.mouse_present) {
-            const float position =
-                splitter_drag_.splitter.dir == DockDir::horizontal
-                    ? in.mouse_x
-                    : in.mouse_y;
-            panel_host_.dock().apply_drag(splitter_drag_.splitter, position);
+            if (!splitter_drag_.consumed) {
+                const float position =
+                    splitter_drag_.splitter.dir == DockDir::horizontal
+                        ? in.mouse_x
+                        : in.mouse_y;
+                panel_host_.dock().apply_drag(splitter_drag_.splitter,
+                                              position);
+            }
         } else {
             splitter_drag_.active = false;
         }
@@ -1140,7 +1208,6 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
 
     // Focus follows press: a press inside a leaf activates that leaf's
     // front tab (the tab strip's own selection does the same on click).
-    const ws::input::InputFrame& in = gui.input();
     const bool pressed = in.mouse_present && in.mouse_pressed[0];
     if (pressed) {
         for (const DockTree::LeafRect& leaf : resolved.leaves) {
@@ -1207,25 +1274,94 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
         const gui::ScopedId leaf_ids(gui.ids(), leaf.leaf);
         int active = std::clamp(leaf.active, 0,
                                 static_cast<int>(labels.size()) - 1);
+        // The tab pitch leaves the strip's right end its own room: the
+        // zoom button below is a strip-level affordance, and a full
+        // row of tabs must not cover it (or its x) with the last tab.
         const float tab_w =
-            std::max(40.0f, std::min(160.0f, leaf.rect.width /
-                                                 static_cast<float>(
-                                                     labels.size())));
+            std::max(40.0f,
+                     std::min(160.0f,
+                              (leaf.rect.width -
+                               (2.0f * theme.padding + kZoomHit)) /
+                                  static_cast<float>(labels.size())));
         layout.begin_panel(strip, 0.0f, 0.0f);
         // The closable strip: each tab carries its own round x INSIDE
         // the tab (a small circular hitbox - the strip-level square
         // button right of the tabs read as nothing at all, and it
-        // closed only the FRONT tab). tab_bar's out-param names the tab
-        // whose x fired; the strip stays the selection primitive.
+        // closed only the FRONT tab). tab_bar's out-params name the tab
+        // whose x fired and the tab whose press is still held; the
+        // strip stays the selection primitive, the drag rides its
+        // claim.
         int closed_tab = -1;
+        int held_tab = -1;
         if (gui::tab_bar(gui, layout, theme, "shell.tabs", labels.data(),
                          static_cast<int>(labels.size()), active, tab_w,
-                         false, &closed_tab)) {
+                         false, &closed_tab, &held_tab)) {
             // The selection moved: the tree and the focus follow.
             panel_host_.activate(panel_registry_,
                                  (*leaf.tabs)[static_cast<std::size_t>(active)]);
         }
         layout.end_panel();
+        if (held_tab >= 0 && !tab_drag_.armed) {
+            // The drag's arm: which panel's tab is under a held press,
+            // and where the hold started. The threshold test below
+            // decides drag-vs-click; the strip's own click keeps the
+            // selection when the pointer never carries the tab off.
+            tab_drag_.armed = true;
+            tab_drag_.dragging = false;
+            tab_drag_.panel = (*leaf.tabs)[static_cast<std::size_t>(held_tab)];
+            tab_drag_.press_x = in.mouse_x;
+            tab_drag_.press_y = in.mouse_y;
+        }
+
+        // The strip's right end: the focused-pane zoom. A round ghost
+        // button the close x's own size, with a GEOMETRY mark - the
+        // lone square for "zoom this pane to the whole dock", the
+        // doubled square while zoomed for "put the layout back". The
+        // hitbox sits in the room the tab pitch reserved, so it never
+        // covers a tab or its x.
+        const Rect zoom_rect{strip.x + strip.width - theme.padding -
+                                 kZoomHit,
+                             strip.y + (strip_h - kZoomHit) * 0.5f,
+                             kZoomHit, kZoomHit};
+        const gui::WidgetId zoom_id = gui.ids().id("shell.zoom");
+        gui::HitShape zoom_shape;
+        zoom_shape.kind = gui::HitShape::Kind::circle;
+        const gui::ButtonResult zoom =
+            gui::button_behavior(gui, zoom_id, zoom_rect, false, zoom_shape,
+                                 gui::ButtonStyle::ghost);
+        std::uint32_t zoom_face = theme.control_bg;
+        if (zoom.state == gui::WidgetState::Pressed) {
+            zoom_face = theme.control_pressed;
+        } else if (zoom.state == gui::WidgetState::Hovered) {
+            zoom_face = theme.control_hovered;
+        }
+        r2d::draw_rounded_quad(zoom_rect.x, zoom_rect.y, kZoomHit, kZoomHit,
+                               kZoomHit * 0.5f, zoom_face);
+        const bool zoomed = !panel_host_.dock().maximized().empty();
+        const bool zoom_live = zoom.state == gui::WidgetState::Hovered ||
+                               zoom.state == gui::WidgetState::Pressed;
+        const std::uint32_t zoom_ink =
+            zoom_live ? theme.text : theme.text_muted;
+        if (zoomed) {
+            square_outline(zoom_rect.center_x() - 1.6f,
+                           zoom_rect.center_y() - 1.6f, 3.4f, 1.4f, zoom_ink);
+            square_outline(zoom_rect.center_x() + 1.6f,
+                           zoom_rect.center_y() + 1.6f, 3.4f, 1.4f, zoom_ink);
+        } else {
+            square_outline(zoom_rect.center_x(), zoom_rect.center_y(), 4.2f,
+                           1.4f, zoom_ink);
+        }
+        gui::tooltip_text(gui, layout, theme, "shell.zoom", zoom_rect,
+                          zoomed ? "Restore layout" : "Maximize panel");
+        if (zoom.activated()) {
+            DockTree& dock = panel_host_.dock();
+            if (zoomed) {
+                dock.restore();
+            } else {
+                dock.maximize(
+                    (*leaf.tabs)[static_cast<std::size_t>(active)]);
+            }
+        }
         if (closed_tab >= 0) {
             // Not closed here: closing prunes the tree and moves nodes, and
             // the later leaves' LeafRect::tabs still point into it.
@@ -1251,6 +1387,74 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
     }
     if (!closing_panel.empty()) {
         panel_host_.close(panel_registry_, closing_panel);
+    }
+
+    // The tab drag's frame: the threshold, the preview, the drop. The
+    // strips above armed it off their held claim; the tree answers
+    // where a drop lands (dock_hit over THIS frame's resolve - the
+    // tree has not moved since the drag began, so the answer is the
+    // one the release sees).
+    if (tab_drag_.armed) {
+        if (!(in.mouse_present && in.mouse_down[0])) {
+            if (tab_drag_.dragging) {
+                const DockHit drop =
+                    dock_hit(resolved, in.mouse_x, in.mouse_y,
+                             kDockDropBandPx);
+                if (drop.leaf >= 0) {
+                    DockPlacement placement;
+                    placement.area = drop.area;
+                    placement.leaf = drop.leaf;
+                    panel_host_.redock(panel_registry_, tab_drag_.panel,
+                                       placement);
+                }
+                // A release outside every leaf cancels: there are no
+                // floating windows to drop into, and a half-gesture
+                // must not guess a home.
+            }
+            tab_drag_ = TabDrag{};  // the hold ended: dropped or cancelled
+        } else {
+            const float dx = in.mouse_x - tab_drag_.press_x;
+            const float dy = in.mouse_y - tab_drag_.press_y;
+            if (!tab_drag_.dragging &&
+                dx * dx + dy * dy >= kTabDragPx * kTabDragPx) {
+                tab_drag_.dragging = true;
+            }
+            if (tab_drag_.dragging) {
+                // The drop preview: the veil over where the panel would
+                // land - the whole leaf for a retab, the half-leaf for
+                // a split - the accent as a tint, never a hole.
+                const DockHit over = dock_hit(resolved, in.mouse_x,
+                                              in.mouse_y, kDockDropBandPx);
+                if (over.leaf >= 0) {
+                    const Rect& target =
+                        resolved.leaves[static_cast<std::size_t>(
+                                            over.leaf)]
+                            .rect;
+                    Rect preview = target;
+                    switch (over.area) {
+                        case DockPlacement::Area::left:
+                            preview.width = target.width * 0.5f;
+                            break;
+                        case DockPlacement::Area::right:
+                            preview.x = target.x + target.width * 0.5f;
+                            preview.width = target.width * 0.5f;
+                            break;
+                        case DockPlacement::Area::top:
+                            preview.height = target.height * 0.5f;
+                            break;
+                        case DockPlacement::Area::bottom:
+                            preview.y = target.y + target.height * 0.5f;
+                            preview.height = target.height * 0.5f;
+                            break;
+                        case DockPlacement::Area::center:
+                            break;  // the whole leaf: the tab joins it
+                    }
+                    r2d::draw_quad(preview.x, preview.y, preview.width,
+                                   preview.height,
+                                   with_alpha(theme.control_on, 56));
+                }
+            }
+        }
     }
 }
 

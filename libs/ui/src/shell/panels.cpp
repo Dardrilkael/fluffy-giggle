@@ -179,6 +179,24 @@ void PanelHost::cycle(const PanelRegistry& registry) {
     activate(registry, instances_[next].id);
 }
 
+void PanelHost::redock(const PanelRegistry& registry,
+                       std::string_view instance, DockPlacement placement) {
+    if (find(instance) == nullptr) {
+        return;
+    }
+    dock_.move(instance, placement);
+    activate(registry, instance);
+}
+
+void PanelHost::retab(const PanelRegistry& registry,
+                      std::string_view instance, int leaf, int index) {
+    if (find(instance) == nullptr) {
+        return;
+    }
+    dock_.move_tab(instance, leaf, index);
+    activate(registry, instance);
+}
+
 PanelInstance* PanelHost::active_instance() {
     for (PanelInstance& instance : instances_) {
         if (instance.id == active_) {

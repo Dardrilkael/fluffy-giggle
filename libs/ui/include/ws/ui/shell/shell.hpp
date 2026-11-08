@@ -322,12 +322,41 @@ private:
     DocumentFactory document_factory_;
 
     // The splitter drag: which band is held, kept whole so the drag
-    // survives the per-frame re-resolve.
+    // survives the per-frame re-resolve. `consumed` marks the hold
+    // whose press fired a double-click (the distribute): the same hold
+    // must not also drag the freshly evened boundary under the pointer.
     struct SplitterDrag {
         bool active = false;
+        bool consumed = false;
         DockTree::SplitterRect splitter;
     };
     SplitterDrag splitter_drag_;
+
+    // The splitter double-click: the clock (dt_seconds accumulated
+    // every draw_dock frame - the frame's own honest time), the wall
+    // time of the last FRESH press on a band, and the band it landed
+    // on. Two fresh presses on one band inside the window distribute
+    // that split - the splitter's reset, one gesture, no chrome.
+    float splitter_clock_ = 0.0f;
+    float splitter_last_press_at_ = -1.0e30f;
+    DockTree::SplitterRect splitter_last_press_{};
+
+    // The tab drag (the re-dock gesture): the panel whose tab press is
+    // held, and whether the pointer has carried it past the threshold
+    // yet. The tree owns the drop geometry (dock_hit over the frame's
+    // resolve answers the leaf and the zone); the shell owns the
+    // gesture - armed off the strip's held claim, dragging past the
+    // threshold, dropped on the release (a release outside every leaf
+    // cancels, and a release that never crossed the threshold is the
+    // tab bar's click, not a drop).
+    struct TabDrag {
+        bool armed = false;
+        bool dragging = false;
+        std::string panel;
+        float press_x = 0.0f;
+        float press_y = 0.0f;
+    };
+    TabDrag tab_drag_;
 
     // The close prompt's Escape claim key (the modal rule: a stable
     // address per overlay).

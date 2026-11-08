@@ -11,7 +11,7 @@ Condensed from the 1,339-line `libs/ui/CLAUDE.md`. Every rule, invariant and ext
 - **`widgets.hpp`:** the ImGui/ImPlot-backed wrapper.
 - **`r2d`:** the 2D renderer.
 - **`gui/`:** an immediate-mode widget set that draws through r2d; the job-row helpers bridge `ws::jobs`, the theme-json layer `ws::settings` and the command views `ws::app` (all workspace deps of the same purity class as core/input — pure std, no platform).
-- **`shell/`** (stage 15): AppShell — the reusable app skeleton (dock host with tabbed leaves and draggable splitters, panel registry/host, document manager with session restore and autosave, the automatic Window menu, toolbar, status-job rows, the close-with-dirty/recovery/layout modals, palette, toasts, the ordered shutdown). Plain class the host's `App` subclass owns and drives from `on_update()`; headless-testable through the same r2d stub as the gui suite (`test_ui_shell`). `src/shell/CLAUDE.md` is its rulebook.
+- **`shell/`** (stage 15): AppShell — the reusable app skeleton (dock host with tabbed leaves, fusion placements, re-docking tab drags, pane maximize/restore and draggable splitters, panel registry/host, document manager with session restore and autosave, the automatic Window menu, toolbar, status-job rows, the close-with-dirty/recovery/layout modals, palette, toasts, the ordered shutdown). Plain class the host's `App` subclass owns and drives from `on_update()`; headless-testable through the same r2d stub as the gui suite (`test_ui_shell`). `src/shell/CLAUDE.md` is its rulebook.
 
 Since stage 3, the input family lives in `libs/input`, and the Vulkan device, swapchain, frame sync and VMA live in `libs/gfx`. `ui` holds a `gfx::Gpu` and a `gfx::Swapchain`; `app.cpp` is the only place their opaque handles are cast.
 

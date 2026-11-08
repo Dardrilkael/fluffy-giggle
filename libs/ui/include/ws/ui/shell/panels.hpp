@@ -138,6 +138,22 @@ public:
     // wrapping (the panel-cycling command). A no-op with nothing open.
     void cycle(const PanelRegistry& registry);
 
+    // Re-docks an open instance at `placement` (a no-op when unknown):
+    // the tree's move, then activation - the focus follows the tab to
+    // its new home, and on_focus fires exactly when the ACTIVE PANEL
+    // CHANGED (a re-dock that lands the panel where it already was is
+    // the activate no-op). Opening and docking are one act; so are
+    // re-docking and focusing.
+    void redock(const PanelRegistry& registry, std::string_view instance,
+                DockPlacement placement);
+
+    // Reorders one instance's tab: to `index` of leaf `leaf`, a
+    // reorder inside its own strip or a retab into another (the tree's
+    // move_tab, both clamped). The dropped tab fronts its strip, so
+    // the instance activates too. A no-op when unknown.
+    void retab(const PanelRegistry& registry, std::string_view instance,
+               int leaf, int index);
+
     // The active instance, nullptr when nothing is open.
     [[nodiscard]] const PanelInstance* active() const noexcept {
         return active_instance();

@@ -2,6 +2,14 @@
 // tree, its resolve walk and its json persistence. Pure data + math -
 // no widget, no draw call, no clock; the view in shell.cpp owns the
 // pixels, and the tests own the geometry.
+//
+// The placement machinery's one idea is FUSION: a side placement whose
+// target sits in a split of the same axis lands as one more sibling
+// of that split instead of a fresh split nested inside the leaf. The
+// tree stays flat (splitters keep meaning "the boundary between these
+// neighbors"), the json keeps its N-children shape, and the pixels are
+// the ones the nested spelling would have drawn - the new leaf takes
+// its share of the target's span either way.
 
 #include <ws/ui/shell/dock.hpp>
 
@@ -98,64 +106,63 @@ void DockTree::prune(Node& node) {
     }
 }
 
-void DockTree::add(std::string_view panel, DockPlacement placement) {
-    if (panel.empty()) {
-        return;  // the shell never hands an empty id; a no-op beats a crash
+void DockTree::tidy() {
+    if (root_->split) {
+        prune(*root_);
+        if (root_->split && root_->children.empty()) {
+            // A split that lost every child is not a tree add() can
+            // land in (no leaf to find): back to the empty root leaf.
+            root_ = std::make_unique<Node>();
+        }
     }
-    if (contains(panel)) {
-        return;  // already docked: the caller activates instead
+    if (!root_->split && root_->tabs.empty()) {
+        root_->active = 0;  // the empty root leaf stays - the invariant
     }
-    Node* target = leaf_at_index(*root_, placement.leaf);
-    // A whole-tree split: only for a side placement on a tree that
-    // already holds something (an empty tree falls through to the
-    // fill below, like any side placement with nothing to side
-    // against).
-    const bool root_split =
-        placement.at_root && placement.area != DockPlacement::Area::center &&
-        (root_->split || !root_->tabs.empty());
-    if (root_split) {
-        target = root_.get();
-    }
-    if (target == nullptr || (target->split && !root_split)) {
-        return;
-    }
-    const std::string id{panel};
-    if (!root_split && (placement.area == DockPlacement::Area::center ||
-                        target->tabs.empty())) {
-        // CENTER fills the target leaf - and so does a side placement
-        // with nothing to side against. Splitting an empty leaf moves
-        // its (empty) payload into a sibling that resolve() paints as
-        // a phantom pane of dead chrome; the stage-15 default layout
-        // hit this daily - editor placed left, then plot right, on the
-        // fresh empty root left a ghost leaf holding half the dock
-        // until a close happened to prune it.
-        target->tabs.push_back(id);
-        target->active = static_cast<int>(target->tabs.size()) - 1;
-        return;
-    }
-    // A side placement: the target leaf's payload moves into one side
-    // of a fresh split, a new leaf takes the other. left/right split
-    // horizontally (side by side), top/bottom vertically.
-    auto fresh = std::make_unique<Node>();
-    fresh->tabs.push_back(id);
-    fresh->active = 0;
+}
 
-    auto moved = std::make_unique<Node>(std::move(*target));
-    Node& split = *target;  // the node object is reused as the split
+void DockTree::erase_tab(Node& leaf, std::size_t tab) {
+    leaf.tabs.erase(leaf.tabs.begin() + static_cast<std::ptrdiff_t>(tab));
+    if (static_cast<int>(tab) < leaf.active) {
+        --leaf.active;  // an earlier tab left: same tab stays in front
+    }
+    if (leaf.active >= static_cast<int>(leaf.tabs.size())) {
+        leaf.active = leaf.tabs.empty()
+                          ? 0
+                          : static_cast<int>(leaf.tabs.size()) - 1;
+    }
+}
+
+DockTree::Node* DockTree::parent_of(Node& node, Node& child, int* index) {
+    if (&node == &child || !node.split) {
+        return nullptr;  // the root is its own nobody's child
+    }
+    for (std::size_t i = 0; i < node.children.size(); ++i) {
+        if (node.children[i].get() == &child) {
+            if (index != nullptr) {
+                *index = static_cast<int>(i);
+            }
+            return &node;
+        }
+    }
+    for (const std::unique_ptr<Node>& kid : node.children) {
+        if (Node* found = parent_of(*kid, child, index)) {
+            return found;
+        }
+    }
+    return nullptr;
+}
+
+DockTree::Node* DockTree::wrap(Node& node, DockDir dir, bool before,
+                               float share, std::unique_ptr<Node> fresh) {
+    Node* landed = fresh.get();
+    auto moved = std::make_unique<Node>(std::move(node));
+    Node& split = node;  // the node object is reused as the split
     split.split = true;
-    split.dir = (placement.area == DockPlacement::Area::left ||
-                 placement.area == DockPlacement::Area::right)
-                    ? DockDir::horizontal
-                    : DockDir::vertical;
-    const bool before = placement.area == DockPlacement::Area::left ||
-                        placement.area == DockPlacement::Area::top;
+    split.dir = dir;
     split.tabs.clear();
     split.active = 0;
     split.children.clear();
     split.weights.clear();
-    // The new leaf's share of the pair; 0 (unset) = the even split.
-    float share = placement.weight > 0.0f ? placement.weight : 0.5f;
-    share = std::clamp(share, kMinWeight, 1.0f - kMinWeight);
     if (before) {
         split.children.push_back(std::move(fresh));
         split.children.push_back(std::move(moved));
@@ -165,23 +172,289 @@ void DockTree::add(std::string_view panel, DockPlacement placement) {
         split.children.push_back(std::move(fresh));
         split.weights = {1.0f - share, share};
     }
+    return landed;
+}
+
+DockTree::Node* DockTree::insert_leaf(Node& root, Node& target,
+                                      DockPlacement placement,
+                                      std::unique_ptr<Node> fresh) {
+    const DockPlacement::Area area = placement.area;
+
+    // The fills: center, or any side placement with nothing to side
+    // against. Splitting empty chrome moves its (empty) payload into a
+    // sibling that resolve() paints as a phantom pane of dead widgets
+    // - the stage-15 ghost leaf hit this daily. The panel just fills
+    // the leaf, the same answer center always gives.
+    if (area == DockPlacement::Area::center ||
+        (!target.split && target.tabs.empty())) {
+        target.tabs.push_back(std::move(fresh->tabs.front()));
+        target.active = static_cast<int>(target.tabs.size()) - 1;
+        return &target;
+    }
+
+    const bool before = area == DockPlacement::Area::left ||
+                        area == DockPlacement::Area::top;
+    const DockDir dir =
+        (area == DockPlacement::Area::left ||
+         area == DockPlacement::Area::right)
+            ? DockDir::horizontal
+            : DockDir::vertical;
+    // The new leaf's share of the target's span; 0 (unset) = the
+    // even split.
+    float share = placement.weight > 0.0f ? placement.weight : 0.5f;
+    share = std::clamp(share, kMinWeight, 1.0f - kMinWeight);
+
+    // The whole-tree placement: `target` is the root split (only the
+    // at_root redirect hands a split here). A matching axis FUSES -
+    // the new leaf spans the full width/height as one more root child,
+    // every existing weight scaled by its cut, which is the same
+    // relative shrink a wrap would hand them without the nesting; a
+    // mismatched axis wraps the whole tree.
+    if (target.split) {
+        if (target.dir == dir) {
+            float total = 0.0f;
+            for (float w : target.weights) {
+                total += std::max(kMinWeight, w);
+            }
+            if (total <= 0.0f) {
+                total = 1.0f;
+            }
+            for (float& w : target.weights) {
+                w = std::max(kMinWeight, w * (1.0f - share));
+            }
+            Node* landed = fresh.get();
+            const std::size_t at = before ? 0 : target.children.size();
+            target.children.insert(
+                target.children.begin() +
+                    static_cast<std::ptrdiff_t>(at),
+                std::move(fresh));
+            target.weights.insert(
+                target.weights.begin() +
+                    static_cast<std::ptrdiff_t>(at),
+                std::max(kMinWeight, total * share));
+            return landed;
+        }
+        return wrap(target, dir, before, share, std::move(fresh));
+    }
+
+    // A leaf target with payload: fuse into the parent split when its
+    // axis matches. The new leaf takes its share of the TARGET's span
+    // - the target child's weight splits, the siblings keep theirs -
+    // so the pixels are exactly the nested spelling's, one flatter
+    // tree (the splitter between the pair is the boundary the drag
+    // moves, with no intermediate split to confuse it).
+    int target_at = -1;
+    Node* parent = parent_of(root, target, &target_at);
+    if (parent != nullptr && parent->dir == dir) {
+        const float span =
+            std::max(kMinWeight,
+                     parent->weights[static_cast<std::size_t>(target_at)]);
+        parent->weights[static_cast<std::size_t>(target_at)] =
+            std::max(kMinWeight, span * (1.0f - share));
+        const std::size_t at = before
+                                   ? static_cast<std::size_t>(target_at)
+                                   : static_cast<std::size_t>(target_at) + 1;
+        Node* landed = fresh.get();
+        parent->children.insert(
+            parent->children.begin() + static_cast<std::ptrdiff_t>(at),
+            std::move(fresh));
+        parent->weights.insert(
+            parent->weights.begin() + static_cast<std::ptrdiff_t>(at),
+            std::max(kMinWeight, span * share));
+        return landed;
+    }
+
+    // No matching split to join: the target's payload moves into one
+    // side of a fresh split, the new leaf takes the other. left/right
+    // split horizontally (side by side), top/bottom vertically.
+    return wrap(target, dir, before, share, std::move(fresh));
+}
+
+DockTree::Node* DockTree::node_at(const std::vector<int>& path) {
+    Node* node = root_.get();
+    for (int index : path) {
+        if (node == nullptr || !node->split ||
+            static_cast<std::size_t>(index) >= node->children.size()) {
+            return nullptr;
+        }
+        node = node->children[static_cast<std::size_t>(index)].get();
+    }
+    return node;
+}
+
+void DockTree::add(std::string_view panel, DockPlacement placement) {
+    if (panel.empty()) {
+        return;  // the shell never hands an empty id; a no-op beats a crash
+    }
+    if (contains(panel)) {
+        return;  // already docked: the caller re-docks through move()
+    }
+    Node* target = leaf_at_index(*root_, placement.leaf);
+    if (target == nullptr) {
+        return;
+    }
+    auto fresh = std::make_unique<Node>();
+    fresh->tabs.emplace_back(panel);
+    fresh->active = 0;
+    // A whole-tree split: only for a side placement on a tree that
+    // already holds something (an empty tree fills, like any side
+    // placement with nothing to side against).
+    Node& dst = placement.at_root &&
+                        placement.area != DockPlacement::Area::center &&
+                        (root_->split || !root_->tabs.empty())
+                    ? *root_
+                    : *target;
+    (void)insert_leaf(*root_, dst, placement, std::move(fresh));
+}
+
+void DockTree::move(std::string_view panel, DockPlacement placement) {
+    // The source: the leaf holding the tab, and the tab's slot in it.
+    Node* src = nullptr;
+    std::size_t tab = 0;
+    const std::function<bool(Node&)> find = [&](Node& n) {
+        if (!n.split) {
+            for (std::size_t i = 0; i < n.tabs.size(); ++i) {
+                if (n.tabs[i] == panel) {
+                    src = &n;
+                    tab = i;
+                    return true;
+                }
+            }
+            return false;
+        }
+        for (const std::unique_ptr<Node>& child : n.children) {
+            if (find(*child)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (!find(*root_)) {
+        return;  // docked nowhere: nothing to re-dock
+    }
+    Node* target = leaf_at_index(*root_, placement.leaf);
+    if (target == nullptr) {
+        return;
+    }
+    const std::string id{panel};
+    if (placement.area == DockPlacement::Area::center) {
+        if (target == src) {
+            activate(panel);  // onto its own strip: a reorder, not a move
+            return;
+        }
+        // The retab: out of the old leaf, the front tab of the new one
+        // (a dropped tab is the selected tab).
+        erase_tab(*src, tab);
+        target->tabs.push_back(id);
+        target->active = static_cast<int>(target->tabs.size()) - 1;
+        tidy();
+        return;
+    }
+    // A side placement. The at_root redirect and the leaf target share
+    // insert_leaf; the only move-specific shape is the source landing
+    // on itself.
+    Node& dst = placement.at_root &&
+                        (root_->split || !root_->tabs.empty())
+                    ? *root_
+                    : *target;
+    if (&dst == src && src->tabs.size() == 1) {
+        activate(panel);  // a leaf splitting around only itself: nothing
+                          // to side against - the tab just fronts
+        return;
+    }
+    auto fresh = std::make_unique<Node>();
+    fresh->tabs.push_back(id);
+    fresh->active = 0;
+    if (&dst == src) {
+        // Out of its own leaf FIRST: the wrap below moves the leaf's
+        // remaining tabs as the split's other side, and the payload
+        // must not ride along twice. The leaf keeps its other tabs,
+        // so nothing prunes here.
+        erase_tab(*src, tab);
+        (void)insert_leaf(*root_, dst, placement, std::move(fresh));
+    } else {
+        // The new leaf first, the erase after: insert_leaf never moves
+        // the source node (it wraps or fuses around the TARGET - the
+        // wrap reuses the target's object, the fuse pushes unique_ptrs
+        // whose pointees stay put), while the erase can empty the
+        // source and the prune that follows re-shapes the tree.
+        (void)insert_leaf(*root_, dst, placement, std::move(fresh));
+        erase_tab(*src, tab);
+    }
+    tidy();
+}
+
+void DockTree::move_tab(std::string_view panel, int leaf, int index) {
+    Node* src = nullptr;
+    std::size_t tab = 0;
+    const std::function<bool(Node&)> find = [&](Node& n) {
+        if (!n.split) {
+            for (std::size_t i = 0; i < n.tabs.size(); ++i) {
+                if (n.tabs[i] == panel) {
+                    src = &n;
+                    tab = i;
+                    return true;
+                }
+            }
+            return false;
+        }
+        for (const std::unique_ptr<Node>& child : n.children) {
+            if (find(*child)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (!find(*root_)) {
+        return;
+    }
+    Node* target = leaf_at_index(*root_, leaf);
+    if (target == nullptr) {
+        return;
+    }
+    const std::string id{panel};
+    if (target == src) {
+        // The reorder inside one strip: erase and reinsert, with the
+        // front tab following its own move or stepping past whatever
+        // slid in ahead of it.
+        const bool was_front = static_cast<int>(tab) == src->active;
+        const std::size_t count = src->tabs.size();
+        src->tabs.erase(src->tabs.begin() +
+                        static_cast<std::ptrdiff_t>(tab));
+        if (static_cast<int>(tab) < src->active) {
+            --src->active;
+        }
+        const int at = std::clamp(index, 0,
+                                  static_cast<int>(count) - 1);
+        src->tabs.insert(src->tabs.begin() +
+                         static_cast<std::ptrdiff_t>(at), id);
+        if (was_front) {
+            src->active = at;
+        } else if (at <= src->active) {
+            ++src->active;
+        }
+        return;
+    }
+    // The retab: out of the old strip, into the new one at `index`,
+    // and the dropped tab fronts its new leaf.
+    erase_tab(*src, tab);
+    const int at =
+        std::clamp(index, 0, static_cast<int>(target->tabs.size()));
+    target->tabs.insert(target->tabs.begin() +
+                        static_cast<std::ptrdiff_t>(at), id);
+    target->active = at;
+    tidy();
 }
 
 void DockTree::remove(std::string_view panel) {
+    Node* found = nullptr;
+    std::size_t tab = 0;
     const std::function<bool(Node&)> walk = [&](Node& n) {
         if (!n.split) {
             for (std::size_t i = 0; i < n.tabs.size(); ++i) {
                 if (n.tabs[i] == panel) {
-                    n.tabs.erase(n.tabs.begin() +
-                                 static_cast<std::ptrdiff_t>(i));
-                    if (static_cast<int>(i) < n.active) {
-                        --n.active;  // an earlier tab left: same tab stays in front
-                    }
-                    if (n.active >= static_cast<int>(n.tabs.size())) {
-                        n.active = n.tabs.empty()
-                                       ? 0
-                                       : static_cast<int>(n.tabs.size()) - 1;
-                    }
+                    found = &n;
+                    tab = i;
                     return true;
                 }
             }
@@ -197,17 +470,11 @@ void DockTree::remove(std::string_view panel) {
     if (!walk(*root_)) {
         return;
     }
-    if (root_->split) {
-        prune(*root_);
+    erase_tab(*found, tab);
+    if (maximized_ == panel) {
+        restore();  // the zoomed panel left the tree: no stale zoom
     }
-    if (root_->split && root_->children.empty()) {
-        // A split that lost every child is not a tree add() can land in
-        // (no leaf to find): back to the empty root leaf.
-        root_ = std::make_unique<Node>();
-    }
-    if (!root_->split && root_->tabs.empty()) {
-        root_->active = 0;  // the empty root leaf stays - the invariant
-    }
+    tidy();
 }
 
 void DockTree::activate(std::string_view panel) {
@@ -246,6 +513,46 @@ bool DockTree::contains(std::string_view panel) const {
 
 DockTree::Layout DockTree::resolve(const Rect& bounds) const {
     Layout out;
+
+    // The zoom projection: one leaf, the whole bounds, no splitters.
+    // The tree underneath is untouched - the next restore() answers
+    // the full layout again, and every introspector (leaf_count,
+    // panels, leaf_of) keeps reading the whole tree.
+    if (!maximized_.empty()) {
+        const Node* zoomed = nullptr;
+        const std::function<bool(const Node&)> find = [&](const Node& n) {
+            if (!n.split) {
+                for (const std::string& tab : n.tabs) {
+                    if (tab == maximized_) {
+                        zoomed = &n;
+                        return true;
+                    }
+                }
+                return false;
+            }
+            for (const std::unique_ptr<Node>& child : n.children) {
+                if (find(*child)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        (void)find(*root_);
+        if (zoomed != nullptr) {
+            LeafRect leaf;
+            leaf.leaf = 0;
+            leaf.rect = bounds;
+            leaf.tabs = &zoomed->tabs;
+            leaf.active = zoomed->tabs.empty() ? 0 : zoomed->active;
+            out.leaves.push_back(leaf);
+            return out;  // no splitters: nothing drags while zoomed
+        }
+        // A zoom the tree no longer holds cannot happen through the
+        // public seam (remove/clear/from_json drop it); falling
+        // through to the full walk keeps a stale id from painting a
+        // hole instead of a layout.
+    }
+
     int next_leaf = 0;
 
     const std::function<void(const Node&, const Rect&, const std::vector<int>&)>
@@ -313,14 +620,7 @@ DockTree::Layout DockTree::resolve(const Rect& bounds) const {
 }
 
 void DockTree::apply_drag(const SplitterRect& splitter, float position) {
-    Node* node = root_.get();
-    for (int index : splitter.path) {
-        if (node == nullptr || !node->split ||
-            static_cast<std::size_t>(index) >= node->children.size()) {
-            return;
-        }
-        node = node->children[static_cast<std::size_t>(index)].get();
-    }
+    Node* node = node_at(splitter.path);
     if (node == nullptr || !node->split ||
         splitter.first_child + 1 >= node->children.size()) {
         return;
@@ -349,11 +649,41 @@ void DockTree::apply_drag(const SplitterRect& splitter, float position) {
     node->weights[b] = pair * (1.0f - frac);
 }
 
+void DockTree::maximize(std::string_view panel) {
+    if (!contains(panel)) {
+        return;  // zooming a panel the tree does not hold is dead state
+    }
+    maximized_.assign(panel);
+}
+
+void DockTree::restore() { maximized_.clear(); }
+
+void DockTree::distribute(const SplitterRect& splitter) {
+    Node* node = node_at(splitter.path);
+    if (node == nullptr || !node->split) {
+        return;  // a stale band: the tree moved under it
+    }
+    // Even shares: equal weights, normalized to the split at resolve
+    // time like every other weight.
+    std::fill(node->weights.begin(), node->weights.end(), 1.0f);
+}
+
 int DockTree::leaf_of(std::string_view panel) const {
     const std::vector<const Node*> leaves = leaves_of(*root_);
     for (std::size_t i = 0; i < leaves.size(); ++i) {
         for (const std::string& tab : leaves[i]->tabs) {
             if (tab == panel) {
+                return static_cast<int>(i);
+            }
+        }
+    }
+    return -1;
+}
+
+int DockTree::tab_index(std::string_view panel) const {
+    for (const Node* leaf : leaves_of(*root_)) {
+        for (std::size_t i = 0; i < leaf->tabs.size(); ++i) {
+            if (leaf->tabs[i] == panel) {
                 return static_cast<int>(i);
             }
         }
@@ -452,9 +782,9 @@ std::unique_ptr<DockTree::Node> DockTree::node_from_json(
     node->split = true;
     node->dir = horizontal ? DockDir::horizontal : DockDir::vertical;
     for (const json::Value& child : *children->as_array()) {
-        const json::Object* wrap = child.as_object();
+        const json::Object* wrap_obj = child.as_object();
         const json::Value* wrapped =
-            wrap == nullptr ? &child : wrap->find("node");
+            wrap_obj == nullptr ? &child : wrap_obj->find("node");
         if (wrapped == nullptr) {
             wrapped = &child;
         }
@@ -468,8 +798,8 @@ std::unique_ptr<DockTree::Node> DockTree::node_from_json(
             continue;
         }
         float weight = 1.0f;
-        if (wrap != nullptr) {
-            const json::Value* w = wrap->find("w");
+        if (wrap_obj != nullptr) {
+            const json::Value* w = wrap_obj->find("w");
             if (w != nullptr && w->is_real() && w->get_real().value_or(1.0) > 0.0) {
                 weight = static_cast<float>(w->get_real().value_or(1.0));
             }
@@ -498,6 +828,8 @@ bool DockTree::from_json(const ws::settings::json::Value& value,
         return false;
     }
     root_ = std::move(parsed);
+    restore();  // a restored layout starts unzoomed (the zoom is
+                // transient state, never part of the saved shape)
     // One panel, one tab: a hand-edited or merged layout may name an id
     // twice, and a doubled id is two leaves fighting over one instance.
     std::unordered_set<std::string> seen;
@@ -523,18 +855,13 @@ bool DockTree::from_json(const ws::settings::json::Value& value,
         }
     };
     dedupe(*root_);
-    if (root_->split) {
-        prune(*root_);
-        if (root_->split && root_->children.empty()) {
-            root_ = std::make_unique<Node>();
-        }
-    }
-    if (!root_->split && root_->tabs.empty()) {
-        root_->active = 0;
-    }
+    tidy();
     return true;
 }
 
-void DockTree::clear() { root_ = std::make_unique<Node>(); }
+void DockTree::clear() {
+    root_ = std::make_unique<Node>();
+    restore();
+}
 
 }  // namespace ws::ui::shell
