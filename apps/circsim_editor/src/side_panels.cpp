@@ -18,13 +18,17 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include <ws/core/assert.hpp>
+#include <ws/circsim/plot.hpp>
 #include <ws/input/input.hpp>
 #include <ws/spice/parse.hpp>
 #include <ws/ui/renderer2d.hpp>
@@ -222,7 +226,10 @@ void part_text_row(Editor& ed, gui::GuiContext& gui,
 
 // The per-type field rows for one analysis entry; every valid change
 // pushes SetAnalysis. Numbers parse through ws::spice's grammar; an
-// invalid value keeps the old and notes the status line.
+// invalid value keeps the old and notes the status line. The labels
+// lead with the plain word and keep the SPICE token in parentheses
+// ("step (tstep)", "begin (tstart)"): the panel teaches the deck's
+// vocabulary while it speaks the user's.
 void analysis_fields(Editor& ed, gui::GuiContext& gui,
                      gui::LayoutCursor& layout,
                      const gui::ChromeTheme& theme, std::size_t index) {
@@ -269,57 +276,67 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
             std::get_if<ws::circsim::DcSpec>(&spec)) {
         const std::string skey = key + ".dc";
         char* src = field_buf(ed, skey + ".source", dc->source);
-        if (text_input_tracked(ed, gui, layout, theme, "source##" + skey +
+        if (text_input_tracked(ed, gui, layout, theme, "source (swept)##" +
+                                                              skey +
                                                               ".source",
                                src, 128)) {
             ws::circsim::DcSpec next = *dc;
             next.source = src;
             push_set_analysis(*ed.doc, index, next);
         }
-        number_row("start", skey, dc->start, [&](double v) {
+        number_row("begin (start)", skey, dc->start, [&](double v) {
             ws::circsim::DcSpec next = *dc;
             next.start = v;
             push_set_analysis(*ed.doc, index, next);
         });
-        number_row("stop", skey, dc->stop, [&](double v) {
+        number_row("end (stop)", skey, dc->stop, [&](double v) {
             ws::circsim::DcSpec next = *dc;
             next.stop = v;
             push_set_analysis(*ed.doc, index, next);
         });
-        number_row("step", skey, dc->step, [&](double v) {
+        number_row("step (increment)", skey, dc->step, [&](double v) {
             ws::circsim::DcSpec next = *dc;
             next.step = v;
             push_set_analysis(*ed.doc, index, next);
         });
+        hint_line(layout, theme,
+                  "Sweeps the named source from begin to end, step apart");
         return;
     }
     if (const ws::circsim::TranSpec* tran =
             std::get_if<ws::circsim::TranSpec>(&spec)) {
         const std::string skey = key + ".tran";
+        hint_line(layout, theme,
+                  "Signals over time: step = the output interval, "
+                  "begin/end = the window");
         // 0 spells "unset" for the optional pair (tstart/tmax), which
         // the card layer treats exactly like nullopt's defaults.
-        number_row("tstep", skey, tran->tstep, [&](double v) {
+        number_row("step (tstep)", skey, tran->tstep, [&](double v) {
             ws::circsim::TranSpec next = *tran;
             next.tstep = v;
             push_set_analysis(*ed.doc, index, next);
         });
-        number_row("tstop", skey, tran->tstop, [&](double v) {
+        number_row("end (tstop)", skey, tran->tstop, [&](double v) {
             ws::circsim::TranSpec next = *tran;
             next.tstop = v;
             push_set_analysis(*ed.doc, index, next);
         });
-        number_row("tstart", skey, tran->tstart.value_or(0.0),
+        number_row("begin (tstart)", skey, tran->tstart.value_or(0.0),
                    [&](double v) {
                        ws::circsim::TranSpec next = *tran;
                        next.tstart = v > 0.0 ? std::optional<double>{v}
                                              : std::nullopt;
                        push_set_analysis(*ed.doc, index, next);
                    });
-        number_row("tmax", skey, tran->tmax.value_or(0.0), [&](double v) {
-            ws::circsim::TranSpec next = *tran;
-            next.tmax = v > 0.0 ? std::optional<double>{v} : std::nullopt;
-            push_set_analysis(*ed.doc, index, next);
-        });
+        number_row("max step (tmax)", skey, tran->tmax.value_or(0.0),
+                   [&](double v) {
+                       ws::circsim::TranSpec next = *tran;
+                       next.tmax = v > 0.0 ? std::optional<double>{v}
+                                           : std::nullopt;
+                       push_set_analysis(*ed.doc, index, next);
+                   });
+        hint_line(layout, theme,
+                  "0 on begin/max step leaves them at SPICE's defaults");
         bool flag = tran->uic;
         if (gui::checkbox(gui, layout, theme, "uic (skip the bias point)",
                           flag)) {
@@ -358,7 +375,7 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
         char n_text[32];
         std::snprintf(n_text, sizeof n_text, "%d", ac->n);
         char* n_buf = field_buf(ed, skey + ".n", n_text);
-        if (text_input_tracked(ed, gui, layout, theme, "points##" + skey +
+        if (text_input_tracked(ed, gui, layout, theme, "points (n)##" + skey +
                                                              ".n",
                                n_buf, 128)) {
             char* end = nullptr;
@@ -372,21 +389,509 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
                           "' is not a point count - kept the old value");
             }
         }
-        number_row("fstart", skey, ac->fstart, [&](double v) {
+        number_row("begin (fstart)", skey, ac->fstart, [&](double v) {
             ws::circsim::AcSpec next = *ac;
             next.fstart = v;
             push_set_analysis(*ed.doc, index, next);
         });
-        number_row("fstop", skey, ac->fstop, [&](double v) {
+        number_row("end (fstop)", skey, ac->fstop, [&](double v) {
             ws::circsim::AcSpec next = *ac;
             next.fstop = v;
             push_set_analysis(*ed.doc, index, next);
         });
+        hint_line(layout, theme,
+                  "Small-signal sweep from begin to end frequency");
         return;
     }
 }
 
 }  // namespace
+
+// --- the source waveform editor (the pure half: side_panels.hpp) -------------
+
+namespace {
+
+// Case-insensitive head match: does `text` start with `head`?
+[[nodiscard]] bool starts_with_ci(const std::string& text, const char* head) {
+    const std::size_t n = std::strlen(head);
+    if (text.size() < n) {
+        return false;
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+        const char a = static_cast<char>(std::tolower(
+            static_cast<unsigned char>(text[i])));
+        const char b = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(head[i])));
+        if (a != b) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The numbers inside a "(...)" form: split on spaces/commas/tabs and
+// parse each through ws::spice's grammar. False when a token is not a
+// number (the caller answers Raw - never a silent rewrite).
+[[nodiscard]] bool split_numbers(const std::string& inside,
+                                 std::vector<double>& out) {
+    std::size_t at = 0;
+    while (at < inside.size()) {
+        const std::size_t sep = inside.find_first_of(" \t,", at);
+        const std::string token =
+            inside.substr(at, sep == std::string::npos ? std::string::npos
+                                                       : sep - at);
+        if (!token.empty()) {
+            const auto parsed = ws::spice::parse_number(token);
+            if (!parsed.has_value()) {
+                return false;
+            }
+            out.push_back(*parsed);
+        }
+        if (sep == std::string::npos) {
+            break;
+        }
+        at = sep + 1;
+    }
+    return true;
+}
+
+}  // namespace
+
+SourceWave parse_source_wave(const std::string& text) {
+    SourceWave w;
+    // Blank (or absent) is the DC-only form.
+    const std::size_t first = text.find_first_not_of(" \t");
+    if (first == std::string::npos) {
+        w.kind = SourceWave::Kind::None;
+        return w;
+    }
+    const std::size_t last = text.find_last_not_of(" \t");
+    const std::string trimmed = text.substr(first, last - first + 1);
+
+    struct Head {
+        const char* name;
+        SourceWave::Kind kind;
+        std::size_t numbers;
+    };
+    static const Head kHeads[] = {
+        {"SIN(", SourceWave::Kind::Sin, 6},
+        {"PULSE(", SourceWave::Kind::Pulse, 7},
+        {"EXP(", SourceWave::Kind::Exp, 6},
+        {"PWL(", SourceWave::Kind::Pwl, 0},
+    };
+    for (const Head& head : kHeads) {
+        if (!starts_with_ci(trimmed, head.name)) {
+            continue;
+        }
+        // The inside: past the head, up to the LAST ')' (a missing one
+        // is tolerated the way ws::spice's own tokenizer tolerates a
+        // split-across-tokens form - the numbers are what matter).
+        const std::size_t open = trimmed.find('(');
+        std::size_t close = trimmed.find_last_of(')');
+        if (close == std::string::npos || close < open) {
+            close = trimmed.size();
+        }
+        const std::string inside =
+            trimmed.substr(open + 1, close - open - 1);
+        if (head.kind == SourceWave::Kind::Pwl) {
+            // Free-form corners: kept verbatim, edited as text.
+            w.kind = SourceWave::Kind::Pwl;
+            w.raw = trimmed;
+            return w;
+        }
+        std::vector<double> numbers;
+        if (!split_numbers(inside, numbers) ||
+            numbers.size() > head.numbers) {
+            break;  // unreadable or over-long: the Raw escape below
+        }
+        w.kind = head.kind;
+        for (std::size_t i = 0; i < head.numbers && i < numbers.size(); ++i) {
+            w.p[i] = numbers[i];
+        }
+        return w;
+    }
+    w.kind = SourceWave::Kind::Raw;
+    w.raw = trimmed;
+    return w;
+}
+
+std::string compose_source_wave(const SourceWave& w) {
+    switch (w.kind) {
+        case SourceWave::Kind::None:
+            return {};
+        case SourceWave::Kind::Sin:
+        case SourceWave::Kind::Pulse:
+        case SourceWave::Kind::Exp: {
+            const char* head = w.kind == SourceWave::Kind::Sin    ? "SIN("
+                               : w.kind == SourceWave::Kind::Pulse ? "PULSE("
+                                                                   : "EXP(";
+            const std::size_t n =
+                w.kind == SourceWave::Kind::Pulse ? 7 : 6;
+            std::string out = head;
+            for (std::size_t i = 0; i < n; ++i) {
+                char number[64];
+                std::snprintf(number, sizeof number, "%.12g", w.p[i]);
+                if (i != 0) {
+                    out += ' ';
+                }
+                out += number;
+            }
+            out += ')';
+            return out;
+        }
+        case SourceWave::Kind::Pwl:
+        case SourceWave::Kind::Raw:
+            return w.raw;
+    }
+    return {};
+}
+
+// --- the preview's sampler (the pure half: side_panels.hpp) --------------------
+
+namespace {
+
+// The curve forms' sample budget: SIN and EXP land on this many
+// uniform points (their breaks ride beside it), ~2 px apart on a
+// panel-width preview - past that the polyline is denser than the
+// screen and the extra points are pure tessellation cost.
+constexpr int kCurveSamples = 160;
+
+// SIN's value at t: vo before the delay, then the damped oscillation
+// ngspice's manual spells - the phase is DEGREES on the deck (SPICE's
+// own convention) and radians inside sin().
+[[nodiscard]] double sin_value(const SourceWave& w, double t) {
+    const double vo = w.p[0], va = w.p[1], freq = w.p[2], td = w.p[3];
+    const double theta = w.p[4], phase = w.p[5];
+    if (t < td) {
+        return vo;
+    }
+    const double since = t - td;
+    const double damp = theta != 0.0 ? std::exp(-theta * since) : 1.0;
+    const double rad = 2.0 * 3.14159265358979323846 * freq * since +
+                       phase * 3.14159265358979323846 / 180.0;
+    return vo + va * damp * std::sin(rad);
+}
+
+// One PULSE cycle's value at tau (seconds past the cycle's start);
+// tau >= 0. The branch order IS the ngspice grammar's: ramp, plateau,
+// fall, rest. A zero TR or TF never divides (tau < tr with tau >= 0
+// requires tr > 0), so a zero-width edge is the instant jump its
+// absent ramp means.
+[[nodiscard]] double pulse_once(double tau, double v1, double v2,
+                                double tr, double tf, double pw) {
+    if (tau < tr) {
+        return v1 + (v2 - v1) * tau / tr;
+    }
+    tau -= tr;
+    if (tau < pw) {
+        return v2;
+    }
+    tau -= pw;
+    if (tau < tf) {
+        return v2 + (v1 - v2) * tau / tf;
+    }
+    return v1;
+}
+
+// PULSE's value at t: v1 before the delay, then the cycle the modulo
+// picks (PER > 0 repeats; PER <= 0 is the single shot ngspice draws
+// once and holds v1 after).
+[[nodiscard]] double pulse_value(const SourceWave& w, double t) {
+    const double v1 = w.p[0], v2 = w.p[1], td = w.p[2];
+    const double tr = w.p[3], tf = w.p[4], pw = w.p[5], per = w.p[6];
+    if (t < td) {
+        return v1;
+    }
+    const double since = t - td;
+    if (per > 0.0) {
+        return pulse_once(std::fmod(since, per), v1, v2, tr, tf, pw);
+    }
+    return pulse_once(since, v1, v2, tr, tf, pw);
+}
+
+// EXP's approach factor: 1 - e^(-dt/tau), the ngspice segment shape.
+// tau == 0 is the instant step (the limit, not a division); the clamp
+// keeps a negative tau's explosion finite-or-infinite but never NaN
+// (e^x's own overflow answer), so the drawer's run-splitting is the
+// whole story.
+[[nodiscard]] double exp_factor(double dt, double tau) {
+    if (tau == 0.0) {
+        return 1.0;
+    }
+    const double x = -dt / tau;
+    if (x > 700.0) {
+        return -std::numeric_limits<double>::infinity();
+    }
+    if (x < -700.0) {
+        return 1.0;  // e^x underflowed: settled
+    }
+    return 1.0 - std::exp(x);
+}
+
+// EXP's value at t: v1 until TD1, the rise toward v2 with TAU1, and
+// past TD2 the fall's own approach SUBTRACTED from the risen value -
+// ngspice's manual keeps both exponentials alive (the tail settles at
+// v1, not v2: a rise-and-return, the EXP every scope shows).
+[[nodiscard]] double exp_value(const SourceWave& w, double t) {
+    const double v1 = w.p[0], v2 = w.p[1];
+    const double td1 = w.p[2], tau1 = w.p[3], td2 = w.p[4], tau2 = w.p[5];
+    if (t < td1) {
+        return v1;
+    }
+    const double rise = v1 + (v2 - v1) * exp_factor(t - td1, tau1);
+    if (t < td2) {
+        return rise;
+    }
+    return rise + (v1 - v2) * exp_factor(t - td2, tau2);
+}
+
+// PWL's corners from the raw text: the numbers inside the parens,
+// taken as (t, v) pairs. An odd tail is dropped (the mid-typing form
+// previews the complete pairs; the deck itself stays verbatim for the
+// text row). False when a token is not a number - no honest picture.
+[[nodiscard]] bool pwl_corners(const SourceWave& w,
+                               std::vector<double>& ts,
+                               std::vector<double>& vs) {
+    const std::size_t open = w.raw.find('(');
+    std::size_t close = w.raw.find_last_of(')');
+    if (close == std::string::npos ||
+        (open != std::string::npos && close < open)) {
+        close = w.raw.size();
+    }
+    const std::string inside = open == std::string::npos
+                                   ? w.raw
+                                   : w.raw.substr(open + 1,
+                                                  close - open - 1);
+    std::vector<double> nums;
+    if (!split_numbers(inside, nums)) {
+        return false;
+    }
+    const std::size_t pairs = nums.size() / 2u;
+    if (pairs == 0u) {
+        return false;  // not even one complete corner
+    }
+    ts.reserve(pairs);
+    vs.reserve(pairs);
+    for (std::size_t i = 0; i < pairs; ++i) {
+        const double t = nums[2u * i];
+        if (t < 0.0) {
+            return false;  // before the window's start: no honest clip
+        }
+        ts.push_back(t);
+        vs.push_back(nums[2u * i + 1u]);
+    }
+    return true;
+}
+
+// Adds one sample point (kept even when the value is non-finite - the
+// drawer splits the line there, and the y fit skips it).
+void push_point(std::vector<double>& ts, std::vector<double>& vs, double t,
+                double v) {
+    ts.push_back(t);
+    vs.push_back(v);
+}
+
+// Adds a break's two faces: just-before (the segment ending there) and
+// at (the segment starting there - the closed forms answer the right
+// side at their boundaries). A continuous form's pair is two samples
+// d apart with equal values; a zero-width edge's pair is the vertical
+// line the shape deserves.
+void push_break(std::vector<double>& ts, std::vector<double>& vs, double b,
+                double d,
+                const std::function<double(double)>& value_at) {
+    if (b - d > 0.0) {
+        push_point(ts, vs, b - d, value_at(b - d));
+    }
+    push_point(ts, vs, b, value_at(b));
+}
+
+}  // namespace
+
+WavePreview sample_source_wave(const SourceWave& w, double dc_value) {
+    WavePreview out;
+    for (double v : w.p) {
+        if (!std::isfinite(v)) {
+            return out;  // an imported deck can carry what fields gate out
+        }
+    }
+    // The samples per kind, then the shared finish below (sort, flat).
+    std::function<double(double)> value_at;
+    switch (w.kind) {
+        case SourceWave::Kind::None: {
+            if (!std::isfinite(dc_value)) {
+                return out;  // no level to draw: the value row says it
+            }
+            out.t_end = 1.0;  // a flat line's window is arbitrary
+            push_point(out.ts, out.vs, 0.0, dc_value);
+            push_point(out.ts, out.vs, out.t_end, dc_value);
+            break;
+        }
+        case SourceWave::Kind::Sin: {
+            const double td = w.p[3];
+            const double freq = w.p[2];
+            if (freq > 0.0) {
+                // Three cycles, or the delay plus one when the delay is
+                // the longer story - the window shows the hold AND at
+                // least a cycle of what follows it.
+                out.t_end = std::max(3.0 / freq, td + 1.0 / freq);
+            } else {
+                out.t_end = std::max(td, 0.0) + 1.0;  // the offset line
+            }
+            if (!(out.t_end > 0.0)) {
+                out.t_end = 1.0;
+            }
+            value_at = [&](double t) { return sin_value(w, t); };
+            for (int i = 0; i < kCurveSamples; ++i) {
+                const double t = out.t_end * static_cast<double>(i) /
+                                 static_cast<double>(kCurveSamples - 1);
+                push_point(out.ts, out.vs, t, value_at(t));
+            }
+            // The delay's jump (a phase != 0 sine steps at TD; a phase
+            // == 0 one is continuous and the pair costs nothing).
+            const double d = out.t_end * 1e-9;
+            if (td > 0.0 && td < out.t_end) {
+                push_break(out.ts, out.vs, td, d, value_at);
+            }
+            break;
+        }
+        case SourceWave::Kind::Pulse: {
+            const double td = w.p[2];
+            const double tr = w.p[3], tf = w.p[4], pw = w.p[5];
+            const double per = w.p[6];
+            const double single = tr + pw + tf;
+            if (per > 0.0) {
+                out.t_end = td + 2.0 * per;  // two full cycles
+            } else if (single > 0.0) {
+                // The single shot plus a quarter-length tail so the
+                // return to v1 reads as the pulse's end, not a cliff.
+                out.t_end = td + single + 0.25 * single;
+            } else {
+                out.t_end = td + 1.0;  // an instant spike: the rest line
+            }
+            if (!(out.t_end > 0.0)) {
+                out.t_end = 1.0;
+            }
+            value_at = [&](double t) { return pulse_value(w, t); };
+            push_point(out.ts, out.vs, 0.0, value_at(0.0));
+            // Every cycle's four breaks (delay, ramp-end, plateau-end,
+            // fall-end), each as its two faces.
+            const double d = out.t_end * 1e-9;
+            for (int k = 0; k < 1000; ++k) {
+                const double base = td + static_cast<double>(k) * per;
+                if (per > 0.0 && base >= out.t_end) {
+                    break;  // past the window's cycles
+                }
+                const double offs[4] = {0.0, tr, tr + pw, tr + pw + tf};
+                for (const double off : offs) {
+                    const double b = base + off;
+                    if (b > 0.0 && b < out.t_end) {
+                        push_break(out.ts, out.vs, b, d, value_at);
+                    }
+                }
+                if (per <= 0.0) {
+                    break;  // the single shot has no second cycle
+                }
+            }
+            push_point(out.ts, out.vs, out.t_end, value_at(out.t_end));
+            break;
+        }
+        case SourceWave::Kind::Exp: {
+            const double td1 = w.p[2], tau1 = w.p[3];
+            const double td2 = w.p[4], tau2 = w.p[5];
+            // The settling span: past each delay by 5 of its own tau
+            // (95% settled), then a 5% tail so the last event is not
+            // pinned to the frame's edge.
+            double span = std::max({td1, td2, 0.0});
+            if (tau1 != 0.0) {
+                span = std::max(span, td1 + 5.0 * std::fabs(tau1));
+            }
+            if (tau2 != 0.0) {
+                span = std::max(span, td2 + 5.0 * std::fabs(tau2));
+            }
+            out.t_end = span > 0.0 ? span * 1.05 : 1.0;
+            value_at = [&](double t) { return exp_value(w, t); };
+            for (int i = 0; i < kCurveSamples; ++i) {
+                const double t = out.t_end * static_cast<double>(i) /
+                                 static_cast<double>(kCurveSamples - 1);
+                push_point(out.ts, out.vs, t, value_at(t));
+            }
+            // Both delays' faces (a zero tau steps there).
+            const double d = out.t_end * 1e-9;
+            for (const double b : {td1, td2}) {
+                if (b > 0.0 && b < out.t_end) {
+                    push_break(out.ts, out.vs, b, d, value_at);
+                }
+            }
+            break;
+        }
+        case SourceWave::Kind::Pwl: {
+            if (!pwl_corners(w, out.ts, out.vs)) {
+                out.ts.clear();
+                out.vs.clear();
+                return out;  // not drawable
+            }
+            // ngspice holds v1 before the first corner; the window is
+            // the corners' own extent.
+            if (out.ts.front() > 0.0) {
+                out.ts.insert(out.ts.begin(), 0.0);
+                out.vs.insert(out.vs.begin(), out.vs.front());
+            }
+            out.t_end = out.ts.back();
+            if (out.ts.size() < 2u || !(out.t_end > 0.0)) {
+                out.ts.clear();
+                out.vs.clear();
+                return out;  // a single point is not a picture
+            }
+            break;
+        }
+        case SourceWave::Kind::Raw:
+            return out;  // never a guess over a text kept verbatim
+    }
+
+    // Ascending order: the breaks ride beside the grid and the pairs
+    // interleave. Equal times (a grid point ON a break) keep both -
+    // duplicates are a zero-length segment, harmless to the polyline.
+    std::vector<std::size_t> order(out.ts.size());
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        order[i] = i;
+    }
+    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        return out.ts[a] < out.ts[b];
+    });
+    std::vector<double> ts2;
+    std::vector<double> vs2;
+    ts2.reserve(out.ts.size());
+    vs2.reserve(out.vs.size());
+    for (const std::size_t i : order) {
+        ts2.push_back(out.ts[i]);
+        vs2.push_back(out.vs[i]);
+    }
+    out.ts = std::move(ts2);
+    out.vs = std::move(vs2);
+
+    // The shared finish: a finite sample must exist (a fully exploded
+    // form has no picture either), and `flat` means every sample
+    // finite AND equal - the one-line-one-label case (a non-finite
+    // sample breaks the line, so it is not a labeled level either).
+    bool any_finite = false;
+    bool all_equal = true;
+    double first = 0.0;
+    for (const double v : out.vs) {
+        if (!std::isfinite(v)) {
+            all_equal = false;
+            continue;
+        }
+        if (!any_finite) {
+            first = v;
+            any_finite = true;
+        } else if (v != first) {
+            all_equal = false;
+        }
+    }
+    out.flat = any_finite && all_equal;
+    out.drawable = any_finite && out.ts.size() >= 2u;
+    return out;
+}
 
 // --- the directives split/join (side_panels.hpp's contract) -------------------
 
@@ -786,6 +1291,350 @@ namespace {
 constexpr const char* const kPropertyTabs[] = {"Properties", "Netlist",
                                                "Simulation"};
 
+// True when the symbol is a source the waveform editor can drive: a
+// V/I Spice letter AND the `wave` param the editor composes into (a
+// .csym source without one keeps the generic rows - the editor never
+// writes a param the symbol's emit list would drop).
+[[nodiscard]] bool source_wave_editable(const ws::circsim::SymbolDef& sym) {
+    if (sym.spice_letter != 'V' && sym.spice_letter != 'I') {
+        return false;
+    }
+    for (const ws::circsim::ParamSpec& spec : sym.params) {
+        if (spec.key == "wave") {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The waveform format combo's items, index-matched to the template a
+// switch lands (parse_source_wave's Kind order, Pwl last because its
+// body stays the free-form text row).
+constexpr const char* const kWaveFormats[] = {"DC only", "Sine", "Pulse",
+                                              "Exponential", "Piecewise"};
+
+// One slot's label per kind: ngspice's parameter names, spelled for a
+// human (the SPICE token stays in the parens - the row teaches the
+// deck's word while it speaks the user's).
+struct WaveFieldLabel {
+    const char* label;
+};
+constexpr WaveFieldLabel kSinLabels[6] = {
+    {"Offset (VO)"},   {"Amplitude (VA)"}, {"Frequency (FREQ)"},
+    {"Delay (TD)"},    {"Damping (THETA)"}, {"Phase (PHASE)"}};
+constexpr WaveFieldLabel kPulseLabels[7] = {
+    {"Initial (V1)"},  {"Pulsed (V2)"},    {"Delay (TD)"},
+    {"Rise (TR)"},     {"Fall (TF)"},      {"Width (PW)"},
+    {"Period (PER)"}};
+constexpr WaveFieldLabel kExpLabels[6] = {
+    {"Initial (V1)"},    {"Pulsed (V2)"},      {"Rise delay (TD1)"},
+    {"Rise tau (TAU1)"}, {"Fall delay (TD2)"}, {"Fall tau (TAU2)"}};
+
+// --- the waveform preview (the picture of what the fields shape) -------------
+
+// The preview's geometry: a fixed-height flow rect the canvas draws
+// into in screen space (the Results plot's own spelling; the scroll
+// panel's clip keeps it inside the panel), the labels' margins around
+// its frame.
+constexpr float kPreviewHeight = 88.0f;
+constexpr float kPreviewMarginLeft = 44.0f;    // the y min/max labels
+constexpr float kPreviewMarginBottom = 18.0f;  // the window's end label
+constexpr float kPreviewMarginTop = 6.0f;
+constexpr float kPreviewMarginRight = 8.0f;
+
+// The series, split at non-finite samples (a negative tau explodes;
+// the line stops there instead of poisoning the tessellator with NaN
+// vertices) - the Results panel's own run rule.
+void stroke_preview_series(canvas::Canvas2D& rc,
+                           const std::vector<canvas::Point>& pts,
+                           std::uint32_t color) {
+    canvas::Paint paint;
+    paint.width = 2.0f;
+    paint.color = color;
+    paint.join = canvas::StrokeJoin::round;
+    paint.cap = canvas::StrokeCap::round;
+    std::size_t run = 0;
+    for (std::size_t i = 0; i <= pts.size(); ++i) {
+        const bool break_here = i == pts.size() || std::isnan(pts[i].x) ||
+                                std::isnan(pts[i].y);
+        if (break_here && run >= 2u) {
+            rc.stroke_polyline(pts.data() + (i - run),
+                               static_cast<int>(run), paint);
+        }
+        if (i == pts.size()) {
+            break;
+        }
+        run = break_here ? 0u : run + 1u;
+    }
+}
+
+// The preview: the waveform's own window mapped into a shallow well -
+// the frame, the zero line when zero is in range, the series in the
+// accent the selected tab's own underline wears, and the labels the
+// font can carry (a fontless theme draws the shape alone). No
+// interaction: it is a picture of the model, and the fields below it
+// are the hands.
+void draw_wave_preview(Editor& ed, gui::LayoutCursor& layout,
+                       const gui::ChromeTheme& theme,
+                       const WavePreview& pv) {
+    const gui::Rect box =
+        layout.next(layout.remaining_width(), kPreviewHeight);
+    const float iw =
+        box.width - kPreviewMarginLeft - kPreviewMarginRight;
+    const float ih =
+        box.height - kPreviewMarginTop - kPreviewMarginBottom;
+    if (iw < 24.0f || ih < 16.0f) {
+        return;  // too narrow to be worth a frame
+    }
+    const float fx = box.x + kPreviewMarginLeft;
+    const float fy = box.y + kPreviewMarginTop;
+
+    canvas::Canvas2D& rc = ed.properties_draw_canvas();
+    rc.set_view_scale(1.0f);  // identity: local == screen
+
+    // The well: the preview sits in a shallow control face so the rows
+    // around it cannot read as its labels.
+    rc.fill_rounded_rect(box.x, box.y, box.width, box.height,
+                         theme.corner_radius, theme.control_bg);
+    // The frame.
+    canvas::Paint frame;
+    frame.width = 1.0f;
+    frame.color = gui::dim(theme.text, 0.35f);
+    const canvas::Point quad[4] = {
+        {fx, fy}, {fx + iw, fy}, {fx + iw, fy + ih}, {fx, fy + ih}};
+    rc.stroke_polyline(quad, 4, frame, true);
+
+    // The y fit: the finite samples, padded by plot's expand_range.
+    double lo = std::numeric_limits<double>::infinity();
+    double hi = -std::numeric_limits<double>::infinity();
+    for (const double v : pv.vs) {
+        if (std::isfinite(v)) {
+            lo = std::min(lo, v);
+            hi = std::max(hi, v);
+        }
+    }
+    if (lo > hi) {
+        return;  // nothing finite (the sampler's own guard, again)
+    }
+    const ws::circsim::PlotRange yr = ws::circsim::expand_range(lo, hi);
+    const auto sx = [&](double t) {
+        return static_cast<float>(fx + t / pv.t_end * iw);
+    };
+    const auto sy = [&](double v) {
+        return static_cast<float>(fy + (yr.hi - v) / (yr.hi - yr.lo) * ih);
+    };
+
+    // The zero line, when zero is in range - the reference a
+    // waveform reads against.
+    if (yr.lo < 0.0 && yr.hi > 0.0) {
+        canvas::Paint zero;
+        zero.width = 1.0f;
+        zero.color = gui::dim(theme.text, 0.2f);
+        rc.stroke_line({fx, sy(0.0)}, {fx + iw, sy(0.0)}, zero);
+    }
+
+    // The series.
+    std::vector<canvas::Point> pts;
+    pts.reserve(pv.ts.size());
+    for (std::size_t i = 0; i < pv.ts.size(); ++i) {
+        const double v = pv.vs[i];
+        if (!std::isfinite(v)) {
+            pts.push_back({std::numeric_limits<float>::quiet_NaN(),
+                           std::numeric_limits<float>::quiet_NaN()});
+            continue;
+        }
+        pts.push_back({sx(pv.ts[i]), sy(v)});
+    }
+    stroke_preview_series(rc, pts, theme.control_on);
+
+    // The labels: the face the panel's own rows wear.
+    const ws::ui::r2d::Font* font =
+        theme.font != nullptr ? theme.font : ed.font;
+    if (font == nullptr || font->line_height() <= 0.0f) {
+        return;  // the shape alone still says the shape
+    }
+    const std::uint32_t label = gui::dim(theme.text, 0.55f);
+    if (pv.flat) {
+        // One line, one label: the level itself, just above the line
+        // (a flat form sits at the frame's vertical center by
+        // construction - expand_range pads it symmetrically).
+        const std::string text =
+            ws::circsim::format_eng(pv.vs.front());
+        const float w = rc.measure_text(text.c_str(), *font);
+        (void)rc.draw_text(fx + (iw - w) * 0.5f,
+                           sy(pv.vs.front()) - font->line_height() - 2.0f,
+                           text.c_str(), *font, label);
+        return;
+    }
+    const float lh = font->line_height();
+    // y max / y min, right-aligned into the left margin.
+    const std::string ymax = ws::circsim::format_eng(yr.hi);
+    const std::string ymin = ws::circsim::format_eng(yr.lo);
+    const float wmax = rc.measure_text(ymax.c_str(), *font);
+    const float wmin = rc.measure_text(ymin.c_str(), *font);
+    (void)rc.draw_text(fx - 5.0f - wmax, fy, ymax.c_str(), *font, label);
+    (void)rc.draw_text(fx - 5.0f - wmin, fy + ih - lh, ymin.c_str(), *font,
+                       label);
+    // The window's end, under the frame's right corner (its start is
+    // 0 - the frame's own left edge says it).
+    const std::string end = ws::circsim::format_eng(pv.t_end) + "s";
+    const float wend = rc.measure_text(end.c_str(), *font);
+    (void)rc.draw_text(fx + iw - wend, fy + ih + 2.0f, end.c_str(), *font,
+                       label);
+}
+
+// The source editor: the AC magnitude row plus the waveform section -
+// a format picker and one number field per parameter, the whole
+// `wave` param text composed/decomposed through parse/compose so the
+// deck line is never hand-typed. Every edit lands through
+// push_part_text, so the undo stack and the coalescing are the rows'
+// own story everywhere else in this panel.
+void source_wave_editor(Editor& ed, gui::GuiContext& gui,
+                        gui::LayoutCursor& layout,
+                        const gui::ChromeTheme& theme,
+                        const ws::circsim::Part& p) {
+    panel_section(layout, theme, "Source setup");
+
+    // The AC magnitude (the `ac` param): the small-signal level a .ac
+    // sweep reads; blank = none.
+    const auto ac_at = p.params.find("ac");
+    part_text_row(ed, gui, layout, theme, "AC magnitude", p.id, 2, "ac",
+                  ac_at != p.params.end() ? ac_at->second : "");
+    hint_line(layout, theme,
+              "Small-signal level for .ac sweeps - blank means none");
+
+    // The waveform (the `wave` param).
+    const auto wave_at = p.params.find("wave");
+    const std::string wave_text =
+        wave_at != p.params.end() ? wave_at->second : "";
+    SourceWave wave = parse_source_wave(wave_text);
+
+    // The format picker: selected re-derives from the model every
+    // frame (the view-of-model rule the analysis combo keeps); a REAL
+    // move lands the picked format's editable template - sane numbers
+    // the user then shapes, never a bare "SIN(".
+    int selected = wave.kind == SourceWave::Kind::None   ? 0
+                   : wave.kind == SourceWave::Kind::Sin   ? 1
+                   : wave.kind == SourceWave::Kind::Pulse ? 2
+                   : wave.kind == SourceWave::Kind::Exp   ? 3
+                   : wave.kind == SourceWave::Kind::Pwl   ? 4
+                                                          : -1;
+    const std::string fmt_key = part_field_key(p.id, 2, "wave") + ".fmt";
+    FieldBuf& fmt = field_of(ed, fmt_key);
+    if (fmt.stamp != ed.field_stamp) {
+        fmt.stamp = ed.field_stamp;
+        fmt.combo_open = false;
+    }
+    if (gui::combo(gui, layout, theme,
+                   ("Waveform##" + fmt_key).c_str(), kWaveFormats, 5,
+                   selected, fmt.combo_open) &&
+        selected >= 0) {
+        SourceWave next;  // the editable templates, one per format
+        switch (selected) {
+            case 1:
+                next.kind = SourceWave::Kind::Sin;
+                next.p[0] = 0.0; next.p[1] = 1.0; next.p[2] = 1000.0;
+                break;  // SIN(0 1 1k): a 1V 1kHz sine
+            case 2:
+                next.kind = SourceWave::Kind::Pulse;
+                next.p[0] = 0.0; next.p[1] = 5.0;
+                next.p[3] = 1e-6; next.p[4] = 1e-6;
+                next.p[5] = 1e-3; next.p[6] = 2e-3;
+                break;  // PULSE(0 5 0 1u 1u 1m 2m): a 5V square wave
+            case 3:
+                next.kind = SourceWave::Kind::Exp;
+                next.p[0] = 0.0; next.p[1] = 5.0;
+                next.p[3] = 1e-5; next.p[4] = 1e-3; next.p[5] = 1e-4;
+                break;  // EXP(0 5 0 10u 1m 100u): a rise-and-settle step
+            case 4:
+                next.kind = SourceWave::Kind::Pwl;
+                next.raw = "PWL(0 0 1m 5)";
+                break;  // corners: time/value pairs, free-form below
+            default:
+                next.kind = SourceWave::Kind::None;
+                break;  // DC only: the Value row is the whole story
+        }
+        push_part_text(*ed.doc, p.id, 2, "wave",
+                       compose_source_wave(next), "Set waveform");
+        ed.bump_edit_epoch();  // the field rows reload from the template
+    }
+
+    // The preview: the picture of what the fields below are shaping,
+    // re-derived from the model every frame (the fields' own
+    // view-of-model rule - a field edit lands and the very next draw
+    // shows the new shape). A form the sampler cannot picture draws
+    // nothing, never a guess: Raw, an unreadable PWL, a DC value that
+    // is not a number.
+    const double dc_level = [&] {
+        const auto parsed = ws::spice::parse_number(p.value);
+        return parsed.has_value()
+                   ? *parsed
+                   : std::numeric_limits<double>::quiet_NaN();
+    }();
+    const WavePreview preview = sample_source_wave(wave, dc_level);
+    if (preview.drawable) {
+        draw_wave_preview(ed, layout, theme, preview);
+        if (!preview.flat) {
+            // The window's span: what the x axis is showing (a flat
+            // line's window is arbitrary and says nothing).
+            hint_line(layout, theme,
+                      "preview: 0 to " +
+                          ws::circsim::format_eng(preview.t_end) + "s");
+        }
+    }
+
+    if (wave.kind == SourceWave::Kind::Pwl ||
+        wave.kind == SourceWave::Kind::Raw) {
+        // Free-form corners (or a text the editor could not parse):
+        // the plain text row, verbatim - never a silent rewrite.
+        part_text_row(ed, gui, layout, theme, "Waveform", p.id, 2, "wave",
+                      wave_text);
+        hint_line(layout, theme,
+                  wave.kind == SourceWave::Kind::Pwl
+                      ? "Piecewise corners: PWL(t1 v1 t2 v2 ...)"
+                      : "Not a form the editor reads - kept verbatim");
+        return;
+    }
+    if (wave.kind == SourceWave::Kind::None) {
+        hint_line(layout, theme, "DC only - the DC value row is the level");
+        return;
+    }
+
+    // One number row per parameter: parse, re-compose the whole form,
+    // push; a bad value keeps the old and says so on the status line
+    // (the analysis rows' own contract).
+    const WaveFieldLabel* labels = wave.kind == SourceWave::Kind::Sin
+                                       ? kSinLabels
+                                       : (wave.kind == SourceWave::Kind::Pulse
+                                              ? kPulseLabels
+                                              : kExpLabels);
+    const int slots = wave.kind == SourceWave::Kind::Pulse ? 7 : 6;
+    const std::string base = part_field_key(p.id, 2, "wave");
+    for (int slot = 0; slot < slots; ++slot) {
+        const char* label = labels[slot].label;
+        char current_text[64];
+        std::snprintf(current_text, sizeof current_text, "%.12g",
+                      wave.p[slot]);
+        const std::string key = base + "." + label;
+        char* buf = field_buf(ed, key, current_text);
+        if (text_input_tracked(ed, gui, layout, theme,
+                               std::string{label} + "##" + key, buf, 128)) {
+            const auto parsed = ws::spice::parse_number(buf);
+            if (parsed.has_value()) {
+                SourceWave next = wave;
+                next.p[slot] = *parsed;
+                push_part_text(*ed.doc, p.id, 2, "wave",
+                               compose_source_wave(next), "Edit waveform");
+            } else {
+                ed.status(std::string{"'"} + buf +
+                          "' is not a SPICE number - kept the old value");
+            }
+        }
+    }
+    hint_line(layout, theme,
+              "Times accept SPICE units - 1u, 2.5n, 1meg");
+}
+
 }  // namespace
 
 void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
@@ -840,15 +1689,27 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
                        : p->symbol + " (unknown)");
         part_text_row(ed, gui, layout, theme, "Reference", p->id, 0, "",
                       p->ref);
+        // A source's value row names what it is: the level the deck
+        // prints between the nets and any AC/waveform tail.
+        const bool source_editor =
+            sym != nullptr && source_wave_editable(*sym);
         if (sym == nullptr || sym->needs_value || !p->value.empty()) {
-            part_text_row(ed, gui, layout, theme, "Value", p->id, 1, "",
+            part_text_row(ed, gui, layout, theme,
+                          source_editor ? "DC value" : "Value", p->id, 1, "",
                           p->value);
         }
-        if (sym != nullptr && !sym->params.empty()) {
+        if (sym != nullptr && !sym->params.empty() && !source_editor) {
             panel_section(layout, theme, "Parameters");
         }
         if (sym != nullptr) {
             for (const ws::circsim::ParamSpec& spec : sym->params) {
+                // The source editor owns the ac/wave rows (the picker
+                // and its fields); the generic loop keeps every other
+                // param a .csym source might carry.
+                if (source_editor &&
+                    (spec.key == "ac" || spec.key == "wave")) {
+                    continue;
+                }
                 const auto it = p->params.find(spec.key);
                 const std::string current =
                     it != p->params.end() ? it->second : "";
@@ -896,6 +1757,11 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
                                   p->id, 2, spec.key, current);
                 }
             }
+        }
+        if (source_editor) {
+            // The AC magnitude + waveform picker: the netlist's source
+            // line without the hand-typed "SIN(0 1 1k)".
+            source_wave_editor(ed, gui, layout, theme, *p);
         }
         char where[64];
         std::snprintf(where, sizeof where, "Position: (%.12g, %.12g)",
@@ -1004,6 +1870,9 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
 
     // --- the analysis list
     gui::heading(layout, theme, "Analyses (in deck order)");
+    hint_line(layout, theme,
+              "The deck runs these in order - .tran plots signals over "
+              "time");
     if (ed.analysis_index >=
         static_cast<int>(ed.schem()->analysis.entries.size())) {
         ed.analysis_index = -1;  // the list shrank under the selection
@@ -1043,7 +1912,13 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
         ws::circsim::AnalysisSpec spec;
         switch (add_kind) {
             case 1: spec = ws::circsim::DcSpec{}; break;
-            case 2: spec = ws::circsim::TranSpec{.tstop = 1.0e-3}; break;
+            // A fresh .tran runs out of the box: tstop 1ms at a 1us
+            // step (the classic 1000-point sweep), both editable the
+            // moment the entry lands.
+            case 2:
+                spec = ws::circsim::TranSpec{.tstep = 1e-6,
+                                             .tstop = 1e-3};
+                break;
             case 3: spec = ws::circsim::AcSpec{}; break;
             default: spec = ws::circsim::OpSpec{}; break;
         }

@@ -607,6 +607,19 @@ struct Editor {
         return palette_canvas != nullptr ? *palette_canvas : renderer;
     }
 
+    // The Properties panel's draw seam: the same pattern a fourth
+    // time. The source editor's waveform preview draws through here -
+    // null = &renderer (the live app); a headless test injects a
+    // CommandListCanvas and asserts the preview's geometry (the well,
+    // the frame, the zero line, the series polyline) the same way the
+    // palette and results suites assert theirs.
+    canvas::Canvas2D* properties_canvas = nullptr;
+
+    // The canvas the Properties panel draws through.
+    [[nodiscard]] canvas::Canvas2D& properties_draw_canvas() {
+        return properties_canvas != nullptr ? *properties_canvas : renderer;
+    }
+
     // --- helpers (editor.cpp) ---
 
     [[nodiscard]] ws::circsim::Schematic* schem() {

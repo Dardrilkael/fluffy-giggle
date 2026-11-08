@@ -36,6 +36,90 @@ namespace editor {
 // True when a removal actually landed.
 bool remove_selected_analysis(Editor& ed);
 
+// --- the source waveform editor's pure half ----------------------------------
+// A source part's `wave` param is the verbatim SPICE tail its deck
+// line carries after the DC value and the AC magnitude - "SIN(0 1 1k)",
+// "PULSE(0 5 0 1u 1u 1m 2m)". The Properties panel edits it as a
+// format picker plus one number field per parameter instead of that
+// text; this pair is the translation, pure and headless so the
+// round-trip is testable without a gui.
+struct SourceWave {
+    enum class Kind : std::uint8_t {
+        None,   // empty text: the DC value is the whole story
+        Sin,    // SIN(VO VA FREQ TD THETA PHASE) - 6 numbers
+        Pulse,  // PULSE(V1 V2 TD TR TF PW PER) - 7 numbers
+        Exp,    // EXP(V1 V2 TD1 TAU1 TD2 TAU2) - 6 numbers
+        Pwl,    // PWL(t1 v1 t2 v2 ...) - free-form corners
+        Raw,    // anything else: kept verbatim, edited as text
+    };
+    Kind kind = Kind::None;
+    // The per-kind numbers in ngspice order (Sin reads [0..5], Pulse
+    // [0..6], Exp [0..5]); a short hand-typed form pads with 0s.
+    double p[7] = {0, 0, 0, 0, 0, 0, 0};
+    // Pwl/Raw: the text itself, kept byte for byte (nothing the field
+    // editor could faithfully round-trip).
+    std::string raw;
+};
+
+// Parses a `wave` text. Tolerant by design: an empty or blank text is
+// None; a recognized head ("SIN(", "PULSE(", "EXP(", "PWL(" - case
+// insensitive) with parseable SPICE numbers inside (commas or spaces
+// between) fills the slots it has and zeros the rest; anything else -
+// a bad number, more numbers than the kind takes, no parenthesis at
+// all - answers Raw so the panel falls back to the plain text row and
+// the model never silently rewrites what it could not read.
+[[nodiscard]] SourceWave parse_source_wave(const std::string& text);
+
+// Composes the canonical text: every number the kind takes, %.12g,
+// single spaces, uppercase head - "SIN(0 1 1000 0 0 0)". None
+// composes the empty text (the DC-only form); Pwl/Raw answer `raw`
+// unchanged. parse(compose(w)) == w for every kind, so an edit cycle
+// never drifts.
+[[nodiscard]] std::string compose_source_wave(const SourceWave& w);
+
+// --- the source waveform editor's preview half -------------------------------
+// The picture of the form the fields are shaping: the waveform sampled
+// over its own natural window, pure and headless so the shape is
+// testable without a gui (the panel only maps it to pixels). The
+// values are ngspice's own closed forms - the deck's truth, not an
+// approximation of it - with the one license that a zero TAU reads as
+// the instant step its limit is (ngspice's exp(-(t-td)/0) evaluates
+// there too, but a preview should not divide by zero to say it).
+struct WavePreview {
+    // False when there is no honest picture: a Raw text, a PWL whose
+    // corners do not read as number pairs, a corner before t=0 (the
+    // window starts at 0 and would clip mid-shape), or a DC level that
+    // is not a number. The panel draws nothing rather than a guess.
+    bool drawable = false;
+    // Every sample finite and equal: one line, one label (a DC level,
+    // a zero-amplitude sine, a held PWL). The drawer labels the value
+    // on the line instead of padding min/max labels around it.
+    bool flat = false;
+    // The window's span; ts runs [0, t_end]. Chosen per kind from the
+    // form's own numbers - three cycles of a sine, two periods of a
+    // pulse (its single-shot tail when PER is 0), EXP's settling span
+    // (5 tau past each delay), the corners' own extent for PWL, an
+    // arbitrary 1 for a flat level.
+    double t_end = 0.0;
+    // Ascending times and the waveform's value at each. Curves (SIN,
+    // EXP) land on a uniform grid plus both sides of their delay jumps;
+    // piecewise-linear forms (PULSE, PWL) land on their own corners and
+    // cycle breaks, each sampled just-before and at the break so a
+    // zero-width edge draws as the vertical it is. Non-finite values
+    // are allowed through (a negative tau explodes): the drawer breaks
+    // the line there instead of poisoning the tessellator.
+    std::vector<double> ts;
+    std::vector<double> vs;
+};
+
+// Samples the waveform. `dc_value` is the source's DC value row, the
+// level a None (DC-only) form draws as; non-finite leaves None
+// undrawable (a blank or non-number value row has no level to show).
+// Any non-finite parameter leaves the whole form undrawable - parse
+// gates the fields, but an imported deck can still carry "1e999".
+[[nodiscard]] WavePreview sample_source_wave(const SourceWave& w,
+                                             double dc_value);
+
 // The Problems panel's severity filter: does a diag of `severity`
 // pass the three toggles? The panel's counts never pass through this
 // (they stay the full counts whatever is hidden) - only the row draw

@@ -99,6 +99,23 @@ struct Bench {
         draw_properties([] {});
     }
 
+    // The frame-fed spelling (the keyboard cases): the frame's
+    // pointer/keys drive the same panel body, with the post-draw hook
+    // between it and end_frame - the focus window the typing cases
+    // need.
+    template <typename Hook>
+    void draw_properties(const ws::input::InputFrame& frame, Hook&& after_body) {
+        gui.begin_frame(frame);
+        gui::LayoutCursor layout;
+        (void)layout.begin_panel(gui::Rect{0.0f, 0.0f, 360.0f, 640.0f},
+                                 12.0f, 8.0f);
+        const gui::ChromeTheme theme = gui::kDefaultChrome;
+        editor::draw_properties_panel(ed, gui, layout, theme);
+        after_body();
+        layout.end_panel();
+        gui.end_frame();
+    }
+
     // Draws the Palette panel once (the seam test's surface).
     void draw_palette() {
         draw_palette(gui::kDefaultChrome);
@@ -1060,4 +1077,400 @@ TEST_CASE("the Copy button lands the shown deck on the clipboard seam") {
         [&](const char* text) { fresh_copied = text; });
     fresh.click_netlist(172.0f, 26.0f);
     CHECK(fresh_copied.empty());
+}
+
+// --- the source waveform editor (the friendly netlist half) --------------------
+
+TEST_CASE("parse_source_wave reads the SPICE forms, tolerantly") {
+    using K = editor::SourceWave::Kind;
+    // Blank (or absent) is DC only.
+    CHECK(editor::parse_source_wave("").kind == K::None);
+    CHECK(editor::parse_source_wave("   ").kind == K::None);
+
+    // The canonical forms, case-insensitive, commas or spaces.
+    const editor::SourceWave sin = editor::parse_source_wave("SIN(0 1 1k)");
+    REQUIRE(sin.kind == K::Sin);
+    CHECK(sin.p[0] == 0.0);
+    CHECK(sin.p[1] == 1.0);
+    CHECK(sin.p[2] == 1000.0);
+    CHECK(sin.p[3] == 0.0);  // the absent tail pads with zeros
+    const editor::SourceWave pulse =
+        editor::parse_source_wave("pulse(0 5 0 1u 1u 1m 2m)");
+    REQUIRE(pulse.kind == K::Pulse);
+    CHECK(pulse.p[1] == 5.0);
+    CHECK(pulse.p[3] == doctest::Approx(1e-6));
+    CHECK(pulse.p[6] == doctest::Approx(2e-3));
+    const editor::SourceWave exp = editor::parse_source_wave("EXP(0, 5, 0, 10u)");
+    REQUIRE(exp.kind == K::Exp);
+    CHECK(exp.p[3] == doctest::Approx(1e-5));
+
+    // PWL and the unreadable stay verbatim (Raw never rewrites).
+    const editor::SourceWave pwl = editor::parse_source_wave("PWL(0 0 1m 5)");
+    CHECK(pwl.kind == K::Pwl);
+    CHECK(pwl.raw == "PWL(0 0 1m 5)");
+    CHECK(editor::parse_source_wave("SIN(0 one 1k)").kind == K::Raw);
+    CHECK(editor::parse_source_wave("SIN(0 1 1k 0 0 0 9)").kind == K::Raw);
+    CHECK(editor::parse_source_wave("5").kind == K::Raw);
+}
+
+TEST_CASE("compose_source_wave is canonical and round-trips") {
+    using K = editor::SourceWave::Kind;
+    // None is the empty text (the DC-only deck form).
+    CHECK(editor::compose_source_wave({}).empty());
+
+    // The canonical spelling: every number, %.12g, single spaces.
+    editor::SourceWave sin;
+    sin.kind = K::Sin;
+    sin.p[0] = 0.0; sin.p[1] = 1.0; sin.p[2] = 1000.0;
+    CHECK(editor::compose_source_wave(sin) == "SIN(0 1 1000 0 0 0)");
+
+    editor::SourceWave pulse;
+    pulse.kind = K::Pulse;
+    pulse.p[1] = 5.0;
+    pulse.p[3] = 1e-6; pulse.p[4] = 1e-6;
+    pulse.p[5] = 1e-3; pulse.p[6] = 2e-3;
+    CHECK(editor::compose_source_wave(pulse) ==
+          "PULSE(0 5 0 1e-06 1e-06 0.001 0.002)");
+
+    // parse(compose(w)) == w: an edit cycle never drifts.
+    const editor::SourceWave round =
+        editor::parse_source_wave(editor::compose_source_wave(sin));
+    REQUIRE(round.kind == K::Sin);
+    for (int i = 0; i < 6; ++i) {
+        CHECK(round.p[static_cast<std::size_t>(i)] ==
+              doctest::Approx(sin.p[static_cast<std::size_t>(i)]));
+    }
+
+    // Pwl/Raw answer their bytes unchanged.
+    editor::SourceWave pwl;
+    pwl.kind = K::Pwl;
+    pwl.raw = "PWL(0 0 1m 5)";
+    CHECK(editor::compose_source_wave(pwl) == "PWL(0 0 1m 5)");
+}
+
+TEST_CASE("a selected source edits its waveform through the fields") {
+    Bench b;
+    // A voltage source, hand-typed waveform and all.
+    ws::circsim::Part p = ws::circsim::Part::make("v", "V1", "5", {0.0, 0.0});
+    p.id = b.doc.schem.alloc_id();
+    p.params["wave"] = "SIN(0 1 1k)";
+    p.params["ac"] = "1";
+    b.doc.schem.parts_mut().push_back(p);
+    b.ed.sel.kind = editor::Selection::Kind::Part;
+    b.ed.sel.id = p.id;
+
+    // One Properties draw: the source editor minted its field rows
+    // (the picker plus one row per number, keyed like every field the
+    // panel edits).
+    b.draw_properties();
+    const std::string base = "p" + std::to_string(p.id) + ".param.wave.";
+    CHECK(b.ed.fields.count(base + "Offset (VO)") == 1u);
+    CHECK(b.ed.fields.count(base + "Amplitude (VA)") == 1u);
+    CHECK(b.ed.fields.count(base + "Frequency (FREQ)") == 1u);
+    CHECK(std::string{b.ed.fields.at(base + "Frequency (FREQ)").buf.data()} ==
+          "1000");
+    // The format picker's combo state minted too, and the DC value row
+    // wears its source name.
+    CHECK(b.ed.fields.count(base + "fmt") == 1u);
+    CHECK(b.ed.fields.count("p" + std::to_string(p.id) + ".value") == 1u);
+
+    // A field edit through the keyboard (the focus + verbs the gui
+    // suite drives its own fields by): backspace the "1", type "2.5".
+    const std::string amp_id =
+        "Amplitude (VA)##" + base + "Amplitude (VA)";
+    b.draw_properties(
+        [&] { b.gui.set_focus(b.gui.ids().id(amp_id.c_str())); });
+    {
+        // Select all (the field's caret starts at 0 - typing would
+        // prepend, not replace; the gui suite's own replace verb).
+        ws::input::InputFrame select;
+        select.key_down[static_cast<std::size_t>(
+            ws::input::keys::kLeftControl)] = true;
+        select.key_pressed[static_cast<std::size_t>(ws::input::keys::kA)] =
+            true;
+        b.draw_properties(select, [] {});
+    }
+    {
+        ws::input::InputFrame typing;
+        typing.text_input = {'2', '.', '5'};
+        b.draw_properties(typing, [] {});
+    }
+
+    // The edit landed as ONE composed push: the model's wave text
+    // carries the whole form, not the field's fragment.
+    const ws::circsim::Part* after = b.doc.schem.find_part(p.id);
+    REQUIRE(after != nullptr);
+    CHECK(after->params.at("wave") == "SIN(0 2.5 1000 0 0 0)");
+    CHECK(after->params.at("ac") == "1");     // untouched by the edit
+    CHECK(after->value == "5");               // the DC value untouched too
+    REQUIRE(b.doc.undo().undo_count() >= 1u);  // the push is on the stack
+}
+
+// --- the waveform preview (the picture of the fields' shape) ------------------
+
+// The sampler's min/max over the finite samples (the drawer's y fit
+// reads the same numbers).
+struct Extent {
+    double lo = 1e30;
+    double hi = -1e30;
+};
+[[nodiscard]] Extent extent_of(const editor::WavePreview& p) {
+    Extent e;
+    for (const double v : p.vs) {
+        if (std::isfinite(v)) {
+            e.lo = std::min(e.lo, v);
+            e.hi = std::max(e.hi, v);
+        }
+    }
+    return e;
+}
+
+TEST_CASE("sample_source_wave windows and samples the SPICE forms") {
+    // DC only: the level itself, one flat line.
+    const editor::WavePreview dc =
+        editor::sample_source_wave(editor::parse_source_wave(""), 5.0);
+    REQUIRE(dc.drawable);
+    CHECK(dc.flat);
+    CHECK(dc.ts.front() == 0.0);
+    CHECK(dc.vs.front() == doctest::Approx(5.0));
+    CHECK(dc.vs.back() == doctest::Approx(5.0));
+    // A blank (or non-number) value row has no level to show.
+    CHECK(!editor::sample_source_wave(editor::parse_source_wave(""),
+                                      std::numeric_limits<double>::quiet_NaN())
+               .drawable);
+
+    // A sine: three cycles over the window, the full swing.
+    const editor::WavePreview s = editor::sample_source_wave(
+        editor::parse_source_wave("SIN(0 1 1k)"), 0.0);
+    REQUIRE(s.drawable);
+    CHECK(!s.flat);
+    CHECK(s.t_end == doctest::Approx(3e-3));
+    CHECK(s.ts.front() == doctest::Approx(0.0));
+    CHECK(s.ts.back() == doctest::Approx(3e-3));
+    const Extent se = extent_of(s);
+    CHECK(se.hi == doctest::Approx(1.0).epsilon(0.02));
+    CHECK(se.lo == doctest::Approx(-1.0).epsilon(0.02));
+
+    // A delayed sine: vo held before the delay, the jump's two faces
+    // AT it, and a window that keeps a cycle past the delay.
+    const editor::WavePreview d = editor::sample_source_wave(
+        editor::parse_source_wave("SIN(1 2 1k 2m 0 90)"), 0.0);
+    REQUIRE(d.drawable);
+    CHECK(d.t_end == doctest::Approx(3e-3));
+    for (std::size_t i = 0; i < d.ts.size(); ++i) {
+        if (d.ts[i] < 2e-3 - 1e-9) {
+            CHECK(d.vs[i] == doctest::Approx(1.0));
+        }
+    }
+    // The first sample at (or past) the delay is its right face:
+    // vo + va*sin(90 deg) = 3 exactly.
+    std::size_t at = 0;
+    while (at < d.ts.size() && d.ts[at] < 2e-3) {
+        ++at;
+    }
+    REQUIRE(at < d.ts.size());
+    CHECK(d.ts[at] == doctest::Approx(2e-3));
+    CHECK(d.vs[at] == doctest::Approx(3.0));
+
+    // No frequency: the offset's own flat line.
+    const editor::WavePreview z = editor::sample_source_wave(
+        editor::parse_source_wave("SIN(2 0 0)"), 0.0);
+    REQUIRE(z.drawable);
+    CHECK(z.flat);
+    CHECK(z.vs.front() == doctest::Approx(2.0));
+
+    // A pulse: two periods, the plateau exact at its corners.
+    const editor::WavePreview pu = editor::sample_source_wave(
+        editor::parse_source_wave("PULSE(0 5 0 1u 1u 1m 2m)"), 0.0);
+    REQUIRE(pu.drawable);
+    CHECK(!pu.flat);
+    CHECK(pu.t_end == doctest::Approx(4e-3));
+    const Extent pe = extent_of(pu);
+    CHECK(pe.hi == doctest::Approx(5.0));
+    CHECK(pe.lo == doctest::Approx(0.0));
+    CHECK(pu.vs.front() == doctest::Approx(0.0));
+
+    // The single shot (PER 0): the pulse plus its quarter tail, then
+    // v1 to the window's end.
+    const editor::WavePreview single = editor::sample_source_wave(
+        editor::parse_source_wave("PULSE(0 5 0 1u 1u 1m 0)"), 0.0);
+    REQUIRE(single.drawable);
+    CHECK(single.t_end == doctest::Approx(1.2525e-3));
+    CHECK(single.vs.back() == doctest::Approx(0.0));
+
+    // EXP: the rise, then the fall that returns toward v1 (both
+    // exponentials alive past TD2 - the settle is v1, not v2).
+    const editor::WavePreview e = editor::sample_source_wave(
+        editor::parse_source_wave("EXP(0 5 0 10u 1m 100u)"), 0.0);
+    REQUIRE(e.drawable);
+    CHECK(!e.flat);
+    CHECK(e.t_end > 1.5e-3);  // the fall's 5-tau settle plus the tail
+    CHECK(e.vs.front() == doctest::Approx(0.0));
+    const Extent ee = extent_of(e);
+    CHECK(ee.hi == doctest::Approx(5.0));
+    CHECK(e.vs.back() < 0.05);  // settled back within reach of v1
+
+    // PWL: the corners themselves, exact - the shape IS the sample set.
+    const editor::WavePreview pw = editor::sample_source_wave(
+        editor::parse_source_wave("PWL(0 0 500u 2 1m 5)"), 0.0);
+    REQUIRE(pw.drawable);
+    REQUIRE(pw.ts.size() == 3u);
+    CHECK(pw.ts[0] == doctest::Approx(0.0));
+    CHECK(pw.ts[1] == doctest::Approx(5e-4));
+    CHECK(pw.ts[2] == doctest::Approx(1e-3));
+    CHECK(pw.t_end == doctest::Approx(1e-3));
+    CHECK(pw.vs[1] == doctest::Approx(2.0));
+    CHECK(pw.vs[2] == doctest::Approx(5.0));
+
+    // A held lead: v1 from the window's start to the first corner.
+    const editor::WavePreview held = editor::sample_source_wave(
+        editor::parse_source_wave("PWL(1m 5)"), 0.0);
+    REQUIRE(held.drawable);
+    CHECK(held.flat);
+    CHECK(held.vs.front() == doctest::Approx(5.0));
+
+    // The mid-typing odd tail previews its complete pairs (the deck
+    // itself stays verbatim for the text row).
+    const editor::WavePreview mid = editor::sample_source_wave(
+        editor::parse_source_wave("PWL(0 0 1m 5 2m)"), 0.0);
+    REQUIRE(mid.drawable);
+    REQUIRE(mid.ts.size() == 2u);
+    CHECK(mid.t_end == doctest::Approx(1e-3));
+
+    // No honest picture: an unreadable PWL, a corner before zero, a
+    // bare Raw text.
+    CHECK(!editor::sample_source_wave(
+               editor::parse_source_wave("PWL(0 abc)"), 0.0)
+               .drawable);
+    CHECK(!editor::sample_source_wave(
+               editor::parse_source_wave("PWL(-1m 0 1m 5)"), 0.0)
+               .drawable);
+    CHECK(!editor::sample_source_wave(editor::parse_source_wave("5"), 0.0)
+               .drawable);
+}
+
+TEST_CASE("the waveform preview draws through the properties canvas seam") {
+    // A voltage source with a sine, selected, one draw: the preview
+    // records through properties_draw_canvas the way the palette's
+    // tiles record through theirs.
+    {
+        Bench b;
+        ws::circsim::Part p =
+            ws::circsim::Part::make("v", "V1", "5", {0.0, 0.0});
+        p.id = b.doc.schem.alloc_id();
+        p.params["wave"] = "SIN(0 1 1k)";
+        b.doc.schem.parts_mut().push_back(p);
+        b.ed.sel.kind = editor::Selection::Kind::Part;
+        b.ed.sel.id = p.id;
+        b.ed.properties_canvas = &b.clc;
+
+        b.draw_properties();
+        // The well, the frame, the zero line (0 is inside the fit),
+        // and the series - the geometry the drawer owns.
+        CHECK(b.clc.count(canvas::CanvasCmdKind::fill_polygon) >= 1u);
+        CHECK(b.clc.count(canvas::CanvasCmdKind::stroke_polyline) >= 3u);
+        // The series is the only long polyline: the grid's 160 points
+        // plus the delay's faces (the frame is 4, the zero line 2).
+        bool series = false;
+        for (const canvas::CanvasCmd& c : b.clc.cmds) {
+            if (c.kind == canvas::CanvasCmdKind::stroke_polyline &&
+                c.points.size() > 100u) {
+                series = true;
+            }
+        }
+        CHECK(series);
+    }
+
+    // DC only: the flat level - a frame and a two-point line, no zero
+    // line (the fit pads around the level, not around zero).
+    {
+        Bench b;
+        ws::circsim::Part p =
+            ws::circsim::Part::make("v", "V2", "5", {0.0, 0.0});
+        p.id = b.doc.schem.alloc_id();
+        p.params["wave"] = "";
+        b.doc.schem.parts_mut().push_back(p);
+        b.ed.sel.kind = editor::Selection::Kind::Part;
+        b.ed.sel.id = p.id;
+        b.ed.properties_canvas = &b.clc;
+
+        b.draw_properties();
+        CHECK(b.clc.count(canvas::CanvasCmdKind::fill_polygon) == 1u);
+        // The frame plus the series: exactly two strokes.
+        CHECK(b.clc.count(canvas::CanvasCmdKind::stroke_polyline) == 2u);
+        bool line = false;
+        for (const canvas::CanvasCmd& c : b.clc.cmds) {
+            if (c.kind == canvas::CanvasCmdKind::stroke_polyline &&
+                c.points.size() == 2u) {
+                line = true;
+            }
+        }
+        CHECK(line);
+    }
+
+    // A non-source part: the panel's rows are all widgets - the seam
+    // carries nothing (and an unparseable wave draws no guess either).
+    {
+        Bench b;
+        b.select_part("res");
+        b.ed.properties_canvas = &b.clc;
+        b.draw_properties();
+        CHECK(b.clc.cmds.empty());
+    }
+    {
+        Bench b;
+        ws::circsim::Part p =
+            ws::circsim::Part::make("v", "V3", "5", {0.0, 0.0});
+        p.id = b.doc.schem.alloc_id();
+        p.params["wave"] = "gibberish";
+        b.doc.schem.parts_mut().push_back(p);
+        b.ed.sel.kind = editor::Selection::Kind::Part;
+        b.ed.sel.id = p.id;
+        b.ed.properties_canvas = &b.clc;
+        b.draw_properties();
+        CHECK(b.clc.cmds.empty());
+    }
+}
+
+TEST_CASE("a field edit reshapes the next frame's preview") {
+    Bench b;
+    ws::circsim::Part p = ws::circsim::Part::make("v", "V1", "0", {0.0, 0.0});
+    p.id = b.doc.schem.alloc_id();
+    p.params["wave"] = "SIN(0 1 1k)";
+    b.doc.schem.parts_mut().push_back(p);
+    b.ed.sel.kind = editor::Selection::Kind::Part;
+    b.ed.sel.id = p.id;
+    b.ed.properties_canvas = &b.clc;
+
+    // The amplitude row's edit path, the same verbs the composed-push
+    // test drives: focus, select all, type.
+    const std::string base = "p" + std::to_string(p.id) + ".param.wave.";
+    const std::string amp_id = "Amplitude (VA)##" + base + "Amplitude (VA)";
+    b.draw_properties(
+        [&] { b.gui.set_focus(b.gui.ids().id(amp_id.c_str())); });
+    {
+        ws::input::InputFrame select;
+        select.key_down[static_cast<std::size_t>(
+            ws::input::keys::kLeftControl)] = true;
+        select.key_pressed[static_cast<std::size_t>(ws::input::keys::kA)] =
+            true;
+        b.draw_properties(select, [] {});
+    }
+    {
+        ws::input::InputFrame typing;
+        typing.text_input = {'3'};
+        b.draw_properties(typing, [] {});
+    }
+
+    // The model carries the edit, and the preview the model: the
+    // series' y extent answers the new amplitude, not the old.
+    const ws::circsim::Part* after = b.doc.schem.find_part(p.id);
+    REQUIRE(after != nullptr);
+    REQUIRE(after->params.at("wave") == "SIN(0 3 1000 0 0 0)");
+    const editor::WavePreview pv = editor::sample_source_wave(
+        editor::parse_source_wave(after->params.at("wave")), 0.0);
+    REQUIRE(pv.drawable);
+    const Extent e = extent_of(pv);
+    CHECK(e.hi == doctest::Approx(3.0).epsilon(0.02));
+    CHECK(e.lo == doctest::Approx(-3.0).epsilon(0.02));
 }
