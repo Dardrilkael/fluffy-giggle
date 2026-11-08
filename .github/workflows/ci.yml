@@ -14,125 +14,77 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Linux: headless subset (GCC + Ninja), build + test
-  # ---------------------------------------------------------------------------
   linux:
-    name: Linux (GCC, headless subset)
-    runs-on: ubuntu-22.04
+    name: Linux (GCC 13, headless subset)
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
-
     steps:
       - uses: actions/checkout@v4
-
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            ninja-build \
-            cmake \
-            g++ \
-            libstdc++-12-dev \
-            libglfw3-dev \
-            libvulkan-dev \
-            libopenal-dev \
-            libuv1-dev
-
-      - name: Configure (linux preset)
+            ninja-build cmake g++ \
+            libglfw3-dev libvulkan-dev libopenal-dev libuv1-dev
+      - name: Configure
         run: cmake --preset linux
-
       - name: Build
         run: cmake --build --preset linux
-
       - name: Test
         run: ctest --preset linux
 
-  # ---------------------------------------------------------------------------
-  # Linux: ASan + UBSan build and test
-  # ---------------------------------------------------------------------------
   linux-sanitizers:
     name: Linux (ASan + UBSan)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
-
     steps:
       - uses: actions/checkout@v4
-
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            ninja-build \
-            cmake \
-            g++ \
-            libstdc++-12-dev \
-            libglfw3-dev \
-            libvulkan-dev \
-            libopenal-dev \
-            libuv1-dev
-
-      - name: Configure (linux-asan preset)
+            ninja-build cmake g++ \
+            libglfw3-dev libvulkan-dev libopenal-dev libuv1-dev
+      - name: Configure
         run: cmake --preset linux-asan
-
       - name: Build
         run: cmake --build --preset linux-asan
-
-      - name: Test (with sanitizers)
+      - name: Test
         env:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:halt_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:abort_on_error=1
         run: ctest --preset linux-asan
 
-  # ---------------------------------------------------------------------------
-  # Dependency rule enforcement (check_deps)
-  # Runs on Linux with PowerShell Core (pwsh).
-  # ---------------------------------------------------------------------------
   check-deps:
     name: Workspace dependency rule
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
-
     steps:
       - uses: actions/checkout@v4
-
       - name: Install PowerShell
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends powershell
-
       - name: Run check_deps
         run: |
           pwsh -NoProfile -ExecutionPolicy Bypass \
             -File tools/check_deps.ps1 -Root "$PWD"
 
-  # ---------------------------------------------------------------------------
-  # Android NDK cross-compilation (build only, no tests)
-  # ---------------------------------------------------------------------------
   android:
     name: Android NDK (arm64-v8a)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
-
     steps:
       - uses: actions/checkout@v4
-
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            ninja-build \
-            cmake
-
-      - name: Setup NDK
+          sudo apt-get install -y --no-install-recommends ninja-build cmake
+      - name: Verify NDK toolchain
         run: |
-          ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_HOME" >> $GITHUB_ENV
-          echo "NDK installed at $ANDROID_NDK_HOME"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
           ls "$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
-
-      - name: Configure (android preset)
+      - name: Configure
         run: cmake --preset android
-
       - name: Build
         run: cmake --build --preset android
