@@ -49,7 +49,7 @@ function Test-ThirdParty([string]$Header) {
 function Test-LibInclude([string]$Header, [string]$FilePath) {
   if (Test-ThirdParty $Header) {
     if ($Header -eq 'tl/expected.hpp' -and
-        $FilePath.EndsWith('ws\core\result.hpp')) {
+        $FilePath -match 'ws[\\/]core[\\/]result\.hpp$') {
       return $true  # the one sanctioned exception, by file
     }
     return $false
@@ -104,7 +104,10 @@ if (Test-Path $appsDir) {
   $allAppFiles = @(Get-ChildItem -Path $appsDir -Recurse -Include $extensions -File)
   # Exclude test files (apps/*/tests/*) from the dependency check - they
   # legitimately include third-party test frameworks like doctest.
-  $appFiles = @($allAppFiles | Where-Object { $_.FullName -notmatch '\\tests\\' })
+  # Match both Windows (\tests\) and Linux (/tests/) path separators.
+  $appFiles = @($allAppFiles | Where-Object {
+    $_.FullName -notmatch '[\\/]tests[\\/]'
+  })
 }
 
 $violations = New-Object System.Collections.Generic.List[string]
