@@ -11,4 +11,15 @@ if(ANDROID)
   target_link_libraries(ws_core PRIVATE log)
 endif()
 
+# log.cpp uses standard C I/O (fopen, fseek, ftell, etc.) which MSVC deprecates
+# in favor of *_s variants. Suppress C4996 warnings-as-errors for this target.
+if(MSVC)
+  target_compile_definitions(ws_core PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+
 ws_add_test(core SOURCES tests/test_core.cpp)
+
+# The test also uses std::fopen/fclose in file sink tests.
+if(MSVC)
+  target_compile_definitions(test_core PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
