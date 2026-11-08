@@ -12,12 +12,45 @@
 
 namespace ws::ui::gui {
 
+namespace {
+
+// The closable strip's tab hit shape: the tab's rect MINUS the round
+// close button's circle. The tab and its x are two widgets over one
+// rect, and the hit rules give a same-stratum press to whichever
+// record order wins (a two-frame click: the later steal) or the first
+// claimant (a same-frame tap: the click floor) - mutually exclusive
+// answers. Cutting the circle out of the tab's OWN shape settles both
+// timings the one way: the x is the only claimant inside the circle,
+// the tab the only one outside it, and the x's square corners (inside
+// the tab, outside the circle) fall through to the select.
+struct TabCloseZone {
+    Rect tab;
+    Rect close;
+};
+
+bool tab_hit_outside_close(const void* user, float x, float y) {
+    const auto* zone = static_cast<const TabCloseZone*>(user);
+    if (!zone->tab.contains(x, y)) {
+        return false;
+    }
+    const float dx = x - zone->close.center_x();
+    const float dy = y - zone->close.center_y();
+    const float r =
+        std::min(zone->close.width, zone->close.height) * 0.5f;
+    return dx * dx + dy * dy > r * r;
+}
+
+}  // namespace
+
 bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
              const char* label, const char* const* tabs, int count,
-             int& active, float width, bool disabled) {
+             int& active, float width, bool disabled, int* closed) {
     width = std::max(width, 0.0f);  // like button: no mirrored quads
 
     bool changed = false;
+    if (closed != nullptr) {
+        *closed = -1;  // no tab's x has fired (yet) this frame
+    }
     // The strip's own scope: each tab ids by index under it, so duplicate
     // tab labels in one strip stay distinct widgets (the loop-children
     // discipline, without stringifying).
@@ -25,6 +58,25 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     for (int i = 0; i < count; ++i) {
         gui.ids().push(i);
         const Rect rect = layout.next(width, theme.control_height);
+        // The x's geometry, BEFORE the tab's behavior: the tab's hit
+        // shape needs the circle, and the label's fit budget needs the
+        // zone. A small round 12-px hitbox at the tab's right edge,
+        // padded in by the theme's own inset so it breathes inside the
+        // tab instead of touching its border - small on purpose: the
+        // tab is the fat target, the x is the precise one.
+        const bool closable = closed != nullptr;
+        constexpr float kCloseHit = 12.0f;
+        const Rect close_rect{
+            rect.x + rect.width - theme.padding - kCloseHit,
+            rect.y + (rect.height - kCloseHit) * 0.5f, kCloseHit,
+            kCloseHit};
+        TabCloseZone zone{rect, close_rect};
+        HitShape tab_shape;  // the plain rect when not closable
+        if (closable) {
+            tab_shape.kind = HitShape::Kind::predicate;
+            tab_shape.predicate = &tab_hit_outside_close;
+            tab_shape.user = &zone;
+        }
         // Full citizenship, like a button, per tab - the behavior's fold
         // (registration in strip order so Tab walks the strip left to
         // right, state()'s one hit-test, the Enter/Space edge). The
@@ -33,20 +85,97 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
         // the lock, and the selection below cannot move (a dead row
         // reports no click, holds no focus for the keys).
         const WidgetId tab_id = gui.ids().id("tab");
-        TabResult result = tab_behavior(gui, tab_id, rect, disabled);
+        TabResult result = tab_behavior(gui, tab_id, rect, disabled,
+                                        tab_shape);
         fold_hover_t(gui, tab_id, result, theme);  // P4: the face traveler
         // P4: the accent traveler - the selected tab's underline fades
         // in under the tab's own id.
         result.accent_t = gui.animate_toward(tab_id, i == active ? 1.0f : 0.0f,
                                              motion_duration(theme));
+        // The closable tab's label, pre-fitted around the x's zone: the
+        // painter row fits to the tab minus padding as always, so the
+        // reservation must already be spent here - the ellipsized text
+        // hands the skin the same shape every tab label arrives in,
+        // nothing about the row's signature changes.
+        const char* tab_label = tabs != nullptr ? tabs[i] : nullptr;
+        char label_scratch[128];
+        if (closable && tab_label != nullptr) {
+            const float budget = std::max(
+                0.0f, rect.width - 2.0f * theme.padding -
+                          (theme.padding + kCloseHit));
+            const LabelFit fit = fit_text(tab_label, budget, theme,
+                                          label_scratch, sizeof(label_scratch));
+            tab_label = fit.text;
+        }
         paint(theme, &WidgetPainters::tab, &tab_draw, rect, result, theme,
-              tabs != nullptr ? tabs[i] : nullptr, i == active);
+              tab_label, i == active);
         // A full click or the focused tab's Enter/Space moves the
         // selection; selecting the already-selected tab is a no-op that
         // reports nothing.
         if (result.clicked && i != active) {
             active = i;
             changed = true;
+        }
+        // The tab's own x: a ghost button in the circle - no resting
+        // face (the tab's face shows through), a round hover/press disc,
+        // and the muted x mark that goes full ink the moment the pointer
+        // arrives. Hit-tested as the circle it is drawn as, registered
+        // AFTER the tab so painter order and claim order agree.
+        if (closable) {
+            const WidgetId close_id = gui.ids().id("close");
+            HitShape close_hit;
+            close_hit.kind = HitShape::Kind::circle;
+            ButtonResult close = button_behavior(gui, close_id, close_rect,
+                                                 disabled, close_hit,
+                                                 ButtonStyle::ghost);
+            fold_hover_t(gui, close_id, close, theme);
+            if (close.state == WidgetState::Pressed) {
+                r2d::draw_rounded_quad(close_rect.x, close_rect.y,
+                                       kCloseHit, kCloseHit,
+                                       kCloseHit * 0.5f,
+                                       theme.control_pressed);
+            } else if (close.state == WidgetState::Hovered) {
+                const float t =
+                    close.hover_t >= 0.0f ? close.hover_t : 1.0f;
+                r2d::draw_rounded_quad(
+                    close_rect.x, close_rect.y, kCloseHit, kCloseHit,
+                    kCloseHit * 0.5f,
+                    fade_alpha(theme.control_hovered, t));
+            }
+            // The mark: the multiplication x every close button wears,
+            // muted at rest so the label owns the tab and full ink under
+            // the pointer. The fontless v1 spelling rides the bar, like
+            // every label without a face.
+            char glyph[16];
+            const LabelFit mark = fit_text("\xC3\x97", -1.0f, theme, glyph,
+                                           sizeof(glyph));
+            if (mark.advance > 0.0f) {
+                const bool live = close.state == WidgetState::Hovered ||
+                                  close.state == WidgetState::Pressed;
+                const std::uint32_t ink =
+                    live ? theme.text : theme.text_muted;
+                const float mx =
+                    close_rect.x + (kCloseHit - mark.advance) * 0.5f;
+                if (theme.font != nullptr) {
+                    r2d::draw_text(mx, close_rect.y +
+                                           (kCloseHit -
+                                            theme.font->line_height()) *
+                                               0.5f,
+                                   mark.text, *theme.font, ink);
+                } else {
+                    r2d::draw_quad(mx, close_rect.y + kCloseHit * 0.5f - 2.0f,
+                                   mark.advance, 4.0f, ink);
+                }
+            }
+            // The keyboard's legibility: the ring, round like the button
+            // it frames (Enter or Space on the focused x closes the tab,
+            // exactly like a click).
+            ring_draw(close.focused, close_rect, theme, kCloseHit * 0.5f);
+            tooltip_text(gui, layout, theme, "close", close_rect,
+                         "Close tab");
+            if (close.activated()) {
+                *closed = i;
+            }
         }
         gui.ids().pop();
         if (i + 1 < count) {

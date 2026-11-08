@@ -541,9 +541,23 @@ void popup_frame_draw(const Rect& bounds, const ChromeTheme& theme);
 // same lock on the whole strip, no scope needed. What shows per tab is
 // the caller's branch - the strip is the selection primitive, not a
 // content container.
+//
+// THE CLOSABLE STRIP: pass a non-null `closed` and every tab grows a
+// round x at its right edge - a small (12 px) CIRCULAR hitbox, the
+// editor-tab spelling. The entry starts each call at -1 and names the
+// tab whose x was clicked (or key-fired) this frame; the caller closes
+// it. The tab's own hit shape EXCLUDES the circle, so the two widgets
+// never fight over a press: a click inside the circle closes the tab
+// and moves nothing, a click in the x's square corners falls through
+// to the tab and selects it. The label pre-fits around the x's zone
+// (the fit runs here, before the painter row, so skins see the
+// ellipsized text like any tab label). A null `closed` is the plain
+// strip - no x drawn, no room reserved, byte-for-byte the old
+// behavior.
 bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
              const char* label, const char* const* tabs, int count,
-             int& active, float width = 120.0f, bool disabled = false);
+             int& active, float width = 120.0f, bool disabled = false,
+             int* closed = nullptr);
 
 // The split halves, the tab strip's seam: the behavior is ONE tab's
 // interaction (the strip loops it - the caller owns the id scope, so

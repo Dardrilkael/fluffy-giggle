@@ -4961,6 +4961,71 @@ TEST_CASE("tab_bar: index scopes keep duplicate tab labels distinct") {
     CHECK(active == 2);
 }
 
+TEST_CASE("tab_bar: the in-tab close x is a small circular hitbox") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    static const char* kTabs[] = {"alpha", "beta", "gamma"};
+    int active = 0;
+    int closed = -2;
+
+    // Tabs of 60 px on kDefaultChrome's 28-tall line (padding 12): the
+    // x circle of tab i (i from 0) spans x [60i+36, 60i+48) - centred
+    // (60i+42, 14), r 6. Beta's x is centred (102, 14).
+    const auto strip = [&](const ws::input::InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+        const bool moved = tab_bar(gui, layout, kDefaultChrome, "views",
+                                   kTabs, 3, active, 60.0f, false, &closed);
+        layout.end_panel();
+        gui.end_frame();
+        return moved;
+    };
+
+    // A same-frame tap dead-centre on beta's x: the close fires, the
+    // selection does not move - the tab's own hit shape excludes the
+    // circle, so the x is the strip's only claimant there whatever the
+    // click's timing.
+    closed = -2;
+    CHECK(!strip(snap(102.0f, 14.0f, false, true, true)));
+    CHECK(active == 0);
+    CHECK(closed == 1);
+
+    // The two-frame click, the timing a real mouse delivers: the press
+    // frame claims, the release frame closes - and still no select.
+    closed = -1;
+    CHECK(!strip(snap(102.0f, 14.0f, true, true)));
+    CHECK(closed == -1);
+    CHECK(!strip(snap(102.0f, 14.0f, false, false, true)));
+    CHECK(closed == 1);
+    CHECK(active == 0);
+
+    // A click in the x's SQUARE corner - inside the tab, outside the
+    // circle ((97, 9) sits sqrt(50) > 6 from the centre) - falls
+    // through to the tab: it selects beta and closes nothing.
+    closed = -1;
+    CHECK(strip(snap(97.0f, 9.0f, false, true, true)));
+    CHECK(active == 1);
+    CHECK(closed == -1);
+
+    // The plain tab body, far from any x: the old behavior untouched.
+    closed = -1;
+    CHECK(strip(snap(130.0f, 14.0f, false, true, true)));
+    CHECK(active == 2);
+    CHECK(closed == -1);
+
+    // The null out-param is the plain strip: no x claims anything, and
+    // a click where the x would be selects the tab like any other
+    // pixel of it.
+    gui.begin_frame(snap(102.0f, 14.0f, false, true, true));
+    (void)layout.begin_panel({0.0f, 0.0f, 400.0f, 300.0f}, 0.0f);
+    CHECK(tab_bar(gui, layout, kDefaultChrome, "views", kTabs, 3, active,
+                  60.0f));
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(active == 1);
+}
+
 TEST_CASE("scroll: the wheel moves the flow - clamps at both ends and persists") {
     using namespace ws::ui::gui;
     GuiContext gui;

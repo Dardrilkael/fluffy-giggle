@@ -1212,53 +1212,27 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
                                                  static_cast<float>(
                                                      labels.size())));
         layout.begin_panel(strip, 0.0f, 0.0f);
+        // The closable strip: each tab carries its own round x INSIDE
+        // the tab (a small circular hitbox - the strip-level square
+        // button right of the tabs read as nothing at all, and it
+        // closed only the FRONT tab). tab_bar's out-param names the tab
+        // whose x fired; the strip stays the selection primitive.
+        int closed_tab = -1;
         if (gui::tab_bar(gui, layout, theme, "shell.tabs", labels.data(),
-                         static_cast<int>(labels.size()), active, tab_w)) {
+                         static_cast<int>(labels.size()), active, tab_w,
+                         false, &closed_tab)) {
             // The selection moved: the tree and the focus follow.
             panel_host_.activate(panel_registry_,
                                  (*leaf.tabs)[static_cast<std::size_t>(active)]);
         }
-        // The tab strip's close button, right of the tabs - the split
-        // spelling, because the mark a 22-px square can carry is not a
-        // label the padded fit would keep room for: the glyph is drawn
-        // here, centered like any button label, and a tooltip names the
-        // act (a bare square beside the tab reads as nothing at all,
-        // and a mystery button that kills a panel is how an editor
-        // gets lost with no visible way back).
-        layout.same_line(0.0f);
-        const Rect close_rect = layout.next(22.0f, theme.control_height);
-        const gui::ButtonResult close = gui::button_behavior(
-            gui, gui.ids().id("shell.closetab"), close_rect);
-        gui::button_draw(close_rect, close, theme, nullptr);
-        char glyph[16];
-        const gui::LabelFit glyph_fit =
-            gui::fit_text("\xC3\x97", -1.0f, theme, glyph, sizeof(glyph));
-        if (glyph_fit.advance > 0.0f) {
-            const float gx =
-                close_rect.x + (close_rect.width - glyph_fit.advance) * 0.5f;
-            if (theme.font != nullptr) {
-                const float line = theme.font->line_height();
-                r2d::draw_text(gx,
-                               close_rect.y +
-                                   (close_rect.height - line) * 0.5f,
-                               glyph_fit.text, *theme.font, theme.text);
-            } else {
-                // the fontless v1 mark: the bar every label wears
-                r2d::draw_quad(gx,
-                               close_rect.y + close_rect.height * 0.5f - 2.0f,
-                               glyph_fit.advance, 4.0f, theme.text);
-            }
-        }
-        gui::tooltip_text(gui, layout, theme, "shell.closetab", close_rect,
-                          "Close panel");
-        if (close.activated()) {
+        layout.end_panel();
+        if (closed_tab >= 0) {
             // Not closed here: closing prunes the tree and moves nodes, and
             // the later leaves' LeafRect::tabs still point into it.
-            closing_panel = (*leaf.tabs)[static_cast<std::size_t>(active)];
-            layout.end_panel();
+            closing_panel =
+                (*leaf.tabs)[static_cast<std::size_t>(closed_tab)];
             continue;  // the leaf's body is gone this frame
         }
-        layout.end_panel();
 
         const PanelInstance* instance =
             panel_host_.find((*leaf.tabs)[static_cast<std::size_t>(active)]);
