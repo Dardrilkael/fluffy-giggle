@@ -1300,6 +1300,20 @@ TEST_CASE("the transport scrubs and plays the transient") {
     CHECK(editor::Editor::shown_sample(*tran, t1) + 1u ==
           tran->row_count());
     CHECK(editor::Editor::shown_sample(*tran, t0) == 0u);
+
+    // The rate chip (patch 0012): one press walks ws::circsim's ladder
+    // - 1x -> 2x -> 1/4x - and the chip's rect sits inside the strip
+    // beside the bar, so the press never reaches the scrub. (The pace
+    // math itself - rate x dt over the window, looping - is
+    // overlay_step's own headless gate in libs/circsim.)
+    CHECK(b.ed.playback.rate == doctest::Approx(1.0));
+    b.click_screen(tl.rate.x + tl.rate.width * 0.5f,
+                   tl.rate.y + tl.rate.height * 0.5f);
+    CHECK(b.ed.playback.rate == doctest::Approx(2.0));
+    CHECK_FALSE(b.ed.transport_scrub);  // the chip is not the track
+    b.click_screen(tl.rate.x + tl.rate.width * 0.5f,
+                   tl.rate.y + tl.rate.height * 0.5f);
+    CHECK(b.ed.playback.rate == doctest::Approx(0.25));
 }
 
 }  // namespace

@@ -16,6 +16,7 @@
 
 #include <ws/core/assert.hpp>
 #include <ws/circsim/erc.hpp>
+#include <ws/circsim/overlay.hpp>
 
 namespace editor {
 namespace {
@@ -1182,24 +1183,9 @@ const ws::spice::Table* Editor::canvas_tran_table() const {
 
 std::size_t Editor::shown_sample(const ws::spice::Table& t,
                                  double playhead) {
-    const std::size_t rows = t.row_count();
-    if (rows == 0) {
-        return 0;
-    }
-    if (t.sweep != ws::spice::SweepKind::Time || t.sweep_axes.empty()) {
-        return rows - 1;  // the sweep's end - the settled answer
-    }
-    const std::span<const double> axis = t.axis(0);
-    if (axis.empty()) {
-        return rows - 1;
-    }
-    // The last sample at or before the playhead (a .tran axis is
-    // strictly increasing; upper_bound lands past it).
-    const auto it = std::upper_bound(axis.begin(), axis.end(), playhead);
-    if (it == axis.begin()) {
-        return 0;
-    }
-    return static_cast<std::size_t>(it - axis.begin()) - 1;
+    // The rule lives in ws::circsim (overlay.hpp) so the plot's hover
+    // math, the canvas's paint and this seam share one answer.
+    return ws::circsim::overlay_playhead_sample(t, playhead);
 }
 
 void Editor::document_changed() {
@@ -1216,6 +1202,7 @@ void Editor::document_changed() {
     results = ResultsCache{};
     playback = Playback{};      // another document has no transient yet
     transport_scrub = false;
+    results_scrub = false;      // the row's drag dies with the document
     join_dots_.clear();
     joins_valid_ = false;
     nets_cache_ = ws::circsim::NetList{};
@@ -1264,9 +1251,11 @@ bool Editor::tick() {
         }
     }
     // The .tran playback advances with the same clock: the whole run
-    // sweeps by in kLoopSeconds of wall time, looping at the window's
-    // end. A run with no transient (or an empty table) parks itself -
-    // the transport strip still scrubs it by hand.
+    // sweeps by in kLoopSeconds of wall time at 1x (the rate stretches
+    // or shrinks it), looping at the window's end - the step math is
+    // ws::circsim's own (overlay.hpp), headless and tested. A run with
+    // no transient (or an empty table) parks itself - the transport
+    // strip still scrubs it by hand.
     if (playback.playing) {
         const ws::spice::Table* t = canvas_tran_table();
         const std::span<const double> axis =
@@ -1274,16 +1263,9 @@ bool Editor::tick() {
         if (axis.empty()) {
             playback.playing = false;
         } else {
-            const double t0 = axis.front();
-            const double t1 = axis.back();
-            const double span = std::max(t1 - t0, 1e-12);
-            playback.t += dt * span / Playback::kLoopSeconds;
-            while (playback.t > t1) {
-                playback.t -= span;  // loop
-            }
-            if (playback.t < t0) {
-                playback.t = t0;
-            }
+            playback.t = ws::circsim::overlay_step(
+                playback.t, ws::circsim::overlay_window(*t), dt,
+                playback.rate, Playback::kLoopSeconds);
             busy = true;  // keep the frames coming
         }
     }

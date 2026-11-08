@@ -39,12 +39,14 @@ struct ModeToggleLayout {
 [[nodiscard]] ModeToggleLayout mode_toggle_layout(const gui::Rect& body);
 
 // The .tran transport: the pill at the bottom center - the play/pause
-// button at its left, the scrub track filling the middle, the time
-// readout riding the right end.
+// button at its left, the scrub track filling the middle, the rate
+// chip (the sweep's pace, one press cycles 1/4 -> 1/2 -> 1 -> 2) and
+// the time readout riding the right end.
 struct TransportStripLayout {
     gui::Rect strip;   // the whole pill (the press target)
     gui::Rect button;  // play/pause
     gui::Rect bar;     // the scrub track
+    gui::Rect rate;    // the pace chip (a press cycles the ladder)
 };
 [[nodiscard]] TransportStripLayout transport_strip_layout(
     const gui::Rect& body);

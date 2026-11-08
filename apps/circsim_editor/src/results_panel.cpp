@@ -60,6 +60,7 @@
 
 #include <ws/input/input.hpp>
 #include <ws/spice/results.hpp>
+#include <ws/circsim/overlay.hpp>
 #include <ws/ui/renderer2d.hpp>
 
 namespace editor {
@@ -1100,6 +1101,27 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
         }
     }
 
+    // --- the playhead: the transient the canvas animates, swept here
+    // too (patch 0012). The transport row below and the canvas strip
+    // scrub the same playback.t - one clock, so the plot's cursor and
+    // the schematic's LED glow can never disagree. A time-swept table
+    // only; a pointer zoomed away from the playhead simply loses the
+    // line (the view is the truth, the line never stretches to it).
+    if (!by_index && t.sweep == ws::spice::SweepKind::Time) {
+        const double ph = ed.playback.t;
+        if (ph >= pf.vxr.lo && ph <= pf.vxr.hi) {
+            const float px = sx(ph);
+            Paint sweep;
+            sweep.width = 1.5f;
+            sweep.color = theme.control_on;
+            rc.stroke_line({px, fy}, {px, fy + ih}, sweep);
+            const Point cap[3] = {{px - 4.0f, fy},
+                                  {px + 4.0f, fy},
+                                  {px, fy + 6.0f}};
+            rc.fill_polygon(cap, 3, theme.control_on);
+        }
+    }
+
     // --- the in-flight band + the manual-view hint -------------------
     const PlotGesture& g = ed.results.gesture;
     if (g.kind == PlotGesture::Kind::Band) {
@@ -1173,6 +1195,90 @@ void draw_value_rows(Editor& ed, gui::LayoutCursor& layout,
         const std::string value = with_unit(r.value, r.unit, 5);
         (void)ws::ui::r2d::draw_text(row.x + col, row.y, value.c_str(),
                                      *font, gui::dim(theme.text, 0.95f));
+    }
+}
+
+// The transient's transport row (patch 0012): the SAME playback the
+// canvas strip wears - play/pause, a scrub track, the SI readout and
+// the rate chip. One clock: a scrub here animates the schematic, a
+// scrub on the canvas sweeps this plot's playhead line, and the two
+// strips can never disagree because there is only one field. Drawn
+// only under a time-swept table (the .op shape has nothing to sweep).
+void draw_transport_row(Editor& ed, gui::GuiContext& gui,
+                        gui::LayoutCursor& layout,
+                        const gui::ChromeTheme& theme,
+                        const ws::spice::Table& t) {
+    const ws::circsim::OverlayWindow w = ws::circsim::overlay_window(t);
+    if (!(w.t1 > w.t0)) {
+        return;  // a degenerate transient has nothing to sweep
+    }
+
+    // Play/pause: a paused playhead at the run's end restarts (the
+    // canvas strip's own rule - the settled state stays one press
+    // away from the sweep).
+    if (gui::button(gui, layout, theme,
+                    ed.playback.playing ? "pause" : "play", 56.0f)) {
+        if (!ed.playback.playing && ed.playback.t >= w.t1) {
+            ed.playback.t = w.t0;
+        }
+        ed.playback.playing = !ed.playback.playing;
+    }
+    layout.same_line();
+
+    // The scrub track: custom chrome over the strip's pointer rule -
+    // a press inside arms, the drag owns the pointer until release.
+    const float track_w =
+        std::max(60.0f, layout.remaining_width() - 170.0f);
+    const gui::Rect track = layout.next(track_w, 20.0f);
+    const ws::input::InputFrame& in = gui.input();
+    const auto frac_of = [&](float mx) {
+        return std::clamp(
+            (mx - track.x) / static_cast<double>(track.width), 0.0, 1.0);
+    };
+    const auto over_track = [&]() {
+        return gui.claims_open() && in.mouse_x >= track.x &&
+               in.mouse_x < track.x + track.width && in.mouse_y >= track.y &&
+               in.mouse_y < track.y + track.height;
+    };
+    if (ed.results_scrub) {
+        if (in.mouse_down[ws::input::mouse::kLeft] == 0) {
+            ed.results_scrub = false;  // release: the drag lets go
+        } else {
+            ed.playback.t = ws::circsim::overlay_scrub(w, frac_of(in.mouse_x));
+        }
+    } else if (in.mouse_pressed[ws::input::mouse::kLeft] != 0 &&
+               over_track()) {
+        ed.results_scrub = true;
+        ed.playback.t = ws::circsim::overlay_scrub(w, frac_of(in.mouse_x));
+    }
+
+    // The track's face: the rail, the played span, the knob - the
+    // canvas strip's look, at the row's own scale.
+    canvas::Canvas2D& rc = ed.results_draw_canvas();
+    rc.set_view_scale(1.0f);
+    const double frac =
+        std::clamp((ed.playback.t - w.t0) / (w.t1 - w.t0), 0.0, 1.0);
+    const float ty = track.y + track.height * 0.5f - 1.0f;
+    const Point rail{track.x, ty};
+    rc.fill_rects(&rail, 1, track.width, 2.0f, gui::dim(theme.text, 0.30f));
+    const Point played{track.x, ty};
+    rc.fill_rects(&played, 1, static_cast<float>(track.width * frac), 2.0f,
+                  theme.control_on);
+    rc.fill_circle(Point{track.x + static_cast<float>(track.width * frac),
+                         track.y + track.height * 0.5f},
+                   4.0f, theme.control_on);
+
+    // The readout, then the rate chip (the ladder's cycle - the same
+    // field the canvas chip walks).
+    layout.same_line();
+    std::string label = ws::circsim::format_eng(ed.playback.t);
+    label += 's';
+    gui::text(layout, theme, label.c_str());
+    layout.same_line();
+    if (gui::button(gui, layout, theme,
+                    ws::circsim::overlay_rate_label(ed.playback.rate),
+                    52.0f)) {
+        ed.playback.rate = ws::circsim::overlay_rate_next(ed.playback.rate);
     }
 }
 
@@ -1358,6 +1464,7 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
 
         gui::separator(layout, theme);
         draw_plot(ed, gui, layout, theme, t, x_name);
+        draw_transport_row(ed, gui, layout, theme, t);
         gui::text(layout, quiet,
                   "wheel zoom | drag box | drag axis | space+drag pan | "
                   "dbl-click fit | right-click cancel");

@@ -2,7 +2,7 @@
     "format": "circsim",
     "version": 1,
     "grid": 1.0,
-    "next_id": 11,
+    "next_id": 17,
     "parts": [
         {
             "id": 1,
@@ -59,22 +59,38 @@
             "mirror": false
         },
         {
-            "id": 10,
+            "id": 11,
             "symbol": "led",
             "ref": "D2",
             "value": "",
             "pos": [
-                21.0,
-                -4.0
+                14.0,
+                4.0
             ],
-            "rot": 0,
+            "rot": 180,
             "mirror": false,
             "params": {
-                "color": "red"
+                "color": "red",
+                "model": "LED_RED"
             }
         }
     ],
-    "junctions": [],
+    "junctions": [
+        {
+            "id": 14,
+            "pos": [
+                17.0,
+                4.0
+            ]
+        },
+        {
+            "id": 16,
+            "pos": [
+                11.0,
+                4.0
+            ]
+        }
+    ],
     "wires": [
         {
             "id": 5,
@@ -157,6 +173,56 @@
                 ]
             ],
             "ortho": true
+        },
+        {
+            "id": 13,
+            "a": {
+                "pin": {
+                    "part": 3,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "junction": {
+                    "id": 14
+                }
+            },
+            "waypoints": [
+                [
+                    18.0,
+                    0.0
+                ],
+                [
+                    17.0,
+                    0.0
+                ]
+            ],
+            "ortho": true
+        },
+        {
+            "id": 15,
+            "a": {
+                "pin": {
+                    "part": 3,
+                    "pin": 0
+                }
+            },
+            "b": {
+                "junction": {
+                    "id": 16
+                }
+            },
+            "waypoints": [
+                [
+                    10.0,
+                    0.0
+                ],
+                [
+                    11.0,
+                    0.0
+                ]
+            ],
+            "ortho": true
         }
     ],
     "labels": [
@@ -181,10 +247,10 @@
     },
     "directives": ".model LED_RED D(Is=1.6e-14 N=2.5 Rs=0.5)\n",
     "view": {
-        "zoom": 37.12636081575672,
+        "zoom": 37.12636081575673,
         "center": [
-            14.294593341896428,
-            -2.864651326124597
+            9.351626355728134,
+            -3.4261637521270467
         ]
     }
 }

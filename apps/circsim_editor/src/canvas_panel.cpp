@@ -50,6 +50,7 @@
 #include <vector>
 
 #include <ws/input/input.hpp>
+#include <ws/circsim/overlay.hpp>
 #include <ws/ui/canvas/canvas2d.hpp>
 
 namespace editor {
@@ -101,37 +102,18 @@ constexpr double kMagnetCells = 1.5;
     return series_color(h);
 }
 
-// The voltage ramp: v normalized by the run's max |v|, mapped through a
-// sqrt (perceptual - the interesting near-zero mids spread) from the
-// canvas's neutral gray toward red (positive) or blue (negative).
-// Pure data for the legend too, which walks the same u ladder.
+// The voltage ramp and the LED's brightness curve moved home in
+// patch 0012: ws::circsim/overlay.hpp owns the math (the locked rule
+// - no ui include in the library, no paint math stranded in the
+// panel), so the legend below and the glow both call the headless,
+// tested functions. The thin aliases keep the draw sites reading
+// the same way they always did.
 [[nodiscard]] std::uint32_t voltage_color(double v, double vmax) {
-    const double u = std::clamp(v / std::max(vmax, 1e-9), -1.0, 1.0);
-    const double a = std::sqrt(std::fabs(u));
-    constexpr double kBase[3] = {122.0, 126.0, 134.0};  // neutral ink
-    constexpr double kHot[3] = {255.0, 86.0, 60.0};     // positive: red
-    constexpr double kCold[3] = {86.0, 150.0, 255.0};   // negative: blue
-    const double* hot = u >= 0.0 ? kHot : kCold;
-    std::uint8_t rgb[3];
-    for (int i = 0; i < 3; ++i) {
-        rgb[i] = static_cast<std::uint8_t>(
-            std::lround(kBase[i] + (hot[i] - kBase[i]) * a));
-    }
-    return ws::ui::r2d::rgba(rgb[0], rgb[1], rgb[2], 242);
+    return ws::circsim::overlay_voltage_color(v, vmax);
 }
 
-// The glow's full-scale and floor: 20 mA reads as full-on, sub-100 uA
-// conduction (reverse leakage, the solver's gmin ghost) is dark. The
-// sqrt between them is the eye's own curve - half current reads as
-// clearly dimmer, not as 50% of nothing.
-constexpr double kLedFullAmps = 0.020;
-constexpr double kLedFloorAmps = 100e-6;
 [[nodiscard]] double led_brightness(double amps) {
-    const double a = std::fabs(amps);
-    if (a < kLedFloorAmps) {
-        return 0.0;
-    }
-    return std::sqrt(std::min(1.0, a / kLedFullAmps));
+    return ws::circsim::overlay_led_brightness(amps);
 }
 
 // The LED's own hue from its `color` param (the Choice the symbol
@@ -188,30 +170,17 @@ struct RunPainting {
         t = &ed.results.run.results.tables.front();
     }
     rp.table = t;
-    rp.sample = Editor::shown_sample(*t, ed.playback.t);
-    // net id -> node token (the export map is token -> net; invert once)
-    std::unordered_map<std::uint32_t, std::string> token_of;
-    token_of.reserve(ed.results.map.node_net.size());
-    for (const auto& [tok, net_id] : ed.results.map.node_net) {
-        token_of.emplace(net_id, tok);
-    }
-    for (const auto& [net_id, tok] : token_of) {
-        const std::span<const double> col = t->signal("v(" + tok + ")");
-        if (col.size() > rp.sample && std::isfinite(col[rp.sample])) {
-            const double v = col[rp.sample];
-            rp.volts.emplace(net_id, v);
-            rp.vmax = std::max(rp.vmax, std::fabs(v));
-        }
-    }
-    // part id -> the element's probe current at the same sample (only
-    // devices with a probe column answer; resistors stay absent).
-    for (const auto& [name, part_id] : ed.results.map.element_part) {
-        const std::span<const double> col = t->signal("i(" + name + ")");
-        if (col.size() > rp.sample && std::isfinite(col[rp.sample])) {
-            rp.amps.emplace(part_id, col[rp.sample]);
-        }
-    }
-    rp.ok = !rp.volts.empty();
+    // The extraction itself is ws::circsim's (overlay.hpp - patch
+    // 0012): the playhead's sample, every mapped net's voltage, every
+    // probed element's current, the ramp's scale. Headless, tested,
+    // and the one implementation every surface shares.
+    const ws::circsim::OverlaySnapshot snap =
+        ws::circsim::overlay_snapshot(*t, ed.results.map, ed.playback.t);
+    rp.sample = snap.sample;
+    rp.volts = std::move(snap.volts);
+    rp.amps = std::move(snap.amps);
+    rp.vmax = snap.vmax;
+    rp.ok = snap.ok;
     rp.stale = ed.results.version != s->version();
     return rp;
 }
@@ -239,32 +208,42 @@ ModeToggleLayout mode_toggle_layout(const gui::Rect& body) {
 }
 
 TransportStripLayout transport_strip_layout(const gui::Rect& body) {
-    const float w = std::min(300.0f, std::max(150.0f, body.width * 0.5f));
+    // The pill's width floor rose with the rate chip (patch 0012): the
+    // play button, a scrubbable track, the pace chip and the readout
+    // all need their room on a narrow canvas too.
+    const float w = std::min(320.0f, std::max(190.0f, body.width * 0.5f));
     const float h = 30.0f;
+    constexpr float kReadoutPx = 62.0f;  // the right end's reservation
+    constexpr float kRatePx = 36.0f;     // the pace chip
     TransportStripLayout out;
     out.strip = {body.x + (body.width - w) * 0.5f,
                  body.y + body.height - h - 34.0f, w, h};
     out.button = {out.strip.x + 3.0f, out.strip.y + 3.0f, h - 6.0f,
                   h - 6.0f};
+    out.rate = {out.strip.x + out.strip.width - kReadoutPx - kRatePx - 2.0f,
+                out.strip.y + 3.0f, kRatePx, h - 6.0f};
     out.bar = {out.strip.x + h + 4.0f, out.strip.y + h * 0.5f - 3.0f,
-               std::max(20.0f, w - h - 8.0f - 62.0f), 6.0f};
+               std::max(20.0f, out.rate.x - (out.strip.x + h + 4.0f) - 4.0f),
+               6.0f};
     return out;
 }
 
 namespace {
 
-// Scrubs the playhead to the bar position under `mouse_x`.
+// Scrubs the playhead to the bar position under `mouse_x` (the
+// fraction math is ws::circsim's overlay_scrub - one rule, tested).
 void scrub_to(Editor& ed, const ws::spice::Table& t, const gui::Rect& bar,
               float mouse_x) {
-    const std::span<const double> axis = t.axis(0);
-    if (axis.empty() || bar.width <= 1.0f) {
+    if (bar.width <= 1.0f) {
         return;
     }
-    const double t0 = axis.front();
-    const double t1 = axis.back();
+    const ws::circsim::OverlayWindow w = ws::circsim::overlay_window(t);
+    if (!(w.t1 > w.t0)) {
+        return;
+    }
     const double frac = std::clamp(
         (mouse_x - bar.x) / static_cast<double>(bar.width), 0.0, 1.0);
-    ed.playback.t = t0 + frac * (t1 - t0);
+    ed.playback.t = ws::circsim::overlay_scrub(w, frac);
 }
 
 // True when the point sits in the rect (the half-open screen rule).
@@ -537,6 +516,15 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                         ed.playback.t = axis.front();
                     }
                     ed.playback.playing = !ed.playback.playing;
+                    return;
+                }
+                if (in_rect(tl.rate, in.mouse_x, in.mouse_y)) {
+                    // One press walks the ladder (1/4 -> 1/2 -> 1 -> 2,
+                    // wrapping): 2x halves the wall clock, 1/4x
+                    // stretches it. The Results row rides the same
+                    // field, so both chips always agree.
+                    ed.playback.rate =
+                        ws::circsim::overlay_rate_next(ed.playback.rate);
                     return;
                 }
                 if (in_rect(tl.strip, in.mouse_x, in.mouse_y)) {
@@ -1470,6 +1458,32 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
             Point{bar.x + static_cast<float>(bar.width * frac),
                   bar.y + bar.height * 0.5f},
             5.0f, theme.control_on);
+
+        // The rate chip: the sweep's pace, one press cycles the
+        // ladder. It wears the "on" face while playing at a pace other
+        // than 1x, so an accidental 1/4x says so at a glance.
+        const gui::Rect& rt = tl.rate;
+        const bool pace_off = ed.playback.rate != 1.0;
+        rc.fill_rounded_rect(rt.x, rt.y, rt.width, rt.height, 4.0f,
+                             pace_off ? gui::dim(theme.control_on, 0.22f)
+                                      : theme.control_bg);
+        Paint chip;
+        chip.width = 1.0f;
+        chip.color = pace_off
+                         ? gui::dim(theme.control_on, 0.80f)
+                         : gui::dim(theme.text, 0.35f);
+        rc.stroke_rounded_rect(rt.x, rt.y, rt.width, rt.height, 4.0f,
+                               chip);
+        if (theme.font != nullptr) {
+            const char* rl =
+                ws::circsim::overlay_rate_label(ed.playback.rate);
+            const float rw = rc.measure_text(rl, *theme.font);
+            (void)rc.draw_text(
+                rt.x + (rt.width - rw) * 0.5f,
+                rt.y + (rt.height - theme.font->line_height()) * 0.5f,
+                rl, *theme.font,
+                pace_off ? theme.control_on : gui::dim(theme.text, 0.85f));
+        }
 
         // The readout (a fontless theme draws the shape alone).
         if (theme.font != nullptr) {

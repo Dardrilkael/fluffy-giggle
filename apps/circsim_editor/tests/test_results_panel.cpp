@@ -25,6 +25,7 @@
 #include <ws/settings/filesystem.hpp>
 #include <ws/spice/results.hpp>
 #include <ws/spice/run.hpp>
+#include <ws/circsim/plot.hpp>
 #include <ws/ui/canvas/canvas2d.hpp>
 #include <ws/ui/gui/gui_context.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
@@ -946,4 +947,117 @@ TEST_CASE("the x-sortedness caches per table and follows table switches") {
     b.draw();
     CHECK(b.ed.results.x_sorted == true);
     CHECK(b.ed.results.x_sorted_for == 0u);
+}
+
+// --- the transient wears the plot (patch 0012) --------------------------------
+//
+// The playhead the canvas animates is the plot's cursor too, and the
+// transport row under the plot scrubs the SAME playback: one field, so
+// the two surfaces can never disagree. The gate drives the row the way
+// a hand would - a press in the track, the drag, the release - and
+// asserts the shared state moved (and parked) exactly.
+TEST_CASE("the playhead line sweeps the plot at the shared cursor") {
+    Bench b;
+    b.load(ramp_table(51u));  // 0 .. 5 ms, a clean ramp
+    const std::span<const double> xs =
+        b.ed.results.run.results.tables[0].axis(0);
+    REQUIRE(xs.size() == 51u);
+    const double t0 = xs.front();
+    const double t1 = xs.back();
+
+    // Park the playhead mid-sweep: the plot draws a vertical line at
+    // the playhead's x - the same mapping the series ride, the padded
+    // auto fit the panel itself asks ws::circsim for.
+    b.ed.playback.t = 2.5e-3;
+    b.draw();
+    const canvas::CanvasCmd* frame = b.frame_cmd();
+    const Bench::FrameBox fb = b.frame_box(frame);
+    const float iw = fb.fx2 - fb.fx;
+    const float ih = fb.fy2 - fb.fy;
+    const ws::circsim::PlotRange xr =
+        ws::circsim::expand_range(t0, t1);
+    const float want_x =
+        fb.fx + static_cast<float>((b.ed.playback.t - xr.lo) /
+                                   (xr.hi - xr.lo)) * iw;
+    const canvas::CanvasCmd* sweep = nullptr;
+    for (const canvas::CanvasCmd& c : b.clc.cmds) {
+        if (c.kind == canvas::CanvasCmdKind::stroke_polyline &&
+            c.points.size() == 2u && c.width == 1.5f &&
+            c.color == gui::kDefaultChrome.control_on) {
+            sweep = &c;
+            break;
+        }
+    }
+    REQUIRE(sweep != nullptr);
+    CHECK(sweep->points[0].x == doctest::Approx(want_x).epsilon(0.01));
+    CHECK(sweep->points[1].x == doctest::Approx(want_x).epsilon(0.01));
+    CHECK(sweep->points[0].y == doctest::Approx(fb.fy).epsilon(0.01));
+    CHECK(sweep->points[1].y == doctest::Approx(fb.fy + ih).epsilon(0.01));
+
+    // An .op table wears no playhead (nothing to sweep): the line is a
+    // transient's own.
+    b.load(op_table());
+    b.draw();
+    for (const canvas::CanvasCmd& c : b.clc.cmds) {
+        if (c.kind == canvas::CanvasCmdKind::stroke_polyline &&
+            c.points.size() == 2u && c.width == 1.5f &&
+            c.color == gui::kDefaultChrome.control_on) {
+            FAIL("the .op shape drew a playhead line");
+        }
+    }
+}
+
+TEST_CASE("the transport row scrubs the one shared playback") {
+    Bench b;
+    b.load(ramp_table(51u));
+    const std::span<const double> xs =
+        b.ed.results.run.results.tables[0].axis(0);
+    const double t0 = xs.front();
+    const double t1 = xs.back();
+    const double span = t1 - t0;
+    b.draw();
+
+    // The row drew: a rail (a 2px fill_rects at least 60 px wide) with
+    // the knob circle on it - the row's own geometry, found in the
+    // command stream the way the canvas suite finds its chrome.
+    const canvas::CanvasCmd* rail = nullptr;
+    for (const canvas::CanvasCmd& c : b.clc.cmds) {
+        if (c.kind == canvas::CanvasCmdKind::fill_rects &&
+            c.points.size() == 1u && c.w >= 60.0f && c.h <= 2.5f) {
+            rail = &c;
+            break;
+        }
+    }
+    REQUIRE(rail != nullptr);
+    const float tx = rail->points[0].x;
+    const float ty = rail->points[0].y;
+    const float tw = rail->w;
+
+    // A press a quarter into the track arms the drag and lands the
+    // playhead there - the canvas's own strip rule, on the plot's row.
+    Bench::Mouse m;
+    m.x = tx + tw * 0.25f;
+    m.y = ty + 10.0f;
+    m.left_pressed = true;
+    m.left_down = true;
+    b.draw(m);
+    CHECK(b.ed.results_scrub);
+    CHECK(b.ed.playback.t == doctest::Approx(t0 + span * 0.25)
+                               .epsilon(0.02));
+
+    // The drag owns the pointer: a move to the far end sweeps it, and
+    // the same playback field is what the canvas animates.
+    m.left_pressed = false;
+    m.x = tx + tw * 0.95f;
+    b.draw(m);
+    CHECK(b.ed.results_scrub);
+    CHECK(b.ed.playback.t >= t0 + span * 0.90);  // 0.95 in, slack out
+
+    // Release parks it; a later press in the plot's own frame (the
+    // band zoom's turf) never re-arms the row.
+    m.left_down = false;
+    m.left_released = true;
+    b.draw(m);
+    CHECK_FALSE(b.ed.results_scrub);
+    CHECK(b.ed.playback.t >= t0 + span * 0.90);
 }

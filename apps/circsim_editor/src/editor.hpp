@@ -405,13 +405,21 @@ enum class WireColorMode : std::uint8_t { Plain, Nets, Voltage };
 // paused canvas shows the sample at playback.t (a delivery parks it at
 // the run's END - the settled state, what an .op reader means by "the
 // answer"); playing sweeps t across the table's window at a pace that
-// fits the whole run into ~4 s of wall clock, looping. The voltage
-// coloring and the LED glow both read the playhead's sample, so a
-// playing transient animates the canvas.
+// fits the whole run into ~4 s of wall clock (the rate below stretches
+// or shrinks that), looping. The voltage coloring and the LED glow
+// both read the playhead's sample, so a playing transient animates the
+// canvas - and the Results plot wears the same playhead as a swept
+// cursor line (one clock: the canvas strip and the plot's transport
+// row scrub the same field, so no two surfaces can disagree).
 struct Playback {
     static constexpr double kLoopSeconds = 4.0;  // wall clock per sweep
     bool playing = false;
     double t = 0.0;
+    // The sweep's pace, off ws::circsim's rate ladder (1/4, 1/2, 1, 2
+    // - overlay.hpp): 1x fits the run into kLoopSeconds, 2x halves
+    // the wall clock, 1/4x stretches it. The transport strip's rate
+    // chip and the Results row's cycle the same field.
+    double rate = 1.0;
 };
 
 // --- the editor ----------------------------------------------------------------
@@ -466,6 +474,11 @@ struct Editor {
     WireColorMode wire_colors = WireColorMode::Nets;
     Playback playback;
     bool transport_scrub = false;
+    // The Results panel's transport row scrub, the strip's own rule: a
+    // press in the row's track arms it, the drag owns the pointer
+    // until release, and both surfaces write the one playback above -
+    // a scrub on the plot animates the canvas, and back.
+    bool results_scrub = false;
     // The move-drag (press to release). `live` writes the position
     // directly (no undo) while the pointer holds; the command lands at
     // release with the captured from/to.
