@@ -29,7 +29,18 @@ interfaces, never a make_* factory).
   multi-instance with a never-reused counter), focus with on_focus
   firing only on the CHANGE, cycling, redock/retab (a re-dock and a
   retab activate the moved tab - opening and docking are one act,
-  and so are re-docking and focusing).
+  and so are re-docking and focusing). THE FLOATING LAYER: a panel
+  instance lives in exactly one home - a tab in the tree or a
+  floating window in the host's z stack - with float_panel the
+  tear-off (the tree forgets the tab, the focus follows the panel
+  out), move/raise for the view's drag, redock the way back (the
+  tree's add, not move - a floating panel holds no tab), and close
+  closing the panel whichever home it is in. The layer rides the
+  layout json as one extra root key ("floating", back to front);
+  from_json drops a ghost id, an id the tree already holds (one
+  instance, one home - the tree wins), and clamps the minimum size
+  (kFloatingMinW/H, the data invariant - the view's ceiling is the
+  dock frame it clamps windows into).
 - document.cpp: DocumentManager's open set - the close flow
   (plan_close -> the prompt -> finish_close, a failed save keeps the
   document open), session save/restore (missing files land in the
@@ -40,18 +51,28 @@ interfaces, never a make_* factory).
   never failed boots), the frame (menu bar + the automatic Window
   menu, toolbar, the dock view - tab strips, close buttons, focus
   follows press, splitter drags through gui.hit_test, panel bodies in
-  scroll scopes - status-job rows, the status bar, the overlays), and
-  the ordered shutdown logged phase by phase. The dock view's three
-  gestures: the TAB DRAG (armed off tab_bar's held-claim out-param,
-  a 6-px threshold, a drop-preview veil over dock_hit's zone, the
-  release drops through PanelHost::redock - outside every leaf
-  cancels, and a hold that never crossed the threshold stays the
-  strip's click), the ZOOM BUTTON (the strip's right end, a round
-  ghost glyph button that maximizes the pane's front tab and
-  restores it - resolve()'s projection does the rest), and the
-  SPLITTER DOUBLE-CLICK (two fresh presses on one band inside
-  0.35 s of the frame clock distribute that split; the same hold
-  never also drags the boundary it just evened).
+  scroll scopes, the floating windows over all of it - status-job
+  rows, the status bar, the overlays), and the ordered shutdown
+  logged phase by phase. The dock view's four gestures: the TAB DRAG
+  (armed off tab_bar's held-claim out-param, a 6-px threshold, a
+  drop-preview veil over dock_hit's zone, the release drops through
+  PanelHost::redock - outside every leaf TEARS THE PANEL OFF into a
+  floating window sized after the pane it came out of, and a hold
+  that never crossed the threshold stays the strip's click), the
+  FLOATING WINDOW (draw_floating: the z stack back to front, a
+  press raises + focuses, the title bar drags - the same threshold,
+  the same veil, the same dock_hit drop on release, a release over
+  no leaf stays floating - and the corner grip resizes, both
+  clamped on-screen through seat_in_bounds), the ZOOM BUTTON (the
+  strip's right end, a round ghost glyph button that maximizes the
+  pane's front tab and restores it - resolve()'s projection does the
+  rest; every drop aimed at the projection's leaf 0 re-maps to the
+  zoomed panel's REAL leaf, or the tab would dock into a pane the
+  screen is not showing), and the SPLITTER DOUBLE-CLICK (two fresh
+  presses on one band inside 0.35 s of the frame clock distribute
+  that split; the same hold never also drags the boundary it just
+  evened). The float/dock palette commands ride the last frame's
+  dock bounds (last_dock_bounds_) for their geometry.
 
 ## Rules that keep biting
 - **The shell never touches ws::ui::App** - it is a plain class the
@@ -68,7 +89,16 @@ interfaces, never a make_* factory).
   drag rides the tab's capture (hit.pressed stays true wherever the
   pointer carries it), so no other widget can steal the hold - and
   the drop logic reads mouse_down directly, exactly like the
-  splitter drag before it.
+  splitter drag before it. The floating title-bar drag is the same
+  discipline with the same threshold: a press that never carries
+  past it is the raise + focus the press already did, never a move
+  and never a dock-under-itself.
+- **One instance, one home**: a panel id is a tab in the tree OR an
+  entry in the floating stack, never both - the tear-off removes
+  the tab, the redock removes the window, the json parse drops the
+  second sighting (the tree wins), and the same id in the layer
+  twice is one window that moves. rebuild_default_layout clears
+  BOTH homes before re-adding at the defaults.
 - **Move ordering is pointer-safety, not style**: a re-dock inserts
   the new leaf BEFORE erasing the old tab when the source and the
   target differ (the erase can empty the source and the prune that
@@ -104,15 +134,20 @@ interfaces, never a make_* factory).
 ```
 ctest --preset debug -R ui_shell    # or: test_ui_shell directly
 ```
-Twenty-six cases: dock geometry/serialization/clamps/pruning, the
+Thirty-one cases: dock geometry/serialization/clamps/pruning, the
 fusion shapes (flat splits, at_root strips) and their pixel-exact
 shares, move/move_tab (retab, reorder, prune-behind), the
 maximize/restore projection, distribute, dock_hit's five zones,
 panel validation/focus, document close-dirty/session/autosave, shell
 first-run/corrupt-config/layout-restore/dirty-title/palette/drops/
-theme/shutdown-order, and the three gestures through scripted
-three-frame pointer runs (the tab drag's retab/split/cancel/click,
-the zoom button, the splitter double-click). The suite links
-ws::ui_gui + the r2d stub + ws::platform's headless halves - no
-Vulkan, GLFW or OS TU anywhere (the acceptance the stage set out to
-prove).
+theme/shutdown-order, and the gestures through scripted three-frame
+pointer runs (the tab drag's retab/split/tear-off/click, the zoom
+button, the splitter double-click). Five of those walk the floating
+layer end to end: the host-level tear-off/redock/close and the
+layout json round-trip (ghost ids, docked ids, the size floor, an
+older file with no layer key), the title-bar drag's click-vs-drag
+and redock-vs-stay-out, the grip resize and its floor, and the drop
+onto a zoomed dock landing in the zoomed pane's real leaf. The
+suite links ws::ui_gui + the r2d stub + ws::platform's headless
+halves - no Vulkan, GLFW or OS TU anywhere (the acceptance the
+stage set out to prove).

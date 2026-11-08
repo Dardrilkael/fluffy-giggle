@@ -787,7 +787,6 @@ TEST_CASE("the tab drag re-docks a panel through the shell") {
     const float strip_y =
         laid.leaves[0].rect.y + chrome * 0.5f;  // the strips' midline
     const float editor_tab_x = laid.leaves[0].rect.x + 20.0f;
-    const float plot_tab_x = laid.leaves[1].rect.x + 20.0f;
     const float plot_cx = laid.leaves[1].rect.x +
                           laid.leaves[1].rect.width * 0.5f;
     const float plot_cy = laid.leaves[1].rect.y +
@@ -815,20 +814,361 @@ TEST_CASE("the tab drag re-docks a panel through the shell") {
     CHECK(tree.leaf_of("editor") == 0);
     CHECK(tree.leaf_of("plot") == 1);
 
-    // A drop outside every leaf cancels: carried over the menu bar and
-    // released there, the tree never moves.
+    // A drop outside every leaf tears the panel off: carried over the
+    // menu bar and released there, the panel becomes a floating window
+    // (the ImGui gesture - the tree loses its leaf, the window centers
+    // on the release, and the focus follows the panel out).
+    PanelHost& host = rig.shell->panel_host();
     rig.point(editor_tab_x, strip_y, true, true, false);
     rig.point(600.0f, 10.0f, true, false, false);  // the menu bar's band
     rig.point(600.0f, 10.0f, false, false, true);
-    CHECK(tree.leaf_count() == 2);
+    REQUIRE(host.floating().size() == 1);
+    CHECK(host.floating()[0].panel == "editor");
+    CHECK(!tree.contains("editor"));
+    CHECK(tree.leaf_count() == 1);  // plot alone spans the dock
+    CHECK(host.active() != nullptr);
+    CHECK(host.active()->id == "editor");  // the focus follows the tear
+
+    // The torn-off window's size: the pane it came out of (the editor
+    // leaf was the left half), centered on the release and seated
+    // inside the dock - the title bar never rides off the top.
+    const ws::ui::gui::Rect& floated = host.floating()[0].rect;
+    CHECK(floated.width == doctest::Approx(640.0f));   // the left half
+    CHECK(floated.height == doctest::Approx(dock.height));  // the whole dock
+    CHECK(floated.y >= dock.y);
 
     // A press-and-release that never crosses the threshold is the
-    // strip's own click: the selection moves, the tree does not.
-    rig.point(plot_tab_x, strip_y, true, true, false);
-    rig.point(plot_tab_x, strip_y, false, false, true);
-    CHECK(tree.leaf_count() == 2);
-    CHECK(rig.shell->panel_host().active() != nullptr);
-    CHECK(rig.shell->panel_host().active()->id == "plot");
+    // strip's own click: the selection moves, the tree does not (the
+    // plot leaf now spans the whole dock, so its tab lives at the
+    // left end - clear of the floating window).
+    const float plot_tab_x2 = dock.x + 20.0f;
+    rig.point(plot_tab_x2, strip_y, true, true, false);
+    rig.point(plot_tab_x2, strip_y, false, false, true);
+    CHECK(tree.leaf_count() == 1);
+    CHECK(host.floating().size() == 1);  // the click docked nothing
+    CHECK(host.active() != nullptr);
+    CHECK(host.active()->id == "plot");
+    (void)rig.shell->shutdown();
+}
+
+TEST_CASE("float_panel tears a tab out and redock puts it back") {
+    PanelRegistry registry;
+    PanelDesc a;
+    a.id = "a";
+    a.title = "A";
+    a.placement.area = DockPlacement::Area::left;
+    a.draw = [](GuiContext&, LayoutCursor&, const ws::ui::gui::ChromeTheme&,
+                const PanelInstance&) {};
+    PanelDesc b;
+    b.id = "b";
+    b.title = "B";
+    b.placement.area = DockPlacement::Area::right;
+    b.draw = [](GuiContext&, LayoutCursor&, const ws::ui::gui::ChromeTheme&,
+                const PanelInstance&) {};
+    REQUIRE(registry.add(std::move(a)));
+    REQUIRE(registry.add(std::move(b)));
+
+    PanelHost host;
+    (void)host.open(registry, "a");
+    (void)host.open(registry, "b");
+    CHECK(host.dock().leaf_count() == 2);
+
+    // The tear-off: the tree forgets the tab, the layer gains the
+    // window, and the focus follows the panel out.
+    host.float_panel(registry, "a", ws::ui::gui::Rect{40.0f, 60.0f, 200.0f, 150.0f});
+    CHECK(host.dock().leaf_count() == 1);
+    CHECK(host.dock().panels() == std::vector<std::string>{"b"});
+    REQUIRE(host.floating().size() == 1);
+    CHECK(host.floating()[0].panel == "a");
+    CHECK(host.is_floating("a"));
+    CHECK(host.active() != nullptr);
+    CHECK(host.active()->id == "a");
+
+    // A rect below the floor lands clamped: a window smaller than the
+    // minimums is a title bar with no body.
+    host.float_panel(registry, "a",
+                     ws::ui::gui::Rect{0.0f, 0.0f, 40.0f, 30.0f});
+    REQUIRE(host.floating().size() == 1);  // one id, one window
+    CHECK(host.floating()[0].rect.width ==
+          doctest::Approx(ws::ui::shell::kFloatingMinW));
+    CHECK(host.floating()[0].rect.height ==
+          doctest::Approx(ws::ui::shell::kFloatingMinH));
+
+    // The move and the raise (the drag and the press-raise ride these).
+    host.move_floating("a", ws::ui::gui::Rect{70.0f, 80.0f, 220.0f, 160.0f});
+    CHECK(host.floating()[0].rect.x == doctest::Approx(70.0f));
+    host.raise_floating("a");  // already the top: a no-op, not a dupe
+    CHECK(host.floating().size() == 1);
+
+    // The way back: a floating redock lands the tab (the tree's add,
+    // not move - the panel held no tab) and the focus follows it in.
+    DockPlacement back;
+    back.area = DockPlacement::Area::center;
+    back.leaf = 0;
+    host.redock(registry, "a", back);
+    CHECK(host.floating().empty());
+    CHECK(host.dock().contains("a"));
+    CHECK(host.dock().panels() == std::vector<std::string>({"b", "a"}));
+    CHECK(host.active() != nullptr);
+    CHECK(host.active()->id == "a");
+
+    // Closing a floating panel closes the panel, not just the window.
+    host.float_panel(registry, "a", ws::ui::gui::Rect{10.0f, 10.0f, 200.0f, 150.0f});
+    CHECK(host.close(registry, "a"));
+    CHECK(host.floating().empty());
+    CHECK(host.find("a") == nullptr);
+    CHECK(host.dock().panels() == std::vector<std::string>{"b"});
+}
+
+TEST_CASE("the floating layer persists in the layout json") {
+    PanelRegistry registry;
+    PanelDesc a;
+    a.id = "a";
+    a.title = "A";
+    a.placement.area = DockPlacement::Area::left;
+    a.draw = [](GuiContext&, LayoutCursor&, const ws::ui::gui::ChromeTheme&,
+                const PanelInstance&) {};
+    PanelDesc b;
+    b.id = "b";
+    b.title = "B";
+    b.placement.area = DockPlacement::Area::right;
+    b.draw = [](GuiContext&, LayoutCursor&, const ws::ui::gui::ChromeTheme&,
+                const PanelInstance&) {};
+    REQUIRE(registry.add(std::move(a)));
+    REQUIRE(registry.add(std::move(b)));
+
+    PanelHost host;
+    (void)host.open(registry, "a");
+    (void)host.open(registry, "b");
+    host.float_panel(registry, "b", ws::ui::gui::Rect{40.0f, 60.0f, 220.0f, 160.0f});
+
+    // The saved shape: the tree's own root object plus the one extra
+    // key - the z stack, back to front.
+    const ws::settings::json::Value saved = host.layout_to_json();
+    const ws::settings::json::Object* root = saved.as_object();
+    REQUIRE(root != nullptr);
+    const ws::settings::json::Value* floating = root->find("floating");
+    REQUIRE(floating != nullptr);
+    REQUIRE(floating->is_array());
+    REQUIRE(floating->as_array()->size() == 1);
+
+    // The round trip: the layer left (a redock), the same value
+    // restores it - rect and all.
+    host.redock(registry, "b", DockPlacement{});
+    CHECK(host.floating().empty());
+    CHECK(host.layout_from_json(saved, [](std::string_view) { return true; }));
+    REQUIRE(host.floating().size() == 1);
+    CHECK(host.floating()[0].panel == "b");
+    CHECK(host.floating()[0].rect.x == doctest::Approx(40.0f));
+    CHECK(host.floating()[0].rect.width == doctest::Approx(220.0f));
+
+    // The tolerance, a hand-edited file's worst day: a ghost id nobody
+    // opened, an id the tree already holds (one instance, one home),
+    // and a window below the floor.
+    const ws::core::Result<ws::settings::json::Value> hand =
+        ws::settings::json::parse(
+            R"({"tabs":["a"],"active":0,"floating":[)"
+            R"({"id":"ghost","x":1,"y":1,"w":50,"h":50},)"
+            R"({"id":"a","x":5,"y":5,"w":100,"h":100},)"
+            R"({"id":"b","x":9,"y":9,"w":50,"h":50}]})");
+    REQUIRE(hand);
+    PanelHost edited;
+    (void)edited.open(registry, "a");
+    (void)edited.open(registry, "b");
+    CHECK(edited.layout_from_json(*hand, nullptr));
+    REQUIRE(edited.floating().size() == 1);  // ghost and the docked id drop
+    CHECK(edited.floating()[0].panel == "b");
+    CHECK(edited.floating()[0].rect.width ==
+          doctest::Approx(ws::ui::shell::kFloatingMinW));  // the floor
+
+    // A file with no layer key (an older build's layout) restores its
+    // tree and simply no windows.
+    const ws::core::Result<ws::settings::json::Value> old =
+        ws::settings::json::parse(R"({"tabs":["a"],"active":0})");
+    REQUIRE(old);
+    CHECK(edited.layout_from_json(*old, [](std::string_view) { return true; }));
+    CHECK(edited.floating().empty());
+    CHECK(edited.dock().panels() == std::vector<std::string>{"a"});
+}
+
+TEST_CASE("a floating window drags by its title bar and re-docks on release") {
+    Rig rig;
+    rig.build();
+    CHECK(rig.shell->startup());
+    (void)rig.shell->panel_host().open(rig.shell->panels(), "editor");
+    (void)rig.shell->panel_host().open(rig.shell->panels(), "plot");
+
+    const float chrome = ws::ui::gui::kDefaultChrome.control_height;
+    const ws::ui::gui::Rect dock{0.0f, chrome, 1280.0f, 720.0f - chrome};
+    PanelHost& host = rig.shell->panel_host();
+    DockTree& tree = host.dock();
+
+    // Torn off over the dock's middle: the title bar's center is the
+    // grab, and the plot leaf (the whole dock now) is the drop target.
+    host.float_panel(rig.shell->panels(), "editor",
+                     ws::ui::gui::Rect{100.0f, 100.0f, 300.0f, 200.0f});
+    rig.frame();  // one idle frame: the window is on screen
+    const float bar_x = 250.0f;               // the bar's middle
+    const float bar_y = 100.0f + chrome * 0.5f;
+    const float drop_x = dock.x + dock.width * 0.5f;
+    const float drop_y = dock.y + dock.height * 0.5f;
+
+    // A held CLICK on the bar (no carry past the threshold) is the
+    // raise + focus, nothing more: the window neither moves nor docks.
+    rig.point(bar_x, bar_y, true, true, false);
+    rig.point(bar_x, bar_y, false, false, true);
+    CHECK(host.floating().size() == 1);
+    CHECK(host.floating()[0].rect.x == doctest::Approx(100.0f));
+    CHECK(host.active() != nullptr);
+    CHECK(host.active()->id == "editor");  // the press focused it
+
+    // The drag: carry the bar over the plot leaf's center and release
+    // - the same center drop a tab drag makes, the window leaves the
+    // layer and the tab joins the leaf (its front tab).
+    rig.point(bar_x, bar_y, true, true, false);
+    rig.point(drop_x, drop_y, true, false, false);
+    rig.point(drop_x, drop_y, false, false, true);
+    CHECK(host.floating().empty());
+    CHECK(tree.contains("editor"));
+    CHECK(tree.leaf_count() == 1);
+    CHECK(tree.tab_index("editor") == 1);  // the dropped tab lands last
+    CHECK(tree.tab_index("plot") == 0);
+    CHECK(host.active() != nullptr);
+    CHECK(host.active()->id == "editor");
+
+    // The drag that lands nowhere: torn off again, carried over the
+    // menu bar (outside every leaf) and released - the window stays
+    // floating, seated inside the dock where the carry left it.
+    host.float_panel(rig.shell->panels(), "editor",
+                     ws::ui::gui::Rect{100.0f, 100.0f, 300.0f, 200.0f});
+    rig.frame();
+    rig.point(bar_x, bar_y, true, true, false);
+    rig.point(600.0f, 10.0f, true, false, false);  // the menu bar's band
+    rig.point(600.0f, 10.0f, false, false, true);
+    REQUIRE(host.floating().size() == 1);
+    CHECK(host.floating()[0].panel == "editor");
+    // The move's own math: 100 + (600 - 250) across, 100 + (10 - 113)
+    // down - clamped to the dock's top edge.
+    CHECK(host.floating()[0].rect.x == doctest::Approx(450.0f));
+    CHECK(host.floating()[0].rect.y >= dock.y);
+
+    // The palette pair: the same two acts as commands, no pointer
+    // needed. Dock (the floating panel centers into the last leaf),
+    // then float (half the dock, centered on it).
+    CHECK(rig.commands.execute("shell.dock_panel"));
+    CHECK(host.floating().empty());
+    CHECK(tree.contains("editor"));
+    CHECK(rig.commands.execute("shell.float_panel"));
+    REQUIRE(host.floating().size() == 1);
+    CHECK(host.floating()[0].panel == "editor");
+    CHECK(host.floating()[0].rect.width == doctest::Approx(dock.width * 0.5f));
+    CHECK(host.floating()[0].rect.height ==
+          doctest::Approx(dock.height * 0.5f));
+    CHECK(host.floating()[0].rect.x ==
+          doctest::Approx(dock.x + dock.width * 0.25f));
+    (void)rig.shell->shutdown();
+}
+
+TEST_CASE("a floating window resizes from its corner grip") {
+    Rig rig;
+    rig.build();
+    CHECK(rig.shell->startup());
+    (void)rig.shell->panel_host().open(rig.shell->panels(), "editor");
+    (void)rig.shell->panel_host().open(rig.shell->panels(), "plot");
+
+    PanelHost& host = rig.shell->panel_host();
+    host.float_panel(rig.shell->panels(), "editor",
+                     ws::ui::gui::Rect{100.0f, 100.0f, 300.0f, 200.0f});
+    rig.frame();
+
+    // The grip: the bottom-right corner's square. Press, carry down-
+    // right past the threshold, release - the window grows by the
+    // carry's delta, its origin unmoved.
+    float grip_x = 100.0f + 300.0f - 7.0f;
+    float grip_y = 100.0f + 200.0f - 7.0f;
+    rig.point(grip_x, grip_y, true, true, false);
+    rig.point(grip_x + 80.0f, grip_y + 60.0f, true, false, false);
+    rig.point(grip_x + 80.0f, grip_y + 60.0f, false, false, true);
+    REQUIRE(host.floating().size() == 1);
+    CHECK(host.floating()[0].rect.width == doctest::Approx(380.0f));
+    CHECK(host.floating()[0].rect.height == doctest::Approx(260.0f));
+    CHECK(host.floating()[0].rect.x == doctest::Approx(100.0f));
+
+    // The floor: a carry far past the window's own corner cannot
+    // shrink it below the minimums (a title bar with no body).
+    grip_x = 100.0f + 380.0f - 7.0f;
+    grip_y = 100.0f + 260.0f - 7.0f;
+    rig.point(grip_x, grip_y, true, true, false);
+    rig.point(grip_x - 1000.0f, grip_y - 1000.0f, true, false, false);
+    rig.point(grip_x - 1000.0f, grip_y - 1000.0f, false, false, true);
+    REQUIRE(host.floating().size() == 1);
+    CHECK(host.floating()[0].rect.width ==
+          doctest::Approx(ws::ui::shell::kFloatingMinW));
+    CHECK(host.floating()[0].rect.height ==
+          doctest::Approx(ws::ui::shell::kFloatingMinH));
+
+    // A grip CLICK (no carry) resizes nothing.
+    grip_x = 100.0f + ws::ui::shell::kFloatingMinW - 7.0f;
+    grip_y = 100.0f + ws::ui::shell::kFloatingMinH - 7.0f;
+    rig.point(grip_x, grip_y, true, true, false);
+    rig.point(grip_x, grip_y, false, false, true);
+    CHECK(host.floating()[0].rect.width ==
+          doctest::Approx(ws::ui::shell::kFloatingMinW));
+    (void)rig.shell->shutdown();
+}
+
+TEST_CASE("a drop onto a zoomed dock lands in the zoomed pane") {
+    Rig rig;
+    rig.build();
+    CHECK(rig.shell->startup());
+    // A third pane, so the zoomed panel is NOT leaf 0 after the
+    // tear-off: the drop's re-map (projection leaf 0 -> the zoomed
+    // panel's real leaf) has a wrong answer to avoid. The CONSOLE is
+    // the drag source (tearing it keeps plot at leaf 1; tearing the
+    // editor would renumber plot to 0 and the map would have nothing
+    // to prove).
+    PanelDesc console;
+    console.id = "console";
+    console.title = "Console";
+    console.placement.area = DockPlacement::Area::bottom;
+    console.draw = [](GuiContext&, LayoutCursor&,
+                      const ws::ui::gui::ChromeTheme&, const PanelInstance&) {
+    };
+    (void)rig.shell->panels().add(std::move(console));
+    (void)rig.shell->panel_host().open(rig.shell->panels(), "editor");
+    (void)rig.shell->panel_host().open(rig.shell->panels(), "plot");
+    (void)rig.shell->panel_host().open(rig.shell->panels(), "console");
+    // editor left, plot right, console under plot: three leaves.
+    PanelHost& host = rig.shell->panel_host();
+    DockTree& tree = host.dock();
+    REQUIRE(tree.leaf_count() == 3);
+    REQUIRE(tree.leaf_of("plot") == 1);
+
+    // Console torn off (plot stays leaf 1), plot zoomed, one frame so
+    // the zoom projection and the window are both on screen.
+    host.float_panel(rig.shell->panels(), "console",
+                     ws::ui::gui::Rect{100.0f, 100.0f, 300.0f, 200.0f});
+    REQUIRE(tree.leaf_of("plot") == 1);  // the tear renumbered nothing above it
+    tree.maximize("plot");
+    rig.frame();
+
+    // Carry the window over the zoomed dock's middle and release: the
+    // projection answers leaf 0, the drop must land in plot's REAL
+    // leaf (index 1, not the editor's 0) - the console joins the pane
+    // the screen shows.
+    const float chrome = ws::ui::gui::kDefaultChrome.control_height;
+    const float bar_y = 100.0f + chrome * 0.5f;
+    const float drop_x = 640.0f;
+    const float drop_y = chrome + (720.0f - chrome) * 0.5f;
+    rig.point(250.0f, bar_y, true, true, false);
+    rig.point(drop_x, drop_y, true, false, false);
+    rig.point(drop_x, drop_y, false, false, true);
+    CHECK(host.floating().empty());
+    CHECK(tree.leaf_of("console") == 1);  // plot's leaf, not the projection's 0
+    CHECK(tree.leaf_of("console") == tree.leaf_of("plot"));
+    CHECK(tree.maximized() == "plot");   // the zoom survived the drop
+    CHECK(tree.tab_index("plot") == 0);
+    CHECK(tree.tab_index("console") == 1);
     (void)rig.shell->shutdown();
 }
 

@@ -61,6 +61,57 @@ constexpr float kSplitterDblClickS = 0.35f;
 // The strip's zoom/restore button: a 12-px round hitbox, the close
 // x's own size (the strip's two round affordances read as a pair).
 constexpr float kZoomHit = 12.0f;
+// The floating window's resize grip: a square at the bottom-right
+// corner (three diagonal strokes, the classic grip mark). Big enough
+// to hit at a glance, small enough to stay out of the scroll bars.
+constexpr float kFloatGripPx = 14.0f;
+
+// The drop preview's geometry, shared by the tab drag and the
+// floating title-bar drag: the veil over where the drop would land -
+// the whole target leaf for a retab, the half-leaf for a split (the
+// accent as a tint, never a hole). A no-drop (leaf < 0) answers an
+// empty rect, the caller's "nothing to paint".
+[[nodiscard]] Rect drop_preview_rect(const DockTree::Layout& layout,
+                                     const DockHit& over) {
+    if (over.leaf < 0 ||
+        static_cast<std::size_t>(over.leaf) >= layout.leaves.size()) {
+        return Rect{};
+    }
+    Rect preview = layout.leaves[static_cast<std::size_t>(over.leaf)].rect;
+    switch (over.area) {
+        case DockPlacement::Area::left:
+            preview.width *= 0.5f;
+            break;
+        case DockPlacement::Area::right:
+            preview.x += preview.width * 0.5f;
+            preview.width *= 0.5f;
+            break;
+        case DockPlacement::Area::top:
+            preview.height *= 0.5f;
+            break;
+        case DockPlacement::Area::bottom:
+            preview.y += preview.height * 0.5f;
+            preview.height *= 0.5f;
+            break;
+        case DockPlacement::Area::center:
+            break;  // the whole leaf: the tab joins it
+    }
+    return preview;
+}
+
+// `rect` re-seated to sit WHOLLY inside `bounds` (a window dragged to
+// the edge keeps its title bar reachable; a layout restored under a
+// smaller frame comes back on-screen). Width-first: a window wider
+// than the frame pins to the frame's origin and overflows no further.
+[[nodiscard]] Rect seat_in_bounds(Rect rect, const Rect& bounds) {
+    rect.width = std::min(rect.width, bounds.width);
+    rect.height = std::min(rect.height, bounds.height);
+    rect.x = std::min(std::max(rect.x, bounds.x),
+                      bounds.x + std::max(0.0f, bounds.width - rect.width));
+    rect.y = std::min(std::max(rect.y, bounds.y),
+                      bounds.y + std::max(0.0f, bounds.height - rect.height));
+    return rect;
+}
 
 // `color` with its alpha channel replaced - the r2d packing is
 // (r,g,b,a) one byte each, alpha in the low 8. The drop-preview veil:
@@ -386,6 +437,58 @@ void AppShell::register_commands() {
     };
     add_or_ignore(std::move(reset_cmd));
 
+    // The tear-off and the way back, as commands: the same two acts
+    // the gestures drive (the tab drag out, the title-bar drop in),
+    // reachable from the palette when a pointer is not at hand. No
+    // chords - the pointer owns the gesture, the palette owns the
+    // menu.
+    Command float_cmd;
+    float_cmd.id = "shell.float_panel";
+    float_cmd.label = "Float Active Panel";
+    float_cmd.category = "Window";
+    float_cmd.enabled = [this] {
+        const PanelInstance* active = panel_host_.active();
+        return active != nullptr && !panel_host_.is_floating(active->id);
+    };
+    float_cmd.execute = [this](std::string_view) {
+        const PanelInstance* active = panel_host_.active();
+        if (active == nullptr) {
+            return;
+        }
+        // Half the dock, centered on it: a window big enough to work
+        // in, small enough to see the dock it came out of. The last
+        // frame's dock is the frame the user is looking at.
+        Rect rect = last_dock_bounds_;
+        rect.x += rect.width * 0.25f;
+        rect.y += rect.height * 0.25f;
+        rect.width *= 0.5f;
+        rect.height *= 0.5f;
+        panel_host_.float_panel(panel_registry_, active->id,
+                                seat_in_bounds(rect, last_dock_bounds_));
+        set_status("panel floated");
+    };
+    add_or_ignore(std::move(float_cmd));
+
+    Command dock_cmd;
+    dock_cmd.id = "shell.dock_panel";
+    dock_cmd.label = "Dock Active Panel";
+    dock_cmd.category = "Window";
+    dock_cmd.enabled = [this] {
+        const PanelInstance* active = panel_host_.active();
+        return active != nullptr && panel_host_.is_floating(active->id);
+    };
+    dock_cmd.execute = [this](std::string_view) {
+        const PanelInstance* active = panel_host_.active();
+        if (active == nullptr) {
+            return;
+        }
+        // Center into the last leaf: the tree's own "the new tab
+        // joins what is there" (the same answer a center drop gives).
+        panel_host_.redock(panel_registry_, active->id, DockPlacement{});
+        set_status("panel docked");
+    };
+    add_or_ignore(std::move(dock_cmd));
+
     // The shell's built-in settings panel: the host's schema, one
     // property grid. A host that registered its own "settings" panel
     // keeps it (the add refusal below is swallowed on purpose).
@@ -503,10 +606,10 @@ ws::core::Status AppShell::load_layout() {
     }
     const ws::core::Result<ws::settings::json::Value> parsed =
         ws::settings::json::parse(*text);
-    if (!parsed || !panel_host_.dock().from_json(
-                       *parsed, [this](std::string_view panel) {
-                           return panel_host_.find(panel) != nullptr;
-                       })) {
+    if (!parsed || !panel_host_.layout_from_json(
+                           *parsed, [this](std::string_view panel) {
+                               return panel_host_.find(panel) != nullptr;
+                           })) {
         status_ = "layout.json would not parse; the default layout stands";
         return ws::core::unexpected<ws::core::Error>(
             shell_error(ShellError::parse_failed, "layout.json is corrupt"));
@@ -520,7 +623,7 @@ ws::core::Status AppShell::save_layout() {
     }
     return config_.fs->write(
         path_of("layout.json"),
-        ws::settings::json::write(panel_host_.dock().to_json()));
+        ws::settings::json::write(panel_host_.layout_to_json()));
 }
 
 ws::core::Status AppShell::save_session() {
@@ -556,9 +659,14 @@ ws::core::Status AppShell::save_recents() {
 }
 
 void AppShell::rebuild_default_layout() {
-    // Keep the open set, rebuild the tree: every open instance lands
-    // at its descriptor's default placement, in open order.
+    // Keep the open set, rebuild the tree: every open instance -
+    // docked OR floating (a reset must not eat a torn-off window's
+    // panel) - lands at its descriptor's default placement, in open
+    // order.
     std::vector<std::string> ids = panel_host_.dock().panels();
+    for (const FloatingPanel& win : panel_host_.floating()) {
+        ids.push_back(win.panel);
+    }
     // Registration order, not the old tree's walk: the default
     // placements are written against it (the first panel fills the
     // empty root; later ones split or tab against what is there), so
@@ -580,6 +688,7 @@ void AppShell::rebuild_default_layout() {
                          return rank(a) < rank(b);
                      });
     panel_host_.dock().clear();
+    panel_host_.clear_floating();
     for (const std::string& id : ids) {
         const PanelInstance* instance = panel_host_.find(id);
         if (instance == nullptr) {
@@ -628,7 +737,7 @@ ws::core::Status AppShell::save_named_layout(const std::string& name) {
     // the names ride layouts.json).
     const ws::core::Status st = config_.fs->write(
         config_.config_dir + "/layouts/" + name + ".json",
-        ws::settings::json::write(panel_host_.dock().to_json()));
+        ws::settings::json::write(panel_host_.layout_to_json()));
     if (!st) {
         return st;
     }
@@ -669,10 +778,10 @@ ws::core::Status AppShell::load_named_layout(const std::string& name) {
     }
     const ws::core::Result<ws::settings::json::Value> parsed =
         ws::settings::json::parse(*text);
-    if (!parsed || !panel_host_.dock().from_json(
-                       *parsed, [this](std::string_view panel) {
-                           return panel_host_.find(panel) != nullptr;
-                       })) {
+    if (!parsed || !panel_host_.layout_from_json(
+                           *parsed, [this](std::string_view panel) {
+                               return panel_host_.find(panel) != nullptr;
+                           })) {
         return ws::core::unexpected<ws::core::Error>(
             shell_error(ShellError::parse_failed,
                         "layout '" + name + "' is corrupt"));
@@ -1129,8 +1238,22 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
     if (bounds.width <= 0.0f || bounds.height <= 0.0f) {
         return;
     }
+    last_dock_bounds_ = bounds;  // the float command's geometry source
     r2d::draw_quad(bounds.x, bounds.y, bounds.width, bounds.height, theme.panel_bg);
     const DockTree::Layout resolved = panel_host_.dock().resolve(bounds);
+    // While a pane is zoomed, resolve() answers the PROJECTION: one
+    // leaf (index 0) spanning the dock. A drop aimed at it must land
+    // in the zoomed panel's REAL leaf or the tab would dock into a
+    // pane the screen is not showing - every drop path (the tab drag,
+    // the title-bar drag) re-maps leaf 0 through this one rule.
+    DockTree& dock = panel_host_.dock();
+    const std::string zoomed{dock.maximized()};
+    const auto drop_leaf = [&dock, &zoomed](int leaf) {
+        if (!zoomed.empty() && leaf == 0) {
+            return dock.leaf_of(zoomed);
+        }
+        return leaf;
+    };
     // The one input view for the whole dock view, and the splitter
     // clock's tick: the frame's dt is the honest clock a double-click
     // needs (a hand-built test frame reports 0 - every press then
@@ -1306,11 +1429,14 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
             // and where the hold started. The threshold test below
             // decides drag-vs-click; the strip's own click keeps the
             // selection when the pointer never carries the tab off.
+            // The leaf's own bounds ride along: a tear-off sizes its
+            // window after the pane the tab came out of.
             tab_drag_.armed = true;
             tab_drag_.dragging = false;
             tab_drag_.panel = (*leaf.tabs)[static_cast<std::size_t>(held_tab)];
             tab_drag_.press_x = in.mouse_x;
             tab_drag_.press_y = in.mouse_y;
+            tab_drag_.origin_rect = leaf.rect;
         }
 
         // The strip's right end: the focused-pane zoom. A round ghost
@@ -1337,12 +1463,12 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
         }
         r2d::draw_rounded_quad(zoom_rect.x, zoom_rect.y, kZoomHit, kZoomHit,
                                kZoomHit * 0.5f, zoom_face);
-        const bool zoomed = !panel_host_.dock().maximized().empty();
+        const bool is_zoomed = !panel_host_.dock().maximized().empty();
         const bool zoom_live = zoom.state == gui::WidgetState::Hovered ||
                                zoom.state == gui::WidgetState::Pressed;
         const std::uint32_t zoom_ink =
             zoom_live ? theme.text : theme.text_muted;
-        if (zoomed) {
+        if (is_zoomed) {
             square_outline(zoom_rect.center_x() - 1.6f,
                            zoom_rect.center_y() - 1.6f, 3.4f, 1.4f, zoom_ink);
             square_outline(zoom_rect.center_x() + 1.6f,
@@ -1352,13 +1478,13 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
                            1.4f, zoom_ink);
         }
         gui::tooltip_text(gui, layout, theme, "shell.zoom", zoom_rect,
-                          zoomed ? "Restore layout" : "Maximize panel");
+                          is_zoomed ? "Restore layout" : "Maximize panel");
         if (zoom.activated()) {
-            DockTree& dock = panel_host_.dock();
-            if (zoomed) {
-                dock.restore();
+            DockTree& dock_ref = panel_host_.dock();
+            if (is_zoomed) {
+                dock_ref.restore();
             } else {
-                dock.maximize(
+                dock_ref.maximize(
                     (*leaf.tabs)[static_cast<std::size_t>(active)]);
             }
         }
@@ -1403,15 +1529,30 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
                 if (drop.leaf >= 0) {
                     DockPlacement placement;
                     placement.area = drop.area;
-                    placement.leaf = drop.leaf;
+                    placement.leaf = drop_leaf(drop.leaf);
                     panel_host_.redock(panel_registry_, tab_drag_.panel,
                                        placement);
+                } else {
+                    // Released outside every leaf: the tear-off. The
+                    // panel becomes a floating window centered on the
+                    // release, sized after the pane it came out of -
+                    // the ImGui gesture, the half-way point between
+                    // "cancel" (a dragged tab snapping home) and
+                    // "guess" (a panel dropped into a leaf nobody
+                    // pointed at).
+                    Rect tear = tab_drag_.origin_rect;
+                    const float max_w = std::max(kFloatingMinW, bounds.width);
+                    const float max_h = std::max(kFloatingMinH, bounds.height);
+                    tear.width = std::clamp(tear.width, kFloatingMinW, max_w);
+                    tear.height = std::clamp(tear.height, kFloatingMinH, max_h);
+                    tear.x = in.mouse_x - tear.width * 0.5f;
+                    tear.y = in.mouse_y - tear.height * 0.5f;
+                    panel_host_.float_panel(panel_registry_,
+                                            tab_drag_.panel,
+                                            seat_in_bounds(tear, bounds));
                 }
-                // A release outside every leaf cancels: there are no
-                // floating windows to drop into, and a half-gesture
-                // must not guess a home.
             }
-            tab_drag_ = TabDrag{};  // the hold ended: dropped or cancelled
+            tab_drag_ = TabDrag{};  // the hold ended: dropped or torn off
         } else {
             const float dx = in.mouse_x - tab_drag_.press_x;
             const float dy = in.mouse_y - tab_drag_.press_y;
@@ -1420,35 +1561,13 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
                 tab_drag_.dragging = true;
             }
             if (tab_drag_.dragging) {
-                // The drop preview: the veil over where the panel would
-                // land - the whole leaf for a retab, the half-leaf for
-                // a split - the accent as a tint, never a hole.
+                // The drop preview: the shared veil over where the
+                // panel would land (the whole leaf for a retab, the
+                // half-leaf for a split).
                 const DockHit over = dock_hit(resolved, in.mouse_x,
                                               in.mouse_y, kDockDropBandPx);
-                if (over.leaf >= 0) {
-                    const Rect& target =
-                        resolved.leaves[static_cast<std::size_t>(
-                                            over.leaf)]
-                            .rect;
-                    Rect preview = target;
-                    switch (over.area) {
-                        case DockPlacement::Area::left:
-                            preview.width = target.width * 0.5f;
-                            break;
-                        case DockPlacement::Area::right:
-                            preview.x = target.x + target.width * 0.5f;
-                            preview.width = target.width * 0.5f;
-                            break;
-                        case DockPlacement::Area::top:
-                            preview.height = target.height * 0.5f;
-                            break;
-                        case DockPlacement::Area::bottom:
-                            preview.y = target.y + target.height * 0.5f;
-                            preview.height = target.height * 0.5f;
-                            break;
-                        case DockPlacement::Area::center:
-                            break;  // the whole leaf: the tab joins it
-                    }
+                const Rect preview = drop_preview_rect(resolved, over);
+                if (preview.width > 0.0f && preview.height > 0.0f) {
                     r2d::draw_quad(preview.x, preview.y, preview.width,
                                    preview.height,
                                    with_alpha(theme.control_on, 56));
@@ -1456,6 +1575,279 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
             }
         }
     }
+
+    // The floating layer, over the dock and its veil: the torn-off
+    // windows, their drags and their drops.
+    draw_floating(gui, layout, theme, bounds, resolved);
+}
+
+void AppShell::draw_floating(GuiContext& gui, LayoutCursor& layout,
+                             const ChromeTheme& theme, const Rect& bounds,
+                             const DockTree::Layout& resolved) {
+    const ws::input::InputFrame& in = gui.input();
+    const std::vector<FloatingPanel>& windows = panel_host_.floating();
+    if (windows.empty() && !float_drag_.active) {
+        return;  // nothing torn off, nothing dragging
+    }
+
+    // The window the frame actually shows: the stored rect re-seated
+    // whole inside the dock (a restored layout may sit outside a
+    // smaller frame; a drag never stores an off-frame rect because it
+    // moves through this clamp).
+    const auto seat = [&bounds](const FloatingPanel& win) {
+        return seat_in_bounds(win.rect, bounds);
+    };
+
+    // The press's raise + focus: the TOPMOST window under the pointer
+    // (the z walk, back to front - a press on an overlap must pick
+    // exactly one window, the one the eye sees on top).
+    if (in.mouse_present && in.mouse_pressed[0]) {
+        for (std::size_t i = windows.size(); i-- > 0;) {
+            if (point_in(seat(windows[i]), in.mouse_x, in.mouse_y)) {
+                panel_host_.raise_floating(windows[i].panel);
+                panel_host_.activate(panel_registry_, windows[i].panel);
+                break;
+            }
+        }
+    }
+
+    // A live move-drag's veil, under the windows and over the dock:
+    // the same tint the tab drag paints, the same zones - one drop
+    // grammar, two gestures into it. Only once the pointer CARRIED the
+    // window: a held click paints nothing.
+    if (float_drag_.active && float_drag_.dragging &&
+        !float_drag_.resizing) {
+        const DockHit over = dock_hit(resolved, in.mouse_x, in.mouse_y,
+                                      kDockDropBandPx);
+        const Rect preview = drop_preview_rect(resolved, over);
+        if (preview.width > 0.0f && preview.height > 0.0f) {
+            r2d::draw_quad(preview.x, preview.y, preview.width,
+                           preview.height,
+                           with_alpha(theme.control_on, 56));
+        }
+    }
+
+    // The windows, back to front: the later entries claim later, so
+    // the top window's widgets win the taps over whatever it covers -
+    // the draw order IS the z order.
+    std::vector<std::string> closing;  // closed after the walk
+    for (const FloatingPanel& win : windows) {
+        // The id first, stable in hand: raise_floating/move_floating
+        // reorder the very vector this loop walks, and a moved element
+        // must not pull the id out from under the paint that follows.
+        const std::string panel = win.panel;
+        const Rect rect = seat(win);
+        const PanelInstance* instance = panel_host_.find(panel);
+        const PanelDesc* desc =
+            instance == nullptr ? nullptr
+                                : panel_registry_.find(instance->type);
+
+        const gui::ScopedId win_ids(gui.ids(), panel.c_str());
+        const Rect bar{rect.x, rect.y, rect.width, theme.control_height};
+        const Rect content{rect.x, rect.y + bar.height, rect.width,
+                           std::max(0.0f, rect.height - bar.height)};
+        const Rect close_rect{bar.x + bar.width - theme.padding - kZoomHit,
+                              bar.y + (bar.height - kZoomHit) * 0.5f,
+                              kZoomHit, kZoomHit};
+        const Rect grip{rect.x + rect.width - kFloatGripPx,
+                        rect.y + rect.height - kFloatGripPx, kFloatGripPx,
+                        kFloatGripPx};
+
+        // The window's face, then its 1-px frame, then the title bar
+        // over both - a floating panel reads as a raised card, not a
+        // hole in the dock.
+        r2d::draw_quad(rect.x, rect.y, rect.width, rect.height,
+                       theme.panel_bg);
+        r2d::draw_quad(rect.x, rect.y, rect.width, 1.0f, theme.border);
+        r2d::draw_quad(rect.x, rect.y + rect.height - 1.0f, rect.width,
+                       1.0f, theme.border);
+        r2d::draw_quad(rect.x, rect.y, 1.0f, rect.height, theme.border);
+        r2d::draw_quad(rect.x + rect.width - 1.0f, rect.y, 1.0f,
+                       rect.height, theme.border);
+        r2d::draw_quad(bar.x, bar.y, bar.width, bar.height, theme.bar_bg);
+        r2d::draw_quad(bar.x, bar.y + bar.height - 1.0f, bar.width, 1.0f,
+                       theme.border);
+
+        // The title bar's drag: a press on the bar (the close button's
+        // pixels excepted - its claim registers below and owns them)
+        // arms the move. The bar's own hit_test answers the capture;
+        // the PRESS EDGE is the arm, so a click that never carries the
+        // window is just the raise + focus the press already did.
+        const gui::WidgetId bar_id = gui.ids().id("shell.float.bar");
+        const gui::HitTest bar_hit = gui.hit_test(bar_id, bar);
+        if (bar_hit.pressed && in.mouse_pressed[0] && !float_drag_.active &&
+            !tab_drag_.armed && !point_in(close_rect, in.mouse_x, in.mouse_y)) {
+            float_drag_.active = true;
+            float_drag_.resizing = false;
+            float_drag_.panel = panel;
+            float_drag_.grab_x = in.mouse_x;
+            float_drag_.grab_y = in.mouse_y;
+            float_drag_.base_x = rect.x;
+            float_drag_.base_y = rect.y;
+            float_drag_.start = rect;
+        }
+
+        // The title: the panel's label, ellipsized into the room the
+        // close button leaves.
+        {
+            const float text_w = std::max(
+                0.0f, bar.width - 2.0f * theme.padding - kZoomHit);
+            LayoutCursor title;
+            const Rect text_rect{bar.x + theme.padding, bar.y, text_w,
+                                 bar.height};
+            title.begin_panel(text_rect, 0.0f, 0.0f);
+            gui::text(title, theme,
+                      instance != nullptr ? instance->title.c_str()
+                                          : panel.c_str(),
+                      title.remaining_width());
+            title.end_panel();
+        }
+
+        // The close button: the tab strip's own round x, the same
+        // size and the same ghost face (one close affordance, docked
+        // or torn off).
+        gui::HitShape close_shape;
+        close_shape.kind = gui::HitShape::Kind::circle;
+        const gui::ButtonResult close =
+            gui::button_behavior(gui, gui.ids().id("shell.float.close"),
+                                 close_rect, false, close_shape,
+                                 gui::ButtonStyle::ghost);
+        std::uint32_t close_face = theme.control_bg;
+        if (close.state == gui::WidgetState::Pressed) {
+            close_face = theme.control_pressed;
+        } else if (close.state == gui::WidgetState::Hovered) {
+            close_face = theme.control_hovered;
+        }
+        r2d::draw_rounded_quad(close_rect.x, close_rect.y, kZoomHit,
+                               kZoomHit, kZoomHit * 0.5f, close_face);
+        const bool close_live =
+            close.state == gui::WidgetState::Hovered ||
+            close.state == gui::WidgetState::Pressed;
+        const std::uint32_t close_ink =
+            close_live ? theme.text : theme.text_muted;
+        {
+            const float cx = close_rect.center_x();
+            const float cy = close_rect.center_y();
+            const float a = 2.6f;
+            r2d::draw_line(cx - a, cy - a, cx + a, cy + a, 1.4f, close_ink);
+            r2d::draw_line(cx - a, cy + a, cx + a, cy - a, 1.4f, close_ink);
+        }
+        gui::tooltip_text(gui, layout, theme, "shell.float.close",
+                          close_rect, "Close panel");
+        if (close.activated()) {
+            closing.push_back(panel);  // closed after the walk, like a tab
+        }
+
+        // The resize grip: the bottom-right corner, three diagonal
+        // strokes. A press there arms the resize; the drag frame below
+        // grows the rect by the pointer's delta.
+        const gui::WidgetId grip_id = gui.ids().id("shell.float.grip");
+        const gui::HitTest grip_hit = gui.hit_test(grip_id, grip);
+        if (grip_hit.pressed && in.mouse_pressed[0] && !float_drag_.active) {
+            float_drag_.active = true;
+            float_drag_.resizing = true;
+            float_drag_.panel = panel;
+            float_drag_.grab_x = in.mouse_x;
+            float_drag_.grab_y = in.mouse_y;
+            float_drag_.base_x = rect.x;
+            float_drag_.base_y = rect.y;
+            float_drag_.start = rect;
+        }
+        {
+            const bool grip_live =
+                grip_hit.hovered || grip_hit.pressed;
+            const std::uint32_t grip_ink =
+                grip_live ? theme.text : theme.text_muted;
+            const float s = kFloatGripPx;
+            r2d::draw_line(rect.x + rect.width - 4.0f, rect.y + rect.height - s + 4.0f,
+                           rect.x + rect.width - s + 4.0f,
+                           rect.y + rect.height - 4.0f, 1.2f, grip_ink);
+            r2d::draw_line(rect.x + rect.width - 4.0f,
+                           rect.y + rect.height - s + 8.0f,
+                           rect.x + rect.width - s + 8.0f,
+                           rect.y + rect.height - 4.0f, 1.2f, grip_ink);
+            r2d::draw_line(rect.x + rect.width - 8.0f,
+                           rect.y + rect.height - s + 4.0f,
+                           rect.x + rect.width - s + 4.0f,
+                           rect.y + rect.height - 8.0f, 1.2f, grip_ink);
+        }
+        gui::tooltip_text(gui, layout, theme, "shell.float.grip", grip,
+                          "Resize");
+
+        // The body: the panel's own draw in a scroll scope, the same
+        // shape a leaf's body takes.
+        if (content.height > 0.0f) {
+            gui::panel_draw(content, theme);
+            if (desc != nullptr && desc->draw && instance != nullptr) {
+                const std::string label = "shell.float.body." + panel;
+                (void)gui::begin_scroll_panel(gui, layout, theme,
+                                              label.c_str(), content);
+                desc->draw(gui, layout, theme, *instance);
+                gui::end_scroll_panel(gui, layout, theme);
+            }
+        }
+    }
+    for (const std::string& panel : closing) {
+        if (float_drag_.active && float_drag_.panel == panel) {
+            float_drag_ = FloatDrag{};  // the dragged window left
+        }
+        panel_host_.close(panel_registry_, panel);
+    }
+
+    // The drag frame: the press armed it, the threshold starts it (a
+    // click never moves the window - the raise + focus the press did
+    // is the whole click), and the release decides the home - over a
+    // leaf, back into the tree; anywhere else, the floating rect the
+    // move already left behind.
+    if (!float_drag_.active) {
+        return;
+    }
+    if (in.mouse_present && in.mouse_down[0]) {
+        const float dx = in.mouse_x - float_drag_.grab_x;
+        const float dy = in.mouse_y - float_drag_.grab_y;
+        if (!float_drag_.dragging &&
+            dx * dx + dy * dy >= kTabDragPx * kTabDragPx) {
+            float_drag_.dragging = true;
+        }
+        if (!float_drag_.dragging) {
+            return;
+        }
+        if (float_drag_.resizing) {
+            Rect grown = float_drag_.start;
+            grown.width += dx;
+            grown.height += dy;
+            panel_host_.move_floating(float_drag_.panel,
+                                      seat_in_bounds(grown, bounds));
+        } else {
+            Rect moved = float_drag_.start;
+            moved.x = float_drag_.base_x + dx;
+            moved.y = float_drag_.base_y + dy;
+            panel_host_.move_floating(float_drag_.panel,
+                                      seat_in_bounds(moved, bounds));
+        }
+        return;
+    }
+    if (float_drag_.dragging && !float_drag_.resizing) {
+        DockTree& dock = panel_host_.dock();
+        const std::string zoomed{dock.maximized()};
+        const DockHit drop = dock_hit(resolved, in.mouse_x, in.mouse_y,
+                                      kDockDropBandPx);
+        if (drop.leaf >= 0) {
+            DockPlacement placement;
+            placement.area = drop.area;
+            // The zoomed projection answers leaf 0; the real leaf is
+            // the zoomed panel's own (the tab drag's own rule).
+            placement.leaf = !zoomed.empty() && drop.leaf == 0
+                                 ? dock.leaf_of(zoomed)
+                                 : drop.leaf;
+            panel_host_.redock(panel_registry_, float_drag_.panel,
+                               placement);
+        }
+        // A release over no leaf (or over another floating window -
+        // the zones are the dock's) leaves the window where the move
+        // put it: floating is a home, not a limbo.
+    }
+    float_drag_ = FloatDrag{};
 }
 
 void AppShell::draw_empty_dock(GuiContext& gui, const ChromeTheme& theme,

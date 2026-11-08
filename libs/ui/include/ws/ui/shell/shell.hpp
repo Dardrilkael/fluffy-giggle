@@ -203,6 +203,14 @@ private:
                        const gui::ChromeTheme& theme, const gui::Rect& bar);
     void draw_dock(gui::GuiContext& gui, gui::LayoutCursor& layout,
                    const gui::ChromeTheme& theme, const gui::Rect& bounds);
+    // The floating layer's frame: every torn-off window, back to
+    // front, over the resolved dock. `resolved` is the same frame's
+    // leaf layout - the drop zones a title-bar drag answers over are
+    // the ones the frame already resolved (the preview veil and the
+    // tab drag's share it).
+    void draw_floating(gui::GuiContext& gui, gui::LayoutCursor& layout,
+                        const gui::ChromeTheme& theme, const gui::Rect& bounds,
+                        const DockTree::Layout& resolved);
     void draw_empty_dock(gui::GuiContext& gui, const gui::ChromeTheme& theme,
                          const gui::Rect& content);
     void draw_status(gui::GuiContext& gui, gui::LayoutCursor& layout,
@@ -346,17 +354,48 @@ private:
     // yet. The tree owns the drop geometry (dock_hit over the frame's
     // resolve answers the leaf and the zone); the shell owns the
     // gesture - armed off the strip's held claim, dragging past the
-    // threshold, dropped on the release (a release outside every leaf
-    // cancels, and a release that never crossed the threshold is the
-    // tab bar's click, not a drop).
+    // threshold, dropped on the release. A release over a leaf
+    // re-docks; a release OUTSIDE every leaf tears the panel off into
+    // a floating window (the ImGui gesture - the dock keeps no
+    // half-gestures, the pointer decides the home); a release that
+    // never crossed the threshold is the tab bar's click, not a drop.
     struct TabDrag {
         bool armed = false;
         bool dragging = false;
         std::string panel;
         float press_x = 0.0f;
         float press_y = 0.0f;
+        Rect origin_rect{};  // the source leaf's bounds at the arm -
+                             // the torn-off window's size hint
     };
     TabDrag tab_drag_;
+
+    // The floating-window drag: one held title bar (a move) or corner
+    // grip (a resize). The press ARMS, the pointer carrying past the
+    // tab drag's own threshold STARTS the move (a click on the bar is
+    // the raise + focus the press already did - it must not dock the
+    // window under itself), and the RELEASE decides the home - over a
+    // leaf the window re-docks (the same dock_hit zones the tab drag
+    // drops through), anywhere else it stays floating where it was
+    // left, clamped inside the dock frame.
+    struct FloatDrag {
+        bool active = false;
+        bool dragging = false;  // the pointer crossed the threshold
+        bool resizing = false;
+        std::string panel;
+        float grab_x = 0.0f;   // the pointer at the press
+        float grab_y = 0.0f;
+        float base_x = 0.0f;   // the window's origin at the press (a
+        float base_y = 0.0f;   // move adds the pointer's delta to it)
+        Rect start{};          // the whole rect at the press (a resize
+                               // grows it by the pointer's delta)
+    };
+    FloatDrag float_drag_;
+
+    // The dock space the last draw() laid (the float command's geometry
+    // source: a palette-driven tear-off has no pointer, so it sizes its
+    // window against the frame the user is looking at).
+    Rect last_dock_bounds_{};
 
     // The close prompt's Escape claim key (the modal rule: a stable
     // address per overlay).
