@@ -39,8 +39,8 @@
     },
     {
       "name": "vs-debug",
-      "displayName": "Debug (Visual Studio generator)",
-      "generator": "Visual Studio 18 2026",
+      "displayName": "Debug (Visual Studio 17 2022)",
+      "generator": "Visual Studio 17 2022",
       "binaryDir": "${sourceDir}/build/vs-debug",
       "architecture": "x64",
       "cacheVariables": {
@@ -50,8 +50,8 @@
     },
     {
       "name": "vs-release",
-      "displayName": "Release (Visual Studio generator)",
-      "generator": "Visual Studio 18 2026",
+      "displayName": "Release (Visual Studio 17 2022)",
+      "generator": "Visual Studio 17 2022",
       "binaryDir": "${sourceDir}/build/vs-release",
       "architecture": "x64",
       "cacheVariables": {
