@@ -302,6 +302,7 @@ class CircsimApp final : public ws::ui::App {
         config.fs = &doc_fs();
 #ifdef _WIN32
         dialogs_ = ws::platform::make_file_dialogs();
+        config.dialogs = dialogs_.get();
 #elif defined(__ANDROID__)
         // The SAF bridge's pickers, when init wired them; the
         // documented refusal otherwise (a failed bridge init means the
@@ -1160,6 +1161,7 @@ class CircsimApp final : public ws::ui::App {
             editor_.results.map = std::move(outcome.map);
             editor_.playback = editor::Playback{};
             editor_.transport_scrub = false;
+            editor_.results_scrub = false;  // the row's drag dies with the run
             if (const ws::spice::Table* tran =
                     editor_.canvas_tran_table();
                 tran != nullptr && !tran->axis(0).empty()) {
