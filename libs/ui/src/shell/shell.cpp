@@ -1317,10 +1317,13 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
     if (splitter_drag_.active) {
         if (in.mouse_down[0] && in.mouse_present) {
             if (!splitter_drag_.consumed) {
+                // Mouse is in frame coords; splitter span is in dock coords.
+                const float mx = in.mouse_x - bounds.x;
+                const float my = in.mouse_y - bounds.y;
                 const float position =
                     splitter_drag_.splitter.dir == DockDir::horizontal
-                        ? in.mouse_x
-                        : in.mouse_y;
+                        ? mx
+                        : my;
                 panel_host_.dock().apply_drag(splitter_drag_.splitter,
                                               position);
             }
@@ -1333,8 +1336,10 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
     // front tab (the tab strip's own selection does the same on click).
     const bool pressed = in.mouse_present && in.mouse_pressed[0];
     if (pressed) {
+        const float mx = in.mouse_x - bounds.x;
+        const float my = in.mouse_y - bounds.y;
         for (const DockTree::LeafRect& leaf : resolved.leaves) {
-            if (point_in(leaf.rect, in.mouse_x, in.mouse_y) &&
+            if (point_in(leaf.rect, mx, my) &&
                 leaf.tabs != nullptr && !leaf.tabs->empty()) {
                 const int index = std::clamp(
                     leaf.active, 0, static_cast<int>(leaf.tabs->size()) - 1);
@@ -1523,9 +1528,10 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
     if (tab_drag_.armed) {
         if (!(in.mouse_present && in.mouse_down[0])) {
             if (tab_drag_.dragging) {
+                const float mx = in.mouse_x - bounds.x;
+                const float my = in.mouse_y - bounds.y;
                 const DockHit drop =
-                    dock_hit(resolved, in.mouse_x, in.mouse_y,
-                             kDockDropBandPx);
+                    dock_hit(resolved, mx, my, kDockDropBandPx);
                 if (drop.leaf >= 0) {
                     DockPlacement placement;
                     placement.area = drop.area;
@@ -1545,8 +1551,8 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
                     const float max_h = std::max(kFloatingMinH, bounds.height);
                     tear.width = std::clamp(tear.width, kFloatingMinW, max_w);
                     tear.height = std::clamp(tear.height, kFloatingMinH, max_h);
-                    tear.x = in.mouse_x - tear.width * 0.5f;
-                    tear.y = in.mouse_y - tear.height * 0.5f;
+                    tear.x = mx - tear.width * 0.5f;
+                    tear.y = my - tear.height * 0.5f;
                     panel_host_.float_panel(panel_registry_,
                                             tab_drag_.panel,
                                             seat_in_bounds(tear, bounds));
@@ -1564,8 +1570,9 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
                 // The drop preview: the shared veil over where the
                 // panel would land (the whole leaf for a retab, the
                 // half-leaf for a split).
-                const DockHit over = dock_hit(resolved, in.mouse_x,
-                                              in.mouse_y, kDockDropBandPx);
+                const float mx = in.mouse_x - bounds.x;
+                const float my = in.mouse_y - bounds.y;
+                const DockHit over = dock_hit(resolved, mx, my, kDockDropBandPx);
                 const Rect preview = drop_preview_rect(resolved, over);
                 if (preview.width > 0.0f && preview.height > 0.0f) {
                     r2d::draw_quad(preview.x, preview.y, preview.width,
@@ -1617,8 +1624,9 @@ void AppShell::draw_floating(GuiContext& gui, LayoutCursor& layout,
     // window: a held click paints nothing.
     if (float_drag_.active && float_drag_.dragging &&
         !float_drag_.resizing) {
-        const DockHit over = dock_hit(resolved, in.mouse_x, in.mouse_y,
-                                      kDockDropBandPx);
+        const float mx = in.mouse_x - bounds.x;
+        const float my = in.mouse_y - bounds.y;
+        const DockHit over = dock_hit(resolved, mx, my, kDockDropBandPx);
         const Rect preview = drop_preview_rect(resolved, over);
         if (preview.width > 0.0f && preview.height > 0.0f) {
             r2d::draw_quad(preview.x, preview.y, preview.width,
@@ -1830,8 +1838,9 @@ void AppShell::draw_floating(GuiContext& gui, LayoutCursor& layout,
     if (float_drag_.dragging && !float_drag_.resizing) {
         DockTree& dock = panel_host_.dock();
         const std::string zoomed{dock.maximized()};
-        const DockHit drop = dock_hit(resolved, in.mouse_x, in.mouse_y,
-                                      kDockDropBandPx);
+        const float mx = in.mouse_x - bounds.x;
+        const float my = in.mouse_y - bounds.y;
+        const DockHit drop = dock_hit(resolved, mx, my, kDockDropBandPx);
         if (drop.leaf >= 0) {
             DockPlacement placement;
             placement.area = drop.area;

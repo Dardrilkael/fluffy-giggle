@@ -1,0 +1,515 @@
+{
+    "format": "circsim",
+    "version": 1,
+    "grid": 1.0,
+    "next_id": 33,
+    "parts": [
+        {
+            "id": 1,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [
+                0.0,
+                -2.0
+            ],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 2,
+            "symbol": "v",
+            "ref": "V1",
+            "value": "",
+            "pos": [
+                -0.0,
+                4.0
+            ],
+            "rot": 270,
+            "mirror": false,
+            "params": {
+                "ac": "1",
+                "wave": "PWL(0 0 1 15)"
+            }
+        },
+        {
+            "id": 5,
+            "symbol": "npn",
+            "ref": "Q1",
+            "value": "",
+            "pos": [
+                16.0,
+                3.0
+            ],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": ".MODEL Q2N2222A NPN (IS=3.295E-14 BF=173 VAF=100 IKF=0.3 ISE=1.5E-14 NE=2 BR=4 VAR=100 IKR=0.1 ISC=1E-13 NC=1.5 RB=10 RC=1 CJE="
+            }
+        },
+        {
+            "id": 6,
+            "symbol": "d",
+            "ref": "D1",
+            "value": "",
+            "pos": [
+                9.0,
+                -1.0
+            ],
+            "rot": 270,
+            "mirror": false,
+            "params": {
+                "model": ".MODEL 1M4148 D(IS=2.52N RS=.568 N=1.752 CJO=4P M=.4 TT=20N VJ=20 BV=75)"
+            }
+        },
+        {
+            "id": 9,
+            "symbol": "d",
+            "ref": "D2",
+            "value": "",
+            "pos": [
+                8.0,
+                -8.0
+            ],
+            "rot": 270,
+            "mirror": false,
+            "params": {
+                "model": ".MODEL 1M4148 D(IS=2.52N RS=.568 N=1.752 CJO=4P M=.4 TT=20N VJ=20 BV=75)"
+            }
+        },
+        {
+            "id": 12,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [
+                9.0,
+                -12.0
+            ],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 13,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [
+                18.0,
+                -10.0
+            ],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 14,
+            "symbol": "r",
+            "ref": "R1",
+            "value": "47",
+            "pos": [
+                18.0,
+                -5.0
+            ],
+            "rot": 90,
+            "mirror": false
+        },
+        {
+            "id": 19,
+            "symbol": "led",
+            "ref": "D3",
+            "value": "",
+            "pos": [
+                18.0,
+                11.0
+            ],
+            "rot": 270,
+            "mirror": false,
+            "params": {
+                "color": "red"
+            }
+        },
+        {
+            "id": 21,
+            "symbol": "r",
+            "ref": "R2",
+            "value": "1k",
+            "pos": [
+                9.0,
+                9.0
+            ],
+            "rot": 90,
+            "mirror": false
+        },
+        {
+            "id": 27,
+            "symbol": "vcc",
+            "ref": "",
+            "value": "",
+            "pos": [
+                15.0,
+                16.0
+            ],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 28,
+            "symbol": "vcc",
+            "ref": "",
+            "value": "",
+            "pos": [
+                -0.0,
+                9.0
+            ],
+            "rot": 0,
+            "mirror": false
+        }
+    ],
+    "junctions": [
+        {
+            "id": 23,
+            "pos": [
+                9.0,
+                3.0
+            ]
+        },
+        {
+            "id": 25,
+            "pos": [
+                18.0,
+                15.0
+            ]
+        },
+        {
+            "id": 31,
+            "pos": [
+                15.0,
+                15.0
+            ]
+        }
+    ],
+    "wires": [
+        {
+            "id": 11,
+            "a": {
+                "pin": {
+                    "part": 6,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 9,
+                    "pin": 0
+                }
+            },
+            "waypoints": [
+                [
+                    9.0,
+                    -4.0
+                ],
+                [
+                    9.0,
+                    -4.0
+                ],
+                [
+                    9.0,
+                    -5.0
+                ]
+            ],
+            "ortho": true
+        },
+        {
+            "id": 15,
+            "a": {
+                "pin": {
+                    "part": 5,
+                    "pin": 2
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 14,
+                    "pin": 1
+                }
+            },
+            "waypoints": [
+                [
+                    18.0,
+                    -2.0
+                ],
+                [
+                    18.0,
+                    -2.0
+                ]
+            ],
+            "ortho": true
+        },
+        {
+            "id": 16,
+            "a": {
+                "pin": {
+                    "part": 14,
+                    "pin": 0
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 13,
+                    "pin": 0
+                }
+            },
+            "waypoints": [
+                [
+                    18.0,
+                    -8.0
+                ],
+                [
+                    18.0,
+                    -8.0
+                ]
+            ],
+            "ortho": true
+        },
+        {
+            "id": 17,
+            "a": {
+                "pin": {
+                    "part": 9,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 12,
+                    "pin": 0
+                }
+            },
+            "waypoints": [
+                [
+                    9.0,
+                    -11.0
+                ],
+                [
+                    9.0,
+                    -12.0
+                ]
+            ],
+            "ortho": true
+        },
+        {
+            "id": 18,
+            "a": {
+                "pin": {
+                    "part": 5,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 6,
+                    "pin": 0
+                }
+            },
+            "waypoints": [
+                [
+                    8.0,
+                    3.0
+                ],
+                [
+                    8.0,
+                    2.0
+                ]
+            ],
+            "ortho": true
+        },
+        {
+            "id": 20,
+            "a": {
+                "pin": {
+                    "part": 19,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 5,
+                    "pin": 0
+                }
+            },
+            "waypoints": [
+                [
+                    18.0,
+                    8.0
+                ],
+                [
+                    18.0,
+                    8.0
+                ]
+            ],
+            "ortho": true
+        },
+        {
+            "id": 22,
+            "a": {
+                "pin": {
+                    "part": 21,
+                    "pin": 0
+                }
+            },
+            "b": {
+                "junction": {
+                    "id": 23
+                }
+            },
+            "waypoints": [
+                [
+                    9.0,
+                    6.0
+                ],
+                [
+                    9.0,
+                    6.0
+                ]
+            ],
+            "ortho": true
+        },
+        {
+            "id": 24,
+            "a": {
+                "pin": {
+                    "part": 19,
+                    "pin": 0
+                }
+            },
+            "b": {
+                "junction": {
+                    "id": 25
+                }
+            },
+            "waypoints": [
+                [
+                    18.0,
+                    14.0
+                ],
+                [
+                    18.0,
+                    14.0
+                ]
+            ],
+            "ortho": true
+        },
+        {
+            "id": 26,
+            "a": {
+                "junction": {
+                    "id": 25
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 21,
+                    "pin": 1
+                }
+            },
+            "waypoints": [
+                [
+                    10.0,
+                    15.0
+                ],
+                [
+                    10.0,
+                    12.0
+                ]
+            ],
+            "ortho": true
+        },
+        {
+            "id": 29,
+            "a": {
+                "pin": {
+                    "part": 28,
+                    "pin": 0
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 2,
+                    "pin": 0
+                }
+            },
+            "waypoints": [
+                [
+                    0.0,
+                    7.0
+                ],
+                [
+                    0.0,
+                    7.0
+                ]
+            ],
+            "ortho": true
+        },
+        {
+            "id": 30,
+            "a": {
+                "pin": {
+                    "part": 27,
+                    "pin": 0
+                }
+            },
+            "b": {
+                "junction": {
+                    "id": 31
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 32,
+            "a": {
+                "pin": {
+                    "part": 2,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 1,
+                    "pin": 0
+                }
+            },
+            "waypoints": [
+                [
+                    0.0,
+                    1.0
+                ],
+                [
+                    0.0,
+                    1.0
+                ]
+            ],
+            "ortho": true
+        }
+    ],
+    "labels": [],
+    "analysis": {
+        "entries": [
+            {
+                "tran": {
+                    "tstep": 0.000001,
+                    "tstop": 1.001,
+                    "uic": true
+                }
+            }
+        ]
+    },
+    "directives": "",
+    "view": {
+        "zoom": 11.989122722079038,
+        "center": [
+            6.483415107101065,
+            0.7045961500520699
+        ]
+    }
+}
