@@ -7,10 +7,12 @@ disagree, DESIGN.md wins and this file gets fixed.
 ## Where we are
 
 M0 + M1 + M2 + M3 + M4 (CLOSED) + the 2026-10-29 post-review revision +
-**M5** (temp M5a, .nodeset M5b, .noise M5c, Meyer caps M5d) + **the
-BSIM6-style MOS core** (M6, LEVEL=77) — all committed on `main`.
-Latest recorded gate: **3165 assertions, 178 test cases, 0 failures**
-(Linux preset: GCC 14, `-Wall -Wextra -Wpedantic -Werror`).
+**M5** (temp M5a, .nodeset M5b, .noise M5c, Meyer caps M5d, diode TT M5e)
++ **the BSIM6-style MOS core** (M6, LEVEL=77) — all committed on `main`.
+Latest recorded gate: **8928 assertions, 181 test cases, 0 failures**
+(Linux preset: GCC 14, `-Wall -Wextra -Wpedantic -Werror`; the count
+jumped from 3165/178 — the M5e axis fix un-deadened two per-point
+loops that had been reading a data column as the time base).
 Windows parity: the MSVC `/W4 /WX` build is clean (the one M4a shadow,
 C4456, fixed in `523774b`; the earlier 97+6-case Windows smoke ran
 green after `70e7e84` + `b265ae7`); the Linux-side parity checks live
@@ -51,6 +53,7 @@ in `tools/audit_*.py` / `tools/build_*.py` (documented in
 | `824d54e` | M5c — .noise (§7.5): the adjoint analysis. NoiseContext reports per-device current PSDs folded with one adjoint solve per frequency (A^T x = e_out via ComplexSparseLu::solve_transpose); the forward gain carries only the named input (ngspice's MODEACNOISE). Sources: R thermal + carbon flicker, diode _rs/_id/_1overf, BJT _ic/_ib/_fn, MOS _thermal(2/3·gm)/_1overf. Integrated totals via the ninteg.c power-law segments; spectra + per-device summary tables. ALSO fixed a REAL gap the noise tests caught: the MOSFET stamped NOTHING into .ac (any .ac deck carrying one saw an open channel) — channel_eval() now shared by load_dc/load_ac/load_noise; state grows kVbsPrev (5 slots). Gate: kT/C within 3e-4 (ngspice 44.2 lands on the same 2.035120e-6), the diode shot through the loaded impedance (1e-9 rel), the MOS channel row, 4 rejection goldens. |
 | (this commit) | M5d — the MOS Meyer gate caps (§6.2, SPICE3 DEVqmeyer): TOX/CGSO/CGDO/CGBO land on the level-1 model. meyer_half is DEVqmeyer verbatim (half-caps; the caller doubles and adds the overlaps — mos1load.c's `2*state0+overlap` small-signal form, pinned against the ngspice source); gate_caps adds the reverse-mode (vds<0) source/drain swap and the body-effected von. The state grows 42 slots when caps exist (a (V,Q,I,geq,jeq) block + a 3×(t,q) LTE history per terminal pair, MIRROR-frame pair voltages vgs/vgd/vgb — vgb = vgs − vbs); load_tran stamps the three charge Nortons (jeq flips with sgn); load_ac stamps j*ω*C at the frozen OP; the tran charge evolves q += (v_new − v_old)·C(v_new) (SPICE3's mos1load form); the t=0 seed is the TRANOP q = v·C (the doubled caps + overlaps). The caps are dynamic-only (TOX or an overlap present; a bare model keeps the M4c stamp byte-identical). Gate: the §10.1 Meyer rows — the .ac gate-cap table in cutoff/triode/saturation/weak-inversion (the drive-all-but-one-terminal extraction, 1e-9), the PMOS mirror row, the cutoff-region gate RC step vs the closed form, the overlaps-only (no TOX) row. mos_ac_meyer.cir + mos_tran_meyer.cir examples. |
 | (this commit) | M6 — **the BSIM6-style MOS core (LEVEL=77)**: a surface-potential, charge-based channel built from the exact physics in the new src-only `bsim6_core.hpp` (~460 lines, every equation gated). LEVEL=77 follows Xyce ("MOSFET (Level 77) BSIM6") and Simetrix (BSIM-BULK: LEVEL=77, VERSION=106) — ngspice ships no BSIM6 (verified against its NEWS/DEVICES; modern compact models arrive there via OSDI), and 77 is free in every ngspice level table. The core: the exact space-charge PSI(psi,Vch) (both carriers, Poisson+Boltzmann), psi solved per channel node by damped Newton + analytic seeds + bisection fallback (residual 1.4e-14 over the full bias grid incl. accumulation), dpsi by implicit differentiation; the charge-sheet split qi/qb/qg (smooth in depletion AND strong inversion, qi smoothly clamped at 0 for the accumulation/forward-body corners where the surface density dips under bulk equilibrium); Id = mueff(W/L)·∫qi dVch by 16-point GL with an exponential-concentrating substitution when the channel decays (subthreshold integrands of ~50 e-foldings become degree-≤31 polynomials — GL16-exact; a linear map was 2× off at 1e-22 A); velocity saturation via the implicit Vdsat boundary (G_sat = Id_cs(V) − vsat·W·qi(Vsb+V) = 0, scale-RELATIVE Newton tolerance — an absolute one stops percent-early at pA) + the BSIM4-style Vdseff smoothing (DELTA=0.02); the terminal charges as channel-charge-weighted integrals with the smooth chi partition (50/50 linear, 0/100 deep sat); EVERY derivative analytic (the master (Vgb',Vsb,Vds) partials scatter to node voltages; a dqi sign slip that doubled two cancelling cox-scale terms in subthreshold was caught by the FD gate at pA currents). Params: TOX, EPSROX, NDEP (cm⁻³), VTH0 (= the Vgb at which psi_s = 2*phif — Vfb backs out exactly), U0, UA/UB (SI semantics — BSIM deck values do NOT transfer), VSAT (≤0 disables the layer), RDSW (half per side onto internal 'name#d'/'name#s' nodes, the diode-Rs topology), CGSO/CGDO/CGBO, TNOM; temp via ni(T)/phif(T)/gamma(T)/Vfb(T). The device: the M card dispatches on level; PMOS by the mirror frame; REVERSE drain operation by an S/D-swap wrapper (the core is symmetric, the Vdseff layer is not); .tran companions per intrinsic pair (g-s', g-d', g-b) with state-FUNCTION charges (conservation exact — no Meyer-style incremental tracking), the overlaps folded into the same pair charges; .ac stamps the full 3×4 transcapacitance matrix (row g sums to +jω·dQg/dv — conservation) + the overlaps; a frozen-Vdsat state slot keeps begin_step/commit on one linearization point (a mid-step refresh desynced the charges from the solved companion — a constant spurious gate current was the symptom); psi/Vdsat failures are loud Convergence errors through load_error (the T-line latch precedent). Gate: 7 rows — the .dc Id vs an INDEPENDENT Pao-Sah double integral computed in the test (3%: the charge-sheet gap, 0.6% strong→2.5% deep subthreshold, pinned by tools/bsim6_core_check.cpp: psi residual 1.4e-14, FD partials 1.5e-6, quadrature 1e-8 vs Simpson, continuity, swing 68.0 vs 67.7 mV/dec, the vsat bound); threshold/subthreshold/swing; vsat flatness; PMOS mirror + S/D swap symmetry + zero gate DC; RDSW exact resistor drops on #d/#s; .tran gate hold + capacitive .ac; 3 rejection goldens (Level=49, unknown param, Tox≤0). mos_b6_iv.cir + mos_b6_tran.cir examples. |
+| (this commit) | M5e — **the diode transit-time diffusion charge (TT)**: Q_tt = TT·(Id + Is) (the stored minority charge; the −Is generation component is not stored), C_tt = TT·gd — both scale with the bias, so the .ac response poles at exactly 1/(2π·TT), bias-free (the §10.1 row checks every .ac point against the closed form). TT>0 flips the diode dynamic even with Cjo=0 (state 3 → 18 slots: the folded Is(T)·area / n·Vt(T) mirrors evaluate at the INSTANCE temp — load_temp_k, so the companion can never disagree with the loads). Two companion correctness fixes the recovery deck forced: (1) the BE branch now uses the consistent tangent jeq = −geq·V_comp (the trap branch always had it; the old −Q/dt origin form is exact only for q = C·v — for the exponential diffusion charge Q = Vt·C, a factor 27 off at 0.7 V, and it dumped amperes into BE restarts); (2) the reverse-recovery SNAP: when the stored charge empties, C_tt collapses while the terminal current stays mA — dv/dt → ∞, a true discontinuity. The frozen companion's tangent crosses the charge's zero there; committing its fiction current rang the trap memory forever (a 2-cycle pinned to rail ± I·R, observed). Fix: the snap guard in commit (tangent-implied TT charge ≤ 0 → commit the honest rate (q_new − Q)/dt) + the phys::kChargeFloor cutoff (the SPICE3 chgtol, 1e-14 C: below it the TT companion goes fully silent — no geq, no memory — and the circuit pins the node algebraically). Negative TT rejects loudly; TT rides the raw model tokens through the netlist round-trip. Gate: the .ac pole (1e-6 rel, every row), the .tran reverse recovery (the Lambert-W OP, the storage window, ts ≈ TT·ln(1+If/Ir) ≈ 2.8 ns, the snap to the rail, i → gmin), rejection + round-trip. ALSO fixed: three tests read `t.signals[0]` as the time base — signals[] holds only the saved columns (v(src) is first in the M5e deck, v(gin) in the M5d/M6 decks), so the M5d per-point RC loop and the M6 gate-hold loop were DEAD CODE (the wrong "time" never entered their windows); all three now use t.axis() and the loops are live (the assertion count nearly tripled). diode_tt_ac.cir + diode_tt_recovery.cir examples. |
 
 ## Known sharp edges
 
@@ -70,10 +73,10 @@ in `tools/audit_*.py` / `tools/build_*.py` (documented in
   expressions round-trip fine. The B source otherwise participates in
   write_netlist like any device.
 - **Deferred device physics** (accepted-but-not-implemented model keys,
-  so ngspice decks parse): the diode/BJT diffusion charge (TT/Tf/Tr) and
-  the breakdown pair (Bv/Ibv). The BJT Early voltages (Vaf/Var), the
-  diode Rs and the MOS Meyer caps have landed. The rest queue behind M6
-  (diffusion charge) unless pulled earlier.
+  so ngspice decks parse): the BJT diffusion charge (Tf/Tr) and the
+  breakdown pair (Bv/Ibv). The BJT Early voltages (Vaf/Var), the
+  diode Rs, the MOS Meyer caps and the diode TT diffusion charge have
+  landed.
 - **The Meyer charge increment evaluates C at the NEW bias** (q += Δv·C(v_new))
   — the diode/BJT companion convention. ngspice's mos1load instead
   averages the DEVqmeyer halves across the step endpoints
@@ -156,9 +159,15 @@ in `tools/audit_*.py` / `tools/build_*.py` (documented in
 
 ## Next (per §11)
 
-M5 is closed (temp, .nodeset, .noise, Meyer caps) and the BSIM6-style core
-(level 77) has landed with its physics gates. Next: the diffusion-charge
-pair (diode TT, BJT Tf/Tr — the famous reverse-recovery gate), the b6
-follow-ups (CLM/PCLM output conductance, the Ward-Dutton partition
-moment, noise sources, the psi/Vdsat state caching), with M0b (the KLU
-backend decision) and M6 hardening after.
+M5 is closed (temp, .nodeset, .noise, Meyer caps, the diode TT diffusion
+charge) and the BSIM6-style core (level 77) has landed with its physics
+gates. Next: the BJT diffusion charge (Tf/Tr — the reverse-recovery
+companion now has its architecture: the diode-TT snap guard and charge
+floor carry over), the b6 follow-ups (CLM/PCLM output conductance, the
+Ward-Dutton partition moment, noise sources, the psi/Vdsat state
+caching), with M0b (the KLU backend decision) and M6 hardening after.
+A small alignment debt noted during M5e: the BJT/Meyer/b6 BE companions
+still use the -Q/dt origin form (their charges are volt-scale, so it is
+benign there — the diode's exponential diffusion charge was the only
+catastrophic case); aligning them to the consistent -geq·V form is a
+one-line-each follow-up if a BE-mode gate ever needs it.

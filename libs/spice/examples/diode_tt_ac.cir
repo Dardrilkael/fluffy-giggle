@@ -1,0 +1,11 @@
+* diode transit-time diffusion charge: the small-signal pole. With
+* Q_tt = TT*(Id + Is) both the conductance gd and the diffusion cap
+* C_tt = TT*gd scale with the bias, so the impedance 1/(gd + j*w*C_tt)
+* poles at exactly f = 1/(2*pi*TT) = 159 kHz - independent of the DC
+* bias. Below the pole v(d) tracks the AC current (1/gd ~ 2.6 k);
+* above it the diffusion charge rolls the response off at -20 dB/dec.
+I1 0 d DC 10u AC 1
+D1 d 0 dt
+.model dt D(Is=1e-14 N=1 TT=1u)
+.ac dec 20 1k 1g
+.end

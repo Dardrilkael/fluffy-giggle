@@ -35,6 +35,15 @@ inline constexpr double kNoiseMinGain = 1e-20;
 // logarithmic integral form is used.
 inline constexpr double kIntFlatThresh = 1e-10;
 inline constexpr double kIntUseLog = 1e-10;
+// The charge floor: SPICE3's default chgtol (1e-14 C), the tolerance
+// below which a stored charge is numerically dead. The .tran companions
+// use it as the dynamic-charge cutoff (M5e): once a diffusion charge
+// drops under it, C = dQ/dV collapses with it (C = Q/Vt for the
+// exponential diffusion form) while the terminal current stays
+// milliamp-scale, so the remaining dv/dt is a true discontinuity - the
+// reverse-recovery snap. A user tightening chgtol below this floor gets
+// a MORE resolved companion, never less (the floor only silences).
+inline constexpr double kChargeFloor = 1e-14;
 
 // Thermal voltage at temperature `temp_k` (K).
 [[nodiscard]] inline double vt(double temp_k) { return temp_k * kKoverQ; }

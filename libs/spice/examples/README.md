@@ -65,6 +65,13 @@ On Windows: `.\build\spice-debug\bin\spice.exe run <example>.cir`
 | `t_ringing.cir` | `.tran` | RL = 3·Z0 with a matched source: one round trip to the DC wire value, no ringing |
 | `t_quarter_wave.cir` | `.ac` | Open 1 µs line: input short at odd quarter-waves, open at half-waves |
 
+## M5e — the diode transit-time diffusion charge (TT)
+
+| File | Analysis | What it shows |
+|---|---|---|
+| `diode_tt_ac.cir` | `.ac` | The diffusion-cap pole: gd and C_tt = TT·gd both scale with bias, so the small-signal response poles at exactly 1/(2π·TT) = 159 kHz — bias-free |
+| `diode_tt_recovery.cir` | `.tran` | Reverse recovery: the stored charge TT·(Id+Is) ≈ 21.5 pC holds the diode on ~2.8 ns (TT·ln(1+If/Ir)) after the current reverses, then the junction snaps to the rail |
+
 ## ngspice cross-validation
 
 The `.op` examples produce values that match ngspice 39 to 5+ significant

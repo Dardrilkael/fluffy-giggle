@@ -2761,7 +2761,10 @@ TEST_CASE("M5d MOS Meyer: .tran cutoff-region gate RC step vs the closed form") 
         nullptr, settings);
     REQUIRE(run);
     const Table& t = run->results.tables[0];
-    const auto& time = t.signals[0].data;
+    // The sweep axis is the time base (t.axis(); signals[] holds only the
+    // saved columns - an earlier draft read signals[0] as time, which is
+    // v(gin) here and silently skipped the whole per-point loop).
+    const std::span<const double> time = t.axis();
     const auto& vg = t.signals[col_of(t, "v(g)")].data;
     REQUIRE(time.size() > 100);
     // The ramp ends at t_edge = 5u + 1n; the gate then charges from -2.1
@@ -2796,6 +2799,139 @@ TEST_CASE("M5d MOS Meyer: TOX absent keeps only the (linear) overlaps") {
           doctest::Approx(r.ov_gb).epsilon(1e-9));
 }
 
+
+
+TEST_CASE("M5e diode TT: the diffusion-cap pole is 1/(2*pi*TT)") {
+    // The transit-time charge Q = TT*(Id + Is) gives C = TT*gd: both the
+    // conductance and the capacitance scale with gd, so the small-signal
+    // impedance 1/(gd + j*w*C) has its pole at exactly 1/TT - bias-free.
+    // Every .ac row checks against the closed form (the RC-low-pass row
+    // precedent; a -3dB-point scan would be grid-limited at 20 pts/dec).
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "diode tt pole\n"
+        "I1 0 d DC 10u AC 1\n"
+        "D1 d 0 dt\n"
+        ".model dt D(Is=1e-14 N=1 TT=1u)\n"
+        ".ac dec 20 1k 1g\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    // gd = (Id + Is)/vte at the forced 10uA OP (Is=1e-14, N=1, 27C).
+    const double vte = 300.15 * 8.617333262145e-5;
+    const double gd = (10e-6 + 1e-14) / vte;
+    const double tt = 1e-6;
+    for (const auto& row : t.rows()) {
+        const double w = 2 * kPi * row[0];
+        const double g_tot = gd + 1e-12;  // + gmin
+        const double want_re = g_tot / (g_tot * g_tot + (w * tt * gd) * (w * tt * gd));
+        const double want_im = -(w * tt * gd) /
+                               (g_tot * g_tot + (w * tt * gd) * (w * tt * gd));
+        CHECK(row[col_of(t, "re(v(d))") + 1] ==
+              doctest::Approx(want_re).epsilon(1e-6));
+        CHECK(row[col_of(t, "im(v(d))") + 1] ==
+              doctest::Approx(want_im).epsilon(1e-6));
+    }
+}
+
+TEST_CASE("M5e diode TT: .tran reverse recovery holds the stored charge") {
+    // The textbook setup: forward ~4.31 mA through R (the Lambert-W OP
+    // below), then the source flips to -5 V (a ~-5.7 mA pull). While the
+    // TT charge drains the diode stays on (v(d) near the forward drop);
+    // once it empties the junction recovers and v(d) swings to the
+    // reverse level. Charge-control gives ts = TT*ln(1+If/Ir) ~ 2.8 ns
+    // here; the row pins the physics with robust windows (the exact
+    // crossing is grid/LTE dependent - an ngspice-ref row can tighten
+    // it later).
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "diode tt recovery\n"
+        "V1 src 0 PULSE(5 -5 20n 1n 1n 40n 180n)\n"
+        "R1 src d 1k\n"
+        "D1 d 0 dt\n"
+        ".model dt D(Is=1e-14 N=1 TT=5n Cjo=0)\n"
+        ".tran 0.2n 60n\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const std::span<const double> time = t.axis();
+    const auto& vd = t.signals[col_of(t, "v(d)")].data;
+    REQUIRE(time.size() > 50);
+    REQUIRE(vd.size() == time.size());
+    // Forward on before the flip: the pure Shockley OP (a TT charge is
+    // open at DC) - the M3 Lambert-W row's exact geometry.
+    const auto [ref_vd, ref_if] = diode_series_r_op(5.0, 1000.0, 1e-14, 1.0);
+    CHECK(vd[0] == doctest::Approx(ref_vd).epsilon(1e-3));
+    // Still on just after the pull (the charge is draining, not empty).
+    bool still_on = false;
+    for (std::size_t k = 0; k < time.size(); ++k) {
+        if (time[k] > 21.2e-9 && time[k] < 22.0e-9 && vd[k] > 0.3) {
+            still_on = true;
+        }
+    }
+    CHECK(still_on);
+    // Recovered: the junction reversed, bounded by the rail.
+    double v_end = vd.back();
+    CHECK(v_end < -4.0);
+    CHECK(v_end > -5.0);
+    // The crossing happened shortly after the pull, not instantly.
+    double t_cross = -1.0;
+    for (std::size_t k = 0; k < time.size(); ++k) {
+        if (time[k] > 21.0e-9 && vd[k] < 0.0) {
+            t_cross = time[k];
+            break;
+        }
+    }
+    CHECK(t_cross > 21.5e-9);
+    CHECK(t_cross < 28.0e-9);
+}
+
+TEST_CASE("M5e diode TT: rejections and the netlist round-trip") {
+    // Negative TT flips the stored charge's sign - loud Semantic error
+    // (the Rs precedent).
+    CHECK(error_of(run_text("tt bad\n"
+                            "V1 a 0 1\n"
+                            "D1 a 0 dx\n"
+                            ".model dx D(Is=1e-14 TT=-1n)\n"
+                            "R1 a 0 1k\n"
+                            ".op\n"))
+              .find("TT >= 0") != std::string::npos);
+    // The writer re-emits the model card (TT rides along in the raw
+    // tokens); the written deck re-solves to the same OP (TT is open at
+    // DC, so the OP is the pure Shockley point either way).
+    const std::string deck =
+        "tt roundtrip\n"
+        "V1 in 0 5\n"
+        "R1 in out 1k\n"
+        "D1 out 0 dx\n"
+        ".model dx D(Is=1e-14 N=1 TT=1u)\n"
+        ".op\n";
+    const ws::core::Result<ws::spice::Deck> parsed =
+        read_deck("t.cir", deck, ws::spice::ParseOptions{});
+    REQUIRE(parsed);
+    std::vector<Warning> w;
+    const ws::core::Result<ws::spice::DeckAst> ast = build_deck_ast(*parsed, w);
+    REQUIRE(ast);
+    const ws::core::Result<ws::spice::Circuit> circ =
+        elaborate_deck(*ast, 27.0, w);
+    REQUIRE(circ);
+    const ws::core::Result<ws::spice::RunState> rs =
+        ws::spice::RunState::bind(*circ);
+    REQUIRE(rs);
+    const ws::core::Result<std::string> net = write_netlist(*circ, *rs);
+    REQUIRE(net);
+    CHECK(net->find("TT=1u") != std::string::npos);
+    const std::size_t end_pos = net->rfind(".end");
+    REQUIRE(end_pos != std::string::npos);
+    const auto again = run_text(net->substr(0, end_pos) + ".op\n.end\n");
+    REQUIRE(again);
+    const auto [ref_vd, ref_i] = diode_series_r_op(5.0, 1000.0, 1e-14, 1.0);
+    CHECK(again->results.tables[0]
+              .signals[col_of(again->results.tables[0], "i(V1)")]
+              .data[0] == doctest::Approx(-ref_i).epsilon(1e-7));
+}
 
 // --- §10.1 M6: the BSIM6-style core (level 77) -----------------------------------
 
@@ -3073,11 +3209,14 @@ TEST_CASE("M6 BSIM6: .tran gate step charges and holds; .ac is capacitive") {
         nullptr, settings);
     REQUIRE(run);
     const Table& t = run->results.tables[0];
-    const auto& time = t.signals[0].data;
+    // The sweep axis is the time base (t.axis(); signals[0] is v(gin)
+    // here - reading it as time never entered the hold window and the
+    // loop below was dead code).
+    const std::span<const double> time = t.axis();
     const auto& vg = t.signals[col_of(t, "v(g)")].data;
     bool held = true;
     for (std::size_t k = 0; k < time.size(); ++k) {
-        if (time[k] > 20e-9 && time[k] < 80e-9) {
+        if (time[k] > 20e-9 && time[k] < 60e-9) {
             if (std::abs(vg[k] - 1.2) > 5e-3) {
                 held = false;
             }

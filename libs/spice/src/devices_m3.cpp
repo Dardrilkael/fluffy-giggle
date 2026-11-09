@@ -117,6 +117,8 @@ public:
     static constexpr std::size_t kHistN = 8;   // LTE history length (0..3)
     static constexpr std::size_t kHist = 9;    // first (t, q) pair, 6 slots
     static constexpr std::size_t kCjoEff = 15; // folded Cjo*area
+    static constexpr std::size_t kIsEff = 16;  // folded Is(T)*area (TT hooks)
+    static constexpr std::size_t kNVtEff = 17; // folded n*Vt(T) (TT hooks)
 
     Diode(std::string display, NodeId anode, NodeId cathode, ExprProgram area,
           bool has_ic, double ic, bool has_temp_inst, double temp_inst_c)
@@ -251,7 +253,7 @@ public:
         const NodeId j = jnode();
         cx.add_conductance(j, cathode_, {gd_op, 0.0});
         if (has_cap()) {
-            const double cj = c_dep(vd, cjo_ * area);
+            const double cj = c_dep(vd, cjo_ * area) + c_tt(vd, op.is_eff, op.vte);
             cx.add_conductance(j, cathode_, {0.0, cx.omega * cj});
         }
     }
@@ -273,7 +275,7 @@ public:
     // M3: 3 slots (Vd_prev, I_cur, I_prev). M4b: 16 slots when Cjo > 0
     // (adds companion state + LTE history + folded Cjo*area).
     [[nodiscard]] std::size_t state_slots() const override {
-        return has_cap() ? 16 : 3;
+        return has_cap() ? 18 : 3;
     }
     [[nodiscard]] bool is_dynamic() const override { return has_cap(); }
 
@@ -281,7 +283,17 @@ public:
     // pattern as the Capacitor's kCParam fold). link_dynamic sets self_index_.
     void fold_state(double* st, const RunState& rs, const Circuit& c) const override {
         if (has_cap()) {
-            st[kCjoEff] = cjo_ * rs.params()[c.param_span[self_index_].begin];
+            const double area = rs.params()[c.param_span[self_index_].begin];
+            st[kCjoEff] = cjo_ * area;
+            // The TT charge evaluates at the instance's effective
+            // temperature (load_temp_k: the per-instance temp= override,
+            // else the circuit's elaboration temperature) - the same
+            // value every load-context path uses, so the companion and
+            // the loads can never disagree. Every temp change
+            // re-elaborates (§7.7), so the fold stays current.
+            const TempOp op = temp_op(area, load_temp_k(phys::c_to_k(c.temp)));
+            st[kIsEff] = op.is_eff;
+            st[kNVtEff] = op.vte;
         }
     }
     [[nodiscard]] ws::core::Status link_dynamic(const Circuit& /*c*/,
@@ -373,13 +385,47 @@ public:
     void begin_step(const TranStep& step, double* st) override {
         if (!has_cap()) return;
         const double cjo_eff = st[kCjoEff];
+        // The diffusion-charge cutoff (phys::kChargeFloor): once the stored
+        // TT charge drops below the SPICE3 chgtol floor it is numerically
+        // dead - C_tt = Q_tt/Vt collapses with it while the terminal
+        // current stays whatever the circuit pushes, so the remaining
+        // dynamics are a genuine discontinuity (the reverse-recovery
+        // snap; with Cjo=0 nothing softens it). With no depletion cap
+        // either, the honest handoff is a fully silent companion: the
+        // circuit pins the node algebraically, and carrying the trap
+        // memory of a dead charge is exactly the ringing poison (a
+        // current source with no conductance to damp it).
+        const double q_tt_comp = q_tt(st[kVComp], st[kIsEff], st[kNVtEff]);
+        const bool tt_dead = q_tt_comp <= phys::kChargeFloor;
+        if (tt_dead && cjo_eff <= 0.0) {
+            st[kGeq] = 0.0;
+            st[kJeq] = 0.0;
+            return;
+        }
         // Capacitance at the last committed V (begin_step runs once per
         // step attempt, before the Newton loop - it can't see the current
         // iterate, so it uses V_comp from the last commit).
-        const double c = c_dep(st[kVComp], cjo_eff);
+        const double c = c_dep(st[kVComp], cjo_eff) +
+                         (tt_dead ? 0.0 : q_tt_comp / st[kNVtEff]);
         if (step.be) {
             st[kGeq] = c / step.dt;
-            st[kJeq] = -st[kQComp] / step.dt;
+            // The consistent BE linearization of i = (q(v) - Q_prev)/dt
+            // frozen at the committed point: the tangent of q at V_comp
+            // carries q(V_comp) - c*V_comp, and q(V_comp) == Q_prev when
+            // the tangent sits ON the committed point (begin_step runs
+            // after commit), so the two Q's cancel EXACTLY and only
+            // -geq*V_comp survives: i = geq*(v - V_comp).
+            // The -Q/dt-only form the linear C uses is the same thing for
+            // q = C*v (Q == c*V bit-for-bit), but for a nonlinear charge
+            // it is a charge-referenced error term (c*V - Q)/dt per step:
+            // invisible for depletion (Q ~ c*V to a factor ~2), but the
+            // TT diffusion charge has Q = vte*C - a factor 1/27 off at
+            // 0.7 V - so the origin form dumps amperes into the first BE
+            // restart after a LTE rejection (22 pC through a 0.2 ns dt
+            // is 110 A). The trap branch below was already the
+            // consistent tangent form; this makes BE match it (and
+            // quietly removes the depletion-offset error too).
+            st[kJeq] = -st[kGeq] * st[kVComp];
         } else {
             st[kGeq] = 2.0 * c / step.dt;
             st[kJeq] = -(st[kGeq] * st[kVComp] + st[kIComp]);
@@ -391,10 +437,31 @@ public:
         if (!has_cap()) return;
         const double cjo_eff = st[kCjoEff];
         const double vd = v_across(x, jnode(), cathode_);
-        const double q = q_dep(vd, cjo_eff);
+        const double q = q_dep(vd, cjo_eff) + q_tt(vd, st[kIsEff], st[kNVtEff]);
+        // The snap guard: the committed trap memory must be the charge's
+        // true rate, not the frozen tangent's current, whenever the step
+        // left the tangent's domain. The TT tangent-implied charge
+        // q_hat = Q_tt(V_comp) + C_tt*(v - V_comp) crosses zero exactly
+        // when the step drains more than the stored diffusion charge
+        // (|dv| > Vt off a live charge - the snap); the companion current
+        // geq*v+jeq is then a fiction (amperes through a charge that no
+        // longer exists), and committing it rings forever: the next
+        // step's jeq = -(geq*V_comp + I_comp) becomes a current source
+        // with no conductance left to damp it - the observed 2-cycle
+        // pinned to rail +- I*R. The honest memory is the implied rate
+        // (q_new - Q_comp)/dt - what the step ACTUALLY did to the charge.
+        double i_comp = st[kGeq] * vd + st[kJeq];
+        const double q_tt_comp = q_tt(st[kVComp], st[kIsEff], st[kNVtEff]);
+        if (tt_ > 0.0 && q_tt_comp > phys::kChargeFloor) {
+            const double q_hat_tt =
+                q_tt_comp + (q_tt_comp / st[kNVtEff]) * (vd - st[kVComp]);
+            if (q_hat_tt <= 0.0) {
+                i_comp = (q - st[kQComp]) / step.dt;
+            }
+        }
         st[kVComp] = vd;
         st[kQComp] = q;
-        st[kIComp] = st[kGeq] * vd + st[kJeq];
+        st[kIComp] = i_comp;
         // LTE history (3 (t, q) pairs, oldest first).
         if (step.be) {
             st[kHistN] = 0.0;  // BE restart invalidates trap LTE history
@@ -426,7 +493,7 @@ public:
         }
         const double cjo_eff = st[kCjoEff];
         const double vd = v_across(x, jnode(), cathode_);
-        const double q_new = q_dep(vd, cjo_eff);
+        const double q_new = q_dep(vd, cjo_eff) + q_tt(vd, st[kIsEff], st[kNVtEff]);
         // Reuse the dd3_lte logic from devices_m2.cpp (inline here since
         // it's in a different TU's anonymous namespace).
         const double n = st[kHistN];
@@ -459,17 +526,17 @@ public:
         if (!has_cap()) return;
         const double vd = v_across(x, jnode(), cathode_);
         st[kVComp] = vd;
-        st[kQComp] = q_dep(vd, st[kCjoEff]);
+        st[kQComp] = q_dep(vd, st[kCjoEff]) + q_tt(vd, st[kIsEff], st[kNVtEff]);
         st[kIComp] = 0.0;
         st[kHistN] = 0.0;
     }
 
     // .model name D(Is=... N=... Rs=... Cjo=... ...). Implements Is, N,
     // Tnom, Xti, Eg (the §7.7 temperature model), Cjo/M/Vj/Fc (M4b
-    // junction charge) and Rs (series resistance — the internal-node
-    // form); accepts Bv/Ibv/Kf/Af/TT silently (warned once per model in
-    // `spice check`) - they land with M5 (breakdown, noise, diffusion
-    // charge).
+    // junction charge), TT (the transit-time diffusion charge) and Rs
+    // (series resistance — the internal-node form); accepts
+    // Bv/Ibv/Kf/Af silently - they land with the breakdown/noise
+    // follow-ups.
     ws::core::Status apply_model(const ModelDef& model,
                                  NodeResolver& nodes) override {
         if (model.type != "d") {
@@ -485,6 +552,7 @@ public:
         double n_val = 1.0;
         double tnom = 27.0;
         double cjo_val = 0.0, m_val = 0.5, vj_val = 1.0, fc_val = 0.5;
+        double tt_val = 0.0;
         double rs_val = 0.0;
         double eg_val = 1.11, xti_val = 3.0;
         double kf_val = 0.0, af_val = 1.0;
@@ -558,16 +626,18 @@ public:
                 kf_val = v;
             } else if (key == "af") {
                 af_val = v;
-            } else if (key == "bv" || key == "ibv" || key == "tt") {
+            } else if (key == "tt") {
+                tt_val = v;
+            } else if (key == "bv" || key == "ibv") {
                 // Accepted (so ngspice decks parse cleanly) but not
                 // implemented. `spice check` warns per-model.
-                // TT (diffusion charge) and Bv/Ibv (breakdown) land with
-                // the M5 device-physics follow-ups.
+                // Bv/Ibv (breakdown) land with the device-physics
+                // follow-ups.
             } else {
                 return spice_fail(dev_diag(
                     ErrorKind::Semantic, "spice.semantic.model_param",
                     "model '" + model.name.text + "': unknown parameter '" + key +
-                        "' (Is, N, Tnom, Rs, Cjo, M, Vj, Bv, Ibv, Xti, Eg, Kf, Af, Fc)",
+                        "' (Is, N, Tnom, Rs, Cjo, M, Vj, TT, Bv, Ibv, Xti, Eg, Kf, Af, Fc)",
                     toks[i].loc));
             }
         }
@@ -588,6 +658,16 @@ public:
                 ErrorKind::Semantic, "spice.semantic.d_rs",
                 "model '" + model.name.text + "' needs Rs >= 0"
                 " (0 disables the series resistance)",
+                model.loc));
+        }
+        // Transit time: 0 (the default) disables the diffusion charge;
+        // negative values flip the stored charge's sign - reject loudly
+        // (the Rs precedent; ngspice rejects TT < 0 too).
+        if (!(tt_val >= 0.0) || !std::isfinite(tt_val)) {
+            return spice_fail(dev_diag(
+                ErrorKind::Semantic, "spice.semantic.d_tt",
+                "model '" + model.name.text + "' needs TT >= 0"
+                " (0 disables the transit-time diffusion charge)",
                 model.loc));
         }
         is_ = is_val;
@@ -615,6 +695,7 @@ public:
         // T == Tnom the values equal the frozen-Tnom form bit-for-bit.
         // M4b: junction capacitance params.
         cjo_ = cjo_val;
+        tt_ = tt_val;
         m_ = m_val;
         vj_ = vj_val;
         fc_ = fc_val;
@@ -646,7 +727,22 @@ private:
     // --- M4b: junction capacitance (Cjo) charge model -------------------
     // True when the diode has a junction cap (Cjo > 0) - gates is_dynamic,
     // state_slots, and all the companion hooks.
-    [[nodiscard]] bool has_cap() const { return cjo_ > 0.0; }
+    [[nodiscard]] bool has_cap() const { return cjo_ > 0.0 || tt_ > 0.0; }
+
+    // The transit-time diffusion charge (the stored minority charge of a
+    // diode carrying the forward conduction current): Q_tt = TT*(Id_cond +
+    // Is) = TT*Is*e^(Vd/vte) - the generation component (-Is) is not
+    // stored. C_tt = TT*gd_ideal. The .ac consequence is elegant: the
+    // small-signal pole sits at 1/(2*pi*TT) regardless of bias (both gd
+    // and C_tt scale with gd).
+    [[nodiscard]] double q_tt(double vd, double is_eff, double vte) const {
+        if (tt_ <= 0.0) return 0.0;
+        return tt_ * is_eff * std::exp(safe_exp_arg(vd / vte));
+    }
+    [[nodiscard]] double c_tt(double vd, double is_eff, double vte) const {
+        if (tt_ <= 0.0) return 0.0;
+        return tt_ * is_eff / vte * std::exp(safe_exp_arg(vd / vte));
+    }
 
     // Depletion charge Q_dep(Vd) and capacitance C_dep(Vd), using the
     // SPICE3/ngspice depletion model with the Fc linear extension past
@@ -705,6 +801,7 @@ private:
     double m_ = 0.5;        // grading coefficient
     double vj_ = 1.0;       // junction potential (V)
     double fc_ = 0.5;       // forward-bias depletion cap coefficient
+    double tt_ = 0.0;       // transit time (s; the diffusion charge)
     std::size_t self_index_ = 0;  // filled by link_dynamic (for fold_state)
     std::string model_name_;
 };

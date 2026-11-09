@@ -1,0 +1,15 @@
+* diode reverse recovery - the classic transit-time showcase. The
+* source holds +5 V (4.3 mA forward) for 20 ns, then pulls to -5 V
+* (a -5.7 mA extraction). The stored diffusion charge TT*(Id+Is) ~
+* 21.5 pC keeps the diode on while it drains - charge-control gives
+* the storage time ts = TT*ln(1 + If/Ir) ~ 2.8 ns - then the junction
+* snaps shut and v(d) swings to the rail. Watch v(d) sit near 0.65 V
+* for ~3 ns AFTER the current has already reversed (t > 21 ns): the
+* charge, not the voltage, is what conducts.
+V1 src 0 PULSE(5 -5 20n 1n 1n 40n 180n)
+R1 src d 1k
+D1 d 0 dt
+.model dt D(Is=1e-14 N=1 TT=5n)
+.tran 0.2n 60n
+.print tran v(src) v(d) i(V1)
+.end
