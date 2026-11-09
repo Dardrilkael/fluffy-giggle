@@ -101,7 +101,7 @@ constexpr double kVtPerK = phys::kKoverQ;
     return arg;
 }
 
-// --- Q (BJT, §3.6/§5.3/§11 M4a: Ebers-Moll) -------------------------------------
+// --- Q (BJT, §3.6/§5.3/§11 M4a: Ebers-Moll; M4b junction caps; M7 Tf/Tr) ----------
 
 class Bjt final : public Device {
 public:
@@ -110,13 +110,13 @@ public:
     static constexpr std::size_t kVbcPrev = 1;
     static constexpr std::size_t kICur = 2;
     static constexpr std::size_t kIPrev = 3;
-    // M4b BE junction companion (when Cje > 0):
+    // M4b BE junction companion (when Cje > 0 or Tf > 0):
     static constexpr std::size_t kVbeComp = 4;
     static constexpr std::size_t kQbeComp = 5;
     static constexpr std::size_t kIbeComp = 6;
     static constexpr std::size_t kGeqBe = 7;
     static constexpr std::size_t kJeqBe = 8;
-    // M4b BC junction companion (when Cjc > 0):
+    // M4b BC junction companion (when Cjc > 0 or Tr > 0):
     static constexpr std::size_t kVbcComp = 9;
     static constexpr std::size_t kQbcComp = 10;
     static constexpr std::size_t kIbcComp = 11;
@@ -130,6 +130,16 @@ public:
     // Folded params:
     static constexpr std::size_t kCjeEff = 28;
     static constexpr std::size_t kCjcEff = 29;
+    // M7 TT slots (present in every dynamic layout): the BE cross
+    // conductance (the dQ_be/dVbc Early coupling - the companion's extra
+    // unknown) and the folded temp mirrors the charge companions evaluate
+    // at (the diode-TT precedent: begin_step/commit see no load context,
+    // so the instance temp's Is(T)*area, Nf*Vt(T) and Nr*Vt(T) fold once
+    // per step attempt and can never disagree with the load paths).
+    static constexpr std::size_t kGeqcbBe = 30;
+    static constexpr std::size_t kIsEffT = 31;
+    static constexpr std::size_t kNVtBeT = 32;
+    static constexpr std::size_t kNVtBcT = 33;
 
     Bjt(std::string display, NodeId c, NodeId b, NodeId e,
         ExprProgram area, bool has_ic, double ic_vbe, double ic_vbc,
@@ -269,13 +279,29 @@ public:
         const double die_dvc = -(dic_dvc + dib_dvc);
         const double die_dve = -(dic_dve + dib_dve);
         // Norton offsets: the constant part of each terminal current after
-        // subtracting the V-dependent (G matrix) part.
-        const double ic_eq = ic - (dic_dvb * cx.node_v(b_) + dic_dvc * cx.node_v(c_) +
-                                    dic_dve * cx.node_v(e_));
-        const double ib_eq = ib - (dib_dvb * cx.node_v(b_) + dib_dvc * cx.node_v(c_) +
-                                    dib_dve * cx.node_v(e_));
-        const double ie_eq = ie - (die_dvb * cx.node_v(b_) + die_dvc * cx.node_v(c_) +
-                                    die_dve * cx.node_v(e_));
+        // subtracting the V-dependent (G matrix) part. The reference is
+        // the node triple CONSISTENT with the clamped junction voltages
+        // (the diode's vd_lim precedent; SPICE3's bjtload evaluates every
+        // companion at the limited vbe/vbc) - the raw iterate may have
+        // run far past the clamp, and evaluating the offset there pins
+        // it outside forever: a current-forced base (I1 into the base)
+        // cold-starts at |v_b| ~ source/gmin ~ 1e8 and the whole §5.2
+        // ladder then fails (found landing M7 - the fT-pole gates bias
+        // the base with a current source; every M4a deck was
+        // voltage-driven, which hid it). The rows sum to zero (the
+        // currents depend on junction voltages only), so the offset is
+        // shift-invariant and any consistent triple gives the same
+        // stamp; with no clamp active the triple IS the raw node
+        // voltages, byte-identical to the M4a form.
+        const double vb_ref = cx.node_v(e_) + sgn * vbe;
+        const double vc_ref = vb_ref - sgn * vbc;
+        const double ve_ref = cx.node_v(e_);
+        const double ic_eq = ic - (dic_dvb * vb_ref + dic_dvc * vc_ref +
+                                    dic_dve * ve_ref);
+        const double ib_eq = ib - (dib_dvb * vb_ref + dib_dvc * vc_ref +
+                                    dib_dve * ve_ref);
+        const double ie_eq = ie - (die_dvb * vb_ref + die_dvc * vc_ref +
+                                    die_dve * ve_ref);
         // G matrix: "current leaving node" = current into the BJT terminal.
         // The derivatives are d(terminal current)/dV, stamped directly.
         cx.add_entry(c_, b_, dic_dvb);
@@ -296,9 +322,9 @@ public:
         cx.add_rhs(e_, -ie_eq);
     }
 
-    // M4a: no junction caps (Cje/Cjc land M4b). load_tran = load_dc.
     // load_ac: small-signal conductances at the OP (frozen Vbe/Vbc from
-    // state, set by update_state during the .ac OP solve).
+    // state, set by update_state during the .ac OP solve) + the junction
+    // caps (M4b depletion, M7 transit-time diffusion) as j*omega*C.
     void load_ac(AcLoadContext& cx) const override {
         const double area = cx.par(kAreaParam);
         const TempOp op = temp_op(area, load_temp_k(cx.temp_k()));
@@ -334,30 +360,63 @@ public:
         cx.add_entry(e_, c_, {die_dvc, 0.0});
         cx.add_entry(e_, e_, {die_dve, 0.0});
         // M4b: junction caps Cje(Vbe_op) and Cjc(Vbc_op) as j*omega*C.
-        if (has_caps()) {
-            if (cje_ > 0.0) {
-                const double cje_eff = cje_ * area;
-                const double cj_be = c_dep_be(vbe, cje_eff);
+        // M7: the transit-time diffusion caps ride the same stamps, and
+        // the BE charge's Early dependence adds the transcapacitance
+        // cross dQ_be/dVbc coupling the (b,e) port to v(b)-v(c) (the
+        // level-77 precedent: the full transcapacitance matrix,
+        // conservation by construction; ngspice's bjtacld.c stamps only
+        // the scalar capbe - identical here whenever Vaf = Var = 0,
+        // where the cross is exactly 0).
+        if (has_dyn_be()) {
+            double cj_be = cje_ > 0.0 ? c_dep_be(vbe, cje_ * area) : 0.0;
+            if (tf_ > 0.0 &&
+                live_tt_be(vbe, vbc, is_eff, nf_ * op.vt) > phys::kChargeFloor) {
+                cj_be += c_tt_be_vbe(vbe, vbc, is_eff, nf_ * op.vt);
+                const double c_x = c_tt_be_vbc(vbe, is_eff, nf_ * op.vt);
+                if (c_x != 0.0) {
+                    cx.add_entry(b_, b_, {0.0, cx.omega * c_x});
+                    cx.add_entry(b_, c_, {0.0, -cx.omega * c_x});
+                    cx.add_entry(e_, b_, {0.0, -cx.omega * c_x});
+                    cx.add_entry(e_, c_, {0.0, cx.omega * c_x});
+                }
+            }
+            if (cj_be != 0.0) {
                 cx.add_conductance(b_, e_, {0.0, cx.omega * cj_be});
             }
-            if (cjc_ > 0.0) {
-                const double cjc_eff = cjc_ * area;
-                const double cj_bc = c_dep_bc(vbc, cjc_eff);
+        }
+        if (has_dyn_bc()) {
+            double cj_bc = cjc_ > 0.0 ? c_dep_bc(vbc, cjc_ * area) : 0.0;
+            if (tr_ > 0.0 &&
+                live_tt_bc(vbc, is_eff, nr_ * op.vt) > phys::kChargeFloor) {
+                cj_bc += c_tt_bc(vbc, is_eff, nr_ * op.vt);
+            }
+            if (cj_bc != 0.0) {
                 cx.add_conductance(b_, c_, {0.0, cx.omega * cj_bc});
             }
         }
     }
 
-    // M4b: load_tran stamps the DC terminal currents PLUS the junction cap
-    // companions (geq_be/jeq_be between B and E, geq_bc/jeq_bc between B and C).
+    // M4b: load_tran stamps the DC terminal currents PLUS the junction
+    // charge companions (geq_be/jeq_be between B and E, geq_bc/jeq_bc
+    // between B and C; M7 folds the transit-time diffusion charges into
+    // the same companions). The BE companion also carries the Early
+    // cross conductance kGeqcbBe: the BE charge depends on Vbc, so the
+    // charging current into the base picks up geqcb*(v_b - v_c) - a
+    // VCCS-shaped stamp between the (b,e) pair and the (b,c) pair.
     void load_tran(DcLoadContext& cx, const TranStep&) const override {
         load_dc(cx);  // DC terminal-current stamp (M4a)
-        if (!has_caps()) return;
-        if (cje_ > 0.0) {
+        if (has_dyn_be()) {
             cx.add_conductance(b_, e_, cx.st(kGeqBe));
             cx.add_current(e_, b_, cx.st(kJeqBe));
+            const double gx = cx.st(kGeqcbBe);
+            if (gx != 0.0) {
+                cx.add_entry(b_, b_, gx);
+                cx.add_entry(b_, c_, -gx);
+                cx.add_entry(e_, b_, -gx);
+                cx.add_entry(e_, c_, gx);
+            }
         }
-        if (cjc_ > 0.0) {
+        if (has_dyn_bc()) {
             cx.add_conductance(b_, c_, cx.st(kGeqBc));
             cx.add_current(c_, b_, cx.st(kJeqBc));
         }
@@ -377,18 +436,33 @@ public:
     }
 
     // --- state model (§3.5b) ---------------------------------------------
-    // M4a: 4 slots. M4b: 30 slots when Cje or Cjc > 0.
+    // M4a: 4 slots. Dynamic (Cje/Cjc depletion or Tf/Tr transit time):
+    // 34 slots - the M4b companion/LTE/fold layout plus the M7 cross
+    // conductance and the three folded temp mirrors. One layout for
+    // every dynamic combination (the diode-TT 18-slot precedent: no
+    // per-feature slot juggling, the untouched slots just read 0).
     [[nodiscard]] std::size_t state_slots() const override {
-        return has_caps() ? 30 : 4;
+        return has_dyn_be() || has_dyn_bc() ? 34 : 4;
     }
-    [[nodiscard]] bool is_dynamic() const override { return has_caps(); }
+    [[nodiscard]] bool is_dynamic() const override {
+        return has_dyn_be() || has_dyn_bc();
+    }
 
     void fold_state(double* st, const RunState& rs, const Circuit& c) const override {
-        if (has_caps()) {
-            const double area = rs.params()[c.param_span[self_index_].begin];
-            st[kCjeEff] = cje_ * area;
-            st[kCjcEff] = cjc_ * area;
-        }
+        if (!has_dyn_be() && !has_dyn_bc()) return;
+        const double area = rs.params()[c.param_span[self_index_].begin];
+        st[kCjeEff] = cje_ * area;
+        st[kCjcEff] = cjc_ * area;
+        // The TT charges evaluate at the instance's effective temperature
+        // (load_temp_k: the per-instance temp= override, else the
+        // circuit's elaboration temperature) - the diode-TT fold
+        // precedent, so the companion can never disagree with the load
+        // paths. Every temp change re-elaborates (§7.7), so the fold
+        // stays current.
+        const TempOp op = temp_op(area, load_temp_k(phys::c_to_k(c.temp)));
+        st[kIsEffT] = op.is_eff;
+        st[kNVtBeT] = nf_ * op.vt;
+        st[kNVtBcT] = nr_ * op.vt;
     }
     [[nodiscard]] ws::core::Status link_dynamic(const Circuit& /*c*/,
                                                  std::size_t self) override {
@@ -396,36 +470,139 @@ public:
         return {};
     }
 
-    // --- M4b dynamic hooks (junction cap companions, only when Cje/Cjc > 0) ---
+    // --- M4b/M7 dynamic hooks (junction charge companions) ----------------
+    // The per-junction charge is the depletion part (M4b) PLUS the
+    // transit-time diffusion part (M7); the BE charge also depends on Vbc
+    // through the Early factor (the cross conductance kGeqcbBe). The
+    // companion algebra is the diode-TT architecture (M5e): the charge
+    // floor silences a numerically dead diffusion charge, the consistent
+    // tangent linearizes at the committed point (the -Q/dt origin form
+    // is exact only for q = C*v, and the diffusion charge is exponential
+    // - Q = Vt*C, a factor 27 off at 0.7 V; this also retires the M4b
+    // BE-branch debt noted in STATUS), and the trap memory rides I_comp.
     void begin_step(const TranStep& step, double* st) override {
-        if (!has_caps()) return;
-        if (cje_ > 0.0) {
-            const double c = c_dep_be(st[kVbeComp], st[kCjeEff]);
-            if (step.be) { st[kGeqBe] = c / step.dt; st[kJeqBe] = -st[kQbeComp] / step.dt; }
-            else { st[kGeqBe] = 2.0 * c / step.dt; st[kJeqBe] = -(st[kGeqBe] * st[kVbeComp] + st[kIbeComp]); }
+        if (!has_dyn_be() && !has_dyn_bc()) return;
+        if (has_dyn_be()) {
+            const double vbe_c = st[kVbeComp];
+            // The cross reference: the accepted Vbc of the last solved
+            // step. kVbcComp holds it when the BC junction is dynamic;
+            // kVbcPrev always exists and carries the same accepted value
+            // (update_state ran on the converged iterate, where pnjlim
+            // is inactive).
+            const double vbc_ref = st[kVbcPrev];
+            const double cje_eff = st[kCjeEff];
+            // The diffusion charge floor (phys::kChargeFloor, the SPICE3
+            // chgtol): once the stored charge drops under it, C = dQ/dV
+            // collapses with it while the terminal current stays
+            // milliamp-scale - the remaining dynamics are the
+            // reverse-recovery snap. With no depletion cap either, the
+            // honest handoff is a fully silent companion (the circuit
+            // pins the node algebraically; a dead charge's trap memory
+            // is exactly the ringing poison).
+            const bool tt_dead =
+                live_tt_be(vbe_c, vbc_ref, st[kIsEffT], st[kNVtBeT]) <=
+                phys::kChargeFloor;
+            if (tt_dead && cje_eff <= 0.0) {
+                st[kGeqBe] = 0.0;
+                st[kJeqBe] = 0.0;
+                st[kGeqcbBe] = 0.0;
+            } else {
+                const double c = c_dep_be(vbe_c, cje_eff) +
+                                 (tt_dead ? 0.0
+                                          : c_tt_be_vbe(vbe_c, vbc_ref,
+                                                        st[kIsEffT], st[kNVtBeT]));
+                const double c_x =
+                    tt_dead ? 0.0
+                            : c_tt_be_vbc(vbe_c, st[kIsEffT], st[kNVtBeT]);
+                if (step.be) {
+                    st[kGeqBe] = c / step.dt;
+                    st[kGeqcbBe] = c_x / step.dt;
+                    // The consistent BE linearization of i = (q(v) -
+                    // Q_comp)/dt frozen at the committed point: the
+                    // tangent carries q(V_comp) - c*V_comp and the two
+                    // Q's cancel exactly (begin_step runs after commit).
+                    st[kJeqBe] = -(st[kGeqBe] * vbe_c + st[kGeqcbBe] * vbc_ref);
+                } else {
+                    st[kGeqBe] = 2.0 * c / step.dt;
+                    st[kGeqcbBe] = 2.0 * c_x / step.dt;
+                    st[kJeqBe] = -(st[kGeqBe] * vbe_c + st[kGeqcbBe] * vbc_ref +
+                                   st[kIbeComp]);
+                }
+            }
         }
-        if (cjc_ > 0.0) {
-            const double c = c_dep_bc(st[kVbcComp], st[kCjcEff]);
-            if (step.be) { st[kGeqBc] = c / step.dt; st[kJeqBc] = -st[kQbcComp] / step.dt; }
-            else { st[kGeqBc] = 2.0 * c / step.dt; st[kJeqBc] = -(st[kGeqBc] * st[kVbcComp] + st[kIbcComp]); }
+        if (has_dyn_bc()) {
+            const double vbc_c = st[kVbcComp];
+            const double cjc_eff = st[kCjcEff];
+            const bool tt_dead =
+                live_tt_bc(vbc_c, st[kIsEffT], st[kNVtBcT]) <= phys::kChargeFloor;
+            if (tt_dead && cjc_eff <= 0.0) {
+                st[kGeqBc] = 0.0;
+                st[kJeqBc] = 0.0;
+            } else {
+                const double c = c_dep_bc(vbc_c, cjc_eff) +
+                                 (tt_dead ? 0.0
+                                          : c_tt_bc(vbc_c, st[kIsEffT], st[kNVtBcT]));
+                if (step.be) {
+                    st[kGeqBc] = c / step.dt;
+                    st[kJeqBc] = -st[kGeqBc] * vbc_c;
+                } else {
+                    st[kGeqBc] = 2.0 * c / step.dt;
+                    st[kJeqBc] = -(st[kGeqBc] * vbc_c + st[kIbcComp]);
+                }
+            }
         }
     }
 
     void commit(const std::vector<double>& x, std::size_t /*nc*/,
                 const TranStep& step, double* st) override {
-        if (!has_caps()) return;
+        if (!has_dyn_be() && !has_dyn_bc()) return;
         const double vbe = v_across(x, b_, e_);
         const double vbc = v_across(x, b_, c_);
-        if (cje_ > 0.0) {
-            const double q = q_dep_be(vbe, st[kCjeEff]);
+        if (has_dyn_be()) {
+            const double q = q_dep_be(vbe, st[kCjeEff]) +
+                             q_tt_be(vbe, vbc, st[kIsEffT], st[kNVtBeT]);
+            // The companion current at the accepted point (the trap
+            // memory; the cross term included - it is the same charge).
+            double i_comp = st[kGeqBe] * vbe + st[kGeqcbBe] * vbc + st[kJeqBe];
+            // The snap guard (the diode-TT precedent): when the step
+            // drained the tangent-implied diffusion charge past its
+            // floor (|dv| > Vt off a live charge - the reverse-recovery
+            // snap), the frozen companion's current is a fiction;
+            // committing it rings the trap memory forever. The honest
+            // memory is the implied rate (q_new - Q_comp)/dt - what the
+            // step ACTUALLY did to the charge.
+            if (live_tt_be(st[kVbeComp], st[kVbcPrev], st[kIsEffT],
+                           st[kNVtBeT]) > phys::kChargeFloor) {
+                const double c_dir =
+                    c_tt_be_vbe(st[kVbeComp], st[kVbcPrev], st[kIsEffT], st[kNVtBeT]);
+                const double q_hat =
+                    live_tt_be(st[kVbeComp], st[kVbcPrev], st[kIsEffT], st[kNVtBeT]) +
+                    c_dir * (vbe - st[kVbeComp]);
+                if (q_hat <= 0.0) {
+                    i_comp = (q - st[kQbeComp]) / step.dt;
+                }
+            }
             st[kVbeComp] = vbe; st[kQbeComp] = q;
-            st[kIbeComp] = st[kGeqBe] * vbe + st[kJeqBe];
+            st[kIbeComp] = i_comp;
             push_hist(st, kHistNBe, kHistBe, step.time, q, step.be);
         }
-        if (cjc_ > 0.0) {
-            const double q = q_dep_bc(vbc, st[kCjcEff]);
+        if (has_dyn_bc()) {
+            const double q = q_dep_bc(vbc, st[kCjcEff]) +
+                             q_tt_bc(vbc, st[kIsEffT], st[kNVtBcT]);
+            double i_comp = st[kGeqBc] * vbc + st[kJeqBc];
+            if (live_tt_bc(st[kVbcComp], st[kIsEffT], st[kNVtBcT]) >
+                phys::kChargeFloor) {
+                const double c_dir =
+                    c_tt_bc(st[kVbcComp], st[kIsEffT], st[kNVtBcT]);
+                const double q_hat =
+                    live_tt_bc(st[kVbcComp], st[kIsEffT], st[kNVtBcT]) +
+                    c_dir * (vbc - st[kVbcComp]);
+                if (q_hat <= 0.0) {
+                    i_comp = (q - st[kQbcComp]) / step.dt;
+                }
+            }
             st[kVbcComp] = vbc; st[kQbcComp] = q;
-            st[kIbcComp] = st[kGeqBc] * vbc + st[kJeqBc];
+            st[kIbcComp] = i_comp;
             push_hist(st, kHistNBc, kHistBc, step.time, q, step.be);
         }
     }
@@ -433,17 +610,21 @@ public:
     [[nodiscard]] bool lte_ok(const TranStep& step, const std::vector<double>& x,
                               std::size_t /*nc*/, double reltol, double chgtol,
                               double trtol, const double* st, double* ratio) const override {
-        if (!has_caps()) { if (ratio) *ratio = 0.0; return true; }
+        if (!has_dyn_be() && !has_dyn_bc()) { if (ratio) *ratio = 0.0; return true; }
+        const double vbe = v_across(x, b_, e_);
+        const double vbc = v_across(x, b_, c_);
         double worst = 0.0;
-        if (cje_ > 0.0) {
-            const double q = q_dep_be(v_across(x, b_, e_), st[kCjeEff]);
+        if (has_dyn_be()) {
+            const double q = q_dep_be(vbe, st[kCjeEff]) +
+                             q_tt_be(vbe, vbc, st[kIsEffT], st[kNVtBeT]);
             double r = 0.0;
             dd3_lte_check(st + kHistNBe, st + kHistBe, step, q, st[kQbeComp],
                           reltol, chgtol, trtol, &r);
             worst = std::max(worst, r);
         }
-        if (cjc_ > 0.0) {
-            const double q = q_dep_bc(v_across(x, b_, c_), st[kCjcEff]);
+        if (has_dyn_bc()) {
+            const double q = q_dep_bc(vbc, st[kCjcEff]) +
+                             q_tt_bc(vbc, st[kIsEffT], st[kNVtBcT]);
             double r = 0.0;
             dd3_lte_check(st + kHistNBc, st + kHistBc, step, q, st[kQbcComp],
                           reltol, chgtol, trtol, &r);
@@ -454,16 +635,22 @@ public:
     }
 
     void seed_state(const std::vector<double>& x, std::size_t /*nc*/, double* st) override {
-        if (!has_caps()) return;
+        if (!has_dyn_be() && !has_dyn_bc()) return;
         const double vbe = v_across(x, b_, e_);
         const double vbc = v_across(x, b_, c_);
-        if (cje_ > 0.0) {
-            st[kVbeComp] = vbe; st[kQbeComp] = q_dep_be(vbe, st[kCjeEff]);
-            st[kIbeComp] = 0.0; st[kHistNBe] = 0.0;
+        if (has_dyn_be()) {
+            st[kVbeComp] = vbe;
+            st[kQbeComp] = q_dep_be(vbe, st[kCjeEff]) +
+                           q_tt_be(vbe, vbc, st[kIsEffT], st[kNVtBeT]);
+            st[kIbeComp] = 0.0;
+            st[kHistNBe] = 0.0;
         }
-        if (cjc_ > 0.0) {
-            st[kVbcComp] = vbc; st[kQbcComp] = q_dep_bc(vbc, st[kCjcEff]);
-            st[kIbcComp] = 0.0; st[kHistNBc] = 0.0;
+        if (has_dyn_bc()) {
+            st[kVbcComp] = vbc;
+            st[kQbcComp] = q_dep_bc(vbc, st[kCjcEff]) +
+                           q_tt_bc(vbc, st[kIsEffT], st[kNVtBcT]);
+            st[kIbcComp] = 0.0;
+            st[kHistNBc] = 0.0;
         }
     }
 
@@ -544,9 +731,11 @@ public:
     // Is, Bf, Br, Nf, Nr, Tnom; M4b adds Cje/Cjc/Mje/Mjc/Vje/Vjc/Fc; the
     // Early voltages Vaf/Var are implemented (the SPICE3 base-charge
     // form, no roll-off); §7.7 (M5) implements the temperature model
-    // (Xti, Eg, Xtb - Is(T), the beta exponent); the remaining
-    // Gummel-Poon params (Ikf, Ikr, Tf, Tr, Kf, Af, ...) are accepted
-    // but not implemented - they land with the M5 device-physics follow-ups.
+    // (Xti, Eg, Xtb - Is(T), the beta exponent); M7 adds the transit
+    // times Tf/Tr (the diffusion charges, bjtload.c's qbe/qbc form);
+    // the remaining Gummel-Poon params (Ikf, Ikr, the Tf bias/Temp
+    // modulation Xtf/Itf/Vtf, the excess phase Ptf, ...) are accepted
+    // but not implemented - they land with the device-physics follow-ups.
     ws::core::Status apply_model(const ModelDef& model,
                                  NodeResolver& /*nodes*/) override {
         if (model.type != "npn" && model.type != "pnp") {
@@ -566,6 +755,7 @@ public:
         double vje_val = 0.75, vjc_val = 0.75, fc_val = 0.5;
         double eg_val = 1.11, xti_val = 3.0, xtb_val = 0.0;
         double kf_val = 0.0, af_val = 1.0;
+        double tf_val = 0.0, tr_val = 0.0;
         const auto& toks = model.params;
         for (std::size_t i = 0; i < toks.size(); ++i) {
             std::string text = toks[i].text;
@@ -620,11 +810,14 @@ public:
             else if (key == "vje") vje_val = v;
             else if (key == "vjc") vjc_val = v;
             else if (key == "fc") fc_val = v;
-            // Accepted but not implemented (the M5 device-physics
-            // follow-ups: diffusion charge, noise, parasitic resistances,
-            // high-current roll-off):
+            else if (key == "tf") tf_val = v;
+            else if (key == "tr") tr_val = v;
+            // Accepted but not implemented (the device-physics follow-ups:
+            // high-current roll-off, the Tf bias/temperature modulation,
+            // excess phase, parasitic resistances, the leak diodes):
             else if (key == "ikf" || key == "ikr" ||
-                     key == "tf" || key == "tr" ||
+                     key == "xtf" || key == "itf" || key == "vtf" ||
+                     key == "ptf" ||
                      key == "pe" || key == "pc" || key == "ise" ||
                      key == "isc" || key == "ne" || key == "nc" || key == "rb" ||
                      key == "rc" || key == "re") {
@@ -661,6 +854,17 @@ public:
                 " (0 disables the Early effect)",
                 model.loc));
         }
+        // Transit times: 0 (the default) disables each diffusion charge;
+        // negative values flip the stored charge's sign - reject loudly
+        // (the diode-TT precedent; ngspice rejects Tf/Tr < 0 too).
+        if (!(tf_val >= 0.0) || !std::isfinite(tf_val) ||
+            !(tr_val >= 0.0) || !std::isfinite(tr_val)) {
+            return spice_fail(dev_diag(
+                ErrorKind::Semantic, "spice.semantic.q_tt",
+                "model '" + model.name.text + "' needs Tf >= 0 and Tr >= 0"
+                " (0 disables the transit-time diffusion charge)",
+                model.loc));
+        }
         is_ = is_val;
         bf_ = bf; br_ = br;
         nf_ = nf; nr_ = nr;
@@ -683,6 +887,9 @@ public:
         mje_ = mje_val; mjc_ = mjc_val;
         vje_ = vje_val; vjc_ = vjc_val;
         fc_ = fc_val;
+        // M7: transit times (Tf/Tr > 0 enables the diffusion charges).
+        tf_ = tf_val;
+        tr_ = tr_val;
         return {};
     }
 
@@ -720,8 +927,67 @@ private:
         return vp - vn;
     }
 
-    // --- M4b: junction capacitance --------------------------------------
-    [[nodiscard]] bool has_caps() const { return cje_ > 0.0 || cjc_ > 0.0; }
+    // --- M4b/M7: junction charges ----------------------------------------
+    // Per-junction dynamic gates: the companion exists when either the
+    // depletion cap (Cje/Cjc) or the transit time (Tf/Tr) is live.
+    [[nodiscard]] bool has_dyn_be() const { return cje_ > 0.0 || tf_ > 0.0; }
+    [[nodiscard]] bool has_dyn_bc() const { return cjc_ > 0.0 || tr_ > 0.0; }
+    [[nodiscard]] bool has_tt() const { return tf_ > 0.0 || tr_ > 0.0; }
+
+    // --- M7: the transit-time diffusion charges (bjtload.c) --------------
+    // The forward (BE) charge: Q_be = Tf*If*oef at Vbe > 0 (SPICE3
+    // divides the forward diode current by the base charge qb = 1/oef -
+    // the stored charge tracks the Early base-width modulation), plain
+    // Tf*If at Vbe <= 0; the reverse (BC) charge Q_bc = Tr*Ir carries no
+    // base-charge scaling (SPICE3 likewise). The ngspice form floors at
+    // -Tf*Is / -Tr*Is in reverse (the generation component is not
+    // stored); live_* reports the above-floor part the charge floor and
+    // the snap guard reason about. The _vbe/_vbc partials carry the
+    // Early chain exactly (the cross term is dQ_be/dVbc).
+    [[nodiscard]] double q_tt_be(double vbe, double vbc, double is_eff,
+                                 double vte_be) const {
+        if (tf_ <= 0.0) return 0.0;
+        const double q = tf_ * is_eff *
+                         (std::exp(safe_exp_arg(vbe / vte_be)) - 1.0);
+        return vbe > 0.0 ? q * (1.0 - vbc * inv_vaf_ - vbe * inv_var_) : q;
+    }
+    [[nodiscard]] double live_tt_be(double vbe, double vbc, double is_eff,
+                                    double vte_be) const {
+        if (tf_ <= 0.0) return 0.0;
+        const double live = tf_ * is_eff * std::exp(safe_exp_arg(vbe / vte_be));
+        return vbe > 0.0 ? live * (1.0 - vbc * inv_vaf_ - vbe * inv_var_)
+                         : live;
+    }
+    [[nodiscard]] double c_tt_be_vbe(double vbe, double vbc, double is_eff,
+                                     double vte_be) const {
+        if (tf_ <= 0.0) return 0.0;
+        const double ex = std::exp(safe_exp_arg(vbe / vte_be));
+        if (vbe > 0.0) {
+            const double iff = is_eff * (ex - 1.0);
+            const double oef = 1.0 - vbc * inv_vaf_ - vbe * inv_var_;
+            return tf_ * (is_eff / vte_be * ex * oef - iff * inv_var_);
+        }
+        return tf_ * is_eff / vte_be * ex;
+    }
+    [[nodiscard]] double c_tt_be_vbc(double vbe, double is_eff,
+                                     double vte_be) const {
+        if (tf_ <= 0.0 || vbe <= 0.0) return 0.0;
+        const double ex = std::exp(safe_exp_arg(vbe / vte_be));
+        return -tf_ * is_eff * (ex - 1.0) * inv_vaf_;
+    }
+    [[nodiscard]] double q_tt_bc(double vbc, double is_eff, double vte_bc) const {
+        if (tr_ <= 0.0) return 0.0;
+        return tr_ * is_eff *
+               (std::exp(safe_exp_arg(vbc / vte_bc)) - 1.0);
+    }
+    [[nodiscard]] double live_tt_bc(double vbc, double is_eff, double vte_bc) const {
+        if (tr_ <= 0.0) return 0.0;
+        return tr_ * is_eff * std::exp(safe_exp_arg(vbc / vte_bc));
+    }
+    [[nodiscard]] double c_tt_bc(double vbc, double is_eff, double vte_bc) const {
+        if (tr_ <= 0.0) return 0.0;
+        return tr_ * is_eff / vte_bc * std::exp(safe_exp_arg(vbc / vte_bc));
+    }
 
     // Generic depletion charge/cap (same SPICE formula as the diode's Cjo,
     // parameterized by the junction's Cj/M/Vj/Fc).
@@ -840,11 +1106,15 @@ private:
     // off, oef == 1.0 exactly and the stamp is byte-identical to M4a.
     double vaf_ = 0.0, var_ = 0.0;
     double inv_vaf_ = 0.0, inv_var_ = 0.0;
-    // M4b: junction cap params (Cje/Cjc > 0 enables the companions)
+    // M4b: junction cap params (Cje/Cjc > 0 enables the depletion
+    // companions)
     double cje_ = 0.0, cjc_ = 0.0;
     double mje_ = 0.5, mjc_ = 0.5;
     double vje_ = 0.75, vjc_ = 0.75;
     double fc_ = 0.5;
+    // M7: transit times (Tf/Tr > 0 enables the diffusion charges; the
+    // BE charge carries the Early base-charge scaling, the BC does not).
+    double tf_ = 0.0, tr_ = 0.0;
     bool pnp_ = false;
     std::size_t self_index_ = 0;  // filled by link_dynamic
     std::string model_name_;

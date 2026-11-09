@@ -4846,3 +4846,443 @@ TEST_CASE("noise: MOS channel (8/3)kT*gm; rejections") {
               "nr4\nV1 a 0 AC 1\nR1 a 0 1k\n.noise v(a) R1 lin 1 1 2\n"))
               .find("not a V or I source") != std::string::npos);
 }
+
+
+// --- §10.1 M7: the BJT transit-time diffusion charges (Tf/Tr) ----------------------
+
+namespace {
+
+// The resistor-biased forward OP: solves (vdrive - vbe)/rb = Is*(e^vbe/vt
+// - 1)/Bf for vbe (Newton; the gmin/reverse-junction corrections are
+// ~1e-7 relative - below every epsilon used here).
+[[nodiscard]] double bjt_rb_op_vbe(double vdrive, double rb, double is_val,
+                                   double bf, double vt) {
+    double vbe = 0.6;
+    for (int k = 0; k < 80; ++k) {
+        const double ex = std::exp(vbe / vt);
+        const double f = (vdrive - vbe) / rb - is_val * (ex - 1.0) / bf;
+        const double df = -1.0 / rb - is_val * ex / vt / bf;
+        const double dv = f / df;
+        vbe -= dv;
+        if (std::abs(dv) < 1e-15) break;
+    }
+    return vbe;
+}
+
+}  // namespace
+
+TEST_CASE("M7 BJT Tf: the diffusion-cap pole is 1/(2*pi*Tf*Bf)") {
+    // C_be = Tf*gm_f and gpi = gm_f/Bf both scale with the bias, so the
+    // small-signal input impedance 1/(gpi + j*w*C_be) poles at exactly
+    // gm_f/Bf / (Tf*gm_f) = 1/(Bf*Tf) - bias-free, and the current-gain
+    // unity crossover sits at fT = 1/(2*pi*Tf). Every .ac row checks
+    // against the closed form (the diode-TT pole row precedent).
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "bjt tf pole\n"
+        "I1 0 b DC 100u AC 1\n"
+        "V1 c 0 DC 12\n"
+        "Q1 c b 0 qn\n"
+        ".model qn NPN(Is=1e-16 Bf=100 Tf=100n)\n"
+        ".ac dec 20 1k 10g\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    // The forced-ib OP: If = Bf*ib exactly (both junction conductances
+    // scale with it); gm_f = (If + Is)/Vt.
+    const double is_val = 1e-16;
+    const double iff = 100.0 * 100e-6;
+    const double gm_f = (iff + is_val) / kVt27;
+    const double gpi = gm_f / 100.0 + 2e-12;  // + gmin (both junction rows)
+    const double c_be = 1e-7 * gm_f;
+    for (const auto& row : t.rows()) {
+        const double w = 2 * kPi * row[0];
+        const double den = gpi * gpi + (w * c_be) * (w * c_be);
+        CHECK(row[col_of(t, "re(v(b))") + 1] ==
+              doctest::Approx(gpi / den).epsilon(1e-6));
+        CHECK(row[col_of(t, "im(v(b))") + 1] ==
+              doctest::Approx(-(w * c_be) / den).epsilon(1e-6));
+    }
+}
+
+TEST_CASE("M7 BJT Tf/Vaf: the Early cross capacitance in .ac") {
+    // With Vaf > 0 the forward diffusion charge Q_be = Tf*If*oef carries
+    // the base-charge scaling and a dQ/dVbc cross term; with the
+    // collector AC-grounded (v_bc = v_b) both fold into the input
+    // admittance: Y_in = gm_f/Bf + j*w*(Tf*gm_f*oef - Tf*If/Vaf). The
+    // cross SUBTRACTS (base-width modulation releases stored charge as
+    // the BC junction forward-biases) - a sign slip doubles the error
+    // and fails the row.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "bjt tf early cross ac\n"
+        "I1 0 b DC 100u AC 1\n"
+        "V1 c 0 DC 12\n"
+        "Q1 c b 0 qe\n"
+        ".model qe NPN(Is=1e-16 Bf=100 Vaf=50 Tf=100n)\n"
+        ".ac dec 20 1k 10g\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double is_val = 1e-16;
+    const double iff = 100.0 * 100e-6;  // the OP is Early-free (base diodes)
+    const double vbe = kVt27 * std::log(iff / is_val + 1.0);
+    const double vbc = vbe - 12.0;
+    const double oef = 1.0 - vbc / 50.0;
+    const double gm_f = (iff + is_val) / kVt27;
+    const double g = gm_f / 100.0 + 2e-12;
+    const double c_in = 1e-7 * gm_f * oef - 1e-7 * iff / 50.0;
+    for (const auto& row : t.rows()) {
+        const double w = 2 * kPi * row[0];
+        const double den = g * g + (w * c_in) * (w * c_in);
+        CHECK(row[col_of(t, "re(v(b))") + 1] ==
+              doctest::Approx(g / den).epsilon(1e-6));
+        CHECK(row[col_of(t, "im(v(b))") + 1] ==
+              doctest::Approx(-(w * c_in) / den).epsilon(1e-6));
+    }
+}
+
+TEST_CASE("M7 BJT Tf/Tr: saturation .ac, both diffusion caps live") {
+    // A true two-junction-forward OP: the collector pinned at 0.14 V by
+    // an ideal source (AC ground), the base driven by a current source.
+    // Both diffusion caps are alive (C_be = Tf*gm_f, C_bc = Tr*gm_r) and
+    // shunt the base in parallel: Y_in = gpi + gmu + j*w*(C_be + C_bc).
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "bjt tt sat ac\n"
+        "I1 0 b DC 20u AC 1\n"
+        "V1 c 0 DC 0.14\n"
+        "Q1 c b 0 qs\n"
+        ".model qs NPN(Is=1e-16 Bf=100 Br=1 Tf=100n Tr=1u)\n"
+        ".ac dec 20 100 1g\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double is_val = 1e-16;
+    // Solve the OP: If/Bf + Ir/Br = ib with vbc = vbe - 0.14.
+    double vbe = 0.75;
+    for (int k = 0; k < 80; ++k) {
+        const double exf = std::exp(vbe / kVt27);
+        const double exr = std::exp((vbe - 0.14) / kVt27);
+        const double f = is_val * (exf - 1.0) / 100.0 +
+                         is_val * (exr - 1.0) / 1.0 - 20e-6;
+        const double df = is_val * exf / kVt27 / 100.0 +
+                          is_val * exr / kVt27 / 1.0;
+        const double dv = f / df;
+        vbe -= dv;
+        if (std::abs(dv) < 1e-15) break;
+    }
+    const double exf = std::exp(vbe / kVt27);
+    const double exr = std::exp((vbe - 0.14) / kVt27);
+    const double gm_f = is_val * exf / kVt27;
+    const double gm_r = is_val * exr / kVt27;
+    // Both stored charges are above the chgtol floor at this OP (the
+    // test's meaning depends on it).
+    CHECK(1e-7 * is_val * exf > 1e-14);
+    CHECK(1e-6 * is_val * exr > 1e-14);
+    const double g = gm_f / 100.0 + gm_r / 1.0 + 2e-12;
+    const double c_in = 1e-7 * gm_f + 1e-6 * gm_r;
+    for (const auto& row : t.rows()) {
+        const double w = 2 * kPi * row[0];
+        const double den = g * g + (w * c_in) * (w * c_in);
+        CHECK(row[col_of(t, "re(v(b))") + 1] ==
+              doctest::Approx(g / den).epsilon(1e-6));
+        CHECK(row[col_of(t, "im(v(b))") + 1] ==
+              doctest::Approx(-(w * c_in) / den).epsilon(1e-6));
+    }
+}
+
+TEST_CASE("M7 BJT Tf: .tran forward-active storage turn-off") {
+    // The textbook single-junction storage: the collector rides an ideal
+    // 12 V rail (Vbc reverse, Ir dead), the base is driven through 13.3k
+    // from a source that flips +2 V -> -5 V. The stored charge
+    // Q_be = Tf*If drains through the base drive at ib - If/Bf, so
+    // ic = Q/Tf follows the charge-control exponential
+    //   ic(t) = -Bf*IR + (ic0 + Bf*IR)*exp(-t/(Tf*Bf))
+    // and crosses zero (the snap) at ts = Tf*Bf*ln(1 + IB1/IR).
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "bjt tf turnoff\n"
+        "V1 cc 0 12\n"
+        "V2 src 0 PULSE(2 -5 12u 10n 10n 40u 100u)\n"
+        "R1 src b 13.3k\n"
+        "Q1 cc b 0 qn\n"
+        ".model qn NPN(Is=1e-16 Bf=100 Tf=20n)\n"
+        ".tran 0.001u 15u\n"
+        ".print tran v(src) v(b) i(V1)\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const std::span<const double> time = t.axis();
+    const auto& ic = t.signals[col_of(t, "i(V1)")].data;  // ic = -i(V1)
+    const auto& vb = t.signals[col_of(t, "v(b)")].data;
+    REQUIRE(time.size() > 100);
+    REQUIRE(ic.size() == time.size());
+    // The on OP (the source held +2 V since t=0, the charge seeded at
+    // the OP - no fill transient): the resistor-biased forward point.
+    const double is_val = 1e-16;
+    const double vbe0 = bjt_rb_op_vbe(2.0, 13300.0, is_val, 100.0, kVt27);
+    const double iff0 = is_val * (std::exp(vbe0 / kVt27) - 1.0);
+    std::size_t k_on = 0;
+    for (std::size_t k = 0; k < time.size(); ++k) {
+        if (time[k] > 6e-6 && time[k] < 11.9e-6) { k_on = k; }
+    }
+    REQUIRE(k_on > 0);
+    CHECK(-ic[k_on] == doctest::Approx(iff0).epsilon(1e-4));
+    // The charge-control exponential through the extraction. The deck's
+    // 1 ns dtmax keeps the frozen companion's tangent on the exponential
+    // tail honest (at a coarse dtmax the tail's dv/dt grows as 1/If and
+    // single steps move vbe past Vt - the tangent then lags the curve;
+    // the charge LTE cannot see it because v is logarithmic in q. The
+    // dtmax knob is the accuracy trade, the Rs*Cjo ring precedent).
+    const double tau = 20e-9 * 100.0;
+    const double ir = (5.0 + vbe0) / 13300.0;  // ~constant (vbe drifts ~1%)
+    const double ic0 = -ic[k_on];
+    double max_dev = 0.0;
+    for (std::size_t k = 0; k < time.size(); ++k) {
+        if (time[k] > 12.05e-6 && time[k] < 12.36e-6) {
+            const double dt = time[k] - 12.005e-6;
+            const double pred = -100.0 * ir + (ic0 + 100.0 * ir) *
+                                                  std::exp(-dt / tau);
+            max_dev = std::max(max_dev, std::abs(-ic[k] - pred));
+        }
+    }
+    CHECK(max_dev < 0.06 * ic0);
+    // The snap: ic crosses zero at ts = tau*ln(1 + IB1/IR) after the
+    // flip, then the companion goes silent - the base follows the
+    // source and the collector current dies to gmin scale with no
+    // trap-memory ring (the M5e 2-cycle regression).
+    const double ts_pred = tau * std::log((ic0 + 100.0 * ir) / (100.0 * ir));
+    double t_cross = -1.0;
+    for (std::size_t k = 0; k < time.size(); ++k) {
+        if (time[k] > 12.01e-6 && ic[k] >= 0.0) { t_cross = time[k]; break; }
+    }
+    REQUIRE(t_cross > 0.0);
+    CHECK(t_cross > 12.005e-6 + ts_pred - 0.035e-6);
+    CHECK(t_cross < 12.005e-6 + ts_pred + 0.045e-6);
+    for (std::size_t k = 0; k < time.size(); ++k) {
+        if (time[k] > 12.8e-6) {
+            CHECK(std::abs(ic[k]) < 5e-6);
+        }
+    }
+    CHECK(vb.back() < -4.9);
+    CHECK(vb.back() > -5.05);
+}
+
+TEST_CASE("M7 BJT Tf/Tr: .tran saturated-switch storage time") {
+    // The two-junction showcase: a forced-beta switch (ICS ~ 10.4 mA,
+    // IB1 ~ 0.43 mA, deep saturation) turned off with a -5 V pull. The
+    // storage phase holds ic at the load line while BOTH diffusion
+    // charges drain through the base; charge-control with the load-line
+    // constraint If - Ir = ICS gives
+    //   tau_S = (Tf + Tr)/(1/Bf + 1/Br)
+    //   t_s   = tau_S*ln[(If0 - If*)/(ICS - If*)],
+    //     If* = (IB2 + ICS/Br)/(1/Bf + 1/Br)
+    // and the knee lands where the BC charge empties (vbc collapses,
+    // v(out) snaps toward vbe). A Tr=0 twin collapses the storage by
+    // the (Tf+Tr)/Tf factor - the two knees are a factor ~20 apart.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run_deck = [&settings](const char* model) {
+        return run_text(std::string("bjt sat switch\n") +
+                        "V1 cc 0 5\n"
+                        "Rc cc out 470\n"
+                        "V2 src 0 PULSE(-5 5 1u 1n 1n 10u 60u)\n"
+                        "Rb src b 10k\n"
+                        ".options itl4=100\n"
+                        "Q1 out b 0 qs\n" + model +
+                        "\n.tran 0.02u 18u\n"
+                        ".print tran v(src) v(b) v(out) i(V1)\n",
+                        nullptr, settings);
+    };
+    const auto run = run_deck(".model qs NPN(Is=1e-16 Bf=100 Br=1 Tf=100n "
+                              "Tr=2u Cje=5p Cjc=5p)");
+    REQUIRE(run);
+    double t_knee = -1.0;
+    {
+        const Table& t = run->results.tables[0];
+        const std::span<const double> time = t.axis();
+        const auto& vout = t.signals[col_of(t, "v(out)")].data;
+        const auto& vb = t.signals[col_of(t, "v(b)")].data;
+        REQUIRE(time.size() > 100);
+        // The pre-flip saturated OP (read from the columns; Tf/Tr are
+        // open at DC so this is the pure Ebers-Moll point).
+        std::size_t k0 = 0;
+        for (std::size_t k = 0; k < time.size(); ++k) {
+            if (time[k] > 9.5e-6 && time[k] < 10.99e-6) { k0 = k; }
+        }
+        REQUIRE(k0 > 0);
+        const double is_val = 1e-16;
+        const double vbe0 = vb[k0];
+        const double vbc0 = vb[k0] - vout[k0];
+        const double iff0 = is_val * (std::exp(vbe0 / kVt27) - 1.0);
+        const double irr0 = is_val * (std::exp(vbc0 / kVt27) - 1.0);
+        const double ics = (5.0 - vout[k0]) / 470.0;
+        // The OP self-consistency: the transport current is the load
+        // current (both junctions forward, oef = 1).
+        CHECK((iff0 - irr0) == doctest::Approx(ics).epsilon(1e-2));
+        // Both stored charges above the chgtol floor (the gate's meaning).
+        CHECK(100e-9 * is_val * std::exp(vbe0 / kVt27) > 1e-14);
+        CHECK(2e-6 * is_val * std::exp(vbc0 / kVt27) > 1e-14);
+        // The storage phase holds v(out) at the saturation level.
+        for (std::size_t k = 0; k < time.size(); ++k) {
+            if (time[k] > 10.5e-6 && time[k] < 11.5e-6) {
+                CHECK(vout[k] < vout[k0] + 0.25);
+            }
+        }
+        // The knee: v(out) snaps through 0.5 V when the BC charge
+        // empties (vbc collapses; before the snap v(out) < 0.16).
+        const double gg = 1.0 / 100.0 + 1.0 / 1.0;
+        const double ib2 = (-5.0 - vbe0) / 10000.0;
+        const double if_star = (ib2 + ics / 1.0) / gg;
+        const double ts = (100e-9 + 2e-6) / gg *
+                          std::log((iff0 - if_star) / (ics - if_star));
+        for (std::size_t k = 0; k < time.size(); ++k) {
+            if (time[k] > 11.005e-6 && vout[k] > 0.5) { t_knee = time[k]; break; }
+        }
+        REQUIRE(t_knee > 0.0);
+        // The quasi-static reference neglects the BC charge dump into
+        // the load line (it holds ic up a touch longer), so the knee
+        // lands a little LATE of the formula - the window is one-sided
+        // on purpose (observed ~ +0.16 us at this dtmax).
+        CHECK(t_knee > 11.001e-6 + ts - 0.10e-6);
+        CHECK(t_knee < 11.001e-6 + ts + 0.30e-6);
+        CHECK(t_knee - 11.001e-6 > 0.5e-6);
+        // Cutoff reached, and no trap-memory ring on the way up: the
+        // rise is monotone until the base's own snap (the forward-active
+        // storage tail - the BE charge drains on Tf*Bf and releases the
+        // base to the rail ~1.7 us past the knee, a real physical
+        // feature whose Cjc displacement kick wobbles v(out) a few
+        // 10s of mV), after which v(out) settles bounded at the rail.
+        CHECK(vout.back() > 4.9);
+        for (std::size_t k = 1; k < time.size(); ++k) {
+            if (time[k] > 12.5e-6 && time[k] <= 13.4e-6) {
+                CHECK(vout[k] >= vout[k - 1] - 2e-3);
+            }
+            if (time[k] > 14.2e-6) {
+                CHECK(vout[k] > 4.85);
+            }
+        }
+    }
+    // The Tr=0 twin: the storage collapses to (Tf+0)/(Tf+Tr) of the
+    // two-charge knee (the OP is Tr-independent).
+    const auto run0 = run_deck(".model qs NPN(Is=1e-16 Bf=100 Br=1 Tf=100n "
+                               "Tr=0 Cje=5p Cjc=5p)");
+    REQUIRE(run0);
+    {
+        const Table& t = run0->results.tables[0];
+        const std::span<const double> time = t.axis();
+        const auto& vout = t.signals[col_of(t, "v(out)")].data;
+        double t_knee0 = -1.0;
+        for (std::size_t k = 0; k < time.size(); ++k) {
+            if (time[k] > 11.005e-6 && vout[k] > 0.5) { t_knee0 = time[k]; break; }
+        }
+        REQUIRE(t_knee0 > 0.0);
+        CHECK(t_knee0 < 11.35e-6);
+        CHECK(t_knee - t_knee0 > 0.5e-6);
+    }
+}
+
+TEST_CASE("M7 BJT Tf: the temp fold - the pole at 127 C") {
+    // The companion's Is(T)/Vt(T) fold at the INSTANCE temperature: at
+    // 127 C the thermal voltage is 33% larger, so both gm_f and C_be
+    // shift - a companion folded at 27 C would miss the im column by
+    // 33% at every point. The reference recomputes the SPICE3 Is(T)
+    // factor (Xti/Eg, tlev=0) itself.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "bjt tf pole temp\n"
+        ".options temp=127\n"
+        "I1 0 b DC 100u AC 1\n"
+        "V1 c 0 DC 12\n"
+        "Q1 c b 0 qt\n"
+        ".model qt NPN(Is=1e-16 Bf=100 Tf=100n)\n"
+        ".ac dec 20 1k 10g\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double temp_k = 127.0 + 273.15;
+    const double vt = temp_k * 8.617333262145e-5;
+    const double ratlog = std::log(temp_k / 300.15);
+    const double factlog = (temp_k / 300.15 - 1.0) * 1.11 / vt + 3.0 * ratlog;
+    const double is_t = 1e-16 * std::exp(factlog);
+    const double iff = 100.0 * 100e-6;  // Xtb = 0: Bf(T) = Bf
+    const double gm_f = (iff + is_t) / vt;
+    const double g = gm_f / 100.0 + 2e-12;
+    const double c = 1e-7 * gm_f;
+    for (const auto& row : t.rows()) {
+        const double w = 2 * kPi * row[0];
+        const double den = g * g + (w * c) * (w * c);
+        CHECK(row[col_of(t, "re(v(b))") + 1] ==
+              doctest::Approx(g / den).epsilon(1e-6));
+        CHECK(row[col_of(t, "im(v(b))") + 1] ==
+              doctest::Approx(-(w * c) / den).epsilon(1e-6));
+    }
+}
+
+TEST_CASE("M7 BJT Tf/Tr: rejections and the netlist round-trip") {
+    // Negative Tf/Tr flips the stored charge's sign - loud Semantic
+    // error (the diode-TT precedent).
+    CHECK(error_of(run_text("tt bad\n"
+                            "Vbe b 0 DC 0.7\n"
+                            "Vc c 0 DC 5\n"
+                            "Q1 c b 0 qn\n"
+                            ".model qn NPN(Is=1e-16 Tf=-1n)\n"
+                            ".op\n"))
+              .find("Tf >= 0") != std::string::npos);
+    CHECK(error_of(run_text("tt bad2\n"
+                            "Vbe b 0 DC 0.7\n"
+                            "Vc c 0 DC 5\n"
+                            "Q1 c b 0 qn\n"
+                            ".model qn NPN(Is=1e-16 Tr=-1n)\n"
+                            ".op\n"))
+              .find("Tf >= 0") != std::string::npos);
+    // The Xtf/Itf/Vtf/Ptf modulation tail is accepted (production GP
+    // decks parse; the values are ignored - the b6-params precedent).
+    REQUIRE(run_text("tt accept\n"
+                     "Vbe b 0 DC 0.7\n"
+                     "Vc c 0 DC 5\n"
+                     "Q1 c b 0 qn\n"
+                     ".model qn NPN(Is=1e-16 Tf=1n Xtf=2 Itf=1m "
+                     "Vtf=2 Ptf=20p)\n"
+                     ".op\n"));
+    // The writer re-emits the model card (Tf/Tr ride along in the raw
+    // tokens); the written deck re-solves to the same OP (the transit
+    // charges are open at DC).
+    const std::string deck =
+        "tt roundtrip\n"
+        "Vbe b 0 DC 0.7\n"
+        "Vc c 0 DC 5\n"
+        "Q1 c b 0 qn\n"
+        ".model qn NPN(Is=1e-16 Bf=100 Tf=100n Tr=1u)\n"
+        ".op\n";
+    const ws::core::Result<ws::spice::Deck> parsed =
+        read_deck("t.cir", deck, ws::spice::ParseOptions{});
+    REQUIRE(parsed);
+    std::vector<Warning> w;
+    const ws::core::Result<ws::spice::DeckAst> ast = build_deck_ast(*parsed, w);
+    REQUIRE(ast);
+    const ws::core::Result<ws::spice::Circuit> circ =
+        elaborate_deck(*ast, 27.0, w);
+    REQUIRE(circ);
+    const ws::core::Result<ws::spice::RunState> rs =
+        ws::spice::RunState::bind(*circ);
+    REQUIRE(rs);
+    const ws::core::Result<std::string> net = write_netlist(*circ, *rs);
+    REQUIRE(net);
+    CHECK(net->find("Tf=100n") != std::string::npos);
+    CHECK(net->find("Tr=1u") != std::string::npos);
+    const std::size_t end_pos = net->rfind(".end");
+    REQUIRE(end_pos != std::string::npos);
+    const auto again = run_text(net->substr(0, end_pos) + ".op\n.end\n");
+    REQUIRE(again);
+    // The M4a/M4b ngspice cross-validation point: Ic ~ 56.7 uA.
+    CHECK(-again->results.tables[0]
+               .signals[col_of(again->results.tables[0], "i(Vbe)")]
+               .data[0] == doctest::Approx(5.67e-7).epsilon(1e-3));
+}

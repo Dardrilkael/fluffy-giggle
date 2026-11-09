@@ -1,0 +1,13 @@
+* BJT transit-time diffusion charge: the fT pole. With C_be = Tf*gm_f
+* and gpi = gm_f/Bf both scaling with the bias, the small-signal input
+* impedance 1/(gpi + j*w*C_be) poles at 1/(Bf*Tf) = 159 kHz - and the
+* current-gain unity crossover sits at fT = 1/(2*pi*Tf) = 1.59 MHz,
+* independent of the DC bias (the diode-TT pole property, transistor
+* edition). Below the pole v(b) tracks the AC current (1/gpi ~ 260 R);
+* above it the stored base charge rolls the response off at -20 dB/dec.
+I1 0 b DC 100u AC 1
+V1 c 0 DC 12
+Q1 c b 0 qn
+.model qn NPN(Is=1e-16 Bf=100 Tf=100n)
+.ac dec 20 1k 10g
+.end

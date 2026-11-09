@@ -1,0 +1,23 @@
+* BJT saturated-switch storage time - the two-charge showcase. The
+* switch is driven into deep saturation (forced beta ~ 24), then the
+* base is pulled to -5 V. While BOTH diffusion charges (Q_be = Tf*If,
+* Q_bc = Tr*Ir, ~1 nC + ~0.6 nC) drain through the base, the collector
+* stays pinned at the load line (v(out) ~ 0.09 V) - the storage
+* phase. Charge-control puts the knee at
+*   tau_S*(ln[(If0-If*)/(ICS-If*)]) ~ 0.78 us after the pull,
+*     tau_S = (Tf+Tr)/(1/Bf+1/Br)
+* where the BC charge emptying (vbc collapsing) snaps v(out) toward
+* vbe and the transistor exits saturation. Then the BE charge keeps
+* draining on Tf*Bf: ~1.7 us later the base snaps to the rail and the
+* collector floats to 5 V - watch v(b) hold ~0.83 V long after the
+* drive has reversed: the charge, not the voltage, is what conducts.
+V1 cc 0 5
+Rc cc out 470
+V2 src 0 PULSE(-5 5 1u 1n 1n 10u 60u)
+Rb src b 10k
+.options itl4=100
+Q1 out b 0 qs
+.model qs NPN(Is=1e-16 Bf=100 Br=1 Tf=100n Tr=2u Cje=5p Cjc=5p)
+.tran 0.02u 18u
+.print tran v(src) v(b) v(out) i(V1)
+.end

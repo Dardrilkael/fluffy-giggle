@@ -72,6 +72,13 @@ On Windows: `.\build\spice-debug\bin\spice.exe run <example>.cir`
 | `diode_tt_ac.cir` | `.ac` | The diffusion-cap pole: gd and C_tt = TT·gd both scale with bias, so the small-signal response poles at exactly 1/(2π·TT) = 159 kHz — bias-free |
 | `diode_tt_recovery.cir` | `.tran` | Reverse recovery: the stored charge TT·(Id+Is) ≈ 21.5 pC holds the diode on ~2.8 ns (TT·ln(1+If/Ir)) after the current reverses, then the junction snaps to the rail |
 
+## M7 — the BJT transit-time diffusion charges (Tf/Tr)
+
+| File | Analysis | What it shows |
+|---|---|---|
+| `bjt_tf_ac.cir` | `.ac` | The fT pole: C_be = Tf·gm_f and gπ = gm_f/Bf both scale with bias, so the input impedance poles at 1/(2π·Bf·Tf) = 159 kHz and the current-gain crossover sits at fT = 1/(2π·Tf) = 1.59 MHz — bias-free |
+| `bjt_sat_switch.cir` | `.tran` | Saturated-switch storage: both junction charges (~1.65 nC) hold the collector at the load line ~0.78 µs past the −5 V pull (τS = (Tf+Tr)/(1/Bf+1/Br) charge control), the BC-charge knee snaps v(out) up, and ~1.7 µs later the BE charge releases the base to the rail |
+
 ## ngspice cross-validation
 
 The `.op` examples produce values that match ngspice 39 to 5+ significant
