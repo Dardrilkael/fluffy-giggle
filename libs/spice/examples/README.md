@@ -47,6 +47,7 @@ On Windows: `.\build\spice-debug\bin\spice.exe run <example>.cir`
 | `mos_tran_meyer.cir` | `.tran` | A gate step in deep cutoff: the Meyer caps hold flat, so the gate charges through 1 MΩ with τ = R·(Cox + overlaps) = 17.4 µs — the RC closed form |
 | `mos_b6_iv.cir` | `.dc` | The BSIM6-style core (LEVEL=77): a Vgs sweep crossing subthreshold (~68 mV/dec), the threshold at Vgb=VTH0 and strong inversion — continuous everywhere (no region switching) |
 | `mos_b6_tran.cir` | `.tran` | A level-77 gate step through 10 k: the intrinsic surface-potential charge model (conservation exact) charges the gate as the channel inverts |
+| `mos_b6_clm.cir` | `.dc` | The level-77 CLM layer (PCLM): the Vd sweep crosses the knee and then carries the Litovski log-law slope — finite ro in saturation (gds ~ Id·lc·Vdsat/(PCLM·L·Vds)), instead of the v1 flat curve |
 
 ## M4d — the behavioral B source (dual-number AD)
 

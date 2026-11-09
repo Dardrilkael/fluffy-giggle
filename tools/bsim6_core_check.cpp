@@ -422,6 +422,267 @@ int main() {
               id_vsat_bound, 0.2);
     }
 
+    // 9. (M8) CLM: FD partials with PCLM on, over a grid that crosses the
+    // knee into deep saturation (the IFT partials of the fold - the
+    // trickiest derivative block in the core).
+    {
+        Params pc = p;
+        pc.pclm = 1.0;
+        double worst = 0.0;
+        for (double vgb = 0.1; vgb <= 1.8; vgb += 0.53) {
+            for (double vsb = -0.1; vsb <= 0.8; vsb += 0.43) {
+                for (double vds = 0.01; vds <= 2.5; vds += 0.47) {
+                    const double vg = vgb, vb = 0.0, vs = vsb, vd = vsb + vds;
+                    const auto ev_at =
+                        [&](double dvg, double dvd, double dvs, double dvb) {
+                            const double vgb2 = (vg + dvg) - (vb + dvb) - d.vfb;
+                            const double vsb2 = (vs + dvs) - (vb + dvb);
+                            const double vds2 = (vd + dvd) - (vs + dvs);
+                            return evaluate(pc, d, l_eff, w, vgb2, vsb2, vds2,
+                                            EvalOpts{});
+                        };
+                    const Eval e0 = ev_at(0, 0, 0, 0);
+                    if (!e0.ok) {
+                        check(false, "clm eval ok", 0, 1, 0);
+                        continue;
+                    }
+                    const double h = 1e-6;
+                    const double pert[4][4] = {
+                        {h, 0, 0, 0}, {0, h, 0, 0}, {0, 0, h, 0}, {0, 0, 0, h}};
+                    for (int k = 0; k < 4; ++k) {
+                        const Eval ep = ev_at(pert[k][0], pert[k][1],
+                                              pert[k][2], pert[k][3]);
+                        const Eval em = ev_at(-pert[k][0], -pert[k][1],
+                                              -pert[k][2], -pert[k][3]);
+                        if (!ep.ok || !em.ok) {
+                            continue;
+                        }
+                        const double scale = std::abs(e0.id) + 1e-9;
+                        double rel =
+                            std::abs((ep.id - em.id) / (2 * h) - e0.did[k]) /
+                            (std::abs(e0.did[k]) + scale);
+                        if (rel > worst) {
+                            worst = rel;
+                        }
+                        const double qg_scale = std::abs(e0.qg) + 1e-18;
+                        rel = std::abs((ep.qg - em.qg) / (2 * h) - e0.dqg[k]) /
+                              (std::abs(e0.dqg[k]) + qg_scale);
+                        if (rel > worst) {
+                            worst = rel;
+                        }
+                        const double qs_scale = std::abs(e0.qs) + 1e-18;
+                        rel = std::abs((ep.qs - em.qs) / (2 * h) - e0.dqs[k]) /
+                              (std::abs(e0.dqs[k]) + qs_scale);
+                        if (rel > worst) {
+                            worst = rel;
+                        }
+                        const double qd_scale = std::abs(e0.qd) + 1e-18;
+                        rel = std::abs((ep.qd - em.qd) / (2 * h) - e0.dqd[k]) /
+                              (std::abs(e0.dqd[k]) + qd_scale);
+                        if (rel > worst) {
+                            worst = rel;
+                            if (rel > 1e-5) {
+                                std::printf(
+                                    "  clm fd worst: vgb=%.3f vsb=%.3f "
+                                    "vds=%.3f k=%d rel=%.2e\n",
+                                    vgb, vsb, vds, k, rel);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        std::printf("clm FD partials (id/qg/qs/qd): worst rel %.2e\n", worst);
+        check(worst < 1e-4, "clm FD partials", worst, 0, 1e-4);
+    }
+
+    // 10. (M8) CLM: the saturation tail law - the fold's CLM slope
+    // dId/dVds|clm = Id*(lc/PCLM)*sig/(arg*(L-dL)), isolated
+    // DIFFERENTIALLY (gds at PCLM=1 minus gds at PCLM=1e9 - the
+    // smoothed-Vdseff ride-along slope cancels) and checked against the
+    // law recomputed here from (Vds, Vdsat) per the documented formulas.
+    {
+        Params pc = p;
+        pc.pclm = 1.0;
+        Params pg = p;
+        pg.pclm = 1e9;
+        const double lc = std::sqrt(3.0 * pc.tox * pc.xj);
+        double worst = 0.0;
+        for (double vgb = 0.8; vgb <= 1.8; vgb += 0.5) {
+            const Eval e1 =
+                evaluate(pc, d, l_eff, w, vgb - d.vfb, 0.0, 3.0, EvalOpts{});
+            const Eval e0 =
+                evaluate(pg, d, l_eff, w, vgb - d.vfb, 0.0, 3.0, EvalOpts{});
+            const double gds_clm = e1.did[1] - e0.did[1];
+            // The law's own intermediates (independent recomputation).
+            const double s = 0.02 * e1.vdsat;
+            const double u = (3.0 - e1.vdsat) / s;
+            const double sp =
+                (u > 0.0) ? u + std::log1p(std::exp(-u)) : std::log1p(std::exp(u));
+            const double vxs = s * sp;
+            const double sig = 1.0 / (1.0 + std::exp(-u));
+            const double arg = 1.0 + vxs / e1.vdsat;
+            const double dl = (lc / pc.pclm) * e1.vdsat * std::log(arg);
+            const double law = e1.id * (lc / pc.pclm) * sig /
+                               (arg * (l_eff - dl));
+            const double rel = std::abs(gds_clm - law) / law;
+            std::printf("clm tail vgb=%.2f: gds_clm=%.6e law=%.6e rel %.2e\n",
+                        vgb, gds_clm, law, rel);
+            if (rel > worst) {
+                worst = rel;
+            }
+        }
+        std::printf("clm tail law: worst rel %.2e\n", worst);
+        check(worst < 0.05, "clm tail law", worst, 0, 0.05);
+    }
+
+    // 11. (M8) CLM: PCLM -> infinity recovers the v1 curve, and the
+    // triode is untouched at any sane PCLM (the softplus tail).
+    {
+        Params pg = p;
+        pg.pclm = 1e12;
+        double worst_sat = 0.0, worst_tri = 0.0;
+        for (double vgb = 0.4; vgb <= 1.8; vgb += 0.35) {
+            for (double vds = 0.05; vds <= 2.4; vds += 0.47) {
+                const Eval e0 =
+                    evaluate(p, d, l_eff, w, vgb - d.vfb, 0.0, vds, EvalOpts{});
+                const Eval eg =
+                    evaluate(pg, d, l_eff, w, vgb - d.vfb, 0.0, vds, EvalOpts{});
+                if (!e0.ok || !eg.ok) {
+                    check(false, "pclm inf eval ok", 0, 1, 0);
+                    continue;
+                }
+                const double rel = std::abs(eg.id - e0.id) /
+                                   (std::abs(e0.id) + 1e-30);
+                if (vds > 0.8) {
+                    worst_sat = std::max(worst_sat, rel);
+                }
+            }
+        }
+        // The triode at PCLM=1: a knee and a half below Vdsat the tail
+        // is exponentially small (Vxs ~ s*e^{(Vds-Vdsat)/s}).
+        Params p1 = p;
+        p1.pclm = 1.0;
+        for (double vgb = 0.8; vgb <= 1.8; vgb += 0.5) {
+            const Eval es =
+                evaluate(p, d, l_eff, w, vgb - d.vfb, 0.0, 2.0, EvalOpts{});
+            const double vtri = std::max(0.05, es.vdsat - 0.35);
+            const Eval e0 =
+                evaluate(p, d, l_eff, w, vgb - d.vfb, 0.0, vtri, EvalOpts{});
+            const Eval e1 = evaluate(p1, d, l_eff, w, vgb - d.vfb, 0.0, vtri,
+                                     EvalOpts{});
+            if (!e0.ok || !e1.ok) {
+                check(false, "triode eval ok", 0, 1, 0);
+                continue;
+            }
+            worst_tri = std::max(worst_tri,
+                                 std::abs(e1.id - e0.id) /
+                                     (std::abs(e0.id) + 1e-30));
+        }
+        std::printf("pclm->inf vs off: worst sat rel %.2e; triode PCLM=1 "
+                    "rel %.2e\n",
+                    worst_sat, worst_tri);
+        check(worst_sat < 1e-6, "pclm inf recovers v1", worst_sat, 0, 1e-6);
+        check(worst_tri < 1e-4, "triode untouched", worst_tri, 0, 1e-4);
+    }
+
+    // 12. (M8) CLM: the frozen-Vdsat path (the .tran companions') still
+    // carries correct analytic partials - FD the charges at fixed Vdsat.
+    {
+        Params pc = p;
+        pc.pclm = 1.0;
+        double worst = 0.0;
+        for (double vgb = 0.8; vgb <= 1.8; vgb += 0.5) {
+            for (double vds = 0.3; vds <= 2.4; vds += 0.7) {
+                const Eval ef =
+                    evaluate(pc, d, l_eff, w, vgb - d.vfb, 0.0, vds, EvalOpts{});
+                if (!ef.ok) {
+                    continue;
+                }
+                EvalOpts of;
+                of.vdsat_fixed = ef.vdsat;
+                const double h = 1e-6;
+                const auto q_at = [&](double dvg, double dvds) {
+                    return evaluate(pc, d, l_eff, w, vgb + dvg - d.vfb, 0.0,
+                                    vds + dvds, of);
+                };
+                const Eval q0 = q_at(0, 0);
+                const Eval qpp = q_at(h, 0), qpm = q_at(-h, 0);
+                const Eval qmp = q_at(0, h), qmm = q_at(0, -h);
+                if (!q0.ok || !qpp.ok || !qpm.ok || !qmp.ok || !qmm.ok) {
+                    continue;
+                }
+                const double fd_g = (qpp.qs - qpm.qs) / (2 * h);
+                const double fd_d = (qmp.qs - qmm.qs) / (2 * h);
+                const double sc = std::abs(q0.qs) + 1e-18;
+                worst = std::max(
+                    worst, std::abs(fd_g - q0.dqs[0]) /
+                                  (std::abs(q0.dqs[0]) + sc));
+                worst = std::max(
+                    worst, std::abs(fd_d - q0.dqs[1]) /
+                                  (std::abs(q0.dqs[1]) + sc));
+            }
+        }
+        std::printf("clm frozen-Vdsat partials: worst rel %.2e\n", worst);
+        check(worst < 1e-4, "clm frozen partials", worst, 0, 1e-4);
+    }
+
+    // 13. (M8) CLM: absurd PCLM (0.01) stays finite and monotone (the
+    // Vdseff=Vds degradation branch or the clamp - never a failure).
+    {
+        Params ps = p;
+        ps.pclm = 0.01;
+        double prev = 0.0;
+        bool mono = true, all_ok = true;
+        for (double vds = 0.02; vds <= 4.0; vds += 0.13) {
+            const Eval e =
+                evaluate(ps, d, l_eff, w, 1.5 - d.vfb, 0.0, vds, EvalOpts{});
+            if (!e.ok || !std::isfinite(e.id)) {
+                all_ok = false;
+                break;
+            }
+            if (e.id < prev * (1.0 - 1e-12)) {
+                mono = false;
+                std::printf("  absurd dip: vds=%.3f id=%.10e prev=%.10e "
+                            "vdsat=%.4f vdseff=%.4f\n",
+                            vds, e.id, prev, e.vdsat, e.vdseff);
+            }
+            prev = e.id;
+        }
+        std::printf("clm absurd pclm=0.01: ok=%d monotone=%d id(4V)=%.4e\n",
+                    all_ok ? 1 : 0, mono ? 1 : 0, prev);
+        check(all_ok, "absurd pclm ok", all_ok ? 1 : 0, 1, 0);
+        check(mono, "absurd pclm monotone", mono ? 1 : 0, 1, 0);
+    }
+
+    // 14. (M8) Long-window monotonicity: the sweep's decaying-channel
+    // substitution at windows far past saturation (VSAT <= 0 pins the
+    // window to Vds). The old max(6vt, vlim/3) lam leg wiggled ~1e-4
+    // here as the GL16 nodes slid; lam = 6vt keeps the s-space degree
+    // fixed and the curve monotone to solver dust.
+    {
+        Params pn = p;
+        pn.vsat = 0.0;
+        double prev = 0.0, worst_dip = 0.0;
+        bool all_ok = true;
+        for (double vds = 0.5; vds <= 4.0; vds += 0.01) {
+            const Eval e =
+                evaluate(pn, d, l_eff, w, 1.5 - d.vfb, 0.0, vds, EvalOpts{});
+            if (!e.ok || !std::isfinite(e.id)) {
+                all_ok = false;
+                break;
+            }
+            if (prev > 0.0 && e.id < prev) {
+                worst_dip = std::max(worst_dip, (prev - e.id) / prev);
+            }
+            prev = e.id;
+        }
+        std::printf("long-window monotonicity: ok=%d worst dip %.2e\n",
+                    all_ok ? 1 : 0, worst_dip);
+        check(all_ok, "long window ok", all_ok ? 1 : 0, 1, 0);
+        check(worst_dip < 1e-9, "long window monotone", worst_dip, 0, 1e-9);
+    }
+
     std::printf(g_fail == 0 ? "ALL OK\n" : "%d FAILURES\n", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

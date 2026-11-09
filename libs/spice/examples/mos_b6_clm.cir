@@ -1,0 +1,17 @@
+mos bsim6 level 77 clm
+* The channel-length-modulation layer (PCLM): without it the level-77
+* core pins gds to ~0 past the knee (like level-1 with Lambda=0) and a
+* saturated current source has infinite ro. With Pclm=1 the drain-end
+* shortening dL = (lc/PCLM)*Vdsat*ln(1+Vxs/Vdsat) folds into Vdseff:
+* the .dc Vd sweep crosses the knee at ~0.6 V and then carries the
+* Litovski log-law slope - deep saturation follows
+* gds ~ Id*(lc/PCLM)*Vdsat/(L*Vds), the ro every analog gain needs.
+* Xj feeds the lateral spread length lc = sqrt(3*Tox*Xj); Pclm=0 (the
+* default) keeps the layer off.
+Vd d 0 DC 0
+Vg g 0 DC 1.5
+Vs s 0 DC 0
+Vb b 0 DC 0
+M1 d g s b nch L=1u W=1u
+.model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 Vsat=8e4 Pclm=1 Xj=0.3u)
+.dc Vd 0 3 0.1

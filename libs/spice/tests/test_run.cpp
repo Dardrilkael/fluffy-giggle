@@ -2943,6 +2943,7 @@ struct B6Ref {
     double ndep_cm3 = 2e17;
     double vth0 = 0.5;
     double u0 = 0.045;
+    double vsat = 8e4;
     double l = 1e-6, w = 1e-6;
     double temp_k = 300.15;
     [[nodiscard]] const char* model() const {
@@ -3037,6 +3038,50 @@ double b6_paosah_id(double vgbp, double vsb, double vds, const B6Ref& r,
     return r.u0 * (r.w / r.l) * 1.602176634e-19 * r.ndep_cm3 * 1e6 * sum * h / 3.0;
 }
 
+// The inversion charge sheet density at (vgp, Vch) from the test's own
+// psi bisection (the charge-sheet split of bsim6_core.hpp, re-derived).
+double b6_qi_ref(double vgbp, double vch, const B6Derived& d) {
+    const double psi = b6_psi_solve(vgbp, vch, d);
+    const double s = (vgbp >= 0.0) ? 1.0 : -1.0;
+    const double psi_dep = psi + d.vt * (std::exp(-psi / d.vt) - 1.0);
+    return d.cox * s * (vgbp - psi) -
+           d.gamma * d.cox * std::sqrt(std::max(psi_dep, 0.0));
+}
+
+// I1 = int_0^vlim qi dVch by Simpson (independent of the core's GL16).
+double b6_i1_simpson(double vgbp, double vlim, const B6Derived& d) {
+    const int n = 2000;
+    const double h = vlim / n;
+    double sum = 0.0;
+    for (int i = 0; i <= n; ++i) {
+        sum += (i == 0 || i == n ? 1.0 : (i % 2 ? 4.0 : 2.0)) *
+               b6_qi_ref(vgbp, vlim * i / n, d);
+    }
+    return sum * h / 3.0;
+}
+
+// The Vdsat boundary by bisection on the core's DOCUMENTED G_sat
+// equation, everything on the test's own solvers (the M8 tail gate).
+double b6_vdsat_ref(double vgbp, const B6Ref& r, const B6Derived& d) {
+    auto g = [&](double v) {
+        return r.u0 * (r.w / r.l) * b6_i1_simpson(vgbp, v, d) -
+               r.vsat * r.w * b6_qi_ref(vgbp, v, d);
+    };
+    double lo = 0.0, hi = 2.0;
+    while (g(hi) < 0.0 && hi < 100.0) {
+        hi *= 2.0;
+    }
+    for (int i = 0; i < 80; ++i) {
+        const double m = 0.5 * (lo + hi);
+        if (g(m) < 0.0) {
+            lo = m;
+        } else {
+            hi = m;
+        }
+    }
+    return 0.5 * (lo + hi);
+}
+
 }  // namespace
 
 TEST_CASE("M6 BSIM6: .dc Id tracks the Pao-Sah double integral") {
@@ -3107,8 +3152,9 @@ TEST_CASE("M6 BSIM6: threshold at VTH0 and clean subthreshold") {
 }
 
 TEST_CASE("M6 BSIM6: velocity saturation flattens Id(Vds)") {
-    // Past the knee the current is flat (no CLM in v1 - a documented
-    // limitation; this row PINS the flatness and the vsat scale).
+    // Past the knee the current is flat at the DEFAULT Pclm=0 (the CLM
+    // layer is off - M8 turns it on; this row stays the v1-flatness
+    // pin) and the vsat scale holds.
     RunSettings settings;
     settings.reltol = 1e-9;
     const auto run = run_text(
@@ -3264,6 +3310,309 @@ TEST_CASE("M6 BSIM6: rejections are loud") {
         ".op\n");
     REQUIRE(!bad_tox);
     CHECK(bad_tox.error().message.find("Tox > 0") != std::string::npos);
+}
+
+TEST_CASE("M8 b6 CLM: the saturation tail follows the Litovski law") {
+    // The physics gate: the CLM contribution to gds in deep saturation
+    // (isolated differentially - PCLM=1 minus PCLM=1e9, the smoothed-
+    // Vdseff ride-along cancels) against the law's closed form, with
+    // Vdsat from the test's OWN G_sat bisection (Simpson I1, own psi
+    // solver - nothing shared with the core).
+    const B6Ref r;
+    const B6Derived d(r);
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const char* deck = "b6 clm tail\n"
+                       "Vd d 0 DC 0\nVg g 0 DC 1.5\nVs s 0 DC 0\nVb b 0 DC 0\n"
+                       "M1 d g s b nch L=1u W=1u\n"
+                       ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 "
+                       "U0=0.045 Vsat=8e4 Pclm=%s)\n"
+                       ".dc Vd 2.0 3.0 0.25\n";
+    char buf[512];
+    std::snprintf(buf, sizeof buf, deck, "1");
+    const auto run1 = run_text(buf, nullptr, settings);
+    std::snprintf(buf, sizeof buf, deck, "1e9");
+    const auto run0 = run_text(buf, nullptr, settings);
+    REQUIRE(run1);
+    REQUIRE(run0);
+    const Table& t1 = run1->results.tables[0];
+    const Table& t0 = run0->results.tables[0];
+    const auto& id1 = t1.signals[col_of(t1, "i(Vd)")].data;
+    const auto& id0 = t0.signals[col_of(t0, "i(Vd)")].data;
+    REQUIRE(id1.size() == 5);
+    const double vdsat = b6_vdsat_ref(1.5 - d.vfb, r, d);
+    REQUIRE(vdsat > 0.4);
+    REQUIRE(vdsat < 0.9);
+    const double lc = std::sqrt(3.0 * r.tox * 1.5e-7);
+    for (std::size_t k = 0; k + 1 < id1.size(); ++k) {
+        const double gds_clm = ((-id1[k + 1]) - (-id1[k])) / 0.25 -
+                               ((-id0[k + 1]) - (-id0[k])) / 0.25;
+        const double vdm = 2.0 + 0.25 * (static_cast<double>(k) + 0.5);
+        const double id_m = 0.5 * (-id1[k] + -id1[k + 1]);
+        // The law (documented formulas, recomputed here).
+        const double s = 0.02 * vdsat;
+        const double u = (vdm - vdsat) / s;
+        const double sp =
+            (u > 0.0) ? u + std::log1p(std::exp(-u)) : std::log1p(std::exp(u));
+        const double vxs = s * sp;
+        const double sig = 1.0 / (1.0 + std::exp(-u));
+        const double arg = 1.0 + vxs / vdsat;
+        const double dl = lc * vdsat * std::log(arg);
+        const double law = id_m * lc * sig / (arg * (r.l - dl));
+        CHECK(gds_clm == doctest::Approx(law).epsilon(0.03));
+    }
+    // And the layer matters: the PCLM curve sits measurably above v1.
+    CHECK((-id1[4]) > 1.005 * (-id0[4]));
+}
+
+TEST_CASE("M8 b6 CLM: the knee is smooth and the triode untouched") {
+    // A fine Vd sweep crossing Vdsat: Id is monotone and continuous, and
+    // below the knee (>= 0.1 V under) the PCLM=1 curve agrees with the
+    // layer-off curve to 1e-6 (the softplus tail is e^{-8} there).
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const char* deck = "b6 clm knee\n"
+                       "Vd d 0 DC 0\nVg g 0 DC 1.2\nVs s 0 DC 0\nVb b 0 DC 0\n"
+                       "M1 d g s b nch L=1u W=1u\n"
+                       ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 "
+                       "U0=0.045 Vsat=8e4%s)\n"
+                       ".dc Vd 0.02 1.5 0.02\n";
+    char buf[512];
+    std::snprintf(buf, sizeof buf, deck, " Pclm=1");
+    const auto run1 = run_text(buf, nullptr, settings);
+    std::snprintf(buf, sizeof buf, deck, "");
+    const auto run0 = run_text(buf, nullptr, settings);
+    REQUIRE(run1);
+    REQUIRE(run0);
+    const Table& t1 = run1->results.tables[0];
+    const Table& t0 = run0->results.tables[0];
+    const auto& id1 = t1.signals[col_of(t1, "i(Vd)")].data;
+    const auto& id0 = t0.signals[col_of(t0, "i(Vd)")].data;
+    REQUIRE(id1.size() == 75);
+    double prev = 0.0;
+    int triode_rows = 0;
+    for (std::size_t k = 0; k < id1.size(); ++k) {
+        const double id = -id1[k];
+        CHECK(id >= prev - 1e-13);  // monotone
+        prev = id;
+        const double vd = 0.02 + 0.02 * static_cast<double>(k);
+        if (vd <= 0.42) {  // >= 0.1 under the ~0.55 V Vdsat at Vg=1.2
+            CHECK(id == doctest::Approx(-id0[k]).epsilon(1e-6));
+            ++triode_rows;
+        }
+    }
+    CHECK(triode_rows >= 20);
+}
+
+TEST_CASE("M8 b6 CLM: Pclm huge recovers v1; Vsat=0 makes Pclm inert") {
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto inf = run_text(
+        "b6 clm inf\n"
+        "Vd d 0 DC 3.0\nVg g 0 DC 1.5\nVs s 0 DC 0\nVb b 0 DC 0\n"
+        "M1 d g s b nch L=1u W=1u\n"
+        ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 "
+        "Vsat=8e4 Pclm=1e9)\n"
+        ".op\n",
+        nullptr, settings);
+    const auto off = run_text(
+        "b6 clm off\n"
+        "Vd d 0 DC 3.0\nVg g 0 DC 1.5\nVs s 0 DC 0\nVb b 0 DC 0\n"
+        "M1 d g s b nch L=1u W=1u\n"
+        ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 "
+        "Vsat=8e4)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(inf);
+    REQUIRE(off);
+    const double id_inf =
+        -inf->results.tables[0]
+             .signals[col_of(inf->results.tables[0], "i(Vd)")].data[0];
+    const double id_off =
+        -off->results.tables[0]
+             .signals[col_of(off->results.tables[0], "i(Vd)")].data[0];
+    CHECK(id_inf == doctest::Approx(id_off).epsilon(1e-6));
+    // The layer rides the vsat boundary: VSAT <= 0 leaves PCLM inert.
+    const auto inert = run_text(
+        "b6 clm inert\n"
+        "Vd d 0 DC 3.0\nVg g 0 DC 1.5\nVs s 0 DC 0\nVb b 0 DC 0\n"
+        "M1 d g s b nch L=1u W=1u\n"
+        ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 "
+        "Vsat=0 Pclm=1)\n"
+        ".op\n",
+        nullptr, settings);
+    const auto vsat0 = run_text(
+        "b6 clm vsat0\n"
+        "Vd d 0 DC 3.0\nVg g 0 DC 1.5\nVs s 0 DC 0\nVb b 0 DC 0\n"
+        "M1 d g s b nch L=1u W=1u\n"
+        ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 "
+        "Vsat=0)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(inert);
+    REQUIRE(vsat0);
+    const double id_inert =
+        -inert->results.tables[0]
+             .signals[col_of(inert->results.tables[0], "i(Vd)")].data[0];
+    const double id_vsat0 =
+        -vsat0->results.tables[0]
+             .signals[col_of(vsat0->results.tables[0], "i(Vd)")].data[0];
+    CHECK(id_inert == doctest::Approx(id_vsat0).epsilon(1e-12));
+}
+
+TEST_CASE("M8 b6 CLM: the .ac output conductance tracks the DC fold") {
+    // Drain-driven .ac at a saturation bias: re(i(Vd)) is the folded
+    // gds (the capacitive part is negligible at 1 kHz); the reference is
+    // the finite difference of two .op solves.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto op = [&](double vd) {
+        char buf[512];
+        std::snprintf(buf, sizeof buf,
+                      "b6 clm acop\n"
+                      "Vd d 0 DC %.2f\nVg g 0 DC 1.5\nVs s 0 DC 0\n"
+                      "Vb b 0 DC 0\n"
+                      "M1 d g s b nch L=1u W=1u\n"
+                      ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 "
+                      "U0=0.045 Vsat=8e4 Pclm=1)\n"
+                      ".op\n",
+                      vd);
+        const auto run = run_text(buf, nullptr, settings);
+        REQUIRE(run);
+        return -run->results.tables[0]
+                    .signals[col_of(run->results.tables[0], "i(Vd)")].data[0];
+    };
+    const double gds_fd = (op(3.0) - op(2.9)) / 0.1;
+    const auto run_ac = run_text(
+        "b6 clm ac\n"
+        "Vd d 0 DC 3.0 AC 1\nVg g 0 DC 1.5\nVs s 0 DC 0\nVb b 0 DC 0\n"
+        "M1 d g s b nch L=1u W=1u\n"
+        ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 "
+        "Vsat=8e4 Pclm=1)\n"
+        ".ac lin 1 1k 1k\n",
+        nullptr, settings);
+    REQUIRE(run_ac);
+    const Table& ta = run_ac->results.tables[0];
+    const double re_id = ta.signals[col_of(ta, "re(i(Vd))")].data[0];
+    const double im_id = ta.signals[col_of(ta, "im(i(Vd))")].data[0];
+    CHECK(std::abs(re_id) == doctest::Approx(gds_fd).epsilon(1e-3));
+    CHECK(std::abs(im_id) < 1e-3 * std::abs(re_id));
+}
+
+TEST_CASE("M8 b6 CLM: .tran with the layer on holds and settles on the fold") {
+    // The M6 gate-step deck with PCLM=1: the gate still holds, and the
+    // settled drain current lands on the .dc fold value (the companions
+    // are transparent at steady state) - measurably above the v1 curve.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "b6 clm tran\n"
+        "Vg gin 0 PULSE(0 1.2 2n 0.5n 0.5n 80n)\n"
+        "Rg gin g 10k\n"
+        "Vd d 0 DC 1.2\nVs s 0 DC 0\nVb b 0 DC 0\n"
+        "M1 d g s b nch L=1u W=1u\n"
+        ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 "
+        "Vsat=8e4 Pclm=1)\n"
+        ".tran 1n 60n\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const std::span<const double> time = t.axis();
+    const auto& vg = t.signals[col_of(t, "v(g)")].data;
+    const auto& id = t.signals[col_of(t, "i(Vd)")].data;
+    bool held = true;
+    double id_last = 0.0;
+    for (std::size_t k = 0; k < time.size(); ++k) {
+        if (time[k] > 20e-9 && time[k] < 60e-9) {
+            if (std::abs(vg[k] - 1.2) > 5e-3) {
+                held = false;
+            }
+            id_last = -id[k];
+        }
+    }
+    CHECK(held);
+    const auto op1 = run_text(
+        "b6 clm tranop\n"
+        "Vd d 0 DC 1.2\nVg g 0 DC 1.2\nVs s 0 DC 0\nVb b 0 DC 0\n"
+        "M1 d g s b nch L=1u W=1u\n"
+        ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 "
+        "Vsat=8e4 Pclm=1)\n"
+        ".op\n",
+        nullptr, settings);
+    const auto op0 = run_text(
+        "b6 clm tranop0\n"
+        "Vd d 0 DC 1.2\nVg g 0 DC 1.2\nVs s 0 DC 0\nVb b 0 DC 0\n"
+        "M1 d g s b nch L=1u W=1u\n"
+        ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 "
+        "Vsat=8e4)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(op1);
+    REQUIRE(op0);
+    const double id_op1 =
+        -op1->results.tables[0]
+             .signals[col_of(op1->results.tables[0], "i(Vd)")].data[0];
+    const double id_op0 =
+        -op0->results.tables[0]
+             .signals[col_of(op0->results.tables[0], "i(Vd)")].data[0];
+    CHECK(id_last == doctest::Approx(id_op1).epsilon(1e-3));
+    CHECK(id_op1 > 1.005 * id_op0);  // the fold is really riding
+}
+
+TEST_CASE("M8 b6 CLM: rejections and the netlist round-trip") {
+    CHECK(error_of(run_text("clm bad\n"
+                            "Vd d 0 DC 1\nVg g 0 DC 1\nVs s 0 DC 0\n"
+                            "Vb b 0 DC 0\n"
+                            "M1 d g s b nch\n"
+                            ".model nch NMOS(Level=77 Tox=2n Pclm=-1)\n"
+                            ".op\n"))
+              .find("Pclm >= 0") != std::string::npos);
+    CHECK(error_of(run_text("clm bad xj\n"
+                            "Vd d 0 DC 1\nVg g 0 DC 1\nVs s 0 DC 0\n"
+                            "Vb b 0 DC 0\n"
+                            "M1 d g s b nch\n"
+                            ".model nch NMOS(Level=77 Tox=2n Xj=-1n)\n"
+                            ".op\n"))
+              .find("Xj > 0") != std::string::npos);
+    // The writer re-emits the model card (Pclm/Xj ride the raw tokens);
+    // the written deck re-solves to the same OP.
+    const std::string deck =
+        "clm roundtrip\n"
+        "Vd d 0 DC 3.0\nVg g 0 DC 1.5\nVs s 0 DC 0\nVb b 0 DC 0\n"
+        "M1 d g s b nch L=1u W=1u\n"
+        ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 "
+        "Vsat=8e4 Pclm=1 Xj=0.3u)\n"
+        ".op\n";
+    const auto direct = run_text(deck);
+    REQUIRE(direct);
+    const double id_direct =
+        -direct->results.tables[0]
+             .signals[col_of(direct->results.tables[0], "i(Vd)")].data[0];
+    const ws::core::Result<ws::spice::Deck> parsed =
+        read_deck("t.cir", deck, ws::spice::ParseOptions{});
+    REQUIRE(parsed);
+    std::vector<Warning> w;
+    const ws::core::Result<ws::spice::DeckAst> ast = build_deck_ast(*parsed, w);
+    REQUIRE(ast);
+    const ws::core::Result<ws::spice::Circuit> circ =
+        elaborate_deck(*ast, 27.0, w);
+    REQUIRE(circ);
+    const ws::core::Result<ws::spice::RunState> rs =
+        ws::spice::RunState::bind(*circ);
+    REQUIRE(rs);
+    const ws::core::Result<std::string> net = write_netlist(*circ, *rs);
+    REQUIRE(net);
+    CHECK(net->find("Pclm=1") != std::string::npos);
+    CHECK(net->find("Xj=0.3u") != std::string::npos);
+    const std::size_t end_pos = net->rfind(".end");
+    REQUIRE(end_pos != std::string::npos);
+    const auto again =
+        run_text(net->substr(0, end_pos) + ".op\n.end\n");
+    REQUIRE(again);
+    const double id_again =
+        -again->results.tables[0]
+             .signals[col_of(again->results.tables[0], "i(Vd)")].data[0];
+    CHECK(id_again == doctest::Approx(id_direct).epsilon(1e-9));
 }
 
 

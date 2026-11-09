@@ -2329,9 +2329,9 @@ public:
 
     // .model name NMOS|PMOS(Level=1 Vto= Kp= Lambda= Gamma= Phi= ...)
     // Level=77 selects the BSIM6-style core (bsim6_core.hpp): TOX, EPSROX,
-    // NDEP, VTH0, U0, UA, UB, VSAT, RDSW, CGSO/CGDO/CGBO, TNOM implemented;
-    // the long BSIM4/6 tail is accepted-but-ignored so production decks
-    // parse (the diode-TT precedent; STATUS lists them).
+    // NDEP, VTH0, U0, UA, UB, VSAT, RDSW, PCLM, XJ, CGSO/CGDO/CGBO, TNOM
+    // implemented; the long BSIM4/6 tail is accepted-but-ignored so
+    // production decks parse (the diode-TT precedent; STATUS lists them).
     ws::core::Status apply_model(const ModelDef& model,
                                  NodeResolver& nodes) override {
         if (model.type != "nmos" && model.type != "pmos") {
@@ -2405,6 +2405,8 @@ public:
             else if (key == "ub") b6_.ub = v;
             else if (key == "vsat") b6_.vsat = v;
             else if (key == "rdsw") b6_.rdsw = v;
+            else if (key == "pclm") b6_.pclm = v;
+            else if (key == "xj") b6_.xj = v;
             else if (key == "cj" || key == "mj" || key == "cjsw" ||
                      key == "mjsw" || key == "pb" || key == "js" ||
                      key == "cbd" || key == "cbs" || key == "nsub" ||
@@ -2419,14 +2421,14 @@ public:
                      key == "dsub" || key == "cdsc" || key == "cdscd" ||
                      key == "cdscb" || key == "nfactor" || key == "voff" ||
                      key == "cit" || key == "a0" || key == "ags" ||
-                     key == "b0" || key == "bsat" || key == "pclm" ||
+                     key == "b0" || key == "bsat" ||
                      key == "pdiblc1" || key == "pdiblc2" || key == "pdiblcb" ||
                      key == "drout" || key == "pvag" || key == "delta" ||
                      key == "rdswmin" || key == "rdw" || key == "rsw" ||
                      key == "prwg" || key == "prwb" || key == "nch" ||
                      key == "ngate" || key == "phin" || key == "mobmod" ||
                      key == "capmod" || key == "noimod" || key == "paramchk" ||
-                     key == "xj" || key == "lint" || key == "wint" ||
+                     key == "lint" || key == "wint" ||
                      key == "ll" || key == "lln" || key == "wl" ||
                      key == "wln" || key == "lwl" || key == "ww" ||
                      key == "wwn" || key == "wwn") {
@@ -2479,6 +2481,14 @@ public:
                     ErrorKind::Semantic, "spice.semantic.mos_b6",
                     "model '" + model.name.text +
                         "': Level 77 needs Rdsw >= 0 and Vsat >= 0",
+                    model.loc));
+            }
+            if (b6_.pclm < 0.0 || !(b6_.xj > 0.0)) {
+                return spice_fail(dev_diag(
+                    ErrorKind::Semantic, "spice.semantic.mos_b6",
+                    "model '" + model.name.text +
+                        "': Level 77 needs Pclm >= 0 (0 disables the CLM "
+                        "layer) and Xj > 0",
                     model.loc));
             }
             b6_.tnom_c = tnom;

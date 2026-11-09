@@ -43,8 +43,23 @@
 //                                      + 4*DELTA*Vdsat*Vds))
 //   (the BSIM4-style smoothing, DELTA = 0.02: C-infinity across the knee
 //   for the price of a ~(1-DELTA) triode-slope compression and a
-//   sqrt(DELTA) = 14% knee softening - a documented model choice; no CLM
-//   in v1, so gds -> 0 in deep saturation, like level-1 with Lambda = 0).
+//   sqrt(DELTA) = 14% knee softening - a documented model choice).
+//   Channel-length modulation (PCLM > 0, the saturation ro layer):
+//   the excess drain voltage past the knee depletes a drain-end segment
+//     dL = (lc/PCLM)*Vdsat*ln(1 + Vxs/Vdsat),  lc = sqrt(3*TOX*XJ),
+//     Vxs = s*softplus((Vds - Vdsat)/s),  s = DELTA*Vdsat
+//   (the Litovski log law - the lateral field spreads over lc, so the
+//   segment grows only logarithmically in the excess; Vdsat is the
+//   pinch region's own voltage scale, the BSIM litlk analog; the
+//   softplus keeps the triode untouched to ~ppm). The shortened
+//   channel L - dL carries more current at the SAME saturation window,
+//   and the long-channel integral reproduces that at a LARGER window:
+//   Vdseff solves I1(Vsb,Vdseff) = I1(Vsb,Vdseff_smooth)*L/(L-dL)
+//   (the BSIM4 fold - one window variable still drives Id and the
+//   charges alike, conservation by construction; deep saturation
+//   gds -> Id*(lc/PCLM)*Vdsat/(L*Vds)). PCLM <= 0 keeps the layer off
+//   (the VSAT precedent - v1 decks are byte-identical); the layer
+//   rides the vsat boundary, so VSAT <= 0 makes PCLM inert.
 //   Charges (channel-charge-weighted averages; the partition is the
 //   classic smooth chi form - 50/50 in the linear limit, 0/100 in deep
 //   saturation, symmetric in S/D):
@@ -73,7 +88,9 @@
 // Eeff = (qb+qi/2)/eps_si in V/m - BSIM4/6 deck values do NOT transfer),
 // VSAT (m/s; <= 0 disables the velocity-saturation layer), RDSW (ohm*um,
 // split half per side into internal 'name#d'/'name#s' nodes),
-// CGSO/CGDO (F/m, on W) / CGBO (F/m, on L), TNOM. Temperature: ni(T) via
+// CGSO/CGDO (F/m, on W) / CGBO (F/m, on L), PCLM (the CLM strength,
+// <= 0 off), XJ (m; only feeds lc = sqrt(3*tox*xj)), TNOM.
+// Temperature: ni(T) via
 // the variable-bandgap form, phif(T)/gamma(T)/Vfb(T) follow. Everything
 // else a BSIM6 deck might carry is ACCEPTED but ignored (the diode-TT
 // precedent) - the STATUS sharp edge lists them.
@@ -100,6 +117,8 @@ struct Params {
     double cgso = 0.0;         // F/m
     double cgdo = 0.0;         // F/m
     double cgbo = 0.0;         // F/m
+    double pclm = 0.0;         // CLM strength (<= 0: the layer is off)
+    double xj = 1.5e-7;        // m (feeds lc = sqrt(3*tox*xj) only)
     double tnom_c = 27.0;
 };
 
@@ -456,35 +475,31 @@ struct Sweep {
         return sw;
     }
     const bool decaying = nb_probe.qi < 0.05 * na.qi;
-    // Exponential-concentrating substitution: Vch = a - lam*ln(1 - s*(1-
-    // e^{-vlim/lam})), s in [0,1], lam = max(6*vt, vlim/3). The subthreshold
-    // integrand decays ~e^{-Vch/vt} (up to ~50 e-foldings over the
-    // channel); the substitution maps it to ~(1-s)^{lam/vt-1}, a degree-
-    // <=31 polynomial that GL16 integrates EXACTLY (a linear map was off
-    // by 2x at 1e-22 A). Uniform channels skip it: the s-space drain-end
-    // stretch (bounded by e^{vlim/lam} <= e^3) costs ~1e-7 accuracy that
-    // plain GL16 does not.
-    const double lam = std::max(6.0 * d.vt, vlim / 3.0);
-    const double one_me = decaying ? (1.0 - std::exp(-vlim / lam)) : 0.0;
+    // Quadrature mapping. A UNIFORM channel gets plain GL16 (exact to
+    // solver dust on the smooth strong-inversion integrand - 1e-15 vs a
+    // 4000-node Simpson at a 6x end ratio). A DECAYING one is SPLIT at
+    // the c where qi crosses 0.05*qi_a (12 bisections; qi is monotone
+    // down the channel): plain GL16 over [a, c] - the flat inversion
+    // charge plus the knee - and the exponential-concentrating
+    // substitution over [c, b]:
+    //     Vch = c - lam*ln(1 - s*(1 - e^{-(b-c)/lam})), lam = 6*vt,
+    // under which a ~e^{-Vch/vt} tail becomes a degree-5 polynomial
+    // that GL16 integrates exactly (a linear map was 2x off at 1e-22
+    // A). The split is the M8 fix: substituting over the WHOLE window
+    // mapped the flat prefix onto a 1/(1-s)-type kernel that GL16
+    // could not integrate (up to 6e-3 error on past-pinchoff windows,
+    // non-monotone in the window length - never gated before because
+    // the sweep grid's saturation windows ride the vsat layer, not the
+    // pinch-off tail). Pinned at 4.6e-9 vs Simpson over the full bias
+    // range, monotone to solver dust.
     seed = na.psi;
-    for (int i = 0; i < 16; ++i) {
-        double vch;
-        double jac;  // dVch/ds, s in [0,1]; the GL weight carries the 1/2.
-        if (decaying) {
-            const double s_n = 0.5 * (1.0 + g.t[i]);
-            const double u = 1.0 - s_n * one_me;
-            vch = a - lam * std::log(u);
-            jac = lam * one_me / u;
-        } else {
-            vch = a + vlim * 0.5 * (1.0 + g.t[i]);
-            jac = vlim;
-        }
+    auto accum = [&](double vch, double jac, double w) {
         const NodeEval n = node_eval(vgp, vch, d, seed);
         if (!n.ok) {
             sw.ok = false;
-            return sw;
+            return;
         }
-        const double wk = 0.5 * g.w[i] * jac;
+        const double wk = 0.5 * w * jac;
         sw.i1 += wk * n.qi;
         sw.di1_dvg += wk * n.dqi_dvg;
         sw.jg += wk * n.qg * n.qi;
@@ -494,6 +509,48 @@ struct Sweep {
         sw.jq += wk * n.qi * n.qi;
         sw.djq_dvg += wk * (2.0 * n.qi * n.dqi_dvg);
         seed = n.psi;
+    };
+    if (!decaying) {
+        for (int i = 0; i < 16; ++i) {
+            accum(a + vlim * 0.5 * (1.0 + g.t[i]), vlim, g.w[i]);
+            if (!sw.ok) {
+                return sw;
+            }
+        }
+    } else {
+        // The 0.05*qi_a crossing (qi monotone down the channel).
+        double lo = a, hi = b;
+        for (int it = 0; it < 12; ++it) {
+            const double m = 0.5 * (lo + hi);
+            const NodeEval nm = node_eval(vgp, m, d, psi_seed(vgp, m, d));
+            if (!nm.ok) {
+                sw.ok = false;
+                return sw;
+            }
+            if (nm.qi > 0.05 * na.qi) {
+                lo = m;
+            } else {
+                hi = m;
+            }
+        }
+        const double c = 0.5 * (lo + hi);
+        for (int i = 0; i < 16; ++i) {  // plain GL16 over [a, c]
+            accum(a + (c - a) * 0.5 * (1.0 + g.t[i]), c - a, g.w[i]);
+            if (!sw.ok) {
+                return sw;
+            }
+        }
+        const double lam = 6.0 * d.vt;  // substituted over [c, b]
+        const double vl = b - c;
+        const double one_me = 1.0 - std::exp(-vl / lam);
+        for (int i = 0; i < 16; ++i) {
+            const double s_n = 0.5 * (1.0 + g.t[i]);
+            const double u = 1.0 - s_n * one_me;
+            accum(c - lam * std::log(u), lam * one_me / u, g.w[i]);
+            if (!sw.ok) {
+                return sw;
+            }
+        }
     }
     // Exact endpoints (GL nodes are interior).
     const NodeEval nb = nb_probe;
@@ -544,6 +601,204 @@ struct VdseffVal {
     r.dv_dvds = -0.5 * (-1.0 + (-a + 2.0 * kDelta * vdsat) / s);
     r.dv_dvdsat = 1.0 - 0.5 * (1.0 + (a + 2.0 * kDelta * vds) / s);
     return r;
+}
+
+// --- channel-length modulation (PCLM > 0, M8) -----------------------------------
+//
+// The saturation ro layer. The BSIM4 fold shape: the drain-end
+// shortening is expressed as a LARGER effective drain voltage, so the
+// one window variable keeps driving Id and the charges alike
+// (conservation by construction). See the header comment for the law
+// and its derivation; the solve follows the G_sat pattern (bracketed
+// Newton, scale-relative tolerance, bisection fallback, IFT partials).
+// The knee-softening scale of the excess voltage: DELTA (0.02) - a
+// 7x sharper turn-on than the Vdseff smoothing's sqrt(DELTA) knee, so
+// the softplus tail below the knee is negligible a few DELTA*Vdsat
+// into the triode (e^{-50} at half a volt below a 0.6 V Vdsat).
+inline constexpr double kClmKnee = kDelta;
+
+[[nodiscard]] inline double clm_sigmoid(double u) {
+    // 1/(1+e^-u), overflow-safe through the clamped exp.
+    return 1.0 / (1.0 + clamped_exp(-u));
+}
+
+struct ClmFold {
+    double v = 0.0;  // the folded Vdseff (> Vdseff_smooth in saturation)
+    double dv_dvds = 0.0;   // total master partials (Vdsat chained in)
+    double dv_dvsb = 0.0;
+    double dv_dvg = 0.0;
+    Sweep sweep;     // the channel sweep at the root (the final sweep)
+    bool ok = true;  // false: a psi/solver failure (the caller goes loud)
+};
+
+// Solves the CLM fold at a solved-or-frozen Vdsat. `vsm`/`dvsm_*` are
+// the DELTA-smoothed Vdseff and ITS partials (dvsm_dvsb/dvg already
+// carry the ve.dv_dvdsat*vdsat_d* chain); vdsat_dvg/dvsb chain Vdsat's
+// own bias dependence into dL (zero on the frozen-Vdsat path - the
+// companions never differentiate through the frozen point).
+[[nodiscard]] inline ClmFold clm_fold(const Params& p, const Derived& d,
+                                      double vgbp, double vsb, double vds,
+                                      double vdsat, double l_eff, double vsm,
+                                      double dvsm_dvds, double dvsm_dvsb,
+                                      double dvsm_dvg, double vdsat_dvg,
+                                      double vdsat_dvsb) {
+    ClmFold out;
+    if (!(vdsat > 0.0)) {
+        return out;  // degenerate Vdsat: keep the smoothed Vdseff
+    }
+    // --- dL and its (Vds, Vdsat) partials --------------------------------
+    const double lc = std::sqrt(3.0 * p.tox * p.xj);
+    const double s = kClmKnee * vdsat;
+    const double u = (vds - vdsat) / s;
+    const double sp = softplus(u);
+    const double vxs = s * sp;
+    const double sig = clm_sigmoid(u);
+    // dVxs/dVds = sig; dVxs/dVdsat = k*sp - sig*(1 + k*u) (s scales).
+    const double dvxs_dvdsat = kClmKnee * sp - sig * (1.0 + u * kClmKnee);
+    const double arg = 1.0 + vxs / vdsat;
+    const double dl = (lc / p.pclm) * vdsat * std::log(arg);
+    // A hard clamp for silly decks (PCLM tiny AND Vds enormous): the
+    // fold keeps at least a tenth of the channel. C0 only, and the
+    // partials freeze on the clamped branch - never reached by sane
+    // parameter sets (PCLM >= 0.05 keeps dL << L at any Vds a deck
+    // can write).
+    const double dl_eff = std::min(dl, 0.9 * l_eff);
+    const bool clamped = dl_eff < dl;
+    const double ddl_dvds = clamped ? 0.0 : (lc / p.pclm) * sig / arg;
+    const double ddl_dvdsat =
+        clamped ? 0.0
+                : (lc / p.pclm) *
+                      (std::log(arg) +
+                       (dvxs_dvdsat * vdsat - vxs) / (vdsat * arg));
+    const double lprime = l_eff - dl_eff;
+    const double k_fac = l_eff / lprime;
+    const double dk_dvds = l_eff * ddl_dvds / (lprime * lprime);
+    const double dk_dvdsat = l_eff * ddl_dvdsat / (lprime * lprime);
+
+    // --- the fold equation F(Vdseff) = I1(Vdseff) - K*I1(vsm) = 0 -------
+    const Sweep sw_m = channel_sweep(d, vgbp, vsb, vsm,
+                                      psi_seed(vgbp, vsb, d));
+    if (!sw_m.ok) {
+        out.ok = false;
+        return out;
+    }
+    const double i1_sm = sw_m.i1;
+    const double target = k_fac * i1_sm;
+    auto f_of = [&](double v, Sweep* sw_out) {
+        const Sweep sw = channel_sweep(d, vgbp, vsb, v,
+                                        psi_seed(vgbp, vsb + 0.5 * v, d));
+        if (!sw.ok) {
+            return 1e300;
+        }
+        if (sw_out != nullptr) {
+            *sw_out = sw;
+        }
+        return sw.i1 - target;
+    };
+    // Bracket: F(vsm) = I1(vsm)*(1 - K) <= 0; F(vds) must be > 0.
+    Sweep sw_hi;
+    const double f_hi = f_of(vds, &sw_hi);
+    if (f_hi == 1e300) {
+        out.ok = false;
+        return out;
+    }
+    if (!(f_hi > 0.0)) {
+        // The law asks for more current than even the FULL window
+        // carries (PCLM absurdly small): pin Vdseff = Vds - the
+        // graceful degradation, monotone and finite, never a failure.
+        out.v = vds;
+        out.dv_dvds = 1.0;
+        out.sweep = sw_hi;
+        return out;
+    }
+    double lo = vsm, hi = vds;
+    double v = 0.5 * (lo + hi);
+    Sweep sw_root;
+    bool solved = false;
+    for (int it = 0; it < 40; ++it) {
+        Sweep sw;
+        const double fv = f_of(v, &sw);
+        if (fv == 1e300) {
+            break;
+        }
+        const double scale = std::abs(sw.i1) + std::abs(target) + 1e-300;
+        if (std::abs(fv) <= 1e-12 * scale) {
+            sw_root = sw;
+            solved = true;
+            break;
+        }
+        const double fp = sw.end_b.qi;  // F'(v) = qi at the window end
+        if (!(fp > 0.0)) {
+            break;
+        }
+        double v_new = v - fv / fp;
+        if (!(v_new > lo)) {
+            v_new = 0.5 * (lo + v);
+        }
+        if (!(v_new < hi)) {
+            v_new = 0.5 * (v + hi);
+        }
+        if (std::abs(v_new - v) <= 1e-13 * (1.0 + std::abs(v))) {
+            v = v_new;
+            sw_root = sw;
+            solved = true;
+            break;
+        }
+        v = v_new;
+    }
+    if (!solved) {
+        // Bisection fallback (F monotone up on [lo, hi]).
+        double glo = f_of(lo, nullptr);
+        if (glo == 1e300) {
+            out.ok = false;
+            return out;
+        }
+        for (int it = 0; it < 200; ++it) {
+            const double m = 0.5 * (lo + hi);
+            const double gm = f_of(m, &sw_root);
+            if (gm == 1e300) {
+                break;
+            }
+            if (std::abs(hi - lo) <= 1e-13 * (1.0 + std::abs(m))) {
+                v = m;
+                solved = true;
+                break;
+            }
+            if ((gm > 0.0) == (glo > 0.0)) {
+                lo = m;
+                glo = gm;
+            } else {
+                hi = m;
+            }
+        }
+        if (!solved) {
+            out.ok = false;
+            return out;
+        }
+    }
+    out.v = v;
+    out.sweep = sw_root;
+    // --- the IFT partials at the root ------------------------------------
+    // G_x = dF/dx at the FIXED root window; dv/dx = -G_x/qi_b(root).
+    const double qi_b_r = sw_root.end_b.qi;
+    const double qi_a_r = sw_root.end_a.qi;
+    const double qi_b_m = sw_m.end_b.qi;
+    const double qi_a_m = sw_m.end_a.qi;
+    if (!(std::abs(qi_b_r) > 0.0)) {
+        out.ok = false;
+        return out;
+    }
+    const double g_vds = -dk_dvds * i1_sm - k_fac * qi_b_m * dvsm_dvds;
+    const double g_vg = sw_root.di1_dvg - k_fac * sw_m.di1_dvg -
+                        dk_dvdsat * i1_sm * vdsat_dvg -
+                        k_fac * qi_b_m * dvsm_dvg;
+    const double g_vsb = (qi_b_r - qi_a_r) - k_fac * (qi_b_m - qi_a_m) -
+                         k_fac * qi_b_m * dvsm_dvsb -
+                         dk_dvdsat * i1_sm * vdsat_dvsb;
+    out.dv_dvds = -g_vds / qi_b_r;
+    out.dv_dvsb = -g_vsb / qi_b_r;
+    out.dv_dvg = -g_vg / qi_b_r;
+    return out;
 }
 
 }  // namespace detail
@@ -686,15 +941,32 @@ struct VdseffVal {
         vdsat = opts.vdsat_fixed;  // partials unused on this path
     }
 
-    // --- Vdseff ---------------------------------------------------------------
+    // --- Vdseff (and the CLM fold, PCLM > 0) ------------------------------------
     double vlim = vds;
     double dvlim_dvds = 1.0, dvlim_dvsb = 0.0, dvlim_dvg = 0.0;
+    bool fold_sweep = false;  // the CLM fold supplied the final sweep
+    Sweep swf;
     if (vsat_on) {
         const detail::VdseffVal ve = detail::vdseff_of(vds, vdsat);
         vlim = ve.v;
         dvlim_dvds = ve.dv_dvds;
         dvlim_dvsb = ve.dv_dvdsat * vdsat_dvsb;
         dvlim_dvg = ve.dv_dvdsat * vdsat_dvg;
+        if (p.pclm > 0.0 && vlim > 0.0) {
+            const detail::ClmFold cf = detail::clm_fold(
+                p, d, vgbp, vsb, vds, vdsat, l_eff, vlim, dvlim_dvds,
+                dvlim_dvsb, dvlim_dvg, vdsat_dvg, vdsat_dvsb);
+            if (!cf.ok) {
+                ev.ok = false;
+                return ev;
+            }
+            vlim = cf.v;
+            dvlim_dvds = cf.dv_dvds;
+            dvlim_dvsb = cf.dv_dvsb;
+            dvlim_dvg = cf.dv_dvg;
+            swf = cf.sweep;
+            fold_sweep = true;
+        }
     }
     if (!(vlim > 0.0)) {
         // Vds == 0 (or the smoothing collapsed it): the channel is
@@ -739,7 +1011,9 @@ struct VdseffVal {
     ev.vdsat = vdsat;
 
     // --- the final sweep over the effective channel ---------------------------
-    const Sweep swf = channel_sweep(d, vgbp, vsb, vlim, psi_seed(vgbp, vsb, d));
+    if (!fold_sweep) {
+        swf = channel_sweep(d, vgbp, vsb, vlim, psi_seed(vgbp, vsb, d));
+    }
     if (!swf.ok) {
         ev.ok = false;
         return ev;
