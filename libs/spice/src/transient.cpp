@@ -79,8 +79,10 @@ namespace drivers {
 
 struct TranMarch::Impl {
     Impl(const Circuit& c, RunState& st, const RunSettings& se, const TranCard& ca,
-         const ParamTable& sc, const std::vector<IcCard>& ic)
-        : circuit(c), state(st), settings(se), card(ca), scope(sc), ics(ic) {}
+         const ParamTable& sc, const std::vector<IcCard>& ic,
+         const std::vector<NodesetCard>& ns)
+        : circuit(c), state(st), settings(se), card(ca), scope(sc), ics(ic),
+          nodesets(ns) {}
 
     const Circuit& circuit;
     RunState& state;
@@ -88,6 +90,7 @@ struct TranMarch::Impl {
     TranCard card;
     const ParamTable& scope;
     std::vector<IcCard> ics;
+    std::vector<NodesetCard> nodesets;  // §7.2/M5: the t=0 OP hints
 
     // Card-resolved constants (prepare()).
     double tstep = 0.0, tstop = 0.0, tstart = 0.0;
@@ -184,6 +187,31 @@ ws::core::Status TranMarch::Impl::seed_t0() {
         }
     }
 
+    // §7.2/M5: the .nodeset hints for the t=0 OP (not UIC - there is no
+    // OP to hint).
+    std::vector<std::pair<std::size_t, double>> ns_forces;
+    for (const NodesetCard& ns : nodesets) {
+        for (const auto& [node_tok, expr] : ns.node_values) {
+            WS_TRY_ASSIGN(const double volts, eval_expr(expr, scope));
+            const std::string node_lower = to_lower(node_tok.text);
+            if (node_lower == "0" || node_lower == "gnd") {
+                Diagnostic d = march_diag(ErrorKind::Semantic, "spice.semantic.nodeset",
+                                          "cannot nodeset the ground node");
+                d.loc = node_tok.loc;
+                return spice_fail(std::move(d));
+            }
+            const auto it = circuit.node_ids.find(node_lower);
+            if (it == circuit.node_ids.end()) {
+                Diagnostic d = march_diag(
+                    ErrorKind::Semantic, "spice.semantic.nodeset",
+                    ".nodeset names unknown node '" + node_tok.text + "'");
+                d.loc = node_tok.loc;
+                return spice_fail(std::move(d));
+            }
+            ns_forces.emplace_back(it->second, volts);
+        }
+    }
+
     const std::size_t nc = circuit.node_count();
     x.clear();
     total_iterations = 0;
@@ -210,11 +238,12 @@ ws::core::Status TranMarch::Impl::seed_t0() {
         }
     } else {
         // OP at t=0 with .ic enforced (stiff Norton, released when the
-        // transient starts).
+        // transient starts) and .nodeset hinting the first iteration.
         std::size_t iterations = 0;
         if (const ws::core::Status st =
                 kernel->solve(x, settings.itl1, ".tran t=0 op", iterations,
-                              ic_forces.empty() ? nullptr : &ic_forces);
+                              ic_forces.empty() ? nullptr : &ic_forces,
+                              ns_forces.empty() ? nullptr : &ns_forces);
             !st) {
             return wrap_solver_error(st, ".tran t=0 op");
         }
@@ -399,8 +428,9 @@ ws::core::Status TranMarch::Impl::one_step(const Hooks& hooks) {
 
 TranMarch::TranMarch(const Circuit& circuit, RunState& state, const RunSettings& settings,
                      const TranCard& card, const ParamTable& scope,
-                     const std::vector<IcCard>& ics)
-    : impl_(std::make_unique<Impl>(circuit, state, settings, card, scope, ics)) {}
+                     const std::vector<IcCard>& ics,
+                     const std::vector<NodesetCard>& nodesets)
+    : impl_(std::make_unique<Impl>(circuit, state, settings, card, scope, ics, nodesets)) {}
 
 TranMarch::~TranMarch() = default;
 

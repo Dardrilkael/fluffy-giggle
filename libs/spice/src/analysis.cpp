@@ -88,9 +88,15 @@ ws::core::unexpected<ws::core::Error> wrap_solver_error(const ws::core::Status& 
 // --- .op (§7.2) ---------------------------------------------------------------------
 
 ws::core::Result<Table> run_op(const Circuit& circuit, RunState& state,
-                               const RunSettings& settings, AnalysisReport& report) {
+                               const RunSettings& settings, AnalysisReport& report,
+                               const std::vector<NodesetCard>& nodeset_cards) {
     if (circuit.devices.empty()) {
         return empty_circuit_error(".op");
+    }
+    // §7.2/M5: the .nodeset hints seed + soften the first iteration.
+    std::vector<std::pair<std::size_t, double>> nodesets;
+    if (!nodeset_cards.empty()) {
+        WS_TRY_ASSIGN(nodesets, detail::resolve_nodesets(circuit, nodeset_cards));
     }
 
     DcKernel kernel(circuit, state, settings);
@@ -100,7 +106,9 @@ ws::core::Result<Table> run_op(const Circuit& circuit, RunState& state,
 
     std::vector<double> x;  // cold start: all zeros
     std::size_t iterations = 0;
-    if (const ws::core::Status st = kernel.solve(x, settings.itl1, ".op", iterations);
+    if (const ws::core::Status st = kernel.solve(
+            x, settings.itl1, ".op", iterations, nullptr,
+            nodesets.empty() ? nullptr : &nodesets);
         !st) {
         return wrap_solver_error(st, ".op");
     }
@@ -243,11 +251,18 @@ std::string sweep_context(const SweepPlan& inner, double inner_value,
 
 ws::core::Result<Table> run_dc(const DeckAst& ast, const Circuit& base_circuit,
                                const DcCard& card, const RunSettings& settings,
-                               std::vector<Warning>& warnings, AnalysisReport& report) {
+                               std::vector<Warning>& warnings, AnalysisReport& report,
+                               const std::vector<NodesetCard>& nodeset_cards) {
     // Warnings arrive via the caller's single elaboration; temp
     // re-elaborations inside this driver are identical by construction and
     // report to scratch (the §7.7 flow).
     (void)warnings;
+    // §7.2/M5: the .nodeset hints apply to the sweep's FIRST point only
+    // (ngspice: later points warm-start in INITFLOAT).
+    std::vector<std::pair<std::size_t, double>> nodesets;
+    if (!nodeset_cards.empty()) {
+        WS_TRY_ASSIGN(nodesets, detail::resolve_nodesets(base_circuit, nodeset_cards));
+    }
     // Global .param scope for the sweep expressions. ParamTable::define()
     // is infallible by design (a later definition replaces an earlier one),
     // so there is no error to drop here.
@@ -429,7 +444,9 @@ ws::core::Result<Table> run_dc(const DeckAst& ast, const Circuit& base_circuit,
                 sweep_context(inner, inner_value, outer, outer_value);
             const int cap = first_point ? settings.itl1 : settings.itl2;
             std::size_t iterations = 0;
-            if (const ws::core::Status st = kernel->solve(x, cap, ctx, iterations);
+            if (const ws::core::Status st = kernel->solve(
+                    x, cap, ctx, iterations, nullptr,
+                    first_point && !nodesets.empty() ? &nodesets : nullptr);
                 !st) {
                 return wrap_solver_error(st, ctx);
             }
@@ -465,9 +482,10 @@ ws::core::Result<Table> run_tran(const Circuit& circuit, RunState& state,
                                  const TranCard& card, const RunSettings& settings,
                                  const ParamTable& scope,
                                  const std::vector<IcCard>& ics,
-                                 AnalysisReport& report) {
+                                 AnalysisReport& report,
+                                 const std::vector<NodesetCard>& nodesets) {
     auto march = std::make_unique<drivers::TranMarch>(circuit, state, settings, card,
-                                                      scope, ics);
+                                                      scope, ics, nodesets);
     WS_TRY(march->prepare());
     const drivers::TranMarch::Hooks no_hooks{};
     while (!march->done() && !march->stopped()) {
@@ -541,12 +559,18 @@ ws::core::Result<std::vector<double>> ac_frequency_list(const AcCard& card,
 
 ws::core::Result<Table> run_ac(const Circuit& circuit, RunState& state,
                                const AcCard& card, const RunSettings& settings,
-                               const ParamTable& scope, AnalysisReport& report) {
+                               const ParamTable& scope, AnalysisReport& report,
+                               const std::vector<NodesetCard>& nodeset_cards) {
     if (circuit.devices.empty()) {
         return empty_circuit_error(".ac");
     }
 
     WS_TRY_ASSIGN(const std::vector<double> freqs, ac_frequency_list(card, scope));
+    // §7.2/M5: the .nodeset hints for the OP solve.
+    std::vector<std::pair<std::size_t, double>> nodesets;
+    if (!nodeset_cards.empty()) {
+        WS_TRY_ASSIGN(nodesets, detail::resolve_nodesets(circuit, nodeset_cards));
+    }
 
     DcKernel kernel(circuit, state, settings);
     if (const ws::core::Status st = kernel.prepare(); !st) {
@@ -558,8 +582,9 @@ ws::core::Result<Table> run_ac(const Circuit& circuit, RunState& state,
     {
         std::vector<double> x_op;
         std::size_t iterations = 0;
-        if (const ws::core::Status st = kernel.solve(x_op, settings.itl1, ".ac op",
-                                                     iterations);
+        if (const ws::core::Status st = kernel.solve(
+                x_op, settings.itl1, ".ac op", iterations, nullptr,
+                nodesets.empty() ? nullptr : &nodesets);
             !st) {
             return wrap_solver_error(st, ".ac op");
         }
@@ -692,8 +717,9 @@ ws::core::Status check_compat_strict(const DeckAst& ast) {
 namespace drivers {
 
 ws::core::Result<Table> run_op(const Circuit& circuit, RunState& state,
-                               const RunSettings& settings, AnalysisReport& report) {
-    return ::ws::spice::run_op(circuit, state, settings, report);
+                               const RunSettings& settings, AnalysisReport& report,
+                               const std::vector<NodesetCard>& nodesets) {
+    return ::ws::spice::run_op(circuit, state, settings, report, nodesets);
 }
 
 ws::core::Result<Table> run_dc(const DeckAst* ast, const Circuit& base_circuit,
@@ -717,22 +743,26 @@ ws::core::Result<Table> run_dc(const DeckAst* ast, const Circuit& base_circuit,
             return spice_fail(std::move(d));
         }
         static const DeckAst empty;  // never consulted beyond temp paths
-        return ::ws::spice::run_dc(empty, base_circuit, card, settings, warnings, report);
+        return ::ws::spice::run_dc(empty, base_circuit, card, settings, warnings, report,
+                                   {});
     }
-    return ::ws::spice::run_dc(*ast, base_circuit, card, settings, warnings, report);
+    return ::ws::spice::run_dc(*ast, base_circuit, card, settings, warnings, report, {});
 }
 
 ws::core::Result<Table> run_tran(const Circuit& circuit, RunState& state,
                                   const TranCard& card, const RunSettings& settings,
                                   const ParamTable& scope, const std::vector<IcCard>& ics,
-                                  AnalysisReport& report) {
-    return ::ws::spice::run_tran(circuit, state, card, settings, scope, ics, report);
+                                  AnalysisReport& report,
+                                  const std::vector<NodesetCard>& nodesets) {
+    return ::ws::spice::run_tran(circuit, state, card, settings, scope, ics, report,
+                                 nodesets);
 }
 
 ws::core::Result<Table> run_ac(const Circuit& circuit, RunState& state,
                                const AcCard& card, const RunSettings& settings,
-                               const ParamTable& scope, AnalysisReport& report) {
-    return ::ws::spice::run_ac(circuit, state, card, settings, scope, report);
+                               const ParamTable& scope, AnalysisReport& report,
+                               const std::vector<NodesetCard>& nodesets) {
+    return ::ws::spice::run_ac(circuit, state, card, settings, scope, report, nodesets);
 }
 
 }  // namespace drivers
@@ -1450,13 +1480,16 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
             ws::core::Result<Table> t = ws::core::unexpected<ws::core::Error>(
                 ws::core::make_error(1, "spice", "internal: no analysis"));
             if (card.op) {
-                t = run_op(*live, state, settings, report);
+                t = run_op(*live, state, settings, report, ast.nodesets);
             } else if (card.dc) {
-                t = run_dc(ast, *live, *card.dc, settings, warnings, report);
+                t = run_dc(ast, *live, *card.dc, settings, warnings, report,
+                           ast.nodesets);
             } else if (card.tran) {
-                t = run_tran(*live, state, *card.tran, settings, scope, ast.ics, report);
+                t = run_tran(*live, state, *card.tran, settings, scope, ast.ics, report,
+                             ast.nodesets);
             } else {
-                t = run_ac(*live, state, *card.ac, settings, scope, report);
+                t = run_ac(*live, state, *card.ac, settings, scope, report,
+                           ast.nodesets);
             }
             if (!t) {
                 if (ast.steps.empty()) {

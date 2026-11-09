@@ -32,7 +32,8 @@ public:
 
     TranMarch(const Circuit& circuit, RunState& state, const RunSettings& settings,
               const TranCard& card, const ParamTable& scope,
-              const std::vector<IcCard>& ics);
+              const std::vector<IcCard>& ics,
+              const std::vector<NodesetCard>& nodesets = {});
     ~TranMarch();
     TranMarch(TranMarch&&) = default;
 
@@ -53,10 +54,12 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// §7.2
+// §7.2. `nodesets` (§7.2/M5): the resolved first-iteration hints; null
+// or empty keeps the plain cold start.
 [[nodiscard]] ws::core::Result<Table> run_op(const Circuit& circuit, RunState& state,
                                              const RunSettings& settings,
-                                             AnalysisReport& report);
+                                             AnalysisReport& report,
+                                             const std::vector<NodesetCard>& nodesets = {});
 
 // §7.3. `ast` may be null (no temp re-elaboration possible).
 [[nodiscard]] ws::core::Result<Table> run_dc(const DeckAst* ast,
@@ -72,13 +75,15 @@ private:
                                                const RunSettings& settings,
                                                const ParamTable& scope,
                                                const std::vector<IcCard>& ics,
-                                               AnalysisReport& report);
+                                               AnalysisReport& report,
+                                               const std::vector<NodesetCard>& nodesets = {});
 
 // §7.4
 [[nodiscard]] ws::core::Result<Table> run_ac(const Circuit& circuit, RunState& state,
                                              const AcCard& card,
                                              const RunSettings& settings,
                                              const ParamTable& scope,
-                                             AnalysisReport& report);
+                                             AnalysisReport& report,
+                                             const std::vector<NodesetCard>& nodesets = {});
 
 }  // namespace ws::spice::drivers

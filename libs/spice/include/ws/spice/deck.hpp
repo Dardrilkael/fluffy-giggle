@@ -94,6 +94,14 @@ struct IcCard {
     std::vector<std::pair<Token, ExprProgram>> node_values;  // node token, volts
 };
 
+// .nodeset v(node)=value ... (§7.2/§5, M5): the ngspice NODESET - a
+// first-iteration hint for the DC operating point, released immediately
+// (unlike .ic, which holds the t=0 OP). Same card grammar as .ic.
+struct NodesetCard {
+    SourceLoc loc;
+    std::vector<std::pair<Token, ExprProgram>> node_values;
+};
+
 // .meas (§0.4): one measurement over an analysis's results. The MODELS
 // are the §0.4 subset: TRIG/TARG, WHEN, AVG, RMS, MAX, MIN, PP, INTEG,
 // FIND...WHEN, FIND...AT, DERIV - a thin parser onto the measure::
@@ -181,6 +189,7 @@ struct DeckAst {
     std::vector<OptionsCard> options;     // top-level .options, in order
     std::vector<AnalysisCard> analyses;   // deck order
     std::vector<IcCard> ics;              // top-level .ic cards, in order
+    std::vector<NodesetCard> nodesets;    // top-level .nodeset cards, in order (M5)
     std::vector<StepCard> steps;          // top-level .step cards, in order
     std::vector<MeasCard> meas;           // top-level .meas cards, in order
     std::vector<SaveCard> saves;          // .save/.print/.probe, in order

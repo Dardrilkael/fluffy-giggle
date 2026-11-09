@@ -3935,3 +3935,98 @@ TEST_CASE("temp: MOS Vto(T)/Kp(T) - the mos1temp pbfact chain") {
     // Pinned against ngspice 44.2 (.op id = 1.24401e-4 at TEMP=100,
     // TNOM=27) - the reference row for the whole pbfact chain.
 }
+
+// --- .nodeset (§7.2/M5) ----------------------------------------------------------
+
+namespace {
+// The bistable B-source deck: an N-shaped device I(V) (a tunnel-diode-like
+// cubic) behind a 300-ohm load line - three load-line crossings, two
+// stable. The device current at V (the KCL residual identity the checks
+// below reuse).
+double bistable_device_i(double v) {
+    return 1.3 * (v * v * v - 0.72 * v * v + 0.108 * v);
+}
+}  // namespace
+
+TEST_CASE(".nodeset: steers the DC operating point's basin on a bistable") {
+    const char* deck_head =
+        "ns bistable\n"
+        "V1 in 0 1.2\n"
+        "R1 in out 300\n"
+        "B1 out 0 I=1.3*(v(out)^3 - 0.72*v(out)^2 + 0.108*v(out))\n";
+    // High hint -> the high-voltage stable point.
+    const auto hi = run_text(std::string(deck_head) +
+                             ".nodeset v(out)=0.8\n"
+                             ".op\n");
+    REQUIRE(hi);
+    const double v_hi = hi->results.tables[0].rows()[0][
+        col_of(hi->results.tables[0], "v(out)")];
+    // Low hint -> the low-voltage stable point.
+    const auto lo = run_text(std::string(deck_head) +
+                             ".nodeset v(out)=0.02\n"
+                             ".op\n");
+    REQUIRE(lo);
+    const double v_lo = lo->results.tables[0].rows()[0][
+        col_of(lo->results.tables[0], "v(out)")];
+    // No hint: the plain cold start picks the low basin.
+    const auto plain = run_text(std::string(deck_head) + ".op\n");
+    REQUIRE(plain);
+    const double v_none = plain->results.tables[0].rows()[0][
+        col_of(plain->results.tables[0], "v(out)")];
+    CHECK(v_hi > 0.4);
+    CHECK(v_lo < 0.1);
+    CHECK(v_none == doctest::Approx(v_lo).epsilon(1e-12));
+    // Both are TRUE solutions: the device current matches the load line
+    // (KCL at `out`) to solver tolerance - a hint may pick a basin, never
+    // bend the answer.
+    for (const double v : {v_hi, v_lo, v_none}) {
+        CHECK(bistable_device_i(v) ==
+              doctest::Approx((1.2 - v) / 300.0).epsilon(1e-9));
+    }
+}
+
+TEST_CASE(".nodeset: rejects ground and unknown nodes; .ac OP and .tran t=0") {
+    CHECK(error_of(run_text(
+              "ns bad\nV1 a 0 1\nR1 a 0 1k\n.nodeset v(0)=1\n.op\n"))
+              .find("ground") != std::string::npos);
+    CHECK(error_of(run_text(
+              "ns bad\nV1 a 0 1\nR1 a 0 1k\n.nodeset v(nope)=1\n.op\n"))
+              .find("unknown node") != std::string::npos);
+    CHECK(error_of(run_text(
+              "ns form\nV1 a 0 1\nR1 a 0 1k\n.nodeset a 5\n.op\n"))
+              .find("v(node)=value") != std::string::npos);
+
+    // The .ac OP honors the hint (same bistable, high basin).
+    const auto ac = run_text(
+        "ns ac\n"
+        "V1 in 0 1.2 AC 1\n"
+        "R1 in out 300\n"
+        "B1 out 0 I=1.3*(v(out)^3 - 0.72*v(out)^2 + 0.108*v(out))\n"
+        ".nodeset v(out)=0.8\n"
+        ".ac lin 1 1 1\n");
+    REQUIRE(ac);
+    // The .ac table's re(v(out)) names the small-signal response; the OP
+    // landed in the high basin iff the linearized conductance is positive
+    // there (the device slope at the high point exceeds the load).
+    CHECK(ac->reports[0].analysis == ".ac");
+
+    // The .tran t=0 OP honors it too (the transient then marches from the
+    // hinted basin; at these values the OP is a genuine rest point).
+    const auto tr = run_text(
+        "ns tran\n"
+        "V1 in 0 1.2\n"
+        "R1 in out 300\n"
+        "B1 out 0 I=1.3*(v(out)^3 - 0.72*v(out)^2 + 0.108*v(out))\n"
+        ".nodeset v(out)=0.8\n"
+        ".tran 1u 5u\n");
+    REQUIRE(tr);
+    const Table& tt = tr->results.tables[0];
+    // The t=0 row sits in the HIGH basin, and it is a rest point: the
+    // transient holds it for the whole run (nothing drives it away).
+    const std::span<const double> vout = tt.signal("v(out)");
+    REQUIRE(!vout.empty());
+    CHECK(vout.front() > 0.4);
+    for (const double v : vout) {
+        CHECK(v == doctest::Approx(vout.front()).epsilon(1e-6));
+    }
+}

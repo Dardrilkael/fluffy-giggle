@@ -128,6 +128,45 @@ inline void fold_all(const Circuit& c, RunState& rs) {
     }
 }
 
+// Resolves .nodeset cards' v(node)=expr entries against a circuit (the
+// §7.2/M5 first-iteration DC hint). Expressions evaluate against `scope`
+// (the circuit's own global .param scope when null). Ground and unknown
+// nodes reject loudly - the .ic precedent.
+[[nodiscard]] inline ws::core::Result<std::vector<std::pair<std::size_t, double>>>
+resolve_nodesets(const Circuit& c, const std::vector<NodesetCard>& cards,
+                 const ParamTable* scope = nullptr) {
+    const ParamTable& params = scope != nullptr ? *scope : c.params;
+    std::vector<std::pair<std::size_t, double>> out;
+    for (const NodesetCard& card : cards) {
+        for (const auto& [node_tok, expr] : card.node_values) {
+            WS_TRY_ASSIGN(const std::vector<std::optional<double>> b, params.bind(expr));
+            WS_TRY_ASSIGN(const double v, expr.evaluate(b));
+            const std::string node_lower = to_lower(node_tok.text);
+            if (node_lower == "0" || node_lower == "gnd") {
+                Diagnostic d;
+                d.kind = ErrorKind::Semantic;
+                d.code = "spice.semantic.nodeset";
+                d.message = "cannot nodeset the ground node";
+                d.loc = node_tok.loc;
+                return spice_fail(std::move(d));
+            }
+            const auto it = c.node_ids.find(node_lower);
+            if (it == c.node_ids.end()) {
+                Diagnostic d;
+                d.kind = ErrorKind::Semantic;
+                d.code = "spice.semantic.nodeset";
+                d.message =
+                    ".nodeset names unknown node '" + node_tok.text + "'";
+                d.loc = node_tok.loc;
+                d.hint = "a .nodeset node must appear on a device card";
+                return spice_fail(std::move(d));
+            }
+            out.emplace_back(it->second, v);
+        }
+    }
+    return out;
+}
+
 // --- the DC/OP Newton kernel (§5.1) ----------------------------------------------
 
 class DcKernel {
@@ -162,11 +201,25 @@ public:
     ws::core::Status solve(std::vector<double>& x, int max_iterations,
                            const std::string& context, std::size_t& iterations,
                            const std::vector<std::pair<std::size_t, double>>* forces =
+                               nullptr,
+                           const std::vector<std::pair<std::size_t, double>>* nodesets =
                                nullptr) {
         FatalErr fe;
         stage_ = "newton";
+        // §7.2/M5: the nodeset values seed the INITIAL iterate (ngspice
+        // sets rhsOld = nodeset); the soft force rides each stage's first
+        // iteration through newton_pass. Seeding happens on the COLD
+        // start only - the ladder's warm starts keep the walked solution.
+        if (nodesets != nullptr && !nodesets->empty() && x.size() != mna_.dim()) {
+            x.assign(mna_.dim(), 0.0);
+            for (const auto& [node, v] : *nodesets) {
+                if (node < x.size()) {
+                    x[node] = v;
+                }
+            }
+        }
         if (newton_pass(x, max_iterations, context, iterations, forces, 0.0, nullptr,
-                        &fe)) {
+                        &fe, nodesets)) {
             return {};
         }
         if (fe.set) {
@@ -179,7 +232,7 @@ public:
         for (int k = settings_.gmin_steps; k >= 0; --k) {
             const double g = settings_.gmin * std::pow(10.0, static_cast<double>(k));
             if (!newton_pass(x, max_iterations, context, iterations, forces, g, nullptr,
-                             &fe)) {
+                             &fe, nodesets)) {
                 if (fe.set) {
                     return fe.st;
                 }
@@ -200,7 +253,7 @@ public:
                 scale.apply(static_cast<double>(k) /
                             static_cast<double>(settings_.src_steps));
                 if (!newton_pass(x, max_iterations, context, iterations, forces, 0.0,
-                                 nullptr, &fe)) {
+                                 nullptr, &fe, nodesets)) {
                     if (fe.set) {
                         return fe.st;
                     }
@@ -219,7 +272,7 @@ public:
         // the pseudo-dynamics, so latches and oscillators settle where
         // the homotopies chatter. A final plain Newton confirms.
         stage_ = "ptc";
-        if (ptc_pass(x, max_iterations, context, iterations, forces, &fe)) {
+        if (ptc_pass(x, max_iterations, context, iterations, forces, &fe, nodesets)) {
             return {};
         }
         if (fe.set) {
@@ -246,7 +299,8 @@ public:
         std::vector<double>& x, int max_iterations, const std::string& context,
         std::size_t& iterations, const std::vector<std::pair<std::size_t, double>>* forces,
         double shunt_g = 0.0, const std::vector<double>* shunt_ref = nullptr,
-        FatalErr* fe = nullptr) {
+        FatalErr* fe = nullptr,
+        const std::vector<std::pair<std::size_t, double>>* nodesets = nullptr) {
         (void)context;  // diagnostics are the ladder caller's job
         const std::size_t nc = circuit_.node_count();
         double gforce = 0.0;
@@ -296,6 +350,17 @@ public:
             if (forces != nullptr) {
                 for (const auto& [node, volts] : *forces) {
                     mna_.force_node(node, volts, gforce);
+                }
+            }
+            // §7.2/M5: the nodeset hint - a soft g = 1 S Norton toward the
+            // hint value, stamped on the FIRST iteration only (ngspice's
+            // cktload.c applies it in the INITJCT/INITFIX passes and
+            // releases the moment the solve floats). A hint, not a
+            // constraint: at g = 1 it barely moves a low-impedance node
+            // and dominates a high-impedance one, exactly like ngspice.
+            if (nodesets != nullptr && it == 1) {
+                for (const auto& [node, volts] : *nodesets) {
+                    mna_.force_node(node, volts, 1.0);
                 }
             }
             if (shunt_g > 0.0) {
@@ -413,7 +478,8 @@ public:
     bool ptc_pass(std::vector<double>& x, int max_iterations,
                   const std::string& context, std::size_t& iterations,
                   const std::vector<std::pair<std::size_t, double>>* forces,
-                  FatalErr* fe = nullptr) {
+                  FatalErr* fe = nullptr,
+                  const std::vector<std::pair<std::size_t, double>>* nodesets = nullptr) {
         // Measure-only load for the initial pseudo-capacitor sizing;
         // nullptr for x linearizes nonlinear devices around zero (fine
         // for max_diagonal, which only sizes the pseudo-C).
@@ -424,7 +490,8 @@ public:
         }
         for (int it = 0; it < max_iterations; ++it) {
             std::vector<double> x_prev = x;
-            if (!newton_pass(x, 20, context, iterations, forces, c, &x_prev, fe)) {
+            if (!newton_pass(x, 20, context, iterations, forces, c, &x_prev, fe,
+                             nodesets)) {
                 return false;
             }
             c *= 0.5;
@@ -433,7 +500,7 @@ public:
             }
         }
         return static_cast<bool>(newton_pass(x, max_iterations, context, iterations,
-                                              forces, 0.0, nullptr, fe));
+                                              forces, 0.0, nullptr, fe, nodesets));
     }
 
     // One transient step: companion load (coefficients from the devices'

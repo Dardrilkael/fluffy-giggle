@@ -28,7 +28,6 @@ const std::map<char, const char*>& device_milestones() {
 
 const std::map<std::string, const char*>& card_milestones() {
     static const std::map<std::string, const char*> table = {
-        {".noise", "M5"},   {".nodeset", "M5"},
         {".lib", "backlog"},  {".global", "backlog"}, {".func", "backlog"},
         {".alter", "backlog"}, {".tf", "backlog"},    {".pz", "backlog"},
         {".four", "backlog"},  {".disto", "backlog"}, {".sens", "backlog"},
@@ -223,6 +222,47 @@ ws::core::Result<ParsedCard> parse_card(const Record& rec, bool inside_subckt,
             }
             card.kind = ParsedCard::Kind::Ic;
             card.ic = std::move(ic);
+            return card;
+        }
+        if (first_lower == ".nodeset") {
+            // M5 (§7.2): the first-iteration DC hint - same grammar as .ic.
+            if (inside_subckt) {
+                return spice_fail(card_diag(ErrorKind::Parse, "spice.parse.card_scope",
+                                            "'.nodeset' inside .subckt", rec.loc));
+            }
+            if (rec.tokens.size() < 2) {
+                return spice_fail(card_diag(ErrorKind::Parse, "spice.parse.ic_arity",
+                                            "'.nodeset' needs v(node)=value ...",
+                                            rec.loc));
+            }
+            NodesetCard ns;
+            ns.loc = rec.loc;
+            for (std::size_t i = 1; i < rec.tokens.size(); ++i) {
+                const std::string& t = rec.tokens[i].text;
+                const std::string lower = to_lower(t);
+                const std::size_t eq = t.find('=');
+                bool ok = lower.rfind("v(", 0) == 0 && eq != std::string::npos;
+                std::size_t close = std::string::npos;
+                if (ok) {
+                    close = t.find(')');
+                    ok = close != std::string::npos && close > 2 && close < eq &&
+                         eq + 1 < t.size();
+                }
+                if (!ok) {
+                    return spice_fail(card_diag(
+                        ErrorKind::Parse, "spice.parse.ic_form",
+                        "'.nodeset' entries look like v(node)=value, got '" + t + "'",
+                        rec.tokens[i].loc));
+                }
+                Token node;
+                node.text = t.substr(2, close - 2);
+                node.loc = rec.tokens[i].loc;
+                WS_TRY_ASSIGN(ExprProgram expr,
+                              expr_from_text(t.substr(eq + 1), rec.tokens[i].loc));
+                ns.node_values.emplace_back(std::move(node), std::move(expr));
+            }
+            card.kind = ParsedCard::Kind::Nodeset;
+            card.nodeset = std::move(ns);
             return card;
         }
         if (first_lower == ".save" || first_lower == ".print" ||
@@ -933,6 +973,15 @@ ws::core::Result<DeckAst> build_deck_ast(const Deck& deck, std::vector<Warning>&
                         "'.ic' inside .subckt", rec.loc));
                 }
                 ast.ics.push_back(card.ic);
+                break;
+            }
+            case K::Nodeset: {
+                if (inside) {
+                    return spice_fail(ast_diag(
+                        ErrorKind::Parse, "spice.parse.card_scope",
+                        "'.nodeset' inside .subckt", rec.loc));
+                }
+                ast.nodesets.push_back(card.nodeset);
                 break;
             }
             case K::Step: {
