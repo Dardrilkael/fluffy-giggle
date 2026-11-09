@@ -182,6 +182,13 @@ public:
     ws::core::Status solve(std::span<const std::complex<double>> b,
                            std::span<std::complex<double>> x) const;
 
+    // Solves A^T x = b (the .noise adjoint system, DESIGN.md §4.5 in
+    // libs/spice): Aᵀ is factored explicitly over the latest stored
+    // values - lazily on first use, invalidated by every factorize(),
+    // exactly like the real twin's solve_transpose.
+    ws::core::Status solve_transpose(std::span<const std::complex<double>> b,
+                                     std::span<std::complex<double>> x);
+
     bool analyzed() const;
     bool factored() const;
     std::size_t factorization_count() const;

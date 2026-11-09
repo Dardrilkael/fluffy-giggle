@@ -3771,3 +3771,167 @@ TEST_CASE("diode Rs: rejections and the netlist round-trip") {
               .signals[col_of(again->results.tables[0], "i(V1)")]
               .data[0] == doctest::Approx(-ref_i).epsilon(1e-7));
 }
+
+// --- §7.7 temperature (M5) -------------------------------------------------------
+
+TEST_CASE("temp: diode .dc temp sweeps Is(T)/Vt(T) - the SPICE3 form") {
+    const auto run = run_text(
+        "dtemp\n"
+        "V1 a 0 0.65\n"
+        "D1 a 0 dx\n"
+        ".model dx D(Is=1e-14 N=1 Xti=3 Eg=1.11)\n"
+        ".dc temp 27 127 25\n"
+        ".print dc v(a) i(D1)\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    REQUIRE(t.row_count() == 5);
+    const double k_over_q = 8.617333262145e-5;  // the repo's CODATA set
+    for (std::size_t k = 0; k < 5; ++k) {
+        const double c = 27.0 + 25.0 * k;
+        const double tk = c + 273.15;
+        const double tnom = 300.15;
+        const double vt = tk * k_over_q;
+        // SPICE3 diotemp.c (tlev=0): the emission-coefficient-scaled form.
+        const double is_t = 1e-14 *
+                            std::exp((tk / tnom - 1.0) * 1.11 / vt +
+                                     (3.0 / 1.0) * std::log(tk / tnom));
+        const double ref = is_t * (std::exp(0.65 / vt) - 1.0);
+        CAPTURE(c);
+        CHECK(t.sweep_axes[0][k] == doctest::Approx(c));
+        CHECK(t.signal("i(D1)")[k] == doctest::Approx(ref).epsilon(1e-12));
+    }
+}
+
+TEST_CASE("temp: diode at Tnom is bit-identical; per-instance temp overrides") {
+    // At T == Tnom the temp factor is exactly 0 - the M3 answer stands.
+    const auto base = run_text("d0\nV1 a 0 0.7\nD1 a 0 dx\n.model dx D(Is=1e-14)\n.op\n");
+    const auto hot = run_text(
+        "d1\nV1 a 0 0.7\nD1 a 0 dx\n.model dx D(Is=1e-14)\n.options temp=27\n.op\n");
+    REQUIRE(base);
+    REQUIRE(hot);
+    const double i0 = base->results.tables[0].rows()[0][col_of(base->results.tables[0], "i(D1)")];
+    const double i1 = hot->results.tables[0].rows()[0][col_of(hot->results.tables[0], "i(D1)")];
+    CHECK(i0 == i1);  // exactly
+
+    // One diode at temp=77 next to one at the circuit temperature: the
+    // instance override reaches the Shockley equation alone.
+    const auto pair = run_text(
+        "d2\nV1 a 0 0.7\nD1 a 0 dx\nD2 a 0 dx temp=77\n.model dx D(Is=1e-14)\n.op\n");
+    REQUIRE(pair);
+    const Table& t = pair->results.tables[0];
+    const double k_over_q = 8.617333262145e-5;
+    const double tk = 77.0 + 273.15, tnom = 300.15, vt = tk * k_over_q;
+    const double is_t =
+        1e-14 * std::exp((tk / tnom - 1.0) * 1.11 / vt + 3.0 * std::log(tk / tnom));
+    const double vd = 0.7;
+    CHECK(t.rows()[0][col_of(t, "i(D2)")] ==
+          doctest::Approx(is_t * (std::exp(vd / vt) - 1.0)).epsilon(1e-12));
+}
+
+TEST_CASE("temp: R TC1/TC2 polynomial, the model form, and instance temp=") {
+    // R(T) = R*(1 + TC1*dt + TC2*dt^2) - the exact polynomial.
+    const auto run = run_text(
+        "rtc\n"
+        "V1 in 0 5\n"
+        "R1 in out 2k tc1=0.005 tc2=2e-5\n"
+        "R2 out 0 1k\n"
+        ".options temp=100\n"
+        ".op\n");
+    REQUIRE(run);
+    const double dt = 100.0 - 27.0;
+    const double r1 = 2000.0 * (1.0 + 0.005 * dt + 2e-5 * dt * dt);
+    const Table& t = run->results.tables[0];
+    CHECK(t.rows()[0][col_of(t, "v(out)")] ==
+          doctest::Approx(5.0 * 1000.0 / (1000.0 + r1)).epsilon(1e-12));
+
+    // The model form: same numbers through .model RM R(...).
+    const auto model_run = run_text(
+        "rtcm\n"
+        "V1 in 0 5\n"
+        "R1 in out RM 2k\n"
+        "R2 out 0 1k\n"
+        ".model RM R(tc1=0.005 tc2=2e-5)\n"
+        ".options temp=100\n"
+        ".op\n");
+    REQUIRE(model_run);
+    CHECK(model_run->results.tables[0].rows()[0][
+              col_of(model_run->results.tables[0], "v(out)")] ==
+          doctest::Approx(5.0 * 1000.0 / (1000.0 + r1)).epsilon(1e-12));
+
+    // The instance tc1= overrides the model's; instance temp= overrides
+    // the run temperature for that device alone.
+    const auto mixed = run_text(
+        "rtcx\n"
+        "V1 in 0 5\n"
+        "R1 in out RM 2k tc1=0\n"
+        "R2 out 0 1k temp=127\n"
+        ".model RM R(tc1=0.005 tc2=2e-5)\n"
+        ".options temp=100\n"
+        ".op\n");
+    REQUIRE(mixed);
+    // tc1=0 (instance) kills tc1 only; the model tc2 still applies.
+    const double r1_eff = 2000.0 * (1.0 + 0.0 + 2e-5 * dt * dt);
+    const double r2_eff = 1000.0;  // temp=127 with TC=0: unchanged
+    CHECK(mixed->results.tables[0].rows()[0][
+              col_of(mixed->results.tables[0], "v(out)")] ==
+          doctest::Approx(5.0 * r2_eff / (r2_eff + r1_eff)).epsilon(1e-12));
+}
+
+TEST_CASE("temp: C TC shifts the RC pole; Tnom is per-model") {
+    const auto run = run_text(
+        "ctc\n"
+        "V1 in 0 AC 1\n"
+        "R1 in out 1k\n"
+        "C1 out 0 1n tc1=0.01\n"
+        ".options temp=127\n"
+        ".ac lin 1 159154.943 159154.943\n");
+    REQUIRE(run);
+    // C(127) = 1n*(1 + 0.01*100) = 2n; fc = 1/(2pi*R*C) = 79.6 kHz; at
+    // 159.15 kHz the response is 1/(1+j*2) - re=0.2, im=-0.4 (the
+    // default re()/im() pair columns; the derived forms land with §7.4).
+    const Table& t = run->results.tables[0];
+    CHECK(t.signal("re(v(out))")[0] == doctest::Approx(0.2).epsilon(1e-9));
+    CHECK(t.signal("im(v(out))")[0] == doctest::Approx(-0.4).epsilon(1e-9));
+}
+
+TEST_CASE("temp: BJT Is(T)/Vt(T) and the XTB beta exponent") {
+    // Vbe-driven: Ic = Is(T)*(e^Vbe/Vt(T) - 1) (Early off), and
+    // Ib = Ic/Bf(T) with Bf(T) = Bf*exp(XTB*ln(T/Tnom)).
+    const auto run = run_text(
+        "qtemp\n"
+        "Q1 c b 0 np\n"
+        "Vb b 0 0.7\n"
+        "Vc c 0 5\n"
+        ".model np NPN(Is=1e-15 Bf=100 Xti=3 Xtb=1.5)\n"
+        ".options temp=77\n"
+        ".op\n");
+    REQUIRE(run);
+    const double k_over_q = 8.617333262145e-5;
+    const double tk = 77.0 + 273.15, tnom = 300.15, vt = tk * k_over_q;
+    const double is_t =
+        1e-15 * std::exp((tk / tnom - 1.0) * 1.11 / vt + 3.0 * std::log(tk / tnom));
+    const double ic_ref = is_t * (std::exp(0.7 / vt) - 1.0);
+    const double bf_t = 100.0 * std::exp(1.5 * std::log(tk / tnom));
+    const Table& t = run->results.tables[0];
+    CHECK(t.rows()[0][col_of(t, "i(Vc)")] ==
+          doctest::Approx(-ic_ref).epsilon(1e-10));
+    CHECK(t.rows()[0][col_of(t, "i(Vb)")] ==
+          doctest::Approx(-ic_ref / bf_t).epsilon(1e-10));
+}
+
+TEST_CASE("temp: MOS Vto(T)/Kp(T) - the mos1temp pbfact chain") {
+    const auto run = run_text(
+        "mtemp\n"
+        "M1 d g 0 0 nm L=2u W=10u\n"
+        "Vg g 0 2\n"
+        "Vd d 0 5\n"
+        ".model nm NMOS(Vto=1 Kp=50u Lambda=0.02 Gamma=0.4 Phi=0.6)\n"
+        ".options temp=100\n"
+        ".op\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    CHECK(t.rows()[0][col_of(t, "i(Vd)")] ==
+          doctest::Approx(-0.000124400975915).epsilon(1e-9));
+    // Pinned against ngspice 44.2 (.op id = 1.24401e-4 at TEMP=100,
+    // TNOM=27) - the reference row for the whole pbfact chain.
+}

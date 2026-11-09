@@ -289,6 +289,16 @@ struct ComplexSparseLu::Impl {
     bool analyzed = false;
     bool factored = false;
     std::size_t factorizations = 0;
+
+    // Latest numeric values (copied at factorize) - what the lazy transpose
+    // factors when a solve_transpose lands between factorizations (the
+    // .noise adjoint, one per frequency point).
+    std::vector<std::complex<double>> values;
+
+    // Lazy transpose factors, invalidated by every factorize().
+    ComplexSolver lu_t;
+    bool t_analyzed = false;
+    bool t_factored = false;
 };
 
 ComplexSparseLu::ComplexSparseLu() : impl_(std::make_unique<Impl>()) {}
@@ -306,6 +316,8 @@ ws::core::Status ComplexSparseLu::analyze(SparsePattern pattern) {
         impl_->pattern, std::vector<std::complex<double>>(impl_->pattern.nnz())));
     impl_->analyzed = true;
     impl_->factored = false;
+    impl_->t_analyzed = false;
+    impl_->t_factored = false;
     return {};
 }
 
@@ -329,6 +341,8 @@ ws::core::Status ComplexSparseLu::factorize(
                 std::string(impl_->lu.lastErrorMessage()) + ")");
     }
     impl_->factored = true;
+    impl_->t_factored = false;  // values moved under the transpose factors
+    impl_->values = a.values();
     ++impl_->factorizations;
     return {};
 }
@@ -353,6 +367,46 @@ ws::core::Status ComplexSparseLu::solve(std::span<const std::complex<double>> b,
 
 bool ComplexSparseLu::analyzed() const { return impl_->analyzed; }
 bool ComplexSparseLu::factored() const { return impl_->factored; }
-std::size_t ComplexSparseLu::factorization_count() const { return impl_->factorizations; }
+std::size_t ComplexSparseLu::factorization_count() const {
+    return impl_->factorizations;
+}
+
+ws::core::Status ComplexSparseLu::solve_transpose(
+    std::span<const std::complex<double>> b, std::span<std::complex<double>> x) {
+    if (!impl_->factored) {
+        return sparse_fail(kErrNotFactored,
+                           "complex sparse LU transpose solve: factorize() first");
+    }
+    const std::size_t n = impl_->pattern.n;
+    if (b.size() != n || x.size() != n) {
+        return sparse_fail(kErrDimension,
+                           "complex sparse LU transpose solve: dimension mismatch");
+    }
+    if (!impl_->t_analyzed) {
+        // Symbolic for A^T, once per topology (same caveat as the real
+        // twin: Eigen only reports symbolic problems at factorize time).
+        impl_->lu_t.analyzePattern(to_eigen_transpose<std::complex<double>>(
+            impl_->pattern, std::vector<std::complex<double>>(impl_->pattern.nnz())));
+        impl_->t_analyzed = true;
+        impl_->t_factored = false;
+    }
+    if (!impl_->t_factored) {
+        impl_->lu_t.factorize(
+            to_eigen_transpose<std::complex<double>>(impl_->pattern, impl_->values));
+        if (impl_->lu_t.info() != Eigen::Success) {
+            return sparse_fail(kErrSingular,
+                               "complex sparse LU transpose factorize: singular");
+        }
+        impl_->t_factored = true;
+    }
+    Eigen::Map<const Eigen::VectorXcd> be(b.data(), static_cast<Eigen::Index>(n));
+    Eigen::Map<Eigen::VectorXcd> xe(x.data(), static_cast<Eigen::Index>(n));
+    xe = impl_->lu_t.solve(be);
+    if (!xe.allFinite()) {
+        return sparse_fail(kErrSingular,
+                           "complex sparse LU transpose solve: non-finite solution");
+    }
+    return {};
+}
 
 }  // namespace ws::math

@@ -17,6 +17,7 @@
 
 #include <ws/spice/circuit.hpp>
 #include "mna.hpp"
+#include "physconst.hpp"
 
 #include <ws/spice/deck.hpp>
 #include <ws/spice/results.hpp>
@@ -99,8 +100,8 @@ inline void append_row_columns(const Circuit& c, const SaveList& s, Table& t,
         if (state != nullptr && di < c.param_span.size()) {
             par = state->params().data() + c.param_span[di].begin;
         }
-        t.signals[k++].data.push_back(
-            c.devices[di]->terminal_current(x, c.node_count(), par));
+        t.signals[k++].data.push_back(c.devices[di]->terminal_current(
+            x, c.node_count(), par, phys::c_to_k(c.temp)));
     }
 }
 
@@ -319,13 +320,16 @@ public:
             for (std::size_t i = 0; i < circuit_.devices.size(); ++i) {
                 // §3.6: pass &x as x_prev so nonlinear devices can advance
                 // their pnjlim/reference slots (x is still the pre-solve
-                // iterate here - it's moved into x_new BELOW).
+                // iterate here - it's moved into x_new BELOW). §7.7: the
+                // circuit's elaboration temperature reaches the
+                // temp-dependent model equations.
                 state_changed = circuit_.devices[i]->update_state(
                                     x_new, nc, state_.state_.data() +
                                                    circuit_.state_span[i].begin,
                                     &x,
                                     state_.params_.data() +
-                                        circuit_.param_span[i].begin) ||
+                                        circuit_.param_span[i].begin,
+                                    phys::c_to_k(circuit_.temp)) ||
                                 state_changed;
             }
             bool converged = !state_changed;
@@ -477,7 +481,8 @@ public:
                                                    circuit_.state_span[i].begin,
                                     &x,
                                     state_.params_.data() +
-                                        circuit_.param_span[i].begin) ||
+                                        circuit_.param_span[i].begin,
+                                    phys::c_to_k(circuit_.temp)) ||
                                 state_changed;
             }
             // §5.1 (M3): both the switch-state gate (a flip demands

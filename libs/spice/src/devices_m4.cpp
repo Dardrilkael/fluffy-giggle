@@ -48,6 +48,8 @@
 #include <ws/spice/device.hpp>
 #include <ws/spice/state.hpp>
 
+#include "physconst.hpp"
+
 namespace ws::spice {
 
 namespace {
@@ -62,7 +64,21 @@ Diagnostic dev_diag(ErrorKind kind, std::string code, std::string message, Sourc
 }
 
 // Boltzmann/q in V/K (matches devices_m3.cpp's kVtPerK).
-constexpr double kVtPerK = 8.617333262145e-5;
+constexpr double kVtPerK = phys::kKoverQ;
+
+// §7.7: the SPICE3 BJT saturation-current temperature factor (bjttemp.c,
+// tlev=0): factlog = (T/Tnom − 1)·Eg/Vt_T + XTI·ln(T/Tnom) - note NO
+// division by the emission coefficient (the diode's XTI/N form differs).
+// Returns exactly 0.0 at T == Tnom.
+[[nodiscard]] double bjt_is_temp_factor(double temp_k, double tnom_k, double eg,
+                                        double xti) {
+    const double ratlog = std::log(temp_k / tnom_k);
+    const double ratio1 = temp_k / tnom_k - 1.0;
+    if (ratlog == 0.0 && ratio1 == 0.0) {
+        return 0.0;
+    }
+    return ratio1 * eg / (temp_k * kVtPerK) + xti * ratlog;
+}
 
 // §5.3 pnjlim (same simplified form as the diode - the icheck first-time
 // flag folded into the always-directional step). Clamps |ΔV| to 2*Vt past
@@ -115,9 +131,11 @@ public:
     static constexpr std::size_t kCjcEff = 29;
 
     Bjt(std::string display, NodeId c, NodeId b, NodeId e,
-        ExprProgram area, bool has_ic, double ic_vbe, double ic_vbc)
+        ExprProgram area, bool has_ic, double ic_vbe, double ic_vbc,
+        bool has_temp_inst, double temp_inst_c)
         : name_(std::move(display)), c_(c), b_(b), e_(e),
-          area_(std::move(area)), has_ic_(has_ic), ic_vbe_(ic_vbe), ic_vbc_(ic_vbc) {}
+          area_(std::move(area)), has_ic_(has_ic), ic_vbe_(ic_vbe), ic_vbc_(ic_vbc),
+          has_temp_inst_(has_temp_inst), temp_inst_c_(temp_inst_c) {}
 
     [[nodiscard]] const std::string& name() const override { return name_; }
     [[nodiscard]] char kind() const override { return 'Q'; }
@@ -143,17 +161,63 @@ public:
     // sgn. This avoids the sign pitfalls of the diode+CCCS decomposition
     // (where minority-carrier currents flow low→high, breaking add_conductance's
     // high→low assumption).
+
+    // §7.7 (M5): the effective temperature for this load - the instance
+    // temp= override when given, else the run's (elaboration) temperature.
+    [[nodiscard]] double load_temp_k(double ctx_temp_k) const {
+        return has_temp_inst_ ? phys::c_to_k(temp_inst_c_) : ctx_temp_k;
+    }
+
+    // The temp-dependent model quantities at one (area, temperature):
+    // Vt, the effective Is(T)·area, the Early-free betas Bf(T)/Br(T)
+    // (SPICE3's XTB scaling) with their α forms, and both junctions'
+    // pnjlim knees. At T == Tnom every field equals the frozen Tnom
+    // values, so default decks keep the M4a/M4b answers bit-for-bit.
+    struct TempOp {
+        double vt = 0.0;
+        double is_eff = 0.0;
+        double bf = 100.0, br = 1.0;
+        double af = 100.0 / 101.0, ar = 0.5;
+        double vcrit_be = 0.7, vcrit_bc = 0.7;
+        double is_be = 1e-18, is_bc = 1e-16;  // per-junction Is/α (noise)
+    };
+    [[nodiscard]] TempOp temp_op(double area, double temp_k) const {
+        TempOp op;
+        op.vt = temp_k * kVtPerK;
+        const double tf = bjt_is_temp_factor(temp_k, tnom_k_, eg_, xti_);
+        const double is_t = is_ * std::exp(tf);
+        op.is_eff = is_t * area;
+        // XTB: Bf(T) = Bf·exp(XTB·ln(T/Tnom)), same factor for Br
+        // (bjttemp.c; XTB=0, the default, is exactly 1.0).
+        const double ratlog = std::log(temp_k / tnom_k_);
+        const double bfactor = std::exp(xtb_ * ratlog);
+        op.bf = bf_ * bfactor;
+        op.br = br_ * bfactor;
+        op.af = op.bf / (op.bf + 1.0);
+        op.ar = op.br / (op.br + 1.0);
+        // Per-junction saturation currents and vcrit knees (SPICE3 form,
+        // evaluated at the effective Is(T)).
+        op.is_be = is_t / op.af;
+        op.is_bc = is_t / op.ar;
+        const double arg_be = nf_ * op.vt / (std::sqrt(2.0) * op.is_be);
+        op.vcrit_be = (arg_be > 1.0) ? nf_ * op.vt * std::log(arg_be) : nf_ * op.vt;
+        const double arg_bc = nr_ * op.vt / (std::sqrt(2.0) * op.is_bc);
+        op.vcrit_bc = (arg_bc > 1.0) ? nr_ * op.vt * std::log(arg_bc) : nr_ * op.vt;
+        return op;
+    }
+
     void load_dc(DcLoadContext& cx) const override {
         const double area = cx.par(kAreaParam);
-        const double is_eff = is_ * area;
+        const TempOp op = temp_op(area, load_temp_k(cx.temp_k()));
+        const double is_eff = op.is_eff;
         const double sgn = pnp_ ? -1.0 : 1.0;
         const double vbe_raw = sgn * (cx.node_v(b_) - cx.node_v(e_));
         const double vbc_raw = sgn * (cx.node_v(b_) - cx.node_v(c_));
-        const double vbe = pnjlim(vbe_raw, cx.st(kVbePrev), nf_ * vt_, vcrit_be_);
-        const double vbc = pnjlim(vbc_raw, cx.st(kVbcPrev), nr_ * vt_, vcrit_bc_);
-        const double arg_be = safe_exp_arg(vbe / (nf_ * vt_));
+        const double vbe = pnjlim(vbe_raw, cx.st(kVbePrev), nf_ * op.vt, op.vcrit_be);
+        const double vbc = pnjlim(vbc_raw, cx.st(kVbcPrev), nr_ * op.vt, op.vcrit_bc);
+        const double arg_be = safe_exp_arg(vbe / (nf_ * op.vt));
         const double ex_be = std::exp(arg_be);
-        const double arg_bc = safe_exp_arg(vbc / (nr_ * vt_));
+        const double arg_bc = safe_exp_arg(vbc / (nr_ * op.vt));
         const double ex_bc = std::exp(arg_bc);
         const double gm = cx.gmin();
         // Early effect (SPICE3's base charge, roll-off terms dropped):
@@ -172,8 +236,8 @@ public:
         //   Ie = -(Ic + Ib)
         const double t_tran = is_eff * (ex_be - ex_bc);
         const double ic = sgn * t_tran * oef;
-        const double ib = sgn * (is_eff / bf_ * (ex_be - 1.0) +
-                                  is_eff / br_ * (ex_bc - 1.0) +
+        const double ib = sgn * (is_eff / op.bf * (ex_be - 1.0) +
+                                  is_eff / op.br * (ex_bc - 1.0) +
                                   gm * (vbe + vbc));
         const double ie = -(ic + ib);
         // Derivatives w.r.t. the EFFECTIVE junction voltages:
@@ -184,10 +248,10 @@ public:
         // conductances:
         //   dIb/dVbe_eff = Is/(Bf*Nf*Vt)*ex_be + gmin = gd_ib_f
         //   dIb/dVbc_eff = Is/(Br*Nr*Vt)*ex_bc + gmin = gd_ib_r
-        const double gm_f = is_eff / (nf_ * vt_) * ex_be;
-        const double gm_r = is_eff / (nr_ * vt_) * ex_bc;
-        const double gd_ib_f = is_eff / (bf_ * nf_ * vt_) * ex_be + gm;
-        const double gd_ib_r = is_eff / (br_ * nr_ * vt_) * ex_bc + gm;
+        const double gm_f = is_eff / (nf_ * op.vt) * ex_be;
+        const double gm_r = is_eff / (nr_ * op.vt) * ex_bc;
+        const double gd_ib_f = is_eff / (op.bf * nf_ * op.vt) * ex_be + gm;
+        const double gd_ib_r = is_eff / (op.br * nr_ * op.vt) * ex_bc + gm;
         // Chain rule to node voltages. For NPN: Vbe_eff=Vb-Ve, Vbc_eff=Vb-Vc.
         // For PNP: Vbe_eff=Ve-Vb, Vbc_eff=Vc-Vb. The sgn factors cancel
         // (d(sgn*Ic)/dVb = sgn * dIc/dVbe_eff * dVbe_eff/dVb = sgn*gm_f*sgn = gm_f),
@@ -236,17 +300,18 @@ public:
     // state, set by update_state during the .ac OP solve).
     void load_ac(AcLoadContext& cx) const override {
         const double area = cx.par(kAreaParam);
-        const double is_eff = is_ * area;
+        const TempOp op = temp_op(area, load_temp_k(cx.temp_k()));
+        const double is_eff = op.is_eff;
         const double vbe = cx.st(kVbePrev);
         const double vbc = cx.st(kVbcPrev);
-        const double arg_be = safe_exp_arg(vbe / (nf_ * vt_));
+        const double arg_be = safe_exp_arg(vbe / (nf_ * op.vt));
         const double ex_be = std::exp(arg_be);
-        const double arg_bc = safe_exp_arg(vbc / (nr_ * vt_));
+        const double arg_bc = safe_exp_arg(vbc / (nr_ * op.vt));
         const double ex_bc = std::exp(arg_bc);
-        const double gm_f = is_eff / (nf_ * vt_) * ex_be;
-        const double gm_r = is_eff / (nr_ * vt_) * ex_bc;
-        const double gd_ib_f = is_eff / (bf_ * nf_ * vt_) * ex_be;
-        const double gd_ib_r = is_eff / (br_ * nr_ * vt_) * ex_bc;
+        const double gm_f = is_eff / (nf_ * op.vt) * ex_be;
+        const double gm_r = is_eff / (nr_ * op.vt) * ex_bc;
+        const double gd_ib_f = is_eff / (op.bf * nf_ * op.vt) * ex_be;
+        const double gd_ib_r = is_eff / (op.br * nr_ * op.vt) * ex_bc;
         // The Early terms at the frozen OP (go and its Vbe-side mirror).
         const double oef = 1.0 - vbc * inv_vaf_ - vbe * inv_var_;
         const double t_tran = is_eff * (ex_be - ex_bc);
@@ -406,25 +471,30 @@ public:
     [[nodiscard]] bool update_state(const std::vector<double>& x,
                                     std::size_t /*node_count*/, double* st,
                                     const std::vector<double>* x_prev = nullptr,
-                                    const double* /*params*/ = nullptr) override {
+                                    const double* params = nullptr,
+                                    double temp_k = 300.15) override {
         const std::vector<double>& x_load =
             (x_prev != nullptr && !x_prev->empty()) ? *x_prev : x;
+        double area = 1.0;
+        if (params != nullptr) {
+            area = params[kAreaParam];
+        }
+        const TempOp op = temp_op(area, load_temp_k(temp_k));
         const double sgn = pnp_ ? -1.0 : 1.0;
         const double vbe_raw = sgn * (v_across(x_load, b_, e_));
         const double vbc_raw = sgn * (v_across(x_load, b_, c_));
-        const double vbe_lim = pnjlim(vbe_raw, st[kVbePrev], nf_ * vt_, vcrit_be_);
-        const double vbc_lim = pnjlim(vbc_raw, st[kVbcPrev], nr_ * vt_, vcrit_bc_);
+        const double vbe_lim = pnjlim(vbe_raw, st[kVbePrev], nf_ * op.vt, op.vcrit_be);
+        const double vbc_lim = pnjlim(vbc_raw, st[kVbcPrev], nr_ * op.vt, op.vcrit_bc);
         // Ic at the clamped point (the "current predicted by the
-        // linearization", §5.1). Uses is_ (area=1) - same minor
-        // approximation as the diode; the voltage-delta check compensates.
-        const double arg_be = safe_exp_arg(vbe_lim / (nf_ * vt_));
-        const double i_be = is_ / af_ * (std::exp(arg_be) - 1.0);
-        const double arg_bc = safe_exp_arg(vbc_lim / (nr_ * vt_));
-        const double i_bc = is_ / ar_ * (std::exp(arg_bc) - 1.0);
+        // linearization", §5.1).
+        const double arg_be = safe_exp_arg(vbe_lim / (nf_ * op.vt));
+        const double i_be = op.is_eff / op.af * (std::exp(arg_be) - 1.0);
+        const double arg_bc = safe_exp_arg(vbc_lim / (nr_ * op.vt));
+        const double i_bc = op.is_eff / op.ar * (std::exp(arg_bc) - 1.0);
         // Early factor at the clamped point (the linearization the load
         // just used; Vaf/Var = 0 leaves ic_lim untouched).
         const double oef = 1.0 - vbc_lim * inv_vaf_ - vbe_lim * inv_var_;
-        const double ic_lim = sgn * (af_ * i_be - i_bc) * oef;
+        const double ic_lim = sgn * (op.af * i_be - i_bc) * oef;
         st[kIPrev] = st[kICur];
         st[kICur] = ic_lim;
         st[kVbePrev] = vbe_lim;
@@ -446,9 +516,10 @@ public:
     // .model name NPN|PNP (Is= Bf= Br= Nf= Nr= Tnom= ...). M4a implements
     // Is, Bf, Br, Nf, Nr, Tnom; M4b adds Cje/Cjc/Mje/Mjc/Vje/Vjc/Fc; the
     // Early voltages Vaf/Var are implemented (the SPICE3 base-charge
-    // form, no roll-off); the remaining Gummel-Poon params (Ikf, Ikr,
-    // Tf, Tr, Xti, Eg, Kf, Af, ...) are accepted but not implemented -
-    // they land with M5 (temp model, noise, diffusion charge).
+    // form, no roll-off); §7.7 (M5) implements the temperature model
+    // (Xti, Eg, Xtb - Is(T), the beta exponent); the remaining
+    // Gummel-Poon params (Ikf, Ikr, Tf, Tr, Kf, Af, ...) are accepted
+    // but not implemented - they land with the M5 device-physics follow-ups.
     ws::core::Status apply_model(const ModelDef& model,
                                  NodeResolver& /*nodes*/) override {
         if (model.type != "npn" && model.type != "pnp") {
@@ -460,11 +531,13 @@ public:
         pnp_ = (model.type == "pnp");
         model_name_ = model.name.text;
         // ngspice defaults: Is=1e-16, Bf=100, Br=1, Nf=1, Nr=1, Tnom=27,
-        // Cje=0, Cjc=0 (no caps), Mje=0.5, Mjc=0.5, Vje=0.75, Vjc=0.75, Fc=0.5.
+        // Cje=0, Cjc=0 (no caps), Mje=0.5, Mjc=0.5, Vje=0.75, Vjc=0.75,
+        // Fc=0.5, Eg=1.11, Xti=3, Xtb=0 (bjtsetup.c).
         double is_val = 1e-16, bf = 100.0, br = 1.0, nf = 1.0, nr = 1.0, tnom = 27.0;
         double vaf_val = 0.0, var_val = 0.0;
         double cje_val = 0.0, cjc_val = 0.0, mje_val = 0.5, mjc_val = 0.5;
         double vje_val = 0.75, vjc_val = 0.75, fc_val = 0.5;
+        double eg_val = 1.11, xti_val = 3.0, xtb_val = 0.0;
         const auto& toks = model.params;
         for (std::size_t i = 0; i < toks.size(); ++i) {
             std::string text = toks[i].text;
@@ -507,6 +580,9 @@ public:
             else if (key == "tnom") tnom = v;
             else if (key == "vaf") vaf_val = v;
             else if (key == "var") var_val = v;
+            else if (key == "xti") xti_val = v;
+            else if (key == "eg") eg_val = v;
+            else if (key == "xtb") xtb_val = v;
             else if (key == "cje") cje_val = v;
             else if (key == "cjc") cjc_val = v;
             else if (key == "mje") mje_val = v;
@@ -514,12 +590,12 @@ public:
             else if (key == "vje") vje_val = v;
             else if (key == "vjc") vjc_val = v;
             else if (key == "fc") fc_val = v;
-            // Accepted but not implemented (M5: temp model, noise,
-            // diffusion charge, parasitic resistances, high-current
-            // roll-off):
+            // Accepted but not implemented (the M5 device-physics
+            // follow-ups: diffusion charge, noise, parasitic resistances,
+            // high-current roll-off):
             else if (key == "ikf" || key == "ikr" ||
                      key == "tf" || key == "tr" ||
-                     key == "xti" || key == "eg" || key == "kf" || key == "af" ||
+                     key == "kf" || key == "af" ||
                      key == "pe" || key == "pc" || key == "ise" ||
                      key == "isc" || key == "ne" || key == "nc" || key == "rb" ||
                      key == "rc" || key == "re") {
@@ -564,15 +640,13 @@ public:
         inv_var_ = (var_ > 0.0) ? 1.0 / var_ : 0.0;
         af_ = bf / (bf + 1.0);
         ar_ = br / (br + 1.0);
-        vt_ = (tnom + 273.15) * kVtPerK;
-        // vcrit per junction (SPICE3 formula, scaled by 1/α for the
-        // diode's effective Is = Is/α).
-        const double is_be = is_val / af_;
-        const double is_bc = is_val / ar_;
-        const double arg_be = nf_ * vt_ / (std::sqrt(2.0) * is_be);
-        vcrit_be_ = (arg_be > 1.0) ? nf_ * vt_ * std::log(arg_be) : nf_ * vt_;
-        const double arg_bc = nr_ * vt_ / (std::sqrt(2.0) * is_bc);
-        vcrit_bc_ = (arg_bc > 1.0) ? nr_ * vt_ * std::log(arg_bc) : nr_ * vt_;
+        tnom_k_ = phys::c_to_k(tnom);
+        eg_ = eg_val;
+        xti_ = xti_val;
+        xtb_ = xtb_val;
+        // vcrit per junction is a PER-LOAD quantity now (§7.7, M5): it
+        // evaluates at the run temperature through temp_op(). At
+        // T == Tnom the values equal the frozen-Tnom form bit-for-bit.
         // M4b: junction cap params.
         cje_ = cje_val; cjc_ = cjc_val;
         mje_ = mje_val; mjc_ = mjc_val;
@@ -712,15 +786,19 @@ private:
     ExprProgram area_;
     bool has_ic_;
     double ic_vbe_, ic_vbc_;
+    // §7.7: per-instance temp= override (°C; ngspice's Q TEMP).
+    bool has_temp_inst_ = false;
+    double temp_inst_c_ = 27.0;
     // Model fields (set by apply_model):
     double is_ = 1e-16;
     double bf_ = 100.0, br_ = 1.0;
     double nf_ = 1.0, nr_ = 1.0;
     double af_ = 100.0 / 101.0;  // αF = Bf/(Bf+1)
     double ar_ = 1.0 / 2.0;      // αR = Br/(Br+1)
-    double vt_ = 0.02585;
-    double vcrit_be_ = 0.7;
-    double vcrit_bc_ = 0.7;
+    double tnom_k_ = 300.15;     // model nominal temperature, K (§7.7)
+    double eg_ = 1.11;           // energy gap, eV (§7.7 Is(T))
+    double xti_ = 3.0;           // Is temperature exponent (§7.7)
+    double xtb_ = 0.0;           // beta temperature exponent (§7.7)
     // Early voltages (Vaf forward, Var reverse; 0 = off, the default).
     // The reciprocal is what the stamp multiplies by, precomputed so the
     // no-Early path costs one 1.0 multiply and two 0.0 adds - with both
@@ -757,6 +835,8 @@ ws::core::Result<std::unique_ptr<Device>> make_bjt(const DeviceCard& card,
     bool has_area = false;
     bool has_ic = false;
     double ic_vbe = 0.0, ic_vbc = 0.0;
+    bool has_temp_inst = false;
+    double temp_inst = 27.0;
     for (std::size_t i = model_idx + 1; i < card.rest.size(); ++i) {
         const std::string lower = to_lower(card.rest[i].text);
         if (lower.rfind("ic=", 0) == 0) {
@@ -774,7 +854,14 @@ ws::core::Result<std::unique_ptr<Device>> make_bjt(const DeviceCard& card,
             continue;
         }
         if (lower == "off") continue;
-        if (lower.rfind("temp=", 0) == 0) continue;  // per-instance temp: M5
+        if (lower.rfind("temp=", 0) == 0) {
+            // §7.7 (M5): per-instance temperature override (°C).
+            if (const ws::core::Result<double> r = parse_number(card.rest[i].text.substr(5))) {
+                has_temp_inst = true;
+                temp_inst = *r;
+            }
+            continue;
+        }
         if (!has_area) {
             WS_TRY_ASSIGN(area_prog, resolve_value_program(card.rest[i], s.params));
             WS_TRY(eval_param_for_validation(area_prog, s.params));
@@ -794,7 +881,8 @@ ws::core::Result<std::unique_ptr<Device>> make_bjt(const DeviceCard& card,
         WS_TRY_ASSIGN(area_prog, resolve_value_program(one, s.params));
     }
     auto dev = std::make_unique<Bjt>(card.name.text, n[0], n[1], n[2],
-                                      std::move(area_prog), has_ic, ic_vbe, ic_vbc);
+                                      std::move(area_prog), has_ic, ic_vbe, ic_vbc,
+                                      has_temp_inst, temp_inst);
     dev->loc = card.loc;
     s.models.push_back(ModelRequest{dev.get(), card.rest[model_idx]});
     return dev;
@@ -812,8 +900,9 @@ public:
     static constexpr std::size_t kIPrev = 3;
 
     Mosfet(std::string display, NodeId d, NodeId g, NodeId s, NodeId b,
-           double l, double w)
-        : name_(std::move(display)), d_(d), g_(g), s_(s), b_(b), l_(l), w_(w) {}
+           double l, double w, bool has_temp_inst, double temp_inst_c)
+        : name_(std::move(display)), d_(d), g_(g), s_(s), b_(b), l_(l), w_(w),
+          has_temp_inst_(has_temp_inst), temp_inst_c_(temp_inst_c) {}
 
     [[nodiscard]] const std::string& name() const override { return name_; }
     [[nodiscard]] char kind() const override { return 'M'; }
@@ -839,18 +928,76 @@ public:
     //     Id = 0.5*Kp*W/L*(Vgs-Vth)^2*(1+lambda*Vds)
     // Vth = Vto + gamma*(sqrt(2*phi - Vbs) - sqrt(2*phi))
     // PMOS: negate Vgs, Vds, Vbs; Id flows S→D (negate Id).
+
+    // §7.7 (M5): the effective temperature for this load - the instance
+    // temp= override when given, else the run's (elaboration) temperature.
+    [[nodiscard]] double load_temp_k(double ctx_temp_k) const {
+        return has_temp_inst_ ? phys::c_to_k(temp_inst_c_) : ctx_temp_k;
+    }
+
+    // The temp-dependent level-1 quantities (mos1temp.c, the tlev=0
+    // machinery): Phi(T) through the SPICE3 pbfact form, Vto(T) through
+    // the tVbi/tVto chain, and Kp(T) = Kp/(T/Tnom)^1.5 (surface
+    // mobility). At T == Tnom every field equals the frozen Tnom value
+    // (pbfact(Tnom) == pbfact1 exactly), so default decks keep the M4c
+    // answers bit-for-bit.
+    struct TempOp {
+        double phi = 0.6;
+        double vto = 0.0;
+        double kp = 20e-6;
+    };
+    [[nodiscard]] TempOp temp_op(double temp_k) const {
+        TempOp op;
+        if (temp_k == tnom_k_) {
+            op.phi = phi_;
+            op.vto = vto_;
+            op.kp = kp_;
+            return op;
+        }
+        const double vt = temp_k * kVtPerK;
+        const double vtnom = tnom_k_ * kVtPerK;
+        const double fact2 = temp_k / phys::kRefTempK;
+        const double fact1 = tnom_k_ / phys::kRefTempK;
+        const double egfet_t = phys::egfet(temp_k);
+        const double egfet_1 = phys::egfet(tnom_k_);
+        const double arg = -egfet_t / (2.0 * phys::kBoltz * temp_k) +
+                           1.1150877 / (phys::kBoltz * (phys::kRefTempK + phys::kRefTempK));
+        const double pbfact = -2.0 * vt * (1.5 * std::log(fact2) + phys::kQ * arg);
+        const double arg1 = -egfet_1 / (phys::kBoltz * 2.0 * tnom_k_) +
+                            1.1150877 / (2.0 * phys::kBoltz * phys::kRefTempK);
+        const double pbfact1 = -2.0 * vtnom * (1.5 * std::log(fact1) + phys::kQ * arg1);
+        // Phi(T): the surface potential's temperature shift.
+        const double phio = (phi_ - pbfact1) / fact1;
+        op.phi = fact2 * phio + pbfact;
+        // Vto(T): tVbi + type*gamma*sqrt(tPhi), the tlev=0 chain.
+        const double type = pnp_ ? -1.0 : 1.0;
+        const double tvbi = vto_ - type * (gamma_ * std::sqrt(phi_)) +
+                            0.5 * (egfet_1 - egfet_t) +
+                            type * 0.5 * (op.phi - phi_);
+        op.vto = tvbi + type * gamma_ * std::sqrt(op.phi);
+        if (op.phi < 0.1) {
+            op.phi = 0.1;  // mos1temp.c's MAX(.1, phi) guard
+        }
+        // Kp(T): tTransconductance = Kp / (T/Tnom)^1.5.
+        const double ratio = temp_k / tnom_k_;
+        const double ratio4 = ratio * std::sqrt(ratio);
+        op.kp = kp_ / ratio4;
+        return op;
+    }
+
     void load_dc(DcLoadContext& cx) const override {
         const double sgn = pnp_ ? -1.0 : 1.0;  // PMOS = pnp_ flag reused
+        const TempOp op = temp_op(load_temp_k(cx.temp_k()));
         const double vg = cx.node_v(g_), vs = cx.node_v(s_);
         const double vd = cx.node_v(d_), vb = cx.node_v(b_);
         const double vgs = sgn * (vg - vs);
         const double vds = sgn * (vd - vs);
         const double vbs = sgn * (vb - vs);
         // Body effect: Vth = Vto + gamma*(sqrt(2*phi - Vbs) - sqrt(2*phi)).
-        double vth = vto_;
+        double vth = op.vto;
         if (gamma_ != 0.0) {
-            const double arg1 = std::max(2 * phi_ - vbs, 1e-12);
-            const double arg2 = std::max(2 * phi_, 1e-12);
+            const double arg1 = std::max(2 * op.phi - vbs, 1e-12);
+            const double arg2 = std::max(2 * op.phi, 1e-12);
             vth += gamma_ * (std::sqrt(arg1) - std::sqrt(arg2));
         }
         const double vgs_vth = vgs - vth;  // "overdrive voltage"
@@ -862,7 +1009,7 @@ public:
             id = 0.0;
             did_dvg = did_dvd = did_dvs = did_dvb = 0.0;
         } else {
-            const double beta = kp_ * w_ / l_;  // Kp*W/L
+            const double beta = op.kp * w_ / l_;  // Kp(T)*W/L
             const double vdsat = vgs_vth;       // saturation voltage
             if (vds < vdsat) {
                 // Triode: Id = beta*(Vgs-Vth - Vds/2)*Vds*(1+lambda*Vds)
@@ -940,24 +1087,26 @@ public:
     [[nodiscard]] bool update_state(const std::vector<double>& x,
                                     std::size_t /*nc*/, double* st,
                                     const std::vector<double>* x_prev = nullptr,
-                                    const double* /*params*/ = nullptr) override {
+                                    const double* /*params*/ = nullptr,
+                                    double temp_k = 300.15) override {
         const std::vector<double>& x_load =
             (x_prev != nullptr && !x_prev->empty()) ? *x_prev : x;
+        const TempOp op = temp_op(load_temp_k(temp_k));
         const double sgn = pnp_ ? -1.0 : 1.0;
         const double vgs = sgn * (v_across(x_load, g_, s_));
         const double vds = sgn * (v_across(x_load, d_, s_));
         // Compute Id at the current iterate (for residual tracking).
-        double vth = vto_;
+        double vth = op.vto;
         if (gamma_ != 0.0) {
             const double vbs = sgn * (v_across(x_load, b_, s_));
-            const double arg1 = std::max(2 * phi_ - vbs, 1e-12);
-            const double arg2 = std::max(2 * phi_, 1e-12);
+            const double arg1 = std::max(2 * op.phi - vbs, 1e-12);
+            const double arg2 = std::max(2 * op.phi, 1e-12);
             vth += gamma_ * (std::sqrt(arg1) - std::sqrt(arg2));
         }
         const double vgs_vth = vgs - vth;
         double id = 0.0;
         if (vgs_vth > 0.0) {
-            const double beta = kp_ * w_ / l_;
+            const double beta = op.kp * w_ / l_;
             if (vds < vgs_vth) {
                 id = beta * (vgs_vth - vds / 2.0) * vds * (1.0 + lambda_ * vds);
             } else {
@@ -989,8 +1138,9 @@ public:
         }
         pnp_ = (model.type == "pmos");
         model_name_ = model.name.text;
-        // ngspice defaults: Vto=0, Kp=20µA/V², Lambda=0, Gamma=0, Phi=0.6.
-        double vto = 0.0, kp = 20e-6, lambda = 0.0, gamma = 0.0, phi = 0.6;
+        // ngspice defaults: Vto=0, Kp=20µA/V², Lambda=0, Gamma=0, Phi=0.6,
+        // Tnom=27°C (§7.7).
+        double vto = 0.0, kp = 20e-6, lambda = 0.0, gamma = 0.0, phi = 0.6, tnom = 27.0;
         const auto& toks = model.params;
         for (std::size_t i = 0; i < toks.size(); ++i) {
             std::string text = toks[i].text;
@@ -1030,6 +1180,7 @@ public:
             else if (key == "lambda") lambda = v;
             else if (key == "gamma") gamma = v;
             else if (key == "phi") phi = v;
+            else if (key == "tnom") tnom = v;
             else if (key == "level" || key == "u0" || key == "tox" ||
                      key == "cj" || key == "mj" || key == "cjsw" ||
                      key == "mjsw" || key == "pb" || key == "js" ||
@@ -1047,6 +1198,7 @@ public:
             }
         }
         vto_ = vto; kp_ = kp; lambda_ = lambda; gamma_ = gamma; phi_ = phi;
+        tnom_k_ = phys::c_to_k(tnom);
         return {};
     }
 
@@ -1069,12 +1221,16 @@ private:
     std::string name_;
     NodeId d_, g_, s_, b_;
     double l_, w_;
+    // §7.7: per-instance temp= override (°C; ngspice's M TEMP).
+    bool has_temp_inst_ = false;
+    double temp_inst_c_ = 27.0;
     // Model fields:
     double vto_ = 0.0;
     double kp_ = 20e-6;
     double lambda_ = 0.0;
     double gamma_ = 0.0;
     double phi_ = 0.6;
+    double tnom_k_ = 300.15;  // model nominal temperature, K (§7.7)
     bool pnp_ = false;  // PMOS
     std::string model_name_;
 };
@@ -1093,6 +1249,8 @@ ws::core::Result<std::unique_ptr<Device>> make_mosfet(const DeviceCard& card,
                                    card.loc));
     }
     double l = 100e-6, w = 100e-6;  // ngspice defaults
+    bool has_temp_inst = false;
+    double temp_inst = 27.0;
     for (std::size_t i = model_idx + 1; i < card.rest.size(); ++i) {
         const std::string lower = to_lower(card.rest[i].text);
         if (lower.rfind("l=", 0) == 0) {
@@ -1103,10 +1261,17 @@ ws::core::Result<std::unique_ptr<Device>> make_mosfet(const DeviceCard& card,
             if (const ws::core::Result<double> r = parse_number(card.rest[i].text.substr(2))) {
                 w = *r;
             }
+        } else if (lower.rfind("temp=", 0) == 0) {
+            // §7.7 (M5): per-instance temperature override (°C).
+            if (const ws::core::Result<double> r = parse_number(card.rest[i].text.substr(5))) {
+                has_temp_inst = true;
+                temp_inst = *r;
+            }
         }
         // AD, AS, PD, PS, NRD, NRS, OFF, IC= — accepted, ignored in M4c.
     }
-    auto dev = std::make_unique<Mosfet>(card.name.text, n[0], n[1], n[2], n[3], l, w);
+    auto dev = std::make_unique<Mosfet>(card.name.text, n[0], n[1], n[2], n[3], l, w,
+                                        has_temp_inst, temp_inst);
     dev->loc = card.loc;
     s.models.push_back(ModelRequest{dev.get(), card.rest[model_idx]});
     return dev;

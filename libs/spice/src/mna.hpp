@@ -63,13 +63,19 @@ public:
     // the run's junction-parallel conductance floor (§5.2 ladder stage 2)
     // folded into each nonlinear device's stamp. Pattern mode never calls
     // these - it runs through the contexts directly in setup().
+    // §7.7 (M5): the circuit's elaboration temperature reaches the
+    // temp-dependent loads through the contexts (temp_k()).
     void load(const std::vector<std::unique_ptr<Device>>& devices,
               const RunState& rs, const std::vector<double>* x, double gmin);
     void load_tran(const std::vector<std::unique_ptr<Device>>& devices,
                    const RunState& rs, const TranStep& step,
                    const std::vector<double>* x, double gmin);
+    // §7.5 (M5): `noise_input` (when not null) is the .noise input
+    // source - every source stamps zero except it (1+0j, ngspice's
+    // MODEACNOISE); null keeps the plain .ac semantics (declared specs).
     void load_ac(const std::vector<std::unique_ptr<Device>>& devices,
-                 const RunState& rs, double omega);
+                 const RunState& rs, double omega,
+                 const Device* noise_input = nullptr);
 
     // Freezes the pattern (col-major dedupe) and runs the symbolic
     // analyze. Fails through Status on a malformed pattern.
@@ -83,6 +89,13 @@ public:
     // unknowns. Returns Singular/... errors as-is from the facade.
     [[nodiscard]] ws::core::Status solve(std::vector<double>& x);
     [[nodiscard]] ws::core::Status solve_ac(std::vector<std::complex<double>>& x);
+
+    // §7.5 (M5): the adjoint solve A^T x = b over the SAME loaded complex
+    // matrix (call after solve_ac - the factors are current; the transpose
+    // factors rebuild lazily from the stored values, §4.5).
+    [[nodiscard]] ws::core::Status solve_ac_transpose(
+        const std::vector<std::complex<double>>& b,
+        std::vector<std::complex<double>>& x);
 
     // §6.5: enforces v(node) = volts during an OP solve by stamping a
     // Norton (gforce from node to ground, gforce*volts injected) over the

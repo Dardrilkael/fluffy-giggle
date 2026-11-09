@@ -14,6 +14,7 @@
 // move.
 
 #include "cards.hpp"
+#include "physconst.hpp"
 #include "waveform.hpp"
 
 #include <cmath>
@@ -153,10 +154,19 @@ namespace {
 
 // --- R -------------------------------------------------------------------------
 
+// R name a b [modelname] value [temp=] [tc1=] [tc2=]  (ngspice order:
+// the model names FIRST, then the value; the model carries TC/Tnom
+// defaults, the instance may override TC1/TC2 and its own temperature).
+// §7.7 (M5): R(T) = R*(1 + TC1*(T-Tnom) + TC2*(T-Tnom)^2) - restemp.c.
 class Resistor final : public Device {
 public:
-    Resistor(std::string display, NodeId a, NodeId b, ExprProgram ohms)
-        : name_(std::move(display)), a_(a), b_(b), ohms_(std::move(ohms)) {}
+    Resistor(std::string display, NodeId a, NodeId b, ExprProgram ohms,
+             ExprProgram tc1, ExprProgram tc2, bool tc1_given, bool tc2_given,
+             bool has_temp_inst, double temp_inst_c)
+        : name_(std::move(display)), a_(a), b_(b), ohms_(std::move(ohms)),
+          tc1_(std::move(tc1)), tc2_(std::move(tc2)), tc1_given_(tc1_given),
+          tc2_given_(tc2_given), has_temp_inst_(has_temp_inst),
+          temp_inst_c_(temp_inst_c) {}
 
     [[nodiscard]] const std::string& name() const override { return name_; }
     [[nodiscard]] char kind() const override { return 'R'; }
@@ -167,7 +177,8 @@ public:
     }
 
     [[nodiscard]] std::vector<ParamSpec> param_specs() const override {
-        return {ParamSpec{"value", ohms_}};
+        return {ParamSpec{"value", ohms_}, ParamSpec{"tc1", tc1_},
+                ParamSpec{"tc2", tc2_}};
     }
     [[nodiscard]] ws::core::Status check_params(const double* p) const override {
         if (!(p[0] > 0.0) || !std::isfinite(p[0])) {
@@ -175,26 +186,151 @@ public:
                 ErrorKind::Semantic, "spice.semantic.r_value",
                 "resistor " + name_ + " needs a positive finite value", loc));
         }
+        if (!std::isfinite(p[kTc1Param]) || !std::isfinite(p[kTc2Param])) {
+            return spice_fail(dev_diag(
+                ErrorKind::Semantic, "spice.semantic.r_tc",
+                "resistor " + name_ + " needs finite TC1/TC2", loc));
+        }
         return {};
     }
 
+    // §7.7: the effective temperature for this load - the instance temp=
+    // override when given, else the run's (elaboration) temperature.
+    [[nodiscard]] double load_temp_k(double ctx_temp_k) const {
+        return has_temp_inst_ ? phys::c_to_k(temp_inst_c_) : ctx_temp_k;
+    }
+
+    // The temp-scaled resistance (§7.7): TC=0 (the default) is exactly the
+    // bound value, so plain decks keep the M1 stamp bit-for-bit.
+    [[nodiscard]] double ohms_at(const double* p, double ctx_temp_k) const {
+        return p[kValueParam] *
+               phys::rc_temp_factor(load_temp_k(ctx_temp_k), tnom_k_, p[kTc1Param],
+                                    p[kTc2Param]);
+    }
+
     void load_dc(DcLoadContext& cx) const override {
-        cx.add_conductance(a_, b_, 1.0 / cx.par(0));
+        cx.add_conductance(a_, b_, 1.0 / ohms_at(cx.params_, cx.temp_k()));
     }
     void load_ac(AcLoadContext& cx) const override {
-        cx.add_conductance(a_, b_, 1.0 / cx.par(0));
+        cx.add_conductance(a_, b_, 1.0 / ohms_at(cx.params_, cx.temp_k()));
     }
+
+    // §7.7 (M5): the R model (`.model name R(...)`) carries the TC/Tnom
+    // defaults (and later the flicker keys). Instance tc1=/tc2= override;
+    // the value always comes from the instance (ngspice has no model
+    // value key - rsh is the sheet-resistance geometry form, not taken).
+    ws::core::Status apply_model(const ModelDef& model,
+                                 NodeResolver& /*nodes*/) override {
+        if (model.type != "r") {
+            return spice_fail(dev_diag(
+                ErrorKind::Semantic, "spice.semantic.model_type",
+                "resistor " + name_ + " needs an R model, got type '" + model.type +
+                    "'",
+                model.loc));
+        }
+        model_name_ = model.name.text;
+        double tnom = 27.0;
+        const auto& toks = model.params;
+        for (std::size_t i = 0; i < toks.size(); ++i) {
+            std::string text = toks[i].text;
+            while (!text.empty() && text.front() == '(') text.erase(text.begin());
+            while (!text.empty() && text.back() == ')') text.pop_back();
+            if (text.empty()) continue;
+            std::string key, value;
+            const std::size_t eq = text.find('=');
+            if (eq != std::string::npos && eq > 0) {
+                key = to_lower(text.substr(0, eq));
+                value = text.substr(eq + 1);
+            } else {
+                key = to_lower(text);
+                std::size_t next = i + 1;
+                if (next < toks.size() && toks[next].text == "=") ++next;
+                if (next >= toks.size()) {
+                    return spice_fail(dev_diag(
+                        ErrorKind::Semantic, "spice.semantic.model_param",
+                        "model '" + model.name.text + "': '" + text +
+                            "' needs a value",
+                        toks[i].loc));
+                }
+                value = toks[next].text;
+                i = next;
+            }
+            while (!value.empty() && value.back() == ')') value.pop_back();
+            double v = 0.0;
+            if (const ws::core::Result<double> r = parse_number(value)) {
+                v = *r;
+            } else {
+                return spice_fail(dev_diag(
+                    ErrorKind::Semantic, "spice.semantic.model_param",
+                    "model '" + model.name.text + "': bad value '" + value + "'",
+                    toks[i].loc));
+            }
+            if (key == "tnom") {
+                tnom = v;
+            } else if (key == "tc1" || key == "tc1r") {
+                if (!tc1_given_) {
+                    tc1_ = ExprProgram::constant(v);
+                }
+            } else if (key == "tc2" || key == "tc2r") {
+                if (!tc2_given_) {
+                    tc2_ = ExprProgram::constant(v);
+                }
+            } else if (key == "kf" || key == "af" || key == "ef" ||
+                       key == "rsh" || key == "narrow" || key == "dw" ||
+                       key == "short" || key == "dlr" || key == "tce" ||
+                       key == "defw" || key == "w" || key == "l" ||
+                       key == "noiz") {
+                // Accepted (ngspice model keys) - the geometry form
+                // (rsh/l/w) and the exponential TCE stay unimplemented;
+                // Kf/Af/Ef land with the noise follow-up.
+            } else {
+                return spice_fail(dev_diag(
+                    ErrorKind::Semantic, "spice.semantic.model_param",
+                    "model '" + model.name.text + "': unknown parameter '" + key +
+                        "' (Tnom, Tc1, Tc2, + the ngspice R set)",
+                    toks[i].loc));
+            }
+        }
+        tnom_k_ = phys::c_to_k(tnom);
+        return {};
+    }
+
     [[nodiscard]] bool write_card(std::string& out,
-                                    const CardWriter& w) const override {
-        out += name_ + " " + w.node(a_) + " " + w.node(b_) + " " +
-               Device::CardWriter::num(w.params(*this)[0]) + "\n";
+                                  const CardWriter& w) const override {
+        out += name_ + " " + w.node(a_) + " " + w.node(b_);
+        if (!model_name_.empty()) {
+            out += " " + model_name_;
+        }
+        const double* p = w.params(*this);
+        out += " " + Device::CardWriter::num(p[kValueParam]);
+        if (p[kTc1Param] != 0.0) {
+            out += " tc1=" + Device::CardWriter::num(p[kTc1Param]);
+        }
+        if (p[kTc2Param] != 0.0) {
+            out += " tc2=" + Device::CardWriter::num(p[kTc2Param]);
+        }
+        if (has_temp_inst_) {
+            out += " temp=" + Device::CardWriter::num(temp_inst_c_);
+        }
+        out += "\n";
         return true;
     }
 
 private:
+    static constexpr std::size_t kValueParam = 0;
+    static constexpr std::size_t kTc1Param = 1;
+    static constexpr std::size_t kTc2Param = 2;
+
     std::string name_;
     NodeId a_, b_;
     ExprProgram ohms_;
+    ExprProgram tc1_, tc2_;
+    bool tc1_given_;         // instance tc1= overrides the model's
+    bool tc2_given_;
+    double tnom_k_ = 300.15;      // model/.options tnom, K (§7.7)
+    bool has_temp_inst_ = false;  // instance temp= override (°C)
+    double temp_inst_c_ = 27.0;
+    std::string model_name_;  // empty when the card carried no model
 };
 
 ws::core::Result<std::unique_ptr<Device>> make_resistor(const DeviceCard& card,
@@ -205,18 +341,106 @@ ws::core::Result<std::unique_ptr<Device>> make_resistor(const DeviceCard& card,
                                    "device " + card.name.text + " needs a value",
                                    card.loc));
     }
-    // R name a b value | modelname [w= l= ...]
-    WS_TRY_ASSIGN(ExprProgram ohms, resolve_value_program(card.rest[2], s.params));
+    // R name a b [model] value [temp=] [tc1=] [tc2=]: rest[2] is the value
+    // when it parses AND validates (a bare .param name wins, the §8.3
+    // accommodation; a gauss() draw validates against a dummy rng), else
+    // a model name with the value at rest[3] (ngspice's order).
+    std::size_t value_idx = 2;
+    bool has_model = false;
+    {
+        const ws::core::Result<ExprProgram> first =
+            resolve_value_program(card.rest[2], s.params);
+        bool first_ok = false;
+        if (first) {
+            first_ok = static_cast<bool>(eval_param_for_validation(*first, s.params));
+        }
+        if (!first_ok) {
+            if (card.rest.size() >= 4 &&
+                resolve_value_program(card.rest[3], s.params)) {
+                has_model = true;
+                value_idx = 3;
+            } else {
+                // Neither a value nor a model-with-value: report the
+                // token's own parse/validation error (it carries the loc).
+                return first ? ws::core::unexpected<ws::core::Error>(
+                                   eval_param_for_validation(*first, s.params).error())
+                             : ws::core::unexpected<ws::core::Error>(first.error());
+            }
+        }
+    }
+    WS_TRY_ASSIGN(ExprProgram ohms, resolve_value_program(card.rest[value_idx], s.params));
     WS_TRY(eval_param_for_validation(ohms, s.params));
-    if (card.rest.size() > 3) {
+    Token tc1_tok, tc2_tok;
+    bool has_tc1 = false, has_tc2 = false;
+    bool has_temp_inst = false;
+    double temp_inst = 27.0;
+    for (std::size_t i = value_idx + 1; i < card.rest.size(); ++i) {
+        const std::string lower = to_lower(card.rest[i].text);
+        if (lower.rfind("tc1=", 0) == 0) {
+            tc1_tok.text = card.rest[i].text.substr(4);
+            tc1_tok.loc = card.rest[i].loc;
+            has_tc1 = true;
+            continue;
+        }
+        if (lower.rfind("tc2=", 0) == 0) {
+            tc2_tok.text = card.rest[i].text.substr(4);
+            tc2_tok.loc = card.rest[i].loc;
+            has_tc2 = true;
+            continue;
+        }
+        if (lower.rfind("temp=", 0) == 0) {
+            // §7.7: per-instance temperature override (°C).
+            if (const ws::core::Result<double> r =
+                    parse_number(card.rest[i].text.substr(5))) {
+                has_temp_inst = true;
+                temp_inst = *r;
+            }
+            continue;
+        }
+        if (lower.rfind("tc=", 0) == 0) {
+            // ngspice's tc=tc1[,tc2] spelling.
+            const std::string v = card.rest[i].text.substr(3);
+            const std::size_t comma = v.find(',');
+            if (const ws::core::Result<double> r = parse_number(v.substr(0, comma))) {
+                tc1_tok.text = v.substr(0, comma);
+                tc1_tok.loc = card.rest[i].loc;
+                has_tc1 = true;
+            }
+            if (comma != std::string::npos) {
+                if (const ws::core::Result<double> r = parse_number(v.substr(comma + 1))) {
+                    tc2_tok.text = v.substr(comma + 1);
+                    tc2_tok.loc = card.rest[i].loc;
+                    has_tc2 = true;
+                }
+            }
+            continue;
+        }
         return spice_fail(dev_diag(
             ErrorKind::Semantic, "spice.semantic.r_extra",
             "resistor " + card.name.text +
-                " takes a plain value in v1 (models/geometry land with M5)",
+                " takes [model] value, temp=, tc1=, tc2= (w=/l= geometry lands"
+                " post-M5)",
             card.loc));
     }
-    auto dev = std::make_unique<Resistor>(card.name.text, n[0], n[1], std::move(ohms));
+    Token zero_tok;
+    zero_tok.text = "0";
+    WS_TRY_ASSIGN(ExprProgram tc1_zero, resolve_value_program(zero_tok, s.params));
+    WS_TRY_ASSIGN(ExprProgram tc2_zero, resolve_value_program(zero_tok, s.params));
+    ExprProgram tc1 = std::move(tc1_zero);
+    if (has_tc1) {
+        WS_TRY_ASSIGN(tc1, resolve_value_program(tc1_tok, s.params));
+    }
+    ExprProgram tc2 = std::move(tc2_zero);
+    if (has_tc2) {
+        WS_TRY_ASSIGN(tc2, resolve_value_program(tc2_tok, s.params));
+    }
+    auto dev = std::make_unique<Resistor>(card.name.text, n[0], n[1], std::move(ohms),
+                                          std::move(tc1), std::move(tc2), has_tc1,
+                                          has_tc2, has_temp_inst, temp_inst);
     dev->loc = card.loc;
+    if (has_model) {
+        s.models.push_back(ModelRequest{dev.get(), card.rest[2]});
+    }
     return dev;
 }
 

@@ -103,6 +103,29 @@ SparseMatrix<double> from_dense(const std::vector<double>& dense, std::size_t n,
     return m;
 }
 
+
+SparseMatrix<std::complex<double>> from_dense(
+    const std::vector<std::complex<double>>& dense, std::size_t n,
+    double drop = 0.0) {
+    SparsePatternBuilder builder;
+    for (std::size_t r = 0; r < n; ++r) {
+        for (std::size_t c = 0; c < n; ++c) {
+            if (std::abs(dense[r * n + c]) > drop) {
+                builder.add(r, c);
+            }
+        }
+    }
+    SparseMatrix<std::complex<double>> m(builder.build(n));
+    for (std::size_t r = 0; r < n; ++r) {
+        for (std::size_t c = 0; c < n; ++c) {
+            if (m.contains(r, c)) {
+                m.at(r, c) = dense[r * n + c];
+            }
+        }
+    }
+    return m;
+}
+
 }  // namespace
 
 TEST_CASE("pattern builder sorts, dedupes and reports per-column ranges") {
@@ -369,5 +392,80 @@ TEST_CASE("transpose solve matches an explicit transposed factorization") {
     REQUIRE(lu_t2.solve(b, x_ref2));
     for (std::size_t i = 0; i < n; ++i) {
         CHECK(x_adj2[i] == doctest::Approx(x_ref2[i]).epsilon(1e-12));
+    }
+}
+
+TEST_CASE("complex transpose solve matches an explicit transposed factorization") {
+    using cd = std::complex<double>;
+    // The .noise adjoint shape (libs/spice DESIGN.md §4.5): random complex
+    // sparse system, A^T x = b against a factorization of A^T itself.
+    Lcg rng(0xAD01);
+    const std::size_t n = 20;
+    std::vector<cd> dense(n * n, cd(0.0, 0.0));
+    for (std::size_t r = 0; r < n; ++r) {
+        for (std::size_t c = 0; c < n; ++c) {
+            if (rng.unit() < 0.3) {
+                dense[r * n + c] =
+                    cd(0.5 + rng.unit(), 0.5 * rng.unit() - 0.25);
+            }
+        }
+        dense[r * n + r] += cd(2.0, 0.0);
+    }
+    std::vector<cd> b(n);
+    for (cd& v : b) {
+        v = cd(-1.0 + 2.0 * rng.unit(), rng.unit() - 0.5);
+    }
+
+    SparseMatrix<cd> m = from_dense(dense, n);
+
+    ComplexSparseLu lu;
+    REQUIRE(lu.analyze(m.pattern()));
+    REQUIRE(lu.factorize(m));
+
+    std::vector<cd> x_adj(n, cd(0.0, 0.0));
+    REQUIRE(lu.solve_transpose(b, x_adj));
+
+    // Reference: build and factorize A^T itself.
+    std::vector<cd> dense_t(n * n);
+    for (std::size_t r = 0; r < n; ++r) {
+        for (std::size_t c = 0; c < n; ++c) {
+            dense_t[r * n + c] = dense[c * n + r];
+        }
+    }
+    SparseMatrix<cd> mt = from_dense(dense_t, n);
+    ComplexSparseLu lu_t;
+    REQUIRE(lu_t.analyze(mt.pattern()));
+    REQUIRE(lu_t.factorize(mt));
+    std::vector<cd> x_ref(n, cd(0.0, 0.0));
+    REQUIRE(lu_t.solve(b, x_ref));
+
+    for (std::size_t i = 0; i < n; ++i) {
+        CHECK(x_adj[i].real() == doctest::Approx(x_ref[i].real()).epsilon(1e-12));
+        CHECK(x_adj[i].imag() == doctest::Approx(x_ref[i].imag()).epsilon(1e-12));
+    }
+
+    // A new factorize() invalidates the transpose factors - the next
+    // transpose solve follows the NEW values.
+    for (cd& v : m.values()) {
+        v *= cd(1.5, 0.0);
+    }
+    REQUIRE(lu.factorize(m));
+    std::vector<cd> x_adj2(n, cd(0.0, 0.0));
+    REQUIRE(lu.solve_transpose(b, x_adj2));
+    std::vector<cd> dense_t2(n * n);
+    for (std::size_t r = 0; r < n; ++r) {
+        for (std::size_t c = 0; c < n; ++c) {
+            dense_t2[r * n + c] = dense[c * n + r] * cd(1.5, 0.0);
+        }
+    }
+    SparseMatrix<cd> mt2 = from_dense(dense_t2, n);
+    ComplexSparseLu lu_t2;
+    REQUIRE(lu_t2.analyze(mt2.pattern()));
+    REQUIRE(lu_t2.factorize(mt2));
+    std::vector<cd> x_ref2(n, cd(0.0, 0.0));
+    REQUIRE(lu_t2.solve(b, x_ref2));
+    for (std::size_t i = 0; i < n; ++i) {
+        CHECK(x_adj2[i].real() == doctest::Approx(x_ref2[i].real()).epsilon(1e-12));
+        CHECK(x_adj2[i].imag() == doctest::Approx(x_ref2[i].imag()).epsilon(1e-12));
     }
 }

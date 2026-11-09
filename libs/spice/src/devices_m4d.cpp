@@ -43,6 +43,8 @@
 
 #include "cards.hpp"
 
+#include "physconst.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -777,7 +779,8 @@ public:
     [[nodiscard]] bool update_state(const std::vector<double>& x,
                                     std::size_t node_count, double* st,
                                     const std::vector<double>* x_prev = nullptr,
-                                    const double* params = nullptr) override {
+                                    const double* params = nullptr,
+                                    double /*temp_k*/ = 300.15) override {
         const std::vector<double>& xl =
             (x_prev != nullptr && !x_prev->empty()) ? *x_prev : x;
         double ref_vals[kMaxRefs];

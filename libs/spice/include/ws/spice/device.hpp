@@ -49,6 +49,7 @@ inline constexpr NodeId kGround = static_cast<NodeId>(-1);
 
 class DcLoadContext;
 class AcLoadContext;
+class NoiseContext;
 struct ModelDef;
 class ParamTable;
 struct Circuit;
@@ -253,6 +254,15 @@ public:
     // a V source without one still pins v(p)-v(n)=0 through its override).
     virtual void load_ac(AcLoadContext& cx) const { (void)cx; }
 
+    // Small-signal noise densities at the OP (§7.5, M5). Called per
+    // frequency point by the .noise driver with the OP frozen in the
+    // state slice; the device reports each of its uncorrelated noise
+    // generators through cx.add_source(name, p, n, psd) - a current PSD
+    // in A^2/Hz between nodes p and n. The driver folds each source with
+    // the adjoint gain |x_a[p]-x_a[n]|^2; linear devices (the default)
+    // report none.
+    virtual void load_noise(NoiseContext& cx) const { (void)cx; }
+
     // --- dynamic-device state machine (§3.5b, §6.2/§6.3) ----------------------
 
     // True for devices with per-step companion state (C, L). The driver
@@ -336,15 +346,20 @@ public:
     // passes); devices must tolerate that. `params` (M4d) is this device's
     // bound parameter slice - behavioral sources need it to evaluate their
     // residual against the true gains; null in contexts that have none.
+    // `temp_k` (M5, §7.7) is the run temperature in KELVIN (the circuit's
+    // elaboration temperature) - the same value the load contexts expose,
+    // for the temp-dependent model equations (Vt(T), Is(T)) this hook
+    // evaluates.
     [[nodiscard]] virtual bool update_state(
         const std::vector<double>& x, std::size_t node_count, double* st,
         const std::vector<double>* x_prev = nullptr,
-        const double* params = nullptr) {
+        const double* params = nullptr, double temp_k = 300.15) {
         (void)x;
         (void)node_count;
         (void)st;
         (void)x_prev;
         (void)params;
+        (void)temp_k;
         return false;
     }
 
@@ -367,12 +382,14 @@ public:
     // against the ACCEPTED solution `x` (node voltages then branch
     // unknowns; ground is kGround). `params` is this device's bound
     // parameter slice (the update_state convention), null when the caller
-    // has none bound. Sign convention: positive current flows from the
-    // first terminal to the second (the diode: anode -> cathode).
+    // has none bound. `temp_k` (M5) is the run temperature in KELVIN (the
+    // update_state convention) for the temp-dependent current equations.
+    // Sign convention: positive current flows from the first terminal to
+    // the second (the diode: anode -> cathode).
     [[nodiscard]] virtual bool probes_current() const { return false; }
     [[nodiscard]] virtual double terminal_current(
         const std::vector<double>& /*x*/, std::size_t /*node_count*/,
-        const double* /*params*/) const {
+        const double* /*params*/, double /*temp_k*/ = 300.15) const {
         return 0.0;
     }
 
@@ -471,7 +488,10 @@ public:
 // well-defined stamp POSITIONS, which is all the pattern dry run needs).
 // `gmin()` exposes the run's junction-parallel conductance (§5.2 ladder
 // stage 2) so nonlinear devices can fold it into their stamp without
-// reaching into RunSettings.
+// reaching into RunSettings. §7.7 (M5): `temp_k()` is the run's
+// temperature in KELVIN - the circuit's elaboration temperature (every
+// temp change re-elaborates, §7.7), so a load never needs to ask
+// anything else. Pattern mode returns the default 27 °C.
 class DcLoadContext {
 public:
     virtual ~DcLoadContext() = default;
@@ -502,6 +522,12 @@ public:
     // nonlinear devices can fold it into their linearization without
     // reaching into RunSettings. Pattern mode returns the default.
     [[nodiscard]] virtual double gmin() const = 0;
+
+    // §7.7 (M5): the run temperature in KELVIN (the circuit's elaboration
+    // temperature - a `.dc temp` / `.step temp` point re-elaborates, so
+    // this is always the temperature the devices must evaluate at).
+    // Pattern mode returns the 27 °C default (values never matter there).
+    [[nodiscard]] virtual double temp_k() const = 0;
 
     // --- this device's slices (set by the system before every call) ------
     //
@@ -548,7 +574,11 @@ public:
 // linearization is the one frozen at the OP. §3.6 (M3): the device's
 // state slice IS exposed (read-only) so nonlinear devices can recover
 // their OP linearization point (a diode's Gd_op from Vd_prev) without
-// re-solving.
+// re-solving. §7.5 (M5): during a .noise forward solve `noise_input`
+// names the analysis's input source - every source stamps zero EXCEPT
+// it (and it stamps 1+0j, ignoring its declared AC spec, exactly
+// ngspice's MODEACNOISE); null in a plain .ac run, where sources use
+// their declared specs.
 class AcLoadContext {
 public:
     virtual ~AcLoadContext() = default;
@@ -556,6 +586,13 @@ public:
     virtual void add_entry(std::size_t row, std::size_t col, std::complex<double> v) = 0;
     virtual void add_rhs(std::size_t row, std::complex<double> v) = 0;
     [[nodiscard]] virtual std::size_t branch_row(BranchId br) const = 0;
+
+    // §7.7 (M5): the run temperature in KELVIN (see DcLoadContext).
+    [[nodiscard]] virtual double temp_k() const = 0;
+
+    // §7.5 (M5): the .noise input source (see the class comment); null
+    // in a plain .ac run.
+    const Device* noise_input = nullptr;
 
     // This device's parameter slice + (M3) state slice: the OP
     // linearization is frozen at the .ac solve, and nonlinear devices
@@ -585,6 +622,34 @@ public:
         add_entry(n, row, -1.0);
         add_rhs(row, v);
     }
+};
+
+// The noise twin (§7.5, M5): per-frequency density contributions at the
+// frozen OP. Devices report each uncorrelated noise generator as a
+// CURRENT source PSD (A^2/Hz) between two nodes; the driver folds in the
+// adjoint gain |x_a[p]-x_a[n]|^2 itself (one adjoint solve serves every
+// source, §7.5). `freq` is the density's frequency (Hz) and `temp_k` the
+// run temperature (K) - the R thermal 4kT/R and junction formulas read
+// both. The parameter/state slices follow the load-context convention
+// (the OP lives in the state slice, exactly like load_ac).
+class NoiseContext {
+public:
+    virtual ~NoiseContext() = default;
+
+    // Reports one uncorrelated noise current source: name is the
+    // SPICE-style source tag ("rs", "id", "1overf", "thermal", "ib",
+    // "ic", "fn" - ngspice's per-device naming); the PSD is in A^2/Hz
+    // between p and n (either may be ground).
+    virtual void add_source(const char* name, NodeId p, NodeId n,
+                            double psd) = 0;
+
+    const double* params_ = nullptr;
+    const double* state_ = nullptr;
+    [[nodiscard]] double par(std::size_t i) const { return params_[i]; }
+    [[nodiscard]] double st(std::size_t i) const { return state_[i]; }
+
+    double freq = 0.0;    // Hz (the density's frequency)
+    double temp_k = 300.15;  // the run temperature, K
 };
 
 // The factory signature: card + services -> device. The factory table

@@ -35,6 +35,8 @@
 #include <ws/spice/device.hpp>
 #include <ws/spice/state.hpp>
 
+#include "physconst.hpp"
+
 namespace ws::spice {
 
 namespace {
@@ -56,7 +58,21 @@ Diagnostic dev_diag(ErrorKind kind, std::string code, std::string message, Sourc
 }
 
 // Boltzmann's constant / electron charge (V/K) - the thermal voltage scale.
-constexpr double kVtPerK = 8.617333262145e-5;
+constexpr double kVtPerK = phys::kKoverQ;
+
+// §7.7: the SPICE3 saturation-current temperature factor (diotemp.c,
+// tlev=0): Is(T) = Is·exp[(T/Tnom − 1)·Eg/(N·Vt_T) + (XTI/N)·ln(T/Tnom)]
+// with EG the model's energy gap (default 1.11 eV) and XTI=3. Returns
+// exactly 0.0 at T == Tnom, so the default-temperature stamp is
+// bit-identical to the frozen-Tnom form.
+[[nodiscard]] double diode_is_temp_factor(double temp_k, double tnom_k, double eg,
+                                          double xti, double n, double vte) {
+    const double ratio = temp_k / tnom_k;
+    if (ratio == 1.0) {
+        return 0.0;
+    }
+    return (ratio - 1.0) * eg / vte + (xti / n) * std::log(ratio);
+}
 
 // §5.3 pnjlim (SPICE3 dev.c, simplified - the icheck first-time flag is
 // folded into the always-directional form; the difference only matters on
@@ -103,9 +119,10 @@ public:
     static constexpr std::size_t kCjoEff = 15; // folded Cjo*area
 
     Diode(std::string display, NodeId anode, NodeId cathode, ExprProgram area,
-          bool has_ic, double ic)
+          bool has_ic, double ic, bool has_temp_inst, double temp_inst_c)
         : name_(std::move(display)), anode_(anode), cathode_(cathode),
-          area_(std::move(area)), has_ic_(has_ic), ic_(ic) {}
+          area_(std::move(area)), has_ic_(has_ic), ic_(ic),
+          has_temp_inst_(has_temp_inst), temp_inst_c_(temp_inst_c) {}
 
     [[nodiscard]] const std::string& name() const override { return name_; }
     [[nodiscard]] char kind() const override { return 'D'; }
@@ -133,17 +150,47 @@ public:
     // stamp byte-identical - no mid node exists at all.
     [[nodiscard]] NodeId jnode() const { return (mid_ != kGround) ? mid_ : anode_; }
 
+    // §7.7 (M5): the effective temperature for this load - the instance
+    // temp= override when given, else the run's (elaboration) temperature.
+    [[nodiscard]] double load_temp_k(double ctx_temp_k) const {
+        return has_temp_inst_ ? phys::c_to_k(temp_inst_c_) : ctx_temp_k;
+    }
+
+    // The temp-dependent model quantities at one (area, temperature):
+    // Vt, N·Vt, the effective saturation current Is(T)·area and the
+    // pnjlim knee vcrit(T). At T == Tnom every field equals the frozen
+    // Tnom values (the factor is exactly 0), so default decks keep the
+    // M3/M4b answers bit-for-bit.
+    struct TempOp {
+        double vt = 0.0;
+        double vte = 0.0;
+        double is_eff = 0.0;
+        double vcrit = 0.0;
+    };
+    [[nodiscard]] TempOp temp_op(double area, double temp_k) const {
+        TempOp op;
+        op.vt = temp_k * kVtPerK;
+        op.vte = n_ * op.vt;
+        const double tf =
+            diode_is_temp_factor(temp_k, tnom_k_, eg_, xti_, n_, op.vte);
+        const double is_t = is_ * std::exp(tf);
+        op.is_eff = is_t * area;
+        const double arg = op.vte / (std::sqrt(2.0) * is_t);
+        op.vcrit = (arg > 1.0) ? op.vte * std::log(arg) : op.vte;
+        return op;
+    }
+
     void load_dc(DcLoadContext& cx) const override {
         const double area = cx.par(kAreaParam);
-        const double is_eff = is_ * area;
+        const TempOp op = temp_op(area, load_temp_k(cx.temp_k()));
         const NodeId j = jnode();
         const double vd = cx.node_v(j) - cx.node_v(cathode_);
-        const double vd_lim = pnjlim(vd, cx.st(kVdPrev), vt_, vcrit_);
-        const double arg = safe_exp_arg(vd_lim / (n_ * vt_));
+        const double vd_lim = pnjlim(vd, cx.st(kVdPrev), op.vte, op.vcrit);
+        const double arg = safe_exp_arg(vd_lim / op.vte);
         const double ex = std::exp(arg);
         const double gm = cx.gmin();
-        const double gd = is_eff / (n_ * vt_) * ex + gm;
-        const double i = is_eff * (ex - 1.0) + gm * vd_lim;
+        const double gd = op.is_eff / op.vte * ex + gm;
+        const double i = op.is_eff * (ex - 1.0) + gm * vd_lim;
         const double ieq = i - gd * vd_lim;  // Norton offset
         // Series resistance (every mode; Rs scales as Rs/area, SPICE3).
         if (mid_ != kGround) {
@@ -171,11 +218,11 @@ public:
     // M4b: adds j*omega*Cj(Vd) — the junction capacitance at the OP.
     void load_ac(AcLoadContext& cx) const override {
         const double area = cx.par(kAreaParam);
-        const double is_eff = is_ * area;
+        const TempOp op = temp_op(area, load_temp_k(cx.temp_k()));
         const double vd = cx.st(kVdPrev);
-        const double arg = safe_exp_arg(vd / (n_ * vt_));
+        const double arg = safe_exp_arg(vd / op.vte);
         const double ex = std::exp(arg);
-        const double gd_op = is_eff / (n_ * vt_) * ex;
+        const double gd_op = op.is_eff / op.vte * ex;
         if (mid_ != kGround) {
             cx.add_conductance(anode_, mid_, area / rs_);
         }
@@ -234,11 +281,17 @@ public:
     [[nodiscard]] bool update_state(const std::vector<double>& x,
                                     std::size_t /*node_count*/, double* st,
                                     const std::vector<double>* x_prev = nullptr,
-                                    const double* /*params*/ = nullptr) override {
+                                    const double* params = nullptr,
+                                    double temp_k = 300.15) override {
         const std::vector<double>& x_load =
             (x_prev != nullptr && !x_prev->empty()) ? *x_prev : x;
+        double area = 1.0;
+        if (params != nullptr) {
+            area = params[kAreaParam];
+        }
+        const TempOp op = temp_op(area, load_temp_k(temp_k));
         const double vd_load = v_across(x_load, jnode(), cathode_);
-        const double vd_lim = pnjlim(vd_load, st[kVdPrev], vt_, vcrit_);
+        const double vd_lim = pnjlim(vd_load, st[kVdPrev], op.vte, op.vcrit);
         // §5.3: return true (force another iteration) when pnjlim is
         // actively clamping — the linearization point differs from the
         // iterate, so convergence would be premature. Without this, a
@@ -246,11 +299,12 @@ public:
         // because I(Vd_lim) is below abstol and the residual check passes.
         const bool clamped = vd_lim != vd_load;
         // Track I at the clamped linearization point (the "current
-        // predicted by the linearization", §5.1). Using is_ (area=1) is a
-        // minor approximation when area≠1; the voltage-delta check
-        // compensates, and the Lambert-W gate uses area=1 anyway.
-        const double arg = safe_exp_arg(vd_lim / (n_ * vt_));
-        const double i_lim = is_ * (std::exp(arg) - 1.0);
+        // predicted by the linearization", §5.1). §7.7 (M5): Is(T) and Vt(T)
+        // re-evaluate per load through the temp op, and the area folds in
+        // exactly (the old area=1 approximation is gone - the residual
+        // gate is area-exact now).
+        const double arg = safe_exp_arg(vd_lim / op.vte);
+        const double i_lim = op.is_eff * (std::exp(arg) - 1.0);
         st[kIPrev] = st[kICur];
         st[kICur] = i_lim;
         st[kVdPrev] = vd_lim;  // CLAMPED, for the NEXT iteration's pnjlim vold
@@ -276,15 +330,16 @@ public:
     [[nodiscard]] bool probes_current() const override { return true; }
     [[nodiscard]] double terminal_current(const std::vector<double>& x,
                                           std::size_t /*node_count*/,
-                                          const double* params) const override {
+                                          const double* params,
+                                          double temp_k = 300.15) const override {
         const double area =
             params != nullptr ? params[kAreaParam] : 1.0;
         if (mid_ != kGround) {
             return v_across(x, anode_, mid_) * area / rs_;
         }
-        const double is_eff = is_ * area;
+        const TempOp op = temp_op(area, load_temp_k(temp_k));
         const double vd = v_across(x, anode_, cathode_);
-        return is_eff * (std::exp(safe_exp_arg(vd / (n_ * vt_))) - 1.0);
+        return op.is_eff * (std::exp(safe_exp_arg(vd / op.vte)) - 1.0);
     }
 
     // --- M4b dynamic hooks (charge companion, only when Cjo > 0) ----------
@@ -388,10 +443,11 @@ public:
     }
 
     // .model name D(Is=... N=... Rs=... Cjo=... ...). Implements Is, N,
-    // Tnom (for Vt/vcrit), Cjo/M/Vj/Fc (M4b junction charge) and Rs
-    // (series resistance — the internal-node form); accepts Bv/Ibv/Xti/
-    // Eg/Kf/Af/TT silently (warned once per model in `spice check`) - they
-    // land with M5 (breakdown, temp model, noise) and the diffusion charge.
+    // Tnom, Xti, Eg (the §7.7 temperature model), Cjo/M/Vj/Fc (M4b
+    // junction charge) and Rs (series resistance — the internal-node
+    // form); accepts Bv/Ibv/Kf/Af/TT silently (warned once per model in
+    // `spice check`) - they land with M5 (breakdown, noise, diffusion
+    // charge).
     ws::core::Status apply_model(const ModelDef& model,
                                  NodeResolver& nodes) override {
         if (model.type != "d") {
@@ -402,12 +458,13 @@ public:
         }
         model_name_ = model.name.text;
         // ngspice defaults: Is=1e-14 A, N=1, Tnom=27°C, Cjo=0 (no cap),
-        // M=0.5, Vj=1V, Fc=0.5.
+        // M=0.5, Vj=1V, Fc=0.5, Eg=1.11 eV, Xti=3 (diosetup.c).
         double is_val = 1e-14;
         double n_val = 1.0;
         double tnom = 27.0;
         double cjo_val = 0.0, m_val = 0.5, vj_val = 1.0, fc_val = 0.5;
         double rs_val = 0.0;
+        double eg_val = 1.11, xti_val = 3.0;
         const auto& toks = model.params;
         for (std::size_t i = 0; i < toks.size(); ++i) {
             std::string text = toks[i].text;
@@ -470,13 +527,16 @@ public:
                 vj_val = v;
             } else if (key == "fc") {
                 fc_val = v;
+            } else if (key == "xti") {
+                xti_val = v;
+            } else if (key == "eg") {
+                eg_val = v;
             } else if (key == "bv" || key == "ibv" ||
-                       key == "xti" || key == "eg" || key == "kf" ||
-                       key == "af" || key == "tt") {
+                       key == "kf" || key == "af" || key == "tt") {
                 // Accepted (so ngspice decks parse cleanly) but not
                 // implemented. `spice check` warns per-model.
-                // TT (diffusion charge), Bv/Ibv (breakdown), Xti/Eg
-                // (temp), Kf/Af (noise) land with M5.
+                // TT (diffusion charge), Bv/Ibv (breakdown), Kf/Af
+                // (noise) land with M5.
             } else {
                 return spice_fail(dev_diag(
                     ErrorKind::Semantic, "spice.semantic.model_param",
@@ -507,6 +567,9 @@ public:
         is_ = is_val;
         n_ = n_val;
         rs_ = rs_val;
+        tnom_k_ = phys::c_to_k(tnom);
+        eg_ = eg_val;
+        xti_ = xti_val;
         // The series node exists only when Rs > 0 (the L Rser precedent:
         // an always-present internal node would flood every deck's save
         // list). apply_model runs BEFORE the §6.6 graph checks, so the
@@ -518,13 +581,10 @@ public:
             mid_tok.loc = model.loc;
             mid_ = nodes.node(mid_tok);
         }
-        // Vt at Tnom. M5 will re-evaluate per-run against TEMP; M3/M4b freezes
-        // at Tnom (the Lambert-W gate uses the default 27°C).
-        vt_ = (tnom + 273.15) * kVtPerK;
-        // SPICE3 vcrit = N*Vt*ln(N*Vt / (sqrt(2)*Is)). With Is=1e-14, N=1,
-        // Tnom=27: vcrit ≈ 0.728 V - the knee past which pnjlim engages.
-        const double arg = n_ * vt_ / (std::sqrt(2.0) * is_val);
-        vcrit_ = (arg > 1.0) ? n_ * vt_ * std::log(arg) : n_ * vt_;
+        // Vt/vcrit are now PER-LOAD quantities (§7.7, M5): they evaluate at
+        // the run temperature through temp_op(), so a `.options temp` /
+        // `.dc temp` deck sees the true thermal voltage and Is(T). At
+        // T == Tnom the values equal the frozen-Tnom form bit-for-bit.
         // M4b: junction capacitance params.
         cjo_ = cjo_val;
         m_ = m_val;
@@ -600,11 +660,15 @@ private:
     ExprProgram area_;
     bool has_ic_;
     double ic_;
+    // §7.7: per-instance temp= override (°C; ngspice's diode TEMP).
+    bool has_temp_inst_ = false;
+    double temp_inst_c_ = 27.0;
     // Model fields (set by apply_model):
     double is_ = 1e-14;     // saturation current (per area=1)
     double n_ = 1.0;        // emission coefficient
-    double vt_ = 0.02585;   // thermal voltage at Tnom (V)
-    double vcrit_ = 0.7;    // pnjlim knee (V)
+    double tnom_k_ = 300.15;  // model nominal temperature, K (§7.7)
+    double eg_ = 1.11;      // energy gap, eV (§7.7 Is(T))
+    double xti_ = 3.0;      // Is temperature exponent (§7.7)
     double rs_ = 0.0;       // series resistance (ohms; 0 = no mid node)
     // M4b: junction capacitance model params (Cjo > 0 enables the companion)
     double cjo_ = 0.0;      // zero-bias junction capacitance (F)
@@ -631,6 +695,8 @@ ws::core::Result<std::unique_ptr<Device>> make_diode(const DeviceCard& card,
     bool has_area = false;
     bool has_ic = false;
     double ic_val = 0.0;
+    bool has_temp_inst = false;
+    double temp_inst = 27.0;
     for (std::size_t i = 3; i < card.rest.size(); ++i) {
         const std::string lower = to_lower(card.rest[i].text);
         if (lower.rfind("ic=", 0) == 0) {
@@ -647,8 +713,12 @@ ws::core::Result<std::unique_ptr<Device>> make_diode(const DeviceCard& card,
             continue;
         }
         if (lower.rfind("temp=", 0) == 0) {
-            // Per-instance temp override lands with M5 (temp-dependent
-            // models). Accept and ignore in M3.
+            // §7.7 (M5): per-instance temperature override (°C).
+            if (const ws::core::Result<double> r =
+                    parse_number(card.rest[i].text.substr(5))) {
+                has_temp_inst = true;
+                temp_inst = *r;
+            }
             continue;
         }
         if (!has_area) {
@@ -671,7 +741,7 @@ ws::core::Result<std::unique_ptr<Device>> make_diode(const DeviceCard& card,
         WS_TRY_ASSIGN(area_prog, resolve_value_program(one, s.params));
     }
     auto dev = std::make_unique<Diode>(card.name.text, n[0], n[1], std::move(area_prog),
-                                       has_ic, ic_val);
+                                       has_ic, ic_val, has_temp_inst, temp_inst);
     dev->loc = card.loc;
     s.models.push_back(ModelRequest{dev.get(), card.rest[2]});
     return dev;

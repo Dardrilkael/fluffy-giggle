@@ -55,6 +55,8 @@
 
 #include "cards.hpp"
 
+#include "physconst.hpp"
+
 #include <cmath>
 #include <complex>
 #include <cstddef>

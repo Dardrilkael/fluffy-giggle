@@ -432,13 +432,75 @@ ws::core::Status Elaborator::resolve_controls() {
     return {};
 }
 
+namespace {
+
+// §7.7: `.options tnom=` (the LAST card wins, §5.1) - the default nominal
+// temperature for every model without an explicit Tnom= (ngspice's
+// CKTnomTemp).
+[[nodiscard]] std::optional<double> deck_default_tnom(const DeckAst& ast) {
+    std::optional<double> out;
+    for (const OptionsCard& opt : ast.options) {
+        for (const auto& [k, v] : opt.kv) {
+            if (k.text == "tnom") {
+                if (const ws::core::Result<double> r = parse_number(v.text)) {
+                    out = *r;
+                }
+            }
+        }
+    }
+    return out;
+}
+
+[[nodiscard]] bool model_lacks_tnom(const ModelDef& m) {
+    for (const Token& t : m.params) {
+        std::string text = to_lower(t.text);
+        while (!text.empty() && text.front() == '(') text.erase(text.begin());
+        if (text == "tnom" || text.rfind("tnom=", 0) == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Appends `tnom <v>` to a model lacking it (the §7.7 patch).
+[[nodiscard]] ModelDef with_default_tnom(const ModelDef& m, double tnom) {
+    ModelDef patched = m;
+    Token k;
+    k.text = "tnom";
+    k.loc = m.loc;
+    Token v;
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.17g", tnom);
+    v.text = buf;
+    v.loc = m.loc;
+    patched.params.push_back(k);
+    patched.params.push_back(v);
+    return patched;
+}
+
+}  // namespace
+
 ws::core::Status Elaborator::resolve_models() {
+    // §7.7 (M5): patch the deck's default Tnom into every model without
+    // an explicit one, so the devices never need a second channel - the
+    // ModelDef they see already holds the effective value. The patched
+    // cards also land in Circuit::used_models, so a written netlist
+    // carries the effective Tnom explicitly (deterministic round-trip,
+    // §10.2).
+    const std::optional<double> default_tnom = deck_default_tnom(ast_);
+
     for (const ModelRequest& req : pending_models_) {
         const std::string key = to_lower(req.name.text);
         const ModelDef* def = nullptr;
+        ModelDef patched;
         for (const ModelDef& m : ast_.models) {
             if (to_lower(m.name.text) == key) {
-                def = &m;
+                if (default_tnom.has_value() && model_lacks_tnom(m)) {
+                    patched = with_default_tnom(m, *default_tnom);
+                    def = &patched;
+                } else {
+                    def = &m;
+                }
                 break;
             }
         }
@@ -724,10 +786,25 @@ ws::core::Status Elaborator::elaborate(
     WS_TRY(resolve_controls());
     // The referenced .model cards travel with the circuit (netlist writer,
     // @dev[param] reads). Subckt-local models are flattened away, so this
-    // is the complete set the devices can consult.
-    for (const ModelDef& m : ast_.models) {
-        if (used_models_.count(to_lower(m.name.text)) != 0) {
-            circuit_.used_models.push_back(m);
+    // is the complete set the devices can consult. A tnom-patched model
+    // re-emits with its explicit Tnom (§7.7) - recompute the same patch
+    // here so the written deck matches what the devices saw.
+    if (const std::optional<double> default_tnom = deck_default_tnom(ast_);
+        default_tnom.has_value()) {
+        for (const ModelDef& m : ast_.models) {
+            if (used_models_.count(to_lower(m.name.text)) != 0) {
+                if (model_lacks_tnom(m)) {
+                    circuit_.used_models.push_back(with_default_tnom(m, *default_tnom));
+                } else {
+                    circuit_.used_models.push_back(m);
+                }
+            }
+        }
+    } else {
+        for (const ModelDef& m : ast_.models) {
+            if (used_models_.count(to_lower(m.name.text)) != 0) {
+                circuit_.used_models.push_back(m);
+            }
         }
     }
     return check_topology();

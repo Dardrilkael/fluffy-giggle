@@ -5,6 +5,8 @@
 #include <utility>
 #include <vector>
 
+#include "physconst.hpp"
+
 namespace ws::spice {
 
 namespace detail {
@@ -13,7 +15,8 @@ namespace detail {
 // entries never reach the builder (ground row/col dropped, §4.1). §3.6
 // (M3): node_v/branch_i/gmin return 0/default - a linearization around
 // zero produces the right stamp POSITIONS (only coefficients depend on
-// the iterate), which is all the dry run records.
+// the iterate), which is all the dry run records. §7.7 (M5): temp_k
+// returns the 27 °C default - temperature scales coefficients only.
 class PatternContext final : public DcLoadContext {
 public:
     PatternContext(ws::math::SparsePatternBuilder& builder, std::size_t node_count)
@@ -33,6 +36,7 @@ public:
     [[nodiscard]] double node_v(NodeId) const override { return 0.0; }
     [[nodiscard]] double branch_i(BranchId) const override { return 0.0; }
     [[nodiscard]] double gmin() const override { return 1e-12; }
+    [[nodiscard]] double temp_k() const override { return phys::kRefTempK; }
 
 private:
     ws::math::SparsePatternBuilder& builder_;
@@ -47,8 +51,10 @@ private:
 class NumericContext final : public DcLoadContext {
 public:
     NumericContext(ws::math::SparseMatrix<double>& matrix, std::vector<double>& rhs,
-                   std::size_t node_count, const std::vector<double>* x, double gmin)
-        : matrix_(matrix), rhs_(rhs), node_count_(node_count), x_(x), gmin_(gmin) {}
+                   std::size_t node_count, const std::vector<double>* x, double gmin,
+                   double temp_k)
+        : matrix_(matrix), rhs_(rhs), node_count_(node_count), x_(x), gmin_(gmin),
+          temp_k_(temp_k) {}
 
     void add_entry(std::size_t row, std::size_t col, double v) override {
         if (row == kGround || col == kGround) {
@@ -79,6 +85,7 @@ public:
         return (*x_)[node_count_ + br];
     }
     [[nodiscard]] double gmin() const override { return gmin_; }
+    [[nodiscard]] double temp_k() const override { return temp_k_; }
 
 private:
     ws::math::SparseMatrix<double>& matrix_;
@@ -86,6 +93,7 @@ private:
     std::size_t node_count_;
     const std::vector<double>* x_;
     double gmin_;
+    double temp_k_;
 };
 
 // The AC pattern twin: same coordinates, complex values ignored.
@@ -104,6 +112,7 @@ public:
     [[nodiscard]] std::size_t branch_row(BranchId br) const override {
         return node_count_ + br;
     }
+    [[nodiscard]] double temp_k() const override { return phys::kRefTempK; }
 
 private:
     ws::math::SparsePatternBuilder& builder_;
@@ -115,8 +124,8 @@ class AcNumericContext final : public AcLoadContext {
 public:
     AcNumericContext(ws::math::SparseMatrix<std::complex<double>>& matrix,
                      std::vector<std::complex<double>>& rhs, std::size_t node_count,
-                     double w)
-        : matrix_(matrix), rhs_(rhs), node_count_(node_count) {
+                     double w, double temp_k)
+        : matrix_(matrix), rhs_(rhs), node_count_(node_count), temp_k_(temp_k) {
         this->omega = w;
     }
 
@@ -135,11 +144,13 @@ public:
     [[nodiscard]] std::size_t branch_row(BranchId br) const override {
         return node_count_ + br;
     }
+    [[nodiscard]] double temp_k() const override { return temp_k_; }
 
 private:
     ws::math::SparseMatrix<std::complex<double>>& matrix_;
     std::vector<std::complex<double>>& rhs_;
     std::size_t node_count_;
+    double temp_k_;
 };
 
 }  // namespace detail
@@ -226,7 +237,11 @@ void MnaSystem::load(const std::vector<std::unique_ptr<Device>>& devices,
                       double gmin) {
     zero();
     if (matrix_) {
-        detail::NumericContext ctx(*matrix_, rhs_, node_count_, x, gmin);
+        // §7.7: the circuit's elaboration temperature reaches every
+        // temp-dependent load (a temp change re-elaborates, so this is
+        // always the run's temperature).
+        detail::NumericContext ctx(*matrix_, rhs_, node_count_, x, gmin,
+                                    phys::c_to_k(circuit_.temp));
         for (std::size_t i = 0; i < devices.size(); ++i) {
             ctx.params_ = rs.params_.data() + circuit_.param_span[i].begin;
             ctx.state_ = rs.state_.data() + circuit_.state_span[i].begin;
@@ -240,7 +255,8 @@ void MnaSystem::load_tran(const std::vector<std::unique_ptr<Device>>& devices,
                           const std::vector<double>* x, double gmin) {
     zero();
     if (matrix_) {
-        detail::NumericContext ctx(*matrix_, rhs_, node_count_, x, gmin);
+        detail::NumericContext ctx(*matrix_, rhs_, node_count_, x, gmin,
+                                    phys::c_to_k(circuit_.temp));
         for (std::size_t i = 0; i < devices.size(); ++i) {
             ctx.params_ = rs.params_.data() + circuit_.param_span[i].begin;
             ctx.state_ = rs.state_.data() + circuit_.state_span[i].begin;
@@ -250,11 +266,14 @@ void MnaSystem::load_tran(const std::vector<std::unique_ptr<Device>>& devices,
 }
 
 void MnaSystem::load_ac(const std::vector<std::unique_ptr<Device>>& devices,
-                        const RunState& rs, double omega) {
+                        const RunState& rs, double omega,
+                        const Device* noise_input) {
     zero_ac();
     if (ac_matrix_) {
-        detail::AcNumericContext ctx(*ac_matrix_, ac_rhs_, node_count_, omega);
+        detail::AcNumericContext ctx(*ac_matrix_, ac_rhs_, node_count_, omega,
+                                     phys::c_to_k(circuit_.temp));
         ctx.omega = omega;
+        ctx.noise_input = noise_input;
         for (std::size_t i = 0; i < devices.size(); ++i) {
             ctx.params_ = rs.params_.data() + circuit_.param_span[i].begin;
             // §3.6 (M3): nonlinear devices read their OP linearization
@@ -297,6 +316,14 @@ ws::core::Status MnaSystem::solve_ac(std::vector<std::complex<double>>& x) {
     x.assign(dim(), {0.0, 0.0});
     WS_TRY(ac_lu_.factorize(*ac_matrix_));
     return ac_lu_.solve(ac_rhs_, x);
+}
+
+// §7.5: the adjoint solve A^T x_a = b over the SAME loaded complex
+// matrix (the caller forward-solved first, so the factors are current).
+ws::core::Status MnaSystem::solve_ac_transpose(
+    const std::vector<std::complex<double>>& b, std::vector<std::complex<double>>& x) {
+    x.assign(dim(), {0.0, 0.0});
+    return ac_lu_.solve_transpose(b, x);
 }
 
 void MnaSystem::force_node(std::size_t node, double volts, double gforce) {
