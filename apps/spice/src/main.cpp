@@ -202,6 +202,25 @@ int cmd_run(const std::vector<std::string>& args) {
         return 1;
     }
 
+    // §7.5 (M5): the .noise totals and the per-device contribution tables
+    // at the summary points (ngspice's text shape).
+    for (const ws::spice::AnalysisReport& rep : run->reports) {
+        if (rep.analysis != ".noise") {
+            continue;
+        }
+        for (const auto& sum : rep.noise_summaries) {
+            std::fprintf(stdout, "Noise analysis at %.6g Hz:\n", sum.freq);
+            for (std::size_t i = 0; i < sum.names.size(); ++i) {
+                std::fprintf(stdout, "  onoise_%-24s = %.6g V/sqrt(Hz)\n",
+                             sum.names[i].c_str(), sum.out_density[i]);
+            }
+        }
+        if (rep.noise_out_total >= 0.0) {
+            std::fprintf(stdout, "onoise_total = %.6g V\n", rep.noise_out_total);
+            std::fprintf(stdout, "inoise_total = %.6g V\n", rep.noise_in_total);
+        }
+    }
+
     // .meas results print to stdout after the CSV (ngspice's shape);
     // a failed measurement is a fact about the run, not an error (§9.5),
     // unless --strict-meas promotes it.

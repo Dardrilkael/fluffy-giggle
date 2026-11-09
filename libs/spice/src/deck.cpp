@@ -182,6 +182,53 @@ ws::core::Result<ParsedCard> parse_card(const Record& rec, bool inside_subckt,
             card.ac = std::move(ac);
             return card;
         }
+        if (first_lower == ".noise") {
+            // §7.5 (M5): .noise v(out[,ref]) src dec|oct|lin N fstart
+            // fstop [pts_per_summary].
+            if (inside_subckt) {
+                return spice_fail(card_diag(ErrorKind::Parse, "spice.parse.card_scope",
+                                            "'.noise' inside .subckt", rec.loc));
+            }
+            if (rec.tokens.size() < 7) {
+                return spice_fail(card_diag(
+                    ErrorKind::Parse, "spice.parse.noise_arity",
+                    "'.noise' takes v(out[,ref]) src dec|oct|lin N fstart"
+                    " fstop [pts_per_summary]",
+                    rec.loc));
+            }
+            NoiseCard nc;
+            nc.loc = rec.loc;
+            nc.output = rec.tokens[1];
+            nc.input = rec.tokens[2];
+            const std::string mode = to_lower(rec.tokens[3].text);
+            if (mode == "dec") {
+                nc.sweep = NoiseCard::Sweep::Dec;
+            } else if (mode == "oct") {
+                nc.sweep = NoiseCard::Sweep::Oct;
+            } else if (mode == "lin") {
+                nc.sweep = NoiseCard::Sweep::Lin;
+            } else {
+                return spice_fail(card_diag(
+                    ErrorKind::Parse, "spice.parse.ac_mode",
+                    "'" + rec.tokens[3].text + "' is not one of dec, oct, lin",
+                    rec.tokens[3].loc));
+            }
+            WS_TRY_ASSIGN(nc.n, expr_from_text(rec.tokens[4].text, rec.tokens[4].loc));
+            WS_TRY_ASSIGN(nc.fstart, expr_from_text(rec.tokens[5].text, rec.tokens[5].loc));
+            WS_TRY_ASSIGN(nc.fstop, expr_from_text(rec.tokens[6].text, rec.tokens[6].loc));
+            if (rec.tokens.size() >= 8) {
+                // The summary cadence: a plain integer (0 = never).
+                if (const ws::core::Result<double> r =
+                        parse_number(rec.tokens[7].text)) {
+                    if (*r >= 0.0 && *r == std::floor(*r) && *r < 1e9) {
+                        nc.pts_per_summary = static_cast<int>(*r);
+                    }
+                }
+            }
+            card.kind = ParsedCard::Kind::Noise;
+            card.noise = std::move(nc);
+            return card;
+        }
         if (first_lower == ".ic") {
             if (inside_subckt) {
                 return spice_fail(card_diag(ErrorKind::Parse, "spice.parse.card_scope",
@@ -963,6 +1010,18 @@ ws::core::Result<DeckAst> build_deck_ast(const Deck& deck, std::vector<Warning>&
                 AnalysisCard a;
                 a.loc = card.loc;
                 a.ac = card.ac;
+                ast.analyses.push_back(std::move(a));
+                break;
+            }
+            case K::Noise: {
+                if (inside) {
+                    return spice_fail(ast_diag(
+                        ErrorKind::Parse, "spice.parse.card_scope",
+                        "'.noise' inside .subckt", rec.loc));
+                }
+                AnalysisCard a;
+                a.loc = card.loc;
+                a.noise = card.noise;
                 ast.analyses.push_back(std::move(a));
                 break;
             }

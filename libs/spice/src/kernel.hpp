@@ -611,6 +611,37 @@ public:
         return {};
     }
 
+    // §7.5 (M5): one .noise forward solve - the AC system with ONLY the
+    // named input source stamped (1+0j, declared specs ignored - the
+    // noise-mode load), factored and solved. The caller then drives the
+    // adjoint against the SAME loaded matrix.
+    ws::core::Status noise_point(double omega, const Device* noise_input,
+                                 std::vector<std::complex<double>>& xc,
+                                 const std::string& context) {
+        mna_.load_ac(circuit_.devices, state_, omega, noise_input);
+        WS_TRY(mna_.solve_ac(xc));
+        for (const std::complex<double>& v : xc) {
+            if (!std::isfinite(v.real()) || !std::isfinite(v.imag())) {
+                Diagnostic d = run_diag(ErrorKind::Convergence, "spice.convergence.nan",
+                                        "small-signal solution is not finite");
+                d.analysis = context;
+                return spice_fail(std::move(d));
+            }
+        }
+        return {};
+    }
+
+    // §7.5 (M5): the adjoint solve A^T x = b over the currently loaded
+    // complex matrix (call after noise_point/solve_ac - the factors are
+    // current; A^T's own factors rebuild lazily from the stored values,
+    // §4.5). Errors surface as-is; the caller wraps them.
+    ws::core::Status solve_ac_transpose(const std::vector<std::complex<double>>& b,
+                                        std::vector<std::complex<double>>& x,
+                                        const std::string& context) {
+        (void)context;
+        return mna_.solve_ac_transpose(b, x);
+    }
+
     [[nodiscard]] std::size_t factorizations() const { return mna_.factorization_count(); }
 
 private:

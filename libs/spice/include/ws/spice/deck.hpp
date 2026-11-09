@@ -87,6 +87,24 @@ struct AcCard {
     ExprProgram fstop;
 };
 
+// .noise v(out[,ref]) src dec|oct|lin N fstart fstop [pts_per_summary]
+// (§7.5, M5): the output node pair, the input source (a V or I device
+// name; its declared AC spec is IGNORED - the forward gain solve stamps
+// 1+0j on it alone, ngspice's MODEACNOISE), the frequency grid, and the
+// summary cadence (every Nth point prints the per-device contribution
+// table; 0 = never).
+struct NoiseCard {
+    enum class Sweep { Dec, Oct, Lin };
+    SourceLoc loc;
+    Sweep sweep = Sweep::Dec;
+    Token output;   // "v(out)" or "v(out,ref)" - as spelled
+    Token input;    // the input source name
+    ExprProgram n;
+    ExprProgram fstart;
+    ExprProgram fstop;
+    int pts_per_summary = 0;
+};
+
 // .ic v(node)=value ... (§6.5). One entry per v(name)=expr token; the
 // .tran driver resolves node names against the elaborated circuit.
 struct IcCard {
@@ -179,6 +197,7 @@ struct AnalysisCard {
     std::optional<DcCard> dc;
     std::optional<TranCard> tran;
     std::optional<AcCard> ac;
+    std::optional<NoiseCard> noise;  // §7.5 (M5)
 };
 
 struct DeckAst {

@@ -31,6 +31,7 @@ enum class AnalysisKind {
     Dc,    // §7.3
     Tran,  // §6
     Ac,    // §7.4
+    Noise, // §7.5 (M5)
 };
 
 // What the sweep axis/axes of the table measure.

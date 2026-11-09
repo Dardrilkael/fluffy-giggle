@@ -214,6 +214,28 @@ public:
         cx.add_current(cathode_, j, cx.st(kJeq));
     }
 
+    // §7.5 (M5, dionoise.c): _rs thermal (area/Rs, between anode and the
+    // internal mid node), _id shot 2q·|Id| (between the junction nodes),
+    // _1overf flicker KF·|Id/area|^AF/f·area (KF=0, the default, is
+    // silent). The OP junction voltage rides state[kVdPrev].
+    void load_noise(NoiseContext& cx) const override {
+        const double area = cx.par(kAreaParam);
+        const TempOp op = temp_op(area, load_temp_k(cx.temp_k));
+        const double vd = cx.st(kVdPrev);
+        const double ex = std::exp(safe_exp_arg(vd / op.vte));
+        const double id = op.is_eff * (ex - 1.0);
+        if (mid_ != kGround) {
+            cx.add_source("rs", anode_, mid_, 4.0 * phys::kBoltz *
+                                                  load_temp_k(cx.temp_k) * area / rs_);
+        }
+        cx.add_source("id", jnode(), cathode_, 2.0 * phys::kQ * std::abs(id));
+        if (kf_ != 0.0 && cx.freq > 0.0 && id != 0.0) {
+            cx.add_source(
+                "1overf", jnode(), cathode_,
+                kf_ * std::pow(std::abs(id / area), af_) / cx.freq * area);
+        }
+    }
+
     // The small-signal conductance at the OP (frozen Vd from state[kVdPrev]).
     // M4b: adds j*omega*Cj(Vd) — the junction capacitance at the OP.
     void load_ac(AcLoadContext& cx) const override {
@@ -465,6 +487,7 @@ public:
         double cjo_val = 0.0, m_val = 0.5, vj_val = 1.0, fc_val = 0.5;
         double rs_val = 0.0;
         double eg_val = 1.11, xti_val = 3.0;
+        double kf_val = 0.0, af_val = 1.0;
         const auto& toks = model.params;
         for (std::size_t i = 0; i < toks.size(); ++i) {
             std::string text = toks[i].text;
@@ -531,12 +554,15 @@ public:
                 xti_val = v;
             } else if (key == "eg") {
                 eg_val = v;
-            } else if (key == "bv" || key == "ibv" ||
-                       key == "kf" || key == "af" || key == "tt") {
+            } else if (key == "kf") {
+                kf_val = v;
+            } else if (key == "af") {
+                af_val = v;
+            } else if (key == "bv" || key == "ibv" || key == "tt") {
                 // Accepted (so ngspice decks parse cleanly) but not
                 // implemented. `spice check` warns per-model.
-                // TT (diffusion charge), Bv/Ibv (breakdown), Kf/Af
-                // (noise) land with M5.
+                // TT (diffusion charge) and Bv/Ibv (breakdown) land with
+                // the M5 device-physics follow-ups.
             } else {
                 return spice_fail(dev_diag(
                     ErrorKind::Semantic, "spice.semantic.model_param",
@@ -570,6 +596,8 @@ public:
         tnom_k_ = phys::c_to_k(tnom);
         eg_ = eg_val;
         xti_ = xti_val;
+        kf_ = kf_val;
+        af_ = af_val;
         // The series node exists only when Rs > 0 (the L Rser precedent:
         // an always-present internal node would flood every deck's save
         // list). apply_model runs BEFORE the §6.6 graph checks, so the
@@ -669,6 +697,8 @@ private:
     double tnom_k_ = 300.15;  // model nominal temperature, K (§7.7)
     double eg_ = 1.11;      // energy gap, eV (§7.7 Is(T))
     double xti_ = 3.0;      // Is temperature exponent (§7.7)
+    double kf_ = 0.0;       // flicker coefficient (§7.5; 0 = silent)
+    double af_ = 1.0;       // flicker current exponent (§7.5)
     double rs_ = 0.0;       // series resistance (ohms; 0 = no mid node)
     // M4b: junction capacitance model params (Cjo > 0 enables the companion)
     double cjo_ = 0.0;      // zero-bias junction capacitance (F)

@@ -19,6 +19,7 @@ const char* plot_name(AnalysisKind k) {
         case AnalysisKind::Dc: return "DC Analysis";
         case AnalysisKind::Ac: return "AC Analysis";
         case AnalysisKind::Op: return "Operating Point";
+        case AnalysisKind::Noise: return "Noise Analysis";
     }
     return "Analysis";
 }

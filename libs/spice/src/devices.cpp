@@ -215,6 +215,23 @@ public:
         cx.add_conductance(a_, b_, 1.0 / ohms_at(cx.params_, cx.temp_k()));
     }
 
+    // §7.5 (M5, resnoise.c): thermal 4kT·G between the terminals, plus
+    // the opt-in carbon flicker KF·|I|^AF / (f^EF) when the model carries
+    // KF (default 0: silent). The DC current is (v(a)-v(b))/R at the OP.
+    void load_noise(NoiseContext& cx) const override {
+        const double r = ohms_at(cx.params_, cx.temp_k);
+        const double t_k = load_temp_k(cx.temp_k);
+        cx.add_source("thermal", a_, b_, 4.0 * phys::kBoltz * t_k / r);
+        if (kf_ != 0.0 && cx.freq > 0.0) {
+            const double i = (cx.node_v(a_) - cx.node_v(b_)) / r;
+            if (i != 0.0) {
+                cx.add_source("1overf", a_, b_,
+                              kf_ * std::pow(std::abs(i), af_) /
+                                  std::pow(cx.freq, ef_));
+            }
+        }
+    }
+
     // §7.7 (M5): the R model (`.model name R(...)`) carries the TC/Tnom
     // defaults (and later the flicker keys). Instance tc1=/tc2= override;
     // the value always comes from the instance (ngspice has no model
@@ -275,14 +292,18 @@ public:
                 if (!tc2_given_) {
                     tc2_ = ExprProgram::constant(v);
                 }
-            } else if (key == "kf" || key == "af" || key == "ef" ||
-                       key == "rsh" || key == "narrow" || key == "dw" ||
+            } else if (key == "kf") {
+                kf_ = v;
+            } else if (key == "af") {
+                af_ = v;
+            } else if (key == "ef") {
+                ef_ = v;
+            } else if (key == "rsh" || key == "narrow" || key == "dw" ||
                        key == "short" || key == "dlr" || key == "tce" ||
                        key == "defw" || key == "w" || key == "l" ||
                        key == "noiz") {
                 // Accepted (ngspice model keys) - the geometry form
-                // (rsh/l/w) and the exponential TCE stay unimplemented;
-                // Kf/Af/Ef land with the noise follow-up.
+                // (rsh/l/w) and the exponential TCE stay unimplemented.
             } else {
                 return spice_fail(dev_diag(
                     ErrorKind::Semantic, "spice.semantic.model_param",
@@ -327,6 +348,9 @@ private:
     ExprProgram tc1_, tc2_;
     bool tc1_given_;         // instance tc1= overrides the model's
     bool tc2_given_;
+    double kf_ = 0.0;             // flicker coefficient (§7.5; 0 = silent)
+    double af_ = 1.0;             // flicker current exponent
+    double ef_ = 1.0;             // flicker frequency exponent
     double tnom_k_ = 300.15;      // model/.options tnom, K (§7.7)
     bool has_temp_inst_ = false;  // instance temp= override (°C)
     double temp_inst_c_ = 27.0;
@@ -661,8 +685,16 @@ public:
     }
     void load_ac(AcLoadContext& cx) const override {
         // A V source is a short to the small-signal system; the AC spec (or
-        // zero) is the stimulus (§7.4).
-        cx.stamp_branch_voltage(branch_, p_, n_, ac_phasor());
+        // zero) is the stimulus (§7.4). §7.5 (M5): during a .noise forward
+        // solve every source stamps zero except the named input, which
+        // stamps 1+0j regardless of its declared spec (ngspice's
+        // MODEACNOISE).
+        std::complex<double> stimulus = ac_phasor();
+        if (cx.noise_input != nullptr) {
+            stimulus = (cx.noise_input == this) ? std::complex<double>{1.0, 0.0}
+                                                : std::complex<double>{0.0, 0.0};
+        }
+        cx.stamp_branch_voltage(branch_, p_, n_, stimulus);
     }
     [[nodiscard]] double next_event(double t, double tstep,
                                      double tstop, const double* st) const override {
@@ -713,7 +745,15 @@ public:
         cx.add_current(n_, p_, tran_value(cx, step));
     }
     void load_ac(AcLoadContext& cx) const override {
-        // No AC spec: open to the small-signal system (§7.4).
+        // No AC spec: open to the small-signal system (§7.4). §7.5 (M5):
+        // the .noise forward solve - only the named input stamps (1+0j,
+        // spec ignored), everything else goes quiet.
+        if (cx.noise_input != nullptr) {
+            if (cx.noise_input == this) {
+                cx.add_current(n_, p_, {1.0, 0.0});
+            }
+            return;
+        }
         if (has_ac()) {
             cx.add_current(n_, p_, ac_phasor());
         }

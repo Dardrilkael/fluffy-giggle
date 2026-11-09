@@ -466,6 +466,32 @@ public:
         }
     }
 
+    // §7.5 (M5, bjtnoise.c): _ic shot 2q·|Ic| between collector and
+    // emitter, _ib shot 2q·|Ib| between base and emitter, _fn flicker
+    // KF·|Ib|^AF/f (KP=0, the default, is silent). The rb/re/rc thermal
+    // sources need the parasitic resistances this model does not carry.
+    // The OP junction voltages ride state[kVbePrev]/[kVbcPrev]; the
+    // currents are the sgn-effective terminal currents at the OP.
+    void load_noise(NoiseContext& cx) const override {
+        const double area = cx.par(kAreaParam);
+        const TempOp op = temp_op(area, load_temp_k(cx.temp_k));
+        const double sgn = pnp_ ? -1.0 : 1.0;
+        const double vbe = cx.st(kVbePrev);
+        const double vbc = cx.st(kVbcPrev);
+        const double ex_be = std::exp(safe_exp_arg(vbe / (nf_ * op.vt)));
+        const double ex_bc = std::exp(safe_exp_arg(vbc / (nr_ * op.vt)));
+        const double oef = 1.0 - vbc * inv_vaf_ - vbe * inv_var_;
+        const double ic = sgn * op.is_eff * (ex_be - ex_bc) * oef;
+        const double ib = sgn * (op.is_eff / op.bf * (ex_be - 1.0) +
+                                 op.is_eff / op.br * (ex_bc - 1.0));
+        cx.add_source("ic", c_, e_, 2.0 * phys::kQ * std::abs(ic));
+        cx.add_source("ib", b_, e_, 2.0 * phys::kQ * std::abs(ib));
+        if (kf_ != 0.0 && cx.freq > 0.0 && ib != 0.0) {
+            cx.add_source("fn", b_, e_,
+                          kf_ * std::pow(std::abs(ib), flicker_exp_) / cx.freq);
+        }
+    }
+
     // Advances both junctions' pnjlim vold and the Ic residual trackers.
     // §5.3: vold stored is the CLAMPED V (same lesson as the diode).
     [[nodiscard]] bool update_state(const std::vector<double>& x,
@@ -538,6 +564,7 @@ public:
         double cje_val = 0.0, cjc_val = 0.0, mje_val = 0.5, mjc_val = 0.5;
         double vje_val = 0.75, vjc_val = 0.75, fc_val = 0.5;
         double eg_val = 1.11, xti_val = 3.0, xtb_val = 0.0;
+        double kf_val = 0.0, af_val = 1.0;
         const auto& toks = model.params;
         for (std::size_t i = 0; i < toks.size(); ++i) {
             std::string text = toks[i].text;
@@ -583,6 +610,8 @@ public:
             else if (key == "xti") xti_val = v;
             else if (key == "eg") eg_val = v;
             else if (key == "xtb") xtb_val = v;
+            else if (key == "kf") kf_val = v;
+            else if (key == "af") af_val = v;
             else if (key == "cje") cje_val = v;
             else if (key == "cjc") cjc_val = v;
             else if (key == "mje") mje_val = v;
@@ -595,7 +624,6 @@ public:
             // high-current roll-off):
             else if (key == "ikf" || key == "ikr" ||
                      key == "tf" || key == "tr" ||
-                     key == "kf" || key == "af" ||
                      key == "pe" || key == "pc" || key == "ise" ||
                      key == "isc" || key == "ne" || key == "nc" || key == "rb" ||
                      key == "rc" || key == "re") {
@@ -644,6 +672,8 @@ public:
         eg_ = eg_val;
         xti_ = xti_val;
         xtb_ = xtb_val;
+        kf_ = kf_val;
+        af_ = af_val;
         // vcrit per junction is a PER-LOAD quantity now (§7.7, M5): it
         // evaluates at the run temperature through temp_op(). At
         // T == Tnom the values equal the frozen-Tnom form bit-for-bit.
@@ -799,6 +829,10 @@ private:
     double eg_ = 1.11;           // energy gap, eV (§7.7 Is(T))
     double xti_ = 3.0;           // Is temperature exponent (§7.7)
     double xtb_ = 0.0;           // beta temperature exponent (§7.7)
+    double kf_ = 0.0;            // flicker coefficient (§7.5; 0 = silent)
+    double flicker_exp_ = 1.0;   // flicker current exponent AF (§7.5;
+                                 // 'af_' is alpha-F here - the transport
+                                 // model's forward alpha)
     // Early voltages (Vaf forward, Var reverse; 0 = off, the default).
     // The reciprocal is what the stamp multiplies by, precomputed so the
     // no-Early path costs one 1.0 multiply and two 0.0 adds - with both
@@ -898,6 +932,7 @@ public:
     static constexpr std::size_t kVdsPrev = 1;
     static constexpr std::size_t kICur = 2;
     static constexpr std::size_t kIPrev = 3;
+    static constexpr std::size_t kVbsPrev = 4;  // §7.5: the OP body bias
 
     Mosfet(std::string display, NodeId d, NodeId g, NodeId s, NodeId b,
            double l, double w, bool has_temp_inst, double temp_inst_c)
@@ -985,14 +1020,18 @@ public:
         return op;
     }
 
-    void load_dc(DcLoadContext& cx) const override {
-        const double sgn = pnp_ ? -1.0 : 1.0;  // PMOS = pnp_ flag reused
-        const TempOp op = temp_op(load_temp_k(cx.temp_k()));
-        const double vg = cx.node_v(g_), vs = cx.node_v(s_);
-        const double vd = cx.node_v(d_), vb = cx.node_v(b_);
-        const double vgs = sgn * (vg - vs);
-        const double vds = sgn * (vd - vs);
-        const double vbs = sgn * (vb - vs);
+    // The level-1 channel evaluation at one bias point (the shared body
+    // of load_dc, load_ac and load_noise): Id and its node-voltage
+    // derivatives, with the gmin channel floor folded in. The returned
+    // `id` is the REAL-FRAME drain current (PMOS-negated); the
+    // derivatives are d(that current)/d(real node voltage).
+    struct ChannelEval {
+        double id = 0.0;
+        double did_dvg = 0.0, did_dvd = 0.0, did_dvs = 0.0, did_dvb = 0.0;
+    };
+    [[nodiscard]] ChannelEval channel_eval(double vgs, double vds, double vbs,
+                                           double gmin, const TempOp& op) const {
+        const double sgn = pnp_ ? -1.0 : 1.0;
         // Body effect: Vth = Vto + gamma*(sqrt(2*phi - Vbs) - sqrt(2*phi)).
         double vth = op.vto;
         if (gamma_ != 0.0) {
@@ -1001,56 +1040,55 @@ public:
             vth += gamma_ * (std::sqrt(arg1) - std::sqrt(arg2));
         }
         const double vgs_vth = vgs - vth;  // "overdrive voltage"
-        const double gm = cx.gmin();  // gmin floor for the channel
-        // Compute Id and its derivatives.
-        double id, did_dvg, did_dvd, did_dvs, did_dvb;
+        ChannelEval e;
         if (vgs_vth <= 0.0) {
             // Cutoff: Id = 0 (only gmin leakage).
-            id = 0.0;
-            did_dvg = did_dvd = did_dvs = did_dvb = 0.0;
         } else {
             const double beta = op.kp * w_ / l_;  // Kp(T)*W/L
-            const double vdsat = vgs_vth;       // saturation voltage
+            const double vdsat = vgs_vth;         // saturation voltage
             if (vds < vdsat) {
                 // Triode: Id = beta*(Vgs-Vth - Vds/2)*Vds*(1+lambda*Vds)
-                const double vds_eff = vds;
-                id = beta * (vgs_vth - vds_eff / 2.0) * vds_eff * (1.0 + lambda_ * vds_eff);
-                // Derivatives (chain rule: Vgs=d(Vg-Vs), Vds=d(Vd-Vs), Vth=f(Vbs))
-                did_dvg = beta * vds_eff * (1.0 + lambda_ * vds_eff);  // dId/dVgs
-                did_dvd = beta * ((vgs_vth - vds_eff) * (1.0 + lambda_ * vds_eff) +
-                                   (vgs_vth - vds_eff / 2.0) * vds_eff * lambda_);  // dId/dVds
-                did_dvs = -did_dvg - did_dvd;  // via Vgs and Vds chain
-                did_dvb = 0.0;  // body effect on Vth (simplified)
-                // Body effect: dVth/dVbs = -gamma/(2*sqrt(2*phi-Vbs))
-                // dId/dVb = dId/dVgs * (-dVth/dVbs) ... (simplified for M4c)
+                e.id = beta * (vgs_vth - vds / 2.0) * vds * (1.0 + lambda_ * vds);
+                e.did_dvg = beta * vds * (1.0 + lambda_ * vds);
+                e.did_dvd = beta * ((vgs_vth - vds) * (1.0 + lambda_ * vds) +
+                                    (vgs_vth - vds / 2.0) * vds * lambda_);
+                e.did_dvs = -e.did_dvg - e.did_dvd;
+                e.did_dvb = 0.0;  // body effect on Vth (simplified)
             } else {
                 // Saturation: Id = 0.5*beta*(Vgs-Vth)^2*(1+lambda*Vds)
-                id = 0.5 * beta * vgs_vth * vgs_vth * (1.0 + lambda_ * vds);
-                did_dvg = beta * vgs_vth * (1.0 + lambda_ * vds);  // gm
-                did_dvd = 0.5 * beta * vgs_vth * vgs_vth * lambda_;  // gds (channel-length mod)
-                did_dvs = -did_dvg - did_dvd;
-                did_dvb = 0.0;  // body effect (simplified)
+                e.id = 0.5 * beta * vgs_vth * vgs_vth * (1.0 + lambda_ * vds);
+                e.did_dvg = beta * vgs_vth * (1.0 + lambda_ * vds);  // gm
+                e.did_dvd = 0.5 * beta * vgs_vth * vgs_vth * lambda_;  // gds
+                e.did_dvs = -e.did_dvg - e.did_dvd;
+                e.did_dvb = 0.0;  // body effect (simplified)
             }
         }
         // Add gmin channel (D-S conductance floor for graph/convergence).
-        id += gm * vds;
-        did_dvd += gm;
-        did_dvs -= gm;
-        // Apply polarity (PMOS: Id flows S→D, so negate). After this line
-        // `id` IS the real-frame current into the drain (the mirror
-        // circuit's currents flip with its negated voltages), and the
-        // derivatives below are d(that current)/d(real node voltage) -
-        // the sgn factors cancel in the chain rule, same as the BJT.
-        id *= sgn;
-        const double dic_dvg = did_dvg;  // dId/dVg
-        const double dic_dvd = did_dvd;  // dId/dVd
-        const double dic_dvs = did_dvs;  // dId/dVs
-        const double dic_dvb = did_dvb;  // dId/dVb
-        // Norton offset in terms of node voltages. `id` is already the
+        e.id += gmin * vds;
+        e.did_dvd += gmin;
+        e.did_dvs -= gmin;
+        // Apply polarity (PMOS: Id flows S to D, so negate). The sgn
+        // factors cancel in the derivative chain rule, same as the BJT.
+        e.id *= sgn;
+        return e;
+    }
+
+    void load_dc(DcLoadContext& cx) const override {
+        const double sgn = pnp_ ? -1.0 : 1.0;  // PMOS = pnp_ flag reused
+        const TempOp op = temp_op(load_temp_k(cx.temp_k()));
+        const double vg = cx.node_v(g_), vs = cx.node_v(s_);
+        const double vd = cx.node_v(d_), vb = cx.node_v(b_);
+        const ChannelEval e = channel_eval(sgn * (vg - vs), sgn * (vd - vs),
+                                           sgn * (vb - vs), cx.gmin(), op);
+        const double dic_dvg = e.did_dvg;
+        const double dic_dvd = e.did_dvd;
+        const double dic_dvs = e.did_dvs;
+        const double dic_dvb = e.did_dvb;
+        // Norton offset in terms of node voltages. `e.id` is already the
         // real-frame drain current - no second sgn here (the M4c PMOS bug
-        // the §10.1 analytic row caught: a double negation flipped the
+        // the analytic row caught: a double polarity negation flipped the
         // PMOS rhs constant while the G entries stayed right).
-        const double id_const = id -
+        const double id_const = e.id -
             (dic_dvg * vg + dic_dvd * vd + dic_dvs * vs + dic_dvb * vb);
         // G matrix: current leaving D = Id (into the drain).
         cx.add_entry(d_, g_, dic_dvg);
@@ -1067,6 +1105,26 @@ public:
         cx.add_rhs(s_, id_const);
     }
 
+    // §7.4 (M5): the small-signal channel at the OP - the SAME conductance
+    // entries as load_dc, evaluated at the frozen bias in the state slice
+    // (kVgsPrev/kVdsPrev/kVbsPrev). A gap until now: the MOSFET stamped
+    // NOTHING into the AC system, so any .ac deck carrying one saw an
+    // open channel (gain 0). The Meyer caps join this stamp in their own
+    // commit.
+    void load_ac(AcLoadContext& cx) const override {
+        const TempOp op = temp_op(load_temp_k(cx.temp_k()));
+        const ChannelEval e = channel_eval(cx.st(kVgsPrev), cx.st(kVdsPrev),
+                                           cx.st(kVbsPrev), 0.0, op);
+        cx.add_entry(d_, g_, {e.did_dvg, 0.0});
+        cx.add_entry(d_, d_, {e.did_dvd, 0.0});
+        cx.add_entry(d_, s_, {e.did_dvs, 0.0});
+        cx.add_entry(d_, b_, {e.did_dvb, 0.0});
+        cx.add_entry(s_, g_, {-e.did_dvg, 0.0});
+        cx.add_entry(s_, d_, {-e.did_dvd, 0.0});
+        cx.add_entry(s_, s_, {-e.did_dvs, 0.0});
+        cx.add_entry(s_, b_, {-e.did_dvb, 0.0});
+    }
+
     // M4c: no junction caps yet (Cgs/Cgd/Cgb land in a follow-up).
     // load_tran = load_dc (the MOSFET is a nonlinear resistor at each OP).
 
@@ -1079,8 +1137,31 @@ public:
     }
 
     // --- state model (§3.5b) ---------------------------------------------
-    [[nodiscard]] std::size_t state_slots() const override { return 4; }
+    [[nodiscard]] std::size_t state_slots() const override { return 5; }
     [[nodiscard]] bool is_dynamic() const override { return false; }
+
+    // §7.5 (M5, mos1noi.c): _thermal channel noise 4kT·(2/3·gm) between
+    // drain and source (the level-1 nlev<3 form - (8/3)kT·gm as a
+    // density), plus _1overf flicker. The DESIGN's per-model formula
+    // KF·|Id|^AF/f^EF (no geometry/Cox term - the model carries no TOX
+    // dependency here; a documented deviation from ngspice's nlev=0
+    // geometry form). The OP rides state[kVgsPrev]/[kVdsPrev].
+    void load_noise(NoiseContext& cx) const override {
+        const double t_k = load_temp_k(cx.temp_k);
+        const TempOp op = temp_op(t_k);
+        const ChannelEval e = channel_eval(cx.st(kVgsPrev), cx.st(kVdsPrev),
+                                           cx.st(kVbsPrev), 0.0, op);
+        const double gm = e.did_dvg;
+        // channel_eval returns the real-frame Id; the mirror-frame value
+        // drives the flicker exponent (|Id| - polarity-free either way).
+        const double sid = 2.0 / 3.0 * std::abs(gm);
+        cx.add_source("thermal", d_, s_, 4.0 * phys::kBoltz * t_k * sid);
+        if (kf_ != 0.0 && cx.freq > 0.0 && e.id != 0.0) {
+            cx.add_source("1overf", d_, s_,
+                          kf_ * std::pow(std::abs(e.id), af_) /
+                              std::pow(cx.freq, ef_));
+        }
+    }
 
     // Track Id for nonlinear_residual + Vgs/Vds for limiting (M4c: no
     // fetlim yet — the MOS is quadratic, converges without limiting).
@@ -1118,6 +1199,7 @@ public:
         st[kICur] = id;
         st[kVgsPrev] = vgs;
         st[kVdsPrev] = vds;
+        st[kVbsPrev] = sgn * (v_across(x_load, b_, s_));
         return false;  // no limiting in M4c (MOS is quadratic)
     }
 
@@ -1141,6 +1223,7 @@ public:
         // ngspice defaults: Vto=0, Kp=20µA/V², Lambda=0, Gamma=0, Phi=0.6,
         // Tnom=27°C (§7.7).
         double vto = 0.0, kp = 20e-6, lambda = 0.0, gamma = 0.0, phi = 0.6, tnom = 27.0;
+        double kf_val = 0.0, af_val = 1.0, ef_val = 1.0;
         const auto& toks = model.params;
         for (std::size_t i = 0; i < toks.size(); ++i) {
             std::string text = toks[i].text;
@@ -1181,6 +1264,9 @@ public:
             else if (key == "gamma") gamma = v;
             else if (key == "phi") phi = v;
             else if (key == "tnom") tnom = v;
+            else if (key == "kf") kf_val = v;
+            else if (key == "af") af_val = v;
+            else if (key == "ef") ef_val = v;
             else if (key == "level" || key == "u0" || key == "tox" ||
                      key == "cj" || key == "mj" || key == "cjsw" ||
                      key == "mjsw" || key == "pb" || key == "js" ||
@@ -1199,6 +1285,7 @@ public:
         }
         vto_ = vto; kp_ = kp; lambda_ = lambda; gamma_ = gamma; phi_ = phi;
         tnom_k_ = phys::c_to_k(tnom);
+        kf_ = kf_val; af_ = af_val; ef_ = ef_val;
         return {};
     }
 
@@ -1231,6 +1318,9 @@ private:
     double gamma_ = 0.0;
     double phi_ = 0.6;
     double tnom_k_ = 300.15;  // model nominal temperature, K (§7.7)
+    double kf_ = 0.0;         // flicker coefficient (§7.5; 0 = silent)
+    double af_ = 1.0;         // flicker current exponent (§7.5)
+    double ef_ = 1.0;         // flicker frequency exponent (§7.5)
     bool pnp_ = false;  // PMOS
     std::string model_name_;
 };

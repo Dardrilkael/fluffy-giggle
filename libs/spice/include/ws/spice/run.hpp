@@ -70,14 +70,32 @@ struct RunSettings {
 
 // The per-analysis diagnostics record (§9.4), minimal for M1: the ladder
 // fields (gmin/source stepping, worst unknowns) land with M3. M2 adds the
-// transient step counters.
+// transient step counters. M5 adds the .noise totals and the per-device
+// contribution tables at the summary points.
 struct AnalysisReport {
-    std::string analysis;              // ".op", ".dc", ".tran", ".ac"
+    std::string analysis;              // ".op", ".dc", ".tran", ".ac", ".noise"
     std::size_t newton_iterations = 0; // total across the analysis
     std::size_t lu_factorizations = 0; // refactors over the run
     std::string stage = "newton";      // ladder stage reached (M3 grows it)
     std::size_t accepted_steps = 0;    // .tran: accepted time points
     std::size_t rejected_steps = 0;    // .tran: LTE-rejected attempts
+
+    // §7.5 (M5): the .noise integrated totals - V rms at the output and
+    // referred to the input (A rms when the input source is an I
+    // device). Negative when no .noise ran. The spectra live in the
+    // Table (frequency, onoise_spectrum, inoise_spectrum in V/sqrt(Hz)).
+    double noise_out_total = -1.0;
+    double noise_in_total = -1.0;
+
+    // §7.5 (M5): the per-device contribution table at each summary
+    // point - densities AT THE OUTPUT in V/sqrt(Hz), the decomposition of
+    // onoise_spectrum by source ("R1_thermal", "D1_id", "Q1_ib", ...).
+    struct NoiseSummary {
+        double freq = 0.0;
+        std::vector<std::string> names;
+        std::vector<double> out_density;  // V/sqrt(Hz), parallel to names
+    };
+    std::vector<NoiseSummary> noise_summaries;
 };
 
 // One evaluated .meas (§0.4): a value, or a failure note (a failed

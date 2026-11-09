@@ -4030,3 +4030,178 @@ TEST_CASE(".nodeset: rejects ground and unknown nodes; .ac OP and .tran t=0") {
         CHECK(v == doctest::Approx(vout.front()).epsilon(1e-6));
     }
 }
+
+// --- .noise (§7.5, M5) ------------------------------------------------------------
+
+TEST_CASE("noise: kT/C - the integrated RC output noise is kT/C") {
+    const auto run = run_text(
+        "ktc\n"
+        "V1 in 0 AC 1\n"
+        "R1 in out 1k\n"
+        "C1 out 0 1n\n"
+        ".noise v(out) V1 dec 20 1 1e12\n");
+    REQUIRE(run);
+    REQUIRE(run->reports.size() == 1);
+    const ws::spice::AnalysisReport& rep = run->reports[0];
+    REQUIRE(rep.analysis == ".noise");
+    // kT/C with the repo's constants: sqrt(1.380649e-23 * 300.15 / 1e-9).
+    // The log-log segment integration is exact for the white floor and
+    // the 1/f^2 roll; the CORNER region interpolates a power law between
+    // grid points, costing ~3e-4 relative at 20 pts/decade (ngspice 44.2
+    // on the same grid lands on the same value: 2.035120e-6).
+    CHECK(rep.noise_out_total ==
+          doctest::Approx(2.0356861186096e-6).epsilon(1e-3).scale(0.0));
+    CHECK(rep.noise_out_total ==
+          doctest::Approx(2.0351201332e-6).epsilon(1e-6).scale(0.0));
+    // The input-referred density is the WHITE 4kT*R (the RC rolloff
+    // divides both the noise and the gain), so its integral over
+    // [fstart, fstop] is density * sqrt(bandwidth) - exact, no corner.
+    CHECK(rep.noise_in_total ==
+          doctest::Approx(std::sqrt(4.0 * 1.380649e-23 * 300.15 * 1000.0 *
+                                    (1e12 - 1.0)))
+              .epsilon(1e-4)
+              .scale(0.0));
+    // The white floor itself: sqrt(4kT/R) * R at 1 Hz (C is an open
+    // there), and the inoise density equals it (H = 1).
+    const Table& t = run->results.tables[0];
+    REQUIRE(t.row_count() > 0);
+    // NOTE: doctest's Approx carries a scale=1.0 absolute floor - for
+    // 1e-9-magnitude densities every check below pins .scale(0.0) so the
+    // tolerance is what it claims (purely relative).
+    CHECK(t.signal("onoise_spectrum")[0] ==
+          doctest::Approx(4.07137223714e-9).epsilon(1e-9).scale(0.0));
+    CHECK(t.signal("inoise_spectrum")[0] ==
+          doctest::Approx(t.signal("onoise_spectrum")[0]).epsilon(1e-9).scale(0.0));
+}
+
+TEST_CASE("noise: resistor divider - 4kT(R1||R2) at the output, /|H| at the input") {
+    const auto run = run_text(
+        "div\n"
+        "V1 in 0 AC 1\n"
+        "R1 in out 1k\n"
+        "R2 out 0 3k\n"
+        ".noise v(out) V1 lin 3 1k 3k\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    REQUIRE(t.row_count() == 3);
+    const double k = 1.380649e-23;
+    const double t_k = 300.15;
+    // The output density: both resistors contribute through their
+    // transfer to out; the parallel-combination identity gives exactly
+    // 4kT*(R1||R2) as an output-referred voltage density.
+    for (std::size_t i = 0; i < 3; ++i) {
+        // Each resistor's noise current sees the parallel combination
+        // (the other resistor to the AC-grounded node): the classic
+        // v_noise(out)^2 = 4kT*(R1||R2) identity, decomposed per source.
+        const double r1d = std::sqrt(4.0 * k * t_k / 1000.0) * 750.0;
+        const double r2d = std::sqrt(4.0 * k * t_k / 3000.0) * 750.0;
+        const double quad = std::sqrt(r1d * r1d + r2d * r2d);
+        CHECK(t.signal("onoise_spectrum")[i] ==
+              doctest::Approx(quad).epsilon(1e-9).scale(0.0));
+        // The input-referred density: H = R2/(R1+R2) = 0.75.
+        CHECK(t.signal("inoise_spectrum")[i] ==
+              doctest::Approx(quad / 0.75).epsilon(1e-9).scale(0.0));
+    }
+}
+
+TEST_CASE("noise: diode shot 2qI and the summary table") {
+    // reltol 1e-9: the noise identity rides the OP point itself, so the
+    // solve must be machine-tight (the default reltol 1e-3 leaves ~1e-3
+    // on Id, which the densities inherit).
+    const auto run = run_text(
+        "shot\n"
+        "V1 in 0 0.7\n"
+        "R1 in out 100\n"
+        "D1 out 0 dx\n"
+        ".model dx D(Is=1e-14 N=1)\n"
+        ".options reltol=1e-9\n"
+        ".noise v(out) V1 dec 2 1 100 1\n");
+    REQUIRE(run);
+    // The OP: bisection on Vd for Is*(e^Vd/Vt - 1) = (0.7 - Vd)/100 (the
+    // naive fixed-point iteration diverges on a stiff diode - it overshoots
+    // between the open and conducting branches).
+    double lo = 0.0, hi = 0.7, vd = 0.0;
+    for (int i = 0; i < 200; ++i) {
+        vd = 0.5 * (lo + hi);
+        const double f = 1e-14 * (std::exp(vd / 0.025864925786328215) - 1.0) - (0.7 - vd) / 100.0;
+        if (f < 0.0) {
+            lo = vd;
+        } else {
+            hi = vd;
+        }
+    }
+    const double id = 1e-14 * (std::exp(vd / 0.025864925786328215) - 1.0);
+    // Output density at low f: the R thermal through (1 - loading) plus
+    // the shot current through the parallel impedance. The dominant check
+    // is the SHOT term vs its analytic value: the diode's shot PSD
+    // 2q|Id| times |Z_at_out|^2 where Z is the impedance seen at `out`
+    // (R in parallel with the diode's dynamic resistance rd = nVt/Id).
+    const double rd = 0.025864925786328215 / id;
+    const double z = 100.0 * rd / (100.0 + rd);
+    const double q = 1.602176634e-19;
+    const double shot_v = std::sqrt(2.0 * q * id) * z;
+    // The per-source checks ride the summary table below: D1_id must
+    // equal the shot current density seen at `out` (2q|Id| through Z =
+    // R||rd), R1_thermal the loaded thermal term.
+    REQUIRE(run->reports[0].noise_summaries.size() >= 1);
+    const auto& sum = run->reports[0].noise_summaries[0];
+    bool found_id = false;
+    for (std::size_t i = 0; i < sum.names.size(); ++i) {
+        if (sum.names[i].find("id") != std::string::npos) {
+            found_id = true;
+            CHECK(sum.out_density[i] ==
+                  doctest::Approx(shot_v).epsilon(1e-9).scale(0.0));
+        }
+        if (sum.names[i].find("thermal") != std::string::npos) {
+            // R1's thermal density at out through the loaded divider.
+            const double r_term =
+                std::sqrt(4.0 * 1.380649e-23 * 300.15 / 100.0) * z;
+            CHECK(sum.out_density[i] ==
+                  doctest::Approx(r_term).epsilon(1e-9).scale(0.0));
+        }
+    }
+    CHECK(found_id);
+}
+
+TEST_CASE("noise: MOS channel (8/3)kT*gm; rejections") {
+    const auto run = run_text(
+        "mosn\n"
+        "Vdd dd 0 5\n"
+        "Rl dd out 2k\n"
+        "M1 out g 0 0 nm L=2u W=20u\n"
+        "Vg g 0 2 AC 1\n"
+        ".model nm NMOS(Vto=1 Kp=100u)\n"
+        ".noise v(out) Vg lin 2 1 2\n");
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    // Saturation, lambda=0: Id = Kp/2*(W/L)*(Vgs-Vto)^2 = 0.5 mA, so
+    // v(out) = 5 - Id*2k = 4 V (Vds > Vgs-Vto holds). gm = Kp*(W/L)*
+    // (Vgs-Vto) = 1 mS; the channel noise current 4kT*(2/3)*gm flows
+    // through Z_out = Rl (the channel is a pure current source):
+    //   onoise = sqrt(4kT*(2/3)*gm) * 2k, inoise = onoise/(gm*2k).
+    const double k = 1.380649e-23;
+    const double gm = 100e-6 * (20.0 / 2.0) * (2.0 - 1.0);
+    const double i_n = std::sqrt(4.0 * k * 300.15 * (2.0 / 3.0) * gm);
+    // onoise^2 = (i_n*Rl)^2 + 4kT*Rl (the channel current through the
+    // load, in quadrature with the load's own thermal noise).
+    const double on_quad =
+        std::sqrt(i_n * 2000.0 * i_n * 2000.0 + 4.0 * k * 300.15 * 2000.0);
+    CHECK(t.signal("onoise_spectrum")[0] ==
+          doctest::Approx(on_quad).epsilon(1e-9).scale(0.0));
+    // inoise = onoise/|H| with H = gm*Rl = 2.
+    CHECK(t.signal("inoise_spectrum")[0] ==
+          doctest::Approx(on_quad / 2.0).epsilon(1e-9).scale(0.0));
+
+    // Rejections: bad output form, unknown node, unknown/unsupported input.
+    CHECK(error_of(run_text("nr1\nV1 a 0 AC 1\nR1 a 0 1k\n.noise a V1 lin 1 1 2\n"))
+              .find("v(out)") != std::string::npos);
+    CHECK(error_of(run_text(
+              "nr2\nV1 a 0 AC 1\nR1 a 0 1k\n.noise v(nope) V1 lin 1 1 2\n"))
+              .find("unknown output node") != std::string::npos);
+    CHECK(error_of(run_text(
+              "nr3\nV1 a 0 AC 1\nR1 a 0 1k\n.noise v(a) V9 lin 1 1 2\n"))
+              .find("unknown input source") != std::string::npos);
+    CHECK(error_of(run_text(
+              "nr4\nV1 a 0 AC 1\nR1 a 0 1k\n.noise v(a) R1 lin 1 1 2\n"))
+              .find("not a V or I source") != std::string::npos);
+}

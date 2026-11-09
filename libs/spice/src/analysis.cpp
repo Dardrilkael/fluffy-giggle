@@ -665,6 +665,313 @@ ws::core::Result<Table> run_ac(const Circuit& circuit, RunState& state,
     return t;
 }
 
+// --- .noise (§7.5, M5) -------------------------------------------------------------
+
+namespace {
+
+// The driver-side NoiseContext: collects one device's sources with their
+// adjoint gains folded in (§7.5: one adjoint solve serves every source).
+class DriverNoiseContext final : public NoiseContext {
+public:
+    DriverNoiseContext(const std::vector<std::complex<double>>& adjoint,
+                       std::size_t node_count)
+        : adjoint_(adjoint), node_count_(node_count) {}
+
+    // The owning device's name for this batch of sources (set by the
+    // driver between devices): the summary tables read
+    // "R1_thermal", "D1_id", "Q1_ib" - ngspice's naming.
+    std::string device_name;
+
+    void add_source(const char* name, NodeId p, NodeId n, double psd) override {
+        const std::complex<double> xa_p =
+            (p == kGround) ? std::complex<double>{0.0, 0.0} : adjoint_[p];
+        const std::complex<double> xa_n =
+            (n == kGround) ? std::complex<double>{0.0, 0.0} : adjoint_[n];
+        const std::complex<double> d = xa_p - xa_n;
+        const double gain = d.real() * d.real() + d.imag() * d.imag();
+        const std::string full = device_name + "_" + name;
+        sources.emplace_back(std::move(full), gain * psd);
+    }
+
+    struct Contribution {
+        std::string name;      // "R1_thermal", "D1_id", ...
+        double out_psd_sq;     // gain * psd, V^2/Hz at the output
+    };
+    std::vector<Contribution> sources;
+
+private:
+    const std::vector<std::complex<double>>& adjoint_;
+    std::size_t node_count_;
+};
+
+// §7.5: the log-log (power-law) segment integral (ngspice ninteg.c) -
+// exact for white and 1/f^k pieces. `ln_*` are pre-logged endpoints.
+[[nodiscard]] double noise_integrate(double dens, double ln_dens, double ln_dens_last,
+                                     double del_freq, double ln_freq,
+                                     double ln_freq_last) {
+    const double del_ln_freq = ln_freq - ln_freq_last;
+    if (std::abs(del_ln_freq) < 1e-300) {
+        return 0.0;
+    }
+    const double exponent = (ln_dens - ln_dens_last) / del_ln_freq;
+    if (std::abs(exponent) < phys::kIntFlatThresh) {
+        return dens * del_freq;
+    }
+    // D = a * f^exponent on this segment; integrate a*f^e df.
+    const double a = std::exp(std::min(ln_dens - exponent * ln_freq, 700.0));
+    const double exp1 = exponent + 1.0;
+    if (std::abs(exp1) < phys::kIntUseLog) {
+        return a * (ln_freq - ln_freq_last);
+    }
+    // limexp guards f^(e+1) against overflow (ninteg.c's limexp).
+    auto limexp = [](double x) {
+        return x > 700.0 ? std::exp(700.0) * (1.0 + x - 700.0) : std::exp(x);
+    };
+    return a * (limexp(exp1 * ln_freq) - limexp(exp1 * ln_freq_last)) / exp1;
+}
+
+}  // namespace
+
+ws::core::Result<Table> run_noise(const Circuit& circuit, RunState& state,
+                                  const NoiseCard& card, const RunSettings& settings,
+                                  const ParamTable& scope, AnalysisReport& report,
+                                  const std::vector<NodesetCard>& nodeset_cards) {
+    if (circuit.devices.empty()) {
+        return empty_circuit_error(".noise");
+    }
+
+    // The frequency grid: the same generator as .ac (§7.4).
+    AcCard grid_card;
+    grid_card.loc = card.loc;
+    grid_card.sweep = static_cast<AcCard::Sweep>(card.sweep);
+    grid_card.n = card.n;
+    grid_card.fstart = card.fstart;
+    grid_card.fstop = card.fstop;
+    WS_TRY_ASSIGN(const std::vector<double> freqs, ac_frequency_list(grid_card, scope));
+
+    // §7.5: the output pair "v(out)" / "v(out,ref)".
+    auto noise_fail = [&](std::string message) -> ws::core::unexpected<ws::core::Error> {
+        Diagnostic d = run_diag(ErrorKind::Semantic, "spice.semantic.noise",
+                                std::move(message));
+        d.loc = card.loc;
+        return spice_fail(std::move(d));
+    };
+    const std::string out_text = to_lower(card.output.text);
+    NodeId out_node = kGround;
+    NodeId ref_node = kGround;
+    {
+        const std::size_t eq = out_text.find('=');
+        const bool ok_form = out_text.rfind("v(", 0) == 0 && out_text.back() == ')' &&
+                             eq == std::string::npos;
+        const std::size_t close = out_text.rfind(')');
+        const std::string inner =
+            ok_form ? out_text.substr(2, close - 2) : std::string();
+        const std::size_t comma = inner.find(',');
+        if (!ok_form || inner.empty()) {
+            return noise_fail(".noise output looks like v(out) or v(out,ref), got '" +
+                              card.output.text + "'");
+        }
+        const std::string out_name =
+            to_lower(comma == std::string::npos ? inner : inner.substr(0, comma));
+        const auto it_out = circuit.node_ids.find(out_name);
+        if (it_out == circuit.node_ids.end()) {
+            return noise_fail(".noise names unknown output node '" +
+                              inner.substr(0, comma == std::string::npos ? inner.size()
+                                                                          : comma) +
+                              "'");
+        }
+        out_node = it_out->second;
+        if (comma != std::string::npos) {
+            const std::string ref_name = to_lower(inner.substr(comma + 1));
+            if (ref_name == "0" || ref_name == "gnd") {
+                ref_node = kGround;
+            } else {
+                const auto it_ref = circuit.node_ids.find(ref_name);
+                if (it_ref == circuit.node_ids.end()) {
+                    return noise_fail(".noise names unknown reference node '" +
+                                      inner.substr(comma + 1) + "'");
+                }
+                ref_node = it_ref->second;
+            }
+        }
+        if (out_node == kGround) {
+            return noise_fail(".noise cannot measure the ground node");
+        }
+    }
+
+    // §7.5: the input source must be an existing V or I device.
+    const Device* input_dev = nullptr;
+    {
+        const std::string lower = to_lower(card.input.text);
+        for (const auto& dev : circuit.devices) {
+            if (to_lower(dev->name()) == lower) {
+                input_dev = dev.get();
+                break;
+            }
+        }
+        if (input_dev == nullptr) {
+            return noise_fail(".noise names unknown input source '" + card.input.text +
+                              "'");
+        }
+        if (input_dev->kind() != 'V' && input_dev->kind() != 'I') {
+            return noise_fail(".noise input '" + card.input.text +
+                              "' is not a V or I source");
+        }
+    }
+
+    // §7.2/M5: the .nodeset hints for the OP solve.
+    std::vector<std::pair<std::size_t, double>> nodesets;
+    if (!nodeset_cards.empty()) {
+        WS_TRY_ASSIGN(nodesets, detail::resolve_nodesets(circuit, nodeset_cards));
+    }
+
+    DcKernel kernel(circuit, state, settings);
+    if (const ws::core::Status st = kernel.prepare(); !st) {
+        return wrap_solver_error(st, ".noise");
+    }
+
+    // §7.1: this analysis's own OP, sources at their DC values.
+    std::vector<double> x_op;
+    {
+        std::size_t iterations = 0;
+        if (const ws::core::Status st = kernel.solve(
+                x_op, settings.itl1, ".noise op", iterations, nullptr,
+                nodesets.empty() ? nullptr : &nodesets);
+            !st) {
+            return wrap_solver_error(st, ".noise op");
+        }
+        report.newton_iterations = iterations;
+    }
+
+    if (const ws::core::Status st = kernel.prepare_ac(); !st) {
+        return wrap_solver_error(st, ".noise");
+    }
+    // The companion mirrors (switch positions, K-coupled M) freeze at the
+    // settled OP - the same fold the .ac path runs.
+    fold_all(circuit, state);
+
+    Table t;
+    t.analysis = AnalysisKind::Noise;
+    t.sweep = SweepKind::Frequency;
+    t.sweep_names.push_back("frequency");
+    t.sweep_axes.assign(1, {});
+    Signal onoise;
+    onoise.name = "onoise_spectrum";
+    Signal inoise;
+    inoise.name = "inoise_spectrum";
+    t.signals.push_back(std::move(onoise));
+    t.signals.push_back(std::move(inoise));
+
+    // The integration state (§7.5): totals over power-law segments, the
+    // per-source densities for the summary tables.
+    double out_total_sq = 0.0;   // V^2
+    double in_total_sq = 0.0;    // V^2 (A^2 for current inputs)
+    double ln_f_last = 0.0;
+    double ln_on_last = 0.0;
+    double ln_in_last = 0.0;
+    bool have_last = false;
+
+    for (std::size_t k = 0; k < freqs.size(); ++k) {
+        const double f = freqs[k];
+        const double omega = 2.0 * 3.14159265358979323846 * f;
+
+        // (a) The forward solve: the AC system with ONLY the input source
+        // stamped (1+0j, its declared spec ignored - MODEACNOISE).
+        std::vector<std::complex<double>> xc;
+        {
+            char ctx[64];
+            std::snprintf(ctx, sizeof(ctx), ".noise at %.6g Hz", f);
+            WS_TRY(kernel.noise_point(omega, input_dev, xc, ctx));
+        }
+
+        // (b) The gain H from the input to the output (V per V, or V per
+        // A - the input source's own units).
+        const std::complex<double> h_out =
+            xc[out_node] - (ref_node == kGround ? std::complex<double>{0.0, 0.0}
+                                                : xc[ref_node]);
+        const double h_sq = h_out.real() * h_out.real() + h_out.imag() * h_out.imag();
+        const double gain_sq_inv = 1.0 / std::max(h_sq, phys::kNoiseMinGain);
+
+        // (c) The adjoint solve: A^T x_a = e_out (+1 at out, -1 at ref).
+        std::vector<std::complex<double>> x_a;
+        {
+            std::vector<std::complex<double>> e_out(
+                circuit.node_count() + circuit.branch_count,
+                std::complex<double>{0.0, 0.0});
+            e_out[out_node] = {1.0, 0.0};
+            if (ref_node != kGround) {
+                e_out[ref_node] = {-1.0, 0.0};
+            }
+            char ctx[64];
+            std::snprintf(ctx, sizeof(ctx), ".noise adjoint at %.6g Hz", f);
+            if (const ws::core::Status st = kernel.solve_ac_transpose(e_out, x_a, ctx);
+                !st) {
+                return wrap_solver_error(st, ctx);
+            }
+        }
+
+        // (d) Every device's noise sources, folded with the adjoint gain.
+        double on_sq = 0.0;  // V^2/Hz at the output
+        DriverNoiseContext nctx(x_a, circuit.node_count());
+        nctx.op = &x_op;
+        // (The device name is set per device inside the loop below.)
+        nctx.freq = f;
+        nctx.temp_k = phys::c_to_k(circuit.temp);
+        for (std::size_t di = 0; di < circuit.devices.size(); ++di) {
+            nctx.params_ = state.params_.data() + circuit.param_span[di].begin;
+            nctx.state_ = state.state_.data() + circuit.state_span[di].begin;
+            nctx.device_name = circuit.devices[di]->name();
+            circuit.devices[di]->load_noise(nctx);
+        }
+        for (const auto& c : nctx.sources) {
+            on_sq += c.out_psd_sq;
+        }
+        const double in_sq = on_sq * gain_sq_inv;
+
+        // (e) The spectra rows (V/sqrt(Hz); internally V^2/Hz).
+        t.sweep_axes[0].push_back(f);
+        t.signals[0].data.push_back(std::sqrt(std::max(on_sq, 0.0)));
+        t.signals[1].data.push_back(std::sqrt(std::max(in_sq, 0.0)));
+
+        // (f) The totals: power-law segments (exact for white and 1/f^k).
+        const double ln_f = std::log(std::max(f, phys::kNoiseMinLog));
+        if (have_last) {
+            const double ln_on = std::log(std::max(on_sq, phys::kNoiseMinLog));
+            const double ln_in = std::log(std::max(in_sq, phys::kNoiseMinLog));
+            out_total_sq +=
+                noise_integrate(on_sq, ln_on, ln_on_last, f - freqs[k - 1], ln_f, ln_f_last);
+            in_total_sq +=
+                noise_integrate(in_sq, ln_in, ln_in_last, f - freqs[k - 1], ln_f, ln_f_last);
+            ln_on_last = ln_on;
+            ln_in_last = ln_in;
+        } else {
+            ln_on_last = std::log(std::max(on_sq, phys::kNoiseMinLog));
+            ln_in_last = std::log(std::max(in_sq, phys::kNoiseMinLog));
+            have_last = true;
+        }
+        ln_f_last = ln_f;
+
+        // (g) The summary table (every pts_per_summary points, the first
+        // included - ngspice's step % NStpsSm == 0).
+        if (card.pts_per_summary > 0 && k % static_cast<std::size_t>(card.pts_per_summary) == 0) {
+            AnalysisReport::NoiseSummary sum;
+            sum.freq = f;
+            for (const auto& c : nctx.sources) {
+                sum.names.push_back(c.name);
+                sum.out_density.push_back(std::sqrt(std::max(c.out_psd_sq, 0.0)));
+            }
+            report.noise_summaries.push_back(std::move(sum));
+        }
+    }
+
+    report.analysis = ".noise";
+    report.lu_factorizations = kernel.factorizations();
+    report.stage = "noise";
+    report.noise_out_total = std::sqrt(std::max(out_total_sq, 0.0));
+    report.noise_in_total = std::sqrt(std::max(in_total_sq, 0.0));
+    return t;
+}
+
 }  // namespace
 
 // --- compat=strict (§8.3 rev) -------------------------------------------------------
@@ -763,6 +1070,14 @@ ws::core::Result<Table> run_ac(const Circuit& circuit, RunState& state,
                                const ParamTable& scope, AnalysisReport& report,
                                const std::vector<NodesetCard>& nodesets) {
     return ::ws::spice::run_ac(circuit, state, card, settings, scope, report, nodesets);
+}
+
+ws::core::Result<Table> run_noise(const Circuit& circuit, RunState& state,
+                                  const NoiseCard& card, const RunSettings& settings,
+                                  const ParamTable& scope, AnalysisReport& report,
+                                  const std::vector<NodesetCard>& nodesets) {
+    return ::ws::spice::run_noise(circuit, state, card, settings, scope, report,
+                                  nodesets);
 }
 
 }  // namespace drivers
@@ -1345,7 +1660,7 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
     // card (working-rule 5).
     for (const AnalysisCard& card : ast.analyses) {
         const int kinds = (card.op ? 1 : 0) + (card.dc ? 1 : 0) + (card.tran ? 1 : 0) +
-                          (card.ac ? 1 : 0);
+                          (card.ac ? 1 : 0) + (card.noise ? 1 : 0);
         if (kinds != 1) {
             Diagnostic d = run_diag(
                 ErrorKind::Semantic, "spice.semantic.analysis_card",
@@ -1487,6 +1802,9 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
             } else if (card.tran) {
                 t = run_tran(*live, state, *card.tran, settings, scope, ast.ics, report,
                              ast.nodesets);
+            } else if (card.noise) {
+                t = run_noise(*live, state, *card.noise, settings, scope, report,
+                              ast.nodesets);
             } else {
                 t = run_ac(*live, state, *card.ac, settings, scope, report,
                            ast.nodesets);

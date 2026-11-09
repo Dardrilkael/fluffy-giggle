@@ -650,6 +650,17 @@ public:
 
     double freq = 0.0;    // Hz (the density's frequency)
     double temp_k = 300.15;  // the run temperature, K
+
+    // The OP solution (node voltages then branch currents; null when the
+    // caller has none): linear devices without state slots (the resistor)
+    // read their DC operating current back through it. Ground reads 0.
+    const std::vector<double>* op = nullptr;
+    [[nodiscard]] double node_v(NodeId n) const {
+        if (op == nullptr || n == kGround) {
+            return 0.0;
+        }
+        return (*op)[n];
+    }
 };
 
 // The factory signature: card + services -> device. The factory table

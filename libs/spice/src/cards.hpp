@@ -21,6 +21,7 @@ struct ParsedCard {
         Dc,
         Tran,
         Ac,
+        Noise,
         Ic,
         Nodeset,  // ".nodeset" - deck level only (M5)
         Step,    // ".step" - deck level only
@@ -39,6 +40,7 @@ struct ParsedCard {
     DcCard dc;
     TranCard tran;
     AcCard ac;
+    NoiseCard noise;
     IcCard ic;
     NodesetCard nodeset;
     StepCard step;

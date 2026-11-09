@@ -581,6 +581,7 @@ std::string results_json(const ws::spice::RunOutput& run) {
             case ws::spice::AnalysisKind::Dc: analysis = ".dc"; break;
             case ws::spice::AnalysisKind::Tran: analysis = ".tran"; break;
             case ws::spice::AnalysisKind::Ac: analysis = ".ac"; break;
+            case ws::spice::AnalysisKind::Noise: analysis = ".noise"; break;
             case ws::spice::AnalysisKind::Op: break;
         }
         o.set("analysis", json::Value::text(analysis));

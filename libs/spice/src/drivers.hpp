@@ -78,6 +78,14 @@ private:
                                                AnalysisReport& report,
                                                const std::vector<NodesetCard>& nodesets = {});
 
+// §7.5 (M5)
+[[nodiscard]] ws::core::Result<Table> run_noise(const Circuit& circuit, RunState& state,
+                                                const NoiseCard& card,
+                                                const RunSettings& settings,
+                                                const ParamTable& scope,
+                                                AnalysisReport& report,
+                                                const std::vector<NodesetCard>& nodesets);
+
 // §7.4
 [[nodiscard]] ws::core::Result<Table> run_ac(const Circuit& circuit, RunState& state,
                                              const AcCard& card,
