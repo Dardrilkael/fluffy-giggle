@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <unordered_map>
 
 #include <ws/settings/json.hpp>
 
@@ -48,8 +49,7 @@ std::string palette_category(const ws::circsim::SymbolDef& sym) {
 // "P-channel MOSFET" out. A superset of the old substring match, so
 // every query that worked before keeps working; an empty needle
 // matches.
-[[nodiscard]] bool palette_matches(std::string_view haystack,
-                                   std::string_view needle) {
+bool palette_matches(std::string_view haystack, std::string_view needle) {
     if (needle.empty()) {
         return true;
     }
@@ -74,6 +74,47 @@ std::string palette_category(const ws::circsim::SymbolDef& sym) {
     return at == needle.size();
 }
 
+int palette_score(std::string_view haystack, std::string_view needle) {
+    if (needle.empty()) {
+        return 0;
+    }
+    if (!palette_matches(haystack, needle)) {
+        return -1;
+    }
+    const auto ieq = [](char a, char b) {
+        return std::tolower(static_cast<unsigned char>(a)) ==
+               std::tolower(static_cast<unsigned char>(b));
+    };
+    // Tiers: 4 exact, 3 prefix, 2 whole needle contiguous from a word
+    // start ("source" in "Voltage source"), 1 loose subsequence.
+    int tier = 1;
+    if (haystack.size() == needle.size() &&
+        std::equal(needle.begin(), needle.end(), haystack.begin(), ieq)) {
+        tier = 4;
+    } else if (haystack.size() >= needle.size() &&
+               std::equal(needle.begin(), needle.end(), haystack.begin(),
+                          ieq)) {
+        tier = 3;
+    } else {
+        for (std::size_t i = 0; i + needle.size() <= haystack.size(); ++i) {
+            const bool starts_word =
+                i == 0 || !std::isalnum(static_cast<unsigned char>(
+                                           haystack[i - 1]));
+            if (starts_word &&
+                std::equal(needle.begin(), needle.end(),
+                           haystack.begin() + static_cast<std::ptrdiff_t>(i),
+                           ieq)) {
+                tier = 2;
+                break;
+            }
+        }
+    }
+    // Shorter haystacks first inside a tier: "Resistor" beats
+    // "Resistor (variable)" for "res".
+    const int len = static_cast<int>(std::min<std::size_t>(haystack.size(), 99));
+    return tier * 100 + (99 - len);
+}
+
 std::vector<PaletteGroup> palette_groups(const ws::circsim::SymbolLibrary& lib,
                                          std::string_view filter) {
     static constexpr std::array<const char*, 4> kOrder = {
@@ -82,13 +123,21 @@ std::vector<PaletteGroup> palette_groups(const ws::circsim::SymbolLibrary& lib,
     for (const char* name : kOrder) {
         groups.push_back(PaletteGroup{name, {}});
     }
+    // Relevance per symbol (filtering only): the best of name and key,
+    // or half the category's score (only if category matches) - a hit on
+    // what the part IS outranks a hit on the group it sits in.
+    std::unordered_map<const ws::circsim::SymbolDef*, int> score;
     for (const ws::circsim::SymbolDef& sym : lib.symbols()) {
         const std::string category = palette_category(sym);
-        if (!palette_matches(sym.name, filter) &&
-            !palette_matches(sym.key, filter) &&
-            !palette_matches(category, filter)) {
+        const int name_score = palette_score(sym.name, filter);
+        const int key_score = palette_score(sym.key, filter);
+        const int cat_raw = palette_score(category, filter);
+        const int cat_score = cat_raw >= 0 ? cat_raw / 2 : -1;
+        const int s = std::max({name_score, key_score, cat_score});
+        if (s < 0) {
             continue;
         }
+        score[&sym] = s;
         auto it = std::find_if(
             groups.begin(), groups.end(),
             [&](const PaletteGroup& g) { return g.name == category; });
@@ -98,11 +147,38 @@ std::vector<PaletteGroup> palette_groups(const ws::circsim::SymbolLibrary& lib,
         }
         it->items.push_back(&sym);
     }
-    groups.erase(std::remove_if(groups.begin(), groups.end(),
-                                [](const PaletteGroup& g) {
-                                    return g.items.empty();
-                                }),
-                 groups.end());
+    if (!filter.empty()) {
+        // A search ranks: the best matches lead inside each group and
+        // the group holding the best match leads the list, so the first
+        // tile is the one Enter arms. Ties keep library / group order.
+        const auto best = [&score](const PaletteGroup& g) {
+            int top = -1;
+            for (const ws::circsim::SymbolDef* s : g.items) {
+                top = std::max(top, score[s]);
+            }
+            return top;
+        };
+        for (PaletteGroup& g : groups) {
+            std::stable_sort(g.items.begin(), g.items.end(),
+                             [&score](const ws::circsim::SymbolDef* a,
+                                      const ws::circsim::SymbolDef* b) {
+                                 return score[a] > score[b];
+                             });
+        }
+        std::stable_sort(groups.begin(), groups.end(),
+                         [&best](const PaletteGroup& a,
+                                 const PaletteGroup& b) {
+                             return best(a) > best(b);
+                         });
+    } else {
+        // No filter: drop empty groups (the "Other" partition below
+        // still runs so a custom "Other" group lands last).
+        groups.erase(std::remove_if(groups.begin(), groups.end(),
+                                    [](const PaletteGroup& g) {
+                                        return g.items.empty();
+                                    }),
+                     groups.end());
+    }
     // "Other" is the catch-all: always last, after any custom group.
     std::stable_partition(groups.begin(), groups.end(),
                           [](const PaletteGroup& g) {

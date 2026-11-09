@@ -40,7 +40,17 @@ struct PaletteGroup {
 [[nodiscard]] bool palette_matches(std::string_view haystack,
                                    std::string_view needle);
 
-// The groups for `filter` (empty = everything). The pointers borrow
+// How well `needle` matches `haystack`: -1 for no match (exactly when
+// palette_matches says no), else higher is better - exact, then prefix,
+// then a whole-needle hit at a word start, then a loose subsequence;
+// shorter haystacks rank first inside a tier. An empty needle scores 0.
+[[nodiscard]] int palette_score(std::string_view haystack,
+                                std::string_view needle);
+
+// The groups for `filter` (empty = everything). With a filter the
+// result is RANKED: best matches first inside each group, and the group
+// holding the best match first (a custom "Other" still goes last), so
+// the first tile is what Enter arms. Without one: library order. The pointers borrow
 // from `lib` - valid until the library changes.
 [[nodiscard]] std::vector<PaletteGroup> palette_groups(
     const ws::circsim::SymbolLibrary& lib, std::string_view filter);

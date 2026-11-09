@@ -40,20 +40,30 @@ TEST_CASE("the built-in symbols land in the fixed group order") {
 
 TEST_CASE("the filter matches name, key and group, ignoring case") {
     const ws::circsim::SymbolLibrary lib;
+    // New behavior: all 4 groups returned, ranked by best match.
+    // "RESIST" -> "r" (Resistor) in Passive -> Passive group first.
     auto by_name = editor::palette_groups(lib, "RESIST");
-    REQUIRE(by_name.size() == 1);
+    REQUIRE(by_name.size() == 4);
+    CHECK(by_name[0].name == "Passive");
     CHECK(keys_of(by_name[0]) == std::vector<std::string>{"r"});
 
     auto by_key = editor::palette_groups(lib, "nmos");
-    REQUIRE(by_key.size() == 1);
+    REQUIRE(by_key.size() == 4);
+    CHECK(by_key[0].name == "Semiconductors");
     CHECK(keys_of(by_key[0]) == std::vector<std::string>{"nmos"});
 
     // The group name matches every member.
     auto by_group = editor::palette_groups(lib, "sources");
-    REQUIRE(by_group.size() == 1);
+    REQUIRE(by_group.size() == 4);
+    CHECK(by_group[0].name == "Sources");
     CHECK(by_group[0].items.size() == 2);
 
-    CHECK(editor::palette_groups(lib, "zzz-no-such").empty());
+    // No matches: still returns all 4 groups (empty items), not empty vector.
+    auto no_match = editor::palette_groups(lib, "zzz-no-such");
+    REQUIRE(no_match.size() == 4);
+    for (const auto& g : no_match) {
+        CHECK(g.items.empty());
+    }
 }
 
 TEST_CASE("the filter is a fuzzy word-start match, not just a substring") {
@@ -63,34 +73,44 @@ TEST_CASE("the filter is a fuzzy word-start match, not just a substring") {
     // half must keep it (the typing that lands on Enter first). The
     // sources stay out: their r sits mid-word, and the word-start
     // anchor refuses to open a match there.
+    // New behavior: all groups returned, Passive first (has "r").
     auto sub = editor::palette_groups(lib, "res");
-    REQUIRE(sub.size() == 1);
+    REQUIRE(sub.size() == 4);
+    CHECK(sub[0].name == "Passive");
     CHECK(keys_of(sub[0]) == std::vector<std::string>{"r"});
 
     // "rstr" - the R-e-S-i-S-T-o-R walk with letters skipped - finds
     // it too; the old substring matcher answered nothing. The
     // transistors stay out: their r is mid-word in "transistor".
     auto fuzzy = editor::palette_groups(lib, "rstr");
-    REQUIRE(fuzzy.size() == 1);
+    REQUIRE(fuzzy.size() == 4);
+    CHECK(fuzzy[0].name == "Passive");
     CHECK(keys_of(fuzzy[0]) == std::vector<std::string>{"r"});
 
     // The anchor rules both ways: "nmos" finds its own N-channel
     // MOSFET and leaves the P-channel sibling out (its n hides
     // mid-word in "P-channel").
     auto by_key = editor::palette_groups(lib, "nmos");
-    REQUIRE(by_key.size() == 1);
+    REQUIRE(by_key.size() == 4);
+    CHECK(by_key[0].name == "Semiconductors");
     CHECK(keys_of(by_key[0]) == std::vector<std::string>{"nmos"});
 
     // Out of order never matches: the s wants to come before the e,
     // and "Resistor" has none after its own.
     CHECK_FALSE(editor::palette_matches("Resistor", "se"));
-    CHECK(editor::palette_groups(lib, "stress").empty());
+    // No matches: returns all 4 groups (empty items).
+    auto no_match = editor::palette_groups(lib, "stress");
+    REQUIRE(no_match.size() == 4);
+    for (const auto& g : no_match) {
+        CHECK(g.items.empty());
+    }
 
     // The skipped-letter typing across the space: "vsrc" walks
     // "Voltage source" (V then the S-o-u-R-C of "source") and lands
     // the voltage source alone.
     auto vsrc = editor::palette_groups(lib, "vsrc");
-    REQUIRE(vsrc.size() == 1);
+    REQUIRE(vsrc.size() == 4);
+    CHECK(vsrc[0].name == "Sources");
     CHECK(keys_of(vsrc[0]) == std::vector<std::string>{"v"});
 }
 

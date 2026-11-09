@@ -1158,6 +1158,11 @@ constexpr float kTilePad = 6.0f;
 // window).
 constexpr std::size_t kRecentMax = 6;
 
+// The search field's label doubles as its placeholder text and (whole,
+// "##" suffix included) its id - one constant so the field and the
+// focus check below can never disagree.
+constexpr const char* kSearchLabel = "Search - Enter places first##palette.search";
+
 // The note itself: a key already in the history moves to the front
 // (re-arming is the strongest recency signal there is), a new one
 // enters at the front, and the tail falls past the cap.
@@ -1250,12 +1255,12 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
         ed.tool = Tool::Select;
         ed.wire_draft = Editor::WireDraft{};
     }
-    if (gui::selectable(gui, layout, theme, "wire (W)",
+    if (gui::selectable(gui, layout, theme, "Wire (W)",
                         ed.tool == Tool::Wire)) {
         ed.tool = Tool::Wire;
         ed.wire_draft = Editor::WireDraft{};
     }
-    if (gui::selectable(gui, layout, theme, "label (L)",
+    if (gui::selectable(gui, layout, theme, "Label (L)",
                         ed.tool == Tool::Label)) {
         ed.tool = Tool::Label;
     }
@@ -1267,7 +1272,15 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
                                  static_cast<int>(sizeof ed.label_text));
     }
     if (ed.tool == Tool::Place) {
-        gui::text(layout, theme, ("Placing: " + ed.place_symbol).c_str());
+        // The symbol's readable name, not its library key.
+        std::string placing = ed.place_symbol;
+        for (const ws::circsim::SymbolDef& sym : ed.library.symbols()) {
+            if (sym.key == ed.place_symbol) {
+                placing = sym.name;
+                break;
+            }
+        }
+        gui::text(layout, theme, ("Placing: " + placing).c_str());
         hint_line(layout, theme,
                   "Click to place - R rotate - M mirror - Esc cancel");
     }
@@ -1279,7 +1292,7 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
     // button (no hunting for the backspace key to get the palette back).
     const bool had_filter = ed.palette_filter[0] != '\0';
     (void)text_input_tracked(
-        ed, gui, layout, theme, std::string{"Search symbols"},
+        ed, gui, layout, theme, std::string{kSearchLabel},
         ed.palette_filter, static_cast<int>(sizeof ed.palette_filter),
         had_filter ? std::max(60.0f, layout.remaining_width() - 64.0f)
                    : -1.0f);
@@ -1290,7 +1303,7 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
         }
     }
     const bool filter_focused =
-        gui.is_focused(gui.ids().id("Search symbols"));
+        gui.is_focused(gui.ids().id(kSearchLabel));
     const std::string_view filter{ed.palette_filter};
     const bool filtering = !filter.empty();
     const std::vector<PaletteGroup> groups =
@@ -1322,6 +1335,19 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
                   ("No symbols match \"" + std::string{filter} + "\"")
                       .c_str());
         hint_line(layout, theme, "Try a shorter name, e.g. res, cap or gnd");
+        if (gui::button(gui, layout, theme, "Clear search", 100.0f)) {
+            ed.palette_filter[0] = '\0';
+        }
+    } else if (filtering) {
+        // What the search is doing, and the two keys that drive it.
+        std::size_t matches = 0;
+        for (const PaletteGroup& g : groups) {
+            matches += g.items.size();
+        }
+        hint_line(layout, theme,
+                  (counted(matches, "match") +
+                   " - Enter places the first, Esc clears")
+                      .c_str());
     }
 
     // The columns stretch the tiles to fill the panel's width.
@@ -1898,7 +1924,7 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
         label_line(layout, theme, "Symbol",
                    sym != nullptr
                        ? sym->name + " (" + sym->key + ")"
-                       : p->symbol + " (unknown)");
+                       : p->symbol + " (not in the symbol library)");
         part_text_row(ed, gui, layout, theme, "Reference", p->id, 0, "",
                       p->ref);
         // A source's value row lives INSIDE its mode editor, under the

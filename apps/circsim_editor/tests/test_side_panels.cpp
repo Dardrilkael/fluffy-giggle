@@ -141,8 +141,10 @@ struct Bench {
     // box's Enter does: focus the box (one frame), set the filter,
     // press Enter.
     void arm_first(const char* filter) {
+        constexpr const char* kSearchLabel =
+            "Search - Enter places first##palette.search";
         draw_palette(ws::input::InputFrame{},
-                     [&] { gui.set_focus(gui.ids().id("Search symbols")); });
+                     [&] { gui.set_focus(gui.ids().id(kSearchLabel)); });
         std::snprintf(ed.palette_filter, sizeof ed.palette_filter, "%s",
                       filter);
         ws::input::InputFrame enter;
@@ -810,8 +812,10 @@ TEST_CASE("Esc in the search box clears the filter") {
     // Focus the box, then a filter that matches exactly one built-in
     // ("r" - the resistor, whose zigzag is a stroke, so one tile face
     // is the whole canvas fill story).
+    constexpr const char* kSearchLabel =
+        "Search - Enter places first##palette.search";
     b.draw_palette(ws::input::InputFrame{}, [&] {
-        b.gui.set_focus(b.gui.ids().id("Search symbols"));
+        b.gui.set_focus(b.gui.ids().id(kSearchLabel));
     });
     std::snprintf(b.ed.palette_filter, sizeof b.ed.palette_filter, "r");
     b.clc.cmds.clear();
