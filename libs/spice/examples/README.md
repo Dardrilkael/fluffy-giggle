@@ -45,6 +45,8 @@ On Windows: `.\build\spice-debug\bin\spice.exe run <example>.cir`
 | `mos_cutoff.cir` | `.op` | Vgs < Vth — Id ≈ 0 |
 | `mos_ac_meyer.cir` | `.ac` | The Meyer gate caps at a frozen OP: drive every terminal but the measured one with the gate's AC phase, then C = im(i(Vg))/ω (saturation: Cgs = ⅔·Cox + overlap, Cgd/Cgb overlap-only) |
 | `mos_tran_meyer.cir` | `.tran` | A gate step in deep cutoff: the Meyer caps hold flat, so the gate charges through 1 MΩ with τ = R·(Cox + overlaps) = 17.4 µs — the RC closed form |
+| `mos_b6_iv.cir` | `.dc` | The BSIM6-style core (LEVEL=77): a Vgs sweep crossing subthreshold (~68 mV/dec), the threshold at Vgb=VTH0 and strong inversion — continuous everywhere (no region switching) |
+| `mos_b6_tran.cir` | `.tran` | A level-77 gate step through 10 k: the intrinsic surface-potential charge model (conservation exact) charges the gate as the channel inverts |
 
 ## M4d — the behavioral B source (dual-number AD)
 

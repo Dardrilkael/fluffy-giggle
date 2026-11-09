@@ -1,0 +1,12 @@
+mos bsim6 level 77 iv
+* The BSIM6-style surface-potential core: a Vgs sweep at Vds=1 crosses
+* subthreshold (the ~68 mV/decade slope), the threshold at Vgb=VTH0=0.5
+* and strong inversion - continuous everywhere by construction (no
+* region switching; the SP-formulation selling point).
+Vd d 0 DC 1.0
+Vg g 0 DC 0
+Vs s 0 DC 0
+Vb b 0 DC 0
+M1 d g s b nch L=1u W=1u
+.model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 Vsat=8e4)
+.dc Vg 0 1.4 0.05

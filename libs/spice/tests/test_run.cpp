@@ -2796,6 +2796,338 @@ TEST_CASE("M5d MOS Meyer: TOX absent keeps only the (linear) overlaps") {
           doctest::Approx(r.ov_gb).epsilon(1e-9));
 }
 
+
+// --- §10.1 M6: the BSIM6-style core (level 77) -----------------------------------
+
+namespace {
+
+// The reference model parameters (shared by the rows below).
+struct B6Ref {
+    double tox = 2e-9;
+    double ndep_cm3 = 2e17;
+    double vth0 = 0.5;
+    double u0 = 0.045;
+    double l = 1e-6, w = 1e-6;
+    double temp_k = 300.15;
+    [[nodiscard]] const char* model() const {
+        return "Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 Vsat=8e4";
+    }
+};
+
+// phif/vt/beta2/vfb derived exactly as bsim6_core.hpp derives them; the
+// INDEPENDENT part is the Pao-Sah integral below (own psi bisection, own
+// space-charge function - nothing is shared with the implementation).
+struct B6Derived {
+    double cox, gamma, phif, vt, beta2, vfb;
+    explicit B6Derived(const B6Ref& r) : cox(3.9 * 8.854214871e-12 / r.tox), gamma(0), phif(0),
+                                        vt(r.temp_k * 8.617333262145e-5), beta2(0), vfb(0) {
+        const double t0 = 300.15;
+        const auto eg = [](double t) {
+            return 1.16 - (7.02e-4 * t * t) / (t + 1108.0);
+        };
+        const double ni = 1.45e16 * std::pow(r.temp_k / t0, 1.5) *
+                          std::exp(-0.5 * (eg(r.temp_k) / vt -
+                                           eg(t0) / (t0 * 8.617333262145e-5)));
+        const double na = r.ndep_cm3 * 1e6;
+        phif = vt * std::log(na / ni);
+        gamma = std::sqrt(2.0 * 1.602176634e-19 * 11.7 * 8.854214871e-12 * na) / cox;
+        beta2 = std::exp(-2.0 * phif / vt);
+        const double psi_th = 2.0 * phif;
+        const double psi_th_sc =
+            psi_th + vt * (std::exp(-psi_th / vt) - 1.0) +
+            vt * (std::exp((psi_th - 2.0 * phif) / vt) - beta2);
+        vfb = r.vth0 - psi_th - gamma * std::sqrt(psi_th_sc);
+    }
+};
+
+// PSI(psi, Vch): the exact space-charge function.
+double b6_psi_space(double psi, double vch, const B6Derived& d) {
+    return psi + d.vt * (std::exp(-psi / d.vt) - 1.0) +
+           d.vt * (std::exp((psi - 2.0 * d.phif - vch) / d.vt) - d.beta2);
+}
+
+// psi_s by bisection (independent of the core's Newton).
+double b6_psi_solve(double vgbp, double vch, const B6Derived& d) {
+    const double s = (vgbp >= 0.0) ? 1.0 : -1.0;
+    auto g = [&](double psi) {
+        return vgbp - psi -
+               s * d.gamma * std::sqrt(std::max(b6_psi_space(psi, vch, d), 0.0));
+    };
+    double lo = s > 0 ? 0.0 : -5.0, hi = s > 0 ? 5.0 : 0.0;
+    while (g(hi) > 0 && hi < 1e4) hi *= 2;
+    while (g(lo) < 0 && lo > -1e4) lo *= 2;
+    for (int i = 0; i < 200; ++i) {
+        const double m = 0.5 * (lo + hi);
+        if (g(m) > 0) {
+            lo = m;
+        } else {
+            hi = m;
+        }
+    }
+    return 0.5 * (lo + hi);
+}
+
+// The Pao-Sah current: Id = u0*(W/L)*q*NA * int_{Vsb}^{Vdb} N_sheet dVch,
+// N_sheet = int_0^{psis} (ni/NA)^2 e^{(psi-Vch)/vt}/E dpsi, E = the
+// silicon field (the psi = psis*s^2 substitution kills the flatband
+// 1/sqrt(psi) singularity). No velocity saturation - the classic Pao-Sah
+// has none, so the row runs with Vsat=0.
+double b6_paosah_id(double vgbp, double vsb, double vds, const B6Ref& r,
+                    const B6Derived& d) {
+    const double eps_si = 11.7 * 8.854214871e-12;
+    auto n_sheet = [&](double vch) {
+        const double psis = b6_psi_solve(vgbp, vch, d);
+        const int n = 800;
+        const double h = 1.0 / n;
+        double sum = 0.0;
+        for (int i = 0; i <= n; ++i) {
+            const double s = i * h;
+            const double psi = psis * s * s;
+            const double sc = std::max(b6_psi_space(psi, vch, d), 0.0);
+            const double e_den = d.gamma * d.cox * std::sqrt(sc) / eps_si;
+            const double f = d.beta2 * std::exp((psi - vch) / d.vt) /
+                                 std::max(e_den, 1e-30) * (2.0 * s * psis);
+            sum += (i == 0 || i == n ? 1.0 : (i % 2 ? 4.0 : 2.0)) * f;
+        }
+        return sum * h / 3.0;
+    };
+    const int n = 400;
+    const double h = vds / n;
+    double sum = 0.0;
+    for (int i = 0; i <= n; ++i) {
+        const double vch = vsb + vds * i / n;
+        sum += (i == 0 || i == n ? 1.0 : (i % 2 ? 4.0 : 2.0)) * n_sheet(vch);
+    }
+    return r.u0 * (r.w / r.l) * 1.602176634e-19 * r.ndep_cm3 * 1e6 * sum * h / 3.0;
+}
+
+}  // namespace
+
+TEST_CASE("M6 BSIM6: .dc Id tracks the Pao-Sah double integral") {
+    // The physics gate: a Vg sweep crossing subthreshold, the knee and
+    // strong inversion, every point against the exact drift-diffusion
+    // double integral. The charge-sheet core sits ~1-3% BELOW Pao-Sah
+    // (the approximation's known profile; pinned by tools/bsim6_core_check.cpp).
+    const B6Ref r;
+    const B6Derived d(r);
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;  // the gmin channel floor swamps subthreshold pA
+    const auto run = run_text(
+        "b6 paosah\n"
+        "Vd d 0 DC 1.0\n"
+        "Vg g 0 DC 0\n"
+        "Vs s 0 DC 0\n"
+        "Vb b 0 DC 0\n"
+        "M1 d g s b nch L=1u W=1u\n"
+        ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 Vsat=0)\n"
+        ".dc Vg 0 1.4 0.2\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const std::size_t col_i = col_of(t, "i(Vd)");
+    const std::size_t col_vg = col_of(t, "v(g)");
+    REQUIRE(t.signals[col_i].data.size() == 8);
+    for (std::size_t k = 0; k < 8; ++k) {
+        const double vgb = t.signals[col_vg].data[k];
+        const double id = -t.signals[col_i].data[k];
+        const double ref = b6_paosah_id(vgb - d.vfb, 0.0, 1.0, r, d);
+        if (ref > 1e-13) {
+            CHECK(id == doctest::Approx(ref).epsilon(0.03));
+        }
+    }
+}
+
+TEST_CASE("M6 BSIM6: threshold at VTH0 and clean subthreshold") {
+    // Deep subthreshold is decades down, the threshold point carries the
+    // threshold-scale current, and the swing is 55-95 mV/decade.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;
+    const auto run = run_text(
+        "b6 threshold\n"
+        "Vd d 0 DC 1.0\n"
+        "Vg g 0 DC 0\n"
+        "Vs s 0 DC 0\n"
+        "Vb b 0 DC 0\n"
+        "M1 d g s b nch L=1u W=1u\n"
+        ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 Vsat=8e4)\n"
+        ".dc Vg 0.1 0.5 0.2\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const auto& id = t.signals[col_of(t, "i(Vd)")].data;
+    REQUIRE(id.size() == 3);
+    const double i_sub = -id[0];  // Vgb = 0.1, deep subthreshold
+    const double i_mid = -id[1];
+    const double i_th = -id[2];   // Vgb = 0.5 = VTH0
+    CHECK(i_sub > 1e-16);
+    CHECK(i_sub < 1e-10);
+    CHECK(i_th > 1e-8);
+    CHECK(i_th < 1e-5);
+    const double swing = 1e3 * 0.2 / (std::log10(i_mid) - std::log10(i_sub));
+    CHECK(swing > 55.0);
+    CHECK(swing < 95.0);
+}
+
+TEST_CASE("M6 BSIM6: velocity saturation flattens Id(Vds)") {
+    // Past the knee the current is flat (no CLM in v1 - a documented
+    // limitation; this row PINS the flatness and the vsat scale).
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "b6 vsat flat\n"
+        "Vd d 0 DC 0\n"
+        "Vg g 0 DC 1.2\n"
+        "Vs s 0 DC 0\n"
+        "Vb b 0 DC 0\n"
+        "M1 d g s b nch L=1u W=1u\n"
+        ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 Vsat=8e4)\n"
+        ".dc Vd 0 3 0.25\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const auto& id = t.signals[col_of(t, "i(Vd)")].data;
+    REQUIRE(id.size() == 13);
+    const double i_sat = -id.back();
+    CHECK(i_sat > 0);
+    for (std::size_t k = 6; k < 13; ++k) {
+        CHECK(-id[k] == doctest::Approx(i_sat).epsilon(0.02));
+    }
+    // The vsat bound: Id <= ~1.2x vsat*W*qi(sat) scale (the boundary
+    // condition the Vdsat solve enforces).
+    CHECK(i_sat < 1.2 * 8e4 * 1e-6 * 0.0173 * 0.8);
+}
+
+TEST_CASE("M6 BSIM6: PMOS mirrors NMOS; S/D swap is symmetric; no gate DC") {
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run_n = run_text(
+        "b6 nmos\n"
+        "Vd d 0 DC 1.0\nVg g 0 DC 1.0\nVs s 0 DC 0\nVb b 0 DC 0\n"
+        "M1 d g s b nch L=1u W=1u\n"
+        ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 Vsat=8e4)\n"
+        ".op\n",
+        nullptr, settings);
+    const auto run_p = run_text(
+        "b6 pmos\n"
+        "Vd d 0 DC -1.0\nVg g 0 DC -1.0\nVs s 0 DC 0\nVb b 0 DC 0\n"
+        "M1 d g s b pch L=1u W=1u\n"
+        ".model pch PMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 Vsat=8e4)\n"
+        ".op\n",
+        nullptr, settings);
+    const auto run_r = run_text(
+        "b6 reverse\n"
+        "Vd d 0 DC 0\nVg g 0 DC 1.0\nVs s 0 DC 1.0\nVb b 0 DC 0\n"
+        "M1 d g s b nch L=1u W=1u\n"
+        ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 Vsat=8e4)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run_n);
+    REQUIRE(run_p);
+    REQUIRE(run_r);
+    const Table& tn = run_n->results.tables[0];
+    const double id_n = -tn.signals[col_of(tn, "i(Vd)")].data[0];
+    const Table& tp = run_p->results.tables[0];
+    const double id_p = tp.signals[col_of(tp, "i(Vd)")].data[0];
+    const Table& tr = run_r->results.tables[0];
+    const double id_r = tr.signals[col_of(tr, "i(Vd)")].data[0];
+    CHECK(id_p == doctest::Approx(id_n).epsilon(1e-9));
+    CHECK(id_r == doctest::Approx(id_n).epsilon(1e-6));
+    CHECK(std::abs(tn.signals[col_of(tn, "i(Vg)")].data[0]) < 1e-20);
+}
+
+TEST_CASE("M6 BSIM6: RDSW splits onto the internal #d/#s nodes") {
+    // Rdsw = 200 ohm*um over W = 1um: 100 ohm per side; the drops are
+    // exact linear resistor drops at the solved current.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "b6 rdsw\n"
+        "Vd d 0 DC 1.0\nVg g 0 DC 1.2\nVs s 0 DC 0\nVb b 0 DC 0\n"
+        "M1 d g s b nch L=1u W=1u\n"
+        ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 Vsat=8e4 Rdsw=200)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double id = -t.signals[col_of(t, "i(Vd)")].data[0];
+    const double vd = t.signals[col_of(t, "v(d)")].data[0];
+    const double vdp = t.signals[col_of(t, "v(M1#d)")].data[0];
+    const double vsp = t.signals[col_of(t, "v(M1#s)")].data[0];
+    CHECK((vd - vdp) == doctest::Approx(id * 100.0).epsilon(1e-6));
+    CHECK(vsp == doctest::Approx(id * 100.0).epsilon(1e-6));
+}
+
+TEST_CASE("M6 BSIM6: .tran gate step charges and holds; .ac is capacitive") {
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "b6 tran gate\n"
+        "Vg gin 0 PULSE(0 1.2 2n 0.5n 0.5n 80n)\n"
+        "Rg gin g 10k\n"
+        "Vd d 0 DC 1.2\nVs s 0 DC 0\nVb b 0 DC 0\n"
+        "M1 d g s b nch L=1u W=1u\n"
+        ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 Vsat=8e4)\n"
+        ".tran 1n 60n\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const auto& time = t.signals[0].data;
+    const auto& vg = t.signals[col_of(t, "v(g)")].data;
+    bool held = true;
+    for (std::size_t k = 0; k < time.size(); ++k) {
+        if (time[k] > 20e-9 && time[k] < 80e-9) {
+            if (std::abs(vg[k] - 1.2) > 5e-3) {
+                held = false;
+            }
+        }
+    }
+    CHECK(held);
+    const auto run_ac = run_text(
+        "b6 ac\n"
+        "Vd d 0 DC 1.2\nVg g 0 DC 1.2 AC 1\nVs s 0 DC 0\nVb b 0 DC 0\n"
+        "M1 d g s b nch L=1u W=1u\n"
+        ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 Vsat=8e4 Cgso=1e-10 Cgdo=1e-10)\n"
+        ".ac lin 1 1meg 1meg\n",
+        nullptr, settings);
+    REQUIRE(run_ac);
+    const Table& ta = run_ac->results.tables[0];
+    const double re_ig = ta.signals[col_of(ta, "re(i(Vg))")].data[0];
+    const double im_ig = ta.signals[col_of(ta, "im(i(Vg))")].data[0];
+    CHECK(std::abs(re_ig) < 1e-12);
+    CHECK(im_ig < 0);
+    CHECK(im_ig > -1e-3);  // ~tens of fF at 1 MHz
+}
+
+TEST_CASE("M6 BSIM6: rejections are loud") {
+    const auto bad_level = run_text(
+        "b6 bad level\n"
+        "Vd d 0 DC 1\nVg g 0 DC 1\nVs s 0 DC 0\nVb b 0 DC 0\n"
+        "M1 d g s b nch\n"
+        ".model nch NMOS(Level=49)\n"
+        ".op\n");
+    REQUIRE(!bad_level);
+    CHECK(bad_level.error().message.find("Level 49") != std::string::npos);
+    const auto bad_param = run_text(
+        "b6 bad param\n"
+        "Vd d 0 DC 1\nVg g 0 DC 1\nVs s 0 DC 0\nVb b 0 DC 0\n"
+        "M1 d g s b nch\n"
+        ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Frobnicate=1)\n"
+        ".op\n");
+    REQUIRE(!bad_param);
+    CHECK(bad_param.error().message.find("frobnicate") != std::string::npos);
+    const auto bad_tox = run_text(
+        "b6 bad tox\n"
+        "Vd d 0 DC 1\nVg g 0 DC 1\nVs s 0 DC 0\nVb b 0 DC 0\n"
+        "M1 d g s b nch\n"
+        ".model nch NMOS(Level=77 Tox=-1n Ndep=2e17)\n"
+        ".op\n");
+    REQUIRE(!bad_tox);
+    CHECK(bad_tox.error().message.find("Tox > 0") != std::string::npos);
+}
+
+
 // --- §10.1/§10.4 M4d: the behavioral B source (dual-number AD) --------------------
 
 namespace {

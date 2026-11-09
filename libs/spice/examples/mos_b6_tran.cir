@@ -1,0 +1,12 @@
+mos bsim6 level 77 gate step
+* A gate step through 10k: the intrinsic charge model (terminal charges
+* from the surface-potential core, S/D partitioned by the smooth chi
+* form) charges the gate; Id follows as the channel inverts.
+Vg gin 0 PULSE(0 1.2 2n 0.5n 0.5n 80n)
+Rg gin g 10k
+Vd d 0 DC 1.2
+Vs s 0 DC 0
+Vb b 0 DC 0
+M1 d g s b nch L=1u W=1u
+.model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5 U0=0.045 Vsat=8e4)
+.tran 1n 60n

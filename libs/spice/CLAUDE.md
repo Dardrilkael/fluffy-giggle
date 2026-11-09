@@ -169,6 +169,30 @@ file gets fixed.
   q += (v_new-v_old)*C(v_new); the t=0 seed is the TRANOP q = v*C.
   Caps are dynamic-only (TOX or an overlap present - a bare model keeps
   the M4c stamp byte-identical).
+- **M6 - the BSIM6-style MOS core (LEVEL=77)**: `src/bsim6_core.hpp`
+  (src-only) holds the physics - the exact space-charge PSI(psi,Vch)
+  (Poisson+Boltzmann, both carriers), psi by damped Newton + analytic
+  seeds + bisection fallback, implicit-differentiation partials, the
+  charge-sheet split qi/qb/qg (qi smoothly clamped at 0 in the
+  accumulation/forward-body corners), Id = mueff*(W/L)*INTEGRAL qi dVch
+  (16-pt Gauss-Legendre, with an exponential-concentrating substitution
+  when the channel decays - subthreshold integrands of ~50 e-foldings
+  become degree<=31 polynomials, GL16-exact), the implicit Vdsat
+  boundary (G_sat = Id_cs - vsat*W*qi = 0, scale-RELATIVE tolerance) +
+  BSIM4-style Vdseff smoothing (DELTA=0.02), and the terminal charges
+  with the smooth chi partition. LEVEL=77 = Xyce/Simetrix's number
+  (ngspice ships no BSIM6). The M card dispatches on level; PMOS via
+  the mirror frame; reverse drain via an S/D-swap wrapper; RDSW makes
+  internal 'name#d'/'name#s' nodes (the diode-Rs topology); .tran
+  companions per pair with STATE-FUNCTION charges (conservation exact);
+  .ac stamps the 3x4 transcapacitance matrix; the frozen-Vdsat slot
+  keeps a step's hooks on one linearization point (update_state
+  refreshes kB6Vdsat mid-Newton - a mid-step swap desyncs the committed
+  charges from the solved companion, a spurious constant gate current
+  is the symptom); failures are loud through load_error. Implemented
+  params: TOX/EPSROX/NDEP(cm^-3)/VTH0/U0/UA/UB(SI!)/VSAT/RDSW/
+  CGSO/CGDO/CGBO/TNOM; the BSIM4/6 tail accepts-and-ignores. NO CLM
+  (gds -> 0 in deep sat), no noise, no body diodes (documented).
 
 Everything else rejects at parse with file:line (working-rule 5):
 `.lib` (backlog), `solver=klu` (M0b).

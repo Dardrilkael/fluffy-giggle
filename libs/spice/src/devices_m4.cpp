@@ -48,6 +48,7 @@
 #include <ws/spice/device.hpp>
 #include <ws/spice/state.hpp>
 
+#include "bsim6_core.hpp"
 #include "physconst.hpp"
 
 namespace ws::spice {
@@ -948,25 +949,76 @@ public:
     static constexpr std::size_t kGsHistN = 21, kGsHist = 22;  // 6 slots
     static constexpr std::size_t kGdHistN = 28, kGdHist = 29;  // 6 slots
     static constexpr std::size_t kGbHistN = 35, kGbHist = 36;  // 6 slots
+    // level 77 (BSIM6-style core) block: the folded temperature, the
+    // committed Vdsat (the dynamic hooks reuse it instead of re-solving),
+    // then the SAME (V, Q, I, geq, jeq) + LTE-history shape as the Meyer
+    // pairs over the intrinsic pairs (g-s', g-d', g-b).
+    static constexpr std::size_t kB6TempK = 5;
+    static constexpr std::size_t kB6Vdsat = 6;
+    static constexpr std::size_t kB6GsV = 7, kB6GsQ = 8, kB6GsI = 9, kB6GsGeq = 10,
+                                 kB6GsJeq = 11;
+    static constexpr std::size_t kB6GdV = 12, kB6GdQ = 13, kB6GdI = 14,
+                                 kB6GdGeq = 15, kB6GdJeq = 16;
+    static constexpr std::size_t kB6GbV = 17, kB6GbQ = 18, kB6GbI = 19,
+                                 kB6GbGeq = 20, kB6GbJeq = 21;
+    static constexpr std::size_t kB6GsHistN = 22, kB6GsHist = 23;  // 6 slots
+    static constexpr std::size_t kB6GdHistN = 29, kB6GdHist = 30;  // 6 slots
+    static constexpr std::size_t kB6GbHistN = 36, kB6GbHist = 37;  // 6 slots
+    static constexpr std::size_t kB6VdsatFrozen = 43;  // the Vdsat the
+    // step's companions froze on: update_state refreshes kB6Vdsat inside
+    // the Newton loop, so begin_step snapshots it here for commit/lte_ok -
+    // a mid-step swap desynced the committed charges from the solved
+    // companion (a constant spurious gate current was the symptom).
+    static constexpr std::size_t kB6Slots = 44;
 
     Mosfet(std::string display, NodeId d, NodeId g, NodeId s, NodeId b,
            double l, double w, bool has_temp_inst, double temp_inst_c)
         : name_(std::move(display)), d_(d), g_(g), s_(s), b_(b), l_(l), w_(w),
           has_temp_inst_(has_temp_inst), temp_inst_c_(temp_inst_c) {}
 
+    // The intrinsic channel terminals: with RDSW > 0 the channel hangs on
+    // the internal 'name#d'/'name#s' nodes behind the series resistances
+    // (the diode-Rs topology precedent); without it they ARE the terminals.
+    [[nodiscard]] NodeId chan_d() const { return rdsw_ > 0.0 ? dp_ : d_; }
+    [[nodiscard]] NodeId chan_s() const { return rdsw_ > 0.0 ? sp_ : s_; }
+
     [[nodiscard]] const std::string& name() const override { return name_; }
     [[nodiscard]] char kind() const override { return 'M'; }
     [[nodiscard]] std::vector<NodeId> terminals() const override {
+        if (level_ == 77 && rdsw_ > 0.0) {
+            return {d_, dp_, g_, s_, sp_, b_};
+        }
         return {d_, g_, s_, b_};
     }
     // The MOSFET's channel connects D-S (through the controlled current
     // source); the gate is capacitive only (no DC path). The body junction
     // (B-S, B-D) is reverse-biased (a diode) — for the graph check, treat
     // D-S as a conductance path (the channel is always slightly conducting
-    // via gmin). The gate has no DC path (open).
+    // via gmin). The gate has no DC path (open). Level 77 with RDSW adds
+    // the d-d'-s'-s resistor chain (the diode-Rs graph precedent).
     [[nodiscard]] std::vector<std::pair<NodeId, NodeId>> conductance_edges()
         const override {
+        if (level_ == 77 && rdsw_ > 0.0) {
+            return {{d_, dp_}, {dp_, sp_}, {sp_, s_}};
+        }
         return {{d_, s_}};  // channel (weak but present via gmin)
+    }
+
+    // §8.5: the b6 psi/Vdsat failure channel (the T-line overflow
+    // precedent - the one-shot latch lives on the device because
+    // load_error has no state slice).
+    [[nodiscard]] ws::core::Status load_error(
+        const std::vector<double>&, const TranStep*, const double*,
+        std::size_t) const override {
+        if (level_ == 77 && b6_failed_) {
+            b6_failed_ = false;
+            return spice_fail(dev_diag(
+                ErrorKind::Convergence, "spice.convergence.b6_core",
+                "BSIM6 core of " + name_ +
+                    " failed to converge (surface potential or Vdsat solve)",
+                loc));
+        }
+        return {};
     }
 
     // --- the stamp (direct terminal-current, like the BJT) --------------
@@ -1177,7 +1229,428 @@ public:
         return c;
     }
 
+    // --- level 77: the BSIM6-style core (src/bsim6_core.hpp) -----------------
+    //
+    // The wrapper maps the REAL node voltages into the core's MIRROR frame
+    // (all four negated for PMOS), handles reverse drain operation by the
+    // source/drain swap (the core itself is symmetric; the Vdseff layer is
+    // not, so it always sees vds >= 0), and maps the results back: the
+    // current and charges flip with sgn, the partials do not (the level-1
+    // polarity lesson: d(sgn*f)/d(v_real) = df/dv_mirror).
+    struct B6Eval {
+        double id = 0.0;                     // real-frame drain current
+        double did[4] = {};                  // d/d(vg, vd, vs, vb) real
+        double qg = 0.0, qb = 0.0, qs = 0.0, qd = 0.0;  // real-frame, C
+        double dqg[4] = {}, dqb[4] = {}, dqs[4] = {}, dqd[4] = {};
+        double vdseff = 0.0;
+        double vdsat = 0.0;
+        bool ok = true;
+    };
+
+    // The three gate pair charges (real frame): qgs = -Qs, qgd = -Qd,
+    // qgb = -Qb (qgs+qgd+qgb = Qg by construction - conservation).
+    struct B6Pairs {
+        double q[3] = {};       // qgs, qgd, qgb
+        double dq[3][4] = {};   // their node-voltage partials
+    };
+    [[nodiscard]] static B6Pairs b6_pairs(const B6Eval& e) {
+        B6Pairs p;
+        p.q[0] = -e.qs;
+        p.q[1] = -e.qd;
+        p.q[2] = -e.qb;
+        for (int k = 0; k < 4; ++k) {
+            p.dq[0][k] = -e.dqs[k];
+            p.dq[1][k] = -e.dqd[k];
+            p.dq[2][k] = -e.dqb[k];
+        }
+        return p;
+    }
+
+    [[nodiscard]] B6Eval b6_wrap(double vg, double vd, double vs, double vb,
+                                 double temp_k,
+                                 double vdsat_fixed = -1.0) const {
+        const double sgn = pnp_ ? -1.0 : 1.0;
+        const bsim6::Derived dv = bsim6::derive(b6_, temp_k);
+        const double vgbp = sgn * (vg - vb) - dv.vfb;
+        const double vsb = sgn * (vs - vb);
+        const double vds = sgn * (vd - vs);
+        bsim6::EvalOpts opts;
+        opts.vdsat_fixed = vdsat_fixed;
+        B6Eval out;
+        if (vds >= 0.0) {
+            const bsim6::Eval e =
+                bsim6::evaluate(b6_, dv, l_, w_, vgbp, vsb, vds, opts);
+            if (!e.ok) {
+                out.ok = false;
+                return out;
+            }
+            out.id = sgn * e.id;
+            for (int k = 0; k < 4; ++k) {
+                out.did[k] = e.did[k];
+                out.dqg[k] = e.dqg[k];
+                out.dqb[k] = e.dqb[k];
+                out.dqs[k] = e.dqs[k];
+                out.dqd[k] = e.dqd[k];
+            }
+            out.qg = sgn * e.qg;
+            out.qb = sgn * e.qb;
+            out.qs = sgn * e.qs;
+            out.qd = sgn * e.qd;
+            out.vdseff = e.vdseff;
+            out.vdsat = e.vdsat;
+            return out;
+        }
+        // Reverse mode: evaluate with S/D swapped, then unswap. Column
+        // permutation: real vd is the swapped vs and vice versa.
+        const bsim6::Eval e = bsim6::evaluate(b6_, dv, l_, w_, vgbp, vsb + vds,
+                                              -vds, opts);
+        if (!e.ok) {
+            out.ok = false;
+            return out;
+        }
+        static const int perm[4] = {0, 2, 1, 3};
+        out.id = -sgn * e.id;
+        for (int k = 0; k < 4; ++k) {
+            out.did[k] = -e.did[perm[k]];
+            out.dqg[k] = e.dqg[perm[k]];
+            out.dqb[k] = e.dqb[perm[k]];
+        }
+        // The swapped source IS the real drain.
+        out.qs = sgn * e.qd;
+        out.qd = sgn * e.qs;
+        for (int k = 0; k < 4; ++k) {
+            out.dqs[k] = e.dqd[perm[k]];
+            out.dqd[k] = e.dqs[perm[k]];
+        }
+        out.vdseff = e.vdseff;
+        out.vdsat = e.vdsat;
+        return out;
+    }
+
+    // The mirror-frame pair voltages (vgs, vgd, vgb) from a solution.
+    void b6_pair_volts(const std::vector<double>& x, double v[3]) const {
+        const double sgn = pnp_ ? -1.0 : 1.0;
+        v[0] = sgn * v_across(x, g_, chan_s());
+        v[1] = sgn * v_across(x, g_, chan_d());
+        v[2] = sgn * v_across(x, g_, b_);
+    }
+
+    // The pair charges + their mirror-frame node partials at given mirror
+    // pair voltages, reusing a committed Vdsat (the hooks' linearization
+    // point). v = {vgs, vgd, vgb}; columns (vg, vd, vs, vb) mirror.
+    [[nodiscard]] B6Pairs b6_pairs_at(const double v[3], double vdsat,
+                                      double temp_k, bool* ok) const {
+        B6Pairs p;
+        const bsim6::Derived dv = bsim6::derive(b6_, temp_k);
+        bsim6::EvalOpts opts;
+        opts.vdsat_fixed = vdsat;
+        const double vgbp = v[2] - dv.vfb;
+        const double vsb = v[2] - v[0];  // vgb - vgs = vs - vb
+        const double vds = v[0] - v[1];  // vgs - vgd
+        bsim6::Eval e;
+        if (vds >= 0.0) {
+            e = bsim6::evaluate(b6_, dv, l_, w_, vgbp, vsb, vds, opts);
+        } else {
+            // Reverse: swapped evaluation, then unswap.
+            const bsim6::Eval es =
+                bsim6::evaluate(b6_, dv, l_, w_, vgbp, vsb + vds, -vds, opts);
+            e = es;
+            if (es.ok) {
+                static const int perm[4] = {0, 2, 1, 3};
+                e.qs = es.qd;
+                e.qd = es.qs;
+                for (int k = 0; k < 4; ++k) {
+                    e.dqs[k] = es.dqd[perm[k]];
+                    e.dqd[k] = es.dqs[perm[k]];
+                }
+            }
+        }
+        *ok = e.ok;
+        if (!e.ok) {
+            return p;
+        }
+        p.q[0] = -e.qs;
+        p.q[1] = -e.qd;
+        p.q[2] = -e.qb;
+        for (int k = 0; k < 4; ++k) {
+            p.dq[0][k] = -e.dqs[k];
+            p.dq[1][k] = -e.dqd[k];
+            p.dq[2][k] = -e.dqb[k];
+        }
+        // The overlap caps ride the SAME pair charges (and therefore the
+        // same companions + LTE): qgs += CGSO*W*vgs, etc.
+        p.q[0] += b6_.cgso * w_ * v[0];
+        p.q[1] += b6_.cgdo * w_ * v[1];
+        p.q[2] += b6_.cgbo * l_ * v[2];
+        p.dq[0][0] += b6_.cgso * w_;
+        p.dq[1][0] += b6_.cgdo * w_;
+        p.dq[2][0] += b6_.cgbo * l_;
+        p.dq[0][2] -= b6_.cgso * w_;
+        p.dq[1][1] -= b6_.cgdo * w_;
+        p.dq[2][3] -= b6_.cgbo * l_;
+        return p;
+    }
+
+    void b6_load_dc(DcLoadContext& cx) const {
+        const NodeId cd = chan_d(), cs = chan_s();
+        const B6Eval e = b6_wrap(cx.node_v(g_), cx.node_v(cd), cx.node_v(cs),
+                                 cx.node_v(b_), load_temp_k(cx.temp_k()));
+        if (!e.ok) {
+            b6_failed_ = true;  // reported through load_error
+            return;
+        }
+        // Channel Norton on the intrinsic nodes (the level-1 pattern).
+        const double vg = cx.node_v(g_), vd = cx.node_v(cd),
+                     vs = cx.node_v(cs), vb = cx.node_v(b_);
+        const double id_const = e.id - (e.did[0] * vg + e.did[1] * vd +
+                                        e.did[2] * vs + e.did[3] * vb);
+        cx.add_entry(cd, g_, e.did[0]);
+        cx.add_entry(cd, cd, e.did[1]);
+        cx.add_entry(cd, cs, e.did[2]);
+        cx.add_entry(cd, b_, e.did[3]);
+        cx.add_entry(cs, g_, -e.did[0]);
+        cx.add_entry(cs, cd, -e.did[1]);
+        cx.add_entry(cs, cs, -e.did[2]);
+        cx.add_entry(cs, b_, -e.did[3]);
+        cx.add_rhs(cd, -id_const);
+        cx.add_rhs(cs, id_const);
+        // The gmin channel floor (the graph/convergence precedent).
+        cx.add_conductance(cd, cs, cx.gmin());
+        // Series resistances (constant stamps).
+        if (rdsw_ > 0.0) {
+            const double g = 1.0 / (0.5 * rdsw_ / (w_ * 1e6));
+            cx.add_conductance(d_, dp_, g);
+            cx.add_conductance(s_, sp_, g);
+        }
+    }
+
+    void b6_load_ac(AcLoadContext& cx) const {
+        const NodeId cd = chan_d(), cs = chan_s();
+        const double sgn = pnp_ ? -1.0 : 1.0;
+        // The frozen OP rides the shared mirror slots (update_state):
+        // reconstruct real node voltages with vb = 0 (vg = sgn*(Vgs-Vbs),
+        // vd = sgn*(Vds-Vbs), vs = -sgn*Vbs - the wrapper re-mirrors).
+        const B6Eval e = b6_wrap(
+            sgn * (cx.st(kVgsPrev) - cx.st(kVbsPrev)),
+            sgn * (cx.st(kVdsPrev) - cx.st(kVbsPrev)),
+            -sgn * cx.st(kVbsPrev), 0.0, load_temp_k(cx.temp_k()));
+        if (!e.ok) {
+            b6_failed_ = true;
+            return;
+        }
+        // Channel conductances (real entries, the level-1 shape).
+        cx.add_entry(cd, g_, {e.did[0], 0.0});
+        cx.add_entry(cd, cd, {e.did[1], 0.0});
+        cx.add_entry(cd, cs, {e.did[2], 0.0});
+        cx.add_entry(cd, b_, {e.did[3], 0.0});
+        cx.add_entry(cs, g_, {-e.did[0], 0.0});
+        cx.add_entry(cs, cd, {-e.did[1], 0.0});
+        cx.add_entry(cs, cs, {-e.did[2], 0.0});
+        cx.add_entry(cs, b_, {-e.did[3], 0.0});
+        if (rdsw_ > 0.0) {
+            const double g = 1.0 / (0.5 * rdsw_ / (w_ * 1e6));
+            cx.add_conductance(d_, dp_, {g, 0.0});
+            cx.add_conductance(s_, sp_, {g, 0.0});
+        }
+        // The transcapacitance stamp: each pair (g,n_k) carries q_k; the
+        // current the node g must SUPPLY to the pair is dq_k/dt, so
+        // Y[g][j] += j*omega*dq_k/dv_j and the return node gets the same
+        // with the opposite sign (the plain-cap convention: a linear q=C*v
+        // reduces to add_conductance's +j*omega*C diagonal). Row g summed
+        // over the pairs reproduces +j*omega*dQg/dv_j.
+        const B6Pairs pr = b6_pairs(e);
+        const NodeId ret[3] = {cs, cd, b_};
+        const NodeId cols[4] = {g_, cd, cs, b_};
+        for (int p = 0; p < 3; ++p) {
+            for (int j = 0; j < 4; ++j) {
+                const std::complex<double> y = {0.0, cx.omega * pr.dq[p][j]};
+                cx.add_entry(g_, cols[j], y);
+                cx.add_entry(ret[p], cols[j], -y);
+            }
+        }
+        // Overlaps as plain caps.
+        cx.add_conductance(g_, cs, {0.0, cx.omega * b6_.cgso * w_});
+        cx.add_conductance(g_, cd, {0.0, cx.omega * b6_.cgdo * w_});
+        cx.add_conductance(g_, b_, {0.0, cx.omega * b6_.cgbo * l_});
+    }
+
+    void b6_load_tran(DcLoadContext& cx) const {
+        b6_load_dc(cx);
+        const NodeId cd = chan_d(), cs = chan_s();
+        const double sgn = pnp_ ? -1.0 : 1.0;
+        cx.add_conductance(g_, cs, cx.st(kB6GsGeq));
+        cx.add_current(cs, g_, sgn * cx.st(kB6GsJeq));
+        cx.add_conductance(g_, cd, cx.st(kB6GdGeq));
+        cx.add_current(cd, g_, sgn * cx.st(kB6GdJeq));
+        cx.add_conductance(g_, b_, cx.st(kB6GbGeq));
+        cx.add_current(b_, g_, sgn * cx.st(kB6GbJeq));
+    }
+
+    // The b6 companions: each pair's charge is a STATE FUNCTION of the
+    // terminal voltages (no incremental tracking - the charge-based
+    // advantage over Meyer: Q is always q_pair(v), conservation exact).
+    // begin_step linearizes at the committed bias with the committed
+    // Vdsat; the (V,Q,I,geq,jeq) bookkeeping follows the Cjo/Meyer house
+    // convention (trap: geq = 2C/dt, jeq = -(geq*V+I); BE: geq = C/dt,
+    // jeq = -Q/dt), where C is the pair's self-transcapacitance
+    // d(q_pair)/d(v_pair) from the core's analytic Jacobian.
+    void b6_begin_step(const TranStep& step, double* st) {
+        st[kB6VdsatFrozen] = st[kB6Vdsat];
+        double v[3] = {st[kB6GsV], st[kB6GdV], st[kB6GbV]};
+        bool ok = true;
+        const B6Pairs p = b6_pairs_at(v, st[kB6VdsatFrozen], st[kB6TempK], &ok);
+        if (!ok) {
+            b6_failed_ = true;
+            return;
+        }
+        // Self-caps: d(qgs)/d(vgs)|vgd,vgb = d(-Qs)/d(vs), etc.
+        const double cap[3] = {-p.dq[0][2], -p.dq[1][1], -p.dq[2][3]};
+        const std::size_t slot[3][5] = {
+            {kB6GsV, kB6GsQ, kB6GsI, kB6GsGeq, kB6GsJeq},
+            {kB6GdV, kB6GdQ, kB6GdI, kB6GdGeq, kB6GdJeq},
+            {kB6GbV, kB6GbQ, kB6GbI, kB6GbGeq, kB6GbJeq},
+        };
+        for (int k = 0; k < 3; ++k) {
+            const double c = cap[k] > 0.0 ? cap[k] : 0.0;
+            if (step.be) {
+                st[slot[k][3]] = c / step.dt;
+                st[slot[k][4]] = -st[slot[k][1]] / step.dt;
+            } else {
+                st[slot[k][3]] = 2.0 * c / step.dt;
+                st[slot[k][4]] = -(st[slot[k][3]] * st[slot[k][0]] + st[slot[k][2]]);
+            }
+        }
+    }
+
+    void b6_commit(const std::vector<double>& x, const TranStep& step,
+                   double* st) {
+        double v[3];
+        b6_pair_volts(x, v);
+        bool ok = true;
+        const B6Pairs p = b6_pairs_at(v, st[kB6VdsatFrozen], st[kB6TempK], &ok);
+        if (!ok) {
+            b6_failed_ = true;
+            return;
+        }
+        const std::size_t slot[3][5] = {
+            {kB6GsV, kB6GsQ, kB6GsI, kB6GsGeq, kB6GsJeq},
+            {kB6GdV, kB6GdQ, kB6GdI, kB6GdGeq, kB6GdJeq},
+            {kB6GbV, kB6GbQ, kB6GbI, kB6GbGeq, kB6GbJeq},
+        };
+        const std::size_t hn[3] = {kB6GsHistN, kB6GdHistN, kB6GbHistN};
+        const std::size_t h[3] = {kB6GsHist, kB6GdHist, kB6GbHist};
+        for (int k = 0; k < 3; ++k) {
+            const auto& sl = slot[k];
+            st[sl[1]] = p.q[k];
+            st[sl[0]] = v[k];
+            st[sl[2]] = st[sl[3]] * v[k] + st[sl[4]];
+            if (step.be) {
+                st[hn[k]] = 0.0;
+            } else {
+                const double n = st[hn[k]];
+                if (n < 3.0) {
+                    const auto idx = static_cast<std::size_t>(n);
+                    st[h[k] + idx * 2] = step.time;
+                    st[h[k] + idx * 2 + 1] = st[sl[1]];
+                    st[hn[k]] = n + 1.0;
+                } else {
+                    for (std::size_t j = 0; j < 2; ++j) {
+                        st[h[k] + j * 2] = st[h[k] + (j + 1) * 2];
+                        st[h[k] + j * 2 + 1] = st[h[k] + (j + 1) * 2 + 1];
+                    }
+                    st[h[k] + 4] = step.time;
+                    st[h[k] + 5] = st[sl[1]];
+                }
+            }
+        }
+    }
+
+    [[nodiscard]] bool b6_lte_ok(const TranStep& step, const std::vector<double>& x,
+                                 double reltol, double chgtol, double trtol,
+                                 const double* st, double* ratio) const {
+        double v[3];
+        b6_pair_volts(x, v);
+        bool ok = true;
+        const B6Pairs p = b6_pairs_at(v, st[kB6VdsatFrozen], st[kB6TempK], &ok);
+        if (!ok) {
+            if (ratio != nullptr) {
+                *ratio = std::numeric_limits<double>::infinity();
+            }
+            return false;
+        }
+        const std::size_t qsl[3] = {kB6GsQ, kB6GdQ, kB6GbQ};
+        const std::size_t hn[3] = {kB6GsHistN, kB6GdHistN, kB6GbHistN};
+        const std::size_t h[3] = {kB6GsHist, kB6GdHist, kB6GbHist};
+        double worst = 0.0;
+        for (int k = 0; k < 3; ++k) {
+            const double n = st[hn[k]];
+            if (n < 3.0) {
+                continue;
+            }
+            const double q3 = p.q[k];
+            const double t0 = st[h[k]], q0 = st[h[k] + 1];
+            const double t1 = st[h[k] + 2], q1 = st[h[k] + 3];
+            const double t2 = st[h[k] + 4], q2 = st[h[k] + 5];
+            const double t3 = step.time;
+            if (!(t1 > t0) || !(t2 > t1) || !(t3 > t2) || !(step.dt > 0)) {
+                continue;
+            }
+            const double d1a = (q1 - q0) / (t1 - t0);
+            const double d1b = (q2 - q1) / (t2 - t1);
+            const double d1c = (q3 - q2) / (t3 - t2);
+            const double d2a = (d1b - d1a) / (t2 - t0);
+            const double d2b = (d1c - d1b) / (t3 - t1);
+            const double dd3 = (d2b - d2a) / (t3 - t0);
+            const double eps = step.dt * step.dt * step.dt * std::abs(dd3) / 2.0;
+            const double tolq = trtol * (reltol * std::max(std::abs(q3), std::abs(st[qsl[k]])) + chgtol);
+            if (tolq > 0.0) {
+                worst = std::max(worst, eps / tolq);
+            }
+        }
+        if (ratio != nullptr) {
+            *ratio = worst;
+        }
+        return worst <= 1.0;
+    }
+
+    void b6_seed_state(const std::vector<double>& x, double* st) {
+        // The t=0 OP: pair charges at the OP bias, a FRESH Vdsat for the
+        // companions, zero companion currents.
+        const NodeId cd = chan_d(), cs = chan_s();
+        const B6Eval e = b6_wrap(v_across(x, g_, kGround), v_across(x, cd, kGround),
+                                 v_across(x, cs, kGround), v_across(x, b_, kGround),
+                                 st[kB6TempK]);
+        if (!e.ok) {
+            b6_failed_ = true;
+            return;
+        }
+        st[kB6Vdsat] = e.vdsat;
+        st[kB6VdsatFrozen] = e.vdsat;
+        double v[3];
+        b6_pair_volts(x, v);
+        bool ok = true;
+        const B6Pairs p = b6_pairs_at(v, e.vdsat, st[kB6TempK], &ok);
+        if (!ok) {
+            b6_failed_ = true;
+            return;
+        }
+        const std::size_t vsl[3] = {kB6GsV, kB6GdV, kB6GbV};
+        const std::size_t qsl[3] = {kB6GsQ, kB6GdQ, kB6GbQ};
+        const std::size_t isl[3] = {kB6GsI, kB6GdI, kB6GbI};
+        const std::size_t hn[3] = {kB6GsHistN, kB6GdHistN, kB6GbHistN};
+        for (int k = 0; k < 3; ++k) {
+            st[vsl[k]] = v[k];
+            st[qsl[k]] = p.q[k];
+            st[isl[k]] = 0.0;
+            st[hn[k]] = 0.0;
+        }
+    }
+
     void load_dc(DcLoadContext& cx) const override {
+        if (level_ == 77) {
+            b6_load_dc(cx);
+            return;
+        }
         const double sgn = pnp_ ? -1.0 : 1.0;  // PMOS = pnp_ flag reused
         const TempOp op = temp_op(load_temp_k(cx.temp_k()));
         const double vg = cx.node_v(g_), vs = cx.node_v(s_);
@@ -1216,6 +1689,10 @@ public:
     // open channel (gain 0). The Meyer caps (§6.2) join as j*omega*C at
     // the same frozen OP.
     void load_ac(AcLoadContext& cx) const override {
+        if (level_ == 77) {
+            b6_load_ac(cx);
+            return;
+        }
         const TempOp op = temp_op(load_temp_k(cx.temp_k()));
         const ChannelEval e = channel_eval(cx.st(kVgsPrev), cx.st(kVdsPrev),
                                            cx.st(kVbsPrev), 0.0, op);
@@ -1242,6 +1719,10 @@ public:
     // live in the mirror frame, so the constant current flips with the
     // polarity - see the state-layout comment).
     void load_tran(DcLoadContext& cx, const TranStep&) const override {
+        if (level_ == 77) {
+            b6_load_tran(cx);
+            return;
+        }
         load_dc(cx);
         if (!has_caps()) {
             return;
@@ -1266,9 +1747,14 @@ public:
 
     // --- state model (§3.5b) ---------------------------------------------
     [[nodiscard]] std::size_t state_slots() const override {
+        if (level_ == 77) {
+            return kB6Slots;
+        }
         return has_caps() ? 42 : 5;
     }
-    [[nodiscard]] bool is_dynamic() const override { return has_caps(); }
+    [[nodiscard]] bool is_dynamic() const override {
+        return level_ == 77 ? true : has_caps();
+    }
 
     // §7.5 (M5, mos1noi.c): _thermal channel noise 4kT·(2/3·gm) between
     // drain and source (the level-1 nlev<3 form - (8/3)kT·gm as a
@@ -1277,6 +1763,9 @@ public:
     // dependency here; a documented deviation from ngspice's nlev=0
     // geometry form). The OP rides state[kVgsPrev]/[kVdsPrev].
     void load_noise(NoiseContext& cx) const override {
+        if (level_ == 77) {
+            return;  // the b6 noise model is the follow-up (documented)
+        }
         const double t_k = load_temp_k(cx.temp_k);
         const TempOp op = temp_op(t_k);
         const ChannelEval e = channel_eval(cx.st(kVgsPrev), cx.st(kVdsPrev),
@@ -1311,6 +1800,10 @@ public:
     // 5-slot no-caps slice ends below kTempK (fold_all only calls this on
     // dynamic devices, but the guard keeps the invariant local).
     void fold_state(double* st, const RunState& /*rs*/, const Circuit& c) const override {
+        if (level_ == 77) {
+            st[kB6TempK] = phys::c_to_k(c.temp);
+            return;
+        }
         if (has_caps()) {
             st[kTempK] = phys::c_to_k(c.temp);
         }
@@ -1324,6 +1817,10 @@ public:
     // COMMITTED bias (the Cjo precedent). The caps all evaluate at the
     // same (vgs, vds, vbs) recovered from the committed pair voltages.
     void begin_step(const TranStep& step, double* st) override {
+        if (level_ == 77) {
+            b6_begin_step(step, st);
+            return;
+        }
         if (!has_caps()) {
             return;
         }
@@ -1357,6 +1854,10 @@ public:
     // cap at the NEW bias carries the step's charge increment.
     void commit(const std::vector<double>& x, std::size_t /*nc*/,
                 const TranStep& step, double* st) override {
+        if (level_ == 77) {
+            b6_commit(x, step, st);
+            return;
+        }
         if (!has_caps()) {
             return;
         }
@@ -1498,6 +1999,27 @@ public:
                                     double temp_k = 300.15) override {
         const std::vector<double>& x_load =
             (x_prev != nullptr && !x_prev->empty()) ? *x_prev : x;
+        if (level_ == 77) {
+            const NodeId cd = chan_d(), cs = chan_s();
+            const double sgn = pnp_ ? -1.0 : 1.0;
+            const double vgs = sgn * v_across(x_load, g_, cs);
+            const double vds = sgn * v_across(x_load, cd, cs);
+            const double vbs = sgn * v_across(x_load, b_, cs);
+            const B6Eval e =
+                b6_wrap(v_across(x_load, g_, kGround), v_across(x_load, cd, kGround),
+                        v_across(x_load, cs, kGround), v_across(x_load, b_, kGround),
+                        load_temp_k(temp_k));
+            b6_failed_ = b6_failed_ || !e.ok;
+            st[kIPrev] = st[kICur];
+            st[kICur] = e.ok ? e.id : 0.0;
+            st[kVgsPrev] = vgs;
+            st[kVdsPrev] = vds;
+            st[kVbsPrev] = vbs;
+            if (e.ok) {
+                st[kB6Vdsat] = e.vdsat;
+            }
+            return false;  // the SP core is smooth; no limiting
+        }
         const TempOp op = temp_op(load_temp_k(temp_k));
         const double sgn = pnp_ ? -1.0 : 1.0;
         const double vgs = sgn * (v_across(x_load, g_, s_));
@@ -1536,8 +2058,12 @@ public:
     }
 
     // .model name NMOS|PMOS(Level=1 Vto= Kp= Lambda= Gamma= Phi= ...)
+    // Level=77 selects the BSIM6-style core (bsim6_core.hpp): TOX, EPSROX,
+    // NDEP, VTH0, U0, UA, UB, VSAT, RDSW, CGSO/CGDO/CGBO, TNOM implemented;
+    // the long BSIM4/6 tail is accepted-but-ignored so production decks
+    // parse (the diode-TT precedent; STATUS lists them).
     ws::core::Status apply_model(const ModelDef& model,
-                                 NodeResolver& /*nodes*/) override {
+                                 NodeResolver& nodes) override {
         if (model.type != "nmos" && model.type != "pmos") {
             return spice_fail(dev_diag(
                 ErrorKind::Semantic, "spice.semantic.model_type",
@@ -1551,6 +2077,7 @@ public:
         double vto = 0.0, kp = 20e-6, lambda = 0.0, gamma = 0.0, phi = 0.6, tnom = 27.0;
         double kf_val = 0.0, af_val = 1.0, ef_val = 1.0;
         double tox_val = 0.0, cgso_val = 0.0, cgdo_val = 0.0, cgbo_val = 0.0;
+        double level_val = 1.0;
         const auto& toks = model.params;
         for (std::size_t i = 0; i < toks.size(); ++i) {
             std::string text = toks[i].text;
@@ -1594,16 +2121,45 @@ public:
             else if (key == "kf") kf_val = v;
             else if (key == "af") af_val = v;
             else if (key == "ef") ef_val = v;
-            else if (key == "tox") tox_val = v;
-            else if (key == "cgso") cgso_val = v;
-            else if (key == "cgdo") cgdo_val = v;
-            else if (key == "cgbo") cgbo_val = v;
-            else if (key == "level" || key == "u0" ||
-                     key == "cj" || key == "mj" || key == "cjsw" ||
+            else if (key == "tox") { tox_val = v; b6_.tox = v; }
+            else if (key == "cgso") { cgso_val = v; b6_.cgso = v; }
+            else if (key == "cgdo") { cgdo_val = v; b6_.cgdo = v; }
+            else if (key == "cgbo") { cgbo_val = v; b6_.cgbo = v; }
+            else if (key == "level") level_val = v;
+            else if (key == "version") { /* 77 lineage marker; ignored */ }
+            else if (key == "epsrox") b6_.epsrox = v;
+            else if (key == "ndep") b6_.ndep_cm3 = v;
+            else if (key == "vth0") b6_.vth0 = v;
+            else if (key == "u0") b6_.u0 = v;
+            else if (key == "ua") b6_.ua = v;
+            else if (key == "ub") b6_.ub = v;
+            else if (key == "vsat") b6_.vsat = v;
+            else if (key == "rdsw") b6_.rdsw = v;
+            else if (key == "cj" || key == "mj" || key == "cjsw" ||
                      key == "mjsw" || key == "pb" || key == "js" ||
                      key == "cbd" || key == "cbs" || key == "nsub" ||
                      key == "nss" || key == "tpg" || key == "ld" ||
-                     key == "xl" || key == "wd" || key == "xw") {
+                     key == "xl" || key == "wd" || key == "xw" ||
+                     // The BSIM6 tail: accepted so real decks parse, not
+                     // implemented (STATUS sharp edge lists the set).
+                     key == "k1" || key == "k2" || key == "k3" ||
+                     key == "k3b" || key == "w0" || key == "dvt0" ||
+                     key == "dvt1" || key == "dvt2" || key == "dvt0w" ||
+                     key == "dvt1w" || key == "eta0" || key == "etab" ||
+                     key == "dsub" || key == "cdsc" || key == "cdscd" ||
+                     key == "cdscb" || key == "nfactor" || key == "voff" ||
+                     key == "cit" || key == "a0" || key == "ags" ||
+                     key == "b0" || key == "bsat" || key == "pclm" ||
+                     key == "pdiblc1" || key == "pdiblc2" || key == "pdiblcb" ||
+                     key == "drout" || key == "pvag" || key == "delta" ||
+                     key == "rdswmin" || key == "rdw" || key == "rsw" ||
+                     key == "prwg" || key == "prwb" || key == "nch" ||
+                     key == "ngate" || key == "phin" || key == "mobmod" ||
+                     key == "capmod" || key == "noimod" || key == "paramchk" ||
+                     key == "xj" || key == "lint" || key == "wint" ||
+                     key == "ll" || key == "lln" || key == "wl" ||
+                     key == "wln" || key == "lwl" || key == "ww" ||
+                     key == "wwn" || key == "wwn") {
                 // Accepted but not implemented (BSIM, junction cap
                 // tables, geometry shrinks).
             } else {
@@ -1625,6 +2181,51 @@ public:
         cgso_ = cgso_val;
         cgdo_ = cgdo_val;
         cgbo_ = cgbo_val;
+        if (level_val != 1.0 && level_val != 77.0) {
+            return spice_fail(dev_diag(
+                ErrorKind::Semantic, "spice.semantic.mos_level",
+                "model '" + model.name.text + "': Level " +
+                    Device::CardWriter::num(level_val) +
+                    " is not implemented (1 = Shichman-Hodges, 77 = BSIM6)",
+                model.loc));
+        }
+        level_ = static_cast<int>(level_val);
+        if (level_ == 77) {
+            if (!(b6_.tox > 0.0) || !std::isfinite(b6_.tox)) {
+                return spice_fail(dev_diag(
+                    ErrorKind::Semantic, "spice.semantic.mos_b6",
+                    "model '" + model.name.text + "': Level 77 needs Tox > 0",
+                    model.loc));
+            }
+            if (!(b6_.ndep_cm3 > 0.0) || !(b6_.u0 > 0.0)) {
+                return spice_fail(dev_diag(
+                    ErrorKind::Semantic, "spice.semantic.mos_b6",
+                    "model '" + model.name.text +
+                        "': Level 77 needs Ndep > 0 and U0 > 0",
+                    model.loc));
+            }
+            if (b6_.rdsw < 0.0 || b6_.vsat < 0.0) {
+                return spice_fail(dev_diag(
+                    ErrorKind::Semantic, "spice.semantic.mos_b6",
+                    "model '" + model.name.text +
+                        "': Level 77 needs Rdsw >= 0 and Vsat >= 0",
+                    model.loc));
+            }
+            b6_.tnom_c = tnom;
+            rdsw_ = b6_.rdsw;
+            dp_ = kGround;
+            sp_ = kGround;
+            if (rdsw_ > 0.0) {
+                // The diode-Rs topology: internal nodes behind half the
+                // total Rds each side, claimed before the §6.6 checks.
+                Token tok;
+                tok.text = name_ + "#d";
+                tok.loc = model.loc;
+                dp_ = nodes.node(tok);
+                tok.text = name_ + "#s";
+                sp_ = nodes.node(tok);
+            }
+        }
         return {};
     }
 
@@ -1647,6 +2248,15 @@ private:
     std::string name_;
     NodeId d_, g_, s_, b_;
     double l_, w_;
+    // Level 77: the BSIM6-style core (bsim6_core.hpp) + its series-R
+    // internal nodes (kGround when RDSW = 0 - no nodes exist at all, the
+    // diode-Rs precedent) and the psi/Vdsat failure latch (the T-line
+    // overflow precedent: load_error has no state access).
+    int level_ = 1;
+    bsim6::Params b6_;
+    double rdsw_ = 0.0;
+    NodeId dp_ = kGround, sp_ = kGround;
+    mutable bool b6_failed_ = false;
     // §7.7: per-instance temp= override (°C; ngspice's M TEMP).
     bool has_temp_inst_ = false;
     double temp_inst_c_ = 27.0;
