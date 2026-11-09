@@ -1,0 +1,14 @@
+mos meyer gate rc
+* A gate step in deep cutoff (Vgs - Von = -3.1 V << -Phi) holds the Meyer
+* caps flat: the gate is a single constant cap
+*   C = Cox + (CGSO+CGDO)*W + CGBO*L = 17.42 fF
+* so the gate node charges through 1 meg with tau = 17.42 us - the RC
+* closed form V*(1-exp(-t/tau)) after the 1 ns ramp edge.
+Vg gin 0 PULSE(-2.1 -1.9 5u 1n 1n 200u)
+Rg gin g 1meg
+Vd d 0 DC 2
+Vs s 0 DC 0
+Vb b 0 DC 0
+M1 d g s b mm L=1u W=1u
+.model mm NMOS(Vto=1 Kp=20u Phi=0.6 Tox=2n Cgso=0.1n Cgdo=0.2n Cgbo=0.05n)
+.tran 10n 60u

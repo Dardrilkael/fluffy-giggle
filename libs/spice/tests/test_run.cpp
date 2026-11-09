@@ -2626,6 +2626,176 @@ TEST_CASE("M4c MOSFET: PMOS - polarity flips, same magnitudes") {
     CHECK(i_vd == doctest::Approx(ref_sat).epsilon(1e-9));
 }
 
+// --- §10.1 M5d: the MOS Meyer gate capacitances (§6.2, SPICE3 DEVqmeyer) ----------
+
+namespace {
+
+// One .ac point at f = 1 MHz. The gate is driven AC 1 and every terminal
+// the measurement should NOT see is driven by the SAME AC phase, so only
+// the selected pair voltage carries an AC component and the small-signal
+// gate current is j*omega*C_pair exactly (the gate is purely capacitive -
+// no channel current touches it). `drive` names the terminals beyond the
+// gate that share the gate's AC; the others sit at AC ground. `vg/vd/vs/vb`
+// are the DC biases (they freeze the Meyer region); the PMOS form negates
+// every DC value (and swaps the model) so the caps see a mirrored bias.
+// Returns the extracted capacitance in farads.
+double meyer_ac_cap(double vg, double vd, double vs, double vb, const char* drive,
+                    const char* model, bool pmos = false) {
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    settings.gmin = 0.0;
+    const double s = pmos ? -1.0 : 1.0;
+    const auto ac = [](bool on) { return std::string(on ? " AC 1" : ""); };
+    const bool d_drv = std::strchr(drive, 'd') != nullptr;
+    const bool s_drv = std::strchr(drive, 's') != nullptr;
+    const bool b_drv = std::strchr(drive, 'b') != nullptr;
+    std::string deck;
+    deck += "meyer ac cap\n";
+    deck += "Vd d 0 DC " + std::to_string(s * vd) + ac(d_drv) + "\n";
+    deck += "Vg g 0 DC " + std::to_string(s * vg) + " AC 1\n";
+    deck += "Vs s 0 DC " + std::to_string(s * vs) + ac(s_drv) + "\n";
+    deck += "Vb b 0 DC " + std::to_string(s * vb) + ac(b_drv) + "\n";
+    deck += "M1 d g s b mm L=1u W=1u\n";
+    deck += std::string(".model mm ") + (pmos ? "PMOS" : "NMOS") + "(" + model + ")\n";
+    deck += ".ac lin 1 1meg 1meg\n";
+    const auto run = run_text(deck, nullptr, settings);
+    REQUIRE(run);
+    REQUIRE(run->results.tables.size() == 1);
+    const Table& t = run->results.tables[0];
+    // i(Vg) = -(current the gate draws) = -j*omega*C*V, so C = -im/omega.
+    const double im = t.signals[col_of(t, "im(i(Vg))")].data[0];
+    const double w = 2 * kPi * 1e6;
+    return -im / w;
+}
+
+// The §10.1 reference geometry: TOX=2n, W=L=1u, overlaps 0.1/0.2/0.05 fF.
+struct MeyerRef {
+    double cox = 3.9 * 8.854214871e-12 / 2e-9 * 1e-6 * 1e-6;  // 17.27 fF
+    double ov_gs = 1e-10 * 1e-6;  // CGSO*W
+    double ov_gd = 2e-10 * 1e-6;  // CGDO*W
+    double ov_gb = 5e-11 * 1e-6;  // CGBO*L
+    // The model card shared by the Meyer rows (Vto=1, Phi=0.6, Gamma=0 so
+    // von == Vto and the region arithmetic stays closed-form).
+    static const char* model() {
+        return "Vto=1 Kp=20u Phi=0.6 Tox=2n Cgso=0.1n Cgdo=0.2n Cgbo=0.05n";
+    }
+};
+
+}  // namespace
+
+TEST_CASE("M5d MOS Meyer: .ac gate caps in cutoff/triode/saturation vs the table") {
+    // §10.1 row: the Meyer piecewise table (doubled DEVqmeyer + overlaps),
+    // measured through the AC gate current at a frozen OP. Region biases:
+    //   cutoff  vgs=-2 (vgst=-3 <= -phi): Cgb=Cox, Cgs/Cgd overlaps only
+    //   triode  vgs=2, vds=0 (vds<vdsat): Cgs=Cgd=Cox/2
+    //   sat     vgs=2, vds=3 (vds>=vdsat=1): Cgs=2*Cox/3, Cgd/Cgb overlaps
+    //   weak    vgs=0.8 (vgst=-0.2 in (-phi/2, 0]), vds=0: the qmeyer
+    //           branch arithmetic pinned (cgb=cox/6, cgs=cox/9*0.75)
+    const MeyerRef r;
+    const double c_cutoff_gb = meyer_ac_cap(-2.0, 2.0, 0.0, 0.0, "d s", MeyerRef::model());
+    const double c_cutoff_gs = meyer_ac_cap(-2.0, 2.0, 0.0, 0.0, "d b", MeyerRef::model());
+    const double c_cutoff_gd = meyer_ac_cap(-2.0, 2.0, 0.0, 0.0, "s b", MeyerRef::model());
+    CHECK(c_cutoff_gb == doctest::Approx(r.cox + r.ov_gb).epsilon(1e-9));
+    CHECK(c_cutoff_gs == doctest::Approx(r.ov_gs).epsilon(1e-9));
+    CHECK(c_cutoff_gd == doctest::Approx(r.ov_gd).epsilon(1e-9));
+
+    const double c_tri_gs = meyer_ac_cap(2.0, 0.0, 0.0, 0.0, "d b", MeyerRef::model());
+    const double c_tri_gd = meyer_ac_cap(2.0, 0.0, 0.0, 0.0, "s b", MeyerRef::model());
+    const double c_tri_gb = meyer_ac_cap(2.0, 0.0, 0.0, 0.0, "d s", MeyerRef::model());
+    CHECK(c_tri_gs == doctest::Approx(r.cox / 2 + r.ov_gs).epsilon(1e-9));
+    CHECK(c_tri_gd == doctest::Approx(r.cox / 2 + r.ov_gd).epsilon(1e-9));
+    CHECK(c_tri_gb == doctest::Approx(r.ov_gb).epsilon(1e-9));
+
+    const double c_sat_gs = meyer_ac_cap(2.0, 3.0, 0.0, 0.0, "d b", MeyerRef::model());
+    const double c_sat_gd = meyer_ac_cap(2.0, 3.0, 0.0, 0.0, "s b", MeyerRef::model());
+    const double c_sat_gb = meyer_ac_cap(2.0, 3.0, 0.0, 0.0, "d s", MeyerRef::model());
+    CHECK(c_sat_gs == doctest::Approx(2 * r.cox / 3 + r.ov_gs).epsilon(1e-9));
+    CHECK(c_sat_gd == doctest::Approx(r.ov_gd).epsilon(1e-9));
+    CHECK(c_sat_gb == doctest::Approx(r.ov_gb).epsilon(1e-9));
+
+    // Weak inversion, vgst = -0.2, vdsat = max(vgst, 0) -> 0 branch picks
+    // vdsat = 0.025 (the floor), vds = 0 < vdsat:
+    //   cgs_half = vgst*cox/(1.5*phi) + cox/3 = cox*(1/3 - 0.2/0.9)
+    //   vddif = 2*0.025, vddif2 = 0.0025, both ratios 0.025^2/0.0025 = 0.25
+    //   -> cgs = cgd = 0.75 * cgs_half (doubled) + overlaps
+    //   cgb_half = -vgst*cox/(2*phi) = cox/6 (doubled: cox/3)
+    const double c_weak_gs = meyer_ac_cap(0.8, 0.0, 0.0, 0.0, "d b", MeyerRef::model());
+    const double c_weak_gd = meyer_ac_cap(0.8, 0.0, 0.0, 0.0, "s b", MeyerRef::model());
+    const double c_weak_gb = meyer_ac_cap(0.8, 0.0, 0.0, 0.0, "d s", MeyerRef::model());
+    const double half = r.cox * (1.0 / 3.0 - 0.2 / 0.9);
+    CHECK(c_weak_gs == doctest::Approx(2 * 0.75 * half + r.ov_gs).epsilon(1e-9));
+    CHECK(c_weak_gd == doctest::Approx(2 * 0.75 * half + r.ov_gd).epsilon(1e-9));
+    CHECK(c_weak_gb == doctest::Approx(r.cox / 3 + r.ov_gb).epsilon(1e-9));
+}
+
+TEST_CASE("M5d MOS Meyer: PMOS mirrors the NMOS caps at a mirrored bias") {
+    // The companion/charge state lives in the mirror frame; the PMOS row
+    // pins the sgn handling (a sign slip doubles or zeroes a cap).
+    const MeyerRef r;
+    const double nmos = meyer_ac_cap(2.0, 3.0, 0.0, 0.0, "d b", MeyerRef::model());
+    const double pmos = meyer_ac_cap(2.0, 3.0, 0.0, 0.0, "d b", MeyerRef::model(), true);
+    CHECK(pmos == doctest::Approx(nmos).epsilon(1e-12));
+    CHECK(pmos == doctest::Approx(2 * r.cox / 3 + r.ov_gs).epsilon(1e-9));
+}
+
+TEST_CASE("M5d MOS Meyer: .tran cutoff-region gate RC step vs the closed form") {
+    // Deep cutoff holds Cgb = Cox and the overlaps flat, so the gate sees
+    // one constant C_tot = Cox + (CGSO+CGDO)*W + CGBO*L through R: the
+    // §10.1 RC row on a Meyer cap. tau = 1meg * 17.42 fF = 17.42 us; the
+    // 1 ns ramp is an instantaneous step at O(1e-4) of the 0.2 V step.
+    const MeyerRef r;
+    const double c_tot = r.cox + r.ov_gs + r.ov_gd + r.ov_gb;
+    const double tau = 1e6 * c_tot;
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "meyer tran rc\n"
+        "Vg gin 0 PULSE(-2.1 -1.9 5u 1n 1n 200u)\n"
+        "Rg gin g 1meg\n"
+        "Vd d 0 DC 2\n"
+        "Vs s 0 DC 0\n"
+        "Vb b 0 DC 0\n"
+        "M1 d g s b mm L=1u W=1u\n"
+        ".model mm NMOS(Vto=1 Kp=20u Phi=0.6 Tox=2n Cgso=0.1n Cgdo=0.2n Cgbo=0.05n)\n"
+        ".tran 10n 60u\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const auto& time = t.signals[0].data;
+    const auto& vg = t.signals[col_of(t, "v(g)")].data;
+    REQUIRE(time.size() > 100);
+    // The ramp ends at t_edge = 5u + 1n; the gate then charges from -2.1
+    // toward -1.9 with tau (every post-edge point checked).
+    const double t_edge = 5e-6 + 1e-9;
+    for (std::size_t k = 0; k < time.size(); ++k) {
+        if (time[k] <= t_edge) {
+            continue;
+        }
+        const double want = -2.1 + 0.2 * (1.0 - std::exp(-(time[k] - t_edge) / tau));
+        CHECK(vg[k] == doctest::Approx(want).epsilon(5e-3));
+    }
+    // ~3.15 tau after the edge the gate sits within 0.5% of the step top.
+    CHECK(vg.back() == doctest::Approx(-1.9 + 0.2 * std::exp(-55e-6 / tau)).epsilon(1e-3));
+}
+
+TEST_CASE("M5d MOS Meyer: TOX absent keeps only the (linear) overlaps") {
+    // ngspice's oxideCapFactor == 0 without TOX (mos1temp.c): only the
+    // overlap caps remain, bias-independent in every region - the caps
+    // still make the device dynamic, but nothing in the stamp is nonlinear.
+    const MeyerRef r;
+    const char* model = "Vto=1 Kp=20u Cgso=0.1n Cgdo=0.2n Cgbo=0.05n";
+    // Saturation bias: overlaps only.
+    const double c_gs = meyer_ac_cap(2.0, 3.0, 0.0, 0.0, "d b", model);
+    const double c_gd = meyer_ac_cap(2.0, 3.0, 0.0, 0.0, "s b", model);
+    const double c_gb = meyer_ac_cap(2.0, 3.0, 0.0, 0.0, "d s", model);
+    CHECK(c_gs == doctest::Approx(r.ov_gs).epsilon(1e-9));
+    CHECK(c_gd == doctest::Approx(r.ov_gd).epsilon(1e-9));
+    CHECK(c_gb == doctest::Approx(r.ov_gb).epsilon(1e-9));
+    // Cutoff bias: identical (linear caps).
+    CHECK(meyer_ac_cap(-2.0, 2.0, 0.0, 0.0, "d s", model) ==
+          doctest::Approx(r.ov_gb).epsilon(1e-9));
+}
+
 // --- §10.1/§10.4 M4d: the behavioral B source (dual-number AD) --------------------
 
 namespace {

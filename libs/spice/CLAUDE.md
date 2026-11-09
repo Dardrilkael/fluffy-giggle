@@ -5,7 +5,7 @@ contract is `DESIGN.md` (this directory) - sections cited throughout the
 code as `§n.m`; when code and this file disagree, DESIGN.md wins and this
 file gets fixed.
 
-## What exists (M0-M4e + the 2026-10-29 structural revision)
+## What exists (M0-M5d + the 2026-10-29 structural revision)
 - `ws::math` sparse LU facade (lives in libs/math, grown for this arc):
   analyze once per topology, factorize per solve, real + complex,
   transpose solve for the future noise adjoint.
@@ -137,9 +137,41 @@ file gets fixed.
 - compat=ngspice|ltspice|strict (§8.3 rev); `spice check` lint (number
   traps + topology + unused models, nothing simulates); CLI: -o -,
   --format raw, --keep-going, --strict-meas, --werror.
+- **M5a - temperature (§7.7)**: temp_k() on both load contexts (the
+  circuit's elaboration temperature - every temp change re-elaborates);
+  the diode Is(T)/Vt(T)/vcrit(T) (diotemp.c tlev=0), the BJT factlog +
+  XTB beta exponent, the MOS level-1 pbfact chain (Phi(T)/Vto(T)/
+  Kp(T)=(T/Tnom)^-1.5), R/C TC1/TC2 (instances + models), per-instance
+  temp= everywhere, `.options tnom=` patched into models lacking one.
+  physconst.hpp (src-only) owns k/q/Eg(T)/rc_temp_factor (CODATA 2018).
+  T == Tnom is bit-identical everywhere (the factors return exactly 0/1).
+- **M5b - .nodeset (§7.2)**: v(node)=expr seeds the cold-start iterate
+  + a soft g=1 Norton on iteration 1 of every ladder stage (released
+  after). .dc hints the first point only; .ac/.tran OPs honor it.
+- **M5c - .noise (§7.5)**: the adjoint analysis - one A^T x = e_out
+  solve per frequency folds every device's current PSDs (NoiseContext);
+  the forward gain carries only the named input source (MODEACNOISE).
+  R thermal + flicker, diode _rs/_id/_1overf, BJT _ic/_ib/_fn, MOS
+  _thermal(2/3·gm)/_1overf; ninteg.c power-law integration for the
+  totals; spectra + per-device summary tables. (This arc also fixed the
+  MOSFET stamping NOTHING into .ac - channel_eval() is now shared by
+  load_dc/load_ac/load_noise.)
+- **M5d - the MOS Meyer caps (§6.2)**: TOX/CGSO/CGDO/CGBO on the
+  level-1 model. meyer_half is SPICE3's DEVqmeyer verbatim (HALF-caps;
+  the caller doubles and adds the overlaps - mos1load.c's small-signal
+  `2*half+overlap`, pinned against the ngspice source); gate_caps does
+  the reverse-mode source/drain swap and the body-effected von. State:
+  42 slots when caps exist - a (V,Q,I,geq,jeq) block + 3x(t,q) LTE
+  history per terminal pair over the MIRROR-frame pair voltages
+  (vgs/vgd/vgb; vgb = vgs - vbs, NOT vgs+vbs). load_tran stamps the
+  three charge Nortons (jeq flips with sgn for PMOS); load_ac stamps
+  j*omega*C at the frozen OP; the tran charge evolves
+  q += (v_new-v_old)*C(v_new); the t=0 seed is the TRANOP q = v*C.
+  Caps are dynamic-only (TOX or an overlap present - a bare model keeps
+  the M4c stamp byte-identical).
 
 Everything else rejects at parse with file:line (working-rule 5):
-`.lib` (backlog), `.noise/.nodeset` (M5), `solver=klu` (M0b).
+`.lib` (backlog), `solver=klu` (M0b).
 
 ## Layout
 - Public surface (`include/ws/spice/`): parse.hpp, deck.hpp (cards +

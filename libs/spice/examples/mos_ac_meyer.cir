@@ -1,0 +1,17 @@
+mos meyer ac caps
+* The Meyer gate capacitances (SPICE3 DEVqmeyer, doubled + overlaps),
+* measured one per .ac point: the gate is driven AC 1 and the terminals
+* that should not see the drive share the SAME AC phase, so only one
+* pair voltage moves and im(i(Vg))/omega is that cap directly.
+Vd d 0 DC 3
+Vg g 0 DC 2 AC 1
+Vs s 0 DC 0 AC 1
+Vb b 0 DC 0 AC 1
+M1 d g s b mm L=1u W=1u
+.model mm NMOS(Vto=1 Kp=20u Phi=0.6 Tox=2n Cgso=0.1n Cgdo=0.2n Cgbo=0.05n)
+*
+* Vgs=2, Vds=3 >= Vdsat=1: saturation ->
+*   Cgs = 2/3*Cox + CGSO*W = 11.68 fF (Cox = 17.27 fF)
+* Run with Vs/Vb stripped of "AC 1" (and Vd given it) to read Cgd or Cgb:
+* saturation keeps only the overlaps there (Cgd = 0.2 fF, Cgb = 0.05 fF).
+.ac lin 1 1meg 1meg

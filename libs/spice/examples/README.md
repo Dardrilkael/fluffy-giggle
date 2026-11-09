@@ -36,13 +36,15 @@ On Windows: `.\build\spice-debug\bin\spice.exe run <example>.cir`
 | `diode_ac_cjo.cir` | `.ac` | Reverse-biased diode as a cap; RC low-pass cutoff at fc = 1/(2πRC) |
 | `bjt_ac_cje.cir` | `.ac` | BJT Cje cap; base low-pass with the source resistance |
 
-## M4c — the MOSFET (level 1, Shichman-Hodges)
+## M4c/M5d — the MOSFET (level 1, Shichman-Hodges + Meyer caps)
 
 | File | Analysis | What it shows |
 |---|---|---|
 | `mos_saturation.cir` | `.op` | NMOS saturation: Id = ½·Kp·W/L·(Vgs−Vth)²·(1+λVds) = 11.0 µA (matches ngspice 39 exactly) |
 | `mos_iv.cir` | `.dc` | Id vs Vds — the triode-to-saturation knee |
 | `mos_cutoff.cir` | `.op` | Vgs < Vth — Id ≈ 0 |
+| `mos_ac_meyer.cir` | `.ac` | The Meyer gate caps at a frozen OP: drive every terminal but the measured one with the gate's AC phase, then C = im(i(Vg))/ω (saturation: Cgs = ⅔·Cox + overlap, Cgd/Cgb overlap-only) |
+| `mos_tran_meyer.cir` | `.tran` | A gate step in deep cutoff: the Meyer caps hold flat, so the gate charges through 1 MΩ with τ = R·(Cox + overlaps) = 17.4 µs — the RC closed form |
 
 ## M4d — the behavioral B source (dual-number AD)
 

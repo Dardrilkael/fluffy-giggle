@@ -933,6 +933,21 @@ public:
     static constexpr std::size_t kICur = 2;
     static constexpr std::size_t kIPrev = 3;
     static constexpr std::size_t kVbsPrev = 4;  // §7.5: the OP body bias
+    // Meyer-cap companion state (§6.2; present when has_caps()): the run
+    // temperature (folded), then one (V, Q, I, geq, jeq) block per
+    // terminal pair and a 3x (n, t, q) LTE history. The V/Q blocks carry
+    // the MIRROR-frame pair voltages (vgs, vgd, vgb - SPICE3's qgs
+    // precedent); the stamps flip jeq by sgn. vds = vgs - vgd and
+    // vbs = vgs - vgb recover the bias for the cap evaluation.
+    static constexpr std::size_t kTempK = 5;  // folded run temperature, K
+    static constexpr std::size_t kGsV = 6, kGsQ = 7, kGsI = 8, kGsGeq = 9, kGsJeq = 10;
+    static constexpr std::size_t kGdV = 11, kGdQ = 12, kGdI = 13, kGdGeq = 14,
+                                 kGdJeq = 15;
+    static constexpr std::size_t kGbV = 16, kGbQ = 17, kGbI = 18, kGbGeq = 19,
+                                 kGbJeq = 20;
+    static constexpr std::size_t kGsHistN = 21, kGsHist = 22;  // 6 slots
+    static constexpr std::size_t kGdHistN = 28, kGdHist = 29;  // 6 slots
+    static constexpr std::size_t kGbHistN = 35, kGbHist = 36;  // 6 slots
 
     Mosfet(std::string display, NodeId d, NodeId g, NodeId s, NodeId b,
            double l, double w, bool has_temp_inst, double temp_inst_c)
@@ -1073,6 +1088,95 @@ public:
         return e;
     }
 
+    // --- Meyer gate capacitances (§6.2, SPICE3 DEVqmeyer) -------------------
+    // True when any gate cap exists: the oxide channel cap (TOX given)
+    // or an overlap term (CGSO/CGDO/CGBO).
+    [[nodiscard]] bool has_caps() const {
+        return cox_total() > 0.0 || cgso_ * w_ > 0.0 || cgdo_ * w_ > 0.0 ||
+               cgbo_ * l_ > 0.0;
+    }
+    // The total oxide cap over the channel (0 without TOX - ngspice's
+    // oxideCapFactor == 0 leaves only the overlaps, mos1temp.c).
+    [[nodiscard]] double cox_total() const {
+        return cox_factor_ > 0.0 ? cox_factor_ * w_ * l_ : 0.0;
+    }
+
+    // SPICE3's DEVqmeyer: the HALF-capacitances at the mirror-frame gate
+    // voltages (the caller doubles them and adds the overlaps). vdsat is
+    // floored at 0.025 V (mos1load's MAGIC_VDS guard).
+    struct MeyerHalf {
+        double cgs = 0.0, cgd = 0.0, cgb = 0.0;
+    };
+    [[nodiscard]] static MeyerHalf meyer_half(double vgs, double vgd, double von,
+                                              double vdsat_in, double phi,
+                                              double cox) {
+        MeyerHalf m;
+        const double vgst = vgs - von;
+        const double vdsat = std::max(vdsat_in, 0.025);
+        if (vgst <= -phi) {
+            m.cgb = cox / 2.0;
+        } else if (vgst <= -phi / 2.0) {
+            m.cgb = -vgst * cox / (2.0 * phi);
+        } else if (vgst <= 0.0) {
+            m.cgb = -vgst * cox / (2.0 * phi);
+            m.cgs = vgst * cox / (1.5 * phi) + cox / 3.0;
+            const double vds = vgs - vgd;
+            if (vds < vdsat) {
+                const double vddif = 2.0 * vdsat - vds;
+                const double vddif1 = vdsat - vds;
+                const double vddif2 = vddif * vddif;
+                m.cgd = m.cgs * (1.0 - vdsat * vdsat / vddif2);
+                m.cgs = m.cgs * (1.0 - vddif1 * vddif1 / vddif2);
+            }
+        } else {
+            const double vds = vgs - vgd;
+            if (vdsat <= vds) {
+                m.cgs = cox / 3.0;
+            } else {
+                const double vddif = 2.0 * vdsat - vds;
+                const double vddif1 = vdsat - vds;
+                const double vddif2 = vddif * vddif;
+                m.cgd = cox * (1.0 - vdsat * vdsat / vddif2) / 3.0;
+                m.cgs = cox * (1.0 - vddif1 * vddif1 / vddif2) / 3.0;
+            }
+        }
+        return m;
+    }
+
+    // The FULL gate caps at one bias point: 2*meyer (the mode swap for
+    // reversed drain current, mos1load) + the overlaps. The threshold
+    // carries the body effect at `vbs`.
+    struct GateCaps {
+        double cgs = 0.0, cgd = 0.0, cgb = 0.0;
+    };
+    [[nodiscard]] GateCaps gate_caps(double vgs, double vds, double vbs,
+                                     const TempOp& op) const {
+        double vth = op.vto;
+        if (gamma_ != 0.0) {
+            const double arg1 = std::max(2 * op.phi - vbs, 1e-12);
+            const double arg2 = std::max(2 * op.phi, 1e-12);
+            vth += gamma_ * (std::sqrt(arg1) - std::sqrt(arg2));
+        }
+        const double von = vth;
+        const double vdsat = vgs - von;
+        const double vgd = vgs - vds;
+        const double cox = cox_total();
+        // mode swap: vds >= 0 keeps (gs, gd); vds < 0 swaps them.
+        MeyerHalf m = (vds >= 0.0)
+                          ? meyer_half(vgs, vgd, von, vdsat, op.phi, cox)
+                          : meyer_half(vgd, vgs, von, vdsat, op.phi, cox);
+        GateCaps c;
+        if (vds >= 0.0) {
+            c.cgs = 2.0 * m.cgs + cgso_ * w_;
+            c.cgd = 2.0 * m.cgd + cgdo_ * w_;
+        } else {
+            c.cgs = 2.0 * m.cgd + cgso_ * w_;
+            c.cgd = 2.0 * m.cgs + cgdo_ * w_;
+        }
+        c.cgb = 2.0 * m.cgb + cgbo_ * l_;
+        return c;
+    }
+
     void load_dc(DcLoadContext& cx) const override {
         const double sgn = pnp_ ? -1.0 : 1.0;  // PMOS = pnp_ flag reused
         const TempOp op = temp_op(load_temp_k(cx.temp_k()));
@@ -1109,8 +1213,8 @@ public:
     // entries as load_dc, evaluated at the frozen bias in the state slice
     // (kVgsPrev/kVdsPrev/kVbsPrev). A gap until now: the MOSFET stamped
     // NOTHING into the AC system, so any .ac deck carrying one saw an
-    // open channel (gain 0). The Meyer caps join this stamp in their own
-    // commit.
+    // open channel (gain 0). The Meyer caps (§6.2) join as j*omega*C at
+    // the same frozen OP.
     void load_ac(AcLoadContext& cx) const override {
         const TempOp op = temp_op(load_temp_k(cx.temp_k()));
         const ChannelEval e = channel_eval(cx.st(kVgsPrev), cx.st(kVdsPrev),
@@ -1123,10 +1227,34 @@ public:
         cx.add_entry(s_, d_, {-e.did_dvd, 0.0});
         cx.add_entry(s_, s_, {-e.did_dvs, 0.0});
         cx.add_entry(s_, b_, {-e.did_dvb, 0.0});
+        // §6.2 (M5): the Meyer caps at the frozen OP, as j*omega*C.
+        if (has_caps()) {
+            const GateCaps c = gate_caps(cx.st(kVgsPrev), cx.st(kVdsPrev),
+                                         cx.st(kVbsPrev), op);
+            cx.add_conductance(g_, s_, {0.0, cx.omega * c.cgs});
+            cx.add_conductance(g_, d_, {0.0, cx.omega * c.cgd});
+            cx.add_conductance(g_, b_, {0.0, cx.omega * c.cgb});
+        }
     }
 
-    // M4c: no junction caps yet (Cgs/Cgd/Cgb land in a follow-up).
-    // load_tran = load_dc (the MOSFET is a nonlinear resistor at each OP).
+    // §6.2 (M5): the transient companion - the DC channel stamp plus the
+    // three Meyer-cap Nortons (geq in parallel with sgn*jeq; the charges
+    // live in the mirror frame, so the constant current flips with the
+    // polarity - see the state-layout comment).
+    void load_tran(DcLoadContext& cx, const TranStep&) const override {
+        load_dc(cx);
+        if (!has_caps()) {
+            return;
+        }
+        const double sgn = pnp_ ? -1.0 : 1.0;
+        cx.add_conductance(g_, s_, cx.st(kGsGeq));
+        cx.add_current(s_, g_, sgn * cx.st(kGsJeq));
+        cx.add_conductance(g_, d_, cx.st(kGdGeq));
+        cx.add_current(d_, g_, sgn * cx.st(kGdJeq));
+        cx.add_conductance(g_, b_, cx.st(kGbGeq));
+        cx.add_current(b_, g_, sgn * cx.st(kGbJeq));
+    }
+
 
     // --- parameter model (§3.5a) -----------------------------------------
     [[nodiscard]] std::vector<ParamSpec> param_specs() const override {
@@ -1137,8 +1265,10 @@ public:
     }
 
     // --- state model (§3.5b) ---------------------------------------------
-    [[nodiscard]] std::size_t state_slots() const override { return 5; }
-    [[nodiscard]] bool is_dynamic() const override { return false; }
+    [[nodiscard]] std::size_t state_slots() const override {
+        return has_caps() ? 42 : 5;
+    }
+    [[nodiscard]] bool is_dynamic() const override { return has_caps(); }
 
     // §7.5 (M5, mos1noi.c): _thermal channel noise 4kT·(2/3·gm) between
     // drain and source (the level-1 nlev<3 form - (8/3)kT·gm as a
@@ -1160,6 +1290,202 @@ public:
             cx.add_source("1overf", d_, s_,
                           kf_ * std::pow(std::abs(e.id), af_) /
                               std::pow(cx.freq, ef_));
+        }
+    }
+
+    // --- §6.2 (M5): the Meyer-cap companion hooks --------------------------
+
+    // The mirror-frame terminal voltages from a solution vector.
+    [[nodiscard]] double mirror_vgs(const std::vector<double>& x) const {
+        return (pnp_ ? -1.0 : 1.0) * v_across(x, g_, s_);
+    }
+    [[nodiscard]] double mirror_vds(const std::vector<double>& x) const {
+        return (pnp_ ? -1.0 : 1.0) * v_across(x, d_, s_);
+    }
+    [[nodiscard]] double mirror_vbs(const std::vector<double>& x) const {
+        return (pnp_ ? -1.0 : 1.0) * v_across(x, b_, s_);
+    }
+
+    // The run temperature reaches begin_step through the folded mirror
+    // (the driver folds once per step attempt, §3.5b). Guarded: the
+    // 5-slot no-caps slice ends below kTempK (fold_all only calls this on
+    // dynamic devices, but the guard keeps the invariant local).
+    void fold_state(double* st, const RunState& /*rs*/, const Circuit& c) const override {
+        if (has_caps()) {
+            st[kTempK] = phys::c_to_k(c.temp);
+        }
+    }
+    [[nodiscard]] ws::core::Status link_dynamic(const Circuit& /*c*/,
+                                                std::size_t /*self*/) override {
+        return {};
+    }
+
+    // One companion per terminal pair, coefficients frozen at the last
+    // COMMITTED bias (the Cjo precedent). The caps all evaluate at the
+    // same (vgs, vds, vbs) recovered from the committed pair voltages.
+    void begin_step(const TranStep& step, double* st) override {
+        if (!has_caps()) {
+            return;
+        }
+        const TempOp op = temp_op(st[kTempK]);
+        const double vgs = st[kGsV];
+        const double vds = vgs - st[kGdV];   // vgd = vgs - vds
+        const double vbs = vgs - st[kGbV];   // vgb = vgs - vbs
+        // (vgb = vg - vb and vgs = vg - vs, so vgb - vgs = vs - vb = -vbs.)
+        const GateCaps c = gate_caps(vgs, vds, vbs, op);
+        struct Pair {
+            std::size_t v, q, i, geq, jeq;
+            double cap;
+        };
+        const Pair pairs[3] = {
+            {kGsV, kGsQ, kGsI, kGsGeq, kGsJeq, c.cgs},
+            {kGdV, kGdQ, kGdI, kGdGeq, kGdJeq, c.cgd},
+            {kGbV, kGbQ, kGbI, kGbGeq, kGbJeq, c.cgb},
+        };
+        for (const Pair& pr : pairs) {
+            if (step.be) {
+                st[pr.geq] = pr.cap / step.dt;
+                st[pr.jeq] = -st[pr.q] / step.dt;
+            } else {
+                st[pr.geq] = 2.0 * pr.cap / step.dt;
+                st[pr.jeq] = -(st[pr.geq] * st[pr.v] + st[pr.i]);
+            }
+        }
+    }
+
+    // SPICE3's charge evolution: q += (v_new - v_old) * C(v_new) - the
+    // cap at the NEW bias carries the step's charge increment.
+    void commit(const std::vector<double>& x, std::size_t /*nc*/,
+                const TranStep& step, double* st) override {
+        if (!has_caps()) {
+            return;
+        }
+        const TempOp op = temp_op(st[kTempK]);
+        const double vgs = mirror_vgs(x);
+        const double vds = mirror_vds(x);
+        const double vbs = mirror_vbs(x);
+        const GateCaps c = gate_caps(vgs, vds, vbs, op);
+        // v[2] is vgb: vgb = vgs - vbs (vgb - vgs = vs - vb = -vbs).
+        const double v[3] = {vgs, vgs - vds, vgs - vbs};
+        const struct {
+            std::size_t v, q, i, geq, jeq, hn, h;
+        } pairs[3] = {
+            {kGsV, kGsQ, kGsI, kGsGeq, kGsJeq, kGsHistN, kGsHist},
+            {kGdV, kGdQ, kGdI, kGdGeq, kGdJeq, kGdHistN, kGdHist},
+            {kGbV, kGbQ, kGbI, kGbGeq, kGbJeq, kGbHistN, kGbHist},
+        };
+        const double caps[3] = {c.cgs, c.cgd, c.cgb};
+        for (std::size_t k = 0; k < 3; ++k) {
+            const auto& pr = pairs[k];
+            st[pr.q] = st[pr.q] + (v[k] - st[pr.v]) * caps[k];
+            st[pr.v] = v[k];
+            st[pr.i] = st[pr.geq] * v[k] + st[pr.jeq];
+            // LTE history (3 (t, q) pairs, oldest first); BE restarts.
+            if (step.be) {
+                st[pr.hn] = 0.0;
+            } else {
+                const double n = st[pr.hn];
+                if (n < 3.0) {
+                    const std::size_t idx = static_cast<std::size_t>(n);
+                    st[pr.h + idx * 2] = step.time;
+                    st[pr.h + idx * 2 + 1] = st[pr.q];
+                    st[pr.hn] = n + 1.0;
+                } else {
+                    for (std::size_t j = 0; j < 2; ++j) {
+                        st[pr.h + j * 2] = st[pr.h + (j + 1) * 2];
+                        st[pr.h + j * 2 + 1] = st[pr.h + (j + 1) * 2 + 1];
+                    }
+                    st[pr.h + 4] = step.time;
+                    st[pr.h + 5] = st[pr.q];
+                }
+            }
+        }
+    }
+
+    // The §6.3 LTE test per pair, over the candidate charge
+    // q_new = q + (v(x) - v_comp) * C(v(x)).
+    [[nodiscard]] bool lte_ok(const TranStep& step, const std::vector<double>& x,
+                              std::size_t /*nc*/, double reltol, double chgtol,
+                              double trtol, const double* st, double* ratio) const override {
+        if (!has_caps()) {
+            if (ratio != nullptr) {
+                *ratio = 0.0;
+            }
+            return true;
+        }
+        const TempOp op = temp_op(st[kTempK]);
+        const double vgs = mirror_vgs(x);
+        const double vds = mirror_vds(x);
+        const double vbs = mirror_vbs(x);
+        const GateCaps c = gate_caps(vgs, vds, vbs, op);
+        // v[2] is vgb: vgb = vgs - vbs (vgb - vgs = vs - vb = -vbs).
+        const double v[3] = {vgs, vgs - vds, vgs - vbs};
+        const struct {
+            std::size_t v, q, hn, h;
+        } pairs[3] = {
+            {kGsV, kGsQ, kGsHistN, kGsHist},
+            {kGdV, kGdQ, kGdHistN, kGdHist},
+            {kGbV, kGbQ, kGbHistN, kGbHist},
+        };
+        const double caps[3] = {c.cgs, c.cgd, c.cgb};
+        double worst = 0.0;
+        for (std::size_t k = 0; k < 3; ++k) {
+            const auto& pr = pairs[k];
+            const double q_new = st[pr.q] + (v[k] - st[pr.v]) * caps[k];
+            const double n = st[pr.hn];
+            if (n < 3.0) {
+                continue;
+            }
+            const double t0 = st[pr.h], q0 = st[pr.h + 1];
+            const double t1 = st[pr.h + 2], q1 = st[pr.h + 3];
+            const double t2 = st[pr.h + 4], q2 = st[pr.h + 5];
+            const double t3 = step.time, q3 = q_new;
+            if (!(t1 > t0) || !(t2 > t1) || !(t3 > t2) || !(step.dt > 0)) {
+                continue;
+            }
+            const double d1a = (q1 - q0) / (t1 - t0);
+            const double d1b = (q2 - q1) / (t2 - t1);
+            const double d1c = (q3 - q2) / (t3 - t2);
+            const double d2a = (d1b - d1a) / (t2 - t0);
+            const double d2b = (d1c - d1b) / (t3 - t1);
+            const double dd3 = (d2b - d2a) / (t3 - t0);
+            const double eps = step.dt * step.dt * step.dt * std::abs(dd3) / 2.0;
+            const double tolq =
+                trtol * (reltol * std::max(std::abs(q3), std::abs(st[pr.q])) + chgtol);
+            if (tolq > 0.0) {
+                worst = std::max(worst, eps / tolq);
+            }
+        }
+        if (ratio != nullptr) {
+            *ratio = worst;
+        }
+        return worst <= 1.0;
+    }
+
+    // The t=0 seed: the OP's mirror voltages, TRANOP charges q = v*C(v)
+    // (the DOUBLED caps + overlaps), zero companion current.
+    void seed_state(const std::vector<double>& x, std::size_t /*nc*/,
+                    double* st) override {
+        if (!has_caps()) {
+            return;
+        }
+        const TempOp op = temp_op(st[kTempK]);
+        const double vgs = mirror_vgs(x);
+        const double vds = mirror_vds(x);
+        const double vbs = mirror_vbs(x);
+        const GateCaps c = gate_caps(vgs, vds, vbs, op);
+        // v[2] is vgb: vgb = vgs - vbs (vgb - vgs = vs - vb = -vbs).
+        const double v[3] = {vgs, vgs - vds, vgs - vbs};
+        const double caps[3] = {c.cgs, c.cgd, c.cgb};
+        const std::size_t vs[3] = {kGsV, kGdV, kGbV};
+        const std::size_t qs[3] = {kGsQ, kGdQ, kGbQ};
+        const std::size_t is[3] = {kGsI, kGdI, kGbI};
+        const std::size_t hns[3] = {kGsHistN, kGdHistN, kGbHistN};
+        for (std::size_t k = 0; k < 3; ++k) {
+            st[vs[k]] = v[k];
+            st[qs[k]] = v[k] * caps[k];
+            st[is[k]] = 0.0;
+            st[hns[k]] = 0.0;
         }
     }
 
@@ -1224,6 +1550,7 @@ public:
         // Tnom=27°C (§7.7).
         double vto = 0.0, kp = 20e-6, lambda = 0.0, gamma = 0.0, phi = 0.6, tnom = 27.0;
         double kf_val = 0.0, af_val = 1.0, ef_val = 1.0;
+        double tox_val = 0.0, cgso_val = 0.0, cgdo_val = 0.0, cgbo_val = 0.0;
         const auto& toks = model.params;
         for (std::size_t i = 0; i < toks.size(); ++i) {
             std::string text = toks[i].text;
@@ -1267,14 +1594,18 @@ public:
             else if (key == "kf") kf_val = v;
             else if (key == "af") af_val = v;
             else if (key == "ef") ef_val = v;
-            else if (key == "level" || key == "u0" || key == "tox" ||
+            else if (key == "tox") tox_val = v;
+            else if (key == "cgso") cgso_val = v;
+            else if (key == "cgdo") cgdo_val = v;
+            else if (key == "cgbo") cgbo_val = v;
+            else if (key == "level" || key == "u0" ||
                      key == "cj" || key == "mj" || key == "cjsw" ||
                      key == "mjsw" || key == "pb" || key == "js" ||
-                     key == "cbd" || key == "cbs" || key == "cgso" ||
-                     key == "cgdo" || key == "cgbo" || key == "nsub" ||
+                     key == "cbd" || key == "cbs" || key == "nsub" ||
                      key == "nss" || key == "tpg" || key == "ld" ||
                      key == "xl" || key == "wd" || key == "xw") {
-                // Accepted but not implemented (BSIM, cap tables, etc.).
+                // Accepted but not implemented (BSIM, junction cap
+                // tables, geometry shrinks).
             } else {
                 return spice_fail(dev_diag(
                     ErrorKind::Semantic, "spice.semantic.model_param",
@@ -1286,6 +1617,14 @@ public:
         vto_ = vto; kp_ = kp; lambda_ = lambda; gamma_ = gamma; phi_ = phi;
         tnom_k_ = phys::c_to_k(tnom);
         kf_ = kf_val; af_ = af_val; ef_ = ef_val;
+        // §6.2 (M5): the oxide cap factor (0 without TOX - only the
+        // overlaps then, mos1temp.c) and the overlap caps per meter.
+        cox_factor_ = (tox_val > 0.0)
+                          ? 3.9 * 8.854214871e-12 / tox_val
+                          : 0.0;
+        cgso_ = cgso_val;
+        cgdo_ = cgdo_val;
+        cgbo_ = cgbo_val;
         return {};
     }
 
@@ -1321,6 +1660,10 @@ private:
     double kf_ = 0.0;         // flicker coefficient (§7.5; 0 = silent)
     double af_ = 1.0;         // flicker current exponent (§7.5)
     double ef_ = 1.0;         // flicker frequency exponent (§7.5)
+    double cox_factor_ = 0.0;  // oxide cap per area, F/m^2 (§6.2; 0 = no TOX)
+    double cgso_ = 0.0;        // gate-source overlap, F/m (§6.2)
+    double cgdo_ = 0.0;        // gate-drain overlap, F/m (§6.2)
+    double cgbo_ = 0.0;        // gate-bulk overlap, F/m (§6.2)
     bool pnp_ = false;  // PMOS
     std::string model_name_;
 };

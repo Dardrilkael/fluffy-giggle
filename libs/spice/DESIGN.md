@@ -836,6 +836,7 @@ tolerance. Labels in CTest: `unit`, `analytic`, `ref`.
 | diode + series R | `.op` current | Lambert-W solution computed in the test | 1e-7 rel at `reltol=1e-9` |
 | BJT forward-active bias | Ic, Ib, Vbe | Ebers–Moll/Gummel–Poon closed form | 1e-4 rel |
 | MOS level 1 | Id in triode/saturation | model equations | 1e-9 rel |
+| MOS Meyer caps | Cgs/Cgd/Cgb per region (`.ac`), gate RC step in cutoff (`.tran`) | piecewise Meyer table; `V(1−e^{−t/RC})` | 1e-9 rel; 5e-3·V |
 | RC step | `v(t)` | `V(1−e^{−t/RC})` | ≤ 1e-3·V at defaults; ≤ 1e-5·V at `reltol=1e-6` |
 | trap order | RC error ratio on halving fixed dt | ≈ 4 (2nd order) | ratio within 5% (test-only fixed-step hook in the C++ API) |
 | series RLC step, underdamped | ringing frequency, overshoot | closed form | 0.2% freq, 1e-3·V amplitude |
