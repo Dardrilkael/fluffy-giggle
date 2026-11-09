@@ -1115,7 +1115,7 @@ class CircsimApp final : public ws::ui::App {
                        result.has_value(), submitted_version);
         if (editor_.doc == nullptr || !result.has_value()) {
             if (!result.has_value()) {
-                editor_.toast("simulation job failed: " +
+                editor_.toast("Simulation job failed: " +
                                   result.error().message,
                               gui::ToastSeverity::error);
             }
@@ -1190,7 +1190,7 @@ class CircsimApp final : public ws::ui::App {
             }
             char summary[160];
             std::snprintf(summary, sizeof summary,
-                          "simulation ok: %zu table%s, %zu row%s, %zu "
+                          "Simulation finished: %zu table%s, %zu row%s, %zu "
                           "measurement%s",
                           editor_.results.run.results.tables.size(),
                           editor_.results.run.results.tables.size() == 1
@@ -1205,7 +1205,7 @@ class CircsimApp final : public ws::ui::App {
             editor_.status(count == 0 ? summary
                                       : editor_.problems.header);
         } else {
-            editor_.toast("simulation failed: " +
+            editor_.toast("Simulation failed: " +
                               outcome.run.error().message,
                           gui::ToastSeverity::error);
             editor_.status(editor_.problems.header);
@@ -1246,9 +1246,10 @@ class CircsimApp final : public ws::ui::App {
                  : ws::spice::results_csv(editor_.results.run.results);
         const ws::core::Status done = doc_fs().write(path, body);
         if (done.has_value()) {
-            editor_.toast("wrote " + path, gui::ToastSeverity::info);
+            editor_.toast("Results exported to " + path,
+                          gui::ToastSeverity::info);
         } else {
-            editor_.toast("export failed: " + done.error().message,
+            editor_.toast("Export failed: " + done.error().message,
                           gui::ToastSeverity::error);
         }
     }

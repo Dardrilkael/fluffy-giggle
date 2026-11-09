@@ -458,6 +458,9 @@ struct Editor {
     // the user collapsed (open is the default, so a new group shows).
     char palette_filter[48] = "";
     std::set<std::string> palette_closed;
+    // The Palette's layout: false = the compact picture-tile grid, true =
+    // one named row per symbol (names visible without hovering).
+    bool palette_list_view = false;
     // The Palette's recently-armed symbols, newest first, capped at
     // six. Editor-lifetime convenience state, not document state: a
     // document switch keeps it ("what did I place last?" is the same

@@ -1306,6 +1306,13 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
         gui.is_focused(gui.ids().id(kSearchLabel));
     const std::string_view filter{ed.palette_filter};
     const bool filtering = !filter.empty();
+    // Grid (pictures, tooltips for names) or List (a named row each):
+    // the grid is dense, the list is readable - the user picks.
+    if (gui::button(gui, layout, theme,
+                    ed.palette_list_view ? "Grid view" : "List view",
+                    84.0f)) {
+        ed.palette_list_view = !ed.palette_list_view;
+    }
     const std::vector<PaletteGroup> groups =
         palette_groups(ed.library, filter);
 
@@ -1364,14 +1371,25 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
     const auto tile_run = [&](const auto& items) {
         std::size_t n = 0;
         for (const ws::circsim::SymbolDef* sym : items) {
-            if (n % static_cast<std::size_t>(cols) != 0) {
+            if (!ed.palette_list_view &&
+                n % static_cast<std::size_t>(cols) != 0) {
                 layout.same_line();
             }
             ++n;
             gui.ids().push(tile_index++);
             const bool armed =
                 ed.tool == Tool::Place && ed.place_symbol == sym->key;
-            if (symbol_tile(ed, gui, layout, theme, *sym, tile_w, armed)) {
+            if (ed.palette_list_view) {
+                // One full-width named row (the armed row wears the
+                // selected face, like the tool list above).
+                if (gui::selectable(gui, layout, theme,
+                                    (sym->name + "  (" + sym->key + ")")
+                                        .c_str(),
+                                    armed)) {
+                    arm(*sym);
+                }
+            } else if (symbol_tile(ed, gui, layout, theme, *sym, tile_w,
+                                   armed)) {
                 arm(*sym);
             }
             gui.ids().pop();

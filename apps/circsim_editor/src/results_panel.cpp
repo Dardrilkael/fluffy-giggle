@@ -82,6 +82,7 @@ using editor::series_color;
         case ws::spice::AnalysisKind::Dc: return ".dc";
         case ws::spice::AnalysisKind::Tran: return ".tran";
         case ws::spice::AnalysisKind::Ac: return ".ac";
+        case ws::spice::AnalysisKind::Noise: return ".noise";
     }
     return "?";
 }
@@ -1290,17 +1291,19 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
                         gui::LayoutCursor& layout,
                         const gui::ChromeTheme& theme) {
     if (ed.doc == nullptr || ed.schem() == nullptr) {
-        gui::text(layout, theme, "no document");
+        gui::text(layout, theme, "No document open");
         return;
     }
     if (!ed.results.has) {
         gui::text(layout, theme,
-                  "no results yet - Circuit > Simulate (Ctrl+Enter) runs one");
+                  "No results yet - run a simulation with Ctrl+Enter "
+                  "(Circuit > Simulate)");
         return;
     }
     const ws::spice::Results& res = ed.results.run.results;
     if (res.tables.empty()) {
-        gui::text(layout, theme, "the run produced no tables");
+        gui::text(layout, theme,
+                  "The run produced no results - see the Problems panel");
         return;
     }
     if (ed.results.table >= res.tables.size()) {
@@ -1340,12 +1343,12 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
             }
         }
         layout.same_line();
-        if (gui::button(gui, layout, theme, "export csv", 84.0f) &&
+        if (gui::button(gui, layout, theme, "Export CSV", 84.0f) &&
             ed.export_results) {
             ed.export_results(false);
         }
         layout.same_line();
-        if (gui::button(gui, layout, theme, "export json", 84.0f) &&
+        if (gui::button(gui, layout, theme, "Export JSON", 84.0f) &&
             ed.export_results) {
             ed.export_results(true);
         }
@@ -1353,7 +1356,7 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
             gui::ChromeTheme warn = theme;
             warn.text = gui::dim(theme.toast_warning, 0.95f);
             gui::text(layout, warn,
-                      "stale - edited since the run (Ctrl+Enter re-runs)");
+                      "Out of date - the schematic changed since the run (Ctrl+Enter re-runs)");
         }
     }
 
@@ -1394,16 +1397,16 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
         quiet.text = gui::dim(theme.text, 0.45f);
         // The toolbar: bulk visibility, the discoverable "fit view"
         // (the double-click still works), and the hover x readout.
-        if (gui::button(gui, layout, theme, "show all", 64.0f)) {
+        if (gui::button(gui, layout, theme, "Show all", 64.0f)) {
             ed.results.visible.assign(t.signals.size(), 1u);
         }
         layout.same_line();
-        if (gui::button(gui, layout, theme, "hide all", 64.0f)) {
+        if (gui::button(gui, layout, theme, "Hide all", 64.0f)) {
             ed.results.visible.assign(t.signals.size(), 0u);
         }
         if (ed.results.view.active) {
             layout.same_line();
-            if (gui::button(gui, layout, theme, "fit view", 64.0f)) {
+            if (gui::button(gui, layout, theme, "Fit view", 64.0f)) {
                 ed.results.view = PlotView{};
             }
         }
@@ -1473,7 +1476,7 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
     // --- the measurements
     if (!ed.results.run.measurements.empty()) {
         gui::separator(layout, theme);
-        gui::text(layout, theme, "measurements");
+        gui::text(layout, theme, "Measurements");
         const ws::ui::r2d::Font* font =
             ed.font_mono != nullptr && !ed.font_mono->empty()
                 ? ed.font_mono
