@@ -17,7 +17,8 @@
 //                  "net N004" | "V1, L1, V2" (loops) | "" (ground)
 //   nets.cpp       "wire 5" | "label out" | "net carries labels ..."
 //   export.cpp     "part 12" | "part 12 pin b" | "net N003"
-//                  "directives" | "analysis setup"
+//                  "directives" | "analysis setup" | "simulation setup"
+//                  (the temp card's origin; the Analysis block)
 //
 // Element names resolve through the export back-map FIRST (the mangled
 // included - a part whose ref failed ERC still exports under a
@@ -213,6 +214,13 @@ struct Token {
         return out;
     }
     if (token == "analysis setup") {
+        out.kind = DiagTarget::Kind::Analysis;
+        return out;
+    }
+    // The temperature row's origin (the .options temp= card the
+    // Simulation tab emits): the same no-geometry block the analysis
+    // setup rows land on.
+    if (token == "simulation setup") {
         out.kind = DiagTarget::Kind::Analysis;
         return out;
     }

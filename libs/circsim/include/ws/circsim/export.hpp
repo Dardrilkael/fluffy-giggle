@@ -45,7 +45,7 @@ struct SpiceExport {
     std::map<std::string, std::uint32_t, CiLess> node_net;      // token -> id
 
     struct Origin {
-        enum class Kind { None, Part, Directives, Analysis };
+        enum class Kind { None, Part, Directives, Analysis, Temp };
         Kind kind = Kind::None;
         std::uint32_t id = 0;  // part id when kind == Part
     };

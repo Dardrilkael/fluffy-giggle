@@ -128,8 +128,11 @@ fetched privately, which would duplicate a first-party capability.
 - Warnings never block; errors do. `run_erc(s)` = build_nets + ERC.
 
 ## Export (export.hpp)
-- Deck: title line, directives verbatim, device cards sorted by ref (ci),
-  analysis cards, `.end`. Power/ground parts emit nothing. Element name =
+- Deck: title line, the run temperature (`.options temp=` when the
+  schematic's optional `temp` is set - emitted after the directives so
+  a user's own `.options temp=` there still wins), directives verbatim,
+  device cards sorted by ref (ci), analysis cards, `.end`. Power/ground
+  parts emit nothing. Element name =
   the ref when valid-and-prefixed, else a deterministic mangling (ERC has
   flagged it). Node tokens: identifiers only, never leading-digit; ground
   is "0". Two nets sanitizing to one token fails the export.
@@ -137,14 +140,17 @@ fetched privately, which would duplicate a first-party capability.
   `build_deck_ast` -> `run_deck` (ws::spice's own front end - never a
   second solver). Failures map back through line origins (deck line ->
   part / directives / analysis), else element/node name matching.
-- Analysis specs are numbers in the model; cards print %.12g. The CLI's
-  `--analysis` grammar ("tran 1u 1m", "ac dec 10 1 100k") parses with
-  ws::spice's number grammar.
+- Analysis specs are numbers in the model; cards print %.12g. The kinds:
+  op, dc, tran, ac, and noise (`v(out[,ref]) src dec|oct|lin n fstart
+  fstop [pts]`, ws::spice §7.5). The CLI's `--analysis` grammar
+  ("tran 1u 1m", "ac dec 10 1 100k", "noise v(out) V1 dec 10 1 100k")
+  parses with ws::spice's number grammar.
 
 ## Locate (locate.hpp, stage 3)
 - The Problems panel's jump seam: `locate_diag` parses a Diag's
   pre-rendered `where` ("R3", "R3 pin b", "npn 7", "part 12",
   "net N004", "wire 5", "label out", "directives", "analysis setup",
+  "simulation setup" (the temp card's origin; the Analysis block),
   comma lists) back into a `DiagTarget` (Part+optional pin / Net id /
   Wire id / Label id / the two no-geometry blocks / None).
 - Element names resolve through the export back-map FIRST (the mangled

@@ -241,6 +241,11 @@ TEST_CASE("the block spellings and the empty where") {
                                                   b.s, nullptr, nullptr);
     CHECK(a.kind == DiagTarget::Kind::Analysis);
 
+    // The temperature row's origin lands on the same block.
+    const DiagTarget t = ws::circsim::locate_diag(diag("simulation setup"),
+                                                  b.s, nullptr, nullptr);
+    CHECK(t.kind == DiagTarget::Kind::Analysis);
+
     CHECK(ws::circsim::locate_diag(diag(""), b.s, nullptr, nullptr).kind ==
           DiagTarget::Kind::None);
     CHECK(ws::circsim::locate_diag(diag("gibberish"), b.s, nullptr, nullptr)

@@ -132,7 +132,25 @@ struct AcSpec {
     double fstop = 1.0e6;
 };
 
-using AnalysisSpec = std::variant<OpSpec, DcSpec, TranSpec, AcSpec>;
+// .noise v(out[,ref]) src dec|oct|lin n fstart fstop [pts_per_summary]
+// (ws::spice §7.5): the output node pair, the input source (a V or I
+// element; its declared AC spec is IGNORED - the noise solve drives it
+// with a unit stimulus), the frequency grid, and the per-device
+// contribution summary cadence (0 = never).
+struct NoiseSpec {
+    enum class Sweep { Dec, Oct, Lin };
+    Sweep sweep = Sweep::Dec;
+    int n = 10;
+    double fstart = 1.0;
+    double fstop = 1.0e6;
+    std::string output;  // the output net's token; exported as v(output)
+    std::string ref;     // optional reference net; empty = ground
+    std::string input;   // the input source's element name ("V1", "I2")
+    int pts_per_summary = 0;
+};
+
+using AnalysisSpec =
+    std::variant<OpSpec, DcSpec, TranSpec, AcSpec, NoiseSpec>;
 
 struct AnalysisSetup {
     std::vector<AnalysisSpec> entries;
@@ -175,6 +193,11 @@ public:
     double grid = 1.0;  // snap grid size in schematic units
     AnalysisSetup analysis;
     std::string directives;  // verbatim .model/.subckt/.include text block
+    // §7.7 (M5a): the run temperature, degrees C; nullopt = SPICE's
+    // 27°C default. Exported as `.options temp=` ahead of the parts (a
+    // `.options temp=` inside `directives` still overrides it - deck
+    // order, last wins).
+    std::optional<double> temp;
     ViewState view;
     ws::settings::json::Object unknown;  // unrecognized top-level fields
 

@@ -405,6 +405,147 @@ TEST_CASE("a document switch resets the analysis selection") {
     CHECK(b.ed.analysis_index == -1);
 }
 
+// --- the noise analysis rows (the .noise entry the Simulation tab owns) -------
+
+TEST_CASE("the noise analysis spells its brief and mints its field rows") {
+    Bench b;
+    ws::circsim::NoiseSpec ns;
+    ns.output = "out";
+    ns.input = "V1";
+    ns.n = 10;
+    editor::push_add_analysis(b.doc, ns);
+    b.ed.properties_tab = 2;  // Simulation tab
+    b.ed.analysis_index = 0;
+
+    // The readable face: what it is, then its own parameters.
+    CHECK(editor::analysis_brief(b.doc.schem.analysis.entries[0]) ==
+          "Noise (.noise)");
+    const std::string params =
+        editor::analysis_params_brief(b.doc.schem.analysis.entries[0]);
+    CHECK(params.find("v(out)") != std::string::npos);
+    CHECK(params.find("V1") != std::string::npos);
+    CHECK(params.find("10 pts/dec") != std::string::npos);
+
+    // The rows the panel minted for the selected noise entry: the
+    // three names, the sweep combo's state, the numbers - each keyed
+    // by its own buffer identity.
+    b.draw_properties();
+    CHECK(b.ed.fields.count("a0.noise.output node (v(out))") == 1u);
+    CHECK(b.ed.fields.count("a0.noise.reference (v(out,ref))") == 1u);
+    CHECK(b.ed.fields.count("a0.noise.input source (V/I)") == 1u);
+    CHECK(b.ed.fields.count("a0.noise.sweep") == 1u);
+    CHECK(b.ed.fields.count("a0.noise.n") == 1u);
+    CHECK(b.ed.fields.count("a0.noise.begin (fstart)") == 1u);
+    CHECK(b.ed.fields.count("a0.noise.end (fstop)") == 1u);
+    CHECK(b.ed.fields.count("a0.noise.summary every (pts)") == 1u);
+    // The loaded values round the model's own.
+    CHECK(std::string{b.ed.fields.at("a0.noise.output node (v(out))")
+                          .buf.data()} == "out");
+    CHECK(std::string{b.ed.fields.at("a0.noise.input source (V/I)")
+                          .buf.data()} == "V1");
+}
+
+TEST_CASE("typing into the noise rows lands one Set Analysis per field") {
+    Bench b;
+    editor::push_add_analysis(b.doc, ws::circsim::NoiseSpec{});
+    b.ed.properties_tab = 2;
+    b.ed.analysis_index = 0;
+    const std::size_t before = b.doc.undo().undo_count();
+
+    // The output row: focus, select all, type "mid".
+    const std::string out_id =
+        "output node (v(out))##a0.noise.output node (v(out))";
+    b.draw_properties(
+        [&] { b.gui.set_focus(b.gui.ids().id(out_id.c_str())); });
+    {
+        ws::input::InputFrame select;
+        select.key_down[static_cast<std::size_t>(
+            ws::input::keys::kLeftControl)] = true;
+        select.key_pressed[static_cast<std::size_t>(ws::input::keys::kA)] =
+            true;
+        b.draw_properties(select, [] {});
+    }
+    {
+        ws::input::InputFrame typing;
+        typing.text_input = {'m', 'i', 'd'};
+        b.draw_properties(typing, [] {});
+    }
+    const auto* ns = std::get_if<ws::circsim::NoiseSpec>(
+        &b.doc.schem.analysis.entries[0]);
+    REQUIRE(ns != nullptr);
+    CHECK(ns->output == "mid");
+    CHECK(ns->input.empty());   // untouched by this row's edit
+    CHECK(ns->fstop == 1e6);    // the defaults stand
+    CHECK(b.doc.undo().undo_count() == before + 1u);
+    CHECK(b.doc.undo().name_to_undo() == "Edit Analysis");
+
+    // A bad number in the fstart row keeps the old and says so on the
+    // status line (the number row's own contract).
+    const std::string fstart_id = "begin (fstart)##a0.noise.fstart";
+    b.draw_properties(
+        [&] { b.gui.set_focus(b.gui.ids().id(fstart_id.c_str())); });
+    {
+        ws::input::InputFrame select;
+        select.key_down[static_cast<std::size_t>(
+            ws::input::keys::kLeftControl)] = true;
+        select.key_pressed[static_cast<std::size_t>(ws::input::keys::kA)] =
+            true;
+        b.draw_properties(select, [] {});
+    }
+    {
+        ws::input::InputFrame typing;
+        typing.text_input = {'b', 'a', 'd'};
+        b.draw_properties(typing, [] {});
+    }
+    ns = std::get_if<ws::circsim::NoiseSpec>(
+        &b.doc.schem.analysis.entries[0]);
+    REQUIRE(ns != nullptr);
+    CHECK(ns->fstart == 1.0);  // kept
+    CHECK(b.doc.schem.analysis.entries.size() == 1u);
+}
+
+// --- the temperature row (the Simulation options section) ----------------------
+
+TEST_CASE("the temperature row edits, clears back to the default, and undoes") {
+    Bench b;
+    b.ed.properties_tab = 2;  // Simulation tab
+    b.draw_properties();
+    CHECK(b.ed.fields.count("sim.temp") == 1u);
+    CHECK(b.doc.schem.temp == std::nullopt);
+
+    // Type 125: one Edit Temperature lands.
+    const std::string temp_id = "Temperature (temp)##sim.temp";
+    b.draw_properties(
+        [&] { b.gui.set_focus(b.gui.ids().id(temp_id.c_str())); });
+    {
+        ws::input::InputFrame select;
+        select.key_down[static_cast<std::size_t>(
+            ws::input::keys::kLeftControl)] = true;
+        select.key_pressed[static_cast<std::size_t>(ws::input::keys::kA)] =
+            true;
+        b.draw_properties(select, [] {});
+    }
+    {
+        ws::input::InputFrame typing;
+        typing.text_input = {'1', '2', '5'};
+        b.draw_properties(typing, [] {});
+    }
+    REQUIRE(b.doc.schem.temp.has_value());
+    CHECK(*b.doc.schem.temp == 125.0);
+    CHECK(b.doc.undo().name_to_undo() == "Edit Temperature");
+
+    // One undo reverts to the unset default (never a phantom 27).
+    REQUIRE(b.doc.undo().undo().has_value());
+    CHECK(b.doc.schem.temp == std::nullopt);
+
+    // Clearing the row back to empty is a real edit to nullopt (the
+    // user's explicit "back to SPICE's default"), and the no-op guard
+    // holds: setting nullopt when it already is pushes nothing.
+    const std::size_t held = b.doc.undo().undo_count();
+    editor::push_set_temp(b.doc, std::nullopt);
+    CHECK(b.doc.undo().undo_count() == held);
+}
+
 // --- refresh_problems' snapshot version ----------------------------------------
 
 TEST_CASE("refresh_problems keys to the version it is handed, not the live one") {

@@ -142,8 +142,10 @@ CMakeLists only wire ws libraries together.
   word-start search ("res" and "rstr" both arm the resistor; a
   mid-word letter never opens a match, so "res" leaves the sources
   alone); the Properties panel as a three-tab strip - the selection's
-  rows, the Netlist view, the Simulation setup (the analysis list +
-  the directives editor, always reachable instead of hidden behind an
+  rows, the Netlist view, the Simulation setup (the analysis list - op,
+  dc, tran, ac, noise, each with its own field rows; the run temperature
+  row (blank = SPICE's 27°C, exported as .options temp=); and the
+  directives editor, always reachable instead of hidden behind an
   empty selection);
   the Problems list over Diags with select-and-zoom through
   libs/circsim's locate seam; the Netlist view; the Results panel - the

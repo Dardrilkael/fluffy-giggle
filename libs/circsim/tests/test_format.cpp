@@ -58,7 +58,7 @@ bool same_schematic(const Schematic& a, const Schematic& b) {
     }
     if (a.directives != b.directives || a.view.zoom != b.view.zoom ||
         a.view.center.x != b.view.center.x ||
-        a.view.center.y != b.view.center.y) {
+        a.view.center.y != b.view.center.y || a.temp != b.temp) {
         return false;
     }
     if (a.parts().size() != b.parts().size() ||
@@ -342,10 +342,41 @@ TEST_CASE("every analysis spec spelling round-trips") {
     s.analysis.entries.push_back(ws::circsim::AcSpec{
         .sweep = ws::circsim::AcSpec::Sweep::Oct, .n = 20,
         .fstart = 10.0, .fstop = 1e5});
+    s.analysis.entries.push_back(ws::circsim::NoiseSpec{
+        .sweep = ws::circsim::NoiseSpec::Sweep::Lin, .n = 30,
+        .fstart = 100.0, .fstop = 100e3, .output = "out", .ref = "gndref",
+        .input = "V1", .pts_per_summary = 5});
+    s.temp = 85.0;
 
     LoadReport report;
     const auto loaded =
         ws::circsim::load_csim(ws::circsim::save_csim(s), report);
     REQUIRE(loaded.has_value());
     CHECK(same_schematic(s, *loaded));
+}
+
+TEST_CASE("the temperature field is optional and absent when unset") {
+    // Unset: the file carries no temp key at all (an older writer's
+    // byte-identical shape), and the load answers nullopt.
+    {
+        Schematic s;
+        LoadReport report;
+        const auto loaded =
+            ws::circsim::load_csim(ws::circsim::save_csim(s), report);
+        REQUIRE(loaded.has_value());
+        CHECK(loaded->temp == std::nullopt);
+        CHECK(ws::circsim::save_csim(*loaded).find("\"temp\"") ==
+              std::string::npos);
+    }
+    // A non-number repairs to unset with a diagnostic, never a failure.
+    {
+        constexpr const char* bad =
+            R"json({"format":"circsim","version":1,"temp":"hot"})json";
+        LoadReport report;
+        const auto loaded = ws::circsim::load_csim(bad, report);
+        REQUIRE(loaded.has_value());
+        CHECK(loaded->temp == std::nullopt);
+        REQUIRE(report.diags.size() == 1u);
+        CHECK(report.diags[0].code == "circsim.format.bad_field");
+    }
 }

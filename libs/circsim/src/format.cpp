@@ -321,6 +321,27 @@ void write_analysis(json::Object& out, const AnalysisSetup& setup) {
             a.set("fstart", json::Value::real(ac->fstart));
             a.set("fstop", json::Value::real(ac->fstop));
             e.set("ac", json::Value::object(std::move(a)));
+        } else if (const NoiseSpec* ns = std::get_if<NoiseSpec>(&spec)) {
+            json::Object o;
+            const char* sweep = "dec";
+            if (ns->sweep == NoiseSpec::Sweep::Oct) {
+                sweep = "oct";
+            } else if (ns->sweep == NoiseSpec::Sweep::Lin) {
+                sweep = "lin";
+            }
+            o.set("output", json::Value::text(ns->output));
+            if (!ns->ref.empty()) {
+                o.set("ref", json::Value::text(ns->ref));
+            }
+            o.set("input", json::Value::text(ns->input));
+            o.set("sweep", json::Value::text(sweep));
+            o.set("n", json::Value::integer(ns->n));
+            o.set("fstart", json::Value::real(ns->fstart));
+            o.set("fstop", json::Value::real(ns->fstop));
+            if (ns->pts_per_summary > 0) {
+                o.set("pts", json::Value::integer(ns->pts_per_summary));
+            }
+            e.set("noise", json::Value::object(std::move(o)));
         }
         entries.push_back(json::Value::object(std::move(e)));
     }
@@ -407,6 +428,37 @@ AnalysisSetup read_analysis(const json::Value* v, std::vector<Diag>& diags) {
                 ac.fstop = *n;
             }
             setup.entries.push_back(ac);
+        } else if (kind == "noise" && o != nullptr) {
+            NoiseSpec ns;
+            if (const auto t = as_text(o->find("output"))) {
+                ns.output = *t;
+            }
+            if (const auto t = as_text(o->find("ref"))) {
+                ns.ref = *t;
+            }
+            if (const auto t = as_text(o->find("input"))) {
+                ns.input = *t;
+            }
+            if (const auto sw = as_text(o->find("sweep"))) {
+                if (*sw == "oct") {
+                    ns.sweep = NoiseSpec::Sweep::Oct;
+                } else if (*sw == "lin") {
+                    ns.sweep = NoiseSpec::Sweep::Lin;
+                }
+            }
+            if (const auto n = as_integer(o->find("n"))) {
+                ns.n = static_cast<int>(*n);
+            }
+            if (const auto n = as_number(o->find("fstart"))) {
+                ns.fstart = *n;
+            }
+            if (const auto n = as_number(o->find("fstop"))) {
+                ns.fstop = *n;
+            }
+            if (const auto n = as_integer(o->find("pts"))) {
+                ns.pts_per_summary = static_cast<int>(*n);
+            }
+            setup.entries.push_back(ns);
         } else {
             diags.push_back(load_diag(
                 "circsim.format.bad_field",
@@ -515,6 +567,17 @@ ws::core::Result<Schematic> load_csim(std::string_view text,
     }
     if (const auto directives = as_text(root.find("directives"))) {
         s.directives = *directives;
+    }
+    // §7.7 (M5a): the run temperature. A non-number repairs to unset
+    // (SPICE's default) with a diagnostic, the loader's own contract.
+    if (const json::Value* temp = root.find("temp"); temp != nullptr) {
+        if (const auto n = as_number(temp)) {
+            s.temp = *n;
+        } else {
+            report.diags.push_back(load_diag(
+                "circsim.format.bad_field",
+                "'temp' is not a number; the SPICE default stands", ""));
+        }
     }
     s.analysis = read_analysis(root.find("analysis"), report.diags);
     if (const json::Value* view = root.find("view");
@@ -665,7 +728,7 @@ ws::core::Result<Schematic> load_csim(std::string_view text,
         if (key != "format" && key != "version" && key != "grid" &&
             key != "next_id" && key != "parts" && key != "junctions" &&
             key != "wires" && key != "labels" && key != "analysis" &&
-            key != "directives" && key != "view") {
+            key != "directives" && key != "temp" && key != "view") {
             s.unknown.set(key, val);
         }
     }
@@ -790,6 +853,11 @@ std::string save_csim(const Schematic& s) {
 
     write_analysis(root, s.analysis);
     root.set("directives", json::Value::text(s.directives));
+    // The run temperature: written only when set, so an unset temp keeps
+    // the file byte-identical to what older writers produced.
+    if (s.temp.has_value()) {
+        root.set("temp", json::Value::real(*s.temp));
+    }
 
     json::Object view;
     view.set("zoom", json::Value::real(s.view.zoom));

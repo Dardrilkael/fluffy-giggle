@@ -1072,6 +1072,37 @@ class DirectivesCommand final : public EditCommand {
     std::string was_, next_;
 };
 
+// The Simulation tab's temperature row (§7.7): nullopt = SPICE's 27°C
+// default. Merges like the directives row does - typing "12" then "5"
+// is one Edit Temperature step, not two.
+class SimTempCommand final : public EditCommand {
+  public:
+    SimTempCommand(SchematicDocument* doc,
+                   std::optional<double> was, std::optional<double> next)
+        : EditCommand(doc), was_(was), next_(next) {}
+
+    void apply() override { schem().temp = next_; }
+    void undo() override { schem().temp = was_; }
+    [[nodiscard]] std::string name() const override {
+        return "Edit Temperature";
+    }
+    [[nodiscard]] bool merge_with(
+        const ws::app::UndoCommand& newer) override {
+        const auto* edit = dynamic_cast<const SimTempCommand*>(&newer);
+        if (edit == nullptr) {
+            return false;
+        }
+        next_ = edit->next_;
+        return true;
+    }
+    [[nodiscard]] std::size_t memory_estimate() const override {
+        return sizeof(*this);
+    }
+
+  private:
+    std::optional<double> was_, next_;
+};
+
 class AddAnalysisCommand final : public EditCommand {
   public:
     AddAnalysisCommand(SchematicDocument& doc,
@@ -1162,6 +1193,14 @@ void push_directives(SchematicDocument& doc, std::string next) {
     }
     (void)doc.undo().push(std::make_unique<DirectivesCommand>(
         &doc, doc.schem.directives, std::move(next)));
+}
+
+void push_set_temp(SchematicDocument& doc, std::optional<double> next) {
+    if (doc.schem.temp == next) {
+        return;
+    }
+    (void)doc.undo().push(
+        std::make_unique<SimTempCommand>(&doc, doc.schem.temp, next));
 }
 
 void push_add_analysis(SchematicDocument& doc,

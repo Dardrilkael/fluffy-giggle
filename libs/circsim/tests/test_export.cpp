@@ -24,6 +24,7 @@
 using ws::circsim::AcSpec;
 using ws::circsim::DcSpec;
 using ws::circsim::Label;
+using ws::circsim::NoiseSpec;
 using ws::circsim::OpSpec;
 using ws::circsim::Part;
 using ws::circsim::PinRef;
@@ -210,6 +211,15 @@ TEST_CASE("the analysis card spellings") {
     CHECK(analysis_card(AcSpec{.sweep = AcSpec::Sweep::Dec, .n = 10,
                                .fstart = 1.0, .fstop = 1e6}) ==
           ".ac dec 10 1 1000000");
+    CHECK(analysis_card(NoiseSpec{
+              .sweep = NoiseSpec::Sweep::Dec, .n = 10, .fstart = 1.0,
+              .fstop = 1e6, .output = "out", .input = "V1"}) ==
+          ".noise v(out) V1 dec 10 1 1000000");
+    CHECK(analysis_card(NoiseSpec{
+              .sweep = NoiseSpec::Sweep::Lin, .n = 5, .fstart = 10.0,
+              .fstop = 1e3, .output = "out", .ref = "ref", .input = "I2",
+              .pts_per_summary = 2}) ==
+          ".noise v(out,ref) I2 lin 5 10 1000 2");
 }
 
 TEST_CASE("the --analysis grammar parses (and rejects)") {
@@ -240,8 +250,44 @@ TEST_CASE("the --analysis grammar parses (and rejects)") {
     CHECK(as->sweep == AcSpec::Sweep::Oct);
     CHECK(as->fstop == 1e5);
 
+    // The noise grammar: both spellings of the output, the optional
+    // reference and the optional summary cadence.
+    const auto noise = ws::circsim::parse_analysis_spec(
+        "noise v(out) V1 dec 10 1 100k 5");
+    REQUIRE(noise.has_value());
+    const auto* n1 = std::get_if<NoiseSpec>(&*noise);
+    REQUIRE(n1 != nullptr);
+    CHECK(n1->output == "out");
+    CHECK(n1->ref.empty());
+    CHECK(n1->input == "V1");
+    CHECK(n1->sweep == NoiseSpec::Sweep::Dec);
+    CHECK(n1->n == 10);
+    CHECK(n1->fstart == 1.0);
+    CHECK(n1->fstop == 1e5);
+    CHECK(n1->pts_per_summary == 5);
+
+    const auto noise_bare =
+        ws::circsim::parse_analysis_spec("noise out,ref V2 oct 4 1k 1meg");
+    REQUIRE(noise_bare.has_value());
+    const auto* n2 = std::get_if<NoiseSpec>(&*noise_bare);
+    REQUIRE(n2 != nullptr);
+    CHECK(n2->output == "out");
+    CHECK(n2->ref == "ref");
+    CHECK(n2->input == "V2");
+    CHECK(n2->sweep == NoiseSpec::Sweep::Oct);
+    CHECK(n2->fstop == 1e6);
+    CHECK(n2->pts_per_summary == 0);
+
     CHECK_FALSE(ws::circsim::parse_analysis_spec("").has_value());
     CHECK_FALSE(ws::circsim::parse_analysis_spec("noise 1 10").has_value());
+    CHECK_FALSE(ws::circsim::parse_analysis_spec("noise out V1 fast 10 1 1k")
+                    .has_value());
+    CHECK_FALSE(ws::circsim::parse_analysis_spec(
+                    "noise out V1 dec ten 1 1k")
+                    .has_value());
+    CHECK_FALSE(ws::circsim::parse_analysis_spec(
+                    "noise out V1 dec 10 1 1k 2.5")
+                    .has_value());
     CHECK_FALSE(ws::circsim::parse_analysis_spec("dc V1 zero five")
                     .has_value());
 }
@@ -306,6 +352,167 @@ TEST_CASE("the RC step response tracks 5*(1-exp(-t/tau))") {
     REQUIRE(v2 >= 0.0);
     CHECK(v2 ==
           doctest::Approx(5.0 * (1.0 - std::exp(-1e-2 / tau))).epsilon(2e-3));
+}
+
+TEST_CASE("a noise analysis runs through the schematic path") {
+    Schematic s = divider();
+    s.analysis.entries.push_back(NoiseSpec{
+        .sweep = NoiseSpec::Sweep::Dec, .n = 10, .fstart = 1.0,
+        .fstop = 1e5, .output = "out", .input = "V1"});
+    const ws::circsim::RunOutcome out = ws::circsim::run_schematic(s);
+    REQUIRE(out.run.has_value());
+    REQUIRE(out.run->results.tables.size() == 1);
+    const ws::spice::Table& t = out.run->results.tables[0];
+    CHECK(t.analysis == ws::spice::AnalysisKind::Noise);
+    CHECK(t.sweep == ws::spice::SweepKind::Frequency);
+    // The spectra columns the Results panel plots.
+    REQUIRE(t.signal("onoise_spectrum").size() == t.row_count());
+    REQUIRE(t.signal("inoise_spectrum").size() == t.row_count());
+    CHECK(t.row_count() == 10 * 5 + 1);  // 10 pts/decade over 5 decades
+    // The integrated totals: the divider's out node sees R1||R2 = 5k of
+    // Johnson noise against the AC-grounded source, onoise =
+    // sqrt(4 k T (R1||R2) (fstop - fstart)) at the 27°C default.
+    REQUIRE(out.run->reports.size() == 1);
+    const double analytic =
+        std::sqrt(1.656e-20 * 5.0e3 * (1e5 - 1.0));
+    CHECK(out.run->reports[0].noise_out_total ==
+          doctest::Approx(analytic).epsilon(0.05));
+    // The forward gain from V1 to out is 1/2, so the input-referred
+    // noise is twice the output noise.
+    CHECK(out.run->reports[0].noise_in_total ==
+          doctest::Approx(2.0 * analytic).epsilon(0.05));
+    // Every spectrum point is positive and finite.
+    for (const double v : t.signal("onoise_spectrum")) {
+        CHECK(v > 0.0);
+        CHECK(std::isfinite(v));
+    }
+}
+
+TEST_CASE("the temperature rides as .options temp= ahead of the parts") {
+    // Unset: no card anywhere (SPICE's 27°C default stands).
+    {
+        const Schematic s = divider();
+        const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+        const auto deck = ws::circsim::export_deck(s, nets.nets);
+        REQUIRE(deck.has_value());
+        CHECK(deck->text.find(".options temp=") == std::string::npos);
+    }
+    // Set: the card lands between the directives and the parts, so a
+    // user's own .options temp= inside the directives still wins (deck
+    // order, last assignment lands).
+    {
+        Schematic s = divider();
+        s.temp = 125.0;
+        s.directives = ".options temp=-40";
+        s.analysis.entries.push_back(OpSpec{});
+        const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+        const auto deck = ws::circsim::export_deck(s, nets.nets);
+        REQUIRE(deck.has_value());
+        CHECK(deck->text ==
+              "circsim export\n"
+              ".options temp=125\n"
+              ".options temp=-40\n"
+              "R1 N001 out 10k\n"
+              "R2 out 0 10k\n"
+              "V1 N001 0 5\n"
+              ".op\n"
+              ".end\n");
+        // The back-map pins the temp card on the simulation setup.
+        REQUIRE(deck->line_origins.size() == 8);
+        CHECK(deck->line_origins[1].kind ==
+              ws::circsim::SpiceExport::Origin::Kind::Temp);
+    }
+}
+
+TEST_CASE(".nodeset, a LEVEL=77 MOS and a BJT with Tf ride the directives") {
+    // The editor's whole escape hatch for the recent spice models:
+    // model cards and DC hints live in the directives block, the
+    // devices carry model/L/W through the property grid's params, and
+    // the run composes both halves.
+    SUBCASE("a .nodeset hint rides the directives and solves") {
+        Schematic s = divider();
+        s.directives = ".nodeset v(out)=2.5";
+        s.analysis.entries.push_back(OpSpec{});
+        const ws::circsim::RunOutcome out = ws::circsim::run_schematic(s);
+        REQUIRE(out.run.has_value());
+        const auto v_out = out.run->results.tables[0].signal("v(out)");
+        REQUIRE(v_out.size() == 1);
+        CHECK(v_out[0] == doctest::Approx(2.5).epsilon(1e-9));
+    }
+    SUBCASE("the BSIM6-style MOS core") {
+        Schematic s;
+        Part* vd = s.add_part(Part::make("v", "Vd", "1", {0.0, 4.0}));
+        Part* vg = s.add_part(Part::make("v", "Vg", "0.8", {0.0, -2.0}));
+        Part* m = s.add_part(Part::make("nmos", "M1", "", {10.0, 0.0}));
+        m->params["model"] = "nch";
+        m->params["l"] = "1u";
+        m->params["w"] = "1u";
+        Part* g = s.add_part(Part::make("gnd", "", "", {5.0, -6.0}));
+        // nmos pins: d g s b. Drain and gate ride their sources; source
+        // and bulk ground through the one ground part (same fixed net).
+        s.add_wire(ws::circsim::Wire::endpoints(
+            PinRef{vd->id, 0}, PinRef{m->id, 0}));
+        s.add_wire(ws::circsim::Wire::endpoints(
+            PinRef{vg->id, 0}, PinRef{m->id, 1}));
+        s.add_wire(ws::circsim::Wire::endpoints(
+            PinRef{m->id, 2}, PinRef{g->id, 0}));
+        s.add_wire(ws::circsim::Wire::endpoints(
+            PinRef{m->id, 3}, PinRef{g->id, 0}));
+        s.add_wire(ws::circsim::Wire::endpoints(
+            PinRef{vd->id, 1}, PinRef{g->id, 0}));
+        s.add_wire(ws::circsim::Wire::endpoints(
+            PinRef{vg->id, 1}, PinRef{g->id, 0}));
+        s.directives =
+            ".model nch NMOS(Level=77 Tox=2n Ndep=2e17 Vth0=0.5"
+            " U0=0.045 Vsat=8e4)";
+        s.analysis.entries.push_back(OpSpec{});
+        const ws::circsim::RunOutcome out = ws::circsim::run_schematic(s);
+        REQUIRE(out.run.has_value());
+        REQUIRE(out.run->results.tables.size() == 1);
+        // Above threshold (Vgs=0.8 > Vth0=0.5) at Vds=1: a real drain
+        // current flows through the charge-sheet channel - the Level=77
+        // core answered, not a silent no-op.
+        const auto i_vd = out.run->results.tables[0].signal("i(Vd)");
+        REQUIRE(i_vd.size() == 1);
+        CHECK(-i_vd[0] > 1e-6);
+        CHECK(-i_vd[0] < 1e-2);
+        // The geometry params ride the card tail.
+        CHECK(out.map.text.find("nch L=1u W=1u\n") != std::string::npos);
+    }
+    SUBCASE("the BJT transit-time charges") {
+        Schematic s;
+        Part* vc = s.add_part(Part::make("v", "V1", "5", {0.0, 4.0}));
+        Part* rc = s.add_part(Part::make("r", "Rc", "1k", {8.0, 2.0}));
+        Part* vb = s.add_part(Part::make("v", "V2", "0.7", {0.0, -4.0}));
+        Part* q = s.add_part(Part::make("npn", "Q1", "", {12.0, -2.0}));
+        q->params["model"] = "qmod";
+        Part* g = s.add_part(Part::make("gnd", "", "", {6.0, -8.0}));
+        // npn pins: c b e. Collector rides Rc (which rides V1), base
+        // rides V2, emitter grounds.
+        s.add_wire(ws::circsim::Wire::endpoints(
+            PinRef{vc->id, 0}, PinRef{rc->id, 0}));
+        s.add_wire(ws::circsim::Wire::endpoints(
+            PinRef{rc->id, 1}, PinRef{q->id, 0}));
+        s.add_wire(ws::circsim::Wire::endpoints(
+            PinRef{vb->id, 0}, PinRef{q->id, 1}));
+        s.add_wire(ws::circsim::Wire::endpoints(
+            PinRef{q->id, 2}, PinRef{g->id, 0}));
+        s.add_wire(ws::circsim::Wire::endpoints(
+            PinRef{vc->id, 1}, PinRef{g->id, 0}));
+        s.add_wire(ws::circsim::Wire::endpoints(
+            PinRef{vb->id, 1}, PinRef{g->id, 0}));
+        s.directives =
+            ".model qmod NPN(Is=1e-14 Bf=100 Vaf=50 Tf=0.5n)";
+        s.analysis.entries.push_back(OpSpec{});
+        const ws::circsim::RunOutcome out = ws::circsim::run_schematic(s);
+        REQUIRE(out.run.has_value());
+        const auto i_v1 = out.run->results.tables[0].signal("i(V1)");
+        REQUIRE(i_v1.size() == 1);
+        // Is*exp(0.7/Vt) ~ 5.8 mA collector current, lifted by Vaf.
+        CHECK(-i_v1[0] > 1e-3);
+        CHECK(-i_v1[0] < 5e-2);
+        CHECK(out.map.text.find("qmod\n") != std::string::npos);
+    }
 }
 
 TEST_CASE("simulation failures map back onto parts and directives") {

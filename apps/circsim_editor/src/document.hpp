@@ -136,6 +136,10 @@ void push_label_text(SchematicDocument& doc, std::uint32_t label_id,
 // The whole-text edits (typing coalesces like the part fields).
 void push_directives(SchematicDocument& doc, std::string next);
 
+// The Simulation tab's temperature row (§7.7): nullopt = SPICE's 27°C
+// default, so the row clears back to it. Typing coalesces.
+void push_set_temp(SchematicDocument& doc, std::optional<double> next);
+
 // The analysis list: index-checked at push (a no-op refusal beyond
 // the caller's own guards when the list changed under it).
 void push_add_analysis(SchematicDocument& doc,

@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <map>
 #include <optional>
@@ -130,15 +131,33 @@ std::string analysis_card(const AnalysisSpec& a) {
         }
         return card;
     }
-    const AcSpec* ac = std::get_if<AcSpec>(&a);
+    if (const AcSpec* ac = std::get_if<AcSpec>(&a)) {
+        const char* sweep = "dec";
+        if (ac->sweep == AcSpec::Sweep::Oct) {
+            sweep = "oct";
+        } else if (ac->sweep == AcSpec::Sweep::Lin) {
+            sweep = "lin";
+        }
+        return std::string(".ac ") + sweep + " " + fmt_num(ac->n) + " " +
+               fmt_num(ac->fstart) + " " + fmt_num(ac->fstop);
+    }
+    const NoiseSpec* ns = std::get_if<NoiseSpec>(&a);
     const char* sweep = "dec";
-    if (ac->sweep == AcSpec::Sweep::Oct) {
+    if (ns->sweep == NoiseSpec::Sweep::Oct) {
         sweep = "oct";
-    } else if (ac->sweep == AcSpec::Sweep::Lin) {
+    } else if (ns->sweep == NoiseSpec::Sweep::Lin) {
         sweep = "lin";
     }
-    return std::string(".ac ") + sweep + " " + fmt_num(ac->n) + " " +
-           fmt_num(ac->fstart) + " " + fmt_num(ac->fstop);
+    std::string card = ".noise v(" + ns->output;
+    if (!ns->ref.empty()) {
+        card += "," + ns->ref;
+    }
+    card += ") " + ns->input + " " + sweep + " " + fmt_num(ns->n) + " " +
+           fmt_num(ns->fstart) + " " + fmt_num(ns->fstop);
+    if (ns->pts_per_summary > 0) {
+        card += " " + std::to_string(ns->pts_per_summary);
+    }
+    return card;
 }
 
 ws::core::Result<AnalysisSpec> parse_analysis_spec(std::string_view text) {
@@ -163,7 +182,8 @@ ws::core::Result<AnalysisSpec> parse_analysis_spec(std::string_view text) {
         return ws::core::unexpected<ws::core::Error>(ws::core::make_error(
             2, "circsim", "--analysis needs a spec: 'op' | 'dc V1 0 5 0.1' | "
                               "'tran 1u 1m [tstart [tmax]] [uic]' | "
-                              "'ac dec 10 1 100k'"));
+                              "'ac dec 10 1 100k' | "
+                              "'noise v(out) V1 dec 10 1 100k'"));
     }
     const std::string kind = lower(tokens[0]);
     const auto need = [&](std::size_t count) {
@@ -275,10 +295,72 @@ ws::core::Result<AnalysisSpec> parse_analysis_spec(std::string_view text) {
         ac.fstop = *f2;
         return AnalysisSpec{ac};
     }
+    if (kind == "noise") {
+        // 'noise <out> <src> dec|oct|lin> <n> <fstart> <fstop> [pts]',
+        // the output spelling either a bare node ("out") or the card's
+        // own v(out[,ref]) form.
+        if (tokens.size() < 7 || tokens.size() > 8) {
+            return ws::core::unexpected<ws::core::Error>(
+                ws::core::make_error(2, "circsim",
+                                     "'noise' takes: noise <out> <src> "
+                                             "<dec|oct|lin> <n> <fstart> "
+                                             "<fstop> [pts]"));
+        }
+        // The output token: strip an optional v(...) wrapper.
+        std::string out_text = tokens[1];
+        std::string ref;
+        if (out_text.size() >= 3 && lower(out_text.substr(0, 2)) == "v(" &&
+            out_text.back() == ')') {
+            out_text = out_text.substr(2, out_text.size() - 3);
+        }
+        const std::size_t comma = out_text.find(',');
+        if (comma != std::string::npos) {
+            ref = out_text.substr(comma + 1);
+            out_text = out_text.substr(0, comma);
+        }
+        NoiseSpec ns;
+        ns.output = out_text;
+        ns.ref = ref;
+        ns.input = tokens[2];
+        const std::string sweep = lower(tokens[3]);
+        if (sweep == "dec") {
+            ns.sweep = NoiseSpec::Sweep::Dec;
+        } else if (sweep == "oct") {
+            ns.sweep = NoiseSpec::Sweep::Oct;
+        } else if (sweep == "lin") {
+            ns.sweep = NoiseSpec::Sweep::Lin;
+        } else {
+            return ws::core::unexpected<ws::core::Error>(
+                ws::core::make_error(2, "circsim",
+                                     "noise sweep must be dec, oct or lin"));
+        }
+        const auto n = ws::spice::parse_number(tokens[4]);
+        const auto f1 = ws::spice::parse_number(tokens[5]);
+        const auto f2 = ws::spice::parse_number(tokens[6]);
+        if (!n || !f1 || !f2) {
+            return ws::core::unexpected<ws::core::Error>(
+                ws::core::make_error(2, "circsim",
+                                     "bad number in --analysis noise"));
+        }
+        ns.n = static_cast<int>(*n);
+        ns.fstart = *f1;
+        ns.fstop = *f2;
+        if (tokens.size() == 8) {
+            const auto pts = ws::spice::parse_number(tokens[7]);
+            if (!pts || *pts != std::floor(*pts) || *pts < 0.0) {
+                return ws::core::unexpected<ws::core::Error>(
+                    ws::core::make_error(
+                        2, "circsim",
+                        "noise summary cadence must be a whole number >= 0"));
+            }
+            ns.pts_per_summary = static_cast<int>(*pts);
+        }
+        return AnalysisSpec{ns};
+    }
     return ws::core::unexpected<ws::core::Error>(
         ws::core::make_error(2, "circsim",
                              "unknown analysis '" + tokens[0] +
-                                 "' (op, dc, tran, ac)"));
+                                 "' (op, dc, tran, ac, noise)"));
 }
 
 // --- the deck export ---------------------------------------------------------------
@@ -377,6 +459,15 @@ ws::core::Result<SpiceExport> export_deck(
     };
 
     push_line("circsim export", SpiceExport::Origin::Kind::None, 0);
+
+    // The run temperature (§7.7): an unset temp emits nothing (SPICE's
+    // 27°C default stands), and the card rides AFTER the directives
+    // block so a user's own `.options temp=` (an escape hatch inside
+    // the directives) still wins - deck order, last assignment lands.
+    if (s.temp.has_value()) {
+        push_line(".options temp=" + fmt_num(*s.temp),
+                  SpiceExport::Origin::Kind::Temp, 0);
+    }
 
     if (!s.directives.empty()) {
         std::string body = s.directives;
@@ -479,6 +570,8 @@ Diag map_spice_error(const Schematic& s, const SpiceExport& map,
             where = "directives";
         } else if (o.kind == SpiceExport::Origin::Kind::Analysis) {
             where = "analysis setup";
+        } else if (o.kind == SpiceExport::Origin::Kind::Temp) {
+            where = "simulation setup";
         }
         // Strip the "name:line:col: " prefix for the message body.
         const std::size_t sep = msg.find(": error:");

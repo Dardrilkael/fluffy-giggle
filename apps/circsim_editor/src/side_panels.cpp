@@ -413,6 +413,107 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
                   "Small-signal sweep from begin to end frequency");
         return;
     }
+    if (const ws::circsim::NoiseSpec* ns =
+            std::get_if<ws::circsim::NoiseSpec>(&spec)) {
+        const std::string skey = key + ".noise";
+        // The three names first: WHERE the noise is measured (the output
+        // net, optionally against a reference instead of ground), and
+        // WHICH source the input refers it to. The labels teach the
+        // card's own spelling, like every analysis row does.
+        const auto name_row = [&](const char* label,
+                                  const std::string& current,
+                                  const auto& land) {
+            char* buf = field_buf(ed, skey + "." + label, current);
+            if (text_input_tracked(ed, gui, layout, theme,
+                                   std::string{label} + "##" + skey + "." +
+                                       label,
+                                   buf, 128)) {
+                land(std::string{buf});
+            }
+        };
+        name_row("output node (v(out))", ns->output,
+                 [&](std::string v) {
+                     ws::circsim::NoiseSpec next = *ns;
+                     next.output = std::move(v);
+                     push_set_analysis(*ed.doc, index, next);
+                 });
+        name_row("reference (v(out,ref))", ns->ref,
+                 [&](std::string v) {
+                     ws::circsim::NoiseSpec next = *ns;
+                     next.ref = std::move(v);
+                     push_set_analysis(*ed.doc, index, next);
+                 });
+        name_row("input source (V/I)", ns->input,
+                 [&](std::string v) {
+                     ws::circsim::NoiseSpec next = *ns;
+                     next.input = std::move(v);
+                     push_set_analysis(*ed.doc, index, next);
+                 });
+        hint_line(layout, theme,
+                  "Measured at the output net (against the reference, "
+                  "ground when blank), referred to the input source");
+        // The sweep: same shape as the AC rows (one grid, two ways to
+        // walk it), so the two frequency-domain analyses read alike.
+        static const char* const kSweeps[] = {"dec", "oct", "lin"};
+        int selected = static_cast<int>(ns->sweep);
+        FieldBuf& sweep = field_of(ed, skey + ".sweep");
+        if (sweep.stamp != ed.field_stamp) {
+            sweep.stamp = ed.field_stamp;
+            sweep.combo_open = false;
+        }
+        if (gui::combo(gui, layout, theme,
+                       ("sweep##" + skey + ".sweep").c_str(), kSweeps, 3,
+                       selected, sweep.combo_open)) {
+            ws::circsim::NoiseSpec next = *ns;
+            next.sweep =
+                static_cast<ws::circsim::NoiseSpec::Sweep>(selected);
+            push_set_analysis(*ed.doc, index, next);
+        }
+        char n_text[32];
+        std::snprintf(n_text, sizeof n_text, "%d", ns->n);
+        char* n_buf = field_buf(ed, skey + ".n", n_text);
+        if (text_input_tracked(ed, gui, layout, theme, "points (n)##" + skey +
+                                                             ".n",
+                               n_buf, 128)) {
+            char* end = nullptr;
+            const long parsed = std::strtol(n_buf, &end, 10);
+            if (end != nullptr && *end == '\0' && parsed > 0) {
+                ws::circsim::NoiseSpec next = *ns;
+                next.n = static_cast<int>(parsed);
+                push_set_analysis(*ed.doc, index, next);
+            } else {
+                ed.status(std::string{"'"} + n_buf +
+                          "' is not a point count - kept the old value");
+            }
+        }
+        number_row("begin (fstart)", skey, ns->fstart, [&](double v) {
+            ws::circsim::NoiseSpec next = *ns;
+            next.fstart = v;
+            push_set_analysis(*ed.doc, index, next);
+        }, "Hz");
+        number_row("end (fstop)", skey, ns->fstop, [&](double v) {
+            ws::circsim::NoiseSpec next = *ns;
+            next.fstop = v;
+            push_set_analysis(*ed.doc, index, next);
+        }, "Hz");
+        // The per-device contribution summary: how often the run prints
+        // the breakdown table (0 = never - the plot needs nothing from
+        // it, this is the engineer's print-out).
+        number_row("summary every (pts)", skey,
+                   static_cast<double>(ns->pts_per_summary), [&](double v) {
+                       ws::circsim::NoiseSpec next = *ns;
+                       next.pts_per_summary =
+                           v > 0.0 && v == std::floor(v)
+                               ? static_cast<int>(v)
+                               : 0;
+                       push_set_analysis(*ed.doc, index, next);
+                   });
+        hint_line(layout, theme,
+                  "Noise spectra per frequency; the input source's AC "
+                  "value is ignored. Summary 0 = never print the "
+                  "per-device breakdown");
+        return;
+    }
 }
 
 }  // namespace
@@ -442,7 +543,10 @@ std::string analysis_brief(const ws::circsim::AnalysisSpec& spec) {
     if (std::get_if<ws::circsim::TranSpec>(&spec) != nullptr) {
         return "Transient (.tran)";
     }
-    return "AC sweep (.ac)";
+    if (std::get_if<ws::circsim::AcSpec>(&spec) != nullptr) {
+        return "AC sweep (.ac)";
+    }
+    return "Noise (.noise)";
 }
 
 std::string analysis_params_brief(const ws::circsim::AnalysisSpec& spec) {
@@ -478,6 +582,27 @@ std::string analysis_params_brief(const ws::circsim::AnalysisSpec& spec) {
     }
     const ws::circsim::AcSpec* ac =
         std::get_if<ws::circsim::AcSpec>(&spec);
+    if (ac == nullptr) {
+        // The one remaining alternative: the noise analysis.
+        const ws::circsim::NoiseSpec* ns =
+            std::get_if<ws::circsim::NoiseSpec>(&spec);
+        std::string s = "at " +
+                        (ns->output.empty() ? std::string{"v(?)"}
+                                            : "v(" + ns->output + ")") +
+                        ", from " +
+                        (ns->input.empty() ? std::string{"?"} : ns->input) +
+                        ", " + std::to_string(ns->n) + " pts/";
+        const char* sweep = "dec";
+        if (ns->sweep == ws::circsim::NoiseSpec::Sweep::Oct) {
+            sweep = "oct";
+        } else if (ns->sweep == ws::circsim::NoiseSpec::Sweep::Lin) {
+            sweep = "lin";
+        }
+        s += sweep;
+        s += ", " + ws::circsim::format_eng(ns->fstart) + "Hz to " +
+             ws::circsim::format_eng(ns->fstop) + "Hz";
+        return s;
+    }
     const char* sweep = "dec";
     if (ac->sweep == ws::circsim::AcSpec::Sweep::Oct) {
         sweep = "oct";
@@ -1472,15 +1597,6 @@ constexpr const char* const kPropertyTabs[] = {"Properties", "Netlist",
     return false;
 }
 
-// The source's stimulus, parsed from its `wave` param - the mode
-// dropdown's own truth (a None kind is DC mode; every other kind,
-// Raw included, is AC).
-[[nodiscard]] SourceWave source_wave_of(const ws::circsim::Part& p) {
-    const auto it = p.params.find("wave");
-    return it != p.params.end() ? parse_source_wave(it->second)
-                                : SourceWave{};
-}
-
 // The waveform format combo's items, index-matched to the template a
 // switch lands (parse_source_wave's Kind order, Pwl last because its
 // body stays the free-form text row). No "DC only" item: the MODE
@@ -2162,11 +2278,16 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
 
     // One button per kind. (The old "add" combo answered only on a real
     // move off its first item, so ".op" - item 0 - could never be added.)
-    static const char* const kKinds[] = {"+ op", "+ dc", "+ tran", "+ ac"};
+    static const char* const kKinds[] = {"+ op", "+ dc", "+ tran", "+ ac",
+                                         "+ noise"};
+    constexpr int kKindCount =
+        static_cast<int>(std::size(kKinds));
     const float add_w = std::max(
-        40.0f, (layout.remaining_width() - 3.0f * theme.spacing) / 4.0f);
+        40.0f, (layout.remaining_width() -
+                static_cast<float>(kKindCount - 1) * theme.spacing) /
+                   static_cast<float>(kKindCount));
     int add_kind = -1;
-    for (int k = 0; k < 4; ++k) {
+    for (int k = 0; k < kKindCount; ++k) {
         if (k != 0) {
             layout.same_line();
         }
@@ -2186,6 +2307,11 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
                                              .tstop = 1e-3};
                 break;
             case 3: spec = ws::circsim::AcSpec{}; break;
+            // A fresh .noise carries the AC row's own sweep defaults
+            // (10 pts/dec, 1Hz-1MHz); the two names - which net, which
+            // source - are the user's to fill, and the fields are
+            // waiting the moment the entry lands.
+            case 4: spec = ws::circsim::NoiseSpec{}; break;
             default: spec = ws::circsim::OpSpec{}; break;
         }
         push_add_analysis(*ed.doc, spec);
@@ -2217,9 +2343,47 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
         }
     }
 
+    // --- the run temperature (§7.7): one row, blank = SPICE's default
+    panel_section(layout, theme, "Simulation options");
+    {
+        char current_text[64];
+        if (ed.schem()->temp.has_value()) {
+            std::snprintf(current_text, sizeof current_text, "%.12g",
+                          *ed.schem()->temp);
+        } else {
+            current_text[0] = '\0';
+        }
+        char* buf = field_buf(ed, "sim.temp", current_text);
+        if (text_input_tracked(ed, gui, layout, theme,
+                               "Temperature (temp)##sim.temp", buf, 128)) {
+            const std::string text{buf};
+            const auto parsed = ws::spice::parse_number(buf);
+            if (parsed.has_value()) {
+                push_set_temp(*ed.doc, *parsed);
+            } else if (text.empty()) {
+                push_set_temp(*ed.doc, std::nullopt);  // back to 27°C
+            } else {
+                ed.status(std::string{"'"} + buf +
+                          "' is not a SPICE number - kept the old value");
+            }
+        }
+        const auto shown = ws::spice::parse_number(buf);
+        if (!shown.has_value() && !std::string{buf}.empty()) {
+            hint_line(layout, theme,
+                      "Not a SPICE number - try 25, 125 or -40");
+        } else {
+            hint_line(layout, theme,
+                      "Degrees C; blank = SPICE's 27 default. Device models "
+                      "that track temperature (diodes, BJTs, MOS) follow it");
+        }
+    }
+
     // --- the directives block: one row per line
-    panel_section(layout, theme, "Directives (.model / .include, verbatim)");
-    hint_line(layout, theme, "One line per row, e.g. .include models.lib");
+    panel_section(layout, theme,
+                  "Directives (.model / .include / .nodeset, verbatim)");
+    hint_line(layout, theme,
+              "One line per row, e.g. .model mynmos nmos level=77 - "
+              "passed to the deck untouched");
     const std::vector<std::string> lines = split_directive_lines(
         ed.schem()->directives);
     constexpr float kRowButtonW = 24.0f;

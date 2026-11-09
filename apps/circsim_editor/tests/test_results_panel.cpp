@@ -102,6 +102,37 @@ using editor::SchematicDocument;
     return t;
 }
 
+// A .noise table: the log frequency axis plus the two spectra columns
+// the .noise run delivers (V/sqrt(Hz) densities, both positive).
+[[nodiscard]] ws::spice::Table noise_table(std::size_t rows) {
+    ws::spice::Table t;
+    t.analysis = ws::spice::AnalysisKind::Noise;
+    t.sweep = ws::spice::SweepKind::Frequency;
+    t.sweep_names = {"frequency"};
+    t.sweep_axes.emplace_back();
+    t.sweep_axes.back().reserve(rows);
+    for (std::size_t i = 0; i < rows; ++i) {
+        const double k = static_cast<double>(i) /
+                         static_cast<double>(rows - 1u);
+        t.sweep_axes.back().push_back(1.0 * std::pow(1e5, k));
+    }
+    ws::spice::Signal onoise;
+    onoise.name = "onoise_spectrum";
+    onoise.data.reserve(rows);
+    ws::spice::Signal inoise;
+    inoise.name = "inoise_spectrum";
+    inoise.data.reserve(rows);
+    for (std::size_t i = 0; i < rows; ++i) {
+        // White spectra: flat densities, the input-referred pair twice
+        // the output's (a 1/2 forward gain).
+        onoise.data.push_back(2.9e-9);
+        inoise.data.push_back(5.8e-9);
+    }
+    t.signals.push_back(std::move(onoise));
+    t.signals.push_back(std::move(inoise));
+    return t;
+}
+
 // The bench: an Editor over an untitled document, a CommandListCanvas
 // injected at the plot seam, and one drawn frame per call.
 struct Bench {
@@ -298,11 +329,34 @@ TEST_CASE("a swept table draws frame, grid, and both series") {
     CHECK(swatches == 2u);
 }
 
+TEST_CASE("a .noise table plots both spectra like any swept table") {
+    Bench b;
+    b.load(noise_table(51u));  // 10 pts/decade over 1Hz..100kHz
+    b.draw();
+
+    // The plot itself: frame + grid + the two spectra strokes.
+    const Bench::FrameBox f = b.frame_box(b.frame_cmd());
+    CHECK(f.fx2 - f.fx > 400.0f);
+    const std::vector<const canvas::CanvasCmd*> series = b.series_cmds();
+    REQUIRE(series.size() == 2u);
+
+    // The visibility flags minted for exactly the two spectra.
+    REQUIRE(b.ed.results.visible.size() == 2u);
+    CHECK(b.ed.results.visible[0] == 1u);
+    CHECK(b.ed.results.visible[1] == 1u);
+
+    // Hiding one spectrum (the legend checkbox) drops one stroke and
+    // leaves the other: the noise pair toggles per signal like every
+    // table the panel already drew.
+    b.ed.results.visible[0] = 0u;
+    b.draw();
+    CHECK(b.series_cmds().size() == 1u);
+}
+
 TEST_CASE("a long sweep decimates to the pixel budget") {
     Bench b;
     b.load(ramp_table(1200u));
     b.draw();
-
     const std::vector<const canvas::CanvasCmd*> series = b.series_cmds();
     REQUIRE(series.size() == 2u);
     for (const canvas::CanvasCmd* s : series) {
