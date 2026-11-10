@@ -146,7 +146,11 @@ CMakeLists only wire ws libraries together.
   Palette over `symbols()` with fitted mini previews and the fuzzy
   word-start search ("res" and "rstr" both arm the resistor; a
   mid-word letter never opens a match, so "res" leaves the sources
-  alone); the Select tool's GROUP edit: a press on empty space arms
+  alone); the palette's five fixed shelves are Passive / Sources /
+  Semiconductors / Switches / Power (stage 24 grew Switches for the
+  S/W symbols and sent E/F/G/H/B to Sources and T/K/xfmr to Passive -
+  `palette_category` maps by SPICE letter, a `.csym`'s own `category`
+  field still wins); the Select tool's GROUP edit: a press on empty space arms
   the box-select (the drag sweeps a dashed veil, the release lands
   every part/wire/junction/label it holds - Shift extends instead of
   replacing; a plain click on empty space still clears, the degenerate

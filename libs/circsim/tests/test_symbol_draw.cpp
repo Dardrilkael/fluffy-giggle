@@ -185,7 +185,12 @@ bool pin_has_lead(const SymbolDef& s, const PinDef& pin) {
 // The whole contract, with the symbol's key for the failure message.
 void check_symbol(const SymbolDef& s) {
     INFO("symbol key: ", s.key);
-    REQUIRE(!s.pins.empty());
+    // The coupling (k) is deliberately pinless - it names inductors
+    // instead of touching nets, so the pin checks skip it; everything
+    // else must carry pins (stage 24).
+    if (s.key != "k") {
+        REQUIRE(!s.pins.empty());
+    }
 
     const Bounds b = symbol_bounds(s);
     for (const PinDef& pin : s.pins) {
@@ -266,7 +271,10 @@ TEST_CASE("library symbols hold the draw invariants too") {
     SymbolLibrary lib;
     std::vector<ws::circsim::Diag> diags;
     REQUIRE(lib.load_text(kTlineLib, "tline.csym", diags).has_value());
-    CHECK(diags.empty());
+    // tline is a built-in since stage 24: the example now overrides it
+    // in place, and the override warning is the load's own voice.
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == "circsim.symbols.override");
     const SymbolDef* t = lib.find("tline");
     REQUIRE(t != nullptr);
     check_symbol(*t);

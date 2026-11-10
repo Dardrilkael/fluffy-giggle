@@ -43,6 +43,24 @@ struct ParamEmit {
     bool optional = true; // skip when the value is empty
 };
 
+// Multi-card symbols: one placed part emits SEVERAL deck cards - the
+// 2-winding transformer is L + L + K, the only shape today. Each entry
+// is one card: the device letter (its name = letter + the part ref's
+// body + `suffix`, export.cpp's sub_element_name), the pin indices it
+// connects in ITS SPICE order (a subset of the symbol's pins; the
+// coupling card has none), and its own param tail. `name_siblings`
+// spells the OTHER cards' names as leading tokens - the coupling names
+// what it couples, so the K card never goes stale when the ref changes.
+// A .csym override replaces the whole symbol, this list included; the
+// .csym spelling ("cards") round-trips through library.hpp.
+struct CardEmit {
+    char letter = 0;                   // 'L', 'K'
+    std::string suffix;                // "p", "s", ""
+    std::vector<std::uint32_t> pins;   // symbol pin indices, in order
+    std::vector<ParamEmit> emit;       // this card's tail
+    bool name_siblings = false;        // spell the sibling names first
+};
+
 // What one params key MEANS (stage 2): the type the property grid edits
 // and ERC validates, the label the grid shows, the default a NEW part
 // starts from (never injected at export - the schematic file is the
@@ -88,6 +106,7 @@ struct SymbolDef {
     std::vector<PinDef> pins;  // SPICE order; index = Part pin indices
     std::optional<std::string> fixed_net;  // power symbols: the pin's net
     std::vector<ParamEmit> emit;
+    std::vector<CardEmit> card_emits;  // non-empty = multi-card (see above)
     bool needs_value = true;   // ERC: value must be non-empty
     bool needs_model = false;  // ERC: params["model"] must be non-empty
     std::vector<ParamSpec> params;  // typed specs (stage 2)
@@ -95,9 +114,10 @@ struct SymbolDef {
     ws::settings::json::Object unknown;  // unrecognized .csym fields ride
 };
 
-// The stage-1 built-in set: r, c, l, v, i, d, npn, pnp, nmos, pmos, gnd,
-// vcc - with their stage-2 param specs and drawing primitives. Offsets
-// are whole grid units so rotated pins stay on grid points.
+// The built-in set: r, c, l, xfmr, k, tline, v, i, e, f, g, h, b, d,
+// led, npn, pnp, nmos, pmos, s, w, gnd, vcc - the classic twelve plus
+// the orphan devices ws::spice always parsed (stage 24). Offsets are
+// whole grid units so rotated pins stay on grid points.
 [[nodiscard]] const std::vector<SymbolDef>& builtin_symbols();
 
 // Case-insensitive lookup by key; null when unknown. BUILT-INS ONLY -

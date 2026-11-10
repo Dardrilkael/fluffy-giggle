@@ -1,0 +1,33 @@
+{
+    "format": "circsim",
+    "version": 1,
+    "grid": 1.0,
+    "next_id": 18,
+    "parts": [
+        {"id": 1, "symbol": "v", "ref": "V1", "value": "0", "pos": [0.0, -4.0], "rot": 0, "mirror": false, "params": {"ac": "1"}},
+        {"id": 2, "symbol": "r", "ref": "Rs", "value": "10", "pos": [4.0, 0.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 3, "symbol": "l", "ref": "L1", "value": "1m", "pos": [11.0, 0.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 4, "symbol": "l", "ref": "L2", "value": "10m", "pos": [24.0, 0.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 5, "symbol": "k", "ref": "K1", "value": "", "pos": [17.0, -6.0], "rot": 0, "mirror": false, "params": {"l1": "L1", "l2": "L2", "k": "0.9"}},
+        {"id": 6, "symbol": "r", "ref": "Rl", "value": "100k", "pos": [24.0, -8.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 7, "symbol": "gnd", "ref": "", "value": "", "pos": [8.0, -4.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 8, "symbol": "gnd", "ref": "", "value": "", "pos": [27.0, -3.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 9, "symbol": "gnd", "ref": "", "value": "", "pos": [27.0, -11.0], "rot": 0, "mirror": false, "params": {}}
+    ],
+    "junctions": [],
+    "wires": [
+        {"id": 10, "a": {"pin": {"part": 1, "pin": 0}}, "b": {"pin": {"part": 2, "pin": 0}}, "waypoints": [[-3.0, 0.0]], "ortho": true},
+        {"id": 11, "a": {"pin": {"part": 2, "pin": 1}}, "b": {"pin": {"part": 3, "pin": 0}}, "waypoints": [], "ortho": true},
+        {"id": 12, "a": {"pin": {"part": 1, "pin": 1}}, "b": {"pin": {"part": 3, "pin": 1}}, "waypoints": [[14.0, -4.0]], "ortho": true},
+        {"id": 13, "a": {"pin": {"part": 4, "pin": 0}}, "b": {"pin": {"part": 6, "pin": 0}}, "waypoints": [], "ortho": true},
+        {"id": 14, "a": {"pin": {"part": 4, "pin": 1}}, "b": {"pin": {"part": 8, "pin": 0}}, "waypoints": [], "ortho": true},
+        {"id": 15, "a": {"pin": {"part": 6, "pin": 1}}, "b": {"pin": {"part": 9, "pin": 0}}, "waypoints": [], "ortho": true}
+    ],
+    "labels": [
+        {"id": 16, "pos": [8.0, 0.0], "name": "pri"},
+        {"id": 17, "pos": [21.0, 0.0], "name": "sec"}
+    ],
+    "analysis": {"entries": [{"ac": {"sweep": "dec", "n": 5, "fstart": 1000.0, "fstop": 100000.0}}]},
+    "directives": "",
+    "view": {"zoom": 1.0, "center": [12.0, -5.0]}
+}

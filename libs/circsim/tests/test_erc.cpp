@@ -297,3 +297,60 @@ TEST_CASE("current-source cutsets are caught; shunted ones are not") {
             has(ws::circsim::run_erc(b.s), "circsim.erc.isource_cutset"));
     }
 }
+
+TEST_CASE("the orphan devices' required params and refs check like any other") {
+    SUBCASE("a coupling without its pair names errors") {
+        Bench b;
+        b.part("k", "K1", "", {0.0, 0.0});
+        const auto diags = ws::circsim::run_erc(b.s);
+        CHECK(has(diags, "circsim.erc.missing_param"));
+    }
+    SUBCASE("a complete coupling is param-quiet") {
+        Bench b;
+        Part* k = b.part("k", "K1", "", {0.0, 0.0});
+        k->params["l1"] = "L1";
+        k->params["l2"] = "L2";
+        k->params["k"] = "0.9";
+        const auto diags = ws::circsim::run_erc(b.s);
+        CHECK_FALSE(has(diags, "circsim.erc.missing_param"));
+        CHECK_FALSE(has(diags, "circsim.erc.unused_param"));
+    }
+    SUBCASE("a coupling's k must be a SPICE number") {
+        Bench b;
+        Part* k = b.part("k", "K1", "", {0.0, 0.0});
+        k->params["l1"] = "L1";
+        k->params["l2"] = "L2";
+        k->params["k"] = "tight";
+        CHECK(has(ws::circsim::run_erc(b.s), "circsim.erc.bad_param"));
+    }
+    SUBCASE("the transformer's per-card params are required") {
+        Bench b;
+        Part* x = b.part("xfmr", "K1", "", {0.0, 0.0});
+        x->params["lp"] = "1m";
+        // ls and k missing: two missing_param errors.
+        const auto diags = ws::circsim::run_erc(b.s);
+        std::size_t missing = 0;
+        for (const auto& d : diags) {
+            if (d.code == "circsim.erc.missing_param") {
+                ++missing;
+            }
+        }
+        CHECK(missing == 2);
+    }
+    SUBCASE("the coupling ref must still start with K") {
+        Bench b;
+        b.part("k", "TR1", "", {0.0, 0.0});
+        CHECK(has(ws::circsim::run_erc(b.s), "circsim.erc.ref_prefix"));
+    }
+    SUBCASE("a switch without a model errors, with one it is quiet") {
+        Bench b;
+        Part* s1 = b.part("s", "S1", "", {0.0, 0.0});
+        s1->params["model"] = "swmod";
+        CHECK_FALSE(has(ws::circsim::run_erc(b.s), "circsim.erc.missing_model"));
+    }
+    SUBCASE("a controlled source without its controlling name errors") {
+        Bench b;
+        b.part("f", "F1", "", {0.0, 0.0});
+        CHECK(has(ws::circsim::run_erc(b.s), "circsim.erc.missing_param"));
+    }
+}

@@ -48,12 +48,36 @@ fetched privately, which would duplicate a first-party capability.
   exactly like pins (`transform_pos` - the one shared transform, so the
   picture and the pins can never disagree). `symbol_bounds` is the
   conservative AABB (arcs bound by full circles, text by its anchor).
-- The built-in table (symbols.cpp, 13 keys) carries specs + draw for
+- The built-in table (symbols.cpp, 23 keys) carries specs + draw for
   every symbol; `find_symbol` is the BUILT-IN-ONLY lookup. The `led`
   key is the diode plus a display-only `color` Choice (spec'd, never
   emitted - the deck cannot tell an LED from a diode) and two emission
   arrowheads; the editor's glow reads the color and ws::spice's i(Dn)
   probe column for the intensity.
+- Stage 24 added the orphan devices the engine always parsed but no
+  symbol carried: `e`/`f`/`g`/`h` (the controlled sources - E/G four
+  pins in OUT+ OUT- IN+ IN- card order, F/H two pins plus the
+  controlling V source's NAME as params, the grammar spelling the
+  source before the gain), `b` (behavioral: exactly one of
+  `vexpr`/`iexpr`, the deck rejects the bad combos loudly), `s`/`w`
+  (switches, needs_model), `tline` (promoted from tline.csym verbatim)
+  and `k` (the coupling: DELIBERATELY PINLESS - it names inductors by
+  ref; every net/ERC/export loop only iterates pins, so a pinless part
+  flows through untouched).
+- `CardEmit` (stage 24, symbols.hpp) is the multi-card layout, the
+  transformer its only user: one part decks `L<ref>p` + `L<ref>s` + the
+  `K` that names its siblings (`name_siblings` - the coupling can never
+  name an inductor that is not there). Export's `sub_element_name`
+  derives every card name from the part's ref under `element_name`'s
+  own rules; all names share the used-name dedup and the element
+  back-map. The `.csym` spelling is `"cards"` (parse + save both in
+  library.cpp); a .csym override replaces a multi-card symbol
+  wholesale. ERC reads a CardEmit's non-optional emits as required
+  params.
+- Two engine contracts the examples teach: an ideal V directly across
+  an L rejects as a V-L loop (carry a series Rs on transformer
+  primaries), and the W reads a DEDICATED 0 V sense source's branch
+  current (a delivering source's own i() is negative).
 - `SymbolLibrary` (library.hpp) is the effective table: built-ins at
   construction, `.csym` files layered on by `load_text` - same key (ci)
   REPLACES in place, later files win, every redefinition warns

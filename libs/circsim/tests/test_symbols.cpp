@@ -339,7 +339,10 @@ TEST_CASE("a fresh library is the built-in table") {
 TEST_CASE("a good .csym loads every field") {
     std::vector<ws::circsim::Diag> diags;
     const SymbolLibrary lib = load_ok(kTlineLib, diags);
-    CHECK(diags.empty());
+    // tline is a built-in since stage 24: loading the example now
+    // overrides it in place (warned), not appended.
+    REQUIRE(diags.size() == 1);
+    CHECK(diags[0].code == "circsim.symbols.override");
 
     const SymbolDef* t = lib.find("tline");
     REQUIRE(t != nullptr);
@@ -369,14 +372,16 @@ TEST_CASE("a good .csym loads every field") {
     // Unknown fields ride: symbol level and root level.
     CHECK(t->unknown.find("vendor") != nullptr);
     CHECK(lib.unknown.find("author") != nullptr);
-    // One library symbol on top of the built-ins.
-    CHECK(lib.symbols().size() == ws::circsim::builtin_symbols().size() + 1);
+    // The override keeps the built-in's slot: same table size.
+    CHECK(lib.symbols().size() == ws::circsim::builtin_symbols().size());
+    CHECK(lib.builtin_count() ==
+          ws::circsim::builtin_symbols().size());
 }
 
 TEST_CASE("every draw primitive kind parses") {
     constexpr std::string_view text = R"json({
         "format": "circsim-symbols", "version": 1,
-        "symbols": [{"key": "k", "spice": "K",
+        "symbols": [{"key": "prims", "spice": "K",
             "draw": [
                 {"line": [[0.0, 0.0], [1.0, 1.0]]},
                 {"poly": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]},
@@ -391,7 +396,7 @@ TEST_CASE("every draw primitive kind parses") {
     std::vector<ws::circsim::Diag> diags;
     const SymbolLibrary lib = load_ok(text, diags);
     CHECK(diags.empty());
-    const SymbolDef* k = lib.find("k");
+    const SymbolDef* k = lib.find("prims");
     REQUIRE(k != nullptr);
     REQUIRE(k->draw.size() == 8);
     CHECK(k->draw[0].kind == DrawPrim::Kind::Line);
@@ -470,18 +475,18 @@ TEST_CASE("hard failures: not JSON, wrong format") {
 TEST_CASE("versions: absent migrates, future warns") {
     constexpr std::string_view no_version =
         R"json({"format": "circsim-symbols",
-                 "symbols": [{"key": "k"}]})json";
+                 "symbols": [{"key": "ver1"}]})json";
     std::vector<ws::circsim::Diag> diags;
     const SymbolLibrary lib = load_ok(no_version, diags);
-    CHECK(lib.find("k") != nullptr);
+    CHECK(lib.find("ver1") != nullptr);
     CHECK(has_diag(diags, "circsim.symbols.migrated"));
 
     constexpr std::string_view future =
         R"json({"format": "circsim-symbols", "version": 2,
-                 "symbols": [{"key": "k2"}]})json";
+                 "symbols": [{"key": "ver2"}]})json";
     std::vector<ws::circsim::Diag> diags2;
     const SymbolLibrary lib2 = load_ok(future, diags2);
-    CHECK(lib2.find("k2") != nullptr);
+    CHECK(lib2.find("ver2") != nullptr);
     CHECK(has_diag(diags2, "circsim.symbols.future_version"));
 }
 
@@ -541,7 +546,10 @@ TEST_CASE("save round-trips a library and its unknowns") {
 
     std::vector<ws::circsim::Diag> diags2;
     const SymbolLibrary again = load_ok(once, diags2);
-    CHECK(diags2.empty());
+    // The saved text still carries the tline override of the built-in,
+    // so the load warns again - the fixpoint below is unaffected.
+    REQUIRE(diags2.size() == 1);
+    CHECK(diags2[0].code == "circsim.symbols.override");
     CHECK(again.save() == once);  // stable: save -> load -> save is a fixpoint
     const SymbolDef* t = again.find("tline");
     REQUIRE(t != nullptr);
@@ -751,4 +759,164 @@ TEST_CASE("an override changes the coincidence-built nets") {
     const ws::circsim::NetBuild wide_nets = ws::circsim::build_nets(s, &lib);
     CHECK(wide_nets.nets.by_name("out") == nullptr);  // the touch is gone
     CHECK(has_diag(wide_nets.diags, "circsim.nets.label_unattached"));
+}
+
+// --- the orphan devices join the built-ins (stage 24) ------------------------------
+
+TEST_CASE("the orphan-device built-ins carry the SPICE letters and specs") {
+    // The controlled sources: four nodes OUT+ OUT- IN+ IN-, the gain
+    // as the value (E/G are the only new symbols that keep one).
+    const SymbolDef* e = ws::circsim::find_symbol("e");
+    REQUIRE(e != nullptr);
+    CHECK(e->spice_letter == 'E');
+    CHECK(e->ref_prefix == "E");
+    REQUIRE(e->pins.size() == 4);
+    CHECK(e->pins[0].name == "out+");
+    CHECK(e->pins[1].name == "out-");
+    CHECK(e->pins[2].name == "in+");
+    CHECK(e->pins[3].name == "in-");
+    CHECK(e->needs_value);
+    const SymbolDef* g = ws::circsim::find_symbol("g");
+    REQUIRE(g != nullptr);
+    CHECK(g->spice_letter == 'G');
+    REQUIRE(g->pins.size() == 4);
+    CHECK(g->pins[0].name == e->pins[0].name);  // the same card order
+
+    // The current-controlled pair: two pins, and the controlling V
+    // source's name rides BEFORE the gain (the card grammar's order,
+    // which forbids the value-first spelling).
+    const SymbolDef* f = ws::circsim::find_symbol("f");
+    REQUIRE(f != nullptr);
+    CHECK(f->spice_letter == 'F');
+    REQUIRE(f->pins.size() == 2);
+    CHECK(!f->needs_value);
+    REQUIRE(f->params.size() == 2);
+    CHECK(f->params[0].key == "vs");
+    CHECK(f->params[0].type == ParamSpec::Type::Text);
+    CHECK(f->params[1].key == "gain");
+    CHECK(f->params[1].type == ParamSpec::Type::Number);
+    REQUIRE(f->emit.size() == 2);
+    CHECK(!f->emit[0].optional);  // vs and gain are both required
+    CHECK(!f->emit[1].optional);
+    const SymbolDef* h = ws::circsim::find_symbol("h");
+    REQUIRE(h != nullptr);
+    CHECK(h->spice_letter == 'H');
+    REQUIRE(h->emit.size() == 2);
+    CHECK(h->emit[1].key == "r");
+
+    // The behavioral source: exactly one of V=/I= is meant; both are
+    // optional at the table level, the deck rejects the bad combos.
+    const SymbolDef* b = ws::circsim::find_symbol("b");
+    REQUIRE(b != nullptr);
+    CHECK(b->spice_letter == 'B');
+    CHECK(!b->needs_value);
+    REQUIRE(b->emit.size() == 2);
+    CHECK(b->emit[0].prefix == "V=");
+    CHECK(b->emit[1].prefix == "I=");
+    CHECK(b->emit[0].optional);
+    CHECK(b->emit[1].optional);
+
+    // The switches: model required, W names the controlling source.
+    const SymbolDef* sw = ws::circsim::find_symbol("s");
+    REQUIRE(sw != nullptr);
+    CHECK(sw->spice_letter == 'S');
+    CHECK(sw->needs_model);
+    CHECK(!sw->needs_value);
+    REQUIRE(sw->pins.size() == 4);
+    CHECK(sw->pins[0].name == "p");   // the card spells p n c+ c-
+    CHECK(sw->pins[2].name == "c+");
+    const SymbolDef* w = ws::circsim::find_symbol("w");
+    REQUIRE(w != nullptr);
+    CHECK(w->spice_letter == 'W');
+    CHECK(w->needs_model);
+    REQUIRE(w->emit.size() == 2);
+    CHECK(w->emit[0].key == "vs");
+    CHECK(!w->emit[0].optional);
+
+    // The coupling: deliberately pinless - it names inductors.
+    const SymbolDef* k = ws::circsim::find_symbol("k");
+    REQUIRE(k != nullptr);
+    CHECK(k->spice_letter == 'K');
+    CHECK(k->pins.empty());
+    CHECK(!k->needs_value);
+    REQUIRE(k->emit.size() == 3);
+    CHECK(k->emit[0].key == "l1");
+    CHECK(k->emit[1].key == "l2");
+    CHECK(k->emit[2].key == "k");
+    for (const ParamEmit& pe : k->emit) {
+        CHECK(!pe.optional);
+    }
+
+    // The transformer: the multi-card shape. Three cards - Lp, Ls and
+    // the K coupling that names its own siblings.
+    const SymbolDef* xf = ws::circsim::find_symbol("xfmr");
+    REQUIRE(xf != nullptr);
+    CHECK(xf->spice_letter == 'K');
+    CHECK(xf->ref_prefix == "K");
+    CHECK(!xf->needs_value);
+    REQUIRE(xf->pins.size() == 4);
+    CHECK(xf->pins[0].name == "p+");
+    CHECK(xf->pins[2].name == "s+");
+    REQUIRE(xf->card_emits.size() == 3);
+    CHECK(xf->card_emits[0].letter == 'L');
+    CHECK(xf->card_emits[0].suffix == "p");
+    CHECK(xf->card_emits[0].pins == std::vector<std::uint32_t>{0, 1});
+    CHECK(xf->card_emits[0].emit[0].key == "lp");
+    CHECK(!xf->card_emits[0].emit[0].optional);
+    CHECK(xf->card_emits[1].letter == 'L');
+    CHECK(xf->card_emits[1].suffix == "s");
+    CHECK(xf->card_emits[1].pins == std::vector<std::uint32_t>{2, 3});
+    CHECK(xf->card_emits[2].letter == 'K');
+    CHECK(xf->card_emits[2].pins.empty());
+    CHECK(xf->card_emits[2].name_siblings);  // the K names Lp and Ls
+    CHECK(xf->card_emits[2].emit[0].key == "k");
+    // A new part prefills usable inductances and coupling.
+    const std::map<std::string, std::string> defs =
+        ws::circsim::default_params(*xf);
+    CHECK(defs.at("lp") == "1m");
+    CHECK(defs.at("ls") == "1m");
+    CHECK(defs.at("k") == "0.98");
+
+    // The tline is a built-in now: same four pins, same Z0=/TD=.
+    const SymbolDef* tl = ws::circsim::find_symbol("tline");
+    REQUIRE(tl != nullptr);
+    CHECK(tl->spice_letter == 'T');
+    REQUIRE(tl->pins.size() == 4);
+    CHECK(tl->pins[0].name == "in+");
+    CHECK(tl->pins[0].dx == -4.0);
+    CHECK(tl->pins[0].dy == 1.0);
+    CHECK(!tl->needs_value);
+    REQUIRE(tl->emit.size() == 2);
+    CHECK(tl->emit[0].prefix == "Z0=");
+    CHECK(!tl->emit[0].optional);
+    CHECK(tl->emit[1].prefix == "TD=");
+    CHECK(!tl->emit[1].optional);
+}
+
+TEST_CASE("the built-in tline exports and simulates without any library") {
+    // The promoted symbol: the quarter-wave demo runs on the built-in
+    // table alone - no -S, no .csym layer.
+    const Schematic s = tline_schematic();
+    const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+    CHECK(nets.diags.empty());
+    const auto deck = ws::circsim::export_deck(s, nets.nets);
+    REQUIRE(deck.has_value());
+    CHECK(deck->text ==
+          "circsim export\n"
+          "Rs in a 50\n"
+          "T1 a 0 b 0 Z0=50 TD=1u\n"
+          "V1 in 0 1 AC 1\n"
+          ".ac lin 3 250000 750000\n"
+          ".end\n");
+
+    const ws::circsim::RunOutcome out = ws::circsim::run_schematic(s);
+    REQUIRE(out.run.has_value());
+    REQUIRE(out.run->results.tables.size() == 1);
+    const ws::spice::Table& tbl = out.run->results.tables.front();
+    CHECK(tbl.row_count() == 3);
+    const auto va = tbl.signal("re(v(a))");
+    REQUIRE(va.size() == 3);
+    CHECK(std::abs(va[0]) < 0.05);          // 250k: the line looks short
+    CHECK(std::abs(va[1] - 1.0) < 0.05);    // 500k: open
+    CHECK(std::abs(va[2]) < 0.05);          // 750k: short again
 }

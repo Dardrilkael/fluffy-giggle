@@ -1,0 +1,38 @@
+{
+    "format": "circsim",
+    "version": 1,
+    "grid": 1.0,
+    "next_id": 23,
+    "parts": [
+        {"id": 1, "symbol": "v", "ref": "V1", "value": "5", "pos": [0.0, -4.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 2, "symbol": "r", "ref": "R1", "value": "1k", "pos": [10.0, 0.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 3, "symbol": "f", "ref": "F1", "value": "", "pos": [20.0, 0.0], "rot": 0, "mirror": true, "params": {"vs": "V1", "gain": "2"}},
+        {"id": 4, "symbol": "r", "ref": "R2", "value": "1k", "pos": [30.0, 0.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 5, "symbol": "gnd", "ref": "", "value": "", "pos": [8.0, -4.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 6, "symbol": "gnd", "ref": "", "value": "", "pos": [17.0, -3.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 7, "symbol": "gnd", "ref": "", "value": "", "pos": [33.0, -3.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 8, "symbol": "h", "ref": "H1", "value": "", "pos": [20.0, -12.0], "rot": 0, "mirror": false, "params": {"vs": "V1", "r": "100"}},
+        {"id": 9, "symbol": "r", "ref": "R3", "value": "1k", "pos": [30.0, -12.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 10, "symbol": "gnd", "ref": "", "value": "", "pos": [17.0, -15.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 11, "symbol": "gnd", "ref": "", "value": "", "pos": [33.0, -15.0], "rot": 0, "mirror": false, "params": {}}
+    ],
+    "junctions": [],
+    "wires": [
+        {"id": 12, "a": {"pin": {"part": 1, "pin": 0}}, "b": {"pin": {"part": 2, "pin": 0}}, "waypoints": [[-3.0, 0.0]], "ortho": true},
+        {"id": 13, "a": {"pin": {"part": 2, "pin": 1}}, "b": {"pin": {"part": 1, "pin": 1}}, "waypoints": [[13.0, -4.0]], "ortho": true},
+        {"id": 14, "a": {"pin": {"part": 3, "pin": 0}}, "b": {"pin": {"part": 4, "pin": 0}}, "waypoints": [], "ortho": true},
+        {"id": 15, "a": {"pin": {"part": 3, "pin": 1}}, "b": {"pin": {"part": 6, "pin": 0}}, "waypoints": [], "ortho": true},
+        {"id": 16, "a": {"pin": {"part": 4, "pin": 1}}, "b": {"pin": {"part": 7, "pin": 0}}, "waypoints": [], "ortho": true},
+        {"id": 17, "a": {"pin": {"part": 8, "pin": 0}}, "b": {"pin": {"part": 10, "pin": 0}}, "waypoints": [], "ortho": true},
+        {"id": 18, "a": {"pin": {"part": 8, "pin": 1}}, "b": {"pin": {"part": 9, "pin": 0}}, "waypoints": [], "ortho": true},
+        {"id": 19, "a": {"pin": {"part": 9, "pin": 1}}, "b": {"pin": {"part": 11, "pin": 0}}, "waypoints": [], "ortho": true}
+    ],
+    "labels": [
+        {"id": 20, "pos": [2.0, 0.0], "name": "in"},
+        {"id": 21, "pos": [25.0, 0.0], "name": "out"},
+        {"id": 22, "pos": [25.0, -12.0], "name": "out2"}
+    ],
+    "analysis": {"entries": [{"op": {}}]},
+    "directives": "",
+    "view": {"zoom": 1.0, "center": [15.0, -8.0]}
+}

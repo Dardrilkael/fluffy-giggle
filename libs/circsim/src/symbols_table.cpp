@@ -1,9 +1,12 @@
-// The built-in symbol table (stage 2, redrawn stage 17): the twelve
-// keys - r, c, l, v, i, d, npn, pnp, nmos, pmos, gnd, vcc - with
-// their param specs, emit tails and drawing primitives. Pure data:
-// the geometry that READS it (lookup, transform, bounds, the render
-// seam) lives in symbols.cpp/render.cpp; a .csym library layers over
-// this table through library.hpp.
+// The built-in symbol table (stage 2, redrawn stage 17, widened stage
+// 24): the r, c, l, v, i, d, npn, pnp, nmos, pmos, gnd, vcc set plus the
+// orphan devices ws::spice always supported but no symbol ever carried
+// into a schematic - the controlled sources (e, f, g, h), the
+// behavioral source (b), the switches (s, w), the lossless line (tline),
+// the coupling (k) and the 2-winding transformer (xfmr, one part = the
+// L + L + K card trio). Pure data: the geometry that READS it (lookup,
+// transform, bounds, the render seam) lives in symbols.cpp/render.cpp;
+// a .csym library layers over this table through library.hpp.
 
 #include <string>
 #include <utility>
@@ -62,6 +65,21 @@ DrawPrim arc(double cx, double cy, double r, double a0, double a1) {
     d.r = r;
     d.a0 = a0;
     d.a1 = a1;
+    return d;
+}
+
+DrawPrim dot(double cx, double cy, double r) {
+    DrawPrim d;
+    d.kind = DrawPrim::Kind::Dot;
+    d.pts = {Pos{cx, cy}};
+    d.r = r;
+    return d;
+}
+
+DrawPrim rect(double x1, double y1, double x2, double y2) {
+    DrawPrim d;
+    d.kind = DrawPrim::Kind::Rect;
+    d.pts = {Pos{x1, y1}, Pos{x2, y2}};
     return d;
 }
 
@@ -189,6 +207,101 @@ const std::vector<SymbolDef>& table() {
             {arc(-2.25, 0.0, 0.75, 0.0, 180.0), arc(-0.75, 0.0, 0.75, 0.0, 180.0),
              arc(0.75, 0.0, 0.75, 0.0, 180.0), arc(2.25, 0.0, 0.75, 0.0, 180.0)},
             {spec(ParamSpec::Type::Number, "ic", "IC")}),
+        // Transformer (stage 24): ONE part, THREE cards - the multi-card
+        // shape's only user today. The ref is the coupling's (K): ERC
+        // enforces the K prefix, and export derives the two inductor
+        // names from it (ref K3 -> cards L3p, L3s and K3), so the deck's
+        // coupling can never name an inductor that is not there. The
+        // picture: two 2-bump coils facing the laminated core, the
+        // polarity dots marking the same-named ends (p+ over s+).
+        [] {
+            SymbolDef s;
+            s.key = "xfmr";
+            s.name = "Transformer (2-winding)";
+            s.spice_letter = 'K';
+            s.ref_prefix = "K";
+            s.pins = {PinDef{.name = "p+", .dx = -5.0, .dy = 2.0, .dir = 180},
+                      PinDef{.name = "p-", .dx = -5.0, .dy = -2.0, .dir = 180},
+                      PinDef{.name = "s+", .dx = 5.0, .dy = 2.0, .dir = 0},
+                      PinDef{.name = "s-", .dx = 5.0, .dy = -2.0, .dir = 0}};
+            s.needs_value = false;  // the three params carry everything
+            s.params = {
+                spec(ParamSpec::Type::Number, "lp", "Primary L", "1m"),
+                spec(ParamSpec::Type::Number, "ls", "Secondary L", "1m"),
+                spec(ParamSpec::Type::Number, "k", "Coupling (k)", "0.98")};
+            s.card_emits = {
+                CardEmit{'L', "p", {0, 1},
+                         {ParamEmit{.key = "lp", .prefix = "", .optional = false}}},
+                CardEmit{'L', "s", {2, 3},
+                         {ParamEmit{.key = "ls", .prefix = "", .optional = false}}},
+                CardEmit{'K', "", {},
+                         {ParamEmit{.key = "k", .prefix = "", .optional = false}},
+                         true}};
+            s.draw = {// the primary coil: two right-facing bumps, apexes
+                      // exactly on the +/-2 pin rows so the leads land
+                      // on the winding's ends
+                      arc(-1.7, 1.0, 1.0, -90.0, 90.0),
+                      arc(-1.7, -1.0, 1.0, -90.0, 90.0),
+                      // the secondary, mirrored to face back
+                      arc(1.7, 1.0, 1.0, 90.0, 270.0),
+                      arc(1.7, -1.0, 1.0, 90.0, 270.0),
+                      // the laminated core between them
+                      line(-0.35, -2.2, -0.35, 2.2), line(0.35, -2.2, 0.35, 2.2),
+                      // the leads
+                      line(-5.0, 2.0, -1.7, 2.0), line(-5.0, -2.0, -1.7, -2.0),
+                      line(1.7, 2.0, 5.0, 2.0), line(1.7, -2.0, 5.0, -2.0),
+                      // the polarity dots: p+ and s+ are the same end
+                      dot(-2.6, 2.7, 0.15), dot(2.6, 2.7, 0.15)};
+            return s;
+        }(),
+        // Coupling (stage 24): the K card on the canvas - no pins, no
+        // nets; it names two inductors (by ref) and the coupling factor.
+        // A part that touches no net still flows through nets/ERC/export
+        // untouched: the loops only ever iterate pins.
+        [] {
+            SymbolDef s;
+            s.key = "k";
+            s.name = "Coupling (K)";
+            s.spice_letter = 'K';
+            s.ref_prefix = "K";
+            s.needs_value = false;  // all three ride as params, in card order
+            s.params = {
+                spec(ParamSpec::Type::Text, "l1", "First inductor"),
+                spec(ParamSpec::Type::Text, "l2", "Second inductor"),
+                spec(ParamSpec::Type::Number, "k", "Coupling (k)", "0.98")};
+            s.emit = {ParamEmit{.key = "l1", .prefix = "", .optional = false},
+                      ParamEmit{.key = "l2", .prefix = "", .optional = false},
+                      ParamEmit{.key = "k", .prefix = "", .optional = false}};
+            // The bare two-bar core: the same core the transformer
+            // draws, standing alone where the user drops it.
+            s.draw = {line(-0.7, -2.0, -0.7, 2.0), line(0.7, -2.0, 0.7, 2.0)};
+            return s;
+        }(),
+        // The lossless transmission line, promoted from the tline.csym
+        // example to a built-in (stage 24): same geometry, same
+        // Z0=/TD= params, so tline_demo.csim runs without -S and a
+        // .csym override keeps working (it replaces this wholesale).
+        [] {
+            SymbolDef s;
+            s.key = "tline";
+            s.name = "Lossless transmission line";
+            s.spice_letter = 'T';
+            s.ref_prefix = "T";
+            s.pins = {PinDef{.name = "in+", .dx = -4.0, .dy = 1.0, .dir = 180},
+                      PinDef{.name = "in-", .dx = -4.0, .dy = -1.0, .dir = 180},
+                      PinDef{.name = "out+", .dx = 4.0, .dy = 1.0, .dir = 0},
+                      PinDef{.name = "out-", .dx = 4.0, .dy = -1.0, .dir = 0}};
+            s.needs_value = false;
+            s.emit = {ParamEmit{.key = "z0", .prefix = "Z0=", .optional = false},
+                      ParamEmit{.key = "td", .prefix = "TD=", .optional = false}};
+            s.params = {
+                spec(ParamSpec::Type::Number, "z0", "Z0 (ohms)", "50"),
+                spec(ParamSpec::Type::Number, "td", "TD (seconds)", "1n")};
+            s.draw = {line(-4.0, 1.0, -1.0, 1.0), line(-4.0, -1.0, -1.0, -1.0),
+                      line(1.0, 1.0, 4.0, 1.0), line(1.0, -1.0, 4.0, -1.0),
+                      rect(-1.0, -2.0, 1.0, 2.0), line(-1.0, 2.0, 1.0, -2.0)};
+            return s;
+        }(),
         // Sources: p/n, value then AC then waveform (the ngspice grammar
         // order - "V1 a b 5 AC 1 PULSE(...)"). Pins at +-3 with real
         // lead prims (the safety net must never fire: a pin ON the
@@ -238,6 +351,126 @@ const std::vector<SymbolDef>& table() {
                       line(0.0, -0.7, 0.0, 0.25),
                       polyfill({Pos{0.0, 0.75}, Pos{-0.3, 0.25},
                                 Pos{0.3, 0.25}})};
+            return s;
+        }(),
+        // The controlled sources (stage 24), ws::spice's M1 set that no
+        // built-in ever carried. Card order is the house grammar's:
+        // E/G take four nodes OUT+ OUT- IN+ IN- (the E is a voltage
+        // SOURCE - its +/ - marks sit on the output side; the G is a
+        // current source - an arrow instead), drawn LTspice-style with
+        // the sense pair stacked on the left and the output pair on the
+        // right. F/H are two-terminal (out+ out-) plus the NAME of the
+        // V source whose branch current controls them - the grammar
+        // spells the source before the gain, so both ride as params
+        // (the card order forbids the value-first spelling).
+        [] {
+            SymbolDef s;
+            s.key = "e";
+            s.name = "VCVS (voltage-controlled voltage source)";
+            s.spice_letter = 'E';
+            s.ref_prefix = "E";
+            s.pins = {PinDef{.name = "out+", .dx = 5.0, .dy = 1.0, .dir = 0},
+                      PinDef{.name = "out-", .dx = 5.0, .dy = -1.0, .dir = 0},
+                      PinDef{.name = "in+", .dx = -5.0, .dy = 1.0, .dir = 180},
+                      PinDef{.name = "in-", .dx = -5.0, .dy = -1.0, .dir = 180}};
+            s.draw = {rect(-2.5, -2.0, 2.5, 2.0),
+                      line(-5.0, 1.0, -2.5, 1.0), line(-5.0, -1.0, -2.5, -1.0),
+                      line(2.5, 1.0, 5.0, 1.0), line(2.5, -1.0, 5.0, -1.0),
+                      text(-0.45, -0.55, "E"),
+                      // the sense pair's polarity
+                      line(-3.85, 1.85, -3.25, 1.85),
+                      line(-3.55, 1.55, -3.55, 2.15),
+                      line(-3.85, -1.85, -3.25, -1.85),
+                      // the output pair's polarity
+                      line(3.25, 1.85, 3.85, 1.85), line(3.55, 1.55, 3.55, 2.15),
+                      line(3.25, -1.85, 3.85, -1.85)};
+            return s;
+        }(),
+        [] {
+            SymbolDef s;
+            s.key = "g";
+            s.name = "VCCS (voltage-controlled current source)";
+            s.spice_letter = 'G';
+            s.ref_prefix = "G";
+            s.pins = {PinDef{.name = "out+", .dx = 5.0, .dy = 1.0, .dir = 0},
+                      PinDef{.name = "out-", .dx = 5.0, .dy = -1.0, .dir = 0},
+                      PinDef{.name = "in+", .dx = -5.0, .dy = 1.0, .dir = 180},
+                      PinDef{.name = "in-", .dx = -5.0, .dy = -1.0, .dir = 180}};
+            s.draw = {rect(-2.5, -2.0, 2.5, 2.0),
+                      line(-5.0, 1.0, -2.5, 1.0), line(-5.0, -1.0, -2.5, -1.0),
+                      line(2.5, 1.0, 5.0, 1.0), line(2.5, -1.0, 5.0, -1.0),
+                      text(-0.45, -0.55, "G"),
+                      // the sense pair is a voltage: +/-
+                      line(-3.85, 1.85, -3.25, 1.85),
+                      line(-3.55, 1.55, -3.55, 2.15),
+                      line(-3.85, -1.85, -3.25, -1.85),
+                      // the output is a current: an arrow through the
+                      // out+ lead (pointing into the source, the i
+                      // source's own convention read sideways)
+                      polyfill({Pos{3.15, 1.0}, Pos{3.6, 0.75}, Pos{3.6, 1.25}})};
+            return s;
+        }(),
+        [] {
+            SymbolDef s;
+            s.key = "f";
+            s.name = "CCCS (current-controlled current source)";
+            s.spice_letter = 'F';
+            s.ref_prefix = "F";
+            s.pins = {PinDef{.name = "p", .dx = -3.0, .dy = 0.0, .dir = 180},
+                      PinDef{.name = "n", .dx = 3.0, .dy = 0.0, .dir = 0}};
+            s.needs_value = false;  // the grammar wants Vname BEFORE gain
+            s.params = {spec(ParamSpec::Type::Text, "vs", "Controlling V source"),
+                        spec(ParamSpec::Type::Number, "gain", "Gain")};
+            s.emit = {ParamEmit{.key = "vs", .prefix = "", .optional = false},
+                      ParamEmit{.key = "gain", .prefix = "", .optional = false}};
+            // The i source's own body (a current output) with the
+            // letter carrying the difference.
+            s.draw = {line(-3.0, 0.0, -1.0, 0.0), line(1.0, 0.0, 3.0, 0.0),
+                      circle(0.0, 0.0, 1.0), line(0.0, -0.7, 0.0, 0.25),
+                      polyfill({Pos{0.0, 0.75}, Pos{-0.3, 0.25}, Pos{0.3, 0.25}}),
+                      text(1.15, 1.15, "F")};
+            return s;
+        }(),
+        [] {
+            SymbolDef s;
+            s.key = "h";
+            s.name = "CCVS (current-controlled voltage source)";
+            s.spice_letter = 'H';
+            s.ref_prefix = "H";
+            s.pins = {PinDef{.name = "p", .dx = -3.0, .dy = 0.0, .dir = 180},
+                      PinDef{.name = "n", .dx = 3.0, .dy = 0.0, .dir = 0}};
+            s.needs_value = false;  // the grammar wants Vname BEFORE r
+            s.params = {spec(ParamSpec::Type::Text, "vs", "Controlling V source"),
+                        spec(ParamSpec::Type::Number, "r", "R (ohms)")};
+            s.emit = {ParamEmit{.key = "vs", .prefix = "", .optional = false},
+                      ParamEmit{.key = "r", .prefix = "", .optional = false}};
+            // The v source's own body (a voltage output): +/-
+            // marks, no arrow.
+            s.draw = {line(-3.0, 0.0, -1.0, 0.0), line(1.0, 0.0, 3.0, 0.0),
+                      circle(0.0, 0.0, 1.0), line(-0.65, 0.0, -0.05, 0.0),
+                      line(-0.35, -0.3, -0.35, 0.3), line(0.05, 0.0, 0.65, 0.0),
+                      text(1.15, 1.15, "H")};
+            return s;
+        }(),
+        // The behavioral source (stage 24): the B card is V= or I= plus
+        // an expression - two optional params of which exactly one is
+        // meant (both empty or both filled rejects loudly at parse and
+        // maps back onto the part through the export back-map).
+        [] {
+            SymbolDef s;
+            s.key = "b";
+            s.name = "Behavioral source (V= or I= expression)";
+            s.spice_letter = 'B';
+            s.ref_prefix = "B";
+            s.pins = {PinDef{.name = "p", .dx = -3.0, .dy = 0.0, .dir = 180},
+                      PinDef{.name = "n", .dx = 3.0, .dy = 0.0, .dir = 0}};
+            s.needs_value = false;
+            s.params = {spec(ParamSpec::Type::Text, "vexpr", "V expression"),
+                        spec(ParamSpec::Type::Text, "iexpr", "I expression")};
+            s.emit = {ParamEmit{.key = "vexpr", .prefix = "V="},
+                      ParamEmit{.key = "iexpr", .prefix = "I="}};
+            s.draw = {line(-3.0, 0.0, -1.0, 0.0), line(1.0, 0.0, 3.0, 0.0),
+                      circle(0.0, 0.0, 1.0), text(1.15, 1.15, "B")};
             return s;
         }(),
         // Diode: anode/cathode; the model token rides where a value would.
@@ -308,6 +541,63 @@ const std::vector<SymbolDef>& table() {
         // MOSFETs: D G S B pin order, y-up (drain on top).
         mosfet("nmos", "N-channel MOSFET", false),
         mosfet("pmos", "P-channel MOSFET", true),
+        // The switches (stage 24). Both need a .model of type SW
+        // (Ron/Roff and the threshold pair) - the directives block is
+        // where it lives, the params carry only the model's NAME. The
+        // S card is `S p n pc nc model`: the switched pair runs
+        // horizontally through the contact, the control pair hangs off
+        // the bottom like a relay's coil terminals. The W card is
+        // `W p n Vname model`: the current through the NAMED V source
+        // throws the contact.
+        [] {
+            SymbolDef s;
+            s.key = "s";
+            s.name = "Switch (voltage controlled)";
+            s.spice_letter = 'S';
+            s.ref_prefix = "S";
+            s.pins = {PinDef{.name = "p", .dx = -5.0, .dy = 0.0, .dir = 180},
+                      PinDef{.name = "n", .dx = 5.0, .dy = 0.0, .dir = 0},
+                      PinDef{.name = "c+", .dx = 2.0, .dy = -4.0, .dir = 270},
+                      PinDef{.name = "c-", .dx = -2.0, .dy = -4.0, .dir = 270}};
+            s.needs_value = false;
+            s.needs_model = true;
+            s.params = {spec(ParamSpec::Type::Text, "model", "Model")};
+            s.emit = {ParamEmit{.key = "model", .optional = false}};
+            s.draw = {// the body the contact sits in
+                      rect(-2.5, -2.0, 2.5, 2.0),
+                      // the switched path: lead, contact dot, the open
+                      // blade, contact dot, lead
+                      line(-5.0, 0.0, -1.2, 0.0), dot(-1.2, 0.0, 0.14),
+                      line(-1.2, 0.0, 0.9, 0.95), dot(1.2, 0.0, 0.14),
+                      line(1.2, 0.0, 5.0, 0.0),
+                      // the control pair rises into the box from below
+                      line(2.0, -4.0, 2.0, -2.0), line(-2.0, -4.0, -2.0, -2.0),
+                      // and carries its own polarity
+                      line(2.65, -3.35, 3.25, -3.35),
+                      line(2.95, -3.65, 2.95, -3.05),
+                      line(-3.25, -3.35, -2.65, -3.35)};
+            return s;
+        }(),
+        [] {
+            SymbolDef s;
+            s.key = "w";
+            s.name = "Switch (current controlled)";
+            s.spice_letter = 'W';
+            s.ref_prefix = "W";
+            s.pins = {PinDef{.name = "p", .dx = -3.0, .dy = 0.0, .dir = 180},
+                      PinDef{.name = "n", .dx = 3.0, .dy = 0.0, .dir = 0}};
+            s.needs_value = false;
+            s.needs_model = true;
+            s.params = {spec(ParamSpec::Type::Text, "vs", "Controlling V source"),
+                        spec(ParamSpec::Type::Text, "model", "Model")};
+            s.emit = {ParamEmit{.key = "vs", .prefix = "", .optional = false},
+                      ParamEmit{.key = "model", .optional = false}};
+            s.draw = {// the same contact as the S switch, compact
+                      line(-3.0, 0.0, -0.9, 0.0), dot(-0.9, 0.0, 0.14),
+                      line(-0.9, 0.0, 0.6, 0.8), dot(0.9, 0.0, 0.14),
+                      line(0.9, 0.0, 3.0, 0.0), text(0.55, 1.5, "W")};
+            return s;
+        }(),
         // Ground / power: single fixed-net pins, never exported. The
         // pin is where the wire lands; the body hangs BELOW it (the
         // bars) and the pin points UP into the circuit (dir 90 - the

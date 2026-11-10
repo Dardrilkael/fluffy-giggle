@@ -1,0 +1,31 @@
+{
+    "format": "circsim",
+    "version": 1,
+    "grid": 1.0,
+    "next_id": 16,
+    "parts": [
+        {"id": 1, "symbol": "v", "ref": "V1", "value": "0", "pos": [0.0, -4.0], "rot": 0, "mirror": false, "params": {"ac": "1"}},
+        {"id": 2, "symbol": "r", "ref": "Rs", "value": "10", "pos": [5.0, 0.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 3, "symbol": "xfmr", "ref": "K1", "value": "", "pos": [17.0, 0.0], "rot": 0, "mirror": false, "params": {"lp": "1m", "ls": "4m", "k": "0.99"}},
+        {"id": 4, "symbol": "r", "ref": "Rl", "value": "100k", "pos": [30.0, -6.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 5, "symbol": "gnd", "ref": "", "value": "", "pos": [8.0, -2.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 6, "symbol": "gnd", "ref": "", "value": "", "pos": [22.0, -5.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 7, "symbol": "gnd", "ref": "", "value": "", "pos": [33.0, -9.0], "rot": 0, "mirror": false, "params": {}}
+    ],
+    "junctions": [],
+    "wires": [
+        {"id": 8, "a": {"pin": {"part": 1, "pin": 0}}, "b": {"pin": {"part": 2, "pin": 0}}, "waypoints": [[-3.0, 0.0]], "ortho": true},
+        {"id": 9, "a": {"pin": {"part": 2, "pin": 1}}, "b": {"pin": {"part": 3, "pin": 0}}, "waypoints": [[8.0, 2.0]], "ortho": true},
+        {"id": 10, "a": {"pin": {"part": 1, "pin": 1}}, "b": {"pin": {"part": 3, "pin": 1}}, "waypoints": [[3.0, -2.0]], "ortho": true},
+        {"id": 11, "a": {"pin": {"part": 3, "pin": 3}}, "b": {"pin": {"part": 6, "pin": 0}}, "waypoints": [], "ortho": true},
+        {"id": 12, "a": {"pin": {"part": 3, "pin": 2}}, "b": {"pin": {"part": 4, "pin": 0}}, "waypoints": [[27.0, 2.0]], "ortho": true},
+        {"id": 13, "a": {"pin": {"part": 4, "pin": 1}}, "b": {"pin": {"part": 7, "pin": 0}}, "waypoints": [], "ortho": true}
+    ],
+    "labels": [
+        {"id": 14, "pos": [10.0, 2.0], "name": "pri"},
+        {"id": 15, "pos": [24.0, 2.0], "name": "sec"}
+    ],
+    "analysis": {"entries": [{"ac": {"sweep": "dec", "n": 5, "fstart": 1000.0, "fstop": 100000.0}}]},
+    "directives": "",
+    "view": {"zoom": 1.0, "center": [15.0, -3.0]}
+}

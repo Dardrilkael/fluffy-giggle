@@ -1,0 +1,32 @@
+{
+    "format": "circsim",
+    "version": 1,
+    "grid": 1.0,
+    "next_id": 20,
+    "parts": [
+        {"id": 1, "symbol": "v", "ref": "V1", "value": "1", "pos": [0.0, -4.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 2, "symbol": "r", "ref": "R0", "value": "10k", "pos": [4.0, 0.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 3, "symbol": "b", "ref": "B1", "value": "", "pos": [12.0, 0.0], "rot": 0, "mirror": true, "params": {"vexpr": "3*v(in)"}},
+        {"id": 4, "symbol": "r", "ref": "R1", "value": "1k", "pos": [22.0, 0.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 5, "symbol": "gnd", "ref": "", "value": "", "pos": [7.0, -3.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 6, "symbol": "gnd", "ref": "", "value": "", "pos": [3.0, -7.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 7, "symbol": "gnd", "ref": "", "value": "", "pos": [25.0, -3.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 8, "symbol": "gnd", "ref": "", "value": "", "pos": [9.0, -3.0], "rot": 0, "mirror": false, "params": {}}
+    ],
+    "junctions": [],
+    "wires": [
+        {"id": 9, "a": {"pin": {"part": 1, "pin": 0}}, "b": {"pin": {"part": 2, "pin": 0}}, "waypoints": [[-3.0, 0.0]], "ortho": true},
+        {"id": 10, "a": {"pin": {"part": 2, "pin": 1}}, "b": {"pin": {"part": 5, "pin": 0}}, "waypoints": [], "ortho": true},
+        {"id": 11, "a": {"pin": {"part": 1, "pin": 1}}, "b": {"pin": {"part": 6, "pin": 0}}, "waypoints": [], "ortho": true},
+        {"id": 12, "a": {"pin": {"part": 3, "pin": 0}}, "b": {"pin": {"part": 4, "pin": 0}}, "waypoints": [], "ortho": true},
+        {"id": 13, "a": {"pin": {"part": 3, "pin": 1}}, "b": {"pin": {"part": 8, "pin": 0}}, "waypoints": [], "ortho": true},
+        {"id": 14, "a": {"pin": {"part": 4, "pin": 1}}, "b": {"pin": {"part": 7, "pin": 0}}, "waypoints": [], "ortho": true}
+    ],
+    "labels": [
+        {"id": 15, "pos": [0.0, 0.0], "name": "in"},
+        {"id": 16, "pos": [17.0, 0.0], "name": "out"}
+    ],
+    "analysis": {"entries": [{"op": {}}]},
+    "directives": "",
+    "view": {"zoom": 1.0, "center": [11.0, -2.0]}
+}

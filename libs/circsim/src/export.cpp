@@ -87,6 +87,35 @@ std::string element_name(const Part& p, const SymbolDef& sym) {
     return base;
 }
 
+// One card of a multi-card symbol: the device letter + the part ref's
+// body + the per-card suffix (ref K3 on the transformer -> L3p, L3s and
+// K3). The body follows element_name's own rules - a ref that already
+// starts with the symbol's letter contributes its remainder, anything
+// else mangles the same way - so every sibling name stays derivable
+// from the one ref, and the K card whose letter matches the symbol's
+// lands exactly on element_name itself.
+std::string sub_element_name(const Part& p, const SymbolDef& sym, char letter,
+                             const std::string& suffix) {
+    std::string body;
+    if (!p.ref.empty() && is_identifier(p.ref) &&
+        static_cast<char>(std::toupper(static_cast<unsigned char>(p.ref[0]))) ==
+            sym.spice_letter) {
+        body = p.ref.substr(1);
+    } else if (!p.ref.empty()) {
+        std::string kept;
+        for (const char c : p.ref) {
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') || c == '_') {
+                kept += c;
+            }
+        }
+        body = "_" + (kept.empty() ? std::to_string(p.id) : kept);
+    } else {
+        body = std::to_string(p.id);
+    }
+    return std::string(1, letter) + body + suffix;
+}
+
 Diag mapped_diag(std::string code, std::string message, std::string where) {
     Diag d;
     d.severity = Severity::Error;
@@ -404,6 +433,9 @@ ws::core::Result<SpiceExport> export_deck(
         const Part* part;
         const SymbolDef* sym;
         std::string name;
+        // Multi-card symbols: one name per CardEmit, in table order
+        // (empty = the single-card default above).
+        std::vector<std::string> card_names;
     };
     std::vector<Card> cards;
     for (const Part& p : s.parts()) {
@@ -422,7 +454,7 @@ ws::core::Result<SpiceExport> export_deck(
         if (sym->spice_letter == 0) {
             continue;  // power/ground ride their net names
         }
-        cards.push_back({&p, sym, ""});
+        cards.push_back({&p, sym, "", {}});
     }
     std::sort(cards.begin(), cards.end(), [](const Card& a, const Card& b) {
         const std::string ra = lower(a.part->ref);
@@ -432,9 +464,11 @@ ws::core::Result<SpiceExport> export_deck(
         }
         return a.part->id < b.part->id;
     });
+    // The used-name dedup runs per CARD (a transformer claims three
+    // names), and every name lands in the element back-map so locate
+    // and the probe tool resolve any of them onto the part.
     std::map<std::string, std::uint32_t, CiLess> used_names;
-    for (Card& c : cards) {
-        std::string name = element_name(*c.part, *c.sym);
+    const auto claim_name = [&](std::string name, std::uint32_t part_id) {
         if (used_names.find(name) != used_names.end()) {
             std::string base = name;
             int suffix = 2;
@@ -443,9 +477,22 @@ ws::core::Result<SpiceExport> export_deck(
                 ++suffix;
             }
         }
-        used_names[name] = c.part->id;
-        c.name = std::move(name);
-        out.element_part[c.name] = c.part->id;
+        used_names[name] = part_id;
+        return name;
+    };
+    for (Card& c : cards) {
+        if (c.sym->card_emits.empty()) {
+            c.name = claim_name(element_name(*c.part, *c.sym), c.part->id);
+            out.element_part[c.name] = c.part->id;
+            continue;
+        }
+        for (const CardEmit& ce : c.sym->card_emits) {
+            const std::string name =
+                claim_name(sub_element_name(*c.part, *c.sym, ce.letter, ce.suffix),
+                           c.part->id);
+            c.card_names.push_back(name);
+            out.element_part[name] = c.part->id;
+        }
     }
 
     // Emission.
@@ -487,6 +534,44 @@ ws::core::Result<SpiceExport> export_deck(
     }
 
     for (const Card& c : cards) {
+        // Multi-card symbols: one line per CardEmit - its own pin subset,
+        // then the sibling names (the coupling names what it couples),
+        // then its param tail. Every line maps back onto the part, so a
+        // deck error on any of the three highlights the same symbol.
+        if (!c.sym->card_emits.empty()) {
+            for (std::size_t i = 0; i < c.sym->card_emits.size(); ++i) {
+                const CardEmit& ce = c.sym->card_emits[i];
+                std::string line = c.card_names[i];
+                for (const std::uint32_t pin : ce.pins) {
+                    if (pin >= c.sym->pins.size()) {
+                        line += " NC";  // a bad table entry, not a crash
+                        continue;
+                    }
+                    const Net* n = nets.net_of_pin(PinRef{c.part->id, pin});
+                    if (n == nullptr) {
+                        line += " NC";
+                        continue;
+                    }
+                    line += " " + net_token(*n);
+                }
+                if (ce.name_siblings) {
+                    for (std::size_t j = 0; j < c.card_names.size(); ++j) {
+                        if (j != i) {
+                            line += " " + c.card_names[j];
+                        }
+                    }
+                }
+                for (const ParamEmit& pe : ce.emit) {
+                    const auto it = c.part->params.find(pe.key);
+                    if (it == c.part->params.end() || it->second.empty()) {
+                        continue;  // ERC has flagged a required one missing
+                    }
+                    line += " " + pe.prefix + it->second;
+                }
+                push_line(line, SpiceExport::Origin::Kind::Part, c.part->id);
+            }
+            continue;
+        }
         std::string line = c.name;
         for (std::uint32_t i = 0; i < c.sym->pins.size(); ++i) {
             const Net* n = nets.net_of_pin(PinRef{c.part->id, i});

@@ -311,10 +311,11 @@ std::vector<Diag> run_erc(const Schematic& s, const NetBuild& build,
         }
         // --- param typing (stage 2): the symbol's specs are the truth ---
         // A non-optional emit entry names a param the card cannot stand
-        // without (the T-line's Z0=/TD=).
-        for (const ParamEmit& pe : sym->emit) {
+        // without (the T-line's Z0=/TD=) - including a multi-card
+        // symbol's per-card tails (the transformer's Lp/Ls/k).
+        const auto check_required = [&](const ParamEmit& pe) {
             if (pe.optional) {
-                continue;
+                return;
             }
             const auto it = p.params.find(pe.key);
             if (it == p.params.end() || it->second.empty()) {
@@ -323,6 +324,14 @@ std::vector<Diag> run_erc(const Schematic& s, const NetBuild& build,
                     "parameter '" + pe.key + "' is required by symbol '" +
                         sym->key + "'",
                     where));
+            }
+        };
+        for (const ParamEmit& pe : sym->emit) {
+            check_required(pe);
+        }
+        for (const CardEmit& ce : sym->card_emits) {
+            for (const ParamEmit& pe : ce.emit) {
+                check_required(pe);
             }
         }
         for (const ParamSpec& ps : sym->params) {
@@ -366,7 +375,8 @@ std::vector<Diag> run_erc(const Schematic& s, const NetBuild& build,
             }
         }
         // A param the symbol neither specs nor emits can never reach
-        // the deck - say so instead of dropping it silently.
+        // the deck - say so instead of dropping it silently. A
+        // multi-card symbol's per-card tails count as emits.
         for (const auto& [key, value] : p.params) {
             if (value.empty()) {
                 continue;
@@ -381,6 +391,17 @@ std::vector<Diag> run_erc(const Schematic& s, const NetBuild& build,
             for (const ParamEmit& pe : sym->emit) {
                 if (pe.key == key) {
                     known = true;
+                    break;
+                }
+            }
+            for (const CardEmit& ce : sym->card_emits) {
+                for (const ParamEmit& pe : ce.emit) {
+                    if (pe.key == key) {
+                        known = true;
+                        break;
+                    }
+                }
+                if (known) {
                     break;
                 }
             }

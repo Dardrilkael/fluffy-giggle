@@ -147,6 +147,104 @@ def main():
     check(last[d1] > last[d2] > last[d3],
           "the three LEDs land on distinct brightness steps")
 
+    # --- the stage-24 orphan devices: the six new examples ---------------------
+    # Each one exercises a built-in that ws::spice always parsed but no
+    # symbol ever carried: controlled, current-controlled, behavioral,
+    # switched, coupled and transformed.
+
+    # The VCVS: v(out) = 10 * v(in) at every frequency.
+    cs = EXAMPLES / "controlled.csim"
+    r = run(args.cli, "erc", cs)
+    check(r.returncode == 0, "controlled erc exit 0")
+    r = run(args.cli, "run", cs, "-o", "-")
+    check(r.returncode == 0, f"controlled run exit 0 (stderr: {r.stderr.strip()!r})")
+    header, rows = parse_csv(r.stdout)
+    out = header.index("re(v(out))")
+    inp = header.index("re(v(in))")
+    check(len(rows) == 61, "controlled ac has 61 points")
+    for row in rows:
+        if abs(row[out] - 10.0 * row[inp]) > 1e-9 * 10:
+            check(False, f"controlled: v(out) {row[out]} != 10*v(in) {row[inp]}")
+    check(True, "controlled: the VCVS holds its x10 at every point")
+
+    # F and H: the CCCS answers 2 * 5 mA * 1 k = 10 V, the CCVS
+    # 100 ohm * 5 mA = 0.5 V (its pins flipped, so the sign reads up).
+    cc = EXAMPLES / "current_controlled.csim"
+    r = run(args.cli, "run", cc, "-o", "-")
+    check(r.returncode == 0, "current_controlled run exit 0")
+    header, rows = parse_csv(r.stdout)
+    check(len(rows) == 1, "current_controlled op has one row")
+    check(abs(rows[0][header.index("v(out)")] - 10.0) < 1e-9,
+          "current_controlled: the CCCS answers 10 V")
+    check(abs(rows[0][header.index("v(out2)")] - 0.5) < 1e-9,
+          "current_controlled: the CCVS answers 0.5 V")
+
+    # The behavioral source: V=3*v(in) -> 3 V.
+    bs = EXAMPLES / "bsource.csim"
+    r = run(args.cli, "run", bs, "-o", "-")
+    check(r.returncode == 0, "bsource run exit 0")
+    header, rows = parse_csv(r.stdout)
+    check(abs(rows[0][header.index("v(out)")] - 3.0) < 1e-9,
+          "bsource: V=3*v(in) answers 3 V")
+
+    # The voltage switch: the .dc transfer curve over V2 - open below
+    # Vt = 2 (the Roff divider), 5 V over 1010 above it.
+    sw = EXAMPLES / "switch.csim"
+    r = run(args.cli, "erc", sw)
+    check(r.returncode == 0, "switch erc exit 0")
+    r = run(args.cli, "run", sw, "-o", "-")
+    check(r.returncode == 0, "switch run exit 0")
+    header, rows = parse_csv(r.stdout)
+    out = header.index("v(out)")
+    check(len(rows) == 11, "switch dc sweep has 11 points")
+    check(rows[0][out] < 1e-2, "switch: open at V2 = 0")
+    check(rows[2][out] < 1e-2, "switch: still open at V2 = 1 (Vt = 2)")
+    check(abs(rows[10][out] - 5.0 * 1000.0 / 1010.0) < 5e-3,
+          "switch: Ron closed at V2 = 5")
+
+    # The transformer part: ONE symbol, THREE cards (L1p, L1s and the K
+    # that names them), and the loaded ratio k*sqrt(ls/lp) = 1.98.
+    xf = EXAMPLES / "transformer.csim"
+    r = run(args.cli, "erc", xf)
+    check(r.returncode == 0, "transformer erc exit 0")
+    r = run(args.cli, "netlist", xf)
+    check(r.returncode == 0, "transformer netlist exit 0")
+    for line in ("L1p pri 0 1m\n", "L1s sec 0 4m\n", "K1 L1p L1s 0.99\n"):
+        check(line in r.stdout, f"transformer decks {line.strip()}")
+    r = run(args.cli, "run", xf, "-o", "-")
+    check(r.returncode == 0, "transformer run exit 0")
+    header, rows = parse_csv(r.stdout)
+    pre = header.index("re(v(pri))")
+    pim = header.index("im(v(pri))")
+    sre = header.index("re(v(sec))")
+    sim = header.index("im(v(sec))")
+    for row in rows:
+        pri = math.hypot(row[pre], row[pim])
+        sec = math.hypot(row[sre], row[sim])
+        if abs(sec / pri - 1.98) > 0.01:
+            check(False, f"transformer ratio at {row[0]}: {sec/pri} != ~1.98")
+    check(True, "transformer: k*sqrt(ls/lp) = 1.98 across the band")
+
+    # The discrete coupling: two inductors + the pinless k part, the
+    # ratio k*sqrt(L2/L1) = 0.9*sqrt(10).
+    cp = EXAMPLES / "coupled.csim"
+    r = run(args.cli, "netlist", cp)
+    check(r.returncode == 0, "coupled netlist exit 0")
+    check("K1 L1 L2 0.9\n" in r.stdout, "coupled decks the K card")
+    r = run(args.cli, "run", cp, "-o", "-")
+    check(r.returncode == 0, "coupled run exit 0")
+    header, rows = parse_csv(r.stdout)
+    pre = header.index("re(v(pri))")
+    pim = header.index("im(v(pri))")
+    sre = header.index("re(v(sec))")
+    sim = header.index("im(v(sec))")
+    for row in rows:
+        pri = math.hypot(row[pre], row[pim])
+        sec = math.hypot(row[sre], row[sim])
+        if abs(sec / pri - 0.9 * math.sqrt(10.0)) > 0.03:
+            check(False, f"coupled ratio at {row[0]}: {sec/pri} != ~2.846")
+    check(True, "coupled: k*sqrt(L2/L1) across the band")
+
     # --- a broken file exits 1 with a mapped problem -------------------------
     with tempfile.TemporaryDirectory() as tmp:
         bad = Path(tmp) / "bad.csim"
@@ -189,8 +287,14 @@ def main():
               "symbols lists the built-ins first")
         r = run(args.cli, "symbols", "-S", tline_lib)
         check(r.returncode == 0, "symbols -S exit 0")
-        check(r.stdout.rstrip().endswith("tline        T     4    Lossless transmission line T"),
-              "symbols -S lists the library symbol")
+        # tline is a BUILT-IN since stage 24: the example now overrides
+        # it in place (warned), so the row sits in the built-in block,
+        # not appended at the end.
+        check(any(line.split() and line.split()[0] == "tline"
+                  for line in r.stdout.splitlines()),
+              "symbols -S lists the tline row")
+        check("redefines the built-in 'tline'" in r.stderr,
+              "the tline override warns on stderr")
 
         # The full-table JSON dump parses and carries the stage-2 fields.
         r = run(args.cli, "symbols", "-S", tline_lib, "--json")
@@ -198,13 +302,28 @@ def main():
         table = json.loads(r.stdout)
         check(table["format"] == "circsim-symbols", "json table format")
         by_key = {s["key"]: s for s in table["symbols"]}
-        check(len(table["symbols"]) == 14, "13 built-ins + tline")
+        # 22 built-ins + tline (stage 24: the orphan devices joined the
+        # table); the tline override keeps the built-in's slot.
+        check(len(table["symbols"]) == 23, "the widened built-in table")
+        for key, letter in (("e", "E"), ("f", "F"), ("g", "G"), ("h", "H"),
+                            ("b", "B"), ("s", "S"), ("w", "W"), ("k", "K"),
+                            ("xfmr", "K"), ("tline", "T")):
+            check(by_key[key]["spice"] == letter,
+                  f"the {key} built-in carries its {letter} letter")
         check(by_key["tline"]["spice"] == "T", "tline json letter")
         check(by_key["tline"]["draw"][4] == {"rect": [-1.0, -2.0, 1.0, 2.0]},
               "tline json draw primitives")
         check(by_key["nmos"]["params"][1] ==
               {"key": "l", "type": "number", "label": "L", "default": ""},
               "nmos json param specs")
+        # The transformer's multi-card layout round-trips through the
+        # JSON dump: three cards, the coupling naming its siblings.
+        cards = by_key["xfmr"]["cards"]
+        check(len(cards) == 3, "xfmr json cards")
+        check(cards[0]["letter"] == "L" and cards[0]["suffix"] == "p",
+              "the primary card")
+        check(cards[2]["letter"] == "K" and cards[2]["name_siblings"],
+              "the coupling card names its siblings")
 
         # The stage-17 headless render: every symbol through the render
         # seam as SVG - one file per key plus the contact sheet. The
@@ -227,6 +346,8 @@ def main():
               "svg marks both pins (a and b dots + names)")
 
         # The quarter-wave demo: netlist golden, closed-form run, honest erc.
+        # The tline is a built-in now, so -S merely overrides it with the
+        # same geometry - both spellings of the run carry the same deck.
         r = run(args.cli, "netlist", tline, "-S", tline_lib)
         check(r.returncode == 0, "tline netlist exit 0")
         expected = (
@@ -238,6 +359,9 @@ def main():
             ".end\n"
         )
         check(r.stdout == expected, "tline golden netlist through the library")
+        r = run(args.cli, "netlist", tline)
+        check(r.stdout == expected,
+              "tline golden netlist on the built-in alone (stage 24)")
 
         r = run(args.cli, "run", tline, "-S", tline_lib, "-o", "-")
         check(r.returncode == 0, f"tline run exit 0 (stderr: {r.stderr.strip()!r})")
@@ -255,13 +379,19 @@ def main():
         check("net b has only one connection" in r.stdout,
               "tline erc warns about the open port")
 
-        # Without the library the demo silently loses its line: the run
-        # still exits 0 (the deck is legal), but the mapped error diag
-        # names the unknown symbol on stderr.
+        # Without the library the built-in answers the same demo now
+        # (stage 24): the unknown-symbol escape hatch is closed, the run
+        # carries the line either way.
         r = run(args.cli, "run", tline, "-o", "-")
-        check(r.returncode == 0, "tline without -S still runs (deck is legal)")
-        check("unknown symbol 'tline'" in r.stderr,
-              "tline without -S names the unknown symbol on stderr")
+        check(r.returncode == 0, "tline runs on the built-in alone")
+        header, rows = parse_csv(r.stdout)
+        check(header[0] == "frequency", "tline ac CSV leads with frequency")
+        va = header.index("re(v(a))")
+        check(len(rows) == 3, "tline ac has 3 points")
+        for row, want in zip(rows, (0.0, 1.0, 0.0)):
+            if abs(row[va] - want) > 0.05:
+                check(False, f"tline re(v(a)) at {row[0]}: {row[va]} != ~{want}")
+        check(True, "tline quarter-wave on the built-in: short, open, short")
 
         # A library override: redefining a built-in warns and wins (the
         # definition REPLACES the built-in wholesale - spice/ref included).

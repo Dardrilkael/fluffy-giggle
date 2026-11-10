@@ -31,6 +31,7 @@ using ws::circsim::PinRef;
 using ws::circsim::Pos;
 using ws::circsim::Schematic;
 using ws::circsim::TranSpec;
+using ws::circsim::Wire;
 
 namespace {
 
@@ -655,4 +656,594 @@ TEST_CASE("the LED decks as a diode and lights its probe current") {
     CHECK(i_led[0] > 8e-3);
     CHECK(i_led[0] < 12e-3);
     CHECK(i_led[0] == doctest::Approx(-t.signal("i(V1)")[0]).epsilon(1e-9));
+}
+
+// --- the orphan devices (stage 24) -------------------------------------------------
+//
+// The shared shape: a source on the left below the axis (never a straight
+// wire over its own opposite pin), the device under test on the axis, the
+// load to the right, ground wherever a return needs one.
+
+// The first part carrying `symbol`, mutable through find_part.
+Part* first_with_symbol(Schematic& s, std::string_view symbol) {
+    for (const Part& p : s.parts()) {
+        if (p.symbol == symbol) {
+            return s.find_part(p.id);
+        }
+    }
+    return nullptr;
+}
+
+Schematic vcvs_stage() {
+    Schematic s;
+    Part* v = s.add_part(Part::make("v", "V1", "1", {0.0, -4.0}));
+    Part* e = s.add_part(Part::make("e", "E1", "10", {12.0, 0.0}));
+    Part* r = s.add_part(Part::make("r", "R1", "1k", {24.0, 1.0}));
+    s.add_part(Part::make("gnd", "", "", {3.0, -3.0}));  // the sense return's pickup
+    Part* g2 = s.add_part(Part::make("gnd", "", "", {17.0, -4.0}));
+    Part* g3 = s.add_part(Part::make("gnd", "", "", {27.0, -3.0}));
+    // The sense pair: in+ up and over, in- across and up (the gnd on the
+    // vertical leg grounds the return).
+    s.add_wire(Wire::endpoints(PinRef{v->id, 0}, PinRef{e->id, 2}))
+        ->waypoints = {Pos{-3.0, 1.0}};
+    s.add_wire(Wire::endpoints(PinRef{v->id, 1}, PinRef{e->id, 3}))
+        ->waypoints = {Pos{3.0, -1.0}};
+    // The output pair: out+ straight into the load, out- and the load's
+    // far end each down to their own ground.
+    s.add_wire(Wire::endpoints(PinRef{e->id, 0}, PinRef{r->id, 0}));
+    s.add_wire(Wire::endpoints(PinRef{e->id, 1}, PinRef{g2->id, 0}));
+    s.add_wire(Wire::endpoints(PinRef{r->id, 1}, PinRef{g3->id, 0}));
+    Label* in = s.add_label({});
+    in->pos = Pos{2.0, 1.0};
+    in->name = "in";
+    Label* out = s.add_label({});
+    out->pos = Pos{19.0, 1.0};
+    out->name = "out";
+    s.analysis.entries.push_back(OpSpec{});
+    return s;
+}
+
+TEST_CASE("the VCVS decks its four nodes and solves at its gain") {
+    const Schematic s = vcvs_stage();
+    const std::vector<ws::circsim::Diag> erc = ws::circsim::run_erc(s);
+    CHECK(erc.empty());
+    const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+    const auto deck = ws::circsim::export_deck(s, nets.nets);
+    REQUIRE(deck.has_value());
+    CHECK(deck->text ==
+          "circsim export\n"
+          "E1 out 0 in 0 10\n"
+          "R1 out 0 1k\n"
+          "V1 in 0 1\n"
+          ".op\n"
+          ".end\n");
+    const ws::circsim::RunOutcome run = ws::circsim::run_schematic(s);
+    REQUIRE(run.run.has_value());
+    const auto v_out = run.run->results.tables[0].signal("v(out)");
+    REQUIRE(v_out.size() == 1);
+    CHECK(v_out[0] == doctest::Approx(10.0).epsilon(1e-9));  // 1 V * 10
+}
+
+TEST_CASE("the VCCS decks the same shape and solves at its gm") {
+    Schematic s = vcvs_stage();
+    Part* e = first_with_symbol(s, "e");
+    REQUIRE(e != nullptr);
+    e->symbol = "g";
+    e->ref = "G1";
+    e->value = "1m";
+    const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+    const auto deck = ws::circsim::export_deck(s, nets.nets);
+    REQUIRE(deck.has_value());
+    CHECK(deck->text ==
+          "circsim export\n"
+          "G1 out 0 in 0 1m\n"
+          "R1 out 0 1k\n"
+          "V1 in 0 1\n"
+          ".op\n"
+          ".end\n");
+    const ws::circsim::RunOutcome run = ws::circsim::run_schematic(s);
+    REQUIRE(run.run.has_value());
+    const auto v_out = run.run->results.tables[0].signal("v(out)");
+    REQUIRE(v_out.size() == 1);
+    // ngspice's G convention: the current gm*v(in) flows from out+
+    // THROUGH the source to out-, so the load sees -1 mA.
+    CHECK(v_out[0] == doctest::Approx(-1.0).epsilon(1e-9));
+}
+
+Schematic current_controlled(bool f_not_h) {
+    // V1 5 V over R1 1k sources 5 mA; the controlled device reads
+    // i(V1) and drives R2 1k from its own output node. The source sits
+    // BELOW the axis (a straight pin wire must never pass over its own
+    // opposite pin).
+    Schematic s;
+    Part* v = s.add_part(Part::make("v", "V1", "5", {0.0, -4.0}));
+    Part* r1 = s.add_part(Part::make("r", "R1", "1k", {10.0, 0.0}));
+    Part* d = s.add_part(Part::make(f_not_h ? "f" : "h", f_not_h ? "F1" : "H1",
+                                    "", {20.0, 0.0}));
+    d->mirror = true;  // p faces the load: no straight wire over own pins
+    d->params["vs"] = "V1";
+    d->params[f_not_h ? "gain" : "r"] = f_not_h ? "2" : "100";
+    Part* r2 = s.add_part(Part::make("r", "R2", "1k", {30.0, 0.0}));
+    s.add_part(Part::make("gnd", "", "", {8.0, -4.0}));  // the return's pickup
+    Part* g2 = s.add_part(Part::make("gnd", "", "", {17.0, -3.0}));
+    Part* g3 = s.add_part(Part::make("gnd", "", "", {33.0, -3.0}));
+    // The measuring loop: V1 up onto the axis into R1, back under it.
+    s.add_wire(Wire::endpoints(PinRef{v->id, 0}, PinRef{r1->id, 0}))
+        ->waypoints = {Pos{-3.0, 0.0}};
+    s.add_wire(Wire::endpoints(PinRef{r1->id, 1}, PinRef{v->id, 1}))
+        ->waypoints = {Pos{13.0, -4.0}};
+    // The output: the device's p on to the load, its n down to ground
+    // (the F's current then flows out into the node; the H is a source
+    // of r*i(V1) volts across the same pair).
+    s.add_wire(Wire::endpoints(PinRef{d->id, 0}, PinRef{r2->id, 0}));
+    s.add_wire(Wire::endpoints(PinRef{d->id, 1}, PinRef{g2->id, 0}));
+    s.add_wire(Wire::endpoints(PinRef{r2->id, 1}, PinRef{g3->id, 0}));
+    Label* in = s.add_label({});
+    in->pos = Pos{2.0, 0.0};
+    in->name = "in";
+    Label* out = s.add_label({});
+    out->pos = Pos{25.0, 0.0};
+    out->name = "out";
+    s.analysis.entries.push_back(OpSpec{});
+    return s;
+}
+
+TEST_CASE("the CCCS names its controlling source before its gain") {
+    const Schematic s = current_controlled(true);
+    const std::vector<ws::circsim::Diag> erc = ws::circsim::run_erc(s);
+    CHECK(erc.empty());
+    const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+    const auto deck = ws::circsim::export_deck(s, nets.nets);
+    REQUIRE(deck.has_value());
+    CHECK(deck->text ==
+          "circsim export\n"
+          "F1 out 0 V1 2\n"
+          "R1 in 0 1k\n"
+          "R2 out 0 1k\n"
+          "V1 in 0 5\n"
+          ".op\n"
+          ".end\n");
+    const ws::circsim::RunOutcome run = ws::circsim::run_schematic(s);
+    REQUIRE(run.run.has_value());
+    const auto v_out = run.run->results.tables[0].signal("v(out)");
+    REQUIRE(v_out.size() == 1);
+    // 2 * 5 mA through 1 k.
+    CHECK(v_out[0] == doctest::Approx(10.0).epsilon(1e-9));
+}
+
+TEST_CASE("the CCVS names its controlling source before its r") {
+    const Schematic s = current_controlled(false);
+    const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+    const auto deck = ws::circsim::export_deck(s, nets.nets);
+    REQUIRE(deck.has_value());
+    CHECK(deck->text ==
+          "circsim export\n"
+          "H1 out 0 V1 100\n"
+          "R1 in 0 1k\n"
+          "R2 out 0 1k\n"
+          "V1 in 0 5\n"
+          ".op\n"
+          ".end\n");
+    const ws::circsim::RunOutcome run = ws::circsim::run_schematic(s);
+    REQUIRE(run.run.has_value());
+    const auto v_out = run.run->results.tables[0].signal("v(out)");
+    REQUIRE(v_out.size() == 1);
+    // v(out+) - v(out-) = r * i(V1), and a delivering source's branch
+    // current is negative in the SPICE convention: -0.5 V.
+    CHECK(v_out[0] == doctest::Approx(-0.5).epsilon(1e-9));
+}
+
+// The behavioral source stage: V1 biases a real "in" node over R0, and
+// the B source (mirrored, so its p faces the load) drives R1. The
+// expression references the net NAMES - no sense pins needed.
+Schematic b_stage() {
+    Schematic s;
+    Part* v = s.add_part(Part::make("v", "V1", "1", {0.0, -4.0}));
+    Part* r0 = s.add_part(Part::make("r", "R0", "10k", {4.0, 0.0}));
+    Part* b = s.add_part(Part::make("b", "B1", "", {12.0, 0.0}));
+    b->mirror = true;  // p faces the load
+    Part* r1 = s.add_part(Part::make("r", "R1", "1k", {22.0, 0.0}));
+    Part* g1 = s.add_part(Part::make("gnd", "", "", {7.0, -3.0}));
+    Part* g2 = s.add_part(Part::make("gnd", "", "", {3.0, -7.0}));
+    Part* g3 = s.add_part(Part::make("gnd", "", "", {25.0, -3.0}));
+    Part* g4 = s.add_part(Part::make("gnd", "", "", {9.0, -3.0}));
+    // V1.p up onto the axis into R0 (the in node), its return grounded.
+    s.add_wire(Wire::endpoints(PinRef{v->id, 0}, PinRef{r0->id, 0}))
+        ->waypoints = {Pos{-3.0, 0.0}};
+    s.add_wire(Wire::endpoints(PinRef{r0->id, 1}, PinRef{g1->id, 0}));
+    s.add_wire(Wire::endpoints(PinRef{v->id, 1}, PinRef{g2->id, 0}));
+    // The B source's output: p on to the load, n down to ground.
+    s.add_wire(Wire::endpoints(PinRef{b->id, 0}, PinRef{r1->id, 0}));
+    s.add_wire(Wire::endpoints(PinRef{b->id, 1}, PinRef{g4->id, 0}));
+    s.add_wire(Wire::endpoints(PinRef{r1->id, 1}, PinRef{g3->id, 0}));
+    Label* in = s.add_label({});
+    in->pos = Pos{0.0, 0.0};
+    in->name = "in";
+    Label* out = s.add_label({});
+    out->pos = Pos{17.0, 0.0};
+    out->name = "out";
+    s.analysis.entries.push_back(OpSpec{});
+    return s;
+}
+
+TEST_CASE("the behavioral source carries its V= or I= expression") {
+    SUBCASE("the V= form") {
+        Schematic s = b_stage();
+        Part* b = first_with_symbol(s, "b");
+        REQUIRE(b != nullptr);
+        b->params["vexpr"] = "3*v(in)";
+        const std::vector<ws::circsim::Diag> erc = ws::circsim::run_erc(s);
+        CHECK(erc.empty());
+        const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+        const auto deck = ws::circsim::export_deck(s, nets.nets);
+        REQUIRE(deck.has_value());
+        CHECK(deck->text ==
+              "circsim export\n"
+              "B1 out 0 V=3*v(in)\n"
+              "R0 in 0 10k\n"
+              "R1 out 0 1k\n"
+              "V1 in 0 1\n"
+              ".op\n"
+              ".end\n");
+        const ws::circsim::RunOutcome run = ws::circsim::run_schematic(s);
+        REQUIRE(run.run.has_value());
+        const auto v_out = run.run->results.tables[0].signal("v(out)");
+        REQUIRE(v_out.size() == 1);
+        CHECK(v_out[0] == doctest::Approx(3.0).epsilon(1e-9));
+    }
+    SUBCASE("the I= form") {
+        Schematic s = b_stage();
+        Part* b = first_with_symbol(s, "b");
+        REQUIRE(b != nullptr);
+        b->params["iexpr"] = "v(in)/1k";
+        const ws::circsim::RunOutcome run = ws::circsim::run_schematic(s);
+        REQUIRE(run.run.has_value());
+        const auto v_out = run.run->results.tables[0].signal("v(out)");
+        REQUIRE(v_out.size() == 1);
+        // The I-form's current flows p -> n through the source, so the
+        // 1 mA (a 1 k behavioral resistor) draws v(out) negative.
+        CHECK(v_out[0] == doctest::Approx(-1.0).epsilon(1e-9));
+    }
+    SUBCASE("neither expression rejects loudly and maps back") {
+        Schematic s = b_stage();
+        const ws::circsim::RunOutcome run = ws::circsim::run_schematic(s);
+        REQUIRE(!run.run.has_value());
+        CHECK_FALSE(run.problems.empty());
+    }
+}
+
+// The S switch: V1 5 V through the contact into R1 1k; V2 drives the
+// control pair SINGLE-ENDED (the control port is an open sense - a
+// floating drive loop has no DC path to ground and the graph check
+// says so), and the .dc sweep over V2 draws the transfer curve.
+Schematic vswitch_stage() {
+    Schematic s;
+    Part* v1 = s.add_part(Part::make("v", "V1", "5", {0.0, -4.0}));
+    Part* sw = s.add_part(Part::make("s", "S1", "", {12.0, 0.0}));
+    sw->params["model"] = "swmod";
+    Part* r1 = s.add_part(Part::make("r", "R1", "1k", {26.0, 0.0}));
+    Part* v2 = s.add_part(Part::make("v", "V2", "0", {4.0, -12.0}));
+    Part* g1 = s.add_part(Part::make("gnd", "", "", {3.0, -7.0}));
+    Part* g2 = s.add_part(Part::make("gnd", "", "", {29.0, -3.0}));
+    Part* g3 = s.add_part(Part::make("gnd", "", "", {10.0, -7.0}));
+    Part* g4 = s.add_part(Part::make("gnd", "", "", {7.0, -15.0}));
+    // The switched path.
+    s.add_wire(Wire::endpoints(PinRef{v1->id, 0}, PinRef{sw->id, 0}))
+        ->waypoints = {Pos{-3.0, 0.0}};
+    s.add_wire(Wire::endpoints(PinRef{sw->id, 1}, PinRef{r1->id, 0}));
+    s.add_wire(Wire::endpoints(PinRef{v1->id, 1}, PinRef{g1->id, 0}));
+    s.add_wire(Wire::endpoints(PinRef{r1->id, 1}, PinRef{g2->id, 0}));
+    // The control drive: V2.p up into c+, both returns grounded.
+    s.add_wire(Wire::endpoints(PinRef{v2->id, 0}, PinRef{sw->id, 2}))
+        ->waypoints = {Pos{1.0, -8.0}, Pos{14.0, -8.0}};
+    s.add_wire(Wire::endpoints(PinRef{v2->id, 1}, PinRef{g4->id, 0}));
+    s.add_wire(Wire::endpoints(PinRef{sw->id, 3}, PinRef{g3->id, 0}));
+    Label* in = s.add_label({});
+    in->pos = Pos{2.0, 0.0};
+    in->name = "in";
+    Label* out = s.add_label({});
+    out->pos = Pos{20.0, 0.0};
+    out->name = "out";
+    Label* ctl = s.add_label({});
+    ctl->pos = Pos{8.0, -8.0};
+    ctl->name = "ctl";
+    s.directives = ".model swmod SW(Ron=10 Roff=1meg Vt=2 Vh=0)";
+    s.analysis.entries.push_back(DcSpec{.source = "V2", .start = 0.0,
+                                        .stop = 5.0, .step = 0.5});
+    return s;
+}
+
+TEST_CASE("the voltage switch decks p n c+ c- and its model") {
+    const Schematic s = vswitch_stage();
+    const std::vector<ws::circsim::Diag> erc = ws::circsim::run_erc(s);
+    CHECK(erc.empty());
+    const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+    const auto deck = ws::circsim::export_deck(s, nets.nets);
+    REQUIRE(deck.has_value());
+    CHECK(deck->text ==
+          "circsim export\n"
+          ".model swmod SW(Ron=10 Roff=1meg Vt=2 Vh=0)\n"
+          "R1 out 0 1k\n"
+          "S1 in out ctl 0 swmod\n"
+          "V1 in 0 5\n"
+          "V2 ctl 0 0\n"
+          ".dc V2 0 5 0.5\n"
+          ".end\n");
+
+    // The transfer curve: below Vt the contact is Roff (the 1k/1meg
+    // divider, ~5 mV), above it Ron (5 V over 1010).
+    const ws::circsim::RunOutcome run = ws::circsim::run_schematic(s);
+    REQUIRE(run.run.has_value());
+    const ws::spice::Table& t = run.run->results.tables[0];
+    const auto v_out = t.signal("v(out)");
+    const auto v2 = t.axis(0);
+    REQUIRE(v_out.size() == v2.size());
+    REQUIRE(v_out.size() == 11);
+    CHECK(v_out[0] < 1e-2);   // V2 = 0: open (the Roff divider ~5 mV)
+    CHECK(v_out[2] < 1e-2);   // V2 = 1: still open (Vt = 2)
+    CHECK(v_out[10] == doctest::Approx(5.0 * 1000.0 / 1010.0).epsilon(1e-3));
+}
+
+TEST_CASE("the current switch decks its controlling source and model") {
+    // The idiomatic W circuit: a DEDICATED 0 V source carries the
+    // measured current (its branch current is positive in the loop's
+    // flow direction - a delivering source's own i() is negative), and
+    // W1 (It = 2 m, so 5 mA closes it) connects V2 5 V through R2 1k.
+    Schematic s;
+    Part* v1 = s.add_part(Part::make("v", "V1", "5", {0.0, -4.0}));
+    Part* r1 = s.add_part(Part::make("r", "R1", "1k", {10.0, 0.0}));
+    Part* vs = s.add_part(Part::make("v", "Vs", "0", {20.0, 0.0}));
+    Part* w = s.add_part(Part::make("w", "W1", "", {28.0, 0.0}));
+    w->params["vs"] = "Vs";
+    w->params["model"] = "swmod";
+    Part* r2 = s.add_part(Part::make("r", "R2", "1k", {36.0, 0.0}));
+    Part* v2 = s.add_part(Part::make("v", "V2", "5", {0.0, -16.0}));
+    Part* g1 = s.add_part(Part::make("gnd", "", "", {23.0, -3.0}));
+    Part* g2 = s.add_part(Part::make("gnd", "", "", {39.0, -3.0}));
+    Part* g3 = s.add_part(Part::make("gnd", "", "", {3.0, -19.0}));
+    // The measuring loop: V1 up onto the axis, through R1, through the
+    // 0 V sense source, down to ground.
+    s.add_wire(Wire::endpoints(PinRef{v1->id, 0}, PinRef{r1->id, 0}))
+        ->waypoints = {Pos{-3.0, 0.0}};
+    s.add_wire(Wire::endpoints(PinRef{r1->id, 1}, PinRef{vs->id, 0}));
+    s.add_wire(Wire::endpoints(PinRef{vs->id, 1}, PinRef{g1->id, 0}));
+    s.add_wire(Wire::endpoints(PinRef{v1->id, 1}, PinRef{g3->id, 0}));
+    // The switched branch: V2.p up from below, across to W1.p, W1.n on
+    // to the load.
+    s.add_wire(Wire::endpoints(PinRef{v2->id, 0}, PinRef{w->id, 0}))
+        ->waypoints = {Pos{-3.0, -12.0}, Pos{25.0, -12.0}};
+    s.add_wire(Wire::endpoints(PinRef{w->id, 1}, PinRef{r2->id, 0}));
+    s.add_wire(Wire::endpoints(PinRef{r2->id, 1}, PinRef{g2->id, 0}));
+    s.add_wire(Wire::endpoints(PinRef{v2->id, 1}, PinRef{g3->id, 0}));
+    Label* in = s.add_label({});
+    in->pos = Pos{2.0, 0.0};
+    in->name = "in";
+    Label* sens = s.add_label({});
+    sens->pos = Pos{15.0, 0.0};
+    sens->name = "sens";
+    Label* out = s.add_label({});
+    out->pos = Pos{32.0, 0.0};
+    out->name = "out";
+    Label* bus = s.add_label({});
+    bus->pos = Pos{10.0, -12.0};
+    bus->name = "bus";
+    s.directives = ".model swmod SW(Ron=10 Roff=1meg It=2m Ih=0)";
+    s.analysis.entries.push_back(OpSpec{});
+
+    const std::vector<ws::circsim::Diag> erc = ws::circsim::run_erc(s);
+    CHECK(erc.empty());
+    const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+    const auto deck = ws::circsim::export_deck(s, nets.nets);
+    REQUIRE(deck.has_value());
+    CHECK(deck->text ==
+          "circsim export\n"
+          ".model swmod SW(Ron=10 Roff=1meg It=2m Ih=0)\n"
+          "R1 in sens 1k\n"
+          "R2 out 0 1k\n"
+          "V1 in 0 5\n"
+          "V2 bus 0 5\n"
+          "Vs sens 0 0\n"
+          "W1 bus out Vs swmod\n"
+          ".op\n"
+          ".end\n");
+
+    const ws::circsim::RunOutcome run = ws::circsim::run_schematic(s);
+    REQUIRE(run.run.has_value());
+    const auto v_out = run.run->results.tables[0].signal("v(out)");
+    REQUIRE(v_out.size() == 1);
+    CHECK(v_out[0] == doctest::Approx(5.0 * 1000.0 / 1010.0).epsilon(1e-3));
+}
+
+// Two discrete inductors + the pinless k part, AC-driven: the loaded
+// secondary answers k*sqrt(L2/L1) times the primary voltage.
+Schematic coupled_stage() {
+    Schematic s;
+    Part* v = s.add_part(Part::make("v", "V1", "0", {0.0, -4.0}));
+    v->params["ac"] = "1";
+    Part* rs = s.add_part(Part::make("r", "Rs", "10", {4.0, 0.0}));
+    Part* l1 = s.add_part(Part::make("l", "L1", "1m", {11.0, 0.0}));
+    Part* l2 = s.add_part(Part::make("l", "L2", "10m", {24.0, 0.0}));
+    Part* k = s.add_part(Part::make("k", "K1", "", {17.0, -6.0}));
+    k->params["l1"] = "L1";
+    k->params["l2"] = "L2";
+    k->params["k"] = "0.9";
+    Part* rl = s.add_part(Part::make("r", "Rl", "100k", {24.0, -8.0}));
+    s.add_part(Part::make("gnd", "", "", {8.0, -4.0}));  // the primary return's pickup
+    Part* g2 = s.add_part(Part::make("gnd", "", "", {27.0, -3.0}));
+    Part* g3 = s.add_part(Part::make("gnd", "", "", {27.0, -11.0}));
+    // The primary: V1.p up onto the axis, through Rs into L1.a (the
+    // series R keeps V1 off the inductor - a 0-ohm V-L loop is the
+    // graph check's own rejection); the return runs under into L1.b.
+    s.add_wire(Wire::endpoints(PinRef{v->id, 0}, PinRef{rs->id, 0}))
+        ->waypoints = {Pos{-3.0, 0.0}};
+    s.add_wire(Wire::endpoints(PinRef{rs->id, 1}, PinRef{l1->id, 0}));
+    s.add_wire(Wire::endpoints(PinRef{v->id, 1}, PinRef{l1->id, 1}))
+        ->waypoints = {Pos{14.0, -4.0}};
+    // The secondary: L2.a is the sec node into the load, L2.b grounds.
+    s.add_wire(Wire::endpoints(PinRef{l2->id, 0}, PinRef{rl->id, 0}));
+    s.add_wire(Wire::endpoints(PinRef{l2->id, 1}, PinRef{g2->id, 0}));
+    s.add_wire(Wire::endpoints(PinRef{rl->id, 1}, PinRef{g3->id, 0}));
+    Label* pri = s.add_label({});
+    pri->pos = Pos{8.0, 0.0};
+    pri->name = "pri";
+    Label* sec = s.add_label({});
+    sec->pos = Pos{21.0, 0.0};
+    sec->name = "sec";
+    AcSpec ac;
+    ac.sweep = AcSpec::Sweep::Dec;
+    ac.n = 5;
+    ac.fstart = 1e3;
+    ac.fstop = 100e3;
+    s.analysis.entries.push_back(ac);
+    return s;
+}
+
+TEST_CASE("the coupling part decks K and solves the mutual ratio") {
+    const Schematic s = coupled_stage();
+    const std::vector<ws::circsim::Diag> erc = ws::circsim::run_erc(s);
+    CHECK(erc.empty());
+    const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+    const auto deck = ws::circsim::export_deck(s, nets.nets);
+    REQUIRE(deck.has_value());
+    CHECK(deck->text ==
+          "circsim export\n"
+          "K1 L1 L2 0.9\n"
+          "L1 pri 0 1m\n"
+          "L2 sec 0 10m\n"
+          "Rl sec 0 100k\n"
+          "Rs N001 pri 10\n"
+          "V1 N001 0 0 AC 1\n"
+          ".ac dec 5 1000 100000\n"
+          ".end\n");
+
+    const ws::circsim::RunOutcome run = ws::circsim::run_schematic(s);
+    REQUIRE(run.run.has_value());
+    const ws::spice::Table& t = run.run->results.tables[0];
+    const auto pri_re = t.signal("re(v(pri))");
+    const auto pri_im = t.signal("im(v(pri))");
+    const auto sec_re = t.signal("re(v(sec))");
+    const auto sec_im = t.signal("im(v(sec))");
+    REQUIRE(pri_re.size() == 11);
+    REQUIRE(sec_re.size() == 11);
+    // v(sec)/v(pri) = k*sqrt(L2/L1) = 0.9*sqrt(10) at every point (the
+    // 100k load draws it down by w*L2/100k, under 0.3% across the band).
+    const double want = 0.9 * std::sqrt(10.0);
+    for (std::size_t i = 0; i < pri_re.size(); ++i) {
+        const double pri_mag = std::hypot(pri_re[i], pri_im[i]);
+        const double sec_mag = std::hypot(sec_re[i], sec_im[i]);
+        REQUIRE(pri_mag > 1e-9);
+        CHECK(sec_mag / pri_mag == doctest::Approx(want).epsilon(4e-3));
+    }
+}
+
+TEST_CASE("the transformer part decks L + L + K and solves its ratio") {
+    Schematic s;
+    Part* v = s.add_part(Part::make("v", "V1", "0", {0.0, -4.0}));
+    v->params["ac"] = "1";
+    Part* rs = s.add_part(Part::make("r", "Rs", "10", {5.0, 0.0}));
+    Part* x = s.add_part(Part::make("xfmr", "K1", "", {17.0, 0.0}));
+    x->params["lp"] = "1m";
+    x->params["ls"] = "4m";
+    x->params["k"] = "0.99";
+    Part* rl = s.add_part(Part::make("r", "Rl", "100k", {30.0, -6.0}));
+    s.add_part(Part::make("gnd", "", "", {8.0, -2.0}));  // the primary return's pickup
+    Part* g2 = s.add_part(Part::make("gnd", "", "", {22.0, -5.0}));
+    Part* g3 = s.add_part(Part::make("gnd", "", "", {33.0, -9.0}));
+    // The primary: V1.p up onto the axis, through Rs into p+ (the
+    // series R keeps V1 off the winding - a 0-ohm V-L loop is the
+    // graph check's own rejection); the return into p-.
+    s.add_wire(Wire::endpoints(PinRef{v->id, 0}, PinRef{rs->id, 0}))
+        ->waypoints = {Pos{-3.0, 0.0}};
+    s.add_wire(Wire::endpoints(PinRef{rs->id, 1}, PinRef{x->id, 0}))
+        ->waypoints = {Pos{8.0, 2.0}};
+    s.add_wire(Wire::endpoints(PinRef{v->id, 1}, PinRef{x->id, 1}))
+        ->waypoints = {Pos{3.0, -2.0}};
+    // The secondary: s- grounded, s+ down into the load.
+    s.add_wire(Wire::endpoints(PinRef{x->id, 3}, PinRef{g2->id, 0}));
+    s.add_wire(Wire::endpoints(PinRef{x->id, 2}, PinRef{rl->id, 0}))
+        ->waypoints = {Pos{27.0, 2.0}};
+    s.add_wire(Wire::endpoints(PinRef{rl->id, 1}, PinRef{g3->id, 0}));
+    Label* pri = s.add_label({});
+    pri->pos = Pos{10.0, 2.0};
+    pri->name = "pri";
+    Label* sec = s.add_label({});
+    sec->pos = Pos{24.0, 2.0};
+    sec->name = "sec";
+    AcSpec ac;
+    ac.sweep = AcSpec::Sweep::Dec;
+    ac.n = 5;
+    ac.fstart = 1e3;
+    ac.fstop = 100e3;
+    s.analysis.entries.push_back(ac);
+
+    const std::vector<ws::circsim::Diag> erc = ws::circsim::run_erc(s);
+    CHECK(erc.empty());
+    const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+    const auto deck = ws::circsim::export_deck(s, nets.nets);
+    REQUIRE(deck.has_value());
+    // One part, three cards: the inductors derive their names from the
+    // part's ref (K1 -> L1p/L1s), and the coupling names its siblings.
+    CHECK(deck->text ==
+          "circsim export\n"
+          "L1p pri 0 1m\n"
+          "L1s sec 0 4m\n"
+          "K1 L1p L1s 0.99\n"
+          "Rl sec 0 100k\n"
+          "Rs N001 pri 10\n"
+          "V1 N001 0 0 AC 1\n"
+          ".ac dec 5 1000 100000\n"
+          ".end\n");
+    // All three element names resolve onto the one part.
+    REQUIRE(deck->element_part.count("K1") != 0);
+    REQUIRE(deck->element_part.count("L1p") != 0);
+    REQUIRE(deck->element_part.count("L1s") != 0);
+    CHECK(deck->element_part.at("K1") == x->id);
+    CHECK(deck->element_part.at("L1p") == x->id);
+    CHECK(deck->element_part.at("L1s") == x->id);
+
+    const ws::circsim::RunOutcome run = ws::circsim::run_schematic(s);
+    REQUIRE(run.run.has_value());
+    const ws::spice::Table& t = run.run->results.tables[0];
+    const auto pri_re = t.signal("re(v(pri))");
+    const auto pri_im = t.signal("im(v(pri))");
+    const auto sec_re = t.signal("re(v(sec))");
+    const auto sec_im = t.signal("im(v(sec))");
+    REQUIRE(pri_re.size() == 11);
+    // v(sec)/v(pri) = k*sqrt(ls/lp) = 0.99*2 (the load draws it down
+    // by w*ls/100k, under 0.3% across the band).
+    const double want = 0.99 * 2.0;
+    for (std::size_t i = 0; i < pri_re.size(); ++i) {
+        const double pri_mag = std::hypot(pri_re[i], pri_im[i]);
+        const double sec_mag = std::hypot(sec_re[i], sec_im[i]);
+        REQUIRE(pri_mag > 1e-9);
+        CHECK(sec_mag / pri_mag == doctest::Approx(want).epsilon(4e-3));
+    }
+}
+
+TEST_CASE("two transformers and a plain inductor never collide on names") {
+    // Two K refs and a user inductor named like a derived one: the
+    // dedup appends _2 and the coupling still names its true siblings.
+    Schematic s;
+    Part* v = s.add_part(Part::make("v", "V1", "0", {0.0, 0.0}));
+    v->params["ac"] = "1";
+    Part* x1 = s.add_part(Part::make("xfmr", "K1", "", {17.0, 0.0}));
+    x1->params["lp"] = "1m";
+    x1->params["ls"] = "4m";
+    x1->params["k"] = "0.99";
+    Part* x2 = s.add_part(Part::make("xfmr", "K1", "", {17.0, -20.0}));
+    x2->params["lp"] = "1m";
+    x2->params["ls"] = "4m";
+    x2->params["k"] = "0.99";
+    Part* lx = s.add_part(Part::make("l", "L1p", "1m", {40.0, 0.0}));
+    (void)lx;
+    (void)v;
+    const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+    const auto deck = ws::circsim::export_deck(s, nets.nets);
+    REQUIRE(deck.has_value());
+    // K1 (first by id) claims K1/L1p/L1s; the second transformer's
+    // names collide and shift by one suffix; the plain inductor named
+    // L1p finds L1p and L1p_2 both taken and lands on L1p_3.
+    CHECK(deck->text.find("K1 L1p L1s 0.99\n") != std::string::npos);
+    CHECK(deck->text.find("K1_2 L1p_2 L1s_2 0.99\n") != std::string::npos);
+    CHECK(deck->text.find("\nL1p_3 N") != std::string::npos);
 }

@@ -22,15 +22,25 @@ std::string palette_category(const ws::circsim::SymbolDef& sym) {
         case 'R':
         case 'C':
         case 'L':
+        case 'T':  // the lossless line is a passive two-port
+        case 'K':  // coupling and the transformer: magnetics passives
             return "Passive";
         case 'V':
         case 'I':
+        case 'E':  // the controlled and behavioral sources are sources
+        case 'F':
+        case 'G':
+        case 'H':
+        case 'B':
             return "Sources";
         case 'D':
         case 'Q':
         case 'M':
         case 'J':
             return "Semiconductors";
+        case 'S':  // the switches get their own shelf
+        case 'W':
+            return "Switches";
         default:
             break;
     }
@@ -117,8 +127,8 @@ int palette_score(std::string_view haystack, std::string_view needle) {
 
 std::vector<PaletteGroup> palette_groups(const ws::circsim::SymbolLibrary& lib,
                                          std::string_view filter) {
-    static constexpr std::array<const char*, 4> kOrder = {
-        "Passive", "Sources", "Semiconductors", "Power"};
+    static constexpr std::array<const char*, 5> kOrder = {
+        "Passive", "Sources", "Semiconductors", "Switches", "Power"};
     std::vector<PaletteGroup> groups;
     for (const char* name : kOrder) {
         groups.push_back(PaletteGroup{name, {}});

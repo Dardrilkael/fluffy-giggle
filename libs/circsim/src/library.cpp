@@ -223,6 +223,93 @@ bool read_emit(const json::Object& o, ParamEmit& pe,
     return true;
 }
 
+// One entry of a multi-card symbol's "cards" list: the device letter,
+// the name suffix, the pin indices it connects, its own emit tail and
+// the sibling-name flag (see symbols.hpp CardEmit). Pin indices are
+// bounds-checked against the symbol's pin count by the caller (the
+// pins parse before the cards do).
+bool read_card(const json::Object& o, CardEmit& ce, const std::string& key,
+               std::size_t pin_count, const std::string& origin,
+               std::vector<Diag>& diags) {
+    const auto letter = as_text(o.find("letter"));
+    if (!letter.has_value() || letter->size() != 1 ||
+        (*letter)[0] < 'A' || (*letter)[0] > 'Z') {
+        diags.push_back(lib_diag(
+            Severity::Warning, "circsim.symbols.bad_field",
+            "symbol '" + key + "': a cards entry without an uppercase"
+                               " 'letter' (\"L\", \"K\", ...) is dropped",
+            origin));
+        return false;
+    }
+    ce.letter = (*letter)[0];
+    if (const auto suffix = as_text(o.find("suffix"))) {
+        ce.suffix = *suffix;
+    } else if (o.find("suffix") != nullptr) {
+        diags.push_back(lib_diag(
+            Severity::Warning, "circsim.symbols.bad_field",
+            "symbol '" + key + "' card '" + *letter +
+                "': 'suffix' is not text; defaulting to none",
+            origin));
+    }
+    if (const json::Value* pins = o.find("pins");
+        pins != nullptr && pins->is_array()) {
+        for (const json::Value& e : *pins->as_array()) {
+            const auto idx = as_integer(&e);
+            if (!idx.has_value() || *idx < 0 ||
+                static_cast<std::size_t>(*idx) >= pin_count) {
+                diags.push_back(lib_diag(
+                    Severity::Warning, "circsim.symbols.bad_field",
+                    "symbol '" + key + "' card '" + *letter +
+                        "': pin index " +
+                        (idx.has_value() ? std::to_string(*idx)
+                                         : std::string("not a number")) +
+                        " is not one of the symbol's " +
+                        std::to_string(pin_count) + " pins; dropped",
+                    origin));
+                return false;
+            }
+            ce.pins.push_back(static_cast<std::uint32_t>(*idx));
+        }
+    } else if (o.find("pins") != nullptr) {
+        diags.push_back(lib_diag(
+            Severity::Warning, "circsim.symbols.bad_field",
+            "symbol '" + key + "': 'pins' is not an array; ignored", origin));
+    }
+    if (const json::Value* emit = o.find("emit");
+        emit != nullptr && emit->is_array()) {
+        for (const json::Value& e : *emit->as_array()) {
+            ParamEmit pe;
+            if (e.is_object() &&
+                read_emit(*e.as_object(), pe, key, origin, diags)) {
+                ce.emit.push_back(std::move(pe));
+            } else if (!e.is_object()) {
+                diags.push_back(lib_diag(
+                    Severity::Warning, "circsim.symbols.bad_field",
+                    "symbol '" + key + "': an emit entry is not an object;"
+                                       " skipped",
+                    origin));
+            }
+        }
+    } else if (o.find("emit") != nullptr) {
+        diags.push_back(lib_diag(
+            Severity::Warning, "circsim.symbols.bad_field",
+            "symbol '" + key + "': 'emit' is not an array; ignored", origin));
+    }
+    if (const auto siblings = as_bool(o.find("name_siblings"))) {
+        ce.name_siblings = *siblings;
+    } else if (o.find("name_siblings") != nullptr) {
+        diags.push_back(lib_diag(
+            Severity::Warning, "circsim.symbols.bad_field",
+            "symbol '" + key + "': 'name_siblings' is not a bool;"
+                               " defaulting to false",
+            origin));
+    }
+    warn_unknown_fields(o, {"letter", "suffix", "pins", "emit", "name_siblings"},
+                        "symbol '" + key + "' card '" + *letter + "'", origin,
+                        diags);
+    return true;
+}
+
 bool read_param_spec(const json::Object& o, ParamSpec& ps,
                      const std::string& key, const std::string& origin,
                      std::vector<Diag>& diags) {
@@ -565,6 +652,29 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + k + "': 'emit' is not an array; ignored", origin));
     }
+    // The multi-card layout (symbols.hpp CardEmit): parses after the
+    // pins so each entry's pin indices can be bounds-checked.
+    if (const json::Value* cards = o.find("cards");
+        cards != nullptr && cards->is_array()) {
+        for (const json::Value& e : *cards->as_array()) {
+            CardEmit ce;
+            if (e.is_object() &&
+                read_card(*e.as_object(), ce, k, r.def.pins.size(), origin,
+                          diags)) {
+                r.def.card_emits.push_back(std::move(ce));
+            } else if (!e.is_object()) {
+                diags.push_back(lib_diag(
+                    Severity::Warning, "circsim.symbols.bad_field",
+                    "symbol '" + k + "': a cards entry is not an object;"
+                                    " dropped",
+                    origin));
+            }
+        }
+    } else if (o.find("cards") != nullptr) {
+        diags.push_back(lib_diag(
+            Severity::Warning, "circsim.symbols.bad_field",
+            "symbol '" + k + "': 'cards' is not an array; ignored", origin));
+    }
     if (const json::Value* params = o.find("params");
         params != nullptr && params->is_array()) {
         for (const json::Value& e : *params->as_array()) {
@@ -612,7 +722,7 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
         if (field != "key" && field != "name" && field != "spice" &&
             field != "ref" && field != "fixed_net" && field != "value" &&
             field != "model" && field != "pins" && field != "emit" &&
-            field != "params" && field != "draw") {
+            field != "cards" && field != "params" && field != "draw") {
             r.def.unknown.set(field, val);
         }
     }
@@ -814,6 +924,33 @@ std::string SymbolLibrary::save(bool include_builtin) const {
             emit.push_back(json::Value::object(std::move(e)));
         }
         o.set("emit", json::Value::array(std::move(emit)));
+        // The multi-card layout rides only when the symbol has one, so
+        // every classic .csym stays byte-identical.
+        if (!s.card_emits.empty()) {
+            json::Array cards;
+            for (const CardEmit& ce : s.card_emits) {
+                json::Object c;
+                c.set("letter", json::Value::text(std::string(1, ce.letter)));
+                c.set("suffix", json::Value::text(ce.suffix));
+                json::Array cpins;
+                for (const std::uint32_t pin : ce.pins) {
+                    cpins.push_back(json::Value::integer(pin));
+                }
+                c.set("pins", json::Value::array(std::move(cpins)));
+                json::Array cemit;
+                for (const ParamEmit& pe : ce.emit) {
+                    json::Object e;
+                    e.set("param", json::Value::text(pe.key));
+                    e.set("prefix", json::Value::text(pe.prefix));
+                    e.set("optional", json::Value::boolean(pe.optional));
+                    cemit.push_back(json::Value::object(std::move(e)));
+                }
+                c.set("emit", json::Value::array(std::move(cemit)));
+                c.set("name_siblings", json::Value::boolean(ce.name_siblings));
+                cards.push_back(json::Value::object(std::move(c)));
+            }
+            o.set("cards", json::Value::array(std::move(cards)));
+        }
         json::Array params;
         for (const ParamSpec& ps : s.params) {
             json::Object p;

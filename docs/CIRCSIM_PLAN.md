@@ -437,3 +437,64 @@ editor's headless suites over the r2d stub - canvas 33/33 (the wire
 modes' ink contract, the ramp reference, the glow discs, the
 transport's park/play/scrub), side panels 34/34, results 16/16,
 palette 5/5 (the LED joins Semiconductors).
+
+## Stage 24 (2026-11-10): the orphan devices join the palette
+
+ws::spice always parsed `E F G H B S W T K` - nine device letters the
+built-in symbol table never carried, reachable only through a hand-
+written `.csym`. This stage promotes them all to built-ins and adds the
+one part the engine could never express from a single symbol: the
+2-winding transformer.
+
+- **The nine symbols** (`symbols_table.cpp`): `e`/`g` (VCVS/VCCS, four
+  pins in card order OUT+ OUT- IN+ IN-, LTspice-style with the sense
+  pair stacked left and the output right, +/− marks on the voltage
+  output, an arrow on the current one), `f`/`h` (CCCS/CCVS - two pins
+  plus the controlling V source's NAME, both params because the card
+  grammar spells the source before the gain), `b` (behavioral, one of
+  `vexpr`/`iexpr` - both empty or both filled rejects loudly at parse
+  and maps back onto the part), `s` (voltage switch: the contact runs
+  horizontally, the control pair hangs below like relay terminals) and
+  `w` (current switch), `tline` (promoted from `tline.csym` verbatim -
+  same geometry, same `Z0=`/`TD=`; `tline_demo.csim` now runs with no
+  `-S` at all) and `k` (the coupling: deliberately PINLESS - it names
+  two inductors by ref and touches no net; a pinless part flows through
+  nets/ERC/export untouched because those loops only ever iterate pins).
+- **The transformer** (`xfmr`): one part, three cards - `L<ref>p`,
+  `L<ref>s` and the `K` that names them. The new `CardEmit` layout
+  (`symbols.hpp`) spells a multi-card symbol declaratively: per card the
+  device letter, the name suffix, the pin indices it connects and its
+  own param tail; `name_siblings` lets the coupling name its siblings,
+  so the K card never goes stale when the ref changes. Export derives
+  every card name from the part's ref (`sub_element_name`, following
+  `element_name`'s own rules), claims them all through the same dedup
+  (two transformers named K1 answer K1/K1_2; a user inductor named L1p
+  lands on L1p_3), and maps all three lines back onto the one part so
+  locate and the probe tool highlight the symbol. The `.csym` spelling
+  (`"cards"`) round-trips through `library.cpp`, so a library-defined
+  multi-card symbol is first-class too. ERC reads a `CardEmit`'s
+  non-optional emits as required params (the transformer's lp/ls/k).
+- **The palette** grows a Switches shelf (`S`/`W`); the controlled and
+  behavioral sources join Sources, the line/coupling/transformer join
+  Passive - `palette_category` maps by letter, and a `.csym`'s own
+  `category` field still wins.
+- **Six examples** (`libs/circsim/examples/`): `controlled` (E at x10
+  across a decade sweep), `current_controlled` (F at 2×5 mA = 10 V and
+  H at 100 Ω×5 mA = 0.5 V), `bsource` (`V=3*v(in)`), `switch` (the S
+  transfer curve over a .dc sweep, `.model` in the directives),
+  `transformer` (the xfmr answering k·sqrt(ls/lp) = 1.98) and
+  `coupled` (two inductors + the pinless k part at 0.9·sqrt(10)). The
+  smoke suite drives all six through the real CLI with closed-form
+  assertions.
+
+Two honest engine contracts the examples teach: an ideal V directly
+across an L is the graph check's own V-L-loop rejection (the primaries
+carry a series Rs, like ws::spice's own xfmr test), and a W reads a
+DEDICATED 0 V sense source's branch current (a delivering source's own
+`i()` is negative in the SPICE convention).
+
+The stage-24 gate: the full linux ctest 735/735 (test_circsim 145
+cases / 1993 assertions - the new battery: golden decks, closed-form
+runs, the ERC requireds, the collision dedup, the built-in tline
+quarter-wave), the circsim smoke green with the six new examples, the
+spice smoke untouched.
