@@ -1344,9 +1344,22 @@ struct TableColumn {
 // same grid works anywhere and two tables differ by label like any
 // widget. The table keeps NO context state of its own: the selection is
 // the caller's int, and the scroll is the caller's scroll panel - a
-// table taller than its panel simply flows (the scroll panel's clips
-// hide and unclaim whatever scrolls out; v1 culls nothing, every row
-// records).
+// table taller than its panel simply flows, and the walk is VIRTUALIZED
+// over it: the rows the current hit clip cannot see (a scroll panel's
+// viewport, a plain panel's content rect, their intersection when
+// nested) neither draw, hit-test nor register. The visible window plus
+// ONE sentinel row at each end is all that records, so a
+// ten-thousand-row grid costs what its viewport shows, not its row
+// count - and since the clip was already hiding those pixels and
+// unclaiming those presses, culling the walk changes nothing the user
+// can touch. A bare table with no clip pushed walks every row, as it
+// always did. The honest limits of v1: Tab wraps within the visible
+// window (a culled row never registers), and the arrows rest on a
+// row the walk cannot see - a step off the window's edge still lands
+// (set_focus needs no registration; a scroll panel pulls the landing
+// row into view the same frame), but a row the USER scrolled out of
+// view never walks, and its stepping pauses until the scroll returns
+// it.
 //
 // `selected` is what makes the table interactive: full citizenship per
 // row, selectable's exact look - the bare list (no idle face), the

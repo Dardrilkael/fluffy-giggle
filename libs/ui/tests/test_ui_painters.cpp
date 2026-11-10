@@ -185,7 +185,12 @@ TEST_CASE("a skin's table receives every widget family's draws") {
     toasts.push({.text = "saved"});
 
     gui.begin_frame(snap(-100.0f, -100.0f));
-    (void)begin_panel(gui, layout, theme, "board", {0.0f, 0.0f, 420.0f, 500.0f});
+    // The panel must hold the whole flow now that the table's walk is
+    // virtualized: its rows used to draw past the panel's clip as
+    // invisible ink (the calls fired, the renderer clipped them) - a
+    // row the clip hides no longer draws at all, so the table needs
+    // room its rows actually sit inside.
+    (void)begin_panel(gui, layout, theme, "board", {0.0f, 0.0f, 420.0f, 700.0f});
     (void)button(gui, layout, theme, "go", 60.0f);
     (void)checkbox(gui, layout, theme, "ck", bool_value);
     (void)radio(gui, layout, theme, "rd", int_value, 1);

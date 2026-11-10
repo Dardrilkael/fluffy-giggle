@@ -2,13 +2,17 @@
 // the table - the column grid, its header chrome and the selectable
 // rows under the loop-children id discipline. The rows fold through the
 // shared begin but keep their own late key edge under the grid walk.
-// The look halves are public (table_header_draw / table_row_draw over
+// The walk is VIRTUALIZED: only the rows the current hit clip can see
+// (plus one sentinel at each end) draw, hit-test or register, so a
+// ten-thousand-row grid costs its viewport, not its row count. The
+// look halves are public (table_header_draw / table_row_draw over
 // TableGeometry) - the composed widget owns the geometry resolution
 // and the walk, the draws own the pixels.
 
 #include "widgets_detail.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 namespace ws::ui::gui {
@@ -165,6 +169,25 @@ bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     // grid as pure chrome, no ids at all (the statics' "cannot interact"
     // spelled by the pointer). The row look is the split draw's half;
     // the walk (focus stepping, the pick) stays here.
+    //
+    // THE VIRTUALIZED WALK: the rows the current hit clip cannot see
+    // neither draw nor claim - the clip was already hiding their
+    // pixels and unclaiming their presses, so culling the walk changes
+    // nothing the user can touch, and a ten-thousand-row grid costs
+    // what its viewport shows instead of its row count. The visible
+    // window comes from the hit clip the enclosing panel(s) pushed -
+    // the scroll panel's viewport, a plain panel's content rect, their
+    // intersection when nested - intersected with the body's own band:
+    // floor/ceil over the row height covers the partially-scrolled
+    // rows at each edge, and ONE sentinel row past each end walks too,
+    // so a focus step off the window lands on a row that registered
+    // (the scroll panel pulls it into view the same frame, at end).
+    // With no clip pushed (a bare table in the open frame) every row
+    // walks, exactly as before - nothing clips a bare table, so
+    // nothing culls it. The honest limits, spelled in the header
+    // contract: Tab wraps within the visible window (the culled rows
+    // never register), and a focused row scrolled out of view pauses
+    // its arrow stepping until the scroll brings it back.
     bool changed = false;
     const float body_top = rect.y + row_h + 2.0f;
     {
@@ -176,6 +199,32 @@ bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             ScopedId row_scope(gui.ids(), index);
             return gui.ids().id("row");
         };
+        // The visible window, as index bounds: [first, last] INCLUSIVE.
+        int first = 0;
+        int last = row_count - 1;
+        if (const Rect* clip = gui.current_hit_clip();
+            clip != nullptr && row_h > 0.0f && row_count > 0) {
+            const float top =
+                std::max(body_top, clip->y);
+            const float bottom =
+                std::min(body_top + body_h, clip->y + clip->height);
+            if (bottom > top) {
+                first = std::max(
+                    0, static_cast<int>(std::floor((top - body_top) / row_h)));
+                last = std::min(row_count - 1,
+                                static_cast<int>(std::ceil(
+                                    (bottom - body_top) / row_h)) -
+                                    1);
+                // The sentinels: one row past each visible end, so the
+                // edge rows of the next scroll frame and a focus step
+                // off the window find a registered row.
+                first = std::max(0, first - 1);
+                last = std::min(row_count - 1, last + 1);
+            } else {
+                first = 0;
+                last = -1;  // the body and the clip never overlap
+            }
+        }
         // The frame's walk gate: ONE step per frame, whatever the edge.
         // set_focus is immediate and the rows iterate in index order, so
         // a DOWN landing row's own fold (running after the walker's)
@@ -184,7 +233,7 @@ bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
         // end in one frame. (Up walks against the iteration order and
         // never cascades; the gate is symmetric anyway.)
         bool focus_stepped = false;
-        for (int i = 0; i < row_count; ++i) {
+        for (int i = first; i <= last; ++i) {
             const Rect row_rect{rect.x,
                                 body_top + static_cast<float>(i) * row_h,
                                 rect.width, row_h};

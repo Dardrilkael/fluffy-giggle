@@ -340,6 +340,25 @@ if(TARGET test_ui_num_input)
   target_include_directories(test_ui_num_input PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
 
+# The table virtualization suite: the virtualized walk, end to end -
+# the visible window over the hit clip (the seam the scroll panels
+# push, read through current_hit_clip), the sentinel rows at each
+# end, the chrome path culling identically, the honest limits the
+# contract spells (Tab wraps within the window; the arrows rest on a
+# row the walk cannot see), and the REAL scroll panel driven through
+# its reserved ScrollState key - the gui archive + the real font
+# bake, the same purity class as test_ui_gui.
+ws_add_test(ui_table_clip
+  SOURCES tests/test_ui_table_clip.cpp
+          tests/ui_gui_r2d_stub.cpp
+          src/text/font.cpp
+          src/text/stb_impl.cpp
+  LINK ws::ui_gui
+  DEPENDS stb)
+if(TARGET test_ui_table_clip)
+  target_include_directories(test_ui_table_clip PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+
 # --- Shader workflow targets (opt-in; the default build is unchanged) ------
 # The committed spirv.h stays the build input (no shader compiler needed);
 # these targets make staleness visible and regeneration explicit. The flags
