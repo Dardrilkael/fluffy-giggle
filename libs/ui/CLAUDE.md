@@ -160,6 +160,7 @@ Widget functions hold no state; persistence lives in `GuiContext` side tables.
   - `gather_pointers()` returns the mouse as slot 0 (only while `mouse_present`), then the touches.
   - `mouse_present` is set by desktop cursor move, button or enter, and cleared when the cursor leaves. On Android only the real-mouse path touches it.
   - The primary touch bridges to mouse button 0 but never touches `mouse_present`.
+  - Key edges come in two spellings: `key_pressed` (fresh press only) and `key_repeated` (the OS's auto-repeat of a held key - GLFW_REPEAT / Android's repeat count; never folded into `key_pressed`). Stepping consumers (slider arrows, table row walk, text caret/deleters, palette and menu walks) read `GuiContext::key_pressed_or_repeated`; distinct-press consumers (activation keys, Tab, Escape, chords, mnemonics) read `key_pressed` alone. `consume_key()` clears both.
   - `begin_frame(frame_input())` adopts the snapshot, and `end_frame()` resolves per pointer.
 - **Identity:** `WidgetId` is FNV-1a over scope + family tag + label.
   - `##` ids the full string but hides the tail.

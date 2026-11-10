@@ -155,6 +155,37 @@ TEST_CASE("InputFrame::next_frame clears edges and keeps held state") {
     CHECK(frame.text_input.empty());
 }
 
+TEST_CASE("InputFrame: the repeat edge is its own - a hold reports it, next_frame clears it") {
+    using namespace ws::input;
+    InputFrame frame;
+    // The OS's auto-repeat story for one held key: the press frame
+    // carries the fresh edge only, the held frames carry repeats.
+    frame.key_down[ws::input::keys::kBackspace] = true;
+    frame.key_pressed[ws::input::keys::kBackspace] = true;
+    frame.next_frame();
+    CHECK(frame.key_down[ws::input::keys::kBackspace] == true);   // held
+    CHECK(frame.key_pressed[ws::input::keys::kBackspace] == false);
+    CHECK(frame.key_repeated[ws::input::keys::kBackspace] == false);
+
+    // A repeat frame: held, no fresh press, the repeat edge set.
+    frame.key_repeated[ws::input::keys::kBackspace] = true;
+    CHECK(frame.key_pressed[ws::input::keys::kBackspace] == false);
+    CHECK(frame.key_repeated[ws::input::keys::kBackspace] == true);
+
+    // The repeat is an EDGE like the press: next_frame clears it while
+    // the hold survives.
+    frame.next_frame();
+    CHECK(frame.key_down[ws::input::keys::kBackspace] == true);
+    CHECK(frame.key_pressed[ws::input::keys::kBackspace] == false);
+    CHECK(frame.key_repeated[ws::input::keys::kBackspace] == false);
+
+    // The lift ends the story: no edge of any kind after the release.
+    frame.key_down[ws::input::keys::kBackspace] = false;
+    frame.next_frame();
+    CHECK(frame.key_pressed[ws::input::keys::kBackspace] == false);
+    CHECK(frame.key_repeated[ws::input::keys::kBackspace] == false);
+}
+
 TEST_CASE("InputFrame: the frame clock survives next_frame - the shell's write is the refresh") {
     using namespace ws::input;
     InputFrame frame;

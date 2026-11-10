@@ -40,6 +40,7 @@ void InputFrame::next_frame() {
     scroll_dx = 0.0f;
     scroll_dy = 0.0f;
     key_pressed.fill(false);
+    key_repeated.fill(false);
     text_input.clear();
     // Touch edges clear and lifted contacts leave the table now - their
     // release frame is over. The survivors keep their arrival order (that

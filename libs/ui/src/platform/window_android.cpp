@@ -570,19 +570,30 @@ private:
         if (key == kKeyUnknown) {
             return;
         }
-        const bool repeat = (action == AKEY_EVENT_ACTION_MULTIPLE);
-        if (action == AKEY_EVENT_ACTION_DOWN || repeat) {
+        // Android's hardware-key auto-repeat: a repeat arrives as another
+        // ACTION_DOWN carrying a repeat count (ACTION_MULTIPLE is the
+        // legacy burst spelling; it repeats too). The first down (count
+        // 0) is the fresh press; every count past it is the auto-repeat
+        // fact.
+        const int32_t repeat_count = AKeyEvent_getRepeatCount(event);
+        const bool repeat = repeat_count > 0;
+        if (action == AKEY_EVENT_ACTION_DOWN ||
+            action == AKEY_EVENT_ACTION_MULTIPLE) {
             emit(ws::input::KeyPressedEvent{key, repeat});
         } else if (action == AKEY_EVENT_ACTION_UP) {
             emit(ws::input::KeyReleasedEvent{key});
         }
         // gui tap, the same rules as the desktop key callback: held state
-        // on every transition, pressed edge on the first DOWN only.
+        // on every transition, pressed edge on the first DOWN only, and
+        // the auto-repeat lands in its OWN edge - never a fresh press.
         if (ws::input::InputFrame* input = sink_->input;
             input != nullptr && key >= 0 && key < ws::input::InputFrame::kMaxKeys) {
             input->key_down[key] = (action != AKEY_EVENT_ACTION_UP);
-            if (action == AKEY_EVENT_ACTION_DOWN) {
+            if (action == AKEY_EVENT_ACTION_DOWN && repeat_count == 0) {
                 input->key_pressed[key] = true;
+            }
+            if (repeat) {
+                input->key_repeated[key] = true;
             }
         }
         // Text tap: hardware-keyboard glyphs only (native_app_glue has no

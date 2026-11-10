@@ -301,13 +301,21 @@ void run_menu_keyboard(GuiContext& gui, MenuState& state,
     const auto pressed = [&in](int key) {
         return in.key_pressed[static_cast<std::size_t>(key)] != 0;
     };
+    // The repeat-honoring spelling: a held arrow keeps walking the
+    // list (the OS auto-repeat), the way a held key glides through
+    // every other list. Activation and the horizontals stay
+    // edge-only - a held Enter must not re-fire rows, a held Right
+    // must not cascade through submenus.
+    const auto stepped = [&gui](int key) {
+        return gui.key_pressed_or_repeated(key);
+    };
 
     // The vertical walk: move, wrap past separators and dead rows, and
     // a parent list's open child closes - the walk re-aims the chain.
-    if (pressed(ws::input::keys::kUp) || pressed(ws::input::keys::kDown)) {
+    if (stepped(ws::input::keys::kUp) || stepped(ws::input::keys::kDown)) {
         state.highlight[deepest] = next_walkable(
             level, state.highlight[deepest],
-            pressed(ws::input::keys::kDown) ? 1 : -1);
+            stepped(ws::input::keys::kDown) ? 1 : -1);
         gui.consume_key(ws::input::keys::kUp);
         gui.consume_key(ws::input::keys::kDown);
         close_chain_from(state, deepest + 1);

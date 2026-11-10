@@ -101,14 +101,17 @@ void on_key(GLFWwindow* window, int key, int scancode, int action, int mods) {
         default:
             break;
     }
-    // gui tap: held state on every transition, pressed edge on PRESS only -
-    // key repeat is a widget policy, not an input fact, so the edge stays
-    // pure. Out-of-range codes (GLFW_KEY_UNKNOWN) drop.
+    // gui tap: held state on every transition, pressed edge on PRESS only,
+    // and the OS's auto-repeat lands in its OWN edge (key_repeated) - a
+    // repeat is a fact widgets may or may not honor, never a fresh press.
+    // Out-of-range codes (GLFW_KEY_UNKNOWN) drop.
     if (ws::input::InputFrame* input = input_for(window);
         input != nullptr && key >= 0 && key < ws::input::InputFrame::kMaxKeys) {
         input->key_down[key] = (action != GLFW_RELEASE);
         if (action == GLFW_PRESS) {
             input->key_pressed[key] = true;
+        } else if (action == GLFW_REPEAT) {
+            input->key_repeated[key] = true;
         }
     }
 }

@@ -86,14 +86,16 @@ SliderResult slider_behavior(GuiContext& gui, WidgetId id, const Rect& rect,
 
     // Keyboard: the arrows step the focused slider - one key_step per
     // press, clamped to the range; only a real move reports changed.
+    // Held arrows keep stepping: the walk honors the OS auto-repeat
+    // (key_pressed_or_repeated), the way every stepping control reads.
     // The focus read rides the fold begin_widget_paint captured after
     // state(): nothing between there and here moves it.
     if (result.focused &&
-        (gui.input().key_pressed[ws::input::keys::kLeft] ||
-         gui.input().key_pressed[ws::input::keys::kRight])) {
+        (gui.key_pressed_or_repeated(ws::input::keys::kLeft) ||
+         gui.key_pressed_or_repeated(ws::input::keys::kRight))) {
         const float step =
-            gui.input().key_pressed[ws::input::keys::kRight] ? key_step
-                                                              : -key_step;
+            gui.key_pressed_or_repeated(ws::input::keys::kRight) ? key_step
+                                                                   : -key_step;
         const float next = std::min(std::max(value + step, min), max);
         if (next != value) {
             value = next;
@@ -232,14 +234,15 @@ DragFloatResult drag_float_behavior(GuiContext& gui, WidgetId id,
 
     // Keyboard: the arrows step the focused row - 1% of the range per
     // press, like a slider; only a real move reports changed, and the
-    // same NaN guard holds. The focus read rides the fold
-    // begin_widget_paint captured after state().
+    // same NaN guard holds. Held arrows keep stepping on the OS
+    // auto-repeat, the slider's own rule. The focus read rides the
+    // fold begin_widget_paint captured after state().
     if (result.focused &&
-        (gui.input().key_pressed[ws::input::keys::kLeft] ||
-         gui.input().key_pressed[ws::input::keys::kRight])) {
+        (gui.key_pressed_or_repeated(ws::input::keys::kLeft) ||
+         gui.key_pressed_or_repeated(ws::input::keys::kRight))) {
         const float step = (max - min) / 100.0f;
         const float delta =
-            gui.input().key_pressed[ws::input::keys::kRight] ? step : -step;
+            gui.key_pressed_or_repeated(ws::input::keys::kRight) ? step : -step;
         const float next = std::min(std::max(value + delta, min), max);
         if (next == next && next != value) {
             value = next;

@@ -176,6 +176,14 @@ bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             ScopedId row_scope(gui.ids(), index);
             return gui.ids().id("row");
         };
+        // The frame's walk gate: ONE step per frame, whatever the edge.
+        // set_focus is immediate and the rows iterate in index order, so
+        // a DOWN landing row's own fold (running after the walker's)
+        // re-captures the live focus - without this gate a single Down,
+        // fresh press or OS repeat alike, would cascade to the grid's
+        // end in one frame. (Up walks against the iteration order and
+        // never cascades; the gate is symmetric anyway.)
+        bool focus_stepped = false;
         for (int i = 0; i < row_count; ++i) {
             const Rect row_rect{rect.x,
                                 body_top + static_cast<float>(i) * row_h,
@@ -212,12 +220,18 @@ bool table(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             // ring draws now, and the scroll panel's focus-into-view
             // follows the move for free. The gate rides the fold's
             // capture - nothing between the fold and here moves focus.
-            if (row.focused) {
-                if (gui.input().key_pressed[ws::input::keys::kUp] && i > 0) {
+            if (row.focused && !focus_stepped) {
+                // Held arrows keep walking: the row step honors the OS
+                // auto-repeat, the slider's own stepping rule.
+                if (gui.key_pressed_or_repeated(ws::input::keys::kUp) &&
+                    i > 0) {
                     gui.set_focus(row_id(i - 1));
-                } else if (gui.input().key_pressed[ws::input::keys::kDown] &&
+                    focus_stepped = true;
+                } else if (gui.key_pressed_or_repeated(
+                               ws::input::keys::kDown) &&
                            i + 1 < row_count) {
                     gui.set_focus(row_id(i + 1));
+                    focus_stepped = true;
                 }
             }
 

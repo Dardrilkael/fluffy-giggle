@@ -253,15 +253,15 @@ PaletteEvent command_palette(GuiContext& gui, const ChromeTheme& theme,
         }
     }
     if (!freshly_opened && !state.prompting && gui.is_focused(search_id)) {
-        if (gui.input().key_pressed[static_cast<std::size_t>(
-                ws::input::keys::kUp)]) {
+        // Held arrows keep walking the ranked list - the OS auto-repeat,
+        // the table's own row-walk rule.
+        if (gui.key_pressed_or_repeated(ws::input::keys::kUp)) {
             gui.consume_key(ws::input::keys::kUp);
             if (state.selection > 0) {
                 --state.selection;
             }
         }
-        if (gui.input().key_pressed[static_cast<std::size_t>(
-                ws::input::keys::kDown)]) {
+        if (gui.key_pressed_or_repeated(ws::input::keys::kDown)) {
             gui.consume_key(ws::input::keys::kDown);
             if (state.selection < shown - 1) {
                 ++state.selection;

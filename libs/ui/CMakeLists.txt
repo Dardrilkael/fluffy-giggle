@@ -285,6 +285,23 @@ if(TARGET test_ui_tap)
   target_include_directories(test_ui_tap PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
 
+# The key-repeat suite: the OS auto-repeat edge (key_repeated) through
+# the policy read (key_pressed_or_repeated) and the widgets that honor
+# it (the text field's deleters and caret keys, the slider's arrows,
+# the table's row walk) plus the ones that stay edge-only (activation,
+# Home/End) - the gui archive + the r2d stub, the same purity class as
+# test_ui_gui.
+ws_add_test(ui_key_repeat
+  SOURCES tests/test_ui_key_repeat.cpp
+          tests/ui_gui_r2d_stub.cpp
+          src/text/font.cpp
+          src/text/stb_impl.cpp
+  LINK ws::ui_gui
+  DEPENDS stb)
+if(TARGET test_ui_key_repeat)
+  target_include_directories(test_ui_key_repeat PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+
 # --- Shader workflow targets (opt-in; the default build is unchanged) ------
 # The committed spirv.h stays the build input (no shader compiler needed);
 # these targets make staleness visible and regeneration explicit. The flags

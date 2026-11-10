@@ -87,14 +87,17 @@ inline constexpr int kMiddle = 2;    // GLFW_MOUSE_BUTTON_MIDDLE
 
 // The GLFW key codes the gui itself gives meaning to: Tab cycles focus,
 // Shift+Tab cycles back, Enter and Space activate the focused widget
-// (button, checkbox, tab), the horizontal arrows step the focused
-// slider, the vertical arrows step the focused table row - and the
-// text input owns the editing cluster: the caret keys, Backspace/Delete,
-// Home/End, Shift held for selection, Ctrl+A/C/V/X over the clipboard
-// seam. Apps keep using raw GLFW numbers for everything else (the arrays
-// in InputFrame are indexed by them); these exist so the gui core and its
-// widgets can never disagree about the spelling of the few keys with
-// built-in behavior.
+// (button, checkbox, tab) - always edge-only, never on a repeat - the
+// horizontal arrows step the focused slider, the vertical arrows step
+// the focused table row (both HONOR key_repeated: a held arrow keeps
+// stepping) - and the text input owns the editing cluster: the caret
+// keys, Backspace/Delete, Home/End, Shift held for selection, Ctrl+A/
+// C/V/X over the clipboard seam (the caret keys and the deleters honor
+// repeats; the clipboard cluster and Home/End do not). Apps keep using
+// raw GLFW numbers for everything else (the arrays in InputFrame are
+// indexed by them); these exist so the gui core and its widgets can
+// never disagree about the spelling of the few keys with built-in
+// behavior.
 namespace keys {
 inline constexpr int kTab = 258;          // GLFW_KEY_TAB
 inline constexpr int kEnter = 257;        // GLFW_KEY_ENTER
@@ -144,11 +147,11 @@ struct InputFrame {
     static constexpr int kMaxPointers = 1 + kMaxTouches;
 
     // Advances to the next frame: clears the per-frame edges (pressed/
-    // released, scroll, key presses, text input) and keeps held state and
-    // position. Released touches leave the table (order of the survivors
-    // preserved); held ones keep their slot. The shell calls this once per
-    // frame at the top of the pump, before this frame's input starts
-    // accumulating.
+    // released, scroll, key presses and repeats, text input) and keeps
+    // held state and position. Released touches leave the table (order of
+    // the survivors preserved); held ones keep their slot. The shell calls
+    // this once per frame at the top of the pump, before this frame's input
+    // starts accumulating.
     void next_frame();
 
     // --- touch table -----------------------------------------------------------
@@ -216,6 +219,20 @@ struct InputFrame {
     float scroll_dx = 0.0f;  // the frame's deltas, summed
     float scroll_dy = 0.0f;
     std::array<bool, kMaxKeys> key_pressed{};  // key went down this frame
+    // The OS repeated a HELD key this frame (GLFW_REPEAT on desktop, a
+    // repeat-counted key event on Android): the auto-repeat fact, kept
+    // apart from key_pressed so the fresh-press edge stays pure - the
+    // platform layers never fold a repeat into key_pressed. Whether a
+    // repeat COUNTS is a widget policy, not an input fact: a consumer
+    // that steps on held keys (a slider's arrows, the text field's
+    // backspace, the table's row walk) reads this edge next to the
+    // press; a consumer of distinct presses (activation keys, chords,
+    // mnemonics) ignores it. The two edges can co-occur on one frame -
+    // a platform may deliver a repeat the same frame it (re)anchors a
+    // press - and a repeat never lands for a key key_down does not
+    // hold. Holds with no OS repeat (a soft keyboard, a test) simply
+    // report neither edge.
+    std::array<bool, kMaxKeys> key_repeated{};  // a held key auto-repeated
     // UTF-32 codepoints typed this frame, in arrival order.
     std::vector<std::uint32_t> text_input;
 

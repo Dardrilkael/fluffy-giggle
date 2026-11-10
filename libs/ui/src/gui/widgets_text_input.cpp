@@ -154,7 +154,9 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
             in.key_down[static_cast<std::size_t>(ws::input::keys::kRightControl)];
 
         // The caret keys: Shift extends from the anchor, plain collapses
-        // it onto the caret - the rule every editor spells.
+        // it onto the caret - the rule every editor spells. Held caret
+        // keys keep moving: they honor the OS auto-repeat, the way a
+        // held arrow glides through text everywhere else.
         const auto move_caret = [&](int to) {
             eb.caret = to;
             if (!shift) {
@@ -162,10 +164,10 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
             }
             edit.blink = 0.0f;
         };
-        if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kLeft)]) {
+        if (gui.key_pressed_or_repeated(ws::input::keys::kLeft)) {
             move_caret(std::max(0, eb.caret - 1));
         }
-        if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kRight)]) {
+        if (gui.key_pressed_or_repeated(ws::input::keys::kRight)) {
             move_caret(std::min(eb.len, eb.caret + 1));
         }
         if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kHome)]) {
@@ -197,10 +199,12 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
         // Deleters before typing, when one frame carries both (no arrival
         // order exists between key edges and the codepoint list): the
         // old text leaves, then the new lands at the settled caret.
-        if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kBackspace)] ||
-            in.key_pressed[static_cast<std::size_t>(ws::input::keys::kDelete)]) {
+        // Held deleters keep deleting - they honor the OS auto-repeat,
+        // the caret keys' own rule.
+        if (gui.key_pressed_or_repeated(ws::input::keys::kBackspace) ||
+            gui.key_pressed_or_repeated(ws::input::keys::kDelete)) {
             const bool forward =
-                in.key_pressed[static_cast<std::size_t>(ws::input::keys::kDelete)];
+                gui.key_pressed_or_repeated(ws::input::keys::kDelete);
             if (eb.has_selection()) {
                 eb.erase_selection();
                 changed = true;

@@ -325,8 +325,18 @@ public:
     // how an open menu owns its navigation cluster (the arrows, Enter,
     // the works) so the widget underneath never sees them. Widgets read
     // gui.input(), never the platform's frame, so this is the whole
-    // story. Unknown keys are a no-op.
+    // story. The REPEAT edge clears with it: a cluster owned fresh is
+    // owned held. Unknown keys are a no-op.
     void consume_key(int key);
+    // The repeat-honoring spelling of the pressed edge: a fresh press
+    // OR the OS's auto-repeat of a held key, this frame, from the
+    // context's own copy. This is the read for consumers that STEP on
+    // held keys - a slider's arrows, the text field's deleters and
+    // caret keys, the table's row walk, the palette's list walk.
+    // Consumers of DISTINCT presses (activation, Tab focus, Escape,
+    // chords, mnemonics) keep reading input().key_pressed and never
+    // this. Unknown keys answer false.
+    bool key_pressed_or_repeated(int key) const;
     // The typing spelling of consume_key: clears the frame's text_input
     // codepoints (the vector keeps its capacity - no allocation), so an
     // open menu's mnemonic walk eats the frame's letters.

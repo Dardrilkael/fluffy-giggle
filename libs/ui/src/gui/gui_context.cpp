@@ -613,10 +613,26 @@ void GuiContext::consume_key(int key) {
     // The context's OWN copy: begin_frame copies the snapshot in, so
     // clearing an edge here hides it from every later reader this
     // frame - how an open menu owns its navigation cluster. The
-    // platform's frame is untouched.
+    // platform's frame is untouched. The repeat edge clears with the
+    // press: a key whose fresh press is owned is owned held too, or
+    // the widget beneath would watch a repeat arrive for a key it
+    // never saw press.
     if (key >= 0 && key < ws::input::InputFrame::kMaxKeys) {
         input_.key_pressed[static_cast<std::size_t>(key)] = false;
+        input_.key_repeated[static_cast<std::size_t>(key)] = false;
     }
+}
+
+bool GuiContext::key_pressed_or_repeated(int key) const {
+    // The same copy consume_key edits, so an owned cluster hides its
+    // repeats from this read too. Out-of-range keys (a caller's raw
+    // platform code) answer false, the key_pressed contract's own
+    // drop-safe shape.
+    if (key < 0 || key >= ws::input::InputFrame::kMaxKeys) {
+        return false;
+    }
+    const std::size_t slot = static_cast<std::size_t>(key);
+    return input_.key_pressed[slot] || input_.key_repeated[slot];
 }
 
 void GuiContext::consume_typing() {
