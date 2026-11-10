@@ -289,3 +289,19 @@ ctest --preset debug -R ui
 - The Android soft-keyboard IME is unsupported.
 - No directional or gamepad focus nav yet. The focusable list is the seam for it.
 - Handle generation wraps after 4096 reuses of one slot. The bindless table is capped at 1024 slots.
+
+## Future widget work (verified gaps — zero matches in gui headers)
+
+These are the missing widgets that apps currently hand-roll. Each is a candidate for a future stage; the design must keep the no-leak rule and the behavior/draw split.
+
+| Widget | Gap | Notes |
+|--------|-----|-------|
+| **Plot / chart** | Biggest gap. `circsim_editor` hand-rolls its waveform plot (~500 lines in `results_panel.cpp` over `canvas2d` + `ws::circsim::plot` math). The legacy ImGui wrapper (`widgets.hpp`) wraps ImPlot, but that's the deprecated path; `neuralnet-studio` (loss curves) would need to re-hand-roll it too. | Needs: series API, axes, grid, zoom/pan, legend, tooltip, the same r2d primitives the canvas uses. |
+| **Tree / hierarchy** | `collapsing_header` is one level deep; no multi-level `TreeNode` equivalent for netlist explorers / outliners. | Needs: indent tracking, expand/collapse state per node, keyboard nav, drag-reorder seam. |
+| **Multiline text editor** | `text_input` is single-line, ASCII-only by design ("v1 edits ASCII", `widgets.hpp:1005`). No wrapping edit surface. | Needs: line buffer, soft wrap, cursor/selection over lines, undo stack, syntax highlight tokens (painter seam), horizontal scroll. |
+| **Numeric text entry** | No `InputInt`/`InputFloat` equivalent and no filter param — `insert_filtered` only strips non-ASCII bytes, it doesn't validate formats. The property grid maps numerics to sliders, so you can't type an exact value like `0.0001`. | Needs: format string / step / min / max, parse-on-commit with `Result`, the same painter seam as `text_input`. |
+| **Table virtualization** | `widgets_table.cpp:179` loops `0..row_count` and emits draws for every row each frame; no `ListClipper`-style viewport culling. Fine for hundreds of rows, not tens of thousands. | Needs: visible-range computation from scroll offset + row height, only emit draws for visible rows + 1 sentinel. |
+| **drag_int** | Asymmetry: sliders have int variants (`slider_int`), drag has only `drag_float`. | Trivial add: `drag_int` mirroring `drag_float` with integer step/clamp. |
+| **Image widget** | Only icon sprites on buttons; no standalone picture/scaled-image draw. | Needs: `image(texture, size, uv0, uv1, tint)` with fit/fill/stretch modes, the same painter seam. |
+| **Color picker** | Nothing (`theme_color.cpp` is theme math, not a widget). | Needs: HSV/hex/RGB inputs, alpha, palette swatches, the painter seam; `ws::math` already has Oklch. |
+| **General drag-&-drop payload API** | DnD exists only inside the dock; apps can't offer cross-widget drags (e.g., palette → canvas). | Needs: `begin_drag(payload_id, type_tag, user_data)` / `accept_drag(type_tag)` / `drop_result()` returning the payload; the dock's internal DnD stays private. |
