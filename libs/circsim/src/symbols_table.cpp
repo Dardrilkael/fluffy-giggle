@@ -83,6 +83,13 @@ DrawPrim rect(double x1, double y1, double x2, double y2) {
     return d;
 }
 
+// A closed diamond centred on the origin: the IEEE outline of a
+// dependent (controlled) source.
+DrawPrim diamond(double hw, double hh) {
+    return poly({Pos{-hw, 0.0}, Pos{0.0, hh}, Pos{hw, 0.0}, Pos{0.0, -hh},
+                 Pos{-hw, 0.0}});
+}
+
 DrawPrim text(double x, double y, std::string s) {
     DrawPrim d;
     d.kind = DrawPrim::Kind::Text;
@@ -173,7 +180,13 @@ SymbolDef mosfet(std::string key, std::string name, bool pmos) {
     // source-to-bulk short at every zoom.
     s.draw = {// gate lead + gate bar + channel bar
               line(-3.0, 0.0, -1.0, 0.0), line(-1.0, -1.6, -1.0, 1.6),
-              line(0.0, -1.6, 0.0, 1.6),
+              // the channel as three segments (the enhancement-mode
+              // convention: no channel until the gate pulls one in).
+              // The drain stroke lands on the top segment (y=1.0), the
+              // source stroke on the bottom one (y=-1.0), and the bulk
+              // drop below still tees off the bottom segment's end.
+              line(0.0, 1.6, 0.0, 0.55), line(0.0, 0.3, 0.0, -0.3),
+              line(0.0, -0.55, 0.0, -1.6),
               // drain + source strokes
               line(0.0, 1.0, 2.0, 3.0), line(0.0, -1.0, 2.0, -3.0),
               // bulk route down and out to the b pin
@@ -193,10 +206,14 @@ const std::vector<SymbolDef>& table() {
     static const std::vector<SymbolDef> symbols = {
         two_terminal(
             "r", "Resistor", 'R', "R", {},
-            {// the classic zigzag body between the pins
-             poly({Pos{-3.0, 0.0}, Pos{-2.0, 0.6}, Pos{-1.0, -0.6},
-                  Pos{0.0, 0.6}, Pos{1.0, -0.6}, Pos{2.0, 0.6},
-                  Pos{3.0, 0.0}})}),
+            {// short flat leads, then the classic zigzag. Every slope
+             // is identical (0.375 run : 0.7 rise at the half-strokes,
+             // 0.75 : 1.4 in the body), so the teeth read evenly at any
+             // zoom and the shape is its own 180-degree rotation.
+             poly({Pos{-3.0, 0.0}, Pos{-2.25, 0.0}, Pos{-1.875, 0.7},
+                   Pos{-1.125, -0.7}, Pos{-0.375, 0.7}, Pos{0.375, -0.7},
+                   Pos{1.125, 0.7}, Pos{1.875, -0.7}, Pos{2.25, 0.0},
+                   Pos{3.0, 0.0}})}),
         two_terminal(
             "c", "Capacitor", 'C', "C", {ParamEmit{.key = "ic", .prefix = "IC="}},
             {line(-3.0, 0.0, -0.6, 0.0), line(-0.6, -1.6, -0.6, 1.6),
@@ -212,7 +229,7 @@ const std::vector<SymbolDef>& table() {
         // enforces the K prefix, and export derives the two inductor
         // names from it (ref K3 -> cards L3p, L3s and K3), so the deck's
         // coupling can never name an inductor that is not there. The
-        // picture: two 2-bump coils facing the laminated core, the
+        // picture: two 4-bump coils facing the laminated core, the
         // polarity dots marking the same-named ends (p+ over s+).
         [] {
             SymbolDef s;
@@ -237,21 +254,28 @@ const std::vector<SymbolDef>& table() {
                 CardEmit{'K', "", {},
                          {ParamEmit{.key = "k", .prefix = "", .optional = false}},
                          true}};
-            s.draw = {// the primary coil: two right-facing bumps, apexes
-                      // exactly on the +/-2 pin rows so the leads land
-                      // on the winding's ends
-                      arc(-1.7, 1.0, 1.0, -90.0, 90.0),
-                      arc(-1.7, -1.0, 1.0, -90.0, 90.0),
+            s.draw = {// the primary coil: four right-facing bumps stacked
+                      // from y=-2 to y=2, so the winding's ends sit
+                      // exactly on the +/-2 pin rows and the leads land
+                      // on them
+                      arc(-1.4, 1.5, 0.5, -90.0, 90.0),
+                      arc(-1.4, 0.5, 0.5, -90.0, 90.0),
+                      arc(-1.4, -0.5, 0.5, -90.0, 90.0),
+                      arc(-1.4, -1.5, 0.5, -90.0, 90.0),
                       // the secondary, mirrored to face back
-                      arc(1.7, 1.0, 1.0, 90.0, 270.0),
-                      arc(1.7, -1.0, 1.0, 90.0, 270.0),
-                      // the laminated core between them
-                      line(-0.35, -2.2, -0.35, 2.2), line(0.35, -2.2, 0.35, 2.2),
+                      arc(1.4, 1.5, 0.5, 90.0, 270.0),
+                      arc(1.4, 0.5, 0.5, 90.0, 270.0),
+                      arc(1.4, -0.5, 0.5, 90.0, 270.0),
+                      arc(1.4, -1.5, 0.5, 90.0, 270.0),
+                      // the laminated core between them, a hair taller
+                      // than the windings
+                      line(-0.25, -2.1, -0.25, 2.1), line(0.25, -2.1, 0.25, 2.1),
                       // the leads
-                      line(-5.0, 2.0, -1.7, 2.0), line(-5.0, -2.0, -1.7, -2.0),
-                      line(1.7, 2.0, 5.0, 2.0), line(1.7, -2.0, 5.0, -2.0),
-                      // the polarity dots: p+ and s+ are the same end
-                      dot(-2.6, 2.7, 0.15), dot(2.6, 2.7, 0.15)};
+                      line(-5.0, 2.0, -1.4, 2.0), line(-5.0, -2.0, -1.4, -2.0),
+                      line(1.4, 2.0, 5.0, 2.0), line(1.4, -2.0, 5.0, -2.0),
+                      // the polarity dots beside the top winding ends:
+                      // p+ and s+ are the same end
+                      dot(-2.2, 1.45, 0.13), dot(2.2, 1.45, 0.13)};
             return s;
         }(),
         // Coupling (stage 24): the K card on the canvas - no pins, no
@@ -356,10 +380,10 @@ const std::vector<SymbolDef>& table() {
         // The controlled sources (stage 24), ws::spice's M1 set that no
         // built-in ever carried. Card order is the house grammar's:
         // E/G take four nodes OUT+ OUT- IN+ IN- (the E is a voltage
-        // SOURCE - its +/ - marks sit on the output side; the G is a
-        // current source - an arrow instead), drawn LTspice-style with
-        // the sense pair stacked on the left and the output pair on the
-        // right. F/H are two-terminal (out+ out-) plus the NAME of the
+        // SOURCE - a +/- pair inside the diamond; the G is a current
+        // source - an arrow instead), drawn as the IEEE dependent-source
+        // diamond, the sense pair stacked on the left and the output
+        // pair on the right. F/H: two-terminal (out+ out-) plus the NAME of the
         // V source whose branch current controls them - the grammar
         // spells the source before the gain, so both ride as params
         // (the card order forbids the value-first spelling).
@@ -373,17 +397,19 @@ const std::vector<SymbolDef>& table() {
                       PinDef{.name = "out-", .dx = 5.0, .dy = -1.0, .dir = 0},
                       PinDef{.name = "in+", .dx = -5.0, .dy = 1.0, .dir = 180},
                       PinDef{.name = "in-", .dx = -5.0, .dy = -1.0, .dir = 180}};
-            s.draw = {rect(-2.5, -2.0, 2.5, 2.0),
-                      line(-5.0, 1.0, -2.5, 1.0), line(-5.0, -1.0, -2.5, -1.0),
-                      line(2.5, 1.0, 5.0, 1.0), line(2.5, -1.0, 5.0, -1.0),
-                      text(-0.45, -0.55, "E"),
-                      // the sense pair's polarity
-                      line(-3.85, 1.85, -3.25, 1.85),
-                      line(-3.55, 1.55, -3.55, 2.15),
-                      line(-3.85, -1.85, -3.25, -1.85),
-                      // the output pair's polarity
-                      line(3.25, 1.85, 3.85, 1.85), line(3.55, 1.55, 3.55, 2.15),
-                      line(3.25, -1.85, 3.85, -1.85)};
+            s.draw = {diamond(2.5, 2.5),
+                      // the four leads, each ending on the diamond's
+                      // edge (x = +-1.5 at y = +-1)
+                      line(-5.0, 1.0, -1.5, 1.0), line(-5.0, -1.0, -1.5, -1.0),
+                      line(1.5, 1.0, 5.0, 1.0), line(1.5, -1.0, 5.0, -1.0),
+                      // the output is a voltage: +/- inside the diamond,
+                      // + on the out+ (top) side
+                      line(-0.3, 1.3, 0.3, 1.3), line(0.0, 1.0, 0.0, 1.6),
+                      line(-0.3, -1.3, 0.3, -1.3),
+                      // the sense pair's polarity, beside its leads
+                      line(-3.85, 1.55, -3.25, 1.55),
+                      line(-3.55, 1.25, -3.55, 1.85),
+                      line(-3.85, -1.55, -3.25, -1.55)};
             return s;
         }(),
         [] {
@@ -396,18 +422,17 @@ const std::vector<SymbolDef>& table() {
                       PinDef{.name = "out-", .dx = 5.0, .dy = -1.0, .dir = 0},
                       PinDef{.name = "in+", .dx = -5.0, .dy = 1.0, .dir = 180},
                       PinDef{.name = "in-", .dx = -5.0, .dy = -1.0, .dir = 180}};
-            s.draw = {rect(-2.5, -2.0, 2.5, 2.0),
-                      line(-5.0, 1.0, -2.5, 1.0), line(-5.0, -1.0, -2.5, -1.0),
-                      line(2.5, 1.0, 5.0, 1.0), line(2.5, -1.0, 5.0, -1.0),
-                      text(-0.45, -0.55, "G"),
+            s.draw = {diamond(2.5, 2.5),
+                      line(-5.0, 1.0, -1.5, 1.0), line(-5.0, -1.0, -1.5, -1.0),
+                      line(1.5, 1.0, 5.0, 1.0), line(1.5, -1.0, 5.0, -1.0),
                       // the sense pair is a voltage: +/-
-                      line(-3.85, 1.85, -3.25, 1.85),
-                      line(-3.55, 1.55, -3.55, 2.15),
-                      line(-3.85, -1.85, -3.25, -1.85),
-                      // the output is a current: an arrow through the
-                      // out+ lead (pointing into the source, the i
-                      // source's own convention read sideways)
-                      polyfill({Pos{3.15, 1.0}, Pos{3.6, 0.75}, Pos{3.6, 1.25}})};
+                      line(-3.85, 1.55, -3.25, 1.55),
+                      line(-3.55, 1.25, -3.55, 1.85),
+                      line(-3.85, -1.55, -3.25, -1.55),
+                      // the output is a current: the i source's arrow
+                      // inside the diamond, pointing at out+ (top)
+                      line(0.0, -1.3, 0.0, 0.6),
+                      polyfill({Pos{0.0, 1.4}, Pos{-0.4, 0.6}, Pos{0.4, 0.6}})};
             return s;
         }(),
         [] {
@@ -423,12 +448,11 @@ const std::vector<SymbolDef>& table() {
                         spec(ParamSpec::Type::Number, "gain", "Gain")};
             s.emit = {ParamEmit{.key = "vs", .prefix = "", .optional = false},
                       ParamEmit{.key = "gain", .prefix = "", .optional = false}};
-            // The i source's own body (a current output) with the
-            // letter carrying the difference.
-            s.draw = {line(-3.0, 0.0, -1.0, 0.0), line(1.0, 0.0, 3.0, 0.0),
-                      circle(0.0, 0.0, 1.0), line(0.0, -0.7, 0.0, 0.25),
-                      polyfill({Pos{0.0, 0.75}, Pos{-0.3, 0.25}, Pos{0.3, 0.25}}),
-                      text(1.15, 1.15, "F")};
+            // The i source's arrow (a current output) inside the
+            // dependent-source diamond.
+            s.draw = {line(-3.0, 0.0, -1.6, 0.0), line(1.6, 0.0, 3.0, 0.0),
+                      diamond(1.6, 1.6), line(0.0, -0.85, 0.0, 0.3),
+                      polyfill({Pos{0.0, 0.95}, Pos{-0.3, 0.3}, Pos{0.3, 0.3}})};
             return s;
         }(),
         [] {
@@ -444,12 +468,11 @@ const std::vector<SymbolDef>& table() {
                         spec(ParamSpec::Type::Number, "r", "R (ohms)")};
             s.emit = {ParamEmit{.key = "vs", .prefix = "", .optional = false},
                       ParamEmit{.key = "r", .prefix = "", .optional = false}};
-            // The v source's own body (a voltage output): +/-
-            // marks, no arrow.
-            s.draw = {line(-3.0, 0.0, -1.0, 0.0), line(1.0, 0.0, 3.0, 0.0),
-                      circle(0.0, 0.0, 1.0), line(-0.65, 0.0, -0.05, 0.0),
-                      line(-0.35, -0.3, -0.35, 0.3), line(0.05, 0.0, 0.65, 0.0),
-                      text(1.15, 1.15, "H")};
+            // The v source's +/- marks (a voltage output) inside the
+            // dependent-source diamond, + on the p side.
+            s.draw = {line(-3.0, 0.0, -1.6, 0.0), line(1.6, 0.0, 3.0, 0.0),
+                      diamond(1.6, 1.6), line(-0.95, 0.0, -0.35, 0.0),
+                      line(-0.65, -0.3, -0.65, 0.3), line(0.35, 0.0, 0.95, 0.0)};
             return s;
         }(),
         // The behavioral source (stage 24): the B card is V= or I= plus
