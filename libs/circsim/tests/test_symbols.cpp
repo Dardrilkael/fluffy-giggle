@@ -922,3 +922,132 @@ TEST_CASE("the built-in tline exports and simulates without any library") {
     CHECK(std::abs(va[1] - 1.0) < 0.05);    // 500k: open
     CHECK(std::abs(va[2]) < 0.05);          // 750k: short again
 }
+
+// --- the model library's shelf kinds (stage 25) -----------------------------
+
+TEST_CASE("every model-bearing symbol declares its library kind") {
+    // The kinds map 1:1 onto the .model TYPE tokens ("d", "npn", ...);
+    // "opamp" is the one extension (a .subckt card). The property grid's
+    // picker offers this kind's cards, ERC checks a named card against
+    // it, export emits the card a part names.
+    struct Row {
+        const char* key;
+        const char* kind;
+    };
+    for (const Row& row : {Row{"d", "d"}, Row{"led", "d"}, Row{"npn", "npn"},
+                           Row{"pnp", "pnp"}, Row{"nmos", "nmos"},
+                           Row{"pmos", "pmos"}, Row{"njf", "njf"},
+                           Row{"pjf", "pjf"}, Row{"s", "sw"}, Row{"w", "sw"},
+                           Row{"opamp", "opamp"}}) {
+        const SymbolDef* sym = ws::circsim::find_symbol(row.key);
+        REQUIRE(sym != nullptr);
+        CHECK(sym->model_kind == row.kind);
+        CHECK(sym->needs_model);
+    }
+    // A part that takes no model carries no kind: the text row is the
+    // whole story for these.
+    for (const char* key : {"r", "c", "l", "v", "i", "gnd", "vcc", "tline"}) {
+        const SymbolDef* sym = ws::circsim::find_symbol(key);
+        REQUIRE(sym != nullptr);
+        CHECK(sym->model_kind.empty());
+    }
+}
+
+TEST_CASE("the op amp is a five-pin X instance over the model library") {
+    // One symbol, one `model` param - the subckt NAME it decks as
+    // `X<ref> out inp inn vp vm <model>`. The built-in library's opamp
+    // cards (linear macromodels) are what the picker offers; the pins
+    // land at whole-grid points with leads pointing into the body.
+    const SymbolDef* op = ws::circsim::find_symbol("opamp");
+    REQUIRE(op != nullptr);
+    CHECK(op->spice_letter == 'X');
+    CHECK(op->ref_prefix == "X");
+    CHECK(op->needs_model);
+    CHECK(!op->needs_value);
+    CHECK(op->model_kind == "opamp");
+    REQUIRE(op->pins.size() == 5);
+    CHECK(op->pins[0].name == "out");
+    CHECK(op->pins[1].name == "in+");
+    CHECK(op->pins[2].name == "in-");
+    CHECK(op->pins[3].name == "v+");
+    CHECK(op->pins[4].name == "v-");
+    for (const ws::circsim::PinDef& p : op->pins) {
+        // Whole grid units so rotated pins stay on grid points, and a
+        // lead direction pointing INTO the body (the invariants' rule).
+        CHECK(p.dx == std::floor(p.dx));
+        CHECK(p.dy == std::floor(p.dy));
+    }
+    // The params: just the model.
+    REQUIRE(op->params.size() == 1);
+    CHECK(op->params[0].key == "model");
+    CHECK(op->params[0].type == ParamSpec::Type::Text);
+    REQUIRE(op->emit.size() == 1);
+    CHECK(op->emit[0].key == "model");
+    CHECK(!op->emit[0].optional);
+    // The picture: a triangle, the +/- input marks, the supply stubs.
+    CHECK(!op->draw.empty());
+    bool triangle = false;
+    for (const DrawPrim& d : op->draw) {
+        if (d.kind == DrawPrim::Kind::Poly && d.pts.size() == 4) {
+            triangle = true;
+        }
+    }
+    CHECK(triangle);
+}
+
+TEST_CASE("a .csym symbol's model_kind round-trips") {
+    // Stage 25: a .csym semiconductor names which library shelf its
+    // picker offers and ERC checks against - the field must survive a
+    // save -> load cycle untouched, and only when set (every classic
+    // .csym stays byte-identical).
+    constexpr std::string_view with_kind = R"json({
+        "format": "circsim-symbols", "version": 1,
+        "symbols": [{"key": "myd", "name": "My diode", "spice": "D",
+                     "ref": "D", "model_kind": "d",
+                     "pins": [{"name": "a", "pos": [-3.0, 0.0], "dir": 180},
+                              {"name": "k", "pos": [3.0, 0.0], "dir": 0}]}]
+    })json";
+    std::vector<ws::circsim::Diag> diags;
+    SymbolLibrary lib;
+    REQUIRE(lib.load_text(with_kind, "kind.csym", diags).has_value());
+    const SymbolDef* d = lib.find("myd");
+    REQUIRE(d != nullptr);
+    CHECK(d->model_kind == "d");
+
+    const std::string saved = lib.save();
+    CHECK(saved.find("\"model_kind\": \"d\"") != std::string::npos);
+    std::vector<ws::circsim::Diag> diags2;
+    SymbolLibrary again;
+    REQUIRE(again.load_text(saved, "kind2.csym", diags2).has_value());
+    REQUIRE(again.find("myd") != nullptr);
+    CHECK(again.find("myd")->model_kind == "d");
+    CHECK(again.save() == saved);  // the fixpoint holds
+
+    // A kind the library has not met yet still loads (it rides as-is -
+    // the built-in table grows kinds the editor has not met), and a
+    // non-text value warns and lands empty.
+    constexpr std::string_view odd = R"json({
+        "format": "circsim-symbols", "version": 1,
+        "symbols": [{"key": "zed", "name": "Zed", "spice": "Z", "ref": "Z",
+                     "model_kind": "zed",
+                     "pins": [{"name": "a", "pos": [-2.0, 0.0], "dir": 180},
+                              {"name": "b", "pos": [2.0, 0.0], "dir": 0}]}]
+    })json";
+    std::vector<ws::circsim::Diag> diags3;
+    REQUIRE(lib.load_text(odd, "odd.csym", diags3).has_value());
+    REQUIRE(lib.find("zed") != nullptr);
+    CHECK(lib.find("zed")->model_kind == "zed");
+
+    constexpr std::string_view bad = R"json({
+        "format": "circsim-symbols", "version": 1,
+        "symbols": [{"key": "bad", "name": "Bad", "spice": "Z", "ref": "Z",
+                     "model_kind": 7,
+                     "pins": [{"name": "a", "pos": [-2.0, 0.0], "dir": 180},
+                              {"name": "b", "pos": [2.0, 0.0], "dir": 0}]}]
+    })json";
+    std::vector<ws::circsim::Diag> diags4;
+    REQUIRE(lib.load_text(bad, "bad.csym", diags4).has_value());
+    REQUIRE(lib.find("bad") != nullptr);
+    CHECK(lib.find("bad")->model_kind.empty());
+    CHECK(has_diag(diags4, "circsim.symbols.bad_field"));
+}

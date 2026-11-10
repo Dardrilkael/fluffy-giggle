@@ -5,6 +5,7 @@
 #include <vector>
 
 #include <ws/circsim/erc.hpp>
+#include <ws/circsim/models.hpp>
 #include <ws/spice/parse.hpp>
 
 #include "util.hpp"
@@ -303,6 +304,29 @@ std::vector<Diag> run_erc(const Schematic& s, const NetBuild& build,
                     Severity::Error, "circsim.erc.missing_model",
                     "part names no .model (set the 'model' parameter)", where,
                     on_part));
+            }
+        }
+        // The named model must be the RIGHT KIND when it is a
+        // library card (stage 25): a diode part naming 2n3904 decks
+        // fine and dies at ws::spice's own type check with the error
+        // pointing at a library line - ERC says it HERE, at the part,
+        // in the picker's own vocabulary. A name the library does not
+        // know stays the directives story (a custom model, checked by
+        // the engine, as always); the symbol's model_kind can be
+        // empty for a .csym symbol that takes models of any kind.
+        if (!sym->model_kind.empty()) {
+            const auto it = p.params.find("model");
+            if (it != p.params.end() && !it->second.empty()) {
+                const ModelCard* card = find_builtin_model(it->second);
+                if (card != nullptr && card->kind != sym->model_kind) {
+                    out.push_back(make_diag(
+                        Severity::Error, "circsim.erc.model_kind",
+                        "model '" + it->second + "' is a built-in " +
+                            model_kind_label(card->kind) + " card; " +
+                            where + " takes " +
+                            model_kind_label(sym->model_kind) + " cards",
+                        where, on_part));
+                }
             }
         }
         // --- param typing (stage 2): the symbol's specs are the truth ---

@@ -28,6 +28,7 @@
 #include <vector>
 
 #include <ws/core/assert.hpp>
+#include <ws/circsim/models.hpp>
 #include <ws/circsim/plot.hpp>
 #include <ws/circsim/text.hpp>  // fmt_num: the locale-free %.12g
 #include <ws/input/input.hpp>
@@ -221,6 +222,81 @@ void part_text_row(Editor& ed, gui::GuiContext& gui,
         if (!readback.empty()) {
             hint_line(layout, theme, readback);
         }
+    }
+}
+
+// The model library row (stage 25): the `model` param's shelf, the
+// row under the Model field. A combo of the symbol's kind's built-in
+// cards - picking one lands the card's NAME through the same seam
+// the text row rides (one undo step per pick), and the epoch bump
+// reloads every field so the Model row shows the name the pick
+// landed. The text row above stays first-class: a hand-typed name (a
+// custom .model or .subckt in the directives) is the escape hatch,
+// and the hints below say which story the current name is in - a
+// shelf card's description, a wrong-kind card's ERC story, a custom
+// name's pointer at the directives block, an empty field's
+// invitation.
+void draw_model_library_row(Editor& ed, gui::GuiContext& gui,
+                            gui::LayoutCursor& layout,
+                            const gui::ChromeTheme& theme,
+                            const ws::circsim::Part& p,
+                            const ws::circsim::SymbolDef& sym,
+                            const std::string& current) {
+    const std::vector<const ws::circsim::ModelCard*> shelf =
+        ws::circsim::builtin_models_of_kind(sym.model_kind);
+    if (shelf.empty()) {
+        return;  // a kind with no cards yet: the text row is the story
+    }
+    std::vector<const char*> items;
+    int selected = -1;
+    for (std::size_t i = 0; i < shelf.size(); ++i) {
+        items.push_back(shelf[i]->title.c_str());
+        if (!ws::circsim::CiLess{}(current, shelf[i]->name) &&
+            !ws::circsim::CiLess{}(shelf[i]->name, current)) {
+            selected = static_cast<int>(i);
+        }
+    }
+    // The "##" rule again (text_input_tracked's note): the picker's
+    // own buffer key, so two model-bearing parts never share a
+    // dropdown state - and the Mode/Waveform combos' ".mode"/".fmt"
+    // suffix idiom is the precedent for living beside the param.
+    const std::string key = part_field_key(p.id, 2, "model") + ".lib";
+    FieldBuf& field = field_of(ed, key);
+    if (field.stamp != ed.field_stamp) {
+        field.stamp = ed.field_stamp;
+        field.combo_open = false;
+    }
+    if (gui::combo(gui, layout, theme, ("Library##" + key).c_str(),
+                   items.data(), static_cast<int>(items.size()), selected,
+                   field.combo_open) &&
+        selected >= 0) {
+        push_part_text(*ed.doc, p.id, 2, "model",
+                       shelf[static_cast<std::size_t>(selected)]->name,
+                       "Pick model");
+        ed.bump_edit_epoch();  // the Model row reloads with the name
+        return;               // the next frame draws the new hints
+    }
+    if (selected >= 0) {
+        hint_line(layout, theme,
+                  shelf[static_cast<std::size_t>(selected)]->desc);
+    } else if (!current.empty()) {
+        const ws::circsim::ModelCard* card =
+            ws::circsim::find_builtin_model(current);
+        if (card != nullptr) {
+            hint_line(layout, theme,
+                      "a built-in " +
+                          ws::circsim::model_kind_label(card->kind) +
+                          " card - this part takes " +
+                          ws::circsim::model_kind_label(sym.model_kind) +
+                          " cards");
+        } else {
+            hint_line(layout, theme,
+                      "custom model - its .model or .subckt card lives in "
+                      "Simulation > Directives");
+        }
+    } else {
+        hint_line(layout, theme,
+                  "pick a card from the shelf, or type a custom name above");
     }
 }
 
@@ -2122,6 +2198,14 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
                 } else {
                     part_text_row(ed, gui, layout, theme, shown.c_str(),
                                   p->id, 2, spec.key, current);
+                }
+                // The model param's shelf rides directly under the
+                // Model field (stage 25) - the picker is a row of the
+                // property grid, not a separate panel, and a symbol
+                // that declares a model_kind gets it for free.
+                if (spec.key == "model" && !sym->model_kind.empty()) {
+                    draw_model_library_row(ed, gui, layout, theme, *p,
+                                           *sym, current);
                 }
             }
         }

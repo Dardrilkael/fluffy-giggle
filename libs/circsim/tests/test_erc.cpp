@@ -354,3 +354,33 @@ TEST_CASE("the orphan devices' required params and refs check like any other") {
         CHECK(has(ws::circsim::run_erc(b.s), "circsim.erc.missing_param"));
     }
 }
+
+TEST_CASE("a library card of the wrong kind errors in the picker's vocabulary") {
+    // Stage 25: a diode part naming 2n3904 decks fine and dies at
+    // ws::spice's own type check with the error pointing at a library
+    // line - ERC says it HERE, at the part, before the run.
+    SUBCASE("a diode naming a BJT card") {
+        Bench b;
+        Part* d = b.part("d", "D1", "", {0.0, 0.0});
+        d->params["model"] = "2n3904";
+        CHECK(has(ws::circsim::run_erc(b.s), "circsim.erc.model_kind"));
+    }
+    SUBCASE("the right kind is quiet") {
+        Bench b;
+        Part* d = b.part("d", "D1", "", {0.0, 0.0});
+        d->params["model"] = "1n4148";
+        CHECK_FALSE(has(ws::circsim::run_erc(b.s), "circsim.erc.model_kind"));
+    }
+    SUBCASE("a custom name is the directives story (no kind check)") {
+        Bench b;
+        Part* d = b.part("d", "D1", "", {0.0, 0.0});
+        d->params["model"] = "mydiode";
+        CHECK_FALSE(has(ws::circsim::run_erc(b.s), "circsim.erc.model_kind"));
+    }
+    SUBCASE("case-insensitive on both sides") {
+        Bench b;
+        Part* d = b.part("d", "D1", "", {0.0, 0.0});
+        d->params["model"] = "2N3904";
+        CHECK(has(ws::circsim::run_erc(b.s), "circsim.erc.model_kind"));
+    }
+}

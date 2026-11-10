@@ -50,9 +50,19 @@ struct SpiceExport {
     std::map<std::string, std::uint32_t, CiLess> node_net;      // token -> id
 
     struct Origin {
-        enum class Kind { None, Part, Directives, Analysis, Temp };
+        enum class Kind {
+            None,
+            Part,
+            Directives,
+            Analysis,
+            Temp,
+            Library,  // the built-in model library's auto-emitted card
+                      // (.model / .subckt); .id names the FIRST part
+                      // that referenced it, so a bad card locates onto
+                      // the pick that brought it in
+        };
         Kind kind = Kind::None;
-        std::uint32_t id = 0;  // part id when kind == Part
+        std::uint32_t id = 0;  // part id when kind == Part or Library
     };
     // Deck line n (1-based) -> where it came from; index 0 is line 1.
     std::vector<Origin> line_origins;

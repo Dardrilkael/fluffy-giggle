@@ -333,6 +333,85 @@ def main():
           "zener sinks exactly the 10 mA bias")
 
 
+    # --- the built-in model library (stage 25) -------------------------------
+    # A semiconductor part's `model` param names a card and the card rides
+    # the deck with no directives block - the two shipped examples prove
+    # the whole path (pick -> export -> run) on closed forms.
+
+    # The fixed-bias BJT stage: Rb 1meg from the rail, the 2n3904 card's
+    # own Gummel-Poon numbers answer. beta_forced = Bf*(1+(Vce-Vbe)/Vaf)
+    # is the card's forward relation at the bias point.
+    ba = EXAMPLES / "bjt_amp.csim"
+    r = run(args.cli, "erc", ba)
+    check(r.returncode == 0, "bjt_amp erc exit 0")
+    check("0 errors, 0 warnings" in r.stdout, "bjt_amp erc fully clean")
+    r = run(args.cli, "netlist", ba)
+    check(r.returncode == 0, "bjt_amp netlist exit 0")
+    check(".model 2n3904 NPN(Is=6.734f Bf=206" in r.stdout,
+          "bjt_amp decks the library's 2n3904 card")
+    r = run(args.cli, "run", ba, "-o", "-")
+    check(r.returncode == 0, f"bjt_amp run exit 0 (stderr: {r.stderr.strip()!r})")
+    header, rows = parse_csv(r.stdout)
+    check(len(rows) == 1, "bjt_amp op has one row")
+    vc = rows[0][header.index("v(vc)")]
+    vbe = rows[0][header.index("v(N002)")]
+    isup = rows[0][header.index("i(V1)")]  # -(Ic + Ib) when delivering
+    check(3.5 < vc < 4.5, f"bjt_amp biases mid-rail: v(vc) ~ 4 V (got {vc})")
+    ib = (12.0 - vbe) / 1e6
+    ic = -isup - ib
+    beta = ic / ib
+    want = 206.0 * (1.0 + (vc - vbe) / 74.0)  # Bf*(1+(Vce-Vbe)/Vaf)
+    check(abs(beta - want) / want < 1e-3,
+          f"bjt_amp beta_forced = {want:.2f} (got {beta:.2f})")
+
+    # The non-inverting op amp stage: gain 1 + Rf/Rg = 10 through the
+    # ua741 card's linear macromodel - the FINITE-gain closed form
+    # 10*Avol/(10+Avol), not the wishful 10.
+    oa = EXAMPLES / "opamp_amp.csim"
+    r = run(args.cli, "erc", oa)
+    check(r.returncode == 0, "opamp_amp erc exit 0")
+    check("0 errors, 0 warnings" in r.stdout, "opamp_amp erc fully clean")
+    r = run(args.cli, "netlist", oa)
+    check(r.returncode == 0, "opamp_amp netlist exit 0")
+    for line in (".subckt ua741 out inp inn vp vm", "Eo b1 0 g2 0 2e5",
+                 ".ends"):
+        check(line in r.stdout, f"opamp_amp decks the macromodel ({line[:16]})")
+    xline = next(l for l in r.stdout.splitlines() if l.startswith("X1 "))
+    check(xline.startswith("X1 out ") and xline.endswith(" ua741"),
+          f"opamp_amp decks the X card in port order ({xline})")
+    r = run(args.cli, "run", oa, "-o", "-")
+    check(r.returncode == 0, f"opamp_amp run exit 0 (stderr: {r.stderr.strip()!r})")
+    header, rows = parse_csv(r.stdout)
+    check(len(rows) == 1, "opamp_amp op has one row")
+    vout = rows[0][header.index("v(out)")]
+    vfb = rows[0][header.index("v(N004)")]  # the in- feedback node
+    iv1 = rows[0][header.index("i(V1)")]
+    want = 10.0 * 2e5 / (10.0 + 2e5)  # 9.9995: gain 10, Avol 2e5
+    check(abs(vout - want) / want < 1e-6,
+          f"opamp_amp v(out) = {want} (got {vout})")
+    check(abs(vfb - vout / 10.0) < 1e-6,
+          f"opamp_amp feedback node rides the divider (got {vfb})")
+    check(abs(iv1) < 1e-9, f"opamp_amp input draws nothing (got {iv1})")
+
+    # The models listing: the shelf itself, table and JSON.
+    r = run(args.cli, "models")
+    check(r.returncode == 0, "models exit 0")
+    names = [l.split()[0] for l in r.stdout.splitlines()[1:] if l.strip()]
+    check(len(names) == 25, f"the shelf carries 25 cards (got {len(names)})")
+    check("1n4148" in names and "ua741" in names and "2n3904" in names,
+          "the shelf lists the diode/BJT/opamp cards")
+    r = run(args.cli, "models", "--json")
+    check(r.returncode == 0, "models --json exit 0")
+    table = json.loads(r.stdout)
+    check(table["format"] == "circsim-models", "models json format marker")
+    by_name = {m["name"]: m for m in table["models"]}
+    check(by_name["1n4148"]["kind"] == "d" and
+          ".model 1n4148 D(" in by_name["1n4148"]["text"],
+          "models json: the diode card")
+    check(by_name["ua741"]["kind"] == "opamp" and
+          by_name["ua741"]["text"].startswith(".subckt ua741 "),
+          "models json: the opamp subckt card")
+
     # --- a broken file exits 1 with a mapped problem -------------------------
     with tempfile.TemporaryDirectory() as tmp:
         bad = Path(tmp) / "bad.csim"
@@ -391,12 +470,12 @@ def main():
         check(table["format"] == "circsim-symbols", "json table format")
         by_key = {s["key"]: s for s in table["symbols"]}
         # 24 built-ins + tline (stage 24: the orphan devices; the JFET
-        # pair njf/pjf joined next); the tline override keeps the
-        # built-in's slot.
-        check(len(table["symbols"]) == 25, "the widened built-in table")
+        # pair njf/pjf joined next) + the op amp (stage 25); the tline
+        # override keeps the built-in's slot.
+        check(len(table["symbols"]) == 26, "the widened built-in table")
         for key, letter in (("e", "E"), ("f", "F"), ("g", "G"), ("h", "H"),
                             ("b", "B"), ("s", "S"), ("w", "W"), ("k", "K"),
-                            ("xfmr", "K"), ("tline", "T")):
+                            ("xfmr", "K"), ("tline", "T"), ("opamp", "X")):
             check(by_key[key]["spice"] == letter,
                   f"the {key} built-in carries its {letter} letter")
         check(by_key["tline"]["spice"] == "T", "tline json letter")
@@ -421,7 +500,7 @@ def main():
         svg_dir = Path(tmp) / "svg"
         r = run(args.cli, "symbols", "-S", tline_lib, "--svg", svg_dir)
         check(r.returncode == 0, "symbols --svg exit 0")
-        for key in ("r", "v", "gnd", "vcc", "npn", "tline"):
+        for key in ("r", "v", "gnd", "vcc", "npn", "tline", "opamp"):
             f = svg_dir / f"{key}.svg"
             check(f.is_file() and f.stat().st_size > 0,
                   f"svg written: {key}.svg")

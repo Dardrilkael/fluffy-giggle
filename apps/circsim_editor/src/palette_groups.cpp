@@ -37,6 +37,7 @@ std::string palette_category(const ws::circsim::SymbolDef& sym) {
         case 'Q':
         case 'M':
         case 'J':
+        case 'X':  // the op amp: the subckt instance is a semiconductor
             return "Semiconductors";
         case 'S':  // the switches get their own shelf
         case 'W':

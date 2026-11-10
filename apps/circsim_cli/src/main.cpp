@@ -7,6 +7,7 @@
 //   circsim_cli erc <file.csim> [-S <lib.csym>]...
 //   circsim_cli netlist <file.csim> [-o out|-] [-S <lib.csym>]...
 //   circsim_cli symbols [-S <lib.csym>]... [--json] [--svg <dir>]
+//   circsim_cli models [--json]
 //
 // -S layers .csym symbol libraries over the built-in table (later files
 // win; redefinitions report a warning). `symbols` lists the effective
@@ -15,6 +16,11 @@
 // renders every symbol through ws::circsim's render seam (the
 // stage-17 headless render: one SVG per symbol plus a contact sheet,
 // the before/after comparison harness for the symbol redesign).
+// `models` lists the built-in model library (stage 25) - the curated
+// .model / .subckt cards the property grid's picker offers and export
+// auto-emits when a part names one; --json dumps the full table
+// (name, kind, text, desc) in the same insertion-order JSON shape the
+// .csim format rides.
 //
 // Exit codes: 0 success; 1 simulation or ERC error; 2 usage or file I/O
 // (the workspace convention). Warnings print to stderr and never fail a
@@ -31,6 +37,7 @@
 #include <ws/circsim/export.hpp>
 #include <ws/circsim/format.hpp>
 #include <ws/circsim/library.hpp>
+#include <ws/circsim/models.hpp>
 #include <ws/spice/error.hpp>
 #include <ws/spice/results.hpp>
 
@@ -56,7 +63,8 @@ int usage() {
                  "       circsim_cli netlist <file.csim> [-o out|-]"
                  " [-S <lib.csym>]...\n"
                  "       circsim_cli symbols [-S <lib.csym>]... [--json]"
-                 " [--svg <dir>]\n");
+                 " [--svg <dir>]\n"
+                 "       circsim_cli models [--json]\n");
     return 2;
 }
 
@@ -428,6 +436,50 @@ int cmd_symbols(const std::vector<std::string>& args) {
     return 0;
 }
 
+// The built-in model library: one row per card, the deck text under
+// the name. --json dumps the table the same way `symbols --json`
+// does - the full cards, multi-line text and all, in insertion order.
+int cmd_models(const std::vector<std::string>& args) {
+    bool json = false;
+    for (const std::string& a : args) {
+        if (a == "--json") {
+            json = true;
+        } else {
+            std::fprintf(stderr, "error: unknown option '%s'\n", a.c_str());
+            return usage();
+        }
+    }
+    const std::vector<ws::circsim::ModelCard>& models =
+        ws::circsim::builtin_models();
+    if (json) {
+        ws::settings::json::Object root;
+        root.set("format", ws::settings::json::Value::text(
+                               "circsim-models"));
+        root.set("version", ws::settings::json::Value::integer(1));
+        ws::settings::json::Array cards;
+        for (const ws::circsim::ModelCard& c : models) {
+            ws::settings::json::Object o;
+            o.set("name", ws::settings::json::Value::text(c.name));
+            o.set("title", ws::settings::json::Value::text(c.title));
+            o.set("kind", ws::settings::json::Value::text(c.kind));
+            o.set("text", ws::settings::json::Value::text(c.text));
+            o.set("desc", ws::settings::json::Value::text(c.desc));
+            cards.push_back(ws::settings::json::Value::object(std::move(o)));
+        }
+        root.set("models", ws::settings::json::Value::array(std::move(cards)));
+        return write_out("",
+                    ws::settings::json::write(
+                        ws::settings::json::Value::object(std::move(root))));
+    }
+    std::fprintf(stdout, "%-12s %-6s %-12s %s\n", "NAME", "KIND",
+                 "TITLE", "DESCRIPTION");
+    for (const ws::circsim::ModelCard& c : models) {
+        std::fprintf(stdout, "%-12s %-6s %-12s %s\n", c.name.c_str(),
+                     c.kind.c_str(), c.title.c_str(), c.desc.c_str());
+    }
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -447,6 +499,10 @@ int main(int argc, char** argv) {
     }
     if (args[0] == "symbols") {
         return cmd_symbols(
+            std::vector<std::string>(args.begin() + 1, args.end()));
+    }
+    if (args[0] == "models") {
+        return cmd_models(
             std::vector<std::string>(args.begin() + 1, args.end()));
     }
     std::fprintf(stderr, "error: unknown command '%s'\n", args[0].c_str());

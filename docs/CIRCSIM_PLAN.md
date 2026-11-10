@@ -498,3 +498,75 @@ cases / 1993 assertions - the new battery: golden decks, closed-form
 runs, the ERC requireds, the collision dedup, the built-in tline
 quarter-wave), the circsim smoke green with the six new examples, the
 spice smoke untouched.
+
+## Stage 25 (2026-11-10): the built-in model library
+
+Hand-writing a `.model` line in the directives block was the only way
+to give a semiconductor a part number - "that's not a product". This
+stage ships the shelf: 25 curated cards the property grid offers as a
+picker under the Model field, and export auto-emits when a part names
+one. The user never touches the directives for a stock part again.
+
+- **The table** (`models.hpp` / `models_table.cpp`): diodes (1N4148,
+  1N4007, BAT54, the 1N4733 zener, three LEDs), BJTs (2N2222, 2N3904,
+  BC547, 2N3906, BC557), MOSFETs (2N7000, IRF540, BS250, IRF9540 -
+  Level-1 cards tuned at the default W/L so the part's own L=/W=
+  scales the channel), JFETs (J2N5457/J2N5459, 2N5460), switches
+  (ideal, TTL) and op amps (ideal, uA741, LM358, TL071). Every card
+  sticks to the parameter sets the engine's `apply_model` actually
+  IMPLEMENTS - the accepted-but-ignored vendor tail is deliberately
+  absent, because a library card is a promise, not a wish. The op amps
+  are linear macromodels (E/R/C `.subckt`s: differential Ri, the GBW
+  pole, Avol, Ro - the supplies are sense pins), so no `.model` rides
+  inside a subckt body.
+- **`SymbolDef::model_kind`** (`symbols.hpp`, `symbols_table.cpp`): what
+  KIND of card the `model` param names - "d"/"npn"/"pnp"/"nmos"/"pmos"/
+  "njf"/"pjf"/"sw", plus "opamp" for the new five-pin X symbol (out,
+  in+, in-, v+, v-; the triangle with supply stubs, every pin a
+  whole-grid endpoint with its lead into the body). The field
+  round-trips through `.csym` (`"model_kind"` in `library.cpp`, saved
+  only when set so classic files stay byte-identical), and unknown
+  kinds ride as-is.
+- **The picker** (`side_panels.cpp`): a combo of the symbol's kind's
+  cards directly under the Model text row - picking one lands the
+  card's NAME through the same seam the text row rides (one undo step
+  per pick), and the hints below tell the story: a shelf card's
+  description, a wrong-kind card's ERC story, a custom name's pointer
+  at the directives, an empty field's invitation. The hand-typed text
+  row stays first-class - the escape hatch is a feature.
+- **Export** (`export.cpp`): a part naming a library card appends the
+  card's text (multi-line for the `.subckt`s) after the directives and
+  before the cards, attributed through a new `Origin::Kind::Library`
+  whose id names the FIRST part that referenced it - a bad card locates
+  onto the pick that brought it in. Two rules keep it honest: the
+  DIRECTIVES WIN (a user-defined card of the same name is skipped, so
+  the override stays an override) and emission is by NAME, not kind (a
+  wrong-kind pairing still decks, and ws::spice's own type check
+  rejects it mapped back onto the part).
+- **ERC** (`erc.cpp`): `circsim.erc.model_kind` - a diode naming 2n3904
+  is a library card of the wrong kind, said HERE at the part in the
+  picker's own vocabulary instead of dying at a deck line mid-run. A
+  name the library does not know stays the directives story (a custom
+  model, the engine's to check, as always).
+- **ws::spice**: one elaborator fix the op amps forced - ground stays
+  GLOBAL through a `.subckt` boundary (SPICE3's own rule; the prefixing
+  used to strand a floating `X<n>:0` that gmin solved to garbage,
+  silently).
+- **CLI**: `circsim_cli models [--json]` lists the shelf (name, kind,
+  title, description; the JSON dump carries the full card text) - the
+  same listing the picker rides.
+- **Two examples** (`bjt_amp.csim`, `opamp_amp.csim`): the fixed-bias
+  common-emitter stage (v(vc) = 3.969 V; β_forced = Bf·(1+(Vce−Vbe)/
+  Vaf) = 215.13 holds to 1e-3) and the non-inverting stage (v(out) =
+  10·Avol/(10+Avol) = 9.99950 exactly - the FINITE-gain answer, not
+  the wishful 10). Both run with an EMPTY directives block - the whole
+  point.
+
+The stage-25 gate: the full linux ctest 778/778 and editor 1273/1273
+(test_circsim 163 cases / 3169 assertions - the new battery: the golden
+library deck, the directives override, the wrong-kind mapping, the
+opamp closed form, the 25-card sweep that runs EVERY card through its
+own device via ws::spice's public path, the ERC kinds, the symbol
+shapes, the `.csym` round-trip), the circsim smoke green with the two
+new examples and the `models` listing, the spice smoke untouched at
+110/110.

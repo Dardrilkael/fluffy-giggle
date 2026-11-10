@@ -3,12 +3,14 @@
 #include <cmath>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include <ws/spice/deck.hpp>
 #include <ws/circsim/export.hpp>
+#include <ws/circsim/models.hpp>
 
 #include "util.hpp"
 
@@ -533,6 +535,103 @@ ws::core::Result<SpiceExport> export_deck(
         }
     }
 
+    // The built-in model library (stage 25): every part whose `model`
+    // param names a library card gets that card's text here - the
+    // user never hand-writes the directives line the library already
+    // knows. Two rules keep it honest:
+    //   * the DIRECTIVES WIN - a name the user defined there is
+    //     skipped, so the escape hatch stays an override (the .model
+    //     table resolves first-match, the .subckt map emplaces
+    //     first, and the directives ride EARLIER in the deck either
+    //     way - the user's card is found first);
+    //   * emission is by NAME, not kind - a part naming a card of the
+    //     wrong kind (ERC has flagged it) still gets the card, and
+    //     ws::spice's own type check rejects it with the line mapped
+    //     back onto the part.
+    // One line per unique name, first part to name it carries the
+    // attribution (the cards walk in ref order, so it is stable), and
+    // multi-line cards (the opamp .subckts) push every line.
+    {
+        // The names the directives already define: ".model <name>" /
+        // ".subckt <name>" - first two tokens of each line, compared
+        // ci (the name is always its own token; a glued "D(...)" tail
+        // rides the TYPE, never the name).
+        std::set<std::string, CiLess> directive_defined;
+        std::size_t scan = 0;
+        while (scan < s.directives.size()) {
+            std::size_t end = s.directives.find('\n', scan);
+            if (end == std::string::npos) {
+                end = s.directives.size();
+            }
+            std::string_view line(s.directives.data() + scan, end - scan);
+            std::string_view first;
+            std::string_view second;
+            std::size_t i = 0;
+            while (i < line.size() && line[i] <= ' ') {
+                ++i;
+            }
+            const auto take_token = [&](std::string_view& out) {
+                const std::size_t start = i;
+                while (i < line.size() && line[i] > ' ') {
+                    ++i;
+                }
+                out = line.substr(start, i - start);
+                while (i < line.size() && line[i] <= ' ') {
+                    ++i;
+                }
+            };
+            take_token(first);
+            take_token(second);
+            const std::string head = lower(first);
+            if (!second.empty() &&
+                (head == ".model" || head == ".subckt")) {
+                directive_defined.insert(lower(second));
+            }
+            scan = end + 1;
+        }
+        struct LibLine {
+            const ModelCard* card;
+            std::uint32_t part_id;
+        };
+        std::vector<LibLine> lib_lines;
+        std::set<std::string, CiLess> lib_seen;
+        for (const Card& c : cards) {
+            const auto it = c.part->params.find("model");
+            if (it == c.part->params.end() || it->second.empty()) {
+                continue;  // ERC's missing_model is the story
+            }
+            if (directive_defined.find(it->second) !=
+                directive_defined.end()) {
+                continue;  // the user's own card wins
+            }
+            const ModelCard* card = find_builtin_model(it->second);
+            if (card == nullptr) {
+                continue;  // a custom name: directives or bust (the
+                           // engine's unknown-model error maps onto
+                           // the part, as always)
+            }
+            if (lib_seen.insert(lower(it->second)).second) {
+                lib_lines.push_back({card, c.part->id});
+            }
+        }
+        for (const LibLine& l : lib_lines) {
+            std::size_t start = 0;
+            const std::string& card_text = l.card->text;
+            while (start <= card_text.size()) {
+                std::size_t end = card_text.find('\n', start);
+                if (end == std::string::npos) {
+                    end = card_text.size();
+                }
+                push_line(card_text.substr(start, end - start),
+                          SpiceExport::Origin::Kind::Library, l.part_id);
+                if (end == card_text.size()) {
+                    break;
+                }
+                start = end + 1;
+            }
+        }
+    }
+
     for (const Card& c : cards) {
         // Multi-card symbols: one line per CardEmit - its own pin subset,
         // then the sibling names (the coupling names what it couples),
@@ -658,6 +757,22 @@ Diag map_spice_error(const Schematic& s, const SpiceExport& map,
         } else if (o.kind == SpiceExport::Origin::Kind::Directives) {
             where = "directives";
             target.kind = DiagTarget::Kind::Directives;
+        } else if (o.kind == SpiceExport::Origin::Kind::Library) {
+            // A library card line: the part that first named the card
+            // owns the diagnostic (the pick that brought it in), so a
+            // bad card selects and zooms like any other part error;
+            // an id that no longer resolves falls back to the block
+            // spelling.
+            const Part* p = s.find_part(o.id);
+            if (p != nullptr) {
+                where = !p->ref.empty()
+                            ? p->ref
+                            : "part " + std::to_string(p->id);
+                target.kind = DiagTarget::Kind::Part;
+                target.part = o.id;
+            } else {
+                where = "model library";
+            }
         } else if (o.kind == SpiceExport::Origin::Kind::Analysis) {
             where = "analysis setup";
             target.kind = DiagTarget::Kind::Analysis;

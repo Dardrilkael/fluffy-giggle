@@ -21,9 +21,13 @@
 
 #include <ws/circsim/erc.hpp>
 #include <ws/circsim/export.hpp>
+#include <ws/circsim/models.hpp>
 #include <ws/circsim/nets.hpp>
 #include <ws/circsim/plot.hpp>  // format_eng (the locale proof)
 #include <ws/circsim/text.hpp>  // fmt_num / parse_plain_number
+#include <ws/spice/deck.hpp>
+#include <ws/spice/parse.hpp>
+#include <ws/spice/run.hpp>
 
 using ws::circsim::AcSpec;
 using ws::circsim::DcSpec;
@@ -1380,4 +1384,324 @@ TEST_CASE("number text is locale-independent") {
     CHECK(ws::circsim::format_eng(0.001) == "1m");
     CHECK(ws::circsim::format_eng(4.7) == "4.7");
     std::setlocale(LC_NUMERIC, "C");
+}
+
+// --- the built-in model library (stage 25) -----------------------------------
+//
+// A semiconductor part's `model` param names a card; when the name is one
+// of the library's, export appends the card's text and the user never
+// hand-writes the directives line. The shared shape below is the LED test's
+// diode stage, minus the directives block.
+
+namespace {
+
+// 5 V over 1k into a diode: ~4.4 mA forward conduction for the 1N4148
+// card (Vf ~0.6 V at that current).
+Schematic library_diode_stage(const std::string& model) {
+    Schematic s;
+    Part* v = s.add_part(Part::make("v", "V1", "5", {0.0, -4.0}));
+    Part* r = s.add_part(Part::make("r", "R1", "1k", {6.0, 0.0}));
+    Part* d = s.add_part(Part::make("d", "D1", "", {14.0, 0.0}));
+    d->params["model"] = model;
+    Part* g = s.add_part(Part::make("gnd", "", "", {7.0, -6.0}));
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{v->id, 0}, PinRef{r->id, 0}));
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{r->id, 1}, PinRef{d->id, 0}));
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{d->id, 1}, PinRef{g->id, 0}));
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{g->id, 0}, PinRef{v->id, 1}));
+    s.analysis.entries.push_back(OpSpec{});
+    return s;
+}
+
+// The non-inverting stage the opamp_amp example rides: 1 V into in+,
+// Rg 1k to ground, Rf 9k around - gain 1 + Rf/Rg = 10, solved by the
+// ua741 card's linear macromodel (Avol 2e5, Ri 2meg, Ro 75; the sense
+// supplies ride V2/V3 exactly like the shipped example).
+Schematic opamp_stage() {
+    Schematic s;
+    Part* v1 = s.add_part(Part::make("v", "V1", "1", {-5.0, 2.0}));
+    v1->rot = 180;
+    Part* x = s.add_part(Part::make("opamp", "X1", "", {14.0, 0.0}));
+    x->params["model"] = "ua741";
+    Part* rf = s.add_part(Part::make("r", "Rf", "9k", {14.0, 8.0}));
+    Part* rg = s.add_part(Part::make("r", "Rg", "1k", {9.0, -8.0}));
+    rg->rot = 90;
+    Part* v2 = s.add_part(Part::make("v", "V2", "12", {14.0, 11.0}));
+    v2->rot = 90;
+    Part* v3 = s.add_part(Part::make("v", "V3", "12", {14.0, -9.0}));
+    v3->rot = 90;
+    Part* g1 = s.add_part(Part::make("gnd", "", "", {-8.0, 0.0}));
+    Part* g2 = s.add_part(Part::make("gnd", "", "", {9.0, -13.0}));
+    Part* g3 = s.add_part(Part::make("gnd", "", "", {14.0, 16.0}));
+    Part* g4 = s.add_part(Part::make("gnd", "", "", {14.0, -14.0}));
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{v1->id, 0}, PinRef{x->id, 1}));
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{x->id, 2}, PinRef{rg->id, 1}));
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{rg->id, 0}, PinRef{g2->id, 0}));
+    Wire* fb = s.add_wire(
+        ws::circsim::Wire::endpoints(PinRef{rf->id, 0}, PinRef{x->id, 2}));
+    fb->waypoints = {Pos{11.0, 6.0}, Pos{7.0, 6.0}, Pos{7.0, -2.0}};
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{x->id, 0}, PinRef{rf->id, 1}))
+        ->waypoints = {Pos{19.0, 8.0}};
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{x->id, 3}, PinRef{v2->id, 0}));
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{v2->id, 1}, PinRef{g3->id, 0}));
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{x->id, 4}, PinRef{v3->id, 1}));
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{v3->id, 0}, PinRef{g4->id, 0}));
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{v1->id, 1}, PinRef{g1->id, 0}));
+    Label* out = s.add_label({});
+    out->pos = Pos{19.0, 2.0};
+    out->name = "out";
+    Label* tap = s.add_label({});
+    tap->pos = Pos{9.0, -3.0};  // on the in- lead: the feedback node
+    tap->name = "fb";
+    s.analysis.entries.push_back(OpSpec{});
+    return s;
+}
+
+// Runs deck text through ws::spice exactly as the CLI does (the sweep's
+// engine - the card table's every entry must survive the real path).
+ws::core::Result<ws::spice::RunOutput> run_spice_text(const std::string& deck) {
+    const auto parsed =
+        ws::spice::read_deck("lib.cir", deck, ws::spice::ParseOptions{});
+    if (!parsed) {
+        return ws::core::unexpected<ws::core::Error>(parsed.error());
+    }
+    std::vector<ws::spice::Warning> warnings;
+    const auto ast = ws::spice::build_deck_ast(*parsed, warnings);
+    if (!ast) {
+        return ws::core::unexpected<ws::core::Error>(ast.error());
+    }
+    return ws::spice::run_deck(*ast, ws::spice::RunSettings{}, warnings);
+}
+
+// ASCII ci equality / upper (util.hpp's lower is private to the lib's
+// TUs; the tests carry their own tiny fold).
+bool ci_equal(const std::string& a, const std::string& b) {
+    return !ws::circsim::CiLess{}(a, b) && !ws::circsim::CiLess{}(b, a);
+}
+
+std::string ci_upper(std::string s) {
+    for (char& c : s) {
+        if (c >= 'a' && c <= 'z') {
+            c = static_cast<char>(c - 'a' + 'A');
+        }
+    }
+    return s;
+}
+
+}  // namespace
+
+TEST_CASE("a part naming a library card decks it with no directives") {
+    Schematic s = library_diode_stage("1n4148");
+    const std::vector<ws::circsim::Diag> erc = ws::circsim::run_erc(s);
+    CHECK(erc.empty());
+    const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+    const auto deck = ws::circsim::export_deck(s, nets.nets);
+    REQUIRE(deck.has_value());
+    CHECK(deck->text ==
+          "circsim export\n"
+          ".model 1n4148 D(Is=4.35n N=1.6666 Rs=0.8456 Tt=4.4n"
+          " Cjo=1.1p M=0.23 Vj=0.75 Bv=100 Ibv=100u)\n"
+          "D1 N002 0 1n4148\n"
+          "R1 N001 N002 1k\n"
+          "V1 N001 0 5\n"
+          ".op\n"
+          ".end\n");
+    // The card line carries the Library origin, attributed to the part
+    // that named it (a bad card locates onto the pick that brought it
+    // in); line 2 is the .model card, one under the title.
+    REQUIRE(deck->line_origins.size() > 2);
+    CHECK(deck->line_origins[1].kind ==
+          ws::circsim::SpiceExport::Origin::Kind::Library);
+    const Part* d1 = first_with_symbol(s, "d");
+    REQUIRE(d1 != nullptr);
+    CHECK(deck->line_origins[1].id == d1->id);
+
+    // The run: ~4.4 mA forward (Vf ~0.6 V at that current, per the
+    // card's own desc), the loop invariant against the source probe.
+    const ws::circsim::RunOutcome out = ws::circsim::run_schematic(s);
+    REQUIRE(out.run.has_value());
+    REQUIRE(out.run->results.tables.size() == 1);
+    const ws::spice::Table& t = out.run->results.tables.front();
+    const auto v_d = t.signal("v(N002)");
+    const auto i_v = t.signal("i(V1)");
+    const auto i_d = t.signal("i(D1)");
+    REQUIRE(v_d.size() == 1);
+    CHECK(v_d[0] > 0.5);
+    CHECK(v_d[0] < 0.7);
+    CHECK(i_v[0] < -4.0e-3);
+    CHECK(i_v[0] > -4.6e-3);
+    CHECK(i_d[0] == doctest::Approx(-i_v[0]).epsilon(1e-9));
+}
+
+TEST_CASE("the directives' own card wins over the library") {
+    // The escape hatch stays an override: a name the user defined in the
+    // directives block is skipped by the library's emission, so exactly
+    // ONE card of that name rides the deck - the user's.
+    Schematic s = library_diode_stage("1n4148");
+    s.directives = ".model 1n4148 D(Is=1e-12 N=1)";
+    const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+    const auto deck = ws::circsim::export_deck(s, nets.nets);
+    REQUIRE(deck.has_value());
+    CHECK(deck->text ==
+          "circsim export\n"
+          ".model 1n4148 D(Is=1e-12 N=1)\n"
+          "D1 N002 0 1n4148\n"
+          "R1 N001 N002 1k\n"
+          "V1 N001 0 5\n"
+          ".op\n"
+          ".end\n");
+    // The directives line carries the Directives origin, not Library's.
+    CHECK(deck->line_origins[1].kind ==
+          ws::circsim::SpiceExport::Origin::Kind::Directives);
+}
+
+TEST_CASE("a wrong-kind library name still decks, and the engine maps it back") {
+    // Emission is by NAME, not kind (ERC flagged the mismatch already);
+    // ws::spice's own type check rejects the pairing, and the Library
+    // line's attribution lands the diagnostic on the part that named
+    // the card - the picker's pick, not a mystery deck line.
+    Schematic s = library_diode_stage("2n3904");
+    const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+    const auto deck = ws::circsim::export_deck(s, nets.nets);
+    REQUIRE(deck.has_value());
+    CHECK(deck->text.find(".model 2n3904 NPN(") != std::string::npos);
+    CHECK(deck->text.find("D1 N002 0 2n3904\n") != std::string::npos);
+
+    const ws::circsim::RunOutcome out = ws::circsim::run_schematic(s);
+    CHECK_FALSE(out.run.has_value());
+    bool mapped = false;
+    for (const ws::circsim::Diag& d : out.problems) {
+        if (d.code == "circsim.run.failed" && d.where == "D1") {
+            mapped = true;
+        }
+    }
+    CHECK(mapped);
+}
+
+TEST_CASE("the op amp decks its subckt card and solves at its gain") {
+    const Schematic s = opamp_stage();
+    const std::vector<ws::circsim::Diag> erc = ws::circsim::run_erc(s);
+    CHECK(erc.empty());
+    const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+    const auto deck = ws::circsim::export_deck(s, nets.nets);
+    REQUIRE(deck.has_value());
+    // The multi-line .subckt card rides whole, seven lines under the
+    // title; every line carries the Library origin.
+    CHECK(deck->text.substr(0, deck->text.find("Rf ")) ==
+          "circsim export\n"
+          ".subckt ua741 out inp inn vp vm\n"
+          "Ri inp inn 2meg\n"
+          "Eg g1 0 inp inn 1\n"
+          "Rg g1 g2 1meg\n"
+          "Cg g2 0 31.8n\n"
+          "Eo b1 0 g2 0 2e5\n"
+          "Ro b1 out 75\n"
+          ".ends\n");
+    for (std::size_t i = 1; i <= 7; ++i) {
+        CHECK(deck->line_origins[i].kind ==
+              ws::circsim::SpiceExport::Origin::Kind::Library);
+    }
+    // The instance card: out in+ in- v+ v- then the subckt name.
+    const std::size_t x_at = deck->text.find("X1 out ");
+    CHECK(x_at != std::string::npos);
+    const std::string x_line = deck->text.substr(
+        x_at, deck->text.find('\n', x_at) - x_at);
+    CHECK(x_line.find(" fb ") != std::string::npos);
+    CHECK(x_line.substr(x_line.size() - 6) == " ua741");
+
+    // The closed form: Vout = 10*Avol/(10+Avol) (the finite-gain
+    // answer for 1+Rf/Rg = 10), the feedback node rides the divider
+    // Vout/10, and the input draws only the Ri leakage.
+    const ws::circsim::RunOutcome out = ws::circsim::run_schematic(s);
+    REQUIRE(out.run.has_value());
+    REQUIRE(out.run->results.tables.size() == 1);
+    const ws::spice::Table& t = out.run->results.tables.front();
+    const auto v_out = t.signal("v(out)");
+    const auto v_fb = t.signal("v(fb)");
+    const auto i_v1 = t.signal("i(V1)");
+    REQUIRE(v_out.size() == 1);
+    const double avol = 2.0e5;
+    CHECK(v_out[0] == doctest::Approx(10.0 * avol / (10.0 + avol)).epsilon(1e-5));
+    CHECK(v_fb[0] == doctest::Approx(v_out[0] / 10.0).epsilon(1e-6));
+    CHECK(std::abs(i_v1[0]) < 1e-9);
+}
+
+TEST_CASE("the model library table is well-formed and every card runs") {
+    using ws::circsim::builtin_models;
+    using ws::circsim::builtin_models_of_kind;
+    using ws::circsim::find_builtin_model;
+
+    // The four requested families all carry cards, and so do the
+    // JFETs and switches the shelf grew.
+    for (const char* kind :
+         {"d", "npn", "pnp", "nmos", "pmos", "njf", "pjf", "sw", "opamp"}) {
+        CHECK_FALSE(builtin_models_of_kind(kind).empty());
+    }
+    CHECK(builtin_models_of_kind("no-such-kind").empty());
+
+    std::map<std::string, int> seen;  // ci names are unique
+    for (const ws::circsim::ModelCard& c : builtin_models()) {
+        ++seen[c.name];
+        // The lookup answers for every card, ci.
+        const ws::circsim::ModelCard* found = find_builtin_model(c.name);
+        REQUIRE(found != nullptr);
+        CHECK(found->name == c.name);
+        CHECK(find_builtin_model(ci_upper(c.name)) != nullptr);
+        // The shelf of its own kind carries it.
+        bool on_shelf = false;
+        for (const ws::circsim::ModelCard* k : builtin_models_of_kind(c.kind)) {
+            if (k->name == c.name) {
+                on_shelf = true;
+            }
+        }
+        CHECK(on_shelf);
+        // The card text is a .model of its own TYPE (or an opamp
+        // .subckt): the kind a part must have to name it.
+        if (c.kind == "opamp") {
+            CHECK(c.text.rfind(".subckt ", 0) == 0);
+        } else {
+            const std::string head = ".model " + c.name + " ";
+            CHECK(c.text.rfind(head, 0) == 0);
+            const std::size_t type_at = c.text.find('(', head.size());
+            REQUIRE(type_at != std::string::npos);
+            const std::string type = c.text.substr(head.size(), type_at - head.size());
+            CHECK(ci_equal(type, c.kind));
+        }
+    }
+    for (const auto& [name, count] : seen) {
+        CHECK(count == 1);
+    }
+
+    // THE PROMISE: every card runs through its own device - a minimal
+    // but honest stage per kind, straight through ws::spice's public
+    // path. A card the engine cannot back never ships.
+    const auto instance = [](const std::string& kind,
+                             const std::string& name) {
+        if (kind == "d") {
+            return "V1 a 0 5\nR1 a b 1k\nD1 b 0 " + name + "\n";
+        }
+        if (kind == "npn" || kind == "pnp") {
+            return "V1 a 0 5\nR1 a b 1k\nQ1 b b 0 " + name + "\n";
+        }
+        if (kind == "nmos" || kind == "pmos") {
+            return "V1 a 0 5\nR1 a b 1k\nM1 b b 0 0 " + name + "\n";
+        }
+        if (kind == "njf" || kind == "pjf") {
+            return "V1 a 0 5\nR1 a b 1k\nJ1 b 0 0 " + name + "\n";
+        }
+        if (kind == "sw") {
+            return "V1 a 0 5\nR1 a b 1k\nS1 b 0 a 0 " + name + "\n";
+        }
+        return "V1 in 0 1\nX1 out in out 12 0 " + name + "\n";  // opamp
+    };
+    for (const ws::circsim::ModelCard& c : builtin_models()) {
+        const std::string deck =
+            "card sweep\n" + instance(c.kind, c.name) + c.text + "\n.op\n.end";
+        const auto run = run_spice_text(deck);
+        REQUIRE_MESSAGE(run.has_value(),
+                        (c.name + ": " +
+                         (run.has_value() ? std::string()
+                                          : run.error().message))
+                            .c_str());
+        REQUIRE(run->results.tables.size() == 1);
+    }
 }

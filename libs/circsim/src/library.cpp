@@ -530,6 +530,22 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
                 origin));
         }
     }
+    // The model KIND the `model` param names (stage 25): a .csym
+    // semiconductor names which library shelf its picker offers and
+    // ERC checks against. Unknown strings ride as-is - the built-in
+    // library grows kinds the editor has not met yet, and a wrong
+    // kind simply picks nothing (find_builtin_model still answers
+    // by name at export time).
+    if (const json::Value* v = o.find("model_kind"); v != nullptr) {
+        if (const auto t = as_text(v)) {
+            r.def.model_kind = *t;
+        } else {
+            diags.push_back(make_diag(
+                Severity::Warning, "circsim.symbols.bad_field",
+                "symbol '" + k + "': 'model_kind' is not text; ignored",
+                origin));
+        }
+    }
     if (const json::Value* pins = o.find("pins");
         pins != nullptr && pins->is_array()) {
         for (const json::Value& e : *pins->as_array()) {
@@ -641,7 +657,8 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
     for (const auto& [field, val] : o) {
         if (field != "key" && field != "name" && field != "spice" &&
             field != "ref" && field != "fixed_net" && field != "value" &&
-            field != "model" && field != "pins" && field != "emit" &&
+            field != "model" && field != "model_kind" &&
+            field != "pins" && field != "emit" &&
             field != "cards" && field != "params" && field != "draw") {
             r.def.unknown.set(field, val);
         }
@@ -818,6 +835,11 @@ std::string SymbolLibrary::save(bool include_builtin) const {
         }
         o.set("value", json::Value::boolean(s.needs_value));
         o.set("model", json::Value::boolean(s.needs_model));
+        // The kind rides only when the symbol takes one, so every
+        // classic .csym stays byte-identical.
+        if (!s.model_kind.empty()) {
+            o.set("model_kind", json::Value::text(s.model_kind));
+        }
         json::Array emit;
         for (const ParamEmit& pe : s.emit) {
             json::Object e;

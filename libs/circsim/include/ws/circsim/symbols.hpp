@@ -109,14 +109,26 @@ struct SymbolDef {
     std::vector<CardEmit> card_emits;  // non-empty = multi-card (see above)
     bool needs_value = true;   // ERC: value must be non-empty
     bool needs_model = false;  // ERC: params["model"] must be non-empty
+    // What KIND of .model the `model` param names (stage 25): the
+    // built-in model library's own kind string - "d", "npn", "pnp",
+    // "nmos", "pmos", "njf", "pjf", "sw", "opamp" (a .subckt card).
+    // Empty = the symbol takes no model (or names one nobody types:
+    // keep it empty and the property grid stays a plain text row).
+    // The property grid's library picker offers this kind's cards;
+    // ERC checks a named library card against it; export emits the
+    // card's text when a part names one. A .csym symbol carries its
+    // own through "model_kind".
+    std::string model_kind;
     std::vector<ParamSpec> params;  // typed specs (stage 2)
     std::vector<DrawPrim> draw;     // the symbol's picture (stage 2)
     ws::settings::json::Object unknown;  // unrecognized .csym fields ride
 };
 
 // The built-in set: r, c, l, xfmr, k, tline, v, i, e, f, g, h, b, d,
-// led, npn, pnp, nmos, pmos, s, w, gnd, vcc - the classic twelve plus
-// the orphan devices ws::spice always parsed (stage 24). Offsets are
+// led, npn, pnp, nmos, pmos, njf, pjf, opamp, s, w, gnd, vcc - the
+// classic twelve plus the orphan devices ws::spice always parsed
+// (stage 24) and the op amp (stage 25, the X subckt instance the
+// built-in model library's opamp cards ride). Offsets are
 // whole grid units so rotated pins stay on grid points.
 [[nodiscard]] const std::vector<SymbolDef>& builtin_symbols();
 

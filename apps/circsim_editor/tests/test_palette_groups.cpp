@@ -37,9 +37,12 @@ TEST_CASE("the built-in symbols land in the fixed group order") {
     CHECK(keys_of(groups[1]) ==
           std::vector<std::string>{"v", "i", "e", "g", "f", "h", "b"});
     CHECK(groups[2].name == "Semiconductors");
+    // The op amp closes the shelf (stage 25): the X subckt instance
+    // rides with the semiconductors - its cards are the built-in model
+    // library's opamp shelf.
     CHECK(keys_of(groups[2]) ==
           std::vector<std::string>{"d", "led", "npn", "pnp", "nmos", "pmos",
-                                   "njf", "pjf"});
+                                   "njf", "pjf", "opamp"});
     CHECK(groups[3].name == "Switches");
     CHECK(keys_of(groups[3]) == std::vector<std::string>{"s", "w"});
     CHECK(groups[4].name == "Power");
@@ -108,6 +111,13 @@ TEST_CASE("the filter is a fuzzy word-start match, not just a substring") {
     REQUIRE(by_key.size() == 5);
     CHECK(by_key[0].name == "Semiconductors");
     CHECK(keys_of(by_key[0]) == std::vector<std::string>{"nmos"});
+
+    // "opamp" walks "Op amp" - the o of "Op", then the a-m-p of
+    // "amp"'s own word start (the typing that lands on the op amp).
+    auto oa = editor::palette_groups(lib, "opamp");
+    REQUIRE(oa.size() == 5);
+    CHECK(oa[0].name == "Semiconductors");
+    CHECK(keys_of(oa[0]) == std::vector<std::string>{"opamp"});
 
     // Out of order never matches: the s wants to come before the e,
     // and "Resistor" has none after its own.

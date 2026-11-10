@@ -1,12 +1,16 @@
 // The built-in symbol table (stage 2, redrawn stage 17, widened stage
-// 24): the r, c, l, v, i, d, npn, pnp, nmos, pmos, gnd, vcc set plus the
-// orphan devices ws::spice always supported but no symbol ever carried
-// into a schematic - the controlled sources (e, f, g, h), the
-// behavioral source (b), the switches (s, w), the lossless line (tline),
-// the coupling (k) and the 2-winding transformer (xfmr, one part = the
-// L + L + K card trio). Pure data: the geometry that READS it (lookup,
-// transform, bounds, the render seam) lives in symbols.cpp/render.cpp;
-// a .csym library layers over this table through library.hpp.
+// 24, stage 25): the r, c, l, v, i, d, npn, pnp, nmos, pmos, gnd, vcc
+// set plus the orphan devices ws::spice always supported but no symbol
+// ever carried into a schematic - the controlled sources (e, f, g, h),
+// the behavioral source (b), the switches (s, w), the lossless line
+// (tline), the coupling (k) and the 2-winding transformer (xfmr, one
+// part = the L + L + K card trio) - and the op amp (opamp, the X
+// subckt instance whose cards live in the built-in model library).
+// The semiconductor symbols declare their model_kind so the property
+// grid and ERC know what the `model` param names. Pure data: the
+// geometry that READS it (lookup, transform, bounds, the render seam)
+// lives in symbols.cpp/render.cpp; a .csym library layers over this
+// table through library.hpp.
 
 #include <string>
 #include <utility>
@@ -137,6 +141,7 @@ SymbolDef bjt(std::string key, std::string name, bool pnp) {
     s.emit = {ParamEmit{.key = "model"}, ParamEmit{.key = "area"}};
     s.needs_value = false;
     s.needs_model = true;
+    s.model_kind = pnp ? "pnp" : "npn";
     s.params = {spec(ParamSpec::Type::Text, "model", "Model"),
                 spec(ParamSpec::Type::Number, "area", "Area")};
     s.draw = {// base lead + bar
@@ -171,6 +176,7 @@ SymbolDef mosfet(std::string key, std::string name, bool pmos) {
               ParamEmit{.key = "w", .prefix = "W="}};
     s.needs_value = false;
     s.needs_model = true;
+    s.model_kind = pmos ? "pmos" : "nmos";
     s.params = {spec(ParamSpec::Type::Text, "model", "Model"),
                 spec(ParamSpec::Type::Number, "l", "L"),
                 spec(ParamSpec::Type::Number, "w", "W")};
@@ -220,6 +226,7 @@ SymbolDef jfet(std::string key, std::string name, bool pjf) {
     s.emit = {ParamEmit{.key = "model"}, ParamEmit{.key = "area"}};
     s.needs_value = false;
     s.needs_model = true;
+    s.model_kind = pjf ? "pjf" : "njf";
     s.params = {spec(ParamSpec::Type::Text, "model", "Model"),
                 spec(ParamSpec::Type::Number, "area", "Area")};
     s.draw = {// gate lead + the channel bar it enters
@@ -544,6 +551,7 @@ const std::vector<SymbolDef>& table() {
             s.emit = {ParamEmit{.key = "model"}, ParamEmit{.key = "area"}};
             s.needs_value = false;
             s.needs_model = true;
+            s.model_kind = "d";
             s.params = {spec(ParamSpec::Type::Text, "model", "Model"),
                         spec(ParamSpec::Type::Number, "area", "Area")};
             s.draw = {line(-3.0, 0.0, -1.0, 0.0),
@@ -571,6 +579,7 @@ const std::vector<SymbolDef>& table() {
             s.emit = {ParamEmit{.key = "model"}, ParamEmit{.key = "area"}};
             s.needs_value = false;
             s.needs_model = true;
+            s.model_kind = "d";
             s.params = {
                 spec(ParamSpec::Type::Text, "model", "Model"),
                 spec(ParamSpec::Type::Number, "area", "Area"),
@@ -604,6 +613,53 @@ const std::vector<SymbolDef>& table() {
         // device letter joins the palette.
         jfet("njf", "N-channel JFET", false),
         jfet("pjf", "P-channel JFET", true),
+        // The op amp (stage 25): the X subckt instance. One symbol, one
+        // `model` param - the subckt NAME it decks as `X<ref> out inp
+        // inn vp vm <model>`; the built-in model library's opamp cards
+        // (linear macromodels) are what the property grid's picker
+        // offers for it, and a hand-written .subckt of one's own rides
+        // the directives block exactly like a custom .model does. The
+        // supplies are the macromodels' sense pins: connect them (a
+        // real op amp has them, ERC wants every pin placed) and the
+        // linear card simply does not read them.
+        //
+        // The picture: the triangle with + and - marking the inputs,
+        // and the supply stubs. Every pin lands at a whole-grid point
+        // that is a SEGMENT ENDPOINT with its lead pointing into the
+        // body (the invariants' rule): the inputs ride their own
+        // horizontal leads into the left edge, out sits at the apex,
+        // and vp/vm ride their stubs rising from the slanted edges at
+        // x=0 (y = +/-20/9 = +/-2.222).
+        [] {
+            SymbolDef s;
+            s.key = "opamp";
+            s.name = "Op amp";
+            s.spice_letter = 'X';
+            s.ref_prefix = "X";
+            s.pins = {PinDef{.name = "out", .dx = 5.0, .dy = 0.0, .dir = 0},
+                      PinDef{.name = "in+", .dx = -5.0, .dy = 2.0, .dir = 180},
+                      PinDef{.name = "in-", .dx = -5.0, .dy = -2.0, .dir = 180},
+                      PinDef{.name = "v+", .dx = 0.0, .dy = 5.0, .dir = 90},
+                      PinDef{.name = "v-", .dx = 0.0, .dy = -5.0, .dir = 270}};
+            s.emit = {ParamEmit{.key = "model", .optional = false}};
+            s.needs_value = false;
+            s.needs_model = true;
+            s.model_kind = "opamp";
+            s.params = {spec(ParamSpec::Type::Text, "model", "Model")};
+            s.draw = {// the input leads, entering the triangle's left
+                      // edge (x=-4) on the +/-2 pin rows
+                      line(-5.0, 2.0, -4.0, 2.0), line(-5.0, -2.0, -4.0, -2.0),
+                      // the triangle itself: left edge, apex at out
+                      poly({Pos{-4.0, 4.0}, Pos{-4.0, -4.0}, Pos{5.0, 0.0},
+                            Pos{-4.0, 4.0}}),
+                      // the input polarity marks, inside the edge
+                      text(-3.55, 2.7, "+"), text(-3.55, -2.95, "-"),
+                      // the supply stubs: v+ rises from the top edge
+                      // (at x=0 the edge sits at y=+20/9), v- mirrors
+                      line(0.0, 2.222, 0.0, 5.0),
+                      line(0.0, -2.222, 0.0, -5.0)};
+            return s;
+        }(),
         // The switches (stage 24). Both need a .model of type SW
         // (Ron/Roff and the threshold pair) - the directives block is
         // where it lives, the params carry only the model's NAME. The
@@ -624,6 +680,7 @@ const std::vector<SymbolDef>& table() {
                       PinDef{.name = "c-", .dx = -2.0, .dy = -4.0, .dir = 270}};
             s.needs_value = false;
             s.needs_model = true;
+            s.model_kind = "sw";
             s.params = {spec(ParamSpec::Type::Text, "model", "Model")};
             s.emit = {ParamEmit{.key = "model", .optional = false}};
             s.draw = {// the body the contact sits in
@@ -651,6 +708,7 @@ const std::vector<SymbolDef>& table() {
                       PinDef{.name = "n", .dx = 3.0, .dy = 0.0, .dir = 0}};
             s.needs_value = false;
             s.needs_model = true;
+            s.model_kind = "sw";
             s.params = {spec(ParamSpec::Type::Text, "vs", "Controlling V source"),
                         spec(ParamSpec::Type::Text, "model", "Model")};
             s.emit = {ParamEmit{.key = "vs", .prefix = "", .optional = false},

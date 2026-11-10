@@ -354,7 +354,12 @@ ws::core::Status Elaborator::flatten_x(const DeviceCard& card,
                     if (const auto port = port_map.find(to_lower(nested.rest[i].text));
                         port != port_map.end()) {
                         nested.rest[i] = port->second;
-                    } else {
+                    } else if (!is_ground_spelling(nested.rest[i].text)) {
+                        // Ground stays GLOBAL through the boundary
+                        // (SPICE3's own rule - every real .subckt body
+                        // grounds its internals through 0; prefixing it
+                        // strands a floating X<n>:0 node that gmin
+                        // solves to garbage, silently).
                         nested.rest[i].text = my_prefix + nested.rest[i].text;
                     }
                 }
@@ -378,6 +383,10 @@ ws::core::Status Elaborator::flatten_x(const DeviceCard& card,
                 if (const auto port = port_map.find(to_lower(local.text));
                     port != port_map.end()) {
                     scoped.rest[i] = port->second;
+                } else if (is_ground_spelling(local.text)) {
+                    // Ground stays ground (the nested-call rule above,
+                    // for the body's own devices).
+                    continue;
                 } else {
                     scoped.rest[i].text = my_prefix + local.text;  // internal node
                 }
