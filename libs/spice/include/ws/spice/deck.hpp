@@ -148,6 +148,18 @@ struct MeasCard {
     bool trig_fall = false, targ_fall = false, when_fall = false;
 };
 
+// .four (§7.9): the Fourier series of the named signals over the
+// run's .tran table - or, when the deck ran .op, each signal's DC
+// component alone. FREQ is the fundamental in Hz; a pure-integer
+// second token is the harmonic count (default 9, the classic printout);
+// the signals are column spellings ("v(out)", "i(V1)") like .meas's.
+struct FourCard {
+    SourceLoc loc;
+    ExprProgram freq;            // fundamental frequency, Hz
+    ExprProgram nharms;          // harmonic count (constant 9 by default)
+    std::vector<Token> signals;  // "v(out)", "i(V1)", ... as spelled
+};
+
 // .save / .print / .probe (§0.5 rev): the deck's REQUESTED save-list as
 // expressions - plain names (v(out), i(V1)) or post-hoc waveform math
 // (v(out)-v(in), i(V1)*v(in), @R1[value]). Evaluated against the stored
@@ -211,6 +223,7 @@ struct DeckAst {
     std::vector<NodesetCard> nodesets;    // top-level .nodeset cards, in order (M5)
     std::vector<StepCard> steps;          // top-level .step cards, in order
     std::vector<MeasCard> meas;           // top-level .meas cards, in order
+    std::vector<FourCard> fours;          // top-level .four cards, in order (§7.9)
     std::vector<SaveCard> saves;          // .save/.print/.probe, in order
     std::map<std::string, SubcktDef> subckts;  // key: lowercased name
 };

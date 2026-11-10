@@ -1,0 +1,33 @@
+{
+    "format": "circsim",
+    "version": 1,
+    "grid": 1.0,
+    "next_id": 10,
+    "parts": [
+        {"id": 1, "symbol": "b", "ref": "B1", "value": "", "pos": [8.0, 0.0], "rot": 0, "mirror": true, "params": {"vexpr": "0.5*sin(6283.185307179586*time)+0.1*sin(18849.555921538759*time)"}},
+        {"id": 2, "symbol": "r", "ref": "R1", "value": "1k", "pos": [16.0, 0.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 3, "symbol": "gnd", "ref": "", "value": "", "pos": [5.0, -3.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 4, "symbol": "gnd", "ref": "", "value": "", "pos": [19.0, -3.0], "rot": 0, "mirror": false, "params": {}}
+    ],
+    "junctions": [],
+    "wires": [
+        {"id": 5, "a": {"pin": {"part": 1, "pin": 0}}, "b": {"pin": {"part": 2, "pin": 0}}, "waypoints": [], "ortho": true},
+        {"id": 6, "a": {"pin": {"part": 1, "pin": 1}}, "b": {"pin": {"part": 3, "pin": 0}}, "waypoints": [], "ortho": true},
+        {"id": 7, "a": {"pin": {"part": 2, "pin": 1}}, "b": {"pin": {"part": 4, "pin": 0}}, "waypoints": [], "ortho": true}
+    ],
+    "labels": [
+        {"id": 8, "pos": [12.0, 0.0], "name": "out"}
+    ],
+    "analysis": {
+        "entries": [
+            {
+                "tran": {
+                    "tstep": 0.00001,
+                    "tstop": 0.005
+                }
+            }
+        ]
+    },
+    "directives": ".four 1k 9 v(out)",
+    "view": {"zoom": 1.0, "center": [12.0, -2.0]}
+}

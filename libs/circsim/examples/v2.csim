@@ -1,0 +1,459 @@
+{
+    "format": "circsim",
+    "version": 1,
+    "grid": 1.0,
+    "next_id": 200,
+    "parts": [
+        {
+            "id": 1,
+            "symbol": "v",
+            "ref": "V12",
+            "value": "12",
+            "pos": [40.0, 55.0],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 2,
+            "symbol": "v",
+            "ref": "B2",
+            "value": "0",
+            "pos": [10.0, 10.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "wave": "PULSE(0 3.3 1 1n 1n 10 20)"
+            }
+        },
+        {
+            "id": 3,
+            "symbol": "v",
+            "ref": "B1",
+            "value": "0",
+            "pos": [30.0, 40.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "wave": "PULSE(0 12 1m 1n 1n 10 20)"
+            }
+        },
+        {
+            "id": 4,
+            "symbol": "v",
+            "ref": "Vch1",
+            "value": "0",
+            "pos": [60.0, 0.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "wave": "PULSE(0 1 0 1n 1n 1 2)"
+            }
+        },
+        {
+            "id": 5,
+            "symbol": "v",
+            "ref": "Vch2",
+            "value": "0",
+            "pos": [50.0, 0.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "wave": "PULSE(0 1 0 1n 1n 1 2)"
+            }
+        },
+        {
+            "id": 6,
+            "symbol": "r",
+            "ref": "R9",
+            "value": "220",
+            "pos": [20.0, 10.0],
+            "rot": 90,
+            "mirror": false
+        },
+        {
+            "id": 7,
+            "symbol": "r",
+            "ref": "R11",
+            "value": "47k",
+            "pos": [35.0, 20.0],
+            "rot": 270,
+            "mirror": false
+        },
+        {
+            "id": 8,
+            "symbol": "r",
+            "ref": "R2",
+            "value": "120",
+            "pos": [50.0, 30.0],
+            "rot": 270,
+            "mirror": false
+        },
+        {
+            "id": 9,
+            "symbol": "r",
+            "ref": "R1",
+            "value": "1",
+            "pos": [40.0, 40.0],
+            "rot": 90,
+            "mirror": false
+        },
+        {
+            "id": 10,
+            "symbol": "r",
+            "ref": "R3",
+            "value": "470",
+            "pos": [65.0, 30.0],
+            "rot": 270,
+            "mirror": false
+        },
+        {
+            "id": 11,
+            "symbol": "r",
+            "ref": "R10",
+            "value": "470k",
+            "pos": [85.0, 45.0],
+            "rot": 270,
+            "mirror": false
+        },
+        {
+            "id": 12,
+            "symbol": "r",
+            "ref": "R4",
+            "value": "1",
+            "pos": [85.0, 30.0],
+            "rot": 90,
+            "mirror": false
+        },
+        {
+            "id": 13,
+            "symbol": "r",
+            "ref": "R5",
+            "value": "680m",
+            "pos": [105.0, 50.0],
+            "rot": 90,
+            "mirror": false
+        },
+        {
+            "id": 14,
+            "symbol": "r",
+            "ref": "R6",
+            "value": "{5000*pot1}",
+            "pos": [115.0, 15.0],
+            "rot": 270,
+            "mirror": false
+        },
+        {
+            "id": 15,
+            "symbol": "r",
+            "ref": "R7",
+            "value": "{5000*(1-pot1)}",
+            "pos": [115.0, 5.0],
+            "rot": 270,
+            "mirror": false
+        },
+        {
+            "id": 16,
+            "symbol": "r",
+            "ref": "R8",
+            "value": "{load1}",
+            "pos": [125.0, 25.0],
+            "rot": 90,
+            "mirror": false
+        },
+        {
+            "id": 17,
+            "symbol": "c",
+            "ref": "C1",
+            "value": "3300u",
+            "pos": [45.0, 40.0],
+            "rot": 270,
+            "mirror": false
+        },
+        {
+            "id": 18,
+            "symbol": "c",
+            "ref": "C2",
+            "value": "3300u",
+            "pos": [115.0, 50.0],
+            "rot": 90,
+            "mirror": false
+        },
+        {
+            "id": 19,
+            "symbol": "opto",
+            "ref": "U1",
+            "value": "PC817A",
+            "pos": [30.0, 10.0],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 20,
+            "symbol": "q",
+            "ref": "Q2",
+            "value": "BC337-25",
+            "pos": [50.0, 10.0],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 21,
+            "symbol": "q",
+            "ref": "Q3",
+            "value": "BC337-25",
+            "pos": [65.0, 20.0],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 22,
+            "symbol": "scr",
+            "ref": "Q1",
+            "value": "Qpt41c",
+            "pos": [95.0, 45.0],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 23,
+            "symbol": "sw",
+            "ref": "S1",
+            "value": "mch1",
+            "pos": [65.0, 10.0],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 24,
+            "symbol": "sw",
+            "ref": "S2",
+            "value": "mch2",
+            "pos": [55.0, 20.0],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 25,
+            "symbol": "d",
+            "ref": "D1",
+            "value": "1N4148",
+            "pos": [75.0, 25.0],
+            "rot": 270,
+            "mirror": false
+        },
+        {
+            "id": 26,
+            "symbol": "d",
+            "ref": "D2",
+            "value": "1N4148",
+            "pos": [75.0, 10.0],
+            "rot": 270,
+            "mirror": false
+        },
+        {
+            "id": 27,
+            "symbol": "d",
+            "ref": "D3",
+            "value": "1N4148",
+            "pos": [75.0, 0.0],
+            "rot": 270,
+            "mirror": false
+        },
+        {
+            "id": 28,
+            "symbol": "d",
+            "ref": "D4",
+            "value": "1N4148",
+            "pos": [75.0, -10.0],
+            "rot": 270,
+            "mirror": false
+        },
+        {
+            "id": 29,
+            "symbol": "d",
+            "ref": "D5",
+            "value": "1N4148",
+            "pos": [85.0, 20.0],
+            "rot": 90,
+            "mirror": false
+        },
+        {
+            "id": 30,
+            "symbol": "d",
+            "ref": "D6",
+            "value": "1N4148",
+            "pos": [95.0, 20.0],
+            "rot": 90,
+            "mirror": false
+        },
+        {
+            "id": 31,
+            "symbol": "d",
+            "ref": "D7",
+            "value": "MUR460",
+            "pos": [115.0, 35.0],
+            "rot": 90,
+            "mirror": false
+        },
+        {
+            "id": 32,
+            "symbol": "d",
+            "ref": "D8",
+            "value": "1N4007",
+            "pos": [135.0, 25.0],
+            "rot": 270,
+            "mirror": false
+        },
+        {
+            "id": 33,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [10.0, 0.0],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 34,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [30.0, 0.0],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 35,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [50.0, 0.0],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 36,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [75.0, -15.0],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 37,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [115.0, -5.0],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 38,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [135.0, 15.0],
+            "rot": 0,
+            "mirror": false
+        }
+    ],
+    "junctions": [
+        { "id": 101, "pos": [35.0, 10.0] },
+        { "id": 102, "pos": [55.0, 20.0] },
+        { "id": 103, "pos": [60.0, 30.0] },
+        { "id": 104, "pos": [85.0, 25.0] },
+        { "id": 105, "pos": [85.0, 35.0] },
+        { "id": 106, "pos": [105.0, 45.0] },
+        { "id": 107, "pos": [120.0, 25.0] }
+    ],
+    "wires": [
+        { "id": 201, "a": { "pin": { "part": 1, "pin": 0 } }, "b": { "pin": { "part": 22, "pin": 0 } }, "waypoints": [[40.0, 50.0], [95.0, 50.0]], "ortho": true },
+        { "id": 202, "a": { "pin": { "part": 1, "pin": 1 } }, "b": { "pin": { "part": 34, "pin": 0 } }, "waypoints": [[40.0, 45.0]], "ortho": true },
+        { "id": 203, "a": { "pin": { "part": 2, "pin": 0 } }, "b": { "pin": { "part": 6, "pin": 0 } }, "waypoints": [], "ortho": true },
+        { "id": 204, "a": { "pin": { "part": 2, "pin": 1 } }, "b": { "pin": { "part": 33, "pin": 0 } }, "waypoints": [], "ortho": true },
+        { "id": 205, "a": { "pin": { "part": 6, "pin": 1 } }, "b": { "pin": { "part": 19, "pin": 0 } }, "waypoints": [], "ortho": true },
+        { "id": 206, "a": { "pin": { "part": 19, "pin": 1 } }, "b": { "pin": { "part": 34, "pin": 0 } }, "waypoints": [], "ortho": true },
+        { "id": 207, "a": { "pin": { "part": 19, "pin": 2 } }, "b": { "pin": { "part": 34, "pin": 0 } }, "waypoints": [], "ortho": true },
+        { "id": 208, "a": { "pin": { "part": 19, "pin": 3 } }, "b": { "junction": { "id": 101 } }, "waypoints": [], "ortho": true },
+        { "id": 209, "a": { "pin": { "part": 7, "pin": 0 } }, "b": { "junction": { "id": 101 } }, "waypoints": [], "ortho": true },
+        { "id": 210, "a": { "pin": { "part": 7, "pin": 1 } }, "b": { "pin": { "part": 1, "pin": 0 } }, "waypoints": [[35.0, 50.0]], "ortho": true },
+        { "id": 211, "a": { "pin": { "part": 20, "pin": 1 } }, "b": { "junction": { "id": 101 } }, "waypoints": [], "ortho": true },
+        { "id": 212, "a": { "pin": { "part": 20, "pin": 2 } }, "b": { "pin": { "part": 35, "pin": 0 } }, "waypoints": [], "ortho": true },
+        { "id": 213, "a": { "pin": { "part": 20, "pin": 0 } }, "b": { "junction": { "id": 102 } }, "waypoints": [], "ortho": true },
+        { "id": 214, "a": { "pin": { "part": 8, "pin": 0 } }, "b": { "junction": { "id": 102 } }, "waypoints": [], "ortho": true },
+        { "id": 215, "a": { "pin": { "part": 8, "pin": 1 } }, "b": { "pin": { "part": 1, "pin": 0 } }, "waypoints": [[50.0, 50.0]], "ortho": true },
+        { "id": 216, "a": { "pin": { "part": 24, "pin": 0 } }, "b": { "junction": { "id": 102 } }, "waypoints": [], "ortho": true },
+        { "id": 217, "a": { "pin": { "part": 24, "pin": 1 } }, "b": { "junction": { "id": 105 } }, "waypoints": [[85.0, 20.0], [85.0, 35.0]], "ortho": true },
+        { "id": 218, "a": { "pin": { "part": 24, "pin": 2 } }, "b": { "pin": { "part": 5, "pin": 0 } }, "waypoints": [[55.0, 5.0]], "ortho": true },
+        { "id": 219, "a": { "pin": { "part": 3, "pin": 0 } }, "b": { "pin": { "part": 9, "pin": 0 } }, "waypoints": [], "ortho": true },
+        { "id": 220, "a": { "pin": { "part": 3, "pin": 1 } }, "b": { "pin": { "part": 34, "pin": 0 } }, "waypoints": [[30.0, 30.0], [30.0, 10.0]], "ortho": true },
+        { "id": 221, "a": { "pin": { "part": 9, "pin": 1 } }, "b": { "junction": { "id": 103 } }, "waypoints": [], "ortho": true },
+        { "id": 222, "a": { "pin": { "part": 17, "pin": 0 } }, "b": { "junction": { "id": 103 } }, "waypoints": [], "ortho": true },
+        { "id": 223, "a": { "pin": { "part": 17, "pin": 1 } }, "b": { "pin": { "part": 34, "pin": 0 } }, "waypoints": [], "ortho": true },
+        { "id": 224, "a": { "pin": { "part": 21, "pin": 0 } }, "b": { "junction": { "id": 103 } }, "waypoints": [], "ortho": true },
+        { "id": 225, "a": { "pin": { "part": 21, "pin": 1 } }, "b": { "junction": { "id": 104 } }, "waypoints": [], "ortho": true },
+        { "id": 226, "a": { "pin": { "part": 21, "pin": 2 } }, "b": { "pin": { "part": 23, "pin": 0 } }, "waypoints": [], "ortho": true },
+        { "id": 227, "a": { "pin": { "part": 10, "pin": 0 } }, "b": { "junction": { "id": 103 } }, "waypoints": [], "ortho": true },
+        { "id": 228, "a": { "pin": { "part": 10, "pin": 1 } }, "b": { "pin": { "part": 1, "pin": 0 } }, "waypoints": [[65.0, 50.0]], "ortho": true },
+        { "id": 229, "a": { "pin": { "part": 23, "pin": 1 } }, "b": { "pin": { "part": 26, "pin": 0 } }, "waypoints": [], "ortho": true },
+        { "id": 230, "a": { "pin": { "part": 23, "pin": 2 } }, "b": { "pin": { "part": 4, "pin": 0 } }, "waypoints": [[65.0, 5.0]], "ortho": true },
+        { "id": 231, "a": { "pin": { "part": 25, "pin": 0 } }, "b": { "junction": { "id": 103 } }, "waypoints": [], "ortho": true },
+        { "id": 232, "a": { "pin": { "part": 25, "pin": 1 } }, "b": { "junction": { "id": 104 } }, "waypoints": [], "ortho": true },
+        { "id": 233, "a": { "pin": { "part": 26, "pin": 1 } }, "b": { "pin": { "part": 27, "pin": 0 } }, "waypoints": [], "ortho": true },
+        { "id": 234, "a": { "pin": { "part": 27, "pin": 1 } }, "b": { "pin": { "part": 28, "pin": 0 } }, "waypoints": [], "ortho": true },
+        { "id": 235, "a": { "pin": { "part": 28, "pin": 1 } }, "b": { "pin": { "part": 36, "pin": 0 } }, "waypoints": [], "ortho": true },
+        { "id": 236, "a": { "pin": { "part": 22, "pin": 1 } }, "b": { "junction": { "id": 105 } }, "waypoints": [], "ortho": true },
+        { "id": 237, "a": { "pin": { "part": 22, "pin": 2 } }, "b": { "junction": { "id": 106 } }, "waypoints": [], "ortho": true },
+        { "id": 238, "a": { "pin": { "part": 11, "pin": 0 } }, "b": { "junction": { "id": 105 } }, "waypoints": [], "ortho": true },
+        { "id": 239, "a": { "pin": { "part": 11, "pin": 1 } }, "b": { "junction": { "id": 106 } }, "waypoints": [], "ortho": true },
+        { "id": 240, "a": { "pin": { "part": 12, "pin": 0 } }, "b": { "junction": { "id": 105 } }, "waypoints": [], "ortho": true },
+        { "id": 241, "a": { "pin": { "part": 12, "pin": 1 } }, "b": { "junction": { "id": 104 } }, "waypoints": [], "ortho": true },
+        { "id": 242, "a": { "pin": { "part": 13, "pin": 0 } }, "b": { "pin": { "part": 22, "pin": 0 } }, "waypoints": [[105.0, 50.0]], "ortho": true },
+        { "id": 243, "a": { "pin": { "part": 13, "pin": 1 } }, "b": { "junction": { "id": 106 } }, "waypoints": [], "ortho": true },
+        { "id": 244, "a": { "pin": { "part": 18, "pin": 0 } }, "b": { "pin": { "part": 22, "pin": 0 } }, "waypoints": [[115.0, 50.0]], "ortho": true },
+        { "id": 245, "a": { "pin": { "part": 18, "pin": 1 } }, "b": { "junction": { "id": 106 } }, "waypoints": [], "ortho": true },
+        { "id": 246, "a": { "pin": { "part": 29, "pin": 0 } }, "b": { "junction": { "id": 104 } }, "waypoints": [], "ortho": true },
+        { "id": 247, "a": { "pin": { "part": 29, "pin": 1 } }, "b": { "junction": { "id": 106 } }, "waypoints": [], "ortho": true },
+        { "id": 248, "a": { "pin": { "part": 30, "pin": 0 } }, "b": { "junction": { "id": 104 } }, "waypoints": [], "ortho": true },
+        { "id": 249, "a": { "pin": { "part": 30, "pin": 1 } }, "b": { "junction": { "id": 106 } }, "waypoints": [], "ortho": true },
+        { "id": 250, "a": { "pin": { "part": 31, "pin": 0 } }, "b": { "junction": { "id": 106 } }, "waypoints": [], "ortho": true },
+        { "id": 251, "a": { "pin": { "part": 31, "pin": 1 } }, "b": { "junction": { "id": 107 } }, "waypoints": [], "ortho": true },
+        { "id": 252, "a": { "pin": { "part": 14, "pin": 0 } }, "b": { "junction": { "id": 104 } }, "waypoints": [], "ortho": true },
+        { "id": 253, "a": { "pin": { "part": 14, "pin": 1 } }, "b": { "pin": { "part": 15, "pin": 0 } }, "waypoints": [], "ortho": true },
+        { "id": 254, "a": { "pin": { "part": 15, "pin": 1 } }, "b": { "pin": { "part": 37, "pin": 0 } }, "waypoints": [], "ortho": true },
+        { "id": 255, "a": { "pin": { "part": 16, "pin": 0 } }, "b": { "junction": { "id": 107 } }, "waypoints": [], "ortho": true },
+        { "id": 256, "a": { "pin": { "part": 16, "pin": 1 } }, "b": { "pin": { "part": 32, "pin": 0 } }, "waypoints": [], "ortho": true },
+        { "id": 257, "a": { "pin": { "part": 32, "pin": 1 } }, "b": { "pin": { "part": 38, "pin": 0 } }, "waypoints": [], "ortho": true },
+        { "id": 258, "a": { "pin": { "part": 4, "pin": 1 } }, "b": { "pin": { "part": 35, "pin": 0 } }, "waypoints": [], "ortho": true },
+        { "id": 259, "a": { "pin": { "part": 5, "pin": 1 } }, "b": { "pin": { "part": 35, "pin": 0 } }, "waypoints": [], "ortho": true }
+    ],
+    "labels": [
+        {
+            "id": 150,
+            "pos": [95.0, 52.0],
+            "name": "12v"
+        },
+        {
+            "id": 151,
+            "pos": [85.0, 37.0],
+            "name": "bq1"
+        }
+    ],
+    "analysis": {
+        "entries": [
+            {
+                "tran": {
+                    "tstep": 0.001,
+                    "tstop": 1.1
+                }
+            }
+        ]
+    },
+    "directives": ".inc \"C:\\Users\\e-sf\\OneDrive\\2026\\Projeto VFMM 2026\\Simulações\\Circuito de Disparo do SCR\\Bibliotecas_extras_spice\\TIP41C.LIB\"\n.tran 1100m startup\n.step param ch1 list 0 1\n.step param ch2 list 0 1\n.step param pot1 list 0.001 0.5 0.999\n.step param load1 list 3300m 20\n.model mch1 SW(Ron=10m Roff=100Meg Vt=.5 Vh=-.4)\n.model mch2 SW(Ron=10m Roff=100Meg Vt=.5 Vh=-.4)\n",
+    "view": {
+        "zoom": 20.0,
+        "center": [65.0, 25.0]
+    }
+}

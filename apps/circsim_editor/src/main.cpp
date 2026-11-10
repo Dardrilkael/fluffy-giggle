@@ -1324,10 +1324,10 @@ class CircsimApp final : public ws::ui::App {
             for (const ws::spice::Table& t : editor_.results.run.results.tables) {
                 rows += t.row_count();
             }
-            char summary[160];
+            char summary[192];
             std::snprintf(summary, sizeof summary,
                           "Simulation finished: %zu table%s, %zu row%s, %zu "
-                          "measurement%s",
+                          "measurement%s, %zu fourier%s",
                           editor_.results.run.results.tables.size(),
                           editor_.results.run.results.tables.size() == 1
                               ? ""
@@ -1336,7 +1336,9 @@ class CircsimApp final : public ws::ui::App {
                           editor_.results.run.measurements.size(),
                           editor_.results.run.measurements.size() == 1
                               ? ""
-                              : "s");
+                              : "s",
+                          editor_.results.run.fouriers.size(),
+                          editor_.results.run.fouriers.size() == 1 ? "" : "s");
             editor_.toast(summary, gui::ToastSeverity::info);
             editor_.status(count == 0 ? summary
                                       : editor_.problems.header);

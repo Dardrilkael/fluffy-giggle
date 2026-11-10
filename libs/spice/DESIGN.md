@@ -105,9 +105,9 @@ Goals (from the brief, restated as verifiable targets):
 - Netlist dialect: the common LTspice/ngspice subset — devices R C L K,
   V/I (DC, AC, PULSE, SIN, EXP, PWL), E F G H, behavioral B, switches,
   diode, BJT (Gummel–Poon), MOS (level 1 first; BSIM in the backlog),
-  lossless transmission line. Cards: `.op .dc .ac .tran .noise .step
-  .param .meas .model .subckt .include .save .print .options .nodeset
-  .ic .end`.
+  lossless transmission line. Cards: `.op .dc .ac .tran .noise .four
+  .step .param .meas .model .subckt .include .save .print .options
+  .nodeset .ic .end`.
 - Accuracy gates: the analytic suite (§10.1) at per-test tolerances, and
   ngspice agreement within stated tolerances wherever the harness can run
   (§10.2).
@@ -117,9 +117,9 @@ Goals (from the brief, restated as verifiable targets):
 Non-goals (v1):
 
 - No GUI, no plotting, no waveform binary format — CSV plus a text report
-  for noise/`.meas`. A `.raw` writer is a backlog add-on behind the same
-  results API.
-- No `.control` scripting, `.four`, `.disto`, `.sens`, `.pss`, IBIS,
+  for noise/`.meas`/`.four`. A `.raw` writer is a backlog add-on behind the
+  same results API.
+- No `.control` scripting, `.disto`, `.sens`, `.pss`, IBIS,
   Verilog-A, cosimulation, or multithreading.
 - No SPICE2-style special cases: a construct either works or is rejected.
 
@@ -520,7 +520,7 @@ elaboration with graph checks and name the offending cycle explicitly
 The deck fix is series resistance/`rseries`-style; the error message says
 so. Index-2 handling itself is a backlog item, never a silent gap.
 
-## 7. The other analyses: op, dc, ac, noise, step
+## 7. The other analyses: op, dc, ac, noise, step, .four
 
 Transient is §6. This section covers the rest of the analysis drivers
 (`src/analysis/*.cpp`) and how a deck with several of them runs.
@@ -657,6 +657,29 @@ expression language gained signal references (`v(node)`, `v(a,b)`
 differential, `i(Vsrc)`) and `@dev[param]` bound-value references; the
 sweep axes are pseudo-columns. A `.step` family evaluates them per point
 (the `@dev[param]` values are per point).
+
+### 7.9 `.four`
+
+`.four FREQ [NHARMS] ov1 [ov2 ...]` — the Fourier series of the named
+signals over the completed `.tran` table (a pure-integer second token is
+the harmonic count; default 9). A deck that ran `.op` instead answers
+each signal's DC component alone; a deck with neither `.tran` nor `.op`
+turns every `.four` into a failure note, never a run failure (the
+`.meas` contract, §9.5).
+
+- The window is the run's LAST whole fundamental period — the settled
+  waveform, not the startup (LTspice's Nperiods=1 shape); a run shorter
+  than one period uses the whole run (`periods = 0`, window leakage).
+- The bins are the window's exact harmonics, integrated trapezoidally
+  on the ADAPTIVE grid — no resampling, no FFT size games (the same
+  no-resample convention as `measure::`). DC plus NHARMS harmonics, each
+  as magnitude / cos-referenced phase / % of the fundamental, plus
+  THD = √(Σ_{n≥2} mag²)/mag₁·100.
+- The library half lives in `fourier.hpp` (`fourier::series`); the card
+  half is `evaluate_four`, run after the `.meas` loop — per step point
+  for a family, `@2`/`@3` suffixes like `.meas`. Results ride
+  `RunOutput::fouriers`: the CLIs print the table after the
+  measurements, `results_json` carries it (the CSV stays tables-only).
 
 ## 8. Netlist front end: records, numbers, scope, expressions
 
@@ -943,7 +966,7 @@ M1 proceeds without waiting for M0b (§4.6); M0b must finish before M2.
 ### 11.1 Backlog (explicit, not scheduled)
 
 BSIM3/4 and MOS levels 2/3, JFET/MESFET, lossy transmission lines,
-`.lib`, `.alter`, `.tf`, `.pz`, `.four`, `.disto`, `.sens`, `.pss`,
+`.lib`, `.alter`, `.tf`, `.pz`, `.disto`, `.sens`, `.pss`,
 Gear(2) and TR-BDF2, index-2 DAE handling (§6.6), hierarchical matrices
 (§8.4), full `.meas` grammar (the §0.4 subset landed 2026-10-29),
 AMD/BTF tuning and transpose-factor reuse (§4.5), multithreaded DRIVERS
@@ -951,8 +974,8 @@ AMD/BTF tuning and transpose-factor reuse (§4.5), multithreaded DRIVERS
 Promoted out of the backlog by the 2026-10-29 revision: pseudo-transient
 continuation (§5.2 stage 4), the `.raw` writer (§7.8), `.step`/Monte
 Carlo (§7.6), the measured `.meas` subset (§0.4), `.save`/`.print`
-expressions (§0.5). Anything here is rejected at parse with a line
-number until it lands.
+expressions (§0.5); and later, the `.four` harmonic series (§7.9).
+Anything here is rejected at parse with a line number until it lands.
 
 ### 11.2 Open questions for sign-off
 

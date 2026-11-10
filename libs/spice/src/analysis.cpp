@@ -29,6 +29,7 @@
 #include "mna.hpp"
 
 #include <ws/spice/deck.hpp>
+#include <ws/spice/fourier.hpp>
 #include <ws/spice/measure.hpp>
 #include <ws/spice/run.hpp>
 #include <ws/spice/state.hpp>
@@ -1643,6 +1644,105 @@ ws::core::Result<Measurement> evaluate_meas(const MeasCard& m, const Table& t,
     return out;
 }
 
+// Splits a .step family table into its per-point tables - a plain
+// table is its own single slice. .meas/.four must see the analysis's
+// own axis, never the step column (§7.6's classic family-table
+// mistake), so the leading step axes drop out of every part.
+[[nodiscard]] std::vector<Table> family_parts(const Table& f) {
+    std::vector<Table> parts;
+    if (f.step_axes == 0 || f.row_count() == 0) {
+        parts.push_back(f);
+        return parts;
+    }
+    const std::vector<double>& steps = f.sweep_axes[0];
+    std::size_t i = 0;
+    while (i < steps.size()) {
+        const double k = steps[i];
+        std::size_t j = i;
+        while (j < steps.size() && steps[j] == k) {
+            ++j;
+        }
+        Table t;
+        t.analysis = f.analysis;
+        t.sweep = f.sweep;
+        for (std::size_t a = f.step_axes; a < f.sweep_names.size(); ++a) {
+            t.sweep_names.push_back(f.sweep_names[a]);
+            t.sweep_axes.emplace_back(f.sweep_axes[a].begin() +
+                                          static_cast<std::ptrdiff_t>(i),
+                                      f.sweep_axes[a].begin() +
+                                          static_cast<std::ptrdiff_t>(j));
+        }
+        for (const Signal& sig : f.signals) {
+            Signal c;
+            c.name = sig.name;
+            c.data.assign(sig.data.begin() + static_cast<std::ptrdiff_t>(i),
+                          sig.data.begin() + static_cast<std::ptrdiff_t>(j));
+            t.signals.push_back(std::move(c));
+        }
+        parts.push_back(std::move(t));
+        i = j;
+    }
+    return parts;
+}
+
+// Evaluates one .four signal against a completed (per-point) table:
+// the fourier:: library does the series, this half resolves the card's
+// numbers and the signal column. A .op table (or a degenerate one-row
+// .tran) answers the DC component alone - harmonics need a time axis.
+Fourier evaluate_four(const FourCard& f, const Token& sig_tok, const Table& t,
+                      const ParamTable& scope) {
+    Fourier out;
+    out.signal = sig_tok.text;
+    out.analysis = t.analysis == AnalysisKind::Tran ? ".tran" : ".op";
+    auto eval_num = [&](const ExprProgram& p) -> ws::core::Result<double> {
+        WS_TRY_ASSIGN(const std::vector<std::optional<double>> b, scope.bind(p));
+        WS_TRY_ASSIGN(const double v, p.evaluate(b));
+        return v;
+    };
+    const auto freq = eval_num(f.freq);
+    if (!freq) {
+        out.note = "fundamental: " + freq.error().message;
+        return out;
+    }
+    out.fundamental = *freq;
+    const auto count = eval_num(f.nharms);
+    if (!count) {
+        out.note = "harmonics: " + count.error().message;
+        return out;
+    }
+    if (*count < 1.0 || *count > 10000.0 || *count != std::floor(*count)) {
+        out.note = "the harmonic count must be a whole number between 1 and 10000";
+        return out;
+    }
+    const std::span<const double> sig = t.signal(sig_tok.text);
+    if (sig.empty()) {
+        out.note = "unknown signal '" + sig_tok.text + "'";
+        return out;
+    }
+    if (t.analysis != AnalysisKind::Tran || t.row_count() < 2) {
+        // .op: one sample, no time axis - the DC component is the answer.
+        out.dc = sig.front();
+        return out;
+    }
+    const fourier::Series s =
+        fourier::series(t.axis(), sig, *freq, static_cast<int>(*count));
+    out.periods = s.periods;
+    out.dc = s.dc;
+    out.thd_percent = s.thd_percent;
+    out.note = std::move(s.note);
+    out.harmonics.reserve(s.harmonics.size());
+    for (const fourier::Harmonic& h : s.harmonics) {
+        FourierHarmonic r;
+        r.n = h.n;
+        r.freq = h.freq;
+        r.magnitude = h.magnitude;
+        r.phase_deg = h.phase_deg;
+        r.normalized = h.normalized;
+        out.harmonics.push_back(r);
+    }
+    return out;
+}
+
 ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
                                      std::vector<Warning>& warnings) {
     // .options override the caller's defaults, later cards win (§5.1).
@@ -1891,48 +1991,55 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
         // Split the family into per-point tables (a plain table is its
         // own single slice): .meas must see the analysis's own axis, not
         // the step column.
-        std::vector<Table> parts;
-        {
-            const Table& f = *target;
-            if (f.step_axes == 0 || f.row_count() == 0) {
-                parts.push_back(f);
-            } else {
-                const std::vector<double>& steps = f.sweep_axes[0];
-                std::size_t i = 0;
-                while (i < steps.size()) {
-                    const double k = steps[i];
-                    std::size_t j = i;
-                    while (j < steps.size() && steps[j] == k) {
-                        ++j;
-                    }
-                    Table t;
-                    t.analysis = f.analysis;
-                    t.sweep = f.sweep;
-                    for (std::size_t a = f.step_axes; a < f.sweep_names.size(); ++a) {
-                        t.sweep_names.push_back(f.sweep_names[a]);
-                        t.sweep_axes.emplace_back(f.sweep_axes[a].begin() +
-                                                      static_cast<std::ptrdiff_t>(i),
-                                                  f.sweep_axes[a].begin() +
-                                                      static_cast<std::ptrdiff_t>(j));
-                    }
-                    for (const Signal& sig : f.signals) {
-                        Signal c;
-                        c.name = sig.name;
-                        c.data.assign(sig.data.begin() + static_cast<std::ptrdiff_t>(i),
-                                      sig.data.begin() + static_cast<std::ptrdiff_t>(j));
-                        t.signals.push_back(std::move(c));
-                    }
-                    parts.push_back(std::move(t));
-                    i = j;
-                }
-            }
-        }
+        const std::vector<Table> parts = family_parts(*target);
         for (std::size_t pi = 0; pi < parts.size(); ++pi) {
             WS_TRY_ASSIGN(Measurement r, evaluate_meas(m, parts[pi], global));
             if (pi != 0) {
                 r.name += "@" + std::to_string(pi + 1);  // per-point suffix
             }
             out.measurements.push_back(std::move(r));
+        }
+    }
+
+    // .four (§7.9): every card against the run's .tran table - the .op
+    // table when no .tran ran (its DC component alone), no table at all
+    // a failure note per signal. Per step point for a family, @2/@3
+    // suffixes like .meas; failures are notes, never run failures (§9.5).
+    for (const FourCard& f : ast.fours) {
+        const Table* target = nullptr;
+        for (const Table& t : out.results.tables) {
+            if (t.analysis == AnalysisKind::Tran) {
+                target = &t;
+                break;
+            }
+        }
+        if (target == nullptr) {
+            for (const Table& t : out.results.tables) {
+                if (t.analysis == AnalysisKind::Op) {
+                    target = &t;
+                    break;
+                }
+            }
+        }
+        if (target == nullptr) {
+            for (const Token& sig_tok : f.signals) {
+                Fourier failed;
+                failed.signal = sig_tok.text;
+                failed.note =
+                    "the deck has no .tran or .op table to analyse";
+                out.fouriers.push_back(std::move(failed));
+            }
+            continue;
+        }
+        const std::vector<Table> parts = family_parts(*target);
+        for (std::size_t pi = 0; pi < parts.size(); ++pi) {
+            for (const Token& sig_tok : f.signals) {
+                Fourier r = evaluate_four(f, sig_tok, parts[pi], global);
+                if (pi != 0) {
+                    r.signal += "@" + std::to_string(pi + 1);  // per-point suffix
+                }
+                out.fouriers.push_back(std::move(r));
+            }
         }
     }
 

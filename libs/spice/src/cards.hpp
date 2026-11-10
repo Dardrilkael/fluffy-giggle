@@ -26,6 +26,7 @@ struct ParsedCard {
         Nodeset,  // ".nodeset" - deck level only (M5)
         Step,    // ".step" - deck level only
         Meas,    // ".meas" - deck level only
+        Four,    // ".four" - deck level only (§7.9)
         Save,    // ".save"/".print"/".probe" - deck level only
         Subckt,  // ".subckt" opener - only meaningful at deck level
         Ends,    // ".ends" - ditto
@@ -45,6 +46,7 @@ struct ParsedCard {
     NodesetCard nodeset;
     StepCard step;
     MeasCard meas;
+    FourCard four;
     SaveCard save;
     SourceLoc loc;
 

@@ -234,6 +234,33 @@ int cmd_run(const std::vector<std::string>& args) {
         }
     }
 
+    // .four results print to stdout after the measurements (§7.9) - the
+    // DC component, the harmonic table, THD. A failed series is a note
+    // (§9.5's contract; --strict-meas stays a .meas-only switch).
+    for (const ws::spice::Fourier& fr : run->fouriers) {
+        if (!fr.ok()) {
+            std::fprintf(stdout, "fourier %s: FAILED (%s)\n",
+                         fr.signal.c_str(), fr.note.c_str());
+            continue;
+        }
+        std::fprintf(stdout,
+                     "fourier %s: fundamental %.6g Hz, %zu period%s, "
+                     "dc %.6g, thd %.6g %%\n",
+                     fr.signal.c_str(), fr.fundamental, fr.periods,
+                     fr.periods == 1 ? "" : "s", fr.dc, fr.thd_percent);
+        if (!fr.harmonics.empty()) {
+            std::fprintf(stdout,
+                         "  harm  frequency     magnitude    phase (deg)"
+                         "  %% of fund\n");
+            for (const ws::spice::FourierHarmonic& h : fr.harmonics) {
+                std::fprintf(stdout,
+                             "  %-4d  %-12.7g %-12.7g %-10.4g %6.4g %%\n",
+                             h.n, h.freq, h.magnitude, h.phase_deg,
+                             h.normalized);
+            }
+        }
+    }
+
     const std::string body = raw ? ws::spice::results_raw(run->results)
                                  : ws::spice::results_csv(run->results);
     if (out_path.empty() || out_path == "-") {

@@ -2382,8 +2382,8 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
     panel_section(layout, theme,
                   "Directives (.model / .include / .nodeset, verbatim)");
     hint_line(layout, theme,
-              "One line per row, e.g. .model mynmos nmos level=77 - "
-              "passed to the deck untouched");
+              "One line per row, e.g. .model mynmos nmos level=77 or "
+              ".four 1k 9 v(out) - passed to the deck untouched");
     const std::vector<std::string> lines = split_directive_lines(
         ed.schem()->directives);
     constexpr float kRowButtonW = 24.0f;

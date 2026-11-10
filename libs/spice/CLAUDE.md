@@ -132,6 +132,12 @@ file gets fixed.
 - measure:: library (rise_time, rms, trig_targ, ...) + .meas as a thin
   parser (TRIG/TARG WHEN AVG RMS MAX MIN PP INTEG FIND...WHEN/AT
   DERIV); failures are notes (--strict-meas promotes).
+- fourier:: library (§7.9) + .four the same way: the trapezoidal DFT at
+  the run's last whole fundamental period's exact harmonic bins, on the
+  adaptive grid (window = the whole run when shorter, periods 0);
+  `.four FREQ [NHARMS] sig...` (default 9), .op decks answer the DC
+  component alone, notes never failures; per step point with @k
+  suffixes; RunOutput::fouriers.
 - .save/.print/.probe expression columns evaluated post-hoc over the
   stored defaults (no hidden B sources); the axes are pseudo-columns.
 - compat=ngspice|ltspice|strict (§8.3 rev); `spice check` lint (number

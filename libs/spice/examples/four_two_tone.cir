@@ -1,0 +1,8 @@
+* .four - the two-tone closed form: 0.5 V @ 1 kHz + 0.1 V @ 3 kHz.
+* The harmonic table answers magnitude 0.5 V / 0.1 V at the 1st/3rd bins
+* (both at -90 deg, cos-referenced), THD exactly 20 %, every other
+* harmonic zero - the window is the run's last whole 1 kHz period.
+B1 out 0 V=0.5*sin(6283.185307179586*time)+0.1*sin(18849.555921538759*time)
+R1 out 0 1k
+.tran 10u 5m
+.four 1k 9 v(out)

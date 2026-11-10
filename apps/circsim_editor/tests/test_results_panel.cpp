@@ -19,6 +19,7 @@
 #include "../src/results_panel.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <vector>
 
@@ -30,6 +31,9 @@
 #include <ws/ui/gui/gui_context.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
 #include <ws/ui/gui/theme.hpp>
+#include <ws/ui/renderer2d.hpp>
+
+#include "ui_gui_stub.hpp"
 
 namespace {
 
@@ -1114,4 +1118,137 @@ TEST_CASE("the transport row scrubs the one shared playback") {
     b.draw(m);
     CHECK_FALSE(b.ed.results_scrub);
     CHECK(b.ed.playback.t >= t0 + span * 0.90);
+}
+
+// --- the .four table (§7.9): the results panel's third section -------------------
+
+namespace {
+
+// A .tran two-tone series: fundamental 0.5 V, 3rd harmonic 0.1 V - the
+// closed form the engine's .four tests pin (THD exactly 20 %).
+[[nodiscard]] ws::spice::Fourier two_tone_fourier() {
+    ws::spice::Fourier f;
+    f.signal = "v(out)";
+    f.analysis = ".tran";
+    f.fundamental = 1000.0;
+    f.periods = 1;
+    f.dc = 0.0;
+    f.thd_percent = 20.0;
+    f.harmonics.push_back({1, 1000.0, 0.5, -90.0, 100.0});
+    f.harmonics.push_back({2, 2000.0, 0.0, 0.0, 0.0});
+    f.harmonics.push_back({3, 3000.0, 0.1, -90.0, 20.0});
+    return f;
+}
+
+// The synthetic mono face the section's rows install (the side-panels
+// suite's own glyph-table pattern: the fill ctor copies the table, so
+// the array fills before the Font member constructs).
+using GlyphTable = std::array<ws::ui::r2d::Font::Glyph, 95>;
+
+[[nodiscard]] GlyphTable glyph_table(float advance) {
+    GlyphTable glyphs{};
+    for (ws::ui::r2d::Font::Glyph& g : glyphs) {
+        g.advance = advance;
+    }
+    return glyphs;
+}
+
+}  // namespace
+
+TEST_CASE("a .tran run's fourier section renders the harmonic rows") {
+    Bench b;
+    b.load(ramp_table(16u));
+    b.ed.results.run.fouriers.push_back(two_tone_fourier());
+
+    const GlyphTable mono_glyphs = glyph_table(8.0f);
+    ws::ui::r2d::Font mono(15.0f, 19.0f, mono_glyphs.data(), 95);
+    b.ed.font_mono = &mono;
+
+    ws::ui::gui_test::stub.reset();
+    b.draw();
+    // The section's own rows through the mono face - header, dc, the
+    // column header, three harmonics, the THD footer - and nothing else
+    // in this bench draws text through the seam (the plot and the
+    // legend ride the canvas and the fontless gui chrome).
+    CHECK(ws::ui::gui_test::stub.texts == 7u);
+    CHECK(ws::ui::gui_test::stub.last_text_font == &mono);
+
+    // The section renders under the measurements when both exist: the
+    // same seven rows plus however many the measurements draw.
+    b.ed.results.run.measurements.push_back(
+        ws::spice::Measurement{"m1", ".tran", 1.0, ""});
+    ws::ui::gui_test::stub.reset();
+    b.draw();
+    CHECK(ws::ui::gui_test::stub.texts == 8u);
+    b.ed.font_mono = nullptr;
+}
+
+TEST_CASE("the fourier section gates on the shown table's analysis") {
+    Bench b;
+    const GlyphTable mono_glyphs = glyph_table(8.0f);
+    ws::ui::r2d::Font mono(15.0f, 19.0f, mono_glyphs.data(), 95);
+    b.ed.font_mono = &mono;
+
+    // A .noise table: the .tran series never shows, whatever the run
+    // carries - the section's rows are the delta between the two draws.
+    b.load(noise_table(51u));
+    ws::ui::gui_test::stub.reset();
+    b.draw();
+    const std::uint32_t without = ws::ui::gui_test::stub.texts;
+    b.ed.results.run.fouriers.push_back(two_tone_fourier());
+    ws::ui::gui_test::stub.reset();
+    b.draw();
+    CHECK(ws::ui::gui_test::stub.texts == without);  // hidden under .noise
+
+    // The same series under the run's .tran table draws its rows.
+    b.load(ramp_table(16u));
+    ws::ui::gui_test::stub.reset();
+    b.draw();
+    CHECK(ws::ui::gui_test::stub.texts == without + 7u);
+    b.ed.font_mono = nullptr;
+}
+
+TEST_CASE("a failed fourier series reads like a failed measurement") {
+    Bench b;
+    b.load(ramp_table(16u));
+    ws::spice::Fourier f;
+    f.signal = "v(nope)";
+    f.analysis = ".tran";
+    f.note = "unknown signal 'v(nope)'";
+    b.ed.results.run.fouriers.push_back(std::move(f));
+
+    const GlyphTable mono_glyphs = glyph_table(8.0f);
+    ws::ui::r2d::Font mono(15.0f, 19.0f, mono_glyphs.data(), 95);
+    b.ed.font_mono = &mono;
+
+    ws::ui::gui_test::stub.reset();
+    b.draw();
+    CHECK(ws::ui::gui_test::stub.texts == 1u);
+    // The failure wears the measurement's own warning ink.
+    CHECK(ws::ui::gui_test::stub.last_text_color ==
+          gui::dim(gui::kDefaultChrome.toast_warning, 0.95f));
+    b.ed.font_mono = nullptr;
+}
+
+TEST_CASE("an .op fourier answers the dc line alone") {
+    Bench b;
+    b.load(op_table());
+    ws::spice::Fourier f;
+    f.signal = "v(out)";
+    f.analysis = ".op";
+    f.fundamental = 1000.0;
+    f.dc = 2.5;
+    b.ed.results.run.fouriers.push_back(std::move(f));
+
+    const GlyphTable mono_glyphs = glyph_table(8.0f);
+    ws::ui::r2d::Font mono(15.0f, 19.0f, mono_glyphs.data(), 95);
+    b.ed.font_mono = &mono;
+
+    ws::ui::gui_test::stub.reset();
+    b.draw();
+    // The .op value rows draw through the mono face too (2 texts per
+    // signal x 3 signals), then the fourier section's single dc line.
+    CHECK(ws::ui::gui_test::stub.texts == 7u);
+    CHECK(ws::ui::gui_test::stub.last_text_font == &mono);
+    b.ed.font_mono = nullptr;
 }

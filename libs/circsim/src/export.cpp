@@ -803,6 +803,35 @@ std::string results_json(const ws::spice::RunOutput& run) {
         measurements.push_back(json::Value::object(std::move(o)));
     }
     root.set("measurements", json::Value::array(std::move(measurements)));
+
+    // The .four harmonic tables (§7.9), parallel to the measurements.
+    json::Array fouriers;
+    for (const ws::spice::Fourier& f : run.fouriers) {
+        json::Object o;
+        o.set("signal", json::Value::text(f.signal));
+        o.set("analysis", json::Value::text(f.analysis));
+        o.set("fundamental", json::Value::real(f.fundamental));
+        o.set("periods",
+              json::Value::integer(static_cast<std::int64_t>(f.periods)));
+        o.set("dc", json::Value::real(f.dc));
+        o.set("thd_percent", json::Value::real(f.thd_percent));
+        if (!f.note.empty()) {
+            o.set("note", json::Value::text(f.note));
+        }
+        json::Array harmonics;
+        for (const ws::spice::FourierHarmonic& h : f.harmonics) {
+            json::Object ho;
+            ho.set("n", json::Value::integer(h.n));
+            ho.set("freq", json::Value::real(h.freq));
+            ho.set("magnitude", json::Value::real(h.magnitude));
+            ho.set("phase_deg", json::Value::real(h.phase_deg));
+            ho.set("normalized", json::Value::real(h.normalized));
+            harmonics.push_back(json::Value::object(std::move(ho)));
+        }
+        o.set("harmonics", json::Value::array(std::move(harmonics)));
+        fouriers.push_back(json::Value::object(std::move(o)));
+    }
+    root.set("fouriers", json::Value::array(std::move(fouriers)));
     return json::write(json::Value::object(std::move(root)));
 }
 

@@ -9,10 +9,10 @@ disagree, DESIGN.md wins and this file gets fixed.
 M0 + M1 + M2 + M3 + M4 (CLOSED) + the 2026-10-29 post-review revision +
 **M5** (temp M5a, .nodeset M5b, .noise M5c, Meyer caps M5d, diode TT M5e)
 + **the BSIM6-style MOS core** (M6, LEVEL=77) + **the BJT diffusion
-charges** (M7, Tf/Tr) — all committed on `main`.
-Latest recorded gate: **12591 assertions, 188 test cases, 0 failures**
-(Linux preset: GCC 14, `-Wall -Wextra -Wpedantic -Werror`; M7 added 7
-cases / 3663 assertions; test_circsim 124/1422 green).
+charges** (M7, Tf/Tr) + **§7.9 — `.four`** — all committed on `main`.
+Latest recorded gate: **12808 assertions, 201 test cases, 0 failures**
+(Linux preset: GCC 14, `-Wall -Wextra -Wpedantic -Werror`; the .four arc
+added 7 cases / 76 assertions; test_circsim 145/1993 green).
 Windows parity: the MSVC `/W4 /WX` build is clean (the one M4a shadow,
 C4456, fixed in `523774b`; the earlier 97+6-case Windows smoke ran
 green after `70e7e84` + `b265ae7`); the Linux-side parity checks live
@@ -23,6 +23,7 @@ in `tools/audit_*.py` / `tools/build_*.py` (documented in
 
 | Commit | What |
 |---|---|
+| (this commit) | §7.9 — `.four FREQ [NHARMS] sig...`: the fourier:: library (the trapezoidal DFT at the run's last whole fundamental period's exact harmonic bins, on the adaptive grid; whole-run window when shorter, periods 0) + the card riding the .meas machinery (the family_parts split with @k suffixes, notes never failures, `.op` answering the DC component alone, no table a note); `RunOutput::fouriers` printed by both CLIs and carried by `results_json`; the Results panel's Fourier table (.tran/.op views only); `four_two_tone.cir` + `fourier.csim` through the smoke. |
 | `8373c6e` | §3.5 rev — the param/state arenas: immutable Circuit, RunState (bound values + state slices + pins), all 12 devices on the new contract, subckt-local value inlining, Rand + gauss()/flat() opcodes, ParamTable resolve cache. |
 | `5f2c8e7` | §7.8 rev — columnar results: Table = axes + signal columns, `res["v(out)"]` spans, row()/rows() views, CSV byte-identical. |
 | `d8a7da0` | §2.1 rev — CircuitBuilder + unit literals + Simulator (set/set_source/release, snapshot/restore, rebind) + write_netlist round-trip + equivalence tests. Found and fixed the Rser-to-ground §6.6 false positive. |

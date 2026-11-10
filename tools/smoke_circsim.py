@@ -245,6 +245,47 @@ def main():
             check(False, f"coupled ratio at {row[0]}: {sec/pri} != ~2.846")
     check(True, "coupled: k*sqrt(L2/L1) across the band")
 
+    # --- the .four card (§7.9): the two-tone closed form ---------------------
+    # B1 = 0.5 V @ 1 kHz + 0.1 V @ 3 kHz (the directives block carries the
+    # card): fundamental 0.5 V, 3rd harmonic 0.1 V, THD exactly 20 % - the
+    # whole schematic -> deck -> run -> CLI print path in one closed form.
+    fo = EXAMPLES / "fourier.csim"
+    r = run(args.cli, "erc", fo)
+    check(r.returncode == 0, "fourier erc exit 0")
+    r = run(args.cli, "run", fo, "-o", "-")
+    check(r.returncode == 0, f"fourier run exit 0 (stderr: {r.stderr.strip()!r})")
+    lines = [l for l in r.stdout.splitlines() if l.strip()]
+    heads = [l for l in lines if l.startswith("fourier v(out):")]
+    check(len(heads) == 1, "fourier prints one v(out) header")
+
+    def four_row(n):
+        # A harmonic row: "  n  freq  magnitude  phase  normalized %" -
+        # six whitespace tokens, no commas (the CSV rows are comma-joined).
+        for l in lines:
+            if "," in l:
+                continue
+            parts = l.split()
+            if len(parts) == 6 and parts[0] == str(n) and parts[5] == "%":
+                try:
+                    return [float(p) for p in parts[1:5]]
+                except ValueError:
+                    pass
+        return None
+
+    h1 = four_row(1)
+    h2 = four_row(2)
+    h3 = four_row(3)
+    check(h1 is not None, "fourier prints the harmonic rows")
+    check(abs(h1[0] - 1000.0) < 1.0, f"fundamental bin at 1 kHz (got {h1[0]})")
+    check(abs(h1[1] - 0.5) < 1e-3, f"fundamental magnitude 0.5 V (got {h1[1]})")
+    check(h2 is not None and abs(h2[1]) < 1e-3,
+          f"2nd harmonic ~0 (got {h2[1] if h2 else None})")
+    check(h3 is not None and abs(h3[1] - 0.1) < 1e-3,
+          f"3rd harmonic 0.1 V (got {h3[1] if h3 else None})")
+    toks = heads[0].replace(",", " ").split()
+    thd = float(toks[toks.index("thd") + 1])
+    check(abs(thd - 20.0) < 0.05, f"fourier THD 20 % (got {thd})")
+
     # --- a broken file exits 1 with a mapped problem -------------------------
     with tempfile.TemporaryDirectory() as tmp:
         bad = Path(tmp) / "bad.csim"

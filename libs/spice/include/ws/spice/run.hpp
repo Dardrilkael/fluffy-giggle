@@ -108,6 +108,31 @@ struct Measurement {
     std::string note;              // failure reason when value is absent
 };
 
+// One .four harmonic line (§7.9); n = 1 is the fundamental.
+struct FourierHarmonic {
+    int n = 0;
+    double freq = 0.0;        // n * fundamental, Hz
+    double magnitude = 0.0;   // amplitude, the signal's own unit
+    double phase_deg = 0.0;   // cos-referenced: x ~ mag*cos(2*pi*f*t + phase)
+    double normalized = 0.0;  // % of the fundamental's magnitude
+};
+
+// One evaluated .four signal (§7.9): the harmonic series over the .tran
+// table's last whole fundamental period - or, when the deck ran .op, the
+// DC component alone (harmonics empty). ok() == false is a note, never a
+// run failure (the .meas contract, §9.5).
+struct Fourier {
+    std::string signal;         // "v(out)", as spelled (+ "@k" per step point)
+    std::string analysis;       // ".tran" or ".op"
+    double fundamental = 0.0;   // Hz
+    std::size_t periods = 0;    // whole fundamental periods in the window
+    double dc = 0.0;            // the n = 0 component
+    std::vector<FourierHarmonic> harmonics;
+    double thd_percent = 0.0;   // sqrt(sum_{n>=2} mag^2) / mag_1 * 100
+    std::string note;           // failure reason when !ok()
+    [[nodiscard]] bool ok() const { return note.empty(); }
+};
+
 struct RunOutput {
     // One (family) Table per analysis card, in deck order - a .step run
     // merges every point into one table with leading step axes (§7.6).
@@ -115,6 +140,7 @@ struct RunOutput {
     std::vector<AnalysisReport> reports;  // per point-and-analysis, deck order
     std::uint64_t seed = 1;               // the Monte-Carlo seed (§8.5 rev)
     std::vector<Measurement> measurements;  // .meas results, deck order (§0.4)
+    std::vector<Fourier> fouriers;          // .four results, deck order (§7.9)
 };
 
 // Runs every analysis in the deck. `settings` carries the caller's

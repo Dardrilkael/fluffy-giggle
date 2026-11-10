@@ -1538,6 +1538,104 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
             ++index;
         }
     }
+
+    // --- the fourier table (§7.9): the shown analysis's series only -
+    // .tran tables get the harmonic rows, .op tables the DC line. A
+    // .dc/.ac/.noise view hides the section entirely (nothing to
+    // analyse against), and a failed series reads like a failed
+    // measurement - the same warning color, the same note contract.
+    if (!ed.results.run.fouriers.empty() &&
+        (t.analysis == ws::spice::AnalysisKind::Tran ||
+         t.analysis == ws::spice::AnalysisKind::Op)) {
+        const char* shown = analysis_name(t.analysis);
+        bool any = false;
+        for (const ws::spice::Fourier& f : ed.results.run.fouriers) {
+            if (f.analysis == shown) {
+                any = true;
+                break;
+            }
+        }
+        if (any) {
+            gui::separator(layout, theme);
+            gui::text(layout, theme, "Fourier");
+            const ws::ui::r2d::Font* font =
+                ed.font_mono != nullptr && !ed.font_mono->empty()
+                    ? ed.font_mono
+                    : theme.font;
+            const auto row_line = [&](const char* line,
+                                      std::uint32_t color) {
+                if (font != nullptr && font->line_height() > 0.0f) {
+                    const float line_h = font->line_height() + 2.0f;
+                    const gui::Rect row =
+                        layout.next(layout.remaining_width(), line_h);
+                    (void)ws::ui::r2d::draw_text(row.x, row.y, line, *font,
+                                                 color);
+                } else {
+                    gui::text(layout, theme, line);
+                }
+            };
+            int index = 0;
+            for (const ws::spice::Fourier& f :
+                 ed.results.run.fouriers) {
+                if (f.analysis != shown) {
+                    continue;
+                }
+                gui.ids().push(index);
+                const char* unit = unit_of(f.signal);
+                char line[224];
+                if (!f.ok()) {
+                    std::snprintf(line, sizeof line, "%s: failed - %s",
+                                  f.signal.c_str(), f.note.c_str());
+                    row_line(line, gui::dim(theme.toast_warning, 0.95f));
+                } else if (f.harmonics.empty()) {
+                    // The .op shape: the DC component is the whole answer.
+                    std::snprintf(line, sizeof line,
+                                  "%s - dc %s (.op: harmonics need .tran)",
+                                  f.signal.c_str(),
+                                  with_unit(f.dc, unit, 5).c_str());
+                    row_line(line, gui::dim(theme.text, 0.85f));
+                } else {
+                    std::snprintf(
+                        line, sizeof line,
+                        "%s - fundamental %s Hz, %zu period%s, THD %.4g %%",
+                        f.signal.c_str(),
+                        ws::circsim::format_eng(f.fundamental, 4).c_str(),
+                        f.periods, f.periods == 1 ? "" : "s",
+                        f.thd_percent);
+                    row_line(line, gui::dim(theme.text, 0.85f));
+                    std::snprintf(line, sizeof line, "  dc  %s",
+                                  with_unit(f.dc, unit, 5).c_str());
+                    row_line(line, gui::dim(theme.text, 0.85f));
+                    if (f.periods == 0) {
+                        row_line("  (the run is shorter than one period -"
+                                 " the bins carry window leakage)",
+                                 gui::dim(theme.text, 0.55f));
+                    }
+                    row_line("   n  frequency     magnitude      phase"
+                             "  %fund",
+                             gui::dim(theme.text, 0.55f));
+                    for (const ws::spice::FourierHarmonic& h :
+                         f.harmonics) {
+                        std::snprintf(
+                            line, sizeof line,
+                            "  %2d  %-12s %-14s %8.1f  %6.2f", h.n,
+                            (ws::circsim::format_eng(h.freq, 4) + " Hz")
+                                .c_str(),
+                            with_unit(h.magnitude, unit, 4).c_str(),
+                            h.phase_deg, h.normalized);
+                        row_line(line, gui::dim(theme.text, 0.85f));
+                    }
+                    std::snprintf(line, sizeof line,
+                                  "  thd  %.4f %%  (harmonics 2..%d)",
+                                  f.thd_percent,
+                                  f.harmonics.back().n);
+                    row_line(line, gui::dim(theme.text, 0.85f));
+                }
+                gui.ids().pop();
+                ++index;
+            }
+        }
+    }
 }
 
 }  // namespace editor

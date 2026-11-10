@@ -180,8 +180,11 @@ CMakeLists only wire ws libraries together.
   ws::circsim's headless axis math (nice 1/2/5 ticks, SI engineering
   labels, min/max decimation for long sweeps), per-signal visibility
   with live legend readouts, a hover crosshair with per-series markers,
-  .op tables and .meas as value rows, and CSV/JSON export through the
-  writers ws::spice already owns; stage 5 gives the plot its hands -
+  .op tables and .meas as value rows, the .four harmonics table under
+  the measurements (.tran/.op views only - the directives block authors
+  the card, `.four 1k 9 v(out)`; a .op run answers the DC component
+  alone, a failed series reads like a failed measurement), and CSV/JSON
+  export through the writers ws::spice already owns; stage 5 gives the plot its hands -
   the wheel zooms both axes toward the cursor (the plot's own wheel
   claim beats the enclosing scroll panel's), a left-drag rubber band
   zooms to the box with a live dx/dy readout, dragging an axis strip

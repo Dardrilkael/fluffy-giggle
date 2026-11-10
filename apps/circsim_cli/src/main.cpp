@@ -262,6 +262,32 @@ int cmd_run(const std::vector<std::string>& args) {
         }
     }
 
+    // .four results print ahead of the data too (§7.9, the spice CLI's
+    // shape) - the CSV body stays tables-only.
+    for (const ws::spice::Fourier& fr : out.run->fouriers) {
+        if (!fr.ok()) {
+            std::fprintf(stdout, "fourier %s: FAILED (%s)\n",
+                         fr.signal.c_str(), fr.note.c_str());
+            continue;
+        }
+        std::fprintf(stdout,
+                     "fourier %s: fundamental %.6g Hz, %zu period%s, "
+                     "dc %.6g, thd %.6g %%\n",
+                     fr.signal.c_str(), fr.fundamental, fr.periods,
+                     fr.periods == 1 ? "" : "s", fr.dc, fr.thd_percent);
+        if (!fr.harmonics.empty()) {
+            std::fprintf(stdout,
+                         "  harm  frequency     magnitude    phase (deg)"
+                         "  %% of fund\n");
+            for (const ws::spice::FourierHarmonic& h : fr.harmonics) {
+                std::fprintf(stdout,
+                             "  %-4d  %-12.7g %-12.7g %-10.4g %6.4g %%\n",
+                             h.n, h.freq, h.magnitude, h.phase_deg,
+                             h.normalized);
+            }
+        }
+    }
+
     const std::string body = format == "json"
                                  ? ws::circsim::results_json(*out.run)
                                  : ws::spice::results_csv(out.run->results);

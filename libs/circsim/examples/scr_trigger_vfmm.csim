@@ -1,0 +1,961 @@
+{
+    "format": "circsim",
+    "version": 1,
+    "grid": 1.0,
+    "next_id": 80,
+    "parts": [
+        {
+            "id": 1,
+            "symbol": "v",
+            "ref": "V12",
+            "value": "12",
+            "pos": [0.0, -3.0],
+            "rot": 270,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 2,
+            "symbol": "v",
+            "ref": "Vf1",
+            "value": "0",
+            "pos": [-12.0, 8.0],
+            "rot": 270,
+            "mirror": false,
+            "params": {
+                "wave": "PULSE(0 12 1m 1u 1u 1m 2m)"
+            }
+        },
+        {
+            "id": 3,
+            "symbol": "v",
+            "ref": "Vf2",
+            "value": "0",
+            "pos": [-12.0, 3.0],
+            "rot": 270,
+            "mirror": false,
+            "params": {
+                "wave": "PULSE(0 3.3 1 1u 1u 1 2)"
+            }
+        },
+        {
+            "id": 4,
+            "symbol": "v",
+            "ref": "Vch1",
+            "value": "0",
+            "pos": [-4.0, 13.0],
+            "rot": 270,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 5,
+            "symbol": "v",
+            "ref": "Vch2",
+            "value": "0",
+            "pos": [-4.0, 8.0],
+            "rot": 270,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 6,
+            "symbol": "subckt",
+            "ref": "XU1",
+            "value": "",
+            "pos": [-8.0, 11.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "PC817A"
+            }
+        },
+        {
+            "id": 7,
+            "symbol": "r",
+            "ref": "R9",
+            "value": "220",
+            "pos": [-10.0, 11.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 8,
+            "symbol": "r",
+            "ref": "R1",
+            "value": "1",
+            "pos": [-11.0, 8.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 9,
+            "symbol": "c",
+            "ref": "C1",
+            "value": "3300u",
+            "pos": [-11.0, 3.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 10,
+            "symbol": "r",
+            "ref": "R11",
+            "value": "47k",
+            "pos": [-2.0, 13.0],
+            "rot": 90,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 11,
+            "symbol": "npn",
+            "ref": "Q2",
+            "value": "",
+            "pos": [4.0, 13.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "BC337-25"
+            }
+        },
+        {
+            "id": 12,
+            "symbol": "r",
+            "ref": "R2",
+            "value": "120",
+            "pos": [7.0, 16.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 13,
+            "symbol": "vswitch",
+            "ref": "S2",
+            "value": "",
+            "pos": [10.0, 13.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "mch2"
+            }
+        },
+        {
+            "id": 14,
+            "symbol": "npn",
+            "ref": "Q3",
+            "value": "",
+            "pos": [4.0, 3.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "BC337-25"
+            }
+        },
+        {
+            "id": 15,
+            "symbol": "r",
+            "ref": "R3",
+            "value": "470",
+            "pos": [7.0, 6.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 16,
+            "symbol": "r",
+            "ref": "R4",
+            "value": "1",
+            "pos": [4.0, 8.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 17,
+            "symbol": "d",
+            "ref": "D1",
+            "value": "",
+            "pos": [7.0, 3.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "1N4148"
+            }
+        },
+        {
+            "id": 18,
+            "symbol": "vswitch",
+            "ref": "S1",
+            "value": "",
+            "pos": [10.0, 3.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "mch1"
+            }
+        },
+        {
+            "id": 19,
+            "symbol": "d",
+            "ref": "D2",
+            "value": "",
+            "pos": [13.0, 3.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "1N4148"
+            }
+        },
+        {
+            "id": 20,
+            "symbol": "d",
+            "ref": "D3",
+            "value": "",
+            "pos": [16.0, 3.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "1N4148"
+            }
+        },
+        {
+            "id": 21,
+            "symbol": "d",
+            "ref": "D4",
+            "value": "",
+            "pos": [19.0, 3.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "1N4148"
+            }
+        },
+        {
+            "id": 22,
+            "symbol": "subckt",
+            "ref": "XQ1",
+            "value": "",
+            "pos": [12.0, 16.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "Qpt41c"
+            }
+        },
+        {
+            "id": 23,
+            "symbol": "r",
+            "ref": "R10",
+            "value": "470k",
+            "pos": [12.0, 20.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 24,
+            "symbol": "r",
+            "ref": "R5",
+            "value": "0.68",
+            "pos": [15.0, 16.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 25,
+            "symbol": "c",
+            "ref": "C2",
+            "value": "3300u",
+            "pos": [15.0, 13.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 26,
+            "symbol": "d",
+            "ref": "D5",
+            "value": "",
+            "pos": [12.0, 13.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "1N4148"
+            }
+        },
+        {
+            "id": 27,
+            "symbol": "d",
+            "ref": "D6",
+            "value": "",
+            "pos": [12.0, 10.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "1N4148"
+            }
+        },
+        {
+            "id": 28,
+            "symbol": "d",
+            "ref": "D7",
+            "value": "",
+            "pos": [18.0, 16.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "MUR460"
+            }
+        },
+        {
+            "id": 29,
+            "symbol": "r",
+            "ref": "R8",
+            "value": "3.3",
+            "pos": [21.0, 16.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 30,
+            "symbol": "d",
+            "ref": "D8",
+            "value": "",
+            "pos": [24.0, 16.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "1N4007"
+            }
+        },
+        {
+            "id": 31,
+            "symbol": "r",
+            "ref": "R6",
+            "value": "5k",
+            "pos": [7.0, -4.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 32,
+            "symbol": "r",
+            "ref": "R7",
+            "value": "5k",
+            "pos": [10.0, -4.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 33,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [0.0, -9.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 34,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [-12.0, 0.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 35,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [15.0, 10.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 36,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [15.0, 7.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 37,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [22.0, 13.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {}
+        },
+        {
+            "id": 38,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [10.0, -6.0],
+            "rot": 0,
+            "mirror": false,
+            "params": {}
+        }
+    ],
+    "junctions": [
+        {"id": 39, "pos": [0.0, 2.0]},
+        {"id": 40, "pos": [-4.0, 11.0]},
+        {"id": 41, "pos": [-2.0, 13.0]},
+        {"id": 42, "pos": [4.0, 16.0]},
+        {"id": 43, "pos": [10.0, 11.0]},
+        {"id": 44, "pos": [4.0, 6.0]},
+        {"id": 45, "pos": [10.0, 1.0]},
+        {"id": 46, "pos": [13.0, 1.0]},
+        {"id": 47, "pos": [16.0, 1.0]},
+        {"id": 48, "pos": [19.0, 1.0]},
+        {"id": 49, "pos": [12.0, 18.0]},
+        {"id": 50, "pos": [15.0, 14.5]},
+        {"id": 51, "pos": [18.0, 18.0]},
+        {"id": 52, "pos": [24.0, 18.0]},
+        {"id": 53, "pos": [7.0, -2.0]},
+        {"id": 54, "pos": [10.0, -2.0]}
+    ],
+    "wires": [
+        {
+            "id": 55,
+            "a": {"pin": {"part": 1, "pin": 0}},
+            "b": {"junction": {"id": 39}},
+            "ortho": true,
+            "waypoints": [[0.0, 2.0]]
+        },
+        {
+            "id": 56,
+            "a": {"pin": {"part": 1, "pin": 1}},
+            "b": {"pin": {"part": 33, "pin": 0}},
+            "ortho": true
+        },
+        {
+            "id": 57,
+            "a": {"pin": {"part": 12, "pin": 0}},
+            "b": {"junction": {"id": 39}},
+            "ortho": true,
+            "waypoints": [[7.0, 2.0]]
+        },
+        {
+            "id": 58,
+            "a": {"pin": {"part": 15, "pin": 0}},
+            "b": {"junction": {"id": 39}},
+            "ortho": true,
+            "waypoints": [[7.0, 2.0]]
+        },
+        {
+            "id": 59,
+            "a": {"pin": {"part": 22, "pin": 0}},
+            "b": {"junction": {"id": 39}},
+            "ortho": true,
+            "waypoints": [[12.0, 2.0]]
+        },
+        {
+            "id": 60,
+            "a": {"pin": {"part": 2, "pin": 0}},
+            "b": {"junction": {"id": 40}},
+            "ortho": true,
+            "waypoints": [[-12.0, 11.0]]
+        },
+        {
+            "id": 61,
+            "a": {"pin": {"part": 2, "pin": 1}},
+            "b": {"pin": {"part": 34, "pin": 0}},
+            "ortho": true
+        },
+        {
+            "id": 62,
+            "a": {"pin": {"part": 3, "pin": 0}},
+            "b": {"junction": {"id": 40}},
+            "ortho": true,
+            "waypoints": [[-12.0, 6.0]]
+        },
+        {
+            "id": 63,
+            "a": {"pin": {"part": 3, "pin": 1}},
+            "b": {"pin": {"part": 34, "pin": 0}},
+            "ortho": true
+        },
+        {
+            "id": 64,
+            "a": {"pin": {"part": 4, "pin": 0}},
+            "b": {"junction": {"id": 40}},
+            "ortho": true,
+            "waypoints": [[-4.0, 11.0]]
+        },
+        {
+            "id": 65,
+            "a": {"pin": {"part": 4, "pin": 1}},
+            "b": {"pin": {"part": 34, "pin": 0}},
+            "ortho": true
+        },
+        {
+            "id": 66,
+            "a": {"pin": {"part": 5, "pin": 0}},
+            "b": {"junction": {"id": 41}},
+            "ortho": true
+        },
+        {
+            "id": 67,
+            "a": {"pin": {"part": 5, "pin": 1}},
+            "b": {"pin": {"part": 34, "pin": 0}},
+            "ortho": true
+        },
+        {
+            "id": 68,
+            "a": {"pin": {"part": 6, "pin": 0}},
+            "b": {"pin": {"part": 7, "pin": 1}},
+            "ortho": true
+        },
+        {
+            "id": 69,
+            "a": {"pin": {"part": 6, "pin": 1}},
+            "b": {"pin": {"part": 34, "pin": 0}},
+            "ortho": true
+        },
+        {
+            "id": 70,
+            "a": {"pin": {"part": 6, "pin": 2}},
+            "b": {"junction": {"id": 41}},
+            "ortho": true
+        },
+        {
+            "id": 71,
+            "a": {"pin": {"part": 6, "pin": 3}},
+            "b": {"pin": {"part": 34, "pin": 0}},
+            "ortho": true
+        },
+        {
+            "id": 72,
+            "a": {"pin": {"part": 7, "pin": 0}},
+            "b": {"junction": {"id": 40}},
+            "ortho": true
+        },
+        {
+            "id": 73,
+            "a": {"pin": {"part": 8, "pin": 0}},
+            "b": {"junction": {"id": 40}},
+            "ortho": true
+        },
+        {
+            "id": 74,
+            "a": {"pin": {"part": 8, "pin": 1}},
+            "b": {"pin": {"part": 9, "pin": 0}},
+            "ortho": true
+        },
+        {
+            "id": 75,
+            "a": {"pin": {"part": 9, "pin": 1}},
+            "b": {"pin": {"part": 34, "pin": 0}},
+            "ortho": true
+        },
+        {
+            "id": 76,
+            "a": {"pin": {"part": 10, "pin": 0}},
+            "b": {"junction": {"id": 41}},
+            "ortho": true
+        },
+        {
+            "id": 77,
+            "a": {"pin": {"part": 10, "pin": 1}},
+            "b": {"junction": {"id": 41}},
+            "ortho": true
+        },
+        {
+            "id": 78,
+            "a": {"pin": {"part": 11, "pin": 1}},
+            "b": {"junction": {"id": 41}},
+            "ortho": true
+        },
+        {
+            "id": 79,
+            "a": {"pin": {"part": 11, "pin": 0}},
+            "b": {"junction": {"id": 42}},
+            "ortho": true
+        },
+        {
+            "id": 80,
+            "a": {"pin": {"part": 11, "pin": 2}},
+            "b": {"pin": {"part": 13, "pin": 0}},
+            "ortho": true
+        },
+        {
+            "id": 81,
+            "a": {"pin": {"part": 12, "pin": 1}},
+            "b": {"junction": {"id": 42}},
+            "ortho": true
+        },
+        {
+            "id": 82,
+            "a": {"pin": {"part": 13, "pin": 1}},
+            "b": {"pin": {"part": 34, "pin": 0}},
+            "ortho": true
+        },
+        {
+            "id": 83,
+            "a": {"pin": {"part": 13, "pin": 2}},
+            "b": {"junction": {"id": 43}},
+            "ortho": true
+        },
+        {
+            "id": 84,
+            "a": {"pin": {"part": 13, "pin": 3}},
+            "b": {"pin": {"part": 34, "pin": 0}},
+            "ortho": true
+        },
+        {
+            "id": 85,
+            "a": {"pin": {"part": 14, "pin": 1}},
+            "b": {"pin": {"part": 16, "pin": 0}},
+            "ortho": true
+        },
+        {
+            "id": 86,
+            "a": {"pin": {"part": 14, "pin": 0}},
+            "b": {"junction": {"id": 44}},
+            "ortho": true
+        },
+        {
+            "id": 87,
+            "a": {"pin": {"part": 14, "pin": 2}},
+            "b": {"pin": {"part": 18, "pin": 0}},
+            "ortho": true
+        },
+        {
+            "id": 88,
+            "a": {"pin": {"part": 15, "pin": 1}},
+            "b": {"junction": {"id": 44}},
+            "ortho": true
+        },
+        {
+            "id": 89,
+            "a": {"pin": {"part": 16, "pin": 1}},
+            "b": {"pin": {"part": 17, "pin": 0}},
+            "ortho": true
+        },
+        {
+            "id": 90,
+            "a": {"pin": {"part": 17, "pin": 1}},
+            "b": {"junction": {"id": 44}},
+            "ortho": true
+        },
+        {
+            "id": 91,
+            "a": {"pin": {"part": 18, "pin": 1}},
+            "b": {"junction": {"id": 45}},
+            "ortho": true
+        },
+        {
+            "id": 92,
+            "a": {"pin": {"part": 18, "pin": 2}},
+            "b": {"junction": {"id": 46}},
+            "ortho": true
+        },
+        {
+            "id": 93,
+            "a": {"pin": {"part": 18, "pin": 3}},
+            "b": {"pin": {"part": 34, "pin": 0}},
+            "ortho": true
+        },
+        {
+            "id": 94,
+            "a": {"pin": {"part": 19, "pin": 0}},
+            "b": {"junction": {"id": 46}},
+            "ortho": true
+        },
+        {
+            "id": 95,
+            "a": {"pin": {"part": 19, "pin": 1}},
+            "b": {"junction": {"id": 47}},
+            "ortho": true
+        },
+        {
+            "id": 96,
+            "a": {"pin": {"part": 20, "pin": 0}},
+            "b": {"junction": {"id": 47}},
+            "ortho": true
+        },
+        {
+            "id": 97,
+            "a": {"pin": {"part": 20, "pin": 1}},
+            "b": {"junction": {"id": 48}},
+            "ortho": true
+        },
+        {
+            "id": 98,
+            "a": {"pin": {"part": 21, "pin": 0}},
+            "b": {"junction": {"id": 48}},
+            "ortho": true
+        },
+        {
+            "id": 99,
+            "a": {"pin": {"part": 21, "pin": 1}},
+            "b": {"pin": {"part": 38, "pin": 0}},
+            "ortho": true
+        },
+        {
+            "id": 100,
+            "a": {"pin": {"part": 22, "pin": 1}},
+            "b": {"junction": {"id": 49}},
+            "ortho": true
+        },
+        {
+            "id": 101,
+            "a": {"pin": {"part": 22, "pin": 2}},
+            "b": {"junction": {"id": 50}},
+            "ortho": true
+        },
+        {
+            "id": 102,
+            "a": {"pin": {"part": 23, "pin": 0}},
+            "b": {"junction": {"id": 49}},
+            "ortho": true
+        },
+        {
+            "id": 103,
+            "a": {"pin": {"part": 23, "pin": 1}},
+            "b": {"junction": {"id": 50}},
+            "ortho": true
+        },
+        {
+            "id": 104,
+            "a": {"pin": {"part": 24, "pin": 0}},
+            "b": {"junction": {"id": 50}},
+            "ortho": true
+        },
+        {
+            "id": 105,
+            "a": {"pin": {"part": 24, "pin": 1}},
+            "b": {"pin": {"part": 25, "pin": 0}},
+            "ortho": true
+        },
+        {
+            "id": 106,
+            "a": {"pin": {"part": 25, "pin": 1}},
+            "b": {"junction": {"id": 50}},
+            "ortho": true
+        },
+        {
+            "id": 107,
+            "a": {"pin": {"part": 26, "pin": 0}},
+            "b": {"junction": {"id": 50}},
+            "ortho": true
+        },
+        {
+            "id": 108,
+            "a": {"pin": {"part": 26, "pin": 1}},
+            "b": {"junction": {"id": 50}},
+            "ortho": true
+        },
+        {
+            "id": 109,
+            "a": {"pin": {"part": 27, "pin": 0}},
+            "b": {"junction": {"id": 50}},
+            "ortho": true
+        },
+        {
+            "id": 110,
+            "a": {"pin": {"part": 27, "pin": 1}},
+            "b": {"junction": {"id": 51}},
+            "ortho": true
+        },
+        {
+            "id": 111,
+            "a": {"pin": {"part": 28, "pin": 0}},
+            "b": {"junction": {"id": 50}},
+            "ortho": true
+        },
+        {
+            "id": 112,
+            "a": {"pin": {"part": 28, "pin": 1}},
+            "b": {"junction": {"id": 51}},
+            "ortho": true
+        },
+        {
+            "id": 113,
+            "a": {"pin": {"part": 29, "pin": 0}},
+            "b": {"junction": {"id": 51}},
+            "ortho": true
+        },
+        {
+            "id": 114,
+            "a": {"pin": {"part": 29, "pin": 1}},
+            "b": {"junction": {"id": 52}},
+            "ortho": true
+        },
+        {
+            "id": 115,
+            "a": {"pin": {"part": 30, "pin": 0}},
+            "b": {"junction": {"id": 52}},
+            "ortho": true
+        },
+        {
+            "id": 116,
+            "a": {"pin": {"part": 30, "pin": 1}},
+            "b": {"pin": {"part": 37, "pin": 0}},
+            "ortho": true
+        },
+        {
+            "id": 117,
+            "a": {"pin": {"part": 31, "pin": 0}},
+            "b": {"junction": {"id": 44}},
+            "ortho": true
+        },
+        {
+            "id": 118,
+            "a": {"pin": {"part": 31, "pin": 1}},
+            "b": {"junction": {"id": 53}},
+            "ortho": true
+        },
+        {
+            "id": 119,
+            "a": {"pin": {"part": 32, "pin": 0}},
+            "b": {"junction": {"id": 53}},
+            "ortho": true
+        },
+        {
+            "id": 120,
+            "a": {"pin": {"part": 32, "pin": 1}},
+            "b": {"pin": {"part": 38, "pin": 0}},
+            "ortho": true
+        }
+    ],
+    "labels": [
+        {
+            "id": 121,
+            "pos": [-12.0, 8.0],
+            "name": "f1"
+        },
+        {
+            "id": 122,
+            "pos": [-12.0, 3.0],
+            "name": "f2"
+        },
+        {
+            "id": 123,
+            "pos": [-4.0, 13.0],
+            "name": "ch1"
+        },
+        {
+            "id": 124,
+            "pos": [-4.0, 8.0],
+            "name": "ch2"
+        },
+        {
+            "id": 125,
+            "pos": [-8.0, 11.0],
+            "name": "n_u1_anode"
+        },
+        {
+            "id": 126,
+            "pos": [-2.0, 13.0],
+            "name": "bg2"
+        },
+        {
+            "id": 127,
+            "pos": [4.0, 16.0],
+            "name": "eq2"
+        },
+        {
+            "id": 128,
+            "pos": [10.0, 11.0],
+            "name": "n_q2_e"
+        },
+        {
+            "id": 129,
+            "pos": [4.0, 6.0],
+            "name": "eq3"
+        },
+        {
+            "id": 130,
+            "pos": [10.0, 1.0],
+            "name": "n_q3_e"
+        },
+        {
+            "id": 131,
+            "pos": [13.0, 1.0],
+            "name": "n_s1_b"
+        },
+        {
+            "id": 132,
+            "pos": [16.0, 1.0],
+            "name": "n_d2_k"
+        },
+        {
+            "id": 133,
+            "pos": [19.0, 1.0],
+            "name": "n_d3_k"
+        },
+        {
+            "id": 134,
+            "pos": [12.0, 18.0],
+            "name": "ve"
+        },
+        {
+            "id": 135,
+            "pos": [15.0, 14.5],
+            "name": "vee"
+        },
+        {
+            "id": 136,
+            "pos": [18.0, 18.0],
+            "name": "vo"
+        },
+        {
+            "id": 137,
+            "pos": [24.0, 18.0],
+            "name": "n_r8_b"
+        },
+        {
+            "id": 138,
+            "pos": [7.0, -2.0],
+            "name": "n_r6_b"
+        },
+        {
+            "id": 139,
+            "pos": [0.0, 2.0],
+            "name": "12v"
+        },
+        {
+            "id": 140,
+            "pos": [-12.0, 0.0],
+            "name": "0"
+        }
+    ],
+    "analysis": {
+        "entries": [
+            {
+                "tran": {
+                    "tstep": 0.001,
+                    "tstop": 1.1,
+                    "uic": true
+                }
+            }
+        ]
+    },
+    "directives": ".model mch1 SW(Ron=10m Roff=100Meg Vt=.5 Vh=-.4)\n.model mch2 SW(Ron=10m Roff=100Meg Vt=.5 Vh=-.4)\n.subckt PC817 1 2 3 4 params: Igain=2.3m\nR1 N003 2 2\nD1 1 N003 LD\nG1 3 N004 N003 2 {Igain}\nC1 1 2 18p\nQ1 3 N004 4 NP\n.model LD D(Is=1e-20 Cjo=18p)\n.model NP NPN(Bf=1200 Vaf=140 Ikf=100m Rc=1 Cjc=19p Cje=7p Cjs=7p C2=3e-15)\n.ends PC817\n\n.subckt Qpt41c A G K\n* TIP41C SCR equivalent\nS_SCR A K G K SW_SCR\nD_SCR A K D_SCR\n.model SW_SCR SW(Ron=10m Roff=100Meg Vt=0.5 Vh=-0.4)\n.model D_SCR D(Is=1e-14)\n.ends Qpt41c\n\n.model 1N4148 D(IS=4.352E-9 N=1.906 BV=110 IBV=0.0001 RS=0.6458 CJO=7.048E-13 VJ=0.869 M=0.03 FC=0.5 TT=3.48E-9 EG=1.11 XTI=3)\n.model 1N4007 D(IS=1e-14 N=1.05 RS=10)\n.model MUR460 D(IS=1e-14 N=1.05 RS=10 BV=600)\n.model BC337-25 NPN(IS=1e-14 BF=250 VAF=100 IKF=0.1 RC=1)",
+    "view": {
+        "zoom": 0.4,
+        "center": [5.0, 5.0]
+    }
+}

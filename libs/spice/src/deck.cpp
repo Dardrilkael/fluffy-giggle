@@ -30,8 +30,7 @@ const std::map<std::string, const char*>& card_milestones() {
     static const std::map<std::string, const char*> table = {
         {".lib", "backlog"},  {".global", "backlog"}, {".func", "backlog"},
         {".alter", "backlog"}, {".tf", "backlog"},    {".pz", "backlog"},
-        {".four", "backlog"},  {".disto", "backlog"}, {".sens", "backlog"},
-        {".pss", "backlog"},
+        {".disto", "backlog"}, {".sens", "backlog"},  {".pss", "backlog"},
     };
     return table;
 }
@@ -595,6 +594,54 @@ ws::core::Result<ParsedCard> parse_card(const Record& rec, bool inside_subckt,
             card.meas = std::move(m);
             return card;
         }
+        if (first_lower == ".four") {
+            // §7.9: .four FREQ [NHARMS] ov1 [ov2 ...] - the harmonic
+            // series of the named signals over the run's .tran table
+            // (the .op table answers the DC component alone). NHARMS is
+            // optional: a pure-integer second token is the count, any
+            // other spelling starts the signal list (both the ngspice
+            // two-token and the LTspice three-token forms parse).
+            if (inside_subckt) {
+                return spice_fail(card_diag(ErrorKind::Parse, "spice.parse.card_scope",
+                                            "'.four' inside .subckt", rec.loc));
+            }
+            if (rec.tokens.size() < 3) {
+                return spice_fail(card_diag(
+                    ErrorKind::Parse, "spice.parse.four_arity",
+                    "'.four' takes FREQ [NHARMS] v(out) [v(out2) ...]",
+                    rec.loc));
+            }
+            FourCard fc;
+            fc.loc = rec.loc;
+            WS_TRY_ASSIGN(fc.freq, expr_from_text(rec.tokens[1].text,
+                                                   rec.tokens[1].loc));
+            fc.nharms = ExprProgram::constant(9.0);
+            bool count_next = true;
+            for (const char c : rec.tokens[2].text) {
+                if (std::isdigit(static_cast<unsigned char>(c)) == 0) {
+                    count_next = false;
+                    break;
+                }
+            }
+            std::size_t i = 2;
+            if (count_next) {
+                WS_TRY_ASSIGN(fc.nharms, expr_from_text(rec.tokens[2].text,
+                                                         rec.tokens[2].loc));
+                i = 3;
+            }
+            if (i >= rec.tokens.size()) {
+                return spice_fail(card_diag(
+                    ErrorKind::Parse, "spice.parse.four_arity",
+                    "'.four' needs at least one signal (v(out), i(V1), ...)",
+                    rec.loc));
+            }
+            for (; i < rec.tokens.size(); ++i) {
+                fc.signals.push_back(rec.tokens[i]);
+            }
+            card.kind = ParsedCard::Kind::Four;
+            card.four = std::move(fc);
+            return card;
+        }
         if (first_lower == ".step") {
             if (inside_subckt) {
                 return spice_fail(card_diag(ErrorKind::Parse, "spice.parse.card_scope",
@@ -1059,6 +1106,15 @@ ws::core::Result<DeckAst> build_deck_ast(const Deck& deck, std::vector<Warning>&
                         "'.meas' inside .subckt", rec.loc));
                 }
                 ast.meas.push_back(card.meas);
+                break;
+            }
+            case K::Four: {
+                if (inside) {
+                    return spice_fail(ast_diag(
+                        ErrorKind::Parse, "spice.parse.card_scope",
+                        "'.four' inside .subckt", rec.loc));
+                }
+                ast.fours.push_back(card.four);
                 break;
             }
             case K::Save: {

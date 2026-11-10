@@ -35,10 +35,13 @@ ws_add_test(circsim_editor_panel
   DEPENDS ws::ui_gui ws::app ws::settings stb)
 if(TARGET test_circsim_editor_panel)
   # "editor.hpp"/"results_panel.hpp" from the app's src, the stub's
-  # "ui_gui_stub.hpp" and font.cpp's "text/font.h" from libs/ui's src.
+  # "ui_gui_stub.hpp" and font.cpp's "text/font.h" from libs/ui's src
+  # (the .four section's rows read the r2d stub the side-panels suite
+  # reads - mono-face rows count themselves there too).
   target_include_directories(test_circsim_editor_panel PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    "${PROJECT_SOURCE_DIR}/libs/ui/src")
+    "${PROJECT_SOURCE_DIR}/libs/ui/src"
+    "${PROJECT_SOURCE_DIR}/libs/ui/tests")
 endif()
 
 # The Schematic panel's headless gate: the camera mapping. The panel

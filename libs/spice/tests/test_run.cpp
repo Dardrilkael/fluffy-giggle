@@ -15,6 +15,7 @@
 #include <ws/spice/circuit.hpp>
 #include <ws/spice/deck.hpp>
 #include <ws/spice/error.hpp>
+#include <ws/spice/fourier.hpp>
 #include <ws/spice/netlist.hpp>
 #include <ws/spice/parse.hpp>
 #include <ws/spice/state.hpp>
@@ -5634,4 +5635,199 @@ TEST_CASE("M7 BJT Tf/Tr: rejections and the netlist round-trip") {
     CHECK(-again->results.tables[0]
                .signals[col_of(again->results.tables[0], "i(Vbe)")]
                .data[0] == doctest::Approx(5.67e-7).epsilon(1e-3));
+}
+
+// --- §7.9: .four ----------------------------------------------------------------
+
+TEST_CASE("four: the two-tone closed form - magnitudes, phase, THD") {
+    // B1 = 0.5*sin(w t) + 0.1*sin(3 w t), w = 2*pi*1k: the fundamental
+    // reads 0.5 V at -90 deg (cos-referenced), the 3rd 0.1 V, THD =
+    // 20 %, every other harmonic zero - the window is the run's last
+    // whole period, so the bins land exact.
+    const auto run = run_text(
+        "twotone\n"
+        "B1 out 0 V=0.5*sin(6283.185307179586*time)"
+        "+0.1*sin(18849.555921538759*time)\n"
+        "R1 out 0 1k\n"
+        ".tran 10u 5m\n"
+        ".four 1k 9 v(out)\n");
+    REQUIRE(run);
+    REQUIRE(run->fouriers.size() == 1u);
+    const ws::spice::Fourier& f = run->fouriers[0];
+    REQUIRE(f.ok());
+    CHECK(f.signal == "v(out)");
+    CHECK(f.analysis == ".tran");
+    CHECK(f.periods == 1u);
+    REQUIRE(f.harmonics.size() == 9u);
+    CHECK(std::abs(f.dc) < 1e-9);
+    CHECK(f.harmonics[0].magnitude == doctest::Approx(0.5).epsilon(1e-3));
+    CHECK(f.harmonics[0].phase_deg == doctest::Approx(-90.0).epsilon(1e-3));
+    CHECK(f.harmonics[0].normalized == doctest::Approx(100.0).epsilon(1e-3));
+    CHECK(f.harmonics[1].magnitude < 1e-3);  // the 2nd: exactly zero
+    CHECK(f.harmonics[2].magnitude == doctest::Approx(0.1).epsilon(1e-2));
+    CHECK(f.harmonics[2].phase_deg == doctest::Approx(-90.0).epsilon(1e-2));
+    CHECK(f.harmonics[2].normalized == doctest::Approx(20.0).epsilon(1e-2));
+    for (std::size_t i = 3; i < f.harmonics.size(); ++i) {
+        CHECK(f.harmonics[i].magnitude < 1e-3);
+    }
+    CHECK(f.thd_percent == doctest::Approx(20.0).epsilon(1e-3));
+}
+
+TEST_CASE("four: the ngspice two-token form defaults to nine harmonics") {
+    const auto run = run_text(
+        "sine\n"
+        "V1 in 0 SIN(0 1 1k)\n"
+        "R1 in out 1k\n"
+        "R2 out 0 1k\n"
+        ".tran 10u 5m\n"
+        ".four 1k v(out) i(V1)\n");
+    REQUIRE(run);
+    REQUIRE(run->fouriers.size() == 2u);
+    const ws::spice::Fourier& v = run->fouriers[0];
+    const ws::spice::Fourier& i = run->fouriers[1];
+    REQUIRE(v.ok());
+    REQUIRE(i.ok());
+    CHECK(v.signal == "v(out)");
+    CHECK(i.signal == "i(V1)");
+    CHECK(v.harmonics.size() == 9u);  // the default count
+    CHECK(i.harmonics.size() == 9u);
+    CHECK(v.harmonics[0].magnitude == doctest::Approx(0.5).epsilon(1e-3));
+    CHECK(v.harmonics[0].phase_deg == doctest::Approx(-90.0).epsilon(1e-3));
+    CHECK(i.harmonics[0].magnitude == doctest::Approx(0.5e-3).epsilon(1e-3));
+    CHECK(v.thd_percent < 0.1);
+}
+
+TEST_CASE("four: .op answers the dc component alone") {
+    const auto run = run_text(
+        "opfour\n"
+        "V1 in 0 5\n"
+        "R1 in out 1k\n"
+        "R2 out 0 1k\n"
+        ".op\n"
+        ".four 1k 9 v(out)\n");
+    REQUIRE(run);
+    REQUIRE(run->fouriers.size() == 1u);
+    const ws::spice::Fourier& f = run->fouriers[0];
+    REQUIRE(f.ok());
+    CHECK(f.analysis == ".op");
+    CHECK(f.harmonics.empty());
+    CHECK(f.dc == doctest::Approx(2.5).epsilon(1e-9));
+    CHECK(f.fundamental == doctest::Approx(1000.0).epsilon(1e-9));
+}
+
+TEST_CASE("four: notes, never failures - the .meas contract (§9.5)") {
+    // A .dc-only deck: no .tran or .op table to analyse against.
+    const auto dc = run_text(
+        "dcfour\n"
+        "V1 in 0 5\n"
+        "R1 in out 1k\n"
+        "R2 out 0 1k\n"
+        ".dc V1 0 5 1\n"
+        ".four 1k v(out)\n");
+    REQUIRE(dc);
+    REQUIRE(dc->fouriers.size() == 1u);
+    CHECK(!dc->fouriers[0].ok());
+    CHECK(dc->fouriers[0].note.find("no .tran or .op table") !=
+          std::string::npos);
+
+    // An unknown signal is a note too.
+    const auto missing = run_text(
+        "missing\n"
+        "V1 in 0 SIN(0 1 1k)\n"
+        "R1 in out 1k\n"
+        "R2 out 0 1k\n"
+        ".tran 10u 5m\n"
+        ".four 1k v(nope)\n");
+    REQUIRE(missing);
+    REQUIRE(missing->fouriers.size() == 1u);
+    CHECK(!missing->fouriers[0].ok());
+    CHECK(missing->fouriers[0].note.find("unknown signal 'v(nope)'") !=
+          std::string::npos);
+
+    // A zero fundamental is a note as well.
+    const auto zero = run_text(
+        "zero\n"
+        "V1 in 0 SIN(0 1 1k)\n"
+        "R1 in out 1k\n"
+        "R2 out 0 1k\n"
+        ".tran 10u 5m\n"
+        ".four 0 v(out)\n");
+    REQUIRE(zero);
+    REQUIRE(zero->fouriers.size() == 1u);
+    CHECK(!zero->fouriers[0].ok());
+    CHECK(zero->fouriers[0].note.find("> 0") != std::string::npos);
+}
+
+TEST_CASE("four: a .step family measures per point with @k suffixes") {
+    const auto run = run_text(
+        "stepfour\n"
+        "B1 out 0 V=amp*sin(6283.185307179586*time)\n"
+        "R1 out 0 1k\n"
+        ".param amp=0.5\n"
+        ".step param amp list 0.5 1\n"
+        ".tran 10u 5m\n"
+        ".four 1k 4 v(out)\n");
+    REQUIRE(run);
+    REQUIRE(run->fouriers.size() == 2u);
+    CHECK(run->fouriers[0].signal == "v(out)");
+    CHECK(run->fouriers[1].signal == "v(out)@2");
+    REQUIRE(run->fouriers[0].ok());
+    REQUIRE(run->fouriers[1].ok());
+    CHECK(run->fouriers[0].harmonics.size() == 4u);
+    CHECK(run->fouriers[0].harmonics[0].magnitude ==
+          doctest::Approx(0.5).epsilon(1e-3));
+    CHECK(run->fouriers[1].harmonics[0].magnitude ==
+          doctest::Approx(1.0).epsilon(1e-3));
+}
+
+TEST_CASE("four: parse rejections - arity and the card's scope") {
+    CHECK(error_of(run_text("x\n"
+                            "V1 in 0 5\n"
+                            "R1 in out 1k\n"
+                            "R2 out 0 1k\n"
+                            ".tran 10u 5m\n"
+                            ".four 1k\n"))
+              .find("'.four' takes FREQ") != std::string::npos);
+    CHECK(error_of(run_text("x\n"
+                            "V1 in 0 5\n"
+                            "R1 in out 1k\n"
+                            "R2 out 0 1k\n"
+                            ".tran 10u 5m\n"
+                            ".four 1k 9\n"))
+              .find("needs at least one signal") != std::string::npos);
+    CHECK(error_of(run_text("x\n"
+                            ".subckt sub a b\n"
+                            "R1 a b 1k\n"
+                            ".four 1k v(a)\n"
+                            ".ends\n"))
+              .find("'.four' inside .subckt") != std::string::npos);
+}
+
+TEST_CASE("fourier::series: the library half's impossible answers") {
+    const std::vector<double> two{0.0, 1e-3};
+    const std::vector<double> flat{1.0, 1.0};
+    // A bad fundamental and a bad count are notes.
+    CHECK(ws::spice::fourier::series(two, flat, 0.0, 9).note.find("> 0") !=
+          std::string::npos);
+    CHECK(ws::spice::fourier::series(two, flat, 1e3, 0).note.find("1 and 10000") !=
+          std::string::npos);
+    // Too few samples.
+    const std::vector<double> one{1e-3};
+    CHECK(ws::spice::fourier::series(one, one, 1e3, 9).note.find("two samples") !=
+          std::string::npos);
+    // A run shorter than one fundamental period still answers - the
+    // whole run is the window, periods reports 0 (leakage caveat). Three
+    // quarters of a 1 kHz period, quarter-period spaced.
+    const std::vector<double> t{0.0, 2.5e-4, 5.0e-4, 7.5e-4};
+    std::vector<double> s(t.size());
+    for (std::size_t k = 0; k < t.size(); ++k) {
+        s[k] = std::sin(6283.185307179586 * t[k]);  // 1 kHz, quarter period
+    }
+    const ws::spice::fourier::Series q =
+        ws::spice::fourier::series(t, s, 1e3, 1);
+    CHECK(q.ok());
+    CHECK(q.periods == 0u);
+    REQUIRE(q.harmonics.size() == 1u);
+    CHECK(q.harmonics[0].magnitude > 0.2);
+    CHECK(q.harmonics[0].freq == doctest::Approx(1000.0).epsilon(1e-9));
 }
