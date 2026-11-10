@@ -725,7 +725,7 @@ errors. `1meh` is 1e-3 (the `eh` is trailing letters) — matches ngspice.
 
 Card handlers live in `src/deck.cpp`, one function per card; an unknown
 card or instance letter is a line-numbered error (§0.3). Instance
-letters: R C L K V I E F G H B S W D Q M T X. ngspice syntax is canonical;
+letters: R C L K V I E F G H B S W D Q M T X J. ngspice syntax is canonical;
 LTspice forms are accepted where unambiguous and listed in
 `libs/spice/CLAUDE.md` (curly-brace parameters, `Rser=` on L, `.step
 param`, `.meas`). Ambiguous or LTspice-only constructs (`.lib` models

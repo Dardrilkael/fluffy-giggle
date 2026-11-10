@@ -5831,3 +5831,764 @@ TEST_CASE("fourier::series: the library half's impossible answers") {
     CHECK(q.harmonics[0].magnitude > 0.2);
     CHECK(q.harmonics[0].freq == doctest::Approx(1000.0).epsilon(1e-9));
 }
+
+// --- the JFET (the last classic device letter) ---------------------------------
+
+TEST_CASE("JFET: .op saturation, linear and cutoff match the SPICE3 equations") {
+    // Voltage-driven terminals (the M4a BJT test shape), NJF with
+    // Vto=-2, Beta=1e-4, Lambda=0. Saturation: vgs=0 (vgst=2) with
+    // vds=5 >= vgst -> Id = Beta*vgst^2 = 0.4 mA exactly (the channel
+    // only; the drain terminal adds the gd junction's reverse leakage,
+    // ~-Is, which the i(J1) probe carries).
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "jfet regions\n"
+        "V1 d 0 5\n"
+        "V2 g 0 0\n"
+        "J1 d g 0 jn\n"
+        ".model jn NJF(Vto=-2 Beta=1e-4)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double ij = t.signals[col_of(t, "i(J1)")].data[0];
+    CHECK(ij == doctest::Approx(1e-4 * 2.0 * 2.0 - 1e-14).epsilon(1e-6));
+
+    // Linear region: vds = 0.5 < vgst = 2 ->
+    // Id = Beta*vds*(2*vgst - vds) = 1e-4*0.5*3.5 = 175 uA.
+    const auto lin = run_text(
+        "jfet linear\n"
+        "V1 d 0 0.5\n"
+        "V2 g 0 0\n"
+        "J1 d g 0 jn\n"
+        ".model jn NJF(Vto=-2 Beta=1e-4)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(lin);
+    CHECK(lin->results.tables[0].signals[col_of(lin->results.tables[0],
+                                                "i(J1)")].data[0] ==
+          doctest::Approx(1e-4 * 0.5 * 3.5 - 1e-14).epsilon(1e-6));
+
+    // Cutoff: vgs = -3 < Vto -> the channel is EXACTLY off; the drain
+    // terminal carries only the gd junction's reverse saturation -Is.
+    const auto cut = run_text(
+        "jfet cutoff\n"
+        "V1 d 0 5\n"
+        "V2 g 0 -3\n"
+        "J1 d g 0 jn\n"
+        ".model jn NJF(Vto=-2 Beta=1e-4)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(cut);
+    CHECK(cut->results.tables[0].signals[col_of(cut->results.tables[0],
+                                                "i(J1)")].data[0] ==
+          doctest::Approx(-1e-14).epsilon(1e-6));
+}
+
+TEST_CASE("JFET: .dc Vgs sweep crosses cutoff into saturation") {
+    // Every point of the sweep against the region map: cutoff at
+    // vgs <= Vto, then Id = Beta*(vgs-Vto)^2 (vds = 5 keeps every
+    // conducting point in saturation).
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "jfet vgs sweep\n"
+        "V1 d 0 5\n"
+        "V2 g 0 -4\n"
+        "J1 d g 0 jn\n"
+        ".model jn NJF(Vto=-2 Beta=1e-4)\n"
+        ".dc V2 -4 0 0.25\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const std::span<const double> vgs = t.axis();
+    const auto& ij = t.signals[col_of(t, "i(J1)")].data;
+    REQUIRE(vgs.size() == 17);
+    for (std::size_t k = 0; k < vgs.size(); ++k) {
+        const double vgst = vgs[k] + 2.0;
+        const double want =
+            (vgst <= 0.0) ? -1e-14 : 1e-4 * vgst * vgst - 1e-14;
+        CHECK(ij[k] == doctest::Approx(want).epsilon(1e-6).scale(1e-6));
+    }
+}
+
+TEST_CASE("JFET: Lambda is the saturation output conductance") {
+    // Id = Beta*vgst^2*(1+Lambda*Vds) in saturation: two drain voltages,
+    // one ratio. vgs=0 keeps vgst=2 exactly (no parasitics).
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    double id5 = 0.0, id10 = 0.0;
+    for (const double vdd : {5.0, 10.0}) {
+        const auto run = run_text(
+            "jfet lambda\n"
+            "V1 d 0 " + std::to_string(vdd) + "\n"
+            "V2 g 0 0\n"
+            "J1 d g 0 jn\n"
+            ".model jn NJF(Vto=-2 Beta=1e-4 Lambda=2m)\n"
+            ".op\n",
+            nullptr, settings);
+        REQUIRE(run);
+        const double ij = run->results.tables[0].signals[col_of(
+                              run->results.tables[0], "i(J1)")].data[0];
+        (vdd == 5.0 ? id5 : id10) = ij;
+    }
+    // id10/id5 = (1+lambda*10)/(1+lambda*5), both minus the same -Is leak.
+    const double lam = 2e-3;
+    const double want = (1.0 + lam * 10.0) / (1.0 + lam * 5.0);
+    CHECK((id10 + 1e-14) / (id5 + 1e-14) == doctest::Approx(want).epsilon(1e-6));
+}
+
+TEST_CASE("JFET: PJF mirrors NJF; the inverse region swaps source and drain") {
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    // PJF: every terminal voltage negated, |Id| identical (the M4a PNP
+    // test shape). i(J1) flips sign: the mirror-frame drain current is
+    // negative.
+    const auto pjf = run_text(
+        "jfet pjf\n"
+        "V1 d 0 -5\n"
+        "V2 g 0 0\n"
+        "J1 d g 0 jp\n"
+        ".model jp PJF(Vto=-2 Beta=1e-4)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(pjf);
+    CHECK(pjf->results.tables[0].signals[col_of(pjf->results.tables[0],
+                                                "i(J1)")].data[0] ==
+          doctest::Approx(-(1e-4 * 4.0 - 1e-14)).epsilon(1e-6));
+
+    // Inverse mode: the source sits ABOVE the drain (vds < 0) with both
+    // junctions reverse-biased; the channel runs backwards:
+    // vgdt = vgd - Vto = 1, -vds = 2 >= vgdt -> inverse saturation,
+    // cdrain = -Beta*vgdt^2 = -0.1 mA.
+    const auto inv = run_text(
+        "jfet inverse\n"
+        "V1 d 0 1\n"
+        "V2 g 0 0\n"
+        "V3 s 0 3\n"
+        "J1 d g s jn\n"
+        ".model jn NJF(Vto=-2 Beta=1e-4)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(inv);
+    CHECK(inv->results.tables[0].signals[col_of(inv->results.tables[0],
+                                                "i(J1)")].data[0] ==
+          doctest::Approx(-1e-4 * 1.0 - 1e-14).epsilon(1e-6));
+}
+
+TEST_CASE("JFET: Rd/Rs parasitics split onto the #d/#s internal nodes") {
+    // With Rd only (the source grounded): vgs = 0 keeps vgst = 2 exact,
+    // and Id = Beta*vgst^2*(1+lambda*(Vdd - Id*Rd)) folds to a LINEAR
+    // equation in Id - the RDSW test shape.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "jfet rd\n"
+        "V1 d 0 10\n"
+        "V2 g 0 0\n"
+        "J1 d g 0 jn\n"
+        ".model jn NJF(Vto=-2 Beta=1e-4 Lambda=2m Rd=100)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double beta = 1e-4, vgst = 2.0, lam = 2e-3;
+    const double a = beta * vgst * vgst;
+    const double id_ref = a * (1.0 + lam * 10.0) / (1.0 + a * lam * 100.0);
+    CHECK(t.signals[col_of(t, "i(J1)")].data[0] ==
+          doctest::Approx(id_ref).epsilon(1e-6));
+    // The internal #d node carries the true drain: Vdd - Id*Rd.
+    CHECK(t.signals[col_of(t, "v(J1#d)")].data[0] ==
+          doctest::Approx(10.0 - id_ref * 100.0).epsilon(1e-7));
+
+    // With Rs only (no lambda): vgs = -Id*Rs, Id = Beta*(vgst)^2 folds to
+    // the source-follower quadratic Rs*x^2 + x/sqrt(Beta) - 2 = 0 over
+    // x = sqrt(Id) (the jfet.csim closed form).
+    const auto rs = run_text(
+        "jfet rs\n"
+        "V1 d 0 15\n"
+        "V2 g 0 0\n"
+        "J1 d g s jn\n"
+        "V3 s 0 0\n"
+        ".model jn NJF(Vto=-2 Beta=1e-4 Rs=1k)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(rs);
+    const Table& t2 = rs->results.tables[0];
+    const double sb = 1.0 / std::sqrt(1e-4);
+    const double x = (-sb + std::sqrt(sb * sb + 4.0 * 1000.0 * 2.0)) / 2000.0;
+    const double id2 = x * x;
+    CHECK(t2.signals[col_of(t2, "i(J1)")].data[0] ==
+          doctest::Approx(id2).epsilon(1e-6));
+    CHECK(t2.signals[col_of(t2, "v(J1#s)")].data[0] ==
+          doctest::Approx(id2 * 1000.0).epsilon(1e-7));
+}
+
+TEST_CASE("JFET: a current-forced bias converges to the closed form") {
+    // The ladder gate: a current source pulling 250 uA out of the source
+    // forces Id = 250 uA, and the gate (grounded) meets it at
+    // vgs = Vto + sqrt(Id/Beta) -> v(ss) = 0.41886 V. This is the deck
+    // that needs pnjlim's NEGATIVE floor: without it the first Newton
+    // iterate swings the source to +11 V, the channel lands in cutoff,
+    // and the gmin-regularized system has a self-consistent spurious
+    // solution at v(ss) ~ I/gmin ~ 2.5e8 V that "converges".
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "jfet current bias\n"
+        "I1 ss 0 DC 250u\n"
+        "J1 dd g ss jn\n"
+        "V1 dd 0 12\n"
+        "V2 g 0 0\n"
+        ".model jn NJF(Vto=-2 Beta=1e-4)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double vgs = -2.0 + std::sqrt(250e-6 / 1e-4);
+    // The junction leakage (~5e-13 A through the source node) shifts the
+    // answer in the 9th digit; 1e-7 covers it with margin.
+    CHECK(t.signals[col_of(t, "v(ss)")].data[0] ==
+          doctest::Approx(-vgs).epsilon(1e-7));
+    CHECK(t.signals[col_of(t, "i(J1)")].data[0] ==
+          doctest::Approx(250e-6).epsilon(1e-7));
+    // And the follower with BOTH parasitics plus a cold 2.5e8-V-scale
+    // start (Rd/Rs added): same closed form with the Rs lift.
+    const auto run2 = run_text(
+        "jfet current bias rd rs\n"
+        "I1 ss 0 DC 250u\n"
+        "J1 dd g ss jn\n"
+        "V1 dd 0 12\n"
+        "V2 g 0 0\n"
+        ".model jn NJF(Vto=-2 Beta=1e-4 Rd=10 Rs=20)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run2);
+    const Table& t2 = run2->results.tables[0];
+    // v(#s) - v(ss) = Id*Rs with the prime ABOVE the terminal (the
+    // channel current flows out through Rs), so v(ss) = -vgs - Id*Rs.
+    CHECK(t2.signals[col_of(t2, "v(ss)")].data[0] ==
+          doctest::Approx(-vgs - 250e-6 * 20.0).epsilon(1e-7));
+}
+
+TEST_CASE("JFET: temperature - Vto(T)/Beta(T)/Is(T), the jfettemp chain") {
+    // 127 C with the explicit-coefficient spellings: Vto(T) = Vto +
+    // Vtotc*dT, Beta(T) = Beta*1.01^(Betatce*dT), Is(T) = Is*exp(dT*Eg/
+    // (N*Vt(T))) (the SPICE3 quirk: no (T/Tnom)^XTI factor unless XTI is
+    // explicitly given). The drain terminal current picks up Is(T) as
+    // the gd junction's reverse leakage.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "jfet temp\n"
+        "V1 d 0 5\n"
+        "V2 g 0 0\n"
+        "J1 d g 0 jt\n"
+        ".model jt NJF(Vto=-2 Beta=1e-4 Vtotc=-2m Betatce=-1)\n"
+        ".options temp=127\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double dt = 100.0;                       // 400.15 - 300.15 K
+    const double ratio1 = 400.15 / 300.15 - 1.0;   // the Is(T) exponent's
+                                                   // relative form
+    const double vto_t = -2.0 + (-2e-3) * dt;
+    const double beta_t = 1e-4 * std::pow(1.01, -1.0 * dt);
+    const double vt_t = 400.15 * 8.617333262145e-5;
+    const double is_t = 1e-14 * std::exp(ratio1 * 1.11 / (1.0 * vt_t));
+    const double want = beta_t * (0.0 - vto_t) * (0.0 - vto_t) + is_t;
+    CHECK(t.signals[col_of(t, "i(J1)")].data[0] ==
+          doctest::Approx(want).epsilon(1e-7));
+    // XTI given: the (1+dT/Tnom)^XTI factor applies (SPICE3's quirk in
+    // the other direction).
+    const auto run2 = run_text(
+        "jfet temp xti\n"
+        "V1 d 0 5\n"
+        "V2 g 0 0\n"
+        "J1 d g 0 jt\n"
+        ".model jt NJF(Is=1e-14 Eg=1.11 Xti=2)\n"
+        ".options temp=127\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run2);
+    const Table& t2 = run2->results.tables[0];
+    const double is_t2 =
+        1e-14 * std::exp(ratio1 * 1.11 / vt_t) * std::pow(1.0 + ratio1, 2.0);
+    const double want2 = 1e-4 * 4.0 + is_t2;
+    CHECK(t2.signals[col_of(t2, "i(J1)")].data[0] ==
+          doctest::Approx(want2).epsilon(1e-7));
+    // T == Tnom is bit-identical: the temp card at 27 C equals no card.
+    const char* deck =
+        "jfet tnom\n"
+        "V1 d 0 5\n"
+        "V2 g 0 0\n"
+        "J1 d g 0 jn\n"
+        ".model jn NJF(Vto=-2 Beta=1e-4 Cgs=10p Cgd=10p)\n"
+        ".op\n";
+    const auto plain = run_text(std::string(deck) + "", nullptr, settings);
+    const auto tnomd = run_text(std::string(deck) + ".options temp=27\n",
+                                nullptr, settings);
+    REQUIRE(plain);
+    REQUIRE(tnomd);
+    const Table& tp = plain->results.tables[0];
+    const Table& tq = tnomd->results.tables[0];
+    for (std::size_t c = 0; c < tp.signals.size(); ++c) {
+        REQUIRE(tp.signals[c].data.size() == tq.signals[c].data.size());
+        for (std::size_t k = 0; k < tp.signals[c].data.size(); ++k) {
+            CHECK(tp.signals[c].data[k] == tq.signals[c].data[k]);
+        }
+    }
+}
+
+TEST_CASE("JFET: Cgs/Cgd gate caps - the .ac RC pole at the OP") {
+    // Gate driven through 1k from an AC source; drain and source pinned
+    // by DC sources (AC grounds). The OP: vgs = 0 (the gate leaks ~pA),
+    // vgd = -5, so Cgs = Cgs0 and Cgd = Cgs0/sqrt(1+5/Pb): the gate is a
+    // plain RC low-pass with Ctot = 10p + 10p/sqrt(6).
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "jfet gate ac\n"
+        "V1 a 0 AC 1\n"
+        "R1 a g 1k\n"
+        "J1 d g s jc\n"
+        "V2 d 0 5\n"
+        "V3 s 0 0\n"
+        ".model jc NJF(Vto=-2 Beta=1e-4 Cgs=10p Cgd=10p Pb=1)\n"
+        ".ac dec 20 1meg 1g\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const std::span<const double> f = t.axis();
+    const auto& re = t.signals[col_of(t, "re(v(g))")].data;
+    const auto& im = t.signals[col_of(t, "im(v(g))")].data;
+    const double c_tot = 10e-12 + 10e-12 / std::sqrt(6.0);
+    for (std::size_t k = 0; k < f.size(); ++k) {
+        const double w = 6.283185307179586 * f[k];
+        const double den = 1.0 + w * w * 1000.0 * 1000.0 * c_tot * c_tot;
+        CHECK(re[k] == doctest::Approx(1.0 / den).epsilon(1e-7));
+        CHECK(im[k] == doctest::Approx(-w * 1000.0 * c_tot / den).epsilon(1e-7));
+    }
+}
+
+TEST_CASE("JFET: .tran cutoff gate RC step vs the closed form") {
+    // Deep cutoff (Vto=-2, gate stepped -2.1 -> -2.0... still cutoff at
+    // -2.0? vgst = 0 - use -2.2 -> -2.1, both below Vto): the gate caps
+    // sit at a constant bias, so the gate charges through Rg with
+    // tau = Rg*(Cgs(vgs) + Cgd(vgd)) - the Meyer RC row on depletion
+    // caps. A 10 mV step keeps the cap variation ~0.1%.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const double cgs = 10e-12 / std::sqrt(1.0 + 2.15 / 1.0);   // at vgs=-2.15
+    const double cgd = 10e-12 / std::sqrt(1.0 + 7.15 / 1.0);   // at vgd=-7.15
+    const double tau = 1e5 * (cgs + cgd);
+    const auto run = run_text(
+        "jfet gate rc\n"
+        "V1 gin 0 PULSE(-2.2 -2.1 5u 1n 1n 200u)\n"
+        "R1 gin g 100k\n"
+        "V2 d 0 5\n"
+        "V3 s 0 0\n"
+        "J1 d g s jc\n"
+        ".model jc NJF(Vto=-2 Beta=1e-4 Cgs=10p Cgd=10p Pb=1)\n"
+        ".tran 50n 60u\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const std::span<const double> time = t.axis();
+    const auto& vg = t.signals[col_of(t, "v(g)")].data;
+    REQUIRE(time.size() > 100);
+    const double t_edge = 5e-6 + 1e-9;
+    for (std::size_t k = 0; k < time.size(); ++k) {
+        if (time[k] <= t_edge) {
+            continue;
+        }
+        const double want =
+            -2.2 + 0.1 * (1.0 - std::exp(-(time[k] - t_edge) / tau));
+        CHECK(vg[k] == doctest::Approx(want).epsilon(5e-3));
+    }
+}
+
+TEST_CASE("JFET: noise - the 2/3*gm channel through the follower impedance") {
+    // The current-biased follower of the ladder test, output at the
+    // source: the channel noise source (4kT*(2/3)*gm between the primes,
+    // which ARE the terminals here) folds through the follower's output
+    // impedance Z = 1/(gm + ggs + gds) - and with Lambda=0 and the gate
+    // reverse-biased, Z = 1/gm to 1e-8, so the output density is
+    // sqrt(4kT*(2/3)*gm)/gm - the JFET's channel-noise row.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "jfet noise\n"
+        "I1 ss 0 DC 250u\n"
+        "J1 dd g ss jn\n"
+        "V1 dd 0 12\n"
+        "V2 g 0 0\n"
+        ".model jn NJF(Vto=-2 Beta=1e-4)\n"
+        ".noise v(ss) V2 dec 2 1k 10k 1\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const double gm = 2.0 * 1e-4 * std::sqrt(250e-6 / 1e-4);
+    const double k_b = 1.602176634e-19 * 8.617333262145e-5;
+    const double t_k = 300.15;
+    const double z = 1.0 / (gm + 1e-12);  // ggs ~ is/vt ~ 4e-20, gmin floor
+    const double want = std::sqrt(4.0 * k_b * t_k * (2.0 / 3.0) * gm) * z;
+    REQUIRE(!run->reports[0].noise_summaries.empty());
+    const auto& sum = run->reports[0].noise_summaries[0];
+    bool found = false;
+    for (std::size_t i = 0; i < sum.names.size(); ++i) {
+        if (sum.names[i].find("id") != std::string::npos) {
+            found = true;
+            CHECK(sum.out_density[i] ==
+                  doctest::Approx(want).epsilon(1e-7).scale(0.0));
+        }
+    }
+    CHECK(found);
+    // With parasitics + flicker, the summary names the full ngspice set:
+    // rd, rs, id and 1overf.
+    const auto run2 = run_text(
+        "jfet noise full\n"
+        "I1 ss 0 DC 250u\n"
+        "J1 dd g ss jn\n"
+        "V1 dd 0 12\n"
+        "V2 g 0 0\n"
+        ".model jn NJF(Vto=-2 Beta=1e-4 Rd=10 Rs=20 Kf=1e-15 Af=1)\n"
+        ".noise v(ss) V2 dec 2 1k 10k 1\n",
+        nullptr, settings);
+    REQUIRE(run2);
+    REQUIRE(!run2->reports[0].noise_summaries.empty());
+    const auto& sum2 = run2->reports[0].noise_summaries[0];
+    bool has_rd = false, has_rs = false, has_id = false, has_f = false;
+    for (const std::string& n : sum2.names) {
+        has_rd = has_rd || n.find("rd") != std::string::npos;
+        has_rs = has_rs || n.find("rs") != std::string::npos;
+        has_id = has_id || n.find("id") != std::string::npos;
+        has_f = has_f || n.find("1overf") != std::string::npos;
+    }
+    CHECK(has_rd);
+    CHECK(has_rs);
+    CHECK(has_id);
+    CHECK(has_f);
+}
+
+TEST_CASE("JFET: rejections are loud and line-numbered; the round-trip") {
+    const auto bad_type = run_text(
+        "jt\n"
+        "V1 d 0 5\n"
+        "J1 d g 0 jm\n"
+        ".model jm NPN(Is=1e-16)\n"
+        ".op\n");
+    CHECK(error_of(bad_type).find("NJF or PJF") != std::string::npos);
+
+    const auto bad_param = run_text(
+        "jt\n"
+        "V1 d 0 5\n"
+        "J1 d g 0 jm\n"
+        ".model jm NJF(Vtox=1)\n"
+        ".op\n");
+    CHECK(error_of(bad_param).find("unknown parameter 'vtox'") !=
+          std::string::npos);
+
+    const auto bad_beta = run_text(
+        "jt\n"
+        "V1 d 0 5\n"
+        "J1 d g 0 jm\n"
+        ".model jm NJF(Beta=0)\n"
+        ".op\n");
+    CHECK(error_of(bad_beta).find("Beta > 0") != std::string::npos);
+
+    const auto bad_rd = run_text(
+        "jt\n"
+        "V1 d 0 5\n"
+        "J1 d g 0 jm\n"
+        ".model jm NJF(Rd=-1)\n"
+        ".op\n");
+    CHECK(error_of(bad_rd).find("Rd >= 0") != std::string::npos);
+
+    const auto bad_fc = run_text(
+        "jt\n"
+        "V1 d 0 5\n"
+        "J1 d g 0 jm\n"
+        ".model jm NJF(Fc=0.99)\n"
+        ".op\n");
+    CHECK(error_of(bad_fc).find("0 <= Fc <= 0.95") != std::string::npos);
+
+    const auto bad_area = run_text(
+        "jt\n"
+        "V1 d 0 5\n"
+        "J1 d g 0 jm 0\n"
+        ".model jm NJF()\n"
+        ".op\n");
+    CHECK(error_of(bad_area).find("positive finite area") != std::string::npos);
+
+    const auto bad_extra = run_text(
+        "jt\n"
+        "V1 d 0 5\n"
+        "J1 d g 0 jm 1 2\n"
+        ".model jm NJF()\n"
+        ".op\n");
+    CHECK(error_of(bad_extra).find("takes three nodes") != std::string::npos);
+
+    // The netlist round-trip: write and re-solve (the M4e shape). The
+    // instance temp= follows the diode/BJT convention (applied, not
+    // round-tripped); ic= rides the card.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const std::string deck =
+        "jfet round trip\n"
+        "V1 d 0 10\n"
+        "V2 g 0 -1\n"
+        "J1 d g 0 jrt 2 ic=2,-1\n"
+        ".model jrt NJF(Vto=-2.5 Beta=2e-4 Lambda=1m Rd=5 Rs=3 Cgs=2p Cgd=1p)\n"
+        ".op\n";
+    const ws::core::Result<ws::spice::Deck> parsed =
+        read_deck("t.cir", deck, ws::spice::ParseOptions{});
+    REQUIRE(parsed);
+    std::vector<Warning> w;
+    const ws::core::Result<ws::spice::DeckAst> ast = build_deck_ast(*parsed, w);
+    REQUIRE(ast);
+    const ws::core::Result<ws::spice::Circuit> circ =
+        elaborate_deck(*ast, 27.0, w);
+    REQUIRE(circ);
+    const ws::core::Result<ws::spice::RunState> rs =
+        ws::spice::RunState::bind(*circ);
+    REQUIRE(rs);
+    const ws::core::Result<std::string> net = write_netlist(*circ, *rs);
+    REQUIRE(net);
+    CHECK(net->find("J1 d g 0 jrt 2 ic=2,-1") != std::string::npos);
+    const std::size_t end_pos = net->rfind(".end");
+    REQUIRE(end_pos != std::string::npos);
+    const auto run = run_text(net->substr(0, end_pos) + ".op\n.end\n",
+                              nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    // The bias point: vgst = 1.5 - Id*(Rs/area) (the source prime lifts
+    // with Id*Rs/area), vds = 10 - Id*(Rd+Rs)/area, saturation:
+    // Id = Beta*area*vgst^2*(1+lambda*vds) - the fixed point.
+    double id_ref = 9e-4;
+    for (int i = 0; i < 200; ++i) {
+        const double vgst = 1.5 - id_ref * 3.0 / 2.0;
+        const double vds = 10.0 - id_ref * 8.0 / 2.0;
+        id_ref = 2.0 * 2e-4 * vgst * vgst * (1.0 + 1e-3 * vds);
+    }
+    CHECK(t.signals[col_of(t, "i(J1)")].data[0] ==
+          doctest::Approx(id_ref).epsilon(1e-7));
+}
+
+// --- the diode Bv/Ibv reverse breakdown ----------------------------------------
+
+TEST_CASE("diode Bv: the zener regulator .op pins the rail at Bv") {
+    // R from 15.1 V, D1 cathode to the rail (anode grounded), Bv=5.1 and
+    // IBV set to the EXACT bias current (15.1-5.1)/1k = 10 mA: the knee
+    // construction passes -IBV at -Bv by construction, so v(out) = Bv
+    // exactly (up to the gmin leakage, ~nV).
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "zener\n"
+        "V1 n1 0 15.1\n"
+        "R1 n1 out 1k\n"
+        "D1 0 out zd\n"
+        ".model zd D(Is=1e-14 Bv=5.1 Ibv=10m)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    CHECK(t.signals[col_of(t, "v(out)")].data[0] ==
+          doctest::Approx(5.1).epsilon(1e-9));
+    CHECK(t.signals[col_of(t, "i(D1)")].data[0] ==
+          doctest::Approx(-0.01).epsilon(1e-9));
+
+    // Half the bias current: the rail sits one vte*log(2) below Bv
+    // (the exponential's own shift, solved as a fixed point - it
+    // converges in a handful of sweeps because the shift is ~mV).
+    const auto run2 = run_text(
+        "zener half\n"
+        "V1 n1 0 10.1\n"
+        "R1 n1 out 1k\n"
+        "D1 0 out zd\n"
+        ".model zd D(Is=1e-14 Bv=5.1 Ibv=10m)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run2);
+    const Table& t2 = run2->results.tables[0];
+    const double vt = 300.15 * 8.617333262145e-5;
+    double v = 5.1;
+    for (int i = 0; i < 80; ++i) {
+        v = 5.1 + vt * std::log((10.1 - v) / 1000.0 / 0.01);
+    }
+    CHECK(t2.signals[col_of(t2, "v(out)")].data[0] ==
+          doctest::Approx(v).epsilon(1e-9));
+}
+
+TEST_CASE("diode Bv: the knee rides the Rs internal node") {
+    // Rs=10: the knee sees the INTERNAL junction voltage, so the rail
+    // carries the extra |I|*Rs drop. With IBV at the exact bias current
+    // the fixed point is v = Bv + |I|*Rs + vte*ln(|I|/IBV), |I| =
+    // (15.1-v)/1k.
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "zener rs\n"
+        "V1 n1 0 15.1\n"
+        "R1 n1 out 1k\n"
+        "D1 0 out zd\n"
+        ".model zd D(Is=1e-14 Bv=5.1 Ibv=10m Rs=10)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const double vt = 300.15 * 8.617333262145e-5;
+    double v = 5.2;
+    for (int i = 0; i < 200; ++i) {
+        const double i_abs = (15.1 - v) / 1000.0;
+        v = 5.1 + i_abs * 10.0 + vt * std::log(i_abs / 0.01);
+    }
+    CHECK(t.signals[col_of(t, "v(out)")].data[0] ==
+          doctest::Approx(v).epsilon(1e-9));
+    // The Rs drop lands on the ANODE side: the breakdown current flows
+    // cathode -> mid -> anode -> ground, so v(#mid) = |I|*Rs/area sits
+    // ~0.099 V above ground (not below the rail).
+    CHECK(t.signals[col_of(t, "v(D1#mid)")].data[0] ==
+          doctest::Approx((15.1 - v) / 1000.0 * 10.0).epsilon(1e-9));
+}
+
+TEST_CASE("diode Bv: .dc sweep through the knee, point by point") {
+    // Below the knee the diode is open (v(out) = V1 minus the Is drop);
+    // past it the rail follows the breakdown exponential. The exact
+    // answer per point: v < xbv -> v = V1 - Is*1k; v > xbv ->
+    // (V1-v)/1k = Is*exp((v-xbv)/vte) - solved by bisection (a fixed
+    // point does not exist for every supply).
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto run = run_text(
+        "zener sweep\n"
+        "V1 n1 0 10\n"
+        "R1 n1 out 1k\n"
+        "D1 0 out zd\n"
+        ".model zd D(Is=1e-14 Bv=5.1 Ibv=10m)\n"
+        ".dc V1 0 10 0.25\n",
+        nullptr, settings);
+    REQUIRE(run);
+    const Table& t = run->results.tables[0];
+    const std::span<const double> v1 = t.axis();
+    const auto& out = t.signals[col_of(t, "v(out)")].data;
+    const double vt = 300.15 * 8.617333262145e-5;
+    const double vte = vt;
+    // The knee: the diotemp.c fixed point (area=1).
+    double xbv = 5.1 - vte * std::log(1.0 + 0.01 / 1e-14);
+    for (int it = 0; it < 25; ++it) {
+        xbv = 5.1 - vte * std::log(0.01 / 1e-14 + 1.0 - xbv / vt);
+    }
+    REQUIRE(xbv > 0.0);
+    REQUIRE(v1.size() == out.size());
+    // The exact per-point KCL: i_diode(v) = (V1-v)/1k over the terminal
+    // voltage v (vd = -v, anode grounded), with i_diode the SAME branch
+    // structure the load uses - Shockley+gmin below the knee, the
+    // breakdown exponential+gmin above - monotone in v, so one bisection
+    // per row (a fixed point does not exist at every supply).
+    const double gmin = 1e-12;
+    const auto i_diode = [&](double v) {
+        const double i_gmin = gmin * (-v);
+        if (v <= xbv) {
+            return 1e-14 * (std::exp(-v / vte) - 1.0) + i_gmin;
+        }
+        return -1e-14 * std::exp((v - xbv) / vte) + i_gmin;
+    };
+    for (std::size_t k = 0; k < v1.size(); ++k) {
+        double lo = -0.2, hi = v1[k] + 0.2;
+        for (int it = 0; it < 200; ++it) {
+            const double m = 0.5 * (lo + hi);
+            // KCL at out: (V1-v)/1k in from R1 + i (the diode's
+            // anode->cathode current, NEGATIVE in breakdown) = 0.
+            const double f = i_diode(m) + (v1[k] - m) / 1000.0;
+            if (f > 0.0) {
+                lo = m;
+            } else {
+                hi = m;
+            }
+        }
+        const double want = 0.5 * (lo + hi);
+        CHECK(out[k] == doctest::Approx(want).epsilon(1e-8).scale(1e-6));
+    }
+}
+
+TEST_CASE("diode Bv: Bv=0 keeps the M3 reverse; .tran clamps the pulse") {
+    // No Bv: the reverse current is exactly -Is (the M3 form).
+    RunSettings settings;
+    settings.reltol = 1e-9;
+    const auto rev = run_text(
+        "reverse no bv\n"
+        "V1 a 0 -10\n"
+        "R1 a k 1k\n"
+        "D1 k 0 dm\n"
+        ".model dm D(Is=1e-14)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(rev);
+    CHECK(rev->results.tables[0].signals[col_of(rev->results.tables[0],
+                                                "i(D1)")].data[0] ==
+          doctest::Approx(-1e-14).epsilon(1e-6));
+
+    // Bv=0 EXPLICITLY is the same model (0 disables, the Rs/TT
+    // precedent) - and the rejections: negative Bv, Ibv<=0 with Bv.
+    const auto rev0 = run_text(
+        "reverse bv=0\n"
+        "V1 a 0 -10\n"
+        "R1 a k 1k\n"
+        "D1 k 0 dm\n"
+        ".model dm D(Is=1e-14 Bv=0)\n"
+        ".op\n",
+        nullptr, settings);
+    REQUIRE(rev0);
+    CHECK(rev0->results.tables[0].signals[col_of(rev0->results.tables[0],
+                                                 "i(D1)")].data[0] ==
+          doctest::Approx(-1e-14).epsilon(1e-6));
+
+    const auto bad_bv = run_text(
+        "bad bv\n"
+        "D1 k 0 dm\n"
+        ".model dm D(Bv=-5)\n"
+        ".op\n");
+    CHECK(error_of(bad_bv).find("Bv >= 0") != std::string::npos);
+    const auto bad_ibv = run_text(
+        "bad ibv\n"
+        "D1 k 0 dm\n"
+        ".model dm D(Bv=5 Ibv=0)\n"
+        ".op\n");
+    CHECK(error_of(bad_ibv).find("Ibv > 0") != std::string::npos);
+
+    // The .tran zener clamp: a 0->12 V pulse through 1k into the 5.1 V
+    // rail. The knee walk costs pnjlim iterations exactly like the
+    // rectifier test's ("the diode's pnjlim walk needs more than the
+    // default 10"), and the clamp value at the 12 V rail is the same
+    // fixed point as the .op test at that supply.
+    settings.itl4 = 50;
+    const auto tran = run_text(
+        "zener tran\n"
+        "V1 n1 0 PULSE(0 12 1u 100n 100n 4u 8u)\n"
+        "R1 n1 out 1k\n"
+        "D1 0 out zd\n"
+        ".model zd D(Is=1e-14 Bv=5.1 Ibv=10m Cjo=10p)\n"
+        ".tran 200n 9u\n",
+        nullptr, settings);
+    REQUIRE(tran);
+    const Table& t = tran->results.tables[0];
+    const auto& out = t.signals[col_of(t, "v(out)")].data;
+    REQUIRE(out.size() > 40);
+    const double vt = 300.15 * 8.617333262145e-5;
+    double v = 5.1;
+    for (int i = 0; i < 80; ++i) {
+        v = 5.1 + vt * std::log((12.0 - v) / 1000.0 / 0.01);
+    }
+    double v_max = -1e9;
+    for (const double o : out) {
+        v_max = std::max(v_max, o);
+    }
+    CHECK(v_max == doctest::Approx(v).epsilon(1e-6));
+    // After the pulse the rail decays through the reverse-biased junction
+    // toward 0 (the Cjo charge drains through the 1k and the leakage).
+    CHECK(out.back() >= 0.0);
+    CHECK(out.back() < 0.05);
+}

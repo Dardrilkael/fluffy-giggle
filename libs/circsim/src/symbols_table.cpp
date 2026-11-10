@@ -202,6 +202,42 @@ SymbolDef mosfet(std::string key, std::string name, bool pmos) {
     return s;
 }
 
+// The JFETs share the BJT's three-pin layout (D G S in card order,
+// drain on top) with the MOSFET's bar-and-arrow language: one vertical
+// channel bar (the gate lead enters it), the drain/source strokes off
+// its ends, and the TYPE arrow on the gate lead - INTO the channel
+// (n-channel: the P-gate's arrow points at the N channel, the BJT
+// emitter-arrow convention) vs back out at the gate pin (p-channel).
+SymbolDef jfet(std::string key, std::string name, bool pjf) {
+    SymbolDef s;
+    s.key = std::move(key);
+    s.name = std::move(name);
+    s.spice_letter = 'J';
+    s.ref_prefix = "J";
+    s.pins = {PinDef{.name = "d", .dx = 2.0, .dy = 3.0, .dir = 90},
+              PinDef{.name = "g", .dx = -3.0, .dy = 0.0, .dir = 180},
+              PinDef{.name = "s", .dx = 2.0, .dy = -3.0, .dir = 270}};
+    s.emit = {ParamEmit{.key = "model"}, ParamEmit{.key = "area"}};
+    s.needs_value = false;
+    s.needs_model = true;
+    s.params = {spec(ParamSpec::Type::Text, "model", "Model"),
+                spec(ParamSpec::Type::Number, "area", "Area")};
+    s.draw = {// gate lead + the channel bar it enters
+              line(-3.0, 0.0, -1.0, 0.0), line(-1.0, -1.6, -1.0, 1.6),
+              // drain + source strokes off the bar's ends
+              line(-1.0, 0.8, 2.0, 3.0), line(-1.0, -0.8, 2.0, -3.0)};
+    // The type arrowhead riding the gate lead: tip AT the channel bar
+    // (n-channel, pointing in) vs tip back at the lead (p-channel,
+    // pointing out at the gate pin). Head length 0.8, half-width 0.28
+    // (the BJT arrowhead's proportions).
+    s.draw.push_back(pjf
+                         ? polyfill({Pos{-2.2, 0.0}, Pos{-1.4, 0.28},
+                                     Pos{-1.4, -0.28}})
+                         : polyfill({Pos{-1.0, 0.0}, Pos{-1.8, 0.28},
+                                     Pos{-1.8, -0.28}}));
+    return s;
+}
+
 const std::vector<SymbolDef>& table() {
     static const std::vector<SymbolDef> symbols = {
         two_terminal(
@@ -564,6 +600,10 @@ const std::vector<SymbolDef>& table() {
         // MOSFETs: D G S B pin order, y-up (drain on top).
         mosfet("nmos", "N-channel MOSFET", false),
         mosfet("pmos", "P-channel MOSFET", true),
+        // JFETs: D G S pin order, y-up (drain on top) - the last classic
+        // device letter joins the palette.
+        jfet("njf", "N-channel JFET", false),
+        jfet("pjf", "P-channel JFET", true),
         // The switches (stage 24). Both need a .model of type SW
         // (Ron/Roff and the threshold pair) - the directives block is
         // where it lives, the params carry only the model's NAME. The

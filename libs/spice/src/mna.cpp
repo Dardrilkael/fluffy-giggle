@@ -124,8 +124,9 @@ class AcNumericContext final : public AcLoadContext {
 public:
     AcNumericContext(ws::math::SparseMatrix<std::complex<double>>& matrix,
                      std::vector<std::complex<double>>& rhs, std::size_t node_count,
-                     double w, double temp_k)
-        : matrix_(matrix), rhs_(rhs), node_count_(node_count), temp_k_(temp_k) {
+                     double w, double temp_k, double gmin)
+        : matrix_(matrix), rhs_(rhs), node_count_(node_count), temp_k_(temp_k),
+          gmin_(gmin) {
         this->omega = w;
     }
 
@@ -145,12 +146,14 @@ public:
         return node_count_ + br;
     }
     [[nodiscard]] double temp_k() const override { return temp_k_; }
+    [[nodiscard]] double gmin() const override { return gmin_; }
 
 private:
     ws::math::SparseMatrix<std::complex<double>>& matrix_;
     std::vector<std::complex<double>>& rhs_;
     std::size_t node_count_;
     double temp_k_;
+    double gmin_;
 };
 
 }  // namespace detail
@@ -266,12 +269,12 @@ void MnaSystem::load_tran(const std::vector<std::unique_ptr<Device>>& devices,
 }
 
 void MnaSystem::load_ac(const std::vector<std::unique_ptr<Device>>& devices,
-                        const RunState& rs, double omega,
-                        const Device* noise_input) {
+                        const RunState& rs, double omega, const Device* noise_input,
+                        double gmin) {
     zero_ac();
     if (ac_matrix_) {
         detail::AcNumericContext ctx(*ac_matrix_, ac_rhs_, node_count_, omega,
-                                     phys::c_to_k(circuit_.temp));
+                                     phys::c_to_k(circuit_.temp), gmin);
         ctx.omega = omega;
         ctx.noise_input = noise_input;
         for (std::size_t i = 0; i < devices.size(); ++i) {

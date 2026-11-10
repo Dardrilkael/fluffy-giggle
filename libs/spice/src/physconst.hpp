@@ -22,6 +22,9 @@ inline constexpr double kKoverQ = 8.617333262145e-5;
 // Boltzmann constant (J/K): k = q * (k/q), the exact SI-2019 value
 // 1.380649e-23 to double precision.
 inline constexpr double kBoltz = kQ * kKoverQ;
+// Euler's number (SPICE3's CONSTe, the diode/JFET reverse-junction cubic
+// extrapolation's base).
+inline constexpr double kE = 2.718281828459045235360287471352662498;
 // 0 °C in K.
 inline constexpr double kCtoK = 273.15;
 // The reference temperature: 27 °C in K (SPICE's REFTEMP).

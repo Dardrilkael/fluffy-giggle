@@ -1,0 +1,33 @@
+{
+    "format": "circsim",
+    "version": 1,
+    "grid": 1.0,
+    "next_id": 18,
+    "parts": [
+        {"id": 1, "symbol": "v", "ref": "V1", "value": "15", "pos": [0.0, -8.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 2, "symbol": "r", "ref": "Rd", "value": "4.7k", "pos": [8.0, 0.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 3, "symbol": "njf", "ref": "J1", "value": "", "pos": [18.0, 0.0], "rot": 0, "mirror": false, "params": {"model": "j2n5457"}},
+        {"id": 4, "symbol": "r", "ref": "Rs", "value": "1k", "pos": [16.0, -9.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 5, "symbol": "r", "ref": "Rg", "value": "100k", "pos": [5.0, 5.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 6, "symbol": "gnd", "ref": "", "value": "", "pos": [3.0, -12.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 7, "symbol": "gnd", "ref": "", "value": "", "pos": [13.0, -12.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 8, "symbol": "gnd", "ref": "", "value": "", "pos": [-1.0, 5.0], "rot": 0, "mirror": false, "params": {}}
+    ],
+    "junctions": [],
+    "wires": [
+        {"id": 9, "a": {"pin": {"part": 1, "pin": 0}}, "b": {"pin": {"part": 2, "pin": 0}}, "waypoints": [[-3.0, 0.0]], "ortho": true},
+        {"id": 10, "a": {"pin": {"part": 2, "pin": 1}}, "b": {"pin": {"part": 3, "pin": 0}}, "waypoints": [[11.0, 3.0]], "ortho": true},
+        {"id": 11, "a": {"pin": {"part": 3, "pin": 1}}, "b": {"pin": {"part": 5, "pin": 1}}, "waypoints": [[15.0, 6.0], [8.0, 6.0]], "ortho": true},
+        {"id": 12, "a": {"pin": {"part": 5, "pin": 0}}, "b": {"pin": {"part": 8, "pin": 0}}, "waypoints": [], "ortho": true},
+        {"id": 13, "a": {"pin": {"part": 3, "pin": 2}}, "b": {"pin": {"part": 4, "pin": 1}}, "waypoints": [[20.0, -9.0]], "ortho": true},
+        {"id": 14, "a": {"pin": {"part": 4, "pin": 0}}, "b": {"pin": {"part": 7, "pin": 0}}, "waypoints": [], "ortho": true},
+        {"id": 15, "a": {"pin": {"part": 1, "pin": 1}}, "b": {"pin": {"part": 6, "pin": 0}}, "waypoints": [], "ortho": true}
+    ],
+    "labels": [
+        {"id": 16, "pos": [13.0, 3.0], "name": "vd"},
+        {"id": 17, "pos": [20.0, -6.0], "name": "vs"}
+    ],
+    "analysis": {"entries": [{"op": {}}]},
+    "directives": ".model j2n5457 NJF(Vto=-2 Beta=1e-4)",
+    "view": {"zoom": 1.0, "center": [9.0, -3.0]}
+}

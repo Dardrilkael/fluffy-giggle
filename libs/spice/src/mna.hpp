@@ -73,9 +73,12 @@ public:
     // §7.5 (M5): `noise_input` (when not null) is the .noise input
     // source - every source stamps zero except it (1+0j, ngspice's
     // MODEACNOISE); null keeps the plain .ac semantics (declared specs).
+    // `gmin` (M6, JFET): the run's junction-parallel floor the small-
+    // signal stamp folds in (see AcLoadContext::gmin - a reverse-biased
+    // junction's column is numerically dead without it).
     void load_ac(const std::vector<std::unique_ptr<Device>>& devices,
                  const RunState& rs, double omega,
-                 const Device* noise_input = nullptr);
+                 const Device* noise_input = nullptr, double gmin = 1e-12);
 
     // Freezes the pattern (col-major dedupe) and runs the symbolic
     // analyze. Fails through Status on a malformed pattern.

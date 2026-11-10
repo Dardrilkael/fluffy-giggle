@@ -796,12 +796,13 @@ ws::core::Result<ParsedCard> parse_card(const Record& rec, bool inside_subckt,
             const std::string type_lower = to_lower(type);
             if (type_lower != "r" && type_lower != "sw" && type_lower != "d" &&
                 type_lower != "npn" && type_lower != "pnp" &&
-                type_lower != "nmos" && type_lower != "pmos") {
+                type_lower != "nmos" && type_lower != "pmos" &&
+                type_lower != "njf" && type_lower != "pjf") {
                 return spice_fail(card_diag(
                     ErrorKind::Parse, "spice.parse.model_type",
                     "model type '" + type +
                         "' is not supported in v1 (resistor models M5, switch models M2,"
-                        " diode M3, BJT M4a, MOS M4c)",
+                        " diode M3, BJT M4a, MOS M4c, JFET)",
                     rec.loc));
             }
             std::vector<Token> params;
@@ -901,7 +902,7 @@ ws::core::Result<ParsedCard> parse_card(const Record& rec, bool inside_subckt,
     }
     const char letter =
         static_cast<char>(std::toupper(static_cast<unsigned char>(name_text[0])));
-    const std::string supported = "RVIEFGHXCLKSWDQMBT";
+    const std::string supported = "RVIEFGHXCLKSWDQMBTJ";
     if (supported.find(letter) == std::string::npos) {
         if (device_milestones().count(letter) != 0) {
             return spice_fail(card_diag(

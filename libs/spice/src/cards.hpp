@@ -107,6 +107,9 @@ namespace ws::spice {
 // The M4e device factory (devices_m4e.cpp).
 [[nodiscard]] ws::core::Result<std::unique_ptr<Device>> make_tline(
     const DeviceCard& card, FactoryServices& s);
+// The JFET factory (devices_jfet.cpp) - the last classic device letter.
+[[nodiscard]] ws::core::Result<std::unique_ptr<Device>> make_jfet(
+    const DeviceCard& card, FactoryServices& s);
 
 // The builtin device factory table ('R','V','I','E','F','G','H' + M2's
 // 'C','L','K','S','W'), defined in devices.cpp. The elaborator copies it

@@ -1119,7 +1119,7 @@ const std::map<char, DeviceFactory>& builtin_device_factories() {
         {'H', make_ccvs},      {'C', make_capacitor}, {'L', make_inductor},
         {'K', make_coupling},  {'S', make_vswitch},   {'W', make_iswitch},
         {'D', make_diode},     {'Q', make_bjt},     {'M', make_mosfet},
-        {'B', make_bsource},   {'T', make_tline},
+        {'B', make_bsource},   {'T', make_tline},    {'J', make_jfet},
     };
     return table;
 }

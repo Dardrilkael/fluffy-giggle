@@ -286,6 +286,53 @@ def main():
     thd = float(toks[toks.index("thd") + 1])
     check(abs(thd - 20.0) < 0.05, f"fourier THD 20 % (got {thd})")
 
+    # --- the JFET: the last classic device letter -----------------------------
+    # The self-biased source follower: Id = Beta*(Vgs-Vto)^2 with
+    # Vgs = -Id*Rs folds to the quadratic Rs*x^2 + x/sqrt(Beta) + Vto = 0
+    # over x = sqrt(Id); the gate sits within ~1.4 uV of ground (the gmin
+    # leakage through Rg), so the closed form holds to ~1e-6.
+    jf = EXAMPLES / "jfet.csim"
+    r = run(args.cli, "erc", jf)
+    check(r.returncode == 0, "jfet erc exit 0")
+    r = run(args.cli, "netlist", jf)
+    check(r.returncode == 0, "jfet netlist exit 0")
+    check("J1 vd N002 vs j2n5457\n" in r.stdout, "jfet decks the J card (d g s)")
+    r = run(args.cli, "run", jf, "-o", "-")
+    check(r.returncode == 0, f"jfet run exit 0 (stderr: {r.stderr.strip()!r})")
+    header, rows = parse_csv(r.stdout)
+    check(len(rows) == 1, "jfet op has one row")
+    sb = 1.0 / math.sqrt(1e-4)
+    x = (-sb + math.sqrt(sb * sb - 4 * 1000.0 * -2.0)) / (2 * 1000.0)
+    id_ref = x * x
+    vs_ref = id_ref * 1000.0
+    vd_ref = 15.0 - id_ref * 4700.0
+    vs = rows[0][header.index("v(vs)")]
+    vd = rows[0][header.index("v(vd)")]
+    ij = rows[0][header.index("i(J1)")]
+    check(abs(vs - vs_ref) < 1e-6, f"jfet v(vs) = {vs_ref:.6f} (got {vs})")
+    check(abs(vd - vd_ref) < 1e-5, f"jfet v(vd) = {vd_ref:.6f} (got {vd})")
+    check(abs(ij - id_ref) < 1e-8, f"jfet i(J1) = {id_ref:.9f} (got {ij})")
+
+    # --- the zener: the diode Bv/Ibv breakdown ---------------------------------
+    # The shunt regulator with IBV set to the exact bias current
+    # (15.1-5.1)/1k = 10 mA pins the rail at Bv EXACTLY - the knee solve
+    # passes -IBV at -Bv by construction.
+    zn = EXAMPLES / "zener.csim"
+    r = run(args.cli, "erc", zn)
+    check(r.returncode == 0, "zener erc exit 0")
+    r = run(args.cli, "netlist", zn)
+    check(r.returncode == 0, "zener netlist exit 0")
+    check("D1 0 out zd5v1\n" in r.stdout, "zener decks the cathode-to-rail D card")
+    check("Bv=5.1 Ibv=10m" in r.stdout, "zener decks the Bv/Ibv model")
+    r = run(args.cli, "run", zn, "-o", "-")
+    check(r.returncode == 0, f"zener run exit 0 (stderr: {r.stderr.strip()!r})")
+    header, rows = parse_csv(r.stdout)
+    out = rows[0][header.index("v(out)")]
+    check(abs(out - 5.1) < 1e-9, f"zener pins v(out) at 5.1 V (got {out})")
+    check(abs(rows[0][header.index("i(D1)")] + 0.01) < 1e-9,
+          "zener sinks exactly the 10 mA bias")
+
+
     # --- a broken file exits 1 with a mapped problem -------------------------
     with tempfile.TemporaryDirectory() as tmp:
         bad = Path(tmp) / "bad.csim"
@@ -343,9 +390,10 @@ def main():
         table = json.loads(r.stdout)
         check(table["format"] == "circsim-symbols", "json table format")
         by_key = {s["key"]: s for s in table["symbols"]}
-        # 22 built-ins + tline (stage 24: the orphan devices joined the
-        # table); the tline override keeps the built-in's slot.
-        check(len(table["symbols"]) == 23, "the widened built-in table")
+        # 24 built-ins + tline (stage 24: the orphan devices; the JFET
+        # pair njf/pjf joined next); the tline override keeps the
+        # built-in's slot.
+        check(len(table["symbols"]) == 25, "the widened built-in table")
         for key, letter in (("e", "E"), ("f", "F"), ("g", "G"), ("h", "H"),
                             ("b", "B"), ("s", "S"), ("w", "W"), ("k", "K"),
                             ("xfmr", "K"), ("tline", "T")):

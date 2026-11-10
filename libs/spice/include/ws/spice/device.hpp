@@ -578,7 +578,16 @@ public:
 // names the analysis's input source - every source stamps zero EXCEPT
 // it (and it stamps 1+0j, ignoring its declared AC spec, exactly
 // ngspice's MODEACNOISE); null in a plain .ac run, where sources use
-// their declared specs.
+// their declared specs. §3.6 (M6, JFET): `gmin()` is the run's
+// junction-parallel conductance floor - the SAME floor the OP stamp
+// folded in. A reverse-biased junction's small-signal conductance
+// underflows to ~1e-20 and below (a JFET's gate in normal operation,
+// a diode past a few volts of reverse bias), leaving its matrix column
+// numerically dead - the complex factorize fails as singular. The
+// floor keeps the small-signal system as well-conditioned as the OP
+// system it linearizes (ngspice's small-signal matrix carries the OP's
+// gmin likewise). Default 1e-12 (SPICE's) for the pattern contexts,
+// where values never matter.
 class AcLoadContext {
 public:
     virtual ~AcLoadContext() = default;
@@ -589,6 +598,9 @@ public:
 
     // §7.7 (M5): the run temperature in KELVIN (see DcLoadContext).
     [[nodiscard]] virtual double temp_k() const = 0;
+
+    // §5.2: the run's gmin (see the class comment).
+    [[nodiscard]] virtual double gmin() const { return 1e-12; }
 
     // §7.5 (M5): the .noise input source (see the class comment); null
     // in a plain .ac run.

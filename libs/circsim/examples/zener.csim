@@ -1,0 +1,26 @@
+{
+    "format": "circsim",
+    "version": 1,
+    "grid": 1.0,
+    "next_id": 11,
+    "parts": [
+        {"id": 1, "symbol": "v", "ref": "V1", "value": "15.1", "pos": [0.0, -8.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 2, "symbol": "r", "ref": "R1", "value": "1k", "pos": [8.0, 0.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 3, "symbol": "d", "ref": "D1", "value": "", "pos": [18.0, -6.0], "rot": 0, "mirror": false, "params": {"model": "zd5v1"}},
+        {"id": 4, "symbol": "gnd", "ref": "", "value": "", "pos": [3.0, -12.0], "rot": 0, "mirror": false, "params": {}},
+        {"id": 5, "symbol": "gnd", "ref": "", "value": "", "pos": [15.0, -10.0], "rot": 0, "mirror": false, "params": {}}
+    ],
+    "junctions": [],
+    "wires": [
+        {"id": 6, "a": {"pin": {"part": 1, "pin": 0}}, "b": {"pin": {"part": 2, "pin": 0}}, "waypoints": [[-3.0, 0.0]], "ortho": true},
+        {"id": 7, "a": {"pin": {"part": 2, "pin": 1}}, "b": {"pin": {"part": 3, "pin": 1}}, "waypoints": [[21.0, 0.0]], "ortho": true},
+        {"id": 8, "a": {"pin": {"part": 3, "pin": 0}}, "b": {"pin": {"part": 5, "pin": 0}}, "waypoints": [], "ortho": true},
+        {"id": 9, "a": {"pin": {"part": 1, "pin": 1}}, "b": {"pin": {"part": 4, "pin": 0}}, "waypoints": [], "ortho": true}
+    ],
+    "labels": [
+        {"id": 10, "pos": [16.0, 0.0], "name": "out"}
+    ],
+    "analysis": {"entries": [{"op": {}}]},
+    "directives": ".model zd5v1 D(Is=1e-14 Bv=5.1 Ibv=10m)",
+    "view": {"zoom": 1.0, "center": [9.0, -4.0]}
+}

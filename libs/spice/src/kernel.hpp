@@ -597,7 +597,7 @@ public:
     // One .ac point: complex load at omega + solve.
     ws::core::Status solve_ac(std::vector<std::complex<double>>& xc, double omega,
                               const std::string& context) {
-        mna_.load_ac(circuit_.devices, state_, omega);
+        mna_.load_ac(circuit_.devices, state_, omega, nullptr, settings_.gmin);
         WS_TRY(mna_.solve_ac(xc));
         for (const std::complex<double>& v : xc) {
             if (!std::isfinite(v.real()) || !std::isfinite(v.imag())) {
@@ -618,7 +618,8 @@ public:
     ws::core::Status noise_point(double omega, const Device* noise_input,
                                  std::vector<std::complex<double>>& xc,
                                  const std::string& context) {
-        mna_.load_ac(circuit_.devices, state_, omega, noise_input);
+        mna_.load_ac(circuit_.devices, state_, omega, noise_input,
+                     settings_.gmin);
         WS_TRY(mna_.solve_ac(xc));
         for (const std::complex<double>& v : xc) {
             if (!std::isfinite(v.real()) || !std::isfinite(v.imag())) {

@@ -86,6 +86,37 @@ constexpr double kVtPerK = phys::kKoverQ;
     return vnew;
 }
 
+// The BREAKDOWN mirror of pnjlim (active only when Bv > 0): the same
+// SPICE3 clamp applied to the reflected coordinate w = -(vd + xbv), the
+// "forward voltage past the knee". Without it a zener's first Newton
+// iterate lands at vd = -15 V, the reverse exponential (arg ~ 400)
+// saturates the safe_exp clamp, and the linearization crawls back to
+// the knee at one vte per iteration - hundreds of iterations of false
+// ladder marching. The mirror lands the FIRST deep excursion where the
+// reverse current is vte-scale (w = vte*ln(w/vte), SPICE3's vold <= 0
+// landing), then steps w by vte*(2 + ln(arg - 2)) - the overshoot-
+// adaptive step SPICE3's forward branch uses. A no-op at every
+// non-breakdown bias, so decks without Bv keep the exact M3 sequence.
+[[nodiscard]] double bd_pnjlim(double vd, double vold, double vte, double vcrit,
+                               double xbv) {
+    const double w_new = -(vd + xbv);   // breakdown "forward" coordinate
+    const double w_old = -(vold + xbv);
+    if (w_new > vcrit && std::abs(w_new - w_old) > 2.0 * vte) {
+        double w_lim;
+        if (w_old > 0.0) {
+            const double arg = (w_new - w_old) / vte;
+            w_lim = (arg > 2.0)
+                        ? w_old + vte * (2.0 + std::log(arg - 2.0))
+                        : w_new;  // degenerate overshoot: leave it
+        } else {
+            // First entry into breakdown: land at the vte-scale current.
+            w_lim = vte * std::log(w_new / vte);
+        }
+        return -(w_lim + xbv);
+    }
+    return vd;
+}
+
 // Safe exp argument: clamp to ≤ 80 so exp() stays finite (exp(80) ≈ 5.5e34;
 // Is*exp(80) ≈ 5e20 A for Is=1e-14 - absurd but finite, won't NaN the
 // solve). pnjlim should keep us well below this in normal operation; the
@@ -159,15 +190,19 @@ public:
     }
 
     // The temp-dependent model quantities at one (area, temperature):
-    // Vt, N·Vt, the effective saturation current Is(T)·area and the
-    // pnjlim knee vcrit(T). At T == Tnom every field equals the frozen
-    // Tnom values (the factor is exactly 0), so default decks keep the
-    // M3/M4b answers bit-for-bit.
+    // Vt, N·Vt, the effective saturation current Is(T)·area, the
+    // pnjlim knee vcrit(T) and - with Bv > 0 - the breakdown knee xbv
+    // (the SPICE3 diotemp.c fixed point: the shifted voltage where the
+    // reverse exponential passes exactly -IBV·area at -Bv, so the
+    // deck's Bv/Ibv pair is honored by construction). At T == Tnom
+    // every field equals the frozen Tnom values (the factor is exactly
+    // 0), so default decks keep the M3/M4b answers bit-for-bit.
     struct TempOp {
         double vt = 0.0;
         double vte = 0.0;
         double is_eff = 0.0;
         double vcrit = 0.0;
+        double xbv = 0.0;  // > 0: the breakdown knee; 0: no breakdown
     };
     [[nodiscard]] TempOp temp_op(double area, double temp_k) const {
         TempOp op;
@@ -179,6 +214,30 @@ public:
         op.is_eff = is_t * area;
         const double arg = op.vte / (std::sqrt(2.0) * is_t);
         op.vcrit = (arg > 1.0) ? op.vte * std::log(arg) : op.vte;
+        // The breakdown knee (diotemp.c): solve xbv so that
+        //   Is·exp((Bv - xbv)/vte) = IBV·area + Is·(1 - xbv/vt)
+        // whose fixed point is xbv = Bv - vte·ln(IBV·area/Is + 1 -
+        // xbv/vt) - the exponential that passes -IBV·area at exactly
+        // -Bv while joining the -Is reverse saturation at -xbv (the
+        // current at the knee itself is -Is, continuous with the
+        // reverse branch). The compat fallback (knee AT Bv, the
+        // current at -Bv exceeding IBV) covers an IBV below the
+        // forward-saturation scale; a fixed point landing at xbv <= 0
+        // (a Bv so low the shift would swallow it) is the same
+        // fallback - SPICE3 iterates into that nonsense silently.
+        if (bv_ > 0.0) {
+            const double cbv = ibv_ * area;
+            if (cbv < op.is_eff * bv_ / op.vt) {
+                op.xbv = bv_;
+            } else {
+                double xbv = bv_ - op.vte * std::log(1.0 + cbv / op.is_eff);
+                for (int it = 0; it < 25; ++it) {
+                    xbv = bv_ -
+                          op.vte * std::log(cbv / op.is_eff + 1.0 - xbv / op.vt);
+                }
+                op.xbv = (xbv > 0.0) ? xbv : bv_;
+            }
+        }
         return op;
     }
 
@@ -187,12 +246,33 @@ public:
         const TempOp op = temp_op(area, load_temp_k(cx.temp_k()));
         const NodeId j = jnode();
         const double vd = cx.node_v(j) - cx.node_v(cathode_);
-        const double vd_lim = pnjlim(vd, cx.st(kVdPrev), op.vte, op.vcrit);
-        const double arg = safe_exp_arg(vd_lim / op.vte);
-        const double ex = std::exp(arg);
+        double vd_lim = pnjlim(vd, cx.st(kVdPrev), op.vte, op.vcrit);
+        if (op.xbv > 0.0) {
+            vd_lim = bd_pnjlim(vd_lim, cx.st(kVdPrev), op.vte, op.vcrit, op.xbv);
+        }
         const double gm = cx.gmin();
-        const double gd = op.is_eff / op.vte * ex + gm;
-        const double i = op.is_eff * (ex - 1.0) + gm * vd_lim;
+        double gd;
+        double i;
+        if (op.xbv > 0.0 && vd_lim < -op.xbv) {
+            // Reverse breakdown (SPICE3 dioload.c): past the knee the
+            // current is -Is·exp(-(xbv+vd)/vte) + gmin·vd - the mirror
+            // of the forward Shockley branch on the far side of the
+            // axis, evaluated at the SAME internal junction node when
+            // Rs > 0 (the Rs-precedent topology: the knee sees vj, not
+            // the terminal voltage). Continuous with the reverse
+            // branch at the knee (both -Is there); the conductance
+            // jumps by Is/vte (~4e-13 S at the defaults) - the same
+            // jump SPICE3 takes.
+            const double evrev =
+                std::exp(safe_exp_arg(-(op.xbv + vd_lim) / op.vte));
+            gd = op.is_eff / op.vte * evrev + gm;
+            i = -op.is_eff * evrev + gm * vd_lim;
+        } else {
+            const double arg = safe_exp_arg(vd_lim / op.vte);
+            const double ex = std::exp(arg);
+            gd = op.is_eff / op.vte * ex + gm;
+            i = op.is_eff * (ex - 1.0) + gm * vd_lim;
+        }
         const double ieq = i - gd * vd_lim;  // Norton offset
         // Series resistance (every mode; Rs scales as Rs/area, SPICE3).
         if (mid_ != kGround) {
@@ -224,8 +304,18 @@ public:
         const double area = cx.par(kAreaParam);
         const TempOp op = temp_op(area, load_temp_k(cx.temp_k));
         const double vd = cx.st(kVdPrev);
-        const double ex = std::exp(safe_exp_arg(vd / op.vte));
-        const double id = op.is_eff * (ex - 1.0);
+        double id;
+        if (op.xbv > 0.0 && vd < -op.xbv) {
+            // The shot noise rides the FULL conduction current - in
+            // breakdown that is the reverse exponential (the mirror of
+            // the forward branch; ngspice's dionoise likewise evaluates
+            // the DC current through the load's branch structure).
+            id = -op.is_eff *
+                 std::exp(safe_exp_arg(-(op.xbv + vd) / op.vte));
+        } else {
+            const double ex = std::exp(safe_exp_arg(vd / op.vte));
+            id = op.is_eff * (ex - 1.0);
+        }
         if (mid_ != kGround) {
             cx.add_source("rs", anode_, mid_, 4.0 * phys::kBoltz *
                                                   load_temp_k(cx.temp_k) * area / rs_);
@@ -240,13 +330,20 @@ public:
 
     // The small-signal conductance at the OP (frozen Vd from state[kVdPrev]).
     // M4b: adds j*omega*Cj(Vd) — the junction capacitance at the OP.
+    // Bv: in breakdown the conductance is the reverse exponential's
+    // slope Is/vte·exp(-(xbv+vd)/vte).
     void load_ac(AcLoadContext& cx) const override {
         const double area = cx.par(kAreaParam);
         const TempOp op = temp_op(area, load_temp_k(cx.temp_k()));
         const double vd = cx.st(kVdPrev);
-        const double arg = safe_exp_arg(vd / op.vte);
-        const double ex = std::exp(arg);
-        const double gd_op = op.is_eff / op.vte * ex;
+        double gd_op;
+        if (op.xbv > 0.0 && vd < -op.xbv) {
+            gd_op = op.is_eff / op.vte *
+                    std::exp(safe_exp_arg(-(op.xbv + vd) / op.vte));
+        } else {
+            const double arg = safe_exp_arg(vd / op.vte);
+            gd_op = op.is_eff / op.vte * std::exp(arg);
+        }
         if (mid_ != kGround) {
             cx.add_conductance(anode_, mid_, area / rs_);
         }
@@ -325,7 +422,10 @@ public:
         }
         const TempOp op = temp_op(area, load_temp_k(temp_k));
         const double vd_load = v_across(x_load, jnode(), cathode_);
-        const double vd_lim = pnjlim(vd_load, st[kVdPrev], op.vte, op.vcrit);
+        double vd_lim = pnjlim(vd_load, st[kVdPrev], op.vte, op.vcrit);
+        if (op.xbv > 0.0) {
+            vd_lim = bd_pnjlim(vd_lim, st[kVdPrev], op.vte, op.vcrit, op.xbv);
+        }
         // §5.3: return true (force another iteration) when pnjlim is
         // actively clamping — the linearization point differs from the
         // iterate, so convergence would be premature. Without this, a
@@ -336,9 +436,17 @@ public:
         // predicted by the linearization", §5.1). §7.7 (M5): Is(T) and Vt(T)
         // re-evaluate per load through the temp op, and the area folds in
         // exactly (the old area=1 approximation is gone - the residual
-        // gate is area-exact now).
-        const double arg = safe_exp_arg(vd_lim / op.vte);
-        const double i_lim = op.is_eff * (std::exp(arg) - 1.0);
+        // gate is area-exact now). Bv: the breakdown branch's current
+        // (the forward Shockley form would report -Is for every
+        // breakdown bias and blind the residual gate).
+        double i_lim;
+        if (op.xbv > 0.0 && vd_lim < -op.xbv) {
+            i_lim = -op.is_eff *
+                    std::exp(safe_exp_arg(-(op.xbv + vd_lim) / op.vte));
+        } else {
+            const double arg = safe_exp_arg(vd_lim / op.vte);
+            i_lim = op.is_eff * (std::exp(arg) - 1.0);
+        }
         st[kIPrev] = st[kICur];
         st[kICur] = i_lim;
         st[kVdPrev] = vd_lim;  // CLAMPED, for the NEXT iteration's pnjlim vold
@@ -373,6 +481,10 @@ public:
         }
         const TempOp op = temp_op(area, load_temp_k(temp_k));
         const double vd = v_across(x, anode_, cathode_);
+        if (op.xbv > 0.0 && vd < -op.xbv) {
+            return -op.is_eff *
+                   std::exp(safe_exp_arg(-(op.xbv + vd) / op.vte));
+        }
         return op.is_eff * (std::exp(safe_exp_arg(vd / op.vte)) - 1.0);
     }
 
@@ -533,10 +645,10 @@ public:
 
     // .model name D(Is=... N=... Rs=... Cjo=... ...). Implements Is, N,
     // Tnom, Xti, Eg (the §7.7 temperature model), Cjo/M/Vj/Fc (M4b
-    // junction charge), TT (the transit-time diffusion charge) and Rs
-    // (series resistance — the internal-node form); accepts
-    // Bv/Ibv/Kf/Af silently - they land with the breakdown/noise
-    // follow-ups.
+    // junction charge), TT (the transit-time diffusion charge), Rs
+    // (series resistance — the internal-node form) and Bv/Ibv (reverse
+    // breakdown — the diotemp.c knee solve + the dioload.c reverse
+    // exponential, riding the same internal junction node Rs uses).
     ws::core::Status apply_model(const ModelDef& model,
                                  NodeResolver& nodes) override {
         if (model.type != "d") {
@@ -556,6 +668,7 @@ public:
         double rs_val = 0.0;
         double eg_val = 1.11, xti_val = 3.0;
         double kf_val = 0.0, af_val = 1.0;
+        double bv_val = 0.0, ibv_val = 1e-3;
         const auto& toks = model.params;
         for (std::size_t i = 0; i < toks.size(); ++i) {
             std::string text = toks[i].text;
@@ -628,11 +741,10 @@ public:
                 af_val = v;
             } else if (key == "tt") {
                 tt_val = v;
-            } else if (key == "bv" || key == "ibv") {
-                // Accepted (so ngspice decks parse cleanly) but not
-                // implemented. `spice check` warns per-model.
-                // Bv/Ibv (breakdown) land with the device-physics
-                // follow-ups.
+            } else if (key == "bv") {
+                bv_val = v;
+            } else if (key == "ibv") {
+                ibv_val = v;
             } else {
                 return spice_fail(dev_diag(
                     ErrorKind::Semantic, "spice.semantic.model_param",
@@ -670,6 +782,25 @@ public:
                 " (0 disables the transit-time diffusion charge)",
                 model.loc));
         }
+        // Reverse breakdown: Bv = 0 (the default) disables the branch;
+        // a negative breakdown voltage is meaningless - reject loudly.
+        // IBV defaults to 1 mA (ngspice's diode default) and must be
+        // positive when Bv is given - the knee solve needs a current
+        // scale.
+        if (!(bv_val >= 0.0) || !std::isfinite(bv_val)) {
+            return spice_fail(dev_diag(
+                ErrorKind::Semantic, "spice.semantic.d_bv",
+                "model '" + model.name.text + "' needs Bv >= 0"
+                " (0 disables reverse breakdown)",
+                model.loc));
+        }
+        if (bv_val > 0.0 && (!(ibv_val > 0.0) || !std::isfinite(ibv_val))) {
+            return spice_fail(dev_diag(
+                ErrorKind::Semantic, "spice.semantic.d_ibv",
+                "model '" + model.name.text + "' needs Ibv > 0 when Bv is given"
+                " (the current at the breakdown voltage; default 1mA)",
+                model.loc));
+        }
         is_ = is_val;
         n_ = n_val;
         rs_ = rs_val;
@@ -699,6 +830,10 @@ public:
         m_ = m_val;
         vj_ = vj_val;
         fc_ = fc_val;
+        // Reverse breakdown (the knee itself is per-load: it depends on
+        // Is(T)·area and Vt(T), so it evaluates inside temp_op()).
+        bv_ = bv_val;
+        ibv_ = ibv_val;
         return {};
     }
 
@@ -802,6 +937,8 @@ private:
     double vj_ = 1.0;       // junction potential (V)
     double fc_ = 0.5;       // forward-bias depletion cap coefficient
     double tt_ = 0.0;       // transit time (s; the diffusion charge)
+    double bv_ = 0.0;      // reverse breakdown voltage (V; 0 = off)
+    double ibv_ = 1e-3;    // current at Bv (A; the knee solve's scale)
     std::size_t self_index_ = 0;  // filled by link_dynamic (for fold_state)
     std::string model_name_;
 };
