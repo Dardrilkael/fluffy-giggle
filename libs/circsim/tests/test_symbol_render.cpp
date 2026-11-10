@@ -72,10 +72,14 @@ TEST_CASE("render_symbol flattens the table's prims at identity") {
     // vertices.
     REQUIRE(out.size() == 1);
     REQUIRE(out[0].kind == SymbolStroke::Kind::Poly);
-    REQUIRE(out[0].pts.size() == 7);
+    // 50bffe3's even-slope zigzag: short flat leads, then the 0.7-high
+    // teeth (every slope 0.375 : 0.7) - 10 points, not the old 7.
+    REQUIRE(out[0].pts.size() == 10);
     CHECK(pts_eq(out[0], 0, Pos{-3.0, 0.0}));
-    CHECK(pts_eq(out[0], 3, Pos{0.0, 0.6}));
-    CHECK(pts_eq(out[0], 6, Pos{3.0, 0.0}));
+    CHECK(pts_eq(out[0], 1, Pos{-2.25, 0.0}));
+    CHECK(pts_eq(out[0], 4, Pos{-0.375, 0.7}));
+    CHECK(pts_eq(out[0], 5, Pos{0.375, -0.7}));
+    CHECK(pts_eq(out[0], 9, Pos{3.0, 0.0}));
 }
 
 TEST_CASE("render_symbol rides the part transform") {
@@ -87,13 +91,13 @@ TEST_CASE("render_symbol rides the part transform") {
         render_symbol(*r, placement(Pos{10.0, 10.0}, 90));
     REQUIRE(out.size() == 1);
     CHECK(pts_eq(out[0], 0, Pos{10.0, 7.0}));   // (-3,0) rot90 -> (0,-3)
-    CHECK(pts_eq(out[0], 6, Pos{10.0, 13.0}));  // (3,0) rot90 -> (0,3)
+    CHECK(pts_eq(out[0], 9, Pos{10.0, 13.0}));  // (3,0) rot90 -> (0,3)
 
     // Mirror x-flips before the rotation.
     out = render_symbol(*r, placement(Pos{0.0, 0.0}, 0, true));
     REQUIRE(out.size() == 1);
     CHECK(pts_eq(out[0], 0, Pos{3.0, 0.0}));
-    CHECK(pts_eq(out[0], 6, Pos{-3.0, 0.0}));
+    CHECK(pts_eq(out[0], 9, Pos{-3.0, 0.0}));
 }
 
 TEST_CASE("arcs fold mirror and rotation into their angles") {
@@ -426,14 +430,15 @@ TEST_CASE("polylines render open; closed shapes close by construction") {
         render_symbol(*r, placement(Pos{0.0, 0.0}));
     const SymbolStroke* poly = find_kind(rz, SymbolStroke::Kind::Poly);
     REQUIRE(poly != nullptr);
-    REQUIRE(poly->pts.size() == 7);
+    // The even-slope zigzag since 50bffe3: 10 points, not the old 7.
+    REQUIRE(poly->pts.size() == 10);
     CHECK_FALSE(poly->closed);
     // And the open path is exactly the table's zigzag - no phantom
-    // eighth segment, no reordered teeth.
+    // closing segment, no reordered teeth.
     CHECK(pts_eq(*poly, 0, Pos{-3.0, 0.0}));
-    CHECK(pts_eq(*poly, 1, Pos{-2.0, 0.6}));
-    CHECK(pts_eq(*poly, 4, Pos{1.0, -0.6}));
-    CHECK(pts_eq(*poly, 6, Pos{3.0, 0.0}));
+    CHECK(pts_eq(*poly, 1, Pos{-2.25, 0.0}));
+    CHECK(pts_eq(*poly, 5, Pos{0.375, -0.7}));
+    CHECK(pts_eq(*poly, 9, Pos{3.0, 0.0}));
 
     const SymbolDef* d = ws::circsim::find_symbol("d");
     REQUIRE(d != nullptr);

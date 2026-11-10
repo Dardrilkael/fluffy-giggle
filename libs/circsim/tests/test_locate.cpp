@@ -257,7 +257,8 @@ TEST_CASE("the block spellings and the empty where") {
 TEST_CASE("focus_bounds answers the transformed part extent") {
     Bench b;
     // A resistor at the origin, rotated 90: its local x span (-3..3)
-    // becomes the world y span, the y span (about -0.6..0.6) the x.
+    // becomes the world y span, the y span (the 0.7-high zigzag teeth)
+    // the x.
     Part* r1 = b.r("R1", {10.0, 20.0});
     r1->rot = 90;
 
@@ -265,10 +266,10 @@ TEST_CASE("focus_bounds answers the transformed part extent") {
         ws::circsim::locate_diag(diag("R1"), b.s, nullptr, nullptr);
     const std::optional<Bounds> bounds = ws::circsim::focus_bounds(t, b.s);
     REQUIRE(bounds.has_value());
-    // The pins are the extremes (-3/+3 local), so the world bounds are
-    // the rotated pin box around (10, 20).
-    CHECK(bounds->min_x == doctest::Approx(10.0 - 0.6).epsilon(1e-9));
-    CHECK(bounds->max_x == doctest::Approx(10.0 + 0.6).epsilon(1e-9));
+    // The pins bound the rotated y span (-3/+3 local); the teeth bound
+    // the x (the 0.7 zigzag since 50bffe3, was 0.6).
+    CHECK(bounds->min_x == doctest::Approx(10.0 - 0.7).epsilon(1e-9));
+    CHECK(bounds->max_x == doctest::Approx(10.0 + 0.7).epsilon(1e-9));
     CHECK(bounds->min_y == doctest::Approx(20.0 - 3.0).epsilon(1e-9));
     CHECK(bounds->max_y == doctest::Approx(20.0 + 3.0).epsilon(1e-9));
 

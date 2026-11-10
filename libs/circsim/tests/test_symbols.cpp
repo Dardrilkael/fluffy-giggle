@@ -184,7 +184,8 @@ TEST_CASE("built-in symbols carry stage-2 specs and draw") {
     CHECK(r->params.empty());
     REQUIRE(r->draw.size() == 1);
     CHECK(r->draw[0].kind == DrawPrim::Kind::Poly);
-    CHECK(r->draw[0].pts.size() == 7);
+    // The even-slope zigzag since 50bffe3: 10 points (leads + teeth).
+    CHECK(r->draw[0].pts.size() == 10);
 
     const SymbolDef* gnd = ws::circsim::find_symbol("gnd");
     REQUIRE(gnd != nullptr);
@@ -276,7 +277,8 @@ TEST_CASE("symbol_bounds covers pins and primitives") {
     const SymbolDef* r = ws::circsim::find_symbol("r");
     REQUIRE(r != nullptr);
     const Bounds rb = ws::circsim::symbol_bounds(*r);
-    CHECK(rb == Bounds{-3.0, -0.6, 3.0, 0.6});
+    // The 0.7-high zigzag teeth bound y since 50bffe3 (was 0.6).
+    CHECK(rb == Bounds{-3.0, -0.7, 3.0, 0.7});
     const SymbolDef* l = ws::circsim::find_symbol("l");
     REQUIRE(l != nullptr);
     const Bounds lb = ws::circsim::symbol_bounds(*l);
