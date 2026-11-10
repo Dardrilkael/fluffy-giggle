@@ -2,20 +2,24 @@
 // schema setting, grouped by category. The row's widget depends on the
 // setting's type and constraints:
 //   boolean            -> checkbox
-//   integer + range    -> slider_int
+//   integer + range    -> input_int (typed, arrows step 1, clamped)
 //   integer + enum     -> combo
-//   integer (neither)  -> slider_int (0..100, a fallback)
-//   real + range       -> slider_float
+//   integer (neither)  -> input_int (unbounded - the honest row, where
+//                         the old 0..100 slider fallback invented a
+//                         range the schema never declared)
+//   real + range       -> input_float (typed, clamped)
 //   real + enum        -> combo
-//   real (neither)     -> drag_float (0..100)
+//   real (neither)     -> input_float (unbounded)
 //   text + enum        -> combo
 //   text + regex/plain -> text_input
 //
 // The grid reads the current value through SettingsStore::get<T> and
-// writes through SettingsStore::set(Layer::user, key, value). A change
+// writes through SettingsStore::set(Layer::user, key, value) - on the
+// numeric rows, only on the field's own commit edges (Enter, the
+// blur, a step), so a keystroke is not a settings write. A change
 // that fails validation (coerce rejects) is silently dropped - the
-// widget's value stays at the last valid read; the schema's constraint
-// is the authority.
+// field re-spells from the store's standing value on its next idle
+// frame; the schema's constraint is the authority.
 
 #include <ws/ui/gui/property_grid.hpp>
 
@@ -93,8 +97,14 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
     std::size_t changed = 0;
     const auto categories = schema.categories();
     for (const auto& cat : categories) {
-        // Ensure the category has an open-state entry (default: open).
-        auto& open = state.category_open[cat];
+        // Ensure the category has an open-state entry - defaulting OPEN,
+        // the documented intent. (The entry used to come from
+        // operator[]'s zero-init, which said CLOSED: every grid laid
+        // its categories collapsed until clicked, and the smoke test
+        // never noticed - a closed header still draws its quads. The
+        // typed rows made it visible: a collapsed category renders no
+        // rows at all.)
+        auto& open = state.category_open.try_emplace(cat, true).first->second;
         if (!collapsing_header(gui, layout, theme, cat.c_str(), open)) {
             continue;
         }
@@ -141,9 +151,12 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                     }
                 } else {
                     int val = static_cast<int>(r->value);
-                    int lo = range ? static_cast<int>(range->min) : 0;
-                    int hi = range ? static_cast<int>(range->max) : 100;
-                    if (slider_int(gui, layout, theme, label, val, lo, hi)) {
+                    const int lo = range ? static_cast<int>(range->min) : 0;
+                    const int hi = range ? static_cast<int>(range->max) : 0;
+                    // min == max (no schema range) lays the field
+                    // unbounded; a schema range bounds the commits (a
+                    // typed value clamps into it, the family's rule).
+                    if (input_int(gui, layout, theme, label, val, lo, hi)) {
                         if (settings.set(settings::Layer::user, desc->key,
                                          static_cast<std::int64_t>(val)).has_value()) {
                             ++changed;
@@ -155,9 +168,12 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                 auto r = settings.get<double>(desc->key);
                 if (!r) continue;
                 float val = static_cast<float>(r->value);
-                float lo = range ? static_cast<float>(range->min) : 0.0f;
-                float hi = range ? static_cast<float>(range->max) : 100.0f;
-                if (slider_float(gui, layout, theme, label, val, lo, hi)) {
+                const float lo = range ? static_cast<float>(range->min) : 0.0f;
+                const float hi = range ? static_cast<float>(range->max) : 0.0f;
+                // The typed row: exact values like 0.0001 land as
+                // typed (a slider could only scrub at its own
+                // resolution); min == max lays the field unbounded.
+                if (input_float(gui, layout, theme, label, val, lo, hi)) {
                     if (settings.set(settings::Layer::user, desc->key,
                                      static_cast<double>(val)).has_value()) {
                         ++changed;

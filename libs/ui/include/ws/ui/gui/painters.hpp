@@ -81,6 +81,8 @@ struct WidgetPainters {
                   const char*, const char* const*, int, int, bool);
     void (*text_input)(const Rect&, const TextInputResult&, const ChromeTheme&,
                        const char*, const char*, int);
+    void (*input_float)(const Rect&, const NumInputResult&, const ChromeTheme&,
+                        const char*, const char*, int);
 
     // --- the chrome rows ---------------------------------------------------
     // Every surface and floating window a screen sits on.
@@ -132,6 +134,7 @@ inline constexpr WidgetPainters kStockPainters{
     &tab_draw,
     &combo_draw,
     &text_input_draw,
+    &input_float_draw,
     &panel_draw,
     &popup_frame_draw,
     &scrollbar_draw,

@@ -3,10 +3,10 @@
 // PropertyGrid: a schema-driven settings/property grid. The host
 // declares a ws::settings::Schema (the keys, types, constraints,
 // categories), and this widget renders one row per setting - a
-// checkbox for booleans, a slider for ranged numerics, a combo for
-// enums, a text input for free text - reading and writing through the
-// SettingsStore. The grid is the Stage 15 minimal in-repo version of
-// Part A's property grid; the seam is clear so a future full Part A
+// checkbox for booleans, a typed numeric field (input_int/input_float)
+// for numerics - ranges from the schema, unbounded without one - a
+// combo for enums, a text input for free text - reading and writing
+// through the SettingsStore. The seam is clear so a future full Part A
 // can replace it.
 //
 // The grid groups settings by their `category` field (one collapsing
@@ -45,8 +45,8 @@ struct PropertyGridState {
 // Returns the number of settings whose value changed this frame (for
 // the host to react - apply a theme, rebake a font, etc.).
 //
-// The grid uses the existing widget set (checkbox, slider_float,
-// slider_int, combo, text_input) and the standard layout cursor. The
+// The grid uses the existing widget set (checkbox, input_int,
+// input_float, combo, text_input) and the standard layout cursor. The
 // row width fills the current panel's content width.
 std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                           const ChromeTheme& theme,

@@ -5,6 +5,8 @@
 #include <ws/ui/gui/rect.hpp>
 #include <ws/ui/gui/theme.hpp>
 
+#include <ws/core/result.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -1074,14 +1076,19 @@ struct EditBuffer {
         return at + n;
     }
 
-    // A paste through the filter: only insertable bytes count, and only
-    // as many as the room takes - counted in one pass over the text,
+    // A paste through the filter: only bytes the filter admits count, and
+    // only as many as the room takes - counted in one pass over the text,
     // then landed in one move, so the buffer never walks per byte and
     // the capacity never splits mid-paste. The return is insert's pen.
-    int insert_filtered(int at, const char* text) {
+    // The filter rides as a parameter so a constrained field (a numeric
+    // one) admits only its own charset; the default is the v1 field's
+    // plain cut, so every existing caller spells the same edit it
+    // always did.
+    int insert_filtered(int at, const char* text,
+                        bool (*filter)(std::uint32_t) = &is_insertable) {
         int take = 0;
         for (const char* p = text; *p != '\0' && len + take < room; ++p) {
-            if (is_insertable(static_cast<unsigned char>(*p))) {
+            if (filter(static_cast<unsigned char>(*p))) {
                 ++take;
             }
         }
@@ -1096,7 +1103,7 @@ struct EditBuffer {
             if (pen - at >= take) {
                 break;  // the room's count is landed; the tail never walks
             }
-            if (is_insertable(static_cast<unsigned char>(*p))) {
+            if (filter(static_cast<unsigned char>(*p))) {
                 buf[pen++] = *p;
             }
         }
@@ -1125,17 +1132,21 @@ struct TextInputResult : WidgetPaint {
 // The interaction half at a placed rect: the citizenship fold, then the
 // field's whole editing - the press that places the caret, the sweep
 // that selects, the caret keys, the deleters, the frame's codepoints
-// through the v1 filter, Ctrl+A, Escape's selection drop and the
+// through the filter, Ctrl+A, Escape's selection drop and the
 // clipboard trio - all against the caller's buffer through the
 // EditBuffer verbs, the pair written back into `edit`. `theme` maps
 // the caret into pixels: the font's glyph advances, or
-// label_char_width fontless. Draws nothing.
+// label_char_width fontless. `filter` is the typing and paste
+// charset - the codepoints the field admits - and defaults to the
+// plain v1 cut (ASCII 32..126); a numeric field passes its own
+// (is_float_insertable / is_int_insertable below). Draws nothing.
 TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
                                     const Rect& rect, char* buf, int capacity,
                                     TextInputState& edit,
                                     const ChromeTheme& theme,
                                     bool disabled = false,
-                                    const HitShape& hit_shape = {});
+                                    const HitShape& hit_shape = {},
+                                    bool (*filter)(std::uint32_t) = &is_insertable);
 
 // The look half: the face, the focus ring, the selection band, the
 // content - or the placeholder while the buffer is empty - the "..."
@@ -1145,6 +1156,168 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
 void text_input_draw(const Rect& rect, const TextInputResult& result,
                      const ChromeTheme& theme, const char* label,
                      const char* buf, int capacity);
+
+// --- the numeric field ---------------------------------------------------------
+// input_float / input_int: the exact-value row the property grid always
+// wanted - a number you can TYPE, where the slider only let you scrub.
+// The row is a fitted label at the left and a text field over the rest
+// (the property-grid shape; a null or empty label lays the field across
+// the whole row, and a label wider than the row's left share truncates
+// with "..." like every fitted label - the field keeps a floor of px it
+// never shrinks below). The field is text_input's own surface: the same
+// caret, selection, clipboard trio and blink, driven through
+// text_input_behavior - but through the NUMERIC filter, so only the
+// charset a number can spell lands in the buffer.
+//
+// The buffer discipline (the property grid's old copy-in-every-frame
+// trap, fixed): the spelling lives in the widget's own side-table state
+// (NumInputState), not the caller's. While the field HOLDS the focus
+// the buffer is the user's to edit; every frame without the focus
+// re-spells it from `value`, so an external change shows the moment it
+// lands. The commit edges: Enter commits (a numeric line HAS one - the
+// key is this widget's to take, and it consumes the edge, so a dialog
+// behind the field does not also answer it), the focus leaving commits,
+// and Up/Down step `step` from the buffer's parsed value (a commit by
+// another name - held arrows keep stepping on the OS auto-repeat, the
+// slider's rule). A commit parses the buffer strictly, CLAMPS into
+// [min, max] when the field is ranged (min < max), and answers true
+// only when the value actually MOVED - the radio's idempotence, so
+// re-typing the standing value is a no-op. A buffer that will not
+// parse (or a range the parse clamps to nothing new) reverts to the
+// value's own spelling: an abandoned edit never leaks. Escape while a
+// selection stands drops it (the text field's own rule); a bare Escape
+// abandons the edit the same way - the buffer reverts, and the
+// arbitration's copy of the key is spent, so the next Escape closes
+// the overlay behind the field.
+//
+// Tab onto the field selects the whole spelling (typing replaces it);
+// a click onto it places the caret at the click (the text field's own
+// placement, which the arrival frame's select-all defers to).
+//
+// `step` is the Up/Down increment; 0 (the default) derives it the way
+// the family always has - 1% of the range when the field is ranged, 1
+// (the int ladder's own) when it is not - and a negative step disables
+// the arrows' stepping outright. `min`/`max` bound the commits only
+// while min < max; equal (the default) or inverted lays the field
+// UNBOUNDED - the honest row for a value with no natural range, where
+// the old grid's 0..100 fallback invented one. input_float spells the
+// value with `significant` significant digits (%g semantics, 6 by
+// default, clamped to 1..9); input_int spells the plain integer. A
+// non-finite float spells "nan"/"inf" and never re-commits (the parse
+// refuses its own spelling); the row is otherwise inert under it, like
+// drag_float's NaN guard. `width` lays the row like a button's
+// (negative = fill the line); the trailing `disabled` parameter is the
+// one-row lock, as everywhere.
+bool input_float(GuiContext& gui, LayoutCursor& layout,
+                 const ChromeTheme& theme, const char* label, float& value,
+                 float min = 0.0f, float max = 0.0f, float step = 0.0f,
+                 int significant = 6, float width = -1.0f,
+                 bool disabled = false);
+bool input_int(GuiContext& gui, LayoutCursor& layout,
+               const ChromeTheme& theme, const char* label, int& value,
+               int min = 0, int max = 0, int step = 0, float width = -1.0f,
+               bool disabled = false);
+
+// The typing filters the numeric fields ride: is_float_insertable
+// admits the decimal-float charset (digits, '.', '+', '-', 'e', 'E'),
+// is_int_insertable the integer one (digits, '+', '-'). Both are
+// text_input_behavior filter parameters, so a custom field narrows its
+// own charset the same way. The PARSE stays the authority - a filter
+// admits charset, the commit admits format ("1.2.3" passes the filter
+// and dies at the parse).
+inline bool is_float_insertable(std::uint32_t cp) {
+    return (cp >= '0' && cp <= '9') || cp == '.' || cp == '+' || cp == '-' ||
+           cp == 'e' || cp == 'E';
+}
+inline bool is_int_insertable(std::uint32_t cp) {
+    return (cp >= '0' && cp <= '9') || cp == '+' || cp == '-';
+}
+
+// The parse's own error codes, on ws::core::Error with the "ui"
+// category (the theme's own): what a commit refused, for a caller that
+// wants to say why. The messages are static literals - the error never
+// allocates past its own storage.
+enum class InputParseError : std::int32_t {
+    empty = 1,        // nothing (or only whitespace) to parse
+    not_a_number = 2, // "abc", "inf", "nan", "1e" - strtod refused or spelled non-finite
+    trailing = 3,     // "1.2.3", "4px" - text after the number
+    out_of_range = 4, // parses but cannot live in the type (the int's overflow)
+};
+
+// The strict parse, public and pure (the popup_placement precedent): the
+// WHOLE string must be one number - no trailing text, no hex spellings,
+// no non-finite values. Leading whitespace is tolerated (strtod's own
+// contract); the decimal point is the C locale's, the same locale every
+// snprintf spelling in the gui writes. input_parse_int refuses a
+// fractional spelling outright ("1.5" is trailing text to an integer),
+// and a magnitude past the int's own bounds answers out_of_range.
+ws::core::Result<float> input_parse_float(const char* text);
+ws::core::Result<int> input_parse_int(const char* text);
+
+// The float spelling, the format half of the pure pair: `value` in
+// `significant` significant digits (%g semantics - trailing zeros drop,
+// small and large magnitudes go exponential), written into `buf` and
+// NUL-terminated within `capacity`. `significant` clamps to 1..9 (the
+// float's own honest digits end near 7; 9 leaves room for a caller's
+// round-trip tolerance). Returns the bytes written (the pen, excluding
+// the terminator), 0 when the capacity refuses anything. A non-finite
+// value spells "nan"/"inf" exactly as snprintf does - a display that
+// never re-parses.
+int input_format_float(char* buf, int capacity, float value, int significant);
+
+// --- the numeric field's split halves ------------------------------------------
+// The same seam every family takes: the behavior owns the editing, the
+// commit edges and the clamped write; the draw owns the pixels - the
+// fitted label at the left, then text_input's own field look over the
+// rest of the row (the stock draw delegates to text_input_draw at the
+// field rect, so a skin replacing EITHER row owns its pixels whole).
+// The state travels public with them: hold NumInputState in the side
+// table under your own id and the custom numeric field edits through
+// the same moves. input_int's behavior is the integer ladder of the
+// same shape (its own filter, parse and spelling); both answer
+// NumInputResult, and both draws are one - the buffer already holds
+// the spelling, int or float alike.
+
+// The numeric field's persistent half: the text field's own editing
+// pair (nested - the caret, the anchor, the blink), plus the spelling
+// buffer the pair edits. First touch zeroes the buffer, and the first
+// unfocused frame spells the value into it.
+inline constexpr int kNumInputCapacity = 64;
+
+struct NumInputState {
+    TextInputState edit;  // the field's own pair, the same verbs
+    char buf[static_cast<std::size_t>(kNumInputCapacity)] = {};
+};
+
+// The behavior's answer: the text field's whole mapped result (the
+// caret and selection ride the field rect, not the row) plus the
+// commit word. `changed` is the widget's return - the value MOVED this
+// frame, by a commit or a step; `edited` (inherited) says the buffer
+// alone changed, which a live readout may still want to watch.
+struct NumInputResult : TextInputResult {
+    bool changed = false;  // the value moved this frame (commit or step)
+};
+
+NumInputResult input_float_behavior(GuiContext& gui, WidgetId id,
+                                    const Rect& rect, float& value, float min,
+                                    float max, float step, int significant,
+                                    const char* label,
+                                    const ChromeTheme& theme,
+                                    bool disabled = false);
+NumInputResult input_int_behavior(GuiContext& gui, WidgetId id,
+                                  const Rect& rect, int& value, int min,
+                                  int max, int step, const char* label,
+                                  const ChromeTheme& theme,
+                                  bool disabled = false);
+
+// The look half: the fitted label at the row's left share, then the
+// field - text_input's stock look over the field rect the behavior
+// mapped its caret into. Recomputes the label fit itself (the draw
+// owns its own fits); reads no context, and `buf` is read-only.
+void input_float_draw(const Rect& rect, const NumInputResult& result,
+                      const ChromeTheme& theme, const char* label,
+                      const char* buf, int capacity);
+
 
 // One column of a table: the header text and the width policy. A width
 // above zero is fixed pixels; zero or negative STRETCHES - the column

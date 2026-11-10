@@ -4,6 +4,9 @@
 - widgets_basic.cpp: collapsing_header, selectable, text, separator, progress,
   spinner, progress_indeterminate, status_bar (+ fit_text)
 - widgets_sliders.cpp: slider_float/int, drag_float
+- widgets_num_input.cpp: input_float/input_int - the typed numeric
+  rows over text_input's machinery (the pure parse/format pair, the
+  commit edges, the property grid's own mapping)
 - widgets_panels.cpp: tab_bar, panel
 - widgets_scroll.cpp: scroll panel (+ drag/thumb state)
 - widgets_overlays.cpp: popup, tooltip, modal
@@ -46,7 +49,12 @@ pixels over the answer. The pairs:
 - tab (widgets_panels.cpp - the strip loops the per-tab pair)
 - combo (the ROW pair; the dropdown stays the composed widget's own
   half - a custom combo lays its list through place_popup/begin_popup)
-- text_input (+ EditBuffer/TextInputState/is_insertable public)
+- text_input (+ EditBuffer/TextInputState/is_insertable public; the
+  behavior's filter parameter is the seam a constrained field
+  narrows its charset through)
+- input_float (one draw and one state for both ladders; NumInputState,
+  the numeric filters, input_parse_float/input_parse_int and
+  input_format_float travel public with it) - widgets_num_input.cpp
 - the scroll halves: scroll_drag_behavior / scroll_thumb_behavior /
   scrollbar_draw, with ScrollState/ScrollDragState public
 - panel_draw, popup_frame_draw (every floating window's chrome - the

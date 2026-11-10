@@ -37,7 +37,8 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
                                     const Rect& rect, char* buf, int capacity,
                                     TextInputState& edit,
                                     const ChromeTheme& theme, bool disabled,
-                                    const HitShape& hit_shape) {
+                                    const HitShape& hit_shape,
+                                    bool (*filter)(std::uint32_t)) {
     TextInputResult out{begin_widget_paint(gui, id, rect, disabled, hit_shape)};
     const HitTest& hit = out.hit;
 
@@ -220,11 +221,12 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
             edit.blink = 0.0f;
         }
 
-        // Typing: the frame's codepoints through the one filter (v1
-        // edits ASCII). A selection dies under what replaces it, and a
-        // full buffer drops the rest of the frame's text.
+        // Typing: the frame's codepoints through the field's filter (v1
+        // edits ASCII; a numeric field narrows it to its charset). A
+        // selection dies under what replaces it, and a full buffer drops
+        // the rest of the frame's text.
         for (std::uint32_t cp : in.text_input) {
-            if (!is_insertable(cp)) {
+            if (!filter(cp)) {
                 continue;
             }
             eb.erase_selection();
@@ -260,7 +262,7 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
             const char* pasted = gui.get_clipboard_text();
             if (pasted != nullptr) {
                 eb.erase_selection();
-                const int pen = eb.insert_filtered(eb.caret, pasted);
+                const int pen = eb.insert_filtered(eb.caret, pasted, filter);
                 if (pen >= 0) {
                     eb.collapse(pen);
                     edit.blink = 0.0f;

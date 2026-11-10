@@ -321,6 +321,25 @@ if(TARGET test_ui_plot)
   target_include_directories(test_ui_plot PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
 
+# The numeric input suite: the exact-value field end to end - the pure
+# parse/format pair gated directly (the refusals with their own codes),
+# and the widget driven through hand-built frames (the arrival's
+# select-all against a press's caret placement, the typing through the
+# numeric charset, Enter's consumed commit, the blur's silent one,
+# Escape's abandoned edit, the stepping arrows under the OS
+# auto-repeat, the clamps) plus the property grid's own row - the gui
+# archive + the real font bake, the same purity class as test_ui_gui.
+ws_add_test(ui_num_input
+  SOURCES tests/test_ui_num_input.cpp
+          tests/ui_gui_r2d_stub.cpp
+          src/text/font.cpp
+          src/text/stb_impl.cpp
+  LINK ws::ui_gui
+  DEPENDS stb)
+if(TARGET test_ui_num_input)
+  target_include_directories(test_ui_num_input PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+
 # --- Shader workflow targets (opt-in; the default build is unchanged) ------
 # The committed spirv.h stays the build input (no shader compiler needed);
 # these targets make staleness visible and regeneration explicit. The flags
