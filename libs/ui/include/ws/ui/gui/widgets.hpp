@@ -1248,6 +1248,309 @@ void table_row_draw(const Rect& row_rect, const TableRowPaint& paint,
                     const char* const* cells, const TableGeometry& geom,
                     const ChromeTheme& theme);
 
+// --- the plot -----------------------------------------------------------------
+// The waveform widget: one shared x axis, N borrowed series, and - when
+// the data earns it - a second y spine, the shape every scope and
+// results panel draws. The call is ONE slot in the parent's flow: it
+// fits the axes to the VISIBLE data (the caller owns the visibility
+// flags, like every display state here), lays the nice-number grid with
+// engineering-notation labels, strokes the series (min/max decimated
+// when a long sweep meets a narrow frame, so a 100k-point waveform
+// still shows its envelope at ~2 vertices per pixel), and answers the
+// hover: the nearest sample to the cursor, for the caller's legend
+// readouts. The hands are the scope language: the wheel zooms both
+// axes toward the cursor (the plot registers its own wheel claim - the
+// innermost rect beats the enclosing scroll panel's), a left-drag
+// rubber band zooms to the box, dragging on an axis strip stretches
+// that axis alone, a middle or Space+left drag pans, a double-click
+// resets to the auto fit, a right-click cancels the gesture in flight.
+// The view never leaves the data: every manual window clamps inside
+// the padded auto fit (home), the one rule all the gestures share.
+//
+// The state is the context's, like a scroll panel's offset: the manual
+// view and the gesture in flight live in the persistent side table
+// under the plot's id, so they survive frames and the plot vanishing
+// for frames (a tab that comes back keeps its zoom) with no caller
+// storage. The series themselves are BORROWED - `ys` spans re-read
+// every frame, the cells/items discipline - and the caller re-describes
+// the list each frame, so a same-label plot showing a different run is
+// just a different call.
+//
+// v1 limits, deliberate: mouse-driven gestures only (no touch pan; a
+// soft keyboard has no wheel), one x axis shared by every series, the
+// legend is the caller's rows (checkboxes and live readouts are app
+// chrome, built on selectable and the hover answer), no log axes, no
+// markers/annotations, and the stock polyline joins are square (r2d
+// strokes line segments; round joins are a canvas-side luxury). The
+// crosshair is solid, not dashed, for the same reason.
+
+// A closed interval with the endpoints in order - the plot's own range
+// spelling, named in full so a TU holding both this header and
+// ws::circsim's results math (the editor, today) reads unambiguously.
+struct PlotAxisRange {
+    double lo = 0.0;
+    double hi = 0.0;
+};
+
+// Which y spine a series maps through. The left spine is the plot's
+// primary scale; the right one exists only while some VISIBLE series
+// claims it (a mixed V/I legend on one scale flattens itself into a
+// lie, so each unit earns its own spine, own ticks, own drag strip).
+enum class PlotSpine : std::uint8_t { left, right };
+
+// One series, plain data with a borrowed span: `ys` holds
+// `sample_count` samples (the plot call's own parameter - every series
+// of one call shares the count, one x axis), re-read every frame.
+// `color` 0 rides the stock series wheel (8 hues, i mod 8 - data
+// colors, not chrome); `visible` is display state the row never
+// writes, the caller's to own; `unit` (optional) suffixes the
+// tooltip's readout ("V", "A"); `label` (optional) names the tooltip
+// row - the legend the caller composes keys its own rows by whatever
+// it wants.
+struct PlotSeries {
+    const char* label = nullptr;
+    const double* ys = nullptr;
+    std::uint32_t color = 0;
+    bool visible = true;
+    PlotSpine spine = PlotSpine::left;
+    const char* unit = nullptr;
+};
+
+// The pure axis math, public so the headless suite (and any caller
+// sizing its own readouts) gates the same decisions the plot renders -
+// the popup_placement precedent. These mirror ws::circsim's plot.hpp
+// contracts (the editor's hand-rolled Results panel rides those); they
+// are re-homed here rather than linked because a gui widget must not
+// reach into an app tier, and a future shared math tier could unify
+// the two spellings without touching either consumer's calls.
+
+// Tick positions covering [lo, hi] at roughly `target` intervals,
+// snapped to the 1/2/5 x 10^k ladder every scope walks. Degenerate
+// (lo == hi, or either non-finite) answers the single tick {lo};
+// inverted or infinite spans answer none (a caller bug labels itself
+// by drawing no grid at all); target 0 is treated as 1. The answer
+// never exceeds the fixed 32-slot budget (a clamped target cannot ask
+// for more), so the walk allocates nothing.
+struct PlotTicks {
+    std::array<double, 32> ticks{};
+    unsigned count = 0;
+    const double* begin() const { return ticks.data(); }
+    const double* end() const { return ticks.data() + count; }
+};
+
+PlotTicks plot_ticks(double lo, double hi, unsigned target);
+
+// SI engineering notation, the scope convention: 4700 -> "4.7k",
+// -12.3e-3 -> "-12.3m", 2e-9 -> "2n", 0 -> "0" (never "-0"). Prefixes
+// run f p n u m (none) k M G T - ASCII "u" for micro, the SPICE
+// spelling; case matters. `digits` is the significant-digit budget
+// (1..6, clamped); a mantissa that rounds up through its decade
+// ("999.9m") renormalizes to the next prefix rather than printing
+// 1000m, and magnitudes beyond the table fall back to plain %g.
+// Non-finite inputs answer "nan"/"inf"/"-inf". Writes into `buf`
+// (always NUL-terminated, truncated to fit) and returns it - the
+// caller-scratch discipline, no allocation mid-frame.
+const char* plot_format_eng(char* buf, std::size_t cap, double v,
+                            int digits = 3);
+
+// Pads [lo, hi] by `frac` of its span on both sides (default 5%), the
+// breathing room a frame wants so extremal points are not ON the
+// border. A degenerate lo == hi expands by frac of max(|lo|, 1) - a
+// constant line still gets an axis; non-finite endpoints answer {0,
+// 1}, the empty-but-sane frame; frac <= 0 is treated as 0.
+PlotAxisRange plot_expand_range(double lo, double hi, double frac = 0.05);
+
+// Clamps `view` back inside `home`: non-finite or degenerate answers
+// home, a window at or past home's span answers home, otherwise the
+// window slides the minimal distance so both ends sit inside - the
+// invariant that keeps every manual window a healthy interval inside
+// the data.
+PlotAxisRange plot_clamp_view(PlotAxisRange view, PlotAxisRange home);
+
+// Zooms `view` about `anchor` (a data coordinate, clamped into the
+// view first) by `factor`: > 1 zooms IN (the span shrinks), < 1 out,
+// 1 or non-finite or non-positive answers the view unchanged. The
+// result is floored at home's span x 1e-6 (below that the axis is
+// float mush) and clamped into home, so a wheel spun forever settles,
+// never inverts.
+PlotAxisRange plot_zoom_range(PlotAxisRange view, PlotAxisRange home,
+                              double anchor, double factor);
+
+// Slides `view` by `delta` data units (positive = toward hi) and
+// clamps into home - a pan past the data's edge parks flush against
+// it. A non-finite delta answers the view unchanged.
+PlotAxisRange plot_pan_range(PlotAxisRange view, PlotAxisRange home,
+                             double delta);
+
+// --- the plot's split halves -----------------------------------------------
+// The behavior/draw seam, the table's own shape: the behavior owns the
+// geometry resolution, the auto fit, every gesture and the hover
+// answer; the draw owns every pixel over the resolved frame. A custom
+// look recomputes nothing to repaint the stock appearance.
+
+// The gesture in flight, and the manual view it rides. Public (the
+// ScrollState discipline) so a custom plot surface holds its own in
+// the side table under its own id - the split halves take it by
+// reference. `kind` none = the resting plot. The press-time captures
+// (g*/was_active) exist so a right-click cancel restores the view
+// exactly as the press found it, and the axis-drag anchors are the
+// data coordinates the press mapped to, kept so the live zoom pivots
+// where the drag began however the window moves under it.
+enum class PlotGestureKind : std::uint8_t {
+    none,
+    pan,     // middle or Space+left drag: both axes follow the cursor
+    band,    // left drag in the frame: the rubber box lands at release
+    zoom_x,  // left drag on the bottom strip: the x axis stretches
+    zoom_y,  // left drag on a y strip: that spine stretches
+};
+
+struct PlotState {
+    // The manual view; inactive = the auto fit. Three windows - x,
+    // the left spine, the right spine - each clamped inside its own
+    // home by the behavior, never directly writable by a gesture.
+    bool view_active = false;
+    PlotAxisRange x{};
+    PlotAxisRange y{};
+    PlotAxisRange y1{};
+
+    // The gesture in flight.
+    PlotGestureKind kind = PlotGestureKind::none;
+    float from_x = 0.0f;   // the press point, frame px
+    float from_y = 0.0f;
+    float click_x = 0.0f;  // the last press, for the double-click pair
+    float click_y = 0.0f;
+    float click_clock = 100.0f;  // seconds since that press (< 0.35: a pair)
+    int zoom_axis = 0;           // zoom_y's strip: 0 left, 1 right
+    bool was_active = false;     // the press-time view_active (cancel)
+    PlotAxisRange gx{};          // press-time captures (cancel restores)
+    PlotAxisRange gy{};
+    PlotAxisRange gy1{};
+    double anchor_x = 0.0;   // the strip drags' data anchors
+    double anchor_y = 0.0;
+    double anchor_y1 = 0.0;
+};
+
+// The resolved frame the behavior hands the draw (and any custom
+// look): the placed rect, the inner plot frame with its margins, the
+// effective view windows (the manual one clamped, or the auto fit),
+// and the axis facts the mapping needs. The screen<->data maps ride
+// it: sx/sy/sy1 map data into the frame's pixels, wx/wy/wy1 map the
+// cursor back. The spans are positive by construction - the behavior
+// only ever resolves windows that passed expand_range/clamp_view, so
+// the maps never divide by zero.
+struct PlotFrame {
+    Rect rect{};    // the whole plot row (what layout.next placed)
+    float fx = 0.0f;  // the inner frame's top-left
+    float fy = 0.0f;
+    float iw = 0.0f;  // the inner frame's size (the series' clip)
+    float ih = 0.0f;
+    float margin_right = 0.0f;  // 10 px, or 46 with the right spine
+    bool has_right = false;     // a visible series rides the right spine
+    bool by_index = false;      // the x axis is the sample index (xs null)
+    bool x_sorted = false;      // xs strictly increasing (decimation rides)
+    float cursor_x = 0.0f;      // the pointer's position, captured by the
+    float cursor_y = 0.0f;      // behavior (the band's live corner reads it)
+    PlotAxisRange view_x{};     // the effective windows
+    PlotAxisRange view_y{};
+    PlotAxisRange view_y1{};
+
+    // Screen px -> data, through each spine's own window.
+    double wx(float px) const {
+        return view_x.lo +
+               (static_cast<double>(px) - fx) / iw * (view_x.hi - view_x.lo);
+    }
+    double wy(float py) const {
+        return view_y.hi -
+               (static_cast<double>(py) - fy) / ih * (view_y.hi - view_y.lo);
+    }
+    double wy1(float py) const {
+        return view_y1.hi -
+               (static_cast<double>(py) - fy) / ih * (view_y1.hi - view_y1.lo);
+    }
+    // Data -> screen px.
+    float sx(double v) const {
+        return static_cast<float>(
+            fx + (v - view_x.lo) / (view_x.hi - view_x.lo) * iw);
+    }
+    float sy(double v) const {
+        return static_cast<float>(
+            fy + (view_y.hi - v) / (view_y.hi - view_y.lo) * ih);
+    }
+    float sy1(double v) const {
+        return static_cast<float>(
+            fy + (view_y1.hi - v) / (view_y1.hi - view_y1.lo) * ih);
+    }
+};
+
+// What the plot answers: the hover (the pointer rests in the frame
+// under an open claim layer, and `hover` is the nearest sample to the
+// cursor - binary-searched on a sorted axis, scanned otherwise, the
+// index-axis rounded - with `hover_x` that sample's x, for the
+// caller's legend readouts), and the frame's view news: `view_changed`
+// a gesture moved the manual window this frame, `view_reset` a
+// double-click dropped back to the auto fit (disjoint by design - a
+// reset is not a move). A pointer outside the frame, or a raised
+// modal veil, answers the resting plot: hovered false, hover -1.
+struct PlotResult {
+    bool hovered = false;
+    int hover = -1;
+    double hover_x = 0.0;
+    bool view_changed = false;
+    bool view_reset = false;
+};
+
+// The interaction half at a placed rect: fits the axes to the visible
+// series, resolves the effective view, registers the wheel claim
+// (frame plus strips - the innermost rect beats an enclosing scroll
+// panel's, and the first notch after the cursor arrives settles
+// ownership instead of zooming, the gui's one-frame claim rule), runs
+// every gesture against `state` (which the caller holds - the
+// composed plot keeps it in the persistent side table under the
+// widget's id; a custom surface may hold its own), and resolves the
+// hover. Fills `frame` with the resolved geometry, views and cursor
+// position; answers the frame's news. Draws nothing. An empty plot
+// (count <= 0) or one too narrow to frame (inner size under 40x30)
+// resolves a sane-empty frame, claims nothing, hovers nothing.
+PlotResult plot_behavior(GuiContext& gui, const Rect& rect,
+                         const double* xs, const PlotSeries* series,
+                         int series_count, int sample_count,
+                         PlotFrame& frame, PlotState& state);
+
+// The look half: the grid and zero rail, the tick labels in
+// engineering notation (x below, the left spine right-aligned in its
+// margin, the right spine in its own when it exists), the frame
+// outline, the series (clipped to the frame, min/max decimated when
+// the window is long and the axis is sorted, non-finite samples
+// breaking the line), the hover crosshair and per-series markers, the
+// floating tooltip (x plus one row per visible series, capped at 8
+// with "+N more"; hidden while a gesture flies), the in-flight band
+// with its dx/dy readout, the axis name, the manual-view hint, and
+// the empty-state message. Reads no context; `state` is read-only
+// here (the band's press point and the hint's view_active).
+void plot_draw(const Rect& rect, const PlotFrame& frame,
+               const PlotSeries* series, int series_count,
+               int sample_count, const double* xs,
+               const char* x_name, const PlotResult& result,
+               const PlotState& state, const ChromeTheme& theme);
+
+// The composed widget: places the row (`height` tall, default 220 -
+// the scope strip; `width` lays like a button's, negative = fill the
+// line), runs the behavior against the side-table state, paints
+// through the painter row (a skin replaces the whole look in one
+// override). `xs` is the shared x axis - null rides the sample index
+// (0..sample_count-1), the table-without-a-sweep-axis shape;
+// `series_count` series walk it, each holding `sample_count` samples
+// - the one count every series shares, so the fits, the decimation
+// and the hover all speak one length. `x_name` (optional) labels the
+// axis, quiet, inside the frame's top-left. A negative or zero
+// height lays a degenerate row and draws nothing.
+PlotResult plot(GuiContext& gui, LayoutCursor& layout,
+                const ChromeTheme& theme, const char* label,
+                const double* xs, const PlotSeries* series,
+                int series_count, int sample_count,
+                const char* x_name = nullptr, float height = 220.0f,
+                float width = -1.0f);
+
 // --- menus ------------------------------------------------------------------
 // Menus are data-driven: the caller owns a plain array of item structs
 // and re-describes it every frame, the same discipline as combo's item

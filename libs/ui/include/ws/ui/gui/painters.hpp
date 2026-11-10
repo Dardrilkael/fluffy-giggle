@@ -100,6 +100,9 @@ struct WidgetPainters {
     void (*table_row)(const Rect&, const TableRowPaint&, const char* const*,
                       const TableGeometry&, const ChromeTheme&);
     void (*toast)(const Rect&, ToastSeverity, const ChromeTheme&);
+    void (*plot)(const Rect&, const PlotFrame&, const PlotSeries*, int,
+                 int, const double*, const char*, const PlotResult&,
+                 const PlotState&, const ChromeTheme&);
 
     // --- the icon mapping (P6) -------------------------------------------
     // A LOOKUP, not a draw: the sprite an Icon resolves to under this
@@ -138,6 +141,7 @@ inline constexpr WidgetPainters kStockPainters{
     &table_header_draw,
     &table_row_draw,
     &toast_draw,
+    &plot_draw,
     &stock_icon_sprite,
 };
 

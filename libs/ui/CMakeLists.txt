@@ -302,6 +302,25 @@ if(TARGET test_ui_key_repeat)
   target_include_directories(test_ui_key_repeat PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
 
+# The plot suite: the waveform widget end to end - the pure axis math
+# (ticks, engineering notation, the view invariants) gated directly,
+# and the widget driven through hand-built frames (the wheel zoom
+# against the claim's one-frame settle, the rubber band, the axis
+# strip drags, the pan, the double-click reset, the right-click
+# cancel) with the draws asserted through the r2d stub's counters -
+# the gui archive + the real font bake, the same purity class as
+# test_ui_gui.
+ws_add_test(ui_plot
+  SOURCES tests/test_ui_plot.cpp
+          tests/ui_gui_r2d_stub.cpp
+          src/text/font.cpp
+          src/text/stb_impl.cpp
+  LINK ws::ui_gui
+  DEPENDS stb)
+if(TARGET test_ui_plot)
+  target_include_directories(test_ui_plot PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+
 # --- Shader workflow targets (opt-in; the default build is unchanged) ------
 # The committed spirv.h stays the build input (no shader compiler needed);
 # these targets make staleness visible and regeneration explicit. The flags
