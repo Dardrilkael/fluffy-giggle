@@ -234,18 +234,24 @@ const char* plot_format_eng(char* buf, std::size_t cap, double v,
         return buf;
     }
     if (std::isnan(v)) {
-        std::strncpy(buf, "nan", cap - 1);
-        buf[cap - 1] = '\0';
+        const char* s = "nan";
+        std::size_t n = std::min(cap - 1, std::char_traits<char>::length(s));
+        std::copy_n(s, n, buf);
+        buf[n] = '\0';
         return buf;
     }
     if (std::isinf(v)) {
-        std::strncpy(buf, v > 0.0 ? "inf" : "-inf", cap - 1);
-        buf[cap - 1] = '\0';
+        const char* s = v > 0.0 ? "inf" : "-inf";
+        std::size_t n = std::min(cap - 1, std::char_traits<char>::length(s));
+        std::copy_n(s, n, buf);
+        buf[n] = '\0';
         return buf;
     }
     if (v == 0.0) {
-        std::strncpy(buf, "0", cap - 1);
-        buf[cap - 1] = '\0';
+        const char* s = "0";
+        std::size_t n = std::min(cap - 1, std::char_traits<char>::length(s));
+        std::copy_n(s, n, buf);
+        buf[n] = '\0';
         return buf;
     }
     digits = std::clamp(digits, 1, 6);
