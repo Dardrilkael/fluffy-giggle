@@ -171,9 +171,14 @@ public:
     // failure-path teardown calls them uniformly.
     core::Status create_buffer(const BufferDesc& desc, BufferOut& out) const;
     void destroy_buffer(std::uint64_t buffer, std::uint64_t allocation) const;
-    // Makes the whole buffer's host writes visible - vma may hand back
-    // non-coherent memory, so a writer flushes after filling `mapped`.
-    void flush_buffer(std::uint64_t allocation) const;
+    // Makes the buffer's host writes in [offset, offset + size) visible -
+    // vma may hand back non-coherent memory, so a writer flushes after
+    // filling `mapped`. The defaults keep the whole-allocation spelling;
+    // a caller that knows its written prefix (the renderer's arenas)
+    // passes it and spares the cache maintenance of the tail. size may
+    // be UINT64_MAX for "to the end" (VK_WHOLE_SIZE under the hood).
+    void flush_buffer(std::uint64_t allocation, std::uint64_t offset = 0,
+                      std::uint64_t size = UINT64_MAX) const;
     core::Status create_image(const ImageDesc& desc, ImageOut& out) const;
     void destroy_image(std::uint64_t image, std::uint64_t allocation) const;
     core::Status create_shader_module(const uint32_t* code,

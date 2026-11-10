@@ -54,6 +54,7 @@
 #include <imgui_impl_vulkan.h>
 #include <implot.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -619,7 +620,6 @@ struct App::Impl {
     // --- frame loop ---------------------------------------------------------
 
     int main_loop(App& app) {
-        core::warn("ui: main_loop() starting");
         // The frame clock's "previous": the pump's own start, so the
         // first frame's dt measures real time and not a default
         // epoch's.
@@ -629,10 +629,15 @@ struct App::Impl {
             // The frame clock: seconds from the previous pump top -
             // steady_clock, immune to wall-clock moves. One write per
             // iteration, before next_frame (which keeps the field: this
-            // write IS its refresh).
+            // write IS its refresh). Clamped: a blocked pump (an Android
+            // wait_for_window stretch, a hidden window's sleep) must not
+            // hand on_update a dt covering the whole block, or every
+            // animation snaps to its end state in one step on resume.
+            constexpr float kMaxFrameDt = 0.25f;
             const auto now = std::chrono::steady_clock::now();
             gui_input_.dt_seconds =
-                std::chrono::duration<float>(now - previous).count();
+                std::min(std::chrono::duration<float>(now - previous).count(),
+                         kMaxFrameDt);
             previous = now;
             // Fresh gui input edges for this pump: the previous frame's
             // pressed/released/scroll/text clear, held state and position
@@ -661,7 +666,6 @@ struct App::Impl {
             if (jobs_ != nullptr) {
                 jobs_->drain();
             }
-            core::warn("ui: after jobs drain, should_close={}", host_->should_close());
             if (host_->should_close()) {
                 break;
             }
@@ -671,7 +675,6 @@ struct App::Impl {
             // (Android surface loss; desktop stays ready for the whole
             // run), and block on the platform while there is nothing to
             // render instead of spinning.
-            core::warn("ui: window_ready={}, window_stage_up={}", host_->window_ready(), window_stage_up);
             if (!host_->window_ready()) {
                 if (window_stage_up) {
                     detach_window();
@@ -682,7 +685,6 @@ struct App::Impl {
                 host_->wait_for_window();
                 continue;
             }
-            core::warn("ui: calling attach_window, window_stage_up={}", window_stage_up);
             if (!window_stage_up && !attach_window(app)) {
                 core::warn("ui: attach_window failed");
                 return 1;
@@ -739,29 +741,19 @@ struct App::Impl {
                 style.Colors[ImGuiCol_WindowBg].w = 1.0f;
                 viewport_style_set = true;
             }
-            core::warn("ui: attach_window succeeded");
-            core::warn("ui: window_hidden={}", host_->is_hidden());
-            core::warn("ui: entering render loop");
-            core::warn("ui: calling ImGui_ImplVulkan_NewFrame()");
 
             ImGui_ImplVulkan_NewFrame();
-            core::warn("ui: calling host_->imgui_platform_new_frame()");
             host_->imgui_platform_new_frame();
-            core::warn("ui: calling ImGui::NewFrame()");
             ImGui::NewFrame();
-            core::warn("ui: calling renderer2d_.frame_begin()");
 
             // One r2d frame per ImGui frame: begin before on_update() records
             // its draws, sort + replay once it returned.
             renderer2d_.frame_begin(static_cast<float>(swapchain_.width()),
                                     static_cast<float>(swapchain_.height()));
             bool frame_abandoned = false;
-            core::warn("ui: calling app.on_update()");
             try {
                 app.on_update();
-                core::warn("ui: app.on_update() returned");
                 renderer2d_.frame_end();
-                core::warn("ui: renderer2d_.frame_end() returned");
             } catch (const std::exception& e) {
                 core::error("ui: exception in on_update(): {}", e.what());
                 host_->request_stop();

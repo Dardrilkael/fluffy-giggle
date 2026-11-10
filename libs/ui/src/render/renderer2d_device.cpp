@@ -597,7 +597,9 @@ bool Renderer2D::grow_index_arena(uint32_t frame_slot, std::size_t min_quads) {
     }
     // No refill: the flush writes each chunk's pattern every frame (the
     // indices are chunk-local u16), so a fresh buffer only needs its
-    // capacity - the flush fills exactly what it draws.
+    // capacity - the flush fills exactly what it draws. The fresh bytes
+    // are garbage though, so the skip-rewrite cache must not survive
+    // them (see IndexArena::layout).
     auto* const indices = static_cast<std::uint16_t*>(buffer.mapped);
     if (arena.buffer != VK_NULL_HANDLE) {
         gpu_->destroy_buffer(gfx::handle_to_u64(arena.buffer), arena.allocation);
@@ -609,6 +611,8 @@ bool Renderer2D::grow_index_arena(uint32_t frame_slot, std::size_t min_quads) {
     arena.allocation = buffer.allocation;
     arena.mapped = indices;
     arena.capacity = capacity;
+    arena.layout.clear();
+    arena.contents_valid = false;
     const std::string name =
         "r2d index arena slot " + std::to_string(frame_slot);
     name_object(VK_OBJECT_TYPE_BUFFER,
@@ -1069,7 +1073,8 @@ bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
     const VkBuffer staging = gfx::handle_from_u64<VkBuffer>(staging_out.buffer);
     std::memcpy(staging_out.mapped, pixels,
                 static_cast<std::size_t>(size));
-    gpu_->flush_buffer(staging_out.allocation);
+    gpu_->flush_buffer(staging_out.allocation, 0,
+                       static_cast<std::uint64_t>(size));
 
     // One-off submit on the graphics queue - textures load at load
     // granularity, so the synchronous fence wait is fine.
@@ -1315,9 +1320,11 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
     }
     std::memcpy(arena.mapped, vertices.data(),
                 vertices.size() * sizeof(batch::Vertex));
-    // vma may hand back non-coherent memory: make the arena's writes
-    // visible before the submit.
-    gpu_->flush_buffer(arena.allocation);
+    // vma may hand back non-coherent memory: make the frame's writes
+    // visible before the submit - only the written prefix, not the
+    // arena's whole (much larger) capacity.
+    gpu_->flush_buffer(arena.allocation, 0,
+                       vertices.size() * sizeof(batch::Vertex));
 
     // A full vertex arena is exactly capacity/4 quads; the index arena
     // grows in step so every chunk's pattern instance fits.
@@ -1337,22 +1344,57 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
     // texture-table split can start a chunk at any quad index, so the
     // LOCAL quad number restarts per chunk - that is what keeps every
     // index inside the u16 space (kMaxQuadsPerChunk bounds quad_count).
-    for (uint32_t c = 0; c < batch_.chunk_count(); ++c) {
-        const batch::Chunk& chunk = batch_.chunk(c);
-        std::uint16_t* dst = indices.mapped +
-            (static_cast<std::size_t>(chunk.vertex_offset) / 4) * 6;
-        for (uint32_t q = 0; q < chunk.quad_count; ++q) {
-            const std::uint16_t base = static_cast<std::uint16_t>(q * 4);
-            dst[q * 6 + 0] = base + 0;  // TL
-            dst[q * 6 + 1] = base + 1;  // TR
-            dst[q * 6 + 2] = base + 2;  // BR
-            dst[q * 6 + 3] = base + 2;  // BR
-            dst[q * 6 + 4] = base + 3;  // BL
-            dst[q * 6 + 5] = base + 0;  // TL
+    //
+    // The pattern is a pure function of the chunk layout (each chunk's
+    // vertex_offset + quad_count sequence), so a frame whose layout
+    // matches what this slot's buffer already holds skips the rewrite -
+    // and its visibility flush - whole. A steady UI re-records the same
+    // chunk structure frame after frame (only vertex positions move),
+    // which makes the skip the common case.
+    bool layout_matches = indices.contents_valid;
+    if (layout_matches &&
+        (indices.layout.size() !=
+             1 + 2 * std::size_t(batch_.chunk_count()) ||
+         indices.layout[0] != batch_.chunk_count())) {
+        layout_matches = false;
+    }
+    if (layout_matches) {
+        for (uint32_t c = 0; c < batch_.chunk_count(); ++c) {
+            const batch::Chunk& chunk = batch_.chunk(c);
+            if (indices.layout[1 + 2 * std::size_t(c)] != chunk.vertex_offset ||
+                indices.layout[2 + 2 * std::size_t(c)] != chunk.quad_count) {
+                layout_matches = false;
+                break;
+            }
         }
     }
-    // Same non-coherent visibility contract as the vertex arena above.
-    gpu_->flush_buffer(indices.allocation);
+    if (!layout_matches) {
+        for (uint32_t c = 0; c < batch_.chunk_count(); ++c) {
+            const batch::Chunk& chunk = batch_.chunk(c);
+            std::uint16_t* dst = indices.mapped +
+                (static_cast<std::size_t>(chunk.vertex_offset) / 4) * 6;
+            for (uint32_t q = 0; q < chunk.quad_count; ++q) {
+                const std::uint16_t base = static_cast<std::uint16_t>(q * 4);
+                dst[q * 6 + 0] = base + 0;  // TL
+                dst[q * 6 + 1] = base + 1;  // TR
+                dst[q * 6 + 2] = base + 2;  // BR
+                dst[q * 6 + 3] = base + 2;  // BR
+                dst[q * 6 + 4] = base + 3;  // BL
+                dst[q * 6 + 5] = base + 0;  // TL
+            }
+        }
+        indices.layout.assign(1 + 2 * std::size_t(batch_.chunk_count()), 0u);
+        indices.layout[0] = batch_.chunk_count();
+        for (uint32_t c = 0; c < batch_.chunk_count(); ++c) {
+            const batch::Chunk& chunk = batch_.chunk(c);
+            indices.layout[1 + 2 * std::size_t(c)] = chunk.vertex_offset;
+            indices.layout[2 + 2 * std::size_t(c)] = chunk.quad_count;
+        }
+        indices.contents_valid = true;
+        // Same non-coherent visibility contract as the vertex arena above,
+        // again only over the written prefix.
+        gpu_->flush_buffer(indices.allocation, 0, quads * 6 * sizeof(std::uint16_t));
+    }
 
     // Vertex/index binds and the viewport are pipeline-independent state -
     // bound once; the pipeline itself binds per chunk below (bind on change).

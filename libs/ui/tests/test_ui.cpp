@@ -975,6 +975,39 @@ TEST_CASE("atlas packer extrudes sprite edges into the gutter") {
     CHECK(is_color(page_px(packed.pages[0], 6, 6), 0, 0, 0, 0));  // untouched
 }
 
+TEST_CASE("atlas suggest_page_size sizes a batch to its content") {
+    using namespace ws::ui::r2d;
+    const auto red = solid_pixels(8, 8, 255, 0, 0);
+    std::vector<std::uint8_t> dummy(4);
+
+    // A tiny lazy-bake batch: the floor page, never the 2048 default
+    // (16 MB of GPU memory for a few KB of glyphs).
+    const std::vector<atlas::SourceImage> tiny(8, {red.data(), 8, 8});
+    CHECK(atlas::suggest_page_size(tiny.data(), tiny.size()) == 64u);
+
+    // A text-sized batch: 32 glyphs of 48x64 packs into a 512 page, not
+    // a full sheet.
+    const std::vector<atlas::SourceImage> glyphs(32, {dummy.data(), 48, 64});
+    CHECK(atlas::suggest_page_size(glyphs.data(), glyphs.size()) == 512u);
+
+    // The largest image plus its gutter ring must fit: a single 100px
+    // glyph asks for the area-slacked side (256), well under the default.
+    const atlas::SourceImage big[1] = {{dummy.data(), 100, 100}};
+    CHECK(atlas::suggest_page_size(big, 1) == 256u);
+
+    // A batch too big for one default page answers the cap and lets
+    // pack() spill, exactly as before.
+    const std::vector<atlas::SourceImage> huge(3000, {dummy.data(), 64, 64});
+    CHECK(atlas::suggest_page_size(huge.data(), huge.size()) ==
+          atlas::kPageSize);
+
+    // Nothing real to place (failed loads only, or no images at all):
+    // the floor, never a crash and never a full sheet.
+    const atlas::SourceImage none[2] = {{nullptr, 0, 0}, {nullptr, 0, 0}};
+    CHECK(atlas::suggest_page_size(none, 2) == 64u);
+    CHECK(atlas::suggest_page_size(nullptr, 0) == 64u);
+}
+
 TEST_CASE("the rounded-rect SDF channel: one record, radius normalized negative") {
     using namespace ws::ui::r2d;
     Renderer2D r;

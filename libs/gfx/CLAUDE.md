@@ -144,9 +144,11 @@ renderer needs — sized to exactly its use, nothing speculative:
 
 - **Buffers**: `create_buffer` is the one host-write profile ui has
   (sequential writes, persistently mapped — the arena + upload-staging
-  shape); `flush_buffer` makes a whole buffer's writes visible (vma
-  may hand back non-coherent memory, so a writer flushes after filling
-  `mapped`); `destroy_buffer` takes the create's handle pair.
+  shape); `flush_buffer` makes a buffer's writes visible over an
+  explicit `[offset, offset+size)` range, defaulting to the whole
+  allocation (vma may hand back non-coherent memory, so a writer flushes
+  after filling `mapped`); `destroy_buffer` takes the create's handle
+  pair.
 - **Images**: `create_image` is the one shape ui uploads — device-local
   2D sample targets (one layer, optimal tiling, starting undefined); the
   mip count is the descriptor's — 1 flat, or the full

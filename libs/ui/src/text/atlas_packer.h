@@ -16,6 +16,9 @@ namespace ws::ui::r2d::atlas {
 // Square page side, px (default; pack() accepts smaller for tests). A
 // 2048 page holds ~1000 64px icons.
 inline constexpr std::uint32_t kPageSize = 2048;
+// The smallest page suggest_page_size() ever answers: tiny lazy-bake
+// batches still get a real page, never a degenerate sliver.
+inline constexpr std::uint32_t kMinBatchPage = 64;
 // Duplicated-edge border around every sprite: magnified edges never sample
 // a shelf neighbour's texels (or the transparent canvas) under the linear
 // sampler.
@@ -68,5 +71,15 @@ struct Packing {
 // instead of failing the atlas. Pages spill when a shelf no longer fits.
 Packing pack(const SourceImage* images, std::size_t count,
              std::uint32_t page_size = kPageSize);
+
+// The page side a SMALL one-shot batch should pack into: the smallest
+// power-of-two square (clamped to [kMinBatchPage, kPageSize]) that fits the
+// batch's largest image plus gutters and, with 2x slack for shelf
+// fragmentation, its total cell area. The lazy font bake packs one small
+// batch per call - sizing those pages to the batch keeps an 8-glyph bake
+// at a 64px page instead of a full 2048px sheet (16 MB of GPU memory for
+// a few KB of glyphs). A batch too big for kPageSize answers kPageSize and
+// pack() spills to as many pages as it needs, exactly as before.
+std::uint32_t suggest_page_size(const SourceImage* images, std::size_t count);
 
 }  // namespace ws::ui::r2d::atlas

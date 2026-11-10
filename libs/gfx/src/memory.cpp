@@ -97,15 +97,18 @@ void Gpu::destroy_buffer(std::uint64_t buffer, std::uint64_t allocation) const {
                      handle_from_u64<VmaAllocation>(allocation));
 }
 
-void Gpu::flush_buffer(std::uint64_t allocation) const {
+void Gpu::flush_buffer(std::uint64_t allocation, std::uint64_t offset,
+                      std::uint64_t size) const {
     const VmaAllocator alloc = static_cast<VmaAllocator>(allocator());
     if (alloc == nullptr || allocation == 0) {
         return;
     }
-    // Whole-allocation: every consumer flushes everything it wrote since
-    // the create or the last flush (vmaFlushAllocation reports nothing).
-    vmaFlushAllocation(alloc, handle_from_u64<VmaAllocation>(allocation), 0,
-                       VK_WHOLE_SIZE);
+    // The caller's range (defaults: the whole allocation). Every consumer
+    // flushes what it wrote since the create or the last flush
+    // (vmaFlushAllocation reports nothing); a range caller keeps the tail
+    // it never touched out of the cache maintenance.
+    vmaFlushAllocation(alloc, handle_from_u64<VmaAllocation>(allocation),
+                       offset, size);
 }
 
 // --- images ------------------------------------------------------------------

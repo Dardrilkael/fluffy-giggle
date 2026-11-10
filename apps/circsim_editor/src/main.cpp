@@ -447,7 +447,6 @@ class CircsimApp final : public ws::ui::App {
     }
 
     void on_update() override {
-        ws::core::warn("circsim: on_update() starting");
         namespace r2d = ws::ui::r2d;
 
         // The autorun probe (debug): CIRCSIM_AUTORUN_SECS fires the
@@ -490,12 +489,10 @@ class CircsimApp final : public ws::ui::App {
         // The lazy CJK bake: a small batch per frame, both fonts.
         (void)r2d::font_bake_pending(font_, 8u);
         (void)r2d::font_bake_pending(font_mono_, 8u);
-        ws::core::warn("circsim: font_bake_pending done");
 
         // The active document watch (a switch re-points the editor and
         // clears every per-document surface).
         watch_active_document(false);
-        ws::core::warn("circsim: watch_active_document done");
 
         // The chord loop, before the frame (the gallery's rule): the
         // rung is the text_editing one while a field held the keyboard
@@ -504,21 +501,13 @@ class CircsimApp final : public ws::ui::App {
         // control-carrying chords (undo, run) still answer.
         const ws::input::InputFrame& frame_in = ws::input::frame_input();
         resolve_chords(frame_in);
-        ws::core::warn("circsim: resolve_chords done");
 
-        ws::core::warn("circsim: gui_.begin_frame");
         gui_.begin_frame(frame_in);
-        ws::core::warn("circsim: r2d::begin");
         r2d::begin();
-        ws::core::warn("circsim: r2d::frame_size");
         const r2d::FrameSize frame = r2d::frame_size();
-        ws::core::warn("circsim: gui_.begin_layer");
         gui_.begin_layer(gui::Layer::base);
-        ws::core::warn("circsim: shell_->theme().scaled");
         gui::ChromeTheme theme = shell_->theme().scaled(scale_);
-        ws::core::warn("circsim: gui::is_dark");
         const bool dark = gui::is_dark(theme);
-        ws::core::warn("circsim: dark={}", dark);
         if (dark != font_dark_) {
             font_dark_ = dark;
             rebuild_fonts();
@@ -526,16 +515,11 @@ class CircsimApp final : public ws::ui::App {
         theme.font = font_.empty() ? nullptr : &font_;
         theme.font_strong = font_strong_.empty() ? nullptr : &font_strong_;
         theme.font_mono = font_mono_.empty() ? nullptr : &font_mono_;
-        ws::core::warn("circsim: shell_->draw");
         shell_->draw(gui_, theme,
                      gui::Rect{0.0f, 0.0f, frame.width, frame.height});
-        ws::core::warn("circsim: gui_.end_layer");
         gui_.end_layer();
-        ws::core::warn("circsim: r2d::end");
         r2d::end();
-        ws::core::warn("circsim: r2d::set_layer(0)");
         r2d::set_layer(0);
-        ws::core::warn("circsim: gui_.end_frame");
         gui_.end_frame();
 
         // The composed title, handed to the OS window when it changes.
@@ -557,7 +541,6 @@ class CircsimApp final : public ws::ui::App {
                           gui::ToastSeverity::warning);
         }
 #endif
-        ws::core::warn("circsim: on_update() done");
     }
 
   private:

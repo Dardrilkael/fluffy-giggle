@@ -331,7 +331,8 @@ FrameSize sprite_size(Sprite sprite);
 // primary bake (font_add_face) and bake their glyphs LAZILY -
 // font_request_text marks a string's out-of-bake codepoints pending,
 // font_bake_pending rasterizes a batch per frame into FRESH pages (pack
-// is one-shot, so each batch is its own page set). The inline 95 stay
+// is one-shot, so each batch is its own page set, the page sized to
+// the batch - never the fixed 2048 default). The inline 95 stay
 // the fast path; a codepoint past 126 resolves through the lazily-baked
 // table before the fallback box, so draw_text, measure_text and every
 // widget survive unchanged. One font stays ONE size - a runtime size

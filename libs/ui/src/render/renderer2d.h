@@ -540,6 +540,16 @@ private:
         std::uint64_t allocation = 0;  // the gfx buffer allocation (flush/destroy's handle; a 64-bit handle)
         std::uint16_t* mapped = nullptr;
         std::size_t capacity = 0;  // quads
+        // The skip-rewrite cache: the chunk layout (vertex_offset +
+        // quad_count per chunk, see flush) this buffer's pattern was last
+        // written for, and whether that write ever happened. A steady
+        // frame re-records the identical chunk structure - only vertex
+        // POSITIONS moved - and the u16 pattern is a pure function of the
+        // layout, so the rewrite (and its cache flush) is skipped whole.
+        // Any growth replaces the buffer with a fresh one: contents_valid
+        // drops, the next flush rewrites.
+        std::vector<std::uint32_t> layout;
+        bool contents_valid = false;
     };
     std::vector<IndexArena> index_arenas_;
 

@@ -1620,9 +1620,16 @@ std::uint32_t font_bake_pending(Font& font, std::uint32_t batch_cap) {
     if (g_active != nullptr && !sources.empty()) {
         // One pack for the whole batch, fresh pages per pack - atlas::pack
         // is one-shot, so each batch grows the font by its own page set.
-        // Headless skips the pack entirely: sprites were only ever the
-        // upload's business, and the metrics are already in place.
-        atlas::Packing packed = atlas::pack(sources.data(), sources.size());
+        // The page is sized to the BATCH (suggest_page_size), not the
+        // packer default: lazy bakes run a handful of glyphs per frame,
+        // and a fixed 2048px sheet per batch would cost 16 MB of GPU
+        // memory apiece. Headless skips the pack entirely: sprites were
+        // only ever the upload's business, and the metrics are already
+        // in place.
+        const std::uint32_t page_size =
+            atlas::suggest_page_size(sources.data(), sources.size());
+        atlas::Packing packed =
+            atlas::pack(sources.data(), sources.size(), page_size);
         std::vector<std::uint32_t> page_ids(packed.pages.size(), 0u);
         for (std::size_t p = 0; p < packed.pages.size(); ++p) {
             atlas::Page& page = packed.pages[p];

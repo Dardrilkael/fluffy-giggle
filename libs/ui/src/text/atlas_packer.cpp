@@ -1,6 +1,8 @@
 #include "text/atlas_packer.h"
 
 #include <algorithm>
+#include <bit>
+#include <cmath>
 #include <numeric>
 
 namespace ws::ui::r2d::atlas {
@@ -43,6 +45,49 @@ void fill_white(std::uint8_t* canvas, std::int64_t page_size, std::int64_t x,
 }
 
 }  // namespace
+
+std::uint32_t suggest_page_size(const SourceImage* images, std::size_t count) {
+    // The batch's shape: the largest cell side (a page smaller than that
+    // would degrade the glyph to the white fallback cell) and the total
+    // cell area. Failed loads (pixels == nullptr) become 4px white cells
+    // in pack() - too small to matter for either measure, so they are
+    // skipped here.
+    std::uint64_t max_side = 0;
+    std::uint64_t area = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (images[i].pixels == nullptr) {
+            continue;
+        }
+        const std::uint64_t w = images[i].w;
+        const std::uint64_t h = images[i].h;
+        max_side = std::max({max_side, w, h});
+        area += (w + 2 * kGutter) * (h + 2 * kGutter);
+    }
+    if (max_side == 0) {
+        return kMinBatchPage;  // nothing real to place
+    }
+
+    // Ceiling square root, exact for the uint64 range a batch can reach
+    // (double sqrt then a one-step fix on either side).
+    const std::uint64_t doubled = area * 2;  // shelf fragmentation slack
+    std::uint64_t root = static_cast<std::uint64_t>(
+        std::sqrt(static_cast<double>(doubled)));
+    while (root > 0 && root * root > doubled) {
+        --root;
+    }
+    while ((root + 1) * (root + 1) <= doubled) {
+        ++root;
+    }
+
+    // The page must fit the tallest glyph plus its gutter ring, and the
+    // area estimate with slack; power-of-two keeps allocator waste low,
+    // the clamps keep it a real page.
+    const std::uint64_t need =
+        std::max<std::uint64_t>(max_side + 2 * kGutter, root);
+    return static_cast<std::uint32_t>(
+        std::clamp<std::uint64_t>(std::bit_ceil(need), kMinBatchPage,
+                                  kPageSize));
+}
 
 Packing pack(const SourceImage* images, std::size_t count,
              std::uint32_t page_size) {
