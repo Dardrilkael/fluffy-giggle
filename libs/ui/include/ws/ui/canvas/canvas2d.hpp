@@ -103,6 +103,13 @@ public:
     // Begins a new path (the old path is discarded). The path
     // accumulates in LOCAL space; stroke/fill transforms it to screen.
     virtual void begin_path() = 0;
+    // Moves the pen AND OPENS A NEW SUBPATH at p (the SVG convention):
+    // fill treats every subpath as its own polygon, and a dash pattern
+    // never crosses a move_to (each subpath dashes from its own start).
+    // A SOLID stroke still walks the whole accumulated path as one
+    // chained polyline - the connecting edges a move_to skips over are
+    // drawn (the rounded rects' straight sides are exactly such
+    // connectors, and the close_path contract below finishes the chain).
     virtual void move_to(Point p) = 0;
     virtual void line_to(Point p) = 0;
     // Appends a quadratic Bezier from the current point through p1 to p2.
@@ -120,11 +127,15 @@ public:
     // through the shape's interior).
     virtual void close_path() = 0;
     // Strokes the current path with `paint` (screen-space width, joins,
-    // caps, dashes). The path is consumed (a new begin_path is needed
-    // for the next stroke).
+    // caps, dashes). A dashed paint dashes each SUBPATH independently
+    // (the pattern never runs across a move_to's jump); a solid paint
+    // strokes the accumulated chain once. The path is consumed (a new
+    // begin_path is needed for the next stroke).
     virtual void stroke(const Paint& paint) = 0;
-    // Fills the current path with `color` (the path is treated as a
-    // simple polygon; subpaths are filled independently).
+    // Fills the current path with `color`: every SUBPATH is filled as
+    // its own simple polygon (a subpath with fewer than three points
+    // is skipped). The subpaths never interact - two rings in one path
+    // fill as two shapes, no spurious edge between them.
     virtual void fill(std::uint32_t color) = 0;
 
     // --- convenience wrappers ------------------------------------------------
@@ -273,6 +284,8 @@ private:
     float view_scale_ = 1.0f;
     std::vector<Affine> xform_stack_{1};  // identity at the bottom
     std::vector<Point> path_;
+    std::vector<int> substarts_;  // path_ indices where a move_to opened a
+                                  // subpath (fill/dash walk these ranges)
     bool path_closed_ = false;
     bool has_path_ = false;
 
@@ -345,6 +358,8 @@ private:
     float view_scale_ = 1.0f;
     std::vector<Affine> xform_stack_{1};
     std::vector<Point> path_;
+    std::vector<int> substarts_;  // path_ indices where a move_to opened a
+                                  // subpath (fill/dash walk these ranges)
     bool path_closed_ = false;
     bool has_path_ = false;
 

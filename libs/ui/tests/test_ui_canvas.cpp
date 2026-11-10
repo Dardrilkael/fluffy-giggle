@@ -301,6 +301,47 @@ TEST_CASE("stroke: closed paths joint the loop and cap nothing") {
     CHECK(buf2.quad_count() == 28);
 }
 
+TEST_CASE("stroke: long paths spill the stack buffers, geometry unchanged") {
+    // The stroker's segment/joint arrays live in 64-entry inline stack
+    // buffers first and spill to the heap past that. These pin the
+    // spill spelling with exactly computable counts - the same
+    // arithmetic the short-path cases pin below 64.
+    Paint paint;
+    paint.width = 4.0f;
+
+    SUBCASE("a 199-segment collinear line: no joints, two butt caps") {
+        std::vector<Point> line(200);
+        for (int i = 0; i < 200; ++i) {
+            line[static_cast<std::size_t>(i)] = {
+                static_cast<float>(i), 0.0f};
+        }
+        TessBuffer buf;
+        stroke_polyline(line.data(), 200, paint, buf, false);
+        // Collinear joints are inactive: n core + 2n fringe + 2 caps.
+        REQUIRE(buf.quad_count() == 3 * 199 + 2);
+    }
+
+    SUBCASE("a 100-gon ring: miter joints around the loop") {
+        // A regular 100-gon's 3.6-degree turns are shallow enough that
+        // the outer miter stays far under the limit (the miter point at
+        // radius 1 sits 1/cos(1.8deg) ~ 1.0005 out; the ratio is ~0.5
+        // against the default 4), so every joint mitres: base + miter
+        // wedge in the core, two miter bands in the fringe.
+        std::vector<Point> gon(100);
+        for (int i = 0; i < 100; ++i) {
+            const float a = kTwoPi * static_cast<float>(i) / 100.0f;
+            gon[static_cast<std::size_t>(i)] = {
+                100.0f + 50.0f * std::cos(a), 100.0f + 50.0f * std::sin(a)};
+        }
+        TessBuffer buf;
+        stroke_polyline(gon.data(), 100, paint, buf, true);
+        // 100 segments (the synthetic closer makes the ring), all
+        // jointed: n core + 2n wedges + 2n fringe + 2n miter bands, no
+        // caps on a closed ring.
+        REQUIRE(buf.quad_count() == 7 * 100);
+    }
+}
+
 TEST_CASE("flattening: tolerance drives the segment count") {
     SUBCASE("a quadratic with a collinear handle appends just the end") {
         std::vector<Point> out;
@@ -1115,6 +1156,129 @@ TEST_CASE("canvas2d: dashed closed paths stroke fragments open") {
             rc.stroke_polyline(square, 4, paint, true);
         }
         CHECK(ws::ui::gui_test::stub.quads == fragment_quads);
+    }
+}
+
+TEST_CASE("canvas2d: subpaths fill independently, dashes never cross a move_to") {
+    // The header's contract, honored since the substarts were tracked:
+    // a move_to opens a new subpath, fill treats every subpath as its
+    // own polygon, and a dash pattern restarts at each subpath's own
+    // start. A SOLID stroke still walks the whole accumulated path as
+    // one chained polyline (the documented rule - the rounded rects'
+    // straight sides are exactly such connectors).
+    CommandListCanvas c;
+
+    SUBCASE("two disjoint squares fill as two polygons") {
+        c.begin_path();
+        c.move_to({0.0f, 0.0f});
+        c.line_to({10.0f, 0.0f});
+        c.line_to({10.0f, 10.0f});
+        c.move_to({20.0f, 0.0f});  // a disjoint second ring
+        c.line_to({30.0f, 0.0f});
+        c.line_to({30.0f, 10.0f});
+        c.fill(0xFF00FF00u);
+        // Two subpaths, two fills - the old whole-path spelling handed
+        // the ear clipper one self-intersecting ring whose phantom
+        // diagonal spanned the 10-unit gap.
+        REQUIRE(c.cmds.size() == 2);
+        REQUIRE(c.cmds[0].points.size() == 3);
+        REQUIRE(c.cmds[1].points.size() == 3);
+        for (const auto& p : c.cmds[0].points) {
+            CHECK(p.x <= 10.0f + 1e-3f);
+        }
+        for (const auto& p : c.cmds[1].points) {
+            CHECK(p.x >= 20.0f - 1e-3f);
+        }
+    }
+
+    SUBCASE("a subpath with fewer than three points is skipped") {
+        c.begin_path();
+        c.move_to({0.0f, 0.0f});
+        c.line_to({10.0f, 0.0f});  // two points: not a polygon
+        c.move_to({20.0f, 0.0f});
+        c.line_to({30.0f, 0.0f});
+        c.line_to({30.0f, 10.0f});
+        c.line_to({20.0f, 10.0f});
+        c.fill(0xFFFFFFFFu);
+        REQUIRE(c.cmds.size() == 1);
+        for (const auto& p : c.cmds[0].points) {
+            CHECK(p.x >= 20.0f - 1e-3f);
+        }
+    }
+
+    SUBCASE("a dashed stroke never runs the pattern across a move_to") {
+        Paint paint;
+        paint.width = 2.0f;
+        paint.dash.lengths[0] = 4.0f;
+        paint.dash.lengths[1] = 4.0f;
+        paint.dash.count = 2;
+        c.begin_path();
+        c.move_to({0.0f, 0.0f});
+        c.line_to({12.0f, 0.0f});  // 12 units: dashes 0-4 and 8-12
+        c.move_to({20.0f, 0.0f});  // a disjoint second segment
+        c.line_to({32.0f, 0.0f});  // the phase restarts: dashes 20-24, 28-32
+        c.stroke(paint);
+        // 2 runs per segment, and NO run in the 12..20 gap - the old
+        // chained spelling walked the phantom connector and the pattern
+        // ran on through it.
+        REQUIRE(c.cmds.size() == 4);
+        for (const auto& cmd : c.cmds) {
+            for (const auto& p : cmd.points) {
+                CHECK((p.x <= 12.0f + 1e-3f || p.x >= 20.0f - 1e-3f));
+            }
+        }
+    }
+
+    SUBCASE("a solid stroke still walks the chain, one command") {
+        c.begin_path();
+        c.move_to({0.0f, 0.0f});
+        c.line_to({12.0f, 0.0f});
+        c.move_to({20.0f, 0.0f});
+        c.line_to({32.0f, 0.0f});
+        c.stroke(Paint{});
+        // The documented solid rule: one chained polyline through the
+        // connector (the 4 recorded points include the 12->20 jump).
+        REQUIRE(c.cmds.size() == 1);
+        REQUIRE(c.cmds[0].points.size() == 4);
+        CHECK(c.cmds[0].points[2].x == doctest::Approx(20.0f));
+        CHECK(c.cmds[0].points[3].x == doctest::Approx(32.0f));
+    }
+
+    SUBCASE("rounded rects are one ring: one fill, one stroke") {
+        c.fill_rounded_rect(10.0f, 10.0f, 40.0f, 30.0f, 6.0f, 0xFFFFFFFFu);
+        c.stroke_rounded_rect(10.0f, 10.0f, 40.0f, 30.0f, 6.0f, Paint{});
+        CHECK(c.count(CanvasCmdKind::fill_polygon) == 1);
+        CHECK(c.count(CanvasCmdKind::stroke_polyline) == 1);
+    }
+
+    SUBCASE("through the renderer canvas: subpath fills equal separate fills") {
+        // End-to-end over the r2d seam: a two-subpath fill must cost
+        // exactly what filling the two polygons separately costs.
+        const Point sq_a[] = {{0.0f, 0.0f}, {10.0f, 0.0f}, {10.0f, 10.0f}};
+        const Point sq_b[] = {{20.0f, 0.0f}, {30.0f, 0.0f}, {30.0f, 10.0f}};
+
+        ws::ui::gui_test::stub.reset();
+        {
+            Renderer2DCanvas rc;
+            rc.fill_polygon(sq_a, 3, 0xFF00FF00u);
+            rc.fill_polygon(sq_b, 3, 0xFF00FF00u);
+        }
+        const std::uint32_t separate = ws::ui::gui_test::stub.quads;
+        CHECK(separate > 0);
+
+        ws::ui::gui_test::stub.reset();
+        {
+            Renderer2DCanvas rc;
+            rc.begin_path();
+            rc.move_to(sq_a[0]);
+            rc.line_to(sq_a[1]);
+            rc.line_to(sq_a[2]);
+            rc.move_to(sq_b[0]);
+            rc.line_to(sq_b[1]);
+            rc.line_to(sq_b[2]);
+            rc.fill(0xFF00FF00u);
+        }
+        CHECK(ws::ui::gui_test::stub.quads == separate);
     }
 }
 

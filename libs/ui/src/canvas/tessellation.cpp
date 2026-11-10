@@ -474,54 +474,90 @@ void stroke_polyline(const Point* pts, int count, const Paint& paint,
     // path whose last point differs from its first, one synthetic
     // closing segment joins them. The walk keeps the FIRST valid segment
     // so the closing joint can reference it.
-    //   segs are generated lazily by advancing a cursor; "next valid
-    //   segment after index i" = the pair (i, j) with j the first index
-    //   > i whose span from pts[i] is non-degenerate... rather: advance
-    //   i to the first point that starts a valid span, then j to the
-    //   first point after i that ends it.
 
-    // Collect valid segments into a local buffer. A closed path may add
-    // one synthetic closer; an open path walks them straight. Bounded by
-    // count+1.
-    // (The vector is the stroker's one allocation; the 100k stress uses
-    // short primitives, and long paths stroke once per frame - amortized
-    // fine against the per-quad math it feeds.)
-    std::vector<StrokeSeg> segs;
-    segs.reserve(static_cast<std::size_t>(count));
-    {
-        int i = 0;
-        while (i < count - 1) {
-            if (!seg_valid(pts[i], pts[i + 1])) {
-                ++i;
-                continue;
+    // Collect valid segments; a closed path may add one synthetic
+    // closer; an open path walks them straight. Bounded by count+1.
+    // The storage is an INLINE stack buffer first: a grid hairline is
+    // one segment, a wire or a symbol poly a handful, a circle 32+1 -
+    // the overwhelming majority of a frame's stroke calls never touch
+    // the heap. Past kSegStack entries the store spills to a vector
+    // (copied once, then grown) - the stroker's one allocation became
+    // a long-path-only cost instead of the per-call floor it was.
+    constexpr int kSegStack = 64;
+    StrokeSeg seg_stack[kSegStack];
+    std::vector<StrokeSeg> seg_heap;
+    int seg_count = 0;
+    const auto push_seg = [&](const StrokeSeg& s) {
+        if (seg_count < kSegStack) {
+            seg_stack[seg_count] = s;
+        } else {
+            if (seg_heap.empty()) {
+                seg_heap.assign(seg_stack, seg_stack + kSegStack);
             }
-            StrokeSeg s;
-            s.a = pts[i];
-            s.b = pts[i + 1];
-            s.d = (s.b - s.a) * (1.0f / length(s.b - s.a));
-            s.n = right_normal(s.d);
-            segs.push_back(s);
-            ++i;
+            seg_heap.push_back(s);
         }
+        ++seg_count;
+    };
+    for (int i = 0; i < count - 1; ++i) {
+        if (!seg_valid(pts[i], pts[i + 1])) {
+            continue;
+        }
+        StrokeSeg s;
+        s.a = pts[i];
+        s.b = pts[i + 1];
+        s.d = (s.b - s.a) * (1.0f / length(s.b - s.a));
+        s.n = right_normal(s.d);
+        push_seg(s);
     }
-    if (segs.empty()) {
+    if (seg_count == 0) {
         // Every span was degenerate: the whole path is one point.
         stroke_polyline(pts, 1, paint, sink, false);
         return;
     }
     if (closed) {
-        const StrokeSeg& last = segs.back();
-        if (length(last.b - segs.front().a) > 1e-9f) {
+        // The synthetic closer joins the last walk's end back to the
+        // first walk's start (a ring whose points already meet - the
+        // close_path spelling's duplicate - adds nothing).
+        const Vec2 join_from = seg_heap.empty() ? seg_stack[seg_count - 1].b
+                                                : seg_heap[seg_count - 1].b;
+        const Vec2 join_to =
+            seg_heap.empty() ? seg_stack[0].a : seg_heap[0].a;
+        if (length(join_from - join_to) > 1e-9f) {
             StrokeSeg s;
-            s.a = last.b;
-            s.b = segs.front().a;
+            s.a = join_from;
+            s.b = join_to;
             s.d = (s.b - s.a) * (1.0f / length(s.b - s.a));
             s.n = right_normal(s.d);
-            segs.push_back(s);
+            push_seg(s);
         }
     }
-    const int n = static_cast<int>(segs.size());
+    StrokeSeg* const segs =
+        seg_heap.empty() ? seg_stack : seg_heap.data();
+    const int n = seg_count;
     const bool loop = closed;  // joints run cyclically
+
+    // The joints, resolved ONCE: joint i sits between segs[i] and
+    // segs[(i+1)%n]. The fringe pass's corner_at re-resolved the same
+    // joint up to eight times per segment (two sides x four corners)
+    // and the core and join-band passes twice more - one resolution
+    // each now, read everywhere. resolve_joint is pure, so the emitted
+    // geometry is bit-identical to the re-resolving spelling.
+    Joint joint_stack[kSegStack];
+    std::vector<Joint> joint_heap;
+    Joint* joints;
+    if (n <= kSegStack) {
+        joints = joint_stack;
+    } else {
+        joint_heap.resize(static_cast<std::size_t>(n));
+        joints = joint_heap.data();
+    }
+    for (int i = 0; i < n; ++i) {
+        if (loop || i + 1 < n) {
+            joints[i] = resolve_joint(segs[i], segs[(i + 1) % n], paint);
+        }
+        // An open path's last slot stays default-constructed: nothing
+        // reads it (the open end has no joint by definition).
+    }
 
     // ---- pass 1: the core (skipped for hairlines) ------------------------------
     if (!hairline) {
@@ -542,7 +578,7 @@ void stroke_polyline(const Point* pts, int count, const Paint& paint,
             if (!loop && next >= n) {
                 break;
             }
-            const Joint j = resolve_joint(segs[i], segs[next], paint);
+            const Joint& j = joints[i];
             if (!j.active) {
                 continue;
             }
@@ -620,7 +656,10 @@ void stroke_polyline(const Point* pts, int count, const Paint& paint,
             out = v + sref.n * (s * r);
             return;
         }
-        const Joint j = resolve_joint(segs[jprev], segs[at_end ? (jprev + 1) % n : seg_index], paint);
+        // The precomputed joint between segs[jprev] and its successor
+        // (at_end: segs[jprev+1]; else segs[seg_index] - which IS the
+        // successor of jprev by the jprev arithmetic above).
+        const Joint& j = joints[jprev];
         const Vec2 v = at_end ? segs[jprev].b : segs[seg_index].a;
         if (!j.active) {
             out = v + sref.n * (s * r);
@@ -664,7 +703,7 @@ void stroke_polyline(const Point* pts, int count, const Paint& paint,
             if (!loop && next >= n) {
                 break;
             }
-            const Joint j = resolve_joint(segs[i], segs[next], paint);
+            const Joint& j = joints[i];
             if (!j.active) {
                 continue;
             }
@@ -775,8 +814,8 @@ void stroke_polyline(const Point* pts, int count, const Paint& paint,
                 }
             }
         };
-        emit_cap(segs.front(), false);
-        emit_cap(segs.back(), true);
+        emit_cap(segs[0], false);
+        emit_cap(segs[n - 1], true);
     }
 }
 
@@ -895,13 +934,22 @@ void fill_polygon(const Point* pts, int count, uint32_t color, TessSink& sink) {
 
     int guard = 0;
     const int guard_max = 2 * n * n + 8;  // the O(n^2) worst case, doubled
+    // The ear scan CONTINUES from the clip site: the removed vertex's
+    // two neighbors are the likeliest next ears, so the sweep rotates
+    // to them instead of restarting at index 0 - a restart made an
+    // n-vertex polygon pay the full sweep once per clip (n sweeps of
+    // n candidates each). The emitted triangle count is invariant (an
+    // n-gon always clips into exactly n-2 ears); which ears are chosen
+    // first may differ, never how many cover the shape.
+    int scan = 0;
     while (index.size() > 3 && guard++ < guard_max) {
         bool clipped = false;
         const int m = static_cast<int>(index.size());
         for (int i = 0; i < m && !clipped; ++i) {
-            const int ia = index[(i + m - 1) % m];
-            const int ib = index[i];
-            const int ic = index[(i + 1) % m];
+            const int at = (scan + i) % m;
+            const int ia = index[(at + m - 1) % m];
+            const int ib = index[at];
+            const int ic = index[(at + 1) % m];
             const Vec2& a = shrunk[static_cast<std::size_t>(ia)];
             const Vec2& b = shrunk[static_cast<std::size_t>(ib)];
             const Vec2& c = shrunk[static_cast<std::size_t>(ic)];
@@ -926,8 +974,12 @@ void fill_polygon(const Point* pts, int count, uint32_t color, TessSink& sink) {
                 continue;
             }
             emit_tri(a, b, c);
-            index.erase(index.begin() + i);
+            index.erase(index.begin() + at);
             clipped = true;
+            // Continue from the clipped vertex's left neighbor (the
+            // right neighbor now sits AT `at` after the erase).
+            const int m_next = m - 1;
+            scan = (at + m_next - 1) % m_next;
         }
         if (!clipped) {
             break;  // degenerate remainder: emit it as a fan and stop

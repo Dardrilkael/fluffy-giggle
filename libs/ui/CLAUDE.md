@@ -74,13 +74,29 @@ never carry the closing segment. Tests assert the flag (an open
 polyline must stay open; the stage-2 symbol renderer once closed every
 poly and the resistor's zigzag wore a phantom straight segment). For a
 DASHED stroke the flag is per-run, not per-path: only a run that wraps
-the whole ring (started at the path's first point, walked to its last)
-closes; dash fragments stroke open with their caps, or each dash would
-wear its own phantom chord. `Renderer2DCanvas::stroke_polyline` routes
-dashed paints through the path API for the same reason - the dash
+its own subpath's ring (started at the subpath's first point, walked to
+its last) closes; dash fragments stroke open with their caps, or each
+dash would wear its own phantom chord. `Renderer2DCanvas::stroke_polyline`
+routes dashed paints through the path API for the same reason - the dash
 pattern walks the local-space path, so the wrapper's direct
 tessellation would draw solid while the recording canvas showed
 dashes.
+
+Subpaths (stage 17d): a `move_to` opens a new subpath (the canvases
+track the starts; `substarts_`). Fill treats every subpath as its OWN
+simple polygon - two rings in one path fill as two shapes, no spurious
+edge between them; a subpath under three points is skipped. A dash
+pattern never crosses a move_to: it restarts at each subpath's own
+start. A SOLID stroke still walks the whole accumulated path as one
+chained polyline (the connectors a move_to skips over are drawn) - the
+rounded rects build ONE ring (a single move_to, the later arcs chain
+through arc()'s own line_to; at the radius-0 clamp floor the sharp ring
+is explicit) and their straight sides ride those connecting segments.
+Solid strokes skip the dash machinery entirely (no runs vector, no path
+copy; the renderer transforms in place) and the stroker's segment/joint
+arrays live in 64-entry stack buffers first (the heap is a
+long-path-only cost), so a steady frame's hairlines, wires and symbol
+polys allocate nothing per stroke.
 
 ## Event system
 
