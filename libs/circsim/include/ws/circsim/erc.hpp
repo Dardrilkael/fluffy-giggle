@@ -33,6 +33,11 @@
 //                       graph with every current source removed
 //
 // Warnings never block a run on their own; errors do.
+//
+// THREADING: run_erc is a pure read of Schematic + NetBuild +
+// SymbolLibrary - safe to call from any number of threads at once
+// (e.g. the editor's background ERC pass), provided no thread is
+// mutating the schematic concurrently. See docs/threading.md.
 
 namespace ws::circsim {
 

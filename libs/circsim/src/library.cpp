@@ -2,109 +2,29 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <string>
 #include <vector>
 
 #include <ws/circsim/library.hpp>
+#include <ws/circsim/text.hpp>
+
+#include "json_helpers.hpp"
+#include "util.hpp"
 
 namespace ws::circsim {
 
 namespace json = ws::settings::json;
 
+// as_number/as_integer/as_text/as_bool/as_pos/pos_value ride
+// json_helpers.hpp; lower/is_identifier ride util.hpp; number_text rides
+// fmt_num (text.hpp) - locale-independent by construction.
+
 namespace {
-
-// --- small json helpers (the format.cpp set, this TU's own) ------------------
-
-std::optional<double> as_number(const json::Value* v) {
-    if (v == nullptr) {
-        return std::nullopt;
-    }
-    if (v->is_integer()) {
-        const auto n = v->get_integer();
-        if (n) {
-            return static_cast<double>(*n);
-        }
-        return std::nullopt;
-    }
-    if (v->is_real()) {
-        const auto n = v->get_real();
-        if (n) {
-            return *n;
-        }
-    }
-    return std::nullopt;
-}
-
-std::optional<std::int64_t> as_integer(const json::Value* v) {
-    if (v != nullptr && v->is_integer()) {
-        const auto n = v->get_integer();
-        if (n) {
-            return *n;
-        }
-    }
-    return std::nullopt;
-}
-
-std::optional<std::string> as_text(const json::Value* v) {
-    if (v != nullptr && v->is_text()) {
-        const auto t = v->get_text();
-        if (t) {
-            return *t;
-        }
-    }
-    return std::nullopt;
-}
-
-std::optional<bool> as_bool(const json::Value* v) {
-    if (v != nullptr && v->is_bool()) {
-        const auto b = v->get_bool();
-        if (b) {
-            return *b;
-        }
-    }
-    return std::nullopt;
-}
-
-std::optional<Pos> as_pos(const json::Value* v) {
-    if (v == nullptr || !v->is_array()) {
-        return std::nullopt;
-    }
-    const json::Array* a = v->as_array();
-    if (a == nullptr || a->size() != 2) {
-        return std::nullopt;
-    }
-    const auto x = as_number(&(*a)[0]);
-    const auto y = as_number(&(*a)[1]);
-    if (!x.has_value() || !y.has_value()) {
-        return std::nullopt;
-    }
-    return Pos{*x, *y};
-}
-
-json::Value pos_value(Pos p) {
-    json::Array a;
-    a.push_back(json::Value::real(p.x));
-    a.push_back(json::Value::real(p.y));
-    return json::Value::array(std::move(a));
-}
 
 // A number formatted for a params default (accepted as bare JSON number
 // on load; written back as text so re-loads stay stringly like the model).
 std::string number_text(double v) {
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%.12g", v);
-    return buf;
-}
-
-Diag lib_diag(Severity sev, std::string code, std::string message,
-              std::string where) {
-    Diag d;
-    d.severity = sev;
-    d.code = std::move(code);
-    d.message = std::move(message);
-    d.where = std::move(where);
-    return d;
+    return fmt_num(v);
 }
 
 // --- migration chain ----------------------------------------------------------
@@ -115,7 +35,7 @@ void migrate_0_to_1(json::Object& root, std::vector<Diag>& diags) {
     if (root.find("symbols") == nullptr) {
         root.set("symbols", json::Value::array());
     }
-    diags.push_back(lib_diag(
+    diags.push_back(make_diag(
         Severity::Note, "circsim.symbols.migrated",
         "library carried no version; migrated to version 1 (defaults filled)",
         ""));
@@ -142,7 +62,7 @@ void warn_unknown_fields(const json::Object& o,
         if (std::find(known.begin(), known.end(), key) != known.end()) {
             continue;
         }
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             context + ": field '" + key +
                 "' is not recognized here; dropped (unknown fields survive"
@@ -155,7 +75,7 @@ bool read_pin(const json::Object& o, PinDef& pin, const std::string& key,
               const std::string& origin, std::vector<Diag>& diags) {
     const auto name = as_text(o.find("name"));
     if (!name.has_value() || name->empty()) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + key + "': a pin without a 'name' is dropped",
             origin));
@@ -166,7 +86,7 @@ bool read_pin(const json::Object& o, PinDef& pin, const std::string& key,
         pin.dx = pos->x;
         pin.dy = pos->y;
     } else if (o.find("pos") != nullptr) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + key + "' pin '" + pin.name +
                 "': 'pos' is not [x, y]; defaulting to [0, 0]",
@@ -175,7 +95,7 @@ bool read_pin(const json::Object& o, PinDef& pin, const std::string& key,
     if (const auto dir = as_integer(o.find("dir"))) {
         pin.dir = static_cast<int>(*dir);
     } else if (o.find("dir") != nullptr) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + key + "' pin '" + pin.name +
                 "': 'dir' is not an integer; defaulting to 180",
@@ -192,7 +112,7 @@ bool read_emit(const json::Object& o, ParamEmit& pe,
                std::vector<Diag>& diags) {
     const auto param = as_text(o.find("param"));
     if (!param.has_value() || param->empty()) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + key + "': an emit entry without a 'param' is dropped",
             origin));
@@ -202,7 +122,7 @@ bool read_emit(const json::Object& o, ParamEmit& pe,
     if (const auto prefix = as_text(o.find("prefix"))) {
         pe.prefix = *prefix;
     } else if (o.find("prefix") != nullptr) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + key + "' emit '" + pe.key +
                 "': 'prefix' is not text; defaulting to none",
@@ -211,7 +131,7 @@ bool read_emit(const json::Object& o, ParamEmit& pe,
     if (const auto optional = as_bool(o.find("optional"))) {
         pe.optional = *optional;
     } else if (o.find("optional") != nullptr) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + key + "' emit '" + pe.key +
                 "': 'optional' is not a bool; defaulting to true",
@@ -234,7 +154,7 @@ bool read_card(const json::Object& o, CardEmit& ce, const std::string& key,
     const auto letter = as_text(o.find("letter"));
     if (!letter.has_value() || letter->size() != 1 ||
         (*letter)[0] < 'A' || (*letter)[0] > 'Z') {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + key + "': a cards entry without an uppercase"
                                " 'letter' (\"L\", \"K\", ...) is dropped",
@@ -245,7 +165,7 @@ bool read_card(const json::Object& o, CardEmit& ce, const std::string& key,
     if (const auto suffix = as_text(o.find("suffix"))) {
         ce.suffix = *suffix;
     } else if (o.find("suffix") != nullptr) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + key + "' card '" + *letter +
                 "': 'suffix' is not text; defaulting to none",
@@ -257,7 +177,7 @@ bool read_card(const json::Object& o, CardEmit& ce, const std::string& key,
             const auto idx = as_integer(&e);
             if (!idx.has_value() || *idx < 0 ||
                 static_cast<std::size_t>(*idx) >= pin_count) {
-                diags.push_back(lib_diag(
+                diags.push_back(make_diag(
                     Severity::Warning, "circsim.symbols.bad_field",
                     "symbol '" + key + "' card '" + *letter +
                         "': pin index " +
@@ -271,7 +191,7 @@ bool read_card(const json::Object& o, CardEmit& ce, const std::string& key,
             ce.pins.push_back(static_cast<std::uint32_t>(*idx));
         }
     } else if (o.find("pins") != nullptr) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + key + "': 'pins' is not an array; ignored", origin));
     }
@@ -283,7 +203,7 @@ bool read_card(const json::Object& o, CardEmit& ce, const std::string& key,
                 read_emit(*e.as_object(), pe, key, origin, diags)) {
                 ce.emit.push_back(std::move(pe));
             } else if (!e.is_object()) {
-                diags.push_back(lib_diag(
+                diags.push_back(make_diag(
                     Severity::Warning, "circsim.symbols.bad_field",
                     "symbol '" + key + "': an emit entry is not an object;"
                                        " skipped",
@@ -291,14 +211,14 @@ bool read_card(const json::Object& o, CardEmit& ce, const std::string& key,
             }
         }
     } else if (o.find("emit") != nullptr) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + key + "': 'emit' is not an array; ignored", origin));
     }
     if (const auto siblings = as_bool(o.find("name_siblings"))) {
         ce.name_siblings = *siblings;
     } else if (o.find("name_siblings") != nullptr) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + key + "': 'name_siblings' is not a bool;"
                                " defaulting to false",
@@ -315,7 +235,7 @@ bool read_param_spec(const json::Object& o, ParamSpec& ps,
                      std::vector<Diag>& diags) {
     const auto pk = as_text(o.find("key"));
     if (!pk.has_value() || pk->empty()) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + key +
                 "': a params entry without a 'key' is dropped",
@@ -329,7 +249,7 @@ bool read_param_spec(const json::Object& o, ParamSpec& ps,
         } else if (*type == "choice") {
             ps.type = ParamSpec::Type::Choice;
         } else if (*type != "text") {
-            diags.push_back(lib_diag(
+            diags.push_back(make_diag(
                 Severity::Warning, "circsim.symbols.bad_field",
                 "symbol '" + key + "' param '" + ps.key + "': unknown type '" +
                     *type + "'; treating as text",
@@ -339,7 +259,7 @@ bool read_param_spec(const json::Object& o, ParamSpec& ps,
     if (const auto label = as_text(o.find("label"))) {
         ps.label = *label;
     } else if (o.find("label") != nullptr) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + key + "' param '" + ps.key +
                 "': 'label' is not text; defaulting to the key",
@@ -351,7 +271,7 @@ bool read_param_spec(const json::Object& o, ParamSpec& ps,
         } else if (const auto n = as_number(def)) {
             ps.default_value = number_text(*n);  // "default": 50 -> "50"
         } else {
-            diags.push_back(lib_diag(
+            diags.push_back(make_diag(
                 Severity::Warning, "circsim.symbols.bad_field",
                 "symbol '" + key + "' param '" + ps.key +
                     "': 'default' is neither text nor number; ignored",
@@ -364,7 +284,7 @@ bool read_param_spec(const json::Object& o, ParamSpec& ps,
             if (const auto text = as_text(&c)) {
                 ps.choices.push_back(*text);
             } else {
-                diags.push_back(lib_diag(
+                diags.push_back(make_diag(
                     Severity::Warning, "circsim.symbols.bad_field",
                     "symbol '" + key + "' param '" + ps.key +
                         "': a choice is not text; dropped",
@@ -372,7 +292,7 @@ bool read_param_spec(const json::Object& o, ParamSpec& ps,
             }
         }
     } else if (o.find("choices") != nullptr) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + key + "' param '" + ps.key +
                 "': 'choices' is not an array; ignored",
@@ -422,7 +342,7 @@ std::optional<std::vector<Pos>> pos_array(const json::Value* v,
 bool read_draw(const json::Object& o, DrawPrim& d, const std::string& key,
                const std::string& origin, std::vector<Diag>& diags) {
     if (o.size() != 1) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_draw",
             "symbol '" + key + "': a draw entry must hold exactly one shape"
                                 " key; entry dropped",
@@ -431,7 +351,7 @@ bool read_draw(const json::Object& o, DrawPrim& d, const std::string& key,
     }
     const auto& [shape, val] = *o.begin();
     const auto bad = [&](const char* why) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_draw",
             "symbol '" + key + "': " + shape + " " + why + "; entry dropped",
             origin));
@@ -508,7 +428,7 @@ bool read_draw(const json::Object& o, DrawPrim& d, const std::string& key,
             return bad("needs [x, y, \"text\"]");
         }
     } else {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_draw",
             "symbol '" + key + "': unknown shape '" + shape +
                 "' (line, poly, rect, circle, arc, dot, text); entry dropped",
@@ -530,7 +450,7 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
     SymbolReader r;
     const auto key = as_text(o.find("key"));
     if (!key.has_value() || key->empty()) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Error, "circsim.symbols.bad_symbol",
             "a symbol without a 'key' cannot be addressed; skipped", origin));
         return r;
@@ -542,7 +462,7 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
     if (const auto name = as_text(o.find("name"))) {
         r.def.name = *name;
     } else if (o.find("name") != nullptr) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + k + "': 'name' is not text; defaulting to empty",
             origin));
@@ -554,14 +474,14 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
             } else if (std::isalpha(static_cast<unsigned char>((*letter)[0]))) {
                 r.def.spice_letter = (*letter)[0];
             } else {
-                diags.push_back(lib_diag(
+                diags.push_back(make_diag(
                     Severity::Warning, "circsim.symbols.bad_field",
                     "symbol '" + k + "': 'spice' must be a letter (\"" +
                         *letter + "\"); treated as not exported",
                     origin));
             }
         } else {
-            diags.push_back(lib_diag(
+            diags.push_back(make_diag(
                 Severity::Warning, "circsim.symbols.bad_field",
                 "symbol '" + k + "': 'spice' is not text; treated as not"
                                 " exported",
@@ -571,7 +491,7 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
     if (const auto ref = as_text(o.find("ref"))) {
         r.def.ref_prefix = *ref;
     } else if (o.find("ref") != nullptr) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + k + "': 'ref' is not text; defaulting to empty",
             origin));
@@ -582,7 +502,7 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
         } else if (net->is_null()) {
             r.def.fixed_net = std::nullopt;
         } else {
-            diags.push_back(lib_diag(
+            diags.push_back(make_diag(
                 Severity::Warning, "circsim.symbols.bad_field",
                 "symbol '" + k + "': 'fixed_net' is not text; ignored",
                 origin));
@@ -592,7 +512,7 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
         if (const auto b = as_bool(v)) {
             r.def.needs_value = *b;
         } else {
-            diags.push_back(lib_diag(
+            diags.push_back(make_diag(
                 Severity::Warning, "circsim.symbols.bad_field",
                 "symbol '" + k + "': 'value' is not a bool; defaulting to"
                                 " true",
@@ -603,7 +523,7 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
         if (const auto b = as_bool(v)) {
             r.def.needs_model = *b;
         } else {
-            diags.push_back(lib_diag(
+            diags.push_back(make_diag(
                 Severity::Warning, "circsim.symbols.bad_field",
                 "symbol '" + k + "': 'model' is not a bool; defaulting to"
                                 " false",
@@ -618,7 +538,7 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
                 read_pin(*e.as_object(), pin, k, origin, diags)) {
                 r.def.pins.push_back(std::move(pin));
             } else if (!e.is_object()) {
-                diags.push_back(lib_diag(
+                diags.push_back(make_diag(
                     Severity::Warning, "circsim.symbols.bad_field",
                     "symbol '" + k + "': a pin entry is not an object;"
                                     " dropped",
@@ -626,7 +546,7 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
             }
         }
     } else if (o.find("pins") != nullptr) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + k + "': 'pins' is not an array; the symbol exports"
                             " no connections",
@@ -640,7 +560,7 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
                 read_emit(*e.as_object(), pe, k, origin, diags)) {
                 r.def.emit.push_back(std::move(pe));
             } else if (!e.is_object()) {
-                diags.push_back(lib_diag(
+                diags.push_back(make_diag(
                     Severity::Warning, "circsim.symbols.bad_field",
                     "symbol '" + k + "': an emit entry is not an object;"
                                     " dropped",
@@ -648,7 +568,7 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
             }
         }
     } else if (o.find("emit") != nullptr) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + k + "': 'emit' is not an array; ignored", origin));
     }
@@ -663,7 +583,7 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
                           diags)) {
                 r.def.card_emits.push_back(std::move(ce));
             } else if (!e.is_object()) {
-                diags.push_back(lib_diag(
+                diags.push_back(make_diag(
                     Severity::Warning, "circsim.symbols.bad_field",
                     "symbol '" + k + "': a cards entry is not an object;"
                                     " dropped",
@@ -671,7 +591,7 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
             }
         }
     } else if (o.find("cards") != nullptr) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + k + "': 'cards' is not an array; ignored", origin));
     }
@@ -683,7 +603,7 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
                 read_param_spec(*e.as_object(), ps, k, origin, diags)) {
                 r.def.params.push_back(std::move(ps));
             } else if (!e.is_object()) {
-                diags.push_back(lib_diag(
+                diags.push_back(make_diag(
                     Severity::Warning, "circsim.symbols.bad_field",
                     "symbol '" + k + "': a params entry is not an object;"
                                     " dropped",
@@ -691,7 +611,7 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
             }
         }
     } else if (o.find("params") != nullptr) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + k + "': 'params' is not an array; ignored",
             origin));
@@ -704,7 +624,7 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
                 read_draw(*e.as_object(), d, k, origin, diags)) {
                 r.def.draw.push_back(std::move(d));
             } else if (!e.is_object()) {
-                diags.push_back(lib_diag(
+                diags.push_back(make_diag(
                     Severity::Warning, "circsim.symbols.bad_draw",
                     "symbol '" + k + "': a draw entry is not an object;"
                                     " dropped",
@@ -712,7 +632,7 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
             }
         }
     } else if (o.find("draw") != nullptr) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "symbol '" + k + "': 'draw' is not an array; ignored", origin));
     }
@@ -737,28 +657,23 @@ SymbolLibrary::SymbolLibrary() {
     symbols_ = builtin_symbols();
     builtin_count_ = symbols_.size();
     source_.assign(symbols_.size(), 0);
+    reindex();
 }
 
 const SymbolDef* SymbolLibrary::find(std::string_view key) const {
-    const std::string want = [key] {
-        std::string out(key);
-        std::transform(out.begin(), out.end(), out.begin(),
-                       [](unsigned char c) {
-                           return static_cast<char>(std::tolower(c));
-                       });
-        return out;
-    }();
-    for (const SymbolDef& s : symbols_) {
-        std::string have(s.key);
-        std::transform(have.begin(), have.end(), have.begin(),
-                       [](unsigned char c) {
-                           return static_cast<char>(std::tolower(c));
-                       });
-        if (have == want) {
-            return &s;
-        }
+    // The index answers in one lower + one lookup; the old linear scan
+    // lowercased BOTH strings on every comparison (~100k constructions
+    // for a 1,000-part schematic against a 100-symbol table, every net
+    // build / ERC pass / export).
+    const auto it = by_key_.find(lower(key));
+    return it == by_key_.end() ? nullptr : &symbols_[it->second];
+}
+
+void SymbolLibrary::reindex() {
+    by_key_.clear();
+    for (std::size_t i = 0; i < symbols_.size(); ++i) {
+        by_key_[lower(symbols_[i].key)] = i;  // later wins, as layering does
     }
-    return nullptr;
 }
 
 ws::core::Status SymbolLibrary::load_text(std::string_view text,
@@ -793,12 +708,12 @@ ws::core::Status SymbolLibrary::load_text(std::string_view text,
     if (const auto v = as_integer(root.find("version"))) {
         version = static_cast<int>(*v);
     } else if (root.find("version") != nullptr) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "'version' is not an integer; treated as version 0", origin));
     }
     if (version > kCsymLibVersion) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.future_version",
             "library says version " + std::to_string(version) +
                 ", this build knows " + std::to_string(kCsymLibVersion) +
@@ -823,7 +738,7 @@ ws::core::Status SymbolLibrary::load_text(std::string_view text,
         return {};  // the migration fills it; an explicit null means empty
     }
     if (!symbols->is_array()) {
-        diags.push_back(lib_diag(
+        diags.push_back(make_diag(
             Severity::Warning, "circsim.symbols.bad_field",
             "'symbols' is not an array; the library contributes nothing",
             origin));
@@ -831,7 +746,7 @@ ws::core::Status SymbolLibrary::load_text(std::string_view text,
     }
     for (const json::Value& e : *symbols->as_array()) {
         if (!e.is_object()) {
-            diags.push_back(lib_diag(
+            diags.push_back(make_diag(
                 Severity::Warning, "circsim.symbols.bad_symbol",
                 "a symbol entry is not an object; skipped", origin));
             continue;
@@ -841,25 +756,12 @@ ws::core::Status SymbolLibrary::load_text(std::string_view text,
             continue;
         }
         // Layering: same key (ci) overrides in place; new keys append.
-        std::size_t at = symbols_.size();
-        for (std::size_t i = 0; i < symbols_.size(); ++i) {
-            std::string have(symbols_[i].key);
-            std::transform(have.begin(), have.end(), have.begin(),
-                           [](unsigned char c) {
-                               return static_cast<char>(std::tolower(c));
-                           });
-            std::string want(r.def.key);
-            std::transform(want.begin(), want.end(), want.begin(),
-                           [](unsigned char c) {
-                               return static_cast<char>(std::tolower(c));
-                           });
-            if (have == want) {
-                at = i;
-                break;
-            }
-        }
-        if (at < symbols_.size()) {
-            diags.push_back(lib_diag(
+        // The index carries the lookup (one lower + one find).
+        const std::string key = lower(r.def.key);
+        const auto it = by_key_.find(key);
+        if (it != by_key_.end()) {
+            const std::size_t at = it->second;
+            diags.push_back(make_diag(
                 Severity::Warning, "circsim.symbols.override",
                 "symbol '" + r.def.key + "' redefines " +
                     (source_[at] == 0 ? "the built-in '" + r.def.key + "'"
@@ -870,6 +772,7 @@ ws::core::Status SymbolLibrary::load_text(std::string_view text,
             symbols_[at] = std::move(r.def);
             source_[at] = 1;
         } else {
+            by_key_[key] = symbols_.size();
             symbols_.push_back(std::move(r.def));
             source_.push_back(1);
         }

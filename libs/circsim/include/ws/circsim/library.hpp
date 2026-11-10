@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -84,8 +85,16 @@ public:
     ws::settings::json::Object unknown;
 
 private:
+    // Rebuilds the ci lookup index from symbols_ (constructor use; the
+    // load path maintains it incrementally).
+    void reindex();
+
     std::vector<SymbolDef> symbols_;
     std::vector<std::uint8_t> source_;  // 0 built-in, 1 library-defined
+    // lowercased key -> index into symbols_: find()'s one-lookup answer
+    // (built at insert time so a lookup costs one lower, not a scan
+    // that lowercases the whole table per comparison).
+    std::map<std::string, std::size_t> by_key_;
     std::size_t builtin_count_ = 0;
 };
 

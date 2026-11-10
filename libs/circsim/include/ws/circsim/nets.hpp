@@ -15,6 +15,11 @@
 // - wire endpoints name pins and junctions - plus exact position
 // coincidence among attach points:
 //
+// THREADING: build_nets is a pure read of Schematic + SymbolLibrary -
+// safe to call from any number of threads at once, provided no thread
+// is mutating the schematic (or the library) concurrently. See
+// docs/threading.md.
+//
 //   * a wire unions its two endpoints;
 //   * pins/junctions sharing a grid position union (pin-to-pin touch, a
 //     junction dot on a pin);

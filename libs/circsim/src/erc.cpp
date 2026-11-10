@@ -7,52 +7,31 @@
 #include <ws/circsim/erc.hpp>
 #include <ws/spice/parse.hpp>
 
+#include "util.hpp"
+
 namespace ws::circsim {
 
 namespace {
 
-std::string lower(std::string_view s) {
-    std::string out(s);
-    std::transform(out.begin(), out.end(), out.begin(),
-                   [](unsigned char c) {
-                       return static_cast<char>(std::tolower(c));
-                   });
-    return out;
-}
-
-Diag make(Severity sev, std::string code, std::string message,
-          std::string where) {
-    Diag d;
-    d.severity = sev;
-    d.code = std::move(code);
-    d.message = std::move(message);
-    d.where = std::move(where);
-    return d;
-}
-
-bool is_identifier(std::string_view s) {
-    if (s.empty()) {
-        return false;
-    }
-    for (const char c : s) {
-        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                        (c >= '0' && c <= '9') || c == '_';
-        if (!ok) {
-            return false;
-        }
-    }
-    return true;
-}
+// lower/is_identifier ride util.hpp; the diagnostic factory is
+// make_diag (diag.hpp). Every finding below fills Diag::target - the
+// structured jump target - alongside its display `where`.
 
 // "R3 pin b" (or "part 12 pin b" for the ref-less).
 std::string part_pin_where(const Schematic& s, PinRef pr,
-                           const SymbolLibrary& lib) {
+                           const SymbolLibrary& lib,
+                           DiagTarget& target) {
     const Part* p = s.find_part(pr.part);
     const SymbolDef* sym = p != nullptr ? lib.find(p->symbol) : nullptr;
     std::string pin_name =
         sym != nullptr && pr.pin < sym->pins.size()
             ? sym->pins[pr.pin].name
             : std::to_string(pr.pin);
+    target.kind = DiagTarget::Kind::Part;
+    target.part = pr.part;
+    target.pin = sym != nullptr && pr.pin < sym->pins.size()
+                     ? pr.pin
+                     : DiagTarget::npos();
     if (p == nullptr) {
         return "part " + std::to_string(pr.part) + " pin " + pin_name;
     }
@@ -64,7 +43,8 @@ std::string part_pin_where(const Schematic& s, PinRef pr,
 // --- V/L loops over the net graph ------------------------------------------
 // Constraint edges (V sources, inductors) over nets; a cycle - including a
 // 2-cycle (parallel edges) or a self-loop (both pins on one net) - is a
-// loop. A BFS over the edges seen so far recovers the cycle's members.
+// loop. A BFS over the adjacency list recovers the cycle's members (the
+// list is built once; the old scan re-walked every edge per BFS dequeue).
 void check_constraint_loops(const Schematic& s, const NetList& nets,
                             const SymbolLibrary& lib,
                             std::vector<Diag>& out) {
@@ -92,7 +72,8 @@ void check_constraint_loops(const Schematic& s, const NetList& nets,
             {a->id, b->id, p.id, p.ref.empty() ? "?" : p.ref});
     }
 
-    // Union-find over net ids; adjacency for cycle recovery.
+    // Union-find over net ids; adjacency + part->edge maps for cycle
+    // recovery, built once.
     std::map<std::uint32_t, std::uint32_t> parent;
     const auto find = [&parent](std::uint32_t x) {
         while (parent[x] != x) {
@@ -107,6 +88,16 @@ void check_constraint_loops(const Schematic& s, const NetList& nets,
         }
         return find(id);
     };
+    std::map<std::uint32_t, std::vector<std::pair<std::uint32_t,
+                                                  std::uint32_t>>>
+        adjacency;  // net -> (other net, part id)
+    std::map<std::uint32_t, std::size_t> edge_of_part;
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        const Edge& e = edges[i];
+        adjacency[e.net_a].emplace_back(e.net_b, e.part);
+        adjacency[e.net_b].emplace_back(e.net_a, e.part);
+        edge_of_part[e.part] = i;
+    }
 
     for (const Edge& e : edges) {
         ensure(e.net_a);
@@ -117,7 +108,7 @@ void check_constraint_loops(const Schematic& s, const NetList& nets,
             parent[rb] = ra;
             continue;
         }
-        // Cycle: recover its members with a BFS over the earlier edges.
+        // Cycle: recover its members with a BFS over the adjacency list.
         std::vector<std::uint32_t> members{e.part};
         if (e.net_a != e.net_b) {
             std::map<std::uint32_t, std::uint32_t> prev;
@@ -125,19 +116,16 @@ void check_constraint_loops(const Schematic& s, const NetList& nets,
             std::map<std::uint32_t, bool> seen{{e.net_a, true}};
             for (std::size_t qi = 0; qi < queue.size(); ++qi) {
                 const std::uint32_t u = queue[qi];
-                for (const Edge& f : edges) {
-                    if (f.part == e.part) {
-                        continue;
-                    }
-                    if (f.net_a != u && f.net_b != u) {
-                        continue;
-                    }
-                    const std::uint32_t v = f.net_a == u ? f.net_b : f.net_a;
-                    if (seen[v]) {
+                const auto it = adjacency.find(u);
+                if (it == adjacency.end()) {
+                    continue;
+                }
+                for (const auto& [v, part] : it->second) {
+                    if (part == e.part || seen[v]) {
                         continue;
                     }
                     seen[v] = true;
-                    prev[v] = f.part;
+                    prev[v] = part;
                     queue.push_back(v);
                 }
             }
@@ -147,12 +135,12 @@ void check_constraint_loops(const Schematic& s, const NetList& nets,
                     break;
                 }
                 members.push_back(it->second);
-                for (const Edge& f : edges) {
-                    if (f.part == it->second) {
-                        v = f.net_a == v ? f.net_b : f.net_a;
-                        break;
-                    }
+                const auto edge = edge_of_part.find(it->second);
+                if (edge == edge_of_part.end()) {
+                    break;
                 }
+                const Edge& f = edges[edge->second];
+                v = f.net_a == v ? f.net_b : f.net_a;
             }
         }
         std::sort(members.begin(), members.end());
@@ -167,9 +155,13 @@ void check_constraint_loops(const Schematic& s, const NetList& nets,
             names += p != nullptr && !p->ref.empty() ? p->ref
                                                      : "?" + std::to_string(pid);
         }
-        out.push_back(make(
+        DiagTarget target;
+        target.kind = DiagTarget::Kind::Part;
+        target.part = members.front();
+        out.push_back(make_diag(
             Severity::Error, "circsim.erc.vsource_loop",
-            "voltage-source/inductor loop through " + names, names));
+            "voltage-source/inductor loop through " + names, names,
+            target));
     }
 }
 
@@ -233,12 +225,12 @@ void check_isource_cutsets(const Schematic& s, const NetList& nets,
             continue;
         }
         if (find(a->id) != find(b->id)) {
-            out.push_back(make(
+            out.push_back(make_diag(
                 Severity::Error, "circsim.erc.isource_cutset",
                 "current source " + (p.ref.empty() ? "?" : p.ref) +
                     " bridges subcircuits with no DC path between them"
                     " (current-source cutset)",
-                p.ref));
+                p.ref, DiagTarget{DiagTarget::Kind::Part, p.id}));
         }
     }
 }
@@ -257,35 +249,38 @@ std::vector<Diag> run_erc(const Schematic& s, const NetBuild& build,
     for (const Part& p : s.parts()) {
         const std::string where =
             p.ref.empty() ? p.symbol + " " + std::to_string(p.id) : p.ref;
+        const DiagTarget on_part{DiagTarget::Kind::Part, p.id};
         const SymbolDef* sym = lib.find(p.symbol);
         if (sym == nullptr) {
-            out.push_back(make(Severity::Error, "circsim.erc.unknown_symbol",
-                               "unknown symbol '" + p.symbol + "'", where));
+            out.push_back(make_diag(Severity::Error, "circsim.erc.unknown_symbol",
+                                    "unknown symbol '" + p.symbol + "'", where,
+                                    on_part));
             continue;
         }
         if (sym->spice_letter == 0) {
             continue;  // power/ground: no ref, no value, no card
         }
         if (p.ref.empty()) {
-            out.push_back(make(Severity::Error, "circsim.erc.missing_ref",
-                               "part has no reference designator", where));
+            out.push_back(make_diag(Severity::Error, "circsim.erc.missing_ref",
+                                    "part has no reference designator", where,
+                                    on_part));
         } else {
             by_ref[lower(p.ref)].push_back(&p);
             if (!is_identifier(p.ref)) {
-                out.push_back(make(
+                out.push_back(make_diag(
                     Severity::Error, "circsim.erc.bad_ref",
                     "reference designator '" + p.ref +
                         "' is not a valid SPICE name (letters, digits, _)",
-                    where));
+                    where, on_part));
             } else if (static_cast<char>(std::toupper(
                            static_cast<unsigned char>(p.ref[0]))) !=
                        sym->spice_letter) {
-                out.push_back(make(
+                out.push_back(make_diag(
                     Severity::Error, "circsim.erc.ref_prefix",
                     "reference '" + p.ref + "' must start with '" +
                         std::string(1, sym->spice_letter) +
                         "' to export as its symbol's element kind",
-                    where));
+                    where, on_part));
             }
         }
         // A waveform-carrying source is self-valued: the engine derives
@@ -298,15 +293,16 @@ std::vector<Diag> run_erc(const Schematic& s, const NetBuild& build,
         const bool self_valued =
             wave_at != p.params.end() && !wave_at->second.empty();
         if (sym->needs_value && p.value.empty() && !self_valued) {
-            out.push_back(make(Severity::Error, "circsim.erc.missing_value",
-                               "part has no value", where));
+            out.push_back(make_diag(Severity::Error, "circsim.erc.missing_value",
+                                    "part has no value", where, on_part));
         }
         if (sym->needs_model) {
             const auto it = p.params.find("model");
             if (it == p.params.end() || it->second.empty()) {
-                out.push_back(make(
+                out.push_back(make_diag(
                     Severity::Error, "circsim.erc.missing_model",
-                    "part names no .model (set the 'model' parameter)", where));
+                    "part names no .model (set the 'model' parameter)", where,
+                    on_part));
             }
         }
         // --- param typing (stage 2): the symbol's specs are the truth ---
@@ -319,11 +315,11 @@ std::vector<Diag> run_erc(const Schematic& s, const NetBuild& build,
             }
             const auto it = p.params.find(pe.key);
             if (it == p.params.end() || it->second.empty()) {
-                out.push_back(make(
+                out.push_back(make_diag(
                     Severity::Error, "circsim.erc.missing_param",
                     "parameter '" + pe.key + "' is required by symbol '" +
                         sym->key + "'",
-                    where));
+                    where, on_part));
             }
         };
         for (const ParamEmit& pe : sym->emit) {
@@ -343,11 +339,11 @@ std::vector<Diag> run_erc(const Schematic& s, const NetBuild& build,
                 ps.label.empty() ? ps.key : ps.label;
             if (ps.type == ParamSpec::Type::Number) {
                 if (!ws::spice::parse_number(it->second)) {
-                    out.push_back(make(
+                    out.push_back(make_diag(
                         Severity::Error, "circsim.erc.bad_param",
                         "parameter '" + shown + "' is '" + it->second +
                             "', not a SPICE number (try 10k, 2.5, 1n)",
-                        where));
+                        where, on_part));
                 }
             } else if (ps.type == ParamSpec::Type::Choice) {
                 const std::string value = lower(it->second);
@@ -366,11 +362,11 @@ std::vector<Diag> run_erc(const Schematic& s, const NetBuild& build,
                         }
                         list += c;
                     }
-                    out.push_back(make(
+                    out.push_back(make_diag(
                         Severity::Warning, "circsim.erc.bad_param",
                         "parameter '" + shown + "' is '" + it->second +
                             "'; allowed: " + list,
-                        where));
+                        where, on_part));
                 }
             }
         }
@@ -406,12 +402,12 @@ std::vector<Diag> run_erc(const Schematic& s, const NetBuild& build,
                 }
             }
             if (!known) {
-                out.push_back(make(
+                out.push_back(make_diag(
                     Severity::Warning, "circsim.erc.unused_param",
                     "parameter '" + key +
                         "' is not used by symbol '" + sym->key +
                         "'; it never reaches the netlist",
-                    where));
+                    where, on_part));
             }
         }
     }
@@ -424,24 +420,30 @@ std::vector<Diag> run_erc(const Schematic& s, const NetBuild& build,
                 }
                 names += p->ref;
             }
-            out.push_back(make(Severity::Error, "circsim.erc.duplicate_ref",
-                               "reference designator '" + group.front()->ref +
-                                   "' is used by " +
-                                   std::to_string(group.size()) + " parts",
-                               names));
+            out.push_back(make_diag(Severity::Error, "circsim.erc.duplicate_ref",
+                                    "reference designator '" +
+                                        group.front()->ref +
+                                        "' is used by " +
+                                        std::to_string(group.size()) + " parts",
+                                    names,
+                                    DiagTarget{DiagTarget::Kind::Part,
+                                               group.front()->id}));
         }
     }
 
     // --- net checks --------------------------------------------------------------
     for (const Net& n : nets.nets) {
         const std::string where = "net " + n.name;
+        const DiagTarget on_net{DiagTarget::Kind::Net, 0, DiagTarget::npos(),
+                                n.id};
         const bool has_attachment =
             !n.wires.empty() || !n.junctions.empty() || !n.labels.empty();
         if (n.pins.empty()) {
             if (!n.is_ground) {
-                out.push_back(make(Severity::Warning,
-                                   "circsim.erc.empty_net",
-                                   "net has no pins (dangling wiring)", where));
+                out.push_back(make_diag(Severity::Warning,
+                                        "circsim.erc.empty_net",
+                                        "net has no pins (dangling wiring)",
+                                        where, on_net));
             }
         } else if (n.pins.size() == 1 && !n.is_ground) {
             // Fixed-net pins (power/ground) are their own connection.
@@ -451,24 +453,28 @@ std::vector<Diag> run_erc(const Schematic& s, const NetBuild& build,
                 p != nullptr ? lib.find(p->symbol) : nullptr;
             const bool fixed = sym != nullptr && sym->fixed_net.has_value();
             if (!fixed && !has_attachment) {
-                out.push_back(make(
+                DiagTarget target;
+                const std::string pin_where =
+                    part_pin_where(s, pr, lib, target);
+                out.push_back(make_diag(
                     Severity::Warning, "circsim.erc.floating_pin",
-                    part_pin_where(s, pr, lib) + " is not connected to anything",
-                    part_pin_where(s, pr, lib)));
+                    pin_where + " is not connected to anything", pin_where,
+                    target));
             } else if (!fixed) {
-                out.push_back(make(
+                out.push_back(make_diag(
                     Severity::Warning, "circsim.erc.one_pin_net",
-                    "net " + n.name + " has only one connection",
-                    where));
+                    "net " + n.name + " has only one connection", where,
+                    on_net));
             }
         }
     }
 
     // Missing ground: nets exist but none is "0".
     if (!nets.nets.empty() && nets.ground() == nullptr) {
-        out.push_back(make(Severity::Error, "circsim.erc.missing_ground",
-                           "no ground: every schematic needs a ground (net 0)",
-                           ""));
+        out.push_back(make_diag(Severity::Error, "circsim.erc.missing_ground",
+                                "no ground: every schematic needs a ground"
+                                " (net 0)",
+                                ""));
     }
 
     check_constraint_loops(s, nets, lib, out);

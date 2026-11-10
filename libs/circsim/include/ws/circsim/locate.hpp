@@ -1,26 +1,28 @@
 #pragma once
 
-#include <cstdint>
 #include <optional>
-#include <string_view>
-#include <vector>
 
-#include <ws/circsim/diag.hpp>
+#include <ws/circsim/diag.hpp>  // DiagTarget lives there (producers
+                                // fill it; this seam only consumes it)
 #include <ws/circsim/library.hpp>
 #include <ws/circsim/model.hpp>
 #include <ws/circsim/nets.hpp>
 #include <ws/circsim/symbols.hpp>
 
 // Stage 3 (the editor): turning a Diag back into the object it points
-// at, so the Problems panel can select and zoom. The diags carry their
-// target as a pre-rendered `where` string ("R3", "R3 pin b", "npn 7",
-// "net N004", "directives", "" = file-level) - the format the CLI and
-// the Problems panel show - so this is a parse of that spelling against
-// the schematic plus the export back-map, exactly the seam docs/
-// CIRCSIM_PLAN.md names: element names resolve through
+// at, so the Problems panel can select and zoom.
+//
+// The PREFERRED path: producers (erc/nets/export) fill Diag::target -
+// the structured jump target - at the source, and locate_diag returns
+// it verbatim. The LEGACY path (kept so un-migrated producers keep
+// working): the diag carries its target only as the pre-rendered
+// `where` string ("R3", "R3 pin b", "npn 7", "net N004", "directives",
+// "" = file-level) - the format the CLI and the Problems panel show -
+// and locate_diag parses that spelling against the schematic plus the
+// export back-map: element names resolve through
 // SpiceExport::element_part (the mangled included), net names through
 // NetList::by_name and the export's node_net, pins by name through the
-// symbol table. Nothing here guesses: an unresolvable `where` answers
+// symbol table. Nothing here guesses: an unresolvable spelling answers
 // Kind::None and the panel shows the row without a jump target.
 //
 // focus_bounds() is the zoom answer: the world-space AABB of the
@@ -29,29 +31,9 @@
 
 namespace ws::circsim {
 
-struct DiagTarget {
-    enum class Kind : std::uint8_t {
-        None = 0,      // unresolvable (or file-level: no object)
-        Part = 1,      // .part valid; .pin is a pin index or npos
-        Net = 2,       // .net is a NetList net id
-        Wire = 3,      // .obj is a Wire id (the net builder's findings)
-        Label = 4,     // .obj is a Label id (first of its name)
-        Directives = 5,   // the directives block (no geometry)
-        Analysis = 6,     // the analysis setup (no geometry)
-    };
-    Kind kind = Kind::None;
-    std::uint32_t part = 0;  // Part id (Kind::Part)
-    std::size_t pin = static_cast<std::size_t>(-1);  // pin index, or npos
-    std::uint32_t net = 0;   // Net id (Kind::Net)
-    std::uint32_t obj = 0;   // Wire / Label id
-
-    [[nodiscard]] static constexpr std::size_t npos() {
-        return static_cast<std::size_t>(-1);
-    }
-    [[nodiscard]] bool has_pin() const { return pin != npos(); }
-};
-
-// Parses `d.where` against the schematic. `nets` (nullable) resolves
+// Resolves a Diag to its jump target. A Diag whose `target` is set
+// answers it directly (the producers' structured path). Otherwise this
+// parses `d.where` against the schematic: `nets` (nullable) resolves
 // net names; `map` (nullable) resolves element names through the export
 // back-map - the editor passes both when it has them (an ERC pass has
 // nets, a run outcome has nets + map); `symbols` (nullable, null = the

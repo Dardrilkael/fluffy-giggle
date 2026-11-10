@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstdio>
 #include <map>
 #include <optional>
 #include <string>
@@ -11,38 +10,15 @@
 #include <ws/spice/deck.hpp>
 #include <ws/circsim/export.hpp>
 
+#include "util.hpp"
+
 namespace ws::circsim {
 
 namespace {
 
-std::string lower(std::string_view s) {
-    std::string out(s);
-    std::transform(out.begin(), out.end(), out.begin(),
-                   [](unsigned char c) {
-                       return static_cast<char>(std::tolower(c));
-                   });
-    return out;
-}
-
-std::string fmt_num(double v) {
-    char buf[32];
-    std::snprintf(buf, sizeof buf, "%.12g", v);
-    return buf;
-}
-
-bool is_identifier(std::string_view s) {
-    if (s.empty()) {
-        return false;
-    }
-    for (const char c : s) {
-        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                        (c >= '0' && c <= '9') || c == '_';
-        if (!ok) {
-            return false;
-        }
-    }
-    return true;
-}
+// lower/is_identifier ride util.hpp, fmt_num rides text.hpp - the one
+// definition each (locale-independent; the deck's decimals never answer
+// to LC_NUMERIC).
 
 // A SPICE-safe node token: identifier characters only, never empty, never
 // leading-digit ("+5V" -> "n5V", "in out" -> "inout"). Deterministic, so
@@ -116,20 +92,7 @@ std::string sub_element_name(const Part& p, const SymbolDef& sym, char letter,
     return std::string(1, letter) + body + suffix;
 }
 
-Diag mapped_diag(std::string code, std::string message, std::string where) {
-    Diag d;
-    d.severity = Severity::Error;
-    d.code = std::move(code);
-    d.message = std::move(message);
-    d.where = std::move(where);
-    return d;
-}
-
 }  // namespace
-
-bool CiLess::operator()(const std::string& a, const std::string& b) const {
-    return lower(a) < lower(b);
-}
 
 // --- analysis cards -------------------------------------------------------------
 
@@ -248,6 +211,10 @@ ws::core::Result<AnalysisSpec> parse_analysis_spec(std::string_view text) {
             }
             (k == 0 ? dc.start : k == 1 ? dc.stop : dc.step) = *n;
         }
+        if (const auto problem = analysis_spec_problem(AnalysisSpec{dc})) {
+            return ws::core::unexpected<ws::core::Error>(
+                ws::core::make_error(2, "circsim", *problem));
+        }
         return AnalysisSpec{dc};
     }
     if (kind == "tran") {
@@ -262,6 +229,12 @@ ws::core::Result<AnalysisSpec> parse_analysis_spec(std::string_view text) {
         std::vector<double> nums;
         for (std::size_t k = 1; k < tokens.size(); ++k) {
             if (lower(tokens[k]) == "uic") {
+                if (uic) {
+                    return ws::core::unexpected<ws::core::Error>(
+                        ws::core::make_error(2, "circsim",
+                                             "'uic' appears twice in "
+                                                 "--analysis tran"));
+                }
                 uic = true;
                 continue;
             }
@@ -289,6 +262,10 @@ ws::core::Result<AnalysisSpec> parse_analysis_spec(std::string_view text) {
             t.tmax = nums[3];
         }
         t.uic = uic;
+        if (const auto problem = analysis_spec_problem(AnalysisSpec{t})) {
+            return ws::core::unexpected<ws::core::Error>(
+                ws::core::make_error(2, "circsim", *problem));
+        }
         return AnalysisSpec{t};
     }
     if (kind == "ac") {
@@ -319,9 +296,19 @@ ws::core::Result<AnalysisSpec> parse_analysis_spec(std::string_view text) {
                 ws::core::make_error(2, "circsim",
                                      "bad number in --analysis ac"));
         }
+        if (*n != std::floor(*n)) {
+            return ws::core::unexpected<ws::core::Error>(
+                ws::core::make_error(2, "circsim",
+                                     "ac n must be a whole number, got '" +
+                                         tokens[2] + "'"));
+        }
         ac.n = static_cast<int>(*n);
         ac.fstart = *f1;
         ac.fstop = *f2;
+        if (const auto problem = analysis_spec_problem(AnalysisSpec{ac})) {
+            return ws::core::unexpected<ws::core::Error>(
+                ws::core::make_error(2, "circsim", *problem));
+        }
         return AnalysisSpec{ac};
     }
     if (kind == "noise") {
@@ -371,6 +358,12 @@ ws::core::Result<AnalysisSpec> parse_analysis_spec(std::string_view text) {
                 ws::core::make_error(2, "circsim",
                                      "bad number in --analysis noise"));
         }
+        if (*n != std::floor(*n)) {
+            return ws::core::unexpected<ws::core::Error>(
+                ws::core::make_error(2, "circsim",
+                                     "noise n must be a whole number, got '" +
+                                         tokens[4] + "'"));
+        }
         ns.n = static_cast<int>(*n);
         ns.fstart = *f1;
         ns.fstop = *f2;
@@ -383,6 +376,10 @@ ws::core::Result<AnalysisSpec> parse_analysis_spec(std::string_view text) {
                         "noise summary cadence must be a whole number >= 0"));
             }
             ns.pts_per_summary = static_cast<int>(*pts);
+        }
+        if (const auto problem = analysis_spec_problem(AnalysisSpec{ns})) {
+            return ws::core::unexpected<ws::core::Error>(
+                ws::core::make_error(2, "circsim", *problem));
         }
         return AnalysisSpec{ns};
     }
@@ -442,12 +439,15 @@ ws::core::Result<SpiceExport> export_deck(
         const SymbolDef* sym = lib.find(p.symbol);
         if (sym == nullptr) {
             if (diags != nullptr) {
-                diags->push_back(mapped_diag(
-                    "circsim.export.unknown_symbol",
+                const std::string where =
+                    p.ref.empty()
+                        ? p.symbol + " " + std::to_string(p.id)
+                        : p.ref;
+                diags->push_back(make_diag(
+                    Severity::Error, "circsim.export.unknown_symbol",
                     "part with unknown symbol '" + p.symbol +
                         "' exports no card",
-                    p.ref.empty() ? p.symbol + " " + std::to_string(p.id)
-                                  : p.ref));
+                    where, DiagTarget{DiagTarget::Kind::Part, p.id}));
             }
             continue;
         }
@@ -636,10 +636,12 @@ std::optional<int> leading_line(std::string_view message,
 }
 
 // One spice failure -> one circsim diagnostic: deck line first (part /
-// directives / analysis), then element/node names in the message.
+// directives / analysis), then element/node names in the message. The
+// target rides along structured - no `where` re-parse needed downstream.
 Diag map_spice_error(const Schematic& s, const SpiceExport& map,
                      const std::string& msg) {
     std::string where;
+    DiagTarget target;
     std::string detail = msg;
     const auto line = leading_line(msg, map.deck_name);
     if (line.has_value() && *line >= 1 &&
@@ -651,12 +653,17 @@ Diag map_spice_error(const Schematic& s, const SpiceExport& map,
             where = p != nullptr && !p->ref.empty()
                         ? p->ref
                         : "part " + std::to_string(o.id);
+            target.kind = DiagTarget::Kind::Part;
+            target.part = o.id;
         } else if (o.kind == SpiceExport::Origin::Kind::Directives) {
             where = "directives";
+            target.kind = DiagTarget::Kind::Directives;
         } else if (o.kind == SpiceExport::Origin::Kind::Analysis) {
             where = "analysis setup";
+            target.kind = DiagTarget::Kind::Analysis;
         } else if (o.kind == SpiceExport::Origin::Kind::Temp) {
             where = "simulation setup";
+            target.kind = DiagTarget::Kind::Analysis;
         }
         // Strip the "name:line:col: " prefix for the message body.
         const std::size_t sep = msg.find(": error:");
@@ -664,27 +671,32 @@ Diag map_spice_error(const Schematic& s, const SpiceExport& map,
             detail = msg.substr(sep + 2);  // "error: ..."
         }
     }
-    if (where.empty()) {
+    if (target.kind == DiagTarget::Kind::None) {
         for (const auto& [name, part_id] : map.element_part) {
             if (name.size() >= 2 && msg.find(name) != std::string::npos) {
                 const Part* p = s.find_part(part_id);
                 where = p != nullptr && !p->ref.empty()
                             ? p->ref
                             : "part " + std::to_string(part_id);
+                target.kind = DiagTarget::Kind::Part;
+                target.part = part_id;
                 break;
             }
         }
     }
-    if (where.empty()) {
+    if (target.kind == DiagTarget::Kind::None) {
         for (const auto& [token, net_id] : map.node_net) {
             if (token.size() >= 2 && token[0] >= 'A' &&
                 msg.find(token) != std::string::npos) {
                 where = "net " + token;
+                target.kind = DiagTarget::Kind::Net;
+                target.net = net_id;
                 break;
             }
         }
     }
-    return mapped_diag("circsim.run.failed", detail, where);
+    return make_diag(Severity::Error, "circsim.run.failed", detail, where,
+                     target);
 }
 
 }  // namespace
@@ -712,8 +724,9 @@ RunOutcome run_schematic(const Schematic& s,
     auto deck = export_deck(s, out.nets, &effective, &out.problems, symbols);
     if (!deck) {
         out.run = ws::core::unexpected<ws::core::Error>(deck.error());
-        out.problems.push_back(mapped_diag(
-            "circsim.export.failed", deck.error().message, ""));
+        out.problems.push_back(make_diag(
+            Severity::Error, "circsim.export.failed", deck.error().message,
+            ""));
         return out;
     }
     out.map = std::move(*deck);

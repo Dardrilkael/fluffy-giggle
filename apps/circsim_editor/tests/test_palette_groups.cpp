@@ -31,8 +31,11 @@ TEST_CASE("the built-in symbols land in the fixed group order") {
     CHECK(keys_of(groups[0]) ==
           std::vector<std::string>{"r", "c", "l", "xfmr", "k", "tline"});
     CHECK(groups[1].name == "Sources");
+    // The shelf is the library's own order: v/i, then the E/G four-pin
+    // pair (card order), then the F/H pair that names its controlling
+    // source, then the behavioral source.
     CHECK(keys_of(groups[1]) ==
-          std::vector<std::string>{"v", "i", "e", "f", "g", "h", "b"});
+          std::vector<std::string>{"v", "i", "e", "g", "f", "h", "b"});
     CHECK(groups[2].name == "Semiconductors");
     CHECK(keys_of(groups[2]) ==
           std::vector<std::string>{"d", "led", "npn", "pnp", "nmos", "pmos"});
@@ -116,12 +119,16 @@ TEST_CASE("the filter is a fuzzy word-start match, not just a substring") {
     }
 
     // The skipped-letter typing across the space: "vsrc" walks
-    // "Voltage source" (V then the S-o-u-R-C of "source") and lands
-    // the voltage source alone.
+    // "Voltage source" (V then the S-o-u-R-C of "source"). The loose
+    // walk also reaches the controlled and behavioral sources (their
+    // names carry a word-start V and the s/r/c of "source" too), so
+    // the assertion is the RANK: the voltage source leads - the tile
+    // Enter arms.
     auto vsrc = editor::palette_groups(lib, "vsrc");
     REQUIRE(vsrc.size() == 5);
     CHECK(vsrc[0].name == "Sources");
-    CHECK(keys_of(vsrc[0]) == std::vector<std::string>{"v"});
+    REQUIRE(!vsrc[0].items.empty());
+    CHECK(vsrc[0].items.front()->key == "v");
 
     // "vcvs" walks the VCVS's own name - and the VCCS's too (v, then
     // the c of "C", then the v of "voltage-controlled", then the s of

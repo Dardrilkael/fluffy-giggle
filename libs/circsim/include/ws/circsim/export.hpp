@@ -11,6 +11,7 @@
 #include <ws/circsim/model.hpp>
 #include <ws/circsim/nets.hpp>
 #include <ws/circsim/symbols.hpp>
+#include <ws/circsim/text.hpp>  // CiLess (the map key comparator)
 #include <ws/spice/error.hpp>
 #include <ws/spice/parse.hpp>
 #include <ws/spice/results.hpp>
@@ -28,14 +29,18 @@
 // sanitized node token -> net id, and deck line -> origin, so later stages
 // turn spice diagnostics into Problems-panel entries that select and zoom
 // to the object.
+//
+// THREADING: export_deck and run_schematic are pure reads of Schematic +
+// NetList + SymbolLibrary (run_schematic shares nothing mutable across
+// calls) - safe on any number of threads, provided no thread mutates the
+// schematic concurrently. Deck text rides fmt_num (text.hpp): always the
+// "C" locale, never LC_NUMERIC. See docs/threading.md.
 
 namespace ws::circsim {
 
-// Case-insensitive less-than for the map keys.
-struct CiLess {
-    [[nodiscard]] bool operator()(const std::string& a,
-                                  const std::string& b) const;
-};
+// CiLess (the case-insensitive map comparator) lives in text.hpp,
+// which this header includes - the same name ws::circsim::CiLess the
+// maps below have always keyed on.
 
 struct SpiceExport {
     std::string text;
@@ -72,7 +77,10 @@ struct SpiceExport {
 
 // Parses one CLI --analysis argument: "op" | "dc V1 0 5 0.1" |
 // "tran 1u 1m [tstart [tmax]] [uic]" | "ac dec 10 1 100k" - values use
-// the ws::spice number grammar (1u, 100k, 1meg).
+// the ws::spice number grammar (1u, 100k, 1meg). Invalid VALUES (a
+// zero step, n < 1 or non-whole, an empty output node, reversed
+// ranges, a duplicate uic) are rejected here with a message naming
+// the token - analysis_spec_problem's rules, one layer earlier.
 [[nodiscard]] ws::core::Result<AnalysisSpec> parse_analysis_spec(
     std::string_view text);
 

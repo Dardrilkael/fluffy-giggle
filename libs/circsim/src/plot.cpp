@@ -1,13 +1,15 @@
 // apps/circsim stage 4 - the plot axis math (see include/ws/circsim/
-// plot.hpp for the contracts). Pure <cmath> and <cstdio>; no ws::spice,
-// no ui, so the headless suite gates every decision the Results panel
-// renders.
+// plot.hpp for the contracts). Pure <cmath> plus the text utilities
+// (fmt_num / parse_plain_number - locale-independent by construction,
+// so an axis label never answers to LC_NUMERIC); no ws::spice, no ui,
+// so the headless suite gates every decision the Results panel renders.
 
 #include "ws/circsim/plot.hpp"
 
 #include <cmath>
-#include <cstdio>
-#include <cstring>
+#include <string>
+
+#include "ws/circsim/text.hpp"
 
 namespace ws::circsim {
 
@@ -131,9 +133,7 @@ std::string format_eng(double v, int digits) {
     // through its decade ("999.9m" at 4 digits) renormalizes to the
     // next prefix rather than printing 1000m.
     if (!(av >= 1e-15) || !(av < 1e15)) {
-        char raw[48];
-        std::snprintf(raw, sizeof raw, "%.*g", digits, v);
-        return raw;
+        return fmt_num(v, digits);
     }
     // The initial bucket, clamped to the table before any
     // renormalization walks it upward.
@@ -146,9 +146,14 @@ std::string format_eng(double v, int digits) {
     }
     for (int pass = 0; pass < 2; ++pass) {
         const double scaled = av / pow10(e);
-        char mant[32];
-        std::snprintf(mant, sizeof mant, "%.*g", digits, scaled);
-        const double printed = std::atof(mant);
+        const std::string mant = fmt_num(scaled, digits);
+        // The round-trip check (the old std::atof, but honest about
+        // what it consumed and deaf to LC_NUMERIC). A parse failure
+        // cannot happen for our own output; if it ever did, treating
+        // the mantissa as out-of-bucket walks the renormalization
+        // instead of accepting garbage.
+        const double printed =
+            parse_plain_number(mant).value_or(1000.0);
         if (printed < 1000.0) {
             std::string out;
             if (neg && printed != 0.0) {
@@ -168,17 +173,13 @@ std::string format_eng(double v, int digits) {
         e += kStep;
         if (e > kLastExp) {
             // Rounding up past tera: beyond the table, plain %g.
-            char raw[48];
-            std::snprintf(raw, sizeof raw, "%.*g", digits, v);
-            return raw;
+            return fmt_num(v, digits);
         }
     }
     // Unreachable for inputs inside the table (the renormalized value
     // re-buckets strictly below the ladder top); kept as the honest
     // raw %g tail a promising-string function owes its callers.
-    char raw[48];
-    std::snprintf(raw, sizeof raw, "%.*g", digits, v);
-    return raw;
+    return fmt_num(v, digits);
 }
 
 PlotRange expand_range(double lo, double hi, double frac) {

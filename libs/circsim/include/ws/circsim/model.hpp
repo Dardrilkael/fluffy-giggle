@@ -106,14 +106,23 @@ struct Part {
 // this order (deck order is run order). Same aggregates the ws::spice
 // builder uses, minus the expression layer: values are numbers here, the
 // property grid and the CLI write them.
+//
+// Every spec carries an `unknown` object: fields a newer build wrote
+// inside the entry body that this build does not know ride there and
+// re-emerge on save (the .csim carrier rule, finally extended to the
+// analysis entries - they used to be the one thing a round trip
+// through an older build silently stripped).
 
-struct OpSpec {};
+struct OpSpec {
+    ws::settings::json::Object unknown;
+};
 
 struct DcSpec {
     std::string source;  // "V1", "I2"
     double start = 0.0;
     double stop = 0.0;
     double step = 0.0;
+    ws::settings::json::Object unknown;
 };
 
 struct TranSpec {
@@ -122,6 +131,7 @@ struct TranSpec {
     std::optional<double> tstart;
     std::optional<double> tmax;
     bool uic = false;
+    ws::settings::json::Object unknown;
 };
 
 struct AcSpec {
@@ -130,6 +140,7 @@ struct AcSpec {
     int n = 10;
     double fstart = 1.0;
     double fstop = 1.0e6;
+    ws::settings::json::Object unknown;
 };
 
 // .noise v(out[,ref]) src dec|oct|lin n fstart fstop [pts_per_summary]
@@ -147,6 +158,7 @@ struct NoiseSpec {
     std::string ref;     // optional reference net; empty = ground
     std::string input;   // the input source's element name ("V1", "I2")
     int pts_per_summary = 0;
+    ws::settings::json::Object unknown;
 };
 
 using AnalysisSpec =
@@ -154,9 +166,24 @@ using AnalysisSpec =
 
 struct AnalysisSetup {
     std::vector<AnalysisSpec> entries;
+    // Fields a newer build wrote beside "entries" ride here (the .csim
+    // carrier rule at the analysis root).
+    ws::settings::json::Object unknown;
 
     [[nodiscard]] bool empty() const { return entries.empty(); }
 };
+
+// The shared analysis validation: the first problem with this spec's
+// VALUES (zero steps, empty nodes, non-finite numbers, n < 1, reversed
+// ranges), or nullopt when the spec would run. Both entry doors ride
+// it - the CLI's parse_analysis_spec and the .csim loader's
+// read_analysis - so an invalid analysis is rejected at entry with a
+// message naming the value, not discovered as a mid-run engine error.
+// (Mirrors ws::spice's own semantic checks - .dc step/direction,
+// .tran's 0 <= tstart < tstop, .ac's positive-integer N and
+// 0 < fstart <= fstop - one layer earlier, in circsim's vocabulary.)
+[[nodiscard]] std::optional<std::string> analysis_spec_problem(
+    const AnalysisSpec& a);
 
 struct ViewState {
     double zoom = 1.0;
@@ -165,10 +192,19 @@ struct ViewState {
 };
 
 // --- the schematic ----------------------------------------------------------
-
+//
+// Concurrency: Schematic itself is NOT thread-safe - every mutation
+// (add_*/erase/restore_*/the *_mut() seams/direct field writes) must
+// happen-before any concurrent read, externally synchronized. Given
+// that, the pure read passes (build_nets, run_erc, export_deck,
+// run_schematic) may run on any number of threads at once; see
+// docs/threading.md for the full contract.
 class Schematic {
 public:
-    // A fresh id. Ids start at 1 (0 is the "none" sentinel everywhere).
+    // A fresh id. Ids start at 1 (0 is the "none" sentinel everywhere)
+    // and stop at 0xFFFFFFFE: 0xFFFFFFFF is the reserved ceiling the
+    // loader rejects (see raise_next_id) so the counter can never wrap
+    // a live id.
     [[nodiscard]] std::uint32_t alloc_id() { return next_id_++; }
 
     // Adds with a fresh id (the incoming id field is ignored - the only
@@ -208,22 +244,44 @@ public:
     [[nodiscard]] const std::deque<Wire>& wires() const { return wires_; }
     [[nodiscard]] const std::deque<Label>& labels() const { return labels_; }
 
-    // Direct container access for the loader and the undo commands (the
-    // two writers that manage ids themselves); both must keep next_id
-    // ahead of every id stored and bump() on change.
+    // Direct container access for the editor's undo commands (the
+    // writers that manage ids themselves); both must keep next_id
+    // ahead of every id stored and bump() on change. THE INVARIANTS,
+    // loudly: (1) after any *_mut() mutation that adds or keeps an
+    // entity, next_id must be > every stored id - call raise_next_id
+    // for each - or the next add_* mints a duplicate; (2) every
+    // semantic change must bump() or the editor's caches (nets,
+    // exports, results) serve stale data. The loader does NOT use
+    // these - it rides restore_parts/restore_junctions/restore_wires/
+    // restore_labels, which do both fixups themselves.
     std::deque<Part>& parts_mut() { return parts_; }
     std::deque<Junction>& junctions_mut() { return junctions_; }
     std::deque<Wire>& wires_mut() { return wires_; }
     std::deque<Label>& labels_mut() { return labels_; }
 
-    // Raises next_id above `id` (loader bookkeeping after tolerant reads).
+    // The loader's wholesale restore: swaps the container in, raises
+    // next_id above every id it carries and bumps the revision - the
+    // *_mut() invariants done for you. (set_next_id after this can
+    // still raise the counter further, e.g. to honor a file's own
+    // next_id; it must never lower it below a stored id.)
+    void restore_parts(std::deque<Part> p);
+    void restore_junctions(std::deque<Junction> j);
+    void restore_wires(std::deque<Wire> w);
+    void restore_labels(std::deque<Label> l);
+
+    // Raises next_id above `id`, saturating at the reserved ceiling
+    // (0xFFFFFFFF is never a valid entity id, so id + 1 can never wrap
+    // - the loader rejects files that try to use it).
     void raise_next_id(std::uint32_t id) {
         if (id >= next_id_) {
-            next_id_ = id + 1;
+            next_id_ = id + 1 == 0 ? kIdCeiling : id + 1;
         }
     }
     [[nodiscard]] std::uint32_t next_id() const { return next_id_; }
     void set_next_id(std::uint32_t v) { next_id_ = v; }
+
+    // The largest id any file may carry; next_id saturates here.
+    static constexpr std::uint32_t kIdCeiling = 0xFFFFFFFF;
 
 private:
     // Deques on purpose: references to elements stay valid across further

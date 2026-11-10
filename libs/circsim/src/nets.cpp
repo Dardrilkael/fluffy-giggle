@@ -10,18 +10,15 @@
 
 #include <ws/circsim/nets.hpp>
 
+#include "util.hpp"
+
 namespace ws::circsim {
 
 namespace {
 
-std::string lower(std::string_view s) {
-    std::string out(s);
-    std::transform(out.begin(), out.end(), out.begin(),
-                   [](unsigned char c) {
-                       return static_cast<char>(std::tolower(c));
-                   });
-    return out;
-}
+// lower rides util.hpp (the one ASCII-only, locale-independent
+// definition); the diagnostic factory is make_diag (diag.hpp), every
+// finding below filling Diag::target alongside its display `where`.
 
 // --- union-find --------------------------------------------------------------
 
@@ -101,18 +98,81 @@ struct Entity {
     Pos pos{0.0, 0.0};
 };
 
-Diag net_warn(std::string code, std::string message, std::string where) {
-    Diag d;
-    d.severity = Severity::Warning;
-    d.code = std::move(code);
-    d.message = std::move(message);
-    d.where = std::move(where);
-    return d;
-}
-
 [[nodiscard]] std::uint64_t pin_key(PinRef r) {
     return (static_cast<std::uint64_t>(r.part) << 32) | r.pin;
 }
+
+// --- the segment candidate grid ----------------------------------------------
+// The wire-vertex-on-wire and pin-on-wire coincidence rules are O(W^2)
+// brute force below kGridThreshold wires (every test-sized schematic -
+// zero behavior change), and a uniform grid over segment AABBs above
+// it: each segment lands in every cell its bounding box overlaps (a
+// pathological box covering more than kMaxCells cells rides the
+// always-checked oversize list instead), and a point query touches one
+// cell. Candidates come back sorted by (wire, segment) so the loops
+// below visit exactly the pairs the brute force would, in the same
+// order - identical unions, identical silent joins, just fewer
+// on_polyline calls to get there.
+
+struct SegRef {
+    std::size_t wire;
+    std::size_t seg;  // 1..path.size()-1 (the segment path[seg-1]..path[seg])
+};
+
+struct SegGrid {
+    std::map<std::pair<std::int64_t, std::int64_t>, std::vector<SegRef>>
+        cells;
+    std::vector<SegRef> oversize;
+    double cell = 16.0;
+
+    static constexpr int kMaxCells = 64;  // per segment, each axis
+
+    void insert(std::size_t wire, const std::vector<Pos>& path) {
+        for (std::size_t seg = 1; seg < path.size(); ++seg) {
+            const Pos& a = path[seg - 1];
+            const Pos& b = path[seg];
+            const double lo_x = std::min(a.x, b.x);
+            const double hi_x = std::max(a.x, b.x);
+            const double lo_y = std::min(a.y, b.y);
+            const double hi_y = std::max(a.y, b.y);
+            const auto cell_of = [&](double v) {
+                return static_cast<std::int64_t>(std::floor(v / cell));
+            };
+            const std::int64_t cx0 = cell_of(lo_x);
+            const std::int64_t cx1 = cell_of(hi_x);
+            const std::int64_t cy0 = cell_of(lo_y);
+            const std::int64_t cy1 = cell_of(hi_y);
+            if ((cx1 - cx0 + 1) * (cy1 - cy0 + 1) > kMaxCells) {
+                oversize.push_back({wire, seg});
+                continue;
+            }
+            for (std::int64_t cx = cx0; cx <= cx1; ++cx) {
+                for (std::int64_t cy = cy0; cy <= cy1; ++cy) {
+                    cells[{cx, cy}].push_back({wire, seg});
+                }
+            }
+        }
+    }
+
+    // Every segment whose AABB contains p (its cell, plus the oversize
+    // list), sorted by (wire, seg).
+    void query(Pos p, std::vector<SegRef>& out) const {
+        out.clear();
+        const auto cx = static_cast<std::int64_t>(std::floor(p.x / cell));
+        const auto cy = static_cast<std::int64_t>(std::floor(p.y / cell));
+        const auto it = cells.find({cx, cy});
+        if (it != cells.end()) {
+            out.insert(out.end(), it->second.begin(), it->second.end());
+        }
+        out.insert(out.end(), oversize.begin(), oversize.end());
+        std::sort(out.begin(), out.end(), [](const SegRef& a,
+                                             const SegRef& b) {
+            return a.wire != b.wire ? a.wire < b.wire : a.seg < b.seg;
+        });
+    }
+};
+
+constexpr std::size_t kGridThreshold = 500;
 
 }  // namespace
 
@@ -162,26 +222,29 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
     // Positions where the coincidence rules below connect things with no
     // authored junction dot. An explicit junction anywhere suppresses the
     // record (it draws its own dot); one entry per position, a pin entry
-    // replacing a wire entry at the same spot.
+    // replacing a wire entry at the same spot. The position index beside
+    // the vector answers "already recorded here?" in one lookup (the
+    // old linear rescan made a many-join build quadratic).
     std::set<PosKey> junction_at;
     for (const Junction& j : s.junctions()) {
         junction_at.insert({j.pos.x, j.pos.y});
     }
+    std::map<PosKey, std::size_t> join_at;
     const auto record_join = [&](SilentJoin join) {
         const PosKey key{join.pos.x, join.pos.y};
-        for (SilentJoin& seen : out.silent_joins) {
-            const PosKey at{seen.pos.x, seen.pos.y};
-            if (!(at < key) && !(key < at)) {
-                // Upgrade a wire entry to the pin that names it; a
-                // second wire at the same spot changes nothing (the
-                // first answer stands).
-                if (join.kind == SilentJoin::Kind::PinOnWire &&
-                    seen.kind == SilentJoin::Kind::WireOnWire) {
-                    seen = join;
-                }
-                return;
+        const auto it = join_at.find(key);
+        if (it != join_at.end()) {
+            // Upgrade a wire entry to the pin that names it; a second
+            // wire at the same spot changes nothing (the first answer
+            // stands).
+            SilentJoin& seen = out.silent_joins[it->second];
+            if (join.kind == SilentJoin::Kind::PinOnWire &&
+                seen.kind == SilentJoin::Kind::WireOnWire) {
+                seen = join;
             }
+            return;
         }
+        join_at.emplace(key, out.silent_joins.size());
         out.silent_joins.push_back(join);
     };
 
@@ -214,12 +277,15 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
         const std::uint32_t ea = endpoint_ent(w.a, ok_a);
         const std::uint32_t eb = endpoint_ent(w.b, ok_b);
         if (!ok_a || !ok_b) {
-            out.diags.push_back(net_warn(
+            out.diags.push_back(make_diag(
+                Severity::Warning,
                 "circsim.nets.dangling_wire",
                 "wire " + std::to_string(w.id) +
                     " ends on a pin or junction that does not exist; it is"
                     " dropped from connectivity",
-                "wire " + std::to_string(w.id)));
+                "wire " + std::to_string(w.id),
+                DiagTarget{DiagTarget::Kind::Wire, 0, DiagTarget::npos(), 0,
+                           w.id}));
             continue;
         }
         std::vector<Pos> path;
@@ -243,56 +309,124 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
     }
 
     // --- wire vertices on other wires (the T-junction rule) --------------------
+    // The candidate set comes either from the brute-force scan (small
+    // schematics - exactly the historical behavior) or the segment
+    // grid (large ones); both feed the same per-(vertex, wire) body.
+    //
+    // One wire's vertex v landing on wire wj.
+    const auto vertex_on_wire = [&](std::size_t wi, const Pos& v,
+                                    std::size_t wj) {
+        dsu.unite(wire_ents[wi].first, wire_ents[wj].first);
+        // v on wj's path INTERIOR (not its endpoints), with no
+        // junction drawn there: a merge nothing on the canvas
+        // says. If v is wj's endpoint the contact sits on an
+        // entity both wires reference - a visible landing.
+        if (!same_pos(v, paths[wj].front()) &&
+            !same_pos(v, paths[wj].back()) &&
+            junction_at.count({v.x, v.y}) == 0) {
+            SilentJoin join;
+            join.kind = SilentJoin::Kind::WireOnWire;
+            join.pos = v;
+            join.wire = wires[wi]->id;
+            join.other = wires[wj]->id;
+            record_join(join);
+        }
+    };
+    // "p lies on wire wi's polyline", tested against one wire's
+    // candidate segments (the grid's narrowed on_polyline).
+    const auto on_wire_via_segments = [&](const std::vector<SegRef>& cands,
+                                          std::size_t at, std::size_t end,
+                                          const Pos& p) {
+        for (std::size_t k = at; k < end; ++k) {
+            const SegRef& c = cands[k];
+            if (on_segment(paths[c.wire][c.seg - 1], paths[c.wire][c.seg],
+                           p)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    const bool use_grid = paths.size() >= kGridThreshold;
+    SegGrid grid;
+    if (use_grid) {
+        for (std::size_t wi = 0; wi < paths.size(); ++wi) {
+            grid.insert(wi, paths[wi]);
+        }
+    }
+    std::vector<SegRef> cands;
     for (std::size_t wi = 0; wi < paths.size(); ++wi) {
         for (const Pos& v : paths[wi]) {
+            if (use_grid) {
+                grid.query(v, cands);
+                for (std::size_t at = 0; at < cands.size();) {
+                    std::size_t end = at;
+                    while (end < cands.size() &&
+                           cands[end].wire == cands[at].wire) {
+                        ++end;
+                    }
+                    if (cands[at].wire != wi &&
+                        on_wire_via_segments(cands, at, end, v)) {
+                        vertex_on_wire(wi, v, cands[at].wire);
+                    }
+                    at = end;
+                }
+                continue;
+            }
             for (std::size_t wj = 0; wj < paths.size(); ++wj) {
                 if (wj == wi || !on_polyline(paths[wj], v)) {
                     continue;
                 }
-                dsu.unite(wire_ents[wi].first, wire_ents[wj].first);
-                // v on wj's path INTERIOR (not its endpoints), with no
-                // junction drawn there: a merge nothing on the canvas
-                // says. If v is wj's endpoint the contact sits on an
-                // entity both wires reference - a visible landing.
-                if (!same_pos(v, paths[wj].front()) &&
-                    !same_pos(v, paths[wj].back()) &&
-                    junction_at.count({v.x, v.y}) == 0) {
-                    SilentJoin join;
-                    join.kind = SilentJoin::Kind::WireOnWire;
-                    join.pos = v;
-                    join.wire = wires[wi]->id;
-                    join.other = wires[wj]->id;
-                    record_join(join);
-                }
+                vertex_on_wire(wi, v, wj);
             }
         }
     }
 
     // --- pins/junctions lying on a wire path ------------------------------------
+    // One pin/junction entity e at p landing on wire wi.
+    const auto entity_on_wire = [&](std::uint32_t e, const Pos& p,
+                                    const PosKey& key, std::size_t wi) {
+        dsu.unite(e, wire_ents[wi].first);
+        // A PIN on the path's interior, no junction dot, is a
+        // silent pickup (junction entities draw their own dot;
+        // a pin at a path ENDPOINT is a wire landing on a named
+        // entity - visible). One per position, pins over wires.
+        if (ents[e].kind == Entity::Kind::Pin &&
+            !same_pos(p, paths[wi].front()) &&
+            !same_pos(p, paths[wi].back()) &&
+            junction_at.count(key) == 0) {
+            SilentJoin join;
+            join.kind = SilentJoin::Kind::PinOnWire;
+            join.pos = p;
+            join.part = ents[e].pin.part;
+            join.pin = ents[e].pin.pin;
+            join.wire = wires[wi]->id;
+            record_join(join);
+        }
+    };
     for (const auto& [key, group] : by_pos) {
         const Pos p{key.x, key.y};
         for (std::uint32_t e : group) {
+            if (use_grid) {
+                grid.query(p, cands);
+                for (std::size_t at = 0; at < cands.size();) {
+                    std::size_t end = at;
+                    while (end < cands.size() &&
+                           cands[end].wire == cands[at].wire) {
+                        ++end;
+                    }
+                    if (on_wire_via_segments(cands, at, end, p)) {
+                        entity_on_wire(e, p, key, cands[at].wire);
+                    }
+                    at = end;
+                }
+                continue;
+            }
             for (std::size_t wi = 0; wi < paths.size(); ++wi) {
                 if (!on_polyline(paths[wi], p)) {
                     continue;
                 }
-                dsu.unite(e, wire_ents[wi].first);
-                // A PIN on the path's interior, no junction dot, is a
-                // silent pickup (junction entities draw their own dot;
-                // a pin at a path ENDPOINT is a wire landing on a named
-                // entity - visible). One per position, pins over wires.
-                if (ents[e].kind == Entity::Kind::Pin &&
-                    !same_pos(p, paths[wi].front()) &&
-                    !same_pos(p, paths[wi].back()) &&
-                    junction_at.count(key) == 0) {
-                    SilentJoin join;
-                    join.kind = SilentJoin::Kind::PinOnWire;
-                    join.pos = p;
-                    join.part = ents[e].pin.part;
-                    join.pin = ents[e].pin.pin;
-                    join.wire = wires[wi]->id;
-                    record_join(join);
-                }
+                entity_on_wire(e, p, key, wi);
             }
         }
     }
@@ -330,18 +464,24 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
             dsu.unite(le, interior[0]);
             mark_attached(le);
         } else if (interior.size() >= 2) {
-            out.diags.push_back(net_warn(
+            out.diags.push_back(make_diag(
+                Severity::Warning,
                 "circsim.nets.label_at_crossing",
                 "label '" + l.name + "' sits on a wire crossing; it names"
                 " nothing (move it onto a wire endpoint or away from the"
                 " crossing)",
-                "label " + l.name));
+                "label " + l.name,
+                DiagTarget{DiagTarget::Kind::Label, 0, DiagTarget::npos(), 0,
+                           l.id}));
         } else {
-            out.diags.push_back(net_warn(
+            out.diags.push_back(make_diag(
+                Severity::Warning,
                 "circsim.nets.label_unattached",
                 "label '" + l.name +
                     "' is not on any wire, pin or junction",
-                "label " + l.name));
+                "label " + l.name,
+                DiagTarget{DiagTarget::Kind::Label, 0, DiagTarget::npos(), 0,
+                           l.id}));
         }
     }
     const auto is_attached = [&](std::uint32_t le) {
@@ -494,12 +634,16 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
             g.name = g.label_objs.front()->name;
             for (std::size_t i = 1; i < g.label_objs.size(); ++i) {
                 if (lower(g.label_objs[i]->name) != lower(g.name)) {
-                    out.diags.push_back(net_warn(
+                    out.diags.push_back(make_diag(
+                        Severity::Warning,
                         "circsim.nets.label_conflict",
                         "net carries labels '" + g.name + "' and '" +
                             g.label_objs[i]->name + "'; '" + g.name +
                             "' wins",
-                        "label " + g.name));
+                        "label " + g.name,
+                        DiagTarget{DiagTarget::Kind::Label, 0,
+                                   DiagTarget::npos(), 0,
+                                   g.label_objs.front()->id}));
                 }
             }
         } else if (!g.fixed_name.empty()) {

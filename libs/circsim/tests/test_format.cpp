@@ -380,3 +380,187 @@ TEST_CASE("the temperature field is optional and absent when unset") {
         CHECK(report.diags[0].code == "circsim.format.bad_field");
     }
 }
+
+// --- the hardening batch: the id ceiling, grid snapping, load-time
+// analysis validation, analysis unknowns -------------------------------------
+
+TEST_CASE("the reserved id ceiling is rejected and next_id never wraps") {
+    // id 4294967295 is the reserved ceiling: loading it would leave the
+    // next-id counter nowhere to go, and the next add_part would mint
+    // its duplicate. It must drop, like every unusable id.
+    LoadReport report;
+    const auto at_ceiling = load_csim(R"({
+        "format": "circsim", "version": 1, "next_id": 4294967296,
+        "parts": [
+            {"id": 4294967295, "symbol": "r", "ref": "R1", "value": "1k",
+             "pos": [0, 0], "rot": 0, "mirror": false}
+        ]
+    })",
+                                       report);
+    REQUIRE(at_ceiling.has_value());
+    CHECK(at_ceiling->parts().empty());
+    bool dropped = false;
+    for (const Diag& d : report.diags) {
+        if (d.code == "circsim.format.bad_id") {
+            dropped = true;
+        }
+    }
+    CHECK(dropped);
+
+    // One below the ceiling loads, and the counter lands exactly on the
+    // ceiling (the first alloc mints 4294967295 - unique, since no
+    // stored id can be there).
+    report = LoadReport{};
+    const auto near_ceiling = load_csim(R"({
+        "format": "circsim", "version": 1, "next_id": 1,
+        "parts": [
+            {"id": 4294967294, "symbol": "r", "ref": "R1", "value": "1k",
+             "pos": [0, 0], "rot": 0, "mirror": false}
+        ]
+    })",
+                                         report);
+    REQUIRE(near_ceiling.has_value());
+    CHECK(near_ceiling->parts().size() == 1);
+    CHECK(near_ceiling->next_id() == 4294967295u);
+
+    // A file next_id at the ceiling is out of range (it could only
+    // wrap on alloc); it is ignored, and the stored ids still raise
+    // the counter above themselves.
+    report = LoadReport{};
+    const auto clamped = load_csim(R"({
+        "format": "circsim", "version": 1, "next_id": 4294967295,
+        "parts": [
+            {"id": 7, "symbol": "r", "ref": "R1", "value": "1k",
+             "pos": [0, 0], "rot": 0, "mirror": false}
+        ]
+    })",
+                                   report);
+    REQUIRE(clamped.has_value());
+    CHECK(clamped->next_id() == 8);  // the part's id + 1, not the file's
+}
+
+TEST_CASE("off-grid coordinates snap to the integer grid with a warning") {
+    LoadReport report;
+    const auto snapped = load_csim(R"({
+        "format": "circsim", "version": 1, "next_id": 10,
+        "parts": [
+            {"id": 1, "symbol": "r", "ref": "R1", "value": "1k",
+             "pos": [1.5, 2.25], "rot": 0, "mirror": false}
+        ],
+        "junctions": [{"id": 2, "pos": [3.1, -0.9]}],
+        "labels": [{"id": 3, "pos": [0.5, 0.5], "name": "out"}],
+        "wires": [{"id": 4,
+                   "a": {"pin": {"part": 1, "pin": 0}},
+                   "b": {"junction": {"id": 2}},
+                   "waypoints": [[2.5, 1.5]], "ortho": true}]
+    })",
+                                   report);
+    REQUIRE(snapped.has_value());
+    REQUIRE(snapped->parts().size() == 1);
+    CHECK(snapped->parts().front().pos.x == 2.0);
+    CHECK(snapped->parts().front().pos.y == 2.0);
+    CHECK(snapped->junctions().front().pos.x == 3.0);
+    CHECK(snapped->junctions().front().pos.y == -1.0);
+    CHECK(snapped->labels().front().pos.x == 1.0);
+    CHECK(snapped->labels().front().pos.y == 1.0);
+    REQUIRE(snapped->wires().size() == 1);
+    REQUIRE(snapped->wires().front().waypoints.size() == 1);
+    CHECK(snapped->wires().front().waypoints.front().x == 3.0);
+    CHECK(snapped->wires().front().waypoints.front().y == 2.0);
+
+    std::size_t off_grid = 0;
+    for (const Diag& d : report.diags) {
+        if (d.code == "circsim.format.off_grid") {
+            ++off_grid;
+            CHECK(d.severity == Severity::Warning);
+        }
+    }
+    CHECK(off_grid == 4);  // one per entity: part, junction, label, waypoint
+
+    // The save writes the snapped values (the repair sticks), and a
+    // reload of that save is warning-free.
+    const std::string saved = save_csim(*snapped);
+    LoadReport second;
+    const auto reloaded = load_csim(saved, second);
+    REQUIRE(reloaded.has_value());
+    for (const Diag& d : second.diags) {
+        CHECK(d.code != "circsim.format.off_grid");
+    }
+}
+
+TEST_CASE("invalid analysis values are rejected at load, not at run") {
+    LoadReport report;
+    const auto loaded = load_csim(R"({
+        "format": "circsim", "version": 1, "next_id": 2,
+        "parts": [],
+        "analysis": {"entries": [
+            {"dc": {"source": "V1", "start": 0, "stop": 5, "step": 0}},
+            {"ac": {"sweep": "dec", "n": 0, "fstart": 1, "fstop": 1000}},
+            {"ac": {"sweep": "dec", "n": 1.5, "fstart": 1, "fstop": 1000}},
+            {"tran": {"tstep": 0, "tstop": 0}},
+            {"noise": {"output": "", "input": "V1", "sweep": "dec",
+                       "n": 10, "fstart": 1, "fstop": 1000}},
+            {"op": {}},
+            {"dc": {"source": "V1", "start": 0, "stop": 5, "step": 0.1}}
+        ]}
+    })",
+                                  report);
+    REQUIRE(loaded.has_value());
+    // The five invalid entries are gone; the two valid ones survive,
+    // in order.
+    REQUIRE(loaded->analysis.entries.size() == 2);
+    CHECK(std::holds_alternative<ws::circsim::OpSpec>(
+        loaded->analysis.entries.front()));
+    const auto* dc = std::get_if<ws::circsim::DcSpec>(
+        &loaded->analysis.entries.back());
+    REQUIRE(dc != nullptr);
+    CHECK(dc->step == 0.1);
+    // Each rejection is an error diagnostic that names the analysis.
+    std::size_t bad = 0;
+    for (const Diag& d : report.diags) {
+        if (d.code == "circsim.format.bad_analysis") {
+            ++bad;
+            CHECK(d.severity == Severity::Error);
+            CHECK(d.target.kind == ws::circsim::DiagTarget::Kind::Analysis);
+        }
+    }
+    CHECK(bad == 5);
+}
+
+TEST_CASE("analysis entries and the setup preserve unknown fields") {
+    LoadReport report;
+    const auto loaded = load_csim(R"({
+        "format": "circsim", "version": 1, "next_id": 2,
+        "parts": [],
+        "analysis": {
+            "selected": 2,
+            "entries": [
+                {"dc": {"source": "V1", "start": 0, "stop": 5, "step": 0.1,
+                        "frobnicate": 7}, "note": "the input sweep"},
+                {"op": {"frob": "x"}, "enabled": false}
+            ]
+        }
+    })",
+                                  report);
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->analysis.entries.size() == 2);
+    const auto* dc = std::get_if<ws::circsim::DcSpec>(
+        &loaded->analysis.entries.front());
+    REQUIRE(dc != nullptr);
+    CHECK(dc->unknown.find("frobnicate") != nullptr);
+    CHECK(dc->unknown.find("note") != nullptr);
+    const auto* op = std::get_if<ws::circsim::OpSpec>(
+        &loaded->analysis.entries.back());
+    REQUIRE(op != nullptr);
+    CHECK(op->unknown.find("frob") != nullptr);
+    CHECK(op->unknown.find("enabled") != nullptr);
+    CHECK(loaded->analysis.unknown.find("selected") != nullptr);
+
+    // And they all come back out on save.
+    const std::string saved = save_csim(*loaded);
+    CHECK(saved.find("\"selected\"") != std::string::npos);
+    CHECK(saved.find("\"frobnicate\"") != std::string::npos);
+    CHECK(saved.find("\"note\"") != std::string::npos);
+    CHECK(saved.find("\"enabled\"") != std::string::npos);
+    CHECK(saved.find("\"frob\"") != std::string::npos);
+}

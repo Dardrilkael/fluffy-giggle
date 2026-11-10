@@ -1,7 +1,10 @@
 // Net building: the connectivity rules (reference edges, exact-position
 // coincidence, the crossing exception, labels, power/ground, naming).
 
+#include <algorithm>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <doctest/doctest.h>
 
@@ -386,4 +389,65 @@ TEST_CASE("silent joins: an authored junction suppresses the record") {
     c.part("r", "R1", {0.0, 0.0});  // pin 1 at (3, 0), picked up...
     c.junction(3.0, 0.0);           // ...but the junction says it first
     CHECK(ws::circsim::build_nets(c.s).silent_joins.empty());
+}
+
+// --- the hardening batch: the large-schematic grid path -----------------------
+// Above 500 wires the wire-vertex and pin-on-wire coincidence rules
+// switch from the brute-force scan to the segment grid; the two must
+// answer identically. A comb - one spine, N teeth whose waypoints
+// cross it - is the cleanest proof: every tooth unions through the
+// spine (one net), every crossing waypoint records a silent join.
+
+namespace {
+
+struct CombAnswer {
+    std::size_t nets = 0;
+    std::size_t joins = 0;
+    std::vector<std::pair<double, double>> join_positions;
+};
+
+CombAnswer comb(std::size_t teeth) {
+    Bench b;
+    // The spine runs one unit past the last tooth so no crossing
+    // waypoint sits on a spine endpoint (those are visible landings,
+    // not silent joins).
+    b.wire_j(0, 0, static_cast<double>(teeth) + 1.0, 0);
+    for (std::size_t i = 1; i <= teeth; ++i) {
+        const double x = static_cast<double>(i);
+        b.wire_j(x, -5, x, 5, {Pos{x, 0}});
+    }
+    const NetBuild built = ws::circsim::build_nets(b.s);
+    CombAnswer out;
+    out.nets = built.nets.nets.size();
+    out.joins = built.silent_joins.size();
+    for (const auto& j : built.silent_joins) {
+        out.join_positions.emplace_back(j.pos.x, j.pos.y);
+    }
+    std::sort(out.join_positions.begin(), out.join_positions.end());
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("the segment grid answers what the brute force answers") {
+    // Below the threshold: the historical brute-force path.
+    const CombAnswer small = comb(60);
+    REQUIRE(small.nets == 1);
+    REQUIRE(small.joins == 60);
+    CHECK(small.join_positions.front() == std::make_pair(1.0, 0.0));
+    CHECK(small.join_positions.back() ==
+          std::make_pair(60.0, 0.0));
+
+    // Above the threshold: the grid path, same comb shape.
+    const CombAnswer large = comb(600);
+    REQUIRE(large.nets == 1);
+    REQUIRE(large.joins == 600);
+    CHECK(large.join_positions.front() == std::make_pair(1.0, 0.0));
+    CHECK(large.join_positions.back() ==
+          std::make_pair(600.0, 0.0));
+    // No duplicates, no gaps: exactly the x = 1..600 interior points.
+    for (std::size_t i = 0; i < large.join_positions.size(); ++i) {
+        CHECK(large.join_positions[i] ==
+              std::make_pair(static_cast<double>(i) + 1.0, 0.0));
+    }
 }

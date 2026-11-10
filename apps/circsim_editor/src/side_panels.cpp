@@ -29,6 +29,7 @@
 
 #include <ws/core/assert.hpp>
 #include <ws/circsim/plot.hpp>
+#include <ws/circsim/text.hpp>  // fmt_num: the locale-free %.12g
 #include <ws/input/input.hpp>
 #include <ws/spice/parse.hpp>
 #include <ws/ui/renderer2d.hpp>
@@ -165,8 +166,9 @@ void panel_section(gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
     if (!parsed.has_value()) {
         return {};
     }
-    char plain[64];
-    std::snprintf(plain, sizeof plain, "%.12g", *parsed);
+    // fmt_num: locale-independent, so the readback can never disagree
+    // with the netlist's own spelling under a comma-decimal locale.
+    const std::string plain = ws::circsim::fmt_num(*parsed);
     if (std::string_view{text} == plain) {
         return {};
     }
@@ -224,6 +226,19 @@ void part_text_row(Editor& ed, gui::GuiContext& gui,
 
 // --- the analysis editor ---------------------------------------------------
 
+namespace {
+
+// The panels' one number spelling, plain (no engineering prefix - a
+// 0.1 step should read "0.1", not "100m"): fmt_num, the
+// locale-independent %.12g. A comma-decimal LC_NUMERIC must never leak
+// into a field or row whose value the netlist re-reads. Defined here,
+// early, because the analysis rows below were the first callers.
+[[nodiscard]] std::string plain_num(double v) {
+    return ws::circsim::fmt_num(v);
+}
+
+}  // namespace
+
 // The per-type field rows for one analysis entry; every valid change
 // pushes SetAnalysis. Numbers parse through ws::spice's grammar; an
 // invalid value keeps the old and notes the status line. The labels
@@ -251,8 +266,7 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
     const auto number_row = [&](const char* label, const std::string& skey,
                                 double current, const auto& land,
                                 const char* unit = nullptr) {
-        char current_text[64];
-        std::snprintf(current_text, sizeof current_text, "%.12g", current);
+        const std::string current_text = plain_num(current);
         const std::string key = skey + "." + label;
         char* buf = field_buf(ed, key, current_text);
         if (text_input_tracked(ed, gui, layout, theme,
@@ -520,19 +534,6 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
 
 // --- the analysis list's readable face (side_panels.hpp) ----------------------
 
-namespace {
-
-// The dc sweep's numbers, plain (no engineering prefix - a 0.1 step
-// should read "0.1", not "100m"; the swept source's unit is the
-// user's, not the row's to guess).
-[[nodiscard]] std::string plain_num(double v) {
-    char text[64];
-    std::snprintf(text, sizeof text, "%.12g", v);
-    return text;
-}
-
-}  // namespace
-
 std::string analysis_brief(const ws::circsim::AnalysisSpec& spec) {
     if (std::get_if<ws::circsim::OpSpec>(&spec) != nullptr) {
         return "Operating point (.op)";
@@ -736,12 +737,10 @@ std::string compose_source_wave(const SourceWave& w) {
                 w.kind == SourceWave::Kind::Pulse ? 7 : 6;
             std::string out = head;
             for (std::size_t i = 0; i < n; ++i) {
-                char number[64];
-                std::snprintf(number, sizeof number, "%.12g", w.p[i]);
                 if (i != 0) {
                     out += ' ';
                 }
-                out += number;
+                out += plain_num(w.p[i]);
             }
             out += ')';
             return out;
@@ -757,11 +756,8 @@ std::string source_wave_baseline(const SourceWave& w) {
     switch (w.kind) {
         case SourceWave::Kind::Sin:
         case SourceWave::Kind::Pulse:
-        case SourceWave::Kind::Exp: {
-            char text[64];
-            std::snprintf(text, sizeof text, "%.12g", w.p[0]);
-            return text;
-        }
+        case SourceWave::Kind::Exp:
+            return plain_num(w.p[0]);
         case SourceWave::Kind::Pwl: {
             // The first (t, v) corner's value, when the numbers read:
             // "PWL(0 3 1m 5)" answers 3. Anything else - no pair, a
@@ -781,9 +777,7 @@ std::string source_wave_baseline(const SourceWave& w) {
             if (!split_numbers(inside, numbers) || numbers.size() < 2u) {
                 return {};
             }
-            char text[64];
-            std::snprintf(text, sizeof text, "%.12g", numbers[1]);
-            return text;
+            return plain_num(numbers[1]);
         }
         case SourceWave::Kind::None:
         case SourceWave::Kind::Raw:
@@ -1970,9 +1964,7 @@ void source_wave_editor(Editor& ed, gui::GuiContext& gui,
         const std::string base = part_field_key(p.id, 2, "wave");
         for (int slot = 0; slot < slots; ++slot) {
             const char* label = labels[slot].label;
-            char current_text[64];
-            std::snprintf(current_text, sizeof current_text, "%.12g",
-                          wave.p[slot]);
+            const std::string current_text = plain_num(wave.p[slot]);
             const std::string key = base + "." + label;
             char* buf = field_buf(ed, key, current_text);
             if (text_input_tracked(ed, gui, layout, theme,
@@ -2138,11 +2130,11 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
             // line without the hand-typed "SIN(0 1 1k)".
             source_wave_editor(ed, gui, layout, theme, *p);
         }
-        char where[64];
-        std::snprintf(where, sizeof where, "Position: (%.12g, %.12g)",
-                      p->pos.x, p->pos.y);
+        const std::string where =
+            "Position: (" + plain_num(p->pos.x) + ", " +
+            plain_num(p->pos.y) + ")";
         gui::separator(layout, theme);
-        hint_line(layout, theme, where);
+        hint_line(layout, theme, where.c_str());
         if (gui::button(gui, layout, theme, "Delete part")) {
             push_delete_part(*ed.doc, p->id);
             ed.sel.clear();
@@ -2172,10 +2164,10 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
             ed.sel.clear();
             return;
         }
-        char where[64];
-        std::snprintf(where, sizeof where, "Junction at (%.12g, %.12g)",
-                      j->pos.x, j->pos.y);
-        gui::text(layout, theme, where);
+        const std::string where =
+            "Junction at (" + plain_num(j->pos.x) + ", " +
+            plain_num(j->pos.y) + ")";
+        gui::text(layout, theme, where.c_str());
         if (gui::button(gui, layout, theme, "Delete junction")) {
             // A junction delete is the first wire through it; find the
             // id BEFORE the command runs (it mutates the deque this
@@ -2238,9 +2230,8 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
         return;
     }
     gui::heading(layout, theme, "Schematic");
-    char grid[64];
-    std::snprintf(grid, sizeof grid, "%.12g", ed.schem()->grid);
-    label_line(layout, theme, "Grid", grid);
+    const std::string grid = plain_num(ed.schem()->grid);
+    label_line(layout, theme, "Grid", grid.c_str());
     gui::separator(layout, theme);
 
     // --- the analysis list
@@ -2346,13 +2337,10 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
     // --- the run temperature (§7.7): one row, blank = SPICE's default
     panel_section(layout, theme, "Simulation options");
     {
-        char current_text[64];
-        if (ed.schem()->temp.has_value()) {
-            std::snprintf(current_text, sizeof current_text, "%.12g",
-                          *ed.schem()->temp);
-        } else {
-            current_text[0] = '\0';
-        }
+        const std::string current_text =
+            ed.schem()->temp.has_value()
+                ? plain_num(*ed.schem()->temp)
+                : std::string{};
         char* buf = field_buf(ed, "sim.temp", current_text);
         if (text_input_tracked(ed, gui, layout, theme,
                                "Temperature (temp)##sim.temp", buf, 128)) {

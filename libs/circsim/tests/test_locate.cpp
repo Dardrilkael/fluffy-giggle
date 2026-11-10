@@ -3,9 +3,11 @@
 // the editor zooms to. One case per producer spelling.
 
 #include <string>
+#include <vector>
 
 #include <doctest/doctest.h>
 
+#include <ws/circsim/erc.hpp>
 #include <ws/circsim/export.hpp>
 #include <ws/circsim/locate.hpp>
 #include <ws/circsim/nets.hpp>
@@ -345,4 +347,79 @@ TEST_CASE("focus_bounds answers the net, wire and label extents") {
     CHECK_FALSE(ws::circsim::focus_bounds(none, b.s).has_value());
     none.kind = DiagTarget::Kind::None;
     CHECK_FALSE(ws::circsim::focus_bounds(none, b.s).has_value());
+}
+
+// --- the hardening batch: the structured target path --------------------------
+// Producers now fill Diag::target at the source; locate_diag answers it
+// verbatim, before (and instead of) parsing the `where` string - the
+// legacy parse stays for producers that have not migrated.
+
+TEST_CASE("a structured target answers before the where string is read") {
+    Bench b;
+    Part* r1 = b.r("R1", {0.0, 0.0});
+    Part* r2 = b.r("R2", {10.0, 0.0});
+    b.pin_wire(PinRef{r1->id, 0}, PinRef{r2->id, 0});
+
+    Diag d;
+    d.where = "total garbage the parser can never resolve";
+    d.target.kind = DiagTarget::Kind::Part;
+    d.target.part = r2->id;
+    d.target.pin = 1;
+    const DiagTarget t = ws::circsim::locate_diag(d, b.s, nullptr, nullptr);
+    REQUIRE(t.kind == DiagTarget::Kind::Part);
+    CHECK(t.part == r2->id);
+    CHECK(t.pin == 1);
+
+    // A target survives even when `where` is empty (file-level rows
+    // that still know their object).
+    Diag quiet;
+    quiet.where = "";
+    quiet.target.kind = DiagTarget::Kind::Net;
+    quiet.target.net = 7;
+    const DiagTarget t2 =
+        ws::circsim::locate_diag(quiet, b.s, nullptr, nullptr);
+    CHECK(t2.kind == DiagTarget::Kind::Net);
+    CHECK(t2.net == 7);
+
+    // No target: the legacy string parse still carries the row.
+    Diag legacy;
+    legacy.where = "R1";
+    const DiagTarget t3 =
+        ws::circsim::locate_diag(legacy, b.s, nullptr, nullptr);
+    REQUIRE(t3.kind == DiagTarget::Kind::Part);
+    CHECK(t3.part == r1->id);
+}
+
+TEST_CASE("ERC findings arrive with their targets already filled") {
+    Schematic s;
+    Part* r = s.add_part(
+        Part::make("r", "X9", "1k", {0.0, 0.0}));  // wrong prefix
+    (void)r;
+    const std::vector<Diag> erc = ws::circsim::run_erc(s);
+    bool saw_ref_prefix = false;
+    for (const Diag& d : erc) {
+        if (d.code == "circsim.erc.ref_prefix") {
+            saw_ref_prefix = true;
+            REQUIRE(d.target.kind == DiagTarget::Kind::Part);
+            CHECK(d.target.part == r->id);
+        }
+        if (d.code == "circsim.erc.missing_ground") {
+            CHECK(d.target.kind == DiagTarget::Kind::None);
+        }
+    }
+    CHECK(saw_ref_prefix);
+
+    // A floating pin names the part AND the pin index.
+    Schematic two;
+    Part* a = two.add_part(Part::make("r", "R1", "1k", {0.0, 0.0}));
+    Part* c = two.add_part(Part::make("c", "C1", "1n", {10.0, 0.0}));
+    two.add_part(Part::make("gnd", "", "", {5.0, -5.0}));
+    two.add_wire(Wire::endpoints(PinRef{a->id, 0}, PinRef{c->id, 0}));
+    const std::vector<Diag> erc2 = ws::circsim::run_erc(two);
+    for (const Diag& d : erc2) {
+        if (d.code == "circsim.erc.floating_pin") {
+            REQUIRE(d.target.kind == DiagTarget::Kind::Part);
+            CHECK(d.target.has_pin());
+        }
+    }
 }

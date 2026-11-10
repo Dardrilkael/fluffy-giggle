@@ -3,6 +3,8 @@
 // answers.
 
 #include <cmath>
+#include <clocale>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -20,6 +22,8 @@
 #include <ws/circsim/erc.hpp>
 #include <ws/circsim/export.hpp>
 #include <ws/circsim/nets.hpp>
+#include <ws/circsim/plot.hpp>  // format_eng (the locale proof)
+#include <ws/circsim/text.hpp>  // fmt_num / parse_plain_number
 
 using ws::circsim::AcSpec;
 using ws::circsim::DcSpec;
@@ -1246,4 +1250,134 @@ TEST_CASE("two transformers and a plain inductor never collide on names") {
     CHECK(deck->text.find("K1 L1p L1s 0.99\n") != std::string::npos);
     CHECK(deck->text.find("K1_2 L1p_2 L1s_2 0.99\n") != std::string::npos);
     CHECK(deck->text.find("\nL1p_3 N") != std::string::npos);
+}
+
+// --- the hardening batch: value validation, locale-free numbers ----------------
+
+TEST_CASE("invalid analysis values are rejected at the parser") {
+    // The user's table, one row per line: every one of these used to
+    // parse into a spec the engine would only reject (or accept
+    // wrongly) at run time.
+    CHECK_FALSE(ws::circsim::parse_analysis_spec("ac dec 0 1 100k").has_value());
+    CHECK_FALSE(ws::circsim::parse_analysis_spec("ac dec 1.5 1 100k")
+                    .has_value());
+    CHECK_FALSE(ws::circsim::parse_analysis_spec("tran 0 0").has_value());
+    CHECK_FALSE(ws::circsim::parse_analysis_spec("dc V1 5 5 0").has_value());
+    CHECK_FALSE(ws::circsim::parse_analysis_spec("noise v( ) V1 dec 10 1 1k")
+                    .has_value());
+    CHECK_FALSE(ws::circsim::parse_analysis_spec("tran 1u 1m uic uic")
+                    .has_value());
+    // Direction: the step must point toward the stop.
+    CHECK_FALSE(ws::circsim::parse_analysis_spec("dc V1 0 5 -1").has_value());
+    CHECK_FALSE(ws::circsim::parse_analysis_spec("dc V1 5 0 1").has_value());
+    // Frequencies: 0 < fstart <= fstop, both sweeps.
+    CHECK_FALSE(ws::circsim::parse_analysis_spec("ac dec 10 0 1k").has_value());
+    CHECK_FALSE(ws::circsim::parse_analysis_spec("ac dec 10 100k 1")
+                    .has_value());
+    CHECK_FALSE(ws::circsim::parse_analysis_spec("noise out V1 dec 10 1k 1")
+                    .has_value());
+    // tran: tstart in [0, tstop), tmax > 0.
+    CHECK_FALSE(ws::circsim::parse_analysis_spec("tran 1u 1m 2m").has_value());
+    CHECK_FALSE(ws::circsim::parse_analysis_spec("tran 1u 1m -1m").has_value());
+    CHECK_FALSE(ws::circsim::parse_analysis_spec("tran 1u 1m 0 0")
+                    .has_value());
+
+    // And the edge cases that stay legal:
+    // - tstep 0 = the tstop/100 card convention;
+    // - a dc point sweep (start == stop, nonzero step);
+    // - fstart == fstop (a single-frequency ac point);
+    // - a bare noise node without the v(...) wrapper.
+    const auto tran_auto = ws::circsim::parse_analysis_spec("tran 0 1m");
+    REQUIRE(tran_auto.has_value());
+    const auto* ta = std::get_if<TranSpec>(&*tran_auto);
+    REQUIRE(ta != nullptr);
+    CHECK(ta->tstep == 0.0);
+    CHECK(ta->tstop == 1e-3);
+
+    const auto dc_point = ws::circsim::parse_analysis_spec("dc V1 5 5 0.1");
+    CHECK(dc_point.has_value());
+
+    const auto ac_point = ws::circsim::parse_analysis_spec("ac lin 1 1k 1k");
+    CHECK(ac_point.has_value());
+
+    const auto noise_bare_node =
+        ws::circsim::parse_analysis_spec("noise out V1 dec 10 1 100k");
+    REQUIRE(noise_bare_node.has_value());
+    const auto* nb = std::get_if<NoiseSpec>(&*noise_bare_node);
+    REQUIRE(nb != nullptr);
+    CHECK(nb->output == "out");
+
+    // The shared validator behind both doors, on the spec values
+    // themselves (the .csim loader's path).
+    using ws::circsim::analysis_spec_problem;
+    CHECK(analysis_spec_problem(ws::circsim::AnalysisSpec{OpSpec{}}) == std::nullopt);
+    DcSpec bad_dc;
+    bad_dc.source = "V1";
+    bad_dc.start = 0.0;
+    bad_dc.stop = 5.0;
+    bad_dc.step = 0.0;
+    CHECK(analysis_spec_problem(ws::circsim::AnalysisSpec{bad_dc}).has_value());
+    NoiseSpec empty_out;  // defaults: valid numbers, no output node
+    CHECK(analysis_spec_problem(ws::circsim::AnalysisSpec{empty_out}).has_value());
+    TranSpec zero_stop;
+    zero_stop.tstop = 0.0;
+    CHECK(analysis_spec_problem(ws::circsim::AnalysisSpec{zero_stop}).has_value());
+    AcSpec tiny_n;
+    tiny_n.n = 0;
+    CHECK(analysis_spec_problem(ws::circsim::AnalysisSpec{tiny_n}).has_value());
+}
+
+TEST_CASE("number text is locale-independent") {
+    using ws::circsim::fmt_num;
+    using ws::circsim::parse_plain_number;
+    // The "C"-locale baseline (also the exact historical %.12g output,
+    // which the golden decks pin).
+    CHECK(fmt_num(0.1) == "0.1");
+    CHECK(fmt_num(-0.000123) == "-0.000123");
+    CHECK(fmt_num(1e-5) == "1e-05");
+    CHECK(fmt_num(1e+21) == "1e+21");
+    CHECK(fmt_num(100000.0) == "100000");
+    CHECK(fmt_num(0.0) == "0");
+    // Round trips through the parse (the std::atof replacement).
+    for (const double v : {0.1, -2.5, 1e-7, 999.9, 123456.0}) {
+        const auto back = parse_plain_number(fmt_num(v));
+        REQUIRE(back.has_value());
+        CHECK(*back == v);
+    }
+    CHECK_FALSE(parse_plain_number("").has_value());
+    CHECK_FALSE(parse_plain_number("0.1 junk").has_value());
+    CHECK(parse_plain_number("1e+05").value_or(0.0) == 1e5);
+
+    // The point of the exercise: under a comma-decimal LC_NUMERIC the
+    // old snprintf("%.12g") spells "0,1" and quietly corrupts decks.
+    // Prove it when the runner has such a locale installed; skip
+    // (loudly) when it does not.
+    const char* tried[] = {"de_DE.UTF-8", "de_DE",   "fr_FR.UTF-8",
+                           "fr_FR",       "it_IT.UTF-8", "it_IT"};
+    const char* won = nullptr;
+    for (const char* name : tried) {
+        if (std::setlocale(LC_NUMERIC, name) != nullptr) {
+            won = name;
+            break;
+        }
+    }
+    if (won == nullptr) {
+        MESSAGE("no comma-decimal locale installed; the LC_NUMERIC proof "
+                "is skipped (the 'C' baseline above still stands)");
+        return;
+    }
+    MESSAGE("proving LC_NUMERIC independence under '", won, "'");
+    CHECK(fmt_num(0.1) == "0.1");
+    CHECK(fmt_num(4.7).find(',') == std::string::npos);
+    // The deck itself: a schematic whose temp and analysis spell
+    // decimals must export decimal-pointed text.
+    Schematic s = divider();
+    s.temp = 0.1;
+    const ws::circsim::NetBuild nets = ws::circsim::build_nets(s);
+    const auto deck = ws::circsim::export_deck(s, nets.nets);
+    REQUIRE(deck.has_value());
+    CHECK(deck->text.find(".options temp=0.1\n") != std::string::npos);
+    CHECK(ws::circsim::format_eng(0.001) == "1m");
+    CHECK(ws::circsim::format_eng(4.7) == "4.7");
+    std::setlocale(LC_NUMERIC, "C");
 }

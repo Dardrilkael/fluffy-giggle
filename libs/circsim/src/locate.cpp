@@ -8,10 +8,14 @@
 #include <ws/circsim/export.hpp>
 #include <ws/circsim/locate.hpp>
 
-// The Problems panel's jump seam (stage 3). Every producer renders its
-// target into Diag::where at the source; this file parses that spelling
-// back into the object. The producers and their shapes, all in one
-// place (keep this table true or the panel jumps nowhere):
+#include "util.hpp"
+
+// The Problems panel's jump seam (stage 3). The PREFERRED path: a
+// producer that knew its object filled Diag::target at the source, and
+// locate_diag answers it verbatim - no parsing, no grammar to keep
+// true. The LEGACY path (below) parses the `where` spelling back into
+// the object, for producers that have not migrated; its shapes, all in
+// one place (keep this table true or the panel jumps nowhere):
 //
 //   erc.cpp        "R3" | "npn 7" | "R3 pin b" | "npn 7 pin c"
 //                  "net N004" | "V1, L1, V2" (loops) | "" (ground)
@@ -28,15 +32,6 @@
 
 namespace ws::circsim {
 namespace {
-
-std::string lower(std::string_view s) {
-    std::string out(s);
-    std::transform(out.begin(), out.end(), out.begin(),
-                   [](unsigned char c) {
-                       return static_cast<char>(std::tolower(c));
-                   });
-    return out;
-}
 
 // One token of a (possibly comma-list) where: the part's spelling plus
 // the pin tail when present. "R3 pin b" -> {"R3", "pin b"}; the tail
@@ -313,6 +308,11 @@ void grow_wire(const Wire& w, const Schematic& s,
 DiagTarget locate_diag(const Diag& d, const Schematic& s,
                        const NetList* nets, const SpiceExport* map,
                        const SymbolLibrary* symbols) {
+    // The structured path: a producer that knew its object. Answers
+    // verbatim - no parse, no grammar.
+    if (d.target.kind != DiagTarget::Kind::None) {
+        return d.target;
+    }
     const SymbolLibrary& lib =
         symbols != nullptr ? *symbols : builtin_library();
     if (d.where.empty()) {
