@@ -17,6 +17,7 @@
 
 #include <ws/circsim/export.hpp>
 #include <ws/circsim/overlay.hpp>
+#include <ws/circsim/plot.hpp>
 
 using ws::circsim::OverlayWindow;
 using ws::circsim::SpiceExport;
@@ -229,4 +230,119 @@ TEST_CASE("no table: the overlay is a silent no-op") {
     no_axis.signals.push_back({"v(out)", {1.0, 2.0}});
     CHECK(overlay_window(no_axis).t1 == doctest::Approx(0.0));
     CHECK(overlay_playhead_sample(no_axis, 1.0) == 1u);  // the last row
+}
+
+// --- the .dc sweep (the transport's second axis) -------------------------------
+//
+// The same scrub/play/loop machinery a .tran rides, on the swept
+// source's own axis: strictly increasing values, the playhead in the
+// source's units, the readout naming the source and its unit. The
+// .step family's leading axes never answer - the analysis's own x
+// does.
+
+TEST_CASE("the .dc sweep: the transport scrubs the swept source") {
+    ws::spice::Table t;
+    t.analysis = ws::spice::AnalysisKind::Dc;
+    t.sweep = ws::spice::SweepKind::Swept;
+    t.sweep_names = {"V1"};
+    t.sweep_axes.push_back(
+        {0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0});
+    t.signals.push_back({"v(out)",
+                         {0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8,
+                          0.9, 1.0}});
+
+    CHECK(ws::circsim::overlay_scrubbable(t));
+    const std::span<const double> axis =
+        ws::circsim::overlay_sweep_axis(t);
+    REQUIRE(axis.size() == 11u);
+
+    // The window is the swept source's own range.
+    const OverlayWindow w = overlay_window(t);
+    CHECK(w.t0 == doctest::Approx(0.0));
+    CHECK(w.t1 == doctest::Approx(5.0));
+
+    // The playhead resolves onto the swept axis exactly as a .tran's
+    // resolves onto time: the last sample at or before it.
+    CHECK(ws::circsim::overlay_playhead_sample(t, 0.0) == 0u);
+    CHECK(ws::circsim::overlay_playhead_sample(t, 0.75) == 1u);
+    CHECK(ws::circsim::overlay_playhead_sample(t, 4.99) == 9u);
+    CHECK(ws::circsim::overlay_playhead_sample(t, 5.0) == 10u);
+    CHECK(ws::circsim::overlay_playhead_sample(t, 99.0) == 10u);
+
+    // The scrub walks the same window; the step loops it.
+    CHECK(overlay_scrub(w, 0.5) == doctest::Approx(2.5));
+    CHECK(overlay_step(2.0, w, 0.016, 1.0, 4.0) ==
+          doctest::Approx(2.0 + 0.02));
+
+    // The readout names the source and reads its unit off the name's
+    // leading letter (V is volts, I is amps - the DcSpec grammar).
+    using ws::circsim::overlay_axis_readout;
+    CHECK(overlay_axis_readout(t, 3.4) ==
+          std::string{"V1 = "} + ws::circsim::format_eng(3.4) + "V");
+}
+
+TEST_CASE("the readout spells each axis's own unit") {
+    using ws::circsim::overlay_axis_readout;
+
+    ws::spice::Table tran;
+    tran.sweep = ws::spice::SweepKind::Time;
+    tran.sweep_names = {"time"};
+    tran.sweep_axes.push_back({0.0, 1.2e-3});
+    CHECK(overlay_axis_readout(tran, 1.2e-3) ==
+          ws::circsim::format_eng(1.2e-3) + "s");
+
+    ws::spice::Table isrc;
+    isrc.sweep = ws::spice::SweepKind::Swept;
+    isrc.sweep_names = {"I2"};
+    isrc.sweep_axes.push_back({0.0, 2.0e-3});
+    CHECK(overlay_axis_readout(isrc, 2.0e-3) ==
+          std::string{"I2 = "} + ws::circsim::format_eng(2.0e-3) + "A");
+
+    ws::spice::Table ac;
+    ac.sweep = ws::spice::SweepKind::Frequency;
+    ac.sweep_names = {"frequency"};
+    ac.sweep_axes.push_back({1.0, 1000.0});
+    CHECK(overlay_axis_readout(ac, 1000.0) ==
+          ws::circsim::format_eng(1000.0) + "Hz");
+
+    // A .op sweeps nothing: the empty spelling.
+    ws::spice::Table op;
+    op.sweep = ws::spice::SweepKind::None;
+    CHECK(overlay_axis_readout(op, 0.0).empty());
+}
+
+TEST_CASE("a frequency table is labeled but never scrubbable") {
+    ws::spice::Table ac;
+    ac.analysis = ws::spice::AnalysisKind::Ac;
+    ac.sweep = ws::spice::SweepKind::Frequency;
+    ac.sweep_names = {"frequency"};
+    ac.sweep_axes.push_back({1.0, 10.0, 100.0, 1000.0});
+    CHECK_FALSE(ws::circsim::overlay_scrubbable(ac));
+    // The playhead parks at the last row (the settled spelling) - the
+    // canvas never animates a log axis off a linear track.
+    CHECK(ws::circsim::overlay_playhead_sample(ac, 10.0) == 3u);
+}
+
+TEST_CASE("a .step family's leading axes never answer as the sweep") {
+    ws::spice::Table t;
+    t.analysis = ws::spice::AnalysisKind::Dc;
+    t.sweep = ws::spice::SweepKind::Swept;
+    // The step number leads (step_axes = 1), the swept source follows.
+    t.sweep_names = {"step", "V1"};
+    t.sweep_axes.push_back({1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0});
+    t.sweep_axes.push_back({0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0});
+    t.step_axes = 1;
+    t.signals.push_back({"v(out)", {0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0,
+                                    3.0}});
+
+    CHECK(ws::circsim::overlay_scrubbable(t));
+    const std::span<const double> axis =
+        ws::circsim::overlay_sweep_axis(t);
+    REQUIRE(axis.size() == 8u);
+    CHECK(axis.front() == doctest::Approx(0.0));
+    CHECK(axis.back() == doctest::Approx(3.0));
+    // The playhead 2.5 sits past V1=2 in the FIRST family; the last
+    // sample at or before it is the family's own 2.0 (index 6, not
+    // the step column's answers).
+    CHECK(ws::circsim::overlay_playhead_sample(t, 2.5) == 6u);
 }

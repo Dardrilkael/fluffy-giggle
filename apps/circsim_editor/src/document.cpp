@@ -1256,4 +1256,264 @@ std::string next_ref(const ws::circsim::Schematic& s,
     return sym.ref_prefix + std::to_string(highest + 1);
 }
 
+// --- the group commands (document.hpp: the box-select's landing gear) --------
+
+namespace {
+
+// One group move: every member lands its `to` (undo: back to its
+// `from`), the wire routes riding beside. A member the schematic no
+// longer finds is skipped - the honest shape, the single moves' rule.
+class MoveSetCommand final : public EditCommand {
+  public:
+    MoveSetCommand(SchematicDocument* doc, std::vector<EntityMove> moves,
+                   std::vector<WireRoute> routes,
+                   std::vector<WireRoute> undo_routes)
+        : EditCommand(doc), moves_(std::move(moves)),
+          routes_(std::move(routes)), undo_routes_(std::move(undo_routes)) {}
+
+    void apply() override {
+        land(moves_, true);
+        (void)land_wire_routes(schem(), routes_);
+    }
+    void undo() override {
+        land(moves_, false);
+        (void)land_wire_routes(schem(), undo_routes_);
+    }
+    [[nodiscard]] std::string name() const override { return "Move Set"; }
+    [[nodiscard]] std::size_t memory_estimate() const override {
+        return sizeof(*this) + moves_.size() * sizeof(EntityMove) +
+               routes_bytes(routes_) + routes_bytes(undo_routes_);
+    }
+
+  private:
+    void land(const std::vector<EntityMove>& moves, bool forward) {
+        for (const EntityMove& m : moves) {
+            const ws::circsim::Pos at = forward ? m.to : m.from;
+            switch (m.kind) {
+                case EntityMove::Kind::Part:
+                    if (Part* p = schem().find_part(m.id)) {
+                        p->pos = at;
+                    }
+                    break;
+                case EntityMove::Kind::Junction:
+                    // find_junction answers const only (the model's
+                    // own seam); the mut walk is the writer's path.
+                    for (Junction& j : schem().junctions_mut()) {
+                        if (j.id == m.id) {
+                            j.pos = at;
+                            break;
+                        }
+                    }
+                    break;
+                case EntityMove::Kind::Label:
+                    for (ws::circsim::Label& l : schem().labels_mut()) {
+                        if (l.id == m.id) {
+                            l.pos = at;
+                            break;
+                        }
+                    }
+                    break;
+            }
+        }
+        schem().bump();
+    }
+
+    std::vector<EntityMove> moves_;
+    std::vector<WireRoute> routes_, undo_routes_;
+};
+
+// The paste: the payload's ids are pre-minted, so both directions are
+// the plain container writers - apply inserts everything, undo takes
+// exactly those ids back out (wires first: they name the parts and
+// junctions, the delete cascade's own order).
+class PasteCommand final : public EditCommand {
+  public:
+    PasteCommand(SchematicDocument* doc, PastePayload payload)
+        : EditCommand(doc), payload_(std::move(payload)) {}
+
+    void apply() override {
+        for (const Part& p : payload_.parts) {
+            reinsert_part(schem(), p);
+        }
+        for (const Junction& j : payload_.junctions) {
+            reinsert_junction(schem(), j);
+        }
+        for (const Wire& w : payload_.wires) {
+            reinsert_wire(schem(), w);
+        }
+        for (const ws::circsim::Label& l : payload_.labels) {
+            reinsert_label(schem(), l);
+        }
+    }
+    void undo() override {
+        for (const Wire& w : payload_.wires) {
+            (void)take_wire(schem(), w.id);
+        }
+        for (const Part& p : payload_.parts) {
+            (void)take_part(schem(), p.id);
+        }
+        for (const Junction& j : payload_.junctions) {
+            (void)take_junction(schem(), j.id);
+        }
+        for (const ws::circsim::Label& l : payload_.labels) {
+            (void)take_label(schem(), l.id);
+        }
+        schem().bump();
+    }
+    [[nodiscard]] std::string name() const override { return "Paste"; }
+    [[nodiscard]] std::size_t memory_estimate() const override {
+        return sizeof(*this) + payload_.parts.size() * sizeof(Part) +
+               payload_.wires.size() * sizeof(Wire) +
+               payload_.junctions.size() * sizeof(Junction) +
+               payload_.labels.size() * sizeof(ws::circsim::Label);
+    }
+
+  private:
+    PastePayload payload_;
+};
+
+// The set delete's captured removal: the parts with their cascades,
+// the wires with theirs, the labels - all as the ONE step's payload.
+class DeleteSetCommand final : public EditCommand {
+  public:
+    DeleteSetCommand(SchematicDocument* doc, std::vector<Part> parts,
+                     std::vector<Wire> wires, std::vector<Junction> junctions,
+                     std::vector<ws::circsim::Label> labels)
+        : EditCommand(doc), parts_(std::move(parts)), wires_(std::move(wires)),
+          junctions_(std::move(junctions)), labels_(std::move(labels)) {}
+
+    void apply() override {
+        for (const Wire& w : wires_) {
+            (void)take_wire(schem(), w.id);
+        }
+        for (const Part& p : parts_) {
+            (void)take_part(schem(), p.id);
+        }
+        for (const ws::circsim::Label& l : labels_) {
+            (void)take_label(schem(), l.id);
+        }
+        for (const Junction& j : junctions_) {
+            (void)take_junction(schem(), j.id);
+        }
+        schem().bump();
+    }
+    void undo() override {
+        for (const Part& p : parts_) {
+            reinsert_part(schem(), p);
+        }
+        for (const ws::circsim::Label& l : labels_) {
+            reinsert_label(schem(), l);
+        }
+        for (const Junction& j : junctions_) {
+            reinsert_junction(schem(), j);
+        }
+        for (const Wire& w : wires_) {
+            reinsert_wire(schem(), w);
+        }
+    }
+    [[nodiscard]] std::string name() const override { return "Delete Set"; }
+    [[nodiscard]] std::size_t memory_estimate() const override {
+        return sizeof(*this) + parts_.size() * sizeof(Part) +
+               wires_.size() * sizeof(Wire) +
+               junctions_.size() * sizeof(Junction) +
+               labels_.size() * sizeof(ws::circsim::Label);
+    }
+
+  private:
+    std::vector<Part> parts_;
+    std::vector<Wire> wires_;
+    std::vector<Junction> junctions_;
+    std::vector<ws::circsim::Label> labels_;
+};
+
+}  // namespace
+
+void push_move_set(SchematicDocument& doc, std::vector<EntityMove> moves,
+                   std::vector<WireRoute> routes) {
+    if (moves.empty()) {
+        return;
+    }
+    // The undo shape: every routed wire's CURRENT waypoints (the
+    // single move's own capture, widened to the set).
+    std::vector<WireRoute> undo_routes;
+    undo_routes.reserve(routes.size());
+    for (const WireRoute& r : routes) {
+        if (const Wire* w = doc.schem.find_wire(r.wire)) {
+            undo_routes.push_back(WireRoute{r.wire, w->waypoints});
+        }
+    }
+    (void)doc.undo().push(std::make_unique<MoveSetCommand>(
+        &doc, std::move(moves), std::move(routes),
+        std::move(undo_routes)));
+}
+
+void push_paste(SchematicDocument& doc, PastePayload payload) {
+    if (payload.parts.empty() && payload.junctions.empty() &&
+        payload.wires.empty() && payload.labels.empty()) {
+        return;
+    }
+    (void)doc.undo().push(
+        std::make_unique<PasteCommand>(&doc, std::move(payload)));
+}
+
+bool push_delete_set(SchematicDocument& doc,
+                     const std::vector<std::uint32_t>& parts,
+                     const std::vector<std::uint32_t>& wires,
+                     const std::vector<std::uint32_t>& labels) {
+    const Schematic& s = doc.schem;
+
+    // The wires the removal takes: the named ones plus every wire
+    // that references a named part's pin (the part rule, widened -
+    // deduped by id so a named wire is not captured twice).
+    std::vector<Wire> taking;
+    taking.reserve(wires.size());
+    std::set<std::uint32_t> taken_ids;
+    const auto take_wire_by_id = [&](std::uint32_t id) {
+        if (taken_ids.insert(id).second) {
+            if (const Wire* w = s.find_wire(id)) {
+                taking.push_back(*w);
+            }
+        }
+    };
+    for (std::uint32_t id : wires) {
+        take_wire_by_id(id);
+    }
+    for (std::uint32_t part_id : parts) {
+        for (const Wire& w : s.wires()) {
+            const PinRef* a = std::get_if<PinRef>(&w.a);
+            const PinRef* b = std::get_if<PinRef>(&w.b);
+            if ((a != nullptr && a->part == part_id) ||
+                (b != nullptr && b->part == part_id)) {
+                take_wire_by_id(w.id);
+            }
+        }
+    }
+
+    // The parts and labels themselves (skipping ids the schematic no
+    // longer has - the set is honest, but honest costs nothing here).
+    std::vector<Part> part_copies;
+    for (std::uint32_t id : parts) {
+        if (const Part* p = s.find_part(id)) {
+            part_copies.push_back(*p);
+        }
+    }
+    std::vector<ws::circsim::Label> label_copies;
+    for (std::uint32_t id : labels) {
+        if (const ws::circsim::Label* l = s.find_label(id)) {
+            label_copies.push_back(*l);
+        }
+    }
+    if (part_copies.empty() && taking.empty() && label_copies.empty()) {
+        return false;
+    }
+
+    // The junctions the wire removals orphan (the wire rule: kept
+    // when any surviving wire still wants them).
+    std::vector<Junction> junctions = orphaned_junctions(s, taking);
+    (void)doc.undo().push(std::make_unique<DeleteSetCommand>(
+        &doc, std::move(part_copies), std::move(taking),
+        std::move(junctions), std::move(label_copies)));
+    return true;
+}
+
 }  // namespace editor

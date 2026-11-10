@@ -130,18 +130,41 @@ CMakeLists only wire ws libraries together.
   glows: its i(<element>) probe column (ws::spice's terminal-current
   save) maps through a 20 mA-full sqrt brightness into three halo
   discs under the strokes in the part's `color` param, eased ~120 ms
-  so a light reads as a light; a .tran run grows a transport strip
-  (bottom center: play/pause, a scrub bar, the format_eng time
-  readout) whose playhead the voltages and glows follow - a delivery
-  parks it at the run's end (the settled state), one press sweeps the
-  whole transient across the canvas in ~4 s, looping;
+  so a light reads as a light; a .tran or .dc run grows a transport
+  strip (bottom center: play/pause, a scrub bar, the axis's own
+  format_eng readout - seconds for a .tran, "V1 = 3.4V" for a swept
+  .dc source) whose playhead the voltages and glows follow - a
+  delivery parks it at the run's end (the settled state), one press
+  sweeps the whole run across the canvas in ~4 s, looping (the
+  playhead's units are the sweep table's own axis; a frequency table
+  never drives the clock - its log decade grid would lie under a
+  linear track, so the Results transport row binds to the same one
+  table the canvas strip does);
   the panel's canvas transform composes the exact inverse of its w2s
   (viewport center, zoom with the y flip, -center), so the world
   lands on the same pixels the grid marks at every pan/zoom; the
   Palette over `symbols()` with fitted mini previews and the fuzzy
   word-start search ("res" and "rstr" both arm the resistor; a
   mid-word letter never opens a match, so "res" leaves the sources
-  alone); the Properties panel as a three-tab strip - the selection's
+  alone); the Select tool's GROUP edit: a press on empty space arms
+  the box-select (the drag sweeps a dashed veil, the release lands
+  every part/wire/junction/label it holds - Shift extends instead of
+  replacing; a plain click on empty space still clears, the degenerate
+  box holds nothing), Shift+click toggles one entity into the set,
+  dragging any member moves the whole set by one grid-snapped delta
+  (relative geometry never distorts) as ONE undo step with the
+  attached ortho wires re-routed, Ctrl+C/V/D copy/paste/duplicate on
+  the panel rung (a focused text field keeps its own chords), the
+  clipboard crossing documents with fresh minted ids, renumbered
+  refs (R1 pasted beside R1 becomes R2), lattice-aligned offsets and
+  boundary wires carried as minted junction stubs, and Delete takes
+  the set as one step (junctions die with their wires, the lone
+  rule); the Probe tool (P): a click on a wire, junction, pin or
+  label toggles that net's v(net) curve in Results, a click on a
+  part BODY toggles its i(element) current - the Results panel
+  switches to the table carrying the signal, the legend's checkbox
+  state and the pulse answer with it (the Results panel's own
+  visibility flags, driven from the canvas); the Properties panel as a three-tab strip - the selection's
   rows, the Netlist view, the Simulation setup (the analysis list - op,
   dc, tran, ac, noise, each with its own field rows; the run temperature
   row (blank = SPICE's 27°C, exported as .options temp=); and the
@@ -180,7 +203,8 @@ CMakeLists only wire ws libraries together.
   `tests/test_canvas_panel.cpp` through the canvas_panel_canvas seam
   (every element's recorded geometry equals its w2s answer - the grid
   marks, the snap feedback and the picks speak the same mapping). The
-  bare editor keys (R/M/W/L/F/Del/Esc) bind on the shortcut resolver's
+  bare editor keys (R/M/W/L/P/F/Del/Esc and the Ctrl+C/V/D clipboard
+  trio) bind on the shortcut resolver's
   panel rung - the Schematic panel's own scope, kept out of focused
   text fields by the resolver's text rule. Windows is the shipped
   desktop (native dialogs, single instance); a posix dev box builds and

@@ -251,7 +251,7 @@ struct EditorView {
 
 // --- selection & tools --------------------------------------------------------
 
-enum class Tool : std::uint8_t { Select, Place, Wire, Label };
+enum class Tool : std::uint8_t { Select, Place, Wire, Label, Probe };
 
 struct Selection {
     enum class Kind : std::uint8_t { None, Part, Wire, Junction, Label };
@@ -269,6 +269,52 @@ struct PinHit {
     ws::circsim::PinRef ref{};
     Pos pos{0.0, 0.0};
     int dir = 0;  // the pin's pointing direction, degrees
+};
+
+// --- the group edit: the working set and the clipboard ------------------
+
+// The multi-selection beside the primary: the box tool's set and the
+// shift-clicks' toggles. `sel` stays the anchor - the Properties
+// panel's subject, the frame command's target - while `multi` widens
+// the WORKING set (sel + multi, deduped) the group commands act on:
+// copy/paste/duplicate, the group drag, the group delete. Selection
+// is view state, never document state - it is not undoable, and an
+// undo that removes an entity simply drops it from both halves
+// (selection_set skips ids the schematic no longer finds).
+struct BoxSelect {
+    bool active = false;
+    Pos start_world{0.0, 0.0};
+    Pos cur_world{0.0, 0.0};
+
+    // The world rectangle (normalized: min corner, max corner).
+    [[nodiscard]] std::pair<Pos, Pos> rect() const {
+        return {{std::min(start_world.x, cur_world.x),
+                 std::min(start_world.y, cur_world.y)},
+                {std::max(start_world.x, cur_world.x),
+                 std::max(start_world.y, cur_world.y)}};
+    }
+};
+
+// What a copy captured: the entities verbatim (ids still the
+// ORIGINALS' - paste mints fresh ones against the target schematic)
+// plus the set's bounds center, the paste's own anchor. A wire rides
+// along when BOTH endpoints resolve into the set; a wire whose
+// endpoint does not (a pin of an unselected part, a junction outside
+// the box) is carried as a boundary junction minted at the endpoint's
+// world position, so the pasted stub looks exactly like the drawn
+// one. Editor-lifetime state: the clipboard crosses documents (the
+// whole point of copy/paste), so it lives here, not in the document.
+struct Clipboard {
+    std::vector<ws::circsim::Part> parts;
+    std::vector<ws::circsim::Junction> junctions;
+    std::vector<ws::circsim::Wire> wires;
+    std::vector<ws::circsim::Label> labels;
+    std::optional<Pos> center;  // nullopt = empty clipboard
+
+    [[nodiscard]] bool empty() const {
+        return parts.empty() && junctions.empty() && wires.empty() &&
+               labels.empty();
+    }
 };
 
 // --- the caches ----------------------------------------------------------------
@@ -401,16 +447,18 @@ struct FieldBuf {
 // same question in the next schematic.
 enum class WireColorMode : std::uint8_t { Plain, Nets, Voltage };
 
-// The .tran playback: the transport strip's playhead, in SECONDS. A
-// paused canvas shows the sample at playback.t (a delivery parks it at
-// the run's END - the settled state, what an .op reader means by "the
-// answer"); playing sweeps t across the table's window at a pace that
-// fits the whole run into ~4 s of wall clock (the rate below stretches
-// or shrinks that), looping. The voltage coloring and the LED glow
-// both read the playhead's sample, so a playing transient animates the
-// canvas - and the Results plot wears the same playhead as a swept
-// cursor line (one clock: the canvas strip and the plot's transport
-// row scrub the same field, so no two surfaces can disagree).
+// The .tran/.dc playback: the transport strip's playhead, in the
+// sweep table's OWN axis units - seconds for a .tran, the swept
+// source's value for a .dc. A paused canvas shows the sample at
+// playback.t (a delivery parks it at the run's END - the settled
+// state, what an .op reader means by "the answer"); playing sweeps
+// t across the table's window at a pace that fits the whole run into
+// ~4 s of wall clock (the rate below stretches or shrinks that),
+// looping. The voltage coloring and the LED glow both read the
+// playhead's sample, so a playing transient animates the canvas -
+// and the Results plot wears the same playhead as a swept cursor
+// line (one clock: the canvas strip and the plot's transport row
+// scrub the same field, so no two surfaces can disagree).
 struct Playback {
     static constexpr double kLoopSeconds = 4.0;  // wall clock per sweep
     bool playing = false;
@@ -469,6 +517,13 @@ struct Editor {
     // editors (the app and a test bench) shared one history.
     std::vector<std::string> palette_recent;
     Selection sel;
+    // The multi-selection and the box gesture (see BoxSelect/
+    // Clipboard above). The box arms on a Select-tool press over
+    // empty space and lands its set at release; Shift extends the
+    // landing (and a shift-click toggles one entity) instead of
+    // replacing.
+    std::vector<Selection> multi;
+    BoxSelect box;
 
     // The interactive canvas's view state: the wire paint mode and the
     // .tran playback (see WireColorMode / Playback above). The
@@ -493,6 +548,29 @@ struct Editor {
         Pos grab_offset{0.0, 0.0};  // world: press point - entity pos
         bool moved = false;         // past the click threshold
     } drag;
+
+    // The GROUP move-drag: a press on an entity already in the
+    // working set (when the set holds more than the anchor) drags
+    // the whole set as one. Every member's press-time position is
+    // captured here; the live drag moves them by the (grid-snapped)
+    // DELTA so relative geometry never distorts, and the release
+    // lands ONE undo step over all of them (the attached ortho wires
+    // re-routed once, at the landing). The pressed entity's own
+    // target rules the snap - the same "no jump under the pointer"
+    // the single drag keeps.
+    struct GroupDrag {
+        bool active = false;
+        std::vector<Selection> set;   // the working set at press
+        std::vector<Pos> starts;      // parallel: positions at press
+        std::size_t pressed = 0;      // index into set: the pressed one
+        Pos grab_offset{0.0, 0.0};    // world: press point - its pos
+        Pos start_world{0.0, 0.0};    // the press point
+        bool moved = false;
+    } group_drag;
+
+    // The clipboard (see Clipboard above) - copy fills it, paste (and
+    // duplicate, its one-liner) reads it.
+    Clipboard clipboard;
 
     // The wire draft (the Wire tool between its two clicks).
     struct WireDraft {
@@ -814,6 +892,62 @@ struct Editor {
     [[nodiscard]] std::optional<Bounds> selection_bounds() const;
     bool zoom_to_selection(double margin = 3.0);
 
+    // --- the working set (the group edit's face) -------------------------
+    //
+    // The primary `sel` plus `multi`, deduped, in a stable order
+    // (parts, wires, junctions, labels - the schematic's own deque
+    // order within each kind). Ids the schematic no longer finds
+    // (an undo landed under the selection) are dropped, so the set
+    // is always honest to act on.
+    [[nodiscard]] std::vector<Selection> selection_set() const;
+    // True when `of` is in the working set (the drag's "move the
+    // group" test on press).
+    [[nodiscard]] bool in_selection(const Selection& of) const;
+    // The single-entity select (a plain click): the anchor moves, the
+    // multi set clears.
+    void set_selection(const Selection& of);
+    // A shift-click on an entity: toggles it in the multi set; the
+    // anchor follows a joining entity (the Properties panel shows
+    // what was just added), and the last toggle out clears the
+    // anchor when it was the one leaving.
+    void toggle_selection(const Selection& of);
+    // The box's landing: every part whose bounds, wire whose path,
+    // junction and label whose position the world rectangle touches.
+    // Shift extends the current set; plain replaces it. The anchor
+    // becomes the first part in the box (else the first wire,
+    // junction, label), or the set empties entirely.
+    void select_box(const BoxSelect& box, bool extend);
+
+    // --- copy / paste / duplicate -----------------------------------------
+    //
+    // Copies the working set into the clipboard (empty answer: false,
+    // with a status word). Paste lands a fresh-id, offset copy at
+    // `at` - the cursor-relative rule: the clipboard's center rides
+    // `at`, so a paste lands under the pointer wherever it is; the
+    // offsets are grid-snapped so parts land ON the lattice. Refs
+    // renumber through next_ref against the live schematic (R1
+    // pasted beside R1 becomes R2); custom refs and power symbols
+    // keep theirs. Both answer the pasted set (empty = nothing to
+    // paste / a refused command), and the pasted entities become the
+    // new working selection.
+    bool copy_selection();
+    std::vector<Selection> paste_clipboard(Pos at);
+    // Ctrl+D's body: copy, then paste at the set's center nudged by
+    // (2, -2) grid cells - one step apart, the standard EDA offset.
+    std::vector<Selection> duplicate_selection();
+
+    // --- the probe tool ----------------------------------------------------
+    //
+    // Click a net (a wire, a junction, a pin, a label) to toggle its
+    // v(net) curve in Results; click a part's BODY to toggle its
+    // i(element) current curve. The Results panel switches to the
+    // table that carries the signal (the plot follows the probe),
+    // the curve's visibility flips, and the answer is the status
+    // line ("probe: v(out) shown" - the toast's own words). The
+    // locate pulse fires at the click so the canvas answers too.
+    // `radius` is the pick radius in world units (the canvas's own).
+    [[nodiscard]] std::string probe_at(Pos world, double radius);
+
     // The Place tool's "pin magnetism": the snapped position for a
     // ghost of `sym` at `world`, nudged so the ghost's nearest pin
     // lands exactly on an existing pin within `magnet_radius` (world
@@ -859,11 +993,14 @@ struct Editor {
     // builds (the same millisecond work, independent staleness).
     [[nodiscard]] const ws::circsim::NetList& net_cache();
 
-    // The canvas's .tran table: the Results panel's selected table when
-    // it IS a time sweep, else the run's first - what the transport
-    // strip scrubs and the playback animates. Null when the run has no
-    // transient (or no run at all).
-    [[nodiscard]] const ws::spice::Table* canvas_tran_table() const;
+    // The canvas's sweep table: the Results panel's selected table
+    // when the transport scrubs it (a .tran time axis or a .dc swept
+    // source), else the run's first scrubbable table - what the
+    // transport strip scrubs and the playback animates. Null when
+    // the run has no such table (or no run at all); the playhead's
+    // units are the table's own axis (seconds, or the swept source's
+    // volts/amps).
+    [[nodiscard]] const ws::spice::Table* canvas_sweep_table() const;
 
     // The table's sample the canvas should show: the playback playhead
     // resolved onto the time axis (a .tran axis is strictly increasing;

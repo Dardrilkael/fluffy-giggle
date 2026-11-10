@@ -155,4 +155,55 @@ void push_set_analysis(SchematicDocument& doc, std::size_t index,
 [[nodiscard]] std::string next_ref(const ws::circsim::Schematic& s,
                                    const ws::circsim::SymbolDef& sym);
 
+// --- the group commands (the box-select's landing gear) ---------------------
+//
+// One member of a group move: the entity's kind and id with the
+// from/to pair (the caller captures from at press, to at release -
+// the single moves' own contract, widened to N entities).
+struct EntityMove {
+    enum class Kind : std::uint8_t { Part, Junction, Label };
+    Kind kind = Kind::Part;
+    std::uint32_t id = 0;
+    ws::circsim::Pos from{0.0, 0.0};
+    ws::circsim::Pos to{0.0, 0.0};
+};
+
+// The whole group's move as ONE undo step: every member lands its
+// `to` (undo returns it to its `from`), and the attached wires'
+// fresh-at-the-landing routes ride the same step beside their
+// press-time undo shapes (a route whose wire is gone is skipped -
+// the honest shape, the single move's own rule).
+void push_move_set(SchematicDocument& doc, std::vector<EntityMove> moves,
+                   std::vector<WireRoute> routes = {});
+
+// The paste's cargo: entities with PRE-MINTED ids (the editor mints
+// them against the live schematic while building the payload, the
+// same breath the canvas placements mint in), refs already
+// renumbered, positions already offset - the command itself is the
+// pure insert/remove pair.
+struct PastePayload {
+    std::vector<ws::circsim::Part> parts;
+    std::vector<ws::circsim::Junction> junctions;
+    std::vector<ws::circsim::Wire> wires;
+    std::vector<ws::circsim::Label> labels;
+};
+
+// Inserts the payload as ONE undo step ("Paste"); undo removes
+// exactly those ids, redo re-inserts them (the reinsert path: ids
+// stay, next_id re-raises past them - the ids-are-never-reused
+// rule's own loop hole).
+void push_paste(SchematicDocument& doc, PastePayload payload);
+
+// Removes a working set as ONE undo step: the named parts (each with
+// its wires and the junctions those wires orphan - the part rule),
+// the named wires (with their own orphaned junctions), the labels.
+// Junction ids are not removed directly - a junction dies with its
+// wires (the single-delete rule); a selected junction whose wire
+// survives stays, because the wire still wants it. Returns false
+// when the set named nothing the schematic has.
+[[nodiscard]] bool push_delete_set(
+    SchematicDocument& doc, const std::vector<std::uint32_t>& parts,
+    const std::vector<std::uint32_t>& wires,
+    const std::vector<std::uint32_t>& labels);
+
 }  // namespace editor

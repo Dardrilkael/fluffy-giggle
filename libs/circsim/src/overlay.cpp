@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include <ws/circsim/plot.hpp>
+
 namespace ws::circsim {
 
 namespace {
@@ -40,20 +42,39 @@ namespace {
 
 }  // namespace
 
+std::span<const double> overlay_sweep_axis(const ws::spice::Table& t) {
+    // The leading .step family axes are not the analysis's own x;
+    // step_axes counts them, so the own axis is the first one past
+    // them (a plain table's step_axes is 0 and the answer is axis(0),
+    // the historical behavior).
+    if (t.sweep_axes.empty()) {
+        return {};
+    }
+    const std::size_t k =
+        std::min(t.step_axes, t.sweep_axes.size() - 1u);
+    return t.axis(k);
+}
+
+bool overlay_scrubbable(const ws::spice::Table& t) {
+    return (t.sweep == ws::spice::SweepKind::Time ||
+            t.sweep == ws::spice::SweepKind::Swept) &&
+           !overlay_sweep_axis(t).empty();
+}
+
 std::size_t overlay_playhead_sample(const ws::spice::Table& t,
                                     double playhead) {
     const std::size_t rows = t.row_count();
     if (rows == 0) {
         return 0;
     }
-    if (t.sweep != ws::spice::SweepKind::Time || t.sweep_axes.empty()) {
+    if (!overlay_scrubbable(t)) {
         return rows - 1;  // the sweep's end - the settled answer
     }
-    const std::span<const double> axis = t.axis(0);
+    const std::span<const double> axis = overlay_sweep_axis(t);
     if (axis.empty()) {
         return rows - 1;
     }
-    // The last sample at or before the playhead (a .tran axis is
+    // The last sample at or before the playhead (a .tran/.dc axis is
     // strictly increasing; upper_bound lands past it).
     const auto it = std::upper_bound(axis.begin(), axis.end(), playhead);
     if (it == axis.begin()) {
@@ -64,12 +85,40 @@ std::size_t overlay_playhead_sample(const ws::spice::Table& t,
 
 OverlayWindow overlay_window(const ws::spice::Table& t) {
     OverlayWindow w;
-    const std::span<const double> axis = t.axis(0);
+    const std::span<const double> axis = overlay_sweep_axis(t);
     if (!axis.empty()) {
         w.t0 = axis.front();
         w.t1 = axis.back();
     }
     return w;
+}
+
+std::string overlay_axis_readout(const ws::spice::Table& t,
+                                 double playhead) {
+    switch (t.sweep) {
+        case ws::spice::SweepKind::Time:
+            // The strip's own spelling, kept: the SI value with a
+            // trailing 's', no axis name (time needs no introduction).
+            return format_eng(playhead) + "s";
+        case ws::spice::SweepKind::Swept: {
+            // "V1 = 3.4V": the swept source names itself, and its
+            // leading letter carries the unit (V is volts, I is
+            // amps - the DcSpec source grammar's own rule).
+            std::string name =
+                t.sweep_names.size() > t.step_axes
+                    ? t.sweep_names[t.step_axes]
+                    : std::string{"sweep"};
+            const char unit =
+                !name.empty() && (name[0] == 'I' || name[0] == 'i') ? 'A'
+                                                                     : 'V';
+            return name + " = " + format_eng(playhead) + unit;
+        }
+        case ws::spice::SweepKind::Frequency:
+            return format_eng(playhead) + "Hz";
+        case ws::spice::SweepKind::None:
+            break;
+    }
+    return {};
 }
 
 double overlay_scrub(const OverlayWindow& w, double frac) {

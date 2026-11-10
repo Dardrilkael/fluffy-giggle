@@ -23,6 +23,7 @@
 
 #include <ws/circsim/export.hpp>
 #include <ws/circsim/model.hpp>
+#include <ws/circsim/overlay.hpp>
 #include <ws/input/input.hpp>
 #include <ws/settings/filesystem.hpp>
 #include <ws/ui/canvas/canvas2d.hpp>
@@ -39,6 +40,10 @@ using editor::EditorView;
 using editor::SchematicDocument;
 using editor::Selection;
 using ws::circsim::Pos;
+using ws::circsim::Part;
+using ws::circsim::Junction;
+using ws::circsim::Wire;
+using ws::circsim::Label;
 
 // The bench: an Editor over an untitled document, a CommandListCanvas
 // injected at the schematic seam, and one drawn frame per call. The
@@ -1041,9 +1046,13 @@ void deliver(Editor& ed, ws::circsim::RunOutcome outcome) {
     ed.results.map = std::move(outcome.map);
     ed.playback = editor::Playback{};
     ed.transport_scrub = false;
-    if (const ws::spice::Table* tran = ed.canvas_tran_table();
-        tran != nullptr && !tran->axis(0).empty()) {
-        ed.playback.t = tran->axis(0).back();
+    if (const ws::spice::Table* sweep = ed.canvas_sweep_table();
+        sweep != nullptr) {
+        const std::span<const double> axis =
+            ws::circsim::overlay_sweep_axis(*sweep);
+        if (!axis.empty()) {
+            ed.playback.t = axis.back();
+        }
     }
     ed.results.table = 0;
     ed.results.visible_for = editor::ResultsCache::kNoTable;
@@ -1256,11 +1265,13 @@ TEST_CASE("the transport scrubs and plays the transient") {
     b.doc.schem.analysis.entries.push_back(ws::circsim::TranSpec{
         .tstep = 1e-3, .tstop = 3e-3});
     deliver(b.ed, ws::circsim::run_schematic(b.doc.schem));
-    const ws::spice::Table* tran = b.ed.canvas_tran_table();
+    const ws::spice::Table* tran = b.ed.canvas_sweep_table();
     REQUIRE(tran != nullptr);
-    REQUIRE(!tran->axis(0).empty());
-    const double t0 = tran->axis(0).front();
-    const double t1 = tran->axis(0).back();
+    const std::span<const double> tran_axis =
+        ws::circsim::overlay_sweep_axis(*tran);
+    REQUIRE(!tran_axis.empty());
+    const double t0 = tran_axis.front();
+    const double t1 = tran_axis.back();
 
     // The delivery parks the playhead at the run's end - the settled
     // state an .op reader means by "the answer".
@@ -1314,6 +1325,439 @@ TEST_CASE("the transport scrubs and plays the transient") {
     b.click_screen(tl.rate.x + tl.rate.width * 0.5f,
                    tl.rate.y + tl.rate.height * 0.5f);
     CHECK(b.ed.playback.rate == doctest::Approx(0.25));
+}
+
+// --- the group edit: box-select, copy/paste/duplicate, the probe -----------------
+//
+// The scripted pointer frames drive the panel's own gesture ladder
+// (press edge, held frames, release) - the drag_world helper spells
+// the three frames a box sweep or a group move costs.
+
+// One scripted pointer frame at a screen position: `pressed` is the
+// press edge, `down` the button's hold, `shift` the modifier the
+// pointer rules read (the box's extend, the drag's coarse snap).
+void pointer_frame(Bench& b, ws::math::Vec2 sp, bool pressed, bool down,
+                   bool shift) {
+    b.clc.cmds.clear();
+    ws::input::InputFrame in{};
+    in.mouse_x = sp.x;
+    in.mouse_y = sp.y;
+    in.mouse_present = true;
+    in.mouse_down[0] = down;
+    in.mouse_pressed[0] = pressed;
+    if (shift) {
+        in.key_down[ws::input::keys::kLeftShift] = true;
+    }
+    b.gui.begin_frame(in);
+    gui::LayoutCursor layout;
+    (void)layout.begin_panel(gui::Rect{0.0f, 0.0f, 640.0f, 520.0f},
+                             12.0f, 8.0f);
+    b.body = layout.panel_content();
+    editor::draw_canvas_panel(b.ed, b.gui, layout, b.theme);
+    layout.end_panel();
+    b.gui.end_frame();
+}
+
+// Press at `from` (world), hold-move to `to`, release there - the
+// three frames every drag gesture costs.
+void drag_world(Bench& b, Pos from, Pos to, bool shift = false) {
+    if (!b.ed.view.valid()) {
+        b.draw();
+    }
+    pointer_frame(b, b.ed.view.w2s(from), true, true, shift);
+    pointer_frame(b, b.ed.view.w2s(to), false, true, shift);
+    pointer_frame(b, b.ed.view.w2s(to), false, false, shift);
+}
+
+TEST_CASE("the box-select: a drag over empty space selects the set") {
+    Bench b;
+    const ws::circsim::Part* r1 = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0}));
+    (void)b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R2", "1k", {10.0, 0.0}));
+    // The far pair sits above the first box's reach but inside the
+    // default camera (the press must land on-screen to arm the box).
+    const ws::circsim::Part* far_part = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R3", "1k", {6.0, 8.0}));
+    (void)far_part;
+
+    // The sweep: press in clear space, drag the box over the pair,
+    // release. The far part stays out.
+    drag_world(b, {-4.0, 4.0}, {14.0, -4.0});
+    CHECK_FALSE(b.ed.box.active);  // the release landed the set
+    const std::vector<Selection> set = b.ed.selection_set();
+    REQUIRE(set.size() == 2u);
+    for (const Selection& m : set) {
+        CHECK(m.kind == Selection::Kind::Part);
+        CHECK(m.id != far_part->id);
+    }
+    // The anchor is the first part the box held.
+    CHECK(b.ed.sel.kind == Selection::Kind::Part);
+    CHECK(b.ed.sel.id == r1->id);
+
+    // A plain click on empty space clears the set (the degenerate box
+    // holds nothing) - the old press-to-clear rule, kept.
+    b.click_at({-4.0, 4.0});
+    // ...the click ARMS the box; the release (the next frame without
+    // the button) lands the empty set.
+    pointer_frame(b, b.ed.view.w2s({-4.0, 4.0}), false, false, false);
+    CHECK(b.ed.selection_set().empty());
+    CHECK(b.ed.sel.kind == Selection::Kind::None);
+
+    // Shift extends: a second box over the far part adds it.
+    drag_world(b, {-4.0, 4.0}, {14.0, -4.0});
+    REQUIRE(b.ed.selection_set().size() == 2u);
+    drag_world(b, {2.0, 9.0}, {10.0, 7.0}, /*shift=*/true);
+    CHECK(b.ed.selection_set().size() == 3u);
+}
+
+TEST_CASE("a shift-click toggles one entity into the set") {
+    Bench b;
+    const ws::circsim::Part* r1 = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0}));
+    const ws::circsim::Part* r2 = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R2", "1k", {10.0, 0.0}));
+
+    // Shift+click r2: the anchor moves, the set gains it.
+    pointer_frame(b, {}, false, false, false);  // prime the view
+    const ws::math::Vec2 r2_sp = b.ed.view.w2s({10.0, 0.0});
+    pointer_frame(b, r2_sp, true, true, true);
+    CHECK(b.ed.sel.kind == Selection::Kind::Part);
+    CHECK(b.ed.sel.id == r2->id);
+    REQUIRE(b.ed.selection_set().size() == 1u);
+
+    // Shift+click r1: two in the set, the anchor follows the join.
+    pointer_frame(b, b.ed.view.w2s({0.0, 0.0}), true, true, true);
+    CHECK(b.ed.selection_set().size() == 2u);
+    CHECK(b.ed.sel.id == r1->id);
+
+    // Shift+click r1 again: the toggle takes it back out, the anchor
+    // falls to what remains.
+    pointer_frame(b, b.ed.view.w2s({0.0, 0.0}), true, true, true);
+    CHECK(b.ed.selection_set().size() == 1u);
+    CHECK(b.ed.sel.id == r2->id);
+}
+
+TEST_CASE("the group drag moves the set as ONE undo step") {
+    Bench b;
+    const ws::circsim::Part* r1 = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0}));
+    const ws::circsim::Part* r2 = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R2", "1k", {10.0, 0.0}));
+    drag_world(b, {-4.0, 4.0}, {14.0, -4.0});
+    REQUIRE(b.ed.selection_set().size() == 2u);
+    const std::size_t before = b.doc.undo().undo_count();
+
+    // Drag the set by its first member: press on r1, move (3,3),
+    // release. Both parts ride the one delta.
+    drag_world(b, {0.0, 0.0}, {3.0, 3.0});
+    CHECK(b.doc.undo().undo_count() == before + 1u);
+    const ws::circsim::Part* moved1 = b.doc.schem.find_part(r1->id);
+    const ws::circsim::Part* moved2 = b.doc.schem.find_part(r2->id);
+    REQUIRE(moved1 != nullptr);
+    REQUIRE(moved2 != nullptr);
+    CHECK(moved1->pos.x == doctest::Approx(3.0));
+    CHECK(moved1->pos.y == doctest::Approx(3.0));
+    CHECK(moved2->pos.x == doctest::Approx(13.0));
+    CHECK(moved2->pos.y == doctest::Approx(3.0));
+
+    // One undo returns the whole set.
+    (void)b.doc.undo().undo();
+    CHECK(b.doc.schem.find_part(r1->id)->pos.x == doctest::Approx(0.0));
+    CHECK(b.doc.schem.find_part(r2->id)->pos.x ==
+          doctest::Approx(10.0));
+    CHECK(b.doc.schem.find_part(r2->id)->pos.y == doctest::Approx(0.0));
+}
+
+TEST_CASE("copy/paste: fresh ids, renumbered refs, the geometry kept") {
+    Bench b;
+    const ws::circsim::Part* r1 = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0}));
+    const ws::circsim::Part* r2 = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R2", "2k", {10.0, 0.0}));
+    b.ed.sel = {Selection::Kind::Part, r1->id};
+    b.ed.multi.push_back({Selection::Kind::Part, r2->id});
+
+    CHECK(b.ed.copy_selection());
+    REQUIRE(b.ed.clipboard.parts.size() == 2u);
+    CHECK(b.ed.clipboard.center.has_value());
+
+    const std::vector<Selection> pasted = b.ed.paste_clipboard({20.0, 0.0});
+    REQUIRE(pasted.size() == 2u);
+    CHECK(b.doc.schem.parts().size() == 4u);
+
+    // The pasted pair: fresh ids, renumbered refs (R3, R4 - the next
+    // free numbers per prefix), values kept, relative geometry kept.
+    std::vector<const ws::circsim::Part*> news;
+    for (const Selection& m : pasted) {
+        CHECK(m.kind == Selection::Kind::Part);
+        news.push_back(b.doc.schem.find_part(m.id));
+    }
+    REQUIRE(news[0] != nullptr);
+    REQUIRE(news[1] != nullptr);
+    CHECK(news[0]->id != r1->id);
+    CHECK(news[0]->id != r2->id);
+    CHECK(news[0]->ref == "R3");
+    CHECK(news[1]->ref == "R4");
+    CHECK(news[0]->value == "1k");
+    CHECK(news[1]->value == "2k");
+    CHECK((news[1]->pos.x - news[0]->pos.x) == doctest::Approx(10.0));
+
+    // The paste lands ON the lattice (the copy's own positions are
+    // lattice points, the delta is grid-aligned).
+    const double grid = b.doc.schem.grid;
+    CHECK(std::fmod(news[0]->pos.x, grid) == doctest::Approx(0.0));
+    CHECK(std::fmod(news[0]->pos.y, grid) == doctest::Approx(0.0));
+
+    // One undo removes exactly the pasted pair; the originals stand.
+    (void)b.doc.undo().undo();
+    CHECK(b.doc.schem.parts().size() == 2u);
+    CHECK(b.doc.schem.find_part(r1->id) != nullptr);
+    CHECK(b.doc.schem.find_part(r2->id) != nullptr);
+}
+
+TEST_CASE("copy carries a boundary wire as a minted junction stub") {
+    Bench b;
+    const ws::circsim::Part* r1 = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0}));
+    ws::circsim::Junction far_end;
+    far_end.id = b.doc.schem.alloc_id();
+    far_end.pos = {30.0, 0.0};
+    b.doc.schem.junctions_mut().push_back(far_end);
+    ws::circsim::Wire w;
+    w.id = b.doc.schem.alloc_id();
+    w.a = ws::circsim::PinRef{r1->id, 0};
+    w.b = ws::circsim::JunctionRef{far_end.id};
+    b.doc.schem.wires_mut().push_back(w);
+
+    // The box holds the part and the wire's near half; the far
+    // junction stays out (the boundary case).
+    drag_world(b, {-4.0, 4.0}, {4.0, -4.0});
+    const std::vector<Selection> set = b.ed.selection_set();
+    REQUIRE(set.size() == 2u);  // the part and the wire
+    bool has_wire = false;
+    bool has_part = false;
+    for (const Selection& m : set) {
+        has_wire = has_wire || m.kind == Selection::Kind::Wire;
+        has_part = has_part || m.kind == Selection::Kind::Part;
+    }
+    CHECK(has_wire);
+    CHECK(has_part);
+
+    CHECK(b.ed.copy_selection());
+    // The clipboard: the part, the wire, and ONE boundary junction
+    // minted at the wire's far end - the drawn stub, carried.
+    REQUIRE(b.ed.clipboard.parts.size() == 1u);
+    REQUIRE(b.ed.clipboard.wires.size() == 1u);
+    REQUIRE(b.ed.clipboard.junctions.size() == 1u);
+    CHECK(b.ed.clipboard.junctions[0].pos.x == doctest::Approx(30.0));
+
+    const std::vector<Selection> pasted = b.ed.paste_clipboard({0.0, 20.0});
+    REQUIRE(pasted.size() == 3u);
+    // The pasted wire's endpoints resolve through the FRESH ids: the
+    // part's pin and the minted junction at the offset position.
+    const double dx = 0.0 - b.ed.clipboard.center->x;
+    (void)dx;  // the delta is the clipboard's own; geometry is checked
+               // through the junction below.
+    std::uint32_t pasted_junction = 0;
+    std::uint32_t pasted_wire = 0;
+    for (const Selection& m : pasted) {
+        if (m.kind == Selection::Kind::Junction) {
+            pasted_junction = m.id;
+        } else if (m.kind == Selection::Kind::Wire) {
+            pasted_wire = m.id;
+        }
+    }
+    REQUIRE(pasted_junction != 0u);
+    REQUIRE(pasted_wire != 0u);
+    const ws::circsim::Junction* landed =
+        b.doc.schem.find_junction(pasted_junction);
+    REQUIRE(landed != nullptr);
+    CHECK(landed->pos.y == doctest::Approx(20.0));  // the offset rides
+    const ws::circsim::Wire* landed_wire =
+        b.doc.schem.find_wire(pasted_wire);
+    REQUIRE(landed_wire != nullptr);
+    const ws::circsim::JunctionRef* b_end =
+        std::get_if<ws::circsim::JunctionRef>(&landed_wire->b);
+    REQUIRE(b_end != nullptr);
+    CHECK(b_end->junction == pasted_junction);  // remapped, not stale
+
+    // The undo removes the whole paste: part + wire + junction.
+    (void)b.doc.undo().undo();
+    CHECK(b.doc.schem.junctions().size() == 1u);
+    CHECK(b.doc.schem.wires().size() == 1u);
+    CHECK(b.doc.schem.parts().size() == 1u);
+}
+
+TEST_CASE("duplicate nudges the copy one step, as one undo step") {
+    Bench b;
+    const ws::circsim::Part* r1 = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0}));
+    b.ed.sel = {Selection::Kind::Part, r1->id};
+    const std::size_t before = b.doc.undo().undo_count();
+
+    const std::vector<Selection> pasted = b.ed.duplicate_selection();
+    REQUIRE(pasted.size() == 1u);
+    CHECK(b.doc.undo().undo_count() == before + 1u);
+    const ws::circsim::Part* twin = b.doc.schem.find_part(pasted[0].id);
+    REQUIRE(twin != nullptr);
+    // The nudge: one column over, one row down (the standard EDA
+    // step - the world's y is up, so -2 is one row DOWN the screen).
+    CHECK(twin->pos.x == doctest::Approx(2.0));
+    CHECK(twin->pos.y == doctest::Approx(-2.0));
+    CHECK(twin->ref == "R2");
+
+    (void)b.doc.undo().undo();
+    CHECK(b.doc.schem.parts().size() == 1u);
+}
+
+TEST_CASE("push_delete_set: the working set dies as ONE step") {
+    Bench b;
+    const ws::circsim::Part* r1 = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0}));
+    const ws::circsim::Part* r2 = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R2", "1k", {10.0, 0.0}));
+    (void)b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{r1->id, 0}, ws::circsim::PinRef{r2->id, 0}));
+    REQUIRE(b.doc.schem.wires().size() == 1u);
+
+    // Only the PARTS are named: the wire rides the part rule (a wire
+    // referencing a deleted part's pin goes with it).
+    CHECK(editor::push_delete_set(b.doc, {r1->id, r2->id}, {}, {}));
+    CHECK(b.doc.schem.parts().empty());
+    CHECK(b.doc.schem.wires().empty());
+    CHECK(b.doc.undo().can_undo());
+
+    // One undo restores the whole world - parts and the wire between.
+    (void)b.doc.undo().undo();
+    REQUIRE(b.doc.schem.parts().size() == 2u);
+    REQUIRE(b.doc.schem.wires().size() == 1u);
+    const ws::circsim::PinRef* a =
+        std::get_if<ws::circsim::PinRef>(
+            &b.doc.schem.wires().front().a);
+    REQUIRE(a != nullptr);
+    CHECK(a->part == r1->id);
+}
+
+TEST_CASE("the probe toggles a net's curve in Results") {
+    Bench b;
+    // The divider: V1 - R1 - ground, one .tran to have curves.
+    ws::circsim::Part* v = b.doc.schem.add_part(
+        ws::circsim::Part::make("v", "V1", "5", {0.0, -4.0}));
+    ws::circsim::Part* r = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "1k", {6.0, 0.0}));
+    ws::circsim::Part* g = b.doc.schem.add_part(
+        ws::circsim::Part::make("gnd", "", "", {7.0, -6.0}));
+    (void)b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{v->id, 0}, ws::circsim::PinRef{r->id, 0}));
+    (void)b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{r->id, 1}, ws::circsim::PinRef{g->id, 0}));
+    (void)b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{g->id, 0}, ws::circsim::PinRef{v->id, 1}));
+    b.doc.schem.analysis.entries.push_back(
+        ws::circsim::TranSpec{.tstep = 1e-3, .tstop = 3e-3});
+
+    // Before any run: the honest word, nothing toggled. And a
+    // resistor's body answers "not in the run" even after one - the
+    // honest no, R1 has no current column.
+    CHECK(b.ed.probe_at({6.0, 0.0}, 0.5).find("no results") !=
+          std::string::npos);
+
+    deliver(b.ed, ws::circsim::run_schematic(b.doc.schem));
+    REQUIRE(b.ed.results.has);
+    REQUIRE(!b.ed.results.run.results.tables.empty());
+
+    // Probe the V1 body: its element's current curve, i(V1), flips
+    // (a branch device's current is a table column; a resistor's
+    // never is - the honest "not in the run" answers that one).
+    const std::string first = b.ed.probe_at({0.0, -4.0}, 0.4);
+    CHECK(first == "probe: i(V1) hidden");  // all-visible flips to off
+    CHECK(b.ed.results.visible.size() ==
+          b.ed.results.run.results.tables[b.ed.results.table]
+              .signals.size());
+    std::size_t zeros = 0;
+    for (std::uint8_t f : b.ed.results.visible) {
+        zeros += f == 0u ? 1u : 0u;
+    }
+    CHECK(zeros == 1u);
+    // The same probe again: shown - the toggle, both ways.
+    CHECK(b.ed.probe_at({0.0, -4.0}, 0.4) == "probe: i(V1) shown");
+    zeros = 0;
+    for (std::uint8_t f : b.ed.results.visible) {
+        zeros += f == 0u ? 1u : 0u;
+    }
+    CHECK(zeros == 0u);
+
+    // A resistor's body is the honest no (probes its own element).
+    CHECK(b.ed.probe_at({6.0, 0.0}, 0.4) ==
+          "probe: i(R1) is not in the run");
+
+    // Probe a wire: the net's voltage curve (v(<token>) - the deck's
+    // own node spelling, whatever the auto-namer chose).
+    const ws::circsim::Wire* wire = nullptr;
+    for (const ws::circsim::Wire& w : b.doc.schem.wires()) {
+        const std::vector<Pos> path = b.ed.wire_path(w);
+        if (path.size() >= 2u) {
+            wire = &w;
+            break;
+        }
+    }
+    REQUIRE(wire != nullptr);
+    const std::vector<Pos> path = b.ed.wire_path(*wire);
+    const Pos mid{(path.front().x + path.back().x) * 0.5,
+                  (path.front().y + path.back().y) * 0.5};
+    const std::string net_probe = b.ed.probe_at(mid, 0.5);
+    CHECK(net_probe.find("probe: v(") == 0u);
+    CHECK(net_probe.find("hidden") != std::string::npos);
+}
+
+TEST_CASE("a .dc sweep drives the transport like a transient") {
+    Bench b;
+    ws::circsim::Part* v = b.doc.schem.add_part(
+        ws::circsim::Part::make("v", "V1", "5", {0.0, -4.0}));
+    ws::circsim::Part* r = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "1k", {6.0, 0.0}));
+    ws::circsim::Part* g = b.doc.schem.add_part(
+        ws::circsim::Part::make("gnd", "", "", {7.0, -6.0}));
+    (void)b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{v->id, 0}, ws::circsim::PinRef{r->id, 0}));
+    (void)b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{r->id, 1}, ws::circsim::PinRef{g->id, 0}));
+    (void)b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{g->id, 0}, ws::circsim::PinRef{v->id, 1}));
+    b.doc.schem.analysis.entries.push_back(ws::circsim::DcSpec{
+        .source = "V1", .start = 0.0, .stop = 5.0, .step = 0.5});
+    deliver(b.ed, ws::circsim::run_schematic(b.doc.schem));
+
+    // The .dc table IS the canvas sweep table now.
+    const ws::spice::Table* t = b.ed.canvas_sweep_table();
+    REQUIRE(t != nullptr);
+    CHECK(t->sweep == ws::spice::SweepKind::Swept);
+    const std::span<const double> axis =
+        ws::circsim::overlay_sweep_axis(*t);
+    REQUIRE(axis.size() >= 2u);
+    CHECK(axis.front() == doctest::Approx(0.0));
+    CHECK(axis.back() == doctest::Approx(5.0));
+
+    // The delivery parks the playhead at the sweep's END - the
+    // settled state, in the swept source's own units.
+    CHECK(b.ed.playback.t == doctest::Approx(5.0));
+    CHECK_FALSE(b.ed.playback.playing);
+
+    // The strip draws and scrubs: the bar's left end parks at the
+    // sweep's start (the transport test's own click rule).
+    b.draw();
+    const editor::TransportStripLayout tl =
+        editor::transport_strip_layout(b.body);
+    b.click_screen(tl.bar.x + 1.0f, tl.bar.y + tl.bar.height * 0.5f);
+    CHECK(b.ed.transport_scrub);
+    CHECK(b.ed.playback.t <= 5.0 * 0.01);
+
+    // The playhead resolves samples on the swept axis (the canvas's
+    // voltage coloring rides the same walk).
+    CHECK(editor::Editor::shown_sample(*t, 0.75) == 1u);
+    CHECK(editor::Editor::shown_sample(*t, 4.99) ==
+          axis.size() - 2u);
 }
 
 }  // namespace

@@ -1102,13 +1102,15 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
         }
     }
 
-    // --- the playhead: the transient the canvas animates, swept here
-    // too (patch 0012). The transport row below and the canvas strip
-    // scrub the same playback.t - one clock, so the plot's cursor and
-    // the schematic's LED glow can never disagree. A time-swept table
-    // only; a pointer zoomed away from the playhead simply loses the
-    // line (the view is the truth, the line never stretches to it).
-    if (!by_index && t.sweep == ws::spice::SweepKind::Time) {
+    // --- the playhead: the sweep table the canvas animates, swept
+    // here too (patch 0012). The transport row below and the canvas
+    // strip scrub the same playback.t - one clock, so the plot's
+    // cursor and the schematic's LED glow can never disagree. The
+    // table the clock rides (a .tran time axis or a .dc swept
+    // source) only; a pointer zoomed away from the playhead simply
+    // loses the line (the view is the truth, the line never
+    // stretches to it).
+    if (!by_index && ed.canvas_sweep_table() == &t) {
         const double ph = ed.playback.t;
         if (ph >= pf.vxr.lo && ph <= pf.vxr.hi) {
             const float px = sx(ph);
@@ -1199,19 +1201,25 @@ void draw_value_rows(Editor& ed, gui::LayoutCursor& layout,
     }
 }
 
-// The transient's transport row (patch 0012): the SAME playback the
-// canvas strip wears - play/pause, a scrub track, the SI readout and
-// the rate chip. One clock: a scrub here animates the schematic, a
-// scrub on the canvas sweeps this plot's playhead line, and the two
-// strips can never disagree because there is only one field. Drawn
-// only under a time-swept table (the .op shape has nothing to sweep).
+// The sweep table's transport row (patch 0012): the SAME playback
+// the canvas strip wears - play/pause, a scrub track, the axis
+// readout and the rate chip. One clock: a scrub here animates the
+// schematic, a scrub on the canvas sweeps this plot's playhead line,
+// and the two strips can never disagree because there is only one
+// field. Drawn only when the shown table IS the canvas sweep table
+// (a .tran time axis or a .dc swept source) - the clock's units are
+// that table's own, so no other table may drive it (a frequency
+// sweep's row would write Hz into a seconds clock).
 void draw_transport_row(Editor& ed, gui::GuiContext& gui,
                         gui::LayoutCursor& layout,
                         const gui::ChromeTheme& theme,
                         const ws::spice::Table& t) {
+    if (ed.canvas_sweep_table() != &t) {
+        return;  // the clock belongs to another table's axis
+    }
     const ws::circsim::OverlayWindow w = ws::circsim::overlay_window(t);
     if (!(w.t1 > w.t0)) {
-        return;  // a degenerate transient has nothing to sweep
+        return;  // a degenerate sweep has nothing to sweep
     }
 
     // Play/pause: a paused playhead at the run's end restarts (the
@@ -1270,10 +1278,11 @@ void draw_transport_row(Editor& ed, gui::GuiContext& gui,
                    4.0f, theme.control_on);
 
     // The readout, then the rate chip (the ladder's cycle - the same
-    // field the canvas chip walks).
+    // field the canvas chip walks). The axis's own spelling: seconds
+    // for a .tran, "V1 = 3.4V" for a .dc sweep.
     layout.same_line();
-    std::string label = ws::circsim::format_eng(ed.playback.t);
-    label += 's';
+    const std::string label =
+        ws::circsim::overlay_axis_readout(t, ed.playback.t);
     gui::text(layout, theme, label.c_str());
     layout.same_line();
     if (gui::button(gui, layout, theme,
@@ -1339,7 +1348,26 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
                        combo.combo_open, combo_w)) {
             if (picked >= 0 &&
                 static_cast<std::size_t>(picked) < res.tables.size()) {
+                const bool changed =
+                    ed.results.table != static_cast<std::size_t>(picked);
                 ed.results.table = static_cast<std::size_t>(picked);
+                if (changed) {
+                    // A different table may drive the one clock: the
+                    // playhead re-parks on the new sweep table's own
+                    // axis end and pauses - a seconds playhead left
+                    // running against a volts axis would animate
+                    // nonsense. Nothing scrubbable: the clock stops.
+                    const ws::spice::Table* sweep =
+                        ed.canvas_sweep_table();
+                    if (sweep != nullptr) {
+                        const std::span<const double> axis =
+                            ws::circsim::overlay_sweep_axis(*sweep);
+                        if (!axis.empty()) {
+                            ed.playback.t = axis.back();
+                        }
+                    }
+                    ed.playback.playing = false;
+                }
             }
         }
         layout.same_line();

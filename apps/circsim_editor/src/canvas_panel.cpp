@@ -163,9 +163,10 @@ struct RunPainting {
         ed.results.run.results.tables.empty()) {
         return rp;
     }
-    // The transient the transport scrubs, else the run's first table
-    // at its last row (an .op's single answer, a .dc's sweep end).
-    const ws::spice::Table* t = ed.canvas_tran_table();
+    // The sweep table the transport scrubs, else the run's first
+    // table at its last row (an .op's single answer, a frequency
+    // sweep's end).
+    const ws::spice::Table* t = ed.canvas_sweep_table();
     if (t == nullptr) {
         t = &ed.results.run.results.tables.front();
     }
@@ -402,6 +403,99 @@ bool set_drag_pos(Editor& ed, Pos at) {
 
 // --- one pointer frame -------------------------------------------------------
 
+// A Selection's move-command spelling (the group drag's payload
+// builder): wires carry no position, so they never reach the ask.
+[[nodiscard]] editor::EntityMove::Kind m_kind_of(const Selection& m) {
+    switch (m.kind) {
+        case Selection::Kind::Junction:
+            return editor::EntityMove::Kind::Junction;
+        case Selection::Kind::Label:
+            return editor::EntityMove::Kind::Label;
+        case Selection::Kind::Part:
+        case Selection::Kind::Wire:
+        case Selection::Kind::None:
+            break;
+    }
+    return editor::EntityMove::Kind::Part;
+}
+
+// The group drag's own writers: a member's position read at press
+// (the starts' source) and written live (no undo - the command lands
+// at release, the single drag's own contract).
+[[nodiscard]] std::optional<Pos> member_pos(const Editor& ed,
+                                            const Selection& m) {
+    const ws::circsim::Schematic* s = ed.schem();
+    if (s == nullptr) {
+        return std::nullopt;
+    }
+    switch (m.kind) {
+        case Selection::Kind::Part:
+            if (const ws::circsim::Part* p = s->find_part(m.id)) {
+                return p->pos;
+            }
+            break;
+        case Selection::Kind::Junction:
+            if (const ws::circsim::Junction* j =
+                    s->find_junction(m.id)) {
+                return j->pos;
+            }
+            break;
+        case Selection::Kind::Label:
+            if (const ws::circsim::Label* l = s->find_label(m.id)) {
+                return l->pos;
+            }
+            break;
+        case Selection::Kind::Wire:
+        case Selection::Kind::None:
+            break;
+    }
+    return std::nullopt;
+}
+
+bool set_member_pos(Editor& ed, const Selection& m, Pos at) {
+    ws::circsim::Schematic* s = ed.schem();
+    if (s == nullptr) {
+        return false;
+    }
+    const auto land = [&](double cur_x, double cur_y,
+                          auto&& write) {
+        if (eps_eq(cur_x, at.x, 1e-9) && eps_eq(cur_y, at.y, 1e-9)) {
+            return false;
+        }
+        write(at);
+        s->bump();
+        return true;
+    };
+    switch (m.kind) {
+        case Selection::Kind::Part:
+            if (ws::circsim::Part* p = s->find_part(m.id)) {
+                return land(p->pos.x, p->pos.y,
+                            [&](Pos v) { p->pos = v; });
+            }
+            break;
+        case Selection::Kind::Junction:
+            for (ws::circsim::Junction& j : s->junctions_mut()) {
+                if (j.id == m.id) {
+                    return land(j.pos.x, j.pos.y,
+                                [&](Pos v) { j.pos = v; });
+                }
+            }
+            break;
+        case Selection::Kind::Label:
+            for (ws::circsim::Label& l : s->labels_mut()) {
+                if (l.id == m.id) {
+                    return land(l.pos.x, l.pos.y,
+                                [&](Pos v) { l.pos = v; });
+                }
+            }
+            break;
+        case Selection::Kind::Wire:
+        case Selection::Kind::None:
+            break;
+    }
+    return false;
+}
+
 void handle_pointer(Editor& ed, gui::GuiContext& gui,
                      const gui::Rect& body) {
     // If the tool changed away from Wire, cancel any in-flight draft.
@@ -484,7 +578,7 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
     if (gui.claims_open() && !space_down) {
         // A scrub in flight outranks everything but its own release.
         if (ed.transport_scrub) {
-            const ws::spice::Table* tran = ed.canvas_tran_table();
+            const ws::spice::Table* tran = ed.canvas_sweep_table();
             if (tran == nullptr ||
                 in.mouse_down[ws::input::mouse::kLeft] == 0) {
                 ed.transport_scrub = false;
@@ -502,7 +596,7 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                     return;  // the click never reaches the tools
                 }
             }
-            const ws::spice::Table* tran = ed.canvas_tran_table();
+            const ws::spice::Table* tran = ed.canvas_sweep_table();
             if (tran != nullptr) {
                 const TransportStripLayout tl =
                     transport_strip_layout(body);
@@ -554,6 +648,134 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
         return;  // a pan frame owns the pointer
     }
     ed.pan.armed = false;
+
+    // The box-select in flight: the drag owns the pointer until
+    // release, the move-drag's own rule - no pan, no tool arms while
+    // it runs. The release lands the set (Shift extends the current
+    // set instead of replacing it).
+    if (ed.box.active) {
+        if (in.mouse_down[ws::input::mouse::kLeft] != 0) {
+            ed.box.cur_world = world;
+            return;
+        }
+        ed.box.active = false;
+        if (ed.doc != nullptr) {
+            ed.select_box(ed.box, coarse);
+        }
+        return;
+    }
+
+    // A group drag in flight: the same ownership rule as the single
+    // drag. The pressed member's target rules the snap; the ONE delta
+    // carries every member, so the set's relative geometry never
+    // distorts (two parts half a cell apart stay half a cell apart).
+    if (ed.group_drag.active) {
+        if (in.mouse_down[ws::input::mouse::kLeft] != 0) {
+            const Pos target = ed.snap(
+                Pos{world.x - ed.group_drag.grab_offset.x,
+                    world.y - ed.group_drag.grab_offset.y},
+                coarse);
+            const Pos& start =
+                ed.group_drag.starts[ed.group_drag.pressed];
+            if (!eps_eq(target.x, start.x, 1e-9) ||
+                !eps_eq(target.y, start.y, 1e-9)) {
+                ed.group_drag.moved = true;
+            }
+            if (ed.group_drag.moved) {
+                const Pos delta{target.x - start.x, target.y - start.y};
+                for (std::size_t i = 0; i < ed.group_drag.set.size();
+                     ++i) {
+                    const Pos at{
+                        ed.group_drag.starts[i].x + delta.x,
+                        ed.group_drag.starts[i].y + delta.y};
+                    (void)set_member_pos(ed, ed.group_drag.set[i], at);
+                }
+            }
+            return;
+        }
+        // Release: land ONE undo step over the whole set. The
+        // single-drag release trick, widened: everyone visits the
+        // landing first (the attached ortho wires re-route from the
+        // resolved endpoints there), then goes back to the press
+        // positions so the command captures the real "was".
+        if (ed.group_drag.moved && ed.doc != nullptr) {
+            const Pos target = ed.snap(
+                Pos{world.x - ed.group_drag.grab_offset.x,
+                    world.y - ed.group_drag.grab_offset.y},
+                coarse);
+            const Pos& start =
+                ed.group_drag.starts[ed.group_drag.pressed];
+            const Pos delta{target.x - start.x, target.y - start.y};
+            // Live-move everyone to the landing (for the route read).
+            for (std::size_t i = 0; i < ed.group_drag.set.size(); ++i) {
+                const Pos at{
+                    ed.group_drag.starts[i].x + delta.x,
+                    ed.group_drag.starts[i].y + delta.y};
+                (void)set_member_pos(ed, ed.group_drag.set[i], at);
+            }
+            // The routes, deduped by wire id (a wire bent by two
+            // members would be captured twice with the same shape).
+            std::map<std::uint32_t, WireRoute> routes;
+            for (const Selection& m : ed.group_drag.set) {
+                if (m.kind != Selection::Kind::Part &&
+                    m.kind != Selection::Kind::Junction) {
+                    continue;  // wires and labels carry no attachment
+                }
+                const Editor::Drag::Kind kind =
+                    m.kind == Selection::Kind::Part
+                        ? Editor::Drag::Kind::Part
+                        : Editor::Drag::Kind::Junction;
+                for (WireRoute& r :
+                     ed.attached_wire_routes(kind, m.id)) {
+                    routes[r.wire] = std::move(r);
+                }
+            }
+            // Back to the press positions (the command's "was").
+            for (std::size_t i = 0; i < ed.group_drag.set.size(); ++i) {
+                (void)set_member_pos(ed, ed.group_drag.set[i],
+                                     ed.group_drag.starts[i]);
+            }
+            // The payload, when anything actually moved.
+            std::vector<editor::EntityMove> moves;
+            bool any = false;
+            for (std::size_t i = 0; i < ed.group_drag.set.size(); ++i) {
+                const Pos to{ed.group_drag.starts[i].x + delta.x,
+                              ed.group_drag.starts[i].y + delta.y};
+                const bool moved =
+                    !eps_eq(to.x, ed.group_drag.starts[i].x, 1e-9) ||
+                    !eps_eq(to.y, ed.group_drag.starts[i].y, 1e-9);
+                any = any || moved;
+                editor::EntityMove mv;
+                mv.id = ed.group_drag.set[i].id;
+                mv.from = ed.group_drag.starts[i];
+                mv.to = to;
+                mv.kind = m_kind_of(ed.group_drag.set[i]);
+                moves.push_back(mv);
+            }
+            if (any) {
+                std::vector<WireRoute> route_list;
+                route_list.reserve(routes.size());
+                for (auto& [_, r] : routes) {
+                    route_list.push_back(std::move(r));
+                }
+                editor::push_move_set(*ed.doc, std::move(moves),
+                                      std::move(route_list));
+            } else {
+                // Nothing moved: put everyone back at the landing the
+                // live drag had left them at (a no-op command would
+                // be an undo step that does nothing).
+                for (std::size_t i = 0; i < ed.group_drag.set.size();
+                     ++i) {
+                    const Pos at{
+                        ed.group_drag.starts[i].x + delta.x,
+                        ed.group_drag.starts[i].y + delta.y};
+                    (void)set_member_pos(ed, ed.group_drag.set[i], at);
+                }
+            }
+        }
+        ed.group_drag = Editor::GroupDrag{};
+        return;
+    }
 
     // A drag in flight outranks every tool arming.
     if (ed.drag.kind != Editor::Drag::Kind::None) {
@@ -617,7 +839,55 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
         switch (ed.tool) {
             case Tool::Select: {
                 const Selection hit = ed.hit_any(world, pick);
-                ed.sel = hit;
+                if (hit.kind == Selection::Kind::None) {
+                    // Empty space arms the box: a drag sweeps the
+                    // rectangle, a plain click lands an empty box and
+                    // CLEARS the set (the old press-to-clear rule,
+                    // kept - just answered at release, the box's own
+                    // grammar).
+                    if (ed.doc != nullptr) {
+                        ed.box = BoxSelect{};
+                        ed.box.active = true;
+                        ed.box.start_world = ed.snap(world);
+                        ed.box.cur_world = ed.box.start_world;
+                    }
+                    break;
+                }
+                if (coarse) {
+                    // Shift+click toggles the entity into the set -
+                    // no drag starts from a toggle press (the set is
+                    // the subject, not the pointer's cargo).
+                    ed.toggle_selection(hit);
+                    break;
+                }
+                // A press on a member of a wider set drags the SET
+                // (the box's own payoff); a press outside it starts
+                // fresh, the plain single click it always was.
+                const std::vector<Selection> set = ed.selection_set();
+                if (set.size() > 1 && ed.in_selection(hit)) {
+                    Editor::GroupDrag gd;
+                    gd.active = true;
+                    bool pressed_found = false;
+                    for (const Selection& m : set) {
+                        const std::optional<Pos> at = member_pos(ed, m);
+                        if (!at.has_value()) {
+                            continue;
+                        }
+                        gd.set.push_back(m);
+                        gd.starts.push_back(*at);
+                        if (m.kind == hit.kind && m.id == hit.id) {
+                            gd.pressed = gd.starts.size() - 1u;
+                            gd.grab_offset =
+                                Pos{world.x - at->x, world.y - at->y};
+                            pressed_found = true;
+                        }
+                    }
+                    if (pressed_found) {
+                        ed.group_drag = std::move(gd);
+                        break;
+                    }
+                }
+                ed.set_selection(hit);
                 if (hit.kind == Selection::Kind::Part) {
                     if (const ws::circsim::Part* p =
                             ed.schem()->find_part(hit.id)) {
@@ -800,16 +1070,28 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                 push_place_label(*ed.doc, std::move(l));
                 break;
             }
+            case Tool::Probe: {
+                // The probe stays armed (the wire tool's rule): a run
+                // of clicks toggles a run of curves, Esc or a right
+                // click puts the Select tool back.
+                if (ed.doc == nullptr) {
+                    break;
+                }
+                ed.status(ed.probe_at(world, pick));
+                break;
+            }
         }
         return;
     }
 
-    // Right click: the staging - the in-flight draft cancels first, the
-    // tool disarms second, the selection clears last (a stray click
-    // used to kill the draft AND the tool in one go; the Esc command
-    // keeps the same ladder).
+    // Right click: the staging - the in-flight box cancels first,
+    // then the draft, the tool disarms, the selection clears last (a
+    // stray click used to kill the draft AND the tool in one go; the
+    // Esc command keeps the same ladder).
     if (in.mouse_pressed[ws::input::mouse::kRight] != 0) {
-        if (ed.wire_draft.active) {
+        if (ed.box.active) {
+            ed.box = BoxSelect{};
+        } else if (ed.wire_draft.active) {
             ed.wire_draft = Editor::WireDraft{};
         } else if (ed.tool != Tool::Select) {
             ed.tool = Tool::Select;
@@ -1044,7 +1326,10 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
             pts.push_back(Point{static_cast<float>(p.x),
                                 static_cast<float>(p.y)});
         }
-        const bool selected = ed.sel.is(Selection::Kind::Wire, w.id);
+        // The working set wears the highlight (the anchor alone was the
+        // old face - a box-selected wire now shows it too).
+        const bool selected =
+            ed.in_selection({Selection::Kind::Wire, w.id});
         Paint paint = selected ? wire_sel : wire_paint;
         if (!selected) {
             paint.color = entity_color(wire_nets != nullptr
@@ -1058,7 +1343,7 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         rc.fill_circle(
             Point{static_cast<float>(j.pos.x), static_cast<float>(j.pos.y)},
             0.14f,
-            ed.sel.is(Selection::Kind::Junction, j.id)
+            ed.in_selection({Selection::Kind::Junction, j.id})
                 ? theme.control_on
                 : entity_color(wire_nets != nullptr
                                    ? wire_nets->net_of_junction(j.id)
@@ -1092,7 +1377,7 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                            wire_paint);
             (void)rc.draw_text(at.x + 0.45f, at.y - 0.1f, l.name.c_str(),
                                *theme.font,
-                               ed.sel.is(Selection::Kind::Label, l.id)
+                               ed.in_selection({Selection::Kind::Label, l.id})
                                    ? theme.control_on
                                    : gui::dim(theme.text, 0.9f));
         }
@@ -1106,7 +1391,8 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     ghost_paint.color = gui::dim(theme.text, 0.45f);
 
     for (const ws::circsim::Part& p : s.parts()) {
-        const bool selected = ed.sel.is(Selection::Kind::Part, p.id);
+        const bool selected =
+            ed.in_selection({Selection::Kind::Part, p.id});
         if (selected) {
             if (const std::optional<Bounds> b = ed.part_bounds(p.id)) {
                 Paint sel_paint;
@@ -1257,6 +1543,25 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         }
     }
 
+    // --- the box-select rectangle: the sweep's own veil, over the
+    // entities, under the chrome (the plot's band zoom wears the same
+    // face - the two rubber bands in the app read as cousins).
+    if (ed.box.active) {
+        const auto [lo, hi] = ed.box.rect();
+        const Point a = ed.view.w2s(lo);
+        const Point c = ed.view.w2s(hi);
+        const Point quad[4] = {{a.x, a.y},
+                               {c.x, a.y},
+                               {c.x, c.y},
+                               {a.x, c.y}};
+        const std::uint32_t accent = theme.control_on;
+        rc.fill_polygon(quad, 4, gui::dim(accent, 36));
+        Paint band;
+        band.width = 1.0f;
+        band.color = gui::dim(accent, 200);
+        rc.stroke_polyline(quad, 4, band, true);
+    }
+
     // --- the placement / label ghosts
     if (inside && gui.claims_open()) {
         if (ed.tool == Tool::Place && !ed.place_symbol.empty()) {
@@ -1405,13 +1710,15 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         }
     }
 
-    // The .tran transport: the play/pause button, the scrub track with
-    // the playhead knob, and the time readout. Drawn only when the run
-    // has a transient to scrub.
-    if (const ws::spice::Table* tran = ed.canvas_tran_table();
+    // The transport: the play/pause button, the scrub track with the
+    // playhead knob, and the axis readout ("1.2ms" for a .tran,
+    // "V1 = 3.4V" for a .dc sweep). Drawn only when the run has a
+    // scrubbable table.
+    if (const ws::spice::Table* tran = ed.canvas_sweep_table();
         tran != nullptr) {
         const TransportStripLayout tl = transport_strip_layout(body);
-        const std::span<const double> axis = tran->axis(0);
+        const std::span<const double> axis =
+            ws::circsim::overlay_sweep_axis(*tran);
         const double t0 = axis.empty() ? 0.0 : axis.front();
         const double t1 = axis.empty() ? 0.0 : axis.back();
         const double span = std::max(t1 - t0, 1e-12);
@@ -1485,10 +1792,12 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                 pace_off ? theme.control_on : gui::dim(theme.text, 0.85f));
         }
 
-        // The readout (a fontless theme draws the shape alone).
+        // The readout (a fontless theme draws the shape alone): the
+        // axis's own spelling - seconds for a .tran, the swept
+        // source's name and unit for a .dc.
         if (theme.font != nullptr) {
-            std::string label = ws::circsim::format_eng(ed.playback.t);
-            label += 's';
+            const std::string label =
+                ws::circsim::overlay_axis_readout(*tran, ed.playback.t);
             const float w = rc.measure_text(label.c_str(), *theme.font);
             (void)rc.draw_text(
                 tl.strip.x + tl.strip.width - w - 8.0f,

@@ -56,6 +56,8 @@
 #include "results_panel.hpp"
 #include "side_panels.hpp"
 
+#include <ws/circsim/overlay.hpp>
+
 #ifdef _WIN32
 #include <ws/platform/single_instance.hpp>
 #endif
@@ -96,6 +98,11 @@ constexpr int kKeyL = 76;
 constexpr int kKeyF = 70;
 constexpr int kKeyY = 89;  // Ctrl+Y - the standard redo chord
 constexpr int kKeyZ = 90;
+constexpr int kKeyC = 67;  // Ctrl+C - copy (the panel rung: a focused
+                          // text field keeps its own selection chords)
+constexpr int kKeyV = 86;  // Ctrl+V - paste
+constexpr int kKeyD = 68;  // Ctrl+D - duplicate
+constexpr int kKeyP = 80;  // P - the probe tool's arm key
 constexpr int kF1 = 290;
 // F8 = 297 (GLFW_KEY_F8): the problems walk's chord pair. Spelled
 // here rather than ws::input::keys because the input lib only names
@@ -742,10 +749,73 @@ class CircsimApp final : public ws::ui::App {
         // answer in every panel and fight the text rule).
         delete_cmd.enabled = [this] {
             return editor_.doc != nullptr &&
-                   editor_.sel.kind != editor::Selection::Kind::None;
+                   !editor_.selection_set().empty();
         };
         delete_cmd.execute = [this](std::string_view) { delete_selection(); };
         add(std::move(delete_cmd));
+
+        // The group edit's trio. The chords bind on the PANEL rung
+        // (like Del), so a focused text field keeps its own Ctrl+C/V -
+        // the schematic's clipboard only answers while the Schematic
+        // panel owns the keys.
+        Command copy_cmd;
+        copy_cmd.id = "app.copy";
+        copy_cmd.label = "Copy";
+        copy_cmd.category = "Edit";
+        copy_cmd.enabled = [this] {
+            return editor_.doc != nullptr &&
+                   !editor_.selection_set().empty();
+        };
+        copy_cmd.execute = [this](std::string_view) {
+            if (editor_.copy_selection()) {
+                const auto& clip = editor_.clipboard;
+                editor_.status("Copied " +
+                               std::to_string(clip.parts.size() +
+                                              clip.wires.size() +
+                                              clip.junctions.size() +
+                                              clip.labels.size()) +
+                               " objects");
+            }
+        };
+        add(std::move(copy_cmd));
+
+        Command paste_cmd;
+        paste_cmd.id = "app.paste";
+        paste_cmd.label = "Paste";
+        paste_cmd.category = "Edit";
+        paste_cmd.enabled = [this] {
+            return editor_.doc != nullptr && !editor_.clipboard.empty();
+        };
+        paste_cmd.execute = [this](std::string_view) {
+            // The view center carries the paste: the clipboard's own
+            // anchor rides it, so Ctrl+V lands the copy in sight (the
+            // canvas's cursor-relative rule, parked where the eye is).
+            const std::vector<editor::Selection> pasted =
+                editor_.paste_clipboard(editor_.view.center);
+            if (!pasted.empty()) {
+                editor_.status("Pasted " + std::to_string(pasted.size()) +
+                               " objects");
+            }
+        };
+        add(std::move(paste_cmd));
+
+        Command duplicate_cmd;
+        duplicate_cmd.id = "app.duplicate";
+        duplicate_cmd.label = "Duplicate";
+        duplicate_cmd.category = "Edit";
+        duplicate_cmd.enabled = [this] {
+            return editor_.doc != nullptr &&
+                   !editor_.selection_set().empty();
+        };
+        duplicate_cmd.execute = [this](std::string_view) {
+            const std::vector<editor::Selection> pasted =
+                editor_.duplicate_selection();
+            if (!pasted.empty()) {
+                editor_.status("Duplicated " +
+                               std::to_string(pasted.size()) + " objects");
+            }
+        };
+        add(std::move(duplicate_cmd));
 
         Command rotate_cw;
         rotate_cw.id = "app.rotate_cw";
@@ -804,20 +874,34 @@ class CircsimApp final : public ws::ui::App {
         };
         add(std::move(label_cmd));
 
+        Command probe_cmd;
+        probe_cmd.id = "app.probe";
+        probe_cmd.label = "Probe Tool";
+        probe_cmd.category = "Place";
+        probe_cmd.enabled = [this] { return editor_.doc != nullptr; };
+        probe_cmd.execute = [this](std::string_view) {
+            editor_.tool = editor::Tool::Probe;
+            editor_.wire_draft = editor::Editor::WireDraft{};
+        };
+        add(std::move(probe_cmd));
+
         Command escape_cmd;
         escape_cmd.id = "app.escape";
         escape_cmd.label = "Cancel Tool";
         escape_cmd.category = "Place";
         escape_cmd.execute = [this](std::string_view) {
-            // The right click's staging: the in-flight draft cancels
-            // first, the tool disarms second, the selection clears
-            // last.
-            if (editor_.wire_draft.active) {
+            // The right click's staging: the in-flight box cancels
+            // first, then the draft, the tool disarms, the selection
+            // clears last.
+            if (editor_.box.active) {
+                editor_.box = editor::BoxSelect{};
+            } else if (editor_.wire_draft.active) {
                 editor_.wire_draft = editor::Editor::WireDraft{};
             } else if (editor_.tool != editor::Tool::Select) {
                 editor_.tool = editor::Tool::Select;
             } else {
                 editor_.sel.clear();
+                editor_.multi.clear();
             }
         };
         add(std::move(escape_cmd));
@@ -950,7 +1034,8 @@ class CircsimApp final : public ws::ui::App {
             editor_.toast(
                 "circsim editor - the ws::circsim stage-3 schematic "
                 "editor over ws::ui::shell - panel keys (R rotate, M "
-                "mirror, W wire, L label, F fit, Del) answer one frame "
+                "mirror, W wire, L label, P probe, F fit, Del, "
+                "Ctrl+C/V/D copy/paste/duplicate) answer one frame "
                 "after a text field gives the keyboard back: leave the "
                 "field, then press",
                 gui::ToastSeverity::info);
@@ -977,8 +1062,19 @@ class CircsimApp final : public ws::ui::App {
         panel(kKeyM, "app.mirror");
         panel(kKeyW, "app.wire");
         panel(kKeyL, "app.label");
+        panel(kKeyP, "app.probe");
         panel(kKeyF, "view.fit");
         panel(ws::input::keys::kEscape, "app.escape");
+        // The clipboard trio carries control (the standard chords),
+        // still on the PANEL rung: a focused text field keeps its own
+        // copy/paste, the schematic's answers only while the canvas
+        // owns the keys.
+        (void)resolver_.bind({kKeyC, ws::app::Mod::control}, "app.copy",
+                             ws::app::KeyContext::panel);
+        (void)resolver_.bind({kKeyV, ws::app::Mod::control}, "app.paste",
+                             ws::app::KeyContext::panel);
+        (void)resolver_.bind({kKeyD, ws::app::Mod::control}, "app.duplicate",
+                             ws::app::KeyContext::panel);
         // Shift+R (rotate ccw) carries shift, which the text rule lets
         // through at the panel rung only when no field is focused -
         // correct: it is not a typing key.
@@ -1021,6 +1117,39 @@ class CircsimApp final : public ws::ui::App {
         if (editor_.doc == nullptr || editor_.schem() == nullptr) {
             return;
         }
+        // The working set as ONE undo step: the box's own payoff. A
+        // lone anchor keeps the single-entity path it always had (the
+        // junction rule - a lone junction dies through its first wire
+        // - lives there).
+        const std::vector<editor::Selection> set =
+            editor_.selection_set();
+        if (set.size() > 1) {
+            std::vector<std::uint32_t> parts;
+            std::vector<std::uint32_t> wires;
+            std::vector<std::uint32_t> labels;
+            for (const editor::Selection& m : set) {
+                switch (m.kind) {
+                    case editor::Selection::Kind::Part:
+                        parts.push_back(m.id);
+                        break;
+                    case editor::Selection::Kind::Wire:
+                        wires.push_back(m.id);
+                        break;
+                    case editor::Selection::Kind::Label:
+                        labels.push_back(m.id);
+                        break;
+                    case editor::Selection::Kind::Junction:
+                    case editor::Selection::Kind::None:
+                        break;  // a junction dies with its wires
+                }
+            }
+            if (editor::push_delete_set(*editor_.doc, parts, wires,
+                                        labels)) {
+                editor_.sel.clear();
+                editor_.multi.clear();
+            }
+            return;
+        }
         switch (editor_.sel.kind) {
             case editor::Selection::Kind::Part:
                 editor::push_delete_part(*editor_.doc, editor_.sel.id);
@@ -1059,6 +1188,7 @@ class CircsimApp final : public ws::ui::App {
                 return;
         }
         editor_.sel.clear();
+        editor_.multi.clear();
     }
 
     // --- the simulate job -------------------------------------------------------
@@ -1153,19 +1283,25 @@ class CircsimApp final : public ws::ui::App {
             editor_.results.version = submitted_version;
             editor_.results.run = std::move(*outcome.run);
             // The canvas's own half: the run's net build and back-map
-            // (the originals - the Problems cache holds its copy), and
-            // the transport parked at the run's END - the settled
-            // state, the reading an .op user means by "the answer".
-            // One press plays the whole transient across the canvas.
+            // (the originals - the Problems cache holds its copy).
             editor_.results.nets = std::move(outcome.nets);
             editor_.results.map = std::move(outcome.map);
             editor_.playback = editor::Playback{};
             editor_.transport_scrub = false;
             editor_.results_scrub = false;  // the row's drag dies with the run
-            if (const ws::spice::Table* tran =
-                    editor_.canvas_tran_table();
-                tran != nullptr && !tran->axis(0).empty()) {
-                editor_.playback.t = tran->axis(0).back();
+            // The park rides the sweep table's OWN axis (seconds for a
+            // .tran, the swept source's end value for a .dc) - the
+            // settled state, the reading an .op user means by "the
+            // answer". One press plays the whole sweep across the
+            // canvas.
+            if (const ws::spice::Table* sweep =
+                    editor_.canvas_sweep_table();
+                sweep != nullptr) {
+                const std::span<const double> axis =
+                    ws::circsim::overlay_sweep_axis(*sweep);
+                if (!axis.empty()) {
+                    editor_.playback.t = axis.back();
+                }
             }
             editor_.results.table = 0;
             editor_.results.visible_for = editor::ResultsCache::kNoTable;

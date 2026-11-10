@@ -17,6 +17,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <unordered_map>
 
 #include <ws/circsim/export.hpp>
@@ -26,18 +27,33 @@ namespace ws::circsim {
 
 // --- the playhead's sample ---------------------------------------------------
 
-// The sample a playhead in SECONDS sits on: the last sample at or
-// before it on the table's first axis (a .tran axis is strictly
-// increasing; upper_bound lands past it - the plot hover's own rule,
-// so the plot's readout and the canvas's paint can never disagree).
-// A table with no time sweep (an .op's single answer, a .dc seen
-// through the canvas) answers its LAST row - the settled state; an
-// empty table answers 0.
+// The table's OWN sweep axis - time for a .tran, the swept source
+// for a .dc: the leading .step family axes are skipped (step_axes),
+// so the answer is always the analysis's own x. Empty for a .op (no
+// axis) or an empty table.
+[[nodiscard]] std::span<const double> overlay_sweep_axis(
+    const ws::spice::Table& t);
+
+// True when the transport scrubs the table: a .tran's time axis or a
+// .dc's swept-source axis (strictly increasing, a linear track is
+// honest). Frequency tables are NOT scrubbable - their x is a log
+// decade grid, and a linear scrub would walk it wrongly; the Results
+// row still labels their axis, it just does not drive the clock.
+[[nodiscard]] bool overlay_scrubbable(const ws::spice::Table& t);
+
+// The sample a playhead on the table's own axis sits on: the last
+// sample at or before it (a .tran/.dc axis is strictly increasing;
+// upper_bound lands past it - the plot hover's own rule, so the
+// plot's readout and the canvas's paint can never disagree). A table
+// the transport does not scrub (an .op's single answer, a frequency
+// sweep) answers its LAST row - the settled state; an empty table
+// answers 0. The playhead's UNITS are the axis's own: seconds for a
+// .tran, the swept source's value (volts or amps) for a .dc.
 [[nodiscard]] std::size_t overlay_playhead_sample(const ws::spice::Table& t,
                                                   double playhead);
 
-// The transient's window: the first and last axis sample (t0 <= t1;
-// both 0 when the table has no axis - the caller's "nothing to
+// The transient's window: the first and last own-axis sample (t0 <=
+// t1; both 0 when the table has no axis - the caller's "nothing to
 // sweep").
 struct OverlayWindow {
     double t0 = 0.0;
@@ -45,9 +61,19 @@ struct OverlayWindow {
 };
 [[nodiscard]] OverlayWindow overlay_window(const ws::spice::Table& t);
 
-// A scrub track fraction in [0, 1] -> playhead seconds. A degenerate
-// window answers t0; the fraction is clamped (a pointer a hair outside
-// the track is a hair inside the window, never past its ends).
+// The transport's readout for a playhead: "1.2ms" for time (the
+// strip's own spelling, kept), "V1 = 3.4V" for a swept voltage
+// source ("I1 = 2.0mA" for a current one - the unit reads the
+// source name's leading letter), "1.0kHz" for a frequency axis. A
+// .op answers the empty string (nothing is being swept).
+[[nodiscard]] std::string overlay_axis_readout(const ws::spice::Table& t,
+                                               double playhead);
+
+// A scrub track fraction in [0, 1] -> a playhead on the window's own
+// axis (seconds for a .tran, the swept source's value for a .dc). A
+// degenerate window answers t0; the fraction is clamped (a pointer a
+// hair outside the track is a hair inside the window, never past its
+// ends).
 [[nodiscard]] double overlay_scrub(const OverlayWindow& w, double frac);
 
 // One transport step: the playhead advanced by dt * span * rate /

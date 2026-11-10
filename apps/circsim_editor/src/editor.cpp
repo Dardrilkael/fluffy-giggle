@@ -864,40 +864,441 @@ std::optional<Bounds> Editor::selection_bounds() const {
     if (s == nullptr) {
         return std::nullopt;
     }
+    // The WORKING set's extent (the anchor alone was the old answer):
+    // F frames what the group commands act on, box and all.
     BoundsBuilder out;
-    switch (sel.kind) {
-        case Selection::Kind::None:
-            break;
-        case Selection::Kind::Part:
-            if (const std::optional<Bounds> b = part_bounds(sel.id)) {
-                out.add(*b);
-            }
-            break;
-        case Selection::Kind::Junction:
-            if (const ws::circsim::Junction* j = s->find_junction(sel.id)) {
-                out.add(j->pos);
-            }
-            break;
-        case Selection::Kind::Wire:
-            for (const ws::circsim::Wire& w : s->wires()) {
-                if (w.id == sel.id) {
-                    for (const Pos& p : wire_path(w)) {
-                        out.add(p);
+    for (const Selection& m : selection_set()) {
+        switch (m.kind) {
+            case Selection::Kind::None:
+                break;
+            case Selection::Kind::Part:
+                if (const std::optional<Bounds> b = part_bounds(m.id)) {
+                    out.add(*b);
+                }
+                break;
+            case Selection::Kind::Junction:
+                if (const ws::circsim::Junction* j =
+                        s->find_junction(m.id)) {
+                    out.add(j->pos);
+                }
+                break;
+            case Selection::Kind::Wire:
+                for (const ws::circsim::Wire& w : s->wires()) {
+                    if (w.id == m.id) {
+                        for (const Pos& p : wire_path(w)) {
+                            out.add(p);
+                        }
+                        break;
                     }
-                    break;
                 }
-            }
-            break;
-        case Selection::Kind::Label:
-            for (const ws::circsim::Label& l : s->labels()) {
-                if (l.id == sel.id) {
-                    out.add(l.pos);
-                    break;
+                break;
+            case Selection::Kind::Label:
+                for (const ws::circsim::Label& l : s->labels()) {
+                    if (l.id == m.id) {
+                        out.add(l.pos);
+                        break;
+                    }
                 }
-            }
-            break;
+                break;
+        }
     }
     return out.box;
+}
+
+// --- the working set -----------------------------------------------------------
+
+std::vector<Selection> Editor::selection_set() const {
+    const ws::circsim::Schematic* s = schem();
+    std::vector<Selection> out;
+    // The anchor first, then the multi entries - deduped by
+    // (kind, id), and every id re-validated against the schematic so
+    // an undo that landed under the selection drops cleanly.
+    const auto push = [&](const Selection& m) {
+        for (const Selection& have : out) {
+            if (have.kind == m.kind && have.id == m.id) {
+                return;
+            }
+        }
+        bool live = false;
+        if (s != nullptr) {
+            switch (m.kind) {
+                case Selection::Kind::Part:
+                    live = s->find_part(m.id) != nullptr;
+                    break;
+                case Selection::Kind::Junction:
+                    live = s->find_junction(m.id) != nullptr;
+                    break;
+                case Selection::Kind::Wire:
+                    live = s->find_wire(m.id) != nullptr;
+                    break;
+                case Selection::Kind::Label:
+                    live = s->find_label(m.id) != nullptr;
+                    break;
+                case Selection::Kind::None:
+                    break;
+            }
+        }
+        if (live) {
+            out.push_back(m);
+        }
+    };
+    if (sel.kind != Selection::Kind::None) {
+        push(sel);
+    }
+    for (const Selection& m : multi) {
+        push(m);
+    }
+    return out;
+}
+
+bool Editor::in_selection(const Selection& of) const {
+    if (of.kind == Selection::Kind::None) {
+        return false;
+    }
+    if (sel.kind == of.kind && sel.id == of.id) {
+        return true;
+    }
+    for (const Selection& m : multi) {
+        if (m.kind == of.kind && m.id == of.id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void Editor::set_selection(const Selection& of) {
+    sel = of;
+    multi.clear();
+}
+
+void Editor::toggle_selection(const Selection& of) {
+    if (of.kind == Selection::Kind::None) {
+        return;
+    }
+    for (std::size_t i = 0; i < multi.size(); ++i) {
+        if (multi[i].kind == of.kind && multi[i].id == of.id) {
+            // Toggle out: the anchor follows it out when it WAS the
+            // anchor (the set loses its Properties subject honestly).
+            const bool was_anchor = sel.kind == of.kind && sel.id == of.id;
+            multi.erase(multi.begin() +
+                        static_cast<std::ptrdiff_t>(i));
+            if (was_anchor) {
+                sel = multi.empty() ? Selection{} : multi.front();
+            }
+            return;
+        }
+    }
+    multi.push_back(of);
+    sel = of;  // the anchor follows the join (Properties shows it)
+}
+
+void Editor::select_box(const BoxSelect& b, bool extend) {
+    const ws::circsim::Schematic* s = schem();
+    if (s == nullptr) {
+        return;
+    }
+    const auto [lo, hi] = b.rect();
+    std::vector<Selection> found;
+    const auto in_box = [&](const Bounds& bb) {
+        return bb.max_x >= lo.x && bb.min_x <= hi.x && bb.max_y >= lo.y &&
+               bb.min_y <= hi.y;
+    };
+    // The schematic's own order within each kind - the anchor is the
+    // first part (else the first wire, junction, label) the box holds.
+    for (const ws::circsim::Part& p : s->parts()) {
+        if (const std::optional<Bounds> bb = part_bounds(p.id);
+            bb.has_value() && in_box(*bb)) {
+            found.push_back({Selection::Kind::Part, p.id});
+        }
+    }
+    for (const ws::circsim::Wire& w : s->wires()) {
+        for (const Pos& p : wire_path(w)) {
+            if (p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y) {
+                found.push_back({Selection::Kind::Wire, w.id});
+                break;
+            }
+        }
+    }
+    for (const ws::circsim::Junction& j : s->junctions()) {
+        if (j.pos.x >= lo.x && j.pos.x <= hi.x && j.pos.y >= lo.y &&
+            j.pos.y <= hi.y) {
+            found.push_back({Selection::Kind::Junction, j.id});
+        }
+    }
+    for (const ws::circsim::Label& l : s->labels()) {
+        if (l.pos.x >= lo.x && l.pos.x <= hi.x && l.pos.y >= lo.y &&
+            l.pos.y <= hi.y) {
+            found.push_back({Selection::Kind::Label, l.id});
+        }
+    }
+
+    if (extend) {
+        // Union with the current set (the toggles' own rule); the
+        // anchor keeps its place unless it was nothing.
+        for (const Selection& m : found) {
+            bool have = in_selection(m);
+            if (!have) {
+                multi.push_back(m);
+            }
+        }
+        if (sel.kind == Selection::Kind::None && !multi.empty()) {
+            sel = multi.front();
+        }
+        return;
+    }
+    multi.clear();
+    for (const Selection& m : found) {
+        multi.push_back(m);
+    }
+    sel = multi.empty() ? Selection{} : multi.front();
+}
+
+// --- copy / paste / duplicate ---------------------------------------------------
+
+bool Editor::copy_selection() {
+    const ws::circsim::Schematic* s = schem();
+    if (s == nullptr) {
+        return false;
+    }
+    const std::vector<Selection> set = selection_set();
+    if (set.empty()) {
+        return false;
+    }
+
+    Clipboard clip;
+    // The clipboard's own id space: a part keeps its ORIGINAL id (the
+    // paste's part_map keys on it), while every junction the clipboard
+    // carries - selected or boundary-minted - is renumbered to its
+    // clipboard INDEX, and the carried wires' endpoints are rewritten
+    // into that space at copy time. No clipboard JunctionRef can then
+    // name an id the clipboard does not hold, and no two can collide.
+    std::map<std::uint32_t, std::uint32_t> part_map;      // original -> clip
+    std::map<std::uint32_t, std::uint32_t> junction_map;  // original -> index
+    BoundsBuilder extent;
+
+    // Pass 1: the parts, junctions and labels the set names.
+    for (const Selection& m : set) {
+        switch (m.kind) {
+            case Selection::Kind::Part:
+                if (const ws::circsim::Part* p = s->find_part(m.id)) {
+                    part_map.emplace(p->id, p->id);
+                    clip.parts.push_back(*p);
+                }
+                break;
+            case Selection::Kind::Junction: {
+                const ws::circsim::Junction* j = s->find_junction(m.id);
+                if (j == nullptr) {
+                    break;
+                }
+                const auto index = static_cast<std::uint32_t>(
+                    clip.junctions.size());
+                junction_map.emplace(j->id, index);
+                ws::circsim::Junction copy = *j;
+                copy.id = index;  // the clipboard's own numbering
+                clip.junctions.push_back(copy);
+                break;
+            }
+            case Selection::Kind::Label:
+                if (const ws::circsim::Label* l = s->find_label(m.id)) {
+                    clip.labels.push_back(*l);
+                }
+                break;
+            case Selection::Kind::Wire:
+            case Selection::Kind::None:
+                break;
+        }
+    }
+
+    // Pass 2: the wires, endpoints rewritten into the clipboard's id
+    // space. A boundary endpoint (a pin of an unselected part, a
+    // junction outside the set) is carried as a junction minted at
+    // the endpoint's world position - the drawn stub survives the
+    // copy verbatim, and the paste lands it as a real junction.
+    for (const Selection& m : set) {
+        if (m.kind != Selection::Kind::Wire) {
+            continue;
+        }
+        const ws::circsim::Wire* w = s->find_wire(m.id);
+        if (w == nullptr) {
+            continue;
+        }
+        const std::vector<Pos> path = wire_path(*w);
+        if (path.empty()) {
+            continue;  // a dangling ref pair - nothing drawable to keep
+        }
+        ws::circsim::Wire copy = *w;
+        const auto carry = [&](ws::circsim::WireEndpoint& end,
+                               const Pos& at) {
+            if (const ws::circsim::PinRef* pin =
+                    std::get_if<ws::circsim::PinRef>(&end)) {
+                if (part_map.count(pin->part) != 0u) {
+                    return;  // the part rides along; paste remaps the ref
+                }
+            } else if (const ws::circsim::JunctionRef* j =
+                           std::get_if<ws::circsim::JunctionRef>(&end)) {
+                const auto it = junction_map.find(j->junction);
+                if (it != junction_map.end()) {
+                    end = ws::circsim::JunctionRef{it->second};
+                    return;
+                }
+            }
+            ws::circsim::Junction mint;
+            mint.id = static_cast<std::uint32_t>(clip.junctions.size());
+            mint.pos = at;
+            clip.junctions.push_back(mint);
+            end = ws::circsim::JunctionRef{mint.id};
+        };
+        carry(copy.a, path.front());
+        carry(copy.b, path.back());
+        clip.wires.push_back(std::move(copy));
+        for (const Pos& p : path) {
+            extent.add(p);
+        }
+    }
+
+    // The center: everything the copy carries, so the paste's anchor
+    // is where the user's eye was.
+    for (const ws::circsim::Part& p : clip.parts) {
+        if (const std::optional<Bounds> b = part_bounds(p.id)) {
+            extent.add(*b);
+        }
+    }
+    for (const ws::circsim::Junction& j : clip.junctions) {
+        extent.add(j.pos);
+    }
+    for (const ws::circsim::Label& l : clip.labels) {
+        extent.add(l.pos);
+    }
+    if (extent.box.has_value()) {
+        clip.center = Pos{(extent.box->min_x + extent.box->max_x) * 0.5,
+                          (extent.box->min_y + extent.box->max_y) * 0.5};
+    }
+    if (clip.empty()) {
+        return false;
+    }
+    clipboard = std::move(clip);
+    return true;
+}
+
+std::vector<Selection> Editor::paste_clipboard(Pos at) {
+    ws::circsim::Schematic* s = schem();
+    if (s == nullptr || clipboard.empty() || doc == nullptr) {
+        return {};
+    }
+
+    // The lattice-aligned delta: the clipboard's center rides `at`,
+    // and both ends snap so every pasted position lands ON the grid
+    // (the copy's own positions are lattice points - placement and
+    // the wire tool snap everything they mint).
+    const Pos anchor = clipboard.center.value_or(Pos{0.0, 0.0});
+    const Pos delta = snap(at) - snap(anchor);
+
+    editor::PastePayload payload;
+    std::map<std::uint32_t, std::uint32_t> part_fresh;   // original -> new
+    std::map<std::uint32_t, std::uint32_t> junction_fresh;  // index -> new
+    std::vector<std::uint32_t> wire_fresh;
+    std::vector<std::uint32_t> label_fresh;
+    // The refs this paste has already assigned: next_ref sees only
+    // the live schematic, so two R-parts in one clipboard would each
+    // answer the same next free number without the local tally.
+    std::map<std::string, unsigned long> ref_taken;
+
+    for (const ws::circsim::Part& p : clipboard.parts) {
+        ws::circsim::Part next = p;
+        next.id = s->alloc_id();
+        part_fresh.emplace(p.id, next.id);
+        next.pos = Pos{p.pos.x + delta.x, p.pos.y + delta.y};
+        if (const ws::circsim::SymbolDef* sym = sym_of(p);
+            sym != nullptr && !sym->ref_prefix.empty()) {
+            std::string ref = next_ref(*s, *sym);
+            unsigned long n =
+                std::strtoul(ref.c_str() + sym->ref_prefix.size(), nullptr,
+                             10);
+            const auto taken = ref_taken.find(sym->ref_prefix);
+            if (taken != ref_taken.end() && n <= taken->second) {
+                n = taken->second + 1;  // this batch already took it
+                ref = sym->ref_prefix + std::to_string(n);
+            }
+            ref_taken[sym->ref_prefix] = n;
+            next.ref = ref;
+        }
+        payload.parts.push_back(std::move(next));
+    }
+    for (std::size_t i = 0; i < clipboard.junctions.size(); ++i) {
+        const ws::circsim::Junction& j = clipboard.junctions[i];
+        ws::circsim::Junction next = j;
+        next.id = s->alloc_id();
+        junction_fresh.emplace(static_cast<std::uint32_t>(i), next.id);
+        next.pos = Pos{j.pos.x + delta.x, j.pos.y + delta.y};
+        payload.junctions.push_back(std::move(next));
+    }
+    for (const ws::circsim::Wire& w : clipboard.wires) {
+        ws::circsim::Wire next = w;
+        next.id = s->alloc_id();
+        wire_fresh.push_back(next.id);
+        const auto remap = [&](ws::circsim::WireEndpoint& end) {
+            if (ws::circsim::PinRef* pin =
+                    std::get_if<ws::circsim::PinRef>(&end)) {
+                const auto it = part_fresh.find(pin->part);
+                if (it != part_fresh.end()) {
+                    pin->part = it->second;
+                }
+            } else if (ws::circsim::JunctionRef* j =
+                           std::get_if<ws::circsim::JunctionRef>(&end)) {
+                const auto it = junction_fresh.find(j->junction);
+                if (it != junction_fresh.end()) {
+                    j->junction = it->second;
+                }
+            }
+        };
+        remap(next.a);
+        remap(next.b);
+        next.waypoints.reserve(w.waypoints.size());
+        for (const Pos& p : w.waypoints) {
+            next.waypoints.push_back(Pos{p.x + delta.x, p.y + delta.y});
+        }
+        payload.wires.push_back(std::move(next));
+    }
+    for (const ws::circsim::Label& l : clipboard.labels) {
+        ws::circsim::Label next = l;
+        next.id = s->alloc_id();
+        label_fresh.push_back(next.id);
+        next.pos = Pos{l.pos.x + delta.x, l.pos.y + delta.y};
+        payload.labels.push_back(std::move(next));
+    }
+
+    push_paste(*doc, std::move(payload));
+
+    // The pasted entities become the working selection (the anchor:
+    // the first pasted part).
+    std::vector<Selection> pasted;
+    for (const auto& [_, id] : part_fresh) {
+        pasted.push_back({Selection::Kind::Part, id});
+    }
+    for (const std::uint32_t id : wire_fresh) {
+        pasted.push_back({Selection::Kind::Wire, id});
+    }
+    for (const auto& [_, id] : junction_fresh) {
+        pasted.push_back({Selection::Kind::Junction, id});
+    }
+    for (const std::uint32_t id : label_fresh) {
+        pasted.push_back({Selection::Kind::Label, id});
+    }
+    multi = pasted;
+    sel = pasted.empty() ? Selection{} : pasted.front();
+    return pasted;
+}
+
+std::vector<Selection> Editor::duplicate_selection() {
+    if (!copy_selection()) {
+        return {};
+    }
+    // The standard EDA nudge: one column over, one row down the
+    // screen (the world's y is up, so -2) - close enough to see, far
+    // enough to grab.
+    const Pos at = clipboard.center.value_or(Pos{0.0, 0.0}) +
+                   Pos{2.0, -2.0};
+    return paste_clipboard(at);
 }
 
 bool Editor::zoom_to_selection(double margin) {
@@ -960,12 +1361,26 @@ std::string_view Editor::hint() const {
             if (drag.kind != Drag::Kind::None && drag.moved) {
                 return "Release to drop - hold Shift for the coarse grid";
             }
-            if (sel.kind != Selection::Kind::None) {
-                return "Drag to move - F frames - T tidies wires - click "
-                       "empty space to deselect";
+            if (group_drag.active && group_drag.moved) {
+                return "Release to drop the set - hold Shift for the "
+                       "coarse grid";
             }
-            return "Click to select - wheel zooms - middle-drag or "
-                   "Space+drag pans - Shift+A numbers the refs";
+            if (box.active) {
+                return "Release to select what the box holds - Shift "
+                       "extends the set instead of replacing it";
+            }
+            if (!multi.empty()) {
+                return "Drag moves the set - Ctrl+C/D copy/duplicate - "
+                       "Del deletes - click empty space to clear";
+            }
+            if (sel.kind != Selection::Kind::None) {
+                return "Drag to move - F frames - T tidies wires - "
+                       "Shift+click adds to the set - drag empty space "
+                       "to box-select";
+            }
+            return "Click to select - drag empty space to box-select - "
+                   "wheel zooms - middle-drag or Space+drag pans - "
+                   "Shift+A numbers the refs";
         case Tool::Place:
             return "Click to place - R rotates - M mirrors - Shift snaps "
                    "coarse - Esc or right-click to finish";
@@ -977,6 +1392,9 @@ std::string_view Editor::hint() const {
             return "Click a pin, junction or wire to start a run";
         case Tool::Label:
             return "Click to drop the label - it stays armed for the next";
+        case Tool::Probe:
+            return "Click a wire, pin or label to toggle its v(net) "
+                   "curve - a part body toggles its i(element) current";
     }
     return {};
 }
@@ -1161,20 +1579,159 @@ const ws::circsim::NetList& Editor::net_cache() {
     return nets_cache_;
 }
 
-const ws::spice::Table* Editor::canvas_tran_table() const {
+// The deck's node token for a net id (the probe's translator): the
+// export map is token -> net, so the inversion walks it once - the
+// first token a net answers wins, the deck's own one-node-per-net
+// spelling (the overlay snapshot's own inversion).
+[[nodiscard]] std::string net_token_of(
+    const std::map<std::string, std::uint32_t, ws::circsim::CiLess>&
+        node_net,
+    std::uint32_t net_id) {
+    for (const auto& [tok, id] : node_net) {
+        if (id == net_id) {
+            return tok;
+        }
+    }
+    return {};
+}
+
+// --- the probe tool -----------------------------------------------------------
+
+std::string Editor::probe_at(Pos world, double radius) {
+    pulse_at(world);
+    if (!results.has || results.run.results.tables.empty()) {
+        return "probe: no results yet - run first (Ctrl+Enter)";
+    }
+
+    // What the click names: a pin (the smallest target) answers its
+    // NET's voltage; then the entity stack - a wire, a junction or a
+    // label answers a net, a part's BODY answers its element's
+    // current (the pin/body split is the teachable rule: nets are
+    // voltage, elements are current).
+    std::string signal;
+    if (const std::optional<PinHit> pin = hit_pin(world, radius)) {
+        const ws::circsim::NetList& nets = net_cache();
+        if (const ws::circsim::Net* n = nets.net_of_pin(pin->ref)) {
+            signal =
+                "v(" + net_token_of(results.map.node_net, n->id) + ")";
+        }
+    } else {
+        const Selection hit = hit_any(world, radius);
+        const ws::circsim::NetList& nets = net_cache();
+        switch (hit.kind) {
+            case Selection::Kind::Wire:
+                if (const ws::circsim::Net* n =
+                        nets.net_of_wire(hit.id)) {
+                    signal = "v(" +
+                             net_token_of(results.map.node_net, n->id) +
+                             ")";
+                }
+                break;
+            case Selection::Kind::Junction:
+                if (const ws::circsim::Net* n =
+                        nets.net_of_junction(hit.id)) {
+                    signal = "v(" +
+                             net_token_of(results.map.node_net, n->id) +
+                             ")";
+                }
+                break;
+            case Selection::Kind::Label: {
+                const ws::circsim::Schematic* s = schem();
+                const ws::circsim::Label* l =
+                    s != nullptr ? s->find_label(hit.id) : nullptr;
+                if (l != nullptr) {
+                    if (const ws::circsim::Net* n = nets.by_name(l->name)) {
+                        signal = "v(" +
+                                 net_token_of(results.map.node_net,
+                                              n->id) +
+                                 ")";
+                    }
+                }
+                break;
+            }
+            case Selection::Kind::Part: {
+                // The element's current: the export back-map names the
+                // deck element this part became (power/ground parts
+                // emit no card - the honest "nothing to probe").
+                for (const auto& [name, part_id] : results.map.element_part) {
+                    if (part_id == hit.id) {
+                        signal = "i(" + name + ")";
+                        break;
+                    }
+                }
+                break;
+            }
+            case Selection::Kind::None:
+                break;
+        }
+    }
+    if (signal.empty()) {
+        return "probe: nothing probeable there - click a wire, a pin "
+               "or a part body";
+    }
+    if (signal == "v(0)") {
+        return "probe: ground is the reference - every v() is "
+               "measured against it";
+    }
+
+    // The table that carries the signal: the canvas sweep table
+    // first (the clock the strip and the plot share), else the first
+    // table with the column. The panel switches to it, the flag
+    // flips, and the legend's checkbox state follows.
+    const std::vector<ws::spice::Table>& tables =
+        results.run.results.tables;
+    std::size_t table = results.table;
+    if (const ws::spice::Table* sweep = canvas_sweep_table();
+        sweep != nullptr) {
+        const auto idx = sweep->signal_index(signal);
+        if (idx.has_value()) {
+            table = static_cast<std::size_t>(
+                sweep - &tables.front());
+        }
+    }
+    if (!(table < tables.size()) ||
+        !tables[table].signal_index(signal).has_value()) {
+        for (std::size_t i = 0; i < tables.size(); ++i) {
+            if (tables[i].signal_index(signal).has_value()) {
+                table = i;
+                break;
+            }
+        }
+    }
+    if (table >= tables.size() ||
+        !tables[table].signal_index(signal).has_value()) {
+        return "probe: " + signal + " is not in the run";
+    }
+    results.table = table;
+    const ws::spice::Table& t = tables[table];
+    const auto index = t.signal_index(signal);
+    if (results.visible_for != table ||
+        results.visible.size() != t.signals.size()) {
+        results.visible.assign(t.signals.size(), 1u);
+        results.visible_for = table;
+    }
+    const bool shown = results.visible[*index] == 0u;
+    results.visible[*index] = shown ? 1u : 0u;
+    return std::string{"probe: "} + signal +
+           (shown ? " shown" : " hidden");
+}
+
+const ws::spice::Table* Editor::canvas_sweep_table() const {
     if (!results.has || results.run.results.tables.empty()) {
         return nullptr;
     }
     const std::vector<ws::spice::Table>& tables =
         results.run.results.tables;
-    // What the Results panel shows, when it shows a time sweep - the
-    // canvas animates the plot the user is looking at.
+    // What the Results panel shows, when the transport scrubs it - a
+    // .tran time axis or a .dc swept source - the canvas animates the
+    // plot the user is looking at; a frequency table never drives the
+    // clock (its x is a log grid, and the transport would lie).
     if (results.table < tables.size() &&
-        tables[results.table].sweep == ws::spice::SweepKind::Time) {
+        ws::circsim::overlay_scrubbable(tables[results.table])) {
         return &tables[results.table];
     }
     for (const ws::spice::Table& t : tables) {
-        if (t.sweep == ws::spice::SweepKind::Time) {
+        if (ws::circsim::overlay_scrubbable(t)) {
             return &t;
         }
     }
@@ -1194,7 +1751,10 @@ void Editor::document_changed() {
     ghost_rot = 0;
     ghost_mirror = false;
     sel.clear();
+    multi.clear();
+    box = BoxSelect{};
     drag = Drag{};
+    group_drag = GroupDrag{};
     wire_draft = WireDraft{};
     problems = ProblemsCache{};
     problems_cursor = -1;  // the rows it indexed are another document's
@@ -1250,16 +1810,19 @@ bool Editor::tick() {
             busy = true;
         }
     }
-    // The .tran playback advances with the same clock: the whole run
-    // sweeps by in kLoopSeconds of wall time at 1x (the rate stretches
-    // or shrinks it), looping at the window's end - the step math is
-    // ws::circsim's own (overlay.hpp), headless and tested. A run with
-    // no transient (or an empty table) parks itself - the transport
-    // strip still scrubs it by hand.
+    // The .tran/.dc playback advances with the same clock: the whole
+    // run sweeps by in kLoopSeconds of wall time at 1x (the rate
+    // stretches or shrinks it), looping at the window's end - the
+    // step math is ws::circsim's own (overlay.hpp), headless and
+    // tested, and the playhead's units are the sweep table's own
+    // axis (seconds for a .tran, the swept source's value for a
+    // .dc). A run with nothing scrubbable (or an empty table) parks
+    // itself - the transport strip still scrubs by hand.
     if (playback.playing) {
-        const ws::spice::Table* t = canvas_tran_table();
+        const ws::spice::Table* t = canvas_sweep_table();
         const std::span<const double> axis =
-            t != nullptr ? t->axis(0) : std::span<const double>{};
+            t != nullptr ? ws::circsim::overlay_sweep_axis(*t)
+                         : std::span<const double>{};
         if (axis.empty()) {
             playback.playing = false;
         } else {
