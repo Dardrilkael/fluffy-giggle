@@ -72,7 +72,15 @@ CommandListCanvas records every stroke's `closed` flag on the command
 its first point - a tessellation-time property, so the recorded points
 never carry the closing segment. Tests assert the flag (an open
 polyline must stay open; the stage-2 symbol renderer once closed every
-poly and the resistor's zigzag wore a phantom straight segment).
+poly and the resistor's zigzag wore a phantom straight segment). For a
+DASHED stroke the flag is per-run, not per-path: only a run that wraps
+the whole ring (started at the path's first point, walked to its last)
+closes; dash fragments stroke open with their caps, or each dash would
+wear its own phantom chord. `Renderer2DCanvas::stroke_polyline` routes
+dashed paints through the path API for the same reason - the dash
+pattern walks the local-space path, so the wrapper's direct
+tessellation would draw solid while the recording canvas showed
+dashes.
 
 ## Event system
 

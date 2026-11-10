@@ -51,6 +51,11 @@ std::vector<Vec2> circle_points(Vec2 center, float r) {
     return pts;
 }
 
+// True when a and b sit within a float-noise whisker of each other.
+bool pts_near(Vec2 a, Vec2 b) {
+    return std::fabs(a.x - b.x) <= 1e-6f && std::fabs(a.y - b.y) <= 1e-6f;
+}
+
 }  // namespace
 
 // ============================================================================
@@ -74,13 +79,19 @@ void CommandListCanvas::rotate(float rad) {
 }
 
 void CommandListCanvas::push_clip(float x, float y, float w, float h) {
+    // All four corners: under a rotated transform the fourth (br) can
+    // extend past the min/max of the other three (a 45-degree turn
+    // sticks it half a diagonal out), and a clip that misses it would
+    // silently eat content. For the axis-aligned pan/zoom transforms
+    // this is the exact same rect the three-corner form produced.
     const Vec2 tl = to_screen({x, y});
     const Vec2 tr = to_screen({x + w, y});
     const Vec2 bl = to_screen({x, y + h});
-    const float minx = std::min({tl.x, tr.x, bl.x});
-    const float miny = std::min({tl.y, tr.y, bl.y});
-    const float maxx = std::max({tl.x, tr.x, bl.x});
-    const float maxy = std::max({tl.y, tr.y, bl.y});
+    const Vec2 br = to_screen({x + w, y + h});
+    const float minx = std::min({tl.x, tr.x, bl.x, br.x});
+    const float miny = std::min({tl.y, tr.y, bl.y, br.y});
+    const float maxx = std::max({tl.x, tr.x, bl.x, br.x});
+    const float maxy = std::max({tl.y, tr.y, bl.y, br.y});
     CanvasCmd c;
     c.kind = CanvasCmdKind::push_clip;
     c.x = minx; c.y = miny; c.w = maxx - minx; c.h = maxy - miny;
@@ -151,13 +162,22 @@ void CommandListCanvas::stroke(const Paint& paint) {
                   paint.dash, runs);
     for (const auto& run : runs) {
         if (run.empty()) continue;
+        // A run closes only when it wraps the whole ring: it started
+        // at the path's first point AND walked to its last (the
+        // close_path spelling's duplicate, or the ring's final
+        // vertex). Every other run is an open fragment - stroking it
+        // closed would splice a phantom chord from each dash's end
+        // back to its start and drop its caps.
+        const bool run_closed =
+            path_closed_ && pts_near(run.front(), path_.front()) &&
+            pts_near(run.back(), path_.back());
         CanvasCmd c;
         c.kind = CanvasCmdKind::stroke_polyline;
         c.points.reserve(run.size());
         for (const auto& p : run) c.points.push_back(to_screen(p));
         c.color = paint.color;
         c.width = paint.width;
-        c.closed = path_closed_;
+        c.closed = run_closed;
         c.join = paint.join;
         c.cap = paint.cap;
         cmds.push_back(std::move(c));
@@ -217,7 +237,10 @@ void CommandListCanvas::fill_circle(Point center, float r, std::uint32_t color) 
 void CommandListCanvas::stroke_rounded_rect(float x, float y, float w, float h,
                                             float r, const Paint& paint) {
     begin_path();
-    const float rad = std::min(r, std::min(w, h) * 0.5f);
+    // A negative radius clamps to 0 (the SVG rule): unfloored it
+    // displaces the arc centers OUTSIDE the rect and the skipped arcs
+    // splice a bowtie instead of the rect's outline.
+    const float rad = std::clamp(r, 0.0f, std::min(w, h) * 0.5f);
     const Point corners[4] = {{x + w - rad, y + rad}, {x + w - rad, y + h - rad},
                               {x + rad, y + h - rad}, {x + rad, y + rad}};
     const float angles[4][2] = {{-kHalfPi, 0.0f}, {0.0f, kHalfPi},
@@ -234,7 +257,8 @@ void CommandListCanvas::stroke_rounded_rect(float x, float y, float w, float h,
 void CommandListCanvas::fill_rounded_rect(float x, float y, float w, float h,
                                           float r, std::uint32_t color) {
     begin_path();
-    const float rad = std::min(r, std::min(w, h) * 0.5f);
+    // See stroke_rounded_rect: the negative clamp, both spellings.
+    const float rad = std::clamp(r, 0.0f, std::min(w, h) * 0.5f);
     const Point corners[4] = {{x + w - rad, y + rad}, {x + w - rad, y + h - rad},
                               {x + rad, y + h - rad}, {x + rad, y + rad}};
     const float angles[4][2] = {{-kHalfPi, 0.0f}, {0.0f, kHalfPi},
@@ -330,13 +354,16 @@ void Renderer2DCanvas::rotate(float rad) {
 }
 
 void Renderer2DCanvas::push_clip(float x, float y, float w, float h) {
+    // All four corners - see CommandListCanvas::push_clip (the br
+    // corner is the one a rotation sticks out past the other three).
     const Vec2 tl = to_screen({x, y});
     const Vec2 tr = to_screen({x + w, y});
     const Vec2 bl = to_screen({x, y + h});
-    const float minx = std::min({tl.x, tr.x, bl.x});
-    const float miny = std::min({tl.y, tr.y, bl.y});
-    const float maxx = std::max({tl.x, tr.x, bl.x});
-    const float maxy = std::max({tl.y, tr.y, bl.y});
+    const Vec2 br = to_screen({x + w, y + h});
+    const float minx = std::min({tl.x, tr.x, bl.x, br.x});
+    const float miny = std::min({tl.y, tr.y, bl.y, br.y});
+    const float maxx = std::max({tl.x, tr.x, bl.x, br.x});
+    const float maxy = std::max({tl.y, tr.y, bl.y, br.y});
     r2d::push_clip(minx, miny, maxx - minx, maxy - miny);
 }
 
@@ -398,6 +425,12 @@ void Renderer2DCanvas::stroke(const Paint& paint) {
                   paint.dash, runs);
     for (const auto& run : runs) {
         if (run.empty()) continue;
+        // Same wrap-the-ring rule as CommandListCanvas::stroke: dash
+        // fragments stroke open (their caps, no phantom chords), a
+        // full-ring run keeps its cyclic joints.
+        const bool run_closed =
+            path_closed_ && pts_near(run.front(), path_.front()) &&
+            pts_near(run.back(), path_.back());
         std::vector<Vec2> screen_run(run.size());
         for (std::size_t i = 0; i < run.size(); ++i)
             screen_run[i] = to_screen(run[i]);
@@ -405,7 +438,7 @@ void Renderer2DCanvas::stroke(const Paint& paint) {
         // from this class's own stroke_polyline member).
         ws::ui::canvas::stroke_polyline(screen_run.data(),
                                         static_cast<int>(screen_run.size()),
-                                        paint, sink_, path_closed_);
+                                        paint, sink_, run_closed);
     }
     path_.clear(); has_path_ = false; path_closed_ = false;
 }
@@ -432,10 +465,25 @@ void Renderer2DCanvas::stroke_line(Point a, Point b, const Paint& paint) {
 void Renderer2DCanvas::stroke_polyline(const Point* pts, int count,
                                        const Paint& paint, bool closed) {
     // Convenience wrapper: transform local points to screen, then
-    // tessellate through the r2d sink. (No dashing - the path-based
-    // stroke() handles dashes; this is the fast path for one-shot
-    // polylines.)
+    // tessellate through the r2d sink. A DASHED paint must route
+    // through the path API: the pattern walks the local-space path,
+    // so dashing is a stroke()-time property - the direct
+    // tessellation below would silently draw the polyline solid while
+    // CommandListCanvas's recording of the same call showed dashes.
+    // (stroke_circle rides this wrapper, so a dashed circle outline
+    // depends on the routing too.)
     if (count <= 0 || !(paint.width > 0.0f)) return;
+    if (paint.dash.count > 0) {
+        begin_path();
+        for (int i = 0; i < count; ++i) {
+            if (i == 0) move_to(pts[i]); else line_to(pts[i]);
+        }
+        path_closed_ = closed;
+        stroke(paint);
+        return;
+    }
+    // The undashed fast path: no path, no dash runs - straight to
+    // the tessellator.
     std::vector<Vec2> screen_pts(count);
     for (int i = 0; i < count; ++i) screen_pts[i] = to_screen(pts[i]);
     ws::ui::canvas::stroke_polyline(screen_pts.data(), count, paint, sink_, closed);
@@ -462,7 +510,8 @@ void Renderer2DCanvas::fill_circle(Point center, float r, std::uint32_t color) {
 void Renderer2DCanvas::stroke_rounded_rect(float x, float y, float w, float h,
                                            float r, const Paint& paint) {
     begin_path();
-    const float rad = std::min(r, std::min(w, h) * 0.5f);
+    // See CommandListCanvas::stroke_rounded_rect: the negative clamp.
+    const float rad = std::clamp(r, 0.0f, std::min(w, h) * 0.5f);
     const Point corners[4] = {{x + w - rad, y + rad}, {x + w - rad, y + h - rad},
                               {x + rad, y + h - rad}, {x + rad, y + rad}};
     const float angles[4][2] = {{-kHalfPi, 0.0f}, {0.0f, kHalfPi},
@@ -479,7 +528,8 @@ void Renderer2DCanvas::stroke_rounded_rect(float x, float y, float w, float h,
 void Renderer2DCanvas::fill_rounded_rect(float x, float y, float w, float h,
                                          float r, std::uint32_t color) {
     begin_path();
-    const float rad = std::min(r, std::min(w, h) * 0.5f);
+    // See CommandListCanvas::stroke_rounded_rect: the negative clamp.
+    const float rad = std::clamp(r, 0.0f, std::min(w, h) * 0.5f);
     const Point corners[4] = {{x + w - rad, y + rad}, {x + w - rad, y + h - rad},
                               {x + rad, y + h - rad}, {x + rad, y + rad}};
     const float angles[4][2] = {{-kHalfPi, 0.0f}, {0.0f, kHalfPi},

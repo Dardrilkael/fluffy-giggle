@@ -184,14 +184,15 @@ void CanvasView::feed_mouse_button(int button, bool pressed) {
 void CanvasView::feed_scroll(float, float, float, float dy) {
     if (input_policy.wheel_zoom && dy != 0.0f) {
         // Zoom toward the cursor. The factor: dy > 0 zooms in.
+        // Multiple notches can arrive before the next draw applies
+        // them (a fast wheel, a busy frame), and each event computes
+        // its target from the STILL-CURRENT view.zoom - so the target
+        // must compound through the accumulated factor, or every
+        // notch after the first overwrites the previous one and the
+        // extra notches are silently lost.
         const float factor = std::pow(input_policy.zoom_factor, dy);
-        const float new_zoom = view.zoom * factor;
-        // The anchor is the mouse position relative to the view's rect.
-        // We need the rect here, but feed_scroll doesn't have it. Store
-        // the pending zoom and apply it in apply_pending_input (which
-        // has the rect). For now, store the delta.
         pending_zoom_factor_ *= factor;
-        pending_zoom_target_ = new_zoom;
+        pending_zoom_target_ = view.zoom * pending_zoom_factor_;
         has_pending_zoom_ = true;
     }
 }
@@ -236,11 +237,14 @@ void CanvasView::apply_pending_input(const ws::ui::gui::Rect& rect) {
         pending_zoom_factor_ = 1.0f;
     }
 
-    // Apply drag pan (middle-drag or space+left-drag).
+    // Apply drag pan (middle-drag or space+left-drag). pan_by, not
+    // hand-rolled math: it applies the inverse rotation a rotated
+    // view needs (pan -= R^-1 * delta / zoom), which the direct
+    // `pan - delta/zoom` form gets wrong the moment rotation != 0.
     if (dragging_ && (middle_down_ || (space_down_ && left_down_))) {
         const float dx = mouse_x_ - drag_start_x_;
         const float dy = mouse_y_ - drag_start_y_;
-        view.pan = view.pan - Vec2{dx, dy} * (1.0f / view.zoom);
+        view.pan_by({dx, dy});
         // Update the start so the pan is incremental (continuous drag).
         drag_start_x_ = mouse_x_;
         drag_start_y_ = mouse_y_;
@@ -270,7 +274,7 @@ void CanvasView::apply_pending_input(const ws::ui::gui::Rect& rect) {
         if (last_touch_x_ >= 0.0f) {
             const float dx = t.x - last_touch_x_;
             const float dy = t.y - last_touch_y_;
-            view.pan = view.pan - Vec2{dx, dy} * (1.0f / view.zoom);
+            view.pan_by({dx, dy});  // rotation-aware, like the drag pan
         }
         last_touch_x_ = t.x;
         last_touch_y_ = t.y;

@@ -18,6 +18,8 @@
 #include <ws/ui/canvas/canvas2d.hpp>
 #include <ws/ui/canvas/view.hpp>
 
+#include "ui_gui_stub.hpp"  // the r2d stub's counters (Renderer2DCanvas cases)
+
 #include <cmath>
 #include <vector>
 
@@ -479,6 +481,50 @@ TEST_CASE("dash: the pattern walk") {
         REQUIRE(runs.size() == 1);
         REQUIRE(runs[0].size() == 3);
     }
+}
+
+TEST_CASE("dash: boundaries at interior vertices keep their runs") {
+    // A pattern whose phase boundaries land exactly on the polyline's
+    // interior vertices: every ON phase must still open a run there.
+    // The walk used to consume the phase with run == nullptr whenever
+    // the boundary sat exactly on an interior vertex (its run-opening
+    // guard only fired with segment length remaining), silently
+    // dropping that dash - a [4,4] pattern on a 16-unit-segment square
+    // lost half its dashes.
+    const Point sq[] = {{0.0f, 0.0f}, {16.0f, 0.0f},
+                        {16.0f, 16.0f}, {0.0f, 16.0f}};
+    DashSpec dash;
+    dash.lengths[0] = 4.0f;
+    dash.lengths[1] = 4.0f;
+    dash.count = 2;
+
+    std::vector<std::vector<Point>> runs;
+    dash_polyline(sq, 4, dash, runs);
+    // 3 segments x 16 units, period 8: two dashes per segment.
+    REQUIRE(runs.size() == 6);
+    for (const auto& run : runs) {
+        REQUIRE(run.size() == 2);
+        const float dx = run[1].x - run[0].x;
+        const float dy = run[1].y - run[0].y;
+        CHECK(std::sqrt(dx * dx + dy * dy) ==
+              doctest::Approx(4.0f).epsilon(0.01));
+    }
+
+    // The interior-vertex runs open AT the vertex.
+    CHECK(vnear({runs[2][0].x, runs[2][0].y}, 16.0f, 0.0f));
+    CHECK(vnear({runs[4][0].x, runs[4][0].y}, 16.0f, 16.0f));
+
+    // The path's own end still opens nothing (the phantom endpoint
+    // contract the [10,5]-on-30 case pins above): a boundary landing
+    // exactly at the LAST point stays run-less.
+    const Point line[] = {{0.0f, 0.0f}, {30.0f, 0.0f}};
+    DashSpec t;
+    t.lengths[0] = 10.0f;
+    t.lengths[1] = 5.0f;
+    t.count = 2;
+    std::vector<std::vector<Point>> two;
+    dash_polyline(line, 2, t, two);
+    CHECK(two.size() == 2);
 }
 
 TEST_CASE("fill: the ear-clipped core and the AA fringe") {
@@ -972,4 +1018,193 @@ TEST_CASE("grid: the view draws the shared grid system") {
     CHECK(c.count(CanvasCmdKind::fill_rects) > 0);
     CHECK(c.count(CanvasCmdKind::fill_circle) == 0);
     CHECK(c.count(CanvasCmdKind::fill_polygon) == 0);
+}
+
+TEST_CASE("canvas2d: dashed closed paths stroke fragments open") {
+    // The dash walk carves a closed ring into open fragments; only a
+    // run that wraps the whole ring (the solid case, or a dash longer
+    // than the perimeter) may joint its ends. Stroking every fragment
+    // closed spliced a phantom chord from each dash's end back to its
+    // start and dropped the fragment's caps.
+    Paint paint;
+    paint.width = 2.0f;
+    paint.cap = StrokeCap::round;
+    paint.dash.lengths[0] = 4.0f;
+    paint.dash.lengths[1] = 4.0f;
+    paint.dash.count = 2;
+    const Point square[] = {{0.0f, 0.0f}, {16.0f, 0.0f},
+                            {16.0f, 16.0f}, {0.0f, 16.0f}};
+
+    SUBCASE("the wrapper spelling: fragments open, solid closed") {
+        CommandListCanvas c;
+        c.stroke_polyline(square, 4, paint, true);
+        // 3 segments x 16 units, period 8: six 4-unit dashes.
+        REQUIRE(c.cmds.size() == 6);
+        for (const auto& cmd : c.cmds) {
+            CHECK_FALSE(cmd.closed);
+        }
+
+        CommandListCanvas solid;
+        solid.stroke_polyline(square, 4, Paint{}, true);
+        REQUIRE(solid.cmds.size() == 1);
+        CHECK(solid.cmds[0].closed);
+    }
+
+    SUBCASE("the close_path spelling behaves the same") {
+        // close_path appends the duplicate closing point: 4 segments,
+        // perimeter 64, eight dashes - all open.
+        CommandListCanvas c;
+        c.begin_path();
+        c.move_to(square[0]);
+        for (int i = 1; i < 4; ++i) {
+            c.line_to(square[i]);
+        }
+        c.close_path();
+        c.stroke(paint);
+        REQUIRE(c.cmds.size() == 8);
+        for (const auto& cmd : c.cmds) {
+            CHECK_FALSE(cmd.closed);
+        }
+
+        // ...and the solid closed ring still joints.
+        CommandListCanvas solid;
+        solid.begin_path();
+        solid.move_to(square[0]);
+        for (int i = 1; i < 4; ++i) {
+            solid.line_to(square[i]);
+        }
+        solid.close_path();
+        solid.stroke(Paint{});
+        REQUIRE(solid.cmds.size() == 1);
+        CHECK(solid.cmds[0].closed);
+    }
+
+    SUBCASE("a dash longer than the perimeter degenerates to one ring") {
+        CommandListCanvas c;
+        Paint wrap = paint;
+        wrap.dash.lengths[0] = 100.0f;  // > perimeter 48
+        c.stroke_polyline(square, 4, wrap, true);
+        REQUIRE(c.cmds.size() == 1);
+        CHECK(c.cmds[0].closed);
+    }
+
+    SUBCASE("through the renderer canvas: exactly the fragments' quads") {
+        // End-to-end over the r2d seam: the dashed ring must cost
+        // exactly what stroking its fragments individually costs -
+        // no phantom closing chords (each would add a doubled core
+        // segment plus joint bands, and drop the caps).
+        std::vector<std::vector<Point>> runs;
+        dash_polyline(square, 4, paint.dash, runs);
+        REQUIRE(runs.size() == 6);
+
+        ws::ui::gui_test::stub.reset();
+        {
+            Renderer2DCanvas rc;
+            for (const auto& run : runs) {
+                rc.stroke_polyline(run.data(),
+                                   static_cast<int>(run.size()), paint,
+                                   false);
+            }
+        }
+        const std::uint32_t fragment_quads = ws::ui::gui_test::stub.quads;
+        CHECK(fragment_quads > 0);
+
+        ws::ui::gui_test::stub.reset();
+        {
+            Renderer2DCanvas rc;
+            rc.stroke_polyline(square, 4, paint, true);
+        }
+        CHECK(ws::ui::gui_test::stub.quads == fragment_quads);
+    }
+}
+
+TEST_CASE("canvas2d: push_clip bounds all four transformed corners") {
+    CommandListCanvas c;
+
+    SUBCASE("axis-aligned transforms keep the exact rect") {
+        c.translate(10.0f, 20.0f);
+        c.scale(2.0f, 2.0f);
+        c.push_clip(0.0f, 0.0f, 10.0f, 10.0f);
+        REQUIRE(c.cmds.size() == 1);
+        CHECK(c.cmds[0].x == doctest::Approx(10.0f));
+        CHECK(c.cmds[0].y == doctest::Approx(20.0f));
+        CHECK(c.cmds[0].w == doctest::Approx(20.0f));
+        CHECK(c.cmds[0].h == doctest::Approx(20.0f));
+    }
+
+    SUBCASE("a 45-degree rotation bounds the br corner too") {
+        // The old three-corner bounds lost the rotated br corner -
+        // half the diagonal. All four corners: the full 14.14 square.
+        c.rotate(kPi / 4.0f);
+        c.push_clip(0.0f, 0.0f, 10.0f, 10.0f);
+        REQUIRE(c.cmds.size() == 1);
+        CHECK(c.cmds[0].x == doctest::Approx(-7.0711f).epsilon(0.001));
+        CHECK(c.cmds[0].y == doctest::Approx(0.0f).epsilon(0.001));
+        CHECK(c.cmds[0].w == doctest::Approx(14.1421f).epsilon(0.001));
+        CHECK(c.cmds[0].h == doctest::Approx(14.1421f).epsilon(0.001));
+    }
+}
+
+TEST_CASE("canvas2d: rounded rects clamp a negative radius to zero") {
+    // A negative radius used to displace the arc centers outside the
+    // rect and skip the arcs, splicing a bowtie; the SVG rule is a
+    // sharp rect.
+    CommandListCanvas c;
+    c.stroke_rounded_rect(0.0f, 0.0f, 10.0f, 10.0f, -5.0f, Paint{});
+    REQUIRE(c.cmds.size() == 1);
+    REQUIRE(c.cmds[0].points.size() == 5);  // 4 corners + the close
+    // The ring starts at the top-right arc's start and walks the
+    // rect's corners clockwise (y-down).
+    CHECK(vnear({c.cmds[0].points[0].x, c.cmds[0].points[0].y}, 10.0f, 0.0f));
+    CHECK(vnear({c.cmds[0].points[1].x, c.cmds[0].points[1].y}, 10.0f, 10.0f));
+    CHECK(vnear({c.cmds[0].points[2].x, c.cmds[0].points[2].y}, 0.0f, 10.0f));
+    CHECK(vnear({c.cmds[0].points[3].x, c.cmds[0].points[3].y}, 0.0f, 0.0f));
+
+    CommandListCanvas f;
+    f.fill_rounded_rect(0.0f, 0.0f, 10.0f, 10.0f, -5.0f, 0xFFFFFFFFu);
+    REQUIRE(f.cmds.size() == 1);
+    REQUIRE(f.cmds[0].points.size() == 5);
+}
+
+TEST_CASE("canvas view: pending input applies once, compounded") {
+    const ws::ui::gui::Rect rect{0.0f, 0.0f, 100.0f, 100.0f};
+
+    SUBCASE("one wheel notch before the draw") {
+        CanvasView view;
+        view.feed_mouse_moved(50.0f, 50.0f);
+        view.feed_scroll(0.0f, 0.0f, 0.0f, 1.0f);
+        CommandListCanvas c;
+        view.draw(rect, c, false);
+        CHECK(view.view.zoom == doctest::Approx(1.1f).epsilon(0.001));
+    }
+
+    SUBCASE("two notches in one frame compound, not overwrite") {
+        // Each event computes its target from the still-current zoom,
+        // so the second notch used to overwrite the first: two notches
+        // applied 1.1x once. The pending factor must compound.
+        CanvasView view;
+        view.feed_mouse_moved(50.0f, 50.0f);
+        view.feed_scroll(0.0f, 0.0f, 0.0f, 1.0f);
+        view.feed_scroll(0.0f, 0.0f, 0.0f, 1.0f);
+        CommandListCanvas c;
+        view.draw(rect, c, false);
+        CHECK(view.view.zoom == doctest::Approx(1.21f).epsilon(0.001));
+    }
+
+    SUBCASE("a middle-drag pan follows the rotation") {
+        // pan_by applies the inverse rotation; the hand-rolled
+        // `pan - delta/zoom` it replaced ignored rotation entirely and
+        // dragged a 90-degree view along the wrong axis.
+        CanvasView view;
+        view.view.rotation = kHalfPi;
+        view.feed_mouse_moved(50.0f, 50.0f);
+        view.feed_mouse_button(2, true);  // middle press starts the drag
+        view.feed_mouse_moved(60.0f, 50.0f);  // +10 screen x
+        CommandListCanvas c;
+        view.draw(rect, c, false);
+        // R^-1 * (10, 0) at rotation pi/2 = (0, -10); pan -= that:
+        // the pan moves on y, not x.
+        CHECK(view.view.pan.x == doctest::Approx(0.0f).epsilon(0.001));
+        CHECK(view.view.pan.y == doctest::Approx(10.0f).epsilon(0.001));
+    }
 }

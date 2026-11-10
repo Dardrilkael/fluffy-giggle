@@ -241,13 +241,19 @@ void dash_polyline(const Point* pts, int count, const DashSpec& dash,
                 idx = (idx + 1) % pattern_count;
                 left = pattern[idx];
                 on = !on;
-                // Only open a new ON run when there's segment remaining
-                // past the boundary. When seg ~ 0 the boundary sits at
-                // the endpoint and the new phase has nothing to draw -
-                // opening a run here would emit a spurious single-point
-                // run at the endpoint (the [10,5] dash pattern on a
-                // 30px line would produce a phantom third run at 30).
-                if (on && seg > 1e-9f) {
+                // Only open a new ON run when there is path left to
+                // draw it with: either segment remaining past the
+                // boundary, or more points coming (the boundary sits
+                // exactly on an INTERIOR vertex and the next segment
+                // continues the walk - the run must open here, at the
+                // vertex, or the whole ON phase is consumed with run
+                // == nullptr and the dash silently vanishes). The
+                // path's own end (seg ~ 0 and last point) still opens
+                // nothing: a phase starting there has zero length, and
+                // a run would be the phantom single-point endpoint dot
+                // (the [10,5] dash pattern on a 30px line must not
+                // produce a third run at 30).
+                if (on && (seg > 1e-9f || i < count - 1)) {
                     runs.emplace_back();
                     run = &runs.back();
                     run->push_back(at);
