@@ -826,3 +826,117 @@ TEST_CASE("property_grid: a real setting typed to 0.0001 through the "
         gui.persistent_state<ws::ui::gui::NumInputState>(tol_id);
     CHECK(std::string(st.buf) == "0.0001");
 }
+
+TEST_CASE("property_grid: the text row owns its edit - a keystroke is not "
+          "a write, the blur commits, a refused blur reverts") {
+    ws::settings::Schema schema;
+    ws::settings::RegexConstraint lower;
+    lower.pattern = "^[a-z]+$";
+    CHECK(schema.declare({
+        .key = "editor.project",
+        .type = ws::settings::SettingType::text,
+        .default_value = ws::settings::SettingValue::text("untitled"),
+        .description = "the open project",
+        .category = "editor",
+    }).has_value());
+    CHECK(schema.declare({
+        .key = "editor.style",
+        .type = ws::settings::SettingType::text,
+        .default_value = ws::settings::SettingValue::text("light"),
+        .constraints = {lower},
+        .description = "the style sheet name",
+        .category = "editor",
+    }).has_value());
+    ws::settings::SettingsStore store{std::move(schema)};
+
+    GuiContext gui;
+    LayoutCursor layout;
+    ws::ui::gui::PropertyGridState pg;
+
+    const auto run = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                       {0.0f, 0.0f, 400.0f, 600.0f});
+        const std::size_t changed = ws::ui::gui::property_grid(
+            gui, layout, kDefaultChrome, store.schema(), store, pg);
+        ws::ui::gui::end_panel(gui, layout);
+        gui.end_frame();
+        return changed;
+    };
+    const auto buf_of = [&](const char* key) {
+        const auto it = pg.text_bufs.find(key);
+        return it != pg.text_bufs.end() ? std::string(it->second.data())
+                                       : std::string{};
+    };
+    const auto value_of = [&](const char* key) {
+        auto r = store.get<std::string>(key);
+        return r.has_value() ? r->value : std::string{};
+    };
+
+    // An idle frame lays the rows; the buffers sync from the store.
+    REQUIRE(run(snap()) == 0u);
+    gui.ids().push("panel");
+    const ws::ui::gui::WidgetId project_id = gui.ids().id("editor.project");
+    const ws::ui::gui::WidgetId style_id = gui.ids().id("editor.style");
+    gui.ids().pop();
+    REQUIRE(buf_of("editor.project") == "untitled");
+
+    // The arrival, then select-all and the typing: every keystroke
+    // edits the buffer ONLY - the store is not written per keystroke
+    // (the numeric rows' own rule, now the text row's too).
+    gui.set_focus(project_id);
+    run(snap());
+    InputFrame select_all = snap();
+    select_all.key_down[static_cast<std::size_t>(keys::kLeftControl)] = true;
+    select_all.key_pressed[static_cast<std::size_t>(keys::kA)] = true;
+    run(select_all);
+    InputFrame typing = snap();
+    type_text(typing, "circsim");
+    REQUIRE(run(typing) == 0u);
+    REQUIRE(run(snap()) == 0u);
+    CHECK(value_of("editor.project") == "untitled");
+    CHECK(buf_of("editor.project") == "circsim");
+
+    // An external change while the edit stands WAITS: the focused
+    // field owns the spelling, the typing is not stomped.
+    CHECK(store.set(ws::settings::Layer::user, "editor.project",
+                    std::string{"externally"})
+              .has_value());
+    run(snap());
+    CHECK(value_of("editor.project") == "externally");
+    CHECK(buf_of("editor.project") == "circsim");
+
+    // The blur (a press on the empty panel clears the focus at its
+    // end_frame; the frame after is the blur): one commit - the
+    // typing lands, the count answers on the commit frame, the
+    // buffer re-spells from the store's standing value.
+    run(snap(250.0f, 150.0f, true, true));
+    CHECK(run(snap()) == 1u);
+    CHECK(value_of("editor.project") == "circsim");
+    CHECK(buf_of("editor.project") == "circsim");
+
+    // An external change on an IDLE row shows the moment it lands -
+    // the store re-spells the buffer every unfocused frame.
+    CHECK(store.set(ws::settings::Layer::user, "editor.project",
+                    std::string{"synced"})
+              .has_value());
+    REQUIRE(run(snap()) == 0u);
+    CHECK(value_of("editor.project") == "synced");
+    CHECK(buf_of("editor.project") == "synced");
+
+    // A refused write reverts at the BLUR, never mid-typing: a value
+    // the regex refuses keeps through the edit, is offered once at
+    // the commit, and loses to the standing value on that same frame.
+    gui.set_focus(style_id);
+    run(snap());
+    run(select_all);
+    InputFrame bad = snap();
+    type_text(bad, "9");
+    REQUIRE(run(bad) == 0u);
+    CHECK(buf_of("editor.style") == "9");
+    CHECK(value_of("editor.style") == "light");  // the keystroke wrote nothing
+    run(snap(250.0f, 150.0f, true, true));
+    CHECK(run(snap()) == 0u);  // the refused write counts no change
+    CHECK(value_of("editor.style") == "light");
+    CHECK(buf_of("editor.style") == "light");
+}

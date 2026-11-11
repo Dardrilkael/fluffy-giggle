@@ -38,6 +38,11 @@ struct PropertyGridState {
     // Per-text-setting input buffer (256 bytes, enough for any
     // reasonable text setting). Keyed by the setting's key.
     std::unordered_map<std::string, std::array<char, 256>> text_bufs;
+    // Per-text-setting "the field holds the focus" - the editing flag
+    // that gates the buffer sync: while it stands, the field owns the
+    // spelling (no store writes, no re-syncs) and the edit ends at the
+    // first unfocused frame with one commit. Keyed like the buffers.
+    std::unordered_map<std::string, bool> text_editing;
 };
 
 // Renders the property grid for `schema` bound to `settings`. Draws
@@ -47,7 +52,9 @@ struct PropertyGridState {
 //
 // The grid uses the existing widget set (checkbox, input_int,
 // input_float, combo, text_input) and the standard layout cursor. The
-// row width fills the current panel's content width.
+// row width fills the current panel's content width. The text rows
+// own their edit like the numeric ones: a keystroke edits the buffer
+// only, and the store sees the text once, at the blur.
 std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                           const ChromeTheme& theme,
                           const settings::Schema& schema,

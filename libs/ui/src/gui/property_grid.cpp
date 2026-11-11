@@ -14,12 +14,22 @@
 //   text + regex/plain -> text_input
 //
 // The grid reads the current value through SettingsStore::get<T> and
-// writes through SettingsStore::set(Layer::user, key, value) - on the
-// numeric rows, only on the field's own commit edges (Enter, the
-// blur, a step), so a keystroke is not a settings write. A change
-// that fails validation (coerce rejects) is silently dropped - the
-// field re-spells from the store's standing value on its next idle
-// frame; the schema's constraint is the authority.
+// writes through SettingsStore::set(Layer::user, key, value) - only on
+// the rows' own commit edges: Enter, a step or the blur on the numeric
+// rows, and the blur on the text rows (the one edge a bare text field
+// has; a single line of text owns no Enter), so a keystroke is never a
+// settings write. A change that fails validation (coerce rejects) is
+// silently dropped - the field re-spells from the store's standing
+// value on its next idle frame; the schema's constraint is the
+// authority.
+//
+// The text rows keep the numeric field's own discipline around that
+// edge: the focused field owns the spelling (the buffer is not
+// re-synced while the edit stands, so an external change - another
+// panel bound to the store, a settings sync - waits for the blur
+// instead of stomping the typing), and the edit ends at the first
+// unfocused frame with one commit; a refused write reverts the buffer
+// to the standing value on that same frame, never mid-typing.
 
 #include <ws/ui/gui/property_grid.hpp>
 
@@ -204,31 +214,61 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                         }
                     }
                 } else {
-                    // Text input: use the state's buffer.
+                    // Text input: the state's buffer, with the numeric
+                    // rows' own discipline (see the file header) - the
+                    // focused field owns the spelling, the blur commits.
                     auto& buf = state.text_bufs[desc->key];
-                    // Sync the buffer with the current value if it's not
-                    // being edited (a simple heuristic: always copy the
-                    // current value in; the text_input widget handles
-                    // editing in-place). A full implementation would
-                    // track focus and only sync on blur.
-                    //
-                    // copy_n, not strncpy: MSVC C4996s the CRT copy (and
-                    // strncpy_s is MSVC-only), while copying the chars
-                    // and writing the terminator is the same truncating
-                    // copy with no deprecated call in it (app.cpp's
-                    // env_probe is the scoped-pragma case only because
-                    // getenv has no portable non-deprecated spelling).
-                    const std::size_t n =
-                        std::min(r->value.size(), buf.size() - 1);
-                    std::copy_n(r->value.data(), n, buf.data());
-                    buf.data()[n] = '\0';
-                    if (text_input(gui, layout, theme, label, buf.data(),
-                                   static_cast<int>(buf.size()))) {
-                        if (settings.set(settings::Layer::user, desc->key,
-                                         std::string{buf.data()}).has_value()) {
-                            ++changed;
+                    auto& editing = state.text_editing[desc->key];
+                    // The row's own id: text_input derives the same one
+                    // from the same scope (begin_widget_row's
+                    // ids().id(label)), so the focus read here is the
+                    // focus the field itself will see.
+                    const WidgetId row_id = gui.ids().id(label);
+                    if (gui.is_focused(row_id)) {
+                        // The edit stands: the field owns the spelling -
+                        // no store write, no re-sync, whatever else the
+                        // frame does to the setting's value.
+                        editing = true;
+                    } else {
+                        // The row the typing landed in reads as blurred
+                        // only once: the first unfocused frame after the
+                        // edit is THE blur, its commit edge.
+                        const std::string typed{buf.data()};
+                        const std::string* standing = &r->value;
+                        if (editing) {
+                            editing = false;
+                            // Write only on a real move (the radio's
+                            // idempotence: re-typing the standing value
+                            // is a no-op). A refused write keeps the
+                            // standing value and shows it, this frame.
+                            if (typed != r->value &&
+                                settings.set(settings::Layer::user,
+                                              desc->key, typed)
+                                    .has_value()) {
+                                ++changed;
+                                standing = &typed;
+                            }
                         }
+                        // The idle re-sync (and the blur's own
+                        // re-spell): the store's standing value lands
+                        // in the buffer, so an external change (a
+                        // caller's write, a settings sync) shows the
+                        // moment it lands - while no edit stands.
+                        //
+                        // copy_n, not strncpy: MSVC C4996s the CRT copy
+                        // (and strncpy_s is MSVC-only), while copying the
+                        // chars and writing the terminator is the same
+                        // truncating copy with no deprecated call in it
+                        // (app.cpp's env_probe is the scoped-pragma case
+                        // only because getenv has no portable
+                        // non-deprecated spelling).
+                        const std::size_t n =
+                            std::min(standing->size(), buf.size() - 1);
+                        std::copy_n(standing->data(), n, buf.data());
+                        buf.data()[n] = '\0';
                     }
+                    (void)text_input(gui, layout, theme, label, buf.data(),
+                                     static_cast<int>(buf.size()));
                 }
             }
         }
