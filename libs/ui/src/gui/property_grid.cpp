@@ -50,6 +50,20 @@
 // left mid-edit and returned would cash its surviving buffer and
 // editing flag as one phantom blur commit, and a surviving open flag
 // would hand the returned row a dropdown it never opened.
+//
+// The walk itself is cached in the state, keyed on the schema's
+// address and descriptor count: the Schema introspection returns its
+// categories and per-category rows BY VALUE (a copy of every name, a
+// vector per category), and the enum rows' label lists allocate the
+// same way - the one allocating path an otherwise allocation-free
+// walk had left (fit_text's own comment states the mid-frame
+// no-allocation rule; a settings panel open at 60 fps was allocating
+// per category, per enum row, every frame). The cache's key is exact,
+// not heuristic: a re-bind changes the address, a growth changes the
+// count - and a growth may MOVE the descriptors' own storage, so the
+// cached pointers cannot outlive their schema change. The enum rows'
+// choice lists ride the same wipe; each row rebuilds its list once on
+// first use after it.
 
 #include <ws/ui/gui/property_grid.hpp>
 
@@ -139,7 +153,24 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                           SettingsStore& settings,
                           PropertyGridState& state) {
     std::size_t changed = 0;
-    const auto categories = schema.categories();
+
+    // The schema walk, validated then cached (the state's own comment
+    // spells the key): the address catches a re-bind, the count a
+    // growth - and a growth may move the descriptors' storage, so the
+    // cache must never survive one. Steady frames - the grid open on
+    // one schema - read the cached lists and allocate nothing.
+    if (state.walk_from != &schema || state.walk_size != schema.size()) {
+        state.walk_from = &schema;
+        state.walk_size = schema.size();
+        state.walk_categories = schema.categories();
+        state.walk_rows.clear();
+        state.walk_rows.reserve(state.walk_categories.size());
+        for (const std::string& cat : state.walk_categories) {
+            state.walk_rows.push_back(schema.in_category(cat));
+        }
+        state.enum_choices.clear();
+    }
+    const std::vector<std::string>& categories = state.walk_categories;
 
     // The state follows the schema bound THIS frame: an entry whose key
     // or category left the schema leaves with it, before the walk can
@@ -186,7 +217,7 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                categories.end();
     });
 
-    for (const auto& cat : categories) {
+    for (std::size_t ci = 0; ci < categories.size(); ++ci) {
         // Ensure the category has an open-state entry - defaulting OPEN,
         // the documented intent. (The entry used to come from
         // operator[]'s zero-init, which said CLOSED: every grid laid
@@ -194,12 +225,13 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
         // never noticed - a closed header still draws its quads. The
         // typed rows made it visible: a collapsed category renders no
         // rows at all.)
-        auto& open = state.category_open.try_emplace(cat, true).first->second;
-        if (!collapsing_header(gui, layout, theme, cat.c_str(), open)) {
+        auto& open =
+            state.category_open.try_emplace(categories[ci], true).first->second;
+        if (!collapsing_header(gui, layout, theme, categories[ci].c_str(),
+                               open)) {
             continue;
         }
-        const auto descs = schema.in_category(cat);
-        for (const SettingDesc* desc : descs) {
+        for (const SettingDesc* desc : state.walk_rows[ci]) {
             if (desc == nullptr) continue;
             const char* label = desc->key.c_str();
 
@@ -219,10 +251,18 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                 if (!r) continue;
                 if (en != nullptr && !en->allowed.empty()) {
                     // Combo: build the label list, find the current index.
-                    auto labels = enum_labels(*en, SettingType::integer);
-                    std::vector<const char*> ptrs;
-                    ptrs.reserve(labels.size());
-                    for (const auto& s : labels) ptrs.push_back(s.c_str());
+                    // The list is the state's cache (see the file header):
+                    // built once per binding, not once per frame.
+                    auto [choice_it, fresh] =
+                        state.enum_choices.try_emplace(desc->key);
+                    if (fresh) {
+                        PropertyGridState::EnumChoices& choice = choice_it->second;
+                        choice.labels = enum_labels(*en, SettingType::integer);
+                        choice.ptrs.reserve(choice.labels.size());
+                        for (const std::string& s : choice.labels) {
+                            choice.ptrs.push_back(s.c_str());
+                        }
+                    }
                     int sel = 0;
                     // Find the current value's index.
                     for (std::size_t i = 0; i < en->allowed.size(); ++i) {
@@ -235,8 +275,8 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                     // list the row's click or Enter opened still hangs
                     // when the pick lands, a frame or ten later.
                     auto& combo_open = state.combo_open[desc->key];
-                    if (combo(gui, layout, theme, label, ptrs.data(),
-                              static_cast<int>(ptrs.size()), sel, combo_open)) {
+                    if (combo(gui, layout, theme, label, choice_it->second.ptrs.data(),
+                              static_cast<int>(choice_it->second.ptrs.size()), sel, combo_open)) {
                         if (sel >= 0 && sel < static_cast<int>(en->allowed.size())) {
                             auto v = en->allowed[sel].as<std::int64_t>();
                             if (v && settings.set(settings::Layer::user, desc->key, *v).has_value()) {
@@ -273,11 +313,18 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                     // declared never showed - the only way to move the
                     // setting was to type a value the enum silently
                     // refused at the blur, and enum_labels' real arm sat
-                    // dead above.)
-                    auto labels = enum_labels(*en, SettingType::real);
-                    std::vector<const char*> ptrs;
-                    ptrs.reserve(labels.size());
-                    for (const auto& s : labels) ptrs.push_back(s.c_str());
+                    // dead above.) The choice list rides the state's
+                    // cache like the other enum rows'.
+                    auto [choice_it, fresh] =
+                        state.enum_choices.try_emplace(desc->key);
+                    if (fresh) {
+                        PropertyGridState::EnumChoices& choice = choice_it->second;
+                        choice.labels = enum_labels(*en, SettingType::real);
+                        choice.ptrs.reserve(choice.labels.size());
+                        for (const std::string& s : choice.labels) {
+                            choice.ptrs.push_back(s.c_str());
+                        }
+                    }
                     int sel = 0;
                     for (std::size_t i = 0; i < en->allowed.size(); ++i) {
                         auto v = en->allowed[i].as<double>();
@@ -286,8 +333,8 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                     // The caller-owned open flag, the same combo
                     // contract as the integer and text enums above.
                     auto& combo_open = state.combo_open[desc->key];
-                    if (combo(gui, layout, theme, label, ptrs.data(),
-                              static_cast<int>(ptrs.size()), sel, combo_open)) {
+                    if (combo(gui, layout, theme, label, choice_it->second.ptrs.data(),
+                              static_cast<int>(choice_it->second.ptrs.size()), sel, combo_open)) {
                         if (sel >= 0 && sel < static_cast<int>(en->allowed.size())) {
                             auto v = en->allowed[sel].as<double>();
                             if (v && settings.set(settings::Layer::user, desc->key,
@@ -315,10 +362,18 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                 auto r = settings.get<std::string>(desc->key);
                 if (!r) continue;
                 if (en != nullptr && !en->allowed.empty()) {
-                    auto labels = enum_labels(*en, SettingType::text);
-                    std::vector<const char*> ptrs;
-                    ptrs.reserve(labels.size());
-                    for (const auto& s : labels) ptrs.push_back(s.c_str());
+                    // The choice list rides the state's cache like the
+                    // other enum rows' (see the file header).
+                    auto [choice_it, fresh] =
+                        state.enum_choices.try_emplace(desc->key);
+                    if (fresh) {
+                        PropertyGridState::EnumChoices& choice = choice_it->second;
+                        choice.labels = enum_labels(*en, SettingType::text);
+                        choice.ptrs.reserve(choice.labels.size());
+                        for (const std::string& s : choice.labels) {
+                            choice.ptrs.push_back(s.c_str());
+                        }
+                    }
                     int sel = 0;
                     for (std::size_t i = 0; i < en->allowed.size(); ++i) {
                         auto v = en->allowed[i].as<std::string>();
@@ -328,8 +383,8 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                     // above: the text enums' dropdowns hang on the same
                     // contract, not on a bool that dies with the frame.
                     auto& combo_open = state.combo_open[desc->key];
-                    if (combo(gui, layout, theme, label, ptrs.data(),
-                              static_cast<int>(ptrs.size()), sel, combo_open)) {
+                    if (combo(gui, layout, theme, label, choice_it->second.ptrs.data(),
+                              static_cast<int>(choice_it->second.ptrs.size()), sel, combo_open)) {
                         if (sel >= 0 && sel < static_cast<int>(en->allowed.size())) {
                             auto v = en->allowed[sel].as<std::string>();
                             if (v && settings.set(settings::Layer::user, desc->key, *v).has_value()) {
@@ -357,20 +412,32 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                         // The row the typing landed in reads as blurred
                         // only once: the first unfocused frame after the
                         // edit is THE blur, its commit edge.
-                        const std::string typed{buf.data()};
+                        //
+                        // string_view, not string: the idle re-sync
+                        // branch runs EVERY unfocused frame, and a
+                        // value past SSO's 15 bytes would turn that
+                        // comparison into a per-frame allocation - the
+                        // one spelling this walk just dug out. The view
+                        // reads the caller-owned buffer directly; the
+                        // commit's own std::string materializes only
+                        // when a real write is about to happen.
+                        const std::string_view typed{buf.data()};
                         const std::string* standing = &r->value;
+                        std::string moved;
                         if (editing) {
                             editing = false;
                             // Write only on a real move (the radio's
                             // idempotence: re-typing the standing value
                             // is a no-op). A refused write keeps the
                             // standing value and shows it, this frame.
-                            if (typed != r->value &&
-                                settings.set(settings::Layer::user,
-                                              desc->key, typed)
-                                    .has_value()) {
-                                ++changed;
-                                standing = &typed;
+                            if (typed != r->value) {
+                                moved.assign(typed.data(), typed.size());
+                                if (settings.set(settings::Layer::user,
+                                                  desc->key, moved)
+                                        .has_value()) {
+                                    ++changed;
+                                    standing = &moved;
+                                }
                             }
                         }
                         // The idle re-sync (and the blur's own

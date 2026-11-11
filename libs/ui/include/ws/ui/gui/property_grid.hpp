@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <ws/settings/schema.hpp>
 #include <ws/settings/settings.hpp>
@@ -53,6 +54,33 @@ struct PropertyGridState {
     // beneath. The popup's own rules (a pick, the outside press,
     // Escape) close it through the same reference.
     std::unordered_map<std::string, bool> combo_open;
+
+    // The schema walk, cached: the category names in first-declared
+    // order and each category's descriptor pointers, read once per
+    // schema binding instead of the per-frame vectors the Schema
+    // introspection returns by value (categories() copies every
+    // name, in_category() allocates a list per category - the one
+    // allocating path an otherwise allocation-free walk had left).
+    // The cache keys on the schema's ADDRESS and descriptor COUNT,
+    // exactly: a re-bind to another schema (another store, another
+    // document) changes the address, a schema that grew changes the
+    // count - and a growth may reallocate the descriptors' own
+    // storage, so a stale pointer is impossible, never merely
+    // unlikely. The enum rows' choice lists ride the same key.
+    const void* walk_from = nullptr;
+    std::size_t walk_size = 0;
+    std::vector<std::string> walk_categories;
+    std::vector<std::vector<const settings::SettingDesc*>> walk_rows;
+
+    // Per-enum-setting choice lists (the spelled labels and the
+    // c_str()s the combo reads off them), cleared with the walk on
+    // every schema change and rebuilt on a row's first use - built
+    // once per binding, not once per frame.
+    struct EnumChoices {
+        std::vector<std::string> labels;
+        std::vector<const char*> ptrs;  // labels[i].c_str(), parallel
+    };
+    std::unordered_map<std::string, EnumChoices> enum_choices;
 
     // The state follows the schema it last rendered: each frame the
     // maps are pruned to the schema's live keys and categories, so a

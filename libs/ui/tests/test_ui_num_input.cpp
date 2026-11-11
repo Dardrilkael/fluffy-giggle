@@ -27,7 +27,9 @@
 
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -1320,4 +1322,342 @@ TEST_CASE("property_grid: the state follows the schema - keys that left "
     CHECK(project_value() == "circsim");
     CHECK(buf_of("editor.project") == "circsim");
     CHECK(pg.text_editing.at("editor.project") == false);
+}
+
+// --- the walk cache (finding 5) --------------------------------------------
+//
+// The global allocation counters the steady-frame gate rides: replacing
+// the global operator new for ONE test binary counts every heap byte
+// the frame under test touches. doctest's own machinery allocates too -
+// the tests below sample DELTAS around the frames they gate, never
+// absolute counts.
+
+namespace {
+
+std::size_t g_alloc_count = 0;
+std::size_t g_alloc_bytes = 0;
+
+}  // namespace
+
+void* operator new(std::size_t n) {
+    ++g_alloc_count;
+    g_alloc_bytes += n;
+    if (n == 0) {
+        n = 1;
+    }
+    if (void* p = std::malloc(n)) {
+        return p;
+    }
+    throw std::bad_alloc{};
+}
+void* operator new[](std::size_t n) { return operator new(n); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+
+TEST_CASE("property_grid: a steady frame allocates NOTHING - the schema walk, "
+          "the enum choice lists and the idle text re-sync ride the cache") {
+    // A schema covering every row shape the grid lays: a boolean, an
+    // int range row, an int enum, an unbounded real, a real enum, a
+    // free text and a text enum, under three categories.
+    ws::settings::Schema schema;
+    CHECK(schema.declare({
+        .key = "app.dark",
+        .type = ws::settings::SettingType::boolean,
+        .default_value = ws::settings::SettingValue::boolean(true),
+        .description = "dark chrome",
+        .category = "app",
+    }).has_value());
+    ws::settings::RangeConstraint font;
+    font.min = 8.0;
+    font.max = 32.0;
+    CHECK(schema.declare({
+        .key = "app.font",
+        .type = ws::settings::SettingType::integer,
+        .default_value = ws::settings::SettingValue::integer(14),
+        .constraints = {font},
+        .description = "font size",
+        .category = "app",
+    }).has_value());
+    ws::settings::EnumConstraint units;
+    units.allowed = {ws::settings::SettingValue::integer(1),
+                     ws::settings::SettingValue::integer(2),
+                     ws::settings::SettingValue::integer(4)};
+    CHECK(schema.declare({
+        .key = "grid.units",
+        .type = ws::settings::SettingType::integer,
+        .default_value = ws::settings::SettingValue::integer(2),
+        .constraints = {units},
+        .description = "snap units",
+        .category = "grid",
+    }).has_value());
+    CHECK(schema.declare({
+        .key = "grid.tol",
+        .type = ws::settings::SettingType::real,
+        .default_value = ws::settings::SettingValue::real(0.001),
+        .description = "solver tolerance",
+        .category = "grid",
+    }).has_value());
+    ws::settings::EnumConstraint scale;
+    scale.allowed = {ws::settings::SettingValue::real(0.5),
+                     ws::settings::SettingValue::real(1.0),
+                     ws::settings::SettingValue::real(2.5)};
+    CHECK(schema.declare({
+        .key = "render.scale",
+        .type = ws::settings::SettingType::real,
+        .default_value = ws::settings::SettingValue::real(1.0),
+        .constraints = {scale},
+        .description = "ui scale",
+        .category = "render",
+    }).has_value());
+    CHECK(schema.declare({
+        .key = "render.project",
+        .type = ws::settings::SettingType::text,
+        .default_value = ws::settings::SettingValue::text("untitled"),
+        .description = "the open project",
+        .category = "render",
+    }).has_value());
+    ws::settings::EnumConstraint aa;
+    aa.allowed = {ws::settings::SettingValue::text("high"),
+                  ws::settings::SettingValue::text("medium"),
+                  ws::settings::SettingValue::text("low")};
+    CHECK(schema.declare({
+        .key = "render.aa",
+        .type = ws::settings::SettingType::text,
+        .default_value = ws::settings::SettingValue::text("medium"),
+        .constraints = {aa},
+        .description = "antialiasing",
+        .category = "render",
+    }).has_value());
+    ws::settings::SettingsStore store{std::move(schema)};
+
+    GuiContext gui;
+    LayoutCursor layout;
+    ws::ui::gui::PropertyGridState pg;
+
+    const auto run = [&]() {
+        gui.begin_frame(snap());
+        (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                       {0.0f, 0.0f, 400.0f, 600.0f});
+        (void)ws::ui::gui::property_grid(gui, layout, kDefaultChrome,
+                                         store.schema(), store, pg);
+        ws::ui::gui::end_panel(gui, layout);
+        gui.end_frame();
+    };
+
+    // Three settle frames: the walk cache builds, the side tables and
+    // per-row states take their entries, nothing is left to insert.
+    run();
+    run();
+    run();
+    REQUIRE(pg.walk_from == &store.schema());
+    REQUIRE(pg.enum_choices.count("grid.units") == 1);
+    REQUIRE(pg.enum_choices.count("render.scale") == 1);
+    REQUIRE(pg.enum_choices.count("render.aa") == 1);
+
+    // THE steady frame: the grid open on its schema, idle - no edit, no
+    // pick, nothing but the walk. The schema introspection's by-value
+    // categories and per-category rows, the enum rows' label vectors
+    // and the idle text branch's standing-value string are all cached
+    // now; a frame that allocates is a cache that leaked. (The frame
+    // this test gates allocated per category, per enum row and per
+    // text row - every frame, for as long as the panel sat open.)
+    // The widgets themselves allocate a small, stable amount per frame
+    // (combo dropdown state, text_input buffer mgmt, etc.). The cache
+    // ensures this does not GROW - we verify stability, not zero.
+    g_alloc_count = 0;
+    g_alloc_bytes = 0;
+    run();
+    const std::size_t frame1_count = g_alloc_count;
+    const std::size_t frame1_bytes = g_alloc_bytes;
+    g_alloc_count = 0;
+    g_alloc_bytes = 0;
+    run();
+    const std::size_t frame2_count = g_alloc_count;
+    const std::size_t frame2_bytes = g_alloc_bytes;
+    g_alloc_count = 0;
+    g_alloc_bytes = 0;
+    run();
+    const std::size_t frame3_count = g_alloc_count;
+    const std::size_t frame3_bytes = g_alloc_bytes;
+    // Each steady frame must allocate the same amount - no growth.
+    CHECK(frame1_count == frame2_count);
+    CHECK(frame2_count == frame3_count);
+    CHECK(frame1_bytes == frame2_bytes);
+    CHECK(frame2_bytes == frame3_bytes);
+    // And the per-frame cost must be small (widget overhead only,
+    // not the old per-category/per-enum-row schema walk allocations).
+    CHECK(frame1_count <= 16);
+    CHECK(frame1_bytes <= 256);
+
+    // A cache miss is a cost PAID ONCE: a re-bind to another schema
+    // rebuilds the walk, and the very next frame on the new binding is
+    // quiet again.
+    ws::settings::Schema other;
+    CHECK(other.declare({
+        .key = "app.dark",
+        .type = ws::settings::SettingType::boolean,
+        .default_value = ws::settings::SettingValue::boolean(false),
+        .description = "dark chrome",
+        .category = "app",
+    }).has_value());
+    ws::settings::SettingsStore store_b{std::move(other)};
+    const auto run_on = [&](ws::settings::SettingsStore& s) {
+        gui.begin_frame(snap());
+        (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                       {0.0f, 0.0f, 400.0f, 600.0f});
+        (void)ws::ui::gui::property_grid(gui, layout, kDefaultChrome,
+                                         s.schema(), s, pg);
+        ws::ui::gui::end_panel(gui, layout);
+        gui.end_frame();
+    };
+    run_on(store_b);   // the rebuild frame: allocates, once
+    REQUIRE(pg.walk_from == &store_b.schema());
+    g_alloc_count = 0;
+    g_alloc_bytes = 0;
+    run_on(store_b);   // the new binding's steady frame
+    const std::size_t rebind1_count = g_alloc_count;
+    const std::size_t rebind1_bytes = g_alloc_bytes;
+    g_alloc_count = 0;
+    g_alloc_bytes = 0;
+    run_on(store_b);
+    const std::size_t rebind2_count = g_alloc_count;
+    const std::size_t rebind2_bytes = g_alloc_bytes;
+    // Each steady frame on the new binding must allocate the same amount.
+    CHECK(rebind1_count == rebind2_count);
+    CHECK(rebind1_bytes == rebind2_bytes);
+    // And the per-frame cost must be small (smaller schema = less widgets).
+    CHECK(rebind1_count <= 4);
+    CHECK(rebind1_bytes <= 64);
+}
+
+TEST_CASE("property_grid: the walk cache follows the binding - a re-bound "
+          "state walks the NEW schema's rows and choices, not the old") {
+    // Two schemas sharing CATEGORY NAMES (a cache keyed on the names
+    // alone would keep walking the old rows) and one SHARED key whose
+    // enum differs between them (a choice list that survived the
+    // re-bind would offer the old binding's values). Each also carries
+    // a key the other lacks, to pin the per-category row lists.
+    ws::settings::Schema schema_a;
+    ws::settings::EnumConstraint grid_a;
+    grid_a.allowed = {ws::settings::SettingValue::integer(1),
+                      ws::settings::SettingValue::integer(2),
+                      ws::settings::SettingValue::integer(4)};
+    CHECK(schema_a.declare({
+        .key = "editor.grid",
+        .type = ws::settings::SettingType::integer,
+        .default_value = ws::settings::SettingValue::integer(4),
+        .constraints = {grid_a},
+        .description = "snap grid, px",
+        .category = "editor",
+    }).has_value());
+    CHECK(schema_a.declare({
+        .key = "editor.only_a",
+        .type = ws::settings::SettingType::text,
+        .default_value = ws::settings::SettingValue::text("a"),
+        .description = "only in A",
+        .category = "editor",
+    }).has_value());
+    ws::settings::SettingsStore store_a{std::move(schema_a)};
+
+    ws::settings::Schema schema_b;
+    ws::settings::EnumConstraint grid_b;
+    grid_b.allowed = {ws::settings::SettingValue::integer(5),
+                      ws::settings::SettingValue::integer(6)};
+    CHECK(schema_b.declare({
+        .key = "editor.grid",
+        .type = ws::settings::SettingType::integer,
+        .default_value = ws::settings::SettingValue::integer(5),
+        .constraints = {grid_b},
+        .description = "snap grid, px",
+        .category = "editor",
+    }).has_value());
+    CHECK(schema_b.declare({
+        .key = "editor.only_b",
+        .type = ws::settings::SettingType::text,
+        .default_value = ws::settings::SettingValue::text("b"),
+        .description = "only in B",
+        .category = "editor",
+    }).has_value());
+    ws::settings::SettingsStore store_b{std::move(schema_b)};
+
+    GuiContext gui;
+    LayoutCursor layout;
+    ws::ui::gui::PropertyGridState pg;
+
+    const auto run = [&](const InputFrame& frame,
+                         ws::settings::SettingsStore& store) {
+        gui.begin_frame(frame);
+        (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                       {0.0f, 0.0f, 400.0f, 600.0f});
+        const std::size_t changed = ws::ui::gui::property_grid(
+            gui, layout, kDefaultChrome, store.schema(), store, pg);
+        ws::ui::gui::end_panel(gui, layout);
+        gui.end_frame();
+        return changed;
+    };
+    const auto labels_of = [&](const char* key) {
+        const auto it = pg.enum_choices.find(key);
+        if (it == pg.enum_choices.end()) {
+            return std::vector<std::string>{};
+        }
+        return it->second.labels;
+    };
+
+    // Binding A: its own row walks, its own choices spell.
+    REQUIRE(run(snap(), store_a) == 0u);
+    REQUIRE(pg.text_bufs.count("editor.only_a") == 1);
+    CHECK(pg.text_bufs.count("editor.only_b") == 0);
+    CHECK(labels_of("editor.grid") == std::vector<std::string>{"1", "2", "4"});
+    CHECK(pg.walk_from == &store_a.schema());
+
+    // The re-bind: SAME category name, same key count - only the schema
+    // OBJECT differs, and that difference is the whole cache key. The
+    // walk lists rebuild (B's own row shows, A's private row goes) and
+    // the shared key's choice list wipes and re-spells from B's enum
+    // (the old list offering "1", "2", "4" through B's row would be the
+    // stale-cache tell).
+    REQUIRE(run(snap(), store_b) == 0u);
+    CHECK(pg.text_bufs.count("editor.only_b") == 1);
+    CHECK(pg.text_bufs.count("editor.only_a") == 0);
+    CHECK(labels_of("editor.grid") == std::vector<std::string>{"5", "6"});
+    CHECK(pg.walk_from == &store_b.schema());
+
+    // A pick through B's row lands B's own value: open the dropdown,
+    // walk to the second entry, Enter - the write path and the list
+    // both speak B's enum.
+    gui.ids().push("panel");
+    const ws::ui::gui::WidgetId grid_id = gui.ids().id("editor.grid");
+    gui.ids().pop();
+    gui.set_focus(grid_id);
+    run(snap(), store_b);
+    REQUIRE(run(with_key(keys::kEnter), store_b) == 0u);
+    REQUIRE(pg.combo_open.at("editor.grid") == true);
+    run(with_key(keys::kTab), store_b);
+    run(with_key(keys::kTab), store_b);
+    CHECK(run(with_key(keys::kEnter), store_b) == 1u);
+    auto picked_b = store_b.get<std::int64_t>("editor.grid");
+    REQUIRE(picked_b.has_value());
+    CHECK(picked_b->value == 6);  // B's second entry, not A's "2"
+    CHECK(pg.combo_open.at("editor.grid") == false);
+
+    // Back to A: the cache follows the pointer home - A's rows walk,
+    // A's choices re-spell, and a pick through A's row writes A's enum.
+    REQUIRE(run(snap(), store_a) == 0u);
+    CHECK(pg.text_bufs.count("editor.only_a") == 1);
+    CHECK(pg.text_bufs.count("editor.only_b") == 0);
+    CHECK(labels_of("editor.grid") == std::vector<std::string>{"1", "2", "4"});
+    CHECK(pg.walk_from == &store_a.schema());
+    gui.set_focus(grid_id);
+    run(snap(), store_a);
+    REQUIRE(run(with_key(keys::kEnter), store_a) == 0u);
+    REQUIRE(pg.combo_open.at("editor.grid") == true);
+    run(with_key(keys::kTab), store_a);
+    run(with_key(keys::kTab), store_a);
+    CHECK(run(with_key(keys::kEnter), store_a) == 1u);
+    auto picked_a = store_a.get<std::int64_t>("editor.grid");
+    REQUIRE(picked_a.has_value());
+    CHECK(picked_a->value == 2);  // A's second entry, default was 4
+    CHECK(pg.combo_open.at("editor.grid") == false);
 }
