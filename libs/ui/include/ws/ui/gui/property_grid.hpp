@@ -13,9 +13,10 @@
 // header per category, in first-declared order). Each row shows the
 // setting's key as a label and the appropriate widget. The grid is
 // stateless itself - the caller owns a PropertyGridState member that
-// holds the per-category open-state and the per-text-setting input
-// buffers, so the headers and the editing persist across frames the
-// way every other immediate-mode widget's state does.
+// holds the per-category open-state, the per-text-setting input
+// buffers and the per-enum-setting dropdown flags, so the headers, the
+// edits and the open lists persist across frames the way every other
+// immediate-mode widget's state does.
 
 #include <array>
 #include <cstddef>
@@ -43,6 +44,15 @@ struct PropertyGridState {
     // spelling (no store writes, no re-syncs) and the edit ends at the
     // first unfocused frame with one commit. Keyed like the buffers.
     std::unordered_map<std::string, bool> text_editing;
+    // Per-enum-setting "the row's dropdown hangs open" - the combo
+    // contract's caller-owned flag, keyed by the setting's key like
+    // the buffers. A frame-local spelling would lay the list for
+    // exactly the frame of the click that opened it: the next frame
+    // re-arms false, the list vanishes, and the pick - a press on an
+    // item, one frame or ten later - falls through to whatever sat
+    // beneath. The popup's own rules (a pick, the outside press,
+    // Escape) close it through the same reference.
+    std::unordered_map<std::string, bool> combo_open;
 };
 
 // Renders the property grid for `schema` bound to `settings`. Draws
@@ -54,7 +64,10 @@ struct PropertyGridState {
 // input_float, combo, text_input) and the standard layout cursor. The
 // row width fills the current panel's content width. The text rows
 // own their edit like the numeric ones: a keystroke edits the buffer
-// only, and the store sees the text once, at the blur.
+// only, and the store sees the text once, at the blur. The enum rows
+// keep the combo's own state rule: the dropdown's open flag lives in
+// the state, so the list the click opened still hangs when the pick
+// lands, a frame or ten later.
 std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                           const ChromeTheme& theme,
                           const settings::Schema& schema,

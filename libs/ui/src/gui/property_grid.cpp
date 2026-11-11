@@ -30,6 +30,13 @@
 // instead of stomping the typing), and the edit ends at the first
 // unfocused frame with one commit; a refused write reverts the buffer
 // to the standing value on that same frame, never mid-typing.
+//
+// The enum rows ride the combo's own contract for their dropdown: the
+// open flag is the caller's to keep, so it lives in the grid's state
+// keyed by the setting's key (a frame-local bool would lay the list
+// for exactly the frame of the click that opened it - the next frame
+// re-arms false, the list vanishes, and the pick, a press on an item
+// one frame or ten later, falls through to whatever sat beneath).
 
 #include <ws/ui/gui/property_grid.hpp>
 
@@ -149,7 +156,12 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                         auto v = en->allowed[i].as<std::int64_t>();
                         if (v && *v == r->value) { sel = static_cast<int>(i); break; }
                     }
-                    bool combo_open = false;
+                    // The dropdown's open flag is the combo contract's
+                    // caller-owned state (see the file header): kept
+                    // in the grid's state keyed by the setting, so the
+                    // list the row's click or Enter opened still hangs
+                    // when the pick lands, a frame or ten later.
+                    auto& combo_open = state.combo_open[desc->key];
                     if (combo(gui, layout, theme, label, ptrs.data(),
                               static_cast<int>(ptrs.size()), sel, combo_open)) {
                         if (sel >= 0 && sel < static_cast<int>(en->allowed.size())) {
@@ -203,7 +215,10 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                         auto v = en->allowed[i].as<std::string>();
                         if (v && *v == r->value) { sel = static_cast<int>(i); break; }
                     }
-                    bool combo_open = false;
+                    // The same caller-owned flag as the integer enums
+                    // above: the text enums' dropdowns hang on the same
+                    // contract, not on a bool that dies with the frame.
+                    auto& combo_open = state.combo_open[desc->key];
                     if (combo(gui, layout, theme, label, ptrs.data(),
                               static_cast<int>(ptrs.size()), sel, combo_open)) {
                         if (sel >= 0 && sel < static_cast<int>(en->allowed.size())) {

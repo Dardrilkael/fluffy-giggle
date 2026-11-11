@@ -940,3 +940,99 @@ TEST_CASE("property_grid: the text row owns its edit - a keystroke is not "
     CHECK(value_of("editor.style") == "light");
     CHECK(buf_of("editor.style") == "light");
 }
+
+TEST_CASE("property_grid: the enum row's dropdown STAYS open - the pick "
+          "lands frames after the open") {
+    ws::settings::Schema schema;
+    ws::settings::EnumConstraint units;
+    units.allowed = {ws::settings::SettingValue::integer(1),
+                     ws::settings::SettingValue::integer(2),
+                     ws::settings::SettingValue::integer(4)};
+    CHECK(schema.declare({
+        .key = "editor.grid",
+        .type = ws::settings::SettingType::integer,
+        .default_value = ws::settings::SettingValue::integer(2),
+        .constraints = {units},
+        .description = "the snap grid, in px",
+        .category = "editor",
+    }).has_value());
+    ws::settings::EnumConstraint aa;
+    aa.allowed = {ws::settings::SettingValue::text("high"),
+                  ws::settings::SettingValue::text("medium"),
+                  ws::settings::SettingValue::text("low")};
+    CHECK(schema.declare({
+        .key = "render.aa",
+        .type = ws::settings::SettingType::text,
+        .default_value = ws::settings::SettingValue::text("medium"),
+        .constraints = {aa},
+        .description = "the antialiasing level",
+        .category = "render",
+    }).has_value());
+    ws::settings::SettingsStore store{std::move(schema)};
+
+    GuiContext gui;
+    LayoutCursor layout;
+    ws::ui::gui::PropertyGridState pg;
+
+    const auto run = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                       {0.0f, 0.0f, 400.0f, 600.0f});
+        const std::size_t changed = ws::ui::gui::property_grid(
+            gui, layout, kDefaultChrome, store.schema(), store, pg);
+        ws::ui::gui::end_panel(gui, layout);
+        gui.end_frame();
+        return changed;
+    };
+
+    // An idle frame lays the rows; the focus arrives on the int-enum row.
+    REQUIRE(run(snap()) == 0u);
+    gui.ids().push("panel");
+    const ws::ui::gui::WidgetId grid_id = gui.ids().id("editor.grid");
+    const ws::ui::gui::WidgetId aa_id = gui.ids().id("render.aa");
+    gui.ids().pop();
+    gui.set_focus(grid_id);
+    run(snap());
+
+    // Enter on the focused row opens the dropdown - and the open flag
+    // is the combo's CALLER-OWNED state, kept in the grid's own state:
+    // it survives the idle frames between the open and the pick. (The
+    // frame-local spelling this test gates laid the list for exactly
+    // the open's own frame; the next frame re-armed false, the list
+    // vanished, and the pick's press fell through to whatever sat
+    // beneath - an enum setting no mouse or keyboard could ever move.)
+    REQUIRE(run(with_key(keys::kEnter)) == 0u);
+    REQUIRE(pg.combo_open.at("editor.grid") == true);
+    REQUIRE(run(snap()) == 0u);  // an idle frame: the list still hangs
+    REQUIRE(pg.combo_open.at("editor.grid") == true);
+    auto grid_value = store.get<std::int64_t>("editor.grid");
+    REQUIRE(grid_value.has_value());
+    CHECK(grid_value->value == 2);  // nothing written yet
+
+    // Tab walks into the list (the items are citizens while it hangs),
+    // Enter picks the focused one - one write, one changed count, and
+    // the choice closes the dropdown with the focus back on the row.
+    run(with_key(keys::kTab));
+    CHECK(pg.combo_open.at("editor.grid") == true);
+    CHECK(run(with_key(keys::kEnter)) == 1u);
+    grid_value = store.get<std::int64_t>("editor.grid");
+    REQUIRE(grid_value.has_value());
+    CHECK(grid_value->value == 1);
+    CHECK(pg.combo_open.at("editor.grid") == false);
+
+    // The text-enum row is the same contract, the second branch: open
+    // it, idle a frame (the flag must hold there too), then pick.
+    gui.set_focus(aa_id);
+    run(snap());
+    REQUIRE(run(with_key(keys::kEnter)) == 0u);
+    REQUIRE(pg.combo_open.at("render.aa") == true);
+    REQUIRE(run(snap()) == 0u);
+    CHECK(pg.combo_open.at("render.aa") == true);
+    run(with_key(keys::kTab));
+    CHECK(run(with_key(keys::kEnter)) == 1u);
+    auto aa_value = store.get<std::string>("render.aa");
+    REQUIRE(aa_value.has_value());
+    CHECK(aa_value->value == "high");
+    CHECK(pg.combo_open.at("render.aa") == false);
+    CHECK(pg.combo_open.at("editor.grid") == false);  // the earlier pick held
+}
