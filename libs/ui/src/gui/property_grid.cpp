@@ -51,23 +51,34 @@
 // editing flag as one phantom blur commit, and a surviving open flag
 // would hand the returned row a dropdown it never opened.
 //
-// The walk itself is cached in the state, keyed on the schema's
-// address and descriptor count: the Schema introspection returns its
-// categories and per-category rows BY VALUE (a copy of every name, a
-// vector per category), and the enum rows' label lists allocate the
-// same way - the one allocating path an otherwise allocation-free
-// walk had left (fit_text's own comment states the mid-frame
-// no-allocation rule; a settings panel open at 60 fps was allocating
-// per category, per enum row, every frame). The cache's key is exact,
-// not heuristic: a re-bind changes the address, a growth changes the
-// count - and a growth may MOVE the descriptors' own storage, so the
-// cached pointers cannot outlive their schema change. The enum rows'
-// choice lists ride the same wipe; each row rebuilds its list once on
-// first use after it.
+// The walk itself is cached in the state, lifetime-sound on two
+// halves: the ROW pointers are re-bucketed from the live descriptors
+// every frame (a walk of the contiguous descriptor vector and a
+// per-category bucket scan - no allocation, the buckets' capacity
+// rides), so they always point into THIS frame's binding and a schema
+// whose lifetime ends with the frame (a per-frame copy, a temporary in
+// the caller's stack slot) reads through its own bytes, never through
+// storage an earlier binding has freed. The cached half is the part
+// that is values, not storage: the category names - the Schema
+// introspection returns its categories and per-category rows BY VALUE
+// (a copy of every name, a vector per category), and the enum rows'
+// label lists allocate the same way - the one allocating path an
+// otherwise allocation-free walk had left (fit_text's own comment
+// states the mid-frame no-allocation rule; a settings panel open at
+// 60 fps was allocating per category, per enum row, every frame).
+// Reusing the cached half is validated per frame by the binding's
+// address and descriptor count - and by a STAMP, an FNV over every
+// descriptor's identity as the grid consumes it (key, type, category,
+// the constraints' shapes): the address and the count alone cannot
+// name the object, since two different schemas can share an address
+// and a count. The enum rows' choice lists ride the same wipe; each
+// row rebuilds its list once on first use after it.
 
 #include <ws/ui/gui/property_grid.hpp>
 
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -145,6 +156,66 @@ std::vector<std::string> enum_labels(const settings::EnumConstraint& e,
     return out;
 }
 
+// The walk stamp: FNV-1a over the binding's own identity as the grid
+// consumes it. One step per byte, one delimiter per field, so two
+// descriptors' fields cannot concatenate into a third's stamp.
+constexpr std::uint64_t kStampBasis = 14695981039346656037ULL;
+constexpr std::uint64_t kStampPrime = 1099511628211ULL;
+
+std::uint64_t stamp_byte(std::uint64_t hash, std::uint64_t byte) {
+    return (hash ^ (byte & 0xFFu)) * kStampPrime;
+}
+
+// A string field: its bytes, then the delimiter.
+std::uint64_t stamp_field(std::uint64_t hash, std::string_view bytes) {
+    for (const char c : bytes) {
+        hash = stamp_byte(hash, static_cast<unsigned char>(c));
+    }
+    return stamp_byte(hash, ';');
+}
+
+// A whole-number field (a type, a count, a variant tag), low byte
+// first, then the delimiter.
+std::uint64_t stamp_bits(std::uint64_t hash, std::uint64_t bits) {
+    for (int shift = 0; shift < 64; shift += 8) {
+        hash = stamp_byte(hash, (bits >> shift) & 0xFFu);
+    }
+    return stamp_byte(hash, ';');
+}
+
+// A double field as its own bit pattern - the raw bytes the range
+// arithmetic reads, not a re-rounded spelling of them.
+std::uint64_t stamp_double(std::uint64_t hash, double v) {
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &v, sizeof bits);
+    return stamp_bits(hash, bits);
+}
+
+// One descriptor's own contribution: the key, the type, the category,
+// and the constraints' shapes - the constraint count first, then each
+// constraint's variant tag with the parts the grid reads (a range's
+// bounds and action, an enum's entry count; a regex only tags its
+// kind, the grid never reads its pattern). What the stamp cannot see
+// is an enum's VALUE edit behind an identical shape - the struct's own
+// comment names the residual and why nothing reachable can produce it.
+std::uint64_t stamp_desc(std::uint64_t hash, const SettingDesc& d) {
+    hash = stamp_field(hash, d.key);
+    hash = stamp_bits(hash, static_cast<std::uint64_t>(d.type));
+    hash = stamp_field(hash, d.category);
+    hash = stamp_bits(hash, d.constraints.size());
+    for (const auto& c : d.constraints) {
+        hash = stamp_bits(hash, static_cast<std::uint64_t>(c.index()));
+        if (const auto* range = std::get_if<settings::RangeConstraint>(&c)) {
+            hash = stamp_double(hash, range->min);
+            hash = stamp_double(hash, range->max);
+            hash = stamp_bits(hash, static_cast<std::uint64_t>(range->action));
+        } else if (const auto* en = std::get_if<settings::EnumConstraint>(&c)) {
+            hash = stamp_bits(hash, en->allowed.size());
+        }
+    }
+    return hash;
+}
+
 }  // namespace
 
 std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
@@ -154,20 +225,82 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                           PropertyGridState& state) {
     std::size_t changed = 0;
 
-    // The schema walk, validated then cached (the state's own comment
-    // spells the key): the address catches a re-bind, the count a
-    // growth - and a growth may move the descriptors' storage, so the
-    // cache must never survive one. Steady frames - the grid open on
-    // one schema - read the cached lists and allocate nothing.
-    if (state.walk_from != &schema || state.walk_size != schema.size()) {
-        state.walk_from = &schema;
-        state.walk_size = schema.size();
-        state.walk_categories = schema.categories();
-        state.walk_rows.clear();
-        state.walk_rows.reserve(state.walk_categories.size());
-        for (const std::string& cat : state.walk_categories) {
-            state.walk_rows.push_back(schema.in_category(cat));
+    // The schema walk, validated then re-bucketed every frame (the
+    // state's own comment spells the whole contract): the row pointers
+    // always point into THIS frame's live descriptors - a schema whose
+    // lifetime ends with the frame reads through its own bytes, never
+    // through storage an earlier binding has freed - and the cached
+    // category list is served only when the binding's address, its
+    // descriptor count AND its content stamp all say this is the walk
+    // that built them. The address and the count alone cannot say that:
+    // two different schemas can share an address (a per-frame copy in
+    // the caller's stack slot) and a count.
+    const auto& descs = schema.descriptors();
+    bool valid = state.walk_from == &schema &&
+                 state.walk_size == descs.size() &&
+                 !state.walk_categories.empty();
+    if (valid) {
+        // The fast path: clear the buckets (their capacity rides, the
+        // steady frame allocates nothing), re-stamp and re-bucket in
+        // one walk over the contiguous descriptors. A category the
+        // cached list does not know - a different binding's content,
+        // which the stamp below catches in every reachable spelling -
+        // or a stamp that came out different invalidates; the partial
+        // bucketing of that walk is discarded by the rebuild.
+        for (auto& bucket : state.walk_rows) {
+            bucket.clear();
         }
+        std::uint64_t stamp = kStampBasis;
+        for (const SettingDesc& d : descs) {
+            stamp = stamp_desc(stamp, d);
+            int slot = -1;
+            for (std::size_t ci = 0; ci < state.walk_categories.size(); ++ci) {
+                if (d.category == state.walk_categories[ci]) {
+                    slot = static_cast<int>(ci);
+                    break;
+                }
+            }
+            if (slot < 0) {
+                valid = false;
+                break;
+            }
+            state.walk_rows[static_cast<std::size_t>(slot)].push_back(&d);
+        }
+        if (valid && stamp != state.walk_stamp) {
+            valid = false;
+        }
+    }
+    if (!valid) {
+        // The rebuild: the categories re-derive from the descriptors
+        // themselves (the one allocating walk, paid once per binding
+        // change), the buckets refill fresh, and the enum rows' choice
+        // lists wipe with it - the new binding's enums re-spell.
+        state.walk_from = &schema;
+        state.walk_size = descs.size();
+        state.walk_categories = schema.categories();
+        state.walk_rows.resize(state.walk_categories.size());
+        for (auto& bucket : state.walk_rows) {
+            bucket.clear();
+        }
+        std::uint64_t stamp = kStampBasis;
+        for (const SettingDesc& d : descs) {
+            stamp = stamp_desc(stamp, d);
+            // categories() derives from the descriptors themselves, so
+            // every category IS in the list; a miss is unreachable for
+            // a well-formed schema and drops the row rather than
+            // crashing a hand-rolled one.
+            int slot = -1;
+            for (std::size_t ci = 0; ci < state.walk_categories.size(); ++ci) {
+                if (d.category == state.walk_categories[ci]) {
+                    slot = static_cast<int>(ci);
+                    break;
+                }
+            }
+            if (slot >= 0) {
+                state.walk_rows[static_cast<std::size_t>(slot)].push_back(&d);
+            }
+        }
+        state.walk_stamp = stamp;
         state.enum_choices.clear();
     }
     const std::vector<std::string>& categories = state.walk_categories;

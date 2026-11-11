@@ -1661,3 +1661,119 @@ TEST_CASE("property_grid: the walk cache follows the binding - a re-bound "
     CHECK(picked_a->value == 2);  // A's second entry, default was 4
     CHECK(pg.combo_open.at("editor.grid") == false);
 }
+
+TEST_CASE("property_grid: the walk cache follows a schema whose lifetime "
+          "ends with the frame - same stack slot, same count, new content") {
+    // The address-plus-count key could not tell two schema OBJECTS
+    // apart when they share an address: a grid bound to a schema built
+    // per frame (a dialog that re-derives its copy each pass, a
+    // factory answer) lands the SAME address with the SAME descriptor
+    // count every frame. A re-declared content there would serve the
+    // FIRST frame's rows - through pointers into storage that binding
+    // has already freed - and its stale categories and enum choices
+    // would render. The walk re-buckets the live descriptors every
+    // frame and validates the cached half against a content stamp, so
+    // the binding that lands at the same address with the same count
+    // but different content rebuilds, and an IDENTICAL copy (the
+    // dialog's per-frame copy) is served with fresh pointers into its
+    // own live bytes.
+    const auto make = [](char which) {
+        ws::settings::Schema s;
+        ws::settings::EnumConstraint units;
+        if (which == 'a') {
+            units.allowed = {ws::settings::SettingValue::integer(1),
+                             ws::settings::SettingValue::integer(2)};
+        } else {
+            units.allowed = {ws::settings::SettingValue::integer(5),
+                             ws::settings::SettingValue::integer(6)};
+        }
+        CHECK(s.declare({
+            .key = "app.units",
+            .type = ws::settings::SettingType::integer,
+            .default_value = ws::settings::SettingValue::integer(
+                which == 'a' ? 2 : 5),
+            .constraints = {units},
+            .description = "snap units",
+            .category = which == 'a' ? "app" : "zed",
+        }).has_value());
+        CHECK(s.declare({
+            .key = which == 'a' ? "app.note" : "zed.note",
+            .type = ws::settings::SettingType::text,
+            .default_value = ws::settings::SettingValue::text(
+                which == 'a' ? "alpha" : "beta"),
+            .description = "the panel note",
+            .category = which == 'a' ? "app" : "zed",
+        }).has_value());
+        return s;
+    };
+    ws::settings::SettingsStore store_a{make('a')};
+    ws::settings::SettingsStore store_b{make('b')};
+
+    GuiContext gui;
+    LayoutCursor layout;
+    ws::ui::gui::PropertyGridState pg;
+
+    // The binding is a schema OBJECT per frame: `temp` is this lambda's
+    // own stack slot, so every call lands the grid at the SAME address.
+    // first/last pin the premise - if a build ever stops sharing the
+    // slot, the REQUIRE says so instead of quietly gating nothing.
+    const void* first_bound = nullptr;
+    const void* last_bound = nullptr;
+    const auto run_with = [&](char which,
+                              ws::settings::SettingsStore& store) {
+        ws::settings::Schema temp = make(which);
+        if (first_bound == nullptr) {
+            first_bound = &temp;
+        }
+        last_bound = &temp;
+        gui.begin_frame(snap());
+        (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                       {0.0f, 0.0f, 400.0f, 600.0f});
+        (void)ws::ui::gui::property_grid(gui, layout, kDefaultChrome, temp,
+                                         store, pg);
+        ws::ui::gui::end_panel(gui, layout);
+        gui.end_frame();
+    };
+    const auto labels_of = [&](const char* key) {
+        const auto it = pg.enum_choices.find(key);
+        if (it == pg.enum_choices.end()) {
+            return std::vector<std::string>{};
+        }
+        return it->second.labels;
+    };
+
+    // A settles on its own binding: the categories walk, the shared
+    // enum key spells its own entries, and the per-frame copy of the
+    // SAME content is served through fresh pointers (the walk renders
+    // every frame - through storage that is always this frame's).
+    run_with('a', store_a);
+    run_with('a', store_a);
+    REQUIRE(first_bound != nullptr);
+    CHECK(pg.walk_from == first_bound);
+    CHECK(pg.walk_categories == std::vector<std::string>{"app"});
+    CHECK(pg.category_open.count("app") == 1);
+    CHECK(pg.text_bufs.count("app.note") == 1);
+    CHECK(labels_of("app.units") == std::vector<std::string>{"1", "2"});
+
+    // The re-declared content at the SAME address, with the SAME
+    // descriptor count: the address-plus-count pair alone would hold
+    // the cache. The stamp says otherwise - B's categories walk, B's
+    // enum re-spells, and nothing of A's binding is left rendering.
+    run_with('b', store_b);
+    REQUIRE(last_bound == first_bound);  // the premise, said outright
+    CHECK(pg.walk_from == first_bound);
+    CHECK(pg.walk_categories == std::vector<std::string>{"zed"});
+    CHECK(pg.category_open.count("zed") == 1);
+    CHECK(pg.category_open.count("app") == 0);
+    CHECK(pg.text_bufs.count("zed.note") == 1);
+    CHECK(pg.text_bufs.count("app.note") == 0);
+    CHECK(labels_of("app.units") == std::vector<std::string>{"5", "6"});
+
+    // Back to A: the cache follows the content home, at the same
+    // address it never left.
+    run_with('a', store_a);
+    CHECK(pg.walk_categories == std::vector<std::string>{"app"});
+    CHECK(pg.category_open.count("app") == 1);
+    CHECK(pg.category_open.count("zed") == 0);
+    CHECK(labels_of("app.units") == std::vector<std::string>{"1", "2"});
+}

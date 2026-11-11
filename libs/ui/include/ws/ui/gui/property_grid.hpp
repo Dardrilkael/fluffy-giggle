@@ -20,6 +20,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -61,14 +62,33 @@ struct PropertyGridState {
     // introspection returns by value (categories() copies every
     // name, in_category() allocates a list per category - the one
     // allocating path an otherwise allocation-free walk had left).
-    // The cache keys on the schema's ADDRESS and descriptor COUNT,
-    // exactly: a re-bind to another schema (another store, another
-    // document) changes the address, a schema that grew changes the
-    // count - and a growth may reallocate the descriptors' own
-    // storage, so a stale pointer is impossible, never merely
-    // unlikely. The enum rows' choice lists ride the same key.
+    //
+    // The cache is lifetime-sound by construction, on two halves:
+    // the ROW pointers are re-bucketed from the live descriptors
+    // EVERY frame - they always point into THIS frame's binding, never
+    // into storage an earlier binding has freed - while the cached
+    // half is the part that is values, not storage: the category
+    // names. The validity of reusing that half is keyed, beyond the
+    // binding's ADDRESS (a re-bind to another schema) and descriptor
+    // COUNT (a growth - which may also move the descriptors' own
+    // storage), on a STAMP: an FNV over every descriptor's identity
+    // as the grid consumes it - key, type, category, and the
+    // constraints' shapes - re-computed and compared every frame.
+    // The address and the count alone cannot name the object: two
+    // DIFFERENT schemas can share an address (a per-frame copy, a
+    // temporary in the caller's stack slot) and a count, and a cache
+    // keyed on the pair alone would serve the first one's rows
+    // through pointers into storage that binding has already freed.
+    // The one content a stamp still cannot see is an enum's VALUE
+    // edit behind an identical key, type, category and entry count -
+    // reachable only by alternating two hand-built twin schemas
+    // through one stack slot, never through Schema's own append-only
+    // declare(); the write path reads the live descriptor's own
+    // allowed list, so nothing stale is ever written. The enum rows'
+    // choice lists ride the same rebuild.
     const void* walk_from = nullptr;
     std::size_t walk_size = 0;
+    std::uint64_t walk_stamp = 0;
     std::vector<std::string> walk_categories;
     std::vector<std::vector<const settings::SettingDesc*>> walk_rows;
 
