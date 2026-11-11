@@ -94,7 +94,7 @@ void keymap_editor(GuiContext& gui, LayoutCursor& layout,
                 const ws::app::Command* cmd =
                     registry.find(state.recording_id);
                 if (cmd == nullptr) {
-                    state.status = "the command is gone";
+                    state.status = theme_str(theme, Str::command_gone);
                 } else {
                     const auto ctx = static_cast<ws::app::KeyContext>(
                         state.context_index);
@@ -146,7 +146,7 @@ void keymap_editor(GuiContext& gui, LayoutCursor& layout,
         state.cells.push_back(cmd.label.c_str());
         const ws::app::Shortcut* bound = resolver.binding_for(cmd.id, ctx);
         if (bound == nullptr) {
-            state.cells.push_back("<none>");
+            state.cells.push_back(theme_str(theme, Str::none_label));
         } else {
             state.chords.emplace_back(ws::app::describe_chord(*bound));
             state.cells.push_back(state.chords.back().c_str());
@@ -181,7 +181,7 @@ void keymap_editor(GuiContext& gui, LayoutCursor& layout,
         if (bound != nullptr) {
             state.detail += ws::app::describe_chord(*bound);
         } else {
-            state.detail += "<none>";
+            state.detail += theme_str(theme, Str::none_label);
         }
     } else {
         state.detail.clear();
@@ -204,7 +204,7 @@ void keymap_editor(GuiContext& gui, LayoutCursor& layout,
             state.status.clear();
         }
     } else {
-        text(layout, theme, "recording - press a key (Escape cancels)");
+        text(layout, theme, theme_str(theme, Str::recording_hint));
     }
     text(layout, theme, state.status.c_str());
 }

@@ -299,7 +299,7 @@ PaletteEvent command_palette(GuiContext& gui, const ChromeTheme& theme,
     // and chord, or the empty-search note. Rebuilt into the state's
     // own string (no per-frame allocation once it steadies).
     if (shown <= 0) {
-        state.footer = "no matching command";
+        state.footer = theme_str(theme, Str::no_matching_command);
     } else {
         const ws::app::Command& cmd =
             registry.commands()[static_cast<std::size_t>(

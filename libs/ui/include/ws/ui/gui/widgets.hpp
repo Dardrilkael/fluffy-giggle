@@ -2058,9 +2058,12 @@ struct DialogEvent {
 // its selection first spends the key: one Escape abandons the edit,
 // the next closes the dialog. The dialog flips `open` false itself on
 // any answer, so the event and the flag agree on the frame it closes -
-// read `accepted` that same frame. Button labels are English stock in
-// v1 (OK, Cancel, Yes, No, Retry); a themed label set is the seam a
-// localization would grow.
+// read `accepted` that same frame. Button labels are stock ROLES
+// (Str::ok, Str::cancel, Str::yes, Str::no, Str::retry) spelled through
+// the theme's string table (strings.hpp): the stock English set is the
+// null-table default, and a theme carrying a StringTable answers every
+// dialog's buttons in that table's language - the localization seam v1
+// promised.
 DialogEvent modal_dialog(GuiContext& gui, const ChromeTheme& theme,
                          const char* label, const char* title,
                          DialogButtons buttons, bool& open,

@@ -10,6 +10,10 @@ namespace ws::ui::gui {
 // only the pointer, so no include cycle).
 struct WidgetPainters;
 
+// The string table's seam (strings.hpp defines it; the theme carries
+// only the pointer, so no include cycle).
+struct StringTable;
+
 // The look of the gui: one struct of plain values, no registries and no
 // inheritance. Widgets take a const ChromeTheme& and read it inline, so
 // a panel can carry its own variant without touching anyone else's
@@ -242,6 +246,16 @@ struct ChromeTheme {
     // outlive every theme carrying it (the font pointers' own rule),
     // and scaled() carries it as-is (a skin is not a metric).
     const WidgetPainters* painters = nullptr;
+
+    // The string table (strings.hpp): null = stock English (the
+    // byte-identical literals the library has always drawn - the
+    // kStockStrings table); a localization installs a StringTable here
+    // and every stock WORD the widgets draw (dialog buttons, job
+    // state words, empty-state hints) follows it. Same borrowing
+    // contract as the font pointers and painters - the theme points,
+    // it owns nothing, and scaled() carries it as-is (a language is
+    // not a metric).
+    const StringTable* strings = nullptr;
 
     // The role radii, resolved: -1 (the default) inherits
     // corner_radius, so the back-compat rule holds - one number

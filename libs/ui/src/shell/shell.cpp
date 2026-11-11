@@ -21,6 +21,7 @@
 #include <ws/jobs/job_system.hpp>
 #include <ws/platform/title.hpp>
 #include <ws/ui/gui/property_grid.hpp>
+#include <ws/ui/gui/strings.hpp>
 #include <ws/ui/shell/errors.hpp>
 #include <ws/ui/renderer2d.hpp>
 
@@ -1991,8 +1992,13 @@ void AppShell::draw_close_prompt(GuiContext& gui, const ChromeTheme& theme,
         " has unsaved changes.";
     gui::text(mlayout, theme, body.c_str());
 
-    // The three-button row, centered like modal_dialog's own.
-    const char* labels[3] = {"Save", "Discard", "Cancel"};
+    // The three-button row, centered like modal_dialog's own - the
+    // stock words through the theme's string table, so the unsaved-
+    // changes answers follow a localization like every other stock
+    // word (the body above stays the shell's own prose).
+    const char* labels[3] = {gui::theme_str(theme, gui::Str::save),
+                             gui::theme_str(theme, gui::Str::discard),
+                             gui::theme_str(theme, gui::Str::cancel)};
     float widest = 0.0f;
     char scratch[128];
     for (const char* label : labels) {

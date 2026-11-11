@@ -148,6 +148,7 @@ float draw_text(float, float, const char* utf8_text, const Font& font,
     gui_test::stub.last_text_advance = advance;
     gui_test::stub.last_text_color = color;
     gui_test::stub.last_text_font = &font;
+    gui_test::stub.last_text = utf8_text != nullptr ? utf8_text : "";
     return advance;
 }
 

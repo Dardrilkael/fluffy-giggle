@@ -9,6 +9,7 @@
 
 #include <ws/ui/gui/widgets.hpp>
 #include <ws/ui/gui/painters.hpp>
+#include <ws/ui/gui/strings.hpp>
 
 #include <ws/ui/renderer2d.hpp>
 

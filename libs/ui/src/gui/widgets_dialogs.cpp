@@ -13,19 +13,21 @@ namespace ws::ui::gui {
 namespace {
 
 // The standard button sets, one per DialogButtons value in enum order:
-// the stock labels in reading order (the positive first) and how many
-// rows the set lays. `none` carries no labels at all - the set that
-// takes no keys and answers nothing.
+// the stock ROLES in reading order (the positive first) and how many
+// rows the set lays - the spelling is resolved per frame through the
+// theme's string table, so a localized table retargets every dialog
+// without this constant table moving. `none` carries no usable labels
+// at all - the set that takes no keys and answers nothing.
 struct StockButtons {
-    const char* labels[2] = {"", ""};
+    Str labels[2] = {Str::ok, Str::cancel};
     int count = 0;
 };
 constexpr StockButtons kStockButtons[] = {
-    {{"", ""}, 0},              // none
-    {{"OK", ""}, 1},            // ok
-    {{"OK", "Cancel"}, 2},      // ok_cancel
-    {{"Yes", "No"}, 2},         // yes_no
-    {{"Retry", "Cancel"}, 2},   // retry_cancel
+    {Str::ok, Str::cancel, 0},    // none
+    {Str::ok, Str::cancel, 1},   // ok
+    {Str::ok, Str::cancel, 2},    // ok_cancel
+    {Str::yes, Str::no, 2},       // yes_no
+    {Str::retry, Str::cancel, 2}, // retry_cancel
 };
 constexpr int kStockButtonsCount =
     static_cast<int>(sizeof(kStockButtons) / sizeof(kStockButtons[0]));
@@ -154,7 +156,8 @@ DialogEvent modal_dialog(GuiContext& gui, const ChromeTheme& theme,
         float widest = 0.0f;
         char scratch[128];
         for (int i = 0; i < button_count; ++i) {
-            const LabelFit fit = fit_text(stock.labels[i], -1.0f, theme,
+            const LabelFit fit = fit_text(theme_str(theme, stock.labels[i]),
+                                          -1.0f, theme,
                                           scratch, sizeof scratch);
             widest = std::max(widest, fit.advance);
         }
@@ -174,7 +177,8 @@ DialogEvent modal_dialog(GuiContext& gui, const ChromeTheme& theme,
             // private: it registers focusable at the modal stratum (Tab
             // wraps in the dialog), and a click - or the Space a
             // focused one takes - answers with the reading-order index.
-            if (button(gui, layout, theme, stock.labels[i], button_width)) {
+            if (button(gui, layout, theme, theme_str(theme, stock.labels[i]),
+                       button_width)) {
                 open = false;
                 event.button = i;
                 event.accepted = (i == 0);

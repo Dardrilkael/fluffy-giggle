@@ -18,6 +18,7 @@
 #include <ws/ui/gui/job_progress.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
 #include <ws/ui/gui/property_grid.hpp>
+#include <ws/ui/gui/strings.hpp>
 #include <ws/ui/gui/theme.hpp>
 #include <ws/ui/gui/theme_color.hpp>
 #include <ws/ui/gui/theme_data.hpp>
@@ -75,6 +76,27 @@ InputFrame snap(float x, float y, bool down = false, bool pressed = false,
     frame.mouse_pressed[0] = pressed;
     frame.mouse_released[0] = released;
     return frame;
+}
+
+// A fake localization for the string-table tests (G1.4): a handful of
+// Spanish spellings, nullptr for the rest - a half-built table, the
+// shape the fallback contract exists for (the unknown words render in
+// stock English, never blank).
+const char* toy_strings(ws::ui::gui::Str id) {
+    switch (id) {
+    case ws::ui::gui::Str::ok:
+        return "S\u00ed";  // "Sí"
+    case ws::ui::gui::Str::yes:
+        return "S\u00ed";
+    case ws::ui::gui::Str::no:
+        return "No";
+    case ws::ui::gui::Str::job_done:
+        return "hecho";
+    case ws::ui::gui::Str::job_failed:
+        return "fall\u00f3";  // "falló"
+    default:
+        return nullptr;
+    }
 }
 
 }  // namespace
@@ -901,6 +923,40 @@ TEST_CASE("job_view maps every job state to its face") {
     CHECK(view.fill == 0u);
     CHECK(std::string(view.word) == "no job");
     CHECK(!view.cancellable);
+}
+
+TEST_CASE("job rows speak the theme's string table") {
+    using ws::jobs::JobState;
+    // The toy table answers Spanish for done/failed and nullptr for
+    // every other state word - the half-built localization shape.
+    const ws::ui::gui::StringTable toy{&toy_strings};
+    ws::ui::gui::ChromeTheme theme = kDefaultChrome;
+    theme.strings = &toy;
+    ws::ui::gui::JobProgress mirror;
+
+    // The words the table knows follow it...
+    CHECK(std::string(ws::ui::gui::job_view(JobState::done, mirror, theme).word)
+          == "hecho");
+    CHECK(std::string(ws::ui::gui::job_view(JobState::failed, mirror, theme)
+                          .word) == "fall\u00f3");
+
+    // ...the words it answers nullptr for fall back to stock English -
+    // a half-built table never blanks a row.
+    CHECK(std::string(ws::ui::gui::job_view(JobState::queued, mirror, theme)
+                          .word) == "queued");
+    CHECK(std::string(ws::ui::gui::job_view(JobState::cancelled, mirror, theme)
+                          .word) == "cancelled");
+    CHECK(std::string(ws::ui::gui::job_view(JobState::invalid, mirror, theme)
+                          .word) == "no job");
+
+    // Running with no report yet: the stock fallback word; once the
+    // mirror carries a message, the CALLER's word wins - the table
+    // only spells the library's own stock, never the host's text.
+    CHECK(std::string(ws::ui::gui::job_view(JobState::running, mirror, theme)
+                          .word) == "running");
+    mirror.report(0.5f, "halfway");
+    CHECK(std::string(ws::ui::gui::job_view(JobState::running, mirror, theme)
+                          .word) == "halfway");
 }
 
 TEST_CASE("the job row draws through the seam and its cancel button cancels") {
@@ -3771,4 +3827,133 @@ TEST_CASE("property_grid: renders schema settings without crashing") {
     auto font = store.get<std::int64_t>("ui.font_size");
     REQUIRE(font.has_value());
     CHECK(font->value == 14);
+}
+
+TEST_CASE("the string table seam spells stock, overrides, and falls back") {
+    using ws::ui::gui::Str;
+    using ws::ui::gui::theme_str;
+    namespace gui = ws::ui::gui;
+
+    // The null-table default IS the v1 screen: every stock spelling
+    // byte-identical to the literal the widget drew before the seam.
+    // (Pinned value by value so a renumbered table or a retuned stock
+    // word fails HERE, at the seam, not in some widget's draw.)
+    REQUIRE(kDefaultChrome.strings == nullptr);
+    CHECK(theme_str(kDefaultChrome, Str::ok) == std::string_view{"OK"});
+    CHECK(theme_str(kDefaultChrome, Str::cancel) == std::string_view{"Cancel"});
+    CHECK(theme_str(kDefaultChrome, Str::yes) == std::string_view{"Yes"});
+    CHECK(theme_str(kDefaultChrome, Str::no) == std::string_view{"No"});
+    CHECK(theme_str(kDefaultChrome, Str::retry) == std::string_view{"Retry"});
+    CHECK(theme_str(kDefaultChrome, Str::save) == std::string_view{"Save"});
+    CHECK(theme_str(kDefaultChrome, Str::discard) ==
+          std::string_view{"Discard"});
+    CHECK(theme_str(kDefaultChrome, Str::close_tab) ==
+          std::string_view{"Close tab"});
+    CHECK(theme_str(kDefaultChrome, Str::no_data) == std::string_view{"no data"});
+    CHECK(theme_str(kDefaultChrome, Str::all_signals_hidden) ==
+          std::string_view{"all signals hidden"});
+    CHECK(theme_str(kDefaultChrome, Str::double_click_resets) ==
+          std::string_view{"double-click resets"});
+    CHECK(theme_str(kDefaultChrome, Str::no_matching_command) ==
+          std::string_view{"no matching command"});
+    CHECK(theme_str(kDefaultChrome, Str::recording_hint) ==
+          std::string_view{"recording - press a key (Escape cancels)"});
+    CHECK(theme_str(kDefaultChrome, Str::none_label) ==
+          std::string_view{"<none>"});
+    CHECK(theme_str(kDefaultChrome, Str::no_job) == std::string_view{"no job"});
+    CHECK(theme_str(kDefaultChrome, Str::job_queued) ==
+          std::string_view{"queued"});
+    CHECK(theme_str(kDefaultChrome, Str::job_running) ==
+          std::string_view{"running"});
+    CHECK(theme_str(kDefaultChrome, Str::job_done) == std::string_view{"done"});
+    CHECK(theme_str(kDefaultChrome, Str::job_failed) ==
+          std::string_view{"failed"});
+    CHECK(theme_str(kDefaultChrome, Str::job_cancelled) ==
+          std::string_view{"cancelled"});
+    CHECK(theme_str(kDefaultChrome, Str::command_gone) ==
+          std::string_view{"the command is gone"});
+
+    // A table that knows a word answers it; the ids it answers nullptr
+    // for fall back to the stock spelling.
+    const gui::StringTable toy{&toy_strings};
+    gui::ChromeTheme themed = kDefaultChrome;
+    themed.strings = &toy;
+    CHECK(theme_str(themed, Str::ok) == std::string_view{"S\u00ed"});
+    CHECK(theme_str(themed, Str::cancel) == std::string_view{"Cancel"});
+    CHECK(theme_str(themed, Str::job_done) == std::string_view{"hecho"});
+    CHECK(theme_str(themed, Str::command_gone) ==
+          std::string_view{"the command is gone"});
+
+    // An empty StringTable{} is English: the default lookup member IS
+    // the stock table, so "pointing a table" alone localizes nothing.
+    const gui::StringTable english{};
+    themed.strings = &english;
+    CHECK(theme_str(themed, Str::ok) == std::string_view{"OK"});
+
+    // scaled() carries the table pointer as-is - a language is not a
+    // metric - so a touch-density theme speaks the same language.
+    themed.strings = &toy;
+    CHECK(themed.scaled(2.0f).strings == &toy);
+    CHECK(theme_str(themed.scaled(2.0f), Str::ok) ==
+          std::string_view{"S\u00ed"});
+
+    // A Str the stock table does not know answers "" - never a null,
+    // never a crash: the enum grew, the binary's table did not.
+    CHECK(gui::stock_lookup(static_cast<Str>(999u)) != nullptr);
+    CHECK(std::string_view{gui::stock_lookup(static_cast<Str>(999u))}.empty());
+}
+
+TEST_CASE("modal dialog buttons speak the theme's string table") {
+    namespace gui = ws::ui::gui;
+    // A real font, so the button labels actually reach the r2d seam -
+    // the stub keeps the last drawn string for exactly this.
+    std::array<ws::ui::r2d::Font::Glyph, 95> glyphs{};
+    for (ws::ui::r2d::Font::Glyph& glyph : glyphs) {
+        glyph.advance = 10.0f;
+    }
+    const ws::ui::r2d::Font font(16.0f, 20.0f, glyphs.data(), 95);
+    REQUIRE(!font.empty());
+
+    const gui::StringTable toy{&toy_strings};
+    gui::ChromeTheme theme = kDefaultChrome;
+    theme.font = &font;
+    theme.strings = &toy;
+    GuiContext gui_ctx;
+    bool open = true;
+    const auto run = [&](gui::ChromeTheme with, const char* id,
+                         gui::DialogButtons buttons) {
+        ws::ui::gui_test::stub.reset();
+        with.font = &font;
+        gui_ctx.begin_frame(snap(-100.0f, -100.0f));
+        (void)gui::modal_dialog(gui_ctx, with, id, "Title", buttons, open,
+                                280.0f);
+        gui_ctx.end_frame();
+    };
+
+    // Stock, ok-only: the title draws, then the one button - the last
+    // drawn string is the stock "OK" spelling.
+    gui::ChromeTheme stock = kDefaultChrome;
+    run(stock, "stock-ok", gui::DialogButtons::ok);
+    CHECK(ws::ui::gui_test::stub.texts == 2);  // title + the one button
+    CHECK(ws::ui::gui_test::stub.last_text == "OK");
+
+    // Stock, ok_cancel: the negative draws last - "Cancel".
+    open = true;
+    run(stock, "stock-okc", gui::DialogButtons::ok_cancel);
+    CHECK(ws::ui::gui_test::stub.texts == 3);  // title + two buttons
+    CHECK(ws::ui::gui_test::stub.last_text == "Cancel");
+
+    // The toy table's "S\u00ed" rides the ok-only dialog's positive
+    // button - the draw really spells the table's word, not the stock.
+    open = true;
+    run(theme, "toy-ok", gui::DialogButtons::ok);
+    CHECK(ws::ui::gui_test::stub.last_text == "S\u00ed");
+
+    // And the ok_cancel set under the toy table: the positive answers
+    // "S\u00ed", the negative - nullptr in the table - draws its stock
+    // "Cancel" spelling: the fallback inside a real draw path.
+    open = true;
+    run(theme, "toy-okc", gui::DialogButtons::ok_cancel);
+    CHECK(ws::ui::gui_test::stub.texts == 3);
+    CHECK(ws::ui::gui_test::stub.last_text == "Cancel");
 }

@@ -5,6 +5,7 @@
 // the src/gui archive.
 
 #include <ws/ui/gui/job_progress.hpp>
+#include <ws/ui/gui/strings.hpp>
 
 #include <algorithm>
 
@@ -35,30 +36,34 @@ JobView job_view(ws::jobs::JobState state, const JobProgress& mirror,
         // Queued wears the accent (the de-facto "active" face) with
         // whatever the previous run of the slot reported; the cancel
         // is live - a queued job cancels at pickup and never runs.
-        return {mirror.fraction(), theme.control_pressed, "queued", true};
+        return {mirror.fraction(), theme.control_pressed,
+                theme_str(theme, Str::job_queued), true};
     case ws::jobs::JobState::running:
         // The live word is the mirror's latest message; the bare
         // "running" stands until the first report lands.
         return {mirror.fraction(), theme.control_pressed,
-                mirror.message().empty() ? "running"
-                                         : mirror.message().c_str(),
+                mirror.message().empty()
+                    ? theme_str(theme, Str::job_running)
+                    : mirror.message().c_str(),
                 true};
     case ws::jobs::JobState::done:
-        return {1.0f, theme.control_on, "done", false};
+        return {1.0f, theme.control_on, theme_str(theme, Str::job_done),
+                false};
     case ws::jobs::JobState::failed:
         // The toast-error red: the row and the toast it posts (via
         // toast_on_failure) read as one story.
-        return {1.0f, theme.toast_error, "failed", false};
+        return {1.0f, theme.toast_error,
+                theme_str(theme, Str::job_failed), false};
     case ws::jobs::JobState::cancelled:
         // The fraction stands as the mirror left it - a half-run job
         // stays visibly half-run - but the dead face: it is over.
-        return {mirror.fraction(), theme.control_disabled, "cancelled",
-                false};
+        return {mirror.fraction(), theme.control_disabled,
+                theme_str(theme, Str::job_cancelled), false};
     case ws::jobs::JobState::invalid:
     default:
         // The null handle: the idle row. Fill 0x00000000 draws nothing
         // inside the track (alpha 0), which is the point.
-        return {0.0f, 0u, "no job", false};
+        return {0.0f, 0u, theme_str(theme, Str::no_job), false};
     }
 }
 

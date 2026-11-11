@@ -8,6 +8,7 @@
 // reason about.
 
 #include <cstdint>
+#include <string>
 
 namespace ws::ui::r2d {
 class Font;  // the last-text font records a pointer identity, nothing more
@@ -29,6 +30,10 @@ struct StubDraws {
     std::uint32_t tint_pops = 0;     // pop_tint
     std::uint32_t last_tint = 0xFFFFFFFFu;  // the most recent push_tint color
     float last_text_advance = -1.0f;  // the most recent draw_text return
+    // The most recent draw_text STRING (a copy, not a pointer - the
+    // caller's buffer may be gone by assert time). The string-table
+    // tests read it to pin WHAT the gui drew, not just how much.
+    std::string last_text;
     // The typography pass's own pair: the most recent draw_text COLOR
     // and FONT (pointer identity - the muted rung's placeholder/tab
     // assertions and the heading's strong-face assertion compare

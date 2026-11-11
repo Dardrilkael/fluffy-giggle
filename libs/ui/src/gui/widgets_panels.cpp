@@ -176,7 +176,7 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             // exactly like a click).
             ring_draw(close.focused, close_rect, theme, kCloseHit * 0.5f);
             tooltip_text(gui, layout, theme, "close", close_rect,
-                         "Close tab");
+                         theme_str(theme, Str::close_tab));
             if (close.activated()) {
                 *closed = i;
             }

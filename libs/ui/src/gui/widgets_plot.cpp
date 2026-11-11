@@ -1137,9 +1137,9 @@ void plot_draw(const Rect& rect, const PlotFrame& frame,
     // instead of showing a mystery frame.
     if (can_label && (series_count <= 0 || series == nullptr ||
                       !any_visible)) {
-        const char* msg = series_count <= 0 || series == nullptr
-                              ? "no data"
-                              : "all signals hidden";
+        const char* msg = theme_str(theme, series_count <= 0 || series == nullptr
+                                             ? Str::no_data
+                                             : Str::all_signals_hidden);
         const float w = theme.font->measure_text(msg);
         (void)r2d::draw_text(fx + (iw - w) * 0.5f,
                              fy + (ih - theme.font->line_height()) * 0.5f,
@@ -1179,7 +1179,7 @@ void plot_draw(const Rect& rect, const PlotFrame& frame,
         }
     } else if (state.view_active && can_label) {
         // The manual-view hint, quiet, inside the frame's top-right.
-        const char* hint = "double-click resets";
+        const char* hint = theme_str(theme, Str::double_click_resets);
         const float w = theme.font->measure_text(hint);
         (void)r2d::draw_text(fx + iw - w - 5.0f, fy + 3.0f, hint,
                              *theme.font, dim(theme.text, 0.35f));
