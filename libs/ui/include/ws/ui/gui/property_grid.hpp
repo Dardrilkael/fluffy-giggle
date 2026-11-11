@@ -53,6 +53,13 @@ struct PropertyGridState {
     // beneath. The popup's own rules (a pick, the outside press,
     // Escape) close it through the same reference.
     std::unordered_map<std::string, bool> combo_open;
+
+    // The state follows the schema it last rendered: each frame the
+    // maps are pruned to the schema's live keys and categories, so a
+    // state re-bound to another schema - or a schema re-declared at
+    // runtime - starts clean. A key that left mid-edit returns with
+    // no buffer, no editing flag, and no open dropdown: nothing it
+    // left behind can commit on its arrival.
 };
 
 // Renders the property grid for `schema` bound to `settings`. Draws

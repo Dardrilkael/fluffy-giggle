@@ -1158,3 +1158,166 @@ TEST_CASE("property_grid: a real+enum row is the combo the mapping table "
     CHECK(value() == doctest::Approx(1.0));
     CHECK(pg.combo_open.at("render.scale") == false);
 }
+
+TEST_CASE("property_grid: the state follows the schema - keys that left "
+          "take their state with them, a returned row starts clean") {
+    // Schema A: a free-text row and an int-enum row under "editor".
+    ws::settings::Schema schema_a;
+    CHECK(schema_a.declare({
+        .key = "editor.project",
+        .type = ws::settings::SettingType::text,
+        .default_value = ws::settings::SettingValue::text("untitled"),
+        .description = "the open project",
+        .category = "editor",
+    }).has_value());
+    ws::settings::EnumConstraint grid_units;
+    grid_units.allowed = {ws::settings::SettingValue::integer(1),
+                          ws::settings::SettingValue::integer(2),
+                          ws::settings::SettingValue::integer(4)};
+    CHECK(schema_a.declare({
+        .key = "editor.grid",
+        .type = ws::settings::SettingType::integer,
+        .default_value = ws::settings::SettingValue::integer(2),
+        .constraints = {grid_units},
+        .description = "the snap grid, in px",
+        .category = "editor",
+    }).has_value());
+    ws::settings::SettingsStore store_a{std::move(schema_a)};
+
+    // Schema B: the SAME key re-declared an integer under another
+    // category (its row is no text row now, and "editor" itself is
+    // gone), plus one live text key of B's own.
+    ws::settings::Schema schema_b;
+    ws::settings::RangeConstraint small;
+    small.min = 0.0;
+    small.max = 10.0;
+    CHECK(schema_b.declare({
+        .key = "editor.project",
+        .type = ws::settings::SettingType::integer,
+        .default_value = ws::settings::SettingValue::integer(3),
+        .constraints = {small},
+        .description = "re-declared, another type",
+        .category = "misc",
+    }).has_value());
+    CHECK(schema_b.declare({
+        .key = "misc.note",
+        .type = ws::settings::SettingType::text,
+        .default_value = ws::settings::SettingValue::text("hello"),
+        .description = "a live key in this binding",
+        .category = "misc",
+    }).has_value());
+    ws::settings::SettingsStore store_b{std::move(schema_b)};
+
+    GuiContext gui;
+    LayoutCursor layout;
+    ws::ui::gui::PropertyGridState pg;
+
+    // One state, two bindings: the same PropertyGridState re-bound the
+    // way a long-lived settings panel re-binds to another document's
+    // store - the churn the prune exists for.
+    const auto run = [&](const InputFrame& frame,
+                         ws::settings::SettingsStore& store) {
+        gui.begin_frame(frame);
+        (void)ws::ui::gui::begin_panel(gui, layout, kDefaultChrome, "panel",
+                                       {0.0f, 0.0f, 400.0f, 600.0f});
+        const std::size_t changed = ws::ui::gui::property_grid(
+            gui, layout, kDefaultChrome, store.schema(), store, pg);
+        ws::ui::gui::end_panel(gui, layout);
+        gui.end_frame();
+        return changed;
+    };
+    const auto project_value = [&]() {
+        auto r = store_a.get<std::string>("editor.project");
+        return r.has_value() ? r->value : std::string{};
+    };
+    const auto buf_of = [&](const char* key) {
+        const auto it = pg.text_bufs.find(key);
+        return it != pg.text_bufs.end() ? std::string(it->second.data())
+                                       : std::string{};
+    };
+
+    // --- cycle 1: a text row that leaves MID-EDIT ------------------------
+    // The edit stands when the schema swaps: focus held, the buffer
+    // spelling "circsim", the store still at "untitled".
+    REQUIRE(run(snap(), store_a) == 0u);
+    gui.ids().push("panel");
+    const ws::ui::gui::WidgetId project_id = gui.ids().id("editor.project");
+    const ws::ui::gui::WidgetId grid_id = gui.ids().id("editor.grid");
+    gui.ids().pop();
+    gui.set_focus(project_id);
+    run(snap(), store_a);
+    InputFrame select_all = snap();
+    select_all.key_down[static_cast<std::size_t>(keys::kLeftControl)] = true;
+    select_all.key_pressed[static_cast<std::size_t>(keys::kA)] = true;
+    run(select_all, store_a);
+    InputFrame typing = snap();
+    type_text(typing, "circsim");
+    REQUIRE(run(typing, store_a) == 0u);
+    REQUIRE(run(snap(), store_a) == 0u);
+    CHECK(project_value() == "untitled");
+    REQUIRE(buf_of("editor.project") == "circsim");
+    REQUIRE(pg.combo_open.count("editor.grid") == 1);  // laid by A's rows
+
+    // Re-bound to B: the state follows the schema BOUND THIS FRAME -
+    // the key that no longer lays a text row (it is an INTEGER row in
+    // B) loses its buffer and its editing flag, the key that left
+    // entirely loses its dropdown flag, and the category that left
+    // loses its open-state. B's own live key keeps everything.
+    run(snap(), store_b);
+    CHECK(pg.text_bufs.count("editor.project") == 0);
+    CHECK(pg.text_editing.count("editor.project") == 0);
+    CHECK(pg.combo_open.count("editor.grid") == 0);
+    CHECK(pg.category_open.count("editor") == 0);
+    REQUIRE(pg.text_bufs.count("misc.note") == 1);
+    CHECK(buf_of("misc.note") == "hello");
+    CHECK(pg.category_open.count("misc") == 1);
+    // The press clears the focus the dead row still holds, so the
+    // binding after it starts unfocused.
+    run(snap(250.0f, 150.0f, true, true), store_b);
+    run(snap(), store_b);
+
+    // The key returns - with NONE of the state it left with: no
+    // phantom blur commit of the typing nobody typed in this binding,
+    // the buffer spells from the standing value, and the category
+    // re-opens at its documented default.
+    REQUIRE(run(snap(), store_a) == 0u);
+    CHECK(project_value() == "untitled");
+    CHECK(buf_of("editor.project") == "untitled");
+    CHECK(pg.text_editing.at("editor.project") == false);
+    CHECK(pg.combo_open.at("editor.grid") == false);
+    CHECK(pg.category_open.at("editor") == true);
+    CHECK(pg.category_open.count("misc") == 0);
+    CHECK(pg.text_bufs.count("misc.note") == 0);
+
+    // --- cycle 2: a dropdown left hanging open ---------------------------
+    // The enum row's list opens and HANGS when the schema swaps.
+    gui.set_focus(grid_id);
+    run(snap(), store_a);
+    REQUIRE(run(with_key(keys::kEnter), store_a) == 0u);
+    REQUIRE(pg.combo_open.at("editor.grid") == true);
+
+    // One frame of B retires the flag with the row that owned it...
+    run(snap(), store_b);
+    CHECK(pg.combo_open.count("editor.grid") == 0);
+
+    // ...so the row that returns arrives CLOSED - no dropdown it never
+    // opened in this binding.
+    REQUIRE(run(snap(), store_a) == 0u);
+    CHECK(pg.combo_open.at("editor.grid") == false);
+
+    // --- the returned row still edits like the day it was declared ------
+    // The prune is a retirement, not a lobotomy: the focus arrives,
+    // the keystrokes edit the buffer ONLY, the blur commits once.
+    gui.set_focus(project_id);
+    run(snap(), store_a);
+    run(select_all, store_a);
+    REQUIRE(run(typing, store_a) == 0u);
+    run(snap(), store_a);
+    CHECK(project_value() == "untitled");  // the keystrokes wrote nothing
+    CHECK(buf_of("editor.project") == "circsim");
+    run(snap(250.0f, 150.0f, true, true), store_a);  // the blur's press
+    CHECK(run(snap(), store_a) == 1u);
+    CHECK(project_value() == "circsim");
+    CHECK(buf_of("editor.project") == "circsim");
+    CHECK(pg.text_editing.at("editor.project") == false);
+}

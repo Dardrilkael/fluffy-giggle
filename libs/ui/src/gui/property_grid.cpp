@@ -40,11 +40,23 @@
 // The real enums' labels spell through input_format_float - the
 // input_float row's own %g pen - so the list reads like the field it
 // replaces: "0.5", not "0.500000".
+//
+// The state follows the schema bound each frame: the keyed maps are
+// pruned to the schema's live keys and categories before the walk, so
+// a state re-bound to another schema - or a schema re-declared at
+// runtime - starts clean. Nothing else would ever retire an entry
+// (the state is the caller's and the keys are the schema's own
+// strings), and the half of it that is not a leak is worse: a key that
+// left mid-edit and returned would cash its surviving buffer and
+// editing flag as one phantom blur commit, and a surviving open flag
+// would hand the returned row a dropdown it never opened.
 
 #include <ws/ui/gui/property_grid.hpp>
 
 #include <algorithm>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include <ws/ui/gui/widgets.hpp>
@@ -128,6 +140,52 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                           PropertyGridState& state) {
     std::size_t changed = 0;
     const auto categories = schema.categories();
+
+    // The state follows the schema bound THIS frame: an entry whose key
+    // or category left the schema leaves with it, before the walk can
+    // read it back. The state is the caller's and the maps are keyed by
+    // the schema's own strings, so nothing else would ever retire an
+    // entry - a state re-bound to another schema (another document's
+    // settings) or a schema re-declared at runtime would carry the old
+    // keys for as long as the app ran. The leak is the small half: a
+    // text row that leaves mid-edit leaves its editing flag AND its
+    // buffer behind, and a key that RETURNS would cash them on its
+    // first unfocused frame - one phantom commit of typing nobody typed
+    // in this binding, and a dropdown that arrives pre-opened. The
+    // prune is row-aware (a text row's state lives only while the key
+    // lays a text row - a re-declared type takes the old row's state
+    // with it) and costs one schema find per entry, the same order as
+    // the walk's own per-row hashing.
+    const auto lays_text_row = [&](std::string_view key) {
+        const SettingDesc* d = schema.find(key);
+        if (d == nullptr || d->type != SettingType::text) {
+            return false;
+        }
+        const auto* en = find_enum(*d);
+        return en == nullptr || en->allowed.empty();
+    };
+    const auto lays_enum_row = [&](std::string_view key) {
+        const SettingDesc* d = schema.find(key);
+        if (d == nullptr || d->type == SettingType::boolean) {
+            return false;
+        }
+        const auto* en = find_enum(*d);
+        return en != nullptr && !en->allowed.empty();
+    };
+    std::erase_if(state.text_bufs, [&](const auto& kv) {
+        return !lays_text_row(kv.first);
+    });
+    std::erase_if(state.text_editing, [&](const auto& kv) {
+        return !lays_text_row(kv.first);
+    });
+    std::erase_if(state.combo_open, [&](const auto& kv) {
+        return !lays_enum_row(kv.first);
+    });
+    std::erase_if(state.category_open, [&](const auto& kv) {
+        return std::find(categories.begin(), categories.end(), kv.first) ==
+               categories.end();
+    });
+
     for (const auto& cat : categories) {
         // Ensure the category has an open-state entry - defaulting OPEN,
         // the documented intent. (The entry used to come from
