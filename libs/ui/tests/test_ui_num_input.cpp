@@ -1036,3 +1036,125 @@ TEST_CASE("property_grid: the enum row's dropdown STAYS open - the pick "
     CHECK(pg.combo_open.at("render.aa") == false);
     CHECK(pg.combo_open.at("editor.grid") == false);  // the earlier pick held
 }
+
+TEST_CASE("property_grid: a real+enum row is the combo the mapping table "
+          "promised - the list the schema declared, picked from") {
+    ws::settings::Schema schema;
+    ws::settings::EnumConstraint scale;
+    scale.allowed = {ws::settings::SettingValue::real(0.5),
+                     ws::settings::SettingValue::real(1.0),
+                     ws::settings::SettingValue::real(2.5)};
+    CHECK(schema.declare({
+        .key = "render.scale",
+        .type = ws::settings::SettingType::real,
+        .default_value = ws::settings::SettingValue::real(1.0),
+        .constraints = {scale},
+        .description = "the ui scale factor",
+        .category = "render",
+    }).has_value());
+    ws::settings::SettingsStore store{std::move(schema)};
+
+    // The flat-advance font, so the row's composed line is countable:
+    // the closed combo spells "render.scale: 1" (15 glyphs, 150 px) -
+    // input_format_float's %g pen, the input_float family's own - not
+    // the C++ default to_string spelling ("render.scale: 1.000000",
+    // 22 glyphs) the dead enum_labels arm carried.
+    auto glyphs = font_glyphs();
+    const ws::ui::r2d::Font font(16.0f, 20.0f, glyphs.data(), 95);
+    ws::ui::gui::ChromeTheme theme = kDefaultChrome;
+    theme.font = &font;
+
+    GuiContext gui;
+    LayoutCursor layout;
+    ws::ui::gui::PropertyGridState pg;
+
+    const auto run = [&](const InputFrame& frame) {
+        gui.begin_frame(frame);
+        (void)ws::ui::gui::begin_panel(gui, layout, theme, "panel",
+                                       {0.0f, 0.0f, 400.0f, 600.0f});
+        const std::size_t changed = ws::ui::gui::property_grid(
+            gui, layout, theme, store.schema(), store, pg);
+        ws::ui::gui::end_panel(gui, layout);
+        gui.end_frame();
+        return changed;
+    };
+    const auto value = [&]() {
+        auto r = store.get<double>("render.scale");
+        return r.has_value() ? r->value : -1.0;
+    };
+
+    // An idle frame lays the row as a COMBO - the list row, the one
+    // contract the grid's mapping table promised for real+enum. (The
+    // row this test gates laid the UNBOUNDED input_float instead: no
+    // list to open, and a setting whose only move was typing a value
+    // the enum silently refused at the blur.)
+    ws::ui::gui_test::stub.reset();
+    REQUIRE(run(snap()) == 0u);
+    CHECK(ws::ui::gui_test::stub.last_text_advance ==
+          doctest::Approx(150.0f));
+
+    // The focus arrives on the row; Enter opens the dropdown, and the
+    // open flag rides the grid's own state - it hangs across the idle
+    // frames between the open and the pick, like the integer and text
+    // enums' own.
+    gui.ids().push("panel");
+    const ws::ui::gui::WidgetId scale_id = gui.ids().id("render.scale");
+    gui.ids().pop();
+    gui.set_focus(scale_id);
+    run(snap());
+    REQUIRE(run(with_key(keys::kEnter)) == 0u);
+    REQUIRE(pg.combo_open.at("render.scale") == true);
+    REQUIRE(run(snap()) == 0u);  // an idle frame: the list still hangs
+    REQUIRE(pg.combo_open.at("render.scale") == true);
+    CHECK(value() == doctest::Approx(1.0));  // nothing written yet
+
+    // Tab walks into the list, Enter picks the focused item - one
+    // write, one changed count, the dropdown closes, and the pick
+    // wrote the allowed DOUBLE the schema declared (never the spelled
+    // float).
+    run(with_key(keys::kTab));
+    CHECK(run(with_key(keys::kEnter)) == 1u);
+    CHECK(value() == doctest::Approx(0.5));
+    CHECK(pg.combo_open.at("render.scale") == false);
+
+    // The closed row re-spells from the standing value: "render.scale:
+    // 0.5" (17 glyphs, 170 px) - the %g pen again, a label that reads
+    // like the field it replaced.
+    ws::ui::gui_test::stub.reset();
+    REQUIRE(run(snap()) == 0u);
+    CHECK(ws::ui::gui_test::stub.last_text_advance ==
+          doctest::Approx(170.0f));
+
+    // The list is the whole truth: the row is no field to type into -
+    // text delivered to the focused row moves nothing, and the blur
+    // commits nothing (a combo has no text buffer to own).
+    InputFrame typed = snap();
+    type_text(typed, "9");
+    REQUIRE(run(typed) == 0u);
+    run(snap(250.0f, 150.0f, true, true));  // the press clears the focus
+    REQUIRE(run(snap()) == 0u);
+    CHECK(value() == doctest::Approx(0.5));
+
+    // The radio's idempotence through the grid's own count: re-open,
+    // walk to the STANDING item, Enter - a re-pick of the current
+    // value answers false, so the count says 0 and the value holds.
+    gui.set_focus(scale_id);
+    run(snap());
+    REQUIRE(run(with_key(keys::kEnter)) == 0u);
+    REQUIRE(pg.combo_open.at("render.scale") == true);
+    run(with_key(keys::kTab));
+    CHECK(run(with_key(keys::kEnter)) == 0u);
+    CHECK(value() == doctest::Approx(0.5));
+    CHECK(pg.combo_open.at("render.scale") == false);
+
+    // A later item is the same walk: two Tabs reach the second entry,
+    // Enter picks 1.0, and the store answers the move.
+    gui.set_focus(scale_id);
+    run(snap());
+    REQUIRE(run(with_key(keys::kEnter)) == 0u);
+    run(with_key(keys::kTab));
+    run(with_key(keys::kTab));
+    CHECK(run(with_key(keys::kEnter)) == 1u);
+    CHECK(value() == doctest::Approx(1.0));
+    CHECK(pg.combo_open.at("render.scale") == false);
+}

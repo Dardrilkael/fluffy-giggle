@@ -37,6 +37,9 @@
 // for exactly the frame of the click that opened it - the next frame
 // re-arms false, the list vanishes, and the pick, a press on an item
 // one frame or ten later, falls through to whatever sat beneath).
+// The real enums' labels spell through input_format_float - the
+// input_float row's own %g pen - so the list reads like the field it
+// replaces: "0.5", not "0.500000".
 
 #include <ws/ui/gui/property_grid.hpp>
 
@@ -97,7 +100,19 @@ std::vector<std::string> enum_labels(const settings::EnumConstraint& e,
         } else if (type == SettingType::real) {
             auto val = v.as<double>();
             if (val) {
-                out.push_back(std::to_string(*val));
+                // The input_float row's own pen (input_format_float,
+                // %g at the field's default 6 significant digits), so
+                // the list reads like the field it replaces: "0.5",
+                // "2.5" - not the C++ default's fixed six decimals
+                // ("0.500000"), a spelling no row in this family ever
+                // showed. The float cast is the field's own: a label is
+                // a display, and the pick below writes the allowed
+                // double back, never the spelled float.
+                char spelled[24];
+                (void)input_format_float(
+                    spelled, static_cast<int>(sizeof(spelled)),
+                    static_cast<float>(*val), 6);
+                out.emplace_back(spelled);
             }
         }
     }
@@ -187,18 +202,54 @@ std::size_t property_grid(GuiContext& gui, LayoutCursor& layout,
                 }
             } else if (desc->type == SettingType::real) {
                 const auto* range = find_range(*desc);
+                const auto* en = find_enum(*desc);
                 auto r = settings.get<double>(desc->key);
                 if (!r) continue;
-                float val = static_cast<float>(r->value);
-                const float lo = range ? static_cast<float>(range->min) : 0.0f;
-                const float hi = range ? static_cast<float>(range->max) : 0.0f;
-                // The typed row: exact values like 0.0001 land as
-                // typed (a slider could only scrub at its own
-                // resolution); min == max lays the field unbounded.
-                if (input_float(gui, layout, theme, label, val, lo, hi)) {
-                    if (settings.set(settings::Layer::user, desc->key,
-                                     static_cast<double>(val)).has_value()) {
-                        ++changed;
+                if (en != nullptr && !en->allowed.empty()) {
+                    // The enum row the header's mapping table has
+                    // promised all along ("real + enum -> combo"): the
+                    // integer and text enums' own path, with the
+                    // double's own read and write. (The branch used to
+                    // be missing: a real+enum setting laid the UNBOUNDED
+                    // input_float, so the allowed list the schema
+                    // declared never showed - the only way to move the
+                    // setting was to type a value the enum silently
+                    // refused at the blur, and enum_labels' real arm sat
+                    // dead above.)
+                    auto labels = enum_labels(*en, SettingType::real);
+                    std::vector<const char*> ptrs;
+                    ptrs.reserve(labels.size());
+                    for (const auto& s : labels) ptrs.push_back(s.c_str());
+                    int sel = 0;
+                    for (std::size_t i = 0; i < en->allowed.size(); ++i) {
+                        auto v = en->allowed[i].as<double>();
+                        if (v && *v == r->value) { sel = static_cast<int>(i); break; }
+                    }
+                    // The caller-owned open flag, the same combo
+                    // contract as the integer and text enums above.
+                    auto& combo_open = state.combo_open[desc->key];
+                    if (combo(gui, layout, theme, label, ptrs.data(),
+                              static_cast<int>(ptrs.size()), sel, combo_open)) {
+                        if (sel >= 0 && sel < static_cast<int>(en->allowed.size())) {
+                            auto v = en->allowed[sel].as<double>();
+                            if (v && settings.set(settings::Layer::user, desc->key,
+                                                  *v).has_value()) {
+                                ++changed;
+                            }
+                        }
+                    }
+                } else {
+                    float val = static_cast<float>(r->value);
+                    const float lo = range ? static_cast<float>(range->min) : 0.0f;
+                    const float hi = range ? static_cast<float>(range->max) : 0.0f;
+                    // The typed row: exact values like 0.0001 land as
+                    // typed (a slider could only scrub at its own
+                    // resolution); min == max lays the field unbounded.
+                    if (input_float(gui, layout, theme, label, val, lo, hi)) {
+                        if (settings.set(settings::Layer::user, desc->key,
+                                         static_cast<double>(val)).has_value()) {
+                            ++changed;
+                        }
                     }
                 }
             } else if (desc->type == SettingType::text) {
