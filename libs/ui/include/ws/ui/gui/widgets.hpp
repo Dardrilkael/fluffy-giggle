@@ -3,6 +3,7 @@
 #include <ws/ui/gui/gui_context.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
 #include <ws/ui/gui/rect.hpp>
+#include <ws/ui/gui/text_cluster.hpp>
 #include <ws/ui/gui/theme.hpp>
 
 #include <ws/core/result.hpp>
@@ -990,9 +991,11 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
 // the EditBuffer lens is yours for whatever else a custom field edits.
 
 // text_input's persistent half: the caret and its selection anchor are
-// byte offsets into the CALLER's buffer (v1 edits ASCII, so bytes are
-// characters; equal means no selection). The blink phase is the frame
-// clock's first consumer - dt_seconds accumulates here, half on/half
+// byte offsets into the CALLER's buffer, always on grapheme-cluster
+// boundaries - a user-perceived character is base + combining marks, an
+// emoji sequence; an ASCII buffer sees the old one-byte-per-character
+// arithmetic exactly; equal means no selection. The blink phase is the
+// frame clock's first consumer - dt_seconds accumulates here, half on/half
 // off at rest, and every edit, caret move or press rewinds it so the
 // caret reads solid while the user works. `was_focused` lights it the
 // frame the field GAINS the focus, so a Tab-arrival caret shows
@@ -1004,12 +1007,17 @@ struct TextInputState {
     bool was_focused = false;
 };
 
-// The typing filter: v1 edits ASCII - one byte, one glyph, the bake's
-// whole range. The test takes the CODEPOINT, never a char: cp 300 cast
-// to the byte first would alias into ','. The paste path's
-// char->unsigned-char widening is exact, so it shares this one filter.
+// The typing filter: the field edits TEXT - the cut is every scalar
+// value UTF-8 can spell, not v1's ASCII. Control codes stay out (a
+// single line has no use for them; DEL rides with them), and the
+// surrogate halves and anything past U+10FFFF drop rather than land a
+// truncated byte-cast alias - the test takes the CODEPOINT, never a
+// byte: a surrogate half whose low byte would alias into 'A' still
+// refuses whole. The insert lands the codepoint's whole 1..4-byte
+// UTF-8 span (utf8_encode beside it), one cluster at a time.
 inline bool is_insertable(std::uint32_t cp) {
-    return cp >= 32u && cp <= 126u;
+    return cp >= 32u && cp != 127u && cp <= 0x10FFFFu &&
+           !(cp >= 0xD800u && cp <= 0xDFFFu);
 }
 
 // text_input's per-frame lens: the persistent caret pair from
@@ -1029,6 +1037,59 @@ struct EditBuffer {
     int sel_lo() const { return std::min(caret, anchor); }
     int sel_hi() const { return std::max(caret, anchor); }
     bool has_selection() const { return caret != anchor; }
+
+    // --- the cluster navigation ------------------------------------------
+    // Byte offsets snapped onto grapheme-cluster boundaries (see
+    // text_cluster.hpp): the invariant every editing verb leaves
+    // behind. The containing-cluster read is asymmetric on purpose,
+    // the two halves that need it: cluster_start(byte) names the START
+    // of the cluster containing byte-1 - Backspace's target, and the
+    // Left key's step (byte 0 -> 0); cluster_end(byte) the END of the
+    // cluster containing byte - Delete's target, and the Right key's
+    // step (the length clamps). clamp_to_cluster snaps DOWN - the
+    // boundary at or below - so an externally re-spelled buffer (the
+    // caller's own hand between frames) never finds the caret mid-
+    // character. An ASCII buffer degenerates to the old arithmetic
+    // exactly: start = byte-1, end = byte+1, the clamp the identity.
+    int cluster_start(int byte) const {
+        byte = std::max(0, std::min(len, byte));
+        int start = 0;
+        while (start < byte) {
+            const int span = grapheme_length(buf + start, buf + len);
+            if (start + span >= byte) {
+                return start;  // the cluster [start, start+span) holds byte-1
+            }
+            start += span;
+        }
+        return 0;
+    }
+    int cluster_end(int byte) const {
+        byte = std::max(0, std::min(len, byte));
+        int start = 0;
+        while (start < byte) {
+            const int span = grapheme_length(buf + start, buf + len);
+            if (start + span > byte) {
+                return start + span;  // byte sits inside [start, start+span)
+            }
+            start += span;
+        }
+        // byte is a boundary at/below the scan's stop: the cluster
+        // STARTING there owns the answer (or the buffer's end).
+        return byte < len ? byte + grapheme_length(buf + byte, buf + len)
+                          : len;
+    }
+    int clamp_to_cluster(int byte) const {
+        byte = std::max(0, std::min(len, byte));
+        int start = 0;
+        while (start < byte) {
+            const int span = grapheme_length(buf + start, buf + len);
+            if (start + span >= byte) {
+                return byte == start + span ? byte : start;
+            }
+            start += span;
+        }
+        return byte;
+    }
 
     // Both ends onto `at`: the selection dies, the caret stays.
     void collapse(int at) {
@@ -1061,7 +1122,10 @@ struct EditBuffer {
     // n bytes at `at` (clamped into [0, len], never past the room): the
     // tail slides once, the bytes land, the terminator follows. The
     // return is the pen just past the insertion, or -1 when the room
-    // refused everything.
+    // refused everything. Callers pass WHOLE UTF-8 codepoint spans (the
+    // typing loop encodes through utf8_encode and checks the span fits
+    // first - the room never cuts a sequence mid-byte under the
+    // widget's own hand).
     int insert(int at, const char* bytes, int n) {
         at = std::max(0, std::min(len, at));
         n = std::min(n, room - len);
@@ -1076,21 +1140,46 @@ struct EditBuffer {
         return at + n;
     }
 
-    // A paste through the filter: only bytes the filter admits count, and
-    // only as many as the room takes - counted in one pass over the text,
-    // then landed in one move, so the buffer never walks per byte and
-    // the capacity never splits mid-paste. The return is insert's pen.
-    // The filter rides as a parameter so a constrained field (a numeric
-    // one) admits only its own charset; the default is the v1 field's
-    // plain cut, so every existing caller spells the same edit it
-    // always did.
+    // A paste through the filter: only CODEPOINTS the filter admits
+    // land, and each lands its WHOLE 1..4-byte UTF-8 span (the
+    // clipboard seam speaks UTF-8 - the same bytes draw_text walks) -
+    // a span the room cannot take whole stops the count there, an
+    // ill-formed span (a truncated or overlong sequence, a lone
+    // continuation byte) drops rather than lands, and the buffer keeps
+    // its UTF-8 shape. Still counted in one pass over the text, then
+    // landed in one move, so the buffer never walks per byte and the
+    // capacity never splits mid-paste. The return is insert's pen. The
+    // filter rides as a parameter so a constrained field (a numeric
+    // one) admits only its own charset; the default is the field's
+    // plain cut, so every existing caller keeps its edit - with
+    // non-ASCII text now LANDING instead of dropping per byte.
     int insert_filtered(int at, const char* text,
                         bool (*filter)(std::uint32_t) = &is_insertable) {
-        int take = 0;
-        for (const char* p = text; *p != '\0' && len + take < room; ++p) {
-            if (filter(static_cast<unsigned char>(*p))) {
-                ++take;
+        const char* const stop = text + std::strlen(text);
+        // The shared admission test: decode, refuse the ill-formed, ask
+        // the filter - identical in the counting and the landing pass.
+        const auto admits = [&](const char* p, std::uint32_t& cp,
+                                 int& span) -> bool {
+            span = utf8_decode(p, stop, cp);
+            if (span <= 0) {
+                return false;
             }
+            if (span == 1 && cp >= 0x80u) {
+                return false;  // not well-formed UTF-8: the paste drops it
+            }
+            return filter(cp);
+        };
+        int take = 0;  // bytes that will land
+        for (const char* p = text; *p != '\0' && take < room - len;) {
+            std::uint32_t cp = 0;
+            int span = 0;
+            if (admits(p, cp, span)) {
+                if (take + span > room - len) {
+                    break;  // the room would split the span: nothing more lands
+                }
+                take += span;
+            }
+            p += span;
         }
         at = std::max(0, std::min(len, at));
         if (take <= 0) {
@@ -1099,13 +1188,17 @@ struct EditBuffer {
         std::memmove(buf + at + take, buf + at,
                      static_cast<std::size_t>(len - at));
         int pen = at;
-        for (const char* p = text; *p != '\0'; ++p) {
+        for (const char* p = text; *p != '\0';) {
             if (pen - at >= take) {
                 break;  // the room's count is landed; the tail never walks
             }
-            if (filter(static_cast<unsigned char>(*p))) {
-                buf[pen++] = *p;
+            std::uint32_t cp = 0;
+            int span = 0;
+            if (admits(p, cp, span)) {
+                std::memcpy(buf + pen, p, static_cast<std::size_t>(span));
+                pen += span;
             }
+            p += span;
         }
         len += take;
         buf[len] = '\0';
@@ -1135,11 +1228,13 @@ struct TextInputResult : WidgetPaint {
 // through the filter, Ctrl+A, Escape's selection drop and the
 // clipboard trio - all against the caller's buffer through the
 // EditBuffer verbs, the pair written back into `edit`. `theme` maps
-// the caret into pixels: the font's glyph advances, or
-// label_char_width fontless. `filter` is the typing and paste
-// charset - the codepoints the field admits - and defaults to the
-// plain v1 cut (ASCII 32..126); a numeric field passes its own
-// (is_float_insertable / is_int_insertable below). Draws nothing.
+// the caret into pixels over CLUSTERS - the codepoints' glyph
+// advances summed, the draw loop's own walk - or
+// label_char_width fontless, once per codepoint. `filter` is the typing
+// and paste charset - the codepoints the field admits - and defaults
+// to the plain cut (every scalar value but the control codes); a
+// numeric field passes its own (is_float_insertable / is_int_insertable
+// below). Draws nothing.
 TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
                                     const Rect& rect, char* buf, int capacity,
                                     TextInputState& edit,

@@ -45,6 +45,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <map>
@@ -156,9 +157,12 @@ TEST_CASE("text_input edits through its verbs: type, delete, replace") {
     CHECK(!run_field(snap(60.0f, 20.0f, false, false, true)));
 
     // Typing through the filter: insertable codepoints land in order,
-    // and cp 300 - not a byte - drops instead of aliasing into ','.
+    // and the surrogate half 0xD841 - not a scalar value, and its byte
+    // cast would alias into 'A' - drops whole instead of aliasing in.
+    // (A combining mark like cp 300 used to be this case's drop; it
+    // LANDS now - the cluster suite below proves how.)
     InputFrame typing = snap(-100.0f, -100.0f);
-    typing.text_input = {'a', 300u, 'b'};
+    typing.text_input = {'a', 0xD841u, 'b'};
     CHECK(run_field(typing));
     CHECK(std::strcmp(buf, "ab") == 0);
 
@@ -200,6 +204,278 @@ TEST_CASE("text_input edits through its verbs: type, delete, replace") {
     // moved.
     CHECK(!run_field(snap(-100.0f, -100.0f)));
     CHECK(std::strcmp(buf, "zab") == 0);
+}
+
+TEST_CASE("the cluster primitives decode, encode and bound graphemes") {
+    using ws::ui::gui::utf8_decode;
+    using ws::ui::gui::utf8_encode;
+    using ws::ui::gui::grapheme_length;
+
+    // utf8_encode: every scalar value lands its whole span, and the
+    // non-scalars (the surrogate half whose byte cast would alias into
+    // 'A', anything past the top) encode NOTHING - no truncated alias.
+    char bytes[4] = {};
+    CHECK(utf8_encode('a', bytes) == 1);
+    CHECK(bytes[0] == 'a');
+    CHECK(utf8_encode(0x00E9u, bytes) == 2);   // e-acute, 2 bytes
+    CHECK(utf8_encode(0x4F60u, bytes) == 3);  // you (CJK), 3 bytes
+    CHECK(utf8_encode(0x1F600u, bytes) == 4);  // the grin, 4 bytes
+    CHECK(utf8_encode(0xD841u, bytes) == 0);  // the surrogate half
+    CHECK(utf8_encode(0x110000u, bytes) == 0);  // past U+10FFFF
+
+    // utf8_decode: the exact inverse over the spans above, and a total
+    // answer over the malformed - a truncated or invalid sequence
+    // decodes as ONE byte, never stalling the walk.
+    std::uint32_t cp = 0;
+    const char* a_str = "a";
+    const char* a_end = a_str + 1;
+    CHECK(utf8_decode(a_str, a_end, cp) == 1);
+    CHECK(cp == 'a');
+    const char cjk[] = "\xE4\xBD\xA0";  // you
+    CHECK(utf8_decode(cjk, cjk + 3, cp) == 3);
+    CHECK(cp == 0x4F60u);
+    CHECK(utf8_decode(cjk, cjk + 2, cp) == 1);  // truncated: one byte
+    CHECK(cp == 0xE4u);
+    const char orphan[] = "\x80" "a";  // a lone continuation byte
+    CHECK(utf8_decode(orphan, orphan + 2, cp) == 1);
+    CHECK(cp == 0x80u);
+    const char overlong[] = "\xC0\xAF";  // overlong '/'
+    CHECK(utf8_decode(overlong, overlong + 2, cp) == 1);
+    CHECK(cp == 0xC0u);
+
+    // grapheme_length: the cluster bounds over the scripts that
+    // combine - one cluster per user-perceived character, ASCII
+    // degenerate to the byte.
+    const char ascii[] = "a";
+    CHECK(grapheme_length(ascii, ascii + 1) == 1);
+    CHECK(grapheme_length(cjk, cjk + 3) == 3);  // one CJK char: 3 bytes
+    // A base plus its combining mark: one cluster of 3 bytes (e +
+    // U+0301 acute) - the mark never stands alone behind its base.
+    const char combined[] = "e\xCC\x81";
+    CHECK(grapheme_length(combined, combined + 3) == 3);
+    // The mark alone still forms a cluster of its own (a leading mark
+    // with nothing before it), and does not swallow what follows.
+    const char leading[] = "\xCC\x81" "a";
+    CHECK(grapheme_length(leading, leading + 3) == 2);
+    // The emoji sequences: a ZWJ family is ONE cluster (7 codepoints,
+    // 25 bytes); a skin tone joins its base; a flag is one RI pair.
+    char family[25];
+    int pen = 0;
+    const std::uint32_t cps[] = {0x1F468u, 0x200Du, 0x1F469u, 0x200Du,
+                                 0x1F467u, 0x200Du, 0x1F466u};
+    for (std::uint32_t c : cps) {
+        pen += utf8_encode(c, family + pen);
+    }
+    REQUIRE(pen == 25);
+    CHECK(grapheme_length(family, family + 25) == 25);
+    char thumbsup[8];
+    pen = utf8_encode(0x1F44Du, thumbsup);
+    pen += utf8_encode(0x1F3FDu, thumbsup + pen);  // medium skin tone
+    REQUIRE(pen == 8);
+    CHECK(grapheme_length(thumbsup, thumbsup + 8) == 8);
+    char flag[8];
+    pen = utf8_encode(0x1F1EFu, flag);  // J
+    pen += utf8_encode(0x1F1F5u, flag + pen);  // P
+    REQUIRE(pen == 8);
+    CHECK(grapheme_length(flag, flag + 8) == 8);
+    // Three RIs: the pair closes the first cluster, the third opens
+    // its own - pairs, not runs.
+    char three[12];
+    pen = utf8_encode(0x1F1EFu, three);
+    pen += utf8_encode(0x1F1F5u, three + pen);
+    pen += utf8_encode(0x1F1E6u, three + pen);
+    REQUIRE(pen == 12);
+    CHECK(grapheme_length(three, three + 12) == 8);
+    CHECK(grapheme_length(three + 8, three + 12) == 4);
+    // Hangul jamo: L + V + T is one syllable cluster; a new L starts
+    // its own.
+    char syllable[9];
+    pen = utf8_encode(0x1100u, syllable);  // L
+    pen += utf8_encode(0x1161u, syllable + pen);  // V
+    pen += utf8_encode(0x11A8u, syllable + pen);  // T
+    REQUIRE(pen == 9);
+    CHECK(grapheme_length(syllable, syllable + 9) == 9);
+    const char lv[] = "\xEA\xB0\x80";  // precomposed LV
+    CHECK(grapheme_length(lv, lv + 3) == 3);
+    char two_syllables[12];
+    pen = utf8_encode(0x1100u, two_syllables);
+    pen += utf8_encode(0x1161u, two_syllables + pen);
+    pen += utf8_encode(0x1100u, two_syllables + pen);  // a fresh L
+    pen += utf8_encode(0x1161u, two_syllables + pen);
+    REQUIRE(pen == 12);
+    CHECK(grapheme_length(two_syllables, two_syllables + 12) == 6);
+    // CRLF: one cluster, the two-byte newline.
+    const char crlf[] = {'\r', '\n'};
+    CHECK(grapheme_length(crlf, crlf + 2) == 2);
+    // The numeric filters stay ASCII-tight at the CODEPOINT: a CJK
+    // char and a fullwidth digit both refuse.
+    CHECK(!ws::ui::gui::is_float_insertable(0x4F60u));
+    CHECK(!ws::ui::gui::is_int_insertable(0xFF10u));
+    CHECK(ws::ui::gui::is_float_insertable('e'));
+}
+
+TEST_CASE("text_input edits whole grapheme clusters, never halves") {
+    namespace keys = ws::input::keys;
+    using ws::ui::gui::TextInputState;
+
+    ws::ui::gui_test::stub.reset();
+    GuiContext gui;
+    char buf[64] = "";
+    TextInputState edit;
+    const ws::ui::gui::Rect rect{0.0f, 0.0f, 176.0f, 24.0f};
+    const ws::ui::gui::WidgetId id = gui.ids().id("field");
+    const auto run = [&](InputFrame frame) {
+        gui.begin_frame(frame);
+        const auto r = ws::ui::gui::text_input_behavior(
+            gui, id, rect, buf, static_cast<int>(sizeof buf), edit,
+            kDefaultChrome);
+        gui.end_frame();
+        return r;
+    };
+
+    // A press claims the focus, the release settles it (the standard
+    // two-frame opening - the typing below needs the focus held).
+    (void)run(snap(20.0f, 12.0f, true, true));
+    (void)run(snap(20.0f, 12.0f, false, false, true));
+
+    // Typing the CJK char you: three bytes land as ONE cluster, the
+    // caret rests on the boundary past them, and the pen x maps to
+    // ONE fontless codepoint cell (6 px) - the per-BYTE tripling was
+    // exactly the old walk's wrong (the East-Asian-width weighting
+    // is the fit_text gap's own work, not the caret's).
+    InputFrame cjk = snap(-100.0f, -100.0f);
+    cjk.text_input = {0x4F60u};
+    const auto typed = run(cjk);
+    CHECK(typed.edited);
+    CHECK(std::memcmp(buf, "\xE4\xBD\xA0", 3) == 0);
+    CHECK(edit.caret == 3);
+    CHECK(typed.caret_x == 12.0f + 6.0f);  // content_x + one cell
+
+    // Typing e + the combining acute: the mark JOINS the e's cluster -
+    // 3 more bytes, one more user character, the caret at 6.
+    InputFrame combo = snap(-100.0f, -100.0f);
+    combo.text_input = {'e', 0x0301u};
+    const auto marked = run(combo);
+    CHECK(marked.edited);
+    CHECK(std::memcmp(buf + 3, "e\xCC\x81", 3) == 0);
+    CHECK(edit.caret == 6);
+    // And the whole field: you + [e + acute] = TWO clusters.
+    CHECK(typed.sel_x0 == typed.sel_x1);  // quiet frames keep no span
+
+    // Left crosses the combined cluster in ONE step: from 6 to 3 -
+    // never to 5 (inside the mark's span) the way the byte walk did.
+    InputFrame left = snap(-100.0f, -100.0f);
+    left.key_pressed[static_cast<std::size_t>(keys::kLeft)] = true;
+    (void)run(left);
+    CHECK(edit.caret == 3);
+
+    // Delete forward eats the WHOLE combined cluster - the base and
+    // its mark leave together, you alone stands.
+    InputFrame del = snap(-100.0f, -100.0f);
+    del.key_pressed[static_cast<std::size_t>(keys::kDelete)] = true;
+    (void)run(del);
+    CHECK(std::memcmp(buf, "\xE4\xBD\xA0", 3) == 0);
+    CHECK(buf[3] == '\0');
+    CHECK(edit.caret == 3);
+
+    // Backspace eats the CJK cluster whole: one press, empty buffer.
+    InputFrame back = snap(-100.0f, -100.0f);
+    back.key_pressed[static_cast<std::size_t>(keys::kBackspace)] = true;
+    (void)run(back);
+    CHECK(buf[0] == '\0');
+    CHECK(edit.caret == 0);
+
+    // A click inside the combined cluster's first half (9px in - the
+    // you cell is 6px wide, the e+acute cluster starts past it) lands
+    // on its BOUNDARY (3), not mid-sequence; the release settles the
+    // capture the press took (the next field's press must be able to
+    // claim its own).
+    InputFrame refill = snap(-100.0f, -100.0f);
+    refill.text_input = {0x4F60u, 'e', 0x0301u};
+    (void)run(refill);
+    CHECK(edit.caret == 6);
+    const auto placed = run(snap(12.0f + 9.0f, 12.0f, true, true));
+    CHECK(edit.caret == 3);
+    CHECK(edit.anchor == 3);
+    CHECK(placed.caret_x == 12.0f + 6.0f);  // the boundary's pen x
+    (void)run(snap(12.0f + 9.0f, 12.0f, false, false, true));  // release
+
+    // Paste through the clipboard seam: multi-byte text lands whole
+    // through insert_filtered at the standing caret (the you cell
+    // holds bytes 0..2, the paste lands past it), and an ill-formed
+    // byte in the pasted text drops instead of corrupting the buffer.
+    char clip[16] = "";
+    gui.set_clipboard(
+        [&]() -> const char* { return clip; },
+        [&](const char* t) {
+            std::snprintf(clip, sizeof clip, "%s", t);
+        });
+    gui.set_clipboard_text("a\xCC\x81" "b");  // [a + acute] + b
+    InputFrame paste = snap(-100.0f, -100.0f);
+    paste.key_down[static_cast<std::size_t>(keys::kLeftControl)] = true;
+    paste.key_pressed[static_cast<std::size_t>(keys::kV)] = true;
+    (void)run(paste);
+    // The paste lands at the standing caret (3): you + [a + acute] + b
+    // + the [e + acute] that stood past it - ten bytes, the caret
+    // between the pasted run and the old tail.
+    CHECK(std::memcmp(buf,
+                      "\xE4\xBD\xA0" "a\xCC\x81" "b" "e\xCC\x81", 10) == 0);
+    CHECK(edit.caret == 7);
+
+    // A fresh small field for the room edges: a press claims its focus
+    // (the main field's above), the release settles it.
+    char small[5] = "";
+    TextInputState small_edit;
+    const ws::ui::gui::WidgetId small_id = gui.ids().id("small");
+    const auto run_small = [&](InputFrame frame) {
+        gui.begin_frame(frame);
+        const auto r = ws::ui::gui::text_input_behavior(
+            gui, small_id, rect, small, static_cast<int>(sizeof small),
+            small_edit, kDefaultChrome);
+        gui.end_frame();
+        return r;
+    };
+    (void)run_small(snap(20.0f, 12.0f, true, true));
+    (void)run_small(snap(20.0f, 12.0f, false, false, true));
+
+    // The full-buffer drop never splits a sequence: room for 4, the
+    // second you (3 bytes) cannot land after the first leaves 1 free
+    // - the rest of the frame's text drops whole, no dangling lead
+    // byte.
+    InputFrame overfill = snap(-100.0f, -100.0f);
+    overfill.text_input = {0x4F60u, 0x4F60u, 'a'};
+    const auto filled = run_small(overfill);
+    CHECK(filled.edited);
+    CHECK(std::memcmp(small, "\xE4\xBD\xA0", 3) == 0);
+    CHECK(small[3] == '\0');
+    CHECK(small_edit.caret == 3);
+
+    // The ill-formed paste: a lone 0xE9 lead with no continuation
+    // drops; the well-formed neighbors land around it. A third field,
+    // empty with room to spare, so the paste's whole run fits.
+    char tiny[7] = "";
+    TextInputState tiny_edit;
+    const ws::ui::gui::WidgetId tiny_id = gui.ids().id("tiny");
+    const auto run_tiny = [&](InputFrame frame) {
+        gui.begin_frame(frame);
+        const auto r = ws::ui::gui::text_input_behavior(
+            gui, tiny_id, rect, tiny, static_cast<int>(sizeof tiny),
+            tiny_edit, kDefaultChrome);
+        gui.end_frame();
+        return r;
+    };
+    (void)run_tiny(snap(20.0f, 12.0f, true, true));
+    (void)run_tiny(snap(20.0f, 12.0f, false, false, true));
+    gui.set_clipboard_text("a\xE9" "b");  // the lone 0xE9 lead, no continuation
+    InputFrame bad_paste = snap(-100.0f, -100.0f);
+    bad_paste.key_down[static_cast<std::size_t>(keys::kLeftControl)] = true;
+    bad_paste.key_pressed[static_cast<std::size_t>(keys::kV)] = true;
+    const auto tiny_pasted = run_tiny(bad_paste);
+    CHECK(tiny_pasted.edited);
+    // "ab" - the 0xE9 dropped, not landed: a landed 0xE9 would read
+    // three bytes and fail this exact comparison.
+    CHECK(std::memcmp(tiny, "ab", 3) == 0);
+    CHECK(tiny_edit.caret == 2);
 }
 
 TEST_CASE("fit_text truncates through the real font bake") {

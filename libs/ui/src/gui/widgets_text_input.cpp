@@ -4,7 +4,10 @@
 // caller's buffer, plus the caret's pixel mapping) and text_input_draw
 // (the stock field's look over the answer), with the composed row over
 // them. The lens (EditBuffer) and the persistent pair (TextInputState)
-// live in the public widgets.hpp.
+// live in the public widgets.hpp; the cluster primitives both halves
+// walk are the public text_cluster.hpp - the field edits TEXT: UTF-8
+// codepoints land whole, the caret steps grapheme clusters, and no
+// key, click or truncation ever splits a sequence.
 
 #include "widgets_detail.hpp"
 
@@ -72,39 +75,73 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
     const bool dead = out.state == WidgetState::Disabled;
     const bool can_edit = live && focused && !dead;
 
-    // The advance arithmetic the whole field rides: one codepoint's
-    // honest glyph advance (0 outside the bake range - inert bytes sit
-    // still), or (fontless) the v1 bar's per-char estimate, the same
-    // measure fit_text sizes by.
-    const auto cp_advance = [&](unsigned char c) -> float {
+    // The advance arithmetic the whole field rides: one CLUSTER's
+    // honest advance - its codepoints' glyph advances summed, the draw
+    // path's own per-codepoint walk (a multi-byte character is ONE
+    // cell to the caret, never one-per-byte: the renderer's loop is
+    // the model), or (fontless) the v1 bar's per-char estimate once
+    // per CODEPOINT (the East-Asian-width weighting a fontless
+    // non-Latin measure wants is the fit_text gap's own work, not
+    // the caret's).
+    const auto cp_advance = [&](std::uint32_t cp) -> float {
         if (theme.font != nullptr) {
-            const r2d::Font::Glyph* g = theme.font->glyph(c);
+            const r2d::Font::Glyph* g = theme.font->glyph(cp);
             return g != nullptr ? g->advance : 0.0f;
         }
         return theme.label_char_width;
     };
-    const auto char_advance = [&](int i) -> float {
-        return cp_advance(static_cast<unsigned char>(buf[i]));
+    // The cluster at byte i: its byte span and its advance - the
+    // members' advances summed (a ZWJ family's members each advance;
+    // the cluster is their SUM). The buffer END is read live from
+    // eb.len on every call: the edits below grow the buffer inside the
+    // frame, and an end cached at the frame's start would answer
+    // zero-span clusters for the new bytes - the walk would never
+    // advance.
+    const auto cluster_span = [&](int i) -> int {
+        return grapheme_length(buf + i, buf + eb.len);
     };
-    // The pen x at byte `index`, clamped to the buffer's end.
-    const auto x_at = [&](int index) -> float {
+    const auto cluster_advance = [&](int i) -> float {
         float acc = 0.0f;
-        for (int i = 0; i < index && i < eb.len; ++i) {
-            acc += char_advance(i);
+        const int span = cluster_span(i);
+        for (int taken = 0; taken < span;) {
+            std::uint32_t cp = 0;
+            const int used = utf8_decode(buf + i + taken, buf + eb.len, cp);
+            acc += cp_advance(cp);
+            taken += used > 0 ? used : 1;
         }
         return acc;
     };
-    // The inverse: an x inside the row names the first byte whose
+    // The pen x at byte `index` (a cluster boundary): the whole
+    // clusters strictly before it, summed - a mid-cluster index
+    // (only an externally re-spelled buffer leaves one) parks at
+    // the boundary below, deterministic, never a split draw.
+    const auto x_at = [&](int index) -> float {
+        float acc = 0.0f;
+        int i = 0;
+        while (i < index && i < eb.len) {
+            const int span = cluster_span(i);
+            if (i + span > index) {
+                break;  // the index sits inside this cluster
+            }
+            acc += cluster_advance(i);
+            i += span;
+        }
+        return acc;
+    };
+    // The inverse: an x inside the row names the first CLUSTER whose
     // half-advance the click crossed - the standard edit-field
-    // placement, clamped to the buffer.
+    // placement, clamped to the buffer, always on a boundary: a
+    // click never lands the caret inside a sequence.
     const auto caret_from_x = [&](float dx) -> int {
         float acc = 0.0f;
-        for (int i = 0; i < eb.len; ++i) {
-            const float adv = char_advance(i);
+        int i = 0;
+        while (i < eb.len) {
+            const float adv = cluster_advance(i);
             if (dx < acc + adv * 0.5f) {
                 return i;
             }
             acc += adv;
+            i += cluster_span(i);
         }
         return eb.len;
     };
@@ -166,10 +203,10 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
             edit.blink = 0.0f;
         };
         if (gui.key_pressed_or_repeated(ws::input::keys::kLeft)) {
-            move_caret(std::max(0, eb.caret - 1));
+            move_caret(eb.cluster_start(eb.caret));
         }
         if (gui.key_pressed_or_repeated(ws::input::keys::kRight)) {
-            move_caret(std::min(eb.len, eb.caret + 1));
+            move_caret(eb.cluster_end(eb.caret));
         }
         if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kHome)]) {
             move_caret(0);
@@ -210,30 +247,44 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
                 eb.erase_selection();
                 changed = true;
             } else if (!forward && eb.caret > 0) {
-                eb.erase(eb.caret - 1, eb.caret);
-                eb.collapse(eb.caret - 1);
+                // Backspace eats the WHOLE cluster before the caret -
+                // a base with its marks, an emoji sequence whole,
+                // never a dangling tail half.
+                const int lo = eb.cluster_start(eb.caret);
+                eb.erase(lo, eb.caret);
+                eb.collapse(lo);
                 changed = true;
             } else if (forward && eb.caret < eb.len) {
-                eb.erase(eb.caret, eb.caret + 1);
+                // Delete eats forward the same way: the whole
+                // cluster at the caret.
+                eb.erase(eb.caret, eb.cluster_end(eb.caret));
                 eb.collapse(eb.caret);
                 changed = true;
             }
             edit.blink = 0.0f;
         }
 
-        // Typing: the frame's codepoints through the field's filter (v1
-        // edits ASCII; a numeric field narrows it to its charset). A
-        // selection dies under what replaces it, and a full buffer drops
-        // the rest of the frame's text.
+        // Typing: the frame's codepoints through the field's filter,
+        // each landing as its WHOLE UTF-8 span (a numeric field narrows
+        // the filter to its charset). A selection dies under what
+        // replaces it, and a span the room cannot take whole drops the
+        // rest of the frame's text - never a truncated sequence.
         for (std::uint32_t cp : in.text_input) {
             if (!filter(cp)) {
                 continue;
             }
             eb.erase_selection();
-            const char c = static_cast<char>(cp);
-            const int pen = eb.insert(eb.caret, &c, 1);
+            char bytes[4];
+            const int span = utf8_encode(cp, bytes);
+            if (span <= 0) {
+                continue;  // not a scalar value: no byte-cast aliasing lands
+            }
+            if (span > eb.room - eb.len) {
+                break;  // the room refused the span: the rest drops
+            }
+            const int pen = eb.insert(eb.caret, bytes, span);
             if (pen < 0) {
-                break;  // the room refused: the rest of the frame's text drops
+                break;
             }
             eb.collapse(pen);
             edit.blink = 0.0f;
@@ -274,9 +325,11 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
 
     // The buffer may have shrunk under the edits (or under the caller's
     // own hand between frames): the write-back clamps both ends of the
-    // working pair into range on their way into the persistent state.
-    edit.caret = std::clamp(eb.caret, 0, eb.len);
-    edit.anchor = std::clamp(eb.anchor, 0, eb.len);
+    // working pair into range on their way into the persistent state,
+    // and snaps them onto cluster boundaries - a caller who re-spelled
+    // the content between frames never leaves the caret mid-character.
+    edit.caret = eb.clamp_to_cluster(std::clamp(eb.caret, 0, eb.len));
+    edit.anchor = eb.clamp_to_cluster(std::clamp(eb.anchor, 0, eb.len));
     edit.was_focused = focused;
 
     // The mapped answer, paint-ready: the clamped pair's places against
@@ -339,20 +392,43 @@ void text_input_draw(const Rect& rect, const TextInputResult& result,
             ++len;
         }
     }
-    const auto cp_advance = [&](unsigned char c) -> float {
+    const auto cp_advance = [&](std::uint32_t cp) -> float {
         if (theme.font != nullptr) {
-            const r2d::Font::Glyph* g = theme.font->glyph(c);
+            const r2d::Font::Glyph* g = theme.font->glyph(cp);
             return g != nullptr ? g->advance : 0.0f;
         }
         return theme.label_char_width;
     };
-    const auto char_advance = [&](int i) -> float {
-        return cp_advance(static_cast<unsigned char>(buf[i]));
+    // The cluster at byte i: span and advance, the behavior's own
+    // walk recomputed (the look owns its fits). The end caches fine
+    // HERE: the draw never mutates, `len` stands the whole call.
+    const char* const buf_end = buf + len;
+    const auto cluster_span = [&](int i) -> int {
+        return grapheme_length(buf + i, buf_end);
     };
+    const auto cluster_advance = [&](int i) -> float {
+        float acc = 0.0f;
+        const int span = cluster_span(i);
+        for (int taken = 0; taken < span;) {
+            std::uint32_t cp = 0;
+            const int used = utf8_decode(buf + i + taken, buf_end, cp);
+            acc += cp_advance(cp);
+            taken += used > 0 ? used : 1;
+        }
+        return acc;
+    };
+    // The pen x at a boundary: the whole clusters before it - the
+    // behavior's own walk, recomputed here (the look owns its fits).
     const auto x_at = [&](int index) -> float {
         float acc = 0.0f;
-        for (int i = 0; i < index && i < len; ++i) {
-            acc += char_advance(i);
+        int i = 0;
+        while (i < index && i < len) {
+            const int span = cluster_span(i);
+            if (i + span > index) {
+                break;
+            }
+            acc += cluster_advance(i);
+            i += span;
         }
         return acc;
     };
@@ -360,9 +436,8 @@ void text_input_draw(const Rect& rect, const TextInputResult& result,
     if (len > 0) {
         // The content, left-aligned inside the padding. Content is DATA,
         // so fit_text's "##" cut does not apply - the truncation here is
-        // the walk itself: the longest prefix + "..." when the whole
-        // line misses the row's room (the v1 filter already guarantees
-        // one byte per glyph).
+        // the walk itself: the longest cluster-aligned prefix + "..."
+        // when the whole line misses the row's room.
         const float whole = x_at(len);
         int visible = len;
         bool ellipsis = false;
@@ -371,14 +446,19 @@ void text_input_draw(const Rect& rect, const TextInputResult& result,
             const float budget = std::max(0.0f, content_room - dots);
             float acc = 0.0f;
             visible = 0;
-            for (int i = 0; i < len; ++i) {
-                const float adv = char_advance(i);
+            int i = 0;
+            while (i < len) {
+                // The walk steps CLUSTERS: the "..." cut never lands
+                // mid-sequence - no dangling combining mark, no half
+                // an emoji, at the edge.
+                const float adv = cluster_advance(i);
                 if (acc + adv > budget) {
                     break;
                 }
                 acc += adv;
-                visible = i + 1;
+                i += cluster_span(i);
             }
+            visible = i;
             ellipsis = true;
         }
         if (theme.font != nullptr) {
@@ -387,8 +467,24 @@ void text_input_draw(const Rect& rect, const TextInputResult& result,
                                buf, *theme.font, dim(theme.text, dim_by));
             } else {
                 char scratch[256];
-                const int keep =
-                    std::min(visible, static_cast<int>(sizeof(scratch)) - 4);
+                // The scratch clamp walks clusters too: a line wider
+                // than the scratch never leaves a cut sequence inside
+                // the "..." spelling.
+                int keep = visible;
+                const int keep_cap =
+                    static_cast<int>(sizeof(scratch)) - 4;
+                if (keep > keep_cap) {
+                    keep = 0;
+                    int i = 0;
+                    while (i < len) {
+                        const int span = cluster_span(i);
+                        if (i + span > keep_cap) {
+                            break;
+                        }
+                        i += span;
+                    }
+                    keep = i;
+                }
                 std::memcpy(scratch, buf, static_cast<std::size_t>(keep));
                 scratch[keep] = '.';
                 scratch[keep + 1] = '.';
