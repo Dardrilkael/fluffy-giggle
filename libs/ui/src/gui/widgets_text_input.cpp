@@ -19,6 +19,23 @@
 
 namespace ws::ui::gui {
 
+// --- font-aware filter for the composed text_input ----------------------------
+// The composed text_input uses a filter that respects the theme's font:
+// when a font is present, only codepoints with glyphs are allowed;
+// when no font is present, only the ASCII bake range (32..126) is allowed.
+// This is separate from text_input_behavior's default filter (is_insertable)
+// which is Unicode-permissive for custom field flexibility.
+
+static thread_local const r2d::Font* g_text_input_font = nullptr;
+
+bool is_insertable_font_aware(std::uint32_t cp) {
+    if (g_text_input_font != nullptr) {
+        return g_text_input_font->find_glyph(cp) != nullptr;
+    }
+    // No font: only the ASCII bake range (32..126, excluding DEL)
+    return cp >= 32u && cp <= 126u;
+}
+
 // --- the composed row --------------------------------------------------------
 
 bool text_input(GuiContext& gui, LayoutCursor& layout,
@@ -26,8 +43,11 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
                 int capacity, float width, bool disabled) {
     const RowLayout row = begin_widget_row(gui, layout, theme, label, width);
     TextInputState& edit = gui.persistent_state<TextInputState>(row.id);
+    g_text_input_font = theme.font;
     TextInputResult result = text_input_behavior(
-        gui, row.id, row.rect, buf, capacity, edit, theme, disabled);
+        gui, row.id, row.rect, buf, capacity, edit, theme, disabled,
+        {}, &is_insertable_font_aware);
+    g_text_input_font = nullptr;
     fold_hover_t(gui, row.id, result, theme);  // P4: the face traveler
     paint(theme, &WidgetPainters::text_input, &text_input_draw, row.rect,
           result, theme, label, buf, capacity);
@@ -74,6 +94,17 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
     const bool focused = out.focused;
     const bool dead = out.state == WidgetState::Disabled;
     const bool can_edit = live && focused && !dead;
+
+    // The IME composition's frame half (G1.2's channel): while a
+    // composition stands in a field that can edit, the preedit rides
+    // the line at the caret and the KEYBOARD is the IME's - its arrows
+    // walk the candidate list, its backspace re-edits the preedit, and
+    // any glyphs the platform still reports this frame belong to the
+    // composition, not the buffer. The pointer path above stands: a
+    // press elsewhere still moves the focus away, and the platform
+    // ends the composition when the field loses it.
+    const ws::input::Preedit& ime = in.preedit;
+    const bool composing = can_edit && ime.active;
 
     // The advance arithmetic the whole field rides: one CLUSTER's
     // honest advance - its codepoints' glyph advances summed, the draw
@@ -186,7 +217,25 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
     }
 
     // --- the keyboard: caret keys, deleters, typing, the clipboard ------
-    if (can_edit) {
+    // The commit edge first - a composition that ended this frame is
+    // OLDER than any glyphs typed after it, so it lands before them.
+    // The committed text is a whole UTF-8 span: insert_filtered walks
+    // its codepoints through the field's filter and lands spans whole
+    // (the paste path's own never-split-a-span rule), so a numeric
+    // field still refuses a committed kanji and a text field takes an
+    // emoji family in one piece. A standing selection dies under what
+    // replaces it - the typing rule.
+    if (can_edit && !ime.commit.empty()) {
+        eb.erase_selection();
+        const int pen = eb.insert_filtered(eb.caret, ime.commit.c_str(),
+                                            filter);
+        if (pen >= 0) {
+            eb.collapse(pen);
+            edit.blink = 0.0f;
+            changed = true;
+        }
+    }
+    if (can_edit && !composing) {
         const bool ctrl =
             in.key_down[static_cast<std::size_t>(ws::input::keys::kLeftControl)] ||
             in.key_down[static_cast<std::size_t>(ws::input::keys::kRightControl)];
@@ -344,6 +393,62 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
     out.sel_x1 = content_x + std::min(x_at(sel_hi), content_room);
     out.blink = edit.blink;
     out.edited = changed;
+
+    // The composition's own mapping: the preedit run rides the line AT
+    // the caret, its own cluster walk over the frame's borrowed string
+    // (the same arithmetic as the buffer's, second spelling - the
+    // preedit is not in the buffer until it commits). The run's whole
+    // advance is the honest unclamped number (the draw clips its own
+    // fits); the mapped x's follow the caret_x convention and clamp to
+    // the content edge. The composition caret stands at the span's LOW
+    // end's advance into the run; caret_x answers it (the honest
+    // caret while composing), and blink reads solid - composing is
+    // work, the same rule every edit's rewind spells.
+    if (composing) {
+        const char* run = ime.text.c_str();
+        const char* run_end = run + ime.text.size();
+        // One cluster's advance inside the run - cp_advance over the
+        // members, the buffer walk's own arithmetic.
+        const auto run_cluster_advance = [&](const char* p) -> float {
+            float acc = 0.0f;
+            int taken = 0;
+            const int span = grapheme_length(p, run_end);
+            while (taken < span) {
+                std::uint32_t cp = 0;
+                const int used = utf8_decode(p + taken, run_end, cp);
+                acc += cp_advance(cp);
+                taken += used > 0 ? used : 1;
+            }
+            return acc;
+        };
+        // The advance of the run's prefix up to byte `into` (the
+        // composition caret's own position when into == caret_lo).
+        const auto run_x_at = [&](int into) -> float {
+            float acc = 0.0f;
+            const char* p = run;
+            while (p < run_end && p - run < into) {
+                const int span = grapheme_length(p, run_end);
+                if ((p - run) + span > into) {
+                    break;  // the byte sits inside this cluster
+                }
+                acc += run_cluster_advance(p);
+                p += span;
+            }
+            return acc;
+        };
+        out.preedit_text = run;  // borrowed: the context's frame snapshot
+        out.preedit_len = static_cast<int>(ime.text.size());
+        out.preedit_at = edit.caret;
+        out.preedit_caret_lo = ime.caret_lo;
+        out.preedit_caret_hi = ime.caret_hi;
+        out.preedit_x = content_x + std::min(x_at(edit.caret), content_room);
+        out.preedit_advance = run_x_at(out.preedit_len);
+        out.preedit_caret_x =
+            content_x +
+            std::min(x_at(edit.caret) + run_x_at(ime.caret_lo), content_room);
+        out.caret_x = out.preedit_caret_x;
+        out.blink = 0.0f;
+    }
     return out;
 }
 
@@ -392,6 +497,62 @@ void text_input_draw(const Rect& rect, const TextInputResult& result,
             ++len;
         }
     }
+
+    // The composed line while a composition stands (G1.2): the buffer's
+    // prefix, the preedit run at the caret, the buffer's suffix -
+    // spliced into one string the walk below treats exactly like plain
+    // content, so the "..." cut and the cluster walks keep their rules
+    // over it. The run's own marks (the underline + the solid
+    // composition caret) paint after the content, from the behavior's
+    // mapped x's. An overlong splice degrades in tiers - the suffix
+    // first (the least news), then a cluster-aligned prefix cut - so a
+    // pathological report past half a K of preedit stays sound, just
+    // short. The draw re-reads `buf` for the pieces, never the frame:
+    // the behavior's mapping is the only thing borrowed from it.
+    char compose_scratch[512];
+    const char* content = buf;
+    int content_len = len;
+    const bool composing_draw = result.preedit_text != nullptr && live &&
+                                result.focused &&
+                                result.state != WidgetState::Disabled;
+    if (composing_draw) {
+        const int at = std::clamp(result.preedit_at, 0, len);
+        const int pre = std::max(0, result.preedit_len);
+        const int cap = static_cast<int>(sizeof(compose_scratch)) - 1;
+        int keep_pre = pre;
+        int keep_at = at;
+        int keep_suf = len - at;
+        if (keep_pre + keep_at + keep_suf > cap) {
+            keep_suf = 0;  // tier 1: the tail is the least news
+            if (keep_pre + keep_at > cap) {
+                // tier 2: the longest cluster-aligned prefix that fits
+                // beside the whole run - never a split sequence.
+                keep_at = 0;
+                int i = 0;
+                while (i < at) {
+                    const int span = grapheme_length(buf + i, buf + len);
+                    if (span <= 0 || keep_pre + i + span > cap) {
+                        break;
+                    }
+                    i += span;
+                }
+                keep_at = i;
+                if (keep_pre > cap) {
+                    // tier 3, the absurd platform: the run itself cut
+                    // on codepoint boundaries - sound, just short.
+                    keep_pre = cap;
+                }
+            }
+        }
+        std::memcpy(compose_scratch, buf, static_cast<std::size_t>(keep_at));
+        std::memcpy(compose_scratch + keep_at, result.preedit_text,
+                    static_cast<std::size_t>(keep_pre));
+        std::memcpy(compose_scratch + keep_at + keep_pre, buf + at,
+                    static_cast<std::size_t>(keep_suf));
+        content_len = keep_at + keep_pre + keep_suf;
+        compose_scratch[content_len] = '\0';
+        content = compose_scratch;
+    }
     const auto cp_advance = [&](std::uint32_t cp) -> float {
         if (theme.font != nullptr) {
             const r2d::Font::Glyph* g = theme.font->glyph(cp);
@@ -400,18 +561,20 @@ void text_input_draw(const Rect& rect, const TextInputResult& result,
         return theme.label_char_width;
     };
     // The cluster at byte i: span and advance, the behavior's own
-    // walk recomputed (the look owns its fits). The end caches fine
-    // HERE: the draw never mutates, `len` stands the whole call.
-    const char* const buf_end = buf + len;
+    // walk recomputed (the look owns its fits) - over the CONTENT,
+    // which is the spliced line while a composition stands. The end
+    // caches fine HERE: the draw never mutates, `content_len` stands
+    // the whole call.
+    const char* const content_end = content + content_len;
     const auto cluster_span = [&](int i) -> int {
-        return grapheme_length(buf + i, buf_end);
+        return grapheme_length(content + i, content_end);
     };
     const auto cluster_advance = [&](int i) -> float {
         float acc = 0.0f;
         const int span = cluster_span(i);
         for (int taken = 0; taken < span;) {
             std::uint32_t cp = 0;
-            const int used = utf8_decode(buf + i + taken, buf_end, cp);
+            const int used = utf8_decode(content + i + taken, content_end, cp);
             acc += cp_advance(cp);
             taken += used > 0 ? used : 1;
         }
@@ -422,7 +585,7 @@ void text_input_draw(const Rect& rect, const TextInputResult& result,
     const auto x_at = [&](int index) -> float {
         float acc = 0.0f;
         int i = 0;
-        while (i < index && i < len) {
+        while (i < index && i < content_len) {
             const int span = cluster_span(i);
             if (i + span > index) {
                 break;
@@ -433,13 +596,13 @@ void text_input_draw(const Rect& rect, const TextInputResult& result,
         return acc;
     };
 
-    if (len > 0) {
+    if (content_len > 0) {
         // The content, left-aligned inside the padding. Content is DATA,
         // so fit_text's "##" cut does not apply - the truncation here is
         // the walk itself: the longest cluster-aligned prefix + "..."
         // when the whole line misses the row's room.
-        const float whole = x_at(len);
-        int visible = len;
+        const float whole = x_at(content_len);
+        int visible = content_len;
         bool ellipsis = false;
         if (whole > content_room) {
             const float dots = cp_advance('.') * 3.0f;
@@ -447,7 +610,7 @@ void text_input_draw(const Rect& rect, const TextInputResult& result,
             float acc = 0.0f;
             visible = 0;
             int i = 0;
-            while (i < len) {
+            while (i < content_len) {
                 // The walk steps CLUSTERS: the "..." cut never lands
                 // mid-sequence - no dangling combining mark, no half
                 // an emoji, at the edge.
@@ -464,7 +627,7 @@ void text_input_draw(const Rect& rect, const TextInputResult& result,
         if (theme.font != nullptr) {
             if (!ellipsis) {
                 r2d::draw_text(content_x, label_top(rect.y, rect.height, theme),
-                               buf, *theme.font, dim(theme.text, dim_by));
+                               content, *theme.font, dim(theme.text, dim_by));
             } else {
                 char scratch[256];
                 // The scratch clamp walks clusters too: a line wider
@@ -476,7 +639,7 @@ void text_input_draw(const Rect& rect, const TextInputResult& result,
                 if (keep > keep_cap) {
                     keep = 0;
                     int i = 0;
-                    while (i < len) {
+                    while (i < content_len) {
                         const int span = cluster_span(i);
                         if (i + span > keep_cap) {
                             break;
@@ -485,7 +648,8 @@ void text_input_draw(const Rect& rect, const TextInputResult& result,
                     }
                     keep = i;
                 }
-                std::memcpy(scratch, buf, static_cast<std::size_t>(keep));
+                std::memcpy(scratch, content,
+                            static_cast<std::size_t>(keep));
                 scratch[keep] = '.';
                 scratch[keep + 1] = '.';
                 scratch[keep + 2] = '.';
@@ -518,11 +682,34 @@ void text_input_draw(const Rect& rect, const TextInputResult& result,
         }
     }
 
+    // The composition's own marks (G1.2): the underline at the run's
+    // foot - the selection band's machinery, the TEXT color (an
+    // in-flight edit, not a selection) - and the SOLID composition
+    // caret inside the run at the behavior's mapped x. Both clip to
+    // the content edge: a run past the room parks its marks at the
+    // edge like any line. These replace the blink caret below for the
+    // duration - the composition caret never blinks (composing is
+    // work, the behavior reports blink 0 for the same reason).
+    if (composing_draw) {
+        const float edge = content_x + content_room;
+        const float x0 = std::min(result.preedit_x, edge);
+        const float x1 =
+            std::min(result.preedit_x + result.preedit_advance, edge);
+        if (x1 > x0) {
+            r2d::draw_quad(x0, mark_y + mark_h - 2.0f, x1 - x0, 2.0f,
+                           dim(theme.text, dim_by));
+        }
+        r2d::draw_quad(std::min(result.preedit_caret_x, edge), mark_y, 2.0f,
+                       mark_h, theme.text);
+    }
+
     // The caret: a 2px bar in the text color at the mapped x - solid
     // on arrival and through work, half on/half off at rest (the phase
     // the behavior reports; the stock look's own under-half rule),
-    // hidden while unfocused, locked or inert.
-    if (result.focused && result.state != WidgetState::Disabled && live &&
+    // hidden while unfocused, locked or inert - and hidden while a
+    // composition stands (its own caret drew above).
+    if (!composing_draw && result.focused &&
+        result.state != WidgetState::Disabled && live &&
         result.blink < 0.5f) {
         r2d::draw_quad(result.caret_x, mark_y, 2.0f, mark_h, theme.text);
     }

@@ -132,6 +132,19 @@ public:
     // opts in by overriding, like every other capability here.
     virtual void install_clipboard(gui::GuiContext& gui) { (void)gui; }
 
+    // The gui IME-rect seam's platform half (G1.2's channel): pushes this
+    // host's composition-window positioner onto the app's GuiContext -
+    // the context calls it with the focused field's bounds whenever they
+    // change, so the OS composition window tracks what the user is
+    // composing into (App::install_ime_rect is the app-side spelling).
+    // The base default installs nothing: no host wires an IME today
+    // (GLFW exposes no preedit; the Windows IMM32 / Android JNI plumbing
+    // is the channel's platform stage), and an unset seam is the honest
+    // nothing-positions answer - the headless answer, like the unset
+    // clipboard. A platform opts in by overriding, like every other
+    // capability here.
+    virtual void install_ime_rect(gui::GuiContext& gui) { (void)gui; }
+
     // The stage-12 halves the window itself owns. set_title hands the
     // platform a composed title - the answer of ws::platform's
     // window_title(), which stays headless: this seam is where the

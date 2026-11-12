@@ -545,3 +545,112 @@ TEST_CASE("gather_pointers: an absent mouse is not a pointer - touches only") {
     CHECK(frame.pointer_pos(kMousePointerId, &x, &y));
     CHECK(x == 40.0f);
 }
+
+// --- the IME composition channel (G1.2) ---------------------------------------
+
+TEST_CASE("composition events carry their type, payload and start unhandled") {
+    using ws::input::EventType;
+    ws::input::CompositionBeganEvent began{"ni", 0, 2};
+    CHECK(began.type() == EventType::CompositionBegan);
+    CHECK(began.static_type() == EventType::CompositionBegan);
+    CHECK(began.text == "ni");
+    CHECK(began.caret_lo == 0);
+    CHECK(began.caret_hi == 2);
+    CHECK(began.handled == false);
+
+    ws::input::CompositionUpdatedEvent updated{"ni-h", 2, 4};
+    CHECK(updated.type() == EventType::CompositionUpdated);
+    CHECK(updated.text == "ni-h");
+    CHECK(updated.caret_lo == 2);
+    CHECK(updated.caret_hi == 4);
+    CHECK(updated.handled == false);
+
+    // Ended carries the COMMITTED text - the one spelling of the result
+    // a platform reports through the channel (never both this and
+    // glyphs; the frame halves below trust it).
+    ws::input::CompositionEndedEvent ended{"ni-hao", 0, 6};
+    CHECK(ended.type() == EventType::CompositionEnded);
+    CHECK(ended.text == "ni-hao");
+    CHECK(ended.handled == false);
+
+    // The dispatcher treats them like every other event: type-matched,
+    // handled-honoring.
+    ws::input::EventDispatcher d{ended};
+    int saw_ended = 0;
+    d.dispatch<ws::input::CompositionEndedEvent>(
+        [&](ws::input::CompositionEndedEvent&) {
+            ++saw_ended;
+            return true;
+        });
+    CHECK(saw_ended == 1);
+    CHECK(ended.handled);
+    int saw_update = 0;
+    ws::input::EventDispatcher d2{updated};
+    d2.dispatch<ws::input::CompositionEndedEvent>(
+        [&](ws::input::CompositionEndedEvent&) {
+            ++saw_update;
+            return true;
+        });
+    CHECK(saw_update == 0);  // the sibling type is not its own
+}
+
+TEST_CASE("the composition writers: held preedit, edge commit, honest clamps") {
+    ws::input::InputFrame frame;
+
+    // Quiet start: nothing in flight.
+    CHECK(!frame.preedit.active);
+    CHECK(frame.preedit.text.empty());
+    CHECK(frame.preedit.commit.empty());
+
+    // An update with no begin stands as one (platforms differ on the
+    // first report; the frame's observable state is identical).
+    frame.composition_update("ni", 0, 2);
+    CHECK(frame.preedit.active);
+    CHECK(frame.preedit.text == "ni");
+    CHECK(frame.preedit.caret_lo == 0);
+    CHECK(frame.preedit.caret_hi == 2);
+
+    // The advisory span clamps into the string and orders its ends - a
+    // platform's numbers are input, the frame's copy is honest.
+    frame.composition_update("ni-h", 999, -3);
+    CHECK(frame.preedit.text == "ni-h");
+    CHECK(frame.preedit.caret_lo == 0);
+    CHECK(frame.preedit.caret_hi == 4);
+
+    // A multi-byte preedit is a UTF-8 SPAN: the caret span rides bytes
+    // ("ni" + 2-byte 'é' -> the caret past 'é' is byte 4, not 3).
+    frame.composition_update("ni\xc3\xa9", 4, 4);
+    CHECK(frame.preedit.text == "ni\xc3\xa9");
+    CHECK(frame.preedit.caret_lo == 4);
+
+    // HELD: a quiet frame keeps the composition standing - the user
+    // reads the candidate list between re-spellings, the underline
+    // must not flicker.
+    frame.next_frame();
+    CHECK(frame.preedit.active);
+    CHECK(frame.preedit.text == "ni\xc3\xa9");
+    CHECK(frame.preedit.commit.empty());
+
+    // The end: the held half clears NOW (the underline is gone the
+    // very frame the IME let go), the commit becomes the edge.
+    frame.composition_end("ni\xc3\xa9!");
+    CHECK(!frame.preedit.active);
+    CHECK(frame.preedit.text.empty());
+    CHECK(frame.preedit.caret_lo == 0);
+    CHECK(frame.preedit.caret_hi == 0);
+    CHECK(frame.preedit.commit == "ni\xc3\xa9!");
+
+    // The EDGE clears at next_frame; the quiet after an end stays
+    // quiet (a cancel is an end with empty text - nothing lands).
+    frame.next_frame();
+    CHECK(frame.preedit.commit.empty());
+    CHECK(!frame.preedit.active);
+
+    // The cancel spelling, and a null preedit reads as empty.
+    frame.composition_begin(nullptr, 0, 0);
+    CHECK(frame.preedit.active);
+    CHECK(frame.preedit.text.empty());
+    frame.composition_end("");
+    CHECK(!frame.preedit.active);
+    CHECK(frame.preedit.commit.empty());
+}

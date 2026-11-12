@@ -332,6 +332,33 @@ void GuiContext::end_frame() {
         }
     }
     esc_winner_ = esc_winner;
+
+    // The IME rect (G1.2's channel), forwarded at the frame's very end -
+    // after the focus resolution above, so a focus this frame CLEARED
+    // forwards the zero rect, not the dead field's bounds. The latch
+    // filled during the walk (state() latches the focused widget's
+    // rect as it runs), so what forwards here is the rect of whatever
+    // held the focus THROUGH the frame; a Tab landed at the resolution
+    // above forwards on the next frame's end_frame instead - the
+    // documented one-frame lag. Only a CHANGE crosses the seam: the
+    // platform hears moves, not every frame's echo, and an unset seam
+    // hears nothing at all (the headless answer).
+    if (ime_rect_fn_) {
+        Rect ime_now{};  // zero: no field holds focus, hide the window
+        const Rect* focused_bounds_now = focused_bounds();
+        if (focused_bounds_now != nullptr) {
+            ime_now = *focused_bounds_now;
+        }
+        const bool moved =
+            ime_now.x != ime_rect_last_.x ||
+            ime_now.y != ime_rect_last_.y ||
+            ime_now.width != ime_rect_last_.width ||
+            ime_now.height != ime_rect_last_.height;
+        if (moved) {
+            ime_rect_last_ = ime_now;
+            ime_rect_fn_(ime_now);
+        }
+    }
 }
 
 float GuiContext::animate_toward(WidgetId id, float target,
@@ -697,6 +724,15 @@ void GuiContext::cancel_pointer(ws::input::PointerId pointer) {
 void GuiContext::set_clipboard(ClipboardGet get, ClipboardSet set) {
     clipboard_get_ = std::move(get);
     clipboard_set_ = std::move(set);
+}
+
+void GuiContext::set_ime_rect(ImeRectFn fn) {
+    // The clipboard seam's own shape: a move-in install, an unset seam
+    // the honest no-positions answer. The last-forwarded rect does NOT
+    // reset on install - a platform wiring the seam late still hears
+    // the standing focus's rect on its first change, and a seam that
+    // was never told anything keeps its silence (see the header doc).
+    ime_rect_fn_ = std::move(fn);
 }
 
 const char* GuiContext::get_clipboard_text() const {

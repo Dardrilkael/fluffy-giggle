@@ -574,6 +574,21 @@ public:
     // answers null too.)
     [[nodiscard]] bool has_clipboard() const;
 
+    // --- the IME rect seam (G1.2's channel) -------------------------------------
+    // The platform's composition-window positioner: end_frame calls it
+    // with the FOCUSED widget's bounds whenever they change - focus gain,
+    // a layout shift, focus loss (a zero Rect: no field holds focus, hide
+    // the OS composition window). The rect is the field's bounds, not
+    // the caret's pixel - the candidate-window refinement (caret x/y on
+    // caret move) is the guide's G7.2 rider on this seam, deliberately
+    // not v1. An unset seam is the headless answer: nothing positions,
+    // nothing crashes. One-frame note: a Tab resolved at end_frame
+    // forwards the newly focused widget's rect on the NEXT frame's
+    // end_frame (the latch fills during the walk) - the IME follows one
+    // frame late on exactly that path, documented, harmless.
+    using ImeRectFn = std::function<void(const Rect&)>;
+    void set_ime_rect(ImeRectFn fn);
+
     // --- the pieces widget functions receive ---
     IdStack& ids() { return ids_; }
     const ws::input::InputFrame& input() const { return input_; }
@@ -682,6 +697,14 @@ private:
     // The installed clipboard pair (unset until the shell wires one).
     ClipboardGet clipboard_get_;
     ClipboardSet clipboard_set_;
+
+    // The installed IME-rect positioner (unset until the platform stage
+    // wires one) and the last rect it was told - the change detector
+    // end_frame reads, so the seam hears moves, not every frame's echo.
+    // Rect has no operator== on purpose (geometry stays lean), so the
+    // compare is spelled field-by-field below.
+    ImeRectFn ime_rect_fn_;
+    Rect ime_rect_last_{};
 
     // One pointer's hot/active pair, carried across frames keyed by the
     // pointer's id - that carry IS the drag. Slot 0 is the mouse by

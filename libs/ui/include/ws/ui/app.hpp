@@ -90,6 +90,16 @@ public:
     // shortcuts no-op. Include <ws/ui/gui/gui_context.hpp> for the type.
     void install_clipboard(gui::GuiContext& gui);
 
+    // Wires the gui's IME-rect seam to this app's platform window - the
+    // positioner the context calls with the focused field's bounds
+    // whenever they change (G1.2's channel; the OS composition window
+    // tracks the caret's field through it). Call beside
+    // install_clipboard. No host implements the positioner yet (the
+    // Windows IMM32 / Android JNI wiring is the channel's platform
+    // stage), so every host today installs nothing and the seam reads
+    // unset - honest: nothing positions, nothing crashes.
+    void install_ime_rect(gui::GuiContext& gui);
+
     // Installs the job system whose marshal queue the shell drains once
     // per frame, right after the platform events land and BEFORE
     // on_update() runs. Every progress delivery and completion the

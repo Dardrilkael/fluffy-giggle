@@ -123,7 +123,10 @@ using AnyEvent = std::variant<ws::input::WindowCloseEvent, ws::input::WindowResi
                              ws::input::MouseButtonReleasedEvent, ws::input::MouseMovedEvent,
                              ws::input::MouseScrolledEvent, ws::input::TouchPressedEvent,
                              ws::input::TouchMovedEvent, ws::input::TouchReleasedEvent,
-                             ws::input::TextInputEvent, ws::input::FileDroppedEvent>;
+                             ws::input::TextInputEvent, ws::input::FileDroppedEvent,
+                             ws::input::CompositionBeganEvent,
+                             ws::input::CompositionUpdatedEvent,
+                             ws::input::CompositionEndedEvent>;
 
 // The gfx::SurfaceSource adapter: WindowHost speaks Vulkan handles (it
 // includes volk.h internally), gfx speaks opaque handles (void* for the
@@ -406,6 +409,28 @@ struct App::Impl {
                 // edge before the OS callback returned), so the queue's
                 // by-value push moves them, nothing dangles.
                 event_queue_.push_back(static_cast<ws::input::FileDroppedEvent&>(event));
+                break;
+            case ws::input::EventType::CompositionBegan:
+            case ws::input::EventType::CompositionUpdated:
+            case ws::input::EventType::CompositionEnded:
+                // The preedit lifecycle, the TextInput rule again:
+                // order-preserving, never coalesced (a re-spelled preedit
+                // IS the news; dropping or reordering updates would leave
+                // the gui's composition look spelling yesterframe's text).
+                // The strings ride the events like FileDropped's paths -
+                // copied at the platform edge before the OS callback
+                // returned, moved here, never borrowed.
+                if (event.type() == ws::input::EventType::CompositionBegan) {
+                    event_queue_.push_back(std::move(
+                        static_cast<ws::input::CompositionBeganEvent&>(event)));
+                } else if (event.type() ==
+                           ws::input::EventType::CompositionUpdated) {
+                    event_queue_.push_back(std::move(
+                        static_cast<ws::input::CompositionUpdatedEvent&>(event)));
+                } else {
+                    event_queue_.push_back(std::move(
+                        static_cast<ws::input::CompositionEndedEvent&>(event)));
+                }
                 break;
         }
     }
@@ -1130,6 +1155,16 @@ void App::install_clipboard(gui::GuiContext& gui) {
     // without a clipboard gives.
     if (impl_->host_) {
         impl_->host_->install_clipboard(gui);
+    }
+}
+
+void App::install_ime_rect(gui::GuiContext& gui) {
+    // install_clipboard's own shape: no host before run(), and no host
+    // anywhere yet implements the positioner (the channel's platform
+    // stage) - the base default installs nothing and the seam stays
+    // unset, the honest nothing-positions answer.
+    if (impl_->host_) {
+        impl_->host_->install_ime_rect(gui);
     }
 }
 

@@ -34,6 +34,50 @@ int find_touch(const InputFrame& frame, PointerId id) {
 
 // --- InputFrame: one frame's snapshot (the shell fills, next_frame advances) ----
 
+// --- the IME composition channel's writers (G1.2) -----------------------------
+
+namespace {
+
+// The shared spelling of begin/update: adopt the preedit string (a null
+// reads as empty), clamp the advisory caret span into it, order the ends.
+void preedit_spell(Preedit& preedit, const char* utf8, int lo, int hi) {
+    preedit.active = true;
+    preedit.text = utf8 != nullptr ? utf8 : "";
+    const int len = static_cast<int>(preedit.text.size());
+    lo = std::clamp(lo, 0, len);
+    hi = std::clamp(hi, 0, len);
+    if (lo > hi) {
+        std::swap(lo, hi);
+    }
+    preedit.caret_lo = lo;
+    preedit.caret_hi = hi;
+}
+
+}  // namespace
+
+void InputFrame::composition_begin(const char* utf8, int caret_lo,
+                                   int caret_hi) {
+    preedit_spell(preedit, utf8, caret_lo, caret_hi);
+}
+
+void InputFrame::composition_update(const char* utf8, int caret_lo,
+                                    int caret_hi) {
+    // Begin's own semantics by design: an update with no begin stands as
+    // one (the header contract - platforms differ on the first report).
+    preedit_spell(preedit, utf8, caret_lo, caret_hi);
+}
+
+void InputFrame::composition_end(const char* committed_utf8) {
+    // The held half clears NOW - the underline is gone the very frame the
+    // IME let go, not one frame later - and the commit becomes the edge
+    // the gui consumes this frame. Empty text is the cancel spelling.
+    preedit.active = false;
+    preedit.text.clear();
+    preedit.caret_lo = 0;
+    preedit.caret_hi = 0;
+    preedit.commit = committed_utf8 != nullptr ? committed_utf8 : "";
+}
+
 void InputFrame::next_frame() {
     mouse_pressed.fill(false);
     mouse_released.fill(false);
@@ -42,6 +86,11 @@ void InputFrame::next_frame() {
     key_pressed.fill(false);
     key_repeated.fill(false);
     text_input.clear();
+    // The composition's EDGE half clears with the rest; the held half
+    // (text, caret span, active) deliberately survives - see Preedit's
+    // own doc block. An end() is what clears the held half, at the
+    // moment the IME actually let go.
+    preedit.commit.clear();
     // Touch edges clear and lifted contacts leave the table now - their
     // release frame is over. The survivors keep their arrival order (that
     // order is the stable pointer order across frames).

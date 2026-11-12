@@ -134,6 +134,32 @@ inline constexpr int kLeftAlt = 342;      // GLFW_KEY_LEFT_ALT
 inline constexpr int kRightAlt = 346;    // GLFW_KEY_RIGHT_ALT
 }  // namespace keys
 
+// The IME's in-flight composition, the frame's half of the preedit
+// channel (G1.2): what the platform's composition_* writers spell and
+// the gui's text field consumes. The held/edge doctrine of the rest of
+// this struct applies exactly:
+// - `text` + `caret_lo/hi` + `active` are HELD state, kept through
+//   next_frame(): a composition spans many frames of quiet (the user
+//   reads the candidate list between re-spellings), so the preedit
+//   must not flicker out on a frame with no composition event.
+// - `commit` is an EDGE, cleared by next_frame(): the one frame in
+//   which a CompositionEnded's committed text is to land. A cancel is
+//   an end with empty text - the edge stays empty, nothing lands.
+//
+// The commit deliberately rides its own field and NOT text_input's
+// codepoints: committed text is a UTF-8 SPAN (a whole emoji sequence,
+// a Hangul syllable) and the span must land through the gui's
+// whole-run insert path, never be re-narrowed per codepoint. A
+// platform that prefers to deliver the commit as glyphs writes
+// text_input directly instead - one spelling, never both.
+struct Preedit {
+    std::string text;    // the in-flight preedit, UTF-8
+    int caret_lo = 0;    // the composition caret's span, bytes into text
+    int caret_hi = 0;
+    bool active = false; // a composition is in flight
+    std::string commit;  // a CompositionEnded's text, this frame's edge
+};
+
 struct InputFrame {
     // GLFW mouse buttons run 0..7.
     static constexpr int kMaxMouseButtons = 8;
@@ -213,7 +239,8 @@ struct InputFrame {
     // snapshot answers 0 too.
     float dt_seconds = 0.0f;
 
-    // --- edges this frame (cleared by next_frame) ------------------------------
+    // --- edges this frame (cleared by next_frame; the composition's
+    // held half below is the one deliberate exception, its own doc) ----
     std::array<bool, kMaxMouseButtons> mouse_pressed{};
     std::array<bool, kMaxMouseButtons> mouse_released{};
     float scroll_dx = 0.0f;  // the frame's deltas, summed
@@ -235,6 +262,31 @@ struct InputFrame {
     std::array<bool, kMaxKeys> key_repeated{};  // a held key auto-repeated
     // UTF-32 codepoints typed this frame, in arrival order.
     std::vector<std::uint32_t> text_input;
+
+    // --- the IME composition channel (G1.2) ----------------------------------
+    // The platform layer's ONLY writers (besides tests): the
+    // composition_* triple, called from the seam that turned the OS's
+    // IME messages into the Composition* events. The struct's own doc
+    // block above spells the held/edge split.
+    Preedit preedit;
+    // Opens (or re-spells) the in-flight composition: `utf8` is the
+    // preedit string (a null pointer reads as empty - an IME may end
+    // a clause with no text), and the caret byte span is clamped into
+    // the string and ordered (lo <= hi) on the way in - a platform's
+    // span is advisory, the frame's copy is honest. An update that
+    // arrives with no begin stands as one: platforms differ on whether
+    // the first preedit reports as Began, and the frame's observable
+    // state is identical either way.
+    void composition_begin(const char* utf8, int caret_lo, int caret_hi);
+    // Re-spells the standing composition - begin's own semantics; a
+    // separate name only so the event-to-writer mapping reads 1:1.
+    void composition_update(const char* utf8, int caret_lo, int caret_hi);
+    // Closes the composition: the held preedit clears (the underline is
+    // gone the very frame the IME let go) and `committed_utf8` becomes
+    // the commit edge the gui consumes this frame. Empty means the
+    // user cancelled - nothing lands, the field just loses the
+    // composition look.
+    void composition_end(const char* committed_utf8);
 
     // --- touch contacts (the multi-touch table) --------------------------------
     // Live contacts in arrival order; a released-this-frame entry stays

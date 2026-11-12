@@ -1220,6 +1220,31 @@ struct TextInputResult : WidgetPaint {
     float sel_x1 = 0.0f;   // ...right edge (x0 == x1: none stands)
     float blink = 0.0f;    // the caret's phase [0, 1): under 0.5 solid
     bool edited = false;   // the buffer changed this frame
+
+    // --- the IME composition's mapped look (G1.2's channel) -------------------
+    // Set only while a composition is in flight AND this field can edit
+    // (focused, live, enabled) - the frame's preedit rides the line at
+    // the caret, and the field's own editing defers to the IME for the
+    // duration (the keyboard is the IME's while a composition stands).
+    // `preedit_text` borrows into the CONTEXT'S frame snapshot (the
+    // begin_frame copy), so it is valid through the frame's draw - the
+    // same lifetime every input-derived answer carries; null (with the
+    // rest defaulted) when no composition stands here. `preedit_at` is
+    // the buffer byte the run rides (the caret's own position), the
+    // span fields are bytes into the borrowed string, and the mapped
+    // x's follow the caret_x convention (content-edge clamped, except
+    // preedit_advance: the run's whole honest width, clamping is the
+    // draw's business). While set, `caret_x` maps to preedit_caret_x -
+    // the composition caret is the honest caret - and `blink` reads 0:
+    // composing is work, the caret stays solid.
+    const char* preedit_text = nullptr;
+    int preedit_len = 0;          // the run's UTF-8 bytes
+    int preedit_at = 0;           // the buffer byte the run rides
+    int preedit_caret_lo = 0;     // the composition caret's span, bytes
+    int preedit_caret_hi = 0;     // into preedit_text (lo is the caret)
+    float preedit_x = 0.0f;       // the run's pen x (the caret's own x)
+    float preedit_advance = 0.0f; // the run's whole advance, unclamped
+    float preedit_caret_x = 0.0f; // the composition caret's x
 };
 
 // The interaction half at a placed rect: the citizenship fold, then the
@@ -1227,7 +1252,14 @@ struct TextInputResult : WidgetPaint {
 // that selects, the caret keys, the deleters, the frame's codepoints
 // through the filter, Ctrl+A, Escape's selection drop and the
 // clipboard trio - all against the caller's buffer through the
-// EditBuffer verbs, the pair written back into `edit`. `theme` maps
+// EditBuffer verbs, the pair written back into `edit`. The IME
+// composition channel rides here too (G1.2): while the frame's preedit
+// is active the keyboard cluster defers to the IME (its arrows are
+// candidate navigation, its backspace re-edits the preedit), the
+// preedit maps into the result for the draw, and a frame's commit edge
+// lands whole through insert_filtered - the paste path's own
+// never-split-a-span rule, the field's filter applied codepoint by
+// codepoint. `theme` maps
 // the caret into pixels over CLUSTERS - the codepoints' glyph
 // advances summed, the draw loop's own walk - or
 // label_char_width fontless, once per codepoint. `filter` is the typing

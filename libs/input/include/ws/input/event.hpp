@@ -25,6 +25,12 @@ enum class EventType : std::uint8_t {
     TouchReleased,
     TextInput,
     FileDropped,
+    // IME composition (G1.2's channel): the preedit lifecycle. Appended
+    // after FileDropped - the enum is a wire format between the platform
+    // layer and app handlers, so new kinds only ever land at the end.
+    CompositionBegan,
+    CompositionUpdated,
+    CompositionEnded,
 };
 
 // Base of every event. Deliberately has no vtable: each event stores its
@@ -163,6 +169,56 @@ struct FileDroppedEvent : Event {
     explicit FileDroppedEvent(std::vector<std::string> paths)
         : Event(static_type()), paths(std::move(paths)) {}
     std::vector<std::string> paths;
+};
+
+// IME composition, the preedit lifecycle (G1.2's channel). A Japanese,
+// Korean or Chinese input method never types glyphs directly - it
+// builds text in a floating composition: the not-yet-committed span
+// (the "preedit") is re-spelled on every keystroke the IME absorbs,
+// and only the final result is committed as real text. GLFW's char
+// callback (the TextInput path) can only ever see committed glyphs, so
+// the platform seam delivers the in-flight state through these.
+//
+// All three carry the same payload shape: `text` is UTF-8 (Began and
+// Updated: the preedit as it now stands; Ended: the COMMITTED text -
+// empty when the user cancelled the composition), and `caret_lo/hi`
+// are the composition caret's byte span inside `text` (lo == hi on the
+// plain caret platforms; the clause-converters of Japanese IMEs spread
+// it). Like FileDropped these own heap - a composition is keystroke-
+// rate, not per-frame - so their constructors are not constexpr.
+//
+// Delivery contract: order-preserving, never coalesced (the TextInput
+// rule). A platform delivers the commit EITHER as the Ended event's
+// text OR as TextInput glyphs, never both - the frame halves below
+// and the gui's editing path trust exactly one spelling of the result.
+struct CompositionBeganEvent : Event {
+    static constexpr EventType static_type() { return EventType::CompositionBegan; }
+    explicit CompositionBeganEvent(std::string text, int caret_lo, int caret_hi)
+        : Event(static_type()), text(std::move(text)), caret_lo(caret_lo),
+          caret_hi(caret_hi) {}
+    std::string text;   // the preedit, UTF-8
+    int caret_lo = 0;   // the composition caret's span, bytes into text
+    int caret_hi = 0;
+};
+
+struct CompositionUpdatedEvent : Event {
+    static constexpr EventType static_type() { return EventType::CompositionUpdated; }
+    explicit CompositionUpdatedEvent(std::string text, int caret_lo, int caret_hi)
+        : Event(static_type()), text(std::move(text)), caret_lo(caret_lo),
+          caret_hi(caret_hi) {}
+    std::string text;   // the re-spelled preedit, UTF-8
+    int caret_lo = 0;   // the composition caret's span, bytes into text
+    int caret_hi = 0;
+};
+
+struct CompositionEndedEvent : Event {
+    static constexpr EventType static_type() { return EventType::CompositionEnded; }
+    explicit CompositionEndedEvent(std::string text, int caret_lo, int caret_hi)
+        : Event(static_type()), text(std::move(text)), caret_lo(caret_lo),
+          caret_hi(caret_hi) {}
+    std::string text;   // the COMMITTED text, UTF-8 (empty: cancelled)
+    int caret_lo = 0;   // the committed span, bytes into text
+    int caret_hi = 0;
 };
 
 // Routes one event to typed handlers instead of a switch on type():
