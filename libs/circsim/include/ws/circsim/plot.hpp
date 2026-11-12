@@ -167,4 +167,44 @@ enum class PlotYAxis : std::uint8_t { Left, Right };
 [[nodiscard]] std::vector<std::size_t> decimate_minmax_index(
     std::span<const double> ys, std::size_t budget);
 
+// --- the wrap family (stage 9) ------------------------------------------------
+//
+// A .step run lands as ONE table whose leading axes are the step
+// params and whose inner axis is the swept analysis's own - time for a
+// stepped .tran, the inner source for a nested .dc - REPEATING once
+// per step point. Drawing that column as one polyline chords every
+// reset (the last sample of pass p to the first of pass p+1): a plot
+// of lines-between-vertices, not a function. The fix is the family
+// view every simulator answers: split the axis into its monotone
+// passes and OVERLAY them on the shared window.
+//
+// One maximal strictly-monotone run of the axis. `begin`/`end` are
+// sample positions (end exclusive); `rising` is the run's direction -
+// a falling sweep (a .dc walking its source down) is as drawable as a
+// rising one, reversed.
+struct AxisRun {
+    std::size_t begin = 0;
+    std::size_t end = 0;
+    bool rising = true;
+};
+
+// The axis's monotone runs plus its finite envelope (the fit the
+// family overlays share). The runs are maximal and cover [0, xs.size())
+// exactly: a run stops where the direction fails - a reset (the value
+// drops or jumps back), a plateau (equal neighbours), a reversal, or a
+// NaN on either side - and the next run opens at that sample. A
+// strictly monotone axis answers ONE run covering it; a step family
+// answers one run per pass. `lo`/`hi` are the min/max over every
+// finite x (the union of the passes' extents, so a family whose passes
+// differ in span still fits); `finite` false means no finite x at all
+// and lo/hi are the sane-empty 0/1.
+struct AxisRuns {
+    std::vector<AxisRun> runs;
+    double lo = 0.0;
+    double hi = 1.0;
+    bool finite = false;
+};
+
+[[nodiscard]] AxisRuns split_axis_runs(std::span<const double> xs);
+
 }  // namespace ws::circsim

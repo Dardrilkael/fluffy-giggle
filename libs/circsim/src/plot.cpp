@@ -432,6 +432,65 @@ std::vector<std::size_t> decimate_minmax_index(
     return out;
 }
 
+AxisRuns split_axis_runs(std::span<const double> xs) {
+    AxisRuns out;
+    const std::size_t n = xs.size();
+    // The finite envelope rides the same walk (one pass over the
+    // axis, no second scan): the union of the passes' extents.
+    double lo = std::numeric_limits<double>::infinity();
+    double hi = -std::numeric_limits<double>::infinity();
+    for (double v : xs) {
+        if (std::isfinite(v)) {
+            lo = std::min(lo, v);
+            hi = std::max(hi, v);
+        }
+    }
+    if (lo <= hi) {
+        out.finite = true;
+        out.lo = lo;
+        out.hi = hi;
+    }
+    // The run walk: a run opens at `begin` unoriented (length 1),
+    // takes its direction from the first step that moves, and closes
+    // where that direction fails - a reset, a plateau, a reversal, a
+    // NaN on either side (both comparisons read false against one).
+    // The sample that breaks a run opens the next, so the runs cover
+    // [0, n) exactly; a trailing length-1 run is a legal answer.
+    std::size_t begin = 0;
+    bool rising = true;
+    bool oriented = false;
+    for (std::size_t i = 1; i <= n; ++i) {
+        const bool closing = i == n;
+        if (!closing) {
+            if (!oriented) {
+                if (xs[i] > xs[begin]) {
+                    rising = true;
+                    oriented = true;
+                    continue;
+                }
+                if (xs[i] < xs[begin]) {
+                    rising = false;
+                    oriented = true;
+                    continue;
+                }
+                // Equal, or a NaN on either side: a length-1 run.
+            } else if (rising ? xs[i] > xs[i - 1u]
+                              : xs[i] < xs[i - 1u]) {
+                continue;
+            }
+        }
+        AxisRun run;
+        run.begin = begin;
+        run.end = i;
+        run.rising = rising;
+        out.runs.push_back(run);
+        begin = i;
+        oriented = false;
+        rising = true;
+    }
+    return out;
+}
+
 // --- the two-axis split (stage 6) --------------------------------------------
 
 namespace {

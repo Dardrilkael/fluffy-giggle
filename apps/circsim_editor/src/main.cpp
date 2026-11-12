@@ -1315,6 +1315,7 @@ class CircsimApp final : public ws::ui::App {
             editor_.results.visible_for = editor::ResultsCache::kNoTable;
             editor_.results.visible.clear();
             editor_.results.x_sorted_for = editor::ResultsCache::kNoTable;
+            editor_.results.x_runs_for = editor::ResultsCache::kNoTable;
             editor_.results.hover = -1;
             // A fresh run's waveforms start on the auto fit: the old
             // plot's zoom/pan window and any in-flight gesture belong

@@ -422,6 +422,16 @@ struct ResultsCache {
     // NEW run is a different axis).
     bool x_sorted = false;
     std::size_t x_sorted_for = kNoTable;  // the table `x_sorted` belongs to
+    // Stage 9 (the .step family fix): the axis's MONOTONE RUNS plus
+    // its finite envelope, the same per-table constant `x_sorted` is
+    // (same key shape, reset beside it on a delivery). A sorted axis
+    // answers one run; a stepped run's repeating inner axis (time
+    // restarting every step point, a nested .dc's inner sweep walking
+    // back to its start) answers ONE RUN PER PASS - the plot overlays
+    // the passes on the shared window instead of chording every reset
+    // into the lines-between-vertices mess one polyline made.
+    ws::circsim::AxisRuns x_runs;
+    std::size_t x_runs_for = kNoTable;   // the table `x_runs` belongs to
 
     // --- the frame-budget caches (the big-circuit fix) -------------------------
     //
@@ -464,16 +474,27 @@ struct ResultsCache {
     std::uint64_t stats_run = 0;        // ... and the delivery of it
     std::vector<SeriesStats> stats;
 
-    // One signal's cached decimation: `idx` are sample indices (relative
-    // to `base`, the slice start the sorted path bounds to; 0 for the
-    // index path), `built` separates "computed, and legitimately
-    // empty - draw every point in the slice" from "not computed".
-    struct DecimKeep {
+    // One RUN's cached decimation (stage 9's shape): `i0`/`i1` are the
+    // run's visible slice in ABSOLUTE sample positions (the x window
+    // the keeps were decimated over), `idx` the kept positions in
+    // ascending order - EMPTY separates "computed, and legitimately
+    // empty - the slice fits the budget, draw every sample in
+    // [i0, i1)" from nothing (a run with no visible sample answers an
+    // empty idx AND an empty slice, which draws nothing).
+    struct RunKeep {
         std::vector<std::size_t> idx;
-        std::size_t base = 0;
+        std::size_t i0 = 0;
+        std::size_t i1 = 0;
+    };
+    // One signal's cached decimation: one keep per axis RUN - a
+    // sorted axis has exactly one, a step family one per pass (the
+    // overlay), the axisless table one pseudo-run over the index.
+    // `built` separates "computed" from "not computed".
+    struct DecimKeep {
+        std::vector<RunKeep> runs;
         bool built = false;
     };
-    // The shared key of the keep list: which table/run, which x window
+    // The shared key of the keep lists: which table/run, which x window
     // (the effective view - the slice the keeps were decimated over),
     // which pixel budget (the plot's inner width). An exact-window
     // compare is sound: the window only moves through discrete

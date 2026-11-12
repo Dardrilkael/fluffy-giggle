@@ -1062,6 +1062,7 @@ void deliver(Editor& ed, ws::circsim::RunOutcome outcome) {
     ed.results.visible_for = editor::ResultsCache::kNoTable;
     ed.results.visible.clear();
     ed.results.x_sorted_for = editor::ResultsCache::kNoTable;
+    ed.results.x_runs_for = editor::ResultsCache::kNoTable;
     ed.results.hover = -1;
     ed.results.view = editor::PlotView{};
     ed.results.view_for = editor::ResultsCache::kNoTable;

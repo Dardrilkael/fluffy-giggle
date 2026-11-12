@@ -198,12 +198,24 @@ CMakeLists only wire ws libraries together.
   the 40-bucket sparkline envelopes, the spine flags - are walked once
   per (run, table), the series decimations once per (x window, pixel
   budget) so an idle frame maps cached keep lists instead of re-scanning
-  every column, and the by-index/non-sorted tables (a nested .dc's
-  wrapping inner axis) ride ws::circsim::decimate_minmax_index - the
-  same min/max envelope the sorted sweeps always had, where they used
-  to push every sample every frame (48 signals x 20k rows: ~9x an idle
-  frame, opt-in perf smoke behind CIRCSIM_PLOT_PERF=1 in the panel
-  suite),
+  every column, and the axisless tables ride
+  ws::circsim::decimate_minmax_index - the same min/max envelope the
+  sorted sweeps always had, where the stage-7 code pushed every sample
+  every frame (48 signals x 20k rows: ~9x an idle frame, opt-in perf
+  smoke behind CIRCSIM_PLOT_PERF=1 in the panel suite; the wraps rode
+  it too until stage 9 gave them the family below),
+  and stage 9 redraws the WRAPPED axis as the family it is: a .step
+  run lands as one table whose inner axis repeats once per step
+  point (the scr_trigger_vfmm shape - 24 passes x 1103 rows), and one
+  polyline over it chords every reset into a lines-between-vertices
+  mess (the by-index fallback's ~12 vertices a pass did not help).
+  split_axis_runs splits the axis into its monotone passes (a falling
+  .dc pass included, drawn reversed), the fit takes the union
+  envelope, and the series loop overlays every pass on the shared
+  window - one stroke per pass per signal, broken at the resets,
+  each decimated to the pixel budget and cached per (x window,
+  budget) like the sorted path always was; a sorted axis is simply
+  the one-run family, so the two paths are one,
   the .csim document type
   (autosave/crash recovery/session ride the shell), and the
   simulate job over `run_schematic`. The shell toolbar rides the

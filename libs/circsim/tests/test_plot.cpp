@@ -15,8 +15,11 @@
 using ws::circsim::PlotRange;
 using ws::circsim::PlotYAxis;
 using ws::circsim::clamp_view;
+using ws::circsim::AxisRun;
+using ws::circsim::AxisRuns;
 using ws::circsim::decimate_minmax;
 using ws::circsim::decimate_minmax_index;
+using ws::circsim::split_axis_runs;
 using ws::circsim::expand_range;
 using ws::circsim::format_eng;
 using ws::circsim::nice_ticks;
@@ -525,4 +528,123 @@ TEST_CASE("decimate_index answers the NaN buckets like the x walk") {
         }
     }
     CHECK(kept_hi == ys.back());
+}
+
+// --- the axis runs (stage 9) ---------------------------------------------------
+//
+// split_axis_runs: the monotone passes of an axis - a sorted axis is
+// one run, a .step family's repeating inner axis one run per pass -
+// plus the finite union envelope the overlaid family fits. One case
+// per contract in plot.hpp's docs.
+
+TEST_CASE("axis runs answer one run for a monotone axis") {
+    const std::vector<double> xs{0.0, 0.5, 1.0, 1.5, 2.0};
+    const AxisRuns r = split_axis_runs(xs);
+    REQUIRE(r.runs.size() == 1u);
+    CHECK(r.runs[0].begin == 0u);
+    CHECK(r.runs[0].end == 5u);
+    CHECK(r.runs[0].rising);
+    CHECK(r.finite);
+    CHECK(r.lo == 0.0);
+    CHECK(r.hi == 2.0);
+    // A falling axis is one run too, flagged for the reversed draw.
+    const std::vector<double> falling{5.0, 4.0, 3.0, 2.0};
+    const AxisRuns f = split_axis_runs(falling);
+    REQUIRE(f.runs.size() == 1u);
+    CHECK_FALSE(f.runs[0].rising);
+    CHECK(f.runs[0].begin == 0u);
+    CHECK(f.runs[0].end == 4u);
+    CHECK(f.lo == 2.0);
+    CHECK(f.hi == 5.0);
+    // Degenerate sizes: no runs for nothing, one length-1 run for a
+    // single sample.
+    CHECK(split_axis_runs(std::vector<double>{}).runs.empty());
+    const std::vector<double> one_xs{7.0};
+    const AxisRuns one = split_axis_runs(one_xs);
+    REQUIRE(one.runs.size() == 1u);
+    CHECK(one.runs[0].begin == 0u);
+    CHECK(one.runs[0].end == 1u);
+    CHECK(one.lo == 7.0);
+    CHECK(one.hi == 7.0);
+}
+
+TEST_CASE("axis runs answer one run per step pass") {
+    // The .step shape: three passes of the same 0..1 sweep, the axis
+    // resetting between them - the SCR trigger table's own form.
+    std::vector<double> xs;
+    for (int pass = 0; pass < 3; ++pass) {
+        for (int i = 0; i < 50; ++i) {
+            xs.push_back(static_cast<double>(i) / 49.0);
+        }
+    }
+    const AxisRuns r = split_axis_runs(xs);
+    REQUIRE(r.runs.size() == 3u);
+    for (std::size_t p = 0; p < 3u; ++p) {
+        CHECK(r.runs[p].begin == p * 50u);
+        CHECK(r.runs[p].end == (p + 1u) * 50u);
+        CHECK(r.runs[p].rising);
+    }
+    // The union envelope spans a pass's extent (not front/back of the
+    // whole column - identical here, but the contract is the union).
+    CHECK(r.finite);
+    CHECK(r.lo == 0.0);
+    CHECK(r.hi == 1.0);
+}
+
+TEST_CASE("axis runs split a wrap at the reversal and the plateau") {
+    // The nested .dc wrap: rising inner sweep, then walking back down
+    // - two runs, the second falling. The equal neighbour at the peak
+    // breaks the rise (a plateau is not a direction).
+    std::vector<double> xs;
+    for (int i = 0; i < 10; ++i) {
+        xs.push_back(static_cast<double>(i));
+    }
+    xs.push_back(9.0);  // the plateau/turn: equal to the peak
+    for (int i = 8; i >= 0; --i) {
+        xs.push_back(static_cast<double>(i));
+    }
+    const AxisRuns r = split_axis_runs(xs);
+    REQUIRE(r.runs.size() == 2u);
+    CHECK(r.runs[0].begin == 0u);
+    CHECK(r.runs[0].end == 10u);
+    CHECK(r.runs[0].rising);
+    CHECK(r.runs[1].begin == 10u);
+    CHECK(r.runs[1].end == 20u);
+    CHECK_FALSE(r.runs[1].rising);
+    CHECK(r.lo == 0.0);
+    CHECK(r.hi == 9.0);
+}
+
+TEST_CASE("axis runs cover every sample through NaNs and singletons") {
+    // A NaN on either side of a comparison reads false both ways: it
+    // breaks the run it sits in and stands as its own length-1 run.
+    // The runs must cover [0, n) exactly - every row belongs to a
+    // pass, whatever the axis looks like.
+    const std::vector<double> xs{1.0, 2.0, 3.0,
+                                 std::nan(""),
+                                 3.0, 2.0,
+                                 5.0};
+    const AxisRuns r = split_axis_runs(xs);
+    REQUIRE_FALSE(r.runs.empty());
+    std::size_t covered = 0;
+    std::size_t prev_end = 0;
+    bool contiguous = true;
+    for (const AxisRun& run : r.runs) {
+        contiguous = contiguous && run.begin == prev_end && run.end > run.begin;
+        prev_end = run.end;
+        covered += run.end - run.begin;
+    }
+    CHECK(contiguous);
+    CHECK(covered == xs.size());
+    CHECK(prev_end == xs.size());
+    // The NaN sample never reaches the envelope.
+    CHECK(r.finite);
+    CHECK(r.lo == 1.0);
+    CHECK(r.hi == 5.0);
+    // An all-NaN axis: no finite envelope, the sane-empty answer.
+    const std::vector<double> nan_axis_xs{std::nan(""), std::nan("")};
+    const AxisRuns nan_axis = split_axis_runs(nan_axis_xs);
+    CHECK_FALSE(nan_axis.finite);
+    CHECK(nan_axis.lo == 0.0);
+    CHECK(nan_axis.hi == 1.0);
 }

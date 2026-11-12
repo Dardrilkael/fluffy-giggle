@@ -200,10 +200,16 @@ fetched privately, which would duplicate a first-party capability.
   in occurrence order plus the exact ends - spikes and envelope
   survive any budget; non-increasing axes answer EMPTY = draw raw,
   the nested-.dc rule), `decimate_minmax_index` (stage 8: the same
-  envelope bucketed on the sample INDEX - for the by-index axis and
-  that same nested-.dc wrap, where value-bucketing cannot run and the
-  panel used to draw every sample; a NaN that opens a bucket stays as
-  the break vertex, the x-walk's own reading).
+  envelope bucketed on the sample INDEX - for the by-index axis
+  (a table with no sweep axis of its own), where value-bucketing
+  cannot run and the panel used to draw every sample; a NaN that
+  opens a bucket stays as the break vertex, the x-walk's own
+  reading), `split_axis_runs` (stage 9: the axis's maximal
+  strictly-monotone runs plus its finite union envelope - a sorted
+  axis answers one run, a .step family's repeating inner axis one
+  run per pass, a plateau/reversal/NaN breaks; the runs cover
+  [0, n) exactly, and every run carries its direction so a falling
+  .dc pass draws reversed - the family overlay's half).
 - The manual view (stage 5): `clamp_view` (a window slides back
   inside home; wider-than-home, degenerate or non-finite answers
   home), `zoom_range` (anchor clamped into the view first, floored at

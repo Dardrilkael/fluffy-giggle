@@ -57,8 +57,19 @@
 // y-fit envelope, the sparkline envelope, the spine flags) once per
 // (run, table), and the series decimations once per (x window, pixel
 // budget). An idle frame maps cached keep lists through the screen
-// transform - O(signals x budget) - and the by-index/wrap tables join
+// transform - O(signals x budget) - and the axisless tables join
 // the envelope club through ws::circsim::decimate_minmax_index.
+//
+// Stage 9 is the family pass (the .step fix): a stepped run lands as
+// one table whose inner axis REPEATS once per step point (the
+// scr_trigger_vfmm shape - 24 passes x 1103 rows), and one polyline
+// over it chords every reset into a lines-between-vertices mess. The
+// axis now splits into its monotone passes (ws::circsim::
+// split_axis_runs - a falling .dc pass included, drawn reversed) and
+// every pass overlays on the shared window: one stroke per pass per
+// signal, broken at the resets, each decimated to the pixel budget
+// and cached like the sorted path always was. A sorted axis is the
+// one-run family - the two draw paths are one.
 
 #include "results_panel.hpp"
 
@@ -803,6 +814,14 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
         ed.results.x_sorted = !by_index && strictly_increasing(xs);
         ed.results.x_sorted_for = ed.results.table;
     }
+    // Stage 9: the axis's monotone runs, the same per-table constant
+    // `x_sorted` is (same key shape, reset beside it on a delivery).
+    // A sorted axis answers one run; a stepped run's repeating inner
+    // axis answers one per pass - the family the series loop overlays.
+    if (ed.results.x_runs_for != ed.results.table) {
+        ed.results.x_runs = ws::circsim::split_axis_runs(xs);
+        ed.results.x_runs_for = ed.results.table;
+    }
 
     // The home ranges: each y spine fits ITS OWN visible company
     // (stage 6 - the volts on the left, the amps on the right), x
@@ -817,8 +836,15 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     double x_lo = 0.0;
     double x_hi = static_cast<double>(n - 1u);
     if (!by_index) {
-        x_lo = xs.front();
-        x_hi = xs.back();
+        // The runs' union envelope (stage 9): for a sorted axis it is
+        // the old front/back (a monotone run's ends ARE its extremes);
+        // for a step family it spans every pass's extent, where
+        // front/back would clip any pass longer than the last one.
+        // An axis with no finite sample keeps the index-run fallback.
+        if (ed.results.x_runs.finite) {
+            x_lo = ed.results.x_runs.lo;
+            x_hi = ed.results.x_runs.hi;
+        }
     }
     for (std::size_t i = 0; i < t.signals.size(); ++i) {
         if (i >= ed.results.visible.size() || ed.results.visible[i] == 0u) {
@@ -1033,6 +1059,11 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     // stroke) - the old code allocated two fresh vectors per signal
     // per frame.
     std::vector<Point>& pts = cache.scratch_pts;
+    // The falling runs' reversed views (build-time scratch only): the
+    // decimator bucket-walks ASCENDING x, so a descending run is read
+    // back to front, its keeps mapped home and re-sorted.
+    std::vector<double> rev_x;
+    std::vector<double> rev_y;
     for (std::size_t i = 0; i < t.signals.size(); ++i) {
         if (i >= ed.results.visible.size() || ed.results.visible[i] == 0u) {
             continue;
@@ -1058,64 +1089,118 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                                     : std::numeric_limits<float>::
                                           quiet_NaN()});
         };
-        if (!by_index && x_sorted) {
-            // The decimation window: the visible x slice (one sample
-            // of slack each side), so a zoomed-in view spends the
-            // pixel budget on the samples it shows. The auto view's
-            // padded home spans all the data, so the slice is
-            // transparent there - one code path, no special case.
-            const std::size_t rows = std::min(n, ys.size());
-            const auto b0 = std::lower_bound(xs.begin(),
-                                             xs.begin() + rows, pf.vxr.lo);
-            const auto b1 = std::upper_bound(xs.begin(),
-                                             xs.begin() + rows, pf.vxr.hi);
+        // The decimation window: the visible x slice (one sample of
+        // slack each side), so a zoomed-in view spends the pixel
+        // budget on the samples it shows. The auto view's padded home
+        // spans all the data, so the slice is transparent there - one
+        // code path, no special case.
+        const auto slice = [&](std::span<const double> ax, std::size_t r0,
+                               std::size_t r1) {
+            const auto b0 = std::lower_bound(ax.begin() + r0,
+                                             ax.begin() + r1, pf.vxr.lo);
+            const auto b1 = std::upper_bound(ax.begin() + r0,
+                                             ax.begin() + r1, pf.vxr.hi);
             const std::size_t i0 =
-                b0 != xs.begin()
-                    ? static_cast<std::size_t>(b0 - xs.begin()) - 1u
-                    : 0u;
+                b0 != ax.begin() + r0
+                    ? static_cast<std::size_t>(b0 - ax.begin()) - 1u
+                    : r0;
             const std::size_t i1 =
-                b1 != xs.begin() + rows
-                    ? static_cast<std::size_t>(b1 - xs.begin()) + 1u
-                    : rows;
-            if (!dk.built) {
-                dk.base = i0;
-                dk.idx = ws::circsim::decimate_minmax(
-                    xs.subspan(i0, i1 - i0), ys.subspan(i0, i1 - i0),
-                    budget);
-                dk.built = true;
+                b1 != ax.begin() + r1
+                    ? static_cast<std::size_t>(b1 - ax.begin()) + 1u
+                    : r1;
+            return std::pair{i0, i1};
+        };
+        if (!dk.built) {
+            dk.built = true;
+            dk.runs.clear();
+            if (by_index) {
+                // The axisless table: one pseudo-run over the index,
+                // the index envelope (decimate_minmax_index) its keep.
+                ResultsCache::RunKeep rk;
+                rk.i0 = 0;
+                rk.i1 = std::min(n, ys.size());
+                rk.idx = ws::circsim::decimate_minmax_index(
+                    ys.subspan(0, rk.i1), budget);
+                dk.runs.push_back(std::move(rk));
+            } else {
+                // The axis runs (stage 9): a sorted axis answers ONE
+                // run and this is the sorted path as it always was; a
+                // stepped run's repeating inner axis answers one run
+                // per PASS, each decimated on its own - the family
+                // overlay. The keep list is cached beside the window
+                // and budget like the single-run answer always was,
+                // and an idle frame maps it untouched.
+                for (const ws::circsim::AxisRun& run :
+                     ed.results.x_runs.runs) {
+                    const std::size_t r0 = std::min(run.begin, ys.size());
+                    const std::size_t r1 = std::min(run.end, ys.size());
+                    ResultsCache::RunKeep rk;
+                    if (r1 > r0) {
+                        if (run.rising) {
+                            const auto [i0, i1] = slice(xs, r0, r1);
+                            rk.i0 = i0;
+                            rk.i1 = i1;
+                            if (i1 > i0) {
+                                rk.idx = ws::circsim::decimate_minmax(
+                                    xs.subspan(i0, i1 - i0),
+                                    ys.subspan(i0, i1 - i0), budget);
+                            }
+                        } else {
+                            // A falling run (a .dc walking its source
+                            // down): decimate the REVERSED span - the
+                            // ascending view the bucket walk needs -
+                            // then map the keeps home and sort.
+                            const std::size_t m = r1 - r0;
+                            rev_x.resize(m);
+                            rev_y.resize(m);
+                            for (std::size_t j = 0; j < m; ++j) {
+                                rev_x[j] = xs[r1 - 1u - j];
+                                rev_y[j] = ys[r1 - 1u - j];
+                            }
+                            const auto [j0, j1] = slice(rev_x, 0u, m);
+                            rk.i0 = r1 - j1;
+                            rk.i1 = r1 - j0;
+                            if (j1 > j0) {
+                                const std::vector<std::size_t> rev =
+                                    ws::circsim::decimate_minmax(
+                                        std::span<const double>(
+                                            rev_x.data() + j0,
+                                            j1 - j0),
+                                        std::span<const double>(
+                                            rev_y.data() + j0,
+                                            j1 - j0),
+                                        budget);
+                                rk.idx.reserve(rev.size());
+                                for (std::size_t j : rev) {
+                                    rk.idx.push_back(r1 - 1u - j);
+                                }
+                                std::sort(rk.idx.begin(), rk.idx.end());
+                            }
+                        }
+                    }
+                    dk.runs.push_back(std::move(rk));
+                }
             }
-            if (dk.idx.empty()) {
-                // Decimation does not apply (the slice fits the
-                // budget): the honest full-resolution polyline.
-                for (std::size_t k = i0; k < i1; ++k) {
+        }
+        // The draw: one polyline per run - the reset between two runs
+        // is a BREAK (the NaN vertex stroke_series already knows), so
+        // a family overlays its passes instead of chording them. An
+        // empty idx draws the run's slice raw (it fits the budget);
+        // an empty slice draws nothing.
+        bool first_run = true;
+        for (const ResultsCache::RunKeep& rk : dk.runs) {
+            if (!first_run) {
+                pts.push_back(Point{
+                    std::numeric_limits<float>::quiet_NaN(),
+                    std::numeric_limits<float>::quiet_NaN()});
+            }
+            first_run = false;
+            if (rk.idx.empty()) {
+                for (std::size_t k = rk.i0; k < rk.i1; ++k) {
                     push(k);
                 }
             } else {
-                for (std::size_t k : dk.idx) {
-                    push(dk.base + k);
-                }
-            }
-        } else {
-            // The by-index axis and the non-sorted wrap (a nested
-            // .dc's repeating inner axis): decimate_minmax cannot
-            // bucket these by value, so the stage-7 code pushed EVERY
-            // sample of EVERY series each frame - the one path a big
-            // table rode unbounded. The index-envelope
-            // (decimate_minmax_index) gives it the same pixel budget
-            // the sorted sweeps always had; a table that fits the
-            // budget keeps its exact per-sample polyline.
-            if (!dk.built) {
-                dk.base = 0;
-                dk.idx = ws::circsim::decimate_minmax_index(
-                    ys.subspan(0, std::min(n, ys.size())), budget);
-                dk.built = true;
-            }
-            if (dk.idx.empty()) {
-                for (std::size_t k = 0; k < n; ++k) {
-                    push(k);
-                }
-            } else {
-                for (std::size_t k : dk.idx) {
+                for (std::size_t k : rk.idx) {
                     push(k);
                 }
             }

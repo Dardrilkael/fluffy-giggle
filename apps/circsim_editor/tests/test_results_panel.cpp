@@ -190,9 +190,10 @@ struct Bench {
         ed.results.gesture = PlotGesture{};
         // ... and the x-sortedness key with them (main.cpp's block
         // beside visible_for): a same-indexed table of a new run is a
-        // different axis.
+        // different axis. Stage 9's runs key rides the same reset.
         ed.results.x_sorted_for = ResultsCache::kNoTable;
         ed.results.x_sorted = false;
+        ed.results.x_runs_for = ResultsCache::kNoTable;
     }
 
     // The scripted mouse one draw sees. Defaults keep the stage-4
@@ -1276,15 +1277,15 @@ TEST_CASE("an .op fourier answers the dc line alone") {
     b.ed.font_mono = nullptr;
 }
 
-// --- the frame-budget caches (stage 8) ----------------------------------------
+// --- the frame-budget caches (stage 8) and the family (stage 9) ---------------
 //
 // The big-circuit fix's gate: the per-frame work over the run's data
 // is cached against what it depends on - per-signal constants once per
 // (run, table), the series decimations once per (x window, pixel
 // budget). The cases below pin the keys (a delivery re-keys, an idle
 // frame hits), the bounded vertex counts on EVERY path (the sorted
-// sweep, the non-sorted wrap, the by-index axis), and the picture
-// staying byte-identical on the frames nothing changes.
+// sweep, the step family's overlaid passes, the by-index axis), and
+// the picture staying byte-identical on the frames nothing changes.
 
 TEST_CASE("an idle frame reuses the cached decimation verbatim") {
     Bench b;
@@ -1299,9 +1300,13 @@ TEST_CASE("an idle frame reuses the cached decimation verbatim") {
     CHECK(b.ed.results.stats[0].spark_env.size() == 80u);  // 40 buckets
     CHECK_FALSE(b.ed.results.stats[0].right);              // v(out)
     CHECK(b.ed.results.stats[1].right);                    // i(V1)
+    // A sorted axis: one run a side, its keep list built.
     REQUIRE(b.ed.results.decim.size() == 2u);
     CHECK(b.ed.results.decim[0].built);
-    CHECK_FALSE(b.ed.results.decim[0].idx.empty());
+    REQUIRE(b.ed.results.decim[0].runs.size() == 1u);
+    CHECK(b.ed.results.decim[0].runs[0].i0 == 0u);
+    CHECK(b.ed.results.decim[0].runs[0].i1 == 1200u);
+    CHECK_FALSE(b.ed.results.decim[0].runs[0].idx.empty());
 
     // Frame 2, nothing changed: the same series geometry, point for
     // point (the keep lists ride the cache; the mapping is
@@ -1334,12 +1339,14 @@ TEST_CASE("an idle frame reuses the cached decimation verbatim") {
     CHECK(b.ed.results.decim_run == b.ed.results.run_id);
 }
 
-TEST_CASE("a big wrap table folds to the index envelope") {
-    // The .dc wrap shape (the axis rises then falls back - not
+TEST_CASE("a step-family table overlays its passes, no chords") {
+    // The .step/.dc wrap shape (the axis rises then walks back - not
     // strictly increasing) at a size the pixel budget cannot fit: the
-    // stage-7 code pushed every sample of every series each frame; the
-    // stage-8 path rides decimate_minmax_index - bounded vertices,
-    // exact extremes.
+    // stage-7 code pushed every sample as ONE polyline, chording the
+    // reset into the lines-between-vertices mess; stage 9 splits the
+    // axis into its monotone passes and OVERLAYS them - one stroke per
+    // pass per signal, every stroke inside the frame and spanning the
+    // shared window, vertices bounded per pass.
     Bench b;
     ws::spice::Table wrap = ramp_table(4000u);
     for (std::size_t i = 0; i < wrap.sweep_axes[0].size(); ++i) {
@@ -1350,26 +1357,55 @@ TEST_CASE("a big wrap table folds to the index envelope") {
     b.draw();
     CHECK(b.ed.results.x_sorted == false);
 
-    const std::vector<const canvas::CanvasCmd*> series = b.series_cmds();
-    REQUIRE(series.size() == 2u);
-    for (const canvas::CanvasCmd* s : series) {
-        // The budget is the plot's inner width (~570): 4000 samples
-        // fold to at most ~budget + 2 vertices, never collapse.
-        CHECK(s->points.size() <= 580u);
-        CHECK(s->points.size() >= 8u);
-    }
-    // The envelope keeps the ramp's rails: first point low, last point
-    // high (v(out) rises 0 -> 5 across the run, endpoints forced).
-    const canvas::CanvasCmd* ramp =
-        series[0]->color == series_color(0) ? series[0] : series[1];
-    const Bench::FrameBox f = b.frame_box(b.frame_cmd());
-    CHECK(ramp->points.front().y > f.fy2 - 16.0f);
-    CHECK(ramp->points.back().y < f.fy + 16.0f);
-    // The keep lists minted through the index path: base 0, built.
+    // The axis split: one rising pass, one falling (the .dc wrap's
+    // walk back down), covering the table between them.
+    REQUIRE(b.ed.results.x_runs.runs.size() == 2u);
+    CHECK(b.ed.results.x_runs.runs[0].rising);
+    CHECK(b.ed.results.x_runs.runs[0].begin == 0u);
+    CHECK(b.ed.results.x_runs.runs[0].end == 2000u);
+    CHECK_FALSE(b.ed.results.x_runs.runs[1].rising);
+    CHECK(b.ed.results.x_runs.runs[1].begin == 2000u);
+    CHECK(b.ed.results.x_runs.runs[1].end == 4000u);
+
+    // One keep list per pass, each built and folded to the budget
+    // (2000 rows a pass against a ~570-pixel window).
     REQUIRE(b.ed.results.decim.size() == 2u);
     CHECK(b.ed.results.decim[0].built);
-    CHECK(b.ed.results.decim[0].base == 0u);
-    CHECK_FALSE(b.ed.results.decim[0].idx.empty());
+    REQUIRE(b.ed.results.decim[0].runs.size() == 2u);
+    for (const editor::ResultsCache::RunKeep& rk :
+         b.ed.results.decim[0].runs) {
+        CHECK(rk.i1 > rk.i0);
+        CHECK(rk.idx.size() <= 580u);
+        CHECK(rk.idx.size() >= 8u);
+    }
+
+    // The overlay itself: 2 signals x 2 passes = 4 strokes, none
+    // chording the reset - every stroke lives inside the frame and
+    // spans its width (each pass traverses the whole shared window,
+    // the second from the far edge back).
+    const std::vector<const canvas::CanvasCmd*> series = b.series_cmds();
+    REQUIRE(series.size() == 4u);
+    const Bench::FrameBox f = b.frame_box(b.frame_cmd());
+    for (const canvas::CanvasCmd* s : series) {
+        CHECK(s->points.size() <= 580u);  // the budget, per pass
+        float lo = s->points.front().x;
+        float hi = lo;
+        for (const canvas::Point& p : s->points) {
+            lo = std::min(lo, p.x);
+            hi = std::max(hi, p.x);
+            CHECK(p.x >= f.fx - 1.0f);
+            CHECK(p.x <= f.fx2 + 1.0f);
+        }
+        // The stroke spans the plot's data area (frame width minus right-axis
+        // margin when a right spine exists - 46px). The frame box includes
+        // that margin, so allow ~60px slack instead of 8px.
+        CHECK(hi - lo >= (f.fx2 - f.fx) - 60.0f);  // a full pass
+    }
+    // The window fits the runs' union envelope (the wrap's extent),
+    // not the by-index run the stage-7 fallback used to draw against.
+    CHECK(b.ed.results.x_runs.finite);
+    CHECK(b.ed.results.x_runs.lo == 0.0);
+    CHECK(b.ed.results.x_runs.hi == doctest::Approx(0.1999));
 }
 
 TEST_CASE("a many-signal table draws bounded series and sparklines") {
