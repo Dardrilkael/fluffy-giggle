@@ -44,6 +44,9 @@ of threads at once - no shared mutable state, no lazy caches, no
 - `analysis_card(spec)`, `parse_analysis_spec(text)`
 - `run_schematic(...)` - each call owns its deck, its spice run and its
   diagnostics end to end
+- `render_schematic_png(s, symbols, opts)` - one build_nets pass for the
+  silent joins plus its own canvas; every table it touches (the font's
+  glyphs, the CRC32 table) is a compile-time constant
 - `locate_diag` / `focus_bounds`
 - `save_csim(s)`
 

@@ -6,6 +6,8 @@
 //                        [--format csv|json] [-I <dir>]... [-S <lib.csym>]...
 //   circsim_cli erc <file.csim> [-S <lib.csym>]...
 //   circsim_cli netlist <file.csim> [-o out|-] [-S <lib.csym>]...
+//   circsim_cli png <file.csim> -o <out.png|-> [-S <lib.csym>]...
+//                        [--ppu 4..96]
 //   circsim_cli symbols [-S <lib.csym>]... [--json] [--svg <dir>]
 //   circsim_cli models [--json]
 //
@@ -20,13 +22,17 @@
 // .model / .subckt cards the property grid's picker offers and export
 // auto-emits when a part names one; --json dumps the full table
 // (name, kind, text, desc) in the same insertion-order JSON shape the
-// .csim format rides.
+// .csim format rides. `png` renders the whole schematic through the
+// raster seam (png.hpp: symbols via the render seam, wires, junction
+// dots, annotations and net labels in the embedded font) to PNG bytes
+// - deterministic, so builds can diff their sheets.
 //
 // Exit codes: 0 success; 1 simulation or ERC error; 2 usage or file I/O
 // (the workspace convention). Warnings print to stderr and never fail a
 // run.
 
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -38,8 +44,14 @@
 #include <ws/circsim/format.hpp>
 #include <ws/circsim/library.hpp>
 #include <ws/circsim/models.hpp>
+#include <ws/circsim/png.hpp>
 #include <ws/spice/error.hpp>
 #include <ws/spice/results.hpp>
+
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 #include "svg_dump.hpp"
 
@@ -62,6 +74,8 @@ int usage() {
                  "       circsim_cli erc <file.csim> [-S <lib.csym>]...\n"
                  "       circsim_cli netlist <file.csim> [-o out|-]"
                  " [-S <lib.csym>]...\n"
+                 "       circsim_cli png <file.csim> -o <out.png|->"
+                 " [-S <lib.csym>]... [--ppu 4..96]\n"
                  "       circsim_cli symbols [-S <lib.csym>]... [--json]"
                  " [--svg <dir>]\n"
                  "       circsim_cli models [--json]\n");
@@ -436,6 +450,68 @@ int cmd_symbols(const std::vector<std::string>& args) {
     return 0;
 }
 
+int cmd_png(const std::vector<std::string>& args) {
+    if (args.empty()) {
+        return usage();
+    }
+    std::string out_path;
+    std::vector<std::string> symbol_libs;
+    int ppu = 24;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "-o") {
+            if (i + 1 >= args.size()) {
+                std::fprintf(stderr, "error: -o needs a file name (or '-')\n");
+                return usage();
+            }
+            out_path = args[++i];
+        } else if (args[i] == "--ppu") {
+            if (i + 1 >= args.size()) {
+                std::fprintf(stderr, "error: --ppu needs a value (4..96)\n");
+                return usage();
+            }
+            const char* s = args[++i].c_str();
+            char* end = nullptr;
+            const long v = std::strtol(s, &end, 10);
+            if (end == s || *end != '\0' || v < 4 || v > 96) {
+                std::fprintf(stderr,
+                             "error: --ppu takes an integer in 4..96\n");
+                return usage();
+            }
+            ppu = static_cast<int>(v);
+        } else if (args[i] == "-S" || args[i] == "--symbols") {
+            if (!take_symbols_value(args, i, symbol_libs)) {
+                return usage();
+            }
+        } else {
+            std::fprintf(stderr, "error: unknown option '%s'\n",
+                         args[i].c_str());
+            return usage();
+        }
+    }
+    if (out_path.empty()) {
+        std::fprintf(stderr, "error: png needs -o <out.png|->\n");
+        return usage();
+    }
+#ifdef _WIN32
+    if (out_path == "-") {
+        // The PNG bytes must not pass through the text-mode filter.
+        _setmode(_fileno(stdout), _O_BINARY);
+    }
+#endif
+    ws::circsim::Schematic s;
+    if (const int rc = load(fs::path(args[0]), s); rc != 0) {
+        return rc;
+    }
+    ws::circsim::SymbolLibrary lib;
+    if (const int rc = load_symbols(symbol_libs, lib); rc != 0) {
+        return rc;
+    }
+    return write_out(out_path,
+                     ws::circsim::render_schematic_png(
+                         s, symbol_libs.empty() ? nullptr : &lib,
+                         ws::circsim::PngOptions{ppu}));
+}
+
 // The built-in model library: one row per card, the deck text under
 // the name. --json dumps the table the same way `symbols --json`
 // does - the full cards, multi-line text and all, in insertion order.
@@ -496,6 +572,9 @@ int main(int argc, char** argv) {
     if (args[0] == "netlist") {
         return cmd_netlist(
             std::vector<std::string>(args.begin() + 1, args.end()));
+    }
+    if (args[0] == "png") {
+        return cmd_png(std::vector<std::string>(args.begin() + 1, args.end()));
     }
     if (args[0] == "symbols") {
         return cmd_symbols(

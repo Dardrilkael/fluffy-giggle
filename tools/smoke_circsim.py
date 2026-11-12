@@ -589,6 +589,114 @@ def main():
         r = run(args.cli, "run", tline, "-S")
         check(r.returncode == 2, "-S without a file exits 2")
 
+        # --- png: the raster export (png.hpp) ----------------------------
+        # Python's zlib is the only decoder near the build: inflating
+        # IDAT verifies the writer's fixed-Huffman deflate bit for bit,
+        # and the defiltered scanlines carry the palette counts.
+        # Determinism makes the sheets diffable across builds.
+        import struct
+        import zlib
+
+        def parse_png(data):
+            assert data[:8] == b"\x89PNG\r\n\x1a\n", "png signature"
+            out = []
+            i = 8
+            while i + 12 <= len(data):
+                (n,) = struct.unpack(">I", data[i:i + 4])
+                ctype = data[i + 4:i + 8]
+                body = data[i + 8:i + 8 + n]
+                (crc,) = struct.unpack(">I", data[i + 8 + n:i + 12 + n])
+                assert crc == (zlib.crc32(ctype + body) & 0xFFFFFFFF), \
+                    f"{ctype} crc mismatch"
+                out.append((ctype, body))
+                i += 12 + n
+                if ctype == b"IEND":
+                    break
+            assert i == len(data), "trailing bytes after IEND"
+            return out
+
+        def png_pixels(chunks):
+            w, h = struct.unpack(">II", chunks[0][1][:8])
+            assert chunks[0][1][8:13] == b"\x08\x02\x00\x00\x00", "8-bit RGB"
+            raw = zlib.decompress(b"".join(b for t, b in chunks
+                                           if t == b"IDAT"))
+            assert len(raw) == h * (1 + 3 * w), "scanline size"
+            rows = []
+            for y in range(h):
+                base = y * (1 + 3 * w)
+                assert raw[base] == 0, "filter byte is 0"
+                row = raw[base + 1:base + 1 + 3 * w]
+                rows.append([tuple(row[x * 3:x * 3 + 3]) for x in range(w)])
+            return w, h, rows
+
+        def runb(cli, *args):  # binary stdout: no text decoding
+            return subprocess.run([str(cli), *[str(a) for a in args]],
+                                  capture_output=True)
+
+        ink = (0x1F, 0x24, 0x30)      # symbols, wires, dots
+        label_c = (0xB0, 0x56, 0x00)  # net labels
+        annot_c = (0x7A, 0x26, 0x00)  # ref/value annotations
+
+        sheet = Path(tmp) / "divider.png"
+        r = run(args.cli, "png", divider, "-o", sheet)
+        check(r.returncode == 0,
+              f"divider png exit 0 (stderr: {r.stderr.strip()!r})")
+        w, h, rows = png_pixels(parse_png(sheet.read_bytes()))
+        check(200 < w < 2000 and 100 < h < 2000, f"divider png {w}x{h}")
+        check(rows[0][0] == (255, 255, 255) and rows[-1][-1] == (255, 255, 255),
+              "divider png corners are white")
+        n_ink = sum(row.count(ink) for row in rows)
+        n_lab = sum(row.count(label_c) for row in rows)
+        n_ann = sum(row.count(annot_c) for row in rows)
+        check(n_ink > 300, f"divider png ink pixels {n_ink}")
+        check(n_lab > 20, f"divider png label pixels {n_lab}")
+        check(n_ann > 20, f"divider png annotation pixels {n_ann}")
+
+        again = Path(tmp) / "divider2.png"
+        run(args.cli, "png", divider, "-o", again)
+        check(again.read_bytes() == sheet.read_bytes(),
+              "divider png is byte-deterministic")
+
+        small = Path(tmp) / "divider8.png"
+        run(args.cli, "png", divider, "-o", small, "--ppu", "8")
+        w8, h8, _ = png_pixels(parse_png(small.read_bytes()))
+        check(w8 < w and h8 < h, f"ppu 8 shrinks the sheet ({w8}x{h8})")
+
+        # The big one: the SCR trigger sheet inflates, and every
+        # quadrant of the canvas carries ink.
+        scr = EXAMPLES / "scr_trigger_vfmm.csim"
+        big = Path(tmp) / "scr.png"
+        r = run(args.cli, "png", scr, "-o", big)
+        check(r.returncode == 0,
+              f"scr png exit 0 (stderr: {r.stderr.strip()!r})")
+        sw, sh, srows = png_pixels(parse_png(big.read_bytes()))
+        s_ink = sum(row.count(ink) for row in srows)
+        check(s_ink > 5000, f"scr png ink pixels {s_ink}")
+        for name, (x0, y0) in {"TL": (0, 0), "TR": (sw // 2, 0),
+                               "BL": (0, sh // 2),
+                               "BR": (sw // 2, sh // 2)}.items():
+            n = sum(1 for y in range(y0, y0 + sh // 2, 3)
+                    for x in range(x0, x0 + sw // 2, 3)
+                    if srows[y][x] == ink)
+            check(n > 50, f"scr png {name} quadrant has ink ({n})")
+
+        # A .csym-layered sheet, binary stdout, and the guardrails.
+        r = run(args.cli, "png", tline, "-S", tline_lib, "-o",
+                Path(tmp) / "tline.png")
+        check(r.returncode == 0, "tline png through the library exit 0")
+        r = runb(args.cli, "png", divider, "-o", "-")
+        check(r.returncode == 0 and r.stdout[:8] == b"\x89PNG\r\n\x1a\n",
+              "png -o - writes the signature to stdout")
+        for label, argv in (
+                ("png without -o", ["png", divider]),
+                ("ppu below 4", ["png", divider, "-o",
+                                 str(Path(tmp) / "x.png"), "--ppu", "3"]),
+                ("ppu above 96", ["png", divider, "-o",
+                                  str(Path(tmp) / "x.png"), "--ppu", "100"]),
+                ("valid ppu still needs -o", ["png", divider, "--ppu", "24"])):
+            r = run(args.cli, *argv)
+            check(r.returncode == 2, f"usage error exits 2: {label}")
+
     print("circsim smoke: all green")
 
 
