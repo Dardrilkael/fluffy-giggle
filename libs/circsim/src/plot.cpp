@@ -6,8 +6,15 @@
 
 #include "ws/circsim/plot.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <span>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "ws/circsim/text.hpp"
 
@@ -40,6 +47,66 @@ namespace {
     return kTable[static_cast<std::size_t>(slot)];
 }
 
+// The min/max bucket walk both decimators share: `bucket_of(i)` maps a
+// sample index to its bucket; each bucket keeps its y-min and y-max
+// SAMPLE in occurrence order (so the polyline through the kept points
+// keeps the segment's true slope), and the first and last samples are
+// forced in - a waveform's edge timing rides them. A bucket that OPENS
+// on a NaN keeps it (the finite samples behind it compare false against
+// it), the same reading for both callers.
+template <class BucketOf>
+[[nodiscard]] std::vector<std::size_t> minmax_walk(
+    std::span<const double> ys, std::size_t buckets, BucketOf bucket_of) {
+    const std::size_t n = ys.size();
+    std::vector<std::size_t> out;
+    out.reserve(buckets * 2u + 2u);
+    double min_v = ys[0];
+    double max_v = ys[0];
+    std::size_t min_i = 0;
+    std::size_t max_i = 0;
+    std::size_t open = 0;  // the bucket the tracked extrema belong to
+    const auto flush = [&] {
+        if (min_i == max_i) {
+            // A bucket the sweep only grazed: one sample, one entry.
+            out.push_back(min_i);
+            return;
+        }
+        if (min_i < max_i) {
+            out.push_back(min_i);
+            out.push_back(max_i);
+        } else {
+            out.push_back(max_i);
+            out.push_back(min_i);
+        }
+    };
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::size_t b = bucket_of(i);
+        if (b != open) {
+            flush();
+            min_v = max_v = ys[i];
+            min_i = max_i = i;
+            open = b;
+            continue;
+        }
+        if (ys[i] < min_v) {
+            min_v = ys[i];
+            min_i = i;
+        }
+        if (ys[i] > max_v) {
+            max_v = ys[i];
+            max_i = i;
+        }
+    }
+    flush();
+    if (out.front() != 0u) {
+        out.insert(out.begin(), 0u);
+    }
+    if (out.back() != n - 1u) {
+        out.push_back(n - 1u);
+    }
+    return out;
+}
+
 }  // namespace
 
 std::vector<double> nice_ticks(double lo, double hi, unsigned target) {
@@ -67,7 +134,13 @@ std::vector<double> nice_ticks(double lo, double hi, unsigned target) {
     }
 
     const double raw = span / static_cast<double>(target);
+    if (!(raw > 0.0) || !std::isfinite(raw)) {
+        return {};  // span underflowed against target: no ladder exists
+    }
     const double mag = std::pow(10.0, std::floor(std::log10(raw)));
+    if (!(mag > 0.0) || !std::isfinite(mag)) {
+        return {};  // denormal raw: 10^floor(log10) underflowed to 0
+    }
     const double norm = raw / mag;
     double step = 10.0;
     if (norm < 1.5) {
@@ -78,6 +151,9 @@ std::vector<double> nice_ticks(double lo, double hi, unsigned target) {
         step = 5.0;
     }
     step *= mag;
+    if (!(step > 0.0) || !std::isfinite(step)) {
+        return {};
+    }
 
     // First tick at or above lo (ceil on the grid), then every step
     // until past hi. The epsilon guard keeps a tick that IS hi from
@@ -89,6 +165,14 @@ std::vector<double> nice_ticks(double lo, double hi, unsigned target) {
     std::vector<double> out;
     if (k1 < k0) {
         return out;
+    }
+    // k is walked by ++k: past 2^53 a double no longer resolves +1, so
+    // the loop below would never reach k1 (a window narrower than the
+    // ulp of its own offset, e.g. a deep zoom at a large x). The
+    // ticks are unresolvable there - the honest answer is none.
+    constexpr double kExact = 9007199254740992.0;  // 2^53
+    if (!(std::fabs(k0) < kExact) || !(std::fabs(k1) < kExact)) {
+        return {};
     }
     out.reserve(static_cast<std::size_t>(k1 - k0) + 1u);
     for (double k = k0; k <= k1; ++k) {
@@ -146,7 +230,20 @@ std::string format_eng(double v, int digits) {
     }
     for (int pass = 0; pass < 2; ++pass) {
         const double scaled = av / pow10(e);
-        const std::string mant = fmt_num(scaled, digits);
+        std::string mant = fmt_num(scaled, digits);
+        if (mant.find_first_of("eE") != std::string::npos) {
+            // %g slid into exponent form ("2e+01" for 25 at 1 digit,
+            // "1e+03" for 999.9 at 3): the mantissa would print as
+            // "2e+01m", or fail the round-trip below and bump a
+            // prefix it should not. Round to `digits` significant
+            // figures here and spell the result out in plain digits.
+            const double p = std::pow(
+                10.0, std::floor(std::log10(scaled)) -
+                          static_cast<double>(digits) + 1.0);
+            const double rounded = std::round(scaled / p) * p;
+            mant = rounded < 1000.0 ? fmt_num(rounded, 3)
+                                    : std::string("1000");
+        }
         // The round-trip check (the old std::atof, but honest about
         // what it consumed and deaf to LC_NUMERIC). A parse failure
         // cannot happen for our own output; if it ever did, treating
@@ -187,7 +284,7 @@ PlotRange expand_range(double lo, double hi, double frac) {
         std::isinf(hi)) {
         return {0.0, 1.0};
     }
-    if (frac < 0.0 || std::isnan(frac)) {
+    if (frac < 0.0 || !std::isfinite(frac)) {
         frac = 0.0;
     }
     if (!(lo < hi)) {
@@ -197,6 +294,9 @@ PlotRange expand_range(double lo, double hi, double frac) {
         return {lo - d, lo + d};
     }
     const double pad = (hi - lo) * frac;
+    if (!std::isfinite(pad)) {
+        return {lo, hi};  // span overflowed: padding cannot be honest
+    }
     return {lo - pad, hi + pad};
 }
 
@@ -287,76 +387,23 @@ std::vector<std::size_t> decimate_minmax(std::span<const double> xs,
     // Buckets over the x span; each contributes its y-min and y-max
     // SAMPLE in occurrence order, so every bucket's pixels carry the
     // envelope and the global extremes survive by construction (the
-    // global max IS its bucket's max). The endpoints ride their
-    // buckets but are forced in so the sweep's exact ends never drop.
+    // global max IS its bucket's max). The endpoints are forced in so
+    // the sweep's exact ends never drop (minmax_walk).
     const std::size_t buckets = budget / 2u;
     const double span = xs.back() - xs.front();
-    const auto bucket_of = [&](double x) -> std::size_t {
-        const double t = (x - xs.front()) / span;
-        std::size_t b = static_cast<std::size_t>(t *
-                                                 static_cast<double>(buckets));
+    if (!(span > 0.0) || !std::isfinite(span)) {
+        return {};  // an overflowed span has no bucket arithmetic
+    }
+    const auto bucket_of = [&](std::size_t i) -> std::size_t {
+        const double t = (xs[i] - xs.front()) / span;
+        std::size_t b = static_cast<std::size_t>(
+            t * static_cast<double>(buckets));
         if (b >= buckets) {
             b = buckets - 1u;
         }
         return b;
     };
-
-    std::vector<std::size_t> out;
-    out.reserve(buckets * 2u + 2u);
-    double min_v = ys[0];
-    double max_v = ys[0];
-    std::size_t min_i = 0;
-    std::size_t max_i = 0;
-    std::size_t open = 0;  // the bucket the tracked extrema belong to
-    const auto flush = [&] {
-        if (min_i == max_i) {
-            // A bucket the sweep only grazed: one sample, one entry.
-            out.push_back(min_i);
-            return;
-        }
-        // Occurrence order: the earlier index first, so the polyline
-        // through the kept points keeps the segment's true slope.
-        if (min_i < max_i) {
-            out.push_back(min_i);
-            out.push_back(max_i);
-        } else {
-            out.push_back(max_i);
-            out.push_back(min_i);
-        }
-    };
-    for (std::size_t i = 0; i < xs.size(); ++i) {
-        const std::size_t b = bucket_of(xs[i]);
-        if (b != open) {
-            flush();
-            min_v = max_v = ys[i];
-            min_i = max_i = i;
-            open = b;
-            continue;
-        }
-        if (ys[i] < min_v) {
-            min_v = ys[i];
-            min_i = i;
-        }
-        if (ys[i] > max_v) {
-            max_v = ys[i];
-            max_i = i;
-        }
-    }
-    flush();
-
-    // The kept set is bucket-ordered by construction; a boundary
-    // sample can appear twice (it opened the next bucket while closing
-    // the last) - harmless duplicated vertices, and cheaper than a
-    // dedup pass that would need its own order proof. But the FIRST
-    // and LAST samples are load-bearing for a waveform (edge timing):
-    // force them exactly.
-    if (out.front() != 0u) {
-        out.insert(out.begin(), 0u);
-    }
-    if (out.back() != xs.size() - 1u) {
-        out.push_back(xs.size() - 1u);
-    }
-    return out;
+    return minmax_walk(ys, buckets, bucket_of);
 }
 
 std::vector<std::size_t> decimate_minmax_index(
@@ -371,72 +418,24 @@ std::vector<std::size_t> decimate_minmax_index(
     // A bucket that OPENS on a NaN keeps it (the finite samples behind
     // a NaN compare false against one, so the flush pushes the break
     // vertex) - the same reading decimate_minmax gives a NaN bucket.
-    const std::size_t n = ys.size();
-    const std::size_t buckets = budget / 2u;
-    const auto bucket_of = [&](std::size_t i) {
-        std::size_t b = i * buckets / n;
+    const std::uint64_t n = ys.size();
+    const std::uint64_t buckets = budget / 2u;
+    // 64-bit product: i * buckets overflows a 32-bit size_t at a few
+    // million samples (the Android build).
+    const auto bucket_of = [&](std::size_t i) -> std::size_t {
+        std::uint64_t b = static_cast<std::uint64_t>(i) * buckets / n;
         if (b >= buckets) {
             b = buckets - 1u;
         }
-        return b;
+        return static_cast<std::size_t>(b);
     };
-
-    std::vector<std::size_t> out;
-    out.reserve(buckets * 2u + 2u);
-    double min_v = ys[0];
-    double max_v = ys[0];
-    std::size_t min_i = 0;
-    std::size_t max_i = 0;
-    std::size_t open = 0;
-    const auto flush = [&] {
-        if (min_i == max_i) {
-            out.push_back(min_i);
-            return;
-        }
-        if (min_i < max_i) {
-            out.push_back(min_i);
-            out.push_back(max_i);
-        } else {
-            out.push_back(max_i);
-            out.push_back(min_i);
-        }
-    };
-    for (std::size_t i = 0; i < n; ++i) {
-        const std::size_t b = bucket_of(i);
-        if (b != open) {
-            flush();
-            min_v = max_v = ys[i];
-            min_i = max_i = i;
-            open = b;
-            continue;
-        }
-        if (ys[i] < min_v) {
-            min_v = ys[i];
-            min_i = i;
-        }
-        if (ys[i] > max_v) {
-            max_v = ys[i];
-            max_i = i;
-        }
-    }
-    flush();
-
-    // The endpoints are load-bearing (a waveform's edge timing): force
-    // them exactly, as the x-bucket walk does.
-    if (out.front() != 0u) {
-        out.insert(out.begin(), 0u);
-    }
-    if (out.back() != n - 1u) {
-        out.push_back(n - 1u);
-    }
-    return out;
+    return minmax_walk(ys, static_cast<std::size_t>(buckets), bucket_of);
 }
 
 AxisRuns split_axis_runs(std::span<const double> xs) {
     AxisRuns out;
     const std::size_t n = xs.size();
-    // The finite envelope rides the same walk (one pass over the
-    // axis, no second scan): the union of the passes' extents.
+    // The finite envelope: one pass over the axis for its extent.
     double lo = std::numeric_limits<double>::infinity();
     double hi = -std::numeric_limits<double>::infinity();
     for (double v : xs) {
@@ -509,10 +508,8 @@ PlotYAxis signal_y_axis(std::string_view name) {
     if (name.size() >= 4 && name.back() == ')') {
         const char c0 = lower_ascii(name[0]);
         const char c1 = lower_ascii(name[1]);
-        if (c0 == 'r' && c1 == 'e' && name[2] == '(') {
-            name.remove_prefix(3);
-            name.remove_suffix(1);
-        } else if (c0 == 'i' && c1 == 'm' && name[2] == '(') {
+        if (name[2] == '(' && ((c0 == 'r' && c1 == 'e') ||
+                               (c0 == 'i' && c1 == 'm'))) {
             name.remove_prefix(3);
             name.remove_suffix(1);
         }
