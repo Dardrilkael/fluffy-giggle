@@ -15,6 +15,15 @@ no platform header ever crosses into include/.
 
 ## Purpose, per header
 
+- `saf.hpp` - the Storage Access Framework bridge's PURE half (lifted
+  from apps/circsim_editor, stage 11 of the lib extraction): the
+  sandbox-name policy (sanitize, cap, "-<hash8>" splice, the caller's
+  default extension), the persisted path->URI map (SafMap, "path\turi"
+  lines) and WriteThroughFs - the settings FileSystem wrapper that
+  delegates to the base seam and pushes each mapped write on to its
+  content URI (a refused push degrades to "saved locally", never a
+  lost save). No Android type anywhere; the app's JNI half (the
+  pickers, the ContentResolver moves) stays beside its activity shim.
 - `errors.hpp` - the lib's error codes (the settings shape: append-only
   int32 enum, describe(), fail() -> unexpected<Error>, category
   "platform"). canceled/parse_failed/corrupt_file/invalid_argument are

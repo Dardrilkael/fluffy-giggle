@@ -1,8 +1,11 @@
 #pragma once
 
-// apps/circsim_editor - the Palette's grouping + search, as pure data
-// (no gui, no canvas) so the headless suite can pin it.
-//
+// ws::circsim - the symbol palette's grouping + search, as pure data
+// over the symbol library (no gui, no canvas). Lifted from
+// apps/circsim_editor (stage 11 - the lib extraction): the panel
+// remains the app's; the grouping POLICY - the categories, the fuzzy
+// filter, the ranking - is library domain (any frontend building a
+// parts browser over a .csym library rides here).
 // A symbol's group is, in order:
 //   1. the "category" text field a .csym symbol carries (it rides in
 //      SymbolDef::unknown, so a user library can name its own groups);
@@ -21,7 +24,7 @@
 #include <ws/circsim/library.hpp>
 #include <ws/circsim/symbols.hpp>
 
-namespace editor {
+namespace ws::circsim {
 
 struct PaletteGroup {
     std::string name;
@@ -55,4 +58,4 @@ struct PaletteGroup {
 [[nodiscard]] std::vector<PaletteGroup> palette_groups(
     const ws::circsim::SymbolLibrary& lib, std::string_view filter);
 
-}  // namespace editor
+}  // namespace ws::circsim

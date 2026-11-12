@@ -1367,22 +1367,34 @@ TEST_CASE("a step-family table overlays its passes, no chords") {
     CHECK(b.ed.results.x_runs.runs[1].begin == 2000u);
     CHECK(b.ed.results.x_runs.runs[1].end == 4000u);
 
-    // One keep list per pass, each built and folded to the budget
-    // (2000 rows a pass against a ~570-pixel window).
+    // One keep list per pass, each built and folded to its SLICE of
+    // the shared budget (stage 10: the passes overlay one window, so
+    // the pixel budget is split, not multiplied - 2000 rows a pass
+    // against a ~524-pixel window).
     REQUIRE(b.ed.results.decim.size() == 2u);
     CHECK(b.ed.results.decim[0].built);
     REQUIRE(b.ed.results.decim[0].runs.size() == 2u);
+    const std::size_t budget = b.ed.results.decim_budget;
+    std::size_t total_keeps = 0;
     for (const editor::ResultsCache::RunKeep& rk :
          b.ed.results.decim[0].runs) {
         CHECK(rk.i1 > rk.i0);
-        CHECK(rk.idx.size() <= 580u);
+        // The per-pass fold: its slice of the budget (the floor
+        // keeps a many-pass family legible).
+        CHECK(rk.idx.size() <=
+              std::max<std::size_t>(64u, budget / 2u) + 4u);
         CHECK(rk.idx.size() >= 8u);
+        total_keeps += rk.idx.size();
     }
+    // The SHARED budget: both passes together cost about one budget,
+    // not budget x passes (the 24-pass scr_trigger shape this fixes).
+    CHECK(total_keeps <= budget + 8u);
 
     // The overlay itself: 2 signals x 2 passes = 4 strokes, none
     // chording the reset - every stroke lives inside the frame and
-    // spans its width (each pass traverses the whole shared window,
-    // the second from the far edge back).
+    // spans the DATA extent (the auto view pads 5% a side, so the
+    // data fills ~91% of the frame; a stroke spanning the whole frame
+    // would be drawing past its samples).
     const std::vector<const canvas::CanvasCmd*> series = b.series_cmds();
     REQUIRE(series.size() == 4u);
     const Bench::FrameBox f = b.frame_box(b.frame_cmd());
@@ -1399,7 +1411,7 @@ TEST_CASE("a step-family table overlays its passes, no chords") {
         // The stroke spans the plot's data area (frame width minus right-axis
         // margin when a right spine exists - 46px). The frame box includes
         // that margin, so allow ~60px slack instead of 8px.
-        CHECK(hi - lo >= (f.fx2 - f.fx) - 60.0f);  // a full pass
+        CHECK(hi - lo >= (f.fx2 - f.fx) * 0.9f - 8.0f);  // a full pass
     }
     // The window fits the runs' union envelope (the wrap's extent),
     // not the by-index run the stage-7 fallback used to draw against.
@@ -1443,6 +1455,25 @@ TEST_CASE("a many-signal table draws bounded series and sparklines") {
         CHECK(st.finite);
         CHECK(st.spark_env.size() == 80u);
     }
+    // Stage 10: the bounded plot copies. 20000 rows fold to the cap
+    // per signal (one run - the axis is sorted), the envelope rides
+    // the fold EXACTLY (min/max per bucket is the envelope), and the
+    // decimation read the copy, not the raw column.
+    REQUIRE(b.ed.results.copies.size() == 48u);
+    REQUIRE(b.ed.results.copies[0].runs.size() == 1u);
+    const ws::circsim::PlotPoints& cp = b.ed.results.copies[0].runs[0];
+    CHECK(cp.size() > 1000u);           // really folded, not a stub
+    CHECK(cp.size() <= 4096u + 2u);     // the cap (+ forced ends)
+    double copy_lo = cp.ys.front();
+    double copy_hi = copy_lo;
+    for (double v : cp.ys) {
+        copy_lo = std::min(copy_lo, v);
+        copy_hi = std::max(copy_hi, v);
+    }
+    CHECK(copy_lo == b.ed.results.stats[0].lo);  // exact - the fold
+    CHECK(copy_hi == b.ed.results.stats[0].hi);  // keeps the extremes
+    REQUIRE(b.ed.results.decim[0].runs.size() == 1u);
+    CHECK(b.ed.results.decim[0].runs[0].src == &cp);  // the source
     const std::vector<const canvas::CanvasCmd*> series = b.series_cmds();
     REQUIRE(series.size() == 48u);
     std::size_t sparklines = 0;
@@ -1457,6 +1488,70 @@ TEST_CASE("a many-signal table draws bounded series and sparklines") {
     for (const canvas::CanvasCmd* s : series) {
         CHECK(s->points.size() <= 580u);
     }
+}
+
+TEST_CASE("the sparkline atlas declines headless, the polyline rides") {
+    // The stage-10 atlas bakes through r2d's texture seam, which
+    // answers the white sentinel outside a running app (the
+    // headless bench): the panel must keep the stage-8 polyline
+    // spelling verbatim, and the atlas keys are still minted - the
+    // bake (or its decline) happens once per (run, table), not per
+    // frame.
+    Bench b;
+    b.load(ramp_table(200u));
+    b.draw();
+    CHECK(b.ed.results.spark_atlas.texture.id == 0);
+    CHECK(b.ed.results.spark_atlas.run == b.ed.results.run_id);
+    CHECK(b.ed.results.spark_atlas.table == 0u);
+    CHECK(b.ed.results.spark_atlas.count == 2u);
+    std::size_t sparklines = 0;
+    for (const canvas::CanvasCmd& c : b.clc.cmds) {
+        if (c.kind == canvas::CanvasCmdKind::stroke_polyline &&
+            c.width == 1.2f && c.points.size() > 4u) {
+            ++sparklines;
+        }
+    }
+    CHECK(sparklines == 2u);  // the fallback drew both rows
+    // An idle frame does not re-attempt the bake: the keys hold, and
+    // the fallback still draws (the fresh frame's own count).
+    b.draw();
+    CHECK(b.ed.results.spark_atlas.run == b.ed.results.run_id);
+    std::size_t sparklines_again = 0;
+    for (const canvas::CanvasCmd& c : b.clc.cmds) {
+        if (c.kind == canvas::CanvasCmdKind::stroke_polyline &&
+            c.width == 1.2f && c.points.size() > 4u) {
+            ++sparklines_again;
+        }
+    }
+    CHECK(sparklines_again == 2u);
+}
+
+TEST_CASE("hovering a split axis lands on the nearest sample of a pass") {
+    // The family axis is not sorted, so the old hover path SCANNED
+    // every row per frame; stage 10 binary-searches the monotone
+    // passes. The answer is the same shape: the sample whose x is
+    // nearest the cursor's, somewhere in one of the passes.
+    Bench b;
+    ws::spice::Table wrap = ramp_table(4000u);
+    for (std::size_t i = 0; i < wrap.sweep_axes[0].size(); ++i) {
+        wrap.sweep_axes[0][i] =
+            1.0e-4 * static_cast<double>(i < 2000u ? i : 3999u - i);
+    }
+    b.load(std::move(wrap));
+    b.draw();  // mint the frame (and the caches) before reading it
+    const Bench::FrameBox f = b.frame_box(b.frame_cmd());
+    Bench::Mouse m;
+    m.x = (f.fx + f.fx2) * 0.5f;  // the frame's centre column
+    m.y = (f.fy + f.fy2) * 0.5f;
+    b.draw(m);
+    REQUIRE(b.ed.results.hover >= 0);
+    const std::vector<double>& xs =
+        b.ed.results.run.results.tables[0].sweep_axes[0];
+    REQUIRE(static_cast<std::size_t>(b.ed.results.hover) < xs.size());
+    // The centre of the padded 0..0.1999 window is ~0.1; the nearest
+    // sample sits within a step or two of it, whichever pass won.
+    CHECK(std::fabs(xs[static_cast<std::size_t>(b.ed.results.hover)] -
+                    0.1) <= 2.0e-4);
 }
 
 TEST_CASE("the frame budget stays flat on idle frames") {
@@ -1509,4 +1604,53 @@ TEST_CASE("the frame budget stays flat on idle frames") {
                 build_ms, idle_ms,
                 idle_ms > 0.0 ? build_ms / idle_ms : 0.0);
     CHECK(idle_ms <= build_ms);
+
+    // The family shape (stage 10's headline): 10 signals x 24 passes
+    // x 1103 rows - the scr_trigger_vfmm table's own form. Stage 9
+    // gave each pass the FULL pixel budget (24 x ~500 keeps a signal
+    // an idle frame); the shared budget spends ~500 total.
+    ws::spice::Table fam;
+    fam.analysis = ws::spice::AnalysisKind::Tran;
+    fam.sweep = ws::spice::SweepKind::Time;
+    fam.sweep_names = {"time"};
+    fam.sweep_axes.emplace_back();
+    fam.sweep_axes.back().reserve(24u * 1103u);
+    for (int pass = 0; pass < 24; ++pass) {
+        for (std::size_t i = 0; i < 1103u; ++i) {
+            fam.sweep_axes.back().push_back(
+                2.0e-5 * static_cast<double>(i));
+        }
+    }
+    for (std::size_t s = 0; s < 10u; ++s) {
+        ws::spice::Signal sig;
+        sig.name = "v(n" + std::to_string(100 + s) + ")";
+        sig.data.reserve(24u * 1103u);
+        for (std::size_t i = 0; i < 24u * 1103u; ++i) {
+            sig.data.push_back(
+                3.3 * (0.5 + 0.5 * std::sin(6.28318530718 *
+                                            static_cast<double>(i) /
+                                            1103.0 + s)));
+        }
+        fam.signals.push_back(std::move(sig));
+    }
+    b.load(std::move(fam));
+    const double fam_build = draw_many(1);
+    const double fam_idle = draw_many(30) / 30.0;
+    const std::size_t fam_budget = b.ed.results.decim_budget;
+    std::size_t fam_keeps = 0;
+    for (const editor::ResultsCache::DecimKeep& dk :
+         b.ed.results.decim) {
+        for (const editor::ResultsCache::RunKeep& rk : dk.runs) {
+            fam_keeps += rk.idx.size();
+        }
+    }
+    std::printf("  perf: 10 signals x 24 passes x 1103 rows - build "
+                "frame %.3f ms, idle frame %.3f ms; %zu keeps total "
+                "(budget %zu, one pass's full-budget share was %zu)\n",
+                fam_build, fam_idle, fam_keeps, fam_budget,
+                10u * 24u * fam_budget);
+    // The shared-budget contract: all passes of all visible signals
+    // together stay in the same order as ONE signal's old budget.
+    CHECK(fam_keeps <= 10u * (fam_budget + 24u * 8u));
+    CHECK(fam_idle <= fam_build);
 }

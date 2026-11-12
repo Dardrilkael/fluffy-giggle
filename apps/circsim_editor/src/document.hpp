@@ -28,6 +28,8 @@
 
 #include <ws/app/undo.hpp>
 #include <ws/circsim/format.hpp>
+#include <ws/circsim/geom.hpp>  // WireRoute + next_ref (stage 11 - the lib
+                                 // extraction; the aliases below re-export)
 #include <ws/circsim/library.hpp>
 #include <ws/circsim/model.hpp>
 #include <ws/core/result.hpp>
@@ -85,11 +87,10 @@ void push_delete_part(SchematicDocument& doc, std::uint32_t part_id);
 // wire's id and the waypoints that keep its legs axis-aligned at the
 // landing position. The editor computes the new shape (it owns the
 // symbol geometry the endpoints resolve through); the command captures
-// each wire's CURRENT waypoints as the undo shape.
-struct WireRoute {
-    std::uint32_t wire = 0;
-    std::vector<ws::circsim::Pos> waypoints;
-};
+// each wire's CURRENT waypoints as the undo shape. The lib's own type
+// now (ws::circsim::WireRoute, geom.hpp - attached_wire_routes answers
+// it); the alias keeps the editor's historical spelling.
+using WireRoute = ws::circsim::WireRoute;
 
 void push_move_part(SchematicDocument& doc, std::uint32_t part_id,
                     ws::circsim::Pos to,
@@ -151,9 +152,10 @@ void push_set_analysis(SchematicDocument& doc, std::size_t index,
 // The next free reference designator for a symbol ("R1", "R2", ...):
 // the highest trailing number on the symbol's own prefix, plus one -
 // no gap reuse, deterministic. Ref-less symbols (power/ground) answer
-// "" (the symbol's contract).
-[[nodiscard]] std::string next_ref(const ws::circsim::Schematic& s,
-                                   const ws::circsim::SymbolDef& sym);
+// "" (the symbol's contract). Lives in the lib now (ws::circsim::
+// next_ref, geom.hpp); the using keeps the editor's historical
+// unqualified spelling resolving.
+using ws::circsim::next_ref;
 
 // --- the group commands (the box-select's landing gear) ---------------------
 //

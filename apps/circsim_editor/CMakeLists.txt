@@ -75,8 +75,10 @@ endif()
 # its own widget, not the built-in value row - the focus-navigation
 # walk proves two stops where the shared-label bug fused them into
 # one), refresh_problems' snapshot version, and the Palette's draw
-# seam. side_panels needs palette_groups (the panel groups its
-# symbols); the link shape is the suites' own again. The typography
+# seam. side_panels groups its symbols through ws::circsim's palette
+# (src/palette_groups.cpp moved to the lib - stage 11, the lib
+# extraction; the panel is the app's drawing over it); the link shape
+# is the suites' own again. The typography
 # pass's cases read the r2d stub the palette/problems rows draw
 # through, so the stub header's dir rides the include path.
 ws_add_test(circsim_editor_side_panels
@@ -84,7 +86,6 @@ ws_add_test(circsim_editor_side_panels
           src/editor.cpp
           src/document.cpp
           src/side_panels.cpp
-          src/palette_groups.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/tests/ui_gui_r2d_stub.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
@@ -95,31 +96,4 @@ if(TARGET test_circsim_editor_side_panels)
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${PROJECT_SOURCE_DIR}/libs/ui/src"
     "${PROJECT_SOURCE_DIR}/libs/ui/tests")
-endif()
-
-# The Palette's grouping + search: pure data over ws::circsim (no gui),
-# so the suite links the library and nothing else - the symbol table
-# the panel groups, the .csym "category" field, the case-insensitive
-# filter.
-ws_add_test(circsim_editor_palette
-  SOURCES tests/test_palette_groups.cpp
-          src/palette_groups.cpp
-  LINK ws::circsim
-  DEPENDS ws::settings)
-if(TARGET test_circsim_editor_palette)
-  target_include_directories(test_circsim_editor_palette PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/src")
-endif()
-
-# The SAF port's pure half: the sandbox-name policy, the persisted
-# path->URI map and the write-through FileSystem wrapper - the data
-# policy the android bridge (android_saf.cpp, android-only) rides. Pure
-# std over the settings seam, so the suite runs wherever the app does.
-ws_add_test(circsim_editor_saf
-  SOURCES tests/test_saf_store.cpp
-          src/saf_store.cpp
-  LINK ws::settings)
-if(TARGET test_circsim_editor_saf)
-  target_include_directories(test_circsim_editor_saf PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()

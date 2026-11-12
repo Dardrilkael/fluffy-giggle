@@ -85,4 +85,6 @@ endif()
 # file builds and runs on every platform - the headless cases (file watch,
 # recent-files, autosave) now run on Linux too, where they never did
 # before. No separate test binary; the single suite covers both halves.
-ws_add_test(platform SOURCES tests/test_platform.cpp)
+# tests/test_saf.cpp rode in with the SAF bridge's pure half
+# (apps/circsim_editor's saf_store, stage 11 - the lib extraction).
+ws_add_test(platform SOURCES tests/test_platform.cpp tests/test_saf.cpp)

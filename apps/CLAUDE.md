@@ -150,7 +150,9 @@ CMakeLists only wire ws libraries together.
   Semiconductors / Switches / Power (stage 24 grew Switches for the
   S/W symbols and sent E/F/G/H/B to Sources and T/K/xfmr to Passive -
   `palette_category` maps by SPICE letter, a `.csym`'s own `category`
-  field still wins); the Select tool's GROUP edit: a press on empty space arms
+  field still wins - the grouping/search lives in ws::circsim/palette
+  since the stage-11 lib extraction, the panel is the drawing over
+  it); the Select tool's GROUP edit: a press on empty space arms
   the box-select (the drag sweeps a dashed veil, the release lands
   every part/wire/junction/label it holds - Shift extends instead of
   replacing; a plain click on empty space still clears, the degenerate

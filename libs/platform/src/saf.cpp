@@ -1,13 +1,16 @@
-// The SAF port's pure half (see saf_store.hpp) - no Android type, no
-// JNI, no OS call: the policy the bridge rides, headless-testable.
+// ws::platform - the SAF bridge's pure half (see saf.hpp). Lifted
+// verbatim from apps/circsim_editor's saf_store.cpp (stage 11 - the
+// lib extraction): the policy is the editor's own, unchanged; only the
+// home moved (and the sandbox name's default extension became a
+// parameter - the lib stays document-agnostic).
 
-#include "saf_store.hpp"
+#include <ws/platform/saf.hpp>
 
 #include <algorithm>
 #include <cctype>
 #include <utility>
 
-namespace editor::saf {
+namespace ws::platform::saf {
 
 namespace {
 
@@ -105,7 +108,8 @@ std::string hash_tag(std::string_view bytes) {
 }
 
 std::string sandbox_name_for(std::string_view display, std::string_view uri,
-                             std::string_view fallback) {
+                             std::string_view fallback,
+                             std::string_view default_ext) {
     // Sanitize: path bytes would escape the sandbox, control bytes
     // would corrupt the map's line format, and surrounding whitespace
     // is noise a picked name sometimes carries.
@@ -126,9 +130,10 @@ std::string sandbox_name_for(std::string_view display, std::string_view uri,
     if (clean.empty()) {
         clean.assign(fallback);
     }
-    // The extension survives the splice; a bare name earns ".csim"
-    // (the document factory's own gate reads the extension, so a
-    // picked "notes.txt" must STAY notes.txt to be refused honestly).
+    // The extension survives the splice; a bare name earns the
+    // caller's default (the document factory's own gate reads the
+    // extension, so a picked "notes.txt" must STAY notes.txt to be
+    // refused honestly).
     std::string_view stem = clean;
     std::string_view extension;
     const std::size_t dot = clean.find_last_of('.');
@@ -136,7 +141,7 @@ std::string sandbox_name_for(std::string_view display, std::string_view uri,
         stem = std::string_view{clean}.substr(0, dot);
         extension = std::string_view{clean}.substr(dot);
     } else {
-        extension = ".csim";
+        extension = default_ext;
     }
     if (stem.size() > kNameCap) {
         stem = stem.substr(0, kNameCap);
@@ -234,4 +239,4 @@ void WriteThroughFs::save_map() {
     (void)base_.write(map_path_, map_.format());
 }
 
-}  // namespace editor::saf
+}  // namespace ws::platform::saf

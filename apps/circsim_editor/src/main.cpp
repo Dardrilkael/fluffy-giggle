@@ -71,7 +71,9 @@
 
 #include <android_native_app_glue.h>  // android_app + the android_main contract
 
-#include "android_saf.hpp"  // the SAF bridge (the pickers + the write-through fs)
+#include "android_saf.hpp"  // the SAF bridge (the pickers + the write-
+                               // through fs; the data policy is
+                               // ws::platform/saf.hpp)
 
 namespace {
 
@@ -315,7 +317,7 @@ class CircsimApp final : public ws::ui::App {
         // The SAF bridge's pickers, when init wired them; the
         // documented refusal otherwise (a failed bridge init means the
         // APK is broken - the Open/Save commands honestly no-op).
-        if (ws::platform::FileDialogs* saf = editor::saf::dialogs()) {
+        if (ws::platform::FileDialogs* saf = ws::platform::saf::dialogs()) {
             config.dialogs = saf;
         } else {
             dialogs_ =
@@ -540,7 +542,7 @@ class CircsimApp final : public ws::ui::App {
         // so this is a warning toast, never an error one - drained
         // here, between frames, where the toast store is safe to touch.
         if (const std::optional<std::string> refused =
-                editor::saf::take_push_error()) {
+                ws::platform::saf::take_push_error()) {
             editor_.toast("saved locally - the picked location refused "
                           "the write: " + *refused,
                           gui::ToastSeverity::warning);
@@ -1577,7 +1579,7 @@ class CircsimApp final : public ws::ui::App {
     // degrade (state files still write; the pickers refuse).
     [[nodiscard]] ws::settings::FileSystem& doc_fs() {
 #ifdef __ANDROID__
-        if (ws::settings::FileSystem* const saf = editor::saf::fs()) {
+        if (ws::settings::FileSystem* const saf = ws::platform::saf::fs()) {
             return *saf;
         }
 #endif
@@ -1791,7 +1793,7 @@ extern "C" void android_main(android_app* app) {
     // on_setup() wires the shell's config (a failed init degrades to
     // the refusing pickers and the local-only seam - the bridge logs
     // why, the app still runs).
-    (void)editor::saf::init(app);
+    (void)ws::platform::saf::init(app);
     ws::ui::AppConfig config;
     config.title = "circsim editor";
     config.app_handle = app;

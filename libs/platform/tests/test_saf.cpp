@@ -1,11 +1,11 @@
-// The SAF port's pure half, headless (the suite the saf_store.hpp header
-// promises): the sandbox-name policy, the map's parse/format round trip,
-// and the write-through FileSystem wrapper's every verb - the data
-// policy the JNI half (android_saf.cpp, android-only) rides. No Android
-// type appears here; the push act is an injected recorder.
+// The SAF bridge's pure half, headless (the suite the saf.hpp header
+// promises; moved from apps/circsim_editor/tests, where it was born):
+// the sandbox-name policy, the map's parse/format round trip, and the
+// write-through FileSystem wrapper's every verb - the data policy any
+// app's JNI half rides. No Android type appears here; the push act is
+// an injected recorder.
 
-#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
-#include <doctest/doctest.h>
+#include <doctest/doctest.h>  // (this suite rides test_platform.cpp's main - the lib suite's shape)
 
 #include <map>
 #include <optional>
@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-#include "saf_store.hpp"
+#include <ws/platform/saf.hpp>
 
 #include <ws/settings/filesystem.hpp>
 
@@ -68,7 +68,7 @@ struct PushLog {
     std::vector<std::pair<std::string, std::string>> pushed;
     std::optional<std::string> fail_with;
 
-    [[nodiscard]] editor::saf::SafPush hook() {
+    [[nodiscard]] ws::platform::saf::SafPush hook() {
         return [this](const std::string& uri,
                       std::string_view bytes) -> ws::core::Status {
             if (fail_with.has_value()) {
@@ -84,58 +84,62 @@ struct PushLog {
 }  // namespace
 
 TEST_CASE("the sandbox name keeps the pick's shape, the URI's identity") {
-    using editor::saf::sandbox_name_for;
+    using ws::platform::saf::sandbox_name_for;
 
     // The display name survives with its extension; the URI's hash
     // splices in before it.
     const std::string a =
-        sandbox_name_for("my circuit.csim", "content://x/doc/1", "schematic");
+        sandbox_name_for("my circuit.csim", "content://x/doc/1",
+                          "schematic", ".csim");
     CHECK(a.starts_with("my circuit-"));
     CHECK(a.ends_with(".csim"));
     CHECK(a.size() == std::string{"my circuit-"}.size() + 8 + 5);
 
     // Two same-named documents from different folders stay two files.
     const std::string b =
-        sandbox_name_for("my circuit.csim", "content://x/doc/2", "schematic");
+        sandbox_name_for("my circuit.csim", "content://x/doc/2",
+                          "schematic", ".csim");
     CHECK(a != b);
 
     // The SAME URI is one stable name across launches - the identity
     // session restore and recents ride.
     CHECK(sandbox_name_for("my circuit.csim", "content://x/doc/1",
-                           "schematic") == a);
+                           "schematic", ".csim") == a);
 
     // Path bytes fold away: a picked name cannot escape the sandbox.
     const std::string evil = sandbox_name_for(
-        "../..\\escape/eaten.csim", "content://x/doc/3", "schematic");
+        "../..\\escape/eaten.csim", "content://x/doc/3", "schematic",
+        ".csim");
     CHECK(evil.find('/') == std::string::npos);
     CHECK(evil.find('\\') == std::string::npos);
     CHECK(evil.starts_with("....escapeeaten-"));
 
     // A non-.csim pick keeps its extension - the document factory's
     // honest "not a .csim schematic" refusal needs to see it.
-    CHECK(sandbox_name_for("notes.txt", "content://x/doc/4", "schematic")
+    CHECK(sandbox_name_for("notes.txt", "content://x/doc/4", "schematic", ".csim")
               .ends_with(".txt"));
 
     // A bare name earns .csim; a name that sanitizes away falls back.
-    CHECK(sandbox_name_for("plain", "content://x/doc/5", "schematic")
+    CHECK(sandbox_name_for("plain", "content://x/doc/5", "schematic", ".csim")
               .ends_with(".csim"));
-    CHECK(sandbox_name_for("///", "content://x/doc/6", "fallback")
+    CHECK(sandbox_name_for("///", "content://x/doc/6", "fallback", ".csim")
               .starts_with("fallback-"));
 
     // A long name caps before the splice.
     const std::string long_name(300, 'x');
     const std::string capped =
-        sandbox_name_for(long_name, "content://x/doc/7", "schematic");
+        sandbox_name_for(long_name, "content://x/doc/7", "schematic",
+                        ".csim");
     CHECK(capped.size() <= 80 + 1 + 8 + 5);
 }
 
 TEST_CASE("the map parses what it formats, and drops what it cannot") {
-    editor::saf::SafMap map;
+    ws::platform::saf::SafMap map;
     map.add("/data/schematics/a-1111.csim", "content://x/a");
     map.add("/data/schematics/b-2222.csim", "content://x/b");
 
     // The round trip.
-    editor::saf::SafMap reloaded;
+    ws::platform::saf::SafMap reloaded;
     reloaded.load(map.format());
     REQUIRE(reloaded.entries().size() == 2);
     CHECK(reloaded.entries()[0].path == "/data/schematics/a-1111.csim");
@@ -153,7 +157,7 @@ TEST_CASE("the map parses what it formats, and drops what it cannot") {
     CHECK(*map.find("/data/schematics/a-1111.csim") == "content://x/new");
 
     // A hand-damaged map degrades line by line, never kills.
-    editor::saf::SafMap damaged;
+    ws::platform::saf::SafMap damaged;
     damaged.load("no-tab-line\n\n/data/x\tcontent://ok\n/content-only\t\n");
     REQUIRE(damaged.entries().size() == 1);
     CHECK(damaged.entries()[0].path == "/data/x");
@@ -167,9 +171,9 @@ TEST_CASE("the map parses what it formats, and drops what it cannot") {
 TEST_CASE("the write-through seam mirrors mapped writes, records refused "
           "pushes") {
     FakeFs base;
-    editor::saf::SafMap map;
+    ws::platform::saf::SafMap map;
     PushLog push;
-    editor::saf::WriteThroughFs fs{base, map, push.hook(), "/state/map.txt"};
+    ws::platform::saf::WriteThroughFs fs{base, map, push.hook(), "/state/map.txt"};
 
     // An ordinary write: no URI behind it, no push.
     CHECK(fs.write("/plain.txt", "bytes"));
@@ -216,8 +220,8 @@ TEST_CASE("the write-through seam mirrors mapped writes, records refused "
             return false;
         }
     } refusing;
-    editor::saf::SafMap dead_map;
-    editor::saf::WriteThroughFs dead{refusing, dead_map, push.hook(), "/m"};
+    ws::platform::saf::SafMap dead_map;
+    ws::platform::saf::WriteThroughFs dead{refusing, dead_map, push.hook(), "/m"};
     dead_map.add("/sandbox/dead.csim", "content://x/dead");
     CHECK_FALSE(dead.write("/sandbox/dead.csim", "x"));
     CHECK(push.pushed.size() == 1);  // unchanged

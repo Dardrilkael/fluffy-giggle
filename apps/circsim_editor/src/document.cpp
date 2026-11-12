@@ -1225,36 +1225,9 @@ void push_set_analysis(SchematicDocument& doc, std::size_t index,
             doc, index, entries[index], next));
     }
 }
-
-// --- reference designators ---------------------------------------------------
-
-std::string next_ref(const ws::circsim::Schematic& s,
-                     const ws::circsim::SymbolDef& sym) {
-    if (sym.ref_prefix.empty()) {
-        return "";
-    }
-    unsigned long highest = 0;
-    for (const Part& p : s.parts()) {
-        if (p.ref.size() <= sym.ref_prefix.size()) {
-            continue;
-        }
-        if (p.ref.compare(0, sym.ref_prefix.size(), sym.ref_prefix) != 0) {
-            continue;
-        }
-        const std::string tail = p.ref.substr(sym.ref_prefix.size());
-        bool digits = true;
-        for (const char c : tail) {
-            if (std::isdigit(static_cast<unsigned char>(c)) == 0) {
-                digits = false;
-                break;
-            }
-        }
-        if (digits) {
-            highest = std::max(highest, std::strtoul(tail.c_str(), nullptr, 10));
-        }
-    }
-    return sym.ref_prefix + std::to_string(highest + 1);
-}
+// next_ref lives in ws::circsim now (geom.hpp, stage 11 - the lib
+// extraction); document.hpp's using-declaration keeps the editor's
+// unqualified spelling resolving.
 
 // --- the group commands (document.hpp: the box-select's landing gear) --------
 

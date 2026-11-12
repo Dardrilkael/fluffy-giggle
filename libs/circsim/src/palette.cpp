@@ -1,6 +1,8 @@
-// apps/circsim_editor - the Palette's grouping + search (see the header).
+// ws::circsim - the symbol palette's grouping + search (see the
+// header). Lifted verbatim from apps/circsim_editor's
+// palette_groups.cpp (stage 11 - the lib extraction).
 
-#include "palette_groups.hpp"
+#include <ws/circsim/palette.hpp>
 
 #include <algorithm>
 #include <array>
@@ -9,7 +11,7 @@
 
 #include <ws/settings/json.hpp>
 
-namespace editor {
+namespace ws::circsim {
 
 std::string palette_category(const ws::circsim::SymbolDef& sym) {
     if (const ws::settings::json::Value* v = sym.unknown.find("category")) {
@@ -198,4 +200,4 @@ std::vector<PaletteGroup> palette_groups(const ws::circsim::SymbolLibrary& lib,
     return groups;
 }
 
-}  // namespace editor
+}  // namespace ws::circsim

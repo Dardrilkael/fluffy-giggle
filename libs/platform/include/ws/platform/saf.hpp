@@ -1,10 +1,13 @@
 #pragma once
 
-// The SAF port's pure half: everything about the Storage Access bridge
-// that touches no Android - the sandbox-name policy, the persisted
-// path->URI map, and the write-through FileSystem wrapper - so the
-// whole data policy is headless-testable (tests/test_saf_store.cpp) and
-// the JNI half (android_saf.cpp) stays thin.
+// ws::platform - the Storage Access Framework bridge's pure half
+// (lifted from apps/circsim_editor, stage 11 - the lib extraction):
+// everything about a SAF-backed document store that touches no Android
+// - the sandbox-name policy, the persisted path->URI map, and the
+// write-through FileSystem wrapper - so the whole data policy is
+// headless-testable (libs/platform/tests/test_saf.cpp) and any app's
+// JNI half stays thin (circsim_editor's android_saf.cpp pairs with its
+// CircsimActivity Java shim and stays app-side).
 //
 // The port's shape: a picked SAF document (a content:// URI the shell's
 // path-shaped world cannot read) becomes a REAL FILE under the app's
@@ -28,7 +31,7 @@
 #include <ws/core/result.hpp>
 #include <ws/settings/filesystem.hpp>
 
-namespace editor::saf {
+namespace ws::platform::saf {
 
 // One persisted sandbox-file -> content-URI pair.
 struct SafEntry {
@@ -75,10 +78,13 @@ class SafMap {
 // files (and the same URI stays ONE file across launches - the stable
 // identity session restore and the recent list ride). A display name
 // that sanitizes away to nothing falls back to `fallback`; an extension
-// survives, a missing one gets ".csim".
+// survives, a missing one gets `default_ext` (the app's document
+// extension - ".csim" for the schematic editor; the policy is the
+// caller's, the lib stays document-agnostic).
 [[nodiscard]] std::string sandbox_name_for(std::string_view display,
                                            std::string_view uri,
-                                           std::string_view fallback);
+                                           std::string_view fallback,
+                                           std::string_view default_ext);
 
 // One push of a saved document's bytes to its content URI. The JNI half
 // injects the ContentResolver implementation; the headless tests inject
@@ -137,4 +143,4 @@ class WriteThroughFs final : public ws::settings::FileSystem {
     std::optional<std::string> push_error_;
 };
 
-}  // namespace editor::saf
+}  // namespace ws::platform::saf

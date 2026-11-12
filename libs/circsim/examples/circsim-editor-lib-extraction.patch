@@ -1,0 +1,2842 @@
+diff --git a/apps/CLAUDE.md b/apps/CLAUDE.md
+index 241e06a..133374a 100644
+--- a/apps/CLAUDE.md
++++ b/apps/CLAUDE.md
+@@ -150,7 +150,9 @@ CMakeLists only wire ws libraries together.
+   Semiconductors / Switches / Power (stage 24 grew Switches for the
+   S/W symbols and sent E/F/G/H/B to Sources and T/K/xfmr to Passive -
+   `palette_category` maps by SPICE letter, a `.csym`'s own `category`
+-  field still wins); the Select tool's GROUP edit: a press on empty space arms
++  field still wins - the grouping/search lives in ws::circsim/palette
++  since the stage-11 lib extraction, the panel is the drawing over
++  it); the Select tool's GROUP edit: a press on empty space arms
+   the box-select (the drag sweeps a dashed veil, the release lands
+   every part/wire/junction/label it holds - Shift extends instead of
+   replacing; a plain click on empty space still clears, the degenerate
+diff --git a/apps/circsim_editor/CMakeLists.txt b/apps/circsim_editor/CMakeLists.txt
+index 355de55..5302f70 100644
+--- a/apps/circsim_editor/CMakeLists.txt
++++ b/apps/circsim_editor/CMakeLists.txt
+@@ -75,8 +75,10 @@ endif()
+ # its own widget, not the built-in value row - the focus-navigation
+ # walk proves two stops where the shared-label bug fused them into
+ # one), refresh_problems' snapshot version, and the Palette's draw
+-# seam. side_panels needs palette_groups (the panel groups its
+-# symbols); the link shape is the suites' own again. The typography
++# seam. side_panels groups its symbols through ws::circsim's palette
++# (src/palette_groups.cpp moved to the lib - stage 11, the lib
++# extraction; the panel is the app's drawing over it); the link shape
++# is the suites' own again. The typography
+ # pass's cases read the r2d stub the palette/problems rows draw
+ # through, so the stub header's dir rides the include path.
+ ws_add_test(circsim_editor_side_panels
+@@ -84,7 +86,6 @@ ws_add_test(circsim_editor_side_panels
+           src/editor.cpp
+           src/document.cpp
+           src/side_panels.cpp
+-          src/palette_groups.cpp
+           ${PROJECT_SOURCE_DIR}/libs/ui/tests/ui_gui_r2d_stub.cpp
+           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
+           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
+@@ -96,30 +97,3 @@ if(TARGET test_circsim_editor_side_panels)
+     "${PROJECT_SOURCE_DIR}/libs/ui/src"
+     "${PROJECT_SOURCE_DIR}/libs/ui/tests")
+ endif()
+-
+-# The Palette's grouping + search: pure data over ws::circsim (no gui),
+-# so the suite links the library and nothing else - the symbol table
+-# the panel groups, the .csym "category" field, the case-insensitive
+-# filter.
+-ws_add_test(circsim_editor_palette
+-  SOURCES tests/test_palette_groups.cpp
+-          src/palette_groups.cpp
+-  LINK ws::circsim
+-  DEPENDS ws::settings)
+-if(TARGET test_circsim_editor_palette)
+-  target_include_directories(test_circsim_editor_palette PRIVATE
+-    "${CMAKE_CURRENT_SOURCE_DIR}/src")
+-endif()
+-
+-# The SAF port's pure half: the sandbox-name policy, the persisted
+-# path->URI map and the write-through FileSystem wrapper - the data
+-# policy the android bridge (android_saf.cpp, android-only) rides. Pure
+-# std over the settings seam, so the suite runs wherever the app does.
+-ws_add_test(circsim_editor_saf
+-  SOURCES tests/test_saf_store.cpp
+-          src/saf_store.cpp
+-  LINK ws::settings)
+-if(TARGET test_circsim_editor_saf)
+-  target_include_directories(test_circsim_editor_saf PRIVATE
+-    "${CMAKE_CURRENT_SOURCE_DIR}/src")
+-endif()
+diff --git a/apps/circsim_editor/src/android_saf.cpp b/apps/circsim_editor/src/android_saf.cpp
+index aabb8e3..e7c1f7d 100644
+--- a/apps/circsim_editor/src/android_saf.cpp
++++ b/apps/circsim_editor/src/android_saf.cpp
+@@ -1,5 +1,6 @@
+ // The SAF bridge's android half (see android_saf.hpp for the contract
+-// and saf_store.hpp for the data policy). Everything Android about the
++// and <ws/platform/saf.hpp> for the data policy - the platform lib's
++// own since the stage-11 lib extraction). Everything Android about the
+ // editor's file pickers lives in this TU: the intent launch through
+ // the CircsimActivity shim, the result callback the shim answers into,
+ // and the ContentResolver byte moves both directions.
+@@ -23,9 +24,9 @@
+ 
+ #include <android_native_app_glue.h>
+ 
+-#include "saf_store.hpp"
++#include <ws/platform/saf.hpp>
+ 
+-namespace editor::saf {
++namespace ws::platform::saf {
+ 
+ namespace {
+ 
+@@ -424,7 +425,8 @@ class SafDialogs final : public ws::platform::FileDialogs {
+             picked->name.empty() ? "schematic" : picked->name;
+         const std::string path = ws::platform::join_path(
+             b.sandbox_dir,
+-            sandbox_name_for(display, picked->uri, "schematic"));
++            sandbox_name_for(display, picked->uri, "schematic",
++                                    ".csim"));
+         ScopedJavaThread java{b.vm()};
+         if (!java.ok()) {
+             return ws::core::unexpected<ws::core::Error>(make_error(
+@@ -497,7 +499,8 @@ class SafDialogs final : public ws::platform::FileDialogs {
+                                                          : picked->name;
+         const std::string path = ws::platform::join_path(
+             b.sandbox_dir,
+-            sandbox_name_for(display, picked->uri, "schematic"));
++            sandbox_name_for(display, picked->uri, "schematic",
++                                    ".csim"));
+         b.fs_wrapper->map(path, picked->uri);
+         return path;
+     }
+@@ -607,6 +610,6 @@ std::optional<std::string> take_push_error() {
+                                    : std::nullopt;
+ }
+ 
+-}  // namespace editor::saf
++}  // namespace ws::platform::saf
+ 
+ #endif  // __ANDROID__
+diff --git a/apps/circsim_editor/src/android_saf.hpp b/apps/circsim_editor/src/android_saf.hpp
+index 2132367..f35fce6 100644
+--- a/apps/circsim_editor/src/android_saf.hpp
++++ b/apps/circsim_editor/src/android_saf.hpp
+@@ -1,7 +1,9 @@
+ #pragma once
+ 
+-// The SAF bridge's android half (see saf_store.hpp for the pure data
+-// policy this rides). Android-only: the whole file guards on
++// The SAF bridge's android half (see ws/platform/saf.hpp for the pure
++// data policy this rides - the platform lib's own, since the stage-11
++// lib extraction; the JNI glue stays app-side beside the
++// CircsimActivity Java shim it registers its natives against). Android-only: the whole file guards on
+ // __ANDROID__, so a desktop build includes it as an empty TU.
+ //
+ // What lands here: the pickers (the Storage Access Framework's
+@@ -29,7 +31,7 @@ struct android_app;
+ #include <ws/platform/dialogs.hpp>
+ #include <ws/settings/filesystem.hpp>
+ 
+-namespace editor::saf {
++namespace ws::platform::saf {
+ 
+ // Wires the bridge to the glue's handle: registers the JNI natives the
+ // activity shim calls, builds the sandbox (<files>/circsim
+@@ -54,6 +56,6 @@ bool init(android_app* app);
+ // (its toast's own borrowed-bytes cadence).
+ [[nodiscard]] std::optional<std::string> take_push_error();
+ 
+-}  // namespace editor::saf
++}  // namespace ws::platform::saf
+ 
+ #endif  // __ANDROID__
+diff --git a/apps/circsim_editor/src/document.cpp b/apps/circsim_editor/src/document.cpp
+index f9c8b36..e5a8fc2 100644
+--- a/apps/circsim_editor/src/document.cpp
++++ b/apps/circsim_editor/src/document.cpp
+@@ -1225,36 +1225,9 @@ void push_set_analysis(SchematicDocument& doc, std::size_t index,
+             doc, index, entries[index], next));
+     }
+ }
+-
+-// --- reference designators ---------------------------------------------------
+-
+-std::string next_ref(const ws::circsim::Schematic& s,
+-                     const ws::circsim::SymbolDef& sym) {
+-    if (sym.ref_prefix.empty()) {
+-        return "";
+-    }
+-    unsigned long highest = 0;
+-    for (const Part& p : s.parts()) {
+-        if (p.ref.size() <= sym.ref_prefix.size()) {
+-            continue;
+-        }
+-        if (p.ref.compare(0, sym.ref_prefix.size(), sym.ref_prefix) != 0) {
+-            continue;
+-        }
+-        const std::string tail = p.ref.substr(sym.ref_prefix.size());
+-        bool digits = true;
+-        for (const char c : tail) {
+-            if (std::isdigit(static_cast<unsigned char>(c)) == 0) {
+-                digits = false;
+-                break;
+-            }
+-        }
+-        if (digits) {
+-            highest = std::max(highest, std::strtoul(tail.c_str(), nullptr, 10));
+-        }
+-    }
+-    return sym.ref_prefix + std::to_string(highest + 1);
+-}
++// next_ref lives in ws::circsim now (geom.hpp, stage 11 - the lib
++// extraction); document.hpp's using-declaration keeps the editor's
++// unqualified spelling resolving.
+ 
+ // --- the group commands (document.hpp: the box-select's landing gear) --------
+ 
+diff --git a/apps/circsim_editor/src/document.hpp b/apps/circsim_editor/src/document.hpp
+index f734b85..3c38283 100644
+--- a/apps/circsim_editor/src/document.hpp
++++ b/apps/circsim_editor/src/document.hpp
+@@ -28,6 +28,8 @@
+ 
+ #include <ws/app/undo.hpp>
+ #include <ws/circsim/format.hpp>
++#include <ws/circsim/geom.hpp>  // WireRoute + next_ref (stage 11 - the lib
++                                 // extraction; the aliases below re-export)
+ #include <ws/circsim/library.hpp>
+ #include <ws/circsim/model.hpp>
+ #include <ws/core/result.hpp>
+@@ -85,11 +87,10 @@ void push_delete_part(SchematicDocument& doc, std::uint32_t part_id);
+ // wire's id and the waypoints that keep its legs axis-aligned at the
+ // landing position. The editor computes the new shape (it owns the
+ // symbol geometry the endpoints resolve through); the command captures
+-// each wire's CURRENT waypoints as the undo shape.
+-struct WireRoute {
+-    std::uint32_t wire = 0;
+-    std::vector<ws::circsim::Pos> waypoints;
+-};
++// each wire's CURRENT waypoints as the undo shape. The lib's own type
++// now (ws::circsim::WireRoute, geom.hpp - attached_wire_routes answers
++// it); the alias keeps the editor's historical spelling.
++using WireRoute = ws::circsim::WireRoute;
+ 
+ void push_move_part(SchematicDocument& doc, std::uint32_t part_id,
+                     ws::circsim::Pos to,
+@@ -151,9 +152,10 @@ void push_set_analysis(SchematicDocument& doc, std::size_t index,
+ // The next free reference designator for a symbol ("R1", "R2", ...):
+ // the highest trailing number on the symbol's own prefix, plus one -
+ // no gap reuse, deterministic. Ref-less symbols (power/ground) answer
+-// "" (the symbol's contract).
+-[[nodiscard]] std::string next_ref(const ws::circsim::Schematic& s,
+-                                   const ws::circsim::SymbolDef& sym);
++// "" (the symbol's contract). Lives in the lib now (ws::circsim::
++// next_ref, geom.hpp); the using keeps the editor's historical
++// unqualified spelling resolving.
++using ws::circsim::next_ref;
+ 
+ // --- the group commands (the box-select's landing gear) ---------------------
+ //
+diff --git a/apps/circsim_editor/src/editor.cpp b/apps/circsim_editor/src/editor.cpp
+index 144336a..447ea46 100644
+--- a/apps/circsim_editor/src/editor.cpp
++++ b/apps/circsim_editor/src/editor.cpp
+@@ -26,6 +26,17 @@ using canvas::Point;
+ using ws::circsim::JunctionRef;
+ using ws::circsim::PinRef;
+ 
++// The pure geometry the panels and commands share (route/tidy/order,
++// refdes, hit tests, bounds, magnetism, the color wheel) lives in
++// ws::circsim (geom.hpp - stage 11, the lib extraction); the Editor
++// methods below are thin forwarders that keep this app's own API
++// unchanged. These locals are the editor-state HALF: what reads the
++// camera, the selection or the caches, plus the shared math aliases.
++using ws::circsim::BoundsBuilder;
++using ws::circsim::dist_to_segment;
++using ws::circsim::is_auto_ref;   // annotate's rename guard
++using ws::circsim::mentions_token;  // annotate's directive check
++
+ [[nodiscard]] double len(Pos p) {
+     return std::sqrt(p.x * p.x + p.y * p.y);
+ }
+@@ -36,124 +47,8 @@ using ws::circsim::PinRef;
+ // (which at max zoom answered clicks 400px away).
+ constexpr double kLabelPickPx = 6.0;
+ 
+-// Distance (not squared) from `p` to segment ab.
+-[[nodiscard]] double dist_to_segment(Pos a, Pos b, Pos p) {
+-    const Pos ab{b.x - a.x, b.y - a.y};
+-    const Pos ap{p.x - a.x, p.y - a.y};
+-    const double denom = ab.x * ab.x + ab.y * ab.y;
+-    if (denom <= 0.0) {
+-        return len(ap);
+-    }
+-    double t = (ap.x * ab.x + ap.y * ab.y) / denom;
+-    t = std::max(0.0, std::min(1.0, t));
+-    return len(Pos{ap.x - t * ab.x, ap.y - t * ab.y});
+-}
+-
+ constexpr double kPi = 3.14159265358979323846;
+ 
+-// Grows a world AABB point by point. Part bounds, content bounds and
+-// selection bounds all used to carry their own copy of this lambda.
+-struct BoundsBuilder {
+-    std::optional<Bounds> box;
+-
+-    void add(Pos w) {
+-        if (!box.has_value()) {
+-            box = Bounds{w.x, w.y, w.x, w.y};
+-            return;
+-        }
+-        box->min_x = std::min(box->min_x, w.x);
+-        box->min_y = std::min(box->min_y, w.y);
+-        box->max_x = std::max(box->max_x, w.x);
+-        box->max_y = std::max(box->max_y, w.y);
+-    }
+-    void add(const Bounds& b) {
+-        add(Pos{b.min_x, b.min_y});
+-        add(Pos{b.max_x, b.max_y});
+-    }
+-};
+-
+-// Folds duplicate points and collinear CONTINUING middles out of a full
+-// polyline (endpoint, corners, endpoint) and returns the INTERIOR - the
+-// waypoints the .csim stores. A fold needs the leg to continue: a
+-// reversal is collinear too, but folding it would run the wire straight
+-// back through the part it just left. Shared by route_wire (fresh
+-// routes) and tidy_route (existing wires).
+-[[nodiscard]] std::vector<Pos> fold_interior(const std::vector<Pos>& full) {
+-    constexpr double kEps = 1e-9;
+-    const auto same = [&](Pos p, Pos q) {
+-        return eps_eq(p.x, q.x, kEps) && eps_eq(p.y, q.y, kEps);
+-    };
+-    std::vector<Pos> folded;
+-    for (const Pos& p : full) {
+-        if (!folded.empty() && same(folded.back(), p)) {
+-            continue;
+-        }
+-        if (folded.size() >= 2u) {
+-            const Pos& p0 = folded[folded.size() - 2u];
+-            const Pos& p1 = folded[folded.size() - 1u];
+-            const bool collinear =
+-                (eps_eq(p0.x, p1.x, kEps) && eps_eq(p1.x, p.x, kEps)) ||
+-                (eps_eq(p0.y, p1.y, kEps) && eps_eq(p1.y, p.y, kEps));
+-            const double along = (p1.x - p0.x) * (p.x - p1.x) +
+-                                 (p1.y - p0.y) * (p.y - p1.y);
+-            if (collinear && along > 0.0) {
+-                folded.back() = p;  // the leg extends
+-                continue;
+-            }
+-        }
+-        folded.push_back(p);
+-    }
+-    if (folded.size() < 2u) {
+-        return {};
+-    }
+-    return {folded.begin() + 1, folded.end() - 1};
+-}
+-
+-// prefix + digits only ("R12"): a ref Annotate may regenerate. "R_load"
+-// and "TP1a" are the author's and stay put.
+-[[nodiscard]] bool is_auto_ref(const std::string& ref,
+-                               const std::string& prefix) {
+-    if (ref.size() <= prefix.size() || ref.compare(0, prefix.size(), prefix) != 0) {
+-        return false;
+-    }
+-    for (std::size_t i = prefix.size(); i < ref.size(); ++i) {
+-        if (std::isdigit(static_cast<unsigned char>(ref[i])) == 0) {
+-            return false;
+-        }
+-    }
+-    return true;
+-}
+-
+-// Is `token` named in `text` as a whole word (ASCII case-insensitive,
+-// like SPICE)? "R1" matches ".meas I(R1)" but not "R10" or "XR1".
+-[[nodiscard]] bool mentions_token(const std::string& text,
+-                                  const std::string& token) {
+-    if (token.empty()) {
+-        return false;
+-    }
+-    const auto lower = [](std::string s) {
+-        for (char& ch : s) {
+-            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+-        }
+-        return s;
+-    };
+-    const auto word = [](char ch) {
+-        return std::isalnum(static_cast<unsigned char>(ch)) != 0 || ch == '_';
+-    };
+-    const std::string hay = lower(text);
+-    const std::string needle = lower(token);
+-    for (std::size_t at = hay.find(needle); at != std::string::npos;
+-         at = hay.find(needle, at + 1)) {
+-        const std::size_t end = at + needle.size();
+-        const bool left = at == 0 || !word(hay[at - 1]);
+-        const bool right = end >= hay.size() || !word(hay[end]);
+-        if (left && right) {
+-            return true;
+-        }
+-    }
+-    return false;
+-}
+-
+ }  // namespace
+ 
+ const ws::circsim::SymbolDef* Editor::sym_of(
+@@ -202,182 +97,32 @@ std::optional<Bounds> Editor::part_bounds(std::uint32_t id) const {
+     if (cached != part_bounds_cache_.end()) {
+         return cached->second;
+     }
+-    // Cache miss: compute and store.
+-    const ws::circsim::SymbolDef* sym = sym_of(*p);
+-    if (sym == nullptr) {
+-        Bounds b{p->pos.x - 1.0, p->pos.y - 1.0, p->pos.x + 1.0,
+-                 p->pos.y + 1.0};
+-        part_bounds_cache_[id] = b;
+-        return b;
+-    }
+-    const Bounds local = ws::circsim::symbol_bounds(*sym);
+-    BoundsBuilder out;
+-    for (const Pos corner :
+-         {Pos{local.min_x, local.min_y}, Pos{local.max_x, local.min_y},
+-          Pos{local.min_x, local.max_y}, Pos{local.max_x, local.max_y}}) {
+-        out.add(ws::circsim::transform_pos(*p, corner));
+-    }
+-    if (out.box.has_value()) {
+-        part_bounds_cache_[id] = *out.box;
++    // Cache miss: compute through the lib seam and store.
++    const std::optional<Bounds> box =
++        ws::circsim::part_world_bounds(*s, library, id);
++    if (box.has_value()) {
++        part_bounds_cache_[id] = *box;
+     }
+-    return out.box;
++    return box;
+ }
+ 
+ std::vector<Pos> Editor::wire_path(const ws::circsim::Wire& w) const {
+-    std::vector<Pos> out;
++    // The lib's own polyline (ws::circsim::wire_path): endpoints
++    // through their refs, then the waypoints between.
+     const ws::circsim::Schematic* s = schem();
+     if (s == nullptr) {
+-        return out;
+-    }
+-    const auto endpoint_pos = [&](const ws::circsim::WireEndpoint& end)
+-        -> std::optional<Pos> {
+-        if (const PinRef* pin = std::get_if<PinRef>(&end)) {
+-            const ws::circsim::Part* p = s->find_part(pin->part);
+-            const ws::circsim::SymbolDef* sym =
+-                p != nullptr ? sym_of(*p) : nullptr;
+-            if (p != nullptr && sym != nullptr &&
+-                pin->pin < sym->pins.size()) {
+-                return ws::circsim::pin_pos(*sym, *p, pin->pin);
+-            }
+-            return std::nullopt;
+-        }
+-        const JunctionRef* j = std::get_if<JunctionRef>(&end);
+-        const ws::circsim::Junction* found =
+-            j != nullptr ? s->find_junction(j->junction) : nullptr;
+-        if (found != nullptr) {
+-            return found->pos;
+-        }
+-        return std::nullopt;
+-    };
+-    const std::optional<Pos> a = endpoint_pos(w.a);
+-    const std::optional<Pos> b = endpoint_pos(w.b);
+-    if (!a.has_value() || !b.has_value()) {
+-        return out;  // dangling: the loader's tolerance, nothing to draw
+-    }
+-    out.reserve(w.waypoints.size() + 2);
+-    out.push_back(*a);
+-    for (const Pos& p : w.waypoints) {
+-        out.push_back(p);
++        return {};
+     }
+-    out.push_back(*b);
+-    return out;
++    return ws::circsim::wire_path(*s, library, w);
+ }
+ 
+ std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir,
+                                     bool flip) {
+-    // The lead length: how far a route commits to a direction before
+-    // it may turn. One grid unit reads clean at every zoom (a pin's
+-    // own lead is typically three).
+-    constexpr double kLead = 1.0;
+-    constexpr double kEps = 1e-9;
+-
+-    // Directions: negative = free; non-negative dirs are folded into
+-    // [0, 360). A negative pin dir is "free" (no forced lead-out).
+-    // Note: pin dirs are always non-negative cardinals (0, 90, 180, 270)
+-    // so negative is only used for "free" wire drafts.
+-    const auto norm = [](int dir) { return dir < 0 ? -1 : dir % 360; };
+-    a_dir = norm(a_dir);
+-    b_dir = norm(b_dir);
+-
+-    const auto unit = [](int dir) -> Pos {
+-        switch (dir) {
+-            case 0: return {1.0, 0.0};
+-            case 90: return {0.0, 1.0};
+-            case 180: return {-1.0, 0.0};
+-            case 270: return {0.0, -1.0};
+-            default:
+-                WS_CORE_ASSERT(false && "route_wire: non-cardinal pin direction");
+-                return {0.0, -1.0};  // fallback to south (270)
+-        }
+-    };
+-    const auto same = [&](Pos p, Pos q) {
+-        return eps_eq(p.x, q.x, kEps) && eps_eq(p.y, q.y, kEps);
+-    };
+-    if (same(a, b)) {
+-        return {};  // a zero-length wire has no route (not a loop)
+-    }
+-
+-    Pos from = a;  // where the route is free to turn: past a's lead
+-    if (a_dir >= 0) {
+-        const Pos u = unit(a_dir);
+-        from = {a.x + u.x * kLead, a.y + u.y * kLead};
+-    }
+-    Pos target = b;  // ... and the point the route aims for before b
+-    if (b_dir >= 0) {
+-        const Pos u = unit(b_dir);
+-        // Approach b AGAINST b_dir: a pin's dir faces outward (away
+-        // from the part's body - the a side's from = a + u*lead reads
+-        // it exactly that way), so a wire lands tip-first, traveling
+-        // the reverse of the facing from the pin's own outside. The
+-        // stop is one lead short of the tip ON that outside
+-        // (b + u*lead). The old b - u*lead sat the stop inside the
+-        // part: the final leg ran out through the body and doubled
+-        // back to the pin - every pin landing stabbed its part.
+-        target = {b.x + u.x * kLead, b.y + u.y * kLead};
+-    }
+-
+-    // Full polyline a -> ... -> b; the stored waypoints are its
+-    // interior after folding. A corner is needed only when the free
+-    // point past a's lead and the approach point before b share
+-    // neither axis (aligned endpoints fold away).
+-    const bool corner_needed = !eps_eq(from.x, target.x, kEps) &&
+-                               !eps_eq(from.y, target.y, kEps);
+-    std::vector<Pos> full;
+-    full.push_back(a);
+-    if (a_dir >= 0) {
+-        full.push_back(from);
+-    }
+-    if (corner_needed) {
+-        // One corner (an L): the leg out of `from` continues the
+-        // committed direction (horizontal when free), the leg into
+-        // `target` closes. The final approach leg target -> b already
+-        // runs along b_dir, so one corner always suffices.
+-        // `flip` swaps the stock choice (the Tab toggle): the same
+-        // two endpoints, the corner on the other diagonal.
+-        const bool start_horizontal =
+-            (a_dir < 0 || a_dir == 0 || a_dir == 180) != flip;
+-        if (start_horizontal) {
+-            full.push_back(Pos{target.x, from.y});
+-        } else {
+-            full.push_back(Pos{from.x, target.y});
+-        }
+-    }
+-    if (b_dir >= 0) {
+-        full.push_back(target);
+-    }
+-    full.push_back(b);
+-
+-    // Fold duplicates and collinear middles (these become the stored
+-    // waypoints; noise would ride straight into the .csim). A fold
+-    // needs the leg to CONTINUE: a reversal is collinear too, but
+-    // folding it would drop the lead and run the wire straight back
+-    // through the part it just left - a pin at (0,0) facing +x with a
+-    // target at (-5,0) keeps its (1,0) lead-out corner.
+-    return fold_interior(full);
++    return ws::circsim::route_wire(a, a_dir, b, b_dir, flip);
+ }
+ 
+ std::vector<Pos> Editor::tidy_route(const std::vector<Pos>& path) {
+-    constexpr double kEps = 1e-9;
+-    if (path.size() < 2u) {
+-        return {};
+-    }
+-    // Every diagonal leg gets one axis-aligned corner (horizontal
+-    // first - the stock bend); axis-aligned legs pass through. The fold
+-    // then merges the corner into a neighbouring collinear leg where it
+-    // can, so a wire that only had a stray diagonal comes out with the
+-    // fewest bends that keep the rest of its shape.
+-    std::vector<Pos> full;
+-    full.reserve(path.size() * 2u);
+-    full.push_back(path.front());
+-    for (std::size_t i = 1; i < path.size(); ++i) {
+-        const Pos p = full.back();
+-        const Pos q = path[i];
+-        if (!eps_eq(p.x, q.x, kEps) && !eps_eq(p.y, q.y, kEps)) {
+-            full.push_back(Pos{q.x, p.y});
+-        }
+-        full.push_back(q);
+-    }
+-    return fold_interior(full);
++    return ws::circsim::tidy_route(path);
+ }
+ 
+ std::size_t Editor::tidy_selection() {
+@@ -474,31 +219,7 @@ bool Editor::transform_part(std::uint32_t id, int rot, bool mirror,
+ 
+ std::vector<std::size_t> Editor::annotation_order(const std::vector<Pos>& at,
+                                                   double row_tol) {
+-    std::vector<std::size_t> idx(at.size());
+-    for (std::size_t i = 0; i < idx.size(); ++i) {
+-        idx[i] = i;
+-    }
+-    // Top first (world y points up); equal heights keep list order.
+-    std::stable_sort(idx.begin(), idx.end(), [&](std::size_t a, std::size_t b) {
+-        return at[a].y > at[b].y;
+-    });
+-    // Sweep into rows anchored at each row's top part, then left to
+-    // right inside the row (stable: identical x keeps the order above).
+-    std::size_t i = 0;
+-    while (i < idx.size()) {
+-        const double anchor = at[idx[i]].y;
+-        std::size_t j = i + 1;
+-        while (j < idx.size() && anchor - at[idx[j]].y <= row_tol) {
+-            ++j;
+-        }
+-        std::stable_sort(idx.begin() + static_cast<std::ptrdiff_t>(i),
+-                         idx.begin() + static_cast<std::ptrdiff_t>(j),
+-                         [&](std::size_t a, std::size_t b) {
+-                             return at[a].x < at[b].x;
+-                         });
+-        i = j;
+-    }
+-    return idx;
++    return ws::circsim::annotation_order(at, row_tol);
+ }
+ 
+ std::size_t Editor::annotate(double row_tol_cells) {
+@@ -583,72 +304,15 @@ std::size_t Editor::annotate(double row_tol_cells) {
+ // absolute, not relative).
+ std::vector<WireRoute> Editor::attached_wire_routes(
+     Drag::Kind kind, std::uint32_t id) const {
+-    constexpr double kEps = 1e-9;
+-    std::vector<WireRoute> out;
+     const ws::circsim::Schematic* s = schem();
+     if (s == nullptr) {
+-        return out;
+-    }
+-    const auto hits = [&](const ws::circsim::WireEndpoint& e) {
+-        if (kind == Drag::Kind::Part) {
+-            const auto* pin = std::get_if<PinRef>(&e);
+-            return pin != nullptr && pin->part == id;
+-        }
+-        const auto* j = std::get_if<JunctionRef>(&e);
+-        return j != nullptr && j->junction == id;
+-    };
+-    for (const ws::circsim::Wire& w : s->wires()) {
+-        // A cosmetic freeform wire's shape is the author's - only the
+-        // ortho constraint re-routes.
+-        if (!w.ortho) {
+-            continue;
+-        }
+-        const bool a_hit = hits(w.a);
+-        const bool b_hit = hits(w.b);
+-        if (!a_hit && !b_hit) {
+-            continue;
+-        }
+-        const std::vector<Pos> path = wire_path(w);
+-        if (path.size() < 2u) {
+-            continue;  // dangling: nothing to keep straight
+-        }
+-        // Straight or one-bend wires (and anything with both ends on
+-        // the same move) re-route as a fresh horizontal-first L; a
+-        // multi-bend wire keeps its shape - only the adjacent waypoint
+-        // slides, chosen so both touching legs stay axis-aligned.
+-        std::vector<Pos> mid(path.begin() + 1, path.end() - 1);
+-        if (mid.size() <= 1u || (a_hit && b_hit)) {
+-            WireRoute r;
+-            r.wire = w.id;
+-            r.waypoints = route_wire(path.front(), -1, path.back(), -1);
+-            out.push_back(std::move(r));
+-            continue;
+-        }
+-        if (a_hit) {
+-            // The leg into mid[1] keeps its orientation: a vertical
+-            // continuation keeps x (the first leg turns horizontal),
+-            // a horizontal one keeps y (the first leg turns vertical).
+-            if (eps_eq(mid[0].x, mid[1].x, kEps)) {
+-                mid[0].y = path.front().y;
+-            } else {
+-                mid[0].x = path.front().x;
+-            }
+-        }
+-        if (b_hit) {
+-            Pos& last = mid.back();
+-            const Pos& prev = mid[mid.size() - 2u];
+-            if (eps_eq(prev.y, last.y, kEps)) {
+-                last.x = path.back().x;
+-            } else {
+-                last.y = path.back().y;
+-            }
+-        }
+-        WireRoute r;
+-        r.wire = w.id;
+-        r.waypoints = std::move(mid);
+-        out.push_back(std::move(r));
++        return {};
+     }
+-    return out;
++    return ws::circsim::attached_wire_routes(
++        *s, library,
++        kind == Drag::Kind::Part ? ws::circsim::AttachedKind::Part
++                                 : ws::circsim::AttachedKind::Junction,
++        id);
+ }
+ 
+ std::optional<PinHit> Editor::hit_pin(Pos world, double radius) const {
+@@ -656,25 +320,7 @@ std::optional<PinHit> Editor::hit_pin(Pos world, double radius) const {
+     if (s == nullptr) {
+         return std::nullopt;
+     }
+-    std::optional<PinHit> best;
+-    double best_d = radius;
+-    for (const ws::circsim::Part& p : s->parts()) {
+-        const ws::circsim::SymbolDef* sym = sym_of(p);
+-        if (sym == nullptr) {
+-            continue;
+-        }
+-        for (std::size_t i = 0; i < sym->pins.size(); ++i) {
+-            const Pos at = ws::circsim::pin_pos(*sym, p,
+-                                                static_cast<std::uint32_t>(i));
+-            const double d = len(Pos{at.x - world.x, at.y - world.y});
+-            if (d < best_d) {
+-                best_d = d;
+-                best = PinHit{PinRef{p.id, static_cast<std::uint32_t>(i)}, at,
+-                              sym->pins[i].dir};
+-            }
+-        }
+-    }
+-    return best;
++    return ws::circsim::hit_pin(*s, library, world, radius);
+ }
+ 
+ std::optional<std::uint32_t> Editor::hit_junction(Pos world,
+@@ -683,16 +329,7 @@ std::optional<std::uint32_t> Editor::hit_junction(Pos world,
+     if (s == nullptr) {
+         return std::nullopt;
+     }
+-    std::optional<std::uint32_t> best;
+-    double best_d = radius;
+-    for (const ws::circsim::Junction& j : s->junctions()) {
+-        const double d = len(Pos{j.pos.x - world.x, j.pos.y - world.y});
+-        if (d < best_d) {
+-            best_d = d;
+-            best = j.id;
+-        }
+-    }
+-    return best;
++    return ws::circsim::hit_junction(*s, world, radius);
+ }
+ 
+ // A point on an existing wire's path the cursor would land on (stage
+@@ -710,63 +347,11 @@ std::optional<Editor::WirePointSnap> Editor::hit_wire_point(
+     if (s == nullptr) {
+         return std::nullopt;
+     }
+-    std::optional<WirePointSnap> best;
+-    double best_d = radius;
+-    const canvas::GridSpec spec = grid_spec();
+-    const auto snap_one = [&](double v) {
+-        return canvas::snap_coord(v, spec, false);
+-    };
+-    for (const ws::circsim::Wire& w : s->wires()) {
+-        const std::vector<Pos> path = wire_path(w);
+-        for (std::size_t i = 1; i < path.size(); ++i) {
+-            const Pos a = path[i - 1];
+-            const Pos b = path[i];
+-            const Pos ab{b.x - a.x, b.y - a.y};
+-            const Pos ap{world.x - a.x, world.y - a.y};
+-            const double denom = ab.x * ab.x + ab.y * ab.y;
+-            double t = denom > 0.0 ? (ap.x * ab.x + ap.y * ab.y) / denom
+-                                  : 0.0;
+-            t = std::max(0.0, std::min(1.0, t));
+-            const Pos proj{a.x + t * ab.x, a.y + t * ab.y};
+-            // Snap the projection to the fine grid; for an ortho
+-            // segment one coordinate is the segment's stationary
+-            // value (already grid-aligned) and snaps to itself, the
+-            // other rounds to the nearest grid line.
+-            Pos cand{snap_one(proj.x), snap_one(proj.y)};
+-            // Verify cand lies on segment ab with exact equality
+-            // (the same on_segment nets.cpp runs). If not, the grid
+-            // snap drifted off the segment - use the nearer endpoint.
+-            // Note: the endpoint may be a pin or junction position.
+-            // snap_wire_target checks pin -> junction -> wire-point in
+-            // that order with the same radius, so the caller is safe
+-            // today - but this is a fragile ordering dependency. A more
+-            // robust approach would explicitly skip endpoints that are
+-            // pins/junctions here.
+-            const double cross =
+-                (b.x - a.x) * (cand.y - a.y) - (b.y - a.y) * (cand.x - a.x);
+-            const bool on_seg =
+-                cross == 0.0 &&
+-                cand.x >= std::min(a.x, b.x) && cand.x <= std::max(a.x, b.x) &&
+-                cand.y >= std::min(a.y, b.y) && cand.y <= std::max(a.y, b.y);
+-            if (!on_seg) {
+-                const double da = len(Pos{a.x - world.x, a.y - world.y});
+-                const double db = len(Pos{b.x - world.x, b.y - world.y});
+-                cand = da <= db ? a : b;
+-            }
+-            // Accept on the SEGMENT's distance to the cursor; the
+-            // returned candidate is still the grid-aligned point the
+-            // junction will be minted at. Measuring the distance to
+-            // the SNAPPED candidate missed a cursor riding the wire
+-            // between grid intersections at high zoom - its snap sits
+-            // half a cell away.
+-            const double d = dist_to_segment(a, b, world);
+-            if (d <= best_d) {
+-                best_d = d;
+-                best = WirePointSnap{w.id, cand};
+-            }
+-        }
+-    }
+-    return best;
++    // The fine lattice the T-tap snaps to: the SAME spec the grid
++    // renderer draws (the drawn dots and the snap targets can never
++    // disagree), passed as a spacing - the lib owns no ui include.
++    return ws::circsim::hit_wire_point(*s, library, world, radius,
++                                       grid_spec().base);
+ }
+ 
+ Selection Editor::hit_any(Pos world, double radius) const {
+@@ -839,24 +424,7 @@ std::optional<Bounds> Editor::content_bounds() const {
+     if (s == nullptr) {
+         return std::nullopt;
+     }
+-    BoundsBuilder out;
+-    for (const ws::circsim::Part& p : s->parts()) {
+-        if (const std::optional<Bounds> b = part_bounds(p.id)) {
+-            out.add(*b);
+-        }
+-    }
+-    for (const ws::circsim::Junction& j : s->junctions()) {
+-        out.add(j.pos);
+-    }
+-    for (const ws::circsim::Label& l : s->labels()) {
+-        out.add(l.pos);
+-    }
+-    for (const ws::circsim::Wire& w : s->wires()) {
+-        for (const Pos& p : wire_path(w)) {
+-            out.add(p);
+-        }
+-    }
+-    return out.box;
++    return ws::circsim::content_bounds(*s, library);
+ }
+ 
+ std::optional<Bounds> Editor::selection_bounds() const {
+@@ -1324,32 +892,16 @@ Pos Editor::place_snap(const ws::circsim::SymbolDef& sym, Pos world, int rot,
+     if (magnet_radius <= 0.0) {
+         return base;
+     }
+-    // Where would each ghost pin land at the snapped position? If one
+-    // is close to a real pin, shift the whole ghost so they coincide.
+-    ws::circsim::Part probe{};
+-    probe.pos = base;
+-    probe.rot = rot;
+-    probe.mirror = mirror;
+-    std::optional<Pos> best_shift;
+-    double best_d = magnet_radius;
+-    for (std::size_t i = 0; i < sym.pins.size(); ++i) {
+-        const Pos at = ws::circsim::pin_pos(sym, probe,
+-                                            static_cast<std::uint32_t>(i));
+-        const std::optional<PinHit> hit = hit_pin(at, best_d);
+-        if (!hit.has_value()) {
+-            continue;
+-        }
+-        const Pos shift{hit->pos.x - at.x, hit->pos.y - at.y};
+-        const double d = len(shift);
+-        if (d < best_d || !best_shift.has_value()) {
+-            best_d = d;
+-            best_shift = shift;
+-        }
+-    }
+-    if (!best_shift.has_value()) {
++    const ws::circsim::Schematic* s = schem();
++    if (s == nullptr) {
+         return base;
+     }
+-    return {base.x + best_shift->x, base.y + best_shift->y};
++    // The pin magnetism is the lib's (ws::circsim::magnet_shift): the
++    // ghost nudged whole so its nearest pin lands exactly on a real
++    // pin within the radius - a part dropped near another one mates
++    // pin-to-pin instead of a cell off.
++    return ws::circsim::magnet_shift(*s, library, sym, base, rot, mirror,
++                                     magnet_radius);
+ }
+ 
+ std::string_view Editor::hint() const {
+@@ -1876,25 +1428,6 @@ void Editor::status(std::string text) const {
+     }
+ }
+ 
+-// --- the symbol renderer ------------------------------------------------------
+-
+-// The data-color wheel (see editor.hpp's declaration comment): the same
+-// eight the Results plot has always painted its signals in, now the
+-// canvas's nets wear them too.
+-std::uint32_t series_color(std::size_t i) {
+-    static constexpr std::uint32_t kSeries[] = {
+-        ws::ui::r2d::rgba(224, 90, 78),    // red
+-        ws::ui::r2d::rgba(78, 161, 224),   // blue
+-        ws::ui::r2d::rgba(88, 181, 92),    // green
+-        ws::ui::r2d::rgba(211, 154, 42),   // amber
+-        ws::ui::r2d::rgba(154, 111, 211),  // purple
+-        ws::ui::r2d::rgba(78, 201, 192),   // teal
+-        ws::ui::r2d::rgba(211, 90, 158),   // pink
+-        ws::ui::r2d::rgba(143, 154, 78),   // olive
+-    };
+-    return kSeries[i % (sizeof kSeries / sizeof kSeries[0])];
+-}
+-
+ void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
+                  Pos pos, int rot, bool mirror, const Paint& body,
+                  std::uint32_t text_color, const ws::ui::r2d::Font* font) {
+diff --git a/apps/circsim_editor/src/editor.hpp b/apps/circsim_editor/src/editor.hpp
+index 69c39b5..bf2ff8e 100644
+--- a/apps/circsim_editor/src/editor.hpp
++++ b/apps/circsim_editor/src/editor.hpp
+@@ -52,6 +52,10 @@
+ #include <vector>
+ 
+ #include <ws/circsim/export.hpp>
++#include <ws/circsim/geom.hpp>  // the interaction geometry (stage 11:
++                                // route/tidy/order/refdes/hits/bounds/
++                                // magnetism/series_color - the pure math
++                                // this header's methods forward onto)
+ #include <ws/circsim/library.hpp>
+ #include <ws/circsim/locate.hpp>
+ #include <ws/circsim/model.hpp>
+@@ -264,12 +268,10 @@ struct Selection {
+     void clear() { kind = Kind::None; }
+ };
+ 
+-// A hovered pin (the wire tool's target highlight).
+-struct PinHit {
+-    ws::circsim::PinRef ref{};
+-    Pos pos{0.0, 0.0};
+-    int dir = 0;  // the pin's pointing direction, degrees
+-};
++// A hovered pin (the wire tool's target highlight) - the lib's own
++// shape (ws::circsim::PinHit, geom.hpp); the alias keeps the editor's
++// historical spelling.
++using PinHit = ws::circsim::PinHit;
+ 
+ // --- the group edit: the working set and the clipboard ------------------
+ 
+@@ -976,10 +978,10 @@ struct Editor {
+     // junction there. The wire tool snaps a click near another wire's
+     // body to this point and connects through that junction - the
+     // standard EDA T-tap, the one thing the wire tool was missing.
+-    struct WirePointSnap {
+-        std::uint32_t wire = 0;  // the wire whose path was hit
+-        Pos pos{0.0, 0.0};       // grid-aligned, on the wire's path
+-    };
++    // The T-tap snap's answer - ws::circsim::WirePointSnap (geom.hpp),
++    // aliased so `Editor::WirePointSnap` keeps spelling the same type
++    // the panels and tests always named.
++    using WirePointSnap = ws::circsim::WirePointSnap;
+     [[nodiscard]] std::optional<WirePointSnap> hit_wire_point(
+         Pos world, double radius) const;
+     [[nodiscard]] Selection hit_any(Pos world, double radius) const;
+@@ -1180,7 +1182,9 @@ void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
+ // The data-color wheel every colored series in the app shares (i mod N,
+ // the scope's rule): the Results plot's signals and the canvas's per-NET
+ // wire coloring both ride it, so a net and its waveform can never look
+-// like strangers. Pure data - no canvas, no theme.
+-[[nodiscard]] std::uint32_t series_color(std::size_t i);
++// like strangers. Pure data - no canvas, no theme. Lives in the lib now
++// (ws::circsim::series_color, geom.hpp); the using keeps the editor's
++// historical spelling (`editor::series_color`) resolving.
++using ws::circsim::series_color;
+ 
+ }  // namespace editor
+diff --git a/apps/circsim_editor/src/main.cpp b/apps/circsim_editor/src/main.cpp
+index 643e790..4e33d87 100644
+--- a/apps/circsim_editor/src/main.cpp
++++ b/apps/circsim_editor/src/main.cpp
+@@ -71,7 +71,9 @@
+ 
+ #include <android_native_app_glue.h>  // android_app + the android_main contract
+ 
+-#include "android_saf.hpp"  // the SAF bridge (the pickers + the write-through fs)
++#include "android_saf.hpp"  // the SAF bridge (the pickers + the write-
++                               // through fs; the data policy is
++                               // ws::platform/saf.hpp)
+ 
+ namespace {
+ 
+@@ -315,7 +317,7 @@ class CircsimApp final : public ws::ui::App {
+         // The SAF bridge's pickers, when init wired them; the
+         // documented refusal otherwise (a failed bridge init means the
+         // APK is broken - the Open/Save commands honestly no-op).
+-        if (ws::platform::FileDialogs* saf = editor::saf::dialogs()) {
++        if (ws::platform::FileDialogs* saf = ws::platform::saf::dialogs()) {
+             config.dialogs = saf;
+         } else {
+             dialogs_ =
+@@ -540,7 +542,7 @@ class CircsimApp final : public ws::ui::App {
+         // so this is a warning toast, never an error one - drained
+         // here, between frames, where the toast store is safe to touch.
+         if (const std::optional<std::string> refused =
+-                editor::saf::take_push_error()) {
++                ws::platform::saf::take_push_error()) {
+             editor_.toast("saved locally - the picked location refused "
+                           "the write: " + *refused,
+                           gui::ToastSeverity::warning);
+@@ -1577,7 +1579,7 @@ class CircsimApp final : public ws::ui::App {
+     // degrade (state files still write; the pickers refuse).
+     [[nodiscard]] ws::settings::FileSystem& doc_fs() {
+ #ifdef __ANDROID__
+-        if (ws::settings::FileSystem* const saf = editor::saf::fs()) {
++        if (ws::settings::FileSystem* const saf = ws::platform::saf::fs()) {
+             return *saf;
+         }
+ #endif
+@@ -1791,7 +1793,7 @@ extern "C" void android_main(android_app* app) {
+     // on_setup() wires the shell's config (a failed init degrades to
+     // the refusing pickers and the local-only seam - the bridge logs
+     // why, the app still runs).
+-    (void)editor::saf::init(app);
++    (void)ws::platform::saf::init(app);
+     ws::ui::AppConfig config;
+     config.title = "circsim editor";
+     config.app_handle = app;
+diff --git a/apps/circsim_editor/src/side_panels.cpp b/apps/circsim_editor/src/side_panels.cpp
+index 8a71f9b..c3aa6e7 100644
+--- a/apps/circsim_editor/src/side_panels.cpp
++++ b/apps/circsim_editor/src/side_panels.cpp
+@@ -14,7 +14,9 @@
+ 
+ #include "side_panels.hpp"
+ 
+-#include "palette_groups.hpp"
++// The Palette's grouping policy lives in the lib (stage 11 - the lib
++// extraction); the panel is the app's drawing over it.
++#include <ws/circsim/palette.hpp>
+ 
+ #include <algorithm>
+ #include <array>
+@@ -1508,8 +1510,8 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
+                     84.0f)) {
+         ed.palette_list_view = !ed.palette_list_view;
+     }
+-    const std::vector<PaletteGroup> groups =
+-        palette_groups(ed.library, filter);
++    const std::vector<ws::circsim::PaletteGroup> groups =
++        ws::circsim::palette_groups(ed.library, filter);
+ 
+     const auto arm = [&ed](const ws::circsim::SymbolDef& sym) {
+         ed.tool = Tool::Place;
+@@ -1543,7 +1545,7 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
+     } else if (filtering) {
+         // What the search is doing, and the two keys that drive it.
+         std::size_t matches = 0;
+-        for (const PaletteGroup& g : groups) {
++        for (const ws::circsim::PaletteGroup& g : groups) {
+             matches += g.items.size();
+         }
+         hint_line(layout, theme,
+@@ -1596,7 +1598,7 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
+     if (!filtering) {
+         std::vector<const ws::circsim::SymbolDef*> recent;
+         for (const std::string& key : ed.palette_recent) {
+-            for (const PaletteGroup& g : groups) {
++            for (const ws::circsim::PaletteGroup& g : groups) {
+                 const auto it = std::find_if(
+                     g.items.begin(), g.items.end(),
+                     [&key](const ws::circsim::SymbolDef* s) {
+@@ -1615,7 +1617,7 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
+     }
+ 
+     int group_index = 0;
+-    for (const PaletteGroup& g : groups) {
++    for (const ws::circsim::PaletteGroup& g : groups) {
+         gui.ids().push(group_index++);
+         // A search shows every match, open; browsing remembers what the
+         // user collapsed. "##name" keeps the header's id steady while
+diff --git a/libs/circsim/CLAUDE.md b/libs/circsim/CLAUDE.md
+index 0631ea0..c4a765d 100644
+--- a/libs/circsim/CLAUDE.md
++++ b/libs/circsim/CLAUDE.md
+@@ -305,7 +305,14 @@ fetched privately, which would duplicate a first-party capability.
+ - `include/ws/circsim/`: model.hpp, symbols.hpp, library.hpp, diag.hpp,
+   nets.hpp, format.hpp, erc.hpp, export.hpp, locate.hpp, plot.hpp,
+   render.hpp (stage 17a - the symbol render seam), png.hpp (the raster
+-  surface + the PNG writer + the schematic composition).
++  surface + the PNG writer + the schematic composition), geom.hpp
++  (stage 11 of the editor extraction - the schematic INTERACTION
++  geometry: route_wire/tidy_route, the refdes family, hit tests,
++  bounds, pin magnetism, attached wire routes, series_color; lifted
++  from apps/circsim_editor's editor.cpp/document.cpp, pure over the
++  model, no ui include), palette.hpp (the symbol palette's grouping +
++  fuzzy search - pure data over the library, lifted from the editor's
++  palette_groups).
+   ws::core::Result only; no exceptions.
+ - `src/`: model.cpp, symbols.cpp (the geometry half: lookup,
+   transform_pos/pin_pos, symbol_bounds, default_params),
+@@ -314,7 +321,9 @@ fetched privately, which would duplicate a first-party capability.
+   locate.cpp, plot.cpp, render.cpp (the stage-17a seam's flattening),
+   png.cpp (the raster/writer/composition), png_font.cpp (the embedded
+   font - pure data, generated by tools/gen_png_font.py; the
+-  src-local png_font.hpp is its only seam, like json_helpers.hpp).
++  src-local png_font.hpp is its only seam, like json_helpers.hpp),
++  geom.cpp + palette.cpp (the stage-11 extraction's halves).
++  tests/test_geom.cpp + tests/test_palette.cpp pin them headless.
+ - `examples/`: divider.csim, rc_step.csim (the smoke suite's decks),
+   led_demo.csim (three LEDs over 220/680/2.2k sharing a PULSE source -
+   the glow demo: 15/5/1.6 mA of red/yellow/green), tline.csym +
+diff --git a/libs/circsim/CMakeLists.txt b/libs/circsim/CMakeLists.txt
+index 3c0da76..66d10a4 100644
+--- a/libs/circsim/CMakeLists.txt
++++ b/libs/circsim/CMakeLists.txt
+@@ -13,4 +13,5 @@ ws_add_test(circsim SOURCES tests/test_format.cpp tests/test_nets.cpp
+                               tests/test_symbols.cpp tests/test_locate.cpp
+                               tests/test_plot.cpp tests/test_symbol_render.cpp
+                               tests/test_symbol_draw.cpp tests/test_overlay.cpp
+-                              tests/test_render_png.cpp)
++                              tests/test_render_png.cpp
++                              tests/test_geom.cpp tests/test_palette.cpp)
+diff --git a/libs/circsim/include/ws/circsim/geom.hpp b/libs/circsim/include/ws/circsim/geom.hpp
+new file mode 100644
+index 0000000..ce68547
+--- /dev/null
++++ b/libs/circsim/include/ws/circsim/geom.hpp
+@@ -0,0 +1,207 @@
++#pragma once
++
++// ws::circsim - the schematic interaction geometry: the pure editor
++// math over the model, headless and reusable (the editor app's panels,
++// any second frontend, a batch CLI). Everything here was lifted
++// verbatim from apps/circsim_editor's editor.cpp/document.cpp, where it
++// lived beside the Editor struct it served; the app keeps thin
++// forwarders (Editor::route_wire and friends) so its own API is
++// unchanged - this header is where the LOGIC lives now.
++//
++// The families:
++//   * polylines - the ortho router (route_wire), the tidy pass
++//     (tidy_route) and the shared fold (duplicate/collinear-middle
++//     folding, the .csim waypoint contract);
++//   * refdes - next_ref (the designator minter), is_auto_ref /
++//     mentions_token (what Annotate may rename, what a rename can
++//     re-aim) and annotation_order (the reading-order sort);
++//   * bounds - a part's transformed world AABB (part_world_bounds), a
++//     wire's resolved world polyline (wire_path) and the whole sheet's
++//     extent (content_bounds);
++//   * picking - hit_pin / hit_junction (the nearest entity within a
++//     world radius) and hit_wire_point (the T-tap snap: a grid-aligned
++//     point ON a wire's path, bit-equal to a position nets.cpp's
++//     exact-double on_polyline accepts);
++//   * placement - magnet_shift, the Place tool's pin magnetism (the
++//     nudge that mates a ghost's nearest pin onto a real one), and
++//     attached_wire_routes, the re-route shapes that keep a moved
++//     part's/junction's ortho wires straight;
++//   * colors - series_color, the data-color wheel every colored series
++//     in the workspace shares (the Results plot's signals and the
++//     canvas's per-net wire coloring), so a net and its waveform can
++//     never look like strangers.
++//
++// No ui include anywhere - the grid the T-tap snaps to arrives as a
++// spacing (the caller owns which lattice; the editor app passes its
++// canvas GridSpec's base), and every position is model-world (grid
++// units, y up).
++
++#include <cstdint>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include <ws/circsim/library.hpp>
++#include <ws/circsim/model.hpp>
++
++namespace ws::circsim {
++
++// --- polylines -----------------------------------------------------------
++
++// The ortho route for a wire from `a` (leaving along `a_dir`, -1 =
++// free) to `b` (approached along `b_dir`, -1 = free): the waypoint
++// list between the two endpoints - a leads out, an L lands, collinear
++// legs folded away (a reversal keeps its lead-out corner; folding it
++// would run the wire back through the part body it just left).
++// `flip` bends the corner the other way (vertical-first instead of
++// horizontal-first) - the Tab toggle; it only matters when the route
++// needs a corner at all.
++[[nodiscard]] std::vector<Pos> route_wire(Pos a, int a_dir, Pos b,
++                                          int b_dir, bool flip = false);
++
++// Re-straightens an ortho wire's full world path (endpoint, waypoints,
++// endpoint): every diagonal leg gets an axis-aligned corner, duplicate
++// points and collinear continuing middles fold away, the rest of the
++// author's shape is kept (a gentle fix-up, not a re-route). Returns
++// the cleaned INTERIOR waypoints.
++[[nodiscard]] std::vector<Pos> tidy_route(const std::vector<Pos>& path);
++
++// --- refdes ----------------------------------------------------------------
++
++// The next free reference designator for a symbol ("R1", "R2", ...):
++// the highest trailing number on the symbol's own prefix, plus one -
++// no gap reuse, deterministic. Ref-less symbols (power/ground) answer
++// "" (the symbol's contract).
++[[nodiscard]] std::string next_ref(const Schematic& s,
++                                   const SymbolDef& sym);
++
++// prefix + digits only ("R12"): a ref Annotate may regenerate. "R_load"
++// and "TP1a" are the author's and stay put.
++[[nodiscard]] bool is_auto_ref(const std::string& ref,
++                               const std::string& prefix);
++
++// Is `token` named in `text` as a whole word (ASCII case-insensitive,
++// like SPICE)? "R1" matches ".meas I(R1)" but not "R10" or "XR1" -
++// the guard behind Annotate's renamed-ref-in-directives warning.
++[[nodiscard]] bool mentions_token(const std::string& text,
++                                  const std::string& token);
++
++// The pure ordering core of Annotate: indices into `at` in reading
++// order - top to bottom in rows (within `row_tol`), left to right
++// within a row (world y points up).
++[[nodiscard]] std::vector<std::size_t> annotation_order(
++    const std::vector<Pos>& at, double row_tol);
++
++// --- bounds -----------------------------------------------------------------
++
++// Grows a world AABB point by point.
++struct BoundsBuilder {
++    std::optional<Bounds> box;
++
++    void add(Pos w);
++    void add(const Bounds& b);
++};
++
++// A placed part's world AABB: the symbol's local bounds through the
++// placement's transform, corner by corner. A part whose symbol the
++// library cannot find answers a 1x1 box at its anchor (the honest
++// degrade; the drawing does the same).
++[[nodiscard]] std::optional<Bounds> part_world_bounds(
++    const Schematic& s, const SymbolLibrary& lib, std::uint32_t part_id);
++
++// The wire's world polyline: endpoints through their refs (a pin
++// through its part's placement, a junction through its position), then
++// the waypoints between. A dangling endpoint (the loader's tolerance)
++// answers EMPTY - there is nothing to draw or hit.
++[[nodiscard]] std::vector<Pos> wire_path(const Schematic& s,
++                                         const SymbolLibrary& lib,
++                                         const Wire& w);
++
++// The whole schematic's content extent (for a fit command): every
++// part's bounds, every junction and label position, every wire vertex.
++[[nodiscard]] std::optional<Bounds> content_bounds(
++    const Schematic& s, const SymbolLibrary& lib);
++
++// --- picking ----------------------------------------------------------------
++
++// A hovered pin (the wire tool's target highlight, the magnetism's
++// mate target).
++struct PinHit {
++    PinRef ref{};
++    Pos pos{0.0, 0.0};
++    int dir = 0;  // the pin's pointing direction, degrees
++};
++
++// The nearest pin within `radius` of `world` (world units), or none.
++// Distance is the honest metric, so picks stay steady across zooms
++// when the caller converts its pixel radius (screen px / zoom).
++[[nodiscard]] std::optional<PinHit> hit_pin(const Schematic& s,
++                                            const SymbolLibrary& lib,
++                                            Pos world, double radius);
++
++// The nearest junction within `radius` of `world`, or none.
++[[nodiscard]] std::optional<std::uint32_t> hit_junction(
++    const Schematic& s, Pos world, double radius);
++
++// A point on an existing wire's path the cursor would land on: for
++// every segment, project the cursor, snap the projection to the FINE
++// grid (`grid` - the caller's lattice spacing), and accept the snap
++// when it stays on the segment; otherwise fall back to the segment's
++// nearer endpoint (a path vertex, always grid-aligned). Among all
++// candidates, the segment closest to the cursor wins. The returned
++// point is bit-equal to a position the wire's path passes through, so
++// nets.cpp's exact-double on_polyline accepts the junction minted
++// there - the standard EDA T-tap.
++struct WirePointSnap {
++    std::uint32_t wire = 0;  // the wire whose path was hit
++    Pos pos{0.0, 0.0};       // grid-aligned, on the wire's path
++};
++[[nodiscard]] std::optional<WirePointSnap> hit_wire_point(
++    const Schematic& s, const SymbolLibrary& lib, Pos world,
++    double radius, double grid);
++
++// Distance (not squared) from `p` to segment ab - the wire pick's
++// metric, shared with anything that walks a polyline.
++[[nodiscard]] double dist_to_segment(Pos a, Pos b, Pos p);
++
++// --- placement ----------------------------------------------------------------
++
++// The Place tool's pin magnetism: where a ghost of `sym` at the
++// ALREADY-SNAPPED `base` (rot/mirror applied) actually lands - nudged
++// whole so its nearest pin coincides with a real pin within
++// `magnet_radius` (world units). A part dropped near another one mates
++// pin-to-pin instead of a cell off; no pin in range answers `base`
++// unchanged. The snap itself is the caller's (it owns the lattice).
++[[nodiscard]] Pos magnet_shift(const Schematic& s,
++                               const SymbolLibrary& lib,
++                               const SymbolDef& sym, Pos base, int rot,
++                               bool mirror, double magnet_radius);
++
++// The attached ortho wires' fresh shapes for a move of `id` (kind =
++// the entity kind being moved), read at the entity's LANDING:
++// straight or one-bend wires (and anything with both ends on the same
++// move) re-route as a fresh horizontal-first L; a multi-bend wire
++// keeps its shape - only the adjacent waypoint slides, chosen so both
++// touching legs stay axis-aligned. Freeform (non-ortho) wires are the
++// author's and are left alone. The undo commands capture each wire's
++// CURRENT waypoints as the undo shape beside these.
++struct WireRoute {
++    std::uint32_t wire = 0;
++    std::vector<Pos> waypoints;
++};
++enum class AttachedKind : std::uint8_t { Part, Junction };
++[[nodiscard]] std::vector<WireRoute> attached_wire_routes(
++    const Schematic& s, const SymbolLibrary& lib, AttachedKind kind,
++    std::uint32_t id);
++
++// --- colors ----------------------------------------------------------------
++
++// The data-color wheel every colored series in the workspace shares
++// (i mod N, the scope's rule): the Results plot's signals and the
++// canvas's per-NET wire coloring both ride it, so a net and its
++// waveform can never look like strangers. Pure data - no canvas, no
++// theme. 0xRRGGBBAA (the r2d packing).
++[[nodiscard]] std::uint32_t series_color(std::size_t i);
++
++}  // namespace ws::circsim
+diff --git a/apps/circsim_editor/src/palette_groups.hpp b/libs/circsim/include/ws/circsim/palette.hpp
+similarity index 84%
+rename from apps/circsim_editor/src/palette_groups.hpp
+rename to libs/circsim/include/ws/circsim/palette.hpp
+index 793f51b..44df943 100644
+--- a/apps/circsim_editor/src/palette_groups.hpp
++++ b/libs/circsim/include/ws/circsim/palette.hpp
+@@ -1,8 +1,11 @@
+ #pragma once
+ 
+-// apps/circsim_editor - the Palette's grouping + search, as pure data
+-// (no gui, no canvas) so the headless suite can pin it.
+-//
++// ws::circsim - the symbol palette's grouping + search, as pure data
++// over the symbol library (no gui, no canvas). Lifted from
++// apps/circsim_editor (stage 11 - the lib extraction): the panel
++// remains the app's; the grouping POLICY - the categories, the fuzzy
++// filter, the ranking - is library domain (any frontend building a
++// parts browser over a .csym library rides here).
+ // A symbol's group is, in order:
+ //   1. the "category" text field a .csym symbol carries (it rides in
+ //      SymbolDef::unknown, so a user library can name its own groups);
+@@ -21,7 +24,7 @@
+ #include <ws/circsim/library.hpp>
+ #include <ws/circsim/symbols.hpp>
+ 
+-namespace editor {
++namespace ws::circsim {
+ 
+ struct PaletteGroup {
+     std::string name;
+@@ -55,4 +58,4 @@ struct PaletteGroup {
+ [[nodiscard]] std::vector<PaletteGroup> palette_groups(
+     const ws::circsim::SymbolLibrary& lib, std::string_view filter);
+ 
+-}  // namespace editor
++}  // namespace ws::circsim
+diff --git a/libs/circsim/src/geom.cpp b/libs/circsim/src/geom.cpp
+new file mode 100644
+index 0000000..3a2a89a
+--- /dev/null
++++ b/libs/circsim/src/geom.cpp
+@@ -0,0 +1,624 @@
++// ws::circsim - the schematic interaction geometry (see geom.hpp).
++// Everything here was lifted verbatim from apps/circsim_editor's
++// editor.cpp/document.cpp (stage 11 - the lib extraction): the math is
++// the editor's own, unchanged; only the home moved. The app's Editor
++// methods are thin forwarders onto these.
++
++#include <ws/circsim/geom.hpp>
++
++#include <algorithm>
++#include <cctype>
++#include <cmath>
++#include <cstdlib>
++
++#include <ws/core/assert.hpp>
++#include <ws/circsim/symbols.hpp>
++
++namespace ws::circsim {
++namespace {
++
++[[nodiscard]] double len(Pos p) {
++    return std::sqrt(p.x * p.x + p.y * p.y);
++}
++
++[[nodiscard]] bool eps_eq_pos(Pos p, Pos q, double eps) {
++    return std::fabs(p.x - q.x) <= eps && std::fabs(p.y - q.y) <= eps;
++}
++
++// Folds duplicate points and collinear CONTINUING middles out of a full
++// polyline (endpoint, corners, endpoint) and returns the INTERIOR - the
++// waypoints the .csim stores. A fold needs the leg to continue: a
++// reversal is collinear too, but folding it would run the wire straight
++// back through the part it just left. Shared by route_wire (fresh
++// routes) and tidy_route (existing wires).
++[[nodiscard]] std::vector<Pos> fold_interior(const std::vector<Pos>& full) {
++    constexpr double kEps = 1e-9;
++    std::vector<Pos> folded;
++    for (const Pos& p : full) {
++        if (!folded.empty() && eps_eq_pos(folded.back(), p, kEps)) {
++            continue;
++        }
++        if (folded.size() >= 2u) {
++            const Pos& p0 = folded[folded.size() - 2u];
++            const Pos& p1 = folded[folded.size() - 1u];
++            const bool collinear =
++                (std::fabs(p0.x - p1.x) <= kEps &&
++                 std::fabs(p1.x - p.x) <= kEps) ||
++                (std::fabs(p0.y - p1.y) <= kEps &&
++                 std::fabs(p1.y - p.y) <= kEps);
++            const double along = (p1.x - p0.x) * (p.x - p1.x) +
++                                 (p1.y - p0.y) * (p.y - p1.y);
++            if (collinear && along > 0.0) {
++                folded.back() = p;  // the leg extends
++                continue;
++            }
++        }
++        folded.push_back(p);
++    }
++    if (folded.size() < 2u) {
++        return {};
++    }
++    return {folded.begin() + 1, folded.end() - 1};
++}
++
++}  // namespace
++
++// --- polylines -----------------------------------------------------------
++
++std::vector<Pos> route_wire(Pos a, int a_dir, Pos b, int b_dir,
++                            bool flip) {
++    // The lead length: how far a route commits to a direction before
++    // it may turn. One grid unit reads clean at every zoom (a pin's
++    // own lead is typically three).
++    constexpr double kLead = 1.0;
++    constexpr double kEps = 1e-9;
++
++    // Directions: negative = free; non-negative dirs are folded into
++    // [0, 360). A negative pin dir is "free" (no forced lead-out).
++    // Note: pin dirs are always non-negative cardinals (0, 90, 180, 270)
++    // so negative is only used for "free" wire drafts.
++    const auto norm = [](int dir) { return dir < 0 ? -1 : dir % 360; };
++    a_dir = norm(a_dir);
++    b_dir = norm(b_dir);
++
++    const auto unit = [](int dir) -> Pos {
++        switch (dir) {
++            case 0: return {1.0, 0.0};
++            case 90: return {0.0, 1.0};
++            case 180: return {-1.0, 0.0};
++            case 270: return {0.0, -1.0};
++            default:
++                WS_CORE_ASSERT(false && "route_wire: non-cardinal pin direction");
++                return {0.0, -1.0};  // fallback to south (270)
++        }
++    };
++    if (eps_eq_pos(a, b, kEps)) {
++        return {};  // a zero-length wire has no route (not a loop)
++    }
++
++    Pos from = a;  // where the route is free to turn: past a's lead
++    if (a_dir >= 0) {
++        const Pos u = unit(a_dir);
++        from = {a.x + u.x * kLead, a.y + u.y * kLead};
++    }
++    Pos target = b;  // ... and the point the route aims for before b
++    if (b_dir >= 0) {
++        const Pos u = unit(b_dir);
++        // Approach b AGAINST b_dir: a pin's dir faces outward (away
++        // from the part's body - the a side's from = a + u*lead reads
++        // it exactly that way), so a wire lands tip-first, traveling
++        // the reverse of the facing from the pin's own outside. The
++        // stop is one lead short of the tip ON that outside
++        // (b + u*lead). The old b - u*lead sat the stop inside the
++        // part: the final leg ran out through the body and doubled
++        // back to the pin - every pin landing stabbed its part.
++        target = {b.x + u.x * kLead, b.y + u.y * kLead};
++    }
++
++    // Full polyline a -> ... -> b; the stored waypoints are its
++    // interior after folding. A corner is needed only when the free
++    // point past a's lead and the approach point before b share
++    // neither axis (aligned endpoints fold away).
++    const bool corner_needed =
++        !(std::fabs(from.x - target.x) <= kEps) &&
++        !(std::fabs(from.y - target.y) <= kEps);
++    std::vector<Pos> full;
++    full.push_back(a);
++    if (a_dir >= 0) {
++        full.push_back(from);
++    }
++    if (corner_needed) {
++        // One corner (an L): the leg out of `from` continues the
++        // committed direction (horizontal when free), the leg into
++        // `target` closes. The final approach leg target -> b already
++        // runs along b_dir, so one corner always suffices.
++        // `flip` swaps the stock choice (the Tab toggle): the same
++        // two endpoints, the corner on the other diagonal.
++        const bool start_horizontal =
++            (a_dir < 0 || a_dir == 0 || a_dir == 180) != flip;
++        if (start_horizontal) {
++            full.push_back(Pos{target.x, from.y});
++        } else {
++            full.push_back(Pos{from.x, target.y});
++        }
++    }
++    if (b_dir >= 0) {
++        full.push_back(target);
++    }
++    full.push_back(b);
++
++    // Fold duplicates and collinear middles (these become the stored
++    // waypoints; noise would ride straight into the .csim). A fold
++    // needs the leg to CONTINUE: a reversal is collinear too, but
++    // folding it would drop the lead and run the wire straight back
++    // through the part it just left - a pin at (0,0) facing +x with a
++    // target at (-5,0) keeps its (1,0) lead-out corner.
++    return fold_interior(full);
++}
++
++std::vector<Pos> tidy_route(const std::vector<Pos>& path) {
++    constexpr double kEps = 1e-9;
++    if (path.size() < 2u) {
++        return {};
++    }
++    // Every diagonal leg gets one axis-aligned corner (horizontal
++    // first - the stock bend); axis-aligned legs pass through. The fold
++    // then merges the corner into a neighbouring collinear leg where it
++    // can, so a wire that only had a stray diagonal comes out with the
++    // fewest bends that keep the rest of its shape.
++    std::vector<Pos> full;
++    full.reserve(path.size() * 2u);
++    full.push_back(path.front());
++    for (std::size_t i = 1; i < path.size(); ++i) {
++        const Pos p = full.back();
++        const Pos q = path[i];
++        if (!(std::fabs(p.x - q.x) <= kEps) &&
++            !(std::fabs(p.y - q.y) <= kEps)) {
++            full.push_back(Pos{q.x, p.y});
++        }
++        full.push_back(q);
++    }
++    return fold_interior(full);
++}
++
++// --- refdes ----------------------------------------------------------------
++
++std::string next_ref(const Schematic& s, const SymbolDef& sym) {
++    if (sym.ref_prefix.empty()) {
++        return "";
++    }
++    unsigned long highest = 0;
++    for (const Part& p : s.parts()) {
++        if (p.ref.size() <= sym.ref_prefix.size()) {
++            continue;
++        }
++        if (p.ref.compare(0, sym.ref_prefix.size(), sym.ref_prefix) != 0) {
++            continue;
++        }
++        const std::string tail = p.ref.substr(sym.ref_prefix.size());
++        bool digits = true;
++        for (const char c : tail) {
++            if (std::isdigit(static_cast<unsigned char>(c)) == 0) {
++                digits = false;
++                break;
++            }
++        }
++        if (digits) {
++            highest =
++                std::max(highest, std::strtoul(tail.c_str(), nullptr, 10));
++        }
++    }
++    return sym.ref_prefix + std::to_string(highest + 1);
++}
++
++bool is_auto_ref(const std::string& ref, const std::string& prefix) {
++    if (ref.size() <= prefix.size() ||
++        ref.compare(0, prefix.size(), prefix) != 0) {
++        return false;
++    }
++    for (std::size_t i = prefix.size(); i < ref.size(); ++i) {
++        if (std::isdigit(static_cast<unsigned char>(ref[i])) == 0) {
++            return false;
++        }
++    }
++    return true;
++}
++
++bool mentions_token(const std::string& text, const std::string& token) {
++    if (token.empty()) {
++        return false;
++    }
++    const auto lower = [](std::string str) {
++        for (char& ch : str) {
++            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
++        }
++        return str;
++    };
++    const auto word = [](char ch) {
++        return std::isalnum(static_cast<unsigned char>(ch)) != 0 || ch == '_';
++    };
++    const std::string hay = lower(text);
++    const std::string needle = lower(token);
++    for (std::size_t at = hay.find(needle); at != std::string::npos;
++         at = hay.find(needle, at + 1)) {
++        const std::size_t end = at + needle.size();
++        const bool left = at == 0 || !word(hay[at - 1]);
++        const bool right = end >= hay.size() || !word(hay[end]);
++        if (left && right) {
++            return true;
++        }
++    }
++    return false;
++}
++
++std::vector<std::size_t> annotation_order(const std::vector<Pos>& at,
++                                          double row_tol) {
++    std::vector<std::size_t> idx(at.size());
++    for (std::size_t i = 0; i < idx.size(); ++i) {
++        idx[i] = i;
++    }
++    // Top first (world y points up); equal heights keep list order.
++    std::stable_sort(idx.begin(), idx.end(),
++                     [&](std::size_t a, std::size_t b) {
++                         return at[a].y > at[b].y;
++                     });
++    // Sweep into rows anchored at each row's top part, then left to
++    // right inside the row (stable: identical x keeps the order above).
++    std::size_t i = 0;
++    while (i < idx.size()) {
++        const double anchor = at[idx[i]].y;
++        std::size_t j = i + 1;
++        while (j < idx.size() && anchor - at[idx[j]].y <= row_tol) {
++            ++j;
++        }
++        std::stable_sort(idx.begin() + static_cast<std::ptrdiff_t>(i),
++                         idx.begin() + static_cast<std::ptrdiff_t>(j),
++                         [&](std::size_t a, std::size_t b) {
++                             return at[a].x < at[b].x;
++                         });
++        i = j;
++    }
++    return idx;
++}
++
++// --- bounds -----------------------------------------------------------------
++
++void BoundsBuilder::add(Pos w) {
++    if (!box.has_value()) {
++        box = Bounds{w.x, w.y, w.x, w.y};
++        return;
++    }
++    box->min_x = std::min(box->min_x, w.x);
++    box->min_y = std::min(box->min_y, w.y);
++    box->max_x = std::max(box->max_x, w.x);
++    box->max_y = std::max(box->max_y, w.y);
++}
++
++void BoundsBuilder::add(const Bounds& b) {
++    add(Pos{b.min_x, b.min_y});
++    add(Pos{b.max_x, b.max_y});
++}
++
++std::optional<Bounds> part_world_bounds(const Schematic& s,
++                                        const SymbolLibrary& lib,
++                                        std::uint32_t part_id) {
++    const Part* p = s.find_part(part_id);
++    if (p == nullptr) {
++        return std::nullopt;
++    }
++    const SymbolDef* sym = lib.find(p->symbol);
++    if (sym == nullptr) {
++        return Bounds{p->pos.x - 1.0, p->pos.y - 1.0, p->pos.x + 1.0,
++                      p->pos.y + 1.0};
++    }
++    const Bounds local = symbol_bounds(*sym);
++    BoundsBuilder out;
++    for (const Pos corner :
++         {Pos{local.min_x, local.min_y}, Pos{local.max_x, local.min_y},
++          Pos{local.min_x, local.max_y}, Pos{local.max_x, local.max_y}}) {
++        out.add(transform_pos(*p, corner));
++    }
++    return out.box;
++}
++
++std::vector<Pos> wire_path(const Schematic& s, const SymbolLibrary& lib,
++                           const Wire& w) {
++    std::vector<Pos> out;
++    const auto endpoint_pos = [&](const WireEndpoint& end)
++        -> std::optional<Pos> {
++        if (const PinRef* pin = std::get_if<PinRef>(&end)) {
++            const Part* p = s.find_part(pin->part);
++            const SymbolDef* sym = p != nullptr ? lib.find(p->symbol)
++                                                : nullptr;
++            if (p != nullptr && sym != nullptr &&
++                pin->pin < sym->pins.size()) {
++                return pin_pos(*sym, *p, pin->pin);
++            }
++            return std::nullopt;
++        }
++        const JunctionRef* j = std::get_if<JunctionRef>(&end);
++        const Junction* found =
++            j != nullptr ? s.find_junction(j->junction) : nullptr;
++        if (found != nullptr) {
++            return found->pos;
++        }
++        return std::nullopt;
++    };
++    const std::optional<Pos> a = endpoint_pos(w.a);
++    const std::optional<Pos> b = endpoint_pos(w.b);
++    if (!a.has_value() || !b.has_value()) {
++        return out;  // dangling: the loader's tolerance, nothing to draw
++    }
++    out.reserve(w.waypoints.size() + 2);
++    out.push_back(*a);
++    for (const Pos& p : w.waypoints) {
++        out.push_back(p);
++    }
++    out.push_back(*b);
++    return out;
++}
++
++std::optional<Bounds> content_bounds(const Schematic& s,
++                                     const SymbolLibrary& lib) {
++    BoundsBuilder out;
++    for (const Part& p : s.parts()) {
++        if (const std::optional<Bounds> b = part_world_bounds(s, lib, p.id)) {
++            out.add(*b);
++        }
++    }
++    for (const Junction& j : s.junctions()) {
++        out.add(j.pos);
++    }
++    for (const Label& l : s.labels()) {
++        out.add(l.pos);
++    }
++    for (const Wire& w : s.wires()) {
++        for (const Pos& p : wire_path(s, lib, w)) {
++            out.add(p);
++        }
++    }
++    return out.box;
++}
++
++// --- picking ----------------------------------------------------------------
++
++double dist_to_segment(Pos a, Pos b, Pos p) {
++    const Pos ab{b.x - a.x, b.y - a.y};
++    const Pos ap{p.x - a.x, p.y - a.y};
++    const double denom = ab.x * ab.x + ab.y * ab.y;
++    if (denom <= 0.0) {
++        return len(ap);
++    }
++    double t = (ap.x * ab.x + ap.y * ab.y) / denom;
++    t = std::max(0.0, std::min(1.0, t));
++    return len(Pos{ap.x - t * ab.x, ap.y - t * ab.y});
++}
++
++std::optional<PinHit> hit_pin(const Schematic& s,
++                              const SymbolLibrary& lib, Pos world,
++                              double radius) {
++    std::optional<PinHit> best;
++    double best_d = radius;
++    for (const Part& p : s.parts()) {
++        const SymbolDef* sym = lib.find(p.symbol);
++        if (sym == nullptr) {
++            continue;
++        }
++        for (std::size_t i = 0; i < sym->pins.size(); ++i) {
++            const Pos at = pin_pos(*sym, p, static_cast<std::uint32_t>(i));
++            const double d = len(Pos{at.x - world.x, at.y - world.y});
++            if (d < best_d) {
++                best_d = d;
++                best = PinHit{PinRef{p.id, static_cast<std::uint32_t>(i)},
++                              at, sym->pins[i].dir};
++            }
++        }
++    }
++    return best;
++}
++
++std::optional<std::uint32_t> hit_junction(const Schematic& s, Pos world,
++                                          double radius) {
++    std::optional<std::uint32_t> best;
++    double best_d = radius;
++    for (const Junction& j : s.junctions()) {
++        const double d = len(Pos{j.pos.x - world.x, j.pos.y - world.y});
++        if (d < best_d) {
++            best_d = d;
++            best = j.id;
++        }
++    }
++    return best;
++}
++
++std::optional<WirePointSnap> hit_wire_point(const Schematic& s,
++                                            const SymbolLibrary& lib,
++                                            Pos world, double radius,
++                                            double grid) {
++    std::optional<WirePointSnap> best;
++    double best_d = radius;
++    const auto snap_one = [&](double v) {
++        // The FINE lattice, the canvas grid's own expression
++        // (round(v / base) * base) - the same arithmetic
++        // ws::ui::canvas::snap_coord spells, so a snap here is
++        // bit-equal to the one the editor's own snapping produces.
++        return grid > 0.0 ? std::round(v / grid) * grid : v;
++    };
++    for (const Wire& w : s.wires()) {
++        const std::vector<Pos> path = wire_path(s, lib, w);
++        for (std::size_t i = 1; i < path.size(); ++i) {
++            const Pos a = path[i - 1];
++            const Pos b = path[i];
++            const Pos ab{b.x - a.x, b.y - a.y};
++            const Pos ap{world.x - a.x, world.y - a.y};
++            const double denom = ab.x * ab.x + ab.y * ab.y;
++            double t = denom > 0.0 ? (ap.x * ab.x + ap.y * ab.y) / denom
++                                   : 0.0;
++            t = std::max(0.0, std::min(1.0, t));
++            const Pos proj{a.x + t * ab.x, a.y + t * ab.y};
++            // Snap the projection to the fine grid; for an ortho
++            // segment one coordinate is the segment's stationary
++            // value (already grid-aligned) and snaps to itself, the
++            // other rounds to the nearest grid line.
++            Pos cand{snap_one(proj.x), snap_one(proj.y)};
++            // Verify cand lies on segment ab with exact equality
++            // (the same on_segment nets.cpp runs). If not, the grid
++            // snap drifted off the segment - use the nearer endpoint.
++            // Note: the endpoint may be a pin or junction position.
++            // snap_wire_target checks pin -> junction -> wire-point in
++            // that order with the same radius, so the caller is safe
++            // today - but this is a fragile ordering dependency. A more
++            // robust approach would explicitly skip endpoints that are
++            // pins/junctions here.
++            const double cross =
++                (b.x - a.x) * (cand.y - a.y) - (b.y - a.y) * (cand.x - a.x);
++            const bool on_seg =
++                cross == 0.0 &&
++                cand.x >= std::min(a.x, b.x) &&
++                cand.x <= std::max(a.x, b.x) &&
++                cand.y >= std::min(a.y, b.y) &&
++                cand.y <= std::max(a.y, b.y);
++            if (!on_seg) {
++                const double da = len(Pos{a.x - world.x, a.y - world.y});
++                const double db = len(Pos{b.x - world.x, b.y - world.y});
++                cand = da <= db ? a : b;
++            }
++            // Accept on the SEGMENT's distance to the cursor; the
++            // returned candidate is still the grid-aligned point the
++            // junction will be minted at. Measuring the distance to
++            // the SNAPPED candidate missed a cursor riding the wire
++            // between grid intersections at high zoom - its snap sits
++            // half a cell away.
++            const double d = dist_to_segment(a, b, world);
++            if (d <= best_d) {
++                best_d = d;
++                best = WirePointSnap{w.id, cand};
++            }
++        }
++    }
++    return best;
++}
++
++// --- placement ----------------------------------------------------------------
++
++Pos magnet_shift(const Schematic& s, const SymbolLibrary& lib,
++                 const SymbolDef& sym, Pos base, int rot, bool mirror,
++                 double magnet_radius) {
++    // Where would each ghost pin land at the snapped position? If one
++    // is close to a real pin, shift the whole ghost so they coincide.
++    Part probe{};
++    probe.pos = base;
++    probe.rot = rot;
++    probe.mirror = mirror;
++    std::optional<Pos> best_shift;
++    double best_d = magnet_radius;
++    for (std::size_t i = 0; i < sym.pins.size(); ++i) {
++        const Pos at = pin_pos(sym, probe, static_cast<std::uint32_t>(i));
++        const std::optional<PinHit> hit = hit_pin(s, lib, at, best_d);
++        if (!hit.has_value()) {
++            continue;
++        }
++        const Pos shift{hit->pos.x - at.x, hit->pos.y - at.y};
++        const double d = len(shift);
++        if (d < best_d || !best_shift.has_value()) {
++            best_d = d;
++            best_shift = shift;
++        }
++    }
++    if (!best_shift.has_value()) {
++        return base;
++    }
++    return {base.x + best_shift->x, base.y + best_shift->y};
++}
++
++std::vector<WireRoute> attached_wire_routes(const Schematic& s,
++                                            const SymbolLibrary& lib,
++                                            AttachedKind kind,
++                                            std::uint32_t id) {
++    constexpr double kEps = 1e-9;
++    std::vector<WireRoute> out;
++    const auto hits = [&](const WireEndpoint& e) {
++        if (kind == AttachedKind::Part) {
++            const auto* pin = std::get_if<PinRef>(&e);
++            return pin != nullptr && pin->part == id;
++        }
++        const auto* j = std::get_if<JunctionRef>(&e);
++        return j != nullptr && j->junction == id;
++    };
++    for (const Wire& w : s.wires()) {
++        // A cosmetic freeform wire's shape is the author's - only the
++        // ortho constraint re-routes.
++        if (!w.ortho) {
++            continue;
++        }
++        const bool a_hit = hits(w.a);
++        const bool b_hit = hits(w.b);
++        if (!a_hit && !b_hit) {
++            continue;
++        }
++        const std::vector<Pos> path = wire_path(s, lib, w);
++        if (path.size() < 2u) {
++            continue;  // dangling: nothing to keep straight
++        }
++        // Straight or one-bend wires (and anything with both ends on
++        // the same move) re-route as a fresh horizontal-first L; a
++        // multi-bend wire keeps its shape - only the adjacent waypoint
++        // slides, chosen so both touching legs stay axis-aligned.
++        std::vector<Pos> mid(path.begin() + 1, path.end() - 1);
++        if (mid.size() <= 1u || (a_hit && b_hit)) {
++            WireRoute r;
++            r.wire = w.id;
++            r.waypoints = route_wire(path.front(), -1, path.back(), -1);
++            out.push_back(std::move(r));
++            continue;
++        }
++        if (a_hit) {
++            // The leg into mid[1] keeps its orientation: a vertical
++            // continuation keeps x (the first leg turns horizontal),
++            // a horizontal one keeps y (the first leg turns vertical).
++            if (std::fabs(mid[0].x - mid[1].x) <= kEps) {
++                mid[0].y = path.front().y;
++            } else {
++                mid[0].x = path.front().x;
++            }
++        }
++        if (b_hit) {
++            Pos& last = mid.back();
++            const Pos& prev = mid[mid.size() - 2u];
++            if (std::fabs(prev.y - last.y) <= kEps) {
++                last.x = path.back().x;
++            } else {
++                last.y = path.back().y;
++            }
++        }
++        WireRoute r;
++        r.wire = w.id;
++        r.waypoints = std::move(mid);
++        out.push_back(std::move(r));
++    }
++    return out;
++}
++
++// --- colors ----------------------------------------------------------------
++
++std::uint32_t series_color(std::size_t i) {
++    // The same eight the Results plot has always painted its signals
++    // in, now the canvas's nets wear them too. Spelled as packed
++    // 0xRRGGBBAA literals (the r2d packing) - the lib owns no ui
++    // include; the app's editor.hpp re-exports the name, and the
++    // values are byte-identical to the rgba(r, g, b) spelling the
++    // editor app used (0xE05A4EFF == rgba(224, 90, 78), ...).
++    static constexpr std::uint32_t kSeries[] = {
++        0xE05A4EFFu,  // red
++        0x4EA1E0FFu,  // blue
++        0x58B55CFFu,  // green
++        0xD39A2AFFu,  // amber
++        0x9A6FD3FFu,  // purple
++        0x4EC9C0FFu,  // teal
++        0xD35A9EFFu,  // pink
++        0x8F9A4EFFu,  // olive
++    };
++    return kSeries[i % (sizeof kSeries / sizeof kSeries[0])];
++}
++
++}  // namespace ws::circsim
+diff --git a/apps/circsim_editor/src/palette_groups.cpp b/libs/circsim/src/palette.cpp
+similarity index 96%
+rename from apps/circsim_editor/src/palette_groups.cpp
+rename to libs/circsim/src/palette.cpp
+index 1936d92..394b6d4 100644
+--- a/apps/circsim_editor/src/palette_groups.cpp
++++ b/libs/circsim/src/palette.cpp
+@@ -1,6 +1,8 @@
+-// apps/circsim_editor - the Palette's grouping + search (see the header).
++// ws::circsim - the symbol palette's grouping + search (see the
++// header). Lifted verbatim from apps/circsim_editor's
++// palette_groups.cpp (stage 11 - the lib extraction).
+ 
+-#include "palette_groups.hpp"
++#include <ws/circsim/palette.hpp>
+ 
+ #include <algorithm>
+ #include <array>
+@@ -9,7 +11,7 @@
+ 
+ #include <ws/settings/json.hpp>
+ 
+-namespace editor {
++namespace ws::circsim {
+ 
+ std::string palette_category(const ws::circsim::SymbolDef& sym) {
+     if (const ws::settings::json::Value* v = sym.unknown.find("category")) {
+@@ -198,4 +200,4 @@ std::vector<PaletteGroup> palette_groups(const ws::circsim::SymbolLibrary& lib,
+     return groups;
+ }
+ 
+-}  // namespace editor
++}  // namespace ws::circsim
+diff --git a/libs/circsim/tests/test_geom.cpp b/libs/circsim/tests/test_geom.cpp
+new file mode 100644
+index 0000000..fd9867d
+--- /dev/null
++++ b/libs/circsim/tests/test_geom.cpp
+@@ -0,0 +1,329 @@
++// ws::circsim - the schematic interaction geometry, headless (the
++// suite geom.hpp promises). The cases here pin the LIB API directly;
++// the editor app's own suites keep driving the same math through the
++// Editor forwarders (test_canvas_panel.cpp) - the behaviors below are
++// the ones that suite was born pinning, restated against the lib seam
++// so a second consumer (a batch CLI, another frontend) can rely on
++// them without the app.
++
++#include <doctest/doctest.h>  // (this suite rides test_format.cpp's main - the lib suite's shape)
++
++#include <cmath>
++#include <cstdint>
++#include <string>
++#include <vector>
++
++#include <ws/circsim/geom.hpp>
++#include <ws/circsim/library.hpp>
++
++using ws::circsim::Pos;
++
++namespace {
++
++// A two-resistor sheet: R1 at the origin (pins left/right), R2 to the
++// right, a wire joining them, a junction on the wire's mid, a label
++// and a directive naming R1 (annotate's warning case).
++[[nodiscard]] ws::circsim::Schematic two_resistors() {
++    ws::circsim::Schematic s;
++    const ws::circsim::SymbolLibrary lib;
++    const ws::circsim::SymbolDef* r = lib.find("r");
++    REQUIRE(r != nullptr);
++
++    ws::circsim::Part p1{};
++    p1.id = s.alloc_id();
++    p1.symbol = r->key;
++    p1.ref = "R1";
++    p1.pos = {0.0, 0.0};
++    s.parts_mut().push_back(p1);
++    s.bump();
++
++    ws::circsim::Part p2{};
++    p2.id = s.alloc_id();
++    p2.symbol = r->key;
++    p2.ref = "R9";
++    p2.pos = {8.0, 0.0};
++    s.parts_mut().push_back(p2);
++    s.bump();
++    return s;
++}
++
++}  // namespace
++
++// --- route_wire -------------------------------------------------------------
++
++TEST_CASE("route_wire: a reversal target keeps the lead-out corner") {
++    // A pin at (0,0) facing +x (dir 0) with the target at (-5,0): the
++    // collinear fold once read the reversal as a continuation and
++    // swallowed the (1,0) lead - the wire ran straight back through
++    // the part body it just left.
++    const std::vector<Pos> w =
++        ws::circsim::route_wire({0.0, 0.0}, 0, {-5.0, 0.0}, -1);
++    REQUIRE(w.size() == 1);
++    CHECK(w[0].x == 1.0);
++    CHECK(w[0].y == 0.0);
++}
++
++TEST_CASE("route_wire: 360 degrees routes exactly as 0") {
++    const std::vector<Pos> a =
++        ws::circsim::route_wire({0.0, 0.0}, 0, {4.0, 3.0}, -1);
++    const std::vector<Pos> b =
++        ws::circsim::route_wire({0.0, 0.0}, 360, {4.0, 3.0}, -1);
++    REQUIRE(a.size() == b.size());
++    for (std::size_t i = 0; i < a.size(); ++i) {
++        CHECK(a[i].x == b[i].x);
++        CHECK(a[i].y == b[i].y);
++    }
++}
++
++TEST_CASE("route_wire: aligned endpoints fold to nothing") {
++    // Both on y=0, free ends: no corner, no waypoints.
++    CHECK(ws::circsim::route_wire({0.0, 0.0}, -1, {5.0, 0.0}, -1)
++              .empty());
++}
++
++// --- tidy_route ---------------------------------------------------------------
++
++TEST_CASE("tidy_route: every diagonal leg earns its axis-aligned corner") {
++    // (0,0) -> (2,1) -> (4,0): both legs are diagonal, so each earns a
++    // corner (horizontal-first, the stock bend) - the author's vertex
++    // (2,1) survives as the middle of the Z, the fewest bends that
++    // keep the rest of the shape.
++    const std::vector<Pos> w = ws::circsim::tidy_route(
++        {{0.0, 0.0}, {2.0, 1.0}, {4.0, 0.0}});
++    REQUIRE(w.size() == 3);
++    CHECK(w[0] == Pos{2.0, 0.0});
++    CHECK(w[1] == Pos{2.0, 1.0});
++    CHECK(w[2] == Pos{4.0, 1.0});
++}
++
++TEST_CASE("tidy_route: duplicate points fold away") {
++    const std::vector<Pos> w = ws::circsim::tidy_route(
++        {{0.0, 0.0}, {0.0, 0.0}, {3.0, 0.0}});
++    CHECK(w.empty());
++}
++
++// --- refdes -------------------------------------------------------------------
++
++TEST_CASE("next_ref: the highest on the prefix, plus one") {
++    const ws::circsim::Schematic s = two_resistors();
++    const ws::circsim::SymbolLibrary lib;
++    const ws::circsim::SymbolDef* r = lib.find("r");
++    REQUIRE(r != nullptr);
++    CHECK(ws::circsim::next_ref(s, *r) == "R10");
++}
++
++TEST_CASE("next_ref: a ref-less symbol answers empty") {
++    const ws::circsim::SymbolLibrary lib;
++    const ws::circsim::SymbolDef* gnd = lib.find("gnd");
++    REQUIRE(gnd != nullptr);
++    CHECK(ws::circsim::next_ref({}, *gnd).empty());
++}
++
++TEST_CASE("is_auto_ref: prefix + digits only") {
++    CHECK(ws::circsim::is_auto_ref("R12", "R"));
++    CHECK_FALSE(ws::circsim::is_auto_ref("R_load", "R"));
++    CHECK_FALSE(ws::circsim::is_auto_ref("TP1a", "TP"));
++    CHECK_FALSE(ws::circsim::is_auto_ref("R", "R"));
++}
++
++TEST_CASE("mentions_token: whole words only, ASCII case-insensitive") {
++    CHECK(ws::circsim::mentions_token(".meas I(R1)", "R1"));
++    CHECK_FALSE(ws::circsim::mentions_token(".meas I(R10)", "R1"));
++    CHECK_FALSE(ws::circsim::mentions_token("XR1", "R1"));
++    CHECK(ws::circsim::mentions_token("i(r1) = 1", "R1"));
++    CHECK_FALSE(ws::circsim::mentions_token("anything", ""));
++}
++
++TEST_CASE("annotation_order: rows top to bottom, left to right") {
++    // Four parts: two on the top row (B left of A on disk), two below.
++    const std::vector<Pos> at{{6.0, 5.0}, {0.0, 5.0}, {6.0, 0.0},
++                              {0.0, 0.0}};
++    const std::vector<std::size_t> order =
++        ws::circsim::annotation_order(at, 1.0);
++    REQUIRE(order.size() == 4);
++    CHECK(order[0] == 1);  // top row, left
++    CHECK(order[1] == 0);  // top row, right
++    CHECK(order[2] == 3);  // bottom row, left
++    CHECK(order[3] == 2);  // bottom row, right
++}
++
++// --- bounds -------------------------------------------------------------------
++
++TEST_CASE("part_world_bounds: the transformed symbol box, per part id") {
++    const ws::circsim::Schematic s = two_resistors();
++    const ws::circsim::SymbolLibrary lib;
++    const ws::circsim::Part* p1 = s.find_part(
++        s.parts().front().id);
++    REQUIRE(p1 != nullptr);
++    const std::optional<ws::circsim::Bounds> b =
++        ws::circsim::part_world_bounds(s, lib, p1->id);
++    REQUIRE(b.has_value());
++    // The r symbol spans roughly [-3,3] x [-1,1] locally; unrotated at
++    // the origin the world box is the local box.
++    CHECK(b->min_x <= -2.0);
++    CHECK(b->max_x >= 2.0);
++    CHECK(b->min_y <= -0.5);
++    CHECK(b->max_y >= 0.5);
++    // A missing id answers nothing.
++    CHECK_FALSE(
++        ws::circsim::part_world_bounds(s, lib, 999999u).has_value());
++}
++
++TEST_CASE("content_bounds: covers parts, junctions, labels and wires") {
++    ws::circsim::Schematic s = two_resistors();
++    const ws::circsim::SymbolLibrary lib;
++
++    ws::circsim::Junction j{};
++    j.id = s.alloc_id();
++    j.pos = {-20.0, 7.0};
++    s.junctions_mut().push_back(j);
++    s.bump();
++
++    ws::circsim::Label l{};
++    l.id = s.alloc_id();
++    l.pos = {25.0, -9.0};
++    l.name = "net";
++    s.labels_mut().push_back(l);
++    s.bump();
++
++    const std::optional<ws::circsim::Bounds> b =
++        ws::circsim::content_bounds(s, lib);
++    REQUIRE(b.has_value());
++    CHECK(b->min_x <= -20.0);
++    CHECK(b->max_x >= 25.0);
++    CHECK(b->min_y <= -9.0);
++    CHECK(b->max_y >= 7.0);
++}
++
++TEST_CASE("wire_path: endpoints through their refs, waypoints between") {
++    ws::circsim::Schematic s;
++    const ws::circsim::SymbolLibrary lib;
++
++    ws::circsim::Junction a{};
++    a.id = s.alloc_id();
++    a.pos = {0.0, 0.0};
++    s.junctions_mut().push_back(a);
++    s.bump();
++    ws::circsim::Junction b{};
++    b.id = s.alloc_id();
++    b.pos = {4.0, 0.0};
++    s.junctions_mut().push_back(b);
++    s.bump();
++
++    ws::circsim::Wire w = ws::circsim::Wire::endpoints(
++        ws::circsim::JunctionRef{a.id}, ws::circsim::JunctionRef{b.id});
++    w.id = s.alloc_id();
++    w.waypoints = {{2.0, 2.0}};
++    s.wires_mut().push_back(w);
++    s.bump();
++
++    const std::vector<Pos> path = ws::circsim::wire_path(s, lib, w);
++    REQUIRE(path.size() == 3);
++    CHECK(path[0] == Pos{0.0, 0.0});
++    CHECK(path[1] == Pos{2.0, 2.0});
++    CHECK(path[2] == Pos{4.0, 0.0});
++}
++
++// --- picking ------------------------------------------------------------------
++
++TEST_CASE("hit_pin and hit_junction: the nearest within the radius") {
++    ws::circsim::Schematic s = two_resistors();
++    const ws::circsim::SymbolLibrary lib;
++    const ws::circsim::Part* p1 = &s.parts().front();
++
++    // R1's left pin sits near (-3, 0) at the stock symbol.
++    const std::optional<ws::circsim::PinHit> hit =
++        ws::circsim::hit_pin(s, lib, {-3.0, 0.2}, 1.0);
++    REQUIRE(hit.has_value());
++    CHECK(hit->ref.part == p1->id);
++    CHECK(std::fabs(hit->pos.x - (-3.0)) < 1.0);
++    CHECK(std::fabs(hit->pos.y - 0.0) < 1.0);
++    CHECK(hit->dir == 180);  // the left pin faces west
++
++    // Far away: nothing.
++    CHECK_FALSE(
++        ws::circsim::hit_pin(s, lib, {50.0, 50.0}, 1.0).has_value());
++
++    ws::circsim::Junction j{};
++    j.id = s.alloc_id();
++    j.pos = {2.0, 5.0};
++    s.junctions_mut().push_back(j);
++    s.bump();
++    CHECK(ws::circsim::hit_junction(s, {2.3, 5.2}, 0.6).has_value());
++    CHECK_FALSE(ws::circsim::hit_junction(s, {2.3, 5.2}, 0.2).has_value());
++}
++
++TEST_CASE("hit_wire_point: the snap is bit-equal to a path vertex") {
++    // A two-segment path (an L): (0,0) -> (3,0) -> (3,3). A click just
++    // past the corner, off the grid: the snap lands on the nearer
++    // ENDPOINT (a path vertex, always grid-aligned) when the grid snap
++    // would drift off the segment - the junction minted there is
++    // accepted by nets.cpp's exact-double on_polyline.
++    ws::circsim::Schematic s;
++    const ws::circsim::SymbolLibrary lib;
++
++    ws::circsim::Junction a{};
++    a.id = s.alloc_id();
++    a.pos = {0.0, 0.0};
++    s.junctions_mut().push_back(a);
++    s.bump();
++    ws::circsim::Junction b{};
++    b.id = s.alloc_id();
++    b.pos = {3.0, 3.0};
++    s.junctions_mut().push_back(b);
++    s.bump();
++
++    ws::circsim::Wire w = ws::circsim::Wire::endpoints(
++        ws::circsim::JunctionRef{a.id}, ws::circsim::JunctionRef{b.id});
++    w.id = s.alloc_id();
++    w.waypoints = {{3.0, 0.0}};
++    s.wires_mut().push_back(w);
++    s.bump();
++
++    // A click near the vertical leg's lower end: the snap is the
++    // corner vertex (3,0) exactly.
++    const std::optional<ws::circsim::WirePointSnap> hit =
++        ws::circsim::hit_wire_point(s, lib, {3.2, 0.1}, 0.4, 1.0);
++    REQUIRE(hit.has_value());
++    CHECK(hit->wire == w.id);
++    CHECK(hit->pos.x == 3.0);
++    CHECK(hit->pos.y == 0.0);
++
++    // Far from every wire: nothing.
++    CHECK_FALSE(ws::circsim::hit_wire_point(s, lib, {20.0, 20.0}, 0.4, 1.0)
++                    .has_value());
++}
++
++// --- placement ----------------------------------------------------------------
++
++TEST_CASE("magnet_shift: no pin in range answers the base unchanged") {
++    const ws::circsim::Schematic s = two_resistors();
++    const ws::circsim::SymbolLibrary lib;
++    const ws::circsim::SymbolDef* r = lib.find("r");
++    REQUIRE(r != nullptr);
++    const Pos base{0.0, 20.0};  // far from every pin
++    const Pos at = ws::circsim::magnet_shift(s, lib, *r, base, 0, false,
++                                             2.0);
++    CHECK(at.x == base.x);
++    CHECK(at.y == base.y);
++}
++
++TEST_CASE("attached_wire_routes: no wires, no routes") {
++    const ws::circsim::Schematic s = two_resistors();
++    const ws::circsim::SymbolLibrary lib;
++    const ws::circsim::Part* p1 = &s.parts().front();
++    CHECK(ws::circsim::attached_wire_routes(
++              s, lib, ws::circsim::AttachedKind::Part, p1->id)
++              .empty());
++}
++
++// --- colors ----------------------------------------------------------------
++
++TEST_CASE("series_color: the wheel cycles every eight") {
++    CHECK(ws::circsim::series_color(0) == ws::circsim::series_color(8));
++    CHECK(ws::circsim::series_color(3) != ws::circsim::series_color(4));
++    // The head the Results plot always painted first: red,
++    // 0xE05A4EFF (the r2d packing).
++    CHECK(ws::circsim::series_color(0) == 0xE05A4EFFu);
++    CHECK(ws::circsim::series_color(1) == 0x4EA1E0FFu);
++}
+diff --git a/apps/circsim_editor/tests/test_palette_groups.cpp b/libs/circsim/tests/test_palette.cpp
+similarity index 77%
+rename from apps/circsim_editor/tests/test_palette_groups.cpp
+rename to libs/circsim/tests/test_palette.cpp
+index e97bf50..910af5a 100644
+--- a/apps/circsim_editor/tests/test_palette_groups.cpp
++++ b/libs/circsim/tests/test_palette.cpp
+@@ -1,9 +1,9 @@
+-// apps/circsim_editor - the Palette's grouping + search, headless.
++// ws::circsim - the symbol palette's grouping + search, headless
++// (moved from apps/circsim_editor/tests, where the suite was born).
+ 
+-#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+-#include <doctest/doctest.h>
++#include <doctest/doctest.h>  // (this suite rides test_format.cpp's main - the lib suite's shape)
+ 
+-#include "../src/palette_groups.hpp"
++#include <ws/circsim/palette.hpp>
+ 
+ #include <string>
+ #include <vector>
+@@ -13,7 +13,7 @@
+ 
+ namespace {
+ 
+-std::vector<std::string> keys_of(const editor::PaletteGroup& g) {
++std::vector<std::string> keys_of(const ws::circsim::PaletteGroup& g) {
+     std::vector<std::string> out;
+     for (const ws::circsim::SymbolDef* s : g.items) {
+         out.push_back(s->key);
+@@ -25,7 +25,7 @@ std::vector<std::string> keys_of(const editor::PaletteGroup& g) {
+ 
+ TEST_CASE("the built-in symbols land in the fixed group order") {
+     const ws::circsim::SymbolLibrary lib;
+-    const auto groups = editor::palette_groups(lib, "");
++    const auto groups = ws::circsim::palette_groups(lib, "");
+     REQUIRE(groups.size() == 5);  // no "Other": it is empty and dropped
+     CHECK(groups[0].name == "Passive");
+     CHECK(keys_of(groups[0]) ==
+@@ -53,31 +53,31 @@ TEST_CASE("the filter matches name, key and group, ignoring case") {
+     const ws::circsim::SymbolLibrary lib;
+     // All 5 groups returned, ranked by best match.
+     // "RESIST" -> "r" (Resistor) in Passive -> Passive group first.
+-    auto by_name = editor::palette_groups(lib, "RESIST");
++    auto by_name = ws::circsim::palette_groups(lib, "RESIST");
+     REQUIRE(by_name.size() == 5);
+     CHECK(by_name[0].name == "Passive");
+     CHECK(keys_of(by_name[0]) == std::vector<std::string>{"r"});
+ 
+-    auto by_key = editor::palette_groups(lib, "nmos");
++    auto by_key = ws::circsim::palette_groups(lib, "nmos");
+     REQUIRE(by_key.size() == 5);
+     CHECK(by_key[0].name == "Semiconductors");
+     CHECK(keys_of(by_key[0]) == std::vector<std::string>{"nmos"});
+ 
+     // The group name matches every member.
+-    auto by_group = editor::palette_groups(lib, "sources");
++    auto by_group = ws::circsim::palette_groups(lib, "sources");
+     REQUIRE(by_group.size() == 5);
+     CHECK(by_group[0].name == "Sources");
+     CHECK(by_group[0].items.size() == 7);
+ 
+     // The switches group: found by its own name, and by the switch
+     // names' word starts.
+-    auto sw = editor::palette_groups(lib, "switch");
++    auto sw = ws::circsim::palette_groups(lib, "switch");
+     REQUIRE(sw.size() == 5);
+     CHECK(sw[0].name == "Switches");
+     CHECK(keys_of(sw[0]) == std::vector<std::string>{"s", "w"});
+ 
+     // No matches: still returns all 5 groups (empty items).
+-    auto no_match = editor::palette_groups(lib, "zzz-no-such");
++    auto no_match = ws::circsim::palette_groups(lib, "zzz-no-such");
+     REQUIRE(no_match.size() == 5);
+     for (const auto& g : no_match) {
+         CHECK(g.items.empty());
+@@ -91,7 +91,7 @@ TEST_CASE("the filter is a fuzzy word-start match, not just a substring") {
+     // half must keep it (the typing that lands on Enter first). The
+     // sources stay out: their r sits mid-word, and the word-start
+     // anchor refuses to open a match there.
+-    auto sub = editor::palette_groups(lib, "res");
++    auto sub = ws::circsim::palette_groups(lib, "res");
+     REQUIRE(sub.size() == 5);
+     CHECK(sub[0].name == "Passive");
+     CHECK(keys_of(sub[0]) == std::vector<std::string>{"r"});
+@@ -99,7 +99,7 @@ TEST_CASE("the filter is a fuzzy word-start match, not just a substring") {
+     // "rstr" - the R-e-S-i-S-T-o-R walk with letters skipped - finds
+     // it too; the old substring matcher answered nothing. The
+     // transistors stay out: their r is mid-word in "transistor".
+-    auto fuzzy = editor::palette_groups(lib, "rstr");
++    auto fuzzy = ws::circsim::palette_groups(lib, "rstr");
+     REQUIRE(fuzzy.size() == 5);
+     CHECK(fuzzy[0].name == "Passive");
+     CHECK(keys_of(fuzzy[0]) == std::vector<std::string>{"r"});
+@@ -107,23 +107,23 @@ TEST_CASE("the filter is a fuzzy word-start match, not just a substring") {
+     // The anchor rules both ways: "nmos" finds its own N-channel
+     // MOSFET and leaves the P-channel sibling out (its n hides
+     // mid-word in "P-channel").
+-    auto by_key = editor::palette_groups(lib, "nmos");
++    auto by_key = ws::circsim::palette_groups(lib, "nmos");
+     REQUIRE(by_key.size() == 5);
+     CHECK(by_key[0].name == "Semiconductors");
+     CHECK(keys_of(by_key[0]) == std::vector<std::string>{"nmos"});
+ 
+     // "opamp" walks "Op amp" - the o of "Op", then the a-m-p of
+     // "amp"'s own word start (the typing that lands on the op amp).
+-    auto oa = editor::palette_groups(lib, "opamp");
++    auto oa = ws::circsim::palette_groups(lib, "opamp");
+     REQUIRE(oa.size() == 5);
+     CHECK(oa[0].name == "Semiconductors");
+     CHECK(keys_of(oa[0]) == std::vector<std::string>{"opamp"});
+ 
+     // Out of order never matches: the s wants to come before the e,
+     // and "Resistor" has none after its own.
+-    CHECK_FALSE(editor::palette_matches("Resistor", "se"));
++    CHECK_FALSE(ws::circsim::palette_matches("Resistor", "se"));
+     // No matches: returns all 5 groups (empty items).
+-    auto no_match = editor::palette_groups(lib, "stress");
++    auto no_match = ws::circsim::palette_groups(lib, "stress");
+     REQUIRE(no_match.size() == 5);
+     for (const auto& g : no_match) {
+         CHECK(g.items.empty());
+@@ -135,7 +135,7 @@ TEST_CASE("the filter is a fuzzy word-start match, not just a substring") {
+     // names carry a word-start V and the s/r/c of "source" too), so
+     // the assertion is the RANK: the voltage source leads - the tile
+     // Enter arms.
+-    auto vsrc = editor::palette_groups(lib, "vsrc");
++    auto vsrc = ws::circsim::palette_groups(lib, "vsrc");
+     REQUIRE(vsrc.size() == 5);
+     CHECK(vsrc[0].name == "Sources");
+     REQUIRE(!vsrc[0].items.empty());
+@@ -144,7 +144,7 @@ TEST_CASE("the filter is a fuzzy word-start match, not just a substring") {
+     // "vcvs" walks the VCVS's own name - and the VCCS's too (v, then
+     // the c of "C", then the v of "voltage-controlled", then the s of
+     // "source": a legal loose walk). The exact one ranks first.
+-    auto vcvs = editor::palette_groups(lib, "vcvs");
++    auto vcvs = ws::circsim::palette_groups(lib, "vcvs");
+     REQUIRE(vcvs.size() == 5);
+     CHECK(vcvs[0].name == "Sources");
+     CHECK(keys_of(vcvs[0]) == std::vector<std::string>{"e", "g"});
+@@ -169,7 +169,7 @@ TEST_CASE("a .csym category field makes its own group, after the built-ins") {
+       ]})", "test", diags);
+     REQUIRE(status.has_value());
+ 
+-    const auto groups = editor::palette_groups(lib, "");
++    const auto groups = ws::circsim::palette_groups(lib, "");
+     REQUIRE(groups.size() >= 2);
+     // Built-in groups first, then the custom one, then nothing odd.
+     // The Z letter maps nowhere: "zz" rides the catch-all "Other".
+@@ -181,18 +181,18 @@ TEST_CASE("a .csym category field makes its own group, after the built-ins") {
+ }
+ 
+ TEST_CASE("palette_matches is the ASCII case-insensitive fuzzy word walk") {
+-    CHECK(editor::palette_matches("Voltage source", "SOUR"));
+-    CHECK(editor::palette_matches("anything", ""));
+-    CHECK_FALSE(editor::palette_matches("r", "resistor"));
++    CHECK(ws::circsim::palette_matches("Voltage source", "SOUR"));
++    CHECK(ws::circsim::palette_matches("anything", ""));
++    CHECK_FALSE(ws::circsim::palette_matches("r", "resistor"));
+     // The skips: letters between the matched ones are the point.
+-    CHECK(editor::palette_matches("Resistor", "rstr"));
+-    CHECK(editor::palette_matches("Voltage source", "vsrc"));
+-    CHECK(editor::palette_matches("Supply (VCC)", "vcc"));
++    CHECK(ws::circsim::palette_matches("Resistor", "rstr"));
++    CHECK(ws::circsim::palette_matches("Voltage source", "vsrc"));
++    CHECK(ws::circsim::palette_matches("Supply (VCC)", "vcc"));
+     // Order is the one rule a subsequence cannot forgive...
+-    CHECK_FALSE(editor::palette_matches("Resistor", "se"));
+-    CHECK_FALSE(editor::palette_matches("Capacitor", "rot"));
++    CHECK_FALSE(ws::circsim::palette_matches("Resistor", "se"));
++    CHECK_FALSE(ws::circsim::palette_matches("Capacitor", "rot"));
+     // ...and a mid-word letter never OPENS a match (the anchor).
+-    CHECK_FALSE(editor::palette_matches("Current source", "res"));
+-    CHECK_FALSE(editor::palette_matches("P-channel MOSFET", "nmos"));
+-    CHECK(editor::palette_matches("N-channel MOSFET", "nmos"));
++    CHECK_FALSE(ws::circsim::palette_matches("Current source", "res"));
++    CHECK_FALSE(ws::circsim::palette_matches("P-channel MOSFET", "nmos"));
++    CHECK(ws::circsim::palette_matches("N-channel MOSFET", "nmos"));
+ }
+diff --git a/libs/platform/CLAUDE.md b/libs/platform/CLAUDE.md
+index 64375f6..4c68601 100644
+--- a/libs/platform/CLAUDE.md
++++ b/libs/platform/CLAUDE.md
+@@ -15,6 +15,15 @@ no platform header ever crosses into include/.
+ 
+ ## Purpose, per header
+ 
++- `saf.hpp` - the Storage Access Framework bridge's PURE half (lifted
++  from apps/circsim_editor, stage 11 of the lib extraction): the
++  sandbox-name policy (sanitize, cap, "-<hash8>" splice, the caller's
++  default extension), the persisted path->URI map (SafMap, "path\turi"
++  lines) and WriteThroughFs - the settings FileSystem wrapper that
++  delegates to the base seam and pushes each mapped write on to its
++  content URI (a refused push degrades to "saved locally", never a
++  lost save). No Android type anywhere; the app's JNI half (the
++  pickers, the ContentResolver moves) stays beside its activity shim.
+ - `errors.hpp` - the lib's error codes (the settings shape: append-only
+   int32 enum, describe(), fail() -> unexpected<Error>, category
+   "platform"). canceled/parse_failed/corrupt_file/invalid_argument are
+diff --git a/libs/platform/CMakeLists.txt b/libs/platform/CMakeLists.txt
+index 65bf90c..03851a4 100644
+--- a/libs/platform/CMakeLists.txt
++++ b/libs/platform/CMakeLists.txt
+@@ -85,4 +85,6 @@ endif()
+ # file builds and runs on every platform - the headless cases (file watch,
+ # recent-files, autosave) now run on Linux too, where they never did
+ # before. No separate test binary; the single suite covers both halves.
+-ws_add_test(platform SOURCES tests/test_platform.cpp)
++# tests/test_saf.cpp rode in with the SAF bridge's pure half
++# (apps/circsim_editor's saf_store, stage 11 - the lib extraction).
++ws_add_test(platform SOURCES tests/test_platform.cpp tests/test_saf.cpp)
+diff --git a/apps/circsim_editor/src/saf_store.hpp b/libs/platform/include/ws/platform/saf.hpp
+similarity index 86%
+rename from apps/circsim_editor/src/saf_store.hpp
+rename to libs/platform/include/ws/platform/saf.hpp
+index 297c049..a9109d4 100644
+--- a/apps/circsim_editor/src/saf_store.hpp
++++ b/libs/platform/include/ws/platform/saf.hpp
+@@ -1,10 +1,13 @@
+ #pragma once
+ 
+-// The SAF port's pure half: everything about the Storage Access bridge
+-// that touches no Android - the sandbox-name policy, the persisted
+-// path->URI map, and the write-through FileSystem wrapper - so the
+-// whole data policy is headless-testable (tests/test_saf_store.cpp) and
+-// the JNI half (android_saf.cpp) stays thin.
++// ws::platform - the Storage Access Framework bridge's pure half
++// (lifted from apps/circsim_editor, stage 11 - the lib extraction):
++// everything about a SAF-backed document store that touches no Android
++// - the sandbox-name policy, the persisted path->URI map, and the
++// write-through FileSystem wrapper - so the whole data policy is
++// headless-testable (libs/platform/tests/test_saf.cpp) and any app's
++// JNI half stays thin (circsim_editor's android_saf.cpp pairs with its
++// CircsimActivity Java shim and stays app-side).
+ //
+ // The port's shape: a picked SAF document (a content:// URI the shell's
+ // path-shaped world cannot read) becomes a REAL FILE under the app's
+@@ -28,7 +31,7 @@
+ #include <ws/core/result.hpp>
+ #include <ws/settings/filesystem.hpp>
+ 
+-namespace editor::saf {
++namespace ws::platform::saf {
+ 
+ // One persisted sandbox-file -> content-URI pair.
+ struct SafEntry {
+@@ -75,10 +78,13 @@ class SafMap {
+ // files (and the same URI stays ONE file across launches - the stable
+ // identity session restore and the recent list ride). A display name
+ // that sanitizes away to nothing falls back to `fallback`; an extension
+-// survives, a missing one gets ".csim".
++// survives, a missing one gets `default_ext` (the app's document
++// extension - ".csim" for the schematic editor; the policy is the
++// caller's, the lib stays document-agnostic).
+ [[nodiscard]] std::string sandbox_name_for(std::string_view display,
+                                            std::string_view uri,
+-                                           std::string_view fallback);
++                                           std::string_view fallback,
++                                           std::string_view default_ext);
+ 
+ // One push of a saved document's bytes to its content URI. The JNI half
+ // injects the ContentResolver implementation; the headless tests inject
+@@ -137,4 +143,4 @@ class WriteThroughFs final : public ws::settings::FileSystem {
+     std::optional<std::string> push_error_;
+ };
+ 
+-}  // namespace editor::saf
++}  // namespace ws::platform::saf
+diff --git a/apps/circsim_editor/src/saf_store.cpp b/libs/platform/src/saf.cpp
+similarity index 90%
+rename from apps/circsim_editor/src/saf_store.cpp
+rename to libs/platform/src/saf.cpp
+index 290039f..cd5804a 100644
+--- a/apps/circsim_editor/src/saf_store.cpp
++++ b/libs/platform/src/saf.cpp
+@@ -1,13 +1,16 @@
+-// The SAF port's pure half (see saf_store.hpp) - no Android type, no
+-// JNI, no OS call: the policy the bridge rides, headless-testable.
++// ws::platform - the SAF bridge's pure half (see saf.hpp). Lifted
++// verbatim from apps/circsim_editor's saf_store.cpp (stage 11 - the
++// lib extraction): the policy is the editor's own, unchanged; only the
++// home moved (and the sandbox name's default extension became a
++// parameter - the lib stays document-agnostic).
+ 
+-#include "saf_store.hpp"
++#include <ws/platform/saf.hpp>
+ 
+ #include <algorithm>
+ #include <cctype>
+ #include <utility>
+ 
+-namespace editor::saf {
++namespace ws::platform::saf {
+ 
+ namespace {
+ 
+@@ -105,7 +108,8 @@ std::string hash_tag(std::string_view bytes) {
+ }
+ 
+ std::string sandbox_name_for(std::string_view display, std::string_view uri,
+-                             std::string_view fallback) {
++                             std::string_view fallback,
++                             std::string_view default_ext) {
+     // Sanitize: path bytes would escape the sandbox, control bytes
+     // would corrupt the map's line format, and surrounding whitespace
+     // is noise a picked name sometimes carries.
+@@ -126,9 +130,10 @@ std::string sandbox_name_for(std::string_view display, std::string_view uri,
+     if (clean.empty()) {
+         clean.assign(fallback);
+     }
+-    // The extension survives the splice; a bare name earns ".csim"
+-    // (the document factory's own gate reads the extension, so a
+-    // picked "notes.txt" must STAY notes.txt to be refused honestly).
++    // The extension survives the splice; a bare name earns the
++    // caller's default (the document factory's own gate reads the
++    // extension, so a picked "notes.txt" must STAY notes.txt to be
++    // refused honestly).
+     std::string_view stem = clean;
+     std::string_view extension;
+     const std::size_t dot = clean.find_last_of('.');
+@@ -136,7 +141,7 @@ std::string sandbox_name_for(std::string_view display, std::string_view uri,
+         stem = std::string_view{clean}.substr(0, dot);
+         extension = std::string_view{clean}.substr(dot);
+     } else {
+-        extension = ".csim";
++        extension = default_ext;
+     }
+     if (stem.size() > kNameCap) {
+         stem = stem.substr(0, kNameCap);
+@@ -234,4 +239,4 @@ void WriteThroughFs::save_map() {
+     (void)base_.write(map_path_, map_.format());
+ }
+ 
+-}  // namespace editor::saf
++}  // namespace ws::platform::saf
+diff --git a/apps/circsim_editor/tests/test_saf_store.cpp b/libs/platform/tests/test_saf.cpp
+similarity index 87%
+rename from apps/circsim_editor/tests/test_saf_store.cpp
+rename to libs/platform/tests/test_saf.cpp
+index 7556e51..2ecfb9d 100644
+--- a/apps/circsim_editor/tests/test_saf_store.cpp
++++ b/libs/platform/tests/test_saf.cpp
+@@ -1,11 +1,11 @@
+-// The SAF port's pure half, headless (the suite the saf_store.hpp header
+-// promises): the sandbox-name policy, the map's parse/format round trip,
+-// and the write-through FileSystem wrapper's every verb - the data
+-// policy the JNI half (android_saf.cpp, android-only) rides. No Android
+-// type appears here; the push act is an injected recorder.
++// The SAF bridge's pure half, headless (the suite the saf.hpp header
++// promises; moved from apps/circsim_editor/tests, where it was born):
++// the sandbox-name policy, the map's parse/format round trip, and the
++// write-through FileSystem wrapper's every verb - the data policy any
++// app's JNI half rides. No Android type appears here; the push act is
++// an injected recorder.
+ 
+-#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+-#include <doctest/doctest.h>
++#include <doctest/doctest.h>  // (this suite rides test_platform.cpp's main - the lib suite's shape)
+ 
+ #include <map>
+ #include <optional>
+@@ -13,7 +13,7 @@
+ #include <utility>
+ #include <vector>
+ 
+-#include "saf_store.hpp"
++#include <ws/platform/saf.hpp>
+ 
+ #include <ws/settings/filesystem.hpp>
+ 
+@@ -68,7 +68,7 @@ struct PushLog {
+     std::vector<std::pair<std::string, std::string>> pushed;
+     std::optional<std::string> fail_with;
+ 
+-    [[nodiscard]] editor::saf::SafPush hook() {
++    [[nodiscard]] ws::platform::saf::SafPush hook() {
+         return [this](const std::string& uri,
+                       std::string_view bytes) -> ws::core::Status {
+             if (fail_with.has_value()) {
+@@ -84,58 +84,62 @@ struct PushLog {
+ }  // namespace
+ 
+ TEST_CASE("the sandbox name keeps the pick's shape, the URI's identity") {
+-    using editor::saf::sandbox_name_for;
++    using ws::platform::saf::sandbox_name_for;
+ 
+     // The display name survives with its extension; the URI's hash
+     // splices in before it.
+     const std::string a =
+-        sandbox_name_for("my circuit.csim", "content://x/doc/1", "schematic");
++        sandbox_name_for("my circuit.csim", "content://x/doc/1",
++                          "schematic", ".csim");
+     CHECK(a.starts_with("my circuit-"));
+     CHECK(a.ends_with(".csim"));
+     CHECK(a.size() == std::string{"my circuit-"}.size() + 8 + 5);
+ 
+     // Two same-named documents from different folders stay two files.
+     const std::string b =
+-        sandbox_name_for("my circuit.csim", "content://x/doc/2", "schematic");
++        sandbox_name_for("my circuit.csim", "content://x/doc/2",
++                          "schematic", ".csim");
+     CHECK(a != b);
+ 
+     // The SAME URI is one stable name across launches - the identity
+     // session restore and recents ride.
+     CHECK(sandbox_name_for("my circuit.csim", "content://x/doc/1",
+-                           "schematic") == a);
++                           "schematic", ".csim") == a);
+ 
+     // Path bytes fold away: a picked name cannot escape the sandbox.
+     const std::string evil = sandbox_name_for(
+-        "../..\\escape/eaten.csim", "content://x/doc/3", "schematic");
++        "../..\\escape/eaten.csim", "content://x/doc/3", "schematic",
++        ".csim");
+     CHECK(evil.find('/') == std::string::npos);
+     CHECK(evil.find('\\') == std::string::npos);
+     CHECK(evil.starts_with("....escapeeaten-"));
+ 
+     // A non-.csim pick keeps its extension - the document factory's
+     // honest "not a .csim schematic" refusal needs to see it.
+-    CHECK(sandbox_name_for("notes.txt", "content://x/doc/4", "schematic")
++    CHECK(sandbox_name_for("notes.txt", "content://x/doc/4", "schematic", ".csim")
+               .ends_with(".txt"));
+ 
+     // A bare name earns .csim; a name that sanitizes away falls back.
+-    CHECK(sandbox_name_for("plain", "content://x/doc/5", "schematic")
++    CHECK(sandbox_name_for("plain", "content://x/doc/5", "schematic", ".csim")
+               .ends_with(".csim"));
+-    CHECK(sandbox_name_for("///", "content://x/doc/6", "fallback")
++    CHECK(sandbox_name_for("///", "content://x/doc/6", "fallback", ".csim")
+               .starts_with("fallback-"));
+ 
+     // A long name caps before the splice.
+     const std::string long_name(300, 'x');
+     const std::string capped =
+-        sandbox_name_for(long_name, "content://x/doc/7", "schematic");
++        sandbox_name_for(long_name, "content://x/doc/7", "schematic",
++                        ".csim");
+     CHECK(capped.size() <= 80 + 1 + 8 + 5);
+ }
+ 
+ TEST_CASE("the map parses what it formats, and drops what it cannot") {
+-    editor::saf::SafMap map;
++    ws::platform::saf::SafMap map;
+     map.add("/data/schematics/a-1111.csim", "content://x/a");
+     map.add("/data/schematics/b-2222.csim", "content://x/b");
+ 
+     // The round trip.
+-    editor::saf::SafMap reloaded;
++    ws::platform::saf::SafMap reloaded;
+     reloaded.load(map.format());
+     REQUIRE(reloaded.entries().size() == 2);
+     CHECK(reloaded.entries()[0].path == "/data/schematics/a-1111.csim");
+@@ -153,7 +157,7 @@ TEST_CASE("the map parses what it formats, and drops what it cannot") {
+     CHECK(*map.find("/data/schematics/a-1111.csim") == "content://x/new");
+ 
+     // A hand-damaged map degrades line by line, never kills.
+-    editor::saf::SafMap damaged;
++    ws::platform::saf::SafMap damaged;
+     damaged.load("no-tab-line\n\n/data/x\tcontent://ok\n/content-only\t\n");
+     REQUIRE(damaged.entries().size() == 1);
+     CHECK(damaged.entries()[0].path == "/data/x");
+@@ -167,9 +171,9 @@ TEST_CASE("the map parses what it formats, and drops what it cannot") {
+ TEST_CASE("the write-through seam mirrors mapped writes, records refused "
+           "pushes") {
+     FakeFs base;
+-    editor::saf::SafMap map;
++    ws::platform::saf::SafMap map;
+     PushLog push;
+-    editor::saf::WriteThroughFs fs{base, map, push.hook(), "/state/map.txt"};
++    ws::platform::saf::WriteThroughFs fs{base, map, push.hook(), "/state/map.txt"};
+ 
+     // An ordinary write: no URI behind it, no push.
+     CHECK(fs.write("/plain.txt", "bytes"));
+@@ -216,8 +220,8 @@ TEST_CASE("the write-through seam mirrors mapped writes, records refused "
+             return false;
+         }
+     } refusing;
+-    editor::saf::SafMap dead_map;
+-    editor::saf::WriteThroughFs dead{refusing, dead_map, push.hook(), "/m"};
++    ws::platform::saf::SafMap dead_map;
++    ws::platform::saf::WriteThroughFs dead{refusing, dead_map, push.hook(), "/m"};
+     dead_map.add("/sandbox/dead.csim", "content://x/dead");
+     CHECK_FALSE(dead.write("/sandbox/dead.csim", "x"));
+     CHECK(push.pushed.size() == 1);  // unchanged

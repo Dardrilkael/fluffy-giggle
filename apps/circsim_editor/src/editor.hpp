@@ -52,6 +52,10 @@
 #include <vector>
 
 #include <ws/circsim/export.hpp>
+#include <ws/circsim/geom.hpp>  // the interaction geometry (stage 11:
+                                // route/tidy/order/refdes/hits/bounds/
+                                // magnetism/series_color - the pure math
+                                // this header's methods forward onto)
 #include <ws/circsim/library.hpp>
 #include <ws/circsim/locate.hpp>
 #include <ws/circsim/model.hpp>
@@ -264,12 +268,10 @@ struct Selection {
     void clear() { kind = Kind::None; }
 };
 
-// A hovered pin (the wire tool's target highlight).
-struct PinHit {
-    ws::circsim::PinRef ref{};
-    Pos pos{0.0, 0.0};
-    int dir = 0;  // the pin's pointing direction, degrees
-};
+// A hovered pin (the wire tool's target highlight) - the lib's own
+// shape (ws::circsim::PinHit, geom.hpp); the alias keeps the editor's
+// historical spelling.
+using PinHit = ws::circsim::PinHit;
 
 // --- the group edit: the working set and the clipboard ------------------
 
@@ -926,10 +928,10 @@ struct Editor {
     // junction there. The wire tool snaps a click near another wire's
     // body to this point and connects through that junction - the
     // standard EDA T-tap, the one thing the wire tool was missing.
-    struct WirePointSnap {
-        std::uint32_t wire = 0;  // the wire whose path was hit
-        Pos pos{0.0, 0.0};       // grid-aligned, on the wire's path
-    };
+    // The T-tap snap's answer - ws::circsim::WirePointSnap (geom.hpp),
+    // aliased so `Editor::WirePointSnap` keeps spelling the same type
+    // the panels and tests always named.
+    using WirePointSnap = ws::circsim::WirePointSnap;
     [[nodiscard]] std::optional<WirePointSnap> hit_wire_point(
         Pos world, double radius) const;
     [[nodiscard]] Selection hit_any(Pos world, double radius) const;
@@ -1130,7 +1132,9 @@ void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
 // The data-color wheel every colored series in the app shares (i mod N,
 // the scope's rule): the Results plot's signals and the canvas's per-NET
 // wire coloring both ride it, so a net and its waveform can never look
-// like strangers. Pure data - no canvas, no theme.
-[[nodiscard]] std::uint32_t series_color(std::size_t i);
+// like strangers. Pure data - no canvas, no theme. Lives in the lib now
+// (ws::circsim::series_color, geom.hpp); the using keeps the editor's
+// historical spelling (`editor::series_color`) resolving.
+using ws::circsim::series_color;
 
 }  // namespace editor

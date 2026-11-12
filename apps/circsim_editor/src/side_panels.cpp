@@ -14,7 +14,9 @@
 
 #include "side_panels.hpp"
 
-#include "palette_groups.hpp"
+// The Palette's grouping policy lives in the lib (stage 11 - the lib
+// extraction); the panel is the app's drawing over it.
+#include <ws/circsim/palette.hpp>
 
 #include <algorithm>
 #include <array>
@@ -1508,8 +1510,8 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
                     84.0f)) {
         ed.palette_list_view = !ed.palette_list_view;
     }
-    const std::vector<PaletteGroup> groups =
-        palette_groups(ed.library, filter);
+    const std::vector<ws::circsim::PaletteGroup> groups =
+        ws::circsim::palette_groups(ed.library, filter);
 
     const auto arm = [&ed](const ws::circsim::SymbolDef& sym) {
         ed.tool = Tool::Place;
@@ -1543,7 +1545,7 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
     } else if (filtering) {
         // What the search is doing, and the two keys that drive it.
         std::size_t matches = 0;
-        for (const PaletteGroup& g : groups) {
+        for (const ws::circsim::PaletteGroup& g : groups) {
             matches += g.items.size();
         }
         hint_line(layout, theme,
@@ -1596,7 +1598,7 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
     if (!filtering) {
         std::vector<const ws::circsim::SymbolDef*> recent;
         for (const std::string& key : ed.palette_recent) {
-            for (const PaletteGroup& g : groups) {
+            for (const ws::circsim::PaletteGroup& g : groups) {
                 const auto it = std::find_if(
                     g.items.begin(), g.items.end(),
                     [&key](const ws::circsim::SymbolDef* s) {
@@ -1615,7 +1617,7 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
     }
 
     int group_index = 0;
-    for (const PaletteGroup& g : groups) {
+    for (const ws::circsim::PaletteGroup& g : groups) {
         gui.ids().push(group_index++);
         // A search shows every match, open; browsing remembers what the
         // user collapsed. "##name" keeps the header's id steady while

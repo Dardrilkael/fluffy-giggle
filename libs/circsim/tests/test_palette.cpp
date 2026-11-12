@@ -1,9 +1,9 @@
-// apps/circsim_editor - the Palette's grouping + search, headless.
+// ws::circsim - the symbol palette's grouping + search, headless
+// (moved from apps/circsim_editor/tests, where the suite was born).
 
-#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
-#include <doctest/doctest.h>
+#include <doctest/doctest.h>  // (this suite rides test_format.cpp's main - the lib suite's shape)
 
-#include "../src/palette_groups.hpp"
+#include <ws/circsim/palette.hpp>
 
 #include <string>
 #include <vector>
@@ -13,7 +13,7 @@
 
 namespace {
 
-std::vector<std::string> keys_of(const editor::PaletteGroup& g) {
+std::vector<std::string> keys_of(const ws::circsim::PaletteGroup& g) {
     std::vector<std::string> out;
     for (const ws::circsim::SymbolDef* s : g.items) {
         out.push_back(s->key);
@@ -25,7 +25,7 @@ std::vector<std::string> keys_of(const editor::PaletteGroup& g) {
 
 TEST_CASE("the built-in symbols land in the fixed group order") {
     const ws::circsim::SymbolLibrary lib;
-    const auto groups = editor::palette_groups(lib, "");
+    const auto groups = ws::circsim::palette_groups(lib, "");
     REQUIRE(groups.size() == 5);  // no "Other": it is empty and dropped
     CHECK(groups[0].name == "Passive");
     CHECK(keys_of(groups[0]) ==
@@ -53,31 +53,31 @@ TEST_CASE("the filter matches name, key and group, ignoring case") {
     const ws::circsim::SymbolLibrary lib;
     // All 5 groups returned, ranked by best match.
     // "RESIST" -> "r" (Resistor) in Passive -> Passive group first.
-    auto by_name = editor::palette_groups(lib, "RESIST");
+    auto by_name = ws::circsim::palette_groups(lib, "RESIST");
     REQUIRE(by_name.size() == 5);
     CHECK(by_name[0].name == "Passive");
     CHECK(keys_of(by_name[0]) == std::vector<std::string>{"r"});
 
-    auto by_key = editor::palette_groups(lib, "nmos");
+    auto by_key = ws::circsim::palette_groups(lib, "nmos");
     REQUIRE(by_key.size() == 5);
     CHECK(by_key[0].name == "Semiconductors");
     CHECK(keys_of(by_key[0]) == std::vector<std::string>{"nmos"});
 
     // The group name matches every member.
-    auto by_group = editor::palette_groups(lib, "sources");
+    auto by_group = ws::circsim::palette_groups(lib, "sources");
     REQUIRE(by_group.size() == 5);
     CHECK(by_group[0].name == "Sources");
     CHECK(by_group[0].items.size() == 7);
 
     // The switches group: found by its own name, and by the switch
     // names' word starts.
-    auto sw = editor::palette_groups(lib, "switch");
+    auto sw = ws::circsim::palette_groups(lib, "switch");
     REQUIRE(sw.size() == 5);
     CHECK(sw[0].name == "Switches");
     CHECK(keys_of(sw[0]) == std::vector<std::string>{"s", "w"});
 
     // No matches: still returns all 5 groups (empty items).
-    auto no_match = editor::palette_groups(lib, "zzz-no-such");
+    auto no_match = ws::circsim::palette_groups(lib, "zzz-no-such");
     REQUIRE(no_match.size() == 5);
     for (const auto& g : no_match) {
         CHECK(g.items.empty());
@@ -91,7 +91,7 @@ TEST_CASE("the filter is a fuzzy word-start match, not just a substring") {
     // half must keep it (the typing that lands on Enter first). The
     // sources stay out: their r sits mid-word, and the word-start
     // anchor refuses to open a match there.
-    auto sub = editor::palette_groups(lib, "res");
+    auto sub = ws::circsim::palette_groups(lib, "res");
     REQUIRE(sub.size() == 5);
     CHECK(sub[0].name == "Passive");
     CHECK(keys_of(sub[0]) == std::vector<std::string>{"r"});
@@ -99,7 +99,7 @@ TEST_CASE("the filter is a fuzzy word-start match, not just a substring") {
     // "rstr" - the R-e-S-i-S-T-o-R walk with letters skipped - finds
     // it too; the old substring matcher answered nothing. The
     // transistors stay out: their r is mid-word in "transistor".
-    auto fuzzy = editor::palette_groups(lib, "rstr");
+    auto fuzzy = ws::circsim::palette_groups(lib, "rstr");
     REQUIRE(fuzzy.size() == 5);
     CHECK(fuzzy[0].name == "Passive");
     CHECK(keys_of(fuzzy[0]) == std::vector<std::string>{"r"});
@@ -107,23 +107,23 @@ TEST_CASE("the filter is a fuzzy word-start match, not just a substring") {
     // The anchor rules both ways: "nmos" finds its own N-channel
     // MOSFET and leaves the P-channel sibling out (its n hides
     // mid-word in "P-channel").
-    auto by_key = editor::palette_groups(lib, "nmos");
+    auto by_key = ws::circsim::palette_groups(lib, "nmos");
     REQUIRE(by_key.size() == 5);
     CHECK(by_key[0].name == "Semiconductors");
     CHECK(keys_of(by_key[0]) == std::vector<std::string>{"nmos"});
 
     // "opamp" walks "Op amp" - the o of "Op", then the a-m-p of
     // "amp"'s own word start (the typing that lands on the op amp).
-    auto oa = editor::palette_groups(lib, "opamp");
+    auto oa = ws::circsim::palette_groups(lib, "opamp");
     REQUIRE(oa.size() == 5);
     CHECK(oa[0].name == "Semiconductors");
     CHECK(keys_of(oa[0]) == std::vector<std::string>{"opamp"});
 
     // Out of order never matches: the s wants to come before the e,
     // and "Resistor" has none after its own.
-    CHECK_FALSE(editor::palette_matches("Resistor", "se"));
+    CHECK_FALSE(ws::circsim::palette_matches("Resistor", "se"));
     // No matches: returns all 5 groups (empty items).
-    auto no_match = editor::palette_groups(lib, "stress");
+    auto no_match = ws::circsim::palette_groups(lib, "stress");
     REQUIRE(no_match.size() == 5);
     for (const auto& g : no_match) {
         CHECK(g.items.empty());
@@ -135,7 +135,7 @@ TEST_CASE("the filter is a fuzzy word-start match, not just a substring") {
     // names carry a word-start V and the s/r/c of "source" too), so
     // the assertion is the RANK: the voltage source leads - the tile
     // Enter arms.
-    auto vsrc = editor::palette_groups(lib, "vsrc");
+    auto vsrc = ws::circsim::palette_groups(lib, "vsrc");
     REQUIRE(vsrc.size() == 5);
     CHECK(vsrc[0].name == "Sources");
     REQUIRE(!vsrc[0].items.empty());
@@ -144,7 +144,7 @@ TEST_CASE("the filter is a fuzzy word-start match, not just a substring") {
     // "vcvs" walks the VCVS's own name - and the VCCS's too (v, then
     // the c of "C", then the v of "voltage-controlled", then the s of
     // "source": a legal loose walk). The exact one ranks first.
-    auto vcvs = editor::palette_groups(lib, "vcvs");
+    auto vcvs = ws::circsim::palette_groups(lib, "vcvs");
     REQUIRE(vcvs.size() == 5);
     CHECK(vcvs[0].name == "Sources");
     CHECK(keys_of(vcvs[0]) == std::vector<std::string>{"e", "g"});
@@ -169,7 +169,7 @@ TEST_CASE("a .csym category field makes its own group, after the built-ins") {
       ]})", "test", diags);
     REQUIRE(status.has_value());
 
-    const auto groups = editor::palette_groups(lib, "");
+    const auto groups = ws::circsim::palette_groups(lib, "");
     REQUIRE(groups.size() >= 2);
     // Built-in groups first, then the custom one, then nothing odd.
     // The Z letter maps nowhere: "zz" rides the catch-all "Other".
@@ -181,18 +181,18 @@ TEST_CASE("a .csym category field makes its own group, after the built-ins") {
 }
 
 TEST_CASE("palette_matches is the ASCII case-insensitive fuzzy word walk") {
-    CHECK(editor::palette_matches("Voltage source", "SOUR"));
-    CHECK(editor::palette_matches("anything", ""));
-    CHECK_FALSE(editor::palette_matches("r", "resistor"));
+    CHECK(ws::circsim::palette_matches("Voltage source", "SOUR"));
+    CHECK(ws::circsim::palette_matches("anything", ""));
+    CHECK_FALSE(ws::circsim::palette_matches("r", "resistor"));
     // The skips: letters between the matched ones are the point.
-    CHECK(editor::palette_matches("Resistor", "rstr"));
-    CHECK(editor::palette_matches("Voltage source", "vsrc"));
-    CHECK(editor::palette_matches("Supply (VCC)", "vcc"));
+    CHECK(ws::circsim::palette_matches("Resistor", "rstr"));
+    CHECK(ws::circsim::palette_matches("Voltage source", "vsrc"));
+    CHECK(ws::circsim::palette_matches("Supply (VCC)", "vcc"));
     // Order is the one rule a subsequence cannot forgive...
-    CHECK_FALSE(editor::palette_matches("Resistor", "se"));
-    CHECK_FALSE(editor::palette_matches("Capacitor", "rot"));
+    CHECK_FALSE(ws::circsim::palette_matches("Resistor", "se"));
+    CHECK_FALSE(ws::circsim::palette_matches("Capacitor", "rot"));
     // ...and a mid-word letter never OPENS a match (the anchor).
-    CHECK_FALSE(editor::palette_matches("Current source", "res"));
-    CHECK_FALSE(editor::palette_matches("P-channel MOSFET", "nmos"));
-    CHECK(editor::palette_matches("N-channel MOSFET", "nmos"));
+    CHECK_FALSE(ws::circsim::palette_matches("Current source", "res"));
+    CHECK_FALSE(ws::circsim::palette_matches("P-channel MOSFET", "nmos"));
+    CHECK(ws::circsim::palette_matches("N-channel MOSFET", "nmos"));
 }

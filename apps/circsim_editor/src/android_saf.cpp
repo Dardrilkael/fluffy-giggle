@@ -1,5 +1,6 @@
 // The SAF bridge's android half (see android_saf.hpp for the contract
-// and saf_store.hpp for the data policy). Everything Android about the
+// and <ws/platform/saf.hpp> for the data policy - the platform lib's
+// own since the stage-11 lib extraction). Everything Android about the
 // editor's file pickers lives in this TU: the intent launch through
 // the CircsimActivity shim, the result callback the shim answers into,
 // and the ContentResolver byte moves both directions.
@@ -23,9 +24,9 @@
 
 #include <android_native_app_glue.h>
 
-#include "saf_store.hpp"
+#include <ws/platform/saf.hpp>
 
-namespace editor::saf {
+namespace ws::platform::saf {
 
 namespace {
 
@@ -424,7 +425,8 @@ class SafDialogs final : public ws::platform::FileDialogs {
             picked->name.empty() ? "schematic" : picked->name;
         const std::string path = ws::platform::join_path(
             b.sandbox_dir,
-            sandbox_name_for(display, picked->uri, "schematic"));
+            sandbox_name_for(display, picked->uri, "schematic",
+                                    ".csim"));
         ScopedJavaThread java{b.vm()};
         if (!java.ok()) {
             return ws::core::unexpected<ws::core::Error>(make_error(
@@ -497,7 +499,8 @@ class SafDialogs final : public ws::platform::FileDialogs {
                                                          : picked->name;
         const std::string path = ws::platform::join_path(
             b.sandbox_dir,
-            sandbox_name_for(display, picked->uri, "schematic"));
+            sandbox_name_for(display, picked->uri, "schematic",
+                                    ".csim"));
         b.fs_wrapper->map(path, picked->uri);
         return path;
     }
@@ -607,6 +610,6 @@ std::optional<std::string> take_push_error() {
                                    : std::nullopt;
 }
 
-}  // namespace editor::saf
+}  // namespace ws::platform::saf
 
 #endif  // __ANDROID__

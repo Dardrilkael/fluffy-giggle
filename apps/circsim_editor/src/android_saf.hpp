@@ -1,7 +1,9 @@
 #pragma once
 
-// The SAF bridge's android half (see saf_store.hpp for the pure data
-// policy this rides). Android-only: the whole file guards on
+// The SAF bridge's android half (see ws/platform/saf.hpp for the pure
+// data policy this rides - the platform lib's own, since the stage-11
+// lib extraction; the JNI glue stays app-side beside the
+// CircsimActivity Java shim it registers its natives against). Android-only: the whole file guards on
 // __ANDROID__, so a desktop build includes it as an empty TU.
 //
 // What lands here: the pickers (the Storage Access Framework's
@@ -29,7 +31,7 @@ struct android_app;
 #include <ws/platform/dialogs.hpp>
 #include <ws/settings/filesystem.hpp>
 
-namespace editor::saf {
+namespace ws::platform::saf {
 
 // Wires the bridge to the glue's handle: registers the JNI natives the
 // activity shim calls, builds the sandbox (<files>/circsim
@@ -54,6 +56,6 @@ bool init(android_app* app);
 // (its toast's own borrowed-bytes cadence).
 [[nodiscard]] std::optional<std::string> take_push_error();
 
-}  // namespace editor::saf
+}  // namespace ws::platform::saf
 
 #endif  // __ANDROID__

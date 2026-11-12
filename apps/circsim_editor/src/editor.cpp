@@ -26,6 +26,17 @@ using canvas::Point;
 using ws::circsim::JunctionRef;
 using ws::circsim::PinRef;
 
+// The pure geometry the panels and commands share (route/tidy/order,
+// refdes, hit tests, bounds, magnetism, the color wheel) lives in
+// ws::circsim (geom.hpp - stage 11, the lib extraction); the Editor
+// methods below are thin forwarders that keep this app's own API
+// unchanged. These locals are the editor-state HALF: what reads the
+// camera, the selection or the caches, plus the shared math aliases.
+using ws::circsim::BoundsBuilder;
+using ws::circsim::dist_to_segment;
+using ws::circsim::is_auto_ref;   // annotate's rename guard
+using ws::circsim::mentions_token;  // annotate's directive check
+
 [[nodiscard]] double len(Pos p) {
     return std::sqrt(p.x * p.x + p.y * p.y);
 }
@@ -36,123 +47,7 @@ using ws::circsim::PinRef;
 // (which at max zoom answered clicks 400px away).
 constexpr double kLabelPickPx = 6.0;
 
-// Distance (not squared) from `p` to segment ab.
-[[nodiscard]] double dist_to_segment(Pos a, Pos b, Pos p) {
-    const Pos ab{b.x - a.x, b.y - a.y};
-    const Pos ap{p.x - a.x, p.y - a.y};
-    const double denom = ab.x * ab.x + ab.y * ab.y;
-    if (denom <= 0.0) {
-        return len(ap);
-    }
-    double t = (ap.x * ab.x + ap.y * ab.y) / denom;
-    t = std::max(0.0, std::min(1.0, t));
-    return len(Pos{ap.x - t * ab.x, ap.y - t * ab.y});
-}
-
 constexpr double kPi = 3.14159265358979323846;
-
-// Grows a world AABB point by point. Part bounds, content bounds and
-// selection bounds all used to carry their own copy of this lambda.
-struct BoundsBuilder {
-    std::optional<Bounds> box;
-
-    void add(Pos w) {
-        if (!box.has_value()) {
-            box = Bounds{w.x, w.y, w.x, w.y};
-            return;
-        }
-        box->min_x = std::min(box->min_x, w.x);
-        box->min_y = std::min(box->min_y, w.y);
-        box->max_x = std::max(box->max_x, w.x);
-        box->max_y = std::max(box->max_y, w.y);
-    }
-    void add(const Bounds& b) {
-        add(Pos{b.min_x, b.min_y});
-        add(Pos{b.max_x, b.max_y});
-    }
-};
-
-// Folds duplicate points and collinear CONTINUING middles out of a full
-// polyline (endpoint, corners, endpoint) and returns the INTERIOR - the
-// waypoints the .csim stores. A fold needs the leg to continue: a
-// reversal is collinear too, but folding it would run the wire straight
-// back through the part it just left. Shared by route_wire (fresh
-// routes) and tidy_route (existing wires).
-[[nodiscard]] std::vector<Pos> fold_interior(const std::vector<Pos>& full) {
-    constexpr double kEps = 1e-9;
-    const auto same = [&](Pos p, Pos q) {
-        return eps_eq(p.x, q.x, kEps) && eps_eq(p.y, q.y, kEps);
-    };
-    std::vector<Pos> folded;
-    for (const Pos& p : full) {
-        if (!folded.empty() && same(folded.back(), p)) {
-            continue;
-        }
-        if (folded.size() >= 2u) {
-            const Pos& p0 = folded[folded.size() - 2u];
-            const Pos& p1 = folded[folded.size() - 1u];
-            const bool collinear =
-                (eps_eq(p0.x, p1.x, kEps) && eps_eq(p1.x, p.x, kEps)) ||
-                (eps_eq(p0.y, p1.y, kEps) && eps_eq(p1.y, p.y, kEps));
-            const double along = (p1.x - p0.x) * (p.x - p1.x) +
-                                 (p1.y - p0.y) * (p.y - p1.y);
-            if (collinear && along > 0.0) {
-                folded.back() = p;  // the leg extends
-                continue;
-            }
-        }
-        folded.push_back(p);
-    }
-    if (folded.size() < 2u) {
-        return {};
-    }
-    return {folded.begin() + 1, folded.end() - 1};
-}
-
-// prefix + digits only ("R12"): a ref Annotate may regenerate. "R_load"
-// and "TP1a" are the author's and stay put.
-[[nodiscard]] bool is_auto_ref(const std::string& ref,
-                               const std::string& prefix) {
-    if (ref.size() <= prefix.size() || ref.compare(0, prefix.size(), prefix) != 0) {
-        return false;
-    }
-    for (std::size_t i = prefix.size(); i < ref.size(); ++i) {
-        if (std::isdigit(static_cast<unsigned char>(ref[i])) == 0) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// Is `token` named in `text` as a whole word (ASCII case-insensitive,
-// like SPICE)? "R1" matches ".meas I(R1)" but not "R10" or "XR1".
-[[nodiscard]] bool mentions_token(const std::string& text,
-                                  const std::string& token) {
-    if (token.empty()) {
-        return false;
-    }
-    const auto lower = [](std::string s) {
-        for (char& ch : s) {
-            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-        }
-        return s;
-    };
-    const auto word = [](char ch) {
-        return std::isalnum(static_cast<unsigned char>(ch)) != 0 || ch == '_';
-    };
-    const std::string hay = lower(text);
-    const std::string needle = lower(token);
-    for (std::size_t at = hay.find(needle); at != std::string::npos;
-         at = hay.find(needle, at + 1)) {
-        const std::size_t end = at + needle.size();
-        const bool left = at == 0 || !word(hay[at - 1]);
-        const bool right = end >= hay.size() || !word(hay[end]);
-        if (left && right) {
-            return true;
-        }
-    }
-    return false;
-}
 
 }  // namespace
 
@@ -202,182 +97,32 @@ std::optional<Bounds> Editor::part_bounds(std::uint32_t id) const {
     if (cached != part_bounds_cache_.end()) {
         return cached->second;
     }
-    // Cache miss: compute and store.
-    const ws::circsim::SymbolDef* sym = sym_of(*p);
-    if (sym == nullptr) {
-        Bounds b{p->pos.x - 1.0, p->pos.y - 1.0, p->pos.x + 1.0,
-                 p->pos.y + 1.0};
-        part_bounds_cache_[id] = b;
-        return b;
+    // Cache miss: compute through the lib seam and store.
+    const std::optional<Bounds> part_box =
+        ws::circsim::part_world_bounds(*s, library, id);
+    if (part_box.has_value()) {
+        part_bounds_cache_[id] = *part_box;
     }
-    const Bounds local = ws::circsim::symbol_bounds(*sym);
-    BoundsBuilder out;
-    for (const Pos corner :
-         {Pos{local.min_x, local.min_y}, Pos{local.max_x, local.min_y},
-          Pos{local.min_x, local.max_y}, Pos{local.max_x, local.max_y}}) {
-        out.add(ws::circsim::transform_pos(*p, corner));
-    }
-    if (out.box.has_value()) {
-        part_bounds_cache_[id] = *out.box;
-    }
-    return out.box;
+    return part_box;
 }
 
 std::vector<Pos> Editor::wire_path(const ws::circsim::Wire& w) const {
-    std::vector<Pos> out;
+    // The lib's own polyline (ws::circsim::wire_path): endpoints
+    // through their refs, then the waypoints between.
     const ws::circsim::Schematic* s = schem();
     if (s == nullptr) {
-        return out;
+        return {};
     }
-    const auto endpoint_pos = [&](const ws::circsim::WireEndpoint& end)
-        -> std::optional<Pos> {
-        if (const PinRef* pin = std::get_if<PinRef>(&end)) {
-            const ws::circsim::Part* p = s->find_part(pin->part);
-            const ws::circsim::SymbolDef* sym =
-                p != nullptr ? sym_of(*p) : nullptr;
-            if (p != nullptr && sym != nullptr &&
-                pin->pin < sym->pins.size()) {
-                return ws::circsim::pin_pos(*sym, *p, pin->pin);
-            }
-            return std::nullopt;
-        }
-        const JunctionRef* j = std::get_if<JunctionRef>(&end);
-        const ws::circsim::Junction* found =
-            j != nullptr ? s->find_junction(j->junction) : nullptr;
-        if (found != nullptr) {
-            return found->pos;
-        }
-        return std::nullopt;
-    };
-    const std::optional<Pos> a = endpoint_pos(w.a);
-    const std::optional<Pos> b = endpoint_pos(w.b);
-    if (!a.has_value() || !b.has_value()) {
-        return out;  // dangling: the loader's tolerance, nothing to draw
-    }
-    out.reserve(w.waypoints.size() + 2);
-    out.push_back(*a);
-    for (const Pos& p : w.waypoints) {
-        out.push_back(p);
-    }
-    out.push_back(*b);
-    return out;
+    return ws::circsim::wire_path(*s, library, w);
 }
 
 std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir,
                                     bool flip) {
-    // The lead length: how far a route commits to a direction before
-    // it may turn. One grid unit reads clean at every zoom (a pin's
-    // own lead is typically three).
-    constexpr double kLead = 1.0;
-    constexpr double kEps = 1e-9;
-
-    // Directions: negative = free; non-negative dirs are folded into
-    // [0, 360). A negative pin dir is "free" (no forced lead-out).
-    // Note: pin dirs are always non-negative cardinals (0, 90, 180, 270)
-    // so negative is only used for "free" wire drafts.
-    const auto norm = [](int dir) { return dir < 0 ? -1 : dir % 360; };
-    a_dir = norm(a_dir);
-    b_dir = norm(b_dir);
-
-    const auto unit = [](int dir) -> Pos {
-        switch (dir) {
-            case 0: return {1.0, 0.0};
-            case 90: return {0.0, 1.0};
-            case 180: return {-1.0, 0.0};
-            case 270: return {0.0, -1.0};
-            default:
-                WS_CORE_ASSERT(false && "route_wire: non-cardinal pin direction");
-                return {0.0, -1.0};  // fallback to south (270)
-        }
-    };
-    const auto same = [&](Pos p, Pos q) {
-        return eps_eq(p.x, q.x, kEps) && eps_eq(p.y, q.y, kEps);
-    };
-    if (same(a, b)) {
-        return {};  // a zero-length wire has no route (not a loop)
-    }
-
-    Pos from = a;  // where the route is free to turn: past a's lead
-    if (a_dir >= 0) {
-        const Pos u = unit(a_dir);
-        from = {a.x + u.x * kLead, a.y + u.y * kLead};
-    }
-    Pos target = b;  // ... and the point the route aims for before b
-    if (b_dir >= 0) {
-        const Pos u = unit(b_dir);
-        // Approach b AGAINST b_dir: a pin's dir faces outward (away
-        // from the part's body - the a side's from = a + u*lead reads
-        // it exactly that way), so a wire lands tip-first, traveling
-        // the reverse of the facing from the pin's own outside. The
-        // stop is one lead short of the tip ON that outside
-        // (b + u*lead). The old b - u*lead sat the stop inside the
-        // part: the final leg ran out through the body and doubled
-        // back to the pin - every pin landing stabbed its part.
-        target = {b.x + u.x * kLead, b.y + u.y * kLead};
-    }
-
-    // Full polyline a -> ... -> b; the stored waypoints are its
-    // interior after folding. A corner is needed only when the free
-    // point past a's lead and the approach point before b share
-    // neither axis (aligned endpoints fold away).
-    const bool corner_needed = !eps_eq(from.x, target.x, kEps) &&
-                               !eps_eq(from.y, target.y, kEps);
-    std::vector<Pos> full;
-    full.push_back(a);
-    if (a_dir >= 0) {
-        full.push_back(from);
-    }
-    if (corner_needed) {
-        // One corner (an L): the leg out of `from` continues the
-        // committed direction (horizontal when free), the leg into
-        // `target` closes. The final approach leg target -> b already
-        // runs along b_dir, so one corner always suffices.
-        // `flip` swaps the stock choice (the Tab toggle): the same
-        // two endpoints, the corner on the other diagonal.
-        const bool start_horizontal =
-            (a_dir < 0 || a_dir == 0 || a_dir == 180) != flip;
-        if (start_horizontal) {
-            full.push_back(Pos{target.x, from.y});
-        } else {
-            full.push_back(Pos{from.x, target.y});
-        }
-    }
-    if (b_dir >= 0) {
-        full.push_back(target);
-    }
-    full.push_back(b);
-
-    // Fold duplicates and collinear middles (these become the stored
-    // waypoints; noise would ride straight into the .csim). A fold
-    // needs the leg to CONTINUE: a reversal is collinear too, but
-    // folding it would drop the lead and run the wire straight back
-    // through the part it just left - a pin at (0,0) facing +x with a
-    // target at (-5,0) keeps its (1,0) lead-out corner.
-    return fold_interior(full);
+    return ws::circsim::route_wire(a, a_dir, b, b_dir, flip);
 }
 
 std::vector<Pos> Editor::tidy_route(const std::vector<Pos>& path) {
-    constexpr double kEps = 1e-9;
-    if (path.size() < 2u) {
-        return {};
-    }
-    // Every diagonal leg gets one axis-aligned corner (horizontal
-    // first - the stock bend); axis-aligned legs pass through. The fold
-    // then merges the corner into a neighbouring collinear leg where it
-    // can, so a wire that only had a stray diagonal comes out with the
-    // fewest bends that keep the rest of its shape.
-    std::vector<Pos> full;
-    full.reserve(path.size() * 2u);
-    full.push_back(path.front());
-    for (std::size_t i = 1; i < path.size(); ++i) {
-        const Pos p = full.back();
-        const Pos q = path[i];
-        if (!eps_eq(p.x, q.x, kEps) && !eps_eq(p.y, q.y, kEps)) {
-            full.push_back(Pos{q.x, p.y});
-        }
-        full.push_back(q);
-    }
-    return fold_interior(full);
+    return ws::circsim::tidy_route(path);
 }
 
 std::size_t Editor::tidy_selection() {
@@ -474,31 +219,7 @@ bool Editor::transform_part(std::uint32_t id, int rot, bool mirror,
 
 std::vector<std::size_t> Editor::annotation_order(const std::vector<Pos>& at,
                                                   double row_tol) {
-    std::vector<std::size_t> idx(at.size());
-    for (std::size_t i = 0; i < idx.size(); ++i) {
-        idx[i] = i;
-    }
-    // Top first (world y points up); equal heights keep list order.
-    std::stable_sort(idx.begin(), idx.end(), [&](std::size_t a, std::size_t b) {
-        return at[a].y > at[b].y;
-    });
-    // Sweep into rows anchored at each row's top part, then left to
-    // right inside the row (stable: identical x keeps the order above).
-    std::size_t i = 0;
-    while (i < idx.size()) {
-        const double anchor = at[idx[i]].y;
-        std::size_t j = i + 1;
-        while (j < idx.size() && anchor - at[idx[j]].y <= row_tol) {
-            ++j;
-        }
-        std::stable_sort(idx.begin() + static_cast<std::ptrdiff_t>(i),
-                         idx.begin() + static_cast<std::ptrdiff_t>(j),
-                         [&](std::size_t a, std::size_t b) {
-                             return at[a].x < at[b].x;
-                         });
-        i = j;
-    }
-    return idx;
+    return ws::circsim::annotation_order(at, row_tol);
 }
 
 std::size_t Editor::annotate(double row_tol_cells) {
@@ -583,72 +304,15 @@ std::size_t Editor::annotate(double row_tol_cells) {
 // absolute, not relative).
 std::vector<WireRoute> Editor::attached_wire_routes(
     Drag::Kind kind, std::uint32_t id) const {
-    constexpr double kEps = 1e-9;
-    std::vector<WireRoute> out;
     const ws::circsim::Schematic* s = schem();
     if (s == nullptr) {
-        return out;
+        return {};
     }
-    const auto hits = [&](const ws::circsim::WireEndpoint& e) {
-        if (kind == Drag::Kind::Part) {
-            const auto* pin = std::get_if<PinRef>(&e);
-            return pin != nullptr && pin->part == id;
-        }
-        const auto* j = std::get_if<JunctionRef>(&e);
-        return j != nullptr && j->junction == id;
-    };
-    for (const ws::circsim::Wire& w : s->wires()) {
-        // A cosmetic freeform wire's shape is the author's - only the
-        // ortho constraint re-routes.
-        if (!w.ortho) {
-            continue;
-        }
-        const bool a_hit = hits(w.a);
-        const bool b_hit = hits(w.b);
-        if (!a_hit && !b_hit) {
-            continue;
-        }
-        const std::vector<Pos> path = wire_path(w);
-        if (path.size() < 2u) {
-            continue;  // dangling: nothing to keep straight
-        }
-        // Straight or one-bend wires (and anything with both ends on
-        // the same move) re-route as a fresh horizontal-first L; a
-        // multi-bend wire keeps its shape - only the adjacent waypoint
-        // slides, chosen so both touching legs stay axis-aligned.
-        std::vector<Pos> mid(path.begin() + 1, path.end() - 1);
-        if (mid.size() <= 1u || (a_hit && b_hit)) {
-            WireRoute r;
-            r.wire = w.id;
-            r.waypoints = route_wire(path.front(), -1, path.back(), -1);
-            out.push_back(std::move(r));
-            continue;
-        }
-        if (a_hit) {
-            // The leg into mid[1] keeps its orientation: a vertical
-            // continuation keeps x (the first leg turns horizontal),
-            // a horizontal one keeps y (the first leg turns vertical).
-            if (eps_eq(mid[0].x, mid[1].x, kEps)) {
-                mid[0].y = path.front().y;
-            } else {
-                mid[0].x = path.front().x;
-            }
-        }
-        if (b_hit) {
-            Pos& last = mid.back();
-            const Pos& prev = mid[mid.size() - 2u];
-            if (eps_eq(prev.y, last.y, kEps)) {
-                last.x = path.back().x;
-            } else {
-                last.y = path.back().y;
-            }
-        }
-        WireRoute r;
-        r.wire = w.id;
-        r.waypoints = std::move(mid);
-        out.push_back(std::move(r));
-    }
-    return out;
+    return ws::circsim::attached_wire_routes(
+        *s, library,
+        kind == Drag::Kind::Part ? ws::circsim::AttachedKind::Part
+                                 : ws::circsim::AttachedKind::Junction,
+        id);
 }
 
 std::optional<PinHit> Editor::hit_pin(Pos world, double radius) const {
@@ -656,25 +320,7 @@ std::optional<PinHit> Editor::hit_pin(Pos world, double radius) const {
     if (s == nullptr) {
         return std::nullopt;
     }
-    std::optional<PinHit> best;
-    double best_d = radius;
-    for (const ws::circsim::Part& p : s->parts()) {
-        const ws::circsim::SymbolDef* sym = sym_of(p);
-        if (sym == nullptr) {
-            continue;
-        }
-        for (std::size_t i = 0; i < sym->pins.size(); ++i) {
-            const Pos at = ws::circsim::pin_pos(*sym, p,
-                                                static_cast<std::uint32_t>(i));
-            const double d = len(Pos{at.x - world.x, at.y - world.y});
-            if (d < best_d) {
-                best_d = d;
-                best = PinHit{PinRef{p.id, static_cast<std::uint32_t>(i)}, at,
-                              sym->pins[i].dir};
-            }
-        }
-    }
-    return best;
+    return ws::circsim::hit_pin(*s, library, world, radius);
 }
 
 std::optional<std::uint32_t> Editor::hit_junction(Pos world,
@@ -683,16 +329,7 @@ std::optional<std::uint32_t> Editor::hit_junction(Pos world,
     if (s == nullptr) {
         return std::nullopt;
     }
-    std::optional<std::uint32_t> best;
-    double best_d = radius;
-    for (const ws::circsim::Junction& j : s->junctions()) {
-        const double d = len(Pos{j.pos.x - world.x, j.pos.y - world.y});
-        if (d < best_d) {
-            best_d = d;
-            best = j.id;
-        }
-    }
-    return best;
+    return ws::circsim::hit_junction(*s, world, radius);
 }
 
 // A point on an existing wire's path the cursor would land on (stage
@@ -710,63 +347,11 @@ std::optional<Editor::WirePointSnap> Editor::hit_wire_point(
     if (s == nullptr) {
         return std::nullopt;
     }
-    std::optional<WirePointSnap> best;
-    double best_d = radius;
-    const canvas::GridSpec spec = grid_spec();
-    const auto snap_one = [&](double v) {
-        return canvas::snap_coord(v, spec, false);
-    };
-    for (const ws::circsim::Wire& w : s->wires()) {
-        const std::vector<Pos> path = wire_path(w);
-        for (std::size_t i = 1; i < path.size(); ++i) {
-            const Pos a = path[i - 1];
-            const Pos b = path[i];
-            const Pos ab{b.x - a.x, b.y - a.y};
-            const Pos ap{world.x - a.x, world.y - a.y};
-            const double denom = ab.x * ab.x + ab.y * ab.y;
-            double t = denom > 0.0 ? (ap.x * ab.x + ap.y * ab.y) / denom
-                                  : 0.0;
-            t = std::max(0.0, std::min(1.0, t));
-            const Pos proj{a.x + t * ab.x, a.y + t * ab.y};
-            // Snap the projection to the fine grid; for an ortho
-            // segment one coordinate is the segment's stationary
-            // value (already grid-aligned) and snaps to itself, the
-            // other rounds to the nearest grid line.
-            Pos cand{snap_one(proj.x), snap_one(proj.y)};
-            // Verify cand lies on segment ab with exact equality
-            // (the same on_segment nets.cpp runs). If not, the grid
-            // snap drifted off the segment - use the nearer endpoint.
-            // Note: the endpoint may be a pin or junction position.
-            // snap_wire_target checks pin -> junction -> wire-point in
-            // that order with the same radius, so the caller is safe
-            // today - but this is a fragile ordering dependency. A more
-            // robust approach would explicitly skip endpoints that are
-            // pins/junctions here.
-            const double cross =
-                (b.x - a.x) * (cand.y - a.y) - (b.y - a.y) * (cand.x - a.x);
-            const bool on_seg =
-                cross == 0.0 &&
-                cand.x >= std::min(a.x, b.x) && cand.x <= std::max(a.x, b.x) &&
-                cand.y >= std::min(a.y, b.y) && cand.y <= std::max(a.y, b.y);
-            if (!on_seg) {
-                const double da = len(Pos{a.x - world.x, a.y - world.y});
-                const double db = len(Pos{b.x - world.x, b.y - world.y});
-                cand = da <= db ? a : b;
-            }
-            // Accept on the SEGMENT's distance to the cursor; the
-            // returned candidate is still the grid-aligned point the
-            // junction will be minted at. Measuring the distance to
-            // the SNAPPED candidate missed a cursor riding the wire
-            // between grid intersections at high zoom - its snap sits
-            // half a cell away.
-            const double d = dist_to_segment(a, b, world);
-            if (d <= best_d) {
-                best_d = d;
-                best = WirePointSnap{w.id, cand};
-            }
-        }
-    }
-    return best;
+    // The fine lattice the T-tap snaps to: the SAME spec the grid
+    // renderer draws (the drawn dots and the snap targets can never
+    // disagree), passed as a spacing - the lib owns no ui include.
+    return ws::circsim::hit_wire_point(*s, library, world, radius,
+                                       grid_spec().base);
 }
 
 Selection Editor::hit_any(Pos world, double radius) const {
@@ -839,24 +424,7 @@ std::optional<Bounds> Editor::content_bounds() const {
     if (s == nullptr) {
         return std::nullopt;
     }
-    BoundsBuilder out;
-    for (const ws::circsim::Part& p : s->parts()) {
-        if (const std::optional<Bounds> b = part_bounds(p.id)) {
-            out.add(*b);
-        }
-    }
-    for (const ws::circsim::Junction& j : s->junctions()) {
-        out.add(j.pos);
-    }
-    for (const ws::circsim::Label& l : s->labels()) {
-        out.add(l.pos);
-    }
-    for (const ws::circsim::Wire& w : s->wires()) {
-        for (const Pos& p : wire_path(w)) {
-            out.add(p);
-        }
-    }
-    return out.box;
+    return ws::circsim::content_bounds(*s, library);
 }
 
 std::optional<Bounds> Editor::selection_bounds() const {
@@ -1324,32 +892,16 @@ Pos Editor::place_snap(const ws::circsim::SymbolDef& sym, Pos world, int rot,
     if (magnet_radius <= 0.0) {
         return base;
     }
-    // Where would each ghost pin land at the snapped position? If one
-    // is close to a real pin, shift the whole ghost so they coincide.
-    ws::circsim::Part probe{};
-    probe.pos = base;
-    probe.rot = rot;
-    probe.mirror = mirror;
-    std::optional<Pos> best_shift;
-    double best_d = magnet_radius;
-    for (std::size_t i = 0; i < sym.pins.size(); ++i) {
-        const Pos at = ws::circsim::pin_pos(sym, probe,
-                                            static_cast<std::uint32_t>(i));
-        const std::optional<PinHit> hit = hit_pin(at, best_d);
-        if (!hit.has_value()) {
-            continue;
-        }
-        const Pos shift{hit->pos.x - at.x, hit->pos.y - at.y};
-        const double d = len(shift);
-        if (d < best_d || !best_shift.has_value()) {
-            best_d = d;
-            best_shift = shift;
-        }
-    }
-    if (!best_shift.has_value()) {
+    const ws::circsim::Schematic* s = schem();
+    if (s == nullptr) {
         return base;
     }
-    return {base.x + best_shift->x, base.y + best_shift->y};
+    // The pin magnetism is the lib's (ws::circsim::magnet_shift): the
+    // ghost nudged whole so its nearest pin lands exactly on a real
+    // pin within the radius - a part dropped near another one mates
+    // pin-to-pin instead of a cell off.
+    return ws::circsim::magnet_shift(*s, library, sym, base, rot, mirror,
+                                     magnet_radius);
 }
 
 std::string_view Editor::hint() const {
@@ -1868,25 +1420,6 @@ void Editor::status(std::string text) const {
     if (set_status) {
         set_status(std::move(text));
     }
-}
-
-// --- the symbol renderer ------------------------------------------------------
-
-// The data-color wheel (see editor.hpp's declaration comment): the same
-// eight the Results plot has always painted its signals in, now the
-// canvas's nets wear them too.
-std::uint32_t series_color(std::size_t i) {
-    static constexpr std::uint32_t kSeries[] = {
-        ws::ui::r2d::rgba(224, 90, 78),    // red
-        ws::ui::r2d::rgba(78, 161, 224),   // blue
-        ws::ui::r2d::rgba(88, 181, 92),    // green
-        ws::ui::r2d::rgba(211, 154, 42),   // amber
-        ws::ui::r2d::rgba(154, 111, 211),  // purple
-        ws::ui::r2d::rgba(78, 201, 192),   // teal
-        ws::ui::r2d::rgba(211, 90, 158),   // pink
-        ws::ui::r2d::rgba(143, 154, 78),   // olive
-    };
-    return kSeries[i % (sizeof kSeries / sizeof kSeries[0])];
 }
 
 void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
