@@ -192,6 +192,18 @@ CMakeLists only wire ws libraries together.
   resets, a right-click cancels and restores the press-time view - the
   manual window rides ws::circsim's clamp/zoom/pan math and can never
   leave the data, and the decimation slices to the visible x window),
+  stage 8 pins the panel's per-frame work to what it depends on (the
+  frame-budget caches in ResultsCache, keyed by a run_id every delivery
+  bumps): per-signal constants - the finite envelopes the y fit reads,
+  the 40-bucket sparkline envelopes, the spine flags - are walked once
+  per (run, table), the series decimations once per (x window, pixel
+  budget) so an idle frame maps cached keep lists instead of re-scanning
+  every column, and the by-index/non-sorted tables (a nested .dc's
+  wrapping inner axis) ride ws::circsim::decimate_minmax_index - the
+  same min/max envelope the sorted sweeps always had, where they used
+  to push every sample every frame (48 signals x 20k rows: ~9x an idle
+  frame, opt-in perf smoke behind CIRCSIM_PLOT_PERF=1 in the panel
+  suite),
   the .csim document type
   (autosave/crash recovery/session ride the shell), and the
   simulate job over `run_schematic`. The shell toolbar rides the

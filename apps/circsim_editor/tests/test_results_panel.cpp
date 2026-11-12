@@ -20,7 +20,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 #include <ws/settings/filesystem.hpp>
@@ -44,6 +47,23 @@ using editor::PlotGesture;
 using editor::PlotView;
 using editor::ResultsCache;
 using editor::SchematicDocument;
+
+// getenv trips MSVC's C4996 deprecation under /W4 /WX; the Win32 call is
+// the sanctioned spelling. Empty string = unset (getenv's null maps to
+// "" here - both mean "not configured").
+static std::string env_value(const char* name) {
+#if defined(_WIN32)
+    char buffer[MAX_PATH];
+    const DWORD size = GetEnvironmentVariableA(name, buffer, MAX_PATH);
+    if (size == 0 || size >= MAX_PATH) {
+        return "";
+    }
+    return buffer;
+#else
+    const char* v = std::getenv(name);
+    return v ? v : "";
+#endif
+}
 
 // The series palette the panel draws with (results_panel.cpp's wheel).
 [[nodiscard]] std::uint32_t series_color(std::size_t i) {
@@ -157,6 +177,9 @@ struct Bench {
         ed.results.run.results.tables.clear();
         ed.results.run.results.tables.push_back(std::move(table));
         ed.results.table = 0;
+        // The app's delivery bump: a new run_id re-keys the
+        // frame-budget caches (stats/decim) beside the stage-4/5 keys.
+        ++ed.results.run_id;
         ed.results.visible_for = ResultsCache::kNoTable;
         ed.results.visible.clear();
         ed.results.hover = -1;
@@ -1251,4 +1274,203 @@ TEST_CASE("an .op fourier answers the dc line alone") {
     CHECK(ws::ui::gui_test::stub.texts == 7u);
     CHECK(ws::ui::gui_test::stub.last_text_font == &mono);
     b.ed.font_mono = nullptr;
+}
+
+// --- the frame-budget caches (stage 8) ----------------------------------------
+//
+// The big-circuit fix's gate: the per-frame work over the run's data
+// is cached against what it depends on - per-signal constants once per
+// (run, table), the series decimations once per (x window, pixel
+// budget). The cases below pin the keys (a delivery re-keys, an idle
+// frame hits), the bounded vertex counts on EVERY path (the sorted
+// sweep, the non-sorted wrap, the by-index axis), and the picture
+// staying byte-identical on the frames nothing changes.
+
+TEST_CASE("an idle frame reuses the cached decimation verbatim") {
+    Bench b;
+    b.load(ramp_table(1200u));
+    b.draw();  // frame 1: builds the stats and the keep lists
+
+    // The caches minted for THIS table of THIS run.
+    REQUIRE(b.ed.results.stats.size() == 2u);
+    CHECK(b.ed.results.stats_for == 0u);
+    CHECK(b.ed.results.stats_run == b.ed.results.run_id);
+    CHECK(b.ed.results.stats[0].finite);
+    CHECK(b.ed.results.stats[0].spark_env.size() == 80u);  // 40 buckets
+    CHECK_FALSE(b.ed.results.stats[0].right);              // v(out)
+    CHECK(b.ed.results.stats[1].right);                    // i(V1)
+    REQUIRE(b.ed.results.decim.size() == 2u);
+    CHECK(b.ed.results.decim[0].built);
+    CHECK_FALSE(b.ed.results.decim[0].idx.empty());
+
+    // Frame 2, nothing changed: the same series geometry, point for
+    // point (the keep lists ride the cache; the mapping is
+    // deterministic), and the cache keys did not move.
+    std::vector<std::vector<canvas::Point>> before;
+    for (const canvas::CanvasCmd* s : b.series_cmds()) {
+        before.push_back(s->points);
+    }
+    b.draw();
+    const std::vector<const canvas::CanvasCmd*> after = b.series_cmds();
+    REQUIRE(after.size() == before.size());
+    for (std::size_t i = 0; i < after.size(); ++i) {
+        REQUIRE(after[i]->points.size() == before[i].size());
+        for (std::size_t j = 0; j < before[i].size(); ++j) {
+            CHECK(after[i]->points[j] == before[i][j]);
+        }
+    }
+    CHECK(b.ed.results.decim_run == b.ed.results.run_id);
+
+    // A delivery re-keys: the stats rebuild against the new run_id and
+    // the keeps unbuilt (a same-shaped table is a different table).
+    const std::uint64_t was_run = b.ed.results.run_id;
+    b.load(ramp_table(1200u));
+    CHECK(b.ed.results.run_id != was_run);
+    const bool stats_rekeyed = b.ed.results.stats_for == ResultsCache::kNoTable ||
+                               b.ed.results.stats_run != b.ed.results.run_id;
+    CHECK(stats_rekeyed);
+    b.draw();
+    CHECK(b.ed.results.stats_run == b.ed.results.run_id);
+    CHECK(b.ed.results.decim_run == b.ed.results.run_id);
+}
+
+TEST_CASE("a big wrap table folds to the index envelope") {
+    // The .dc wrap shape (the axis rises then falls back - not
+    // strictly increasing) at a size the pixel budget cannot fit: the
+    // stage-7 code pushed every sample of every series each frame; the
+    // stage-8 path rides decimate_minmax_index - bounded vertices,
+    // exact extremes.
+    Bench b;
+    ws::spice::Table wrap = ramp_table(4000u);
+    for (std::size_t i = 0; i < wrap.sweep_axes[0].size(); ++i) {
+        wrap.sweep_axes[0][i] =
+            1.0e-4 * static_cast<double>(i < 2000u ? i : 3999u - i);
+    }
+    b.load(std::move(wrap));
+    b.draw();
+    CHECK(b.ed.results.x_sorted == false);
+
+    const std::vector<const canvas::CanvasCmd*> series = b.series_cmds();
+    REQUIRE(series.size() == 2u);
+    for (const canvas::CanvasCmd* s : series) {
+        // The budget is the plot's inner width (~570): 4000 samples
+        // fold to at most ~budget + 2 vertices, never collapse.
+        CHECK(s->points.size() <= 580u);
+        CHECK(s->points.size() >= 8u);
+    }
+    // The envelope keeps the ramp's rails: first point low, last point
+    // high (v(out) rises 0 -> 5 across the run, endpoints forced).
+    const canvas::CanvasCmd* ramp =
+        series[0]->color == series_color(0) ? series[0] : series[1];
+    const Bench::FrameBox f = b.frame_box(b.frame_cmd());
+    CHECK(ramp->points.front().y > f.fy2 - 16.0f);
+    CHECK(ramp->points.back().y < f.fy + 16.0f);
+    // The keep lists minted through the index path: base 0, built.
+    REQUIRE(b.ed.results.decim.size() == 2u);
+    CHECK(b.ed.results.decim[0].built);
+    CHECK(b.ed.results.decim[0].base == 0u);
+    CHECK_FALSE(b.ed.results.decim[0].idx.empty());
+}
+
+TEST_CASE("a many-signal table draws bounded series and sparklines") {
+    // 48 signals x 20000 rows - the big-circuit shape the caches exist
+    // for. Every series folds to the pixel budget; every legend row's
+    // sparkline is the cached 40-bucket envelope (a width-1.2 stroke
+    // of at most 96 points, whatever the row count).
+    Bench b;
+    ws::spice::Table t;
+    t.analysis = ws::spice::AnalysisKind::Tran;
+    t.sweep = ws::spice::SweepKind::Time;
+    t.sweep_names = {"time"};
+    t.sweep_axes.emplace_back();
+    t.sweep_axes.back().reserve(20000u);
+    for (std::size_t i = 0; i < 20000u; ++i) {
+        t.sweep_axes.back().push_back(5.0e-7 * static_cast<double>(i));
+    }
+    for (std::size_t s = 0; s < 48u; ++s) {
+        ws::spice::Signal sig;
+        sig.name = "v(n" + std::to_string(1000 + s) + ")";
+        sig.data.reserve(20000u);
+        for (std::size_t i = 0; i < 20000u; ++i) {
+            const double x = static_cast<double>(i) / 19999.0;
+            sig.data.push_back(3.3 * (0.5 + 0.5 * std::sin(6.28318530718 *
+                                                           x + s)));
+        }
+        t.signals.push_back(std::move(sig));
+    }
+    b.load(std::move(t));
+    b.draw();
+
+    REQUIRE(b.ed.results.stats.size() == 48u);
+    for (const editor::ResultsCache::SeriesStats& st :
+         b.ed.results.stats) {
+        CHECK(st.finite);
+        CHECK(st.spark_env.size() == 80u);
+    }
+    const std::vector<const canvas::CanvasCmd*> series = b.series_cmds();
+    REQUIRE(series.size() == 48u);
+    std::size_t sparklines = 0;
+    for (const canvas::CanvasCmd& c : b.clc.cmds) {
+        if (c.kind == canvas::CanvasCmdKind::stroke_polyline &&
+            c.width == 1.2f && c.points.size() > 4u) {
+            ++sparklines;
+            CHECK(c.points.size() <= 96u);  // 2 per bucket, 40 buckets
+        }
+    }
+    CHECK(sparklines == 48u);
+    for (const canvas::CanvasCmd* s : series) {
+        CHECK(s->points.size() <= 580u);
+    }
+}
+
+TEST_CASE("the frame budget stays flat on idle frames") {
+    // Opt-in perf smoke, not a gate: run with CIRCSIM_PLOT_PERF=1 to
+    // see the numbers. The stage-8 contract in wall clock: the first
+    // frame of a table pays the cache builds (O(signals x samples)),
+    // and every idle frame after it must NOT - it maps the cached
+    // keeps (O(signals x budget)). The check is the generous direction
+    // (an idle frame is strictly less work than a build frame), so it
+    // cannot flake on a slow machine.
+    if (env_value("CIRCSIM_PLOT_PERF").empty()) {
+        return;
+    }
+    Bench b;
+    ws::spice::Table t;
+    t.analysis = ws::spice::AnalysisKind::Tran;
+    t.sweep = ws::spice::SweepKind::Time;
+    t.sweep_names = {"time"};
+    t.sweep_axes.emplace_back();
+    t.sweep_axes.back().reserve(20000u);
+    for (std::size_t i = 0; i < 20000u; ++i) {
+        t.sweep_axes.back().push_back(5.0e-7 * static_cast<double>(i));
+    }
+    for (std::size_t s = 0; s < 48u; ++s) {
+        ws::spice::Signal sig;
+        sig.name = "v(n" + std::to_string(1000 + s) + ")";
+        sig.data.reserve(20000u);
+        for (std::size_t i = 0; i < 20000u; ++i) {
+            const double x = static_cast<double>(i) / 19999.0;
+            sig.data.push_back(3.3 * (0.5 + 0.5 * std::sin(6.28318530718 *
+                                                           x + s)));
+        }
+        t.signals.push_back(std::move(sig));
+    }
+    b.load(std::move(t));
+
+    using Clock = std::chrono::steady_clock;
+    const auto draw_many = [&](int frames) {
+        const auto t0 = Clock::now();
+        for (int i = 0; i < frames; ++i) {
+            b.draw();
+        }
+        return std::chrono::duration<double, std::milli>(Clock::now() - t0)
+            .count();
+    };
+    const double build_ms = draw_many(1);   // the cache-building frame
+    const double idle_ms = draw_many(30) / 30.0;
+    std::printf("  perf: 48 signals x 20000 rows - build frame %.3f ms, "
+                "idle frame %.3f ms (%.1fx)\n",
+                build_ms, idle_ms,
+                idle_ms > 0.0 ? build_ms / idle_ms : 0.0);
+    CHECK(idle_ms <= build_ms);
 }

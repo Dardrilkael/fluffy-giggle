@@ -199,7 +199,11 @@ fetched privately, which would duplicate a first-party capability.
   a strictly-increasing x, keeps each bucket's y-min and y-max SAMPLE
   in occurrence order plus the exact ends - spikes and envelope
   survive any budget; non-increasing axes answer EMPTY = draw raw,
-  the nested-.dc rule).
+  the nested-.dc rule), `decimate_minmax_index` (stage 8: the same
+  envelope bucketed on the sample INDEX - for the by-index axis and
+  that same nested-.dc wrap, where value-bucketing cannot run and the
+  panel used to draw every sample; a NaN that opens a bucket stays as
+  the break vertex, the x-walk's own reading).
 - The manual view (stage 5): `clamp_view` (a window slides back
   inside home; wider-than-home, degenerate or non-finite answers
   home), `zoom_range` (anchor clamped into the view first, floored at

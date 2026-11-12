@@ -1055,6 +1055,10 @@ void deliver(Editor& ed, ws::circsim::RunOutcome outcome) {
         }
     }
     ed.results.table = 0;
+    // The app's delivery bump: re-keys the frame-budget caches (the
+    // results panel is not drawn here, but the fake delivery mirrors
+    // main.cpp's block exactly).
+    ++ed.results.run_id;
     ed.results.visible_for = editor::ResultsCache::kNoTable;
     ed.results.visible.clear();
     ed.results.x_sorted_for = editor::ResultsCache::kNoTable;

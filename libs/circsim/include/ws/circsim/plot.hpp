@@ -151,4 +151,20 @@ enum class PlotYAxis : std::uint8_t { Left, Right };
     std::span<const double> xs, std::span<const double> ys,
     std::size_t budget);
 
+// The same envelope for data whose x IS the sample index: the by-index
+// axis (a table with no sweep axis of its own) and the non-sorted
+// wrap (a nested .dc's repeating inner axis, where decimate_minmax
+// refuses to bucket by value). Buckets split the INDEX run instead of
+// the x span - bucket b owns samples [b*n/buckets, (b+1)*n/buckets) -
+// and each contributes its y-minimum and y-maximum sample in
+// occurrence order, plus the forced global first and last. The answer
+// never exceeds ~2 x budget entries and is strictly increasing in
+// index; a bucket that holds no finite sample still answers through
+// its opener (a NaN vertex, the line break the stroker already knows).
+//
+// EMPTY means "decimation does not apply - draw every point": the
+// input already fits the budget (or is too short to fold).
+[[nodiscard]] std::vector<std::size_t> decimate_minmax_index(
+    std::span<const double> ys, std::size_t budget);
+
 }  // namespace ws::circsim

@@ -422,6 +422,75 @@ struct ResultsCache {
     // NEW run is a different axis).
     bool x_sorted = false;
     std::size_t x_sorted_for = kNoTable;  // the table `x_sorted` belongs to
+
+    // --- the frame-budget caches (the big-circuit fix) -------------------------
+    //
+    // A big circuit's run carries dozens of signals over tens of
+    // thousands of samples, and the panel used to re-walk ALL of it
+    // EVERY frame: the y fit scanned every visible column end to end,
+    // each legend row's sparkline scanned its whole signal twice, and
+    // every series re-decimated from scratch - three O(signals x
+    // samples) passes at the frame rate on a plot that only changes
+    // when the view, the hover or the table does. The caches below pin
+    // each pass to what it actually depends on:
+    //   * stats - per-signal constants of the TABLE (the finite
+    //     envelope for the y fit, the sparkline's 40-bucket envelope,
+    //     the spine flag): computed once per (run, table), read every
+    //     frame. The y fit becomes O(visible signals), the sparkline
+    //     O(buckets).
+    //   * decim - per-signal keep lists for the series polylines,
+    //     recomputed only when the x window or the pixel budget moves
+    //     (a gesture, a resize), reused verbatim on idle frames.
+    // Both key on run_id (bumped by every delivery, main.cpp) beside
+    // the table index, so a same-indexed table of a new run never
+    // reads a stale entry; a document switch replaces the whole cache.
+    // The tables are immutable once delivered, so a (run, table) hit
+    // is valid by construction.
+    std::uint64_t run_id = 0;  // the delivery the cached work belongs to
+
+    struct SeriesStats {
+        bool finite = false;   // any finite sample at all
+        double lo = 0.0;       // the finite envelope's min (y fit +
+        double hi = 1.0;       //  sparkline scale; sane-empty when !finite)
+        // The sparkline envelope: 2 entries per bucket (the min and
+        // max SAMPLE's value in occurrence order, duplicated when the
+        // bucket holds one sample, NaN pair when it holds none) - the
+        // exact point list draw_sparkline used to rebuild per frame,
+        // mapped straight through py() at draw time.
+        std::vector<double> spark_env;
+        bool right = false;    // signal_y_axis's answer (the spine flag)
+    };
+    std::size_t stats_for = kNoTable;   // the table `stats` belongs to
+    std::uint64_t stats_run = 0;        // ... and the delivery of it
+    std::vector<SeriesStats> stats;
+
+    // One signal's cached decimation: `idx` are sample indices (relative
+    // to `base`, the slice start the sorted path bounds to; 0 for the
+    // index path), `built` separates "computed, and legitimately
+    // empty - draw every point in the slice" from "not computed".
+    struct DecimKeep {
+        std::vector<std::size_t> idx;
+        std::size_t base = 0;
+        bool built = false;
+    };
+    // The shared key of the keep list: which table/run, which x window
+    // (the effective view - the slice the keeps were decimated over),
+    // which pixel budget (the plot's inner width). An exact-window
+    // compare is sound: the window only moves through discrete
+    // gestures, and the auto fit is recomputed deterministically from
+    // immutable axis ends.
+    std::size_t decim_for = kNoTable;
+    std::uint64_t decim_run = 0;
+    double decim_lo = 0.0;
+    double decim_hi = 0.0;
+    std::size_t decim_budget = 0;
+    std::vector<DecimKeep> decim;
+
+    // The series/sparkline point scratch: one buffer reused across
+    // signals and frames (a fresh vector per series per signal was
+    // 2 x signals heap round-trips a frame for nothing - the canvas
+    // consumes points synchronously, so no draw holds them).
+    std::vector<canvas::Point> scratch_pts;
 };
 
 // One editable field's caller-owned buffer (the Properties panel's

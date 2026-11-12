@@ -1287,6 +1287,11 @@ class CircsimApp final : public ws::ui::App {
                 }
             }
             editor_.results.table = 0;
+            // The frame-budget caches' delivery key: every delivery is
+            // a new run_id, so the per-signal stats and the decimation
+            // keeps re-key (a same-indexed table of the new run is a
+            // different table even where the address matches).
+            ++editor_.results.run_id;
             editor_.results.visible_for = editor::ResultsCache::kNoTable;
             editor_.results.visible.clear();
             editor_.results.x_sorted_for = editor::ResultsCache::kNoTable;

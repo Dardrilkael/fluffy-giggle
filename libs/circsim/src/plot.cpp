@@ -359,6 +359,79 @@ std::vector<std::size_t> decimate_minmax(std::span<const double> xs,
     return out;
 }
 
+std::vector<std::size_t> decimate_minmax_index(
+    std::span<const double> ys, std::size_t budget) {
+    if (budget < 2u || ys.size() < 2u || ys.size() <= budget) {
+        return {};
+    }
+    // The index run's bucket walk: same shape as decimate_minmax's
+    // (min/max SAMPLE per bucket, occurrence order, forced endpoints)
+    // but the bucket comes from the index arithmetic alone - there is
+    // no x to chain, so no strictly-increasing precondition to fail.
+    // A bucket that OPENS on a NaN keeps it (the finite samples behind
+    // a NaN compare false against one, so the flush pushes the break
+    // vertex) - the same reading decimate_minmax gives a NaN bucket.
+    const std::size_t n = ys.size();
+    const std::size_t buckets = budget / 2u;
+    const auto bucket_of = [&](std::size_t i) {
+        std::size_t b = i * buckets / n;
+        if (b >= buckets) {
+            b = buckets - 1u;
+        }
+        return b;
+    };
+
+    std::vector<std::size_t> out;
+    out.reserve(buckets * 2u + 2u);
+    double min_v = ys[0];
+    double max_v = ys[0];
+    std::size_t min_i = 0;
+    std::size_t max_i = 0;
+    std::size_t open = 0;
+    const auto flush = [&] {
+        if (min_i == max_i) {
+            out.push_back(min_i);
+            return;
+        }
+        if (min_i < max_i) {
+            out.push_back(min_i);
+            out.push_back(max_i);
+        } else {
+            out.push_back(max_i);
+            out.push_back(min_i);
+        }
+    };
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::size_t b = bucket_of(i);
+        if (b != open) {
+            flush();
+            min_v = max_v = ys[i];
+            min_i = max_i = i;
+            open = b;
+            continue;
+        }
+        if (ys[i] < min_v) {
+            min_v = ys[i];
+            min_i = i;
+        }
+        if (ys[i] > max_v) {
+            max_v = ys[i];
+            max_i = i;
+        }
+    }
+    flush();
+
+    // The endpoints are load-bearing (a waveform's edge timing): force
+    // them exactly, as the x-bucket walk does.
+    if (out.front() != 0u) {
+        out.insert(out.begin(), 0u);
+    }
+    if (out.back() != n - 1u) {
+        out.push_back(n - 1u);
+    }
+    return out;
+}
+
 // --- the two-axis split (stage 6) --------------------------------------------
 
 namespace {

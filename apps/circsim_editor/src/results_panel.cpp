@@ -46,6 +46,19 @@
 // message, aligned value rows with units, and a one-line gesture
 // cheat sheet under the plot. The per-frame debug logging and the
 // per-frame index vector in the hover path are gone.
+//
+// Stage 8 is the frame-budget pass (the big-circuit fix): a run with
+// dozens of signals over tens of thousands of samples used to re-walk
+// every column three times a frame (the y fit, each sparkline, each
+// series' decimation), which priced an idle frame at O(signals x
+// samples) and made big results panels crawl. The per-frame work over
+// the run's data is now cached against what it actually depends on
+// (ResultsCache's frame-budget block): per-signal constants (the
+// y-fit envelope, the sparkline envelope, the spine flags) once per
+// (run, table), and the series decimations once per (x window, pixel
+// budget). An idle frame maps cached keep lists through the screen
+// transform - O(signals x budget) - and the by-index/wrap tables join
+// the envelope club through ws::circsim::decimate_minmax_index.
 
 #include "results_panel.hpp"
 
@@ -129,6 +142,87 @@ void sync_visibility(Editor& ed, const ws::spice::Table& t) {
         ed.results.visible.assign(t.signals.size(), 1u);
         ed.results.visible_for = ed.results.table;
     }
+}
+
+// The per-signal constants of the shown table (ResultsCache's
+// frame-budget block): every column's finite envelope (the y fit and
+// the sparkline scale both read it), the sparkline's 40-bucket
+// envelope, and the two-axis classifier's spine flag. One walk per
+// (run, table) - the tables are immutable once delivered, so the key
+// (run_id, table index) is sound by construction, and a frame that
+// changes nothing (the common case) reads the vectors as-is. The y
+// fit below and every legend row drop from O(samples) to O(1)/O(40)
+// per frame, whatever the circuit's size.
+void ensure_series_stats(Editor& ed, const ws::spice::Table& t) {
+    ResultsCache& cache = ed.results;
+    if (cache.stats_for == cache.table &&
+        cache.stats_run == cache.run_id &&
+        cache.stats.size() == t.signals.size()) {
+        return;  // the constants of THIS table of THIS run
+    }
+    cache.stats.clear();
+    cache.stats.resize(t.signals.size());
+    constexpr std::size_t kSparkBuckets = 40;
+    for (std::size_t i = 0; i < t.signals.size(); ++i) {
+        ResultsCache::SeriesStats& st = cache.stats[i];
+        st.right = ws::circsim::signal_y_axis(t.signals[i].name) ==
+                   ws::circsim::PlotYAxis::Right;
+        const std::span<const double> ys = t.signals[i].data;
+        const std::size_t n = ys.size();
+        // The finite envelope: one scan serves the y fit (which used
+        // to re-scan every visible column per frame) and the
+        // sparkline's scale.
+        double lo = std::numeric_limits<double>::infinity();
+        double hi = -std::numeric_limits<double>::infinity();
+        for (double v : ys) {
+            if (std::isfinite(v)) {
+                lo = std::min(lo, v);
+                hi = std::max(hi, v);
+            }
+        }
+        if (lo <= hi) {
+            st.finite = true;
+            st.lo = lo;
+            st.hi = hi;
+        }
+        // The sparkline envelope: the exact point list draw_sparkline
+        // used to rebuild per frame per legend row, materialized once
+        // - 2 entries per bucket (the min and max sample's VALUE in
+        // occurrence order; a NaN pair for a bucket with nothing
+        // finite). n < 2 draws no sparkline; the empty vector is its
+        // own answer.
+        const std::size_t buckets = std::min(kSparkBuckets, n);
+        st.spark_env.assign(buckets * 2u,
+                            std::numeric_limits<double>::quiet_NaN());
+        for (std::size_t b = 0; b < buckets; ++b) {
+            const std::size_t i0 = b * n / buckets;
+            const std::size_t i1 = std::max(i0 + 1u, (b + 1u) * n / buckets);
+            std::size_t imin = n;
+            std::size_t imax = n;
+            for (std::size_t k = i0; k < i1 && k < n; ++k) {
+                if (!std::isfinite(ys[k])) {
+                    continue;
+                }
+                if (imin == n || ys[k] < ys[imin]) {
+                    imin = k;
+                }
+                if (imax == n || ys[k] > ys[imax]) {
+                    imax = k;
+                }
+            }
+            if (imin == n) {
+                continue;  // nothing finite: the NaN pair stays
+            }
+            // Index order inside the bucket, so a falling edge does
+            // not zigzag (draw_sparkline's own rule).
+            const std::size_t first = std::min(imin, imax);
+            const std::size_t second = std::max(imin, imax);
+            st.spark_env[b * 2u] = ys[first];
+            st.spark_env[b * 2u + 1u] = ys[second];
+        }
+    }
+    cache.stats_for = cache.table;
+    cache.stats_run = cache.run_id;
 }
 
 [[nodiscard]] bool strictly_increasing(std::span<const double> xs) {
@@ -224,29 +318,23 @@ constexpr float kMarginRightAxis = 46.0f;
     return (color & 0xFFFFFF00u) | std::uint32_t(a);
 }
 
-// A legend sparkline: the whole signal squeezed into `r` as a min/max
-// envelope (so a spike survives the squeeze), scaled to its own range,
+// A legend sparkline: the cached 40-bucket envelope (see
+// ensure_series_stats) squeezed into `r`, scaled to its own range,
 // with a dot at the hover sample. It is a thumbnail of the SHAPE - the
-// plot carries the numbers.
+// plot carries the numbers - and it costs O(buckets) a frame instead
+// of the two full-column scans it used to run per legend row.
 void draw_sparkline(canvas::Canvas2D& rc, const gui::Rect& r,
-                    std::span<const double> ys, std::uint32_t color,
-                    int mark) {
-    constexpr std::size_t kBuckets = 40;
+                    std::span<const double> ys,
+                    const ResultsCache::SeriesStats& st,
+                    std::uint32_t color, int mark,
+                    std::vector<Point>& pts) {
     const std::size_t n = ys.size();
-    if (n < 2u) {
+    const std::size_t buckets = st.spark_env.size() / 2u;
+    if (n < 2u || buckets < 2u || !st.finite) {
         return;
     }
-    double lo = std::numeric_limits<double>::infinity();
-    double hi = -std::numeric_limits<double>::infinity();
-    for (double v : ys) {
-        if (std::isfinite(v)) {
-            lo = std::min(lo, v);
-            hi = std::max(hi, v);
-        }
-    }
-    if (lo > hi) {
-        return;  // nothing finite to draw
-    }
+    double lo = st.lo;
+    double hi = st.hi;
     if (!(hi > lo)) {
         lo -= 1.0;  // a flat signal rides the middle rail
         hi += 1.0;
@@ -255,39 +343,14 @@ void draw_sparkline(canvas::Canvas2D& rc, const gui::Rect& r,
     const auto py = [&](double v) {
         return static_cast<float>(r.y + 2.0f + (hi - v) / (hi - lo) * h);
     };
-    const std::size_t buckets = std::min(kBuckets, n);
-    std::vector<Point> pts;
+    pts.clear();
     pts.reserve(buckets * 2u);
     for (std::size_t b = 0; b < buckets; ++b) {
-        const std::size_t i0 = b * n / buckets;
-        const std::size_t i1 = std::max(i0 + 1u, (b + 1u) * n / buckets);
         const float px = r.x + static_cast<float>(b) *
                                    (r.width - 1.0f) /
                                    static_cast<float>(buckets - 1u);
-        std::size_t imin = n;
-        std::size_t imax = n;
-        for (std::size_t k = i0; k < i1 && k < n; ++k) {
-            if (!std::isfinite(ys[k])) {
-                continue;
-            }
-            if (imin == n || ys[k] < ys[imin]) {
-                imin = k;
-            }
-            if (imax == n || ys[k] > ys[imax]) {
-                imax = k;
-            }
-        }
-        if (imin == n) {
-            pts.push_back(Point{px, std::numeric_limits<float>::quiet_NaN()});
-            continue;
-        }
-        // Index order inside the bucket, so a falling edge does not zigzag.
-        const std::size_t first = std::min(imin, imax);
-        const std::size_t second = std::max(imin, imax);
-        pts.push_back(Point{px, py(ys[first])});
-        if (second != first) {
-            pts.push_back(Point{px, py(ys[second])});
-        }
+        pts.push_back(Point{px, py(st.spark_env[b * 2u])});
+        pts.push_back(Point{px, py(st.spark_env[b * 2u + 1u])});
     }
     stroke_series(rc, pts, with_alpha(color, 200), 1.2f);
     if (mark >= 0 && static_cast<std::size_t>(mark) < n &&
@@ -693,19 +756,19 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
 
     // The two-axis split (stage 6) FIRST: whether the visible signals
     // earn a right spine decides the frame's right margin, so it is
-    // plot geometry, not a draw detail. The classification is a
-    // per-signal constant of the frame - the flags the mapping,
-    // markers and legend all read.
-    std::vector<std::uint8_t> on_right(t.signals.size(), 0u);
+    // plot geometry, not a draw detail. The classifier's flags and
+    // every column's finite envelope are per-table constants - they
+    // ride the stats cache (ensure_series_stats built this table's)
+    // instead of the per-frame classify walk plus the full-column
+    // scan per visible signal the stage-7 code ran.
+    const std::vector<ResultsCache::SeriesStats>& stats = ed.results.stats;
     bool has_right = false;
     for (std::size_t i = 0; i < t.signals.size(); ++i) {
-        if (ws::circsim::signal_y_axis(t.signals[i].name) ==
-            ws::circsim::PlotYAxis::Right) {
-            on_right[i] = 1u;
-            if (i < ed.results.visible.size() &&
-                ed.results.visible[i] != 0u) {
-                has_right = true;
-            }
+        if (i < ed.results.visible.size() &&
+            ed.results.visible[i] != 0u && i < stats.size() &&
+            stats[i].right) {
+            has_right = true;
+            break;
         }
     }
     const float mr = has_right ? kMarginRightAxis : kMarginRight;
@@ -762,18 +825,20 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
             continue;
         }
         any_visible = true;
-        const std::span<const double> ys = t.signals[i].data;
-        const bool right = on_right[i] != 0u;
-        for (std::size_t k = 0; k < ys.size() && k < n; ++k) {
-            if (std::isfinite(ys[k])) {
-                if (right) {
-                    y1_lo = std::min(y1_lo, ys[k]);
-                    y1_hi = std::max(y1_hi, ys[k]);
-                } else {
-                    y_lo = std::min(y_lo, ys[k]);
-                    y_hi = std::max(y_hi, ys[k]);
-                }
-            }
+        // The cached finite envelope - the same min/max the per-frame
+        // scan below this block used to re-derive over every sample
+        // of every visible column, read here in O(1).
+        const ResultsCache::SeriesStats& st =
+            i < stats.size() ? stats[i] : ResultsCache::SeriesStats{};
+        if (!st.finite) {
+            continue;
+        }
+        if (st.right) {
+            y1_lo = std::min(y1_lo, st.lo);
+            y1_hi = std::max(y1_hi, st.hi);
+        } else {
+            y_lo = std::min(y_lo, st.lo);
+            y_hi = std::max(y_hi, st.hi);
         }
     }
     if (y_lo > y_hi) {
@@ -810,9 +875,10 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
             fy + (pf.vyr1.hi - v) / (pf.vyr1.hi - pf.vyr1.lo) * ih);
     };
     // A series maps through its OWN spine (stage 6): the flag is the
-    // classifier's answer, the visibility gates the caller already ran.
+    // classifier's cached answer, the visibility gate the caller
+    // already ran.
     const auto sy_of = [&](std::size_t i, double v) {
-        return on_right[i] != 0u ? sy1(v) : sy(v);
+        return i < stats.size() && stats[i].right ? sy1(v) : sy(v);
     };
 
     canvas::Canvas2D& rc = ed.results_draw_canvas();
@@ -939,6 +1005,34 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     // --- the series
     const std::size_t budget =
         std::max<std::size_t>(64u, static_cast<std::size_t>(iw));
+    // The decimation cache's key (ResultsCache's frame-budget block):
+    // the table (its delivery rides run_id), the x window the slice
+    // bounds to, and the pixel budget. A miss - a table switch, a new
+    // run, a gesture frame, a resize - unbuilt-s every keep WITHOUT
+    // freeing their buffers (a pan rebuilds into the same storage
+    // every frame it moves); a hit - the common idle frame - reuses
+    // the lists verbatim and skips the per-signal decimation walk
+    // entirely.
+    ResultsCache& cache = ed.results;
+    if (cache.decim_for != cache.table || cache.decim_run != cache.run_id ||
+        cache.decim_budget != budget || cache.decim_lo != pf.vxr.lo ||
+        cache.decim_hi != pf.vxr.hi ||
+        cache.decim.size() != t.signals.size()) {
+        cache.decim.resize(t.signals.size());
+        for (ResultsCache::DecimKeep& dk : cache.decim) {
+            dk.built = false;  // the idx buffers ride on (capacity kept)
+        }
+        cache.decim_for = cache.table;
+        cache.decim_run = cache.run_id;
+        cache.decim_lo = pf.vxr.lo;
+        cache.decim_hi = pf.vxr.hi;
+        cache.decim_budget = budget;
+    }
+    // One point buffer for every series of the frame (the canvas
+    // consumes points synchronously, so nothing holds them past a
+    // stroke) - the old code allocated two fresh vectors per signal
+    // per frame.
+    std::vector<Point>& pts = cache.scratch_pts;
     for (std::size_t i = 0; i < t.signals.size(); ++i) {
         if (i >= ed.results.visible.size() || ed.results.visible[i] == 0u) {
             continue;
@@ -947,11 +1041,12 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
         if (ys.empty()) {
             continue;
         }
+        ResultsCache::DecimKeep& dk = cache.decim[i];
         const auto x_at = [&](std::size_t k) {
             return by_index ? static_cast<double>(k)
                             : (k < xs.size() ? xs[k] : 0.0);
         };
-        std::vector<Point> pts;
+        pts.clear();
         const auto push = [&](std::size_t k) {
             if (k >= ys.size()) {
                 return;
@@ -982,22 +1077,47 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                 b1 != xs.begin() + rows
                     ? static_cast<std::size_t>(b1 - xs.begin()) + 1u
                     : rows;
-            const std::vector<std::size_t> keep =
-                ws::circsim::decimate_minmax(xs.subspan(i0, i1 - i0),
-                                             ys.subspan(i0, i1 - i0),
-                                             budget);
-            if (keep.empty()) {
+            if (!dk.built) {
+                dk.base = i0;
+                dk.idx = ws::circsim::decimate_minmax(
+                    xs.subspan(i0, i1 - i0), ys.subspan(i0, i1 - i0),
+                    budget);
+                dk.built = true;
+            }
+            if (dk.idx.empty()) {
+                // Decimation does not apply (the slice fits the
+                // budget): the honest full-resolution polyline.
                 for (std::size_t k = i0; k < i1; ++k) {
                     push(k);
                 }
             } else {
-                for (std::size_t k : keep) {
-                    push(i0 + k);
+                for (std::size_t k : dk.idx) {
+                    push(dk.base + k);
                 }
             }
         } else {
-            for (std::size_t k = 0; k < n; ++k) {
-                push(k);
+            // The by-index axis and the non-sorted wrap (a nested
+            // .dc's repeating inner axis): decimate_minmax cannot
+            // bucket these by value, so the stage-7 code pushed EVERY
+            // sample of EVERY series each frame - the one path a big
+            // table rode unbounded. The index-envelope
+            // (decimate_minmax_index) gives it the same pixel budget
+            // the sorted sweeps always had; a table that fits the
+            // budget keeps its exact per-sample polyline.
+            if (!dk.built) {
+                dk.base = 0;
+                dk.idx = ws::circsim::decimate_minmax_index(
+                    ys.subspan(0, std::min(n, ys.size())), budget);
+                dk.built = true;
+            }
+            if (dk.idx.empty()) {
+                for (std::size_t k = 0; k < n; ++k) {
+                    push(k);
+                }
+            } else {
+                for (std::size_t k : dk.idx) {
+                    push(k);
+                }
             }
         }
         stroke_series(rc, pts, series_color(i));
@@ -1320,6 +1440,11 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
     }
     const ws::spice::Table& t = res.tables[ed.results.table];
     sync_visibility(ed, t);
+    // The per-signal constants of this table (the finite envelopes,
+    // the sparkline envelopes, the spine flags): one walk per
+    // (run, table) - the frame-budget caches' first member. Both the
+    // legend rows below and draw_plot read it.
+    ensure_series_stats(ed, t);
 
     const bool stale = ed.results.version != ed.schem()->version();
 
@@ -1480,8 +1605,9 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
                       14.0f);
             layout.same_line();
             const gui::Rect spark = layout.next(48.0f, 14.0f);
-            draw_sparkline(sw, spark, s.data, series_color(i),
-                           ed.results.hover);
+            draw_sparkline(sw, spark, s.data, ed.results.stats[i],
+                           series_color(i), ed.results.hover,
+                           ed.results.scratch_pts);
             if (at >= 0 && static_cast<std::size_t>(at) < s.data.size()) {
                 layout.same_line();
                 const std::string value = with_unit(

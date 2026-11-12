@@ -16,6 +16,7 @@ using ws::circsim::PlotRange;
 using ws::circsim::PlotYAxis;
 using ws::circsim::clamp_view;
 using ws::circsim::decimate_minmax;
+using ws::circsim::decimate_minmax_index;
 using ws::circsim::expand_range;
 using ws::circsim::format_eng;
 using ws::circsim::nice_ticks;
@@ -421,4 +422,107 @@ TEST_CASE("decimate answers a monotone but sparse sweep") {
     }
     CHECK(has_min);
     CHECK(has_max);
+}
+
+// --- the index envelope (stage 8) ---------------------------------------------
+//
+// decimate_minmax_index: the same min/max envelope for data whose x is
+// the sample index - the by-index axis and the non-sorted wrap, where
+// decimate_minmax declines (no x to chain). One case per contract in
+// plot.hpp's docs.
+
+TEST_CASE("decimate_index declines work it cannot do") {
+    const std::vector<double> three{0.0, 5.0, 1.0};
+    // Fits the budget: raw.
+    CHECK(decimate_minmax_index(three, 8u).empty());
+    // Budget below 2 keeps nothing honest: raw.
+    CHECK(decimate_minmax_index(three, 1u).empty());
+    // Trivial sizes: raw.
+    CHECK(decimate_minmax_index(std::vector<double>{}, 4u).empty());
+    CHECK(decimate_minmax_index(std::vector<double>{7.0}, 4u).empty());
+    // One fold is not a fold.
+    CHECK(decimate_minmax_index(std::vector<double>{7.0, 8.0}, 2u)
+              .empty());
+}
+
+TEST_CASE("decimate_index keeps every extremum within the budget") {
+    // The spike shape the x-bucket walk answers, at the index run: a
+    // slow ramp with one spike at i=500 - whatever the budget, the
+    // spike's sample and both ends survive.
+    std::vector<double> ys;
+    for (int i = 0; i <= 1000; ++i) {
+        ys.push_back(i == 500 ? 1000.0 : static_cast<double>(i) / 1000.0);
+    }
+    const std::vector<std::size_t> keep = decimate_minmax_index(ys, 64u);
+    REQUIRE_FALSE(keep.empty());
+    CHECK(keep.size() <= 2u * 64u + 2u);
+    CHECK(keep.front() == 0u);
+    CHECK(keep.back() == 1000u);
+    bool spike = false;
+    for (std::size_t k : keep) {
+        if (k == 500u) {
+            spike = true;
+        }
+        CHECK(k < ys.size());
+    }
+    CHECK(spike);
+    // The kept indices are strictly increasing (bucket order).
+    for (std::size_t i = 1; i < keep.size(); ++i) {
+        CHECK(keep[i] > keep[i - 1]);
+    }
+}
+
+TEST_CASE("decimate_index keeps the exact envelope of a wrap") {
+    // A .dc wrap's inner family: a triangle that rises 0..500 then
+    // falls back - the global extremes ARE their buckets' extremes,
+    // so the kept envelope reaches them exactly (min/max vs stride).
+    std::vector<double> ys;
+    for (int i = 0; i < 1000; ++i) {
+        ys.push_back(i < 500 ? static_cast<double>(i)
+                             : static_cast<double>(999 - i));
+    }
+    const std::vector<std::size_t> keep = decimate_minmax_index(ys, 100u);
+    REQUIRE_FALSE(keep.empty());
+    double true_lo = ys[0];
+    double true_hi = ys[0];
+    for (double y : ys) {
+        true_lo = std::min(true_lo, y);
+        true_hi = std::max(true_hi, y);
+    }
+    double kept_lo = ys[keep.front()];
+    double kept_hi = ys[keep.front()];
+    for (std::size_t k : keep) {
+        kept_lo = std::min(kept_lo, ys[k]);
+        kept_hi = std::max(kept_hi, ys[k]);
+    }
+    CHECK(kept_lo == true_lo);
+    CHECK(kept_hi == true_hi);
+    CHECK(true_lo == 0.0);
+    CHECK(true_hi == 499.0);
+}
+
+TEST_CASE("decimate_index answers the NaN buckets like the x walk") {
+    // A NaN that OPENS a bucket stays (the line break the stroker
+    // needs); a NaN behind a finite opener compares false against
+    // both extremes and drops - the x-bucket walk's own reading.
+    std::vector<double> ys{std::nan(""), std::nan(""), 1.0};
+    for (int i = 3; i < 200; ++i) {
+        ys.push_back(static_cast<double>(i));
+    }
+    const std::vector<std::size_t> keep = decimate_minmax_index(ys, 20u);
+    REQUIRE_FALSE(keep.empty());
+    CHECK(keep.front() == 0u);  // the NaN opener is the forced endpoint
+    bool nan_kept = false;
+    for (std::size_t k : keep) {
+        nan_kept = nan_kept || std::isnan(ys[k]);
+    }
+    CHECK(nan_kept);
+    // The finite tail's maximum survives regardless.
+    double kept_hi = -std::numeric_limits<double>::infinity();
+    for (std::size_t k : keep) {
+        if (std::isfinite(ys[k])) {
+            kept_hi = std::max(kept_hi, ys[k]);
+        }
+    }
+    CHECK(kept_hi == ys.back());
 }
