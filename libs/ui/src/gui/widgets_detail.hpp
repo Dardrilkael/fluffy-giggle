@@ -516,4 +516,303 @@ inline void fold_hover_t(GuiContext& gui, WidgetId id, WidgetPaint& paint,
         motion_duration(theme));
 }
 
+// --- the shared text-field keyboard ------------------------------------------
+// One spelling of the whole editing keyboard, walked by BOTH fields:
+// the single-line text_input and the multi-line text_editor (which
+// adds its vertical walk around the call). Everything here is the
+// field's own cluster: the caret keys (Ctrl+arrows walk words), the
+// deleters (Ctrl eats a word), typing, the clipboard trio, select-all,
+// Escape's selection drop and the undo/redo pair - all through the
+// EditBuffer verbs and the history riding in TextInputState, so the
+// two widgets can never disagree about an edit. The behavior halves
+// own everything else: the pointer placement, the pixel mapping, the
+// editor's Up/Down/paragraph walk (it needs the goal column, which is
+// the editor's persistent state).
+
+// The single-line field's Up/Down story: the classic Win32/EDIT
+// mapping (Up = Home, Down = End), which a field whose vertical keys
+// mean something else - the numeric stepper - opts out of.
+
+// How the shared cluster reads its keys: see TextFieldKeys below.
+struct TextFieldKeys {
+    bool multiline = false;  // Enter breaks lines; Home/End bound lines
+    bool vertical_home_end = true;  // single-line Up/Down -> Home/End
+    bool (*filter)(std::uint32_t) = &is_insertable;
+};
+
+struct TextFieldKeysResult {
+    bool changed = false;     // the buffer changed (typing, deletes, ...)
+    bool caret_moved = false; // any caret/selection move (the editor's
+                              // goal-column reset keys off it)
+};
+
+inline bool text_edit_shift(const ws::input::InputFrame& in) {
+    return in.key_down[static_cast<std::size_t>(ws::input::keys::kLeftShift)] ||
+           in.key_down[static_cast<std::size_t>(ws::input::keys::kRightShift)];
+}
+
+inline bool text_edit_ctrl(const ws::input::InputFrame& in) {
+    return in.key_down[static_cast<std::size_t>(
+               ws::input::keys::kLeftControl)] ||
+           in.key_down[static_cast<std::size_t>(
+               ws::input::keys::kRightControl)];
+}
+
+// The caret move every key funnels through: Shift extends from the
+// anchor, plain collapses it onto the caret - the rule every editor
+// spells - and the blink rewinds (a move is work).
+inline void text_edit_move(EditBuffer& eb, TextInputState& edit, int to,
+                           bool shift) {
+    eb.caret = to;
+    if (!shift) {
+        eb.anchor = to;
+    }
+    edit.blink = 0.0f;
+}
+
+// The frame's shared clock half: the blink phase advances, hitches
+// rewind, and the focus's arrival shows the caret solid.
+inline void text_edit_clock(TextInputState& edit, float dt, bool focused) {
+    edit.blink += dt;
+    if (edit.blink >= 1.0f) {
+        edit.blink -= 1.0f;
+        if (edit.blink >= 1.0f) {
+            edit.blink = 0.0f;  // a hitched frame restarts the phase
+        }
+    }
+    if (focused && !edit.was_focused) {
+        edit.blink = 0.0f;  // arrival shows the caret solid
+    }
+}
+
+// The IME commit edge, shared: a composition that ended this frame is
+// OLDER than any glyphs typed after it, so it lands before them -
+// through the history, as one recorded step (a selection dies under
+// it, the typing rule). Call it whenever the field can edit.
+inline bool text_field_ime_commit(GuiContext& gui, EditBuffer& eb,
+                                  TextInputState& edit,
+                                  const ws::input::Preedit& ime,
+                                  bool (*filter)(std::uint32_t)) {
+    (void)gui;
+    if (ime.commit.empty()) {
+        return false;
+    }
+    const int pen = edit.history.replace_filtered(
+        eb, eb.sel_lo(), eb.sel_hi(), ime.commit.c_str(), filter,
+        TextEditCoalesce::none);
+    if (pen < 0) {
+        return false;
+    }
+    edit.blink = 0.0f;
+    return true;
+}
+
+// The keyboard itself. Call it inside the focused-and-live gate, with
+// the composition's own deferral already decided (the IME owns the
+// keyboard while a composition stands). Order matters and is the
+// single-line field's own documented order: caret keys first, then
+// undo/redo, deleters before typing (an old span leaves before new
+// glyphs land), the clipboard last. Deleters and undo/redo honor the
+// OS auto-repeat (the held-key rule); Home/End and the clipboard read
+// fresh presses only.
+inline TextFieldKeysResult text_field_keys(GuiContext& gui, EditBuffer& eb,
+                                           TextInputState& edit,
+                                           const TextFieldKeys& keys) {
+    namespace keysns = ws::input::keys;
+    TextFieldKeysResult out;
+    const ws::input::InputFrame& in = gui.input();
+    const bool shift = text_edit_shift(in);
+    const bool ctrl = text_edit_ctrl(in);
+    const auto move = [&](int to) {
+        text_edit_move(eb, edit, to, shift);
+        out.caret_moved = true;
+    };
+
+    // The caret keys: cluster steps plain, word steps under Ctrl;
+    // Home/End bound the line (the whole buffer single-line), Ctrl
+    // taking them to the document's ends; the single-line Up/Down ride
+    // Home/End (the classic mapping) unless the field opted out - the
+    // editor handles its own vertical walk around this call.
+    if (gui.key_pressed_or_repeated(keysns::kLeft)) {
+        move(ctrl ? word_start(eb.buf, eb.len, eb.caret)
+                  : eb.cluster_start(eb.caret));
+    }
+    if (gui.key_pressed_or_repeated(keysns::kRight)) {
+        move(ctrl ? word_end(eb.buf, eb.len, eb.caret)
+                  : eb.cluster_end(eb.caret));
+    }
+    const bool home = in.key_pressed[static_cast<std::size_t>(keysns::kHome)];
+    const bool end = in.key_pressed[static_cast<std::size_t>(keysns::kEnd)];
+    if (home) {
+        const int to = keys.multiline && !ctrl
+                           ? line_start(eb.buf, eb.len, eb.caret)
+                           : 0;
+        move(to);
+    }
+    if (end) {
+        const int to = keys.multiline && !ctrl
+                           ? line_end(eb.buf, eb.len, eb.caret)
+                           : eb.len;
+        move(to);
+    }
+    if (!keys.multiline && keys.vertical_home_end) {
+        if (gui.key_pressed_or_repeated(keysns::kUp)) {
+            move(0);
+        }
+        if (gui.key_pressed_or_repeated(keysns::kDown)) {
+            move(eb.len);
+        }
+    }
+    if (ctrl && in.key_pressed[static_cast<std::size_t>(keysns::kA)]) {
+        eb.anchor = 0;  // select all: the anchor says it
+        eb.caret = eb.len;
+        edit.blink = 0.0f;
+        out.caret_moved = true;
+    }
+    if (in.key_pressed[static_cast<std::size_t>(keysns::kEscape)]) {
+        // Escape's one job: drop the selection. The drop SPENDS the
+        // key - consume_escape, only when a selection actually stood -
+        // so the popup or dialog behind the field keeps its claim that
+        // frame: one Escape abandons the edit, the next one closes the
+        // overlay.
+        if (eb.has_selection()) {
+            eb.collapse(eb.caret);
+            edit.blink = 0.0f;
+            out.caret_moved = true;
+            gui.consume_escape();
+        }
+    }
+
+    // The undo/redo pair, before the deleters (an undo answers the
+    // frame's earlier steps, and its restored caret is where the
+    // frame's own typing would land). Held keys keep walking - the
+    // held Ctrl+Z of every editor.
+    if (ctrl && !shift &&
+        gui.key_pressed_or_repeated(keysns::kZ)) {
+        if (edit.history.undo(eb)) {
+            edit.blink = 0.0f;
+            out.changed = true;
+        }
+    }
+    if (ctrl && (gui.key_pressed_or_repeated(keysns::kY) ||
+                 (shift &&
+                  gui.key_pressed_or_repeated(keysns::kZ)))) {
+        if (edit.history.redo(eb)) {
+            edit.blink = 0.0f;
+            out.changed = true;
+        }
+    }
+
+    // Deleters: a selection dies whole; plain keys eat one cluster,
+    // Ctrl one word. The runs coalesce - a held Backspace is one undo
+    // step - while the word deletes stand alone.
+    const bool backspace =
+        gui.key_pressed_or_repeated(keysns::kBackspace);
+    const bool delete_key =
+        gui.key_pressed_or_repeated(keysns::kDelete);
+    if (backspace || delete_key) {
+        int lo = -1;
+        int hi = -1;
+        TextEditCoalesce kind = TextEditCoalesce::none;
+        if (eb.has_selection()) {
+            lo = eb.sel_lo();
+            hi = eb.sel_hi();
+        } else if (backspace && ctrl) {
+            lo = word_start(eb.buf, eb.len, eb.caret);
+            hi = eb.caret;
+        } else if (backspace) {
+            lo = eb.cluster_start(eb.caret);
+            hi = eb.caret;
+            kind = TextEditCoalesce::deletion_back;
+        } else if (ctrl) {
+            lo = eb.caret;
+            hi = word_end(eb.buf, eb.len, eb.caret);
+        } else {
+            lo = eb.caret;
+            hi = eb.cluster_end(eb.caret);
+            kind = TextEditCoalesce::deletion_forward;
+        }
+        if (edit.history.replace(eb, lo, hi, nullptr, 0, kind) >= 0) {
+            out.changed = true;
+        }
+        edit.blink = 0.0f;
+    }
+
+    // Enter breaks the line in a multi-line editor: one '\n' through
+    // the filter's whole-span path, the edge consumed with it (a
+    // dialog behind the box does not also answer the key). Ctrl+Enter
+    // is NOT taken - the app's submit chord, reported by the editor's
+    // own result.
+    if (keys.multiline && !ctrl &&
+        gui.key_pressed_or_repeated(keysns::kEnter) && keys.filter('\n')) {
+        const char nl = '\n';
+        if (edit.history.replace(eb, eb.sel_lo(), eb.sel_hi(), &nl, 1,
+                                 TextEditCoalesce::none) >= 0) {
+            out.changed = true;
+            edit.blink = 0.0f;
+            gui.consume_key(keysns::kEnter);
+        }
+    }
+
+    // Typing: the frame's codepoints through the field's filter, each
+    // landing as its WHOLE UTF-8 span. Word characters coalesce (one
+    // undo step per word); a space or punctuation commits the run.
+    for (std::uint32_t cp : in.text_input) {
+        if (!keys.filter(cp)) {
+            continue;
+        }
+        char bytes[4];
+        const int span = utf8_encode(cp, bytes);
+        if (span <= 0) {
+            continue;  // not a scalar value: no byte-cast aliasing lands
+        }
+        const TextEditCoalesce kind =
+            word_class(cp) == TextWordClass::word
+                ? TextEditCoalesce::typing
+                : TextEditCoalesce::none;
+        const int pen =
+            edit.history.replace(eb, eb.sel_lo(), eb.sel_hi(), bytes, span,
+                                 kind);
+        if (pen < 0) {
+            break;  // the room refused the span: the rest drops
+        }
+        edit.blink = 0.0f;
+        out.changed = true;
+    }
+
+    // The clipboard trio - only a selection copies or cuts, and a
+    // paste lands at the caret replacing the selection first, like
+    // typing, as ONE recorded step. An unwired seam makes all three
+    // no-ops (the context's own contract; Android keeps one today).
+    if (ctrl &&
+        (in.key_pressed[static_cast<std::size_t>(keysns::kC)] ||
+         in.key_pressed[static_cast<std::size_t>(keysns::kX)]) &&
+        eb.has_selection()) {
+        // The one allocation an explicit copy may make: a mid-buffer
+        // range is not NUL-terminated, and the seam speaks C strings.
+        gui.set_clipboard_text(
+            std::string(eb.buf + eb.sel_lo(), eb.buf + eb.sel_hi()).c_str());
+        if (in.key_pressed[static_cast<std::size_t>(keysns::kX)]) {
+            if (edit.history.replace(eb, eb.sel_lo(), eb.sel_hi(), nullptr,
+                                     0, TextEditCoalesce::none) >= 0) {
+                out.changed = true;
+            }
+            edit.blink = 0.0f;
+        }
+    }
+    if (ctrl && in.key_pressed[static_cast<std::size_t>(keysns::kV)]) {
+        const char* pasted = gui.get_clipboard_text();
+        if (pasted != nullptr) {
+            const int pen = edit.history.replace_filtered(
+                eb, eb.sel_lo(), eb.sel_hi(), pasted, keys.filter,
+                TextEditCoalesce::none);
+            if (pen >= 0) {
+                edit.blink = 0.0f;
+                out.changed = true;
+            }
+        }
+    }
+    return out;
+}
+
 }  // namespace ws::ui::gui

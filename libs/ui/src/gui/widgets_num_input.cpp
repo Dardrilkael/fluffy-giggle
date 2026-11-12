@@ -255,20 +255,25 @@ NumInputResult input_num_behavior(GuiContext& gui, WidgetId id,
     if (!pre_focused) {
         if (!was_focused) {
             (void)Num::spell(num.buf, kNumInputCapacity, value, significant);
+            num.edit.history.clear();  // a re-spelled buffer voids its past
         }
     } else if (!was_focused) {
         const int pen =
             Num::spell(num.buf, kNumInputCapacity, value, significant);
         num.edit.caret = pen;
         num.edit.anchor = 0;
+        num.edit.history.clear();  // the arrival spelling is the ground truth
     }
 
     // The field itself: text_input's whole editing through the numeric
-    // charset, over the row's field rect.
+    // charset, over the row's field rect. The vertical keys opt out -
+    // the numeric stepper owns Up/Down (its value steps below), so the
+    // field never spends them on Home/End.
     NumInputResult out;
     static_cast<TextInputResult&>(out) = text_input_behavior(
         gui, id, num_field_rect(rect, label, theme), num.buf,
-        kNumInputCapacity, num.edit, theme, disabled, {}, &Num::filter);
+        kNumInputCapacity, num.edit, theme, disabled, {}, &Num::filter,
+        false);
     out.changed = false;
 
     const bool dead = out.state == WidgetState::Disabled;
@@ -307,6 +312,10 @@ NumInputResult input_num_behavior(GuiContext& gui, WidgetId id,
         const int pen =
             Num::spell(num.buf, kNumInputCapacity, value, significant);
         num.edit.caret = num.edit.anchor = pen;
+        // The canonical spelling is a REWRITE, not an edit: the history
+        // the typing built describes a buffer that no longer exists,
+        // and undo must not splice a stale entry into it.
+        num.edit.history.clear();
     };
 
     // Enter: the numeric line's own commit edge - the key is this

@@ -301,7 +301,8 @@ These are the missing widgets that apps currently hand-roll. Each is a candidate
 | Widget | Gap | Notes |
 |--------|-----|-------|
 | **Tree / hierarchy** | `collapsing_header` is one level deep; no multi-level `TreeNode` equivalent for netlist explorers / outliners. | Needs: indent tracking, expand/collapse state per node, keyboard nav, drag-reorder seam. |
-| **Multiline text editor** | `text_input` is single-line, ASCII-only by design ("v1 edits ASCII", `widgets.hpp:1005`). No wrapping edit surface. | Needs: line buffer, soft wrap, cursor/selection over lines, undo stack, syntax highlight tokens (painter seam), horizontal scroll. |
+| **Multiline text editor** | SHIPPED as `text_editor` (widgets_text_editor.cpp): '
+' hard breaks, the goal column, Ctrl+arrows/Backspace, the bounded undo/redo history (text_edit_core.hpp), the wheel + caret-follow; Ctrl+Enter passes through as the app's submit chord. Still open: soft wrap, syntax highlight tokens (the painter seam exists), horizontal scroll (long lines truncate with "..." like the single-line field). |
 | **drag_int** | Asymmetry: sliders have int variants (`slider_int`), drag has only `drag_float`. | Trivial add: `drag_int` mirroring `drag_float` with integer step/clamp. |
 | **Image widget** | Only icon sprites on buttons; no standalone picture/scaled-image draw. | Needs: `image(texture, size, uv0, uv1, tint)` with fit/fill/stretch modes, the same painter seam. |
 | **Color picker** | Nothing (`theme_color.cpp` is theme math, not a widget). | Needs: HSV/hex/RGB inputs, alpha, palette swatches, the painter seam; `ws::math` already has Oklch. |

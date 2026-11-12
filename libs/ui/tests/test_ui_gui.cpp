@@ -1,3 +1,51 @@
+// The IME composition suite (G1.2's channel) and the field's rect
+// seam: the preedit rides the focused line, the keyboard defers to
+// the IME while a composition stands, the commit lands whole through
+// the field's filter, and the platform hears the focused field's
+// bounds on change - driven through hand-built frames the way the
+// num-input suite builds them, with the draws asserted through the
+// r2d stub's counters (the same purity class: the gui archive, the
+// real font bake, the stub seam; no renderer, no window).
+
+#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include <doctest/doctest.h>
+
+#include <ws/ui/gui/gui_context.hpp>
+#include <ws/ui/gui/theme.hpp>
+#include <ws/ui/gui/widgets.hpp>
+
+#include <ws/ui/renderer2d.hpp>
+
+#include "ui_gui_stub.hpp"
+
+#include <array>
+#include <cstring>
+#include <vector>
+
+namespace {
+
+using ws::ui::gui::GuiContext;
+using ws::input::InputFrame;
+using ws::ui::gui::kDefaultChrome;
+
+// The gui suite's snap(): a present mouse parked far off-panel by
+// default, with the primary button's held state and optional
+// press/release edges - the same shape test_ui_num_input's snap()
+// models.
+InputFrame snap(float x = -100.0f, float y = -100.0f, bool down = false,
+                bool pressed = false, bool released = false) {
+    InputFrame frame;
+    frame.mouse_x = x;
+    frame.mouse_y = y;
+    frame.mouse_present = true;
+    frame.mouse_down[0] = down;
+    frame.mouse_pressed[0] = pressed;
+    frame.mouse_released[0] = released;
+    return frame;
+}
+
+}  // namespace
+
 // --- the IME composition channel (G1.2) ---------------------------------------
 
 TEST_CASE("an IME composition rides the line: preedit maps, the keyboard "

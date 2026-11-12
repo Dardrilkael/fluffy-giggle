@@ -1366,6 +1366,9 @@ private:
     float drag_ = 0.0f;
     char name_buf_[32] = "gallery";
     char locked_buf_[32] = "read only";
+    char notes_buf_[512] =
+        "the multi-line editor:\n"
+        "enter breaks lines, ctrl+enter is the app's own submit chord";
     int list_sel_ = 0;
     int combo_sel_ = 0;
     bool combo_open_ = false;
@@ -2147,6 +2150,33 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
         }
         gui::separator(layout_, chrome_);
         gui::text(layout_, chrome_, "a separator above", -1.0f);
+
+        // The multi-line editor: the same buffer contract and the same
+        // editing rules (clipboard, undo/redo, word walks, IME) over
+        // lines - plus the vertical keyboard, the wheel scroll and the
+        // caret-follow. Ctrl+Enter passes through as the app's submit
+        // chord; this gallery just echoes it.
+        gui::text(layout_, chrome_,
+                  "the multi-line editor - arrows walk lines, ctrl+arrow "
+                  "walks words, ctrl+z/y undoes:",
+                  -1.0f);
+        if (gui::text_editor(gui_, layout_, chrome_, "notes", notes_buf_,
+                             static_cast<int>(sizeof notes_buf_), -1.0f, 6)) {
+            std::snprintf(status_, sizeof status_, "notes: %d chars",
+                          static_cast<int>(std::strlen(notes_buf_)));
+        }
+        const gui::WidgetId notes_id = gui_.ids().id("notes");
+        if (gui_.is_focused(notes_id) &&
+            ws::input::frame_input().key_pressed[ws::input::keys::kEnter] &&
+            (ws::input::frame_input()
+                 .key_down[static_cast<std::size_t>(
+                     ws::input::keys::kLeftControl)] ||
+             ws::input::frame_input()
+                 .key_down[static_cast<std::size_t>(
+                     ws::input::keys::kRightControl)])) {
+            std::snprintf(status_, sizeof status_, "notes submitted: %d chars",
+                          static_cast<int>(std::strlen(notes_buf_)));
+        }
     }
 
     // --- lists ------------------------------------------------------------------

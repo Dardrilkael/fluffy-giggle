@@ -81,6 +81,8 @@ struct WidgetPainters {
                   const char*, const char* const*, int, int, bool);
     void (*text_input)(const Rect&, const TextInputResult&, const ChromeTheme&,
                        const char*, const char*, int);
+    void (*text_editor)(const Rect&, const TextEditorResult&, const ChromeTheme&,
+                        const char*, const char*, int);
     void (*input_float)(const Rect&, const NumInputResult&, const ChromeTheme&,
                         const char*, const char*, int);
 
@@ -134,6 +136,7 @@ inline constexpr WidgetPainters kStockPainters{
     &tab_draw,
     &combo_draw,
     &text_input_draw,
+    &text_editor_draw,
     &input_float_draw,
     &panel_draw,
     &popup_frame_draw,

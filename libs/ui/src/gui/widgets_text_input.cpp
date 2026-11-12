@@ -3,11 +3,17 @@
 // text_input_behavior (the caret and selection edits against the
 // caller's buffer, plus the caret's pixel mapping) and text_input_draw
 // (the stock field's look over the answer), with the composed row over
-// them. The lens (EditBuffer) and the persistent pair (TextInputState)
-// live in the public widgets.hpp; the cluster primitives both halves
-// walk are the public text_cluster.hpp - the field edits TEXT: UTF-8
-// codepoints land whole, the caret steps grapheme clusters, and no
-// key, click or truncation ever splits a sequence.
+// them. The behavior's keyboard half is the SHARED cluster both text
+// fields walk (widgets_detail.hpp's text_field_keys, over the engine
+// in text_edit_core.hpp) - the field adds the single-line pointer
+// placement and the caret's pixel mapping around it; the multi-line
+// editor (widgets_text_editor.cpp) adds its vertical walk. The lens
+// (EditBuffer) and the persistent pair (TextInputState, with the
+// undo/redo history) live in the public text_edit_core.hpp; the
+// cluster primitives both halves walk are the public
+// text_cluster.hpp - the field edits TEXT: UTF-8 codepoints land
+// whole, the caret steps grapheme clusters, and no key, click or
+// truncation ever splits a sequence.
 
 #include "widgets_detail.hpp"
 
@@ -61,7 +67,8 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
                                     TextInputState& edit,
                                     const ChromeTheme& theme, bool disabled,
                                     const HitShape& hit_shape,
-                                    bool (*filter)(std::uint32_t)) {
+                                    bool (*filter)(std::uint32_t),
+                                    bool vertical_keys) {
     TextInputResult out{begin_widget_paint(gui, id, rect, disabled, hit_shape)};
     const HitTest& hit = out.hit;
 
@@ -182,25 +189,16 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
 
     bool changed = false;
 
-    // The frame clock's first consumer: the phase runs every frame (the
-    // clock does), and the resets below rewind it solid - every edit,
-    // every caret move, every press, and the focus's own arrival.
-    edit.blink += in.dt_seconds;
-    if (edit.blink >= 1.0f) {
-        edit.blink -= 1.0f;
-        if (edit.blink >= 1.0f) {
-            edit.blink = 0.0f;  // a hitched frame (a pause, a debugger) restarts
-        }
-    }
-    if (focused && !edit.was_focused) {
-        edit.blink = 0.0f;  // arrival shows the caret solid
-    }
+    // The frame clock's first consumer (the shared spelling): the
+    // phase runs every frame (the clock does), and the resets below
+    // rewind it solid - every edit, every caret move, every press,
+    // and the focus's own arrival.
+    text_edit_clock(edit, in.dt_seconds, focused);
 
     // --- the pointer: a press places the caret, a sweep selects ---------
     const ws::input::PointerView* owner = gui.pointer(hit.pointer);
     const bool hold = hit.pressed && owner != nullptr && owner->down;
-    const bool shift = in.key_down[static_cast<std::size_t>(ws::input::keys::kLeftShift)] ||
-                       in.key_down[static_cast<std::size_t>(ws::input::keys::kRightShift)];
+    const bool shift = text_edit_shift(in);
     if (can_edit && hold) {
         const int placed = caret_from_x(owner->x - content_x);
         if (owner->pressed || placed != eb.caret) {
@@ -216,160 +214,24 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
         }
     }
 
-    // --- the keyboard: caret keys, deleters, typing, the clipboard ------
-    // The commit edge first - a composition that ended this frame is
-    // OLDER than any glyphs typed after it, so it lands before them.
-    // The committed text is a whole UTF-8 span: insert_filtered walks
-    // its codepoints through the field's filter and lands spans whole
-    // (the paste path's own never-split-a-span rule), so a numeric
-    // field still refuses a committed kanji and a text field takes an
-    // emoji family in one piece. A standing selection dies under what
-    // replaces it - the typing rule.
-    if (can_edit && !ime.commit.empty()) {
-        eb.erase_selection();
-        const int pen = eb.insert_filtered(eb.caret, ime.commit.c_str(),
-                                            filter);
-        if (pen >= 0) {
-            eb.collapse(pen);
-            edit.blink = 0.0f;
-            changed = true;
-        }
+    // --- the keyboard: the shared cluster -------------------------------
+    // The whole editing keyboard is the one spelling both fields walk
+    // (widgets_detail.hpp's text_field_keys): the caret keys with
+    // their Ctrl word steps, the deleters with their word eats, the
+    // undo/redo pair, typing, the clipboard trio, Ctrl+A and Escape -
+    // all through the history riding in `edit`, so the single-line
+    // field and the multi-line editor can never disagree about an
+    // edit. The IME's commit edge lands first (a composition that
+    // ended this frame is OLDER than any glyphs typed after it), then
+    // the cluster inside the composition's deferral gate.
+    if (can_edit && text_field_ime_commit(gui, eb, edit, ime, filter)) {
+        changed = true;
     }
     if (can_edit && !composing) {
-        const bool ctrl =
-            in.key_down[static_cast<std::size_t>(ws::input::keys::kLeftControl)] ||
-            in.key_down[static_cast<std::size_t>(ws::input::keys::kRightControl)];
-
-        // The caret keys: Shift extends from the anchor, plain collapses
-        // it onto the caret - the rule every editor spells. Held caret
-        // keys keep moving: they honor the OS auto-repeat, the way a
-        // held arrow glides through text everywhere else.
-        const auto move_caret = [&](int to) {
-            eb.caret = to;
-            if (!shift) {
-                eb.anchor = to;
-            }
-            edit.blink = 0.0f;
-        };
-        if (gui.key_pressed_or_repeated(ws::input::keys::kLeft)) {
-            move_caret(eb.cluster_start(eb.caret));
-        }
-        if (gui.key_pressed_or_repeated(ws::input::keys::kRight)) {
-            move_caret(eb.cluster_end(eb.caret));
-        }
-        if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kHome)]) {
-            move_caret(0);
-        }
-        if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kEnd)]) {
-            move_caret(eb.len);
-        }
-        if (ctrl && in.key_pressed[static_cast<std::size_t>(ws::input::keys::kA)]) {
-            eb.anchor = 0;  // select all: the anchor says it
-            eb.caret = eb.len;
-            edit.blink = 0.0f;
-        }
-        if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kEscape)]) {
-            // Escape's one job: drop the selection. The drop SPENDS the
-            // key - consume_escape, only when a selection actually
-            // stood - so the popup or dialog behind the field keeps
-            // its claim that frame: one Escape abandons the edit, the
-            // next one closes the overlay. A bare-caret Escape (or a
-            // field inside no overlay) leaves the key to the
-            // arbitration untouched.
-            if (eb.has_selection()) {
-                eb.collapse(eb.caret);
-                edit.blink = 0.0f;
-                gui.consume_escape();
-            }
-        }
-
-        // Deleters before typing, when one frame carries both (no arrival
-        // order exists between key edges and the codepoint list): the
-        // old text leaves, then the new lands at the settled caret.
-        // Held deleters keep deleting - they honor the OS auto-repeat,
-        // the caret keys' own rule.
-        if (gui.key_pressed_or_repeated(ws::input::keys::kBackspace) ||
-            gui.key_pressed_or_repeated(ws::input::keys::kDelete)) {
-            const bool forward =
-                gui.key_pressed_or_repeated(ws::input::keys::kDelete);
-            if (eb.has_selection()) {
-                eb.erase_selection();
-                changed = true;
-            } else if (!forward && eb.caret > 0) {
-                // Backspace eats the WHOLE cluster before the caret -
-                // a base with its marks, an emoji sequence whole,
-                // never a dangling tail half.
-                const int lo = eb.cluster_start(eb.caret);
-                eb.erase(lo, eb.caret);
-                eb.collapse(lo);
-                changed = true;
-            } else if (forward && eb.caret < eb.len) {
-                // Delete eats forward the same way: the whole
-                // cluster at the caret.
-                eb.erase(eb.caret, eb.cluster_end(eb.caret));
-                eb.collapse(eb.caret);
-                changed = true;
-            }
-            edit.blink = 0.0f;
-        }
-
-        // Typing: the frame's codepoints through the field's filter,
-        // each landing as its WHOLE UTF-8 span (a numeric field narrows
-        // the filter to its charset). A selection dies under what
-        // replaces it, and a span the room cannot take whole drops the
-        // rest of the frame's text - never a truncated sequence.
-        for (std::uint32_t cp : in.text_input) {
-            if (!filter(cp)) {
-                continue;
-            }
-            eb.erase_selection();
-            char bytes[4];
-            const int span = utf8_encode(cp, bytes);
-            if (span <= 0) {
-                continue;  // not a scalar value: no byte-cast aliasing lands
-            }
-            if (span > eb.room - eb.len) {
-                break;  // the room refused the span: the rest drops
-            }
-            const int pen = eb.insert(eb.caret, bytes, span);
-            if (pen < 0) {
-                break;
-            }
-            eb.collapse(pen);
-            edit.blink = 0.0f;
-            changed = true;
-        }
-
-        // The clipboard trio - only a selection copies or cuts, and a
-        // paste lands at the caret replacing the selection first, like
-        // typing. An unwired seam makes all three no-ops (the context's
-        // own contract; Android keeps one today).
-        if (ctrl &&
-            (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kC)] ||
-             in.key_pressed[static_cast<std::size_t>(ws::input::keys::kX)]) &&
-            eb.has_selection()) {
-            // The one allocation an explicit copy may make: a mid-buffer
-            // range is not NUL-terminated, and the seam speaks C strings.
-            gui.set_clipboard_text(
-                std::string(eb.buf + eb.sel_lo(), eb.buf + eb.sel_hi()).c_str());
-            if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kX)]) {
-                eb.erase_selection();
-                edit.blink = 0.0f;
-                changed = true;
-            }
-        }
-        if (ctrl && in.key_pressed[static_cast<std::size_t>(ws::input::keys::kV)]) {
-            const char* pasted = gui.get_clipboard_text();
-            if (pasted != nullptr) {
-                eb.erase_selection();
-                const int pen = eb.insert_filtered(eb.caret, pasted, filter);
-                if (pen >= 0) {
-                    eb.collapse(pen);
-                    edit.blink = 0.0f;
-                    changed = true;
-                }
-            }
-        }
+        const TextFieldKeysResult keys = text_field_keys(
+            gui, eb, edit,
+            {false, vertical_keys, filter});
+        changed = changed || keys.changed;
     }
 
     // The buffer may have shrunk under the edits (or under the caller's

@@ -113,6 +113,24 @@ if(TARGET test_ui_gui)
   target_include_directories(test_ui_gui PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
 
+# The text-editing engine suite: the word/line walks, the undo/redo
+# history, the single-line field's extended keyboard (Ctrl+arrows,
+# Ctrl+Backspace/Delete, Ctrl+Z/Y, Up/Down as Home/End) and the
+# multi-line editor's vertical half (Enter, the goal column, the
+# click placement, the wheel/follow interplay) - the same purity
+# class as test_ui_gui (the gui archive, the r2d stub, the real font
+# bake; no renderer on the link line).
+ws_add_test(ui_text_edit
+  SOURCES tests/test_ui_text_edit.cpp
+          tests/ui_gui_r2d_stub.cpp
+          src/text/font.cpp
+          src/text/stb_impl.cpp
+  LINK ws::ui_gui
+  DEPENDS stb)
+if(TARGET test_ui_text_edit)
+  target_include_directories(test_ui_text_edit PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+
 # The stage-14 canvas suite: the pure tessellation half (stroke/fill/
 # flatten/dash) over the same gui archive + r2d stub. Same purity class
 # as test_ui_gui - no Vulkan or GLFW on the link line. The canvas

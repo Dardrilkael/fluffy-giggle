@@ -1,0 +1,3507 @@
+From ef731f19270c19486abc4599da46b2002025c5fc Mon Sep 17 00:00:00 2001
+From: Z User <z@container>
+Date: Thu, 12 Nov 2026 06:29:00 +0000
+Subject: [PATCH] ui: the reusable text-edit engine + the multi-line
+ text_editor
+
+text_edit_core.hpp (new, public): EditBuffer/TextInputState/is_insertable
+moved out of widgets.hpp unchanged in spelling, plus the engine both
+fields and any custom field share:
+- TextEditHistory: bounded (128 steps / 32 KiB) coalescing undo/redo -
+  word runs, held-backspace runs and type-over-selection merge into one
+  step; entries carry both spellings and both caret pairs, guarded by
+  the buffer lengths they remember (a caller's rewrite voids the
+  history instead of corrupting it). Out-of-line in text_edit_core.cpp.
+- the word walk (word_start/word_end, VS Code-style stops: words,
+  punct runs, spaces skip) and the line walk (line_start/end/count/
+  index/start_of) - cluster-aligned, pure (buf,len) functions.
+
+widgets_detail.hpp: the whole editing keyboard spelled ONCE
+(text_field_keys) and walked by both fields - caret keys with
+Ctrl+Left/Right word steps, Home/End (line bounds multiline, Ctrl =
+doc ends), Ctrl+Backspace/Delete word eats, typing through the filter
+(word chars coalesce), the clipboard trio as one recorded step,
+Ctrl+A, Escape, Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z. num_input opts out of
+the single-line Up/Down->Home/End mapping (its stepper owns them) and
+clears the history at every canonical respell.
+
+widgets_text_editor.cpp (new): the multi-line editor - Enter breaks
+lines (Ctrl+Enter passes through as the app's submit chord), Up/Down
+carry the goal column, Ctrl+Up/Down walk paragraphs, click places by
+(line, x), sweeps select, the wheel scrolls and the follow keeps the
+caret's line on screen (a same-line caret never fights the wheel),
+the IME preedit rides the caret's line, the scrollbar is the scroll
+panel's own thumb. Painters row + gallery demo included.
+
+libs/input: kY/kZ join the named keys. test_ui_gui.cpp regains the
+preamble a past patch lost (it could not compile); new suite
+test_ui_text_edit (14 cases: the walks, the history, the field's new
+keys, the editor's vertical half).
+---
+ apps/ui_gallery/src/main.cpp                 |  30 +
+ libs/input/include/ws/input/input.hpp        |  17 +-
+ libs/ui/CLAUDE.md                            |   3 +-
+ libs/ui/CMakeLists.txt                       |  18 +
+ libs/ui/include/ws/ui/gui/painters.hpp       |   3 +
+ libs/ui/include/ws/ui/gui/text_cluster.hpp   |   5 +-
+ libs/ui/include/ws/ui/gui/text_edit_core.hpp | 527 ++++++++++++++
+ libs/ui/include/ws/ui/gui/widgets.hpp        | 390 +++++------
+ libs/ui/src/gui/CLAUDE.md                    |  20 +-
+ libs/ui/src/gui/text_edit_core.cpp           | 227 +++++++
+ libs/ui/src/gui/widgets_detail.hpp           | 299 ++++++++
+ libs/ui/src/gui/widgets_num_input.cpp        |  13 +-
+ libs/ui/src/gui/widgets_text_editor.cpp      | 680 +++++++++++++++++++
+ libs/ui/src/gui/widgets_text_input.cpp       | 208 +-----
+ libs/ui/tests/test_ui_gui.cpp                |  48 ++
+ libs/ui/tests/test_ui_text_edit.cpp          | 675 ++++++++++++++++++
+ 16 files changed, 2741 insertions(+), 422 deletions(-)
+ create mode 100644 libs/ui/include/ws/ui/gui/text_edit_core.hpp
+ create mode 100644 libs/ui/src/gui/text_edit_core.cpp
+ create mode 100644 libs/ui/src/gui/widgets_text_editor.cpp
+ create mode 100644 libs/ui/tests/test_ui_text_edit.cpp
+
+diff --git a/apps/ui_gallery/src/main.cpp b/apps/ui_gallery/src/main.cpp
+index 352af83..22100d2 100644
+--- a/apps/ui_gallery/src/main.cpp
++++ b/apps/ui_gallery/src/main.cpp
+@@ -1366,6 +1366,9 @@ private:
+     float drag_ = 0.0f;
+     char name_buf_[32] = "gallery";
+     char locked_buf_[32] = "read only";
++    char notes_buf_[512] =
++        "the multi-line editor:\n"
++        "enter breaks lines, ctrl+enter is the app's own submit chord";
+     int list_sel_ = 0;
+     int combo_sel_ = 0;
+     bool combo_open_ = false;
+@@ -2147,6 +2150,33 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
+         }
+         gui::separator(layout_, chrome_);
+         gui::text(layout_, chrome_, "a separator above", -1.0f);
++
++        // The multi-line editor: the same buffer contract and the same
++        // editing rules (clipboard, undo/redo, word walks, IME) over
++        // lines - plus the vertical keyboard, the wheel scroll and the
++        // caret-follow. Ctrl+Enter passes through as the app's submit
++        // chord; this gallery just echoes it.
++        gui::text(layout_, chrome_,
++                  "the multi-line editor - arrows walk lines, ctrl+arrow "
++                  "walks words, ctrl+z/y undoes:",
++                  -1.0f);
++        if (gui::text_editor(gui_, layout_, chrome_, "notes", notes_buf_,
++                             static_cast<int>(sizeof notes_buf_), -1.0f, 6)) {
++            std::snprintf(status_, sizeof status_, "notes: %d chars",
++                          static_cast<int>(std::strlen(notes_buf_)));
++        }
++        const gui::WidgetId notes_id = gui_.ids().id("notes");
++        if (gui_.is_focused(notes_id) &&
++            ws::input::frame_input().key_pressed[ws::input::keys::kEnter] &&
++            (ws::input::frame_input()
++                 .key_down[static_cast<std::size_t>(
++                     ws::input::keys::kLeftControl)] ||
++             ws::input::frame_input()
++                 .key_down[static_cast<std::size_t>(
++                     ws::input::keys::kRightControl)])) {
++            std::snprintf(status_, sizeof status_, "notes submitted: %d chars",
++                          static_cast<int>(std::strlen(notes_buf_)));
++        }
+     }
+ 
+     // --- lists ------------------------------------------------------------------
+diff --git a/libs/input/include/ws/input/input.hpp b/libs/input/include/ws/input/input.hpp
+index fba02d4..0eb8949 100644
+--- a/libs/input/include/ws/input/input.hpp
++++ b/libs/input/include/ws/input/input.hpp
+@@ -90,10 +90,14 @@ inline constexpr int kMiddle = 2;    // GLFW_MOUSE_BUTTON_MIDDLE
+ // (button, checkbox, tab) - always edge-only, never on a repeat - the
+ // horizontal arrows step the focused slider, the vertical arrows step
+ // the focused table row (both HONOR key_repeated: a held arrow keeps
+-// stepping) - and the text input owns the editing cluster: the caret
+-// keys, Backspace/Delete, Home/End, Shift held for selection, Ctrl+A/
+-// C/V/X over the clipboard seam (the caret keys and the deleters honor
+-// repeats; the clipboard cluster and Home/End do not). Apps keep using
++// stepping) - and the text fields own the editing cluster: the caret
++// keys (Ctrl+arrows walk words/paragraphs), Backspace/Delete (Ctrl
++// eats a word), Home/End (Ctrl jumps the document), the vertical
++// arrows inside a multi-line editor, Shift held for selection,
++// Ctrl+A/C/V/X over the clipboard seam and Ctrl+Z/Y through the
++// field's history (the caret keys, the deleters and the undo pair
++// honor repeats; the clipboard cluster and Home/End do not). Apps
++// keep using
+ // raw GLFW numbers for everything else (the arrays in InputFrame are
+ // indexed by them); these exist so the gui core and its widgets can
+ // never disagree about the spelling of the few keys with built-in
+@@ -121,11 +125,14 @@ inline constexpr int kHome = 268;          // GLFW_KEY_HOME
+ inline constexpr int kEnd = 269;           // GLFW_KEY_END
+ inline constexpr int kEscape = 256;        // GLFW_KEY_ESCAPE (clears the
+                                            // text input's selection)
+-// Ctrl+A selects all; Ctrl+C/X/V ride the clipboard seam.
++// Ctrl+A selects all; Ctrl+C/X/V ride the clipboard seam; Ctrl+Z/Y
++// (and Ctrl+Shift+Z) undo/redo through the field's own history.
+ inline constexpr int kA = 65;             // GLFW_KEY_A
+ inline constexpr int kC = 67;             // GLFW_KEY_C
+ inline constexpr int kV = 86;             // GLFW_KEY_V
+ inline constexpr int kX = 88;             // GLFW_KEY_X
++inline constexpr int kY = 89;             // GLFW_KEY_Y (redo)
++inline constexpr int kZ = 90;             // GLFW_KEY_Z (undo)
+ inline constexpr int kLeftControl = 341;  // GLFW_KEY_LEFT_CONTROL
+ inline constexpr int kRightControl = 345; // GLFW_KEY_RIGHT_CONTROL
+ // Alt: the menu bar's Alt+mnemonic opens match the shift spelling above
+diff --git a/libs/ui/CLAUDE.md b/libs/ui/CLAUDE.md
+index 4ec7b46..43a4ac4 100644
+--- a/libs/ui/CLAUDE.md
++++ b/libs/ui/CLAUDE.md
+@@ -301,7 +301,8 @@ These are the missing widgets that apps currently hand-roll. Each is a candidate
+ | Widget | Gap | Notes |
+ |--------|-----|-------|
+ | **Tree / hierarchy** | `collapsing_header` is one level deep; no multi-level `TreeNode` equivalent for netlist explorers / outliners. | Needs: indent tracking, expand/collapse state per node, keyboard nav, drag-reorder seam. |
+-| **Multiline text editor** | `text_input` is single-line, ASCII-only by design ("v1 edits ASCII", `widgets.hpp:1005`). No wrapping edit surface. | Needs: line buffer, soft wrap, cursor/selection over lines, undo stack, syntax highlight tokens (painter seam), horizontal scroll. |
++| **Multiline text editor** | SHIPPED as `text_editor` (widgets_text_editor.cpp): '
++' hard breaks, the goal column, Ctrl+arrows/Backspace, the bounded undo/redo history (text_edit_core.hpp), the wheel + caret-follow; Ctrl+Enter passes through as the app's submit chord. Still open: soft wrap, syntax highlight tokens (the painter seam exists), horizontal scroll (long lines truncate with "..." like the single-line field). |
+ | **drag_int** | Asymmetry: sliders have int variants (`slider_int`), drag has only `drag_float`. | Trivial add: `drag_int` mirroring `drag_float` with integer step/clamp. |
+ | **Image widget** | Only icon sprites on buttons; no standalone picture/scaled-image draw. | Needs: `image(texture, size, uv0, uv1, tint)` with fit/fill/stretch modes, the same painter seam. |
+ | **Color picker** | Nothing (`theme_color.cpp` is theme math, not a widget). | Needs: HSV/hex/RGB inputs, alpha, palette swatches, the painter seam; `ws::math` already has Oklch. |
+diff --git a/libs/ui/CMakeLists.txt b/libs/ui/CMakeLists.txt
+index dba3d29..45bd4e1 100644
+--- a/libs/ui/CMakeLists.txt
++++ b/libs/ui/CMakeLists.txt
+@@ -113,6 +113,24 @@ if(TARGET test_ui_gui)
+   target_include_directories(test_ui_gui PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+ endif()
+ 
++# The text-editing engine suite: the word/line walks, the undo/redo
++# history, the single-line field's extended keyboard (Ctrl+arrows,
++# Ctrl+Backspace/Delete, Ctrl+Z/Y, Up/Down as Home/End) and the
++# multi-line editor's vertical half (Enter, the goal column, the
++# click placement, the wheel/follow interplay) - the same purity
++# class as test_ui_gui (the gui archive, the r2d stub, the real font
++# bake; no renderer on the link line).
++ws_add_test(ui_text_edit
++  SOURCES tests/test_ui_text_edit.cpp
++          tests/ui_gui_r2d_stub.cpp
++          src/text/font.cpp
++          src/text/stb_impl.cpp
++  LINK ws::ui_gui
++  DEPENDS stb)
++if(TARGET test_ui_text_edit)
++  target_include_directories(test_ui_text_edit PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
++endif()
++
+ # The stage-14 canvas suite: the pure tessellation half (stroke/fill/
+ # flatten/dash) over the same gui archive + r2d stub. Same purity class
+ # as test_ui_gui - no Vulkan or GLFW on the link line. The canvas
+diff --git a/libs/ui/include/ws/ui/gui/painters.hpp b/libs/ui/include/ws/ui/gui/painters.hpp
+index 27160d3..c704156 100644
+--- a/libs/ui/include/ws/ui/gui/painters.hpp
++++ b/libs/ui/include/ws/ui/gui/painters.hpp
+@@ -81,6 +81,8 @@ struct WidgetPainters {
+                   const char*, const char* const*, int, int, bool);
+     void (*text_input)(const Rect&, const TextInputResult&, const ChromeTheme&,
+                        const char*, const char*, int);
++    void (*text_editor)(const Rect&, const TextEditorResult&, const ChromeTheme&,
++                        const char*, const char*, int);
+     void (*input_float)(const Rect&, const NumInputResult&, const ChromeTheme&,
+                         const char*, const char*, int);
+ 
+@@ -134,6 +136,7 @@ inline constexpr WidgetPainters kStockPainters{
+     &tab_draw,
+     &combo_draw,
+     &text_input_draw,
++    &text_editor_draw,
+     &input_float_draw,
+     &panel_draw,
+     &popup_frame_draw,
+diff --git a/libs/ui/include/ws/ui/gui/text_cluster.hpp b/libs/ui/include/ws/ui/gui/text_cluster.hpp
+index 3ebb54f..075343c 100644
+--- a/libs/ui/include/ws/ui/gui/text_cluster.hpp
++++ b/libs/ui/include/ws/ui/gui/text_cluster.hpp
+@@ -9,8 +9,9 @@
+ // one byte before the buffer), and the caret walked each byte as a
+ // standalone glyph, splitting any multi-byte character mid-sequence.
+ // These free functions are the shared fix: every text-editing widget
+-// (text_input today; the multi-line area the guide plans rides the
+-// same primitives) decodes through them, and the caret/anchor pair
++// (text_input and the multi-line text_editor, and any custom field
++// through text_edit_core.hpp's engine) decodes through them, and the
++// caret/anchor pair
+ // stays in BYTES (the EditBuffer's own contract) but always lands on
+ // CLUSTER boundaries - a user-perceived character: a base plus its
+ // combining marks, an emoji ZWJ sequence, a flag's regional-indicator
+diff --git a/libs/ui/include/ws/ui/gui/text_edit_core.hpp b/libs/ui/include/ws/ui/gui/text_edit_core.hpp
+new file mode 100644
+index 0000000..016f4dc
+--- /dev/null
++++ b/libs/ui/include/ws/ui/gui/text_edit_core.hpp
+@@ -0,0 +1,527 @@
++#pragma once
++
++// The gui's reusable TEXT EDITING ENGINE - the half of a text field
++// that is not a widget at all: the caller-owned buffer lens
++// (EditBuffer), the persistent caret pair with its undo/redo history
++// (TextInputState + TextEditHistory), and the buffer walks every
++// field and every app shares (word boundaries for Ctrl+Arrow and
++// Ctrl+Backspace, line boundaries for the multi-line editor).
++// Split out of widgets.hpp so an app with a CUSTOM field (or no
++// widget at all - a buffer plus this engine is a complete editor)
++// reaches the machinery without the widget surface; widgets.hpp
++// includes this header and keeps every spelling it always had.
++//
++// The cluster primitives the walks ride are text_cluster.hpp's: the
++// engine edits TEXT - UTF-8 codepoints land whole, the caret steps
++// grapheme clusters, and no key, click, paste or undo ever splits a
++// sequence. An ASCII buffer degenerates to one-byte-per-character
++// arithmetic exactly.
++
++#include <ws/ui/gui/text_cluster.hpp>
++
++#include <algorithm>
++#include <cstdint>
++#include <cstring>
++#include <string>
++#include <vector>
++
++namespace ws::ui::gui {
++
++struct EditBuffer;  // the lens below - the history's verbs speak it
++
++// --- the undo/redo history -------------------------------------------------------
++// A bounded, coalescing stack of whole changes. One entry spells one
++// step: the span that changed, both its spellings (what stood there,
++// what stands there now), and the caret/selection pair on both sides
++// of it. Undo re-erases `inserted` and re-lands `erased` at `pos`;
++// redo the mirror - the exact arithmetic of every editor the user
++// knows, sized for a widget: a few hundred steps, not a document.
++//
++// Coalescing (one undo step per gesture, the rule the editors set):
++// a run of single-cluster typing merges while it stays on word
++// characters (undo gives back the word, not the letter), a held
++// Backspace merges into the span it ate, a held Delete into the span
++// it ate forward. A word delete, a paste, a cut, an Enter - every
++// deliberate edit - stands as its own step. Any new edit clears the
++// redo stack (the standard: redo answers only an unbroken undo run).
++//
++// The caller owns the buffer, so the history guards itself: every
++// entry remembers the buffer lengths on both sides of the change, and
++// an undo/redo that finds a different length (the caller re-spelled
++// the buffer between frames - a numeric field's commit, a settings
++// sync) drops the whole history rather than splice a stale entry into
++// text it never saw. A field that rewrites its own buffer on purpose
++// clears the history at the rewrite instead - the numeric field does.
++
++enum class TextEditCoalesce {
++    none,            // its own undo step, always
++    typing,          // merges with a preceding typing run (word chars only)
++    deletion_back,   // merges with a preceding backspace run (eating left)
++    deletion_forward // merges with a preceding delete run (eating right)
++};
++
++// One recorded step. `pos` is the byte the change landed at; the
++// [pos, pos + inserted.size()) span is what stands there now, and
++// `erased` is what the change replaced. The caret pair travels both
++// ways so undo restores the selection that stood before the change -
++// the detail that makes undo feel like undo.
++struct TextEditChange {
++    int pos = 0;
++    std::string erased;    // what stood at the span before the change
++    std::string inserted;  // what stands there after it
++    int caret_before = 0;
++    int anchor_before = 0;
++    int caret_after = 0;
++    int anchor_after = 0;
++    int len_after = 0;   // the WHOLE buffer's length after the change
++    int len_before = 0;  // ...and before it (each side's staleness guard)
++    TextEditCoalesce kind = TextEditCoalesce::none;
++};
++
++class TextEditHistory {
++  public:
++    // The bounds: the stack never grows past either, and the OLDEST
++    // steps drop when a bound is crossed (a field remembers its last
++    // few hundred edits, not its birth).
++    static constexpr std::size_t kMaxEntries = 128;
++    static constexpr std::size_t kMaxBytes = 32u * 1024u;
++
++    bool can_undo() const { return !undo_.empty(); }
++    bool can_redo() const { return !redo_.empty(); }
++    std::size_t undo_depth() const { return undo_.size(); }
++    std::size_t redo_depth() const { return redo_.size(); }
++
++    void clear() {
++        undo_.clear();
++        redo_.clear();
++        bytes_ = 0;
++    }
++
++    // The one recording verb: replace [lo, hi) with `n` whole bytes at
++    // `lo` (both spans already filtered - typing and the deleters),
++    // move the caret to the pen, and record the step. Returns the pen
++    // (>= 0) when the buffer changed, -1 when nothing happened (an
++    // empty span the room refused - the verbs' no-op, unrecorded).
++    int replace(EditBuffer& eb, int lo, int hi, const char* bytes, int n,
++                TextEditCoalesce kind);
++
++    // The paste spelling: the landing is whatever `utf8` admits
++    // through `filter` and the room (EditBuffer::insert_filtered's own
++    // count), one recorded step either way - undo gives back the
++    // selection the paste replaced in one move. Returns the pen, or
++    // -1 when nothing changed.
++    int replace_filtered(EditBuffer& eb, int lo, int hi, const char* utf8,
++                         bool (*filter)(std::uint32_t), TextEditCoalesce kind);
++
++    // Walk back/forward one step. True when a step applied; the
++    // EditBuffer's text and caret pair stand at the step's far side,
++    // ready for the frame's write-back into TextInputState. A stale
++    // buffer (the caller's own rewrite) answers false and clears the
++    // history - see the class doc.
++    bool undo(EditBuffer& eb);
++    bool redo(EditBuffer& eb);
++
++  private:
++    void record(TextEditChange change);
++    void trim();
++
++    std::vector<TextEditChange> undo_;
++    std::vector<TextEditChange> redo_;
++    std::size_t bytes_ = 0;  // the undo stack's erased+inserted bytes
++};
++
++// The text field's persistent half: the caret and its selection anchor
++// are byte offsets into the CALLER's buffer, always on grapheme-cluster
++// boundaries - a user-perceived character is base + combining marks, an
++// emoji sequence; an ASCII buffer sees the old one-byte-per-character
++// arithmetic exactly; equal means no selection. The blink phase is the
++// frame clock's first consumer - dt_seconds accumulates here, half on/half
++// off at rest, and every edit, caret move or press rewinds it so the
++// caret reads solid while the user works. `was_focused` lights it the
++// frame the field GAINS the focus, so a Tab-arrival caret shows
++// immediately instead of mid-blink. The undo/redo history rides along:
++// every text field edits through it, so Ctrl+Z/Y (and the engine's
++// own verbs for a custom field) work everywhere for free.
++struct TextInputState {
++    int caret = 0;
++    int anchor = 0;      // the selection origin; caret == anchor: none
++    float blink = 0.0f;  // [0, 1): under 0.5 draws the caret
++    bool was_focused = false;
++    TextEditHistory history;  // the field's own undo/redo, bounded
++};
++
++// The typing filter: the field edits TEXT - the cut is every scalar
++// value UTF-8 can spell, not v1's ASCII. Control codes stay out (a
++// single line has no use for them; DEL rides with them), and the
++// surrogate halves and anything past U+10FFFF drop rather than land a
++// truncated byte-cast alias - the test takes the CODEPOINT, never a
++// byte: a surrogate half whose low byte would alias into 'A' still
++// refuses whole. The insert lands the codepoint's whole 1..4-byte
++// UTF-8 span (utf8_encode beside it), one cluster at a time.
++inline bool is_insertable(std::uint32_t cp) {
++    return cp >= 32u && cp != 127u && cp <= 0x10FFFFu &&
++           !(cp >= 0xD800u && cp <= 0xDFFFu);
++}
++
++// The multi-line editor's filter: the single-line cut plus LINE BREAKS
++// - the editor's Enter lands '\n' through the same whole-span path
++// typing walks (the newline is one cluster, one entry, one undo step).
++// '\r' still refuses: a pasted CRLF pair normalizes to LF, the way
++// every modern editor spells it.
++inline bool is_insertable_multiline(std::uint32_t cp) {
++    return cp == '\n' || is_insertable(cp);
++}
++
++// The text field's per-frame lens: the persistent caret pair from
++// TextInputState plus the caller's buffer geometry as one object, so
++// every edit speaks a verb instead of spelling memmove. Built once per
++// frame with the length measured fresh; the frame-end clamp writes the
++// pair back into the persistent state. A dead field carries room 0,
++// and the verbs' own clamps turn that into a no-op.
++struct EditBuffer {
++    char* buf = nullptr;  // the caller's buffer (the widget never owns it)
++    int room = 0;   // bytes the buffer may hold: capacity minus the NUL
++    int len = 0;    // bytes before the terminator, measured this frame
++    int caret = 0;   // the editing position; the selection's live end
++    int anchor = 0;  // the selection origin; caret == anchor: none
++
++    // The selection as a range, low end first (equal ends: none).
++    int sel_lo() const { return std::min(caret, anchor); }
++    int sel_hi() const { return std::max(caret, anchor); }
++    bool has_selection() const { return caret != anchor; }
++
++    // --- the cluster navigation ------------------------------------------
++    // Byte offsets snapped onto grapheme-cluster boundaries (see
++    // text_cluster.hpp): the invariant every editing verb leaves
++    // behind. The containing-cluster read is asymmetric on purpose,
++    // the two halves that need it: cluster_start(byte) names the START
++    // of the cluster containing byte-1 - Backspace's target, and the
++    // Left key's step (byte 0 -> 0); cluster_end(byte) the END of the
++    // cluster containing byte - Delete's target, and the Right key's
++    // step (the length clamps). clamp_to_cluster snaps DOWN - the
++    // boundary at or below - so an externally re-spelled buffer (the
++    // caller's own hand between frames) never finds the caret mid-
++    // character. An ASCII buffer degenerates to the old arithmetic
++    // exactly: start = byte-1, end = byte+1, the clamp the identity.
++    int cluster_start(int byte) const {
++        byte = std::max(0, std::min(len, byte));
++        int start = 0;
++        while (start < byte) {
++            const int span = grapheme_length(buf + start, buf + len);
++            if (start + span >= byte) {
++                return start;  // the cluster [start, start+span) holds byte-1
++            }
++            start += span;
++        }
++        return 0;
++    }
++    int cluster_end(int byte) const {
++        byte = std::max(0, std::min(len, byte));
++        int start = 0;
++        while (start < byte) {
++            const int span = grapheme_length(buf + start, buf + len);
++            if (start + span > byte) {
++                return start + span;  // byte sits inside [start, start+span)
++            }
++            start += span;
++        }
++        // byte is a boundary at/below the scan's stop: the cluster
++        // STARTING there owns the answer (or the buffer's end).
++        return byte < len ? byte + grapheme_length(buf + byte, buf + len)
++                          : len;
++    }
++    int clamp_to_cluster(int byte) const {
++        byte = std::max(0, std::min(len, byte));
++        int start = 0;
++        while (start < byte) {
++            const int span = grapheme_length(buf + start, buf + len);
++            if (start + span >= byte) {
++                return byte == start + span ? byte : start;
++            }
++            start += span;
++        }
++        return byte;
++    }
++
++    // Both ends onto `at`: the selection dies, the caret stays.
++    void collapse(int at) {
++        caret = anchor = at;
++    }
++
++    // The one eraser every deleter funnels through: [lo, hi) leaves,
++    // the tail slides, the terminator follows the new end.
++    void erase(int lo, int hi) {
++        lo = std::max(0, lo);
++        hi = std::min(len, hi);
++        if (lo >= hi) {
++            return;
++        }
++        std::memmove(buf + lo, buf + hi, static_cast<std::size_t>(len - hi));
++        len -= hi - lo;
++        buf[len] = '\0';
++    }
++
++    // A selection dies under what replaces it - typing and pasting both
++    // spell it; the caret lands where the selection was.
++    void erase_selection() {
++        if (has_selection()) {
++            const int lo = sel_lo();
++            erase(lo, sel_hi());
++            collapse(lo);
++        }
++    }
++
++    // n bytes at `at` (clamped into [0, len], never past the room): the
++    // tail slides once, the bytes land, the terminator follows. The
++    // return is the pen just past the insertion, or -1 when the room
++    // refused everything. Callers pass WHOLE UTF-8 codepoint spans (the
++    // typing loop encodes through utf8_encode and checks the span fits
++    // first - the room never cuts a sequence mid-byte under the
++    // widget's own hand).
++    int insert(int at, const char* bytes, int n) {
++        at = std::max(0, std::min(len, at));
++        n = std::min(n, room - len);
++        if (n <= 0) {
++            return -1;
++        }
++        std::memmove(buf + at + n, buf + at,
++                     static_cast<std::size_t>(len - at));
++        std::memcpy(buf + at, bytes, static_cast<std::size_t>(n));
++        len += n;
++        buf[len] = '\0';
++        return at + n;
++    }
++
++    // A paste through the filter: only CODEPOINTS the filter admits
++    // land, and each lands its WHOLE 1..4-byte UTF-8 span (the
++    // clipboard seam speaks UTF-8 - the same bytes draw_text walks) -
++    // a span the room cannot take whole stops the count there, an
++    // ill-formed span (a truncated or overlong sequence, a lone
++    // continuation byte) drops rather than lands, and the buffer keeps
++    // its UTF-8 shape. Still counted in one pass over the text, then
++    // landed in one move, so the buffer never walks per byte and the
++    // capacity never splits mid-paste. The return is insert's pen. The
++    // filter rides as a parameter so a constrained field (a numeric
++    // one) admits only its own charset; the default is the field's
++    // plain cut, so every existing caller keeps its edit - with
++    // non-ASCII text now LANDING instead of dropping per byte.
++    int insert_filtered(int at, const char* text,
++                        bool (*filter)(std::uint32_t) = &is_insertable) {
++        const char* const stop = text + std::strlen(text);
++        // The shared admission test: decode, refuse the ill-formed, ask
++        // the filter - identical in the counting and the landing pass.
++        const auto admits = [&](const char* p, std::uint32_t& cp,
++                                 int& span) -> bool {
++            span = utf8_decode(p, stop, cp);
++            if (span <= 0) {
++                return false;
++            }
++            if (span == 1 && cp >= 0x80u) {
++                return false;  // not well-formed UTF-8: the paste drops it
++            }
++            return filter(cp);
++        };
++        int take = 0;  // bytes that will land
++        for (const char* p = text; *p != '\0' && take < room - len;) {
++            std::uint32_t cp = 0;
++            int span = 0;
++            if (admits(p, cp, span)) {
++                if (take + span > room - len) {
++                    break;  // the room would split the span: nothing more lands
++                }
++                take += span;
++            }
++            p += span;
++        }
++        at = std::max(0, std::min(len, at));
++        if (take <= 0) {
++            return -1;
++        }
++        std::memmove(buf + at + take, buf + at,
++                     static_cast<std::size_t>(len - at));
++        int pen = at;
++        for (const char* p = text; *p != '\0';) {
++            if (pen - at >= take) {
++                break;  // the room's count is landed; the tail never walks
++            }
++            std::uint32_t cp = 0;
++            int span = 0;
++            if (admits(p, cp, span)) {
++                std::memcpy(buf + pen, p, static_cast<std::size_t>(span));
++                pen += span;
++            }
++            p += span;
++        }
++        len += take;
++        buf[len] = '\0';
++        return pen;
++    }
++};
++
++// --- the word walk (Ctrl+Arrow, Ctrl+Backspace/Delete) -------------------------
++// The buffer's characters fall in three classes - word (letters,
++// digits, underscore, and every non-ASCII codepoint: a CJK run, an
++// emoji family), space (whitespace, newlines included) and punct
++// (everything else, each run its own stop). Ctrl+Left lands on the
++// start of the run before the caret (spaces skipped), Ctrl+Right on
++// the end of the run after it - the VS Code school, where a
++// punctuation run is a stop of its own rather than transparent: in
++// "foo, bar" the stops read 0, 3, 4, 5, 8. Cluster-aligned: a
++// combining mark or a ZWJ family walks with its base, never splits.
++enum class TextWordClass { word, space, punct };
++
++inline TextWordClass word_class(std::uint32_t cp) {
++    if (cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' || cp == '\v' ||
++        cp == '\f') {
++        return TextWordClass::space;
++    }
++    if ((cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z') ||
++        (cp >= '0' && cp <= '9') || cp == '_' || cp >= 0x80u) {
++        return TextWordClass::word;  // non-ASCII edits as word text
++    }
++    return TextWordClass::punct;
++}
++
++// The cluster boundary at or below `byte` (the snap every walk enters
++// through, so a mid-cluster byte - only an externally re-spelled
++// buffer leaves one - never splits a sequence).
++inline int cluster_floor(const char* buf, int len, int byte) {
++    byte = std::max(0, std::min(len, byte));
++    int at = 0;
++    while (at < byte) {
++        const int span = grapheme_length(buf + at, buf + len);
++        if (at + span >= byte) {
++            return at + span == byte ? byte : at;
++        }
++        at += span;
++    }
++    return byte;
++}
++
++// The class of the cluster starting at `at` (its first codepoint);
++// the buffer's end reads as a stop.
++inline TextWordClass cluster_class(const char* buf, int len, int at) {
++    if (at >= len) {
++        return TextWordClass::space;
++    }
++    std::uint32_t cp = 0;
++    (void)utf8_decode(buf + at, buf + len, cp);
++    return word_class(cp);
++}
++
++// The start of the cluster ENDING at boundary `at` (the cluster that
++// owns byte at-1).
++inline int cluster_before(const char* buf, int len, int at) {
++    int start = 0;
++    while (start < at) {
++        const int span = grapheme_length(buf + start, buf + len);
++        if (start + span >= at) {
++            return start;
++        }
++        start += span;
++    }
++    return at;
++}
++
++// Ctrl+Left's landing: the start of the run before `byte` - spaces to
++// the left skip, then the whole run of the class that stands there.
++// The buffer's top answers 0, always.
++inline int word_start(const char* buf, int len, int byte) {
++    int at = cluster_floor(buf, len, byte);
++    while (at > 0 && cluster_class(buf, len, cluster_before(buf, len, at)) ==
++                         TextWordClass::space) {
++        at = cluster_before(buf, len, at);
++    }
++    if (at > 0) {
++        const TextWordClass cls =
++            cluster_class(buf, len, cluster_before(buf, len, at));
++        while (at > 0 && cluster_class(buf, len, cluster_before(buf, len, at)) ==
++                             cls) {
++            at = cluster_before(buf, len, at);
++        }
++    }
++    return at;
++}
++
++// Ctrl+Right's landing: the end of the run after `byte` - spaces skip
++// forward, then the run of the class that lands. The buffer's end
++// answers len, always.
++inline int word_end(const char* buf, int len, int byte) {
++    int at = cluster_floor(buf, len, byte);
++    while (at < len && cluster_class(buf, len, at) == TextWordClass::space) {
++        at += grapheme_length(buf + at, buf + len);
++    }
++    if (at < len) {
++        const TextWordClass cls = cluster_class(buf, len, at);
++        while (at < len && cluster_class(buf, len, at) == cls) {
++            at += grapheme_length(buf + at, buf + len);
++        }
++    }
++    return at;
++}
++
++// --- the line walk (the multi-line editor's vertical half) ----------------------
++// A line is the span between '\n' bytes - hard breaks only; the editor
++// does not soft-wrap (a long line truncates with "..." like the
++// single-line field always has, and the keys still edit the hidden
++// tail). Pure byte arithmetic over the caller's buffer, so the
++// editor's navigation, its draw and any app walk the same lines.
++
++// The line containing `byte` starts here (just past the previous '\n').
++inline int line_start(const char* buf, int len, int byte) {
++    byte = std::max(0, std::min(len, byte));
++    while (byte > 0 && buf[byte - 1] != '\n') {
++        --byte;
++    }
++    return byte;
++}
++
++// The line containing `byte` ends here (at its own '\n', which is the
++// terminator and NOT part of the line; len at the buffer's tail).
++inline int line_end(const char* buf, int len, int byte) {
++    byte = std::max(0, std::min(len, byte));
++    while (byte < len && buf[byte] != '\n') {
++        ++byte;
++    }
++    return byte;
++}
++
++// How many lines the buffer holds (1 + the '\n' count).
++inline int line_count(const char* buf, int len) {
++    int n = 1;
++    for (int i = 0; i < len; ++i) {
++        if (buf[i] == '\n') {
++            ++n;
++        }
++    }
++    return n;
++}
++
++// The 0-based index of the line containing `byte`.
++inline int line_index(const char* buf, int len, int byte) {
++    byte = std::max(0, std::min(len, byte));
++    int n = 0;
++    for (int i = 0; i < byte; ++i) {
++        if (buf[i] == '\n') {
++            ++n;
++        }
++    }
++    return n;
++}
++
++// The start of line `index` (0-based; an index past the end clamps to
++// the last line's start). O(n), like every walk here - editing
++// buffers are small.
++inline int line_start_of(const char* buf, int len, int index) {
++    int at = 0;
++    int n = 0;
++    while (at < len && n < index) {
++        if (buf[at] == '\n') {
++            ++n;
++        }
++        ++at;
++    }
++    return line_start(buf, len, at);
++}
++
++}  // namespace ws::ui::gui
+diff --git a/libs/ui/include/ws/ui/gui/widgets.hpp b/libs/ui/include/ws/ui/gui/widgets.hpp
+index 39c0576..4ef78bd 100644
+--- a/libs/ui/include/ws/ui/gui/widgets.hpp
++++ b/libs/ui/include/ws/ui/gui/widgets.hpp
+@@ -4,6 +4,7 @@
+ #include <ws/ui/gui/layout_cursor.hpp>
+ #include <ws/ui/gui/rect.hpp>
+ #include <ws/ui/gui/text_cluster.hpp>
++#include <ws/ui/gui/text_edit_core.hpp>
+ #include <ws/ui/gui/theme.hpp>
+ 
+ #include <ws/core/result.hpp>
+@@ -947,24 +948,29 @@ void combo_draw(const Rect& rect, const ComboResult& result,
+ // NUL-terminated UTF-8 the caller owns (the house rule - the widget
+ // holds no copy), `capacity` counts the NUL, and the answer is true on
+ // the frame the text CHANGED (typing, Backspace/Delete, a cut, a
+-// paste) - caret and selection moves edit nothing and answer false.
+-// v1 edits ASCII 32..126, the font's bake range: typed codepoints
+-// outside it drop, a paste filters byte-wise, and bytes already in the
+-// buffer outside it sit inert (no advance, no draw - the font skips
+-// them). The row wears the button faces with the content left-aligned
+-// inside the padding; the label draws as a dimmed placeholder only
+-// while the buffer is empty. The caret: a click places it (x to glyph
+-// index at the mid-advance), Left/Right/Home/End move it, and it
++// paste, an undo/redo) - caret and selection moves edit nothing and
++// answer false. v1 edits ASCII 32..126, the font's bake range: typed
++// codepoints outside it drop, a paste filters byte-wise, and bytes
++// already in the buffer outside it sit inert (no advance, no draw -
++// the font skips them). The row wears the button faces with the
++// content left-aligned inside the padding; the label draws as a dimmed
++// placeholder only while the buffer is empty. The caret: a click
++// places it (x to glyph index at the mid-advance), Left/Right/Home/End
++// move it (Ctrl+Left/Right step WORDS, Ctrl+Home/End the line's ends,
++// Up/Down land Home/End - the classic single-line mapping), and it
+ // blinks on the frame clock (dt_seconds' first consumer) - solid
+ // through every edit and move, half on/half off at rest, hidden while
+ // unfocused or under a disabled scope. Selection: Shift extends the
+-// arrows/Home/End from the anchor, a press-and-sweep drags it, Ctrl+A
+-// takes all, and typing or Backspace/Delete replaces it; Escape
+-// clears it. The range draws as the accent band under the text, the
+-// selected tab's face. Ctrl+C/X copy/cut the selection and Ctrl+V
+-// pastes at the caret through the gui's clipboard seam
++// arrows/Home/End from the anchor (Ctrl+arrows included - the word
++// walk), a press-and-sweep drags it, Ctrl+A takes all, and typing or
++// Backspace/Delete replaces it; Escape clears it. The range draws as
++// the accent band under the text, the selected tab's face.
++// Ctrl+C/X copy/cut the selection, Ctrl+V pastes at the caret, and
++// Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z) undo/redo through the field's own
++// bounded history - all through the gui's clipboard seam
+ // (GuiContext::set_clipboard; App::install_clipboard wires the
+-// platform - an unwired seam, Android today, makes the trio no-ops).
++// platform - an unwired seam, Android today, makes the clipboard trio
++// no-ops; undo/redo need no seam).
+ // Enter is not the widget's to take - a single line has no commit
+ // edge, so the caller reads its own: is_focused(ids().id(label)) and
+ // key_pressed[ws::input::keys::kEnter] on the frame after the edit. Tab cycles
+@@ -990,221 +996,15 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
+ // persistent pair in the context's side table under your own id, and
+ // the EditBuffer lens is yours for whatever else a custom field edits.
+ 
+-// text_input's persistent half: the caret and its selection anchor are
+-// byte offsets into the CALLER's buffer, always on grapheme-cluster
+-// boundaries - a user-perceived character is base + combining marks, an
+-// emoji sequence; an ASCII buffer sees the old one-byte-per-character
+-// arithmetic exactly; equal means no selection. The blink phase is the
+-// frame clock's first consumer - dt_seconds accumulates here, half on/half
+-// off at rest, and every edit, caret move or press rewinds it so the
+-// caret reads solid while the user works. `was_focused` lights it the
+-// frame the field GAINS the focus, so a Tab-arrival caret shows
+-// immediately instead of mid-blink.
+-struct TextInputState {
+-    int caret = 0;
+-    int anchor = 0;      // the selection origin; caret == anchor: none
+-    float blink = 0.0f;  // [0, 1): under 0.5 draws the caret
+-    bool was_focused = false;
+-};
+-
+-// The typing filter: the field edits TEXT - the cut is every scalar
+-// value UTF-8 can spell, not v1's ASCII. Control codes stay out (a
+-// single line has no use for them; DEL rides with them), and the
+-// surrogate halves and anything past U+10FFFF drop rather than land a
+-// truncated byte-cast alias - the test takes the CODEPOINT, never a
+-// byte: a surrogate half whose low byte would alias into 'A' still
+-// refuses whole. The insert lands the codepoint's whole 1..4-byte
+-// UTF-8 span (utf8_encode beside it), one cluster at a time.
+-inline bool is_insertable(std::uint32_t cp) {
+-    return cp >= 32u && cp != 127u && cp <= 0x10FFFFu &&
+-           !(cp >= 0xD800u && cp <= 0xDFFFu);
+-}
+-
+-// text_input's per-frame lens: the persistent caret pair from
+-// TextInputState plus the caller's buffer geometry as one object, so
+-// every edit speaks a verb instead of spelling memmove. Built once per
+-// frame with the length measured fresh; the frame-end clamp writes the
+-// pair back into the persistent state. A dead field carries room 0,
+-// and the verbs' own clamps turn that into a no-op.
+-struct EditBuffer {
+-    char* buf = nullptr;  // the caller's buffer (the widget never owns it)
+-    int room = 0;   // bytes the buffer may hold: capacity minus the NUL
+-    int len = 0;    // bytes before the terminator, measured this frame
+-    int caret = 0;   // the editing position; the selection's live end
+-    int anchor = 0;  // the selection origin; caret == anchor: none
+-
+-    // The selection as a range, low end first (equal ends: none).
+-    int sel_lo() const { return std::min(caret, anchor); }
+-    int sel_hi() const { return std::max(caret, anchor); }
+-    bool has_selection() const { return caret != anchor; }
+-
+-    // --- the cluster navigation ------------------------------------------
+-    // Byte offsets snapped onto grapheme-cluster boundaries (see
+-    // text_cluster.hpp): the invariant every editing verb leaves
+-    // behind. The containing-cluster read is asymmetric on purpose,
+-    // the two halves that need it: cluster_start(byte) names the START
+-    // of the cluster containing byte-1 - Backspace's target, and the
+-    // Left key's step (byte 0 -> 0); cluster_end(byte) the END of the
+-    // cluster containing byte - Delete's target, and the Right key's
+-    // step (the length clamps). clamp_to_cluster snaps DOWN - the
+-    // boundary at or below - so an externally re-spelled buffer (the
+-    // caller's own hand between frames) never finds the caret mid-
+-    // character. An ASCII buffer degenerates to the old arithmetic
+-    // exactly: start = byte-1, end = byte+1, the clamp the identity.
+-    int cluster_start(int byte) const {
+-        byte = std::max(0, std::min(len, byte));
+-        int start = 0;
+-        while (start < byte) {
+-            const int span = grapheme_length(buf + start, buf + len);
+-            if (start + span >= byte) {
+-                return start;  // the cluster [start, start+span) holds byte-1
+-            }
+-            start += span;
+-        }
+-        return 0;
+-    }
+-    int cluster_end(int byte) const {
+-        byte = std::max(0, std::min(len, byte));
+-        int start = 0;
+-        while (start < byte) {
+-            const int span = grapheme_length(buf + start, buf + len);
+-            if (start + span > byte) {
+-                return start + span;  // byte sits inside [start, start+span)
+-            }
+-            start += span;
+-        }
+-        // byte is a boundary at/below the scan's stop: the cluster
+-        // STARTING there owns the answer (or the buffer's end).
+-        return byte < len ? byte + grapheme_length(buf + byte, buf + len)
+-                          : len;
+-    }
+-    int clamp_to_cluster(int byte) const {
+-        byte = std::max(0, std::min(len, byte));
+-        int start = 0;
+-        while (start < byte) {
+-            const int span = grapheme_length(buf + start, buf + len);
+-            if (start + span >= byte) {
+-                return byte == start + span ? byte : start;
+-            }
+-            start += span;
+-        }
+-        return byte;
+-    }
+-
+-    // Both ends onto `at`: the selection dies, the caret stays.
+-    void collapse(int at) {
+-        caret = anchor = at;
+-    }
+-
+-    // The one eraser every deleter funnels through: [lo, hi) leaves,
+-    // the tail slides, the terminator follows the new end.
+-    void erase(int lo, int hi) {
+-        lo = std::max(0, lo);
+-        hi = std::min(len, hi);
+-        if (lo >= hi) {
+-            return;
+-        }
+-        std::memmove(buf + lo, buf + hi, static_cast<std::size_t>(len - hi));
+-        len -= hi - lo;
+-        buf[len] = '\0';
+-    }
+-
+-    // A selection dies under what replaces it - typing and pasting both
+-    // spell it; the caret lands where the selection was.
+-    void erase_selection() {
+-        if (has_selection()) {
+-            const int lo = sel_lo();
+-            erase(lo, sel_hi());
+-            collapse(lo);
+-        }
+-    }
+-
+-    // n bytes at `at` (clamped into [0, len], never past the room): the
+-    // tail slides once, the bytes land, the terminator follows. The
+-    // return is the pen just past the insertion, or -1 when the room
+-    // refused everything. Callers pass WHOLE UTF-8 codepoint spans (the
+-    // typing loop encodes through utf8_encode and checks the span fits
+-    // first - the room never cuts a sequence mid-byte under the
+-    // widget's own hand).
+-    int insert(int at, const char* bytes, int n) {
+-        at = std::max(0, std::min(len, at));
+-        n = std::min(n, room - len);
+-        if (n <= 0) {
+-            return -1;
+-        }
+-        std::memmove(buf + at + n, buf + at,
+-                     static_cast<std::size_t>(len - at));
+-        std::memcpy(buf + at, bytes, static_cast<std::size_t>(n));
+-        len += n;
+-        buf[len] = '\0';
+-        return at + n;
+-    }
+-
+-    // A paste through the filter: only CODEPOINTS the filter admits
+-    // land, and each lands its WHOLE 1..4-byte UTF-8 span (the
+-    // clipboard seam speaks UTF-8 - the same bytes draw_text walks) -
+-    // a span the room cannot take whole stops the count there, an
+-    // ill-formed span (a truncated or overlong sequence, a lone
+-    // continuation byte) drops rather than lands, and the buffer keeps
+-    // its UTF-8 shape. Still counted in one pass over the text, then
+-    // landed in one move, so the buffer never walks per byte and the
+-    // capacity never splits mid-paste. The return is insert's pen. The
+-    // filter rides as a parameter so a constrained field (a numeric
+-    // one) admits only its own charset; the default is the field's
+-    // plain cut, so every existing caller keeps its edit - with
+-    // non-ASCII text now LANDING instead of dropping per byte.
+-    int insert_filtered(int at, const char* text,
+-                        bool (*filter)(std::uint32_t) = &is_insertable) {
+-        const char* const stop = text + std::strlen(text);
+-        // The shared admission test: decode, refuse the ill-formed, ask
+-        // the filter - identical in the counting and the landing pass.
+-        const auto admits = [&](const char* p, std::uint32_t& cp,
+-                                 int& span) -> bool {
+-            span = utf8_decode(p, stop, cp);
+-            if (span <= 0) {
+-                return false;
+-            }
+-            if (span == 1 && cp >= 0x80u) {
+-                return false;  // not well-formed UTF-8: the paste drops it
+-            }
+-            return filter(cp);
+-        };
+-        int take = 0;  // bytes that will land
+-        for (const char* p = text; *p != '\0' && take < room - len;) {
+-            std::uint32_t cp = 0;
+-            int span = 0;
+-            if (admits(p, cp, span)) {
+-                if (take + span > room - len) {
+-                    break;  // the room would split the span: nothing more lands
+-                }
+-                take += span;
+-            }
+-            p += span;
+-        }
+-        at = std::max(0, std::min(len, at));
+-        if (take <= 0) {
+-            return -1;
+-        }
+-        std::memmove(buf + at + take, buf + at,
+-                     static_cast<std::size_t>(len - at));
+-        int pen = at;
+-        for (const char* p = text; *p != '\0';) {
+-            if (pen - at >= take) {
+-                break;  // the room's count is landed; the tail never walks
+-            }
+-            std::uint32_t cp = 0;
+-            int span = 0;
+-            if (admits(p, cp, span)) {
+-                std::memcpy(buf + pen, p, static_cast<std::size_t>(span));
+-                pen += span;
+-            }
+-            p += span;
+-        }
+-        len += take;
+-        buf[len] = '\0';
+-        return pen;
+-    }
+-};
++// The field's engine half - the persistent pair (TextInputState, the
++// caret/anchor pair with the field's own undo/redo history), the typing
++// filter (is_insertable) and the per-frame edit lens (EditBuffer) -
++// lives in text_edit_core.hpp now: the same public spellings every
++// caller always had, in the lean header a custom field (or an app with
++// no widget at all) reaches without the widget surface. The word walk
++// (word_start/word_end) and the line walk (line_start/line_end/
++// line_count/line_index/line_start_of) ride beside them - the engine
++// every text-editing surface in the library shares.
+ 
+ // What the behavior hands a look: the row's paint plus the caret's
+ // mapped geometry, paint-ready. caret_x is the caret's x in frame px,
+@@ -1249,31 +1049,38 @@ struct TextInputResult : WidgetPaint {
+ 
+ // The interaction half at a placed rect: the citizenship fold, then the
+ // field's whole editing - the press that places the caret, the sweep
+-// that selects, the caret keys, the deleters, the frame's codepoints
+-// through the filter, Ctrl+A, Escape's selection drop and the
+-// clipboard trio - all against the caller's buffer through the
+-// EditBuffer verbs, the pair written back into `edit`. The IME
++// that selects, the caret keys (Ctrl+arrows walk words), the deleters
++// (Ctrl eats a word), the frame's codepoints through the filter,
++// Ctrl+A, Escape's selection drop, the clipboard trio and the undo/
++// redo pair (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z) - all against the
++// caller's buffer through the EditBuffer verbs and the history that
++// rides in `edit`, the pair written back into `edit`. The IME
+ // composition channel rides here too (G1.2): while the frame's preedit
+ // is active the keyboard cluster defers to the IME (its arrows are
+ // candidate navigation, its backspace re-edits the preedit), the
+ // preedit maps into the result for the draw, and a frame's commit edge
+ // lands whole through insert_filtered - the paste path's own
+ // never-split-a-span rule, the field's filter applied codepoint by
+-// codepoint. `theme` maps
++// codepoint, one recorded undo step. `theme` maps
+ // the caret into pixels over CLUSTERS - the codepoints' glyph
+ // advances summed, the draw loop's own walk - or
+ // label_char_width fontless, once per codepoint. `filter` is the typing
+ // and paste charset - the codepoints the field admits - and defaults
+ // to the plain cut (every scalar value but the control codes); a
+ // numeric field passes its own (is_float_insertable / is_int_insertable
+-// below). Draws nothing.
++// below). `vertical_keys` hands the field the plain single-line
++// Up/Down -> Home/End mapping (the classic Win32/EDIT behavior); a
++// field whose rows have their own meaning for the vertical arrows -
++// the numeric stepper - passes false and keeps them for itself.
++// Draws nothing.
+ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
+                                     const Rect& rect, char* buf, int capacity,
+                                     TextInputState& edit,
+                                     const ChromeTheme& theme,
+                                     bool disabled = false,
+                                     const HitShape& hit_shape = {},
+-                                    bool (*filter)(std::uint32_t) = &is_insertable);
++                                    bool (*filter)(std::uint32_t) = &is_insertable,
++                                    bool vertical_keys = true);
+ 
+ // The look half: the face, the focus ring, the selection band, the
+ // content - or the placeholder while the buffer is empty - the "..."
+@@ -1284,6 +1091,117 @@ void text_input_draw(const Rect& rect, const TextInputResult& result,
+                      const ChromeTheme& theme, const char* label,
+                      const char* buf, int capacity);
+ 
++// --- the multi-line editor ------------------------------------------------------
++// text_editor: text_input's every rule, plus the vertical dimension -
++// the same caller-owned NUL-terminated UTF-8 buffer contract, the same
++// cluster discipline, the same selection/clipboard/undo semantics,
++// driven over LINES ('\n' hard breaks; no soft wrap - a line wider
++// than the box truncates with "..." and the keys still edit the hidden
++// tail). Enter breaks the line (one '\n', one undo step, the key
++// consumed with it); Ctrl+Enter is NOT the editor's - the result
++// reports the edge so an app spells its own submit chord. Up/Down walk
++// lines carrying the caret's remembered column (the goal survives the
++// walk, dies on any horizontal move or edit - the editors' rule),
++// Ctrl+Up/Down walk PARAGRAPHS (runs of non-blank lines), Home/End
++// bound the line and Ctrl+Home/End the document, and every one of
++// text_input's shortcuts rides unchanged: Ctrl+Left/Right (words),
++// Ctrl+Backspace/Delete (a word at a time), Shift+arrows (selection),
++// Ctrl+A, Ctrl+C/X/V, Ctrl+Z/Y, Escape. A click places the caret by
++// (line, x); a sweep selects; the wheel scrolls (one notch = the
++// theme's scroll_speed, the scroll panel's own rule) and the view
++// follows the caret - every edit and every walk keeps the caret's
++// line on screen. The IME composition rides the caret's line exactly
++// as text_input's rides the row. Tab still cycles the focus away (the
++// editor takes no indentation of its own in v1). `rows` sizes the box
++// (rows * the font's line height + padding, floored at the control
++// height); `width` and `disabled` spell what they always do.
++
++// The editor's persistent half: text_input's own pair (caret, anchor,
++// blink, the undo/redo history) plus the vertical state - how far the
++// content scrolled (px, clamped every frame to the content's height
++// minus the view's) and the Up/Down column memory (the goal x, content
++// px; negative = none stands - the next vertical step re-derives it
++// from the caret).
++struct TextEditorState {
++    TextInputState field;
++    float scroll_y = 0.0f;  // the scrolled-off top, content px
++    float goal_x = -1.0f;   // Up/Down's remembered column, content px
++    int follow_line = -1;   // the caret line the scroll last followed
++                             // (-1: the next focused frame follows)
++};
++
++// What the editor's behavior hands its look. The caret and the
++// selection travel as BUFFER BYTES (the look owns its own pixel fits -
++// the split convention); caret_x/caret_y map the caret's box top-left
++// in frame px (y already scrolled, x clamped to the content edge like
++// text_input's), line_h is one line box's height (the font's line
++// height, or control_height/2 fontless), caret_line its 0-based index.
++// sel_lo/sel_hi order the selection (equal: none). scroll_y/content_h/
++// view_h describe the settled scroll so a look places the thumb
++// without re-measuring. ctrl_enter reports the frame's Ctrl+Enter
++// edge (the app's submit chord - the editor never takes it); edited
++// is the frame's answer, the widget's own return. The preedit fields
++// mirror TextInputResult's (the run rides the caret's LINE; the y's
++// are frame px, the x's content-edge clamped) and stand only while a
++// composition is in flight in a field that can edit.
++struct TextEditorResult : WidgetPaint {
++    int caret_byte = 0;   // the caret, buffer bytes (cluster-aligned)
++    int sel_lo = 0;       // the selection's low end, bytes (== hi: none)
++    int sel_hi = 0;       // ...high end
++    float caret_x = 0.0f;  // the caret's box left, frame px
++    float caret_y = 0.0f;  // ...top, frame px (scrolled)
++    float line_h = 0.0f;   // one line box's height, px
++    int caret_line = 0;    // the caret's 0-based line
++    float blink = 0.0f;    // the caret's phase [0, 1)
++    bool edited = false;   // the buffer changed this frame
++    float scroll_y = 0.0f;   // the settled scroll, content px
++    float content_h = 0.0f;  // lines * line_h
++    float view_h = 0.0f;     // the box's inner height, px
++    bool ctrl_enter = false;  // the app's submit edge passed through
++
++    const char* preedit_text = nullptr;
++    int preedit_len = 0;
++    int preedit_caret_lo = 0;  // the composition caret's span, bytes
++    int preedit_caret_hi = 0;  // into preedit_text (lo is the caret)
++    float preedit_x = 0.0f;     // the run's pen x, frame px
++    float preedit_y = 0.0f;     // ...pen y (the caret's line), frame px
++    float preedit_advance = 0.0f;  // the run's whole width, unclamped
++    float preedit_caret_x = 0.0f;  // the composition caret's x, frame px
++};
++
++// The behavior half at a placed rect - text_input's whole keyboard
++// (the shared cluster), the editor's vertical walk over it, the 2D
++// pointer placement, the wheel scroll and the caret-follow, the pair
++// and the scroll written back into `state`. `filter` defaults to the
++// multi-line cut (is_insertable_multiline: the plain cut plus '\n') -
++// pass your own to spell a constrained editor. Draws nothing.
++TextEditorResult text_editor_behavior(GuiContext& gui, WidgetId id,
++                                      const Rect& rect, char* buf,
++                                      int capacity, TextEditorState& state,
++                                      const ChromeTheme& theme,
++                                      bool disabled = false,
++                                      const HitShape& hit_shape = {},
++                                      bool (*filter)(std::uint32_t) =
++                                          &is_insertable_multiline);
++
++// The look half: the box (ring, face), the visible lines, the
++// per-line selection bands, the per-line "..." truncation, the
++// placeholder on an empty buffer's first line, the caret, the
++// scrollbar (the scroll panel's own thumb), and the composition
++// marks while a preedit rides the caret's line. Reads no context.
++void text_editor_draw(const Rect& rect, const TextEditorResult& result,
++                      const ChromeTheme& theme, const char* label,
++                      const char* buf, int capacity);
++
++// The composed row: the behavior and the stock look folded, the
++// answer true on the frame the text changed. The buffer contract is
++// text_input's own (NUL-terminated UTF-8, capacity counts the NUL, a
++// null or under-2 buffer lays the box inert).
++bool text_editor(GuiContext& gui, LayoutCursor& layout,
++                 const ChromeTheme& theme, const char* label, char* buf,
++                 int capacity, float width = -1.0f, int rows = 5,
++                 bool disabled = false);
++
+ // --- the numeric field ---------------------------------------------------------
+ // input_float / input_int: the exact-value row the property grid always
+ // wanted - a number you can TYPE, where the slider only let you scrub.
+diff --git a/libs/ui/src/gui/CLAUDE.md b/libs/ui/src/gui/CLAUDE.md
+index 3b9e82a..d553f56 100644
+--- a/libs/ui/src/gui/CLAUDE.md
++++ b/libs/ui/src/gui/CLAUDE.md
+@@ -17,6 +17,15 @@
+   mirror's store and the job_view state-to-view mapping (the row and toast
+   templates stay in job_progress.hpp with their JobHandle<T> parameter)
+ - widgets_combo.cpp / widgets_text_input.cpp / widgets_table.cpp
++- widgets_text_editor.cpp: the multi-line editor - text_input's rules
++  over lines (the vertical walk with its goal column, the 2D pointer
++  placement, the wheel scroll, the caret-follow; the keyboard itself
++  is the shared text_field_keys in widgets_detail.hpp)
++- text_edit_core.cpp: the reusable editing ENGINE's out-of-line half -
++  the undo/redo history behind text_edit_core.hpp (the public header
++  also holds EditBuffer/TextInputState, the word walk and the line
++  walk; pure value types, not widgets, so the widget-file rule does
++  not apply)
+ - command_views.cpp / command_palette.cpp / command_keymap.cpp: the
+   ws::app bridge (stage 13 phase 4) - the shared hint + menu builder +
+   toolbar; the palette's fuzzy scorer/ranker + the modal over them; and
+@@ -49,9 +58,14 @@ pixels over the answer. The pairs:
+ - tab (widgets_panels.cpp - the strip loops the per-tab pair)
+ - combo (the ROW pair; the dropdown stays the composed widget's own
+   half - a custom combo lays its list through place_popup/begin_popup)
+-- text_input (+ EditBuffer/TextInputState/is_insertable public; the
+-  behavior's filter parameter is the seam a constrained field
+-  narrows its charset through)
++- text_input (+ EditBuffer/TextInputState/is_insertable public in
++  text_edit_core.hpp - the reusable engine header both fields and any
++  custom field share; the behavior's filter parameter is the seam a
++  constrained field narrows its charset through, vertical_keys the
++  seam a field with its own Up/Down meaning opts out of Home/End)
++- text_editor (the multi-line family: TextEditorState/TextEditorResult
++  public, the behavior's vertical walk over the shared keyboard
++  cluster)
+ - input_float (one draw and one state for both ladders; NumInputState,
+   the numeric filters, input_parse_float/input_parse_int and
+   input_format_float travel public with it) - widgets_num_input.cpp
+diff --git a/libs/ui/src/gui/text_edit_core.cpp b/libs/ui/src/gui/text_edit_core.cpp
+new file mode 100644
+index 0000000..acfe3f6
+--- /dev/null
++++ b/libs/ui/src/gui/text_edit_core.cpp
+@@ -0,0 +1,227 @@
++// The undo/redo history's out-of-line half (text_edit_core.hpp's own
++// doc block spells the design): replace/replace_filtered perform AND
++// record in one verb, coalescing merges a gesture's small steps into
++// one undo step, and undo/redo splice the recorded span back guarded
++// by the buffer lengths the entries remember - a caller who re-spelled
++// the buffer between frames voids the history instead of corrupting
++// it. Pure std + the engine's own types: no context, no drawing, no
++// platform, so the same code links into every app and test.
++
++#include <ws/ui/gui/text_edit_core.hpp>
++
++#include <utility>
++
++namespace ws::ui::gui {
++
++namespace {
++
++// An entry's byte weight for the budget: both spellings, both stacks.
++std::size_t change_bytes(const TextEditChange& c) {
++    return c.erased.size() + c.inserted.size();
++}
++
++}  // namespace
++
++int TextEditHistory::replace(EditBuffer& eb, int lo, int hi,
++                             const char* bytes, int n,
++                             TextEditCoalesce kind) {
++    lo = std::max(0, std::min(eb.len, lo));
++    hi = std::max(0, std::min(eb.len, hi));
++    if (lo > hi) {
++        std::swap(lo, hi);
++    }
++    const bool erased_any = lo < hi;
++    if (!erased_any && (bytes == nullptr || n <= 0)) {
++        return -1;  // nothing asked, nothing happened, nothing records
++    }
++
++    TextEditChange c;
++    c.pos = lo;
++    c.len_before = eb.len;
++    c.caret_before = eb.caret;
++    c.anchor_before = eb.anchor;
++    if (erased_any) {
++        c.erased.assign(eb.buf + lo, eb.buf + hi);
++    }
++
++    eb.erase(lo, hi);
++    int pen = lo;
++    if (bytes != nullptr && n > 0) {
++        const int landed = eb.insert(lo, bytes, n);
++        if (landed >= 0) {
++            pen = landed;
++        }
++    }
++    if (!erased_any && pen == lo) {
++        return -1;  // the room refused the insert and nothing stood there
++    }
++    c.inserted.assign(eb.buf + lo, eb.buf + pen);
++    c.len_after = eb.len;
++    c.caret_after = pen;
++    c.anchor_after = pen;
++    c.kind = kind;
++
++    eb.caret = pen;
++    eb.anchor = pen;
++    record(std::move(c));
++    return pen;
++}
++
++int TextEditHistory::replace_filtered(EditBuffer& eb, int lo, int hi,
++                                      const char* utf8,
++                                      bool (*filter)(std::uint32_t),
++                                      TextEditCoalesce kind) {
++    lo = std::max(0, std::min(eb.len, lo));
++    hi = std::max(0, std::min(eb.len, hi));
++    if (lo > hi) {
++        std::swap(lo, hi);
++    }
++    if (utf8 == nullptr || *utf8 == '\0') {
++        // An empty paste is still an erase when a selection stood.
++        return replace(eb, lo, hi, nullptr, 0, kind);
++    }
++
++    TextEditChange c;
++    c.pos = lo;
++    c.len_before = eb.len;
++    c.caret_before = eb.caret;
++    c.anchor_before = eb.anchor;
++    if (lo < hi) {
++        c.erased.assign(eb.buf + lo, eb.buf + hi);
++    }
++
++    eb.erase(lo, hi);
++    int pen = eb.insert_filtered(lo, utf8, filter);
++    if (pen < 0) {
++        pen = lo;
++    }
++    if (lo >= hi && pen == lo) {
++        return -1;  // the filter refused everything and nothing stood there
++    }
++    c.inserted.assign(eb.buf + lo, eb.buf + pen);
++    c.len_after = eb.len;
++    c.caret_after = pen;
++    c.anchor_after = pen;
++    c.kind = kind;
++
++    eb.caret = pen;
++    eb.anchor = pen;
++    record(std::move(c));
++    return pen;
++}
++
++void TextEditHistory::record(TextEditChange change) {
++    redo_.clear();  // a new edit answers the undo run's question
++
++    // Coalescing: the small steps of ONE gesture merge into the step
++    // below them - a typing run on word characters, a held backspace
++    // eating left, a held delete eating right. Contiguity is the whole
++    // test: the new change must land exactly where the run stands.
++    if (change.kind != TextEditCoalesce::none && !undo_.empty()) {
++        TextEditChange& last = undo_.back();
++        const bool contiguous =
++            (change.kind == TextEditCoalesce::typing &&
++             change.pos ==
++                 last.pos + static_cast<int>(last.inserted.size()) &&
++             change.erased.empty()) ||
++            (change.kind == TextEditCoalesce::deletion_back &&
++             change.pos + static_cast<int>(change.erased.size()) ==
++                 last.pos) ||
++            (change.kind == TextEditCoalesce::deletion_forward &&
++             change.pos == last.pos && change.inserted.empty());
++        if (contiguous && last.kind == change.kind) {
++            if (change.kind == TextEditCoalesce::typing) {
++                last.inserted += change.inserted;
++                bytes_ += change.inserted.size();
++            } else if (change.kind == TextEditCoalesce::deletion_back) {
++                last.pos = change.pos;
++                last.erased.insert(0, change.erased);
++                bytes_ += change.erased.size();
++            } else {
++                last.erased += change.erased;
++                bytes_ += change.erased.size();
++            }
++            last.caret_after = change.caret_after;
++            last.anchor_after = change.anchor_after;
++            last.len_after = change.len_after;
++            return;
++        }
++    }
++
++    undo_.push_back(std::move(change));
++    bytes_ += change_bytes(undo_.back());
++    trim();
++}
++
++bool TextEditHistory::undo(EditBuffer& eb) {
++    while (!undo_.empty()) {
++        const TextEditChange e = undo_.back();
++        // The staleness guard: the entry left the buffer at len_after;
++        // anything else means the caller re-spelled it - the history
++        // never splices into text it did not see.
++        if (eb.len != e.len_after ||
++            e.pos + static_cast<int>(e.inserted.size()) > eb.len) {
++            clear();
++            return false;
++        }
++        eb.erase(e.pos, e.pos + static_cast<int>(e.inserted.size()));
++        if (!e.erased.empty()) {
++            (void)eb.insert(e.pos, e.erased.data(),
++                            static_cast<int>(e.erased.size()));
++        }
++        eb.caret = eb.clamp_to_cluster(
++            std::max(0, std::min(eb.len, e.caret_before)));
++        eb.anchor = eb.clamp_to_cluster(
++            std::max(0, std::min(eb.len, e.anchor_before)));
++
++        bytes_ -= change_bytes(e);
++        undo_.pop_back();
++        redo_.push_back(e);
++        return true;
++    }
++    return false;
++}
++
++bool TextEditHistory::redo(EditBuffer& eb) {
++    while (!redo_.empty()) {
++        const TextEditChange e = redo_.back();
++        // The mirror guard: redo applies onto the state the undo left
++        // (len_before, with the erased spelling standing at pos).
++        if (eb.len != e.len_before ||
++            e.pos + static_cast<int>(e.erased.size()) > eb.len) {
++            clear();
++            return false;
++        }
++        eb.erase(e.pos, e.pos + static_cast<int>(e.erased.size()));
++        if (!e.inserted.empty()) {
++            (void)eb.insert(e.pos, e.inserted.data(),
++                            static_cast<int>(e.inserted.size()));
++        }
++        eb.caret = eb.clamp_to_cluster(
++            std::max(0, std::min(eb.len, e.caret_after)));
++        eb.anchor = eb.clamp_to_cluster(
++            std::max(0, std::min(eb.len, e.anchor_after)));
++
++        undo_.push_back(e);
++        bytes_ += change_bytes(e);
++        redo_.pop_back();
++        return true;
++    }
++    return false;
++}
++
++void TextEditHistory::trim() {
++    while (undo_.size() > kMaxEntries || bytes_ > kMaxBytes) {
++        if (undo_.empty()) {
++            bytes_ = 0;
++            return;
++        }
++        bytes_ -= change_bytes(undo_.front());
++        undo_.erase(undo_.begin());
++        if (bytes_ > kMaxBytes * 4u) {
++            bytes_ = 0;  // defensive: a corrupted budget self-heals
++        }
++    }
++}
++
++}  // namespace ws::ui::gui
+diff --git a/libs/ui/src/gui/widgets_detail.hpp b/libs/ui/src/gui/widgets_detail.hpp
+index ce391e1..dd99a46 100644
+--- a/libs/ui/src/gui/widgets_detail.hpp
++++ b/libs/ui/src/gui/widgets_detail.hpp
+@@ -516,4 +516,303 @@ inline void fold_hover_t(GuiContext& gui, WidgetId id, WidgetPaint& paint,
+         motion_duration(theme));
+ }
+ 
++// --- the shared text-field keyboard ------------------------------------------
++// One spelling of the whole editing keyboard, walked by BOTH fields:
++// the single-line text_input and the multi-line text_editor (which
++// adds its vertical walk around the call). Everything here is the
++// field's own cluster: the caret keys (Ctrl+arrows walk words), the
++// deleters (Ctrl eats a word), typing, the clipboard trio, select-all,
++// Escape's selection drop and the undo/redo pair - all through the
++// EditBuffer verbs and the history riding in TextInputState, so the
++// two widgets can never disagree about an edit. The behavior halves
++// own everything else: the pointer placement, the pixel mapping, the
++// editor's Up/Down/paragraph walk (it needs the goal column, which is
++// the editor's persistent state).
++
++// The single-line field's Up/Down story: the classic Win32/EDIT
++// mapping (Up = Home, Down = End), which a field whose vertical keys
++// mean something else - the numeric stepper - opts out of.
++
++// How the shared cluster reads its keys: see TextFieldKeys below.
++struct TextFieldKeys {
++    bool multiline = false;  // Enter breaks lines; Home/End bound lines
++    bool vertical_home_end = true;  // single-line Up/Down -> Home/End
++    bool (*filter)(std::uint32_t) = &is_insertable;
++};
++
++struct TextFieldKeysResult {
++    bool changed = false;     // the buffer changed (typing, deletes, ...)
++    bool caret_moved = false; // any caret/selection move (the editor's
++                              // goal-column reset keys off it)
++};
++
++inline bool text_edit_shift(const ws::input::InputFrame& in) {
++    return in.key_down[static_cast<std::size_t>(ws::input::keys::kLeftShift)] ||
++           in.key_down[static_cast<std::size_t>(ws::input::keys::kRightShift)];
++}
++
++inline bool text_edit_ctrl(const ws::input::InputFrame& in) {
++    return in.key_down[static_cast<std::size_t>(
++               ws::input::keys::kLeftControl)] ||
++           in.key_down[static_cast<std::size_t>(
++               ws::input::keys::kRightControl)];
++}
++
++// The caret move every key funnels through: Shift extends from the
++// anchor, plain collapses it onto the caret - the rule every editor
++// spells - and the blink rewinds (a move is work).
++inline void text_edit_move(EditBuffer& eb, TextInputState& edit, int to,
++                           bool shift) {
++    eb.caret = to;
++    if (!shift) {
++        eb.anchor = to;
++    }
++    edit.blink = 0.0f;
++}
++
++// The frame's shared clock half: the blink phase advances, hitches
++// rewind, and the focus's arrival shows the caret solid.
++inline void text_edit_clock(TextInputState& edit, float dt, bool focused) {
++    edit.blink += dt;
++    if (edit.blink >= 1.0f) {
++        edit.blink -= 1.0f;
++        if (edit.blink >= 1.0f) {
++            edit.blink = 0.0f;  // a hitched frame restarts the phase
++        }
++    }
++    if (focused && !edit.was_focused) {
++        edit.blink = 0.0f;  // arrival shows the caret solid
++    }
++}
++
++// The IME commit edge, shared: a composition that ended this frame is
++// OLDER than any glyphs typed after it, so it lands before them -
++// through the history, as one recorded step (a selection dies under
++// it, the typing rule). Call it whenever the field can edit.
++inline bool text_field_ime_commit(GuiContext& gui, EditBuffer& eb,
++                                  TextInputState& edit,
++                                  const ws::input::Preedit& ime,
++                                  bool (*filter)(std::uint32_t)) {
++    (void)gui;
++    if (ime.commit.empty()) {
++        return false;
++    }
++    const int pen = edit.history.replace_filtered(
++        eb, eb.sel_lo(), eb.sel_hi(), ime.commit.c_str(), filter,
++        TextEditCoalesce::none);
++    if (pen < 0) {
++        return false;
++    }
++    edit.blink = 0.0f;
++    return true;
++}
++
++// The keyboard itself. Call it inside the focused-and-live gate, with
++// the composition's own deferral already decided (the IME owns the
++// keyboard while a composition stands). Order matters and is the
++// single-line field's own documented order: caret keys first, then
++// undo/redo, deleters before typing (an old span leaves before new
++// glyphs land), the clipboard last. Deleters and undo/redo honor the
++// OS auto-repeat (the held-key rule); Home/End and the clipboard read
++// fresh presses only.
++inline TextFieldKeysResult text_field_keys(GuiContext& gui, EditBuffer& eb,
++                                           TextInputState& edit,
++                                           const TextFieldKeys& keys) {
++    namespace keysns = ws::input::keys;
++    TextFieldKeysResult out;
++    const ws::input::InputFrame& in = gui.input();
++    const bool shift = text_edit_shift(in);
++    const bool ctrl = text_edit_ctrl(in);
++    const auto move = [&](int to) {
++        text_edit_move(eb, edit, to, shift);
++        out.caret_moved = true;
++    };
++
++    // The caret keys: cluster steps plain, word steps under Ctrl;
++    // Home/End bound the line (the whole buffer single-line), Ctrl
++    // taking them to the document's ends; the single-line Up/Down ride
++    // Home/End (the classic mapping) unless the field opted out - the
++    // editor handles its own vertical walk around this call.
++    if (gui.key_pressed_or_repeated(keysns::kLeft)) {
++        move(ctrl ? word_start(eb.buf, eb.len, eb.caret)
++                  : eb.cluster_start(eb.caret));
++    }
++    if (gui.key_pressed_or_repeated(keysns::kRight)) {
++        move(ctrl ? word_end(eb.buf, eb.len, eb.caret)
++                  : eb.cluster_end(eb.caret));
++    }
++    const bool home = in.key_pressed[static_cast<std::size_t>(keysns::kHome)];
++    const bool end = in.key_pressed[static_cast<std::size_t>(keysns::kEnd)];
++    if (home) {
++        const int to = keys.multiline && !ctrl
++                           ? line_start(eb.buf, eb.len, eb.caret)
++                           : 0;
++        move(to);
++    }
++    if (end) {
++        const int to = keys.multiline && !ctrl
++                           ? line_end(eb.buf, eb.len, eb.caret)
++                           : eb.len;
++        move(to);
++    }
++    if (!keys.multiline && keys.vertical_home_end) {
++        if (gui.key_pressed_or_repeated(keysns::kUp)) {
++            move(0);
++        }
++        if (gui.key_pressed_or_repeated(keysns::kDown)) {
++            move(eb.len);
++        }
++    }
++    if (ctrl && in.key_pressed[static_cast<std::size_t>(keysns::kA)]) {
++        eb.anchor = 0;  // select all: the anchor says it
++        eb.caret = eb.len;
++        edit.blink = 0.0f;
++        out.caret_moved = true;
++    }
++    if (in.key_pressed[static_cast<std::size_t>(keysns::kEscape)]) {
++        // Escape's one job: drop the selection. The drop SPENDS the
++        // key - consume_escape, only when a selection actually stood -
++        // so the popup or dialog behind the field keeps its claim that
++        // frame: one Escape abandons the edit, the next one closes the
++        // overlay.
++        if (eb.has_selection()) {
++            eb.collapse(eb.caret);
++            edit.blink = 0.0f;
++            out.caret_moved = true;
++            gui.consume_escape();
++        }
++    }
++
++    // The undo/redo pair, before the deleters (an undo answers the
++    // frame's earlier steps, and its restored caret is where the
++    // frame's own typing would land). Held keys keep walking - the
++    // held Ctrl+Z of every editor.
++    if (ctrl && !shift &&
++        gui.key_pressed_or_repeated(keysns::kZ)) {
++        if (edit.history.undo(eb)) {
++            edit.blink = 0.0f;
++            out.changed = true;
++        }
++    }
++    if (ctrl && (gui.key_pressed_or_repeated(keysns::kY) ||
++                 (shift &&
++                  gui.key_pressed_or_repeated(keysns::kZ)))) {
++        if (edit.history.redo(eb)) {
++            edit.blink = 0.0f;
++            out.changed = true;
++        }
++    }
++
++    // Deleters: a selection dies whole; plain keys eat one cluster,
++    // Ctrl one word. The runs coalesce - a held Backspace is one undo
++    // step - while the word deletes stand alone.
++    const bool backspace =
++        gui.key_pressed_or_repeated(keysns::kBackspace);
++    const bool delete_key =
++        gui.key_pressed_or_repeated(keysns::kDelete);
++    if (backspace || delete_key) {
++        int lo = -1;
++        int hi = -1;
++        TextEditCoalesce kind = TextEditCoalesce::none;
++        if (eb.has_selection()) {
++            lo = eb.sel_lo();
++            hi = eb.sel_hi();
++        } else if (backspace && ctrl) {
++            lo = word_start(eb.buf, eb.len, eb.caret);
++            hi = eb.caret;
++        } else if (backspace) {
++            lo = eb.cluster_start(eb.caret);
++            hi = eb.caret;
++            kind = TextEditCoalesce::deletion_back;
++        } else if (ctrl) {
++            lo = eb.caret;
++            hi = word_end(eb.buf, eb.len, eb.caret);
++        } else {
++            lo = eb.caret;
++            hi = eb.cluster_end(eb.caret);
++            kind = TextEditCoalesce::deletion_forward;
++        }
++        if (edit.history.replace(eb, lo, hi, nullptr, 0, kind) >= 0) {
++            out.changed = true;
++        }
++        edit.blink = 0.0f;
++    }
++
++    // Enter breaks the line in a multi-line editor: one '\n' through
++    // the filter's whole-span path, the edge consumed with it (a
++    // dialog behind the box does not also answer the key). Ctrl+Enter
++    // is NOT taken - the app's submit chord, reported by the editor's
++    // own result.
++    if (keys.multiline && !ctrl &&
++        gui.key_pressed_or_repeated(keysns::kEnter) && keys.filter('\n')) {
++        const char nl = '\n';
++        if (edit.history.replace(eb, eb.sel_lo(), eb.sel_hi(), &nl, 1,
++                                 TextEditCoalesce::none) >= 0) {
++            out.changed = true;
++            edit.blink = 0.0f;
++            gui.consume_key(keysns::kEnter);
++        }
++    }
++
++    // Typing: the frame's codepoints through the field's filter, each
++    // landing as its WHOLE UTF-8 span. Word characters coalesce (one
++    // undo step per word); a space or punctuation commits the run.
++    for (std::uint32_t cp : in.text_input) {
++        if (!keys.filter(cp)) {
++            continue;
++        }
++        char bytes[4];
++        const int span = utf8_encode(cp, bytes);
++        if (span <= 0) {
++            continue;  // not a scalar value: no byte-cast aliasing lands
++        }
++        const TextEditCoalesce kind =
++            word_class(cp) == TextWordClass::word
++                ? TextEditCoalesce::typing
++                : TextEditCoalesce::none;
++        const int pen =
++            edit.history.replace(eb, eb.sel_lo(), eb.sel_hi(), bytes, span,
++                                 kind);
++        if (pen < 0) {
++            break;  // the room refused the span: the rest drops
++        }
++        edit.blink = 0.0f;
++        out.changed = true;
++    }
++
++    // The clipboard trio - only a selection copies or cuts, and a
++    // paste lands at the caret replacing the selection first, like
++    // typing, as ONE recorded step. An unwired seam makes all three
++    // no-ops (the context's own contract; Android keeps one today).
++    if (ctrl &&
++        (in.key_pressed[static_cast<std::size_t>(keysns::kC)] ||
++         in.key_pressed[static_cast<std::size_t>(keysns::kX)]) &&
++        eb.has_selection()) {
++        // The one allocation an explicit copy may make: a mid-buffer
++        // range is not NUL-terminated, and the seam speaks C strings.
++        gui.set_clipboard_text(
++            std::string(eb.buf + eb.sel_lo(), eb.buf + eb.sel_hi()).c_str());
++        if (in.key_pressed[static_cast<std::size_t>(keysns::kX)]) {
++            if (edit.history.replace(eb, eb.sel_lo(), eb.sel_hi(), nullptr,
++                                     0, TextEditCoalesce::none) >= 0) {
++                out.changed = true;
++            }
++            edit.blink = 0.0f;
++        }
++    }
++    if (ctrl && in.key_pressed[static_cast<std::size_t>(keysns::kV)]) {
++        const char* pasted = gui.get_clipboard_text();
++        if (pasted != nullptr) {
++            const int pen = edit.history.replace_filtered(
++                eb, eb.sel_lo(), eb.sel_hi(), pasted, keys.filter,
++                TextEditCoalesce::none);
++            if (pen >= 0) {
++                edit.blink = 0.0f;
++                out.changed = true;
++            }
++        }
++    }
++    return out;
++}
++
+ }  // namespace ws::ui::gui
+diff --git a/libs/ui/src/gui/widgets_num_input.cpp b/libs/ui/src/gui/widgets_num_input.cpp
+index 7f809f9..d782428 100644
+--- a/libs/ui/src/gui/widgets_num_input.cpp
++++ b/libs/ui/src/gui/widgets_num_input.cpp
+@@ -255,20 +255,25 @@ NumInputResult input_num_behavior(GuiContext& gui, WidgetId id,
+     if (!pre_focused) {
+         if (!was_focused) {
+             (void)Num::spell(num.buf, kNumInputCapacity, value, significant);
++            num.edit.history.clear();  // a re-spelled buffer voids its past
+         }
+     } else if (!was_focused) {
+         const int pen =
+             Num::spell(num.buf, kNumInputCapacity, value, significant);
+         num.edit.caret = pen;
+         num.edit.anchor = 0;
++        num.edit.history.clear();  // the arrival spelling is the ground truth
+     }
+ 
+     // The field itself: text_input's whole editing through the numeric
+-    // charset, over the row's field rect.
++    // charset, over the row's field rect. The vertical keys opt out -
++    // the numeric stepper owns Up/Down (its value steps below), so the
++    // field never spends them on Home/End.
+     NumInputResult out;
+     static_cast<TextInputResult&>(out) = text_input_behavior(
+         gui, id, num_field_rect(rect, label, theme), num.buf,
+-        kNumInputCapacity, num.edit, theme, disabled, {}, &Num::filter);
++        kNumInputCapacity, num.edit, theme, disabled, {}, &Num::filter,
++        false);
+     out.changed = false;
+ 
+     const bool dead = out.state == WidgetState::Disabled;
+@@ -307,6 +312,10 @@ NumInputResult input_num_behavior(GuiContext& gui, WidgetId id,
+         const int pen =
+             Num::spell(num.buf, kNumInputCapacity, value, significant);
+         num.edit.caret = num.edit.anchor = pen;
++        // The canonical spelling is a REWRITE, not an edit: the history
++        // the typing built describes a buffer that no longer exists,
++        // and undo must not splice a stale entry into it.
++        num.edit.history.clear();
+     };
+ 
+     // Enter: the numeric line's own commit edge - the key is this
+diff --git a/libs/ui/src/gui/widgets_text_editor.cpp b/libs/ui/src/gui/widgets_text_editor.cpp
+new file mode 100644
+index 0000000..c221150
+--- /dev/null
++++ b/libs/ui/src/gui/widgets_text_editor.cpp
+@@ -0,0 +1,680 @@
++// ws::ui::gui widget functions, one family per file (src/gui/CLAUDE.md):
++// the multi-line editor - text_input's every rule over LINES. The
++// behavior/draw split is the set's own: text_editor_behavior (the
++// citizenship fold, the shared keyboard cluster from
++// widgets_detail.hpp, the vertical walk with its goal column, the 2D
++// pointer placement, the wheel scroll and the caret-follow) and
++// text_editor_draw (the box, the visible lines, the per-line selection
++// bands and "..." truncation, the caret, the scrollbar thumb), with
++// the composed text_editor row over them. The engine it all rides -
++// EditBuffer, the history, the word walk, the line walk - is the
++// public text_edit_core.hpp, so an app with its own editor surface
++// walks the same lines the widget does.
++
++#include "widgets_detail.hpp"
++
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include <cstring>
++#include <string>
++
++namespace ws::ui::gui {
++
++// One line box's height: the font's line height, or half a control
++// row fontless (the v1 bar look's own centering).
++static float editor_line_height(const ChromeTheme& theme) {
++    return theme.font != nullptr ? theme.font->line_height()
++                                 : theme.control_height * 0.5f;
++}
++
++// --- the composed row ---------------------------------------------------------
++
++bool text_editor(GuiContext& gui, LayoutCursor& layout,
++                 const ChromeTheme& theme, const char* label, char* buf,
++                 int capacity, float width, int rows, bool disabled) {
++    resolve_width(width, layout);
++    const WidgetId id = gui.ids().id(label);
++    const float line_h = editor_line_height(theme);
++    const float height =
++        std::max(theme.control_height,
++                 static_cast<float>(rows) * line_h + 2.0f * theme.padding);
++    const Rect rect = layout.next(width, height);
++    TextEditorState& state = gui.persistent_state<TextEditorState>(id);
++    TextEditorResult result =
++        text_editor_behavior(gui, id, rect, buf, capacity, state, theme,
++                             disabled);
++    fold_hover_t(gui, id, result, theme);
++    paint(theme, &WidgetPainters::text_editor, &text_editor_draw, rect,
++          result, theme, label, buf, capacity);
++    return result.edited;
++}
++
++// --- the behavior half ----------------------------------------------------------
++
++// The paragraph walk's one question: is line [ls, its end) blank
++// (nothing but spaces/tabs, or empty)?
++static bool editor_line_blank(const char* buf, int len, int ls) {
++    const int le = line_end(buf, len, ls);
++    for (int i = ls; i < le; ++i) {
++        if (buf[i] != ' ' && buf[i] != '\t') {
++            return false;
++        }
++    }
++    return true;
++}
++
++// Ctrl+Up's landing: the start of the paragraph the caret stands in -
++// or, when the caret already sits at that start, the start of the
++// paragraph ABOVE (blank lines skip). The document's top answers 0.
++static int editor_paragraph_above(const char* buf, int len, int caret) {
++    int ls = line_start(buf, len, caret);
++    if (!editor_line_blank(buf, len, ls)) {
++        // Walk to this paragraph's first line; a caret already there
++        // keeps walking up instead.
++        int ps = ls;
++        while (ps > 0 && !editor_line_blank(buf, len,
++                                            line_start(buf, len, ps - 1))) {
++            ps = line_start(buf, len, ps - 1);
++        }
++        if (caret > ps) {
++            return ps;
++        }
++        ls = ps;
++    }
++    // From here the walk skips blanks and lands on the paragraph above.
++    while (ls > 0) {
++        const int prev = line_start(buf, len, ls - 1);
++        if (editor_line_blank(buf, len, prev)) {
++            ls = prev;
++            continue;
++        }
++        int ps = prev;
++        while (ps > 0 && !editor_line_blank(buf, len,
++                                            line_start(buf, len, ps - 1))) {
++            ps = line_start(buf, len, ps - 1);
++        }
++        return ps;
++    }
++    return 0;
++}
++
++// Ctrl+Down's landing: the start of the first non-blank line strictly
++// below the caret's line, or the document's end.
++static int editor_paragraph_below(const char* buf, int len, int caret) {
++    int ls = line_start(buf, len, caret);
++    while (true) {
++        const int le = line_end(buf, len, ls);
++        if (le >= len) {
++            return len;
++        }
++        ls = le + 1;
++        if (!editor_line_blank(buf, len, ls)) {
++            return ls;
++        }
++    }
++}
++
++TextEditorResult text_editor_behavior(GuiContext& gui, WidgetId id,
++                                      const Rect& rect, char* buf,
++                                      int capacity, TextEditorState& state,
++                                      const ChromeTheme& theme,
++                                      bool disabled, const HitShape& hit_shape,
++                                      bool (*filter)(std::uint32_t)) {
++    TextEditorResult out{begin_widget_paint(gui, id, rect, disabled, hit_shape)};
++    const HitTest& hit = out.hit;
++
++    // The caller's buffer contract is text_input's own: NUL-terminated
++    // within `capacity`, a null or under-2 buffer lays the box inert.
++    const bool live = buf != nullptr && capacity >= 2;
++    const int room = live ? capacity - 1 : 0;
++    int len = 0;
++    if (live) {
++        while (len < room && buf[len] != '\0') {
++            ++len;
++        }
++    }
++    EditBuffer eb{buf, room, len, state.field.caret, state.field.anchor};
++
++    const ws::input::InputFrame& in = gui.input();
++    const bool focused = out.focused;
++    const bool dead = out.state == WidgetState::Disabled;
++    const bool can_edit = live && focused && !dead;
++
++    const ws::input::Preedit& ime = in.preedit;
++    const bool composing = can_edit && ime.active;
++
++    // The geometry: the line grid the whole behavior maps through.
++    const float line_h = editor_line_height(theme);
++    const float content_x = rect.x + theme.padding;
++    const float content_top = rect.y + theme.padding;
++    const float content_room = std::max(0.0f, rect.width - 2.0f * theme.padding);
++    const float view_h = std::max(0.0f, rect.height - 2.0f * theme.padding);
++    const int lines = line_count(buf, len);
++    const float content_h = static_cast<float>(lines) * line_h;
++
++    // The advance arithmetic, the single-line field's own walk
++    // parameterized by a SPAN (a line) instead of the whole buffer:
++    // one cluster's advance is its codepoints' glyph advances summed
++    // (or the fontless per-codepoint estimate), and the caret lands on
++    // the cluster boundary a click's x crossed.
++    const auto cp_advance = [&](std::uint32_t cp) -> float {
++        if (theme.font != nullptr) {
++            const r2d::Font::Glyph* g = theme.font->glyph(cp);
++            return g != nullptr ? g->advance : 0.0f;
++        }
++        return theme.label_char_width;
++    };
++    const auto cluster_advance_at = [&](const char* p, const char* stop) -> float {
++        float acc = 0.0f;
++        const int span = grapheme_length(p, stop);
++        for (int taken = 0; taken < span;) {
++            std::uint32_t cp = 0;
++            const int used = utf8_decode(p + taken, stop, cp);
++            acc += cp_advance(cp);
++            taken += used > 0 ? used : 1;
++        }
++        return acc;
++    };
++    // The pen x at `into` bytes inside the span (a boundary): the
++    // whole clusters before it, summed.
++    const auto x_at = [&](const char* p, const char* stop, int into) -> float {
++        float acc = 0.0f;
++        const char* q = p;
++        while (q < stop && q - p < into) {
++            const int span = grapheme_length(q, stop);
++            if ((q - p) + span > into) {
++                break;  // the index sits inside this cluster
++            }
++            acc += cluster_advance_at(q, stop);
++            q += span;
++        }
++        return acc;
++    };
++    // The inverse: an x inside the span names the first cluster whose
++    // half-advance the click crossed - always a boundary, never a
++    // split sequence; past the end answers the span's end.
++    const auto caret_from_x = [&](const char* p, const char* stop, float dx) -> int {
++        float acc = 0.0f;
++        const char* q = p;
++        while (q < stop) {
++            const float adv = cluster_advance_at(q, stop);
++            if (dx < acc + adv * 0.5f) {
++                return static_cast<int>(q - p);
++            }
++            acc += adv;
++            q += grapheme_length(q, stop);
++        }
++        return static_cast<int>(stop - p);
++    };
++    // The caret's x within its own line, content px (the goal column's
++    // measure and the Up/Down walk's landing arithmetic).
++    const auto caret_x_in_line = [&](int byte) -> float {
++        const int ls = line_start(buf, len, byte);
++        const int le = line_end(buf, len, byte);
++        return x_at(buf + ls, buf + le, byte - ls);
++    };
++    // A point in frame px -> a buffer byte: the line the y names, the
++    // cluster the x names inside it. Clamped on every edge - a click
++    // past the bottom names the last line's end, a click above the
++    // first line the top, a click past a line's width its end.
++    const auto caret_from_point = [&](float x, float y) -> int {
++        const float dy = y - content_top + state.scroll_y;
++        int line_idx = static_cast<int>(std::floor(dy / line_h));
++        line_idx = std::max(0, std::min(lines - 1, line_idx));
++        const int ls = line_start_of(buf, len, line_idx);
++        const int le = line_end(buf, len, ls);
++        const int placed = caret_from_x(buf + ls, buf + le, x - content_x);
++        return ls + placed;
++    };
++
++    bool changed = false;
++    // The focus's arrival frame (the clock's own read, captured before
++    // the write-back spends was_focused).
++    const bool arrived = focused && !state.field.was_focused;
++
++    // The frame clock's shared half (the single-line field's own).
++    text_edit_clock(state.field, in.dt_seconds, focused);
++
++    // The wheel: the box registers as a claimant every frame (the
++    // scroll panel's own one-frame settle, its whole-bounds claim), and
++    // the settled winner scrolls - one notch = the theme's
++    // scroll_speed, clamped below against the content's height once
++    // the caret-follow has spoken.
++    gui.register_wheel_claim(rect, &state);
++    if (gui.input().mouse_present && in.scroll_dy != 0.0f &&
++        gui.wheel_won(&state)) {
++        state.scroll_y -= in.scroll_dy * theme.scroll_speed;
++    }
++
++    // --- the pointer: a press places the caret by (line, x), a sweep
++    // selects - the single-line field's rule, one dimension up.
++    const ws::input::PointerView* owner = gui.pointer(hit.pointer);
++    const bool hold = hit.pressed && owner != nullptr && owner->down;
++    const bool shift = text_edit_shift(in);
++    if (can_edit && hold) {
++        const int placed = caret_from_point(owner->x, owner->y);
++        if (owner->pressed || placed != eb.caret) {
++            if (owner->pressed && !shift) {
++                eb.anchor = placed;
++            }
++            eb.caret = placed;
++            state.field.blink = 0.0f;
++            state.goal_x = -1.0f;  // a placed caret re-derives the goal
++        }
++    }
++
++    // --- the keyboard: the editor's vertical walk, then the shared cluster.
++    // The IME's commit edge lands first, the composition deferring the
++    // rest (the single-line field's own order).
++    if (can_edit && text_field_ime_commit(gui, eb, state.field, ime, filter)) {
++        changed = true;
++    }
++    const bool ctrl = text_edit_ctrl(in);
++    if (can_edit && !composing) {
++        // The vertical walk owns Up/Down (Ctrl: paragraphs). The goal
++        // column stands from the last vertical step and dies on any
++        // other move or edit - the editors' rule - so a walk through
++        // short lines keeps the column the user meant.
++        const bool up = gui.key_pressed_or_repeated(ws::input::keys::kUp);
++        const bool down = gui.key_pressed_or_repeated(ws::input::keys::kDown);
++        int vertical_to = -1;
++        if (up || down) {
++            if (ctrl) {
++                vertical_to = up ? editor_paragraph_above(buf, len, eb.caret)
++                                 : editor_paragraph_below(buf, len, eb.caret);
++                state.goal_x = -1.0f;  // a paragraph jump re-derives the goal
++            } else {
++                if (state.goal_x < 0.0f) {
++                    state.goal_x = caret_x_in_line(eb.caret);
++                }
++                const int ls = line_start(buf, len, eb.caret);
++                if (up) {
++                    if (ls > 0) {
++                        const int pls = line_start(buf, len, ls - 1);
++                        const int ple = line_end(buf, len, pls);
++                        vertical_to =
++                            pls + caret_from_x(buf + pls, buf + ple,
++                                               state.goal_x);
++                    } else {
++                        vertical_to = 0;  // the top line's up is its home
++                    }
++                } else {
++                    const int le = line_end(buf, len, eb.caret);
++                    if (le < len) {
++                        const int nls = le + 1;
++                        const int nle = line_end(buf, len, nls);
++                        vertical_to =
++                            nls + caret_from_x(buf + nls, buf + nle,
++                                               state.goal_x);
++                    } else {
++                        vertical_to = len;  // the tail line's down is its end
++                    }
++                }
++            }
++            if (vertical_to >= 0) {
++                text_edit_move(eb, state.field, vertical_to, shift);
++            }
++        }
++        // The shared cluster - every single-line shortcut rides here,
++        // Enter included (the multi-line flag lands '\n' through the
++        // filter); the vertical_home_end opt-out is the editor's own
++        // (its Up/Down just walked above).
++        const TextFieldKeysResult keys =
++            text_field_keys(gui, eb, state.field, {true, false, filter});
++        changed = changed || keys.changed;
++        if (!up && !down && (keys.changed || keys.caret_moved)) {
++            state.goal_x = -1.0f;  // a horizontal move or edit re-derives
++        }
++    }
++
++    // The app's submit chord: Ctrl+Enter passes through untouched (the
++    // editor's Enter breaks lines; an app that wants send-on-a-chord
++    // reads this edge).
++    out.ctrl_enter = can_edit && !composing && ctrl &&
++                     in.key_pressed[static_cast<std::size_t>(
++                         ws::input::keys::kEnter)];
++
++    // The write-back (the single-line field's own clamps).
++    state.field.caret =
++        eb.clamp_to_cluster(std::clamp(eb.caret, 0, eb.len));
++    state.field.anchor =
++        eb.clamp_to_cluster(std::clamp(eb.anchor, 0, eb.len));
++    state.field.was_focused = focused;
++
++    // The caret-follow and the scroll's clamp: the view pulls the
++    // caret's line on screen when the CARET moves lines (or the focus
++    // arrives) - and only then, so a wheel-away from a parked caret
++    // stays where the user scrolled (the follow_line memory is the
++    // whole trick: a same-line frame never fights the wheel). The
++    // scroll then settles into the content's range (a shrunk buffer
++    // never scrolls past its own end).
++    const int caret_line = line_index(buf, len, state.field.caret);
++    const float caret_top = static_cast<float>(caret_line) * line_h;
++    const float caret_bottom = caret_top + line_h;
++    if (focused && !dead &&
++        (arrived || caret_line != state.follow_line)) {
++        if (caret_top < state.scroll_y) {
++            state.scroll_y = caret_top;
++        } else if (caret_bottom > state.scroll_y + view_h) {
++            state.scroll_y = caret_bottom - view_h;
++        }
++        state.follow_line = caret_line;
++    }
++    state.scroll_y =
++        std::clamp(state.scroll_y, 0.0f, std::max(0.0f, content_h - view_h));
++
++    // The mapped answer, paint-ready.
++    out.caret_byte = state.field.caret;
++    out.sel_lo = std::min(state.field.caret, state.field.anchor);
++    out.sel_hi = std::max(state.field.caret, state.field.anchor);
++    out.line_h = line_h;
++    out.caret_line = caret_line;
++    out.caret_x = content_x +
++                  std::min(caret_x_in_line(state.field.caret), content_room);
++    out.caret_y = content_top + caret_top - state.scroll_y;
++    out.blink = state.field.blink;
++    out.edited = changed;
++    out.scroll_y = state.scroll_y;
++    out.content_h = content_h;
++    out.view_h = view_h;
++
++    // The composition's own mapping: the preedit run rides the caret's
++    // LINE (the single-line field's arithmetic, one line up), its x
++    // mapped inside that line, its caret solid - composing is work.
++    if (composing) {
++        const int ls = line_start(buf, len, state.field.caret);
++        const int le = line_end(buf, len, state.field.caret);
++        const float caret_in_line = x_at(buf + ls, buf + le,
++                                         state.field.caret - ls);
++        const char* run = ime.text.c_str();
++        const char* run_end = run + ime.text.size();
++        float run_before = 0.0f;  // the run's prefix up to the caret span
++        const char* q = run;
++        while (q < run_end && q - run < ime.caret_lo) {
++            const int span = grapheme_length(q, run_end);
++            if ((q - run) + span > ime.caret_lo) {
++                break;
++            }
++            run_before += cluster_advance_at(q, run_end);
++            q += span;
++        }
++        out.preedit_text = run;  // borrowed: the context's frame snapshot
++        out.preedit_len = static_cast<int>(ime.text.size());
++        out.preedit_caret_lo = ime.caret_lo;
++        out.preedit_caret_hi = ime.caret_hi;
++        out.preedit_x = content_x + std::min(caret_in_line, content_room);
++        out.preedit_y = out.caret_y;
++        out.preedit_advance = x_at(run, run_end, out.preedit_len);
++        out.preedit_caret_x =
++            content_x +
++            std::min(caret_in_line + run_before, content_room);
++        out.blink = 0.0f;
++    }
++    return out;
++}
++
++// --- the draw half --------------------------------------------------------------
++
++void text_editor_draw(const Rect& rect, const TextEditorResult& result,
++                      const ChromeTheme& theme, const char* label,
++                      const char* buf, int capacity) {
++    ring_draw(result.focused, rect, theme);
++    const float dim_by = dim_factor(result.state, theme);
++    const std::uint32_t face = control_face_of(result, theme);
++    r2d::draw_rounded_quad(rect.x, rect.y, rect.width, rect.height,
++                           theme.corner_radius, face);
++
++    const bool live = buf != nullptr && capacity >= 2;
++    const int room = live ? capacity - 1 : 0;
++    int len = 0;
++    if (live) {
++        while (len < room && buf[len] != '\0') {
++            ++len;
++        }
++    }
++    const float line_h = result.line_h;
++    const float content_x = rect.x + theme.padding;
++    const float content_top = rect.y + theme.padding;
++    const float content_room =
++        std::max(0.0f, rect.width - 2.0f * theme.padding);
++    const float view_h =
++        std::max(0.0f, rect.height - 2.0f * theme.padding);
++    const bool composing_draw =
++        result.preedit_text != nullptr && live && result.focused &&
++        result.state != WidgetState::Disabled;
++
++    // The look owns its own fits (the split convention): the same
++    // advance arithmetic the behavior maps the caret by, recomputed
++    // here over each line's span.
++    const auto cp_advance = [&](std::uint32_t cp) -> float {
++        if (theme.font != nullptr) {
++            const r2d::Font::Glyph* g = theme.font->glyph(cp);
++            return g != nullptr ? g->advance : 0.0f;
++        }
++        return theme.label_char_width;
++    };
++    const auto cluster_advance_at = [&](const char* p, const char* stop) -> float {
++        float acc = 0.0f;
++        const int span = grapheme_length(p, stop);
++        for (int taken = 0; taken < span;) {
++            std::uint32_t cp = 0;
++            const int used = utf8_decode(p + taken, stop, cp);
++            acc += cp_advance(cp);
++            taken += used > 0 ? used : 1;
++        }
++        return acc;
++    };
++    const auto x_at = [&](const char* p, const char* stop, int into) -> float {
++        float acc = 0.0f;
++        const char* q = p;
++        while (q < stop && q - p < into) {
++            const int span = grapheme_length(q, stop);
++            if ((q - p) + span > into) {
++                break;
++            }
++            acc += cluster_advance_at(q, stop);
++            q += span;
++        }
++        return acc;
++    };
++
++    // The visible line window: the lines the scrolled view overlaps,
++    // one on each side for a partially cut line box.
++    const int total_lines = len > 0 ? line_count(buf, len) : 1;
++    int first = static_cast<int>(std::floor(result.scroll_y / line_h));
++    first = std::max(0, std::min(total_lines - 1, first));
++    int last = first + static_cast<int>(std::ceil(view_h / line_h)) + 1;
++    last = std::max(first + 1, std::min(total_lines, last));
++
++    // The placeholder: an empty buffer shows the label on the first
++    // line, the single-line field's own muted hint.
++    if (len == 0 && !composing_draw) {
++        char scratch[128];
++        const LabelFit fit =
++            fit_text(label, content_room, theme, scratch, sizeof scratch);
++        if (fit.advance > 0.0f) {
++            const std::uint32_t ph = dim(theme.text_muted, dim_by);
++            const float y = content_top - result.scroll_y;
++            if (theme.font != nullptr) {
++                r2d::draw_text(content_x, y, fit.text, *theme.font, ph);
++            } else {
++                r2d::draw_quad(content_x,
++                               y + (line_h - line_h * 0.5f) * 0.5f,
++                               fit.advance, line_h * 0.5f, ph);
++            }
++        }
++    }
++
++    for (int i = first; i < last; ++i) {
++        const int ls = line_start_of(buf, len, i);
++        const int le = line_end(buf, len, ls);
++        const float y = content_top +
++                        static_cast<float>(i) * line_h - result.scroll_y;
++
++        // The selection band: this line's share of the range, the
++        // accent under the text (only while the box holds the focus -
++        // a stale selection never bands an unfocused box).
++        if (result.focused && result.state != WidgetState::Disabled &&
++            result.sel_hi > result.sel_lo) {
++            const int lo = std::max(result.sel_lo, ls);
++            const int hi = std::min(result.sel_hi, le);
++            if (hi > lo) {
++                const float x0 = content_x + x_at(buf + ls, buf + le, lo - ls);
++                const float x1 = content_x + x_at(buf + ls, buf + le, hi - ls);
++                r2d::draw_quad(x0, y, x1 - x0, line_h, theme.control_on);
++            }
++        }
++
++        if (ls >= le) {
++            continue;  // an empty line draws no run (the band above may)
++        }
++
++        // The line's content: the spliced run while a composition
++        // rides the caret's line (prefix + preedit + suffix, the
++        // single-line field's own splice), the line itself otherwise.
++        // Either way ONE text run, truncated with "..." when the walk
++        // runs past the room - the cluster-aligned cut that never
++        // splits a sequence.
++        char splice[512];
++        const char* content = buf + ls;
++        int content_len = le - ls;
++        if (composing_draw && result.caret_byte >= ls &&
++            result.caret_byte <= le) {
++            const int at = std::clamp(result.caret_byte - ls, 0, le - ls);
++            const int pre = std::max(0, result.preedit_len);
++            const int cap = static_cast<int>(sizeof splice) - 1;
++            int keep_pre = pre;
++            int keep_at = at;
++            int keep_suf = (le - ls) - at;
++            if (keep_pre + keep_at + keep_suf > cap) {
++                keep_suf = 0;  // the suffix is the least news
++                if (keep_pre + keep_at > cap) {
++                    keep_at = 0;  // then a cluster-aligned prefix cut
++                    int i2 = 0;
++                    while (i2 < at) {
++                        const int span =
++                            grapheme_length(buf + ls + i2, buf + le);
++                        if (span <= 0 || keep_pre + i2 + span > cap) {
++                            break;
++                        }
++                        i2 += span;
++                    }
++                    keep_at = i2;
++                    keep_pre = std::min(keep_pre, cap);
++                }
++            }
++            std::memcpy(splice, buf + ls, static_cast<std::size_t>(keep_at));
++            std::memcpy(splice + keep_at, result.preedit_text,
++                        static_cast<std::size_t>(keep_pre));
++            std::memcpy(splice + keep_at + keep_pre, buf + ls + at,
++                        static_cast<std::size_t>(keep_suf));
++            content_len = keep_at + keep_pre + keep_suf;
++            splice[content_len] = '\0';
++            content = splice;
++        }
++        const char* const stop = content + content_len;
++        const float whole = x_at(content, stop, content_len);
++        int visible = content_len;
++        bool ellipsis = false;
++        if (whole > content_room) {
++            const float dots = cp_advance('.') * 3.0f;
++            const float budget = std::max(0.0f, content_room - dots);
++            float acc = 0.0f;
++            visible = 0;
++            const char* q = content;
++            while (q < stop) {
++                const float adv = cluster_advance_at(q, stop);
++                if (acc + adv > budget) {
++                    break;
++                }
++                acc += adv;
++                q += grapheme_length(q, stop);
++            }
++            visible = static_cast<int>(q - content);
++            ellipsis = true;
++        }
++        if (theme.font != nullptr) {
++            if (!ellipsis) {
++                r2d::draw_text(content_x, y, content, *theme.font,
++                               dim(theme.text, dim_by));
++            } else {
++                char scratch[256];
++                int keep = visible;
++                const int keep_cap = static_cast<int>(sizeof scratch) - 4;
++                if (keep > keep_cap) {
++                    keep = 0;
++                    const char* q = content;
++                    while (q < stop) {
++                        const int span = grapheme_length(q, stop);
++                        if ((q - content) + span > keep_cap) {
++                            break;
++                        }
++                        q += span;
++                    }
++                    keep = static_cast<int>(q - content);
++                }
++                std::memcpy(scratch, content, static_cast<std::size_t>(keep));
++                scratch[keep] = '.';
++                scratch[keep + 1] = '.';
++                scratch[keep + 2] = '.';
++                scratch[keep + 3] = '\0';
++                r2d::draw_text(content_x, y, scratch, *theme.font,
++                               dim(theme.text, dim_by));
++            }
++        } else {
++            const float w = ellipsis ? std::min(whole, content_room) : whole;
++            r2d::draw_quad(content_x, y + (line_h - line_h * 0.5f) * 0.5f, w,
++                           line_h * 0.5f, dim(theme.text, dim_by));
++        }
++
++        // The composition's marks on the caret's line: the underline
++        // at the run's foot (the selection band's machinery, the TEXT
++        // color - an in-flight edit, not a selection) and the SOLID
++        // composition caret inside the run - the single-line field's
++        // own pair, one line up.
++        if (composing_draw && result.caret_byte >= ls &&
++            result.caret_byte <= le) {
++            const float edge = content_x + content_room;
++            const float x0 = std::min(result.preedit_x, edge);
++            const float x1 =
++                std::min(result.preedit_x + result.preedit_advance, edge);
++            if (x1 > x0) {
++                r2d::draw_quad(x0, y + line_h - 2.0f, x1 - x0, 2.0f,
++                               dim(theme.text, dim_by));
++            }
++            r2d::draw_quad(std::min(result.preedit_caret_x, edge), y, 2.0f,
++                           line_h, theme.text);
++        }
++    }
++
++    // The caret: a 2px bar in the text color at the mapped box -
++    // solid on arrival and through work, half on/half off at rest,
++    // hidden while unfocused or locked, and hidden while a composition
++    // stands (its own caret drew above).
++    if (!composing_draw && result.focused &&
++        result.state != WidgetState::Disabled && live &&
++        result.blink < 0.5f && result.caret_y >= content_top - 1.0f &&
++        result.caret_y + result.line_h <= content_top + view_h + 1.0f) {
++        r2d::draw_quad(result.caret_x, result.caret_y, 2.0f, result.line_h,
++                       theme.text);
++    }
++
++    // The scrollbar: the scroll panel's own thumb, proportioned over
++    // the box's inner height (a fitted box wears no thumb at all).
++    if (result.content_h > result.view_h && result.view_h > 0.0f) {
++        ScrollbarThumb thumb;
++        thumb.height = std::max(theme.scrollbar_min_thumb,
++                                result.view_h * result.view_h /
++                                    result.content_h);
++        const float track = result.view_h - thumb.height;
++        const float max_scroll = std::max(
++            1.0f, result.content_h - result.view_h);
++        thumb.top = content_top + track * (result.scroll_y / max_scroll);
++        thumb.shows = true;
++        const Rect viewport{content_x, content_top, content_room, view_h};
++        scrollbar_draw(viewport, thumb, theme);
++    }
++}
++
++}  // namespace ws::ui::gui
+diff --git a/libs/ui/src/gui/widgets_text_input.cpp b/libs/ui/src/gui/widgets_text_input.cpp
+index 63ed644..26fb3b5 100644
+--- a/libs/ui/src/gui/widgets_text_input.cpp
++++ b/libs/ui/src/gui/widgets_text_input.cpp
+@@ -3,11 +3,17 @@
+ // text_input_behavior (the caret and selection edits against the
+ // caller's buffer, plus the caret's pixel mapping) and text_input_draw
+ // (the stock field's look over the answer), with the composed row over
+-// them. The lens (EditBuffer) and the persistent pair (TextInputState)
+-// live in the public widgets.hpp; the cluster primitives both halves
+-// walk are the public text_cluster.hpp - the field edits TEXT: UTF-8
+-// codepoints land whole, the caret steps grapheme clusters, and no
+-// key, click or truncation ever splits a sequence.
++// them. The behavior's keyboard half is the SHARED cluster both text
++// fields walk (widgets_detail.hpp's text_field_keys, over the engine
++// in text_edit_core.hpp) - the field adds the single-line pointer
++// placement and the caret's pixel mapping around it; the multi-line
++// editor (widgets_text_editor.cpp) adds its vertical walk. The lens
++// (EditBuffer) and the persistent pair (TextInputState, with the
++// undo/redo history) live in the public text_edit_core.hpp; the
++// cluster primitives both halves walk are the public
++// text_cluster.hpp - the field edits TEXT: UTF-8 codepoints land
++// whole, the caret steps grapheme clusters, and no key, click or
++// truncation ever splits a sequence.
+ 
+ #include "widgets_detail.hpp"
+ 
+@@ -61,7 +67,8 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
+                                     TextInputState& edit,
+                                     const ChromeTheme& theme, bool disabled,
+                                     const HitShape& hit_shape,
+-                                    bool (*filter)(std::uint32_t)) {
++                                    bool (*filter)(std::uint32_t),
++                                    bool vertical_keys) {
+     TextInputResult out{begin_widget_paint(gui, id, rect, disabled, hit_shape)};
+     const HitTest& hit = out.hit;
+ 
+@@ -182,25 +189,16 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
+ 
+     bool changed = false;
+ 
+-    // The frame clock's first consumer: the phase runs every frame (the
+-    // clock does), and the resets below rewind it solid - every edit,
+-    // every caret move, every press, and the focus's own arrival.
+-    edit.blink += in.dt_seconds;
+-    if (edit.blink >= 1.0f) {
+-        edit.blink -= 1.0f;
+-        if (edit.blink >= 1.0f) {
+-            edit.blink = 0.0f;  // a hitched frame (a pause, a debugger) restarts
+-        }
+-    }
+-    if (focused && !edit.was_focused) {
+-        edit.blink = 0.0f;  // arrival shows the caret solid
+-    }
++    // The frame clock's first consumer (the shared spelling): the
++    // phase runs every frame (the clock does), and the resets below
++    // rewind it solid - every edit, every caret move, every press,
++    // and the focus's own arrival.
++    text_edit_clock(edit, in.dt_seconds, focused);
+ 
+     // --- the pointer: a press places the caret, a sweep selects ---------
+     const ws::input::PointerView* owner = gui.pointer(hit.pointer);
+     const bool hold = hit.pressed && owner != nullptr && owner->down;
+-    const bool shift = in.key_down[static_cast<std::size_t>(ws::input::keys::kLeftShift)] ||
+-                       in.key_down[static_cast<std::size_t>(ws::input::keys::kRightShift)];
++    const bool shift = text_edit_shift(in);
+     if (can_edit && hold) {
+         const int placed = caret_from_x(owner->x - content_x);
+         if (owner->pressed || placed != eb.caret) {
+@@ -216,160 +214,24 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
+         }
+     }
+ 
+-    // --- the keyboard: caret keys, deleters, typing, the clipboard ------
+-    // The commit edge first - a composition that ended this frame is
+-    // OLDER than any glyphs typed after it, so it lands before them.
+-    // The committed text is a whole UTF-8 span: insert_filtered walks
+-    // its codepoints through the field's filter and lands spans whole
+-    // (the paste path's own never-split-a-span rule), so a numeric
+-    // field still refuses a committed kanji and a text field takes an
+-    // emoji family in one piece. A standing selection dies under what
+-    // replaces it - the typing rule.
+-    if (can_edit && !ime.commit.empty()) {
+-        eb.erase_selection();
+-        const int pen = eb.insert_filtered(eb.caret, ime.commit.c_str(),
+-                                            filter);
+-        if (pen >= 0) {
+-            eb.collapse(pen);
+-            edit.blink = 0.0f;
+-            changed = true;
+-        }
++    // --- the keyboard: the shared cluster -------------------------------
++    // The whole editing keyboard is the one spelling both fields walk
++    // (widgets_detail.hpp's text_field_keys): the caret keys with
++    // their Ctrl word steps, the deleters with their word eats, the
++    // undo/redo pair, typing, the clipboard trio, Ctrl+A and Escape -
++    // all through the history riding in `edit`, so the single-line
++    // field and the multi-line editor can never disagree about an
++    // edit. The IME's commit edge lands first (a composition that
++    // ended this frame is OLDER than any glyphs typed after it), then
++    // the cluster inside the composition's deferral gate.
++    if (can_edit && text_field_ime_commit(gui, eb, edit, ime, filter)) {
++        changed = true;
+     }
+     if (can_edit && !composing) {
+-        const bool ctrl =
+-            in.key_down[static_cast<std::size_t>(ws::input::keys::kLeftControl)] ||
+-            in.key_down[static_cast<std::size_t>(ws::input::keys::kRightControl)];
+-
+-        // The caret keys: Shift extends from the anchor, plain collapses
+-        // it onto the caret - the rule every editor spells. Held caret
+-        // keys keep moving: they honor the OS auto-repeat, the way a
+-        // held arrow glides through text everywhere else.
+-        const auto move_caret = [&](int to) {
+-            eb.caret = to;
+-            if (!shift) {
+-                eb.anchor = to;
+-            }
+-            edit.blink = 0.0f;
+-        };
+-        if (gui.key_pressed_or_repeated(ws::input::keys::kLeft)) {
+-            move_caret(eb.cluster_start(eb.caret));
+-        }
+-        if (gui.key_pressed_or_repeated(ws::input::keys::kRight)) {
+-            move_caret(eb.cluster_end(eb.caret));
+-        }
+-        if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kHome)]) {
+-            move_caret(0);
+-        }
+-        if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kEnd)]) {
+-            move_caret(eb.len);
+-        }
+-        if (ctrl && in.key_pressed[static_cast<std::size_t>(ws::input::keys::kA)]) {
+-            eb.anchor = 0;  // select all: the anchor says it
+-            eb.caret = eb.len;
+-            edit.blink = 0.0f;
+-        }
+-        if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kEscape)]) {
+-            // Escape's one job: drop the selection. The drop SPENDS the
+-            // key - consume_escape, only when a selection actually
+-            // stood - so the popup or dialog behind the field keeps
+-            // its claim that frame: one Escape abandons the edit, the
+-            // next one closes the overlay. A bare-caret Escape (or a
+-            // field inside no overlay) leaves the key to the
+-            // arbitration untouched.
+-            if (eb.has_selection()) {
+-                eb.collapse(eb.caret);
+-                edit.blink = 0.0f;
+-                gui.consume_escape();
+-            }
+-        }
+-
+-        // Deleters before typing, when one frame carries both (no arrival
+-        // order exists between key edges and the codepoint list): the
+-        // old text leaves, then the new lands at the settled caret.
+-        // Held deleters keep deleting - they honor the OS auto-repeat,
+-        // the caret keys' own rule.
+-        if (gui.key_pressed_or_repeated(ws::input::keys::kBackspace) ||
+-            gui.key_pressed_or_repeated(ws::input::keys::kDelete)) {
+-            const bool forward =
+-                gui.key_pressed_or_repeated(ws::input::keys::kDelete);
+-            if (eb.has_selection()) {
+-                eb.erase_selection();
+-                changed = true;
+-            } else if (!forward && eb.caret > 0) {
+-                // Backspace eats the WHOLE cluster before the caret -
+-                // a base with its marks, an emoji sequence whole,
+-                // never a dangling tail half.
+-                const int lo = eb.cluster_start(eb.caret);
+-                eb.erase(lo, eb.caret);
+-                eb.collapse(lo);
+-                changed = true;
+-            } else if (forward && eb.caret < eb.len) {
+-                // Delete eats forward the same way: the whole
+-                // cluster at the caret.
+-                eb.erase(eb.caret, eb.cluster_end(eb.caret));
+-                eb.collapse(eb.caret);
+-                changed = true;
+-            }
+-            edit.blink = 0.0f;
+-        }
+-
+-        // Typing: the frame's codepoints through the field's filter,
+-        // each landing as its WHOLE UTF-8 span (a numeric field narrows
+-        // the filter to its charset). A selection dies under what
+-        // replaces it, and a span the room cannot take whole drops the
+-        // rest of the frame's text - never a truncated sequence.
+-        for (std::uint32_t cp : in.text_input) {
+-            if (!filter(cp)) {
+-                continue;
+-            }
+-            eb.erase_selection();
+-            char bytes[4];
+-            const int span = utf8_encode(cp, bytes);
+-            if (span <= 0) {
+-                continue;  // not a scalar value: no byte-cast aliasing lands
+-            }
+-            if (span > eb.room - eb.len) {
+-                break;  // the room refused the span: the rest drops
+-            }
+-            const int pen = eb.insert(eb.caret, bytes, span);
+-            if (pen < 0) {
+-                break;
+-            }
+-            eb.collapse(pen);
+-            edit.blink = 0.0f;
+-            changed = true;
+-        }
+-
+-        // The clipboard trio - only a selection copies or cuts, and a
+-        // paste lands at the caret replacing the selection first, like
+-        // typing. An unwired seam makes all three no-ops (the context's
+-        // own contract; Android keeps one today).
+-        if (ctrl &&
+-            (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kC)] ||
+-             in.key_pressed[static_cast<std::size_t>(ws::input::keys::kX)]) &&
+-            eb.has_selection()) {
+-            // The one allocation an explicit copy may make: a mid-buffer
+-            // range is not NUL-terminated, and the seam speaks C strings.
+-            gui.set_clipboard_text(
+-                std::string(eb.buf + eb.sel_lo(), eb.buf + eb.sel_hi()).c_str());
+-            if (in.key_pressed[static_cast<std::size_t>(ws::input::keys::kX)]) {
+-                eb.erase_selection();
+-                edit.blink = 0.0f;
+-                changed = true;
+-            }
+-        }
+-        if (ctrl && in.key_pressed[static_cast<std::size_t>(ws::input::keys::kV)]) {
+-            const char* pasted = gui.get_clipboard_text();
+-            if (pasted != nullptr) {
+-                eb.erase_selection();
+-                const int pen = eb.insert_filtered(eb.caret, pasted, filter);
+-                if (pen >= 0) {
+-                    eb.collapse(pen);
+-                    edit.blink = 0.0f;
+-                    changed = true;
+-                }
+-            }
+-        }
++        const TextFieldKeysResult keys = text_field_keys(
++            gui, eb, edit,
++            {false, vertical_keys, filter});
++        changed = changed || keys.changed;
+     }
+ 
+     // The buffer may have shrunk under the edits (or under the caller's
+diff --git a/libs/ui/tests/test_ui_gui.cpp b/libs/ui/tests/test_ui_gui.cpp
+index b46a4a8..43f448f 100644
+--- a/libs/ui/tests/test_ui_gui.cpp
++++ b/libs/ui/tests/test_ui_gui.cpp
+@@ -1,3 +1,51 @@
++// The IME composition suite (G1.2's channel) and the field's rect
++// seam: the preedit rides the focused line, the keyboard defers to
++// the IME while a composition stands, the commit lands whole through
++// the field's filter, and the platform hears the focused field's
++// bounds on change - driven through hand-built frames the way the
++// num-input suite builds them, with the draws asserted through the
++// r2d stub's counters (the same purity class: the gui archive, the
++// real font bake, the stub seam; no renderer, no window).
++
++#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
++#include <doctest/doctest.h>
++
++#include <ws/ui/gui/gui_context.hpp>
++#include <ws/ui/gui/theme.hpp>
++#include <ws/ui/gui/widgets.hpp>
++
++#include <ws/ui/renderer2d.hpp>
++
++#include "ui_gui_stub.hpp"
++
++#include <array>
++#include <cstring>
++#include <vector>
++
++namespace {
++
++using ws::ui::gui::GuiContext;
++using ws::input::InputFrame;
++using ws::ui::gui::kDefaultChrome;
++
++// The gui suite's snap(): a present mouse parked far off-panel by
++// default, with the primary button's held state and optional
++// press/release edges - the same shape test_ui_num_input's snap()
++// models.
++InputFrame snap(float x = -100.0f, float y = -100.0f, bool down = false,
++                bool pressed = false, bool released = false) {
++    InputFrame frame;
++    frame.mouse_x = x;
++    frame.mouse_y = y;
++    frame.mouse_present = true;
++    frame.mouse_down[0] = down;
++    frame.mouse_pressed[0] = pressed;
++    frame.mouse_released[0] = released;
++    return frame;
++}
++
++}  // namespace
++
+ // --- the IME composition channel (G1.2) ---------------------------------------
+ 
+ TEST_CASE("an IME composition rides the line: preedit maps, the keyboard "
+diff --git a/libs/ui/tests/test_ui_text_edit.cpp b/libs/ui/tests/test_ui_text_edit.cpp
+new file mode 100644
+index 0000000..7f3bc3e
+--- /dev/null
++++ b/libs/ui/tests/test_ui_text_edit.cpp
+@@ -0,0 +1,675 @@
++// The text-editing engine suite: the pieces text_input and the new
++// multi-line text_editor SHARE, gated directly and end to end. First
++// the engine's own arithmetic (the word walk, the line walk), then
++// the history (coalescing, the roundtrip, the staleness guard, the
++// bounds), then the single-line field's new keys through
++// text_input_behavior (Ctrl+arrows, Ctrl+Backspace/Delete, undo/redo,
++// Up/Down as Home/End), and the editor's vertical half through
++// text_editor_behavior (Enter, the goal column, the line/documented
++// Home/End pair, the click placement, the wheel and the
++// caret-follow), with the draws asserted through the r2d stub's
++// counters - the same purity class as test_ui_gui: the gui archive,
++// the real font bake, the stub seam; no renderer, no window, no
++// platform TU.
++
++#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
++#include <doctest/doctest.h>
++
++#include <ws/ui/gui/gui_context.hpp>
++#include <ws/ui/gui/layout_cursor.hpp>
++#include <ws/ui/gui/painters.hpp>
++#include <ws/ui/gui/theme.hpp>
++#include <ws/ui/gui/text_edit_core.hpp>
++#include <ws/ui/gui/widgets.hpp>
++#include <ws/input/input.hpp>
++
++#include "ui_gui_stub.hpp"
++
++#include <array>
++#include <cstring>
++#include <string>
++
++namespace {
++
++using ws::ui::gui::GuiContext;
++using ws::input::InputFrame;
++using ws::ui::gui::LayoutCursor;
++using ws::ui::gui::kDefaultChrome;
++namespace keys = ws::input::keys;
++
++// The gui suite's snap(): a present mouse parked far off-panel by
++// default, with the primary button's held state and optional
++// press/release edges.
++InputFrame snap(float x = -100.0f, float y = -100.0f, bool down = false,
++                bool pressed = false, bool released = false) {
++    InputFrame frame;
++    frame.mouse_x = x;
++    frame.mouse_y = y;
++    frame.mouse_present = true;
++    frame.mouse_down[0] = down;
++    frame.mouse_pressed[0] = pressed;
++    frame.mouse_released[0] = released;
++    return frame;
++}
++
++// One frame's typing: the codepoints land in order, the way the
++// platform's text-input delivery would queue them.
++InputFrame type(std::string_view text) {
++    InputFrame frame = snap();
++    for (char c : text) {
++        frame.text_input.push_back(static_cast<std::uint32_t>(c));
++    }
++    return frame;
++}
++
++// A frame with Ctrl held and the named key freshly pressed.
++InputFrame ctrl_press(int key) {
++    InputFrame frame = snap();
++    frame.key_down[static_cast<std::size_t>(keys::kLeftControl)] = true;
++    frame.key_pressed[static_cast<std::size_t>(key)] = true;
++    return frame;
++}
++
++}  // namespace
++
++// --- the word walk -------------------------------------------------------------
++
++TEST_CASE("the word walk names the run boundaries: words, punct, spaces") {
++    using ws::ui::gui::word_start;
++    using ws::ui::gui::word_end;
++
++    // "foo, bar": f0 o1 o2 ','3 ' '4 b5 a6 r7. The stops (where a
++    // Ctrl+walk can land) read 0, 3, 4, 5, 8 - the VS Code school,
++    // where the comma run is a stop of its own and spaces skip.
++    const char* const text = "foo, bar";
++    const int len = 8;
++    CHECK(word_start(text, len, 8) == 5);  // the end -> "bar"'s start
++    CHECK(word_start(text, len, 5) == 3);  // "bar"'s start -> the comma's
++                                           // (the space skipped on the way)
++    CHECK(word_start(text, len, 4) == 3);  // the space's start -> the comma's
++    CHECK(word_start(text, len, 3) == 0);  // the comma's start -> "foo"'s
++    CHECK(word_start(text, len, 0) == 0);  // the top stays the top
++    CHECK(word_end(text, len, 0) == 3);    // "foo"'s start -> its end
++    CHECK(word_end(text, len, 3) == 4);    // the comma's start -> its end
++    CHECK(word_end(text, len, 4) == 8);    // the space's start -> "bar"'s end
++    CHECK(word_end(text, len, 5) == 8);    // "bar"'s start -> its end
++    CHECK(word_end(text, len, 8) == 8);    // the end stays the end
++    // Mid-word bytes land on the run's ends, not their own cluster.
++    CHECK(word_start(text, len, 2) == 0);
++    CHECK(word_end(text, len, 6) == 8);
++}
++
++TEST_CASE("the word walk rides multi-byte clusters whole") {
++    using ws::ui::gui::word_end;
++
++    // "aé b": 'a' (1 byte) + é (2 bytes, word class) + space + 'b'.
++    const char* const text = "a\xc3\xa9 b";
++    const int len = 5;
++    CHECK(word_end(text, len, 0) == 3);  // "aé" walks as ONE word
++    CHECK(word_end(text, len, 3) == 5);  // past the space: "b"'s end
++    // The newline is a space-class stop: across a break the walk
++    // treats it like any run boundary.
++    const char* const lines = "ab\ncd";
++    CHECK(ws::ui::gui::word_start(lines, 5, 5) == 3);
++    CHECK(ws::ui::gui::word_start(lines, 5, 3) == 0);
++    CHECK(ws::ui::gui::word_end(lines, 5, 2) == 5);
++}
++
++// --- the line walk -------------------------------------------------------------
++
++TEST_CASE("the line walk bounds the '\n'-delimited lines") {
++    using ws::ui::gui::line_count;
++    using ws::ui::gui::line_end;
++    using ws::ui::gui::line_index;
++    using ws::ui::gui::line_start;
++    using ws::ui::gui::line_start_of;
++
++    // "ab\ncd\n": a0 b1 '\n'2 c3 d4 '\n'5 - three lines: "ab", "cd"
++    // and the empty tail the last break leaves behind.
++    const char* const text = "ab\ncd\n";
++    const int len = 6;
++    CHECK(line_count(text, len) == 3);
++    CHECK(line_start(text, len, 0) == 0);
++    CHECK(line_start(text, len, 2) == 0);   // the '\n' belongs to line 0
++    CHECK(line_start(text, len, 3) == 3);
++    CHECK(line_start(text, len, 5) == 3);   // the tail '\n' is line 1's
++    CHECK(line_start(text, len, 6) == 6);   // the empty tail line
++    CHECK(line_end(text, len, 0) == 2);     // the '\n' is NOT part of it
++    CHECK(line_end(text, len, 3) == 5);
++    CHECK(line_end(text, len, 6) == 6);     // the empty tail ends at once
++    CHECK(line_index(text, len, 0) == 0);
++    CHECK(line_index(text, len, 4) == 1);
++    CHECK(line_index(text, len, 6) == 2);
++    CHECK(line_start_of(text, len, 0) == 0);
++    CHECK(line_start_of(text, len, 1) == 3);
++    CHECK(line_start_of(text, len, 2) == 6);
++    CHECK(line_start_of(text, len, 9) == 6);  // past the end clamps
++}
++
++// --- the history -----------------------------------------------------------------
++
++TEST_CASE("the history records a typing run word by word") {
++    char storage[16] = "";
++    ws::ui::gui::TextInputState edit;
++    ws::ui::gui::TextEditHistory& h = edit.history;
++
++    // Type "hi yo": "hi" merges (a word run), the space stands alone,
++    // "yo" merges - three entries, the editors' undo granularity.
++    const auto type_cp = [&](char c) {
++        ws::ui::gui::EditBuffer eb{storage, 15,
++                                   static_cast<int>(std::strlen(storage)),
++                                   edit.caret, edit.anchor};
++        const ws::ui::gui::TextEditCoalesce kind =
++            ws::ui::gui::word_class(c) == ws::ui::gui::TextWordClass::word
++                ? ws::ui::gui::TextEditCoalesce::typing
++                : ws::ui::gui::TextEditCoalesce::none;
++        const int pen = h.replace(eb, eb.sel_lo(), eb.sel_hi(), &c, 1, kind);
++        edit.caret = edit.anchor = pen;
++    };
++    type_cp('h');
++    type_cp('i');
++    type_cp(' ');
++    type_cp('y');
++    type_cp('o');
++    CHECK(std::strcmp(storage, "hi yo") == 0);
++    REQUIRE(h.undo_depth() == 3);
++
++    // Undo walks the run back a step at a time, the caret restoring
++    // to each step's far side.
++    const auto undo_once = [&]() {
++        ws::ui::gui::EditBuffer eb{storage, 15,
++                                   static_cast<int>(std::strlen(storage)),
++                                   edit.caret, edit.anchor};
++        REQUIRE(h.undo(eb));
++        edit.caret = eb.caret;
++        edit.anchor = eb.anchor;
++    };
++    undo_once();
++    CHECK(std::strcmp(storage, "hi ") == 0);
++    CHECK(edit.caret == 3);
++    undo_once();
++    CHECK(std::strcmp(storage, "hi") == 0);
++    undo_once();
++    CHECK(std::strcmp(storage, "") == 0);
++    CHECK(edit.caret == 0);
++    CHECK(!h.can_undo());
++}
++
++TEST_CASE("the history coalesces word runs and undoes them as one step") {
++    char storage[16] = "";
++    ws::ui::gui::TextInputState edit;
++    ws::ui::gui::TextEditHistory& h = edit.history;
++
++    // "hey" is one word run: three replaces, one entry.
++    for (char c : {'h', 'e', 'y'}) {
++        ws::ui::gui::EditBuffer eb{storage, 15,
++                                   static_cast<int>(std::strlen(storage)),
++                                   edit.caret, edit.anchor};
++        (void)h.replace(eb, eb.sel_lo(), eb.sel_hi(), &c, 1,
++                        ws::ui::gui::TextEditCoalesce::typing);
++        edit.caret = edit.anchor = static_cast<int>(std::strlen(storage));
++    }
++    CHECK(std::strcmp(storage, "hey") == 0);
++    REQUIRE(h.undo_depth() == 1);
++
++    // Undo: the whole run leaves, the caret restores to where it
++    // stood before the first letter.
++    ws::ui::gui::EditBuffer eb{storage, 15,
++                               static_cast<int>(std::strlen(storage)),
++                               edit.caret, edit.anchor};
++    CHECK(h.undo(eb));
++    CHECK(eb.len == 0);
++    CHECK(eb.caret == 0);
++    CHECK(eb.anchor == 0);
++    CHECK(!h.can_undo());
++    CHECK(h.can_redo());
++
++    // Redo: the run lands again, the caret at its end.
++    CHECK(h.redo(eb));
++    CHECK(eb.len == 3);
++    CHECK(std::strcmp(eb.buf, "hey") == 0);
++    CHECK(eb.caret == 3);
++
++    // A new edit after the undo clears the redo stack (the standard).
++    CHECK(h.undo(eb));
++    char c = 'x';
++    (void)h.replace(eb, eb.sel_lo(), eb.sel_hi(), &c, 1,
++                    ws::ui::gui::TextEditCoalesce::typing);
++    CHECK(std::strcmp(eb.buf, "x") == 0);
++    CHECK(!h.can_redo());
++}
++
++TEST_CASE("the history merges a held backspace run into one step") {
++    char storage[16] = "abc";
++    ws::ui::gui::TextInputState edit;
++    ws::ui::gui::TextEditHistory& h = edit.history;
++    edit.caret = edit.anchor = 3;
++
++    for (int i = 0; i < 3; ++i) {
++        ws::ui::gui::EditBuffer eb{storage, 15,
++                                   static_cast<int>(std::strlen(storage)),
++                                   edit.caret, edit.anchor};
++        const int lo = eb.cluster_start(eb.caret);
++        (void)h.replace(eb, lo, eb.caret, nullptr, 0,
++                        ws::ui::gui::TextEditCoalesce::deletion_back);
++        edit.caret = edit.anchor = lo;
++    }
++    CHECK(std::strcmp(storage, "") == 0);
++    REQUIRE(h.undo_depth() == 1);  // one gesture, one step
++
++    ws::ui::gui::EditBuffer eb{storage, 15, 0, edit.caret, edit.anchor};
++    CHECK(h.undo(eb));
++    CHECK(std::strcmp(eb.buf, "abc") == 0);
++    CHECK(eb.caret == 3);
++}
++
++TEST_CASE("the history refuses a stale buffer and drops itself") {
++    char storage[16] = "hello";
++    ws::ui::gui::TextInputState edit;
++    ws::ui::gui::TextEditHistory& h = edit.history;
++
++    ws::ui::gui::EditBuffer eb{storage, 15, 5, 5, 5};
++    char c = '!';
++    (void)h.replace(eb, 5, 5, &c, 1, ws::ui::gui::TextEditCoalesce::none);
++    CHECK(std::strcmp(storage, "hello!") == 0);
++    REQUIRE(h.can_undo());
++
++    // The caller re-spells the buffer between frames (a commit, a
++    // sync): the lengths no longer match, undo answers false and the
++    // history voids itself rather than splice into unseen text.
++    std::strcpy(storage, "hey");
++    ws::ui::gui::EditBuffer stale{storage, 15, 3, 3, 3};
++    CHECK(!h.undo(stale));
++    CHECK(!h.can_undo());
++    CHECK(!h.can_redo());
++    CHECK(std::strcmp(storage, "hey") == 0);  // untouched
++}
++
++TEST_CASE("the history bounds itself: the oldest steps drop") {
++    char storage[64] = "";
++    ws::ui::gui::TextInputState edit;
++    ws::ui::gui::TextEditHistory& h = edit.history;
++
++    // 200 distinct (non-coalescing) pastes: every one lands at 0 with
++    // a fresh word, so each stands alone and the depth caps.
++    for (int i = 0; i < 200; ++i) {
++        ws::ui::gui::EditBuffer eb{storage, 63,
++                                   static_cast<int>(std::strlen(storage)),
++                                   edit.caret, edit.anchor};
++        (void)h.replace(eb, 0, eb.len, "w", 1,
++                        ws::ui::gui::TextEditCoalesce::none);
++    }
++    CHECK(h.undo_depth() <= ws::ui::gui::TextEditHistory::kMaxEntries);
++}
++
++// --- the single-line field's new keys --------------------------------------------
++
++TEST_CASE("the field walks words with Ctrl+arrows and eats them with "
++          "Ctrl+Backspace/Delete") {
++    using ws::ui::gui::TextInputResult;
++    using ws::ui::gui::TextInputState;
++
++    GuiContext gui;
++    char buf[32] = "";
++    TextInputState edit;
++    const ws::ui::gui::Rect rect{0.0f, 0.0f, 176.0f, 24.0f};
++    const ws::ui::gui::WidgetId id = gui.ids().id("field");
++
++    const auto run = [&](InputFrame frame) -> TextInputResult {
++        gui.begin_frame(frame);
++        const TextInputResult out = ws::ui::gui::text_input_behavior(
++            gui, id, rect, buf, static_cast<int>(sizeof buf), edit,
++            kDefaultChrome);
++        gui.end_frame();
++        return out;
++    };
++
++    run(snap(20.0f, 12.0f, true, true));
++    run(snap(60.0f, 12.0f, false, false, true));
++    (void)run(type("foo bar"));
++
++    // Ctrl+Left from the end: the caret lands on "bar"'s start.
++    run(ctrl_press(keys::kLeft));
++    CHECK(edit.caret == 4);
++    CHECK(edit.anchor == 4);
++
++    // Ctrl+Left again: "foo"'s start; Ctrl+Right: "foo"'s end.
++    run(ctrl_press(keys::kLeft));
++    CHECK(edit.caret == 0);
++    run(ctrl_press(keys::kRight));
++    CHECK(edit.caret == 3);
++
++    // Ctrl+Backspace at the end eats "bar" whole; undo gives it back.
++    InputFrame end_frame = snap();
++    end_frame.key_pressed[static_cast<std::size_t>(keys::kEnd)] = true;
++    (void)run(end_frame);
++    CHECK(edit.caret == 7);
++    InputFrame word_bs = ctrl_press(keys::kBackspace);
++    word_bs.key_repeated[static_cast<std::size_t>(keys::kBackspace)] = false;
++    const TextInputResult eaten = run(word_bs);
++    CHECK(eaten.edited);
++    CHECK(std::strcmp(buf, "foo ") == 0);
++    CHECK(edit.caret == 4);
++
++    // Ctrl+Z restores, Ctrl+Y (and Ctrl+Shift+Z) redo.
++    (void)run(ctrl_press(keys::kZ));
++    CHECK(std::strcmp(buf, "foo bar") == 0);
++    CHECK(edit.caret == 7);
++    (void)run(ctrl_press(keys::kY));
++    CHECK(std::strcmp(buf, "foo ") == 0);
++    (void)run(ctrl_press(keys::kZ));
++    CHECK(std::strcmp(buf, "foo bar") == 0);
++    InputFrame shift_z = ctrl_press(keys::kZ);
++    shift_z.key_down[static_cast<std::size_t>(keys::kLeftShift)] = true;
++    (void)run(shift_z);
++    CHECK(std::strcmp(buf, "foo ") == 0);
++
++    // Up/Down read as Home/End on a single line (the classic mapping).
++    InputFrame up = snap();
++    up.key_pressed[static_cast<std::size_t>(keys::kUp)] = true;
++    (void)run(up);
++    CHECK(edit.caret == 0);
++    InputFrame down = snap();
++    down.key_pressed[static_cast<std::size_t>(keys::kDown)] = true;
++    (void)run(down);
++    CHECK(edit.caret == 4);
++
++    // Ctrl+Delete eats forward from the caret: "foo " at 0 loses "foo".
++    InputFrame home = snap();
++    home.key_pressed[static_cast<std::size_t>(keys::kHome)] = true;
++    (void)run(home);
++    const TextInputResult fwd = run(ctrl_press(keys::kDelete));
++    CHECK(fwd.edited);
++    CHECK(std::strcmp(buf, " ") == 0);
++}
++
++TEST_CASE("the field's undo restores a replaced selection") {
++    using ws::ui::gui::TextInputState;
++
++    GuiContext gui;
++    char buf[32] = "";
++    TextInputState edit;
++    const ws::ui::gui::Rect rect{0.0f, 0.0f, 176.0f, 24.0f};
++    const ws::ui::gui::WidgetId id = gui.ids().id("sel");
++
++    const auto run = [&](InputFrame frame) {
++        gui.begin_frame(frame);
++        (void)ws::ui::gui::text_input_behavior(
++            gui, id, rect, buf, static_cast<int>(sizeof buf), edit,
++            kDefaultChrome);
++        gui.end_frame();
++    };
++
++    run(snap(20.0f, 12.0f, true, true));
++    run(snap(60.0f, 12.0f, false, false, true));
++    (void)run(type("notes"));
++    (void)run(ctrl_press(keys::kA));  // select all
++    CHECK(edit.caret == 5);
++    CHECK(edit.anchor == 0);
++    (void)run(type("ok"));  // replaces the selection
++    CHECK(std::strcmp(buf, "ok") == 0);
++
++    // The replacement and the typing that followed COALESCE (one
++    // gesture): one undo gives the selection back with its text -
++    // the detail that makes undo feel like undo - and the second
++    // takes the original typing away.
++    (void)run(ctrl_press(keys::kZ));
++    CHECK(std::strcmp(buf, "notes") == 0);
++    CHECK(edit.caret == 5);
++    CHECK(edit.anchor == 0);
++    (void)run(ctrl_press(keys::kZ));
++    CHECK(std::strcmp(buf, "") == 0);
++    CHECK(!edit.history.can_undo());
++    // Redo walks forward again, one gesture at a time. The redone
++    // step lands the pair where TYPING left it (collapsed at the
++    // end) - the Ctrl+A that selected the text was no edit, so redo
++    // does not restore its selection.
++    (void)run(ctrl_press(keys::kY));
++    CHECK(std::strcmp(buf, "notes") == 0);
++    CHECK(edit.caret == 5);
++    CHECK(edit.anchor == 5);
++}
++
++// --- the editor -------------------------------------------------------------------
++
++TEST_CASE("the editor breaks lines, walks them with the goal column and "
++          "undoes the break") {
++    using ws::ui::gui::TextEditorResult;
++    using ws::ui::gui::TextEditorState;
++
++    GuiContext gui;
++    char buf[64] = "";
++    TextEditorState state;
++    const ws::ui::gui::Rect rect{0.0f, 0.0f, 200.0f, 100.0f};
++    const ws::ui::gui::WidgetId id = gui.ids().id("editor");
++
++    const auto run = [&](InputFrame frame) -> TextEditorResult {
++        gui.begin_frame(frame);
++        const TextEditorResult out = ws::ui::gui::text_editor_behavior(
++            gui, id, rect, buf, static_cast<int>(sizeof buf), state,
++            kDefaultChrome);
++        gui.end_frame();
++        return out;
++    };
++    const auto press = [&](int key) {
++        InputFrame frame = snap();
++        frame.key_pressed[static_cast<std::size_t>(key)] = true;
++        return frame;
++    };
++
++    // Focus, then "ab", Enter, "12345".
++    run(snap(20.0f, 12.0f, true, true));
++    run(snap(60.0f, 12.0f, false, false, true));
++    (void)run(type("ab"));
++    const TextEditorResult broke = run(press(keys::kEnter));
++    CHECK(broke.edited);
++    CHECK(broke.ctrl_enter == false);  // plain Enter is the editor's
++    (void)run(type("12345"));
++    CHECK(std::strcmp(buf, "ab\n12345") == 0);
++
++    // Up: the goal column is the caret's x on the SHORT line's walk -
++    // the caret stood at line 1's end (30px), so it lands at "ab"'s
++    // end (byte 2), not byte 5.
++    const TextEditorResult up = run(press(keys::kUp));
++    CHECK(state.field.caret == 2);
++    CHECK(up.caret_line == 0);
++    CHECK(state.goal_x >= 0.0f);  // the walk remembers the column
++
++    // Down: the remembered column (line 1's end) lands the caret back
++    // at byte 8.
++    (void)run(press(keys::kDown));
++    CHECK(state.field.caret == 8);
++
++    // A Left step kills the goal; the next Up re-derives it from the
++    // caret's own x (byte 7 = 24px into line 1), which clamps to line
++    // 0's end.
++    (void)run(press(keys::kLeft));
++    CHECK(state.field.caret == 7);
++    CHECK(state.goal_x < 0.0f);
++    (void)run(press(keys::kUp));
++    CHECK(state.field.caret == 2);
++
++    // Home/End bound the LINE; Ctrl+Home/End the document.
++    InputFrame ctrl_home = ctrl_press(keys::kHome);
++    (void)run(ctrl_home);
++    CHECK(state.field.caret == 0);
++    (void)run(press(keys::kEnd));  // line 0's end
++    CHECK(state.field.caret == 2);
++    InputFrame ctrl_end = ctrl_press(keys::kEnd);
++    (void)run(ctrl_end);
++    CHECK(state.field.caret == 8);
++    (void)run(press(keys::kHome));  // line 1's start
++    CHECK(state.field.caret == 3);
++
++    // Undo walks back: "12345" (a word run), then the break, then "ab".
++    (void)run(ctrl_press(keys::kZ));
++    CHECK(std::strcmp(buf, "ab\n") == 0);
++    (void)run(ctrl_press(keys::kZ));
++    CHECK(std::strcmp(buf, "ab") == 0);
++    (void)run(ctrl_press(keys::kZ));
++    CHECK(std::strcmp(buf, "") == 0);
++    CHECK(!state.field.history.can_undo());
++
++    // Ctrl+Enter passes through untouched - the app's submit chord,
++    // never the editor's: nothing lands, the edge reports true.
++    const TextEditorResult chord = run(ctrl_press(keys::kEnter));
++    CHECK(chord.ctrl_enter);
++    CHECK(std::strcmp(buf, "") == 0);
++}
++
++TEST_CASE("the editor places the caret by click, and the wheel scrolls "
++          "without the follow fighting back") {
++    using ws::ui::gui::TextEditorResult;
++    using ws::ui::gui::TextEditorState;
++
++    GuiContext gui;
++    char buf[128] = "";
++    TextEditorState state;
++    // 200x40, fontless: line_h = control_height/2 = 14, the inner view
++    // is 16px tall - a tight box the six-line content overflows.
++    const ws::ui::gui::Rect rect{0.0f, 0.0f, 200.0f, 40.0f};
++    const ws::ui::gui::WidgetId id = gui.ids().id("scrolled");
++
++    const auto run = [&](InputFrame frame) -> TextEditorResult {
++        gui.begin_frame(frame);
++        const TextEditorResult out = ws::ui::gui::text_editor_behavior(
++            gui, id, rect, buf, static_cast<int>(sizeof buf), state,
++            kDefaultChrome);
++        gui.end_frame();
++        return out;
++    };
++    const auto press = [&](int key) {
++        InputFrame frame = snap();
++        frame.key_pressed[static_cast<std::size_t>(key)] = true;
++        return frame;
++    };
++
++    run(snap(20.0f, 12.0f, true, true));
++    run(snap(60.0f, 12.0f, false, false, true));
++
++    // Six two-char lines: "l0\nl1\nl2\nl3\nl4\nl5" (17 bytes), the
++    // caret landing at the buffer's end, line 5. The follow pinned the
++    // scroll to the bottom along the way.
++    for (int i = 0; i < 6; ++i) {
++        (void)run(type("l" + std::to_string(i)));
++        if (i < 5) {
++            (void)run(press(keys::kEnter));
++        }
++    }
++    CHECK(std::strcmp(buf, "l0\nl1\nl2\nl3\nl4\nl5") == 0);
++    CHECK(state.field.caret == 17);
++    const TextEditorResult bottom = run(snap());
++    CHECK(bottom.content_h == 6.0f * 14.0f);
++    CHECK(bottom.scroll_y == bottom.content_h - bottom.view_h);
++
++    // A click on the visible band places the caret by (line, x): the
++    // view is pinned at the bottom (68px), so y 26 names line 5, and
++    // x 15 (3px into the content) lands one cluster into "l5".
++    (void)run(snap(15.0f, 26.0f, true, true));
++    CHECK(state.field.caret == 16);
++    CHECK(state.goal_x < 0.0f);  // a placed caret re-derives the goal
++
++    // The wheel away from the caret: the claim settles one frame late
++    // (the scroll panel's rule) and resolves against the POINTER, so
++    // the notches ride with the mouse parked over the box. The follow
++    // does NOT drag the scroll back on quiet frames (the follow_line
++    // memory; a same-line caret never fights the wheel).
++    InputFrame wheel_up = snap(100.0f, 20.0f);  // over the box
++    wheel_up.scroll_dy = 1.0f;  // up: earlier content
++    (void)run(wheel_up);        // the settle frame
++    const TextEditorResult scrolled = run(wheel_up);
++    CHECK(scrolled.scroll_y < bottom.scroll_y);
++    const TextEditorResult quiet = run(snap(100.0f, 20.0f));
++    CHECK(quiet.scroll_y == scrolled.scroll_y);
++
++    // Many notches clamp at the content's top.
++    for (int i = 0; i < 30; ++i) {
++        (void)run(wheel_up);
++    }
++    CHECK(run(snap()).scroll_y == 0.0f);
++
++    // A caret that moves lines pulls the view back: Ctrl+Home walks
++    // the caret to line 0 and the follow brings it on screen.
++    InputFrame ctrl_home = ctrl_press(keys::kHome);
++    const TextEditorResult followed = run(ctrl_home);
++    CHECK(state.field.caret == 0);
++    CHECK(followed.scroll_y == 0.0f);
++    CHECK(followed.caret_y == 12.0f);  // the content top, on screen
++}
++
++TEST_CASE("the editor draws its lines, bands and thumb through the stub") {
++    using ws::ui::gui::TextEditorResult;
++    using ws::ui::gui::TextEditorState;
++
++    std::array<ws::ui::r2d::Font::Glyph, 95> glyphs{};
++    for (ws::ui::r2d::Font::Glyph& glyph : glyphs) {
++        glyph.advance = 10.0f;
++    }
++    const ws::ui::r2d::Font font(16.0f, 20.0f, glyphs.data(), 95);
++    ws::ui::gui::ChromeTheme themed = kDefaultChrome;
++    themed.font = &font;
++
++    GuiContext gui;
++    char buf[64] = "ab\ncd";
++    TextEditorState state;
++    const ws::ui::gui::Rect rect{0.0f, 0.0f, 200.0f, 64.0f};
++    const ws::ui::gui::WidgetId id = gui.ids().id("drawn");
++
++    const auto run = [&](InputFrame frame) -> TextEditorResult {
++        gui.begin_frame(frame);
++        const TextEditorResult out = ws::ui::gui::text_editor_behavior(
++            gui, id, rect, buf, static_cast<int>(sizeof buf), state, themed);
++        ws::ui::gui::text_editor_draw(rect, out, themed, "notes", buf,
++                                      static_cast<int>(sizeof buf));
++        gui.end_frame();
++        return out;
++    };
++
++    run(snap(20.0f, 12.0f, true, true));
++    run(snap(60.0f, 12.0f, false, false, true));  // the focus settled
++
++    // One quiet focused frame: the chrome (ring + face), the two
++    // lines as two text runs, the caret quad - the content fits, so
++    // no thumb draws. The focus click parked the caret mid "ab"
++    // (line 0, one 10px glyph in).
++    ws::ui::gui_test::stub.reset();
++    const TextEditorResult drawn = run(snap());
++    CHECK(ws::ui::gui_test::stub.rounded == 2);
++    CHECK(ws::ui::gui_test::stub.texts == 2);
++    CHECK(ws::ui::gui_test::stub.last_text == std::string("cd"));
++    CHECK(ws::ui::gui_test::stub.quads == 1);  // the caret
++    CHECK(drawn.caret_line == 0);
++    CHECK(drawn.caret_y == 12.0f);             // line 0, unscrolled
++    CHECK(drawn.caret_x == 22.0f);             // 12 + one 10px glyph
++
++    // Select all: the bands draw per line (2 quads beside the caret).
++    ws::ui::gui_test::stub.reset();
++    (void)run(ctrl_press(keys::kA));
++    CHECK(ws::ui::gui_test::stub.texts == 2);
++    CHECK(ws::ui::gui_test::stub.quads == 3);  // 2 line bands + caret
++}
++
++TEST_CASE("the dead editor rides a click and keys without pretending") {
++    using ws::ui::gui::TextEditorState;
++
++    GuiContext gui;
++    TextEditorState state;
++    const ws::ui::gui::Rect rect{0.0f, 0.0f, 200.0f, 64.0f};
++    const ws::ui::gui::WidgetId id = gui.ids().id("dead");
++
++    gui.begin_frame(snap(20.0f, 12.0f, true, true));
++    const ws::ui::gui::TextEditorResult dead =
++        ws::ui::gui::text_editor_behavior(
++            gui, id, rect, nullptr, 1, state, kDefaultChrome);
++    gui.end_frame();
++    CHECK(!dead.edited);
++    CHECK(dead.preedit_text == nullptr);
++
++    gui.begin_frame(type("x"));
++    const ws::ui::gui::TextEditorResult quiet =
++        ws::ui::gui::text_editor_behavior(
++            gui, id, rect, nullptr, 1, state, kDefaultChrome);
++    gui.end_frame();
++    CHECK(!quiet.edited);
++    CHECK(!quiet.ctrl_enter);
++}
+-- 
+2.47.3
+

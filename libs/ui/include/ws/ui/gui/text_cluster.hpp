@@ -9,8 +9,9 @@
 // one byte before the buffer), and the caret walked each byte as a
 // standalone glyph, splitting any multi-byte character mid-sequence.
 // These free functions are the shared fix: every text-editing widget
-// (text_input today; the multi-line area the guide plans rides the
-// same primitives) decodes through them, and the caret/anchor pair
+// (text_input and the multi-line text_editor, and any custom field
+// through text_edit_core.hpp's engine) decodes through them, and the
+// caret/anchor pair
 // stays in BYTES (the EditBuffer's own contract) but always lands on
 // CLUSTER boundaries - a user-perceived character: a base plus its
 // combining marks, an emoji ZWJ sequence, a flag's regional-indicator

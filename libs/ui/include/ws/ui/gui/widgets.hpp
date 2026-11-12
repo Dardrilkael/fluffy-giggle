@@ -4,6 +4,7 @@
 #include <ws/ui/gui/layout_cursor.hpp>
 #include <ws/ui/gui/rect.hpp>
 #include <ws/ui/gui/text_cluster.hpp>
+#include <ws/ui/gui/text_edit_core.hpp>
 #include <ws/ui/gui/theme.hpp>
 
 #include <ws/core/result.hpp>
@@ -947,24 +948,29 @@ void combo_draw(const Rect& rect, const ComboResult& result,
 // NUL-terminated UTF-8 the caller owns (the house rule - the widget
 // holds no copy), `capacity` counts the NUL, and the answer is true on
 // the frame the text CHANGED (typing, Backspace/Delete, a cut, a
-// paste) - caret and selection moves edit nothing and answer false.
-// v1 edits ASCII 32..126, the font's bake range: typed codepoints
-// outside it drop, a paste filters byte-wise, and bytes already in the
-// buffer outside it sit inert (no advance, no draw - the font skips
-// them). The row wears the button faces with the content left-aligned
-// inside the padding; the label draws as a dimmed placeholder only
-// while the buffer is empty. The caret: a click places it (x to glyph
-// index at the mid-advance), Left/Right/Home/End move it, and it
+// paste, an undo/redo) - caret and selection moves edit nothing and
+// answer false. v1 edits ASCII 32..126, the font's bake range: typed
+// codepoints outside it drop, a paste filters byte-wise, and bytes
+// already in the buffer outside it sit inert (no advance, no draw -
+// the font skips them). The row wears the button faces with the
+// content left-aligned inside the padding; the label draws as a dimmed
+// placeholder only while the buffer is empty. The caret: a click
+// places it (x to glyph index at the mid-advance), Left/Right/Home/End
+// move it (Ctrl+Left/Right step WORDS, Ctrl+Home/End the line's ends,
+// Up/Down land Home/End - the classic single-line mapping), and it
 // blinks on the frame clock (dt_seconds' first consumer) - solid
 // through every edit and move, half on/half off at rest, hidden while
 // unfocused or under a disabled scope. Selection: Shift extends the
-// arrows/Home/End from the anchor, a press-and-sweep drags it, Ctrl+A
-// takes all, and typing or Backspace/Delete replaces it; Escape
-// clears it. The range draws as the accent band under the text, the
-// selected tab's face. Ctrl+C/X copy/cut the selection and Ctrl+V
-// pastes at the caret through the gui's clipboard seam
+// arrows/Home/End from the anchor (Ctrl+arrows included - the word
+// walk), a press-and-sweep drags it, Ctrl+A takes all, and typing or
+// Backspace/Delete replaces it; Escape clears it. The range draws as
+// the accent band under the text, the selected tab's face.
+// Ctrl+C/X copy/cut the selection, Ctrl+V pastes at the caret, and
+// Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z) undo/redo through the field's own
+// bounded history - all through the gui's clipboard seam
 // (GuiContext::set_clipboard; App::install_clipboard wires the
-// platform - an unwired seam, Android today, makes the trio no-ops).
+// platform - an unwired seam, Android today, makes the clipboard trio
+// no-ops; undo/redo need no seam).
 // Enter is not the widget's to take - a single line has no commit
 // edge, so the caller reads its own: is_focused(ids().id(label)) and
 // key_pressed[ws::input::keys::kEnter] on the frame after the edit. Tab cycles
@@ -990,221 +996,15 @@ bool text_input(GuiContext& gui, LayoutCursor& layout,
 // persistent pair in the context's side table under your own id, and
 // the EditBuffer lens is yours for whatever else a custom field edits.
 
-// text_input's persistent half: the caret and its selection anchor are
-// byte offsets into the CALLER's buffer, always on grapheme-cluster
-// boundaries - a user-perceived character is base + combining marks, an
-// emoji sequence; an ASCII buffer sees the old one-byte-per-character
-// arithmetic exactly; equal means no selection. The blink phase is the
-// frame clock's first consumer - dt_seconds accumulates here, half on/half
-// off at rest, and every edit, caret move or press rewinds it so the
-// caret reads solid while the user works. `was_focused` lights it the
-// frame the field GAINS the focus, so a Tab-arrival caret shows
-// immediately instead of mid-blink.
-struct TextInputState {
-    int caret = 0;
-    int anchor = 0;      // the selection origin; caret == anchor: none
-    float blink = 0.0f;  // [0, 1): under 0.5 draws the caret
-    bool was_focused = false;
-};
-
-// The typing filter: the field edits TEXT - the cut is every scalar
-// value UTF-8 can spell, not v1's ASCII. Control codes stay out (a
-// single line has no use for them; DEL rides with them), and the
-// surrogate halves and anything past U+10FFFF drop rather than land a
-// truncated byte-cast alias - the test takes the CODEPOINT, never a
-// byte: a surrogate half whose low byte would alias into 'A' still
-// refuses whole. The insert lands the codepoint's whole 1..4-byte
-// UTF-8 span (utf8_encode beside it), one cluster at a time.
-inline bool is_insertable(std::uint32_t cp) {
-    return cp >= 32u && cp != 127u && cp <= 0x10FFFFu &&
-           !(cp >= 0xD800u && cp <= 0xDFFFu);
-}
-
-// text_input's per-frame lens: the persistent caret pair from
-// TextInputState plus the caller's buffer geometry as one object, so
-// every edit speaks a verb instead of spelling memmove. Built once per
-// frame with the length measured fresh; the frame-end clamp writes the
-// pair back into the persistent state. A dead field carries room 0,
-// and the verbs' own clamps turn that into a no-op.
-struct EditBuffer {
-    char* buf = nullptr;  // the caller's buffer (the widget never owns it)
-    int room = 0;   // bytes the buffer may hold: capacity minus the NUL
-    int len = 0;    // bytes before the terminator, measured this frame
-    int caret = 0;   // the editing position; the selection's live end
-    int anchor = 0;  // the selection origin; caret == anchor: none
-
-    // The selection as a range, low end first (equal ends: none).
-    int sel_lo() const { return std::min(caret, anchor); }
-    int sel_hi() const { return std::max(caret, anchor); }
-    bool has_selection() const { return caret != anchor; }
-
-    // --- the cluster navigation ------------------------------------------
-    // Byte offsets snapped onto grapheme-cluster boundaries (see
-    // text_cluster.hpp): the invariant every editing verb leaves
-    // behind. The containing-cluster read is asymmetric on purpose,
-    // the two halves that need it: cluster_start(byte) names the START
-    // of the cluster containing byte-1 - Backspace's target, and the
-    // Left key's step (byte 0 -> 0); cluster_end(byte) the END of the
-    // cluster containing byte - Delete's target, and the Right key's
-    // step (the length clamps). clamp_to_cluster snaps DOWN - the
-    // boundary at or below - so an externally re-spelled buffer (the
-    // caller's own hand between frames) never finds the caret mid-
-    // character. An ASCII buffer degenerates to the old arithmetic
-    // exactly: start = byte-1, end = byte+1, the clamp the identity.
-    int cluster_start(int byte) const {
-        byte = std::max(0, std::min(len, byte));
-        int start = 0;
-        while (start < byte) {
-            const int span = grapheme_length(buf + start, buf + len);
-            if (start + span >= byte) {
-                return start;  // the cluster [start, start+span) holds byte-1
-            }
-            start += span;
-        }
-        return 0;
-    }
-    int cluster_end(int byte) const {
-        byte = std::max(0, std::min(len, byte));
-        int start = 0;
-        while (start < byte) {
-            const int span = grapheme_length(buf + start, buf + len);
-            if (start + span > byte) {
-                return start + span;  // byte sits inside [start, start+span)
-            }
-            start += span;
-        }
-        // byte is a boundary at/below the scan's stop: the cluster
-        // STARTING there owns the answer (or the buffer's end).
-        return byte < len ? byte + grapheme_length(buf + byte, buf + len)
-                          : len;
-    }
-    int clamp_to_cluster(int byte) const {
-        byte = std::max(0, std::min(len, byte));
-        int start = 0;
-        while (start < byte) {
-            const int span = grapheme_length(buf + start, buf + len);
-            if (start + span >= byte) {
-                return byte == start + span ? byte : start;
-            }
-            start += span;
-        }
-        return byte;
-    }
-
-    // Both ends onto `at`: the selection dies, the caret stays.
-    void collapse(int at) {
-        caret = anchor = at;
-    }
-
-    // The one eraser every deleter funnels through: [lo, hi) leaves,
-    // the tail slides, the terminator follows the new end.
-    void erase(int lo, int hi) {
-        lo = std::max(0, lo);
-        hi = std::min(len, hi);
-        if (lo >= hi) {
-            return;
-        }
-        std::memmove(buf + lo, buf + hi, static_cast<std::size_t>(len - hi));
-        len -= hi - lo;
-        buf[len] = '\0';
-    }
-
-    // A selection dies under what replaces it - typing and pasting both
-    // spell it; the caret lands where the selection was.
-    void erase_selection() {
-        if (has_selection()) {
-            const int lo = sel_lo();
-            erase(lo, sel_hi());
-            collapse(lo);
-        }
-    }
-
-    // n bytes at `at` (clamped into [0, len], never past the room): the
-    // tail slides once, the bytes land, the terminator follows. The
-    // return is the pen just past the insertion, or -1 when the room
-    // refused everything. Callers pass WHOLE UTF-8 codepoint spans (the
-    // typing loop encodes through utf8_encode and checks the span fits
-    // first - the room never cuts a sequence mid-byte under the
-    // widget's own hand).
-    int insert(int at, const char* bytes, int n) {
-        at = std::max(0, std::min(len, at));
-        n = std::min(n, room - len);
-        if (n <= 0) {
-            return -1;
-        }
-        std::memmove(buf + at + n, buf + at,
-                     static_cast<std::size_t>(len - at));
-        std::memcpy(buf + at, bytes, static_cast<std::size_t>(n));
-        len += n;
-        buf[len] = '\0';
-        return at + n;
-    }
-
-    // A paste through the filter: only CODEPOINTS the filter admits
-    // land, and each lands its WHOLE 1..4-byte UTF-8 span (the
-    // clipboard seam speaks UTF-8 - the same bytes draw_text walks) -
-    // a span the room cannot take whole stops the count there, an
-    // ill-formed span (a truncated or overlong sequence, a lone
-    // continuation byte) drops rather than lands, and the buffer keeps
-    // its UTF-8 shape. Still counted in one pass over the text, then
-    // landed in one move, so the buffer never walks per byte and the
-    // capacity never splits mid-paste. The return is insert's pen. The
-    // filter rides as a parameter so a constrained field (a numeric
-    // one) admits only its own charset; the default is the field's
-    // plain cut, so every existing caller keeps its edit - with
-    // non-ASCII text now LANDING instead of dropping per byte.
-    int insert_filtered(int at, const char* text,
-                        bool (*filter)(std::uint32_t) = &is_insertable) {
-        const char* const stop = text + std::strlen(text);
-        // The shared admission test: decode, refuse the ill-formed, ask
-        // the filter - identical in the counting and the landing pass.
-        const auto admits = [&](const char* p, std::uint32_t& cp,
-                                 int& span) -> bool {
-            span = utf8_decode(p, stop, cp);
-            if (span <= 0) {
-                return false;
-            }
-            if (span == 1 && cp >= 0x80u) {
-                return false;  // not well-formed UTF-8: the paste drops it
-            }
-            return filter(cp);
-        };
-        int take = 0;  // bytes that will land
-        for (const char* p = text; *p != '\0' && take < room - len;) {
-            std::uint32_t cp = 0;
-            int span = 0;
-            if (admits(p, cp, span)) {
-                if (take + span > room - len) {
-                    break;  // the room would split the span: nothing more lands
-                }
-                take += span;
-            }
-            p += span;
-        }
-        at = std::max(0, std::min(len, at));
-        if (take <= 0) {
-            return -1;
-        }
-        std::memmove(buf + at + take, buf + at,
-                     static_cast<std::size_t>(len - at));
-        int pen = at;
-        for (const char* p = text; *p != '\0';) {
-            if (pen - at >= take) {
-                break;  // the room's count is landed; the tail never walks
-            }
-            std::uint32_t cp = 0;
-            int span = 0;
-            if (admits(p, cp, span)) {
-                std::memcpy(buf + pen, p, static_cast<std::size_t>(span));
-                pen += span;
-            }
-            p += span;
-        }
-        len += take;
-        buf[len] = '\0';
-        return pen;
-    }
-};
+// The field's engine half - the persistent pair (TextInputState, the
+// caret/anchor pair with the field's own undo/redo history), the typing
+// filter (is_insertable) and the per-frame edit lens (EditBuffer) -
+// lives in text_edit_core.hpp now: the same public spellings every
+// caller always had, in the lean header a custom field (or an app with
+// no widget at all) reaches without the widget surface. The word walk
+// (word_start/word_end) and the line walk (line_start/line_end/
+// line_count/line_index/line_start_of) ride beside them - the engine
+// every text-editing surface in the library shares.
 
 // What the behavior hands a look: the row's paint plus the caret's
 // mapped geometry, paint-ready. caret_x is the caret's x in frame px,
@@ -1249,31 +1049,38 @@ struct TextInputResult : WidgetPaint {
 
 // The interaction half at a placed rect: the citizenship fold, then the
 // field's whole editing - the press that places the caret, the sweep
-// that selects, the caret keys, the deleters, the frame's codepoints
-// through the filter, Ctrl+A, Escape's selection drop and the
-// clipboard trio - all against the caller's buffer through the
-// EditBuffer verbs, the pair written back into `edit`. The IME
+// that selects, the caret keys (Ctrl+arrows walk words), the deleters
+// (Ctrl eats a word), the frame's codepoints through the filter,
+// Ctrl+A, Escape's selection drop, the clipboard trio and the undo/
+// redo pair (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z) - all against the
+// caller's buffer through the EditBuffer verbs and the history that
+// rides in `edit`, the pair written back into `edit`. The IME
 // composition channel rides here too (G1.2): while the frame's preedit
 // is active the keyboard cluster defers to the IME (its arrows are
 // candidate navigation, its backspace re-edits the preedit), the
 // preedit maps into the result for the draw, and a frame's commit edge
 // lands whole through insert_filtered - the paste path's own
 // never-split-a-span rule, the field's filter applied codepoint by
-// codepoint. `theme` maps
+// codepoint, one recorded undo step. `theme` maps
 // the caret into pixels over CLUSTERS - the codepoints' glyph
 // advances summed, the draw loop's own walk - or
 // label_char_width fontless, once per codepoint. `filter` is the typing
 // and paste charset - the codepoints the field admits - and defaults
 // to the plain cut (every scalar value but the control codes); a
 // numeric field passes its own (is_float_insertable / is_int_insertable
-// below). Draws nothing.
+// below). `vertical_keys` hands the field the plain single-line
+// Up/Down -> Home/End mapping (the classic Win32/EDIT behavior); a
+// field whose rows have their own meaning for the vertical arrows -
+// the numeric stepper - passes false and keeps them for itself.
+// Draws nothing.
 TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
                                     const Rect& rect, char* buf, int capacity,
                                     TextInputState& edit,
                                     const ChromeTheme& theme,
                                     bool disabled = false,
                                     const HitShape& hit_shape = {},
-                                    bool (*filter)(std::uint32_t) = &is_insertable);
+                                    bool (*filter)(std::uint32_t) = &is_insertable,
+                                    bool vertical_keys = true);
 
 // The look half: the face, the focus ring, the selection band, the
 // content - or the placeholder while the buffer is empty - the "..."
@@ -1283,6 +1090,117 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
 void text_input_draw(const Rect& rect, const TextInputResult& result,
                      const ChromeTheme& theme, const char* label,
                      const char* buf, int capacity);
+
+// --- the multi-line editor ------------------------------------------------------
+// text_editor: text_input's every rule, plus the vertical dimension -
+// the same caller-owned NUL-terminated UTF-8 buffer contract, the same
+// cluster discipline, the same selection/clipboard/undo semantics,
+// driven over LINES ('\n' hard breaks; no soft wrap - a line wider
+// than the box truncates with "..." and the keys still edit the hidden
+// tail). Enter breaks the line (one '\n', one undo step, the key
+// consumed with it); Ctrl+Enter is NOT the editor's - the result
+// reports the edge so an app spells its own submit chord. Up/Down walk
+// lines carrying the caret's remembered column (the goal survives the
+// walk, dies on any horizontal move or edit - the editors' rule),
+// Ctrl+Up/Down walk PARAGRAPHS (runs of non-blank lines), Home/End
+// bound the line and Ctrl+Home/End the document, and every one of
+// text_input's shortcuts rides unchanged: Ctrl+Left/Right (words),
+// Ctrl+Backspace/Delete (a word at a time), Shift+arrows (selection),
+// Ctrl+A, Ctrl+C/X/V, Ctrl+Z/Y, Escape. A click places the caret by
+// (line, x); a sweep selects; the wheel scrolls (one notch = the
+// theme's scroll_speed, the scroll panel's own rule) and the view
+// follows the caret - every edit and every walk keeps the caret's
+// line on screen. The IME composition rides the caret's line exactly
+// as text_input's rides the row. Tab still cycles the focus away (the
+// editor takes no indentation of its own in v1). `rows` sizes the box
+// (rows * the font's line height + padding, floored at the control
+// height); `width` and `disabled` spell what they always do.
+
+// The editor's persistent half: text_input's own pair (caret, anchor,
+// blink, the undo/redo history) plus the vertical state - how far the
+// content scrolled (px, clamped every frame to the content's height
+// minus the view's) and the Up/Down column memory (the goal x, content
+// px; negative = none stands - the next vertical step re-derives it
+// from the caret).
+struct TextEditorState {
+    TextInputState field;
+    float scroll_y = 0.0f;  // the scrolled-off top, content px
+    float goal_x = -1.0f;   // Up/Down's remembered column, content px
+    int follow_line = -1;   // the caret line the scroll last followed
+                             // (-1: the next focused frame follows)
+};
+
+// What the editor's behavior hands its look. The caret and the
+// selection travel as BUFFER BYTES (the look owns its own pixel fits -
+// the split convention); caret_x/caret_y map the caret's box top-left
+// in frame px (y already scrolled, x clamped to the content edge like
+// text_input's), line_h is one line box's height (the font's line
+// height, or control_height/2 fontless), caret_line its 0-based index.
+// sel_lo/sel_hi order the selection (equal: none). scroll_y/content_h/
+// view_h describe the settled scroll so a look places the thumb
+// without re-measuring. ctrl_enter reports the frame's Ctrl+Enter
+// edge (the app's submit chord - the editor never takes it); edited
+// is the frame's answer, the widget's own return. The preedit fields
+// mirror TextInputResult's (the run rides the caret's LINE; the y's
+// are frame px, the x's content-edge clamped) and stand only while a
+// composition is in flight in a field that can edit.
+struct TextEditorResult : WidgetPaint {
+    int caret_byte = 0;   // the caret, buffer bytes (cluster-aligned)
+    int sel_lo = 0;       // the selection's low end, bytes (== hi: none)
+    int sel_hi = 0;       // ...high end
+    float caret_x = 0.0f;  // the caret's box left, frame px
+    float caret_y = 0.0f;  // ...top, frame px (scrolled)
+    float line_h = 0.0f;   // one line box's height, px
+    int caret_line = 0;    // the caret's 0-based line
+    float blink = 0.0f;    // the caret's phase [0, 1)
+    bool edited = false;   // the buffer changed this frame
+    float scroll_y = 0.0f;   // the settled scroll, content px
+    float content_h = 0.0f;  // lines * line_h
+    float view_h = 0.0f;     // the box's inner height, px
+    bool ctrl_enter = false;  // the app's submit edge passed through
+
+    const char* preedit_text = nullptr;
+    int preedit_len = 0;
+    int preedit_caret_lo = 0;  // the composition caret's span, bytes
+    int preedit_caret_hi = 0;  // into preedit_text (lo is the caret)
+    float preedit_x = 0.0f;     // the run's pen x, frame px
+    float preedit_y = 0.0f;     // ...pen y (the caret's line), frame px
+    float preedit_advance = 0.0f;  // the run's whole width, unclamped
+    float preedit_caret_x = 0.0f;  // the composition caret's x, frame px
+};
+
+// The behavior half at a placed rect - text_input's whole keyboard
+// (the shared cluster), the editor's vertical walk over it, the 2D
+// pointer placement, the wheel scroll and the caret-follow, the pair
+// and the scroll written back into `state`. `filter` defaults to the
+// multi-line cut (is_insertable_multiline: the plain cut plus '\n') -
+// pass your own to spell a constrained editor. Draws nothing.
+TextEditorResult text_editor_behavior(GuiContext& gui, WidgetId id,
+                                      const Rect& rect, char* buf,
+                                      int capacity, TextEditorState& state,
+                                      const ChromeTheme& theme,
+                                      bool disabled = false,
+                                      const HitShape& hit_shape = {},
+                                      bool (*filter)(std::uint32_t) =
+                                          &is_insertable_multiline);
+
+// The look half: the box (ring, face), the visible lines, the
+// per-line selection bands, the per-line "..." truncation, the
+// placeholder on an empty buffer's first line, the caret, the
+// scrollbar (the scroll panel's own thumb), and the composition
+// marks while a preedit rides the caret's line. Reads no context.
+void text_editor_draw(const Rect& rect, const TextEditorResult& result,
+                      const ChromeTheme& theme, const char* label,
+                      const char* buf, int capacity);
+
+// The composed row: the behavior and the stock look folded, the
+// answer true on the frame the text changed. The buffer contract is
+// text_input's own (NUL-terminated UTF-8, capacity counts the NUL, a
+// null or under-2 buffer lays the box inert).
+bool text_editor(GuiContext& gui, LayoutCursor& layout,
+                 const ChromeTheme& theme, const char* label, char* buf,
+                 int capacity, float width = -1.0f, int rows = 5,
+                 bool disabled = false);
 
 // --- the numeric field ---------------------------------------------------------
 // input_float / input_int: the exact-value row the property grid always

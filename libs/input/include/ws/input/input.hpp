@@ -90,10 +90,14 @@ inline constexpr int kMiddle = 2;    // GLFW_MOUSE_BUTTON_MIDDLE
 // (button, checkbox, tab) - always edge-only, never on a repeat - the
 // horizontal arrows step the focused slider, the vertical arrows step
 // the focused table row (both HONOR key_repeated: a held arrow keeps
-// stepping) - and the text input owns the editing cluster: the caret
-// keys, Backspace/Delete, Home/End, Shift held for selection, Ctrl+A/
-// C/V/X over the clipboard seam (the caret keys and the deleters honor
-// repeats; the clipboard cluster and Home/End do not). Apps keep using
+// stepping) - and the text fields own the editing cluster: the caret
+// keys (Ctrl+arrows walk words/paragraphs), Backspace/Delete (Ctrl
+// eats a word), Home/End (Ctrl jumps the document), the vertical
+// arrows inside a multi-line editor, Shift held for selection,
+// Ctrl+A/C/V/X over the clipboard seam and Ctrl+Z/Y through the
+// field's history (the caret keys, the deleters and the undo pair
+// honor repeats; the clipboard cluster and Home/End do not). Apps
+// keep using
 // raw GLFW numbers for everything else (the arrays in InputFrame are
 // indexed by them); these exist so the gui core and its widgets can
 // never disagree about the spelling of the few keys with built-in
@@ -121,11 +125,14 @@ inline constexpr int kHome = 268;          // GLFW_KEY_HOME
 inline constexpr int kEnd = 269;           // GLFW_KEY_END
 inline constexpr int kEscape = 256;        // GLFW_KEY_ESCAPE (clears the
                                            // text input's selection)
-// Ctrl+A selects all; Ctrl+C/X/V ride the clipboard seam.
+// Ctrl+A selects all; Ctrl+C/X/V ride the clipboard seam; Ctrl+Z/Y
+// (and Ctrl+Shift+Z) undo/redo through the field's own history.
 inline constexpr int kA = 65;             // GLFW_KEY_A
 inline constexpr int kC = 67;             // GLFW_KEY_C
 inline constexpr int kV = 86;             // GLFW_KEY_V
 inline constexpr int kX = 88;             // GLFW_KEY_X
+inline constexpr int kY = 89;             // GLFW_KEY_Y (redo)
+inline constexpr int kZ = 90;             // GLFW_KEY_Z (undo)
 inline constexpr int kLeftControl = 341;  // GLFW_KEY_LEFT_CONTROL
 inline constexpr int kRightControl = 345; // GLFW_KEY_RIGHT_CONTROL
 // Alt: the menu bar's Alt+mnemonic opens match the shift spelling above

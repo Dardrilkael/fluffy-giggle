@@ -17,6 +17,15 @@
   mirror's store and the job_view state-to-view mapping (the row and toast
   templates stay in job_progress.hpp with their JobHandle<T> parameter)
 - widgets_combo.cpp / widgets_text_input.cpp / widgets_table.cpp
+- widgets_text_editor.cpp: the multi-line editor - text_input's rules
+  over lines (the vertical walk with its goal column, the 2D pointer
+  placement, the wheel scroll, the caret-follow; the keyboard itself
+  is the shared text_field_keys in widgets_detail.hpp)
+- text_edit_core.cpp: the reusable editing ENGINE's out-of-line half -
+  the undo/redo history behind text_edit_core.hpp (the public header
+  also holds EditBuffer/TextInputState, the word walk and the line
+  walk; pure value types, not widgets, so the widget-file rule does
+  not apply)
 - command_views.cpp / command_palette.cpp / command_keymap.cpp: the
   ws::app bridge (stage 13 phase 4) - the shared hint + menu builder +
   toolbar; the palette's fuzzy scorer/ranker + the modal over them; and
@@ -49,9 +58,14 @@ pixels over the answer. The pairs:
 - tab (widgets_panels.cpp - the strip loops the per-tab pair)
 - combo (the ROW pair; the dropdown stays the composed widget's own
   half - a custom combo lays its list through place_popup/begin_popup)
-- text_input (+ EditBuffer/TextInputState/is_insertable public; the
-  behavior's filter parameter is the seam a constrained field
-  narrows its charset through)
+- text_input (+ EditBuffer/TextInputState/is_insertable public in
+  text_edit_core.hpp - the reusable engine header both fields and any
+  custom field share; the behavior's filter parameter is the seam a
+  constrained field narrows its charset through, vertical_keys the
+  seam a field with its own Up/Down meaning opts out of Home/End)
+- text_editor (the multi-line family: TextEditorState/TextEditorResult
+  public, the behavior's vertical walk over the shared keyboard
+  cluster)
 - input_float (one draw and one state for both ladders; NumInputState,
   the numeric filters, input_parse_float/input_parse_int and
   input_format_float travel public with it) - widgets_num_input.cpp
