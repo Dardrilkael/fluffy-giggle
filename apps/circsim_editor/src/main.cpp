@@ -57,6 +57,7 @@
 #include "side_panels.hpp"
 
 #include <ws/circsim/overlay.hpp>
+#include <ws/circsim/png.hpp>  // render_schematic_png: the Export PNG button
 
 #ifdef _WIN32
 #include <ws/platform/single_instance.hpp>
@@ -385,11 +386,15 @@ class CircsimApp final : public ws::ui::App {
             "app.wire",
             "circuit.erc",
             "circuit.run",
+            "circuit.export_png",
         });
         // The toolbar's icons: the chrome actions wear the built-in
         // set's standard glyphs (floppy, arrows, bin...) with their
         // name + chord in the tooltip; circuit.run keeps its text
-        // button - Simulate is the one act that deserves the word.
+        // button - Simulate is the one act that deserves the word -
+        // and circuit.export_png rides beside it as the second text
+        // button (the icon set has no picture glyph, and "Export PNG"
+        // says what it does in two words).
         shell_->set_toolbar_icons({
             {"shell.new_document", gui::Icon::document},
             {"shell.open_document", gui::Icon::folder},
@@ -1001,6 +1006,21 @@ class CircsimApp final : public ws::ui::App {
         json_cmd.execute = [this](std::string_view) { export_run(true); };
         add(std::move(json_cmd));
 
+        // The schematic's own picture: the same raster the CLI's png
+        // subcommand serves (ws::circsim::render_schematic_png - one
+        // composition, four surfaces), written beside the document
+        // under the results exports' own stem rule. Synchronous on
+        // the ui thread by the same discipline as run_erc and
+        // export_run: the simulate job owns a snapshot, so the live
+        // schematic is only ever read here.
+        Command png_cmd;
+        png_cmd.id = "circuit.export_png";
+        png_cmd.label = "Export PNG";
+        png_cmd.category = "Circuit";
+        png_cmd.enabled = [this] { return editor_.schem() != nullptr; };
+        png_cmd.execute = [this](std::string_view) { export_png(); };
+        add(std::move(png_cmd));
+
         Command about_cmd;
         about_cmd.id = "app.about";
         about_cmd.label = "About circsim editor";
@@ -1373,6 +1393,44 @@ class CircsimApp final : public ws::ui::App {
         const ws::core::Status done = doc_fs().write(path, body);
         if (done.has_value()) {
             editor_.toast("Results exported to " + path,
+                          gui::ToastSeverity::info);
+        } else {
+            editor_.toast("Export failed: " + done.error().message,
+                          gui::ToastSeverity::error);
+        }
+    }
+
+    // The schematic as a PNG: the toolbar's Export PNG button and the
+    // Circuit menu's row ride this. The same stem rule as the results
+    // exports (beside the document, the .csim's own name) with the
+    // CLI's default resolution (24 px per grid unit); the bytes go
+    // through doc_fs().write's binary-mode stream, and the toast
+    // answers the same pair.
+    void export_png() {
+        if (editor_.schem() == nullptr || editor_.doc == nullptr) {
+            return;
+        }
+        std::string stem = editor_.doc->path();
+        if (stem.empty()) {
+            stem = "circsim-schematic";
+        } else {
+            const std::size_t slash = stem.find_last_of("/\\");
+            const std::size_t dot = stem.find_last_of('.');
+            if (dot != std::string::npos &&
+                (slash == std::string::npos || dot > slash)) {
+                stem.resize(dot);
+            }
+            if (stem.empty() ||
+                (slash != std::string::npos && dot == slash + 1u)) {
+                stem = "circsim-schematic";
+            }
+        }
+        const std::string path = stem + ".png";
+        const std::string png = ws::circsim::render_schematic_png(
+            *editor_.schem(), &editor_.library, ws::circsim::PngOptions{});
+        const ws::core::Status done = doc_fs().write(path, png);
+        if (done.has_value()) {
+            editor_.toast("Schematic exported to " + path,
                           gui::ToastSeverity::info);
         } else {
             editor_.toast("Export failed: " + done.error().message,

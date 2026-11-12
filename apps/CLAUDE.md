@@ -212,7 +212,11 @@ CMakeLists only wire ws libraries together.
   set's standard glyphs through `set_toolbar_icons`, every button
   carries a label+chord tooltip (the live binding, the menus' own
   hint text), and Simulate keeps its text button - the one act that
-  deserves the word. Redo's chords are the standard pair, Ctrl+Y
+  deserves the word - beside the second text button, Export PNG
+  (circuit.export_png: the Circuit menu's row too, the same
+  render_schematic_png the CLI's png subcommand serves, written
+  beside the document under the results exports' stem rule and
+  toasted through the same pair). Redo's chords are the standard pair, Ctrl+Y
   declared (the hints spell it) with Ctrl+Shift+Z bound as the alias (a status row with cancel, a
   summary toast, the run's mapped problems in the Problems panel, the
   tables delivered to the Results panel). The panel's draw is gated
