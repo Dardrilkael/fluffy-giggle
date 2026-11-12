@@ -9,7 +9,12 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstdlib>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <variant>
+#include <vector>
 
 #include <ws/core/assert.hpp>
 #include <ws/circsim/symbols.hpp>
@@ -187,7 +192,10 @@ std::string next_ref(const Schematic& s, const SymbolDef& sym) {
     if (sym.ref_prefix.empty()) {
         return "";
     }
-    unsigned long highest = 0;
+    // Saturating parse: strtoul wraps to ULONG_MAX (32-bit on Windows)
+    // on a long digit run, and highest + 1 then wrapped to "R0".
+    constexpr std::uint64_t kCap = 999'999'999'999ULL;
+    std::uint64_t highest = 0;
     for (const Part& p : s.parts()) {
         if (p.ref.size() <= sym.ref_prefix.size()) {
             continue;
@@ -197,15 +205,17 @@ std::string next_ref(const Schematic& s, const SymbolDef& sym) {
         }
         const std::string tail = p.ref.substr(sym.ref_prefix.size());
         bool digits = true;
+        std::uint64_t value = 0;
         for (const char c : tail) {
             if (std::isdigit(static_cast<unsigned char>(c)) == 0) {
                 digits = false;
                 break;
             }
+            value = std::min(kCap, value * 10u +
+                                       static_cast<std::uint64_t>(c - '0'));
         }
         if (digits) {
-            highest =
-                std::max(highest, std::strtoul(tail.c_str(), nullptr, 10));
+            highest = std::max(highest, value);
         }
     }
     return sym.ref_prefix + std::to_string(highest + 1);
@@ -456,11 +466,20 @@ std::optional<WirePointSnap> hit_wire_point(const Schematic& s,
                                    : 0.0;
             t = std::max(0.0, std::min(1.0, t));
             const Pos proj{a.x + t * ab.x, a.y + t * ab.y};
-            // Snap the projection to the fine grid; for an ortho
-            // segment one coordinate is the segment's stationary
-            // value (already grid-aligned) and snaps to itself, the
-            // other rounds to the nearest grid line.
-            Pos cand{snap_one(proj.x), snap_one(proj.y)};
+            // Snap the projection to the fine grid. For an ortho
+            // segment the stationary coordinate is the wire's own and
+            // is kept EXACT (it may be off the lattice - an off-grid
+            // pin, a grid change - and snapping it moved the candidate
+            // off the wire, forcing the endpoint fallback below); only
+            // the running coordinate rounds to a grid line.
+            Pos cand;
+            if (ab.x == 0.0) {
+                cand = Pos{a.x, snap_one(proj.y)};
+            } else if (ab.y == 0.0) {
+                cand = Pos{snap_one(proj.x), a.y};
+            } else {
+                cand = Pos{snap_one(proj.x), snap_one(proj.y)};
+            }
             // Verify cand lies on segment ab with exact equality
             // (the same on_segment nets.cpp runs). If not, the grid
             // snap drifted off the segment - use the nearer endpoint.
@@ -591,9 +610,17 @@ std::vector<WireRoute> attached_wire_routes(const Schematic& s,
                 last.y = path.back().y;
             }
         }
+        // The slide can leave a zero-length or collinear waypoint
+        // (a part dropped exactly in line); fold those out so they
+        // never ride into the .csim.
+        std::vector<Pos> full;
+        full.reserve(mid.size() + 2u);
+        full.push_back(path.front());
+        full.insert(full.end(), mid.begin(), mid.end());
+        full.push_back(path.back());
         WireRoute r;
         r.wire = w.id;
-        r.waypoints = std::move(mid);
+        r.waypoints = fold_interior(full);
         out.push_back(std::move(r));
     }
     return out;
