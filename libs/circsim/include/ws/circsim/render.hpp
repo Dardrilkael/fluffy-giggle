@@ -48,7 +48,16 @@ struct SymbolStroke {
 // opposite the pin's own direction - the .csym safety net for symbols
 // whose prims fall short of their pins. Malformed prims (a line without
 // two points, a circle without a center) are skipped, not repaired.
+//
+// `switch_closed` interpolates the SwitchBlade (when the symbol carries
+// one) from open (0.0) to closed (1.0): the endpoints render verbatim,
+// between them the tip sweeps the angle (shortest rotational path) and
+// radius about the pivot, then the placement's transform folds in
+// exactly like every static vertex. Every static consumer (the SVG
+// dump, the PNG export, the palette) passes nothing - the blade at
+// rest. A symbol without a blade ignores the value.
 [[nodiscard]] std::vector<SymbolStroke> render_symbol(
-    const SymbolDef& sym, const Part& placement);
+    const SymbolDef& sym, const Part& placement,
+    double switch_closed = 0.0);
 
 }  // namespace ws::circsim

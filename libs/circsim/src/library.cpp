@@ -546,6 +546,33 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
                 origin));
         }
     }
+    // The animated blade (the S/W switch's moving contact): three
+    // [x, y] pairs - the pivot contact and the tip's open/closed
+    // endpoints. A malformed blade (a missing endpoint, a non-array)
+    // drops to the static picture, never a half-animated one.
+    if (const json::Value* v = o.find("blade"); v != nullptr) {
+        bool blade_ok = false;
+        if (v->is_object()) {
+            const json::Object* bo = v->as_object();
+            const auto pivot = as_pos(bo->find("pivot"));
+            const auto open_tip = as_pos(bo->find("open"));
+            const auto closed_tip = as_pos(bo->find("closed"));
+            if (pivot.has_value() && open_tip.has_value() &&
+                closed_tip.has_value()) {
+                r.def.blade = SwitchBlade{.pivot = *pivot,
+                                          .open_tip = *open_tip,
+                                          .closed_tip = *closed_tip};
+                blade_ok = true;
+            }
+        }
+        if (!blade_ok) {
+            diags.push_back(make_diag(
+                Severity::Warning, "circsim.symbols.bad_field",
+                "symbol '" + k + "': 'blade' needs pivot, open and closed"
+                                " [x, y] pairs; ignored",
+                origin));
+        }
+    }
     if (const json::Value* pins = o.find("pins");
         pins != nullptr && pins->is_array()) {
         for (const json::Value& e : *pins->as_array()) {
@@ -658,6 +685,7 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
         if (field != "key" && field != "name" && field != "spice" &&
             field != "ref" && field != "fixed_net" && field != "value" &&
             field != "model" && field != "model_kind" &&
+            field != "blade" &&
             field != "pins" && field != "emit" &&
             field != "cards" && field != "params" && field != "draw") {
             r.def.unknown.set(field, val);
@@ -839,6 +867,16 @@ std::string SymbolLibrary::save(bool include_builtin) const {
         // classic .csym stays byte-identical.
         if (!s.model_kind.empty()) {
             o.set("model_kind", json::Value::text(s.model_kind));
+        }
+        // The blade rides only when the symbol carries one (the s/w
+        // switches and a .csym that authors one), same rule as the
+        // kind: classic .csym files stay byte-identical.
+        if (s.blade.has_value()) {
+            json::Object bl;
+            bl.set("pivot", pos_value(s.blade->pivot));
+            bl.set("open", pos_value(s.blade->open_tip));
+            bl.set("closed", pos_value(s.blade->closed_tip));
+            o.set("blade", json::Value::object(std::move(bl)));
         }
         json::Array emit;
         for (const ParamEmit& pe : s.emit) {

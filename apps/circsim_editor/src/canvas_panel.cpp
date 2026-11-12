@@ -1439,9 +1439,36 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                 rc.fill_circle(center, 0.22f, gui::dim(hue, glow));
             }
         }
+        // The switch blade (the LED glow's mechanical sibling): the
+        // run's answer at the playhead - the S/W device's own
+        // hysteresis walk over the control column (overlay.hpp) - eases
+        // the blade from its open rest onto the mate contact. A switch
+        // reads as a switch the same ~120 ms; instant when the theme's
+        // motion is off. No run, no control column, no model card: the
+        // target is open - the static picture every other surface
+        // (the palette, the ghost, the PNG export) draws too.
+        double blade_closed = 0.0;
+        if (sym != nullptr && sym->blade.has_value()) {
+            double target = 0.0;
+            if (rp.table != nullptr) {
+                const ws::circsim::OverlaySwitch sw = ws::circsim::overlay_switch(
+                    *rp.table, ed.results.map, ed.results.nets, s, p, *sym,
+                    ed.playback.t);
+                if (sw.known && sw.closed) {
+                    target = 1.0;
+                }
+            }
+            char blade_id[32];
+            std::snprintf(blade_id, sizeof blade_id,
+                          "switch blade %u", p.id);
+            blade_closed = static_cast<double>(gui.animate_toward(
+                gui.ids().internal_id(blade_id),
+                static_cast<float>(target),
+                theme.anim_enabled ? 0.12f : 0.0f));
+        }
         if (sym != nullptr) {
             draw_symbol(rc, *sym, p.pos, p.rot, p.mirror, body_paint,
-                        theme.text, theme.font);
+                        theme.text, theme.font, blade_closed);
         } else {
             // An unknown symbol: the origin cross, so the object is
             // still visible and selectable (ERC has flagged it).

@@ -683,12 +683,18 @@ const std::vector<SymbolDef>& table() {
             s.model_kind = "sw";
             s.params = {spec(ParamSpec::Type::Text, "model", "Model")};
             s.emit = {ParamEmit{.key = "model", .optional = false}};
+            // The blade is the animated half (SwitchBlade): the pivot
+            // and mate contacts stay static dots, the swinging stroke
+            // eases open->closed with the run's answer (render.hpp).
+            s.blade = SwitchBlade{.pivot = Pos{-1.2, 0.0},
+                                  .open_tip = Pos{0.9, 0.95},
+                                  .closed_tip = Pos{1.2, 0.0}};
             s.draw = {// the body the contact sits in
                       rect(-2.5, -2.0, 2.5, 2.0),
-                      // the switched path: lead, contact dot, the open
-                      // blade, contact dot, lead
+                      // the switched path: lead, contact dot, the
+                      // blade (SwitchBlade), contact dot, lead
                       line(-5.0, 0.0, -1.2, 0.0), dot(-1.2, 0.0, 0.14),
-                      line(-1.2, 0.0, 0.9, 0.95), dot(1.2, 0.0, 0.14),
+                      dot(1.2, 0.0, 0.14),
                       line(1.2, 0.0, 5.0, 0.0),
                       // the control pair rises into the box from below
                       line(2.0, -4.0, 2.0, -2.0), line(-2.0, -4.0, -2.0, -2.0),
@@ -713,9 +719,13 @@ const std::vector<SymbolDef>& table() {
                         spec(ParamSpec::Type::Text, "model", "Model")};
             s.emit = {ParamEmit{.key = "vs", .prefix = "", .optional = false},
                       ParamEmit{.key = "model", .optional = false}};
+            // The same blade as the S switch, compact (SwitchBlade).
+            s.blade = SwitchBlade{.pivot = Pos{-0.9, 0.0},
+                                  .open_tip = Pos{0.6, 0.8},
+                                  .closed_tip = Pos{0.9, 0.0}};
             s.draw = {// the same contact as the S switch, compact
                       line(-3.0, 0.0, -0.9, 0.0), dot(-0.9, 0.0, 0.14),
-                      line(-0.9, 0.0, 0.6, 0.8), dot(0.9, 0.0, 0.14),
+                      dot(0.9, 0.0, 0.14),
                       line(0.9, 0.0, 3.0, 0.0), text(0.55, 1.5, "W")};
             return s;
         }(),

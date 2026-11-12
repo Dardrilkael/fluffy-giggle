@@ -1253,6 +1253,111 @@ TEST_CASE("the LED glows with the run's current") {
     }
 }
 
+// The switch blade's stroke: the 2-point polyline whose points are the
+// w2s answers of the blade's pivot and the asked-for tip (open or
+// closed), matched by content like wire_cmd - the canvas stream holds
+// plenty of 2-point polylines (the symbol's own leads among them), but
+// only the blade ENDS on the pivot.
+[[nodiscard]] const canvas::CanvasCmd* blade_cmd(
+    const Bench& b, const ws::circsim::Part& p, Pos tip_local) {
+    const ws::circsim::Pos pivot_w =
+        ws::circsim::transform_pos(p, Pos{-1.2, 0.0});
+    const ws::circsim::Pos tip_w =
+        ws::circsim::transform_pos(p, tip_local);
+    const ws::math::Vec2 pv = b.ed.view.w2s(pivot_w);
+    const ws::math::Vec2 tv = b.ed.view.w2s(tip_w);
+    for (const canvas::CanvasCmd& cmd : b.clc.cmds) {
+        if (cmd.kind != canvas::CanvasCmdKind::stroke_polyline ||
+            cmd.points.size() != 2u) {
+            continue;
+        }
+        if (vec2_near(cmd.points[0], pv, 0.01f) &&
+            vec2_near(cmd.points[1], tv, 0.01f)) {
+            return &cmd;
+        }
+    }
+    return nullptr;
+}
+
+TEST_CASE("the switch blade throws with the run's answer") {
+    // The LED glow's mechanical sibling: an S switch whose control pair
+    // rides a .dc-swept source. sw_ideal closes above 0 V, so the
+    // blade rests open before any run and at the sweep's start, and
+    // lands on the mate contact at the sweep's end - the transport's
+    // playhead driving the same walk the device ran. Motion is off:
+    // the ease snaps, exactly the LED test's own rule.
+    //
+    // The layout keeps every wire's ortho corridor clear of every
+    // other pin (a pin riding another wire's path is a silent join -
+    // the nets would merge and the test would lie): the control source
+    // sits below c+ with its + lead pointing left into open space, c-
+    // drops straight onto its own ground.
+    Bench b;
+    b.theme.anim_enabled = false;
+    // The switched path: V2 -> S1 -> R1 -> ground, and V2's return.
+    ws::circsim::Part* v2 = b.doc.schem.add_part(
+        ws::circsim::Part::make("v", "V2", "5", {-2.0, 6.0}));
+    ws::circsim::Part* sw = b.doc.schem.add_part(
+        ws::circsim::Part::make("s", "S1", "", {10.0, 6.0}));
+    sw->params["model"] = "sw_ideal";
+    ws::circsim::Part* r1 = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "1k", {20.0, 6.0}));
+    ws::circsim::Part* g1 = b.doc.schem.add_part(
+        ws::circsim::Part::make("gnd", "", "", {-5.0, 3.0}));
+    ws::circsim::Part* g2 = b.doc.schem.add_part(
+        ws::circsim::Part::make("gnd", "", "", {23.0, 3.0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{v2->id, 1}, ws::circsim::PinRef{sw->id, 0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{sw->id, 1}, ws::circsim::PinRef{r1->id, 0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{r1->id, 1}, ws::circsim::PinRef{g2->id, 0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{v2->id, 0}, ws::circsim::PinRef{g1->id, 0}));
+    // The control pair: V1 (swept 0 -> 5 V) sits below c+, its minus
+    // on its own ground; c- drops onto a ground of its own.
+    ws::circsim::Part* v1 = b.doc.schem.add_part(
+        ws::circsim::Part::make("v", "V1", "0", {15.0, -2.0}));
+    ws::circsim::Part* g3 = b.doc.schem.add_part(
+        ws::circsim::Part::make("gnd", "", "", {18.0, -5.0}));
+    ws::circsim::Part* g4 = b.doc.schem.add_part(
+        ws::circsim::Part::make("gnd", "", "", {8.0, 0.0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{v1->id, 0}, ws::circsim::PinRef{sw->id, 2}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{v1->id, 1}, ws::circsim::PinRef{g3->id, 0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{sw->id, 3}, ws::circsim::PinRef{g4->id, 0}));
+    b.doc.schem.analysis.entries.push_back(ws::circsim::DcSpec{
+        .source = "V1", .start = 0.0, .stop = 5.0, .step = 0.5});
+
+    // No run yet: the blade rests open - the authored static picture.
+    b.draw();
+    REQUIRE(blade_cmd(b, *sw, Pos{0.9, 0.95}) != nullptr);
+    CHECK(blade_cmd(b, *sw, Pos{1.2, 0.0}) == nullptr);
+
+    // The run lands, the playhead parks at the sweep's end (5 V over
+    // sw_ideal's 0 V threshold): the blade is thrown.
+    deliver(b.ed, ws::circsim::run_schematic(b.doc.schem));
+    REQUIRE(b.ed.results.has);
+    b.draw();
+    CHECK(blade_cmd(b, *sw, Pos{0.9, 0.95}) == nullptr);
+    REQUIRE(blade_cmd(b, *sw, Pos{1.2, 0.0}) != nullptr);
+
+    // Scrub to the sweep's start: the control reads 0 V, and the walk
+    // (strictly above the threshold) keeps the contact open - the
+    // blade follows the playhead back down.
+    const ws::spice::Table* dc = b.ed.canvas_sweep_table();
+    REQUIRE(dc != nullptr);
+    const std::span<const double> axis =
+        ws::circsim::overlay_sweep_axis(*dc);
+    REQUIRE(!axis.empty());
+    b.ed.playback.t = axis.front();
+    b.draw();
+    REQUIRE(blade_cmd(b, *sw, Pos{0.9, 0.95}) != nullptr);
+    CHECK(blade_cmd(b, *sw, Pos{1.2, 0.0}) == nullptr);
+}
+
 TEST_CASE("the transport scrubs and plays the transient") {
     Bench b;
     ws::circsim::Part* v = b.doc.schem.add_part(

@@ -346,3 +346,223 @@ TEST_CASE("a .step family's leading axes never answer as the sweep") {
     // the step column's answers).
     CHECK(ws::circsim::overlay_playhead_sample(t, 2.5) == 6u);
 }
+
+// --- the switch blade's walk (the S/W contact animation) -----------------------
+
+namespace {
+
+// The walk's bench: an S switch (part 7, pins c+ on net "ctl" and c-
+// on ground) over a .tran-shaped table whose v(ctl) column is the
+// control ramp, plus the Schematic carrying the directives block and
+// the part's model param. Hand-built like every fixture here (the run
+// path is test_export's own gate).
+struct SwitchBench {
+    ws::spice::Table t;
+    SpiceExport map;
+    ws::circsim::NetList nets;
+    ws::circsim::Schematic s;
+    ws::circsim::Part p;
+    const ws::circsim::SymbolDef* sym = ws::circsim::find_symbol("s");
+
+    explicit SwitchBench(std::vector<double> control,
+                         std::string model_card = ".model mysw"
+                                                  " SW(Ron=1 Roff=1meg"
+                                                  " Vt=2 Vh=0.5)") {
+        REQUIRE(sym != nullptr);
+        t.analysis = ws::spice::AnalysisKind::Tran;
+        t.sweep = ws::spice::SweepKind::Time;
+        t.sweep_names = {"time"};
+        std::vector<double> axis;
+        for (std::size_t i = 0; i < control.size(); ++i) {
+            axis.push_back(static_cast<double>(i));
+        }
+        t.sweep_axes.push_back(std::move(axis));
+        t.signals.push_back({"v(ctl)", std::move(control)});
+
+        map.node_net["ctl"] = 10;
+
+        ws::circsim::Net ctl;
+        ctl.id = 10;
+        ctl.name = "ctl";
+        ctl.pins = {ws::circsim::PinRef{7, 2}};  // part 7, pin "c+"
+        ws::circsim::Net gnd;
+        gnd.id = 11;
+        gnd.name = "0";
+        gnd.is_ground = true;
+        gnd.pins = {ws::circsim::PinRef{7, 3}};  // pin "c-"
+        nets.nets.push_back(ctl);
+        nets.nets.push_back(gnd);
+        nets.index();
+
+        s.directives = std::move(model_card);
+        p.id = 7;
+        p.symbol = "s";
+        p.ref = "S1";
+        p.params["model"] = "mysw";
+    }
+};
+
+}  // namespace
+
+TEST_CASE("the S switch walks the device's hysteresis law") {
+    // Vt=2, Vh=0.5: on above 2.5, off below 1.5, sticky in between -
+    // exactly devices_m2's hysteresis_flip. The ramp crosses up,
+    // holds inside the band, falls out, crosses back.
+    SwitchBench b({0.0, 2.0, 2.6, 2.2, 1.4, 2.6});
+    const ws::circsim::OverlaySwitch open =
+        ws::circsim::overlay_switch(b.t, b.map, b.nets, b.s, b.p, *b.sym,
+                                    1.0);
+    CHECK(open.known);
+    CHECK_FALSE(open.closed);  // 2.0 sits in the band, sticky from open
+    const ws::circsim::OverlaySwitch shut =
+        ws::circsim::overlay_switch(b.t, b.map, b.nets, b.s, b.p, *b.sym,
+                                    2.0);
+    CHECK(shut.known);
+    CHECK(shut.closed);  // 2.6 crosses 2.5
+    const ws::circsim::OverlaySwitch held =
+        ws::circsim::overlay_switch(b.t, b.map, b.nets, b.s, b.p, *b.sym,
+                                    3.0);
+    CHECK(held.known);
+    CHECK(held.closed);  // 2.2 inside the band, sticky from closed
+    const ws::circsim::OverlaySwitch dropped =
+        ws::circsim::overlay_switch(b.t, b.map, b.nets, b.s, b.p, *b.sym,
+                                    4.0);
+    CHECK(dropped.known);
+    CHECK_FALSE(dropped.closed);  // 1.4 falls below 1.5
+    const ws::circsim::OverlaySwitch again =
+        ws::circsim::overlay_switch(b.t, b.map, b.nets, b.s, b.p, *b.sym,
+                                    5.0);
+    CHECK(again.known);
+    CHECK(again.closed);  // 2.6 crosses back
+}
+
+TEST_CASE("the walk rests open when it cannot know") {
+    // No control column: the ctl net never lands a v(ctl) column (an
+    // .ac's small-signal spellings, say) - unknown, never a guess.
+    SwitchBench b({0.0, 3.0});
+    b.t.signals.clear();
+    b.t.signals.push_back({"re(v(ctl))", {0.0, 3.0}});
+    const ws::circsim::OverlaySwitch sw =
+        ws::circsim::overlay_switch(b.t, b.map, b.nets, b.s, b.p, *b.sym,
+                                    1.0);
+    CHECK_FALSE(sw.known);
+    CHECK_FALSE(sw.closed);
+
+    // A model no card answers: unknown (and no run would have landed
+    // anyway).
+    SwitchBench c({0.0, 3.0});
+    c.p.params["model"] = "nobody";
+    const ws::circsim::OverlaySwitch unk =
+        ws::circsim::overlay_switch(c.t, c.map, c.nets, c.s, c.p, *c.sym,
+                                    1.0);
+    CHECK_FALSE(unk.known);
+
+    // An empty table: unknown.
+    SwitchBench d({});
+    const ws::circsim::OverlaySwitch empty =
+        ws::circsim::overlay_switch(d.t, d.map, d.nets, d.s, d.p, *d.sym,
+                                    0.0);
+    CHECK_FALSE(empty.known);
+}
+
+TEST_CASE("the thresholds read the directives' card, not just the library") {
+    // A directives card named like the library's own sw_ttl but with
+    // Vt=1: the user's card wins (the export's resolution order), and
+    // the walk flips at 1, not at the library's 2.5.
+    SwitchBench b({0.0, 1.2, 2.6},
+                  ".model sw_ttl SW(Ron=1 Roff=1meg Vt=1 Vh=0)");
+    b.p.params["model"] = "sw_ttl";
+    const ws::circsim::OverlaySwitch sw =
+        ws::circsim::overlay_switch(b.t, b.map, b.nets, b.s, b.p, *b.sym,
+                                    2.0);
+    CHECK(sw.known);
+    CHECK(sw.closed);  // the directives' Vt=1, not the library's 2.5
+
+    // The same name with NO directives card: the built-in library's
+    // sw_ttl (Vt=2.5 Vh=0.4) answers, and 2.6 stays open (the band's
+    // top is 2.9).
+    SwitchBench c({0.0, 2.6});
+    c.s.directives.clear();
+    c.p.params["model"] = "sw_ttl";
+    const ws::circsim::OverlaySwitch lib_low =
+        ws::circsim::overlay_switch(c.t, c.map, c.nets, c.s, c.p, *c.sym,
+                                    1.0);
+    CHECK(lib_low.known);
+    CHECK_FALSE(lib_low.closed);
+    SwitchBench d({0.0, 3.0});
+    d.s.directives.clear();
+    d.p.params["model"] = "sw_ttl";
+    const ws::circsim::OverlaySwitch lib_high =
+        ws::circsim::overlay_switch(d.t, d.map, d.nets, d.s, d.p, *d.sym,
+                                    1.0);
+    CHECK(lib_high.known);
+    CHECK(lib_high.closed);  // 3.0 crosses the library's 2.9
+}
+
+TEST_CASE("the card's spelling tolerance: spaced and continued params") {
+    // "Vt = 2" across tokens and a '+' continuation line - the real
+    // deck reader's own tolerance, the same cards the run would read.
+    SwitchBench b({0.0, 2.6},
+                  ".model spaced SW(Ron = 1 Roff = 1meg\n+ Vt = 2"
+                  " Vh = 0.5)");
+    b.p.params["model"] = "spaced";
+    const ws::circsim::OverlaySwitch sw =
+        ws::circsim::overlay_switch(b.t, b.map, b.nets, b.s, b.p, *b.sym,
+                                    1.0);
+    CHECK(sw.known);
+    CHECK(sw.closed);  // 2.6 against Vt=2, Vh=0.5: over the top
+}
+
+TEST_CASE("the W switch walks the controlling source's current") {
+    // The W card reads It/Ih; the control is the named V source's
+    // branch column. sw_ideal closes above 1 mA.
+    const ws::circsim::SymbolDef* w = ws::circsim::find_symbol("w");
+    REQUIRE(w != nullptr);
+    ws::spice::Table t;
+    t.analysis = ws::spice::AnalysisKind::Tran;
+    t.sweep = ws::spice::SweepKind::Time;
+    t.sweep_names = {"time"};
+    t.sweep_axes.push_back({0.0, 1.0, 2.0});
+    t.signals.push_back({"i(V1)", {0.0, 0.5e-3, 2.0e-3}});
+    SpiceExport map;
+    map.node_net["n1"] = 10;
+    map.element_part["V1"] = 5;
+    ws::circsim::NetList nets;  // the W reads no nets: empty is honest
+    ws::circsim::Schematic s;
+    ws::circsim::Part p;
+    p.id = 8;
+    p.symbol = "w";
+    p.ref = "W1";
+    p.params["vs"] = "V1";
+    p.params["model"] = "sw_ideal";
+
+    const ws::circsim::OverlaySwitch low =
+        ws::circsim::overlay_switch(t, map, nets, s, p, *w, 1.0);
+    CHECK(low.known);
+    CHECK_FALSE(low.closed);  // 0.5 mA < 1 mA
+    const ws::circsim::OverlaySwitch high =
+        ws::circsim::overlay_switch(t, map, nets, s, p, *w, 2.0);
+    CHECK(high.known);
+    CHECK(high.closed);  // 2 mA crosses
+
+    // The param's spelling may differ in case from the deck's: the
+    // map's CiLess lookup finds the column the table actually named.
+    p.params["vs"] = "v1";
+    const ws::circsim::OverlaySwitch ci =
+        ws::circsim::overlay_switch(t, map, nets, s, p, *w, 2.0);
+    CHECK(ci.known);
+    CHECK(ci.closed);
+}
+
+TEST_CASE("a .op's single row answers the settled state") {
+    SwitchBench b({3.0});
+    b.t.analysis = ws::spice::AnalysisKind::Op;
+    b.t.sweep = ws::spice::SweepKind::None;
+    b.t.sweep_names.clear();
+    b.t.sweep_axes.clear();
+    const ws::circsim::OverlaySwitch sw =
+        ws::circsim::overlay_switch(b.t, b.map, b.nets, b.s, b.p, *b.sym,
+                                    123.0 /* any playhead: settled */);
+    CHECK(sw.known);
+    CHECK(sw.closed);  // 3.0 over Vt+Vh = 2.5
+}

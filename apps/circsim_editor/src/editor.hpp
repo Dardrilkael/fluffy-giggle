@@ -1124,10 +1124,14 @@ struct Editor {
 // strokes to canvas calls. The pin-lead safety net rides the seam: a
 // pin no prim vertex touches gets a stub into the body (the .csym
 // path's net for symbols whose prims fall short of their pins).
+// `switch_closed` (0 = open, 1 = closed) eases the SwitchBlade the
+// s/w symbols carry; every static caller (the ghost, the palette
+// preview) passes nothing and draws the blade at rest.
 void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
                  Pos pos, int rot, bool mirror,
                  const canvas::Paint& body, std::uint32_t text_color,
-                 const ws::ui::r2d::Font* font);
+                 const ws::ui::r2d::Font* font,
+                 double switch_closed = 0.0);
 
 // The data-color wheel every colored series in the app shares (i mod N,
 // the scope's rule): the Results plot's signals and the canvas's per-NET

@@ -470,3 +470,84 @@ TEST_CASE("malformed prims are skipped, not repaired") {
         render_symbol(s, placement(Pos{0.0, 0.0}));
     CHECK(out.empty());
 }
+
+TEST_CASE("the switch blade renders open by default and eases to closed") {
+    // The s symbol's moving contact (SwitchBlade): every static
+    // consumer passes nothing and must see the authored open rest -
+    // bit-identical to the line the old static table drew, pivot to
+    // (0.9, 0.95). switch_closed 1.0 lands the tip verbatim on the
+    // mate contact, and the halves between sweep the angle monotonics
+    // (the tip rises off the open end, falls onto the closed one).
+    const SymbolDef* s = ws::circsim::find_symbol("s");
+    REQUIRE(s != nullptr);
+    REQUIRE(s->blade.has_value());
+
+    const std::vector<SymbolStroke> open =
+        render_symbol(*s, placement(Pos{0.0, 0.0}));
+    // The blade is one Line with its pivot exactly on the first
+    // contact dot's spot.
+    const SymbolStroke* blade = nullptr;
+    for (const SymbolStroke& st : open) {
+        if (st.kind == SymbolStroke::Kind::Line &&
+            st.pts.size() == 2u && st.pts[0].x == -1.2 &&
+            st.pts[0].y == 0.0 && st.pts[1].y > 0.0) {
+            blade = &st;
+        }
+    }
+    REQUIRE(blade != nullptr);
+    CHECK(pts_eq(*blade, 1, Pos{0.9, 0.95}));  // the authored rest, exact
+
+    const std::vector<SymbolStroke> closed =
+        render_symbol(*s, placement(Pos{0.0, 0.0}), 1.0);
+    const SymbolStroke* thrown = nullptr;
+    for (const SymbolStroke& st : closed) {
+        if (st.kind == SymbolStroke::Kind::Line &&
+            st.pts.size() == 2u && st.pts[0].x == -1.2 &&
+            st.pts[0].y == 0.0) {
+            thrown = &st;
+        }
+    }
+    REQUIRE(thrown != nullptr);
+    CHECK(pts_eq(*thrown, 1, Pos{1.2, 0.0}));  // the mate contact, exact
+
+    // The half-thrown blade: between the two tips, above the axis, at
+    // a shorter angle than the open rest.
+    const std::vector<SymbolStroke> half =
+        render_symbol(*s, placement(Pos{0.0, 0.0}), 0.5);
+    const SymbolStroke* mid = nullptr;
+    for (const SymbolStroke& st : half) {
+        if (st.kind == SymbolStroke::Kind::Line && st.pts.size() == 2u &&
+            st.pts[0].x == -1.2 && st.pts[0].y == 0.0) {
+            mid = &st;
+        }
+    }
+    REQUIRE(mid != nullptr);
+    CHECK(mid->pts[1].y > 0.0);           // still up off the axis
+    CHECK(mid->pts[1].y < 0.95);          // but below the open tip
+    CHECK(mid->pts[1].x > -1.2);          // and sweeping toward the mate
+
+    // Mirror folds into the moving tip exactly as it does into every
+    // static vertex: the mirrored blade swings the other way, same
+    // interpolation, the transform never sees a special case.
+    const std::vector<SymbolStroke> mirrored =
+        render_symbol(*s, placement(Pos{0.0, 0.0}, 0, true), 0.5);
+    const SymbolStroke* mm = nullptr;
+    for (const SymbolStroke& st : mirrored) {
+        if (st.kind == SymbolStroke::Kind::Line && st.pts.size() == 2u &&
+            st.pts[0].x == 1.2 && st.pts[0].y == 0.0) {
+            mm = &st;
+        }
+    }
+    REQUIRE(mm != nullptr);
+    CHECK(mm->pts[1].y == doctest::Approx(mid->pts[1].y).epsilon(1e-9));
+    CHECK(mm->pts[1].x ==
+          doctest::Approx(-mid->pts[1].x).epsilon(1e-9));
+    CHECK(mm->pts[0].y == 0.0);
+
+    // A symbol with no blade ignores the value: the resistor's single
+    // zigzag answers whatever switch_closed says.
+    const SymbolDef* r = ws::circsim::find_symbol("r");
+    REQUIRE(r != nullptr);
+    CHECK(render_symbol(*r, placement(Pos{0.0, 0.0}), 0.7).size() ==
+          render_symbol(*r, placement(Pos{0.0, 0.0})).size());
+}

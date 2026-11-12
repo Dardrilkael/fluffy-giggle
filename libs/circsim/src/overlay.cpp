@@ -8,8 +8,17 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
+#include <string>
+#include <vector>
 
+#include <ws/spice/deck.hpp>
+#include <ws/spice/parse.hpp>
+
+#include <ws/circsim/models.hpp>
 #include <ws/circsim/plot.hpp>
+
+#include "util.hpp"
 
 namespace ws::circsim {
 
@@ -38,6 +47,122 @@ namespace {
         }
     }
     return best;
+}
+
+// --- the S/W model's thresholds (the blade walk's constants) -------------------
+
+// What one .model SW card says: the S reads Vt/Vh, the W It/Ih.
+struct SwThresholds {
+    double vt = 0.0;
+    double vh = 0.0;
+    double it = 0.0;
+    double ih = 0.0;
+};
+
+// The param tokens of one .model card -> the thresholds. The walk over
+// the tokens mirrors the SW device's own apply_model (devices_m2):
+// paren glue "(Ron=1" / "Roff=1meg)", "key=value" one token, "key
+// value" across two, "key = value" across three. Values ride
+// parse_number ("2.5", "0.4m", "1meg"); a token that cannot spell a
+// number makes the whole card unusable (the run would have said the
+// same). Keys the blade does not read (Ron/Roff) are consumed and
+// skipped - only the thresholds answer here.
+[[nodiscard]] std::optional<SwThresholds> sw_thresholds_of(
+    const std::vector<ws::spice::Token>& toks) {
+    SwThresholds out;
+    for (std::size_t i = 0; i < toks.size(); ++i) {
+        std::string text = toks[i].text;
+        while (!text.empty() && text.front() == '(') {
+            text.erase(text.begin());
+        }
+        while (!text.empty() && text.back() == ')') {
+            text.pop_back();
+        }
+        if (text.empty()) {
+            continue;
+        }
+        std::string key;
+        std::string value;
+        const std::size_t eq = text.find('=');
+        if (eq != std::string::npos && eq > 0) {
+            key = lower(text.substr(0, eq));
+            value = text.substr(eq + 1);
+        } else {
+            key = lower(text);
+            std::size_t next = i + 1;
+            if (next < toks.size() && toks[next].text == "=") {
+                ++next;
+            }
+            if (next >= toks.size()) {
+                return std::nullopt;  // a key without a value
+            }
+            value = toks[next].text;
+            i = next;
+        }
+        while (!value.empty() && value.back() == ')') {
+            value.pop_back();
+        }
+        const ws::core::Result<double> r = ws::spice::parse_number(value);
+        if (!r) {
+            return std::nullopt;
+        }
+        if (key == "vt") {
+            out.vt = *r;
+        } else if (key == "vh") {
+            out.vh = *r;
+        } else if (key == "it") {
+            out.it = *r;
+        } else if (key == "ih") {
+            out.ih = *r;
+        }
+        // Ron/Roff and friends: consumed, not answered.
+    }
+    return out;
+}
+
+// The thresholds of the model `name` names, in the export's own
+// resolution order: the directives block's card first (the user's own
+// wins), else the built-in model library's card, else nothing. Both
+// spellings go through ws::spice's real deck reader - continuations,
+// comments and glued parens read exactly as the run read them. (An
+// .include inside directives resolves through the RUN's own resolver,
+// which this walk does not carry: such a card answers nothing here and
+// the blade rests open - the honest degradation, never a wrong flip.)
+[[nodiscard]] std::optional<SwThresholds> sw_thresholds_for(
+    const Schematic& s, const std::string& name) {
+    const auto from_deck_text = [&name](const std::string& text) {
+        // Line 1 of a deck is its title - the leading comment keeps
+        // the first real card off it.
+        const auto read =
+            ws::spice::read_deck("switch overlay", "* overlay\n" + text,
+                                 ws::spice::ParseOptions{});
+        if (!read) {
+            return std::optional<SwThresholds>{};
+        }
+        std::vector<ws::spice::Warning> warnings;
+        const auto ast = ws::spice::build_deck_ast(*read, warnings);
+        if (!ast) {
+            return std::optional<SwThresholds>{};
+        }
+        for (const ws::spice::ModelDef& m : ast->models) {
+            if (lower(m.name.text) == lower(name) && m.type == "sw") {
+                return sw_thresholds_of(m.params);
+            }
+        }
+        return std::optional<SwThresholds>{};
+    };
+    if (!s.directives.empty()) {
+        if (const std::optional<SwThresholds> t =
+                from_deck_text(s.directives);
+            t.has_value()) {
+            return t;
+        }
+    }
+    if (const ModelCard* card = find_builtin_model(name);
+        card != nullptr) {
+        return from_deck_text(card->text);
+    }
+    return std::nullopt;
 }
 
 }  // namespace
@@ -226,6 +351,143 @@ OverlaySnapshot overlay_snapshot(const ws::spice::Table& t,
     }
     snap.ok = !snap.volts.empty();
     return snap;
+}
+
+OverlaySwitch overlay_switch(const ws::spice::Table& t,
+                             const SpiceExport& map, const NetList& nets,
+                             const Schematic& s, const Part& p,
+                             const SymbolDef& sym, double playhead) {
+    OverlaySwitch out;  // unknown -> the blade rests open
+    if (t.row_count() == 0) {
+        return out;
+    }
+    const std::size_t sample = overlay_playhead_sample(t, playhead);
+
+    // The control signal, resolved onto its column pair: v(c+) - v(c-)
+    // for an S (the pins by name, the nets through the run's own
+    // build, ground answering 0 V), i(<vs>) for a W (the deck's own
+    // spelling - element_part is CiLess, so a differently-cased param
+    // still finds the column the table actually named).
+    std::span<const double> pos;
+    std::span<const double> neg;
+    std::span<const double> cur;
+    double thr = 0.0;
+    double band = 0.0;
+    if (sym.spice_letter == 'S') {
+        const auto pin_index = [&](const char* name) {
+            for (std::size_t i = 0; i < sym.pins.size(); ++i) {
+                if (sym.pins[i].name == name) {
+                    return static_cast<int>(i);
+                }
+            }
+            return -1;
+        };
+        const int cp = pin_index("c+");
+        const int cn = pin_index("c-");
+        if (cp < 0 || cn < 0) {
+            return out;  // not this shape (a .csym rename): rest open
+        }
+        // net id -> node token, inverted once (overlay_snapshot's own
+        // rule: the first token a net answers wins).
+        const auto column_of = [&](std::uint32_t pin_index_u,
+                                   std::span<const double>& col) {
+            const Net* n = nets.net_of_pin(
+                PinRef{p.id, pin_index_u});
+            if (n == nullptr) {
+                return false;  // the pin joins no net (ERC's story)
+            }
+            if (n->is_ground) {
+                return true;  // 0 V: no v(0) column exists, and none is
+                              // needed - the span stays empty and reads 0
+            }
+            for (const auto& [tok, net_id] : map.node_net) {
+                if (net_id == n->id) {
+                    col = t.signal("v(" + tok + ")");
+                    return !col.empty();
+                }
+            }
+            return false;
+        };
+        if (!column_of(static_cast<std::uint32_t>(cp), pos) ||
+            !column_of(static_cast<std::uint32_t>(cn), neg)) {
+            return out;
+        }
+    } else if (sym.spice_letter == 'W') {
+        const auto vs = p.params.find("vs");
+        if (vs == p.params.end() || vs->second.empty()) {
+            return out;
+        }
+        cur = t.signal("i(" + vs->second + ")");
+        if (cur.empty()) {
+            const auto it = map.element_part.find(vs->second);
+            if (it != map.element_part.end()) {
+                cur = t.signal("i(" + it->first + ")");
+            }
+        }
+        if (cur.empty()) {
+            return out;
+        }
+    } else {
+        return out;  // not a switch the walk speaks
+    }
+
+    // The thresholds: the model the part names, in the export's own
+    // resolution order.
+    const auto model = p.params.find("model");
+    if (model == p.params.end() || model->second.empty()) {
+        return out;  // ERC's missing_model is the story; no run anyway
+    }
+    const std::optional<SwThresholds> th =
+        sw_thresholds_for(s, model->second);
+    if (!th.has_value()) {
+        return out;
+    }
+    if (sym.spice_letter == 'S') {
+        thr = th->vt;
+        band = th->vh;
+    } else {
+        thr = th->it;
+        band = th->ih;
+    }
+
+    // The walk itself - the device's exact hysteresis law
+    // (devices_m2's hysteresis_flip), sample 0 through the playhead's,
+    // starting open (the export writes no ic=on). A ground pin's empty
+    // span reads 0 V (no v(0) column exists); any column that runs
+    // short, or a non-finite control anywhere, answers unknown rather
+    // than guess.
+    const auto read = [&](std::span<const double> col,
+                          std::size_t k) -> std::optional<double> {
+        if (col.empty()) {
+            return 0.0;  // the ground pin (column_of's own spelling)
+        }
+        if (k >= col.size()) {
+            return std::nullopt;
+        }
+        return col[k];
+    };
+    bool on = false;
+    for (std::size_t k = 0; k <= sample && k < t.row_count(); ++k) {
+        const std::optional<double> a = read(pos, k);
+        const std::optional<double> b = read(neg, k);
+        const std::optional<double> c =
+            cur.empty() ? std::optional<double>{0.0} : read(cur, k);
+        if (!a.has_value() || !b.has_value() || !c.has_value()) {
+            return out;
+        }
+        const double control = cur.empty() ? *a - *b : *c;
+        if (!std::isfinite(control)) {
+            return out;
+        }
+        if (!on && control > thr + band) {
+            on = true;
+        } else if (on && control < thr - band) {
+            on = false;
+        }
+    }
+    out.known = true;
+    out.closed = on;
+    return out;
 }
 
 }  // namespace ws::circsim

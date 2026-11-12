@@ -130,7 +130,14 @@ CMakeLists only wire ws libraries together.
   glows: its i(<element>) probe column (ws::spice's terminal-current
   save) maps through a 20 mA-full sqrt brightness into three halo
   discs under the strokes in the part's `color` param, eased ~120 ms
-  so a light reads as a light; a .tran or .dc run grows a transport
+  so a light reads as a light; the S/W switch symbols' blades animate
+  the same way - `overlay_switch` walks the device's own hysteresis
+  law over the control column (v(c+) - v(c-) for an S, i(<vs>) for a
+  W; thresholds from the directives' .model card else the built-in
+  library) from row 0 to the playhead, and the blade eases open
+  <-> closed onto the mate contact (~120 ms, instant with motion
+  off, resting open with no run - the static picture every static
+  surface draws); a .tran or .dc run grows a transport
   strip (bottom center: play/pause, a scrub bar, the axis's own
   format_eng readout - seconds for a .tran, "V1 = 3.4V" for a swept
   .dc source) whose playhead the voltages and glows follow - a

@@ -564,6 +564,105 @@ TEST_CASE("save round-trips a library and its unknowns") {
     CHECK(full.find("\"tline\"") != std::string::npos);
 }
 
+TEST_CASE("the blade rides a .csym round trip, and a broken one drops") {
+    // A .csym switch with a blade: load, read, save, reload - the
+    // geometry must survive byte-stable (the fixpoint the other fields
+    // hold). The built-in s override warns, as overrides do.
+    constexpr std::string_view kBladeLib = R"json({
+        "format": "circsim-symbols", "version": 1,
+        "symbols": [{
+            "key": "s", "name": "Switch (voltage controlled)",
+            "spice": "S", "ref": "S", "model": true, "value": false,
+            "model_kind": "sw",
+            "pins": [
+                {"name": "p", "pos": [-5.0, 0.0], "dir": 180},
+                {"name": "n", "pos": [5.0, 0.0], "dir": 0},
+                {"name": "c+", "pos": [2.0, -4.0], "dir": 270},
+                {"name": "c-", "pos": [-2.0, -4.0], "dir": 270}
+            ],
+            "emit": [{"param": "model", "optional": false}],
+            "params": [{"key": "model", "label": "Model"}],
+            "draw": [
+                {"rect": [-2.5, -2.0, 2.5, 2.0]},
+                {"line": [[-5.0, 0.0], [-1.2, 0.0]]},
+                {"dot": [-1.2, 0.0, 0.14]},
+                {"dot": [1.2, 0.0, 0.14]},
+                {"line": [[1.2, 0.0], [5.0, 0.0]]}
+            ],
+            "blade": {
+                "pivot": [-1.2, 0.0],
+                "open": [0.9, 0.95],
+                "closed": [1.2, 0.0]
+            }
+        }]
+    })json";
+    std::vector<ws::circsim::Diag> diags;
+    SymbolLibrary lib = load_ok(kBladeLib, diags);
+    const SymbolDef* s = lib.find("s");
+    REQUIRE(s != nullptr);
+    REQUIRE(s->blade.has_value());
+    CHECK(s->blade->pivot.x == doctest::Approx(-1.2));
+    CHECK(s->blade->open_tip.y == doctest::Approx(0.95));
+    CHECK(s->blade->closed_tip.x == doctest::Approx(1.2));
+    // Save keeps the blade (an override of a built-in stays on the
+    // user side of the cut), and the reload reads the same geometry.
+    const std::string once = lib.save();
+    CHECK(once.find("\"blade\"") != std::string::npos);
+    std::vector<ws::circsim::Diag> diags2;
+    const SymbolLibrary again = load_ok(once, diags2);
+    const SymbolDef* s2 = again.find("s");
+    REQUIRE(s2 != nullptr);
+    REQUIRE(s2->blade.has_value());
+    CHECK(s2->blade->pivot.x == doctest::Approx(-1.2));
+    CHECK(s2->blade->open_tip.y == doctest::Approx(0.95));
+    CHECK(s2->blade->closed_tip.x == doctest::Approx(1.2));
+    CHECK(again.save() == once);
+
+    // The built-ins' own blades ride the full dump too: the s/w pair
+    // survive a dump -> reload without losing their moving contact.
+    SymbolLibrary fresh;
+    std::vector<ws::circsim::Diag> diags3;
+    const SymbolLibrary full = load_ok(fresh.save(true), diags3);
+    const SymbolDef* sb = full.find("s");
+    REQUIRE(sb != nullptr);
+    REQUIRE(sb->blade.has_value());
+    CHECK(sb->blade->open_tip.y == doctest::Approx(0.95));
+    const SymbolDef* wb = full.find("w");
+    REQUIRE(wb != nullptr);
+    REQUIRE(wb->blade.has_value());
+
+    // A malformed blade (a missing endpoint) warns and drops to the
+    // static picture - never a half-animated symbol.
+    constexpr std::string_view kBadBladeLib = R"json({
+        "format": "circsim-symbols", "version": 1,
+        "symbols": [{
+            "key": "mytr", "name": "My throwover", "spice": "S",
+            "ref": "S",
+            "pins": [
+                {"name": "p", "pos": [-3.0, 0.0], "dir": 180},
+                {"name": "n", "pos": [3.0, 0.0], "dir": 0},
+                {"name": "c+", "pos": [2.0, -3.0], "dir": 270},
+                {"name": "c-", "pos": [-2.0, -3.0], "dir": 270}
+            ],
+            "blade": {"pivot": [-1.0, 0.0], "open": [1.0, 1.0]}
+        }]
+    })json";
+    std::vector<ws::circsim::Diag> diags4;
+    const SymbolLibrary bad = load_ok(kBadBladeLib, diags4);
+    bool saw_blade_diag = false;
+    for (const ws::circsim::Diag& d : diags4) {
+        if (d.code == "circsim.symbols.bad_field" &&
+            d.message.find("'blade'") != std::string::npos) {
+            saw_blade_diag = true;
+        }
+    }
+    CHECK(saw_blade_diag);
+    const SymbolDef* mytr = bad.find("mytr");
+    REQUIRE(mytr != nullptr);
+    CHECK(!mytr->blade.has_value());
+}
+
+
 TEST_CASE("save keeps a built-in override on the user side of the cut") {
     constexpr std::string_view wide = R"json({
         "format": "circsim-symbols", "version": 1,
@@ -834,6 +933,40 @@ TEST_CASE("the orphan-device built-ins carry the SPICE letters and specs") {
     REQUIRE(w->emit.size() == 2);
     CHECK(w->emit[0].key == "vs");
     CHECK(!w->emit[0].optional);
+
+    // The blade (the animated contact): the pivot on the first contact
+    // dot, the open tip at the end the old static line drew, the
+    // closed tip on the mate contact - and the s/w pair are the only
+    // symbols in the table that carry one.
+    REQUIRE(sw->blade.has_value());
+    CHECK(sw->blade->pivot.x == doctest::Approx(-1.2));
+    CHECK(sw->blade->pivot.y == doctest::Approx(0.0));
+    CHECK(sw->blade->open_tip.x == doctest::Approx(0.9));
+    CHECK(sw->blade->open_tip.y == doctest::Approx(0.95));
+    CHECK(sw->blade->closed_tip.x == doctest::Approx(1.2));
+    CHECK(sw->blade->closed_tip.y == doctest::Approx(0.0));
+    REQUIRE(w->blade.has_value());
+    CHECK(w->blade->pivot.x == doctest::Approx(-0.9));
+    CHECK(w->blade->pivot.y == doctest::Approx(0.0));
+    CHECK(w->blade->open_tip.x == doctest::Approx(0.6));
+    CHECK(w->blade->open_tip.y == doctest::Approx(0.8));
+    CHECK(w->blade->closed_tip.x == doctest::Approx(0.9));
+    CHECK(w->blade->closed_tip.y == doctest::Approx(0.0));
+    for (const SymbolDef& s : ws::circsim::builtin_symbols()) {
+        if (s.key != "s" && s.key != "w") {
+            INFO("symbol key: ", s.key);
+            CHECK(!s.blade.has_value());
+        }
+    }
+    // And the bounds still hold the blade's swing (symbol_bounds grew
+    // the endpoints): the s body's box spans the blade either way, so
+    // the answer is the pins' and the box's own.
+    const Bounds sb = symbol_bounds(*sw);
+    CHECK(sb.min_x == doctest::Approx(-5.0));  // the p pin
+    CHECK(sb.max_x == doctest::Approx(5.0));   // the n pin
+    CHECK(sb.min_y == doctest::Approx(-4.0));  // the c pair's pins
+    CHECK(sb.max_y == doctest::Approx(2.0));   // the body box's top
+
 
     // The coupling: deliberately pinless - it names inductors.
     const SymbolDef* k = ws::circsim::find_symbol("k");

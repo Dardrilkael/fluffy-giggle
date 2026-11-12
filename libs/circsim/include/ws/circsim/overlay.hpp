@@ -144,4 +144,42 @@ struct OverlaySnapshot {
                                                const SpiceExport& map,
                                                double playhead);
 
+// --- the switch blade's state -----------------------------------------------------
+
+// One switch's answer at a playhead: whether the S/W contact is closed
+// and whether the run could say at all. `known` is false when anything
+// the walk needs is missing - no rows, a control column the table does
+// not carry (an unwired pin, an .ac's small-signal columns), a model
+// name no .model card answers - and the caller rests the blade OPEN,
+// exactly what a switch with no run looks like.
+struct OverlaySwitch {
+    bool known = false;
+    bool closed = false;
+};
+
+// The S/W contact's state at the playhead, mirroring ws::spice's SW
+// device law exactly: the control signal walks the table's samples
+// from row 0 to the playhead's, flipping through the model's
+// hysteresis band (on above thr+band, off below thr-band, sticky in
+// between - devices_m2's hysteresis_flip, the same law the solver
+// ran), starting OPEN (the editor's export writes no ic=on). The
+// control is v(c+) - v(c-) for an S (the pins resolve through `nets`
+// onto v(token) columns; a ground pin is 0 V) and i(<vs>) for a W (the
+// named V source's branch column; the deck's own spelling is looked up
+// case-insensitively through the map when the param's differs). The
+// thresholds come from the model the part names - the directives
+// block's own card wins (export's resolution order), else the built-in
+// model library's - parsed with ws::spice's own deck reader, so a
+// hand-authored card reads with continuations and glued parens exactly
+// as the run read it. Per frame per switch on the canvas: a walk over
+// the samples to the playhead and (at most) one small deck parse, the
+// same order of work overlay_snapshot already spends on its maps.
+[[nodiscard]] OverlaySwitch overlay_switch(const ws::spice::Table& t,
+                                           const SpiceExport& map,
+                                           const NetList& nets,
+                                           const Schematic& s,
+                                           const Part& p,
+                                           const SymbolDef& sym,
+                                           double playhead);
+
 }  // namespace ws::circsim

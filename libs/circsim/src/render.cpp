@@ -19,9 +19,11 @@ namespace {
 }  // namespace
 
 std::vector<SymbolStroke> render_symbol(const SymbolDef& sym,
-                                        const Part& placement) {
+                                        const Part& placement,
+                                        double switch_closed) {
     std::vector<SymbolStroke> out;
-    out.reserve(sym.draw.size() + sym.pins.size());
+    out.reserve(sym.draw.size() + sym.pins.size() +
+                (sym.blade.has_value() ? 1u : 0u));
 
     // transform_pos's exact math (mirror, then rotation, then
     // translation) - the one shared transform, so the picture and the
@@ -140,6 +142,48 @@ std::vector<SymbolStroke> render_symbol(const SymbolDef& sym,
                 }
                 break;
         }
+    }
+
+    // The switch blade (SwitchBlade): the one prim the placement does
+    // not own outright. The endpoints render VERBATIM - t=0 is the
+    // authored open rest (bit-identical to the old static line), t=1
+    // the thrown tip - and between them the tip sweeps the angle's
+    // shortest rotational path and the radius about the pivot. The
+    // interpolation happens in the symbol's own local space and THEN
+    // rides the shared transform, so mirror/rotation fold into the
+    // moving tip exactly as they do into every static vertex.
+    if (sym.blade.has_value()) {
+        const SwitchBlade& b = *sym.blade;
+        const Pos open_off{b.open_tip.x - b.pivot.x,
+                           b.open_tip.y - b.pivot.y};
+        const Pos closed_off{b.closed_tip.x - b.pivot.x,
+                             b.closed_tip.y - b.pivot.y};
+        const double t = std::clamp(switch_closed, 0.0, 1.0);
+        Pos tip = b.open_tip;
+        if (t >= 1.0) {
+            tip = b.closed_tip;
+        } else if (t > 0.0) {
+            const double a0 = std::atan2(open_off.y, open_off.x);
+            const double a1 = std::atan2(closed_off.y, closed_off.x);
+            double sweep = a1 - a0;
+            constexpr double kTwoPi = 6.283185307179586476925287;
+            while (sweep > 3.14159265358979323846) {
+                sweep -= kTwoPi;  // the shortest rotational path
+            }
+            while (sweep < -3.14159265358979323846) {
+                sweep += kTwoPi;
+            }
+            const double r0 = len(open_off);
+            const double r1 = len(closed_off);
+            const double a = a0 + sweep * t;
+            const double r = r0 + (r1 - r0) * t;
+            tip = Pos{b.pivot.x + r * std::cos(a),
+                      b.pivot.y + r * std::sin(a)};
+        }
+        SymbolStroke s;
+        s.kind = SymbolStroke::Kind::Line;
+        s.pts = {place(b.pivot), place(tip)};
+        out.push_back(std::move(s));
     }
 
     // Does any draw primitive reach this pin? A prim VERTEX within a

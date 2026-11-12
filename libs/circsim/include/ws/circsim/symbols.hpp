@@ -98,6 +98,24 @@ struct DrawPrim {
     std::string text;       // Text
 };
 
+// The switch blade (the S/W symbols' moving contact): the one stroke a
+// placed symbol does NOT own outright. The canvas animates it between
+// the two endpoints - the run's answer eases the tip from `open_tip`
+// to `closed_tip` about `pivot` (the LED glow's own tempo) - while
+// every static consumer (the SVG dump, the PNG export, the palette
+// preview, the placement ghost) renders the blade OPEN, the authored
+// rest position. The interpolation sweeps the angle (shortest
+// rotational path) and the radius between the two tips; the endpoints
+// themselves render verbatim, so switch_closed 0.0 is bit-identical
+// to the old static line. Only the built-in s/w symbols carry one: a
+// .csym switch without a blade keeps its static picture (and a .csym
+// MAY author one - "blade" round-trips like every other field).
+struct SwitchBlade {
+    Pos pivot;        // the contact the blade swings from
+    Pos open_tip;     // the far end at rest (the contact is open)
+    Pos closed_tip;   // the far end thrown (closed, on the mate contact)
+};
+
 struct SymbolDef {
     std::string key;    // "r", "npn", "gnd" (lowercase; matched ci)
     std::string name;   // display name: "Resistor"
@@ -121,6 +139,7 @@ struct SymbolDef {
     std::string model_kind;
     std::vector<ParamSpec> params;  // typed specs (stage 2)
     std::vector<DrawPrim> draw;     // the symbol's picture (stage 2)
+    std::optional<SwitchBlade> blade;  // the animated contact (s/w only)
     ws::settings::json::Object unknown;  // unrecognized .csym fields ride
 };
 

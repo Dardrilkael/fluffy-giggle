@@ -1,0 +1,1395 @@
+From dd8f6d06b3db03048b0670cb81e00a8af12b0b02 Mon Sep 17 00:00:00 2001
+From: Z User <z@container>
+Date: Thu, 12 Nov 2026 05:34:56 +0000
+Subject: [PATCH] circsim+editor: animate the S/W switch blade with the run's
+ answer
+
+- symbols: SwitchBlade (pivot + open/closed tips) on the s/w table
+  entries - the moving contact leaves the static draw list; .csym
+  round-trips "blade" {pivot/open/closed} (a malformed one drops to
+  the static picture); symbol_bounds grows both endpoints so the
+  swing never leaves the AABB
+- render: render_symbol(sym, placement, switch_closed = 0.0) draws
+  the blade interpolated - endpoints verbatim (t=0 bit-identical to
+  the old static line), the angle's shortest rotational path + the
+  radius between, interpolated in LOCAL space under the shared
+  transform; every static consumer (SVG dump, PNG, palette, ghost)
+  keeps the open rest
+- overlay: overlay_switch - the SW device's exact hysteresis walk
+  (devices_m2's law, initial open) over the control column from row
+  0 to the playhead's sample: v(c+) - v(c-) for an S (pins through
+  the run's own net build, ground pins read 0 V), i(<vs>) for a W
+  (the deck's spelling, resolved case-insensitively when the param's
+  differs); thresholds from the model the part names - the
+  directives' .model card first (export's resolution order), else
+  the built-in library - parsed with ws::spice's own deck reader
+  (continuations and glued parens read as the run read them)
+- editor: the canvas eases the blade ~120 ms toward the walk's
+  answer, the LED glow's own tempo (instant with the theme's motion
+  off, resting open with no run or no answer)
+- tests: the blade's table entry + the .csym round-trip + the broken
+  blade's drop, the render interpolation (mirror riding the moving
+  tip), the walk's hysteresis band/threshold precedence/spelling
+  tolerance/W-current/.op cases, and the editor's .dc-swept blade
+  case (open before the run, thrown at the sweep's end, back open at
+  its start)
+---
+ apps/CLAUDE.md                                |   9 +-
+ apps/circsim_editor/src/canvas_panel.cpp      |  29 +-
+ apps/circsim_editor/src/editor.cpp            |   5 +-
+ apps/circsim_editor/src/editor.hpp            |   6 +-
+ .../tests/test_canvas_panel.cpp               | 105 +++++++
+ libs/circsim/CLAUDE.md                        |  28 +-
+ libs/circsim/include/ws/circsim/overlay.hpp   |  38 +++
+ libs/circsim/include/ws/circsim/render.hpp    |  11 +-
+ libs/circsim/include/ws/circsim/symbols.hpp   |  19 ++
+ libs/circsim/src/library.cpp                  |  38 +++
+ libs/circsim/src/overlay.cpp                  | 262 ++++++++++++++++++
+ libs/circsim/src/render.cpp                   |  48 +++-
+ libs/circsim/src/symbols.cpp                  |  10 +
+ libs/circsim/src/symbols_table.cpp            |  18 +-
+ libs/circsim/tests/test_overlay.cpp           | 220 +++++++++++++++
+ libs/circsim/tests/test_symbol_render.cpp     |  81 ++++++
+ libs/circsim/tests/test_symbols.cpp           | 133 +++++++++
+ 17 files changed, 1044 insertions(+), 16 deletions(-)
+
+diff --git a/apps/CLAUDE.md b/apps/CLAUDE.md
+index 9285d0b..8198116 100644
+--- a/apps/CLAUDE.md
++++ b/apps/CLAUDE.md
+@@ -130,7 +130,14 @@ CMakeLists only wire ws libraries together.
+   glows: its i(<element>) probe column (ws::spice's terminal-current
+   save) maps through a 20 mA-full sqrt brightness into three halo
+   discs under the strokes in the part's `color` param, eased ~120 ms
+-  so a light reads as a light; a .tran or .dc run grows a transport
++  so a light reads as a light; the S/W switch symbols' blades animate
++  the same way - `overlay_switch` walks the device's own hysteresis
++  law over the control column (v(c+) - v(c-) for an S, i(<vs>) for a
++  W; thresholds from the directives' .model card else the built-in
++  library) from row 0 to the playhead, and the blade eases open
++  <-> closed onto the mate contact (~120 ms, instant with motion
++  off, resting open with no run - the static picture every static
++  surface draws); a .tran or .dc run grows a transport
+   strip (bottom center: play/pause, a scrub bar, the axis's own
+   format_eng readout - seconds for a .tran, "V1 = 3.4V" for a swept
+   .dc source) whose playhead the voltages and glows follow - a
+diff --git a/apps/circsim_editor/src/canvas_panel.cpp b/apps/circsim_editor/src/canvas_panel.cpp
+index dd90cf1..bb5ba0c 100644
+--- a/apps/circsim_editor/src/canvas_panel.cpp
++++ b/apps/circsim_editor/src/canvas_panel.cpp
+@@ -1439,9 +1439,36 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
+                 rc.fill_circle(center, 0.22f, gui::dim(hue, glow));
+             }
+         }
++        // The switch blade (the LED glow's mechanical sibling): the
++        // run's answer at the playhead - the S/W device's own
++        // hysteresis walk over the control column (overlay.hpp) - eases
++        // the blade from its open rest onto the mate contact. A switch
++        // reads as a switch the same ~120 ms; instant when the theme's
++        // motion is off. No run, no control column, no model card: the
++        // target is open - the static picture every other surface
++        // (the palette, the ghost, the PNG export) draws too.
++        double blade_closed = 0.0;
++        if (sym != nullptr && sym->blade.has_value()) {
++            double target = 0.0;
++            if (rp.table != nullptr) {
++                const ws::circsim::OverlaySwitch sw = ws::circsim::overlay_switch(
++                    *rp.table, ed.results.map, ed.results.nets, s, p, *sym,
++                    ed.playback.t);
++                if (sw.known && sw.closed) {
++                    target = 1.0;
++                }
++            }
++            char blade_id[32];
++            std::snprintf(blade_id, sizeof blade_id,
++                          "switch blade %u", p.id);
++            blade_closed = static_cast<double>(gui.animate_toward(
++                gui.ids().internal_id(blade_id),
++                static_cast<float>(target),
++                theme.anim_enabled ? 0.12f : 0.0f));
++        }
+         if (sym != nullptr) {
+             draw_symbol(rc, *sym, p.pos, p.rot, p.mirror, body_paint,
+-                        theme.text, theme.font);
++                        theme.text, theme.font, blade_closed);
+         } else {
+             // An unknown symbol: the origin cross, so the object is
+             // still visible and selectable (ERC has flagged it).
+diff --git a/apps/circsim_editor/src/editor.cpp b/apps/circsim_editor/src/editor.cpp
+index ae120c3..094b41f 100644
+--- a/apps/circsim_editor/src/editor.cpp
++++ b/apps/circsim_editor/src/editor.cpp
+@@ -1424,7 +1424,8 @@ void Editor::status(std::string text) const {
+ 
+ void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
+                  Pos pos, int rot, bool mirror, const Paint& body,
+-                 std::uint32_t text_color, const ws::ui::r2d::Font* font) {
++                 std::uint32_t text_color, const ws::ui::r2d::Font* font,
++                 double switch_closed) {
+     // The geometry lives in ws::circsim's render seam (render_symbol):
+     // one pure flattening shared with the CLI's SVG dump and the tests.
+     // This is the painting half only - strokes to canvas calls.
+@@ -1434,7 +1435,7 @@ void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
+     placement.mirror = mirror;
+     constexpr double kRad = kPi / 180.0;
+     for (const ws::circsim::SymbolStroke& s :
+-         ws::circsim::render_symbol(sym, placement)) {
++         ws::circsim::render_symbol(sym, placement, switch_closed)) {
+         const auto pt = [&](std::size_t i) {
+             return Point{static_cast<float>(s.pts[i].x),
+                          static_cast<float>(s.pts[i].y)};
+diff --git a/apps/circsim_editor/src/editor.hpp b/apps/circsim_editor/src/editor.hpp
+index c8f84cc..b66c5f0 100644
+--- a/apps/circsim_editor/src/editor.hpp
++++ b/apps/circsim_editor/src/editor.hpp
+@@ -1124,10 +1124,14 @@ struct Editor {
+ // strokes to canvas calls. The pin-lead safety net rides the seam: a
+ // pin no prim vertex touches gets a stub into the body (the .csym
+ // path's net for symbols whose prims fall short of their pins).
++// `switch_closed` (0 = open, 1 = closed) eases the SwitchBlade the
++// s/w symbols carry; every static caller (the ghost, the palette
++// preview) passes nothing and draws the blade at rest.
+ void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
+                  Pos pos, int rot, bool mirror,
+                  const canvas::Paint& body, std::uint32_t text_color,
+-                 const ws::ui::r2d::Font* font);
++                 const ws::ui::r2d::Font* font,
++                 double switch_closed = 0.0);
+ 
+ // The data-color wheel every colored series in the app shares (i mod N,
+ // the scope's rule): the Results plot's signals and the canvas's per-NET
+diff --git a/apps/circsim_editor/tests/test_canvas_panel.cpp b/apps/circsim_editor/tests/test_canvas_panel.cpp
+index 2a9ee4c..8672d54 100644
+--- a/apps/circsim_editor/tests/test_canvas_panel.cpp
++++ b/apps/circsim_editor/tests/test_canvas_panel.cpp
+@@ -1253,6 +1253,111 @@ TEST_CASE("the LED glows with the run's current") {
+     }
+ }
+ 
++// The switch blade's stroke: the 2-point polyline whose points are the
++// w2s answers of the blade's pivot and the asked-for tip (open or
++// closed), matched by content like wire_cmd - the canvas stream holds
++// plenty of 2-point polylines (the symbol's own leads among them), but
++// only the blade ENDS on the pivot.
++[[nodiscard]] const canvas::CanvasCmd* blade_cmd(
++    const Bench& b, const ws::circsim::Part& p, Pos tip_local) {
++    const ws::circsim::Pos pivot_w =
++        ws::circsim::transform_pos(p, Pos{-1.2, 0.0});
++    const ws::circsim::Pos tip_w =
++        ws::circsim::transform_pos(p, tip_local);
++    const ws::math::Vec2 pv = b.ed.view.w2s(pivot_w);
++    const ws::math::Vec2 tv = b.ed.view.w2s(tip_w);
++    for (const canvas::CanvasCmd& cmd : b.clc.cmds) {
++        if (cmd.kind != canvas::CanvasCmdKind::stroke_polyline ||
++            cmd.points.size() != 2u) {
++            continue;
++        }
++        if (vec2_near(cmd.points[0], pv, 0.01f) &&
++            vec2_near(cmd.points[1], tv, 0.01f)) {
++            return &cmd;
++        }
++    }
++    return nullptr;
++}
++
++TEST_CASE("the switch blade throws with the run's answer") {
++    // The LED glow's mechanical sibling: an S switch whose control pair
++    // rides a .dc-swept source. sw_ideal closes above 0 V, so the
++    // blade rests open before any run and at the sweep's start, and
++    // lands on the mate contact at the sweep's end - the transport's
++    // playhead driving the same walk the device ran. Motion is off:
++    // the ease snaps, exactly the LED test's own rule.
++    //
++    // The layout keeps every wire's ortho corridor clear of every
++    // other pin (a pin riding another wire's path is a silent join -
++    // the nets would merge and the test would lie): the control source
++    // sits below c+ with its + lead pointing left into open space, c-
++    // drops straight onto its own ground.
++    Bench b;
++    b.theme.anim_enabled = false;
++    // The switched path: V2 -> S1 -> R1 -> ground, and V2's return.
++    ws::circsim::Part* v2 = b.doc.schem.add_part(
++        ws::circsim::Part::make("v", "V2", "5", {-2.0, 6.0}));
++    ws::circsim::Part* sw = b.doc.schem.add_part(
++        ws::circsim::Part::make("s", "S1", "", {10.0, 6.0}));
++    sw->params["model"] = "sw_ideal";
++    ws::circsim::Part* r1 = b.doc.schem.add_part(
++        ws::circsim::Part::make("r", "R1", "1k", {20.0, 6.0}));
++    ws::circsim::Part* g1 = b.doc.schem.add_part(
++        ws::circsim::Part::make("gnd", "", "", {-5.0, 3.0}));
++    ws::circsim::Part* g2 = b.doc.schem.add_part(
++        ws::circsim::Part::make("gnd", "", "", {23.0, 3.0}));
++    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
++        ws::circsim::PinRef{v2->id, 1}, ws::circsim::PinRef{sw->id, 0}));
++    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
++        ws::circsim::PinRef{sw->id, 1}, ws::circsim::PinRef{r1->id, 0}));
++    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
++        ws::circsim::PinRef{r1->id, 1}, ws::circsim::PinRef{g2->id, 0}));
++    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
++        ws::circsim::PinRef{v2->id, 0}, ws::circsim::PinRef{g1->id, 0}));
++    // The control pair: V1 (swept 0 -> 5 V) sits below c+, its minus
++    // on its own ground; c- drops onto a ground of its own.
++    ws::circsim::Part* v1 = b.doc.schem.add_part(
++        ws::circsim::Part::make("v", "V1", "0", {15.0, -2.0}));
++    ws::circsim::Part* g3 = b.doc.schem.add_part(
++        ws::circsim::Part::make("gnd", "", "", {18.0, -5.0}));
++    ws::circsim::Part* g4 = b.doc.schem.add_part(
++        ws::circsim::Part::make("gnd", "", "", {8.0, 0.0}));
++    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
++        ws::circsim::PinRef{v1->id, 0}, ws::circsim::PinRef{sw->id, 2}));
++    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
++        ws::circsim::PinRef{v1->id, 1}, ws::circsim::PinRef{g3->id, 0}));
++    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
++        ws::circsim::PinRef{sw->id, 3}, ws::circsim::PinRef{g4->id, 0}));
++    b.doc.schem.analysis.entries.push_back(ws::circsim::DcSpec{
++        .source = "V1", .start = 0.0, .stop = 5.0, .step = 0.5});
++
++    // No run yet: the blade rests open - the authored static picture.
++    b.draw();
++    REQUIRE(blade_cmd(b, *sw, Pos{0.9, 0.95}) != nullptr);
++    CHECK(blade_cmd(b, *sw, Pos{1.2, 0.0}) == nullptr);
++
++    // The run lands, the playhead parks at the sweep's end (5 V over
++    // sw_ideal's 0 V threshold): the blade is thrown.
++    deliver(b.ed, ws::circsim::run_schematic(b.doc.schem));
++    REQUIRE(b.ed.results.has);
++    b.draw();
++    CHECK(blade_cmd(b, *sw, Pos{0.9, 0.95}) == nullptr);
++    REQUIRE(blade_cmd(b, *sw, Pos{1.2, 0.0}) != nullptr);
++
++    // Scrub to the sweep's start: the control reads 0 V, and the walk
++    // (strictly above the threshold) keeps the contact open - the
++    // blade follows the playhead back down.
++    const ws::spice::Table* dc = b.ed.canvas_sweep_table();
++    REQUIRE(dc != nullptr);
++    const std::span<const double> axis =
++        ws::circsim::overlay_sweep_axis(*dc);
++    REQUIRE(!axis.empty());
++    b.ed.playback.t = axis.front();
++    b.draw();
++    REQUIRE(blade_cmd(b, *sw, Pos{0.9, 0.95}) != nullptr);
++    CHECK(blade_cmd(b, *sw, Pos{1.2, 0.0}) == nullptr);
++}
++
+ TEST_CASE("the transport scrubs and plays the transient") {
+     Bench b;
+     ws::circsim::Part* v = b.doc.schem.add_part(
+diff --git a/libs/circsim/CLAUDE.md b/libs/circsim/CLAUDE.md
+index f794710..1efe398 100644
+--- a/libs/circsim/CLAUDE.md
++++ b/libs/circsim/CLAUDE.md
+@@ -49,6 +49,14 @@ fetched privately, which would duplicate a first-party capability.
+   exactly like pins (`transform_pos` - the one shared transform, so the
+   picture and the pins can never disagree). `symbol_bounds` is the
+   conservative AABB (arcs bound by full circles, text by its anchor).
++- `SwitchBlade`: the s/w symbols' moving contact - pivot + the tip's
++  open/closed endpoints, the one prim a placed symbol does not own
++  outright. `render_symbol` draws it interpolated (switch_closed 0
++  open, 1 closed; endpoints verbatim, angle swept between), the
++  canvas eases it with the run's answer (`overlay_switch`, the LED
++  glow's sibling), and every static surface (SVG dump, PNG, palette,
++  ghost) draws it open. Rides a .csym as `"blade": {pivot/open/
++  closed}` - malformed drops to the static picture.
+ - The built-in table (symbols.cpp, 23 keys) carries specs + draw for
+   every symbol; `find_symbol` is the BUILT-IN-ONLY lookup. The `led`
+   key is the diode plus a display-only `color` Choice (spec'd, never
+@@ -221,13 +229,17 @@ fetched privately, which would duplicate a first-party capability.
+   consumes it; the tests gate it.
+ 
+ ## Render (render.hpp, stage 17a)
+-- `render_symbol(sym, placement)` - the ONE geometry flattening of a
+-  placed symbol's picture: draw prims + the pin-lead safety net,
++- `render_symbol(sym, placement, switch_closed = 0.0)` - the ONE
++  geometry flattening of a placed symbol's picture: draw prims + the
++  pin-lead safety net + the SwitchBlade (when the symbol carries one),
+   world-space `SymbolStroke`s (Line/Poly/Circle/Arc/Dot/Text) with the
+   part's mirror-then-rotation-then-position applied exactly like
+   pin_pos applies it to pins. The editor's `draw_symbol` paints them,
+   the CLI's SVG dump writes them, the tests assert them - no parallel
+-  transforms to drift (the stage-16c lesson, applied to symbols).
++  transforms to drift (the stage-16c lesson, applied to symbols). The
++  blade interpolates in LOCAL space (endpoints verbatim, shortest
++  rotational path + radius between) and then rides the same transform,
++  so the default open picture is bit-identical to the old static line.
+ - The safety net: a pin no prim VERTEX touches and no curve carries
+   (circle/arc curve within a quarter unit, dot interior; the geometric
+   rule is stage 17g's - the vertex-only one drew stubs through the
+@@ -287,12 +299,20 @@ fetched privately, which would duplicate a first-party capability.
+   model, no ui include), palette.hpp (the symbol palette's grouping +
+   fuzzy search - pure data over the library, lifted from the editor's
+   palette_groups).
+-  ws::core::Result only; no exceptions.
++  ws::core::Result only; no exceptions. overlay.hpp (patch 0012 +
++  the blade): the interactive canvas's headless math - the playhead's
++  sample, the transport's step/scrub/rates, the voltage ramp, the LED
++  glow curve, the snapshot (volts/amps per net/part), and the S/W
++  switch walk `overlay_switch` (the device's exact hysteresis law
++  over the control column, thresholds from the directives' card
++  else the built-in library, parsed with ws::spice's own deck
++  reader).
+ - `src/`: model.cpp, symbols.cpp (the geometry half: lookup,
+   transform_pos/pin_pos, symbol_bounds, default_params),
+   symbols_table.cpp (the built-in table + its prim builders - pure
+   data), library.cpp, nets.cpp, format.cpp, erc.cpp, export.cpp,
+   locate.cpp, plot.cpp, render.cpp (the stage-17a seam's flattening),
++  overlay.cpp (overlay.hpp's halves, the switch walk included),
+   png.cpp (the raster/writer/composition), png_font.cpp (the embedded
+   font - pure data, generated by tools/gen_png_font.py; the
+   src-local png_font.hpp is its only seam, like json_helpers.hpp),
+diff --git a/libs/circsim/include/ws/circsim/overlay.hpp b/libs/circsim/include/ws/circsim/overlay.hpp
+index 9130c7c..8386362 100644
+--- a/libs/circsim/include/ws/circsim/overlay.hpp
++++ b/libs/circsim/include/ws/circsim/overlay.hpp
+@@ -144,4 +144,42 @@ struct OverlaySnapshot {
+                                                const SpiceExport& map,
+                                                double playhead);
+ 
++// --- the switch blade's state -----------------------------------------------------
++
++// One switch's answer at a playhead: whether the S/W contact is closed
++// and whether the run could say at all. `known` is false when anything
++// the walk needs is missing - no rows, a control column the table does
++// not carry (an unwired pin, an .ac's small-signal columns), a model
++// name no .model card answers - and the caller rests the blade OPEN,
++// exactly what a switch with no run looks like.
++struct OverlaySwitch {
++    bool known = false;
++    bool closed = false;
++};
++
++// The S/W contact's state at the playhead, mirroring ws::spice's SW
++// device law exactly: the control signal walks the table's samples
++// from row 0 to the playhead's, flipping through the model's
++// hysteresis band (on above thr+band, off below thr-band, sticky in
++// between - devices_m2's hysteresis_flip, the same law the solver
++// ran), starting OPEN (the editor's export writes no ic=on). The
++// control is v(c+) - v(c-) for an S (the pins resolve through `nets`
++// onto v(token) columns; a ground pin is 0 V) and i(<vs>) for a W (the
++// named V source's branch column; the deck's own spelling is looked up
++// case-insensitively through the map when the param's differs). The
++// thresholds come from the model the part names - the directives
++// block's own card wins (export's resolution order), else the built-in
++// model library's - parsed with ws::spice's own deck reader, so a
++// hand-authored card reads with continuations and glued parens exactly
++// as the run read it. Per frame per switch on the canvas: a walk over
++// the samples to the playhead and (at most) one small deck parse, the
++// same order of work overlay_snapshot already spends on its maps.
++[[nodiscard]] OverlaySwitch overlay_switch(const ws::spice::Table& t,
++                                           const SpiceExport& map,
++                                           const NetList& nets,
++                                           const Schematic& s,
++                                           const Part& p,
++                                           const SymbolDef& sym,
++                                           double playhead);
++
+ }  // namespace ws::circsim
+diff --git a/libs/circsim/include/ws/circsim/render.hpp b/libs/circsim/include/ws/circsim/render.hpp
+index f9fd799..5081899 100644
+--- a/libs/circsim/include/ws/circsim/render.hpp
++++ b/libs/circsim/include/ws/circsim/render.hpp
+@@ -48,7 +48,16 @@ struct SymbolStroke {
+ // opposite the pin's own direction - the .csym safety net for symbols
+ // whose prims fall short of their pins. Malformed prims (a line without
+ // two points, a circle without a center) are skipped, not repaired.
++//
++// `switch_closed` interpolates the SwitchBlade (when the symbol carries
++// one) from open (0.0) to closed (1.0): the endpoints render verbatim,
++// between them the tip sweeps the angle (shortest rotational path) and
++// radius about the pivot, then the placement's transform folds in
++// exactly like every static vertex. Every static consumer (the SVG
++// dump, the PNG export, the palette) passes nothing - the blade at
++// rest. A symbol without a blade ignores the value.
+ [[nodiscard]] std::vector<SymbolStroke> render_symbol(
+-    const SymbolDef& sym, const Part& placement);
++    const SymbolDef& sym, const Part& placement,
++    double switch_closed = 0.0);
+ 
+ }  // namespace ws::circsim
+diff --git a/libs/circsim/include/ws/circsim/symbols.hpp b/libs/circsim/include/ws/circsim/symbols.hpp
+index 9a915f0..9b1dd6f 100644
+--- a/libs/circsim/include/ws/circsim/symbols.hpp
++++ b/libs/circsim/include/ws/circsim/symbols.hpp
+@@ -98,6 +98,24 @@ struct DrawPrim {
+     std::string text;       // Text
+ };
+ 
++// The switch blade (the S/W symbols' moving contact): the one stroke a
++// placed symbol does NOT own outright. The canvas animates it between
++// the two endpoints - the run's answer eases the tip from `open_tip`
++// to `closed_tip` about `pivot` (the LED glow's own tempo) - while
++// every static consumer (the SVG dump, the PNG export, the palette
++// preview, the placement ghost) renders the blade OPEN, the authored
++// rest position. The interpolation sweeps the angle (shortest
++// rotational path) and the radius between the two tips; the endpoints
++// themselves render verbatim, so switch_closed 0.0 is bit-identical
++// to the old static line. Only the built-in s/w symbols carry one: a
++// .csym switch without a blade keeps its static picture (and a .csym
++// MAY author one - "blade" round-trips like every other field).
++struct SwitchBlade {
++    Pos pivot;        // the contact the blade swings from
++    Pos open_tip;     // the far end at rest (the contact is open)
++    Pos closed_tip;   // the far end thrown (closed, on the mate contact)
++};
++
+ struct SymbolDef {
+     std::string key;    // "r", "npn", "gnd" (lowercase; matched ci)
+     std::string name;   // display name: "Resistor"
+@@ -121,6 +139,7 @@ struct SymbolDef {
+     std::string model_kind;
+     std::vector<ParamSpec> params;  // typed specs (stage 2)
+     std::vector<DrawPrim> draw;     // the symbol's picture (stage 2)
++    std::optional<SwitchBlade> blade;  // the animated contact (s/w only)
+     ws::settings::json::Object unknown;  // unrecognized .csym fields ride
+ };
+ 
+diff --git a/libs/circsim/src/library.cpp b/libs/circsim/src/library.cpp
+index 39736ee..5d65d32 100644
+--- a/libs/circsim/src/library.cpp
++++ b/libs/circsim/src/library.cpp
+@@ -546,6 +546,33 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
+                 origin));
+         }
+     }
++    // The animated blade (the S/W switch's moving contact): three
++    // [x, y] pairs - the pivot contact and the tip's open/closed
++    // endpoints. A malformed blade (a missing endpoint, a non-array)
++    // drops to the static picture, never a half-animated one.
++    if (const json::Value* v = o.find("blade"); v != nullptr) {
++        bool blade_ok = false;
++        if (v->is_object()) {
++            const json::Object* bo = v->as_object();
++            const auto pivot = as_pos(bo->find("pivot"));
++            const auto open_tip = as_pos(bo->find("open"));
++            const auto closed_tip = as_pos(bo->find("closed"));
++            if (pivot.has_value() && open_tip.has_value() &&
++                closed_tip.has_value()) {
++                r.def.blade = SwitchBlade{.pivot = *pivot,
++                                          .open_tip = *open_tip,
++                                          .closed_tip = *closed_tip};
++                blade_ok = true;
++            }
++        }
++        if (!blade_ok) {
++            diags.push_back(make_diag(
++                Severity::Warning, "circsim.symbols.bad_field",
++                "symbol '" + k + "': 'blade' needs pivot, open and closed"
++                                " [x, y] pairs; ignored",
++                origin));
++        }
++    }
+     if (const json::Value* pins = o.find("pins");
+         pins != nullptr && pins->is_array()) {
+         for (const json::Value& e : *pins->as_array()) {
+@@ -658,6 +685,7 @@ SymbolReader read_symbol(const json::Object& o, const std::string& origin,
+         if (field != "key" && field != "name" && field != "spice" &&
+             field != "ref" && field != "fixed_net" && field != "value" &&
+             field != "model" && field != "model_kind" &&
++            field != "blade" &&
+             field != "pins" && field != "emit" &&
+             field != "cards" && field != "params" && field != "draw") {
+             r.def.unknown.set(field, val);
+@@ -840,6 +868,16 @@ std::string SymbolLibrary::save(bool include_builtin) const {
+         if (!s.model_kind.empty()) {
+             o.set("model_kind", json::Value::text(s.model_kind));
+         }
++        // The blade rides only when the symbol carries one (the s/w
++        // switches and a .csym that authors one), same rule as the
++        // kind: classic .csym files stay byte-identical.
++        if (s.blade.has_value()) {
++            json::Object bl;
++            bl.set("pivot", pos_value(s.blade->pivot));
++            bl.set("open", pos_value(s.blade->open_tip));
++            bl.set("closed", pos_value(s.blade->closed_tip));
++            o.set("blade", json::Value::object(std::move(bl)));
++        }
+         json::Array emit;
+         for (const ParamEmit& pe : s.emit) {
+             json::Object e;
+diff --git a/libs/circsim/src/overlay.cpp b/libs/circsim/src/overlay.cpp
+index f0e0c38..a7d82a5 100644
+--- a/libs/circsim/src/overlay.cpp
++++ b/libs/circsim/src/overlay.cpp
+@@ -8,9 +8,18 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <optional>
++#include <string>
++#include <vector>
+ 
++#include <ws/spice/deck.hpp>
++#include <ws/spice/parse.hpp>
++
++#include <ws/circsim/models.hpp>
+ #include <ws/circsim/plot.hpp>
+ 
++#include "util.hpp"
++
+ namespace ws::circsim {
+ 
+ namespace {
+@@ -40,6 +49,122 @@ namespace {
+     return best;
+ }
+ 
++// --- the S/W model's thresholds (the blade walk's constants) -------------------
++
++// What one .model SW card says: the S reads Vt/Vh, the W It/Ih.
++struct SwThresholds {
++    double vt = 0.0;
++    double vh = 0.0;
++    double it = 0.0;
++    double ih = 0.0;
++};
++
++// The param tokens of one .model card -> the thresholds. The walk over
++// the tokens mirrors the SW device's own apply_model (devices_m2):
++// paren glue "(Ron=1" / "Roff=1meg)", "key=value" one token, "key
++// value" across two, "key = value" across three. Values ride
++// parse_number ("2.5", "0.4m", "1meg"); a token that cannot spell a
++// number makes the whole card unusable (the run would have said the
++// same). Keys the blade does not read (Ron/Roff) are consumed and
++// skipped - only the thresholds answer here.
++[[nodiscard]] std::optional<SwThresholds> sw_thresholds_of(
++    const std::vector<ws::spice::Token>& toks) {
++    SwThresholds out;
++    for (std::size_t i = 0; i < toks.size(); ++i) {
++        std::string text = toks[i].text;
++        while (!text.empty() && text.front() == '(') {
++            text.erase(text.begin());
++        }
++        while (!text.empty() && text.back() == ')') {
++            text.pop_back();
++        }
++        if (text.empty()) {
++            continue;
++        }
++        std::string key;
++        std::string value;
++        const std::size_t eq = text.find('=');
++        if (eq != std::string::npos && eq > 0) {
++            key = lower(text.substr(0, eq));
++            value = text.substr(eq + 1);
++        } else {
++            key = lower(text);
++            std::size_t next = i + 1;
++            if (next < toks.size() && toks[next].text == "=") {
++                ++next;
++            }
++            if (next >= toks.size()) {
++                return std::nullopt;  // a key without a value
++            }
++            value = toks[next].text;
++            i = next;
++        }
++        while (!value.empty() && value.back() == ')') {
++            value.pop_back();
++        }
++        const ws::core::Result<double> r = ws::spice::parse_number(value);
++        if (!r) {
++            return std::nullopt;
++        }
++        if (key == "vt") {
++            out.vt = *r;
++        } else if (key == "vh") {
++            out.vh = *r;
++        } else if (key == "it") {
++            out.it = *r;
++        } else if (key == "ih") {
++            out.ih = *r;
++        }
++        // Ron/Roff and friends: consumed, not answered.
++    }
++    return out;
++}
++
++// The thresholds of the model `name` names, in the export's own
++// resolution order: the directives block's card first (the user's own
++// wins), else the built-in model library's card, else nothing. Both
++// spellings go through ws::spice's real deck reader - continuations,
++// comments and glued parens read exactly as the run read them. (An
++// .include inside directives resolves through the RUN's own resolver,
++// which this walk does not carry: such a card answers nothing here and
++// the blade rests open - the honest degradation, never a wrong flip.)
++[[nodiscard]] std::optional<SwThresholds> sw_thresholds_for(
++    const Schematic& s, const std::string& name) {
++    const auto from_deck_text = [&name](const std::string& text) {
++        // Line 1 of a deck is its title - the leading comment keeps
++        // the first real card off it.
++        const auto read =
++            ws::spice::read_deck("switch overlay", "* overlay\n" + text,
++                                 ws::spice::ParseOptions{});
++        if (!read) {
++            return std::optional<SwThresholds>{};
++        }
++        std::vector<ws::spice::Warning> warnings;
++        const auto ast = ws::spice::build_deck_ast(*read, warnings);
++        if (!ast) {
++            return std::optional<SwThresholds>{};
++        }
++        for (const ws::spice::ModelDef& m : ast->models) {
++            if (lower(m.name.text) == lower(name) && m.type == "sw") {
++                return sw_thresholds_of(m.params);
++            }
++        }
++        return std::optional<SwThresholds>{};
++    };
++    if (!s.directives.empty()) {
++        if (const std::optional<SwThresholds> t =
++                from_deck_text(s.directives);
++            t.has_value()) {
++            return t;
++        }
++    }
++    if (const ModelCard* card = find_builtin_model(name);
++        card != nullptr) {
++        return from_deck_text(card->text);
++    }
++    return std::nullopt;
++}
++
+ }  // namespace
+ 
+ std::span<const double> overlay_sweep_axis(const ws::spice::Table& t) {
+@@ -228,4 +353,141 @@ OverlaySnapshot overlay_snapshot(const ws::spice::Table& t,
+     return snap;
+ }
+ 
++OverlaySwitch overlay_switch(const ws::spice::Table& t,
++                             const SpiceExport& map, const NetList& nets,
++                             const Schematic& s, const Part& p,
++                             const SymbolDef& sym, double playhead) {
++    OverlaySwitch out;  // unknown -> the blade rests open
++    if (t.row_count() == 0) {
++        return out;
++    }
++    const std::size_t sample = overlay_playhead_sample(t, playhead);
++
++    // The control signal, resolved onto its column pair: v(c+) - v(c-)
++    // for an S (the pins by name, the nets through the run's own
++    // build, ground answering 0 V), i(<vs>) for a W (the deck's own
++    // spelling - element_part is CiLess, so a differently-cased param
++    // still finds the column the table actually named).
++    std::span<const double> pos;
++    std::span<const double> neg;
++    std::span<const double> cur;
++    double thr = 0.0;
++    double band = 0.0;
++    if (sym.spice_letter == 'S') {
++        const auto pin_index = [&](const char* name) {
++            for (std::size_t i = 0; i < sym.pins.size(); ++i) {
++                if (sym.pins[i].name == name) {
++                    return static_cast<int>(i);
++                }
++            }
++            return -1;
++        };
++        const int cp = pin_index("c+");
++        const int cn = pin_index("c-");
++        if (cp < 0 || cn < 0) {
++            return out;  // not this shape (a .csym rename): rest open
++        }
++        // net id -> node token, inverted once (overlay_snapshot's own
++        // rule: the first token a net answers wins).
++        const auto column_of = [&](std::uint32_t pin_index_u,
++                                   std::span<const double>& col) {
++            const Net* n = nets.net_of_pin(
++                PinRef{p.id, pin_index_u});
++            if (n == nullptr) {
++                return false;  // the pin joins no net (ERC's story)
++            }
++            if (n->is_ground) {
++                return true;  // 0 V: no v(0) column exists, and none is
++                              // needed - the span stays empty and reads 0
++            }
++            for (const auto& [tok, net_id] : map.node_net) {
++                if (net_id == n->id) {
++                    col = t.signal("v(" + tok + ")");
++                    return !col.empty();
++                }
++            }
++            return false;
++        };
++        if (!column_of(static_cast<std::uint32_t>(cp), pos) ||
++            !column_of(static_cast<std::uint32_t>(cn), neg)) {
++            return out;
++        }
++    } else if (sym.spice_letter == 'W') {
++        const auto vs = p.params.find("vs");
++        if (vs == p.params.end() || vs->second.empty()) {
++            return out;
++        }
++        cur = t.signal("i(" + vs->second + ")");
++        if (cur.empty()) {
++            const auto it = map.element_part.find(vs->second);
++            if (it != map.element_part.end()) {
++                cur = t.signal("i(" + it->first + ")");
++            }
++        }
++        if (cur.empty()) {
++            return out;
++        }
++    } else {
++        return out;  // not a switch the walk speaks
++    }
++
++    // The thresholds: the model the part names, in the export's own
++    // resolution order.
++    const auto model = p.params.find("model");
++    if (model == p.params.end() || model->second.empty()) {
++        return out;  // ERC's missing_model is the story; no run anyway
++    }
++    const std::optional<SwThresholds> th =
++        sw_thresholds_for(s, model->second);
++    if (!th.has_value()) {
++        return out;
++    }
++    if (sym.spice_letter == 'S') {
++        thr = th->vt;
++        band = th->vh;
++    } else {
++        thr = th->it;
++        band = th->ih;
++    }
++
++    // The walk itself - the device's exact hysteresis law
++    // (devices_m2's hysteresis_flip), sample 0 through the playhead's,
++    // starting open (the export writes no ic=on). A ground pin's empty
++    // span reads 0 V (no v(0) column exists); any column that runs
++    // short, or a non-finite control anywhere, answers unknown rather
++    // than guess.
++    const auto read = [&](std::span<const double> col,
++                          std::size_t k) -> std::optional<double> {
++        if (col.empty()) {
++            return 0.0;  // the ground pin (column_of's own spelling)
++        }
++        if (k >= col.size()) {
++            return std::nullopt;
++        }
++        return col[k];
++    };
++    bool on = false;
++    for (std::size_t k = 0; k <= sample && k < t.row_count(); ++k) {
++        const std::optional<double> a = read(pos, k);
++        const std::optional<double> b = read(neg, k);
++        const std::optional<double> c =
++            cur.empty() ? std::optional<double>{0.0} : read(cur, k);
++        if (!a.has_value() || !b.has_value() || !c.has_value()) {
++            return out;
++        }
++        const double control = cur.empty() ? *a - *b : *c;
++        if (!std::isfinite(control)) {
++            return out;
++        }
++        if (!on && control > thr + band) {
++            on = true;
++        } else if (on && control < thr - band) {
++            on = false;
++        }
++    }
++    out.known = true;
++    out.closed = on;
++    return out;
++}
++
+ }  // namespace ws::circsim
+diff --git a/libs/circsim/src/render.cpp b/libs/circsim/src/render.cpp
+index f580514..02ab9ef 100644
+--- a/libs/circsim/src/render.cpp
++++ b/libs/circsim/src/render.cpp
+@@ -19,9 +19,11 @@ namespace {
+ }  // namespace
+ 
+ std::vector<SymbolStroke> render_symbol(const SymbolDef& sym,
+-                                        const Part& placement) {
++                                        const Part& placement,
++                                        double switch_closed) {
+     std::vector<SymbolStroke> out;
+-    out.reserve(sym.draw.size() + sym.pins.size());
++    out.reserve(sym.draw.size() + sym.pins.size() +
++                (sym.blade.has_value() ? 1u : 0u));
+ 
+     // transform_pos's exact math (mirror, then rotation, then
+     // translation) - the one shared transform, so the picture and the
+@@ -142,6 +144,48 @@ std::vector<SymbolStroke> render_symbol(const SymbolDef& sym,
+         }
+     }
+ 
++    // The switch blade (SwitchBlade): the one prim the placement does
++    // not own outright. The endpoints render VERBATIM - t=0 is the
++    // authored open rest (bit-identical to the old static line), t=1
++    // the thrown tip - and between them the tip sweeps the angle's
++    // shortest rotational path and the radius about the pivot. The
++    // interpolation happens in the symbol's own local space and THEN
++    // rides the shared transform, so mirror/rotation fold into the
++    // moving tip exactly as they do into every static vertex.
++    if (sym.blade.has_value()) {
++        const SwitchBlade& b = *sym.blade;
++        const Pos open_off{b.open_tip.x - b.pivot.x,
++                           b.open_tip.y - b.pivot.y};
++        const Pos closed_off{b.closed_tip.x - b.pivot.x,
++                             b.closed_tip.y - b.pivot.y};
++        const double t = std::clamp(switch_closed, 0.0, 1.0);
++        Pos tip = b.open_tip;
++        if (t >= 1.0) {
++            tip = b.closed_tip;
++        } else if (t > 0.0) {
++            const double a0 = std::atan2(open_off.y, open_off.x);
++            const double a1 = std::atan2(closed_off.y, closed_off.x);
++            double sweep = a1 - a0;
++            constexpr double kTwoPi = 6.283185307179586476925287;
++            while (sweep > 3.14159265358979323846) {
++                sweep -= kTwoPi;  // the shortest rotational path
++            }
++            while (sweep < -3.14159265358979323846) {
++                sweep += kTwoPi;
++            }
++            const double r0 = len(open_off);
++            const double r1 = len(closed_off);
++            const double a = a0 + sweep * t;
++            const double r = r0 + (r1 - r0) * t;
++            tip = Pos{b.pivot.x + r * std::cos(a),
++                      b.pivot.y + r * std::sin(a)};
++        }
++        SymbolStroke s;
++        s.kind = SymbolStroke::Kind::Line;
++        s.pts = {place(b.pivot), place(tip)};
++        out.push_back(std::move(s));
++    }
++
+     // Does any draw primitive reach this pin? A prim VERTEX within a
+     // quarter unit, or a pin ON a curve - a circle/arc's own curve
+     // (the inductor's coil: its pins sit on the outermost bump, no
+diff --git a/libs/circsim/src/symbols.cpp b/libs/circsim/src/symbols.cpp
+index c296645..fadb74b 100644
+--- a/libs/circsim/src/symbols.cpp
++++ b/libs/circsim/src/symbols.cpp
+@@ -104,6 +104,16 @@ Bounds symbol_bounds(const SymbolDef& s) {
+                 break;
+         }
+     }
++    // The blade's swing (SwitchBlade): both endpoints ride the bounds -
++    // the tip's whole arc lives inside them, so a selection marquee or
++    // hit test never loses the thrown blade to the AABB. The built-in
++    // s/w blades sit inside their bodies' boxes, but a .csym blade may
++    // reach past anything the static prims draw.
++    if (s.blade.has_value()) {
++        grow(s.blade->pivot.x, s.blade->pivot.y);
++        grow(s.blade->open_tip.x, s.blade->open_tip.y);
++        grow(s.blade->closed_tip.x, s.blade->closed_tip.y);
++    }
+     return b;
+ }
+ 
+diff --git a/libs/circsim/src/symbols_table.cpp b/libs/circsim/src/symbols_table.cpp
+index 7158a41..a56f5c3 100644
+--- a/libs/circsim/src/symbols_table.cpp
++++ b/libs/circsim/src/symbols_table.cpp
+@@ -683,12 +683,18 @@ const std::vector<SymbolDef>& table() {
+             s.model_kind = "sw";
+             s.params = {spec(ParamSpec::Type::Text, "model", "Model")};
+             s.emit = {ParamEmit{.key = "model", .optional = false}};
++            // The blade is the animated half (SwitchBlade): the pivot
++            // and mate contacts stay static dots, the swinging stroke
++            // eases open->closed with the run's answer (render.hpp).
++            s.blade = SwitchBlade{.pivot = Pos{-1.2, 0.0},
++                                  .open_tip = Pos{0.9, 0.95},
++                                  .closed_tip = Pos{1.2, 0.0}};
+             s.draw = {// the body the contact sits in
+                       rect(-2.5, -2.0, 2.5, 2.0),
+-                      // the switched path: lead, contact dot, the open
+-                      // blade, contact dot, lead
++                      // the switched path: lead, contact dot, the
++                      // blade (SwitchBlade), contact dot, lead
+                       line(-5.0, 0.0, -1.2, 0.0), dot(-1.2, 0.0, 0.14),
+-                      line(-1.2, 0.0, 0.9, 0.95), dot(1.2, 0.0, 0.14),
++                      dot(1.2, 0.0, 0.14),
+                       line(1.2, 0.0, 5.0, 0.0),
+                       // the control pair rises into the box from below
+                       line(2.0, -4.0, 2.0, -2.0), line(-2.0, -4.0, -2.0, -2.0),
+@@ -713,9 +719,13 @@ const std::vector<SymbolDef>& table() {
+                         spec(ParamSpec::Type::Text, "model", "Model")};
+             s.emit = {ParamEmit{.key = "vs", .prefix = "", .optional = false},
+                       ParamEmit{.key = "model", .optional = false}};
++            // The same blade as the S switch, compact (SwitchBlade).
++            s.blade = SwitchBlade{.pivot = Pos{-0.9, 0.0},
++                                  .open_tip = Pos{0.6, 0.8},
++                                  .closed_tip = Pos{0.9, 0.0}};
+             s.draw = {// the same contact as the S switch, compact
+                       line(-3.0, 0.0, -0.9, 0.0), dot(-0.9, 0.0, 0.14),
+-                      line(-0.9, 0.0, 0.6, 0.8), dot(0.9, 0.0, 0.14),
++                      dot(0.9, 0.0, 0.14),
+                       line(0.9, 0.0, 3.0, 0.0), text(0.55, 1.5, "W")};
+             return s;
+         }(),
+diff --git a/libs/circsim/tests/test_overlay.cpp b/libs/circsim/tests/test_overlay.cpp
+index 4b66f80..630d1b9 100644
+--- a/libs/circsim/tests/test_overlay.cpp
++++ b/libs/circsim/tests/test_overlay.cpp
+@@ -346,3 +346,223 @@ TEST_CASE("a .step family's leading axes never answer as the sweep") {
+     // the step column's answers).
+     CHECK(ws::circsim::overlay_playhead_sample(t, 2.5) == 6u);
+ }
++
++// --- the switch blade's walk (the S/W contact animation) -----------------------
++
++namespace {
++
++// The walk's bench: an S switch (part 7, pins c+ on net "ctl" and c-
++// on ground) over a .tran-shaped table whose v(ctl) column is the
++// control ramp, plus the Schematic carrying the directives block and
++// the part's model param. Hand-built like every fixture here (the run
++// path is test_export's own gate).
++struct SwitchBench {
++    ws::spice::Table t;
++    SpiceExport map;
++    ws::circsim::NetList nets;
++    ws::circsim::Schematic s;
++    ws::circsim::Part p;
++    const ws::circsim::SymbolDef* sym = ws::circsim::find_symbol("s");
++
++    explicit SwitchBench(std::vector<double> control,
++                         std::string model_card = ".model mysw"
++                                                  " SW(Ron=1 Roff=1meg"
++                                                  " Vt=2 Vh=0.5)") {
++        REQUIRE(sym != nullptr);
++        t.analysis = ws::spice::AnalysisKind::Tran;
++        t.sweep = ws::spice::SweepKind::Time;
++        t.sweep_names = {"time"};
++        std::vector<double> axis;
++        for (std::size_t i = 0; i < control.size(); ++i) {
++            axis.push_back(static_cast<double>(i));
++        }
++        t.sweep_axes.push_back(std::move(axis));
++        t.signals.push_back({"v(ctl)", std::move(control)});
++
++        map.node_net["ctl"] = 10;
++
++        ws::circsim::Net ctl;
++        ctl.id = 10;
++        ctl.name = "ctl";
++        ctl.pins = {ws::circsim::PinRef{7, 2}};  // part 7, pin "c+"
++        ws::circsim::Net gnd;
++        gnd.id = 11;
++        gnd.name = "0";
++        gnd.is_ground = true;
++        gnd.pins = {ws::circsim::PinRef{7, 3}};  // pin "c-"
++        nets.nets.push_back(ctl);
++        nets.nets.push_back(gnd);
++        nets.index();
++
++        s.directives = std::move(model_card);
++        p.id = 7;
++        p.symbol = "s";
++        p.ref = "S1";
++        p.params["model"] = "mysw";
++    }
++};
++
++}  // namespace
++
++TEST_CASE("the S switch walks the device's hysteresis law") {
++    // Vt=2, Vh=0.5: on above 2.5, off below 1.5, sticky in between -
++    // exactly devices_m2's hysteresis_flip. The ramp crosses up,
++    // holds inside the band, falls out, crosses back.
++    SwitchBench b({0.0, 2.0, 2.6, 2.2, 1.4, 2.6});
++    const ws::circsim::OverlaySwitch open =
++        ws::circsim::overlay_switch(b.t, b.map, b.nets, b.s, b.p, *b.sym,
++                                    1.0);
++    CHECK(open.known);
++    CHECK_FALSE(open.closed);  // 2.0 sits in the band, sticky from open
++    const ws::circsim::OverlaySwitch shut =
++        ws::circsim::overlay_switch(b.t, b.map, b.nets, b.s, b.p, *b.sym,
++                                    2.0);
++    CHECK(shut.known);
++    CHECK(shut.closed);  // 2.6 crosses 2.5
++    const ws::circsim::OverlaySwitch held =
++        ws::circsim::overlay_switch(b.t, b.map, b.nets, b.s, b.p, *b.sym,
++                                    3.0);
++    CHECK(held.known);
++    CHECK(held.closed);  // 2.2 inside the band, sticky from closed
++    const ws::circsim::OverlaySwitch dropped =
++        ws::circsim::overlay_switch(b.t, b.map, b.nets, b.s, b.p, *b.sym,
++                                    4.0);
++    CHECK(dropped.known);
++    CHECK_FALSE(dropped.closed);  // 1.4 falls below 1.5
++    const ws::circsim::OverlaySwitch again =
++        ws::circsim::overlay_switch(b.t, b.map, b.nets, b.s, b.p, *b.sym,
++                                    5.0);
++    CHECK(again.known);
++    CHECK(again.closed);  // 2.6 crosses back
++}
++
++TEST_CASE("the walk rests open when it cannot know") {
++    // No control column: the ctl net never lands a v(ctl) column (an
++    // .ac's small-signal spellings, say) - unknown, never a guess.
++    SwitchBench b({0.0, 3.0});
++    b.t.signals.clear();
++    b.t.signals.push_back({"re(v(ctl))", {0.0, 3.0}});
++    const ws::circsim::OverlaySwitch sw =
++        ws::circsim::overlay_switch(b.t, b.map, b.nets, b.s, b.p, *b.sym,
++                                    1.0);
++    CHECK_FALSE(sw.known);
++    CHECK_FALSE(sw.closed);
++
++    // A model no card answers: unknown (and no run would have landed
++    // anyway).
++    SwitchBench c({0.0, 3.0});
++    c.p.params["model"] = "nobody";
++    const ws::circsim::OverlaySwitch unk =
++        ws::circsim::overlay_switch(c.t, c.map, c.nets, c.s, c.p, *c.sym,
++                                    1.0);
++    CHECK_FALSE(unk.known);
++
++    // An empty table: unknown.
++    SwitchBench d({});
++    const ws::circsim::OverlaySwitch empty =
++        ws::circsim::overlay_switch(d.t, d.map, d.nets, d.s, d.p, *d.sym,
++                                    0.0);
++    CHECK_FALSE(empty.known);
++}
++
++TEST_CASE("the thresholds read the directives' card, not just the library") {
++    // A directives card named like the library's own sw_ttl but with
++    // Vt=1: the user's card wins (the export's resolution order), and
++    // the walk flips at 1, not at the library's 2.5.
++    SwitchBench b({0.0, 1.2, 2.6},
++                  ".model sw_ttl SW(Ron=1 Roff=1meg Vt=1 Vh=0)");
++    b.p.params["model"] = "sw_ttl";
++    const ws::circsim::OverlaySwitch sw =
++        ws::circsim::overlay_switch(b.t, b.map, b.nets, b.s, b.p, *b.sym,
++                                    2.0);
++    CHECK(sw.known);
++    CHECK(sw.closed);  // the directives' Vt=1, not the library's 2.5
++
++    // The same name with NO directives card: the built-in library's
++    // sw_ttl (Vt=2.5 Vh=0.4) answers, and 2.6 stays open (the band's
++    // top is 2.9).
++    SwitchBench c({0.0, 2.6});
++    c.s.directives.clear();
++    c.p.params["model"] = "sw_ttl";
++    const ws::circsim::OverlaySwitch lib_low =
++        ws::circsim::overlay_switch(c.t, c.map, c.nets, c.s, c.p, *c.sym,
++                                    1.0);
++    CHECK(lib_low.known);
++    CHECK_FALSE(lib_low.closed);
++    SwitchBench d({0.0, 3.0});
++    d.s.directives.clear();
++    d.p.params["model"] = "sw_ttl";
++    const ws::circsim::OverlaySwitch lib_high =
++        ws::circsim::overlay_switch(d.t, d.map, d.nets, d.s, d.p, *d.sym,
++                                    1.0);
++    CHECK(lib_high.known);
++    CHECK(lib_high.closed);  // 3.0 crosses the library's 2.9
++}
++
++TEST_CASE("the card's spelling tolerance: spaced and continued params") {
++    // "Vt = 2" across tokens and a '+' continuation line - the real
++    // deck reader's own tolerance, the same cards the run would read.
++    SwitchBench b({0.0, 2.6},
++                  ".model spaced SW(Ron = 1 Roff = 1meg\n+ Vt = 2"
++                  " Vh = 0.5)");
++    b.p.params["model"] = "spaced";
++    const ws::circsim::OverlaySwitch sw =
++        ws::circsim::overlay_switch(b.t, b.map, b.nets, b.s, b.p, *b.sym,
++                                    1.0);
++    CHECK(sw.known);
++    CHECK(sw.closed);  // 2.6 against Vt=2, Vh=0.5: over the top
++}
++
++TEST_CASE("the W switch walks the controlling source's current") {
++    // The W card reads It/Ih; the control is the named V source's
++    // branch column. sw_ideal closes above 1 mA.
++    const ws::circsim::SymbolDef* w = ws::circsim::find_symbol("w");
++    REQUIRE(w != nullptr);
++    ws::spice::Table t;
++    t.analysis = ws::spice::AnalysisKind::Tran;
++    t.sweep = ws::spice::SweepKind::Time;
++    t.sweep_names = {"time"};
++    t.sweep_axes.push_back({0.0, 1.0, 2.0});
++    t.signals.push_back({"i(V1)", {0.0, 0.5e-3, 2.0e-3}});
++    SpiceExport map;
++    map.node_net["n1"] = 10;
++    map.element_part["V1"] = 5;
++    ws::circsim::NetList nets;  // the W reads no nets: empty is honest
++    ws::circsim::Schematic s;
++    ws::circsim::Part p;
++    p.id = 8;
++    p.symbol = "w";
++    p.ref = "W1";
++    p.params["vs"] = "V1";
++    p.params["model"] = "sw_ideal";
++
++    const ws::circsim::OverlaySwitch low =
++        ws::circsim::overlay_switch(t, map, nets, s, p, *w, 1.0);
++    CHECK(low.known);
++    CHECK_FALSE(low.closed);  // 0.5 mA < 1 mA
++    const ws::circsim::OverlaySwitch high =
++        ws::circsim::overlay_switch(t, map, nets, s, p, *w, 2.0);
++    CHECK(high.known);
++    CHECK(high.closed);  // 2 mA crosses
++
++    // The param's spelling may differ in case from the deck's: the
++    // map's CiLess lookup finds the column the table actually named.
++    p.params["vs"] = "v1";
++    const ws::circsim::OverlaySwitch ci =
++        ws::circsim::overlay_switch(t, map, nets, s, p, *w, 2.0);
++    CHECK(ci.known);
++    CHECK(ci.closed);
++}
++
++TEST_CASE("a .op's single row answers the settled state") {
++    SwitchBench b({3.0});
++    b.t.analysis = ws::spice::AnalysisKind::Op;
++    b.t.sweep = ws::spice::SweepKind::None;
++    b.t.sweep_names.clear();
++    b.t.sweep_axes.clear();
++    const ws::circsim::OverlaySwitch sw =
++        ws::circsim::overlay_switch(b.t, b.map, b.nets, b.s, b.p, *b.sym,
++                                    123.0 /* any playhead: settled */);
++    CHECK(sw.known);
++    CHECK(sw.closed);  // 3.0 over Vt+Vh = 2.5
++}
+diff --git a/libs/circsim/tests/test_symbol_render.cpp b/libs/circsim/tests/test_symbol_render.cpp
+index 1530f02..a6ee82a 100644
+--- a/libs/circsim/tests/test_symbol_render.cpp
++++ b/libs/circsim/tests/test_symbol_render.cpp
+@@ -470,3 +470,84 @@ TEST_CASE("malformed prims are skipped, not repaired") {
+         render_symbol(s, placement(Pos{0.0, 0.0}));
+     CHECK(out.empty());
+ }
++
++TEST_CASE("the switch blade renders open by default and eases to closed") {
++    // The s symbol's moving contact (SwitchBlade): every static
++    // consumer passes nothing and must see the authored open rest -
++    // bit-identical to the line the old static table drew, pivot to
++    // (0.9, 0.95). switch_closed 1.0 lands the tip verbatim on the
++    // mate contact, and the halves between sweep the angle monotonics
++    // (the tip rises off the open end, falls onto the closed one).
++    const SymbolDef* s = ws::circsim::find_symbol("s");
++    REQUIRE(s != nullptr);
++    REQUIRE(s->blade.has_value());
++
++    const std::vector<SymbolStroke> open =
++        render_symbol(*s, placement(Pos{0.0, 0.0}));
++    // The blade is one Line with its pivot exactly on the first
++    // contact dot's spot.
++    const SymbolStroke* blade = nullptr;
++    for (const SymbolStroke& st : open) {
++        if (st.kind == SymbolStroke::Kind::Line &&
++            st.pts.size() == 2u && st.pts[0].x == -1.2 &&
++            st.pts[0].y == 0.0 && st.pts[1].y > 0.0) {
++            blade = &st;
++        }
++    }
++    REQUIRE(blade != nullptr);
++    CHECK(pts_eq(*blade, 1, Pos{0.9, 0.95}));  // the authored rest, exact
++
++    const std::vector<SymbolStroke> closed =
++        render_symbol(*s, placement(Pos{0.0, 0.0}), 1.0);
++    const SymbolStroke* thrown = nullptr;
++    for (const SymbolStroke& st : closed) {
++        if (st.kind == SymbolStroke::Kind::Line &&
++            st.pts.size() == 2u && st.pts[0].x == -1.2 &&
++            st.pts[0].y == 0.0) {
++            thrown = &st;
++        }
++    }
++    REQUIRE(thrown != nullptr);
++    CHECK(pts_eq(*thrown, 1, Pos{1.2, 0.0}));  // the mate contact, exact
++
++    // The half-thrown blade: between the two tips, above the axis, at
++    // a shorter angle than the open rest.
++    const std::vector<SymbolStroke> half =
++        render_symbol(*s, placement(Pos{0.0, 0.0}), 0.5);
++    const SymbolStroke* mid = nullptr;
++    for (const SymbolStroke& st : half) {
++        if (st.kind == SymbolStroke::Kind::Line && st.pts.size() == 2u &&
++            st.pts[0].x == -1.2 && st.pts[0].y == 0.0) {
++            mid = &st;
++        }
++    }
++    REQUIRE(mid != nullptr);
++    CHECK(mid->pts[1].y > 0.0);           // still up off the axis
++    CHECK(mid->pts[1].y < 0.95);          // but below the open tip
++    CHECK(mid->pts[1].x > -1.2);          // and sweeping toward the mate
++
++    // Mirror folds into the moving tip exactly as it does into every
++    // static vertex: the mirrored blade swings the other way, same
++    // interpolation, the transform never sees a special case.
++    const std::vector<SymbolStroke> mirrored =
++        render_symbol(*s, placement(Pos{0.0, 0.0}, 0, true), 0.5);
++    const SymbolStroke* mm = nullptr;
++    for (const SymbolStroke& st : mirrored) {
++        if (st.kind == SymbolStroke::Kind::Line && st.pts.size() == 2u &&
++            st.pts[0].x == 1.2 && st.pts[0].y == 0.0) {
++            mm = &st;
++        }
++    }
++    REQUIRE(mm != nullptr);
++    CHECK(mm->pts[1].y == doctest::Approx(mid->pts[1].y).epsilon(1e-9));
++    CHECK(mm->pts[1].x ==
++          doctest::Approx(-mid->pts[1].x).epsilon(1e-9));
++    CHECK(mm->pts[0].y == 0.0);
++
++    // A symbol with no blade ignores the value: the resistor's single
++    // zigzag answers whatever switch_closed says.
++    const SymbolDef* r = ws::circsim::find_symbol("r");
++    REQUIRE(r != nullptr);
++    CHECK(render_symbol(*r, placement(Pos{0.0, 0.0}), 0.7).size() ==
++          render_symbol(*r, placement(Pos{0.0, 0.0})).size());
++}
+diff --git a/libs/circsim/tests/test_symbols.cpp b/libs/circsim/tests/test_symbols.cpp
+index 628144a..de00668 100644
+--- a/libs/circsim/tests/test_symbols.cpp
++++ b/libs/circsim/tests/test_symbols.cpp
+@@ -564,6 +564,105 @@ TEST_CASE("save round-trips a library and its unknowns") {
+     CHECK(full.find("\"tline\"") != std::string::npos);
+ }
+ 
++TEST_CASE("the blade rides a .csym round trip, and a broken one drops") {
++    // A .csym switch with a blade: load, read, save, reload - the
++    // geometry must survive byte-stable (the fixpoint the other fields
++    // hold). The built-in s override warns, as overrides do.
++    constexpr std::string_view kBladeLib = R"json({
++        "format": "circsim-symbols", "version": 1,
++        "symbols": [{
++            "key": "s", "name": "Switch (voltage controlled)",
++            "spice": "S", "ref": "S", "model": true, "value": false,
++            "model_kind": "sw",
++            "pins": [
++                {"name": "p", "pos": [-5.0, 0.0], "dir": 180},
++                {"name": "n", "pos": [5.0, 0.0], "dir": 0},
++                {"name": "c+", "pos": [2.0, -4.0], "dir": 270},
++                {"name": "c-", "pos": [-2.0, -4.0], "dir": 270}
++            ],
++            "emit": [{"param": "model", "optional": false}],
++            "params": [{"key": "model", "label": "Model"}],
++            "draw": [
++                {"rect": [-2.5, -2.0, 2.5, 2.0]},
++                {"line": [[-5.0, 0.0], [-1.2, 0.0]]},
++                {"dot": [-1.2, 0.0, 0.14]},
++                {"dot": [1.2, 0.0, 0.14]},
++                {"line": [[1.2, 0.0], [5.0, 0.0]]}
++            ],
++            "blade": {
++                "pivot": [-1.2, 0.0],
++                "open": [0.9, 0.95],
++                "closed": [1.2, 0.0]
++            }
++        }]
++    })json";
++    std::vector<ws::circsim::Diag> diags;
++    SymbolLibrary lib = load_ok(kBladeLib, diags);
++    const SymbolDef* s = lib.find("s");
++    REQUIRE(s != nullptr);
++    REQUIRE(s->blade.has_value());
++    CHECK(s->blade->pivot.x == doctest::Approx(-1.2));
++    CHECK(s->blade->open_tip.y == doctest::Approx(0.95));
++    CHECK(s->blade->closed_tip.x == doctest::Approx(1.2));
++    // Save keeps the blade (an override of a built-in stays on the
++    // user side of the cut), and the reload reads the same geometry.
++    const std::string once = lib.save();
++    CHECK(once.find("\"blade\"") != std::string::npos);
++    std::vector<ws::circsim::Diag> diags2;
++    const SymbolLibrary again = load_ok(once, diags2);
++    const SymbolDef* s2 = again.find("s");
++    REQUIRE(s2 != nullptr);
++    REQUIRE(s2->blade.has_value());
++    CHECK(s2->blade->pivot.x == doctest::Approx(-1.2));
++    CHECK(s2->blade->open_tip.y == doctest::Approx(0.95));
++    CHECK(s2->blade->closed_tip.x == doctest::Approx(1.2));
++    CHECK(again.save() == once);
++
++    // The built-ins' own blades ride the full dump too: the s/w pair
++    // survive a dump -> reload without losing their moving contact.
++    SymbolLibrary fresh;
++    std::vector<ws::circsim::Diag> diags3;
++    const SymbolLibrary full = load_ok(fresh.save(true), diags3);
++    const SymbolDef* sb = full.find("s");
++    REQUIRE(sb != nullptr);
++    REQUIRE(sb->blade.has_value());
++    CHECK(sb->blade->open_tip.y == doctest::Approx(0.95));
++    const SymbolDef* wb = full.find("w");
++    REQUIRE(wb != nullptr);
++    REQUIRE(wb->blade.has_value());
++
++    // A malformed blade (a missing endpoint) warns and drops to the
++    // static picture - never a half-animated symbol.
++    constexpr std::string_view kBadBladeLib = R"json({
++        "format": "circsim-symbols", "version": 1,
++        "symbols": [{
++            "key": "mytr", "name": "My throwover", "spice": "S",
++            "ref": "S",
++            "pins": [
++                {"name": "p", "pos": [-3.0, 0.0], "dir": 180},
++                {"name": "n", "pos": [3.0, 0.0], "dir": 0},
++                {"name": "c+", "pos": [2.0, -3.0], "dir": 270},
++                {"name": "c-", "pos": [-2.0, -3.0], "dir": 270}
++            ],
++            "blade": {"pivot": [-1.0, 0.0], "open": [1.0, 1.0]}
++        }]
++    })json";
++    std::vector<ws::circsim::Diag> diags4;
++    const SymbolLibrary bad = load_ok(kBadBladeLib, diags4);
++    bool saw_blade_diag = false;
++    for (const ws::circsim::Diag& d : diags4) {
++        if (d.code == "circsim.symbols.bad_field" &&
++            d.message.find("'blade'") != std::string::npos) {
++            saw_blade_diag = true;
++        }
++    }
++    CHECK(saw_blade_diag);
++    const SymbolDef* mytr = bad.find("mytr");
++    REQUIRE(mytr != nullptr);
++    CHECK(!mytr->blade.has_value());
++}
++
++
+ TEST_CASE("save keeps a built-in override on the user side of the cut") {
+     constexpr std::string_view wide = R"json({
+         "format": "circsim-symbols", "version": 1,
+@@ -835,6 +934,40 @@ TEST_CASE("the orphan-device built-ins carry the SPICE letters and specs") {
+     CHECK(w->emit[0].key == "vs");
+     CHECK(!w->emit[0].optional);
+ 
++    // The blade (the animated contact): the pivot on the first contact
++    // dot, the open tip at the end the old static line drew, the
++    // closed tip on the mate contact - and the s/w pair are the only
++    // symbols in the table that carry one.
++    REQUIRE(sw->blade.has_value());
++    CHECK(sw->blade->pivot.x == doctest::Approx(-1.2));
++    CHECK(sw->blade->pivot.y == doctest::Approx(0.0));
++    CHECK(sw->blade->open_tip.x == doctest::Approx(0.9));
++    CHECK(sw->blade->open_tip.y == doctest::Approx(0.95));
++    CHECK(sw->blade->closed_tip.x == doctest::Approx(1.2));
++    CHECK(sw->blade->closed_tip.y == doctest::Approx(0.0));
++    REQUIRE(w->blade.has_value());
++    CHECK(w->blade->pivot.x == doctest::Approx(-0.9));
++    CHECK(w->blade->pivot.y == doctest::Approx(0.0));
++    CHECK(w->blade->open_tip.x == doctest::Approx(0.6));
++    CHECK(w->blade->open_tip.y == doctest::Approx(0.8));
++    CHECK(w->blade->closed_tip.x == doctest::Approx(0.9));
++    CHECK(w->blade->closed_tip.y == doctest::Approx(0.0));
++    for (const SymbolDef& s : ws::circsim::builtin_symbols()) {
++        if (s.key != "s" && s.key != "w") {
++            INFO("symbol key: ", s.key);
++            CHECK(!s.blade.has_value());
++        }
++    }
++    // And the bounds still hold the blade's swing (symbol_bounds grew
++    // the endpoints): the s body's box spans the blade either way, so
++    // the answer is the pins' and the box's own.
++    const Bounds sb = symbol_bounds(*sw);
++    CHECK(sb.min_x == doctest::Approx(-5.0));  // the p pin
++    CHECK(sb.max_x == doctest::Approx(5.0));   // the n pin
++    CHECK(sb.min_y == doctest::Approx(-4.0));  // the c pair's pins
++    CHECK(sb.max_y == doctest::Approx(2.0));   // the body box's top
++
++
+     // The coupling: deliberately pinless - it names inductors.
+     const SymbolDef* k = ws::circsim::find_symbol("k");
+     REQUIRE(k != nullptr);
+-- 
+2.47.3
+

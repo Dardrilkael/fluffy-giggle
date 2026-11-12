@@ -104,6 +104,16 @@ Bounds symbol_bounds(const SymbolDef& s) {
                 break;
         }
     }
+    // The blade's swing (SwitchBlade): both endpoints ride the bounds -
+    // the tip's whole arc lives inside them, so a selection marquee or
+    // hit test never loses the thrown blade to the AABB. The built-in
+    // s/w blades sit inside their bodies' boxes, but a .csym blade may
+    // reach past anything the static prims draw.
+    if (s.blade.has_value()) {
+        grow(s.blade->pivot.x, s.blade->pivot.y);
+        grow(s.blade->open_tip.x, s.blade->open_tip.y);
+        grow(s.blade->closed_tip.x, s.blade->closed_tip.y);
+    }
     return b;
 }
 

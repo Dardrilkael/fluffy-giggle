@@ -1424,7 +1424,8 @@ void Editor::status(std::string text) const {
 
 void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
                  Pos pos, int rot, bool mirror, const Paint& body,
-                 std::uint32_t text_color, const ws::ui::r2d::Font* font) {
+                 std::uint32_t text_color, const ws::ui::r2d::Font* font,
+                 double switch_closed) {
     // The geometry lives in ws::circsim's render seam (render_symbol):
     // one pure flattening shared with the CLI's SVG dump and the tests.
     // This is the painting half only - strokes to canvas calls.
@@ -1434,7 +1435,7 @@ void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
     placement.mirror = mirror;
     constexpr double kRad = kPi / 180.0;
     for (const ws::circsim::SymbolStroke& s :
-         ws::circsim::render_symbol(sym, placement)) {
+         ws::circsim::render_symbol(sym, placement, switch_closed)) {
         const auto pt = [&](std::size_t i) {
             return Point{static_cast<float>(s.pts[i].x),
                          static_cast<float>(s.pts[i].y)};
