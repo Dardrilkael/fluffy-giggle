@@ -48,6 +48,8 @@
 #include <set>
 #include <string>
 #include <string_view>
+
+#include <ws/ui/gui/rect.hpp>
 #include <utility>
 #include <vector>
 
@@ -85,6 +87,15 @@ namespace gui = ws::ui::gui;
 namespace canvas = ws::ui::canvas;
 using ws::circsim::Bounds;
 using ws::circsim::Pos;
+
+// Screen-space rectangle (min corner + width/height), used by the
+// annotation placement engine for overlap tests in pixel space.
+struct ScreenRect {
+    float x = 0.0f;
+    float y = 0.0f;
+    float w = 0.0f;
+    float h = 0.0f;
+};
 
 // Epsilon compare on world coordinates (grid units).
 inline bool eps_eq(double a, double b, double eps) {
@@ -632,6 +643,17 @@ struct Editor {
     WireColorMode wire_colors = WireColorMode::Nets;
     Playback playback;
     bool transport_scrub = false;
+    // The origin crosshair (the grid's x=0/y=0 axis lines + origin
+    // marker), hidden by default - a full-length crosshair reads as
+    // structure crossing the schematic. View menu > "Show Origin
+    // Axes"; editor view state like wire_colors, so it survives a
+    // document switch.
+    bool show_origin_axes = false;
+    // Part annotations on the canvas: the refdes always (it is the
+    // part's name), the value/model line beside it. On by default -
+    // the classic EDA look; View menu > "Show Part Values", and a
+    // per-part row in Properties (annotate_off) opts one part out.
+    bool show_part_values = true;
     // The Results panel's transport row scrub, the strip's own rule: a
     // press in the row's track arms it, the drag owns the pointer
     // until release, and both surfaces write the one playback above -
@@ -800,6 +822,12 @@ struct Editor {
     bool key_flip_prev_ = false;
     bool key_tidy_prev_ = false;
     bool key_annotate_prev_ = false;
+    // Alt+Arrow nudges (C1): one slot per direction so a held nudge
+    // fires once per press edge (repeat is the panel's own policy).
+    // 0=Up, 1=Down, 2=Left, 3=Right, 4=Reset (Shift+R in the patch,
+    // but we reuse the same array - the reset chord is wired in
+    // handle_pointer and reads key_nudge_prev_[4]).
+    std::array<bool, 5> key_nudge_prev_ = {false, false, false, false, false};
 
     // Quiet toasts: an identical toast pushed while its twin is still
     // on screen is dropped instead of stacking (a command mashed ten
@@ -1121,6 +1149,115 @@ struct Editor {
     void toast(std::string text, gui::ToastSeverity severity,
                float seconds = 4.0f) const;
     void status(std::string text) const;
+
+    // --- C1-C4: schematic readability pass (annotation placement engine) ---
+    // PartAnnotation: one part's refdes and optional value/model text,
+    // plus the symbol's text origin (where the picture's refdes *would*
+    // draw if the symbol had a refdes field - the anchor we place the
+    // annotation around). The placement engine positions the refdes +
+    // value as one tile (the refdes left, value right, one space
+    // between), with the refdes anchored at the text origin when
+    // possible, else the tile center-below the part. The panel draws the
+    // placed tiles verbatim; the part symbol itself draws no text.
+    struct PartAnnotation {
+        std::uint32_t part_id = 0;
+        std::string refdes;
+        std::string value;   // the effective value/model line (param fallback)
+        Pos text_origin{0.0, 0.0};  // the symbol's declared text origin
+        bool has_origin = false;    // true when text_origin came from the symbol
+    };
+
+    // TextTile: a placed annotation tile (refdes + value), the screen rect
+    // the tile occupies (for collision tests), and the world anchor the
+    // tile was placed at (the center of the tile). The placement engine
+    // returns a vector of these; the panel iterates and draws each.
+    struct TextTile {
+        std::string refdes;
+        std::string value;
+        ws::ui::gui::Rect screen_rect{0.0f, 0.0f, 0.0f, 0.0f};  // screen px
+        Pos anchor{0.0, 0.0};                                 // world
+    };
+
+    // AnnotObstacles: the world-space shapes that annotations must not
+    // overlap - part body AABBs, wire polylines (with a small stroke
+    // width buffer), junction dots, and the canvas extents. Built once
+    // per frame from the schematic and the current view (only obstacles
+    // inside the view + a margin matter).
+    struct AnnotObstacles {
+        std::vector<Bounds> part_bodies;          // part AABBs (world)
+        std::vector<std::vector<Pos>> wire_paths; // wire polylines (world)
+        std::vector<Pos> junctions;               // junction positions (world)
+        Bounds view_bounds;                       // the visible world rect
+    };
+
+    // AnnotPlacement: the output of the placement engine - all placed
+    // part tiles, all placed net label tiles, and the obstacles they
+    // were placed against (for hit-testing / debugging).
+    struct AnnotPlacement {
+        std::vector<TextTile> part_tiles;
+        std::vector<TextTile> net_tiles;
+        AnnotObstacles obstacles;
+    };
+
+    // AnnotState: the editor-owned annotation state for one part - the
+    // user's per-part nudge (world delta from the engine's answer) and
+    // the annotate_off opt-out flag. The engine runs every frame and
+    // adds this nudge to its computed position; the Properties panel
+    // edits the nudge and the flag. The editor owns the map keyed by
+    // part id; a part not in the map has zero nudge and annotate_off
+    // false (the default on). The map is editor-lifetime state (survives
+    // document switches, so nudges persist like wire_colors).
+    struct AnnotState {
+        Pos nudge{0.0, 0.0};
+        bool annotate_off = false;
+    };
+
+    // AnnotCandidate: one candidate position the engine evaluates for a
+    // tile. The tile's screen rect at that candidate, the world anchor,
+    // the penalty score (overlap area with obstacles + distance from the
+    // ideal anchor + a tiny jitter tie-break), and whether the candidate
+    // is inside the view bounds (false = dropped).
+    struct AnnotCandidate {
+        ScreenRect screen_rect{0.0f, 0.0f, 0.0f, 0.0f};
+        Pos anchor{0.0, 0.0};
+        double score = 0.0;
+        bool in_view = true;
+    };
+
+    // True when the tile's screen_rect overlaps any obstacle's screen
+    // projection (with a small margin). The obstacles are projected to
+    // screen through the current view (the same view the panel uses for
+    // culling). Used by the placement engine to score candidates.
+    [[nodiscard]] bool annot_blocked(const ScreenRect& tile,
+                                     const AnnotObstacles& obs,
+                                     const EditorView& editor_view) const;
+
+    // Place all part annotations for the current schematic. Returns an
+    // AnnotPlacement with the placed part tiles and net tiles. The
+    // engine: builds obstacles from the visible schematic, computes the
+    // ideal anchor for each part (text_origin if has_origin, else the
+    // part's bounds center-bottom), generates a ring of candidates
+    // around the ideal (8 directions x 3 radii = 24 candidates, plus the
+    // ideal itself), scores each (obstacle overlap + distance from ideal
+    // + jitter), picks the best, applies the per-part nudge from
+    // annot_state_of, and stores the placed tile. Net labels: the net
+    // name at the net's centroid (the average of all pins/junctions on
+    // the net), same candidate ring, same scoring. Parts with
+    // annotate_off or no refdes are skipped. The engine is called once
+    // per frame from draw_canvas_panel (so it rides the view's culling).
+    [[nodiscard]] AnnotPlacement place_part_annotation() const;
+
+    // Place net labels (the net name at the net's centroid). Called by
+    // place_part_annotation; split for testing.
+    [[nodiscard]] std::vector<TextTile> place_net_label(
+        const AnnotObstacles& obs, const EditorView& editor_view) const;
+
+    // Get (creating if needed) the annotation state for `part_id`.
+    [[nodiscard]] AnnotState& annot_state_of(std::uint32_t part_id);
+
+    // Set the annotation state for `part_id` (the Properties panel calls
+    // this when the user edits the nudge fields or toggles annotate_off).
+    void set_annot_state(std::uint32_t part_id, const AnnotState& st);
 };
 
 // The shared symbol renderer: `draw` prims + pin stubs through a

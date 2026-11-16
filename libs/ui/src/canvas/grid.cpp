@@ -295,34 +295,37 @@ void draw_grid_marks(Canvas2D& canvas, const GridSpec& spec,
     // The axes: thin snapped lines in the accent face - a subtle
     // x=0/y=0 reading, never a loud crosshair (the face's own alpha is
     // the volume knob) - plus the 3px origin marker where they cross.
-    const auto axis_pos = [&](bool vertical) {
-        // world 0 on the wanted axis, unsnapped.
-        return vertical ? m.mark_x(m.rungs[0], 0) : m.mark_y(m.rungs[0], 0);
-    };
-    const std::uint32_t axis =
-        scale_alpha(spec.axis_color, brightness);
-    Paint axis_paint;
-    axis_paint.width = 1.0f;
-    axis_paint.cap = StrokeCap::butt;
-    axis_paint.color = axis;
-    const float left = m.frame.ox;
-    const float top = m.frame.oy;
-    const float right = m.frame.ox + static_cast<float>(m.frame.view_w);
-    const float bottom = m.frame.oy + static_cast<float>(m.frame.view_h);
-    if (m.x_axis_visible) {
-        const float px =
-            std::floor(static_cast<float>(axis_pos(true))) + 0.5f;
-        canvas.stroke_line(Point{px, top}, Point{px, bottom}, axis_paint);
-    }
-    if (m.y_axis_visible) {
-        const float py =
-            std::floor(static_cast<float>(axis_pos(false))) + 0.5f;
-        canvas.stroke_line(Point{left, py}, Point{right, py}, axis_paint);
-    }
-    if (m.x_axis_visible && m.y_axis_visible) {
-        const Point origin{snap_mark(axis_pos(true), 3.0f),
-                           snap_mark(axis_pos(false), 3.0f)};
-        canvas.fill_rects(&origin, 1, 3.0f, 3.0f, axis);
+    // C4: gated by spec.show_axis (the editor's View > Show Origin Axes).
+    if (spec.show_axis) {
+        const auto axis_pos = [&](bool vertical) {
+            // world 0 on the wanted axis, unsnapped.
+            return vertical ? m.mark_x(m.rungs[0], 0) : m.mark_y(m.rungs[0], 0);
+        };
+        const std::uint32_t axis =
+            scale_alpha(spec.axis_color, brightness);
+        Paint axis_paint;
+        axis_paint.width = 1.0f;
+        axis_paint.cap = StrokeCap::butt;
+        axis_paint.color = axis;
+        const float left = m.frame.ox;
+        const float top = m.frame.oy;
+        const float right = m.frame.ox + static_cast<float>(m.frame.view_w);
+        const float bottom = m.frame.oy + static_cast<float>(m.frame.view_h);
+        if (m.x_axis_visible) {
+            const float px =
+                std::floor(static_cast<float>(axis_pos(true))) + 0.5f;
+            canvas.stroke_line(Point{px, top}, Point{px, bottom}, axis_paint);
+        }
+        if (m.y_axis_visible) {
+            const float py =
+                std::floor(static_cast<float>(axis_pos(false))) + 0.5f;
+            canvas.stroke_line(Point{left, py}, Point{right, py}, axis_paint);
+        }
+        if (m.x_axis_visible && m.y_axis_visible) {
+            const Point origin{snap_mark(axis_pos(true), 3.0f),
+                               snap_mark(axis_pos(false), 3.0f)};
+            canvas.fill_rects(&origin, 1, 3.0f, 3.0f, axis);
+        }
     }
 }
 

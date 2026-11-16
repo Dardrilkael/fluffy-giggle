@@ -54,6 +54,12 @@ struct GridSpec {
     // Dots at the intersections (the schematic look) vs 1px
     // hairlines (the graph-paper look).
     bool show_dots = true;
+    // The origin crosshair (x=0 / y=0 axis lines + origin marker).
+    // Gated by this flag so the editor can toggle it (View menu > Show
+    // Origin Axes). Default true - the crosshair reads as structure
+    // crossing the schematic when on. The editor defaults to false in
+    // Editor::show_origin_axes.
+    bool show_axis = true;
     // The density policy, in screen px per cell:
     //   min_cell_px    - below this a rung's marks are invisible
     //                    (the minors "hidden" band; the ladder's

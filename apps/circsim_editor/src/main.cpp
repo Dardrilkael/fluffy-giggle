@@ -911,6 +911,28 @@ class CircsimApp final : public ws::ui::App {
         };
         add(std::move(fit_cmd));
 
+        Command show_origin_axes_cmd;
+        show_origin_axes_cmd.id = "view.show_origin_axes";
+        show_origin_axes_cmd.label = "Show Origin Axes";
+        show_origin_axes_cmd.category = "View";
+        show_origin_axes_cmd.enabled = [this] { return editor_.schem() != nullptr; };
+        show_origin_axes_cmd.checked = [this] { return editor_.show_origin_axes; };
+        show_origin_axes_cmd.execute = [this](std::string_view) {
+            editor_.show_origin_axes = !editor_.show_origin_axes;
+        };
+        add(std::move(show_origin_axes_cmd));
+
+        Command show_part_values_cmd;
+        show_part_values_cmd.id = "view.show_part_values";
+        show_part_values_cmd.label = "Show Part Values";
+        show_part_values_cmd.category = "View";
+        show_part_values_cmd.enabled = [this] { return editor_.schem() != nullptr; };
+        show_part_values_cmd.checked = [this] { return editor_.show_part_values; };
+        show_part_values_cmd.execute = [this](std::string_view) {
+            editor_.show_part_values = !editor_.show_part_values;
+        };
+        add(std::move(show_part_values_cmd));
+
         Command erc_cmd;
         erc_cmd.id = "circuit.erc";
         erc_cmd.label = "Run ERC Check";

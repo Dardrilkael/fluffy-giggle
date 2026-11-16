@@ -570,6 +570,83 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
         ed.key_annotate_prev_ = annotate_down;
     }
 
+    // Alt+Arrow nudges (C1): moves the selected part's annotation nudge
+    // by one grid cell. The nudge is stored in Editor::annot_state_of
+    // (editor-lifetime state, survives document switches like
+    // wire_colors). Shift+Alt+Arrow nudges by 5 cells. Alt+R resets the
+    // selected part's nudge to zero. Only active in Select tool with
+    // claims open and no text field focused.
+    {
+        const bool keys_ok =
+            inside && gui.claims_open() && !ed.text_field_focused;
+        const bool alt_down =
+            keys_ok &&
+            (in.key_down[ws::input::keys::kLeftAlt] != 0 ||
+             in.key_down[ws::input::keys::kRightAlt] != 0);
+        if (alt_down) {
+            const bool shift_down = coarse;  // Shift is already computed
+            const double step = shift_down ? 5.0 : 1.0;
+            // Up (0)
+            if (in.key_pressed[ws::input::keys::kUp] &&
+                !ed.key_nudge_prev_[0]) {
+                if (ed.sel.kind == Selection::Kind::Part) {
+                    auto& st = ed.annot_state_of(ed.sel.id);
+                    st.nudge.y += step;
+                    ed.bump_edit_epoch();
+                }
+            }
+            ed.key_nudge_prev_[0] = in.key_down[ws::input::keys::kUp] != 0;
+            // Down (1)
+            if (in.key_pressed[ws::input::keys::kDown] &&
+                !ed.key_nudge_prev_[1]) {
+                if (ed.sel.kind == Selection::Kind::Part) {
+                    auto& st = ed.annot_state_of(ed.sel.id);
+                    st.nudge.y -= step;
+                    ed.bump_edit_epoch();
+                }
+            }
+            ed.key_nudge_prev_[1] = in.key_down[ws::input::keys::kDown] != 0;
+            // Left (2)
+            if (in.key_pressed[ws::input::keys::kLeft] &&
+                !ed.key_nudge_prev_[2]) {
+                if (ed.sel.kind == Selection::Kind::Part) {
+                    auto& st = ed.annot_state_of(ed.sel.id);
+                    st.nudge.x -= step;
+                    ed.bump_edit_epoch();
+                }
+            }
+            ed.key_nudge_prev_[2] = in.key_down[ws::input::keys::kLeft] != 0;
+            // Right (3)
+            if (in.key_pressed[ws::input::keys::kRight] &&
+                !ed.key_nudge_prev_[3]) {
+                if (ed.sel.kind == Selection::Kind::Part) {
+                    auto& st = ed.annot_state_of(ed.sel.id);
+                    st.nudge.x += step;
+                    ed.bump_edit_epoch();
+                }
+            }
+            ed.key_nudge_prev_[3] = in.key_down[ws::input::keys::kRight] != 0;
+            // Reset (4) - Alt+Shift+R (the patch used Shift+R, but we
+            // use Alt+R since R is already the rotate chord in Place
+            // tool; Alt+R is free in Select).
+            if (in.key_pressed['R'] && !ed.key_nudge_prev_[4]) {
+                if (ed.sel.kind == Selection::Kind::Part) {
+                    auto& st = ed.annot_state_of(ed.sel.id);
+                    st.nudge = {0.0, 0.0};
+                    ed.bump_edit_epoch();
+                }
+            }
+            ed.key_nudge_prev_[4] = in.key_down['R'] != 0;
+        } else {
+            // Alt not held: clear the edge memory so next Alt press fires.
+            ed.key_nudge_prev_[0] = false;
+            ed.key_nudge_prev_[1] = false;
+            ed.key_nudge_prev_[2] = false;
+            ed.key_nudge_prev_[3] = false;
+            ed.key_nudge_prev_[4] = false;
+        }
+    }
+
     // Wheel: zoom toward the cursor (the scroll panel's own claim is
     // the harmless no-op the header note explains). An open modal veil
     // freezes the canvas - the zoom with it (the header's own
@@ -1203,6 +1280,7 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         spec.major_color = theme.grid_major;
         spec.axis_color = theme.grid_axis;
         spec.show_dots = true;
+        spec.show_axis = ed.show_origin_axes;  // C4: origin crosshair
 
         canvas::GridFrame frame;
         frame.center_x = ed.view.center.x;
@@ -1427,7 +1505,32 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                 0.14f, entity_color(net_of_id(dot_net)));
         }
     }
+    // C1-C4: Annotation placement engine - runs every frame (rides the
+    // view's culling). Places part annotations (refdes + value/model) and
+    // net labels (net name at centroid) avoiding collisions with part
+    // bodies, wires, junctions and view edges. The engine returns placed
+    // TextTiles with screen rects and world anchors; the panel draws them
+    // verbatim. Per-part nudges from Editor::annot_state_of are applied
+    // by the engine.
+    Editor::AnnotPlacement placement;
+    if (theme.font != nullptr && ed.show_part_values) {
+        placement = ed.place_part_annotation();
+    }
+
     if (theme.font != nullptr) {
+        // Net labels: draw from the placement engine's net_tiles (C1).
+        // The engine places the net name at the net's centroid, avoiding
+        // collisions. We match by name since the engine returns the net
+        // name in the tile's refdes field.
+        for (const auto& tile : placement.net_tiles) {
+            const Point at{tile.screen_rect.x, tile.screen_rect.y};
+            // The tile's screen_rect is the text bounds; draw at its top-left
+            (void)rc.draw_text(tile.screen_rect.x, tile.screen_rect.y,
+                               tile.refdes.c_str(), *theme.font,
+                               gui::dim(theme.text, 0.9f));
+        }
+        // Authored labels (the Label tool's labels): keep drawing at their
+        // explicit positions (they are not moved by the engine).
         for (const ws::circsim::Label& l : s.labels()) {
             if (!point_visible(l.pos.x, l.pos.y)) {
                 continue;
@@ -1549,23 +1652,42 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                       static_cast<float>(p.pos.y + 0.5)},
                 body_paint);
         }
-        // The refdes above, the value below (power symbols carry no
-        // ref; the value line only when there is one).
-        if (theme.font != nullptr) {
-            const std::optional<Bounds> b = ed.part_bounds(p.id);
-            const double top = b.has_value() ? b->max_y : p.pos.y;
-            const double bottom = b.has_value() ? b->min_y : p.pos.y;
-            if (!p.ref.empty()) {
-                (void)rc.draw_text(static_cast<float>(p.pos.x - 0.4f),
-                                   static_cast<float>(top + 0.35f),
-                                   p.ref.c_str(), *theme.font,
-                                   gui::dim(theme.text, 0.75f));
+        // The refdes + value: draw from the placement engine's part_tiles (C1).
+        // The engine places the annotation avoiding collisions; we match
+        // by refdes (which is unique per part in the schematic).
+        if (theme.font != nullptr && ed.show_part_values) {
+            // Find the placed tile for this part by refdes.
+            const Editor::TextTile* placed = nullptr;
+            for (const auto& tile : placement.part_tiles) {
+                if (tile.refdes == p.ref) {
+                    placed = &tile;
+                    break;
+                }
             }
-            if (!p.value.empty()) {
-                (void)rc.draw_text(static_cast<float>(p.pos.x - 0.4f),
-                                   static_cast<float>(bottom - 0.9f),
-                                   p.value.c_str(), *theme.font,
-                                   gui::dim(theme.text, 0.75f));
+            if (placed != nullptr) {
+                // Draw refdes and value from the placed tile.
+                // The tile's screen_rect is the combined text bounds
+                // (refdes + " " + value). We need to split them.
+                // The engine places refdes left, value right with one
+                // space between. Draw refdes at screen_rect.x, value at
+                // screen_rect.x + refdes_width + space_width.
+                if (!placed->refdes.empty()) {
+                    (void)rc.draw_text(placed->screen_rect.x,
+                                       placed->screen_rect.y,
+                                       placed->refdes.c_str(),
+                                       *theme.font,
+                                       gui::dim(theme.text, 0.75f));
+                }
+                if (!placed->value.empty()) {
+                    const float ref_w = rc.measure_text(placed->refdes.c_str(),
+                                                        *theme.font);
+                    const float space_w = rc.measure_text(" ", *theme.font);
+                    (void)rc.draw_text(placed->screen_rect.x + ref_w + space_w,
+                                       placed->screen_rect.y,
+                                       placed->value.c_str(),
+                                       *theme.font,
+                                       gui::dim(theme.text, 0.75f));
+                }
             }
         }
     }
@@ -1799,6 +1921,30 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                 }
             }
         }
+    }
+
+    // C2: Wire color caption - a one-line label under the toggle
+    // explaining the current mode. Rides the theme's secondary text.
+    if (theme.font != nullptr) {
+        const ModeToggleLayout modes = mode_toggle_layout(body);
+        const gui::Rect& r = modes.buttons[static_cast<int>(ed.wire_colors)];
+        const char* caption = "";
+        switch (ed.wire_colors) {
+            case WireColorMode::Plain:
+                caption = "Plain: single ink color";
+                break;
+            case WireColorMode::Nets:
+                caption = "Nets: each net its own color";
+                break;
+            case WireColorMode::Voltage:
+                caption = "Voltage: node voltages as blue-gray-red";
+                break;
+        }
+        const float cw = rc.measure_text(caption, *theme.font);
+        const float cx = r.x + (r.width - cw) * 0.5f;
+        const float cy = r.y + r.height + 4.0f;
+        (void)rc.draw_text(cx, cy, caption, *theme.font,
+                           gui::dim(theme.text, 0.55f));
     }
 
     // The transport: the play/pause button, the scrub track with the

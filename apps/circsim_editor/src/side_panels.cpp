@@ -2211,6 +2211,52 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
                 }
             }
         }
+
+        // Annotation nudge/reset for the selected part (C1: placement
+        // engine with nudge support). The per-part AnnotState stores a
+        // world-space nudge and an annotate_off opt-out; the Properties
+        // panel edits these.
+        panel_section(layout, theme, "Annotation");
+        // The nudge fields: world-space delta from the engine's answer.
+        // Input floats with step derived from the grid base (0.1) and a
+        // reasonable range for schematic-scale nudges.
+        auto& annot_st = ed.annot_state_of(p->id);
+        bool nudge_changed = false;
+        const float nudge_step = 0.1f;  // one grid cell
+        const float nudge_min = -100.0f;
+        const float nudge_max = 100.0f;
+        float nudge_x = static_cast<float>(annot_st.nudge.x);
+        float nudge_y = static_cast<float>(annot_st.nudge.y);
+        if (gui::input_float(gui, layout, theme, "Nudge X", nudge_x,
+                             nudge_step, nudge_min, nudge_max)) {
+            nudge_changed = true;
+        }
+        if (gui::input_float(gui, layout, theme, "Nudge Y", nudge_y,
+                             nudge_step, nudge_min, nudge_max)) {
+            nudge_changed = true;
+        }
+        if (nudge_changed) {
+            Editor::AnnotState st = annot_st;
+            st.nudge.x = nudge_x;
+            st.nudge.y = nudge_y;
+            ed.set_annot_state(p->id, st);
+        }
+        // The annotate_off toggle: when true, the part's refdes/value are
+        // not drawn by the annotation engine.
+        bool annotate_off = annot_st.annotate_off;
+        if (gui::checkbox(gui, layout, theme, "Hide Annotation", annotate_off)) {
+            Editor::AnnotState st = annot_st;
+            st.annotate_off = annotate_off;
+            ed.set_annot_state(p->id, st);
+        }
+        // Reset button: clears the nudge and turns annotation back on.
+        if (gui::button(gui, layout, theme, "Reset Annotation")) {
+            Editor::AnnotState st;
+            st.nudge = {0.0, 0.0};
+            st.annotate_off = false;
+            ed.set_annot_state(p->id, st);
+        }
+
         if (source_editor) {
             // The AC magnitude + waveform picker: the netlist's source
             // line without the hand-typed "SIN(0 1 1k)".

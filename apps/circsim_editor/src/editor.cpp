@@ -1341,6 +1341,10 @@ void Editor::document_changed() {
         view.zoom = EditorView::kDefaultZoom;
         view.center = {0.0, 0.0};
     }
+    // The annotation state map is EDITOR lifetime (survives document
+    // switches like wire_colors). It is intentionally NOT cleared here.
+    // The annot_state_of accessor lazy-creates entries, so a fresh
+    // document starts with empty state per part.
 }
 
 bool Editor::tick() {
@@ -1420,6 +1424,368 @@ void Editor::status(std::string text) const {
     if (set_status) {
         set_status(std::move(text));
     }
+}
+
+// --- C1-C4: schematic readability pass (annotation placement engine) ---
+
+bool Editor::annot_blocked(const ScreenRect& tile,
+                           const AnnotObstacles& obs,
+                           const EditorView& editor_view) const {
+    // Project each obstacle to screen and test overlap with the tile.
+    // A small margin (2 px) around the tile keeps text from kissing
+    // wires and part bodies.
+    const float margin = 2.0f;
+    ScreenRect tile_pad = tile;
+    tile_pad.x -= margin;
+    tile_pad.y -= margin;
+    tile_pad.w += 2.0f * margin;
+    tile_pad.h += 2.0f * margin;
+
+    // Part body AABBs
+    for (const Bounds& b : obs.part_bodies) {
+        ws::math::Vec2 min = editor_view.w2s({b.min_x, b.min_y});
+        ws::math::Vec2 max = editor_view.w2s({b.max_x, b.max_y});
+        ScreenRect r{std::min(min.x, max.x), std::min(min.y, max.y),
+                     std::fabs(max.x - min.x), std::fabs(max.y - min.y)};
+        if (r.w > 0.0f && r.h > 0.0f &&
+            tile_pad.x < r.x + r.w && tile_pad.x + tile_pad.w > r.x &&
+            tile_pad.y < r.y + r.h && tile_pad.y + tile_pad.h > r.y) {
+            return true;
+        }
+    }
+
+    // Wire polylines: project each segment to a thickened screen rect
+    // (stroke width ~2 px in screen space). The view's zoom gives the
+    // world-to-screen scale.
+    const float stroke_px = 3.0f;  // world-to-screen will be applied
+    for (const auto& path : obs.wire_paths) {
+        for (std::size_t i = 1; i < path.size(); ++i) {
+            ws::math::Vec2 a = editor_view.w2s(path[i - 1]);
+            ws::math::Vec2 b = editor_view.w2s(path[i]);
+            float min_x = std::min(a.x, b.x) - stroke_px;
+            float max_x = std::max(a.x, b.x) + stroke_px;
+            float min_y = std::min(a.y, b.y) - stroke_px;
+            float max_y = std::max(a.y, b.y) + stroke_px;
+            ScreenRect r{min_x, min_y, max_x - min_x, max_y - min_y};
+            if (r.w > 0.0f && r.h > 0.0f &&
+                tile_pad.x < r.x + r.w && tile_pad.x + tile_pad.w > r.x &&
+                tile_pad.y < r.y + r.h && tile_pad.y + tile_pad.h > r.y) {
+                return true;
+            }
+        }
+    }
+
+    // Junction dots (small circles, ~4 px radius in screen)
+    const float dot_r = 5.0f;
+    for (const Pos& j : obs.junctions) {
+        ws::math::Vec2 p = editor_view.w2s(j);
+        ScreenRect r{p.x - dot_r, p.y - dot_r, 2.0f * dot_r, 2.0f * dot_r};
+        if (tile_pad.x < r.x + r.w && tile_pad.x + tile_pad.w > r.x &&
+            tile_pad.y < r.y + r.h && tile_pad.y + tile_pad.h > r.y) {
+            return true;
+        }
+    }
+
+    // View bounds: if the tile would fall outside the view + margin, it's blocked.
+    ws::math::Vec2 vmin = editor_view.w2s({obs.view_bounds.min_x, obs.view_bounds.min_y});
+    ws::math::Vec2 vmax = editor_view.w2s({obs.view_bounds.max_x, obs.view_bounds.max_y});
+    ScreenRect view_r{std::min(vmin.x, vmax.x) - margin,
+                      std::min(vmin.y, vmax.y) - margin,
+                      std::fabs(vmax.x - vmin.x) + 2.0f * margin,
+                      std::fabs(vmax.y - vmin.y) + 2.0f * margin};
+    if (tile_pad.x < view_r.x || tile_pad.y < view_r.y ||
+        tile_pad.x + tile_pad.w > view_r.x + view_r.w ||
+        tile_pad.y + tile_pad.h > view_r.y + view_r.h) {
+        return true;
+    }
+
+    return false;
+}
+
+Editor::AnnotPlacement Editor::place_part_annotation() const {
+    AnnotPlacement result;
+    const ws::circsim::Schematic* s = schem();
+    if (s == nullptr) {
+        return result;
+    }
+
+    // Build obstacles from the visible schematic.
+    AnnotObstacles obs;
+    obs.view_bounds = content_bounds().value_or(Bounds{0,0,0,0});
+
+    // Part body AABBs
+    for (const auto& part : s->parts()) {
+        auto b = part_bounds(part.id);
+        if (b) {
+            obs.part_bodies.push_back(*b);
+        }
+    }
+
+    // Wire polylines
+    for (const auto& wire : s->wires()) {
+        obs.wire_paths.push_back(wire_path(wire));
+    }
+
+    // Junction dots
+    for (const auto& junc : s->junctions()) {
+        obs.junctions.push_back(junc.pos);
+    }
+
+    // Part annotations
+    if (show_part_values) {
+        for (const auto& part : s->parts()) {
+            // Skip if annotate_off
+            const AnnotState& state = const_cast<Editor*>(this)->annot_state_of(part.id);
+            if (state.annotate_off) {
+                continue;
+            }
+
+            const ws::circsim::SymbolDef* sym = sym_of(part);
+            if (sym == nullptr) {
+                continue;
+            }
+
+            // Refdes
+            std::string refdes = part.ref;
+            if (refdes.empty()) {
+                continue;  // no refdes, nothing to annotate
+            }
+
+            // Value/model line: the part's `value` param if present,
+            // else the model param, else empty.
+            std::string value;
+            auto it_val = part.params.find("value");
+            if (it_val != part.params.end() && !it_val->second.empty()) {
+                value = it_val->second;
+            } else {
+                auto it_mod = part.params.find("model");
+                if (it_mod != part.params.end() && !it_mod->second.empty()) {
+                    value = it_mod->second;
+                }
+            }
+
+            // Text origin from symbol (if any) - not available in current API,
+            // fall back to part bounds center-bottom
+            Pos text_origin{0.0, 0.0};
+            bool has_origin = false;
+
+            PartAnnotation ann;
+            ann.part_id = part.id;
+            ann.refdes = std::move(refdes);
+            ann.value = std::move(value);
+            ann.text_origin = text_origin;
+            ann.has_origin = has_origin;
+
+            // Ideal anchor: text_origin if has_origin, else part bounds center-bottom
+            Pos ideal_anchor;
+            if (has_origin) {
+                ideal_anchor = text_origin;
+            } else {
+                auto b = part_bounds(part.id);
+                if (b) {
+                    ideal_anchor = {b->min_x + (b->max_x - b->min_x) * 0.5, b->min_y};
+                } else {
+                    ideal_anchor = part.pos;
+                }
+            }
+
+            // Candidate ring: 8 directions x 3 radii + ideal
+            constexpr int kDirs = 8;
+            constexpr double kRadii[3] = {0.0, 12.0, 24.0};  // grid cells
+            std::vector<AnnotCandidate> candidates;
+            candidates.reserve(kDirs * 3 + 1);
+
+            // Ideal candidate
+            ws::math::Vec2 ideal_screen = this->view.w2s(ideal_anchor);
+            ScreenRect ideal_rect{ideal_screen.x, ideal_screen.y, 0.0f, 0.0f};
+            // We'll compute the rect after measuring the text below.
+
+            // For text measurement, we need the font. The panel owns the
+            // font; here we approximate: refdes + " " + value at ~13px
+            // height = ~8px per char. The canvas panel will measure
+            // exactly when drawing. Here we use a rough estimate.
+            const float char_w = 8.0f;
+            const float line_h = 14.0f;
+            float text_w = static_cast<float>(ann.refdes.size() + 1 + ann.value.size()) * char_w;
+            if (ann.value.empty()) {
+                text_w = static_cast<float>(ann.refdes.size()) * char_w;
+            }
+
+            // Ideal rect centered on ideal_screen
+            ideal_rect = {ideal_screen.x - text_w * 0.5f, ideal_screen.y - line_h * 0.5f,
+                          text_w, line_h};
+            candidates.push_back({ideal_rect, ideal_anchor, 0.0, true});
+
+            // Ring candidates
+            for (double r : kRadii) {
+                if (r == 0.0) continue;
+                for (int d = 0; d < kDirs; ++d) {
+                    double ang = d * 2.0 * kPi / kDirs;
+                    Pos cand{ideal_anchor.x + r * std::cos(ang),
+                             ideal_anchor.y + r * std::sin(ang)};
+                    ws::math::Vec2 cand_screen = this->view.w2s(cand);
+                    ScreenRect cand_rect{cand_screen.x - text_w * 0.5f,
+                                         cand_screen.y - line_h * 0.5f,
+                                         text_w, line_h};
+                    // Score: distance from ideal + overlap penalty
+                    double dist = std::hypot(cand.x - ideal_anchor.x, cand.y - ideal_anchor.y);
+                    double penalty = 0.0;
+                    if (annot_blocked(cand_rect, obs, this->view)) {
+                        penalty = 1000.0;  // blocked
+                    }
+                    candidates.push_back({cand_rect, cand, dist + penalty, true});
+                }
+            }
+
+            // Pick best candidate
+            double best_score = 1e100;
+            const AnnotCandidate* best = nullptr;
+            for (const auto& c : candidates) {
+                if (c.in_view && c.score < best_score) {
+                    best_score = c.score;
+                    best = &c;
+                }
+            }
+
+            if (best != nullptr) {
+                // Apply nudge (state was already retrieved above)
+                Pos final_anchor = {best->anchor.x + state.nudge.x,
+                                    best->anchor.y + state.nudge.y};
+                ws::math::Vec2 final_screen = this->view.w2s(final_anchor);
+                ScreenRect final_rect{final_screen.x - text_w * 0.5f,
+                                      final_screen.y - line_h * 0.5f,
+                                      text_w, line_h};
+                // Convert ScreenRect to ws::ui::gui::Rect for TextTile
+                ws::ui::gui::Rect gui_rect{final_rect.x, final_rect.y, final_rect.w, final_rect.h};
+                result.part_tiles.push_back({ann.refdes, ann.value, gui_rect, final_anchor});
+            }
+        }
+    }
+
+    // Net labels
+    result.net_tiles = place_net_label(obs, this->view);
+    result.obstacles = std::move(obs);
+    return result;
+}
+
+std::vector<Editor::TextTile> Editor::place_net_label(
+    const AnnotObstacles& obs, const EditorView& editor_view) const {
+    std::vector<TextTile> tiles;
+    const ws::circsim::Schematic* s = schem();
+    if (s == nullptr) {
+        return tiles;
+    }
+
+    // Build netlist to get net centroids
+    ws::circsim::NetBuild net_build = ws::circsim::build_nets(*s, &library);
+    if (net_build.nets.nets.empty()) {
+        return tiles;
+    }
+
+    const float char_w = 8.0f;
+    const float line_h = 14.0f;
+
+    for (const auto& net : net_build.nets.nets) {
+        // Skip ground net (name "0" or "gnd" or "GND")
+        std::string name = net.name;
+        if (name == "0" || name == "gnd" || name == "GND") {
+            continue;
+        }
+
+        // Compute centroid of all pins/junctions on this net
+        double cx = 0.0, cy = 0.0;
+        int count = 0;
+        for (const auto& pin : net.pins) {
+            const ws::circsim::Part* part = s->find_part(pin.part);
+            if (part != nullptr) {
+                const ws::circsim::SymbolDef* sym = sym_of(*part);
+                if (sym != nullptr) {
+                    // Pin position in world coords using pin_pos
+                    ws::circsim::Pos pin_pos = ws::circsim::pin_pos(*sym, *part, pin.pin);
+                    cx += pin_pos.x;
+                    cy += pin_pos.y;
+                    ++count;
+                }
+            }
+        }
+        for (std::uint32_t jid : net.junctions) {
+            const ws::circsim::Junction* j = s->find_junction(jid);
+            if (j != nullptr) {
+                cx += j->pos.x;
+                cy += j->pos.y;
+                ++count;
+            }
+        }
+        if (count == 0) {
+            continue;
+        }
+        Pos centroid{cx / count, cy / count};
+
+        // Candidate ring (same as parts but fewer radii)
+        constexpr int kDirs = 8;
+        constexpr double kRadii[2] = {0.0, 16.0};
+        std::vector<AnnotCandidate> candidates;
+        candidates.reserve(kDirs * 2 + 1);
+
+        float text_w = static_cast<float>(name.size()) * char_w;
+
+        ws::math::Vec2 ideal_screen = this->view.w2s(centroid);
+        ScreenRect ideal_rect{ideal_screen.x - text_w * 0.5f, ideal_screen.y - line_h * 0.5f,
+                              text_w, line_h};
+        candidates.push_back({ideal_rect, centroid, 0.0, true});
+
+        for (double r : kRadii) {
+            if (r == 0.0) continue;
+            for (int d = 0; d < kDirs; ++d) {
+                double ang = d * 2.0 * kPi / kDirs;
+                Pos cand{centroid.x + r * std::cos(ang),
+                         centroid.y + r * std::sin(ang)};
+                ws::math::Vec2 cand_screen = this->view.w2s(cand);
+                ScreenRect cand_rect{cand_screen.x - text_w * 0.5f,
+                                     cand_screen.y - line_h * 0.5f,
+                                     text_w, line_h};
+                double dist = std::hypot(cand.x - centroid.x, cand.y - centroid.y);
+                double penalty = 0.0;
+                if (annot_blocked(cand_rect, obs, editor_view)) {
+                    penalty = 1000.0;
+                }
+                candidates.push_back({cand_rect, cand, dist + penalty, true});
+            }
+        }
+
+        double best_score = 1e100;
+        const AnnotCandidate* best = nullptr;
+        for (const auto& c : candidates) {
+            if (c.in_view && c.score < best_score) {
+                best_score = c.score;
+                best = &c;
+            }
+        }
+
+        if (best != nullptr) {
+            ws::math::Vec2 final_screen = this->view.w2s(best->anchor);
+            ScreenRect final_rect{final_screen.x - text_w * 0.5f,
+                                  final_screen.y - line_h * 0.5f,
+                                  text_w, line_h};
+            // Convert ScreenRect to ws::ui::gui::Rect for TextTile
+            ws::ui::gui::Rect gui_rect{final_rect.x, final_rect.y, final_rect.w, final_rect.h};
+            tiles.push_back({name, "", gui_rect, best->anchor});
+        }
+    }
+
+    return tiles;
+}
+
+Editor::AnnotState& Editor::annot_state_of(std::uint32_t part_id) {
+    // The map is editor-lifetime state (survives document switches).
+    // Lazy-create on first access.
+    static std::map<std::uint32_t, AnnotState> state_map;
+    return state_map[part_id];
+}
+
+void Editor::set_annot_state(std::uint32_t part_id, const AnnotState& st) {
+    static std::map<std::uint32_t, AnnotState> state_map;
+    state_map[part_id] = st;
 }
 
 void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
