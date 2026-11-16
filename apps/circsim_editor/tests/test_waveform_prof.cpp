@@ -40,17 +40,6 @@ using ws::spice::Signal;
 using ws::spice::AnalysisKind;
 using ws::spice::SweepKind;
 
-// The same series palette the panel draws with (results_panel.cpp's wheel).
-[[nodiscard]] std::uint32_t series_color(std::size_t i) {
-    constexpr std::uint32_t kSeries[] = {
-        ws::ui::r2d::rgba(224, 90, 78),   ws::ui::r2d::rgba(78, 161, 224),
-        ws::ui::r2d::rgba(88, 181, 92),   ws::ui::r2d::rgba(211, 154, 42),
-        ws::ui::r2d::rgba(154, 111, 211), ws::ui::r2d::rgba(78, 201, 192),
-        ws::ui::r2d::rgba(211, 90, 158),  ws::ui::r2d::rgba(143, 154, 78),
-    };
-    return kSeries[i % 8u];
-}
-
 // Build a large table: num_signals signals x num_rows rows.
 // The sweep axis is linear time; each signal gets a distinct waveform.
 [[nodiscard]] Table build_large_table(std::size_t num_signals, std::size_t num_rows) {
@@ -126,7 +115,9 @@ struct ProfBench {
     };
 
     // Draws the panel once. Returns the frame's command count for verification.
-    std::size_t draw(const Mouse& m = {}) {
+    std::size_t draw() { return draw(Mouse{}); }
+
+    std::size_t draw(const Mouse& m) {
         ws::ui::gui_test::stub.reset();  // clear r2d stub counters
         ws::input::InputFrame in{};
         in.mouse_x = m.x;
