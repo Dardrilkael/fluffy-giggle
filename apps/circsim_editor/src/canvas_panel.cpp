@@ -522,6 +522,72 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
     }
 
     const ws::input::InputFrame& in = gui.input();
+
+    // Native two-finger camera gesture. The primary touch is mirrored
+    // as a mouse by InputFrame for single-finger compatibility; once a
+    // second contact appears, take ownership here before that synthetic
+    // mouse can accidentally keep a part/box drag alive.
+    const ws::input::TouchPoint* first = nullptr;
+    const ws::input::TouchPoint* second = nullptr;
+    for (int i = 0; i < in.touch_count; ++i) {
+        const ws::input::TouchPoint& touch = in.touches[static_cast<std::size_t>(i)];
+        if (!touch.down || touch.cancelled) {
+            continue;
+        }
+        if (first == nullptr) {
+            first = &touch;
+        } else {
+            second = &touch;
+            break;
+        }
+    }
+    if (first != nullptr && second != nullptr && gui.claims_open()) {
+        const ws::math::Vec2 midpoint{
+            (first->x + second->x) * 0.5f,
+            (first->y + second->y) * 0.5f};
+        const float dx = second->x - first->x;
+        const float dy = second->y - first->y;
+        const float distance = std::sqrt(dx * dx + dy * dy);
+        const bool midpoint_inside =
+            midpoint.x >= body.x && midpoint.x < body.x + body.width &&
+            midpoint.y >= body.y && midpoint.y < body.y + body.height;
+        if (ed.touch_camera.active || midpoint_inside) {
+            if (!ed.touch_camera.active) {
+                // Cancel any single-finger drag at its press position.
+                if (ed.drag.kind != Editor::Drag::Kind::None) {
+                    if (ed.drag.moved) {
+                        (void)set_drag_pos(ed, ed.drag.start_world);
+                    }
+                    ed.drag = Editor::Drag{};
+                }
+                if (ed.group_drag.active) {
+                    for (std::size_t i = 0; i < ed.group_drag.set.size(); ++i) {
+                        (void)set_member_pos(ed, ed.group_drag.set[i],
+                                             ed.group_drag.starts[i]);
+                    }
+                    ed.group_drag = Editor::GroupDrag{};
+                }
+                ed.box = BoxSelect{};
+                ed.transport_scrub = false;
+                ed.pan.armed = false;
+                ed.touch_camera.active = true;
+            } else if (ed.touch_camera.distance > 1.0f && distance > 1.0f) {
+                // Apply centroid movement first, then pinch around the
+                // new centroid so the content under the fingers stays put.
+                ed.view.pan_by({midpoint.x - ed.touch_camera.midpoint.x,
+                                midpoint.y - ed.touch_camera.midpoint.y});
+                ed.view.zoom_at(midpoint,
+                                static_cast<double>(distance) /
+                                    ed.touch_camera.distance);
+            }
+            ed.touch_camera.midpoint = midpoint;
+            ed.touch_camera.distance = distance;
+            return;
+        }
+    } else if (ed.touch_camera.active) {
+        ed.touch_camera = Editor::TouchCameraGesture{};
+    }
+
     const bool inside =
         in.mouse_x >= body.x && in.mouse_x < body.x + body.width &&
         in.mouse_y >= body.y && in.mouse_y < body.y + body.height;
