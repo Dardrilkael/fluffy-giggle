@@ -1186,6 +1186,10 @@ void App::install_ime_rect(gui::GuiContext& gui) {
     }
 }
 
+void App::install_soft_keyboard(gui::GuiContext& gui) {
+    if (impl_->host_) impl_->host_->install_soft_keyboard(gui);
+}
+
 void App::install_job_system(ws::jobs::JobSystem& jobs) {
     // A pointer store, nothing more: the drain site in the loop reads
     // the member every iteration, so installing any time - on_setup()
