@@ -31,7 +31,9 @@ jobs:
             libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev
 
       - name: Configure Release
-        run: cmake --preset linux -DCMAKE_BUILD_TYPE=Release
+        # GCC 13 emits a false-positive -Wmaybe-uninitialized diagnostic for
+        # std::variant when OpSpec is inserted into the analysis list.
+        run: cmake --preset linux -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-error=maybe-uninitialized"
 
       - name: Build circsim_editor
         run: cmake --build --preset linux --target circsim_editor --parallel 2
