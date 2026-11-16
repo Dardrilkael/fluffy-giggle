@@ -364,6 +364,45 @@ TEST_CASE("waveform render profiling - miter joins PROF=2") {
     CHECK(avg_ms > 0.0);
 }
 
+// The renderer backend retains one tessellated quad buffer per signal.
+// An idle frame reuses the same key/buffer; a fresh delivery must re-key it.
+TEST_CASE("waveform tessellation cache is per series and delivery keyed") {
+    ProfBench b;
+    b.load(build_large_table(20, 10000));
+    b.draw();
+
+    REQUIRE(b.ed.results.geometry.size() == 20u);
+    for (const ResultsCache::SeriesGeometry& series : b.ed.results.geometry) {
+        CHECK(series.built);
+        CHECK(series.key.visible);
+        CHECK(series.key.run == b.ed.results.run_id);
+        CHECK(series.key.table == b.ed.results.table);
+        CHECK(series.buffer.quad_count() > 0u);
+    }
+    const auto first_keys = [&] {
+        std::vector<ResultsCache::SeriesGeometryKey> keys;
+        keys.reserve(b.ed.results.geometry.size());
+        for (const auto& series : b.ed.results.geometry) keys.push_back(series.key);
+        return keys;
+    }();
+
+    b.draw();  // identical view: every series is a geometry-cache hit
+    REQUIRE(b.ed.results.geometry.size() == first_keys.size());
+    for (std::size_t i = 0; i < first_keys.size(); ++i) {
+        CHECK(b.ed.results.geometry[i].key == first_keys[i]);
+        CHECK(b.ed.results.geometry[i].built);
+    }
+
+    const std::uint64_t previous_run = b.ed.results.run_id;
+    b.load(build_large_table(20, 10000));
+    CHECK(b.ed.results.run_id != previous_run);
+    b.draw();
+    for (const auto& series : b.ed.results.geometry) {
+        CHECK(series.built);
+        CHECK(series.key.run == b.ed.results.run_id);
+    }
+}
+
 // A quick structural test that verifies the series loop produces strokes
 // for a large table without crashing (runs without CIRCSIM_PLOT_PROF).
 TEST_CASE("large table draws series strokes without crash") {
