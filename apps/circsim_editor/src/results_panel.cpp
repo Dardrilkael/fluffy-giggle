@@ -731,6 +731,93 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
         in.mouse_y < pf.fy + pf.ih;
     const bool over = in_frame || on_x_axis || on_y_axis || on_y1_axis;
 
+    // Two-finger touch on Android: centroid translation pans the plot,
+    // while finger separation zooms all visible axes around that centroid.
+    // This is separate from the mouse gesture state, and owns the frame
+    // before the primary-touch mouse bridge can start a one-finger drag.
+    const ws::input::TouchPoint* touch_a = nullptr;
+    const ws::input::TouchPoint* touch_b = nullptr;
+    for (int i = 0; i < in.touch_count; ++i) {
+        const ws::input::TouchPoint& touch =
+            in.touches[static_cast<std::size_t>(i)];
+        if (!touch.down || touch.cancelled) {
+            continue;
+        }
+        if (touch_a == nullptr) {
+            touch_a = &touch;
+        } else {
+            touch_b = &touch;
+            break;
+        }
+    }
+    if (touch_a != nullptr && touch_b != nullptr) {
+        const ws::math::Vec2 midpoint{
+            (touch_a->x + touch_b->x) * 0.5f,
+            (touch_a->y + touch_b->y) * 0.5f};
+        const float tx = touch_b->x - touch_a->x;
+        const float ty = touch_b->y - touch_a->y;
+        const float distance = std::sqrt(tx * tx + ty * ty);
+        const bool midpoint_over =
+            midpoint.x >= claimable.x &&
+            midpoint.x < claimable.x + claimable.width &&
+            midpoint.y >= claimable.y &&
+            midpoint.y < claimable.y + claimable.height;
+        if (cache.touch_gesture.active || midpoint_over) {
+            if (!cache.touch_gesture.active) {
+                cache.gesture.kind = PlotGesture::Kind::None;
+                if (!cache.view.active) {
+                    cache.view = PlotView{true, pf.vxr.lo, pf.vxr.hi,
+                                          pf.vyr.lo, pf.vyr.hi,
+                                          pf.vyr1.lo, pf.vyr1.hi};
+                }
+                cache.touch_gesture.active = true;
+            } else if (cache.touch_gesture.distance > 1.0f &&
+                       distance > 1.0f) {
+                const double dx = -static_cast<double>(
+                    midpoint.x - cache.touch_gesture.midpoint.x) /
+                    static_cast<double>(pf.iw) *
+                    (cache.view.x_hi - cache.view.x_lo);
+                const double fy = static_cast<double>(
+                    midpoint.y - cache.touch_gesture.midpoint.y) /
+                    static_cast<double>(pf.ih);
+                const auto px = pan_range(
+                    {cache.view.x_lo, cache.view.x_hi}, pf.xr, dx);
+                const auto py = pan_range(
+                    {cache.view.y_lo, cache.view.y_hi}, pf.yr,
+                    fy * (cache.view.y_hi - cache.view.y_lo));
+                const auto py1 = pan_range(
+                    {cache.view.y1_lo, cache.view.y1_hi}, pf.yr1,
+                    fy * (cache.view.y1_hi - cache.view.y1_lo));
+                const double factor =
+                    static_cast<double>(distance) /
+                    cache.touch_gesture.distance;
+                const double wx = pf.wx(midpoint.x);
+                const double wy = pf.wy(midpoint.y);
+                const double wy1 = pf.wy1(midpoint.y);
+                const auto zx = zoom_range({px.lo, px.hi}, pf.xr, wx, factor);
+                const auto zy = zoom_range({py.lo, py.hi}, pf.yr, wy, factor);
+                const auto zy1 = zoom_range({py1.lo, py1.hi}, pf.yr1,
+                                            wy1, factor);
+                cache.view.x_lo = zx.lo;
+                cache.view.x_hi = zx.hi;
+                cache.view.y_lo = zy.lo;
+                cache.view.y_hi = zy.hi;
+                cache.view.y1_lo = zy1.lo;
+                cache.view.y1_hi = zy1.hi;
+                pf.vxr = zx;
+                pf.vyr = zy;
+                if (pf.has_right) {
+                    pf.vyr1 = zy1;
+                }
+            }
+            cache.touch_gesture.midpoint = midpoint;
+            cache.touch_gesture.distance = distance;
+            return;
+        }
+    } else if (cache.touch_gesture.active) {
+        cache.touch_gesture = ResultsCache::TouchGesture{};
+    }
+
     // The double-click clock: runs while the pointer is over the plot,
     // resets on every press there, dies when it leaves - the "two
     // clicks, same spot, soon" detector the reset rides.
