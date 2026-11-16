@@ -435,6 +435,11 @@ struct ResultsCache {
     PlotView view;                       // the manual zoom/pan window
     std::size_t view_for = kNoTable;     // the table `view` belongs to
     PlotGesture gesture;                 // the in-flight plot gesture
+    struct TouchGesture {
+        bool active = false;
+        ws::math::Vec2 midpoint{0.0f, 0.0f};
+        float distance = 0.0f;
+    } touch_gesture;
     // The shown table's x axis is strictly increasing - a per-table
     // constant of the run (the axis data is immutable once delivered),
     // cached with the same key shape as `visible`/`view` so the plot
