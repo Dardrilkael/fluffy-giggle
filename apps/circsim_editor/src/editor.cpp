@@ -1624,11 +1624,15 @@ const Editor::AnnotPlacement& Editor::place_part_annotation() const {
     if (font != nullptr) {
         mix(std::hash<float>{}(font->line_height()));
     }
-    for (const auto& [id, state] : annot_states_) {
-        mix(std::hash<std::uint32_t>{}(id));
-        mix(std::hash<double>{}(state.nudge.x));
-        mix(std::hash<double>{}(state.nudge.y));
-        mix(std::hash<bool>{}(state.annotate_off));
+    mix(std::hash<const void*>{}(s));
+    const auto states_for_schematic = annot_states_.find(s);
+    if (states_for_schematic != annot_states_.end()) {
+        for (const auto& [id, state] : states_for_schematic->second) {
+            mix(std::hash<std::uint32_t>{}(id));
+            mix(std::hash<double>{}(state.nudge.x));
+            mix(std::hash<double>{}(state.nudge.y));
+            mix(std::hash<bool>{}(state.annotate_off));
+        }
     }
     if (annot_placement_cache_valid_ &&
         annot_placement_cache_signature_ == signature) {
@@ -1876,11 +1880,11 @@ std::vector<Editor::TextTile> Editor::place_net_label(
 }
 
 Editor::AnnotState& Editor::annot_state_of(std::uint32_t part_id) {
-    return annot_states_[part_id];
+    return annot_states_[schem()][part_id];
 }
 
 void Editor::set_annot_state(std::uint32_t part_id, const AnnotState& st) {
-    annot_states_[part_id] = st;
+    annot_states_[schem()][part_id] = st;
     annot_placement_cache_valid_ = false;
 }
 
