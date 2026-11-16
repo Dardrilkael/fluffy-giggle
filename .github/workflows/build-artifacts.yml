@@ -1,0 +1,131 @@
+name: Build artifacts
+
+on:
+  push:
+    branches: [main, "fix/**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: artifacts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux x86_64 (Release)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build cmake g++ \
+            libglfw3-dev libvulkan-dev libopenal-dev libuv1-dev \
+            libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev
+
+      - name: Configure Release
+        run: cmake --preset linux -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build circsim_editor
+        run: cmake --build --preset linux --target circsim_editor --parallel 2
+
+      - name: Stage Linux executable
+        run: |
+          mkdir -p dist
+          cp build/linux/bin/circsim_editor dist/circsim_editor-linux-x86_64
+          tar -C dist -czf dist/circsim-editor-linux-x86_64.tar.gz circsim_editor-linux-x86_64
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: circsim-editor-linux-x86_64
+          path: dist/circsim-editor-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-and-android:
+    name: Windows x64 + Android arm64
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Set up Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK and NDK packages
+        shell: pwsh
+        run: |
+          sdkmanager --install "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
+          if ($LASTEXITCODE -ne 0) { throw "Android SDK installation failed" }
+          $ndk = Join-Path $env:ANDROID_HOME "ndk\27.2.12479018"
+          if (-not (Test-Path (Join-Path $ndk "build\cmake\android.toolchain.cmake"))) {
+            throw "Android NDK toolchain not found at $ndk"
+          }
+          "ANDROID_NDK_HOME=$ndk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ANDROID_SDK_ROOT=$env:ANDROID_HOME" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Configure Windows Release
+        run: cmake --preset release
+
+      - name: Build Windows executable
+        run: cmake --build --preset release --target circsim_editor --parallel 2
+
+      - name: Package Android APK
+        shell: pwsh
+        run: ./tools/package-android.ps1 -App circsim_editor
+
+      - name: Upload Windows executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: circsim-editor-windows-x64
+          path: build/release/bin/circsim_editor.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: circsim-editor-android-arm64
+          path: build/android-arm64/circsim_editor.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows-and-android]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-assets/*
