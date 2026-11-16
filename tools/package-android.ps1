@@ -11,6 +11,7 @@
 #   tools/package-android.ps1                          playground (default)
 #   tools/package-android.ps1 -App chatter             ... apps/chatter
 #   tools/package-android.ps1 -App chatter -Install    ... then adb install -r
+#   tools/package-android.ps1 -BuildType Release       ... optimized native module
 #   tools/package-android.ps1 -Keystore C:\path\to\release.keystore `
 #                           -KeyAlias release -StorePass $secret -KeyPass $secret
 #                                                       ... sign with a real key
@@ -18,6 +19,9 @@
 # Needs cmake + ninja on PATH and the public `android` preset (it lives in
 # CMakePresets.json - ANDROID_NDK_HOME must point at an NDK); the SDK lives
 # under %LOCALAPPDATA%\Android\Sdk or $env:ANDROID_HOME.
+# -BuildToolsVersion / -PlatformApi (or the ANDROID_BUILD_TOOLS_VERSION /
+# ANDROID_PLATFORM_API environment variables) pin the build-tools and the
+# android.jar that are used; without them the newest installed ones win.
 #
 # Signing: defaults to the standard debug keystore (~\.android\debug.keystore,
 # auto-created if missing) so a fresh clone produces an installable APK with
@@ -28,6 +32,9 @@
 param(
     [string]$App = 'playground',
     [switch]$Install,
+    [ValidateSet('Debug', 'Release')][string]$BuildType = 'Debug',
+    [string]$BuildToolsVersion = $env:ANDROID_BUILD_TOOLS_VERSION,
+    [string]$PlatformApi = $env:ANDROID_PLATFORM_API,
     [string]$Keystore = "",
     [string]$KeyAlias = "",
     [string]$StorePass = "",
@@ -50,21 +57,49 @@ if (-not (Test-Path $sdk)) {
     throw "Android SDK not found at $sdk (set ANDROID_HOME to override)."
 }
 if (-not $env:ANDROID_NDK_HOME) {
-    throw "ANDROID_NDK_HOME is not set - the public `android` preset needs it (point it at an NDK)."
+    throw "ANDROID_NDK_HOME is not set - the public 'android' preset needs it (point it at an NDK)."
 }
 
-# Newest build-tools (aapt2/zipalign/apksigner) + newest platform android.jar.
-$buildTools = Get-ChildItem (Join-Path $sdk 'build-tools') -Directory |
-    Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
-$platform = Get-ChildItem (Join-Path $sdk 'platforms') -Directory -Filter 'android-*' |
-    # [version] wants major.minor at minimum - android-35 pads to 35.0.
-    Sort-Object { [version](($_.Name -replace '^android-', '') + '.0') } -Descending |
-    Select-Object -First 1
+# build-tools (aapt2/zipalign/apksigner) + platform android.jar. A pinned
+# version wins (CI pins both); otherwise the newest installed one is used.
+# Directory names are reduced to their numeric prefix for sorting, so preview
+# or extension dirs ("36.0.0-rc1", "android-35-ext14", "android-Baklava")
+# cannot break the [version] parse.
+function ConvertTo-SdkVersion([string]$Name) {
+    $n = $Name -replace '^android-', ''
+    $n = $n -replace '[^0-9.].*$', ''
+    if (-not $n) { return [version]'0.0' }
+    if ($n -notmatch '\.') { $n += '.0' }   # [version] wants major.minor
+    return [version]$n
+}
+$buildToolsRoot = Join-Path $sdk 'build-tools'
+$platformsRoot  = Join-Path $sdk 'platforms'
+if (-not (Test-Path $buildToolsRoot)) { throw "no build-tools directory in $sdk" }
+if (-not (Test-Path $platformsRoot))  { throw "no platforms directory in $sdk" }
+if ($BuildToolsVersion) {
+    $buildTools = Get-Item (Join-Path $buildToolsRoot $BuildToolsVersion) -ErrorAction SilentlyContinue
+} else {
+    $buildTools = Get-ChildItem $buildToolsRoot -Directory |
+        Where-Object { $_.Name -match '^[0-9.]+$' } |   # skip -rc / preview dirs
+        Sort-Object { ConvertTo-SdkVersion $_.Name } -Descending | Select-Object -First 1
+}
+if (-not $buildTools) { throw "Android build-tools not found in $buildToolsRoot (wanted: '$BuildToolsVersion')" }
+if ($PlatformApi) {
+    $platform = Get-Item (Join-Path $platformsRoot "android-$PlatformApi") -ErrorAction SilentlyContinue
+} else {
+    $platform = Get-ChildItem $platformsRoot -Directory -Filter 'android-*' |
+        Where-Object { $_.Name -match '^android-[0-9]+$' } |   # skip -extN / preview dirs
+        Sort-Object { ConvertTo-SdkVersion $_.Name } -Descending | Select-Object -First 1
+}
+if (-not $platform) { throw "Android platform not found in $platformsRoot (wanted: 'android-$PlatformApi')" }
 $aapt2      = Join-Path $buildTools.FullName 'aapt2.exe'
 $zipalign   = Join-Path $buildTools.FullName 'zipalign.exe'
 $apksigner  = Join-Path $buildTools.FullName 'apksigner.bat'
 $androidJar = Join-Path $platform.FullName 'android.jar'
 $adb        = Join-Path $sdk 'platform-tools\adb.exe'
+foreach ($tool in @($aapt2, $zipalign, $apksigner, $androidJar)) {
+    if (-not (Test-Path $tool)) { throw "missing SDK component: $tool" }
+}
 
 # javac/d8/apksigner all need a JVM. JAVA_HOME wins; the Android Studio JBR
 # is a fallback (decided once, used by steps 2.5 and 5). keytool is found
@@ -84,8 +119,8 @@ $keytool = Join-Path $javaHome 'bin\keytool.exe'
 # --- 1. build the module (the public `android` preset; ANDROID_NDK_HOME pins the NDK) ---
 Push-Location $repo
 try {
-    cmake --preset android
-    if ($LASTEXITCODE -ne 0) { throw 'configure failed (cmake --preset android)' }
+    cmake --preset android "-DCMAKE_BUILD_TYPE=$BuildType"
+    if ($LASTEXITCODE -ne 0) { throw "configure failed (cmake --preset android, $BuildType)" }
     cmake --build --preset android
     if ($LASTEXITCODE -ne 0) { throw 'build failed (cmake --build --preset android)' }
 } finally { Pop-Location }
@@ -157,7 +192,8 @@ if ($LASTEXITCODE -ne 0) { throw 'zipalign failed' }
 # A release keystore (all four params passed) wins; otherwise the standard
 # debug keystore is used (auto-created if missing) so a fresh clone still
 # produces an installable APK. The debug-signed build is NOT for production -
-# it shares a publicly-known key with every other debug APK in the world.
+# the key is not one you control (a fresh CI machine generates a new one every
+# run, so two such APKs cannot update each other).
 $apk = Join-Path $repo ("build\android-arm64\$App.apk")
 if ($Keystore -ne "") {
     if (-not (Test-Path $Keystore)) {
@@ -166,9 +202,18 @@ if ($Keystore -ne "") {
     if (-not $KeyAlias -or -not $StorePass -or -not $KeyPass) {
         throw "-Keystore requires -KeyAlias, -StorePass and -KeyPass (release signing needs all four)."
     }
-    & $apksigner sign --ks $Keystore --ks-pass "pass:$StorePass" `
-        --key-pass "pass:$KeyPass" --ks-key-alias $KeyAlias --out $apk $aligned
-    if ($LASTEXITCODE -ne 0) { throw 'apksigner (release) failed' }
+    # Passwords travel through the environment, not the command line, so they
+    # do not show up in process listings.
+    $env:APKSIGNER_STORE_PASS = $StorePass
+    $env:APKSIGNER_KEY_PASS = $KeyPass
+    try {
+        & $apksigner sign --ks $Keystore --ks-pass env:APKSIGNER_STORE_PASS `
+            --key-pass env:APKSIGNER_KEY_PASS --ks-key-alias $KeyAlias --out $apk $aligned
+        $signExit = $LASTEXITCODE
+    } finally {
+        Remove-Item Env:APKSIGNER_STORE_PASS, Env:APKSIGNER_KEY_PASS -ErrorAction SilentlyContinue
+    }
+    if ($signExit -ne 0) { throw 'apksigner (release) failed' }
 } else {
     $debugKeystore = Join-Path $env:USERPROFILE '.android\debug.keystore'
     if (-not (Test-Path $debugKeystore)) {
@@ -184,6 +229,9 @@ if ($Keystore -ne "") {
         --key-pass 'pass:android' --ks-key-alias androiddebugkey --out $apk $aligned
     if ($LASTEXITCODE -ne 0) { throw 'apksigner (debug) failed' }
 }
+
+& $apksigner verify $apk
+if ($LASTEXITCODE -ne 0) { throw 'apksigner verify failed' }
 
 # --- 6. optional install -----------------------------------------------------
 if ($Install) {

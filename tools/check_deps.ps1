@@ -11,6 +11,11 @@
 #      every third-party target is linked PRIVATE by the ws_* lib that
 #      wraps it.
 #
+# Quoted includes ("...") are local/relative headers and are only checked
+# against the third-party signature list; <...> includes get the full rules.
+# A ws/... header is workspace-owned by definition and is accepted before the
+# signature list is consulted.
+#
 # Pure ASCII on purpose: PowerShell 5.1 reads BOM-less files as ANSI.
 
 param([string]$Root = (Get-Location).Path)
@@ -47,6 +52,9 @@ function Test-ThirdParty([string]$Header) {
 
 # Scope 1: libs/*/include - ws/ + std + the result.hpp carve-out, nothing else.
 function Test-LibInclude([string]$Header, [string]$FilePath) {
+  # ws/ first: a name like ws/ui/vulkan_context.hpp must not trip the
+  # (unanchored) third-party signatures below.
+  if ($Header.StartsWith('ws/')) { return $true }
   if (Test-ThirdParty $Header) {
     if ($Header -eq 'tl/expected.hpp' -and
         $FilePath -match 'ws[\\/]core[\\/]result\.hpp$') {
@@ -54,7 +62,6 @@ function Test-LibInclude([string]$Header, [string]$FilePath) {
     }
     return $false
   }
-  if ($Header.StartsWith('ws/')) { return $true }
   if (-not $Header.Contains('/')) {
     # Slash-less: assume standard C/C++ header. The third-party regex list
     # above is the backstop for slash-less third-party names (uv.h,
@@ -72,8 +79,8 @@ function Test-AppInclude([string]$Header) {
   # platform surface - allowed before the third-party gate; libs keep
   # rejecting it (Test-LibInclude has no such carve-out).
   if ($Header -eq 'android_native_app_glue.h') { return $true }
-  if (Test-ThirdParty $Header) { return $false }
   if ($Header.StartsWith('ws/')) { return $true }
+  if (Test-ThirdParty $Header) { return $false }
   if ($Header.StartsWith('android/')) { return $true }  # NDK platform, not a dep
   if ($Header.StartsWith('sys/')) { return $true }      # CRT/POSIX (sys/stat.h)
   if (-not $Header.Contains('/')) {
@@ -84,7 +91,8 @@ function Test-AppInclude([string]$Header) {
   return $false
 }
 
-$extensions = @('*.h', '*.hpp', '*.ipp', '*.inl', '*.c', '*.cpp')
+$extensions = @('*.h', '*.hpp', '*.hh', '*.hxx', '*.ipp', '*.inl', '*.inc',
+                '*.c', '*.cc', '*.cpp', '*.cxx', '*.mm')
 
 # Collect libs/*/include files.
 $libFiles = @()
@@ -101,12 +109,15 @@ if (Test-Path (Join-Path $Root 'libs')) {
 $appFiles = @()
 $appsDir = Join-Path $Root 'apps'
 if (Test-Path $appsDir) {
+  $appsFull = (Resolve-Path $appsDir).Path
   $allAppFiles = @(Get-ChildItem -Path $appsDir -Recurse -Include $extensions -File)
   # Exclude test files (apps/*/tests/*) from the dependency check - they
   # legitimately include third-party test frameworks like doctest.
-  # Match both Windows (\tests\) and Linux (/tests/) path separators.
+  # Match both Windows (\tests\) and Linux (/tests/) path separators, against
+  # the path RELATIVE to apps/ so a checkout root that itself contains a
+  # "tests" directory cannot exclude every file.
   $appFiles = @($allAppFiles | Where-Object {
-    $_.FullName -notmatch '[\\/]tests[\\/]'
+    $_.FullName.Substring($appsFull.Length) -notmatch '[\\/]tests[\\/]'
   })
 }
 
@@ -118,8 +129,12 @@ function Scan-File([System.IO.FileInfo]$File, [scriptblock]$Allowed) {
   $lineNo = 0
   foreach ($line in (Get-Content -LiteralPath $File.FullName)) {
     $lineNo++
-    if ($line -match '^\s*#\s*include\s*<([^>]+)>') {
-      $header = $Matches[1]
+    if ($line -match '^\s*#\s*include\s*([<"])([^>"]+)[>"]') {
+      $quoted = ($Matches[1] -eq '"')
+      $header = $Matches[2]
+      # Quoted = local/relative header: any path shape is fine, only the known
+      # third-party signatures are policed.
+      if ($quoted -and -not (Test-ThirdParty $header)) { continue }
       if (-not (& $Allowed $header $File.FullName)) {
         $script:violations.Add(("{0}:{1}: forbidden include <{2}>" -f `
           $File.FullName, $lineNo, $header))
@@ -131,6 +146,10 @@ function Scan-File([System.IO.FileInfo]$File, [scriptblock]$Allowed) {
 foreach ($f in $libFiles) { Scan-File $f ${function:Test-LibInclude} }
 foreach ($f in $appFiles) { Scan-File $f ${function:Test-AppInclude} }
 
+if ($scanned -eq 0) {
+  Write-Output ("check_deps: FAILED - no files scanned under {0} (expected libs/*/include and apps/)" -f $Root)
+  exit 1
+}
 if ($violations.Count -gt 0) {
   foreach ($v in $violations) { Write-Output $v }
   Write-Output ("check_deps: FAILED - {0} violation(s), {1} files scanned" -f `
