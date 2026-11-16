@@ -2,7 +2,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
-#include "document.hpp"
+#include "../src/document.hpp"
 
 #include <cstdint>
 #include <string>
