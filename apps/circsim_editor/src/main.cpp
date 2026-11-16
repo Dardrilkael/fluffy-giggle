@@ -243,6 +243,7 @@ class CircsimApp final : public ws::ui::App {
     void on_setup() override {
         ws::core::warn("circsim: on_setup() starting");
         install_clipboard(gui_);
+        install_soft_keyboard(gui_);
         ws::core::warn("circsim: install_clipboard done");
         install_job_system(jobs_);
         ws::core::warn("circsim: install_job_system done");
