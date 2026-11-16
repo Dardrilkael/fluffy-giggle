@@ -15,10 +15,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Linux was already built for ordinary branch pushes. Rebuild it only for
-  # version tags, when all three release assets must be produced together.
+  # Build and upload all three platform artifacts on branch pushes as well as
+  # version tags. The release job below only publishes a GitHub Release on tags.
   linux:
-    if: startsWith(github.ref, 'refs/tags/v')
     name: Linux x86_64 (Release)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
