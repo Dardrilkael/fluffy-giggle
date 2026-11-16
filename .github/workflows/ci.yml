@@ -31,7 +31,17 @@ jobs:
       - name: Build
         run: cmake --build --preset linux
       - name: Test
-        run: ctest --preset linux
+        run: ctest --preset linux --output-on-failure
+      - name: Exercise waveform profiler (round, bevel, miter)
+        shell: bash
+        run: |
+          test_bin=build/linux/bin/test_circsim_editor_waveform_prof
+          CIRCSIM_PLOT_PROF=1 CIRCSIM_PLOT_JOIN=round "$test_bin" --test-case="waveform render profiling - round joins"
+          CIRCSIM_PLOT_PROF=1 CIRCSIM_PLOT_JOIN=bevel "$test_bin" --test-case="waveform render profiling - bevel joins"
+          CIRCSIM_PLOT_PROF=1 CIRCSIM_PLOT_JOIN=miter "$test_bin" --test-case="waveform render profiling - miter joins"
+          CIRCSIM_PLOT_PROF=2 CIRCSIM_PLOT_JOIN=round "$test_bin" --test-case="waveform render profiling - round joins PROF=2"
+          CIRCSIM_PLOT_PROF=2 CIRCSIM_PLOT_JOIN=bevel "$test_bin" --test-case="waveform render profiling - bevel joins PROF=2"
+          CIRCSIM_PLOT_PROF=2 CIRCSIM_PLOT_JOIN=miter "$test_bin" --test-case="waveform render profiling - miter joins PROF=2"
 
   linux-sanitizers:
     name: Linux (ASan + UBSan)
