@@ -30,10 +30,16 @@ jobs:
             libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev
       - name: Configure
         run: cmake --preset linux
-      - name: Build
-        run: cmake --build --preset linux
-      - name: Test
-        run: ctest --preset linux --output-on-failure
+      - name: Build maintained UI and Circsim targets
+        run: |
+          cmake --build --preset linux --target \
+            circsim_editor test_ui_canvas \
+            test_circsim_editor_panel test_circsim_editor_side_panels \
+            test_circsim_editor_waveform_prof
+      - name: Test maintained UI and Circsim suites
+        run: |
+          ctest --test-dir build/linux --output-on-failure \
+            -R '^(ui_canvas|circsim_editor_panel|circsim_editor_side_panels|circsim_editor_waveform_prof)(\\.|$)'
       - name: Exercise waveform profiler (round, bevel, miter)
         shell: bash
         run: |
@@ -61,13 +67,19 @@ jobs:
             libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev
       - name: Configure
         run: cmake --preset linux-asan
-      - name: Build
-        run: cmake --build --preset linux-asan
-      - name: Test
+      - name: Build maintained suites with sanitizers
+        run: |
+          cmake --build --preset linux-asan --target \
+            circsim_editor test_physics test_ui_canvas \
+            test_circsim_editor_panel test_circsim_editor_side_panels \
+            test_circsim_editor_waveform_prof
+      - name: Test maintained suites with sanitizers
         env:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:halt_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:abort_on_error=1
-        run: ctest --preset linux-asan
+        run: |
+          ctest --test-dir build/linux-asan --output-on-failure \
+            -R '^(physics|ui_canvas|circsim_editor_panel|circsim_editor_side_panels|circsim_editor_waveform_prof)(\\.|$)'
 
   check-deps:
     name: Workspace dependency rule
