@@ -326,7 +326,7 @@ const char* wave_getenv(const char* name) {
 struct WaveEnv {
     int prof = 0;  // 0 off, 1 timings, 2/3 + shadow tessellation (2 into a
                    // TessBuffer, 3 into a counting sink)
-    canvas::StrokeJoin join = canvas::StrokeJoin::round;
+    canvas::StrokeJoin join = canvas::StrokeJoin::bevel;
 };
 
 const WaveEnv& wave_env() {
