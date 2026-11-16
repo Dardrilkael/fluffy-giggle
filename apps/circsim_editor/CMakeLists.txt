@@ -121,3 +121,11 @@ if(TARGET test_circsim_editor_waveform_prof)
     "${PROJECT_SOURCE_DIR}/libs/ui/src"
     "${PROJECT_SOURCE_DIR}/libs/ui/tests")
 endif()
+
+# The document undo regression gate. These tests exercise deletion snapshots
+# and deque restoration directly, without depending on the canvas test fixture.
+ws_add_test(circsim_editor_document
+  SOURCES tests/test_document_undo.cpp
+          src/document.cpp
+  LINK ws::circsim
+  DEPENDS ws::ui_gui ws::app ws::settings)

@@ -11,8 +11,10 @@
 #include <cctype>
 #include <cstdlib>
 #include <deque>
+#include <iterator>
 #include <memory>
 #include <set>
+#include <unordered_set>
 #include <utility>
 
 namespace editor {
@@ -30,6 +32,35 @@ using ws::circsim::PinRef;
 using ws::circsim::Schematic;
 using ws::circsim::Wire;
 using ws::circsim::WireEndpoint;
+
+// Deletions must remember where each entity lived. Re-inserting at the
+// tail is not the inverse of erasing from the middle of a deque.
+template <typename T>
+struct IndexedEntity {
+    std::size_t index = 0;
+    T value{};
+};
+
+template <typename T, typename IdOf>
+std::vector<IndexedEntity<T>> capture_positions(
+    const std::deque<T>& container, const std::vector<T>& selected,
+    IdOf&& id_of) {
+    std::unordered_set<std::uint32_t> wanted;
+    wanted.reserve(selected.size());
+    for (const T& entity : selected) {
+        wanted.insert(id_of(entity));
+    }
+
+    std::vector<IndexedEntity<T>> out;
+    out.reserve(wanted.size());
+    for (std::size_t i = 0; i < container.size(); ++i) {
+        const T& entity = container[i];
+        if (wanted.erase(id_of(entity)) != 0u) {
+            out.push_back(IndexedEntity<T>{i, entity});
+        }
+    }
+    return out;  // original container order, with duplicate ids collapsed
+}
 
 // --- the container writers (the loader's paths: ids stay, bump after)
 
@@ -89,46 +120,77 @@ void reinsert_label(Schematic& s, ws::circsim::Label l) {
     s.bump();
 }
 
-// The junctions `removing` orphans: referenced by one of its wires,
-// by no wire outside the set. Pure - the callers build payloads
-// without mutating, and the command's apply() owns the one true
-// removal. The "outside the set" test is keyed by id, which holds
-// because every wire owns a distinct one (placement mints, the
-// loader preserves disk ids) - the removed-id set states that
-// contract up front instead of per-wire "the one being removed"
-// guesses (the identity shortcut would NOT work here: `removing`
-// holds copies, never the schematic's own elements).
+template <typename T>
+void put_back_at(std::deque<T>& container,
+                 const IndexedEntity<T>& snapshot) {
+    const std::size_t index = std::min(snapshot.index, container.size());
+    container.insert(container.begin() +
+                         static_cast<std::ptrdiff_t>(index),
+                     snapshot.value);
+}
+
+void reinsert_part(Schematic& s, const IndexedEntity<Part>& p) {
+    s.raise_next_id(p.value.id);
+    put_back_at(s.parts_mut(), p);
+    s.bump();
+}
+void reinsert_wire(Schematic& s, const IndexedEntity<Wire>& w) {
+    s.raise_next_id(w.value.id);
+    put_back_at(s.wires_mut(), w);
+    s.bump();
+}
+void reinsert_junction(Schematic& s, const IndexedEntity<Junction>& j) {
+    s.raise_next_id(j.value.id);
+    put_back_at(s.junctions_mut(), j);
+    s.bump();
+}
+void reinsert_label(Schematic& s,
+                    const IndexedEntity<ws::circsim::Label>& l) {
+    s.raise_next_id(l.value.id);
+    put_back_at(s.labels_mut(), l);
+    s.bump();
+}
+
+// The junctions `removing` orphans: referenced by a removed wire,
+// but by no surviving wire. The scan is linear in the wire and junction
+// counts; sets de-duplicate both removed ids and shared endpoint junctions.
 [[nodiscard]] std::vector<Junction> orphaned_junctions(
     const Schematic& s, const std::vector<Wire>& removing) {
-    std::set<std::uint32_t> removed;
+    std::unordered_set<std::uint32_t> removed;
+    std::unordered_set<std::uint32_t> candidates;
+    std::unordered_set<std::uint32_t> surviving;
+
+    removed.reserve(removing.size());
+    candidates.reserve(removing.size() * 2u);
+    surviving.reserve(s.wires().size() * 2u);
+
+    const auto collect_junction = [](const WireEndpoint& endpoint,
+                                     std::unordered_set<std::uint32_t>& ids) {
+        if (const JunctionRef* ref = std::get_if<JunctionRef>(&endpoint)) {
+            ids.insert(ref->junction);
+        }
+    };
+
     for (const Wire& w : removing) {
         removed.insert(w.id);
+        collect_junction(w.a, candidates);
+        collect_junction(w.b, candidates);
     }
+
+    for (const Wire& w : s.wires()) {
+        if (removed.count(w.id) != 0u) {
+            continue;
+        }
+        collect_junction(w.a, surviving);
+        collect_junction(w.b, surviving);
+    }
+
     std::vector<Junction> out;
-    for (const Wire& w : removing) {
-        for (const WireEndpoint end : {w.a, w.b}) {
-            const JunctionRef* j = std::get_if<JunctionRef>(&end);
-            if (j == nullptr) {
-                continue;
-            }
-            bool other = false;
-            for (const Wire& w2 : s.wires()) {
-                if (removed.count(w2.id) != 0u) {
-                    continue;  // one of the ones being removed
-                }
-                const JunctionRef* a = std::get_if<JunctionRef>(&w2.a);
-                const JunctionRef* b = std::get_if<JunctionRef>(&w2.b);
-                if ((a != nullptr && a->junction == j->junction) ||
-                    (b != nullptr && b->junction == j->junction)) {
-                    other = true;
-                    break;
-                }
-            }
-            if (!other) {
-                if (const Junction* found = s.find_junction(j->junction)) {
-                    out.push_back(*found);
-                }
-            }
+    out.reserve(candidates.size());
+    for (const Junction& junction : s.junctions()) {
+        if (candidates.count(junction.id) != 0u &&
+            surviving.count(junction.id) == 0u) {
+            out.push_back(junction);
         }
     }
     return out;
@@ -231,44 +293,43 @@ class AddPartCommand final : public EditCommand {
 
 class DeletePartCommand final : public EditCommand {
   public:
-    DeletePartCommand(SchematicDocument* doc, Part part,
-                      std::vector<Wire> wires, std::vector<Junction> junctions)
-        : EditCommand(doc),
-          part_(std::move(part)),
-          wires_(std::move(wires)),
+    DeletePartCommand(SchematicDocument* doc, IndexedEntity<Part> part,
+                      std::vector<IndexedEntity<Wire>> wires,
+                      std::vector<IndexedEntity<Junction>> junctions)
+        : EditCommand(doc), part_(std::move(part)), wires_(std::move(wires)),
           junctions_(std::move(junctions)) {}
 
     void apply() override {
         // Wires first (they name the part), then the part, then the
         // junctions the removal orphaned.
-        for (const Wire& w : wires_) {
-            (void)take_wire(schem(), w.id);
+        for (const auto& w : wires_) {
+            (void)take_wire(schem(), w.value.id);
         }
-        (void)take_part(schem(), part_.id);
-        for (const Junction& j : junctions_) {
-            (void)take_junction(schem(), j.id);
+        (void)take_part(schem(), part_.value.id);
+        for (const auto& j : junctions_) {
+            (void)take_junction(schem(), j.value.id);
         }
         schem().bump();
     }
     void undo() override {
         reinsert_part(schem(), part_);
-        for (const Junction& j : junctions_) {
+        for (const auto& j : junctions_) {
             reinsert_junction(schem(), j);
         }
-        for (const Wire& w : wires_) {
+        for (const auto& w : wires_) {
             reinsert_wire(schem(), w);
         }
     }
     [[nodiscard]] std::string name() const override { return "Delete Part"; }
     [[nodiscard]] std::size_t memory_estimate() const override {
-        return sizeof(*this) + wires_.size() * sizeof(Wire) +
-               junctions_.size() * sizeof(Junction);
+        return sizeof(*this) + wires_.size() * sizeof(IndexedEntity<Wire>) +
+               junctions_.size() * sizeof(IndexedEntity<Junction>);
     }
 
   private:
-    Part part_;
-    std::vector<Wire> wires_;
-    std::vector<Junction> junctions_;
+    IndexedEntity<Part> part_;
+    std::vector<IndexedEntity<Wire>> wires_;
+    std::vector<IndexedEntity<Junction>> junctions_;
 };
 
 class MovePartCommand final : public EditCommand {
@@ -534,8 +595,18 @@ void push_delete_part(SchematicDocument& doc, std::uint32_t part_id) {
         }
     }
     std::vector<Junction> junctions = orphaned_junctions(s, wires);
+    const auto indexed_parts = capture_positions(
+        s.parts(), std::vector<Part>{*part},
+        [](const Part& p) { return p.id; });
+    const auto indexed_wires = capture_positions(
+        s.wires(), wires, [](const Wire& w) { return w.id; });
+    const auto indexed_junctions = capture_positions(
+        s.junctions(), junctions, [](const Junction& j) { return j.id; });
+    if (indexed_parts.empty()) {
+        return;
+    }
     (void)doc.undo().push(std::make_unique<DeletePartCommand>(
-        &doc, *part, std::move(wires), std::move(junctions)));
+        &doc, indexed_parts.front(), indexed_wires, indexed_junctions));
 }
 
 void push_move_part(SchematicDocument& doc, std::uint32_t part_id,
@@ -663,20 +734,20 @@ class AddWireCommand final : public EditCommand {
 
 class DeleteWireCommand final : public EditCommand {
   public:
-    DeleteWireCommand(SchematicDocument* doc, Wire wire,
-                      std::vector<Junction> junctions)
+    DeleteWireCommand(SchematicDocument* doc, IndexedEntity<Wire> wire,
+                      std::vector<IndexedEntity<Junction>> junctions)
         : EditCommand(doc), wire_(std::move(wire)),
           junctions_(std::move(junctions)) {}
 
     void apply() override {
-        (void)take_wire(schem(), wire_.id);
-        for (const Junction& j : junctions_) {
-            (void)take_junction(schem(), j.id);
+        (void)take_wire(schem(), wire_.value.id);
+        for (const auto& j : junctions_) {
+            (void)take_junction(schem(), j.value.id);
         }
         schem().bump();
     }
     void undo() override {
-        for (const Junction& j : junctions_) {
+        for (const auto& j : junctions_) {
             reinsert_junction(schem(), j);
         }
         reinsert_wire(schem(), wire_);
@@ -684,8 +755,8 @@ class DeleteWireCommand final : public EditCommand {
     [[nodiscard]] std::string name() const override { return "Delete Wire"; }
 
   private:
-    Wire wire_;
-    std::vector<Junction> junctions_;
+    IndexedEntity<Wire> wire_;
+    std::vector<IndexedEntity<Junction>> junctions_;
 };
 
 class MoveJunctionCommand final : public EditCommand {
@@ -835,8 +906,16 @@ void push_delete_wire(SchematicDocument& doc, std::uint32_t wire_id) {
         return;
     }
     const std::vector<Wire> one{*found};
-    (void)doc.undo().push(std::make_unique<DeleteWireCommand>(
-        &doc, *found, orphaned_junctions(s, one)));
+    const auto indexed_wire = capture_positions(
+        s.wires(), one, [](const Wire& w) { return w.id; });
+    const auto junction_values = orphaned_junctions(s, one);
+    const auto indexed_junctions = capture_positions(
+        s.junctions(), junction_values,
+        [](const Junction& j) { return j.id; });
+    if (!indexed_wire.empty()) {
+        (void)doc.undo().push(std::make_unique<DeleteWireCommand>(
+            &doc, indexed_wire.front(), indexed_junctions));
+    }
 }
 
 void push_move_junction(SchematicDocument& doc, std::uint32_t junction_id,
@@ -929,18 +1008,20 @@ class AddLabelCommand final : public EditCommand {
 
 class DeleteLabelCommand final : public EditCommand {
   public:
-    DeleteLabelCommand(SchematicDocument* doc, ws::circsim::Label label)
+    DeleteLabelCommand(
+        SchematicDocument* doc,
+        IndexedEntity<ws::circsim::Label> label)
         : EditCommand(doc), label_(std::move(label)) {}
 
     void apply() override {
-        (void)take_label(schem(), label_.id);
+        (void)take_label(schem(), label_.value.id);
         schem().bump();
     }
     void undo() override { reinsert_label(schem(), label_); }
     [[nodiscard]] std::string name() const override { return "Delete Label"; }
 
   private:
-    ws::circsim::Label label_;
+    IndexedEntity<ws::circsim::Label> label_;
 };
 
 class MoveLabelCommand final : public EditCommand {
@@ -1015,8 +1096,13 @@ void push_place_label(SchematicDocument& doc, ws::circsim::Label label) {
 void push_delete_label(SchematicDocument& doc, std::uint32_t label_id) {
     for (const ws::circsim::Label& l : doc.schem.labels()) {
         if (l.id == label_id) {
-            (void)doc.undo().push(
-                std::make_unique<DeleteLabelCommand>(&doc, l));
+            const auto indexed = capture_positions(
+                doc.schem.labels(), std::vector<ws::circsim::Label>{l},
+                [](const ws::circsim::Label& item) { return item.id; });
+            if (!indexed.empty()) {
+                (void)doc.undo().push(
+                    std::make_unique<DeleteLabelCommand>(&doc, indexed.front()));
+            }
             return;
         }
     }
@@ -1402,54 +1488,57 @@ class PasteCommand final : public EditCommand {
 // the wires with theirs, the labels - all as the ONE step's payload.
 class DeleteSetCommand final : public EditCommand {
   public:
-    DeleteSetCommand(SchematicDocument* doc, std::vector<Part> parts,
-                     std::vector<Wire> wires, std::vector<Junction> junctions,
-                     std::vector<ws::circsim::Label> labels)
+    DeleteSetCommand(
+        SchematicDocument* doc, std::vector<IndexedEntity<Part>> parts,
+        std::vector<IndexedEntity<Wire>> wires,
+        std::vector<IndexedEntity<Junction>> junctions,
+        std::vector<IndexedEntity<ws::circsim::Label>> labels)
         : EditCommand(doc), parts_(std::move(parts)), wires_(std::move(wires)),
           junctions_(std::move(junctions)), labels_(std::move(labels)) {}
 
     void apply() override {
-        for (const Wire& w : wires_) {
-            (void)take_wire(schem(), w.id);
+        for (const auto& w : wires_) {
+            (void)take_wire(schem(), w.value.id);
         }
-        for (const Part& p : parts_) {
-            (void)take_part(schem(), p.id);
+        for (const auto& p : parts_) {
+            (void)take_part(schem(), p.value.id);
         }
-        for (const ws::circsim::Label& l : labels_) {
-            (void)take_label(schem(), l.id);
+        for (const auto& l : labels_) {
+            (void)take_label(schem(), l.value.id);
         }
-        for (const Junction& j : junctions_) {
-            (void)take_junction(schem(), j.id);
+        for (const auto& j : junctions_) {
+            (void)take_junction(schem(), j.value.id);
         }
         schem().bump();
     }
     void undo() override {
-        for (const Part& p : parts_) {
+        for (const auto& p : parts_) {
             reinsert_part(schem(), p);
         }
-        for (const ws::circsim::Label& l : labels_) {
+        for (const auto& l : labels_) {
             reinsert_label(schem(), l);
         }
-        for (const Junction& j : junctions_) {
+        for (const auto& j : junctions_) {
             reinsert_junction(schem(), j);
         }
-        for (const Wire& w : wires_) {
+        for (const auto& w : wires_) {
             reinsert_wire(schem(), w);
         }
     }
     [[nodiscard]] std::string name() const override { return "Delete Set"; }
     [[nodiscard]] std::size_t memory_estimate() const override {
-        return sizeof(*this) + parts_.size() * sizeof(Part) +
-               wires_.size() * sizeof(Wire) +
-               junctions_.size() * sizeof(Junction) +
-               labels_.size() * sizeof(ws::circsim::Label);
+        return sizeof(*this) + parts_.size() * sizeof(IndexedEntity<Part>) +
+               wires_.size() * sizeof(IndexedEntity<Wire>) +
+               junctions_.size() * sizeof(IndexedEntity<Junction>) +
+               labels_.size() *
+                   sizeof(IndexedEntity<ws::circsim::Label>);
     }
 
   private:
-    std::vector<Part> parts_;
-    std::vector<Wire> wires_;
-    std::vector<Junction> junctions_;
-    std::vector<ws::circsim::Label> labels_;
+    std::vector<IndexedEntity<Part>> parts_;
+    std::vector<IndexedEntity<Wire>> wires_;
+    std::vector<IndexedEntity<Junction>> junctions_;
+    std::vector<IndexedEntity<ws::circsim::Label>> labels_;
 };
 
 }  // namespace
@@ -1536,9 +1625,17 @@ bool push_delete_set(SchematicDocument& doc,
     // The junctions the wire removals orphan (the wire rule: kept
     // when any surviving wire still wants them).
     std::vector<Junction> junctions = orphaned_junctions(s, taking);
+    const auto indexed_parts = capture_positions(
+        s.parts(), part_copies, [](const Part& p) { return p.id; });
+    const auto indexed_wires = capture_positions(
+        s.wires(), taking, [](const Wire& w) { return w.id; });
+    const auto indexed_junctions = capture_positions(
+        s.junctions(), junctions, [](const Junction& j) { return j.id; });
+    const auto indexed_labels = capture_positions(
+        s.labels(), label_copies,
+        [](const ws::circsim::Label& l) { return l.id; });
     (void)doc.undo().push(std::make_unique<DeleteSetCommand>(
-        &doc, std::move(part_copies), std::move(taking),
-        std::move(junctions), std::move(label_copies)));
+        &doc, indexed_parts, indexed_wires, indexed_junctions, indexed_labels));
     return true;
 }
 

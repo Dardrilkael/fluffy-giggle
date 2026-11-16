@@ -22,6 +22,7 @@
 #include <vector>
 
 #include <ws/circsim/export.hpp>
+#include <ws/circsim/format.hpp>
 #include <ws/circsim/model.hpp>
 #include <ws/circsim/overlay.hpp>
 #include <ws/input/input.hpp>
