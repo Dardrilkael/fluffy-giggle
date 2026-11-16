@@ -67,6 +67,23 @@ if(TARGET test_circsim_editor_canvas)
     "${PROJECT_SOURCE_DIR}/libs/ui/src")
 endif()
 
+# The Schematic panel's frame-cost regressions.
+ws_add_test(circsim_editor_canvas_cost
+  SOURCES tests/test_canvas_cost.cpp
+          src/editor.cpp
+          src/document.cpp
+          src/canvas_panel.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/tests/ui_gui_r2d_stub.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
+  LINK ws::circsim
+  DEPENDS ws::ui_gui ws::app ws::settings stb)
+if(TARGET test_circsim_editor_canvas_cost)
+  target_include_directories(test_circsim_editor_canvas_cost PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${PROJECT_SOURCE_DIR}/libs/ui/src")
+endif()
+
 # The side panels' headless gate: the Properties panel's editing state
 # driven the same way (a GuiContext frame + a panel rect) - the
 # directives split/join round-trip (an emptied last row must survive a
