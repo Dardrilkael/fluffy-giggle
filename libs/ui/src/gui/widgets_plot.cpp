@@ -233,7 +233,7 @@ namespace {
     int digits = 0;
     int fractional_digits = 0;
     bool fractional = false;
-    while (*p != '\\0') {
+    while (*p != '\0') {
         if (*p == '.' && !fractional) {
             fractional = true;
             ++p;
@@ -263,7 +263,7 @@ namespace {
         }
         exponent += exponent_negative ? -parsed_exponent : parsed_exponent;
     }
-    if (*p != '\\0') return false;
+    if (*p != '\0') return false;
     out = (negative ? -value : value) *
           std::pow(10.0, static_cast<double>(exponent));
     return std::isfinite(out);
