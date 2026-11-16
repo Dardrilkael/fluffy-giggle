@@ -230,8 +230,8 @@ void draw_line(float x0, float y0, float z0, float x1, float y1, float z1,
 // camera-block contract as every other draw; degenerate input (coincident
 // corners making zero area) is not dropped - a caller tessellating a
 // fan's last wedge relies on it landing where it lands.
-void draw_vertex_quad(const float (&pos)[4][2], const float (&uv)[4][2],
-                      const float (&rgba)[4][4], Texture texture = {});
+void draw_vertex_quad(const float (&positions)[4][2], const float (&texcoords)[4][2],
+                      const float (&colors)[4][4], Texture texture = {});
 
 // Flat-color rounded rectangle: ONE quad shaded by an analytic rounded-box
 // SDF in the fragment shader (the radius rides the batch's per-vertex
