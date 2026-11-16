@@ -1581,15 +1581,19 @@ TEST_CASE("annotation state is isolated between editors with colliding part IDs"
     changed.nudge = {4.0, -3.0};
     changed.annotate_off = true;
     a.ed.set_annot_state(pa->id, changed);
-    b.ed.set_annot_state(pb->id, changed);
+
+    editor::Editor::AnnotState independent;
+    independent.nudge = {-2.0, 5.0};
+    independent.annotate_off = false;
+    b.ed.set_annot_state(pb->id, independent);
 
     const auto& state_a = a.ed.annot_state_of(pa->id);
     const auto& state_b = b.ed.annot_state_of(pb->id);
     CHECK(state_a.nudge.x == doctest::Approx(4.0));
     CHECK(state_a.nudge.y == doctest::Approx(-3.0));
     CHECK(state_a.annotate_off);
-    CHECK(state_b.nudge.x == 0.0);
-    CHECK(state_b.nudge.y == 0.0);
+    CHECK(state_b.nudge.x == doctest::Approx(-2.0));
+    CHECK(state_b.nudge.y == doctest::Approx(5.0));
     CHECK_FALSE(state_b.annotate_off);
 
     // The application reuses one Editor while switching documents too.
@@ -1605,9 +1609,9 @@ TEST_CASE("annotation state is isolated between editors with colliding part IDs"
     CHECK_FALSE(switched_state.annotate_off);
     b.ed.doc = &b.doc;
     const auto& restored_state = b.ed.annot_state_of(pb->id);
-    CHECK(restored_state.nudge.x == doctest::Approx(4.0));
-    CHECK(restored_state.nudge.y == doctest::Approx(-3.0));
-    CHECK(restored_state.annotate_off);
+    CHECK(restored_state.nudge.x == doctest::Approx(-2.0));
+    CHECK(restored_state.nudge.y == doctest::Approx(5.0));
+    CHECK_FALSE(restored_state.annotate_off);
 }
 
 TEST_CASE("C1: set_annot_state writes nudge and annotate_off") {
