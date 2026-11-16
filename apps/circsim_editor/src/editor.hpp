@@ -850,6 +850,15 @@ struct Editor {
         ws::math::Vec2 from{0.0f, 0.0f};
     } pan;
 
+    // Two-finger touch camera gesture (Android): centroid movement pans,
+    // finger separation pinches around the centroid. Kept separate from
+    // the mouse pan so a real mouse and touch contacts can coexist.
+    struct TouchCameraGesture {
+        bool active = false;
+        ws::math::Vec2 midpoint{0.0f, 0.0f};
+        float distance = 0.0f;
+    } touch_camera;
+
     // --- the frame tick, the locate pulse, the panel's key edges ---------
     // The Schematic panel calls tick() once per frame: it advances the
     // smooth camera and the pulse by the REAL elapsed time (steady
