@@ -209,12 +209,16 @@ void CommandListCanvas::stroke(const Paint& paint) {
                              ? static_cast<int>(path_.size())
                              : substarts_[s + 1];
         if (last - first <= 0) continue;
-        dash_polyline(path_.data() + first, last - first, paint.dash, runs);
+        const bool explicitly_closed =
+            path_closed_ && pts_near(path_[first], path_[last - 1]);
+        dash_polyline(path_.data() + first, last - first, paint.dash, runs,
+                      path_closed_ && !explicitly_closed);
         for (const auto& run : runs) {
             if (run.empty()) continue;
+            // Close only a run that remains ON around the entire ring.
             const bool run_closed =
                 path_closed_ && pts_near(run.front(), path_[first]) &&
-                pts_near(run.back(), path_[last - 1]);
+                pts_near(run.back(), path_[first]);
             CanvasCmd c;
             c.kind = CanvasCmdKind::stroke_polyline;
             c.points.reserve(run.size());
@@ -542,12 +546,16 @@ void Renderer2DCanvas::stroke(const Paint& paint) {
                              ? static_cast<int>(path_.size())
                              : substarts_[s + 1];
         if (last - first <= 0) continue;
-        dash_polyline(path_.data() + first, last - first, paint.dash, runs);
+        const bool explicitly_closed =
+            path_closed_ && pts_near(path_[first], path_[last - 1]);
+        dash_polyline(path_.data() + first, last - first, paint.dash, runs,
+                      path_closed_ && !explicitly_closed);
         for (const auto& run : runs) {
             if (run.empty()) continue;
+            // Close only a run that remains ON around the entire ring.
             const bool run_closed =
                 path_closed_ && pts_near(run.front(), path_[first]) &&
-                pts_near(run.back(), path_[last - 1]);
+                pts_near(run.back(), path_[first]);
             screen_run.resize(run.size());
             for (std::size_t i = 0; i < run.size(); ++i)
                 screen_run[i] = to_screen(run[i]);
