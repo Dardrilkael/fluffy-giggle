@@ -3,6 +3,14 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  # Called by build.yml on version tags so a release cannot be published
+  # without the regression tests passing.
+  workflow_call:
+    inputs:
+      tests-only:
+        description: "Run only the test jobs (the release workflow builds the artifacts itself)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -20,13 +28,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            ninja-build cmake g++ \
-            libglfw3-dev libvulkan-dev libopenal-dev libuv1-dev \
-            libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev \
-            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev
+        uses: ./.github/actions/linux-deps
 
       - name: Configure
         run: cmake --preset linux
@@ -43,7 +45,7 @@ jobs:
           build/linux/bin/test_ui_canvas
           build/linux/bin/test_circsim_editor_panel \
             --test-case="an idle frame reuses the cached decimation verbatim"
-          build/linux-asan/bin/test_circsim_editor_waveform_prof
+          build/linux/bin/test_circsim_editor_waveform_prof
 
       - name: Exercise waveform profiler join modes
         shell: bash
@@ -64,13 +66,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            ninja-build cmake g++ \
-            libglfw3-dev libvulkan-dev libopenal-dev libuv1-dev \
-            libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev \
-            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev
+        uses: ./.github/actions/linux-deps
 
       - name: Configure
         run: cmake --preset linux-asan
@@ -90,7 +86,7 @@ jobs:
           build/linux-asan/bin/test_ui_canvas
           build/linux-asan/bin/test_circsim_editor_panel \
             --test-case="an idle frame reuses the cached decimation verbatim"
-          build/linux/bin/test_circsim_editor_waveform_prof
+          build/linux-asan/bin/test_circsim_editor_waveform_prof
 
   check-deps:
     name: Workspace dependency rule
@@ -99,35 +95,65 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install PowerShell
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends powershell
-
+      # pwsh is preinstalled on the GitHub-hosted runner images.
       - name: Run check_deps
-        run: |
-          pwsh -NoProfile -ExecutionPolicy Bypass \
-            -File tools/check_deps.ps1 -Root "$PWD"
+        shell: bash
+        run: pwsh -NoProfile -File tools/check_deps.ps1 -Root "$PWD"
 
-  android:
-    name: Android NDK (arm64-v8a)
+  # ---- build-only checks for what release builds produce (skipped when the
+  # ---- release workflow calls this file with tests-only: true) -------------
+
+  linux-release:
+    if: ${{ inputs.tests-only != true }}
+    name: Linux x86_64 (Release build)
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build cmake
+        uses: ./.github/actions/linux-deps
 
-      - name: Verify NDK toolchain
-        run: |
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
-          test -f "$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
+      # Keep these flags identical to the "linux" job in build.yml.
+      - name: Configure Release
+        run: cmake --preset linux -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-error=maybe-uninitialized"
 
-      - name: Configure
-        run: cmake --preset android
+      - name: Build circsim_editor
+        run: cmake --build --preset linux --target circsim_editor --parallel 2
 
-      - name: Build
-        run: cmake --build --preset android
+  windows:
+    if: ${{ inputs.tests-only != true }}
+    name: Windows x64 (Release build)
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Set up Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Configure Windows Release
+        run: cmake --preset release
+
+      - name: Build Windows executable
+        run: cmake --build --preset release --target circsim_editor --parallel 2
+
+  # Runs the real packaging script (debug-signed) so manifest, aapt2, d8,
+  # zipalign and signing problems show up on the PR, not after the merge.
+  android:
+    if: ${{ inputs.tests-only != true }}
+    name: Android arm64 (APK packaging)
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Android toolchain
+        uses: ./.github/actions/android-sdk
+
+      - name: Package Android APK (debug key)
+        shell: pwsh
+        run: ./tools/package-android.ps1 -App circsim_editor
