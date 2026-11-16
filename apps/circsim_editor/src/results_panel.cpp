@@ -85,6 +85,7 @@
 #include <ws/input/input.hpp>
 #include <ws/spice/results.hpp>
 #include <ws/circsim/overlay.hpp>
+#include <ws/circsim/png.hpp>
 #include <ws/ui/renderer2d.hpp>
 
 namespace editor {
@@ -1497,9 +1498,252 @@ void draw_transport_row(Editor& ed, gui::GuiContext& gui,
     }
 }
 
+
+
+
+
+
 }  // namespace
 
-// --- the panel -----------------------------------------------------------------
+// E3's plot image: the SHOWN table's visible series rendered headless
+// through RasterCanvas - the frame, the engineering-notation grid and
+// tick labels, one polyline per visible signal (full resolution, no
+// decimation - a PNG is written once, not drawn at 60 fps), the
+// markers, and a legend row per series. Pure over its inputs so the
+// headless suite can gate the bytes' shape (the RasterCanvas pixel
+// seam is the test's). `visible` parallels t.signals (nullptr = all
+// visible), `x_name` labels the axis. Public (results_panel.hpp) so
+// the app's export wiring and the tests reach it.
+[[nodiscard]] std::string render_plot_png(const ws::spice::Table& t,
+                                          const std::uint8_t* visible,
+                                          const char* x_name,
+                                          const int* markers,
+                                          std::size_t marker_count) {
+    using ws::circsim::RasterCanvas;
+    constexpr int kW = 1280;
+    constexpr int kH = 720;
+    constexpr double kML = 72.0, kMB = 48.0, kMT = 40.0, kMR = 24.0;
+    RasterCanvas rc(kW, kH, 0x1E2229u);
+    const double iw = kW - kML - kMR;
+    const double ih = kH - kMT - kMB;
+
+    const std::size_t n = t.row_count();
+    const bool by_index = t.sweep_axes.empty();
+    const std::span<const double> xs =
+        by_index ? std::span<const double>{}
+                 : t.axis(std::min(t.step_axes, t.sweep_axes.size() - 1u));
+    const auto x_at = [&](std::size_t k) {
+        return by_index ? static_cast<double>(k)
+                        : (k < xs.size() ? xs[k] : 0.0);
+    };
+
+    // The visible set and the fit: x over the axis envelope, each y
+    // spine over its own visible company (the panel's own rule - a
+    // mixed V/I table splits its scales).
+    std::vector<std::uint8_t> vis;
+    vis.reserve(t.signals.size());
+    for (std::size_t i = 0; i < t.signals.size(); ++i) {
+        vis.push_back(visible == nullptr || visible[i] != 0u ? 1u : 0u);
+    }
+    double x_lo = 0.0, x_hi = static_cast<double>(n > 0u ? n - 1u : 1u);
+    if (!by_index && n > 0u) {
+        x_lo = x_at(0);
+        x_hi = x_at(0);
+        for (std::size_t k = 0; k < n; ++k) {
+            const double v = x_at(k);
+            if (std::isfinite(v)) {
+                x_lo = std::min(x_lo, v);
+                x_hi = std::max(x_hi, v);
+            }
+        }
+    }
+    double y_lo = 0.0, y_hi = 1.0;
+    bool first = true;
+    for (std::size_t i = 0; i < t.signals.size(); ++i) {
+        if (i >= vis.size() || !vis[i]) {
+            continue;
+        }
+        for (double v : t.signals[i].data) {
+            if (!std::isfinite(v)) {
+                continue;
+            }
+            if (first) {
+                y_lo = v;
+                y_hi = v;
+                first = false;
+            } else {
+                y_lo = std::min(y_lo, v);
+                y_hi = std::max(y_hi, v);
+            }
+        }
+    }
+    if (y_lo > y_hi || y_lo == y_hi) {
+        y_lo -= 1.0;
+        y_hi += 1.0;
+    }
+    // The padding the live plot's expand_range gives.
+    const ws::circsim::PlotRange px =
+        ws::circsim::expand_range(x_lo, x_hi);
+    const ws::circsim::PlotRange py =
+        ws::circsim::expand_range(y_lo, y_hi);
+    const auto sx = [&](double v) {
+        return kML + (v - px.lo) / (px.hi - px.lo) * iw;
+    };
+    const auto sy = [&](double v) {
+        return kMT + (py.hi - v) / (py.hi - py.lo) * ih;
+    };
+
+    // The frame.
+    rc.stroke_polyline({{kML, kMT}, {kML + iw, kMT}, {kML + iw, kMT + ih},
+                        {kML, kMT + ih}},
+                       1.0, 0x60666Fu);
+
+    // The grid + tick labels (engineering notation, the panel's own
+    // ladder).
+    const std::vector<double> x_ticks =
+        ws::circsim::nice_ticks(px.lo, px.hi, 8u);
+    const std::vector<double> y_ticks =
+        ws::circsim::nice_ticks(py.lo, py.hi, 6u);
+    for (double tick : x_ticks) {
+        const double pxs = sx(tick);
+        if (pxs < kML || pxs > kML + iw) {
+            continue;
+        }
+        rc.stroke_polyline({{pxs, kMT}, {pxs, kMT + ih}}, 1.0,
+                           0x2A2F38u);
+        rc.draw_text(ws::circsim::format_eng(tick, 4), pxs, kMT + ih + 8.0,
+                     RasterCanvas::HAlign::Center,
+                     RasterCanvas::VAlign::Top, 0xA8ADB8u);
+    }
+    for (double tick : y_ticks) {
+        const double pys = sy(tick);
+        if (pys < kMT || pys > kMT + ih) {
+            continue;
+        }
+        rc.stroke_polyline({{kML, pys}, {kML + iw, pys}}, 1.0,
+                           0x2A2F38u);
+        rc.draw_text(ws::circsim::format_eng(tick, 4), kML - 8.0, pys,
+                     RasterCanvas::HAlign::Right,
+                     RasterCanvas::VAlign::Middle, 0xA8ADB8u);
+    }
+
+    // The series: full resolution, each broken at non-finite samples
+    // (the live plot's own run rule).
+    for (std::size_t i = 0; i < t.signals.size(); ++i) {
+        if (i >= vis.size() || !vis[i] ||
+            t.signals[i].data.size() != n) {
+            continue;
+        }
+        const std::uint32_t color = series_color(i) >> 8u;
+        std::vector<std::pair<double, double>> run;
+        for (std::size_t k = 0; k < n; ++k) {
+            const double yv = t.signals[i].data[k];
+            if (std::isfinite(yv)) {
+                run.emplace_back(sx(x_at(k)), sy(yv));
+            } else if (run.size() >= 2u) {
+                rc.stroke_polyline(run, 2.0, color);
+            }
+            if (!std::isfinite(yv)) {
+                run.clear();
+            }
+        }
+        if (run.size() >= 2u) {
+            rc.stroke_polyline(run, 2.0, color);
+        }
+    }
+
+    // The markers: a solid accent line each, with its x spelled.
+    for (std::size_t mi = 0; mi < marker_count; ++mi) {
+        const int k = markers[mi];
+        if (k < 0 || static_cast<std::size_t>(k) >= n) {
+            continue;
+        }
+        const double mx = x_at(static_cast<std::size_t>(k));
+        rc.stroke_polyline({{sx(mx), kMT}, {sx(mx), kMT + ih}}, 1.0,
+                           0x3E7ACBu);
+        rc.draw_text(ws::circsim::format_eng(mx, 4), sx(mx), kMT + 4.0,
+                     RasterCanvas::HAlign::Left, RasterCanvas::VAlign::Top,
+                     0x8FB8E8u);
+    }
+
+    // The title and the axis name, then the legend along the bottom:
+    // swatch + name, the panel's own legend order.
+    rc.draw_text(analysis_name(t.analysis), kML, 12.0,
+                 RasterCanvas::HAlign::Left, RasterCanvas::VAlign::Top,
+                 0xE6E8ECu, 2);
+    if (x_name != nullptr && x_name[0] != 0) {
+        rc.draw_text(x_name, kML + iw, kMT + ih + 26.0,
+                     RasterCanvas::HAlign::Right,
+                     RasterCanvas::VAlign::Top, 0xA8ADB8u);
+    }
+    double lx = kML;
+    constexpr double kLegendY = kH - 26.0;
+    for (std::size_t i = 0; i < t.signals.size(); ++i) {
+        if (i >= vis.size() || !vis[i]) {
+            continue;
+        }
+        rc.fill_disc(lx + 4.0, kLegendY + 4.0, 4.0,
+                     series_color(i) >> 8u);
+        rc.draw_text(t.signals[i].name, lx + 14.0, kLegendY,
+                     RasterCanvas::HAlign::Left, RasterCanvas::VAlign::Top,
+                     0xD5D9E0u);
+        lx += 28.0 + RasterCanvas::text_width(t.signals[i].name);
+    }
+    return rc.encode_png();
+}
+
+// E2: a legend row's signal name resolved onto the schematic thing it
+// names, through the run's OWN back-map - the same maps the Problems
+// panel locates through (the run's export, not a rebuilt one, so the
+// answer matches the names the table carries even when the schematic
+// has since moved). A v(net) whose net the map knows answers the Net
+// target (a generated v(N001) included - that is the point); an
+// i(part) answers the Part target; anything else (re()/im() pairs,
+// onoise, a name the deck never spelled) answers Kind::None and the
+// row draws no locate button at all - never a dead affordance.
+[[nodiscard]] ws::circsim::DiagTarget locate_signal(
+    const Editor& ed, const std::string& name) {
+    using ws::circsim::DiagTarget;
+    if (!ed.results.has || name.size() < 4u) {
+        return DiagTarget{};
+    }
+    const std::size_t close = name.rfind(')');
+    if (close == std::string::npos) {
+        return DiagTarget{};
+    }
+    const bool is_v = name.rfind("v(", 0) == 0;
+    const bool is_i = name.rfind("i(", 0) == 0;
+    if (!is_v && !is_i) {
+        return DiagTarget{};
+    }
+    const std::string inner =
+        name.substr(2, close - 2u);
+    if (inner.empty()) {
+        return DiagTarget{};
+    }
+    if (is_v) {
+        // v(net): the net the token names. node_net keys the DECK's
+        // node token - exactly the name the engine's column spells.
+        const auto it = ed.results.map.node_net.find(inner);
+        if (it != ed.results.map.node_net.end()) {
+            DiagTarget t;
+            t.kind = DiagTarget::Kind::Net;
+            t.net = it->second;
+            return t;
+        }
+        return DiagTarget{};
+    }
+    // i(part): the element the deck named (a part's ref, or a
+    // multi-card symbol's claimed name - both live in element_part).
+    const auto it = ed.results.map.element_part.find(inner);
+    if (it != ed.results.map.element_part.end()) {
+        DiagTarget t;
+        t.kind = DiagTarget::Kind::Part;
+        t.part = it->second;
+        return t;
+    }
+    return DiagTarget{};
+}// --- the panel -----------------------------------------------------------------
 
 void draw_results_panel(Editor& ed, gui::GuiContext& gui,
                         gui::LayoutCursor& layout,

@@ -533,6 +533,18 @@ struct ResultsCache {
     // 2 x signals heap round-trips a frame for nothing - the canvas
     // consumes points synchronously, so no draw holds them).
     std::vector<canvas::Point> scratch_pts;
+
+    // E1's persistent markers: sample indices planted by a click (a
+    // sub-threshold left release in the frame - a drag is a zoom, a
+    // click is a question), at most `kMaxMarkers` of them. The hover
+    // answers while the pointer rests; a MARKER stays for the readout
+    // the legend spells beside each signal row (the "exact value at a
+    // point I choose" the hover alone cannot keep). Per-table view
+    // state beside `visible`/`view`: same key shape, reset on a
+    // delivery, keyed to the table the click planted them in.
+    static constexpr std::size_t kMaxMarkers = 8;
+    std::vector<int> markers;
+    std::size_t markers_for = kNoTable;  // the table `markers` belong to
 };
 
 // One editable field's caller-owned buffer (the Properties panel's
@@ -602,6 +614,14 @@ struct Editor {
     // The app installs it (the path policy - derive from the
     // document, write through the fs seam - is the app's to own).
     std::function<void(bool json)> export_results;
+    // E3's scoped pair: the SHOWN table only (the button beside the
+    // selector says its scope), and the plot as a PNG (the visible
+    // series, axes and ticks rendered headless through RasterCanvas -
+    // the plot carries itself out of the panel). Same install shape
+    // as export_results; unset (the headless bench) simply disables
+    // the buttons.
+    std::function<void()> export_table_csv;
+    std::function<void()> export_plot_png;
 
     // The active document (null = none open). The app re-points this
     // on every activation change and calls document_changed().

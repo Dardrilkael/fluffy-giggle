@@ -421,6 +421,8 @@ class CircsimApp final : public ws::ui::App {
             shell_->set_status(std::move(text));
         };
         editor_.export_results = [this](bool json) { export_run(json); };
+        editor_.export_table_csv = [this]() { export_table_csv(); };
+        editor_.export_plot_png = [this]() { export_plot_png(); };
         // The Netlist panel's Copy button needs no wiring of its own:
         // it rides the gui's clipboard seam, which install_clipboard
         // above wired to this window (GLFW's set on desktop; Android's
@@ -1427,6 +1429,96 @@ class CircsimApp final : public ws::ui::App {
         const ws::core::Status done = doc_fs().write(path, body);
         if (done.has_value()) {
             editor_.toast("Results exported to " + path,
+                          gui::ToastSeverity::info);
+        } else {
+            editor_.toast("Export failed: " + done.error().message,
+                          gui::ToastSeverity::error);
+        }
+    }
+
+    // E3's scoped exports. The results' path stem is the same rule as
+    // export_run's (beside the document, or the working directory for
+    // an untitled one), so a table CSV and its run's CSV sit together
+    // and never overwrite each other.
+    [[nodiscard]] std::string results_stem() const {
+        std::string stem = editor_.doc->path();
+        if (stem.empty()) {
+            return "circsim-results";
+        }
+        const std::size_t slash = stem.find_last_of("/\\");
+        const std::size_t dot = stem.find_last_of('.');
+        if (dot != std::string::npos &&
+            (slash == std::string::npos || dot > slash)) {
+            stem.resize(dot);
+        }
+        if (stem.empty() ||
+            (slash != std::string::npos && dot == slash + 1u)) {
+            return "circsim-results";
+        }
+        return stem;
+    }
+
+    // The SHOWN table only (the button beside the selector that picks
+    // it): one CSV, that table's columns, named by its position in the
+    // run so several tables export to several readable files.
+    void export_table_csv() {
+        if (!editor_.results.has || editor_.doc == nullptr) {
+            return;
+        }
+        const ws::spice::Results& res = editor_.results.run.results;
+        if (editor_.results.table >= res.tables.size()) {
+            return;
+        }
+        const std::string path =
+            results_stem() + "-" +
+            std::to_string(editor_.results.table + 1u) + ".csv";
+        const std::string body = ws::spice::table_csv(
+            res.tables[editor_.results.table]);
+        const ws::core::Status done = doc_fs().write(path, body);
+        if (done.has_value()) {
+            editor_.toast("Table exported to " + path,
+                          gui::ToastSeverity::info);
+        } else {
+            editor_.toast("Export failed: " + done.error().message,
+                          gui::ToastSeverity::error);
+        }
+    }
+
+    // The plot as a PNG (E3): the shown table's visible series through
+    // the headless renderer, the same stem family with the table's
+    // own suffix.
+    void export_plot_png() {
+        if (!editor_.results.has || editor_.doc == nullptr) {
+            return;
+        }
+        const ws::spice::Results& res = editor_.results.run.results;
+        if (editor_.results.table >= res.tables.size()) {
+            return;
+        }
+        const ws::spice::Table& t =
+            res.tables[editor_.results.table];
+        const std::size_t x_index =
+            t.sweep_axes.empty()
+                ? 0u
+                : std::min(t.step_axes, t.sweep_axes.size() - 1u);
+        const char* x_name =
+            !t.sweep_names.empty() && x_index < t.sweep_names.size() &&
+                    !t.sweep_names[x_index].empty()
+                ? t.sweep_names[x_index].c_str()
+                : "sample";
+        const std::string png = editor::render_plot_png(
+            t,
+            editor_.results.visible.size() == t.signals.size()
+                ? editor_.results.visible.data()
+                : nullptr,
+            x_name, editor_.results.markers.data(),
+            editor_.results.markers.size());
+        const std::string path =
+            results_stem() + "-" +
+            std::to_string(editor_.results.table + 1u) + ".png";
+        const ws::core::Status done = doc_fs().write(path, png);
+        if (done.has_value()) {
+            editor_.toast("Plot exported to " + path,
                           gui::ToastSeverity::info);
         } else {
             editor_.toast("Export failed: " + done.error().message,
