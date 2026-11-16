@@ -123,10 +123,10 @@ void watch_selection(Editor& ed) {
 
 void label_line(gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
                 const std::string& key, const std::string& value) {
-    char line[192];
-    std::snprintf(line, sizeof line, "%s: %s", key.c_str(),
-                  value.c_str());
-    gui::text(layout, theme, line);
+    // A std::string and a wrapped draw: the old 192-byte snprintf cut a
+    // long wire description mid-word, and plain text ran past the edge.
+    const std::string line = key + ": " + value;
+    (void)gui::text_wrapped(layout, theme, line.c_str());
 }
 
 // A dim, secondary line: hints, units, validation notes. WRAPS at the
@@ -141,7 +141,7 @@ void hint_line(gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
     // every word whole, breaks at spaces only - and the fontless
     // bench theme's rows still reserve honest room.
     gui::ChromeTheme dimmed = theme;
-    dimmed.text = gui::dim(theme.text, 0.6f);
+    dimmed.text = gui::dim(theme.text, 0.7f);  // 0.6 was too faint to read
     (void)gui::text_wrapped(layout, dimmed, text.c_str());
 }
 
@@ -169,6 +169,38 @@ void panel_section(gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
 void field_label(gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
                  const std::string& label) {
     gui::text(layout, theme, label.c_str());
+}
+
+// `text` cut to fit `max_w` pixels, ending in "..." (ASCII: every font
+// has it). Whole UTF-8 characters only. The common fits-already case is
+// ONE measure; a cut starts from a proportional guess and steps back.
+[[nodiscard]] std::string ellipsize(const ws::ui::r2d::Font& font,
+                                    const std::string& text, float max_w) {
+    if (max_w <= 0.0f) {
+        return {};
+    }
+    const float full = font.measure_text(text.c_str());
+    if (full <= max_w) {
+        return text;
+    }
+    const std::string dots = "...";
+    const float dots_w = font.measure_text(dots.c_str());
+    std::size_t n = static_cast<std::size_t>(
+        static_cast<float>(text.size()) * std::max(0.0f, max_w - dots_w) /
+        std::max(full, 1.0f));
+    n = std::min(n + 1u, text.size());
+    while (n > 0) {
+        --n;
+        while (n > 0 &&
+               (static_cast<unsigned char>(text[n]) & 0xC0u) == 0x80u) {
+            --n;  // never cut inside a multi-byte character
+        }
+        const std::string cut = text.substr(0, n);
+        if (font.measure_text(cut.c_str()) + dots_w <= max_w) {
+            return cut + dots;
+        }
+    }
+    return dots;
 }
 
 // "3 errors" / "1 error": the count with its noun.
@@ -1537,11 +1569,14 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
     const bool filtering = !filter.empty();
     // Grid (pictures, tooltips for names) or List (a named row each):
     // the grid is dense, the list is readable - the user picks.
-    if (gui::button(gui, layout, theme,
-                    ed.palette_list_view ? "Grid view" : "List view",
-                    84.0f)) {
-        ed.palette_list_view = !ed.palette_list_view;
-    }
+    // A segmented control, so BOTH choices are visible and the current
+    // one is marked (the old toggle button was labeled with the view
+    // you would switch TO, which read as the current one).
+    static const char* const kViews[] = {"Grid", "List"};
+    int view_mode = ed.palette_list_view ? 1 : 0;
+    (void)gui::tab_bar(gui, layout, theme, "palette view", kViews, 2,
+                       view_mode, -1.0f);
+    ed.palette_list_view = view_mode == 1;
     const std::vector<ws::circsim::PaletteGroup> groups =
         ws::circsim::palette_groups(ed.library, filter);
 
@@ -1643,7 +1678,7 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
             }
         }
         if (!recent.empty()) {
-            gui::text(layout, theme, "Recent");
+            hint_line(layout, theme, "Recent");
             tile_run(recent);
         }
     }
@@ -1812,6 +1847,17 @@ void draw_wave_preview(Editor& ed, gui::LayoutCursor& layout,
         return;  // nothing finite (the sampler's own guard, again)
     }
     const ws::circsim::PlotRange yr = ws::circsim::expand_range(lo, hi);
+    if (!(yr.hi > yr.lo) || !(pv.t_end > 0.0)) {
+        return;  // no span to map: the frame alone, never a divide by 0
+    }
+    // Faint quarter ticks so the time axis reads as an axis.
+    for (int q = 1; q < 4; ++q) {
+        canvas::Paint grid;
+        grid.width = 1.0f;
+        grid.color = gui::dim(theme.text, 0.1f);
+        const float gx = fx + iw * static_cast<float>(q) * 0.25f;
+        rc.stroke_line({gx, fy}, {gx, fy + ih}, grid);
+    }
     const auto sx = [&](double t) {
         return static_cast<float>(fx + t / pv.t_end * iw);
     };
@@ -1867,9 +1913,13 @@ void draw_wave_preview(Editor& ed, gui::LayoutCursor& layout,
     const std::string ymin = ws::circsim::format_eng(yr.lo);
     const float wmax = rc.measure_text(ymax.c_str(), *font);
     const float wmin = rc.measure_text(ymin.c_str(), *font);
-    (void)rc.draw_text(fx - 5.0f - wmax, fy, ymax.c_str(), *font, label);
-    (void)rc.draw_text(fx - 5.0f - wmin, fy + ih - lh, ymin.c_str(), *font,
-                       label);
+    // Clamped to the well's own left edge: a long label ("-1.25m") used
+    // to run out of the box and get clipped by the panel.
+    const float lx_max = std::max(box.x + 2.0f, fx - 5.0f - wmax);
+    const float lx_min = std::max(box.x + 2.0f, fx - 5.0f - wmin);
+    (void)rc.draw_text(lx_max, fy, ymax.c_str(), *font, label);
+    (void)rc.draw_text(lx_min, fy + ih - lh, ymin.c_str(), *font, label);
+    (void)rc.draw_text(fx, fy + ih + 2.0f, "0", *font, label);
     // The window's end, under the frame's right corner (its start is
     // 0 - the frame's own left edge says it).
     const std::string end = ws::circsim::format_eng(pv.t_end) + "s";
@@ -1959,8 +2009,7 @@ void source_wave_editor(Editor& ed, gui::GuiContext& gui,
         const auto ac_at = p.params.find("ac");
         if (ac_at != p.params.end() && !ac_at->second.empty()) {
             part_text_row(ed, gui, layout, theme, "AC magnitude", p.id,
-                          2, "ac", ac_at->second,
-                          "blank = no small-signal level");
+                          2, "ac", ac_at->second);
             hint_line(layout, theme,
                       "Small-signal level for .ac sweeps - blank means "
                       "none");
@@ -2106,8 +2155,7 @@ void source_wave_editor(Editor& ed, gui::GuiContext& gui,
     // set.
     const auto ac_at = p.params.find("ac");
     part_text_row(ed, gui, layout, theme, "AC magnitude", p.id, 2, "ac",
-                  ac_at != p.params.end() ? ac_at->second : "",
-                  "blank = no small-signal level");
+                  ac_at != p.params.end() ? ac_at->second : "");
     hint_line(layout, theme,
               "Small-signal level for .ac sweeps - blank means none");
 }
@@ -2161,6 +2209,13 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
             return;
         }
         const ws::circsim::SymbolDef* sym = ed.sym_of(*p);
+        {
+            // Who is selected, at a glance, in the loud face.
+            const std::string title =
+                !p->ref.empty() ? p->ref
+                                : (sym != nullptr ? sym->name : p->symbol);
+            gui::heading(layout, theme, title.c_str());
+        }
         label_line(layout, theme, "Symbol",
                    sym != nullptr
                        ? sym->name + " (" + sym->key + ")"
@@ -2248,55 +2303,58 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
             }
         }
 
-        // Annotation nudge/reset for the selected part (C1: placement
-        // engine with nudge support). The per-part AnnotState stores a
-        // world-space nudge and an annotate_off opt-out; the Properties
-        // panel edits these.
-        panel_section(layout, theme, "Annotation");
-        // The nudge fields: world-space delta from the engine's answer.
-        // Input floats with step derived from the grid base (0.1) and a
-        // reasonable range for schematic-scale nudges.
-        auto& annot_st = ed.annot_state_of(p->id);
-        bool nudge_changed = false;
-        const float nudge_step = 0.1f;  // one grid cell
-        const float nudge_min = -100.0f;
-        const float nudge_max = 100.0f;
-        float nudge_x = static_cast<float>(annot_st.nudge.x);
-        float nudge_y = static_cast<float>(annot_st.nudge.y);
-        if (gui::input_float(gui, layout, theme, "Nudge X", nudge_x,
-                             nudge_step, nudge_min, nudge_max)) {
-            nudge_changed = true;
-        }
-        if (gui::input_float(gui, layout, theme, "Nudge Y", nudge_y,
-                             nudge_step, nudge_min, nudge_max)) {
-            nudge_changed = true;
-        }
-        if (nudge_changed) {
-            Editor::AnnotState st = annot_st;
-            st.nudge.x = nudge_x;
-            st.nudge.y = nudge_y;
-            ed.set_annot_state(p->id, st);
-        }
-        // The annotate_off toggle: when true, the part's refdes/value are
-        // not drawn by the annotation engine.
-        bool annotate_off = annot_st.annotate_off;
-        if (gui::checkbox(gui, layout, theme, "Hide Annotation", annotate_off)) {
-            Editor::AnnotState st = annot_st;
-            st.annotate_off = annotate_off;
-            ed.set_annot_state(p->id, st);
-        }
-        // Reset button: clears the nudge and turns annotation back on.
-        if (gui::button(gui, layout, theme, "Reset Annotation")) {
-            Editor::AnnotState st;
-            st.nudge = {0.0, 0.0};
-            st.annotate_off = false;
-            ed.set_annot_state(p->id, st);
-        }
-
         if (source_editor) {
             // The AC magnitude + waveform picker: the netlist's source
             // line without the hand-typed "SIN(0 1 1k)".
             source_wave_editor(ed, gui, layout, theme, *p);
+        }
+        // Annotation nudge/reset for the selected part (C1: placement
+        // engine with nudge support). The per-part AnnotState stores a
+        // world-space nudge and an annotate_off opt-out; the Properties
+        // panel edits these.
+        gui::separator(layout, theme);
+        if (gui::collapsing_header(gui, layout, theme, "Annotation",
+                                   ed.annotation_open)) {
+            // The nudge fields: world-space delta from the engine's answer.
+            // Input floats with step derived from the grid base (0.1) and a
+            // reasonable range for schematic-scale nudges.
+            auto& annot_st = ed.annot_state_of(p->id);
+            bool nudge_changed = false;
+            const float nudge_step = 0.1f;  // one grid cell
+            const float nudge_min = -100.0f;
+            const float nudge_max = 100.0f;
+            float nudge_x = static_cast<float>(annot_st.nudge.x);
+            float nudge_y = static_cast<float>(annot_st.nudge.y);
+            if (gui::input_float(gui, layout, theme, "Nudge X", nudge_x,
+                                 nudge_step, nudge_min, nudge_max)) {
+                nudge_changed = true;
+            }
+            if (gui::input_float(gui, layout, theme, "Nudge Y", nudge_y,
+                                 nudge_step, nudge_min, nudge_max)) {
+                nudge_changed = true;
+            }
+            if (nudge_changed) {
+                Editor::AnnotState st = annot_st;
+                st.nudge.x = nudge_x;
+                st.nudge.y = nudge_y;
+                ed.set_annot_state(p->id, st);
+            }
+            // The annotate_off toggle: when true, the part's refdes/value are
+            // not drawn by the annotation engine.
+            bool annotate_off = annot_st.annotate_off;
+            if (gui::checkbox(gui, layout, theme, "Hide Annotation", annotate_off)) {
+                Editor::AnnotState st = annot_st;
+                st.annotate_off = annotate_off;
+                ed.set_annot_state(p->id, st);
+            }
+            // Reset button: clears the nudge and turns annotation back on.
+            if (gui::button(gui, layout, theme, "Reset Annotation")) {
+                Editor::AnnotState st;
+                st.nudge = {0.0, 0.0};
+                st.annotate_off = false;
+                ed.set_annot_state(p->id, st);
+            }
+
         }
         // D2: the debug-shaped readout moves out of prime space. The
         // position line is placement plumbing - exactly the "useful
@@ -2316,6 +2374,7 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
             label_line(layout, theme, "Grid pitch",
                        plain_num(ed.schem()->grid) + " (grid cells)");
         }
+        gui::separator(layout, theme);
         if (gui::button(gui, layout, theme, "Delete part")) {
             push_delete_part(*ed.doc, p->id);
             ed.sel.clear();
@@ -2331,6 +2390,7 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
         }
         label_line(layout, theme, "Wire " + std::to_string(w->id),
                    endpoint_label(ed, w->a) + " to " + endpoint_label(ed, w->b));
+        gui::separator(layout, theme);
         if (gui::button(gui, layout, theme, "Delete wire")) {
             push_delete_wire(*ed.doc, w->id);
             ed.sel.clear();
@@ -2349,6 +2409,7 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
             "Junction at (" + plain_num(j->pos.x) + ", " +
             plain_num(j->pos.y) + ")";
         gui::text(layout, theme, where.c_str());
+        gui::separator(layout, theme);
         if (gui::button(gui, layout, theme, "Delete junction")) {
             // A junction delete is the first wire through it; find the
             // id BEFORE the command runs (it mutates the deque this
@@ -2388,6 +2449,7 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
                 128)) {
             push_label_text(*ed.doc, l->id, buf);
         }
+        gui::separator(layout, theme);
         if (gui::button(gui, layout, theme, "Delete label")) {
             push_delete_label(*ed.doc, l->id);
             ed.sel.clear();
@@ -2475,9 +2537,21 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
         const gui::Rect hint_rect =
             layout.next(hint_w, theme.control_height);
         if (theme.font != nullptr) {
+            // Cut to the room the buttons leave (it used to draw the
+            // whole string and run under the ^ v x buttons), centred
+            // in the row, with the full text in a tooltip.
+            const std::string full = analysis_params_brief(spec);
+            const std::string shown =
+                ellipsize(*theme.font, full, hint_rect.width);
+            const float lh = theme.font->line_height();
             (void)ws::ui::r2d::draw_text(
-                hint_rect.x, hint_rect.y, analysis_params_brief(spec).c_str(),
-                *theme.font, gui::dim(theme.text, 0.6f));
+                hint_rect.x,
+                hint_rect.y + std::max(0.0f, (hint_rect.height - lh) * 0.5f),
+                shown.c_str(), *theme.font, gui::dim(theme.text, 0.7f));
+            if (shown != full) {
+                gui::tooltip_text(gui, layout, theme, "params", hint_rect,
+                                  full.c_str());
+            }
         } else {
             (void)hint_rect;  // fontless: the buttons below still act
         }
@@ -2625,6 +2699,11 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
     const std::vector<std::string> lines = split_directive_lines(
         ed.schem()->directives);
     constexpr float kRowButtonW = 24.0f;
+    // Directives are code (.model cards, node names): the mono face.
+    gui::ChromeTheme code_theme = theme;
+    if (ed.font_mono != nullptr && !ed.font_mono->empty()) {
+        code_theme.font = ed.font_mono;
+    }
     int line_at = 0;
     int remove_at = -1;
     for (const std::string& line : lines) {
@@ -2638,7 +2717,7 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
         // of every input is visible at all times, empty or not; the
         // label lives in the section heading above, the placeholder
         // carries the per-row story).
-        if (text_input_tracked(ed, gui, layout, theme,
+        if (text_input_tracked(ed, gui, layout, code_theme,
                                std::string{"line##directives."} +
                                    std::to_string(line_at),
                                buf, 128, field_w)) {
@@ -2782,8 +2861,8 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
     if (gui::button(gui, layout, theme, "Next", 56.0f, {}, !can_step)) {
         (void)step_problem(ed, true);
     }
-    layout.same_line();
     if (!ed.problems.has) {
+        layout.same_line();
         // No check yet: the load report stands in (the tolerant loader's
         // repairs are problems too).
         const std::size_t count = ed.doc->report.diags.size();
@@ -2808,7 +2887,9 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
     if (stale) {
         header += " - stale, press Re-check";
     }
-    gui::text(layout, theme, header.c_str());
+    // Its own wrapped line: beside the buttons a long header was cut at
+    // the panel edge.
+    (void)gui::text_wrapped(layout, theme, header.c_str());
 
     // The filter row: one checkbox per severity, its label the LIVE
     // count - the FULL count, the same number the header said, because
@@ -2816,21 +2897,37 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
     // the widget's identity steady while its count relabels (a focused
     // checkbox survives the relabel; a "##" id would not).
     if (!ed.problems.diags.empty()) {
-        const std::string err =
-            "Errors " + std::to_string(errors) + "###problems.error";
-        const std::string warn =
-            "Warnings " + std::to_string(warnings) + "###problems.warning";
-        const std::string note =
-            "Notes " + std::to_string(notes) + "###problems.note";
+        const std::string d_err = "Errors " + std::to_string(errors);
+        const std::string d_warn = "Warnings " + std::to_string(warnings);
+        const std::string d_note = "Notes " + std::to_string(notes);
+        const std::string err = d_err + "###problems.error";
+        const std::string warn = d_warn + "###problems.warning";
+        const std::string note = d_note + "###problems.note";
+        // Three across only when they fit; otherwise they stack instead
+        // of running off the right edge of a narrow panel.
+        bool one_row = true;
+        if (theme.font != nullptr) {
+            const float need =
+                theme.font->measure_text(d_err.c_str()) +
+                theme.font->measure_text(d_warn.c_str()) +
+                theme.font->measure_text(d_note.c_str()) +
+                3.0f * (theme.control_height + theme.spacing) +
+                2.0f * theme.spacing;
+            one_row = need <= layout.remaining_width();
+        }
         // (void) flips: the checkbox writes the flag in place, and the
         // next frame's draw already answers to it - nothing else to do
         // on the toggle frame.
         (void)gui::checkbox(gui, layout, theme, err.c_str(),
                             ed.problems_show_error);
-        layout.same_line();
+        if (one_row) {
+            layout.same_line();
+        }
         (void)gui::checkbox(gui, layout, theme, warn.c_str(),
                             ed.problems_show_warning);
-        layout.same_line();
+        if (one_row) {
+            layout.same_line();
+        }
         (void)gui::checkbox(gui, layout, theme, note.c_str(),
                             ed.problems_show_note);
         hint_line(layout, theme,
@@ -2922,15 +3019,16 @@ void draw_netlist_panel(Editor& ed, gui::GuiContext& gui,
             ed.status("copy failed - the clipboard is unavailable");
         }
     }
-    layout.same_line();
     if (!ed.netlist.has) {
-        gui::text(layout, theme, "Not exported yet - press Re-export");
+        layout.same_line();
+        (void)gui::text_wrapped(layout, theme,
+                                "Not exported yet - press Re-export");
         return;
     }
     const std::string head =
         std::string{stale ? "Stale - edited since the export" : "The deck"} +
         " (" + counted(ed.netlist.lines.size(), "line") + ")";
-    gui::text(layout, theme, head.c_str());
+    (void)gui::text_wrapped(layout, theme, head.c_str());
 
     // The lines, in the mono face when there is one (the theme's face
     // otherwise - readable, just not column-aligned). A fontless
@@ -2971,8 +3069,15 @@ void draw_netlist_panel(Editor& ed, gui::GuiContext& gui,
         } else if (!line.empty() && line[0] == '.') {
             color = theme.control_on;
         }
-        (void)ws::ui::r2d::draw_text(row.x + gutter, row.y, line.c_str(),
+        // Cut to the panel with an ellipsis (a long .model card used to
+        // run past the edge unreadably); the whole line is the tooltip.
+        const std::string shown =
+            ellipsize(*font, line, row.width - gutter);
+        (void)ws::ui::r2d::draw_text(row.x + gutter, row.y, shown.c_str(),
                                      *font, color);
+        if (shown != line) {
+            gui::tooltip_text(gui, layout, theme, "line", row, line.c_str());
+        }
         gui.ids().pop();
         ++index;
     }

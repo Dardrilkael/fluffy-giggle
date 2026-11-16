@@ -788,6 +788,10 @@ struct Editor {
     // frames and selection moves, and nothing on the undo stack knows
     // it exists.
     bool part_details_open = false;
+    // The Properties panel's Annotation section (nudge / hide / reset):
+    // view state beside part_details_open, collapsed by default so the
+    // fields the user edits come first.
+    bool annotation_open = false;
 
     // Bumps the edit epoch (the app wires the undo stacks' listeners
     // here, so an undo/redo lands back into the field rows).

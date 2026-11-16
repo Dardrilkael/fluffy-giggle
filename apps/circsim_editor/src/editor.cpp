@@ -1502,6 +1502,73 @@ bool Editor::annot_blocked(const ScreenRect& tile,
     return false;
 }
 
+namespace {
+
+[[nodiscard]] bool screen_rects_overlap(const ScreenRect& a,
+                                        const ScreenRect& b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h &&
+           a.y + a.h > b.y;
+}
+
+// Field-by-field, so no assumption about Bounds' member order.
+[[nodiscard]] Bounds make_bounds(double x0, double y0, double x1, double y1) {
+    Bounds b{};
+    b.min_x = std::min(x0, x1);
+    b.min_y = std::min(y0, y1);
+    b.max_x = std::max(x0, x1);
+    b.max_y = std::max(y0, y1);
+    return b;
+}
+
+struct TilePick {
+    ScreenRect rect;
+    Pos anchor;
+};
+
+// Picks where a w x h pixel tile goes around `ideal`: the ideal itself
+// when nothing blocks it, else the nearest free spot on a pixel-radius
+// ring (below first, then around - radii in pixels so the search
+// behaves the same at every zoom). When every candidate is blocked the
+// tile stays at the ideal rather than wandering off. The old code
+// scored the ideal candidate 0 WITHOUT asking whether it was blocked,
+// so it always won and the whole ring search below it was dead code -
+// labels sat on top of their own part bodies and wires.
+[[nodiscard]] TilePick pick_tile(
+    const EditorView& view, Pos ideal, float w, float h,
+    const std::function<bool(const ScreenRect&)>& blocked) {
+    const double zoom = view.zoom > 0.0 ? static_cast<double>(view.zoom) : 1.0;
+    const auto rect_at = [&](Pos world) {
+        const ws::math::Vec2 s = view.w2s(world);
+        return ScreenRect{s.x - w * 0.5f, s.y - h * 0.5f, w, h};
+    };
+    const TilePick ideal_pick{rect_at(ideal), ideal};
+    if (!blocked(ideal_pick.rect)) {
+        return ideal_pick;
+    }
+    constexpr int kDirs = 8;
+    constexpr double kRingPx[3] = {20.0, 44.0, 80.0};
+    double best_score = 1e100;
+    TilePick best = ideal_pick;
+    for (const double r_px : kRingPx) {
+        for (int d = 0; d < kDirs; ++d) {
+            // Start straight below (y is up in world space) and walk
+            // around: the first free spot at the smallest radius wins.
+            const double ang = (-90.0 + d * 360.0 / kDirs) * kPi / 180.0;
+            const Pos cand{ideal.x + r_px / zoom * std::cos(ang),
+                           ideal.y + r_px / zoom * std::sin(ang)};
+            const ScreenRect r = rect_at(cand);
+            const double score = r_px + (blocked(r) ? 1000.0 : 0.0);
+            if (score < best_score) {
+                best_score = score;
+                best = TilePick{r, cand};
+            }
+        }
+    }
+    return best_score >= 1000.0 ? ideal_pick : best;
+}
+
+}  // namespace
+
 Editor::AnnotPlacement Editor::place_part_annotation() const {
     AnnotPlacement result;
     const ws::circsim::Schematic* s = schem();
@@ -1511,7 +1578,18 @@ Editor::AnnotPlacement Editor::place_part_annotation() const {
 
     // Build obstacles from the visible schematic.
     AnnotObstacles obs;
-    obs.view_bounds = content_bounds().value_or(Bounds{0,0,0,0});
+    // The VISIBLE world rect, not the content box: with the content box
+    // every label that wanted to sit just outside the outermost parts
+    // counted as out of bounds and was blocked.
+    if (this->view.valid()) {
+        const Pos wa = this->view.s2w(ws::math::Vec2{this->view.vx, this->view.vy});
+        const Pos wb = this->view.s2w(ws::math::Vec2{this->view.vx + this->view.vw,
+                                                     this->view.vy + this->view.vh});
+        obs.view_bounds = make_bounds(wa.x, wa.y, wb.x, wb.y);
+    } else {
+        obs.view_bounds = content_bounds().value_or(Bounds{0, 0, 0, 0});
+    }
+    std::vector<ScreenRect> placed;  // tiles already laid down this frame
 
     // Part body AABBs
     for (const auto& part : s->parts()) {
@@ -1589,81 +1667,65 @@ Editor::AnnotPlacement Editor::place_part_annotation() const {
                 }
             }
 
-            // Candidate ring: 8 directions x 3 radii + ideal
-            constexpr int kDirs = 8;
-            constexpr double kRadii[3] = {0.0, 12.0, 24.0};  // grid cells
-            std::vector<AnnotCandidate> candidates;
-            candidates.reserve(kDirs * 3 + 1);
-
-            // Ideal candidate
-            ws::math::Vec2 ideal_screen = this->view.w2s(ideal_anchor);
-            ScreenRect ideal_rect{ideal_screen.x, ideal_screen.y, 0.0f, 0.0f};
-            // We'll compute the rect after measuring the text below.
-
-            // For text measurement, we need the font. The panel owns the
-            // font; here we approximate: refdes + " " + value at ~13px
-            // height = ~8px per char. The canvas panel will measure
-            // exactly when drawing. Here we use a rough estimate.
-            const float char_w = 8.0f;
-            const float line_h = 14.0f;
-            float text_w = static_cast<float>(ann.refdes.size() + 1 + ann.value.size()) * char_w;
-            if (ann.value.empty()) {
-                text_w = static_cast<float>(ann.refdes.size()) * char_w;
+            // Measure with the real face when there is one (the old
+            // 8 px/char guess clipped or over-padded every tile).
+            const bool have_font =
+                font != nullptr && font->line_height() > 0.0f;
+            const std::string line_text =
+                ann.value.empty() ? ann.refdes : ann.refdes + " " + ann.value;
+            const float text_w =
+                have_font ? font->measure_text(line_text.c_str())
+                          : static_cast<float>(line_text.size()) * 8.0f;
+            const float line_h = have_font ? font->line_height() : 14.0f;
+            const double zoom_px =
+                this->view.zoom > 0.0 ? static_cast<double>(this->view.zoom) : 1.0;
+            if (!has_origin) {
+                // Below the body, not centred on its edge: the tile's
+                // top clears the bottom edge by a few pixels.
+                ideal_anchor.y -= (line_h * 0.5 + 3.0) / zoom_px;
             }
 
-            // Ideal rect centered on ideal_screen
-            ideal_rect = {ideal_screen.x - text_w * 0.5f, ideal_screen.y - line_h * 0.5f,
-                          text_w, line_h};
-            candidates.push_back({ideal_rect, ideal_anchor, 0.0, true});
-
-            // Ring candidates
-            for (double r : kRadii) {
-                if (r == 0.0) continue;
-                for (int d = 0; d < kDirs; ++d) {
-                    double ang = d * 2.0 * kPi / kDirs;
-                    Pos cand{ideal_anchor.x + r * std::cos(ang),
-                             ideal_anchor.y + r * std::sin(ang)};
-                    ws::math::Vec2 cand_screen = this->view.w2s(cand);
-                    ScreenRect cand_rect{cand_screen.x - text_w * 0.5f,
-                                         cand_screen.y - line_h * 0.5f,
-                                         text_w, line_h};
-                    // Score: distance from ideal + overlap penalty
-                    double dist = std::hypot(cand.x - ideal_anchor.x, cand.y - ideal_anchor.y);
-                    double penalty = 0.0;
-                    if (annot_blocked(cand_rect, obs, this->view)) {
-                        penalty = 1000.0;  // blocked
+            const TilePick pick = pick_tile(
+                this->view, ideal_anchor, text_w, line_h,
+                [&](const ScreenRect& r) {
+                    if (annot_blocked(r, obs, this->view)) {
+                        return true;
                     }
-                    candidates.push_back({cand_rect, cand, dist + penalty, true});
-                }
-            }
+                    for (const ScreenRect& other : placed) {
+                        if (screen_rects_overlap(r, other)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                });
 
-            // Pick best candidate
-            double best_score = 1e100;
-            const AnnotCandidate* best = nullptr;
-            for (const auto& c : candidates) {
-                if (c.in_view && c.score < best_score) {
-                    best_score = c.score;
-                    best = &c;
-                }
-            }
-
-            if (best != nullptr) {
-                // Apply nudge (state was already retrieved above)
-                Pos final_anchor = {best->anchor.x + state.nudge.x,
-                                    best->anchor.y + state.nudge.y};
-                ws::math::Vec2 final_screen = this->view.w2s(final_anchor);
-                ScreenRect final_rect{final_screen.x - text_w * 0.5f,
-                                      final_screen.y - line_h * 0.5f,
-                                      text_w, line_h};
-                // Convert ScreenRect to ws::ui::gui::Rect for TextTile
-                ws::ui::gui::Rect gui_rect{final_rect.x, final_rect.y, final_rect.w, final_rect.h};
-                result.part_tiles.push_back({ann.refdes, ann.value, gui_rect, final_anchor});
-            }
+            // Apply the per-part nudge on top of the engine's answer.
+            const Pos final_anchor = {pick.anchor.x + state.nudge.x,
+                                      pick.anchor.y + state.nudge.y};
+            const ws::math::Vec2 final_screen = this->view.w2s(final_anchor);
+            const ScreenRect final_rect{final_screen.x - text_w * 0.5f,
+                                        final_screen.y - line_h * 0.5f,
+                                        text_w, line_h};
+            placed.push_back(final_rect);
+            ws::ui::gui::Rect gui_rect{final_rect.x, final_rect.y,
+                                       final_rect.w, final_rect.h};
+            result.part_tiles.push_back(
+                {ann.refdes, ann.value, gui_rect, final_anchor});
         }
     }
 
     // Net labels
-    result.net_tiles = place_net_label(obs, this->view);
+    // The placed part tiles are obstacles for the net names (a name
+    // drawn across a refdes reads as one garbled word).
+    AnnotObstacles net_obs = obs;
+    for (const TextTile& t : result.part_tiles) {
+        const Pos a = this->view.s2w(ws::math::Vec2{t.screen_rect.x, t.screen_rect.y});
+        const Pos b = this->view.s2w(
+            ws::math::Vec2{t.screen_rect.x + t.screen_rect.width,
+                           t.screen_rect.y + t.screen_rect.height});
+        net_obs.part_bodies.push_back(make_bounds(a.x, a.y, b.x, b.y));
+    }
+    result.net_tiles = place_net_label(net_obs, this->view);
     result.obstacles = std::move(obs);
     return result;
 }
@@ -1682,8 +1744,7 @@ std::vector<Editor::TextTile> Editor::place_net_label(
         return tiles;
     }
 
-    const float char_w = 8.0f;
-    const float line_h = 14.0f;
+    std::vector<ScreenRect> placed;  // names already laid down
 
     for (const auto& net : net_build.nets.nets) {
         // Skip ground net (name "0" or "gnd" or "GND")
@@ -1721,71 +1782,55 @@ std::vector<Editor::TextTile> Editor::place_net_label(
         }
         Pos centroid{cx / count, cy / count};
 
-        // Candidate ring (same as parts but fewer radii)
-        constexpr int kDirs = 8;
-        constexpr double kRadii[2] = {0.0, 16.0};
-        std::vector<AnnotCandidate> candidates;
-        candidates.reserve(kDirs * 2 + 1);
+        const bool have_font = font != nullptr && font->line_height() > 0.0f;
+        const float text_w = have_font
+                                 ? font->measure_text(name.c_str())
+                                 : static_cast<float>(name.size()) * 8.0f;
+        const float line_h = have_font ? font->line_height() : 14.0f;
 
-        float text_w = static_cast<float>(name.size()) * char_w;
-
-        ws::math::Vec2 ideal_screen = this->view.w2s(centroid);
-        ScreenRect ideal_rect{ideal_screen.x - text_w * 0.5f, ideal_screen.y - line_h * 0.5f,
-                              text_w, line_h};
-        candidates.push_back({ideal_rect, centroid, 0.0, true});
-
-        for (double r : kRadii) {
-            if (r == 0.0) continue;
-            for (int d = 0; d < kDirs; ++d) {
-                double ang = d * 2.0 * kPi / kDirs;
-                Pos cand{centroid.x + r * std::cos(ang),
-                         centroid.y + r * std::sin(ang)};
-                ws::math::Vec2 cand_screen = this->view.w2s(cand);
-                ScreenRect cand_rect{cand_screen.x - text_w * 0.5f,
-                                     cand_screen.y - line_h * 0.5f,
-                                     text_w, line_h};
-                double dist = std::hypot(cand.x - centroid.x, cand.y - centroid.y);
-                double penalty = 0.0;
-                if (annot_blocked(cand_rect, obs, editor_view)) {
-                    penalty = 1000.0;
+        const TilePick pick = pick_tile(
+            editor_view, centroid, text_w, line_h,
+            [&](const ScreenRect& r) {
+                if (annot_blocked(r, obs, editor_view)) {
+                    return true;
                 }
-                candidates.push_back({cand_rect, cand, dist + penalty, true});
-            }
-        }
-
-        double best_score = 1e100;
-        const AnnotCandidate* best = nullptr;
-        for (const auto& c : candidates) {
-            if (c.in_view && c.score < best_score) {
-                best_score = c.score;
-                best = &c;
-            }
-        }
-
-        if (best != nullptr) {
-            ws::math::Vec2 final_screen = this->view.w2s(best->anchor);
-            ScreenRect final_rect{final_screen.x - text_w * 0.5f,
-                                  final_screen.y - line_h * 0.5f,
-                                  text_w, line_h};
-            // Convert ScreenRect to ws::ui::gui::Rect for TextTile
-            ws::ui::gui::Rect gui_rect{final_rect.x, final_rect.y, final_rect.w, final_rect.h};
-            tiles.push_back({name, "", gui_rect, best->anchor});
-        }
+                for (const ScreenRect& other : placed) {
+                    if (screen_rects_overlap(r, other)) {
+                        return true;
+                    }
+                }
+                return false;
+            });
+        placed.push_back(pick.rect);
+        const ws::ui::gui::Rect gui_rect{pick.rect.x, pick.rect.y,
+                                         pick.rect.w, pick.rect.h};
+        tiles.push_back({name, "", gui_rect, pick.anchor});
     }
 
     return tiles;
 }
 
+namespace {
+
+// The ONE annotation-state map. annot_state_of and set_annot_state each
+// used to own a function-local static map of their own, so every write
+// the Properties panel made (nudge, Hide Annotation, Reset) landed in a
+// map the placement engine never read - the controls did nothing.
+std::map<std::uint32_t, Editor::AnnotState>& annot_state_map() {
+    static std::map<std::uint32_t, Editor::AnnotState> state_map;
+    return state_map;
+}
+
+}  // namespace
+
 Editor::AnnotState& Editor::annot_state_of(std::uint32_t part_id) {
     // The map is editor-lifetime state (survives document switches).
     // Lazy-create on first access.
-    static std::map<std::uint32_t, AnnotState> state_map;
-    return state_map[part_id];
+    return annot_state_map()[part_id];
 }
 
 void Editor::set_annot_state(std::uint32_t part_id, const AnnotState& st) {
-    static std::map<std::uint32_t, AnnotState> state_map;
-    state_map[part_id] = st;
+    annot_state_map()[part_id] = st;
 }
 
 void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
