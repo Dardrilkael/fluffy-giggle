@@ -292,6 +292,19 @@ void ensure_series_stats(Editor& ed, const ws::spice::Table& t) {
 //
 //   CIRCSIM_PLOT_PROF=1         log per-stage CPU timings of the plot's series
 //                               loop every kProfWindow frames (INFO).
+//   CIRCSIM_PLOT_PROF=2         the same, plus a SHADOW tessellation of every
+//                               series into a throwaway TessBuffer (timed, not
+//                               drawn): "tess" is the tessellator alone, so
+//                               stroke - tess = the canvas wrapper + r2d's
+//                               per-quad recording. Costs extra CPU: use it for
+//                               the split, not for the baseline.
+//   CIRCSIM_PLOT_PROF=3         like 2, but the shadow tessellation lands in a
+//                               sink that only COUNTS quads (no vertex copy).
+//                               That is the tessellator's own cost: PROF=2's
+//                               TessBuffer sink adds its own per-quad vertex
+//                               store, which can make "tess" exceed "stroke".
+//                               stroke - tess is then the canvas wrapper +
+//                               r2d recording.
 //   CIRCSIM_PLOT_JOIN=bevel     stroke the plot's SERIES with bevel joins
 //                               (round | bevel | miter; unset = round, i.e. the
 //                               shipped look). Legend sparklines and everything
@@ -311,7 +324,8 @@ const char* wave_getenv(const char* name) {
 }
 
 struct WaveEnv {
-    bool prof = false;
+    int prof = 0;  // 0 off, 1 timings, 2/3 + shadow tessellation (2 into a
+                   // TessBuffer, 3 into a counting sink)
     canvas::StrokeJoin join = canvas::StrokeJoin::round;
 };
 
@@ -319,7 +333,9 @@ const WaveEnv& wave_env() {
     static const WaveEnv env = [] {
         WaveEnv e;
         const char* p = wave_getenv("CIRCSIM_PLOT_PROF");
-        e.prof = p != nullptr && p[0] != '\0' && p[0] != '0';
+        e.prof = (p == nullptr || p[0] == '\0' || p[0] == '0')
+                     ? 0
+                     : (p[0] == '3' ? 3 : (p[0] == '2' ? 2 : 1));
         const char* j = wave_getenv("CIRCSIM_PLOT_JOIN");
         if (j != nullptr) {
             if (std::strcmp(j, "bevel") == 0) {
@@ -351,11 +367,15 @@ struct WaveProf {
     std::size_t polylines = 0;
     std::size_t heap_polylines = 0;  // > 64 pts: Renderer2DCanvas heap-allocs
                                      // a screen copy for each, every frame
+    double tess_ms = 0.0;            // PROF>=2: shadow tessellation only
+    std::size_t quads = 0;           // PROF>=2: quads that tessellation emitted
 
     // The window.
     int frames = 0;
     double w_prep_ms = 0.0, w_stroke_ms = 0.0, w_frame_max_ms = 0.0;
+    double w_tess_ms = 0.0;
     std::size_t w_series = 0, w_points = 0, w_polylines = 0, w_heap = 0;
+    std::size_t w_quads = 0;
 };
 
 WaveProf& wave_prof() {
@@ -364,7 +384,7 @@ WaveProf& wave_prof() {
 }
 
 [[nodiscard]] WaveProf::Clock::time_point wave_now() {
-    return wave_env().prof ? WaveProf::Clock::now()
+    return wave_env().prof != 0 ? WaveProf::Clock::now()
                            : WaveProf::Clock::time_point{};
 }
 
@@ -375,19 +395,21 @@ WaveProf& wave_prof() {
 }
 
 void wave_prof_begin_frame() {
-    if (!wave_env().prof) {
+    if (wave_env().prof == 0) {
         return;
     }
     WaveProf& p = wave_prof();
-    p.prep_ms = p.stroke_ms = 0.0;
-    p.series = p.points = p.polylines = p.heap_polylines = 0u;
+    p.prep_ms = p.stroke_ms = p.tess_ms = 0.0;
+    p.series = p.points = p.polylines = p.heap_polylines = p.quads = 0u;
 }
 
 void wave_prof_end_frame() {
-    if (!wave_env().prof) {
+    if (wave_env().prof == 0) {
         return;
     }
     WaveProf& p = wave_prof();
+    p.w_tess_ms += p.tess_ms;
+    p.w_quads += p.quads;
     p.w_prep_ms += p.prep_ms;
     p.w_stroke_ms += p.stroke_ms;
     p.w_frame_max_ms = std::max(p.w_frame_max_ms, p.prep_ms + p.stroke_ms);
@@ -408,9 +430,21 @@ void wave_prof_end_frame() {
         static_cast<double>(p.w_points) / n,
         static_cast<double>(p.w_polylines) / n,
         static_cast<double>(p.w_heap) / n);
+    if (wave_env().prof >= 2) {
+        ws::core::info(
+            "plot prof split (PROF={}, {} sink): tessellator {:.3f} ms/frame "
+            "for {:.0f} quads/frame ({:.1f} ns/quad); stroke minus "
+            "tessellator {:.3f} ms/frame",
+            wave_env().prof, wave_env().prof >= 3 ? "counting" : "TessBuffer",
+            p.w_tess_ms / n, static_cast<double>(p.w_quads) / n,
+            p.w_quads > 0u ? p.w_tess_ms * 1.0e6 /
+                                 static_cast<double>(p.w_quads)
+                           : 0.0,
+            (p.w_stroke_ms - p.w_tess_ms) / n);
+    }
     p.frames = 0;
-    p.w_prep_ms = p.w_stroke_ms = p.w_frame_max_ms = 0.0;
-    p.w_series = p.w_points = p.w_polylines = p.w_heap = 0u;
+    p.w_prep_ms = p.w_stroke_ms = p.w_frame_max_ms = p.w_tess_ms = 0.0;
+    p.w_series = p.w_points = p.w_polylines = p.w_heap = p.w_quads = 0u;
 }
 
 // One series polyline, mapped and clipped to the frame; non-finite
@@ -443,6 +477,41 @@ void stroke_series(canvas::Canvas2D& rc,
             if (heap_polylines != nullptr && run > 64u) {
                 ++*heap_polylines;
             }
+        }
+        if (i == pts.size()) {
+            break;
+        }
+        run = break_here ? 0u : run + 1u;
+    }
+}
+
+// PROF=3's sink: counts quads and nothing else, so the timing is the
+// tessellator's own (one virtual call per quad, which the real sinks pay too).
+class CountingSink final : public canvas::TessSink {
+public:
+    void quad(const ws::math::Vec2 (&)[4],
+              const ws::math::Vec4 (&)[4]) override {
+        ++count;
+    }
+    std::size_t count = 0;
+};
+
+// PROF>=2 only: tessellate `pts` exactly as stroke_series would (same NaN run
+// splitting, same paint) into `out`, with no drawing. Timed by the caller.
+void shadow_tessellate(const std::vector<Point>& pts, std::uint32_t color,
+                       float width, canvas::StrokeJoin join,
+                       canvas::TessSink& out) {
+    Paint paint;
+    paint.width = width;
+    paint.color = color;
+    paint.join = join;
+    std::size_t run = 0;
+    for (std::size_t i = 0; i <= pts.size(); ++i) {
+        const bool break_here = i == pts.size() ||
+                                std::isnan(pts[i].x) || std::isnan(pts[i].y);
+        if (break_here && run >= 2u) {
+            canvas::stroke_polyline(pts.data() + (i - run),
+                                    static_cast<int>(run), paint, out, false);
         }
         if (i == pts.size()) {
             break;
@@ -1357,12 +1426,30 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
         WaveProf& prof = wave_prof();
         stroke_series(rc, pts, series_color(i), 2.0f, wave_env().join,
                       &prof.polylines, &prof.heap_polylines);
-        if (wave_env().prof) {
+        if (wave_env().prof != 0) {
             const double stroke_ms = wave_ms_since(prof_stroke_t0);
             prof.stroke_ms += stroke_ms;
             prof.prep_ms += wave_ms_since(prof_series_t0) - stroke_ms;
             ++prof.series;
             prof.points += pts.size();
+            if (wave_env().prof >= 2) {
+                if (wave_env().prof >= 3) {
+                    CountingSink counting;
+                    const auto t0 = WaveProf::Clock::now();
+                    shadow_tessellate(pts, series_color(i), 2.0f,
+                                      wave_env().join, counting);
+                    prof.tess_ms += wave_ms_since(t0);
+                    prof.quads += counting.count;
+                } else {
+                    static canvas::TessBuffer shadow;  // capacity is kept
+                    shadow.clear();
+                    const auto t0 = WaveProf::Clock::now();
+                    shadow_tessellate(pts, series_color(i), 2.0f,
+                                      wave_env().join, shadow);
+                    prof.tess_ms += wave_ms_since(t0);
+                    prof.quads += shadow.quad_count();
+                }
+            }
         }
     }
     wave_prof_end_frame();

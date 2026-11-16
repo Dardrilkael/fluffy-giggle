@@ -97,3 +97,27 @@ if(TARGET test_circsim_editor_side_panels)
     "${PROJECT_SOURCE_DIR}/libs/ui/src"
     "${PROJECT_SOURCE_DIR}/libs/ui/tests")
 endif()
+
+# The waveform render profiling gate: the Results panel's series loop
+# driven through Renderer2DCanvas (the real CPU tessellator) with the
+# r2d stub recording draw calls. Opt-in via CIRCSIM_PLOT_PROF=1 (logs
+# per-window prep/stroke/heap averages); CIRCSIM_PLOT_JOIN=bevel|miter
+# selects the join style (default round). This is a smoke test without
+# the env vars; with them it produces the A/B numbers for the join
+# comparison.
+ws_add_test(circsim_editor_waveform_prof
+  SOURCES tests/test_waveform_prof.cpp
+          src/editor.cpp
+          src/document.cpp
+          src/results_panel.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/tests/ui_gui_r2d_stub.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
+  LINK ws::circsim
+  DEPENDS ws::ui_gui ws::app ws::settings stb)
+if(TARGET test_circsim_editor_waveform_prof)
+  target_include_directories(test_circsim_editor_waveform_prof PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${PROJECT_SOURCE_DIR}/libs/ui/src"
+    "${PROJECT_SOURCE_DIR}/libs/ui/tests")
+endif()
