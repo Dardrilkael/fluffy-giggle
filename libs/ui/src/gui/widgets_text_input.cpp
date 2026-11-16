@@ -101,7 +101,7 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
     const bool focused = out.focused;
     const bool dead = out.state == WidgetState::Disabled;
     const bool can_edit = live && focused && !dead;
-    if (focused != edit.field.was_focused) {
+    if (focused != edit.was_focused) {
         gui.set_soft_keyboard_visible(focused && !dead && live);
     }
 
