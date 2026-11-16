@@ -74,14 +74,18 @@
 #include "results_panel.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <utility>
 #include <vector>
 #include <span>
 
+#include <ws/core/log.hpp>
 #include <ws/input/input.hpp>
 #include <ws/spice/results.hpp>
 #include <ws/circsim/overlay.hpp>
@@ -281,16 +285,151 @@ void ensure_series_stats(Editor& ed, const ws::spice::Table& t) {
     return static_cast<int>(best);
 }
 
+// --- waveform render experiments (opt-in; see the env vars below) -------------
+//
+// Both knobs are read ONCE, at first use, so an A/B run is two launches of the
+// same binary - no rebuild, no per-frame cost when they are unset.
+//
+//   CIRCSIM_PLOT_PROF=1         log per-stage CPU timings of the plot's series
+//                               loop every kProfWindow frames (INFO).
+//   CIRCSIM_PLOT_JOIN=bevel     stroke the plot's SERIES with bevel joins
+//                               (round | bevel | miter; unset = round, i.e. the
+//                               shipped look). Legend sparklines and everything
+//                               else keep their own paint.
+//
+// MSVC deprecates getenv (C4996); a one-shot read is fine, so the warning is
+// suppressed scoped - the same spelling libs/ui/src/app/app.cpp uses.
+const char* wave_getenv(const char* name) {
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+    return std::getenv(name);
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+}
+
+struct WaveEnv {
+    bool prof = false;
+    canvas::StrokeJoin join = canvas::StrokeJoin::round;
+};
+
+const WaveEnv& wave_env() {
+    static const WaveEnv env = [] {
+        WaveEnv e;
+        const char* p = wave_getenv("CIRCSIM_PLOT_PROF");
+        e.prof = p != nullptr && p[0] != '\0' && p[0] != '0';
+        const char* j = wave_getenv("CIRCSIM_PLOT_JOIN");
+        if (j != nullptr) {
+            if (std::strcmp(j, "bevel") == 0) {
+                e.join = canvas::StrokeJoin::bevel;
+            } else if (std::strcmp(j, "miter") == 0) {
+                e.join = canvas::StrokeJoin::miter;
+            }
+        }
+        return e;
+    }();
+    return env;
+}
+
+// Per-frame counters for the plot's series loop, folded into a window and
+// logged. "prep" = everything in a series' iteration except the stroke call
+// (the decimation cache check, the x/y mapping into scratch_pts); "stroke" =
+// stroke_series() whole (Renderer2DCanvas::stroke_polyline -> screen copy ->
+// CPU tessellator -> r2d quad recording). The tessellator alone is not split
+// out here; see the notes in the PR/summary.
+struct WaveProf {
+    using Clock = std::chrono::steady_clock;
+    static constexpr int kProfWindow = 120;  // frames per log line
+
+    // One frame.
+    double prep_ms = 0.0;
+    double stroke_ms = 0.0;
+    std::size_t series = 0;
+    std::size_t points = 0;
+    std::size_t polylines = 0;
+    std::size_t heap_polylines = 0;  // > 64 pts: Renderer2DCanvas heap-allocs
+                                     // a screen copy for each, every frame
+
+    // The window.
+    int frames = 0;
+    double w_prep_ms = 0.0, w_stroke_ms = 0.0, w_frame_max_ms = 0.0;
+    std::size_t w_series = 0, w_points = 0, w_polylines = 0, w_heap = 0;
+};
+
+WaveProf& wave_prof() {
+    static WaveProf p;
+    return p;
+}
+
+[[nodiscard]] WaveProf::Clock::time_point wave_now() {
+    return wave_env().prof ? WaveProf::Clock::now()
+                           : WaveProf::Clock::time_point{};
+}
+
+[[nodiscard]] double wave_ms_since(WaveProf::Clock::time_point t0) {
+    return std::chrono::duration<double, std::milli>(WaveProf::Clock::now() -
+                                                     t0)
+        .count();
+}
+
+void wave_prof_begin_frame() {
+    if (!wave_env().prof) {
+        return;
+    }
+    WaveProf& p = wave_prof();
+    p.prep_ms = p.stroke_ms = 0.0;
+    p.series = p.points = p.polylines = p.heap_polylines = 0u;
+}
+
+void wave_prof_end_frame() {
+    if (!wave_env().prof) {
+        return;
+    }
+    WaveProf& p = wave_prof();
+    p.w_prep_ms += p.prep_ms;
+    p.w_stroke_ms += p.stroke_ms;
+    p.w_frame_max_ms = std::max(p.w_frame_max_ms, p.prep_ms + p.stroke_ms);
+    p.w_series += p.series;
+    p.w_points += p.points;
+    p.w_polylines += p.polylines;
+    p.w_heap += p.heap_polylines;
+    if (++p.frames < WaveProf::kProfWindow) {
+        return;
+    }
+    const double n = static_cast<double>(p.frames);
+    ws::core::info(
+        "plot prof ({} frames): prep {:.3f} ms/frame, stroke {:.3f} ms/frame "
+        "(worst frame {:.3f} ms) | {:.1f} series, {:.0f} pts, {:.1f} "
+        "polylines ({:.1f} heap-copied) per frame",
+        p.frames, p.w_prep_ms / n, p.w_stroke_ms / n, p.w_frame_max_ms,
+        static_cast<double>(p.w_series) / n,
+        static_cast<double>(p.w_points) / n,
+        static_cast<double>(p.w_polylines) / n,
+        static_cast<double>(p.w_heap) / n);
+    p.frames = 0;
+    p.w_prep_ms = p.w_stroke_ms = p.w_frame_max_ms = 0.0;
+    p.w_series = p.w_points = p.w_polylines = p.w_heap = 0u;
+}
+
 // One series polyline, mapped and clipped to the frame; non-finite
 // samples break the line into segments rather than poisoning the
-// tessellator with NaN vertices.
+// tessellator with NaN vertices. `join` defaults to round, the shipped look;
+// the plot's series loop passes wave_env().join (CIRCSIM_PLOT_JOIN). When
+// `polylines` / `heap_polylines` are non-null they count the strokes issued
+// (and those long enough, > 64 points, that Renderer2DCanvas::stroke_polyline
+// heap-allocates its screen copy).
 void stroke_series(canvas::Canvas2D& rc,
                    const std::vector<Point>& pts, std::uint32_t color,
-                   float width = 2.0f) {
+                   float width = 2.0f,
+                   canvas::StrokeJoin join = canvas::StrokeJoin::round,
+                   std::size_t* polylines = nullptr,
+                   std::size_t* heap_polylines = nullptr) {
     Paint paint;
     paint.width = width;
     paint.color = color;
-    paint.join = canvas::StrokeJoin::round;
+    paint.join = join;
     std::size_t run = 0;
     for (std::size_t i = 0; i <= pts.size(); ++i) {
         const bool break_here = i == pts.size() ||
@@ -298,6 +437,12 @@ void stroke_series(canvas::Canvas2D& rc,
         if (break_here && run >= 2u) {
             rc.stroke_polyline(pts.data() + (i - run),
                                static_cast<int>(run), paint);
+            if (polylines != nullptr) {
+                ++*polylines;
+            }
+            if (heap_polylines != nullptr && run > 64u) {
+                ++*heap_polylines;
+            }
         }
         if (i == pts.size()) {
             break;
@@ -1065,6 +1210,7 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     // back to front, its keeps mapped home and re-sorted.
     std::vector<double> rev_x;
     std::vector<double> rev_y;
+    wave_prof_begin_frame();
     for (std::size_t i = 0; i < t.signals.size(); ++i) {
         if (i >= ed.results.visible.size() || ed.results.visible[i] == 0u) {
             continue;
@@ -1073,6 +1219,7 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
         if (ys.empty()) {
             continue;
         }
+        const auto prof_series_t0 = wave_now();
         ResultsCache::DecimKeep& dk = cache.decim[i];
         const auto x_at = [&](std::size_t k) {
             return by_index ? static_cast<double>(k)
@@ -1206,8 +1353,19 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                 }
             }
         }
-        stroke_series(rc, pts, series_color(i));
+        const auto prof_stroke_t0 = wave_now();
+        WaveProf& prof = wave_prof();
+        stroke_series(rc, pts, series_color(i), 2.0f, wave_env().join,
+                      &prof.polylines, &prof.heap_polylines);
+        if (wave_env().prof) {
+            const double stroke_ms = wave_ms_since(prof_stroke_t0);
+            prof.stroke_ms += stroke_ms;
+            prof.prep_ms += wave_ms_since(prof_series_t0) - stroke_ms;
+            ++prof.series;
+            prof.points += pts.size();
+        }
     }
+    wave_prof_end_frame();
 
     // --- the crosshair + per-series markers at the hover sample
     if (ed.results.hover >= 0) {
