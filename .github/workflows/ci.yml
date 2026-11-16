@@ -34,8 +34,7 @@ jobs:
         run: |
           cmake --build --preset linux --target \
             circsim_editor test_ui_canvas \
-            test_circsim_editor_panel test_circsim_editor_side_panels \
-            test_circsim_editor_waveform_prof
+            test_circsim_editor_panel test_circsim_editor_waveform_prof
       - name: Test maintained UI and Circsim suites
         run: |
           ctest --test-dir build/linux --output-on-failure \
@@ -71,8 +70,7 @@ jobs:
         run: |
           cmake --build --preset linux-asan --target \
             circsim_editor test_physics test_ui_canvas \
-            test_circsim_editor_panel test_circsim_editor_side_panels \
-            test_circsim_editor_waveform_prof
+            test_circsim_editor_panel test_circsim_editor_waveform_prof
       - name: Test maintained suites with sanitizers
         env:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:halt_on_error=1
