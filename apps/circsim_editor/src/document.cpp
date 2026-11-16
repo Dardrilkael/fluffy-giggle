@@ -728,8 +728,8 @@ class AddWireCommand final : public EditCommand {
     [[nodiscard]] std::string name() const override { return "Place Wire"; }
 
   private:
-    IndexedEntity<Wire> wire_;
-    std::vector<IndexedEntity<Junction>> junctions_;
+    Wire wire_;
+    std::vector<Junction> junctions_;
 };
 
 class DeleteWireCommand final : public EditCommand {
@@ -755,8 +755,8 @@ class DeleteWireCommand final : public EditCommand {
     [[nodiscard]] std::string name() const override { return "Delete Wire"; }
 
   private:
-    Wire wire_;
-    std::vector<Junction> junctions_;
+    IndexedEntity<Wire> wire_;
+    std::vector<IndexedEntity<Junction>> junctions_;
 };
 
 class MoveJunctionCommand final : public EditCommand {
