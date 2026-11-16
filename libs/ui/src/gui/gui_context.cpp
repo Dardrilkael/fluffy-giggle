@@ -735,6 +735,17 @@ void GuiContext::set_ime_rect(ImeRectFn fn) {
     ime_rect_fn_ = std::move(fn);
 }
 
+void GuiContext::set_soft_keyboard(SoftKeyboardFn fn) {
+    soft_keyboard_fn_ = std::move(fn);
+    soft_keyboard_visible_ = false;
+}
+
+void GuiContext::set_soft_keyboard_visible(bool visible) {
+    if (soft_keyboard_visible_ == visible) return;
+    soft_keyboard_visible_ = visible;
+    if (soft_keyboard_fn_) soft_keyboard_fn_(visible);
+}
+
 const char* GuiContext::get_clipboard_text() const {
     // An unset seam IS an empty clipboard: the headless answer, and the
     // one a host with no clipboard wiring keeps.
