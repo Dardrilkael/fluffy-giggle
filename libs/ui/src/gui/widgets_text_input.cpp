@@ -101,6 +101,9 @@ TextInputResult text_input_behavior(GuiContext& gui, WidgetId id,
     const bool focused = out.focused;
     const bool dead = out.state == WidgetState::Disabled;
     const bool can_edit = live && focused && !dead;
+    if (focused != edit.field.was_focused) {
+        gui.set_soft_keyboard_visible(focused && !dead && live);
+    }
 
     // The IME composition's frame half (G1.2's channel): while a
     // composition stands in a field that can edit, the preedit rides
