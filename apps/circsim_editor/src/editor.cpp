@@ -1833,6 +1833,10 @@ void Editor::set_annot_state(std::uint32_t part_id, const AnnotState& st) {
     annot_state_map()[part_id] = st;
 }
 
+void Editor::clear_annot_state_map() {
+    annot_state_map().clear();
+}
+
 void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,
                  Pos pos, int rot, bool mirror, const Paint& body,
                  std::uint32_t text_color, const ws::ui::r2d::Font* font,

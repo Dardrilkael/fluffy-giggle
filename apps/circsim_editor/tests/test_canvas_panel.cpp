@@ -65,6 +65,7 @@ struct Bench {
     Bench() {
         ed.doc = &doc;
         ed.canvas_panel_canvas = &clc;
+        ed.clear_annot_state_map();
     }
 
     // A wire (1,1)->(4,1) over two junctions - the drawn world's
@@ -1584,21 +1585,22 @@ TEST_CASE("C1: set_annot_state writes nudge and annotate_off") {
 
 TEST_CASE("C1: place_part_annotation runs and returns placement for a part") {
     Bench b;
-    ws::circsim::Part* p = b.doc.schem.add_part(
+    b.doc.schem.add_part(
         ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0}));
     b.draw();
     const auto placement = b.ed.place_part_annotation();
     // At least one part tile should be placed (the refdes "R1")
     CHECK(placement.part_tiles.size() >= 1u);
     // The tile's screen rect should be non-empty
-    CHECK(placement.part_tiles[0].rect.w > 0.0f);
-    CHECK(placement.part_tiles[0].rect.h > 0.0f);
+    CHECK(placement.part_tiles[0].screen_rect.width > 0.0f);
+    CHECK(placement.part_tiles[0].screen_rect.height > 0.0f);
 }
 
 TEST_CASE("C1: place_part_annotation respects annotate_off") {
     Bench b;
     ws::circsim::Part* p = b.doc.schem.add_part(
         ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0}));
+    (void)p;
     b.draw();
     // Turn annotation off
     editor::Editor::AnnotState st;
@@ -1617,14 +1619,14 @@ TEST_CASE("C1: place_part_annotation applies nudge to placed position") {
     // Get baseline placement
     const auto baseline = b.ed.place_part_annotation();
     REQUIRE(baseline.part_tiles.size() >= 1u);
-    const ws::math::Rect base_rect = baseline.part_tiles[0].rect;
+    const ws::ui::gui::Rect base_rect = baseline.part_tiles[0].screen_rect;
     // Apply a nudge
     editor::Editor::AnnotState st;
     st.nudge = {2.0, 0.0};  // 2 world units right
     b.ed.set_annot_state(p->id, st);
     const auto nudged = b.ed.place_part_annotation();
     REQUIRE(nudged.part_tiles.size() >= 1u);
-    const ws::math::Rect nudged_rect = nudged.part_tiles[0].rect;
+    const ws::ui::gui::Rect nudged_rect = nudged.part_tiles[0].screen_rect;
     // The nudge should shift the tile in screen space (scaled by zoom)
     // At zoom 1, 2 world units = 2 screen px (view is identity-ish)
     CHECK(nudged_rect.x != base_rect.x);
@@ -1637,13 +1639,13 @@ TEST_CASE("C1: place_net_label places net name at centroid") {
     const auto placement = b.ed.place_part_annotation();
     // Should have at least one net tile
     CHECK(placement.net_tiles.size() >= 1u);
-    CHECK(placement.net_tiles[0].rect.w > 0.0f);
-    CHECK(placement.net_tiles[0].rect.h > 0.0f);
+    CHECK(placement.net_tiles[0].screen_rect.width > 0.0f);
+    CHECK(placement.net_tiles[0].screen_rect.height > 0.0f);
 }
 
 TEST_CASE("C1: annotation obstacles include wires and parts") {
     Bench b;
-    ws::circsim::Part* p = b.doc.schem.add_part(
+    b.doc.schem.add_part(
         ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0}));
     b.place_wire();  // wire from (1,1) to (4,1)
     b.draw();
@@ -1661,8 +1663,7 @@ TEST_CASE("C2: wire color mode toggle caption is drawn") {
     // We check that the command list contains the mode toggle elements
     // (The mode_toggle_layout helper gives us the button rects)
     const editor::ModeToggleLayout modes = editor::mode_toggle_layout(b.body);
-    CHECK(modes.buttons.size() == 3u);  // Plain, Nets, Voltage
-    // Each button should have a valid rect
+    // buttons is a fixed array of 3 (Plain, Nets, Voltage)
     for (const auto& btn : modes.buttons) {
         CHECK(btn.width > 0.0f);
         CHECK(btn.height > 0.0f);
@@ -1687,61 +1688,72 @@ TEST_CASE("C2: wire color mode changes the wire stroke color") {
     const ws::circsim::Net* n = b.ed.net_cache().net_of_wire(
         b.doc.schem.wires().front().id);
     REQUIRE(n != nullptr);
-    CHECK(wire->color == editor::series_color(fnv1a(n->name)));
+    // Compute FNV-1a hash of net name (same as canvas_panel.cpp)
+    std::uint32_t h = 2166136261u;
+    for (const char c : n->name) {
+        h ^= static_cast<unsigned char>(c);
+        h *= 16777619u;
+    }
+    CHECK(wire->color == editor::series_color(h));
 }
 
 TEST_CASE("C3: part parameter falls back to model param when empty") {
     // This test verifies the C3 behavior: when a part's param is empty,
-    // it should fall back to the model's default parameter
-    // This is tested through the schematic's model lookup
+    // it should fall back to the model's default parameter.
+    // Models are defined in the schematic's directives block (verbatim .model text)
+    // or in the built-in model library.
     Bench b;
     ws::circsim::Part* p = b.doc.schem.add_part(
         ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0}));
     p->params["model"] = "myres";
-    b.doc.schem.models["myres"] = {{"power", "0.25"}};
+    // Define a custom model in directives (verbatim .model card)
+    b.doc.schem.directives = ".model myres R(power=0.25)";
     // The part has no "power" param, so it should fall back to model
     // This is an integration test - the actual fallback happens in the
     // netlist export or simulation setup
     CHECK(p->params.find("power") == p->params.end());
-    // The model has it
-    const auto& model = b.doc.schem.models.at("myres");
-    CHECK(model.find("power") != model.end());
-    CHECK(model.at("power") == "0.25");
+    // The model is in directives
+    CHECK(b.doc.schem.directives.find("myres") != std::string::npos);
+    CHECK(b.doc.schem.directives.find("power=0.25") != std::string::npos);
 }
 
 TEST_CASE("C4: GridSpec show_axis gates origin crosshair") {
     Bench b;
     b.place_wire();
     // Default: show_axis = true (in GridSpec), but editor defaults to false
-    b.ed.grid_spec().show_axis = true;
+    // The canvas panel copies grid_spec and sets show_axis = ed.show_origin_axes
     b.ed.show_origin_axes = true;
     b.draw();
-    // Check that axis lines are drawn (stroke_line commands at x=0, y=0)
+    // Check that axis lines are drawn (stroke_polyline commands spanning viewport)
     bool x_axis_found = false;
     bool y_axis_found = false;
     bool origin_marker_found = false;
+    // Viewport is 640x520 (from Bench::draw), world center (0,0) maps to screen center
+    const float viewport_cx = 320.0f;
+    const float viewport_cy = 260.0f;
     for (const auto& cmd : b.clc.cmds) {
-        if (cmd.kind == canvas::CanvasCmdKind::stroke_line) {
-            // Axis lines are at x=0 or y=0 in world space
-            // In screen space they span the viewport
+        if (cmd.kind == canvas::CanvasCmdKind::stroke_polyline) {
+            // Axis lines span the full viewport (left-right or top-bottom)
+            // Wire lines are shorter. Check for lines that span near full width/height.
             if (cmd.points.size() == 2u) {
                 const auto& p0 = cmd.points[0];
                 const auto& p1 = cmd.points[1];
-                // Vertical line (x constant) -> y-axis
-                if (std::fabs(p0.x - p1.x) < 0.01f) {
-                    y_axis_found = true;
-                }
-                // Horizontal line (y constant) -> x-axis
-                if (std::fabs(p0.y - p1.y) < 0.01f) {
+                float dx = std::fabs(p0.x - p1.x);
+                float dy = std::fabs(p0.y - p1.y);
+                // X-axis: horizontal line spanning most of viewport width (~640)
+                if (dy < 0.01f && dx > 500.0f) {
                     x_axis_found = true;
+                }
+                // Y-axis: vertical line spanning most of viewport height (~520)
+                if (dx < 0.01f && dy > 400.0f) {
+                    y_axis_found = true;
                 }
             }
         }
         if (cmd.kind == canvas::CanvasCmdKind::fill_rects) {
-            // Origin marker is a 3px rect at (0,0)
-            // Check if any fill_rects is at the origin
+            // Origin marker is a 3px rect at world (0,0) -> screen center
             for (const auto& pt : cmd.points) {
-                if (std::fabs(pt.x) < 2.0f && std::fabs(pt.y) < 2.0f) {
+                if (std::fabs(pt.x - viewport_cx) < 2.0f && std::fabs(pt.y - viewport_cy) < 2.0f) {
                     origin_marker_found = true;
                 }
             }
@@ -1755,28 +1767,36 @@ TEST_CASE("C4: GridSpec show_axis gates origin crosshair") {
 TEST_CASE("C4: show_axis false hides origin crosshair") {
     Bench b;
     b.place_wire();
-    b.ed.grid_spec().show_axis = false;
     b.ed.show_origin_axes = false;
     b.draw();
     bool x_axis_found = false;
     bool y_axis_found = false;
     bool origin_marker_found = false;
+    // Viewport is 640x520 (from Bench::draw), world center (0,0) maps to screen center
+    const float viewport_cx = 320.0f;
+    const float viewport_cy = 260.0f;
     for (const auto& cmd : b.clc.cmds) {
-        if (cmd.kind == canvas::CanvasCmdKind::stroke_line) {
+        if (cmd.kind == canvas::CanvasCmdKind::stroke_polyline) {
+            // Axis lines span the full viewport (left-right or top-bottom)
+            // Wire lines are shorter. Check for lines that span near full width/height.
             if (cmd.points.size() == 2u) {
                 const auto& p0 = cmd.points[0];
                 const auto& p1 = cmd.points[1];
-                if (std::fabs(p0.x - p1.x) < 0.01f) {
-                    y_axis_found = true;
-                }
-                if (std::fabs(p0.y - p1.y) < 0.01f) {
+                float dx = std::fabs(p0.x - p1.x);
+                float dy = std::fabs(p0.y - p1.y);
+                // X-axis: horizontal line spanning most of viewport width (~640)
+                if (dy < 0.01f && dx > 500.0f) {
                     x_axis_found = true;
+                }
+                // Y-axis: vertical line spanning most of viewport height (~520)
+                if (dx < 0.01f && dy > 400.0f) {
+                    y_axis_found = true;
                 }
             }
         }
         if (cmd.kind == canvas::CanvasCmdKind::fill_rects) {
             for (const auto& pt : cmd.points) {
-                if (std::fabs(pt.x) < 2.0f && std::fabs(pt.y) < 2.0f) {
+                if (std::fabs(pt.x - viewport_cx) < 2.0f && std::fabs(pt.y - viewport_cy) < 2.0f) {
                     origin_marker_found = true;
                 }
             }
@@ -1795,40 +1815,38 @@ TEST_CASE("C4: editor show_origin_axes toggles grid_spec.show_axis") {
     CHECK(b.ed.grid_spec().show_axis == true);  // GridSpec default
     // Toggle on
     b.ed.show_origin_axes = true;
-    // In canvas_panel.cpp: spec.show_axis = ed.show_origin_axes
-    // This is tested by the draw path above
-    b.ed.grid_spec().show_axis = b.ed.show_origin_axes;
-    CHECK(b.ed.grid_spec().show_axis == true);
+    CHECK(b.ed.show_origin_axes == true);
     // Toggle off
     b.ed.show_origin_axes = false;
-    b.ed.grid_spec().show_axis = b.ed.show_origin_axes;
-    CHECK(b.ed.grid_spec().show_axis == false);
+    CHECK(b.ed.show_origin_axes == false);
+    // Note: canvas_panel.cpp copies grid_spec and sets spec.show_axis = ed.show_origin_axes
+    // The coupling is tested by the draw tests above.
 }
 
 TEST_CASE("C1: place_part_annotation candidates are scored by overlap + distance") {
     Bench b;
     // Two parts close together - the second part's annotation should
     // nudge away from the first
-    ws::circsim::Part* p1 = b.doc.schem.add_part(
+    b.doc.schem.add_part(
         ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0}));
-    ws::circsim::Part* p2 = b.doc.schem.add_part(
+    b.doc.schem.add_part(
         ws::circsim::Part::make("r", "R2", "2k", {4.0, 0.0}));  // close to R1
     b.draw();
     const auto placement = b.ed.place_part_annotation();
     // Both parts should have tiles
     CHECK(placement.part_tiles.size() == 2u);
     // The tiles should not overlap (the engine scores and picks non-overlapping)
-    const auto& r1 = placement.part_tiles[0].rect;
-    const auto& r2 = placement.part_tiles[1].rect;
+    const auto& r1 = placement.part_tiles[0].screen_rect;
+    const auto& r2 = placement.part_tiles[1].screen_rect;
     // They can touch but not significantly overlap
-    bool overlap = !(r1.x + r1.w <= r2.x || r2.x + r2.w <= r1.x ||
-                     r1.y + r1.h <= r2.y || r2.y + r2.h <= r1.y);
+    bool overlap = !(r1.x + r1.width <= r2.x || r2.x + r2.width <= r1.x ||
+                     r1.y + r1.height <= r2.y || r2.y + r2.height <= r1.y);
     CHECK_FALSE(overlap);
 }
 
 TEST_CASE("C1: annotation engine handles parts with no refdes") {
     Bench b;
-    ws::circsim::Part* p = b.doc.schem.add_part(
+    b.doc.schem.add_part(
         ws::circsim::Part::make("r", "", "1k", {0.0, 0.0}));  // no refdes
     b.draw();
     const auto placement = b.ed.place_part_annotation();
@@ -2181,13 +2199,15 @@ TEST_CASE("push_delete_set: the working set dies as ONE step") {
         ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0}));
     const ws::circsim::Part* r2 = b.doc.schem.add_part(
         ws::circsim::Part::make("r", "R2", "1k", {10.0, 0.0}));
+    const std::uint32_t r1_id = r1->id;
+    const std::uint32_t r2_id = r2->id;
     (void)b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
-        ws::circsim::PinRef{r1->id, 0}, ws::circsim::PinRef{r2->id, 0}));
+        ws::circsim::PinRef{r1_id, 0}, ws::circsim::PinRef{r2_id, 0}));
     REQUIRE(b.doc.schem.wires().size() == 1u);
 
     // Only the PARTS are named: the wire rides the part rule (a wire
     // referencing a deleted part's pin goes with it).
-    CHECK(editor::push_delete_set(b.doc, {r1->id, r2->id}, {}, {}));
+    CHECK(editor::push_delete_set(b.doc, {r1_id, r2_id}, {}, {}));
     CHECK(b.doc.schem.parts().empty());
     CHECK(b.doc.schem.wires().empty());
     CHECK(b.doc.undo().can_undo());
@@ -2200,7 +2220,12 @@ TEST_CASE("push_delete_set: the working set dies as ONE step") {
         std::get_if<ws::circsim::PinRef>(
             &b.doc.schem.wires().front().a);
     REQUIRE(a != nullptr);
-    CHECK(a->part == r1->id);
+    // The wire's PinRef should point to the restored part with the original ID.
+    CHECK(a->part == r1_id);
+    // Also verify the part was restored with the correct ID.
+    const ws::circsim::Part* restored_r1 = b.doc.schem.find_part(r1_id);
+    REQUIRE(restored_r1 != nullptr);
+    CHECK(restored_r1->id == r1_id);
 }
 
 TEST_CASE("the probe toggles a net's curve in Results") {

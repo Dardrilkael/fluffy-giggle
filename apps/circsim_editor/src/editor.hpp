@@ -1316,6 +1316,9 @@ struct Editor {
     // Set the annotation state for `part_id` (the Properties panel calls
     // this when the user edits the nudge fields or toggles annotate_off).
     void set_annot_state(std::uint32_t part_id, const AnnotState& st);
+
+    // Clear the static annotation state map (for test isolation).
+    void clear_annot_state_map();
 };
 
 // The shared symbol renderer: `draw` prims + pin stubs through a
