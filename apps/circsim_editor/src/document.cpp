@@ -322,8 +322,8 @@ class DeletePartCommand final : public EditCommand {
     }
     [[nodiscard]] std::string name() const override { return "Delete Part"; }
     [[nodiscard]] std::size_t memory_estimate() const override {
-        return sizeof(*this) + wires_.size() * sizeof(Wire) +
-               junctions_.size() * sizeof(Junction);
+        return sizeof(*this) + wires_.size() * sizeof(IndexedEntity<Wire>) +
+               junctions_.size() * sizeof(IndexedEntity<Junction>);
     }
 
   private:
@@ -1527,10 +1527,11 @@ class DeleteSetCommand final : public EditCommand {
     }
     [[nodiscard]] std::string name() const override { return "Delete Set"; }
     [[nodiscard]] std::size_t memory_estimate() const override {
-        return sizeof(*this) + parts_.size() * sizeof(Part) +
-               wires_.size() * sizeof(Wire) +
-               junctions_.size() * sizeof(Junction) +
-               labels_.size() * sizeof(ws::circsim::Label);
+        return sizeof(*this) + parts_.size() * sizeof(IndexedEntity<Part>) +
+               wires_.size() * sizeof(IndexedEntity<Wire>) +
+               junctions_.size() * sizeof(IndexedEntity<Junction>) +
+               labels_.size() *
+                   sizeof(IndexedEntity<ws::circsim::Label>);
     }
 
   private:
