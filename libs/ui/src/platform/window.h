@@ -155,6 +155,7 @@ public:
     // clipboard. A platform opts in by overriding, like every other
     // capability here.
     virtual void install_ime_rect(gui::GuiContext& gui) { (void)gui; }
+    virtual void install_soft_keyboard(gui::GuiContext& gui) { (void)gui; }
 
     // The stage-12 halves the window itself owns. set_title hands the
     // platform a composed title - the answer of ws::platform's
