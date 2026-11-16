@@ -674,9 +674,9 @@ namespace {
 // adjoint gains folded in (§7.5: one adjoint solve serves every source).
 class DriverNoiseContext final : public NoiseContext {
 public:
-    DriverNoiseContext(const std::vector<std::complex<double>>& adjoint,
-                       std::size_t node_count)
-        : adjoint_(adjoint), node_count_(node_count) {}
+    explicit DriverNoiseContext(
+        const std::vector<std::complex<double>>& adjoint)
+        : adjoint_(adjoint) {}
 
     // The owning device's name for this batch of sources (set by the
     // driver between devices): the summary tables read
@@ -702,7 +702,6 @@ public:
 
 private:
     const std::vector<std::complex<double>>& adjoint_;
-    std::size_t node_count_;
 };
 
 // §7.5: the log-log (power-law) segment integral (ngspice ninteg.c) -
@@ -913,7 +912,7 @@ ws::core::Result<Table> run_noise(const Circuit& circuit, RunState& state,
 
         // (d) Every device's noise sources, folded with the adjoint gain.
         double on_sq = 0.0;  // V^2/Hz at the output
-        DriverNoiseContext nctx(x_a, circuit.node_count());
+        DriverNoiseContext nctx(x_a);
         nctx.op = &x_op;
         // (The device name is set per device inside the loop below.)
         nctx.freq = f;
