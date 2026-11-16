@@ -10,7 +10,6 @@
 #include "widgets_detail.hpp"
 
 #include <algorithm>
-#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -219,9 +218,60 @@ namespace {
     return kTable[static_cast<std::size_t>(slot)];
 }
 
+// Parse the ASCII decimal emitted by fmt_g. Floating-point
+// std::from_chars is not implemented by every supported libc++ (notably
+// the Android NDK toolchain), so keep this tiny locale-independent parser
+// for the mantissa round-trip check.
+[[nodiscard]] bool parse_g_ascii(const char* text, double& out) {
+    const char* p = text;
+    bool negative = false;
+    if (*p == '-' || *p == '+') {
+        negative = *p == '-';
+        ++p;
+    }
+    double value = 0.0;
+    int digits = 0;
+    int fractional_digits = 0;
+    bool fractional = false;
+    while (*p != '\\0') {
+        if (*p == '.' && !fractional) {
+            fractional = true;
+            ++p;
+            continue;
+        }
+        if (*p < '0' || *p > '9') break;
+        value = value * 10.0 + static_cast<double>(*p - '0');
+        ++digits;
+        if (fractional) ++fractional_digits;
+        ++p;
+    }
+    if (digits == 0) return false;
+
+    int exponent = -fractional_digits;
+    if (*p == 'e' || *p == 'E') {
+        ++p;
+        bool exponent_negative = false;
+        if (*p == '-' || *p == '+') {
+            exponent_negative = *p == '-';
+            ++p;
+        }
+        if (*p < '0' || *p > '9') return false;
+        int parsed_exponent = 0;
+        while (*p >= '0' && *p <= '9') {
+            parsed_exponent = parsed_exponent * 10 + (*p - '0');
+            ++p;
+        }
+        exponent += exponent_negative ? -parsed_exponent : parsed_exponent;
+    }
+    if (*p != '\\0') return false;
+    out = (negative ? -value : value) *
+          std::pow(10.0, static_cast<double>(exponent));
+    return std::isfinite(out);
+}
+
 // The mantissa spelling: plain %g at the digit budget, into the
-// caller's buffer. Locale-independent in practice (the gui never calls
-// setlocale; %g's decimal point is the C locale's "." while it stands).
+// caller's buffer. The parser above reads its ASCII decimal without
+// depending on the process locale.
 void fmt_g(char* buf, std::size_t cap, double v, int digits) {
     std::snprintf(buf, cap, "%.*g", digits, v);
 }
@@ -285,7 +335,7 @@ const char* plot_format_eng(char* buf, std::size_t cap, double v,
         // so the BUCKET renormalizes (e += 3) rather than the label
         // printing 1000m. from_chars is the locale-deaf parse.
         double printed = 1000.0;
-        (void)std::from_chars(mant, mant + std::strlen(mant), printed);
+        if (!parse_g_ascii(mant, printed)) printed = 1000.0;
         if (printed < 1000.0) {
             const int slot = (e - kFirstExp) / kStep;
             const char prefix = kPrefixes[static_cast<std::size_t>(slot)];
