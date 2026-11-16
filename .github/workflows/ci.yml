@@ -92,7 +92,7 @@ jobs:
         run: |
           cmake --build --preset linux-asan --target \
             circsim_editor test_physics test_ui_canvas \
-            test_circsim_editor_document test_circsim_editor_canvas_cost test_circsim_editor_panel \
+            test_circsim_editor_document test_circsim_editor_canvas test_circsim_editor_canvas_cost test_circsim_editor_panel \
             test_circsim_editor_waveform_prof
 
       - name: Run maintained sanitizer tests
