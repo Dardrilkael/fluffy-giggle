@@ -1523,7 +1523,6 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         // collisions. We match by name since the engine returns the net
         // name in the tile's refdes field.
         for (const auto& tile : placement.net_tiles) {
-            const Point at{tile.screen_rect.x, tile.screen_rect.y};
             // The tile's screen_rect is the text bounds; draw at its top-left
             (void)rc.draw_text(tile.screen_rect.x, tile.screen_rect.y,
                                tile.refdes.c_str(), *theme.font,
