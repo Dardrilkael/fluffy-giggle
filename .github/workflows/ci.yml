@@ -57,7 +57,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             ninja-build cmake g++ \
             libglfw3-dev libvulkan-dev libopenal-dev libuv1-dev \
-            libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev
+            libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev
       - name: Configure
         run: cmake --preset linux-asan
       - name: Build
