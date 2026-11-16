@@ -1581,6 +1581,7 @@ TEST_CASE("annotation state is isolated between editors with colliding part IDs"
     changed.nudge = {4.0, -3.0};
     changed.annotate_off = true;
     a.ed.set_annot_state(pa->id, changed);
+    b.ed.set_annot_state(pb->id, changed);
 
     const auto& state_a = a.ed.annot_state_of(pa->id);
     const auto& state_b = b.ed.annot_state_of(pb->id);
