@@ -905,6 +905,44 @@ class CircsimApp final : public ws::ui::App {
         };
         add(std::move(probe_cmd));
 
+        // Touch-accessible equivalents for the canvas conveniences that
+        // previously existed only as bare keyboard shortcuts.
+        Command tidy_cmd;
+        tidy_cmd.id = "app.tidy_wires";
+        tidy_cmd.label = "Tidy Selected Wires";
+        tidy_cmd.category = "Edit";
+        tidy_cmd.enabled = [this] {
+            return editor_.tool == editor::Tool::Select &&
+                   !editor_.selection_set().empty();
+        };
+        tidy_cmd.execute = [this](std::string_view) {
+            (void)editor_.tidy_selection();
+        };
+        add(std::move(tidy_cmd));
+
+        Command annotate_cmd;
+        annotate_cmd.id = "app.annotate";
+        annotate_cmd.label = "Renumber Annotations";
+        annotate_cmd.category = "Edit";
+        annotate_cmd.enabled = [this] { return editor_.schem() != nullptr; };
+        annotate_cmd.execute = [this](std::string_view) {
+            (void)editor_.annotate();
+        };
+        add(std::move(annotate_cmd));
+
+        Command flip_wire_cmd;
+        flip_wire_cmd.id = "app.flip_wire_corner";
+        flip_wire_cmd.label = "Flip Wire Corner";
+        flip_wire_cmd.category = "Place";
+        flip_wire_cmd.enabled = [this] {
+            return editor_.tool == editor::Tool::Wire &&
+                   editor_.wire_draft.active;
+        };
+        flip_wire_cmd.execute = [this](std::string_view) {
+            editor_.wire_draft.flip();
+        };
+        add(std::move(flip_wire_cmd));
+
         Command escape_cmd;
         escape_cmd.id = "app.escape";
         escape_cmd.label = "Cancel Tool";
