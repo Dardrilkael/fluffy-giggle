@@ -1595,12 +1595,51 @@ struct TilePick {
 
 }  // namespace
 
-Editor::AnnotPlacement Editor::place_part_annotation() const {
-    AnnotPlacement result;
+const Editor::AnnotPlacement& Editor::place_part_annotation() const {
     const ws::circsim::Schematic* s = schem();
     if (s == nullptr) {
-        return result;
+        annot_placement_cache_ = AnnotPlacement{};
+        annot_placement_cache_valid_ = true;
+        annot_placement_cache_signature_ = 0;
+        return annot_placement_cache_;
     }
+
+    // Hash every input used by placement. Annotation values are hashed
+    // directly because UI code edits the returned state by reference.
+    std::size_t signature = 0;
+    const auto mix = [&signature](std::size_t value) {
+        signature ^= value + static_cast<std::size_t>(0x9e3779b9u) +
+                     (signature << 6u) + (signature >> 2u);
+    };
+    mix(std::hash<std::uint64_t>{}(s->version()));
+    mix(std::hash<double>{}(view.zoom));
+    mix(std::hash<double>{}(view.center.x));
+    mix(std::hash<double>{}(view.center.y));
+    mix(std::hash<float>{}(view.vx));
+    mix(std::hash<float>{}(view.vy));
+    mix(std::hash<float>{}(view.vw));
+    mix(std::hash<float>{}(view.vh));
+    mix(std::hash<const void*>{}(font));
+    mix(std::hash<bool>{}(show_part_values));
+    if (font != nullptr) {
+        mix(std::hash<float>{}(font->line_height()));
+    }
+    mix(std::hash<const void*>{}(s));
+    const auto states_for_schematic = annot_states_.find(s);
+    if (states_for_schematic != annot_states_.end()) {
+        for (const auto& [id, state] : states_for_schematic->second) {
+            mix(std::hash<std::uint32_t>{}(id));
+            mix(std::hash<double>{}(state.nudge.x));
+            mix(std::hash<double>{}(state.nudge.y));
+            mix(std::hash<bool>{}(state.annotate_off));
+        }
+    }
+    if (annot_placement_cache_valid_ &&
+        annot_placement_cache_signature_ == signature) {
+        return annot_placement_cache_;
+    }
+
+    AnnotPlacement result;
 
     // Build obstacles from the visible schematic.
     AnnotObstacles obs;
@@ -1753,7 +1792,10 @@ Editor::AnnotPlacement Editor::place_part_annotation() const {
     }
     result.net_tiles = place_net_label(net_obs, this->view);
     result.obstacles = std::move(obs);
-    return result;
+    annot_placement_cache_ = std::move(result);
+    annot_placement_cache_signature_ = signature;
+    annot_placement_cache_valid_ = true;
+    return annot_placement_cache_;
 }
 
 std::vector<Editor::TextTile> Editor::place_net_label(
@@ -1764,15 +1806,16 @@ std::vector<Editor::TextTile> Editor::place_net_label(
         return tiles;
     }
 
-    // Build netlist to get net centroids
-    ws::circsim::NetBuild net_build = ws::circsim::build_nets(*s, &library);
-    if (net_build.nets.nets.empty()) {
+    // Reuse the editor's versioned net cache; rebuilding the same netlist
+    // here every frame duplicated work already done by wire coloring.
+    const ws::circsim::NetList& nets = const_cast<Editor*>(this)->net_cache();
+    if (nets.nets.empty()) {
         return tiles;
     }
 
     std::vector<ScreenRect> placed;  // names already laid down
 
-    for (const auto& net : net_build.nets.nets) {
+    for (const auto& net : nets.nets) {
         // Skip ground net (name "0" or "gnd" or "GND")
         std::string name = net.name;
         if (name == "0" || name == "gnd" || name == "GND") {
@@ -1836,31 +1879,13 @@ std::vector<Editor::TextTile> Editor::place_net_label(
     return tiles;
 }
 
-namespace {
-
-// The ONE annotation-state map. annot_state_of and set_annot_state each
-// used to own a function-local static map of their own, so every write
-// the Properties panel made (nudge, Hide Annotation, Reset) landed in a
-// map the placement engine never read - the controls did nothing.
-std::map<std::uint32_t, Editor::AnnotState>& annot_state_map() {
-    static std::map<std::uint32_t, Editor::AnnotState> state_map;
-    return state_map;
-}
-
-}  // namespace
-
 Editor::AnnotState& Editor::annot_state_of(std::uint32_t part_id) {
-    // The map is editor-lifetime state (survives document switches).
-    // Lazy-create on first access.
-    return annot_state_map()[part_id];
+    return annot_states_[schem()][part_id];
 }
 
 void Editor::set_annot_state(std::uint32_t part_id, const AnnotState& st) {
-    annot_state_map()[part_id] = st;
-}
-
-void Editor::clear_annot_state_map() {
-    annot_state_map().clear();
+    annot_states_[schem()][part_id] = st;
+    annot_placement_cache_valid_ = false;
 }
 
 void draw_symbol(canvas::Canvas2D& c, const ws::circsim::SymbolDef& sym,

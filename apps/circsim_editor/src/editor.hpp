@@ -1309,6 +1309,20 @@ struct Editor {
         bool annotate_off = false;
     };
 
+    // Annotation state is scoped to this Editor, not process-global:
+    // component IDs are allocated per schematic and collide across tabs.
+    // Keep annotation edits with their schematic across tab switches;
+    // part IDs are only unique inside one schematic.
+    mutable std::map<const ws::circsim::Schematic*,
+                     std::map<std::uint32_t, AnnotState>,
+                     std::less<const ws::circsim::Schematic*>> annot_states_;
+
+    // Placement is expensive (obstacle construction + candidate scoring).
+    // Reuse it while every input that affects placement remains unchanged.
+    mutable bool annot_placement_cache_valid_ = false;
+    mutable std::size_t annot_placement_cache_signature_ = 0;
+    mutable AnnotPlacement annot_placement_cache_;
+
     // AnnotCandidate: one candidate position the engine evaluates for a
     // tile. The tile's screen rect at that candidate, the world anchor,
     // the penalty score (overlap area with obstacles + distance from the
@@ -1342,7 +1356,7 @@ struct Editor {
     // the net), same candidate ring, same scoring. Parts with
     // annotate_off or no refdes are skipped. The engine is called once
     // per frame from draw_canvas_panel (so it rides the view's culling).
-    [[nodiscard]] AnnotPlacement place_part_annotation() const;
+    [[nodiscard]] const AnnotPlacement& place_part_annotation() const;
 
     // Place net labels (the net name at the net's centroid). Called by
     // place_part_annotation; split for testing.
@@ -1356,8 +1370,6 @@ struct Editor {
     // this when the user edits the nudge fields or toggles annotate_off).
     void set_annot_state(std::uint32_t part_id, const AnnotState& st);
 
-    // Clear the static annotation state map (for test isolation).
-    void clear_annot_state_map();
 };
 
 // The shared symbol renderer: `draw` prims + pin stubs through a

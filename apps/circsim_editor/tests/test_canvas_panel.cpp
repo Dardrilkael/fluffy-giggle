@@ -65,7 +65,6 @@ struct Bench {
     Bench() {
         ed.doc = &doc;
         ed.canvas_panel_canvas = &clc;
-        ed.clear_annot_state_map();
     }
 
     // A wire (1,1)->(4,1) over two junctions - the drawn world's
@@ -1567,6 +1566,52 @@ TEST_CASE("C1: annot_state_of lazy-creates per-part state") {
     // Second call returns the same object (by reference)
     auto& st2 = b.ed.annot_state_of(p->id);
     CHECK(&st1 == &st2);
+}
+
+TEST_CASE("annotation state is isolated between editors with colliding part IDs") {
+    Bench a;
+    Bench b;
+    ws::circsim::Part* pa = a.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0}));
+    ws::circsim::Part* pb = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0}));
+    REQUIRE(pa->id == pb->id);
+
+    editor::Editor::AnnotState changed;
+    changed.nudge = {4.0, -3.0};
+    changed.annotate_off = true;
+    a.ed.set_annot_state(pa->id, changed);
+
+    editor::Editor::AnnotState independent;
+    independent.nudge = {-2.0, 5.0};
+    independent.annotate_off = false;
+    b.ed.set_annot_state(pb->id, independent);
+
+    const auto& state_a = a.ed.annot_state_of(pa->id);
+    const auto& state_b = b.ed.annot_state_of(pb->id);
+    CHECK(state_a.nudge.x == doctest::Approx(4.0));
+    CHECK(state_a.nudge.y == doctest::Approx(-3.0));
+    CHECK(state_a.annotate_off);
+    CHECK(state_b.nudge.x == doctest::Approx(-2.0));
+    CHECK(state_b.nudge.y == doctest::Approx(5.0));
+    CHECK_FALSE(state_b.annotate_off);
+
+    // The application reuses one Editor while switching documents too.
+    // The same part ID in another schematic must still get fresh state.
+    SchematicDocument other_doc{std::string{}, b.fs};
+    ws::circsim::Part* other_part = other_doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0}));
+    REQUIRE(other_part->id == pb->id);
+    b.ed.doc = &other_doc;
+    const auto& switched_state = b.ed.annot_state_of(other_part->id);
+    CHECK(switched_state.nudge.x == 0.0);
+    CHECK(switched_state.nudge.y == 0.0);
+    CHECK_FALSE(switched_state.annotate_off);
+    b.ed.doc = &b.doc;
+    const auto& restored_state = b.ed.annot_state_of(pb->id);
+    CHECK(restored_state.nudge.x == doctest::Approx(-2.0));
+    CHECK(restored_state.nudge.y == doctest::Approx(5.0));
+    CHECK_FALSE(restored_state.annotate_off);
 }
 
 TEST_CASE("C1: set_annot_state writes nudge and annotate_off") {
