@@ -99,6 +99,7 @@ public:
     // stage), so every host today installs nothing and the seam reads
     // unset - honest: nothing positions, nothing crashes.
     void install_ime_rect(gui::GuiContext& gui);
+    void install_soft_keyboard(gui::GuiContext& gui);
 
     // Installs the job system whose marshal queue the shell drains once
     // per frame, right after the platform events land and BEFORE
