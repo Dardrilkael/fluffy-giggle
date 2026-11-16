@@ -17,14 +17,13 @@ namespace {
     return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
 }
 
-// FP to_chars/from_chars landed in libstdc++ 11, MSVC 16.4(ish) and
-// every toolchain this workspace targets; the feature-test macro is the
-// honest gate. The fallback keeps the same contract through the classic
-// locale, so a build without the macro cannot quietly regress.
-#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L
-inline constexpr bool kHasFpCharconv = true;
+// Floating-point charconv is not available in every libc++ shipped
+// with the Android NDK, even when the feature macro for integral charconv
+// is defined. Use the classic-locale stream path there.
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && !defined(__ANDROID__)
+#define WS_CIRCSIM_HAS_FP_CHARCONV 1
 #else
-inline constexpr bool kHasFpCharconv = false;
+#define WS_CIRCSIM_HAS_FP_CHARCONV 0
 #endif
 
 }  // namespace
@@ -48,18 +47,17 @@ std::string fmt_num(double v, int digits) {
     if (digits > 17) {
         digits = 17;
     }
-    if (kHasFpCharconv) {
-        char buf[64];
-        const auto [p, ec] =
-            std::to_chars(buf, buf + sizeof buf, v,
-                          std::chars_format::general, digits);
-        if (ec == std::errc{}) {
-            return std::string(buf, p);
-        }
-        // Unreachable for finite doubles in a 64-byte buffer (17 digits
-        // + sign + dot + "e+308"); fall through to the stream path so
-        // this function never has no answer.
+#if WS_CIRCSIM_HAS_FP_CHARCONV
+    char buf[64];
+    const auto [p, ec] =
+        std::to_chars(buf, buf + sizeof buf, v,
+                      std::chars_format::general, digits);
+    if (ec == std::errc{}) {
+        return std::string(buf, p);
     }
+    // Unreachable for finite doubles in a 64-byte buffer; retain the
+    // stream fallback so this function always has an answer.
+#endif
     // The classic-locale fallback: "%.12g" semantics, LC_NUMERIC-proof.
     std::ostringstream out;
     out.imbue(std::locale::classic());
@@ -72,26 +70,29 @@ std::optional<double> parse_plain_number(std::string_view text) {
     if (text.empty()) {
         return std::nullopt;
     }
-    if (kHasFpCharconv) {
-        double v = 0.0;
-        const char* begin = text.data();
-        const char* end = begin + text.size();
-        // from_chars does not skip leading whitespace; the atof this
-        // replaces did not either (callers hand it its own output).
-        const auto [p, ec] = std::from_chars(begin, end, v);
-        if (ec != std::errc{} || p != end || !std::isfinite(v)) {
-            return std::nullopt;
-        }
-        return v;
-    }
-    // The classic-locale fallback (strtod in the "C" locale).
-    std::string copy(text);
-    char* end = nullptr;
-    const double v = std::strtod(copy.c_str(), &end);
-    if (end != copy.c_str() + copy.size() || !std::isfinite(v)) {
+#if WS_CIRCSIM_HAS_FP_CHARCONV
+    double v = 0.0;
+    const char* begin = text.data();
+    const char* end = begin + text.size();
+    // from_chars does not skip leading whitespace; the atof this
+    // replaces did not either (callers hand it its own output).
+    const auto [p, ec] = std::from_chars(begin, end, v);
+    if (ec != std::errc{} || p != end || !std::isfinite(v)) {
         return std::nullopt;
     }
     return v;
+#else
+    // Locale-independent fallback for Android libc++.
+    std::istringstream in{std::string(text)};
+    in.imbue(std::locale::classic());
+    double v = 0.0;
+    in >> v;
+    if (!in || in.peek() != std::char_traits<char>::eof() ||
+        !std::isfinite(v)) {
+        return std::nullopt;
+    }
+    return v;
+#endif
 }
 
 }  // namespace ws::circsim
