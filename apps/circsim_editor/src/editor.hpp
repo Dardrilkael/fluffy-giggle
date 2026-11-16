@@ -851,20 +851,6 @@ struct Editor {
     mutable std::uint64_t wire_geom_version_ = 0;
     mutable bool wire_geom_valid_ = false;
 
-    // Annotation state is scoped to this Editor, not process-global:
-    // component IDs are allocated per schematic and collide across tabs.
-    // Keep annotation edits with their schematic across tab switches;
-    // part IDs are only unique inside one schematic.
-    mutable std::map<const ws::circsim::Schematic*,
-                     std::map<std::uint32_t, AnnotState>,
-                     std::less<const ws::circsim::Schematic*>> annot_states_;
-
-    // Placement is expensive (obstacle construction + candidate scoring).
-    // Reuse it while every input that affects placement remains unchanged.
-    mutable bool annot_placement_cache_valid_ = false;
-    mutable std::size_t annot_placement_cache_signature_ = 0;
-    mutable AnnotPlacement annot_placement_cache_;
-
     // The Properties panel's editing state: the field buffers keyed
     // by stable strings, the epoch that reloads them, the selection
     // they were built for, and the analysis entry being edited. The
@@ -1322,6 +1308,20 @@ struct Editor {
         Pos nudge{0.0, 0.0};
         bool annotate_off = false;
     };
+
+    // Annotation state is scoped to this Editor, not process-global:
+    // component IDs are allocated per schematic and collide across tabs.
+    // Keep annotation edits with their schematic across tab switches;
+    // part IDs are only unique inside one schematic.
+    mutable std::map<const ws::circsim::Schematic*,
+                     std::map<std::uint32_t, AnnotState>,
+                     std::less<const ws::circsim::Schematic*>> annot_states_;
+
+    // Placement is expensive (obstacle construction + candidate scoring).
+    // Reuse it while every input that affects placement remains unchanged.
+    mutable bool annot_placement_cache_valid_ = false;
+    mutable std::size_t annot_placement_cache_signature_ = 0;
+    mutable AnnotPlacement annot_placement_cache_;
 
     // AnnotCandidate: one candidate position the engine evaluates for a
     // tile. The tile's screen rect at that candidate, the world anchor,
