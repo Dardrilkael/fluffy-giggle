@@ -1,0 +1,702 @@
+diff --git a/apps/circsim_editor/src/canvas_panel.cpp b/apps/circsim_editor/src/canvas_panel.cpp
+index bb5ba0c..15a4ab0 100644
+--- a/apps/circsim_editor/src/canvas_panel.cpp
++++ b/apps/circsim_editor/src/canvas_panel.cpp
+@@ -212,13 +212,23 @@ TransportStripLayout transport_strip_layout(const gui::Rect& body) {
+     // The pill's width floor rose with the rate chip (patch 0012): the
+     // play button, a scrubbable track, the pace chip and the readout
+     // all need their room on a narrow canvas too.
+-    const float w = std::min(320.0f, std::max(190.0f, body.width * 0.5f));
++    const float w = std::min(320.0f, std::max(220.0f, body.width * 0.5f));
+     const float h = 30.0f;
+-    constexpr float kReadoutPx = 62.0f;  // the right end's reservation
+-    constexpr float kRatePx = 36.0f;     // the pace chip
++    constexpr float kReadoutPx = 96.0f;  // the right end's reservation
++    // ("V2 = 470mV" at the 16px body face runs ~80px; the old 62px
++    // reservation let the readout's left edge run into the rate chip -
++    // the overlap this layout pass closes.)
++    constexpr float kRatePx = 40.0f;     // the pace chip ("1/4x")
++    constexpr float kEdgePadPx = 10.0f;  // the strip's own side air
+     TransportStripLayout out;
++    // The strip hugs the panel's bottom edge (the hint strip sits at
++    // -24px and the voltage legend at -44px right-aligned; the old
++    // -34px hover rode ON TOP of the bottom row of the schematic -
++    // gnd symbols sit there). Parked flush against the bottom edge,
++    // it can only occlude the last few px of the sheet, which the
++    // fit's margin (view.fit's world-units air) keeps clear anyway.
+     out.strip = {body.x + (body.width - w) * 0.5f,
+-                 body.y + body.height - h - 34.0f, w, h};
++                 body.y + body.height - h - kEdgePadPx, w, h};
+     out.button = {out.strip.x + 3.0f, out.strip.y + 3.0f, h - 6.0f,
+                   h - 6.0f};
+     out.rate = {out.strip.x + out.strip.width - kReadoutPx - kRatePx - 2.0f,
+@@ -226,6 +236,8 @@ TransportStripLayout transport_strip_layout(const gui::Rect& body) {
+     out.bar = {out.strip.x + h + 4.0f, out.strip.y + h * 0.5f - 3.0f,
+                std::max(20.0f, out.rate.x - (out.strip.x + h + 4.0f) - 4.0f),
+                6.0f};
++    out.readout = {out.rate.x + out.rate.width + 2.0f, out.strip.y,
++                   kReadoutPx - 4.0f, h};
+     return out;
+ }
+ 
+@@ -1126,6 +1138,12 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
+     ed.view.vy = body.y;
+     ed.view.vw = body.width;
+     ed.view.vh = body.height;
++    // The fit's overlay insets: the mode toggle's band (top) and the
++    // transport strip's (bottom) - the controls a fit must not park
++    // content under. The strip only exists with a scrubbable run, but
++    // the reservation is constant so a fit does not re-decide mid-run.
++    ed.view.inset_top = 8.0f + 26.0f + 8.0f;   // toggle row + its pads
++    ed.view.inset_bottom = 30.0f + 2.0f * 10.0f;  // strip + bottom air
+     // Motion: the smooth camera and the locate pulse follow the theme's
+     // animation switch (instant when motion is off, like every other
+     // eased thing in this panel). tick() advances both by real time.
+@@ -1821,15 +1839,27 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
+ 
+         // The readout (a fontless theme draws the shape alone): the
+         // axis's own spelling - seconds for a .tran, the swept
+-        // source's name and unit for a .dc.
++        // source's name and unit for a .dc. Drawn inside the strip's
++        // own reserved box (the readout rect), clipped at the pill's
++        // right edge: the text can never run into the rate chip (the
++        // old right-anchored spelling put "V2 = 470mV" under the
++        // chip's "1x").
+         if (theme.font != nullptr) {
+             const std::string label =
+                 ws::circsim::overlay_axis_readout(*tran, ed.playback.t);
+             const float w = rc.measure_text(label.c_str(), *theme.font);
++            const float avail =
++                std::max(0.0f, tl.readout.width);
++            const std::string shown =
++                w <= avail ? label
++                           : label.substr(0, static_cast<std::size_t>(
++                                   avail / std::max(1.0f, w) *
++                                   static_cast<float>(label.size())));
++            const float sw = rc.measure_text(shown.c_str(), *theme.font);
+             (void)rc.draw_text(
+-                tl.strip.x + tl.strip.width - w - 8.0f,
++                tl.readout.x + (tl.readout.width - sw) * 0.5f,
+                 tl.strip.y + tl.strip.height * 0.5f - 6.0f,
+-                label.c_str(), *theme.font, gui::dim(theme.text, 0.85f));
++                shown.c_str(), *theme.font, gui::dim(theme.text, 0.85f));
+         }
+     }
+ 
+diff --git a/apps/circsim_editor/src/canvas_panel.hpp b/apps/circsim_editor/src/canvas_panel.hpp
+index 346a2d3..fc6790a 100644
+--- a/apps/circsim_editor/src/canvas_panel.hpp
++++ b/apps/circsim_editor/src/canvas_panel.hpp
+@@ -47,6 +47,7 @@ struct TransportStripLayout {
+     gui::Rect button;  // play/pause
+     gui::Rect bar;     // the scrub track
+     gui::Rect rate;    // the pace chip (a press cycles the ladder)
++    gui::Rect readout; // the axis readout's reserved box (the draw clips)
+ };
+ [[nodiscard]] TransportStripLayout transport_strip_layout(
+     const gui::Rect& body);
+diff --git a/apps/circsim_editor/src/editor.hpp b/apps/circsim_editor/src/editor.hpp
+index b66c5f0..a3a2729 100644
+--- a/apps/circsim_editor/src/editor.hpp
++++ b/apps/circsim_editor/src/editor.hpp
+@@ -235,7 +235,14 @@ struct EditorView {
+     }
+ 
+     // Fit `b` (world) with `margin` world units of air on every side.
+-    // A degenerate box keeps the zoom and centers.
++    // A degenerate box keeps the zoom and centers. The screen-space
++    // insets (px bands the canvas's overlays occupy: the mode toggle
++    // top-right, the transport strip along the bottom) shrink the
++    // viewport the fit answers through, so nothing the user just fitted
++    // hides under a control.
++    float inset_top = 0.0f;     // the mode toggle's band (top-right)
++    float inset_bottom = 0.0f;  // the transport strip's band (bottom)
++
+     void fit(const Bounds& b, double margin) {
+         if (!valid()) {
+             return;
+@@ -247,9 +254,10 @@ struct EditorView {
+             fly_to(target, zoom);  // degenerate: center, keep the zoom
+             return;
+         }
++        const float usable_h = std::max(8.0f, vh - inset_top - inset_bottom);
+         // fly_to clamps the zoom, and glides when `animate` is on.
+         fly_to(target, std::min(static_cast<double>(vw) / w,
+-                                static_cast<double>(vh) / h));
++                                static_cast<double>(usable_h) / h));
+     }
+ };
+ 
+diff --git a/apps/circsim_editor/src/main.cpp b/apps/circsim_editor/src/main.cpp
+index 4e33d87..7395139 100644
+--- a/apps/circsim_editor/src/main.cpp
++++ b/apps/circsim_editor/src/main.cpp
+@@ -441,6 +441,7 @@ class CircsimApp final : public ws::ui::App {
+             (void)shell_->documents().new_document();
+         }
+         watch_active_document(true);
++        update_problems_tab();
+     }
+ 
+     // The files the OS dropped: straight into the shell (the drop IS an
+@@ -917,7 +918,12 @@ class CircsimApp final : public ws::ui::App {
+         erc_cmd.enabled = [this] { return editor_.schem() != nullptr; };
+         erc_cmd.execute = [this](std::string_view) {
+             editor_.run_erc();
+-            editor_.status(editor_.problems.header);
++            update_problems_tab();
++            editor_.status(editor_.problems.has &&
++                                   !editor_.problems.diags.empty()
++                               ? editor_.problems.header +
++                                     " - F8 walks them"
++                               : editor_.problems.header);
+         };
+         add(std::move(erc_cmd));
+ 
+@@ -1351,13 +1357,16 @@ class CircsimApp final : public ws::ui::App {
+                           editor_.results.run.fouriers.size(),
+                           editor_.results.run.fouriers.size() == 1 ? "" : "s");
+             editor_.toast(summary, gui::ToastSeverity::info);
++            update_problems_tab();
+             editor_.status(count == 0 ? summary
+-                                      : editor_.problems.header);
++                                      : editor_.problems.header +
++                                            " - F8 walks them");
+         } else {
+             editor_.toast("Simulation failed: " +
+                               outcome.run.error().message,
+                           gui::ToastSeverity::error);
+-            editor_.status(editor_.problems.header);
++            update_problems_tab();
++            editor_.status(editor_.problems.header + " - F8 walks them");
+         }
+         ws::core::warn("circsim: deliver_run done");
+     }
+@@ -1454,6 +1463,29 @@ class CircsimApp final : public ws::ui::App {
+         return jobs;
+     }
+ 
++    // The Problems tab's badge + the status line's tail: the count the
++    // last check answered, spelled where the user looks. The tab title
++    // carries it ("Problems (2)"), the status line's own tail names the
++    // walk's chord so the bar alone says where the warnings live.
++    void update_problems_tab() {
++        if (shell_ == nullptr) {
++            return;
++        }
++        const char* id = "problems";
++        std::string title = "Problems";
++        std::size_t count = 0;
++        if (editor_.problems.has) {
++            count = editor_.problems.diags.size();
++        }
++        if (count > 0) {
++            title += " (" + std::to_string(count) + ")";
++        }
++        (void)shell_->panel_host().retitle(id, std::move(title));
++        problems_count_ = count;
++    }
++
++    std::size_t problems_count_ = 0;
++
+     // --- the active-document watch ------------------------------------------------
+ 
+     void watch_active_document(bool force) {
+diff --git a/apps/circsim_editor/tests/test_canvas_panel.cpp b/apps/circsim_editor/tests/test_canvas_panel.cpp
+index 8672d54..26590ac 100644
+--- a/apps/circsim_editor/tests/test_canvas_panel.cpp
++++ b/apps/circsim_editor/tests/test_canvas_panel.cpp
+@@ -1437,6 +1437,116 @@ TEST_CASE("the transport scrubs and plays the transient") {
+     CHECK(b.ed.playback.rate == doctest::Approx(0.25));
+ }
+ 
++// The layout pass (A2): the strip's own boxes never overlap each other
++// and never ride over the bottom row of the sheet - the readout owns a
++// reservation wide enough for the swept-source spelling, and the
++// strip parks against the panel's bottom edge with only its own pad
++// of air, not a 34px hover over the ground symbols.
++TEST_CASE("the transport strip's boxes stay disjoint and off the sheet") {
++    Bench b;
++    ws::circsim::Part* v = b.doc.schem.add_part(
++        ws::circsim::Part::make("v", "V1", "5", {0.0, -4.0}));
++    ws::circsim::Part* r = b.doc.schem.add_part(
++        ws::circsim::Part::make("r", "R1", "1k", {6.0, 0.0}));
++    ws::circsim::Part* g = b.doc.schem.add_part(
++        ws::circsim::Part::make("gnd", "", "", {7.0, -6.0}));
++    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
++        ws::circsim::PinRef{v->id, 0}, ws::circsim::PinRef{r->id, 0}));
++    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
++        ws::circsim::PinRef{r->id, 1}, ws::circsim::PinRef{g->id, 0}));
++    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
++        ws::circsim::PinRef{g->id, 0}, ws::circsim::PinRef{v->id, 1}));
++    b.doc.schem.analysis.entries.push_back(ws::circsim::DcSpec{
++        .source = "V1", .start = 0.0, .stop = 5.0, .step = 0.5});
++    deliver(b.ed, ws::circsim::run_schematic(b.doc.schem));
++
++    // The disjoint-pair rule, at several panel widths (the strip
++    // scales with the body; the reservation floor must hold at each).
++    const float widths[] = {640.0f, 480.0f, 360.0f, 260.0f};
++    for (const float w : widths) {
++        const gui::Rect body{0.0f, 0.0f, w, 520.0f};
++        const editor::TransportStripLayout tl =
++            editor::transport_strip_layout(body);
++        // Every box lives inside the strip.
++        for (const gui::Rect* box :
++             {&tl.button, &tl.bar, &tl.rate, &tl.readout}) {
++            CHECK(box->x >= tl.strip.x);
++            CHECK(box->x + box->width <= tl.strip.x + tl.strip.width);
++            CHECK(box->y >= tl.strip.y);
++            CHECK(box->y + box->height <= tl.strip.y + tl.strip.height);
++        }
++        // And no pair of them overlaps (the button, the bar, the chip,
++        // the readout sit side by side, never on top of each other).
++        const auto disjoint = [](const gui::Rect& a, const gui::Rect& c) {
++            return a.x + a.width <= c.x + 0.5f ||
++                   c.x + c.width <= a.x + 0.5f;
++        };
++        CHECK(disjoint(tl.button, tl.bar));
++        CHECK(disjoint(tl.bar, tl.rate));
++        CHECK(disjoint(tl.rate, tl.readout));
++        // The readout's reservation: wide enough for the .dc spelling
++        // the axis composes ("V1 = 470mV" and friends).
++        CHECK(tl.readout.width >= 88.0f);
++        // The strip hugs the panel's bottom edge (its own pad of air,
++        // never a hover over the bottom row of the schematic).
++        CHECK(tl.strip.y + tl.strip.height <=
++              body.y + body.height - 4.0f);
++        CHECK(tl.strip.y + tl.strip.height >=
++              body.y + body.height - 16.0f);
++    }
++}
++
++// The fit's overlay insets (A3): the view a fit answers through loses
++// the bands the canvas's own controls occupy, so a fitted sheet never
++// lands its bottom row under the transport strip (the switch.csim
++// ground-symbol clipping the pass set out to close).
++TEST_CASE("a fit keeps the sheet clear of the overlay bands") {
++    Bench b;
++    ws::circsim::Part* v = b.doc.schem.add_part(
++        ws::circsim::Part::make("v", "V1", "5", {0.0, -4.0}));
++    ws::circsim::Part* r = b.doc.schem.add_part(
++        ws::circsim::Part::make("r", "R1", "1k", {6.0, 0.0}));
++    ws::circsim::Part* g = b.doc.schem.add_part(
++        ws::circsim::Part::make("gnd", "", "", {7.0, -6.0}));
++    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
++        ws::circsim::PinRef{v->id, 0}, ws::circsim::PinRef{r->id, 0}));
++    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
++        ws::circsim::PinRef{r->id, 1}, ws::circsim::PinRef{g->id, 0}));
++    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
++        ws::circsim::PinRef{g->id, 0}, ws::circsim::PinRef{v->id, 1}));
++
++    // The panel frame adopts the viewport the way the draw does - the
++    // insets ride with it (the toggle's band, the strip's band).
++    b.draw();
++    CHECK(b.ed.view.inset_top > 0.0f);
++    CHECK(b.ed.view.inset_bottom > 0.0f);
++
++    // The fitted view: every world corner of the content maps INSIDE
++    // the body's rect shrunk by the inset bands - the ground symbol
++    // at the bottom row lands above the strip's band, the header row
++    // below the toggle's. (Animation off: a fit glides when the theme
++    // animates, and the assertion reads the destination, not the
++    // flight's start.)
++    b.ed.view.animate = false;
++    const std::optional<ws::circsim::Bounds> bounds =
++        b.ed.content_bounds();
++    REQUIRE(bounds.has_value());
++    b.ed.view.fit(*bounds, 4.0);
++    const float top_band = b.ed.view.inset_top;
++    const float bottom_band = b.ed.view.inset_bottom;
++    for (const ws::circsim::Pos corner :
++         {ws::circsim::Pos{bounds->min_x, bounds->min_y},
++          ws::circsim::Pos{bounds->max_x, bounds->min_y},
++          ws::circsim::Pos{bounds->min_x, bounds->max_y},
++          ws::circsim::Pos{bounds->max_x, bounds->max_y}}) {
++        const ws::math::Vec2 px = b.ed.view.w2s(corner);
++        CHECK(px.y >= b.body.y + top_band - 0.5f);
++        CHECK(px.y <= b.body.y + b.body.height - bottom_band + 0.5f);
++        CHECK(px.x >= b.body.x - 0.5f);
++        CHECK(px.x <= b.body.x + b.body.width + 0.5f);
++    }
++}
++
+ // --- the group edit: box-select, copy/paste/duplicate, the probe -----------------
+ //
+ // The scripted pointer frames drive the panel's own gesture ladder
+diff --git a/libs/circsim/examples/switch.csim b/libs/circsim/examples/switch.csim
+index a59a7ea..a51d34b 100644
+--- a/libs/circsim/examples/switch.csim
++++ b/libs/circsim/examples/switch.csim
+@@ -277,7 +277,7 @@
+         {
+             "id": 16,
+             "pos": [
+-                2.0,
++                5.0,
+                 0.0
+             ],
+             "name": "in"
+@@ -293,7 +293,7 @@
+         {
+             "id": 18,
+             "pos": [
+-                8.0,
++                10.0,
+                 -8.0
+             ],
+             "name": "ctl"
+diff --git a/libs/circsim/src/nets.cpp b/libs/circsim/src/nets.cpp
+index 6090439..d4cc990 100644
+--- a/libs/circsim/src/nets.cpp
++++ b/libs/circsim/src/nets.cpp
+@@ -1,5 +1,6 @@
+ #include <algorithm>
+ #include <cctype>
++#include <cmath>
+ #include <cstdint>
+ #include <limits>
+ #include <map>
+@@ -74,6 +75,36 @@ bool on_polyline(const std::vector<Pos>& path, Pos p) {
+     return false;
+ }
+ 
++// The point's distance to the polyline: the minimum over its segments
++// (the label reach rule's measure - the same nearest-segment rule the
++// pin picking rides, geom.cpp's dist_to_segment). Grid coordinates are
++// integer-valued doubles, so this stays exact for axis-aligned runs.
++[[nodiscard]] double len(Pos p) {
++    return std::sqrt(p.x * p.x + p.y * p.y);
++}
++
++double polyline_distance(const std::vector<Pos>& path, Pos p) {
++    double best = std::numeric_limits<double>::max();
++    for (std::size_t i = 1; i < path.size(); ++i) {
++        const Pos a = path[i - 1];
++        const Pos b = path[i];
++        const Pos ab{b.x - a.x, b.y - a.y};
++        const Pos ap{p.x - a.x, p.y - a.y};
++        const double denom = ab.x * ab.x + ab.y * ab.y;
++        double t = 0.0;
++        if (denom > 0.0) {
++            t = (ap.x * ab.x + ap.y * ab.y) / denom;
++            t = std::max(0.0, std::min(1.0, t));
++        }
++        const Pos closest{a.x + t * ab.x - p.x, a.y + t * ab.y - p.y};
++        best = std::min(best, len(closest));
++        if (best == 0.0) {
++            break;  // on the polyline: no nearer answer exists
++        }
++    }
++    return best;
++}
++
+ bool same_pos(Pos a, Pos b) {
+     return a.x == b.x && a.y == b.y;
+ }
+@@ -434,7 +465,12 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
+     // --- labels: attach, then merge same names ----------------------------------
+     // An unattached label (empty space, or a wire crossing) joins NO net -
+     // it is a dangling decoration, warned above and excluded from
+-    // grouping, same-name merging and ground forcing below.
++    // grouping, same-name merging and ground forcing below. A label that
++    // misses the exact coincidence by a hair still names the net it
++    // visually belongs to: the anchor reaches one grid cell around the
++    // wires' polylines (nearest wire wins; the schematic's own grid,
++    // the snap the editor already rides) before the label reads as
++    // dangling.
+     std::vector<std::uint32_t> attached_labels;
+     const auto mark_attached = [&](std::uint32_t le) {
+         attached_labels.push_back(le);
+@@ -474,14 +510,34 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
+                 DiagTarget{DiagTarget::Kind::Label, 0, DiagTarget::npos(), 0,
+                            l.id}));
+         } else {
+-            out.diags.push_back(make_diag(
+-                Severity::Warning,
+-                "circsim.nets.label_unattached",
+-                "label '" + l.name +
+-                    "' is not on any wire, pin or junction",
+-                "label " + l.name,
+-                DiagTarget{DiagTarget::Kind::Label, 0, DiagTarget::npos(), 0,
+-                           l.id}));
++            // The near miss: the anchor within one grid cell of the
++            // wires' polylines attaches to the NEAREST wire (the same
++            // nearest-segment rule pin picking rides; the first wire
++            // stands when two tie exactly). Only the exact-crossing
++            // geometry above refuses to pick.
++            const double reach = s.grid > 0.0 ? s.grid : 1.0;
++            std::size_t best_wi = paths.size();
++            double best_d = reach;
++            for (std::size_t wi = 0; wi < paths.size(); ++wi) {
++                const double d = polyline_distance(paths[wi], l.pos);
++                if (d <= best_d) {
++                    best_d = d;  // a nearer wire narrows the reach
++                    best_wi = wi;
++                }
++            }
++            if (best_wi < paths.size()) {
++                dsu.unite(le, wire_ents[best_wi].first);
++                mark_attached(le);
++            } else {
++                out.diags.push_back(make_diag(
++                    Severity::Warning,
++                    "circsim.nets.label_unattached",
++                    "label '" + l.name +
++                        "' is not on any wire, pin or junction",
++                    "label " + l.name,
++                    DiagTarget{DiagTarget::Kind::Label, 0,
++                               DiagTarget::npos(), 0, l.id}));
++            }
+         }
+     }
+     const auto is_attached = [&](std::uint32_t le) {
+diff --git a/libs/circsim/tests/test_nets.cpp b/libs/circsim/tests/test_nets.cpp
+index e66b7d7..6fd7d41 100644
+--- a/libs/circsim/tests/test_nets.cpp
++++ b/libs/circsim/tests/test_nets.cpp
+@@ -198,6 +198,110 @@ TEST_CASE("a label on empty space warns and names nothing") {
+     }
+ }
+ 
++// A label NEAR a wire names that wire's net: the anchor reaches up to
++// one grid cell around the wire's polyline, the nearest wire winning
++// when several are in reach (the switch.csim layout lesson - a label
++// dropped a unit or two off the wire silently named nothing and the
++// Results panel answered N001 instead of the user's spelling).
++TEST_CASE("a label within reach of one wire attaches to it") {
++    Bench b;
++    b.wire_j(0.0, 0.0, 10.0, 0.0);
++    b.label(5.0, 1.0, "near");  // one unit above the wire
++    const NetBuild nets = ws::circsim::build_nets(b.s);
++    REQUIRE(nets.nets.nets.size() == 1);
++    CHECK(nets.nets.nets[0].name == "near");
++    CHECK_FALSE(has_diag(nets, "circsim.nets.label_unattached"));
++}
++
++TEST_CASE("a label at a wire's end attaches through the reach") {
++    Bench b;
++    b.wire_j(3.0, 0.0, 10.0, 0.0);
++    b.label(2.0, 0.0, "in");  // one unit left of the endpoint
++    const NetBuild nets = ws::circsim::build_nets(b.s);
++    REQUIRE(nets.nets.nets.size() == 1);
++    CHECK(nets.nets.nets[0].name == "in");
++}
++
++TEST_CASE("a label's reach snaps to the NEAREST wire") {
++    Bench b;
++    const std::uint32_t wire_a = b.wire_j(0.0, 0.0, 10.0, 0.0);
++    b.wire_j(20.0, 0.0, 30.0, 0.0);
++    b.label(11.0, 0.0, "ctl");  // one unit past wire A's end, 9 from B
++    const NetBuild nets = ws::circsim::build_nets(b.s);
++    REQUIRE(nets.nets.nets.size() == 2);
++    // The label rides wire A's net (the nearest), not wire B's.
++    for (const auto& n : nets.nets.nets) {
++        if (n.name == "ctl") {
++            REQUIRE(n.wires.size() == 1);
++            CHECK(n.wires.front() == wire_a);
++        } else {
++            CHECK(n.name == "N001");  // B alone, auto-named
++        }
++    }
++}
++
++TEST_CASE("a label beyond reach stays unattached and warns") {
++    Bench b;
++    b.wire_j(0.0, 0.0, 10.0, 0.0);
++    b.label(5.0, 3.0, "far");  // three units off: outside one grid cell
++    const NetBuild nets = ws::circsim::build_nets(b.s);
++    CHECK(has_diag(nets, "circsim.nets.label_unattached"));
++    for (const auto& n : nets.nets.nets) {
++        CHECK(n.name != "far");
++    }
++}
++
++TEST_CASE("the reach is per-label unambiguous: two wires in reach, "
++          "nearest wins") {
++    Bench b;
++    const std::uint32_t lower = b.wire_j(0.0, 0.0, 10.0, 0.0);  // y=0
++    b.wire_j(0.0, 3.0, 10.0, 3.0);                             // y=3
++    b.label(5.0, 0.5, "tie");  // 0.5 from the lower, 2.5 from the upper
++    const NetBuild nets = ws::circsim::build_nets(b.s);
++    REQUIRE(nets.nets.nets.size() == 2);
++    // Exactly one net carries the label - the lower (nearest) wire's.
++    for (const auto& n : nets.nets.nets) {
++        if (!n.labels.empty()) {
++            REQUIRE(n.wires.size() == 1);
++            CHECK(n.wires.front() == lower);
++        }
++    }
++}
++
++TEST_CASE("a label's reach never bridges two separate nets through a "
++          "crossing") {
++    // AT the crossing point itself the exact rule stands: two wires'
++    // interiors carry the label, it names nothing, the warning says
++    // where to move it.
++    Bench b;
++    b.wire_j(0.0, 0.0, 10.0, 0.0);
++    b.wire_j(5.0, -5.0, 5.0, 5.0);
++    b.label(5.0, 0.0, "atcross");
++    const NetBuild nets = ws::circsim::build_nets(b.s);
++    CHECK(has_diag(nets, "circsim.nets.label_at_crossing"));
++    for (const auto& n : nets.nets.nets) {
++        CHECK(n.name != "atcross");
++    }
++
++    // NEAR the crossing, off both wires: the reach resolves the label
++    // to the NEAREST wire's net (the vertical arm is nearer than the
++    // horizontal one) - the label names one net, never both.
++    Bench c;
++    c.wire_j(0.0, 0.0, 10.0, 0.0);
++    c.wire_j(5.0, -5.0, 5.0, 5.0);
++    c.label(5.3, 0.4, "nearcross");
++    const NetBuild near = ws::circsim::build_nets(c.s);
++    CHECK_FALSE(has_diag(near, "circsim.nets.label_unattached"));
++    CHECK_FALSE(has_diag(near, "circsim.nets.label_at_crossing"));
++    std::size_t carrying = 0;
++    for (const auto& n : near.nets.nets) {
++        if (!n.labels.empty()) {
++            ++carrying;
++        }
++    }
++    CHECK(carrying == 1);
++}
++
+ TEST_CASE("label conflicts warn and the lowest id wins") {
+     Bench b;
+     b.wire_j(0.0, 0.0, 10.0, 0.0);
+diff --git a/libs/ui/include/ws/ui/shell/panels.hpp b/libs/ui/include/ws/ui/shell/panels.hpp
+index a1144ea..ec35e20 100644
+--- a/libs/ui/include/ws/ui/shell/panels.hpp
++++ b/libs/ui/include/ws/ui/shell/panels.hpp
+@@ -171,6 +171,13 @@ public:
+     void redock(const PanelRegistry& registry, std::string_view instance,
+                 DockPlacement placement);
+ 
++    // Relabels one open instance's tab (the Problems count badge):
++    // the title the tab strip and the Window menu draw. A no-op when
++    // unknown; returns the new title for the caller's echo. Titles are
++    // cosmetic state, not layout - they ride no json.
++    [[nodiscard]] std::string retitle(std::string_view instance,
++                                       std::string title);
++
+     // Reorders one instance's tab: to `index` of leaf `leaf`, a
+     // reorder inside its own strip or a retab into another (the tree's
+     // move_tab, both clamped). The dropped tab fronts its strip, so
+diff --git a/libs/ui/src/shell/panels.cpp b/libs/ui/src/shell/panels.cpp
+index 5b6d3d0..c823b4c 100644
+--- a/libs/ui/src/shell/panels.cpp
++++ b/libs/ui/src/shell/panels.cpp
+@@ -187,6 +187,22 @@ void PanelHost::activate(const PanelRegistry& registry,
+     }
+ }
+ 
++std::string PanelHost::retitle(std::string_view instance,
++                                std::string title) {
++    PanelInstance* found = nullptr;
++    for (PanelInstance& p : instances_) {
++        if (p.id == instance) {
++            found = &p;
++            break;
++        }
++    }
++    if (found != nullptr) {
++        found->title = std::move(title);
++        return found->title;
++    }
++    return {};
++}
++
+ void PanelHost::cycle(const PanelRegistry& registry) {
+     if (instances_.empty()) {
+         return;
+diff --git a/libs/ui/tests/test_ui_shell.cpp b/libs/ui/tests/test_ui_shell.cpp
+index 331d1fb..6e66a1d 100644
+--- a/libs/ui/tests/test_ui_shell.cpp
++++ b/libs/ui/tests/test_ui_shell.cpp
+@@ -920,6 +920,55 @@ TEST_CASE("float_panel tears a tab out and redock puts it back") {
+     CHECK(host.dock().panels() == std::vector<std::string>{"b"});
+ }
+ 
++// retitle: the badge seam. The Problems panel relabels its tab with
++// the live count ("Problems (2)") - the title the tab strip and the
++// Window menu draw - without undocking, reordering or touching the
++// tree, and a closed id answers empty (a no-op, never a crash).
++TEST_CASE("retitle relabels an open instance's tab without moving it") {
++    PanelRegistry registry;
++    PanelDesc a;
++    a.id = "a";
++    a.title = "Problems";
++    a.placement.area = DockPlacement::Area::bottom;
++    a.draw = [](GuiContext&, LayoutCursor&, const ws::ui::gui::ChromeTheme&,
++                const PanelInstance&) {};
++    PanelDesc b;
++    b.id = "b";
++    b.title = "B";
++    b.placement.area = DockPlacement::Area::right;
++    b.draw = [](GuiContext&, LayoutCursor&, const ws::ui::gui::ChromeTheme&,
++                const PanelInstance&) {};
++    REQUIRE(registry.add(std::move(a)));
++    REQUIRE(registry.add(std::move(b)));
++
++    PanelHost host;
++    (void)host.open(registry, "a");
++    (void)host.open(registry, "b");
++    const std::size_t leaves_before = host.dock().leaf_count();
++    const auto panels_before = host.dock().panels();
++
++    // The relabel: the instance's title answers the new spelling, the
++    // dock tree never notices (same leaves, same order, same panels).
++    const std::string echoed = host.retitle("a", "Problems (2)");
++    CHECK(echoed == "Problems (2)");
++    REQUIRE(host.find("a") != nullptr);
++    CHECK(host.find("a")->title == "Problems (2)");
++    CHECK(host.find("b") != nullptr);
++    CHECK(host.find("b")->title == "B");  // only the named one moved
++    CHECK(host.dock().leaf_count() == leaves_before);
++    CHECK(host.dock().panels() == panels_before);
++
++    // Back to plain: the badge clears the same way.
++    CHECK(host.retitle("a", "Problems").empty() == false);
++    CHECK(host.find("a")->title == "Problems");
++
++    // An unknown id is a no-op answering empty - nothing crashes, the
++    // known titles stand.
++    CHECK(host.retitle("nope", "X").empty());
++    CHECK(host.find("a")->title == "Problems");
++    CHECK(host.find("b")->title == "B");
++}
++
+ TEST_CASE("the floating layer persists in the layout json") {
+     PanelRegistry registry;
+     PanelDesc a;
+diff --git a/tools/smoke_circsim.py b/tools/smoke_circsim.py
+index ed8098a..f0b8604 100644
+--- a/tools/smoke_circsim.py
++++ b/tools/smoke_circsim.py
+@@ -188,7 +188,11 @@ def main():
+           "bsource: V=3*v(in) answers 3 V")
+ 
+     # The voltage switch: the .dc transfer curve over V2 - open below
+-    # Vt = 2 (the Roff divider), 5 V over 1010 above it.
++    # Vt = 2, 5 V over 1010 above it. The LED sits between the switch
++    # and R1 now, so an OPEN switch no longer reads 0 V at out: the
++    # Roff = 1meg leakage (~4.7 uA) biases the diode at its microamp
++    # forward drop (~0.35 V - still far below the ~2.4 V lit
++    # threshold), where the pre-LED circuit answered 0 V.
+     sw = EXAMPLES / "switch.csim"
+     r = run(args.cli, "erc", sw)
+     check(r.returncode == 0, "switch erc exit 0")
+@@ -197,9 +201,9 @@ def main():
+     header, rows = parse_csv(r.stdout)
+     out = header.index("v(out)")
+     check(len(rows) == 11, "switch dc sweep has 11 points")
+-    check(rows[0][out] < 1e-2, "switch: open at V2 = 0")
+-    check(rows[2][out] < 1e-2, "switch: still open at V2 = 1 (Vt = 2)")
+-    check(abs(rows[10][out] - 5.0 * 1000.0 / 1010.0) < 5e-3,
++    check(rows[0][out] < 0.4, "switch: open at V2 = 0")
++    check(rows[2][out] < 0.4, "switch: still open at V2 = 1 (Vt = 2)")
++    check(abs(rows[10][out] - 5.0 * 1000.0 / 1010.0) < 1e-2,
+           "switch: Ron closed at V2 = 5")
+ 
+     # The transformer part: ONE symbol, THREE cards (L1p, L1s and the K

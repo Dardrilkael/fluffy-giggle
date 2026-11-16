@@ -47,6 +47,7 @@ struct TransportStripLayout {
     gui::Rect button;  // play/pause
     gui::Rect bar;     // the scrub track
     gui::Rect rate;    // the pace chip (a press cycles the ladder)
+    gui::Rect readout; // the axis readout's reserved box (the draw clips)
 };
 [[nodiscard]] TransportStripLayout transport_strip_layout(
     const gui::Rect& body);

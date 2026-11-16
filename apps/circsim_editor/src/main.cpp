@@ -441,6 +441,7 @@ class CircsimApp final : public ws::ui::App {
             (void)shell_->documents().new_document();
         }
         watch_active_document(true);
+        update_problems_tab();
     }
 
     // The files the OS dropped: straight into the shell (the drop IS an
@@ -917,7 +918,12 @@ class CircsimApp final : public ws::ui::App {
         erc_cmd.enabled = [this] { return editor_.schem() != nullptr; };
         erc_cmd.execute = [this](std::string_view) {
             editor_.run_erc();
-            editor_.status(editor_.problems.header);
+            update_problems_tab();
+            editor_.status(editor_.problems.has &&
+                                   !editor_.problems.diags.empty()
+                               ? editor_.problems.header +
+                                     " - F8 walks them"
+                               : editor_.problems.header);
         };
         add(std::move(erc_cmd));
 
@@ -1351,13 +1357,16 @@ class CircsimApp final : public ws::ui::App {
                           editor_.results.run.fouriers.size(),
                           editor_.results.run.fouriers.size() == 1 ? "" : "s");
             editor_.toast(summary, gui::ToastSeverity::info);
+            update_problems_tab();
             editor_.status(count == 0 ? summary
-                                      : editor_.problems.header);
+                                      : editor_.problems.header +
+                                            " - F8 walks them");
         } else {
             editor_.toast("Simulation failed: " +
                               outcome.run.error().message,
                           gui::ToastSeverity::error);
-            editor_.status(editor_.problems.header);
+            update_problems_tab();
+            editor_.status(editor_.problems.header + " - F8 walks them");
         }
         ws::core::warn("circsim: deliver_run done");
     }
@@ -1453,6 +1462,29 @@ class CircsimApp final : public ws::ui::App {
         }
         return jobs;
     }
+
+    // The Problems tab's badge + the status line's tail: the count the
+    // last check answered, spelled where the user looks. The tab title
+    // carries it ("Problems (2)"), the status line's own tail names the
+    // walk's chord so the bar alone says where the warnings live.
+    void update_problems_tab() {
+        if (shell_ == nullptr) {
+            return;
+        }
+        const char* id = "problems";
+        std::string title = "Problems";
+        std::size_t count = 0;
+        if (editor_.problems.has) {
+            count = editor_.problems.diags.size();
+        }
+        if (count > 0) {
+            title += " (" + std::to_string(count) + ")";
+        }
+        (void)shell_->panel_host().retitle(id, std::move(title));
+        problems_count_ = count;
+    }
+
+    std::size_t problems_count_ = 0;
 
     // --- the active-document watch ------------------------------------------------
 

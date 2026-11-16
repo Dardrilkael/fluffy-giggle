@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <map>
@@ -72,6 +73,36 @@ bool on_polyline(const std::vector<Pos>& path, Pos p) {
         }
     }
     return false;
+}
+
+// The point's distance to the polyline: the minimum over its segments
+// (the label reach rule's measure - the same nearest-segment rule the
+// pin picking rides, geom.cpp's dist_to_segment). Grid coordinates are
+// integer-valued doubles, so this stays exact for axis-aligned runs.
+[[nodiscard]] double len(Pos p) {
+    return std::sqrt(p.x * p.x + p.y * p.y);
+}
+
+double polyline_distance(const std::vector<Pos>& path, Pos p) {
+    double best = std::numeric_limits<double>::max();
+    for (std::size_t i = 1; i < path.size(); ++i) {
+        const Pos a = path[i - 1];
+        const Pos b = path[i];
+        const Pos ab{b.x - a.x, b.y - a.y};
+        const Pos ap{p.x - a.x, p.y - a.y};
+        const double denom = ab.x * ab.x + ab.y * ab.y;
+        double t = 0.0;
+        if (denom > 0.0) {
+            t = (ap.x * ab.x + ap.y * ab.y) / denom;
+            t = std::max(0.0, std::min(1.0, t));
+        }
+        const Pos closest{a.x + t * ab.x - p.x, a.y + t * ab.y - p.y};
+        best = std::min(best, len(closest));
+        if (best == 0.0) {
+            break;  // on the polyline: no nearer answer exists
+        }
+    }
+    return best;
 }
 
 bool same_pos(Pos a, Pos b) {
@@ -434,7 +465,12 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
     // --- labels: attach, then merge same names ----------------------------------
     // An unattached label (empty space, or a wire crossing) joins NO net -
     // it is a dangling decoration, warned above and excluded from
-    // grouping, same-name merging and ground forcing below.
+    // grouping, same-name merging and ground forcing below. A label that
+    // misses the exact coincidence by a hair still names the net it
+    // visually belongs to: the anchor reaches one grid cell around the
+    // wires' polylines (nearest wire wins; the schematic's own grid,
+    // the snap the editor already rides) before the label reads as
+    // dangling.
     std::vector<std::uint32_t> attached_labels;
     const auto mark_attached = [&](std::uint32_t le) {
         attached_labels.push_back(le);
@@ -474,14 +510,34 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
                 DiagTarget{DiagTarget::Kind::Label, 0, DiagTarget::npos(), 0,
                            l.id}));
         } else {
-            out.diags.push_back(make_diag(
-                Severity::Warning,
-                "circsim.nets.label_unattached",
-                "label '" + l.name +
-                    "' is not on any wire, pin or junction",
-                "label " + l.name,
-                DiagTarget{DiagTarget::Kind::Label, 0, DiagTarget::npos(), 0,
-                           l.id}));
+            // The near miss: the anchor within one grid cell of the
+            // wires' polylines attaches to the NEAREST wire (the same
+            // nearest-segment rule pin picking rides; the first wire
+            // stands when two tie exactly). Only the exact-crossing
+            // geometry above refuses to pick.
+            const double reach = s.grid > 0.0 ? s.grid : 1.0;
+            std::size_t best_wi = paths.size();
+            double best_d = reach;
+            for (std::size_t wi = 0; wi < paths.size(); ++wi) {
+                const double d = polyline_distance(paths[wi], l.pos);
+                if (d <= best_d) {
+                    best_d = d;  // a nearer wire narrows the reach
+                    best_wi = wi;
+                }
+            }
+            if (best_wi < paths.size()) {
+                dsu.unite(le, wire_ents[best_wi].first);
+                mark_attached(le);
+            } else {
+                out.diags.push_back(make_diag(
+                    Severity::Warning,
+                    "circsim.nets.label_unattached",
+                    "label '" + l.name +
+                        "' is not on any wire, pin or junction",
+                    "label " + l.name,
+                    DiagTarget{DiagTarget::Kind::Label, 0,
+                               DiagTarget::npos(), 0, l.id}));
+            }
         }
     }
     const auto is_attached = [&](std::uint32_t le) {

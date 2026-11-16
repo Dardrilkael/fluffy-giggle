@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string_view>
+#include <vector>
 
 namespace ws::ui::gui {
 namespace {
@@ -307,6 +308,115 @@ void text(LayoutCursor& layout, const ChromeTheme& theme,
     const Rect rect =
         layout.next(width < 0.0f ? fit.advance : width, theme.control_height);
     draw_label(rect.x, rect.y, rect.height, fit, theme.text, theme);
+}
+
+int text_wrapped(LayoutCursor& layout, const ChromeTheme& theme,
+                 const char* label, float width) {
+    // The truncation-free face of text(): the word wrap. The breaks
+    // are computed first (the flow needs the count before it reserves
+    // anything), then one line-height row per line draws its slice
+    // through the same draw_label every body row uses. Breaks land at
+    // spaces only; a hard '\n' always breaks; a word wider than the
+    // whole width rides its own line whole rather than splitting
+    // mid-word - THE rule this widget exists to keep. Fontless: the
+    // estimate's arithmetic (per byte, label_char_width) walks the
+    // same ladder, so the flow reserves honest room either way.
+    if (label == nullptr || *label == '\0') {
+        return 0;
+    }
+    const float max_w = width < 0.0f
+                            ? std::max(0.0f, layout.remaining_width())
+                            : width;
+    const float line_h = theme.font != nullptr &&
+                                 theme.font->line_height() > 0.0f
+                             ? theme.font->line_height() + 2.0f
+                             : theme.control_height;
+    // The measure the wrap walks: the font's honest advance, or the
+    // fontless per-byte estimate (a view of bytes, no terminator
+    // needed - measure_text takes a C string, so the font path
+    // measures through a stack copy below).
+    const auto measure_view = [&](std::string_view s) {
+        if (s.empty()) {
+            return 0.0f;
+        }
+        if (theme.font == nullptr) {
+            return static_cast<float>(s.size()) * theme.label_char_width;
+        }
+        char buf[kLabelScratchBytes];
+        const std::size_t n = std::min(s.size(), kLabelScratchBytes - 1);
+        std::memcpy(buf, s.data(), n);
+        buf[n] = '\0';
+        return theme.font->measure_text(buf);
+    };
+
+    // The wrap, greedy: walk to the next WORD (spaces and newlines
+    // never stall the walk - a space between words is consumed by the
+    // next word's advance), keep the word when the joined run still
+    // fits, flush at '\n' or when the next word would overflow. A word
+    // that starts a line ALWAYS rides (`scan == line_begin`: a word
+    // wider than the whole line stands alone, whole - never split
+    // mid-word).
+    std::vector<std::string_view> lines;
+    std::string_view rest(label);
+    std::size_t line_begin = 0;
+    std::size_t scan = 0;  // the walk's position (a word start or a break)
+    while (scan < rest.size()) {
+        if (rest[scan] == '\n') {
+            // A hard break: flush the standing line (maybe empty), the
+            // next line starts past the newline.
+            lines.push_back(rest.substr(line_begin, scan - line_begin));
+            line_begin = ++scan;
+            continue;
+        }
+        if (rest[scan] == ' ') {
+            // A separator: advance (the space stays INSIDE the joined
+            // run - substr spans it - and never begins a word's scan).
+            ++scan;
+            continue;
+        }
+        // A word at `scan`: its end (the next space or newline).
+        std::size_t word_end = scan;
+        while (word_end < rest.size() && rest[word_end] != ' ' &&
+               rest[word_end] != '\n') {
+            ++word_end;
+        }
+        const std::string_view joined =
+            rest.substr(line_begin, word_end - line_begin);
+        const bool fits = scan == line_begin ||
+                          measure_view(joined) <= max_w;
+        if (fits) {
+            scan = word_end;  // keep the word
+            continue;
+        }
+        // The next word would overflow: flush the standing line, the
+        // new one starts at THIS word (the space it rode on stays out
+        // of the flush - substr(line_begin, scan) cuts before it).
+        lines.push_back(rest.substr(line_begin, scan - line_begin));
+        line_begin = scan;
+    }
+    // The tail: whatever stands after the last break, even just a
+    // lone word (an empty tail means the text ENDED on a '\n').
+    if (line_begin < rest.size()) {
+        lines.push_back(rest.substr(line_begin));
+    }
+
+    int drawn = 0;
+    for (const std::string_view line : lines) {
+        const Rect rect = layout.next(max_w, line_h);
+        char buf[kLabelScratchBytes];
+        const std::size_t n = std::min(line.size(), kLabelScratchBytes - 1);
+        std::memcpy(buf, line.data(), n);
+        buf[n] = '\0';
+        // draw_label handles both faces: the font's glyphs at the
+        // snapped line top, or the fontless bar at the fitted advance
+        // (which a fontless theme answers per byte - the same
+        // estimate the wrap itself walked, so bar width and reserved
+        // row agree).
+        const LabelFit fit = fit_text(buf, -1.0f, theme, buf, sizeof(buf));
+        draw_label(rect.x, rect.y, rect.height, fit, theme.text, theme);
+        ++drawn;
+    }
+    return drawn;
 }
 
 void heading(LayoutCursor& layout, const ChromeTheme& theme,

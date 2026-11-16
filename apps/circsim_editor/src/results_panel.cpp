@@ -1551,11 +1551,13 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
             combo.combo_open = false;
         }
         int picked = static_cast<int>(ed.results.table);
-        const float combo_w =
-            std::max(80.0f, layout.remaining_width() - 190.0f);
+        // The picker FILLS its own line (negative width): the old
+        // fixed 190px reservation squeezed the export pair into
+        // "Export …" stubs at a narrow panel - the pair now flows on
+        // its own line below, whole (B1's no-mid-word-cut rule).
         if (gui::combo(gui, layout, theme, "table", items.data(),
                        static_cast<int>(items.size()), picked,
-                       combo.combo_open, combo_w)) {
+                       combo.combo_open, -1.0f)) {
             if (picked >= 0 &&
                 static_cast<std::size_t>(picked) < res.tables.size()) {
                 const bool changed =
@@ -1580,21 +1582,29 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
                 }
             }
         }
-        layout.same_line();
-        if (gui::button(gui, layout, theme, "Export CSV", 84.0f) &&
-            ed.export_results) {
+        // The export pair, flowed on their own line and sized to their
+        // whole labels (B2: two "Export …" stubs were one
+        // indistinguishable button - the labels are the purpose).
+        // button_row_flow wraps the overflow when the line cannot
+        // hold both (the no-mid-word-cut rule, the same reflow the
+        // legend toolbar below rides).
+        static const char* const kExportCells[] = {"Export CSV",
+                                                    "Export JSON"};
+        const int export_btn = gui::button_row_flow(
+            gui, layout, theme, "results.export", kExportCells, 2, 96.0f,
+            nullptr);
+        if (export_btn == 0 && ed.export_results) {
             ed.export_results(false);
-        }
-        layout.same_line();
-        if (gui::button(gui, layout, theme, "Export JSON", 84.0f) &&
-            ed.export_results) {
+        } else if (export_btn == 1 && ed.export_results) {
             ed.export_results(true);
         }
         if (stale) {
             gui::ChromeTheme warn = theme;
             warn.text = gui::dim(theme.toast_warning, 0.95f);
-            gui::text(layout, warn,
-                      "Out of date - the schematic changed since the run (Ctrl+Enter re-runs)");
+            (void)gui::text_wrapped(
+                layout, warn,
+                "Out of date - the schematic changed since the run "
+                "(Ctrl+Enter re-runs)");
         }
     }
 
@@ -1635,18 +1645,28 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
         quiet.text = gui::dim(theme.text, 0.45f);
         // The toolbar: bulk visibility, the discoverable "fit view"
         // (the double-click still works), and the hover x readout.
-        if (gui::button(gui, layout, theme, "Show all", 64.0f)) {
+        // The toolbar REFLOWS (button_row_flow): a narrow panel wraps
+        // "Fit view" onto the next line whole instead of drawing
+        // "Sho…"/"Hid…" stubs - the labels ARE the pair's purpose
+        // (B2), and the row never shrinks a button below its own
+        // whole label (B1).
+        static const char* const kLegendCells[] = {"Show all", "Hide all",
+                                                   "Fit view"};
+        // "Fit view" rides the same flowed row but draws DEAD until a
+        // gesture makes the view active (the double-click still resets
+        // directly) - the dead face reads "not applicable yet", the
+        // same lock Remove selected wears; Show/Hide stay alive.
+        const bool fit_dead = !ed.results.view.active;
+        const bool legend_dead[3] = {false, false, fit_dead};
+        const int legend_btn = gui::button_row_flow(
+            gui, layout, theme, "legend.tools", kLegendCells, 3, 72.0f,
+            legend_dead);
+        if (legend_btn == 0) {
             ed.results.visible.assign(t.signals.size(), 1u);
-        }
-        layout.same_line();
-        if (gui::button(gui, layout, theme, "Hide all", 64.0f)) {
+        } else if (legend_btn == 1) {
             ed.results.visible.assign(t.signals.size(), 0u);
-        }
-        if (ed.results.view.active) {
-            layout.same_line();
-            if (gui::button(gui, layout, theme, "Fit view", 64.0f)) {
-                ed.results.view = PlotView{};
-            }
+        } else if (legend_btn == 2) {
+            ed.results.view = PlotView{};  // dead never activates
         }
         if (ed.results.hover >= 0) {
             const std::span<const double> hxs = t.axis(x_index);
@@ -1658,8 +1678,7 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
             std::snprintf(xline, sizeof xline, "%s = %s  (sample %d)",
                           x_name, ws::circsim::format_eng(hx, 5).c_str(),
                           ed.results.hover);
-            layout.same_line();
-            gui::text(layout, quiet, xline);
+            (void)gui::text_wrapped(layout, quiet, xline);
         }
         const int at = ed.results.hover >= 0
                            ? ed.results.hover

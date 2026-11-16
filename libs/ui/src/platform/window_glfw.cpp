@@ -25,6 +25,17 @@
 
 #include <imgui_impl_glfw.h>
 
+#ifdef _WIN32
+// The OS dark-mode probe (prefers_dark below) reads the Personalize
+// registry key, so this platform TU - never an app - carries the one
+// windows.h the seam needs. Lean guard + NOMINMAX: this TU is in every
+// default desktop build, and windows.h's macros would collide with std.
+// Must come BEFORE GLFW/glfw3.h to avoid APIENTRY macro redefinition.
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
@@ -34,16 +45,6 @@
 #include <string_view>
 #include <utility>
 #include <vector>
-
-#ifdef _WIN32
-// The OS dark-mode probe (prefers_dark below) reads the Personalize
-// registry key, so this platform TU - never an app - carries the one
-// windows.h the seam needs. Lean guard + NOMINMAX: this TU is in every
-// default desktop build, and windows.h's macros would collide with std.
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#endif
 
 namespace ws::ui {
 namespace {

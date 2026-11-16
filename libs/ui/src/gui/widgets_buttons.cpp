@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <vector>
 
 namespace ws::ui::gui {
 
@@ -25,6 +26,81 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     paint(theme, &WidgetPainters::button, &button_draw, row.rect,
           result, theme, label, icon);
     return result.activated();
+}
+
+int button_row_flow(GuiContext& gui, LayoutCursor& layout,
+                    const ChromeTheme& theme, const char* label,
+                    const char* const* labels, int count,
+                    float min_width, const bool* dead) {
+    // The packing pass: how many buttons fit on the FIRST line at the
+    // floor width (the row's own geometry decides the line breaks -
+    // the flow rule this row exists to keep). Each packed line shares
+    // its width equally among its buttons, so a full line has no ragged
+    // right edge; the LAST cell on a line never shrinks below the
+    // floor (equal split of >= floor*count is >= floor).
+    if (labels == nullptr || count <= 0) {
+        return -1;
+    }
+    const float avail = std::max(0.0f, layout.remaining_width());
+    const float floor_w = std::max(8.0f, min_width);
+    // How many floor-width buttons fit: avail / (n buttons + n-1
+    // gaps). Solve for the largest n: n*floor + (n-1)*spacing <=
+    // avail -> n <= (avail + spacing) / (floor + spacing).
+    const int per_line = std::clamp(
+        static_cast<int>((avail + theme.spacing) / (floor_w + theme.spacing)),
+        1, count);
+
+    // The cells' rects, line by line, BEFORE any button draws: the row
+    // must reserve every line up front (same_line rewinds between
+    // same-line widgets - placing and drawing in one pass per button
+    // would lose the line's height bookkeeping the cursor keeps).
+    // Every cell is placed at its own true width and rewound onto the
+    // line with same_line(), so the cursor's line bookkeeping and the
+    // drawn rects agree exactly.
+    std::vector<Rect> cells;
+    cells.reserve(static_cast<std::size_t>(count));
+    for (int first = 0; first < count; first += per_line) {
+        const int on_line = std::min(per_line, count - first);
+        const float gaps =
+            static_cast<float>(on_line - 1) * theme.spacing;
+        const float each =
+            on_line > 0
+                ? std::max(floor_w * 0.5f,
+                           (avail - gaps) / static_cast<float>(on_line))
+                : floor_w;
+        for (int k = 0; k < on_line; ++k) {
+            // The first cell of a line OPENS the line; the rest rewind
+            // onto it (one spacing right of the previous cell - the
+            // same_line contract the tabs ride too).
+            cells.push_back(layout.next(each, theme.control_height));
+            if (k + 1 < on_line) {
+                layout.same_line();
+            }
+        }
+    }
+
+    // Draw over the reserved cells - one button per non-null label.
+    int clicked = -1;
+    for (int i = 0; i < count; ++i) {
+        if (labels[i] == nullptr) {
+            continue;  // the spacer cell: reserved, never drawn
+        }
+        gui.ids().push(i);
+        const Rect& rect = cells[static_cast<std::size_t>(i)];
+        const WidgetId id = gui.ids().id(label);
+        const bool disabled =
+            dead != nullptr && i < count && dead[i];
+        ButtonResult result =
+            button_behavior(gui, id, rect, disabled, {});
+        fold_hover_t(gui, id, result, theme);
+        paint(theme, &WidgetPainters::button, &button_draw, rect, result,
+              theme, labels[i], r2d::Sprite{});
+        if (result.activated()) {
+            clicked = i;  // the last activation wins, like a menu walk
+        }
+        gui.ids().pop();
+    }
+    return clicked;
 }
 
 ButtonResult button_behavior(GuiContext& gui, WidgetId id, const Rect& rect,

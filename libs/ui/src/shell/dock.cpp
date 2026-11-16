@@ -642,7 +642,21 @@ void DockTree::apply_drag(const SplitterRect& splitter, float position) {
     }
     const float span = splitter.span_size > 0.0f ? splitter.span_size : 1.0f;
     float frac = (position - splitter.span_start) / span;
-    const float lo = std::min(0.5f, kMinWeight * whole / pair);
+    // Two floors on the same clamp: the weight floor (5% of the split,
+    // above) and the PIXEL floor (kMinLeafPx each side) - whichever
+    // binds tighter on THIS span. The pair's own share of the span is
+    // pair/whole; each side's pixels are that times its share of the
+    // pair, so the pixel floor bounds the pair-frac at
+    // kMinLeafPx / (pair's span). Only when the pair's span can hold
+    // two floors (plus the splitter) does the pixel floor bind at all
+    // - a dock already narrower than two floors clamps at the weight
+    // floor alone and the drag simply cannot widen either side.
+    const float pair_span = span * (pair / whole);
+    float lo = std::min(0.5f, kMinWeight * whole / pair);
+    if (pair_span >= 2.0f * kMinLeafPx + kSplitterPx) {
+        const float px_lo = kMinLeafPx / pair_span;
+        lo = std::min(0.5f, std::max(lo, px_lo));
+    }
     const float hi = 1.0f - lo;
     frac = std::max(lo, std::min(hi, frac));
     node->weights[a] = pair * frac;

@@ -188,7 +188,11 @@ def main():
           "bsource: V=3*v(in) answers 3 V")
 
     # The voltage switch: the .dc transfer curve over V2 - open below
-    # Vt = 2 (the Roff divider), 5 V over 1010 above it.
+    # Vt = 2, 5 V over 1010 above it. The LED sits between the switch
+    # and R1 now, so an OPEN switch no longer reads 0 V at out: the
+    # Roff = 1meg leakage (~4.7 uA) biases the diode at its microamp
+    # forward drop (~0.35 V - still far below the ~2.4 V lit
+    # threshold), where the pre-LED circuit answered 0 V.
     sw = EXAMPLES / "switch.csim"
     r = run(args.cli, "erc", sw)
     check(r.returncode == 0, "switch erc exit 0")
@@ -197,9 +201,9 @@ def main():
     header, rows = parse_csv(r.stdout)
     out = header.index("v(out)")
     check(len(rows) == 11, "switch dc sweep has 11 points")
-    check(rows[0][out] < 1e-2, "switch: open at V2 = 0")
-    check(rows[2][out] < 1e-2, "switch: still open at V2 = 1 (Vt = 2)")
-    check(abs(rows[10][out] - 5.0 * 1000.0 / 1010.0) < 5e-3,
+    check(rows[0][out] < 0.4, "switch: open at V2 = 0")
+    check(rows[2][out] < 0.4, "switch: still open at V2 = 1 (Vt = 2)")
+    check(abs(rows[10][out] - 5.0 * 1000.0 / 1010.0) < 1e-2,
           "switch: Ron closed at V2 = 5")
 
     # The transformer part: ONE symbol, THREE cards (L1p, L1s and the K

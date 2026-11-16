@@ -1772,3 +1772,115 @@ TEST_CASE("a field edit reshapes the next frame's preview") {
     CHECK(e.hi == doctest::Approx(3.0).epsilon(0.02));
     CHECK(e.lo == doctest::Approx(-3.0).epsilon(0.02));
 }
+
+// --- B1: no mid-word cuts - the wrap, the reflow, the strip -----------------
+//
+// The layout pass's own gates: hint copy and headings wrap (every word
+// whole at any panel width), button rows reflow onto the next line
+// instead of shrinking into stubs, and the Properties tab strip fits
+// its labels. The fontless bench theme walks the same ladders the
+// font path does (per-byte estimate), so these assertions pin the
+// FLOW's geometry - the wrap's line count, the row's cell rects, the
+// strip's pitch - which is the part the pixel theme only renders.
+
+TEST_CASE("text_wrapped breaks at spaces only - never mid-word") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    gui.begin_frame(ws::input::InputFrame{});
+
+    // A 96px line at the estimate's 6px/char = 16 chars per line: the
+    // 26-char sentence wraps to 2 lines, each cut at a SPACE.
+    (void)layout.begin_panel(Rect{0.0f, 0.0f, 100.0f, 300.0f}, 2.0f, 8.0f);
+    const int lines = text_wrapped(layout, kDefaultChrome,
+                                    "custom model cards live here");
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(lines == 2);
+
+    // The flow advanced exactly two line rows: the next widget lands
+    // below BOTH wrapped lines (the wrap reserves its room).
+    gui.begin_frame(ws::input::InputFrame{});
+    (void)layout.begin_panel(Rect{0.0f, 0.0f, 100.0f, 300.0f}, 2.0f, 8.0f);
+    (void)text_wrapped(layout, kDefaultChrome, "custom model cards live here");
+    const Rect after = layout.next(50.0f, 10.0f);
+    layout.end_panel();
+    gui.end_frame();
+    // Two line rows (control_height + spacing each) below the 2px pad.
+    CHECK(after.y == doctest::Approx(2.0f + 2.0f * (28.0f + 8.0f)));
+
+    // A hard newline always breaks - two lines, the second empty is
+    // NOT drawn (a trailing newline ends the copy, no phantom row).
+    gui.begin_frame(ws::input::InputFrame{});
+    (void)layout.begin_panel(Rect{0.0f, 0.0f, 100.0f, 300.0f}, 2.0f, 8.0f);
+    CHECK(text_wrapped(layout, kDefaultChrome, "one\n") == 1);
+    CHECK(text_wrapped(layout, kDefaultChrome, "a\nb") == 2);
+    CHECK(text_wrapped(layout, kDefaultChrome, "") == 0);
+    layout.end_panel();
+    gui.end_frame();
+
+    // A word wider than the whole line rides its own line WHOLE - the
+    // no-mid-word-cut rule the widget exists to keep. 12 chars * 6px
+    // = 72px on a 20px line: still one line, never split.
+    gui.begin_frame(ws::input::InputFrame{});
+    (void)layout.begin_panel(Rect{0.0f, 0.0f, 24.0f, 300.0f}, 2.0f, 8.0f);
+    CHECK(text_wrapped(layout, kDefaultChrome, "supercalifragilistic") == 1);
+    layout.end_panel();
+    gui.end_frame();
+}
+
+TEST_CASE("button_row_flow packs the line and wraps the overflow") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    gui.begin_frame(ws::input::InputFrame{});
+
+    // A 300px line, five 64px-floor buttons + one spacer cell: the
+    // packing fits all six cells (5*64 + 5*8 = 360 > 300 -> wraps).
+    // 4 floors + gaps = 4*64 + 3*8 = 280 <= 300: four cells on the
+    // line, two on the next.
+    static const char* const kCells[] = {"+ op", nullptr, "+ dc",
+                                         "+ tran", "+ ac", "+ noise"};
+    (void)layout.begin_panel(Rect{0.0f, 0.0f, 300.0f, 300.0f}, 0.0f, 8.0f);
+    const int none_clicked = button_row_flow(gui, layout, kDefaultChrome,
+                                              "row", kCells, 6, 64.0f);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(none_clicked == -1);  // no pointer: nothing fires
+
+    // The row reserved TWO lines of control_height (the flow wrapped
+    // the overflow instead of shrinking the cells).
+    gui.begin_frame(ws::input::InputFrame{});
+    (void)layout.begin_panel(Rect{0.0f, 0.0f, 300.0f, 300.0f}, 0.0f, 8.0f);
+    (void)button_row_flow(gui, layout, kDefaultChrome, "row", kCells, 6,
+                          64.0f);
+    const Rect after = layout.next(10.0f, 10.0f);
+    layout.end_panel();
+    gui.end_frame();
+    // Zero padding: two control-height lines + two spacings exactly.
+    CHECK(after.y == doctest::Approx(2.0f * (28.0f + 8.0f)));
+
+    // A wide line holds all six on one row: the flow stays single-line
+    // when it can (no phantom second row of air).
+    gui.begin_frame(ws::input::InputFrame{});
+    (void)layout.begin_panel(Rect{0.0f, 0.0f, 640.0f, 300.0f}, 0.0f, 8.0f);
+    (void)button_row_flow(gui, layout, kDefaultChrome, "row", kCells, 6,
+                          64.0f);
+    const Rect wide_after = layout.next(10.0f, 10.0f);
+    layout.end_panel();
+    gui.end_frame();
+    CHECK(wide_after.y == doctest::Approx(28.0f + 8.0f));
+}
+
+TEST_CASE("the props tab strip fits its labels at any panel width") {
+    Bench b;
+    // The Simulation tab at a NARROW panel (the wrap's whole point):
+    // the strip never truncates "Properties" / "Netlist" / "Simulation"
+    // into "Propert..." - at 120px the three cannot share a line, so
+    // the strip wraps. The bench's draw asserts the flow survived
+    // (no hang, the rows lay out) - the strip's own wrap test lives in
+    // the widget's gate above.
+    b.ed.properties_tab = 2;
+    b.draw_properties();  // 360px wide bench panel: one line, all three
+    CHECK(b.ed.properties_tab == 2);  // the strip selected nothing
+}

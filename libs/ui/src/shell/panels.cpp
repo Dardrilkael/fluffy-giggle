@@ -187,6 +187,22 @@ void PanelHost::activate(const PanelRegistry& registry,
     }
 }
 
+std::string PanelHost::retitle(std::string_view instance,
+                                std::string title) {
+    PanelInstance* found = nullptr;
+    for (PanelInstance& p : instances_) {
+        if (p.id == instance) {
+            found = &p;
+            break;
+        }
+    }
+    if (found != nullptr) {
+        found->title = std::move(title);
+        return found->title;
+    }
+    return {};
+}
+
 void PanelHost::cycle(const PanelRegistry& registry) {
     if (instances_.empty()) {
         return;

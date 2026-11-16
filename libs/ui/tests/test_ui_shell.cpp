@@ -920,6 +920,55 @@ TEST_CASE("float_panel tears a tab out and redock puts it back") {
     CHECK(host.dock().panels() == std::vector<std::string>{"b"});
 }
 
+// retitle: the badge seam. The Problems panel relabels its tab with
+// the live count ("Problems (2)") - the title the tab strip and the
+// Window menu draw - without undocking, reordering or touching the
+// tree, and a closed id answers empty (a no-op, never a crash).
+TEST_CASE("retitle relabels an open instance's tab without moving it") {
+    PanelRegistry registry;
+    PanelDesc a;
+    a.id = "a";
+    a.title = "Problems";
+    a.placement.area = DockPlacement::Area::bottom;
+    a.draw = [](GuiContext&, LayoutCursor&, const ws::ui::gui::ChromeTheme&,
+                const PanelInstance&) {};
+    PanelDesc b;
+    b.id = "b";
+    b.title = "B";
+    b.placement.area = DockPlacement::Area::right;
+    b.draw = [](GuiContext&, LayoutCursor&, const ws::ui::gui::ChromeTheme&,
+                const PanelInstance&) {};
+    REQUIRE(registry.add(std::move(a)));
+    REQUIRE(registry.add(std::move(b)));
+
+    PanelHost host;
+    (void)host.open(registry, "a");
+    (void)host.open(registry, "b");
+    const std::size_t leaves_before = host.dock().leaf_count();
+    const auto panels_before = host.dock().panels();
+
+    // The relabel: the instance's title answers the new spelling, the
+    // dock tree never notices (same leaves, same order, same panels).
+    const std::string echoed = host.retitle("a", "Problems (2)");
+    CHECK(echoed == "Problems (2)");
+    REQUIRE(host.find("a") != nullptr);
+    CHECK(host.find("a")->title == "Problems (2)");
+    CHECK(host.find("b") != nullptr);
+    CHECK(host.find("b")->title == "B");  // only the named one moved
+    CHECK(host.dock().leaf_count() == leaves_before);
+    CHECK(host.dock().panels() == panels_before);
+
+    // Back to plain: the badge clears the same way.
+    CHECK(host.retitle("a", "Problems").empty() == false);
+    CHECK(host.find("a")->title == "Problems");
+
+    // An unknown id is a no-op answering empty - nothing crashes, the
+    // known titles stand.
+    CHECK(host.retitle("nope", "X").empty());
+    CHECK(host.find("a")->title == "Problems");
+    CHECK(host.find("b")->title == "B");
+}
+
 TEST_CASE("the floating layer persists in the layout json") {
     PanelRegistry registry;
     PanelDesc a;
@@ -1818,4 +1867,95 @@ TEST_CASE("the theme follows the settings key") {
                                          "shell.theme", "dark"));
     CHECK(&rig.shell->theme() == &ws::ui::gui::kDefaultChrome);
     (void)rig.shell->shutdown();
+}
+
+// The splitter's PIXEL floor (B3): the weight clamp alone lets a wide
+// span crush a sibling to a sliver (5% of a big split is fine; 5% of a
+// narrow one is a tab strip and nothing else). A drag that would push
+// a side under kMinLeafPx parks the boundary AT the floor instead - a
+// panel never resizes or docks so small its content cannot breathe.
+TEST_CASE("a dragged splitter keeps kMinLeafPx on both sides") {
+    using namespace ws::ui::shell;
+    DockTree tree;
+    tree.add("editor", {DockPlacement::Area::center});
+    tree.add("plot", {DockPlacement::Area::right});
+    REQUIRE(tree.leaf_count() == 2);
+
+    // A 600px span: the pair's span is the whole 600 (even split),
+    // two floors + the splitter = 246 <= 600 - the pixel floor binds.
+    const float span_w = 600.0f;
+    const DockTree::Layout laid = tree.resolve({0.0f, 0.0f, span_w, 400.0f});
+    REQUIRE(laid.splitters.size() == 1);
+
+    // A drag all the way to the right edge: the boundary parks at
+    // span - kMinLeafPx (the RIGHT side's floor), not at the weight
+    // floor's 5% (30px).
+    tree.apply_drag(laid.splitters[0], span_w);
+    const DockTree::Layout clamped = tree.resolve({0.0f, 0.0f, span_w, 400.0f});
+    CHECK(clamped.leaves[1].rect.width == doctest::Approx(kMinLeafPx));
+    CHECK(clamped.leaves[0].rect.width ==
+          doctest::Approx(span_w - kMinLeafPx));
+
+    // And all the way LEFT: the same floor on the other side.
+    tree.apply_drag(clamped.splitters[0], -50.0f);
+    const DockTree::Layout clamped_l = tree.resolve({0.0f, 0.0f, span_w, 400.0f});
+    CHECK(clamped_l.leaves[0].rect.width == doctest::Approx(kMinLeafPx));
+    CHECK(clamped_l.leaves[1].rect.width ==
+          doctest::Approx(span_w - kMinLeafPx));
+
+    // A span too narrow to hold two floors: the weight floor binds
+    // alone (the drag simply cannot close either side further), and
+    // nothing misbehaves.
+    DockTree narrow;
+    narrow.add("a", {DockPlacement::Area::center});
+    narrow.add("b", {DockPlacement::Area::right});
+    const DockTree::Layout narrow_laid =
+        narrow.resolve({0.0f, 0.0f, 100.0f, 100.0f});
+    REQUIRE(narrow_laid.splitters.size() == 1);
+    narrow.apply_drag(narrow_laid.splitters[0], 99.0f);
+    const DockTree::Layout narrow_moved =
+        narrow.resolve({0.0f, 0.0f, 100.0f, 100.0f});
+    CHECK(narrow_moved.leaves[1].rect.width ==
+          doctest::Approx(100.0f * kMinWeight));  // the 5% floor won
+}
+
+// The tab strip's FIT-the-line contract (B1): a negative width packs
+// the tabs with each at least wide enough for its own whole label,
+// and the overflow WRAPS onto the next line - "Properties" is never
+// "Propert...". The fontless estimate (6px/char, 12px padding) makes
+// the floors exactly predictable on the bench theme.
+TEST_CASE("tab_bar fits the line: whole labels, wrapped overflow") {
+    using namespace ws::ui::gui;
+    GuiContext gui;
+    LayoutCursor layout;
+    static const char* kTabs[] = {"Properties", "Netlist", "Simulation"};
+    int active = 0;
+
+    // A 400px line: "Properties" (10*6+24=84) + "Netlist" (7*6+24=66)
+    // + "Simulation" (10*6+24=84) + 2*8 spacing = 250 <= 400 - all
+    // three share ONE line, each pitched at the widest floor (84).
+    gui.begin_frame(ws::input::InputFrame{});
+    (void)layout.begin_panel(Rect{0.0f, 0.0f, 400.0f, 300.0f}, 0.0f, 8.0f);
+    (void)tab_bar(gui, layout, kDefaultChrome, "views", kTabs, 3, active,
+                  -1.0f);
+    const Rect after = layout.next(10.0f, 10.0f);
+    layout.end_panel();
+    gui.end_frame();
+    // One line: the next widget lands one control-height + spacing down.
+    CHECK(after.y == doctest::Approx(28.0f + 8.0f));
+
+    // A 100px line: the three floors (84 + 66 + 84 + 2*8 = 250) cannot
+    // share it - the strip WRAPS. "Properties" and "Netlist" fit (84+8
+    // +66=158 > 100 - no: 84+66+8=158 > 100, so only "Properties"
+    // rides the first line) and the rest wrap.
+    gui.begin_frame(ws::input::InputFrame{});
+    (void)layout.begin_panel(Rect{0.0f, 0.0f, 100.0f, 300.0f}, 0.0f, 8.0f);
+    (void)tab_bar(gui, layout, kDefaultChrome, "views", kTabs, 3, active,
+                  -1.0f);
+    const Rect wrapped_after = layout.next(10.0f, 10.0f);
+    layout.end_panel();
+    gui.end_frame();
+    // THREE lines (one tab per line - none of the labels truncate).
+    CHECK(wrapped_after.y ==
+          doctest::Approx(3.0f * (28.0f + 8.0f)));
 }

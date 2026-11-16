@@ -129,31 +129,30 @@ void label_line(gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
     gui::text(layout, theme, line);
 }
 
-// A dim, secondary line: hints, units, validation notes. Drawn the way
-// the netlist rows are (one layout row + draw_text) so it costs a single
-// row and never competes with the primary text.
+// A dim, secondary line: hints, units, validation notes. WRAPS at the
+// panel's width (the long help copy - "custom model - its .model or
+// .subckt card lives in Simulation > Directives" - reads whole at
+// every panel width, never an ellipsis mid-word): the body face's
+// own color dimmed one rung, one line-height row per wrapped line.
 void hint_line(gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
                const std::string& text) {
-    if (theme.font != nullptr && theme.font->line_height() > 0.0f) {
-        const ws::ui::r2d::Font& font = *theme.font;
-        const gui::Rect row =
-            layout.next(layout.remaining_width(), font.line_height() + 2.0f);
-        (void)ws::ui::r2d::draw_text(row.x, row.y, text.c_str(), font,
-                                     gui::dim(theme.text, 0.6f));
-    } else {
-        // Fontless fallback: use the text widget which handles null font.
-        // (The row reservation stands: the same cursor advance the
-        // font path makes, so both branches cost one layout row.)
-        layout.next(layout.remaining_width(), 16.0f);
-        gui::text(layout, theme, text.c_str());
-    }
+    // The wrapped draw rides the widget library's own text_wrapped
+    // through a dimmed theme copy (the one idiom for fading chrome):
+    // every word whole, breaks at spaces only - and the fontless
+    // bench theme's rows still reserve honest room.
+    gui::ChromeTheme dimmed = theme;
+    dimmed.text = gui::dim(theme.text, 0.6f);
+    (void)gui::text_wrapped(layout, dimmed, text.c_str());
 }
 
-// The panels' section break: a separator and a heading.
+// The panels' section break: a separator and a heading. The heading
+// WRAPS (the long ones - "Directives (.model / .include / .nodeset,
+// verbatim)" - keep every word whole at any panel width instead of
+// clipping at the right edge).
 void panel_section(gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
                    const char* title) {
     gui::separator(layout, theme);
-    gui::text(layout, theme, title);
+    gui::text_wrapped(layout, theme, title);
 }
 
 // "3 errors" / "1 error": the count with its noun.
@@ -2092,11 +2091,12 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
     // The tabs instead of the stack: the right panel's three concerns
     // (the selection, the deck, the schematic's setup) each get the
     // full height, so nothing scrolls off under the others. The strip
-    // divides the panel's width; the caller's int IS the state.
-    const float tab_w =
-        std::max(60.0f, layout.remaining_width() / 3.0f);
+    // FITS the panel's line (negative width): each tab at least wide
+    // enough for its whole label, wrapping onto the next line when the
+    // panel is too narrow for all three - never "Propert…" cut at the
+    // right edge. The caller's int IS the state.
     (void)gui::tab_bar(gui, layout, theme, "props tabs", kPropertyTabs, 3,
-                       ed.properties_tab, tab_w);
+                       ed.properties_tab, -1.0f);
 
     if (ed.properties_tab == 1) {
         // The Netlist tab: the bottom panel's own view, beside the
@@ -2355,40 +2355,37 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
 
     // One button per kind. (The old "add" combo answered only on a real
     // move off its first item, so ".op" - item 0 - could never be added.)
-    static const char* const kKinds[] = {"+ op", "+ dc", "+ tran", "+ ac",
-                                         "+ noise"};
-    constexpr int kKindCount =
-        static_cast<int>(std::size(kKinds));
-    const float add_w = std::max(
-        40.0f, (layout.remaining_width() -
-                static_cast<float>(kKindCount - 1) * theme.spacing) /
-                   static_cast<float>(kKindCount));
-    int add_kind = -1;
-    for (int k = 0; k < kKindCount; ++k) {
-        if (k != 0) {
-            layout.same_line();
-        }
-        if (gui::button(gui, layout, theme, kKinds[k], add_w)) {
-            add_kind = k;
-        }
-    }
+    // The REFLOWING row: at a wide panel all five ride one line; a
+    // narrow one wraps the overflow onto the next line instead of
+    // shrinking "+ tran" into "+ t..." (the no-mid-word-cut rule). A
+    // nullptr spacer between ".op" and the sweeps groups them like the
+    // panel's own sections do.
+    static const char* const kKindCells[] = {
+        "+ op", nullptr, "+ dc", "+ tran", "+ ac", "+ noise"};
+    constexpr int kKindCellCount =
+        static_cast<int>(std::size(kKindCells));
+    const int add_kind =
+        gui::button_row_flow(gui, layout, theme, "analysis.add",
+                             kKindCells, kKindCellCount, 64.0f);
     if (add_kind >= 0) {
         ws::circsim::AnalysisSpec spec;
         switch (add_kind) {
-            case 1: spec = ws::circsim::DcSpec{}; break;
+            // The cells' indices: 0 "+ op", 1 the spacer, 2 "+ dc",
+            // 3 "+ tran", 4 "+ ac", 5 "+ noise".
+            case 2: spec = ws::circsim::DcSpec{}; break;
             // A fresh .tran runs out of the box: tstop 1ms at a 1us
             // step (the classic 1000-point sweep), both editable the
             // moment the entry lands.
-            case 2:
+            case 3:
                 spec = ws::circsim::TranSpec{.tstep = 1e-6,
                                              .tstop = 1e-3};
                 break;
-            case 3: spec = ws::circsim::AcSpec{}; break;
+            case 4: spec = ws::circsim::AcSpec{}; break;
             // A fresh .noise carries the AC row's own sweep defaults
             // (10 pts/dec, 1Hz-1MHz); the two names - which net, which
             // source - are the user's to fill, and the fields are
             // waiting the moment the entry lands.
-            case 4: spec = ws::circsim::NoiseSpec{}; break;
+            case 5: spec = ws::circsim::NoiseSpec{}; break;
             default: spec = ws::circsim::OpSpec{}; break;
         }
         push_add_analysis(*ed.doc, spec);
@@ -2399,8 +2396,10 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
 
     if (!ed.schem()->analysis.entries.empty()) {
         // Dead until something is selected (the disabled face), and the
-        // act itself re-checks.
-        if (gui::button(gui, layout, theme, "Remove selected", 120.0f, {},
+        // act itself re-checks. The button FILLS the line (negative
+        // width) so "Remove selected" reads whole at every panel width
+        // - the fill rule the flowed add-row above rides too.
+        if (gui::button(gui, layout, theme, "Remove selected", -1.0f, {},
                         ed.analysis_index < 0)) {
             (void)remove_selected_analysis(ed);
         }

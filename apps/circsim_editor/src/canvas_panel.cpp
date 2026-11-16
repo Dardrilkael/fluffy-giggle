@@ -175,7 +175,9 @@ struct RunPainting {
     // 0012): the playhead's sample, every mapped net's voltage, every
     // probed element's current, the ramp's scale. Headless, tested,
     // and the one implementation every surface shares.
-    const ws::circsim::OverlaySnapshot snap =
+    // NOT const: std::move from a const object silently COPIES, which
+    // duplicated both hash maps every frame.
+    ws::circsim::OverlaySnapshot snap =
         ws::circsim::overlay_snapshot(*t, ed.results.map, ed.playback.t);
     rp.sample = snap.sample;
     rp.volts = std::move(snap.volts);
@@ -212,13 +214,23 @@ TransportStripLayout transport_strip_layout(const gui::Rect& body) {
     // The pill's width floor rose with the rate chip (patch 0012): the
     // play button, a scrubbable track, the pace chip and the readout
     // all need their room on a narrow canvas too.
-    const float w = std::min(320.0f, std::max(190.0f, body.width * 0.5f));
+    const float w = std::min(320.0f, std::max(220.0f, body.width * 0.5f));
     const float h = 30.0f;
-    constexpr float kReadoutPx = 62.0f;  // the right end's reservation
-    constexpr float kRatePx = 36.0f;     // the pace chip
+    constexpr float kReadoutPx = 96.0f;  // the right end's reservation
+    // ("V2 = 470mV" at the 16px body face runs ~80px; the old 62px
+    // reservation let the readout's left edge run into the rate chip -
+    // the overlap this layout pass closes.)
+    constexpr float kRatePx = 40.0f;     // the pace chip ("1/4x")
+    constexpr float kEdgePadPx = 10.0f;  // the strip's own side air
     TransportStripLayout out;
+    // The strip hugs the panel's bottom edge (the hint strip sits at
+    // -24px and the voltage legend at -44px right-aligned; the old
+    // -34px hover rode ON TOP of the bottom row of the schematic -
+    // gnd symbols sit there). Parked flush against the bottom edge,
+    // it can only occlude the last few px of the sheet, which the
+    // fit's margin (view.fit's world-units air) keeps clear anyway.
     out.strip = {body.x + (body.width - w) * 0.5f,
-                 body.y + body.height - h - 34.0f, w, h};
+                 body.y + body.height - h - kEdgePadPx, w, h};
     out.button = {out.strip.x + 3.0f, out.strip.y + 3.0f, h - 6.0f,
                   h - 6.0f};
     out.rate = {out.strip.x + out.strip.width - kReadoutPx - kRatePx - 2.0f,
@@ -226,6 +238,8 @@ TransportStripLayout transport_strip_layout(const gui::Rect& body) {
     out.bar = {out.strip.x + h + 4.0f, out.strip.y + h * 0.5f - 3.0f,
                std::max(20.0f, out.rate.x - (out.strip.x + h + 4.0f) - 4.0f),
                6.0f};
+    out.readout = {out.rate.x + out.rate.width + 2.0f, out.strip.y,
+                   kReadoutPx - 4.0f, h};
     return out;
 }
 
@@ -1126,6 +1140,12 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     ed.view.vy = body.y;
     ed.view.vw = body.width;
     ed.view.vh = body.height;
+    // The fit's overlay insets: the mode toggle's band (top) and the
+    // transport strip's (bottom) - the controls a fit must not park
+    // content under. The strip only exists with a scrubbable run, but
+    // the reservation is constant so a fit does not re-decide mid-run.
+    ed.view.inset_top = 8.0f + 26.0f + 8.0f;   // toggle row + its pads
+    ed.view.inset_bottom = 30.0f + 2.0f * 10.0f;  // strip + bottom air
     // Motion: the smooth camera and the locate pulse follow the theme's
     // animation switch (instant when motion is off, like every other
     // eased thing in this panel). tick() advances both by real time.
@@ -1284,6 +1304,27 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     wire_sel.color = theme.control_on;
     wire_sel.width = 3.0f;
 
+    // --- the world-space view cull. The camera is center/zoom over the
+    // body rect, so the visible world rect is exact; a margin (cells)
+    // keeps big symbols, their text and a wire's stroke from popping at
+    // the edge. Anything fully outside skips tessellation, net lookup
+    // and text layout - the cost that scaled with the WHOLE drawing
+    // instead of what is on screen. A selected part is never culled.
+    constexpr double kCullMarginCells = 12.0;
+    const bool cull_on = ed.view.zoom > 1e-9;
+    const double cull_hw =
+        cull_on ? 0.5 * static_cast<double>(body.width) / ed.view.zoom : 0.0;
+    const double cull_hh =
+        cull_on ? 0.5 * static_cast<double>(body.height) / ed.view.zoom : 0.0;
+    const double cull_x0 = ed.view.center.x - cull_hw - kCullMarginCells;
+    const double cull_x1 = ed.view.center.x + cull_hw + kCullMarginCells;
+    const double cull_y0 = ed.view.center.y - cull_hh - kCullMarginCells;
+    const double cull_y1 = ed.view.center.y + cull_hh + kCullMarginCells;
+    const auto point_visible = [&](double x, double y) {
+        return !cull_on || (x >= cull_x0 && x <= cull_x1 && y >= cull_y0 &&
+                            y <= cull_y1);
+    };
+
     // A net id -> its Net (the join dots carry ids; NetList indexes
     // names/pins/wires, so this is the one walk over the public list).
     const auto net_of_id = [wire_nets](std::uint32_t id) {
@@ -1315,16 +1356,27 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         return net_color(*n);
     };
 
+    std::vector<Point> wire_pts;  // one buffer for every wire of the frame
     for (const ws::circsim::Wire& w : s.wires()) {
         const std::vector<Pos> path = ed.wire_path(w);
         if (path.size() < 2u) {
             continue;
         }
-        std::vector<Point> pts;
-        pts.reserve(path.size());
+        wire_pts.clear();
+        wire_pts.reserve(path.size());
+        double bx0 = path[0].x, bx1 = path[0].x;
+        double by0 = path[0].y, by1 = path[0].y;
         for (const Pos& p : path) {
-            pts.push_back(Point{static_cast<float>(p.x),
+            bx0 = std::min(bx0, static_cast<double>(p.x));
+            bx1 = std::max(bx1, static_cast<double>(p.x));
+            by0 = std::min(by0, static_cast<double>(p.y));
+            by1 = std::max(by1, static_cast<double>(p.y));
+            wire_pts.push_back(Point{static_cast<float>(p.x),
                                 static_cast<float>(p.y)});
+        }
+        if (cull_on && (bx1 < cull_x0 || bx0 > cull_x1 || by1 < cull_y0 ||
+                        by0 > cull_y1)) {
+            continue;  // the bbox misses the view rect entirely
         }
         // The working set wears the highlight (the anchor alone was the
         // old face - a box-selected wire now shows it too).
@@ -1337,9 +1389,12 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                                            : nullptr);
         }
         rc.stroke_polyline(
-            pts.data(), static_cast<int>(pts.size()), paint);
+            wire_pts.data(), static_cast<int>(wire_pts.size()), paint);
     }
     for (const ws::circsim::Junction& j : s.junctions()) {
+        if (!point_visible(j.pos.x, j.pos.y)) {
+            continue;
+        }
         rc.fill_circle(
             Point{static_cast<float>(j.pos.x), static_cast<float>(j.pos.y)},
             0.14f,
@@ -1363,6 +1418,9 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         ed.drag.kind != Editor::Drag::Kind::None && ed.drag.moved;
     if (!drag_moving) {
         for (const auto& [dot_pos, dot_net] : ed.auto_junction_dots()) {
+            if (!point_visible(dot_pos.x, dot_pos.y)) {
+                continue;
+            }
             rc.fill_circle(
                 Point{static_cast<float>(dot_pos.x),
                       static_cast<float>(dot_pos.y)},
@@ -1371,6 +1429,9 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     }
     if (theme.font != nullptr) {
         for (const ws::circsim::Label& l : s.labels()) {
+            if (!point_visible(l.pos.x, l.pos.y)) {
+                continue;
+            }
             const Point at{static_cast<float>(l.pos.x),
                            static_cast<float>(l.pos.y)};
             rc.stroke_line(at, Point{at.x + 0.35f, at.y + 0.35f},
@@ -1393,6 +1454,9 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     for (const ws::circsim::Part& p : s.parts()) {
         const bool selected =
             ed.in_selection({Selection::Kind::Part, p.id});
+        if (!selected && !point_visible(p.pos.x, p.pos.y)) {
+            continue;  // off screen: no glow ease, no symbol, no text
+        }
         if (selected) {
             if (const std::optional<Bounds> b = ed.part_bounds(p.id)) {
                 Paint sel_paint;
@@ -1821,15 +1885,27 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
 
         // The readout (a fontless theme draws the shape alone): the
         // axis's own spelling - seconds for a .tran, the swept
-        // source's name and unit for a .dc.
+        // source's name and unit for a .dc. Drawn inside the strip's
+        // own reserved box (the readout rect), clipped at the pill's
+        // right edge: the text can never run into the rate chip (the
+        // old right-anchored spelling put "V2 = 470mV" under the
+        // chip's "1x").
         if (theme.font != nullptr) {
             const std::string label =
                 ws::circsim::overlay_axis_readout(*tran, ed.playback.t);
             const float w = rc.measure_text(label.c_str(), *theme.font);
+            const float avail =
+                std::max(0.0f, tl.readout.width);
+            const std::string shown =
+                w <= avail ? label
+                           : label.substr(0, static_cast<std::size_t>(
+                                   avail / std::max(1.0f, w) *
+                                   static_cast<float>(label.size())));
+            const float sw = rc.measure_text(shown.c_str(), *theme.font);
             (void)rc.draw_text(
-                tl.strip.x + tl.strip.width - w - 8.0f,
+                tl.readout.x + (tl.readout.width - sw) * 0.5f,
                 tl.strip.y + tl.strip.height * 0.5f - 6.0f,
-                label.c_str(), *theme.font, gui::dim(theme.text, 0.85f));
+                shown.c_str(), *theme.font, gui::dim(theme.text, 0.85f));
         }
     }
 

@@ -9,6 +9,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace ws::ui::gui {
 
@@ -46,7 +49,66 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
              const char* label, const char* const* tabs, int count,
              int& active, float width, bool disabled, int* closed,
              int* held_tab) {
-    width = std::max(width, 0.0f);  // like button: no mirrored quads
+    // The wrap split: a NEGATIVE width asks the strip to FIT the panel
+    // line rather than fixed-pitch it - each tab gets the widest share
+    // its own label fits whole into (the no-mid-word-cut rule), and
+    // tabs that cannot share the line WRAP onto the next (the strip
+    // grows rows, never truncates a label into "..." - the B1
+    // contract). A fixed width (>= 0) keeps byte-for-byte the old
+    // single-line behavior. The packing: measure each label's floor,
+    // greedily fill lines, then hand each line's tabs an equal share
+    // of the line with each tab at least its own floor.
+    const bool wrap = width < 0.0f;
+    float per_tab_w = std::max(width, 0.0f);  // fixed path's pitch
+    std::vector<int> line_breaks;  // wrap path: the index that OPENS
+                                     // each new line (the first is 0)
+    if (wrap) {
+        const float avail = std::max(0.0f, layout.remaining_width());
+        std::vector<float> floors;
+        floors.reserve(static_cast<std::size_t>(std::max(0, count)));
+        for (int i = 0; i < count; ++i) {
+            const char* tab_label = tabs != nullptr ? tabs[i] : nullptr;
+            const std::string_view display =
+                label_display(tab_label != nullptr ? tab_label : "");
+            const float advance =
+                display.empty() || theme.font == nullptr
+                    ? static_cast<float>(display.size()) *
+                          theme.label_char_width
+                    : theme.font->measure_text(std::string(display).c_str());
+            // The floor: the label whole, the face's side air, and
+            // (a closable strip) the x's own reserved corner.
+            floors.push_back(advance + 2.0f * theme.padding +
+                             (closed != nullptr ? theme.padding + 12.0f
+                                                : 0.0f));
+        }
+        // The greedy line packing: keep taking tabs while the line's
+        // total (floors + inter-tab spacing) stays within the line.
+        // The FIRST tab always rides (a tab wider than the whole line
+        // rides it alone, whole).
+        float used = 0.0f;
+        int on_line = 0;
+        for (int i = 0; i < count; ++i) {
+            const float w = floors[static_cast<std::size_t>(i)];
+            if (on_line > 0 && used + theme.spacing + w > avail) {
+                line_breaks.push_back(i);
+                on_line = 0;
+                used = 0.0f;
+            }
+            used += on_line > 0 ? theme.spacing + w : w;
+            ++on_line;
+        }
+        // The pitch: the widest tab's floor across ALL lines (one
+        // pitch reads as one strip - mixed pitches would look like a
+        // broken row), capped by what a line can hold. A single tab
+        // takes the whole line.
+        float widest = 0.0f;
+        for (int i = 0; i < count; ++i) {
+            widest = std::max(widest, floors[static_cast<std::size_t>(i)]);
+        }
+        per_tab_w = count > 0 ? std::min(widest, avail) : 0.0f;
+    }
+    const float tab_w = std::max(per_tab_w, 0.0f);  // like button: no
+                                                    // mirrored quads
 
     bool changed = false;
     if (closed != nullptr) {
@@ -60,8 +122,13 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
     // discipline, without stringifying).
     gui.ids().push(label);
     for (int i = 0; i < count; ++i) {
+        // The wrap path's line breaks live in the trailing rewind
+        // below: a tab whose index opens a new line lands at the
+        // flow's next row (next() does that on its own after the
+        // previous line's last tab advanced the cursor and the rewind
+        // was skipped); a tab CONTINUING a line rewinds onto it, flush.
         gui.ids().push(i);
-        const Rect rect = layout.next(width, theme.control_height);
+        const Rect rect = layout.next(tab_w, theme.control_height);
         // The x's geometry, BEFORE the tab's behavior: the tab's hit
         // shape needs the circle, and the label's fit budget needs the
         // zone. A small round 12-px hitbox at the tab's right edge,
@@ -187,8 +254,15 @@ bool tab_bar(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             // flow items, so the tabs sit at fixed pitch (the strip is
             // count*width wide, the documented geometry) - the explicit
             // 0 gap overrides the panel's item spacing, which would
-            // otherwise gap them.
-            layout.same_line(0.0f);
+            // otherwise gap them. The WRAP path breaks the line itself
+            // at its packed boundaries (the next tab's own opens_line),
+            // so the flush rewind only rides the fixed-pitch strip.
+            const bool next_opens_line =
+                wrap && std::find(line_breaks.begin(), line_breaks.end(),
+                                  i + 1) != line_breaks.end();
+            if (!next_opens_line) {
+                layout.same_line(0.0f);
+            }
         }
     }
     gui.ids().pop();

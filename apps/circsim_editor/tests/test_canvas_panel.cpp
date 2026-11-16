@@ -1437,6 +1437,116 @@ TEST_CASE("the transport scrubs and plays the transient") {
     CHECK(b.ed.playback.rate == doctest::Approx(0.25));
 }
 
+// The layout pass (A2): the strip's own boxes never overlap each other
+// and never ride over the bottom row of the sheet - the readout owns a
+// reservation wide enough for the swept-source spelling, and the
+// strip parks against the panel's bottom edge with only its own pad
+// of air, not a 34px hover over the ground symbols.
+TEST_CASE("the transport strip's boxes stay disjoint and off the sheet") {
+    Bench b;
+    ws::circsim::Part* v = b.doc.schem.add_part(
+        ws::circsim::Part::make("v", "V1", "5", {0.0, -4.0}));
+    ws::circsim::Part* r = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "1k", {6.0, 0.0}));
+    ws::circsim::Part* g = b.doc.schem.add_part(
+        ws::circsim::Part::make("gnd", "", "", {7.0, -6.0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{v->id, 0}, ws::circsim::PinRef{r->id, 0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{r->id, 1}, ws::circsim::PinRef{g->id, 0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{g->id, 0}, ws::circsim::PinRef{v->id, 1}));
+    b.doc.schem.analysis.entries.push_back(ws::circsim::DcSpec{
+        .source = "V1", .start = 0.0, .stop = 5.0, .step = 0.5});
+    deliver(b.ed, ws::circsim::run_schematic(b.doc.schem));
+
+    // The disjoint-pair rule, at several panel widths (the strip
+    // scales with the body; the reservation floor must hold at each).
+    const float widths[] = {640.0f, 480.0f, 360.0f, 260.0f};
+    for (const float w : widths) {
+        const gui::Rect body{0.0f, 0.0f, w, 520.0f};
+        const editor::TransportStripLayout tl =
+            editor::transport_strip_layout(body);
+        // Every box lives inside the strip.
+        for (const gui::Rect* box :
+             {&tl.button, &tl.bar, &tl.rate, &tl.readout}) {
+            CHECK(box->x >= tl.strip.x);
+            CHECK(box->x + box->width <= tl.strip.x + tl.strip.width);
+            CHECK(box->y >= tl.strip.y);
+            CHECK(box->y + box->height <= tl.strip.y + tl.strip.height);
+        }
+        // And no pair of them overlaps (the button, the bar, the chip,
+        // the readout sit side by side, never on top of each other).
+        const auto disjoint = [](const gui::Rect& a, const gui::Rect& c) {
+            return a.x + a.width <= c.x + 0.5f ||
+                   c.x + c.width <= a.x + 0.5f;
+        };
+        CHECK(disjoint(tl.button, tl.bar));
+        CHECK(disjoint(tl.bar, tl.rate));
+        CHECK(disjoint(tl.rate, tl.readout));
+        // The readout's reservation: wide enough for the .dc spelling
+        // the axis composes ("V1 = 470mV" and friends).
+        CHECK(tl.readout.width >= 88.0f);
+        // The strip hugs the panel's bottom edge (its own pad of air,
+        // never a hover over the bottom row of the schematic).
+        CHECK(tl.strip.y + tl.strip.height <=
+              body.y + body.height - 4.0f);
+        CHECK(tl.strip.y + tl.strip.height >=
+              body.y + body.height - 16.0f);
+    }
+}
+
+// The fit's overlay insets (A3): the view a fit answers through loses
+// the bands the canvas's own controls occupy, so a fitted sheet never
+// lands its bottom row under the transport strip (the switch.csim
+// ground-symbol clipping the pass set out to close).
+TEST_CASE("a fit keeps the sheet clear of the overlay bands") {
+    Bench b;
+    ws::circsim::Part* v = b.doc.schem.add_part(
+        ws::circsim::Part::make("v", "V1", "5", {0.0, -4.0}));
+    ws::circsim::Part* r = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "1k", {6.0, 0.0}));
+    ws::circsim::Part* g = b.doc.schem.add_part(
+        ws::circsim::Part::make("gnd", "", "", {7.0, -6.0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{v->id, 0}, ws::circsim::PinRef{r->id, 0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{r->id, 1}, ws::circsim::PinRef{g->id, 0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{g->id, 0}, ws::circsim::PinRef{v->id, 1}));
+
+    // The panel frame adopts the viewport the way the draw does - the
+    // insets ride with it (the toggle's band, the strip's band).
+    b.draw();
+    CHECK(b.ed.view.inset_top > 0.0f);
+    CHECK(b.ed.view.inset_bottom > 0.0f);
+
+    // The fitted view: every world corner of the content maps INSIDE
+    // the body's rect shrunk by the inset bands - the ground symbol
+    // at the bottom row lands above the strip's band, the header row
+    // below the toggle's. (Animation off: a fit glides when the theme
+    // animates, and the assertion reads the destination, not the
+    // flight's start.)
+    b.ed.view.animate = false;
+    const std::optional<ws::circsim::Bounds> bounds =
+        b.ed.content_bounds();
+    REQUIRE(bounds.has_value());
+    b.ed.view.fit(*bounds, 4.0);
+    const float top_band = b.ed.view.inset_top;
+    const float bottom_band = b.ed.view.inset_bottom;
+    for (const ws::circsim::Pos corner :
+         {ws::circsim::Pos{bounds->min_x, bounds->min_y},
+          ws::circsim::Pos{bounds->max_x, bounds->min_y},
+          ws::circsim::Pos{bounds->min_x, bounds->max_y},
+          ws::circsim::Pos{bounds->max_x, bounds->max_y}}) {
+        const ws::math::Vec2 px = b.ed.view.w2s(corner);
+        CHECK(px.y >= b.body.y + top_band - 0.5f);
+        CHECK(px.y <= b.body.y + b.body.height - bottom_band + 0.5f);
+        CHECK(px.x >= b.body.x - 0.5f);
+        CHECK(px.x <= b.body.x + b.body.width + 0.5f);
+    }
+}
+
 // --- the group edit: box-select, copy/paste/duplicate, the probe -----------------
 //
 // The scripted pointer frames drive the panel's own gesture ladder

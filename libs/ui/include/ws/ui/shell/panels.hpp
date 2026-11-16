@@ -171,6 +171,13 @@ public:
     void redock(const PanelRegistry& registry, std::string_view instance,
                 DockPlacement placement);
 
+    // Relabels one open instance's tab (the Problems count badge):
+    // the title the tab strip and the Window menu draw. A no-op when
+    // unknown; returns the new title for the caller's echo. Titles are
+    // cosmetic state, not layout - they ride no json.
+    [[nodiscard]] std::string retitle(std::string_view instance,
+                                       std::string title);
+
     // Reorders one instance's tab: to `index` of leaf `leaf`, a
     // reorder inside its own strip or a retab into another (the tree's
     // move_tab, both clamped). The dropped tab fronts its strip, so

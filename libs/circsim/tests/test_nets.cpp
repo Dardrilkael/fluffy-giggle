@@ -198,6 +198,110 @@ TEST_CASE("a label on empty space warns and names nothing") {
     }
 }
 
+// A label NEAR a wire names that wire's net: the anchor reaches up to
+// one grid cell around the wire's polyline, the nearest wire winning
+// when several are in reach (the switch.csim layout lesson - a label
+// dropped a unit or two off the wire silently named nothing and the
+// Results panel answered N001 instead of the user's spelling).
+TEST_CASE("a label within reach of one wire attaches to it") {
+    Bench b;
+    b.wire_j(0.0, 0.0, 10.0, 0.0);
+    b.label(5.0, 1.0, "near");  // one unit above the wire
+    const NetBuild nets = ws::circsim::build_nets(b.s);
+    REQUIRE(nets.nets.nets.size() == 1);
+    CHECK(nets.nets.nets[0].name == "near");
+    CHECK_FALSE(has_diag(nets, "circsim.nets.label_unattached"));
+}
+
+TEST_CASE("a label at a wire's end attaches through the reach") {
+    Bench b;
+    b.wire_j(3.0, 0.0, 10.0, 0.0);
+    b.label(2.0, 0.0, "in");  // one unit left of the endpoint
+    const NetBuild nets = ws::circsim::build_nets(b.s);
+    REQUIRE(nets.nets.nets.size() == 1);
+    CHECK(nets.nets.nets[0].name == "in");
+}
+
+TEST_CASE("a label's reach snaps to the NEAREST wire") {
+    Bench b;
+    const std::uint32_t wire_a = b.wire_j(0.0, 0.0, 10.0, 0.0);
+    b.wire_j(20.0, 0.0, 30.0, 0.0);
+    b.label(11.0, 0.0, "ctl");  // one unit past wire A's end, 9 from B
+    const NetBuild nets = ws::circsim::build_nets(b.s);
+    REQUIRE(nets.nets.nets.size() == 2);
+    // The label rides wire A's net (the nearest), not wire B's.
+    for (const auto& n : nets.nets.nets) {
+        if (n.name == "ctl") {
+            REQUIRE(n.wires.size() == 1);
+            CHECK(n.wires.front() == wire_a);
+        } else {
+            CHECK(n.name == "N001");  // B alone, auto-named
+        }
+    }
+}
+
+TEST_CASE("a label beyond reach stays unattached and warns") {
+    Bench b;
+    b.wire_j(0.0, 0.0, 10.0, 0.0);
+    b.label(5.0, 3.0, "far");  // three units off: outside one grid cell
+    const NetBuild nets = ws::circsim::build_nets(b.s);
+    CHECK(has_diag(nets, "circsim.nets.label_unattached"));
+    for (const auto& n : nets.nets.nets) {
+        CHECK(n.name != "far");
+    }
+}
+
+TEST_CASE("the reach is per-label unambiguous: two wires in reach, "
+          "nearest wins") {
+    Bench b;
+    const std::uint32_t lower = b.wire_j(0.0, 0.0, 10.0, 0.0);  // y=0
+    b.wire_j(0.0, 3.0, 10.0, 3.0);                             // y=3
+    b.label(5.0, 0.5, "tie");  // 0.5 from the lower, 2.5 from the upper
+    const NetBuild nets = ws::circsim::build_nets(b.s);
+    REQUIRE(nets.nets.nets.size() == 2);
+    // Exactly one net carries the label - the lower (nearest) wire's.
+    for (const auto& n : nets.nets.nets) {
+        if (!n.labels.empty()) {
+            REQUIRE(n.wires.size() == 1);
+            CHECK(n.wires.front() == lower);
+        }
+    }
+}
+
+TEST_CASE("a label's reach never bridges two separate nets through a "
+          "crossing") {
+    // AT the crossing point itself the exact rule stands: two wires'
+    // interiors carry the label, it names nothing, the warning says
+    // where to move it.
+    Bench b;
+    b.wire_j(0.0, 0.0, 10.0, 0.0);
+    b.wire_j(5.0, -5.0, 5.0, 5.0);
+    b.label(5.0, 0.0, "atcross");
+    const NetBuild nets = ws::circsim::build_nets(b.s);
+    CHECK(has_diag(nets, "circsim.nets.label_at_crossing"));
+    for (const auto& n : nets.nets.nets) {
+        CHECK(n.name != "atcross");
+    }
+
+    // NEAR the crossing, off both wires: the reach resolves the label
+    // to the NEAREST wire's net (the vertical arm is nearer than the
+    // horizontal one) - the label names one net, never both.
+    Bench c;
+    c.wire_j(0.0, 0.0, 10.0, 0.0);
+    c.wire_j(5.0, -5.0, 5.0, 5.0);
+    c.label(5.3, 0.4, "nearcross");
+    const NetBuild near = ws::circsim::build_nets(c.s);
+    CHECK_FALSE(has_diag(near, "circsim.nets.label_unattached"));
+    CHECK_FALSE(has_diag(near, "circsim.nets.label_at_crossing"));
+    std::size_t carrying = 0;
+    for (const auto& n : near.nets.nets) {
+        if (!n.labels.empty()) {
+            ++carrying;
+        }
+    }
+    CHECK(carrying == 1);
+}
+
 TEST_CASE("label conflicts warn and the lowest id wins") {
     Bench b;
     b.wire_j(0.0, 0.0, 10.0, 0.0);

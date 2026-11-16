@@ -123,6 +123,24 @@ bool button(GuiContext& gui, LayoutCursor& layout, const ChromeTheme& theme,
             bool disabled = false,
             ButtonStyle style = ButtonStyle::secondary);
 
+// A row of equal-width buttons that REFLOWS instead of shrinking into
+// stubs: the row packs as many buttons as fit side by side (each at
+// `min_width`, stretched to share the line equally), and the overflow
+// wraps onto the next line - never a mid-word "..." cut. Returns the
+// index of the clicked button, or -1 (the row is one widget family:
+// ids come from `label` + index, so the ids scope the caller already
+// holds keeps two such rows distinct). A `nullptr` label entry draws
+// a SPACER cell (no button, no id): the + op / + dc / + tran row
+// splices its own breaks with them. `min_width` is the floor one
+// button never shrinks below - at the stock metrics 40px keeps "+ op"
+// whole; a panel narrower than one floor-worth is ONE button per line,
+// still whole, still clickable. `dead` is the per-button lock, entry
+// by entry (null = all alive, short = the tail is alive).
+int button_row_flow(GuiContext& gui, LayoutCursor& layout,
+                    const ChromeTheme& theme, const char* label,
+                    const char* const* labels, int count,
+                    float min_width, const bool* dead = nullptr);
+
 // The split halves: button's interaction without a single draw, and its
 // stock look over the answer. Composing them in order IS the widget
 // above; swapping the draw half for your own is the custom-look seam -
@@ -413,6 +431,18 @@ void drag_float_draw(const Rect& rect, const DragFloatResult& result,
 void text(LayoutCursor& layout, const ChromeTheme& theme,
           const char* label, float width = -1.0f);
 
+// A static label that WRAPS instead of truncating: the truncation-free
+// face of text() for help copy and sentences whose words must stay
+// whole. The flow gains one line-height row PER wrapped line (a
+// negative `width` fills the rest of the current line, like text()'s
+// fill contract); breaks land at spaces only - a word longer than the
+// whole width rides its own line rather than splitting mid-word, and a
+// hard '\n' always breaks. Fontless themes answer one estimate-wide
+// row per ~20 chars (the v1 bar's arithmetic), so the flow reserves
+// honest room either way. Returns the line count it drew.
+int text_wrapped(LayoutCursor& layout, const ChromeTheme& theme,
+                 const char* label, float width = -1.0f);
+
 // A section heading - the font hierarchy's loud rung. Draws `label`
 // through the theme's STRONG face (font_strong, null = `font`, the
 // one-font rule) at that face's own baked size on a row taller than
@@ -527,8 +557,14 @@ void panel_draw(const Rect& bounds, const ChromeTheme& theme);
 void popup_frame_draw(const Rect& bounds, const ChromeTheme& theme);
 
 // A tab strip: `count` tabs side by side on one line, `width` px each
-// (the strip is count*width wide), theme.control_height tall. The
-// caller's `active` IS the selection state - a full click on a tab
+// (the strip is count*width wide), theme.control_height tall. A
+// NEGATIVE `width` fits the strip to the panel line instead: every tab
+// is at least wide enough to hold its whole label (measured through
+// the font or the fontless estimate, plus the close-x's reservation
+// on a closable strip), and tabs that cannot share the line WRAP onto
+// the next line - the strip grows rows, never truncates a label into
+// an ellipsis (the no-mid-word-cut rule the panels' strips ride).
+// The caller's `active` IS the selection state - a full click on a tab
 // writes the clicked index into it, and true returns only on the frame
 // the selection MOVED (clicking the already-active tab reports false).
 // An out-of-range `active` selects nothing until a click brings it back

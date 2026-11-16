@@ -14,6 +14,7 @@
 #include <ws/ui/canvas/canvas2d.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 #include <ws/math/geometry2d.hpp>
@@ -41,12 +42,26 @@ using ws::math::Vec4;
 // coarse enough that a 100k-primitive stress test stays fast.
 constexpr float kScreenTol = 0.25f;
 
-// Builds a 32-segment circle polyline in local space.
-std::vector<Vec2> circle_points(Vec2 center, float r) {
-    std::vector<Vec2> pts(32);
-    for (int i = 0; i < 32; ++i) {
-        const float a = kTwoPi * i / 32.0f;
-        pts[i] = {center.x + r * std::cos(a), center.y + r * std::sin(a)};
+// Builds a 32-segment circle polyline in local space. The unit-circle
+// cos/sin table is computed once (it never changes) and the result
+// is a fixed std::array: a junction dot or an LED halo used to cost
+// 64 trig calls plus a heap allocation per circle per frame; now it
+// is 32 multiply-adds on the stack. Same points, bit for bit.
+constexpr int kCircleSegs = 32;
+using CirclePts = std::array<Vec2, kCircleSegs>;
+
+CirclePts circle_points(Vec2 center, float r) {
+    static const std::array<Vec2, kCircleSegs> unit = [] {
+        std::array<Vec2, kCircleSegs> t{};
+        for (int i = 0; i < kCircleSegs; ++i) {
+            const float a = kTwoPi * i / static_cast<float>(kCircleSegs);
+            t[i] = {std::cos(a), std::sin(a)};
+        }
+        return t;
+    }();
+    CirclePts pts;
+    for (int i = 0; i < kCircleSegs; ++i) {
+        pts[i] = {center.x + r * unit[i].x, center.y + r * unit[i].y};
     }
     return pts;
 }
@@ -513,7 +528,14 @@ void Renderer2DCanvas::stroke(const Paint& paint) {
     // Same wrap-the-ring rule as CommandListCanvas::stroke: dash
     // fragments stroke open (their caps, no phantom chords), a run
     // that wraps its own subpath's ring keeps its cyclic joints.
-    std::vector<std::vector<Vec2>> runs;
+    // The run list and the screen-space copy are thread_local scratch:
+    // a selection box dashes every frame, and the per-call vectors
+    // were the canvas's steady-state allocations. stroke() is not
+    // reentrant (the sink never calls back into the canvas), so one
+    // buffer per thread is safe.
+    static thread_local std::vector<std::vector<Vec2>> runs;
+    static thread_local std::vector<Vec2> screen_run;
+    runs.clear();
     for (std::size_t s = 0; s < substarts_.size(); ++s) {
         const int first = substarts_[s];
         const int last = s + 1 == substarts_.size()
@@ -526,7 +548,7 @@ void Renderer2DCanvas::stroke(const Paint& paint) {
             const bool run_closed =
                 path_closed_ && pts_near(run.front(), path_[first]) &&
                 pts_near(run.back(), path_[last - 1]);
-            std::vector<Vec2> screen_run(run.size());
+            screen_run.resize(run.size());
             for (std::size_t i = 0; i < run.size(); ++i)
                 screen_run[i] = to_screen(run[i]);
             ws::ui::canvas::stroke_polyline(screen_run.data(),

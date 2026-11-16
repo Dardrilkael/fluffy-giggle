@@ -94,6 +94,17 @@ struct DockPlacement {
 // sibling.
 inline constexpr float kMinWeight = 0.05f;
 
+// The PIXEL floor a dragged splitter keeps each side of its pair at:
+// the usability minimum below which a docked panel cannot hold its
+// tab strip plus one readable control row. A share bound purely in
+// weights lets a wide window crush a sibling to a sliver of pixels
+// (5% of 800px is fine; 5% of a 240px strip is 12px of nothing), so
+// apply_drag() also clamps the pair's normalized shares so each side
+// resolves to at least this many pixels. The tab strip's own pitch
+// (kMinLeafPx minus chrome) is the number below the wrap the shell's
+// closable tabs measure against.
+inline constexpr float kMinLeafPx = 120.0f;
+
 // The splitter thickness, in pixels, centered on the boundary between
 // two children. The view draws and hit-tests this band.
 inline constexpr float kSplitterPx = 6.0f;

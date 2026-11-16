@@ -235,7 +235,14 @@ struct EditorView {
     }
 
     // Fit `b` (world) with `margin` world units of air on every side.
-    // A degenerate box keeps the zoom and centers.
+    // A degenerate box keeps the zoom and centers. The screen-space
+    // insets (px bands the canvas's overlays occupy: the mode toggle
+    // top-right, the transport strip along the bottom) shrink the
+    // viewport the fit answers through, so nothing the user just fitted
+    // hides under a control.
+    float inset_top = 0.0f;     // the mode toggle's band (top-right)
+    float inset_bottom = 0.0f;  // the transport strip's band (bottom)
+
     void fit(const Bounds& b, double margin) {
         if (!valid()) {
             return;
@@ -247,9 +254,10 @@ struct EditorView {
             fly_to(target, zoom);  // degenerate: center, keep the zoom
             return;
         }
+        const float usable_h = std::max(8.0f, vh - inset_top - inset_bottom);
         // fly_to clamps the zoom, and glides when `animate` is on.
         fly_to(target, std::min(static_cast<double>(vw) / w,
-                                static_cast<double>(vh) / h));
+                                static_cast<double>(usable_h) / h));
     }
 };
 
