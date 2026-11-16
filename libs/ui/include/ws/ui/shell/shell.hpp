@@ -194,6 +194,29 @@ public:
     // Opens paths as documents (the open command's and the drop's act).
     [[nodiscard]] ws::core::Status open_paths(const std::vector<std::string>& paths);
 
+    // --- the unsaved-changes guards (F3) -------------------------------------
+
+    // What the prompt's answer owes afterwards: a plain close answers
+    // nothing; the new/open/quit entries run their act once the
+    // document is saved or discarded.
+    enum class PendingIntent : std::uint8_t { none, close, new_document, open_paths, quit };
+    [[nodiscard]] PendingIntent pending_intent() const noexcept {
+        return close_intent_;
+    }
+    // New/Open/drop through the dirty guard: a clean document runs the
+    // act now, a dirty one raises the same 3-button modal the close
+    // flow owns (its answer saves/discards first, then runs the act -
+    // Cancel keeps the document and drops the request).
+    [[nodiscard]] ws::core::Status guarded_new_document();
+    [[nodiscard]] ws::core::Status guarded_open_paths(
+        const std::vector<std::string>& paths);
+    // The OS close request (the window's X, through the app's
+    // WindowCloseEvent): a clean document quits the app now; a dirty
+    // one raises the modal and the answer quits. `request_stop` is
+    // called with true when the answer is "quit" - the host wires it
+    // to its App::request_stop-shaped teardown.
+    void request_quit(const std::function<void()>& request_stop);
+
     // The palette's open flag (the Ctrl+Shift+P command flips it).
     bool palette_open = false;
 
@@ -220,6 +243,11 @@ private:
                        const gui::Rect& frame);
     void draw_close_prompt(gui::GuiContext& gui, const gui::ChromeTheme& theme,
                           const gui::Rect& frame);
+    // The guards' shared half (F3): arms the close modal for a dirty
+    // active document with `intent`/`paths` parked, answers true; a
+    // clean document answers false and the caller runs now.
+    bool guard_dirty_intent(PendingIntent intent,
+                            const std::vector<std::string>& paths = {});
     void draw_recovery_prompt(gui::GuiContext& gui,
                               const gui::ChromeTheme& theme,
                               const gui::Rect& frame);
@@ -312,6 +340,13 @@ private:
     // The close-with-dirty prompt: the document index awaiting the
     // answer (-1 = no prompt).
     int close_pending_ = -1;
+    // F3's guarded acts: what the prompt's answer runs afterwards (a
+    // plain close stays `close`), the paths a pending open owes, and
+    // the teardown the quit answer calls. The stop callback is stored
+    // (request_quit's parameter) so the answer frame can fire it.
+    PendingIntent close_intent_ = PendingIntent::close;
+    std::vector<std::string> close_paths_;
+    std::function<void()> quit_stop_;
     // The recovery prompt queue (document paths with crashed autosaves).
     std::vector<DocumentManager::RecoveryOffer> recoveries_;
     std::size_t recovery_at_ = 0;

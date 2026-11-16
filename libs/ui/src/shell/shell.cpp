@@ -319,9 +319,10 @@ void AppShell::register_commands() {
     new_cmd.category = "File";
     new_cmd.shortcut = {kKeyN, Mod::control};
     new_cmd.execute = [this](std::string_view) {
-        if (documents_->new_document()) {
-            set_status("new document");
-        }
+        // The F3 dirty guard: a clean document makes the new one now;
+        // a dirty one raises the save prompt, and its answer makes
+        // it (Cancel keeps the current document).
+        (void)guarded_new_document();
     };
     add_or_ignore(std::move(new_cmd));
 
@@ -341,13 +342,15 @@ void AppShell::register_commands() {
         options.title = "open document";
         // The pick rides a worker when one is installed (see
         // dispatch_dialog_pick): the completion opens what came back,
-        // between frames where the shell's state is safe to touch.
+        // between frames where the shell's state is safe to touch -
+        // through the F3 dirty guard, so a picked file meets the same
+        // unsaved-changes prompt a dropped one does.
         dispatch_dialog_pick(
             [this, options] { return config_.dialogs->open_file(options); },
             [this](const ws::core::Result<std::optional<std::string>>&
                        picked) {
                 if (picked && picked->has_value()) {
-                    (void)open_paths({**picked});
+                    (void)guarded_open_paths({**picked});
                 }
             });
     };
@@ -840,10 +843,64 @@ void AppShell::request_close_active() {
     }
     if (plan.prompt) {
         close_pending_ = index;  // the modal answers on a later frame
+        close_intent_ = PendingIntent::close;
+        close_paths_.clear();
     } else {
         (void)documents_->finish_close(static_cast<std::size_t>(index), false);
         set_status("closed");
     }
+}
+
+// --- the unsaved-changes guards (F3) -------------------------------------------
+
+// The shared half of every guarded act: when the active document is
+// dirty, arm the same 3-button modal the close flow owns (its answer
+// saves/discards first, then runs the intent) and answer true - the
+// caller parks its request in the intent. A clean document answers
+// false: the caller runs now.
+bool AppShell::guard_dirty_intent(PendingIntent intent,
+                                  const std::vector<std::string>& paths) {
+    const int index = documents_->active_index();
+    if (index < 0) {
+        return false;
+    }
+    Document* document = documents_->active();
+    if (document == nullptr || !document->undo().is_dirty()) {
+        return false;
+    }
+    close_pending_ = index;
+    close_intent_ = intent;
+    close_paths_ = paths;
+    return true;
+}
+
+ws::core::Status AppShell::guarded_new_document() {
+    if (guard_dirty_intent(PendingIntent::new_document)) {
+        return {};  // the prompt's answer runs the act
+    }
+    if (documents_->new_document()) {
+        set_status("new document");
+    }
+    return {};
+}
+
+ws::core::Status AppShell::guarded_open_paths(
+    const std::vector<std::string>& paths) {
+    if (guard_dirty_intent(PendingIntent::open_paths, paths)) {
+        return {};  // the prompt's answer runs the act
+    }
+    return open_paths(paths);
+}
+
+void AppShell::request_quit(const std::function<void()>& request_stop) {
+    quit_stop_ = request_stop;
+    if (guard_dirty_intent(PendingIntent::quit)) {
+        return;  // the prompt's answer quits
+    }
+    if (quit_stop_) {
+        quit_stop_();
+    }
+    quit_stop_ = nullptr;
 }
 
 ws::core::Status AppShell::save_active() {
@@ -994,7 +1051,10 @@ ws::core::Status AppShell::open_paths(const std::vector<std::string>& paths) {
 }
 
 void AppShell::handle_dropped_files(const std::vector<std::string>& paths) {
-    (void)open_paths(paths);
+    // Through the F3 dirty guard: a dropped file replaces the active
+    // document like a picked one, so it owes the same unsaved-changes
+    // prompt.
+    (void)guarded_open_paths(paths);
 }
 
 void AppShell::autosave_tick() {
@@ -1073,7 +1133,12 @@ void AppShell::draw(GuiContext& gui, const ChromeTheme& theme,
 void AppShell::draw_menu_bar(GuiContext& gui, LayoutCursor& layout,
                              const ChromeTheme& theme, const Rect& bar) {
     // The host's menus first (categories become menus, in spec
-    // order), the shell's Window menu after them.
+    // order), the shell's Window menu after them. describe() hands
+    // the builder the spec list set_menu_specs stored - without it
+    // the builder holds no categories, build() lays nothing, and the
+    // bar shows the Window menu alone (the F2 fix: the describe call
+    // was missing, so the host's File/Edit/... specs never rendered).
+    menu_builder_.describe(menu_specs_);
     menu_builder_.build(commands_, &shortcuts_, key_context());
 
     window_items_.clear();
@@ -1973,6 +2038,12 @@ void AppShell::draw_close_prompt(GuiContext& gui, const ChromeTheme& theme,
     }
     if (gui.esc_won(&close_esc_)) {
         close_pending_ = -1;  // Escape answers Cancel
+        // The parked intent (a guarded new/open/quit, F3) dies with
+        // the prompt - the Cancel branch's own rule, spelled here
+        // because Escape takes the same exit.
+        close_intent_ = PendingIntent::close;
+        close_paths_.clear();
+        quit_stop_ = nullptr;
         return;
     }
     LayoutCursor mlayout;
@@ -1987,9 +2058,29 @@ void AppShell::draw_close_prompt(GuiContext& gui, const ChromeTheme& theme,
     gui::text(mlayout, theme, "Save changes?");
     const Document* document =
         documents_->at(static_cast<std::size_t>(close_pending_));
+    // The body names the document AND the parked act's tail (F3): the
+    // guard paths say what the answer leads to, so Save/Discard/
+    // Cancel read as the choice they are. One line - the modal's
+    // geometry (the tests pin the button row's place) stays exactly
+    // the classic close prompt's.
+    const char* tail = "Close it anyway?";
+    switch (close_intent_) {
+        case PendingIntent::new_document:
+            tail = "Start a new document anyway?";
+            break;
+        case PendingIntent::open_paths:
+            tail = "Open the other file anyway?";
+            break;
+        case PendingIntent::quit:
+            tail = "Quit anyway?";
+            break;
+        case PendingIntent::close:
+        case PendingIntent::none:
+            break;
+    }
     const std::string body =
         (document != nullptr ? document->display_name() : std::string{"the document"}) +
-        " has unsaved changes.";
+        " has unsaved changes. " + tail;
     gui::text(mlayout, theme, body.c_str());
 
     // The three-button row, centered like modal_dialog's own - the
@@ -2029,7 +2120,55 @@ void AppShell::draw_close_prompt(GuiContext& gui, const ChromeTheme& theme,
     const std::size_t index = static_cast<std::size_t>(close_pending_);
     close_pending_ = -1;  // cleared before acting: no re-entrancy
     if (answer == 2) {
+        // Cancel: the parked intent (a guarded new/open/quit, F3)
+        // dies with the prompt - the document stays exactly as it is.
+        close_intent_ = PendingIntent::close;
+        close_paths_.clear();
+        quit_stop_ = nullptr;
         return;  // Cancel
+    }
+    // The parked intent (F3): close keeps the classic act; the guards
+    // save-or-clear the document and then run what was asked. Saved
+    // off before the act - the act may re-arm the prompt (a chained
+    // dirty document), and the new arming owns the fields.
+    const PendingIntent intent = close_intent_;
+    const std::vector<std::string> paths = std::move(close_paths_);
+    close_intent_ = PendingIntent::close;
+    const std::function<void()> stop = std::move(quit_stop_);
+    quit_stop_ = nullptr;
+    if (intent == PendingIntent::new_document ||
+        intent == PendingIntent::open_paths ||
+        intent == PendingIntent::quit) {
+        // The guarded acts: the prompt's whole job was the save (or
+        // the discard); the document stays in the list (new/open
+        // replace the active one themselves; quit is about to tear
+        // the app down, and shutdown() owns the teardown order).
+        if (answer == 0) {  // Save: a failed save keeps the document
+            if (const ws::core::Status st = save_active(); !st) {
+                toast_save_failure(st);
+                return;
+            }
+        } else {
+            // Discard: mark the work settled, so the autosave pair
+            // ends with it (the close path's own rule) and a quit's
+            // shutdown does not snapshot what was just thrown away.
+            Document* doc = documents_->active();
+            if (doc != nullptr) {
+                (void)doc->undo().mark_saved();
+                (void)documents_->finish_autosave(
+                    static_cast<std::size_t>(documents_->active_index()));
+            }
+        }
+        if (intent == PendingIntent::new_document) {
+            if (documents_->new_document()) {
+                set_status("new document");
+            }
+        } else if (intent == PendingIntent::open_paths) {
+            (void)open_paths(paths);
+        } else if (stop) {
+            stop();
+        }
+        return;
     }
     if (answer == 0) {  // Save: a failed save keeps the document open
         documents_->activate(index);  // save_active() saves the active one

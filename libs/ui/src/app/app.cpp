@@ -1149,6 +1149,24 @@ void App::set_cursor(CursorShape shape) {
     }
 }
 
+void App::set_closable(bool closable) {
+    // The F3 interception seam: the host clears GLFW's close flag when
+    // an app holds the window open for its prompt; a platform that
+    // cannot postpone the close ignores it inside its own half.
+    if (impl_->host_) {
+        impl_->host_->set_closable(closable);
+    }
+}
+
+void App::request_stop() {
+    // The sanctioned end for an intercepted close: the host sets its
+    // close flag (Android finishes the activity), the loop's next
+    // should_close() answers true, and the normal shutdown order runs.
+    if (impl_->host_) {
+        impl_->host_->request_stop();
+    }
+}
+
 void App::install_clipboard(gui::GuiContext& gui) {
     // Nothing to wire before run() (or after a failed startup) - the
     // unset seam is the no-clipboard answer, the same one a host

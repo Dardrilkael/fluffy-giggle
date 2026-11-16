@@ -74,6 +74,17 @@ public:
     // arrive there through the normal OS sequence.
     virtual bool should_close() const = 0;
 
+    // The close interception (F3): while false, an OS close request
+    // (the title bar's X) is reported through the WindowCloseEvent and
+    // should_close() answers false - the app gets to run its
+    // unsaved-changes prompt before the window dies. When the prompt
+    // is answered, the app calls request_stop() (or sets closable back
+    // and lets the next X through). Desktop: un-sets GLFW's close
+    // flag. Android: a no-op (the OS sequence cannot be postponed - a
+    // destroyRequested close is not a question). Default: closable.
+    virtual void set_closable(bool /*closable*/) {}
+    [[nodiscard]] virtual bool closable() const { return true; }
+
     // Asks the platform to wind the app down (desktop: set the close flag;
     // Android: ANativeActivity_finish, after which the OS delivers the
     // full term-window/destroy sequence through pump()/wait_for_window()).

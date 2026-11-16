@@ -368,24 +368,36 @@ class CircsimApp final : public ws::ui::App {
 
         register_panels();
         register_commands();
+        // The menu bar (F2): the standard run first - File, Edit,
+        // View - then the app's own domains (Place, Circuit), Help
+        // last. View before Circuit is the desktop convention (View
+        // is chrome, Circuit is the app's work).
         shell_->set_menu_specs({
             {"&File", "File"},
             {"&Edit", "Edit"},
+            {"&View", "View"},
             {"&Place", "Place"},
             {"&Circuit", "Circuit"},
-            {"&View", "View"},
             {"&Help", "Help"},
         });
+        // The toolbar (F1): four groups, separated by "|" rules -
+        // file (new/open/save), edit (undo/redo/delete), tools
+        // (rotate/mirror/wire), run (ERC/simulate/export). The same
+        // commands the menus expose, the same live chord hints in the
+        // tooltips.
         shell_->set_toolbar_commands({
             "shell.new_document",
             "shell.open_document",
             "shell.save_document",
+            "|",
             "app.undo",
             "app.redo",
             "app.delete",
+            "|",
             "app.rotate_cw",
             "app.mirror",
             "app.wire",
+            "|",
             "circuit.erc",
             "circuit.run",
             "circuit.export_png",
@@ -453,6 +465,21 @@ class CircsimApp final : public ws::ui::App {
             const auto& dropped =
                 static_cast<const ws::input::FileDroppedEvent&>(event);
             shell_->handle_dropped_files(dropped.paths);
+            return;
+        }
+        if (event.type() == ws::input::EventType::WindowClose) {
+            // F3's interception: the OS asked for the window to die.
+            // Hold the window open and hand the question to the shell
+            // - a clean document quits now (request_quit fires the
+            // teardown below); a dirty one raises the save prompt,
+            // and its answer quits. set_closable(false) takes GLFW's
+            // own close flag back down (the event is already out), so
+            // the loop keeps running while the prompt is up.
+            set_closable(false);
+            shell_->request_quit([this] {
+                set_closable(true);
+                request_stop();
+            });
         }
     }
 

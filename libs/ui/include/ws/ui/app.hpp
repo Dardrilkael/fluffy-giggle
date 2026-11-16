@@ -142,6 +142,21 @@ public:
     // arrow to hand the default back.
     void set_cursor(CursorShape shape);
 
+    // The F3 close interception: while false, the OS's close request
+    // (the title bar's X) reaches on_event as a WindowCloseEvent but
+    // the window stays open - the app runs its unsaved-changes prompt
+    // and answers with request_stop-style teardown or by restoring
+    // closability. No-op before run(); a platform that cannot postpone
+    // a close (Android's destroyRequested) ignores it - the event
+    // still arrives, honest about what could not be asked.
+    void set_closable(bool closable);
+
+    // Asks the platform to wind the app down (the loop's should_close
+    // answers true after it): the sanctioned end for an app that
+    // intercepted the OS close, ran its prompt, and got the answer.
+    // No-op before run().
+    void request_stop();
+
 protected:
     // Called once after the context and ImGui are ready, before the first
     // frame. Safe to create ImGui/ImPlot objects here.

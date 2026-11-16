@@ -73,6 +73,12 @@ void on_window_close(GLFWwindow* window) {
     // again so the intent is explicit and the loop cannot miss it.
     glfwSetWindowShouldClose(window, GLFW_TRUE);
     emit(window, ws::input::WindowCloseEvent{});
+    // The F3 interception needs no work HERE: the event above is
+    // delivered (deliver_events) before the loop's next should_close()
+    // check, so an app that answers the event with set_closable(false)
+    // takes the flag back down in time - its unsaved-changes prompt
+    // runs, and the window stays open until the prompt's answer calls
+    // request_stop().
 }
 
 // Size in screen coordinates; the shell recreates the swapchain off its own
@@ -358,6 +364,20 @@ public:
         return glfwWindowShouldClose(window_) == GLFW_TRUE;
     }
 
+    // The F3 interception: while an app holds the window non-closable,
+    // the X click still emits its WindowCloseEvent (on_window_close
+    // below consults closable_ and clears the flag when it must), but
+    // should_close() answers false - the unsaved-changes prompt runs,
+    // and the app answers with request_stop() (or re-opens closability).
+    void set_closable(bool closable) override {
+        closable_ = closable;
+        if (!closable) {
+            glfwSetWindowShouldClose(window_, GLFW_FALSE);
+        }
+    }
+
+    [[nodiscard]] bool closable() const override { return closable_; }
+
     void request_stop() override { glfwSetWindowShouldClose(window_, GLFW_TRUE); }
 
     bool window_ready() const override { return window_ != nullptr; }
@@ -469,6 +489,9 @@ private:
     GLFWwindow* window_ = nullptr;
     WindowEventSink* sink_ = nullptr;
     bool glfw_initialized_ = false;
+    // The F3 interception flag: while false, an X click's flag is
+    // taken back down (set_closable) and should_close() stays false.
+    bool closable_ = true;
     // One standard cursor per non-arrow shape, created lazily and
     // destroyed in the destructor before glfwTerminate. Indexed by
     // CursorShape's value - arrow (0) never gets a slot used.

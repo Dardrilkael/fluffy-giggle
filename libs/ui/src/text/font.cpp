@@ -528,14 +528,23 @@ bool bake_icon_glyph(std::uint32_t codepoint, float pixel_height,
         {0.68f, 0.28f, 0.65f, 0.82f},  // the body's right
         {0.35f, 0.82f, 0.65f, 0.82f},  // the base
     };
-    // rotate: a near-full clockwise circle whose head points down at
-    // the lower left (the standard "rotate CW" read).
+    // rotate: a rounded SQUARE with an arrow sweeping over its top
+    // right corner, tail to head clockwise (F1's redesign - the old
+    // near-full circle with a lower-left head read as a second undo
+    // at toolbar sizes; the square names the thing being turned, and
+    // the sweep is the turning, a shape no other glyph in the set
+    // shares).
     static const IconSegment kRotate[] = {
-        {0.74f, 0.42f, 0.70f, 0.28f}, {0.70f, 0.28f, 0.58f, 0.20f},
-        {0.58f, 0.20f, 0.42f, 0.20f}, {0.42f, 0.20f, 0.30f, 0.28f},
-        {0.30f, 0.28f, 0.26f, 0.42f}, {0.26f, 0.42f, 0.28f, 0.56f},
-        {0.28f, 0.56f, 0.21f, 0.47f},  // the head's left barb
-        {0.28f, 0.56f, 0.37f, 0.47f},  // the head's right barb
+        {0.26f, 0.30f, 0.26f, 0.74f},   // the square's left
+        {0.26f, 0.74f, 0.70f, 0.74f},   // the square's bottom
+        {0.70f, 0.74f, 0.70f, 0.38f},   // the square's right, to the sweep
+        {0.26f, 0.30f, 0.34f, 0.30f},   // the square's top edge start
+        {0.24f, 0.38f, 0.24f, 0.26f},   // the sweep's rise
+        {0.24f, 0.26f, 0.38f, 0.18f},   // over the top, heading right
+        {0.38f, 0.18f, 0.54f, 0.18f},   // the sweep's run
+        {0.54f, 0.18f, 0.70f, 0.26f},   // curving down at the corner
+        {0.70f, 0.26f, 0.58f, 0.24f},   // the head's upper barb
+        {0.70f, 0.26f, 0.60f, 0.32f},   // the head's lower barb
     };
     // mirror: two horizontal arrows meeting at the center (the
     // "flip horizontally" read).

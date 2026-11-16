@@ -162,6 +162,32 @@ std::string_view command_toolbar(
     const ScopedId scope(gui.ids(), label);
     bool first = true;
     for (std::size_t i = 0; i < ids.size(); ++i) {
+        // The group separator (F1): a "|" entry lays a vertical rule
+        // between the buttons - the toolbar's file / edit / tools /
+        // run groups read as groups at a glance. Chrome like
+        // separator(): no id, no hit-test, no tooltip. A leading or
+        // doubled separator draws nothing (the !first guard), so a
+        // host's list stays handsome whatever it leaves out.
+        // The group separator (F1): a "|" entry lays a vertical rule
+        // between the buttons - the toolbar's file / edit / tools /
+        // run groups read as groups at a glance. The rule occupies a
+        // FULL-HEIGHT slot (the button's own height, so same_line's
+        // resume-from-the-previous-bottom never drifts the row) and
+        // paints centered inside it; chrome like separator(): no id,
+        // no hit-test, no tooltip. A leading or doubled separator
+        // draws nothing (the !first guard), so a host's list stays
+        // handsome whatever it leaves out.
+        if (ids[i] == "|") {
+            if (!first) {
+                layout.same_line();
+                const Rect slot = layout.next(
+                    2.0f, theme.control_height);
+                const float h = theme.control_height * 0.55f;
+                r2d::draw_quad(slot.x, slot.y + (slot.height - h) * 0.5f,
+                               2.0f, h, theme.border);
+            }
+            continue;
+        }
         const ws::app::Command* cmd = registry.find(ids[i]);
         if (cmd == nullptr) {
             continue;  // an unknown id lays nothing - the builder's skip rule

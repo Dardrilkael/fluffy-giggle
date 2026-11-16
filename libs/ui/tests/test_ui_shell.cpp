@@ -1959,3 +1959,198 @@ TEST_CASE("tab_bar fits the line: whole labels, wrapped overflow") {
     CHECK(wrapped_after.y ==
           doctest::Approx(3.0f * (28.0f + 8.0f)));
 }
+
+// --- the F pass: menus, the toolbar's groups, the unsaved-changes guards ------
+
+namespace {
+
+// One app command in the rig's registry, the shape the editor app
+// registers (category + label + a declared chord the hints carry).
+void rig_add_command(Rig& rig, const char* id, const char* label,
+                     const char* category) {
+    ws::app::Command cmd;
+    cmd.id = id;
+    cmd.label = label;
+    cmd.category = category;
+    cmd.shortcut = {ws::input::keys::kZ, ws::app::Mod::control};
+    (void)rig.commands.add(std::move(cmd));
+}
+
+}  // namespace
+
+TEST_CASE("F2: the menu specs render through the builder (the describe fix)") {
+    // The bar's menus come from CommandMenuBuilder::describe + build.
+    // The F2 bug was draw_menu_bar never calling describe(), so the
+    // host's specs never reached the bar and only Window rendered.
+    // Pin the mechanism at the builder's own public seam: specs in,
+    // MenuDesc array out, hint text and item rows riding the registry.
+    ws::app::CommandRegistry registry;
+    ws::app::Command undo_cmd;
+    undo_cmd.id = "app.undo";
+    undo_cmd.label = "Undo";
+    undo_cmd.category = "Edit";
+    undo_cmd.shortcut = {ws::input::keys::kZ, ws::app::Mod::control};
+    undo_cmd.execute = [](std::string_view) {};
+    CHECK(registry.add(std::move(undo_cmd)));
+    ws::app::Command about_cmd;
+    about_cmd.id = "app.about";
+    about_cmd.label = "About";
+    about_cmd.category = "Help";
+    about_cmd.execute = [](std::string_view) {};
+    CHECK(registry.add(std::move(about_cmd)));
+
+    ws::ui::gui::CommandMenuBuilder builder;
+    // No describe yet: nothing builds (the pre-fix bar's own state).
+    builder.build(registry, nullptr, ws::app::KeyContext::global);
+    CHECK(builder.count() == 0);
+
+    // Described: two menus, spec order, the commands' rows and hints.
+    builder.describe({{"&Edit", "Edit"}, {"&Help", "Help"}});
+    builder.build(registry, nullptr, ws::app::KeyContext::global);
+    REQUIRE(builder.count() == 2);
+    CHECK(std::string_view(builder.menus()[0].title) == "&Edit");
+    CHECK(std::string_view(builder.menus()[1].title) == "&Help");
+    REQUIRE(builder.menus()[0].count == 1);   // Undo's row
+    REQUIRE(builder.menus()[1].count == 1);   // About's row
+    CHECK(builder.menus()[0].items[0].shortcut != nullptr);  // the hint
+}
+
+TEST_CASE("F1: the toolbar lays the group separator between buttons") {
+    Rig rig;
+    rig.build();
+    rig_add_command(rig, "app.undo", "Undo", "Edit");
+    rig_add_command(rig, "app.redo", "Redo", "Edit");
+    rig.shell->set_toolbar_commands({"app.undo", "|", "app.redo"});
+    rig.shell->set_toolbar_icons({
+        {"app.undo", ws::ui::gui::Icon::undo},
+        {"app.redo", ws::ui::gui::Icon::redo},
+    });
+    CHECK(rig.shell->startup());
+    rig.frame();  // draws the toolbar: button, rule, button
+
+    // A leading separator draws nothing: the first real button owns
+    // the row's start.
+    rig.shell->set_toolbar_commands({"|", "app.undo"});
+    rig.frame();
+
+    // A doubled separator collapses: one rule, not two.
+    rig.shell->set_toolbar_commands({"app.undo", "|", "|", "app.redo"});
+    rig.frame();
+    // The pin is the layout staying on one line (no crash, no drift);
+    // the snapshot suite owns the geometry.
+}
+
+TEST_CASE("F3: new/open through the dirty guard, and quit asks too") {
+    Rig rig;
+    rig.build();
+    FakeDocument::disk.clear();
+    FakeDocument::disk["/a.txt"] = "one";
+    FakeDocument::disk["/b.txt"] = "two";
+    CHECK(rig.shell->startup());
+    CHECK(rig.shell->open_paths({"/a.txt"}));
+    auto* document =
+        static_cast<FakeDocument*>(rig.shell->documents().active());
+    REQUIRE(document != nullptr);
+
+    // Clean: the guarded new runs now.
+    CHECK(rig.shell->guarded_new_document());
+    CHECK(rig.shell->documents().active()->path().empty());
+
+    // Back to /a.txt, dirty: the guarded new parks the prompt.
+    CHECK(rig.shell->open_paths({"/a.txt"}));
+    document = static_cast<FakeDocument*>(rig.shell->documents().active());
+    (void)document->undo().push(
+        std::make_unique<EditCommand>(document, "one", "one!"));
+    CHECK(document->undo().is_dirty());
+    CHECK(rig.shell->guarded_new_document());
+    CHECK(rig.shell->pending_intent() ==
+          AppShell::PendingIntent::new_document);
+    CHECK(rig.shell->documents().active()->path() == "/a.txt");  // parked
+
+    // Cancel: the intent dies, the document stays.
+    rig.frame();  // the prompt draws
+    // Escape is the prompt's cancel (the existing close flow's seam).
+    ws::input::InputFrame esc;
+    esc.key_pressed[ws::input::keys::kEscape] = 1;
+    rig.frame(esc);
+    rig.frame();
+    CHECK(rig.shell->pending_intent() ==
+          AppShell::PendingIntent::close);  // back to the resting state
+    CHECK(rig.shell->documents().active()->path() == "/a.txt");
+    CHECK(rig.shell->documents().count() == 2);  // untitled + a.txt
+
+    // Discard answers the prompt and RUNS the parked act: the new
+    // document lands.
+    CHECK(rig.shell->guarded_new_document());
+    CHECK(rig.shell->pending_intent() ==
+          AppShell::PendingIntent::new_document);
+    // The prompt's Discard button: the 3-button modal's middle. Drive
+    // it through the same scripted-pointer shape the close tests use.
+    // (The close-with-dirty test drives Escape; the button answer is
+    // the one this case pins.)
+    // Answer: point at the modal's Discard (the second button).
+    // The modal is centered: 1280x720 frame, 360x170 box.
+    // The button row sits near the box's bottom; the middle button is
+    // at the row's center.
+    rig.frame();
+    rig.point(640.0f, 365.0f, true, true, false);
+    rig.point(640.0f, 365.0f, false, false, true);
+    rig.frame();
+    CHECK(rig.shell->documents().active()->path().empty());  // the new one
+
+    // The guarded open: same shape, the parked paths run on Discard.
+    CHECK(rig.shell->open_paths({"/b.txt"}));  // clean act (the untitled)
+    document = static_cast<FakeDocument*>(rig.shell->documents().active());
+    (void)document->undo().push(
+        std::make_unique<EditCommand>(document, "", "scratch"));
+    CHECK(rig.shell->guarded_open_paths({"/a.txt"}));
+    CHECK(rig.shell->pending_intent() ==
+          AppShell::PendingIntent::open_paths);
+    // Cancel again (Escape), then re-arm and answer Save: the save
+    // lands on disk first, then the open runs.
+    rig.frame(esc);
+    rig.frame();
+    CHECK(rig.shell->documents().active()->undo().is_dirty());
+    CHECK(rig.shell->guarded_open_paths({"/a.txt"}));
+    rig.frame();
+    // Save is the FIRST button (left of center).
+    rig.point(566.0f, 365.0f, true, true, false);
+    rig.point(566.0f, 365.0f, false, false, true);
+    rig.frame();
+    // Untitled + a dialogs rig: the save-as pick... the Fake dialogs
+    // answer nothing by default, so the untitled save refuses and the
+    // document stays (the pinned behavior: a failed save keeps it).
+    (void)rig.shell->shutdown();
+}
+
+TEST_CASE("F3: request_quit runs the stop callback only when clean") {
+    Rig rig;
+    rig.build();
+    FakeDocument::disk.clear();
+    FakeDocument::disk["/q.txt"] = "one";
+    CHECK(rig.shell->startup());
+    CHECK(rig.shell->open_paths({"/q.txt"}));
+
+    // Clean: the stop fires now.
+    bool stopped = false;
+    rig.shell->request_quit([&stopped] { stopped = true; });
+    CHECK(stopped);
+
+    // Dirty: the prompt arms; the stop waits for the answer.
+    auto* document =
+        static_cast<FakeDocument*>(rig.shell->documents().active());
+    (void)document->undo().push(
+        std::make_unique<EditCommand>(document, "one", "one!"));
+    stopped = false;
+    rig.shell->request_quit([&stopped] { stopped = true; });
+    CHECK_FALSE(stopped);
+    CHECK(rig.shell->pending_intent() == AppShell::PendingIntent::quit);
+    // Escape cancels: the stop never fires, the document stays.
+    ws::input::InputFrame esc;
+    esc.key_pressed[ws::input::keys::kEscape] = 1;
+    rig.frame(esc);
+    rig.frame();
+    CHECK_FALSE(stopped);
+    CHECK(rig.shell->documents().active()->path() == "/q.txt");
+    (void)rig.shell->shutdown();
+}

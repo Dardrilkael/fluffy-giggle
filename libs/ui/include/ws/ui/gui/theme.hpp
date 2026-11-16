@@ -29,7 +29,11 @@ struct ChromeTheme {
     std::uint32_t control_bg = r2d::rgba(45, 48, 56);
     std::uint32_t control_hovered = r2d::rgba(62, 66, 77);
     std::uint32_t control_pressed = r2d::rgba(80, 128, 190);
-    std::uint32_t control_disabled = r2d::rgba(42, 44, 50);
+    // The disabled face sits BELOW the panel surface (F1: it used to
+    // be 42,44,50 - three points off control_bg, indistinguishable at
+    // a glance, so a locked undo read live). Sunken and flat is the
+    // unmistakable read: the control melted into the chrome.
+    std::uint32_t control_disabled = r2d::rgba(33, 35, 41);
     std::uint32_t control_on = r2d::rgba(84, 144, 212);  // the accent:
                                    // checked, toggled, selected, live data.
                                    // One step deeper than the pre-P2 blue
@@ -329,7 +333,11 @@ inline constexpr ChromeTheme kLightChrome{
     .control_bg = r2d::rgba(222, 224, 230),
     .control_hovered = r2d::rgba(202, 205, 214),
     .control_pressed = r2d::rgba(62, 109, 178),
-    .control_disabled = r2d::rgba(228, 229, 233),
+    // The disabled face rides NEAR the panel surface (F1's
+    // unmistakable-lock rule, the light stock's half): nearly the
+    // chrome's own white, so a locked control reads hollow against
+    // its working neighbors' solid gray.
+    .control_disabled = r2d::rgba(242, 243, 246),
     .control_on = r2d::rgba(38, 122, 203),
     .text_on_accent = r2d::rgba(255, 255, 255),
     .accent_hover = r2d::rgba(70, 150, 224),

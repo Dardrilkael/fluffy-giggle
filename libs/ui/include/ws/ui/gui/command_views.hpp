@@ -164,6 +164,11 @@ struct ToolbarIcon {
 //     rest delay: "Label (Chord)" - the label the icon button dropped,
 //     the LIVE binding through `resolver` at `context` when one is
 //     given (a rebind renames the hint, the same text the menus hint).
+//   * A "|" entry in `ids` is the GROUP SEPARATOR: a full-height slot
+//     with a centered vertical rule, one spacing either side - the
+//     file / edit / tools / run grouping reads at a glance. No id, no
+//     hit-test, no tooltip; leading and doubled separators collapse
+//     (nothing before the first button, one rule between groups).
 //
 // The rest is command_toolbar's own contract, unchanged: the skip
 // rule, the enabled lock, the row's id scope, the fired-id answer.

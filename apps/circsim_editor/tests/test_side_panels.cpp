@@ -31,6 +31,9 @@
 #include <ws/ui/gui/theme.hpp>
 #include <ws/ui/renderer2d.hpp>
 
+#include <ws/circsim/palette.hpp>
+#include <ws/circsim/library.hpp>
+
 #include "ui_gui_stub.hpp"
 
 namespace {
@@ -2174,4 +2177,41 @@ TEST_CASE("the props tab strip fits its labels at any panel width") {
     b.ed.properties_tab = 2;
     b.draw_properties();  // 360px wide bench panel: one line, all three
     CHECK(b.ed.properties_tab == 2);  // the strip selected nothing
+}
+
+// --- F4: the palette's search, headers and collapse stay ----------------------
+
+TEST_CASE("F4: every palette group wears a collapsible header, search finds") {
+    ws::settings::StdFileSystem fs;
+    editor::SchematicDocument doc{std::string{}, fs};
+    editor::Editor ed;
+    ed.doc = &doc;
+    // Browsing: the five groups all carry headers (collapsing rows),
+    // so no shelf renders headerless - F4's "the top group has no
+    // header" is pinned as never-again.
+    const std::vector<ws::circsim::PaletteGroup> browse =
+        ws::circsim::palette_groups(ed.library, "");
+    REQUIRE(browse.size() == 5);
+    for (const ws::circsim::PaletteGroup& g : browse) {
+        CHECK_FALSE(g.name.empty());
+        CHECK_FALSE(g.items.empty());
+    }
+    // The search: name, key and category all find; the ranked answer
+    // leads with the best match's group.
+    const std::vector<ws::circsim::PaletteGroup> res =
+        ws::circsim::palette_groups(ed.library, "RESIST");
+    REQUIRE_FALSE(res.empty());
+    CHECK(res[0].name == "Passive");
+    REQUIRE_FALSE(res[0].items.empty());
+    CHECK(res[0].items[0]->key == "r");
+    // The type search: a group name finds its members too.
+    const std::vector<ws::circsim::PaletteGroup> srcs =
+        ws::circsim::palette_groups(ed.library, "SRC");
+    bool found_v = false;
+    for (const ws::circsim::PaletteGroup& g : srcs) {
+        for (const ws::circsim::SymbolDef* s : g.items) {
+            found_v = found_v || s->key == "v";
+        }
+    }
+    CHECK(found_v);
 }
