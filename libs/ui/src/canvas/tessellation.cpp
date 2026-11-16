@@ -151,7 +151,7 @@ void flatten_arc(Point center, float rx, float ry, float a0, float a1,
 // --- dashing -------------------------------------------------------------------
 
 void dash_polyline(const Point* pts, int count, const DashSpec& dash,
-                   std::vector<std::vector<Point>>& runs) {
+                   std::vector<std::vector<Point>>& runs, bool closed) {
     if (count <= 0) {
         return;
     }
@@ -210,8 +210,11 @@ void dash_polyline(const Point* pts, int count, const DashSpec& dash,
         run->push_back(pts[0]);
     }
 
-    for (int i = 1; i < count; ++i) {
-        float seg = length(pts[i] - pts[i - 1]);
+    const int segment_count = closed ? count : count - 1;
+    for (int i = 1; i <= segment_count; ++i) {
+        // Include the implicit final edge of a closed path.
+        const Point& next = i < count ? pts[i] : pts[0];
+        float seg = length(next - pts[i - 1]);
         // Consume this segment against the pattern; a segment may cross
         // many phases, each crossing either closing a run or opening a
         // new one (possibly at an interpolated point).
@@ -220,15 +223,15 @@ void dash_polyline(const Point* pts, int count, const DashSpec& dash,
                 left -= seg;
                 seg = 0.0f;
                 if (run != nullptr) {
-                    run->push_back(pts[i]);
+                    run->push_back(next);
                 }
             } else {
                 seg -= left;
-                const float seg_len = length(pts[i] - pts[i - 1]);
+                const float seg_len = length(next - pts[i - 1]);
                 const float t = seg > 1e-9f ? 1.0f - seg / seg_len : 1.0f;
                 const Vec2 at = {
-                    pts[i - 1].x + (pts[i].x - pts[i - 1].x) * t,
-                    pts[i - 1].y + (pts[i].y - pts[i - 1].y) * t};
+                    pts[i - 1].x + (next.x - pts[i - 1].x) * t,
+                    pts[i - 1].y + (next.y - pts[i - 1].y) * t};
                 if (run != nullptr) {
                     // Dedupe the boundary point when the segment's start
                     // already sits exactly there.
@@ -253,7 +256,7 @@ void dash_polyline(const Point* pts, int count, const DashSpec& dash,
                 // a run would be the phantom single-point endpoint dot
                 // (the [10,5] dash pattern on a 30px line must not
                 // produce a third run at 30).
-                if (on && (seg > 1e-9f || i < count - 1)) {
+                if (on && (seg > 1e-9f || i < segment_count)) {
                     runs.emplace_back();
                     run = &runs.back();
                     run->push_back(at);
@@ -263,7 +266,7 @@ void dash_polyline(const Point* pts, int count, const DashSpec& dash,
     }
     // A trailing zero-length ON phase still means a dot at the end.
     if (run != nullptr && run->empty()) {
-        run->push_back(pts[count - 1]);
+        run->push_back(closed ? pts[0] : pts[count - 1]);
     }
 }
 
