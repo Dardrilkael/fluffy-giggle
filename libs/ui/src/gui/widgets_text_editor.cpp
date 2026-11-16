@@ -140,6 +140,9 @@ TextEditorResult text_editor_behavior(GuiContext& gui, WidgetId id,
     const bool focused = out.focused;
     const bool dead = out.state == WidgetState::Disabled;
     const bool can_edit = live && focused && !dead;
+    if (focused != state.field.was_focused) {
+        gui.set_soft_keyboard_visible(focused && !dead && live);
+    }
 
     const ws::input::Preedit& ime = in.preedit;
     const bool composing = can_edit && ime.active;
