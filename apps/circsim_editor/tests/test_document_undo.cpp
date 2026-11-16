@@ -30,7 +30,102 @@ std::vector<std::uint32_t> entity_ids(const Container& entities) {
     for (const auto& entity : entities) result.push_back(entity.id);
     return result;
 }
+    using editor::SchematicDocument;
+
+    template <typename F>
+    void check_version_bump(SchematicDocument& doc, const char* operation, F&& run) {
+        const std::uint64_t before = doc.schem.version();
+        run();
+        CHECK_MESSAGE(doc.schem.version() > before,
+                      operation << " did not advance Schematic::version()");
+    }
 }  // namespace
+
+TEST_CASE("directives edits bump the schematic version on apply, undo and redo") {
+    DocumentFixture f;
+
+    check_version_bump(f.doc, "directives apply", [&] {
+        editor::push_directives(f.doc, ".param gain=2");
+    });
+    CHECK(f.doc.schem.directives == ".param gain=2");
+
+    check_version_bump(f.doc, "directives undo", [&] {
+        (void)f.doc.undo().undo();
+    });
+    CHECK(f.doc.schem.directives.empty());
+
+    check_version_bump(f.doc, "directives redo", [&] {
+        (void)f.doc.undo().redo();
+    });
+    CHECK(f.doc.schem.directives == ".param gain=2");
+}
+
+TEST_CASE("temperature edits bump the schematic version on apply, undo and redo") {
+    DocumentFixture f;
+
+    check_version_bump(f.doc, "temperature apply", [&] {
+        editor::push_set_temp(f.doc, 85.0);
+    });
+    REQUIRE(f.doc.schem.temp.has_value());
+    CHECK(*f.doc.schem.temp == 85.0);
+
+    check_version_bump(f.doc, "temperature undo", [&] {
+        (void)f.doc.undo().undo();
+    });
+    CHECK_FALSE(f.doc.schem.temp.has_value());
+
+    check_version_bump(f.doc, "temperature redo", [&] {
+        (void)f.doc.undo().redo();
+    });
+    REQUIRE(f.doc.schem.temp.has_value());
+    CHECK(*f.doc.schem.temp == 85.0);
+}
+
+TEST_CASE("directives and temperature typing coalesce without skipping version bumps") {
+    DocumentFixture f;
+    const std::size_t initial_undo_count = f.doc.undo().undo_count();
+
+    check_version_bump(f.doc, "first temperature keystroke", [&] {
+        editor::push_set_temp(f.doc, 1.0);
+    });
+    check_version_bump(f.doc, "second temperature keystroke", [&] {
+        editor::push_set_temp(f.doc, 12.0);
+    });
+    CHECK(f.doc.undo().undo_count() == initial_undo_count + 1u);
+
+    check_version_bump(f.doc, "undo merged temperature edit", [&] {
+        (void)f.doc.undo().undo();
+    });
+    CHECK_FALSE(f.doc.schem.temp.has_value());
+
+    check_version_bump(f.doc, "first directives keystroke", [&] {
+        editor::push_directives(f.doc, ".p");
+    });
+    check_version_bump(f.doc, "second directives keystroke", [&] {
+        editor::push_directives(f.doc, ".param");
+    });
+
+    check_version_bump(f.doc, "undo merged directives edit", [&] {
+        (void)f.doc.undo().undo();
+    });
+    CHECK(f.doc.schem.directives.empty());
+}
+
+TEST_CASE("directives and temperature edits are reflected in the exported deck") {
+    DocumentFixture f;
+    const ws::circsim::NetBuild nets = ws::circsim::build_nets(f.doc.schem);
+    const auto original = ws::circsim::export_deck(f.doc.schem, nets.nets);
+    REQUIRE(original.has_value());
+
+    editor::push_directives(f.doc, ".param gain=2");
+    editor::push_set_temp(f.doc, 85.0);
+
+    const auto edited = ws::circsim::export_deck(f.doc.schem, nets.nets);
+    REQUIRE(edited.has_value());
+    CHECK(edited->text != original->text);
+    CHECK(edited->text.find(".param gain=2") != std::string::npos);
+    CHECK(edited->text.find(".options temp=85") != std::string::npos);
+}
 
 TEST_CASE("delete-set undo restores exact entity ordering") {
     DocumentFixture f;

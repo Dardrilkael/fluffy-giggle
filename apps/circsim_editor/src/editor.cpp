@@ -110,10 +110,34 @@ std::vector<Pos> Editor::wire_path(const ws::circsim::Wire& w) const {
     // The lib's own polyline (ws::circsim::wire_path): endpoints
     // through their refs, then the waypoints between.
     const ws::circsim::Schematic* s = schem();
-    if (s == nullptr) {
-        return {};
-    }
+    if (s == nullptr) return {};
     return ws::circsim::wire_path(*s, library, w);
+}
+
+const WireGeom& Editor::wire_geom(const ws::circsim::Wire& w) const {
+    static const WireGeom kNone{};
+    const ws::circsim::Schematic* s = schem();
+    if (s == nullptr) return kNone;
+    if (!wire_geom_valid_ || wire_geom_version_ != s->version()) {
+        wire_geom_cache_.clear();
+        wire_geom_version_ = s->version();
+        wire_geom_valid_ = true;
+    }
+    const auto cached = wire_geom_cache_.find(w.id);
+    if (cached != wire_geom_cache_.end()) return cached->second;
+    WireGeom g;
+    g.path = ws::circsim::wire_path(*s, library, w);
+    if (!g.path.empty()) {
+        g.min_x = g.max_x = static_cast<double>(g.path[0].x);
+        g.min_y = g.max_y = static_cast<double>(g.path[0].y);
+        for (const Pos& p : g.path) {
+            g.min_x = std::min(g.min_x, static_cast<double>(p.x));
+            g.max_x = std::max(g.max_x, static_cast<double>(p.x));
+            g.min_y = std::min(g.min_y, static_cast<double>(p.y));
+            g.max_y = std::max(g.max_y, static_cast<double>(p.y));
+        }
+    }
+    return wire_geom_cache_.emplace(w.id, std::move(g)).first->second;
 }
 
 std::vector<Pos> Editor::route_wire(Pos a, int a_dir, Pos b, int b_dir,
@@ -165,7 +189,7 @@ std::size_t Editor::tidy_selection() {
             ++freeform;  // the author's shape: only ortho wires tidy
             continue;
         }
-        const std::vector<Pos> path = wire_path(w);
+        const std::vector<Pos>& path = wire_geom(w).path;
         if (path.size() < 2u) {
             continue;  // dangling: nothing to straighten
         }
@@ -377,7 +401,7 @@ Selection Editor::hit_any(Pos world, double radius) const {
     bool wire_found = false;
     double best_d = radius;
     for (const ws::circsim::Wire& w : s->wires()) {
-        const std::vector<Pos> path = wire_path(w);
+        const std::vector<Pos>& path = wire_geom(w).path;
         for (std::size_t i = 1; i < path.size(); ++i) {
             const double d = dist_to_segment(path[i - 1], path[i], world);
             if (d <= best_d) {
@@ -1321,6 +1345,8 @@ void Editor::document_changed() {
     nets_valid_ = false;
     part_bounds_cache_.clear();
     bounds_valid_ = false;
+    wire_geom_cache_.clear();
+    wire_geom_valid_ = false;
     // The Properties panel's field state rides too: a new document
     // whose first selection happens to share a kind and id with the
     // old one must never show the old document's typing.

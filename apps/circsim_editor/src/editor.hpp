@@ -48,6 +48,8 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <ws/ui/gui/rect.hpp>
 #include <utility>
@@ -285,6 +287,36 @@ struct Selection {
         return kind == k && id == of;
     }
     void clear() { kind = Kind::None; }
+};
+
+struct WireGeom {
+    std::vector<Pos> path;
+    double min_x = 0.0, max_x = 0.0, min_y = 0.0, max_y = 0.0;
+};
+
+class SelectionIndex {
+public:
+    SelectionIndex(const Selection& primary,
+                   const std::vector<Selection>& multi)
+        : primary_(primary) {
+        multi_.reserve(multi.size());
+        for (const Selection& m : multi) {
+            if (m.kind != Selection::Kind::None) multi_.insert(key(m));
+        }
+    }
+
+    [[nodiscard]] bool contains(const Selection& of) const {
+        if (of.kind == Selection::Kind::None) return false;
+        if (primary_.kind == of.kind && primary_.id == of.id) return true;
+        return !multi_.empty() && multi_.count(key(of)) != 0u;
+    }
+
+private:
+    [[nodiscard]] static std::uint64_t key(const Selection& s) {
+        return (static_cast<std::uint64_t>(s.kind) << 32) | s.id;
+    }
+    Selection primary_;
+    std::unordered_set<std::uint64_t> multi_;
 };
 
 // A hovered pin (the wire tool's target highlight) - the lib's own
@@ -815,6 +847,9 @@ struct Editor {
     mutable std::map<std::uint32_t, Bounds> part_bounds_cache_;
     mutable std::uint64_t bounds_version_ = 0;
     mutable bool bounds_valid_ = false;
+    mutable std::unordered_map<std::uint32_t, WireGeom> wire_geom_cache_;
+    mutable std::uint64_t wire_geom_version_ = 0;
+    mutable bool wire_geom_valid_ = false;
 
     // The Properties panel's editing state: the field buffers keyed
     // by stable strings, the epoch that reloads them, the selection
@@ -986,6 +1021,10 @@ struct Editor {
     // the waypoints between).
     [[nodiscard]] std::vector<Pos> wire_path(
         const ws::circsim::Wire& w) const;
+    [[nodiscard]] const WireGeom& wire_geom(const ws::circsim::Wire& w) const;
+    [[nodiscard]] SelectionIndex selection_index() const {
+        return SelectionIndex{sel, multi};
+    }
 
     // The ortho route for a wire from `a` (leaving along `a_dir`, -1 =
     // free) to `b` (approached along `b_dir`, -1 = free): the waypoint
