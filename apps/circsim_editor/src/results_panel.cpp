@@ -1099,10 +1099,6 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     }
     for (std::size_t i = 0; i < t.signals.size(); ++i) {
         if (i >= ed.results.visible.size() || ed.results.visible[i] == 0u) {
-            if (i < cache.geometry.size()) {
-                cache.geometry[i].key.visible = false;
-                cache.geometry[i].built = false;
-            }
             continue;
         }
         any_visible = true;
