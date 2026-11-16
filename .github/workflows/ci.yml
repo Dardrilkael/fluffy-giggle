@@ -43,12 +43,14 @@ jobs:
         run: |
           cmake --build --preset linux --target \
             circsim_editor test_physics test_ui_canvas \
-            test_circsim_editor_panel test_circsim_editor_waveform_prof
+            test_circsim_editor_canvas test_circsim_editor_panel \
+            test_circsim_editor_waveform_prof
 
       - name: Run maintained regression tests
         run: |
           build/linux/bin/test_physics
           build/linux/bin/test_ui_canvas
+          build/linux/bin/test_circsim_editor_canvas
           build/linux/bin/test_circsim_editor_panel \
             --test-case="an idle frame reuses the cached decimation verbatim"
           build/linux/bin/test_circsim_editor_waveform_prof
@@ -87,7 +89,8 @@ jobs:
         run: |
           cmake --build --preset linux-asan --target \
             circsim_editor test_physics test_ui_canvas \
-            test_circsim_editor_panel test_circsim_editor_waveform_prof
+            test_circsim_editor_canvas test_circsim_editor_panel \
+            test_circsim_editor_waveform_prof
 
       - name: Run maintained sanitizer tests
         env:
@@ -96,6 +99,7 @@ jobs:
         run: |
           build/linux-asan/bin/test_physics
           build/linux-asan/bin/test_ui_canvas
+          build/linux-asan/bin/test_circsim_editor_canvas
           build/linux-asan/bin/test_circsim_editor_panel \
             --test-case="an idle frame reuses the cached decimation verbatim"
           build/linux-asan/bin/test_circsim_editor_waveform_prof
