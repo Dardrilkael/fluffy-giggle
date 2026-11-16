@@ -95,6 +95,11 @@ jobs:
             test_circsim_editor_document test_circsim_editor_canvas test_circsim_editor_canvas_cost test_circsim_editor_panel \
             test_circsim_editor_waveform_prof
 
+      # Build this target in its own invocation as a guard: it must
+      # produce the executable that the sanitizer test step runs below.
+      - name: Build canvas regression under sanitizers
+        run: cmake --build --preset linux-asan --target test_circsim_editor_canvas --parallel 2
+
       - name: Run maintained sanitizer tests
         env:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:halt_on_error=1
