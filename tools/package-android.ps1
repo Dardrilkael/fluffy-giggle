@@ -57,8 +57,9 @@ if (-not $env:ANDROID_NDK_HOME) {
 $buildTools = Get-ChildItem (Join-Path $sdk 'build-tools') -Directory |
     Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
 $platform = Get-ChildItem (Join-Path $sdk 'platforms') -Directory -Filter 'android-*' |
-    # [version] wants major.minor at minimum - android-35 pads to 35.0.
-    Sort-Object { [version](($_.Name -replace '^android-', '') + '.0') } -Descending |
+    # Extension platforms have names such as android-34-ext10; compare the
+    # numeric API level and ignore the extension suffix for API selection.
+    Sort-Object { [int]([regex]::Match($_.Name, '^android-(\d+)').Groups[1].Value) } -Descending |
     Select-Object -First 1
 $aapt2      = Join-Path $buildTools.FullName 'aapt2.exe'
 $zipalign   = Join-Path $buildTools.FullName 'zipalign.exe'
