@@ -292,8 +292,8 @@ void ensure_series_stats(Editor& ed, const ws::spice::Table& t) {
 //
 //   CIRCSIM_PLOT_PROF=1         log per-stage CPU timings of the plot's series
 //                               loop every kProfWindow frames (INFO).
-//   CIRCSIM_PLOT_PROF=2         the same, plus a SHADOW tessellation of every
-//                               series into a throwaway TessBuffer (timed, not
+//   CIRCSIM_PLOT_PROF=2         the same, plus a SHADOW tessellation on cache
+//                               misses into a throwaway TessBuffer (timed, not
 //                               drawn): "tess" is the tessellator alone, so
 //                               stroke - tess = the canvas wrapper + r2d's
 //                               per-quad recording. Costs extra CPU: use it for
@@ -1368,7 +1368,6 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                     prof.stroke_ms += stroke_ms;
                     prof.prep_ms += wave_ms_since(prof_series_t0) - stroke_ms;
                     ++prof.series;
-                    prof.quads += cached_geometry->buffer.quad_count();
                 }
                 continue;  // no decimation walk, mapping, or tessellation
             }
@@ -1514,9 +1513,6 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
             cached_geometry->key = geometry_key;
             cached_geometry->built = true;
             renderer->replay_quads(cached_geometry->buffer);
-            if (wave_env().prof != 0) {
-                prof.quads += cached_geometry->buffer.quad_count();
-            }
         } else {
             // CommandListCanvas and other recording/test backends retain
             // their original command stream through the default no-op seam.
