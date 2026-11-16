@@ -1388,7 +1388,7 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     // the edge. Anything fully outside skips tessellation, net lookup
     // and text layout - the cost that scaled with the WHOLE drawing
     // instead of what is on screen. A selected part is never culled.
-    constexpr double kCullMarginCells = 12.0;
+    constexpr double kCullMarginCells = kViewCullMarginCells;
     const bool cull_on = ed.view.zoom > 1e-9;
     const double cull_hw =
         cull_on ? 0.5 * static_cast<double>(body.width) / ed.view.zoom : 0.0;
@@ -1402,6 +1402,7 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         return !cull_on || (x >= cull_x0 && x <= cull_x1 && y >= cull_y0 &&
                             y <= cull_y1);
     };
+    const SelectionIndex sel_index = ed.selection_index();
 
     // A net id -> its Net (the join dots carry ids; NetList indexes
     // names/pins/wires, so this is the one walk over the public list).
@@ -1436,30 +1437,20 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
 
     std::vector<Point> wire_pts;  // one buffer for every wire of the frame
     for (const ws::circsim::Wire& w : s.wires()) {
-        const std::vector<Pos> path = ed.wire_path(w);
-        if (path.size() < 2u) {
+        const WireGeom& geom = ed.wire_geom(w);
+        if (geom.path.size() < 2u) continue;
+        if (cull_on && (geom.max_x < cull_x0 || geom.min_x > cull_x1 ||
+                        geom.max_y < cull_y0 || geom.min_y > cull_y1)) {
             continue;
         }
         wire_pts.clear();
-        wire_pts.reserve(path.size());
-        double bx0 = path[0].x, bx1 = path[0].x;
-        double by0 = path[0].y, by1 = path[0].y;
-        for (const Pos& p : path) {
-            bx0 = std::min(bx0, static_cast<double>(p.x));
-            bx1 = std::max(bx1, static_cast<double>(p.x));
-            by0 = std::min(by0, static_cast<double>(p.y));
-            by1 = std::max(by1, static_cast<double>(p.y));
+        wire_pts.reserve(geom.path.size());
+        for (const Pos& p : geom.path) {
             wire_pts.push_back(Point{static_cast<float>(p.x),
-                                static_cast<float>(p.y)});
+                                     static_cast<float>(p.y)});
         }
-        if (cull_on && (bx1 < cull_x0 || bx0 > cull_x1 || by1 < cull_y0 ||
-                        by0 > cull_y1)) {
-            continue;  // the bbox misses the view rect entirely
-        }
-        // The working set wears the highlight (the anchor alone was the
-        // old face - a box-selected wire now shows it too).
         const bool selected =
-            ed.in_selection({Selection::Kind::Wire, w.id});
+            sel_index.contains({Selection::Kind::Wire, w.id});
         Paint paint = selected ? wire_sel : wire_paint;
         if (!selected) {
             paint.color = entity_color(wire_nets != nullptr
@@ -1476,7 +1467,7 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         rc.fill_circle(
             Point{static_cast<float>(j.pos.x), static_cast<float>(j.pos.y)},
             0.14f,
-            ed.in_selection({Selection::Kind::Junction, j.id})
+            sel_index.contains({Selection::Kind::Junction, j.id})
                 ? theme.control_on
                 : entity_color(wire_nets != nullptr
                                    ? wire_nets->net_of_junction(j.id)
@@ -1540,7 +1531,7 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                            wire_paint);
             (void)rc.draw_text(at.x + 0.45f, at.y - 0.1f, l.name.c_str(),
                                *theme.font,
-                               ed.in_selection({Selection::Kind::Label, l.id})
+                               sel_index.contains({Selection::Kind::Label, l.id})
                                    ? theme.control_on
                                    : gui::dim(theme.text, 0.9f));
         }
@@ -1555,7 +1546,7 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
 
     for (const ws::circsim::Part& p : s.parts()) {
         const bool selected =
-            ed.in_selection({Selection::Kind::Part, p.id});
+            sel_index.contains({Selection::Kind::Part, p.id});
         if (!selected && !point_visible(p.pos.x, p.pos.y)) {
             continue;  // off screen: no glow ease, no symbol, no text
         }

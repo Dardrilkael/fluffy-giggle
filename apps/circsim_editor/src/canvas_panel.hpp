@@ -21,6 +21,12 @@ namespace editor {
 
 // The panel body draw (the shell wraps it in its scroll scope; the
 // body rect IS the viewport).
+// The view cull's margin in world cells: anything farther than this beyond
+// the visible rect is skipped (no tessellation, no net lookup, no text).
+// A part is culled by its ORIGIN, so this must cover the largest symbol's
+// extent from its origin or big symbols pop out at the edge - the test
+// suite pins that against every built-in symbol.
+inline constexpr double kViewCullMarginCells = 12.0;
 void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                        gui::LayoutCursor& layout,
                        const gui::ChromeTheme& theme);
