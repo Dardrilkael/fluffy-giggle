@@ -1503,9 +1503,15 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     // TextTiles with screen rects and world anchors; the panel draws them
     // verbatim. Per-part nudges from Editor::annot_state_of are applied
     // by the engine.
-    Editor::AnnotPlacement placement;
-    if (theme.font != nullptr && ed.show_part_values) {
-        placement = ed.place_part_annotation();
+    const Editor::AnnotPlacement empty_placement{};
+    const Editor::AnnotPlacement& placement =
+        theme.font != nullptr && ed.show_part_values
+            ? ed.place_part_annotation()
+            : empty_placement;
+    std::unordered_map<std::string, const Editor::TextTile*> part_tiles_by_refdes;
+    part_tiles_by_refdes.reserve(placement.part_tiles.size());
+    for (const auto& tile : placement.part_tiles) {
+        part_tiles_by_refdes.emplace(tile.refdes, &tile);
     }
 
     if (theme.font != nullptr) {
@@ -1646,14 +1652,13 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         // The engine places the annotation avoiding collisions; we match
         // by refdes (which is unique per part in the schematic).
         if (theme.font != nullptr && ed.show_part_values) {
-            // Find the placed tile for this part by refdes.
-            const Editor::TextTile* placed = nullptr;
-            for (const auto& tile : placement.part_tiles) {
-                if (tile.refdes == p.ref) {
-                    placed = &tile;
-                    break;
-                }
-            }
+            // The per-frame index avoids scanning every annotation for
+            // every visible part (quadratic matching on large sheets).
+            const auto found_tile = part_tiles_by_refdes.find(p.ref);
+            const Editor::TextTile* placed =
+                found_tile != part_tiles_by_refdes.end()
+                    ? found_tile->second
+                    : nullptr;
             if (placed != nullptr) {
                 // Draw refdes and value from the placed tile.
                 // The tile's screen_rect is the combined text bounds
