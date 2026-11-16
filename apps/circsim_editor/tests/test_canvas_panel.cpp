@@ -2409,12 +2409,44 @@ TEST_CASE("single delete undo restores the original deque position") {
             REQUIRE(p != nullptr);
             expected.push_back(p->id);
         }
+        std::vector<std::uint32_t> junction_ids;
+        for (int i = 0; i < 3; ++i) {
+            Junction j;
+            j.pos = {static_cast<double>(i * 2), 2.0};
+            Junction* added = b.doc.schem.add_junction(j);
+            REQUIRE(added != nullptr);
+            junction_ids.push_back(added->id);
+        }
+        std::vector<std::uint32_t> wire_ids;
+        const auto add_wire = [&](ws::circsim::WireEndpoint a,
+                                  ws::circsim::WireEndpoint c) {
+            Wire* added = b.doc.schem.add_wire(Wire::endpoints(a, c));
+            REQUIRE(added != nullptr);
+            wire_ids.push_back(added->id);
+        };
+        add_wire(ws::circsim::PinRef{expected[0], 0},
+                 ws::circsim::PinRef{expected[2], 0});
+        add_wire(ws::circsim::PinRef{expected[1], 0},
+                 ws::circsim::JunctionRef{junction_ids[1]});
+        add_wire(ws::circsim::PinRef{expected[2], 1},
+                 ws::circsim::JunctionRef{junction_ids[2]});
+
         editor::push_delete_part(b.doc, expected[1]);
         REQUIRE(b.doc.schem.parts().size() == 2u);
+        REQUIRE(b.doc.schem.wires().size() == 2u);
+        REQUIRE(b.doc.schem.junctions().size() == 2u);
         (void)b.doc.undo().undo();
         REQUIRE(b.doc.schem.parts().size() == expected.size());
+        REQUIRE(b.doc.schem.wires().size() == wire_ids.size());
+        REQUIRE(b.doc.schem.junctions().size() == junction_ids.size());
         for (std::size_t i = 0; i < expected.size(); ++i) {
             CHECK(b.doc.schem.parts()[i].id == expected[i]);
+        }
+        for (std::size_t i = 0; i < wire_ids.size(); ++i) {
+            CHECK(b.doc.schem.wires()[i].id == wire_ids[i]);
+        }
+        for (std::size_t i = 0; i < junction_ids.size(); ++i) {
+            CHECK(b.doc.schem.junctions()[i].id == junction_ids[i]);
         }
     }
 
@@ -2429,15 +2461,22 @@ TEST_CASE("single delete undo restores the original deque position") {
             REQUIRE(added != nullptr);
             junction_ids.push_back(added->id);
         }
-        for (int i = 0; i < 3; ++i) {
+        const std::uint32_t wire_a[] = {
+            junction_ids[0], junction_ids[2], junction_ids[0]};
+        const std::uint32_t wire_b[] = {
+            junction_ids[1], junction_ids[3], junction_ids[1]};
+        for (std::size_t i = 0; i < 3u; ++i) {
             Wire* added = b.doc.schem.add_wire(Wire::endpoints(
-                ws::circsim::JunctionRef{junction_ids[i]},
-                ws::circsim::JunctionRef{junction_ids[i + 1]}));
+                ws::circsim::JunctionRef{wire_a[i]},
+                ws::circsim::JunctionRef{wire_b[i]}));
             REQUIRE(added != nullptr);
             wire_ids.push_back(added->id);
         }
+        // The middle wire is the only reference to J3 and J4, so undo
+        // must restore both junctions at their original positions too.
         editor::push_delete_wire(b.doc, wire_ids[1]);
         REQUIRE(b.doc.schem.wires().size() == 2u);
+        REQUIRE(b.doc.schem.junctions().size() == 2u);
         (void)b.doc.undo().undo();
         REQUIRE(b.doc.schem.wires().size() == wire_ids.size());
         REQUIRE(b.doc.schem.junctions().size() == junction_ids.size());
