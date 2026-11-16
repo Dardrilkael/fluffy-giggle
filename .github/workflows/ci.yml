@@ -43,7 +43,7 @@ jobs:
           build/linux/bin/test_ui_canvas
           build/linux/bin/test_circsim_editor_panel \
             --test-case="an idle frame reuses the cached decimation verbatim"
-          build/linux/bin/test_circsim_editor_waveform_prof
+          build/linux-asan/bin/test_circsim_editor_waveform_prof
 
       - name: Exercise waveform profiler join modes
         shell: bash
