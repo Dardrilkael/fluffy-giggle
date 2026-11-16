@@ -588,6 +588,9 @@ public:
     // frame late on exactly that path, documented, harmless.
     using ImeRectFn = std::function<void(const Rect&)>;
     void set_ime_rect(ImeRectFn fn);
+    using SoftKeyboardFn = std::function<void(bool)>;
+    void set_soft_keyboard(SoftKeyboardFn fn);
+    void set_soft_keyboard_visible(bool visible);
 
     // --- the pieces widget functions receive ---
     IdStack& ids() { return ids_; }
@@ -705,6 +708,8 @@ private:
     // compare is spelled field-by-field below.
     ImeRectFn ime_rect_fn_;
     Rect ime_rect_last_{};
+    SoftKeyboardFn soft_keyboard_fn_;
+    bool soft_keyboard_visible_ = false;
 
     // One pointer's hot/active pair, carried across frames keyed by the
     // pointer's id - that carry IS the drag. Slot 0 is the mouse by
