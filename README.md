@@ -118,6 +118,56 @@ cmake --build --preset spice-debug
 | `shell_example` | AppShell acceptance app (text + plot scratchpad) | Desktop |
 | `playground` | Shell smoke-test app | Desktop |
 
+## Circsim Editor
+
+`circsim_editor` is the graphical schematic-capture and simulation application built on
+`ws::circsim` and `ws::spice`. It is available for desktop and Android.
+
+### Schematic workflow
+
+- Create and edit `.csim` schematics with the canvas tools for placing, moving,
+  rotating, mirroring, wiring, and labeling components.
+- Browse the symbol palette and edit component parameters through the property
+  panel. Symbol definitions are provided by the `.csym` library format.
+- Inspect electrical rule-check (ERC) diagnostics and select a problem to locate
+  its associated schematic object.
+- Inspect the generated netlist and run the schematic through the SPICE backend.
+- View analysis results in the plot panel, choose visible signals, inspect values,
+  and export result data as CSV or JSON.
+- Export a schematic image as PNG.
+
+The editor uses an undoable document model for schematic edits and supports the
+usual shell document workflow (open/save, recent files, and session recovery).
+
+### Keyboard shortcuts
+
+These shortcuts apply while the Schematic panel is active:
+
+| Key | Action |
+|-----|--------|
+| `R` | Rotate the placement ghost or selected part |
+| `M` | Mirror the placement ghost or selected part |
+| `W` | Activate the wire tool |
+| `L` | Activate the label tool |
+| `F` | Fit the schematic to the view |
+| `Delete` | Delete the selection |
+| `Esc` | Cancel the active tool or operation |
+
+The canvas supports wheel zoom toward the cursor and panning with the middle mouse
+button or Space + left-drag.
+
+### Command-line tools
+
+The separate `circsim_cli` executable provides non-GUI workflows:
+
+- `run` — run a schematic simulation
+- `erc` — check a schematic for electrical rule violations
+- `netlist` — inspect the generated connectivity
+- `symbols` — inspect available symbol definitions
+
+See [docs/CIRCSIM_PLAN.md](docs/CIRCSIM_PLAN.md) for the implementation history and
+technical design notes.
+
 ## Error Handling
 
 All public APIs return `ws::core::Result<T>` or `Status` — no exceptions cross library boundaries. Each library defines its own error enum and converts to `ws::core::Error` at its public boundary.
