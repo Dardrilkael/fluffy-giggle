@@ -226,29 +226,53 @@ bool jni_threw(JNIEnv* env, const char* what) {
         return saf_fail(PlatformError::io_failed,
                         "no stream for " + uri);
     }
+    // A provider may defer the actual write/commit until close(), so
+    // both write() and close() are part of the save's success condition.
+    // Keep closing the stream even when staging or writing fails.
+    bool write_failed = false;
     jbyteArray const payload =
         env->NewByteArray(static_cast<jsize>(bytes.size()));
     if (payload == nullptr) {
-        return saf_fail(PlatformError::io_failed, "cannot stage the bytes");
+        write_failed = true;
+    } else {
+        env->SetByteArrayRegion(payload, 0, static_cast<jsize>(bytes.size()),
+                                reinterpret_cast<const jbyte*>(bytes.data()));
+        write_failed = jni_threw(env, "staging OutputStream payload threw");
     }
-    env->SetByteArrayRegion(payload, 0, static_cast<jsize>(bytes.size()),
-                            reinterpret_cast<const jbyte*>(bytes.data()));
-    jmethodID const write =
-        env->GetMethodID(env->GetObjectClass(stream), "write", "([B)V");
-    if (write != nullptr) {
-        env->CallVoidMethod(stream, write, payload);
+
+    if (!write_failed) {
+        jmethodID const write =
+            env->GetMethodID(env->GetObjectClass(stream), "write", "([B)V");
+        if (write == nullptr) {
+            write_failed = true;
+            (void)jni_threw(env, "OutputStream.write lookup threw");
+        } else {
+            env->CallVoidMethod(stream, write, payload);
+            write_failed = jni_threw(env, "OutputStream.write threw");
+        }
     }
-    const bool threw =
-        write == nullptr || jni_threw(env, "OutputStream.write threw");
+
+    // Do not discard this exception: some SAF providers only finish and
+    // report their write from close(). A missing close method is a failure
+    // too; otherwise a truncated or uncommitted document would be reported
+    // as saved.
+    bool close_failed = false;
     jmethodID const close = env->GetMethodID(env->GetObjectClass(stream),
                                              "close", "()V");
-    if (close != nullptr) {
+    if (close == nullptr) {
+        close_failed = true;
+        (void)jni_threw(env, "OutputStream.close lookup threw");
+    } else {
         env->CallVoidMethod(stream, close);
+        close_failed = jni_threw(env, "OutputStream.close threw");
     }
-    (void)jni_threw(env, "OutputStream.close threw");
-    if (threw) {
+
+    if (payload != nullptr) {
+        env->DeleteLocalRef(payload);
+    }
+    if (write_failed || close_failed) {
         return saf_fail(PlatformError::io_failed,
-                        "the write to " + uri + " failed");
+                        "the write or close to " + uri + " failed");
     }
     return {};
 }
