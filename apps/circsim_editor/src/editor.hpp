@@ -853,7 +853,11 @@ struct Editor {
 
     // Annotation state is scoped to this Editor, not process-global:
     // component IDs are allocated per schematic and collide across tabs.
-    mutable std::map<std::uint32_t, AnnotState> annot_states_;
+    // Keep annotation edits with their schematic across tab switches;
+    // part IDs are only unique inside one schematic.
+    mutable std::map<const ws::circsim::Schematic*,
+                     std::map<std::uint32_t, AnnotState>,
+                     std::less<const ws::circsim::Schematic*>> annot_states_;
 
     // Placement is expensive (obstacle construction + candidate scoring).
     // Reuse it while every input that affects placement remains unchanged.
