@@ -148,6 +148,11 @@ void push_add_analysis(SchematicDocument& doc,
 void push_remove_analysis(SchematicDocument& doc, std::size_t index);
 void push_set_analysis(SchematicDocument& doc, std::size_t index,
                        ws::circsim::AnalysisSpec next);
+// The deck-order reorder (D3's up/down): one entry moves from `from`
+// to `to`, one undo step for the move. Out-of-range or a same-slot
+// move refuses as a no-op push - the family's own guard.
+void push_move_analysis(SchematicDocument& doc, std::size_t from,
+                        std::size_t to);
 
 // The next free reference designator for a symbol ("R1", "R2", ...):
 // the highest trailing number on the symbol's own prefix, plus one -

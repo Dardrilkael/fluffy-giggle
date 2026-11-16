@@ -1185,6 +1185,42 @@ class SetAnalysisCommand final : public EditCommand {
     ws::circsim::AnalysisSpec was_, next_;
 };
 
+// The reorder the D3 list rides: one entry moves from `from` to `to`
+// (an adjacent swap in practice, but the general spelling is the
+// honest one - the undo mirrors it exactly). Out-of-range on either
+// end refuses as a no-op, the analysis commands' own rule; a same-slot
+// move is nothing and never pushes.
+class MoveAnalysisCommand final : public EditCommand {
+  public:
+    MoveAnalysisCommand(SchematicDocument& doc, std::size_t from,
+                        std::size_t to)
+        : EditCommand(&doc), from_(from), to_(to) {}
+
+    void apply() override { move(from_, to_); }
+    void undo() override { move(to_, from_); }
+    [[nodiscard]] std::string name() const override {
+        return "Reorder Analyses";
+    }
+
+  private:
+    // The vector's own rotation: erase at `from`, insert at `to` -
+    // indices after the erase shift by one when to > from, exactly the
+    // std::vector::insert contract; the undo's mirrored pair lands the
+    // entry back on its own slot, so the two spells round-trip.
+    void move(std::size_t from, std::size_t to) {
+        auto& entries = schem().analysis.entries;
+        if (from >= entries.size() || to >= entries.size() || from == to) {
+            return;
+        }
+        ws::circsim::AnalysisSpec held = entries[from];
+        entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(from));
+        entries.insert(entries.begin() + static_cast<std::ptrdiff_t>(to),
+                       held);
+        schem().bump();
+    }
+    std::size_t from_, to_;
+};
+
 }  // namespace
 
 void push_directives(SchematicDocument& doc, std::string next) {
@@ -1223,6 +1259,17 @@ void push_set_analysis(SchematicDocument& doc, std::size_t index,
     if (index < entries.size()) {
         (void)doc.undo().push(std::make_unique<SetAnalysisCommand>(
             doc, index, entries[index], next));
+    }
+}
+
+void push_move_analysis(SchematicDocument& doc, std::size_t from,
+                        std::size_t to) {
+    // The reorder's own guard, the family's rule: out of range or a
+    // same-slot move refuses as a no-op push (nothing to undo).
+    auto& entries = doc.schem.analysis.entries;
+    if (from < entries.size() && to < entries.size() && from != to) {
+        (void)doc.undo().push(
+            std::make_unique<MoveAnalysisCommand>(doc, from, to));
     }
 }
 // next_ref lives in ws::circsim now (geom.hpp, stage 11 - the lib

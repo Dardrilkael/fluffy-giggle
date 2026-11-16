@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace ws::ui::r2d {
 class Font;  // the last-text font records a pointer identity, nothing more
@@ -34,6 +35,11 @@ struct StubDraws {
     // caller's buffer may be gone by assert time). The string-table
     // tests read it to pin WHAT the gui drew, not just how much.
     std::string last_text;
+    // Every draw_text this run, in draw order - the label-rows tests
+    // (the panels' persistent labels) walk it to find one row among
+    // many where last_text only answers the final draw. reset()
+    // clears it with everything else.
+    std::vector<std::string> text_log;
     // The typography pass's own pair: the most recent draw_text COLOR
     // and FONT (pointer identity - the muted rung's placeholder/tab
     // assertions and the heading's strong-face assertion compare

@@ -316,9 +316,13 @@ TEST_CASE("hairlines sit on pixel centres") {
 }
 
 TEST_CASE("the axes and the origin draw in the axis face") {
-    const GridSpec spec;
+    // The axis block is opt-in (show_axis - the schematic canvas
+    // leaves it off; the graph canvas opts in), so the feature's own
+    // test opts in the way its callers do.
+    GridSpec spec;
+    spec.show_axis = true;
     CommandListCanvas c;
-    draw_grid(c, stock_frame());  // centered on the origin
+    draw_grid(c, stock_frame(), spec);  // centered on the origin
     bool axis_line = false;
     bool origin_dot = false;
     for (const auto& cmd : c.cmds) {
@@ -409,11 +413,16 @@ TEST_CASE("the exact lattice of a small viewport") {
     // same (0,0), skipped; the top rung's (0,0) is skipped the same
     // way - the 3px origin marker draws instead - and its OTHER marks
     // are outside the range. The axes are the two remaining lines.
+    // (Opted into show_axis - the case was written around the axis
+    // owning index 0; the default-off lattice, where the loops
+    // re-own 0, is the canvas panel's own C4 case.)
     GridFrame f = stock_frame();
     f.view_w = 130.0;
     f.view_h = 60.0;
+    GridSpec spec;
+    spec.show_axis = true;
     CommandListCanvas c;
-    draw_grid(c, f);
+    draw_grid(c, f, spec);
     std::size_t one_px = 0;
     std::size_t two_px = 0;
     std::size_t three_px = 0;

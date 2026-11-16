@@ -99,6 +99,22 @@ struct Bench {
         draw_properties([] {});
     }
 
+    // The themed spelling (the D1 typography cases): the panel body
+    // under a caller-built theme, so the label rows draw real text the
+    // r2d stub records - the stock spelling's fontless chrome answers
+    // in bars and the label story is invisible to the stub. Named
+    // distinctly from the hook spellings so the Hook template's
+    // forwarding reference cannot swallow a theme argument.
+    void draw_properties_theme(const gui::ChromeTheme& theme) {
+        gui.begin_frame(ws::input::InputFrame{});
+        gui::LayoutCursor layout;
+        (void)layout.begin_panel(gui::Rect{0.0f, 0.0f, 360.0f, 640.0f},
+                                 12.0f, 8.0f);
+        editor::draw_properties_panel(ed, gui, layout, theme);
+        layout.end_panel();
+        gui.end_frame();
+    }
+
     // The frame-fed spelling (the keyboard cases): the frame's
     // pointer/keys drive the same panel body, with the post-draw hook
     // between it and end_frame - the focus window the typing cases
@@ -279,6 +295,22 @@ struct Bench {
         return p.id;
     }
 };
+
+// The synthetic faces the themed cases install: a strong table at the
+// heading size (18 px against the 16 px body, the app's own bake
+// pair) and a mono table at the data size. The fill ctor copies the
+// table, so the arrays fill before the Font members construct. (Lives
+// with the Bench so every themed case - the typography pass's own and
+// the D1 label cases alike - spells its faces the same way.)
+using GlyphTable = std::array<ws::ui::r2d::Font::Glyph, 95>;
+
+GlyphTable glyph_table(float advance) {
+    GlyphTable glyphs{};
+    for (ws::ui::r2d::Font::Glyph& g : glyphs) {
+        g.advance = advance;
+    }
+    return glyphs;
+}
 
 }  // namespace
 
@@ -513,8 +545,10 @@ TEST_CASE("the temperature row edits, clears back to the default, and undoes") {
     CHECK(b.ed.fields.count("sim.temp") == 1u);
     CHECK(b.doc.schem.temp == std::nullopt);
 
-    // Type 125: one Edit Temperature lands.
-    const std::string temp_id = "Temperature (temp)##sim.temp";
+    // Type 125: one Edit Temperature lands. (D1 renamed the row - the
+    // persistent label above spells the unit, and the widget's own
+    // placeholder no longer carries the "(temp)" token.)
+    const std::string temp_id = "Run temperature##sim.temp";
     b.draw_properties(
         [&] { b.gui.set_focus(b.gui.ids().id(temp_id.c_str())); });
     {
@@ -544,6 +578,277 @@ TEST_CASE("the temperature row edits, clears back to the default, and undoes") {
     const std::size_t held = b.doc.undo().undo_count();
     editor::push_set_temp(b.doc, std::nullopt);
     CHECK(b.doc.undo().undo_count() == held);
+}
+
+// --- D1: every input wears a persistent label ----------------------------------
+
+TEST_CASE("the part rows carry their labels beside filled fields") {
+    Bench b;
+    // A resister with both rows filled: the label must survive a
+    // NON-empty buffer (the stock text_input only shows its label as
+    // an empty field's placeholder - once "R7"/"4k7" land, nothing
+    // named the box). The themed draw records the chrome rows the
+    // fontless one answers in bars.
+    (void)b.select_part("res");
+    b.doc.schem.parts_mut().front().ref = "R7";
+    b.doc.schem.parts_mut().front().value = "4.7k";
+    const GlyphTable glyphs = glyph_table(8.0f);
+    const ws::ui::r2d::Font body(16.0f, 20.0f, glyphs.data(), 95);
+    gui::ChromeTheme theme = gui::kDefaultChrome;
+    theme.font = &body;
+
+    std::size_t label_draws = 0;
+    bool readback = false;
+    for (int frame = 0; frame < 2; ++frame) {
+        ws::ui::gui_test::stub.reset();
+        b.draw_properties_theme(theme);
+        for (const std::string& s : ws::ui::gui_test::stub.text_log) {
+            if (s.find("Reference designator") != std::string::npos) {
+                ++label_draws;
+            }
+            if (s.find("= 4700") != std::string::npos) {
+                readback = true;
+            }
+        }
+    }
+    // The label row drew on every frame - the persistence the stock
+    // placeholder could not keep - and the value readback still
+    // teaches under the filled row (4.7k is 4700).
+    CHECK(label_draws == 2u);
+    CHECK(readback);
+}
+
+TEST_CASE("the source editor's AC row explains its blank state") {
+    Bench b;
+    // AC mode (a wave set) with the ac param empty: the row is the
+    // editor's own tail, minted with its buffer whatever it holds
+    // (the "v" symbol is the library's source key - the shape the
+    // existing waveform cases ride).
+    ws::circsim::Part p = ws::circsim::Part::make("v", "V1", "", {0.0, 0.0});
+    p.id = b.doc.schem.alloc_id();
+    p.params["wave"] = "SIN(0 1 1k)";
+    p.params["ac"] = "";
+    b.doc.schem.parts_mut().push_back(p);
+    b.ed.sel.kind = editor::Selection::Kind::Part;
+    b.ed.sel.id = p.id;
+    b.draw_properties();
+    CHECK(b.ed.fields.count("p1.param.ac") == 1u);
+    CHECK(std::string{b.ed.fields.at("p1.param.ac").buf.data()} == "");
+}
+
+TEST_CASE("the temperature label spells its unit and its blank default") {
+    Bench b;
+    b.ed.properties_tab = 2;
+    const GlyphTable glyphs = glyph_table(8.0f);
+    const ws::ui::r2d::Font body(16.0f, 20.0f, glyphs.data(), 95);
+    gui::ChromeTheme theme = gui::kDefaultChrome;
+    theme.font = &body;
+    ws::ui::gui_test::stub.reset();
+    b.draw_properties_theme(theme);
+    // The persistent label names the field and its unit, and the
+    // blank state's story ("blank = 27 <degree>C") rides the hint
+    // under the field - the old row read as a dead, dim box with no
+    // name. Walk the frame's text log for both rows.
+    const auto& log = ws::ui::gui_test::stub.text_log;
+    const auto drew = [&log](const char* needle) {
+        for (const std::string& s : log) {
+            if (s.find(needle) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+    CHECK(drew("Run temperature"));
+    CHECK(drew("blank = 27"));
+    CHECK(b.ed.fields.count("sim.temp") == 1u);
+    CHECK(b.ed.fields.at("sim.temp").buf.data()[0] == '\0');
+}
+
+// --- D2: the debug readout leaves prime space -----------------------------------
+
+TEST_CASE("the part details section is collapsed until asked for") {
+    Bench b;
+    (void)b.select_part("res");
+    const GlyphTable glyphs = glyph_table(8.0f);
+    const ws::ui::r2d::Font body(16.0f, 20.0f, glyphs.data(), 95);
+    gui::ChromeTheme theme = gui::kDefaultChrome;
+    theme.font = &body;
+
+    // Default: closed. The position readout draws NOTHING - prime
+    // space stays with the editable rows. Walk the whole text log:
+    // no row in the frame spells the position readout.
+    CHECK(b.ed.part_details_open == false);
+    ws::ui::gui_test::stub.reset();
+    b.draw_properties_theme(theme);
+    for (const std::string& s : ws::ui::gui_test::stub.text_log) {
+        CHECK(s.find("Position") == std::string::npos);
+    }
+
+    // Open: the header's own click path (focus + Enter, the keyboard's
+    // click - the same citizenship every collapsible header keeps).
+    b.draw_properties([&] {
+        b.gui.set_focus(b.gui.ids().id("Part details (debug)"));
+    });
+    ws::input::InputFrame enter;
+    enter.key_pressed[static_cast<std::size_t>(ws::input::keys::kEnter)] =
+        true;
+    b.draw_properties(enter, [] {});
+    CHECK(b.ed.part_details_open == true);
+
+    // The position readout now draws - one click away, still present
+    // for the debugging it exists for.
+    ws::ui::gui_test::stub.reset();
+    b.draw_properties_theme(theme);
+    bool found = false;
+    for (const std::string& s : ws::ui::gui_test::stub.text_log) {
+        found = found || s.find("Position") != std::string::npos;
+    }
+    CHECK(found);
+}
+
+TEST_CASE("the grid readout names its unit and meaning") {
+    Bench b;
+    b.ed.properties_tab = 2;
+    const GlyphTable glyphs = glyph_table(8.0f);
+    const ws::ui::r2d::Font body(16.0f, 20.0f, glyphs.data(), 95);
+    gui::ChromeTheme theme = gui::kDefaultChrome;
+    theme.font = &body;
+    ws::ui::gui_test::stub.reset();
+    b.draw_properties_theme(theme);
+    // "Grid pitch: 1 (grid cells)" plus the snap-spacing hint - the
+    // old row said "Grid: 1" and nothing else. Walk the frame's text
+    // log: the readout and its explanation are both in there.
+    const auto& log = ws::ui::gui_test::stub.text_log;
+    const auto drew = [&log](const char* needle) {
+        for (const std::string& s : log) {
+            if (s.find(needle) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+    REQUIRE(log.size() >= 2u);
+    CHECK(drew("Grid pitch"));
+    CHECK(drew("grid cells"));
+    CHECK(drew("snap spacing"));
+}
+
+// --- D3: the analysis list owns its whole story ---------------------------------
+
+TEST_CASE("push_move_analysis reorders as one undo step") {
+    Bench b;
+    editor::push_add_analysis(b.doc, ws::circsim::OpSpec{});
+    editor::push_add_analysis(b.doc, ws::circsim::DcSpec{});
+    editor::push_add_analysis(b.doc, ws::circsim::AcSpec{});
+    const std::size_t before = b.doc.undo().undo_count();
+
+    // Move the op (index 0) below the dc (to index 1).
+    editor::push_move_analysis(b.doc, 0u, 1u);
+    CHECK(b.doc.schem.analysis.entries.size() == 3u);
+    CHECK(std::get_if<ws::circsim::DcSpec>(&b.doc.schem.analysis.entries[0]) !=
+          nullptr);
+    CHECK(std::get_if<ws::circsim::OpSpec>(&b.doc.schem.analysis.entries[1]) !=
+          nullptr);
+    CHECK(b.doc.undo().undo_count() == before + 1u);
+    CHECK(b.doc.undo().name_to_undo() == "Reorder Analyses");
+
+    // One undo lands the entry back on its own slot.
+    REQUIRE(b.doc.undo().undo().has_value());
+    CHECK(std::get_if<ws::circsim::OpSpec>(&b.doc.schem.analysis.entries[0]) !=
+          nullptr);
+    CHECK(std::get_if<ws::circsim::DcSpec>(&b.doc.schem.analysis.entries[1]) !=
+          nullptr);
+
+    // The guard: out of range or a same-slot move refuses as a no-op.
+    const std::size_t held = b.doc.undo().undo_count();
+    editor::push_move_analysis(b.doc, 0u, 0u);
+    editor::push_move_analysis(b.doc, 0u, 99u);
+    editor::push_move_analysis(b.doc, 99u, 0u);
+    CHECK(b.doc.undo().undo_count() == held);
+    CHECK(b.doc.schem.analysis.entries.size() == 3u);
+}
+
+TEST_CASE("the row buttons move and remove through the panel's own acts") {
+    Bench b;
+    b.ed.properties_tab = 2;
+    editor::push_add_analysis(b.doc, ws::circsim::OpSpec{});
+    editor::push_add_analysis(b.doc, ws::circsim::DcSpec{});
+
+    // The row buttons live under the per-row id scope (the index the
+    // list walks), so the second row's ^ is "2's ^" - the same scoping
+    // the selectable rows keep. Focus + Enter is the keyboard's click.
+    const auto press = [&](int row, const char* label) {
+        b.draw_properties([&] {
+            b.gui.ids().push(row);
+            b.gui.set_focus(b.gui.ids().id(label));
+            b.gui.ids().pop();
+        });
+        ws::input::InputFrame enter;
+        enter.key_pressed[static_cast<std::size_t>(
+            ws::input::keys::kEnter)] = true;
+        b.draw_properties(enter, [] {});
+    };
+
+    // Move the dc (row 1) up over the op.
+    press(1, "^");
+    CHECK(std::get_if<ws::circsim::DcSpec>(
+              &b.doc.schem.analysis.entries[0]) != nullptr);
+    CHECK(std::get_if<ws::circsim::OpSpec>(
+              &b.doc.schem.analysis.entries[1]) != nullptr);
+    // The selection followed the entry it named.
+    CHECK(b.ed.analysis_index == 0);
+
+    // The row's own x removes THAT row - not "whatever is selected".
+    press(1, "x");
+    CHECK(b.doc.schem.analysis.entries.size() == 1u);
+    CHECK(std::get_if<ws::circsim::DcSpec>(
+              &b.doc.schem.analysis.entries[0]) != nullptr);
+    CHECK(b.ed.analysis_index == -1);
+
+    // Undo puts it back (one step per act, the family's own rule).
+    REQUIRE(b.doc.undo().undo().has_value());
+    CHECK(b.doc.schem.analysis.entries.size() == 2u);
+}
+
+TEST_CASE("the add buttons say what they add and wrap at narrow widths") {
+    Bench b;
+    b.ed.properties_tab = 2;
+
+    // The five buttons are full words ("Add operating point", not
+    // "+ op"): each names its analysis, so the row teaches rather
+    // than abbreviates. Two per line at the full panel width, the
+    // fifth on its own line - at ANY width the flow lays them, never
+    // a five-across strip a narrow panel would clip.
+    const auto press = [&](const char* label) {
+        b.draw_properties([&] {
+            b.gui.set_focus(b.gui.ids().id(label));
+        });
+        ws::input::InputFrame enter;
+        enter.key_pressed[static_cast<std::size_t>(
+            ws::input::keys::kEnter)] = true;
+        b.draw_properties(enter, [] {});
+    };
+
+    press("Add transient");
+    REQUIRE(b.doc.schem.analysis.entries.size() == 1u);
+    CHECK(std::get_if<ws::circsim::TranSpec>(
+              &b.doc.schem.analysis.entries[0]) != nullptr);
+    // The new entry is selected, its fields minted for editing.
+    CHECK(b.ed.analysis_index == 0);
+    CHECK(b.ed.fields.count("a0.tran.step (tstep)") == 1u);
+
+    press("Add operating point");
+    REQUIRE(b.doc.schem.analysis.entries.size() == 2u);
+    CHECK(std::get_if<ws::circsim::OpSpec>(
+              &b.doc.schem.analysis.entries[1]) != nullptr);
+
+    // A narrow panel (half the bench's width) still lays every button
+    // - the half-width split keeps both halves inside the panel, and
+    // the odd fifth sits alone on the next line.
+    Bench narrow;
+    narrow.ed.properties_tab = 2;
+    narrow.draw_properties();
+    CHECK(narrow.ed.fields.count("sim.temp") == 1u);
 }
 
 // --- refresh_problems' snapshot version ----------------------------------------
@@ -824,7 +1129,8 @@ TEST_CASE("a param labeled Value is its own field, not the built-in value row") 
     // A Tab queued after the body resolves against that list, so the
     // ids it lands on are the panel's own field identity.
     b.draw_properties([&] {
-        b.gui.set_focus(b.gui.ids().id(("Reference##" + part + ".ref").c_str()));
+        b.gui.set_focus(
+            b.gui.ids().id(("Reference designator##" + part + ".ref").c_str()));
         b.gui.nav_next();  // Tab off the Reference row
     });
 
@@ -1014,23 +1320,8 @@ TEST_CASE("two toasts in quick succession keep both messages' bytes live") {
 
 // --- the typography pass: the hierarchy rung, the mono data face ------------------
 
-namespace {
-
-// The synthetic faces the typography cases install: a strong table at
-// the heading size (18 px against the 16 px body, the app's own bake
-// pair) and a mono table at the data size. The fill ctor copies the
-// table, so the arrays fill before the Font members construct.
-using GlyphTable = std::array<ws::ui::r2d::Font::Glyph, 95>;
-
-GlyphTable glyph_table(float advance) {
-    GlyphTable glyphs{};
-    for (ws::ui::r2d::Font::Glyph& g : glyphs) {
-        g.advance = advance;
-    }
-    return glyphs;
-}
-
-}  // namespace
+// (The synthetic-face factory lives up with the Bench now - the D1
+// label cases draw themed panels before this section's own cases.)
 
 TEST_CASE("the palette's tools header draws through the strong face") {
     Bench b;

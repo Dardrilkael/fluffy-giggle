@@ -155,6 +155,22 @@ void panel_section(gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
     gui::text_wrapped(layout, theme, title);
 }
 
+// D1's persistent label: a text row ABOVE the field, spelling what the
+// field is (with its unit where one applies) whatever the buffer holds
+// - the stock text_input shows its label only as the placeholder of an
+// EMPTY field, so "S1" and "swmod" sat in boxes nobody named once
+// filled. The label row is chrome (no id, no hit) drawn through
+// theme.text so it never competes with the hint's dimmer rung; the
+// field below keeps its own "##"-keyed widget id, so the label adds no
+// identity and takes no focus stop. The field's PLACEHOLDER keeps
+// saying the default the empty buffer would land ("27" under a
+// Temperature label), never the label again - the two rows never
+// repeat each other.
+void field_label(gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
+                 const std::string& label) {
+    gui::text(layout, theme, label.c_str());
+}
+
 // "3 errors" / "1 error": the count with its noun.
 [[nodiscard]] std::string counted(std::size_t n, const char* noun) {
     return std::to_string(n) + " " + noun + (n == 1 ? "" : "s");
@@ -200,16 +216,22 @@ void panel_section(gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
     return "junction " + std::to_string(j != nullptr ? j->junction : 0);
 }
 
-// A text row that pushes the edit on every change (the typing-run
-// coalescer makes this one undo step per run). The widget id embeds
-// the buffer key (text_input_tracked's "##" rule): the built-in
-// "ref"/"value" rows and a symbol's own param rows can share display
-// labels without sharing a widget.
+// A labeled text row that pushes the edit on every change (the
+// typing-run coalescer makes this one undo step per run). D1: the
+// persistent label rides ABOVE the field (field_label), with the
+// field's own placeholder telling the empty state's story - the
+// `ph_default` text ("blank = none") when the buffer is empty, so an
+// optional field explains its default the moment it is cleared. The
+// widget id embeds the buffer key (text_input_tracked's "##" rule):
+// the built-in "ref"/"value" rows and a symbol's own param rows can
+// share display labels without sharing a widget.
 void part_text_row(Editor& ed, gui::GuiContext& gui,
                    gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
                    const char* label, std::uint32_t part_id, int kind,
-                   const std::string& param, const std::string& current) {
+                   const std::string& param, const std::string& current,
+                   const char* ph_default = nullptr) {
     const std::string key = part_field_key(part_id, kind, param);
+    field_label(layout, theme, label);
     if (text_input_tracked(ed, gui, layout, theme,
                            std::string{label} + "##" + key,
                            field_buf(ed, key, current), 128)) {
@@ -217,9 +239,12 @@ void part_text_row(Editor& ed, gui::GuiContext& gui,
                        std::string{field_of(ed, key).buf.data()},
                        std::string{"Edit "} + label);
     }
+    const std::string held{field_of(ed, key).buf.data()};
+    if (held.empty() && ph_default != nullptr) {
+        hint_line(layout, theme, ph_default);
+    }
     if (kind == 1) {
-        const std::string readback =
-            value_readback(field_of(ed, key).buf.data());
+        const std::string readback = value_readback(held.c_str());
         if (!readback.empty()) {
             hint_line(layout, theme, readback);
         }
@@ -339,12 +364,16 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
     // edited at a time, but the key still keeps the row's state its
     // own across analysis switches. `unit` (when given) adds the
     // engineering readback - "1e-06" says "= 1us" - the Value row's
-    // own "= 4700" teaching with the row's unit spelled.
+    // own "= 4700" teaching with the row's unit spelled. D1: the
+    // persistent label rides above the field (field_label); the
+    // parenthesized SPICE token stays part of the label, teaching the
+    // deck's word for the row the way it always has.
     const auto number_row = [&](const char* label, const std::string& skey,
                                 double current, const auto& land,
                                 const char* unit = nullptr) {
         const std::string current_text = plain_num(current);
         const std::string key = skey + "." + label;
+        field_label(layout, theme, label);
         char* buf = field_buf(ed, key, current_text);
         if (text_input_tracked(ed, gui, layout, theme,
                                std::string{label} + "##" + key, buf, 128)) {
@@ -376,6 +405,7 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
     if (const ws::circsim::DcSpec* dc =
             std::get_if<ws::circsim::DcSpec>(&spec)) {
         const std::string skey = key + ".dc";
+        field_label(layout, theme, "source (swept)");
         char* src = field_buf(ed, skey + ".source", dc->source);
         if (text_input_tracked(ed, gui, layout, theme, "source (swept)##" +
                                                               skey +
@@ -475,6 +505,7 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
         }
         char n_text[32];
         std::snprintf(n_text, sizeof n_text, "%d", ac->n);
+        field_label(layout, theme, "points (n)");
         char* n_buf = field_buf(ed, skey + ".n", n_text);
         if (text_input_tracked(ed, gui, layout, theme, "points (n)##" + skey +
                                                              ".n",
@@ -514,6 +545,7 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
         const auto name_row = [&](const char* label,
                                   const std::string& current,
                                   const auto& land) {
+            field_label(layout, theme, label);
             char* buf = field_buf(ed, skey + "." + label, current);
             if (text_input_tracked(ed, gui, layout, theme,
                                    std::string{label} + "##" + skey + "." +
@@ -562,6 +594,7 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
         }
         char n_text[32];
         std::snprintf(n_text, sizeof n_text, "%d", ns->n);
+        field_label(layout, theme, "points (n)");
         char* n_buf = field_buf(ed, skey + ".n", n_text);
         if (text_input_tracked(ed, gui, layout, theme, "points (n)##" + skey +
                                                              ".n",
@@ -1926,7 +1959,8 @@ void source_wave_editor(Editor& ed, gui::GuiContext& gui,
         const auto ac_at = p.params.find("ac");
         if (ac_at != p.params.end() && !ac_at->second.empty()) {
             part_text_row(ed, gui, layout, theme, "AC magnitude", p.id,
-                          2, "ac", ac_at->second);
+                          2, "ac", ac_at->second,
+                          "blank = no small-signal level");
             hint_line(layout, theme,
                       "Small-signal level for .ac sweeps - blank means "
                       "none");
@@ -2043,6 +2077,7 @@ void source_wave_editor(Editor& ed, gui::GuiContext& gui,
             const char* label = labels[slot].label;
             const std::string current_text = plain_num(wave.p[slot]);
             const std::string key = base + "." + label;
+            field_label(layout, theme, label);
             char* buf = field_buf(ed, key, current_text);
             if (text_input_tracked(ed, gui, layout, theme,
                                    std::string{label} + "##" + key, buf,
@@ -2071,7 +2106,8 @@ void source_wave_editor(Editor& ed, gui::GuiContext& gui,
     // set.
     const auto ac_at = p.params.find("ac");
     part_text_row(ed, gui, layout, theme, "AC magnitude", p.id, 2, "ac",
-                  ac_at != p.params.end() ? ac_at->second : "");
+                  ac_at != p.params.end() ? ac_at->second : "",
+                  "blank = no small-signal level");
     hint_line(layout, theme,
               "Small-signal level for .ac sweeps - blank means none");
 }
@@ -2129,8 +2165,8 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
                    sym != nullptr
                        ? sym->name + " (" + sym->key + ")"
                        : p->symbol + " (not in the symbol library)");
-        part_text_row(ed, gui, layout, theme, "Reference", p->id, 0, "",
-                      p->ref);
+        part_text_row(ed, gui, layout, theme, "Reference designator", p->id,
+                      0, "", p->ref);
         // A source's value row lives INSIDE its mode editor, under the
         // Mode dropdown that decides it exists (DC mode shows it, AC
         // mode shows the waveform's own offset instead - never the
@@ -2262,11 +2298,24 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
             // line without the hand-typed "SIN(0 1 1k)".
             source_wave_editor(ed, gui, layout, theme, *p);
         }
-        const std::string where =
-            "Position: (" + plain_num(p->pos.x) + ", " +
-            plain_num(p->pos.y) + ")";
-        gui::separator(layout, theme);
-        hint_line(layout, theme, where.c_str());
+        // D2: the debug-shaped readout moves out of prime space. The
+        // position line is placement plumbing - exactly the "useful
+        // while dragging, noise while editing" class - so it lives
+        // behind a collapsed header, one click away but not under the
+        // fields the user edits. The open flag rides the Editor (view
+        // state beside the tab selection), so it survives frames and
+        // selection moves without riding the document.
+        if (gui::collapsing_header(gui, layout, theme,
+                                   "Part details (debug)", ed.part_details_open)) {
+            hint_line(layout, theme,
+                      "Schematic coordinates, grid cells from the origin - "
+                      "what the snapping and the .csim file store");
+            label_line(layout, theme, "Position",
+                       "(" + plain_num(p->pos.x) + ", " +
+                           plain_num(p->pos.y) + ")");
+            label_line(layout, theme, "Grid pitch",
+                       plain_num(ed.schem()->grid) + " (grid cells)");
+        }
         if (gui::button(gui, layout, theme, "Delete part")) {
             push_delete_part(*ed.doc, p->id);
             ed.sel.clear();
@@ -2330,6 +2379,7 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
             ed.sel.clear();
             return;
         }
+        field_label(layout, theme, "Net name");
         char* buf = field_buf(ed, "l" + std::to_string(l->id) + ".name",
                               l->name);
         if (text_input_tracked(
@@ -2362,8 +2412,18 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
         return;
     }
     gui::heading(layout, theme, "Schematic");
-    const std::string grid = plain_num(ed.schem()->grid);
-    label_line(layout, theme, "Grid", grid.c_str());
+    // D1: the grid readout names its unit and its meaning - "Grid: 1"
+    // said a number nobody could read. The pitch is in grid cells
+    // (schematic units), and it is what placement snaps to and what
+    // the .csim stores; the read-only spelling stays a label (there is
+    // no per-document grid editor - a changed pitch would strand every
+    // placed part), so it must explain itself rather than look like a
+    // dead field.
+    label_line(layout, theme, "Grid pitch",
+               plain_num(ed.schem()->grid) + " (grid cells)");
+    hint_line(layout, theme,
+              "The snap spacing parts and wires land on, in schematic "
+              "units - also what the .csim file stores");
     gui::separator(layout, theme);
 
     // --- the analysis list
@@ -2378,7 +2438,17 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
     if (ed.schem()->analysis.entries.empty()) {
         hint_line(layout, theme, "None yet - add one below");
     }
+    // D3: the per-row act buttons. The buttons ride the SAME line as
+    // the params hint through same_line() - the row's own column
+    // layout, never a separate flow row that a narrow panel would
+    // cram five across. The act lands after the walk (a mid-walk
+    // push_ would mutate the very vector being iterated), the same
+    // deferred-shape the add buttons below keep.
+    constexpr float kActW = 24.0f;
     int index = 0;
+    int move_from = -1;
+    int move_to = -1;
+    int row_remove = -1;
     for (const ws::circsim::AnalysisSpec& spec :
          ed.schem()->analysis.entries) {
         gui.ids().push(index);
@@ -2394,61 +2464,105 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
             ed.analysis_index = index;
             ed.bump_edit_epoch();  // the field rows below reload
         }
-        hint_line(layout, theme, analysis_params_brief(spec));
+        // The params hint shares the act row's line: the hint takes
+        // the width the three 24px buttons leave, so the buttons never
+        // wrap past the panel edge at ANY width (the hint truncates,
+        // the buttons do not).
+        const float hint_w = std::max(
+            60.0f, layout.remaining_width() -
+                       3.0f * (kActW + theme.spacing));
+        layout.same_line();
+        const gui::Rect hint_rect =
+            layout.next(hint_w, theme.control_height);
+        if (theme.font != nullptr) {
+            (void)ws::ui::r2d::draw_text(
+                hint_rect.x, hint_rect.y, analysis_params_brief(spec).c_str(),
+                *theme.font, gui::dim(theme.text, 0.6f));
+        } else {
+            (void)hint_rect;  // fontless: the buttons below still act
+        }
+        // Up: dead on the first row, Down dead on the last (the
+        // disabled face says why, the command refuses anyway).
+        if (gui::button(gui, layout, theme, "^", kActW, {},
+                        index == 0)) {
+            move_from = index;
+            move_to = index - 1;
+        }
+        layout.same_line();
+        if (gui::button(gui, layout, theme, "v", kActW, {},
+                        index == static_cast<int>(
+                                      ed.schem()->analysis.entries.size()) -
+                                      1)) {
+            move_from = index;
+            move_to = index + 1;
+        }
+        layout.same_line();
+        if (gui::button(gui, layout, theme, "x", kActW, {})) {
+            row_remove = index;
+        }
         gui.ids().pop();
         ++index;
     }
-
-    // One button per kind. (The old "add" combo answered only on a real
-    // move off its first item, so ".op" - item 0 - could never be added.)
-    // The REFLOWING row: at a wide panel all five ride one line; a
-    // narrow one wraps the overflow onto the next line instead of
-    // shrinking "+ tran" into "+ t..." (the no-mid-word-cut rule). A
-    // nullptr spacer between ".op" and the sweeps groups them like the
-    // panel's own sections do.
-    static const char* const kKindCells[] = {
-        "+ op", nullptr, "+ dc", "+ tran", "+ ac", "+ noise"};
-    constexpr int kKindCellCount =
-        static_cast<int>(std::size(kKindCells));
-    const int add_kind =
-        gui::button_row_flow(gui, layout, theme, "analysis.add",
-                             kKindCells, kKindCellCount, 64.0f);
-    if (add_kind >= 0) {
-        ws::circsim::AnalysisSpec spec;
-        switch (add_kind) {
-            // The cells' indices: 0 "+ op", 1 the spacer, 2 "+ dc",
-            // 3 "+ tran", 4 "+ ac", 5 "+ noise".
-            case 2: spec = ws::circsim::DcSpec{}; break;
-            // A fresh .tran runs out of the box: tstop 1ms at a 1us
-            // step (the classic 1000-point sweep), both editable the
-            // moment the entry lands.
-            case 3:
-                spec = ws::circsim::TranSpec{.tstep = 1e-6,
-                                             .tstop = 1e-3};
-                break;
-            case 4: spec = ws::circsim::AcSpec{}; break;
-            // A fresh .noise carries the AC row's own sweep defaults
-            // (10 pts/dec, 1Hz-1MHz); the two names - which net, which
-            // source - are the user's to fill, and the fields are
-            // waiting the moment the entry lands.
-            case 5: spec = ws::circsim::NoiseSpec{}; break;
-            default: spec = ws::circsim::OpSpec{}; break;
-        }
-        push_add_analysis(*ed.doc, spec);
-        ed.analysis_index = static_cast<int>(
-            ed.schem()->analysis.entries.size() - 1u);
+    if (move_from >= 0 && move_to >= 0) {
+        push_move_analysis(*ed.doc, static_cast<std::size_t>(move_from),
+                           static_cast<std::size_t>(move_to));
+        // The selection follows the entry it named (a moved entry that
+        // left the selection behind would edit the wrong analysis).
+        ed.analysis_index = move_to;
         ed.bump_edit_epoch();
+    }
+    if (row_remove >= 0) {
+        // The row's own x: the same guard the button's act rides, but
+        // landing on the row the click named (a selection the row x
+        // killed would otherwise re-land on a stale index below).
+        const std::size_t at = static_cast<std::size_t>(row_remove);
+        if (at < ed.schem()->analysis.entries.size()) {
+            push_remove_analysis(*ed.doc, at);
+            ed.analysis_index = -1;
+            ed.bump_edit_epoch();
+        }
+    }
+
+    // The add buttons, one per kind, each SAYING what it adds (D3: the
+    // old "+ op / + dc / + t…" row truncated its own story and five
+    // across overflowed a narrow panel). Two per line at full width -
+    // "Add operating point" and its neighbour read at any supported
+    // panel width - and the flow simply lays a third line for the
+    // odd fifth. (The old "add" combo answered only on a real move off
+    // its first item, so ".op" - item 0 - could never be added.)
+    struct AddKind {
+        const char* label;
+        ws::circsim::AnalysisSpec spec;
+    };
+    const std::array<AddKind, 5> kinds = {
+        {{ "Add operating point", ws::circsim::OpSpec{} },
+         { "Add DC sweep", ws::circsim::DcSpec{} },
+         // A fresh .tran runs out of the box: tstop 1ms at a 1us step
+         // (the classic 1000-point sweep), both editable the moment
+         // the entry lands.
+         { "Add transient",
+           ws::circsim::TranSpec{.tstep = 1e-6, .tstop = 1e-3} },
+         { "Add AC sweep", ws::circsim::AcSpec{} },
+         // A fresh .noise carries the AC row's own sweep defaults (10
+         // pts/dec, 1Hz-1MHz); the two names - which net, which source
+         // - are the user's to fill, and the fields are waiting the
+         // moment the entry lands.
+         { "Add noise", ws::circsim::NoiseSpec{} }}};
+    for (std::size_t k = 0; k < kinds.size(); ++k) {
+        if (k % 2u == 1u) {
+            layout.same_line();
+        }
+        const float half = std::max(
+            60.0f, (layout.remaining_width() - theme.spacing) / 2.0f);
+        if (gui::button(gui, layout, theme, kinds[k].label, half)) {
+            push_add_analysis(*ed.doc, kinds[k].spec);
+            ed.analysis_index = static_cast<int>(
+                ed.schem()->analysis.entries.size() - 1u);
+            ed.bump_edit_epoch();
+        }
     }
 
     if (!ed.schem()->analysis.entries.empty()) {
-        // Dead until something is selected (the disabled face), and the
-        // act itself re-checks. The button FILLS the line (negative
-        // width) so "Remove selected" reads whole at every panel width
-        // - the fill rule the flowed add-row above rides too.
-        if (gui::button(gui, layout, theme, "Remove selected", -1.0f, {},
-                        ed.analysis_index < 0)) {
-            (void)remove_selected_analysis(ed);
-        }
         // A stale index is NOT clamped onto the last entry any more (that
         // edited the wrong analysis); the check above already reset it.
         if (ed.analysis_index >= 0) {
@@ -2468,13 +2582,18 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
     // --- the run temperature (§7.7): one row, blank = SPICE's default
     panel_section(layout, theme, "Simulation options");
     {
+        // D1: the persistent label above, the unit in the label, and
+        // the blank state's story in the hint - the old row was an
+        // unlabeled field that showed NOTHING when unset, reading as a
+        // disabled box nobody could edit.
+        field_label(layout, theme, "Run temperature (\u00b0C)");
         const std::string current_text =
             ed.schem()->temp.has_value()
                 ? plain_num(*ed.schem()->temp)
                 : std::string{};
         char* buf = field_buf(ed, "sim.temp", current_text);
         if (text_input_tracked(ed, gui, layout, theme,
-                               "Temperature (temp)##sim.temp", buf, 128)) {
+                               "Run temperature##sim.temp", buf, 128)) {
             const std::string text{buf};
             const auto parsed = ws::spice::parse_number(buf);
             if (parsed.has_value()) {
@@ -2492,7 +2611,7 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
                       "Not a SPICE number - try 25, 125 or -40");
         } else {
             hint_line(layout, theme,
-                      "Degrees C; blank = SPICE's 27 default. Device models "
+                      "blank = 27 \u00b0C (SPICE's default). Device models "
                       "that track temperature (diodes, BJTs, MOS) follow it");
         }
     }
@@ -2514,6 +2633,11 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
                               line);
         const float field_w = std::max(
             60.0f, layout.remaining_width() - kRowButtonW - theme.spacing);
+        // The row's placeholder spells what an empty row wants - a
+        // directive line, not a net name or a value (D1: the identity
+        // of every input is visible at all times, empty or not; the
+        // label lives in the section heading above, the placeholder
+        // carries the per-row story).
         if (text_input_tracked(ed, gui, layout, theme,
                                std::string{"line##directives."} +
                                    std::to_string(line_at),

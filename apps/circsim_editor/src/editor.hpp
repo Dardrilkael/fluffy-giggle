@@ -781,6 +781,13 @@ struct Editor {
     std::uint32_t fields_sel_id = 0;
     int analysis_index = -1;
     int properties_tab = 0;
+    // D2: the Properties tab's collapsed "Part details" section - the
+    // debug-shaped rows (the position readout) live behind it, closed
+    // by default so prime space stays with the editable fields. View
+    // state like the tab selection, not circuit state: it survives
+    // frames and selection moves, and nothing on the undo stack knows
+    // it exists.
+    bool part_details_open = false;
 
     // Bumps the edit epoch (the app wires the undo stacks' listeners
     // here, so an undo/redo lands back into the field rows).

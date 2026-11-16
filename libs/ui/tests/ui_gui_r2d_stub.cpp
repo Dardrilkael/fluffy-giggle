@@ -149,6 +149,10 @@ float draw_text(float, float, const char* utf8_text, const Font& font,
     gui_test::stub.last_text_color = color;
     gui_test::stub.last_text_font = &font;
     gui_test::stub.last_text = utf8_text != nullptr ? utf8_text : "";
+    // The walkable record: the label tests find one row among many
+    // (last_text only answers the final draw). reset() clears it with
+    // everything else.
+    gui_test::stub.text_log.push_back(gui_test::stub.last_text);
     return advance;
 }
 
