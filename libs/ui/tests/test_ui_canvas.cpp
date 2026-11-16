@@ -1079,8 +1079,8 @@ TEST_CASE("canvas2d: dashed closed paths stroke fragments open") {
     SUBCASE("the wrapper spelling: fragments open, solid closed") {
         CommandListCanvas c;
         c.stroke_polyline(square, 4, paint, true);
-        // 3 segments x 16 units, period 8: six 4-unit dashes.
-        REQUIRE(c.cmds.size() == 6);
+        // 4 segments x 16 units, period 8: eight 4-unit dashes.
+        REQUIRE(c.cmds.size() == 8);
         for (const auto& cmd : c.cmds) {
             CHECK_FALSE(cmd.closed);
         }
@@ -1092,8 +1092,8 @@ TEST_CASE("canvas2d: dashed closed paths stroke fragments open") {
     }
 
     SUBCASE("the close_path spelling behaves the same") {
-        // close_path appends the duplicate closing point: 4 segments,
-        // perimeter 64, eight dashes - all open.
+        // close_path appends the duplicate closing point: all four
+        // segments are dashed, for eight open fragments.
         CommandListCanvas c;
         c.begin_path();
         c.move_to(square[0]);
@@ -1123,7 +1123,7 @@ TEST_CASE("canvas2d: dashed closed paths stroke fragments open") {
     SUBCASE("a dash longer than the perimeter degenerates to one ring") {
         CommandListCanvas c;
         Paint wrap = paint;
-        wrap.dash.lengths[0] = 100.0f;  // > perimeter 48
+        wrap.dash.lengths[0] = 100.0f;  // > perimeter 64
         c.stroke_polyline(square, 4, wrap, true);
         REQUIRE(c.cmds.size() == 1);
         CHECK(c.cmds[0].closed);
@@ -1135,8 +1135,8 @@ TEST_CASE("canvas2d: dashed closed paths stroke fragments open") {
         // no phantom closing chords (each would add a doubled core
         // segment plus joint bands, and drop the caps).
         std::vector<std::vector<Point>> runs;
-        dash_polyline(square, 4, paint.dash, runs);
-        REQUIRE(runs.size() == 6);
+        dash_polyline(square, 4, paint.dash, runs, true);
+        REQUIRE(runs.size() == 8);
 
         ws::ui::gui_test::stub.reset();
         {

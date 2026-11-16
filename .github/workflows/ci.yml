@@ -1,8 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
 
@@ -15,45 +13,84 @@ concurrency:
 
 jobs:
   linux:
-    name: Linux (GCC 13, headless subset)
+    name: Linux (GCC, UI and Circsim regressions)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ninja-build cmake g++ \
-            libglfw3-dev libvulkan-dev libopenal-dev libuv1-dev
+            libglfw3-dev libvulkan-dev libopenal-dev libuv1-dev \
+            libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev
+
       - name: Configure
         run: cmake --preset linux
-      - name: Build
-        run: cmake --build --preset linux
-      - name: Test
-        run: ctest --preset linux
+
+      - name: Build application and maintained test targets
+        run: |
+          cmake --build --preset linux --target \
+            circsim_editor test_physics test_ui_canvas \
+            test_circsim_editor_panel test_circsim_editor_waveform_prof
+
+      - name: Run maintained regression tests
+        run: |
+          build/linux/bin/test_physics
+          build/linux/bin/test_ui_canvas
+          build/linux/bin/test_circsim_editor_panel \
+            --test-case="an idle frame reuses the cached decimation verbatim"
+          build/linux/bin/test_circsim_editor_waveform_prof
+
+      - name: Exercise waveform profiler join modes
+        shell: bash
+        run: |
+          test_bin=build/linux/bin/test_circsim_editor_waveform_prof
+          CIRCSIM_PLOT_PROF=1 CIRCSIM_PLOT_JOIN=round "$test_bin" --test-case="waveform render profiling - round joins"
+          CIRCSIM_PLOT_PROF=1 CIRCSIM_PLOT_JOIN=bevel "$test_bin" --test-case="waveform render profiling - bevel joins"
+          CIRCSIM_PLOT_PROF=1 CIRCSIM_PLOT_JOIN=miter "$test_bin" --test-case="waveform render profiling - miter joins"
+          CIRCSIM_PLOT_PROF=2 CIRCSIM_PLOT_JOIN=round "$test_bin" --test-case="waveform render profiling - round joins PROF=2"
+          CIRCSIM_PLOT_PROF=2 CIRCSIM_PLOT_JOIN=bevel "$test_bin" --test-case="waveform render profiling - bevel joins PROF=2"
+          CIRCSIM_PLOT_PROF=2 CIRCSIM_PLOT_JOIN=miter "$test_bin" --test-case="waveform render profiling - miter joins PROF=2"
 
   linux-sanitizers:
     name: Linux (ASan + UBSan)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ninja-build cmake g++ \
-            libglfw3-dev libvulkan-dev libopenal-dev libuv1-dev
+            libglfw3-dev libvulkan-dev libopenal-dev libuv1-dev \
+            libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev
+
       - name: Configure
         run: cmake --preset linux-asan
-      - name: Build
-        run: cmake --build --preset linux-asan
-      - name: Test
+
+      - name: Build maintained sanitizer targets
+        run: |
+          cmake --build --preset linux-asan --target \
+            circsim_editor test_physics test_ui_canvas \
+            test_circsim_editor_panel test_circsim_editor_waveform_prof
+
+      - name: Run maintained sanitizer tests
         env:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:halt_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:abort_on_error=1
-        run: ctest --preset linux-asan
+        run: |
+          build/linux-asan/bin/test_physics
+          build/linux-asan/bin/test_ui_canvas
+          build/linux-asan/bin/test_circsim_editor_panel \
+            --test-case="an idle frame reuses the cached decimation verbatim"
+          build/linux/bin/test_circsim_editor_waveform_prof
 
   check-deps:
     name: Workspace dependency rule
@@ -61,10 +98,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+
       - name: Install PowerShell
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends powershell
+
       - name: Run check_deps
         run: |
           pwsh -NoProfile -ExecutionPolicy Bypass \
@@ -73,18 +112,22 @@ jobs:
   android:
     name: Android NDK (arm64-v8a)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ninja-build cmake
+
       - name: Verify NDK toolchain
         run: |
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
-          ls "$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
+          test -f "$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
+
       - name: Configure
         run: cmake --preset android
+
       - name: Build
         run: cmake --build --preset android

@@ -165,6 +165,10 @@ public:
     virtual void fill_rects(const Point* corners, int count, float w,
                             float h, std::uint32_t color) = 0;
 
+    // Replays already-tessellated, screen-space geometry. Backends that
+    // cannot consume cached quads may leave the default no-op in place.
+    virtual void replay_quads(const TessBuffer&) {}
+
     // --- text ----------------------------------------------------------------
     // Draws one line of UTF-8 text at (x, y) [the line box's top-left
     // in LOCAL space] with `font` and `color`. Returns the pen's
@@ -344,6 +348,7 @@ public:
                            float r, std::uint32_t color) override;
     void fill_rects(const Point* corners, int count, float w,
                     float h, std::uint32_t color) override;
+    void replay_quads(const TessBuffer& buffer) override;
 
     float draw_text(float x, float y, const char* utf8,
                     const r2d::Font& font,

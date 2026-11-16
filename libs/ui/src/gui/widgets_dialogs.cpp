@@ -23,11 +23,11 @@ struct StockButtons {
     int count = 0;
 };
 constexpr StockButtons kStockButtons[] = {
-    {Str::ok, Str::cancel, 0},    // none
-    {Str::ok, Str::cancel, 1},   // ok
-    {Str::ok, Str::cancel, 2},    // ok_cancel
-    {Str::yes, Str::no, 2},       // yes_no
-    {Str::retry, Str::cancel, 2}, // retry_cancel
+    {{Str::ok, Str::cancel}, 0},    // none
+    {{Str::ok, Str::cancel}, 1},    // ok
+    {{Str::ok, Str::cancel}, 2},    // ok_cancel
+    {{Str::yes, Str::no}, 2},       // yes_no
+    {{Str::retry, Str::cancel}, 2}, // retry_cancel
 };
 constexpr int kStockButtonsCount =
     static_cast<int>(sizeof(kStockButtons) / sizeof(kStockButtons[0]));

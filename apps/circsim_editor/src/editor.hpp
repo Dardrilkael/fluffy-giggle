@@ -528,6 +528,33 @@ struct ResultsCache {
     std::size_t decim_budget = 0;
     std::vector<DecimKeep> decim;
 
+    struct SeriesGeometryKey {
+        std::uint64_t run = 0;
+        std::size_t table = kNoTable;
+        double decim_x_lo = 0.0, decim_x_hi = 0.0;
+        std::size_t decim_budget = 0;
+        double x_lo = 0.0, x_hi = 0.0;
+        double y_lo = 0.0, y_hi = 0.0;
+        float plot_x = 0.0f, plot_y = 0.0f;
+        float plot_w = 0.0f, plot_h = 0.0f;
+        float frame_x = 0.0f, frame_y = 0.0f;
+        float frame_w = 0.0f, frame_h = 0.0f;
+        float width = 0.0f;
+        canvas::StrokeJoin join = canvas::StrokeJoin::round;
+        std::uint32_t color = 0;
+        bool visible = false;
+        bool operator==(const SeriesGeometryKey&) const = default;
+    };
+    struct SeriesGeometry {
+        SeriesGeometryKey key;
+        bool built = false;
+        canvas::TessBuffer buffer;
+    };
+    // One retained tessellation per signal. A hit can replay its quads
+    // directly without remapping or CPU tessellation; TessBuffer::clear
+    // retains capacity when a key changes.
+    std::vector<SeriesGeometry> geometry;
+
     // The series/sparkline point scratch: one buffer reused across
     // signals and frames (a fresh vector per series per signal was
     // 2 x signals heap round-trips a frame for nothing - the canvas

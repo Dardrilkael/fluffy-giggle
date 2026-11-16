@@ -160,10 +160,11 @@ void flatten_arc(Point center, float rx, float ry, float a0, float a1,
 // point is a zero-length ON phase - the stroker turns it into cap
 // geometry (a round cap makes the dot of a dotted line). A solid
 // pattern (count 0, or a non-positive total length) emits one run: the
-// whole input. Consecutive duplicate input points collapse within a
-// run. `runs` is appended to, not cleared - callers pipeline.
+// whole input. When `closed` is true, the final point joins back to the
+// first without requiring a duplicated input point. Consecutive duplicate
+// points collapse within a run. `runs` is appended to, not cleared.
 void dash_polyline(const Point* pts, int count, const DashSpec& dash,
-                   std::vector<std::vector<Point>>& runs);
+                   std::vector<std::vector<Point>>& runs, bool closed = false);
 
 // --- stroking -------------------------------------------------------------------
 // Strokes a polyline: the paint's width in screen px, joins at interior

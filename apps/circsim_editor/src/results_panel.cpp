@@ -292,8 +292,8 @@ void ensure_series_stats(Editor& ed, const ws::spice::Table& t) {
 //
 //   CIRCSIM_PLOT_PROF=1         log per-stage CPU timings of the plot's series
 //                               loop every kProfWindow frames (INFO).
-//   CIRCSIM_PLOT_PROF=2         the same, plus a SHADOW tessellation of every
-//                               series into a throwaway TessBuffer (timed, not
+//   CIRCSIM_PLOT_PROF=2         the same, plus a SHADOW tessellation on cache
+//                               misses into a throwaway TessBuffer (timed, not
 //                               drawn): "tess" is the tessellator alone, so
 //                               stroke - tess = the canvas wrapper + r2d's
 //                               per-quad recording. Costs extra CPU: use it for
@@ -376,6 +376,8 @@ struct WaveProf {
     double w_tess_ms = 0.0;
     std::size_t w_series = 0, w_points = 0, w_polylines = 0, w_heap = 0;
     std::size_t w_quads = 0;
+    std::size_t cache_hits = 0, cache_misses = 0;
+    std::size_t w_cache_hits = 0, w_cache_misses = 0;
 };
 
 WaveProf& wave_prof() {
@@ -401,6 +403,7 @@ void wave_prof_begin_frame() {
     WaveProf& p = wave_prof();
     p.prep_ms = p.stroke_ms = p.tess_ms = 0.0;
     p.series = p.points = p.polylines = p.heap_polylines = p.quads = 0u;
+    p.cache_hits = p.cache_misses = 0u;
 }
 
 void wave_prof_end_frame() {
@@ -410,6 +413,8 @@ void wave_prof_end_frame() {
     WaveProf& p = wave_prof();
     p.w_tess_ms += p.tess_ms;
     p.w_quads += p.quads;
+    p.w_cache_hits += p.cache_hits;
+    p.w_cache_misses += p.cache_misses;
     p.w_prep_ms += p.prep_ms;
     p.w_stroke_ms += p.stroke_ms;
     p.w_frame_max_ms = std::max(p.w_frame_max_ms, p.prep_ms + p.stroke_ms);
@@ -430,6 +435,13 @@ void wave_prof_end_frame() {
         static_cast<double>(p.w_points) / n,
         static_cast<double>(p.w_polylines) / n,
         static_cast<double>(p.w_heap) / n);
+    ws::core::info(
+        "plot tess cache: {} hits, {} misses ({}% hit rate)",
+        p.w_cache_hits, p.w_cache_misses,
+        (p.w_cache_hits + p.w_cache_misses) != 0u
+            ? 100.0 * static_cast<double>(p.w_cache_hits) /
+                  static_cast<double>(p.w_cache_hits + p.w_cache_misses)
+            : 0.0);
     if (wave_env().prof >= 2) {
         ws::core::info(
             "plot prof split (PROF={}, {} sink): tessellator {:.3f} ms/frame "
@@ -445,6 +457,7 @@ void wave_prof_end_frame() {
     p.frames = 0;
     p.w_prep_ms = p.w_stroke_ms = p.w_frame_max_ms = p.w_tess_ms = 0.0;
     p.w_series = p.w_points = p.w_polylines = p.w_heap = p.w_quads = 0u;
+    p.w_cache_hits = p.w_cache_misses = 0u;
 }
 
 // One series polyline, mapped and clipped to the frame; non-finite
@@ -516,6 +529,29 @@ void shadow_tessellate(const std::vector<Point>& pts, std::uint32_t color,
         if (i == pts.size()) {
             break;
         }
+        run = break_here ? 0u : run + 1u;
+    }
+}
+
+// Tessellate the already-mapped screen-space points into a retained
+// buffer. NaNs split stepped passes exactly as stroke_series does.
+void tessellate_series(const std::vector<Point>& pts,
+                       std::uint32_t color, float width,
+                       canvas::StrokeJoin join, canvas::TessBuffer& out) {
+    out.clear();
+    Paint paint;
+    paint.width = width;
+    paint.color = color;
+    paint.join = join;
+    std::size_t run = 0;
+    for (std::size_t i = 0; i <= pts.size(); ++i) {
+        const bool break_here = i == pts.size() ||
+                                std::isnan(pts[i].x) || std::isnan(pts[i].y);
+        if (break_here && run >= 2u) {
+            canvas::stroke_polyline(pts.data() + (i - run),
+                                    static_cast<int>(run), paint, out, false);
+        }
+        if (i == pts.size()) break;
         run = break_here ? 0u : run + 1u;
     }
 }
@@ -1274,6 +1310,8 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     // stroke) - the old code allocated two fresh vectors per signal
     // per frame.
     std::vector<Point>& pts = cache.scratch_pts;
+    cache.geometry.resize(t.signals.size());
+    auto* renderer = dynamic_cast<canvas::Renderer2DCanvas*>(&rc);
     // The falling runs' reversed views (build-time scratch only): the
     // decimator bucket-walks ASCENDING x, so a descending run is read
     // back to front, its keeps mapped home and re-sorted.
@@ -1282,6 +1320,10 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     wave_prof_begin_frame();
     for (std::size_t i = 0; i < t.signals.size(); ++i) {
         if (i >= ed.results.visible.size() || ed.results.visible[i] == 0u) {
+            if (renderer != nullptr && i < cache.geometry.size()) {
+                cache.geometry[i].key.visible = false;
+                cache.geometry[i].built = false;
+            }
             continue;
         }
         const std::span<const double> ys = t.signals[i].data;
@@ -1289,6 +1331,44 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
             continue;
         }
         const auto prof_series_t0 = wave_now();
+        WaveProf& prof = wave_prof();
+        constexpr float kSeriesWidth = 2.0f;
+        const std::uint32_t color = series_color(i);
+        ResultsCache::SeriesGeometry* cached_geometry =
+            renderer != nullptr ? &cache.geometry[i] : nullptr;
+        ResultsCache::SeriesGeometryKey geometry_key;
+        if (cached_geometry != nullptr) {
+            const bool right_axis = i < stats.size() && stats[i].right;
+            const ws::circsim::PlotRange yrange = right_axis ? pf.vyr1 : pf.vyr;
+            geometry_key.run = cache.run_id;
+            geometry_key.table = cache.table;
+            geometry_key.decim_x_lo = cache.decim_lo;
+            geometry_key.decim_x_hi = cache.decim_hi;
+            geometry_key.decim_budget = cache.decim_budget;
+            geometry_key.x_lo = pf.vxr.lo; geometry_key.x_hi = pf.vxr.hi;
+            geometry_key.y_lo = yrange.lo; geometry_key.y_hi = yrange.hi;
+            geometry_key.plot_x = plot.x; geometry_key.plot_y = plot.y;
+            geometry_key.plot_w = plot.width; geometry_key.plot_h = plot.height;
+            geometry_key.frame_x = fx; geometry_key.frame_y = fy;
+            geometry_key.frame_w = iw; geometry_key.frame_h = ih;
+            geometry_key.width = kSeriesWidth;
+            geometry_key.join = wave_env().join;
+            geometry_key.color = color;
+            geometry_key.visible = true;
+            if (cached_geometry->built && cached_geometry->key == geometry_key) {
+                const auto replay_t0 = wave_now();
+                if (wave_env().prof != 0) ++prof.cache_hits;
+                renderer->replay_quads(cached_geometry->buffer);
+                if (wave_env().prof != 0) {
+                    const double stroke_ms = wave_ms_since(replay_t0);
+                    prof.stroke_ms += stroke_ms;
+                    prof.prep_ms += wave_ms_since(prof_series_t0) - stroke_ms;
+                    ++prof.series;
+                }
+                continue;  // no decimation walk, mapping, or tessellation
+            }
+            if (wave_env().prof != 0) ++prof.cache_misses;
+        }
         ResultsCache::DecimKeep& dk = cache.decim[i];
         const auto x_at = [&](std::size_t k) {
             return by_index ? static_cast<double>(k)
@@ -1423,9 +1503,18 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
             }
         }
         const auto prof_stroke_t0 = wave_now();
-        WaveProf& prof = wave_prof();
-        stroke_series(rc, pts, series_color(i), 2.0f, wave_env().join,
-                      &prof.polylines, &prof.heap_polylines);
+        if (cached_geometry != nullptr) {
+            tessellate_series(pts, color, kSeriesWidth, wave_env().join,
+                              cached_geometry->buffer);
+            cached_geometry->key = geometry_key;
+            cached_geometry->built = true;
+            renderer->replay_quads(cached_geometry->buffer);
+        } else {
+            // CommandListCanvas and other recording/test backends retain
+            // their original command stream through the default no-op seam.
+            stroke_series(rc, pts, color, kSeriesWidth, wave_env().join,
+                          &prof.polylines, &prof.heap_polylines);
+        }
         if (wave_env().prof != 0) {
             const double stroke_ms = wave_ms_since(prof_stroke_t0);
             prof.stroke_ms += stroke_ms;

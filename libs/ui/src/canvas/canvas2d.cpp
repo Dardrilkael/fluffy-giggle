@@ -209,12 +209,16 @@ void CommandListCanvas::stroke(const Paint& paint) {
                              ? static_cast<int>(path_.size())
                              : substarts_[s + 1];
         if (last - first <= 0) continue;
-        dash_polyline(path_.data() + first, last - first, paint.dash, runs);
+        const bool explicitly_closed =
+            path_closed_ && pts_near(path_[first], path_[last - 1]);
+        dash_polyline(path_.data() + first, last - first, paint.dash, runs,
+                      path_closed_ && !explicitly_closed);
         for (const auto& run : runs) {
             if (run.empty()) continue;
+            // Close only a run that remains ON around the entire ring.
             const bool run_closed =
                 path_closed_ && pts_near(run.front(), path_[first]) &&
-                pts_near(run.back(), path_[last - 1]);
+                pts_near(run.back(), path_[first]);
             CanvasCmd c;
             c.kind = CanvasCmdKind::stroke_polyline;
             c.points.reserve(run.size());
@@ -542,12 +546,16 @@ void Renderer2DCanvas::stroke(const Paint& paint) {
                              ? static_cast<int>(path_.size())
                              : substarts_[s + 1];
         if (last - first <= 0) continue;
-        dash_polyline(path_.data() + first, last - first, paint.dash, runs);
+        const bool explicitly_closed =
+            path_closed_ && pts_near(path_[first], path_[last - 1]);
+        dash_polyline(path_.data() + first, last - first, paint.dash, runs,
+                      path_closed_ && !explicitly_closed);
         for (const auto& run : runs) {
             if (run.empty()) continue;
+            // Close only a run that remains ON around the entire ring.
             const bool run_closed =
                 path_closed_ && pts_near(run.front(), path_[first]) &&
-                pts_near(run.back(), path_[last - 1]);
+                pts_near(run.back(), path_[first]);
             screen_run.resize(run.size());
             for (std::size_t i = 0; i < run.size(); ++i)
                 screen_run[i] = to_screen(run[i]);
@@ -748,6 +756,22 @@ void Renderer2DCanvas::draw_image(float x, float y, float w, float h,
 
 Point Renderer2DCanvas::to_screen(Point p) const {
     return xform_stack_.back().apply(p);
+}
+
+void Renderer2DCanvas::replay_quads(const TessBuffer& buffer) {
+    // TessBuffer vertices are already in screen space: applying the
+    // current canvas transform here would transform cached geometry twice.
+    const std::size_t count = buffer.quads.size();
+    for (std::size_t base = 0; base + 3u < count; base += 4u) {
+        ws::math::Vec2 pos[4];
+        ws::math::Vec4 rgba[4];
+        for (std::size_t i = 0; i < 4u; ++i) {
+            const TessVertex& v = buffer.quads[base + i];
+            pos[i] = {v.x, v.y};
+            rgba[i] = {v.r, v.g, v.b, v.a};
+        }
+        sink_.quad(pos, rgba);
+    }
 }
 
 void Renderer2DCanvas::R2DSink::quad(const Vec2 (&pos)[4],
