@@ -1,6 +1,10 @@
 {
   "version": 6,
-  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "_base",
@@ -66,7 +70,7 @@
       "binaryDir": "${sourceDir}/build/linux",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "WS_BUILD_LIBS": "core;math;spice;jobs;settings;net;physics;circsim",
+        "WS_BUILD_LIBS": "core;math;spice;jobs;settings;net;physics;circsim;ui",
         "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-linux"
       }
     },
@@ -76,7 +80,7 @@
       "inherits": "linux",
       "binaryDir": "${sourceDir}/build/linux-asan",
       "cacheVariables": {
-        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -D_GLIBCXX_ASSERTIONS",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-sanitize=vptr -fno-sanitize-recover=all -fno-omit-frame-pointer -D_GLIBCXX_ASSERTIONS",
         "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined",
         "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address,undefined",
         "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-linux-asan"
@@ -116,7 +120,8 @@
         "ANDROID_STL": "c++_static",
         "WS_BUILD_TESTS": "OFF",
         "WS_BUILD_APPS": "ON",
-        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-android-arm64"
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-android-arm64",
+        "WS_BUILD_LIBS": "ui;circsim"
       }
     },
     {
@@ -151,69 +156,139 @@
     }
   ],
   "buildPresets": [
-    { "name": "debug", "configurePreset": "debug" },
-    { "name": "release", "configurePreset": "release" },
-    { "name": "linux", "configurePreset": "linux" },
-    { "name": "linux-asan", "configurePreset": "linux-asan" },
-    { "name": "spice-debug", "configurePreset": "spice-debug" },
-    { "name": "spice-release", "configurePreset": "spice-release" },
-    { "name": "vs-debug", "configurePreset": "vs-debug", "configuration": "Debug" },
-    { "name": "vs-release", "configurePreset": "vs-release", "configuration": "Release" },
-    { "name": "android", "configurePreset": "android" },
-    { "name": "android-armv7", "configurePreset": "android-armv7" },
-    { "name": "android-x86", "configurePreset": "android-x86" },
-    { "name": "android-x8664", "configurePreset": "android-x8664" }
+    {
+      "name": "debug",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "linux",
+      "configurePreset": "linux"
+    },
+    {
+      "name": "linux-asan",
+      "configurePreset": "linux-asan"
+    },
+    {
+      "name": "spice-debug",
+      "configurePreset": "spice-debug"
+    },
+    {
+      "name": "spice-release",
+      "configurePreset": "spice-release"
+    },
+    {
+      "name": "vs-debug",
+      "configurePreset": "vs-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "vs-release",
+      "configurePreset": "vs-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "android",
+      "configurePreset": "android"
+    },
+    {
+      "name": "android-armv7",
+      "configurePreset": "android-armv7"
+    },
+    {
+      "name": "android-x86",
+      "configurePreset": "android-x86"
+    },
+    {
+      "name": "android-x8664",
+      "configurePreset": "android-x8664"
+    }
   ],
   "testPresets": [
     {
       "name": "linux",
       "configurePreset": "linux",
-      "output": { "outputOnFailure": true },
-      "execution": { "noTestsAction": "error" }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     },
     {
       "name": "linux-asan",
       "configurePreset": "linux-asan",
-      "output": { "outputOnFailure": true },
-      "execution": { "noTestsAction": "error" }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     },
     {
       "name": "spice-debug",
       "configurePreset": "spice-debug",
-      "output": { "outputOnFailure": true },
-      "execution": { "noTestsAction": "error" }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     },
     {
       "name": "spice-release",
       "configurePreset": "spice-release",
-      "output": { "outputOnFailure": true },
-      "execution": { "noTestsAction": "error" }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     },
     {
       "name": "debug",
       "configurePreset": "debug",
-      "output": { "outputOnFailure": true },
-      "execution": { "noTestsAction": "error" }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     },
     {
       "name": "release",
       "configurePreset": "release",
-      "output": { "outputOnFailure": true },
-      "execution": { "noTestsAction": "error" }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     },
     {
       "name": "vs-debug",
       "configurePreset": "vs-debug",
       "configuration": "Debug",
-      "output": { "outputOnFailure": true },
-      "execution": { "noTestsAction": "error" }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     },
     {
       "name": "vs-release",
       "configurePreset": "vs-release",
       "configuration": "Release",
-      "output": { "outputOnFailure": true },
-      "execution": { "noTestsAction": "error" }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     }
   ]
 }
