@@ -222,8 +222,13 @@ public:
     // its fourth corner duplicated (degenerate, zero-area - the batch
     // needs no triangle path). This is the tessellation sink the
     // ws::ui::canvas layer emits into; nothing else should need it.
-    void draw_vertex_quad(const float (&pos)[4][2], const float (&uv)[4][2],
-                          const float (&rgba)[4][4], Texture texture = {});
+    // MSVC-friendly array reference via typedefs (avoids array-reference
+    // declarator parsing quirk with parenthesized parameters).
+    using VertexQuadPositions = const float[4][2];
+    using VertexQuadTexCoords = const float[4][2];
+    using VertexQuadColors = const float[4][4];
+    void draw_vertex_quad(VertexQuadPositions& pos, VertexQuadTexCoords& uv,
+                          VertexQuadColors& rgba, Texture texture = {});
     FrameSize frame_size() const;
     Texture load_texture(const char* path);
     std::vector<Sprite> load_atlas(std::initializer_list<const char*> paths);

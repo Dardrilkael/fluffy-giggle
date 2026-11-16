@@ -136,8 +136,12 @@ void pop_tint() {
 // call so canvas-via-r2d tests can assert the quad count; the test
 // suite mostly uses CommandListCanvas (no r2d), but the symbol must
 // resolve so the pure archive links.
-void draw_vertex_quad(const float (&)[4][2], const float (&)[4][2],
-                      const float (&)[4][4], Texture) {
+// MSVC-friendly array reference via typedefs (matches header).
+using VertexQuadPositions = const float[4][2];
+using VertexQuadTexCoords = const float[4][2];
+using VertexQuadColors = const float[4][4];
+void draw_vertex_quad(VertexQuadPositions&, VertexQuadTexCoords&,
+                      VertexQuadColors&, Texture) {
     gui_test::stub.quads++;
 }
 

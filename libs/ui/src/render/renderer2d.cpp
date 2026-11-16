@@ -1397,8 +1397,13 @@ void draw_line(float x0, float y0, float x1, float y1, float thickness,
     }
 }
 
-void draw_vertex_quad(const float (&pos)[4][2], const float (&uv)[4][2],
-                      const float (&rgba)[4][4], Texture texture) {
+// MSVC-friendly array reference via typedefs (matches header).
+using VertexQuadPositions = const float[4][2];
+using VertexQuadTexCoords = const float[4][2];
+using VertexQuadColors = const float[4][4];
+
+void draw_vertex_quad(VertexQuadPositions& pos, VertexQuadTexCoords& uv,
+                      VertexQuadColors& rgba, Texture texture) {
     if (g_active != nullptr) {
         float tinted[4][4];
         for (int v = 0; v < 4; ++v) {
