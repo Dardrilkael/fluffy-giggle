@@ -7,6 +7,7 @@
 #include "document.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <deque>
@@ -16,6 +17,11 @@
 
 namespace editor {
 namespace {
+
+[[nodiscard]] std::uint64_t next_document_serial() {
+    static std::atomic<std::uint64_t> counter{0};
+    return counter.fetch_add(1, std::memory_order_relaxed) + 1;  // 0 = none
+}
 
 using ws::circsim::Junction;
 using ws::circsim::JunctionRef;
@@ -147,7 +153,7 @@ class EditCommand : public ws::app::UndoCommand {
 
 SchematicDocument::SchematicDocument(std::string path,
                                      ws::settings::FileSystem& fs)
-    : path_(std::move(path)), fs_(&fs) {}
+    : path_(std::move(path)), fs_(&fs), serial_(next_document_serial()) {}
 
 const std::string& SchematicDocument::path() const { return path_; }
 void SchematicDocument::set_path(std::string path) {
@@ -181,7 +187,7 @@ ws::core::Status SchematicDocument::save() {
 }
 
 ws::app::UndoStack& SchematicDocument::undo() { return undo_; }
-std::uint64_t SchematicDocument::job_group() const { return 0; }
+std::uint64_t SchematicDocument::job_group() const { return serial_; }
 
 std::string SchematicDocument::autosave_content() const {
     return ws::circsim::save_csim(schem);

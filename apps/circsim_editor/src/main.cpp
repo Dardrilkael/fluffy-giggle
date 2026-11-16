@@ -1256,17 +1256,13 @@ class CircsimApp final : public ws::ui::App {
     // --- the simulate job -------------------------------------------------------
 
     void submit_run() {
-        ws::core::warn("circsim: submit_run enter (busy={}, doc={})",
-                       run_job_.busy(), editor_.doc != nullptr);
         if (run_job_.busy() || editor_.doc == nullptr) {
-            ws::core::warn("circsim: submit_run early-out");
             return;
         }
         // The job owns a snapshot (the schematic and the symbol table
         // are value types; the run never sees the live document).
         ws::circsim::Schematic schem = editor_.doc->schem;
         ws::circsim::SymbolLibrary lib = editor_.library;
-        ws::core::warn("circsim: submit_run snapshot copied");
         // The version THIS run was submitted against - the staleness
         // stamp the delivery must answer with. Reading the schematic's
         // version at delivery instead would bless every edit that
@@ -1275,42 +1271,83 @@ class CircsimApp final : public ws::ui::App {
         // fresh. The snapshot rides the job's completion, so it is the
         // version the results and the Problems header both key to.
         const std::uint64_t submitted = editor_.schem()->version();
+        // WHICH document it was submitted for. The version above is a
+        // per-instance counter (two documents share one all the time), so
+        // it cannot say whether the delivery still has a home - the
+        // document's serial can.
+        const std::uint64_t doc_serial = editor_.doc->serial();
+        run_doc_serial_ = doc_serial;
         run_progress_.reset();
         ws::jobs::JobCallbacks<ws::circsim::RunOutcome> callbacks =
             run_progress_.callbacks<ws::circsim::RunOutcome>();
         callbacks.on_complete =
-            [this, submitted](ws::jobs::JobHandle<ws::circsim::RunOutcome>
-                                  handle) {
-                deliver_run(handle.take(), submitted);
+            [this, submitted, doc_serial](
+                ws::jobs::JobHandle<ws::circsim::RunOutcome> handle) {
+                deliver_run(handle.take(), submitted, doc_serial);
             };
+        ws::jobs::JobOptions options;
+        options.group = doc_serial;  // cancel_group-able per document
         run_job_ = jobs_.submit<ws::circsim::RunOutcome>(
             [schem = std::move(schem),
-             lib = std::move(lib)](ws::jobs::JobContext&)
+             lib = std::move(lib)](ws::jobs::JobContext& ctx)
                 -> ws::core::Result<ws::circsim::RunOutcome> {
-                ws::core::warn("circsim: worker run_schematic enter");
-                const auto r =
-                    ws::circsim::run_schematic(schem, nullptr, {}, &lib);
-                ws::core::warn("circsim: worker run_schematic done "
-                               "(run_has={})",
-                               r.run.has_value());
+                // The job's cancel flag reaches the solver: the status
+                // bar's Cancel stops the .tran march at its next accepted
+                // step (and the run between step points / analyses).
+                ws::spice::RunSettings settings;
+                const ws::jobs::CancelToken token = ctx.token();
+                settings.should_stop = [token] { return token.cancelled(); };
+                // Progress is the .tran's now/tstop. Throttled to 0.5%
+                // steps: the march can accept 1e5+ steps and the bar
+                // cannot show finer than that anyway. (A deck with
+                // several .tran cards sweeps the bar once per card.)
+                settings.on_tran_progress =
+                    [&ctx, last = -1.0f](double now, double tstop) mutable {
+                        if (!(tstop > 0.0)) {
+                            return;
+                        }
+                        const float f = static_cast<float>(
+                            std::clamp(now / tstop, 0.0, 1.0));
+                        if (f - last >= 0.005f || f >= 1.0f) {
+                            last = f;
+                            ctx.report_progress(f);
+                        }
+                    };
+                ws::circsim::RunOutcome r = ws::circsim::run_schematic(
+                    schem, nullptr, {}, &lib, &settings);
+                if (r.cancelled) {
+                    return ws::jobs::fail(ws::jobs::JobError::cancelled);
+                }
                 return r;
             },
-            ws::jobs::Priority::normal, {}, std::move(callbacks));
-        ws::core::warn("circsim: submit_run submitted (busy={})",
-                       run_job_.busy());
+            ws::jobs::Priority::normal, options, std::move(callbacks));
     }
 
     void deliver_run(ws::core::Result<ws::circsim::RunOutcome> result,
-                     std::uint64_t submitted_version) {
-        ws::core::warn("circsim: deliver_run enter (has_value={}, "
-                       "version={})",
-                       result.has_value(), submitted_version);
-        if (editor_.doc == nullptr || !result.has_value()) {
-            if (!result.has_value()) {
-                editor_.toast("Simulation job failed: " +
-                                  result.error().message,
+                     std::uint64_t submitted_version,
+                     std::uint64_t doc_serial) {
+        // Does the document this run was FOR still own the editor? A
+        // switch or a close in flight means the results have no home: the
+        // Results cache is per active document, and the run's nets/back-map
+        // are only meaningful against the schematic they were built from.
+        const bool same_doc =
+            editor_.doc != nullptr && editor_.doc->serial() == doc_serial;
+        if (!result.has_value()) {
+            const ws::core::Error& err = result.error();
+            if (std::string_view{err.category} == "jobs" &&
+                err.code == static_cast<std::int32_t>(
+                                ws::jobs::JobError::cancelled)) {
+                // The user's own Cancel is an answer, not a failure.
+                if (same_doc) {
+                    editor_.status("Simulation cancelled");
+                }
+            } else {
+                editor_.toast("Simulation job failed: " + err.message,
                               gui::ToastSeverity::error);
             }
+            return;
+        }
+        if (!same_doc) {
             return;
         }
         ws::circsim::RunOutcome& outcome = *result;
@@ -1326,13 +1363,10 @@ class CircsimApp final : public ws::ui::App {
         editor_.problems.map = outcome.map;
         editor_.problems.map_valid = true;
         const std::size_t count = outcome.problems.size();
-        ws::core::warn("circsim: deliver_run problems={} run_has={}", count,
-                       outcome.run.has_value());
         editor_.refresh_problems(
             true, std::move(outcome.problems),
             outcome.run.has_value() ? "run" : "run (failed)",
             submitted_version);
-        ws::core::warn("circsim: deliver_run refresh_problems done");
         if (outcome.run.has_value()) {
             // The Results panel's half of the delivery: the run itself
             // (tables + measurements) keyed to the version it was
@@ -1382,11 +1416,9 @@ class CircsimApp final : public ws::ui::App {
             editor_.results.view = editor::PlotView{};
             editor_.results.view_for = editor::ResultsCache::kNoTable;
             editor_.results.gesture = editor::PlotGesture{};
-            ws::core::warn("circsim: deliver_run results set, opening panel");
             if (!shell_->panel_host().is_open("results")) {
                 (void)shell_->panel_host().open(shell_->panels(), "results");
             }
-            ws::core::warn("circsim: deliver_run panel open done");
 
             std::size_t rows = 0;
             for (const ws::spice::Table& t : editor_.results.run.results.tables) {
@@ -1419,7 +1451,6 @@ class CircsimApp final : public ws::ui::App {
             update_problems_tab();
             editor_.status(editor_.problems.header + " - F8 walks them");
         }
-        ws::core::warn("circsim: deliver_run done");
     }
 
     // --- the export (the Results panel's buttons and the Circuit menu) ---
@@ -1647,6 +1678,14 @@ class CircsimApp final : public ws::ui::App {
         editor_.doc =
             dynamic_cast<editor::SchematicDocument*>(docs.active());
         editor_.document_changed();
+        // A run in flight for a document that is no longer active has
+        // nowhere to land (the Results cache was just reset): stop it
+        // instead of burning a worker on numbers nobody can see.
+        if (run_job_.busy() &&
+            (editor_.doc == nullptr ||
+             editor_.doc->serial() != run_doc_serial_)) {
+            run_job_.request_cancel();
+        }
         if (editor_.doc != nullptr) {
             const auto listener = editor_.doc->undo().add_listener([this] {
                 // An undo/redo landing (or any edit) reloads the
@@ -1783,6 +1822,7 @@ class CircsimApp final : public ws::ui::App {
 
     gui::JobProgress run_progress_;
     ws::jobs::JobHandle<ws::circsim::RunOutcome> run_job_{};
+    std::uint64_t run_doc_serial_ = 0;  // the document run_job_ was submitted for
 
     std::string last_title_;
     int watched_index_ = -1;

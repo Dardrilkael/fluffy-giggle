@@ -327,6 +327,22 @@ TEST_CASE("the divider solves to its analytic midpoint") {
     CHECK(v_out[0] == doctest::Approx(2.5).epsilon(1e-9));
 }
 
+TEST_CASE("run_schematic: a stop request yields a cancelled outcome and NO problem") {
+    const Schematic s = rc_step();
+    ws::spice::RunSettings settings;
+    settings.should_stop = [] { return true; };
+    const ws::circsim::RunOutcome out =
+        ws::circsim::run_schematic(s, nullptr, {}, nullptr, &settings);
+    CHECK(out.cancelled);
+    CHECK_FALSE(out.run.has_value());
+    // A stop is not a finding about the drawing: nothing for the Problems
+    // panel beyond what the net build itself said.
+    const ws::circsim::RunOutcome plain = ws::circsim::run_schematic(s);
+    REQUIRE(plain.run.has_value());
+    CHECK_FALSE(plain.cancelled);
+    CHECK(out.problems.size() == plain.problems.size());
+}
+
 TEST_CASE("the RC step response tracks 5*(1-exp(-t/tau))") {
     const Schematic s = rc_step();
     const ws::circsim::RunOutcome out = ws::circsim::run_schematic(s);

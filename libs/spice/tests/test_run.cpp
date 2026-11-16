@@ -6592,3 +6592,83 @@ TEST_CASE("diode Bv: Bv=0 keeps the M3 reverse; .tran clamps the pulse") {
     CHECK(out.back() >= 0.0);
     CHECK(out.back() < 0.05);
 }
+
+// --- cooperative cancel + progress (RunSettings::should_stop / on_tran_progress) ---
+
+namespace {
+const char* const kRcTran =
+    "rc\n"
+    "V1 in 0 PULSE(0 5 0 1n 1n 1 2)\n"
+    "R1 in out 1k\n"
+    "C1 out 0 1u\n"
+    ".tran 1u 10m\n"
+    ".end\n";
+}  // namespace
+
+TEST_CASE("run_deck reports .tran progress and finishes when nothing stops it") {
+    RunSettings settings;
+    std::size_t calls = 0;
+    double last_now = -1.0;
+    double last_stop = 0.0;
+    bool monotone = true;
+    settings.on_tran_progress = [&](double now, double tstop) {
+        monotone = monotone && now >= last_now;
+        last_now = now;
+        last_stop = tstop;
+        ++calls;
+    };
+    const auto r = run_text(kRcTran, nullptr, settings);
+    REQUIRE(r);
+    CHECK(calls > 10);
+    CHECK(monotone);
+    CHECK(last_stop == doctest::Approx(10e-3));
+    CHECK(last_now == doctest::Approx(10e-3).epsilon(1e-6));
+}
+
+TEST_CASE("a should_stop hook aborts a .tran with the Cancelled kind, no partial table") {
+    RunSettings settings;
+    std::size_t accepted = 0;
+    settings.on_tran_progress = [&](double, double) { ++accepted; };
+    settings.should_stop = [&] { return accepted >= 5; };
+    const auto r = run_text(kRcTran, nullptr, settings);
+    REQUIRE_FALSE(r);
+    CHECK(std::string(r.error().category) == "spice");
+    CHECK(r.error().code == static_cast<std::int32_t>(ws::spice::ErrorKind::Cancelled));
+    CHECK(accepted >= 5);
+    CHECK(accepted < 50);  // it stopped promptly, it did not march to tstop
+}
+
+TEST_CASE("should_stop already true stops before the first analysis") {
+    RunSettings settings;
+    settings.should_stop = [] { return true; };
+    const auto r = run_text(kRcTran, nullptr, settings);
+    REQUIRE_FALSE(r);
+    CHECK(r.error().code == static_cast<std::int32_t>(ws::spice::ErrorKind::Cancelled));
+}
+
+TEST_CASE("a stop inside a .step family is not wrapped as a step failure, even with keep_going") {
+    const std::string deck =
+        "rc\n"
+        "V1 in 0 PULSE(0 5 0 1n 1n 1 2)\n"
+        "R1 in out {r}\n"
+        "C1 out 0 1u\n"
+        ".param r=1k\n"
+        ".step param r list 1k 2k 3k\n"
+        ".tran 1u 10m\n"
+        ".end\n";
+    RunSettings settings;
+    settings.keep_going = true;
+    std::size_t accepted = 0;
+    settings.on_tran_progress = [&](double, double) { ++accepted; };
+    settings.should_stop = [&] { return accepted >= 5; };
+    const auto r = run_text(deck, nullptr, settings);
+    REQUIRE_FALSE(r);
+    CHECK(r.error().code == static_cast<std::int32_t>(ws::spice::ErrorKind::Cancelled));
+    CHECK(error_of(r).find("step point") == std::string::npos);
+}
+
+TEST_CASE("without hooks a .tran run is unchanged") {
+    const auto r = run_text(kRcTran);
+    REQUIRE(r);
+    REQUIRE(r->results.tables.size() == 1);
+}

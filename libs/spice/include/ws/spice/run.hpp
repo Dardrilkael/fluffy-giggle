@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -66,6 +67,18 @@ struct RunSettings {
     // no LTE rejection - so halving studies are meaningful. Breakpoints
     // still truncate a step so waveform edges are never stepped over.
     double fixed_dt = 0.0;
+
+    // Cooperative cancel + progress for a run on a worker thread (the
+    // GUI's simulate job). Both are optional and are called ON the thread
+    // that runs the deck, so they must be thread-safe on the caller's side.
+    //   should_stop      polled before each step point / analysis and after
+    //                    every accepted .tran step; true aborts the run with
+    //                    ErrorKind::Cancelled (code "spice.cancelled") - the
+    //                    partial table is NOT returned as if it were whole.
+    //   on_tran_progress called after every accepted .tran step with
+    //                    (now, tstop); observe only, keep it cheap.
+    std::function<bool()> should_stop;
+    std::function<void(double now, double tstop)> on_tran_progress;
 };
 
 // The per-analysis diagnostics record (§9.4), minimal for M1: the ladder

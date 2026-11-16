@@ -52,7 +52,14 @@ class SchematicDocument final : public ws::ui::shell::Document {
     [[nodiscard]] ws::core::Status save() override;
 
     [[nodiscard]] ws::app::UndoStack& undo() override;
+    // Also the document's serial: unique for the life of the process.
     [[nodiscard]] std::uint64_t job_group() const override;
+
+    // Process-unique identity of THIS document object (never reused, never
+    // 0). Schematic::version() cannot play this role - it is a per-instance
+    // counter, so two documents routinely share a version. Anything that
+    // outlives a document switch (the simulate job) keys on this.
+    [[nodiscard]] std::uint64_t serial() const { return serial_; }
 
     [[nodiscard]] std::string autosave_content() const override;
     void adopt_autosave_content(std::string_view bytes) override;
@@ -69,6 +76,7 @@ class SchematicDocument final : public ws::ui::shell::Document {
     std::string path_;
     ws::settings::FileSystem* fs_;
     ws::app::UndoStack undo_{200, 8u << 20};
+    std::uint64_t serial_;
 };
 
 // --- the command builders (document.cpp; each pushes onto `doc.undo())

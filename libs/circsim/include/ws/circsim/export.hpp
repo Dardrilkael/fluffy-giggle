@@ -105,13 +105,20 @@ struct RunOutcome {
     NetList nets;
     std::vector<Diag> problems;  // net diags + the mapped failure
     std::vector<ws::spice::Warning> warnings;  // spice's own, unmapped
+    // The run stopped because RunSettings::should_stop said so. `run` holds
+    // the spice Cancelled error and `problems` gets NO entry for it - a stop
+    // is not a finding about the drawing.
+    bool cancelled = false;
 };
 
 [[nodiscard]] RunOutcome run_schematic(
     const Schematic& s,
     const std::vector<AnalysisSpec>* override_analyses = nullptr,
     const ws::spice::IncludeResolver& include = {},
-    const SymbolLibrary* symbols = nullptr);
+    const SymbolLibrary* symbols = nullptr,
+    // Optional run settings (cancel/progress hooks live here; see
+    // ws::spice::RunSettings). nullptr = the defaults, as before.
+    const ws::spice::RunSettings* settings = nullptr);
 
 // The CLI's --format json writer: {"format":"circsim-results",...} with
 // one object per table (analysis kind, sweep names, columns, rows).

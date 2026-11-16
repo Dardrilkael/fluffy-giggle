@@ -22,6 +22,7 @@ enum class ErrorKind {
     Measure = 7,     // .meas evaluation
     Io = 8,          // file I/O
     Usage = 9,       // CLI/API misuse
+    Cancelled = 10,  // cooperative stop (RunSettings::should_stop); not a failure of the deck
 };
 
 // A source coordinate through .include expansion (§8.1). `file` is the path

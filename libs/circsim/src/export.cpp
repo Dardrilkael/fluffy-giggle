@@ -819,7 +819,8 @@ Diag map_spice_error(const Schematic& s, const SpiceExport& map,
 RunOutcome run_schematic(const Schematic& s,
                          const std::vector<AnalysisSpec>* override_analyses,
                          const ws::spice::IncludeResolver& include,
-                         const SymbolLibrary* symbols) {
+                         const SymbolLibrary* symbols,
+                         const ws::spice::RunSettings* settings) {
     RunOutcome out;
 
     NetBuild build = build_nets(s, symbols);
@@ -863,8 +864,16 @@ RunOutcome run_schematic(const Schematic& s,
                                                 ast.error().message));
         return out;
     }
-    out.run = ws::spice::run_deck(*ast, ws::spice::RunSettings{}, out.warnings);
+    out.run = ws::spice::run_deck(
+        *ast, settings != nullptr ? *settings : ws::spice::RunSettings{},
+        out.warnings);
     if (!out.run) {
+        if (std::string_view{out.run.error().category} == "spice" &&
+            out.run.error().code ==
+                static_cast<std::int32_t>(ws::spice::ErrorKind::Cancelled)) {
+            out.cancelled = true;  // a stop, not a finding about the drawing
+            return out;
+        }
         out.problems.push_back(
             map_spice_error(s, out.map, out.run.error().message));
     }

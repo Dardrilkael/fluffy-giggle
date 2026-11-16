@@ -53,6 +53,17 @@ Diagnostic run_diag(ErrorKind kind, std::string code, std::string message) {
     return d;
 }
 
+// The cooperative-stop error (RunSettings::should_stop): its own kind so a
+// caller can tell "the user stopped it" from a deck that failed.
+ws::core::unexpected<ws::core::Error> cancelled_run_error() {
+    return spice_fail(run_diag(ErrorKind::Cancelled, "spice.cancelled",
+                               "the run was cancelled"));
+}
+
+[[nodiscard]] bool run_stop_requested(const RunSettings& settings) {
+    return settings.should_stop && settings.should_stop();
+}
+
 std::string fmt_value(double v) {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%.6g", v);
@@ -488,9 +499,27 @@ ws::core::Result<Table> run_tran(const Circuit& circuit, RunState& state,
     auto march = std::make_unique<drivers::TranMarch>(circuit, state, settings, card,
                                                       scope, ics, nodesets);
     WS_TRY(march->prepare());
-    const drivers::TranMarch::Hooks no_hooks{};
+    drivers::TranMarch::Hooks hooks{};
+    if (settings.should_stop || settings.on_tran_progress) {
+        // A false return from on_accept stops the march (stopped() turns
+        // true); progress observes, should_stop decides.
+        hooks.on_accept = [&settings](double now, double tstop) {
+            if (settings.on_tran_progress) {
+                settings.on_tran_progress(now, tstop);
+            }
+            return !(settings.should_stop && settings.should_stop());
+        };
+    }
     while (!march->done() && !march->stopped()) {
-        WS_TRY(march->step(no_hooks));
+        if (settings.should_stop && settings.should_stop()) {
+            return cancelled_run_error();
+        }
+        WS_TRY(march->step(hooks));
+    }
+    if (march->stopped()) {
+        // Only a hook can stop the march: a half-marched table must never
+        // be handed back as the analysis's answer.
+        return cancelled_run_error();
     }
     report = march->report();
     return march->take_table();
@@ -1824,6 +1853,9 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
     bool elaborated_any_devices = false;
 
     for (const StepPoint& sp : points) {
+        if (run_stop_requested(settings)) {
+            return cancelled_run_error();
+        }
         // The point's scope: global defs + the stepped constants. A
         // re-definition clears that name's resolve cache, so devices and
         // .params referencing the stepped name re-draw correctly.
@@ -1865,6 +1897,9 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
         // failure (a Monte-Carlo draw outside a device's domain, a
         // check_params rejection) carries the step context.
         for (std::size_t ai = 0; ai < ast.analyses.size(); ++ai) {
+            if (run_stop_requested(settings)) {
+                return cancelled_run_error();
+            }
             const AnalysisCard& card = ast.analyses[ai];
             ws::core::Result<RunState> bound = RunState::bind(*live, &scope, &rng);
             if (!bound) {
@@ -1909,6 +1944,12 @@ ws::core::Result<RunOutput> run_deck(const DeckAst& ast, RunSettings settings,
                            ast.nodesets);
             }
             if (!t) {
+                if (t.error().category == std::string("spice") &&
+                    t.error().code == static_cast<std::int32_t>(ErrorKind::Cancelled)) {
+                    // A stop is not a step failure: never wrapped as
+                    // "step point {..} failed", never absorbed by keep_going.
+                    return ws::core::unexpected<ws::core::Error>(t.error());
+                }
                 if (ast.steps.empty()) {
                     // A plain run: the driver's own diagnostic reaches the
                     // caller untouched (the §9 taxonomy, never re-branded).
