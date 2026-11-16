@@ -22,6 +22,7 @@
 #include <vector>
 
 #include <ws/circsim/export.hpp>
+#include <ws/circsim/format.hpp>
 #include <ws/circsim/model.hpp>
 #include <ws/circsim/overlay.hpp>
 #include <ws/input/input.hpp>
@@ -2321,6 +2322,152 @@ TEST_CASE("a .dc sweep drives the transport like a transient") {
     CHECK(editor::Editor::shown_sample(*t, 0.75) == 1u);
     CHECK(editor::Editor::shown_sample(*t, 4.99) ==
           axis.size() - 2u);
+}
+
+
+
+// Deletion snapshots retain deque positions. Checking the live ids (not
+// only save_csim, which canonicalizes arrays by id) catches ordering
+// regressions that alter deck/export iteration order.
+TEST_CASE("delete-set undo restores exact entity ordering") {
+    Bench b;
+    std::vector<std::uint32_t> part_ids;
+    std::vector<std::uint32_t> junction_ids;
+    std::vector<std::uint32_t> wire_ids;
+    std::vector<std::uint32_t> label_ids;
+
+    for (int i = 0; i < 4; ++i) {
+        const auto* p = b.doc.schem.add_part(Part::make(
+            "r", "R" + std::to_string(i + 1), "1k",
+            {static_cast<double>(i * 4), 0.0}));
+        REQUIRE(p != nullptr);
+        part_ids.push_back(p->id);
+
+        Junction j;
+        j.pos = {static_cast<double>(i * 2), 2.0};
+        Junction* added_j = b.doc.schem.add_junction(j);
+        REQUIRE(added_j != nullptr);
+        junction_ids.push_back(added_j->id);
+
+        Label label;
+        label.pos = {static_cast<double>(i * 2), 4.0};
+        label.name = "N" + std::to_string(i + 1);
+        Label* added_label = b.doc.schem.add_label(label);
+        REQUIRE(added_label != nullptr);
+        label_ids.push_back(added_label->id);
+    }
+
+    // The middle wires share J2. Removing both must capture that
+    // orphaned junction exactly once; J1 and J3 remain connected to
+    // the two outside wires.
+    const auto add_wire = [&](std::uint32_t a, std::uint32_t c) {
+        Wire* w = b.doc.schem.add_wire(Wire::endpoints(
+            ws::circsim::JunctionRef{a}, ws::circsim::JunctionRef{c}));
+        REQUIRE(w != nullptr);
+        wire_ids.push_back(w->id);
+    };
+    add_wire(junction_ids[0], junction_ids[1]);
+    add_wire(junction_ids[1], junction_ids[2]);
+    add_wire(junction_ids[2], junction_ids[3]);
+    add_wire(junction_ids[3], junction_ids[0]);
+
+    const auto ids = [](const auto& entities) {
+        std::vector<std::uint32_t> result;
+        for (const auto& entity : entities) {
+            result.push_back(entity.id);
+        }
+        return result;
+    };
+    const std::string serialized_before =
+        ws::circsim::save_csim(b.doc.schem);
+
+    CHECK(editor::push_delete_set(
+        b.doc, {part_ids[1], part_ids[3]},
+        {wire_ids[1], wire_ids[2]}, {label_ids[1], label_ids[3]}));
+    CHECK(b.doc.schem.parts().size() == 2u);
+    CHECK(b.doc.schem.wires().size() == 2u);
+    CHECK(b.doc.schem.junctions().size() == 3u);
+    CHECK(b.doc.schem.labels().size() == 2u);
+
+    REQUIRE(b.doc.undo().can_undo());
+    (void)b.doc.undo().undo();
+    CHECK(ids(b.doc.schem.parts()) == part_ids);
+    CHECK(ids(b.doc.schem.wires()) == wire_ids);
+    CHECK(ids(b.doc.schem.junctions()) == junction_ids);
+    CHECK(ids(b.doc.schem.labels()) == label_ids);
+    CHECK(ws::circsim::save_csim(b.doc.schem) == serialized_before);
+}
+
+TEST_CASE("single delete undo restores the original deque position") {
+    SUBCASE("part") {
+        Bench b;
+        std::vector<std::uint32_t> expected;
+        for (int i = 0; i < 3; ++i) {
+            const auto* p = b.doc.schem.add_part(Part::make(
+                "r", "R" + std::to_string(i + 1), "1k",
+                {static_cast<double>(i * 4), 0.0}));
+            REQUIRE(p != nullptr);
+            expected.push_back(p->id);
+        }
+        editor::push_delete_part(b.doc, expected[1]);
+        REQUIRE(b.doc.schem.parts().size() == 2u);
+        (void)b.doc.undo().undo();
+        REQUIRE(b.doc.schem.parts().size() == expected.size());
+        for (std::size_t i = 0; i < expected.size(); ++i) {
+            CHECK(b.doc.schem.parts()[i].id == expected[i]);
+        }
+    }
+
+    SUBCASE("wire and its orphaned junctions") {
+        Bench b;
+        std::vector<std::uint32_t> junction_ids;
+        std::vector<std::uint32_t> wire_ids;
+        for (int i = 0; i < 4; ++i) {
+            Junction j;
+            j.pos = {static_cast<double>(i * 2), 0.0};
+            Junction* added = b.doc.schem.add_junction(j);
+            REQUIRE(added != nullptr);
+            junction_ids.push_back(added->id);
+        }
+        for (int i = 0; i < 3; ++i) {
+            Wire* added = b.doc.schem.add_wire(Wire::endpoints(
+                ws::circsim::JunctionRef{junction_ids[i]},
+                ws::circsim::JunctionRef{junction_ids[i + 1]}));
+            REQUIRE(added != nullptr);
+            wire_ids.push_back(added->id);
+        }
+        editor::push_delete_wire(b.doc, wire_ids[1]);
+        REQUIRE(b.doc.schem.wires().size() == 2u);
+        (void)b.doc.undo().undo();
+        REQUIRE(b.doc.schem.wires().size() == wire_ids.size());
+        REQUIRE(b.doc.schem.junctions().size() == junction_ids.size());
+        for (std::size_t i = 0; i < wire_ids.size(); ++i) {
+            CHECK(b.doc.schem.wires()[i].id == wire_ids[i]);
+        }
+        for (std::size_t i = 0; i < junction_ids.size(); ++i) {
+            CHECK(b.doc.schem.junctions()[i].id == junction_ids[i]);
+        }
+    }
+
+    SUBCASE("label") {
+        Bench b;
+        std::vector<std::uint32_t> expected;
+        for (int i = 0; i < 3; ++i) {
+            Label l;
+            l.pos = {static_cast<double>(i * 2), 0.0};
+            l.name = "NET" + std::to_string(i + 1);
+            Label* added = b.doc.schem.add_label(l);
+            REQUIRE(added != nullptr);
+            expected.push_back(added->id);
+        }
+        editor::push_delete_label(b.doc, expected[1]);
+        REQUIRE(b.doc.schem.labels().size() == 2u);
+        (void)b.doc.undo().undo();
+        REQUIRE(b.doc.schem.labels().size() == expected.size());
+        for (std::size_t i = 0; i < expected.size(); ++i) {
+            CHECK(b.doc.schem.labels()[i].id == expected[i]);
+        }
+    }
 }
 
 }  // namespace
