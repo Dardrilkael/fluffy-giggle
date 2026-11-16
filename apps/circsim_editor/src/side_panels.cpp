@@ -2506,19 +2506,25 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
     // cram five across. The act lands after the walk (a mid-walk
     // push_ would mutate the very vector being iterated), the same
     // deferred-shape the add buttons below keep.
-    constexpr float kActW = 24.0f;
     int index = 0;
     int move_from = -1;
     int move_to = -1;
     int row_remove = -1;
+    const int entry_count =
+        static_cast<int>(ed.schem()->analysis.entries.size());
+    // A button wide enough for its WORDS: the old 24 px "^ v x" squares
+    // were narrower than the button's own padding, so the label was
+    // clipped to nothing and three blank boxes sat in the panel.
+    const auto act_w = [&](const char* label) {
+        const float text_w =
+            theme.font != nullptr ? theme.font->measure_text(label) : 40.0f;
+        return std::max(56.0f, text_w + 2.0f * theme.spacing + 16.0f);
+    };
     for (const ws::circsim::AnalysisSpec& spec :
          ed.schem()->analysis.entries) {
         gui.ids().push(index);
-        // The readable face: WHAT kind of simulation this is (the
-        // plain word with the SPICE token beside it) on the selectable
-        // row, then its own parameters in engineering units under it.
-        // The raw card stays in the Netlist tab, where the deck's
-        // vocabulary lives.
+        // The readable face: WHAT kind of simulation this is on the
+        // selectable row, its parameters (wrapped, whole) under it.
         const std::string title =
             std::to_string(index + 1) + ". " + analysis_brief(spec);
         const bool selected = ed.analysis_index == index;
@@ -2526,53 +2532,27 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
             ed.analysis_index = index;
             ed.bump_edit_epoch();  // the field rows below reload
         }
-        // The params hint shares the act row's line: the hint takes
-        // the width the three 24px buttons leave, so the buttons never
-        // wrap past the panel edge at ANY width (the hint truncates,
-        // the buttons do not).
-        const float hint_w = std::max(
-            60.0f, layout.remaining_width() -
-                       3.0f * (kActW + theme.spacing));
-        layout.same_line();
-        const gui::Rect hint_rect =
-            layout.next(hint_w, theme.control_height);
-        if (theme.font != nullptr) {
-            // Cut to the room the buttons leave (it used to draw the
-            // whole string and run under the ^ v x buttons), centred
-            // in the row, with the full text in a tooltip.
-            const std::string full = analysis_params_brief(spec);
-            const std::string shown =
-                ellipsize(*theme.font, full, hint_rect.width);
-            const float lh = theme.font->line_height();
-            (void)ws::ui::r2d::draw_text(
-                hint_rect.x,
-                hint_rect.y + std::max(0.0f, (hint_rect.height - lh) * 0.5f),
-                shown.c_str(), *theme.font, gui::dim(theme.text, 0.7f));
-            if (shown != full) {
-                gui::tooltip_text(gui, layout, theme, "params", hint_rect,
-                                  full.c_str());
+        hint_line(layout, theme, analysis_params_brief(spec));
+        // The row's acts, with words, only on the selected row (one
+        // set of buttons for the entry being edited, not three per row).
+        if (selected) {
+            if (gui::button(gui, layout, theme, "Move up", act_w("Move up"),
+                            {}, index == 0)) {
+                move_from = index;
+                move_to = index - 1;
             }
-        } else {
-            (void)hint_rect;  // fontless: the buttons below still act
-        }
-        // Up: dead on the first row, Down dead on the last (the
-        // disabled face says why, the command refuses anyway).
-        if (gui::button(gui, layout, theme, "^", kActW, {},
-                        index == 0)) {
-            move_from = index;
-            move_to = index - 1;
-        }
-        layout.same_line();
-        if (gui::button(gui, layout, theme, "v", kActW, {},
-                        index == static_cast<int>(
-                                      ed.schem()->analysis.entries.size()) -
-                                      1)) {
-            move_from = index;
-            move_to = index + 1;
-        }
-        layout.same_line();
-        if (gui::button(gui, layout, theme, "x", kActW, {})) {
-            row_remove = index;
+            layout.same_line();
+            if (gui::button(gui, layout, theme, "Move down",
+                            act_w("Move down"), {},
+                            index == entry_count - 1)) {
+                move_from = index;
+                move_to = index + 1;
+            }
+            layout.same_line();
+            if (gui::button(gui, layout, theme, "Remove", act_w("Remove"),
+                            {})) {
+                row_remove = index;
+            }
         }
         gui.ids().pop();
         ++index;
@@ -2622,12 +2602,15 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
          // - are the user's to fill, and the fields are waiting the
          // moment the entry lands.
          { "Add noise", ws::circsim::NoiseSpec{} }}};
+    // Computed ONCE from the full line: recomputing it after the first
+    // button of a row halved the remainder, so the second button of
+    // every pair came out half-width and read "Add ...".
+    const float half = std::max(
+        60.0f, (layout.remaining_width() - theme.spacing) / 2.0f);
     for (std::size_t k = 0; k < kinds.size(); ++k) {
         if (k % 2u == 1u) {
             layout.same_line();
         }
-        const float half = std::max(
-            60.0f, (layout.remaining_width() - theme.spacing) / 2.0f);
         if (gui::button(gui, layout, theme, kinds[k].label, half)) {
             push_add_analysis(*ed.doc, kinds[k].spec);
             ed.analysis_index = static_cast<int>(
@@ -2660,7 +2643,7 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
         // the blank state's story in the hint - the old row was an
         // unlabeled field that showed NOTHING when unset, reading as a
         // disabled box nobody could edit.
-        field_label(layout, theme, "Run temperature (\u00b0C)");
+        field_label(layout, theme, "Run temperature (C)");
         const std::string current_text =
             ed.schem()->temp.has_value()
                 ? plain_num(*ed.schem()->temp)
@@ -2685,7 +2668,7 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
                       "Not a SPICE number - try 25, 125 or -40");
         } else {
             hint_line(layout, theme,
-                      "blank = 27 \u00b0C (SPICE's default). Device models "
+                      "blank = 27 C (SPICE's default). Device models "
                       "that track temperature (diodes, BJTs, MOS) follow it");
         }
     }
