@@ -39,7 +39,7 @@ jobs:
       - name: Test maintained UI and Circsim suites
         run: |
           ctest --test-dir build/linux --output-on-failure \
-            -R '^(ui_canvas|circsim_editor_panel|circsim_editor_side_panels|circsim_editor_waveform_prof)(\\.|$)'
+            -R '^(ui_canvas|circsim_editor_panel|circsim_editor_side_panels|circsim_editor_waveform_prof)(\.|$)'
       - name: Exercise waveform profiler (round, bevel, miter)
         shell: bash
         run: |
@@ -79,7 +79,7 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:abort_on_error=1
         run: |
           ctest --test-dir build/linux-asan --output-on-failure \
-            -R '^(physics|ui_canvas|circsim_editor_panel|circsim_editor_side_panels|circsim_editor_waveform_prof)(\\.|$)'
+            -R '^(physics|ui_canvas|circsim_editor_panel|circsim_editor_side_panels|circsim_editor_waveform_prof)(\.|$)'
 
   check-deps:
     name: Workspace dependency rule
