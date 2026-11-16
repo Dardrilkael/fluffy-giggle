@@ -28,7 +28,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        uses: ./.github/actions/linux-deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build cmake g++ \
+            libglfw3-dev libvulkan-dev libopenal-dev libuv1-dev \
+            libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev
 
       - name: Configure
         run: cmake --preset linux
@@ -66,7 +72,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        uses: ./.github/actions/linux-deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build cmake g++ \
+            libglfw3-dev libvulkan-dev libopenal-dev libuv1-dev \
+            libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev
 
       - name: Configure
         run: cmake --preset linux-asan
@@ -112,7 +124,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        uses: ./.github/actions/linux-deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build cmake g++ \
+            libglfw3-dev libvulkan-dev libopenal-dev libuv1-dev \
+            libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev
 
       # Keep these flags identical to the "linux" job in build.yml.
       - name: Configure Release
@@ -151,8 +169,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Android toolchain
-        uses: ./.github/actions/android-sdk
+      - name: Set up Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android command-line tools
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools"
+
+      - name: Install Android SDK and NDK packages
+        shell: pwsh
+        run: |
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
+          if ($LASTEXITCODE -ne 0) { throw "Android SDK installation failed" }
+          $ndk = Join-Path $env:ANDROID_HOME "ndk\27.2.12479018"
+          if (-not (Test-Path (Join-Path $ndk "build\cmake\android.toolchain.cmake"))) {
+            throw "Android NDK toolchain not found at $ndk"
+          }
+          "ANDROID_NDK_HOME=$ndk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ANDROID_SDK_ROOT=$env:ANDROID_HOME" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Package Android APK (debug key)
         shell: pwsh
