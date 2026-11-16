@@ -412,6 +412,17 @@ public:
     // refusal the seam's headless default models. `clipboard_read_` is
     // the seam's platform-owned buffer: valid until the next call, the
     // glfwGetClipboardString contract the gui documents.
+    void install_soft_keyboard(gui::GuiContext& gui) override {
+        ANativeActivity* const activity = app_->activity;
+        gui.set_soft_keyboard([activity](bool visible) {
+            if (visible) {
+                (void)ANativeActivity_showSoftInput(activity, 0);
+            } else {
+                (void)ANativeActivity_hideSoftInput(activity, 0);
+            }
+        });
+    }
+
     void install_clipboard(gui::GuiContext& gui) override {
         JavaVM* const vm = app_->activity->vm;
         jobject const activity = app_->activity->clazz;
