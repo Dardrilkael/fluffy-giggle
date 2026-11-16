@@ -84,6 +84,21 @@ if(TARGET test_circsim_editor_canvas_cost)
     "${PROJECT_SOURCE_DIR}/libs/ui/src")
 endif()
 
+# The document layer's version contract: every undoable edit that changes
+# what the export emits (the directives and temperature rows included)
+# moves Schematic::version() on apply, undo and redo - the stamp the
+# results, Problems and Netlist caches all compare against. Pure document
+# code, so only document.cpp rides along (no editor, no gui stubs).
+ws_add_test(circsim_editor_document_version
+  SOURCES tests/test_document_version.cpp
+          src/document.cpp
+  LINK ws::circsim
+  DEPENDS ws::ui_gui ws::app ws::settings)
+if(TARGET test_circsim_editor_document_version)
+  target_include_directories(test_circsim_editor_document_version PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+
 # The side panels' headless gate: the Properties panel's editing state
 # driven the same way (a GuiContext frame + a panel rect) - the
 # directives split/join round-trip (an emptied last row must survive a

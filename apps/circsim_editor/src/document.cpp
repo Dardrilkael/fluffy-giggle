@@ -1142,8 +1142,11 @@ class DirectivesCommand final : public EditCommand {
                       std::string next)
         : EditCommand(doc), was_(std::move(was)), next_(std::move(next)) {}
 
-    void apply() override { schem().directives = next_; }
-    void undo() override { schem().directives = was_; }
+    // The directive text rides into the exported deck, so every landing
+    // (apply, undo, redo) must bump: the version is what marks results,
+    // the Problems list and the Netlist view stale.
+    void apply() override { land(next_); }
+    void undo() override { land(was_); }
     [[nodiscard]] std::string name() const override {
         return "Edit Directives";
     }
@@ -1161,6 +1164,11 @@ class DirectivesCommand final : public EditCommand {
     }
 
   private:
+    void land(const std::string& text) {
+        schem().directives = text;
+        schem().bump();
+    }
+
     std::string was_, next_;
 };
 
@@ -1173,8 +1181,11 @@ class SimTempCommand final : public EditCommand {
                    std::optional<double> was, std::optional<double> next)
         : EditCommand(doc), was_(was), next_(next) {}
 
-    void apply() override { schem().temp = next_; }
-    void undo() override { schem().temp = was_; }
+    // `temp` reaches the run (RunSettings / the .options card), so it bumps
+    // like every other edit - a results table computed at 27 C must not
+    // read as current after the row says 85.
+    void apply() override { land(next_); }
+    void undo() override { land(was_); }
     [[nodiscard]] std::string name() const override {
         return "Edit Temperature";
     }
@@ -1192,6 +1203,11 @@ class SimTempCommand final : public EditCommand {
     }
 
   private:
+    void land(std::optional<double> temp) {
+        schem().temp = temp;
+        schem().bump();
+    }
+
     std::optional<double> was_, next_;
 };
 
