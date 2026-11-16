@@ -1324,6 +1324,10 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     wave_prof_begin_frame();
     for (std::size_t i = 0; i < t.signals.size(); ++i) {
         if (i >= ed.results.visible.size() || ed.results.visible[i] == 0u) {
+            if (renderer != nullptr && i < cache.geometry.size()) {
+                cache.geometry[i].key.visible = false;
+                cache.geometry[i].built = false;
+            }
             continue;
         }
         const std::span<const double> ys = t.signals[i].data;
@@ -1331,6 +1335,45 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
             continue;
         }
         const auto prof_series_t0 = wave_now();
+        WaveProf& prof = wave_prof();
+        constexpr float kSeriesWidth = 2.0f;
+        const std::uint32_t color = series_color(i);
+        ResultsCache::SeriesGeometry* cached_geometry =
+            renderer != nullptr ? &cache.geometry[i] : nullptr;
+        ResultsCache::SeriesGeometryKey geometry_key;
+        if (cached_geometry != nullptr) {
+            const bool right_axis = i < stats.size() && stats[i].right;
+            const ws::circsim::PlotRange yrange = right_axis ? pf.vyr1 : pf.vyr;
+            geometry_key.run = cache.run_id;
+            geometry_key.table = cache.table;
+            geometry_key.decim_x_lo = cache.decim_lo;
+            geometry_key.decim_x_hi = cache.decim_hi;
+            geometry_key.decim_budget = cache.decim_budget;
+            geometry_key.x_lo = pf.vxr.lo; geometry_key.x_hi = pf.vxr.hi;
+            geometry_key.y_lo = yrange.lo; geometry_key.y_hi = yrange.hi;
+            geometry_key.plot_x = plot.x; geometry_key.plot_y = plot.y;
+            geometry_key.plot_w = plot.width; geometry_key.plot_h = plot.height;
+            geometry_key.frame_x = fx; geometry_key.frame_y = fy;
+            geometry_key.frame_w = iw; geometry_key.frame_h = ih;
+            geometry_key.width = kSeriesWidth;
+            geometry_key.join = wave_env().join;
+            geometry_key.color = color;
+            geometry_key.visible = true;
+            if (cached_geometry->built && cached_geometry->key == geometry_key) {
+                const auto replay_t0 = wave_now();
+                if (wave_env().prof != 0) ++prof.cache_hits;
+                renderer->replay_quads(cached_geometry->buffer);
+                if (wave_env().prof != 0) {
+                    const double stroke_ms = wave_ms_since(replay_t0);
+                    prof.stroke_ms += stroke_ms;
+                    prof.prep_ms += wave_ms_since(prof_series_t0) - stroke_ms;
+                    ++prof.series;
+                    prof.quads += cached_geometry->buffer.quad_count();
+                }
+                continue;  // no decimation walk, mapping, or tessellation
+            }
+            if (wave_env().prof != 0) ++prof.cache_misses;
+        }
         ResultsCache::DecimKeep& dk = cache.decim[i];
         const auto x_at = [&](std::size_t k) {
             return by_index ? static_cast<double>(k)
@@ -1465,39 +1508,14 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
             }
         }
         const auto prof_stroke_t0 = wave_now();
-        WaveProf& prof = wave_prof();
-        constexpr float kSeriesWidth = 2.0f;
-        const std::uint32_t color = series_color(i);
-        if (renderer != nullptr) {
-            ResultsCache::SeriesGeometry& cached = cache.geometry[i];
-            const bool right_axis = i < stats.size() && stats[i].right;
-            const ws::circsim::PlotRange yrange = right_axis ? pf.vyr1 : pf.vyr;
-            ResultsCache::SeriesGeometryKey key;
-            key.run = cache.run_id;
-            key.table = cache.table;
-            key.decim_x_lo = cache.decim_lo;
-            key.decim_x_hi = cache.decim_hi;
-            key.decim_budget = cache.decim_budget;
-            key.x_lo = pf.vxr.lo; key.x_hi = pf.vxr.hi;
-            key.y_lo = yrange.lo; key.y_hi = yrange.hi;
-            key.plot_x = plot.x; key.plot_y = plot.y;
-            key.plot_w = plot.width; key.plot_h = plot.height;
-            key.frame_x = fx; key.frame_y = fy;
-            key.frame_w = iw; key.frame_h = ih;
-            key.width = kSeriesWidth;
-            key.join = wave_env().join;
-            key.color = color;
-            key.visible = true;
-            if (cached.built && cached.key == key) {
-                if (wave_env().prof != 0) ++prof.cache_hits;
-                renderer->replay_quads(cached.buffer);
-            } else {
-                if (wave_env().prof != 0) ++prof.cache_misses;
-                tessellate_series(pts, color, kSeriesWidth, wave_env().join,
-                                  cached.buffer);
-                cached.key = key;
-                cached.built = true;
-                renderer->replay_quads(cached.buffer);
+        if (cached_geometry != nullptr) {
+            tessellate_series(pts, color, kSeriesWidth, wave_env().join,
+                              cached_geometry->buffer);
+            cached_geometry->key = geometry_key;
+            cached_geometry->built = true;
+            renderer->replay_quads(cached_geometry->buffer);
+            if (wave_env().prof != 0) {
+                prof.quads += cached_geometry->buffer.quad_count();
             }
         } else {
             // CommandListCanvas and other recording/test backends retain
