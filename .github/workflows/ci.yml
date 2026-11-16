@@ -38,7 +38,190 @@ jobs:
       - name: Test maintained UI and Circsim suites
         run: |
           ctest --test-dir build/linux --output-on-failure \
-            -R '^(ui_canvas|circsim_editor_panel|circsim_editor_side_panels|circsim_editor_waveform_prof)(\.|$)'
+            -R '^(ui_canvas|circsim_editor_waveform_prof)(\.|$)|^circsim_editor_panel\.an idle frame reuses the cached decimation verbatim
+      - name: Exercise waveform profiler (round, bevel, miter)
+        shell: bash
+        run: |
+          test_bin=build/linux/bin/test_circsim_editor_waveform_prof
+          CIRCSIM_PLOT_PROF=1 CIRCSIM_PLOT_JOIN=round "$test_bin" --test-case="waveform render profiling - round joins"
+          CIRCSIM_PLOT_PROF=1 CIRCSIM_PLOT_JOIN=bevel "$test_bin" --test-case="waveform render profiling - bevel joins"
+          CIRCSIM_PLOT_PROF=1 CIRCSIM_PLOT_JOIN=miter "$test_bin" --test-case="waveform render profiling - miter joins"
+          CIRCSIM_PLOT_PROF=2 CIRCSIM_PLOT_JOIN=round "$test_bin" --test-case="waveform render profiling - round joins PROF=2"
+          CIRCSIM_PLOT_PROF=2 CIRCSIM_PLOT_JOIN=bevel "$test_bin" --test-case="waveform render profiling - bevel joins PROF=2"
+          CIRCSIM_PLOT_PROF=2 CIRCSIM_PLOT_JOIN=miter "$test_bin" --test-case="waveform render profiling - miter joins PROF=2"
+
+  linux-sanitizers:
+    name: Linux (ASan + UBSan)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build cmake g++ \
+            libglfw3-dev libvulkan-dev libopenal-dev libuv1-dev \
+            libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev
+      - name: Configure
+        run: cmake --preset linux-asan
+      - name: Build maintained suites with sanitizers
+        run: |
+          cmake --build --preset linux-asan --target \
+            circsim_editor test_physics test_ui_canvas \
+            test_circsim_editor_panel test_circsim_editor_waveform_prof
+      - name: Test maintained suites with sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:abort_on_error=1
+        run: |
+          ctest --test-dir build/linux-asan --output-on-failure \
+            -R '^(physics|ui_canvas|circsim_editor_waveform_prof)(\.|$)|^circsim_editor_panel\.an idle frame reuses the cached decimation verbatim
+
+  check-deps:
+    name: Workspace dependency rule
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PowerShell
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends powershell
+      - name: Run check_deps
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass \
+            -File tools/check_deps.ps1 -Root "$PWD"
+
+  android:
+    name: Android NDK (arm64-v8a)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build cmake
+      - name: Verify NDK toolchain
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          ls "$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
+      - name: Configure
+        run: cmake --preset android
+      - name: Build
+        run: cmake --build --preset android
+
+      - name: Exercise waveform profiler (round, bevel, miter)
+        shell: bash
+        run: |
+          test_bin=build/linux/bin/test_circsim_editor_waveform_prof
+          CIRCSIM_PLOT_PROF=1 CIRCSIM_PLOT_JOIN=round "$test_bin" --test-case="waveform render profiling - round joins"
+          CIRCSIM_PLOT_PROF=1 CIRCSIM_PLOT_JOIN=bevel "$test_bin" --test-case="waveform render profiling - bevel joins"
+          CIRCSIM_PLOT_PROF=1 CIRCSIM_PLOT_JOIN=miter "$test_bin" --test-case="waveform render profiling - miter joins"
+          CIRCSIM_PLOT_PROF=2 CIRCSIM_PLOT_JOIN=round "$test_bin" --test-case="waveform render profiling - round joins PROF=2"
+          CIRCSIM_PLOT_PROF=2 CIRCSIM_PLOT_JOIN=bevel "$test_bin" --test-case="waveform render profiling - bevel joins PROF=2"
+          CIRCSIM_PLOT_PROF=2 CIRCSIM_PLOT_JOIN=miter "$test_bin" --test-case="waveform render profiling - miter joins PROF=2"
+
+  linux-sanitizers:
+    name: Linux (ASan + UBSan)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build cmake g++ \
+            libglfw3-dev libvulkan-dev libopenal-dev libuv1-dev \
+            libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev
+      - name: Configure
+        run: cmake --preset linux-asan
+      - name: Build maintained suites with sanitizers
+        run: |
+          cmake --build --preset linux-asan --target \
+            circsim_editor test_physics test_ui_canvas \
+            test_circsim_editor_panel test_circsim_editor_waveform_prof
+      - name: Test maintained suites with sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:abort_on_error=1
+        run: |
+          ctest --test-dir build/linux-asan --output-on-failure \
+            -R '^(physics|ui_canvas|circsim_editor_panel|circsim_editor_side_panels|circsim_editor_waveform_prof)(\.|$)'
+
+  check-deps:
+    name: Workspace dependency rule
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PowerShell
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends powershell
+      - name: Run check_deps
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass \
+            -File tools/check_deps.ps1 -Root "$PWD"
+
+  android:
+    name: Android NDK (arm64-v8a)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build cmake
+      - name: Verify NDK toolchain
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          ls "$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
+      - name: Configure
+        run: cmake --preset android
+      - name: Build
+        run: cmake --build --preset android
+
+
+  check-deps:
+    name: Workspace dependency rule
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PowerShell
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends powershell
+      - name: Run check_deps
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass \
+            -File tools/check_deps.ps1 -Root "$PWD"
+
+  android:
+    name: Android NDK (arm64-v8a)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build cmake
+      - name: Verify NDK toolchain
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          ls "$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
+      - name: Configure
+        run: cmake --preset android
+      - name: Build
+        run: cmake --build --preset android
+
       - name: Exercise waveform profiler (round, bevel, miter)
         shell: bash
         run: |
