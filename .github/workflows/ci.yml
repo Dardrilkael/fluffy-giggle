@@ -1,8 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: [main, "fix/**"]
   pull_request:
     branches: [main]
 
@@ -92,7 +90,7 @@ jobs:
           build/linux-asan/bin/test_ui_canvas
           build/linux-asan/bin/test_circsim_editor_panel \
             --test-case="an idle frame reuses the cached decimation verbatim"
-          build/linux-asan/bin/test_circsim_editor_waveform_prof
+          build/linux/bin/test_circsim_editor_waveform_prof
 
   check-deps:
     name: Workspace dependency rule
