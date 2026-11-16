@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <memory>
+#include <limits>
 #include <mutex>
 
 #include <jni.h>
@@ -229,11 +230,16 @@ bool jni_threw(JNIEnv* env, const char* what) {
     // A provider may defer the actual write/commit until close(), so
     // both write() and close() are part of the save's success condition.
     // Keep closing the stream even when staging or writing fails.
-    bool write_failed = false;
-    jbyteArray const payload =
-        env->NewByteArray(static_cast<jsize>(bytes.size()));
+    bool write_failed = bytes.size() >
+                        static_cast<std::size_t>(
+                            std::numeric_limits<jsize>::max());
+    jbyteArray const payload = write_failed
+                                   ? nullptr
+                                   : env->NewByteArray(
+                                         static_cast<jsize>(bytes.size()));
     if (payload == nullptr) {
         write_failed = true;
+        (void)jni_threw(env, "allocating OutputStream payload threw");
     } else {
         env->SetByteArrayRegion(payload, 0, static_cast<jsize>(bytes.size()),
                                 reinterpret_cast<const jbyte*>(bytes.data()));
