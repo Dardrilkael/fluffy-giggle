@@ -433,18 +433,13 @@ TEST_CASE("silent joins: a pin on a wire's interior is reported") {
     CHECK(join.wire == w);
 }
 
-TEST_CASE("silent joins: a wire's vertex riding another wire is reported") {
+TEST_CASE("silent joins: a waypoint touching another wire is not connected") {
     Bench b;
-    const std::uint32_t horizontal = b.wire_j(0.0, 0.0, 10.0, 0.0);
-    // The elbow at (5, 0) lands on the horizontal's interior: a T.
-    const std::uint32_t drop = b.wire_j(5.0, 8.0, 5.0, -8.0, {Pos{5.0, 0.0}});
+    b.wire_j(0.0, 0.0, 10.0, 0.0);
+    b.wire_j(5.0, 8.0, 5.0, -8.0, {Pos{5.0, 0.0}});
     const NetBuild nets = ws::circsim::build_nets(b.s);
-    REQUIRE(nets.silent_joins.size() == 1);
-    const auto& join = nets.silent_joins[0];
-    CHECK(join.kind == ws::circsim::SilentJoin::Kind::WireOnWire);
-    CHECK(join.pos == Pos{5.0, 0.0});
-    CHECK(join.wire == drop);
-    CHECK(join.other == horizontal);
+    CHECK(nets.silent_joins.empty());
+    CHECK(nets.nets.nets.size() == 2);
 }
 
 TEST_CASE("silent joins: a pin on the rider wins over the wire entry") {
@@ -545,16 +540,16 @@ CombAnswer comb(std::size_t teeth) {
 TEST_CASE("the segment grid answers what the brute force answers") {
     // Below the threshold: the historical brute-force path.
     const CombAnswer small = comb(60);
-    REQUIRE(small.nets == 1);
-    REQUIRE(small.joins == 60);
+    REQUIRE(small.nets == 61);
+    REQUIRE(small.joins == 0);
     CHECK(small.join_positions.front() == std::make_pair(1.0, 0.0));
     CHECK(small.join_positions.back() ==
           std::make_pair(60.0, 0.0));
 
     // Above the threshold: the grid path, same comb shape.
     const CombAnswer large = comb(600);
-    REQUIRE(large.nets == 1);
-    REQUIRE(large.joins == 600);
+    REQUIRE(large.nets == 601);
+    REQUIRE(large.joins == 0);
     CHECK(large.join_positions.front() == std::make_pair(1.0, 0.0));
     CHECK(large.join_positions.back() ==
           std::make_pair(600.0, 0.0));
