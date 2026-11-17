@@ -376,6 +376,20 @@ TEST_CASE("the directives round-trip preserves every row") {
     }
 }
 
+TEST_CASE("long directive rows keep their complete text in the edit buffer") {
+    Bench b;
+    const std::string directive =
+        ".model long_device nmos level=77 " + std::string(240, 'x');
+    b.doc.schem.directives = directive;
+    b.ed.properties_tab = 2;  // Simulation tab
+    b.draw_properties();
+
+    REQUIRE(b.ed.fields.count("directives.0") == 1u);
+    const auto& field = b.ed.fields.at("directives.0");
+    CHECK(std::string{field.buf.data()} == directive);
+    CHECK(field.buf.size() > directive.size());
+}
+
 TEST_CASE("a directives block with a trailing newline lays out two rows") {
     Bench b;
     b.doc.schem.directives = ".model d dn\n";
@@ -1006,6 +1020,20 @@ TEST_CASE("step_problem lands the cursor and jumps through the row-click path") 
     // not the cursor's): the walk refuses.
     Bench fresh;
     CHECK(editor::step_problem(fresh.ed, true) == false);
+}
+
+TEST_CASE("stale problem locations cannot be navigated after an edit") {
+    Bench b;
+    (void)b.place_with_findings(
+        "R1", {diag_of(ws::circsim::Severity::Error, "R1")});
+    REQUIRE(b.ed.problems.has);
+    REQUIRE(b.ed.problems.diags.size() == 1u);
+    const int cursor_before = b.ed.problems_cursor;
+
+    // Editing the schematic invalidates the check's net/export back-maps.
+    b.doc.schem.bump();
+    CHECK(editor::step_problem(b.ed, true) == false);
+    CHECK(b.ed.problems_cursor == cursor_before);
 }
 
 TEST_CASE("a replaced check resets the problems cursor") {

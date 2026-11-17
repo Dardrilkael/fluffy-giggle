@@ -49,10 +49,15 @@ namespace {
                               const std::string& current) {
     FieldBuf& b = ed.fields[key];
     if (b.stamp != ed.field_stamp) {
-        const std::size_t keep =
-            std::min(current.size(), b.buf.size() - 1u);
-        std::memcpy(b.buf.data(), current.data(), keep);
-        b.buf[keep] = '\0';
+        // Leave room to extend the loaded value while typing. The
+        // capacity is deliberately generous because text_input edits
+        // in-place and cannot grow a caller-owned buffer mid-keystroke.
+        constexpr std::size_t kEditSlack = 4096;
+        const std::size_t needed =
+            std::max<std::size_t>(4096, current.size() + kEditSlack);
+        b.buf.resize(needed, '\0');
+        std::memcpy(b.buf.data(), current.data(), current.size());
+        b.buf[current.size()] = '\0';
         b.shadow = current;
         b.stamp = ed.field_stamp;
         b.combo_open = false;
@@ -264,9 +269,10 @@ void part_text_row(Editor& ed, gui::GuiContext& gui,
                    const char* ph_default = nullptr) {
     const std::string key = part_field_key(part_id, kind, param);
     field_label(layout, theme, label);
+    char* buf = field_buf(ed, key, current);
     if (text_input_tracked(ed, gui, layout, theme,
-                           std::string{label} + "##" + key,
-                           field_buf(ed, key, current), 128)) {
+                           std::string{label} + "##" + key, buf,
+                           static_cast<int>(field_of(ed, key).buf.size()))) {
         push_part_text(*ed.doc, part_id, kind, param,
                        std::string{field_of(ed, key).buf.data()},
                        std::string{"Edit "} + label);
@@ -408,7 +414,7 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
         field_label(layout, theme, label);
         char* buf = field_buf(ed, key, current_text);
         if (text_input_tracked(ed, gui, layout, theme,
-                               std::string{label} + "##" + key, buf, 128)) {
+                               std::string{label} + "##" + key, buf, static_cast<int>(field_of(ed, key).buf.size()))) {
             const auto parsed = ws::spice::parse_number(buf);
             if (parsed.has_value()) {
                 land(*parsed);
@@ -442,7 +448,7 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
         if (text_input_tracked(ed, gui, layout, theme, "source (swept)##" +
                                                               skey +
                                                               ".source",
-                               src, 128)) {
+                               src, static_cast<int>(field_of(ed, skey + ".source").buf.size()))) {
             ws::circsim::DcSpec next = *dc;
             next.source = src;
             push_set_analysis(*ed.doc, index, next);
@@ -541,7 +547,7 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
         char* n_buf = field_buf(ed, skey + ".n", n_text);
         if (text_input_tracked(ed, gui, layout, theme, "points (n)##" + skey +
                                                              ".n",
-                               n_buf, 128)) {
+                               n_buf, static_cast<int>(field_of(ed, skey + ".n").buf.size()))) {
             char* end = nullptr;
             const long parsed = std::strtol(n_buf, &end, 10);
             if (end != nullptr && *end == '\0' && parsed > 0) {
@@ -582,7 +588,7 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
             if (text_input_tracked(ed, gui, layout, theme,
                                    std::string{label} + "##" + skey + "." +
                                        label,
-                                   buf, 128)) {
+                                   buf, static_cast<int>(field_of(ed, skey + "." + label).buf.size()))) {
                 land(std::string{buf});
             }
         };
@@ -630,7 +636,7 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
         char* n_buf = field_buf(ed, skey + ".n", n_text);
         if (text_input_tracked(ed, gui, layout, theme, "points (n)##" + skey +
                                                              ".n",
-                               n_buf, 128)) {
+                               n_buf, static_cast<int>(field_of(ed, skey + ".n").buf.size()))) {
             char* end = nullptr;
             const long parsed = std::strtol(n_buf, &end, 10);
             if (end != nullptr && *end == '\0' && parsed > 0) {
@@ -2130,7 +2136,7 @@ void source_wave_editor(Editor& ed, gui::GuiContext& gui,
             char* buf = field_buf(ed, key, current_text);
             if (text_input_tracked(ed, gui, layout, theme,
                                    std::string{label} + "##" + key, buf,
-                                   128)) {
+                                   static_cast<int>(field_of(ed, key).buf.size()))) {
                 const auto parsed = ws::spice::parse_number(buf);
                 if (parsed.has_value()) {
                     SourceWave next = wave;
@@ -2445,8 +2451,8 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
                               l->name);
         if (text_input_tracked(
                 ed, gui, layout, theme,
-                "Net name##l" + std::to_string(l->id) + ".name", buf,
-                128)) {
+                "Net name##l" + std::to_string(l->id) + ".name", buf, static_cast<int>(field_of(
+                    ed, "l" + std::to_string(l->id) + ".name").buf.size()))) {
             push_label_text(*ed.doc, l->id, buf);
         }
         gui::separator(layout, theme);
@@ -2650,7 +2656,8 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
                 : std::string{};
         char* buf = field_buf(ed, "sim.temp", current_text);
         if (text_input_tracked(ed, gui, layout, theme,
-                               "Run temperature##sim.temp", buf, 128)) {
+                               "Run temperature##sim.temp", buf,
+                               static_cast<int>(field_of(ed, "sim.temp").buf.size()))) {
             const std::string text{buf};
             const auto parsed = ws::spice::parse_number(buf);
             if (parsed.has_value()) {
@@ -2703,7 +2710,9 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
         if (text_input_tracked(ed, gui, layout, code_theme,
                                std::string{"line##directives."} +
                                    std::to_string(line_at),
-                               buf, 128, field_w)) {
+                               buf, static_cast<int>(field_of(
+                                    ed, "directives." + std::to_string(line_at)).buf.size()),
+                               field_w)) {
             // The row edited: re-join with the (possibly cleared to
             // empty) row kept in place - the split/join pair's
             // round-trip is what preserves an emptied last line.
@@ -2748,8 +2757,10 @@ namespace {
 // step so the row highlight follows the keyboard onto the same
 // finding.
 void goto_problem(Editor& ed, std::size_t at) {
-    if (at >= ed.problems.diags.size()) {
-        return;
+    if (at >= ed.problems.diags.size() || ed.doc == nullptr ||
+        ed.schem() == nullptr ||
+        ed.problems.version != ed.schem()->version()) {
+        return;  // stale back-maps must never target the edited schematic
     }
     ed.problems_cursor = static_cast<int>(at);
     const ws::circsim::Diag& d = ed.problems.diags[at];
@@ -2766,8 +2777,10 @@ void goto_problem(Editor& ed, std::size_t at) {
 bool step_problem(Editor& ed, bool forward) {
     // The walk needs a check to walk through; the load report a fresh
     // document shows is the document's own, not the cursor's.
-    if (!ed.problems.has || ed.problems.diags.empty()) {
-        return false;
+    if (!ed.problems.has || ed.problems.diags.empty() ||
+        ed.doc == nullptr || ed.schem() == nullptr ||
+        ed.problems.version != ed.schem()->version()) {
+        return false;  // require a fresh check before navigating findings
     }
     const int next = step_problem_index(
         ed.problems_cursor, ed.problems.diags.size(), forward,
@@ -2828,7 +2841,10 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
             ++visible;
         }
     }
-    const bool can_step = problems_any_visible(ed);
+    // The diagnostic back-maps describe the exact schematic snapshot
+    // checked by ERC/run. Keep stale findings readable, but do not let
+    // their old net/export locations drive selection in a changed sheet.
+    const bool can_step = !stale && problems_any_visible(ed);
 
     if (gui::button(gui, layout, theme, "Re-check")) {
         ed.run_erc();
@@ -2868,11 +2884,17 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
 
     std::string header = ed.problems.header;
     if (stale) {
-        header += " - stale, press Re-check";
+        header += " - stale";
     }
     // Its own wrapped line: beside the buttons a long header was cut at
     // the panel edge.
     (void)gui::text_wrapped(layout, theme, header.c_str());
+    if (stale) {
+        (void)gui::text_wrapped(
+            layout, theme,
+            "The schematic changed after this check. Findings are kept for "
+            "reference, but navigation is paused until you Re-check.");
+    }
 
     // The filter row: one checkbox per severity, its label the LIVE
     // count - the FULL count, the same number the header said, because
@@ -2944,8 +2966,13 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
         // The cursor's row wears the selected face - the keyboard's
         // landing, and the click's (both set the cursor through the
         // same goto_problem path).
-        if (gui::selectable(gui, layout, rows_theme, (prefix + text).c_str(),
-                            at == ed.problems_cursor)) {
+        if (stale) {
+            // A plain row preserves the finding text without offering a
+            // misleading click target backed by an obsolete export map.
+            gui::text_wrapped(layout, rows_theme, (prefix + text).c_str());
+        } else if (gui::selectable(gui, layout, rows_theme,
+                                   (prefix + text).c_str(),
+                                   at == ed.problems_cursor)) {
             goto_problem(ed, line_at);
         }
         gui.ids().pop();

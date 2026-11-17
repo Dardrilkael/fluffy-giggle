@@ -45,7 +45,7 @@ jobs:
             circsim_editor test_physics test_ui_canvas \
             test_circsim_editor_document test_circsim_editor_canvas \
             test_circsim_editor_canvas_cost test_circsim_editor_panel \
-            test_circsim_editor_waveform_prof
+            test_circsim_editor_side_panels test_circsim_editor_waveform_prof
 
       - name: Run maintained regression tests
         run: |
@@ -56,6 +56,10 @@ jobs:
           build/linux/bin/test_circsim_editor_canvas_cost
           build/linux/bin/test_circsim_editor_panel \
             --test-case="an idle frame reuses the cached decimation verbatim"
+          build/linux/bin/test_circsim_editor_side_panels \
+            --test-case="long directive rows keep their complete text in the edit buffer"
+          build/linux/bin/test_circsim_editor_side_panels \
+            --test-case="stale problem locations cannot be navigated after an edit"
           build/linux/bin/test_circsim_editor_waveform_prof
 
       - name: Exercise waveform profiler join modes
@@ -93,7 +97,7 @@ jobs:
           cmake --build --preset linux-asan --target \
             circsim_editor test_physics test_ui_canvas \
             test_circsim_editor_document test_circsim_editor_canvas test_circsim_editor_canvas_cost test_circsim_editor_panel \
-            test_circsim_editor_waveform_prof
+            test_circsim_editor_side_panels test_circsim_editor_waveform_prof
 
       # Build this target in its own invocation as a guard: it must
       # produce the executable that the sanitizer test step runs below.
@@ -112,6 +116,10 @@ jobs:
           build/linux-asan/bin/test_circsim_editor_canvas_cost
           build/linux-asan/bin/test_circsim_editor_panel \
             --test-case="an idle frame reuses the cached decimation verbatim"
+          build/linux-asan/bin/test_circsim_editor_side_panels \
+            --test-case="long directive rows keep their complete text in the edit buffer"
+          build/linux-asan/bin/test_circsim_editor_side_panels \
+            --test-case="stale problem locations cannot be navigated after an edit"
           build/linux-asan/bin/test_circsim_editor_waveform_prof
 
   check-deps:
