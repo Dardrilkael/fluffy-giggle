@@ -1024,7 +1024,11 @@ TEST_CASE("the current switch decks its controlling source and model") {
     Part* v2 = s.add_part(Part::make("v", "V2", "5", {0.0, -16.0}));
     Part* g1 = s.add_part(Part::make("gnd", "", "", {23.0, -3.0}));
     Part* g2 = s.add_part(Part::make("gnd", "", "", {39.0, -3.0}));
-    Part* g3 = s.add_part(Part::make("gnd", "", "", {3.0, -19.0}));
+    // Away from x = 3: v2's return leg used to cross the measuring
+    // return's vertical there - a touch the new rules warn about (and
+    // a silent join they no longer make). Both returns still land on
+    // this one ground, exactly as the deck always meant.
+    Part* g3 = s.add_part(Part::make("gnd", "", "", {9.0, -19.0}));
     // The measuring loop: V1 up onto the axis, through R1, through the
     // 0 V sense source, down to ground.
     s.add_wire(Wire::endpoints(PinRef{v1->id, 0}, PinRef{r1->id, 0}))

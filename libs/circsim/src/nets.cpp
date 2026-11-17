@@ -5,6 +5,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -249,35 +250,21 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
 
     Dsu dsu(ents.size());
 
-    // --- the silent-join recorder (stage 18) ----------------------------------
-    // Positions where the coincidence rules below connect things with no
-    // authored junction dot. An explicit junction anywhere suppresses the
-    // record (it draws its own dot); one entry per position, a pin entry
-    // replacing a wire entry at the same spot. The position index beside
-    // the vector answers "already recorded here?" in one lookup (the
-    // old linear rescan made a many-join build quadratic).
+    // --- the warned-touch sets -----------------------------------------------
+    // One dangling-touch warning per wire pair, one per (part, pin,
+    // wire) - the scans below visit a contact once per wire vertex
+    // and once per entity, and the diagnostics must not repeat.
+    std::set<std::pair<std::uint32_t, std::uint32_t>> warned_touches;
+    std::set<std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>>
+        warned_pins;
+    // Positions where an authored junction dot sits: a junction is the
+    // explicit "connect here" - its position names the node, and the
+    // coincidence rules below honor it (a vertex or pin at that spot
+    // belongs to whatever the junction belongs to).
     std::set<PosKey> junction_at;
     for (const Junction& j : s.junctions()) {
         junction_at.insert({j.pos.x, j.pos.y});
     }
-    std::map<PosKey, std::size_t> join_at;
-    const auto record_join = [&](SilentJoin join) {
-        const PosKey key{join.pos.x, join.pos.y};
-        const auto it = join_at.find(key);
-        if (it != join_at.end()) {
-            // Upgrade a wire entry to the pin that names it; a second
-            // wire at the same spot changes nothing (the first answer
-            // stands).
-            SilentJoin& seen = out.silent_joins[it->second];
-            if (join.kind == SilentJoin::Kind::PinOnWire &&
-                seen.kind == SilentJoin::Kind::WireOnWire) {
-                seen = join;
-            }
-            return;
-        }
-        join_at.emplace(key, out.silent_joins.size());
-        out.silent_joins.push_back(join);
-    };
 
     // --- wires: validate, path, union endpoints --------------------------------
     std::vector<const Wire*> wires;
@@ -344,24 +331,46 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
     // schematics - exactly the historical behavior) or the segment
     // grid (large ones); both feed the same per-(vertex, wire) body.
     //
-    // One wire's vertex v landing on wire wj.
+    // A wire vertex touching another wire's INTERIOR is a geometric
+    // accident, not a connection: the drawing shows a crossing or a
+    // touch, nothing more. The connection exists only when an
+    // explicit junction dot names that position (the authored
+    // T-junction idiom - the wire tools mint the dot, the rule
+    // honors it). A wire END on the other wire's endpoint is a
+    // landing on an entity both reference and stays a union below.
+    // A vertex that touches with no dot now WARNs (dangling touch)
+    // so the author sees what the drawing never says.
     const auto vertex_on_wire = [&](std::size_t wi, const Pos& v,
                                     std::size_t wj) {
-        dsu.unite(wire_ents[wi].first, wire_ents[wj].first);
-        // v on wj's path INTERIOR (not its endpoints), with no
-        // junction drawn there: a merge nothing on the canvas
-        // says. If v is wj's endpoint the contact sits on an
-        // entity both wires reference - a visible landing.
-        if (!same_pos(v, paths[wj].front()) &&
-            !same_pos(v, paths[wj].back()) &&
+        const bool interior_touch =
+            !same_pos(v, paths[wj].front()) &&
+            !same_pos(v, paths[wj].back());
+        if (interior_touch &&
             junction_at.count({v.x, v.y}) == 0) {
-            SilentJoin join;
-            join.kind = SilentJoin::Kind::WireOnWire;
-            join.pos = v;
-            join.wire = wires[wi]->id;
-            join.other = wires[wj]->id;
-            record_join(join);
+            // No junction dot: warn once per touch. The pair is
+            // order-independent on purpose - one warning per
+            // geometric contact, whichever wire's vertex the scan
+            // found it through.
+            if (warned_touches.insert(std::make_pair(
+                    std::min(wires[wi]->id, wires[wj]->id),
+                    std::max(wires[wi]->id, wires[wj]->id)))
+                    .second) {
+                out.diags.push_back(make_diag(
+                    Severity::Warning,
+                    "circsim.nets.wire_touch",
+                    "wires " + std::to_string(wires[wi]->id) + " and " +
+                        std::to_string(wires[wj]->id) +
+                        " touch at (" + std::to_string(static_cast<int>(v.x)) +
+                        ", " + std::to_string(static_cast<int>(v.y)) +
+                        ") without a junction; they stay separate - place"
+                        " a junction to connect them",
+                    "wire " + std::to_string(wires[wi]->id),
+                    DiagTarget{DiagTarget::Kind::Wire, 0,
+                               DiagTarget::npos(), 0, wires[wi]->id}));
+            }
+            return;  // no dot, no union - the touch is inert
         }
+        dsu.unite(wire_ents[wi].first, wire_ents[wj].first);
     };
     // "p lies on wire wi's polyline", tested against one wire's
     // candidate segments (the grid's narrowed on_polyline).
@@ -414,25 +423,54 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
     }
 
     // --- pins/junctions lying on a wire path ------------------------------------
-    // One pin/junction entity e at p landing on wire wi.
+    // A junction entity at p is the explicit dot: it connects to any
+    // wire whose path carries p (the authored "connect here" gesture
+    // the wire tools mint). A POWER symbol's pin (fixed_net set -
+    // gnd and the rail pins) is the sheet's naming idiom: dropped on
+    // a wire's interior it grounds/names that net, the way the app's
+    // own stages draw ground. Every OTHER pin at p is only geometry -
+    // a part moved or rotated onto a wire connects NOTHING (the wire
+    // must end on the pin, or a junction must sit there); the touch
+    // warns so the author sees the dangling pin.
     const auto entity_on_wire = [&](std::uint32_t e, const Pos& p,
                                     const PosKey& key, std::size_t wi) {
-        dsu.unite(e, wire_ents[wi].first);
-        // A PIN on the path's interior, no junction dot, is a
-        // silent pickup (junction entities draw their own dot;
-        // a pin at a path ENDPOINT is a wire landing on a named
-        // entity - visible). One per position, pins over wires.
-        if (ents[e].kind == Entity::Kind::Pin &&
-            !same_pos(p, paths[wi].front()) &&
-            !same_pos(p, paths[wi].back()) &&
-            junction_at.count(key) == 0) {
-            SilentJoin join;
-            join.kind = SilentJoin::Kind::PinOnWire;
-            join.pos = p;
-            join.part = ents[e].pin.part;
-            join.pin = ents[e].pin.pin;
-            join.wire = wires[wi]->id;
-            record_join(join);
+        if (ents[e].kind == Entity::Kind::Junction) {
+            dsu.unite(e, wire_ents[wi].first);
+            return;
+        }
+        // A PIN at a path ENDPOINT is a wire landing on a named
+        // entity - the authored connection (endpoint ref), which the
+        // wire's own reference edge already unions; never a warning.
+        // A junction dot at the spot also names the node explicitly.
+        if (same_pos(p, paths[wi].front()) ||
+            same_pos(p, paths[wi].back()) ||
+            junction_at.count(key) != 0) {
+            return;
+        }
+        // Power/ground pins keep their pickup (the naming idiom);
+        // everything else stays inert on the interior.
+        const Part* owner = s.find_part(ents[e].pin.part);
+        const SymbolDef* sym =
+            owner != nullptr ? lib.find(owner->symbol) : nullptr;
+        if (sym != nullptr && sym->fixed_net.has_value()) {
+            dsu.unite(e, wire_ents[wi].first);
+            return;
+        }
+        if (warned_pins.insert(std::make_tuple(
+                ents[e].pin.part, ents[e].pin.pin, wires[wi]->id))
+                .second) {
+            out.diags.push_back(make_diag(
+                Severity::Warning,
+                "circsim.nets.pin_on_wire",
+                (owner != nullptr ? owner->ref + " pin " : "pin ") +
+                    std::to_string(ents[e].pin.pin) +
+                    " lies on wire " +
+                    std::to_string(wires[wi]->id) +
+                    " without a junction; it connects nothing -"
+                    " wire the pin or place a junction there",
+                "wire " + std::to_string(wires[wi]->id),
+                DiagTarget{DiagTarget::Kind::Wire, 0,
+                           DiagTarget::npos(), 0, wires[wi]->id}));
         }
     };
     for (const auto& [key, group] : by_pos) {

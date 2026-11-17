@@ -99,7 +99,13 @@ TEST_CASE("wires crossing where neither has a vertex never connect") {
     REQUIRE(nets.nets.nets.size() == 2);
 }
 
-TEST_CASE("a wire endpoint on another wire's interior connects (T)") {
+TEST_CASE("a wire END on another wire's interior connects through its "
+          "junction (authored T)") {
+    // wire_j mints a junction at both ends: a dropped wire END on
+    // another wire's body carries its own dot - the authored T-tap,
+    // the one connection the move/rotate rework keeps (the wire
+    // tools mint the dot exactly for this gesture). A bare VERTEX -
+    // a waypoint or elbow - is the touch the rules refuse.
     Bench b;
     const std::uint32_t horizontal = b.wire_j(0.0, 0.0, 10.0, 0.0);
     const std::uint32_t drop = b.wire_j(5.0, 0.0, 5.0, -4.0);  // lands on it
@@ -122,13 +128,19 @@ TEST_CASE("a waypoint on another wire's interior connects") {
     CHECK(nets.nets.nets.size() == 2);
 }
 
-TEST_CASE("a wire elbow landing on another wire connects") {
+TEST_CASE("a wire elbow landing on another wire stays separate without "
+          "a junction") {
+    // Same rule, a bend's vertex instead of an end: the touch is
+    // inert until a junction names it.
     Bench b;
     b.wire_j(0.0, 0.0, 10.0, 0.0);
     // Elbow exactly at (5, 0), on the horizontal wire: a T with a corner.
     b.wire_j(5.0, 8.0, 5.0, -8.0, {Pos{5.0, 0.0}});
     const NetBuild nets = ws::circsim::build_nets(b.s);
-    CHECK(nets.nets.nets.size() == 1);
+    CHECK(nets.nets.nets.size() == 2);
+    CHECK(has_diag(nets, "circsim.nets.wire_touch"));
+    b.junction(5.0, 0.0);
+    CHECK(ws::circsim::build_nets(b.s).nets.nets.size() == 1);
 }
 
 TEST_CASE("coincident pins connect without any wire") {
@@ -144,7 +156,11 @@ TEST_CASE("coincident pins connect without any wire") {
     CHECK(a->id == c->id);
 }
 
-TEST_CASE("a pin lying on a wire's interior connects") {
+TEST_CASE("a pin lying on a wire's interior connects nothing") {
+    // A moved or rotated part's pin on a wire's body is geometry,
+    // not a connection: the pin names no net through the wire, and
+    // the warning says what the drawing never did. (Power symbols
+    // keep their pickup - their own test below.)
     Bench b;
     Part* r1 = b.part("r", "R1", {0.0, 0.0});
     // A vertical wire through R1's right pin at (3, 0).
@@ -152,7 +168,13 @@ TEST_CASE("a pin lying on a wire's interior connects") {
     const NetBuild nets = ws::circsim::build_nets(b.s);
     const auto* pin_net = nets.nets.net_of_pin(PinRef{r1->id, 1});
     REQUIRE(pin_net != nullptr);
-    CHECK(pin_net->wires.size() == 1);
+    CHECK(pin_net->wires.empty());
+    CHECK(has_diag(nets, "circsim.nets.pin_on_wire"));
+    // The authored ways back: a junction at the pin's spot, or the
+    // wire ending on the pin (a landing) - the junction dot first.
+    b.junction(3.0, 0.0);
+    const NetBuild joined = ws::circsim::build_nets(b.s);
+    CHECK(joined.nets.net_of_pin(PinRef{r1->id, 1})->wires.size() == 1);
 }
 
 TEST_CASE("same-name labels merge nets, case-insensitively") {
@@ -408,53 +430,79 @@ TEST_CASE("the netlist lookups answer for pins, wires and junctions") {
     CHECK(named);
 }
 
-// --- silent joins (stage 18): the connections the drawing never shows ---------
+// --- dangling touches (the old silent joins, now refused) ---------------------
+// Stage 18 painted the silent pickups as dots; the move/rotate bug they
+// carried - a moved part's pin landing on a wire silently merged nets,
+// and the next move silently split them again - retired them: a touch
+// without a junction now connects NOTHING and says so (one warning per
+// wire pair, one per part-pin-wire). The junction dot is the authored
+// switch back on, exactly the gesture the wire tools mint.
 
-TEST_CASE("silent joins: a pin on a wire's interior is reported") {
+TEST_CASE("a pin on a wire's interior warns once and connects nothing") {
     Bench b;
-    Part* r1 = b.part("r", "R1", {0.0, 0.0});  // pin 1 at (3, 0)
-    const std::uint32_t w = b.wire_j(3.0, 3.0, 3.0, -3.0);
+    b.part("r", "R1", {0.0, 0.0});  // pin 1 at (3, 0)
+    b.wire_j(3.0, 3.0, 3.0, -3.0);
     const NetBuild nets = ws::circsim::build_nets(b.s);
-    REQUIRE(nets.silent_joins.size() == 1);
-    const auto& join = nets.silent_joins[0];
-    CHECK(join.kind == ws::circsim::SilentJoin::Kind::PinOnWire);
-    CHECK(join.pos == Pos{3.0, 0.0});
-    CHECK(join.part == r1->id);
-    CHECK(join.pin == 1);
-    CHECK(join.wire == w);
+    CHECK(nets.silent_joins.empty());
+    CHECK(has_diag(nets, "circsim.nets.pin_on_wire"));
+    // Exactly one warning for the one touch (the scan visits the pin
+    // against the wire's segments - the warned set holds it to one).
+    std::size_t pin_warns = 0;
+    for (const ws::circsim::Diag& d : nets.diags) {
+        if (d.code == "circsim.nets.pin_on_wire") {
+            ++pin_warns;
+        }
+    }
+    CHECK(pin_warns == 1);
 }
 
-TEST_CASE("silent joins: a wire's vertex riding another wire is reported") {
+TEST_CASE("a wire vertex riding another wire warns once, connects nothing") {
     Bench b;
-    const std::uint32_t horizontal = b.wire_j(0.0, 0.0, 10.0, 0.0);
-    // The elbow at (5, 0) lands on the horizontal's interior: a T.
-    const std::uint32_t drop = b.wire_j(5.0, 8.0, 5.0, -8.0, {Pos{5.0, 0.0}});
+    b.wire_j(0.0, 0.0, 10.0, 0.0);
+    // The elbow at (5, 0) lands on the horizontal's interior: a touch.
+    b.wire_j(5.0, 8.0, 5.0, -8.0, {Pos{5.0, 0.0}});
     const NetBuild nets = ws::circsim::build_nets(b.s);
-    REQUIRE(nets.silent_joins.size() == 1);
-    const auto& join = nets.silent_joins[0];
-    CHECK(join.kind == ws::circsim::SilentJoin::Kind::WireOnWire);
-    CHECK(join.pos == Pos{5.0, 0.0});
-    CHECK(join.wire == drop);
-    CHECK(join.other == horizontal);
+    CHECK(nets.silent_joins.empty());
+    CHECK(nets.nets.nets.size() == 2);
+    CHECK(has_diag(nets, "circsim.nets.wire_touch"));
+    // One warning per pair, whichever wire's vertex found it - the
+    // scan visits the drop's elbow AND the horizontal's vertices
+    // against each other's paths.
+    std::size_t touch_warns = 0;
+    for (const ws::circsim::Diag& d : nets.diags) {
+        if (d.code == "circsim.nets.wire_touch") {
+            ++touch_warns;
+        }
+    }
+    CHECK(touch_warns == 1);
 }
 
-TEST_CASE("silent joins: a pin on the rider wins over the wire entry") {
+TEST_CASE("a pin and a wire sharing a spot: the pin warns, the pair "
+          "stays deduped") {
     Bench b;
-    const std::uint32_t horizontal = b.wire_j(0.0, 0.0, 10.0, 0.0);
-    Part* r2 = b.part("r", "R2", {2.0, 0.0});  // pin 1 at (5, 0)
-    // The rider's elbow lands exactly on that pin: a WireOnWire (the
-    // elbow riding the horizontal) and a PinOnWire (the pin picked up
-    // by both wires) compete for one position - the pin wins, and the
-    // position reports once.
-    const std::uint32_t drop = b.wire_j(5.0, 8.0, 5.0, -8.0, {Pos{5.0, 0.0}});
+    b.wire_j(0.0, 0.0, 10.0, 0.0);
+    b.part("r", "R2", {2.0, 0.0});  // pin 1 at (5, 0)
+    // The rider's elbow lands exactly on that pin: one wire-pair
+    // warning and one pin warning for the same position - the dedup
+    // sets hold each to one.
+    b.wire_j(5.0, 8.0, 5.0, -8.0, {Pos{5.0, 0.0}});
     const NetBuild nets = ws::circsim::build_nets(b.s);
-    REQUIRE(nets.silent_joins.size() == 1);  // one position, one entry
-    CHECK(nets.silent_joins[0].kind ==
-          ws::circsim::SilentJoin::Kind::PinOnWire);
-    CHECK(nets.silent_joins[0].pos == Pos{5.0, 0.0});
-    CHECK(nets.silent_joins[0].part == r2->id);
-    CHECK(nets.silent_joins[0].wire == horizontal);
-    (void)drop;
+    std::size_t pin_warns = 0;
+    std::size_t touch_warns = 0;
+    for (const ws::circsim::Diag& d : nets.diags) {
+        if (d.code == "circsim.nets.pin_on_wire") {
+            ++pin_warns;
+        }
+        if (d.code == "circsim.nets.wire_touch") {
+            ++touch_warns;
+        }
+    }
+    // The pin rides BOTH wires at that spot - the drop's elbow and
+    // the horizontal - so two pin warnings (one per wire), while the
+    // elbow's touch warns once. Everything inert: four nets.
+    CHECK(pin_warns == 2);
+    CHECK(touch_warns == 1);
+    CHECK(nets.nets.nets.size() == 4);
 }
 
 TEST_CASE("silent joins: landings, crossings and touches stay silent-free") {
@@ -495,12 +543,109 @@ TEST_CASE("silent joins: an authored junction suppresses the record") {
     CHECK(ws::circsim::build_nets(c.s).silent_joins.empty());
 }
 
+// --- move/rotate inertness (the user's rule) ------------------------------------
+// Moving or rotating an element keeps every existing connection and
+// creates none: a pin dragged onto another wire's body warns and stays
+// inert; dragging it away leaves the same partition. Connections are
+// authored only through the wire gestures - an endpoint reference, a
+// junction dot (a wire END carries one), or a gnd/power pin's naming
+// pickup.
+
+TEST_CASE("moving a part across wires never changes the net partition") {
+    // R1 wired to J1 (net A) beside two unrelated wires; a sweep of
+    // moves drops its pins on both wires' interiors - the partition
+    // answers the same count every time, and the wired net keeps its
+    // members through the endpoint reference.
+    Bench b;
+    Part* r1 = b.part("r", "R1", {0.0, 10.0});
+    // Net A: J1 -- W1 -- R1.pin0, the ENDPOINT REFERENCE the editor's
+    // wire tool lands (the pin resolves through the part wherever it
+    // moves - the connection that must never break).
+    Junction* j1 = b.s.add_junction({});
+    j1->pos = {-13.0, 10.0};
+    Wire* wired_w = b.s.add_wire({});
+    wired_w->a = ws::circsim::JunctionRef{j1->id};
+    wired_w->b = ws::circsim::PinRef{r1->id, 0};
+    wired_w->ortho = true;
+    const std::uint32_t wired = wired_w->id;
+    const std::uint32_t w2 = b.wire_j(-20.0, 0.0, 20.0, 0.0);  // net B
+    const std::uint32_t w3 = b.wire_j(30.0, -10.0, 30.0, 30.0);  // net C
+
+    const std::size_t before =
+        ws::circsim::build_nets(b.s).nets.nets.size();
+
+    // Onto W2's body: pin0 (-3,0) and pin1 (3,0) ride its interior.
+    r1->pos = {0.0, 0.0};
+    const NetBuild onto = ws::circsim::build_nets(b.s);
+    CHECK(onto.nets.nets.size() == before);
+    CHECK(has_diag(onto, "circsim.nets.pin_on_wire"));
+    const auto* pin_net = onto.nets.net_of_pin(PinRef{r1->id, 0});
+    REQUIRE(pin_net != nullptr);
+    CHECK(pin_net->wires.size() == 1);  // the authored wire only
+    CHECK(pin_net->wires.front() == wired);
+
+    // Far away, pins and re-routed legs crossing nothing but space.
+    r1->pos = {40.0, 40.0};
+    const NetBuild away = ws::circsim::build_nets(b.s);
+    CHECK(away.nets.nets.size() == before);
+    CHECK_FALSE(has_diag(away, "circsim.nets.pin_on_wire"));
+    CHECK(away.nets.net_of_pin(PinRef{r1->id, 0})->wires.size() == 1);
+    (void)w2;
+    (void)w3;
+}
+
+TEST_CASE("a moved part's wire dragging across another wire connects "
+          "nothing") {
+    // The attached wire's re-routed leg may sweep across an unrelated
+    // wire - the crossing and even a landing-looking vertex on the
+    // body stay inert without a junction.
+    Bench b;
+    Part* r1 = b.part("r", "R1", {0.0, 10.0});
+    // Net A: J1 -- W1 -- R1.pin0 through the endpoint reference (the
+    // attachment a move must preserve).
+    Junction* j1 = b.s.add_junction({});
+    j1->pos = {-13.0, 10.0};
+    Wire* w1 = b.s.add_wire({});
+    w1->a = ws::circsim::JunctionRef{j1->id};
+    w1->b = ws::circsim::PinRef{r1->id, 0};
+    w1->ortho = true;
+    const std::uint32_t w2 = b.wire_j(-20.0, 0.0, 20.0, 0.0);  // net B
+
+    // Move R1 so pin0 lands ON W2's interior: W1's leg rides down with
+    // the pin and its endpoint vertex touches W2's body.
+    r1->pos = {0.0, 0.0};
+    const NetBuild nets = ws::circsim::build_nets(b.s);
+    CHECK(nets.nets.nets.size() == 3);  // A (wired), B, R1.pin1
+    CHECK(has_diag(nets, "circsim.nets.wire_touch"));
+    // Net B keeps exactly its own members: the sweep added nothing.
+    const auto* b_net = nets.nets.net_of_wire(w2);
+    REQUIRE(b_net != nullptr);
+    CHECK(b_net->wires.size() == 1);
+    CHECK(b_net->pins.empty());
+}
+
+TEST_CASE("a gnd pin dropped on a wire's interior still grounds it") {
+    // The one pin pickup that survives: power symbols name nets by
+    // definition - a gnd pin on a wire's body pulls that net to the
+    // global ground, the idiom the app's own stages draw.
+    Bench b;
+    const std::uint32_t w = b.wire_j(-20.0, 0.0, 20.0, 0.0);
+    b.wire_j(30.0, -10.0, 30.0, 30.0);  // an unrelated second net
+    b.part("gnd", "", {8.0, 0.0});  // pin 0 at (8,0), on w's interior
+
+    const NetBuild nets = ws::circsim::build_nets(b.s);
+    const auto* g_net = nets.nets.net_of_wire(w);
+    REQUIRE(g_net != nullptr);
+    CHECK(g_net->is_ground);
+    CHECK_FALSE(has_diag(nets, "circsim.nets.pin_on_wire"));
+}
+
 // --- the hardening batch: the large-schematic grid path -----------------------
 // Above 500 wires the wire-vertex and pin-on-wire coincidence rules
 // switch from the brute-force scan to the segment grid; the two must
 // answer identically. A comb - one spine, N teeth whose waypoints
-// cross it - is the cleanest proof: every tooth unions through the
-// spine (one net), every crossing waypoint records a silent join.
+// cross it, a junction at every crossing - is the cleanest proof:
+// one net through both paths, zero silent joins either way.
 
 namespace {
 
@@ -513,12 +658,16 @@ struct CombAnswer {
 CombAnswer comb(std::size_t teeth) {
     Bench b;
     // The spine runs one unit past the last tooth so no crossing
-    // waypoint sits on a spine endpoint (those are visible landings,
-    // not silent joins).
+    // waypoint sits on a spine endpoint (those are landings). A
+    // junction at every tooth's crossing - the authored T - keeps
+    // the comb ONE net through both paths, and the joins the dots
+    // ride are none (a junction is the explicit dot; nothing is
+    // silent).
     b.wire_j(0, 0, static_cast<double>(teeth) + 1.0, 0);
     for (std::size_t i = 1; i <= teeth; ++i) {
         const double x = static_cast<double>(i);
         b.wire_j(x, -5, x, 5, {Pos{x, 0}});
+        b.junction(x, 0);
     }
     const NetBuild built = ws::circsim::build_nets(b.s);
     CombAnswer out;
@@ -537,21 +686,11 @@ TEST_CASE("the segment grid answers what the brute force answers") {
     // Below the threshold: the historical brute-force path.
     const CombAnswer small = comb(60);
     REQUIRE(small.nets == 1);
-    REQUIRE(small.joins == 60);
-    CHECK(small.join_positions.front() == std::make_pair(1.0, 0.0));
-    CHECK(small.join_positions.back() ==
-          std::make_pair(60.0, 0.0));
+    REQUIRE(small.joins == 0);
 
     // Above the threshold: the grid path, same comb shape.
     const CombAnswer large = comb(600);
     REQUIRE(large.nets == 1);
-    REQUIRE(large.joins == 600);
-    CHECK(large.join_positions.front() == std::make_pair(1.0, 0.0));
-    CHECK(large.join_positions.back() ==
-          std::make_pair(600.0, 0.0));
-    // No duplicates, no gaps: exactly the x = 1..600 interior points.
-    for (std::size_t i = 0; i < large.join_positions.size(); ++i) {
-        CHECK(large.join_positions[i] ==
-              std::make_pair(static_cast<double>(i) + 1.0, 0.0));
-    }
+    REQUIRE(large.joins == 0);
+    CHECK(large.join_positions.empty());
 }
