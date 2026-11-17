@@ -193,7 +193,7 @@ struct WireRoute {
 enum class AttachedKind : std::uint8_t { Part, Junction };
 [[nodiscard]] std::vector<WireRoute> attached_wire_routes(
     const Schematic& s, const SymbolLibrary& lib, AttachedKind kind,
-    std::uint32_t id);
+    std::uint32_t id, std::optional<Pos> from = std::nullopt);
 
 // --- colors ----------------------------------------------------------------
 
