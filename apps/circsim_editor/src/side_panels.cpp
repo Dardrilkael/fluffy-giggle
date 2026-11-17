@@ -636,7 +636,7 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
         char* n_buf = field_buf(ed, skey + ".n", n_text);
         if (text_input_tracked(ed, gui, layout, theme, "points (n)##" + skey +
                                                              ".n",
-                               n_buf, 128)) {
+                               n_buf, static_cast<int>(field_of(ed, skey + ".n").buf.size()))) {
             char* end = nullptr;
             const long parsed = std::strtol(n_buf, &end, 10);
             if (end != nullptr && *end == '\0' && parsed > 0) {
@@ -2136,7 +2136,7 @@ void source_wave_editor(Editor& ed, gui::GuiContext& gui,
             char* buf = field_buf(ed, key, current_text);
             if (text_input_tracked(ed, gui, layout, theme,
                                    std::string{label} + "##" + key, buf,
-                                   128)) {
+                                   static_cast<int>(field_of(ed, key).buf.size()))) {
                 const auto parsed = ws::spice::parse_number(buf);
                 if (parsed.has_value()) {
                     SourceWave next = wave;
