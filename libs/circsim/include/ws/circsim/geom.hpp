@@ -165,6 +165,29 @@ struct WirePointSnap {
 // metric, shared with anything that walks a polyline.
 [[nodiscard]] double dist_to_segment(Pos a, Pos b, Pos p);
 
+// --- landing contacts (move/rotate) -----------------------------------------
+
+// A contact a move or rotate CREATED: one of the moved part's pins,
+// resolved at its LANDING, sits exactly on another wire's path
+// interior (the pin-on-wire pickup rule's geometry). Each answer
+// names the pin and the wire whose interior it landed on; wires that
+// already END on that pin (an endpoint ref - the authored connection)
+// never answer, and a junction already at the spot suppresses it (the
+// dot exists; the connection is explicit).
+//
+// The editor drops a junction at each answered position when it lands
+// the move: the connection the pickup rule would make silently
+// becomes VISIBLE, DURABLE (it survives the next move away - the
+// junction keeps naming the node) and undoable with the step.
+struct MovedPinContact {
+    std::uint32_t part = 0;  // the moved part
+    std::uint32_t pin = 0;   // the pin that landed on the wire
+    std::uint32_t wire = 0;  // the wire whose interior was landed on
+    Pos pos{0.0, 0.0};       // the contact (the pin's landing spot)
+};
+[[nodiscard]] std::vector<MovedPinContact> moved_pin_contacts(
+    const Schematic& s, const SymbolLibrary& lib, std::uint32_t part_id);
+
 // --- placement ----------------------------------------------------------------
 
 // The Place tool's pin magnetism: where a ghost of `sym` at the

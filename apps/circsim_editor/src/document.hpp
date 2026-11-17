@@ -109,6 +109,19 @@ void push_move_part(SchematicDocument& doc, std::uint32_t part_id,
 void push_transform_part(SchematicDocument& doc, std::uint32_t part_id,
                          int rot, bool mirror, std::string name);
 
+// The explicit junctions a move/rotate's landing CREATED: for every
+// contact the moved part's pins made with another wire's interior
+// (ws::circsim::moved_pin_contacts), one junction is minted at the
+// contact position - the pickup rule's silent connection becomes a
+// named node with a drawn dot, so it survives the NEXT move away and
+// the undo of the move that made it. One undo step, one name; an
+// empty list lands nothing. Returns the number minted.
+std::size_t push_contact_junctions(
+    SchematicDocument& doc,
+    const std::vector<ws::circsim::MovedPinContact>& contacts,
+    std::string name);
+
+
 // One part text field. kind: 0 = ref, 1 = value, 2 = params[param].
 // Typing runs coalesce (merge_with) so one undo reverts the run.
 void push_part_text(SchematicDocument& doc, std::uint32_t part_id, int kind,

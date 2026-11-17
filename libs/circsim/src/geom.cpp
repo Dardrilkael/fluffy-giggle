@@ -12,7 +12,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <set>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -548,6 +550,80 @@ Pos magnet_shift(const Schematic& s, const SymbolLibrary& lib,
         return base;
     }
     return {base.x + best_shift->x, base.y + best_shift->y};
+}
+
+std::vector<MovedPinContact> moved_pin_contacts(
+    const Schematic& s, const SymbolLibrary& lib, std::uint32_t part_id) {
+    std::vector<MovedPinContact> out;
+    const Part* part = s.find_part(part_id);
+    const SymbolDef* sym = part != nullptr ? lib.find(part->symbol) : nullptr;
+    if (part == nullptr || sym == nullptr) {
+        return out;
+    }
+    // A junction at the spot already names the node explicitly: its
+    // dot is the authored connection, nothing to mint.
+    std::set<std::pair<double, double>> junction_at;
+    for (const Junction& j : s.junctions()) {
+        junction_at.insert({j.pos.x, j.pos.y});
+    }
+    for (std::uint32_t pin = 0; pin < sym->pins.size(); ++pin) {
+        const Pos at = pin_pos(*sym, *part, pin);
+        const PinRef ref{part_id, pin};
+        for (const Wire& w : s.wires()) {
+            // A wire that ENDS on this pin is the authored connection:
+            // its endpoint ref already carries it - landing on that
+            // wire's END is a landing, not a contact to mint.
+            const bool ends_on_pin =
+                (std::get_if<PinRef>(&w.a) != nullptr &&
+                 *std::get_if<PinRef>(&w.a) == ref) ||
+                (std::get_if<PinRef>(&w.b) != nullptr &&
+                 *std::get_if<PinRef>(&w.b) == ref);
+            if (ends_on_pin) {
+                continue;
+            }
+            const std::vector<Pos> path = wire_path(s, lib, w);
+            if (path.size() < 2u) {
+                continue;  // dangling: no interior to land on
+            }
+            // The contact rules are the same exact-double geometry
+            // nets.cpp unions by: the point lies on a segment, and it
+            // is the path's INTERIOR (an endpoint is a landing on a
+            // named entity both would reference - visible already).
+            bool on_interior = false;
+            for (std::size_t i = 1; i < path.size(); ++i) {
+                const Pos& a = path[i - 1];
+                const Pos& b = path[i];
+                const double cross =
+                    (b.x - a.x) * (at.y - a.y) - (b.y - a.y) * (at.x - a.x);
+                if (cross != 0.0) {
+                    continue;
+                }
+                if (at.x < std::min(a.x, b.x) || at.x > std::max(a.x, b.x) ||
+                    at.y < std::min(a.y, b.y) || at.y > std::max(a.y, b.y)) {
+                    continue;
+                }
+                on_interior = true;
+                break;
+            }
+            if (!on_interior) {
+                continue;
+            }
+            if (eps_eq_pos(at, path.front(), 1e-9) ||
+                eps_eq_pos(at, path.back(), 1e-9)) {
+                continue;  // the wire's endpoint position: a landing
+            }
+            if (junction_at.count({at.x, at.y}) != 0u) {
+                continue;  // an explicit dot already names the node
+            }
+            MovedPinContact contact;
+            contact.part = part_id;
+            contact.pin = pin;
+            contact.wire = w.id;
+            contact.pos = at;
+            out.push_back(contact);
+        }
+    }
+    return out;
 }
 
 std::vector<WireRoute> attached_wire_routes(const Schematic& s,

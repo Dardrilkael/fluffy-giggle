@@ -233,11 +233,18 @@ bool Editor::transform_part(std::uint32_t id, int rot, bool mirror,
     p->mirror = mirror;
     s->bump();
     std::vector<WireRoute> routes = attached_wire_routes(Drag::Kind::Part, id);
+    // The contacts the rotated pins make with OTHER wires' interiors,
+    // read at the same landing visit: a rotated pin landing on a wire
+    // is the same silent pickup a moved one makes - it becomes an
+    // explicit junction with the transform's own undo step.
+    const std::vector<ws::circsim::MovedPinContact> contacts =
+        ws::circsim::moved_pin_contacts(*s, library, id);
     p->rot = was_rot;
     p->mirror = was_mirror;
     s->bump();
     push_transform_part_routed(*doc, id, rot, mirror, std::move(name),
                                std::move(routes));
+    (void)push_contact_junctions(*doc, contacts, std::string{name});
     return true;
 }
 

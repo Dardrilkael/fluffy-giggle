@@ -2096,6 +2096,56 @@ TEST_CASE("the group drag moves the set as ONE undo step") {
     CHECK(b.doc.schem.find_part(r2->id)->pos.y == doctest::Approx(0.0));
 }
 
+TEST_CASE("a moved part landing its pin on a wire mints the contact "
+          "junction") {
+    Bench b;
+    // R1 at (0, 4), the unrelated wire W2 at y = 0 - all inside the
+    // default camera (zoom 26, centered on the origin).
+    const ws::circsim::Part* r1 = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "1k", {0.0, 4.0}));
+    ws::circsim::Junction b1;
+    b1.id = b.doc.schem.alloc_id();
+    b1.pos = {-20.0, 0.0};
+    ws::circsim::Junction b2;
+    b2.id = b.doc.schem.alloc_id();
+    b2.pos = {20.0, 0.0};
+    b.doc.schem.junctions_mut().push_back(b1);
+    b.doc.schem.junctions_mut().push_back(b2);
+    ws::circsim::Wire w2;
+    w2.id = b.doc.schem.alloc_id();
+    w2.a = ws::circsim::JunctionRef{b1.id};
+    w2.b = ws::circsim::JunctionRef{b2.id};
+    w2.ortho = true;
+    b.doc.schem.wires_mut().push_back(w2);
+
+    // Drag R1 down onto the wire: pin0 (-3, 0) and pin1 (3, 0) land on
+    // W2's interior. The release mints an explicit junction at each
+    // contact - the connection the landing makes is visible, and the
+    // undo of the move takes the dots with it.
+    const std::size_t junctions_before =
+        b.doc.schem.junctions().size();
+    drag_world(b, {0.0, 4.0}, {0.0, 0.0});
+    CHECK(b.doc.schem.find_part(r1->id)->pos.y ==
+          doctest::Approx(0.0));
+    CHECK(b.doc.schem.junctions().size() == junctions_before + 2u);
+    bool dot_at_pin0 = false;
+    for (const ws::circsim::Junction& j :
+         b.doc.schem.junctions()) {
+        if (j.pos == ws::circsim::Pos{-3.0, 0.0}) {
+            dot_at_pin0 = true;
+        }
+    }
+    CHECK(dot_at_pin0);
+
+    // The undo stack: the move, then its contact junctions. Two undos
+    // return the sheet to exactly what it was.
+    (void)b.doc.undo().undo();
+    (void)b.doc.undo().undo();
+    CHECK(b.doc.schem.junctions().size() == junctions_before);
+    CHECK(b.doc.schem.find_part(r1->id)->pos.y ==
+          doctest::Approx(4.0));
+}
+
 TEST_CASE("copy/paste: fresh ids, renumbered refs, the geometry kept") {
     Bench b;
     const ws::circsim::Part* r1 = b.doc.schem.add_part(

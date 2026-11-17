@@ -317,6 +317,95 @@ TEST_CASE("attached_wire_routes: no wires, no routes") {
               .empty());
 }
 
+// --- landing contacts (move/rotate) -----------------------------------------
+
+TEST_CASE("moved_pin_contacts: a pin landing on a wire's interior answers") {
+    // R1 moved so its pin0 (-3, 0) sits on the interior of a long
+    // horizontal wire at y = 0: the contact the pickup rule would
+    // silently make - and the caller mints a junction at.
+    ws::circsim::Schematic s;
+    const ws::circsim::SymbolLibrary lib;
+    const ws::circsim::SymbolDef* r = lib.find("r");
+    REQUIRE(r != nullptr);
+
+    ws::circsim::Part p1{};
+    p1.id = s.alloc_id();
+    p1.symbol = r->key;
+    p1.ref = "R1";
+    p1.pos = {0.0, 0.0};  // pin0 at (-3, 0)
+    s.parts_mut().push_back(p1);
+
+    ws::circsim::Junction a{}, b{};
+    a.id = s.alloc_id();
+    a.pos = {-20.0, 0.0};
+    b.id = s.alloc_id();
+    b.pos = {20.0, 0.0};
+    s.junctions_mut().push_back(a);
+    s.junctions_mut().push_back(b);
+    ws::circsim::Wire w{};
+    w.id = s.alloc_id();
+    w.a = ws::circsim::JunctionRef{a.id};
+    w.b = ws::circsim::JunctionRef{b.id};
+    w.ortho = true;
+    s.wires_mut().push_back(w);
+
+    const std::vector<ws::circsim::MovedPinContact> contacts =
+        ws::circsim::moved_pin_contacts(s, lib, p1.id);
+    REQUIRE(contacts.size() == 2u);  // pin0 (-3,0) AND pin1 (3,0) ride it
+    bool saw_pin0 = false;
+    bool saw_pin1 = false;
+    for (const ws::circsim::MovedPinContact& c : contacts) {
+        CHECK(c.part == p1.id);
+        CHECK(c.wire == w.id);
+        if (c.pin == 0u) {
+            saw_pin0 = true;
+            CHECK(c.pos == ws::circsim::Pos{-3.0, 0.0});
+        } else if (c.pin == 1u) {
+            saw_pin1 = true;
+            CHECK(c.pos == ws::circsim::Pos{3.0, 0.0});
+        }
+    }
+    CHECK(saw_pin0);
+    CHECK(saw_pin1);
+}
+
+TEST_CASE("moved_pin_contacts: authored endpoints and junctions never answer") {
+    ws::circsim::Schematic s;
+    const ws::circsim::SymbolLibrary lib;
+    const ws::circsim::SymbolDef* r = lib.find("r");
+    REQUIRE(r != nullptr);
+
+    // A wire ENDING on the part's pin: the authored connection - not
+    // a contact to mint.
+    ws::circsim::Part p1{};
+    p1.id = s.alloc_id();
+    p1.symbol = r->key;
+    p1.ref = "R1";
+    p1.pos = {0.0, 0.0};
+    s.parts_mut().push_back(p1);
+
+    ws::circsim::Junction far_end{};
+    far_end.id = s.alloc_id();
+    far_end.pos = {-13.0, 0.0};
+    s.junctions_mut().push_back(far_end);
+    ws::circsim::Wire authored{};
+    authored.id = s.alloc_id();
+    authored.a = ws::circsim::JunctionRef{far_end.id};
+    authored.b = ws::circsim::PinRef{p1.id, 0};  // ends ON the pin
+    authored.ortho = true;
+    s.wires_mut().push_back(authored);
+
+    CHECK(ws::circsim::moved_pin_contacts(s, lib, p1.id).empty());
+
+    // A junction drawn at the pin's spot: the dot exists - explicit
+    // already, never minted again.
+    ws::circsim::Junction dot{};
+    dot.id = s.alloc_id();
+    dot.pos = {3.0, 0.0};  // pin1's position
+    s.junctions_mut().push_back(dot);
+    CHECK(ws::circsim::moved_pin_contacts(s, lib, p1.id).empty());
+}
+
 // --- colors ----------------------------------------------------------------
 
 TEST_CASE("series_color: the wheel cycles every eight") {

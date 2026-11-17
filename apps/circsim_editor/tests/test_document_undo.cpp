@@ -10,6 +10,7 @@
 
 #include <ws/circsim/export.hpp>
 #include <ws/circsim/model.hpp>
+#include <ws/circsim/symbols.hpp>
 #include <ws/settings/filesystem.hpp>
 
 namespace {
@@ -271,4 +272,81 @@ TEST_CASE("single delete undo restores the original deque position") {
         (void)f.doc.undo().undo();
         CHECK(entity_ids(s.labels()) == labels);
     }
+}
+// --- move-created contacts become explicit junctions --------------------------
+
+TEST_CASE("a move landing a pin on a wire mints the contact junctions") {
+    DocumentFixture f;
+    auto& s = f.doc.schem;
+    const ws::circsim::SymbolDef* r =
+        ws::circsim::find_symbol("r");
+    REQUIRE(r != nullptr);
+
+    // R1 at (0, 10): pin0 (-3, 10), pin1 (3, 10).
+    Part* p1 = s.add_part(
+        Part::make("r", "R1", "1k", {0.0, 10.0}));
+    REQUIRE(p1 != nullptr);
+
+    // Net A: J1 -- W1 -- R1.pin0 (the authored connection).
+    Junction* j1 = s.add_junction({});
+    REQUIRE(j1 != nullptr);
+    j1->pos = {-13.0, 10.0};
+    Wire* w1 = s.add_wire({});
+    REQUIRE(w1 != nullptr);
+    w1->a = ws::circsim::JunctionRef{j1->id};
+    w1->b = ws::circsim::PinRef{p1->id, 0};
+    w1->ortho = true;
+
+    // Net B: the unrelated horizontal wire at y = 0.
+    Junction* b1 = s.add_junction({});
+    REQUIRE(b1 != nullptr);
+    b1->pos = {-20.0, 0.0};
+    Junction* b2 = s.add_junction({});
+    REQUIRE(b2 != nullptr);
+    b2->pos = {20.0, 0.0};
+    Wire* w2 = s.add_wire({});
+    REQUIRE(w2 != nullptr);
+    w2->a = ws::circsim::JunctionRef{b1->id};
+    w2->b = ws::circsim::JunctionRef{b2->id};
+    w2->ortho = true;
+
+    // The move's landing (0, 0): pin0 (-3, 0) and pin1 (3, 0) land on
+    // w2's interior - the contacts the commit mints. moved_pin_contacts
+    // reads the part AT ITS LANDING (the canvas release visits the
+    // landing before reading, then restores the press position).
+    p1->pos = {0.0, 0.0};
+    s.bump();
+    const std::vector<ws::circsim::MovedPinContact> contacts =
+        ws::circsim::moved_pin_contacts(s, ws::circsim::builtin_library(),
+                                        p1->id);
+    REQUIRE(contacts.size() == 2u);
+    p1->pos = {0.0, 10.0};
+    s.bump();
+
+    const std::size_t minted =
+        editor::push_contact_junctions(f.doc, contacts, "Move Part");
+    CHECK(minted == 2u);
+    REQUIRE(s.junctions().size() == 5u);  // j1, b1, b2 + the two dots
+    bool saw_dot_at_pin0 = false;
+    bool saw_dot_at_pin1 = false;
+    for (const Junction& j : s.junctions()) {
+        if (j.pos == ws::circsim::Pos{-3.0, 0.0}) {
+            saw_dot_at_pin0 = true;
+        }
+        if (j.pos == ws::circsim::Pos{3.0, 0.0}) {
+            saw_dot_at_pin1 = true;
+        }
+    }
+    CHECK(saw_dot_at_pin0);
+    CHECK(saw_dot_at_pin1);
+
+    // One undo removes both dots (the connection the move created and
+    // the junction land in the same step).
+    (void)f.doc.undo().undo();
+    CHECK(s.junctions().size() == 3u);
+
+    // An empty contact list lands nothing at all.
+    CHECK(editor::push_contact_junctions(
+              f.doc, {}, "Move Part") == 0u);
+    CHECK(f.doc.undo().undo_count() == 0u);
 }
