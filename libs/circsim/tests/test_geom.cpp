@@ -6,7 +6,9 @@
 // so a second consumer (a batch CLI, another frontend) can rely on
 // them without the app.
 
-#include <doctest/doctest.h>  // (this suite rides test_format.cpp's main - the lib suite's shape)
+#include <doctest/doctest.h>
+
+#include <algorithm>  // (this suite rides test_format.cpp's main - the lib suite's shape)
 
 #include <cmath>
 #include <cstdint>
