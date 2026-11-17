@@ -66,6 +66,8 @@ namespace ws::circsim {
 // author's shape is kept (a gentle fix-up, not a re-route). Returns
 // the cleaned INTERIOR waypoints.
 [[nodiscard]] std::vector<Pos> tidy_route(const std::vector<Pos>& path);
+[[nodiscard]] std::vector<Pos> tidy_route(
+    const std::vector<Pos>& path, const std::vector<Pos>& preserve_points);
 
 // --- refdes ----------------------------------------------------------------
 
@@ -117,6 +119,12 @@ struct BoundsBuilder {
 [[nodiscard]] std::vector<Pos> wire_path(const Schematic& s,
                                          const SymbolLibrary& lib,
                                          const Wire& w);
+
+// Interior electrical terminals (pins and junctions) that lie on a wire
+// path. Tidy and move operations must keep these points on the route.
+[[nodiscard]] std::vector<Pos> wire_attachment_points(
+    const Schematic& s, const SymbolLibrary& lib,
+    const std::vector<Pos>& path);
 
 // The whole schematic's content extent (for a fit command): every
 // part's bounds, every junction and label position, every wire vertex.
@@ -191,9 +199,20 @@ struct WireRoute {
     std::vector<Pos> waypoints;
 };
 enum class AttachedKind : std::uint8_t { Part, Junction };
+struct AttachedMove {
+    AttachedKind kind = AttachedKind::Part;
+    std::uint32_t id = 0;
+    Pos from{0.0, 0.0};
+    int from_rot = 0;
+    bool from_mirror = false;
+    bool has_from_transform = false;
+};
+[[nodiscard]] std::vector<WireRoute> attached_wire_routes(
+    const Schematic& s, const SymbolLibrary& lib,
+    const std::vector<AttachedMove>& moves);
 [[nodiscard]] std::vector<WireRoute> attached_wire_routes(
     const Schematic& s, const SymbolLibrary& lib, AttachedKind kind,
-    std::uint32_t id);
+    std::uint32_t id, std::optional<Pos> from = std::nullopt);
 
 // --- colors ----------------------------------------------------------------
 

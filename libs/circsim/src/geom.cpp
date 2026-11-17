@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <variant>
+#include <utility>
 #include <vector>
 
 #include <ws/core/assert.hpp>
@@ -30,13 +31,33 @@ namespace {
     return std::fabs(p.x - q.x) <= eps && std::fabs(p.y - q.y) <= eps;
 }
 
+[[nodiscard]] bool point_on_segment_exact(Pos a, Pos b, Pos p) {
+    const double cross = (b.x - a.x) * (p.y - a.y) -
+                         (b.y - a.y) * (p.x - a.x);
+    return cross == 0.0 &&
+           p.x >= std::min(a.x, b.x) && p.x <= std::max(a.x, b.x) &&
+           p.y >= std::min(a.y, b.y) && p.y <= std::max(a.y, b.y);
+}
+
+[[nodiscard]] bool point_on_path_exact(const std::vector<Pos>& path,
+                                       Pos point) {
+    for (std::size_t i = 1; i < path.size(); ++i) {
+        if (point_on_segment_exact(path[i - 1], path[i], point)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Folds duplicate points and collinear CONTINUING middles out of a full
 // polyline (endpoint, corners, endpoint) and returns the INTERIOR - the
 // waypoints the .csim stores. A fold needs the leg to continue: a
 // reversal is collinear too, but folding it would run the wire straight
 // back through the part it just left. Shared by route_wire (fresh
 // routes) and tidy_route (existing wires).
-[[nodiscard]] std::vector<Pos> fold_interior(const std::vector<Pos>& full) {
+[[nodiscard]] std::vector<Pos> fold_interior(
+    const std::vector<Pos>& full,
+    const std::vector<Pos>* preserve_points = nullptr) {
     constexpr double kEps = 1e-9;
     std::vector<Pos> folded;
     for (const Pos& p : full) {
@@ -53,7 +74,13 @@ namespace {
                  std::fabs(p1.y - p.y) <= kEps);
             const double along = (p1.x - p0.x) * (p.x - p1.x) +
                                  (p1.y - p0.y) * (p.y - p1.y);
-            if (collinear && along > 0.0) {
+            const bool keep_middle =
+                preserve_points != nullptr &&
+                std::any_of(preserve_points->begin(), preserve_points->end(),
+                            [&](Pos keep) {
+                                return eps_eq_pos(keep, folded.back(), kEps);
+                            });
+            if (collinear && along > 0.0 && !keep_middle) {
                 folded.back() = p;  // the leg extends
                 continue;
             }
@@ -162,28 +189,69 @@ std::vector<Pos> route_wire(Pos a, int a_dir, Pos b, int b_dir,
 }
 
 std::vector<Pos> tidy_route(const std::vector<Pos>& path) {
+    return tidy_route(path, {});
+}
+
+std::vector<Pos> tidy_route(const std::vector<Pos>& path,
+                            const std::vector<Pos>& preserve_points) {
     constexpr double kEps = 1e-9;
     if (path.size() < 2u) {
         return {};
     }
+
+    // First make every electrical attachment an explicit path vertex.
+    // A pin or junction may lie in the middle of a long straight segment,
+    // rather than at an authored waypoint.
+    std::vector<Pos> with_attachments;
+    with_attachments.reserve(path.size() + preserve_points.size());
+    with_attachments.push_back(path.front());
+    for (std::size_t i = 1; i < path.size(); ++i) {
+        const Pos a = path[i - 1];
+        const Pos b = path[i];
+        std::vector<std::pair<double, Pos>> on_leg;
+        for (const Pos keep : preserve_points) {
+            if (eps_eq_pos(keep, a, kEps) || eps_eq_pos(keep, b, kEps) ||
+                !point_on_segment_exact(a, b, keep)) {
+                continue;
+            }
+            const double dx = b.x - a.x;
+            const double dy = b.y - a.y;
+            const double denom = dx * dx + dy * dy;
+            const double t = denom > 0.0
+                ? ((keep.x - a.x) * dx + (keep.y - a.y) * dy) / denom
+                : 0.0;
+            on_leg.emplace_back(t, keep);
+        }
+        std::sort(on_leg.begin(), on_leg.end(),
+                  [](const auto& lhs, const auto& rhs) {
+                      return lhs.first < rhs.first;
+                  });
+        for (const auto& entry : on_leg) {
+            if (!eps_eq_pos(with_attachments.back(), entry.second, kEps)) {
+                with_attachments.push_back(entry.second);
+            }
+        }
+        if (!eps_eq_pos(with_attachments.back(), b, kEps)) {
+            with_attachments.push_back(b);
+        }
+    }
+
     // Every diagonal leg gets one axis-aligned corner (horizontal
     // first - the stock bend); axis-aligned legs pass through. The fold
-    // then merges the corner into a neighbouring collinear leg where it
-    // can, so a wire that only had a stray diagonal comes out with the
-    // fewest bends that keep the rest of its shape.
+    // may remove ordinary collinear waypoints, but never an attachment.
     std::vector<Pos> full;
-    full.reserve(path.size() * 2u);
-    full.push_back(path.front());
-    for (std::size_t i = 1; i < path.size(); ++i) {
+    full.reserve(with_attachments.size() * 2u);
+    full.push_back(with_attachments.front());
+    for (std::size_t i = 1; i < with_attachments.size(); ++i) {
         const Pos p = full.back();
-        const Pos q = path[i];
+        const Pos q = with_attachments[i];
         if (!(std::fabs(p.x - q.x) <= kEps) &&
             !(std::fabs(p.y - q.y) <= kEps)) {
             full.push_back(Pos{q.x, p.y});
         }
         full.push_back(q);
     }
-    return fold_interior(full);
+    return fold_interior(full, &preserve_points);
 }
 
 // --- refdes ----------------------------------------------------------------
@@ -365,6 +433,41 @@ std::vector<Pos> wire_path(const Schematic& s, const SymbolLibrary& lib,
         out.push_back(p);
     }
     out.push_back(*b);
+    return out;
+}
+
+std::vector<Pos> wire_attachment_points(const Schematic& s,
+                                        const SymbolLibrary& lib,
+                                        const std::vector<Pos>& path) {
+    std::vector<Pos> out;
+    if (path.size() < 2u) {
+        return out;
+    }
+    const auto add_if_attached = [&](Pos point) {
+        if (eps_eq_pos(point, path.front(), 1e-9) ||
+            eps_eq_pos(point, path.back(), 1e-9) ||
+            !point_on_path_exact(path, point)) {
+            return;
+        }
+        if (std::none_of(out.begin(), out.end(), [&](Pos existing) {
+                return eps_eq_pos(existing, point, 1e-9);
+            })) {
+            out.push_back(point);
+        }
+    };
+    for (const Junction& junction : s.junctions()) {
+        add_if_attached(junction.pos);
+    }
+    for (const Part& part : s.parts()) {
+        const SymbolDef* symbol = lib.find(part.symbol);
+        if (symbol == nullptr) {
+            continue;
+        }
+        for (std::size_t pin = 0; pin < symbol->pins.size(); ++pin) {
+            add_if_attached(
+                pin_pos(*symbol, part, static_cast<std::uint32_t>(pin)));
+        }
+    }
     return out;
 }
 
@@ -550,51 +653,242 @@ Pos magnet_shift(const Schematic& s, const SymbolLibrary& lib,
     return {base.x + best_shift->x, base.y + best_shift->y};
 }
 
-std::vector<WireRoute> attached_wire_routes(const Schematic& s,
-                                            const SymbolLibrary& lib,
-                                            AttachedKind kind,
-                                            std::uint32_t id) {
+std::vector<WireRoute> attached_wire_routes(
+    const Schematic& s, const SymbolLibrary& lib,
+    const std::vector<AttachedMove>& moves) {
     constexpr double kEps = 1e-9;
-    std::vector<WireRoute> out;
-    const auto hits = [&](const WireEndpoint& e) {
-        if (kind == AttachedKind::Part) {
-            const auto* pin = std::get_if<PinRef>(&e);
-            return pin != nullptr && pin->part == id;
-        }
-        const auto* j = std::get_if<JunctionRef>(&e);
-        return j != nullptr && j->junction == id;
+    struct TerminalMove {
+        Pos from;
+        Pos to;
     };
-    for (const Wire& w : s.wires()) {
-        // A cosmetic freeform wire's shape is the author's - only the
-        // ortho constraint re-routes.
-        if (!w.ortho) {
+
+    // Build the old/new position of every pin and junction. The moved
+    // entities are currently at their landing; all other terminals map
+    // to themselves. This lets the route preserve both moving and
+    // stationary connections that happen to sit inside a wire.
+    std::vector<TerminalMove> terminals;
+    for (const Part& part : s.parts()) {
+        Part old_part = part;
+        for (const AttachedMove& move : moves) {
+            if (move.kind == AttachedKind::Part && move.id == part.id) {
+                old_part.pos = move.from;
+                if (move.has_from_transform) {
+                    old_part.rot = move.from_rot;
+                    old_part.mirror = move.from_mirror;
+                }
+                break;
+            }
+        }
+        const SymbolDef* symbol = lib.find(part.symbol);
+        if (symbol == nullptr) {
             continue;
         }
-        const bool a_hit = hits(w.a);
-        const bool b_hit = hits(w.b);
-        if (!a_hit && !b_hit) {
-            continue;
+        for (std::size_t pin = 0; pin < symbol->pins.size(); ++pin) {
+            const auto pin_index = static_cast<std::uint32_t>(pin);
+            terminals.push_back(
+                {pin_pos(*symbol, old_part, pin_index),
+                 pin_pos(*symbol, part, pin_index)});
         }
-        const std::vector<Pos> path = wire_path(s, lib, w);
+    }
+    for (const Junction& junction : s.junctions()) {
+        Pos old_pos = junction.pos;
+        for (const AttachedMove& move : moves) {
+            if (move.kind == AttachedKind::Junction &&
+                move.id == junction.id) {
+                old_pos = move.from;
+                break;
+            }
+        }
+        terminals.push_back({old_pos, junction.pos});
+    }
+
+    const auto hits = [&](const WireEndpoint& endpoint) {
+        for (const AttachedMove& move : moves) {
+            if (move.kind == AttachedKind::Part) {
+                const auto* pin = std::get_if<PinRef>(&endpoint);
+                if (pin != nullptr && pin->part == move.id) {
+                    return true;
+                }
+            } else {
+                const auto* junction =
+                    std::get_if<JunctionRef>(&endpoint);
+                if (junction != nullptr && junction->junction == move.id) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    const auto old_endpoint_pos = [&](const WireEndpoint& endpoint)
+        -> std::optional<Pos> {
+        if (const auto* pin = std::get_if<PinRef>(&endpoint)) {
+            for (const AttachedMove& move : moves) {
+                if (move.kind != AttachedKind::Part || move.id != pin->part) {
+                    continue;
+                }
+                const Part* part = s.find_part(pin->part);
+                const SymbolDef* symbol =
+                    part != nullptr ? lib.find(part->symbol) : nullptr;
+                if (part == nullptr || symbol == nullptr ||
+                    pin->pin >= symbol->pins.size()) {
+                    return std::nullopt;
+                }
+                Part old_part = *part;
+                old_part.pos = move.from;
+                if (move.has_from_transform) {
+                    old_part.rot = move.from_rot;
+                    old_part.mirror = move.from_mirror;
+                }
+                return pin_pos(*symbol, old_part, pin->pin);
+            }
+        } else if (const auto* junction =
+                       std::get_if<JunctionRef>(&endpoint)) {
+            for (const AttachedMove& move : moves) {
+                if (move.kind == AttachedKind::Junction &&
+                    move.id == junction->junction) {
+                    return move.from;
+                }
+            }
+        }
+        return std::nullopt;
+    };
+    const auto same = [](Pos a, Pos b) {
+        return eps_eq_pos(a, b, 1e-9);
+    };
+    const auto append_unique = [&](std::vector<Pos>& points, Pos point) {
+        if (points.empty() || !same(points.back(), point)) {
+            points.push_back(point);
+        }
+    };
+
+    std::vector<WireRoute> out;
+    for (const Wire& wire : s.wires()) {
+        const bool a_hit = hits(wire.a);
+        const bool b_hit = hits(wire.b);
+        const std::vector<Pos> path = wire_path(s, lib, wire);
         if (path.size() < 2u) {
-            continue;  // dangling: nothing to keep straight
+            continue;
         }
-        // Straight or one-bend wires (and anything with both ends on
-        // the same move) re-route as a fresh horizontal-first L; a
-        // multi-bend wire keeps its shape - only the adjacent waypoint
-        // slides, chosen so both touching legs stay axis-aligned.
+
+        // wire_path resolves moved endpoints at their landing. Recreate
+        // the press-time endpoint positions so interior attachments are
+        // tested against the actual pre-move path, not a diagonal chord
+        // from the landing to the untouched endpoint.
+        std::vector<Pos> old_path = path;
+        if (a_hit) {
+            if (const auto old = old_endpoint_pos(wire.a)) {
+                old_path.front() = *old;
+            }
+        }
+        if (b_hit) {
+            if (const auto old = old_endpoint_pos(wire.b)) {
+                old_path.back() = *old;
+            }
+        }
+
+        // Find every pin/junction on the old path's INTERIOR. Endpoints
+        // are already represented by their endpoint refs; interior
+        // terminals must survive as explicit vertices after rerouting.
+        std::vector<TerminalMove> attachments;
+        for (const TerminalMove& terminal : terminals) {
+            if (same(terminal.from, old_path.front()) ||
+                same(terminal.from, old_path.back())) {
+                continue;
+            }
+            if (point_on_path_exact(old_path, terminal.from)) {
+                attachments.push_back(terminal);
+            }
+        }
+        const bool interior_moved = std::any_of(
+            attachments.begin(), attachments.end(),
+            [&](const TerminalMove& attachment) {
+                return !same(attachment.from, attachment.to);
+            });
+        if (!a_hit && !b_hit && !interior_moved) {
+            continue;
+        }
+
+        if (!attachments.empty()) {
+            // Rebuild the path in its original order, inserting every
+            // interior terminal at its old position and moving it to its
+            // new one. This keeps stationary junctions/pins attached
+            // even when an endpoint has moved a very long distance.
+            std::vector<Pos> expanded;
+            expanded.reserve(old_path.size() + attachments.size() + 4u);
+            expanded.push_back(path.front());
+            std::vector<Pos> preserve;
+            preserve.reserve(attachments.size());
+            for (std::size_t i = 1; i < old_path.size(); ++i) {
+                const Pos a = old_path[i - 1];
+                const Pos b = old_path[i];
+                std::vector<std::pair<double, Pos>> on_leg;
+                for (const TerminalMove& attachment : attachments) {
+                    const Pos p = attachment.from;
+                    if (same(p, a) || same(p, b) ||
+                        !point_on_segment_exact(a, b, p)) {
+                        continue;
+                    }
+                    const double dx = b.x - a.x;
+                    const double dy = b.y - a.y;
+                    const double denom = dx * dx + dy * dy;
+                    const double t = denom > 0.0
+                        ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / denom
+                        : 0.0;
+                    on_leg.emplace_back(t, attachment.to);
+                }
+                std::stable_sort(on_leg.begin(), on_leg.end(),
+                                 [](const auto& lhs, const auto& rhs) {
+                                     return lhs.first < rhs.first;
+                                 });
+                for (const auto& point : on_leg) {
+                    append_unique(expanded, point.second);
+                    preserve.push_back(point.second);
+                }
+
+                if (i + 1u == old_path.size()) {
+                    append_unique(expanded, path.back());
+                } else {
+                    bool mapped_vertex = false;
+                    for (const TerminalMove& attachment : attachments) {
+                        if (same(attachment.from, b)) {
+                            append_unique(expanded, attachment.to);
+                            preserve.push_back(attachment.to);
+                            mapped_vertex = true;
+                        }
+                    }
+                    if (!mapped_vertex) {
+                        append_unique(expanded, b);
+                    }
+                }
+            }
+
+            WireRoute route;
+            route.wire = wire.id;
+            if (wire.ortho) {
+                route.waypoints = tidy_route(expanded, preserve);
+            } else {
+                route.waypoints.assign(expanded.begin() + 1,
+                                       expanded.end() - 1);
+            }
+            out.push_back(std::move(route));
+            continue;
+        }
+
+        // No interior electrical terminals need protecting. Keep the
+        // established endpoint-only router for this simple case.
+        if (!wire.ortho || (!a_hit && !b_hit)) {
+            continue;
+        }
         std::vector<Pos> mid(path.begin() + 1, path.end() - 1);
         if (mid.size() <= 1u || (a_hit && b_hit)) {
-            WireRoute r;
-            r.wire = w.id;
-            r.waypoints = route_wire(path.front(), -1, path.back(), -1);
-            out.push_back(std::move(r));
+            WireRoute route;
+            route.wire = wire.id;
+            route.waypoints =
+                route_wire(path.front(), -1, path.back(), -1);
+            out.push_back(std::move(route));
             continue;
         }
         if (a_hit) {
-            // The leg into mid[1] keeps its orientation: a vertical
-            // continuation keeps x (the first leg turns horizontal),
-            // a horizontal one keeps y (the first leg turns vertical).
             if (std::fabs(mid[0].x - mid[1].x) <= kEps) {
                 mid[0].y = path.front().y;
             } else {
@@ -610,20 +904,38 @@ std::vector<WireRoute> attached_wire_routes(const Schematic& s,
                 last.y = path.back().y;
             }
         }
-        // The slide can leave a zero-length or collinear waypoint
-        // (a part dropped exactly in line); fold those out so they
-        // never ride into the .csim.
         std::vector<Pos> full;
         full.reserve(mid.size() + 2u);
         full.push_back(path.front());
         full.insert(full.end(), mid.begin(), mid.end());
         full.push_back(path.back());
-        WireRoute r;
-        r.wire = w.id;
-        r.waypoints = fold_interior(full);
-        out.push_back(std::move(r));
+        WireRoute route;
+        route.wire = wire.id;
+        route.waypoints = fold_interior(full);
+        out.push_back(std::move(route));
     }
     return out;
+}
+
+std::vector<WireRoute> attached_wire_routes(const Schematic& s,
+                                            const SymbolLibrary& lib,
+                                            AttachedKind kind,
+                                            std::uint32_t id,
+                                            std::optional<Pos> from) {
+    Pos origin{};
+    if (from.has_value()) {
+        origin = *from;
+    } else if (kind == AttachedKind::Junction) {
+        const Junction* junction = s.find_junction(id);
+        if (junction == nullptr) return {};
+        origin = junction->pos;
+    } else {
+        const Part* part = s.find_part(id);
+        if (part == nullptr) return {};
+        origin = part->pos;
+    }
+    return attached_wire_routes(s, lib,
+                                std::vector<AttachedMove>{{kind, id, origin}});
 }
 
 // --- colors ----------------------------------------------------------------

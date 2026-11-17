@@ -154,7 +154,26 @@ std::size_t Editor::tidy_selection() {
     if (s == nullptr || doc == nullptr) {
         return 0;
     }
-    // Which wires does the selection cover?
+    // Geometric attachments count just like endpoint references:
+    // a selected part pin or junction may connect to a wire's interior.
+    const auto point_on_wire = [&](const ws::circsim::Wire& wire,
+                                   Pos point) {
+        const std::vector<Pos>& path = wire_geom(wire).path;
+        for (std::size_t i = 1; i < path.size(); ++i) {
+            const Pos a = path[i - 1];
+            const Pos b = path[i];
+            const double cross = (b.x - a.x) * (point.y - a.y) -
+                                 (b.y - a.y) * (point.x - a.x);
+            if (cross == 0.0 &&
+                point.x >= std::min(a.x, b.x) &&
+                point.x <= std::max(a.x, b.x) &&
+                point.y >= std::min(a.y, b.y) &&
+                point.y <= std::max(a.y, b.y)) {
+                return true;
+            }
+        }
+        return false;
+    };
     const auto covered = [&](const ws::circsim::Wire& w) {
         switch (sel.kind) {
             case Selection::Kind::Wire:
@@ -162,14 +181,37 @@ std::size_t Editor::tidy_selection() {
             case Selection::Kind::Part: {
                 const PinRef* a = std::get_if<PinRef>(&w.a);
                 const PinRef* b = std::get_if<PinRef>(&w.b);
-                return (a != nullptr && a->part == sel.id) ||
-                       (b != nullptr && b->part == sel.id);
+                if ((a != nullptr && a->part == sel.id) ||
+                    (b != nullptr && b->part == sel.id)) {
+                    return true;
+                }
+                const ws::circsim::Part* part = s->find_part(sel.id);
+                const ws::circsim::SymbolDef* symbol =
+                    part != nullptr ? sym_of(*part) : nullptr;
+                if (part == nullptr || symbol == nullptr) {
+                    return false;
+                }
+                for (std::size_t pin = 0; pin < symbol->pins.size(); ++pin) {
+                    if (point_on_wire(
+                            w, ws::circsim::pin_pos(
+                                   *symbol, *part,
+                                   static_cast<std::uint32_t>(pin)))) {
+                        return true;
+                    }
+                }
+                return false;
             }
             case Selection::Kind::Junction: {
                 const JunctionRef* a = std::get_if<JunctionRef>(&w.a);
                 const JunctionRef* b = std::get_if<JunctionRef>(&w.b);
-                return (a != nullptr && a->junction == sel.id) ||
-                       (b != nullptr && b->junction == sel.id);
+                if ((a != nullptr && a->junction == sel.id) ||
+                    (b != nullptr && b->junction == sel.id)) {
+                    return true;
+                }
+                const ws::circsim::Junction* junction =
+                    s->find_junction(sel.id);
+                return junction != nullptr &&
+                       point_on_wire(w, junction->pos);
             }
             case Selection::Kind::Label:
             case Selection::Kind::None:
@@ -193,7 +235,10 @@ std::size_t Editor::tidy_selection() {
         if (path.size() < 2u) {
             continue;  // dangling: nothing to straighten
         }
-        routes.push_back(WireRoute{w.id, tidy_route(path)});
+        const std::vector<Pos> attachments =
+            ws::circsim::wire_attachment_points(*s, library, path);
+        routes.push_back(
+            WireRoute{w.id, ws::circsim::tidy_route(path, attachments)});
     }
     if (in_scope == 0u) {
         status("nothing to tidy - select a wire, part or junction");
@@ -232,7 +277,12 @@ bool Editor::transform_part(std::uint32_t id, int rot, bool mirror,
     p->rot = rot;
     p->mirror = mirror;
     s->bump();
-    std::vector<WireRoute> routes = attached_wire_routes(Drag::Kind::Part, id);
+    const std::vector<WireRoute> routes =
+        ws::circsim::attached_wire_routes(
+            *s, library,
+            std::vector<ws::circsim::AttachedMove>{{
+                ws::circsim::AttachedKind::Part, id, p->pos,
+                was_rot, was_mirror, true}});
     p->rot = was_rot;
     p->mirror = was_mirror;
     s->bump();
@@ -327,7 +377,7 @@ std::size_t Editor::annotate(double row_tol_cells) {
 // endpoint left the adjacent wire legs diagonal (waypoints are
 // absolute, not relative).
 std::vector<WireRoute> Editor::attached_wire_routes(
-    Drag::Kind kind, std::uint32_t id) const {
+    Drag::Kind kind, std::uint32_t id, std::optional<Pos> from) const {
     const ws::circsim::Schematic* s = schem();
     if (s == nullptr) {
         return {};
@@ -336,7 +386,7 @@ std::vector<WireRoute> Editor::attached_wire_routes(
         *s, library,
         kind == Drag::Kind::Part ? ws::circsim::AttachedKind::Part
                                  : ws::circsim::AttachedKind::Junction,
-        id);
+        id, from);
 }
 
 std::optional<PinHit> Editor::hit_pin(Pos world, double radius) const {

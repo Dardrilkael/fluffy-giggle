@@ -804,22 +804,29 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                     ed.group_drag.starts[i].y + delta.y};
                 (void)set_member_pos(ed, ed.group_drag.set[i], at);
             }
-            // The routes, deduped by wire id (a wire bent by two
-            // members would be captured twice with the same shape).
+            // Route the whole moving set in one pass so every old
+            // pin/junction coincidence is measured against the same
+            // original wire geometry and composed into one new route.
+            std::vector<ws::circsim::AttachedMove> attached_moves;
+            attached_moves.reserve(ed.group_drag.set.size());
+            for (std::size_t i = 0; i < ed.group_drag.set.size(); ++i) {
+                const Selection& m = ed.group_drag.set[i];
+                if (m.kind == Selection::Kind::Part) {
+                    attached_moves.push_back({
+                        ws::circsim::AttachedKind::Part, m.id,
+                        ed.group_drag.starts[i]});
+                } else if (m.kind == Selection::Kind::Junction) {
+                    attached_moves.push_back({
+                        ws::circsim::AttachedKind::Junction, m.id,
+                        ed.group_drag.starts[i]});
+                }
+            }
+            std::vector<WireRoute> computed_routes =
+                ws::circsim::attached_wire_routes(
+                    ed.doc->schem, ed.library, attached_moves);
             std::map<std::uint32_t, WireRoute> routes;
-            for (const Selection& m : ed.group_drag.set) {
-                if (m.kind != Selection::Kind::Part &&
-                    m.kind != Selection::Kind::Junction) {
-                    continue;  // wires and labels carry no attachment
-                }
-                const Editor::Drag::Kind kind =
-                    m.kind == Selection::Kind::Part
-                        ? Editor::Drag::Kind::Part
-                        : Editor::Drag::Kind::Junction;
-                for (WireRoute& r :
-                     ed.attached_wire_routes(kind, m.id)) {
-                    routes[r.wire] = std::move(r);
-                }
+            for (WireRoute& r : computed_routes) {
+                routes[r.wire] = std::move(r);
             }
             // Back to the press positions (the command's "was").
             for (std::size_t i = 0; i < ed.group_drag.set.size(); ++i) {
@@ -897,7 +904,8 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
             if (ed.doc != nullptr) {
                 set_drag_pos(ed, to);
                 routes =
-                    ed.attached_wire_routes(ed.drag.kind, ed.drag.id);
+                    ed.attached_wire_routes(ed.drag.kind, ed.drag.id,
+                                               ed.drag.start_world);
             }
             set_drag_pos(ed, ed.drag.start_world);
             const bool landed =
