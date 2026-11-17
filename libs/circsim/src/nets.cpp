@@ -372,10 +372,24 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
         // Only a wire ENDPOINT landing on another wire creates a T-junction.
         // An interior waypoint touching/crossing a wire is not a connection;
         // add an explicit junction if that bend is intended to join.
-        const bool source_endpoint =
-            same_pos(v, paths[wi].front()) || same_pos(v, paths[wi].back());
-        if (!source_endpoint) {
+        const bool source_at_front = same_pos(v, paths[wi].front());
+        const bool source_at_back = same_pos(v, paths[wi].back());
+        if (!source_at_front && !source_at_back) {
             return;
+        }
+        const bool target_at_front = same_pos(v, paths[wj].front());
+        const bool target_at_back = same_pos(v, paths[wj].back());
+        if (target_at_front || target_at_back) {
+            const std::uint32_t source_entity =
+                source_at_front ? wire_ents[wi].first : wire_ents[wi].second;
+            const std::uint32_t target_entity =
+                target_at_front ? wire_ents[wj].first : wire_ents[wj].second;
+            // Distinct junction objects at one coordinate are not one node.
+            if (ents[source_entity].kind == Entity::Kind::Junction &&
+                ents[target_entity].kind == Entity::Kind::Junction &&
+                source_entity != target_entity) {
+                return;
+            }
         }
         dsu.unite(wire_ents[wi].first, wire_ents[wj].first);
         // A T landing on the interior of another wire is implicit; a
