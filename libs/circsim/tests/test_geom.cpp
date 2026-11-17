@@ -364,7 +364,7 @@ TEST_CASE("attached_wire_routes: interior attachments follow freeform wires too"
     wire.a = ws::circsim::JunctionRef{a.id};
     wire.b = ws::circsim::JunctionRef{b.id};
     wire.ortho = false;
-    wire.waypoints = {{2.0, 1.0}, {8.0, -1.0}};
+    wire.waypoints = {{2.0, 1.0}, {5.0, 0.0}, {8.0, -1.0}};
     s.wires_mut().push_back(wire);
     s.bump();
 
