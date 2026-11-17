@@ -349,6 +349,41 @@ TEST_CASE("attached_wire_routes: moving an interior junction carries the wire") 
                     Pos{5.0, 4.0}) != routes[0].waypoints.end());
 }
 
+TEST_CASE("attached_wire_routes: interior attachments follow freeform wires too") {
+    ws::circsim::Schematic s;
+    const ws::circsim::SymbolLibrary lib;
+    ws::circsim::Junction a{}, middle{}, b{};
+    a.id = s.alloc_id(); a.pos = {0.0, 0.0};
+    middle.id = s.alloc_id(); middle.pos = {5.0, 0.0};
+    b.id = s.alloc_id(); b.pos = {10.0, 0.0};
+    s.junctions_mut().push_back(a);
+    s.junctions_mut().push_back(middle);
+    s.junctions_mut().push_back(b);
+    ws::circsim::Wire wire{};
+    wire.id = s.alloc_id();
+    wire.a = ws::circsim::JunctionRef{a.id};
+    wire.b = ws::circsim::JunctionRef{b.id};
+    wire.ortho = false;
+    wire.waypoints = {{2.0, 1.0}, {8.0, -1.0}};
+    s.wires_mut().push_back(wire);
+    s.bump();
+
+    for (ws::circsim::Junction& j : s.junctions_mut()) {
+        if (j.id == middle.id) j.pos = {5.0, 4.0};
+    }
+    const auto routes = ws::circsim::attached_wire_routes(
+        s, lib, ws::circsim::AttachedKind::Junction, middle.id,
+        Pos{5.0, 0.0});
+    REQUIRE(routes.size() == 1u);
+    CHECK(routes[0].wire == wire.id);
+    CHECK(std::find(routes[0].waypoints.begin(), routes[0].waypoints.end(),
+                    Pos{5.0, 4.0}) != routes[0].waypoints.end());
+    CHECK(std::find(routes[0].waypoints.begin(), routes[0].waypoints.end(),
+                    Pos{2.0, 1.0}) != routes[0].waypoints.end());
+    CHECK(std::find(routes[0].waypoints.begin(), routes[0].waypoints.end(),
+                    Pos{8.0, -1.0}) != routes[0].waypoints.end());
+}
+
 TEST_CASE("attached_wire_routes: moving a part carries pins on wire interiors") {
     ws::circsim::Schematic s;
     const ws::circsim::SymbolLibrary lib;
