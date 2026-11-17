@@ -42,13 +42,14 @@ jobs:
       - name: Build application and maintained test targets
         run: |
           cmake --build --preset linux --target \
-            circsim_editor test_physics test_ui_canvas \
+            circsim_editor test_circsim test_physics test_ui_canvas \
             test_circsim_editor_document test_circsim_editor_canvas \
             test_circsim_editor_canvas_cost test_circsim_editor_panel \
             test_circsim_editor_side_panels test_circsim_editor_waveform_prof
 
       - name: Run maintained regression tests
         run: |
+          build/linux/bin/test_circsim
           build/linux/bin/test_physics
           build/linux/bin/test_ui_canvas
           build/linux/bin/test_circsim_editor_document
@@ -109,6 +110,7 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:halt_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:abort_on_error=1
         run: |
+          build/linux-asan/bin/test_circsim
           build/linux-asan/bin/test_physics
           build/linux-asan/bin/test_ui_canvas
           build/linux-asan/bin/test_circsim_editor_document
