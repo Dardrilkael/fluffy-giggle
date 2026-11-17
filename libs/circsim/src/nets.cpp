@@ -333,9 +333,31 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
     }
 
     // --- exact-position coincidence among pins/junctions -----------------------
+    // Coincident pins (and a pin with an explicit junction) are a visible
+    // physical contact. Distinct junction objects, however, are NOT aliases:
+    // wires connect through shared JunctionRef endpoints, or when a wire
+    // endpoint lands on another wire. Merely placing two independent wire
+    // endpoints at the same coordinates must not silently merge their nets.
     for (const auto& [key, group] : by_pos) {
-        for (std::size_t i = 1; i < group.size(); ++i) {
-            dsu.unite(group[0], group[i]);
+        (void)key;
+        std::uint32_t first_contact = std::numeric_limits<std::uint32_t>::max();
+        for (const std::uint32_t e : group) {
+            if (ents[e].kind == Entity::Kind::Junction) {
+                continue;
+            }
+            if (first_contact == std::numeric_limits<std::uint32_t>::max()) {
+                first_contact = e;
+            } else {
+                dsu.unite(first_contact, e);
+            }
+        }
+        // A pin at this position also joins every explicit junction there.
+        if (first_contact != std::numeric_limits<std::uint32_t>::max()) {
+            for (const std::uint32_t e : group) {
+                if (ents[e].kind == Entity::Kind::Junction) {
+                    dsu.unite(first_contact, e);
+                }
+            }
         }
     }
 
@@ -347,11 +369,17 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
     // One wire's vertex v landing on wire wj.
     const auto vertex_on_wire = [&](std::size_t wi, const Pos& v,
                                     std::size_t wj) {
+        // Only a wire ENDPOINT landing on another wire creates a T-junction.
+        // An interior waypoint touching/crossing a wire is not a connection;
+        // add an explicit junction if that bend is intended to join.
+        const bool source_endpoint =
+            same_pos(v, paths[wi].front()) || same_pos(v, paths[wi].back());
+        if (!source_endpoint) {
+            return;
+        }
         dsu.unite(wire_ents[wi].first, wire_ents[wj].first);
-        // v on wj's path INTERIOR (not its endpoints), with no
-        // junction drawn there: a merge nothing on the canvas
-        // says. If v is wj's endpoint the contact sits on an
-        // entity both wires reference - a visible landing.
+        // A T landing on the interior of another wire is implicit; a
+        // junction dot at that location makes the connection explicit.
         if (!same_pos(v, paths[wj].front()) &&
             !same_pos(v, paths[wj].back()) &&
             junction_at.count({v.x, v.y}) == 0) {
