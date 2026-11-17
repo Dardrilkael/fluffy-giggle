@@ -804,47 +804,29 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                     ed.group_drag.starts[i].y + delta.y};
                 (void)set_member_pos(ed, ed.group_drag.set[i], at);
             }
-            // Apply each member's route to the temporary live geometry
-            // before routing the next member. This composes multiple
-            // interior attachments on the same wire instead of letting
-            // the last member overwrite the earlier member's reroute.
-            std::map<std::uint32_t, WireRoute> routes;
-            std::map<std::uint32_t, std::vector<Pos>> original_routes;
+            // Route the whole moving set in one pass so every old
+            // pin/junction coincidence is measured against the same
+            // original wire geometry and composed into one new route.
+            std::vector<ws::circsim::AttachedMove> attached_moves;
+            attached_moves.reserve(ed.group_drag.set.size());
             for (std::size_t i = 0; i < ed.group_drag.set.size(); ++i) {
                 const Selection& m = ed.group_drag.set[i];
-                if (m.kind != Selection::Kind::Part &&
-                    m.kind != Selection::Kind::Junction) {
-                    continue;  // wires and labels carry no attachment
-                }
-                const Editor::Drag::Kind kind =
-                    m.kind == Selection::Kind::Part
-                        ? Editor::Drag::Kind::Part
-                        : Editor::Drag::Kind::Junction;
-                for (WireRoute& r :
-                     ed.attached_wire_routes(kind, m.id,
-                                             ed.group_drag.starts[i])) {
-                    if (original_routes.find(r.wire) == original_routes.end()) {
-                        if (const ws::circsim::Wire* w =
-                                ed.doc->schem.find_wire(r.wire)) {
-                            original_routes.emplace(r.wire, w->waypoints);
-                        }
-                    }
-                    for (ws::circsim::Wire& w : ed.doc->schem.wires_mut()) {
-                        if (w.id == r.wire) {
-                            w.waypoints = r.waypoints;
-                            break;
-                        }
-                    }
-                    routes[r.wire] = std::move(r);
+                if (m.kind == Selection::Kind::Part) {
+                    attached_moves.push_back({
+                        ws::circsim::AttachedKind::Part, m.id,
+                        ed.group_drag.starts[i]});
+                } else if (m.kind == Selection::Kind::Junction) {
+                    attached_moves.push_back({
+                        ws::circsim::AttachedKind::Junction, m.id,
+                        ed.group_drag.starts[i]});
                 }
             }
-            // Restore the press-time wire geometry; the command captures
-            // it as the undo state and lands the composed routes on release.
-            for (ws::circsim::Wire& w : ed.doc->schem.wires_mut()) {
-                const auto original = original_routes.find(w.id);
-                if (original != original_routes.end()) {
-                    w.waypoints = original->second;
-                }
+            std::vector<WireRoute> route_list =
+                ws::circsim::attached_wire_routes(
+                    ed.doc->schem, ed.library, attached_moves);
+            std::map<std::uint32_t, WireRoute> routes;
+            for (WireRoute& r : route_list) {
+                routes[r.wire] = std::move(r);
             }
             // Back to the press positions (the command's "was").
             for (std::size_t i = 0; i < ed.group_drag.set.size(); ++i) {
