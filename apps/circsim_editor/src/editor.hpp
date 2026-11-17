@@ -611,7 +611,10 @@ struct ResultsCache {
 // loaded from, and the epoch it loaded at - an epoch move (a selection
 // change, an undo/redo landing) reloads it; a typing frame never does.
 struct FieldBuf {
-    std::array<char, 128> buf{};
+    // Text fields grow to fit the value they load. A fixed 128-byte
+    // buffer silently discarded the tail of long .model/.include cards
+    // as soon as the user edited any character.
+    std::vector<char> buf = std::vector<char>(128, '\0');
     std::string shadow;
     std::uint64_t stamp = 0;
     bool combo_open = false;  // the Choice rows' dropdown state
