@@ -387,8 +387,7 @@ TEST_CASE("attached_wire_routes: moving a part carries pins on wire interiors") 
     const Pos new_pin0{old_pin0.x, 4.0};
     const Pos new_pin1{old_pin1.x, 4.0};
     const auto on_route = [&](Pos point) {
-        std::vector<Pos> path{ws::circsim::pin_pos(*resistor, *s.find_part(part.id), 0)};
-        path.clear();
+        std::vector<Pos> path;
         path.push_back(a.pos);
         path.insert(path.end(), routes[0].waypoints.begin(),
                     routes[0].waypoints.end());
