@@ -817,7 +817,7 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                         ? Editor::Drag::Kind::Part
                         : Editor::Drag::Kind::Junction;
                 for (WireRoute& r :
-                     ed.attached_wire_routes(kind, m.id)) {
+                     ed.attached_wire_routes(kind, m.id, ed.group_drag.starts[i])) {
                     routes[r.wire] = std::move(r);
                 }
             }
@@ -897,7 +897,8 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
             if (ed.doc != nullptr) {
                 set_drag_pos(ed, to);
                 routes =
-                    ed.attached_wire_routes(ed.drag.kind, ed.drag.id);
+                    ed.attached_wire_routes(ed.drag.kind, ed.drag.id,
+                                               ed.drag.start_world);
             }
             set_drag_pos(ed, ed.drag.start_world);
             const bool landed =
