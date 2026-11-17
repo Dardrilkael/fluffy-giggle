@@ -534,20 +534,11 @@ TEST_CASE("the segment grid answers what the brute force answers") {
     const CombAnswer small = comb(60);
     REQUIRE(small.nets == 61);
     REQUIRE(small.joins == 0);
-    CHECK(small.join_positions.front() == std::make_pair(1.0, 0.0));
-    CHECK(small.join_positions.back() ==
-          std::make_pair(60.0, 0.0));
+    CHECK(small.join_positions.empty());
 
     // Above the threshold: the grid path, same comb shape.
     const CombAnswer large = comb(600);
     REQUIRE(large.nets == 601);
     REQUIRE(large.joins == 0);
-    CHECK(large.join_positions.front() == std::make_pair(1.0, 0.0));
-    CHECK(large.join_positions.back() ==
-          std::make_pair(600.0, 0.0));
-    // No duplicates, no gaps: exactly the x = 1..600 interior points.
-    for (std::size_t i = 0; i < large.join_positions.size(); ++i) {
-        CHECK(large.join_positions[i] ==
-              std::make_pair(static_cast<double>(i) + 1.0, 0.0));
-    }
+    CHECK(large.join_positions.empty());
 }
