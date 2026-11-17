@@ -269,9 +269,9 @@ void part_text_row(Editor& ed, gui::GuiContext& gui,
                    const char* ph_default = nullptr) {
     const std::string key = part_field_key(part_id, kind, param);
     field_label(layout, theme, label);
+    char* buf = field_buf(ed, key, current);
     if (text_input_tracked(ed, gui, layout, theme,
-                           std::string{label} + "##" + key,
-                           field_buf(ed, key, current),
+                           std::string{label} + "##" + key, buf,
                            static_cast<int>(field_of(ed, key).buf.size()))) {
         push_part_text(*ed.doc, part_id, kind, param,
                        std::string{field_of(ed, key).buf.data()},
