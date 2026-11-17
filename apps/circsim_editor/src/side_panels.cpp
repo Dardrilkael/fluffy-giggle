@@ -49,10 +49,15 @@ namespace {
                               const std::string& current) {
     FieldBuf& b = ed.fields[key];
     if (b.stamp != ed.field_stamp) {
-        const std::size_t keep =
-            std::min(current.size(), b.buf.size() - 1u);
-        std::memcpy(b.buf.data(), current.data(), keep);
-        b.buf[keep] = '\0';
+        // Leave room to extend the loaded value while typing. The
+        // capacity is deliberately generous because text_input edits
+        // in-place and cannot grow a caller-owned buffer mid-keystroke.
+        constexpr std::size_t kEditSlack = 4096;
+        const std::size_t needed =
+            std::max<std::size_t>(4096, current.size() + kEditSlack);
+        b.buf.resize(needed, '\0');
+        std::memcpy(b.buf.data(), current.data(), current.size());
+        b.buf[current.size()] = '\0';
         b.shadow = current;
         b.stamp = ed.field_stamp;
         b.combo_open = false;
@@ -84,6 +89,9 @@ namespace {
                                      const gui::ChromeTheme& theme,
                                      const std::string& id_label, char* buf,
                                      int capacity, float width = -1.0f) {
+    // FieldBuf reserves at least 4 KiB (and more for an already-long
+    // value), so the widget never receives the old 128-byte limit.
+    capacity = std::max(capacity, 4096);
     const bool changed =
         gui::text_input(gui, layout, theme, id_label.c_str(), buf,
                         capacity, width);
@@ -2748,8 +2756,10 @@ namespace {
 // step so the row highlight follows the keyboard onto the same
 // finding.
 void goto_problem(Editor& ed, std::size_t at) {
-    if (at >= ed.problems.diags.size()) {
-        return;
+    if (at >= ed.problems.diags.size() || ed.doc == nullptr ||
+        ed.schem() == nullptr ||
+        ed.problems.version != ed.schem()->version()) {
+        return;  // stale back-maps must never target the edited schematic
     }
     ed.problems_cursor = static_cast<int>(at);
     const ws::circsim::Diag& d = ed.problems.diags[at];
@@ -2766,8 +2776,10 @@ void goto_problem(Editor& ed, std::size_t at) {
 bool step_problem(Editor& ed, bool forward) {
     // The walk needs a check to walk through; the load report a fresh
     // document shows is the document's own, not the cursor's.
-    if (!ed.problems.has || ed.problems.diags.empty()) {
-        return false;
+    if (!ed.problems.has || ed.problems.diags.empty() ||
+        ed.doc == nullptr || ed.schem() == nullptr ||
+        ed.problems.version != ed.schem()->version()) {
+        return false;  // require a fresh check before navigating findings
     }
     const int next = step_problem_index(
         ed.problems_cursor, ed.problems.diags.size(), forward,
@@ -2828,7 +2840,10 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
             ++visible;
         }
     }
-    const bool can_step = problems_any_visible(ed);
+    // The diagnostic back-maps describe the exact schematic snapshot
+    // checked by ERC/run. Keep stale findings readable, but do not let
+    // their old net/export locations drive selection in a changed sheet.
+    const bool can_step = !stale && problems_any_visible(ed);
 
     if (gui::button(gui, layout, theme, "Re-check")) {
         ed.run_erc();
@@ -2868,11 +2883,17 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
 
     std::string header = ed.problems.header;
     if (stale) {
-        header += " - stale, press Re-check";
+        header += " - stale";
     }
     // Its own wrapped line: beside the buttons a long header was cut at
     // the panel edge.
     (void)gui::text_wrapped(layout, theme, header.c_str());
+    if (stale) {
+        (void)gui::text_wrapped(
+            layout, theme,
+            "The schematic changed after this check. Findings are kept for "
+            "reference, but navigation is paused until you Re-check.");
+    }
 
     // The filter row: one checkbox per severity, its label the LIVE
     // count - the FULL count, the same number the header said, because
@@ -2944,8 +2965,13 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
         // The cursor's row wears the selected face - the keyboard's
         // landing, and the click's (both set the cursor through the
         // same goto_problem path).
-        if (gui::selectable(gui, layout, rows_theme, (prefix + text).c_str(),
-                            at == ed.problems_cursor)) {
+        if (stale) {
+            // A plain row preserves the finding text without offering a
+            // misleading click target backed by an obsolete export map.
+            gui::text_wrapped(layout, rows_theme, (prefix + text).c_str());
+        } else if (gui::selectable(gui, layout, rows_theme,
+                                   (prefix + text).c_str(),
+                                   at == ed.problems_cursor)) {
             goto_problem(ed, line_at);
         }
         gui.ids().pop();
