@@ -602,9 +602,6 @@ std::vector<WireRoute> attached_wire_routes(const Schematic& s,
                p.y >= std::min(a.y, b.y) && p.y <= std::max(a.y, b.y);
     };
     for (const Wire& w : s.wires()) {
-        if (!w.ortho) {
-            continue;  // freeform geometry is intentionally preserved
-        }
         const bool a_hit = hits(w.a);
         const bool b_hit = hits(w.b);
         std::vector<Pos> path = wire_path(s, lib, w);
@@ -645,11 +642,18 @@ std::vector<WireRoute> attached_wire_routes(const Schematic& s,
         if (interior_moved) {
             WireRoute r;
             r.wire = w.id;
-            r.waypoints = tidy_route(path);
+            if (w.ortho) {
+                r.waypoints = tidy_route(path);
+            } else {
+                // Freeform wires keep their authored shape: move only
+                // the coincidence vertex and retain the remaining
+                // interior vertices verbatim (diagonal legs are valid).
+                r.waypoints.assign(path.begin() + 1, path.end() - 1);
+            }
             out.push_back(std::move(r));
             continue;
         }
-        if (!a_hit && !b_hit) {
+        if (!w.ortho || (!a_hit && !b_hit)) {
             continue;
         }
         std::vector<Pos> mid(path.begin() + 1, path.end() - 1);
