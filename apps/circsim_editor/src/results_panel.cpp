@@ -1427,6 +1427,21 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                 // overlay. The keep list is cached beside the window
                 // and budget like the single-run answer always was,
                 // and an idle frame maps it untouched.
+                //
+                // The passes overlay ONE window, so the pixel budget
+                // is SHARED, not multiplied: each pass decimates to
+                // its slice (budget / passes, floored at 64 so a
+                // many-pass family stays legible). Handing every pass
+                // the full budget cost budget x passes keeps - the
+                // 24-pass scr_trigger shape this split fixes.
+                const std::size_t passes =
+                    ed.results.x_runs.runs.size() > 0u
+                        ? ed.results.x_runs.runs.size()
+                        : 1u;
+                const std::size_t pass_budget =
+                    passes > 1u
+                        ? std::max<std::size_t>(64u, budget / passes)
+                        : budget;
                 for (const ws::circsim::AxisRun& run :
                      ed.results.x_runs.runs) {
                     const std::size_t r0 = std::min(run.begin, ys.size());
@@ -1440,7 +1455,7 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                             if (i1 > i0) {
                                 rk.idx = ws::circsim::decimate_minmax(
                                     xs.subspan(i0, i1 - i0),
-                                    ys.subspan(i0, i1 - i0), budget);
+                                    ys.subspan(i0, i1 - i0), pass_budget);
                             }
                         } else {
                             // A falling run (a .dc walking its source
@@ -1466,7 +1481,7 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                                         std::span<const double>(
                                             rev_y.data() + j0,
                                             j1 - j0),
-                                        budget);
+                                        pass_budget);
                                 rk.idx.reserve(rev.size());
                                 for (std::size_t j : rev) {
                                     rk.idx.push_back(r1 - 1u - j);
@@ -2246,18 +2261,6 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
         } else if (legend_btn == 2) {
             ed.results.view = PlotView{};  // dead never activates
         }
-        if (ed.results.hover >= 0) {
-            const std::span<const double> hxs = t.axis(x_index);
-            const std::size_t hk =
-                static_cast<std::size_t>(ed.results.hover);
-            const double hx = hxs.empty() ? static_cast<double>(hk)
-                                          : (hk < hxs.size() ? hxs[hk] : 0.0);
-            char xline[128];
-            std::snprintf(xline, sizeof xline, "%s = %s  (sample %d)",
-                          x_name, ws::circsim::format_eng(hx, 5).c_str(),
-                          ed.results.hover);
-            (void)gui::text_wrapped(layout, quiet, xline);
-        }
         const int at = ed.results.hover >= 0
                            ? ed.results.hover
                            : static_cast<int>(t.row_count()) - 1;
@@ -2304,6 +2307,26 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
         gui::separator(layout, theme);
         draw_plot(ed, gui, layout, theme, t, x_name);
         draw_transport_row(ed, gui, layout, theme, t);
+        // The hover x readout rides BELOW the plot (a readout, like
+        // the value rows under the legend): the hover state toggling
+        // must never shift the plot's own geometry, because every
+        // gesture maps pointer coordinates through the frame built
+        // this frame - a frame that moves mid-gesture (the hover row
+        // appearing above the plot when the pointer crossed into it)
+        // armed the band at one y and committed it at another, 36px
+        // off.
+        if (ed.results.hover >= 0) {
+            const std::span<const double> hxs = t.axis(x_index);
+            const std::size_t hk =
+                static_cast<std::size_t>(ed.results.hover);
+            const double hx = hxs.empty() ? static_cast<double>(hk)
+                                          : (hk < hxs.size() ? hxs[hk] : 0.0);
+            char xline[128];
+            std::snprintf(xline, sizeof xline, "%s = %s  (sample %d)",
+                          x_name, ws::circsim::format_eng(hx, 5).c_str(),
+                          ed.results.hover);
+            (void)gui::text_wrapped(layout, quiet, xline);
+        }
         gui::text(layout, quiet,
                   "wheel zoom | drag box | drag axis | space+drag pan | "
                   "dbl-click fit | right-click cancel");

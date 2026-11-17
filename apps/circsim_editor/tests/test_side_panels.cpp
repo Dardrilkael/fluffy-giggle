@@ -792,8 +792,11 @@ TEST_CASE("the row buttons move and remove through the panel's own acts") {
     editor::push_add_analysis(b.doc, ws::circsim::DcSpec{});
 
     // The row buttons live under the per-row id scope (the index the
-    // list walks), so the second row's ^ is "2's ^" - the same scoping
-    // the selectable rows keep. Focus + Enter is the keyboard's click.
+    // list walks), so the second row's Remove is "1's Remove" - the
+    // same scoping the selectable rows keep. Focus + Enter is the
+    // keyboard's click. The acts are words on the SELECTED row (the
+    // C-pass: one set of buttons for the entry being edited, not
+    // three per row) - so a move first selects the row it moves.
     const auto press = [&](int row, const char* label) {
         b.draw_properties([&] {
             b.gui.ids().push(row);
@@ -806,8 +809,9 @@ TEST_CASE("the row buttons move and remove through the panel's own acts") {
         b.draw_properties(enter, [] {});
     };
 
-    // Move the dc (row 1) up over the op.
-    press(1, "^");
+    // Select the dc (row 1), then move it up over the op.
+    press(1, "2. DC sweep (.dc)");
+    press(1, "Move up");
     CHECK(std::get_if<ws::circsim::DcSpec>(
               &b.doc.schem.analysis.entries[0]) != nullptr);
     CHECK(std::get_if<ws::circsim::OpSpec>(
@@ -815,8 +819,11 @@ TEST_CASE("the row buttons move and remove through the panel's own acts") {
     // The selection followed the entry it named.
     CHECK(b.ed.analysis_index == 0);
 
-    // The row's own x removes THAT row - not "whatever is selected".
-    press(1, "x");
+    // The row's own Remove deletes THAT row - not "whatever is
+    // selected". The acts ride the selected row, so the op (row 1)
+    // selects itself first, then removes.
+    press(1, "2. Operating point (.op)");
+    press(1, "Remove");
     CHECK(b.doc.schem.analysis.entries.size() == 1u);
     CHECK(std::get_if<ws::circsim::DcSpec>(
               &b.doc.schem.analysis.entries[0]) != nullptr);
@@ -2016,8 +2023,9 @@ TEST_CASE("the waveform preview draws through the properties canvas seam") {
 
         b.draw_properties();
         CHECK(b.clc.count(canvas::CanvasCmdKind::fill_polygon) == 1u);
-        // The frame plus the series: exactly two strokes.
-        CHECK(b.clc.count(canvas::CanvasCmdKind::stroke_polyline) == 2u);
+        // The frame plus the series plus the three quarter ticks
+        // (the time axis's faint marks): exactly five strokes.
+        CHECK(b.clc.count(canvas::CanvasCmdKind::stroke_polyline) == 5u);
         bool line = false;
         for (const canvas::CanvasCmd& c : b.clc.cmds) {
             if (c.kind == canvas::CanvasCmdKind::stroke_polyline &&
