@@ -89,9 +89,6 @@ namespace {
                                      const gui::ChromeTheme& theme,
                                      const std::string& id_label, char* buf,
                                      int capacity, float width = -1.0f) {
-    // FieldBuf reserves at least 4 KiB (and more for an already-long
-    // value), so the widget never receives the old 128-byte limit.
-    capacity = std::max(capacity, 4096);
     const bool changed =
         gui::text_input(gui, layout, theme, id_label.c_str(), buf,
                         capacity, width);
@@ -274,7 +271,8 @@ void part_text_row(Editor& ed, gui::GuiContext& gui,
     field_label(layout, theme, label);
     if (text_input_tracked(ed, gui, layout, theme,
                            std::string{label} + "##" + key,
-                           field_buf(ed, key, current), 128)) {
+                           field_buf(ed, key, current),
+                           static_cast<int>(field_of(ed, key).buf.size()))) {
         push_part_text(*ed.doc, part_id, kind, param,
                        std::string{field_of(ed, key).buf.data()},
                        std::string{"Edit "} + label);
@@ -416,7 +414,7 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
         field_label(layout, theme, label);
         char* buf = field_buf(ed, key, current_text);
         if (text_input_tracked(ed, gui, layout, theme,
-                               std::string{label} + "##" + key, buf, 128)) {
+                               std::string{label} + "##" + key, buf, static_cast<int>(field_of(ed, key).buf.size()))) {
             const auto parsed = ws::spice::parse_number(buf);
             if (parsed.has_value()) {
                 land(*parsed);
@@ -450,7 +448,7 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
         if (text_input_tracked(ed, gui, layout, theme, "source (swept)##" +
                                                               skey +
                                                               ".source",
-                               src, 128)) {
+                               src, static_cast<int>(field_of(ed, skey + ".source").buf.size()))) {
             ws::circsim::DcSpec next = *dc;
             next.source = src;
             push_set_analysis(*ed.doc, index, next);
@@ -549,7 +547,7 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
         char* n_buf = field_buf(ed, skey + ".n", n_text);
         if (text_input_tracked(ed, gui, layout, theme, "points (n)##" + skey +
                                                              ".n",
-                               n_buf, 128)) {
+                               n_buf, static_cast<int>(field_of(ed, skey + ".n").buf.size()))) {
             char* end = nullptr;
             const long parsed = std::strtol(n_buf, &end, 10);
             if (end != nullptr && *end == '\0' && parsed > 0) {
@@ -590,7 +588,7 @@ void analysis_fields(Editor& ed, gui::GuiContext& gui,
             if (text_input_tracked(ed, gui, layout, theme,
                                    std::string{label} + "##" + skey + "." +
                                        label,
-                                   buf, 128)) {
+                                   buf, static_cast<int>(field_of(ed, skey + "." + label).buf.size()))) {
                 land(std::string{buf});
             }
         };
@@ -2453,8 +2451,8 @@ void draw_properties_panel(Editor& ed, gui::GuiContext& gui,
                               l->name);
         if (text_input_tracked(
                 ed, gui, layout, theme,
-                "Net name##l" + std::to_string(l->id) + ".name", buf,
-                128)) {
+                "Net name##l" + std::to_string(l->id) + ".name", buf, static_cast<int>(field_of(
+                    ed, "l" + std::to_string(l->id) + ".name").buf.size()))) {
             push_label_text(*ed.doc, l->id, buf);
         }
         gui::separator(layout, theme);
@@ -2658,7 +2656,8 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
                 : std::string{};
         char* buf = field_buf(ed, "sim.temp", current_text);
         if (text_input_tracked(ed, gui, layout, theme,
-                               "Run temperature##sim.temp", buf, 128)) {
+                               "Run temperature##sim.temp", buf,
+                               static_cast<int>(field_of(ed, "sim.temp").buf.size()))) {
             const std::string text{buf};
             const auto parsed = ws::spice::parse_number(buf);
             if (parsed.has_value()) {
@@ -2711,7 +2710,9 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
         if (text_input_tracked(ed, gui, layout, code_theme,
                                std::string{"line##directives."} +
                                    std::to_string(line_at),
-                               buf, 128, field_w)) {
+                               buf, static_cast<int>(field_of(
+                                    ed, "directives." + std::to_string(line_at)).buf.size()),
+                               field_w)) {
             // The row edited: re-join with the (possibly cleared to
             // empty) row kept in place - the split/join pair's
             // round-trip is what preserves an emptied last line.
