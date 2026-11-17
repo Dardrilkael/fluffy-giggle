@@ -551,29 +551,27 @@ Pos magnet_shift(const Schematic& s, const SymbolLibrary& lib,
     return {base.x + best_shift->x, base.y + best_shift->y};
 }
 
-std::vector<WireRoute> attached_wire_routes(const Schematic& s,
-                                            const SymbolLibrary& lib,
-                                            AttachedKind kind,
-                                            std::uint32_t id,
-                                            std::optional<Pos> from) {
+std::vector<WireRoute> attached_wire_routes(
+    const Schematic& s, const SymbolLibrary& lib,
+    const std::vector<AttachedMove>& moves) {
     constexpr double kEps = 1e-9;
     std::vector<WireRoute> out;
     // The editor temporarily places the dragged entity at its landing
     // before asking for routes. The old position also finds geometric
     // attachments that have no explicit wire endpoint reference.
     std::vector<std::pair<Pos, Pos>> moved_points;
-    if (from.has_value()) {
-        if (kind == AttachedKind::Junction) {
-            if (const Junction* j = s.find_junction(id)) {
-                moved_points.emplace_back(*from, j->pos);
+    for (const AttachedMove& move : moves) {
+        if (move.kind == AttachedKind::Junction) {
+            if (const Junction* j = s.find_junction(move.id)) {
+                moved_points.emplace_back(move.from, j->pos);
             }
         } else {
-            const Part* part = s.find_part(id);
+            const Part* part = s.find_part(move.id);
             const SymbolDef* sym = part != nullptr ? lib.find(part->symbol)
                                                    : nullptr;
             if (part != nullptr && sym != nullptr) {
                 Part old_part = *part;
-                old_part.pos = *from;
+                old_part.pos = move.from;
                 for (std::size_t pin = 0; pin < sym->pins.size(); ++pin) {
                     moved_points.emplace_back(
                         pin_pos(*sym, old_part, static_cast<std::uint32_t>(pin)),
@@ -722,6 +720,18 @@ std::vector<WireRoute> attached_wire_routes(const Schematic& s,
         out.push_back(std::move(r));
     }
     return out;
+}
+
+std::vector<WireRoute> attached_wire_routes(const Schematic& s,
+                                            const SymbolLibrary& lib,
+                                            AttachedKind kind,
+                                            std::uint32_t id,
+                                            std::optional<Pos> from) {
+    if (!from.has_value()) {
+        return attached_wire_routes(s, lib, std::vector<AttachedMove>{});
+    }
+    return attached_wire_routes(s, lib,
+                                std::vector<AttachedMove>{{kind, id, *from}});
 }
 
 // --- colors ----------------------------------------------------------------
