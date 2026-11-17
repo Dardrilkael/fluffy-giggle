@@ -821,11 +821,11 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                         ed.group_drag.starts[i]});
                 }
             }
-            std::vector<WireRoute> route_list =
+            std::vector<WireRoute> computed_routes =
                 ws::circsim::attached_wire_routes(
                     ed.doc->schem, ed.library, attached_moves);
             std::map<std::uint32_t, WireRoute> routes;
-            for (WireRoute& r : route_list) {
+            for (WireRoute& r : computed_routes) {
                 routes[r.wire] = std::move(r);
             }
             // Back to the press positions (the command's "was").
