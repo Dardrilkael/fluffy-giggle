@@ -333,31 +333,9 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
     }
 
     // --- exact-position coincidence among pins/junctions -----------------------
-    // Coincident pins (and a pin with an explicit junction) are a visible
-    // physical contact. Distinct junction objects, however, are NOT aliases:
-    // wires connect through shared JunctionRef endpoints, or when a wire
-    // endpoint lands on another wire. Merely placing two independent wire
-    // endpoints at the same coordinates must not silently merge their nets.
     for (const auto& [key, group] : by_pos) {
-        (void)key;
-        std::uint32_t first_contact = std::numeric_limits<std::uint32_t>::max();
-        for (const std::uint32_t e : group) {
-            if (ents[e].kind == Entity::Kind::Junction) {
-                continue;
-            }
-            if (first_contact == std::numeric_limits<std::uint32_t>::max()) {
-                first_contact = e;
-            } else {
-                dsu.unite(first_contact, e);
-            }
-        }
-        // A pin at this position also joins every explicit junction there.
-        if (first_contact != std::numeric_limits<std::uint32_t>::max()) {
-            for (const std::uint32_t e : group) {
-                if (ents[e].kind == Entity::Kind::Junction) {
-                    dsu.unite(first_contact, e);
-                }
-            }
+        for (std::size_t i = 1; i < group.size(); ++i) {
+            dsu.unite(group[0], group[i]);
         }
     }
 
