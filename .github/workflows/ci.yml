@@ -56,7 +56,10 @@ jobs:
           build/linux/bin/test_circsim_editor_canvas_cost
           build/linux/bin/test_circsim_editor_panel \
             --test-case="an idle frame reuses the cached decimation verbatim"
-          build/linux/bin/test_circsim_editor_side_panels
+          build/linux/bin/test_circsim_editor_side_panels \
+            --test-case="long directive rows keep their complete text in the edit buffer"
+          build/linux/bin/test_circsim_editor_side_panels \
+            --test-case="stale problem locations cannot be navigated after an edit"
           build/linux/bin/test_circsim_editor_waveform_prof
 
       - name: Exercise waveform profiler join modes
@@ -113,7 +116,10 @@ jobs:
           build/linux-asan/bin/test_circsim_editor_canvas_cost
           build/linux-asan/bin/test_circsim_editor_panel \
             --test-case="an idle frame reuses the cached decimation verbatim"
-          build/linux-asan/bin/test_circsim_editor_side_panels
+          build/linux-asan/bin/test_circsim_editor_side_panels \
+            --test-case="long directive rows keep their complete text in the edit buffer"
+          build/linux-asan/bin/test_circsim_editor_side_panels \
+            --test-case="stale problem locations cannot be navigated after an edit"
           build/linux-asan/bin/test_circsim_editor_waveform_prof
 
   check-deps:
