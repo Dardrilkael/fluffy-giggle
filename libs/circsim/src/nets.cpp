@@ -445,6 +445,20 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
     // One pin/junction entity e at p landing on wire wi.
     const auto entity_on_wire = [&](std::uint32_t e, const Pos& p,
                                     const PosKey& key, std::size_t wi) {
+        // A junction object only attaches at a wire endpoint when that exact
+        // junction is referenced by the wire. Otherwise two unrelated wire
+        // endpoints at the same coordinates would be merged by this scan.
+        if (ents[e].kind == Entity::Kind::Junction &&
+            (same_pos(p, paths[wi].front()) ||
+             same_pos(p, paths[wi].back()))) {
+            const auto references = [&](const WireEndpoint& ep) {
+                const auto* jr = std::get_if<JunctionRef>(&ep);
+                return jr != nullptr && jr->junction == ents[e].obj_id;
+            };
+            if (!references(wires[wi]->a) && !references(wires[wi]->b)) {
+                return;
+            }
+        }
         dsu.unite(e, wire_ents[wi].first);
         // A PIN on the path's interior, no junction dot, is a
         // silent pickup (junction entities draw their own dot;
