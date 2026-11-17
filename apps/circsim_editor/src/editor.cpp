@@ -327,7 +327,7 @@ std::size_t Editor::annotate(double row_tol_cells) {
 // endpoint left the adjacent wire legs diagonal (waypoints are
 // absolute, not relative).
 std::vector<WireRoute> Editor::attached_wire_routes(
-    Drag::Kind kind, std::uint32_t id) const {
+    Drag::Kind kind, std::uint32_t id, std::optional<Pos> from) const {
     const ws::circsim::Schematic* s = schem();
     if (s == nullptr) {
         return {};
@@ -336,7 +336,7 @@ std::vector<WireRoute> Editor::attached_wire_routes(
         *s, library,
         kind == Drag::Kind::Part ? ws::circsim::AttachedKind::Part
                                  : ws::circsim::AttachedKind::Junction,
-        id);
+        id, from);
 }
 
 std::optional<PinHit> Editor::hit_pin(Pos world, double radius) const {
