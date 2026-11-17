@@ -581,12 +581,20 @@ std::vector<WireRoute> attached_wire_routes(
         }
     }
     const auto hits = [&](const WireEndpoint& e) {
-        if (kind == AttachedKind::Part) {
-            const auto* pin = std::get_if<PinRef>(&e);
-            return pin != nullptr && pin->part == id;
+        for (const AttachedMove& move : moves) {
+            if (move.kind == AttachedKind::Part) {
+                const auto* pin = std::get_if<PinRef>(&e);
+                if (pin != nullptr && pin->part == move.id) {
+                    return true;
+                }
+            } else {
+                const auto* junction = std::get_if<JunctionRef>(&e);
+                if (junction != nullptr && junction->junction == move.id) {
+                    return true;
+                }
+            }
         }
-        const auto* j = std::get_if<JunctionRef>(&e);
-        return j != nullptr && j->junction == id;
+        return false;
     };
     const auto same = [](Pos a, Pos b) {
         return std::fabs(a.x - b.x) <= 1e-9 &&
@@ -727,11 +735,20 @@ std::vector<WireRoute> attached_wire_routes(const Schematic& s,
                                             AttachedKind kind,
                                             std::uint32_t id,
                                             std::optional<Pos> from) {
-    if (!from.has_value()) {
-        return attached_wire_routes(s, lib, std::vector<AttachedMove>{});
+    Pos origin{};
+    if (from.has_value()) {
+        origin = *from;
+    } else if (kind == AttachedKind::Junction) {
+        const Junction* junction = s.find_junction(id);
+        if (junction == nullptr) return {};
+        origin = junction->pos;
+    } else {
+        const Part* part = s.find_part(id);
+        if (part == nullptr) return {};
+        origin = part->pos;
     }
     return attached_wire_routes(s, lib,
-                                std::vector<AttachedMove>{{kind, id, *from}});
+                                std::vector<AttachedMove>{{kind, id, origin}});
 }
 
 // --- colors ----------------------------------------------------------------
