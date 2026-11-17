@@ -98,6 +98,13 @@ TEST_CASE("tidy_route: every diagonal leg earns its axis-aligned corner") {
     CHECK(w[2] == Pos{4.0, 1.0});
 }
 
+TEST_CASE("tidy_route: electrical attachments survive collinear folding") {
+    const std::vector<Pos> w = ws::circsim::tidy_route(
+        {{0.0, 0.0}, {10.0, 0.0}}, {{5.0, 0.0}});
+    REQUIRE(w.size() == 1u);
+    CHECK(w[0] == Pos{5.0, 0.0});
+}
+
 TEST_CASE("tidy_route: duplicate points fold away") {
     const std::vector<Pos> w = ws::circsim::tidy_route(
         {{0.0, 0.0}, {0.0, 0.0}, {3.0, 0.0}});
@@ -491,6 +498,71 @@ TEST_CASE("attached_wire_routes: moving a part carries pins on wire interiors") 
     };
     CHECK(on_route(new_pin0));
     CHECK(on_route(new_pin1));
+}
+
+TEST_CASE("attached_wire_routes: moving a part far away preserves a fixed interior junction") {
+    ws::circsim::Schematic s;
+    const ws::circsim::SymbolLibrary lib;
+    const ws::circsim::SymbolDef* resistor = lib.find("r");
+    REQUIRE(resistor != nullptr);
+
+    ws::circsim::Part part{};
+    part.id = s.alloc_id();
+    part.symbol = resistor->key;
+    part.pos = {0.0, 0.0};
+    s.parts_mut().push_back(part);
+
+    const Pos old_pin = ws::circsim::pin_pos(*resistor, part, 0);
+    ws::circsim::Junction middle{}, end{};
+    middle.id = s.alloc_id();
+    middle.pos = {old_pin.x + 5.0, old_pin.y};
+    end.id = s.alloc_id();
+    end.pos = {old_pin.x + 10.0, old_pin.y};
+    s.junctions_mut().push_back(middle);
+    s.junctions_mut().push_back(end);
+
+    ws::circsim::Wire wire{};
+    wire.id = s.alloc_id();
+    wire.a = ws::circsim::PinRef{part.id, 0};
+    wire.b = ws::circsim::JunctionRef{end.id};
+    wire.ortho = true;
+    s.wires_mut().push_back(wire);
+    s.bump();
+
+    for (ws::circsim::Part& current : s.parts_mut()) {
+        if (current.id == part.id) {
+            current.pos = {0.0, 100.0};
+        }
+    }
+    const auto routes = ws::circsim::attached_wire_routes(
+        s, lib, ws::circsim::AttachedKind::Part, part.id,
+        Pos{0.0, 0.0});
+    REQUIRE(routes.size() == 1u);
+    CHECK(routes[0].wire == wire.id);
+    CHECK(std::find(routes[0].waypoints.begin(), routes[0].waypoints.end(),
+                    middle.pos) != routes[0].waypoints.end());
+
+    std::vector<Pos> path{
+        ws::circsim::pin_pos(*resistor, *s.find_part(part.id), 0)};
+    path.insert(path.end(), routes[0].waypoints.begin(),
+                routes[0].waypoints.end());
+    path.push_back(end.pos);
+    bool connected = false;
+    for (std::size_t i = 1; i < path.size(); ++i) {
+        const Pos a = path[i - 1], b = path[i];
+        const double cross =
+            (b.x - a.x) * (middle.pos.y - a.y) -
+            (b.y - a.y) * (middle.pos.x - a.x);
+        if (cross == 0.0 &&
+            middle.pos.x >= std::min(a.x, b.x) &&
+            middle.pos.x <= std::max(a.x, b.x) &&
+            middle.pos.y >= std::min(a.y, b.y) &&
+            middle.pos.y <= std::max(a.y, b.y)) {
+            connected = true;
+            break;
+        }
+    }
+    CHECK(connected);
 }
 
 // --- colors ----------------------------------------------------------------

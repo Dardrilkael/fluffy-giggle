@@ -193,7 +193,10 @@ std::size_t Editor::tidy_selection() {
         if (path.size() < 2u) {
             continue;  // dangling: nothing to straighten
         }
-        routes.push_back(WireRoute{w.id, tidy_route(path)});
+        const std::vector<Pos> attachments =
+            ws::circsim::wire_attachment_points(*s, library, path);
+        routes.push_back(
+            WireRoute{w.id, ws::circsim::tidy_route(path, attachments)});
     }
     if (in_scope == 0u) {
         status("nothing to tidy - select a wire, part or junction");
