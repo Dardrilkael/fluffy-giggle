@@ -349,6 +349,56 @@ TEST_CASE("attached_wire_routes: moving an interior junction carries the wire") 
                     Pos{5.0, 4.0}) != routes[0].waypoints.end());
 }
 
+TEST_CASE("attached_wire_routes: group moves compose multiple interior junctions") {
+    ws::circsim::Schematic s;
+    const ws::circsim::SymbolLibrary lib;
+    ws::circsim::Junction a{}, first{}, second{}, b{};
+    a.id = s.alloc_id(); a.pos = {0.0, 0.0};
+    first.id = s.alloc_id(); first.pos = {3.0, 0.0};
+    second.id = s.alloc_id(); second.pos = {7.0, 0.0};
+    b.id = s.alloc_id(); b.pos = {10.0, 0.0};
+    s.junctions_mut().push_back(a);
+    s.junctions_mut().push_back(first);
+    s.junctions_mut().push_back(second);
+    s.junctions_mut().push_back(b);
+    ws::circsim::Wire wire{};
+    wire.id = s.alloc_id();
+    wire.a = ws::circsim::JunctionRef{a.id};
+    wire.b = ws::circsim::JunctionRef{b.id};
+    wire.ortho = true;
+    s.wires_mut().push_back(wire);
+    s.bump();
+    for (ws::circsim::Junction& j : s.junctions_mut()) {
+        if (j.id == first.id) j.pos = {3.0, 4.0};
+        if (j.id == second.id) j.pos = {7.0, 4.0};
+    }
+    const std::vector<ws::circsim::AttachedMove> moves{
+        {ws::circsim::AttachedKind::Junction, first.id, {3.0, 0.0}},
+        {ws::circsim::AttachedKind::Junction, second.id, {7.0, 0.0}}};
+    const auto routes = ws::circsim::attached_wire_routes(s, lib, moves);
+    REQUIRE(routes.size() == 1u);
+    CHECK(routes[0].wire == wire.id);
+    const auto on_route = [&](Pos point) {
+        std::vector<Pos> path{a.pos};
+        path.insert(path.end(), routes[0].waypoints.begin(),
+                    routes[0].waypoints.end());
+        path.push_back(b.pos);
+        for (std::size_t i = 1; i < path.size(); ++i) {
+            const Pos p0 = path[i - 1], p1 = path[i];
+            const double cross = (p1.x - p0.x) * (point.y - p0.y) -
+                                 (p1.y - p0.y) * (point.x - p0.x);
+            if (cross == 0.0 &&
+                point.x >= std::min(p0.x, p1.x) &&
+                point.x <= std::max(p0.x, p1.x) &&
+                point.y >= std::min(p0.y, p1.y) &&
+                point.y <= std::max(p0.y, p1.y)) return true;
+        }
+        return false;
+    };
+    CHECK(on_route({3.0, 4.0}));
+    CHECK(on_route({7.0, 4.0}));
+}
+
 TEST_CASE("attached_wire_routes: interior attachments follow freeform wires too") {
     ws::circsim::Schematic s;
     const ws::circsim::SymbolLibrary lib;
