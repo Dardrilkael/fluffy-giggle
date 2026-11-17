@@ -565,6 +565,53 @@ TEST_CASE("attached_wire_routes: moving a part far away preserves a fixed interi
     CHECK(connected);
 }
 
+TEST_CASE("attached_wire_routes: rotating a part carries its interior pin connection") {
+    ws::circsim::Schematic s;
+    const ws::circsim::SymbolLibrary lib;
+    const ws::circsim::SymbolDef* resistor = lib.find("r");
+    REQUIRE(resistor != nullptr);
+
+    ws::circsim::Part part{};
+    part.id = s.alloc_id();
+    part.symbol = resistor->key;
+    part.pos = {0.0, 0.0};
+    s.parts_mut().push_back(part);
+
+    const Pos old_pin = ws::circsim::pin_pos(*resistor, part, 0);
+    ws::circsim::Junction left{}, right{};
+    left.id = s.alloc_id();
+    left.pos = {old_pin.x - 10.0, old_pin.y};
+    right.id = s.alloc_id();
+    right.pos = {old_pin.x + 10.0, old_pin.y};
+    s.junctions_mut().push_back(left);
+    s.junctions_mut().push_back(right);
+
+    ws::circsim::Wire wire{};
+    wire.id = s.alloc_id();
+    wire.a = ws::circsim::JunctionRef{left.id};
+    wire.b = ws::circsim::JunctionRef{right.id};
+    wire.ortho = true;
+    s.wires_mut().push_back(wire);
+    s.bump();
+
+    ws::circsim::Part* moved = s.find_part(part.id);
+    REQUIRE(moved != nullptr);
+    moved->rot = 90;
+    s.bump();
+    const Pos new_pin = ws::circsim::pin_pos(*resistor, *moved, 0);
+    CHECK(new_pin != old_pin);
+
+    const auto routes = ws::circsim::attached_wire_routes(
+        s, lib,
+        std::vector<ws::circsim::AttachedMove>{{
+            ws::circsim::AttachedKind::Part, part.id, part.pos,
+            0, false, true}});
+    REQUIRE(routes.size() == 1u);
+    CHECK(routes[0].wire == wire.id);
+    CHECK(std::find(routes[0].waypoints.begin(), routes[0].waypoints.end(),
+                    new_pin) != routes[0].waypoints.end());
+}
+
 // --- colors ----------------------------------------------------------------
 
 TEST_CASE("series_color: the wheel cycles every eight") {

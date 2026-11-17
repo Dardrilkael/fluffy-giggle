@@ -742,6 +742,34 @@ TEST_CASE("a moved junction re-routes its attached wire, the undo "
     CHECK(b.doc.schem.find_wire(w.id)->waypoints.size() == 1u);
 }
 
+TEST_CASE("tidy follows a junction connected to a wire interior") {
+    Bench b;
+    ws::circsim::Junction left{}, middle{}, right{};
+    left.id = b.doc.schem.alloc_id();
+    left.pos = {0.0, 0.0};
+    middle.id = b.doc.schem.alloc_id();
+    middle.pos = {5.0, 0.0};
+    right.id = b.doc.schem.alloc_id();
+    right.pos = {10.0, 0.0};
+    b.doc.schem.junctions_mut().push_back(left);
+    b.doc.schem.junctions_mut().push_back(middle);
+    b.doc.schem.junctions_mut().push_back(right);
+
+    ws::circsim::Wire wire{};
+    wire.id = b.doc.schem.alloc_id();
+    wire.a = ws::circsim::JunctionRef{left.id};
+    wire.b = ws::circsim::JunctionRef{right.id};
+    wire.ortho = true;
+    b.doc.schem.wires_mut().push_back(wire);
+
+    b.ed.sel = {editor::Selection::Kind::Junction, middle.id};
+    CHECK(b.ed.tidy_selection() == 1u);
+    const ws::circsim::Wire* tidied = b.doc.schem.find_wire(wire.id);
+    REQUIRE(tidied != nullptr);
+    REQUIRE(tidied->waypoints.size() == 1u);
+    CHECK(tidied->waypoints.front() == middle.pos);
+}
+
 // --- the pin-approach route: wires land on pins tip-first ---------------------
 //
 // A pin's dir is its OUTWARD facing (the lead away from the body), and

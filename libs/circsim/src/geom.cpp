@@ -672,6 +672,10 @@ std::vector<WireRoute> attached_wire_routes(
         for (const AttachedMove& move : moves) {
             if (move.kind == AttachedKind::Part && move.id == part.id) {
                 old_part.pos = move.from;
+                if (move.has_from_transform) {
+                    old_part.rot = move.from_rot;
+                    old_part.mirror = move.from_mirror;
+                }
                 break;
             }
         }
@@ -731,6 +735,10 @@ std::vector<WireRoute> attached_wire_routes(
                 }
                 Part old_part = *part;
                 old_part.pos = move.from;
+                if (move.has_from_transform) {
+                    old_part.rot = move.from_rot;
+                    old_part.mirror = move.from_mirror;
+                }
                 return pin_pos(*symbol, old_part, pin->pin);
             }
         } else if (const auto* junction =

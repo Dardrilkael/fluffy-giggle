@@ -203,6 +203,9 @@ struct AttachedMove {
     AttachedKind kind = AttachedKind::Part;
     std::uint32_t id = 0;
     Pos from{0.0, 0.0};
+    int from_rot = 0;
+    bool from_mirror = false;
+    bool has_from_transform = false;
 };
 [[nodiscard]] std::vector<WireRoute> attached_wire_routes(
     const Schematic& s, const SymbolLibrary& lib,
