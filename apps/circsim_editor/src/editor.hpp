@@ -1047,7 +1047,8 @@ struct Editor {
     // caller puts the entity there first, then restores the press
     // position and hands the routes to push_move_*.
     [[nodiscard]] std::vector<WireRoute> attached_wire_routes(
-        Drag::Kind kind, std::uint32_t id) const;
+        Drag::Kind kind, std::uint32_t id,
+        std::optional<Pos> from = std::nullopt) const;
 
     // Hit tests (world space). The pin hit radius is in world units
     // (screen px / zoom), so picks stay steady across zooms.
