@@ -386,10 +386,27 @@ TEST_CASE("attached_wire_routes: moving a part carries pins on wire interiors") 
     CHECK(routes[0].wire == wire.id);
     const Pos new_pin0{old_pin0.x, 4.0};
     const Pos new_pin1{old_pin1.x, 4.0};
-    CHECK(std::find(routes[0].waypoints.begin(), routes[0].waypoints.end(),
-                    new_pin0) != routes[0].waypoints.end());
-    CHECK(std::find(routes[0].waypoints.begin(), routes[0].waypoints.end(),
-                    new_pin1) != routes[0].waypoints.end());
+    const auto on_route = [&](Pos point) {
+        std::vector<Pos> path{ws::circsim::pin_pos(*resistor, *s.find_part(part.id), 0)};
+        path.clear();
+        path.push_back(a.pos);
+        path.insert(path.end(), routes[0].waypoints.begin(),
+                    routes[0].waypoints.end());
+        path.push_back(b.pos);
+        for (std::size_t i = 1; i < path.size(); ++i) {
+            const Pos p0 = path[i - 1], p1 = path[i];
+            const double cross = (p1.x - p0.x) * (point.y - p0.y) -
+                                 (p1.y - p0.y) * (point.x - p0.x);
+            if (cross == 0.0 &&
+                point.x >= std::min(p0.x, p1.x) &&
+                point.x <= std::max(p0.x, p1.x) &&
+                point.y >= std::min(p0.y, p1.y) &&
+                point.y <= std::max(p0.y, p1.y)) return true;
+        }
+        return false;
+    };
+    CHECK(on_route(new_pin0));
+    CHECK(on_route(new_pin1));
 }
 
 // --- colors ----------------------------------------------------------------
