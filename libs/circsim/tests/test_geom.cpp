@@ -317,6 +317,85 @@ TEST_CASE("attached_wire_routes: no wires, no routes") {
               .empty());
 }
 
+TEST_CASE("attached_wire_routes: moving an interior junction carries the wire") {
+    ws::circsim::Schematic s;
+    const ws::circsim::SymbolLibrary lib;
+    ws::circsim::Junction a{}, middle{}, b{};
+    a.id = s.alloc_id(); a.pos = {0.0, 0.0};
+    middle.id = s.alloc_id(); middle.pos = {5.0, 0.0};
+    b.id = s.alloc_id(); b.pos = {10.0, 0.0};
+    s.junctions_mut().push_back(a);
+    s.junctions_mut().push_back(middle);
+    s.junctions_mut().push_back(b);
+    ws::circsim::Wire wire{};
+    wire.id = s.alloc_id();
+    wire.a = ws::circsim::JunctionRef{a.id};
+    wire.b = ws::circsim::JunctionRef{b.id};
+    wire.ortho = true;
+    s.wires_mut().push_back(wire);
+    s.bump();
+
+    for (ws::circsim::Junction& j : s.junctions_mut()) {
+        if (j.id == middle.id) j.pos = {5.0, 4.0};
+    }
+    const auto routes = ws::circsim::attached_wire_routes(
+        s, lib, ws::circsim::AttachedKind::Junction, middle.id,
+        Pos{5.0, 0.0});
+    REQUIRE(routes.size() == 1u);
+    CHECK(routes[0].wire == wire.id);
+    CHECK(std::find(routes[0].waypoints.begin(), routes[0].waypoints.end(),
+                    Pos{5.0, 4.0}) != routes[0].waypoints.end());
+    CHECK(std::find(routes[0].waypoints.begin(), routes[0].waypoints.end(),
+                    Pos{5.0, 0.0}) == routes[0].waypoints.end());
+}
+
+TEST_CASE("attached_wire_routes: moving a part carries pins on wire interiors") {
+    ws::circsim::Schematic s;
+    const ws::circsim::SymbolLibrary lib;
+    const ws::circsim::SymbolDef* resistor = lib.find("r");
+    REQUIRE(resistor != nullptr);
+    ws::circsim::Part part{};
+    part.id = s.alloc_id();
+    part.symbol = resistor->key;
+    part.pos = {0.0, 0.0};
+    s.parts_mut().push_back(part);
+    ws::circsim::Junction a{}, b{};
+    a.id = s.alloc_id(); a.pos = {-10.0, 0.0};
+    b.id = s.alloc_id(); b.pos = {10.0, 0.0};
+    s.junctions_mut().push_back(a);
+    s.junctions_mut().push_back(b);
+    ws::circsim::Wire wire{};
+    wire.id = s.alloc_id();
+    wire.a = ws::circsim::JunctionRef{a.id};
+    wire.b = ws::circsim::JunctionRef{b.id};
+    wire.ortho = true;
+    s.wires_mut().push_back(wire);
+    s.bump();
+
+    const Pos old_pin0 = ws::circsim::pin_pos(*resistor, part, 0);
+    const Pos old_pin1 = ws::circsim::pin_pos(*resistor, part, 1);
+    REQUIRE(old_pin0.y == 0.0);
+    REQUIRE(old_pin1.y == 0.0);
+    for (ws::circsim::Part& p : s.parts_mut()) {
+        if (p.id == part.id) p.pos = {0.0, 4.0};
+    }
+    const auto routes = ws::circsim::attached_wire_routes(
+        s, lib, ws::circsim::AttachedKind::Part, part.id,
+        Pos{0.0, 0.0});
+    REQUIRE(routes.size() == 1u);
+    CHECK(routes[0].wire == wire.id);
+    const Pos new_pin0{old_pin0.x, 4.0};
+    const Pos new_pin1{old_pin1.x, 4.0};
+    CHECK(std::find(routes[0].waypoints.begin(), routes[0].waypoints.end(),
+                    new_pin0) != routes[0].waypoints.end());
+    CHECK(std::find(routes[0].waypoints.begin(), routes[0].waypoints.end(),
+                    new_pin1) != routes[0].waypoints.end());
+    CHECK(std::find(routes[0].waypoints.begin(), routes[0].waypoints.end(),
+                    old_pin0) == routes[0].waypoints.end());
+    CHECK(std::find(routes[0].waypoints.begin(), routes[0].waypoints.end(),
+                    old_pin1) == routes[0].waypoints.end());
+}
+
 // --- colors ----------------------------------------------------------------
 
 TEST_CASE("series_color: the wheel cycles every eight") {
