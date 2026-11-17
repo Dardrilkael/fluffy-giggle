@@ -122,13 +122,13 @@ TEST_CASE("a waypoint on another wire's interior connects") {
     CHECK(nets.nets.nets.size() == 2);
 }
 
-TEST_CASE("a wire elbow landing on another wire connects") {
+TEST_CASE("a waypoint touching another wire does not connect without a junction") {
     Bench b;
     b.wire_j(0.0, 0.0, 10.0, 0.0);
-    // Elbow exactly at (5, 0), on the horizontal wire: a T with a corner.
+    // A bend that happens to touch the other wire is not an electrical node.
     b.wire_j(5.0, 8.0, 5.0, -8.0, {Pos{5.0, 0.0}});
     const NetBuild nets = ws::circsim::build_nets(b.s);
-    CHECK(nets.nets.nets.size() == 1);
+    CHECK(nets.nets.nets.size() == 2);
 }
 
 TEST_CASE("coincident pins connect without any wire") {
