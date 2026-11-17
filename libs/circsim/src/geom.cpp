@@ -608,36 +608,67 @@ std::vector<WireRoute> attached_wire_routes(const Schematic& s,
         if (path.size() < 2u) {
             continue;
         }
-        // Replace each old coincidence point with its landing point.
-        // tidy_route inserts orthogonal corners on both sides, removing
-        // the old point instead of leaving a hidden wire stub behind.
-        bool interior_moved = false;
-        for (const auto& [old_pos, new_pos] : moved_points) {
-            if (same(old_pos, new_pos) || same(old_pos, path.front()) ||
+        // Find every moved pin/junction against the ORIGINAL path first.
+        // Rebuilding from the original segments is important: moving the
+        // first of two pins on one straight wire can make the second old
+        // point no longer lie on the partially rerouted path.
+        std::vector<std::pair<Pos, Pos>> attached_moves;
+        for (const auto& move : moved_points) {
+            const Pos old_pos = move.first;
+            if (same(old_pos, move.second) || same(old_pos, path.front()) ||
                 same(old_pos, path.back())) {
                 continue;
             }
-            bool found = false;
             for (std::size_t i = 1; i < path.size(); ++i) {
-                if (!on_segment(path[i - 1], path[i], old_pos)) {
-                    continue;
-                }
-                if (!same(path[i - 1], old_pos) && !same(path[i], old_pos)) {
-                    path.insert(path.begin() + static_cast<std::ptrdiff_t>(i),
-                                old_pos);
-                }
-                found = true;
-                break;
-            }
-            if (!found) {
-                continue;
-            }
-            for (Pos& point : path) {
-                if (same(point, old_pos)) {
-                    point = new_pos;
+                if (on_segment(path[i - 1], path[i], old_pos)) {
+                    attached_moves.push_back(move);
+                    break;
                 }
             }
-            interior_moved = true;
+        }
+        bool interior_moved = !attached_moves.empty();
+        if (interior_moved) {
+            std::vector<Pos> expanded;
+            expanded.reserve(path.size() + attached_moves.size());
+            expanded.push_back(path.front());
+            for (std::size_t i = 1; i < path.size(); ++i) {
+                const Pos a = path[i - 1], b = path[i];
+                std::vector<std::pair<double, Pos>> on_leg;
+                for (const auto& move : attached_moves) {
+                    const Pos p = move.first;
+                    if (same(p, a) || same(p, b) || !on_segment(a, b, p)) {
+                        continue;
+                    }
+                    const double dx = b.x - a.x;
+                    const double dy = b.y - a.y;
+                    const double denom = dx * dx + dy * dy;
+                    const double t = denom > 0.0
+                        ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / denom
+                        : 0.0;
+                    on_leg.emplace_back(t, p);
+                }
+                std::sort(on_leg.begin(), on_leg.end(),
+                          [](const auto& lhs, const auto& rhs) {
+                              return lhs.first < rhs.first;
+                          });
+                for (const auto& point : on_leg) {
+                    if (!same(expanded.back(), point.second)) {
+                        expanded.push_back(point.second);
+                    }
+                }
+                if (!same(expanded.back(), b)) {
+                    expanded.push_back(b);
+                }
+            }
+            for (Pos& point : expanded) {
+                for (const auto& move : attached_moves) {
+                    if (same(point, move.first)) {
+                        point = move.second;
+                        break;
+                    }
+                }
+            }
+            path = std::move(expanded);
         }
         if (interior_moved) {
             WireRoute r;
