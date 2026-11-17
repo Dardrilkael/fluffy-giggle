@@ -118,7 +118,8 @@ std::size_t push_tidy_wires(SchematicDocument& doc,
 // transform_part() computes the routes and calls this.
 void push_transform_part_routed(SchematicDocument& doc, std::uint32_t part_id,
                                 int rot, bool mirror, std::string name,
-                                std::vector<WireRoute> wire_routes);
+                                std::vector<WireRoute> wire_routes,
+                                std::vector<GluedJunctionMove> glue);
 
 // A whole-sheet renumbering as one undo step: (part id, new ref) pairs;
 // entries that would not change a ref are dropped. Returns how many refs
@@ -1045,8 +1046,18 @@ struct Editor {
     // drag-release re-route: a moved endpoint would otherwise leave
     // the adjacent legs diagonal). Read at the entity's LANDING - the
     // caller puts the entity there first, then restores the press
-    // position and hands the routes to push_move_*.
+    // position and hands the routes to push_move_*. `pinned` (may be
+    // empty): the T-tap spots captured BEFORE the entity moved - the
+    // fresh routes run through them so the taps' connections survive.
     [[nodiscard]] std::vector<WireRoute> attached_wire_routes(
+        Drag::Kind kind, std::uint32_t id,
+        const std::vector<Pos>& pinned = {}) const;
+
+    // The T-tap spots for a move of `id`: junctions on the affected
+    // wires' path interiors, read at the CURRENT geometry - call
+    // BEFORE the entity moves (at the landing the old path is gone
+    // and the taps no longer read as on-path).
+    [[nodiscard]] std::vector<Pos> wire_pin_spots(
         Drag::Kind kind, std::uint32_t id) const;
 
     // Hit tests (world space). The pin hit radius is in world units

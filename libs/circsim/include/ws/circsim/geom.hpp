@@ -209,6 +209,13 @@ struct MovedPinContact {
 // touching legs stay axis-aligned. Freeform (non-ortho) wires are the
 // author's and are left alone. The undo commands capture each wire's
 // CURRENT waypoints as the undo shape beside these.
+// A re-route whose path AT THE PRESS GEOMETRY carried a junction on
+// its body (a T-tap the author drew) keeps that point on the NEW path:
+// the caller hands the pinned spots (captured before the entity moved
+// - at the landing the old path is gone, the tap no longer lies on the
+// live-resolved shape), and the fresh route runs THROUGH each spot (a
+// pinned waypoint at the junction's position) so the tap's connection
+// survives the move, the same guarantee the endpoint references get.
 struct WireRoute {
     std::uint32_t wire = 0;
     std::vector<Pos> waypoints;
@@ -216,7 +223,33 @@ struct WireRoute {
 enum class AttachedKind : std::uint8_t { Part, Junction };
 [[nodiscard]] std::vector<WireRoute> attached_wire_routes(
     const Schematic& s, const SymbolLibrary& lib, AttachedKind kind,
-    std::uint32_t id);
+    std::uint32_t id, const std::vector<Pos>& pinned = {});
+
+// The junctions glued to a part: sitting exactly on one of its pins,
+// they are the "wire the pin" gesture's own artifact (a wire end's
+// junction on the pin, a T-tap dropped there) and must ride the part -
+// a move, group move, rotate or mirror that left them behind breaks
+// exactly the connections the author drew. Each carries the pin it
+// rides so the commands can glue it to the pin's own landing (the
+// rotated pin lands somewhere new, not a delta).
+struct GluedJunction {
+    std::uint32_t junction = 0;
+    std::uint32_t part = 0;
+    std::uint32_t pin = 0;
+};
+[[nodiscard]] std::vector<GluedJunction> glued_junctions(
+    const Schematic& s, const SymbolLibrary& lib, std::uint32_t part_id);
+
+// The pinned spots for a move of `id` (kind as above): every junction
+// lying on an affected wire's path INTERIOR at the CURRENT geometry -
+// call it BEFORE the entity moves (at the landing the endpoints have
+// already resolved elsewhere and the tap no longer reads as on-path).
+// The T-taps the author drew; the affected wires are the ones whose
+// endpoints reference the entity.
+[[nodiscard]] std::vector<Pos> wire_pin_spots(const Schematic& s,
+                                             const SymbolLibrary& lib,
+                                             AttachedKind kind,
+                                             std::uint32_t id);
 
 // --- colors ----------------------------------------------------------------
 

@@ -352,7 +352,36 @@ bool set_drag_pos(Editor& ed, Pos at) {
         case Editor::Drag::Kind::Part:
             if (ws::circsim::Part* p = s->find_part(ed.drag.id)) {
                 if (!eps_eq(p->pos.x, at.x, 1e-9) || !eps_eq(p->pos.y, at.y, 1e-9)) {
+                    // The glue resolves BEFORE the part moves: a
+                    // junction sits on the pin at the OLD position, and
+                    // glued_junctions reads pin positions live (after
+                    // the move the junction would sit on nothing and
+                    // the ride would never fire).
+                    const std::vector<ws::circsim::GluedJunction> glue =
+                        ws::circsim::glued_junctions(*s, ed.library,
+                                                     ed.drag.id);
                     p->pos = at;
+                    // The glued junctions (sitting exactly on a pin)
+                    // ride the LIVE drag too - without them the wires
+                    // visually detach mid-drag and the release's glue
+                    // landings would teleport. Each lands on the pin's
+                    // own spot at `at`, resolved through the library.
+                    for (const ws::circsim::GluedJunction& g : glue) {
+                        const ws::circsim::SymbolDef* sym =
+                            ed.library.find(p->symbol);
+                        if (sym == nullptr || g.pin >= sym->pins.size()) {
+                            continue;
+                        }
+                        const Pos pin_at =
+                            ws::circsim::pin_pos(*sym, *p, g.pin);
+                        for (ws::circsim::Junction& j :
+                             s->junctions_mut()) {
+                            if (j.id == g.junction) {
+                                j.pos = pin_at;
+                                break;
+                            }
+                        }
+                    }
                     s->bump();
                     return true;
                 }
@@ -483,8 +512,35 @@ bool set_member_pos(Editor& ed, const Selection& m, Pos at) {
     switch (m.kind) {
         case Selection::Kind::Part:
             if (ws::circsim::Part* p = s->find_part(m.id)) {
-                return land(p->pos.x, p->pos.y,
-                            [&](Pos v) { p->pos = v; });
+                // The glue resolves BEFORE the part moves (a junction
+                // sits on the pin at the OLD position; after the move
+                // it would sit on nothing and the ride would not fire).
+                const std::vector<ws::circsim::GluedJunction> glue =
+                    ws::circsim::glued_junctions(*s, ed.library, m.id);
+                const bool moved_part = land(p->pos.x, p->pos.y,
+                                             [&](Pos v) { p->pos = v; });
+                if (moved_part) {
+                    // The group drag's own glue ride: a junction on a
+                    // member part's pin follows that part through the
+                    // live move (and the release's captured landings).
+                    for (const ws::circsim::GluedJunction& g : glue) {
+                        const ws::circsim::SymbolDef* sym =
+                            ed.library.find(p->symbol);
+                        if (sym == nullptr || g.pin >= sym->pins.size()) {
+                            continue;
+                        }
+                        const Pos pin_at =
+                            ws::circsim::pin_pos(*sym, *p, g.pin);
+                        for (ws::circsim::Junction& j :
+                             s->junctions_mut()) {
+                            if (j.id == g.junction) {
+                                j.pos = pin_at;
+                                break;
+                            }
+                        }
+                    }
+                }
+                return moved_part;
             }
             break;
         case Selection::Kind::Junction:
@@ -797,6 +853,35 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
             const Pos& start =
                 ed.group_drag.starts[ed.group_drag.pressed];
             const Pos delta{target.x - start.x, target.y - start.y};
+            // The T-tap spots read at the press geometry - the live
+            // drag left the set at the landing, so the first hop below
+            // brings everyone home before anything reads the pins
+            // (at the landing the old paths are gone).
+            for (std::size_t i = 0; i < ed.group_drag.set.size(); ++i) {
+                (void)set_member_pos(ed, ed.group_drag.set[i],
+                                     ed.group_drag.starts[i]);
+            }
+            std::vector<Pos> pins;
+            for (const Selection& m : ed.group_drag.set) {
+                if (m.kind != Selection::Kind::Part &&
+                    m.kind != Selection::Kind::Junction) {
+                    continue;
+                }
+                for (const Pos& p :
+                     ed.wire_pin_spots(
+                         m.kind == Selection::Kind::Part
+                             ? Editor::Drag::Kind::Part
+                             : Editor::Drag::Kind::Junction,
+                         m.id)) {
+                    if (std::find_if(pins.begin(), pins.end(),
+                                     [&](const Pos& q) {
+                                         return eps_eq(q.x, p.x, 1e-9) &&
+                                                eps_eq(q.y, p.y, 1e-9);
+                                     }) == pins.end()) {
+                        pins.push_back(p);
+                    }
+                }
+            }
             // Live-move everyone to the landing (for the route read).
             for (std::size_t i = 0; i < ed.group_drag.set.size(); ++i) {
                 const Pos at{
@@ -821,7 +906,7 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                         ? Editor::Drag::Kind::Part
                         : Editor::Drag::Kind::Junction;
                 for (WireRoute& r :
-                     ed.attached_wire_routes(kind, m.id)) {
+                     ed.attached_wire_routes(kind, m.id, pins)) {
                     routes[r.wire] = std::move(r);
                 }
                 if (m.kind == Selection::Kind::Part) {
@@ -836,6 +921,83 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
             for (std::size_t i = 0; i < ed.group_drag.set.size(); ++i) {
                 (void)set_member_pos(ed, ed.group_drag.set[i],
                                      ed.group_drag.starts[i]);
+            }
+            // The glue payload: junctions on a MEMBER part's pins ride
+            // that part's landing. The list resolves at the PRESS
+            // positions (the junctions sit on the pins there - after
+            // any hop they sit on nothing); the `from`s read right
+            // there, the `to`s after the visit to the landing below.
+            // A junction whose part is NOT in the set stays put - its
+            // part never moved.
+            std::vector<editor::GluedJunctionMove> glue;
+            {
+                // The press-position visit: everyone is already back
+                // at the starts (the loop above), so the glue reads
+                // the real press geometry.
+                std::vector<ws::circsim::GluedJunction> glued;
+                for (const Selection& m : ed.group_drag.set) {
+                    if (m.kind != Selection::Kind::Part) {
+                        continue;
+                    }
+                    for (const ws::circsim::GluedJunction& g :
+                         ws::circsim::glued_junctions(*ed.schem(),
+                                                       ed.library, m.id)) {
+                        glued.push_back(g);
+                    }
+                }
+                for (const ws::circsim::GluedJunction& g : glued) {
+                    editor::GluedJunctionMove gm;
+                    gm.junction = g.junction;
+                    gm.pin = g.pin;
+                    const ws::circsim::Junction* j =
+                        ed.schem()->find_junction(g.junction);
+                    gm.from = j != nullptr ? j->pos : Pos{};
+                    glue.push_back(gm);
+                }
+                // Everyone visits the landing once more, just for the
+                // glue's `to`s (resolved through each part's own pins
+                // at its landing).
+                for (std::size_t i = 0; i < ed.group_drag.set.size(); ++i) {
+                    const Pos at{
+                        ed.group_drag.starts[i].x + delta.x,
+                        ed.group_drag.starts[i].y + delta.y};
+                    (void)set_member_pos(ed, ed.group_drag.set[i], at);
+                }
+                for (const Selection& m : ed.group_drag.set) {
+                    if (m.kind != Selection::Kind::Part) {
+                        continue;
+                    }
+                    const ws::circsim::Part* p =
+                        ed.schem()->find_part(m.id);
+                    if (p == nullptr) {
+                        continue;
+                    }
+                    const ws::circsim::SymbolDef* sym =
+                        ed.library.find(p->symbol);
+                    if (sym == nullptr) {
+                        continue;
+                    }
+                    for (const ws::circsim::GluedJunction& g : glued) {
+                        if (g.part != m.id) {
+                            continue;
+                        }
+                        for (editor::GluedJunctionMove& gm : glue) {
+                            if (gm.junction == g.junction &&
+                                gm.pin == g.pin) {
+                                if (gm.pin < sym->pins.size()) {
+                                    gm.to = ws::circsim::pin_pos(*sym, *p,
+                                                                 gm.pin);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                // And back to the press positions once more.
+                for (std::size_t i = 0; i < ed.group_drag.set.size(); ++i) {
+                    (void)set_member_pos(ed, ed.group_drag.set[i],
+                                         ed.group_drag.starts[i]);
+                }
             }
             // The payload, when anything actually moved.
             std::vector<editor::EntityMove> moves;
@@ -861,7 +1023,7 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                     route_list.push_back(std::move(r));
                 }
                 editor::push_move_set(*ed.doc, std::move(moves),
-                                      std::move(route_list));
+                                      std::move(route_list), std::move(glue));
                 // The group landed: the contacts each part's landing
                 // created become explicit junctions, the same named
                 // step the single drag lands.
@@ -910,18 +1072,66 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
             // no-op (nothing would ever move back). Restore even when
             // doc is null so the entity is never left stranded.
             std::vector<WireRoute> routes;
-            // The contacts the LANDING creates (a pin of the moved
-            // part on another wire's interior): the entity sits at
-            // `to` here for the route read - the same position the
-            // contacts read from.
+            std::vector<editor::GluedJunctionMove> glue;
             std::vector<ws::circsim::MovedPinContact> contacts;
             if (ed.doc != nullptr) {
-                set_drag_pos(ed, to);
-                routes =
-                    ed.attached_wire_routes(ed.drag.kind, ed.drag.id);
                 if (ed.drag.kind == Editor::Drag::Kind::Part) {
+                    // The glue resolves at the PRESS position (the
+                    // junctions sit on the pins there; after any hop
+                    // they sit on nothing and the ride would never
+                    // fire) - the live drag left the part at the
+                    // release landing, so the first hop below brings
+                    // it home before anything reads the glue.
+                    set_drag_pos(ed, ed.drag.start_world);
+                    std::vector<ws::circsim::GluedJunction> glued =
+                        ws::circsim::glued_junctions(
+                            *ed.schem(), ed.library, ed.drag.id);
+                    for (const ws::circsim::GluedJunction& g : glued) {
+                        editor::GluedJunctionMove gm;
+                        gm.junction = g.junction;
+                        gm.pin = g.pin;
+                        const ws::circsim::Junction* j =
+                            ed.schem()->find_junction(g.junction);
+                        gm.from = j != nullptr ? j->pos : Pos{};
+                        glue.push_back(gm);
+                    }
+                    // The T-tap spots read at the press geometry too
+                    // (at the landing the old paths are gone).
+                    const std::vector<Pos> pins =
+                        ed.wire_pin_spots(ed.drag.kind, ed.drag.id);
+                    set_drag_pos(ed, to);
+                    routes = ed.attached_wire_routes(ed.drag.kind,
+                                                     ed.drag.id, pins);
+                    // The `to`s: each glued pin's spot at the landing
+                    // (set_drag_pos rode the glue onto them).
+                    if (const ws::circsim::Part* p =
+                            ed.schem()->find_part(ed.drag.id)) {
+                        const ws::circsim::SymbolDef* sym =
+                            ed.library.find(p->symbol);
+                        if (sym != nullptr) {
+                            for (editor::GluedJunctionMove& gm : glue) {
+                                if (gm.pin < sym->pins.size()) {
+                                    gm.to = ws::circsim::pin_pos(
+                                        *sym, *p, gm.pin);
+                                }
+                            }
+                        }
+                    }
+                    // The contacts the LANDING creates (a pin of the moved
+                    // part on another wire's interior): the entity sits at
+                    // `to` here for the contacts read.
                     contacts = ws::circsim::moved_pin_contacts(
                         ed.doc->schem, ed.library, ed.drag.id);
+                } else {
+                    // The T-tap spots read at the press geometry (the
+                    // live drag left the entity at the landing; the
+                    // hop home reads what the author drew).
+                    set_drag_pos(ed, ed.drag.start_world);
+                    const std::vector<Pos> pins =
+                        ed.wire_pin_spots(ed.drag.kind, ed.drag.id);
+                    set_drag_pos(ed, to);
+                    routes = ed.attached_wire_routes(ed.drag.kind,
+                                                     ed.drag.id, pins);
                 }
             }
             set_drag_pos(ed, ed.drag.start_world);
@@ -931,7 +1141,7 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
             if (landed && ed.doc != nullptr) {  // dragged back to where it started: no edit
                 if (ed.drag.kind == Editor::Drag::Kind::Part) {
                     push_move_part(*ed.doc, ed.drag.id, to,
-                                   std::move(routes));
+                                   std::move(routes), std::move(glue));
                     // The move landed: whatever contacts the landing
                     // created become explicit junctions - the pickup
                     // rule's silent join gets a dot, survives the next

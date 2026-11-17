@@ -225,14 +225,52 @@ bool Editor::transform_part(std::uint32_t id, int rot, bool mirror,
     }
     const int was_rot = p->rot;
     const bool was_mirror = p->mirror;
-    // The part visits the new orientation; the attached wires' endpoints
-    // resolve live through their pins, so the routes read from the
-    // landing; then the part goes back so the command captures the real
-    // "was". Each hop bumps so nothing reads a stale cache.
+    // The glue resolves BEFORE the part visits either orientation: the
+    // junctions sit on the pins at the OLD one, and glued_junctions
+    // reads pin positions live (after a hop they would sit on nothing
+    // and the ride would never fire). Then the part visits the new
+    // orientation; the attached wires' endpoints resolve live through
+    // their pins, so the routes read from the landing; then the part
+    // goes back so the command captures the real "was". Each hop bumps
+    // so nothing reads a stale cache. The glue's `to` is each pin's
+    // spot at the NEW orientation, `from` the OLD one - a
+    // rotate/mirror that left them behind would strand every
+    // connection drawn through them.
+    // The glue resolves BEFORE any orientation hop (the junctions sit
+    // on the pins at the CURRENT orientation; after a hop they would
+    // sit on nothing and the ride would never fire). `from` is each
+    // junction's own position right now; `to` resolves from the part
+    // at its new orientation below.
+    std::vector<editor::GluedJunctionMove> glue;
+    for (const ws::circsim::GluedJunction& g :
+         ws::circsim::glued_junctions(*s, library, id)) {
+        editor::GluedJunctionMove gm;
+        gm.junction = g.junction;
+        gm.pin = g.pin;
+        const ws::circsim::Junction* j = s->find_junction(g.junction);
+        gm.from = j != nullptr ? j->pos : Pos{};
+        glue.push_back(gm);
+    }
+    // The T-tap spots read at the CURRENT orientation (before the
+    // hop - at the new one the old paths are gone).
+    const std::vector<Pos> pins =
+        wire_pin_spots(Drag::Kind::Part, id);
     p->rot = rot;
     p->mirror = mirror;
     s->bump();
-    std::vector<WireRoute> routes = attached_wire_routes(Drag::Kind::Part, id);
+    // The fresh routes run through the pinned spots (the T-taps the
+    // author drew at press geometry) so the taps' connections survive.
+    std::vector<WireRoute> routes =
+        attached_wire_routes(Drag::Kind::Part, id, pins);
+    // Each glued pin's NEW spot, straight from the part at its new
+    // orientation, through the library.
+    if (const ws::circsim::SymbolDef* sym = library.find(p->symbol)) {
+        for (editor::GluedJunctionMove& gm : glue) {
+            if (gm.pin < sym->pins.size()) {
+                gm.to = ws::circsim::pin_pos(*sym, *p, gm.pin);
+            }
+        }
+    }
     // The contacts the rotated pins make with OTHER wires' interiors,
     // read at the same landing visit: a rotated pin landing on a wire
     // is the same silent pickup a moved one makes - it becomes an
@@ -243,7 +281,7 @@ bool Editor::transform_part(std::uint32_t id, int rot, bool mirror,
     p->mirror = was_mirror;
     s->bump();
     push_transform_part_routed(*doc, id, rot, mirror, std::move(name),
-                               std::move(routes));
+                               std::move(routes), std::move(glue));
     (void)push_contact_junctions(*doc, contacts, std::string{name});
     return true;
 }
@@ -334,12 +372,26 @@ std::size_t Editor::annotate(double row_tol_cells) {
 // endpoint left the adjacent wire legs diagonal (waypoints are
 // absolute, not relative).
 std::vector<WireRoute> Editor::attached_wire_routes(
-    Drag::Kind kind, std::uint32_t id) const {
+    Drag::Kind kind, std::uint32_t id,
+    const std::vector<Pos>& pinned) const {
     const ws::circsim::Schematic* s = schem();
     if (s == nullptr) {
         return {};
     }
     return ws::circsim::attached_wire_routes(
+        *s, library,
+        kind == Drag::Kind::Part ? ws::circsim::AttachedKind::Part
+                                 : ws::circsim::AttachedKind::Junction,
+        id, pinned);
+}
+
+std::vector<Pos> Editor::wire_pin_spots(Drag::Kind kind,
+                                        std::uint32_t id) const {
+    const ws::circsim::Schematic* s = schem();
+    if (s == nullptr) {
+        return {};
+    }
+    return ws::circsim::wire_pin_spots(
         *s, library,
         kind == Drag::Kind::Part ? ws::circsim::AttachedKind::Part
                                  : ws::circsim::AttachedKind::Junction,

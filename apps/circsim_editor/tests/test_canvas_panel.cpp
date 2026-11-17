@@ -1996,6 +1996,160 @@ void drag_world(Bench& b, Pos from, Pos to, bool shift = false) {
     pointer_frame(b, b.ed.view.w2s(to), false, false, shift);
 }
 
+// --- the junction glue (move keeps every connection) ---------------------------
+//
+// A junction sitting exactly on a part's pin is the wire gestures' own
+// artifact; a move that leaves it behind breaks the connection the author
+// drew. The glue rides the part: live through the drag, in the undo
+// command, and back on undo. A wire whose body carries a junction (a
+// T-tap) keeps that point on its re-routed path - the tap survives the
+// neighbor moves that bend the wire.
+
+TEST_CASE("the move-drag: a junction wired onto a pin rides the part") {
+    Bench b;
+    const ws::circsim::Part* r1p = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0}));
+    // The wire end's junction glued on R1's pin 1 at (3,0); the wire
+    // runs from a free junction to it.
+    ws::circsim::Junction free_j;
+    free_j.id = b.doc.schem.alloc_id();
+    free_j.pos = {13.0, 0.0};
+    ws::circsim::Junction on_pin;
+    on_pin.id = b.doc.schem.alloc_id();
+    on_pin.pos = {3.0, 0.0};
+    b.doc.schem.junctions_mut().push_back(free_j);
+    b.doc.schem.junctions_mut().push_back(on_pin);
+    ws::circsim::Wire w;
+    w.id = b.doc.schem.alloc_id();
+    w.a = ws::circsim::JunctionRef{free_j.id};
+    w.b = ws::circsim::JunctionRef{on_pin.id};
+    w.ortho = true;
+    b.doc.schem.wires_mut().push_back(w);
+
+    const std::uint32_t part_id = r1p->id;
+    const std::uint32_t glue_id = on_pin.id;
+    const ws::circsim::NetBuild before =
+        ws::circsim::build_nets(b.doc.schem, &b.ed.library);
+    const ws::circsim::Net* pin_net_before =
+        before.nets.net_of_pin(ws::circsim::PinRef{part_id, 1});
+    const ws::circsim::Net* wire_net_before =
+        before.nets.net_of_wire(w.id);
+    REQUIRE(pin_net_before != nullptr);
+    REQUIRE(wire_net_before != nullptr);
+    CHECK(pin_net_before->id == wire_net_before->id);
+
+    // The drag: press on R1's body, land it 10 up. The glue rides.
+    drag_world(b, {0.0, 0.0}, {0.0, 10.0});
+    CHECK(b.doc.schem.find_part(part_id)->pos.y == 10.0);
+    CHECK(b.doc.schem.find_junction(glue_id)->pos.y == 10.0);
+    CHECK(b.doc.schem.find_junction(glue_id)->pos.x == 3.0);
+
+    // The connection survived the move.
+    const ws::circsim::NetBuild after =
+        ws::circsim::build_nets(b.doc.schem, &b.ed.library);
+    const ws::circsim::Net* pin_net_after =
+        after.nets.net_of_pin(ws::circsim::PinRef{part_id, 1});
+    const ws::circsim::Net* wire_net_after =
+        after.nets.net_of_wire(w.id);
+    REQUIRE(pin_net_after != nullptr);
+    REQUIRE(wire_net_after != nullptr);
+    CHECK(pin_net_after->id == wire_net_after->id);
+
+    // Undo: part and glue return together.
+    (void)b.doc.undo().undo();
+    CHECK(b.doc.schem.find_part(part_id)->pos.y == 0.0);
+    CHECK(b.doc.schem.find_junction(glue_id)->pos.y == 0.0);
+    const ws::circsim::NetBuild undone =
+        ws::circsim::build_nets(b.doc.schem, &b.ed.library);
+    const ws::circsim::Net* pin_net_undone =
+        undone.nets.net_of_pin(ws::circsim::PinRef{part_id, 1});
+    const ws::circsim::Net* wire_net_undone =
+        undone.nets.net_of_wire(w.id);
+    REQUIRE(pin_net_undone != nullptr);
+    REQUIRE(wire_net_undone != nullptr);
+    CHECK(pin_net_undone->id == wire_net_undone->id);
+}
+
+TEST_CASE("the move-drag: a T-tap junction survives the wire's re-route") {
+    Bench b;
+    // A spine between two junctions with a T-tap junction at (5,0) and
+    // a stem below it; the spine's left end drags up - the spine
+    // re-routes, and the tap must still sit on its path.
+    ws::circsim::Junction jl;
+    jl.id = b.doc.schem.alloc_id();
+    jl.pos = {0.0, 0.0};
+    ws::circsim::Junction jr;
+    jr.id = b.doc.schem.alloc_id();
+    jr.pos = {10.0, 0.0};
+    ws::circsim::Junction tap;
+    tap.id = b.doc.schem.alloc_id();
+    tap.pos = {5.0, 0.0};
+    ws::circsim::Junction stem_end;
+    stem_end.id = b.doc.schem.alloc_id();
+    stem_end.pos = {5.0, -6.0};
+    b.doc.schem.junctions_mut().push_back(jl);
+    b.doc.schem.junctions_mut().push_back(jr);
+    b.doc.schem.junctions_mut().push_back(tap);
+    b.doc.schem.junctions_mut().push_back(stem_end);
+    ws::circsim::Wire spine;
+    spine.id = b.doc.schem.alloc_id();
+    spine.a = ws::circsim::JunctionRef{jl.id};
+    spine.b = ws::circsim::JunctionRef{jr.id};
+    spine.ortho = true;
+    ws::circsim::Wire stem;
+    stem.id = b.doc.schem.alloc_id();
+    stem.a = ws::circsim::JunctionRef{tap.id};
+    stem.b = ws::circsim::JunctionRef{stem_end.id};
+    stem.ortho = true;
+    b.doc.schem.wires_mut().push_back(spine);
+    b.doc.schem.wires_mut().push_back(stem);
+
+    const ws::circsim::NetBuild before =
+        ws::circsim::build_nets(b.doc.schem, &b.ed.library);
+    const ws::circsim::Net* spine_net =
+        before.nets.net_of_wire(spine.id);
+    const ws::circsim::Net* stem_net =
+        before.nets.net_of_wire(stem.id);
+    REQUIRE(spine_net != nullptr);
+    REQUIRE(stem_net != nullptr);
+    CHECK(spine_net->id == stem_net->id);
+
+    // Drag the spine's left end up: the spine re-routes through the
+    // tap's position (the tap rides its body), the stem keeps its
+    // connection.
+    drag_world(b, {0.0, 0.0}, {0.0, 6.0});
+    CHECK(b.doc.schem.find_junction(jl.id)->pos.y == 6.0);
+    const ws::circsim::NetBuild after =
+        ws::circsim::build_nets(b.doc.schem, &b.ed.library);
+    const ws::circsim::Net* spine_net_after =
+        after.nets.net_of_wire(spine.id);
+    const ws::circsim::Net* stem_net_after =
+        after.nets.net_of_wire(stem.id);
+    REQUIRE(spine_net_after != nullptr);
+    REQUIRE(stem_net_after != nullptr);
+    CHECK(spine_net_after->id == stem_net_after->id);
+
+    // The tap junction still lies on the spine's path.
+    const std::vector<Pos> path =
+        b.ed.wire_path(*b.doc.schem.find_wire(spine.id));
+    bool tap_on_path = false;
+    for (std::size_t i = 0; i + 1u < path.size(); ++i) {
+        const double cross = (path[i + 1u].x - path[i].x) *
+                                 (tap.pos.y - path[i].y) -
+                             (path[i + 1u].y - path[i].y) *
+                                 (tap.pos.x - path[i].x);
+        if (cross == 0.0 && tap.pos.x >= std::min(path[i].x, path[i + 1u].x) &&
+            tap.pos.x <= std::max(path[i].x, path[i + 1u].x) &&
+            tap.pos.y >= std::min(path[i].y, path[i + 1u].y) &&
+            tap.pos.y <= std::max(path[i].y, path[i + 1u].y)) {
+            tap_on_path = true;
+            break;
+        }
+    }
+    CHECK(tap_on_path);
+    (void)tap;  // read above before the drag mutated nothing (tap never moves)
+}
+
 TEST_CASE("the box-select: a drag over empty space selects the set") {
     Bench b;
     const ws::circsim::Part* r1 = b.doc.schem.add_part(

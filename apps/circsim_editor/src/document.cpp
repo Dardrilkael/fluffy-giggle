@@ -334,19 +334,24 @@ class DeletePartCommand final : public EditCommand {
 
 class MovePartCommand final : public EditCommand {
   public:
+    // glued: the junctions riding the part's pins, each with its own
+    // from/to POSITION pair (the pusher resolves the pin landings with
+    // the library in hand - the command owns no symbol knowledge).
     MovePartCommand(SchematicDocument* doc, std::uint32_t id,
                     ws::circsim::Pos from, ws::circsim::Pos to,
                     std::vector<WireRoute> routes,
-                    std::vector<WireRoute> undo_routes)
+                    std::vector<WireRoute> undo_routes,
+                    std::vector<GluedJunctionMove> glued)
         : EditCommand(doc), id_(id), from_(from), to_(to),
-          routes_(std::move(routes)), undo_routes_(std::move(undo_routes)) {}
+          routes_(std::move(routes)), undo_routes_(std::move(undo_routes)),
+          glued_(std::move(glued)) {}
 
     void apply() override {
-        land(to_);
+        land(to_, true);
         land_routes(routes_);
     }
     void undo() override {
-        land(from_);
+        land(from_, false);
         land_routes(undo_routes_);
     }
     [[nodiscard]] std::string name() const override { return "Move Part"; }
@@ -366,15 +371,30 @@ class MovePartCommand final : public EditCommand {
             }
         }
     }
-    void land(ws::circsim::Pos at) {
+    void land(ws::circsim::Pos at, bool forward) {
         if (Part* p = schem().find_part(id_)) {
             p->pos = at;
             schem().bump();
+        }
+        // The glued junctions ride the pin they sit on: a wire end's
+        // junction, a T-tap dropped there - stranded at the old spot
+        // they would break exactly the connection the author drew.
+        // Apply lands each glue's `to` (the pin's landing), undo its
+        // `from` (the pin's press position) - one undo step returns
+        // the whole ride.
+        for (const GluedJunctionMove& g : glued_) {
+            for (Junction& j : schem().junctions_mut()) {
+                if (j.id == g.junction) {
+                    j.pos = forward ? g.to : g.from;
+                    break;
+                }
+            }
         }
     }
     std::uint32_t id_;
     ws::circsim::Pos from_, to_;
     std::vector<WireRoute> routes_, undo_routes_;
+    std::vector<GluedJunctionMove> glued_;
 };
 
 // Lands each route's waypoints on its wire (a wire the step no longer
@@ -408,12 +428,17 @@ bool land_wire_routes(ws::circsim::Schematic& s,
 // ortho wires ride the same undo step with fresh shapes (the move
 // command's contract: without the re-route the adjacent legs go
 // diagonal). The routes are optional - the plain seam passes none.
+// The glued junctions ride the pins' landings the same way (the
+// pusher resolves both orientations with the library in hand: apply's
+// glue `to`, undo's glue `from` - a rotated pin lands somewhere new,
+// not a delta of the old spot).
 class TransformPartCommand final : public EditCommand {
   public:
     TransformPartCommand(SchematicDocument* doc, std::uint32_t id, int rot,
                          bool mirror, int was_rot, bool was_mirror,
                          std::string name, std::vector<WireRoute> routes = {},
-                         std::vector<WireRoute> undo_routes = {})
+                         std::vector<WireRoute> undo_routes = {},
+                         std::vector<GluedJunctionMove> glue = {})
         : EditCommand(doc),
           id_(id),
           rot_(rot),
@@ -422,15 +447,18 @@ class TransformPartCommand final : public EditCommand {
           was_mirror_(was_mirror),
           name_(std::move(name)),
           routes_(std::move(routes)),
-          undo_routes_(std::move(undo_routes)) {}
+          undo_routes_(std::move(undo_routes)),
+          glue_(std::move(glue)) {}
 
     void apply() override {
         land(rot_, mirror_);
         (void)land_wire_routes(schem(), routes_);
+        land_glue(true);
     }
     void undo() override {
         land(was_rot_, was_mirror_);
         (void)land_wire_routes(schem(), undo_routes_);
+        land_glue(false);
     }
     [[nodiscard]] std::string name() const override { return name_; }
     [[nodiscard]] std::size_t memory_estimate() const override {
@@ -439,6 +467,18 @@ class TransformPartCommand final : public EditCommand {
     }
 
   private:
+    // The glued junctions ride their pins: apply lands the `to`s
+    // (each a NEW-orientation pin spot), undo the `from`s.
+    void land_glue(bool forward) {
+        for (const GluedJunctionMove& g : glue_) {
+            for (Junction& j : schem().junctions_mut()) {
+                if (j.id == g.junction) {
+                    j.pos = forward ? g.to : g.from;
+                    break;
+                }
+            }
+        }
+    }
     void land(int rot, bool mirror) {
         if (Part* p = schem().find_part(id_)) {
             p->rot = rot;
@@ -453,6 +493,7 @@ class TransformPartCommand final : public EditCommand {
     bool was_mirror_;
     std::string name_;
     std::vector<WireRoute> routes_, undo_routes_;
+    std::vector<GluedJunctionMove> glue_;
 };
 
 // One part text field: ref (kind 0), value (kind 1), params[key] (2).
@@ -611,7 +652,8 @@ void push_delete_part(SchematicDocument& doc, std::uint32_t part_id) {
 
 void push_move_part(SchematicDocument& doc, std::uint32_t part_id,
                     ws::circsim::Pos to,
-                    std::vector<WireRoute> wire_routes) {
+                    std::vector<WireRoute> wire_routes,
+                    std::vector<GluedJunctionMove> glued) {
     const Part* p = doc.schem.find_part(part_id);
     if (p == nullptr) {
         return;
@@ -628,7 +670,7 @@ void push_move_part(SchematicDocument& doc, std::uint32_t part_id,
     }
     (void)doc.undo().push(std::make_unique<MovePartCommand>(
         &doc, part_id, from, to, std::move(wire_routes),
-        std::move(undo_routes)));
+        std::move(undo_routes), std::move(glued)));
 }
 
 void push_transform_part(SchematicDocument& doc, std::uint32_t part_id,
@@ -643,7 +685,8 @@ void push_transform_part(SchematicDocument& doc, std::uint32_t part_id,
 
 void push_transform_part_routed(SchematicDocument& doc, std::uint32_t part_id,
                                 int rot, bool mirror, std::string name,
-                                std::vector<WireRoute> wire_routes) {
+                                std::vector<WireRoute> wire_routes,
+                                std::vector<GluedJunctionMove> glue) {
     const Part* p = doc.schem.find_part(part_id);
     if (p == nullptr) {
         return;
@@ -658,7 +701,8 @@ void push_transform_part_routed(SchematicDocument& doc, std::uint32_t part_id,
     }
     (void)doc.undo().push(std::make_unique<TransformPartCommand>(
         &doc, part_id, rot, mirror, p->rot, p->mirror, std::move(name),
-        std::move(wire_routes), std::move(undo_routes)));
+        std::move(wire_routes), std::move(undo_routes),
+        std::move(glue)));
 }
 
 void push_part_text(SchematicDocument& doc, std::uint32_t part_id, int kind,
@@ -1452,20 +1496,28 @@ namespace {
 // One group move: every member lands its `to` (undo: back to its
 // `from`), the wire routes riding beside. A member the schematic no
 // longer finds is skipped - the honest shape, the single moves' rule.
+// The glue rides as its own move list (junction ids with from/to
+// positions, already resolved by the pusher): a glued junction whose
+// part is ALSO in the set would double-land (the part's own pin moves,
+// the glue rides it), so the canvas filters those out before pushing.
 class MoveSetCommand final : public EditCommand {
   public:
     MoveSetCommand(SchematicDocument* doc, std::vector<EntityMove> moves,
                    std::vector<WireRoute> routes,
-                   std::vector<WireRoute> undo_routes)
+                   std::vector<WireRoute> undo_routes,
+                   std::vector<GluedJunctionMove> glue = {})
         : EditCommand(doc), moves_(std::move(moves)),
-          routes_(std::move(routes)), undo_routes_(std::move(undo_routes)) {}
+          routes_(std::move(routes)), undo_routes_(std::move(undo_routes)),
+          glue_(std::move(glue)) {}
 
     void apply() override {
         land(moves_, true);
+        land_glue(true);
         (void)land_wire_routes(schem(), routes_);
     }
     void undo() override {
         land(moves_, false);
+        land_glue(false);
         (void)land_wire_routes(schem(), undo_routes_);
     }
     [[nodiscard]] std::string name() const override { return "Move Set"; }
@@ -1475,6 +1527,18 @@ class MoveSetCommand final : public EditCommand {
     }
 
   private:
+    // The glued junctions land their to (undo: their from) - the
+    // same step as the members so one undo reverts everything.
+    void land_glue(bool forward) {
+        for (const GluedJunctionMove& g : glue_) {
+            for (Junction& j : schem().junctions_mut()) {
+                if (j.id == g.junction) {
+                    j.pos = forward ? g.to : g.from;
+                    break;
+                }
+            }
+        }
+    }
     void land(const std::vector<EntityMove>& moves, bool forward) {
         for (const EntityMove& m : moves) {
             const ws::circsim::Pos at = forward ? m.to : m.from;
@@ -1509,6 +1573,7 @@ class MoveSetCommand final : public EditCommand {
 
     std::vector<EntityMove> moves_;
     std::vector<WireRoute> routes_, undo_routes_;
+    std::vector<GluedJunctionMove> glue_;
 };
 
 // The paste: the payload's ids are pre-minted, so both directions are
@@ -1621,7 +1686,8 @@ class DeleteSetCommand final : public EditCommand {
 }  // namespace
 
 void push_move_set(SchematicDocument& doc, std::vector<EntityMove> moves,
-                   std::vector<WireRoute> routes) {
+                   std::vector<WireRoute> routes,
+                   std::vector<GluedJunctionMove> glue) {
     if (moves.empty()) {
         return;
     }
@@ -1636,7 +1702,7 @@ void push_move_set(SchematicDocument& doc, std::vector<EntityMove> moves,
     }
     (void)doc.undo().push(std::make_unique<MoveSetCommand>(
         &doc, std::move(moves), std::move(routes),
-        std::move(undo_routes)));
+        std::move(undo_routes), std::move(glue)));
 }
 
 void push_paste(SchematicDocument& doc, PastePayload payload) {

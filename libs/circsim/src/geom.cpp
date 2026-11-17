@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -26,6 +27,18 @@ namespace {
 
 [[nodiscard]] double len(Pos p) {
     return std::sqrt(p.x * p.x + p.y * p.y);
+}
+
+// The same point-on-segment test nets.cpp runs (collinear and inside
+// the bbox): a junction "on a wire's path" means exactly this.
+[[nodiscard]] bool on_seg(Pos a, Pos b, Pos p) {
+    const double cross =
+        (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+    if (cross != 0.0) {
+        return false;
+    }
+    return p.x >= std::min(a.x, b.x) && p.x <= std::max(a.x, b.x) &&
+           p.y >= std::min(a.y, b.y) && p.y <= std::max(a.y, b.y);
 }
 
 [[nodiscard]] bool eps_eq_pos(Pos p, Pos q, double eps) {
@@ -626,12 +639,18 @@ std::vector<MovedPinContact> moved_pin_contacts(
     return out;
 }
 
-std::vector<WireRoute> attached_wire_routes(const Schematic& s,
-                                            const SymbolLibrary& lib,
-                                            AttachedKind kind,
-                                            std::uint32_t id) {
+std::vector<WireRoute> attached_wire_routes(
+    const Schematic& s, const SymbolLibrary& lib, AttachedKind kind,
+    std::uint32_t id, const std::vector<Pos>& pinned) {
     constexpr double kEps = 1e-9;
     std::vector<WireRoute> out;
+    // The pinned spots arrive from the CALLER, captured at the press
+    // geometry (before the entity moved): every junction the affected
+    // wires' paths carried on their interior - the T-taps the author
+    // drew. At the landing the old path is already gone (the endpoints
+    // resolve live), so only the caller can know what the drawing
+    // carried. The fresh routes run THROUGH each spot so the tap's
+    // connection survives the move.
     const auto hits = [&](const WireEndpoint& e) {
         if (kind == AttachedKind::Part) {
             const auto* pin = std::get_if<PinRef>(&e);
@@ -664,6 +683,38 @@ std::vector<WireRoute> attached_wire_routes(const Schematic& s,
             WireRoute r;
             r.wire = w.id;
             r.waypoints = route_wire(path.front(), -1, path.back(), -1);
+            // A pinned spot the fresh L misses gets its own pinned
+            // waypoint: the route runs THROUGH it (endpoint -> spot ->
+            // endpoint), the T-tap kept alive.
+            for (const Pos& spot : pinned) {
+                if (eps_eq_pos(spot, path.front(), kEps) ||
+                    eps_eq_pos(spot, path.back(), kEps)) {
+                    continue;  // an endpoint's own position - no pin
+                }
+                bool on_new = false;
+                for (std::size_t k = 0; k + 1u < r.waypoints.size();
+                     ++k) {
+                    if (on_seg(r.waypoints[k], r.waypoints[k + 1u],
+                               spot)) {
+                        on_new = true;
+                        break;
+                    }
+                }
+                if (!on_new) {
+                    // The route runs THROUGH the spot: head corners,
+                    // the spot itself as a waypoint (route_wire never
+                    // returns its endpoints), then the tail - without
+                    // the spot the path would jump diagonally off it.
+                    const std::vector<Pos> head =
+                        route_wire(path.front(), -1, spot, -1);
+                    const std::vector<Pos> tail =
+                        route_wire(spot, -1, path.back(), -1);
+                    r.waypoints = head;
+                    r.waypoints.push_back(spot);
+                    r.waypoints.insert(r.waypoints.end(),
+                                       tail.begin(), tail.end());
+                }
+            }
             out.push_back(std::move(r));
             continue;
         }
@@ -698,6 +749,86 @@ std::vector<WireRoute> attached_wire_routes(const Schematic& s,
         r.wire = w.id;
         r.waypoints = fold_interior(full);
         out.push_back(std::move(r));
+    }
+    return out;
+}
+
+std::vector<Pos> wire_pin_spots(const Schematic& s,
+                                 const SymbolLibrary& lib,
+                                 AttachedKind kind, std::uint32_t id) {
+    // The affected wires (the endpoint-reference scan the re-route
+    // runs), read at the CURRENT geometry - the caller runs this
+    // BEFORE the entity moves, so the paths still carry the author's
+    // taps. Interior junctions only: the wire's own endpoint
+    // positions ride their refs and never pin.
+    std::vector<Pos> out;
+    const auto hits = [&](const WireEndpoint& e) {
+        if (kind == AttachedKind::Part) {
+            const auto* pin = std::get_if<PinRef>(&e);
+            return pin != nullptr && pin->part == id;
+        }
+        const auto* j = std::get_if<JunctionRef>(&e);
+        return j != nullptr && j->junction == id;
+    };
+    for (const Wire& w : s.wires()) {
+        if (!w.ortho) {
+            continue;  // the author's own shape never carries the rule
+        }
+        if (!hits(w.a) && !hits(w.b)) {
+            continue;
+        }
+        const std::vector<Pos> path = wire_path(s, lib, w);
+        if (path.size() < 2u) {
+            continue;
+        }
+        for (const Junction& j : s.junctions()) {
+            if (eps_eq_pos(j.pos, path.front(), 1e-9) ||
+                eps_eq_pos(j.pos, path.back(), 1e-9)) {
+                continue;
+            }
+            for (std::size_t k = 0; k + 1u < path.size(); ++k) {
+                if (on_seg(path[k], path[k + 1u], j.pos)) {
+                    // Deduped: one spot per position (two affected
+                    // wires sharing a tap pin it once).
+                    if (std::find_if(out.begin(), out.end(),
+                                     [&](const Pos& p) {
+                                         return eps_eq_pos(p, j.pos, 1e-9);
+                                     }) == out.end()) {
+                        out.push_back(j.pos);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    return out;
+}
+
+std::vector<GluedJunction> glued_junctions(const Schematic& s,
+                                           const SymbolLibrary& lib,
+                                           std::uint32_t part_id) {
+    // A junction exactly on a pin of the part: the wire gestures' own
+    // artifact on that pin (a wire end's junction, a T-tap dropped
+    // there). Those ride the part; a junction merely NEAR the pin (or
+    // on the body of a wire attached to it) does not - only exact
+    // positions glue, the same coincidence the net rules union.
+    std::vector<GluedJunction> out;
+    const Part* p = s.find_part(part_id);
+    if (p == nullptr) {
+        return out;
+    }
+    const SymbolDef* sym = lib.find(p->symbol);
+    if (sym == nullptr) {
+        return out;
+    }
+    for (const Junction& j : s.junctions()) {
+        for (std::uint32_t i = 0; i < sym->pins.size(); ++i) {
+            const Pos pin = pin_pos(*sym, *p, i);
+            if (eps_eq_pos(j.pos, pin, 1e-9)) {
+                out.push_back(GluedJunction{j.id, part_id, i});
+                break;
+            }
+        }
     }
     return out;
 }

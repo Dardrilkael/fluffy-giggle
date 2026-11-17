@@ -100,9 +100,29 @@ void push_delete_part(SchematicDocument& doc, std::uint32_t part_id);
 // it); the alias keeps the editor's historical spelling.
 using WireRoute = ws::circsim::WireRoute;
 
+// A junction riding a moved part's pin (glued_junctions): the command
+// carries its from/to POSITIONS - the pusher resolves the pin landings
+// with the library in hand (the document owns no symbol knowledge).
+// Without riding, the move strands the wire end's junction at the old
+// spot and the connection the author drew dies.
+struct GluedJunctionMove {
+    std::uint32_t junction = 0;
+    std::uint32_t pin = 0;  // the pin it rides (the pusher's landing
+                             // resolution; the command never reads it)
+    ws::circsim::Pos from{0.0, 0.0};
+    ws::circsim::Pos to{0.0, 0.0};
+};
+
+// push_move_part: `to` is the part's landing; the command also carries
+// the glued junctions' landings (glued_junctions - the junctions
+// sitting exactly on the part's pins, whose from/to the CALLER has
+// resolved with the library in hand: a moved pin lands at to + the
+// pin's own offset, a rotated one wherever its transform puts it).
+// Passing them keeps the wire ends' and T-taps' connections alive.
 void push_move_part(SchematicDocument& doc, std::uint32_t part_id,
                     ws::circsim::Pos to,
-                    std::vector<WireRoute> wire_routes = {});
+                    std::vector<WireRoute> wire_routes = {},
+                    std::vector<GluedJunctionMove> glued = {});
 
 // rot/mirror are the FINAL values ("Rotate" or "Mirror" is the step's
 // name - the undo label reads what the user did).
@@ -121,6 +141,15 @@ std::size_t push_contact_junctions(
     const std::vector<ws::circsim::MovedPinContact>& contacts,
     std::string name);
 
+// The routed seam (the rotate/mirror the editor lands after a drag):
+// the glued junctions ride the step with both orientations' landings -
+// each entry's `to` is the pin's spot at the NEW orientation (apply),
+// its `from` the OLD one (undo). A rotated pin lands wherever its
+// transform puts it; the pusher resolves both with the library in hand.
+void push_transform_part_routed(SchematicDocument& doc, std::uint32_t part_id,
+                                int rot, bool mirror, std::string name,
+                                std::vector<WireRoute> wire_routes,
+                                std::vector<GluedJunctionMove> glue = {});
 
 // One part text field. kind: 0 = ref, 1 = value, 2 = params[param].
 // Typing runs coalesce (merge_with) so one undo reverts the run.
@@ -202,7 +231,9 @@ struct EntityMove {
 // press-time undo shapes (a route whose wire is gone is skipped -
 // the honest shape, the single move's own rule).
 void push_move_set(SchematicDocument& doc, std::vector<EntityMove> moves,
-                   std::vector<WireRoute> routes = {});
+                   std::vector<WireRoute> routes = {},
+                   std::vector<GluedJunctionMove> glue = {});
+
 
 // The paste's cargo: entities with PRE-MINTED ids (the editor mints
 // them against the live schematic while building the payload, the
