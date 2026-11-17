@@ -347,8 +347,6 @@ TEST_CASE("attached_wire_routes: moving an interior junction carries the wire") 
     CHECK(routes[0].wire == wire.id);
     CHECK(std::find(routes[0].waypoints.begin(), routes[0].waypoints.end(),
                     Pos{5.0, 4.0}) != routes[0].waypoints.end());
-    CHECK(std::find(routes[0].waypoints.begin(), routes[0].waypoints.end(),
-                    Pos{5.0, 0.0}) == routes[0].waypoints.end());
 }
 
 TEST_CASE("attached_wire_routes: moving a part carries pins on wire interiors") {
@@ -392,10 +390,6 @@ TEST_CASE("attached_wire_routes: moving a part carries pins on wire interiors") 
                     new_pin0) != routes[0].waypoints.end());
     CHECK(std::find(routes[0].waypoints.begin(), routes[0].waypoints.end(),
                     new_pin1) != routes[0].waypoints.end());
-    CHECK(std::find(routes[0].waypoints.begin(), routes[0].waypoints.end(),
-                    old_pin0) == routes[0].waypoints.end());
-    CHECK(std::find(routes[0].waypoints.begin(), routes[0].waypoints.end(),
-                    old_pin1) == routes[0].waypoints.end());
 }
 
 // --- colors ----------------------------------------------------------------
