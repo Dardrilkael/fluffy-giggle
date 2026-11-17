@@ -191,6 +191,14 @@ struct WireRoute {
     std::vector<Pos> waypoints;
 };
 enum class AttachedKind : std::uint8_t { Part, Junction };
+struct AttachedMove {
+    AttachedKind kind = AttachedKind::Part;
+    std::uint32_t id = 0;
+    Pos from{0.0, 0.0};
+};
+[[nodiscard]] std::vector<WireRoute> attached_wire_routes(
+    const Schematic& s, const SymbolLibrary& lib,
+    const std::vector<AttachedMove>& moves);
 [[nodiscard]] std::vector<WireRoute> attached_wire_routes(
     const Schematic& s, const SymbolLibrary& lib, AttachedKind kind,
     std::uint32_t id, std::optional<Pos> from = std::nullopt);
