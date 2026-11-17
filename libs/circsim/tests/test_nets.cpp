@@ -99,6 +99,15 @@ TEST_CASE("wires crossing where neither has a vertex never connect") {
     REQUIRE(nets.nets.nets.size() == 2);
 }
 
+TEST_CASE("independent wire endpoints at the same position stay separate") {
+    Bench b;
+    const std::uint32_t a = b.wire_j(0.0, 0.0, 10.0, 0.0);
+    const std::uint32_t c = b.wire_j(10.0, 0.0, 20.0, 0.0);
+    const NetBuild nets = ws::circsim::build_nets(b.s);
+    REQUIRE(nets.nets.nets.size() == 2);
+    CHECK(nets.nets.net_of_wire(a)->id != nets.nets.net_of_wire(c)->id);
+}
+
 TEST_CASE("a wire endpoint on another wire's interior connects (T)") {
     Bench b;
     const std::uint32_t horizontal = b.wire_j(0.0, 0.0, 10.0, 0.0);
