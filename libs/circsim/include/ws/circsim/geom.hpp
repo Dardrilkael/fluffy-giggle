@@ -211,19 +211,40 @@ struct MovedPinContact {
 // CURRENT waypoints as the undo shape beside these.
 // A re-route whose path AT THE PRESS GEOMETRY carried a junction on
 // its body (a T-tap the author drew) keeps that point on the NEW path:
-// the caller hands the pinned spots (captured before the entity moved
-// - at the landing the old path is gone, the tap no longer lies on the
-// live-resolved shape), and the fresh route runs THROUGH each spot (a
-// pinned waypoint at the junction's position) so the tap's connection
-// survives the move, the same guarantee the endpoint references get.
+// the caller hands the pinned spots with their OWNING wires (captured
+// before the entity moved - at the landing the old path is gone, the
+// tap no longer lies on the live-resolved shape), and each wire's
+// fresh route runs through ITS OWN spots only (a pinned waypoint at
+// the junction's position) so the tap's connection survives the move,
+// the same guarantee the endpoint references get. A spot owned by a
+// DIFFERENT wire never rides this wire's route: the older contract
+// (bare positions) let every affected wire weave every spot in.
 struct WireRoute {
     std::uint32_t wire = 0;
     std::vector<Pos> waypoints;
 };
 enum class AttachedKind : std::uint8_t { Part, Junction };
+
+// The pinned spots for a move of `id` (kind as above): every junction
+// lying on an affected wire's path INTERIOR at the CURRENT geometry -
+// call it BEFORE the entity moves (at the landing the endpoints have
+// already resolved elsewhere and the tap no longer reads as on-path).
+// The T-taps the author drew; the affected wires are the ones whose
+// endpoints reference the entity.
+// Each spot names the WIRE whose interior carried it: a junction on
+// wire W's body is W's tap, and only W's fresh route has to run
+// through it. The editor's older `pinned` list (bare positions) let a
+// wire whose path NEVER touched the spot weave it in anyway - a move
+// could route one net's wire through another net's tap dot, silently
+// joining them; the ownership is the fix.
+struct PinnedSpot {
+    Pos pos{0.0, 0.0};
+    std::uint32_t wire = 0;  // the wire whose interior carried the spot
+};
+
 [[nodiscard]] std::vector<WireRoute> attached_wire_routes(
     const Schematic& s, const SymbolLibrary& lib, AttachedKind kind,
-    std::uint32_t id, const std::vector<Pos>& pinned = {});
+    std::uint32_t id, const std::vector<PinnedSpot>& pinned = {});
 
 // The junctions glued to a part: sitting exactly on one of its pins,
 // they are the "wire the pin" gesture's own artifact (a wire end's
@@ -240,16 +261,9 @@ struct GluedJunction {
 [[nodiscard]] std::vector<GluedJunction> glued_junctions(
     const Schematic& s, const SymbolLibrary& lib, std::uint32_t part_id);
 
-// The pinned spots for a move of `id` (kind as above): every junction
-// lying on an affected wire's path INTERIOR at the CURRENT geometry -
-// call it BEFORE the entity moves (at the landing the endpoints have
-// already resolved elsewhere and the tap no longer reads as on-path).
-// The T-taps the author drew; the affected wires are the ones whose
-// endpoints reference the entity.
-[[nodiscard]] std::vector<Pos> wire_pin_spots(const Schematic& s,
-                                             const SymbolLibrary& lib,
-                                             AttachedKind kind,
-                                             std::uint32_t id);
+[[nodiscard]] std::vector<PinnedSpot> wire_pin_spots(
+    const Schematic& s, const SymbolLibrary& lib, AttachedKind kind,
+    std::uint32_t id);
 
 // A junction move's binding changes at its LANDING: tap_add = the
 // wires whose paths carry the landing position and the dot does not

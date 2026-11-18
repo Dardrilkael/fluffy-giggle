@@ -873,24 +873,27 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                 (void)set_member_pos(ed, ed.group_drag.set[i],
                                      ed.group_drag.starts[i]);
             }
-            std::vector<Pos> pins;
+            std::vector<ws::circsim::PinnedSpot> pinned;
             for (const Selection& m : ed.group_drag.set) {
                 if (m.kind != Selection::Kind::Part &&
                     m.kind != Selection::Kind::Junction) {
                     continue;
                 }
-                for (const Pos& p :
+                for (const ws::circsim::PinnedSpot& ps :
                      ed.wire_pin_spots(
                          m.kind == Selection::Kind::Part
                              ? Editor::Drag::Kind::Part
                              : Editor::Drag::Kind::Junction,
                          m.id)) {
-                    if (std::find_if(pins.begin(), pins.end(),
-                                     [&](const Pos& q) {
-                                         return eps_eq(q.x, p.x, 1e-9) &&
-                                                eps_eq(q.y, p.y, 1e-9);
-                                     }) == pins.end()) {
-                        pins.push_back(p);
+                    // Deduplicate by (pos, wire) - different wires can share
+                    // a position at a junction.
+                    if (std::find_if(pinned.begin(), pinned.end(),
+                                     [&](const ws::circsim::PinnedSpot& q) {
+                                         return q.wire == ps.wire &&
+                                                eps_eq(q.pos.x, ps.pos.x, 1e-9) &&
+                                                eps_eq(q.pos.y, ps.pos.y, 1e-9);
+                                     }) == pinned.end()) {
+                        pinned.push_back(ps);
                     }
                 }
             }
@@ -918,7 +921,7 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                         ? Editor::Drag::Kind::Part
                         : Editor::Drag::Kind::Junction;
                 for (WireRoute& r :
-                     ed.attached_wire_routes(kind, m.id, pins)) {
+                     ed.attached_wire_routes(kind, m.id, pinned)) {
                     routes[r.wire] = std::move(r);
                 }
                 if (m.kind == Selection::Kind::Part) {
@@ -1111,11 +1114,11 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                     }
                     // The T-tap spots read at the press geometry too
                     // (at the landing the old paths are gone).
-                    const std::vector<Pos> pins =
+                    const std::vector<ws::circsim::PinnedSpot> pinned =
                         ed.wire_pin_spots(ed.drag.kind, ed.drag.id);
                     set_drag_pos(ed, to);
                     routes = ed.attached_wire_routes(ed.drag.kind,
-                                                     ed.drag.id, pins);
+                                                     ed.drag.id, pinned);
                     // The `to`s: each glued pin's spot at the landing
                     // (set_drag_pos rode the glue onto them).
                     if (const ws::circsim::Part* p =
@@ -1141,11 +1144,11 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                     // live drag left the entity at the landing; the
                     // hop home reads what the author drew).
                     set_drag_pos(ed, ed.drag.start_world);
-                    const std::vector<Pos> pins =
+                    const std::vector<ws::circsim::PinnedSpot> pinned =
                         ed.wire_pin_spots(ed.drag.kind, ed.drag.id);
                     set_drag_pos(ed, to);
                     routes = ed.attached_wire_routes(ed.drag.kind,
-                                                     ed.drag.id, pins);
+                                                     ed.drag.id, pinned);
                     // The binding changes the LANDING makes (the
                     // entity sits at `to`): a junction dragged onto a
                     // wire's body taps it - the spec's "unless we

@@ -1082,7 +1082,7 @@ struct RouteJudge {
 
 std::vector<WireRoute> attached_wire_routes(
     const Schematic& s, const SymbolLibrary& lib, AttachedKind kind,
-    std::uint32_t id, const std::vector<Pos>& pinned) {
+    std::uint32_t id, const std::vector<PinnedSpot>& pinned) {
     constexpr double kEps = 1e-9;
     std::vector<WireRoute> out;
 
@@ -1126,15 +1126,18 @@ std::vector<WireRoute> attached_wire_routes(
                    ? pin_world_dir(*symbol, *part, pin->pin)
                    : -1;
     };
-    const std::vector<Pos> no_keep;
 
     // The pinned spots arrive from the CALLER, captured at the press
     // geometry (before the entity moved): every junction the affected
     // wires' paths carried on their interior - the T-taps the author
-    // drew. At the landing the old path is already gone (the endpoints
-    // resolve live), so only the caller can know what the drawing
-    // carried. The fresh routes run THROUGH each spot so the tap's
-    // connection survives the move.
+    // drew - each naming its OWNING wire. At the landing the old path
+    // is already gone (the endpoints resolve live), so only the caller
+    // can know what the drawing carried. Each wire's fresh route runs
+    // through ITS OWN spots only: a spot owned by a different wire
+    // never rides this route (the older bare-position contract wove
+    // every spot into every affected wire - a move could route one
+    // net's wire through another net's tap dot and silently join
+    // them).
     const auto hits = [&](const WireEndpoint& e) {
         if (kind == AttachedKind::Part) {
             const auto* pin = std::get_if<PinRef>(&e);
@@ -1158,6 +1161,15 @@ std::vector<WireRoute> attached_wire_routes(
         if (path.size() < 2u) {
             continue;  // dangling: nothing to keep straight
         }
+        // THIS wire's pinned spots: the taps its own press-geometry
+        // path carried. The judge and the insert loop below read this
+        // list, never the caller's whole set.
+        std::vector<Pos> my_spots;
+        for (const PinnedSpot& p : pinned) {
+            if (p.wire == w.id) {
+                my_spots.push_back(p.pos);
+            }
+        }
         // Straight or one-bend wires (and anything with both ends on
         // the same move) re-route as a fresh horizontal-first L; a
         // multi-bend wire keeps its shape - only the adjacent waypoint
@@ -1167,10 +1179,11 @@ std::vector<WireRoute> attached_wire_routes(
             WireRoute route;
             route.wire = w.id;
             std::vector<Pos> base = route_wire(path.front(), -1, path.back(), -1);
-            // Insert pinned spots (T-taps) into the base route so they are
-            // preserved by settle_route. The route runs THROUGH each spot
-            // (endpoint -> spot -> endpoint).
-            for (const Pos& spot : pinned) {
+            // Insert THIS wire's pinned spots (T-taps it carried at
+            // the press geometry) into the base route so they are
+            // preserved by settle_route. The route runs THROUGH each
+            // spot (endpoint -> spot -> endpoint).
+            for (const Pos& spot : my_spots) {
                 if (eps_eq_pos(spot, path.front(), kEps) ||
                     eps_eq_pos(spot, path.back(), kEps)) {
                     continue;  // an endpoint's own position - no pin
@@ -1192,7 +1205,7 @@ std::vector<WireRoute> attached_wire_routes(
                     base.insert(base.end(), tail.begin(), tail.end());
                 }
             }
-            const RouteJudge judge{&terminal_points, &pinned,
+            const RouteJudge judge{&terminal_points, &my_spots,
                                    end_dir(w.a), end_dir(w.b)};
             route.waypoints = settle_route(judge, path.front(), path.back(),
                                            w.ortho, std::move(base));
@@ -1228,7 +1241,7 @@ std::vector<WireRoute> attached_wire_routes(
         full.push_back(path.back());
         WireRoute route;
         route.wire = w.id;
-        const RouteJudge judge{&terminal_points, &pinned,
+        const RouteJudge judge{&terminal_points, &my_spots,
                                end_dir(w.a), end_dir(w.b)};
         route.waypoints = settle_route(judge, path.front(), path.back(),
                                        true, fold_interior(full));
@@ -1237,15 +1250,19 @@ std::vector<WireRoute> attached_wire_routes(
     return out;
 }
 
-std::vector<Pos> wire_pin_spots(const Schematic& s,
-                                 const SymbolLibrary& lib,
-                                 AttachedKind kind, std::uint32_t id) {
+std::vector<PinnedSpot> wire_pin_spots(const Schematic& s,
+                                      const SymbolLibrary& lib,
+                                      AttachedKind kind, std::uint32_t id) {
     // The affected wires (the endpoint-reference scan the re-route
     // runs), read at the CURRENT geometry - the caller runs this
     // BEFORE the entity moves, so the paths still carry the author's
     // taps. Interior junctions only: the wire's own endpoint
-    // positions ride their refs and never pin.
-    std::vector<Pos> out;
+    // positions ride their refs and never pin. Each spot names its
+    // OWNING wire: only that wire's fresh route has to run through it
+    // (a junction on wire W's body is W's tap - a bare position could
+    // be woven into a DIFFERENT wire's route, joining nets that never
+    // touched).
+    std::vector<PinnedSpot> out;
     const auto hits = [&](const WireEndpoint& e) {
         if (kind == AttachedKind::Part) {
             const auto* pin = std::get_if<PinRef>(&e);
@@ -1272,13 +1289,16 @@ std::vector<Pos> wire_pin_spots(const Schematic& s,
             }
             for (std::size_t k = 0; k + 1u < path.size(); ++k) {
                 if (on_seg(path[k], path[k + 1u], j.pos)) {
-                    // Deduped: one spot per position (two affected
-                    // wires sharing a tap pin it once).
+                    // Deduped per (position, wire): two affected wires
+                    // sharing one tap pin it once EACH - the pair is
+                    // the identity the re-route filters by.
                     if (std::find_if(out.begin(), out.end(),
-                                     [&](const Pos& p) {
-                                         return eps_eq_pos(p, j.pos, 1e-9);
+                                     [&](const PinnedSpot& p) {
+                                         return p.wire == w.id &&
+                                                eps_eq_pos(p.pos, j.pos,
+                                                           1e-9);
                                      }) == out.end()) {
-                        out.push_back(j.pos);
+                        out.push_back(PinnedSpot{j.pos, w.id});
                     }
                     break;
                 }

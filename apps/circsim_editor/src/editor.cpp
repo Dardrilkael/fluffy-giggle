@@ -253,7 +253,7 @@ bool Editor::transform_part(std::uint32_t id, int rot, bool mirror,
     }
     // The T-tap spots read at the CURRENT orientation (before the
     // hop - at the new one the old paths are gone).
-    const std::vector<Pos> pins =
+    const std::vector<ws::circsim::PinnedSpot> pinned =
         wire_pin_spots(Drag::Kind::Part, id);
     p->rot = rot;
     p->mirror = mirror;
@@ -261,7 +261,7 @@ bool Editor::transform_part(std::uint32_t id, int rot, bool mirror,
     // The fresh routes run through the pinned spots (the T-taps the
     // author drew at press geometry) so the taps' connections survive.
     std::vector<WireRoute> routes =
-        attached_wire_routes(Drag::Kind::Part, id, pins);
+        attached_wire_routes(Drag::Kind::Part, id, pinned);
     // Each glued pin's NEW spot, straight from the part at its new
     // orientation, through the library.
     if (const ws::circsim::SymbolDef* sym = library.find(p->symbol)) {
@@ -373,7 +373,7 @@ std::size_t Editor::annotate(double row_tol_cells) {
 // absolute, not relative).
 std::vector<WireRoute> Editor::attached_wire_routes(
     Drag::Kind kind, std::uint32_t id,
-    const std::vector<Pos>& pinned) const {
+    const std::vector<ws::circsim::PinnedSpot>& pinned) const {
     const ws::circsim::Schematic* s = schem();
     if (s == nullptr) {
         return {};
@@ -385,8 +385,8 @@ std::vector<WireRoute> Editor::attached_wire_routes(
         id, pinned);
 }
 
-std::vector<Pos> Editor::wire_pin_spots(Drag::Kind kind,
-                                        std::uint32_t id) const {
+std::vector<ws::circsim::PinnedSpot> Editor::wire_pin_spots(Drag::Kind kind,
+                                                            std::uint32_t id) const {
     const ws::circsim::Schematic* s = schem();
     if (s == nullptr) {
         return {};

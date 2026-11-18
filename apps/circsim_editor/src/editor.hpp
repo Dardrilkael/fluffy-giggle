@@ -1051,13 +1051,19 @@ struct Editor {
     // fresh routes run through them so the taps' connections survive.
     [[nodiscard]] std::vector<WireRoute> attached_wire_routes(
         Drag::Kind kind, std::uint32_t id,
-        const std::vector<Pos>& pinned = {}) const;
+        const std::vector<ws::circsim::PinnedSpot>& pinned = {}) const;
 
     // The T-tap spots for a move of `id`: junctions on the affected
     // wires' path interiors, read at the CURRENT geometry - call
     // BEFORE the entity moves (at the landing the old path is gone
     // and the taps no longer read as on-path).
-    [[nodiscard]] std::vector<Pos> wire_pin_spots(
+    // Each spot names the WIRE whose interior carried it: a junction on
+    // wire W's body is W's tap, and only W's fresh route has to run
+    // through it. The editor's older `pinned` list (bare positions) let a
+    // wire whose path NEVER touched the spot weave it in anyway - a move
+    // could route one net's wire through another net's tap dot, silently
+    // joining them; the ownership is the fix.
+    [[nodiscard]] std::vector<ws::circsim::PinnedSpot> wire_pin_spots(
         Drag::Kind kind, std::uint32_t id) const;
 
     // Hit tests (world space). The pin hit radius is in world units
