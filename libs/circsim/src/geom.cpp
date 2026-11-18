@@ -1288,6 +1288,55 @@ std::vector<Pos> wire_pin_spots(const Schematic& s,
     return out;
 }
 
+JunctionTapLanding junction_tap_landing(const Schematic& s,
+                                       const SymbolLibrary& lib,
+                                       std::uint32_t junction_id) {
+    JunctionTapLanding out;
+    const Junction* j = s.find_junction(junction_id);
+    if (j == nullptr) {
+        return out;
+    }
+    // The same point-on-polyline test nets.cpp runs (collinear and
+    // inside the segment's bbox), spelled once here.
+    const auto on_polyline_local = [](const std::vector<Pos>& path,
+                                      Pos p) {
+        for (std::size_t i = 1; i < path.size(); ++i) {
+            const Pos a = path[i - 1];
+            const Pos b = path[i];
+            const double cross =
+                (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+            if (cross != 0.0) {
+                continue;
+            }
+            if (p.x >= std::min(a.x, b.x) && p.x <= std::max(a.x, b.x) &&
+                p.y >= std::min(a.y, b.y) && p.y <= std::max(a.y, b.y)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (const Wire& w : s.wires()) {
+        // The dot's own wires: their endpoint refs already carry the
+        // authored gesture; a "tap" on them would be noise (and the
+        // re-route keeps them passing through the dot anyway).
+        const auto* ea = std::get_if<JunctionRef>(&w.a);
+        const auto* eb = std::get_if<JunctionRef>(&w.b);
+        if ((ea != nullptr && ea->junction == junction_id) ||
+            (eb != nullptr && eb->junction == junction_id)) {
+            continue;
+        }
+        const bool on = on_polyline_local(wire_path(s, lib, w), j->pos);
+        const bool tapped =
+            std::find(j->taps.begin(), j->taps.end(), w.id) != j->taps.end();
+        if (on && !tapped) {
+            out.add.push_back(w.id);
+        } else if (!on && tapped) {
+            out.remove.push_back(w.id);
+        }
+    }
+    return out;
+}
+
 std::vector<GluedJunction> glued_junctions(const Schematic& s,
                                            const SymbolLibrary& lib,
                                            std::uint32_t part_id) {

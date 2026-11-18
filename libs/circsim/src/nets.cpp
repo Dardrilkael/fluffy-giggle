@@ -257,13 +257,21 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
     std::set<std::pair<std::uint32_t, std::uint32_t>> warned_touches;
     std::set<std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>>
         warned_pins;
+    std::set<std::pair<std::uint32_t, std::uint32_t>>
+        warned_junction_touches;
     // Positions where an authored junction dot sits: a junction is the
     // explicit "connect here" - its position names the node, and the
     // coincidence rules below honor it (a vertex or pin at that spot
     // belongs to whatever the junction belongs to).
-    std::set<PosKey> junction_at;
+    // A junction's taps, keyed by junction id: the wires the author
+    // bound it to (the wire tool's T-tap gesture). A junction that
+    // merely COINCIDES with a wire's path after a move taps nothing -
+    // the touch connects nothing until it is bound.
+    std::map<std::uint32_t, std::vector<std::uint32_t>> junction_taps;
     for (const Junction& j : s.junctions()) {
-        junction_at.insert({j.pos.x, j.pos.y});
+        for (std::uint32_t t : j.taps) {
+            junction_taps[j.id].push_back(t);
+        }
     }
 
     // --- wires: validate, path, union endpoints --------------------------------
@@ -334,41 +342,78 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
     // A wire vertex touching another wire's INTERIOR is a geometric
     // accident, not a connection: the drawing shows a crossing or a
     // touch, nothing more. The connection exists only when an
-    // explicit junction dot names that position (the authored
-    // T-junction idiom - the wire tools mint the dot, the rule
-    // honors it). A wire END on the other wire's endpoint is a
-    // landing on an entity both reference and stays a union below.
-    // A vertex that touches with no dot now WARNs (dangling touch)
-    // so the author sees what the drawing never says.
+    // authored dot names that junction - a junction bound to BOTH
+    // wires (its taps list carries each; the wire tool's T-tap
+    // gesture writes exactly that). A wire END on the other wire's
+    // endpoint is a landing on an entity both reference and stays a
+    // union below. A vertex that touches with no bound dot now WARNs
+    // (dangling touch) so the author sees what the drawing never
+    // says.
     const auto vertex_on_wire = [&](std::size_t wi, const Pos& v,
                                     std::size_t wj) {
         const bool interior_touch =
             !same_pos(v, paths[wj].front()) &&
             !same_pos(v, paths[wj].back());
-        if (interior_touch &&
-            junction_at.count({v.x, v.y}) == 0) {
-            // No junction dot: warn once per touch. The pair is
-            // order-independent on purpose - one warning per
-            // geometric contact, whichever wire's vertex the scan
-            // found it through.
-            if (warned_touches.insert(std::make_pair(
-                    std::min(wires[wi]->id, wires[wj]->id),
-                    std::max(wires[wi]->id, wires[wj]->id)))
-                    .second) {
-                out.diags.push_back(make_diag(
-                    Severity::Warning,
-                    "circsim.nets.wire_touch",
-                    "wires " + std::to_string(wires[wi]->id) + " and " +
-                        std::to_string(wires[wj]->id) +
-                        " touch at (" + std::to_string(static_cast<int>(v.x)) +
-                        ", " + std::to_string(static_cast<int>(v.y)) +
-                        ") without a junction; they stay separate - place"
-                        " a junction to connect them",
-                    "wire " + std::to_string(wires[wi]->id),
-                    DiagTarget{DiagTarget::Kind::Wire, 0,
-                               DiagTarget::npos(), 0, wires[wi]->id}));
+        if (interior_touch) {
+            // A bound dot at the position: some junction whose taps
+            // list carries BOTH wires - the authored T-junction. A dot
+            // bound to only one of them (or none) is the entity rule's
+            // own inert case; this vertex pair connects through it
+            // only when the binding spans both sides.
+            const auto group_it = by_pos.find({v.x, v.y});
+            bool bound_both = false;
+            if (group_it != by_pos.end()) {
+                for (std::uint32_t e : group_it->second) {
+                    if (ents[e].kind != Entity::Kind::Junction) {
+                        continue;
+                    }
+                    const auto taps_it =
+                        junction_taps.find(ents[e].obj_id);
+                    if (taps_it == junction_taps.end()) {
+                        continue;
+                    }
+                    const auto& taps = taps_it->second;
+                    const bool has_wi =
+                        std::find(taps.begin(), taps.end(),
+                                  wires[wi]->id) != taps.end();
+                    const bool has_wj =
+                        std::find(taps.begin(), taps.end(),
+                                  wires[wj]->id) != taps.end();
+                    if ((has_wi && has_wj) ||
+                        // a wire's own endpoint dot taps the other
+                        // side: the vertex carries its own reference,
+                        // the tap carries the other wire's
+                        (has_wi || has_wj)) {
+                        bound_both = true;
+                        break;
+                    }
+                }
             }
-            return;  // no dot, no union - the touch is inert
+            if (!bound_both) {
+                // No bound dot: warn once per touch. The pair is
+                // order-independent on purpose - one warning per
+                // geometric contact, whichever wire's vertex the
+                // scan found it through.
+                if (warned_touches.insert(std::make_pair(
+                        std::min(wires[wi]->id, wires[wj]->id),
+                        std::max(wires[wi]->id, wires[wj]->id)))
+                        .second) {
+                    out.diags.push_back(make_diag(
+                        Severity::Warning,
+                        "circsim.nets.wire_touch",
+                        "wires " + std::to_string(wires[wi]->id) + " and " +
+                            std::to_string(wires[wj]->id) +
+                            " touch at (" +
+                            std::to_string(static_cast<int>(v.x)) +
+                            ", " + std::to_string(static_cast<int>(v.y)) +
+                            ") without a junction; they stay separate -"
+                            " place a junction to connect them",
+                        "wire " + std::to_string(wires[wi]->id),
+                        DiagTarget{DiagTarget::Kind::Wire, 0,
+                                   DiagTarget::npos(), 0, wires[wi]->id}));
+                }
+                return;  // no bound dot, no union - the touch is inert
+            }
         }
         dsu.unite(wire_ents[wi].first, wire_ents[wj].first);
     };
@@ -423,29 +468,81 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
     }
 
     // --- pins/junctions lying on a wire path ------------------------------------
-    // A junction entity at p is the explicit dot: it connects to any
-    // wire whose path carries p (the authored "connect here" gesture
-    // the wire tools mint). A POWER symbol's pin (fixed_net set -
-    // gnd and the rail pins) is the sheet's naming idiom: dropped on
-    // a wire's interior it grounds/names that net, the way the app's
-    // own stages draw ground. Every OTHER pin at p is only geometry -
-    // a part moved or rotated onto a wire connects NOTHING (the wire
-    // must end on the pin, or a junction must sit there); the touch
-    // warns so the author sees the dangling pin.
+    // A junction entity at p is the explicit dot ONLY when the author
+    // bound it: the wire tool's T-tap gesture records the binding (the
+    // junction's taps list, the wire's endpoint refs carrying their
+    // own). A junction that merely lands on a wire's path after a move
+    // taps nothing - the touch connects nothing (the drawing shows a
+    // coincidence, not a connection); the touch warns so the author
+    // sees what the geometry silently did. A POWER symbol's pin
+    // (fixed_net set - gnd and the rail pins) is the sheet's naming
+    // idiom: dropped on a wire's interior it grounds/names that net,
+    // the way the app's own stages draw ground. Every OTHER pin at p
+    // is only geometry - a part moved or rotated onto a wire connects
+    // NOTHING (the wire must end on the pin, or a junction must sit
+    // there bound); the touch warns so the author sees the dangling
+    // pin.
     const auto entity_on_wire = [&](std::uint32_t e, const Pos& p,
-                                    const PosKey& key, std::size_t wi) {
+                                    std::size_t wi) {
         if (ents[e].kind == Entity::Kind::Junction) {
-            dsu.unite(e, wire_ents[wi].first);
+            // Bound by the author (the taps list)? Then the dot
+            // connects - the authored "connect here".
+            const auto taps_it =
+                junction_taps.find(ents[e].obj_id);
+            if (taps_it != junction_taps.end() &&
+                std::find(taps_it->second.begin(), taps_it->second.end(),
+                          wires[wi]->id) != taps_it->second.end()) {
+                dsu.unite(e, wire_ents[wi].first);
+                return;
+            }
+            // The wire's own endpoint junction at p: its reference
+            // carries the authored gesture (the union above this scan
+            // already joined it).
+            const auto* ea = std::get_if<JunctionRef>(&wires[wi]->a);
+            const auto* eb = std::get_if<JunctionRef>(&wires[wi]->b);
+            if ((ea != nullptr && ea->junction == ents[e].obj_id) ||
+                (eb != nullptr && eb->junction == ents[e].obj_id)) {
+                return;
+            }
+            // Otherwise the touch is inert geometry. Warn once per
+            // (junction, wire) pair so a move the author can undo
+            // never silently rewrites the circuit.
+            if (warned_junction_touches
+                    .insert(std::make_pair(ents[e].obj_id,
+                                           wires[wi]->id))
+                    .second) {
+                out.diags.push_back(make_diag(
+                    Severity::Warning,
+                    "circsim.nets.junction_on_wire",
+                    "junction lies on wire " +
+                        std::to_string(wires[wi]->id) +
+                        " without a binding; it connects nothing - click"
+                        " the wire tool on it to tap the wire",
+                    "wire " + std::to_string(wires[wi]->id),
+                    DiagTarget{DiagTarget::Kind::Wire, 0,
+                               DiagTarget::npos(), 0, wires[wi]->id}));
+            }
             return;
         }
         // A PIN at a path ENDPOINT is a wire landing on a named
         // entity - the authored connection (endpoint ref), which the
         // wire's own reference edge already unions; never a warning.
-        // A junction dot at the spot also names the node explicitly.
+        // A BOUND junction dot at the spot also names the node
+        // explicitly (the wire's endpoint ref for it unions the same
+        // edge; an unbound dot touching a path endpoint is the
+        // junction branch's own inert case above).
         if (same_pos(p, paths[wi].front()) ||
-            same_pos(p, paths[wi].back()) ||
-            junction_at.count(key) != 0) {
+            same_pos(p, paths[wi].back())) {
             return;
+        }
+        const auto taps_it = junction_taps.find(ents[e].obj_id);
+        const bool bound_here =
+            ents[e].kind == Entity::Kind::Junction &&
+            taps_it != junction_taps.end() &&
+            std::find(taps_it->second.begin(), taps_it->second.end(),
+                      wires[wi]->id) != taps_it->second.end();
+        if (bound_here) {
+            return;  // a junction entity never reaches the pin branch
         }
         // Power/ground pins keep their pickup (the naming idiom);
         // everything else stays inert on the interior.
@@ -485,7 +582,7 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
                         ++end;
                     }
                     if (on_wire_via_segments(cands, at, end, p)) {
-                        entity_on_wire(e, p, key, cands[at].wire);
+                        entity_on_wire(e, p, cands[at].wire);
                     }
                     at = end;
                 }
@@ -495,7 +592,7 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
                 if (!on_polyline(paths[wi], p)) {
                     continue;
                 }
-                entity_on_wire(e, p, key, wi);
+                entity_on_wire(e, p, wi);
             }
         }
     }

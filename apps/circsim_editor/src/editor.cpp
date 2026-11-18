@@ -746,6 +746,12 @@ bool Editor::copy_selection() {
                 junction_map.emplace(j->id, index);
                 ws::circsim::Junction copy = *j;
                 copy.id = index;  // the clipboard's own numbering
+                // The dot's taps name ORIGINAL wire ids - meaningless
+                // in the clipboard's space. Clear them; the paste
+                // rebinds onto the pasted wires by geometry (a pasted
+                // dot sitting on a pasted wire's body re-taps it), so
+                // a stale tap can never name a wrong wire.
+                copy.taps.clear();
                 clip.junctions.push_back(copy);
                 break;
             }
@@ -909,6 +915,86 @@ std::vector<Selection> Editor::paste_clipboard(Pos at) {
             next.waypoints.push_back(Pos{p.x + delta.x, p.y + delta.y});
         }
         payload.wires.push_back(std::move(next));
+    }
+    // Rebind the pasted dots onto the pasted wires by geometry: a
+    // dot that rides a pasted wire's body after the delta taps that
+    // wire (the copy's own T-taps carried across the paste). Runs on
+    // the payload's final positions; the wire paths resolve through
+    // the payload's own endpoints (no live schematic needed).
+    {
+        const auto on_poly = [](const std::vector<Pos>& path, Pos p) {
+            for (std::size_t i = 1; i < path.size(); ++i) {
+                const Pos a = path[i - 1];
+                const Pos b = path[i];
+                const double cross =
+                    (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+                if (cross != 0.0) {
+                    continue;
+                }
+                if (p.x >= std::min(a.x, b.x) && p.x <= std::max(a.x, b.x) &&
+                    p.y >= std::min(a.y, b.y) && p.y <= std::max(a.y, b.y)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        for (ws::circsim::Junction& j : payload.junctions) {
+            for (const ws::circsim::Wire& w : payload.wires) {
+                // The wire's own endpoint dot: its endpoint ref carries
+                // the gesture, never a tap.
+                const auto* ea =
+                    std::get_if<ws::circsim::JunctionRef>(&w.a);
+                const auto* eb =
+                    std::get_if<ws::circsim::JunctionRef>(&w.b);
+                if ((ea != nullptr && ea->junction == j.id) ||
+                    (eb != nullptr && eb->junction == j.id)) {
+                    continue;
+                }
+                const auto end_pos =
+                    [&](const ws::circsim::WireEndpoint& e)
+                    -> std::optional<Pos> {
+                    if (const auto* pin =
+                            std::get_if<ws::circsim::PinRef>(&e)) {
+                        for (const ws::circsim::Part& p : payload.parts) {
+                            if (p.id == pin->part) {
+                                if (const ws::circsim::SymbolDef* sym =
+                                        sym_of(p)) {
+                                    if (pin->pin < sym->pins.size()) {
+                                        return ws::circsim::pin_pos(*sym, p,
+                                                                    pin->pin);
+                                    }
+                                }
+                                return std::nullopt;
+                            }
+                        }
+                        return std::nullopt;
+                    }
+                    const auto* jr =
+                        std::get_if<ws::circsim::JunctionRef>(&e);
+                    for (const ws::circsim::Junction& jj :
+                         payload.junctions) {
+                        if (jj.id == jr->junction) {
+                            return jj.pos;
+                        }
+                    }
+                    return std::nullopt;
+                };
+                const auto a_pos = end_pos(w.a);
+                const auto b_pos = end_pos(w.b);
+                if (!a_pos.has_value() || !b_pos.has_value()) {
+                    continue;
+                }
+                std::vector<Pos> path;
+                path.push_back(*a_pos);
+                for (const Pos& p : w.waypoints) {
+                    path.push_back(p);
+                }
+                path.push_back(*b_pos);
+                if (on_poly(path, j.pos)) {
+                    j.taps.push_back(w.id);
+                }
+            }
+        }
     }
     for (const ws::circsim::Label& l : clipboard.labels) {
         ws::circsim::Label next = l;

@@ -251,6 +251,20 @@ struct GluedJunction {
                                              AttachedKind kind,
                                              std::uint32_t id);
 
+// A junction move's binding changes at its LANDING: tap_add = the
+// wires whose paths carry the landing position and the dot does not
+// already tap (the author dragged it there - the spec's "move the
+// wire directly" case), tap_remove = the dot's taps whose wires no
+// longer pass through the landing (a stale binding would keep a dead
+// connection alive). The wire's own endpoint refs never count (the
+// dot's own wire ends there by reference).
+struct JunctionTapLanding {
+    std::vector<std::uint32_t> add;
+    std::vector<std::uint32_t> remove;
+};
+[[nodiscard]] JunctionTapLanding junction_tap_landing(
+    const Schematic& s, const SymbolLibrary& lib, std::uint32_t junction);
+
 // --- colors ----------------------------------------------------------------
 
 // The data-color wheel every colored series in the workspace shares

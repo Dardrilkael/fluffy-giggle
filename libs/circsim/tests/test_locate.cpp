@@ -289,10 +289,22 @@ TEST_CASE("focus_bounds answers the net, wire and label extents") {
     Part* r2 = b.r("R2", {14.0, 0.0});
     b.pin_wire(PinRef{r1->id, 1}, PinRef{r2->id, 0});
     // A T-join up to the label: the junction at (10, 0) is a wire
-    // VERTEX lying on the R1-R2 wire's polyline (the T-junction rule),
-    // so the stub unions with the divider's net; the label sits on the
-    // stub's far junction and names the net "out".
+    // VERTEX lying on the R1-R2 wire's polyline, and the BINDING (the
+    // dot taps the divider wire - the authored T-junction gesture) is
+    // what unions the stub with the divider's net; the label sits on
+    // the stub's far junction and names the net "out".
     b.j_wire(10.0, 5.0, 10.0, 0.0);
+    // Bind the (10,0) dot to the divider wire (the first wire minted).
+    {
+        const std::uint32_t divider =
+            b.s.wires().front().id;
+        for (Junction& j : b.s.junctions_mut()) {
+            if (j.pos.x == 10.0 && j.pos.y == 0.0) {
+                j.taps.push_back(divider);
+                break;
+            }
+        }
+    }
     b.label(10.0, 5.0, "out");
     const ws::circsim::NetBuild build = ws::circsim::build_nets(b.s);
     const ws::circsim::Net* out = build.nets.by_name("out");

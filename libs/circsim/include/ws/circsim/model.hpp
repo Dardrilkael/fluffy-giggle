@@ -49,6 +49,15 @@ using WireEndpoint = std::variant<PinRef, JunctionRef>;
 struct Junction {
     std::uint32_t id = 0;
     Pos pos{0.0, 0.0};
+    // The wires this dot TAPS - the authored "connect here" gesture.
+    // The wire tool binds a junction it mints on a wire's body (and
+    // re-binds a junction clicked onto one); a junction merely
+    // COINCIDING with a wire's path after a move taps nothing - the
+    // contact connects nothing until the author binds it (the endpoint
+    // reference a wire carries is its own authored gesture, separate
+    // from this list). Order-free, deduped; ids of deleted wires are
+    // dropped at the net build (a stale entry taps nothing).
+    std::vector<std::uint32_t> taps;
     ws::settings::json::Object unknown;  // unrecognized fields, re-emitted
 };
 

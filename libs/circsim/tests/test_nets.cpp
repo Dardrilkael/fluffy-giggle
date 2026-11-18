@@ -31,18 +31,33 @@ struct Bench {
                                      "1k", at));
     }
     // A junction at (x, y), returning its id.
-    std::uint32_t junction(double x, double y) {
+    std::uint32_t junction(double x, double y,
+                           std::vector<std::uint32_t> taps = {}) {
         Junction* j = s.add_junction({});
         j->pos = Pos{x, y};
+        j->taps = std::move(taps);
         return j->id;
     }
     // A wire between two junctions with optional waypoints.
     std::uint32_t wire_j(double ax, double ay, double bx, double by,
-                         std::vector<Pos> wps = {}) {
+                         std::vector<Pos> wps = {},
+                         std::vector<std::uint32_t> taps = {}) {
         Wire* w = s.add_wire({});
         w->a = ws::circsim::JunctionRef{junction(ax, ay)};
         w->b = ws::circsim::JunctionRef{junction(bx, by)};
         w->waypoints = std::move(wps);
+        // The junctions' taps (authored bindings): the whole list
+        // lands on the A-end junction. Tests that want the T-tap
+        // gesture bind through this; a bare geometry touch stays
+        // inert.
+        if (!taps.empty()) {
+            for (Junction& j : s.junctions_mut()) {
+                if (j.id == std::get<ws::circsim::JunctionRef>(w->a).junction) {
+                    j.taps = taps;
+                    break;
+                }
+            }
+        }
         return w->id;
     }
     std::uint32_t label(double x, double y, std::string name) {
@@ -102,13 +117,24 @@ TEST_CASE("wires crossing where neither has a vertex never connect") {
 TEST_CASE("a wire END on another wire's interior connects through its "
           "junction (authored T)") {
     // wire_j mints a junction at both ends: a dropped wire END on
-    // another wire's body carries its own dot - the authored T-tap,
-    // the one connection the move/rotate rework keeps (the wire
-    // tools mint the dot exactly for this gesture). A bare VERTEX -
-    // a waypoint or elbow - is the touch the rules refuse.
+    // another wire's body carries its own dot - and the BINDING makes
+    // it the authored T-tap (the wire tool writes exactly that: the
+    // minted dot taps the wire it landed on). A bare dot - geometry
+    // only, what a MOVE leaves behind - connects nothing.
     Bench b;
     const std::uint32_t horizontal = b.wire_j(0.0, 0.0, 10.0, 0.0);
-    const std::uint32_t drop = b.wire_j(5.0, 0.0, 5.0, -4.0);  // lands on it
+    // Unbound: the moved-on case - inert.
+    const std::uint32_t stray = b.wire_j(5.0, 0.0, 5.0, -4.0);
+    {
+        const NetBuild nets = ws::circsim::build_nets(b.s);
+        REQUIRE(nets.nets.nets.size() == 2);
+        const auto* h_net = nets.nets.net_of_wire(horizontal);
+        REQUIRE(h_net != nullptr);
+        CHECK(nets.nets.net_of_wire(stray)->id != h_net->id);
+    }
+    // Bound (the authored gesture): one net.
+    const std::uint32_t drop = b.wire_j(5.0, 0.0, 5.0, -4.0, {},
+                                        {horizontal});
     const NetBuild nets = ws::circsim::build_nets(b.s);
     REQUIRE(nets.nets.nets.size() == 1);
     const auto* net = nets.nets.net_of_wire(horizontal);
@@ -133,13 +159,15 @@ TEST_CASE("a wire elbow landing on another wire stays separate without "
     // Same rule, a bend's vertex instead of an end: the touch is
     // inert until a junction names it.
     Bench b;
-    b.wire_j(0.0, 0.0, 10.0, 0.0);
+    const std::uint32_t horizontal = b.wire_j(0.0, 0.0, 10.0, 0.0);
     // Elbow exactly at (5, 0), on the horizontal wire: a T with a corner.
     b.wire_j(5.0, 8.0, 5.0, -8.0, {Pos{5.0, 0.0}});
     const NetBuild nets = ws::circsim::build_nets(b.s);
     CHECK(nets.nets.nets.size() == 2);
     CHECK(has_diag(nets, "circsim.nets.wire_touch"));
-    b.junction(5.0, 0.0);
+    // A bound dot joins them (the authored gesture - the tool binds);
+    // a bare dot (a move's leftovers) would leave them separate.
+    b.junction(5.0, 0.0, {horizontal, horizontal + 1});
     CHECK(ws::circsim::build_nets(b.s).nets.nets.size() == 1);
 }
 
@@ -164,15 +192,16 @@ TEST_CASE("a pin lying on a wire's interior connects nothing") {
     Bench b;
     Part* r1 = b.part("r", "R1", {0.0, 0.0});
     // A vertical wire through R1's right pin at (3, 0).
-    b.wire_j(3.0, 3.0, 3.0, -3.0);
+    const std::uint32_t vertical = b.wire_j(3.0, 3.0, 3.0, -3.0);
     const NetBuild nets = ws::circsim::build_nets(b.s);
     const auto* pin_net = nets.nets.net_of_pin(PinRef{r1->id, 1});
     REQUIRE(pin_net != nullptr);
     CHECK(pin_net->wires.empty());
     CHECK(has_diag(nets, "circsim.nets.pin_on_wire"));
-    // The authored ways back: a junction at the pin's spot, or the
-    // wire ending on the pin (a landing) - the junction dot first.
-    b.junction(3.0, 0.0);
+    // The authored ways back: a BOUND junction at the pin's spot (the
+    // tool's gesture - the dot taps the wire), or the wire ending on
+    // the pin (a landing) - the bound dot first.
+    b.junction(3.0, 0.0, {vertical});
     const NetBuild joined = ws::circsim::build_nets(b.s);
     CHECK(joined.nets.net_of_pin(PinRef{r1->id, 1})->wires.size() == 1);
 }
@@ -659,15 +688,16 @@ CombAnswer comb(std::size_t teeth) {
     Bench b;
     // The spine runs one unit past the last tooth so no crossing
     // waypoint sits on a spine endpoint (those are landings). A
-    // junction at every tooth's crossing - the authored T - keeps
-    // the comb ONE net through both paths, and the joins the dots
-    // ride are none (a junction is the explicit dot; nothing is
-    // silent).
-    b.wire_j(0, 0, static_cast<double>(teeth) + 1.0, 0);
+    // junction at every tooth's crossing, BOUND to the spine and its
+    // own tooth - the authored T gesture - keeps the comb ONE net
+    // through both paths, and the joins the dots ride are none (a
+    // bound junction is the explicit dot; nothing is silent).
+    const std::uint32_t spine = b.wire_j(0, 0,
+                                         static_cast<double>(teeth) + 1.0, 0);
     for (std::size_t i = 1; i <= teeth; ++i) {
         const double x = static_cast<double>(i);
-        b.wire_j(x, -5, x, 5, {Pos{x, 0}});
-        b.junction(x, 0);
+        const std::uint32_t tooth = b.wire_j(x, -5, x, 5, {Pos{x, 0}});
+        b.junction(x, 0, {spine, tooth});
     }
     const NetBuild built = ws::circsim::build_nets(b.s);
     CombAnswer out;

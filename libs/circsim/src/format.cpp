@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <ws/circsim/format.hpp>
+#include <ws/circsim/geom.hpp>
 #include <ws/circsim/text.hpp>
 
 #include "json_helpers.hpp"
@@ -764,8 +765,33 @@ ws::core::Result<Schematic> load_csim(std::string_view text,
                                                    std::to_string(j.id),
                                          diags);
                                  }
+                                 // The authored taps: wires the dot is
+                                 // bound to (the wire tool's "connect
+                                 // here"). A stale id (its wire was
+                                 // deleted elsewhere) simply taps
+                                 // nothing - the net build drops it.
+                                 if (const json::Value* taps =
+                                         o.find("taps")) {
+                                     if (const json::Array* arr =
+                                             taps->as_array()) {
+                                         for (const json::Value& tv :
+                                              *arr) {
+                                             const auto wid =
+                                                 as_integer(&tv);
+                                             if (wid.has_value() &&
+                                                 *wid > 0 &&
+                                                 *wid < 0xFFFFFFFFLL) {
+                                                 j.taps.push_back(
+                                                     static_cast<
+                                                         std::uint32_t>(
+                                                         *wid));
+                                             }
+                                         }
+                                     }
+                                 }
                                  for (const auto& [key, val] : o) {
-                                     if (key != "id" && key != "pos") {
+                                     if (key != "id" && key != "pos" &&
+                                         key != "taps") {
                                          j.unknown.set(key, val);
                                      }
                                  }
@@ -802,6 +828,64 @@ ws::core::Result<Schematic> load_csim(std::string_view text,
             wires.erase(wires.begin() + static_cast<std::ptrdiff_t>(i));
         }
         s.restore_wires(std::move(wires));
+    }
+    // Migration: pre-binding decks (a junction list with no "taps"
+    // field anywhere) drew their T-taps as a junction dot on a wire's
+    // path and the OLD net rule read that as a connection. Bind those
+    // dots to the wires they sit on so the drawing's meaning survives
+    // the semantic tightening: a deck that never carried taps keeps
+    // its authored geometry; a deck the new editor wrote carries the
+    // field and skips the inference entirely.
+    {
+        bool any_taps = false;
+        for (const Junction& j : s.junctions()) {
+            if (!j.taps.empty()) {
+                any_taps = true;
+                break;
+            }
+        }
+        if (!any_taps && !s.junctions().empty() && !s.wires().empty()) {
+            // The same point-on-segment test nets.cpp runs, spelled
+            // once here (collinear and inside the segment's bbox).
+            const auto on_polyline_local =
+                [](const std::vector<Pos>& path, Pos p) {
+                    for (std::size_t i = 1; i < path.size(); ++i) {
+                        const Pos a = path[i - 1];
+                        const Pos b = path[i];
+                        const double cross = (b.x - a.x) * (p.y - a.y) -
+                                             (b.y - a.y) * (p.x - a.x);
+                        if (cross != 0.0) {
+                            continue;
+                        }
+                        if (p.x >= std::min(a.x, b.x) &&
+                            p.x <= std::max(a.x, b.x) &&
+                            p.y >= std::min(a.y, b.y) &&
+                            p.y <= std::max(a.y, b.y)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+            for (Junction& j : s.junctions_mut()) {
+                for (const Wire& w : s.wires()) {
+                    if (!on_polyline_local(ws::circsim::wire_path(
+                                               s,
+                                               builtin_library(), w),
+                                            j.pos)) {
+                        continue;
+                    }
+                    // The wire's own endpoint dot at the position
+                    // carries its authored ref - never a tap.
+                    const auto* ea = std::get_if<JunctionRef>(&w.a);
+                    const auto* eb = std::get_if<JunctionRef>(&w.b);
+                    if ((ea != nullptr && ea->junction == j.id) ||
+                        (eb != nullptr && eb->junction == j.id)) {
+                        continue;
+                    }
+                    j.taps.push_back(w.id);
+                }
+            }
+        }
     }
     {
         std::deque<Label> labels;
@@ -912,6 +996,16 @@ std::string save_csim(const Schematic& s) {
         json::Object o;
         o.set("id", json::Value::integer(j.id));
         o.set("pos", pos_value(j.pos));
+        // The authored taps ride the dot (the wire tool's "connect
+        // here"); an empty list writes nothing - the field is young,
+        // and pre-binding decks stay byte-compatible.
+        if (!j.taps.empty()) {
+            json::Array taps;
+            for (std::uint32_t t : j.taps) {
+                taps.push_back(json::Value::integer(t));
+            }
+            o.set("taps", json::Value::array(std::move(taps)));
+        }
         for (const auto& [key, val] : j.unknown) {
             o.set(key, val);
         }

@@ -173,9 +173,18 @@ void push_place_wire(SchematicDocument& doc, ws::circsim::Wire wire,
 // Removes the wire plus the junctions it orphans.
 void push_delete_wire(SchematicDocument& doc, std::uint32_t wire_id);
 
+// push_move_junction: the drag-release move of one junction. The
+// binding changes the LANDING makes (tap_add: wires whose bodies the
+// dot now sits on - the author dragged it there, the spec's "move the
+// wire directly" case; tap_remove: taps whose wires no longer pass
+// through the landing) ride the same undo step. The pusher computes
+// them against the landed schematic (entity at `to`) with the library
+// in hand; the command owns no symbol knowledge.
 void push_move_junction(SchematicDocument& doc, std::uint32_t junction_id,
                         ws::circsim::Pos to,
-                        std::vector<WireRoute> wire_routes = {});
+                        std::vector<WireRoute> wire_routes = {},
+                        std::vector<std::uint32_t> tap_add = {},
+                        std::vector<std::uint32_t> tap_remove = {});
 
 void push_place_label(SchematicDocument& doc, ws::circsim::Label label);
 void push_delete_label(SchematicDocument& doc, std::uint32_t label_id);

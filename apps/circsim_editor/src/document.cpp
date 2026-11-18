@@ -758,6 +758,17 @@ class AddWireCommand final : public EditCommand {
 
     void apply() override {
         for (const Junction& j : junctions_) {
+            // A junction that already exists is the re-bind case (the
+            // author clicked an existing dot on a wire's body): take
+            // the original out first so the bound snapshot REPLACES it
+            // (put_back appends; a blind reinsert would double the
+            // dot). The snapshot carries the dot's own taps plus the
+            // new binding - nothing is lost.
+            const bool existing =
+                schem().find_junction(j.id) != nullptr;
+            if (existing) {
+                (void)take_junction(schem(), j.id);
+            }
             reinsert_junction(schem(), j);
         }
         reinsert_wire(schem(), wire_);
@@ -838,19 +849,34 @@ class DeleteWireCommand final : public EditCommand {
 
 class MoveJunctionCommand final : public EditCommand {
   public:
+    // tap_add/tap_remove: the binding change the landing makes - a
+    // junction DRAGGED onto a wire's body taps that wire (the spec's
+    // "move the wire directly" case: the author's hand put it there),
+    // and a tap whose wire no longer passes through the landing is
+    // released (a binding whose geometry is gone would keep a stale
+    // connection alive). Both computed by the pusher against the
+    // landing; undo restores them exactly.
     MoveJunctionCommand(SchematicDocument& doc, std::uint32_t id,
                         ws::circsim::Pos from, ws::circsim::Pos to,
                         std::vector<WireRoute> routes,
-                        std::vector<WireRoute> undo_routes)
+                        std::vector<WireRoute> undo_routes,
+                        std::vector<std::uint32_t> tap_add = {},
+                        std::vector<std::uint32_t> tap_remove = {})
         : EditCommand(&doc), id_(id), from_(from), to_(to),
-          routes_(std::move(routes)), undo_routes_(std::move(undo_routes)) {}
+          routes_(std::move(routes)), undo_routes_(std::move(undo_routes)),
+          tap_add_(std::move(tap_add)),
+          tap_remove_(std::move(tap_remove)) {}
 
     void apply() override {
         land(to_);
+        land_taps(tap_add_, true);
+        land_taps(tap_remove_, false);
         land_routes(routes_);
     }
     void undo() override {
         land(from_);
+        land_taps(tap_add_, false);
+        land_taps(tap_remove_, true);
         land_routes(undo_routes_);
     }
     [[nodiscard]] std::string name() const override {
@@ -858,6 +884,26 @@ class MoveJunctionCommand final : public EditCommand {
     }
 
   private:
+    // add=true pushes the id into the dot's taps (deduped); add=false
+    // erases it. Never touches a wire's own endpoint refs.
+    void land_taps(const std::vector<std::uint32_t>& taps, bool add) {
+        for (Junction& j : schem().junctions_mut()) {
+            if (j.id != id_) {
+                continue;
+            }
+            for (std::uint32_t t : taps) {
+                const auto at =
+                    std::find(j.taps.begin(), j.taps.end(), t);
+                if (add && at == j.taps.end()) {
+                    j.taps.push_back(t);
+                } else if (!add && at != j.taps.end()) {
+                    j.taps.erase(at);
+                }
+            }
+            schem().bump();
+            return;
+        }
+    }
     // The attached wires ride the step, same as the part move's.
     void land_routes(const std::vector<WireRoute>& routes) {
         for (const WireRoute& r : routes) {
@@ -882,6 +928,7 @@ class MoveJunctionCommand final : public EditCommand {
     std::uint32_t id_;
     ws::circsim::Pos from_, to_;
     std::vector<WireRoute> routes_, undo_routes_;
+    std::vector<std::uint32_t> tap_add_, tap_remove_;
 };
 
 // "Tidy Wires": re-straightens a set of wires in ONE undo step. Pure
@@ -1003,6 +1050,10 @@ std::size_t push_contact_junctions(
     // sentinel; reinsert_junction rides the id it is handed). A
     // junction already at the spot was filtered upstream (the dot
     // exists - the contact is explicit); here every position mints.
+    // Each minted dot carries its tap: the contact's own wire, the
+    // authored binding the move's landing just made visible (the
+    // pin's own wire ends on the dot's position through its endpoint
+    // ref - the wire tool's own gesture, made durable).
     std::vector<Junction> minted;
     minted.reserve(contacts.size());
     for (const ws::circsim::MovedPinContact& c : contacts) {
@@ -1012,6 +1063,7 @@ std::size_t push_contact_junctions(
         Junction j{};
         j.id = doc.schem.alloc_id();
         j.pos = c.pos;
+        j.taps.push_back(c.wire);
         minted.push_back(j);
     }
     if (minted.empty()) {
@@ -1025,7 +1077,9 @@ std::size_t push_contact_junctions(
 
 void push_move_junction(SchematicDocument& doc, std::uint32_t junction_id,
                         ws::circsim::Pos to,
-                        std::vector<WireRoute> wire_routes) {
+                        std::vector<WireRoute> wire_routes,
+                        std::vector<std::uint32_t> tap_add,
+                        std::vector<std::uint32_t> tap_remove) {
     for (const Junction& j : doc.schem.junctions()) {
         if (j.id == junction_id) {
             std::vector<WireRoute> undo_routes;
@@ -1037,7 +1091,8 @@ void push_move_junction(SchematicDocument& doc, std::uint32_t junction_id,
             }
             (void)doc.undo().push(std::make_unique<MoveJunctionCommand>(
                 doc, junction_id, j.pos, to, std::move(wire_routes),
-                std::move(undo_routes)));
+                std::move(undo_routes), std::move(tap_add),
+                std::move(tap_remove)));
             return;
         }
     }

@@ -280,6 +280,10 @@ struct SnapTarget {
     Pos pos{0.0, 0.0};
     int dir = -1;  // the approach direction, -1 when free
     std::uint32_t wire = 0;             // the wire id for WirePoint
+    // A WirePoint landing whose position carries an existing junction:
+    // the dot the author clicked ON the wire - the commit re-binds it
+    // (the T-tap through an existing dot).
+    std::uint32_t tap_junction = 0;
 };
 
 [[nodiscard]] SnapTarget snap_wire_target(const Editor& ed, Pos world) {
@@ -308,6 +312,14 @@ struct SnapTarget {
         t.pos = wp->pos;
         t.dir = -1;  // no approach constraint - the new wire leaves freely
         t.wire = wp->wire;
+        // A junction already sitting at that wire point: the author
+        // clicked the dot itself ON the wire - the click re-binds it
+        // (the T-tap gesture through an existing dot). The commit
+        // side adds the binding; nothing else changes.
+        if (const std::uint32_t j = ed.hit_junction(
+                wp->pos, pick_world(ed.view)).value_or(0)) {
+            t.tap_junction = j;
+        }
         return t;
     }
     SnapTarget t;
@@ -1074,6 +1086,8 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
             std::vector<WireRoute> routes;
             std::vector<editor::GluedJunctionMove> glue;
             std::vector<ws::circsim::MovedPinContact> contacts;
+            std::vector<std::uint32_t> tap_add;
+            std::vector<std::uint32_t> tap_remove;
             if (ed.doc != nullptr) {
                 if (ed.drag.kind == Editor::Drag::Kind::Part) {
                     // The glue resolves at the PRESS position (the
@@ -1132,6 +1146,18 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                     set_drag_pos(ed, to);
                     routes = ed.attached_wire_routes(ed.drag.kind,
                                                      ed.drag.id, pins);
+                    // The binding changes the LANDING makes (the
+                    // entity sits at `to`): a junction dragged onto a
+                    // wire's body taps it - the spec's "unless we
+                    // click/move the wire directly" - and a tap whose
+                    // wire no longer passes through is released.
+                    if (ed.drag.kind == Editor::Drag::Kind::Junction) {
+                        const ws::circsim::JunctionTapLanding taps =
+                            ws::circsim::junction_tap_landing(
+                                *ed.schem(), ed.library, ed.drag.id);
+                        tap_add = taps.add;
+                        tap_remove = taps.remove;
+                    }
                 }
             }
             set_drag_pos(ed, ed.drag.start_world);
@@ -1150,7 +1176,9 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                         *ed.doc, std::move(contacts), "Move Part");
                 } else if (ed.drag.kind == Editor::Drag::Kind::Junction) {
                     push_move_junction(*ed.doc, ed.drag.id, to,
-                                       std::move(routes));
+                                       std::move(routes),
+                                       std::move(tap_add),
+                                       std::move(tap_remove));
                 } else if (ed.drag.kind == Editor::Drag::Kind::Label) {
                     push_move_label(*ed.doc, ed.drag.id, to);
                 }
@@ -1353,18 +1381,66 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                     ws::circsim::Junction j;
                     j.pos = ed.wire_draft.a_pos;
                     j.id = ed.schem()->alloc_id();
+                    // A start on a wire's BODY: the dot taps that wire -
+                    // the authored binding whose connection the net
+                    // rule honors (a start on free space taps nothing;
+                    // the wire being drawn ends on this dot by ref).
+                    if (!ed.wire_draft.a_free &&
+                        ed.wire_draft.a_wire != 0) {
+                        j.taps.push_back(ed.wire_draft.a_wire);
+                    }
                     junctions.push_back(j);
                     w.a = ws::circsim::JunctionRef{j.id};
                 } else {
                     w.a = ed.wire_draft.a;
                 }
-                if (t.kind == SnapTarget::Kind::Free ||
-                    t.kind == SnapTarget::Kind::WirePoint) {
+                if (t.kind == SnapTarget::Kind::Free) {
                     ws::circsim::Junction j;
                     j.pos = t.pos;
                     j.id = ed.schem()->alloc_id();
                     junctions.push_back(j);
                     w.b = ws::circsim::JunctionRef{j.id};
+                } else if (t.kind == SnapTarget::Kind::WirePoint) {
+                    // The commit side's own T-tap: a landing on a
+                    // wire's body. A dot already at that position is
+                    // the author clicking the dot itself - re-bind it
+                    // (the binding rides the same command as the
+                    // wire; undo removes both); otherwise a fresh dot
+                    // mints, bound the same way. The re-bind carries a
+                    // SNAPSHOT of the junction (the command stores
+                    // whole entities), so a junction that already
+                    // taps other wires keeps them.
+                    if (t.tap_junction != 0) {
+                        const ws::circsim::Junction* found =
+                            ed.schem()->find_junction(t.tap_junction);
+                        if (found != nullptr) {
+                            ws::circsim::Junction bound = *found;
+                            if (std::find(bound.taps.begin(),
+                                         bound.taps.end(),
+                                         t.wire) == bound.taps.end()) {
+                                bound.taps.push_back(t.wire);
+                            }
+                            junctions.push_back(bound);
+                            w.b = ws::circsim::JunctionRef{bound.id};
+                        } else {
+                            // The dot died between the snap and the
+                            // commit (an undo, another panel's delete):
+                            // mint a fresh one, bound, the same path.
+                            ws::circsim::Junction j;
+                            j.pos = t.pos;
+                            j.id = ed.schem()->alloc_id();
+                            j.taps.push_back(t.wire);
+                            junctions.push_back(j);
+                            w.b = ws::circsim::JunctionRef{j.id};
+                        }
+                    } else {
+                        ws::circsim::Junction j;
+                        j.pos = t.pos;
+                        j.id = ed.schem()->alloc_id();
+                        j.taps.push_back(t.wire);
+                        junctions.push_back(j);
+                        w.b = ws::circsim::JunctionRef{j.id};
+                    }
                 } else {
                     w.b = t.end;
                 }
