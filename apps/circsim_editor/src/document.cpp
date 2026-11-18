@@ -793,33 +793,6 @@ class AddWireCommand final : public EditCommand {
 // becomes a named node with a drawn dot); undo takes them exactly
 // back - the connection the move created and the connection the undo
 // removes ride the same step.
-class ContactJunctionsCommand final : public EditCommand {
-  public:
-    ContactJunctionsCommand(SchematicDocument* doc,
-                             std::vector<Junction> junctions,
-                             std::string name)
-        : EditCommand(doc), junctions_(std::move(junctions)),
-          name_(std::move(name)) {}
-
-    void apply() override {
-        for (const Junction& j : junctions_) {
-            reinsert_junction(schem(), j);
-        }
-        schem().bump();
-    }
-    void undo() override {
-        for (const Junction& j : junctions_) {
-            (void)take_junction(schem(), j.id);
-        }
-        schem().bump();
-    }
-    [[nodiscard]] std::string name() const override { return name_; }
-
-  private:
-    std::vector<Junction> junctions_;
-    std::string name_;
-};
-
 class DeleteWireCommand final : public EditCommand {
   public:
     DeleteWireCommand(SchematicDocument* doc, IndexedEntity<Wire> wire,
@@ -1042,38 +1015,6 @@ void push_delete_wire(SchematicDocument& doc, std::uint32_t wire_id) {
     }
 }
 
-std::size_t push_contact_junctions(
-    SchematicDocument& doc,
-    const std::vector<ws::circsim::MovedPinContact>& contacts,
-    std::string name) {
-    // One junction per contact, minted fresh ids (0 is the "none"
-    // sentinel; reinsert_junction rides the id it is handed). A
-    // junction already at the spot was filtered upstream (the dot
-    // exists - the contact is explicit); here every position mints.
-    // Each minted dot carries its tap: the contact's own wire, the
-    // authored binding the move's landing just made visible (the
-    // pin's own wire ends on the dot's position through its endpoint
-    // ref - the wire tool's own gesture, made durable).
-    std::vector<Junction> minted;
-    minted.reserve(contacts.size());
-    for (const ws::circsim::MovedPinContact& c : contacts) {
-        if (doc.schem.find_wire(c.wire) == nullptr) {
-            continue;  // the contact's wire is gone: nothing to name
-        }
-        Junction j{};
-        j.id = doc.schem.alloc_id();
-        j.pos = c.pos;
-        j.taps.push_back(c.wire);
-        minted.push_back(j);
-    }
-    if (minted.empty()) {
-        return 0;
-    }
-    const std::size_t count = minted.size();
-    (void)doc.undo().push(std::make_unique<ContactJunctionsCommand>(
-        &doc, std::move(minted), std::move(name)));
-    return count;
-}
 
 void push_move_junction(SchematicDocument& doc, std::uint32_t junction_id,
                         ws::circsim::Pos to,

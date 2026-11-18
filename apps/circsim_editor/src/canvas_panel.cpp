@@ -906,11 +906,10 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
             }
             // The routes, deduped by wire id (a wire bent by two
             // members would be captured twice with the same shape).
+            // No contacts collected: a move never creates
+            // connections (a pin left on a foreign wire's interior
+            // dangles, ERC's pin_on_wire warns it).
             std::map<std::uint32_t, WireRoute> routes;
-            // The contacts the LANDING creates (each moved part's
-            // pins on OTHER wires' interiors), collected while
-            // everyone sits at the landing for the route read.
-            std::vector<ws::circsim::MovedPinContact> contacts;
             for (const Selection& m : ed.group_drag.set) {
                 if (m.kind != Selection::Kind::Part &&
                     m.kind != Selection::Kind::Junction) {
@@ -923,13 +922,6 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                 for (WireRoute& r :
                      ed.attached_wire_routes(kind, m.id, pinned)) {
                     routes[r.wire] = std::move(r);
-                }
-                if (m.kind == Selection::Kind::Part) {
-                    for (ws::circsim::MovedPinContact& c :
-                         ws::circsim::moved_pin_contacts(
-                             ed.doc->schem, ed.library, m.id)) {
-                        contacts.push_back(std::move(c));
-                    }
                 }
             }
             // Back to the press positions (the command's "was").
@@ -1039,11 +1031,8 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                 }
                 editor::push_move_set(*ed.doc, std::move(moves),
                                       std::move(route_list), std::move(glue));
-                // The group landed: the contacts each part's landing
-                // created become explicit junctions, the same named
-                // step the single drag lands.
-                (void)push_contact_junctions(
-                    *ed.doc, std::move(contacts), "Move Selection");
+                // No contact junctions: the group move connects
+                // nothing either (same rule as the single drag).
             } else {
                 // Nothing moved: put everyone back at the landing the
                 // live drag had left them at (a no-op command would
@@ -1088,7 +1077,6 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
             // doc is null so the entity is never left stranded.
             std::vector<WireRoute> routes;
             std::vector<editor::GluedJunctionMove> glue;
-            std::vector<ws::circsim::MovedPinContact> contacts;
             std::vector<std::uint32_t> tap_add;
             std::vector<std::uint32_t> tap_remove;
             if (ed.doc != nullptr) {
@@ -1134,11 +1122,14 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                             }
                         }
                     }
-                    // The contacts the LANDING creates (a pin of the moved
-                    // part on another wire's interior): the entity sits at
-                    // `to` here for the contacts read.
-                    contacts = ws::circsim::moved_pin_contacts(
-                        ed.doc->schem, ed.library, ed.drag.id);
+                    // A move never creates connections: a pin the
+                    // landing leaves on another wire's interior stays
+                    // a dangling touch (nets.cpp's pin_on_wire
+                    // warning names it; wiring the pin is the
+                    // author's gesture). The older flow minted a
+                    // bound junction at each contact - the "silent
+                    // pickup" - which connected nets the drawing
+                    // never said to connect.
                 } else {
                     // The T-tap spots read at the press geometry (the
                     // live drag left the entity at the landing; the
@@ -1171,12 +1162,10 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                 if (ed.drag.kind == Editor::Drag::Kind::Part) {
                     push_move_part(*ed.doc, ed.drag.id, to,
                                    std::move(routes), std::move(glue));
-                    // The move landed: whatever contacts the landing
-                    // created become explicit junctions - the pickup
-                    // rule's silent join gets a dot, survives the next
-                    // move away, and undoes with the move that made it.
-                    (void)push_contact_junctions(
-                        *ed.doc, std::move(contacts), "Move Part");
+                    // No contact junctions: a move never connects
+                    // anything (see above) - a landing that touches
+                    // a foreign wire leaves the pin dangling, warned
+                    // by ERC's pin_on_wire until the author wires it.
                 } else if (ed.drag.kind == Editor::Drag::Kind::Junction) {
                     push_move_junction(*ed.doc, ed.drag.id, to,
                                        std::move(routes),

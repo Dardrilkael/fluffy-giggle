@@ -131,15 +131,6 @@ void push_transform_part(SchematicDocument& doc, std::uint32_t part_id,
 
 // The explicit junctions a move/rotate's landing CREATED: for every
 // contact the moved part's pins made with another wire's interior
-// (ws::circsim::moved_pin_contacts), one junction is minted at the
-// contact position - the pickup rule's silent connection becomes a
-// named node with a drawn dot, so it survives the NEXT move away and
-// the undo of the move that made it. One undo step, one name; an
-// empty list lands nothing. Returns the number minted.
-std::size_t push_contact_junctions(
-    SchematicDocument& doc,
-    const std::vector<ws::circsim::MovedPinContact>& contacts,
-    std::string name);
 
 // The routed seam (the rotate/mirror the editor lands after a drag):
 // the glued junctions ride the step with both orientations' landings -

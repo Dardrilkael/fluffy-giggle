@@ -271,18 +271,16 @@ bool Editor::transform_part(std::uint32_t id, int rot, bool mirror,
             }
         }
     }
-    // The contacts the rotated pins make with OTHER wires' interiors,
-    // read at the same landing visit: a rotated pin landing on a wire
-    // is the same silent pickup a moved one makes - it becomes an
-    // explicit junction with the transform's own undo step.
-    const std::vector<ws::circsim::MovedPinContact> contacts =
-        ws::circsim::moved_pin_contacts(*s, library, id);
+    // No contact junctions: a rotate/mirror never creates
+    // connections either (the same rule as the move - a pin left on
+    // a foreign wire's interior dangles, ERC's pin_on_wire warns
+    // it). The older flow minted a bound junction at each rotated
+    // pin's landing: the "silent pickup".
     p->rot = was_rot;
     p->mirror = was_mirror;
     s->bump();
     push_transform_part_routed(*doc, id, rot, mirror, std::move(name),
                                std::move(routes), std::move(glue));
-    (void)push_contact_junctions(*doc, contacts, std::string{name});
     return true;
 }
 

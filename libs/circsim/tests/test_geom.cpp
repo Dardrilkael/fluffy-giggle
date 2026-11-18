@@ -6,6 +6,7 @@
 // so a second consumer (a batch CLI, another frontend) can rely on
 // them without the app.
 
+#include <algorithm>
 #include <doctest/doctest.h>  // (this suite rides test_format.cpp's main - the lib suite's shape)
 
 #include <cmath>
@@ -436,36 +437,9 @@ TEST_CASE("wire_pin_spots: each spot names its owning wire") {
     s.junctions_mut().push_back(j2);
     s.bump();
 
-    // W1: (0,0) -- (4,0), junction on its interior at (2,0)
-    ws::circsim::Wire w1{};
-    w1.id = s.alloc_id();
-    w1.a = ws::circsim::JunctionRef{j1.id};
-    w1.b = ws::circsim::JunctionRef{j2.id};
-    w1.ortho = true;
-    s.wires_mut().push_back(w1);
-    s.bump();
-
-    // Add a junction ON W1's body at (2,0) - this is a T-tap on W1
-    ws::circsim::Junction tap{};
-    tap.id = s.alloc_id();
-    tap.pos = {2.0, 0.0};
-    s.junctions_mut().push_back(tap);
-    s.bump();
-
-    // W2: endpoint at the junction (not a tap)
-    ws::circsim::Wire w2{};
-    w2.id = s.alloc_id();
-    w2.a = ws::circsim::JunctionRef{tap.id};
-    ws::circsim::Junction j3{};
-    j3.id = s.alloc_id();
-    j3.pos = {2.0, 3.0};
-    s.junctions_mut().push_back(j3);
-    w2.b = ws::circsim::JunctionRef{j3.id};
-    w2.ortho = true;
-    s.wires_mut().push_back(w2);
-    s.bump();
-
-    // A part with pins at (0,0) and (4,0) - the endpoints of W1
+    // The part owns W1 and W2: 'r' pins at (-3,0) and (3,0), pos
+    // (0,0). W1 runs pin0 -> j2 (4,0) carrying the tap at (2,0) on its
+    // interior; W2 runs pin1 -> j3 (3,3), carrying no tap.
     const ws::circsim::SymbolDef* r = lib.find("r");
     REQUIRE(r != nullptr);
     ws::circsim::Part p{};
@@ -476,8 +450,35 @@ TEST_CASE("wire_pin_spots: each spot names its owning wire") {
     s.parts_mut().push_back(p);
     s.bump();
 
-    // wire_pin_spots for the part: wires W1 and W2 both connect to this
-    // part's pins. The tap at (2,0) is on W1's interior - it should
+    ws::circsim::Wire w1{};
+    w1.id = s.alloc_id();
+    w1.a = ws::circsim::PinRef{p.id, 0};
+    w1.b = ws::circsim::JunctionRef{j2.id};
+    w1.ortho = true;
+    s.wires_mut().push_back(w1);
+    s.bump();
+
+    // A junction ON W1's body at (2,0) - W1's own T-tap.
+    ws::circsim::Junction tap{};
+    tap.id = s.alloc_id();
+    tap.pos = {2.0, 0.0};
+    s.junctions_mut().push_back(tap);
+    s.bump();
+
+    ws::circsim::Wire w2{};
+    w2.id = s.alloc_id();
+    w2.a = ws::circsim::PinRef{p.id, 1};
+    ws::circsim::Junction j3{};
+    j3.id = s.alloc_id();
+    j3.pos = {3.0, 3.0};
+    s.junctions_mut().push_back(j3);
+    w2.b = ws::circsim::JunctionRef{j3.id};
+    w2.ortho = true;
+    s.wires_mut().push_back(w2);
+    s.bump();
+
+    // wire_pin_spots for the part: W1 and W2 both reference the part's
+    // pins. The tap at (2,0) is on W1's interior - it should
     // appear as a PinnedSpot owned by W1.
     const auto pinned = ws::circsim::wire_pin_spots(
         s, lib, ws::circsim::AttachedKind::Part, p.id);
@@ -503,18 +504,26 @@ TEST_CASE("attached_wire_routes: each wire routes through ONLY its own spots") {
     ws::circsim::Schematic s;
     const ws::circsim::SymbolLibrary lib;
 
-    ws::circsim::Junction j1{}, j2{};
-    j1.id = s.alloc_id();
-    j1.pos = {0.0, 0.0};
+    const ws::circsim::SymbolDef* r = lib.find("r");
+    REQUIRE(r != nullptr);
+    ws::circsim::Part p{};
+    p.id = s.alloc_id();
+    p.symbol = r->key;
+    p.ref = "R1";
+    p.pos = {0.0, 0.0};  // pins at (-3,0) and (3,0)
+    s.parts_mut().push_back(p);
+    s.bump();
+
+    ws::circsim::Junction j2{};
     j2.id = s.alloc_id();
     j2.pos = {4.0, 0.0};
-    s.junctions_mut().push_back(j1);
     s.junctions_mut().push_back(j2);
     s.bump();
 
+    // W1: the part's pin0 to j2, the tap at (2,0) on its interior.
     ws::circsim::Wire w1{};
     w1.id = s.alloc_id();
-    w1.a = ws::circsim::JunctionRef{j1.id};
+    w1.a = ws::circsim::PinRef{p.id, 0};
     w1.b = ws::circsim::JunctionRef{j2.id};
     w1.ortho = true;
     s.wires_mut().push_back(w1);
@@ -526,26 +535,17 @@ TEST_CASE("attached_wire_routes: each wire routes through ONLY its own spots") {
     s.junctions_mut().push_back(tap);
     s.bump();
 
+    // W2: the part's pin1 (3,0) to j3 (3,3) - carries no tap.
     ws::circsim::Wire w2{};
     w2.id = s.alloc_id();
-    w2.a = ws::circsim::JunctionRef{tap.id};
+    w2.a = ws::circsim::PinRef{p.id, 1};
     ws::circsim::Junction j3{};
     j3.id = s.alloc_id();
-    j3.pos = {2.0, 3.0};
+    j3.pos = {3.0, 3.0};
     s.junctions_mut().push_back(j3);
     w2.b = ws::circsim::JunctionRef{j3.id};
     w2.ortho = true;
     s.wires_mut().push_back(w2);
-    s.bump();
-
-    const ws::circsim::SymbolDef* r = lib.find("r");
-    REQUIRE(r != nullptr);
-    ws::circsim::Part p{};
-    p.id = s.alloc_id();
-    p.symbol = r->key;
-    p.ref = "R1";
-    p.pos = {0.0, 0.0};
-    s.parts_mut().push_back(p);
     s.bump();
 
     // Capture pinned spots BEFORE the move (at press geometry)
@@ -562,10 +562,10 @@ TEST_CASE("attached_wire_routes: each wire routes through ONLY its own spots") {
 
     // W1's route should go through (2,0) - its tap's position
     // W2's route should NOT be forced through (2,0)
-    const auto* r1 = std::find_if(routes.begin(), routes.end(),
-                                  [&](const auto& r) { return r.wire == w1.id; });
-    const auto* r2 = std::find_if(routes.begin(), routes.end(),
-                                  [&](const auto& r) { return r.wire == w2.id; });
+    const auto r1 = std::find_if(routes.begin(), routes.end(),
+                                 [&](const auto& r) { return r.wire == w1.id; });
+    const auto r2 = std::find_if(routes.begin(), routes.end(),
+                                 [&](const auto& r) { return r.wire == w2.id; });
 
     REQUIRE(r1 != routes.end());
     REQUIRE(r2 != routes.end());

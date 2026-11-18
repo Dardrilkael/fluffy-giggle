@@ -273,9 +273,17 @@ TEST_CASE("single delete undo restores the original deque position") {
         CHECK(entity_ids(s.labels()) == labels);
     }
 }
-// --- move-created contacts become explicit junctions --------------------------
+// --- a move never creates connections ------------------------------------------
 
-TEST_CASE("a move landing a pin on a wire mints the contact junctions") {
+TEST_CASE("a move landing a pin on a wire stays inert (no minted dots)") {
+    // The tip-crossing rule at the document layer: the move command
+    // lands the part whose pins ride an unrelated wire's interior,
+    // and the sheet gains nothing - no junction, no binding. The
+    // touch stays ERC's pin_on_wire warning until the author wires
+    // it. (moved_pin_contacts itself still answers the geometry -
+    // the probe the canvas flow USED to mint from - kept as a lib
+    // seam for callers that want to ASK; the editor no longer acts
+    // on it.)
     DocumentFixture f;
     auto& s = f.doc.schem;
     const ws::circsim::SymbolDef* r =
@@ -310,43 +318,40 @@ TEST_CASE("a move landing a pin on a wire mints the contact junctions") {
     w2->b = ws::circsim::JunctionRef{b2->id};
     w2->ortho = true;
 
-    // The move's landing (0, 0): pin0 (-3, 0) and pin1 (3, 0) land on
-    // w2's interior - the contacts the commit mints. moved_pin_contacts
-    // reads the part AT ITS LANDING (the canvas release visits the
-    // landing before reading, then restores the press position).
+    // The geometry the landing WOULD touch (the lib seam answers it);
+    // the move command itself mints nothing from it.
     p1->pos = {0.0, 0.0};
     s.bump();
-    const std::vector<ws::circsim::MovedPinContact> contacts =
-        ws::circsim::moved_pin_contacts(s, ws::circsim::builtin_library(),
-                                        p1->id);
-    REQUIRE(contacts.size() == 2u);
+    CHECK(ws::circsim::moved_pin_contacts(
+              s, ws::circsim::builtin_library(), p1->id).size() == 2u);
     p1->pos = {0.0, 10.0};
     s.bump();
 
-    const std::size_t minted =
-        editor::push_contact_junctions(f.doc, contacts, "Move Part");
-    CHECK(minted == 2u);
-    REQUIRE(s.junctions().size() == 5u);  // j1, b1, b2 + the two dots
-    bool saw_dot_at_pin0 = false;
-    bool saw_dot_at_pin1 = false;
-    for (const Junction& j : s.junctions()) {
-        if (j.pos == ws::circsim::Pos{-3.0, 0.0}) {
-            saw_dot_at_pin0 = true;
-        }
-        if (j.pos == ws::circsim::Pos{3.0, 0.0}) {
-            saw_dot_at_pin1 = true;
-        }
-    }
-    CHECK(saw_dot_at_pin0);
-    CHECK(saw_dot_at_pin1);
+    // The move command: routes for the attached W1, no dots minted.
+    const std::vector<ws::circsim::WireRoute> no_routes;
+    const std::vector<editor::GluedJunctionMove> no_glue;
+    editor::push_move_part(f.doc, p1->id, {0.0, 0.0},
+                            {}, {});
+    REQUIRE(s.junctions().size() == 3u);  // j1, b1, b2 - nothing minted
+    CHECK(s.find_part(p1->id)->pos.y == 0.0);
 
-    // One undo removes both dots (the connection the move created and
-    // the junction land in the same step).
+    // The wire's net does not carry the part's pins.
+    {
+        const ws::circsim::NetBuild nets =
+            ws::circsim::build_nets(s, &ws::circsim::builtin_library());
+        const ws::circsim::Net* wn = nets.nets.net_of_wire(w2->id);
+        REQUIRE(wn != nullptr);
+        bool pin_in = false;
+        for (const ws::circsim::PinRef& pr : wn->pins) {
+            if (pr.part == p1->id) {
+                pin_in = true;
+            }
+        }
+        CHECK(!pin_in);
+    }
+
+    // One undo returns the sheet to exactly what it was.
     (void)f.doc.undo().undo();
     CHECK(s.junctions().size() == 3u);
-
-    // An empty contact list lands nothing at all.
-    CHECK(editor::push_contact_junctions(
-              f.doc, {}, "Move Part") == 0u);
-    CHECK(f.doc.undo().undo_count() == 0u);
+    CHECK(s.find_part(p1->id)->pos.y == 10.0);
 }

@@ -2416,11 +2416,17 @@ TEST_CASE("the group drag moves the set as ONE undo step") {
     CHECK(b.doc.schem.find_part(r2->id)->pos.y == doctest::Approx(0.0));
 }
 
-TEST_CASE("a moved part landing its pin on a wire mints the contact "
-          "junction") {
+TEST_CASE("a moved part landing its pin on a wire connects nothing "
+          "(the tip-crossing rule)") {
+    // The receiver-class repro: a part whose tip lands on an
+    // UNRELATED wire mid-move. The landing must leave the drawing
+    // exactly as the author's gestures made it: no junction minted,
+    // no net joined - the pin dangles (ERC's pin_on_wire warns it)
+    // until the author wires it themselves. The older flow minted a
+    // bound junction at each contact - the "silent pickup".
     Bench b;
     // R1 at (0, 4), the unrelated wire W2 at y = 0 - all inside the
-    // default camera (zoom 26, centered on the origin).
+    // default camera.
     const ws::circsim::Part* r1 = b.doc.schem.add_part(
         ws::circsim::Part::make("r", "R1", "1k", {0.0, 4.0}));
     ws::circsim::Junction b1;
@@ -2438,32 +2444,63 @@ TEST_CASE("a moved part landing its pin on a wire mints the contact "
     w2.ortho = true;
     b.doc.schem.wires_mut().push_back(w2);
 
-    // Drag R1 down onto the wire: pin0 (-3, 0) and pin1 (3, 0) land on
-    // W2's interior. The release mints an explicit junction at each
-    // contact - the connection the landing makes is visible, and the
-    // undo of the move takes the dots with it.
+    // The wire's own net, alone before and after.
+    const std::uint32_t wire_net = [&] {
+        const ws::circsim::NetBuild nets =
+            ws::circsim::build_nets(b.doc.schem, &b.ed.library);
+        const ws::circsim::Net* wn = nets.nets.net_of_wire(w2.id);
+        REQUIRE(wn != nullptr);
+        return wn->id;
+    }();
+
+    // Drag R1 down onto the wire: pin0 (-3,0) and pin1 (3,0) land on
+    // W2's interior.
     const std::size_t junctions_before =
         b.doc.schem.junctions().size();
     drag_world(b, {0.0, 4.0}, {0.0, 0.0});
     CHECK(b.doc.schem.find_part(r1->id)->pos.y ==
           doctest::Approx(0.0));
-    CHECK(b.doc.schem.junctions().size() == junctions_before + 2u);
-    bool dot_at_pin0 = false;
-    for (const ws::circsim::Junction& j :
-         b.doc.schem.junctions()) {
-        if (j.pos == ws::circsim::Pos{-3.0, 0.0}) {
-            dot_at_pin0 = true;
-        }
-    }
-    CHECK(dot_at_pin0);
 
-    // The undo stack: the move, then its contact junctions. Two undos
-    // return the sheet to exactly what it was.
-    (void)b.doc.undo().undo();
+    // No junction was minted: the sheet gained nothing but the move.
+    CHECK(b.doc.schem.junctions().size() == junctions_before);
+    // The nets did not join: the wire keeps its own net, and the
+    // pins are NOT in it.
+    {
+        const ws::circsim::NetBuild nets =
+            ws::circsim::build_nets(b.doc.schem, &b.ed.library);
+        const ws::circsim::Net* wn = nets.nets.net_of_wire(w2.id);
+        REQUIRE(wn != nullptr);
+        CHECK(wn->id == wire_net);
+        bool pin_in_wire_net = false;
+        for (const ws::circsim::PinRef& pr : wn->pins) {
+            if (pr.part == r1->id) {
+                pin_in_wire_net = true;
+            }
+        }
+        CHECK(!pin_in_wire_net);
+        // The touch itself is visible: the warning names it.
+        bool warned = false;
+        for (const ws::circsim::Diag& d : nets.diags) {
+            if (d.code == "circsim.nets.pin_on_wire") {
+                warned = true;
+            }
+        }
+        CHECK(warned);
+    }
+
+    // One undo returns the sheet to exactly what it was (no second
+    // hidden step riding the move).
     (void)b.doc.undo().undo();
     CHECK(b.doc.schem.junctions().size() == junctions_before);
     CHECK(b.doc.schem.find_part(r1->id)->pos.y ==
           doctest::Approx(4.0));
+    {
+        const ws::circsim::NetBuild nets =
+            ws::circsim::build_nets(b.doc.schem, &b.ed.library);
+        const ws::circsim::Net* wn = nets.nets.net_of_wire(w2.id);
+        REQUIRE(wn != nullptr);
+        CHECK(wn->id == wire_net);
+    }
 }
 
 TEST_CASE("copy/paste: fresh ids, renumbered refs, the geometry kept") {
