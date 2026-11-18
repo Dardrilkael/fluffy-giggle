@@ -247,20 +247,6 @@ struct PinnedSpot {
     std::uint32_t id, const std::vector<PinnedSpot>& pinned = {});
 
 // The junctions glued to a part: sitting exactly on one of its pins,
-// they are the "wire the pin" gesture's own artifact (a wire end's
-// junction on the pin, a T-tap dropped there) and must ride the part -
-// a move, group move, rotate or mirror that left them behind breaks
-// exactly the connections the author drew. Each carries the pin it
-// rides so the commands can glue it to the pin's own landing (the
-// rotated pin lands somewhere new, not a delta).
-struct GluedJunction {
-    std::uint32_t junction = 0;
-    std::uint32_t part = 0;
-    std::uint32_t pin = 0;
-};
-[[nodiscard]] std::vector<GluedJunction> glued_junctions(
-    const Schematic& s, const SymbolLibrary& lib, std::uint32_t part_id);
-
 [[nodiscard]] std::vector<PinnedSpot> wire_pin_spots(
     const Schematic& s, const SymbolLibrary& lib, AttachedKind kind,
     std::uint32_t id);

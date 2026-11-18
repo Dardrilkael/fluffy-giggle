@@ -1357,34 +1357,6 @@ JunctionTapLanding junction_tap_landing(const Schematic& s,
     return out;
 }
 
-std::vector<GluedJunction> glued_junctions(const Schematic& s,
-                                           const SymbolLibrary& lib,
-                                           std::uint32_t part_id) {
-    // A junction exactly on a pin of the part: the wire gestures' own
-    // artifact on that pin (a wire end's junction, a T-tap dropped
-    // there). Those ride the part; a junction merely NEAR the pin (or
-    // on the body of a wire attached to it) does not - only exact
-    // positions glue, the same coincidence the net rules union.
-    std::vector<GluedJunction> out;
-    const Part* p = s.find_part(part_id);
-    if (p == nullptr) {
-        return out;
-    }
-    const SymbolDef* sym = lib.find(p->symbol);
-    if (sym == nullptr) {
-        return out;
-    }
-    for (const Junction& j : s.junctions()) {
-        for (std::uint32_t i = 0; i < sym->pins.size(); ++i) {
-            const Pos pin = pin_pos(*sym, *p, i);
-            if (eps_eq_pos(j.pos, pin, 1e-9)) {
-                out.push_back(GluedJunction{j.id, part_id, i});
-                break;
-            }
-        }
-    }
-    return out;
-}
 
 // --- colors ----------------------------------------------------------------
 

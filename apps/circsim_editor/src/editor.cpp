@@ -225,32 +225,12 @@ bool Editor::transform_part(std::uint32_t id, int rot, bool mirror,
     }
     const int was_rot = p->rot;
     const bool was_mirror = p->mirror;
-    // The glue resolves BEFORE the part visits either orientation: the
-    // junctions sit on the pins at the OLD one, and glued_junctions
-    // reads pin positions live (after a hop they would sit on nothing
-    // and the ride would never fire). Then the part visits the new
-    // orientation; the attached wires' endpoints resolve live through
-    // their pins, so the routes read from the landing; then the part
-    // goes back so the command captures the real "was". Each hop bumps
-    // so nothing reads a stale cache. The glue's `to` is each pin's
-    // spot at the NEW orientation, `from` the OLD one - a
-    // rotate/mirror that left them behind would strand every
-    // connection drawn through them.
-    // The glue resolves BEFORE any orientation hop (the junctions sit
-    // on the pins at the CURRENT orientation; after a hop they would
-    // sit on nothing and the ride would never fire). `from` is each
-    // junction's own position right now; `to` resolves from the part
-    // at its new orientation below.
     std::vector<editor::GluedJunctionMove> glue;
-    for (const ws::circsim::GluedJunction& g :
-         ws::circsim::glued_junctions(*s, library, id)) {
-        editor::GluedJunctionMove gm;
-        gm.junction = g.junction;
-        gm.pin = g.pin;
-        const ws::circsim::Junction* j = s->find_junction(g.junction);
-        gm.from = j != nullptr ? j->pos : Pos{};
-        glue.push_back(gm);
-    }
+    // No glue: a rotate/mirror is geometry-only (the move's rule).
+    // Wires end on the part's pins by reference and the routes below
+    // keep them ortho through the hop; a dot exactly on a pin is a
+    // coincidence the partition rule refuses (entities_coincide) - it
+    // never rides the transform.
     // The T-tap spots read at the CURRENT orientation (before the
     // hop - at the new one the old paths are gone).
     const std::vector<ws::circsim::PinnedSpot> pinned =
@@ -262,15 +242,6 @@ bool Editor::transform_part(std::uint32_t id, int rot, bool mirror,
     // author drew at press geometry) so the taps' connections survive.
     std::vector<WireRoute> routes =
         attached_wire_routes(Drag::Kind::Part, id, pinned);
-    // Each glued pin's NEW spot, straight from the part at its new
-    // orientation, through the library.
-    if (const ws::circsim::SymbolDef* sym = library.find(p->symbol)) {
-        for (editor::GluedJunctionMove& gm : glue) {
-            if (gm.pin < sym->pins.size()) {
-                gm.to = ws::circsim::pin_pos(*sym, *p, gm.pin);
-            }
-        }
-    }
     // No contact junctions: a rotate/mirror never creates
     // connections either (the same rule as the move - a pin left on
     // a foreign wire's interior dangles, ERC's pin_on_wire warns

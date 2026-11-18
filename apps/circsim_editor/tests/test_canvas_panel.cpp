@@ -1996,6 +1996,15 @@ void drag_world(Bench& b, Pos from, Pos to, bool shift = false) {
     pointer_frame(b, b.ed.view.w2s(to), false, false, shift);
 }
 
+bool has_diag(const ws::circsim::NetBuild& b, const std::string& code) {
+    for (const ws::circsim::Diag& d : b.diags) {
+        if (d.code == code) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // --- the junction glue (move keeps every connection) ---------------------------
 //
 // A junction sitting exactly on a part's pin is the wire gestures' own
@@ -2005,32 +2014,30 @@ void drag_world(Bench& b, Pos from, Pos to, bool shift = false) {
 // T-tap) keeps that point on its re-routed path - the tap survives the
 // neighbor moves that bend the wire.
 
-TEST_CASE("the move-drag: a junction wired onto a pin rides the part") {
+TEST_CASE("the move-drag: a junction sitting on a pin is left behind") {
     Bench b;
     const ws::circsim::Part* r1p = b.doc.schem.add_part(
         ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0}));
-    // The wire end's junction glued on R1's pin 1 at (3,0); the wire
-    // runs from a free junction to it.
-    ws::circsim::Junction free_j;
-    free_j.id = b.doc.schem.alloc_id();
-    free_j.pos = {13.0, 0.0};
-    ws::circsim::Junction on_pin;
-    on_pin.id = b.doc.schem.alloc_id();
-    on_pin.pos = {3.0, 0.0};
-    b.doc.schem.junctions_mut().push_back(free_j);
-    b.doc.schem.junctions_mut().push_back(on_pin);
+    // A stray dot parked exactly on R1's pin 1 at (3,0) - a POSITION
+    // COINCIDENCE the partition rule refuses to union
+    // (entities_coincide). The move is geometry-only: the dot never
+    // rides, and the wire (which lands on the PIN by reference)
+    // rubber-bands on its own.
+    ws::circsim::Junction stray;
+    stray.id = b.doc.schem.alloc_id();
+    stray.pos = {3.0, 0.0};
+    b.doc.schem.junctions_mut().push_back(stray);
     ws::circsim::Wire w;
     w.id = b.doc.schem.alloc_id();
-    w.a = ws::circsim::JunctionRef{free_j.id};
-    // The wire lands on the PIN (the authored gesture): the dot at
-    // (3,0) rides the part as glue geometry, the endpoint ref carries
-    // the connection.
+    w.a = ws::circsim::JunctionRef{stray.id};
+    // The wire lands on the PIN (the authored gesture): the endpoint
+    // ref carries the connection.
     w.b = ws::circsim::PinRef{r1p->id, 1};
     w.ortho = true;
     b.doc.schem.wires_mut().push_back(w);
 
     const std::uint32_t part_id = r1p->id;
-    const std::uint32_t glue_id = on_pin.id;
+    const std::uint32_t stray_id = stray.id;
     const ws::circsim::NetBuild before =
         ws::circsim::build_nets(b.doc.schem, &b.ed.library);
     const ws::circsim::Net* pin_net_before =
@@ -2041,13 +2048,14 @@ TEST_CASE("the move-drag: a junction wired onto a pin rides the part") {
     REQUIRE(wire_net_before != nullptr);
     CHECK(pin_net_before->id == wire_net_before->id);
 
-    // The drag: press on R1's body, land it 10 up. The glue rides.
+    // The drag: press on R1's body, land it 10 up. The dot STAYS.
     drag_world(b, {0.0, 0.0}, {0.0, 10.0});
     CHECK(b.doc.schem.find_part(part_id)->pos.y == 10.0);
-    CHECK(b.doc.schem.find_junction(glue_id)->pos.y == 10.0);
-    CHECK(b.doc.schem.find_junction(glue_id)->pos.x == 3.0);
+    CHECK(b.doc.schem.find_junction(stray_id)->pos.y == 0.0);
+    CHECK(b.doc.schem.find_junction(stray_id)->pos.x == 3.0);
 
-    // The connection survived the move.
+    // The wire's connection survived the move (the endpoint ref, not
+    // the dot, carries it).
     const ws::circsim::NetBuild after =
         ws::circsim::build_nets(b.doc.schem, &b.ed.library);
     const ws::circsim::Net* pin_net_after =
@@ -2058,10 +2066,10 @@ TEST_CASE("the move-drag: a junction wired onto a pin rides the part") {
     REQUIRE(wire_net_after != nullptr);
     CHECK(pin_net_after->id == wire_net_after->id);
 
-    // Undo: part and glue return together.
+    // Undo: the part returns alone; the dot never moved.
     (void)b.doc.undo().undo();
     CHECK(b.doc.schem.find_part(part_id)->pos.y == 0.0);
-    CHECK(b.doc.schem.find_junction(glue_id)->pos.y == 0.0);
+    CHECK(b.doc.schem.find_junction(stray_id)->pos.y == 0.0);
     const ws::circsim::NetBuild undone =
         ws::circsim::build_nets(b.doc.schem, &b.ed.library);
     const ws::circsim::Net* pin_net_undone =
@@ -2072,25 +2080,6 @@ TEST_CASE("the move-drag: a junction wired onto a pin rides the part") {
     REQUIRE(wire_net_undone != nullptr);
     CHECK(pin_net_undone->id == wire_net_undone->id);
 }
-
-// True when the build carries a diag with the given code.
-[[nodiscard]] bool has_diag(const ws::circsim::NetBuild& b,
-                            const char* code) {
-    for (const auto& d : b.diags) {
-        if (d.code == code) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// --- connections are authored (the strict move semantics) -------------------
-//
-// The spec: "nothing should be connected unless explicitly connected
-// at the endpoint". A junction dragged onto another wire's body
-// connects through the binding the DRAG itself authors (the spec's
-// "unless we click/move the wire directly"); a bare coincidence (a
-// dot left on a wire by some other move) connects nothing.
 
 TEST_CASE("a junction dragged onto a wire's body stays inert (a move "
           "is geometry-only)") {
