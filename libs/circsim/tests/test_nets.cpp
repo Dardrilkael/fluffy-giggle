@@ -74,9 +74,11 @@ struct Bench {
     }
 };
 
-bool has_diag(const NetBuild& b, const std::string& code) {
+bool has_diag(const NetBuild& b, const std::string& code,
+              ws::circsim::Severity severity =
+                  ws::circsim::Severity::Warning) {
     for (const ws::circsim::Diag& d : b.diags) {
-        if (d.code == code) {
+        if (d.code == code && d.severity == severity) {
             return true;
         }
     }
@@ -132,14 +134,18 @@ TEST_CASE("a wire END on another wire's interior connects through its "
         REQUIRE(h_net != nullptr);
         CHECK(nets.nets.net_of_wire(stray)->id != h_net->id);
     }
-    // Bound (the authored gesture): one net.
+    // Bound (the authored gesture): the drop joins the horizontal
+    // through its dot's tap binding - wherever the wire actually runs.
+    // The stray from the first half stays its own net (its endpoint
+    // dot touches the horizontal's interior UNBOUND: geometry).
     const std::uint32_t drop = b.wire_j(5.0, 0.0, 5.0, -4.0, {},
                                         {horizontal});
     const NetBuild nets = ws::circsim::build_nets(b.s);
-    REQUIRE(nets.nets.nets.size() == 1);
+    REQUIRE(nets.nets.nets.size() == 2);
     const auto* net = nets.nets.net_of_wire(horizontal);
     REQUIRE(net != nullptr);
     CHECK(nets.nets.net_of_wire(drop)->id == net->id);
+    CHECK(nets.nets.net_of_wire(stray)->id != net->id);
 }
 
 TEST_CASE("a waypoint on another wire's interior connects") {
@@ -161,17 +167,26 @@ TEST_CASE("a wire elbow landing on another wire stays separate without "
     Bench b;
     const std::uint32_t horizontal = b.wire_j(0.0, 0.0, 10.0, 0.0);
     // Elbow exactly at (5, 0), on the horizontal wire: a T with a corner.
-    b.wire_j(5.0, 8.0, 5.0, -8.0, {Pos{5.0, 0.0}});
+    const std::uint32_t elbow = b.wire_j(5.0, 8.0, 5.0, -8.0,
+                                        {Pos{5.0, 0.0}});
     const NetBuild nets = ws::circsim::build_nets(b.s);
     CHECK(nets.nets.nets.size() == 2);
     CHECK(has_diag(nets, "circsim.nets.wire_touch"));
-    // A bound dot joins them (the authored gesture - the tool binds);
-    // a bare dot (a move's leftovers) would leave them separate.
-    b.junction(5.0, 0.0, {horizontal, horizontal + 1});
+    // A bound dot joins them (the authored gesture - the tool binds
+    // BOTH wires); a bare dot (a move's leftovers) would leave them
+    // separate. The binding is structural: the union rides the taps.
+    b.junction(5.0, 0.0, {horizontal, elbow});
     CHECK(ws::circsim::build_nets(b.s).nets.nets.size() == 1);
 }
 
-TEST_CASE("coincident pins connect without any wire") {
+TEST_CASE("coincident pins connect nothing without structure") {
+    // THE PARTITION RULE: two pins at the same point are geometry -
+    // a move left them overlapped and that must not merge nets. The
+    // old rule unioned them (the "pin-to-pin touch"); a move could
+    // therefore rewrite the partition by where it left parts. Now
+    // the touch connects nothing and warns (entities_coincide);
+    // the authored ways back are a wire ending on both pins, or a
+    // bound dot at the spot.
     Bench b;
     Part* r1 = b.part("r", "R1", {0.0, 0.0});
     // R2 moved so its pin 0 sits exactly on R1's pin 1.
@@ -181,7 +196,9 @@ TEST_CASE("coincident pins connect without any wire") {
     const auto* c = nets.nets.net_of_pin(PinRef{r2->id, 0});
     REQUIRE(a != nullptr);
     REQUIRE(c != nullptr);
-    CHECK(a->id == c->id);
+    CHECK(a->id != c->id);
+    CHECK(has_diag(nets, "circsim.nets.entities_coincide",
+                   ws::circsim::Severity::Warning));
 }
 
 TEST_CASE("a pin lying on a wire's interior connects nothing") {
@@ -198,12 +215,23 @@ TEST_CASE("a pin lying on a wire's interior connects nothing") {
     REQUIRE(pin_net != nullptr);
     CHECK(pin_net->wires.empty());
     CHECK(has_diag(nets, "circsim.nets.pin_on_wire"));
-    // The authored ways back: a BOUND junction at the pin's spot (the
-    // tool's gesture - the dot taps the wire), or the wire ending on
-    // the pin (a landing) - the bound dot first.
+    // The authored ways back: the wire ENDING on the pin (a landing
+    // - the reference names both sides), or a bound dot at the spot
+    // with a wire ending on the dot. A bound dot ALONE at the pin's
+    // position no longer joins the pin: the dot's binding is to the
+    // wire, the pin names nothing until structure spans it.
     b.junction(3.0, 0.0, {vertical});
+    const NetBuild dotted = ws::circsim::build_nets(b.s);
+    CHECK(dotted.nets.net_of_pin(PinRef{r1->id, 1})->wires.empty());
+    // The wire itself lands on the pin: the authored connection.
+    Wire* land = b.s.add_wire({});
+    land->a = PinRef{r1->id, 1};
+    land->b = ws::circsim::JunctionRef{b.junction(3.0, 0.0, {vertical})};
     const NetBuild joined = ws::circsim::build_nets(b.s);
-    CHECK(joined.nets.net_of_pin(PinRef{r1->id, 1})->wires.size() == 1);
+    // The pin's net carries BOTH wires: the landing wire (its own
+    // other end is the dot bound to the vertical) and the vertical
+    // itself (the dot's binding unions it in).
+    CHECK(joined.nets.net_of_pin(PinRef{r1->id, 1})->wires.size() == 2);
 }
 
 TEST_CASE("same-name labels merge nets, case-insensitively") {
@@ -445,8 +473,14 @@ TEST_CASE("unknown symbols join no net; their wires drop with a warning") {
 
 TEST_CASE("the netlist lookups answer for pins, wires and junctions") {
     Bench b;
-    const std::uint32_t j = b.junction(0.0, 0.0);
+    // A wire whose A end rides a junction dot at (0, 0): the ENDPOINT
+    // REF unions them (the authored gesture) - a bare dot at the wire's
+    // start position no longer does (the partition rule).
     const std::uint32_t w = b.wire_j(0.0, 0.0, 10.0, 0.0);
+    const std::uint32_t j =
+        std::get<ws::circsim::JunctionRef>(
+            b.s.wires()[0].a)
+            .junction;
     const NetBuild nets = ws::circsim::build_nets(b.s);
     const auto* jn = nets.nets.net_of_junction(j);
     const auto* wn = nets.nets.net_of_wire(w);
@@ -653,10 +687,14 @@ TEST_CASE("a moved part's wire dragging across another wire connects "
     CHECK(b_net->pins.empty());
 }
 
-TEST_CASE("a gnd pin dropped on a wire's interior still grounds it") {
-    // The one pin pickup that survives: power symbols name nets by
-    // definition - a gnd pin on a wire's body pulls that net to the
-    // global ground, the idiom the app's own stages draw.
+TEST_CASE("a gnd pin dropped on a wire's interior grounds nothing") {
+    // THE PARTITION RULE: even a power symbol's pin connects nothing
+    // by position. The naming idiom lives in the symbol TABLE (every
+    // gnd pin's net is the global ground NAMED "0") - that part is
+    // structural and survives; what does NOT survive is picking up
+    // the wire the pin happens to sit on. A ground dropped on a wire
+    // now warns like any other pin; wiring it (or a bound dot at the
+    // spot) is the author's gesture.
     Bench b;
     const std::uint32_t w = b.wire_j(-20.0, 0.0, 20.0, 0.0);
     b.wire_j(30.0, -10.0, 30.0, 30.0);  // an unrelated second net
@@ -665,8 +703,9 @@ TEST_CASE("a gnd pin dropped on a wire's interior still grounds it") {
     const NetBuild nets = ws::circsim::build_nets(b.s);
     const auto* g_net = nets.nets.net_of_wire(w);
     REQUIRE(g_net != nullptr);
-    CHECK(g_net->is_ground);
-    CHECK_FALSE(has_diag(nets, "circsim.nets.pin_on_wire"));
+    CHECK_FALSE(g_net->is_ground);
+    CHECK(has_diag(nets, "circsim.nets.pin_on_wire",
+                   ws::circsim::Severity::Warning));
 }
 
 // --- the hardening batch: the large-schematic grid path -----------------------

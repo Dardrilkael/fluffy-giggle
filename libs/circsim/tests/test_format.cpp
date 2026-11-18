@@ -34,7 +34,11 @@ namespace {
 
 Schematic divider() {
     Schematic s;
-    Part* v = s.add_part(Part::make("v", "V1", "5", {0.0, 0.0}));
+    // V1 sits clear of the wire's run (the old bench drew V1.p0 to
+    // R1.p0 as a straight segment with V1.p1 riding its interior -
+    // a pickup the migration now converts to structure on load, which
+    // the field-for-field round-trip rightly notices).
+    Part* v = s.add_part(Part::make("v", "V1", "5", {0.0, -6.0}));
     Part* r1 = s.add_part(Part::make("r", "R1", "10k", {6.0, 0.0}));
     Part* r2 = s.add_part(Part::make("r", "R2", "10k", {14.0, 0.0}));
     s.add_part(Part::make("gnd", "", "", {6.0, -4.0}));

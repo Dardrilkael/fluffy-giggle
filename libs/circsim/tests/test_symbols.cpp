@@ -130,14 +130,23 @@ Schematic tline_schematic() {
     Part* t = s.add_part(Part::make("tline", "T1", "", {15.0, -2.0}));
     t->params["z0"] = "50";
     t->params["td"] = "1u";
-    s.add_part(Part::make("gnd", "", "", {3.0, -6.0}));  // v.n moved to +3 (stage 17d)
-    s.add_part(Part::make("gnd", "", "", {11.0, -3.0}));
-    s.add_part(Part::make("gnd", "", "", {19.0, -3.0}));
+    Part* g1 = s.add_part(Part::make("gnd", "", "", {3.0, -6.0}));  // v.n's ground (stage 17d)
+    Part* g2 = s.add_part(Part::make("gnd", "", "", {11.0, -3.0}));
+    Part* g3 = s.add_part(Part::make("gnd", "", "", {19.0, -3.0}));
     s.add_wire(ws::circsim::Wire::endpoints(PinRef{v->id, 0},
                                             PinRef{rs->id, 0}))
         ->waypoints = {Pos{-3.0, 0.0}};  // v.p moved to -3 (stage 17d)
     s.add_wire(ws::circsim::Wire::endpoints(PinRef{rs->id, 1},
                                             PinRef{t->id, 0}));
+    // The grounds WIRED (the old bench parked each gnd on the pin it
+    // named and let pin-to-pin coincidence do the joining - the
+    // partition rule kills that).
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{v->id, 1},
+                                            PinRef{g1->id, 0}));
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{t->id, 1},
+                                            PinRef{g2->id, 0}));
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{t->id, 3},
+                                            PinRef{g3->id, 0}));
     Label* in = s.add_label({});
     in->pos = Pos{2.0, 0.0};
     in->name = "in";
@@ -826,7 +835,7 @@ TEST_CASE("a library symbol exports and simulates") {
     CHECK(std::abs(tbl.row(2)[col]) < 0.05);
 }
 
-TEST_CASE("an override changes the coincidence-built nets") {
+TEST_CASE("an override changes the drawn geometry, not the authored span") {
     constexpr std::string_view wide = R"json({
         "format": "circsim-symbols", "version": 1,
         "symbols": [{"key": "r", "name": "Wide resistor",
@@ -836,9 +845,13 @@ TEST_CASE("an override changes the coincidence-built nets") {
     std::vector<ws::circsim::Diag> diags;
     const SymbolLibrary lib = load_ok(wide, diags);
 
-    // Two resistors touching PIN TO PIN at (9, 0) - no wire between them:
-    // with the built-ins the exact-position coincidence unions them; with
-    // the wide override the pins move to 8 and 10 and the touch is gone.
+    // THE PARTITION RULE: pin-to-pin position coincidence unions
+    // nothing - the touch that used to "build" the out net is inert.
+    // The same bench rewired structurally: a wire spans r1.b to r2.a
+    // (the authored gesture), and the label at (9, 0) rides the WIRE
+    // (the vertex/interior attach - still the label rule). The wide
+    // override moves the pins to 8 and 10 and the label no longer
+    // rides the wire's segment - the override still changes nets.
     Schematic s;
     Part* v = s.add_part(Part::make("v", "V1", "5", {0.0, -4.0}));
     Part* r1 = s.add_part(Part::make("r", "R1", "10k", {6.0, 0.0}));
@@ -847,6 +860,7 @@ TEST_CASE("an override changes the coincidence-built nets") {
     s.add_wire(ws::circsim::Wire::endpoints(PinRef{v->id, 0}, PinRef{r1->id, 0}));
     s.add_wire(ws::circsim::Wire::endpoints(PinRef{r2->id, 1}, PinRef{g->id, 0}));
     s.add_wire(ws::circsim::Wire::endpoints(PinRef{g->id, 0}, PinRef{v->id, 1}));
+    s.add_wire(ws::circsim::Wire::endpoints(PinRef{r1->id, 1}, PinRef{r2->id, 0}));
     Label* out = s.add_label({});
     out->pos = Pos{9.0, 0.0};
     out->name = "out";
@@ -855,11 +869,18 @@ TEST_CASE("an override changes the coincidence-built nets") {
     CHECK(plain.diags.empty());
     const ws::circsim::Net* n_out = plain.nets.by_name("out");
     REQUIRE(n_out != nullptr);
-    CHECK(n_out->pins.size() == 2);  // r1.b + r2.a touch
+    CHECK(n_out->pins.size() == 2);  // r1.b + r2.a through the wire
 
     const ws::circsim::NetBuild wide_nets = ws::circsim::build_nets(s, &lib);
-    CHECK(wide_nets.nets.by_name("out") == nullptr);  // the touch is gone
-    CHECK(has_diag(wide_nets.diags, "circsim.nets.label_unattached"));
+    // The wide pins at (2,0)/(10,0) and (8,0)/(16,0): the spanning
+    // wire still unions its ends, and its straight run still passes
+    // (9, 0) - the label rides it under EITHER library. That is the
+    // point the strict rule makes: the net no longer depends on which
+    // pin COINCIDES with which; only the authored span (the wire)
+    // matters, and it is the same span either way.
+    const ws::circsim::Net* wide_out = wide_nets.nets.by_name("out");
+    REQUIRE(wide_out != nullptr);
+    CHECK(wide_out->pins.size() == 2);
 }
 
 // --- the orphan devices join the built-ins (stage 24) ------------------------------

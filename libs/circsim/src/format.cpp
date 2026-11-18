@@ -829,13 +829,14 @@ ws::core::Result<Schematic> load_csim(std::string_view text,
         }
         s.restore_wires(std::move(wires));
     }
-    // Migration: pre-binding decks (a junction list with no "taps"
-    // field anywhere) drew their T-taps as a junction dot on a wire's
-    // path and the OLD net rule read that as a connection. Bind those
-    // dots to the wires they sit on so the drawing's meaning survives
-    // the semantic tightening: a deck that never carried taps keeps
-    // its authored geometry; a deck the new editor wrote carries the
-    // field and skips the inference entirely.
+    // Migration: pre-binding decks (no "taps" field anywhere) drew
+    // their connections through POSITION COINCIDENCE - the old net
+    // rule unioned pins on wires' interiors, pins on pins, wire
+    // vertices on other wires, dots on pins. The partition rule
+    // retired every one of those unions; this step converts each
+    // drawing to the structure the old rule inferred, so the deck's
+    // meaning survives byte-for-byte: the same nets, expressed as
+    // authored gestures instead of accidents.
     {
         bool any_taps = false;
         for (const Junction& j : s.junctions()) {
@@ -844,38 +845,35 @@ ws::core::Result<Schematic> load_csim(std::string_view text,
                 break;
             }
         }
+        const SymbolLibrary& lib = builtin_library();
+        const auto on_poly = [&](const std::vector<Pos>& path, Pos p) {
+            for (std::size_t k = 1; k < path.size(); ++k) {
+                const Pos a = path[k - 1];
+                const Pos b = path[k];
+                const double cross = (b.x - a.x) * (p.y - a.y) -
+                                     (b.y - a.y) * (p.x - a.x);
+                if (cross != 0.0) {
+                    continue;
+                }
+                if (p.x >= std::min(a.x, b.x) &&
+                    p.x <= std::max(a.x, b.x) &&
+                    p.y >= std::min(a.y, b.y) &&
+                    p.y <= std::max(a.y, b.y)) {
+                    return true;
+                }
+            }
+            return false;
+        };
         if (!any_taps && !s.junctions().empty() && !s.wires().empty()) {
-            // The same point-on-segment test nets.cpp runs, spelled
-            // once here (collinear and inside the segment's bbox).
-            const auto on_polyline_local =
-                [](const std::vector<Pos>& path, Pos p) {
-                    for (std::size_t i = 1; i < path.size(); ++i) {
-                        const Pos a = path[i - 1];
-                        const Pos b = path[i];
-                        const double cross = (b.x - a.x) * (p.y - a.y) -
-                                             (b.y - a.y) * (p.x - a.x);
-                        if (cross != 0.0) {
-                            continue;
-                        }
-                        if (p.x >= std::min(a.x, b.x) &&
-                            p.x <= std::max(a.x, b.x) &&
-                            p.y >= std::min(a.y, b.y) &&
-                            p.y <= std::max(a.y, b.y)) {
-                            return true;
-                        }
-                    }
-                    return false;
-                };
+            // (a) existing dots on wires' paths: bind them (the
+            // original migration's own conversion).
             for (Junction& j : s.junctions_mut()) {
                 for (const Wire& w : s.wires()) {
-                    if (!on_polyline_local(ws::circsim::wire_path(
-                                               s,
-                                               builtin_library(), w),
-                                            j.pos)) {
+                    if (!on_poly(ws::circsim::wire_path(
+                                       s, lib, w),
+                                  j.pos)) {
                         continue;
                     }
-                    // The wire's own endpoint dot at the position
-                    // carries its authored ref - never a tap.
                     const auto* ea = std::get_if<JunctionRef>(&w.a);
                     const auto* eb = std::get_if<JunctionRef>(&w.b);
                     if ((ea != nullptr && ea->junction == j.id) ||
@@ -885,6 +883,175 @@ ws::core::Result<Schematic> load_csim(std::string_view text,
                     j.taps.push_back(w.id);
                 }
             }
+        }
+        // The remaining conversions run for every pre-binding deck
+        // (taps or not - a deck with dots may still carry pin
+        // coincidences; the "taps anywhere" flag above only gates the
+        // dot re-binding, which would double-bind on new-format
+        // decks).
+        if (!any_taps) {
+            // Reuse the outer `lib` and `on_poly` to avoid shadowing.
+            // Resolve every pin's world position once.
+            std::vector<std::pair<PinRef, Pos>> pins;
+            for (const Part& p : s.parts()) {
+                const SymbolDef* sym = lib.find(p.symbol);
+                if (sym == nullptr) {
+                    continue;
+                }
+                for (std::uint32_t i = 0; i < sym->pins.size(); ++i) {
+                    pins.push_back({PinRef{p.id, i},
+                                    pin_pos(*sym, p, i)});
+                }
+            }
+            // Everything the conversion mints lands in these lists and
+            // is applied once, after every scan: no deque is iterated
+            // while it grows.
+            std::vector<Wire> mint_wires;
+            std::vector<Junction> mint_dots;
+            const std::deque<Wire> wires_snapshot = s.wires();
+            const std::deque<Junction> junctions_snapshot =
+                s.junctions();
+            // (b) PIN-PIN and PIN-JUNCTION coincidences: a stub wire
+            // spanning the two entities - exactly what the old by_pos
+            // union said.
+            for (std::size_t a = 0; a < pins.size(); ++a) {
+                for (std::size_t b = a + 1; b < pins.size(); ++b) {
+                    if (pins[a].second != pins[b].second) {
+                        continue;
+                    }
+                    Wire w{};
+                    w.id = s.alloc_id();
+                    w.a = pins[a].first;
+                    w.b = pins[b].first;
+                    mint_wires.push_back(w);
+                }
+            }
+            for (const Junction& j : junctions_snapshot) {
+                for (const auto& [pr, pos] : pins) {
+                    if (!(pos == j.pos)) {
+                        continue;
+                    }
+                    Wire w{};
+                    w.id = s.alloc_id();
+                    w.a = pr;
+                    w.b = JunctionRef{j.id};
+                    mint_wires.push_back(w);
+                }
+            }
+            // (c) POWER/ground pins on wires' INTERIORS: the one pickup
+            // class the OLD rule honored (fixed_net - the gnd/vcc
+            // idiom). A dot at the pin's position, tapped to the wire,
+            // plus a stub wire pin<->dot.
+            for (const auto& [pr, pos] : pins) {
+                const Part* pp = s.find_part(pr.part);
+                const SymbolDef* sym =
+                    pp != nullptr ? lib.find(pp->symbol) : nullptr;
+                if (sym == nullptr || !sym->fixed_net.has_value()) {
+                    continue;  // regular pin: the old rule left it inert
+                }
+                for (const Wire& w : wires_snapshot) {
+                    const std::vector<Pos> wp =
+                        ws::circsim::wire_path(s, lib, w);
+                    if (wp.size() < 2 || !on_poly(wp, pos)) {
+                        continue;
+                    }
+                    if ((std::get_if<PinRef>(&w.a) != nullptr &&
+                         *std::get_if<PinRef>(&w.a) == pr) ||
+                        (std::get_if<PinRef>(&w.b) != nullptr &&
+                         *std::get_if<PinRef>(&w.b) == pr)) {
+                        continue;  // the wire's own endpoint: authored
+                    }
+                    Junction j{};
+                    j.id = s.alloc_id();
+                    j.pos = pos;
+                    j.taps.push_back(w.id);
+                    mint_dots.push_back(j);
+                    Wire stub{};
+                    stub.id = s.alloc_id();
+                    stub.a = pr;
+                    stub.b = JunctionRef{j.id};
+                    mint_wires.push_back(stub);
+                }
+            }
+            // (e) WIRE ENDPOINT on another wire's ENDPOINT: the one
+            // wire-wire landing the OLD rule joined unconditionally.
+            // A vertex riding an interior joined only through a bound
+            // dot - the (a) conversion; minting structure there would
+            // join nets the old rule left separate.
+            for (const Wire& w : wires_snapshot) {
+                const std::vector<Pos> path =
+                    ws::circsim::wire_path(s, lib, w);
+                if (path.size() < 2) {
+                    continue;
+                }
+                const Pos ends[2] = {path.front(), path.back()};
+                for (const Pos& v : ends) {
+                    for (const Wire& w2 : wires_snapshot) {
+                        if (w2.id == w.id) {
+                            continue;
+                        }
+                        const std::vector<Pos> p2 =
+                            ws::circsim::wire_path(s, lib, w2);
+                        if (p2.size() < 2) {
+                            continue;
+                        }
+                        const bool at_end =
+                            v == p2.front() || v == p2.back();
+                        if (!at_end || !on_poly(p2, v)) {
+                            continue;
+                        }
+                        // already one net structurally (the divider's
+                        // gnd fan-out): no dot needed
+                        const auto shares = [&](const Wire& x,
+                                                const Wire& y) {
+                            for (const WireEndpoint* ex :
+                                 {&x.a, &x.b}) {
+                                for (const WireEndpoint* ey :
+                                     {&y.a, &y.b}) {
+                                    if (ex->index() == ey->index() &&
+                                        *ex == *ey) {
+                                        return true;
+                                    }
+                                }
+                            }
+                            return false;
+                        };
+                        if (shares(w, w2)) {
+                            continue;
+                        }
+                        // a dot already there bound to both?
+                        bool dot = false;
+                        for (const Junction& j : junctions_snapshot) {
+                            if (j.pos == v &&
+                                std::find(j.taps.begin(), j.taps.end(),
+                                          w.id) != j.taps.end() &&
+                                std::find(j.taps.begin(), j.taps.end(),
+                                          w2.id) != j.taps.end()) {
+                                dot = true;
+                                break;
+                            }
+                        }
+                        if (dot) {
+                            continue;
+                        }
+                        Junction j{};
+                        j.id = s.alloc_id();
+                        j.pos = v;
+                        j.taps.push_back(w.id);
+                        j.taps.push_back(w2.id);
+                        mint_dots.push_back(j);
+                    }
+                }
+            }
+            // Apply everything at once - nothing above iterates a
+            // container it mutates.
+            for (const Junction& j : mint_dots) {
+                s.junctions_mut().push_back(j);
+            }
+            for (const Wire& w : mint_wires) {
+                s.wires_mut().push_back(w);
+            }
+            s.bump();
         }
     }
     {

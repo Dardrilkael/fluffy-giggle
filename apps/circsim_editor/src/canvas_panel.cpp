@@ -1077,8 +1077,6 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
             // doc is null so the entity is never left stranded.
             std::vector<WireRoute> routes;
             std::vector<editor::GluedJunctionMove> glue;
-            std::vector<std::uint32_t> tap_add;
-            std::vector<std::uint32_t> tap_remove;
             if (ed.doc != nullptr) {
                 if (ed.drag.kind == Editor::Drag::Kind::Part) {
                     // The glue resolves at the PRESS position (the
@@ -1142,16 +1140,15 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                                                      ed.drag.id, pinned);
                     // The binding changes the LANDING makes (the
                     // entity sits at `to`): a junction dragged onto a
-                    // wire's body taps it - the spec's "unless we
-                    // click/move the wire directly" - and a tap whose
-                    // wire no longer passes through is released.
-                    if (ed.drag.kind == Editor::Drag::Kind::Junction) {
-                        const ws::circsim::JunctionTapLanding taps =
-                            ws::circsim::junction_tap_landing(
-                                *ed.schem(), ed.library, ed.drag.id);
-                        tap_add = taps.add;
-                        tap_remove = taps.remove;
-                    }
+                    // A junction move is geometry-only now (the
+                    // partition rule): the dot's tap bindings ride
+                    // the move unchanged - a landing on another
+                    // wire's body stays a warned coincidence until
+                    // the author binds it, and a dot dragged OFF its
+                    // tapped wire keeps the binding (ERC's
+                    // tap_detached names it) instead of silently
+                    // splitting the net.
+
                 }
             }
             set_drag_pos(ed, ed.drag.start_world);
@@ -1168,9 +1165,7 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                     // by ERC's pin_on_wire until the author wires it.
                 } else if (ed.drag.kind == Editor::Drag::Kind::Junction) {
                     push_move_junction(*ed.doc, ed.drag.id, to,
-                                       std::move(routes),
-                                       std::move(tap_add),
-                                       std::move(tap_remove));
+                                       std::move(routes), {}, {});
                 } else if (ed.drag.kind == Editor::Drag::Kind::Label) {
                     push_move_label(*ed.doc, ed.drag.id, to);
                 }

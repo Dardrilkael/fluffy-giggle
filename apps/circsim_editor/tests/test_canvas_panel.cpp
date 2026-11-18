@@ -2022,7 +2022,10 @@ TEST_CASE("the move-drag: a junction wired onto a pin rides the part") {
     ws::circsim::Wire w;
     w.id = b.doc.schem.alloc_id();
     w.a = ws::circsim::JunctionRef{free_j.id};
-    w.b = ws::circsim::JunctionRef{on_pin.id};
+    // The wire lands on the PIN (the authored gesture): the dot at
+    // (3,0) rides the part as glue geometry, the endpoint ref carries
+    // the connection.
+    w.b = ws::circsim::PinRef{r1p->id, 1};
     w.ortho = true;
     b.doc.schem.wires_mut().push_back(w);
 
@@ -2089,12 +2092,13 @@ TEST_CASE("the move-drag: a junction wired onto a pin rides the part") {
 // "unless we click/move the wire directly"); a bare coincidence (a
 // dot left on a wire by some other move) connects nothing.
 
-TEST_CASE("a junction dragged onto a wire's body taps it (the move "
-          "authors the binding)") {
+TEST_CASE("a junction dragged onto a wire's body stays inert (a move "
+          "is geometry-only)") {
+    // THE PARTITION RULE: dragging the dot onto a wire's body no
+    // longer authors a binding - moves never change connectivity. The
+    // landing warns (junction_on_wire) and the nets stay separate
+    // until the author taps (the wire tool's gesture).
     Bench b;
-    // Two separate nets, both on-screen at the default zoom (the
-    // viewport spans roughly y in (-8, 8)): wire A along y=0, wire C
-    // along y=5.
     const std::uint32_t ja = b.doc.schem.alloc_id();
     const std::uint32_t jb = b.doc.schem.alloc_id();
     const std::uint32_t jc = b.doc.schem.alloc_id();
@@ -2121,6 +2125,9 @@ TEST_CASE("a junction dragged onto a wire's body taps it (the move "
     b.doc.schem.wires_mut().push_back(a);
     b.doc.schem.wires_mut().push_back(c);
 
+    // Drag wire C's LEFT end junction down onto wire A's interior at
+    // (5,0): nothing binds, the two nets stay separate.
+    drag_world(b, {0.0, 5.0}, {5.0, 0.0});
     {
         const ws::circsim::NetBuild nets =
             ws::circsim::build_nets(b.doc.schem, &b.ed.library);
@@ -2130,28 +2137,13 @@ TEST_CASE("a junction dragged onto a wire's body taps it (the move "
         REQUIRE(cn != nullptr);
         CHECK(an->id != cn->id);
     }
-
-    // Drag wire C's LEFT end junction down onto wire A's interior at
-    // (5,0) - the author's own hand (the spec's "move the wire
-    // directly"). The landing taps: one net after the move.
-    drag_world(b, {0.0, 5.0}, {5.0, 0.0});
-    {
-        const ws::circsim::NetBuild nets =
-            ws::circsim::build_nets(b.doc.schem, &b.ed.library);
-        const ws::circsim::Net* an = nets.nets.net_of_wire(a.id);
-        const ws::circsim::Net* cn = nets.nets.net_of_wire(c.id);
-        REQUIRE(an != nullptr);
-        REQUIRE(cn != nullptr);
-        CHECK(an->id == cn->id);
-    }
-    // The dot's binding is recorded.
+    // The dot carries no binding.
     const ws::circsim::Junction* landed =
         b.doc.schem.find_junction(jc);
     REQUIRE(landed != nullptr);
-    CHECK(std::find(landed->taps.begin(), landed->taps.end(), a.id) !=
-          landed->taps.end());
+    CHECK(landed->taps.empty());
 
-    // Undo: the binding rides the same step back out.
+    // One undo returns the sheet to exactly what it was.
     (void)b.doc.undo().undo();
     {
         const ws::circsim::NetBuild nets =
@@ -2213,8 +2205,9 @@ TEST_CASE("a wire dragged ONTO another wire connects nothing until "
     CHECK(an->id != sn->id);
     CHECK(has_diag(nets, "circsim.nets.junction_on_wire"));
 
-    // Drag the stray dot itself onto ANOTHER spot of wire A (the
-    // author's hand on the wire): the move binds, one net.
+    // Drag the stray dot itself onto ANOTHER spot of wire A: the
+    // move is geometry-only - still no binding, still two nets, the
+    // junction_on_wire warning follows the dot.
     drag_world(b, {6.0, 0.0}, {3.0, 0.0});
     {
         const ws::circsim::NetBuild moved =
@@ -2223,8 +2216,16 @@ TEST_CASE("a wire dragged ONTO another wire connects nothing until "
         const ws::circsim::Net* sn2 = moved.nets.net_of_wire(stub.id);
         REQUIRE(an2 != nullptr);
         REQUIRE(sn2 != nullptr);
-        CHECK(an2->id == sn2->id);
+        CHECK(an2->id != sn2->id);
+        CHECK(has_diag(moved, "circsim.nets.junction_on_wire"));
+        const ws::circsim::Junction* dot =
+            b.doc.schem.find_junction(stray);
+        REQUIRE(dot != nullptr);
+        CHECK(dot->taps.empty());
     }
+
+    // One undo restores the original position.
+    (void)b.doc.undo().undo();
 }
 
 TEST_CASE("the move-drag: a T-tap junction survives the wire's re-route") {

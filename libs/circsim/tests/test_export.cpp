@@ -703,15 +703,18 @@ Schematic vcvs_stage() {
     Part* v = s.add_part(Part::make("v", "V1", "1", {0.0, -4.0}));
     Part* e = s.add_part(Part::make("e", "E1", "10", {12.0, 0.0}));
     Part* r = s.add_part(Part::make("r", "R1", "1k", {24.0, 1.0}));
-    s.add_part(Part::make("gnd", "", "", {3.0, -3.0}));  // the sense return's pickup
+    Part* g1 = s.add_part(Part::make("gnd", "", "", {3.0, -3.0}));
     Part* g2 = s.add_part(Part::make("gnd", "", "", {17.0, -4.0}));
     Part* g3 = s.add_part(Part::make("gnd", "", "", {27.0, -3.0}));
-    // The sense pair: in+ up and over, in- across and up (the gnd on the
-    // vertical leg grounds the return).
+    // The sense pair: in+ up and over, in- across and up. The return's
+    // ground is WIRED now (the partition rule: a pin on a wire's
+    // interior connects nothing - the old bench parked the gnd on the
+    // vertical leg and let position coincidence ground it).
     s.add_wire(Wire::endpoints(PinRef{v->id, 0}, PinRef{e->id, 2}))
         ->waypoints = {Pos{-3.0, 1.0}};
-    s.add_wire(Wire::endpoints(PinRef{v->id, 1}, PinRef{e->id, 3}))
+    s.add_wire(Wire::endpoints(PinRef{v->id, 1}, PinRef{g1->id, 0}))
         ->waypoints = {Pos{3.0, -1.0}};
+    s.add_wire(Wire::endpoints(PinRef{g1->id, 0}, PinRef{e->id, 3}));
     // The output pair: out+ straight into the load, out- and the load's
     // far end each down to their own ground.
     s.add_wire(Wire::endpoints(PinRef{e->id, 0}, PinRef{r->id, 0}));
@@ -788,14 +791,18 @@ Schematic current_controlled(bool f_not_h) {
     d->params["vs"] = "V1";
     d->params[f_not_h ? "gain" : "r"] = f_not_h ? "2" : "100";
     Part* r2 = s.add_part(Part::make("r", "R2", "1k", {30.0, 0.0}));
-    s.add_part(Part::make("gnd", "", "", {8.0, -4.0}));  // the return's pickup
+    Part* g1 = s.add_part(Part::make("gnd", "", "", {8.0, -4.0}));
     Part* g2 = s.add_part(Part::make("gnd", "", "", {17.0, -3.0}));
     Part* g3 = s.add_part(Part::make("gnd", "", "", {33.0, -3.0}));
-    // The measuring loop: V1 up onto the axis into R1, back under it.
+    // The measuring loop: V1 up onto the axis into R1, back under it,
+    // with the return grounded through a WIRE ending on the ground's
+    // pin (the old bench parked the gnd on the wire's path and let
+    // position coincidence ground it - the partition rule kills that).
     s.add_wire(Wire::endpoints(PinRef{v->id, 0}, PinRef{r1->id, 0}))
         ->waypoints = {Pos{-3.0, 0.0}};
-    s.add_wire(Wire::endpoints(PinRef{r1->id, 1}, PinRef{v->id, 1}))
+    s.add_wire(Wire::endpoints(PinRef{r1->id, 1}, PinRef{g1->id, 0}))
         ->waypoints = {Pos{13.0, -4.0}};
+    s.add_wire(Wire::endpoints(PinRef{g1->id, 0}, PinRef{v->id, 1}));
     // The output: the device's p on to the load, its n down to ground
     // (the F's current then flows out into the node; the H is a source
     // of r*i(V1) volts across the same pair).
@@ -1096,17 +1103,20 @@ Schematic coupled_stage() {
     k->params["l2"] = "L2";
     k->params["k"] = "0.9";
     Part* rl = s.add_part(Part::make("r", "Rl", "100k", {24.0, -8.0}));
-    s.add_part(Part::make("gnd", "", "", {8.0, -4.0}));  // the primary return's pickup
+    Part* g1 = s.add_part(Part::make("gnd", "", "", {8.0, -4.0}));
     Part* g2 = s.add_part(Part::make("gnd", "", "", {27.0, -3.0}));
     Part* g3 = s.add_part(Part::make("gnd", "", "", {27.0, -11.0}));
     // The primary: V1.p up onto the axis, through Rs into L1.a (the
     // series R keeps V1 off the inductor - a 0-ohm V-L loop is the
-    // graph check's own rejection); the return runs under into L1.b.
+    // graph check's own rejection); the return runs under, through the
+    // WIRED ground pin (the old bench parked the gnd on the wire's
+    // path - the partition rule killed that pickup), into L1.b.
     s.add_wire(Wire::endpoints(PinRef{v->id, 0}, PinRef{rs->id, 0}))
         ->waypoints = {Pos{-3.0, 0.0}};
     s.add_wire(Wire::endpoints(PinRef{rs->id, 1}, PinRef{l1->id, 0}));
-    s.add_wire(Wire::endpoints(PinRef{v->id, 1}, PinRef{l1->id, 1}))
+    s.add_wire(Wire::endpoints(PinRef{v->id, 1}, PinRef{g1->id, 0}))
         ->waypoints = {Pos{14.0, -4.0}};
+    s.add_wire(Wire::endpoints(PinRef{g1->id, 0}, PinRef{l1->id, 1}));
     // The secondary: L2.a is the sec node into the load, L2.b grounds.
     s.add_wire(Wire::endpoints(PinRef{l2->id, 0}, PinRef{rl->id, 0}));
     s.add_wire(Wire::endpoints(PinRef{l2->id, 1}, PinRef{g2->id, 0}));
@@ -1174,7 +1184,7 @@ TEST_CASE("the transformer part decks L + L + K and solves its ratio") {
     x->params["ls"] = "4m";
     x->params["k"] = "0.99";
     Part* rl = s.add_part(Part::make("r", "Rl", "100k", {30.0, -6.0}));
-    s.add_part(Part::make("gnd", "", "", {8.0, -2.0}));  // the primary return's pickup
+    Part* g1 = s.add_part(Part::make("gnd", "", "", {8.0, -2.0}));
     Part* g2 = s.add_part(Part::make("gnd", "", "", {22.0, -5.0}));
     Part* g3 = s.add_part(Part::make("gnd", "", "", {33.0, -9.0}));
     // The primary: V1.p up onto the axis, through Rs into p+ (the
@@ -1184,8 +1194,11 @@ TEST_CASE("the transformer part decks L + L + K and solves its ratio") {
         ->waypoints = {Pos{-3.0, 0.0}};
     s.add_wire(Wire::endpoints(PinRef{rs->id, 1}, PinRef{x->id, 0}))
         ->waypoints = {Pos{8.0, 2.0}};
-    s.add_wire(Wire::endpoints(PinRef{v->id, 1}, PinRef{x->id, 1}))
+    // The return grounds through the WIRED pin (the old bench parked
+    // the gnd on this wire's path - the partition rule killed that).
+    s.add_wire(Wire::endpoints(PinRef{v->id, 1}, PinRef{g1->id, 0}))
         ->waypoints = {Pos{3.0, -2.0}};
+    s.add_wire(Wire::endpoints(PinRef{g1->id, 0}, PinRef{x->id, 1}));
     // The secondary: s- grounded, s+ down into the load.
     s.add_wire(Wire::endpoints(PinRef{x->id, 3}, PinRef{g2->id, 0}));
     s.add_wire(Wire::endpoints(PinRef{x->id, 2}, PinRef{rl->id, 0}))
