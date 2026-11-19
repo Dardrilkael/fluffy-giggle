@@ -148,6 +148,13 @@ void SchematicAdapter::build(ws::circsim::Schematic& s,
                                    return n.id == old_node;
                                }),
                 doc.nodes.end());
+            // BOTH halves descend from the same persisted wire: the
+            // first took the original sch id's SLOT (a fresh id in a
+            // reused slot), the second is brand new. Map them both so
+            // landing() can merge the pair back (and drops() can name
+            // the persisted wire).
+            wire_back[s->first] = tapped;
+            wire_back[s->second] = tapped;
             (void)wit;
         }
     }
@@ -278,13 +285,79 @@ SchematicAdapter::Landing SchematicAdapter::landing(
             out.junctions[jit->second] = p(pos);
         }
     }
-    // Wire shapes: the overlay's wire paths in circsim ids.
-    for (const auto& [wire, mid] : ov.wirePath) {
-        const auto bit = wire_back.find(wire);
-        if (bit == wire_back.end()) {
+    // Wire shapes: the overlay's wire paths in circsim ids. A SPLIT
+    // pair (two sch halves born of one persisted wire - the tap lift)
+    // merges back: the persisted wire's fresh waypoints are first.mid +
+    // [the split junction's position] + second.mid, each half reading
+    // its overlay shape when the drag bent it and its stored shape when
+    // it did not. Without the merge, the two halves would fight for one
+    // entry and the split point (the T-connection the author drew)
+    // would vanish from the persisted path.
+    //
+    // Group the sch wires by the persisted circsim wire they descend
+    // from (wire_back), split pairs included.
+    std::map<std::uint32_t, std::vector<ws::sch::WireId>> by_persisted;
+    for (const auto& [sch_id, cs_id] : wire_back) {
+        by_persisted[cs_id].push_back(sch_id);
+    }
+    for (const auto& [cs_id, sch_ids] : by_persisted) {
+        if (sch_ids.size() == 1u) {
+            // The plain case: the overlay's entry (or nothing - an
+            // untouched wire keeps its stored shape).
+            const auto it = ov.wirePath.find(sch_ids.front());
+            if (it != ov.wirePath.end()) {
+                out.wires[cs_id] = it->second;
+            }
             continue;
         }
-        out.wires[bit->second] = mid;
+        // The split case: order the halves (a-side first - the half
+        // whose a endpoint is the ORIGINAL wire's a), then merge the
+        // mids with the split junction's position between them.
+        const ws::sch::WireId original_sch =
+            wire_ids.count(cs_id) != 0 ? wire_ids.at(cs_id) : 0u;
+        std::vector<const ws::sch::Wire*> ordered;
+        for (const ws::sch::WireId id : sch_ids) {
+            const ws::sch::Wire* w = doc.find_wire(id);
+            if (w != nullptr && w->id != original_sch) {
+                ordered.push_back(w);
+            }
+        }
+        if (ordered.size() != 2u) {
+            continue;  // not a pair (a stale half is gone): skip honestly
+        }
+        // a-first: the half NOT ending at the junction is the a-side.
+        const auto junction_of = [&](const ws::sch::Wire* w) {
+            // The split junction: the node both halves share.
+            return (w->a == ordered[0]->b || w->a == ordered[1]->b)
+                       ? w->a
+                       : w->b;
+        };
+        const NodeId jid = junction_of(ordered[0]);
+        const ws::sch::Node* jn = doc.find_node(jid);
+        if (jn == nullptr) {
+            continue;
+        }
+        // Order: the half whose b == jid is the FIRST (a-side).
+        const ws::sch::Wire* first =
+            ordered[0]->b == jid ? ordered[0] : ordered[1];
+        const ws::sch::Wire* second =
+            first == ordered[0] ? ordered[1] : ordered[0];
+        const auto shape_of = [&](const ws::sch::Wire* w) {
+            const auto it = ov.wirePath.find(w->id);
+            if (it != ov.wirePath.end()) {
+                return it->second;
+            }
+            return w->mid;
+        };
+        std::vector<ws::circsim::Pos> mids;
+        for (const Vec2& m : shape_of(first)) {
+            mids.push_back(p(m));
+        }
+        mids.push_back(p(jn->pos));
+        for (const Vec2& m : shape_of(second)) {
+            mids.push_back(p(m));
+        }
+        out.wires[cs_id] = std::move(mids);
     }
     return out;
 }

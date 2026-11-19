@@ -828,11 +828,14 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
             }
             return;
         }
-        // Release: land ONE undo step over the whole set. The
-        // single-drag release trick, widened: everyone visits the
-        // landing first (the attached ortho wires re-route from the
-        // resolved endpoints there), then goes back to the press
-        // positions so the command captures the real "was".
+        // Release: land ONE undo step over the whole set. The ONE
+        // routing answer (schematic-current.md's rewrite): the live
+        // drag has everyone at the landing already; the release
+        // resolves the overlay AT that state (the same call the
+        // preview ran), reads its landing()'s routes, restores the
+        // press positions for the capture, and pushes one
+        // push_move_set carrying exactly those routes. No hops, no
+        // wire_pin_spots, no attached_wire_routes.
         if (ed.group_drag.moved && ed.doc != nullptr) {
             const Pos target = ed.snap(
                 Pos{world.x - ed.group_drag.grab_offset.x,
@@ -841,76 +844,19 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
             const Pos& start =
                 ed.group_drag.starts[ed.group_drag.pressed];
             const Pos delta{target.x - start.x, target.y - start.y};
-            // The T-tap spots read at the press geometry - the live
-            // drag left the set at the landing, so the first hop below
-            // brings everyone home before anything reads the pins
-            // (at the landing the old paths are gone).
-            for (std::size_t i = 0; i < ed.group_drag.set.size(); ++i) {
-                (void)set_member_pos(ed, ed.group_drag.set[i],
-                                     ed.group_drag.starts[i]);
-            }
-            std::vector<ws::circsim::PinnedSpot> pinned;
-            for (const Selection& m : ed.group_drag.set) {
-                if (m.kind != Selection::Kind::Part &&
-                    m.kind != Selection::Kind::Junction) {
-                    continue;
-                }
-                for (const ws::circsim::PinnedSpot& ps :
-                     ed.wire_pin_spots(
-                         m.kind == Selection::Kind::Part
-                             ? Editor::Drag::Kind::Part
-                             : Editor::Drag::Kind::Junction,
-                         m.id)) {
-                    // Deduplicate by (pos, wire) - different wires can share
-                    // a position at a junction.
-                    if (std::find_if(pinned.begin(), pinned.end(),
-                                     [&](const ws::circsim::PinnedSpot& q) {
-                                         return q.wire == ps.wire &&
-                                                eps_eq(q.pos.x, ps.pos.x, 1e-9) &&
-                                                eps_eq(q.pos.y, ps.pos.y, 1e-9);
-                                     }) == pinned.end()) {
-                        pinned.push_back(ps);
-                    }
+            // The overlay at the landing state (everyone is there
+            // already - the live drag wrote them).
+            std::vector<WireRoute> route_list;
+            if (ed.drag_overlay() != nullptr) {
+                const auto landing = ed.drag_overlay_landing();
+                route_list.reserve(landing.wires.size());
+                for (const auto& [wire_id, waypoints] : landing.wires) {
+                    WireRoute r;
+                    r.wire = wire_id;
+                    r.waypoints = waypoints;
+                    route_list.push_back(std::move(r));
                 }
             }
-            // Live-move everyone to the landing (for the route read).
-            for (std::size_t i = 0; i < ed.group_drag.set.size(); ++i) {
-                const Pos at{
-                    ed.group_drag.starts[i].x + delta.x,
-                    ed.group_drag.starts[i].y + delta.y};
-                (void)set_member_pos(ed, ed.group_drag.set[i], at);
-            }
-            // The routes, deduped by wire id (a wire bent by two
-            // members would be captured twice with the same shape).
-            // No contacts collected: a move never creates
-            // connections (a pin left on a foreign wire's interior
-            // dangles, ERC's pin_on_wire warns it).
-            std::map<std::uint32_t, WireRoute> routes;
-            for (const Selection& m : ed.group_drag.set) {
-                if (m.kind != Selection::Kind::Part &&
-                    m.kind != Selection::Kind::Junction) {
-                    continue;  // wires and labels carry no attachment
-                }
-                const Editor::Drag::Kind kind =
-                    m.kind == Selection::Kind::Part
-                        ? Editor::Drag::Kind::Part
-                        : Editor::Drag::Kind::Junction;
-                for (WireRoute& r :
-                     ed.attached_wire_routes(kind, m.id, pinned)) {
-                    routes[r.wire] = std::move(r);
-                }
-            }
-            // Back to the press positions (the command's "was").
-            for (std::size_t i = 0; i < ed.group_drag.set.size(); ++i) {
-                (void)set_member_pos(ed, ed.group_drag.set[i],
-                                     ed.group_drag.starts[i]);
-            }
-            // No glue payload: a group move is geometry-only.
-            // Wires end on member pins by reference (the routes above
-            // keep them ortho); a dot sitting exactly on a member's pin
-            // is a coincidence the partition rule refuses
-            // (entities_coincide) - it and its wires stay behind.
-            std::vector<editor::GluedJunctionMove> glue;
             // The payload, when anything actually moved.
             std::vector<editor::EntityMove> moves;
             bool any = false;
@@ -928,12 +874,19 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                 mv.kind = m_kind_of(ed.group_drag.set[i]);
                 moves.push_back(mv);
             }
+            // No glue payload: a group move is geometry-only.
+            // Wires end on member pins by reference (the routes above
+            // keep them ortho); a dot sitting exactly on a member's pin
+            // is a coincidence the partition rule refuses
+            // (entities_coincide) - it and its wires stay behind.
+            std::vector<editor::GluedJunctionMove> glue;
+            // Back to the press positions (the command's "was") before
+            // the push so the capture sees the real before-state.
+            for (std::size_t i = 0; i < ed.group_drag.set.size(); ++i) {
+                (void)set_member_pos(ed, ed.group_drag.set[i],
+                                     ed.group_drag.starts[i]);
+            }
             if (any) {
-                std::vector<WireRoute> route_list;
-                route_list.reserve(routes.size());
-                for (auto& [_, r] : routes) {
-                    route_list.push_back(std::move(r));
-                }
                 editor::push_move_set(*ed.doc, std::move(moves),
                                       std::move(route_list), std::move(glue));
                 // No contact junctions: the group move connects
@@ -973,59 +926,41 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
         // Release: land the undo command when the drag actually moved.
         if (ed.drag.moved) {
             const Pos to = drag_target(ed, world, coarse);
-            // The entity first visits the landing (the attached ortho
-            // wires re-route from the resolved endpoints there), then
-            // goes back to its press position so the command captures
-            // THAT as its from - the live drag had left it at the
-            // release position, and a from == to command is an undo
-            // no-op (nothing would ever move back). Restore even when
-            // doc is null so the entity is never left stranded.
+            // The ONE routing answer (schematic-current.md's rewrite):
+            // the release re-resolves the overlay at the release-time
+            // state (the drag's live writes are the landings; the same
+            // call the preview ran), reads its landing() - junction
+            // positions + fresh wire waypoints, in circsim ids - and
+            // lands ONE command carrying exactly that. No hops, no
+            // wire_pin_spots, no attached_wire_routes: preview and
+            // commit are the same value because they ARE the same
+            // value. The live drag wrote the entity to `to` already;
+            // the command's from is the press position below, and
+            // restore-before-push keeps the capture honest.
             std::vector<WireRoute> routes;
-            std::vector<editor::GluedJunctionMove> glue;
-            if (ed.doc != nullptr) {
-                if (ed.drag.kind == Editor::Drag::Kind::Part) {
-                    // No glue: a single move is geometry-only (the
-                    // group move's rule). Wires end on the part's pins
-                    // by reference and the routes below keep them
-                    // ortho; a dot exactly on a pin is a coincidence
-                    // the partition rule refuses (entities_coincide).
-                    // The T-tap spots read at the press geometry too
-                    // The T-tap spots read at the press geometry too
-                    // (at the landing the old paths are gone).
-                    const std::vector<ws::circsim::PinnedSpot> pinned =
-                        ed.wire_pin_spots(ed.drag.kind, ed.drag.id);
-                    set_drag_pos(ed, to);
-                    routes = ed.attached_wire_routes(ed.drag.kind,
-                                                     ed.drag.id, pinned);
-                    // A move never creates connections: a pin the
-                    // landing leaves on another wire's interior stays
-                    // a dangling touch (nets.cpp's pin_on_wire
-                    // warning names it; wiring the pin is the
-                    // author's gesture). The older flow minted a
-                    // bound junction at each contact - the "silent
-                    // pickup" - which connected nets the drawing
-                    // never said to connect.
-                } else {
-                    // The T-tap spots read at the press geometry (the
-                    // live drag left the entity at the landing; the
-                    // hop home reads what the author drew).
-                    set_drag_pos(ed, ed.drag.start_world);
-                    const std::vector<ws::circsim::PinnedSpot> pinned =
-                        ed.wire_pin_spots(ed.drag.kind, ed.drag.id);
-                    set_drag_pos(ed, to);
-                    routes = ed.attached_wire_routes(ed.drag.kind,
-                                                     ed.drag.id, pinned);
-                    // The binding changes the LANDING makes (the
-                    // entity sits at `to`): a junction dragged onto a
-                    // A junction move is geometry-only now (the
-                    // partition rule): the dot's tap bindings ride
-                    // the move unchanged - a landing on another
-                    // wire's body stays a warned coincidence until
-                    // the author binds it, and a dot dragged OFF its
-                    // tapped wire keeps the binding (ERC's
-                    // tap_detached names it) instead of silently
-                    // splitting the net.
-
+            if (ed.doc != nullptr &&
+                (ed.drag.kind == Editor::Drag::Kind::Part ||
+                 ed.drag.kind == Editor::Drag::Kind::Junction)) {
+                set_drag_pos(ed, to);  // the landing the overlay resolves at
+                if (ed.drag_overlay() != nullptr) {
+                    const auto landing = ed.drag_overlay_landing();
+                    routes.reserve(landing.wires.size());
+                    for (const auto& [wire_id, waypoints] :
+                         landing.wires) {
+                        WireRoute r;
+                        r.wire = wire_id;
+                        r.waypoints = waypoints;
+                        routes.push_back(std::move(r));
+                    }
+                    // Connect-on-drop: the drops the drag showed are
+                    // the only connections the release may make. The
+                    // seam exposes them (snap-ring rendering lands with
+                    // the draw pass); the release lands none until the
+                    // author's gesture asks for it (the current
+                    // product decision: a move never silently
+                    // connects; ERC's pin_on_wire names the dangling
+                    // touch). The candidates stay computed and exposed
+                    // - flipping the policy is a one-line change here.
                 }
             }
             set_drag_pos(ed, ed.drag.start_world);
@@ -1035,11 +970,12 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
             if (landed && ed.doc != nullptr) {  // dragged back to where it started: no edit
                 if (ed.drag.kind == Editor::Drag::Kind::Part) {
                     push_move_part(*ed.doc, ed.drag.id, to,
-                                   std::move(routes), std::move(glue));
-                    // No contact junctions: a move never connects
-                    // anything (see above) - a landing that touches
-                    // a foreign wire leaves the pin dangling, warned
-                    // by ERC's pin_on_wire until the author wires it.
+                                   std::move(routes));
+                    // No glue: a single move is geometry-only (the
+                    // group move's rule). Wires end on the part's pins
+                    // by reference and the routes above keep them
+                    // ortho; a dot exactly on a pin is a coincidence
+                    // the partition rule refuses (entities_coincide).
                 } else if (ed.drag.kind == Editor::Drag::Kind::Junction) {
                     push_move_junction(*ed.doc, ed.drag.id, to,
                                        std::move(routes), {}, {});
@@ -1650,64 +1586,48 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         return net_color(*n);
     };
 
-    // The live-drag rubber band: while a drag (single or group) is
-    // moving an entity, an ortho wire ending on it resolves its
-    // endpoints live but its WAYPOINTS are the author's old ones -
-    // the raw path can run DIAGONAL legs (a pin dragged up-left of a
-    // junction draws a slash every frame; the V-shaped tangles the
-    // screenshot shows), and even tidied it still draws the STALE
-    // corridor (a hold frame showed wires running down the old route
-    // with dangling ends where the part used to be). The DRAW answers
-    // with the PREVIEW of the landing itself (live_wire_path: the
-    // same fresh-route / slid-waypoint family attached_wire_routes
-    // lands at release, computed against the live geometry) so what
-    // you see while holding the button is exactly what the release
-    // will land. Freeform wires never ride this (their shape is the
-    // author's); the document is untouched mid-drag - the waypoints
-    // still land via the release's command.
-    const auto wire_live_end = [&](const ws::circsim::WireEndpoint& e) {
-        if (ed.drag.kind == Editor::Drag::Kind::Part) {
-            const auto* pin = std::get_if<ws::circsim::PinRef>(&e);
-            return pin != nullptr && pin->part == ed.drag.id;
-        }
-        if (ed.drag.kind == Editor::Drag::Kind::Junction) {
-            const auto* j = std::get_if<ws::circsim::JunctionRef>(&e);
-            return j != nullptr && j->junction == ed.drag.id;
-        }
-        if (ed.group_drag.active) {
-            for (const Selection& m : ed.group_drag.set) {
-                if (m.kind == Selection::Kind::Part) {
-                    const auto* pin =
-                        std::get_if<ws::circsim::PinRef>(&e);
-                    if (pin != nullptr && pin->part == m.id) {
-                        return true;
-                    }
-                } else if (m.kind == Selection::Kind::Junction) {
-                    const auto* j =
-                        std::get_if<ws::circsim::JunctionRef>(&e);
-                    if (j != nullptr && j->junction == m.id) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    };
-    const auto drag_attached = [&](const ws::circsim::Wire& w) {
-        return w.ortho && (wire_live_end(w.a) || wire_live_end(w.b));
-    };
-    const bool drag_live =
-        (ed.drag.kind != Editor::Drag::Kind::None && ed.drag.moved) ||
-        (ed.group_drag.active && ed.group_drag.moved);
+    // The live-drag rubber band (schematic-current.md's rewrite): the
+    // canvas holds no routing logic - it asks the Editor's overlay seam
+    // ONCE per frame for the drag's ONE routing answer (resolve_move
+    // over the adapter view) and draws doc + overlay. What you see
+    // while holding the button is exactly what the release will land,
+    // because the release lands the SAME overlay value as its one
+    // command. The overlay carries only the wires it bent (an
+    // untouched wire keeps its stored shape); the geom cache above
+    // still resolves endpoints live through the drag's direct writes,
+    // so a wire whose endpoints moved but whose shape the overlay
+    // kept (a rigid translate) also draws correctly through the
+    // overlay path. Freeform wires never ride this (their shape is
+    // the author's); the document is untouched mid-drag - the
+    // waypoints still land via the release's command.
+    const ws::sch::Overlay* overlay = ed.drag_overlay();
+    const std::map<std::uint32_t, ws::sch::WireId>* overlay_wire_ids =
+        ed.drag_overlay_wire_ids();
     std::vector<Point> wire_pts;  // one buffer for every wire of the frame
     for (const ws::circsim::Wire& w : s.wires()) {
         const WireGeom& geom = ed.wire_geom(w);
         if (geom.path.size() < 2u) continue;
         const std::vector<Pos>* draw_path = &geom.path;
-        std::vector<Pos> previewed;  // per-wire preview landing route
-        if (drag_live && drag_attached(w)) {
-            previewed = ws::circsim::live_wire_path(
-                s, ed.library, w, wire_live_end(w.a), wire_live_end(w.b));
+        std::vector<Pos> previewed;  // per-wire overlay landing route
+        ws::sch::WireId sch_id = 0;
+        if (overlay != nullptr && overlay_wire_ids != nullptr) {
+            const auto wit = overlay_wire_ids->find(w.id);
+            if (wit != overlay_wire_ids->end() &&
+                overlay->wirePath.count(wit->second) != 0) {
+                sch_id = wit->second;
+            }
+        }
+        if (sch_id != 0) {
+            // The overlay's fresh shape for this wire: endpoints from
+            // the live geometry (the geom cache's first/last vertex,
+            // resolved through the drag's direct writes), interior from
+            // the overlay.
+            previewed.reserve(overlay->wirePath.at(sch_id).size() + 2u);
+            previewed.push_back(geom.path.front());
+            for (const ws::sch::Vec2& m : overlay->wirePath.at(sch_id)) {
+                previewed.push_back(Pos{m.x, m.y});
+            }
+            previewed.push_back(geom.path.back());
             if (previewed.size() >= 2u) {
                 draw_path = &previewed;
             }

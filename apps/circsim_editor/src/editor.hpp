@@ -75,6 +75,7 @@
 #include <ws/ui/gui/widgets.hpp>
 
 #include "document.hpp"
+#include "schematic_adapter.hpp"
 
 namespace ws::jobs {
 class JobSystem;
@@ -851,6 +852,18 @@ struct Editor {
     mutable std::uint64_t wire_geom_version_ = 0;
     mutable bool wire_geom_valid_ = false;
 
+    // The drag overlay seam (schematic-current.md's rewrite): the ONE
+    // routing answer a live drag and its release both read. While a
+    // drag moves, the canvas rebuilds the adapter view, builds the
+    // session from the input, and resolves the OVERLAY once per frame;
+    // the PREVIEW draws doc + overlay, and the RELEASE lands the SAME
+    // overlay's landing() through one undo command. adapter_ holds the
+    // built view (rebuild_drag_overlay() refreshes it); overlay_ the
+    // pure answer; overlay_valid_ gates it off outside a live drag.
+    editor::SchematicAdapter adapter_;
+    ws::sch::Overlay overlay_;
+    bool overlay_valid_ = false;
+
     // The Properties panel's editing state: the field buffers keyed
     // by stable strings, the epoch that reloads them, the selection
     // they were built for, and the analysis entry being edited. The
@@ -1022,6 +1035,28 @@ struct Editor {
     [[nodiscard]] std::vector<Pos> wire_path(
         const ws::circsim::Wire& w) const;
     [[nodiscard]] const WireGeom& wire_geom(const ws::circsim::Wire& w) const;
+
+    // The drag overlay seam: rebuilds the adapter view + resolves the
+    // overlay for the CURRENT drag state (part / junction / group; the
+    // drag's own live positions are the landings). Answers nullptr
+    // when no drag is live (or the schematic is null) - the caller
+    // draws the stored geometry instead. The release reads the SAME
+    // overlay through drag_overlay_landing() + the drops() the drag
+    // showed, so preview and commit are one value.
+    [[nodiscard]] const ws::sch::Overlay* drag_overlay();
+    // The overlay's wire ids keyed by the CIRCSIM wire id (the draw
+    // loop and any consumer holding circsim ids needs this to index
+    // overlay->wirePath, whose keys are the adapter's sch ids).
+    [[nodiscard]] const std::map<std::uint32_t, ws::sch::WireId>*
+    drag_overlay_wire_ids() {
+        return overlay_valid_ ? &adapter_.wire_ids : nullptr;
+    }
+    // The release-side translation of the live overlay: what the ONE
+    // command writes (junction positions + fresh wire waypoints, in
+    // circsim ids) + the connect-on-drop candidates the drag showed.
+    // Valid only right after a drag_overlay() that answered live.
+    [[nodiscard]] editor::SchematicAdapter::Landing drag_overlay_landing() const;
+    [[nodiscard]] std::vector<editor::SchematicAdapter::Drop> drag_overlay_drops() const;
     [[nodiscard]] SelectionIndex selection_index() const {
         return SelectionIndex{sel, multi};
     }
@@ -1038,13 +1073,12 @@ struct Editor {
                                                      Pos b, int b_dir,
                                                      bool flip = false);
 
-    // The attached ortho wires' fresh shapes for a move of `id` (the
-    // drag-release re-route: a moved endpoint would otherwise leave
-    // the adjacent legs diagonal). Read at the entity's LANDING - the
-    // caller puts the entity there first, then restores the press
-    // position and hands the routes to push_move_*. `pinned` (may be
-    // empty): the T-tap spots captured BEFORE the entity moved - the
-    // fresh routes run through them so the taps' connections survive.
+    // The attached ortho wires' fresh shapes for a move of `id` (kind =
+    // the entity kind being moved), read at the entity's LANDING: the
+    // editor computes the new routes; push_move_* captures each wire's
+    // CURRENT waypoints as the undo shape. Without the re-route a moved
+    // endpoint left the adjacent wire legs diagonal (waypoints are
+    // absolute, not relative).
     [[nodiscard]] std::vector<WireRoute> attached_wire_routes(
         Drag::Kind kind, std::uint32_t id,
         const std::vector<ws::circsim::PinnedSpot>& pinned = {}) const;
@@ -1055,10 +1089,10 @@ struct Editor {
     // and the taps no longer read as on-path).
     // Each spot names the WIRE whose interior carried it: a junction on
     // wire W's body is W's tap, and only W's fresh route has to run
-    // through it. The editor's older `pinned` list (bare positions) let a
-    // wire whose path NEVER touched the spot weave it in anyway - a move
-    // could route one net's wire through another net's tap dot, silently
-    // joining them; the ownership is the fix.
+    // through it. The editor's older `pinned` list (bare positions) let
+    // a wire whose path NEVER touched the spot weave it in anyway - a
+    // move could route one net's wire through another net's tap dot,
+    // silently joining them; the ownership is the fix.
     [[nodiscard]] std::vector<ws::circsim::PinnedSpot> wire_pin_spots(
         Drag::Kind kind, std::uint32_t id) const;
 

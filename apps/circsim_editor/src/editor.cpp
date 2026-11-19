@@ -114,6 +114,162 @@ std::vector<Pos> Editor::wire_path(const ws::circsim::Wire& w) const {
     return ws::circsim::wire_path(*s, library, w);
 }
 
+// --- the drag overlay seam (schematic-current.md's rewrite) --------------------
+//
+// The canvas calls drag_overlay() every frame while a drag moves: the
+// adapter view is rebuilt at the PRESS geometry (the drag parked back
+// at its start), the session carries the LIVE landings, and
+// ws::sch::resolve_move answers the OVERLAY - the one routing answer.
+// The preview draws doc + overlay; the release reads the SAME value
+// through drag_overlay_landing()/drag_overlay_drops() so preview and
+// commit cannot drift (they are the same value). No topology decision
+// lives in the canvas.
+
+const ws::sch::Overlay* Editor::drag_overlay() {
+    overlay_valid_ = false;
+    ws::circsim::Schematic* s = schem();
+    if (s == nullptr || doc == nullptr) {
+        return nullptr;
+    }
+    // What the session drags, from the drag state.
+    ws::sch::MoveSession session;
+    const bool part =
+        drag.kind == Drag::Kind::Part && drag.moved;
+    const bool junction =
+        drag.kind == Drag::Kind::Junction && drag.moved;
+    const bool group =
+        group_drag.active && group_drag.moved;
+    if (!part && !junction && !group) {
+        return nullptr;  // no live drag: the caller draws stored geometry
+    }
+
+    // The VIEW holds the PRESS geometry (the drag's start state); the
+    // SESSION carries the LIVE landings. resolve_move then answers the
+    // full move (the wire shapes the PRESS-authored corridors bend
+    // into), which is exactly what the preview draws and the release
+    // lands. (Building the view at the live state would make every
+    // landing a no-op: the pins would already sit at their landings
+    // and nothing would ever route.)
+    adapter_.build(*s, library);
+    if (part) {
+        // The press geometry: the part at its start position.
+        if (ws::circsim::Part* p = s->find_part(drag.id)) {
+            const ws::circsim::Pos live = p->pos;
+            p->pos = drag.start_world;
+            adapter_.build(*s, library);
+            p->pos = live;
+            session = adapter_.part_session(drag.id, live);
+        }
+    } else if (junction) {
+        ws::circsim::Junction* j = nullptr;
+        for (ws::circsim::Junction& cand : s->junctions_mut()) {
+            if (cand.id == drag.id) {
+                j = &cand;
+                break;
+            }
+        }
+        if (j != nullptr) {
+            const ws::circsim::Pos live = j->pos;
+            j->pos = drag.start_world;
+            adapter_.build(*s, library);
+            j->pos = live;
+            session = adapter_.junction_session(drag.id, live);
+        }
+    } else {
+        // The group: everyone back at their press positions for the
+        // view, the live positions as the landings.
+        std::vector<editor::SchematicAdapter::MemberMove> members;
+        for (std::size_t i = 0; i < group_drag.set.size(); ++i) {
+            const Selection& m = group_drag.set[i];
+            editor::SchematicAdapter::MemberMove mm;
+            mm.id = m.id;
+            mm.kind = m.kind == Selection::Kind::Part
+                          ? 1u
+                          : (m.kind == Selection::Kind::Junction ? 3u : 0u);
+            if (mm.kind == 0u) {
+                continue;  // wires/labels carry no attachment
+            }
+            const ws::circsim::Pos start = group_drag.starts[i];
+            ws::circsim::Pos live{0.0, 0.0};
+            if (mm.kind == 1u) {
+                if (const ws::circsim::Part* p = s->find_part(m.id)) {
+                    live = p->pos;
+                }
+            } else {
+                for (const ws::circsim::Junction& cand :
+                     s->junctions()) {
+                    if (cand.id == m.id) {
+                        live = cand.pos;
+                        break;
+                    }
+                }
+            }
+            mm.to = live;
+            members.push_back(mm);
+            // Park the member at its press position for the view.
+            if (mm.kind == 1u) {
+                if (ws::circsim::Part* p = s->find_part(m.id)) {
+                    p->pos = start;
+                }
+            } else {
+                for (ws::circsim::Junction& cand :
+                     s->junctions_mut()) {
+                    if (cand.id == m.id) {
+                        cand.pos = start;
+                        break;
+                    }
+                }
+            }
+        }
+        adapter_.build(*s, library);
+        // Restore everyone to the live positions (the schematic the
+        // canvas keeps drawing must never see the press parking).
+        for (std::size_t i = 0; i < group_drag.set.size(); ++i) {
+            const Selection& m = group_drag.set[i];
+            if (m.kind == Selection::Kind::Part) {
+                if (ws::circsim::Part* p = s->find_part(m.id)) {
+                    for (const auto& mm : members) {
+                        if (mm.id == m.id && mm.kind == 1u) {
+                            p->pos = mm.to;
+                        }
+                    }
+                }
+            } else if (m.kind == Selection::Kind::Junction) {
+                for (ws::circsim::Junction& cand :
+                     s->junctions_mut()) {
+                    if (cand.id != m.id) {
+                        continue;
+                    }
+                    for (const auto& mm : members) {
+                        if (mm.id == m.id && mm.kind == 3u) {
+                            cand.pos = mm.to;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        session = adapter_.group_session(members);
+    }
+    overlay_ = ws::sch::resolve_move(adapter_.doc, session);
+    overlay_valid_ = true;
+    return &overlay_;
+}
+
+editor::SchematicAdapter::Landing Editor::drag_overlay_landing() const {
+    if (!overlay_valid_) {
+        return {};
+    }
+    return adapter_.landing(overlay_);
+}
+
+std::vector<editor::SchematicAdapter::Drop> Editor::drag_overlay_drops() const {
+    if (!overlay_valid_) {
+        return {};
+    }
+    return adapter_.drops(overlay_);
+}
+
 const WireGeom& Editor::wire_geom(const ws::circsim::Wire& w) const {
     static const WireGeom kNone{};
     const ws::circsim::Schematic* s = schem();
@@ -228,20 +384,36 @@ bool Editor::transform_part(std::uint32_t id, int rot, bool mirror,
     std::vector<editor::GluedJunctionMove> glue;
     // No glue: a rotate/mirror is geometry-only (the move's rule).
     // Wires end on the part's pins by reference and the routes below
-    // keep them ortho through the hop; a dot exactly on a pin is a
-    // coincidence the partition rule refuses (entities_coincide) - it
-    // never rides the transform.
-    // The T-tap spots read at the CURRENT orientation (before the
-    // hop - at the new one the old paths are gone).
-    const std::vector<ws::circsim::PinnedSpot> pinned =
-        wire_pin_spots(Drag::Kind::Part, id);
+    // keep them ortho through the resolved overlay; a dot exactly on
+    // a pin is a coincidence the partition rule refuses
+    // (entities_coincide) - it never rides the transform.
+    //
+    // The ONE routing answer (schematic-current.md's rewrite): visit
+    // the transform, resolve the overlay at the new orientation (the
+    // rotate session carries every pin's new position AND new exit
+    // direction - the stubs turn with the part), read its landing()
+    // routes, then put the part back and push ONE command carrying
+    // exactly those routes. No wire_pin_spots, no
+    // attached_wire_routes, no judging against terminals.
     p->rot = rot;
     p->mirror = mirror;
     s->bump();
-    // The fresh routes run through the pinned spots (the T-taps the
-    // author drew at press geometry) so the taps' connections survive.
-    std::vector<WireRoute> routes =
-        attached_wire_routes(Drag::Kind::Part, id, pinned);
+    std::vector<WireRoute> routes;
+    {
+        adapter_.build(*s, library);
+        const ws::sch::MoveSession session =
+            adapter_.rotate_session(id, rot, mirror);
+        const ws::sch::Overlay ov =
+            ws::sch::resolve_move(adapter_.doc, session);
+        const auto landing = adapter_.landing(ov);
+        routes.reserve(landing.wires.size());
+        for (const auto& [wire_id, waypoints] : landing.wires) {
+            WireRoute r;
+            r.wire = wire_id;
+            r.waypoints = waypoints;
+            routes.push_back(std::move(r));
+        }
+    }
     // No contact junctions: a rotate/mirror never creates
     // connections either (the same rule as the move - a pin left on
     // a foreign wire's interior dangles, ERC's pin_on_wire warns
