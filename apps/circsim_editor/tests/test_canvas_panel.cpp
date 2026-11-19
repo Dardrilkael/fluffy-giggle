@@ -2308,10 +2308,13 @@ TEST_CASE("the move-drag: an attached wire draws ortho while dragging") {
     // The rubber band: a live drag writes only the entity's position,
     // so the wire's waypoints are the author's OLD ones against MOVED
     // endpoints - the raw path can run diagonal legs (the V-shaped
-    // tangles a dragged LED shows). The DRAW answers with the same
-    // tidier the landing's re-route runs: every diagonal leg earns its
-    // axis-aligned corner, so what you see while dragging is what the
-    // release lands. The document's waypoints never change mid-drag.
+    // tangles a dragged LED shows), and even tidied it still drew the
+    // STALE corridor (a hold frame showed the wire running down the old
+    // route, dangling where the part used to be). The DRAW answers with
+    // the PREVIEW of the landing itself (live_wire_path - the same
+    // fresh-route family attached_wire_routes lands at release), so
+    // the hold frame's stroke IS the shape the release will land. The
+    // document's waypoints never change mid-drag.
     Bench b;
     ws::circsim::Part led = ws::circsim::Part::make(
         "led", "D1", "red", {0.0, 0.0});
@@ -2341,9 +2344,12 @@ TEST_CASE("the move-drag: an attached wire draws ortho while dragging") {
     pointer_frame(b, press, true, true, false);
     pointer_frame(b, hold, false, true, false);
 
-    // Find the wire's polyline: 2+ points, one of them at the moved
-    // pin's world position (0,3) - the dragged end.
+    // Find the wire's polyline: the one carrying BOTH endpoints of the
+    // drag-attached wire - the moved pin's screen position (0,3) and
+    // the junction's (8,0). The part's own symbol outline passes near
+    // the pin (it IS the pin's part) but never touches the junction.
     const ws::math::Vec2 pin_screen = b.ed.view.w2s({0.0, 3.0});
+    const ws::math::Vec2 junc_screen = b.ed.view.w2s({8.0, 0.0});
     const canvas::CanvasCmd* wire_poly = nullptr;
     for (const canvas::CanvasCmd& cmd : b.clc.cmds) {
         if (cmd.kind != canvas::CanvasCmdKind::stroke_polyline ||
@@ -2351,18 +2357,43 @@ TEST_CASE("the move-drag: an attached wire draws ortho while dragging") {
             continue;
         }
         bool has_pin = false;
+        bool has_junc = false;
         for (const ws::math::Vec2& p : cmd.points) {
             if (vec2_near(p, pin_screen, 0.5f)) {
                 has_pin = true;
-                break;
+            }
+            if (vec2_near(p, junc_screen, 0.5f)) {
+                has_junc = true;
             }
         }
-        if (has_pin) {
+        if (has_pin && has_junc) {
             wire_poly = &cmd;
             break;
         }
     }
+    if (wire_poly == nullptr) {
+        for (const canvas::CanvasCmd& cmd : b.clc.cmds) {
+            if (cmd.kind != canvas::CanvasCmdKind::stroke_polyline ||
+                cmd.points.size() < 2u) {
+                continue;
+            }
+            std::printf("poly n=%zu w=%.1f closed=%d :",
+                        cmd.points.size(), cmd.width,
+                        cmd.closed ? 1 : 0);
+            for (const ws::math::Vec2& p : cmd.points) {
+                std::printf(" (%.1f,%.1f)", p.x, p.y);
+            }
+            std::printf("\n");
+        }
+        std::printf("pin=(%.1f,%.1f) junc=(%.1f,%.1f)\n", pin_screen.x,
+                    pin_screen.y, junc_screen.x, junc_screen.y);
+    }
     REQUIRE(wire_poly != nullptr);
+    // COPY the stroke's points NOW: the release frame re-runs the
+    // panel draw, clearing and refilling b.clc.cmds - a pointer into
+    // the old stream would swing to whatever command lands at the
+    // same slot (the LED's 33-point symbol outline did).
+    const std::vector<ws::math::Vec2> hold_pts = wire_poly->points;
     // Every leg axis-aligned - no diagonal anywhere in the stroke.
     for (std::size_t i = 1; i < wire_poly->points.size(); ++i) {
         const float dx =
@@ -2389,6 +2420,230 @@ TEST_CASE("the move-drag: an attached wire draws ortho while dragging") {
             std::fabs(landed[i].x - landed[i - 1u].x) < 1e-9 ||
             std::fabs(landed[i].y - landed[i - 1u].y) < 1e-9;
         CHECK(axis);
+    }
+    // The contract this round adds: the HOLD stroke was the landing.
+    // The stroke was captured above, before release; a dash-tessellated
+    // command can carry the wire's points in ANY order with runs joined
+    // - compare as SETS: every landed corner's screen point must sit
+    // on the stroke's points (within a dash gap), and the stroke must
+    // carry no point that is not on the landed polyline.
+    REQUIRE(landed.size() >= 2u);
+    for (const Pos& corner : landed) {
+        const ws::math::Vec2 sp = b.ed.view.w2s(corner);
+        bool on_stroke = false;
+        for (const ws::math::Vec2& p : hold_pts) {
+            if (vec2_near(p, sp, 1.5f)) {
+                on_stroke = true;
+                break;
+            }
+        }
+        CHECK(on_stroke);
+    }
+    for (const ws::math::Vec2& p : hold_pts) {
+        bool on_landed = false;
+        for (std::size_t i = 1; i < landed.size(); ++i) {
+            const ws::math::Vec2 a = b.ed.view.w2s(landed[i - 1u]);
+            const ws::math::Vec2 b2 = b.ed.view.w2s(landed[i]);
+            // point-to-segment (screen): inside bbox and near the line
+            const float minX = std::min(a.x, b2.x) - 1.0f;
+            const float maxX = std::max(a.x, b2.x) + 1.0f;
+            const float minY = std::min(a.y, b2.y) - 1.0f;
+            const float maxY = std::max(a.y, b2.y) + 1.0f;
+            if (p.x < minX || p.x > maxX || p.y < minY || p.y > maxY) {
+                continue;
+            }
+            const float cross = std::fabs((b2.x - a.x) * (p.y - a.y) -
+                                          (b2.y - a.y) * (p.x - a.x));
+            const float len = std::sqrt((b2.x - a.x) * (b2.x - a.x) +
+                                        (b2.y - a.y) * (b2.y - a.y));
+            if (len > 1e-3f && cross / len <= 1.0f) {
+                on_landed = true;
+                break;
+            }
+        }
+        CHECK(on_landed);
+    }
+}
+
+TEST_CASE("the move-drag: a bent wire's hold preview slides the same "
+          "waypoint the release slides") {
+    // The bent-wire class: one moving pin end, authored bends - the
+    // landing slides the waypoint adjacent to the moved end so both
+    // touching legs stay axis-aligned. The hold preview must slide the
+    // SAME waypoint (not the stale corridor, not a fresh L).
+    Bench b;
+    ws::circsim::Part led = ws::circsim::Part::make(
+        "led", "D1", "red", {0.0, 0.0});
+    led.id = b.doc.schem.alloc_id();
+    b.doc.schem.parts_mut().push_back(led);
+    ws::circsim::Junction j;
+    j.id = b.doc.schem.alloc_id();
+    j.pos = {20.0, 4.0};
+    b.doc.schem.junctions_mut().push_back(j);
+    ws::circsim::Wire w;
+    w.id = b.doc.schem.alloc_id();
+    w.a = ws::circsim::PinRef{led.id, 1u};
+    w.b = ws::circsim::JunctionRef{j.id};
+    w.ortho = true;
+    w.waypoints = {{8.0, 0.0}, {8.0, 4.0}};
+    b.doc.schem.wires_mut().push_back(w);
+    b.draw();
+
+    // Drag the part to (-3,3): the pin lands at (0,3). The landing
+    // slides the first waypoint (8,0) onto the pin's y: (8,3).
+    const ws::math::Vec2 press = b.ed.view.w2s({0.0, 0.0});
+    const ws::math::Vec2 hold = b.ed.view.w2s({-3.0, 3.0});
+    pointer_frame(b, press, true, true, false);
+    pointer_frame(b, hold, false, true, false);
+    const ws::math::Vec2 pin_screen = b.ed.view.w2s({0.0, 3.0});
+    const ws::math::Vec2 junc_screen = b.ed.view.w2s({20.0, 4.0});
+    const canvas::CanvasCmd* wire_poly = nullptr;
+    for (const canvas::CanvasCmd& cmd : b.clc.cmds) {
+        if (cmd.kind != canvas::CanvasCmdKind::stroke_polyline ||
+            cmd.points.size() < 2u) {
+            continue;
+        }
+        bool has_pin = false;
+        bool has_junc = false;
+        for (const ws::math::Vec2& p : cmd.points) {
+            if (vec2_near(p, pin_screen, 0.5f)) has_pin = true;
+            if (vec2_near(p, junc_screen, 0.5f)) has_junc = true;
+        }
+        if (has_pin && has_junc) {
+            wire_poly = &cmd;
+            break;
+        }
+    }
+    REQUIRE(wire_poly != nullptr);
+    // The preview's interior waypoint is the SLID one (8,3): the
+    // stale first waypoint (8,0) must be gone from the stroke, and
+    // every leg is axis-aligned.
+    const ws::math::Vec2 slid = b.ed.view.w2s({8.0, 3.0});
+    const ws::math::Vec2 stale = b.ed.view.w2s({8.0, 0.0});
+    bool has_slid = false;
+    bool has_stale = false;
+    for (const ws::math::Vec2& p : wire_poly->points) {
+        if (vec2_near(p, slid, 0.5f)) has_slid = true;
+        if (vec2_near(p, stale, 0.5f)) has_stale = true;
+    }
+    CHECK(has_slid);
+    CHECK_FALSE(has_stale);
+    const std::vector<ws::math::Vec2> hold_pts = wire_poly->points;
+    for (std::size_t i = 1; i < hold_pts.size(); ++i) {
+        const float dx =
+            std::fabs(hold_pts[i].x - hold_pts[i - 1u].x);
+        const float dy =
+            std::fabs(hold_pts[i].y - hold_pts[i - 1u].y);
+        const bool axis = dx < 0.01f || dy < 0.01f;
+        CHECK(axis);
+    }
+    // The document's waypoints are untouched mid-drag.
+    REQUIRE(b.doc.schem.wires().front().waypoints.size() == 2u);
+    CHECK(b.doc.schem.wires().front().waypoints[0u].x == 8.0);
+    CHECK(b.doc.schem.wires().front().waypoints[0u].y == 0.0);
+
+    // Release: the landed path is the preview, point for point.
+    pointer_frame(b, hold, false, false, false);
+    const std::vector<Pos> landed =
+        b.ed.wire_path(*b.doc.schem.find_wire(w.id));
+    REQUIRE(landed.size() == 4u);
+    for (const Pos& corner : landed) {
+        const ws::math::Vec2 sp = b.ed.view.w2s(corner);
+        bool on_stroke = false;
+        for (const ws::math::Vec2& p : hold_pts) {
+            if (vec2_near(p, sp, 0.5f)) {
+                on_stroke = true;
+                break;
+            }
+        }
+        CHECK(on_stroke);
+    }
+    CHECK(b.doc.schem.find_part(led.id)->pos.x == -3.0);
+    CHECK(b.doc.schem.find_part(led.id)->pos.y == 3.0);
+}
+
+TEST_CASE("the group move-drag: an attached wire's hold preview is the "
+          "landing route") {
+    // A group carrying both ends of a wire: the landing reroutes as a
+    // fresh L (both ends move); the hold preview must already be that
+    // L - the group's preview rides the same rule as the single drag.
+    Bench b;
+    ws::circsim::Junction jl;
+    jl.id = b.doc.schem.alloc_id();
+    jl.pos = {0.0, 0.0};
+    ws::circsim::Junction jr;
+    jr.id = b.doc.schem.alloc_id();
+    jr.pos = {6.0, 0.0};
+    b.doc.schem.junctions_mut().push_back(jl);
+    b.doc.schem.junctions_mut().push_back(jr);
+    ws::circsim::Wire w;
+    w.id = b.doc.schem.alloc_id();
+    w.a = ws::circsim::JunctionRef{jl.id};
+    w.b = ws::circsim::JunctionRef{jr.id};
+    w.ortho = true;
+    b.doc.schem.wires_mut().push_back(w);
+    b.draw();
+    // Box-select the pair (the wire between them rides the box too).
+    drag_world(b, {-4.0, 4.0}, {10.0, -4.0});
+    const std::vector<Selection> set = b.ed.selection_set();
+    bool jl_in = false;
+    bool jr_in = false;
+    for (const Selection& m : set) {
+        if (m.kind == Selection::Kind::Junction && m.id == jl.id) jl_in = true;
+        if (m.kind == Selection::Kind::Junction && m.id == jr.id) jr_in = true;
+    }
+    REQUIRE(jl_in);
+    REQUIRE(jr_in);
+
+    // Press on jl (a member) and hold-move the set by (2,3): jl lands
+    // at (2,3), jr at (8,3). The raw rubber band is horizontal, but
+    // both ends moved - the fresh L route is (0,0)->(6,0)'s new
+    // corridor: horizontal at y=3 straight across (endpoints aligned
+    // on y: the L folds to a straight line).
+    const ws::math::Vec2 press = b.ed.view.w2s({0.0, 0.0});
+    const ws::math::Vec2 hold = b.ed.view.w2s({2.0, 3.0});
+    pointer_frame(b, press, true, true, false);
+    pointer_frame(b, hold, false, true, false);
+    const ws::math::Vec2 jl_screen = b.ed.view.w2s({2.0, 3.0});
+    const ws::math::Vec2 jr_screen = b.ed.view.w2s({8.0, 3.0});
+    const canvas::CanvasCmd* wire_poly = nullptr;
+    for (const canvas::CanvasCmd& cmd : b.clc.cmds) {
+        if (cmd.kind != canvas::CanvasCmdKind::stroke_polyline ||
+            cmd.points.size() < 2u) {
+            continue;
+        }
+        bool has_jl = false;
+        bool has_jr = false;
+        for (const ws::math::Vec2& p : cmd.points) {
+            if (vec2_near(p, jl_screen, 0.5f)) has_jl = true;
+            if (vec2_near(p, jr_screen, 0.5f)) has_jr = true;
+        }
+        if (has_jl && has_jr) {
+            wire_poly = &cmd;
+            break;
+        }
+    }
+    REQUIRE(wire_poly != nullptr);
+    const std::vector<ws::math::Vec2> hold_pts = wire_poly->points;
+    // The document's waypoints are untouched mid-drag.
+    CHECK(b.doc.schem.wires().front().waypoints.empty());
+
+    pointer_frame(b, hold, false, false, false);
+    CHECK(b.doc.schem.find_junction(jl.id)->pos.x == doctest::Approx(2.0));
+    CHECK(b.doc.schem.find_junction(jl.id)->pos.y == doctest::Approx(3.0));
+    const std::vector<Pos> landed =
+        b.ed.wire_path(*b.doc.schem.find_wire(w.id));
+    REQUIRE(landed.size() >= 2u);
+    for (const Pos& corner : landed) {
+        const ws::math::Vec2 sp = b.ed.view.w2s(corner);
+        bool on_stroke = false;
+        for (const ws::math::Vec2& p : hold_pts) {
+            if (vec2_near(p, sp, 0.5f)) {
+                on_stroke = true;
+                break;
+            }
+        }
+        CHECK(on_stroke);
     }
 }
 

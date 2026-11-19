@@ -1086,6 +1086,109 @@ struct RouteJudge {
 
 }  // namespace
 
+std::vector<Pos> live_wire_path(const Schematic& s,
+                               const SymbolLibrary& lib,
+                               const Wire& w, bool a_live, bool b_live) {
+    // The rubber band's own answer: endpoints resolve live (the drag
+    // writes the entity's position), the waypoints are the author's
+    // stale ones - the RAW path can run diagonals. This answers the
+    // route the release would land for the CURRENT geometry, mirroring
+    // attached_wire_routes' own two classes:
+    //   - straight/L (or both ends moving): the fresh no-dir base,
+    //     upgraded to the dir-honoring route when the base leaves a
+    //     pin backwards (settle_route's decision core);
+    //   - one moving end, authored bends: the adjacent waypoint
+    //     slides so both touching legs stay axis-aligned.
+    std::vector<Pos> path = wire_path(s, lib, w);
+    if (path.size() < 2u) {
+        return path;  // dangling: nothing to preview
+    }
+    const auto end_dir = [&](const WireEndpoint& endpoint) -> int {
+        const auto* pin = std::get_if<PinRef>(&endpoint);
+        if (pin == nullptr) {
+            return -1;
+        }
+        const Part* part = s.find_part(pin->part);
+        const SymbolDef* symbol =
+            part != nullptr ? lib.find(part->symbol) : nullptr;
+        return (part != nullptr && symbol != nullptr)
+                   ? pin_world_dir(*symbol, *part, pin->pin)
+                   : -1;
+    };
+    // A first/last leg that leaves its pin backwards (dot < 0 with the
+    // pin's outward unit) - the lead_violation settle_route prices.
+    const auto lead_bad = [&](int dir, const Pos& leg_from,
+                              const Pos& leg_to) {
+        if (dir < 0) {
+            return false;
+        }
+        const Pos u = dir_unit(dir);
+        const double dot = (leg_to.x - leg_from.x) * u.x +
+                           (leg_to.y - leg_from.y) * u.y;
+        return dot < -1e-9;
+    };
+    std::vector<Pos> mid(path.begin() + 1, path.end() - 1);
+    if (mid.size() <= 1u || (a_live && b_live)) {
+        const int a_dir = end_dir(w.a);
+        const int b_dir = end_dir(w.b);
+        std::vector<Pos> base =
+            route_wire(path.front(), -1, path.back(), -1);
+        // route_wire folds a straight pair to the EMPTY interior, and
+        // a full-polyline preview needs the endpoints: compose with
+        // them, the settle_route contract's own compose.
+        std::vector<Pos> full;
+        full.reserve(base.size() + 2u);
+        full.push_back(path.front());
+        full.insert(full.end(), base.begin(), base.end());
+        full.push_back(path.back());
+        // (Re-fold over the full polyline: duplicates the compose may
+        // leave at a shared corner fold away the same way.)
+        std::vector<Pos> composed = fold_interior(full);
+        full.clear();
+        full.push_back(path.front());
+        full.insert(full.end(), composed.begin(), composed.end());
+        full.push_back(path.back());
+        if (full.size() >= 2u &&
+            (lead_bad(a_dir, full.front(), full[1u]) ||
+             lead_bad(b_dir, full[full.size() - 2u], full.back()))) {
+            // The clean base would leave a pin backwards - the
+            // landing reroutes with the directions honored.
+            return route_wire(path.front(), a_dir, path.back(), b_dir);
+        }
+        return full;
+    }
+    if (a_live) {
+        if (std::fabs(mid[0].x - mid[1].x) <= 1e-9) {
+            mid[0].y = path.front().y;
+        } else {
+            mid[0].x = path.front().x;
+        }
+    }
+    if (b_live) {
+        Pos& last = mid.back();
+        const Pos& prev = mid[mid.size() - 2u];
+        if (std::fabs(prev.y - last.y) <= 1e-9) {
+            last.x = path.back().x;
+        } else {
+            last.y = path.back().y;
+        }
+    }
+    // Compose the slid corridor into the full polyline the preview
+    // contract answers (endpoints included; fold the duplicates the
+    // slide may leave at the seam of the two legs).
+    std::vector<Pos> full;
+    full.reserve(mid.size() + 2u);
+    full.push_back(path.front());
+    full.insert(full.end(), mid.begin(), mid.end());
+    full.push_back(path.back());
+    const std::vector<Pos> folded = fold_interior(full);
+    full.clear();
+    full.push_back(path.front());
+    full.insert(full.end(), folded.begin(), folded.end());
+    full.push_back(path.back());
+    return full;
+}
+
 std::vector<WireRoute> attached_wire_routes(
     const Schematic& s, const SymbolLibrary& lib, AttachedKind kind,
     std::uint32_t id, const std::vector<PinnedSpot>& pinned) {
