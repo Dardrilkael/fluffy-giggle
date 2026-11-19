@@ -119,9 +119,9 @@ void SchematicAdapter::build(ws::circsim::Schematic& s,
             if (jit == junction_node.end()) {
                 continue;
             }
-            const std::optional<ws::sch::Doc::Split> s =
+            const std::optional<ws::sch::Doc::Split> split =
                 doc.split_wire(wit->second, v(j.pos));
-            if (!s.has_value()) {
+            if (!split.has_value()) {
                 continue;
             }
             // Re-point the junction: its node is the split's junction.
@@ -130,15 +130,15 @@ void SchematicAdapter::build(ws::circsim::Schematic& s,
             // split junction (they are the junction's own wires - the
             // tap's branch).
             const NodeId old_node = jit->second;
-            junction_node[j.id] = s->junction;
+            junction_node[j.id] = split->junction;
             node_junction.erase(old_node);
-            node_junction[s->junction] = j.id;
+            node_junction[split->junction] = j.id;
             for (ws::sch::Wire& w : doc.wires) {
                 if (w.a == old_node) {
-                    w.a = s->junction;
+                    w.a = split->junction;
                 }
                 if (w.b == old_node) {
-                    w.b = s->junction;
+                    w.b = split->junction;
                 }
             }
             // Drop the orphaned original from the doc.
@@ -153,8 +153,8 @@ void SchematicAdapter::build(ws::circsim::Schematic& s,
             // reused slot), the second is brand new. Map them both so
             // landing() can merge the pair back (and drops() can name
             // the persisted wire).
-            wire_back[s->first] = tapped;
-            wire_back[s->second] = tapped;
+            wire_back[split->first] = tapped;
+            wire_back[split->second] = tapped;
             (void)wit;
         }
     }
