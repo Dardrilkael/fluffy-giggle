@@ -109,3 +109,13 @@ if(ws_want_circsim)
   # include anywhere. Its CLI is apps/circsim_cli.
   add_subdirectory(circsim)
 endif()
+if(ws_want_schematic)
+  # ws::schematic is the explicit-connectivity wire/move core (the docs/
+  # schematic-current.md rewrite): a node graph (pins, junctions, labels)
+  # + wires over node ids + nets as pure union-find, and the pure
+  # resolve_move overlay the editor's drag preview and its ONE undo
+  # command both read. No rendering, no ui, no geometry-inferred
+  # connectivity anywhere - a T-connection is a junction node that
+  # SPLITS the wire, and crossing/touching wires never connect.
+  add_subdirectory(schematic)
+endif()

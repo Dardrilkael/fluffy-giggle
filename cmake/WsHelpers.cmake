@@ -53,6 +53,7 @@ _ws_declare_lib(net       DEPENDS core)
 _ws_declare_lib(physics   DEPENDS core math)
 _ws_declare_lib(spice     DEPENDS core math)
 _ws_declare_lib(circsim   DEPENDS core math spice settings)
+_ws_declare_lib(schematic DEPENDS core math)
 
 # Reads a lib's first-party deps from the registry (empty if unknown).
 function(ws_lib_deps out lib)

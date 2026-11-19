@@ -13,7 +13,7 @@
 # The direct deps follow the shell_example's rule (ws::ui links the gui
 # archive PRIVATEly, so the app lists the libs it names itself).
 ws_add_app(circsim_editor DEPENDS ws::ui ws::circsim ws::jobs ws::platform
-                               ws::app ws::settings)
+                               ws::app ws::settings ws::schematic)
 
 # The stage-4 headless gate: the Results panel driven the way the shell
 # drives it (a GuiContext frame + a panel rect), with a
@@ -25,14 +25,16 @@ ws_add_app(circsim_editor DEPENDS ws::ui ws::circsim ws::jobs ws::platform
 # stay out - the app TU owns the App subclass and the window.
 ws_add_test(circsim_editor_panel
   SOURCES tests/test_results_panel.cpp
+          src/schematic_adapter.cpp
           src/editor.cpp
+          src/schematic_adapter.cpp
           src/document.cpp
           src/results_panel.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/tests/ui_gui_r2d_stub.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
   LINK ws::circsim
-  DEPENDS ws::ui_gui ws::app ws::settings stb)
+  DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic)
 if(TARGET test_circsim_editor_panel)
   # "editor.hpp"/"results_panel.hpp" from the app's src, the stub's
   # "ui_gui_stub.hpp" and font.cpp's "text/font.h" from libs/ui's src
@@ -53,14 +55,16 @@ endif()
 # by center * zoom the moment the camera left the origin).
 ws_add_test(circsim_editor_canvas
   SOURCES tests/test_canvas_panel.cpp
+          src/schematic_adapter.cpp
           src/editor.cpp
+          src/schematic_adapter.cpp
           src/document.cpp
           src/canvas_panel.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/tests/ui_gui_r2d_stub.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
   LINK ws::circsim
-  DEPENDS ws::ui_gui ws::app ws::settings stb)
+  DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic)
 if(TARGET test_circsim_editor_canvas)
   target_include_directories(test_circsim_editor_canvas PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -70,14 +74,16 @@ endif()
 # The Schematic panel's frame-cost regressions.
 ws_add_test(circsim_editor_canvas_cost
   SOURCES tests/test_canvas_cost.cpp
+          src/schematic_adapter.cpp
           src/editor.cpp
+          src/schematic_adapter.cpp
           src/document.cpp
           src/canvas_panel.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/tests/ui_gui_r2d_stub.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
   LINK ws::circsim
-  DEPENDS ws::ui_gui ws::app ws::settings stb)
+  DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic)
 if(TARGET test_circsim_editor_canvas_cost)
   target_include_directories(test_circsim_editor_canvas_cost PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -100,14 +106,16 @@ endif()
 # through, so the stub header's dir rides the include path.
 ws_add_test(circsim_editor_side_panels
   SOURCES tests/test_side_panels.cpp
+          src/schematic_adapter.cpp
           src/editor.cpp
+          src/schematic_adapter.cpp
           src/document.cpp
           src/side_panels.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/tests/ui_gui_r2d_stub.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
   LINK ws::circsim
-  DEPENDS ws::ui_gui ws::app ws::settings stb)
+  DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic)
 if(TARGET test_circsim_editor_side_panels)
   target_include_directories(test_circsim_editor_side_panels PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -124,14 +132,16 @@ endif()
 # comparison.
 ws_add_test(circsim_editor_waveform_prof
   SOURCES tests/test_waveform_prof.cpp
+          src/schematic_adapter.cpp
           src/editor.cpp
+          src/schematic_adapter.cpp
           src/document.cpp
           src/results_panel.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/tests/ui_gui_r2d_stub.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
   LINK ws::circsim
-  DEPENDS ws::ui_gui ws::app ws::settings stb)
+  DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic)
 if(TARGET test_circsim_editor_waveform_prof)
   target_include_directories(test_circsim_editor_waveform_prof PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -143,6 +153,7 @@ endif()
 # and deque restoration directly, without depending on the canvas test fixture.
 ws_add_test(circsim_editor_document
   SOURCES tests/test_document_undo.cpp
+          src/schematic_adapter.cpp
           src/document.cpp
   LINK ws::circsim
-  DEPENDS ws::ui_gui ws::app ws::settings)
+  DEPENDS ws::ui_gui ws::app ws::settings ws::schematic)
