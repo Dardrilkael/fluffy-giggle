@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <ws/circsim/geom.hpp>
+#include <ws/schematic/model.hpp>
 #include <ws/circsim/library.hpp>
 
 using ws::circsim::Pos;
@@ -407,13 +408,23 @@ TEST_CASE("magnet_shift: no pin in range answers the base unchanged") {
     CHECK(at.y == base.y);
 }
 
-TEST_CASE("attached_wire_routes: no wires, no routes") {
-    const ws::circsim::Schematic s = two_resistors();
-    const ws::circsim::SymbolLibrary lib;
-    const ws::circsim::Part* p1 = &s.parts().front();
-    CHECK(ws::circsim::attached_wire_routes(
-              s, lib, ws::circsim::AttachedKind::Part, p1->id)
-              .empty());
+// (The attached_wire_routes / wire_pin_spots / junction_tap_landing
+// cases were deleted with the geom.cpp family: their contracts now
+// live in libs/schematic - ws::sch::split_wire IS the T-connection the
+// "owning wire" contract guarded (a tap is a SPLIT of exactly one wire;
+// no other wire's route can weave it in), and resolve_move answers the
+// fresh shapes. The assertions live there as test_model / test_router /
+// test_commands cases.)
+
+TEST_CASE("resolve_move: a session over a doc with no wires answers an empty overlay") {
+    // The old "no wires, no routes" contract, restated on the new core.
+    ws::sch::Doc d;
+    const ws::sch::NodeId p1 = d.add_pin(1, 0, {0.0, 0.0});
+    ws::sch::MoveSession session;
+    session.land[p1] = {5.0, 5.0};
+    const ws::sch::Overlay ov = ws::sch::resolve_move(d, session);
+    CHECK(ov.wirePath.empty());
+    CHECK(ov.nodePos.size() == 1);
 }
 
 // --- landing contacts (move/rotate) -----------------------------------------
@@ -427,179 +438,11 @@ TEST_CASE("series_color: the wheel cycles every eight") {
     CHECK(ws::circsim::series_color(1) == 0x4EA1E0FFu);
 }
 
-// --- PinnedSpot ownership ------------------------------------------------------
-
-TEST_CASE("wire_pin_spots: each spot names its owning wire") {
-    // Two wires sharing a junction at (2,0): W1 from (0,0) to (4,0) with
-    // a junction on its body at (2,0); W2 from (2,0) to (2,3) with its
-    // ENDPOINT at (2,0). The junction is W1's tap (interior) and W2's
-    // endpoint (not a tap). Only W1's tap should appear.
-    ws::circsim::Schematic s;
-    const ws::circsim::SymbolLibrary lib;
-
-    ws::circsim::Junction j1{}, j2{};
-    j1.id = s.alloc_id();
-    j1.pos = {0.0, 0.0};
-    j2.id = s.alloc_id();
-    j2.pos = {4.0, 0.0};
-    s.junctions_mut().push_back(j1);
-    s.junctions_mut().push_back(j2);
-    s.bump();
-
-    // The part owns W1 and W2: 'r' pins at (-3,0) and (3,0), pos
-    // (0,0). W1 runs pin0 -> j2 (4,0) carrying the tap at (2,0) on its
-    // interior; W2 runs pin1 -> j3 (3,3), carrying no tap.
-    const ws::circsim::SymbolDef* r = lib.find("r");
-    REQUIRE(r != nullptr);
-    ws::circsim::Part p{};
-    p.id = s.alloc_id();
-    p.symbol = r->key;
-    p.ref = "R1";
-    p.pos = {0.0, 0.0};  // pins at (-3,0) and (3,0)
-    s.parts_mut().push_back(p);
-    s.bump();
-
-    ws::circsim::Wire w1{};
-    w1.id = s.alloc_id();
-    w1.a = ws::circsim::PinRef{p.id, 0};
-    w1.b = ws::circsim::JunctionRef{j2.id};
-    w1.ortho = true;
-    s.wires_mut().push_back(w1);
-    s.bump();
-
-    // A junction ON W1's body at (2,0) - W1's own T-tap.
-    ws::circsim::Junction tap{};
-    tap.id = s.alloc_id();
-    tap.pos = {2.0, 0.0};
-    s.junctions_mut().push_back(tap);
-    s.bump();
-
-    ws::circsim::Wire w2{};
-    w2.id = s.alloc_id();
-    w2.a = ws::circsim::PinRef{p.id, 1};
-    ws::circsim::Junction j3{};
-    j3.id = s.alloc_id();
-    j3.pos = {3.0, 3.0};
-    s.junctions_mut().push_back(j3);
-    w2.b = ws::circsim::JunctionRef{j3.id};
-    w2.ortho = true;
-    s.wires_mut().push_back(w2);
-    s.bump();
-
-    // wire_pin_spots for the part: W1 and W2 both reference the part's
-    // pins. The tap at (2,0) is on W1's interior - it should
-    // appear as a PinnedSpot owned by W1.
-    const auto pinned = ws::circsim::wire_pin_spots(
-        s, lib, ws::circsim::AttachedKind::Part, p.id);
-
-    // Find the spot at (2,0) - it should be owned by W1
-    bool found_w1_tap = false;
-    for (const auto& ps : pinned) {
-        if (ps.pos.x == 2.0 && ps.pos.y == 0.0) {
-            CHECK(ps.wire == w1.id);
-            found_w1_tap = true;
-        }
-        // W2's endpoint at (2,0) is NOT a tap (it's an endpoint ref),
-        // so it should NOT appear.
-    }
-    CHECK(found_w1_tap);
-}
-
-TEST_CASE("attached_wire_routes: each wire routes through ONLY its own spots") {
-    // Same setup: W1 has a tap at (2,0) on its body; W2 ends at (2,0).
-    // When moving the part, W1's fresh route must go through (2,0) (its
-    // tap), W2's fresh route must NOT be forced through (2,0) (that's
-    // W2's endpoint, not a tap).
-    ws::circsim::Schematic s;
-    const ws::circsim::SymbolLibrary lib;
-
-    const ws::circsim::SymbolDef* r = lib.find("r");
-    REQUIRE(r != nullptr);
-    ws::circsim::Part p{};
-    p.id = s.alloc_id();
-    p.symbol = r->key;
-    p.ref = "R1";
-    p.pos = {0.0, 0.0};  // pins at (-3,0) and (3,0)
-    s.parts_mut().push_back(p);
-    s.bump();
-
-    ws::circsim::Junction j2{};
-    j2.id = s.alloc_id();
-    j2.pos = {4.0, 0.0};
-    s.junctions_mut().push_back(j2);
-    s.bump();
-
-    // W1: the part's pin0 to j2, the tap at (2,0) on its interior.
-    ws::circsim::Wire w1{};
-    w1.id = s.alloc_id();
-    w1.a = ws::circsim::PinRef{p.id, 0};
-    w1.b = ws::circsim::JunctionRef{j2.id};
-    w1.ortho = true;
-    s.wires_mut().push_back(w1);
-    s.bump();
-
-    ws::circsim::Junction tap{};
-    tap.id = s.alloc_id();
-    tap.pos = {2.0, 0.0};
-    s.junctions_mut().push_back(tap);
-    s.bump();
-
-    // W2: the part's pin1 (3,0) to j3 (3,3) - carries no tap.
-    ws::circsim::Wire w2{};
-    w2.id = s.alloc_id();
-    w2.a = ws::circsim::PinRef{p.id, 1};
-    ws::circsim::Junction j3{};
-    j3.id = s.alloc_id();
-    j3.pos = {3.0, 3.0};
-    s.junctions_mut().push_back(j3);
-    w2.b = ws::circsim::JunctionRef{j3.id};
-    w2.ortho = true;
-    s.wires_mut().push_back(w2);
-    s.bump();
-
-    // Capture pinned spots BEFORE the move (at press geometry)
-    const auto pinned = ws::circsim::wire_pin_spots(
-        s, lib, ws::circsim::AttachedKind::Part, p.id);
-
-    // Move the part to (10, 10) - simulate landing by bumping position
-    p.pos = {10.0, 10.0};
-    s.bump();
-
-    // Fresh routes at landing
-    const auto routes = ws::circsim::attached_wire_routes(
-        s, lib, ws::circsim::AttachedKind::Part, p.id, pinned);
-
-    // W1's route should go through (2,0) - its tap's position
-    // W2's route should NOT be forced through (2,0)
-    const auto r1 = std::find_if(routes.begin(), routes.end(),
-                                 [&](const auto& r) { return r.wire == w1.id; });
-    const auto r2 = std::find_if(routes.begin(), routes.end(),
-                                 [&](const auto& r) { return r.wire == w2.id; });
-
-    REQUIRE(r1 != routes.end());
-    REQUIRE(r2 != routes.end());
-
-    // W1's route waypoints should include the tap position (2,0) at
-    // some point along its path from the part's new pin to j2.
-    bool w1_has_tap = false;
-    for (const auto& wp : r1->waypoints) {
-        if (wp.x == 2.0 && wp.y == 0.0) {
-            w1_has_tap = true;
-            break;
-        }
-    }
-    CHECK(w1_has_tap);
-
-    // W2's route should be a direct connection from the part's new pin
-    // to j3 (at (2,3)) - it should NOT detour through (2,0).
-    // The old behavior (without ownership) would have woven W2 through
-    // (2,0) because that spot was in the bare position list.
-    bool w2_has_tap = false;
-    for (const auto& wp : r2->waypoints) {
-        if (wp.x == 2.0 && wp.y == 0.0) {
-            w2_has_tap = true;
-            break;
-        }
-    }
-    CHECK_FALSE(w2_has_tap);  // W2 does NOT route through W1's tap
+TEST_CASE("series_color: the wheel cycles every eight") {
+    CHECK(ws::circsim::series_color(0) == ws::circsim::series_color(8));
+    CHECK(ws::circsim::series_color(3) != ws::circsim::series_color(4));
+    // The head the Results plot always painted first: red,
+    // 0xE05A4EFF (the r2d packing).
+    CHECK(ws::circsim::series_color(0) == 0xE05A4EFFu);
+    CHECK(ws::circsim::series_color(1) == 0x4EA1E0FFu);
 }

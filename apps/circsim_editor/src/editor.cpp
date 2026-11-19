@@ -506,38 +506,9 @@ std::size_t Editor::annotate(double row_tol_cells) {
     return changed;
 }
 
-// The attached ortho wires' fresh shapes for a move of `id` (kind =
-// the entity kind being moved), read at the entity's LANDING: the
-// editor computes the new routes; push_move_* captures each wire's
-// CURRENT waypoints as the undo shape. Without the re-route a moved
-// endpoint left the adjacent wire legs diagonal (waypoints are
-// absolute, not relative).
-std::vector<WireRoute> Editor::attached_wire_routes(
-    Drag::Kind kind, std::uint32_t id,
-    const std::vector<ws::circsim::PinnedSpot>& pinned) const {
-    const ws::circsim::Schematic* s = schem();
-    if (s == nullptr) {
-        return {};
-    }
-    return ws::circsim::attached_wire_routes(
-        *s, library,
-        kind == Drag::Kind::Part ? ws::circsim::AttachedKind::Part
-                                 : ws::circsim::AttachedKind::Junction,
-        id, pinned);
-}
-
-std::vector<ws::circsim::PinnedSpot> Editor::wire_pin_spots(Drag::Kind kind,
-                                                            std::uint32_t id) const {
-    const ws::circsim::Schematic* s = schem();
-    if (s == nullptr) {
-        return {};
-    }
-    return ws::circsim::wire_pin_spots(
-        *s, library,
-        kind == Drag::Kind::Part ? ws::circsim::AttachedKind::Part
-                                 : ws::circsim::AttachedKind::Junction,
-        id);
-}
+// (Editor::attached_wire_routes / wire_pin_spots are deleted with the
+// geom.cpp family: the drag/release/rotate all read the ONE overlay
+// through the adapter seam - see drag_overlay() above.)
 
 std::optional<PinHit> Editor::hit_pin(Pos world, double radius) const {
     const ws::circsim::Schematic* s = schem();

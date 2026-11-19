@@ -713,21 +713,27 @@ TEST_CASE("a moved junction re-routes its attached wire, the undo "
     w.b = ws::circsim::JunctionRef{jb.id};
     w.ortho = true;  // only ortho wires re-route (freeform keeps its shape)
     b.doc.schem.wires_mut().push_back(w);
-    // Slide ja to (0,5) and read the routes from the editor (the
-    // entity is at its landing, the routes' contract).
-    for (ws::circsim::Junction& j : b.doc.schem.junctions_mut()) {
-        if (j.id == ja.id) {
-            j.pos = {0.0, 5.0};
-        }
+    // Slide ja to (0,5) and read the routes through the adapter seam
+    // (the ONE routing answer: the view holds the press geometry, the
+    // session carries the landing).
+    editor::SchematicAdapter ad;
+    ad.build(b.doc.schem, b.ed.library);
+    const ws::sch::MoveSession session =
+        ad.junction_session(ja.id, {0.0, 5.0});
+    const ws::sch::Overlay ov = ws::sch::resolve_move(ad.doc, session);
+    const editor::SchematicAdapter::Landing landing = ad.landing(ov);
+    REQUIRE(landing.wires.size() == 1u);
+    REQUIRE(landing.wires.count(w.id) != 0u);
+    REQUIRE(landing.wires.at(w.id).size() == 1u);  // the fresh L
+    CHECK(landing.wires.at(w.id)[0].x == 10.0);   // horizontal-first
+    CHECK(landing.wires.at(w.id)[0].y == 5.0);
+    std::vector<editor::WireRoute> routes;
+    {
+        editor::WireRoute r;
+        r.wire = w.id;
+        r.waypoints = landing.wires.at(w.id);
+        routes.push_back(r);
     }
-    const std::vector<editor::WireRoute> routes =
-        b.ed.attached_wire_routes(editor::Editor::Drag::Kind::Junction,
-                                  ja.id);
-    REQUIRE(routes.size() == 1u);
-    REQUIRE(routes[0].wire == w.id);
-    REQUIRE(routes[0].waypoints.size() == 1u);  // the fresh L
-    CHECK(routes[0].waypoints[0].x == 10.0);    // horizontal-first
-    CHECK(routes[0].waypoints[0].y == 5.0);
     // The command lands the route with the move. The entity goes home
     // before the push (the release flow's set_drag_pos(start_world)),
     // so the command's from is the press position, not the landing.

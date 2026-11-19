@@ -23,9 +23,9 @@
 //     point ON a wire's path, bit-equal to a position nets.cpp's
 //     exact-double on_polyline accepts);
 //   * placement - magnet_shift, the Place tool's pin magnetism (the
-//     nudge that mates a ghost's nearest pin onto a real one), and
-//     attached_wire_routes, the re-route shapes that keep a moved
-//     part's/junction's ortho wires straight;
+//     nudge that mates a ghost's nearest pin onto a real one); the
+//     moved-entity re-route shapes live in ws::sch::resolve_move now
+//     (the schematic-current.md rewrite);
 //   * colors - series_color, the data-color wheel every colored series
 //     in the workspace shares (the Results plot's signals and the
 //     canvas's per-net wire coloring), so a net and its waveform can
@@ -229,47 +229,14 @@ struct WireRoute {
     std::uint32_t wire = 0;
     std::vector<Pos> waypoints;
 };
-enum class AttachedKind : std::uint8_t { Part, Junction };
-
-// The pinned spots for a move of `id` (kind as above): every junction
-// lying on an affected wire's path INTERIOR at the CURRENT geometry -
-// call it BEFORE the entity moves (at the landing the endpoints have
-// already resolved elsewhere and the tap no longer reads as on-path).
-// The T-taps the author drew; the affected wires are the ones whose
-// endpoints reference the entity.
-// Each spot names the WIRE whose interior carried it: a junction on
-// wire W's body is W's tap, and only W's fresh route has to run
-// through it. The editor's older `pinned` list (bare positions) let a
-// wire whose path NEVER touched the spot weave it in anyway - a move
-// could route one net's wire through another net's tap dot, silently
-// joining them; the ownership is the fix.
-struct PinnedSpot {
-    Pos pos{0.0, 0.0};
-    std::uint32_t wire = 0;  // the wire whose interior carried the spot
-};
-
-[[nodiscard]] std::vector<WireRoute> attached_wire_routes(
-    const Schematic& s, const SymbolLibrary& lib, AttachedKind kind,
-    std::uint32_t id, const std::vector<PinnedSpot>& pinned = {});
-
-// The junctions glued to a part: sitting exactly on one of its pins,
-[[nodiscard]] std::vector<PinnedSpot> wire_pin_spots(
-    const Schematic& s, const SymbolLibrary& lib, AttachedKind kind,
-    std::uint32_t id);
-
-// A junction move's binding changes at its LANDING: tap_add = the
-// wires whose paths carry the landing position and the dot does not
-// already tap (the author dragged it there - the spec's "move the
-// wire directly" case), tap_remove = the dot's taps whose wires no
-// longer pass through the landing (a stale binding would keep a dead
-// connection alive). The wire's own endpoint refs never count (the
-// dot's own wire ends there by reference).
-struct JunctionTapLanding {
-    std::vector<std::uint32_t> add;
-    std::vector<std::uint32_t> remove;
-};
-[[nodiscard]] JunctionTapLanding junction_tap_landing(
-    const Schematic& s, const SymbolLibrary& lib, std::uint32_t junction);
+// (The move/re-route family - attached_wire_routes, wire_pin_spots,
+// junction_tap_landing, settle_route, route_around, live_wire_path and
+// the RouteJudge core - lived here through the live-drag era. The
+// schematic-current.md rewrite moved every routing decision into
+// ws::sch::resolve_move; the editor's drag/release/rotate all read the
+// ONE overlay now, so the family is deleted. WireRoute stays: it is
+// the route payload the editor's commands still carry (the overlay's
+// landing() translated into {wire, waypoints}).
 
 // --- colors ----------------------------------------------------------------
 

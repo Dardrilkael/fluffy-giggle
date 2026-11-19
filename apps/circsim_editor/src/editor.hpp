@@ -1073,28 +1073,9 @@ struct Editor {
                                                      Pos b, int b_dir,
                                                      bool flip = false);
 
-    // The attached ortho wires' fresh shapes for a move of `id` (kind =
-    // the entity kind being moved), read at the entity's LANDING: the
-    // editor computes the new routes; push_move_* captures each wire's
-    // CURRENT waypoints as the undo shape. Without the re-route a moved
-    // endpoint left the adjacent wire legs diagonal (waypoints are
-    // absolute, not relative).
-    [[nodiscard]] std::vector<WireRoute> attached_wire_routes(
-        Drag::Kind kind, std::uint32_t id,
-        const std::vector<ws::circsim::PinnedSpot>& pinned = {}) const;
-
-    // The T-tap spots for a move of `id`: junctions on the affected
-    // wires' path interiors, read at the CURRENT geometry - call
-    // BEFORE the entity moves (at the landing the old path is gone
-    // and the taps no longer read as on-path).
-    // Each spot names the WIRE whose interior carried it: a junction on
-    // wire W's body is W's tap, and only W's fresh route has to run
-    // through it. The editor's older `pinned` list (bare positions) let
-    // a wire whose path NEVER touched the spot weave it in anyway - a
-    // move could route one net's wire through another net's tap dot,
-    // silently joining them; the ownership is the fix.
-    [[nodiscard]] std::vector<ws::circsim::PinnedSpot> wire_pin_spots(
-        Drag::Kind kind, std::uint32_t id) const;
+    // (attached_wire_routes/wire_pin_spots are deleted with the
+    // geom.cpp family: the drag/release/rotate read the ONE overlay
+    // through drag_overlay() - the adapter seam above.)
 
     // Hit tests (world space). The pin hit radius is in world units
     // (screen px / zoom), so picks stay steady across zooms.

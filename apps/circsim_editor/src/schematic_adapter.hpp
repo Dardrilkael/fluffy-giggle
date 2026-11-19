@@ -20,16 +20,6 @@
 //     part positions and wire waypoints to write) so the command layer
 //     needs no ws::sch knowledge beyond this file.
 //
-// SAVE/LOAD MIGRATION (phase 4d): the PERSISTED format is unchanged -
-// the .csim keeps junctions with their authored `taps` lists, so old
-// files load exactly as before and new saves stay readable by old
-// builds. The lift is LIVE: every build() turns each tap into a SPLIT
-// of the tapped wire at the junction's position (the T-connection IS
-// the split in the new core), and landing() merges the split pair back
-// into ONE persisted wire's waypoint list with the junction's position
-// between the halves - so a drag that re-routes the halves saves as the
-// same single wire, tap still on its path, still old-format.
-//
 // Headless: no ui include; the canvas and the tests both drive it.
 
 #include <cstdint>

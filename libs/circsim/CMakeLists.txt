@@ -14,4 +14,5 @@ ws_add_test(circsim SOURCES tests/test_format.cpp tests/test_nets.cpp
                               tests/test_plot.cpp tests/test_symbol_render.cpp
                               tests/test_symbol_draw.cpp tests/test_overlay.cpp
                               tests/test_render_png.cpp
-                              tests/test_geom.cpp tests/test_palette.cpp)
+                              tests/test_geom.cpp tests/test_palette.cpp
+            DEPENDS ws::schematic)
