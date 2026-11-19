@@ -1650,17 +1650,71 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         return net_color(*n);
     };
 
+    // The live-drag rubber band: while a drag (single or group) is
+    // moving an entity, an ortho wire ending on it resolves its
+    // endpoints live but its WAYPOINTS are the author's old ones -
+    // the raw path can run DIAGONAL legs (a pin dragged up-left of a
+    // junction draws a slash every frame; the V-shaped tangles the
+    // screenshot shows). The DRAW answers with the same tidier the
+    // landing's re-route family runs (tidy_route: every diagonal leg
+    // earns its axis-aligned corner) so what you see while dragging
+    // is what the release will land. Freeform wires never ride this
+    // (their shape is the author's); the document is untouched - the
+    // waypoints still land via attached_wire_routes at release.
+    const auto drag_attached = [&](const ws::circsim::Wire& w) {
+        if (!w.ortho) {
+            return false;
+        }
+        const auto on_dragged = [&](const ws::circsim::WireEndpoint& e) {
+            if (ed.drag.kind == Editor::Drag::Kind::Part) {
+                const auto* pin = std::get_if<ws::circsim::PinRef>(&e);
+                return pin != nullptr && pin->part == ed.drag.id;
+            }
+            if (ed.drag.kind == Editor::Drag::Kind::Junction) {
+                const auto* j = std::get_if<ws::circsim::JunctionRef>(&e);
+                return j != nullptr && j->junction == ed.drag.id;
+            }
+            if (ed.group_drag.active) {
+                for (const Selection& m : ed.group_drag.set) {
+                    if (m.kind == Selection::Kind::Part) {
+                        const auto* pin =
+                            std::get_if<ws::circsim::PinRef>(&e);
+                        if (pin != nullptr && pin->part == m.id) {
+                            return true;
+                        }
+                    } else if (m.kind == Selection::Kind::Junction) {
+                        const auto* j =
+                            std::get_if<ws::circsim::JunctionRef>(&e);
+                        if (j != nullptr && j->junction == m.id) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        };
+        return on_dragged(w.a) || on_dragged(w.b);
+    };
+    const bool drag_live =
+        (ed.drag.kind != Editor::Drag::Kind::None && ed.drag.moved) ||
+        (ed.group_drag.active && ed.group_drag.moved);
     std::vector<Point> wire_pts;  // one buffer for every wire of the frame
     for (const ws::circsim::Wire& w : s.wires()) {
         const WireGeom& geom = ed.wire_geom(w);
         if (geom.path.size() < 2u) continue;
+        const std::vector<Pos>* draw_path = &geom.path;
+        std::vector<Pos> tidied;  // per-wire buffer for tidied path
+        if (drag_live && drag_attached(w)) {
+            tidied = ws::circsim::tidy_route(geom.path);
+            draw_path = &tidied;
+        }
         if (cull_on && (geom.max_x < cull_x0 || geom.min_x > cull_x1 ||
                         geom.max_y < cull_y0 || geom.min_y > cull_y1)) {
             continue;
         }
         wire_pts.clear();
-        wire_pts.reserve(geom.path.size());
-        for (const Pos& p : geom.path) {
+        wire_pts.reserve(draw_path->size());
+        for (const Pos& p : *draw_path) {
             wire_pts.push_back(Point{static_cast<float>(p.x),
                                      static_cast<float>(p.y)});
         }

@@ -2304,6 +2304,94 @@ TEST_CASE("a wire dragged ONTO another wire connects nothing until "
     (void)b.doc.undo().undo();
 }
 
+TEST_CASE("the move-drag: an attached wire draws ortho while dragging") {
+    // The rubber band: a live drag writes only the entity's position,
+    // so the wire's waypoints are the author's OLD ones against MOVED
+    // endpoints - the raw path can run diagonal legs (the V-shaped
+    // tangles a dragged LED shows). The DRAW answers with the same
+    // tidier the landing's re-route runs: every diagonal leg earns its
+    // axis-aligned corner, so what you see while dragging is what the
+    // release lands. The document's waypoints never change mid-drag.
+    Bench b;
+    ws::circsim::Part led = ws::circsim::Part::make(
+        "led", "D1", "red", {0.0, 0.0});
+    led.id = b.doc.schem.alloc_id();
+    b.doc.schem.parts_mut().push_back(led);
+    ws::circsim::Junction j;
+    j.id = b.doc.schem.alloc_id();
+    j.pos = {8.0, 0.0};
+    b.doc.schem.junctions_mut().push_back(j);
+    ws::circsim::Wire w;
+    w.id = b.doc.schem.alloc_id();
+    w.a = ws::circsim::PinRef{led.id, 1u};  // cathode, east at (3,0)
+    w.b = ws::circsim::JunctionRef{j.id};
+    w.ortho = true;
+    b.doc.schem.wires_mut().push_back(w);
+    b.draw();
+
+    // The raw rubber band WOULD be diagonal: the pin lands at (0,3)
+    // against the junction's (8,0). The gesture presses the part's
+    // BODY (the pin itself sits under the wire - hit_any would pick
+    // the wire) and holds the drag mid-gesture; the frame between
+    // press and release is the live rubber band.
+    const ws::math::Vec2 press = b.ed.view.w2s({0.0, 0.0});
+    // The cursor rides 3 up, 3 left of the body: the part lands at
+    // (-3,3), its cathode pin at (0,3).
+    const ws::math::Vec2 hold = b.ed.view.w2s({-3.0, 3.0});
+    pointer_frame(b, press, true, true, false);
+    pointer_frame(b, hold, false, true, false);
+
+    // Find the wire's polyline: 2+ points, one of them at the moved
+    // pin's world position (0,3) - the dragged end.
+    const ws::math::Vec2 pin_screen = b.ed.view.w2s({0.0, 3.0});
+    const canvas::CanvasCmd* wire_poly = nullptr;
+    for (const canvas::CanvasCmd& cmd : b.clc.cmds) {
+        if (cmd.kind != canvas::CanvasCmdKind::stroke_polyline ||
+            cmd.points.size() < 2u) {
+            continue;
+        }
+        bool has_pin = false;
+        for (const ws::math::Vec2& p : cmd.points) {
+            if (vec2_near(p, pin_screen, 0.5f)) {
+                has_pin = true;
+                break;
+            }
+        }
+        if (has_pin) {
+            wire_poly = &cmd;
+            break;
+        }
+    }
+    REQUIRE(wire_poly != nullptr);
+    // Every leg axis-aligned - no diagonal anywhere in the stroke.
+    for (std::size_t i = 1; i < wire_poly->points.size(); ++i) {
+        const float dx =
+            std::fabs(wire_poly->points[i].x - wire_poly->points[i - 1u].x);
+        const float dy =
+            std::fabs(wire_poly->points[i].y - wire_poly->points[i - 1u].y);
+        const bool axis = dx < 0.01f || dy < 0.01f;
+        CHECK(axis);
+    }
+    // And the document's waypoints never moved: the live drag writes
+    // only the part's position (the command lands at release).
+    CHECK(b.doc.schem.wires().front().waypoints.empty());
+
+    // Release: the part lands at (-3,3) (the cursor's snap), and the
+    // landing re-route is the same shape family (settle_route's L).
+    pointer_frame(b, hold, false, false, false);
+    CHECK(b.doc.schem.find_part(led.id)->pos.x == -3.0);
+    CHECK(b.doc.schem.find_part(led.id)->pos.y == 3.0);
+    const std::vector<Pos> landed =
+        b.ed.wire_path(*b.doc.schem.find_wire(w.id));
+    REQUIRE(landed.size() >= 2u);
+    for (std::size_t i = 1; i < landed.size(); ++i) {
+        const bool axis =
+            std::fabs(landed[i].x - landed[i - 1u].x) < 1e-9 ||
+            std::fabs(landed[i].y - landed[i - 1u].y) < 1e-9;
+        CHECK(axis);
+    }
+}
+
 TEST_CASE("the move-drag: a T-tap junction survives the wire's re-route") {
     Bench b;
     // A spine between two junctions with a T-tap junction at (5,0) and
