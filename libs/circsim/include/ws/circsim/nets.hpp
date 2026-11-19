@@ -59,19 +59,6 @@ struct Net {
 // actionable fact). Coincident pins stay out: overlapping leads are
 // their own mark, and the decks use the idiom on purpose (tline's
 // grounds ride their source pins).
-struct SilentJoin {
-    enum class Kind : std::uint8_t {
-        PinOnWire,   // a part pin lying on a wire's path interior
-        WireOnWire,  // a wire vertex lying on another wire's interior
-    };
-    Kind kind = Kind::PinOnWire;
-    Pos pos{0.0, 0.0};
-    std::uint32_t part = 0;  // PinOnWire: the picked-up pin's part id
-    std::uint32_t pin = 0;   // PinOnWire: the picked-up pin's index
-    std::uint32_t wire = 0;  // PinOnWire: the wire that did the picking up
-    std::uint32_t other = 0; // WireOnWire: the wire whose path was ridden
-};
-
 class NetList {
 public:
     std::vector<Net> nets;
@@ -105,8 +92,6 @@ private:
 struct NetBuild {
     NetList nets;
     std::vector<Diag> diags;
-    // Every junction-dot-sized hole in the drawing: see SilentJoin.
-    std::vector<SilentJoin> silent_joins;
 };
 
 // Builds the nets. `symbols` resolves symbol keys (null = the built-in

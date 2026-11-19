@@ -52,16 +52,69 @@ namespace {
 
 // --- route_wire -------------------------------------------------------------
 
-TEST_CASE("route_wire: a reversal target keeps the lead-out corner") {
+TEST_CASE("route_wire: a reversal target routes a U around the pin") {
     // A pin at (0,0) facing +x (dir 0) with the target at (-5,0): the
-    // collinear fold once read the reversal as a continuation and
-    // swallowed the (1,0) lead - the wire ran straight back through
-    // the part body it just left.
+    // target lies BEHIND the lead-out, so the stock L would double
+    // back over the pin and across the part body ((0,0)->(1,0)->
+    // (-5,0) ran the leg straight over its own start). The route
+    // steps perpendicular first: out along the lead, one step up,
+    // across, and back down onto the target lane.
     const std::vector<Pos> w =
         ws::circsim::route_wire({0.0, 0.0}, 0, {-5.0, 0.0}, -1);
-    REQUIRE(w.size() == 1);
-    CHECK(w[0].x == 1.0);
-    CHECK(w[0].y == 0.0);
+    REQUIRE(w.size() == 3);
+    CHECK(w[0] == Pos{1.0, 0.0});
+    CHECK(w[1] == Pos{1.0, 1.0});
+    CHECK(w[2] == Pos{-5.0, 1.0});
+}
+
+TEST_CASE("route_wire: a target behind the lead routes a U around the part") {
+    // The reviewer's three cases, verbatim: the doubling-back Ls the
+    // stock corner produced - (10,0)->(11,0)->(2,0)->(3,0) ran the
+    // leg over pin b and the part body - each earn the perpendicular
+    // escape instead.
+    {
+        // a=(10,0) faces +x, b=(3,0) faces -x: out, up, across, down,
+        // into b tip-first.
+        const std::vector<Pos> w =
+            ws::circsim::route_wire({10.0, 0.0}, 0, {3.0, 0.0}, 180);
+        REQUIRE(w.size() == 4);
+        CHECK(w[0] == Pos{11.0, 0.0});
+        CHECK(w[1] == Pos{11.0, 1.0});
+        CHECK(w[2] == Pos{2.0, 1.0});
+        CHECK(w[3] == Pos{2.0, 0.0});
+    }
+    {
+        // a=(10,0) faces +x, b=(3,5) faces -x: same U, closing on
+        // b's lane.
+        const std::vector<Pos> w =
+            ws::circsim::route_wire({10.0, 0.0}, 0, {3.0, 5.0}, 180);
+        REQUIRE(w.size() == 4);
+        CHECK(w[0] == Pos{11.0, 0.0});
+        CHECK(w[1] == Pos{11.0, 1.0});
+        CHECK(w[2] == Pos{2.0, 1.0});
+        CHECK(w[3] == Pos{2.0, 5.0});
+    }
+    {
+        // a=(0,0) faces up, b=(0,-8) faces down: the head-on case -
+        // both ends behind - the perpendicular lane closes both.
+        const std::vector<Pos> w =
+            ws::circsim::route_wire({0.0, 0.0}, 90, {0.0, -8.0}, 270);
+        REQUIRE(w.size() == 4);
+        CHECK(w[0] == Pos{0.0, 1.0});
+        CHECK(w[1] == Pos{1.0, 1.0});
+        CHECK(w[2] == Pos{1.0, -9.0});
+        CHECK(w[3] == Pos{0.0, -9.0});
+    }
+    {
+        // The b side alone: a free start, b=(5,0) facing +x behind
+        // a's lane - the approach escapes perpendicular before
+        // closing.
+        const std::vector<Pos> w =
+            ws::circsim::route_wire({0.0, 0.0}, -1, {5.0, 0.0}, 0);
+        REQUIRE(w.size() >= 3);
+        // The approach into b stays tip-first along b's own lead.
+        CHECK(w.back() == Pos{6.0, 0.0});
+    }
 }
 
 TEST_CASE("route_wire: 360 degrees routes exactly as 0") {
@@ -295,6 +348,51 @@ TEST_CASE("hit_wire_point: the snap is bit-equal to a path vertex") {
                     .has_value());
 }
 
+TEST_CASE("hit_wire_point: an exact tie at a crossing keeps the first wire") {
+    // Two wires crossing at (2,2), the cursor exactly on the cross:
+    // both legs answer distance 0 - a tie. The FIRST wire (the one
+    // the author drew first, the one a draft started on names) wins;
+    // the later wire used to take the pick, and a draft that started
+    // on the earlier one read its own start as gone (the spurious
+    // "the wire's start is gone" cancel).
+    ws::circsim::Schematic s;
+    const ws::circsim::SymbolLibrary lib;
+
+    ws::circsim::Junction a{};
+    a.id = s.alloc_id();
+    a.pos = {0.0, 2.0};
+    s.junctions_mut().push_back(a);
+    ws::circsim::Junction b{};
+    b.id = s.alloc_id();
+    b.pos = {4.0, 2.0};
+    s.junctions_mut().push_back(b);
+    ws::circsim::Junction c{};
+    c.id = s.alloc_id();
+    c.pos = {2.0, 0.0};
+    s.junctions_mut().push_back(c);
+    ws::circsim::Junction d{};
+    d.id = s.alloc_id();
+    d.pos = {2.0, 4.0};
+    s.junctions_mut().push_back(d);
+
+    ws::circsim::Wire first = ws::circsim::Wire::endpoints(
+        ws::circsim::JunctionRef{a.id}, ws::circsim::JunctionRef{b.id});
+    first.id = s.alloc_id();
+    s.wires_mut().push_back(first);
+    ws::circsim::Wire second = ws::circsim::Wire::endpoints(
+        ws::circsim::JunctionRef{c.id}, ws::circsim::JunctionRef{d.id});
+    second.id = s.alloc_id();
+    s.wires_mut().push_back(second);
+    s.bump();
+
+    const std::optional<ws::circsim::WirePointSnap> hit =
+        ws::circsim::hit_wire_point(s, lib, {2.0, 2.0}, 0.4, 1.0);
+    REQUIRE(hit.has_value());
+    CHECK(hit->wire == first.id);
+    CHECK(hit->pos.x == 2.0);
+    CHECK(hit->pos.y == 2.0);
+}
+
 // --- placement ----------------------------------------------------------------
 
 TEST_CASE("magnet_shift: no pin in range answers the base unchanged") {
@@ -319,95 +417,6 @@ TEST_CASE("attached_wire_routes: no wires, no routes") {
 }
 
 // --- landing contacts (move/rotate) -----------------------------------------
-
-TEST_CASE("moved_pin_contacts: a pin landing on a wire's interior answers") {
-    // R1 moved so its pin0 (-3, 0) sits on the interior of a long
-    // horizontal wire at y = 0: the contact the pickup rule would
-    // silently make - and the caller mints a junction at.
-    ws::circsim::Schematic s;
-    const ws::circsim::SymbolLibrary lib;
-    const ws::circsim::SymbolDef* r = lib.find("r");
-    REQUIRE(r != nullptr);
-
-    ws::circsim::Part p1{};
-    p1.id = s.alloc_id();
-    p1.symbol = r->key;
-    p1.ref = "R1";
-    p1.pos = {0.0, 0.0};  // pin0 at (-3, 0)
-    s.parts_mut().push_back(p1);
-
-    ws::circsim::Junction a{}, b{};
-    a.id = s.alloc_id();
-    a.pos = {-20.0, 0.0};
-    b.id = s.alloc_id();
-    b.pos = {20.0, 0.0};
-    s.junctions_mut().push_back(a);
-    s.junctions_mut().push_back(b);
-    ws::circsim::Wire w{};
-    w.id = s.alloc_id();
-    w.a = ws::circsim::JunctionRef{a.id};
-    w.b = ws::circsim::JunctionRef{b.id};
-    w.ortho = true;
-    s.wires_mut().push_back(w);
-
-    const std::vector<ws::circsim::MovedPinContact> contacts =
-        ws::circsim::moved_pin_contacts(s, lib, p1.id);
-    REQUIRE(contacts.size() == 2u);  // pin0 (-3,0) AND pin1 (3,0) ride it
-    bool saw_pin0 = false;
-    bool saw_pin1 = false;
-    for (const ws::circsim::MovedPinContact& c : contacts) {
-        CHECK(c.part == p1.id);
-        CHECK(c.wire == w.id);
-        if (c.pin == 0u) {
-            saw_pin0 = true;
-            CHECK(c.pos == ws::circsim::Pos{-3.0, 0.0});
-        } else if (c.pin == 1u) {
-            saw_pin1 = true;
-            CHECK(c.pos == ws::circsim::Pos{3.0, 0.0});
-        }
-    }
-    CHECK(saw_pin0);
-    CHECK(saw_pin1);
-}
-
-TEST_CASE("moved_pin_contacts: authored endpoints and junctions never answer") {
-    ws::circsim::Schematic s;
-    const ws::circsim::SymbolLibrary lib;
-    const ws::circsim::SymbolDef* r = lib.find("r");
-    REQUIRE(r != nullptr);
-
-    // A wire ENDING on the part's pin: the authored connection - not
-    // a contact to mint.
-    ws::circsim::Part p1{};
-    p1.id = s.alloc_id();
-    p1.symbol = r->key;
-    p1.ref = "R1";
-    p1.pos = {0.0, 0.0};
-    s.parts_mut().push_back(p1);
-
-    ws::circsim::Junction far_end{};
-    far_end.id = s.alloc_id();
-    far_end.pos = {-13.0, 0.0};
-    s.junctions_mut().push_back(far_end);
-    ws::circsim::Wire authored{};
-    authored.id = s.alloc_id();
-    authored.a = ws::circsim::JunctionRef{far_end.id};
-    authored.b = ws::circsim::PinRef{p1.id, 0};  // ends ON the pin
-    authored.ortho = true;
-    s.wires_mut().push_back(authored);
-
-    CHECK(ws::circsim::moved_pin_contacts(s, lib, p1.id).empty());
-
-    // A junction drawn at the pin's spot: the dot exists - explicit
-    // already, never minted again.
-    ws::circsim::Junction dot{};
-    dot.id = s.alloc_id();
-    dot.pos = {3.0, 0.0};  // pin1's position
-    s.junctions_mut().push_back(dot);
-    CHECK(ws::circsim::moved_pin_contacts(s, lib, p1.id).empty());
-}
-
-// --- colors ----------------------------------------------------------------
 
 TEST_CASE("series_color: the wheel cycles every eight") {
     CHECK(ws::circsim::series_color(0) == ws::circsim::series_color(8));

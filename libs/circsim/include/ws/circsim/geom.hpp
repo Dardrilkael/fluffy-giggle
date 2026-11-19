@@ -140,6 +140,17 @@ struct PinHit {
                                             const SymbolLibrary& lib,
                                             Pos world, double radius);
 
+// A DIFFERENT part's pin sitting exactly at `at` (within eps): the
+// wire tool's coincident-pin resolution. The Place tool's magnetism
+// mates two pins at identical coordinates; the partition rule
+// connects that touch nowhere, and the wire between the two refs is
+// the author's gesture. hit_pin's strict < keeps the first part's
+// pin at a shared spot, so this answers the OTHER one. nullopt when
+// only the excluded pin sits there.
+[[nodiscard]] std::optional<PinHit> hit_other_pin_at(
+    const Schematic& s, const SymbolLibrary& lib, Pos world,
+    double radius, const PinRef& exclude, Pos at);
+
 // The nearest junction within `radius` of `world`, or none.
 [[nodiscard]] std::optional<std::uint32_t> hit_junction(
     const Schematic& s, Pos world, double radius);
@@ -167,26 +178,6 @@ struct WirePointSnap {
 
 // --- landing contacts (move/rotate) -----------------------------------------
 
-// A contact a move or rotate CREATED: one of the moved part's pins,
-// resolved at its LANDING, sits exactly on another wire's path
-// interior (the pin-on-wire pickup rule's geometry). Each answer
-// names the pin and the wire whose interior it landed on; wires that
-// already END on that pin (an endpoint ref - the authored connection)
-// never answer, and a junction already at the spot suppresses it (the
-// dot exists; the connection is explicit).
-//
-// The editor drops a junction at each answered position when it lands
-// the move: the connection the pickup rule would make silently
-// becomes VISIBLE, DURABLE (it survives the next move away - the
-// junction keeps naming the node) and undoable with the step.
-struct MovedPinContact {
-    std::uint32_t part = 0;  // the moved part
-    std::uint32_t pin = 0;   // the pin that landed on the wire
-    std::uint32_t wire = 0;  // the wire whose interior was landed on
-    Pos pos{0.0, 0.0};       // the contact (the pin's landing spot)
-};
-[[nodiscard]] std::vector<MovedPinContact> moved_pin_contacts(
-    const Schematic& s, const SymbolLibrary& lib, std::uint32_t part_id);
 
 // --- placement ----------------------------------------------------------------
 

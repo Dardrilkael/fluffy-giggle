@@ -280,10 +280,7 @@ TEST_CASE("a move landing a pin on a wire stays inert (no minted dots)") {
     // lands the part whose pins ride an unrelated wire's interior,
     // and the sheet gains nothing - no junction, no binding. The
     // touch stays ERC's pin_on_wire warning until the author wires
-    // it. (moved_pin_contacts itself still answers the geometry -
-    // the probe the canvas flow USED to mint from - kept as a lib
-    // seam for callers that want to ASK; the editor no longer acts
-    // on it.)
+    // it.
     DocumentFixture f;
     auto& s = f.doc.schem;
     const ws::circsim::SymbolDef* r =
@@ -318,12 +315,8 @@ TEST_CASE("a move landing a pin on a wire stays inert (no minted dots)") {
     w2->b = ws::circsim::JunctionRef{b2->id};
     w2->ortho = true;
 
-    // The geometry the landing WOULD touch (the lib seam answers it);
-    // the move command itself mints nothing from it.
     p1->pos = {0.0, 0.0};
     s.bump();
-    CHECK(ws::circsim::moved_pin_contacts(
-              s, ws::circsim::builtin_library(), p1->id).size() == 2u);
     p1->pos = {0.0, 10.0};
     s.bump();
 

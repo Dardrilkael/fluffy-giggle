@@ -287,8 +287,26 @@ struct SnapTarget {
 };
 
 [[nodiscard]] SnapTarget snap_wire_target(const Editor& ed, Pos world) {
-    if (const std::optional<PinHit> pin =
-            ed.hit_pin(world, pick_world(ed.view))) {
+    // Coincident pins resolve for the WIRE tool the way the magnet
+    // mated them: when the pin hit at the cursor is the draft's own
+    // start pin and ANOTHER part's pin sits at the same spot, the
+    // second click names the OTHER pin - the wire the partition rule
+    // says the touch is not. (hit_pin's strict < keeps the first
+    // part's pin for both clicks otherwise, and the commit's
+    // same-entity guard rightly refuses the self-loop.)
+    std::optional<PinHit> pin = ed.hit_pin(world, pick_world(ed.view));
+    if (pin.has_value() && ed.wire_draft.active) {
+        const auto* start_pin =
+            std::get_if<ws::circsim::PinRef>(&ed.wire_draft.a);
+        if (start_pin != nullptr && *start_pin == pin->ref) {
+            if (const std::optional<PinHit> other =
+                    ed.hit_other_pin_at(world, pick_world(ed.view),
+                                        pin->ref, pin->pos)) {
+                pin = other;
+            }
+        }
+    }
+    if (pin.has_value()) {
         SnapTarget t;
         t.kind = SnapTarget::Kind::Pin;
         t.end = pin->ref;
@@ -1182,19 +1200,42 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                 // a wire's body), deferred to here so a cancel leaves
                 // nothing behind.
                 const SnapTarget t = snap_wire_target(ed, world);
-                // A zero-length wire is not a commitment - whatever the
-                // landing kind. The old guard fired for Free landings
-                // only, so a second click on the START entity (the same
-                // pin, the same junction, the same wire-point) committed
-                // a degenerate self-loop: identical endpoints, an empty
-                // folded route, and for a wire-point start two junctions
-                // minted at one position. The preview already drew
-                // nothing for the case - the commit now agrees. Nothing
-                // is lost: the same position is already one net (the
-                // coincidence rules unite coincident pins and junctions,
-                // and a wire-point landing sits on its own wire).
-                if (eps_eq(t.pos.x, ed.wire_draft.a_pos.x, 1e-9) &&
-                    eps_eq(t.pos.y, ed.wire_draft.a_pos.y, 1e-9)) {
+                // A click on the START ENTITY is not a commitment - a
+                // wire back onto its own origin is a degenerate
+                // self-loop (identical endpoints, an empty folded
+                // route, and for a wire-point start two junctions
+                // minted at one position). The same POSITION, however,
+                // commits when it names a DIFFERENT entity: two parts'
+                // pins mated at identical coordinates by the Place
+                // tool's magnetism connect nothing under the partition
+                // rule (entities_coincide warns and says to wire them),
+                // and that wire - two coincident pins, no waypoints -
+                // is exactly the author's gesture. The old guard
+                // compared POSITIONS and so dropped the click; only the
+                // entity is the loop. A free start keeps the position
+                // rule (two free clicks at one grid point name no
+                // second entity - nothing to wire).
+                const auto same_entity = [&]() {
+                    if (ed.wire_draft.a_free) {
+                        return t.kind == SnapTarget::Kind::Free &&
+                               eps_eq(t.pos.x, ed.wire_draft.a_pos.x,
+                                      1e-9) &&
+                               eps_eq(t.pos.y, ed.wire_draft.a_pos.y,
+                                      1e-9);
+                    }
+                    if (ed.wire_draft.a_mint) {
+                        // A start on a wire's body: the loop is the
+                        // SAME wire-point (same wire; a free or pin
+                        // landing at that position is a different
+                        // entity - it commits).
+                        return t.kind == SnapTarget::Kind::WirePoint &&
+                               t.wire == ed.wire_draft.a_wire;
+                    }
+                    return t.kind != SnapTarget::Kind::Free &&
+                           t.kind != SnapTarget::Kind::WirePoint &&
+                           t.end == ed.wire_draft.a;
+                };
+                if (same_entity()) {
                     break;
                 }
                 // The start anchor may have died between the clicks
@@ -1321,6 +1362,17 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
                 l.id = ed.schem()->alloc_id();
                 l.pos = ed.snap(world, coarse);
                 l.name = ed.label_text;
+                // The authored binding (the junction taps' rule): a
+                // label placed ON a wire binds that wire by reference -
+                // the connection the placement names, position
+                // inherited from the click only for where it sits.
+                // Moving the wire or the label later preserves the
+                // binding; a label placed off every wire saves wire 0
+                // and loads back on the legacy position rule.
+                if (const std::optional<Editor::WirePointSnap> wp =
+                        ed.hit_wire_point(l.pos, pick_world(ed.view))) {
+                    l.wire = wp->wire;
+                }
                 push_place_label(*ed.doc, std::move(l));
                 break;
             }

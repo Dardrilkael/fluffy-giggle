@@ -126,6 +126,51 @@ TEST_CASE("a schematic round-trips field for field") {
     CHECK(ws::circsim::save_csim(*loaded) == ws::circsim::save_csim(s));
 }
 
+TEST_CASE("a label's wire binding round-trips") {
+    // The authored binding saves (absent for 0) and loads back - the
+    // junction taps' own contract: the field is the connection, the
+    // file carries it.
+    Schematic s;
+    s.add_part(Part::make("r", "R1", "1k", {0.0, 0.0}));
+    ws::circsim::Junction a{};
+    a.id = s.alloc_id();
+    a.pos = {0.0, 0.0};
+    s.junctions_mut().push_back(a);
+    ws::circsim::Junction b{};
+    b.id = s.alloc_id();
+    b.pos = {10.0, 0.0};
+    s.junctions_mut().push_back(b);
+    ws::circsim::Wire w =
+        ws::circsim::Wire::endpoints(ws::circsim::JunctionRef{a.id},
+                                    ws::circsim::JunctionRef{b.id});
+    w.id = s.alloc_id();
+    s.wires_mut().push_back(w);
+    ws::circsim::Label* bound = s.add_label({});
+    bound->pos = {5.0, 0.0};
+    bound->name = "vcc";
+    bound->wire = w.id;
+    ws::circsim::Label* free = s.add_label({});
+    free->pos = {50.0, 50.0};
+    free->name = "note";
+
+    LoadReport report;
+    const auto loaded = ws::circsim::load_csim(ws::circsim::save_csim(s),
+                                               report);
+    REQUIRE(loaded.has_value());
+    CHECK(report.diags.empty());
+    const ws::circsim::Label* lb = loaded->find_label(bound->id);
+    const ws::circsim::Label* lf = loaded->find_label(free->id);
+    REQUIRE(lb != nullptr);
+    REQUIRE(lf != nullptr);
+    CHECK(lb->wire == w.id);
+    CHECK(lf->wire == 0);
+
+    // The bound label's save names the wire; the free label's does
+    // not (absent, not 0 - the file stays clean).
+    const std::string text = ws::circsim::save_csim(s);
+    CHECK(text.find("\"wire\"") != std::string::npos);
+}
+
 TEST_CASE("arrays save sorted by id regardless of vector order") {
     Schematic s;
     s.add_part(Part::make("r", "R2", "1k", {0.0, 0.0}));  // id 1

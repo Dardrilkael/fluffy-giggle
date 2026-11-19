@@ -83,6 +83,14 @@ struct Label {
     std::uint32_t id = 0;
     Pos pos{0.0, 0.0};
     std::string name;  // net name; same-name labels merge, case-insensitive
+    // The wire the label names (0 = none) - the AUTHORED binding, the
+    // junction taps' own rule: a label binds the wire it was placed on
+    // at commit time and the binding rides every edit; position alone
+    // never connects (a label moved off its wire keeps the binding
+    // the way a dot dragged off its tapped wire keeps its tap - ERC's
+    // label_detached names it). 0 keeps the legacy position-based
+    // attachment for files saved before the field existed.
+    std::uint32_t wire = 0;
     ws::settings::json::Object unknown;
 };
 

@@ -1085,9 +1085,36 @@ ws::core::Result<Schematic> load_csim(std::string_view text,
                                       *pos, "label " + std::to_string(l.id),
                                       diags);
                               }
+                              // The authored binding (the junction
+                              // taps' rule): the wire the label names;
+                              // 0 or absent = unbound (legacy files keep
+                              // the position-based attachment). A
+                              // dangling id warns and drops to 0 - the
+                              // label reads as unbound, never as a
+                              // binding into nothing.
+                              if (const auto wire =
+                                      as_integer(o.find("wire"))) {
+                                  if (*wire > 0 &&
+                                      static_cast<std::uint64_t>(*wire) <=
+                                          std::numeric_limits<
+                                              std::uint32_t>::max()) {
+                                      l.wire = static_cast<std::uint32_t>(
+                                          *wire);
+                                  } else {
+                                      diags.push_back(make_diag(
+                                          Severity::Warning,
+                                          "circsim.format.bad_field",
+                                          "label " +
+                                              std::to_string(l.id) +
+                                              ": 'wire' is not a usable id"
+                                              " - binding dropped",
+                                          "label " +
+                                              std::to_string(l.id)));
+                                  }
+                              }
                               for (const auto& [key, val] : o) {
                                   if (key != "id" && key != "name" &&
-                                      key != "pos") {
+                                      key != "pos" && key != "wire") {
                                       l.unknown.set(key, val);
                                   }
                               }
@@ -1217,6 +1244,12 @@ std::string save_csim(const Schematic& s) {
         o.set("id", json::Value::integer(l.id));
         o.set("pos", pos_value(l.pos));
         o.set("name", json::Value::text(l.name));
+        // The authored binding: the wire the label names (absent for
+        // 0 - a legacy or unbound label saves nothing and loads back
+        // with wire == 0, the position-based attachment).
+        if (l.wire != 0) {
+            o.set("wire", json::Value::integer(l.wire));
+        }
         for (const auto& [key, val] : l.unknown) {
             o.set(key, val);
         }

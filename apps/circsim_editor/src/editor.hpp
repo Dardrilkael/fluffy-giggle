@@ -829,15 +829,11 @@ struct Editor {
     NetlistCache netlist;
     ResultsCache results;
 
-    // auto_junction_dots' cache (stage 18): the positions themselves
-    // paired with the net each join landed on (the dots wear the net's
-    // color in Nets/Voltage mode), the schematic version they were built
-    // against, and whether a build ever ran (a fresh Editor starts
-    // invalid, not version 0). The net build the dots came from is the
-    // net_cache below - one build_nets per edit feeds both.
+    // auto_junction_dots' answer - empty since the partition rule
+    // landed (the old coincidence rules minted silent joins; the new
+    // rule connects by authored structure only, and the NetBuild
+    // silent_joins field no longer exists). Kept as the draw seam.
     std::vector<std::pair<Pos, std::uint32_t>> join_dots_;
-    std::uint64_t joins_version_ = 0;
-    bool joins_valid_ = false;
 
     // The canvas's own net build: one build_nets per edit (the same seam
     // ERC and the export read), cached against the schematic version.
@@ -1070,6 +1066,14 @@ struct Editor {
     // (screen px / zoom), so picks stay steady across zooms.
     [[nodiscard]] std::optional<PinHit> hit_pin(Pos world,
                                                 double radius) const;
+    // A DIFFERENT part's pin sitting exactly at `at` (within eps):
+    // the wire tool's coincident-pin resolution - when the snap's pin
+    // hit names the draft's own start pin and another pin is mated at
+    // the same coordinates, this one answers it. nullopt when the
+    // spot carries only the named pin.
+    [[nodiscard]] std::optional<PinHit> hit_other_pin_at(
+        Pos world, double radius, const ws::circsim::PinRef& exclude,
+        Pos at) const;
     [[nodiscard]] std::optional<std::uint32_t> hit_junction(
         Pos world, double radius) const;
     // A point on an existing wire's path within `radius` of `world`

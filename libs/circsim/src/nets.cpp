@@ -7,6 +7,7 @@
 #include <set>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -340,6 +341,7 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
     // keeps: moves preserve the net partition exactly). Each bare
     // coincidence warns once per (entity, entity) pair so the drawing
     // shows what the geometry silently did.
+    std::set<std::uint32_t> coincide_warned_pins;
     {
         std::set<std::pair<std::uint32_t, std::uint32_t>>
             warned_coincidences;
@@ -367,6 +369,17 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
                                  std::max(group[i], group[j])))
                              .second) {
                         continue;
+                    }
+                    // The coincidence is THE finding for a pin here -
+                    // remember it so entity_on_wire below does not add
+                    // pin_on_wire for the same bare touch (one touch,
+                    // one warning; the coincidence message already
+                    // says "wire them").
+                    if (a.kind == Entity::Kind::Pin) {
+                        coincide_warned_pins.insert(a.pin.part);
+                    }
+                    if (b.kind == Entity::Kind::Pin) {
+                        coincide_warned_pins.insert(b.pin.part);
                     }
                     const auto name_of = [&](const Entity& e) {
                         if (e.kind == Entity::Kind::Junction) {
@@ -612,6 +625,14 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
                 }
             }
         }
+        // One bare touch, one warning: a pin whose coincidence with
+        // another entity already fired entities_coincide at this
+        // position does not fire pin_on_wire too - the coincidence
+        // message already says "wire them".
+        if (ents[e].kind == Entity::Kind::Pin &&
+            coincide_warned_pins.count(ents[e].pin.part) != 0u) {
+            return;
+        }
         const Part* owner2 = s.find_part(ents[e].pin.part);
         if (ents[e].kind == Entity::Kind::Junction) {
             if (warned_junction_touches
@@ -684,12 +705,41 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
     // wires' polylines (nearest wire wins; the schematic's own grid,
     // the snap the editor already rides) before the label reads as
     // dangling.
-    std::vector<std::uint32_t> attached_labels;
+    // A set, not a vector+std::find: is_attached answers O(1) - the
+    // label loop below is O(L) calls and find made it O(L^2) on
+    // large sheets.
+    std::unordered_set<std::uint32_t> attached_labels;
     const auto mark_attached = [&](std::uint32_t le) {
-        attached_labels.push_back(le);
+        attached_labels.insert(le);
     };
     for (const Label& l : s.labels()) {
         const std::uint32_t le = label_ent[l.id];
+        // An AUTHORED binding decides outright (the junction taps'
+        // rule): the label names its wire by reference, and that is
+        // the connection - position plays no part (a label dragged
+        // off its wire keeps naming it, the way a dot dragged off its
+        // tapped wire keeps the tap; a binding into a deleted wire is
+        // warned below as label_detached instead of silently
+        // re-resolving through geometry). Unbound labels (wire == 0,
+        // legacy files) keep the position-based attachment below.
+        if (l.wire != 0) {
+            const auto bound_it = wire_index_by_id.find(l.wire);
+            if (bound_it != wire_index_by_id.end()) {
+                dsu.unite(le, wire_ents[bound_it->second].first);
+                mark_attached(le);
+            } else {
+                out.diags.push_back(make_diag(
+                    Severity::Warning,
+                    "circsim.nets.label_detached",
+                    "label '" + l.name + "' is bound to a wire that no "
+                    "longer exists (the wire was deleted; move the "
+                    "label or re-place it)",
+                    "label " + l.name,
+                    DiagTarget{DiagTarget::Kind::Label, 0,
+                               DiagTarget::npos(), 0, l.id}));
+            }
+            continue;
+        }
         std::vector<std::uint32_t> anchored;  // entities/vertex-wires at pos
         std::vector<std::uint32_t> interior;  // wires carrying pos mid-segment
         const auto it = by_pos.find({l.pos.x, l.pos.y});
@@ -725,17 +775,69 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
         } else {
             // The near miss: the anchor within one grid cell of the
             // wires' polylines attaches to the NEAREST wire (the same
-            // nearest-segment rule pin picking rides; the first wire
-            // stands when two tie exactly). Only the exact-crossing
-            // geometry above refuses to pick.
+            // nearest-segment rule pin picking rides; the FIRST wire
+            // stands when two tie exactly - strict <, the later wire
+            // used to take the pick and the comment said otherwise).
+            // Only the exact-crossing geometry above refuses to pick.
             const double reach = s.grid > 0.0 ? s.grid : 1.0;
             std::size_t best_wi = paths.size();
             double best_d = reach;
-            for (std::size_t wi = 0; wi < paths.size(); ++wi) {
+            const auto measure = [&](std::size_t wi) {
                 const double d = polyline_distance(paths[wi], l.pos);
-                if (d <= best_d) {
+                // The boundary counts ("within one grid cell",
+                // inclusive - the first wire AT exactly the reach
+                // attaches); after the first acceptance strict <
+                // governs, so an exact tie between two wires keeps
+                // the FIRST (the <= the code carried let the later
+                // wire take the pick, against its own comment).
+                if (d < best_d ||
+                    (best_wi == paths.size() && d <= best_d)) {
                     best_d = d;  // a nearer wire narrows the reach
                     best_wi = wi;
+                }
+            };
+            // The scan rides the SAME candidate grid the vertex
+            // rules use above (when it was built): only the wires
+            // with a segment in the label's cell (+reach band) are
+            // measured - O(cell wires) per label, not O(L*W).
+            if (use_grid) {
+                std::vector<std::size_t> seen_wires;
+                const auto cell_of = [&](double v) {
+                    return static_cast<std::int64_t>(
+                        std::floor(v / grid.cell));
+                };
+                const std::int64_t cx = cell_of(l.pos.x);
+                const std::int64_t cy = cell_of(l.pos.y);
+                const std::int64_t band =
+                    static_cast<std::int64_t>(
+                        std::ceil(reach / grid.cell));
+                for (std::int64_t gx = cx - band; gx <= cx + band; ++gx) {
+                    for (std::int64_t gy = cy - band; gy <= cy + band;
+                         ++gy) {
+                        const auto cell_it = grid.cells.find({gx, gy});
+                        if (cell_it == grid.cells.end()) {
+                            continue;
+                        }
+                        for (const SegRef& sr : cell_it->second) {
+                            if (std::find(seen_wires.begin(),
+                                          seen_wires.end(),
+                                          sr.wire) == seen_wires.end()) {
+                                seen_wires.push_back(sr.wire);
+                                measure(sr.wire);
+                            }
+                        }
+                    }
+                }
+                for (const SegRef& sr : grid.oversize) {
+                    if (std::find(seen_wires.begin(), seen_wires.end(),
+                                  sr.wire) == seen_wires.end()) {
+                        seen_wires.push_back(sr.wire);
+                        measure(sr.wire);
+                    }
+                }
+            } else {
+                for (std::size_t wi = 0; wi < paths.size(); ++wi) {
+                    measure(wi);
                 }
             }
             if (best_wi < paths.size()) {
@@ -754,8 +856,7 @@ NetBuild build_nets(const Schematic& s, const SymbolLibrary* symbols) {
         }
     }
     const auto is_attached = [&](std::uint32_t le) {
-        return std::find(attached_labels.begin(), attached_labels.end(), le) !=
-               attached_labels.end();
+        return attached_labels.count(le) != 0u;
     };
     // Same-name ATTACHED labels merge (case-insensitive): one net per
     // spelling.

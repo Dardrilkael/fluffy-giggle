@@ -792,12 +792,11 @@ std::string render_schematic_png(const Schematic& s,
         all.add(j.pos.x, j.pos.y);
     }
 
-    // The auto-junction dots build_nets reports (nets.hpp's SilentJoin):
-    // the editor paints them; so does the raster.
-    const NetBuild built = build_nets(s, symbols);
-    for (const SilentJoin& sj : built.silent_joins) {
-        all.add(sj.pos.x, sj.pos.y);
-    }
+    // (The auto-junction dots the old coincidence rules minted are
+    // gone with them: nothing rides silent_joins - the field no
+    // longer exists, the partition rule connects by authored
+    // structure only, and a pin on a wire's interior is a warned
+    // dangling touch, not a painted connection.)
 
     for (const Label& l : s.labels()) {
         const double w = RasterCanvas::text_width(l.name, ts) / ppu;
@@ -934,9 +933,6 @@ std::string render_schematic_png(const Schematic& s,
     // 3. junction and silent-join dots.
     for (const Junction& j : s.junctions()) {
         canvas.fill_disc(px(j.pos.x), py(j.pos.y), kDotR * ppu, kInk);
-    }
-    for (const SilentJoin& sj : built.silent_joins) {
-        canvas.fill_disc(px(sj.pos.x), py(sj.pos.y), kDotR * ppu, kInk);
     }
 
     // 4. part annotations: one line above the origin.

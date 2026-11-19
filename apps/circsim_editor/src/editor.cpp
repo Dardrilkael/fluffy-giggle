@@ -375,6 +375,17 @@ std::optional<PinHit> Editor::hit_pin(Pos world, double radius) const {
     return ws::circsim::hit_pin(*s, library, world, radius);
 }
 
+std::optional<PinHit> Editor::hit_other_pin_at(
+    Pos world, double radius, const ws::circsim::PinRef& exclude,
+    Pos at) const {
+    const ws::circsim::Schematic* s = schem();
+    if (s == nullptr) {
+        return std::nullopt;
+    }
+    return ws::circsim::hit_other_pin_at(*s, library, world, radius,
+                                         exclude, at);
+}
+
 std::optional<std::uint32_t> Editor::hit_junction(Pos world,
                                                   double radius) const {
     const ws::circsim::Schematic* s = schem();
@@ -1213,37 +1224,13 @@ void Editor::refresh_netlist() {
 
 const std::vector<std::pair<Pos, std::uint32_t>>&
 Editor::auto_junction_dots() {
-    const ws::circsim::Schematic* s = schem();
-    if (s == nullptr) {
-        join_dots_.clear();
-        joins_valid_ = false;
-        return join_dots_;
-    }
-    if (!joins_valid_ || joins_version_ != s->version()) {
-        // The same seam ERC and the export read: one build_nets per
-        // edit (millisecond work at editor scales), never per frame.
-        // The NetList itself lands in net_cache_; the dots resolve
-        // their nets through it AFTER the move (net_of_pin answers
-        // from the indexed lookup maps).
-        const ws::circsim::NetBuild build =
-            ws::circsim::build_nets(*s, &library);
-        nets_cache_ = std::move(build.nets);
-        nets_version_ = s->version();
-        nets_valid_ = true;
-        join_dots_.clear();
-        for (const ws::circsim::SilentJoin& j : build.silent_joins) {
-            const ws::circsim::Net* n = nullptr;
-            if (j.kind == ws::circsim::SilentJoin::Kind::PinOnWire) {
-                n = nets_cache_.net_of_pin(ws::circsim::PinRef{j.part, j.pin});
-            } else {
-                n = nets_cache_.net_of_wire(j.other);
-            }
-            join_dots_.push_back(
-                {j.pos, n != nullptr ? n->id : 0u});
-        }
-        joins_version_ = s->version();
-        joins_valid_ = true;
-    }
+    // Empty since the partition rule landed: the old coincidence
+    // rules minted "silent joins" (a pin on a wire's interior, a wire
+    // vertex riding another wire) and painted dots for them; nets.cpp
+    // connects by authored structure only now and never populates
+    // silent_joins (the field is gone from NetBuild). The call stays
+    // so the panel's draw code keeps one seam; it answers nothing.
+    join_dots_.clear();
     return join_dots_;
 }
 
@@ -1263,8 +1250,6 @@ const ws::circsim::NetList& Editor::net_cache() {
         nets_cache_ = std::move(build.nets);
         nets_version_ = s->version();
         nets_valid_ = true;
-        // The dots rode the OLD build; their cache must not outlive it.
-        joins_valid_ = false;
     }
     return nets_cache_;
 }
@@ -1454,7 +1439,6 @@ void Editor::document_changed() {
     transport_scrub = false;
     results_scrub = false;      // the row's drag dies with the document
     join_dots_.clear();
-    joins_valid_ = false;
     nets_cache_ = ws::circsim::NetList{};
     nets_valid_ = false;
     part_bounds_cache_.clear();

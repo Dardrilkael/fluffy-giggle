@@ -107,35 +107,25 @@ fetched privately, which would duplicate a first-party capability.
   text so the model stays stringly.
 
 ## Net building (nets.hpp) - the rules that keep biting
-- Reference edges first: a wire unions its two endpoints.
-- Exact-position coincidence: pins/junctions sharing a grid point union;
-  a wire vertex (endpoint or waypoint) on another wire's polyline unions
-  the wires (T-junctions); a pin or junction on a wire's path unions with
-  that wire. Two wires CROSSING where neither has a vertex NEVER connect.
-- Those coincidence pickups that drew nothing are reported: NetBuild
-  carries `silent_joins` - a pin on a wire's path interior (PinOnWire,
-  named part/pin + wire) or a wire vertex on another wire's interior
-  (WireOnWire) - one entry per position, a pin entry over a wire entry;
-  an authored junction at the position suppresses it (its own dot), and
-  pin-to-pin touches stay out (overlapping leads are their own mark -
-  the tline deck's grounds ride them on purpose). The editor paints the
-  positions as auto-junction dots; landings (wire ends on named
-  entities) and crossings never report.
-- Labels attach at their position (pin/junction/vertex, else the unique
-  wire whose interior carries them - a crossing attaches to nothing and
-  warns). Same-name labels merge, case-insensitively, ALWAYS - including
-  unattached ones.
+- Authored structure only: a wire unions its two ENDPOINT REFS (a wire
+  ending on a pin IS the connection; the pin-to-pin "touch" of the
+  Place tool's magnetism is not - entities_coincide warns it).
+- A junction's taps bind it to wires (the authored "connect here"
+  gesture; a dot sitting on a wire with no tap connects nothing).
+- A label bound to a wire (Label::wire, saved as "wire" in the .csim)
+  unions with it; unbound labels keep the legacy position-based
+  attachment (vertex, unique interior, one-grid-cell reach). Same-name
+  ATTACHED labels merge, case-insensitively; an unattached label
+  merges nothing.
+- Position coincidence is geometry, never a connection: a pin on a
+  wire's interior (pin_on_wire), a wire vertex riding another wire -
+  each warns and stays inert until wired. NetBuild no longer carries
+  silent_joins; the auto-junction dot painting is gone with it.
+- Moves never create or break connections: the drag/undo commands carry
+  endpoint refs and tap/label bindings unchanged.
 - Power/ground pins carry fixed net names and merge with every pin of the
   same name, wires or not; every ground spelling ("0" pins, labels "0"/
   "gnd") is ONE global ground.
-- Names: ground "0" > lowest-id label > lowest-id power fixed name > auto
-  `N001`... Auto names order nets by smallest member id (ids are unique
-  across object kinds - one allocator) and skip spellings already taken.
-- Ground merges mean a "gnd"-labeled net and a gnd-symbol net are the same
-  net; a label spelling "gnd" is ground, not a net named gnd.
-- An override with different pin offsets moves coincidence-built
-  connections (reference edges survive; the pin-to-pin touch does not) -
-  test_symbols.cpp pins that semantic.
 
 ## Format (format.hpp)
 - `{"format":"circsim","version":1,...}`; arrays sorted by id on save for

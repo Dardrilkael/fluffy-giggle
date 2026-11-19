@@ -154,6 +154,29 @@ std::vector<Pos> route_wire(Pos a, int a_dir, Pos b, int b_dir,
         target = {b.x + u.x * kLead, b.y + u.y * kLead};
     }
 
+    // Behind-the-lead escape (the U-shape): when the target lies
+    // BEHIND the committed lead-out - dot(unit(a_dir), target - from)
+    // < 0 - the stock L would double back over its own start pin and
+    // across the part body (a=(10,0) facing +x, b=(3,0) facing -x
+    // routed (10,0)->(11,0)->(2,0)->(3,0), the leg (11,0)->(2,0)
+    // running straight over pin b and through the part). The escape
+    // steps PERPENDICULAR first, past the pin's lead, then closes: a
+    // U around the part instead of an L through it. The mirrored
+    // check applies on the b side (the approach leg heading back
+    // into the target's own lead). Free ends (dir < 0) never need
+    // it: nothing is behind a lead they never committed.
+    const auto behind = [&](const Pos& lead_from, int lead_dir,
+                            const Pos& aim) {
+        if (lead_dir < 0) {
+            return false;
+        }
+        const Pos u = unit(lead_dir);
+        return (aim.x - lead_from.x) * u.x + (aim.y - lead_from.y) * u.y <
+               -kEps;
+    };
+    const bool a_behind = behind(from, a_dir, target);
+    const bool b_behind = behind(target, b_dir, from);
+
     // Full polyline a -> ... -> b; the stored waypoints are its
     // interior after folding. A corner is needed only when the free
     // point past a's lead and the approach point before b share
@@ -166,7 +189,27 @@ std::vector<Pos> route_wire(Pos a, int a_dir, Pos b, int b_dir,
     if (a_dir >= 0) {
         full.push_back(from);
     }
-    if (corner_needed) {
+    if (a_behind || b_behind) {
+        // The U: out along the (say horizontal) lead, one step
+        // perpendicular to clear the part, across to the target's
+        // lane, back down onto the approach lane, and in. The
+        // perpendicular step rides the SAME side the stock L would
+        // have turned (flip stays the Tab toggle); with both ends
+        // behind (the head-on case) the lane is whichever axis the
+        // leads share - they are parallel there, so either lane
+        // closes both.
+        const bool start_horizontal =
+            (a_dir < 0 || a_dir == 0 || a_dir == 180) != flip;
+        if (start_horizontal) {
+            const double perp_y = from.y + (target.y >= from.y ? kLead : -kLead);
+            full.push_back(Pos{from.x, perp_y});
+            full.push_back(Pos{target.x, perp_y});
+        } else {
+            const double perp_x = from.x + (target.x >= from.x ? kLead : -kLead);
+            full.push_back(Pos{perp_x, from.y});
+            full.push_back(Pos{perp_x, target.y});
+        }
+    } else if (corner_needed) {
         // One corner (an L): the leg out of `from` continues the
         // committed direction (horizontal when free), the leg into
         // `target` closes. The final approach leg target -> b already
@@ -461,6 +504,37 @@ std::optional<PinHit> hit_pin(const Schematic& s,
     return best;
 }
 
+std::optional<PinHit> hit_other_pin_at(
+    const Schematic& s, const SymbolLibrary& lib, Pos world,
+    double radius, const PinRef& exclude, Pos at) {
+    // Same spot, different pin: iterate the way hit_pin does (parts
+    // in insertion order, pins ascending) and keep the first pin that
+    // is not the excluded one and sits exactly at `at` (within eps)
+    // while still within the pick radius of the cursor.
+    constexpr double kEps = 1e-9;
+    for (const Part& p : s.parts()) {
+        if (p.id == exclude.part) {
+            continue;
+        }
+        const SymbolDef* sym = lib.find(p.symbol);
+        if (sym == nullptr) {
+            continue;
+        }
+        for (std::size_t i = 0; i < sym->pins.size(); ++i) {
+            const Pos pos = pin_pos(*sym, p, static_cast<std::uint32_t>(i));
+            if (!eps_eq_pos(pos, at, kEps)) {
+                continue;
+            }
+            const double d = len(Pos{pos.x - world.x, pos.y - world.y});
+            if (d <= radius) {
+                return PinHit{PinRef{p.id, static_cast<std::uint32_t>(i)},
+                              pos, sym->pins[i].dir};
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<std::uint32_t> hit_junction(const Schematic& s, Pos world,
                                           double radius) {
     std::optional<std::uint32_t> best;
@@ -542,8 +616,13 @@ std::optional<WirePointSnap> hit_wire_point(const Schematic& s,
             // the SNAPPED candidate missed a cursor riding the wire
             // between grid intersections at high zoom - its snap sits
             // half a cell away.
+            // Strict < keeps the FIRST wire on an exact tie (two
+            // wires crossing at the cursor): the later wire used to
+            // win, and a draft that started on the earlier one read
+            // its own start as gone (the spurious cancel) - the
+            // first wire is the one the author drew first.
             const double d = dist_to_segment(a, b, world);
-            if (d <= best_d) {
+            if (d < best_d) {
                 best_d = d;
                 best = WirePointSnap{w.id, cand};
             }
@@ -584,79 +663,6 @@ Pos magnet_shift(const Schematic& s, const SymbolLibrary& lib,
     return {base.x + best_shift->x, base.y + best_shift->y};
 }
 
-std::vector<MovedPinContact> moved_pin_contacts(
-    const Schematic& s, const SymbolLibrary& lib, std::uint32_t part_id) {
-    std::vector<MovedPinContact> out;
-    const Part* part = s.find_part(part_id);
-    const SymbolDef* sym = part != nullptr ? lib.find(part->symbol) : nullptr;
-    if (part == nullptr || sym == nullptr) {
-        return out;
-    }
-    // A junction at the spot already names the node explicitly: its
-    // dot is the authored connection, nothing to mint.
-    std::set<std::pair<double, double>> junction_at;
-    for (const Junction& j : s.junctions()) {
-        junction_at.insert({j.pos.x, j.pos.y});
-    }
-    for (std::uint32_t pin = 0; pin < sym->pins.size(); ++pin) {
-        const Pos at = pin_pos(*sym, *part, pin);
-        const PinRef ref{part_id, pin};
-        for (const Wire& w : s.wires()) {
-            // A wire that ENDS on this pin is the authored connection:
-            // its endpoint ref already carries it - landing on that
-            // wire's END is a landing, not a contact to mint.
-            const bool ends_on_pin =
-                (std::get_if<PinRef>(&w.a) != nullptr &&
-                 *std::get_if<PinRef>(&w.a) == ref) ||
-                (std::get_if<PinRef>(&w.b) != nullptr &&
-                 *std::get_if<PinRef>(&w.b) == ref);
-            if (ends_on_pin) {
-                continue;
-            }
-            const std::vector<Pos> path = wire_path(s, lib, w);
-            if (path.size() < 2u) {
-                continue;  // dangling: no interior to land on
-            }
-            // The contact rules are the same exact-double geometry
-            // nets.cpp unions by: the point lies on a segment, and it
-            // is the path's INTERIOR (an endpoint is a landing on a
-            // named entity both would reference - visible already).
-            bool on_interior = false;
-            for (std::size_t i = 1; i < path.size(); ++i) {
-                const Pos& a = path[i - 1];
-                const Pos& b = path[i];
-                const double cross =
-                    (b.x - a.x) * (at.y - a.y) - (b.y - a.y) * (at.x - a.x);
-                if (cross != 0.0) {
-                    continue;
-                }
-                if (at.x < std::min(a.x, b.x) || at.x > std::max(a.x, b.x) ||
-                    at.y < std::min(a.y, b.y) || at.y > std::max(a.y, b.y)) {
-                    continue;
-                }
-                on_interior = true;
-                break;
-            }
-            if (!on_interior) {
-                continue;
-            }
-            if (eps_eq_pos(at, path.front(), 1e-9) ||
-                eps_eq_pos(at, path.back(), 1e-9)) {
-                continue;  // the wire's endpoint position: a landing
-            }
-            if (junction_at.count({at.x, at.y}) != 0u) {
-                continue;  // an explicit dot already names the node
-            }
-            MovedPinContact contact;
-            contact.part = part_id;
-            contact.pin = pin;
-            contact.wire = w.id;
-            contact.pos = at;
-            out.push_back(contact);
-        }
-    }
-    return out;
-}
 
 namespace {
 

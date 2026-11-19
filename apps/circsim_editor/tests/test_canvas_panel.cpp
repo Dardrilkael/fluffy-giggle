@@ -426,16 +426,21 @@ TEST_CASE("hit_wire_point: among several wires, the nearest segment wins") {
 
 // --- route_wire: the reversal keeps its lead, the degrees normalize ----
 
-TEST_CASE("route_wire: a reversal target keeps the lead-out corner") {
+TEST_CASE("route_wire: a reversal target routes a U around the pin") {
     // A pin at (0,0) facing +x (dir 0) with the target at (-5,0): the
-    // collinear fold once read the reversal as a continuation and
-    // swallowed the (1,0) lead - the wire ran straight back through
-    // the part body it just left.
+    // target lies BEHIND the lead-out, so the stock L would double
+    // back over the pin and the part body. The route steps
+    // perpendicular first (the lib test's contract - kept here so
+    // the editor's re-export answers the same shape).
     const std::vector<Pos> route =
         editor::Editor::route_wire({0.0, 0.0}, 0, {-5.0, 0.0}, -1);
-    REQUIRE(route.size() == 1u);
+    REQUIRE(route.size() == 3u);
     CHECK(route[0].x == 1.0);
     CHECK(route[0].y == 0.0);
+    CHECK(route[1].x == 1.0);
+    CHECK(route[1].y == 1.0);
+    CHECK(route[2].x == -5.0);
+    CHECK(route[2].y == 1.0);
 }
 
 TEST_CASE("route_wire: 360 degrees routes exactly as 0") {
@@ -771,6 +776,48 @@ TEST_CASE("route_wire: a pin landing approaches tip-first from the pin's "
     REQUIRE(cornered.size() == 2u);
     CHECK(cornered.back().x == 4.0);
     CHECK(cornered.back().y == 0.0);
+}
+
+TEST_CASE("the wire tool: two coincident pins wire into one net") {
+    Bench b;
+    ws::circsim::Part r1 =
+        ws::circsim::Part::make("r", "R1", "1k", {0.0, 0.0});
+    r1.id = b.doc.schem.alloc_id();
+    b.doc.schem.parts_mut().push_back(r1);
+    // R2 mirrored at the same origin: its pin 0 lands exactly on
+    // R1's pin 1 (3,0) - the Place tool's magnetism (magnet_shift)
+    // mates pins at identical coordinates. Under the partition rule
+    // the touch connects nothing (entities_coincide warns and says
+    // to wire them), and the wire tool's click at that SAME
+    // POSITION must name the OTHER pin - the second click is a
+    // different ENTITY, so the commit fires: a zero-waypoint wire
+    // between the two refs.
+    ws::circsim::Part r2 =
+        ws::circsim::Part::make("r", "R2", "2k", {0.0, 0.0});
+    r2.mirror = true;
+    r2.id = b.doc.schem.alloc_id();
+    b.doc.schem.parts_mut().push_back(r2);
+    b.wire_click({3.0, 0.0}, {3.0, 0.0});
+    REQUIRE(b.doc.schem.wires().size() == 1u);
+    const ws::circsim::Wire& w = b.doc.schem.wires().front();
+    CHECK(w.waypoints.empty());
+    CHECK(std::get_if<ws::circsim::PinRef>(&w.a) != nullptr);
+    CHECK(std::get_if<ws::circsim::PinRef>(&w.b) != nullptr);
+    const auto* pa = std::get_if<ws::circsim::PinRef>(&w.a);
+    const auto* pb = std::get_if<ws::circsim::PinRef>(&w.b);
+    REQUIRE(pa != nullptr);
+    REQUIRE(pb != nullptr);
+    CHECK(pa->part != pb->part);  // two different parts' pins
+    // And the wire now carries the connection the touch could not.
+    ws::circsim::NetBuild nb =
+        ws::circsim::build_nets(b.doc.schem, &b.ed.library);
+    const ws::circsim::Net* n1 =
+        nb.nets.net_of_pin(ws::circsim::PinRef{r1.id, 1u});
+    const ws::circsim::Net* n2 =
+        nb.nets.net_of_pin(ws::circsim::PinRef{r2.id, 0u});
+    REQUIRE(n1 != nullptr);
+    REQUIRE(n2 != nullptr);
+    CHECK(n1->id == n2->id);
 }
 
 TEST_CASE("the wire tool: a pin-to-pin wire runs straight between facing "
@@ -2004,6 +2051,46 @@ bool has_diag(const ws::circsim::NetBuild& b, const std::string& code) {
     }
     return false;
 }
+
+TEST_CASE("a label placed on a wire binds it; the binding survives moves") {
+    Bench b;
+    b.place_wire();  // junctions (1,1) and (4,1); the wire between
+    const std::uint32_t wire_id = b.doc.schem.wires().front().id;
+    b.ed.tool = editor::Tool::Label;
+    b.click_at({2.0, 1.0});  // on the wire's body; text defaults "net"
+    REQUIRE(b.doc.schem.labels().size() == 1u);
+    CHECK(b.doc.schem.labels().front().wire == wire_id);
+
+    // The net: the label rides the wire's net (the binding, the
+    // authored gesture - the partition rule's own shape).
+    {
+        ws::circsim::NetBuild nb =
+            ws::circsim::build_nets(b.doc.schem, &b.ed.library);
+        const ws::circsim::Net* n =
+            nb.nets.net_of_wire(wire_id);
+        REQUIRE(n != nullptr);
+        CHECK(n->name == "net");
+    }
+
+    // Drag the LABEL far off the wire: still that net - the binding,
+    // not the position, carries the connection (the geometry-only
+    // move's rule, the junction taps' own contract).
+    drag_world(b, {2.0, 1.0}, {50.0, 50.0});
+    CHECK(b.doc.schem.labels().front().wire == wire_id);
+    {
+        ws::circsim::NetBuild nb =
+            ws::circsim::build_nets(b.doc.schem, &b.ed.library);
+        const ws::circsim::Net* n =
+            nb.nets.net_of_wire(wire_id);
+        REQUIRE(n != nullptr);
+        CHECK(n->name == "net");
+    }
+
+    // Undo returns the label alone - the binding intact.
+    (void)b.doc.undo().undo();
+    CHECK(b.doc.schem.labels().front().wire == wire_id);
+}
+
 
 // --- the junction glue (move keeps every connection) ---------------------------
 //
