@@ -90,9 +90,12 @@ TEST_CASE("split_wire: the T-connection IS the split") {
     const auto w = f.d.add_wire(f.p1a, f.p2a, {{4.0, 0.0}});
     const auto s = f.d.split_wire(w, {4.0, 0.0});
     REQUIRE(s.has_value());
-    CHECK(f.d.find_wire(w) == nullptr);  // wait: the slot was REUSED for the
-    // first half - find_wire(w) returns the first half (same id? NO:
-    // first.id is a FRESH id; the slot keeps the new id). Check by count.
+    // IDENTITY: the a-side half KEEPS the original wire's id (labels'
+    // bindings and undo records that name it stay valid); only the
+    // b-side half and the junction are new.
+    CHECK(s->first == w);
+    CHECK(f.d.find_wire(w) != nullptr);
+    CHECK(s->second != w);
     CHECK(f.d.wires.size() == 2);
     const auto* j = f.d.find_node(s->junction);
     REQUIRE(j != nullptr);

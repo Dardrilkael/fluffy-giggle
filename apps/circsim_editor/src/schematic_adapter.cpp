@@ -310,38 +310,37 @@ SchematicAdapter::Landing SchematicAdapter::landing(
             }
             continue;
         }
-        // The split case: order the halves (a-side first - the half
-        // whose a endpoint is the ORIGINAL wire's a), then merge the
-        // mids with the split junction's position between them.
-        const ws::sch::WireId original_sch =
-            wire_ids.count(cs_id) != 0 ? wire_ids.at(cs_id) : 0u;
-        std::vector<const ws::sch::Wire*> ordered;
+        // The split case: both halves are in sch_ids (from wire_back). Find
+        // the shared junction and order them: first half ends at the
+        // junction (b == jid), second half starts at it (a == jid).
+        std::vector<const ws::sch::Wire*> halves;
+        halves.reserve(sch_ids.size());
         for (const ws::sch::WireId id : sch_ids) {
             const ws::sch::Wire* w = doc.find_wire(id);
-            if (w != nullptr && w->id != original_sch) {
-                ordered.push_back(w);
+            if (w != nullptr) {
+                halves.push_back(w);
             }
         }
-        if (ordered.size() != 2u) {
+        if (halves.size() != 2u) {
             continue;  // not a pair (a stale half is gone): skip honestly
         }
-        // a-first: the half NOT ending at the junction is the a-side.
-        const auto junction_of = [&](const ws::sch::Wire* w) {
-            // The split junction: the node both halves share.
-            return (w->a == ordered[0]->b || w->a == ordered[1]->b)
-                       ? w->a
-                       : w->b;
-        };
-        const NodeId jid = junction_of(ordered[0]);
+        // The shared junction is the node both halves connect to.
+        const NodeId jid =
+            (halves[0]->a == halves[1]->a) ? halves[0]->a
+            : (halves[0]->a == halves[1]->b) ? halves[0]->a
+            : (halves[0]->b == halves[1]->a) ? halves[0]->b
+            : halves[0]->b;
         const ws::sch::Node* jn = doc.find_node(jid);
         if (jn == nullptr) {
             continue;
         }
-        // Order: the half whose b == jid is the FIRST (a-side).
-        const ws::sch::Wire* first =
-            ordered[0]->b == jid ? ordered[0] : ordered[1];
-        const ws::sch::Wire* second =
-            first == ordered[0] ? ordered[1] : ordered[0];
+        // First half: b == jid (ends at the junction). Second: a == jid.
+        const ws::sch::Wire* first = halves[0]->b == jid ? halves[0] : halves[1];
+        const ws::sch::Wire* second = first == halves[0] ? halves[1] : halves[0];
+        // Sanity: second must start at the junction.
+        if (second->a != jid) {
+            continue;
+        }
         const auto shape_of = [&](const ws::sch::Wire* w) {
             const auto it = ov.wirePath.find(w->id);
             if (it != ov.wirePath.end()) {

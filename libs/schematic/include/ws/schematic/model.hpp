@@ -112,9 +112,20 @@ struct Label {
     // The authored binding (the .csim `wire` field): the wire this label
     // was placed on; 0 = unbound (legacy), attaches by the adapter's rules.
     WireId wire = 0;
+
+    bool operator==(const Label&) const = default;
 };
 
 // --- the document -----------------------------------------------------------
+
+// Ids to use for the entities split_wire creates. 0 = mint a fresh one.
+// A redo replays a committed split with the ids the commit minted, so the
+// replay is the SAME function with the same ids (no second implementation
+// to drift from the first).
+struct SplitIds {
+    NodeId junction = 0;
+    WireId second = 0;
+};
 
 class Doc {
 public:
@@ -134,6 +145,11 @@ public:
     void raise_node_counter(NodeId n) {
         if (n >= next_node_) {
             next_node_ = n + 1;
+        }
+    }
+    void raise_label_counter(LabelId l) {
+        if (l >= next_label_) {
+            next_label_ = l + 1;
         }
     }
 
@@ -158,26 +174,40 @@ public:
     WireId add_wire(NodeId a, NodeId b, std::vector<Vec2> mid = {},
                     int a_dir = kDirFree, int b_dir = kDirFree);
 
+    // Re-inserts an entity with its own id (undo / redo / the loader) and
+    // keeps the counters ahead of it.
+    WireId restore_wire(const Wire& w);
+
     // THE STRUCTURAL EDIT: a T-connection is made by SPLITTING. Inserts a
-    // junction node at `pos` ON wire `w` (the caller guarantees pos lies
-    // on w's resolved path; an off-path pos is refused with nullopt) and
-    // cuts the wire into two halves meeting at the junction - the branch
-    // then lands its own wire on the junction node. There are no interior
-    // attachments anywhere: the split IS the connection.
-    // `split_of` marks both halves (migration + re-join).
+    // junction node at `pos` ON wire `w` (an off-path pos, or a pos at the
+    // wire's own end, is refused with nullopt) and cuts the wire into two
+    // halves meeting at the junction - the branch then lands its own wire
+    // on the junction node. There are no interior attachments anywhere:
+    // the split IS the connection.
+    //
+    // IDENTITY: the a-side half KEEPS the original wire's id, so anything
+    // that names the wire by id (labels' authored binding, undo records,
+    // the editor's selection) stays valid; only the b-side half and the
+    // junction are new.
+    // `split_of` marks every piece with one group id (migration + re-join).
     struct Split {
         NodeId junction = 0;
-        WireId first = 0;   // the a-side half
+        WireId first = 0;   // the a-side half (== the original wire id)
         WireId second = 0;  // the b-side half
     };
     std::optional<Split> split_wire(WireId w, Vec2 pos);
+    std::optional<Split> split_wire(WireId w, Vec2 pos, SplitIds ids);
 
-    // The inverse: if wires `first` and `second` are the only two wires
-    // on junction `j` and both were split from the same parent (or the
-    // caller passes allow_any=true for a plain two-wire dot), remove the
-    // junction and merge the halves back into one wire. Returns the
-    // merged wire id, 0 when refused.
+    // The inverse: if exactly two wires meet at junction `j` and both were
+    // split from the same parent (or the caller passes allow_any=true for
+    // a plain two-wire dot), remove the junction and merge the halves back
+    // into one wire. The merged wire KEEPS the a-side half's id and labels
+    // bound to the other half are re-bound to it. Returns the merged wire
+    // id, 0 when refused.
     WireId merge_split(NodeId j, bool allow_any = false);
+
+    // Removes a node (does not touch wires that still name it).
+    bool erase_node(NodeId n);
 
     // Removes a wire (leaves its endpoint nodes alone - a junction that
     // loses its last wire stays as a dot the editor may clean up by

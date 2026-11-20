@@ -10,10 +10,12 @@
 #include <cmath>
 #include <map>
 
+#include "geom.hpp"
+
 namespace ws::sch {
 namespace {
 
-constexpr double kEps = 1e-9;
+using detail::kEps;
 constexpr double kLead = 1.0;  // the stub length a pinned exit commits to
 
 [[nodiscard]] Vec2 unit(int dir) {

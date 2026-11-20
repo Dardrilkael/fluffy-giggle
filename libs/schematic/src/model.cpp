@@ -5,6 +5,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <limits>
+#include <utility>
+
+#include "geom.hpp"
 
 namespace ws::sch {
 
@@ -102,24 +107,20 @@ WireId Doc::add_wire(NodeId a, NodeId b, std::vector<Vec2> mid, int a_dir,
 
 // --- Doc: the split / merge (the ONLY T-connection) -------------------------------
 
-namespace {
-
-constexpr double kEps = 1e-9;
-
-bool on_segment(const Vec2& a, const Vec2& b, const Vec2& p) {
-    const double cross = (b.x - a.x) * (p.y - a.y) -
-                         (b.y - a.y) * (p.x - a.x);
-    if (std::fabs(cross) > kEps) {
-        return false;
-    }
-    return p.x >= std::min(a.x, b.x) - kEps &&
-           p.x <= std::max(a.x, b.x) + kEps &&
-           p.y >= std::min(a.y, b.y) - kEps && p.y <= std::max(a.y, b.y) + kEps;
+WireId Doc::restore_wire(const Wire& w) {
+    wires.push_back(w);
+    raise_wire_counter(w.id);
+    return w.id;
 }
 
-}  // namespace
-
 std::optional<Doc::Split> Doc::split_wire(WireId id, Vec2 pos) {
+    return split_wire(id, pos, SplitIds{});
+}
+
+std::optional<Doc::Split> Doc::split_wire(WireId id, Vec2 pos, SplitIds ids) {
+    using detail::near;
+    using detail::on_segment;
+
     Wire* w = find_wire(id);
     if (w == nullptr) {
         return std::nullopt;
@@ -128,73 +129,60 @@ std::optional<Doc::Split> Doc::split_wire(WireId id, Vec2 pos) {
     if (path.size() < 2u) {
         return std::nullopt;  // dangling: nothing to split
     }
-    // The split point must lie on the path; an endpoint's own position is
-    // not a split (the wire already ends at a node there).
-    bool on = false;
-    for (std::size_t i = 1; i < path.size(); ++i) {
-        if (on_segment(path[i - 1], path[i], pos)) {
-            on = true;
-            break;
-        }
-    }
-    if (!on) {
+    // An endpoint's own position is not a split (the wire already ends at
+    // a node there).
+    if (near(pos, path.front()) || near(pos, path.back())) {
         return std::nullopt;
     }
-    if ((on_segment(path[0], path[1], pos) &&
-         std::fabs(pos.x - path[0].x) <= kEps &&
-         std::fabs(pos.y - path[0].y) <= kEps) ||
-        (on_segment(path[path.size() - 2], path.back(), pos) &&
-         std::fabs(pos.x - path.back().x) <= kEps &&
-         std::fabs(pos.y - path.back().y) <= kEps)) {
-        return std::nullopt;  // at an endpoint: that end already has a node
-    }
-
-    // The junction node at the split point.
-    Node j;
-    j.id = alloc_node();
-    j.kind = NodeKind::Junction;
-    j.pos = pos;
-    nodes.push_back(j);
-
-    // Carry the a-side's exit direction onto the first half; the second
-    // half leaves the junction free (a junction has no pin geometry).
-    Wire first;
-    first.id = alloc_wire();
-    first.a = w->a;
-    first.b = j.id;
-    first.a_dir = w->a_dir;
-    first.b_dir = w->b_dir;  // the b-end's own approach now bends at the
-                             // junction the same way it bent into the wire
-    Wire second;
-    second.id = alloc_wire();
-    second.a = j.id;
-    second.b = w->b;
-    second.a_dir = kDirFree;  // leaving a junction: free
-    second.b_dir = w->b_dir;
-    first.split_of = w->id;
-    second.split_of = w->id;
-
-    // Split the interior waypoints at the split point: find the path
-    // SEGMENT carrying the point (index k: path[k]..path[k+1]), then the
-    // first half keeps vertices 1..k and the second half keeps vertices
-    // k+1.. (a vertex exactly AT the point belongs to neither - it became
-    // the junction).
-    std::size_t seg = path.size() - 1;
+    // The segment carrying the point (path[seg]..path[seg+1]); none = the
+    // point is off the path.
+    std::size_t seg = path.size();
     for (std::size_t k = 1; k < path.size(); ++k) {
         if (on_segment(path[k - 1], path[k], pos)) {
             seg = k - 1;
             break;
         }
     }
+    if (seg == path.size()) {
+        return std::nullopt;
+    }
+
+    // The junction node at the split point.
+    Node j;
+    j.id = ids.junction != 0 ? ids.junction : alloc_node();
+    raise_node_counter(j.id);
+    j.kind = NodeKind::Junction;
+    j.pos = pos;
+
+    // One group id for every piece cut from the same conductor, so a
+    // chain of splits can be merged back junction by junction.
+    const WireId group = w->split_of != 0 ? w->split_of : w->id;
+
+    // First half: the a side, KEEPING the original id (labels and undo
+    // records that name this wire stay valid). Its b end is the junction:
+    // a junction has no pin geometry, so that end is free.
+    Wire first = *w;
+    first.b = j.id;
+    first.b_dir = kDirFree;
+    first.split_of = group;
+    first.mid.clear();
+
+    Wire second;
+    second.id = ids.second != 0 ? ids.second : alloc_wire();
+    raise_wire_counter(second.id);
+    second.a = j.id;
+    second.b = w->b;
+    second.a_dir = kDirFree;
+    second.b_dir = w->b_dir;
+    second.split_of = group;
+
+    // Split the interior waypoints: vertices up to the carrying segment go
+    // to the first half, the rest to the second. A vertex exactly AT the
+    // point belongs to neither - it became the junction.
     for (std::size_t k = 1; k + 1 < path.size(); ++k) {
-        // The vertex at the split point itself belongs to NEITHER half -
-        // it became the junction (the same fold the cleanup pass runs).
-        if (std::fabs(path[k].x - pos.x) <= kEps &&
-            std::fabs(path[k].y - pos.y) <= kEps) {
+        if (near(path[k], pos)) {
             continue;
         }
-        // vertex k belongs to the first half when it lies at or before the
-        // split segment's end, else to the second half.
         if (k <= seg) {
             first.mid.push_back(path[k]);
         } else {
@@ -202,11 +190,12 @@ std::optional<Doc::Split> Doc::split_wire(WireId id, Vec2 pos) {
         }
     }
 
-    // Replace the wire with the two halves.
-    *w = first;                // reuse the slot for the first half
-    wires.push_back(second);   // the lib holds no pointers across this
-                               // edit (ids only), so vector is safe.
-    return Split{j.id, first.id, second.id};
+    const WireId first_id = first.id;
+    const WireId second_id = second.id;
+    nodes.push_back(j);
+    *w = first;  // w is not used after this line (push_back below may move it)
+    wires.push_back(std::move(second));
+    return Split{j.id, first_id, second_id};
 }
 
 WireId Doc::merge_split(NodeId jid, bool allow_any) {
@@ -215,9 +204,9 @@ WireId Doc::merge_split(NodeId jid, bool allow_any) {
         return 0;
     }
     // Exactly two wires, both ending at the junction.
-    Wire* wa = nullptr;
-    Wire* wb = nullptr;
-    for (Wire& w : wires) {
+    const Wire* wa = nullptr;
+    const Wire* wb = nullptr;
+    for (const Wire& w : wires) {
         if (w.a == jid || w.b == jid) {
             if (wa == nullptr) {
                 wa = &w;
@@ -235,38 +224,71 @@ WireId Doc::merge_split(NodeId jid, bool allow_any) {
         return 0;  // not a split pair
     }
 
-    // Order: the half whose a-side is the junction is the SECOND half.
-    Wire* first = wa->a == jid ? wb : wa;
-    Wire* second = first == wa ? wb : wa;
+    // Orient the pair so `p` runs INTO the junction and `q` OUT of it
+    // (an allow_any dot may have been drawn with both wires pointing the
+    // same way; flip one so the merge never keeps the removed junction as
+    // an endpoint).
+    Wire p = *wa;
+    Wire q = *wb;
+    const auto flip = [](Wire& w) {
+        std::swap(w.a, w.b);
+        std::swap(w.a_dir, w.b_dir);
+        std::reverse(w.mid.begin(), w.mid.end());
+    };
+    const bool p_in = p.b == jid;
+    const bool q_in = q.b == jid;
+    if (!p_in && q_in) {
+        std::swap(p, q);
+    } else if (p_in && q_in) {
+        flip(q);
+    } else if (!p_in && !q_in) {
+        flip(p);
+    }
 
-    Wire merged;
-    merged.id = alloc_wire();
-    merged.a = first->a;
-    merged.b = second->b;
-    merged.a_dir = first->a_dir;
-    merged.b_dir = second->b_dir;
-    merged.split_of = 0;
-    merged.mid = first->mid;
-    // The junction's position was a real corner only if it is not
-    // collinear with its neighbours; the router's fold drops it when it
-    // is. Keep it as a waypoint when it bends (the shape the author drew
-    // through the split) - the cleanup pass settles collinearity.
+    // The merged wire keeps p's id. The junction's position stays as a
+    // waypoint (the shape the author drew through the split); the
+    // router's cleanup folds it when it is collinear.
+    Wire merged = p;
+    merged.b = q.b;
+    merged.b_dir = q.b_dir;
     merged.mid.push_back(j->pos);
-    merged.mid.insert(merged.mid.end(), second->mid.begin(), second->mid.end());
+    merged.mid.insert(merged.mid.end(), q.mid.begin(), q.mid.end());
 
-    // Drop the two halves, the junction node; add the merged wire.
-    const WireId fa = first->id;
-    const WireId sb = second->id;
+    const WireId keep = p.id;
+    const WireId gone = q.id;
+    const WireId group = p.split_of == q.split_of ? p.split_of : 0;
+
     wires.erase(std::remove_if(wires.begin(), wires.end(),
-                                [&](const Wire& w) {
-                                    return w.id == fa || w.id == sb;
-                                }),
+                               [&](const Wire& w) { return w.id == gone; }),
                 wires.end());
     nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
                                [&](const Node& n) { return n.id == jid; }),
                 nodes.end());
-    wires.push_back(merged);
-    return merged.id;
+    *find_wire(keep) = merged;
+
+    // Labels bound to the absorbed half now name the merged wire.
+    for (Label& l : labels) {
+        if (l.wire == gone) {
+            l.wire = keep;
+        }
+    }
+    // The group id survives only while other pieces of it remain.
+    const bool others = std::any_of(
+        wires.begin(), wires.end(), [&](const Wire& w) {
+            return w.id != keep && group != 0 && w.split_of == group;
+        });
+    find_wire(keep)->split_of = others ? group : 0;
+    return keep;
+}
+
+bool Doc::erase_node(NodeId id) {
+    const auto it = std::remove_if(
+        nodes.begin(), nodes.end(), [&](const Node& n) { return n.id == id; });
+    if (it == nodes.end()) {
+        return false;
+    }
+    nodes.erase(it, nodes.end());
+    return true;
 }
 
 bool Doc::erase_wire(WireId id) {
@@ -346,9 +368,12 @@ NetList build_nets(const Doc& doc) {
         node_slot[i] = i;
     }
     // Labels: unbound labels are DECORATIONS (no slot of their own - they
-    // join no net); bound labels get a slot past the nodes.
-    std::vector<std::size_t> label_slot(doc.labels.size(),
-                                        doc.nodes.size());
+    // join no net); bound labels get a slot past the nodes. The "no slot"
+    // sentinel must be a value no slot can take: it used to be
+    // nodes.size(), which is exactly the FIRST bound label's slot, so that
+    // label was silently dropped from every net.
+    constexpr std::size_t kNoSlot = std::numeric_limits<std::size_t>::max();
+    std::vector<std::size_t> label_slot(doc.labels.size(), kNoSlot);
     std::size_t slots = doc.nodes.size();
     for (std::size_t i = 0; i < doc.labels.size(); ++i) {
         if (doc.labels[i].wire != 0) {
@@ -413,7 +438,7 @@ NetList build_nets(const Doc& doc) {
         comps[dsu.find(node_slot[i])].push_back(doc.nodes[i].id);
     }
     for (std::size_t i = 0; i < doc.labels.size(); ++i) {
-        if (label_slot[i] != doc.nodes.size()) {
+        if (label_slot[i] != kNoSlot) {
             comps[dsu.find(label_slot[i])].push_back(
                 static_cast<NodeId>(0x8000'0000u | i));  // label marker
         }

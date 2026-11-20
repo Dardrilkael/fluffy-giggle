@@ -5,12 +5,33 @@
 // stack's seat in its own undo system (the adapter forwards). Everything
 // here remains headless: no ImGui, no ui, no rendering.
 
+#include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <ws/schematic/model.hpp>
 
 namespace ws::sch {
+
+// One connect-on-drop that actually landed in a commit. Public plain data
+// (the stack's private Entry holds a list of them): redo replays a step
+// with the ids it minted, undo erases exactly those ids.
+struct LandedStep {
+    enum class Kind : std::uint8_t {
+        Split,   // cut `wire` at `at` -> junction + second half + tie
+        Join,    // tie `pin` to the existing junction `other`
+        PinPin,  // a wire between pins `pin` and `other`
+    };
+    Kind kind = Kind::Split;
+    WireId wire = 0;      // Split: the wire that was cut
+    Vec2 at{0.0, 0.0};    // Split: where
+    NodeId pin = 0;       // the dragged pin
+    NodeId other = 0;     // Join / PinPin: the node it was tied to
+    NodeId junction = 0;  // Split: minted junction
+    WireId second = 0;    // Split: minted b-side half
+    WireId tie = 0;       // minted tie wire (all kinds)
+};
 
 // The undo stack the lib's own tests drive. The editor app either uses
 // this directly (the adapter can own one per document) or mirrors the
@@ -44,18 +65,18 @@ private:
     friend bool commit_move(Doc&, UndoStack&, const Overlay&,
                             const std::vector<DropCandidate>&);
 
-    // ONE command's full state: the applied overlay + landed candidates
-    // (redo), the exact before-state of everything touched (undo), and
-    // the entities the commit minted (splits' halves, pin-on-pin joins)
-    // which undo erases exactly.
+    // ONE command's full state: the applied overlay (redo), the exact
+    // before-state of everything touched (undo), and one STEP per
+    // connect-on-drop that actually landed. Redo replays the steps with
+    // the ids they minted, undo erases exactly what they minted - so a
+    // candidate that could not land leaves no trace and nothing is
+    // positional (no cursor to misalign).
     struct Entry {
         std::string name;
         Overlay overlay;
-        std::vector<DropCandidate> candidates;
         std::vector<std::pair<NodeId, Vec2>> node_before;
         std::vector<std::pair<WireId, Wire>> wire_before;
-        std::vector<WireId> minted_wires;
-        std::vector<NodeId> minted_nodes;
+        std::vector<LandedStep> steps;
     };
     std::vector<Entry> list_;
     std::size_t at_ = 0;
